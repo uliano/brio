@@ -90,6 +90,18 @@
 //      self-selected client the USART's Host SPI is served by (the
 //      client half of its r) - drawn with this board as the host, paced
 //      as that suite paces them. Any other peer: SKIPPED, no verdict.
+//   i  the AVR client's RUNS back to back (an avrdx peer only): 256
+//      characters as one request, the exchange, the answer run, the
+//      receive run and the exchange without BUFWR, 500 kHz to 4 MHz
+//   j  THE CLIENT'S EDGES: this board's runs against the peer's
+//      host_burst - the receive run and its echo, `stalled` with no
+//      select and with a select held and no clock, INTFLAG.SSL,
+//      address recognition both ways, a handler timed into a run by the
+//      SSL interrupt, and the select's fall as the wake-up from IDLE and
+//      from STANDBY (RUNSTDBY; the RTC on OSCULP32K the backstop)
+//   k  the host's rare paths: the spin budget on a clockless SERCOM, an
+//      early TXC under a handler (into the peer's receive-only run), and
+//      a lost interrupt under a timed SpiBus over the loop-back engine
 //
 // Letters that need the peer say so and FAIL LOUDLY rather than hanging
 // when it is absent. Nothing here wears flash.
@@ -98,14 +110,18 @@
 
 #include "samc21/clock.hpp"
 #include "samc21/nvic.hpp"
+#include "samc21/osc32kctrl.hpp"
 #include "samc21/pin.hpp"
 #include "samc21/platform.hpp"
+#include "samc21/rtc.hpp"
 #include "samc21/sercom.hpp"
+#include "samc21/sleep.hpp"
 #include "samc21/spi.hpp"
 #include "samc21/tc.hpp"
 #include "samc21/ticker.hpp"
 #include "kernel/tenuto.hpp"
 #include "kernel/post.hpp"
+#include "kernel/time.hpp"
 #include "util/power.hpp"
 #include "util/print.hpp"
 #include "util/spi_bus.hpp"
@@ -249,6 +265,19 @@ volatile uint32_t isr_completions = 0;
 /// The kernel letter re-binds this through a flag; outside it the suite
 /// runs polled requests and the handler is only the ISR-pump legs'.
 volatile bool bus_ao_live = false;
+
+/// Letter k's TIMED arbiter over the same loop-back engine, live only
+/// around its own kernel pumps.
+volatile bool timed_ao_live = false;
+
+/// Letter j: the vector belongs to this board's CLIENT, and its one source
+/// is INTFLAG.SSL (32.6.3.6) - the select's fall, counted and stamped on the
+/// crystal ruler; the handler then holds the core `ssl_hold_us` (a handler
+/// timed into the client's run) and disarms the source.
+volatile bool client_isr = false;
+volatile uint32_t ssl_hold_us = 0;
+volatile uint8_t ssl_seen = 0;
+volatile uint32_t ssl_at = 0;
 
 uint8_t frame_buf[spilink::max_payload + 8];
 uint8_t answer_buf[spilink::answer_bytes];
@@ -2067,12 +2096,13 @@ void th_avr_client() {
 // The avrdx peer serves an exchange with ONE CALL of its driver's runs
 // (avrdx/spi.hpp, SpiClient: read by count, never by RXCIF), so a window
 // can be as long as the run: 256 characters as ONE polled request of this
-// engine, nothing between them but the engine's own gap. Three runs - the
-// exchange, the answer run (spilink::spare_answer_only) and the receive
-// run (spilink::spare_receive_only, which that peer serves as an
-// eight-bit window and raises no report_extended for: the verdict asks
-// only what it received) - at the rungs inside the client's CLK_PER/6
-// (4 MHz on its 24 MHz crystal).
+// engine, nothing between them but the engine's own gap. Four runs - the
+// exchange, the answer run (spilink::spare_answer_only), the receive run
+// (spilink::spare_receive_only, which that peer serves as an eight-bit
+// window and raises no report_extended for: the verdict asks only what it
+// received) and the exchange without BUFWR (regime_buffer, the leftover
+// leading) - at the rungs inside the client's CLK_PER/6 (4 MHz on its
+// 24 MHz crystal).
 
 constexpr uint16_t long_window = 256;
 uint8_t ltx[long_window];
@@ -2088,11 +2118,15 @@ struct LongWindow {
 };
 
 /// One window of `long_window` characters back to back at `baud`: the
-/// command, the request, the report, and this end's read-back judged.
-LongWindow long_exchange(uint8_t baud, uint8_t spare, uint8_t seed_a, uint8_t seed_b) {
+/// command, the request, the report, and this end's read-back judged -
+/// against P_B(i), or under regime_buffer (no BUFWR: the shifter's
+/// leftover leads, spi_link.hpp's table) against P_B(i - 1) from the
+/// second character, the first one the dummy and not judged.
+LongWindow long_exchange(uint8_t baud, uint8_t spare, uint8_t seed_a, uint8_t seed_b,
+                         uint8_t regime = spilink::regime_buffer_wait) {
     LongWindow w{};
     spilink::Params a{};
-    a.cfg.regime = spilink::regime_buffer_wait;
+    a.cfg.regime = regime;
     a.count = long_window;
     a.ms = 400;
     a.seed_a = seed_a;
@@ -2107,8 +2141,9 @@ LongWindow long_exchange(uint8_t baud, uint8_t spare, uint8_t seed_a, uint8_t se
     }
     (void)link_xfer(ltx, lrx, long_window, baud);
     (void)link_command_mode();
+    const bool leads = regime == spilink::regime_buffer;
     spilink::Stream want(a.pattern, seed_b);
-    for (uint16_t i = 0; i < long_window; ++i) {
+    for (uint16_t i = leads ? 1u : 0u; i < long_window; ++i) {
         const uint8_t exp = want.next();
         if (lrx[i] == exp) continue;
         if (w.host_mism == 0) w.first = i;
@@ -2183,7 +2218,13 @@ void ti_avr_runs() {
         // host's one character late would hide the first-bit fault below).
         const LongWindow ans = long_exchange(*b, spilink::spare_answer_only, 0x5C, 0x93);
         const LongWindow rcv = long_exchange(*b, spilink::spare_receive_only, 0x6D, 0x00);
-        if (g.received) windows = static_cast<uint16_t>(windows + 2u);
+        // Without BUFWR: the first answer goes into the buffer behind the
+        // shifter's leftover, so the read-back is one place late.
+        const LongWindow nob = long_exchange(*b, 0, 0x4E, 0xD5, spilink::regime_buffer);
+        if (g.received) windows = static_cast<uint16_t>(windows + 3u);
+        if (g.received && nob.ran && nob.r.count < long_window) ++short_windows;
+        const bool nob_ok = nob.ran && nob.host_mism == 0 && nob.r.count == long_window &&
+                            nob.r.mism == 0;
         const bool ans_ok = ans.ran && ans.host_mism == 0 && ans.r.count == long_window;
         const bool rcv_ok = rcv.ran && rcv.r.count == long_window && rcv.r.mism == 0;
         print(serial, "  ", g.hz / 1000u, " kHz, ", long_window, " back to back: exchange exact ",
@@ -2191,7 +2232,8 @@ void ti_avr_runs() {
               host_bad, " (first at ", host_first, "; wrong in the first bit alone, the MSB just "
               "received: ", first_bit_only, ") | answer run: read back mism ", ans.host_mism,
               ", loaded ", ans.r.count, " | receive run: count ", rcv.r.count, " mism ",
-              rcv.r.mism, crlf);
+              rcv.r.mism, " | without BUFWR: client count ", nob.r.count, " mism ", nob.r.mism,
+              ", read back one late, mism ", nob.host_mism, " (first at ", nob.first, ")", crlf);
         if (g.answers) {
             bench.verdict(g.hz == 500'000UL   ? "the AVR client's exchange run is exact both ways, "
                                                 "256 back to back, at 500 kHz"
@@ -2202,6 +2244,13 @@ void ti_avr_runs() {
                           : g.hz == 1'000'000UL ? "and at 1 MHz"
                                                 : "and at 2 MHz",
                           ans_ok);
+            bench.verdict(g.hz == 500'000UL
+                              ? "WITHOUT BUFWR the exchange run is exact both ways at 500 kHz, "
+                                "the host reading the leading dummy and then every answer one "
+                                "place late"
+                          : g.hz == 1'000'000UL ? "and at 1 MHz"
+                                                : "and at 2 MHz",
+                          nob_ok);
         }
         if (g.received) {
             bench.verdict(g.hz == 3'000'000UL ? "at 3 MHz the AVR client still RECEIVES every "
@@ -2227,6 +2276,613 @@ void ti_avr_runs() {
     bench.verdict("the command channel survives the runs", command(Op::ping));
 }
 
+// ===========================================================================
+// j - THE CLIENT'S EDGES: the peer clocks, this board's runs end every way
+// ===========================================================================
+//
+// Letter e meets the client role a character at a time; this letter runs
+// the client's RUNS (samc21/spi.hpp SpiClient: exchange, receive) against
+// the peer's host_burst - one character at a time with spilink::gap_us
+// between them, the select low for the whole burst, at the peer's clock /
+// 32 (750 kHz on the AVR128DB48's 24 MHz) - and stages what no other
+// letter does: the receive run and its echo, a run whose host never
+// clocks (`stalled`), the select's fall as INTFLAG.SSL (CTRLB.SSDE,
+// 32.6.3.6) and as the wake-up from IDLE and then from STANDBY
+// (CTRLA.RUNSTDBY, 32.6.5), address recognition (FORM 0x2, 32.6.3.1) both
+// ways, and a handler timed into a run by that same SSL interrupt.
+
+uint8_t jout[16];
+uint8_t jin[16];
+
+struct ClientBurst {
+    bool commanded = false;
+    bool reported = false;
+    Peer::Run run{0, Peer::RunEnd::stalled};
+    spilink::Report host{};       ///< what the peer, as host, read
+    uint16_t rx_mism = 0;         ///< this end's bytes against P_A(i) = seed_a + i
+    uint8_t rx_first = 0xFF;
+    uint32_t end_at = 0;          ///< the crystal ruler when the run returned
+};
+
+enum class JRun : uint8_t { exchange, receive };
+
+/// A run's budget: 400 000 counts of the four-poll await, well over the
+/// 60 ms lead-in and a 12-character burst under a millisecond.
+constexpr uint32_t client_run_spins = 400'000u;
+
+const char* end_name(Peer::RunEnd e) {
+    switch (e) {
+        case Peer::RunEnd::complete: return "complete";
+        case Peer::RunEnd::closed: return "closed";
+        case Peer::RunEnd::stalled: return "stalled";
+    }
+    return "?";
+}
+
+/// Command the peer's burst of `n` (the counting pattern: it sends seed_a + i
+/// and checks what it reads against want_b + i), become the client with
+/// `cfg`, run `before` (the arming, a sleep), serve ONE run answering
+/// seed_b + i, then ask the peer's report.
+template <typename Before>
+ClientBurst client_burst(JRun kind, const Peer::Config& cfg, uint16_t n, uint8_t seed_a,
+                         uint8_t seed_b, uint8_t want_b, uint8_t lead_ms, Before before) {
+    ClientBurst c{};
+    spilink::Params a{};
+    a.count = n;
+    a.ms = 300;
+    a.seed_a = seed_a;
+    a.seed_b = want_b;
+    a.pattern = spilink::pattern_counting;
+    a.aux8 = lead_ms;
+    a.aux16 = 32;
+    c.commanded = peer_act(Op::host_burst, a);
+    if (!c.commanded) return c;
+    if (!Peer::init(clock, cfg)) {
+        (void)link_command_mode();
+        c.commanded = false;
+        return c;
+    }
+    for (uint8_t i = 0; i < sizeof jout; ++i) {
+        jout[i] = static_cast<uint8_t>(seed_b + i);
+        jin[i] = 0xEE;
+    }
+    before();
+    const std::span<const uint8_t> outs(jout, n);
+    const std::span<uint8_t> ins(jin, n);
+    c.run = kind == JRun::exchange ? Peer::exchange(outs, ins, client_run_spins)
+                                   : Peer::receive(ins, client_run_spins);
+    c.end_at = wall();
+    for (uint16_t i = 0; i < c.run.count; ++i) {
+        if (jin[i] == static_cast<uint8_t>(seed_a + i)) continue;
+        if (c.rx_mism == 0) c.rx_first = static_cast<uint8_t>(i);
+        ++c.rx_mism;
+    }
+    client_isr = false;
+    ssl_hold_us = 0;
+    Peer::release();
+    settle_ms(20);
+    (void)link_command_mode();
+    c.reported = peer_report(c.host);
+    return c;
+}
+
+/// The select's fall as an interrupt: SSL armed, the vector this letter's.
+void arm_ssl(uint32_t hold_us) {
+    ssl_seen = 0;
+    ssl_at = 0;
+    ssl_hold_us = hold_us;
+    client_isr = true;
+    Raw::clear_flags(SpiFlag::ssl);
+    Raw::enable_ssl_interrupt(true);
+}
+
+void print_burst(const char* name, const ClientBurst& c) {
+    print(serial, "  ", name, ": run ", end_name(c.run.end), " count ", c.run.count,
+          ", received mism ", c.rx_mism);
+    if (c.rx_mism) print(serial, " (first at ", c.rx_first, ": ", hex(jin[c.rx_first]), ")");
+    print(serial, " | the host read ", c.host.count, " mism ", c.host.mism);
+    if (c.host.mism) print(serial, " (first at ", c.host.idx, " got ", hex(c.host.got), " exp ",
+                           hex(c.host.exp), ")");
+    print(serial, crlf);
+}
+
+// ---- the RTC: the sleeping legs' backstop -----------------------------------
+//
+// The RTC on OSCULP32K is the wake-up test_samc_sleep proves in STANDBY;
+// here it is the one nobody should need, armed 300 ms ahead of every sleep
+// and counted.
+
+volatile bool rtc_fired = false;
+
+bool rtc_backstop_up() {
+    if (!Rtc::init()) return false;
+    (void)Rtc::enable(false);
+    Osc32kctrl::rtc_clock(RtcClock::ulp_32k);
+    if (!Rtc::init()) return false;
+    if (!Rtc::configure(RtcConfig{.mode = RtcMode::count32, .prescaler = RtcPrescaler::div1})) {
+        return false;
+    }
+    if (!Rtc::enable(true)) return false;
+    Rtc::disarm(RtcFlag::all);
+    Rtc::clear_flags(RtcFlag::all);
+    Rtc::arm(RtcFlag::compare0);
+    Nvic::enable(Rtc::irq());
+    return true;
+}
+
+/// COMP0 `ticks` of 32768 Hz ahead; false when it is not in the future
+/// once armed (no sleep on it then).
+bool rtc_arm(uint32_t ticks) {
+    const uint32_t c = Rtc::count32();
+    rtc_fired = false;
+    Rtc::clear_flags(RtcFlag::compare0);
+    if (!Rtc::set_comp32(c + ticks)) return false;
+    return static_cast<int32_t>(Rtc::count32() - (c + ticks)) < 0;
+}
+
+/// Sleep in `mode` until the select's fall (or the backstop), race-free:
+/// PRIMASK set, the condition re-tested, WFI wakes on a pending interrupt
+/// even masked, the unmask lets the handler run. The tick's interrupt is
+/// off for the whole wait, so only SSL, the console and the backstop can
+/// wake it - and the console is silent. Returns the WFIs it took.
+uint32_t first_pending = 0;     ///< NVIC->ISPR[0] at the first wake-up: which lines woke it
+
+uint8_t sleep_for_select(SleepMode mode) {
+    uint8_t wakes = 0;
+    // The console drained first: its transmitter's DRE is a wake-up too
+    // (measured: an unfinished line woke the core once a character).
+    for (uint32_t k = 0; k < 2'000'000u && !Serial::tx_idle(); ++k) {
+    }
+    if (!Pm::set_sleep_mode(mode)) return 0;
+    SysTickInterruptGuard quiet_tick;
+    first_pending = 0;
+    while (ssl_seen == 0 && !rtc_fired && wakes < 32u) {
+        __disable_irq();
+        if (ssl_seen == 0 && !rtc_fired) {
+            Pm::sleep();
+            if (wakes == 0) first_pending = NVIC->ISPR[0];
+            ++wakes;
+        }
+        __enable_irq();
+    }
+    (void)Pm::set_sleep_mode(SleepMode::idle0);
+    return wakes;
+}
+
+void tj_client_edges() {
+    if (!need_peer()) return;
+    if (!ruler_ok) {
+        bench.verdict("the crystal ruler is up (the letter's timings ride it)", false);
+        return;
+    }
+    const Peer::Config plain{.mode = SpiMode::mode0, .preload = true, .ss_low_detect = true,
+                             .drive_output = true};
+
+    // The run against the burst, SSL armed with no hold: the baseline, and
+    // the character period P measured from the select's fall to the run's
+    // end (the first character starts gap_us after the fall).
+    ClientBurst c = client_burst(JRun::exchange, plain, 12, 0x24, 0x81, 0x81, 40,
+                                 [] { arm_ssl(0); });
+    print_burst("exchange, 12 of 12", c);
+    bench.verdict("the client's exchange run against the peer's burst ends complete, every "
+                  "character exact both ways",
+                  c.commanded && c.run.end == Peer::RunEnd::complete && c.run.count == 12 &&
+                      c.rx_mism == 0 && c.reported && c.host.count == 12 && c.host.mism == 0);
+    bench.verdict("CTRLB.SSDE raises INTFLAG.SSL at the select's fall, once (32.6.3.6)",
+                  ssl_seen == 1);
+    const uint32_t span_us = ssl_at != 0 ? (c.end_at - ssl_at) / 24u : 0u;
+    const uint32_t p_us = span_us > spilink::gap_us ? (span_us - spilink::gap_us) / 12u : 0u;
+    print(serial, "  the select's fall to the run's end ", span_us, " us: a character and its "
+                  "gap about ", p_us, " us", crlf);
+
+    // A handler timed into the run by the SSL interrupt itself. 10 us ends
+    // before the first character starts (gap_us = 20 after the fall): no
+    // boundary passes under it.
+    c = client_burst(JRun::exchange, plain, 12, 0x31, 0x92, 0x92, 40, [] { arm_ssl(10); });
+    print_burst("exchange, a 10 us handler at the select's fall", c);
+    bench.verdict("a handler that ends before the first character changes nothing",
+                  c.commanded && ssl_seen == 1 && c.run.end == Peer::RunEnd::complete &&
+                      c.rx_mism == 0 && c.reported && c.host.mism == 0);
+
+    // A handler that outlasts the third answer's window: it is due within
+    // the first five SCK cycles of character 1 (32.6.2.6.2; 5 SCK = 6.7 us
+    // at 750 kHz), i.e. by gap_us + P + 6.7 us after the fall, and the
+    // handler must end before character 2 starts, gap_us + 2P: the middle,
+    // gap_us + 1.5 P + 3.3, from P measured above.
+    const uint32_t lo_us = spilink::gap_us + p_us + 7u;
+    const uint32_t hi_us = spilink::gap_us + 2u * p_us;
+    const uint32_t mid_us = spilink::gap_us + (3u * p_us) / 2u + 3u;
+    static uint32_t hold_mid = 0;
+    hold_mid = mid_us;
+    c = client_burst(JRun::exchange, plain, 12, 0x43, 0xA4, 0xA4, 40,
+                     [] { arm_ssl(hold_mid); });
+    print(serial, "  the third answer's window closes at ", lo_us, " us, character 2 starts at ",
+          hi_us, " us; the handler holds ", mid_us, " us", crlf);
+    print_burst("exchange, a handler past the third answer's window", c);
+    bench.verdict("a handler that outlasts an answer's window: the client still receives "
+                  "every character exact",
+                  c.commanded && ssl_seen == 1 && c.run.count == 12 && c.rx_mism == 0);
+    // Character 2 carries what the shifter holds - character 1 as received,
+    // P_A(1) (32.6.2.6.2) - and every later answer goes one character late:
+    // with the counting stream each of characters 2..11 differs, ten.
+    bench.verdict("and the answers SLIP from that character on, unseen by the run: character "
+                  "2 carries the shifter's echo of character 1, every later answer goes one "
+                  "character late, and the run still ends complete",
+                  c.reported && c.host.mism == 10 && c.host.idx == 2 &&
+                      c.host.got == static_cast<uint8_t>(0x43 + 1) &&
+                      c.run.end == Peer::RunEnd::complete);
+
+    // The receive run writes nothing: the shifter sends back the character
+    // it last received (32.6.2.6.2), P_A(i - 1) at character i - asked as
+    // the stream one below; only character 0 may differ. No preload.
+    Peer::Config bare = plain;
+    bare.preload = false;
+    c = client_burst(JRun::receive, bare, 12, 0x56, 0x00, 0x55, 40, [] {});
+    print_burst("receive, 12 of 12", c);
+    bench.verdict("the receive run ends complete with every character exact",
+                  c.commanded && c.run.end == Peer::RunEnd::complete && c.run.count == 12 &&
+                      c.rx_mism == 0);
+    bench.verdict("and the host read the echo, each character one late",
+                  c.reported && c.host.count == 12 &&
+                      (c.host.mism == 0 || (c.host.mism == 1 && c.host.idx == 0)));
+
+    // `stalled`, nobody selects: the budget alone ends the run.
+    {
+        if (Peer::init(clock, plain)) {
+            constexpr uint32_t budget = 20'000u;
+            const uint32_t t0 = wall();
+            const Peer::Run s = Peer::exchange(std::span<const uint8_t>(jout, 8),
+                                               std::span<uint8_t>(jin, 8), budget);
+            const uint32_t took = wall() - t0;
+            print(serial, "  nobody selects: run ", end_name(s.end), " count ", s.count, " after ",
+                  took / 24u, " us, ", (took * 2u) / budget, " core cycles a count", crlf);
+            bench.verdict("a run nobody selects ends STALLED on its budget, with nothing",
+                          s.end == Peer::RunEnd::stalled && s.count == 0);
+        } else {
+            bench.verdict("the client comes up", false);
+        }
+        Peer::release();
+        (void)link_command_mode();
+    }
+
+    // `stalled`, the select held low and no clock: the peer's ss_pulse.
+    {
+        spilink::Params a{};
+        a.aux8 = 20;
+        a.aux16 = 40'000u;
+        const bool took_cmd = peer_act(Op::ss_pulse, a);
+        const bool up = Peer::init(clock, plain);
+        uint32_t w = 0;
+        while (!Peer::selected() && w < 4'000'000u) ++w;
+        const bool fell = Peer::selected();
+        constexpr uint32_t budget = 5'000u;
+        const uint32_t t0 = wall();
+        const Peer::Run s = Peer::exchange(std::span<const uint8_t>(jout, 8),
+                                           std::span<uint8_t>(jin, 8), budget);
+        const uint32_t took = wall() - t0;
+        const bool still = Peer::selected();
+        print(serial, "  the select held with no clock: run ", end_name(s.end), " count ", s.count,
+              " after ", took / 24u, " us; the select still low at its end: ", still ? "yes" : "no",
+              crlf);
+        bench.verdict("a run whose select is held low with no clock ends STALLED on its budget, "
+                      "with nothing, the select still low",
+                      took_cmd && up && fell && s.end == Peer::RunEnd::stalled && s.count == 0 &&
+                          still);
+        settle_ms(60);
+        Peer::release();
+        (void)link_command_mode();
+    }
+
+    // Address recognition (FORM 0x2, 32.6.3.1): the first character of a
+    // transaction is matched against ADDR; preload is off by the chapter.
+    Peer::Config addr = bare;
+    addr.ss_low_detect = false;
+    addr.address_match = true;
+    addr.address_mode = SpiAddressMode::mask;
+    addr.address = 0x5A;
+    addr.address_mask = 0x00;
+    c = client_burst(JRun::receive, addr, 12, 0x5A, 0x00, 0x00, 40, [] {});
+    print_burst("address 0x5A against a burst opening with 0x5A", c);
+    print(serial, "    first characters received:", " ", hex(jin[0]), " ", hex(jin[1]), " ",
+          hex(jin[2]), crlf);
+    bench.verdict("a transaction whose first character matches ADDR is received",
+                  c.commanded && c.run.count >= 11 && c.rx_mism == 0);
+    {
+        spilink::Params a{};
+        a.count = 12;
+        a.ms = 300;
+        a.seed_a = 0x33;
+        a.pattern = spilink::pattern_counting;
+        a.aux8 = 40;
+        a.aux16 = 32;
+        const bool took_cmd = peer_act(Op::host_burst, a);
+        const bool up = Peer::init(clock, addr);
+        const Peer::Run s = Peer::receive(std::span<uint8_t>(jin, 12), 60'000u);
+        const bool done = Peer::transaction_done();
+        print(serial, "  address 0x5A against a burst opening with 0x33: run ", end_name(s.end),
+              " count ", s.count, ", TXC ", done ? "up" : "down", crlf);
+        bench.verdict("a transaction whose address does not match is IGNORED WHOLE: nothing "
+                      "received, TXC never raised, the run ends on its budget",
+                      took_cmd && up && s.end == Peer::RunEnd::stalled && s.count == 0 && !done);
+        settle_ms(20);
+        Peer::release();
+        (void)link_command_mode();
+        spilink::Report r{};
+        (void)peer_report(r);
+    }
+
+    // The select's fall as the WAKE-UP: IDLE first, and STANDBY only once
+    // IDLE has proven the source. The burst's lead-in is 60 ms; the RTC's
+    // backstop 300 ms.
+    if (!rtc_backstop_up()) {
+        bench.verdict("the RTC backstop comes up", false);
+        return;
+    }
+    static uint8_t wakes = 0;
+    static bool backstop = false;
+    Peer::Config idle_cfg = bare;
+    c = client_burst(JRun::receive, idle_cfg, 12, 0x67, 0x00, 0x66, 60, [] {
+        arm_ssl(0);
+        backstop = !rtc_arm(9830);
+        wakes = sleep_for_select(SleepMode::idle0);
+        backstop = backstop || rtc_fired;
+    });
+    print_burst("IDLE until the select's fall, then receive", c);
+    print(serial, "    ", wakes, " WFI, SSL ", ssl_seen, ", the backstop ",
+          backstop ? "FIRED" : "silent", "; the lines pending at the first wake-up ",
+          hex(first_pending), crlf);
+    const bool idle_ok = c.commanded && ssl_seen == 1 && !backstop && wakes == 1;
+    bench.verdict("the select's fall (SSL) wakes the core from IDLE, the one wake-up", idle_ok);
+    bench.verdict("and the burst is received whole after it",
+                  c.run.count == 12 && c.rx_mism == 0);
+
+    if (idle_ok) {
+        Peer::Config stby_cfg = bare;
+        stby_cfg.run_standby = true;
+        c = client_burst(JRun::receive, stby_cfg, 12, 0x78, 0x00, 0x77, 60, [] {
+            arm_ssl(0);
+            backstop = !rtc_arm(9830);
+            wakes = sleep_for_select(SleepMode::standby);
+            backstop = backstop || rtc_fired;
+        });
+        print_burst("STANDBY until the select's fall, then receive", c);
+        print(serial, "    ", wakes, " WFI, SSL ", ssl_seen, ", the backstop ",
+              backstop ? "FIRED" : "silent", "; the lines pending at the first wake-up ",
+              hex(first_pending), crlf);
+        bench.verdict("the select's fall wakes the core from STANDBY with CTRLA.RUNSTDBY set, "
+                      "the one wake-up",
+                      c.commanded && ssl_seen == 1 && !backstop && wakes == 1);
+        bench.verdict("and the burst is received whole after it",
+                      c.run.count == 12 && c.rx_mism == 0);
+    } else {
+        print(serial, "  STANDBY not entered: IDLE did not prove the select's fall as a wake-up",
+              crlf);
+    }
+    Rtc::disarm(RtcFlag::all);
+    (void)link_command_mode();
+    bench.verdict("the command channel survives the client legs", command(Op::ping));
+}
+
+// ===========================================================================
+// k - THE HOST'S RARE PATHS: the spin budget, an early TXC, a lost interrupt
+// ===========================================================================
+
+// ---- the one-shot that lands a handler inside a host request ------------------
+//
+// TC4 on generator 0 (48 MHz), sixteen bits, ONESHOT: started right before a
+// request, its overflow enters a handler that holds the core and samples
+// the SERCOM's INTFLAG at its end.
+
+using Shot = Tc<4>;
+volatile uint32_t shot_hold_us = 0;
+volatile uint8_t shot_fired = 0;
+volatile uint8_t shot_flags_end = 0;
+
+bool shot_arm(uint32_t after_us, uint32_t hold_us) {
+    shot_fired = 0;
+    shot_flags_end = 0;
+    shot_hold_us = hold_us;
+    if (!Shot::init(0)) return false;
+    if (!Shot::configure(TcConfig{.mode = TcMode::count16, .prescaler = TcPrescaler::div1,
+                                  .waveform = TcWaveform::match_frequency, .one_shot = true})) {
+        return false;
+    }
+    if (!Shot::set_cc16(0, static_cast<uint16_t>(after_us * 48u))) return false;
+    Shot::clear_flags(Shot::overflow_flag);
+    Shot::arm(Shot::overflow_flag);
+    Nvic::enable(Shot::irq());
+    return true;
+}
+
+namespace kw {
+
+/// 20 ms: a six-character request at the slowest rate is 0.5 ms.
+constexpr uint32_t timeout_ms = 20;
+using TimedArb = SpiBus<Loop, P, 3, BusPassThrough, ticks_from_ms<P>(timeout_ms)>;
+
+struct Send {};
+
+uint8_t tx[6];
+uint8_t rx[6];
+
+class Driver : public Fsm<Driver, SpiDone, Send> {
+public:
+    static inline EventQueue<Event, 8, P> queue;
+    static inline uint8_t replies = 0;
+    static inline uint8_t last_status = 0xEE;
+    static inline uint32_t last_at = 0;
+
+    static void init() {
+        replies = 0;
+        last_status = 0xEE;
+        last_at = 0;
+        start(&running);
+    }
+    static void dispatch(const Event& e) { Fsm::dispatch(e); }
+
+private:
+    static Status running(const Event& e) {
+        return brio::match(
+            e,
+            [](const Send&) {
+                post<TimedArb>(Loop::Request{
+                    .cs = {}, .dc = {}, .cmd = {},
+                    .tx = lend<Lease::reply>(static_cast<const uint8_t*>(tx)),
+                    .rx = lend<Lease::reply>(rx),
+                    .len = 6, .cmd_len = 0, .polled = false, .baud = 255,
+                    .mode = SpiMode::mode0, .reply = reply_to<Driver, SpiDone>(),
+                });
+                return handled();
+            },
+            [](const SpiDone& d) {
+                ++replies;
+                last_status = d.status;
+                last_at = Ticker::millis();
+                return handled();
+            },
+            [](auto) { return unhandled(); });
+    }
+};
+
+using Kernel = Tenuto<P, Driver, TimedArb>;
+
+/// The kernel loop's turn as Tenuto::run() has it: time events, then
+/// every queue drained.
+void pump_until(uint8_t replies, uint32_t deadline_ms) {
+    const uint32_t t0 = Ticker::millis();
+    while (Ticker::millis() - t0 < deadline_ms) {
+        TimeEvents<P>::process();
+        while (Kernel::step()) {
+        }
+        if (Driver::replies >= replies) break;
+    }
+}
+
+}   // namespace kw
+
+void tk_host_paths() {
+    // THE SPIN BUDGET RUNS OUT: a polled request with the SERCOM's core
+    // clock channel down clocks nothing, and must come back spi_stalled
+    // with the select raised and the receiver flushed.
+    bench.verdict("the protocol's engine comes up", link_command_mode());
+    GclkChannel::disconnect(Raw::gclk_core_id());
+    bool clockless = false;
+    for (uint32_t k = 0; k < 100000u && !clockless; ++k) {
+        clockless = !GclkChannel::connected(Raw::gclk_core_id());
+    }
+    uint8_t txs[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+    uint8_t rxs[8] = {};
+    const uint32_t t0 = wall();
+    (void)Bus::start(Bus::Request{
+        .cs = Cs::ref(), .dc = {}, .cmd = {},
+        .tx = lend<Lease::reply>(static_cast<const uint8_t*>(txs)),
+        .rx = lend<Lease::reply>(rxs),
+        .len = 8, .cmd_len = 0, .polled = true, .baud = command_baud,
+        .mode = SpiMode::mode0, .reply = {},
+    });
+    const uint32_t took = wall() - t0;
+    const uint8_t status = Bus::status();
+    const bool cs_up = Cs::read();
+    const bool rx_empty = !Raw::rxc_flag();
+    (void)Raw::core_clock(0);
+    print(serial, "  a polled request of 8 with the core clock channel down: status ", status,
+          " after ", took / 24u, " us (the budget 200000 + 6000 a character = 248000 turns), select ",
+          cs_up ? "high" : "LOW", crlf);
+    bench.verdict("a polled request on a clockless SERCOM spends its spin budget and comes "
+                  "back spi_stalled, the select raised, the receiver empty",
+                  clockless && status == spi_stalled && cs_up && rx_empty);
+    bench.verdict("and with the channel back the engine runs a request spi_ok",
+                  link_command_mode() && command(Op::ping) && Bus::status() == spi_ok);
+
+    // AN EARLY TXC: a transmit-only request of 64 characters at 1 MHz into
+    // the peer's receive-only run, a 60 us handler (seven characters'
+    // worth) landing about 120 us in. The shifter runs dry under it and
+    // TXC rises; the next write clears it (32.8.6) and the tail waits for
+    // the last character's - so the peer must count all 64 and its run end
+    // complete, the select held to the end.
+    if (need_peer()) {
+        const auto b = Bus::baud_for(1'000'000UL);
+        spilink::Params a{};
+        a.cfg.regime = spilink::regime_buffer_wait;
+        a.count = 64;
+        a.ms = 400;
+        a.seed_a = 0x3D;
+        a.pattern = spilink::pattern_prbs;
+        a.spare = spilink::spare_receive_only;
+        const bool took_cmd = b && peer_act(Op::exchange, a);
+        spilink::Stream out(a.pattern, a.seed_a);
+        for (uint16_t i = 0; i < 64; ++i) ltx[i] = out.next();
+        const bool armed = shot_arm(150, 60);
+        if (took_cmd && armed) {
+            (void)Shot::enable(true);
+            (void)link_xfer(ltx, nullptr, 64, *b);
+        }
+        (void)Shot::enable(false);
+        const uint8_t st = Bus::status();
+        (void)link_command_mode();
+        spilink::Report r{};
+        const bool rep = peer_report(r);
+        print(serial, "  64 at 1 MHz under a 60 us handler: the handler fired ", shot_fired,
+              ", INTFLAG at its end ", hex(shot_flags_end), "; status ", st, "; the peer counted ",
+              r.count, " mism ", r.mism, " end ", r.aux3, crlf);
+        bench.verdict("the handler landed inside the request and the shifter ran dry under it "
+                      "(TXC up at its end)",
+                      shot_fired == 1 && (shot_flags_end & SpiFlag::txc) != 0);
+        bench.verdict("and the request still sent all 64, the select held to the last: the "
+                      "peer's run counted 64 exact and ended complete",
+                      st == spi_ok && rep && r.count == 64 && r.mism == 0 && r.aux3 == 0);
+    }
+
+    // A LOST INTERRUPT under the pump: a timed SpiBus over the loop-back
+    // engine; one request started, then SERCOM1's NVIC line taken away so
+    // the pump never turns. The arbiter's clock must answer spi_timeout
+    // in its place, recover() the engine, and carry the next request.
+    bench.verdict("the loop-back engine comes up for the timed arbiter", Loop::init(clock));
+    for (uint8_t k = 0; k < 6; ++k) {
+        kw::tx[k] = static_cast<uint8_t>(0xC1u + k);
+        kw::rx[k] = 0xEE;
+    }
+    kw::Kernel::init_all();
+    timed_ao_live = true;
+    post<kw::Driver>(kw::Send{});
+    uint32_t t1 = Ticker::millis();
+    kw::pump_until(1, 100);
+    const bool control = kw::Driver::replies == 1 && kw::Driver::last_status == spi_ok &&
+                         kw::rx[5] == 0xC6u;
+    // The reply's time is read from BEFORE the request is posted: the
+    // arming lands inside the dispatch, at most a tick boundary later
+    // (the step takes microseconds), and the timeout matures on the
+    // timeout_ms-th tick boundary after the arming, so the reply comes
+    // timeout_ms to timeout_ms + 1 whole ticks after t1, and one more
+    // for the pump's own pass: [timeout_ms, timeout_ms + 2].
+    kw::Driver::init();
+    t1 = Ticker::millis();
+    post<kw::Driver>(kw::Send{});
+    while (kw::Kernel::step()) {
+    }
+    Nvic::disable(Raw::irq());          // the request is on the wire: its interrupt is lost
+    kw::pump_until(1, 200);
+    const uint32_t reply_ms = kw::Driver::last_at - t1;
+    const uint8_t wedge = kw::Driver::last_status;
+    kw::Driver::init();
+    for (uint8_t k = 0; k < 6; ++k) kw::rx[k] = 0xEE;
+    post<kw::Driver>(kw::Send{});
+    kw::pump_until(1, 100);
+    const bool after = kw::Driver::replies == 1 && kw::Driver::last_status == spi_ok &&
+                       kw::rx[5] == 0xC6u;
+    timed_ao_live = false;
+    print(serial, "  the timed arbiter: control ", control ? "ok" : "BAD", "; the lost interrupt "
+                  "answered ", wedge, " at ", reply_ms, " ms (limit ", kw::timeout_ms,
+          "); the next ", after ? "ok" : "BAD", "; stale ", kw::TimedArb::stale_events(), crlf);
+    bench.verdict("a request whose interrupt is lost comes back spi_timeout ON THE ARBITER'S "
+                  "CLOCK, a reply in its place",
+                  control && wedge == spi_timeout && reply_ms >= kw::timeout_ms &&
+                      reply_ms <= kw::timeout_ms + 2u);
+    bench.verdict("and recover() gives the same bus back: the next request completes spi_ok",
+                  after);
+    (void)link_command_mode();
+}
+
 }   // namespace
 
 // ---------------------------------------------------------------------------
@@ -2240,6 +2896,22 @@ extern "C" void SysTick_Handler() { brio::Ticker::tick(); }
 /// or the protocol's. Both are SpiHost instantiations over the same
 /// Spi<1>, and only one of them ever has RXC armed at a time.
 extern "C" void SERCOM1_Handler() {
+    if (client_isr) {
+        if (Raw::ssl_flag()) {
+            ssl_at = wall();
+            Raw::clear_flags(SpiFlag::ssl);
+            Raw::enable_ssl_interrupt(false);
+            ssl_seen = static_cast<uint8_t>(ssl_seen + 1u);
+            if (ssl_hold_us != 0u) (void)delay_us(clock, ssl_hold_us);
+        }
+        return;
+    }
+    if (timed_ao_live) {
+        if (Loop::isr()) {
+            brio::post<kw::TimedArb>(brio::TransferDone{brio::spi_ok});
+        }
+        return;
+    }
     if (bus_ao_live) {
         if (Loop::isr()) {
             isr_completions = isr_completions + 1;
@@ -2254,6 +2926,21 @@ extern "C" void SERCOM1_Handler() {
 }
 
 extern "C" void SERCOM5_Handler() { (void)Serial::isr(); }
+
+/// Letter k's one-shot: the core held inside a host request, the SERCOM's
+/// flags sampled at the hold's end.
+extern "C" void TC4_Handler() {
+    Shot::clear_flags(Shot::overflow_flag);
+    shot_fired = static_cast<uint8_t>(shot_fired + 1u);
+    (void)delay_us(clock, shot_hold_us);
+    shot_flags_end = Raw::flags();
+}
+
+/// Letter j's backstop: a wake-up nobody should need, counted.
+extern "C" void RTC_Handler() {
+    (void)brio::Rtc::isr();
+    rtc_fired = true;
+}
 
 int main() {
     SysClock::init();
@@ -2289,6 +2976,11 @@ int main() {
     bench.letter('g', "THE KERNEL: SpiBus over SpiHost, util unchanged", tg_kernel);
     bench.letter('h', "the AVR client's facts (an avrdx peer only)", th_avr_client);
     bench.letter('i', "the AVR client's runs back to back (an avrdx peer only)", ti_avr_runs);
+    bench.letter('j', "THE CLIENT'S EDGES: its runs against the peer's burst, every end, "
+                      "SSL as a wake-up (needs the peer)",
+                 tj_client_edges);
+    bench.letter('k', "the host's rare paths: the spin budget, an early TXC, a lost interrupt",
+                 tk_host_paths);
 
     bench.menu();
     bench.prompt();

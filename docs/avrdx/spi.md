@@ -98,7 +98,7 @@ RUNSTDBY control of its own.
 | `SpiConfig`, `spi_config_valid<n>` | the whole configuration, and what this package and the errata allow |
 | `Spi<n>` | the RESOURCE: `init<cfg>()`/`init(cfg)`/`release()`, enable, role and demotion, rate, mode, SSD, buffer mode, DATA, both flag sets with their clear verbs, `flush_receive()` (the receive FIFO emptied whatever RXCIF says), the interrupt enables, `take_normal()`/`take_buffer()` ISR bodies, `routed()` |
 | `SpiHost<n, route>` | the transfer ENGINE, the instance in BUFFER MODE: `Request` descriptors (21 bytes, no padding: two `PinRef`s, three pointers, the lengths, the reply, four settings - the field names every stratum shares), `start()` (a polled request completes inside it reading the lent request and copying nothing; the pump copies its tenure's fields at launch), `isr()` (the pump on RXCIE and TXCIE: the received bytes read by count, two in flight, one interrupt a byte when the handler is on time and one for two when it is late), `status()` (always `spi_ok` here - no DMA path, no fault of its own; the verb keeps the app glue spelled as on every stratum), an optional SCK ceiling with `clock_for(max_sck_hz)` as the chooser at the engine's own clock, `prime(mode, clock)` for a caller framing the select by hand (a CPOL change moves the SCK pad to its new idle level, one edge a selected client counts), `rebase()`, and `recover()` - the verb a timed `SpiBus` calls on a transaction that never answered (util/bus_master.hpp): the pump's interrupt silenced, a demoted host re-armed, the bytes still in flight waited for (bounded), the FIFO read out whatever RXCIF says, the select window closed |
-| `SpiClient<n, route>` | the client side: `init()` (in buffer mode the receive FIFO emptied, the resource's `flush_receive()`), `selected()`, THE RUNS `answer()`, `exchange()` and `receive()` - a transaction's bytes in one polled call, eight-bit characters (a run of `uint16_t` does not compile, nor one on a client the package cannot bond), in buffer mode READ BY COUNT and the read before the write (The client's runs, below), each returning `Run{count, end}` with `RunEnd` `complete`, `closed`, `stalled` and this family's fourth, `late` (a turn that missed its transfer: TXCIF or BUFOVF) -, the per-byte verbs `preload()`, `poll()`, `wait()` and `exchange(byte)` (paced by RXCIF: one byte at a time for a host that leaves a gap), the buffer-mode readbacks and `flags()`, the ISR bodies, `max_sck_hz()`, and `frames_ahead` (ONE: how many answers a pump must keep queued ahead of the host's clock - the one integer that differs between this family's client pump and the other strata's) |
+| `SpiClient<n, route>` | the client side: `init()` (in buffer mode the receive FIFO emptied, the resource's `flush_receive()`), `selected()`, THE RUNS `answer()`, `exchange()` and `receive()` - a transaction's bytes in one polled call, eight-bit characters (a run of `uint16_t` does not compile, nor one on a client the package cannot bond), in buffer mode READ BY COUNT and the read before the write (The client's runs, below), each returning `Run{count, end}` with `RunEnd` `complete`, `closed`, `stalled` and this family's fourth, `late` (a turn that missed its transfer: TXCIF or BUFOVF in buffer mode, WRCOL in normal mode, whose run leaves that turn's byte out of the count) -, the per-byte verbs `preload()`, `poll()`, `wait()` and `exchange(byte)` (paced by RXCIF: one byte at a time for a host that leaves a gap), the buffer-mode readbacks and `flags()`, the ISR bodies, `max_sck_hz()`, and `frames_ahead` (ONE: how many answers a pump must keep queued ahead of the host's clock - the one integer that differs between this family's client pump and the other strata's) |
 
 Both tasks are `ClockUser`s. The engine's `rebase` recomputes the
 `cs_setup_us` timing base and re-picks the division that honours its
@@ -160,9 +160,9 @@ const auto c = brio::spi_clock_for(brio::clock_hz(clock), 2'500'000u);  // XPT20
 ## Bench findings
 
 Measured on rev. A5 at 5 V, CLK_PER 24 MHz, SPI0 on ALT1 (PE0-PE3).
-`test_avr_spi`: `z` = the single board, 187 verdicts; `y` = the same
+`test_avr_spi`: `z` = the single board, 193 verdicts; `y` = the same
 four pins against a second AVR128DB48 running `spi_peer` as a real
-client, 92 verdicts. The desk wires PORTE straight through (each PEn to
+client, 111 verdicts. The desk wires PORTE straight through (each PEn to
 the peer's PEn), so MOSI, MISO, SCK and SS are one four-wire bus between
 the two boards.
 
@@ -180,8 +180,9 @@ host, and the client's runs back to back by its letter i. Letter `u` takes the c
 one polled request of this engine, beside a gapped control - from 1.5
 to 12 MHz, the rungs between the crystal's divisions run with this
 board on its internal oscillator at 16 and 20 MHz; it judges a SAM C21
-peer to 8 MHz and prints every other peer's ladder. Measured: `z` 187 of
-187 with that peer attached, `y` 91 of 91 - `l` read a dummy leading
+peer to 8 MHz and prints every other peer's ladder; letter `v` makes this
+board the CLIENT of the peer's burst (The client's runs, below). Measured: `z` 193 of
+193 with that peer attached, `y` 110 of 110 - `l` read a dummy leading
 every normal and buffer combination of that peer and none of its
 buffer+BUFWR, `m` exact through CLK_PER/4 and its answers broken at
 CLK_PER/2, `u` exact back to back to 8 MHz and broken at 10 and 12
@@ -317,7 +318,11 @@ request faster than the engine's ceiling is slowed to the ceiling. Under
 a 24 -> 12 -> 24 MHz rebase a 1.5 MHz ceiling re-picks CLK_PER/16 ->
 CLK_PER/8 -> CLK_PER/16 and the measured SCK stays at 1.5 MHz. These
 verdicts are the engine in buffer mode (below); test `t` adds the engine
-through the read below.
+through the read below. With the core in IDLE between the pump's
+interrupts - the SPI's own interrupt the wake-up (28.1, "Wake-up from
+Idle mode") - a pumped request of eight at CLK_PER/64 completes whole,
+eight wake-ups for eight bytes and a TCA1 backstop that never fired
+(test `j`).
 
 **A read that empties the FIFO as a byte enters it is not taken.** With
 one byte in the receive FIFO, a DATA read made in the CLK_PER cycle the
@@ -369,6 +374,18 @@ switch to normal mode and back leaves them - every buffer-mode window
 after the one that met it read nothing, until the board was reset.
 `SpiClient::init()` therefore empties the FIFO in buffer mode
 (`flush_receive()`, the sequence the engine's `init()` uses).
+
+**And the engine's two verbs empty it.** With the FIFO left full under a
+lowered RXCIF by the untaken read (at its phase of CLK_PER/16, reached in
+24 of 24 tries), a probe - one byte clocked from a MISO held high, read
+once - reads the stale 0x00 when nothing has emptied it (8 of 8), and the
+fresh 0xFF alone, the FIFO empty behind it, after `SpiHost::init()` (8 of
+8) and after `recover()` (8 of 8). And `recover()`'s wait for the bytes
+in flight waits: a pumped request launched with interrupts masked, so
+that no handler can run, then `recover()` at once - it returned 2545
+CLK_PER after the launch began, the two bytes in flight at CLK_PER/128
+being 2052 of them, and left the FIFO empty and the engine running the
+next request (test `t`, eight of eight).
 
 **The repair read is no cure.** The obvious cure by RXCIF - after a read,
 a flag found down means one more read, its byte dropped - meets an
@@ -579,7 +596,7 @@ each item is used:
 | BUFOVF | YES | the receiver's late signal beside TXCIF - not alone: it was not raised for every byte lost behind a full FIFO (above) |
 | RXCIF | no, as a count | the read that empties the FIFO as a byte enters is not taken, and the repair read takes an arrival (above); RXCIF opens the window only (a byte in, or the select pad low) |
 | the two-entry receive FIFO, read at least every second transfer | YES | the older of the two newest read on every count: the FIFO never emptied while a byte may enter; the receiver keeps one transfer of slack, the transmitter's |
-| IF and WRCOL, the normal layout (28.5.4) | YES | the normal-mode runs: IF a transfer, the answer written first in the host's gap, WRCOL behind it ends the run `late` |
+| IF and WRCOL, the normal layout (28.5.4) | YES | the normal-mode runs: IF a transfer, the answer written first in the host's gap, WRCOL behind it ends the run `late` - and that turn's byte, read for the clear, left out of the count: IF is a flag and not a count (below) |
 | the select pad | YES | the window: a VPORT read (SBIC), once per four polls |
 | RXCIE, TXCIE, DREIE | no | the runs are polled: a turn is 28 cycles, an interrupt's entry and exit alone some 55 (The engine's cost); the ISR bodies stay for a program's own pump |
 | SSIF | no | host mode only (28.3.2.1.3) |
@@ -604,6 +621,40 @@ the silicon's copy (clarification 3.5.2, above): both directions exact to
 2 MHz, the receiver to 3 MHz. The loop the runs replaced (a byte at a
 time on RXCIF, the deadline and the streams stepped in the loop) was
 exact back to back to 500 kHz and never at 1 MHz.
+
+**Every end, staged.** Test `v` makes this board the client of the
+peer's `host_burst` (spi_link.hpp): a burst of eight or twelve characters,
+one at a time with the protocol's 20 us gap, the select low throughout -
+a SAM C21 peer clocking from its 48 MHz, at 750 kHz. Buffer mode with
+BUFWR: the exchange run complete and exact both ways. A burst of eight
+against a run of sixteen ends it `closed` with the eight, read out of the
+FIFO by the count, and the host read the eight answers exact. Without
+BUFWR: complete and exact, the host reading the leading dummy and every
+answer one place late. Normal mode: the exchange complete and exact both
+ways, the answer run loading all twelve and ending at the host's close,
+the receive run complete and exact with the host reading the echo one
+character late - the shifter's last received byte (28.3.2.2.1). `stalled`
+both ways, with nothing: a run nobody selects, and one whose select the
+peer holds low with no clock (its `ss_pulse`) - a count of the budget
+costs 29.7 CLK_PER in `await_select()`, which waits for the window, and 26
+in `await()`. A handler timed into the run - TCA1, started by the select's
+fall through PE3's own pin interrupt, which works under the client's
+input override - of 300 us landing 100 us in ends a buffer-mode run
+`late`, the byte it counted exact and every answer loaded before it
+intact on the wire.
+
+**Normal mode has no count.** IF is one flag: a turn delayed past a
+transfer finds it up for two, and if the handler returns inside the next
+transfer the turn's write meets it - WRCOL, `late` - while DATA already
+holds the LATER byte. Measured, the late turn read P_A(3) where P_A(2)
+was due. The run therefore reads DATA for the clear and leaves that byte
+out of the count, and the bytes it counts are in order and exact (test
+`v`, the handler returning inside a transfer after a whole one passed
+under it). A handler that returns in a GAP has the turn write in
+time for the next transfer: nothing rises, and the byte it missed is gone
+- measured, the run ended `closed` at nine of twelve, seven of them
+wrong. A run that must know is a buffer-mode run, or the caller masks
+around it.
 
 ### Two boards, one four-wire bus
 
@@ -731,11 +782,6 @@ client selects itself with INVEN on its own pulled-up SS pin.
 - the engine's SCK ceiling clamps a request DOWN silently; it does not
   report that it did - a stated caveat, since a slower transfer is
   still a correct one;
-- `recover()` and the timed `SpiBus` over it are host-tested and
-  compile-proven on every package, but no wedge has been staged on AVR
-  silicon (a demotion mid-transfer is the staging that would do it -
-  the demotion itself is bench-measured, the timed recovery over it is
-  not).
 
 **Implemented but not bench-verified:**
 
@@ -754,27 +800,11 @@ client selects itself with INVEN on its own pulled-up SS pin.
   (about 1.2 times the wire), late at CLK_PER/4 (about three times) and
   wire-bound from CLK_PER/32 are counted, and a line at each, the pump's
   in a vector with no meter, would measure them;
-- the client runs' `late` end in the driver's own code: the measurement
-  that grounds it ran a copy of the turn with its write delayed past its
-  transfer, and the peer masks interrupts for its windows, so no run of
-  the driver has come late; a letter that holds the core inside a run (a
-  timer's handler fired into it, as test `t` holds the engine) would;
-- the client runs' `closed` and `stalled` ends in buffer mode: every
-  window the bench clocks runs to its count, the answer windows excepted
-  (they end `closed`, as every one does); a host that closes a window
-  early, or never clocks it, would;
-- the normal-mode `answer()` and `receive()`, and the runs without BUFWR
-  back to back: the bench's normal-mode and BUFWR-less windows are
-  gapped exchanges (`test_samc_spi` letter h); a normal-mode answer-only
-  or receive-only window, and a BUFWR-less one in letter i, would;
-- the receive FIFO emptied by the engine's `init()` and `recover()`:
-  `flush_receive()` has emptied a FIFO left full under a lowered RXCIF
-  through `SpiClient::init()` (Bench findings), never through the two
-  host verbs, and `recover()`'s bounded wait for the bytes still in
-  flight has never waited (the wedge above);
-- an SPI interrupt as the wake from Idle (28.3.5's feature): the sleep
-  story is [platform.md](platform.md)'s and no letter of either suite
-  sleeps with a transfer pending;
+- the timed `SpiBus` over a wedge: `recover()` itself is measured (its
+  wait for the bytes in flight and its flush, test `t`) and the arbiter's
+  timeout around it is host-tested; a request whose interrupt is lost
+  under a timed arbiter would measure it on this silicon, as
+  `test_samc_spi` k does on the SAM C21's;
 - MULTI-HOST arbitration as a protocol: the demotion mechanism is
   measured on the wire (above), but two hosts actually contending for
   one bus - and the driver's part in resolving it - is not written and

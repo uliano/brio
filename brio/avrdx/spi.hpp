@@ -1659,7 +1659,8 @@ public:
         complete,   ///< every byte of the run moved (exchange, receive)
         closed,     ///< the host raised the select
         stalled,    ///< the spin budget ran out first (or the transmitter was not empty)
-        late,       ///< a turn missed its transfer: the transmitter ran dry (TXCIF)
+        late,       ///< a turn missed its transfer: the transmitter ran dry (TXCIF, buffer
+                    ///< mode) or its write met the next transfer (WRCOL, normal mode)
     };
 
     /// What a run did: `count` bytes - answers loaded for answer(), bytes
@@ -1993,7 +1994,15 @@ private:
     /// transfer (28.3.2.2.1). The answer is written first, in the host's
     /// gap, then the byte read; the INTFLAGS read that saw IF and the DATA
     /// access clear it (28.5.4). A write that met the next transfer was
-    /// ignored and raised WRCOL: `late`.
+    /// ignored and raised WRCOL: `late` - and the byte that turn reads is
+    /// NOT counted: IF is one flag, not a count, so a turn that came a
+    /// transfer late may find DATA holding a later byte than the one IF
+    /// announced (measured: test_avr_spi letter v, a handler timed into the
+    /// run; docs/avrdx/spi.md). The read is still made - it is the clear.
+    /// NORMAL MODE HAS NO COUNT: a turn delayed past a whole transfer and
+    /// its gap writes in the next gap, raises nothing, and the byte it
+    /// missed is gone with no flag to say so (the same letter) - a run
+    /// that must know is a buffer-mode run.
     template <bool has_out>
     static Run serve_normal(const uint8_t* out, uint8_t* in, uint16_t len, uint32_t spins) {
         auto& s = S::regs();
@@ -2019,8 +2028,10 @@ private:
                     if ((s.INTFLAGS & SPI_WRCOL_bm) != 0) how = RunEnd::late;
                 }
             }
-            in[r++] = s.DATA;
-            if (r == len || how == RunEnd::late) break;
+            const uint8_t v = s.DATA;
+            if (how == RunEnd::late) break;
+            in[r++] = v;
+            if (r == len) break;
         }
         if (how == RunEnd::closed && r == len) how = RunEnd::complete;
         return {r, how};

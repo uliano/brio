@@ -410,7 +410,54 @@ the two spans:
   which reads nothing - arrive wrong in the first bit alone, the MSB of
   the character just received. This host's "4 MHz" runs 0.6 % fast
   (OSC48M, letter f's 1006 thousandths), above the AVR's CLK_PER/6 on its
-  24 MHz crystal, and there the client mis-samples MOSI.
+  24 MHz crystal, and there the client mis-samples MOSI. Without BUFWR
+  (regime_buffer) the exchange run is exact both ways through 2 MHz too,
+  this host reading the leading dummy and then every answer one place
+  late, as spi_link.hpp's table says.
+- THIS CLIENT'S RUNS AGAINST A HOST'S BURST (letter j: the AVR128DB48
+  peer's host_burst, one character at a time with 20 us between them,
+  750 kHz; a character and its gap 35 us, measured from the select's
+  fall to the run's end): the exchange run complete and exact both ways;
+  the receive run complete and exact, the host reading the echo one
+  character late (32.6.2.6.2); `stalled` both ways, with nothing - a run
+  nobody selects (40 core cycles a count of its budget) and one whose
+  select the peer holds low with no clock (its ss_pulse), the select
+  still low at the end. INTFLAG.SSL rises once at the select's fall with
+  CTRLB.SSDE (32.6.3.6). Address recognition (FORM 0x2, 32.6.3.1): a
+  burst opening with the address is received whole, the address the
+  run's first character; one opening with another is IGNORED WHOLE -
+  nothing received, TXC never raised (32.8.6), the run ending on its
+  budget.
+- A HANDLER TIMED INTO A RUN (letter j: the SSL interrupt itself holds
+  the core). One that ends before the first character changes nothing.
+  One that outlasts an answer's window - due within the first five SCK
+  cycles of character 1, 62 us after the fall, the handler 75 us, ending
+  before character 2 starts at 90 us - LOSES NO CHARACTER: character 2
+  carries what the shifter holds, character 1 as received, and every
+  later answer goes one character late - ten of twelve wrong - while the
+  client receives every character exact and the run ends `complete`. No
+  flag marks a reload that matured a character late, so the run cannot
+  see it; masking around a run is the program's call.
+- THE SELECT'S FALL WAKES THE CORE (letter j): from IDLE0, and then from
+  STANDBY with CTRLA.RUNSTDBY set (32.6.5), one WFI each with the tick's
+  interrupt off, SERCOM1's the line pending at the wake and the RTC's
+  backstop silent; a receive run started on the wake takes the burst
+  whole, the 20 us gap ahead of the first character. The console's own
+  transmitter wakes a standby too: a line still draining woke it once a
+  character (SERCOM5's DRE), so the letter drains it first.
+- THE HOST'S RARE PATHS (letter k). The spin budget: a polled request of
+  eight with the core clock channel disconnected comes back spi_stalled
+  after 83 ms - 248000 turns of the flag wait, 16 core cycles a turn -
+  the select raised and the receiver empty, and the engine runs the next
+  request once the channel is back. An early TXC: 64 characters at 1 MHz
+  in the transmit-only shape under a 60 us handler about 120 us in -
+  TXC stood at the handler's end, the shifter run dry under it, the next
+  write cleared it (32.8.6) and the tail waited for the last character's:
+  the peer's receive run counted 64 exact and ended complete, the select
+  held to the last. A lost interrupt: a timed `SpiBus` (20 ms) over the
+  loop-back engine, SERCOM1's NVIC line taken away once the request was
+  on the wire - spi_timeout at 20 ms on the arbiter's clock, `recover()`
+  giving the same bus back, the next request ok, no stale completion.
 - THIS SILICON AS THE CLIENT, measured against an AVR128DB48 host
   (`test_avr_spi` y with the samc21 `spi_peer`, one character at a time
   with 20 us between them, the select held for the window):
@@ -533,14 +580,6 @@ with the first program that wants the two apart.
 
 Implemented but not bench-verified:
 
-- THE RUN UNDER AN INTERRUPT: `answer()` and `exchange()` poll with
-  interrupts enabled, so a handler that lands inside a back-to-back run
-  and outlasts the five-SCK-cycle window delays one reload and loses
-  that character. One exchange run in eight ladders missed at 6 MHz
-  (`test_avr_spi` letter u) and three repeats were exact - the cause
-  is suspected, not staged; a letter that times a handler into the
-  run would measure it. Masking around a run is the program's call.
-
 - The SAM-SAM pairing on the harness's rows (0x3 host, 0x1 client), and
   the samc21 `spi_peer`'s window end and unpulled select against a host
   that clocks the whole answer budget (`test_samc_spi` itself): needs a
@@ -554,40 +593,24 @@ Implemented but not bench-verified:
   would time them - declined, erratum 1.10.4 ([dmac.md](dmac.md)) - or a
   meter on SCK.
 
-- A polled transaction's spin budget running out (`spi_stalled` in
-  `status()`, the receiver flushed, the select raised): no letter stops
-  the SERCOM's clock under a transaction. A request started with the
-  instance's GCLK channel or CTRLA.ENABLE down would measure it - the
-  wall of the budget and the code in the reply.
-- The polled transmit-only phase's TXC under a handler longer than a
-  character: an early TXC is cleared by the next write (32.8.6) and the
-  tail's wait is the last character's by the chapter's words; letter e
-  runs under the tick and the console alone, and the write-shape
-  numbers are its witness only for that.
-- Sleep: RUNSTDBY on silicon, SSDE as a wake source, erratum 1.17.20's
-  standby cost - no letter sleeps this bus.
-- On silicon: SSDE/SSL, address recognition (FORM = 0x2 - refusals are
-  compile-checked, matching is not bench-verified), 9-bit characters
-  through a real two-board transfer (loop-back only), IBON = 0's
-  travelling overflow flavour.
-- The client's `receive()` run, and every run on nine-bit characters:
-  compile-checked on all three packages; the peer's windows use
-  `answer()` and `exchange()` on eight bits. A peer op that serves a
-  receive-only window, and one on CHSIZE = 9, would measure them.
-- A client run's two rare ends: `stalled` (no letter withholds the
-  host's clock under a run - a command whose host never clocks would)
-  and the select raised in the instructions between the poll's read and
-  the store it decides, which the store's own clear of TXC turns into
-  `stalled` (the method's statement; staging it wants a host that raises
-  its select within a few core cycles of a character boundary).
-- Erratum 1.17.3's dummy-first-character (needs a host that RAISES SS
-  mid-transmission on purpose; the peer holds it low, correctly).
-- The timed-bus path on this wire: `SpiBus`'s per-bus timeout and
-  `recover()` are host-tested (deterministic race legs included) and
-  compile-proven here, but no SPI wedge has been staged on silicon -
-  the I2C letter l is the mechanism's silicon witness (a held wire
-  stages it there; here a SERCOM interrupt lost under a running pump
-  would).
+- Erratum 1.17.20's standby cost: a client that preloaded before a
+  standby may draw extra current - a meter on the supply would measure
+  it, and the desk has none on this board.
+- On silicon: 9-bit characters through a real two-board transfer
+  (loop-back only), and every client run on them - the peer that clocks
+  this board is an AVR128DB48, eight bits only, so a second SAM C21 would
+  measure them; IBON = 0's travelling overflow flavour.
+- A client run's rarest end: the select raised in the instructions
+  between the poll's read and the store it decides, which the store's own
+  clear of TXC turns into `stalled` (the method's statement; staging it
+  wants a host that raises its select within a few core cycles of a
+  character boundary).
+- Erratum 1.17.3's dummy-first-character: it needs a client still
+  preloaded across a select the host raised MID-TRANSMISSION and dropped
+  again, and spi_link.hpp has no such host op (host_burst holds the
+  select for the whole burst), while a peer's own runs end at the first
+  close; an op that raises the select inside a character and selects
+  again would measure it.
 
 Stated, not enforced: `SercomPadPin`'s pin-reaches-pad claim is the
 caller's (sercom.md's open device-table question, unchanged here).

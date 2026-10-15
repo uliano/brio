@@ -9,10 +9,12 @@
 // sequence, the buffer mode's four flags and their clear disciplines,
 // the host demotion an SS pin can force, the two ISR bodies, the clock
 // rebase with an SCK ceiling, the transfer engine (SpiHost) with both
-// its completion styles, and the read the silicon does not take - its
-// own sweep and the sweep of the repair read a cure by RXCIF would make,
-// then the engine through it under a handler that holds the core at every
-// phase (TCB2).
+// its completion styles (the pump also with the core in IDLE between its
+// interrupts), and the read the silicon does not take - its own sweep and
+// the sweep of the repair read a cure by RXCIF would make, then the
+// engine through it under a handler that holds the core at every phase
+// (TCB2), and the engine's init() and recover() emptying the FIFO it
+// leaves (recover() waiting for the bytes in flight).
 //
 // THE RATE ON THE WIRE, which a board answering itself cannot tell by
 // its data: a frame inside a polled block of the engine timed on the
@@ -24,7 +26,7 @@
 // again, j under the 400 kHz ceiling. The divisions letters c, e, f, g, h
 // and t set are b's, on the same generator.
 //
-// TWO BOARDS (k..s and u, `y`): the same four pins with a second board
+// TWO BOARDS (k..s, u and v, `y`): the same four pins with a second board
 // running `spi_peer` as a real client, driven IN BAND over the bus
 // under test
 // (src/apps/spi_link.hpp) - the client matrix (four transfer modes, both
@@ -37,7 +39,11 @@
 // engine request per exchange, beside a gapped control, from 1.5 to
 // 12 MHz with this board's own source switched to 16 and 20 MHz for the
 // rungs between the crystal's divisions; judged against a SAM C21 peer
-// to 8 MHz (its document's boundary) and printed otherwise.
+// to 8 MHz (its document's boundary) and printed otherwise - and (v)
+// THIS board as the CLIENT of the peer's host_burst, its runs in both
+// modes and their rare ends staged: a burst shorter than the run, a run
+// nobody selects and one whose select is held with no clock, a handler
+// timed into the run (TCA1, started by the select's fall).
 //
 // THE PEER IS AN AVR128DB48 OR A SAM C21, and the half asks which
 // (ident's version, its high byte: spi_link.hpp). Some of its verdicts
@@ -86,7 +92,9 @@
 #include "avrdx/delay.hpp"
 #include "avrdx/evsys.hpp"
 #include "avrdx/pin.hpp"
+#include "avrdx/sleep.hpp"
 #include "avrdx/spi.hpp"
+#include "avrdx/tca.hpp"
 #include "avrdx/tcb.hpp"
 #include "avrdx/usart.hpp"
 #include "avrdx/userrow.hpp"
@@ -161,6 +169,64 @@ volatile uint8_t isr_idx = 0;
 
 uint8_t passed = 0, failed = 0;
 
+// ---- the held core: a handler timed into a run --------------------------------
+//
+// TCA1 is the one-shot that lands a handler INSIDE a run of this board's
+// client (letter v): the select's falling edge (PE3's own pin interrupt,
+// ISC falling - the pad's input stage works under the SPI's override)
+// starts it, and its overflow enters the handler, which holds the core
+// for `hold_spin` four-cycle turns and then, by `hold_shape`, returns at
+// once, or lets `hold_skip` whole transfers pass on the SCK pad and
+// returns inside the next one (a write then meets a transfer) or in the
+// gap after it (a write then meets none). Every wait on the pad is
+// bounded; a wait that ran out counts in `hold_lost`. TCA1 is also the
+// backstop of letter j's sleep: there its overflow is a wake-up nobody
+// else gives, and is counted. Mode 0 throughout: SCK idles low.
+
+using Hold = Tca<1>;
+
+enum class HoldShape : uint8_t { off, plain, into_transfer, into_gap, backstop };
+volatile HoldShape hold_shape = HoldShape::off;
+volatile uint16_t hold_offset = 0;    ///< TCA1 ticks at CLK_PER from the select's fall
+volatile uint16_t hold_spin = 0;      ///< the handler's length, four-cycle turns
+volatile uint8_t hold_skip = 0;       ///< whole transfers let pass after the spin
+volatile uint8_t hold_fired = 0;
+volatile uint8_t hold_lost = 0;
+
+/// The handler's own pad waits, bounded by one shared budget: SCK at
+/// `high`, or SCK low for 16 reads in a row (about 5 us at seven cycles a
+/// read - three times a half period at 375 kHz, a quarter of the host's
+/// 20 us gap: a gap between characters and never a low phase inside one).
+[[gnu::always_inline]] inline bool sck_level(bool high, uint16_t& budget) {
+    while (Sck::read() != high) {
+        if (--budget == 0) return false;
+    }
+    return true;
+}
+[[gnu::always_inline]] inline bool sck_gap(uint16_t& budget) {
+    uint8_t low = 0;
+    while (low < 16u) {
+        low = Sck::read() ? 0u : static_cast<uint8_t>(low + 1u);
+        if (--budget == 0) return false;
+    }
+    return true;
+}
+
+/// Arm the hold for the next select edge (or disarm it: HoldShape::off).
+void hold_arm(HoldShape shape, uint16_t offset_us, uint16_t spin_us, uint8_t skip) {
+    Hold::enable_ovf_interrupt(false);
+    Hold::disable();
+    hold_shape = shape;
+    hold_offset = static_cast<uint16_t>(offset_us * 24u);   // CLK_PER = 24 MHz
+    hold_spin = static_cast<uint16_t>(spin_us * 6u);        // four cycles a turn
+    hold_skip = skip;
+    hold_fired = 0;
+    hold_lost = 0;
+    Ss::sense(PinSense::none);
+    Ss::clear_flag();
+    if (shape != HoldShape::off && shape != HoldShape::backstop) Ss::sense(PinSense::falling);
+}
+
 void verdict(const char* name, bool ok) {
     if (ok) ++passed; else ++failed;
     print(serial, "  ", ok ? "PASS" : "FAIL", "  ", name, crlf);
@@ -191,6 +257,7 @@ void quiesce() {
     Ss::set();
     Ss::pull(PinPull::none);
     Ss::invert(false);
+    hold_arm(HoldShape::off, 0, 0, 0);
     engine_mode = false;
     engine_done = false;
     buffer_isr = false;
@@ -1086,6 +1153,49 @@ void tj_engine() {
     verdict("the ISR pump moves the same bytes", pumped);
     verdict("the pump released CS", Ss::read());
 
+    // The pump with the core ASLEEP: IDLE between its interrupts, each of
+    // them the wake-up (DS40002247B 28.1, "Wake-up from Idle mode"). The
+    // test, the arm and SEI; SLEEP back to back close the lost wake-up
+    // (the instruction after SEI runs before a pending interrupt). TCA1's
+    // overflow 20 ms on is the backstop - a wake-up nobody else gives, and
+    // counted: eight bytes at CLK_PER/64 take 0.17 ms.
+    {
+        for (uint8_t i = 0; i < 8; ++i) eng_rx[i] = 0;
+        quiet();
+        hold_arm(HoldShape::backstop, 0, 0, 0);
+        (void)Hold::init({.mode = TcaMode::normal, .clock = TcaClock::div64, .period = 7500});
+        Hold::enable_ovf_interrupt(true);
+        engine_done = false;
+        engine_mode = true;
+        uint8_t wakes = 0;
+        const bool sync = Host::start({Ss::ref(), {}, {}, 0, {}, lend<Lease::reply>(eng_rx), 8, {},
+                                       SpiClock::div64, SpiMode::mode0, false, 0});
+        while (!sync && wakes < 64u) {
+            cli();
+            if (engine_done) {
+                sei();
+                break;
+            }
+            Sleep::arm(SleepMode::idle);
+            sei();
+            Sleep::sleep();
+            Sleep::disarm();
+            ++wakes;
+        }
+        engine_mode = false;
+        Hold::enable_ovf_interrupt(false);
+        Hold::disable();
+        const bool backstop = hold_fired != 0;
+        hold_arm(HoldShape::off, 0, 0, 0);
+        bool slept = !sync && engine_done;
+        for (uint8_t i = 0; i < 8; ++i) slept = slept && eng_rx[i] == 0xFF;
+        print(serial, "  the pump with the core in IDLE: ", wakes, " wake-ups, the backstop ",
+              backstop ? "FIRED" : "silent", crlf);
+        verdict("the pump completes with the core in IDLE between its interrupts, the SPI's own "
+                "interrupt the wake-up",
+                slept && wakes >= 1u && !backstop);
+    }
+
     // A command phase with a DC pin: the D/C line ends HIGH (the data
     // phase), and the command bytes go out on MOSI - counted with MISO
     // held LOW, so the line falls back to zero between bytes (the
@@ -1227,6 +1337,37 @@ void untaken_sweep(uint8_t span, Untaken& u) {
             ++u.other;
         }
     }
+}
+
+/// The FIFO left FULL UNDER A LOWERED RXCIF: untaken_sweep's sequence at
+/// one phase (`cnt` turns and `nops`), interrupts masked by the caller.
+/// True when the read returned A and RXCIF fell behind B's arrival - the
+/// state reached.
+template <uint8_t nops>
+bool untaken_state_at(uint8_t cnt) {
+    raw_drain();
+    miso_level(false);
+    raw_one(0xFF);                          // A = 0x00 waits in the FIFO
+    miso_level(true);
+    S0::clear_txc();
+    S0::write(0xFF);                        // B = 0xFF on its way
+    spin3<nops>(cnt);
+    const uint8_t d = S0::read();
+    while (!S0::txc_flag()) {
+    }
+    return d == 0x00 && !S0::rxc_flag();
+}
+
+/// The state reached at whichever phase this function's own code puts the
+/// read on (a cycle off untaken_sweep's, which is another instruction
+/// sequence): every phase of `span` tried in order until one reaches it.
+bool untaken_state(uint8_t span) {
+    for (uint8_t cnt = 1; cnt < span; ++cnt) {
+        if (untaken_state_at<0>(cnt) || untaken_state_at<1>(cnt) || untaken_state_at<2>(cnt)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 struct Repair {
@@ -1533,6 +1674,85 @@ void tt_untaken() {
                 w.completed == w.runs);
         verdict("and read every byte once, none left behind", w.exact == w.runs && w.clean == w.runs);
     }
+
+    // THE ENGINE'S TWO VERBS EMPTY THAT FIFO. The untaken read at its phase
+    // of CLK_PER/16 leaves the FIFO FULL UNDER A LOWERED RXCIF (A = 0x00
+    // and B = 0xFF kept, the flag down); a probe then clocks one byte with
+    // MISO high and reads once: 0xFF and the FIFO empty behind it when the
+    // FIFO had been emptied, A's 0x00 when it had not (the control).
+    uint8_t reached = 0, stale_kept = 0, by_init = 0, by_recover = 0;
+    for (uint8_t t = 0; t < 8; ++t) {
+        for (uint8_t verb = 0; verb < 3; ++verb) {   // none (the control), init(), recover()
+            (void)Host::init(clock);
+            Host::prime(SpiMode::mode0, SpiClock::div16);
+            cli();
+            const bool state = untaken_state(120);
+            if (verb == 1) (void)Host::init(clock);
+            if (verb == 2) Host::recover();
+            Host::prime(SpiMode::mode0, SpiClock::div16);
+            miso_level(true);
+            raw_one(0xFF);
+            const uint8_t v = S0::read();
+            const bool empty = !S0::rxc_flag();
+            sei();
+            if (state) ++reached;
+            if (verb == 0 && state && v == 0x00) ++stale_kept;
+            if (verb == 1 && state && v == 0xFF && empty) ++by_init;
+            if (verb == 2 && state && v == 0xFF && empty) ++by_recover;
+        }
+    }
+    print(serial, "  the FIFO full under a lowered RXCIF reached in ", reached, " of 24 tries; the "
+                  "probe read the stale byte with no verb in ", stale_kept, " of 8, a fresh one "
+                  "alone after init() in ", by_init, " of 8, after recover() in ", by_recover,
+          " of 8", crlf);
+    verdict("the untaken read leaves the FIFO full under a lowered RXCIF, and a probe reads the "
+            "stale byte first (the control)",
+            reached == 24 && stale_kept == 8);
+    verdict("SpiHost::init() empties it", by_init == 8);
+    verdict("SpiHost::recover() empties it", by_recover == 8);
+
+    // recover()'s bounded wait for the bytes in flight: a pumped request
+    // launched with interrupts masked has written its first two bytes and
+    // no handler can run; recover() must wait for both before it flushes.
+    // Two transfers at CLK_PER/128 are 2 x (8 x 128 + 2) = 2052 CLK_PER
+    // after the first write (letter b's two-cycle gap), and that write
+    // comes after t_a - so recover() cannot return before t_a + 2052.
+    (void)Host::init(clock);
+    miso_level(true);
+    quiet();
+    Ruler::init(TcbClock::div1, ChCarry{}, ChSnap{});
+    Ruler::reset();
+    uint8_t waited = 0;
+    uint32_t span_least = 0xFFFFFFFFu, span_most = 0;
+    for (uint8_t t = 0; t < 8; ++t) {
+        for (uint8_t i = 0; i < 8; ++i) eng_rx[i] = 0;
+        cli();
+        const uint32_t t_a = Ruler::read();
+        (void)Host::start({{}, {}, {}, 0, {}, lend<Lease::reply>(eng_rx), 8, {}, SpiClock::div128,
+                           SpiMode::mode0, false, 0});
+        Host::recover();
+        const uint32_t t_b = Ruler::read();
+        Host::prime(SpiMode::mode0, SpiClock::div16);
+        raw_one(0xFF);
+        const uint8_t v = S0::read();
+        const bool empty = !S0::rxc_flag();
+        sei();
+        const uint32_t span = t_b - t_a;
+        span_least = span < span_least ? span : span_least;
+        span_most = span > span_most ? span : span_most;
+        if (span >= 2052u && v == 0xFF && empty) ++waited;
+    }
+    RulerLo::disable();
+    RulerHi::disable();
+    ChCarry::off();
+    ChSnap::off();
+    print(serial, "  a pumped request's launch then recover(), interrupts masked, CLK_PER/128: ",
+          span_least, "..", span_most, " CLK_PER from before the launch to recover()'s return "
+          "(two bytes in flight: 2052)", crlf);
+    verdict("recover() waits for the two bytes in flight, then leaves the FIFO empty", waited == 8);
+    verdict("and the engine runs a request after it",
+            run_engine({{}, {}, {}, 0, {}, lend<Lease::reply>(eng_rx), 8, {}, SpiClock::div16,
+                        SpiMode::mode0, true, 0}));
     quiesce();
 }
 
@@ -2863,6 +3083,345 @@ void tu_back_to_back() {
     quiesce();
 }
 
+// ---- v: this board as the CLIENT, the peer as the host ---------------------------
+//
+// The client's runs (avrdx/spi.hpp, SpiClient: answer, exchange, receive)
+// against a real host - the peer's host_burst (spi_link.hpp: the roles
+// invert), which clocks a bounded burst one character at a time with
+// spilink::gap_us between characters and its select low for the whole
+// burst - and the runs' rare ends staged on purpose: a burst shorter than
+// the run (`closed`), a run nobody selects and one whose select is held
+// low with no clock (`stalled`, the peer's ss_pulse), and a handler timed
+// into the run (`late`: TCA1 above). Mode 0, MSb first; either peer, whose
+// host_burst division names its own clock (aux16).
+
+using Client = SpiClient<0, SpiRoute::alt1>;
+
+constexpr uint16_t client_cap = 16;
+uint8_t c_out[client_cap];
+uint8_t c_in[client_cap];
+
+enum class RunKind : uint8_t { exchange, answer, receive };
+
+struct ClientLeg {
+    RunKind kind = RunKind::exchange;
+    bool buffered = true;
+    bool bufwr = true;
+    uint16_t run_len = 12;
+    uint16_t burst = 12;                  ///< characters the peer clocks
+    uint8_t seed_a = 0x21;                ///< what the peer sends
+    uint8_t seed_b = 0x6A;                ///< what this end answers
+    uint8_t want_b = 0x6A;                ///< what the peer checks it read against
+    uint16_t div = 64;                    ///< the peer's division of its own clock
+    HoldShape shape = HoldShape::off;
+    uint16_t offset_us = 0;
+    uint16_t spin_us = 0;
+    uint8_t skip = 0;
+};
+
+struct ClientResult {
+    bool commanded = false;
+    bool reported = false;
+    Client::Run run{0, Client::RunEnd::stalled};
+    spilink::Report host{};               ///< what the peer, as host, read
+    uint16_t rx_mism = 0;                 ///< this end's received bytes against P_A
+    uint8_t rx_first = 0xFF;              ///< the first wrong one
+    uint8_t fired = 0;
+    uint8_t lost = 0;
+};
+
+/// The run's budget: 400 000 counts, about half a second at the 30 CLK_PER a
+/// count of await_select costs (measured below) - the peer's lead-in is
+/// 40 ms and its burst under a millisecond.
+constexpr uint32_t client_spins = 400'000u;
+
+/// This board out of the host role and into the client's, the select pad
+/// an input held up by its own pull (the peer drives it only inside the
+/// burst).
+bool become_client(bool buffered, bool bufwr) {
+    S0::release();
+    Ss::invert(false);
+    Ss::input(PinPull::up);
+    return Client::init({.mode = SpiMode::mode0,
+                         .lsb_first = false,
+                         .buffer_mode = buffered,
+                         .buffer_wait = bufwr,
+                         .drive_miso = true});
+}
+
+ClientResult client_leg(const ClientLeg& g) {
+    ClientResult res{};
+    spilink::Params a{};
+    a.count = g.burst;
+    a.ms = 300;
+    a.seed_a = g.seed_a;
+    a.seed_b = g.want_b;
+    a.pattern = spilink::pattern_counting;
+    a.aux8 = 40;                          // lead-in ms: this end becomes the client in it
+    a.aux16 = g.div;
+    res.commanded = peer_act(spilink::Op::host_burst, a);
+    if (!res.commanded) return res;
+    if (!become_client(g.buffered, g.bufwr)) return res;
+    spilink::Stream out(spilink::pattern_counting, g.seed_b);
+    for (uint16_t i = 0; i < client_cap; ++i) {
+        c_out[i] = out.next();
+        c_in[i] = 0xEE;
+    }
+    const uint16_t n = g.run_len < client_cap ? g.run_len : client_cap;
+    quiet();
+    hold_arm(g.shape, g.offset_us, g.spin_us, g.skip);
+    switch (g.kind) {
+        case RunKind::exchange:
+            res.run = Client::exchange(std::span<const uint8_t>(c_out, n),
+                                       std::span<uint8_t>(c_in, n), client_spins);
+            break;
+        case RunKind::answer:
+            res.run = Client::answer(std::span<const uint8_t>(c_out, n), client_spins);
+            break;
+        case RunKind::receive:
+            res.run = Client::receive(std::span<uint8_t>(c_in, n), client_spins);
+            break;
+    }
+    res.fired = hold_fired;
+    res.lost = hold_lost;
+    hold_arm(HoldShape::off, 0, 0, 0);
+    if (g.kind != RunKind::answer) {
+        for (uint16_t i = 0; i < res.run.count; ++i) {
+            if (c_in[i] == static_cast<uint8_t>(g.seed_a + i)) continue;
+            if (res.rx_mism == 0) res.rx_first = static_cast<uint8_t>(i);
+            ++res.rx_mism;
+        }
+    }
+    delay_us(clock, 20'000u);             // the burst is over before this end hosts again
+    S0::release();
+    (void)link_command_mode();
+    res.reported = peer_report(res.host);
+    return res;
+}
+
+const char* end_name(Client::RunEnd e) {
+    switch (e) {
+        case Client::RunEnd::complete: return "complete";
+        case Client::RunEnd::closed: return "closed";
+        case Client::RunEnd::stalled: return "stalled";
+        case Client::RunEnd::late: return "late";
+    }
+    return "?";
+}
+
+void print_leg(const char* name, const ClientResult& r) {
+    print(serial, "  ", name, ": run ", end_name(r.run.end), " count ", r.run.count,
+          ", received mism ", r.rx_mism);
+    if (r.rx_mism) print(serial, " (first at ", r.rx_first, ": ", hex(c_in[r.rx_first]), ")");
+    print(serial, " | the host read ", r.host.count, " mism ", r.host.mism);
+    if (r.host.mism) print(serial, " (first at ", r.host.idx, " got ", hex(r.host.got), " exp ",
+                           hex(r.host.exp), ")");
+    if (r.fired) print(serial, " | hold fired ", r.fired, " lost ", r.lost);
+    print(serial, crlf);
+}
+
+void tv_client() {
+    print(serial, "v this board as the CLIENT, the peer clocking a burst (host_burst): the "
+                  "runs in both modes and their rare ends staged", crlf);
+    quiesce();
+    if (!ensure_link()) {
+        verdict("the peer answers a ping", false);
+        return;
+    }
+
+    // Buffer mode with BUFWR: the run's own case, every end of it complete.
+    ClientLeg g{};
+    ClientResult r = client_leg(g);
+    print_leg("buffer + BUFWR exchange, 12 of 12", r);
+    verdict("buffer mode with BUFWR: the exchange run against a host's burst ends complete, "
+            "and every byte is exact both ways",
+            r.commanded && r.run.end == Client::RunEnd::complete && r.run.count == 12 &&
+                r.rx_mism == 0 && r.reported && r.host.count == 12 && r.host.mism == 0);
+
+    // `closed`: the burst is shorter than the run.
+    g = {};
+    g.run_len = 16;
+    g.burst = 8;
+    g.seed_a = 0x35;
+    g.seed_b = g.want_b = 0x91;
+    r = client_leg(g);
+    print_leg("buffer + BUFWR exchange, a run of 16 against a burst of 8", r);
+    verdict("a burst shorter than the run ends it CLOSED with the eight bytes it carried, "
+            "exact, read out of the FIFO by the count",
+            r.commanded && r.run.end == Client::RunEnd::closed && r.run.count == 8 &&
+                r.rx_mism == 0);
+    verdict("and the host read the eight answers exact",
+            r.reported && r.host.count == 8 && r.host.mism == 0);
+
+    // Buffer mode WITHOUT BUFWR: the shifter's leftover leads (28.3.2.2.2),
+    // so the host reads P_B(i - 1) at character i - asked as the stream
+    // one below (pattern_counting): only character 0, the dummy, may differ.
+    g = {};
+    g.bufwr = false;
+    g.seed_a = 0x44;
+    g.seed_b = 0x70;
+    g.want_b = 0x6F;
+    r = client_leg(g);
+    print_leg("buffer without BUFWR exchange, 12 of 12", r);
+    verdict("buffer mode WITHOUT BUFWR: the exchange run ends complete with every byte exact",
+            r.commanded && r.run.end == Client::RunEnd::complete && r.run.count == 12 &&
+                r.rx_mism == 0);
+    verdict("and the host read a leading dummy, then the answers one place late",
+            r.reported && r.host.count == 12 && (r.host.mism == 0 || (r.host.mism == 1 && r.host.idx == 0)));
+
+    // Normal mode: the three runs, the host's 20 us gap the turn's room.
+    g = {};
+    g.buffered = false;
+    g.bufwr = false;
+    g.seed_a = 0x52;
+    g.seed_b = g.want_b = 0xC1;
+    r = client_leg(g);
+    print_leg("normal exchange, 12 of 12", r);
+    verdict("NORMAL mode: the exchange run ends complete, every byte exact both ways",
+            r.commanded && r.run.end == Client::RunEnd::complete && r.run.count == 12 &&
+                r.rx_mism == 0 && r.reported && r.host.count == 12 && r.host.mism == 0);
+
+    g.kind = RunKind::answer;
+    g.seed_b = g.want_b = 0x0D;
+    r = client_leg(g);
+    print_leg("normal answer, 12 of 12", r);
+    verdict("NORMAL mode: the answer run loads all twelve and ends at the host's close",
+            r.commanded && r.run.end == Client::RunEnd::closed && r.run.count == 12);
+    verdict("and the host read the twelve answers exact",
+            r.reported && r.host.count == 12 && r.host.mism == 0);
+
+    // The receive run writes nothing: the shifter sends back what it last
+    // received (avrdx/spi.hpp), P_A(i - 1) at character i.
+    g.kind = RunKind::receive;
+    g.seed_a = 0x63;
+    g.want_b = 0x62;
+    r = client_leg(g);
+    print_leg("normal receive, 12 of 12", r);
+    verdict("NORMAL mode: the receive run ends complete with every byte exact",
+            r.commanded && r.run.end == Client::RunEnd::complete && r.run.count == 12 &&
+                r.rx_mism == 0);
+    verdict("and the host read the echo, each byte one character late",
+            r.reported && r.host.count == 12 && (r.host.mism == 0 || (r.host.mism == 1 && r.host.idx == 0)));
+
+    // `stalled`, nobody selects: the budget alone ends the run.
+    {
+        S0::release();
+        (void)become_client(true, true);
+        Ruler::init(TcbClock::div1, ChCarry{}, ChSnap{});
+        Ruler::reset();
+        constexpr uint32_t budget = 20'000u;
+        const uint32_t t0 = Ruler::read();
+        const Client::Run s = Client::exchange(std::span<const uint8_t>(c_out, 8),
+                                               std::span<uint8_t>(c_in, 8), budget);
+        const uint32_t took = Ruler::read() - t0;
+        RulerLo::disable();
+        RulerHi::disable();
+        ChCarry::off();
+        ChSnap::off();
+        print(serial, "  nobody selects: run ", end_name(s.end), " count ", s.count, " after ",
+              took, " CLK_PER, ", took / budget, " a count of the budget", crlf);
+        verdict("a run nobody selects ends STALLED on its budget, with nothing",
+                s.end == Client::RunEnd::stalled && s.count == 0);
+        S0::release();
+        (void)link_command_mode();
+    }
+
+    // `stalled`, the select held low and no clock: the peer's ss_pulse.
+    {
+        spilink::Params a{};
+        a.aux8 = 20;                      // ms before the peer takes the wire
+        a.aux16 = 40'000u;                // us it holds it low
+        const bool took_cmd = peer_act(spilink::Op::ss_pulse, a);
+        (void)become_client(true, true);
+        uint32_t w = 0;
+        while (!Client::selected() && w < 2'000'000u) ++w;
+        const bool fell = Client::selected();
+        Ruler::init(TcbClock::div1, ChCarry{}, ChSnap{});
+        Ruler::reset();
+        constexpr uint32_t budget = 5'000u;
+        const uint32_t t0 = Ruler::read();
+        const Client::Run s = Client::exchange(std::span<const uint8_t>(c_out, 8),
+                                               std::span<uint8_t>(c_in, 8), budget);
+        const uint32_t took = Ruler::read() - t0;
+        RulerLo::disable();
+        RulerHi::disable();
+        ChCarry::off();
+        ChSnap::off();
+        const bool still = Client::selected();
+        print(serial, "  the select held with no clock: run ", end_name(s.end), " count ", s.count,
+              " after ", took, " CLK_PER, ", took / budget, " a count of the budget; the select "
+              "still low at its end: ", still ? "yes" : "no", crlf);
+        verdict("a run whose select is held low with no clock ends STALLED on its budget, "
+                "with nothing, the select still low",
+                took_cmd && fell && s.end == Client::RunEnd::stalled && s.count == 0 && still);
+        delay_us(clock, 60'000u);         // the pulse is over
+        S0::release();
+        (void)link_command_mode();
+    }
+
+    // `late`, buffer mode: a handler of 300 us lands 100 us after the
+    // select's fall - after the first two or three characters (a character
+    // and its gap are 30 to 45 us on either peer) - and outlasts the
+    // turn's deadline, one transfer, several times over.
+    g = {};
+    g.seed_a = 0x17;
+    g.seed_b = g.want_b = 0xA8;
+    g.shape = HoldShape::plain;
+    g.offset_us = 100;
+    g.spin_us = 300;
+    r = client_leg(g);
+    print_leg("buffer + BUFWR exchange, a 300 us handler 100 us in", r);
+    verdict("a handler longer than a transfer ends the buffer-mode run LATE (TXCIF)",
+            r.commanded && r.fired == 1 && r.run.end == Client::RunEnd::late);
+    verdict("with the bytes before it in order and exact",
+            r.run.count >= 1 && r.run.count < 12 && r.rx_mism == 0);
+    verdict("and every answer loaded before it reached the host intact",
+            r.reported && (r.host.mism == 0 || r.host.idx >= r.run.count));
+
+    // `late`, normal mode: the handler returns INSIDE a transfer - one whole
+    // transfer after the gap it found, and the one it began in, if it began
+    // in one, besides - so the turn's write meets it and WRCOL rises
+    // (28.3.2.2.1), while IF stands for two transfers and DATA holds the
+    // later byte.
+    g = {};
+    g.buffered = false;
+    g.bufwr = false;
+    g.seed_a = 0x2A;
+    g.seed_b = g.want_b = 0x5F;
+    g.shape = HoldShape::into_transfer;
+    g.offset_us = 100;
+    g.skip = 1;
+    r = client_leg(g);
+    print_leg("normal exchange, a handler returning inside a transfer", r);
+    verdict("NORMAL mode: a handler that returns inside a transfer ends the run LATE - the "
+            "turn's write meets the transfer (WRCOL)",
+            r.commanded && r.fired == 1 && r.lost == 0 && r.run.end == Client::RunEnd::late);
+    verdict("with the bytes it counts in order and exact - the late turn's byte, a later one "
+            "than IF announced, left out",
+            r.run.count >= 1 && r.rx_mism == 0);
+
+    // Normal mode has no count: a handler that lets a transfer pass and
+    // returns in a GAP writes in time for the next one, and nothing marks
+    // the byte the run missed.
+    g = {};
+    g.buffered = false;
+    g.bufwr = false;
+    g.seed_a = 0x3B;
+    g.seed_b = g.want_b = 0x84;
+    g.shape = HoldShape::into_gap;
+    g.offset_us = 100;
+    g.skip = 2;
+    r = client_leg(g);
+    print_leg("normal exchange, a handler returning in a gap after two transfers", r);
+    verdict("NORMAL mode: a handler that returns in a gap is not seen by the run's flags",
+            r.commanded && r.fired == 1 && r.lost == 0 && r.run.end != Client::RunEnd::late);
+
+    quiesce();
+    (void)link_command_mode();
+    verdict("the command channel survives the role swaps", command(spilink::Op::ping));
+    quiesce();
+}
+
 // ---- the menu ----------------------------------------------------------------
 
 using TestFn = void (*)();
@@ -2873,10 +3432,10 @@ constexpr Test tests[] = {
     {'i', ti_rebase}, {'j', tj_engine}, {'t', tt_untaken},
     {'k', tk_bringup}, {'l', tl_matrix}, {'m', tm_rates}, {'n', tn_mismatch},
     {'o', to_ss_midbyte}, {'p', tp_loss}, {'q', tq_demotion}, {'r', tr_mspi},
-    {'s', ts_rebase}, {'u', tu_back_to_back},
+    {'s', ts_rebase}, {'u', tu_back_to_back}, {'v', tv_client},
 };
 constexpr char single_board[] = "abcdefghijt";
-constexpr char two_board[] = "klmnopqrsu";
+constexpr char two_board[] = "klmnopqrsuv";
 
 void run(TestFn fn) {
     passed = failed = 0;
@@ -2904,7 +3463,8 @@ void help() {
           crlf);
     print(serial, "  two boards: k bring-up | l client matrix | m rates and the client "
                   "ceiling | n mismatches | o SS mid-byte | p undrained client | "
-                  "q real demotion | r Host SPI | s rebase | u back to back    -> y = k..s and u", crlf);
+                  "q real demotion | r Host SPI | s rebase | u back to back | "
+                  "v this board as the client    -> y = k..s, u and v", crlf);
     print(serial, "  NO WIRES of its own: PE0..PE3 (SPI0 ALT1) to the peer board's SPI - "
                   "an AVR's PE0..PE3 straight across, or a SAM C21's PA16, PA18, PA19, PA17. "
                   "The peer board runs `spi_peer`, which stays DARK - it drives MISO only for "
@@ -2942,6 +3502,42 @@ ISR(TCB2_INT_vect) {
     T2::disable();                          // one shot: the request's own delay
     uint8_t n = hold_turns;
     if (n != 0) __asm__ __volatile__("1: dec %0\n\tbrne 1b" : "+r"(n));
+}
+
+/// The select's falling edge (letter v's hold): TCA1 started for the
+/// offset, the edge's sense dropped so the burst's close does not count.
+ISR(PORTE_PORT_vect) {
+    Ss::clear_flag();
+    Ss::sense(PinSense::none);
+    if (hold_shape == HoldShape::off || hold_shape == HoldShape::backstop) return;
+    (void)Hold::init({.mode = TcaMode::normal, .clock = TcaClock::div1, .period = hold_offset});
+    Hold::enable_ovf_interrupt(true);
+}
+
+/// The hold itself, or letter j's backstop (a wake-up only it gives).
+ISR(TCA1_OVF_vect) {
+    Hold::ovf();
+    Hold::enable_ovf_interrupt(false);
+    Hold::disable();
+    hold_fired = static_cast<uint8_t>(hold_fired + 1u);
+    const HoldShape shape = hold_shape;
+    if (shape == HoldShape::backstop || shape == HoldShape::off) return;
+    uint16_t n = hold_spin;
+    if (n != 0) __asm__ __volatile__("1: sbiw %0, 1\n\tbrne 1b" : "+w"(n));
+    if (shape == HoldShape::plain) return;
+    uint16_t budget = 60000u;
+    bool ok = sck_gap(budget);
+    // Let `skip` transfers pass: eight rising edges each (mode 0).
+    const uint8_t edges = static_cast<uint8_t>(8u * hold_skip);
+    for (uint8_t e = 0; ok && e < edges; ++e) {
+        ok = sck_level(true, budget) && sck_level(false, budget);
+    }
+    if (ok && shape == HoldShape::into_transfer) {
+        ok = sck_level(true, budget);         // the next transfer has started
+    } else if (ok) {
+        ok = sck_gap(budget);                 // the last of them is over
+    }
+    if (!ok) hold_lost = static_cast<uint8_t>(hold_lost + 1u);
 }
 
 ISR(TCB0_INT_vect) {
