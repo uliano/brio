@@ -1198,7 +1198,7 @@ public:
         if (!st_.busy) {
             return false;
         }
-        ++st_.faults;
+        st_.faults = st_.faults + 1u;
         bind();
         return true;
     }
@@ -1261,7 +1261,7 @@ private:
     struct State {
         uint32_t control;          ///< SxCR's binding word, EN and the beat clear
         volatile void* data;       ///< SxPAR
-        uint32_t faults;
+        volatile uint32_t faults;  ///< abandon() runs in handlers too; read by the thread
         uint16_t in_flight;
         uint8_t irq_flags;         ///< what service() reports
         volatile bool busy;
@@ -1507,7 +1507,7 @@ public:
     static uint16_t taken() { return st_.taken; }
 
     static bool abandon() {
-        ++st_.faults;
+        st_.faults = st_.faults + 1u;
         bind();
         return true;
     }
@@ -1597,7 +1597,7 @@ private:
     struct State {
         uint32_t control;          ///< SxCR's binding word, EN and the beat clear
         volatile void* data;       ///< SxPAR
-        uint32_t faults;
+        volatile uint32_t faults;  ///< abandon() runs in handlers too; read by the thread
         /// Completions service_ring() counted since the binding: written
         /// by the handler, read by the consumer's HardwareRing.
         volatile uint32_t laps;
@@ -1716,7 +1716,7 @@ public:
             return true;
         }
         if ((f & DmaFlag::transfer_error) != 0u) {
-            ++st_.faults;
+            st_.faults = st_.faults + 1u;
         }
         st_.busy = false;
         return false;
@@ -1731,7 +1731,7 @@ public:
         }
         Stream::stop();
         Stream::regs().CR = st_.control;
-        ++st_.faults;
+        st_.faults = st_.faults + 1u;
         st_.busy = false;
         return true;
     }
@@ -1774,7 +1774,7 @@ private:
     /// One object, for the transmit engine's reason.
     struct State {
         uint32_t control;          ///< SxCR's binding word, the block's fields clear
-        uint32_t faults;
+        volatile uint32_t faults;  ///< abandon() runs in handlers too; read by the thread
         volatile bool busy;
     };
     static inline State st_{};

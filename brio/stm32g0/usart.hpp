@@ -1789,9 +1789,13 @@ public:
     /// to the FULL USARTs and to every LPUART, `has_fifo_mode` - EXCEPT
     /// under a wake on an address match, because 33.5.21 says "when the
     /// FIFO is enabled, waking up from low-power mode on address match
-    /// is only possible when mute mode is enabled", mute mode is the
-    /// resource's and not this task's, and without the FIFO that wake
-    /// needs nothing else.
+    /// is only possible when mute mode is enabled", and mute mode is the
+    /// resource's and not this task's. Without the FIFO, WUF rises on the
+    /// match with mute mode off - but the task's own RXNEIE is a wake-up
+    /// source of its own (33.5.21's first bullet), so the first frame of
+    /// ANY address ends a Stop; a program that wants its address alone to
+    /// wake it sets mute mode on the resource (both measured against a far
+    /// sender, docs/stm32g0/usart.md).
     static constexpr bool fifo_mode =
         opts.fifo.stated ? opts.fifo.on
                          : (S::has_fifo_mode &&

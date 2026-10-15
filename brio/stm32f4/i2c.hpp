@@ -1082,7 +1082,7 @@ public:
         }
         S::clear_errors(errs);
         if ((errs & I2cFlag::bus_error) != 0u) {
-            ++spurious_berr_;
+            spurious_berr_ = spurious_berr_ + 1u;
         }
         if (t_.phase == Phase::idle) {
             return false;
@@ -1676,7 +1676,8 @@ private:
     static inline I2cSpeed applied_ = I2cSpeed::standard_100k;
     static inline I2cHostConfig cfg_{};
     static inline uint32_t pclk_hz_ = 0;
-    static inline uint32_t spurious_berr_ = 0;
+    // Bumped by error_isr(), read from thread context: a volatile word.
+    static inline volatile uint32_t spurious_berr_ = 0;
     static inline I2cTiming table_[i2c_speed_count]{};
     static inline bool valid_[i2c_speed_count]{};
     static inline DelayRate delay_rate_{};

@@ -8863,6 +8863,101 @@ WakeLeg wake_leg(uint32_t rate, UsartClock kernel, UsartWakeSource src, uint8_t 
     return w;
 }
 
+/// THE TASK UNDER THE SAME WAKE: a `Uart` naming `wake_from_stop =
+/// address_match` with the FIFO left unstated - the default that option
+/// changes (the FIFO off: 33.5.21 "when the FIFO is enabled, waking up
+/// from low-power mode on address match is only possible when mute mode
+/// is enabled") - on the HSI16 kernel at 2400. The program states the
+/// address on the resource with the instance down (4-bit, 5), and mute
+/// mode beside it when `mute`; the far `send` then sends 0x7E..0x85: two
+/// data frames, then six address marks of which the last alone is 5's.
+/// WHICH FRAME WOKE IT is read off the Stop's length on the RTC: the far
+/// `send` leaves two bit times after each frame, so a frame starts every
+/// twelve bits (5.0 ms) and the eighth ends 7 x 5.0 = 35.0 ms after the
+/// first.
+constexpr UartOptions wake_task_opts{.kernel_clock = UsartClock::hsi16,
+                                     .wake_from_stop = UsartWakeSource::address_match};
+using WakeTask = Uart<1, u1_pins, 16, 16, NoDmaEngine, NoDmaEngine, wake_task_opts>;
+static_assert(!WakeTask::fifo_mode,
+              "the address-match wake's default is the one-register receiver");
+volatile bool wake_task_live = false;
+
+struct TaskWakeLeg {
+    WakeLeg w{};
+    bool fifo_off = false;     ///< CR1.FIFOEN read back clear after init()
+    uint8_t got[10] = {};
+};
+
+template <bool fitted = board_lse_fitted && (usart_exti_line(1) != 0xFF)>
+TaskWakeLeg task_wake_leg(bool mute) {
+    TaskWakeLeg t{};
+    if constexpr (fitted) {
+        link::Params a{};
+        a.cfg.rate = 2400;
+        a.count = 8;
+        a.value = 0x7E;
+        a.pattern = link::pattern_counting;
+        a.aux16 = 600;
+        a.ms = 3000;
+        if (!peer_act(link::Op::send, a)) {
+            return t;
+        }
+        link_task_down();
+        Nvic::disable(U1::irq());
+        wake_task_live = true;
+        bool ok = WakeTask::init(clock, 2400);
+        t.fifo_off = !U1::fifo();
+        U1::enable(false);
+        ok = ok && (mute ? U1::mute_mode({.wake = MuteWake::address_mark, .address_7bit = false,
+                                          .address = 0x5})
+                         : U1::character_match(0x05));
+        U1::enable(true);
+        uint32_t spins = 200000;
+        while ((U1::status() & UsartFlag::reack) == 0u && spins-- != 0u) {
+        }
+        ok = ok && (U1::status() & UsartFlag::reack) != 0u;
+        if (ok && mute) {
+            U1::request(UsartRequest::mute);
+        }
+        WakeTask::clear_errors();
+        t.w.armed = ok;
+        if (!ok) {
+            WakeTask::release();
+            wake_task_live = false;
+            return t;
+        }
+        for (uint32_t spins = 2'000'000u; !Serial::tx_idle() && spins != 0u; --spins) {
+        }
+        (void)Rtc::set_wakeup(RtcWakeupClock::ck_spre, 1, true);
+        Rtc::clear_flags(RtcFlag::wakeup);
+        feed();
+        rtc_backstops = 0;
+        const uint32_t w0 = rtc_wall();
+        Ticker::pause();
+        Pwr::enter(PwrMode::stop0);
+        Ticker::resume();
+        (void)SysClock::init();
+        t.w.slept = rtc_ms(rtc_delta(w0, rtc_wall()));
+        t.w.by_rtc = rtc_backstops != 0u;
+        Rtc::clear_wakeup();
+        feed();
+        // What the TASK received: its ring, read after the far send is
+        // certainly over (eight frames at 2400 are 33.3 ms).
+        wait_ms(200);
+        t.w.wuf = WakeTask::wakes();
+        uint8_t b = 0;
+        while (t.w.n < sizeof t.got && WakeTask::read_byte(b)) {
+            t.got[t.w.n++] = b;
+        }
+        t.w.first = t.w.n != 0u ? t.got[0] : 0u;
+        WakeTask::release();
+        wake_task_live = false;
+        link::Report r{};
+        (void)peer_report(r, 0);
+    }
+    return t;
+}
+
 void print_wake(const char* name, const WakeLeg& w) {
     print(serial, "  ", name, ": the Stop lasted ", w.slept, " ms, WUF seen ", w.wuf, " time(s), the RTC backstop ",
           w.by_rtc ? "fired" : "did not fire", ", ", w.n, " byte(s) after it, first ", hex(w.first), crlf);
@@ -8929,6 +9024,35 @@ void tu_stop_wake() {
               crlf);
         judge("THE WAY ROUND 2.2.4: on the same divided HSI a USART on the LSE kernel wakes the part, the four "
               "frames whole", div_lse.armed && div_lse.wuf != 0u && !div_lse.by_rtc && div_lse.n == 4u);
+        // THE TASK under the address-match wake, its FIFO left to the
+        // option's default: 0x82..0x85 sent, 5 the address.
+        // THE BOUND on which frame woke it: the two legs run one code path,
+        // so their Stops differ by where the wake fell - seven frame pitches,
+        // 35.0 ms, if the mute leg wakes on the eighth and the other on the
+        // first - read on the RTC at 3.9 ms a unit, one unit of quantization
+        // at each end of each Stop (+-7.8 ms on the difference) and the far
+        // chip's 600 ms counted in its own milliseconds (+-1 ms each): the
+        // difference lies in 25..45 ms, and 15 ms divides it from zero.
+        const TaskWakeLeg tm = task_wake_leg(true);
+        print_wake("the Uart task, address match + mute, 0x7E..0x85 at 2400 (5 is the last)", tm.w);
+        judge("a Uart NAMING the address-match wake comes up with its FIFO OFF (the option's default, "
+              "33.5.21)", tm.w.armed && tm.fifo_off);
+        judge("...and under mute mode the far chip's matching address alone wakes it out of Stop: the task "
+              "counts one wake, the RTC never fires, and its ring holds that address and nothing before it",
+              tm.w.armed && tm.w.wuf == 1u && !tm.w.by_rtc && tm.w.n == 1u && tm.w.first == 0x85u);
+        const TaskWakeLeg tn = task_wake_leg(false);
+        print_wake("the Uart task, address match WITHOUT mute, 0x7E..0x85 at 2400", tn.w);
+        print(serial, "    the task's ring:");
+        for (uint8_t i = 0; i < tn.w.n; ++i) {
+            print(serial, " ", hex(tn.got[i]));
+        }
+        const int32_t earlier = static_cast<int32_t>(tm.w.slept) - static_cast<int32_t>(tn.w.slept);
+        print(serial, crlf, "    without mute the Stop ended ", earlier, " ms earlier (seven frame pitches are 35.0 ms)",
+              crlf);
+        judge("WITHOUT MUTE MODE the address does not gate the wake: the FIRST frame's RXNE (RXNEIE is the "
+              "task's, a wake-up source of its own, 33.5.21) ends the Stop - 15 ms or more before the mute "
+              "leg's - and the ring takes all eight frames",
+              tn.w.armed && !tn.w.by_rtc && earlier >= 15 && tn.w.n == 8u && tn.got[0] == 0x7Eu);
         link_release();
     }
 }
@@ -9191,6 +9315,19 @@ bool usart1_wake() {
     return false;
 }
 
+/// Letter u's TASK legs: the Uart that names the address-match wake owns
+/// the vector while it is up.
+template <bool on = test_letter_carried('u')>
+bool usart1_wake_task() {
+    if constexpr (on) {
+        if (wake_task_live) {
+            (void)WakeTask::isr();
+            return true;
+        }
+    }
+    return false;
+}
+
 template <bool on = image_has_transport>
 bool dma23_transport(uint8_t m, bool& edge) {
     if constexpr (on) {
@@ -9311,7 +9448,7 @@ extern "C" void BRIO_STM32G0_USART2_HANDLER() {
 /// seconds later. The symptom looks like a fault and is not one: a
 /// HardFault breadcrumb stays EMPTY through it.
 extern "C" void USART1_IRQHandler() {
-    if (usart1_wake()) {
+    if (usart1_wake() || usart1_wake_task()) {
         return;
     }
     loop_irqs = loop_irqs + 1u;

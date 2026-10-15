@@ -1021,7 +1021,7 @@ private:
     /// Every wait's own count; only an operation copies it out.
     static inline uint32_t turns_ = 0;
     static inline uint32_t op_turns_ = 0;
-    static inline uint32_t last_isr_ecc_ = 0;
+    static inline volatile uint32_t last_isr_ecc_ = 0;   // isr()'s, read by the thread
 };
 
 // ---- the option bytes, read-only --------------------------------------------

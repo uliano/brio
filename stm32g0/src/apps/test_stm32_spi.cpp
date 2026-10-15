@@ -48,7 +48,7 @@
 // is commanded IN BAND over the bus under test, over
 // avrdx/src/apps/spi_link.hpp included by relative path - one source of
 // truth for the wire format, whatever the peer's architecture. Letters
-// n..r and t..x are this instrument's.
+// n..r and t..y are this instrument's.
 //
 // THE TWO CANNOT BE ON THE DESK AT ONCE (the four jumpers go to one end
 // or the other), so main() PROBES the self-link before any letter runs -
@@ -144,6 +144,13 @@
 //      the peer's serves, every BR code, this end's unit on the resource
 //      with the last two data frames written as one burst and CRCNEXT
 //      after them; a wrong CRC frame caught as report_crcerr
+//   y  THE SIMPLEX LINES, THE SOFTWARE SELECT AND prime() against the
+//      peer: a client with no select pad (SSM) deaf with SSI high and exact
+//      with it low, the host's single line out (BIDIMODE) and its
+//      receive-only clock (RXONLY), the client's single line out on MISO
+//      and its receive-only run, and every pair of modes applied inside an
+//      open select window - the slip prime() exists to prevent, counted by
+//      the F446's client into CPHA = 0 alone
 //   t  (OUTSIDE z) THE CRCNEXT WINDOW: the store walked away from the
 //      last data store one loop turn at a time, one frame in flight -
 //      the instrument behind w's burst (spi.md)
@@ -156,6 +163,7 @@
 // plus the console's two.
 //
 // build: boards = g0b1re,g071rb,g031k8
+// build: groups = abcdefghijklmnopqs,rtuvwxy
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -5058,6 +5066,557 @@ void tw_crc() {
 // The menu
 // ---------------------------------------------------------------------------
 
+// =============================================================================
+// y - THE SIMPLEX LINES, THE SOFTWARE SELECT AND prime() against the peer
+// =============================================================================
+//
+// Every other peer letter runs both data lines and frames on a select pad.
+// This one takes each of those away in turn and asks the FOREIGN end what
+// arrived: a client under SSM (no NSS pad, SSI the select), the host's
+// single line out (BIDIMODE + BIDIOE), the host's receive-only clock
+// (RXONLY), the client's single line out (BIDIMODE on MISO), the client's
+// receive-only run - and prime(), staged by its absence: the mode applied
+// INSIDE an open select window.
+//
+// What the wiring cannot carry, and why it is not here: a host RECEIVING
+// on its single line (BIDIMODE, BIDIOE clear) needs the far end to drive
+// THIS end's MOSI, and the peer's MOSI pad is an input on every op; a
+// client receiving on its single line needs the far HOST to drive MISO,
+// the host's input. Both are wire facts, not driver ones.
+
+namespace simplex {
+
+/// The client role WITHOUT AN NSS PAD: SPI1's three data pads alone, the
+/// select the software bit (SSM, and SSI driven by select()).
+constexpr SpiPins ssm_pins{
+    .sck = host_pins.sck, .miso = host_pins.miso, .mosi = host_pins.mosi, .nss = {}};
+using SsmClient = SpiClient<1, ssm_pins>;
+static_assert(!SsmClient::has_nss_pad);
+/// The peer's select wire, read as a plain input: the program's own
+/// knowledge of when it is addressed - what an SSM client stands for.
+using SelectWire = Pin<'A', 15>;
+
+/// The host_burst every client leg of this letter is clocked by: twelve
+/// frames at the peer's own clock / 32 (1.406 MHz on the F446's 45 MHz
+/// APB1), 20 us between frames, 40 ms of lead-in (spi_link.hpp).
+spilink::Params burst_params(uint8_t seed_a, uint8_t seed_b) {
+    spilink::Params a{};
+    a.count = 12;
+    a.ms = 300;
+    a.seed_a = seed_a;
+    a.seed_b = seed_b;
+    a.pattern = spilink::pattern_prbs;
+    a.aux8 = 40;
+    a.aux16 = 32;
+    a.cfg.apply = 1;
+    return a;
+}
+
+/// A run's spin budget for `ms` milliseconds of window (letter r's own).
+uint32_t budget(uint16_t ms) { return static_cast<uint32_t>(ms) * (Fast::hz / 24'000u); }
+
+/// Bytes of `got` that differ from the pattern stream `seed`.
+uint16_t mismatches(const uint8_t* got, uint16_t n, uint8_t pattern, uint8_t seed) {
+    uint16_t m = 0;
+    for (uint16_t i = 0; i < n; ++i) {
+        if (got[i] != spilink::pattern_value(pattern, seed, i)) {
+            ++m;
+        }
+    }
+    return m;
+}
+
+void print_bytes(const char* label, const uint8_t* p, uint16_t n) {
+    print(serial, label);
+    for (uint16_t i = 0; i < n && i < 16u; ++i) {
+        print(serial, " ", hex(p[i]));
+    }
+    print(serial, crlf);
+}
+
+template <typename E>
+const char* end_name(E e) {
+    return e == E::complete ? "complete" : e == E::closed ? "closed" : "stalled";
+}
+
+// ---- the client under SSM ---------------------------------------------------
+
+struct SsmLeg {
+    bool accepted = false;
+    bool fell = false;       ///< the peer's select was seen to fall on PA15
+    SsmClient::Run run{0, SsmClient::RunEnd::stalled};
+    bool reported = false;
+    spilink::Report r{};
+};
+
+/// One burst against the client with no select pad. `select_it`: drive SSI
+/// low once the wire's select is seen to fall (the program's software
+/// select), or leave it high for the whole burst (a deselected client the
+/// clock passes by).
+SsmLeg ssm_leg(bool select_it, uint8_t seed_a, uint8_t seed_b) {
+    SsmLeg L{};
+    const spilink::Params a = burst_params(seed_a, seed_b);
+    L.accepted = peer_act(Op::host_burst, a);
+    if (!L.accepted) {
+        return L;
+    }
+    peer_stop();
+    Nvic::disable(S1::irq());
+    (void)SsmClient::init(clock, {.mode = SpiMode::mode0,
+                                  .bits = SpiDataSize::bits8,
+                                  .lsb_first = false,
+                                  .nss = SpiNss::software,
+                                  .drive_output = true});
+    // init() leaves a software-NSS client SELECTED (SSI low, the role's
+    // default); the window is this program's, so it opens deselected.
+    SsmClient::select(false);
+    SelectWire::input();
+    const uint16_t n = a.count;
+    spilink::Stream out(a.pattern, a.seed_b);
+    for (uint16_t i = 0; i < n; ++i) {
+        cout_[i] = out.next();
+        crx[i] = 0xEE;
+    }
+    SsmClient::enable();
+    const uint32_t m0 = Ticker::millis();
+    while (Ticker::millis() - m0 < a.aux8 + 100u) {
+        if (!SelectWire::read()) {
+            L.fell = true;
+            break;
+        }
+    }
+    if (select_it && L.fell) {
+        SsmClient::select(true);
+    }
+    // The run has no pad to close it: it ends on its count, or on the
+    // budget when no frame comes.
+    L.run = SsmClient::exchange(std::span<const uint8_t>(cout_, n), std::span<uint8_t>(crx, n),
+                                budget(a.ms));
+    SsmClient::select(false);
+    (void)SsmClient::disable();
+    SsmClient::release();
+    SelectWire::release();
+    L.reported = peer_report(L.r);
+    return L;
+}
+
+// ---- the host's simplex shapes, through the resource ------------------------
+
+/// The host's configuration at `rate` (prime() writes it whole), then the
+/// direction the leg wants: SpiHost's Request is full duplex by
+/// construction, so a simplex window is the resource's.
+void host_direction(SpiDirection d, SpiClock rate) {
+    Host::prime(SpiMode::mode0, rate);
+    (void)S1::disable();
+    (void)S1::direction(d);
+}
+
+/// BIDIMODE + BIDIOE: `n` frames out on MOSI alone, polled on TXE, then
+/// 35.5.9's disable (FTLVL, then BSY) so the last frame is through
+/// before the select rises. Returns the frames written; `rx_left` the
+/// RXFIFO level before the disable drains it.
+uint16_t host_bidi_out(const uint8_t* tx, uint16_t n, SpiClock rate, uint8_t& rx_left,
+                       bool& drained) {
+    host_direction(SpiDirection::bidi_transmit, rate);
+    S1::enable();
+    CsPin::clear();
+    link_hold();
+    uint16_t w = 0;
+    for (; w < n; ++w) {
+        uint32_t spins = 100'000u;
+        while (!S1::txe() && spins-- != 0u) {
+        }
+        if (spins == UINT32_MAX) {
+            break;
+        }
+        S1::data_byte(tx[w]);
+    }
+    uint32_t spins = 100'000u;
+    while (S1::tx_level() != 0u && spins-- != 0u) {
+    }
+    rx_left = S1::rx_level();
+    drained = S1::disable();
+    link_hold();
+    CsPin::set();
+    return w;
+}
+
+/// RXONLY: SPE starts a clock that only SPE stops (35.5.9's receive-only
+/// procedure). `n` frames read on RXNE, then SPE cleared at once - inside
+/// frame n + 1, between its first sampling edge and its last, the window
+/// the chapter names: a frame at PCLK/16 is 128 core cycles and the read
+/// plus the store are a few tens. Returns the frames read.
+uint16_t host_rx_only(uint8_t* rx, uint16_t n, SpiClock rate, bool& stopped) {
+    host_direction(SpiDirection::receive_only, rate);
+    CsPin::clear();
+    link_hold();
+    S1::enable();
+    uint16_t got = 0;
+    for (; got < n; ++got) {
+        uint32_t spins = 100'000u;
+        while (!S1::rxne() && spins-- != 0u) {
+        }
+        if (spins == UINT32_MAX) {
+            break;
+        }
+        rx[got] = S1::data_byte();
+    }
+    stopped = S1::disable_receive_only();
+    link_hold();
+    CsPin::set();
+    return got;
+}
+
+// ---- the client's simplex shapes ---------------------------------------------
+
+/// SPI1 as a client on its own four pads: letter r's PeerClient.
+using Client1 = PeerClient;
+
+struct ClientLeg {
+    bool accepted = false;
+    Client1::Run run{0, Client1::RunEnd::stalled};
+    bool reported = false;
+    spilink::Report r{};
+};
+
+/// One burst against SPI1 as a client with `dir`: bidi_transmit answers
+/// on MISO alone (answer(), nothing to read), receive_only listens with
+/// MISO dark (receive()).
+ClientLeg client_leg(SpiDirection dir, uint8_t seed_a, uint8_t seed_b) {
+    ClientLeg L{};
+    const spilink::Params a = burst_params(seed_a, seed_b);
+    L.accepted = peer_act(Op::host_burst, a);
+    if (!L.accepted) {
+        return L;
+    }
+    peer_stop();
+    Nvic::disable(S1::irq());
+    const bool talks = dir == SpiDirection::bidi_transmit;
+    (void)Client1::init(clock, {.mode = SpiMode::mode0,
+                                .bits = SpiDataSize::bits8,
+                                .lsb_first = false,
+                                .nss = SpiNss::hardware_input,
+                                .direction = dir,
+                                .drive_output = talks});
+    const uint16_t n = a.count;
+    spilink::Stream out(a.pattern, a.seed_b);
+    for (uint16_t i = 0; i < n; ++i) {
+        cout_[i] = out.next();
+        crx[i] = 0xEE;
+    }
+    Client1::enable();
+    if (talks) {
+        L.run = Client1::answer(std::span<const uint8_t>(cout_, n), budget(a.ms));
+    } else {
+        L.run = Client1::receive(std::span<uint8_t>(crx, n), budget(a.ms));
+    }
+    (void)Client1::disable();
+    Client1::release();
+    L.reported = peer_report(L.r);
+    return L;
+}
+
+// ---- prime(), by its absence ----------------------------------------------------
+
+/// The protocol window of link_xfer() with ONE difference: the select falls
+/// BEFORE the request's mode is applied, so start() flips CPOL inside the
+/// open window - the order prime() exists to prevent.
+bool link_xfer_unprimed(const uint8_t* tx, uint8_t* rx, uint16_t n, SpiClock rate, SpiMode mode) {
+    CsPin::clear();
+    link_hold();
+    Host::Request r{};
+    r.cs = {};
+    r.tx = lend<Lease::reply>(tx);
+    r.rx = lend<Lease::reply>(rx);
+    r.len = n;
+    r.clock = rate;
+    r.mode = mode;
+    r.bits = SpiDataSize::bits8;
+    r.polled = true;
+    const bool done = Host::start(r);
+    link_hold();
+    CsPin::set();
+    return done;
+}
+
+/// One exchange at mode `next` (the client exact from the first frame,
+/// regime_buffer_wait), the host primed at mode `prev` with the select
+/// high first, then the window primed or not.
+bool mode_exchange(uint8_t prev, uint8_t next, bool primed, Verify& v, spilink::Report& r) {
+    Exchange e{};
+    e.cfg.mode = next;
+    e.host_mode = static_cast<SpiMode>(next);
+    e.seed_a = 0x6E;
+    e.seed_b = 0xA1;
+    spilink::Params a{};
+    a.cfg = e.cfg;
+    a.count = e.count;
+    a.ms = e.ms;
+    a.seed_a = e.seed_a;
+    a.seed_b = e.seed_b;
+    a.pattern = e.pattern;
+    if (!peer_act(Op::exchange, a)) {
+        return false;
+    }
+    spilink::Stream out(e.pattern, e.seed_a);
+    for (uint8_t i = 0; i < max_exchange; ++i) {
+        xtx[i] = i < e.count ? out.next() : 0u;
+        xrx[i] = 0xEE;
+    }
+    settle();
+    Host::prime(static_cast<SpiMode>(prev), link_clock);
+    settle();
+    if (primed) {
+        (void)link_xfer(xtx, xrx, e.count, link_clock, e.host_mode);
+    } else {
+        (void)link_xfer_unprimed(xtx, xrx, e.count, link_clock, e.host_mode);
+    }
+    (void)link_command_mode();
+    const bool rep = peer_report(r);
+    v = verify_rx(e);
+    return rep;
+}
+
+}   // namespace simplex
+
+void ty_simplex() {
+    using namespace simplex;
+    if (!need_peer()) {
+        return;
+    }
+
+    // ---- 1. the client under SSM ------------------------------------------------
+    print(serial, "  1. THE CLIENT WITH NO SELECT PAD (SSM): the peer's 12-frame host_burst "
+                  "at its /32",
+          crlf);
+    const SsmLeg deaf = ssm_leg(false, 0x35, 0x9C);
+    print(serial, "    SSI left HIGH: the wire's select fell=", deaf.fell, ", the run read ",
+          deaf.run.count, " frames and ended ", end_name(deaf.run.end),
+          "; the peer as host read ", deaf.r.count, " frames, mism=", deaf.r.mism, crlf);
+    if (deaf.r.mism != 0u) {
+        print(serial, "    what the peer read off MISO from the deselected client: first "
+                      "mismatch at ", deaf.r.idx, " got ", hex(deaf.r.got), " exp ",
+              hex(deaf.r.exp), crlf);
+    }
+    bench.verdict("a client under SSM with SSI HIGH is deaf to a clock the wire carries: "
+                  "the peer clocked its burst and not one frame arrived (the run without a "
+                  "pad ends on its budget)",
+                  deaf.accepted && deaf.fell && deaf.run.count == 0u &&
+                      deaf.run.end == SsmClient::RunEnd::stalled && deaf.reported &&
+                      deaf.r.count == 12u);
+    const SsmLeg sel = ssm_leg(true, 0x35, 0x9C);
+    const uint16_t sel_mism = mismatches(crx, sel.run.count, spilink::pattern_prbs, 0x35);
+    print(serial, "    SSI driven low after the wire's select fell: the run read ", sel.run.count,
+          " frames, mism=", sel_mism, ", ended ", end_name(sel.run.end),
+          "; the peer as host read ", sel.r.count, " frames, mism=", sel.r.mism, " (first idx ",
+          sel.r.idx, " got ", hex(sel.r.got), " exp ", hex(sel.r.exp), ")", crlf);
+    bench.verdict("selected by SOFTWARE (SSI low), the client with no select pad receives "
+                  "the foreign host's burst byte-exact and its run ends COMPLETE on its count",
+                  sel.accepted && sel.fell && sel.run.count == 12u && sel_mism == 0u &&
+                      sel.run.end == SsmClient::RunEnd::complete);
+    bench.verdict("...and the foreign host read its answer stream byte-exact from the first "
+                  "frame - the TXFIFO filled before SSI fell",
+                  sel.reported && sel.r.count == 12u && sel.r.mism == 0u);
+    (void)link_command_mode();
+
+    // ---- 2. the host's single line out -----------------------------------------------
+    print(serial, "  2. THE HOST'S SINGLE LINE OUT (BIDIMODE + BIDIOE), the peer listening "
+                  "with its answer line dark (spare_receive_only)",
+          crlf);
+    static constexpr SpiClock bidi_rates[] = {SpiClock::div64, SpiClock::div16};
+    bool bidi_ok = true;
+    bool bidi_quiet = true;
+    for (const SpiClock c : bidi_rates) {
+        constexpr uint16_t n = 32;
+        spilink::Params a{};
+        a.cfg = spilink::Cfg{.apply = 1, .mode = 0, .dord = 0,
+                             .regime = spilink::regime_buffer_wait};
+        a.count = n;
+        a.ms = 400;
+        a.seed_a = 0x47;
+        a.seed_b = 0x11;
+        a.pattern = spilink::pattern_prbs;
+        a.spare = spilink::spare_receive_only;
+        const bool acc = peer_act(Op::exchange, a);
+        spilink::Stream out(a.pattern, a.seed_a);
+        for (uint16_t i = 0; i < n; ++i) {
+            xtx[i] = out.next();
+        }
+        settle();
+        uint8_t rx_left = 0xFF;
+        bool drained = false;
+        const uint16_t w = acc ? host_bidi_out(xtx, n, c, rx_left, drained) : 0u;
+        (void)link_command_mode();
+        spilink::Report r{};
+        const bool rep = acc && peer_report(r);
+        const bool ok = rep && w == n && drained && r.count == n && r.mism == 0u &&
+                        (r.flags & spilink::report_extended) != 0u;
+        print(serial, "    PCLK/", spi_division(c), " = ", Host::sck_hz(c) / 1000u, " kHz: ", w,
+              " frames written, the disable ", drained ? "clean" : "TIMED OUT",
+              ", RXFIFO level before it ", rx_left, "; the peer heard ", r.count, " mism=",
+              r.mism, " flags=", hex(r.flags), ok ? "" : "  <-- NOT exact", crlf);
+        bidi_ok = bidi_ok && ok;
+        bidi_quiet = bidi_quiet && rx_left == 0u;
+    }
+    bench.verdict("the host's SINGLE LINE OUT carries 32 frames to a foreign client "
+                  "byte-exact at PCLK/64 and PCLK/16, and 35.5.9's disable (FTLVL, then BSY) "
+                  "lets the last one through before the select rises",
+                  bidi_ok);
+    bench.verdict("...and with BIDIOE set the receiver takes nothing: the RXFIFO is empty "
+                  "after every window",
+                  bidi_quiet);
+
+    // ---- 3. the host's receive-only clock ------------------------------------------------
+    print(serial, "  3. THE HOST'S RECEIVE-ONLY CLOCK (RXONLY), the peer answering alone "
+                  "(spare_answer_only)",
+          crlf);
+    static constexpr SpiClock rxo_rates[] = {SpiClock::div64, SpiClock::div16};
+    bool rxo_ok = true;
+    for (const SpiClock c : rxo_rates) {
+        constexpr uint16_t n = 16;
+        spilink::Params a{};
+        a.cfg = spilink::Cfg{.apply = 1, .mode = 0, .dord = 0,
+                             .regime = spilink::regime_buffer_wait};
+        a.count = 24;   // answers past the host's 16: the frame it clocks while it stops
+        a.ms = 400;
+        a.seed_a = 0x00;
+        a.seed_b = 0xC3;
+        a.pattern = spilink::pattern_prbs;
+        a.spare = spilink::spare_answer_only;
+        const bool acc = peer_act(Op::exchange, a);
+        for (uint16_t i = 0; i < max_exchange; ++i) {
+            xrx[i] = 0xEE;
+        }
+        settle();
+        bool stopped = false;
+        const uint16_t got = acc ? host_rx_only(xrx, n, c, stopped) : 0u;
+        (void)link_command_mode();
+        spilink::Report r{};
+        const bool rep = acc && peer_report(r);
+        const uint16_t m = mismatches(xrx, got, a.pattern, a.seed_b);
+        const bool ok = rep && got == n && m == 0u && stopped;
+        print(serial, "    PCLK/", spi_division(c), " = ", Host::sck_hz(c) / 1000u, " kHz: read ",
+              got, " frames, mism=", m, ", SPE cleared and BSY ", stopped ? "fell" : "STOOD",
+              "; the peer loaded ", r.count, " answers", ok ? "" : "  <-- NOT exact", crlf);
+        if (!ok) {
+            print_bytes("      read:", xrx, got);
+        }
+        rxo_ok = rxo_ok && ok;
+    }
+    bench.verdict("the host's RECEIVE-ONLY clock reads a foreign client's answer stream "
+                  "byte-exact at PCLK/64 and PCLK/16, and clearing SPE inside the next frame "
+                  "stops it (35.5.9's receive-only procedure)",
+                  rxo_ok);
+
+    // ---- 4. the client's single line out, 5. its receive-only run ----------------------
+    print(serial, "  4. THE CLIENT'S SINGLE LINE OUT (BIDIMODE + BIDIOE on MISO) under the "
+                  "peer's host_burst",
+          crlf);
+    const ClientLeg bo = client_leg(SpiDirection::bidi_transmit, 0x29, 0x6B);
+    print(serial, "    answer() wrote ", bo.run.count, " answers, ended ",
+          end_name(bo.run.end),
+          "; the peer as host read ", bo.r.count, " mism=", bo.r.mism, " (first idx ", bo.r.idx,
+          " got ", hex(bo.r.got), " exp ", hex(bo.r.exp), ")", crlf);
+    bench.verdict("a CLIENT on its single line (BIDIMODE, BIDIOE set) answers a foreign "
+                  "host on MISO byte-exact from the first frame, and its run ends when the "
+                  "select rises",
+                  bo.accepted && bo.run.count == 12u && bo.run.end == Client1::RunEnd::closed &&
+                      bo.reported && bo.r.count == 12u && bo.r.mism == 0u);
+    print(serial, "  5. THE CLIENT'S RECEIVE-ONLY RUN (RXONLY, MISO dark) under the peer's "
+                  "host_burst",
+          crlf);
+    const ClientLeg ro = client_leg(SpiDirection::receive_only, 0x5A, 0x00);
+    const uint16_t ro_mism = mismatches(crx, ro.run.count, spilink::pattern_prbs, 0x5A);
+    print(serial, "    receive() read ", ro.run.count, " frames, mism=", ro_mism, ", ended ",
+          end_name(ro.run.end),
+          "; the peer as host clocked ", ro.r.count, crlf);
+    bench.verdict("a CLIENT in RXONLY receives a foreign host's burst byte-exact with its "
+                  "answer line never driven",
+                  ro.accepted && ro.run.count == 12u && ro_mism == 0u &&
+                      ro.run.end == Client1::RunEnd::complete && ro.reported &&
+                      ro.r.count == 12u);
+    (void)link_command_mode();
+
+    // ---- 6. prime(), by its absence ------------------------------------------------------
+    // Every ordered pair of modes: the host left at the first by a prime()
+    // with the select HIGH, then a window at the second with the select
+    // falling BEFORE start() applies it. A pair that keeps CPOL moves no
+    // edge at all. A pair that flips it puts one edge inside the window,
+    // and the F446's client divides those by the NEW mode's phase: landing
+    // in CPHA = 0 (modes 0 and 2) the flip is counted as one more bit - the
+    // client's frames arrive shifted one place right and the host reads
+    // the client one place early, both from the first frame - and landing
+    // in CPHA = 1 (modes 1 and 3) it is not counted at all. A one-bit slip
+    // is read off
+    // the first mismatching frame at each end: the low seven bits of what
+    // the client got are the expected frame shifted right, and the top
+    // seven of what the host got are the expected one shifted left (the
+    // bit that came in at the far end is the wire's, and not judged).
+    print(serial, "  6. prime() BY ITS ABSENCE: every ordered pair of modes, the select "
+                  "falling before the second is applied",
+          crlf);
+    uint8_t slips_as_said = 0, exact_as_said = 0;
+    for (uint8_t prev = 0; prev < 4u; ++prev) {
+        for (uint8_t next = 0; next < 4u; ++next) {
+            if (prev == next) {
+                continue;
+            }
+            Verify v{};
+            spilink::Report r{};
+            const bool ran = mode_exchange(prev, next, false, v, r);
+            const bool flips = ((prev ^ next) & 2u) != 0u;
+            const bool lands_cpha0 = flips && (next & 1u) == 0u;
+            const bool slip = ran && r.count == 8u && r.mism != 0u && r.idx == 0u &&
+                              v.mism != 0u && v.idx == 0u &&
+                              (r.got & 0x7Fu) == (r.exp >> 1) &&
+                              (v.got >> 1) == (v.exp & 0x7Fu);
+            const bool exact = ran && r.count == 8u && r.mism == 0u && v.mism == 0u;
+            if (lands_cpha0 ? slip : exact) {
+                if (lands_cpha0) {
+                    ++slips_as_said;
+                } else {
+                    ++exact_as_said;
+                }
+            } else {
+                print(serial, "    mode ", prev, " -> ", next, ": host mism=", v.mism, " (idx ",
+                      v.idx, " got ", hex(v.got), " exp ", hex(v.exp), "), client count=",
+                      r.count, " mism=", r.mism, " (idx ", r.idx, " got ", hex(r.got), " exp ",
+                      hex(r.exp), ")  <-- not as the phase says", crlf);
+            }
+        }
+    }
+    print(serial, "    unprimed: ", slips_as_said, " of the 4 CPOL flips into CPHA = 0 "
+                  "slipped one bit at both ends, ", exact_as_said, " of the 8 other pairs (4 "
+                  "flips into CPHA = 1, 4 with no flip) stayed exact",
+          crlf);
+    bench.verdict("UNPRIMED, a CPOL flip with the select already low is ONE MORE BIT to a "
+                  "client landing in CPHA = 0 (modes 0 and 2): every such pair slips exactly "
+                  "one place at both ends from the first frame",
+                  slips_as_said == 4u);
+    bench.verdict("...while the same flip into CPHA = 1 (modes 1 and 3) is not counted, and "
+                  "a pair that keeps CPOL moves no edge: those eight stay exact",
+                  exact_as_said == 8u);
+    uint8_t primed_ok = 0;
+    static constexpr uint8_t primed_pairs[][2] = {{0, 2}, {3, 0}, {1, 2}, {2, 0}};
+    for (const auto& pr : primed_pairs) {
+        Verify v{};
+        spilink::Report r{};
+        if (mode_exchange(pr[0], pr[1], true, v, r) && r.count == 8u && r.mism == 0u &&
+            v.mism == 0u) {
+            ++primed_ok;
+        } else {
+            print(serial, "    primed ", pr[0], " -> ", pr[1], ": host mism=", v.mism,
+                  ", client count=", r.count, " mism=", r.mism, crlf);
+        }
+    }
+    bench.verdict("PRIMED (the mode applied with the select high), the four slipping pairs "
+                  "are byte-exact both ways",
+                  primed_ok == 4u);
+    (void)link_command_mode();
+    bench.verdict("the command channel is back after the simplex shapes", command(Op::ping));
+}
+
+
 void banner() {
     print(serial, crlf, "test_stm32_spi - SPI/I2S on a G0 Nucleo", crlf);
     if (self_link) {
@@ -5215,6 +5774,8 @@ int main() {
     bench.letter('v', "RECEIVE-ONLY and ODD COUNTS against the peer: the transmit-only "
                       "shapes witnessed", tv_receive_only);
     bench.letter('w', "THE CRC against the peer's unit, and a wrong CRC caught", tw_crc);
+    bench.letter('y', "THE SIMPLEX LINES, THE SOFTWARE SELECT AND prime() against the peer",
+                 ty_simplex);
     bench.letter('t', "THE CRCNEXT WINDOW against the peer: the walk, no verdict",
                  tt_crcnext_walk, false);
     bench.letter('x', "SLIP STATISTICS against the peer: each mode ten times, no "

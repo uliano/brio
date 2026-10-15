@@ -96,6 +96,11 @@
 //      on the far send_mpcm with this USART's 4-bit address on 8- and
 //      9-bit words, and ES0298 2.13.3 staged with its controls - after
 //      a software mute and after the hardware's own
+//   u  set_baud() at run time: a task brought up at 115200 and moved to
+//      9600, 921600 and 2 Mbaud by set_baud() alone, the far send received
+//      whole and its own frames timed by the far chip; TCIE's vector
+//      between one and two frames after the last write; LBDIE's vector on
+//      a far break in LIN mode
 //
 // build: boards = f446re
 // build: monitor_speed = 115200
@@ -943,7 +948,7 @@ using LinkIrq8 = Uart<1, link_pins, 2048, 64, NoDmaEngine, NoDmaEngine, link_opt
 using LinkDma8 = Uart<1, link_pins, 2048, 64, NoDmaEngine, LinkRxEngine, link_opts8>;
 /// Who owns USART1's vector: 0 nobody (the resource, polled), 1 LinkIrq,
 /// 2 LinkDma, 3 LinkIrq8, 4 LinkDma8; letter 8's rings 5 LinkRing, 6
-/// LinkRing8, 7 LinkRingLow, 8 LinkRingLow8.
+/// LinkRing8, 7 LinkRingLow, 8 LinkRingLow8; letter u's probe 9.
 volatile uint8_t link_owner = 0;
 
 void link_rings_down(uint8_t o);
@@ -3403,6 +3408,201 @@ void ts_mute() {
     link_release();
 }
 
+// ---------------------------------------------------------------------------
+// u - set_baud at run time, and the TC and LBD interrupt enables
+// ---------------------------------------------------------------------------
+//
+// set_baud() moves a running Uart task to another rate with the clock
+// standing still. Each rung brings the task up at 115200 - a rate the far
+// chip is NOT speaking - and moves it with set_baud() alone, then judges
+// both directions by the far chip: its `send` of 64 counting frames
+// received whole and in order through the task's ring, and n frames the
+// task sends gapless timed on the far ruler (the calibrate op, letter 2's
+// bound). Then two interrupt enables no transport arms: TCIE, its vector
+// timed against the last frame on the wire, and LBDIE, its vector on a
+// break from the far engine in LIN mode. (CTSIE needs a CTS wire, and the
+// link has none.)
+
+constexpr uint8_t owner_probe = 9;   ///< USART1's vector is this letter's
+volatile uint16_t probe_tc = 0;
+volatile uint16_t probe_lbd = 0;
+volatile uint32_t probe_tc_at = 0;
+
+/// The letter's body of USART1's vector: each enabled source counted and
+/// consumed by disarming it (TC) or clearing it (LBD).
+void probe_usart1() {
+    const uint32_t st = U1::status();
+    const uint32_t cr1 = U1::regs().CR1;
+    if ((cr1 & USART_CR1_TCIE) != 0u && (st & UsartFlag::tc) != 0u) {
+        probe_tc_at = CycleCounter::now();
+        probe_tc = static_cast<uint16_t>(probe_tc + 1u);
+        U1::tc_interrupt(false);
+    }
+    if ((U1::regs().CR2 & USART_CR2_LBDIE) != 0u && (st & UsartFlag::lbd) != 0u) {
+        probe_lbd = static_cast<uint16_t>(probe_lbd + 1u);
+        U1::clear_flags(UsartFlag::lbd);
+    }
+}
+
+void tu_baud_irqs() {
+    if (!ensure_link()) {
+        bench.verdict("the peer is reachable", false);
+        link_release();
+        return;
+    }
+    const int32_t base = clock_baseline();
+    static constexpr uint32_t rungs[] = {9600, 921'600, 2'000'000};
+    for (const uint32_t rate : rungs) {
+        link::Cfg c{};
+        c.rate = rate;
+        // a. The far `send` into the task, moved there by set_baud().
+        {
+            link::Params a{};
+            a.cfg = c;
+            a.count = 64;
+            a.value = 0;
+            a.pattern = link::pattern_counting;
+            a.aux16 = 100;   // ms after the ack: the task's bring-up fits in it
+            a.ms = 2000;
+            const bool acted = peer_act(link::Op::send, a);
+            link_task_down();
+            link_owner = 1;
+            const bool up = acted && LinkIrq::init(clock, 115'200);
+            const bool moved = up && LinkIrq::set_baud(SysClock::hz, rate);
+            uint8_t ore = 0;
+            const uint32_t got = moved ? task_receive<LinkIrq>(64, 100u + bound_ms(rate, 64) + 200u, ore) : 0u;
+            const uint32_t now_baud = LinkIrq::actual_baud(u1_hz);
+            link_task_down();
+            link::Report r{};
+            (void)peer_report(r, 0);
+            print(serial, "  ", rate, ": the task up at 115200, set_baud() -> ", now_baud, " by its register; ",
+                  got, " of 64 of the far send in order, ORE ", ore, crlf);
+            judge(num(rate), " baud: a task brought up at 115200 and moved by set_baud() alone receives the far "
+                             "chip's 64 frames whole and in order",
+                  moved && got == 64u);
+        }
+        // b. The task's own frames, timed by the far receiver.
+        {
+            const uint16_t n = span_frames(rate);
+            link::Params a{};
+            a.cfg = c;
+            a.count = n;
+            a.ms = bound_ms(rate, n);
+            const bool acted = peer_act(link::Op::calibrate, a);
+            link_task_down();
+            link_owner = 1;
+            const bool up = acted && LinkIrq::init(clock, 115'200);
+            const bool moved = up && LinkIrq::set_baud(SysClock::hz, rate);
+            if (moved) {
+                wait_for_peer_window();
+                for (uint16_t i = 0; i < n; ++i) {
+                    const uint32_t t0 = Ticker::millis();
+                    while (!LinkIrq::write_byte(static_cast<uint8_t>(0x55u + i)) && Ticker::millis() - t0 < 50u) {
+                    }
+                }
+                const uint32_t t0 = Ticker::millis();
+                while (!LinkIrq::tx_idle() && Ticker::millis() - t0 < 100u) {
+                }
+            }
+            link_task_down();
+            link::Report r{};
+            const bool have = peer_report(r, 5);
+            const int32_t ppm = static_cast<int16_t>(r.aux16);
+            const int32_t expect = base + divisor_ppm(rate);
+            print(serial, "  ", rate, ": ", n, " frames from the task, the far chip counted ", r.count, " (ferr ",
+                  r.ferr, ") and times them ");
+            print_ppm(ppm);
+            print(serial, " against the divisor's ", divisor_ppm(rate), " and the clocks' ", base, crlf);
+            judge(num(rate), " baud: the task's transmitter after set_baud(), gapless and on the rate - the far "
+                             "chip counts every frame and times them within 200 ppm of the divisor's",
+                  moved && have && r.count == n && r.ferr == 0u && r.ovf == 0u && near(ppm, expect, 200));
+        }
+    }
+
+    // c. TCIE: sixteen frames written gapless at 115200, TCIE armed after
+    //    the last write. TXE was set at that write, so the shifter held the
+    //    fifteenth (started up to one frame earlier) and TDR takes the
+    //    sixteenth: TC rises between ONE and TWO frame times after the
+    //    write (86.8 and 173.6 us), and the vector lands a microsecond
+    //    after it at most (its entry and the stamp, well under 180 cycles).
+    {
+        link::Cfg c{};
+        c.rate = 115'200;
+        link::Params a{};
+        a.cfg = c;
+        a.count = 16;
+        a.ms = bound_ms(c.rate, 16);
+        const bool acted = peer_act(link::Op::calibrate, a);
+        const bool up = acted && dut_link(c);
+        uint32_t last_write = 0;
+        if (up) {
+            wait_for_peer_window();
+            probe_tc = 0;
+            link_owner = owner_probe;
+            Nvic::enable(U1::irq);
+            for (uint16_t i = 0; i < 16u; ++i) {
+                const uint32_t t0 = Ticker::millis();
+                while (!U1::tx_empty() && Ticker::millis() - t0 < 5u) {
+                }
+                U1::write_word(static_cast<uint16_t>(0x55u + i));
+            }
+            last_write = CycleCounter::now();
+            U1::tc_interrupt(true);
+            const uint32_t t0 = Ticker::millis();
+            while (probe_tc == 0u && Ticker::millis() - t0 < 10u) {
+            }
+            Nvic::disable(U1::irq);
+            U1::tc_interrupt(false);
+            link_owner = 0;
+        }
+        link::Report r{};
+        const bool have = peer_report(r, 5);
+        const uint32_t after_ns = static_cast<uint32_t>(
+            (static_cast<uint64_t>(probe_tc_at - last_write) * 1'000'000'000ull) / SysClock::hz);
+        print(serial, "  TCIE: the vector ran ", probe_tc, " time(s), ", after_ns / 1000u, ".",
+              (after_ns % 1000u) / 100u, " us after the last write; the far chip counted ", r.count, crlf);
+        judge("TCIE: the TRANSMISSION-COMPLETE vector runs once, between one and two frame times after the last "
+              "write (86.8..174.6 us at 115200) - the last frame through, the far chip counting all sixteen",
+              up && probe_tc == 1u && after_ns >= 86'800u && after_ns <= 174'600u && have && r.count == 16u);
+    }
+
+    // d. LBDIE: one 13-bit break from the far engine at 19200, LIN mode on
+    //    with LBDL at eleven bits (letter 0's detection), the flag counted
+    //    by the vector alone.
+    {
+        link::Params a{};
+        a.cfg.rate = 19'200;
+        a.count = 13;
+        a.ms = 200;
+        link::Cfg c{};
+        c.rate = 19'200;
+        const bool acted = peer_act(link::Op::brk, a);
+        const bool up = acted && dut_link(c, true, true);
+        if (up) {
+            probe_lbd = 0;
+            link_owner = owner_probe;
+            U1::break_interrupt(true);
+            Nvic::enable(U1::irq);
+            const uint32_t t0 = Ticker::millis();
+            while (probe_lbd == 0u && Ticker::millis() - t0 < 30u) {
+            }
+            wait_ms(5);
+            Nvic::disable(U1::irq);
+            U1::break_interrupt(false);
+            link_owner = 0;
+        }
+        const bool flag_left = (U1::status() & UsartFlag::lbd) != 0u;
+        link::Report r{};
+        const bool have = peer_report(r, 0);
+        print(serial, "  LBDIE: the far break of 13 bits, the vector ran ", probe_lbd, " time(s), LBD left standing ",
+              flag_left, crlf);
+        judge("LBDIE: the far chip's break reaches the vector ONCE in LIN mode, and the vector's clear leaves no "
+              "LBD standing",
+              up && have && r.count == 13u && probe_lbd == 1u && !flag_left);
+    }
+    link_release();
+}
+
 
 void banner() {
     print(serial, crlf, "test_stm32f4_serial - the transport on USART6's single-wire loop", crlf);
@@ -3415,6 +3615,10 @@ extern "C" void USART2_IRQHandler() { (void)Serial::isr(); }
 extern "C" void USART1_IRQHandler() {
     const uint8_t o = link_owner;
     bool edge = false;
+    if (o == owner_probe) {
+        probe_usart1();
+        return;
+    }
     if (o == 1u) {
         edge = LinkIrq::isr();
     } else if (o == 2u) {
@@ -3528,6 +3732,7 @@ int main() {
     bench.second_letter('0', "LIN both ways: the break at LBDL's two lengths, with LIN off, sent and timed", t0_lin);
     bench.second_letter('r', "IrDA SIR both ways against the far ST ENDEC; RS-485 refused (no DE)", tr_irda);
     bench.second_letter('s', "mute and the multiprocessor wake from a foreign sender; ES0298 2.13.3", ts_mute);
+    bench.second_letter('u', "set_baud() at run time, and the TC and LBD interrupt enables", tu_baud_irqs);
 
     if (serial_ok) {
         print(serial, crlf, "boot: clk=", clock_ok ? "PLL" : "FAILED", " tick=",

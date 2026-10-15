@@ -2203,7 +2203,7 @@ public:
             // transfer must go on. Counted, never reported.
             if ((p & I2cFlag::bus_error) != 0u) {
                 S::clear(I2cClear::bus_error);
-                ++berr_count_;
+                berr_count_ = static_cast<uint16_t>(berr_count_ + 1u);
             }
             if ((p & I2cFlag::arb_lost) != 0u) {
                 // The bus is no longer ours: the silicon has released the
@@ -2595,7 +2595,9 @@ private:
     static inline bool rx_dma_ = false;   ///< and its read half
     static inline Phase phase_ = Phase::idle;
     static inline uint8_t status_ = i2c_ok;
-    static inline uint16_t berr_count_ = 0;
+    // Bumped by the handler (ES0548 2.10.2), read from thread context by
+    // spurious_bus_errors(): a volatile word, so a polling read sees it.
+    static inline volatile uint16_t berr_count_ = 0;
     static inline I2cSpeed applied_ = I2cSpeed::standard_100k;
     static inline I2cTiming table_[3]{};
     static inline bool valid_[3]{};

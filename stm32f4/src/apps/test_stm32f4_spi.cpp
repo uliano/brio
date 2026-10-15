@@ -103,6 +103,17 @@
 //      the peer's serves, every BR code, this end's unit on the resource
 //      with the last data frame queued behind its predecessor and CRCNEXT
 //      after it; a wrong CRC frame caught as report_crcerr
+//   f  THE SOFTWARE SELECT AND THE SELECT OUTPUT: a client with no select
+//      pad (SSM) deaf with SSI high and exact with it low, under the
+//      peer's host_burst; SSOE, the select the block drives from SPE to
+//      SPE, framing the peer's exchange
+//   g  THE STALL A SECOND CHIP MAKES: a long polled request demoted by the
+//      peer's ss_pulse (NSS a hardware input) ends spi_stalled, ERRIE's
+//      vector on the same MODF; a client answering on TXEIE alone; ERRIE
+//      on an unread client's OVR
+//   h  THE HOLD-OFF DECLARED HONESTLY: a 375-cycle TIM7 handler every 5 us
+//      beside the pump at PCLK1/8 - overruns on the default's two in
+//      flight, none on a host declaring 400 cycles
 //   t  (OUTSIDE z) THE CRCNEXT WINDOW and the receive CRC at PCLK1/2: the
 //      store walked away from the last data store, one frame in flight,
 //      and the received CRC against the SCK pad's class - the instrument
@@ -143,6 +154,8 @@
 
 #include "stm32f4/delay.hpp"
 #include "stm32f4/pin.hpp"
+#include "stm32f4/dwt.hpp"
+#include "stm32f4/tim.hpp"
 
 // THE PROTOCOL HEADER IS SHARED, NOT COPIED: pure encoding, not one
 // register, and every architecture on this link compiles the same file.
@@ -2405,6 +2418,649 @@ void tw_crc() {
     bench.verdict("the command channel survives the CRC", command(Op::ping));
 }
 
+// =============================================================================
+// f - THE SOFTWARE SELECT AND THE HARDWARE SELECT OUTPUT against the peer
+// =============================================================================
+//
+// Every other peer letter frames on a GPIO select this end drives (host)
+// or on the NSS pad as the hardware input (client). This one takes the two
+// arrangements left: a CLIENT WITH NO SELECT PAD (SSM, SSI the select) and
+// a HOST WHOSE SELECT IS THE BLOCK'S OWN OUTPUT (SSOE) - each judged by the
+// G0's spi_peer at the far end.
+
+namespace sel {
+
+/// The client role with NO NSS PAD: SPI2's three data pads alone.
+constexpr SpiPins ssm_pins{.sck = link_pins.sck, .miso = link_pins.miso,
+                           .mosi = link_pins.mosi, .nss = {}};
+using SsmClient = SpiClient<2, ssm_pins>;
+static_assert(!SsmClient::has_nss_pad);
+
+uint8_t out_[16];
+uint8_t in_[16];
+
+/// The peer's twelve-frame host_burst at its /32 (2 MHz on the G0's
+/// 64 MHz), 20 us between frames, 40 ms of lead-in (spi_link.hpp).
+spilink::Params burst_params(uint8_t seed_a, uint8_t seed_b) {
+    spilink::Params a{};
+    a.count = 12;
+    a.ms = 300;
+    a.seed_a = seed_a;
+    a.seed_b = seed_b;
+    a.pattern = spilink::pattern_prbs;
+    a.aux8 = 40;
+    a.aux16 = 32;
+    a.cfg.apply = 1;
+    return a;
+}
+
+/// A run's spin budget for `ms` milliseconds of window (letter r's).
+uint32_t budget(uint16_t ms) { return static_cast<uint32_t>(ms) * (SysClock::hz / 36'000u); }
+
+uint16_t mismatches(const uint8_t* got, uint16_t n, uint8_t seed) {
+    uint16_t m = 0;
+    for (uint16_t i = 0; i < n; ++i) {
+        if (got[i] != spilink::pattern_value(spilink::pattern_prbs, seed, i)) {
+            ++m;
+        }
+    }
+    return m;
+}
+
+template <typename E>
+const char* end_name(E e) {
+    return e == E::complete ? "complete" : e == E::closed ? "closed" : "stalled";
+}
+
+struct SsmLeg {
+    bool accepted = false;
+    bool fell = false;
+    SsmClient::Run run{0, SsmClient::RunEnd::stalled};
+    bool reported = false;
+    spilink::Report r{};
+};
+
+/// One burst against the client with no select pad: SSI driven low once
+/// PB12 (a plain input here) is seen to fall when `select_it`, or left
+/// high for the whole burst.
+SsmLeg ssm_leg(bool select_it, uint8_t seed_a, uint8_t seed_b) {
+    SsmLeg L{};
+    const spilink::Params a = burst_params(seed_a, seed_b);
+    L.accepted = peer_act(Op::host_burst, a);
+    if (!L.accepted) {
+        return L;
+    }
+    Host::release();
+    (void)SsmClient::init(clock, {.mode = SpiMode::mode0,
+                                  .bits = SpiDataSize::bits8,
+                                  .lsb_first = false,
+                                  .nss = SpiNss::software,
+                                  .drive_output = true,
+                                  .miso_speed = PinSpeed::low});
+    // A client under SSM comes up SELECTED (SSI low, spi_cr1_of); the
+    // window is this program's, so it opens deselected.
+    SsmClient::select(false);
+    CsPin::input(PinPull::up);
+    spilink::Stream out(a.pattern, a.seed_b);
+    for (uint16_t i = 0; i < a.count; ++i) {
+        out_[i] = out.next();
+        in_[i] = 0xEE;
+    }
+    SsmClient::enable();
+    const uint32_t m0 = Ticker::millis();
+    while (Ticker::millis() - m0 < a.aux8 + 100u) {
+        if (!CsPin::read()) {
+            L.fell = true;
+            break;
+        }
+    }
+    if (select_it && L.fell) {
+        SsmClient::select(true);
+    }
+    L.run = SsmClient::exchange(std::span<const uint8_t>(out_, a.count),
+                                std::span<uint8_t>(in_, a.count), budget(a.ms));
+    SsmClient::select(false);
+    (void)SsmClient::disable();
+    SsmClient::release();
+    L.reported = peer_report(L.r);
+    return L;
+}
+
+}   // namespace sel
+
+void tf_select() {
+    using namespace sel;
+    if (!need_peer()) {
+        return;
+    }
+    print(serial, "  1. THE CLIENT WITH NO SELECT PAD (SSM) under the peer's 12-frame "
+                  "host_burst at 2 MHz",
+          crlf);
+    const SsmLeg deaf = ssm_leg(false, 0x35, 0x9C);
+    print(serial, "    SSI left HIGH: the wire's select fell=", deaf.fell, ", the run read ",
+          deaf.run.count, " frames and ended ", end_name(deaf.run.end), "; the peer as host read ",
+          deaf.r.count, " frames, mism=", deaf.r.mism, " (first got ", hex(deaf.r.got), " exp ",
+          hex(deaf.r.exp), ")", crlf);
+    bench.verdict("a client under SSM with SSI HIGH is deaf to a clock the wire carries: the "
+                  "peer clocked its burst and not one frame arrived (the run without a pad "
+                  "ends on its budget)",
+                  deaf.accepted && deaf.fell && deaf.run.count == 0u &&
+                      deaf.run.end == SsmClient::RunEnd::stalled && deaf.reported &&
+                      deaf.r.count == 12u);
+    const SsmLeg live = ssm_leg(true, 0x35, 0x9C);
+    const uint16_t m = mismatches(in_, live.run.count, 0x35);
+    print(serial, "    SSI driven low after the wire's select fell: the run read ", live.run.count,
+          " frames, mism=", m, ", ended ", end_name(live.run.end), "; the peer as host read ",
+          live.r.count, " frames, mism=", live.r.mism, " (first idx ", live.r.idx, " got ",
+          hex(live.r.got), " exp ", hex(live.r.exp), ")", crlf);
+    bench.verdict("selected by SOFTWARE (SSI low), the client with no select pad receives the "
+                  "foreign host's burst byte-exact, its run COMPLETE on its count",
+                  live.accepted && live.fell && live.run.count == 12u && m == 0u &&
+                      live.run.end == SsmClient::RunEnd::complete);
+    bench.verdict("...and the foreign host read its answers byte-exact from the first frame",
+                  live.reported && live.r.count == 12u && live.r.mism == 0u);
+    (void)link_command_mode();
+
+    // ---- 2. SSOE: the host's select as the block's own output -----------------------
+    // 26.3.5: "The NSS signal is driven low as soon as the SPI is enabled in
+    // master mode (SPE=1), and is kept low until the SPI is disabled (SPE
+    // =0)." The window is the enable, then: the pad read on this side (its
+    // input buffer stays live under AF5) before SPE, after it and after the
+    // disable; the frames between judged by the peer.
+    print(serial, "  2. SSOE: the select driven by the block itself, eight frames at PCLK1/64",
+          crlf);
+    spilink::Params a{};
+    a.cfg = spilink::Cfg{.apply = 1, .mode = 0, .dord = 0, .regime = spilink::regime_buffer_wait};
+    a.count = 8;
+    a.ms = 400;
+    a.seed_a = 0x62;
+    a.seed_b = 0x1D;
+    a.pattern = spilink::pattern_prbs;
+    const bool acc = peer_act(Op::exchange, a);
+    spilink::Stream out(a.pattern, a.seed_a);
+    for (uint16_t i = 0; i < a.count; ++i) {
+        out_[i] = out.next();
+        in_[i] = 0xEE;
+    }
+    settle();
+    (void)S::disable();
+    SpiConfig hc{};
+    hc.clock = SpiClock::div64;
+    hc.nss = SpiNss::hardware_output;
+    const bool cfg_ok = S::configure(hc);
+    Host::claim_nss_pad(true);
+    spin_us(30);
+    const bool high_before = CsPin::read();
+    S::enable();
+    spin_us(30);
+    const bool low_enabled = !CsPin::read();
+    uint16_t moved = 0;
+    for (; moved < a.count; ++moved) {
+        uint32_t spins = 200'000u;
+        while (!S::tx_empty() && spins-- != 0u) {
+        }
+        S::data(out_[moved]);
+        spins = 200'000u;
+        while (!S::rx_ready() && spins-- != 0u) {
+        }
+        if (spins == UINT32_MAX) {
+            break;
+        }
+        in_[moved] = S::data8();
+    }
+    spin_us(30);
+    const bool low_after_frames = !CsPin::read();
+    (void)S::disable();
+    spin_us(30);
+    const bool high_disabled = CsPin::read();
+    Host::claim_nss_pad(false);
+    (void)link_command_mode();
+    spilink::Report r{};
+    const bool rep = acc && peer_report(r);
+    const uint16_t hm = mismatches(in_, moved, a.seed_b);
+    print(serial, "    the pad: high before SPE ", high_before, ", low with SPE up ", low_enabled,
+          ", still low after the frames ", low_after_frames, ", high after the disable ",
+          high_disabled, "; ", moved, " frames, host mism=", hm, "; the peer heard ", r.count,
+          " mism=", r.mism, " aux2=", hex(r.aux2), crlf);
+    bench.verdict("SSOE: the select pad falls when SPE rises - before any frame - stays low "
+                  "through the frames and rises when SPE is cleared (26.3.5)",
+                  cfg_ok && high_before && low_enabled && low_after_frames && high_disabled);
+    bench.verdict("...and that window frames a foreign client: eight frames byte-exact both ways",
+                  acc && rep && moved == a.count && hm == 0u && r.count == a.count &&
+                      r.mism == 0u);
+    bench.verdict("the command channel is back after the two arrangements", command(Op::ping));
+}
+
+// =============================================================================
+// g - THE STALL AND THE INTERRUPT ENABLES against the peer
+// =============================================================================
+//
+// spi_stalled is the polled loop's end when the block stops clocking under
+// it; on this desk the peer can make that happen from outside: this host
+// runs a long polled request with its NSS pad a hardware INPUT (SSM and
+// SSOE clear - the multi-master arrangement, 26.3.4) and the peer pulls the
+// shared select low part-way (Op::ss_pulse). MODF clears SPE and MSTR
+// (26.3.10), the RXNE the loop waits for never comes, and the budget ends
+// it. ERRIE is armed for the same window, so the error vector is measured
+// on the same mode fault. Then TXEIE: this board as a CLIENT answering on
+// the transmit vector alone, and ERRIE again on a client that never reads
+// (OVR).
+
+volatile bool probe_live = false;      ///< the SPI2 vector belongs to this letter
+volatile uint32_t probe_err_sr = 0;    ///< SR at the first error the vector saw
+volatile uint32_t probe_err_at = 0;    ///< and when (DWT)
+volatile uint16_t probe_err_count = 0;
+volatile uint16_t probe_txe_count = 0;
+const uint8_t* volatile probe_answers = nullptr;
+volatile uint16_t probe_answer_n = 0;
+
+/// The letter's body of the SPI2 vector: an answer per TXE until the
+/// answers run out (then TXEIE off), and the first error recorded and
+/// ERRIE disarmed - every error flag is a level, and a handler that left
+/// one standing would re-enter for ever.
+void probe_isr() {
+    const uint32_t up = S::isr();
+    if ((up & SpiFlag::txe) != 0u) {
+        const uint16_t k = probe_txe_count;
+        if (k < probe_answer_n) {
+            S::data(probe_answers[k]);
+        }
+        probe_txe_count = static_cast<uint16_t>(k + 1u);
+        if (probe_txe_count >= probe_answer_n) {
+            S::txe_interrupt(false);
+        }
+    }
+    if ((up & SpiFlag::errors) != 0u) {
+        if (probe_err_count == 0u) {
+            probe_err_sr = S::status();
+            probe_err_at = CycleCounter::now();
+        }
+        probe_err_count = static_cast<uint16_t>(probe_err_count + 1u);
+        S::error_interrupt(false);
+    }
+}
+
+uint8_t stall_tx[2048];
+/// Full duplex on purpose: a transmit-only request leaves its receive
+/// buffer unread, and OVR would be the first error ERRIE brings.
+uint8_t stall_rx[2048];
+
+void tg_stall_irqs() {
+    if (!need_peer()) {
+        return;
+    }
+    (void)CycleCounter::init();
+
+    // ---- 1. a stall made by another chip, with ERRIE on the same fault ----
+    // 2048 frames at PCLK1/256 (175.8 kHz, 45.5 us a frame) are 93.2 ms on
+    // the wire; the peer takes the select 10 ms after it has served its ack
+    // window, which lands 36 ms into the request (measured: the peer's
+    // serve and the command's own windows before it) - 57 ms of margin to
+    // the request's end, and 36 to its start.
+    spilink::Params a{};
+    a.aux8 = 10;
+    a.aux16 = 3000;
+    if (!peer_act(Op::ss_pulse, a)) {
+        bench.verdict("the peer accepted the ss_pulse command", false);
+        return;
+    }
+    for (uint16_t i = 0; i < sizeof stall_tx; ++i) {
+        stall_tx[i] = static_cast<uint8_t>(i);
+    }
+    Host::prime(SpiMode::mode0, SpiClock::div256);
+    // The hardware input under the host's own configuration: SSM and SSI
+    // cleared on the resource, the pad handed to SPI2 and pulled up here
+    // too. The host's cached CR1 still names SSM, so start() applies
+    // nothing over it (the mode and the rate are the ones just primed).
+    (void)S::disable();
+    S::regs().CR1 = S::regs().CR1 & ~(SPI_CR1_SSM | SPI_CR1_SSI);
+    Host::claim_nss_pad(true);
+    CsPin::pull(PinPull::up);
+    probe_err_count = 0;
+    probe_err_sr = 0;
+    probe_live = true;
+    S::enable();
+    S::error_interrupt(true);
+    Host::Request rq{};
+    rq.cs = {};
+    rq.tx = lend<Lease::reply>(static_cast<const uint8_t*>(stall_tx));
+    rq.rx = lend<Lease::reply>(stall_rx);
+    rq.len = sizeof stall_tx;
+    rq.clock = SpiClock::div256;
+    rq.mode = SpiMode::mode0;
+    rq.bits = SpiDataSize::bits8;
+    rq.polled = true;
+    const uint32_t t0 = CycleCounter::now();
+    const bool done = Host::start(rq);
+    const uint32_t t1 = CycleCounter::now();
+    // ERRIE off before the vector is handed back: a request that ended
+    // some other way would leave the fault to come on a vector that does
+    // not consume it.
+    S::error_interrupt(false);
+    probe_live = false;
+    const uint8_t st = Host::status();
+    const uint32_t fault_us = probe_err_count != 0u ? (probe_err_at - t0) / cycles_per_us : 0u;
+    const uint32_t end_us = (t1 - t0) / cycles_per_us;
+    const uint32_t cr1_after = S::regs().CR1;
+    Host::claim_nss_pad(false);
+    print(serial, "  1. a 2048-frame polled request at PCLK1/256 with NSS a hardware input: the "
+                  "error vector ",
+          probe_err_count, " time(s), SR ", hex(probe_err_sr), " at ", fault_us,
+          " us; start() returned ", done ? "(synchronously) " : "", "after ", end_us,
+          " us with status ", st, " (spi_stalled is ", spi_stalled, "); CR1 after ",
+          hex(cr1_after), crlf);
+    bench.verdict("ANOTHER CHIP's select demotes this host mid-request and the polled loop "
+                  "ends spi_stalled on its budget - the block that stopped clocking reset and "
+                  "reconfigured (SPE and MSTR back, SSM restored)",
+                  done && st == spi_stalled && (cr1_after & SPI_CR1_SPE) != 0u &&
+                      (cr1_after & SPI_CR1_MSTR) != 0u && (cr1_after & SPI_CR1_SSM) != 0u);
+    bench.verdict("ERRIE: the SPI2 vector ran ONCE on that fault with MODF in SR, inside the "
+                  "request (26.5's error interrupt)",
+                  probe_err_count == 1u && (probe_err_sr & SPI_SR_MODF) != 0u &&
+                      fault_us < end_us);
+    settle_ms(10);
+    (void)link_command_mode();
+    spilink::Report pr{};
+    const bool prep = peer_report(pr);
+    bench.verdict("the peer reports the wire really taken, and the channel is back after the "
+                  "stall",
+                  prep && pr.op == spilink::byte_of(Op::ss_pulse) && pr.aux0 == 1u);
+
+    // ---- 2. TXEIE: a client answering on the transmit vector alone ----------
+    // 26.3.9: TXE rises when the buffer moves into the shifter, at a frame's
+    // first bit, so one vector per frame writes the NEXT answer with seven
+    // bits of window. Enabling TXEIE with the buffer empty and the select
+    // high runs the vector at once, and that first entry is the preload.
+    {
+        const spilink::Params b = sel::burst_params(0x44, 0x7B);
+        const bool acc = peer_act(Op::host_burst, b);
+        Host::release();
+        (void)Client::init(clock, {.mode = SpiMode::mode0,
+                                   .bits = SpiDataSize::bits8,
+                                   .lsb_first = false,
+                                   .nss = SpiNss::hardware_input,
+                                   .drive_output = true,
+                                   .miso_speed = PinSpeed::low});
+        spilink::Stream out(b.pattern, b.seed_b);
+        for (uint16_t i = 0; i < b.count; ++i) {
+            sel::out_[i] = out.next();
+            sel::in_[i] = 0xEE;
+        }
+        probe_txe_count = 0;
+        probe_err_count = 0;
+        probe_answers = sel::out_;
+        probe_answer_n = b.count;
+        probe_live = true;
+        Client::enable();
+        S::txe_interrupt(true);
+        // The receive side polled here, on RXNE, until the window closes.
+        uint16_t got = 0;
+        bool opened = false;
+        const uint32_t m0 = Ticker::millis();
+        while (Ticker::millis() - m0 < b.aux8 + b.ms) {
+            if (const auto v = Client::poll()) {
+                if (got < b.count) {
+                    sel::in_[got] = static_cast<uint8_t>(*v);
+                }
+                ++got;
+            }
+            const bool selected = Client::selected();
+            if (selected) {
+                opened = true;
+            } else if (opened) {
+                break;
+            }
+        }
+        S::txe_interrupt(false);
+        probe_live = false;
+        (void)Client::disable();
+        Client::release();
+        spilink::Report r{};
+        const bool rep = acc && peer_report(r);
+        const uint16_t m = sel::mismatches(sel::in_, got < b.count ? got : b.count, b.seed_a);
+        print(serial, "  2. TXEIE: the transmit vector ran ", probe_txe_count, " times for ",
+              b.count, " answers; this end read ", got, " frames, mism=", m,
+              "; the peer as host read ", r.count, " mism=", r.mism, " (first idx ", r.idx,
+              " got ", hex(r.got), " exp ", hex(r.exp), ")", crlf);
+        bench.verdict("TXEIE: a client answering on the TRANSMIT VECTOR alone - one entry per "
+                      "answer, the first the preload with the select high - is read byte-exact "
+                      "by the foreign host from the first frame",
+                      acc && rep && probe_txe_count == b.count && r.count == b.count &&
+                          r.mism == 0u);
+        bench.verdict("...while this end, reading RXNE in main, heard every frame exact",
+                      got == b.count && m == 0u);
+    }
+
+    // ---- 3. ERRIE on a client that never reads: the overrun's vector --------
+    // 26.3.13: OVR is set when a frame completes while RXNE still stands, so
+    // a client that reads nothing raises it at the END OF THE SECOND FRAME.
+    // The peer clocks four; the vector records the first error and
+    // disarms.
+    {
+        spilink::Params b = sel::burst_params(0x18, 0x00);
+        b.count = 4;
+        const bool acc = peer_act(Op::host_burst, b);
+        Host::release();
+        (void)Client::init(clock, {.mode = SpiMode::mode0,
+                                   .bits = SpiDataSize::bits8,
+                                   .lsb_first = false,
+                                   .nss = SpiNss::hardware_input,
+                                   .drive_output = false});
+        probe_txe_count = 0;
+        probe_err_count = 0;
+        probe_err_sr = 0;
+        probe_answer_n = 0;
+        probe_live = true;
+        Client::enable();
+        S::error_interrupt(true);
+        bool opened = false;
+        const uint32_t m0 = Ticker::millis();
+        while (Ticker::millis() - m0 < b.aux8 + b.ms) {
+            const bool selected = Client::selected();
+            if (selected) {
+                opened = true;
+            } else if (opened) {
+                break;
+            }
+        }
+        S::error_interrupt(false);
+        probe_live = false;
+        const bool ovr_standing = S::overrun();
+        S::clear_overrun();
+        (void)Client::disable();
+        Client::release();
+        spilink::Report r{};
+        const bool rep = acc && peer_report(r);
+        print(serial, "  3. ERRIE on a client that reads nothing: the error vector ran ",
+              probe_err_count, " time(s), SR ", hex(probe_err_sr), "; OVR still standing at "
+              "the close: ",
+              ovr_standing, "; the peer clocked ", r.count, crlf);
+        bench.verdict("ERRIE: an unread client's OVR (26.3.13) reaches the vector once, and "
+                      "the flag stands until its clearing sequence - the vector consumed "
+                      "nothing",
+                      acc && rep && r.count == 4u && probe_err_count == 1u &&
+                          (probe_err_sr & SPI_SR_OVR) != 0u && ovr_standing);
+    }
+    (void)link_command_mode();
+    bench.verdict("the command channel is back", command(Op::ping));
+}
+
+// =============================================================================
+// h - THE HOLD-OFF DECLARED HONESTLY, against the peer
+// =============================================================================
+//
+// SpiHost keeps two frames in flight on its pump from the frame length its
+// image's hold-off allows (`spi_write_ahead_min_frame_cycles`): 236 cycles
+// at the default 150, so on SPI2 (HCLK = 4 x PCLK1) 8-bit frames go two in
+// flight from PCLK1/8 - 256 cycles a frame. Two in flight overrun the
+// receive buffer when frame k is read more than a frame time after its
+// RXNE (26.3.13). This letter binds a TIM7 update handler that holds the
+// core for 350 cycles of its own (a DWT spin; with the entry and the exit
+// about 375) every 5 us - a handler the default does not declare - and
+// runs the pump at PCLK1/8 against the peer twice: under the default, and
+// on a host declaring 400 cycles, whose threshold (549) keeps that rate one
+// frame in flight. No interrupt nests over another, so the timer's handler
+// holds the SPI2 vector for whatever is left of it when RXNE rises.
+//
+// THE BOUND. A frame's RXNE rises every 256 cycles or more; the handler
+// covers 375 of every 900. An RXNE landing in its first 375 - 256 = 119
+// cycles is read later than a frame after it: a chance of about 119 / 900
+// = 0.13 a frame, so a 64-frame window survives the default with odds near
+// 0.87^64 = 1.3e-4 - ten windows all surviving is beyond any count this
+// suite will run. The declared host cannot overrun at all: one frame in
+// flight writes frame k + 1 only after reading frame k.
+
+constexpr uint32_t hog_cycles = 350;
+volatile bool hog_armed = false;   ///< this series binds the handler at all
+volatile uint32_t hog_count = 0;
+volatile bool honest_live = false;
+using HonestHost = SpiHost<2, link_pins, NoDmaEngine, NoDmaEngine, 400>;
+static_assert(HonestHost::write_ahead_min_frame_cycles == 548u);
+
+constexpr uint16_t hold_n = 64;
+uint8_t hold_tx[hold_n];
+uint8_t hold_rx[hold_n];
+
+struct HoldRun {
+    bool accepted = false;
+    bool completed = false;
+    uint8_t status = 0;
+    uint32_t us = 0;
+    bool reported = false;
+    spilink::Report r{};
+    uint16_t mism = 0;
+};
+
+/// One 64-frame window on the pump of host H at PCLK1/8, the peer
+/// exchanging on its DMA serve.
+template <typename H>
+HoldRun hold_window(uint8_t seed) {
+    HoldRun o{};
+    spilink::Params a{};
+    a.cfg = spilink::Cfg{.apply = 1, .mode = 0, .dord = 0, .regime = spilink::regime_buffer_wait};
+    a.count = hold_n;
+    a.ms = 60;
+    a.seed_a = seed;
+    a.seed_b = static_cast<uint8_t>(seed ^ 0x5Au);
+    a.pattern = spilink::pattern_prbs;
+    o.accepted = peer_act(Op::exchange, a);
+    if (!o.accepted) {
+        return o;
+    }
+    spilink::Stream out(a.pattern, a.seed_a);
+    for (uint16_t i = 0; i < hold_n; ++i) {
+        hold_tx[i] = out.next();
+        hold_rx[i] = 0xEE;
+    }
+    settle();
+    honest_live = std::is_same_v<H, HonestHost>;
+    if (honest_live) {
+        (void)HonestHost::init(clock, peer_link_config<HonestHost>());
+    }
+    H::prime(SpiMode::mode0, SpiClock::div8);
+    CsPin::clear();
+    link_hold();
+    typename H::Request r{};
+    r.cs = {};
+    r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(hold_tx));
+    r.rx = lend<Lease::reply>(hold_rx);
+    r.len = hold_n;
+    r.clock = SpiClock::div8;
+    r.mode = SpiMode::mode0;
+    r.bits = SpiDataSize::bits8;
+    r.polled = false;
+    host_done = false;
+    // The timer runs for the window alone, so the command channel around
+    // it is not what it lands in.
+    Tim<7>::enable(hog_armed);
+    const uint32_t t0 = CycleCounter::now();
+    bool done = H::start(r);
+    const uint32_t m0 = Ticker::millis();
+    while (!done && !host_done && Ticker::millis() - m0 < 50u) {
+    }
+    o.us = (CycleCounter::now() - t0) / cycles_per_us;
+    Tim<7>::enable(false);
+    o.completed = done || host_done;
+    o.status = H::status();
+    link_hold();
+    CsPin::set();
+    honest_live = false;
+    (void)link_command_mode();
+    o.reported = peer_report(o.r);
+    o.mism = sel::mismatches(hold_rx, hold_n, a.seed_b);
+    return o;
+}
+
+struct HoldTally {
+    uint8_t exact = 0;
+    uint8_t overrun = 0;
+    uint32_t us_sum = 0;
+    uint16_t overruns_counted = 0;
+};
+
+template <typename H>
+HoldTally hold_series(bool hog, uint8_t rounds) {
+    HoldTally t{};
+    const uint16_t before = H::overruns();
+    hog_count = 0;
+    for (uint8_t k = 0; k < rounds; ++k) {
+        hog_armed = hog;
+        const HoldRun o = hold_window<H>(static_cast<uint8_t>(0x21u + 13u * k));
+        hog_armed = false;
+        if (o.completed && o.status == spi_ok && o.mism == 0u && o.reported &&
+            o.r.count == hold_n && o.r.mism == 0u) {
+            ++t.exact;
+        }
+        if (o.status == spi_overrun) {
+            ++t.overrun;
+        }
+        t.us_sum += o.us;
+    }
+    t.overruns_counted = static_cast<uint16_t>(H::overruns() - before);
+    return t;
+}
+
+void th_hold_off() {
+    if (!need_peer()) {
+        return;
+    }
+    (void)CycleCounter::init();
+    Tim<7>::init();
+    (void)TimPeriodicTick<Tim<7>>::setup(0, 449);   // 90 MHz / 450 = 200 kHz
+    Tim<7>::enable(false);
+    Nvic::enable(Tim<7>::irq());
+    print(serial, "  the pump at PCLK1/8 (256 cycles a frame); threshold for two in flight: ",
+          Host::write_ahead_min_frame_cycles, " cycles at the default hold-off ", Host::hold_off,
+          ", ", HonestHost::write_ahead_min_frame_cycles, " at the declared ",
+          HonestHost::hold_off, crlf);
+    constexpr uint8_t rounds = 10;
+    const HoldTally quiet = hold_series<Host>(false, rounds);
+    const HoldTally dflt = hold_series<Host>(true, rounds);
+    const uint32_t hogs = hog_count;
+    const HoldTally honest = hold_series<HonestHost>(true, rounds);
+    Nvic::disable(Tim<7>::irq());
+    Tim<7>::release();
+    print(serial, "  no handler, the default:   ", quiet.exact, " of ", rounds, " exact, ",
+          quiet.overruns_counted, " overruns, ", quiet.us_sum / rounds, " us a window", crlf);
+    print(serial, "  the 375-cycle handler, the default (two in flight): ", dflt.exact, " of ",
+          rounds, " exact, ", dflt.overrun, " ended spi_overrun, overruns() counted ",
+          dflt.overruns_counted, " (", hogs, " handler runs)", crlf);
+    print(serial, "  the same handler, 400 declared (one in flight): ", honest.exact, " of ",
+          rounds, " exact, ", honest.overruns_counted, " overruns, ", honest.us_sum / rounds,
+          " us a window", crlf);
+    bench.verdict("the control: with no handler bound, the default's two in flight carry ten "
+                  "64-frame windows exact both ways",
+                  quiet.exact == rounds && quiet.overruns_counted == 0u);
+    bench.verdict("a handler LONGER THAN THE DEFAULT DECLARES overruns the pump's two in "
+                  "flight (spi_overrun, counted by overruns())",
+                  dflt.overrun != 0u && dflt.overruns_counted == dflt.overrun);
+    bench.verdict("THE SAME HANDLER DECLARED (hold_off 400): one frame in flight at that rate, "
+                  "ten windows exact both ways and no overrun",
+                  honest.exact == rounds && honest.overruns_counted == 0u);
+    (void)link_command_mode();
+    bench.verdict("the command channel is back", command(Op::ping));
+}
+
 void banner() {
     print(serial, crlf, "test_stm32f4_spi - SPI2 on the Nucleo-F446RE against the STM32G0B1RE's "
                         "spi_peer",
@@ -2423,6 +3079,16 @@ void banner() {
 extern "C" void USART2_IRQHandler() { (void)Serial::isr(); }
 
 extern "C" void SPI2_IRQHandler() {
+    if (probe_live) {
+        probe_isr();
+        return;
+    }
+    if (honest_live) {
+        if (HonestHost::isr()) {
+            host_done = true;
+        }
+        return;
+    }
     if (dma_host_live) {
         if (DmaHost::isr()) {
             host_done = true;
@@ -2452,6 +3118,16 @@ extern "C" void DMA1_Stream3_IRQHandler() {
 }
 
 extern "C" void SysTick_Handler() { brio::Ticker::tick(); }
+
+/// Letter h's handler the default hold-off does not declare: hog_cycles of
+/// its own, timed on the DWT, every 5 us while its window runs.
+extern "C" void TIM7_IRQHandler() {
+    brio::Tim<7>::clear_flags(brio::Tim<7>::update_flag);
+    const uint32_t t0 = brio::CycleCounter::now();
+    while (brio::CycleCounter::now() - t0 < hog_cycles) {
+    }
+    hog_count = hog_count + 1u;
+}
 
 int main() {
     // What the silicon held before a line of this program ran.
@@ -2492,6 +3168,12 @@ int main() {
                       "witnessed",
                  tv_receive_only);
     bench.letter('w', "THE CRC against the peer's unit, and a wrong CRC caught", tw_crc);
+    bench.letter('f', "THE SOFTWARE SELECT and THE SELECT OUTPUT (SSOE) against the peer",
+                 tf_select);
+    bench.letter('g', "THE STALL a second chip makes, and the TXE and error interrupts",
+                 tg_stall_irqs);
+    bench.letter('h', "THE HOLD-OFF DECLARED HONESTLY: a long handler beside the pump",
+                 th_hold_off);
     bench.letter('t', "THE CRCNEXT WINDOW and the receive CRC at PCLK1/2, no verdict",
                  tt_crc_window, false);
     bench.letter('x', "SLIP STATISTICS against the peer: each mode ten times, no verdict",

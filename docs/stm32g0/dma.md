@@ -594,13 +594,17 @@ tolerance or of finding what is late.
 **THE RECEIVE ENGINE AS A RING** (letter `o`). USART1 in single-wire
 half duplex hears every byte it sends (33.5.15), so its two engines -
 transmit on channel 2, receive on channel 3 in the circular shape over a
-64-byte ring - make a loop with no wire, PA9 alone under its pull-up, at
-1 Mbaud. The figures below are that loop's with PA9 unloaded. ON THE
+64-byte ring - make a loop with no second board, at 1 Mbaud. ON THE
 PAIRED DESK PA9 also carries the link wire to the far board's receive
-pad, and the pull-up's rise into that load holds the open-drain loop to
-460800 ([usart.md](usart.md)): at 1 Mbaud the letter's four ring
-verdicts fail there (2076 of 4096 bytes back, 2069 wrong; 28 of 60; 9
-of 20; 3 wrong of 3) - the stimulus, not the ring:
+pad, and an open-drain loop's rise on the pull-up into that load gives
+out below 1 Mbaud ([usart.md](usart.md)); so the loop's single wire is
+DRIVEN (`single_wire_push_pull`: push-pull while a frame goes out, the
+pull-up holding it between frames) and every figure below is the paired
+desk's, the far board on a console that leaves its pad hi-Z - twelve
+runs of the letter there, all green, the stream's wall within 30 us of
+its 40960 us of wire in each. The ring under a FOREIGN sender's clock is
+`test_stm32_serial`'s letter `6` ([usart.md](usart.md), "Against a far
+board"):
 
 - At rest the channel is CIRCULAR, its count the ring's 64, the lap's
   completion, the half lap and the error armed.
@@ -938,11 +942,7 @@ Driver gaps:
   and not measured; what IS measured is that a channel runs in Sleep and
   freezes in Stop with the bits at their reset values.
 
-Implemented but not bench-verified: on the STM32G0B1RE ON THE PAIRED
-DESK, letter `o`'s four ring verdicts at 1 Mbaud (measured with PA9
-unloaded; the link wire's load holds the open-drain loop to 460800 -
-a loop whose transmitter drives the pad, or the ring fed by the far
-board's `usart_peer`, would measure them there); the circular
+Implemented but not bench-verified: the circular
 receive at a half-word or word beat (compiled at all three in the
 family fixture; letter `o` runs bytes, the beat a USART gives - a
 converter's stream into a ring would measure the wider ones), the

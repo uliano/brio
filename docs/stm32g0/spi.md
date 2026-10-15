@@ -975,6 +975,12 @@ the F446 listening with its answer line dark (its receive DMA, then its
 MHz too, printed: a client that only listens holds above the ceiling
 its answers break at. Odd counts both ways, 7 and 33 byte frames, exact
 against both of the peer's serves.
+ON THE DESK AS IT STANDS the PCLK/4 rung of these windows does not hold:
+six runs of the letter (two of them the suite's image before letter `y`
+was added) each failed three or four of its verdicts, the F446 reading
+the 16 MHz transmit-only windows wrong from a frame part-way through -
+the polled loop in both widths in most runs, the pump and the engines in
+some - every slower code exact; the open finding below.
 
 **THE CRC AGAINST A FOREIGN UNIT** (letter `w`, `spare_crc`), this end's
 unit driven by hand on the resource (`SpiHost`'s Request has no CRC
@@ -1049,6 +1055,44 @@ vendor's sequence (CRCEN cleared and set before SPE, SPE set inside the
 call, FRXTH, the TXE test, the tick read every turn) bears on it. The
 store's distance from the last frame's end decides, and the window is the
 silicon's.
+
+**THE SIMPLEX LINES, THE SOFTWARE SELECT AND `prime()`** (letter `y`,
+every window judged at the far end by the F446's `spi_peer`; twelve runs
+of the letter, all green):
+
+- A CLIENT WITH NO SELECT PAD (`SpiClient` over pads whose `nss` is
+  empty, `SpiNss::software`) is deaf with SSI high: the far board's
+  twelve-frame `host_burst` at 1.406 MHz clocked, not one frame arrived,
+  the run ended `stalled` on its budget, and none of the twelve frames
+  the far host read was an answer (the first 0xFF). Selected by `select(true)` once the program has seen the
+  far select fall (PA15 read as a plain input), both streams are
+  byte-exact from the first frame and the run ends `complete` on its
+  count - the one end a run without a pad has.
+- THE HOST'S SINGLE LINE OUT (BIDIMODE + BIDIOE, through the resource:
+  `direction()`, TXE-paced writes, `disable()`): 32 frames heard exact by
+  the far end's receive-only run at PCLK/64 and PCLK/16, the RXFIFO empty
+  after every window - with BIDIOE set the receiver takes nothing.
+- THE HOST'S RECEIVE-ONLY CLOCK (RXONLY): sixteen frames of the far
+  answer run read exact at both rates; `disable_receive_only()` at the
+  sixteenth RXNE stops the clock inside the seventeenth frame (the far
+  end counts 18 answers loaded: the 17 frames clocked and its one ahead)
+  and BSY falls.
+- THE CLIENT'S SINGLE LINE OUT (BIDIMODE + BIDIOE on MISO, `answer()`):
+  twelve answers read exact by the far host from the first frame, the
+  run `closed` on the select. THE CLIENT'S RECEIVE-ONLY RUN (RXONLY,
+  `drive_output = false`, `receive()`): twelve frames exact, `complete`.
+- `prime()`, STAGED BY ITS ABSENCE over every ordered pair of modes (the
+  host left at the first with the select high, the select then falling
+  before `start()` applies the second): a pair that keeps CPOL moves no
+  edge; a pair that FLIPS it and lands in CPHA = 0 (modes 0 and 2) slips
+  EXACTLY ONE BIT at both ends from the first frame - the F446 client's
+  frames one place right, this host's read of its answers one place
+  early - in four pairs of four; the same flip landing in CPHA = 1
+  (modes 1 and 3) is not counted by this client at all, four of four
+  exact. Which flips a client counts is the client's silicon (the SAM
+  C21's slips into modes 2 and 3 from mode 0, docs/samc21/spi.md), so
+  the verb is for every caller that frames the select by hand. Primed,
+  the four slipping pairs are exact.
 
 **THE G0 `spi_peer` MEASURED FROM THE F446** (`test_stm32f4_spi`, SPI2
 at PCLK1 = 45 MHz hosting, its SCK and its MOSI at medium): the
@@ -1212,9 +1256,6 @@ on every header of the pack, but no silicon has run it:
   completions with nothing on MISO (letter `s`, `bench_stm32` letter
   `e`). A device on the wire with a D/C line, or the self-link's letters
   `b`..`d`, would measure it.
-- **a run without an NSS pad** (a client under SSM): compiled on every
-  header, never driven - every peer op frames on the pad. A peer
-  configuration under SSM would measure it.
 - **The peer letters on the STM32G071RB and the STM32G031K8**: no board
   is paired with either on the desk; a partner running `spi_peer` would
   run them.
@@ -1223,18 +1264,15 @@ on every header of the pack, but no silicon has run it:
   (PC10/PC11/PC12 at AF4) are not wired on this desk; the family fixture
   instantiates it, `spi_irq(3)` is checked against the header, and its
   DMAMUX pair is stated from table 56.
-- **half-duplex (BIDIMODE) and receive-only (RXONLY) on the wire.** The
-  register surface is refused and read back correctly by letter a; no
-  letter clocks a transfer in either.
+- **the single line RECEIVING (BIDIMODE, BIDIOE clear), in either
+  role.** A host receiving on its MOSI pad needs the far end to drive
+  that pad, and a client receiving on MISO needs the far host to drive
+  its own input: the desk partner's MOSI is an input and its MISO the
+  host's input on every `spi_link` op. A three-wire device on the bus
+  (a sensor with one SDIO line) would measure it; the single line OUT is
+  measured both ways (letter `y`).
 - **the I2S asynchronous start (ASTRTEN)** and the PCM long-frame
   synchronization: written and read back, never staged.
-- **`SpiHost::prime()`** - the CPOL-flip-before-the-select verb. Its
-  reason is a one-bit slip measured on the SAM C21; the same slip has
-  not been staged here. What HAS been measured on this target is its
-  mirror image at the other end: a peer client that frames on the clock
-  alone (SSM/SSI) counts a host's CPOL settling edge and is one bit
-  early from the first frame, which is the same fact seen from the
-  client's side.
 - **the self-link letters on the STM32G071RB and the STM32G031K8**:
   ES0418 2.14.1 and 2.14.2 (the two BSY items), the frame matrix, the
   eight BR codes host-to-host, NSS four ways, the CRC, TI mode, the OVR
@@ -1243,6 +1281,13 @@ on every header of the pack, but no silicon has run it:
   (above). All of them are measured on the STM32G0B1RE.
 
 **Findings left open, with what would settle them:**
+
+- **letter `v`'s PCLK/4 rung on the desk as it stands** (above): the
+  same windows were exact at every judged code when the letter was
+  written, and the suite's image without letter `y` fails the same way
+  today, so what moved is most likely the wire and not the code. Letter `x`'s walk of the MOSI
+  pad's class against the F446's listening client at 16 MHz, and a look
+  at the four wires, would say whether it is the data edge again.
 
 - **the CRCNEXT window's cause** (letter `t`): a store 16 to 26 core
   cycles before the last data frame's RXNE corrupts both calculators,

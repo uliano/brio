@@ -376,8 +376,10 @@ figure it declares. A hold-off of 0 is refused at compile time: an
 image with no handler of its own still has the tick's. The witness of
 a figure declared too short is `overruns()` - and `spi_overrun` in the
 transaction's status - at a rate just above the threshold it derives
-(measured, letter e's `spi.short` below); a figure declared too long
-only keeps one frame in flight where two would have held. A frame at BR code c is
+(measured, letter e's `spi.short` below, and on the F446 a handler the
+default does not declare against one that does, letter `h`); a figure
+declared too long only keeps one frame in flight where two would have
+held. A frame at BR code c is
 `bits x 2^(c + 1)` PCLK cycles, twice that in HCLK on APB2 at 180 MHz:
 so 8-bit frames keep two in flight from /16 (256 cycles) and 16-bit
 frames from /8, and faster than that one frame is in flight, the bus
@@ -444,7 +446,8 @@ or declined:
   pad means the close, and without a pad ends on its count or budget.
 - **The TXE and RXNE interrupts** - DECLINED for the runs: a run is a
   polled loop and the ISR body stays for a program that wants an
-  interrupt client.
+  interrupt client - one that answers on TXEIE alone through the
+  resource's `isr()` is measured against the desk partner (letter `g`).
 - **The DMA requests** (SPI2_TX on DMA1 stream 4 and SPI2_RX on stream 3,
   channel 0 both, RM0390 table 28) - DECLINED in the driver: SpiClient
   has no engine slots (the gap list); a program binds the streams raw, as
@@ -519,8 +522,10 @@ MHz at 40 pF, 100 MHz at 30 pF. Each item used or declined:
   so a host's MISO and a client's SCK, MOSI and NSS have no field, and a
   class named for one does not compile (two negative TUs).
 - **The select as a hardware output** - `claim_nss_pad()` hands it at
-  `very_high` and has no field: no program drives SSOE on a wire (the
-  gap list).
+  `very_high` and has no field; SSOE is the resource's (`nss_output()`,
+  `SpiNss::hardware_output`), measured framing the desk partner's client
+  (letter `f`, below), and never the engine's select, which is a GPIO the
+  Request carries so one host serves many devices.
 - **The erratum's table** - `spi_errata_apb_ceiling_hz()` and
   `within_errata_ceiling()`: `init()` accepts a class below the
   erratum's for its APB clock, as the verb does, and the predicate
@@ -1101,6 +1106,49 @@ against the STM32G0B1RE it is paired with on the desk (the stm32g0
   the vendor's own sequence, and nothing else in that sequence bears on
   it.
 
+- **A CLIENT WITH NO SELECT PAD, AND THE SELECT AS THE BLOCK'S OUTPUT**
+  (letter `f`, twelve runs green): `SpiClient` over pads whose `nss` is
+  empty, `SpiNss::software`, is deaf with SSI high - the G0's twelve-frame
+  `host_burst` at 2 MHz clocked, nothing arrived, the run ended `stalled`
+  on its budget and none of the twelve frames the far host read was an
+  answer (the first 0xFF) - and, selected
+  by `select(true)` once the program has seen the far select fall on
+  PB12 (a plain input), byte-exact both ways from the first frame, the
+  run `complete` on its count. SSOE (26.3.5): the pad reads high before
+  SPE, LOW as soon as SPE rises with no frame written, low through eight
+  frames at PCLK1/64 and high again once SPE is cleared - and that window
+  frames the G0 peer's exchange byte-exact both ways.
+- **THE STALL A SECOND CHIP MAKES** (letter `g`, twelve runs): a 2048-frame
+  polled request at PCLK1/256 (93.2 ms of wire) with this host's NSS a
+  hardware INPUT - SSM and SSI cleared under the host's configuration -
+  and the G0 pulling the shared select low some 36 ms in (`ss_pulse`):
+  MODF clears SPE and MSTR, the RXNE the loop waits for never comes, and
+  the request ends `spi_stalled` when its one budget (400000 + 4096 spins
+  a frame) runs out - at 783.6 ms in eight runs and 970.5 ms in four (two
+  figures, not chased) - with the block reset and reconfigured (SPE,
+  MSTR and SSM back). ERRIE's vector runs ONCE on that fault, SR 0x20
+  (MODF alone). A transmit-only request would bring OVR first: its
+  receive buffer is never read.
+- **A CLIENT ON TXEIE, AND ERRIE ON A CLIENT THAT READS NOTHING** (letter
+  `g`): enabling TXEIE with the buffer empty and the select high runs the
+  vector at once, and that first entry is the preload; then one entry
+  per frame, twelve for twelve answers, read byte-exact by the G0 host
+  from the first frame while the main loop reading RXNE heard every frame
+  exact. A client that reads nothing raises OVR at the end of its second
+  frame and ERRIE's vector sees it once (SR 0x43) - `isr()` consumes
+  nothing, so the flag stands until its clearing sequence.
+- **THE HOLD-OFF DECLARED HONESTLY** (letter `h`, twelve runs, every
+  figure the same in each): a TIM7 update handler holding the core 350
+  cycles of its own (about 375 with its entry and exit) every 5 us, beside
+  the pump at PCLK1/8 - 256 cycles a frame, two in flight at the default
+  hold-off's threshold of 236. With no handler, ten 64-frame windows are
+  exact both ways (93 us a window). With the handler and the default,
+  ten of ten end `spi_overrun`, each counted by `overruns()`: an RXNE
+  landing in the handler's first 375 - 256 cycles is read a frame late,
+  about one frame in eight. On a host declaring 400 (threshold 548, one
+  frame in flight at that rate) the same handler costs time and nothing
+  else: ten of ten exact, no overrun, 164 us a window.
+
 **`SpiClient` against the STM32G0B1RE host** (the stm32f4 `spi_peer` on
 this board, firmware 0x0402, `test_stm32_spi` on the G0B1RE, 74 of 74):
 a dark client that drives MISO only inside an answer window; every
@@ -1164,9 +1212,6 @@ Driver gaps:
   chapter's.
 
 Implemented, not bench-verified (each with what would measure it):
-- A run without an NSS pad (a client under SSM): compiled on every
-  header, never driven - every peer op frames on the pad; a peer
-  configuration under SSM would measure it.
 - The instances other than SPI5, SPI2 and SPI1 (SPI3, SPI4, SPI6 -
   compiled on every header that has them, none driven): a wire between
   two of them, or a device on one. SPI1 is driven on the STM32F411CE
@@ -1175,28 +1220,14 @@ Implemented, not bench-verified (each with what would measure it):
   `direction`: the engine's transactions are full duplex by
   construction, and the resource's simplex modes were driven by hand in
   the bidirectional letter alone.
-- A stall ending a transaction with `spi_stalled`: the block always
-  clocks on this bench; the gate closed under a polled request would
-  measure it.
-- A hold-off declared HONESTLY above the default: an image binding a
-  handler longer than 150 cycles beside the pump at /16 (two in flight
-  by the default, a 256-cycle frame) would count overruns with the
-  default and none with its own figure declared - a timer handler of a
-  few hundred cycles at a rate that keeps landing it in the frames is
-  that bench line. The too-short side is measured (`spi.short`).
 - The DCS link's commands and pixel rows over the transmit-only shape
   against a panel: the black pill's display (the breadboard finding)
   wants a run of its probe over this host.
-- The hardware NSS output (SSOE) as the engine's select: the bus AO's
-  select is a GPIO on purpose; the hardware INPUT is measured through
-  `claim_nss_pad()` (letter d's demotion), the output is not.
 - `rebase()` and the SCK ceiling across a clock change: the family's
   `DynamicClock` ([clock.md](clock.md)) exists, and no program here makes
   an `SpiHost` one of its users. `rebase()` derives the APB rate from
   the new SYSCLK (`apb_hz_at`) - reading the divider back, the I2C hosts
   measured, reads the rate being left. What would measure it is a
   transfer timed against the partner at every rate of a pack.
-- The error interrupt (ERRIE) and the transmit interrupt (TXEIE): the
-  engine arms RXNE alone, and the errors were measured by polling.
 - The frame error (FRE): it is a TI slave's and an I2S slave's, and
   neither role has a peer here.

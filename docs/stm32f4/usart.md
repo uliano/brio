@@ -452,14 +452,14 @@ The desk pairs the Nucleo-F446RE's USART1 with the STM32G0B1RE's,
 CROSSED - PA9 (AF7) to its PA10, PA10 from its PA9 - the far board
 running the stm32g0 `usart_peer` (firmware 0x0301), driven IN BAND with
 the protocol every architecture on the link compiles
-(`avrdx/src/apps/usart_link.hpp`). Letters `1` to `9`, `0`, `r` and `s` of
-`test_stm32f4_serial` run under the second all-key `t` and never under
+(`avrdx/src/apps/usart_link.hpp`). Letters `1` to `9`, `0`, `r`, `s` and
+`u` of `test_stm32f4_serial` run under the second all-key `t` and never under
 `z`, which runs with the far board on its dark console. The far peer's
 core is an HSI16 it TRACKS against its LSE crystal (docs/stm32g0/
 clock.md, "The core against the LSE, tracked"), so every rate it times
 is crystal against crystal - and every rate it SENDS it states (a
 `send` or `blast` Report's aux16: its divisor on its tracked core). Score:
-**142 of 142**, what this USART has no word for SKIPPED with its reason.
+**150 of 150**, what this USART has no word for SKIPPED with its reason.
 
 - **The rendezvous and the refusal path** (`1`): ping, IDENT (kind 0x03,
   another die, a crystal-referenced time base), a bad checksum NAKed, a
@@ -616,6 +616,21 @@ is crystal against crystal - and every rate it SENDS it states (a
   note, "the receiver does not check the parity of the address data" -
   is the first address after a software mute; the far G0 flags it in
   every case.
+- **`set_baud()` at run time, and two interrupt enables** (`u`, twelve
+  runs green): a `Uart` task brought up at 115200 - a rate the far chip
+  is not speaking - and moved by `set_baud()` alone, the clock standing
+  still, to 9600, 921600 (918367 by the register) and 2 Mbaud receives
+  the far `send`'s 64 counting frames whole and in order through its
+  ring, and its own frames - 864, 2304 and 5000 of them written into its
+  ring as fast as it frees - reach the far receiver gapless and on the
+  rate: every one counted, timed within 35 ppm of the divisor's figure
+  less the clocks' offset (letter 2's 200 ppm bound). TCIE, armed after
+  the sixteenth of sixteen gapless frames at 115200, runs its vector once
+  173.2..173.8 us after that write - two frame times (173.6 us), the
+  write landing as the fifteenth enters the shifter, against the derived
+  window of one to two frames plus a microsecond. LBDIE in LIN mode
+  (LBDL eleven bits) takes the far engine's 13-bit break to the vector
+  once, the vector's clear leaving no LBD standing.
 
 ### The rendezvous's bound
 
@@ -703,9 +718,9 @@ Implemented, not bench-verified (every mode of the resource beyond the
 transport - each waits for the wire or the peer that measures it): the
 smartcard (no card on the
 desk), the synchronous clock (a timer capture on CK - the timer
-chapter's ruler), CTS/RTS flow control (a peer that asserts them), the
-TC/CTS/LBD interrupt enables, `set_baud` at run time (nothing changes the
-LINK's rate with the clock standing still), the instances beyond USART1,
+chapter's ruler), CTS/RTS flow control and the CTS interrupt enable (a
+peer that asserts CTS, and the link carries no CTS wire: USART1's CTS
+pad, PA11, reaches nothing on this desk), the instances beyond USART1,
 USART2 and USART6 driven on the F446 and the consoles' USART1 and USART3
 (UART4/5/7/8 compiled on every header that has them, none driven), the
 OVER8 and frame-format legs on the other three boards (the loop's pad is

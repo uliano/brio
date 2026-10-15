@@ -2219,7 +2219,7 @@ public:
         }
         if ((p & FmpI2cFlag::bus_error) != 0u) {
             S::clear(FmpI2cClear::bus_error);
-            ++berr_count_;
+            berr_count_ = static_cast<uint16_t>(berr_count_ + 1u);
         }
         if ((p & FmpI2cFlag::arb_lost) != 0u) {
             // The bus is no longer ours: the silicon has released the lines
@@ -2496,7 +2496,8 @@ private:
     static inline uint8_t pos_ = 0;
     static inline volatile Phase phase_ = Phase::idle;
     static inline uint8_t status_ = i2c_ok;
-    static inline uint16_t berr_count_ = 0;
+    // Bumped by error_isr(), read from thread context: a volatile word.
+    static inline volatile uint16_t berr_count_ = 0;
     static inline FmpI2cSpeed applied_ = FmpI2cSpeed::standard_100k;
     static inline FmpI2cTiming table_[fmpi2c_speed_count]{};
     static inline bool valid_[fmpi2c_speed_count]{};

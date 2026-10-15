@@ -1847,7 +1847,7 @@ private:
         Tenure t{};
         uint16_t pos = 0;        ///< frames taken back in the current phase
         uint16_t sent = 0;       ///< frames written in the current phase
-        uint16_t overruns = 0;   ///< saturating
+        volatile uint16_t overruns = 0;   ///< saturating; the pump's handler bumps it, the thread reads it
         uint8_t ahead = 1;       ///< frames the pump keeps in flight: 1 or 2
         bool in_cmd = false;
         bool engined = false;    ///< the data phase is the engines'
@@ -2132,7 +2132,7 @@ private:
             if ((sr & SPI_SR_OVR) != 0u) [[unlikely]] {
                 State& s = st_;
                 if (s.overruns != UINT16_MAX) {
-                    ++s.overruns;
+                    s.overruns = static_cast<uint16_t>(s.overruns + 1u);
                 }
                 s.status = spi_overrun;
                 return true;
@@ -2177,7 +2177,7 @@ private:
     [[gnu::noinline]] static bool end_overrun() {
         State& s = st_;
         if (s.overruns != UINT16_MAX) {
-            ++s.overruns;
+            s.overruns = static_cast<uint16_t>(s.overruns + 1u);
         }
         s.status = spi_overrun;
         s.in_cmd = false;

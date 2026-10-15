@@ -1126,7 +1126,7 @@ public:
         if (!busy_) {
             return false;
         }
-        ++faults_;
+        faults_ = faults_ + 1u;
         Channel::stop();
         busy_ = false;
         in_flight_ = 0;
@@ -1178,7 +1178,7 @@ private:
     static inline uint32_t ccr_ = 0;
     static inline uint8_t armed_ = 0;
     static inline uint16_t in_flight_ = 0;
-    static inline uint32_t faults_ = 0;
+    static inline volatile uint32_t faults_ = 0;   // abandon() runs in handlers too
     static inline volatile bool busy_ = false;
 };
 
@@ -1410,7 +1410,7 @@ public:
     /// channel stopped with its binding standing. Cold and out of line,
     /// DmaTxEngine::abandon()'s reason.
     [[gnu::noinline, gnu::cold]] static bool abandon() {
-        ++faults_;
+        faults_ = faults_ + 1u;
         Channel::stop();
         capacity_ = 0;
         taken_ = 0;
@@ -1449,7 +1449,7 @@ private:
     static inline uint8_t oneshot_armed_ = 0;   // the one-shot runs' flags, arm()'s DmaIrq
     static inline uint16_t capacity_ = 0;
     static inline uint16_t taken_ = 0;
-    static inline uint32_t faults_ = 0;
+    static inline volatile uint32_t faults_ = 0;   // abandon() runs in handlers too
     // The ring's binding: the word with CIRC, the storage, its length.
     static inline uint32_t ring_ccr_ = 0;
     static inline volatile void* ring_ = nullptr;
@@ -1580,7 +1580,7 @@ public:
         if (!busy_) {
             return false;
         }
-        ++faults_;
+        faults_ = faults_ + 1u;
         Channel::stop();
         busy_ = false;
         return true;
@@ -1616,7 +1616,7 @@ private:
     static inline uint32_t ccr_ = 0;
     static inline uint8_t armed_ = 0;
     static inline uint16_t items_ = 0;
-    static inline uint32_t faults_ = 0;
+    static inline volatile uint32_t faults_ = 0;   // abandon() runs in handlers too
     static inline volatile bool busy_ = false;
 };
 

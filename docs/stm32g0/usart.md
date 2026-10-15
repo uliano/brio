@@ -1348,6 +1348,22 @@ SKIPPED with their reason; letter `x`, outside `z` and `t`, is letter
   HSI16 running the HSI16 kernel was not rescued (letter `w`), so 2.2.4
   is not the clock request alone: it is the HSI16 kernel's on a divided
   HSI, and a USART on the LSE is the way round it.
+- **THE TASK under the address-match wake** (`u`, twelve runs): a `Uart`
+  naming `wake_from_stop = address_match` with its FIFO unstated comes
+  up with the FIFO OFF, the option's default (33.5.21); the program
+  states address 5 on the resource with the instance down. The far `send`
+  sends 0x7E..0x85 at 2400 - two data frames, then six address marks of
+  which the last alone is 5's, a frame every twelve bits (5.0 ms, the far
+  peer's two-bit gap). UNDER MUTE MODE the matching address alone ends
+  the Stop: the task counts one wake, the backstop never fires, its ring
+  holds 0x85 and nothing else. WITHOUT MUTE MODE the address does not
+  gate the wake: the task's own RXNEIE is a wake-up source (33.5.21's
+  first bullet), the Stop ends at the FIRST frame - 39 ms before the
+  mute leg's in every run, seven pitches being 35.0 ms, read on the RTC
+  at 3.9 ms a unit - and the ring takes all eight frames, WUF still
+  counted once when 0x85 matches with the core awake. So the option
+  alone wakes on any frame; a program that wants its address alone to
+  wake it sets mute mode beside it.
 
 ### The rendezvous's bound
 
@@ -1605,10 +1621,6 @@ Implemented, not bench-verified:
   the one-register transport, which `brio check stm32g0` proves at
   compile time); one run of `test_stm32_serial` on the board measures
   it.
-- The default under a wake on an ADDRESS MATCH: a Uart naming
-  `wake_from_stop = address_match` with `fifo` unstated keeps the FIFO
-  off, and no suite builds one - letter w arms that wake through the
-  resource, with mute mode set.
 - On the STM32G071RB, **the smartcard CK ladder, the synchronous
   master's CK census and both IRTIM counting legs** - every one an edge
   counter with no CPU, which is exactly the path ES0418 2.2.4 breaks on
