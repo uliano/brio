@@ -683,6 +683,26 @@ other's `spi_peer` - in the one after it.
   byte-exact through the loop, ONE channel interrupt for the transaction
   and no SPI one; the same frames over buffers one byte off take the
   pump, sixteen SPI interrupts and no channel one, byte-exact too.
+- **A POLLED WAIT THAT RUNS OUT ends `spi_stalled`** (letter f, both
+  parts): a polled write of 16 frames started with SPI1's gate closed
+  under the engine - every STATR load reading zero, so TXE never comes -
+  returned `spi_stalled` after 1596908 to 1596912 cycles on the
+  CH32V203C8T6 and 1331207 to 1331239 on the CH32V303VCT6, over the
+  budget's 132768 spins: 12.03 and 10.03 cycles a spin of a loop of five
+  instructions (the STATR load, the bit test, the budget's decrement and
+  test, the branch - poll_write's in the release listing), so the bound
+  the suite judges, 5 to 20 cycles a spin, holds on both; the same
+  request with the gate open again ran `spi_ok`. Ten runs a part.
+- **THE TRANSMIT INTERRUPT ON A HOST** (letter f): SPI1 bare, no pad
+  handed over, a vector writing the next frame on each TXE and silencing
+  TXEIE after the last - 64 frames at /64 in 65 entries, every frame out
+  in order by the CRC unit's own sum (TCRCR 0x1E, the bitwise loop's),
+  back to back: 32883 to 32900 cycles on the CH32V203C8T6 and 32891 to
+  32908 on the CH32V303VCT6 against the frames' 32768, ten runs a part.
+  `txe_interrupt()` and the resource's `isr()` reporting TXE under its
+  enable are what it exercises; the host ENGINE still runs on RXNE alone
+  (the class comment), this being the shape of a transmit-only stream
+  with no reader.
 - **THE OVERRUN ORACLE AND THE HOST UNDER IT**: the vendor's
   two-in-flight shape run on the resource at every code and width, 1024
   frames a run, eight runs a point under a console print in flight,
@@ -694,7 +714,14 @@ other's `spi_peer` - in the one after it.
   receive never put in its way. On the CH32V303VCT6 the same boundary:
   five to eight runs of eight lost a frame at 16 to 128 cycles a frame,
   none at 256 and above, and the host's sixty-four points finished
-  every run `spi_ok` with no overrun.
+  every run `spi_ok` with no overrun. ON A PB1 INSTANCE THE BOUNDARY
+  MOVES ONE CODE (`spi2.ahead`, `spi2.live`, SPI2 at 72 MHz of bus under
+  144 of HCLK, both parts): the oracle lost a frame in five to eight runs
+  of eight at 32, 64 and 128 cycles a frame - /2, /4 and /8 in 8-bit
+  frames, /2 and /4 in 16-bit ones - and in none at 256 and above, /16 and
+  /8; the host, its `write_ahead_from()` reporting /16 and /8, finished its
+  sixty-four points `spi_ok` with no overrun - the threshold's arithmetic
+  per bus share measured where it differs from SPI1's.
 - **A HOLD-OFF DECLARED TOO SHORT LOSES FRAMES, the honest one none**
   (`bench_vx03`'s letter e, `spi.held`, MISO floating, 144 MHz): the
   default host (200 cycles, two frames of a receive in flight from /32)
@@ -884,7 +911,7 @@ declines by name.
 
 ### The pair: the CH32V203C8T6 and the CH32V303VCT6
 
-`test_vx03_spi`'s second set (`y`, letters d, j, k, l, m) on each board
+`test_vx03_spi`'s second set (`y`, letters d, j, k, l, m, n, o) on each board
 against the other's `spi_peer`, both at 144 MHz on their crystals: the
 CH32V203C8T6's SPI2 (PB12..PB15) wired to the CH32V303VCT6's SPI3 on its
 second column (PA4, PC10, PC11, PC12), both selects hardware NSS pads,
@@ -900,8 +927,9 @@ judged from /4 down (a half period holds the 20 ns SCK edge the tables
 allow into 30 pF), this end's read-back from /8 down (the client's MISO
 valid 25 ns after its edge and the host's 5 ns of setup inside the half
 period), the far POLLED run from /16 for 8-bit frames and /8 for 16-bit
-ones (two of its turns inside a frame). Ten runs of `y` each way, every
-verdict green in all twenty (32 a run).
+ones (two of its turns inside a frame). Ten runs of letters d, j, k, l
+and m each way, every verdict green in all twenty; ten runs of n and o
+each way, green; `y` whole at 38 verdicts, green each way.
 
 - **THE LADDER, both ways, every host shape**: the polled request, the
   pump and the engines against the far client's DMA serve, and the polled
@@ -990,6 +1018,30 @@ verdict green in all twenty (32 a run).
   SSOE set keeps its NSS pad high under SPE until the first frame is
   written, drives it low from then to the disable, and the far client it
   frames carries sixteen frames exact both ways.
+- **`recover()` AFTER A TRANSACTION A SECOND DEVICE KILLED** (letter n):
+  a pumped write of 2000 frames at /256 (57 ms) under a TIMED SpiBus (a
+  per-bus timeout of 120 ms), this host's NSS pad made the multi-host
+  input under the engine, and the far chip's ss_pulse taking the select
+  low 30 ms after its ack: MODF 24 to 25 ms into the transaction - SPE
+  and MSTR gone, so the pump's RXNE never came and no completion was
+  posted - the arbiter's answer `spi_timeout` exactly 120 ms after the
+  post, and after `recover()` the block a software-selected host again,
+  enabled, MODF down (the reset pulse is the recovery's), the same
+  arbiter carrying the next transaction `spi_ok` and the command channel
+  answering. Ten runs each way.
+- **`rebase()` UNDER A DYNAMICCLOCK** (letter o): the pair's host a user
+  of a DynamicClock of 144, 96 and 48 MHz on the HSI's PLL, a ceiling of
+  6 MHz declared at init(), each switch's fan-out leaving the engine's
+  bus at 72, 48 and 48 MHz, the ceiling at /16, /8 and /8 (4.5, 6 and
+  6 MHz), and the write-ahead codes at /16 and /8, /16 and /8, /32 and
+  /16 for 8- and 16-bit frames - each what the new bus and its share of
+  HCLK make it; and at every rate a request at /2 ran clamped to the
+  ceiling, 32 frames exact both ways against the far client in 8404 to
+  8431, 5009 to 5190 and 2804 to 2894 cycles (the two parts together)
+  against floors of 6144, 4096 and 2048 - no bit shorter than HCLK over
+  6 MHz. Ten runs each
+  way. The cs_setup timing rebase() also recomputes is not observed by
+  the letter.
 - **The rest, against a foreign client**: a bit-order mismatch an exact two-way reversal; a client that
   never drains keeps ONE frame and raises OVR; the select a real wire; a
   ten-second stress at 4.5 MHz, polled and engined in turn, 23 exchanges
@@ -1052,16 +1104,10 @@ Driver gaps:
 
 Implemented but not bench-verified, each with what would measure it:
 
-- **A polled wait that runs out** (`spi_stalled`): every polled loop
-  counts one spin budget down and ends the transaction with that code,
-  the select raised and the receive side flushed; no letter stops the
-  block's clock under a transaction. A request started with the
-  instance's APB gate closed (`Rcc` with SPI1's enable down) would
-  measure it: the wall of the budget, the code in the reply.
-- **The write-ahead threshold on SPI2 and SPI3**: computed per bus share
-  by the same arithmetic (one code lower than SPI1's above 72 MHz of
-  HCLK) and reported by `write_ahead_from()`; letter e runs on SPI1, and
-  the oracle on a PB1 instance would measure it.
+- **SPI3's own write-ahead codes**: the same PB1 share as SPI2's, which
+  `bench_vx03`'s letter e measures; SPI3's pads on the CH32V303VCT6's
+  board are the evaluation board's jumpers and the pair's link, and the
+  oracle run on SPI3 would close it by name.
 - **The high-speed read at 72 MHz of SCK**, SPI1's /2 - the rate the
   mode is for - and **HSRXEN2**: on the CH32V303 board the only far end
   at that rate is SPI2 as a client on a 72 MHz bus, which does not keep
@@ -1079,13 +1125,7 @@ Implemented but not bench-verified, each with what would measure it:
   a free pad, on the CH32V303VCT6's it is the pair's SPI select wire. A
   letter on the CH32V203C8T6 driving SSOE's output on PA4, and a second
   host's select into it, would measure it.
-- **`recover()` after a wedged transaction, and the arbiter's per-bus
-  timeout with it**: a lost completion has to be staged, and that wants
-  a second device that can hold the bus.
-- **`rebase()` and the SCK ceiling across a clock change**: the fan-out
-  is written and compiled, and no suite drives this chapter under a
-  `DynamicClock` yet.
-- **The transmit interrupt (TXEIE) on a host**: the host engine arms
-  RXNE alone, and a transmit-only stream with no reader would be its
-  first user; on a client, answers written from TXE one frame ahead are
-  measured above.
+- **`rebase()`'s cs_setup timing**: the delay rate it recomputes is
+  written and compiled, and letter o's requests carry no setup time; a
+  request with `cs_setup_us` timed from the select's fall to the first
+  edge at two rates would measure it.

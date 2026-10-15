@@ -1660,7 +1660,7 @@ private:
         uint8_t rx_left;
         uint8_t addr;
         uint8_t freq;         ///< CTLR2.FREQ in force
-        uint8_t status;
+        volatile uint8_t status;   ///< written by the vectors, read by the thread
         volatile Phase phase;
     };
     static inline Tenure t_{nullptr, nullptr, 0, 0, 0, 0, 0, i2c_ok, Phase::idle};
@@ -1877,7 +1877,7 @@ public:
     }
 
 private:
-    static inline bool host_reads_ = false;
+    static inline volatile bool host_reads_ = false;   ///< written by the event vector
 };
 
 // =============================================================================

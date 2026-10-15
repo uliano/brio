@@ -136,7 +136,7 @@
 //      with the probe attached, the two columns on the debug port's pads
 //      refused by init()
 //
-// THE TWO-BOARD KEY `y`, letters 1 to 8, outside z: the desk pair's serial
+// THE TWO-BOARD KEY `y`, letters 1 to 9, outside z: the desk pair's serial
 // link - the CH32V203C8's USART3 (PB10/PB11) crossed to UART4 on the
 // CH32V303's second column (PB0/PB1), vx03_link_dut.hpp - as the DUT, the
 // far chip running usart_peer, driven in band over the link itself
@@ -163,6 +163,11 @@
 //   7  half duplex on the TX pad hearing the far chip's drive_rxd, and the
 //      wired AND of an open-drain wire under its collide
 //   8  mute by address mark and by idle line, IrDA between two WCH codecs
+//   9  the link's receive ring: rx_pending() on the ring and on the
+//      interrupt receiver, the error counts under the ring from trains of
+//      errored frames the far engine draws (two and twelve bits apart),
+//      and the burst edge from the vector - a burst of one, a burst of
+//      sixteen at 1 Mbaud told within two frames on one interrupt
 // and on the CH32V303RC and VC, in the same key:
 //   n  UART4'S ENGINES ON DMA2, on its second column: a message round the
 //      far echo, four kilobytes each way at 921600 with every counter
@@ -186,7 +191,7 @@
 //
 // build: boards = v203c6,v203c8,v303vc
 // build: groups = abcdefghij,klmqrs
-// build: groups.v203c8 = abcdefghijklmqrs,12345678
+// build: groups.v203c8 = abcdefghijklmqrs,123456789
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -3823,6 +3828,245 @@ void t8_modes() {
     done();
 }
 
+// ---------------------------------------------------------------------------
+// 9 - the link's receive ring: rx_pending(), a broken stream's counts, and
+//     the burst edge from the vector
+// ---------------------------------------------------------------------------
+
+/// The link with no engine at all: the interrupt receiver whose
+/// rx_pending() letter 9 asks beside the ring's.
+using LinkPlain = Uart<link_n, P, 64, 64, UartFormat{}, NoDmaEngine, NoDmaEngine, link_column>;
+/// The link's USART vector entries while letter 9's ring owns it.
+volatile uint32_t link_entries = 0;
+
+/// Transport `T` up on the link at `rate` after an action was commanded:
+/// the port through its reset line, the vectors given to `owner`, the RX
+/// pad pulled up as letter 6 does.
+template <typename T>
+bool link_up(uint8_t owner, uint32_t rate) {
+    W::bus_clock(true);
+    W::reset();
+    link_owner = owner;
+    link_edges = 0;
+    link_entries = 0;
+    const bool up = T::init(clock, rate);
+    WRx::input(PinPull::up);
+    return up;
+}
+
+/// A train drawn by the far engine at 115200: `count` frames of the
+/// counting pattern from `first`, the stop cell held low for the whole bit
+/// (each frame a framing error carrying its byte), `idle16` sixteenths of
+/// a bit between frames.
+link::Params broken_train(uint8_t first, uint16_t count, uint16_t idle16) {
+    link::Params a{};
+    a.cfg.rate = 115'200;
+    a.count = count;
+    a.value = first;
+    a.pattern = link::pattern_counting;
+    a.cell = 9;
+    a.pct = 0;
+    a.aux8 = 100;
+    a.aux16 = idle16;
+    a.ms = 400;
+    return a;
+}
+
+/// What the ring held after a train: the bytes in order from `first`, and
+/// how many.
+uint16_t ring_take(uint8_t first, bool& in_order) {
+    uint16_t got = 0;
+    uint8_t want = first;
+    in_order = true;
+    uint8_t b = 0;
+    while (LinkRing::read_byte(b)) {
+        if (b != want) {
+            in_order = false;
+        }
+        ++want;
+        ++got;
+    }
+    return got;
+}
+
+void t9_ring() {
+    if (!ready()) {
+        done();
+        return;
+    }
+    Dma<link_rx_slot.controller>::open();
+
+    // ---- rx_pending(), on the ring and on the interrupt receiver ----
+    // 37 frames of the far chip's counting pattern at 115200 (3.2 ms of
+    // wire), waited out with a margin; then ten read, then the rest.
+    constexpr uint16_t n = 37;
+    bool pending_ok = true;
+    for (uint8_t shape = 0; shape < 2u; ++shape) {
+        link::Params a{};
+        a.cfg.rate = 115'200;
+        a.count = n;
+        a.value = 0x40;
+        a.pattern = link::pattern_counting;
+        a.ms = D::bound_ms(115'200, n);
+        const bool acted = D::act(link::Op::send, a);
+        const bool up = acted && (shape == 0u ? link_up<LinkRing>(1, 115'200) : link_up<LinkPlain>(3, 115'200));
+        D::wait_ms(20);
+        uint32_t p0 = 0;
+        uint32_t p1 = 0;
+        uint32_t p2 = 0;
+        bool in_order = true;
+        uint8_t b = 0;
+        uint8_t want = 0x40;
+        if (shape == 0u) {
+            p0 = LinkRing::rx_pending();
+            for (uint8_t i = 0; i < 10u && LinkRing::read_byte(b); ++i) {
+                in_order = in_order && b == want++;
+            }
+            p1 = LinkRing::rx_pending();
+            while (LinkRing::read_byte(b)) {
+                in_order = in_order && b == want++;
+            }
+            p2 = LinkRing::rx_pending();
+            LinkRing::release();
+        } else {
+            p0 = LinkPlain::rx_pending();
+            for (uint8_t i = 0; i < 10u && LinkPlain::read_byte(b); ++i) {
+                in_order = in_order && b == want++;
+            }
+            p1 = LinkPlain::rx_pending();
+            while (LinkPlain::read_byte(b)) {
+                in_order = in_order && b == want++;
+            }
+            p2 = LinkPlain::rx_pending();
+            LinkPlain::release();
+        }
+        link_owner = 0;
+        link::Report r{};
+        const bool have = D::report(r, 0);
+        const bool ok = up && have && r.count == n && p0 == n && p1 == n - 10u && p2 == 0u && in_order &&
+                        want == static_cast<uint8_t>(0x40u + n);
+        pending_ok = pending_ok && ok;
+        print(serial, "  ", shape == 0u ? "the ring" : "the interrupt receiver", ": rx_pending() ", p0, " with ", n,
+              " arrived, ", p1, " after ten read, ", p2, " after the rest", in_order ? "" : " (NOT IN ORDER)", crlf);
+    }
+    judge("RX_PENDING() COUNTS WHAT ARRIVED AND WAS NOT READ, on the receive ring and on the interrupt receiver: "
+          "37, then 27 after ten read, then none",
+          pending_ok);
+
+    // ---- a broken stream under the ring: the counts the channel's read bounds ----
+    // Eight frames each with its stop cell drawn low: every one a framing
+    // error carrying its byte. Two bits apart (no idle line between them)
+    // the header's rule is that a run of errored frames counts every other
+    // one - four of eight - each byte stored. Twelve bits apart there is an
+    // idle line after each frame, but the vector never sees one: after a
+    // counted error it waits for a frame with IDLEIE down, that frame's
+    // read clears the IDLE standing, and the idle the clearing frame armed
+    // is forgotten (the header) - so the train counts as a run, four of
+    // eight again.
+    constexpr uint16_t train = 8;
+    for (uint8_t k = 0; k < 2u; ++k) {
+        const uint16_t idle16 = k == 0u ? 32u : 192u;
+        const uint8_t first = static_cast<uint8_t>(0x60u + 0x10u * k);
+        const bool acted = D::act(link::Op::stage, broken_train(first, train, idle16));
+        const bool up = acted && link_up<LinkRing>(1, 115'200);
+        D::wait_ms(20);
+        bool in_order = false;
+        const uint16_t got = ring_take(first, in_order);
+        const uint16_t fe = LinkRing::frame_errors();
+        const uint16_t ore = LinkRing::hw_overruns();
+        const uint16_t lost = LinkRing::rx_overruns();
+        LinkRing::release();
+        link_owner = 0;
+        link::Report r{};
+        const bool drawn = D::report(r, 0) && (r.flags & link::report_ran) != 0u && r.count == train;
+        print(serial, "  eight frames, each stop drawn low, ", k == 0u ? "two bits" : "twelve bits", " apart: ", got,
+              " stored", in_order ? " in order" : " NOT IN ORDER", ", FE counted ", fe, ", ORE ", ore,
+              ", laps missed ", lost, ", ", link_entries, " USART entries, ", link_edges, " edges", crlf);
+        if (k == 0u) {
+            judge("A RUN OF ERRORED FRAMES under the ring: every byte stored in order, the framing errors counted "
+                  "every other one (4 of 8), nothing else counted",
+                  up && drawn && got == train && in_order && fe == train / 2u && ore == 0u && lost == 0u);
+        } else {
+            judge("... and with an idle line after every frame the same: the vector never sees one, eight stored "
+                  "in order, four counted",
+                  up && drawn && got == train && in_order && fe == train / 2u && ore == 0u && lost == 0u);
+        }
+    }
+
+    // ---- the burst edge from the vector, nothing polled ----
+    // At 1 Mbaud a frame is 1440 core cycles. A burst of one: told, its
+    // byte there. A burst of sixteen: the last byte's landing stamped on
+    // the channel's count, the edge on the vector's counter - the idle line
+    // a frame after the last stop bit, so within two frames - and at most
+    // two USART entries for the burst, none a byte.
+    constexpr uint32_t frame = 10u * (SysClock::hz / 1'000'000u);
+    bool one_ok = true;
+    for (uint8_t k = 0; k < 3u; ++k) {
+        link::Params a{};
+        a.cfg.rate = 1'000'000;
+        a.count = 1;
+        a.value = static_cast<uint8_t>(0x21u + k);
+        a.pattern = link::pattern_fixed;
+        a.ms = 50;
+        const bool acted = D::act(link::Op::blast, a);
+        const bool up = acted && link_up<LinkRing>(1, 1'000'000);
+        D::wait_ms(10);
+        bool in_order = false;
+        const uint32_t edges = link_edges;
+        const uint16_t got = ring_take(a.value, in_order);
+        LinkRing::release();
+        link_owner = 0;
+        print(serial, "  a burst of one frame: ", edges, " edge(s), ", got, " byte read", crlf);
+        one_ok = one_ok && up && edges >= 1u && got == 1u && in_order;
+        link::Report r{};
+        (void)D::report(r, 0);
+    }
+    judge("a burst of one frame into the ring is told, every time, its byte there", one_ok);
+    {
+        link::Params a{};
+        a.cfg.rate = 1'000'000;
+        a.count = 16;
+        a.value = 0x30;
+        a.pattern = link::pattern_counting;
+        a.ms = 50;
+        const bool acted = D::act(link::Op::blast, a);
+        const bool up = acted && link_up<LinkRing>(1, 1'000'000);
+        const uint32_t start = LinkRxEngine::remaining();
+        const uint32_t t0 = Ticker::millis();
+        uint32_t landed = 0;
+        uint32_t told = 0;
+        bool edge_seen = false;
+        while (up && Ticker::millis() - t0 < 30u) {
+            if (landed == 0u && start - LinkRxEngine::remaining() >= 16u) {
+                landed = Ticker::cycles();
+                edge_seen = link_edges != 0u;
+            }
+            if (landed != 0u && link_edges != 0u) {
+                told = Ticker::cycles();
+                break;
+            }
+        }
+        const uint32_t late = told - landed;
+        D::wait_ms(2);
+        bool in_order = false;
+        const uint16_t got = ring_take(0x30, in_order);
+        const uint32_t entries = link_entries;
+        const uint32_t edges = link_edges;
+        LinkRing::release();
+        link_owner = 0;
+        link::Report r{};
+        (void)D::report(r, 0);
+        print(serial, "  16 frames at 1 Mbaud: ", edges, " edge(s), the edge ", late, " cycles after the last byte "
+              "landed (", late * 10u / frame, " tenths of a frame), ", entries, " USART interrupt(s), ", got, " read",
+              in_order ? " in order" : " NOT IN ORDER", edge_seen ? " (an edge was told before the last byte)" : "",
+              crlf);
+        judge("THE BURST EDGE ON THE LINK'S RING: sixteen frames read whole, told within two frames of the last "
+              "byte's landing, with at most two USART interrupts and none a byte",
+              up && got == 16u && in_order && told != 0u && late <= 2u * frame && entries >= 1u && entries <= 2u);
+    }
+    done();
+}
+
 }  // namespace two
 
 // ===========================================================================
@@ -4520,9 +4764,14 @@ template <bool on = link_present>
 bool link_usart_vector() {
     if constexpr (on) {
         if (two::link_owner == 1u) {
+            two::link_entries = two::link_entries + 1u;
             if (two::LinkRing::isr()) {
                 two::link_edges = two::link_edges + 1u;
             }
+            return true;
+        }
+        if (two::link_owner == 3u) {
+            (void)two::LinkPlain::isr();
             return true;
         }
         if constexpr (v303_pair) {
@@ -4597,6 +4846,7 @@ void register_two_letters() {
                             two::t6_engine);
         bench.second_letter('7', "HALF DUPLEX: HDSEL hearing a second chip, the wired AND", two::t7_half_duplex);
         bench.second_letter('8', "MUTE AND IRDA across the wire", two::t8_modes);
+        bench.second_letter('9', "THE RING: rx_pending(), a broken stream's counts, the burst edge", two::t9_ring);
         if constexpr (v303_pair) {
             bench.second_letter('n', "UART4'S ENGINES ON DMA2 against the far chip: 4 KB each way",
                                 two::tn_pair_engines<>);

@@ -2087,8 +2087,10 @@ private:
     static inline uint16_t n_ = 0;                ///< frames in the phase
     static inline uint16_t rd_ = 0;               ///< frames read back
     static inline uint16_t wr_ = 0;               ///< frames written
-    static inline bool in_cmd_ = false;
-    static inline uint8_t status_ = spi_ok;
+    /// Both written by the vectors and read by the thread (busy(),
+    /// status()): volatile.
+    static inline volatile bool in_cmd_ = false;
+    static inline volatile uint8_t status_ = spi_ok;
     static inline volatile bool dma_done_ = false;
     static inline volatile bool dma_active_ = false;
     /// The dummies of a one-sided data phase, wide enough for either

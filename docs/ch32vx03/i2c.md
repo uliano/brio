@@ -651,11 +651,39 @@ not this table's and is left out. At 400 kHz:
 | write of 255, engines | 6, 783 | - | 4, 542, x 1.00 | 4, 525, x 1.00 |
 | read of 255, engines | 3, 461 | - | 3, 417, x 1.00 | 3, 411, x 1.00 |
 
-- **The pump's handler: 118 cycles a byte written and 131 a byte read
-  on the CH32V203C8T6, 93 and 105 on the CH32V303VCT6** (120 and 162
-  before; the EVT's 174 and 227), the stamps' own read of the ruler
-  inside each; the hardware prologue is outside the stamps. A 255-byte
-  write is x 1.00 on the pump and the engines alike.
+- **The pump's handler: 116 to 117 cycles a byte written and 129 to 130
+  a byte read on the CH32V203C8T6, 87 to 90 and 97 to 105 on the
+  CH32V303VCT6** (120 and 162 before; the EVT's 174 and 227), the stamps'
+  own read of the ruler inside each; the hardware prologue is outside the
+  stamps. A 255-byte write is x 1.00 on the pump and the engines alike.
+- **WHY THE CH32V303VCT6's HANDLER IS CHEAPER ON THE SAME SOURCE: THE
+  V4B PAYS MORE FOR A TAKEN BRANCH.** The two release listings of the
+  event handler are the same instructions in the same order but for the
+  frame - the V4F's body, behind its trampoline, saves ra and three more
+  registers, which is MORE work - so the gap is the cores' and not the
+  code's. `bench_vx03`'s letter i prices each class the path uses, at
+  the letter's 120 MHz, a loop of 1024 turns the best of four: a load or
+  a store of SRAM, of PB2 and of PB1 (6.02 cycles a turn on both, the
+  bridge's two over PB2's), of the STK's count, a multiply, eight loads
+  back to back of SRAM, of the STK and of PB1 (18.1 to 19.3, 18.2 and
+  48.0 to 48.5 on both), a turn of 32 aligned or word-straddling 32-bit
+  instructions (36.4 to 37.4 on both) - THE SAME ON THE TWO DIES, a
+  loop's placement in the image moving a figure by one on either. The
+  class that differs is the TAKEN BRANCH: a turn with a forward branch
+  taken cost one to three cycles more than the same turn with it not
+  taken on the CH32V203C8T6 (two images), none to one more on the
+  CH32V303VCT6; taken to a 32-bit instruction that straddles a word it
+  cost two more than to an aligned one on the CH32V203C8T6, one more on
+  the CH32V303VCT6 - in loops where any predictor is warm. The pump's
+  path is a chain of taken tests - the letter's own watch and trace
+  flags, the ruler's retry checks in each stamp, the engine's event flags
+  one after another - and the ruler itself, the same straight code with
+  its taken tests, reads in 32 cycles on the CH32V203C8T6 and 23 on the
+  CH32V303VCT6 (letter r, 144 MHz). The QingKe V4 manual lists BHT, BTB
+  and RAS for the whole series and says nothing that sets the two apart.
+  Not closed: the gap (27 to 32 cycles an entry) is not summed from a
+  count of the taken branches on the byte's path, nor is a branch's cost
+  with a cold predictor - the handler's case - measured.
 - **Where a short tenure's fixed cost goes**, from the timeline of a
   one-byte write at 400 kHz (every entry of the host's vectors, cycles
   from the `start()` call): the START's SB at 657 - the silicon's

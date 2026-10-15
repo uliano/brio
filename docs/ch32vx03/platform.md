@@ -170,6 +170,16 @@ platform does not compile (util/placement.hpp's `HotPlacement`). The
 tail above the window is the one code flash here behind a wait - 20
 cycles a word read (nvm.md) - and no script places code there.
 
+THE TWO CORES PART AT A TAKEN BRANCH: in a loop where any predictor is
+warm, a turn with a forward branch taken costs one to three cycles more
+than the same turn with it not taken on the CH32V203C8T6's V4B and none
+to one more on the CH32V303VCT6's V4F, and a taken branch to a 32-bit
+instruction straddling a word two more than to an aligned one on the
+V4B, one more on the V4F - where every load, store, multiply and
+straight-line fetch `bench_vx03`'s letter i prices costs the same on
+both. It is what makes the same handler cheaper on the V4F
+([i2c.md](i2c.md), the pump's handler).
+
 ## Types and verbs
 
 `Ch32vx03Platform<TB>`

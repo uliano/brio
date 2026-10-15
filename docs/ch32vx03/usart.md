@@ -270,7 +270,11 @@ read and the edge reported, then WAITING FOR A FRAME (RXNEIE alone),
 whose entry reads NO STATR - a status read there would arm the clear the
 next frame's own read performs, and that frame's error would vanish
 unseen - but CNTR: a moved count turns the vector back and reports the
-edge again, which is the only edge a burst of one frame gets. A frame
+edge again, which is the only edge a burst of one frame gets. A port
+with no transmit engine serves its interrupt transmitter from the same
+vector, so that entry asks CTLR1 whether TXEIE stands and reads STATR for
+TXE only then - the interrupt transmitter's entry is one of the status
+reads that arm the clear (above). A frame
 the channel NEVER takes - a channel stopped by a transfer error, or one
 whose handshake another peripheral's held request froze - leaves RXNE
 standing under RXNEIE, a level that would re-enter the vector for ever
@@ -447,6 +451,28 @@ from both directions unless one is named.
   channel 3, UART4's on DMA2's channel 3 - 450000 bytes in sequence with
   no overrun, no frame error and no fault, the vector entered twice a
   512-byte lap (1757 edges for 450000 bytes) and never a byte.
+- **THE RING'S COUNTS AND ITS EDGE, from the far chip** (key letter 9,
+  each chip's receive ring on the link - USART3's on DMA1's channel 3,
+  UART4's on DMA2's channel 3 - ten runs each way). Eight frames DRAWN by
+  the far engine at 115200 with their stop cell low - every one a
+  framing error carrying its byte - two bits apart: all eight stored in
+  order and FE counted FOUR, the every-other-one of the header's rule,
+  nine vector entries; twelve bits apart, an idle line after each frame,
+  the same four: the vector, waiting for a frame after each counted
+  error with IDLEIE down, never sees those idle lines (the next frame's
+  read clears the IDLE that stood, and the idle that frame armed is
+  forgotten). A burst of one frame at 1 Mbaud told, its byte there,
+  three of three; sixteen frames read whole on ONE USART interrupt, the
+  edge 1642 to 1671 cycles after the last byte landed in the ring (1.1
+  frames). `rx_pending()` read 37 with the far chip's 37 frames arrived,
+  27 after ten were read and none after the rest, on the ring and on the
+  interrupt receiver alike. A STATUS READ ON THE WAIT COSTS THE COUNT
+  WHOLE: the same ring reading STATR after the wait for a frame - for an
+  interrupt transmitter's TXE, with TXEIE down - arms the clear the next
+  frame's read performs, and after one counted error a run of errored
+  frames counts no more (FE 1 of 8, both spacings, both parts, measured
+  with that read in place); which is why the wait asks CTLR1 for TXEIE
+  and reads STATR only when the interrupt transmitter is live.
 - **UART4's engines on DMA2, on its second column** (the CH32V303VCT6):
   a message round the far chip's echo byte for byte; four kilobytes out of
   the transmit engine at 921600 counted clean and summed exact by the far
@@ -937,15 +963,13 @@ Implemented but not bench-verified, each with what would measure it:
   frame are letter o's branches for a die that has them, and the
   CH32V303VCT6 answered no to each; what would measure them is a
   CH32V303 of a lot whose penultimate sixth digit is not zero.
-- **The receive engine's error counts and its burst edge on the
-  CH32V303**: letters q and s run on the CH32V203C8T6's crossed pair, the
-  same block's, and the two-board key's ring counts only the CH32V303's
-  laps (two edges a lap at 4.5 Mbaud); its own pair retired, the far
-  chip's stage trains with breaks and its bursts of one and of sixteen
-  into UART4's ring are what would measure them there.
 - **The debug-port columns once the port is given up**: the refusal is
   measured with the probe attached; a program that gives the port up
   and then brings UART8 up on PA14/PA15 is what would measure the other
   side of it - with no probe attached.
-- **`rx_pending()`**: the surface the other strata share is compiled
-  here and exercised by the family fixture, and no letter asks it.
+- **Errors separated by a clean frame under the ring, from the far
+  chip**: key letter 9 draws trains in which every frame carries the
+  error (the far engine's pulse sits in every frame); a train mixing
+  clean and errored frames is letter q's, on the CH32V203C8T6's crossed
+  pair - the far chip's stage drawing a pulse in some frames only is what
+  would measure it on the CH32V303VCT6.

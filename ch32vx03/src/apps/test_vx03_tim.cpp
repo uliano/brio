@@ -84,6 +84,14 @@
 //   j  THE JUMPER: whether PA6 and PA1 are strapped together, and
 //      whether a pad in plain OUTPUT mode reaches a timer's capture
 //      input at all
+//   t  THE REPETITION COUNTER on TIM1 (and TIM8 where the part has it):
+//      the intervals between update flags at four RPTCR values edge-
+//      aligned and three centre-aligned, against the counts on the STK
+//   u  CENTRE-ALIGNED COUNTING on TIM3: when CC1IF rises in each of the
+//      three modes - the direction read at each rise, the gaps between
+//      them - and the wave itself, the same in all three, captured by TIM2
+//      over the PA6-PA1 jumper and, on the CH32V303, TIM8's by TIM4 over
+//      the PC6-PB8 one
 //   k  (the CH32V303) TIM8's PWM on PC6 CAPTURED BY TIM4 over the
 //      PC6-PB8 jumper: period and high time at five duties and four
 //      frequencies, rising and falling edges on two channels of one input
@@ -110,7 +118,15 @@
 //      into TIM8, TIM9 and TIM10, TIM8 and TIM5 as masters of the others,
 //      and TIM2's ITR1 with its AFIO field both ways
 //
+// THE 32 KB TIER does not hold the suite whole: its four parts build it
+// as two images (the groups line below; design/overview.md, "A suite's
+// image fits the family's smallest chip"), the time base to the tasks in
+// one, the break to the jumper with the repetition counter and the
+// centre-aligned letter in the other. The CH32V203C8 and the CH32V303 build
+// it whole.
+//
 // build: boards = v203c6,v203c8,v303vc
+// build: groups = abcdef,ghijtu
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -2220,6 +2236,294 @@ void ts_links() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// t - the repetition counter, and u - centre-aligned counting
+// ---------------------------------------------------------------------------
+
+/// THE BOUND OF EVERY INTERVAL BELOW. The timers count HCLK, the STK
+/// counts HCLK: an interval between two flags is an exact number of
+/// counter clocks, and what a stamp adds is its poll's lateness - one turn
+/// of the loop (some twenty cycles) and at most one handler between the
+/// flag and its stamp (the tick's, this image's only live vector, well
+/// under the 200 cycles this family's images are counted at, spi.md's
+/// hold-off) - so an interval read on the STK is good to 2 x 220 cycles:
+/// 500 at 144 MHz, three and a half microseconds.
+constexpr uint32_t stamp_slack_cycles = 500;
+
+/// `n` consecutive intervals, in core cycles, between rises of `flag` on
+/// timer T - each rise stamped on the STK and the flag cleared - and the
+/// counting direction read at each rise; false when a rise did not come
+/// within its bound.
+template <class T, uint8_t n>
+bool flag_intervals(uint16_t flag, uint32_t (&gaps)[n], TimDirection (&dir)[n + 1u], uint32_t limit_us) {
+    T::clear_flags(flag);
+    if (!wait_flag<T>(flag, limit_us)) {
+        return false;
+    }
+    Stopwatch w;
+    dir[0] = T::direction();
+    T::clear_flags(flag);
+    uint32_t last = 0;
+    for (uint8_t i = 0; i < n; ++i) {
+        while (!T::flag(flag)) {
+            if (w.us() > (i + 2u) * limit_us) {
+                return false;
+            }
+        }
+        const uint32_t now = w.cycles();
+        dir[i + 1u] = T::direction();
+        T::clear_flags(flag);
+        gaps[i] = now - last;
+        last = now;
+    }
+    return true;
+}
+
+bool near_cycles(uint32_t got, uint32_t want) {
+    return got + stamp_slack_cycles >= want && got <= want + stamp_slack_cycles;
+}
+
+/// THE REPETITION COUNTER on an advanced timer (14.4.13): one update event
+/// in RPTCR + 1 counter periods, edge-aligned at 100 us a period, and in
+/// the centre-aligned mode, where both the overflow and the underflow
+/// count (14.2.4: a period of 2 x ATRLR counts holding two of them) -
+/// four intervals between update flags at each setting against
+/// (RPTCR + 1) x the period, on the STK.
+template <uint8_t N>
+uint8_t repetition_round(uint8_t& cases) {
+    using T = Tim<N>;
+    uint8_t exact = 0;
+    cases = 0;
+    struct Case {
+        TimAlignment align;
+        uint8_t rep;
+    };
+    constexpr Case table[] = {{TimAlignment::edge, 0},        {TimAlignment::edge, 1},
+                              {TimAlignment::edge, 4},        {TimAlignment::edge, 255},
+                              {TimAlignment::center_both, 0}, {TimAlignment::center_both, 1},
+                              {TimAlignment::center_both, 3}};
+    for (const Case& c : table) {
+        ++cases;
+        T::init();
+        const uint32_t prescale = T::clock_hz(clock) / 1'000'000u;
+        // 100 us a period edge-aligned (ATRLR 99: a hundred counts); 100 us
+        // between an overflow and the next underflow centre-aligned (ATRLR
+        // 100: the counter climbs 0..100 and falls back).
+        const uint16_t arr = c.align == TimAlignment::edge ? 99u : 100u;
+        (void)T::configure({.prescaler = static_cast<uint16_t>(prescale - 1u),
+                            .period = arr,
+                            .alignment = c.align,
+                            .repetition = c.rep});
+        T::enable(true);
+        uint32_t gaps[4] = {};
+        TimDirection dir[5] = {};
+        const uint32_t per_event = (static_cast<uint32_t>(c.rep) + 1u) * 100u;   // microseconds
+        const bool got = flag_intervals<T, 4>(T::update_flag, gaps, dir, per_event * 3u + 100u);
+        T::enable(false);
+        const uint32_t want = per_event * (SysClock::hz / 1'000'000u);
+        bool ok = got;
+        for (const uint32_t g : gaps) {
+            ok = ok && near_cycles(g, want);
+        }
+        if (ok) {
+            ++exact;
+        }
+        print(serial, "  TIM", N, c.align == TimAlignment::edge ? " edge-aligned" : " centre-aligned",
+              ", RPTCR ", c.rep, " (read back ", T::repetition(), "): updates ", gaps[0], " ", gaps[1], " ",
+              gaps[2], " ", gaps[3], " cycles apart against ", want,
+              c.align == TimAlignment::edge
+                  ? ""
+                  : (dir[1] != dir[2] ? ", alternating"
+                                      : (dir[1] == TimDirection::down ? ", every one counting down (an overflow's)"
+                                                                      : ", every one counting up (an underflow's)")),
+              got ? "" : " (A FLAG DID NOT COME)", crlf);
+        T::release();
+    }
+    return exact;
+}
+
+void tt_repetition() {
+    all_off();
+    uint8_t cases = 0;
+    const uint8_t exact1 = repetition_round<1>(cases);
+    bench.verdict("TIM1's REPETITION COUNTER: one update in RPTCR + 1 periods, edge-aligned at 0, 1, 4 and 255 "
+                  "and centre-aligned at 0, 1 and 3 counting the overflow and the underflow each - every "
+                  "interval within 500 cycles of the counts",
+                  exact1 == cases);
+    if constexpr (tim_present(8)) {
+        const uint8_t exact8 = repetition_round<8>(cases);
+        bench.verdict("TIM8's, the same seven settings, the same bound", exact8 == cases);
+    }
+    all_off();
+}
+
+/// CENTRE-ALIGNED COUNTING on TIM3 (14.4.1's CMS): the counter climbs
+/// 0..ATRLR and falls back, and the three modes differ only in WHEN CC1IF
+/// rises - while counting down (1), up (2), or both (3). At 1 MHz, ATRLR
+/// 500 and a compare of 200, the up-count meets 200 at t = 200 us and the
+/// down-count at 800 us of each 1000: a flag a period apart in modes 1 and
+/// 2, the direction read at each rise the mode's own, and in mode 3 the
+/// gaps alternating 600 (up to down: 300 + 300) and 400 (down to up: 200 +
+/// 200) microseconds.
+bool centre_flags(TimAlignment mode, const char* name) {
+    Wave::init();
+    (void)Wave::configure({.prescaler = static_cast<uint16_t>(ticks_per_us - 1u), .period = 500, .alignment = mode});
+    (void)Wave::output_channel(0, {.mode = TimOutputMode::pwm1, .compare = 200});
+    Wave::update();
+    Wave::clear_flags(Wave::all_flags);
+    Wave::enable(true);
+    uint32_t gaps[6] = {};
+    TimDirection dir[7] = {};
+    const bool got = flag_intervals<Wave, 6>(Wave::compare_flag(0), gaps, dir, 2000);
+    Wave::enable(false);
+    uint8_t ups = 0;
+    for (const TimDirection d : dir) {
+        ups = static_cast<uint8_t>(ups + (d == TimDirection::up ? 1u : 0u));
+    }
+    const uint32_t us = SysClock::hz / 1'000'000u;
+    bool ok = got;
+    if (mode == TimAlignment::center_both) {
+        // Which half the first gap is depends on where the poll began: the
+        // gaps alternate, each the one its starting direction says.
+        for (uint8_t i = 0; i < 6u; ++i) {
+            const uint32_t want = dir[i] == TimDirection::up ? 600u * us : 400u * us;
+            ok = ok && near_cycles(gaps[i], want) && dir[i + 1u] != dir[i];
+        }
+    } else {
+        const TimDirection want_dir = mode == TimAlignment::center_down ? TimDirection::down : TimDirection::up;
+        for (uint8_t i = 0; i < 6u; ++i) {
+            ok = ok && near_cycles(gaps[i], 1000u * us);
+        }
+        for (const TimDirection d : dir) {
+            ok = ok && d == want_dir;
+        }
+    }
+    print(serial, "  ", name, ": CC1IF ", gaps[0] / us, " ", gaps[1] / us, " ", gaps[2] / us, " ", gaps[3] / us, " ",
+          gaps[4] / us, " ", gaps[5] / us, " us apart, ", ups, " of 7 rises counting up",
+          got ? "" : " (A FLAG DID NOT COME)", crlf);
+    return ok;
+}
+
+/// The CH32V303's TIM8 centre-aligned over the PC6-PB8 jumper, captured by
+/// TIM4's channels 3 and 4 as letter k does: ATRLR 1000 and a compare of
+/// 300 at 1 MHz - a period of 2000 counts and a high time of 600.
+template <uint8_t A = 8>
+void tu_centre_tim8() {
+    if constexpr (tim_present(A)) {
+        using T8 = Tim<A>;
+        constexpr Pad out_pad = tim_channel_pad(A, 0, 0);   // PC6
+        constexpr Pad in_pad = tim_channel_pad(4, 0, 2);    // PB8, TIM4's channel 3
+        using Out = TimPad<out_pad>;
+        using In = TimPad<in_pad>;
+        all_off();
+        v303_off<A>();
+        if (!strap_present<out_pad, in_pad>()) {
+            print(serial, "  no jumper (PC6 to PB8): TIM8's centre-aligned wave is not captured", crlf);
+            bench.verdict("TIM8's half is skipped and says so", true);
+            return;
+        }
+        T8::init();
+        (void)T8::remap(0);
+        (void)T8::configure({.prescaler = 143, .period = 1000, .alignment = TimAlignment::center_both});
+        (void)T8::output_channel(0, {.mode = TimOutputMode::pwm1, .compare = 300});
+        (void)T8::main_output(true);
+        T8::update();
+        T8::clear_flags(T8::all_flags);
+        Out::claim();
+        Quad::init();
+        (void)Quad::remap(0);
+        (void)Quad::configure({.prescaler = 143, .period = 0xFFFF});
+        (void)Quad::capture_channel(2, {.select = TimChannelSelect::direct, .polarity = TimCapturePolarity::rising});
+        (void)Quad::capture_channel(3, {.select = TimChannelSelect::indirect, .polarity = TimCapturePolarity::falling});
+        In::claim_input();
+        Quad::clear_flags(Quad::all_flags);
+        Quad::enable(true);
+        T8::enable(true);
+        wait_us(5000);
+        Quad::clear_flags(Quad::all_flags);
+        bool ok = wait_flag<Quad>(Quad::compare_flag(2), 20000);
+        const uint32_t r1 = Quad::compare(2);
+        Quad::clear_flags(Quad::compare_flag(3));
+        ok = ok && wait_flag<Quad>(Quad::compare_flag(3), 20000);
+        const uint32_t f = Quad::compare(3);
+        ok = ok && wait_flag<Quad>(Quad::compare_flag(2), 20000);
+        const uint32_t r2 = Quad::compare(2);
+        T8::enable(false);
+        Quad::enable(false);
+        const uint32_t per = (r2 - r1) & 0xFFFFu;
+        const uint32_t high = (f - r1) & 0xFFFFu;
+        print(serial, "  TIM8 centre-aligned over PC6-PB8: period ", per, ", high ", high,
+              " counts (2000 and 600 asked)", ok ? "" : " (an edge did not come)", crlf);
+        bench.verdict("TIM8 CENTRE-ALIGNED, captured by TIM4 over its jumper: the period 2 x ATRLR and the high "
+                      "time 2 x the compare, each to a count",
+                      ok && per >= 1999u && per <= 2001u && high >= 599u && high <= 601u);
+        Out::release();
+        In::release();
+        Quad::release();
+        v303_off<A>();
+    }
+}
+
+void tu_centre() {
+    all_off();
+    const bool m1 = centre_flags(TimAlignment::center_down, "mode 1 (CMS 01)");
+    const bool m2 = centre_flags(TimAlignment::center_up, "mode 2 (CMS 10)");
+    const bool m3 = centre_flags(TimAlignment::center_both, "mode 3 (CMS 11)");
+    bench.verdict("CENTRE-ALIGNED, the three compare-flag policies: CC1IF only counting down in mode 1, only "
+                  "counting up in mode 2, a period apart; on both in mode 3, the gaps alternating 600 and 400 "
+                  "us - every gap within 500 cycles",
+                  m1 && m2 && m3);
+    all_off();
+
+    // THE WAVEFORM IS THE SAME in all three (14.4.1): measured by a SECOND
+    // timer over the PA6-PA1 jumper - TIM2's channel 2 resetting its
+    // counter on the rising edge (the period) and channel 1 latching the
+    // falling one (the high time). PWM1 is high while the counter is below
+    // the compare: 2 x 200 us around each underflow, in a period of 2 x 500.
+    need_jumper();
+    if (!jumper) {
+        print(serial, "  no jumper (PA6 to PA1): the centre-aligned waveform is not captured", crlf);
+        bench.verdict("the jumper's half is skipped and says so", true);
+    } else {
+        uint8_t exact = 0;
+        for (const TimAlignment mode : {TimAlignment::center_down, TimAlignment::center_up, TimAlignment::center_both}) {
+            Wave::init();
+            (void)Wave::remap(0);
+            (void)Wave::configure(
+                {.prescaler = static_cast<uint16_t>(ticks_per_us - 1u), .period = 500, .alignment = mode});
+            (void)Wave::output_channel(0, {.mode = TimOutputMode::pwm1, .compare = 200});
+            WavePad::claim();
+            Wave::update();
+            Wave::clear_flags(Wave::all_flags);
+            Wave::enable(true);
+            Meas::init();
+            (void)Meas::remap(0);
+            (void)Meas::configure({.prescaler = static_cast<uint16_t>(ticks_per_us - 1u), .period = 0xFFFF});
+            (void)Meas::capture_channel(1, {.select = TimChannelSelect::direct, .polarity = TimCapturePolarity::rising});
+            (void)Meas::capture_channel(0, {.select = TimChannelSelect::indirect,
+                                            .polarity = TimCapturePolarity::falling});
+            (void)Meas::slave({.mode = TimSlaveMode::reset, .trigger = TimTrigger::ti2});
+            MeasPad::claim_input();
+            Meas::clear_flags(Meas::all_flags);
+            Meas::enable(true);
+            wait_us(5000);
+            const uint32_t period = Meas::compare(1);
+            const uint32_t high = Meas::compare(0);
+            const bool ok = period >= 999u && period <= 1001u && high >= 399u && high <= 401u;
+            if (ok) {
+                ++exact;
+            }
+            print(serial, "  over the jumper, mode ", static_cast<uint8_t>(mode), ": period ", period, " us, high ",
+                  high, " us (1000 and 400 asked)", crlf);
+            all_off();
+        }
+        bench.verdict("THE SAME WAVE in all three modes, captured by TIM2 over the jumper: a period of 2 x ATRLR "
+                      "and a high time of 2 x the compare, each to a microsecond",
+                      exact == 3u);
+    }
+    tu_centre_tim8<>();
+}
+
 /// The CH32V303's letters, registered where the part has the timers - a
 /// template for the same reason as the letters.
 template <uint8_t A = 8>
@@ -2405,6 +2709,8 @@ int main() {
     bench.letter('h', "the trigger chains: reset, trigger and gated modes", th_chains);
     bench.letter('i', "the vectors: four lines on TIM1, one on TIM3", ti_vectors);
     bench.letter('j', "the jumper, and what a plain output pad reaches", tj_jumper);
+    bench.letter('t', "the repetition counter: one update in RPTCR + 1 periods", tt_repetition);
+    bench.letter('u', "centre-aligned counting: the three flag policies, the wave over the jumpers", tu_centre);
     register_v303_letters<>();
 
     if (serial_ok) {

@@ -152,7 +152,7 @@
 // fits the family's smallest chip"). The CH32V203C8 builds two images of
 // its own (the groups.v203c8 line); the CH32V303 builds one.
 // build: boards = v203c6,v203c8,v303vc
-// build: groups = ab,cd,efgh,ijkr,ln,o,pq
+// build: groups = ab,cd,ef,gh,ijkr,ln,o,pq
 // build: groups.v203c8 = abcdefgh,ijklnopqr
 // build: monitor_speed = 115200
 

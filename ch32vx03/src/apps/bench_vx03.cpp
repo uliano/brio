@@ -248,6 +248,13 @@
 //                       never completed (recovered after a bound) and
 //                       those after which OVR stood; every run must
 //                       complete.
+//        spi2.ahead,    THE SAME ORACLE AND THE SAME HOST ON SPI2, a PB1
+//        spi2.live      instance (72 MHz at 144 of HCLK): SCK PB13 and MOSI
+//                       PB15 driven - on the CH32V203C8T6 board the desk
+//                       pair's SPI wires, the far board dark on its console;
+//                       on the CH32V303VCT6's the jumpers to SPI3's default
+//                       column - MISO floating: where the write-ahead
+//                       threshold moves one code with the bus's share.
 //
 //   i  THE I2C HOST ABOVE THE WIRE against a second chip (the 32 KB tier's
 //      images leave it out, as they leave u): I2C1 the host on PB6/PB7,
@@ -289,7 +296,14 @@
 //                       from the start() call with STAR1 as it found it -
 //                       where the fixed cost goes
 //      and the longest single entry of each host vector, watched in a
-//      pass of its own.
+//      pass of its own. FIRST, at the letter's rate, THE PRICE OF EACH
+//      CLASS OF INSTRUCTION the pump's path is made of, a loop of 1024
+//      turns the best of four: a load and a store of SRAM, of PB2 and of
+//      PB1, a load of the STK's count, an add and a multiply on an SRAM
+//      word, eight loads back to back of SRAM, the STK and PB1, a turn of
+//      32-bit instructions aligned and straddling a word, and a forward
+//      branch taken and not, and taken to an aligned and to a straddling
+//      32-bit instruction - what tells the two dies' handlers apart.
 //
 // build: boards = v203c6,v203c8,v303vc
 // On the CH32V203C8 letters u and i sit in different images: letter i run
@@ -1261,8 +1275,9 @@ constexpr Filler<60> live_line = make_filler<60>();
 /// receive`, in one loop until both counts are done) on the resource as
 /// letter e has it configured; bounded, and the overrun flag read and
 /// cleared afterwards. True when the flag stood.
+template <uint8_t n>
 bool ahead_loop_overran(uint16_t frames) {
-    auto& regs = Spi<1>::regs();
+    auto& regs = Spi<n>::regs();
     uint16_t i = 0;
     uint16_t j = 0;
     uint32_t budget = 8'000'000UL;
@@ -1276,34 +1291,38 @@ bool ahead_loop_overran(uint16_t frames) {
             ++j;
         }
     }
-    const bool ovr = Spi<1>::overrun();
+    const bool ovr = Spi<n>::overrun();
     if (ovr || j < frames) {
-        Spi<1>::clear_overrun();
+        Spi<n>::clear_overrun();
     }
     return ovr || j < frames;
 }
 
 /// spi.ahead: the overrun oracle. Every BR code, both widths, 1024 frames
 /// a run, eight runs under a console print in flight: how many runs lost
-/// a frame to a handler longer than one.
-void spi_ahead_report() {
+/// a frame to a handler longer than one. On SPI1 (PB2, the core's rate)
+/// and on SPI2 (PB1, half of it above 72 MHz of HCLK): the frame in core
+/// cycles is what the threshold weighs, and the bus's share is what moves
+/// it one code.
+template <uint8_t n, typename H>
+void spi_ahead_report(const char* name) {
     constexpr uint16_t frames = 1024;
     for (const SpiDataSize bits : {SpiDataSize::bits8, SpiDataSize::bits16}) {
         for (uint8_t code = 0; code < 8u; ++code) {
             const SpiClock rate = static_cast<SpiClock>(code);
-            const uint32_t sck = spi_sck_hz(Spi<1>::bus_hz(clock), rate);
+            const uint32_t sck = spi_sck_hz(Spi<n>::bus_hz(clock), rate);
             const uint32_t frame_cycles = frame_bits_of(bits) * (Ruler::hz() / sck);
-            SpiPlain::prime(SpiMode::mode0, rate, bits);
+            H::prime(SpiMode::mode0, rate, bits);
             uint8_t overran = 0;
             for (uint8_t run = 0; run < 8u; ++run) {
                 console_drain();
                 print(serial, live_line.text);
-                if (ahead_loop_overran(frames)) {
+                if (ahead_loop_overran<n>(frames)) {
                     ++overran;
                 }
             }
             console_drain();
-            print(serial, "  spi.ahead /", spi_division(rate), " ", frame_bits_of(bits),
+            print(serial, "  ", name, " /", spi_division(rate), " ", frame_bits_of(bits),
                   "-bit: ", frame_cycles, " cycles a frame, ", overran,
                   " of 8 runs overran under the console's interrupts", crlf);
         }
@@ -1313,20 +1332,21 @@ void spi_ahead_report() {
 /// spi.live: the host at every code and width under the same load, the
 /// pump and the polled loop, 1024 frames a run, eight runs: the overruns
 /// and the statuses other than spi_ok counted.
-void spi_live_report() {
+template <uint8_t n, typename H>
+void spi_live_report(const char* name) {
     constexpr uint16_t frames = 1024;
     for (const bool receive : {false, true}) {
     for (const bool polled : {true, false}) {
         for (const SpiDataSize bits : {SpiDataSize::bits8, SpiDataSize::bits16}) {
             for (uint8_t code = 0; code < 8u; ++code) {
                 const SpiClock rate = static_cast<SpiClock>(code);
-                const uint32_t sck = spi_sck_hz(Spi<1>::bus_hz(clock), rate);
+                const uint32_t sck = spi_sck_hz(Spi<n>::bus_hz(clock), rate);
                 const uint32_t frame_cycles = frame_bits_of(bits) * (Ruler::hz() / sck);
                 uint8_t overran = 0;
                 uint8_t faulted = 0;
                 uint8_t hung = 0;
                 for (uint8_t run = 0; run < 8u; ++run) {
-                    SpiPlain::Request r{};
+                    typename H::Request r{};
                     r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(buffer_a));
                     if (receive) {
                         r.rx = lend<Lease::reply>(static_cast<uint8_t*>(buffer_b));
@@ -1339,30 +1359,59 @@ void spi_live_report() {
                     spi_plain_done = false;
                     console_drain();
                     print(serial, live_line.text);
-                    const bool sync = SpiPlain::start(r);
+                    const bool sync = H::start(r);
                     uint32_t spins = 8'000'000UL;
                     while (!sync && !spi_plain_done && spins-- != 0u) {
                     }
                     if (!sync && !spi_plain_done) {
                         ++hung;
-                        (void)SpiPlain::recover();
+                        (void)H::recover();
                     }
-                    if (Spi<1>::overrun()) {
+                    if (Spi<n>::overrun()) {
                         ++overran;
-                        Spi<1>::clear_overrun();
+                        Spi<n>::clear_overrun();
                     }
-                    if (SpiPlain::status() != spi_ok) {
+                    if (H::status() != spi_ok) {
                         ++faulted;
                     }
                 }
                 console_drain();
-                print(serial, "  spi.live ", polled ? "polled" : "pump", receive ? " receive" : " write",
+                print(serial, "  ", name, " ", polled ? "polled" : "pump", receive ? " receive" : " write",
                       " /", spi_division(rate), " ", frame_bits_of(bits), "-bit: ", frame_cycles,
                       " cycles a frame, ", overran, " overruns, ", faulted, " statuses not spi_ok, ",
                       hung, " never completed, in 8 runs under the console's interrupts", crlf);
             }
         }
     }
+    }
+}
+
+/// SPI2, the oracle and the host again on a PB1 instance - where the part
+/// has one. Its pads are SCK PB13 and MOSI PB15 with MISO floating: on the
+/// CH32V203C8T6 board the desk pair's SPI wires, the far board dark on its
+/// console; on the CH32V303VCT6's the jumpers to SPI3's default column,
+/// whose pads are inputs.
+constexpr uint8_t second_spi = device::spi_count >= 2u ? 2u : 1u;
+using Spi2Plain = SpiHost<second_spi, spi_pins_for(second_spi, 0)>;
+volatile bool spi2_live = false;
+
+template <bool on = (device::spi_count >= 2u)>
+void spi2_threshold_report() {
+    if constexpr (on) {
+        spi2_live = true;
+        const bool up = Spi2Plain::init(clock);
+        const auto ahead8 = Spi2Plain::write_ahead_from(SpiDataSize::bits8);
+        const auto ahead16 = Spi2Plain::write_ahead_from(SpiDataSize::bits16);
+        constexpr uint8_t m = on ? 2u : 1u;
+        print(serial, "  SpiHost<2> with no engines on PB1 (", Spi<m>::bus_hz(clock) / 1'000'000u, " MHz): ",
+              up ? "up" : "REFUSED", "; a receive runs two frames ahead from /",
+              ahead8 ? spi_division(*ahead8) : 0u, " in 8-bit frames and from /",
+              ahead16 ? spi_division(*ahead16) : 0u, " in 16-bit ones", crlf);
+        console_drain();
+        spi_ahead_report<m, Spi2Plain>("spi2.ahead");
+        spi_live_report<m, Spi2Plain>("spi2.live");
+        Spi2Plain::release();
+        spi2_live = false;
     }
 }
 
@@ -1530,10 +1579,11 @@ void te_spi() {
     console_drain();
     spi_req_report();
     console_drain();
-    spi_ahead_report();
-    spi_live_report();
+    spi_ahead_report<1, SpiPlain>("spi.ahead");
+    spi_live_report<1, SpiPlain>("spi.live");
     spi_held_report();
     spi_window_report();
+    spi2_threshold_report();
     spi1_serves = spi1_dma;
     spi_up = false;   // letter d brings its own host up again
     bench.verdict("ran", true);
@@ -2310,6 +2360,105 @@ struct I2cLetter {
     /// then the rest of it waited out, so the command channel is back.
     static constexpr uint16_t serve_ms = 3000;
 
+    /// THE BUS'S PRICE, per access, at this letter's 120 MHz: a loop of
+    /// 1024 accesses timed on the ruler, the best of 4, for a word of SRAM,
+    /// a register of PB2 (port A's INDR, and a store of zero into port A's
+    /// BSHR, which moves nothing) and of PB1 (I2C1's OADDR1, and OADDR2
+    /// stored with its own value) - each loop an access, an increment and a
+    /// taken branch, so the differences are the bridges' own - and, after
+    /// it, the core's own classes: the STK, a multiply, the fetch, loads
+    /// back to back and a forward branch. The two dies' pump handlers run
+    /// the same instructions at different costs, and these lines are what
+    /// found the one class that sets them apart (docs/ch32vx03/i2c.md).
+    template <typename F>
+    static uint32_t per_access(F f) {
+        uint32_t best = 0xFFFFFFFFu;
+        for (uint8_t k = 0; k < 4u; ++k) {
+            const uint32_t t0 = Ruler::now();
+            for (uint32_t i = 0; i < 1024u; ++i) {
+                f();
+            }
+            const uint32_t t = Ruler::now() - t0;
+            best = t < best ? t : best;
+        }
+        return best;
+    }
+    static void bus_price() {
+        I2c<1>::bus_clock(true);
+        static volatile uint32_t cell = 0;
+        auto& porta = *reinterpret_cast<GpioRegs*>(gpio_base_for('A'));
+        auto& i2c = I2c<1>::regs();
+        const uint16_t oaddr2 = i2c.OADDR2;
+        const uint32_t sram = per_access([] { (void)cell; });
+        const uint32_t pb2_load = per_access([&] { (void)porta.INDR; });
+        const uint32_t pb1_load = per_access([&] { (void)i2c.OADDR1; });
+        const uint32_t sram_store = per_access([] { cell = 0; });
+        const uint32_t pb2_store = per_access([&] { porta.BSHR = 0; });
+        const uint32_t pb1_store = per_access([&] { i2c.OADDR2 = oaddr2; });
+        // The core's own: a load of the STK's count (the ruler reads it
+        // four times a stamp), and a multiply against an add on a value
+        // kept in SRAM (the ruler's one multiply).
+        static volatile uint32_t acc = 3;
+        const uint32_t stk_load = per_access([] { (void)stk()->CNTL; });
+        const uint32_t add_turn = per_access([] { acc = acc + 7u; });
+        const uint32_t mul_turn = per_access([] { acc = acc * 7u; });
+        // THE FETCH: thirty-two 32-bit instructions in a row, every one
+        // aligned on a word, against the same thirty-two each straddling
+        // a word boundary (one compressed nop ahead of them) - the shape
+        // compiled code takes wherever 16- and 32-bit instructions mix.
+        const uint32_t aligned = per_access([] {
+            asm volatile(".balign 4\n.option push\n.option norvc\n.rept 32\naddi t0, t0, 1\n.endr\n"
+                         ".option rvc\nc.nop\n.option pop" ::: "t0");
+        });
+        const uint32_t straddling = per_access([] {
+            asm volatile(".balign 4\n.option push\n.option rvc\nc.nop\n.option norvc\n.rept 32\n"
+                         "addi t0, t0, 1\n.endr\n.option pop" ::: "t0");
+        });
+
+        // BACK TO BACK: eight loads in a row, nothing between them - the
+        // shape of the ruler's read and of the pump's status-then-data -
+        // where the loops above leave each load an instruction or two of
+        // slack before the next.
+        static volatile uint32_t w[8] = {};
+        const uint32_t sram8 = per_access([] {
+            (void)w[0]; (void)w[1]; (void)w[2]; (void)w[3]; (void)w[4]; (void)w[5]; (void)w[6]; (void)w[7];
+        });
+        const uint32_t stk8 = per_access([] {
+            auto& t = *stk();
+            (void)t.CNTL; (void)t.CNTL; (void)t.CNTL; (void)t.CNTL; (void)t.CNTL; (void)t.CNTL; (void)t.CNTL;
+            (void)t.CNTL;
+        });
+        const uint32_t pb1_8 = per_access([&] {
+            (void)i2c.OADDR1; (void)i2c.OADDR1; (void)i2c.OADDR1; (void)i2c.OADDR1; (void)i2c.OADDR1;
+            (void)i2c.OADDR1; (void)i2c.OADDR1; (void)i2c.OADDR1;
+        });
+        // A FORWARD BRANCH, taken and not, in a turn of its own - and
+        // taken to a 32-bit instruction ALIGNED on a word against one that
+        // STRADDLES a word boundary (the branch itself aligned in both).
+        const uint32_t fwd_taken = per_access([] { asm volatile("beqz zero, 1f\nnop\n1:"); });
+        const uint32_t fwd_not = per_access([] { asm volatile("bnez zero, 1f\nnop\n1:"); });
+        const uint32_t to_aligned = per_access([] {
+            asm volatile(".balign 4\n.option push\n.option norvc\nbeqz zero, 1f\n.option rvc\nc.nop\nc.nop\n"
+                         ".option norvc\n1: addi t0, t0, 1\n.option rvc\nc.nop\n.option pop" ::: "t0");
+        });
+        const uint32_t to_straddling = per_access([] {
+            asm volatile(".balign 4\n.option push\n.option norvc\nbeqz zero, 1f\n.option rvc\nc.nop\n"
+                         ".option norvc\n1: addi t0, t0, 1\n.option rvc\nc.nop\n.option pop" ::: "t0");
+        });
+        print(serial, "  the fetch, a turn of 33 instructions: 32-bit ones aligned ", aligned * 100u / 1024u,
+              ", each across a word boundary ", straddling * 100u / 1024u, "; eight loads back to back, a turn: SRAM ",
+              sram8 * 100u / 1024u, ", the STK's count ",
+              stk8 * 100u / 1024u, ", PB1 ", pb1_8 * 100u / 1024u, "; a forward branch taken ",
+              fwd_taken * 100u / 1024u, ", not taken ", fwd_not * 100u / 1024u, ", taken to an aligned 32-bit "
+              "instruction ", to_aligned * 100u / 1024u, ", to a straddling one ", to_straddling * 100u / 1024u,
+              " (cycles x 100)", crlf);
+        print(serial, "  the bus's price, 1024 accesses each in a loop (cycles x 100 / 1024 a turn): loads SRAM ",
+              sram * 100u / 1024u, ", PB2 ", pb2_load * 100u / 1024u, ", PB1 ", pb1_load * 100u / 1024u,
+              ", the STK's count ", stk_load * 100u / 1024u, "; stores SRAM ", sram_store * 100u / 1024u, ", PB2 ",
+              pb2_store * 100u / 1024u, ", PB1 ", pb1_store * 100u / 1024u, "; an SRAM word added to ",
+              add_turn * 100u / 1024u, ", multiplied ", mul_turn * 100u / 1024u, crlf);
+    }
+
     static void run() {
         // The core to 120 MHz: the console drained first, then re-made at
         // the new rate, the tick likewise.
@@ -2319,6 +2468,7 @@ struct I2cLetter {
         (void)Ticker::init(i2c_clock);
         print(serial, "  the core at 120 MHz (", up ? "PLL" : "FAILED",
               "): PB1 60 MHz, the most CTLR2.FREQ states; every cycle below is a 120 MHz one", crlf);
+        bus_price();
         i2c_ev_max = 0;
         i2c_er_max = 0;
         i2c_dma_max = 0;
@@ -2587,6 +2737,13 @@ BRIO_CH32_VECTOR(spi1_handler) {
         spi_done = true;
     }
     spi_meter.leave();
+}
+
+/// Letter e's SPI2 host, its pump.
+BRIO_CH32_VECTOR(spi2_handler) {
+    if (spi2_live && Spi2Plain::isr()) {
+        spi_plain_done = true;
+    }
 }
 
 /// Letter i: I2C1 the host against the far end's target.

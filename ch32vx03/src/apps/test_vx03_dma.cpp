@@ -55,8 +55,9 @@
 //   a  MEMORY TO MEMORY: the block's gate, the three widths with and
 //      without the increments, four kilobytes moved at each of them and
 //      verified byte by byte, the half and complete flags counted, the
-//      cost per item against the core's counter, a store into a RUNNING
-//      channel refused and a misaligned address refused
+//      cost per item against the core's counter, the nine pairings of two
+//      UNEQUAL widths against table 11-1, a store into a RUNNING channel
+//      refused and a misaligned address refused
 //   b  CIRCULAR MODE: a run of compares poured into a timer by its own
 //      update request, the buffer reloaded lap after lap, the half and
 //      complete flags alternating and remaining() walking down and back
@@ -67,8 +68,12 @@
 //      same block finished awake and verified; on the CH32V303 the same
 //      again on DMA2's first channel
 //   d  THE TRANSFER ERROR: five addresses no peripheral answers at,
-//      read by a channel with its error interrupt armed; what the flag
-//      did, and whether the silicon dropped EN by itself
+//      read by a channel with its error interrupt armed, then WRITTEN at
+//      each width, with the image's own pattern in the locked flash at
+//      both of its addresses; what the flag did, whether the silicon
+//      dropped EN by itself, and the ledger's count across it - and the
+//      copy engine's block on an address whose write faults, where one
+//      does
 //   e  THE REQUEST PATH WITH NO WIRE: a timer's update copying another
 //      timer's counter into a buffer once per period (the values a
 //      staircase whose step is the period), and the BURST ENGINE
@@ -86,7 +91,9 @@
 //      edge from the vectors, one across the
 //      storage's end delivered whole, a lap the consumer did not keep up
 //      with counted once and skipped, and a run written over while it was
-//      held refused at its release - or, WITH THE JUMPER, the transmit
+//      held refused at its release, and a REAL transfer error under the
+//      ring where letter d's probe finds an address whose write raises one
+//      - or, WITH THE JUMPER, the transmit
 //      run coming back through the receive ring; and either way the
 //      transmit engine's run timed on the core's counter against the wire
 //      at the rate asked, which a loop dividing one bus at both ends
@@ -137,6 +144,13 @@
 //      UART4's ring on DMA2, the copy on DMA2's channel 1 started when 28
 //      have landed, and the staged frame's copy started on its start bit's
 //      fall, seen on the pad
+//   s  THE HELD REQUEST ON OTHER REQUESTERS: a staircase paced by a
+//      timer's request on the channel a staged hand-over left behind -
+//      USART2's transmit request released without its reset first, the
+//      instrument's positive control, then SPI2's transmit and receive
+//      requests on DMA1's channels 5 and 4 let go by SpiHost::release(),
+//      and on the CH32V303 SPI3's on DMA2's channels 2 and 1 and UART4's
+//      transmit request on channel 5, without and with its reset
 // and on the CH32V303 alone, the second controller:
 //   i  MEMORY TO MEMORY ON DMA2: its gate, a kilobyte copied on each of
 //      the eleven channels and verified, and every completion flag found
@@ -162,7 +176,7 @@
 //      receiver left running keeps its request on its channel
 //
 // build: boards = v203c6,v203c8,v303vc
-// build: groups = abcdef,gho,pqr
+// build: groups = abcdef,gh,opqrs
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -173,6 +187,7 @@
 #include "ch32vx03/pfic.hpp"
 #include "ch32vx03/pin.hpp"
 #include "ch32vx03/platform.hpp"
+#include "ch32vx03/spi.hpp"
 #include "ch32vx03/ticker.hpp"
 #include "ch32vx03/tim.hpp"
 #include "ch32vx03/usart.hpp"
@@ -549,6 +564,60 @@ void ta_memory() {
                   "cell a full-duplex bus clocks a read from",
                   fixed_ok);
 
+    // UNEQUAL WIDTHS (table 11-1, PINC = MINC = 1): each end steps by its
+    // own width, a value narrower than its target is zero-extended and a
+    // wider one keeps its low bytes, both ends little-endian. Four items of
+    // each of the nine pairings, the source the image's pattern and the
+    // target scrubbed to 0xEE, every target byte compared - the bytes past
+    // the four items included, which must stay 0xEE.
+    {
+        constexpr DmaWidth widths[3] = {DmaWidth::byte, DmaWidth::half, DmaWidth::word};
+        const uint8_t* src = source_first_bytes();
+        uint8_t pairs_exact = 0;
+        for (const DmaWidth ps : widths) {
+            for (const DmaWidth ms : widths) {
+                const uint8_t pb = static_cast<uint8_t>(1u << static_cast<uint8_t>(ps));
+                const uint8_t mb = static_cast<uint8_t>(1u << static_cast<uint8_t>(ms));
+                for (uint8_t i = 0; i < 32u; ++i) {
+                    destination[i] = 0xEE;
+                }
+                Ch::stop();
+                DmaTransfer t = copy(source_address(), destination, 4, ps);
+                t.config.memory_width = ms;
+                const bool started = Ch::load(t);
+                const bool done = started && wait_complete(Ch::flag_shift);
+                Ch::stop();
+                uint8_t wrong = 0;
+                for (uint8_t k = 0; k < 4u; ++k) {
+                    for (uint8_t b = 0; b < mb; ++b) {
+                        const uint8_t want = b < pb ? src[k * pb + b] : 0u;
+                        if (destination[k * mb + b] != want) {
+                            ++wrong;
+                        }
+                    }
+                }
+                for (uint8_t i = static_cast<uint8_t>(4u * mb); i < 32u; ++i) {
+                    if (destination[i] != 0xEEu) {
+                        ++wrong;
+                    }
+                }
+                if (done && wrong == 0u) {
+                    ++pairs_exact;
+                } else {
+                    print(serial, "  source ", 8u * pb, " bits into target ", 8u * mb, " bits: ",
+                          done ? "done" : "NOT DONE", ", ", wrong, " byte(s) off table 11-1, target ",
+                          hex(destination[0]), " ", hex(destination[1]), " ", hex(destination[2]), " ",
+                          hex(destination[3]), crlf);
+                }
+            }
+        }
+        print(serial, "  unequal widths: ", pairs_exact, " of 9 pairings exact against table 11-1", crlf);
+        bench.verdict("THE NINE WIDTH PAIRINGS move as table 11-1 draws them: each end stepping by "
+                      "its own width, a narrower value zero-extended, a wider one cut to its low "
+                      "bytes, nothing written past the last item",
+                      pairs_exact == 9u);
+    }
+
     // A store into a RUNNING channel is refused by this driver, because
     // the silicon would drop it in silence (11.2.1's note).
     Ch::stop();
@@ -789,8 +858,32 @@ void tc_sleep() {
 }
 
 // ===========================================================================
-// d - the transfer error: a read of an address nothing answers at
+// d - the transfer error: reads and writes of addresses nothing answers at
 // ===========================================================================
+
+/// The first address letter d found whose word write raises a transfer
+/// error, for letter g's ring; zero when none did.
+uint32_t te_target = 0;
+
+/// The holes of figure 1-11 letter d reads and writes.
+constexpr uint32_t holes[5] = {0x3000'0000UL, 0x4000'8000UL, 0x4002'4000UL, 0x6000'0000UL, 0xA000'0000UL};
+
+/// Whether a four-word write to `target` from RAM ends in a transfer error
+/// on DMA1's channel 3, its line silent: the probe letter g asks when
+/// letter d has not run in this session.
+bool word_write_faults(uint32_t target) {
+    using Ch = DmaChannel<1, 3>;
+    Ch::stop();
+    (void)Ch::load(copy(destination, reinterpret_cast<volatile void*>(target), 4, DmaWidth::word));
+    uint32_t spins = 200'000UL;
+    uint32_t f = 0;
+    while (spins-- != 0u && (f & (DmaFlag::error | DmaFlag::complete)) == 0u) {
+        f = Ch::flags();
+    }
+    Ch::stop();
+    return (f & DmaFlag::error) != 0u;
+}
+
 void td_error() {
     all_off();
     using Ch = DmaChannel<1, 3>;
@@ -798,8 +891,6 @@ void td_error() {
     // 11.2.1: "Reading and writing a reserved address area results in a
     // DMA transmission error", the hardware clears EN and the channel
     // stops. Five addresses outside every window figure 1-11 draws.
-    const uint32_t holes[5] = {0x3000'0000UL, 0x4000'8000UL, 0x4002'4000UL, 0x6000'0000UL,
-                               0xA000'0000UL};
     uint8_t errors = 0;
     uint8_t completions = 0;
     uint8_t left_enabled = 0;
@@ -839,6 +930,114 @@ void td_error() {
     bench.verdict("and wherever a transfer error IS raised the hardware clears EN by itself "
                   "(11.3.3), so no channel was left enabled behind one",
                   left_enabled == 0u);
+
+    // WRITES. 11.1 lists the flash among a channel's destinations, and with
+    // the FPEC locked - as at every boot; no letter of this suite unlocks
+    // it - a store into the array cannot program; 11.2.1's reserved area
+    // is the five holes above, written this time. Each target takes four
+    // items at each width from a RAM source, the error interrupt armed and
+    // the channel's line enabled; the image's pattern - the flash target -
+    // read back afterwards must still be itself.
+    const uint32_t alias = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&source.word[64]));
+    const uint32_t targets[7] = {alias,    flash_array_base + (alias - flash_alias_base),
+                                 holes[0], holes[1], holes[2], holes[3], holes[4]};
+    const uint32_t before_word = source.word[64];
+    for (uint8_t i = 0; i < 16u; ++i) {
+        destination[i] = static_cast<uint8_t>(0xA0u + i);
+    }
+    uint8_t written = 0;
+    uint8_t write_errors = 0;
+    uint8_t errors_clean = 0;
+    te_target = 0;
+    Pfic::clear_pending(dma_channel_irq(1, Ch::number));
+    Pfic::enable(dma_channel_irq(1, Ch::number));
+    for (const uint32_t target : targets) {
+        for (const DmaWidth w : {DmaWidth::byte, DmaWidth::half, DmaWidth::word}) {
+            Ch::stop();
+            Ch::arm(DmaFlag::error | DmaFlag::complete, true);
+            channel_calls[2] = 0;
+            channel_mask[2] = 0;
+            (void)Ch::load(copy(destination, reinterpret_cast<volatile void*>(target), 4, w));
+            uint32_t spins = 200'000UL;
+            uint32_t f = 0;
+            while (spins-- != 0u) {
+                f = Ch::flags() | channel_mask[2];
+                if ((f & (DmaFlag::error | DmaFlag::complete)) != 0u) {
+                    break;
+                }
+            }
+            wait_us(50);
+            f = f | channel_mask[2];
+            const bool en = Ch::enabled();
+            const uint16_t left = Ch::remaining();
+            const bool counted = Dma<1>::counted(Ch::number);
+            const uint8_t masters = BusActivity::active();
+            Ch::stop();
+            const bool given_back = !Dma<1>::counted(Ch::number) && BusActivity::active() == 0u;
+            if ((f & (DmaFlag::error | DmaFlag::complete)) != 0u) {
+                ++written;
+            }
+            if ((f & DmaFlag::error) != 0u) {
+                ++write_errors;
+                if (!en && channel_calls[2] >= 1u && counted && masters == 1u && given_back) {
+                    ++errors_clean;
+                }
+                if (te_target == 0u && w == DmaWidth::word) {
+                    te_target = target;
+                }
+            }
+            if (w == DmaWidth::word || (f & DmaFlag::error) != 0u) {
+                print(serial, "  a ", 8u << static_cast<uint8_t>(w), "-bit write of 4 to ", hex(target), ": flags ",
+                      hex(f), en ? ", EN set" : ", EN clear", ", count left ", left, ", the vector entered ",
+                      channel_calls[2], " time(s); the ledger ", counted ? "counting it" : "not counting it", " (",
+                      masters, " bus master(s)), ", given_back ? "given back by stop()" : "NOT GIVEN BACK", crlf);
+            }
+        }
+    }
+    Ch::stop();
+    Pfic::disable(dma_channel_irq(1, Ch::number));
+    const bool pattern_kept = source.word[64] == before_word;
+    print(serial, "  of 21 writes (7 targets, 3 widths): ", write_errors, " raised a transfer error; the pattern ",
+          pattern_kept ? "intact" : "CHANGED", crlf);
+    bench.verdict("A WRITE INTO THE LOCKED FLASH, or into a hole of the map, ends at every width - a transfer "
+                  "error or an ordinary completion - and the array is untouched",
+                  written == 21u && pattern_kept);
+    bench.verdict("... and wherever one raises a transfer error the hardware drops EN, the vector is entered, "
+                  "and the controller's LEDGER keeps the channel's bus-master count until software stops the "
+                  "channel, which gives it back",
+                  errors_clean == write_errors);
+    if (te_target != 0u) {
+        // The same refusal under an ENGINE: the copy engine's block ends on
+        // the error - the fault counted, the engine free, the count given
+        // back - and its next block, into RAM, runs whole.
+        using FaultCopier = DmaCopyEngine<1, 4>;
+        FaultCopier::arm(DmaPriority::low, false);
+        FaultCopier::clear_faults();
+        const bool launched = FaultCopier::copy(reinterpret_cast<uint32_t*>(te_target),
+                                                reinterpret_cast<const uint32_t*>(destination), 4);
+        uint32_t spins = 200'000UL;
+        while (FaultCopier::busy() && spins-- != 0u) {
+        }
+        const bool freed = !FaultCopier::busy();
+        const uint32_t faults = FaultCopier::faults();
+        const uint8_t masters_after = BusActivity::active();
+        scrub(64);
+        const bool relaunched = FaultCopier::copy(reinterpret_cast<uint32_t*>(destination),
+                                                  reinterpret_cast<const uint32_t*>(source.word), 16);
+        spins = 200'000UL;
+        while (FaultCopier::busy() && spins-- != 0u) {
+        }
+        const bool next_whole = relaunched && !FaultCopier::busy() && verify(64) && FaultCopier::faults() == 1u;
+        FaultCopier::stop();
+        print(serial, "  the copy engine into ", hex(te_target), ": ", launched ? "launched" : "REFUSED", ", ",
+              freed ? "ended" : "STILL BUSY", ", faults ", faults, ", bus masters after ", masters_after,
+              "; the next block into RAM ", next_whole ? "whole" : "NOT WHOLE", crlf);
+        bench.verdict("the copy engine's block into that address ends on the error with the fault counted, "
+                      "the engine free and no bus master left counted - and its next block runs whole",
+                      launched && freed && faults == 1u && masters_after == 0u && next_whole);
+    } else {
+        print(serial, "  no write raised one either: the engines' error path stays unprovoked", crlf);
+    }
     all_off();
 }
 
@@ -1155,6 +1354,68 @@ void ring_on_a_banged_line() {
     bench.verdict("a run the channel wrote over while it was held is refused at its release - "
                   "consume() answers false and the overrun is counted",
                   held_size != 0u && !intact && Loop::rx_overruns() == 2u);
+
+    // A REAL TRANSFER ERROR UNDER THE RING, where letter d found an address
+    // whose write raises one. The running ring's channel is stopped BY
+    // REGISTER, its memory address pointed there and EN set again - the ledger and the transport left as they stand - and one
+    // frame banged into the receive pad: the channel's write of it is
+    // refused, the hardware drops EN, and the transport's vector abandons
+    // the ring and counts the fault. The consumer's next look starts the
+    // ring again from its RAM storage's first byte, and a burst after it
+    // lands whole.
+    if (te_target == 0u) {
+        for (const uint32_t hole : holes) {
+            if (word_write_faults(hole)) {
+                te_target = hole;
+                break;
+            }
+        }
+    }
+    if (te_target == 0u) {
+        print(serial, "  no address of letter d's raises a transfer error on a write: the ring's real error "
+                      "is not staged",
+              crlf);
+    } else {
+        bool junk = true;
+        (void)read_all(src, 0, junk);
+        Loop::clear_errors();
+        const uint32_t into = te_target;
+        const uint32_t kept = source.word[128];
+        const uint16_t faults0 = Loop::dma_faults();
+        const uint32_t rx_faults0 = LoopRx::faults();
+        auto& r = LoopRxChannel::regs();
+        {
+            P::CriticalSection cs;
+            r.CFGR = r.CFGR & ~dma_cfgr_en;   // EN down by hand: the ledger keeps its count
+            r.MADDR = into;
+            r.CFGR = r.CFGR | dma_cfgr_en;
+        }
+        bang(src + 600, 1);
+        wait_us(200);
+        const bool dropped = LoopRx::idle();
+        const uint16_t faults1 = Loop::dma_faults();
+        const uint32_t rx_faults1 = LoopRx::faults();
+        const uint8_t masters_dropped = BusActivity::active();
+        (void)Loop::harvest();   // the consumer's next look
+        const bool running = !LoopRx::idle() && LoopRxChannel::remaining() == 128u &&
+                             r.MADDR != into && BusActivity::active() == 1u;
+        bang(src + 610, 24);
+        bool again_in_order = false;
+        const uint16_t again = read_all(src + 610, 24, again_in_order);
+        print(serial, "  the ring's channel pointed at ", hex(into), ", a frame banged: the channel ",
+              dropped ? "stopped" : "STILL RUNNING", ", the transport's DMA faults ", faults0, " -> ", faults1,
+              ", the engine's ", rx_faults0, " -> ", rx_faults1, ", bus masters ", masters_dropped,
+              "; the next look: ", running ? "the ring running again from its first byte" : "NOT RESTARTED",
+              "; 24 more banged: ", again, again_in_order ? " in order" : " NOT in order", "; the flash ",
+              source.word[128] == kept ? "untouched" : "CHANGED", crlf);
+        bench.verdict("A REAL TRANSFER ERROR STOPS THE RING: the hardware drops EN on the refused "
+                      "write and the transport's vector counts the fault once",
+                      dropped && faults1 == faults0 + 1u && rx_faults1 == rx_faults0 + 1u &&
+                          source.word[128] == kept);
+        bench.verdict("... and the consumer's next look starts the ring again from its storage's first "
+                      "byte, one bus master counted, the next burst whole and in order",
+                      running && again == 24u && again_in_order);
+    }
 }
 
 /// Letter g's last step, either way round: the transmit engine's run at
@@ -1847,8 +2108,248 @@ uint16_t drain() {
 }
 
 // ===========================================================================
-// i - DMA2: memory to memory on every one of its eleven channels
+// s - the held request on SPI2's channels, and on DMA2's
 // ===========================================================================
+
+/// What a paced block made of its channel after a staged hand-over.
+struct Paced {
+    bool armed = false;
+    uint16_t early = 0;   ///< items moved before the pacer ran: a held request's stray
+    uint16_t left = 0;    ///< CNTR after sixteen periods and two more
+    uint16_t steps = 0;   ///< consecutive samples one period apart
+};
+
+/// SIXTEEN SAMPLES OF THE RULER (TIM3 at 1 MHz) on DMA `c`'s channel `ch`,
+/// paced by timer `tn` - its update (cc < 0), or its channel cc's compare
+/// - once every 500 us. A request held on the channel's OR moves one item
+/// at the enable: `early` is read 100 us after it, the pacer still
+/// stopped. A held level its gated owner never drops stalls the channel
+/// after that item: `left` is read after eighteen periods. A clean channel
+/// moves nothing early, ends at zero and takes fifteen steps of 500 +- 5
+/// (the pacer and the ruler divide one timer clock: a step is exact but
+/// for the sample's own bus wait).
+template <uint8_t c, uint8_t ch, uint8_t tn, int8_t cc>
+Paced paced_block() {
+    using Ch = DmaChannel<c, ch>;
+    using T = Tim<tn>;
+    Paced p{};
+    Ruler::init();
+    (void)Ruler::configure(TimConfig{.prescaler = static_cast<uint16_t>(ticks_per_us - 1u), .period = 0xFFFF});
+    Ruler::enable(true);
+    T::init();
+    (void)T::configure(TimConfig{.prescaler = static_cast<uint16_t>(T::clock_hz(clock) / 1'000'000u - 1u),
+                                 .period = 499});
+    if constexpr (cc >= 0) {
+        (void)T::output_channel(static_cast<uint8_t>(cc),
+                                TimChannelConfig{.mode = TimOutputMode::frozen, .compare = 250, .preload = false,
+                                                 .enable = false});
+        T::interrupts(T::compare_dma(static_cast<uint8_t>(cc)), true);
+    } else {
+        T::interrupts(tim_ude, true);
+    }
+    for (uint16_t i = 0; i < sample_count; ++i) {
+        work[i] = 0;
+    }
+    Ch::stop();
+    p.armed = Ch::load(DmaTransfer{
+        .peripheral = Ruler::cnt_address(),
+        .memory = work,
+        .count = sample_count,
+        .config = {.direction = DmaDirection::peripheral_to_memory,
+                   .circular = false,
+                   .memory_to_memory = false,
+                   .peripheral_increment = false,
+                   .memory_increment = true,
+                   .peripheral_width = DmaWidth::half,
+                   .memory_width = DmaWidth::half,
+                   .priority = DmaPriority::high},
+    });
+    wait_us(100);
+    p.early = static_cast<uint16_t>(sample_count - Ch::remaining());
+    T::enable(true);
+    wait_us(18u * 500u);
+    p.left = Ch::remaining();
+    T::enable(false);
+    Ch::stop();
+    for (uint16_t i = 1; i < sample_count; ++i) {
+        const uint16_t step = static_cast<uint16_t>(work[i] - work[i - 1u]);
+        if (step >= 495u && step <= 505u) {
+            ++p.steps;
+        }
+    }
+    T::release();
+    Ruler::release();
+    return p;
+}
+
+/// The paced block's reading as one line, and whether it was clean.
+bool paced_line(const char* what, const Paced& p) {
+    const bool clean = p.armed && p.early == 0u && p.left == 0u && p.steps == sample_count - 1u;
+    print(serial, "  ", what, ": ", p.early, " item(s) before the pacer, ", p.left, " left after it, ", p.steps,
+          " steps of a period", clean ? " - clean" : (p.early != 0u ? " - A HELD REQUEST" : " - NOT CLEAN"), crlf);
+    return clean;
+}
+
+/// SPI `n`'s request staged with no pad and no channel enabled: the block
+/// a host under software select, its RECEIVE request (RXDMAEN, one frame
+/// clocked so RXNE stands) or its TRANSMIT one (TXDMAEN over the TXE that
+/// stands from the enable) raised - then let go by SpiHost::release()
+/// itself, with the block's reset line pulsed first when `reset` says so.
+template <uint8_t n>
+void spi_hold(bool rx, bool reset) {
+    using S = Spi<n>;
+    using H = SpiHost<n, spi_pins_for(n, 0)>;
+    S::bus_clock(true);
+    S::reset();
+    (void)S::configure(SpiConfig{.role = SpiRole::host, .clock = SpiClock::div256});
+    S::dma_requests(!rx, rx);
+    S::enable();
+    if (rx) {
+        S::data8(0x5A);
+        wait_us(200);   // a frame at /256 of 72 MHz is 28 us
+    }
+    if (reset) {
+        S::reset();
+    }
+    H::release();
+}
+
+/// A port's TRANSMIT request staged the same way, no pad handed over: UE,
+/// TE and DMAT over the TXE that stands - TE too: without it the request
+/// is not raised (measured: the staging with UE and DMAT alone left
+/// nothing held) - then let go, DMAT, TE and UE cleared and the gate
+/// closed, the reset line pulsed first when `reset` says so. USART2's is
+/// the instrument's positive control (dma.md's rule: it holds one),
+/// UART4's the CH32V303's on DMA2.
+template <uint8_t u>
+void usart_hold(bool reset) {
+    using U = Usart<u>;
+    U::bus_clock(true);
+    U::reset();
+    (void)U::configure(UartFormat{}, usart_divisor(usart_bus_hz<u>(clock), 115200));
+    U::enable(true);
+    U::transmitter(true);
+    U::dma_transmit(true);
+    wait_us(200);
+    U::dma_transmit(false);
+    U::transmitter(false);
+    U::enable(false);
+    if (reset) {
+        U::reset();
+    }
+    U::bus_clock(false);
+}
+
+/// The CH32V303's half: SPI3 on DMA2's channels 1 and 2 (TIM8's and
+/// TIM5's updates the pacers) and UART4's transmit request on channel 5
+/// (TIM8's second compare). The fourth port's RECEIVE request is not
+/// staged: it wants a frame on its pad, and both of its columns are the
+/// desk pair's wires.
+template <uint8_t C = 2, DmaRequest s3tx = DmaRequest::spi3_tx, DmaRequest s3rx = DmaRequest::spi3_rx,
+          DmaRequest u4tx = DmaRequest::uart4_tx, DmaRequest t5 = DmaRequest::tim5_up,
+          DmaRequest t8 = DmaRequest::tim8_up, DmaRequest t8c2 = DmaRequest::tim8_ch2>
+void ts_held_dma2() {
+    if constexpr (C <= device::dma_controller_count && spi_present(C + 1u) && tim_present(5) && tim_present(8) &&
+                  device::has_usart(C + 2u)) {
+        using S3Tx = DmaRequestOf<s3tx>;
+        using S3Rx = DmaRequestOf<s3rx>;
+        using U4Tx = DmaRequestOf<u4tx>;
+        static_assert(S3Tx::controller == C && S3Tx::channel == DmaRequestOf<t5>::channel &&
+                          S3Rx::controller == C && S3Rx::channel == DmaRequestOf<t8>::channel &&
+                          U4Tx::controller == C && U4Tx::channel == DmaRequestOf<t8c2>::channel,
+                      "table 11-3: SPI3's transmit request shares DMA2's channel 2 with TIM5's update, its "
+                      "receive request channel 1 with TIM8's, UART4's transmit request channel 5 with "
+                      "TIM8's second compare");
+        all_off2<C>();
+        const bool c_tx = paced_line("DMA2 channel 2 paced by TIM5's update, nothing staged",
+                                     paced_block<C, S3Tx::channel, 5, -1>());
+        const bool c_rx = paced_line("DMA2 channel 1 paced by TIM8's update, nothing staged",
+                                     paced_block<C, S3Rx::channel, 8, -1>());
+        const bool c_u4 = paced_line("DMA2 channel 5 paced by TIM8's second compare, nothing staged",
+                                     paced_block<C, U4Tx::channel, 8, 1>());
+        spi_hold<C + 1u>(false, false);
+        const bool tx_free = paced_line("SPI3's transmit request raised, then SpiHost::release()",
+                                        paced_block<C, S3Tx::channel, 5, -1>());
+        spi_hold<C + 1u>(true, false);
+        const bool rx_free = paced_line("SPI3's receive request raised (RXNE standing), then SpiHost::release()",
+                                        paced_block<C, S3Rx::channel, 8, -1>());
+        usart_hold<C + 2u>(false);
+        const Paced u4_bare = paced_block<C, U4Tx::channel, 8, 1>();
+        const bool u4_free = paced_line("UART4's transmit request raised, then DMAT and UE cleared and the gate "
+                                        "closed, no reset", u4_bare);
+        usart_hold<C + 2u>(true);
+        const bool u4_reset = paced_line("... the same with the reset line pulsed first",
+                                         paced_block<C, U4Tx::channel, 8, 1>());
+        bench.verdict("the controls: DMA2's channels 1, 2 and 5 paced by TIM8 and TIM5 with nothing staged run "
+                      "sixteen samples a period apart",
+                      c_tx && c_rx && c_u4);
+        bench.verdict("SPI3 HANDS ITS DMA2 CHANNELS OVER CLEAN through SpiHost::release(), both directions",
+                      tx_free && rx_free);
+        bench.verdict("UART4 HOLDS ITS TRANSMIT REQUEST ON DMA2 as the USARTs do on DMA1: released without "
+                      "its reset, one stray item and the channel stalled behind it; with the reset line pulsed "
+                      "(the transport's release()), nothing",
+                      !u4_free && u4_bare.armed && u4_bare.early == 1u && u4_bare.left == sample_count - 1u &&
+                          u4_reset);
+        all_off2<C>();
+    }
+}
+
+template <DmaRequest s2tx = DmaRequest::spi2_tx, DmaRequest s2rx = DmaRequest::spi2_rx,
+          DmaRequest t1up = DmaRequest::tim1_up, DmaRequest t1c4 = DmaRequest::tim1_ch4>
+void ts_held() {
+    all_off();
+    if constexpr (device::spi_count < 2u) {
+        print(serial, "  this part has one SPI: SPI2's channels are not there to measure", crlf);
+        bench.verdict("the letter declines on a part with one SPI, and says so", true);
+    } else {
+        static_assert(DmaRequestOf<s2tx>::channel == DmaRequestOf<t1up>::channel &&
+                          DmaRequestOf<s2rx>::channel == DmaRequestOf<t1c4>::channel,
+                      "table 11-5: SPI2's transmit request shares channel 5 with TIM1's update, its receive "
+                      "request channel 4 with TIM1's fourth compare");
+        constexpr uint8_t tx_ch = DmaRequestOf<s2tx>::channel;
+        constexpr uint8_t rx_ch = DmaRequestOf<s2rx>::channel;
+        // The instrument's positive control: USART2's transmit request
+        // released with no reset, which dma.md's rule says is held - then
+        // let go by the block's reset line.
+        static_assert(DmaRequestOf<DmaRequest::usart2_tx>::channel == DmaRequestOf<DmaRequest::tim4_up>::channel,
+                      "table 11-5: USART2's transmit request shares channel 7 with TIM4's update");
+        usart_hold<2>(false);
+        const Paced held = paced_block<1, DmaRequestOf<DmaRequest::usart2_tx>::channel, 4, -1>();
+        (void)paced_line("the control: USART2's transmit request raised, released without its reset, channel 7 "
+                         "paced by TIM4's update",
+                         held);
+        Usart<2>::bus_clock(true);
+        Usart<2>::reset();
+        Usart<2>::bus_clock(false);
+        bench.verdict("THE INSTRUMENT SEES A HELD REQUEST: USART2's, released without its reset, moves one item "
+                      "before the pacer runs and stalls the channel there",
+                      held.armed && held.early == 1u && held.left == sample_count - 1u);
+        const bool c_tx = paced_line("channel 5 paced by TIM1's update, nothing staged",
+                                     paced_block<1, tx_ch, 1, -1>());
+        const bool c_rx = paced_line("channel 4 paced by TIM1's fourth compare, nothing staged",
+                                     paced_block<1, rx_ch, 1, 3>());
+        spi_hold<2>(false, false);
+        const Paced tx_driver = paced_block<1, tx_ch, 1, -1>();
+        const bool tx_free = paced_line("SPI2's transmit request raised, then SpiHost::release()", tx_driver);
+        spi_hold<2>(false, true);
+        const bool tx_reset = paced_line("... the same with the reset line pulsed first", paced_block<1, tx_ch, 1, -1>());
+        spi_hold<2>(true, false);
+        const Paced rx_driver = paced_block<1, rx_ch, 1, 3>();
+        const bool rx_free = paced_line("SPI2's receive request raised (RXNE standing), then SpiHost::release()",
+                                        rx_driver);
+        spi_hold<2>(true, true);
+        const bool rx_reset = paced_line("... the same with the reset line pulsed first", paced_block<1, rx_ch, 1, 3>());
+        bench.verdict("the controls: DMA1's channels 4 and 5 paced by TIM1 with nothing staged run sixteen "
+                      "samples a period apart",
+                      c_tx && c_rx);
+        bench.verdict("SPI2 HANDS ITS CHANNELS OVER CLEAN through SpiHost::release() - a transmit request "
+                      "over TXE and a receive request over a standing RXNE, each left nothing for the next "
+                      "owner - and with the reset line pulsed as well",
+                      tx_free && rx_free && tx_reset && rx_reset);
+    }
+    ts_held_dma2<>();
+    all_off();
+}
 template <uint8_t C, uint8_t ch>
 bool dma2_copy(uint32_t& cycles, bool& in_place, uint32_t& intfr) {
     using Ch = DmaChannel<C, ch>;
@@ -3801,7 +4302,7 @@ int main() {
     bench.letter('a', "memory to memory: the gate, the widths, the flags, the cost", ta_memory);
     bench.letter('b', "circular mode, paced by a timer's update request", tb_circular);
     bench.letter('c', "the sleep: what a channel moves while the core is not awake", tc_sleep);
-    bench.letter('d', "the transfer error: five addresses nothing answers at", td_error);
+    bench.letter('d', "the transfer error: five holes read and written, the locked flash written", td_error);
     bench.letter('e', "the request path with no wire: a staircase, and the burst engine",
                  te_request);
     bench.letter('f', "the priorities: two channels contending for one bus", tf_priority);
@@ -3811,6 +4312,8 @@ int main() {
     register_dma2_letters();
     bench.letter('o', "the receive ring at speed: a timer's staircase, lap after lap", to_ring);
     bench.letter('p', "the receive ring over a channel that never takes the frame", tp_dead_ring);
+    bench.letter('s', "the held request: SPI2's channels, and on the CH32V303 SPI3's and UART4's on DMA2",
+                 ts_held<>);
     // Letters q and r on the CH32V203 board's crossed pair; on the CH32V303
     // the pair is retired and they take the far chip in the second set.
     if constexpr (device::dma_controller_count < 2u) {

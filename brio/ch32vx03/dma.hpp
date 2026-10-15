@@ -1070,7 +1070,7 @@ public:
 
     /// Throw the running block away and hand the channel back ready.
     static bool abandon() {
-        ++faults_;
+        faults_ = faults_ + 1u;
         B::halt(cfg_);
         busy_ = false;
         in_flight_ = 0;
@@ -1119,7 +1119,7 @@ private:
     static inline uint32_t cfg_ = 0;
     static inline uint8_t armed_ = 0;
     static inline uint16_t in_flight_ = 0;
-    static inline uint32_t faults_ = 0;
+    static inline volatile uint32_t faults_ = 0;
     // Set in the thread, cleared in the completion handler.
     static inline volatile bool busy_ = false;
 };
@@ -1391,7 +1391,7 @@ public:
     /// Throw the standing run away: what an owner does to a receive
     /// that outlived its sender, so the next start() begins clean.
     static bool abandon() {
-        ++faults_;
+        faults_ = faults_ + 1u;
         B::halt(cfg_);
         capacity_ = 0;
         taken_ = 0;
@@ -1438,7 +1438,7 @@ private:
     static inline uint8_t armed_ = 0;
     static inline uint16_t capacity_ = 0;
     static inline uint16_t taken_ = 0;
-    static inline uint32_t faults_ = 0;
+    static inline volatile uint32_t faults_ = 0;
     // The ring the circular arm() bound: its address, its length (zero:
     // none) and its word.
     static inline uint32_t ring_ = 0;
@@ -1538,7 +1538,7 @@ public:
             const uint32_t f = B::flags();
             if ((f & (DmaFlag::complete | DmaFlag::error)) != 0u) {
                 if ((f & DmaFlag::error) != 0u) {
-                    ++faults_;
+                    faults_ = faults_ + 1u;
                 }
                 finish();
             }
@@ -1561,7 +1561,7 @@ public:
     [[gnu::always_inline]] static uint8_t service() {
         const uint32_t up = B::service(DmaFlag::complete | DmaFlag::error);
         if ((up & DmaFlag::error) != 0u) {
-            ++faults_;
+            faults_ = faults_ + 1u;
         }
         if (up != 0u) {
             finish();
@@ -1600,7 +1600,7 @@ private:
     }
 
     static inline uint32_t cfg_ = 0;
-    static inline uint32_t faults_ = 0;
+    static inline volatile uint32_t faults_ = 0;
     static inline bool interrupt_ = true;
     // Set by the owner, cleared by the completion.
     static inline volatile bool busy_ = false;

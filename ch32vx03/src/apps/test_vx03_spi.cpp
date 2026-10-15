@@ -134,8 +134,8 @@
 //      and with the far client listening only - no verdict
 //
 // build: boards = v203c6,v203c8,v303vc
-// build: groups = abe,c
-// build: groups.v203c8 = abce,djklmx
+// build: groups = abef,c
+// build: groups.v203c8 = abcef,djklmnox
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -3297,6 +3297,316 @@ void tm_select() {
 }
 
 // ===========================================================================
+// f - a polled wait that runs out, and the transmit interrupt (z, no wire)
+// ===========================================================================
+
+/// Letter f's transmit stream, fed from SPI1's vector one frame a TXE.
+volatile bool txe_mode = false;
+volatile uint16_t txe_next = 0;
+volatile uint32_t txe_entries = 0;
+constexpr uint16_t txe_frames = 64;
+
+/// THE POLLED WAIT'S LOOP, counted in the release listing (poll_write's
+/// wait for TXE: the STATR load, the bit test, the budget's decrement and
+/// its test, the branch back - five instructions, one an APB load): a spin
+/// costs at least its five cycles and, the load waiting on PB2, no more
+/// than four times that; the tick's 1 kHz handler adds well under one per
+/// cent. So a budget of S spins ends between 5 S and 20 S cycles.
+constexpr uint32_t spin_min_cycles = 5;
+constexpr uint32_t spin_max_cycles = 20;
+
+void tf_stalled_txe() {
+    third_pad_idle();
+    // ---- spi_stalled: the polled wait that runs out ----
+    // The engine up and primed for the request's own word - so start()
+    // writes nothing on the way in - and THEN SPI1's gate closed under it:
+    // every STATR load reads zero, so TXE never comes.
+    constexpr uint16_t frames = 16;
+    const bool up = Host1::init(clock);
+    Host1::prime(SpiMode::mode0, SpiClock::div64);
+    fill_pattern(tx_buf, frames, 0x31);
+    Host1::Request r{};
+    r.cs = {};
+    r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(tx_buf));
+    r.len = frames;
+    r.mode = SpiMode::mode0;
+    r.clock = SpiClock::div64;
+    r.polled = true;
+    S1::bus_clock(false);
+    const uint32_t t0 = cycles_now();
+    const bool sync = Host1::start(r);
+    const uint32_t wall = cycles_now() - t0;
+    const uint8_t st = Host1::status();
+    S1::bus_clock(true);
+    const uint32_t spins = 100'000u + 2'048u * frames;   // SpiHost's polled_budget(16)
+    // The gate open again: the same request runs to its end.
+    const bool sync2 = Host1::start(r);
+    const uint8_t st2 = Host1::status();
+    print(serial, "  a polled write of ", frames, " frames with SPI1's gate closed: ",
+          sync ? "returned" : "DID NOT RETURN", " with status ", st, " (spi_stalled is ", spi_stalled, ") after ",
+          wall, " cycles - ", wall / spins, " a spin over the budget's ", spins, "; the gate open, the same request ",
+          st2 == spi_ok ? "spi_ok" : "FAILED", crlf);
+    bench.verdict("A POLLED WAIT THAT RUNS OUT ends the transaction spi_stalled within its one spin budget - "
+                  "between 5 and 20 cycles a spin, the loop's own five instructions",
+                  up && sync && st == spi_stalled && wall >= spin_min_cycles * spins &&
+                      wall <= spin_max_cycles * spins);
+    bench.verdict("... and the engine is left where start() is legal: with the gate open the same request "
+                  "runs spi_ok",
+                  sync2 && st2 == spi_ok);
+    Host1::release();
+
+    // ---- TXEIE: a transmit-only stream fed by the transmit interrupt ----
+    // SPI1 bare, no pad handed over, its CRC unit on: the vector writes the
+    // next frame each time TXE rises and silences TXEIE after the last, so
+    // the stream is judged by TCRCR - the CRC of every frame the shift
+    // register sent - against a bitwise loop over the buffer, and timed:
+    // at /64 a frame is 512 core cycles and a handler a small fraction of
+    // it, so the frames go out back to back.
+    S1::bus_clock(true);
+    S1::reset();
+    (void)S1::configure({.role = SpiRole::host, .clock = SpiClock::div64, .crc = true, .crc_polynomial = 0x07u});
+    fill_pattern(tx_buf, txe_frames, 0x5C);
+    txe_next = 0;
+    txe_entries = 0;
+    txe_mode = true;
+    S1::enable();
+    Pfic::clear_pending(S1::irq);
+    Pfic::enable(S1::irq);
+    const uint32_t t1 = cycles_now();
+    S1::txe_interrupt(true);
+    for (uint32_t i = 0; i < 4'000'000UL && txe_mode; ++i) {
+    }
+    for (uint32_t i = 0; i < 400'000UL && S1::busy(); ++i) {
+    }
+    const uint32_t took = cycles_now() - t1;
+    const bool finished = !txe_mode;
+    Pfic::disable(S1::irq);
+    txe_mode = false;
+    const uint16_t got = S1::tx_crc();
+    const uint16_t want = crc_frames(0x07u, false, tx_buf, txe_frames);
+    (void)S1::disable();
+    S1::reset();
+    S1::bus_clock(false);
+    // 64 frames of 512 cycles back to back, plus the first entry's
+    // latency and the last frame's own shift after the vector let go: the
+    // span lies between the frames' time and that plus one frame and the
+    // handlers' slack (2000 cycles: two tick entries and the vector's
+    // sixty-five).
+    const uint32_t frame_cycles = 8u * 64u * (SysClock::hz / SysClock::pclk2_hz);
+    const uint32_t wire = txe_frames * frame_cycles;
+    print(serial, "  TXEIE on a host: ", txe_entries, " entries for ", txe_frames, " frames, TCRCR ", hex(got),
+          " against ", hex(want), ", ", took, " cycles against ", wire, " of wire", crlf);
+    bench.verdict("THE TRANSMIT INTERRUPT ON A HOST: one entry a frame and one more to silence it, every frame "
+                  "out in order (the CRC unit's sum the buffer's)",
+                  finished && txe_entries == txe_frames + 1u && got == want);
+    bench.verdict("... and the stream back to back: the span within one frame and 2000 cycles of the frames' "
+                  "own time",
+                  took >= wire && took <= wire + frame_cycles + 2000u);
+    host_ready();
+}
+
+// ===========================================================================
+// n - recover() with the far chip holding the bus (y)
+// ===========================================================================
+
+volatile bool pair_bus_live = false;
+
+namespace kt {
+
+/// The per-bus timeout: twice the longest transaction this letter asks
+/// for (the 2000 dummies below at /256 of PB1, 57 ms) - so only a
+/// transaction that will never end runs into it.
+constexpr uint32_t timeout_ms = 120;
+using PairArb = SpiBus<PairHost, P, 2, BusPassThrough, ticks_from_ms<P>(timeout_ms)>;
+
+class Probe {
+public:
+    using Event = std::variant<SpiDone>;
+    static inline EventQueue<Event, 4, P> queue;
+    static inline uint8_t n = 0;
+    static inline uint8_t last = 0;
+    static inline uint32_t at_ms = 0;
+
+    static void init() { n = 0; }
+    static void dispatch(const Event& e) {
+        brio::match(e, [](const SpiDone& d) {
+            last = d.status;
+            at_ms = Ticker::millis();
+            ++n;
+        });
+    }
+};
+
+using BusKernel = Tenuto<P, Probe, PairArb>;
+
+void pump() {
+    TimeEvents<P>::process();
+    while (BusKernel::step()) {
+        TimeEvents<P>::process();
+    }
+}
+
+/// `len` frames of dummies at /256 with nothing read back - a write, and
+/// no select of its own: the select wire is the far chip's in this letter.
+PairHost::Request dummies(uint16_t len) {
+    PairHost::Request r{};
+    r.cs = {};
+    r.len = len;
+    r.mode = SpiMode::mode0;
+    r.clock = SpiClock::div256;
+    r.polled = false;
+    r.reply = reply_to<Probe, SpiDone>();
+    return r;
+}
+
+}  // namespace kt
+
+void tn_recover() {
+    if (!need_peer()) {
+        return;
+    }
+    // THE STAGING: this host's NSS pad made the multi-host INPUT (SSM
+    // cleared under the engine, the request's own word primed first so
+    // start() rewrites nothing) and the far chip's ss_pulse taking that
+    // wire low 30 ms after its ack - in the middle of a pumped write of
+    // 2000 frames (57 ms). MODF takes SPE and MSTR away, the pump's RXNE
+    // never comes again, and no completion is posted: the arbiter's
+    // timeout is what answers, and recover() what brings the engine back.
+    spilink::Params a{};
+    a.aux8 = 30;
+    a.aux16 = 2000;
+    const bool acked = peer_act(Op::ss_pulse, a);
+    (void)PairHost::init(clock);
+    PairHost::prime(SpiMode::mode0, SpiClock::div256);
+    PairNss::input(PinPull::up);
+    (void)PairS::disable();
+    PairS::regs().CTLR1 = static_cast<uint16_t>(PairS::regs().CTLR1 & ~spi_ssm);
+    PairS::enable();
+    kt::BusKernel::init_all();
+    pair_bus_live = true;
+    const uint32_t t0 = Ticker::millis();
+    post<kt::PairArb>(kt::dummies(2000));
+    uint32_t modf_at = 0;
+    while (Ticker::millis() - t0 < 600u && kt::Probe::n == 0u) {
+        kt::pump();
+        if (modf_at == 0u && PairS::mode_fault()) {
+            modf_at = Ticker::millis() - t0;
+        }
+    }
+    const uint8_t first = kt::Probe::last;
+    const uint32_t answered = kt::Probe::at_ms - t0;
+    const bool back = PairS::role() == SpiRole::host && PairS::enabled() && !PairS::mode_fault() &&
+                      (PairS::regs().CTLR1 & spi_ssm) != 0u;
+    // The same arbiter carries the next transaction to its end.
+    kt::Probe::n = 0;
+    post<kt::PairArb>(kt::dummies(16));
+    const uint32_t t1 = Ticker::millis();
+    while (Ticker::millis() - t1 < 200u && kt::Probe::n == 0u) {
+        kt::pump();
+    }
+    const uint8_t second = kt::Probe::n != 0u ? kt::Probe::last : no_answer;
+    pair_bus_live = false;
+    print(serial, "  a pumped write of 2000 frames, the far chip's select pulse 30 ms into it: MODF ",
+          modf_at != 0u ? "seen " : "NOT SEEN", modf_at, " ms in; the arbiter answered ", first,
+          " (spi_timeout is ", spi_timeout, ") ", answered, " ms after the post; the block afterwards ",
+          back ? "a host again, enabled, software-selected" : "NOT BACK", "; the next request ", second, crlf);
+    PairNss::release();
+    settle_ms(20);
+    (void)link_command_mode();
+    // The bound: the arbiter's timeout counts from the post, so the answer
+    // comes at 120 ms of ticks plus one tick of its arming and the pump's
+    // turn - never before 120, and well before 200.
+    bench.verdict("A HOST DEMOTED MID-TRANSACTION BY A SECOND DEVICE ON ITS SELECT is answered spi_timeout by "
+                  "the timed arbiter, 120 to 200 ms after the post, MODF seen near the far chip's 30 ms",
+                  acked && modf_at >= 20u && modf_at <= 60u && first == spi_timeout && answered >= kt::timeout_ms &&
+                      answered < 200u);
+    bench.verdict("... and recover() puts the engine back where start() is legal - the block a software-selected "
+                  "host again, MODF down - and the same arbiter carries the next transaction spi_ok",
+                  back && second == spi_ok);
+    bench.verdict("the command channel is back after the staged demotion", command(Op::ping));
+    pair_done();
+}
+
+// ===========================================================================
+// o - rebase(): the engine under a DynamicClock (y)
+// ===========================================================================
+
+/// The suite's own rate first - so the pack starts where main() left the
+/// machine - then two lower PLL rates on the same HSI. The console and the
+/// tick are users so the letter speaks at every rate, and the pair's host
+/// is the one this letter rebases.
+using Dyn = DynamicClock<Rates<Clock<ClockSource::pll, 144'000'000>, Clock<ClockSource::pll, 96'000'000>,
+                               Clock<ClockSource::pll, 48'000'000>>,
+                         Ticker, Serial, PairHost>;
+
+/// The ceiling this letter declares: 6 MHz, which /8 honours on a 48 MHz
+/// bus and /16 on a 72 MHz one.
+constexpr uint32_t rebase_ceiling = 6'000'000;
+
+void to_rebase() {
+    if (!need_peer()) {
+        return;
+    }
+    bool books = true;
+    bool wires = true;
+    for (uint8_t i = 0; i < Dyn::rate_count; ++i) {
+        // The ceiling stands from an init() at the rate in force; then the
+        // switch, whose fan-out is the rebase() this letter is about.
+        console_drain();
+        (void)PairHost::init(Dyn{}, rebase_ceiling);
+        const bool switched = Dyn::set_index(i);
+        const uint32_t hz = Dyn::rate_hz(i);
+        const uint32_t bus = Dyn::rate_pclk1_hz(i);
+        // What rebase() must have computed, from first principles.
+        uint8_t want_code = 0;
+        while (want_code < 7u && bus / (2UL << want_code) > rebase_ceiling) {
+            ++want_code;
+        }
+        const uint8_t ratio = static_cast<uint8_t>(hz / bus);
+        const auto ceiling = PairHost::ceiling_clock();
+        const auto ahead8 = PairHost::write_ahead_from(SpiDataSize::bits8);
+        const auto ahead16 = PairHost::write_ahead_from(SpiDataSize::bits16);
+        const bool book = switched && PairHost::reference_hz() == bus && PairHost::hclk_hz() == hz && ceiling &&
+                          static_cast<uint8_t>(*ceiling) == want_code &&
+                          PairHost::sck_hz(SpiClock::div2) == bus / (2UL << want_code) && ahead8 && ahead16 &&
+                          static_cast<uint8_t>(*ahead8) == spi_write_ahead_code<spi_default_hold_off_cycles>(8, ratio) &&
+                          static_cast<uint8_t>(*ahead16) == spi_write_ahead_code<spi_default_hold_off_cycles>(16, ratio);
+        books = books && book;
+        const uint32_t engine_bus = PairHost::reference_hz();
+        const uint32_t div2_hz = PairHost::sck_hz(SpiClock::div2);
+        // A request at /2 against the far client: clamped to the ceiling,
+        // never faster than it on the core's counter (each of its 256
+        // bits at least HCLK / 6 MHz cycles long), every frame exact both
+        // ways.
+        Exchange e{};
+        e.rate = SpiClock::div2;
+        e.count = 32;
+        const Outcome o = run_exchange(e);
+        const uint32_t floor_cycles = static_cast<uint32_t>(256ULL * hz / rebase_ceiling);
+        const bool wire = exact(e, o) && o.cycles >= floor_cycles;
+        wires = wires && wire;
+        console_drain();
+        print(serial, "  ", hz / 1'000'000u, " MHz (bus ", bus / 1'000'000u, "): the engine's bus ",
+              engine_bus / 1'000'000u, " MHz, the ceiling /", ceiling ? spi_division(*ceiling) : 0u,
+              " (code ", want_code, " asked), /2 runs at ", div2_hz / 1000u,
+              " kHz, two in flight from /", ahead8 ? spi_division(*ahead8) : 0u, " and /",
+              ahead16 ? spi_division(*ahead16) : 0u, "; 32 frames at /2: ", o.cycles, " cycles (", floor_cycles,
+              " at least), ", exact(e, o) ? "exact both ways" : "NOT EXACT", crlf);
+    }
+    console_drain();
+    (void)Dyn::set_index(0);
+    (void)link_command_mode();
+    bench.verdict("REBASE() FOLLOWS THE CLOCK: at 144, 96 and 48 MHz the engine's bus rate, the declared ceiling's "
+                  "code, the rate /2 really runs at and both write-ahead codes are what the new bus makes them",
+                  books);
+    bench.verdict("... and at each rate a request at /2 runs clamped to the ceiling - never faster than it on the "
+                  "core's counter - exact both ways against the far client",
+                  wires);
+    bench.verdict("the suite's own rate is in force again, the command channel answering", command(Op::ping));
+    pair_done();
+}
+
+// ===========================================================================
 // x - the slip statistics (by name): each mode against both far serves
 // ===========================================================================
 
@@ -3366,6 +3676,10 @@ void register_pair_letters() {
         bench.second_letter('l', "THE ROLES INVERT: this chip's client runs under the far host", tl_client);
         bench.second_letter('m', "THE HARDWARE SELECT: MODF from a second chip, SSOE framing the far client",
                             tm_select);
+        bench.second_letter('n', "RECOVER(): a host demoted mid-transaction by the far chip, the timed arbiter",
+                            tn_recover);
+        bench.second_letter('o', "REBASE(): the engine at three rates of a DynamicClock against the far client",
+                            to_rebase);
         bench.letter('x', "the slip statistics against the peer: each mode, both far serves (no verdict)", tx_slips,
                      false);
     }
@@ -3401,6 +3715,22 @@ BRIO_CH32_LEAF_VECTOR(usart1_handler) { (void)Serial::isr(); }
 
 BRIO_CH32_VECTOR(spi1_handler) {
     spi1_isr_entries = spi1_isr_entries + 1u;
+    if (txe_mode) {
+        // Letter f's transmit stream: the next frame on each TXE, the
+        // interrupt silenced after the last.
+        txe_entries = txe_entries + 1u;
+        if ((S1::isr() & SpiFlag::txe) != 0u) {
+            const uint16_t k = txe_next;
+            if (k < txe_frames) {
+                S1::data8(tx_buf[k]);
+                txe_next = static_cast<uint16_t>(k + 1u);
+            } else {
+                S1::txe_interrupt(false);
+                txe_mode = false;
+            }
+        }
+        return;
+    }
     if (err_mode) {
         err_isr_entries = err_isr_entries + 1u;
         err_isr_flags = err_isr_flags | S1::isr();
@@ -3436,7 +3766,16 @@ BRIO_CH32_VECTOR(spi2_handler) {
         }
     }
     // SPI2's pump: letter a's host, and on the CH32V203 the pair's (the
-    // same class there - SPI2's one column is the pair's link).
+    // same class there - SPI2's one column is the pair's link) - under
+    // letter n's timed arbiter there.
+    if constexpr (pair_spi == 2u) {
+        if (pair_bus_live) {
+            if (PairHost::isr()) {
+                brio::post<kt::PairArb>(brio::TransferDone{PairHost::status()});
+            }
+            return;
+        }
+    }
     if (Spi2Host::isr()) {
         host_done = true;
     }
@@ -3451,6 +3790,12 @@ BRIO_CH32_VECTOR(spi3_handler) {
             pair_err_entries = pair_err_entries + 1u;
             pair_err_flags = pair_err_flags | PairS::isr();
             PairS::error_interrupt(false);
+            return;
+        }
+        if (pair_bus_live) {
+            if (PairHost::isr()) {
+                brio::post<kt::PairArb>(brio::TransferDone{PairHost::status()});
+            }
             return;
         }
         if (pair_pump_live && PairHost::isr()) {
@@ -3520,6 +3865,7 @@ int main() {
     bench.letter('c', "THE LOOPBACK on SPI1: the pump, the ladder to 36 MHz, the engines, the arbiter",
                  tc_loop);
     bench.letter('e', "the flags, the vectors, the line modes, the disable rule", te_flags);
+    bench.letter('f', "a polled wait that runs out, and the transmit interrupt", tf_stalled_txe);
     register_spi3_letters();
     register_pair_letters();
 

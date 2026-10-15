@@ -115,11 +115,19 @@ marked: a memory-to-memory block on it runs whole through a frozen
 request, and a USART2 whose channel was never enabled holds one as well.
 SPI1's request does not outlive its release - an engined write abandoned
 with TXE standing under TXDMAEN, SPE then cleared and the gate closed,
-left nothing for a timer-paced block on channels 2 and 3. So a transport's
+left nothing for a timer-paced block on channels 2 and 3 - and neither
+does SPI2's on DMA1's channels 4 and 5 nor, on the CH32V303VCT6, SPI3's on
+DMA2's 1 and 2: a transmit request over TXE and a receive request over a
+standing RXNE, each let go by `SpiHost::release()` with no reset, left a
+clean paced staircase to the next owner on both parts (`test_vx03_dma`
+letter s). UART4's transmit request on DMA2's channel 5 IS held without
+its reset - one stray item, the channel stalled - and let go with it, the
+USARTs' rule on the second controller. A USART's transmit request is TXE
+under TE: staged with UE and DMAT alone, nothing is held. So a transport's
 `release()` pulses its block's reset before the gate where its block
 holds a request - the USART's and the I2C host's; the timers', the ADC's
-and the DAC's reset their blocks there already, and the SPI's, on SPI1's
-measurement, does not need to -
+and the DAC's reset their blocks there already, and the SPI's, on the
+measurement of all three instances, does not need to -
 and the incoming side needs nothing beyond its engine's `arm()`: the
 outgoing owner's release is the whole of the hand-over, because the
 incoming one cannot tell which requester holds the line and its own
@@ -641,11 +649,11 @@ block's reset line, the one act that withdraws a request already raised.
 
 `test_vx03_dma` measures at 144 MHz, the source of every copy a
 four-kilobyte pattern in the image itself and the core's own counter the
-ruler. On the CH32V203C8T6 the twelve letters of a part with one
+ruler. On the CH32V203C8T6 the thirteen letters of a part with one
 controller run with the board bare but for the core board's crossed pair
-to the fourth port (PB0 to PA3, which letters q and r take): **51
+to the fourth port (PB0 to PA3, which letters q and r take): **57
 verdicts in `z`**. On the CH32V303VCT6 DMA2's five single-board letters
-run beside DMA1's with the far board dark: **58 verdicts in `z`**; that
+run beside DMA1's with the far board dark: **67 verdicts in `z`**; that
 board's crossed pair is retired (UART4's default pads PC10/PC11 are the
 desk pair's SPI link), and its letters n, q and r are the two-board key
 `y` against the far chip's usart_peer - UART4 on its second column,
@@ -663,20 +671,32 @@ named.
   2050 on the CH32V303VCT6, which is 11.2.1's own rule read back; INTFR
   stood at 0x7 (the global, complete and half bits of the channel) and
   one write to INTFCR took all four down.
+- **Unequal widths move as table 11-1 draws them** (letter a): the nine
+  pairings of PSIZE and MSIZE, four items each from the image's pattern
+  - each end stepping by its own width, a narrower value zero-extended
+  into a wider target, a wider one cut to its low bytes, little-endian at
+  both ends, nothing written past the last item - every target byte
+  compared against the table on both parts.
 - **EN stays set after a completed block** - CNTR at zero, TCIF up, the
   channel enabled and idle - and while it is set every configuring verb
   of the driver refuses: the configuration, the count, a whole transfer
   and an address, with CFGR unchanged across all four.
-- **NO ADDRESS THE BENCH COULD NAME RAISES A TRANSFER ERROR.** Reads of
-  0x3000 0000, 0x4000 8000, 0x4002 4000, 0x6000 0000 and 0xA000 0000 -
-  five addresses outside every window of the map - each completed as an
-  ORDINARY BLOCK: TCIF up, TEIF down, EN still set, with TEIE armed on
-  every one of them. 11.2.1 promises a transfer error and an automatic
-  drop of EN for a reserved area, and none of the five produced either.
-  The first three read zeros on both parts; on the CH32V303VCT6 the last
-  two are the FSMC's bank 1 and its register block, and with the FSMC's
-  gate closed each read the word 0x0FFF FFFF. The same is true of the
-  CH32V00x's controller.
+- **NO ADDRESS THE BENCH COULD NAME RAISES A TRANSFER ERROR, READ OR
+  WRITTEN.** Reads of 0x3000 0000, 0x4000 8000, 0x4002 4000, 0x6000 0000
+  and 0xA000 0000 - five addresses outside every window of the map - each
+  completed as an ORDINARY BLOCK: TCIF up, TEIF down, EN still set, with
+  TEIE armed on every one of them. 11.2.1 promises a transfer error and
+  an automatic drop of EN for a reserved area, and none of the five
+  produced either. The first three read zeros on both parts; on the
+  CH32V303VCT6 the last two are the FSMC's bank 1 and its register block,
+  and with the FSMC's gate closed each read the word 0x0FFF FFFF. The same
+  is true of the CH32V00x's controller. WRITES end the same way (letter
+  d): four items at each width into the same five holes, and into the
+  image's own pattern in the flash - at the alias the image is linked at
+  and at the array's own address, the FPEC locked as at every boot - all
+  twenty-one writes ordinary completions on both parts, the vector entered
+  for the completion alone and the pattern read back unchanged: the
+  locked array drops the store in silence.
 - **A circular channel reloads its count and its addresses by itself.**
   Eight compares poured into a timer by its own update request, four
   laps: four half flags and four complete ones, the count seen stepping
@@ -941,20 +961,21 @@ Implemented but not bench-verified, each with what would measure it:
 - **The transfer-error path** - TEIE, the engines' `abandon()` on an
   error, their fault counters and the ledger giving the count of a
   channel the hardware stopped back - is written from 11.2.1 and provoked
-  by none of the five addresses the suite reads from, on either part. A
-  peripheral that raises it, or a write into flash (which 11.1 lists as a
-  legal destination and the bench has not tried), would measure it.
+  by nothing the bench can name on either part: the five holes read and
+  written and the locked flash written all end as ordinary blocks (the
+  findings). Letter d judges the path wherever a write does raise one,
+  and runs it through the copy engine; a peripheral or an address that
+  raises the error is what would measure it.
 - **A ring restarted after a real transfer error**: the consumer's next
   look starts a ring whose channel stopped again, measured with `abandon()` standing
-  for the error, which no address the bench can name provokes (above).
-- **The held request on the other requesters.** The rule is measured
-  with USART2, I2C1, TIM4 and SPI1 on DMA1's channels 2, 3, 6 and 7; the
-  release's reset is every USART's and both I2C hosts', and the timers',
-  the ADC's and the DAC's reset theirs already. A hand-over on DMA2 -
-  UART4's receive channel 3 with TIM6's update request on the
-  CH32V303 - or SPI2's channels 4 and 5 shared with USART1's and I2C2's,
-  each owner released with and without its reset, is what would measure
-  it there, and say whether an SPI block other than SPI1 holds one.
+  for the error; letter g stages the real one - the ring's memory address
+  pointed by register at an address whose write faults - as soon as
+  letter d's probe finds such an address, and none is known (above).
+- **UART4's receive request on DMA2's channel 3**: its transmit request
+  is measured held on channel 5 (letter s); the receive side wants a
+  frame on its pad, and both of that port's columns are the desk pair's
+  wires - the far chip's frame, the port released without its reset and
+  a TIM6 staircase on channel 3 after it, is what would measure it.
 - **The CH32V203's serial round trip on one pair of pads.** The engines
   themselves carry a wire's data in the two bus chapters - sixteen bytes
   each way through SPI2's pair and a tenure's shapes through I2C1's,
@@ -963,10 +984,6 @@ Implemented but not bench-verified, each with what would measure it:
   Mbaud ([usart.md](usart.md)). What has no listener on the CH32V203 is USART2's
   pair to itself: a strap between PA2 and PA3 is what the suite's letter
   g detects and what would close it in one run.
-- **Widening and truncation between unequal widths** (table 11-1): the
-  channel takes two widths and every transfer above sets them equal. A
-  copy with PSIZE and MSIZE apart, compared against the table's rows,
-  is what would measure it.
 - **The parts other than the CH32V203C8 and the CH32V303VC.** The request
   table folds through each part's own instances and the whole stratum
   compiles for all thirteen, both ways the hardware prologue can be built

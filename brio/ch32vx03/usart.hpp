@@ -1484,6 +1484,17 @@ struct Uart {
                 rx_edge = rx_frame_entry();
                 if constexpr (has_tx_engine) {
                     return rx_edge;
+                } else {
+                    // THE WAIT FOR A FRAME READS NO STATR, with the
+                    // interrupt transmitter idle too: the status read below
+                    // is TXE's, and made with TXEIE down it armed the clear
+                    // of the NEXT frame's error for nothing - after one
+                    // counted error a run of errored frames counted no
+                    // more (measured, docs/ch32vx03/usart.md). CTLR1 is
+                    // read instead, which arms nothing.
+                    if ((regs().CTLR1 & usart_txeie) == 0u) {
+                        return rx_edge;
+                    }
                 }
             }
         }
@@ -2102,9 +2113,10 @@ private:
     /// prologue, every interrupt, the hardware prologue saving integer
     /// registers only (pfic.hpp). Inline, the vector is a leaf and saves
     /// none of them.
-    [[gnu::always_inline]] static void bump(uint16_t& counter) {
-        if (counter != 0xFFFFu) {
-            ++counter;
+    [[gnu::always_inline]] static void bump(volatile uint16_t& counter) {
+        const uint16_t c = counter;
+        if (c != 0xFFFFu) {
+            counter = static_cast<uint16_t>(c + 1u);
         }
     }
 
@@ -2136,12 +2148,15 @@ private:
     /// alignment modulo the word (rt/rt.cpp's word path), the byte loop
     /// otherwise, where memcpy would run the same loop behind a call.
     static constexpr uint32_t copy_threshold = 16;
-    static inline uint16_t m_rx_overruns = 0;
-    static inline uint16_t m_hw_overruns = 0;
-    static inline uint16_t m_frame_errors = 0;
-    static inline uint16_t m_noise_errors = 0;
-    static inline uint16_t m_parity_errors = 0;
-    static inline uint16_t m_dma_faults = 0;
+    /// The counters the vectors bump and the thread reads: VOLATILE, so a
+    /// thread polling one in a loop sees each store (a plain one is read
+    /// once and kept in a register).
+    static inline volatile uint16_t m_rx_overruns = 0;
+    static inline volatile uint16_t m_hw_overruns = 0;
+    static inline volatile uint16_t m_frame_errors = 0;
+    static inline volatile uint16_t m_noise_errors = 0;
+    static inline volatile uint16_t m_parity_errors = 0;
+    static inline volatile uint16_t m_dma_faults = 0;
     /// Under a receive engine, the bytes lost beside the view's skips (an
     /// overrun, a restart), never cleared: rx_skips()'s second term.
     static inline volatile uint32_t m_rx_lost = 0;

@@ -438,10 +438,10 @@ BRIO_CH32_VECTOR(tim8_brk_handler) {
 ## Bench findings
 
 `test_vx03_tim` measures on both parts at 144 MHz. On the CH32V303VCT6
-all nineteen letters run, both of the suite's optional jumpers in place
-(PA6 to PA1, PC6 to PB8): **51 pass, 0 fail**. On the CH32V203C8T6 the
-ten letters that part has run with NOTHING WIRED: **36 pass, 0 fail**,
-the PA6-PA1 jumper absent and the letter that tests for it saying so.
+all twenty-one letters run, both of the suite's optional jumpers in place
+(PA6 to PA1, PC6 to PB8): **56 pass, 0 fail**. On the CH32V203C8T6 the
+twelve letters that part has run with NOTHING WIRED: **39 pass, 0 fail**,
+the PA6-PA1 jumper absent and the letters that test for it saying so.
 The numbers below are both parts' where one number is given, and named
 where they differ.
 
@@ -469,6 +469,30 @@ setup, those four readings came back one case late.
 **A second timer measuring the first, over the PA6-PA1 jumper**
 (CH32V303VCT6): TIM2 read TIM3's wave as a period of **999 us** and a
 high time of **299 us** for 1000 and 300 asked.
+
+**The repetition counter: one update in RPTCR + 1 periods** (letter
+t, TIM1 on both parts and TIM8 on the CH32V303VCT6). Edge-aligned at a
+100 us period with RPTCR 0, 1, 4 and 255, and centre-aligned with
+ATRLR 100 (100 us between an overflow and the next underflow) at 0, 1
+and 3: every interval between update flags within **42 cycles** of
+(RPTCR + 1) x the counts over ten runs a part, against a bound of 500
+(each stamp one poll turn and one tick handler late) - 3686400 cycles
+at 255 read as 3686377 to 3686420. Centre-aligned, the overflow and the
+underflow each count: at RPTCR 0 the updates alternate direction, at 1
+and 3 every update lands at an UNDERFLOW (the counter reads up after
+each), with the counter started from zero by configure()'s update.
+
+**Centre-aligned counting, and when the compare flag rises** (letter u,
+TIM3 at 1 MHz, ATRLR 500, a compare of 200). Mode 1 raised CC1IF only
+counting down, mode 2 only counting up - seven rises of seven, 999 to
+1000 us apart - and mode 3 on both, the gaps alternating **600 and 400
+us** (599 to 600, 399 to 400), each the one its starting direction says,
+ten runs a part. The wave is the same in all three: over the PA6-PA1
+jumper TIM2 read a period of **999 us** and a high time of **399 us**
+(1000 and 400 asked: PWM1 high for twice the compare around each
+underflow, in twice ATRLR) in every mode, and TIM8 centre-aligned with
+ATRLR 1000 and a compare of 300, over the PC6-PB8 jumper, a period of
+**2000** counts and a high time of **600** (CH32V303VCT6).
 
 **The dead band, measured as the gap it is.** TIM1 at half duty with DTG
 0xFF and CKD at four: the gap between channel 1 falling and its
@@ -620,10 +644,6 @@ Implemented but not bench-verified:
   which no board here carries; the family fixture instantiates every
   verb of it, and the CH32V303's sixteen-bit TIM5 measures the same
   block at the other width.
-- **Centre-aligned counting and its three compare-flag policies**: the
-  configuration is written and read back, but what the reference suite
-  measures is edge-aligned. A scope or a capture on a second timer over
-  a wire would say when CCyIF lands in each of the three modes.
 - **The channels' input filters and prescalers** (ICyF, ICyPSC): both
   fields are written and read back, and no measurement here needs a
   filter - the waveforms are clean because the chip makes them. A noisy
@@ -632,9 +652,6 @@ Implemented but not bench-verified:
   the LQFP48 does not bond, and TIM1's is PA12, which the USB owns on
   that board; the CH32V303VCT6 measures the same block's input on PD2
   above. A CH32V203 package that bonds PD2 would measure it there.
-- **The eight-bit repetition counter**: written and read back on TIM1,
-  but nothing here counts update events at a ratio - a measurement of
-  one update per N periods would.
 - **The TI1 XOR as a Hall interface**: used here as a wireless path from
   one channel's output to TI1, which is not what it is for. Three
   sensors on three pads are.
