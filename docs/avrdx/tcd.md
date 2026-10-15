@@ -25,8 +25,10 @@ through CNTPRES (1/4/32) into the COUNTER clock, so the counter runs
 at `source / (SYNCPRES x CNTPRES)`. The synchronizer clock is what the
 input processing logic and the delay block run on; a third prescaler
 (DLYPRESC) divides it again for blanking and the programmable output
-event. A TCD clocked from anything but CLK_PER does not move when the
-main prescaler does.
+event, which last DLYPRESC x (DLYVAL + 1) synchronizer cycles - one
+prescaled tick more than 25.3.4.1's formula (measured below;
+`delay_cycles()` returns the measured one). A TCD clocked from anything
+but CLK_PER does not move when the main prescaler does.
 
 **The four waveform modes** (25.3.3.2), each a walk of the same four
 states - dead-time A, on-time A, dead-time B, on-time B - with the
@@ -328,9 +330,26 @@ chapter's "two/three clock cycles on the TCD synchronizer clock".
 
 **The digital filter and input blanking work as specified.** With
 CLK_TCD_CNT = 93750 Hz (four cycles = 43 us) a 5 us pulse is rejected
-and a 400 us pulse passes. A blanking window of 1200 CLK_TCD_SYNC
-cycles (400 us) triggered from CMPASET swallowed 4 out of 4 events
-placed inside it and honoured 4 out of 4 placed after it.
+and a 400 us pulse passes. A blanking window of DIV8 x 150 - 1208
+CLK_TCD_SYNC cycles, 403 us - triggered from CMPASET swallowed 4 out of
+4 events placed inside it and honoured 4 out of 4 placed after it.
+
+**The delay counter counts DLYVAL + 1 prescaled ticks** (`test_avr_tcd`
+l). PROGEV triggered at CMPASET, measured from WOA's rising edge on a
+TCB at CLK_PER = CLK_TCD_SYNC: DIV1 x 200 fires 201 ticks later, DIV2 x
+200 402, DIV4 x 100 404, DIV8 x 50 408 - DLYPRESC x (DLYVAL + 1) with no
+skew left between the pin path and the event path, every run of ten.
+25.3.4.1 writes DLYPRESC x DLYVAL; the blanking window runs on the same
+counter ("the same logic"), and `delay_cycles()` reports the measured
+length.
+
+**FIFTY with AUPDATE: one write lands the pair** (`test_avr_tcd` l).
+Two ramps with both CLR registers at 599 (cycle 1200, WOA high 499):
+with FIFTY a write of CMPACLR = 899 alone reads back in CMPBCLR too
+(25.5.3), and with AUPDATE that write - its high byte - requests the
+end-of-cycle synchronization, so the cycle becomes 1800 and both
+outputs' on-time 799. FIFTY without AUPDATE mirrors the register and
+moves nothing on the pins.
 
 **Dithering is exact.** One ramp, DITHERSEL = on-time B, DITHER = 8:
 32 consecutive cycles summed to 19216 ticks = 32 x 600 + 16, and the
@@ -364,6 +383,14 @@ one further read: the discipline is real but costs nothing at this
 rate. It is at a slow CLK_TCD that the bounded waits earn their keep,
 which is why every verb that touches them returns a bool.
 
+**It stops in STANDBY and POWER-DOWN, as 25.3.6 says, whatever its
+clock does** (`test_avr_sleep` o). A one-ramp TCD0 overflowing every
+43.7 ms (24 MHz / 8 / 32, 4096 counts) ends an IDLE sleep with its OVF
+interrupt; in STANDBY it never fires and the 125 ms PIT backstop ends
+the sleep, clocked from CLK_PER and from OSCHF kept running by the
+oscillator's own RUNSTDBY alike, and in POWER-DOWN the same. The TCD
+has no RUNSTDBY of its own, and an oscillator's does not lend it one.
+
 ## Not covered yet
 
 Driver gaps:
@@ -388,15 +415,9 @@ Implemented but not bench-verified:
   measurement, but no waveform is measured on PB4/PB5 or PF0..PF3
   (the console owns PF4/PF5 and the desk's LED sits on PF2); ALT3 is
   PORTG, absent from the 48-pin bench chip.
-- **The programmable output event (PROGEV)** and its DLYVAL delay. The
-  other half of the same register - input blanking - is bench-verified,
-  and the generator is in `evsys.hpp`, but nothing measures PROGEV.
 - **Input modes 1, 2, 3, 5 and 6.** Exposed and validity-checked
   against table 25-5; their signatures need per-state discrimination
   that the wireless rig does not have, so none of them is measured.
-- **`fifty_percent` together with `auto_update`** (25.5.3 says a write
-  to either CLR high byte then requests the sync); FIFTY's mirroring
-  is measured, that interaction is not.
 - **Errata 2.14.1 could NOT be provoked on this die.** With CFG =
   ASYNC and CNTPRES at 4 and at 32, sixteen events of every length
   down to a back-to-back set/clear (~125 ns) reached BOTH the capture
@@ -417,7 +438,3 @@ Implemented but not bench-verified:
   does not refuse alternate routes.
 - **DBGRUN and FAULTDET.** Both need a CPU halted in an OCD session;
   neither is reachable from a running suite.
-- **Sleep.** The TCD runs in Idle and stops in Standby and Power-Down
-  (25.3.6); nothing on this bench exercises the TCD across a sleep, so
-  this remains datasheet-trusted, including RUNSTDBY on the clock
-  sources the TCD requests.

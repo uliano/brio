@@ -230,7 +230,7 @@ extern "C" void TSENS_Handler() {
 
 ## Bench findings
 
-From `test_samc_tsens` (10 letters in `z` plus letter `p` by name, 168
+From `test_samc_tsens` (11 letters in `z` plus letter `p` by name, 171
 verdicts in `z`, about two minutes). **Nothing to wire**, and this chapter
 could not need wires in principle: 43.5.1 is "Not applicable".
 
@@ -483,6 +483,13 @@ so a window whose lower limit sits below the datum's rail matches on
 every measurement and its event is the count. See
 [platform.md](platform.md), "Sleep, peripheral by peripheral".
 
+**And the interrupt half: RESRDY wakes the core from STANDBY** (letter
+k, every run of twelve). One measurement on the CPU's generator, started
+with the console drained and the core put in STANDBY: with RUNSTDBY the
+result ends the sleep in one WFI with TSENS's line pending and the
+300 ms RTC backstop silent; with RUNSTDBY clear the measurement waits for
+the core and the backstop ends the sleep.
+
 ## The inverted start event
 
 From `test_samc_analog` letter l, 8 verdicts.
@@ -519,9 +526,8 @@ Driver gaps (not built):
 
 Implemented but not bench-verified:
 
-- **The block as a WAKE source.** RESRDY, WINMON, OVERRUN and OVF have
-  never driven the NVIC out of a sleep; table 43-1's rows are measured
-  (see "Bench findings") through an event witness and not an interrupt.
+- **WINMON, OVERRUN and OVF as WAKE sources** (RESRDY's is measured):
+  the same letter with one of them armed instead would measure each.
 - **Absolute accuracy, in any form.** There is no thermometer on this
   bench. Everything above is a ratio, a difference, a repeatability figure
   or a plausibility band, and table 45-37's -11.3 .. +6.2 C is untested

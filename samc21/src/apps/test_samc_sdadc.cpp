@@ -56,6 +56,7 @@
 //   j  the event chain: event in, the converter's interrupt out, a TC
 //      counting
 //   k  the automatic sequence over the three pairs
+//   l  RESRDY as a wake from STANDBY, RUNSTDBY clear the control
 //
 // build: boards = c21j
 // build: monitor_speed = 115200
@@ -78,6 +79,8 @@
 #include "util/analog.hpp"
 #include "util/print.hpp"
 #include "util/testbench.hpp"
+
+#include "bench_sleep.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::internal, 48'000'000>;
 constexpr SysClock clock;
@@ -1949,6 +1952,69 @@ void tk_sequence() {
     Inn2::release(); Inp2::release();
 }
 
+// =============================================================================
+// l - RESRDY as a wake from STANDBY
+// =============================================================================
+//
+// One conversion at OSR 1024 on 6 MHz - a 0.7 ms decimation window, two
+// skipped results before it - started with the console drained, the core
+// then in STANDBY under the samc21 suites' sleep (bench_sleep.hpp) with
+// the RTC backstop at 300 ms. RUNSTDBY set: the result ends the sleep,
+// one WFI, SDADC's line pending, the backstop silent. RUNSTDBY clear is
+// the control: the conversion waits for the core and the backstop ends
+// the sleep.
+void tl_wake() {
+    auto leg = [](bool run_standby, uint8_t& wakes, uint32_t& pend, bool& backstop,
+                  uint16_t& seen) {
+        wakes = 0;
+        pend = 0;
+        backstop = false;
+        seen = 0;
+        SdadcConfig c = base_cfg(SdadcOsr::osr1024);
+        c.run_standby = run_standby;
+        if (!sdadc_up(c) || !benchsleep::backstop_arm(9830)) {
+            return;
+        }
+        Sdadc::clear_flags(Sdadc::flag_resrdy);
+        const uint16_t s0 = chain_seen;
+        chain_taken = chain_results;           // count, store nothing
+        Sdadc::arm(Sdadc::flag_resrdy);
+        Nvic::enable(Sdadc::irq());
+        while (!Serial::tx_idle()) {
+        }
+        (void)Sdadc::start();
+        wakes = benchsleep::sleep_until<Serial>(SleepMode::standby,
+                                                [s0] { return chain_seen != s0; });
+        pend = benchsleep::first_pending;
+        backstop = benchsleep::rtc_fired;
+        const uint32_t t0 = Ticker::millis();
+        while (chain_seen == s0 && Ticker::millis() - t0 < 20u) {
+        }
+        seen = static_cast<uint16_t>(chain_seen - s0);
+        Sdadc::disarm(Sdadc::flag_resrdy);
+        Nvic::disable(Sdadc::irq());
+    };
+    const bool rtc = benchsleep::backstop_up();
+    bench.verdict("the backstop comes up", rtc);
+    uint8_t w_on = 0, w_off = 0;
+    uint32_t p_on = 0, p_off = 0;
+    bool b_on = false, b_off = false;
+    uint16_t s_on = 0, s_off = 0;
+    leg(true, w_on, p_on, b_on, s_on);
+    leg(false, w_off, p_off, b_off, s_off);
+    benchsleep::backstop_down();
+    constexpr uint32_t line = 1u << static_cast<uint32_t>(SDADC_IRQn);
+    print(serial, "  STANDBY, RUNSTDBY set: ", w_on, " WFI, pending ", hex(p_on), ", backstop ",
+          b_on ? "FIRED" : "silent", "; RUNSTDBY clear: ", w_off, " WFI, pending ",
+          hex(p_off), ", backstop ", b_off ? "fired" : "SILENT", crlf);
+    bench.verdict("RESRDY WAKES THE CORE FROM STANDBY with RUNSTDBY: one WFI, SDADC's line, "
+                  "the backstop silent",
+                  w_on == 1u && (p_on & line) != 0u && !b_on && s_on >= 1u);
+    bench.verdict("without RUNSTDBY the conversion waits for the core: the backstop ends "
+                  "the sleep",
+                  b_off && (p_off & line) == 0u);
+}
+
 void banner() {
     print(serial, crlf,
           "test_samc_sdadc - SAMC21J18A SIGMA-DELTA converter (ch. 39): three "
@@ -1962,6 +2028,7 @@ void banner() {
 
 extern "C" void SysTick_Handler() { brio::Ticker::tick(); }
 extern "C" void SERCOM5_Handler() { (void)Serial::isr(); }
+extern "C" void RTC_Handler() { benchsleep::backstop_isr(); }
 
 /// Letter j's capture: each RESRDY stores the RESULT word, whose read is
 /// what clears the flag (39.8.7), into the first free entry; results past
@@ -2004,6 +2071,7 @@ int main() {
     bench.letter('i', "the window monitor on a signed result", ti_window);
     bench.letter('j', "the event chain: event in, interrupt out", tj_event_chain);
     bench.letter('k', "the automatic sequence over the three pairs", tk_sequence);
+    bench.letter('l', "RESRDY as a wake from STANDBY", tl_wake);
 
     if (serial_ok) {
         print(serial, crlf, "boot: clk=", clock_ok ? "OSC48M" : "FAILED",

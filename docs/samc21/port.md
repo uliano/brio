@@ -148,6 +148,18 @@ brio::Pin<'B', 31>::function(brio::PinFunction::d, {.input_enable = true});
   [platform.md](platform.md), "Sleep, peripheral by peripheral".
 - The peripheral handoff: PB30/PB31 given to SERCOM5 through function
   D carry a byte-exact 115200 console both ways (see `sercom.md`).
+- **WRCONFIG, many pads in one verb** (`test_samc_eic` h): one
+  `configure_mask()` over PA09, PA16 and PA17 - pins in both half-words
+  of WRCONFIG's 16-bit mask, so the two stores the verb makes - pulls
+  all three up and then down, read back through IN; one
+  `function_mask()` hands all three to the EIC with the pull kept, and
+  each line flags its pad's rise.
+- **Event inputs 2 and 3, and SET with CLR at one instant**
+  (`test_samc_eic` i). One software event on an asynchronous channel
+  drives input 2 (SET) and input 3 (CLR), both naming PA16 under PORT's
+  output: each alone does its action (SET raises and holds, CLR lowers);
+  both at once execute TGL, table 28-3's "all other combinations" - the
+  pad flips on every event.
 
 ## Not covered yet
 
@@ -164,13 +176,10 @@ Driver gaps (not built):
   it, IN and CTRL read zero); this driver uses the APB addresses only.
 
 Implemented but not bench-verified:
-- `strong_drive` and the WRCONFIG multi-pin verbs `configure_mask`/
-  `function_mask`: family-compiled, and no suite spends them (a letter
-  configuring two pads in one store and reading both back would measure
-  the engine; the drive strength wants a load and a meter). The pulls
+- `strong_drive`: family-compiled, and no suite spends it (the drive
+  strength wants a load and a meter). The pulls
   and `release()` are what every pad-driven letter of this stratum
   stands on (above).
-- **Event inputs 2 and 3**, and one pin addressed by several inputs at
-  the same instant, which is where table 28-3's priority rule would show
-  (the SET and CLR inputs above name one pin, never at once). A letter
-  firing two inputs on one pad from one generator would measure it.
+- Simultaneous OUT actions on one pad ("the lowest event line will get
+  the access", 28.6.4) - SET with CLR is measured; two OUT inputs from
+  two generators would measure the rest.

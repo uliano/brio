@@ -28,7 +28,7 @@
 //
 // Commands: ? | a the ladder and what it arms | b a real standby round
 // | c the deadline guard | d the voters | e the standing restrictions
-// | z = a..e
+// | f a power-down round slept, and a lock taken in an ISR | z = a..f
 
 // build: boards = db48,da48
 // build: monitor_speed = 460800
@@ -583,6 +583,107 @@ void te_locks() {
     quiesce();
 }
 
+// ---- f: a POWER-DOWN round, and a lock taken in an ISR ------------------------------
+
+/// The ISR stakeholder of letter f: TCB0's periodic interrupt takes a
+/// standby restriction on one turn and gives it back on the next.
+volatile bool isr_locking = false;
+volatile uint16_t isr_turns = 0;
+PowerLock isr_lock;
+
+using Burst = Tcb<0>;
+
+void tf_power_down() {
+    quiesce();
+
+    // 1. THE ROUND INTO POWER-DOWN, SLEPT. The kernel's own hook takes
+    //    the armed mode; the PIT is the one wake source power-down keeps
+    //    for this program. The RUNSTDBY stopwatch kept CLK_PER alive in
+    //    letter b's standby; power-down stops CLK_PER whatever any
+    //    RUNSTDBY says (platform.md), so across a sleep entered right
+    //    after a tick edge - a whole tick, 23437 cycles, to the next one -
+    //    it counts only the code around the sleep: a tenth of a tick
+    //    bounds that (the wake ISR's stamp runs after the crystal's
+    //    restart, which the stopped stopwatch does not see). The spun
+    //    tick beside it is the control: more than half a tick whatever
+    //    OSC32K's error.
+    ask(SleepDepth::deep);
+    verdict("a two-voter round arms power-down",
+            Probe::last_ok && SLPCTRL.CTRLA == (SLPCTRL_SMODE_PDOWN_gc | SLPCTRL_SEN_bm) &&
+            Pm::armed_depth() == SleepDepth::deep);
+    console_drain();
+    cli();
+    pit_ran = false;
+    sei();
+    while (!pit_ran) {                       // sync to a tick edge
+    }
+    cli();
+    pit_ran = false;
+    const uint16_t p0 = pit_irqs;
+    const uint32_t t0 = cycles_now();
+    K::idle_if_empty();                      // sei + SLEEP in the ARMED mode
+    sei();
+    while (!pit_ran) {
+    }
+    cli();
+    const uint32_t d = pit_stamp - t0;
+    const uint16_t wakes = static_cast<uint16_t>(pit_irqs - p0);
+    sei();
+    const uint32_t spun = tick_leg(false);
+    print(serial, "  one tick through the hook in power-down: the stopwatch counted ", d,
+          " CLK_PER cycles (a tick spun: ", spun, "), PIT interrupts ", wakes, crlf);
+    verdict("the CPU really entered POWER-DOWN: CLK_PER stopped for the tick",
+            d < cycles_per_tick / 10u && spun > cycles_per_tick / 2u);
+    verdict("and the PIT woke it", wakes >= 1);
+    verdict("the site is still armed after a wake that says nothing",
+            SLPCTRL.CTRLA == (SLPCTRL_SMODE_PDOWN_gc | SLPCTRL_SEN_bm));
+    const uint8_t wakes_before = Probe::wakes;
+    release_sleep();
+    verdict("the first event after the wake disarms and reports a deep wake",
+            SLPCTRL.CTRLA == 0 && Probe::wakes == wakes_before + 1 &&
+            Probe::woke_from == SleepDepth::deep);
+
+    // 2. A LOCK TAKEN AND GIVEN BACK IN A REAL ISR, mid-burst. TCB0 at
+    //    20 kHz takes a standby restriction on one interrupt and releases
+    //    it on the next; the main context meanwhile takes and releases a
+    //    light one 20000 times and reads the ceiling inside and outside
+    //    its own scope. The counters' critical section is what keeps the
+    //    two from corrupting each other: a lost increment or decrement
+    //    would leave a ceiling no lock explains, or one standing after
+    //    every lock is gone.
+    isr_turns = 0;
+    isr_locking = true;
+    (void)Burst::init({.mode = TcbMode::periodic, .clock = TcbClock::div1, .compare = 1199});
+    Burst::enable_capt_interrupt(true);
+    uint16_t bad_inside = 0, bad_outside = 0;
+    for (uint16_t i = 0; i < 20000u; ++i) {
+        {
+            PowerLock l = Pm::restrict(SleepDepth::light);
+            if (Pm::ceiling() != SleepDepth::light) ++bad_inside;
+        }
+        const SleepDepth c = Pm::ceiling();
+        if (c != SleepDepth::standby && c != SleepDepth::deep) ++bad_outside;
+    }
+    Burst::enable_capt_interrupt(false);
+    Burst::disable();
+    cli();
+    isr_locking = false;
+    const uint16_t turns = isr_turns;
+    isr_lock.release();
+    sei();
+    print(serial, "  20000 main-context locks against ", turns, " ISR take/release turns: ",
+          bad_inside, " wrong ceilings inside the scope, ", bad_outside, " outside", crlf);
+    verdict("the ISR really took and released its lock all along (over 1000 turns)",
+            turns > 1000u);
+    verdict("inside the main context's scope the ceiling is always its light",
+            bad_inside == 0);
+    verdict("outside it, only the ISR's standby or nothing", bad_outside == 0);
+    verdict("with every lock given back the ladder is whole: no count lost or leaked",
+            Pm::ceiling() == SleepDepth::deep);
+
+    quiesce();
+}
+
 // ---- menu ---------------------------------------------------------------------------
 
 void register_tests() {
@@ -591,6 +692,7 @@ void register_tests() {
     bench.letter('c', "the deadline guard", tc_deadline);
     bench.letter('d', "the voters", td_voters);
     bench.letter('e', "the standing restrictions", te_locks);
+    bench.letter('f', "a power-down round slept, and a lock taken in an ISR", tf_power_down);
 }
 
 void help() {
@@ -617,7 +719,17 @@ ISR(RTC_PIT_vect) {
 // All four TCB vectors are bound as a net: an unbound vector on this
 // core is a jump to 0, i.e. a silent reset loop, and a suite that sleeps
 // is exactly where a stray flag would find one.
-ISR(TCB0_INT_vect) { (void)brio::Tcb<0>::take_flags(); }
+ISR(TCB0_INT_vect) {
+    (void)brio::Tcb<0>::take_flags();
+    if (isr_locking) {
+        if (isr_lock) {
+            isr_lock.release();
+        } else {
+            isr_lock = Pm::restrict(brio::SleepDepth::standby);
+        }
+        isr_turns = isr_turns + 1;
+    }
+}
 ISR(TCB1_INT_vect) { (void)WatchLo::take_flags(); }
 ISR(TCB2_INT_vect) { (void)WatchHi::take_flags(); }
 ISR(TCB3_INT_vect) { (void)brio::Tcb<3>::take_flags(); }

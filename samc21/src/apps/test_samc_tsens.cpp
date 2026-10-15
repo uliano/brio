@@ -47,6 +47,7 @@
 //      out, WINMON counted
 //   i  the four interrupt sources through the one vector
 //   j  drift under load - printed, and judged only if it clears the noise
+//   k  RESRDY as a wake from STANDBY, RUNSTDBY clear the control
 //   p  erratum 1.19.1's PAC write protection (BY NAME ONLY: it may reset
 //      the board, and a reset mid-z would destroy the run)
 //
@@ -72,6 +73,8 @@
 #include "samc21/tsens.hpp"
 #include "util/print.hpp"
 #include "util/testbench.hpp"
+
+#include "bench_sleep.hpp"
 
 // ---------------------------------------------------------------------------
 // Letter p's breadcrumb: the PAC probe may fault, and a fault on this
@@ -2080,6 +2083,68 @@ void tp_pac_protection() {
     Tsens::release();
 }
 
+// =============================================================================
+// k - RESRDY as a wake from STANDBY
+// =============================================================================
+//
+// One measurement on the CPU's generator - about 1.9 ms (letter e's
+// table) - started with the console drained, the core then put in
+// STANDBY by the samc21 suites' sleep (bench_sleep.hpp) with the RTC
+// backstop at 300 ms. With RUNSTDBY the result ends the sleep: one WFI,
+// TSENS's line the pending one, the backstop silent. RUNSTDBY clear is
+// the control: the measurement waits for the core and the backstop ends
+// the sleep.
+void tk_wake() {
+    auto leg = [](bool run_standby, uint8_t& wakes, uint32_t& pend, bool& backstop,
+                  uint32_t& irqs) {
+        wakes = 0;
+        pend = 0;
+        backstop = false;
+        irqs = 0;
+        TsensConfig c = base_cfg();
+        c.run_standby = run_standby;
+        if (!tsens_up(gen_sys, c) || !benchsleep::backstop_arm(9830)) {
+            return;
+        }
+        Tsens::clear_flags(Tsens::flag_all);
+        const uint32_t i0 = tsens_irqs;
+        Tsens::arm(Tsens::flag_result_ready);
+        Nvic::enable(Tsens::irq());
+        while (!Serial::tx_idle()) {
+        }
+        Tsens::start();
+        wakes = benchsleep::sleep_until<Serial>(SleepMode::standby,
+                                                [i0] { return tsens_irqs != i0; });
+        pend = benchsleep::first_pending;
+        backstop = benchsleep::rtc_fired;
+        const uint32_t t0 = Ticker::millis();
+        while (tsens_irqs == i0 && Ticker::millis() - t0 < 20u) {
+        }
+        irqs = tsens_irqs - i0;
+        Tsens::disarm(Tsens::flag_all);
+        Nvic::disable(Tsens::irq());
+    };
+    const bool rtc = benchsleep::backstop_up();
+    bench.verdict("the backstop comes up", rtc);
+    uint8_t w_on = 0, w_off = 0;
+    uint32_t p_on = 0, p_off = 0, i_on = 0, i_off = 0;
+    bool b_on = false, b_off = false;
+    leg(true, w_on, p_on, b_on, i_on);
+    leg(false, w_off, p_off, b_off, i_off);
+    benchsleep::backstop_down();
+    constexpr uint32_t line = 1u << static_cast<uint32_t>(TSENS_IRQn);
+    print(serial, "  STANDBY, RUNSTDBY set: ", w_on, " WFI, pending ", hex(p_on), ", backstop ",
+          b_on ? "FIRED" : "silent", "; RUNSTDBY clear: ", w_off, " WFI, pending ",
+          hex(p_off), ", backstop ", b_off ? "fired" : "SILENT", crlf);
+    bench.verdict("RESRDY WAKES THE CORE FROM STANDBY with RUNSTDBY: one WFI, TSENS's line, "
+                  "the backstop silent",
+                  w_on == 1u && (p_on & line) != 0u && !b_on && i_on == 1u);
+    bench.verdict("without RUNSTDBY the measurement waits for the core: the backstop ends "
+                  "the sleep",
+                  b_off && (p_off & line) == 0u);
+    Tsens::release();
+}
+
 void banner() {
     print(serial, crlf,
           "test_samc_tsens - SAMC21J18A temperature sensor (ch. 43): a CLOCK "
@@ -2091,6 +2156,7 @@ void banner() {
 
 extern "C" void SysTick_Handler() { brio::Ticker::tick(); }
 extern "C" void SERCOM5_Handler() { (void)Serial::isr(); }
+extern "C" void RTC_Handler() { benchsleep::backstop_isr(); }
 extern "C" void HardFault_Handler() { brio::hard_fault_reset<brio::SamPlatform>(); }
 
 extern "C" void TSENS_Handler() {
@@ -2143,6 +2209,7 @@ int main() {
                  ti_interrupts);
     bench.letter('j', "drift under load, printed and judged honestly",
                  tj_drift);
+    bench.letter('k', "RESRDY as a wake from STANDBY", tk_wake);
     bench.letter('p', "erratum 1.19.1's PAC write protection (may reset)",
                  tp_pac_protection, false);
 

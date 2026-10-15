@@ -302,6 +302,12 @@ AO (request/reply), it does not touch the registers.
   window hits below -1000 on a -1400 differential result and not
   below -2000; a live 24 -> 12 MHz rebase moves a dacref reading by
   3 counts and `clock_ok()` stays true.
+- `run_standby`, in a real STANDBY (`test_avr_sleep` o, 5 V): a
+  conversion started by a PIT divider through the event system runs
+  with the CPU asleep and its RESRDY interrupt ends the sleep, reading
+  OP0's VDD/2 within 2 counts of the awake conversion; without the
+  flag nothing converts in standby and the PIT backstop ends the
+  sleep - every run of twelve.
 
 ## Not covered yet
 
@@ -316,7 +322,6 @@ Driver gaps:
 
 Implemented but not bench-verified:
 
-- `run_standby` (an event-started conversion in standby); the 200 us
-  reference start-up case (32.768 kHz main clock: a serial console
-  cannot follow it, so it needs a sleepy application); `debug_run`
-  (needs a debugger session).
+- the 200 us reference start-up case (32.768 kHz main clock: a serial
+  console cannot follow it, so it needs a sleepy application);
+  `debug_run` (needs a debugger session).

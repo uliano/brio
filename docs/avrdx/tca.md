@@ -212,6 +212,37 @@ calls `clock(c)` itself.
   (div4, 60000 ticks) gives 100 OVF per second and a 500 us pulse of
   exactly 12000 CLK_PER ticks; count-on-event and direction-from-level
   count 200 up in 200 ms and 100 down in the next 100 ms.
+- `test_avr_timer` t, the modes the other letters leave:
+  - dual slope with OVF at TOP: the event sits PER + CMP - 3 after the
+    rising edge (14997 for CMP 3000, 17997 for 6000: the edge at CMP
+    counting down, BOTTOM, the falling edge, TOP; test d's skew of -3),
+    one a period; at BOTH the first after the rising edge is BOTTOM's,
+    CMP - 3 on, and two come a period (40 in 20 ms at 1 kHz);
+  - the split mode's three vectors, bound on TCA1: LUNF, HUNF and LCMP0
+    each fire once per 8-bit period - the interrupt counts equal (within
+    one) the LUNF events TCB1 counts in hardware over the same window;
+  - event input B: `restart_posedge` restarts the count on the rise and
+    not on the fall, `restart_anyedge` on both, `restart_while_high`
+    holds CNT at 0 for as long as the level is high; event input A:
+    `count_anyedge` counts both edges of five pulses (10 against the
+    rising count's 5), `count_while_high` counts the prescaled clock only
+    while the level is high (46..48 in 2 ms at CLK_PER/1024);
+  - FRQ: from the init's RESTART both outputs start low, so WO2 rises
+    CMP0 + CMP2 + 2 ticks after WO0 (3001 for CMP2 600, 3601 for 1200).
+    An unbuffered CMP2 written mid-run can toggle WO2 twice in one
+    period and invert it against WO0 - which is why a phase is set from
+    a fresh init, or through the buffer;
+  - LUPD holds a buffered CMP0 across three TOPs and `update()` lands it
+    at once; with ALUPD and CMP0/CMP2 enabled, CMP0's buffer written
+    alone does not land, and both land at the next TOP once CMP2's is
+    written too (23.5.2);
+  - TCA1's three-channel PORTC route drives WO0..2 on PC4..PC6 (each
+    parked high and low through CTRLC, read back on its pad).
+- RUNSTDBY in a real STANDBY (`test_avr_sleep` o): TCA0 at CLK_PER/64
+  counts 46452..46479 across a 125 ms standby against 46448..46469
+  awake over the same PIT period - its request keeps CLK_PER, as a
+  TCB's does ([platform.md](platform.md)) - and only the 758..759 of
+  the code around the sleep without the flag, every run of twelve.
 
 ## Not covered yet
 
@@ -228,17 +259,10 @@ Driver gaps:
 
 Implemented but not bench-verified:
 
-- The dual_slope_top/both OVF placements (bottom is bench-verified
-  by the centred task); the split ISR bodies (the flags and the HUNF
-  event are bench-verified, the vectors are not bound by any test).
-- RUNSTDBY under a real standby (needs a sleeping app); DBGRUN under
-  a halt.
-- Event input B restart actions; count_anyedge/count_while_high on
-  input A; FRQ phase-offset outputs on CMP1/CMP2; ALUPD multi-register
-  updates; the UPDATE command.
-- TCA1's PORTC route (WO0..2 on PC4..PC6): compile-verified and never
-  driven - the suite's own WO read-back would measure it on those pads;
-  the PORTG and TCA1 PORTE routes (compile-verified on the 64-pin
+- DBGRUN under a halt (needs a debugger session).
+- The FRQ phase on CMP1 (WO1 = PD1, the pad the analog suite's DAC wire
+  may share; CMP2's is measured above by the same method).
+- The PORTG and TCA1 PORTE routes (compile-verified on the 64-pin
   headers, no such part on the bench).
 - Errata 2.12.1 is documented, not worked around (no down-counting
   FRQ user; B0 silicon is not affected).

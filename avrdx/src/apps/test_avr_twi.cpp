@@ -45,13 +45,16 @@
 // instead of assuming either way. TWI1 stays DISABLED throughout.
 //
 // TWO BOARDS (k..t, `y`): a second board runs `twi_peer` and taps the
-// same node with its own PA2/PA3. The DUT drives it IN BAND over the
-// bus itself - a write tenure to `twilink::command_addr` carries one
-// command frame, a read tenure collects the answer
+// same node with its own I2C pair (the desk partner, a SAM C21, with its
+// SERCOM3 on PA22/PA23; an AVR peer with its PA2/PA3). The DUT drives
+// it IN BAND over the bus itself - a write tenure to
+// `twilink::command_addr` carries one command frame, a read tenure
+// collects the answer
 // (src/apps/twi_link.hpp) - and then measures what a SECOND,
 // independent chip does to the wire: clock stretching, an injected
 // address or data NACK, multi-host arbitration with both boards
-// combined, the collision case S4 with two clients on one address, a
+// combined (against an AVR peer: letter n says why it skips a SAM C21),
+// the collision case S4 with two clients on one address, a
 // really stuck SDA against `Twi<0>::unstick()`, a General Call
 // answered by two chips, the three bus speeds, a clock rebase, and a
 // tenure parked behind the peer's held SDA answered by the timed I2cBus
@@ -2152,9 +2155,17 @@ void tp_recovery() {
     wait_ms(2);
     const bool sda_low = !Sda::read();
     const bool scl_high = Scl::read();
+    const TwiBusState held_state = T::bus_state();
     print(serial, "  with the peer holding: SDA reads ", sda_low ? 0 : 1, ", SCL reads ",
-          scl_high ? 1 : 0, crlf);
+          scl_high ? 1 : 0, ", BUSSTATE ", static_cast<uint8_t>(held_state),
+          " (1 Idle, 3 Busy)", crlf);
     verdict("SDA is held low while SCL is free", sda_low && scl_high);
+    // The peer takes SDA after this board's STOP (twi_link.hpp's ack
+    // before act; the samc21 peer waits for that STOP), so the fall lands
+    // on an Idle bus with SCL high: a Start condition to the bus state
+    // machine (figure 29-4).
+    verdict("the falling SDA on the idle bus reads as a Start: BUSSTATE Busy",
+            held_state == TwiBusState::busy);
 
     // A host cannot even produce a START on that bus.
     T::clear_host_flags(TWI_WIF_bm | TWI_RIF_bm | TWI_BUSERR_bm | TWI_ARBLOST_bm);

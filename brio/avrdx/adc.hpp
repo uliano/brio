@@ -480,7 +480,9 @@ private:
     static inline Ref ref_ = Ref::vdd;
     static inline uint32_t steps_ = 4096;
     static inline uint8_t acc_ = 1;
-    static inline bool last_hit_ = false;
+    /// Written by result(), which the RESRDY vector's body calls; read
+    /// by window_hit() in the thread: volatile.
+    static inline volatile bool last_hit_ = false;
     static inline uint32_t clk_adc_hz_ = 0;
     static inline bool free_running_ = false;
     static inline bool clock_ok_ = true;

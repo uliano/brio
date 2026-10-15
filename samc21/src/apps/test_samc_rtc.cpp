@@ -48,6 +48,9 @@
 //   g  mode 1: PER as TOP, two compares, and the period formula
 //   h  mode 2: the calendar's boundaries, the chapter's own leap rule,
 //      the top-of-range wrap and the masked alarm
+//   i  the OVERFLOW event counted through EVSYS, the alarm's mask ladder
+//      rung by rung (each matching exactly the fields it names), the
+//      12-hour clock across midnight and noon, and release()
 //
 // NOTE for anyone adding a letter: a printed line must NEVER contain the
 // two characters "->", because bin/brio looks for that arrow to
@@ -1387,6 +1390,166 @@ void th_calendar() {
     (void)select_rtc_clock(RtcClock::ulp_32k);
 }
 
+// =============================================================================
+// i - the overflow event, the alarm's whole mask ladder, the 12-hour
+//     rollover, and release()
+// =============================================================================
+
+/// Mode 2 at 1 Hz: write `from` and wait (bounded, 3 s) for the seconds
+/// to change - the clock is then one second on.
+RtcClockValue roll_from(const RtcClockValue& from) {
+    (void)Rtc::set_clock(from);
+    const uint32_t t0 = ticks_now();
+    RtcClockValue v = Rtc::clock_value();
+    while (v.second == from.second && (ticks_now() - t0) < (stopwatch_hz * 3u)) {
+        v = Rtc::clock_value();
+    }
+    return v;
+}
+
+/// Did ALARM0 rise within `ms` (24.6.2.5: a whole 1 Hz period after the
+/// match it flags)?
+bool alarm_within(uint32_t ms) {
+    const uint32_t t0 = ticks_now();
+    while ((ticks_now() - t0) < (stopwatch_hz / 1000u) * ms) {
+        if ((Rtc::flags() & RtcFlag::alarm0) != 0u) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void ti_more() {
+    // ---- the OVERFLOW event through EVSYS --------------------------------
+    //
+    // Count32 at DIV1 on OSCULP32K, the counter set 64 ticks short of its
+    // top: the wrap comes 2 ms later, and the witness counts the event.
+    Evsys::bus_clock(true);
+    Evsys::reset();
+    constexpr RtcConfig cfg{.mode = RtcMode::count32,
+                            .prescaler = RtcPrescaler::div1};
+    bench.verdict("the RTC comes up on OSCULP32K at DIV1, OVFEO set",
+                  Rtc::init() && select_rtc_clock(RtcClock::ulp_32k) &&
+                      Rtc::init() && Rtc::configure(cfg) &&
+                      Rtc::event_config(cfg, RtcEventConfig{.overflow_out = true}) &&
+                      Rtc::enable(true));
+    bench.verdict("TC4 counts the RTC's OVERFLOW generator",
+                  witness_arm() &&
+                      Evsys::connect(user_witness, ev_ch,
+                                     EventChannelConfig{
+                                         .generator = Rtc::overflow_generator,
+                                         .path = EventPath::asynchronous}));
+    (void)spin_ticks(stopwatch_hz / 50u);
+    const uint16_t before = witnessed();
+    bench.verdict("the counter is set 64 ticks short of its top",
+                  Rtc::set_count32(0xFFFFFFFFUL - 63u));
+    (void)spin_ticks(stopwatch_hz / 20u);         // 50 ms: 1600 ticks, one wrap
+    const uint16_t after = witnessed();
+    print(serial, "  overflow events counted: ", before, " before the wrap, ", after,
+          " after it; the counter now ", Rtc::count32(), crlf);
+    bench.verdict("nothing before the wrap, EXACTLY ONE overflow event after it",
+                  before == 0u && after == 1u);
+    Evsys::disconnect(user_witness);
+    Evsys::release_channel(ev_ch);
+    Witness::release();
+
+    // ---- the alarm's mask, rung by rung ----------------------------------
+    //
+    // The clock rolls 23:59:59 on 30/11 of year+5 into 00:00:00 on 1/12.
+    // Rung L's alarm matches the rolled value in every field up to L and
+    // differs in the field just above it: at rung L it FIRES (that field
+    // is masked out), at rung L+1 it does NOT (now it is compared). Each
+    // judged a whole second after the match, as 24.6.2.5 says - 2 s of
+    // wait. The two ends of the ladder (year_and_below and off) are
+    // letter h's.
+    constexpr RtcConfig cal{.mode = RtcMode::clock, .prescaler = RtcPrescaler::div1024};
+    bench.verdict("mode 2 at 1 Hz on ULP1K", rtc_up(RtcClock::ulp_1k, cal));
+    constexpr RtcClockValue before_roll{.second = 59, .minute = 59, .hour = 23,
+                                        .day = 30, .month = 11, .year = 5};
+    struct Rung {
+        RtcAlarmMask mask;
+        RtcAlarmMask next;
+        RtcClockValue alarm;
+        const char* name;
+    };
+    const Rung rungs[] = {
+        {RtcAlarmMask::second, RtcAlarmMask::minute_second,
+         {.second = 0, .minute = 33, .hour = 7, .day = 9, .month = 3, .year = 9}, "SS"},
+        {RtcAlarmMask::minute_second, RtcAlarmMask::hour_minute_second,
+         {.second = 0, .minute = 0, .hour = 7, .day = 9, .month = 3, .year = 9}, "MMSS"},
+        {RtcAlarmMask::hour_minute_second, RtcAlarmMask::day_and_below,
+         {.second = 0, .minute = 0, .hour = 0, .day = 9, .month = 3, .year = 9}, "HHMMSS"},
+        {RtcAlarmMask::day_and_below, RtcAlarmMask::month_and_below,
+         {.second = 0, .minute = 0, .hour = 0, .day = 1, .month = 3, .year = 9}, "DDHHMMSS"},
+        {RtcAlarmMask::month_and_below, RtcAlarmMask::year_and_below,
+         {.second = 0, .minute = 0, .hour = 0, .day = 1, .month = 12, .year = 9},
+         "MMDDHHMMSS"},
+    };
+    bool all_fire = true, none_beyond = true;
+    for (const Rung& r : rungs) {
+        bool fired = false, beyond = true;
+        if (Rtc::set_alarm(r.alarm) && Rtc::set_alarm_mask(r.mask)) {
+            Rtc::clear_flags();
+            (void)roll_from(before_roll);
+            fired = alarm_within(2000);
+        }
+        if (Rtc::set_alarm_mask(r.next)) {
+            Rtc::clear_flags();
+            (void)roll_from(before_roll);
+            beyond = alarm_within(2000);
+        }
+        print(serial, "  mask ", r.name, ": the alarm ", fired ? "fired" : "did NOT fire",
+              "; one rung up, with the next field wrong, it ", beyond ? "FIRED" : "did not",
+              crlf);
+        all_fire = all_fire && fired;
+        none_beyond = none_beyond && !beyond;
+    }
+    bench.verdict("every rung from SS to MMDDHHMMSS matches exactly the fields it names",
+                  all_fire);
+    bench.verdict("and compares the next field once one rung up", none_beyond);
+    (void)Rtc::set_alarm_mask(RtcAlarmMask::off);
+
+    // ---- the 12-hour clock across its two noons -------------------------
+    constexpr RtcConfig ampm{.mode = RtcMode::clock, .prescaler = RtcPrescaler::div1024,
+                             .twelve_hour = true};
+    bench.verdict("CLKREP set for the 12-hour clock",
+                  Rtc::enable(false) && Rtc::configure(ampm) && Rtc::enable(true));
+    const RtcClockValue midnight = roll_from(RtcClockValue{
+        .second = 59, .minute = 59, .hour = 11, .day = 4, .month = 7, .year = 2, .pm = true});
+    const RtcClockValue noon = roll_from(RtcClockValue{
+        .second = 59, .minute = 59, .hour = 11, .day = 4, .month = 7, .year = 2, .pm = false});
+    print(serial, "  11:59:59 PM of 4/7 became ");
+    print_clock(midnight);
+    print(serial, " on day ", midnight.day, "; 11:59:59 AM became ");
+    print_clock(noon);
+    print(serial, crlf);
+    bench.verdict("11:59:59 PM rolls to 12:00:00 AM of the NEXT day",
+                  midnight.hour == 12u && !midnight.pm && midnight.minute == 0u &&
+                      midnight.second == 0u && midnight.day == 5u);
+    bench.verdict("11:59:59 AM rolls to 12:00:00 PM of the same day",
+                  noon.hour == 12u && noon.pm && noon.minute == 0u && noon.day == 4u);
+
+    // ---- release() --------------------------------------------------------
+    //
+    // It resets the block and takes its bus clock away. Nothing of the
+    // RTC is touched while it is gone; init() is what brings it back, and
+    // the block comes back in its reset state (CTRLA zero, the counter
+    // stopped and not counting) and configurable again.
+    Rtc::release();
+    bench.verdict("release(): the block is reset and its APB clock is off",
+                  (MCLK_REGS->MCLK_APBAMASK & MCLK_APBAMASK_RTC_Msk) == 0u);
+    bench.verdict("init() brings it back in its reset state",
+                  Rtc::init() && !Rtc::enabled() && Rtc::mode() == RtcMode::count32);
+    bench.verdict("and it configures and runs again",
+                  select_rtc_clock(RtcClock::ulp_32k) && Rtc::init() &&
+                      Rtc::configure(cfg) && Rtc::enable(true) &&
+                      count_rate_mhz(stopwatch_hz / 20u) > 30'000'000u);
+
+    (void)Rtc::enable(false);
+    (void)Rtc::configure(cal);
+    (void)select_rtc_clock(RtcClock::ulp_32k);
+}
+
 void banner() {
     print(serial, crlf, "test_samc_rtc - SAMC21J18A RTC (ch. 24), stopwatch "
           "TC0+TC1 at ", stopwatch_hz, " Hz off ",
@@ -1428,6 +1591,8 @@ int main() {
     bench.letter('g', "mode 1: PER as the top, and two compares", tg_mode1);
     bench.letter('h', "mode 2: the calendar, its boundaries and its alarm",
                  th_calendar);
+    bench.letter('i', "the overflow event, the alarm's mask ladder, the 12-hour "
+                 "rollover, release()", ti_more);
 
     if (serial_ok) {
         print(serial, crlf, "boot: clk=", clock_ok ? "OSC48M" : "FAILED",

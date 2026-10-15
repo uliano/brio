@@ -191,7 +191,7 @@ header's name. See "Bench findings".
 
 ## Bench findings
 
-From `test_samc_eic`: six letters in `z`, plus `n` (the NMI) and `u`
+From `test_samc_eic`: nine letters in `z`, plus `n` (the NMI) and `u`
 (the button) outside it. **Nothing to wire.**
 
 **The stimulus technique, which is itself a finding.** A chapter about
@@ -294,6 +294,27 @@ printed and not judged - a suite must not fail for want of a finger.
   a sampled one did, and with the interrupt armed all 100 woke the
   device.
 
+**The falling and low senses, through EVSYS and as an interrupt**
+(letter g, every run of ten). A FALLING sense with its event output
+crosses EVSYS on the pad's fall - one count per fall, none for the rise
+between. A LOW level's event output is the condition itself: high while
+the pad is low, so three low phases are three rising edges at the
+witness and a parked-high pad none. LOW as an interrupt takes one entry
+on the line it names (the handler disarming what it served), and its
+flag is a level: cleared with the pad still low it comes back, cleared
+once the pad is high it does not. Beside them, the CHANNEL's own
+falling-edge detector on a HIGH level's output counts the pad's falls
+and not its rises ([evsys.md](evsys.md)); arming that channel on the
+already-high level counts one, every run - the increments are what the
+letter judges.
+
+**PORT's WRCONFIG verbs** (letter h, [port.md](port.md)): one
+`configure_mask()` sets PA09, PA16 and PA17 - both half-words of the
+mask, the two stores the verb must make - pulled up (all three read 1)
+and then down (all three 0); one `function_mask()` then hands all three
+to the EIC with the pull kept, and each line flags the rise its pull
+makes.
+
 ## Not covered yet
 
 Driver gaps (deliberate):
@@ -313,11 +334,6 @@ Driver gaps (deliberate):
 
 Implemented but not bench-verified:
 
-- **The falling-edge and low-level senses through EVSYS** - a rising
-  edge is what this suite routes, and a HIGH level is what the timer
-  suites route (its event output a copy of the pad, [tc.md](tc.md) and
-  [tcc.md](tcc.md)); and `EicSense::low` as an interrupt (only `high`
-  has been used as a level).
 - **The NMI's filter and its synchronous detection**: the bench NMI is
   edge-sensed and asynchronous by deliberate choice, because a level NMI
   on a board whose pads are not all known cannot be recovered from

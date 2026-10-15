@@ -275,7 +275,7 @@ Tcc<0>::clear_non_recoverable(0);
 
 ## Bench findings
 
-From `test_samc_tcc` (12 letters, 143 verdicts). Nothing to wire. Five of
+From `test_samc_tcc` (13 letters, 146 verdicts). Nothing to wire. Five of
 TCC0's eight outputs reach pads this board leaves free - PA08 (WO0,
 function E), PA09 (WO1, E), PA22 (WO4, F) and PA12 (WO6, F) - and PA16
 carries EXTINT0, which is the fault stimulus.
@@ -435,6 +435,12 @@ overflow published as an event and counted by a timer that runs in
 standby, made 16 overflows in a 30 ms window awake, 15 in the same
 window spent in STANDBY with CTRLA.RUNSTDBY set, and 0 with it clear.
 See [platform.md](platform.md), "Sleep, peripheral by peripheral".
+The interrupt half (letter m, every run of twelve): TCC0 on the CPU's
+generator at /1024 overflowing every 50 ms, restarted with the console
+drained and the core put in STANDBY - with RUNSTDBY the overflow ends
+the sleep in one WFI with TCC0's line pending and the 300 ms RTC backstop
+silent; with RUNSTDBY clear the counter stops with the core and the
+backstop ends the sleep.
 
 ## Bench findings, the advanced modes
 
@@ -537,9 +543,10 @@ Not judged, and deliberately so:
 
 Implemented but not bench-verified:
 
-- **The TCC as a WAKE source.** 36.6.6's counting half is measured (see
-  "Bench findings"); no TCC interrupt has ever left a sleep, and the
-  fault inputs in a standby are untouched.
+- **The fault inputs in a standby.** The TCC as a wake source is
+  measured (its overflow, letter m); a fault arriving while the core
+  sleeps is untouched - a fault event from a pad the sleepwalking pad
+  walker drives would measure it.
 - **The `alternate` fault source** (FCTRLn.SRC = ALTFAULT, one fault
   taking the other's state at the end of the previous period).
 - **The advanced capture actions** (CAPTMIN/CAPTMAX/LOCMIN/LOCMAX/

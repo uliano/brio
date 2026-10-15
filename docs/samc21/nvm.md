@@ -367,6 +367,12 @@ by name. Nothing to wire: everything under test is inside the chip.
   shape is the opposite - an unbound vector jumps to 0 and the program
   reboots for ever.) Halting over SWD and reading IPSR names the
   interrupt that went unserved.
+- **The cache is worth its wait states** (letter g, every run of twelve).
+  A flash-resident loop of 1000 turns, timed with interrupts masked from
+  a tick edge, at RWS 2 (48 MHz): **13114 cycles with the cache on,
+  27132 with CACHEDIS set** - every instruction fetch paying the wait
+  states - and 13114 again after INVALL, the invalidated cache refilling
+  on the first turn.
 
 ## Not covered yet
 
@@ -399,8 +405,9 @@ Driver gaps (not built):
 
 Implemented but not bench-verified:
 
-- The cache verbs (`cache`, `read_mode`, `invalidate_cache`): set and
-  read back, never measured as a performance or coherence effect.
+- `read_mode` (no letter sets anything but the default), and the cache's
+  COHERENCE across a flash write (its performance is measured above): a
+  read of a cached flash word around a row rewrite would measure it.
 - Power reduction (`enter_power_reduction`, `exit_power_reduction`,
   `sleep_power`): the block reports PRM, but nothing here exercises it in
   the sleep modes that give it meaning.

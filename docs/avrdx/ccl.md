@@ -165,6 +165,19 @@ counted by a TCB clocked by LUT4's output event - a one-CLK_PER pulse
 is a valid COUNT input); `SEQCTRL` must be written before the even LUT
 is enabled (see above).
 
+`test_avr_timer` test k (A5, no wires), every run of twelve: the
+peripheral inputs - TCB2's WO on input 2 (the Pwm8 period, 256 ticks,
+through the LUT), USART1's TXD on input 1 (four 0x55 frames, five
+rising edges each: 20), SPI0's SCK on input 2 (a pinless host, 32
+rising edges for four bytes); the D LATCH on pair 0, read on EVOUT
+PD2: Q follows D while G is high and holds 0 and 1 while G is low;
+FEEDBACK closing a DFF on itself (D = NOT Q, EN constant 1) divides its
+clock by two - clocked from the LUT's own input 2 (TCA0's 1 kHz square
+as event B) it runs at 500 Hz exactly (48000 ticks), from OSC32K its
+period is 1451..1454 ticks and from OSC1K 46439..46509 - the 32:1 of
+the two clocks within the capture's ticks and the oscillator's wander
+between the two legs.
+
 ### The CCL as a wake-up source
 
 `test_avr_sleep` test n (A5, no wires): a PIT divider through the event
@@ -194,12 +207,12 @@ Driver gaps:
 
 Implemented but not bench-verified:
 
-- The D latch as a sequencer (DFF, JK and RS are bench-verified);
-  FEEDBACK as an input; the D-latch/DFF distinction under a slow LUT
-  clock.
-- The peripheral inputs beyond events, pins, TCA WO and AC (TCB WO,
-  USART, SPI: the menu is typed, no test drives them).
-- `LutClock::input2` and OSC1K. (RUNSTDBY and the wake-up clarification
-  are bench-verified above.)
+- The D-latch/DFF distinction under a slow LUT clock (the latch and
+  the DFF are each measured, never side by side on one slow clock).
+- The ZCD and TCD0 inputs, and SPI0's MOSI on inputs 0/1 (SCK is
+  measured above): typed, no letter drives them - the same pass-through
+  on a TCD waveform, a ZCD crossing or a MOSI pattern would measure
+  them. `LutClock::oschf`, likewise: the FEEDBACK divider above on it
+  would.
 - A slow-domain-proof stamp protocol (the OSC32K delay measurement
   is single-shot today: a back-to-back repeat races the re-arm).

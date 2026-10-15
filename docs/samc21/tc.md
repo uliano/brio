@@ -174,7 +174,7 @@ extern "C" void TC2_Handler() {
 
 ## Bench findings
 
-From `test_samc_tc`, six letters. Nothing to wire. Every timer runs from
+From `test_samc_tc`, seven letters. Nothing to wire. Every timer runs from
 generator 0 - the CPU's own 48 MHz OSC48M - so every expected number
 below is exact arithmetic and not a measurement of an oscillator, and
 SysTick is the independent witness.
@@ -257,6 +257,10 @@ SysTick is the independent witness.
   21 captures overwritten in the latch.** That is `meter_sampler.hpp`'s
   design as written, measured on silicon: the AO paces PUBLICATION, not
   capture.
+- **TC1 alone is a counter in its own right** (letter g, every run of
+  twelve): brought up by its own `init()` - the generic clock channel it
+  shares with TC0 connected by it - at /1024 it counts 11677 over the
+  SysTick-timed 250 ms against 11718 exact, inside letter b's 1 %.
 
 ## Bench findings, the advanced modes
 
@@ -352,8 +356,6 @@ Not judged, and deliberately so:
 
 Implemented but not bench-verified:
 
-- **TC1 alone as a counter in its own right**: it has run only as the
-  client half of a 32-bit pair.
 - **`count_down` with a capture action**, and **`debug_run`** beyond the
   bit being writable - a halted debugger is out of a console suite's
   reach.

@@ -379,6 +379,13 @@ Stopping:
   `SamPlatform::idle()` takes whatever is armed already. The erratum
   guard's SLEEPCFG read and the DSB cost about 50 bytes of flash in an
   image that idles, and nothing at all in one that does not.
+- **NVIC priorities preempt as the core says** (`test_samc_platform` p,
+  every run of twelve). The core implements four levels (two bits); a
+  fifth is refused with nothing written. PTC's line pends DAC's from
+  inside its own handler: with DAC's line more urgent its body runs at
+  once, between the two halves of the first (the order 1, 3, 2); less
+  urgent, or at the same level, it waits for the first to return (1, 2,
+  3). Every line of every other letter runs at the reset default, 0.
 
 ## The idle path, measured
 
@@ -803,8 +810,6 @@ Driver gaps (not built):
   on a console whose Uart names `DmaTxEngine`.
 
 Implemented but not bench-verified:
-- NVIC priorities other than the reset default (every line runs at 0
-  today, so handler-vs-handler preemption is unexercised).
 - **Erratum 1.8.13's hazard itself.** Letter w walks a TC line across
   `idle()`'s STANDBY branch with the tick held off, and never the
   tick's own edge across a standby entry - the coincidence the guard

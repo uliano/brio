@@ -29,8 +29,10 @@ settles in tDACREF = 25 us, errata document clarification 3.7.4, with
 the bandgap already running). `RUNSTDBY` keeps it alive in standby:
 32.3.5 says event, interrupt and pin keep working without CLK_PER,
 but the CTRLA field description (32.5.1) says interrupts and status
-flags are NOT updated with the clock stopped - the datasheet
-contradicts itself and the bench has not yet decided.
+flags are NOT updated with the clock stopped. The bench sides with
+32.3.5 for the interrupt (below); whether CLK_PER runs for the
+comparator meanwhile is not measured, so the two sentences may yet
+both hold.
 
 Input pins, identical on the 48- and 64-pin parts of both families
 (chapter 3; on 28/32-pin parts the PORTE entries do not exist, and
@@ -117,6 +119,12 @@ comparison on PA7 (default; CLKOUT off) and on PC6 (ALT1, AC2); each
 window sense (below / inside / above) raises exactly ONE interrupt on
 entering its state.
 
+**RUNSTDBY in a real STANDBY** (`test_avr_sleep` o, 5 V): AC0 on AINP0 =
+PD2 against DACREF, the pad driven by EVOUT from a PIT divider at 32 Hz.
+With `run_standby` the CMP interrupt ends a 125 ms standby at the
+first edge, the PIT backstop never firing; without it the comparator
+sleeps and the PIT ends the sleep - in every run of twelve.
+
 ## Not covered yet
 
 Driver gaps:
@@ -133,5 +141,6 @@ Implemented but not bench-verified:
   a DAC step is swamped by the DAC's own slew - a faster edge is
   needed); the three power profiles; the small/large hysteresis
   widths; tDACREF; `INITVAL` (its window is the start-up itself).
-- RUNSTDBY under a real standby (it would also settle the 32.3.5 vs
-  32.5.1 contradiction above).
+- The OUT event and pin under a real standby (the interrupt is measured
+  above): a counter that runs in standby on the event, or a peer reading
+  the pin, would measure them.

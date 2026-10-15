@@ -71,16 +71,21 @@
 #include <avr/interrupt.h>
 #include <stdint.h>
 
+#include "avrdx/ac.hpp"
+#include "avrdx/adc.hpp"
 #include "avrdx/ccl.hpp"
 #include "avrdx/clock.hpp"
 #include "avrdx/delay.hpp"
 #include "avrdx/evsys.hpp"
+#include "avrdx/opamp.hpp"
 #include "avrdx/pin.hpp"
 #include "avrdx/platform.hpp"
 #include "avrdx/reset.hpp"
 #include "avrdx/rtc.hpp"
 #include "avrdx/sleep.hpp"
+#include "avrdx/tca.hpp"
 #include "avrdx/tcb.hpp"
+#include "avrdx/tcd.hpp"
 #include "avrdx/twi.hpp"
 #include "avrdx/usart.hpp"
 #include "avrdx/userrow.hpp"
@@ -158,6 +163,8 @@ volatile uint16_t waker_irqs = 0;
 volatile uint16_t rtc_irqs = 0;
 volatile uint16_t wake_irqs = 0;      ///< PORTE: the peer's stimulus on PE2
 volatile uint16_t ccl_irqs = 0;       ///< the CCL LUT interrupt (test n)
+volatile uint16_t unit_irqs = 0;      ///< the unit under test in test o (AC, ADC, TCD)
+volatile uint16_t adc_last = 0;       ///< the ADC's last RESRDY result (test o)
 volatile uint16_t sfd_irqs = 0;       ///< USART4 RXSIF: a start bit in standby
 volatile uint16_t twis_addr = 0;      ///< TWI client: address matches
 volatile uint16_t twis_stops = 0;     ///< TWI client: STOP conditions
@@ -243,6 +250,7 @@ struct SleepRun {
     uint16_t pads;       ///< PORTD interrupts taken
     uint16_t wakers;     ///< TCB0 interrupts taken
     uint16_t ccls;       ///< CCL interrupts taken (test n)
+    uint16_t units;      ///< the unit's interrupts taken (test o)
     uint16_t rtc0;       ///< the RTC counter before the sleep
     uint16_t rtc1;       ///< and immediately after the wake (see test f: stale)
 };
@@ -268,6 +276,7 @@ SleepRun sleep_once(SleepMode m, bool sync = true, bool spin = false) {
     const uint32_t t0 = Watch::read();
     const uint16_t c0 = Rtc::count();
     const uint16_t p0 = pit_irqs, d0 = pad_irqs, w0 = waker_irqs, l0 = ccl_irqs;
+    const uint16_t u0 = unit_irqs;
     sei();
     if (spin) {
         while (pit_irqs == p0 && pad_irqs == d0 && waker_irqs == w0) {
@@ -284,6 +293,7 @@ SleepRun sleep_once(SleepMode m, bool sync = true, bool spin = false) {
     r.pads = static_cast<uint16_t>(pad_irqs - d0);
     r.wakers = static_cast<uint16_t>(waker_irqs - w0);
     r.ccls = static_cast<uint16_t>(ccl_irqs - l0);
+    r.units = static_cast<uint16_t>(unit_irqs - u0);
     sei();
     return r;
 }
@@ -620,8 +630,16 @@ void td_chain() {
     verdict("the peripheral's RUNSTDBY ALONE is enough on the crystal: its "
             "request keeps the oscillator running", counted[2]);
     verdict("and the same on OSCHF", counted[3]);
-    verdict("the two sources are told apart by the tick count itself (this "
-            "board's OSCHF is the slower of the two)", legs[4].ticks < legs[1].ticks);
+    // The two sources' counts differ by OSCHF's own error against the
+    // crystal - a few hundred ppm - and the ruler is OSC32K, whose period
+    // wanders by as much between two legs (measured: the crystal's count
+    // moves 1800 ticks, 600 ppm, from run to run, and OSCHF read FASTER
+    // than the crystal in one run of twelve). No verdict rests on it: the
+    // source in force is read back from CLKCTRL instead (above).
+    const int32_t apart = static_cast<int32_t>(legs[4].ticks) -
+                          static_cast<int32_t>(legs[1].ticks);
+    print(serial, "  OSCHF minus crystal over the same PIT period: ", apart,
+          " ticks (OSCHF's error, inside the OSC32K ruler's wander)", crlf);
     verdict("a TCB whose chain is complete wakes the CPU from standby by itself",
             by_tcb.wakers >= 1 && by_tcb.pits == 0);
     verdict("a TCB whose RUNSTDBY is clear cannot: the PIT had to end that sleep",
@@ -1895,6 +1913,226 @@ void tn_ccl_wake() {
     quiesce();
 }
 
+// ---- o RUNSTDBY of the analog and the timers, in a real STANDBY ------------------------------
+// Each unit's own RUNSTDBY decides whether it works while the CPU is in
+// STANDBY (test d proved it for a TCB: the PERIPHERAL's request keeps
+// its clock alive). Every leg is one 125 ms standby with the PIT as the
+// backstop, the unit armed with and then without its flag:
+//  - TCA0 counting CLK_PER/64: across the sleep it counts the whole PIT
+//    period, or nothing;
+//  - AC0 on PD2 (AINP0) against its DACREF, the pad driven by EVOUTD from
+//    a PIT divider at 32 Hz (test e's square, an edge every 15.6 ms): its
+//    CMP interrupt ends the sleep, or the PIT does. That also decides the
+//    data sheet's contradiction (32.3.5: the interrupt works without
+//    CLK_PER; 32.5.1: interrupts and status are not updated with the
+//    clock stopped);
+//  - ADC0 started by the same PIT divider through the event system (an
+//    event-started conversion, 33.3.3.2), converting OP0's output (PD2 =
+//    AIN2) - OP0 a follower of VDD/2, its pad with the pull-up on: its
+//    RESRDY interrupt ends the sleep, or the PIT does; and the result
+//    says whether the OP AMP stayed on (VDD/2) or went off with the
+//    pull-up taking its pad to VDD;
+//  - TCD0 counting CLK_PER or OSCHF over a 4096-count ramp (43.7 ms at
+//    24 MHz / 256): its OVF interrupt ends an IDLE sleep; 25.3.6 says
+//    the TCD stops in standby (and power-down), whatever its clock
+//    source does.
+using TcaU = Tca<0>;
+using AcU = Ac<0>;
+using AdcU = Adc<0>;
+using OpU = Opamp<0>;
+using TcdU = Tcd<0>;
+
+constexpr uint32_t tca_per_pit = ticks_per_pit / 64u;      ///< 46875 at CLK_PER/64
+
+/// One 125 ms standby with TCA0 counting, CNT read at the wake. `spin`
+/// is the awake baseline over the same PIT period.
+uint16_t tca_leg(bool run_standby, bool spin) {
+    console_drain();
+    pit_sync();
+    (void)TcaU::init({.mode = TcaMode::normal, .clock = TcaClock::div64, .period = 0xFFFF,
+                      .run_standby = run_standby});
+    (void)sleep_once(SleepMode::standby, false, spin);
+    const uint16_t c = TcaU::count();
+    TcaU::disable();
+    return c;
+}
+
+/// One standby with AC0 armed on PD2's 32 Hz square.
+SleepRun ac_leg(bool run_standby) {
+    (void)AcU::init({.positive = AcPos::ainp0, .negative = AcNeg::dacref,
+                     .reference = Ref::v1024, .dacref = 128, .run_standby = run_standby,
+                     .sense = AcSense::both});
+    ChPad::source(EvPitDiv<1024>{});
+    EvOut<PadPin>::listen(ChPad{});
+    console_drain();
+    delay_us(clock, 40'000u);                  // the comparator settled on a toggling pad
+    AcU::clear_flag();
+    AcU::enable_interrupt(true);
+    const SleepRun r = sleep_once(SleepMode::standby);
+    AcU::enable_interrupt(false);
+    AcU::disable();
+    EvOut<PadPin>::unlisten();
+    ChPad::off();
+    PadPin::configure({});
+    return r;
+}
+
+struct AdcLeg {
+    uint16_t awake;      ///< a software-started conversion before the sleep
+    SleepRun run;
+    uint16_t slept;      ///< the RESRDY result of the event-started one
+    uint16_t freed;      ///< awake again, the op amp released, the pull-up alone
+};
+
+/// One standby with ADC0 started by the event system, converting OP0.
+AdcLeg adc_leg(bool adc_standby, bool op_standby) {
+    AdcLeg l{};
+    OpampSystem::init(clock);
+    (void)OpU::init({.positive = OpampPos::vdd_div2, .negative = OpampNeg::out,
+                     .output = OpampOutput::normal, .mode = OpampMode::software,
+                     .run_standby = op_standby});
+    // The pull-up on the output pad: the op amp overrides it while on;
+    // off, it takes the pad to VDD - the two states a conversion tells
+    // apart. The digital input buffer stays off (the op amp's analog pad).
+    PadPin::configure({.pull = PinPull::up, .sense = PinSense::input_disable});
+    OpU::wait_settled();
+    (void)AdcU::init(clock, {.reference = Ref::vdd, .run_standby = adc_standby});
+    AdcU::select(AnalogIn<PadPin>{});
+    l.awake = AdcU::read();
+    adc_last = 0;
+    AdcU::enable_resrdy_interrupt(true);
+    ChPad::source(EvPitDiv<1024>{});
+    AdcU::start_on(ChPad{});
+    l.run = sleep_once(SleepMode::standby);
+    l.slept = adc_last;
+    AdcU::start_on_events(false);
+    AdcU::enable_resrdy_interrupt(false);
+    ChPad::off();
+    // The control: the same pad with the op amp released (disabled,
+    // OUTMODE off), the pull-up alone on it.
+    OpU::release();
+    PadPin::configure({.pull = PinPull::up, .sense = PinSense::input_disable});
+    delay_us(clock, 1000u);
+    l.freed = AdcU::read();
+    AdcU::disable();
+    OpampSystem::disable();
+    PadPin::configure({});
+    return l;
+}
+
+/// One sleep with TCD0's OVF interrupt armed.
+SleepRun tcd_leg(SleepMode m, TcdClock src) {
+    (void)TcdU::init({.clock = src, .sync_prescaler = TcdSyncPrescaler::div8,
+                      .count_prescaler = TcdCountPrescaler::div32,
+                      .waveform = TcdWaveform::one_ramp, .compare_b_clear = 4095});
+    TcdU::enable_ovf_interrupt(true);
+    const SleepRun r = m == SleepMode::power_down ? power_down_once(11) : sleep_once(m);
+    TcdU::enable_ovf_interrupt(false);
+    (void)TcdU::disable();
+    return r;
+}
+
+void to_runstdby() {
+    print(serial, "o RUNSTDBY of the analog and the timers, in a real STANDBY: TCA, AC, the "
+                  "event-started ADC, the op amp; the TCD stops", crlf);
+    quiesce();
+
+    // TCA0. Both counts measure the same PIT period (OSC32K's error
+    // cancels): the asleep one differs from the awake one only by the
+    // wake-up path - CLK_PER kept alive by the TCA's own request, so no
+    // oscillator restart, a few microseconds - and 64 counts (4096 CLK_PER
+    // cycles, 171 us) bounds that tenfold. Without the flag the count is
+    // what runs outside the sleep: sleep_once's 2 ms console drain (750
+    // counts) plus test c's 1/100 of the period for the rest.
+    const uint16_t tca_awake = tca_leg(false, true);
+    const uint16_t tca_on = tca_leg(true, false);
+    const uint16_t tca_off = tca_leg(false, false);
+    print(serial, "  TCA0 at CLK_PER/64 over one PIT period: awake ", tca_awake,
+          ", standby with RUNSTDBY ", tca_on, ", without ", tca_off, " (nominal ",
+          tca_per_pit, ")", crlf);
+    verdict("TCA0 with RUNSTDBY counts through STANDBY as it does awake",
+            near_u32(tca_on, tca_awake, 64));
+    verdict("without it TCA0 stops with CLK_PER: only the code outside the sleep counts",
+            tca_off < 750u + tca_per_pit / 100u);
+
+    // AC0. The square toggles every 15.6 ms, the PIT ends the sleep at
+    // 125 ms: a comparator alive in standby wakes the CPU on the first
+    // edge - eight edges inside the window - and the PIT count is 0.
+    const SleepRun ac_on = ac_leg(true);
+    const SleepRun ac_off = ac_leg(false);
+    print(serial, "  AC0 on PD2's 32 Hz square: with RUNSTDBY ", ac_on.units,
+          " CMP interrupt(s), ", ac_on.pits, " PIT; without ", ac_off.units, " / ",
+          ac_off.pits, crlf);
+    verdict("AC0 with RUNSTDBY: its CMP interrupt ends STANDBY, the PIT never fires "
+            "(32.3.5 holds, not 32.5.1's 'not updated')", ac_on.units >= 1 && ac_on.pits == 0);
+    verdict("without it the comparator sleeps and the PIT ends the sleep",
+            ac_off.units == 0 && ac_off.pits == 1);
+
+    // ADC0 + OP0. The awake conversion of the follower reads VDD/2 against
+    // VDD: 2048 of 4096. An event-started conversion in standby must read
+    // the same pad within 32 counts (39 mV at 5 V - far above the
+    // converter's few counts of noise, far below the 2048 counts to the
+    // pull-up's rail). With the op amp off in standby nothing holds VDD/2:
+    // the pull-up moves the pad more than 1024 counts (a quarter of the
+    // scale, thirty times the band a driven pad stays in) above it; the
+    // control - the op amp released, the pull-up alone - says where the
+    // pull-up takes the pad.
+    const AdcLeg both = adc_leg(true, true);
+    const AdcLeg op_off = adc_leg(true, false);
+    const AdcLeg adc_off = adc_leg(false, true);
+    print(serial, "  ADC0 on OP0 (follower of VDD/2, pull-up on its pad): awake ", both.awake,
+          "; standby, both RUNSTDBY: ", both.run.units, " RESRDY, ", both.run.pits, " PIT, result ",
+          both.slept, crlf);
+    print(serial, "  op amp without RUNSTBY: awake ", op_off.awake, ", in standby ",
+          op_off.run.units, " RESRDY, ", op_off.run.pits, " PIT, result ", op_off.slept,
+          "; ADC without RUNSTDBY: ", adc_off.run.units, " RESRDY, ", adc_off.run.pits,
+          " PIT", crlf);
+    print(serial, "  the pad with the op amp released and the pull-up alone: ", both.freed, ", ",
+          op_off.freed, ", ", adc_off.freed, crlf);
+    verdict("the follower reads VDD/2 awake (2048 of 4096, within 64)",
+            near_u32(both.awake, 2048, 64));
+    verdict("an event-started conversion runs in STANDBY with the ADC's RUNSTDBY: its "
+            "RESRDY ends the sleep, the PIT never fires",
+            both.run.units >= 1 && both.run.pits == 0);
+    verdict("and it converts the op amp kept on by RUNSTBY: the awake value within 32",
+            near_u32(both.slept, both.awake, 32));
+    verdict("the op amp WITHOUT RUNSTBY is off in standby: nothing holds VDD/2, the "
+            "pull-up moved the pad", op_off.run.units >= 1 &&
+            op_off.slept > static_cast<uint16_t>(op_off.awake + 1024u));
+    // A finding, not a contract: an op amp switched off BY THE SLEEP
+    // (OUTMODE still normal) keeps loading its pad - the pull-up reaches
+    // some 3550 counts - where the same op amp RELEASED (disabled,
+    // OUTMODE off) leaves the pull-up the rail. Within 95 counts of full scale: the
+    // converter's few counts of noise and no load.
+    verdict("the control: released (disabled, OUTMODE off), the pull-up alone takes "
+            "the pad to the rail", op_off.freed > 4000u && both.freed > 4000u);
+    verdict("the ADC without RUNSTDBY converts nothing in standby: the PIT ends the "
+            "sleep", adc_off.run.units == 0 && adc_off.run.pits == 1);
+
+    // TCD0. Its ramp overflows every 43.7 ms (24 MHz / 8 / 32, 4096
+    // counts), inside the 125 ms PIT window: in IDLE its OVF ends the
+    // sleep; in STANDBY the PIT does, from CLK_PER and from OSCHF with
+    // the oscillator's own RUNSTDBY set (25.3.6: the TCD stops in
+    // standby - it has no RUNSTDBY of its own).
+    const SleepRun tcd_idle = tcd_leg(SleepMode::idle, TcdClock::clkper);
+    const SleepRun tcd_std = tcd_leg(SleepMode::standby, TcdClock::clkper);
+    (void)Oschf::set_hz(24'000'000);
+    Oschf::run_standby(true);
+    const SleepRun tcd_osc = tcd_leg(SleepMode::standby, TcdClock::oschf);
+    const SleepRun tcd_pd = tcd_leg(SleepMode::power_down, TcdClock::oschf);
+    print(serial, "  TCD0 OVF every 43.7 ms: IDLE ", tcd_idle.units, " OVF / ", tcd_idle.pits,
+          " PIT; STANDBY on CLK_PER ", tcd_std.units, " / ", tcd_std.pits,
+          "; STANDBY on OSCHF (RUNSTDBY) ", tcd_osc.units, " / ", tcd_osc.pits,
+          "; POWER-DOWN on OSCHF ", tcd_pd.units, " / ", tcd_pd.pits, crlf);
+    verdict("in IDLE the TCD's OVF ends the sleep", tcd_idle.units >= 1 && tcd_idle.pits == 0);
+    verdict("in STANDBY the TCD stops on CLK_PER: the PIT ends the sleep",
+            tcd_std.units == 0 && tcd_std.pits == 1);
+    verdict("and on OSCHF kept running by its own RUNSTDBY too",
+            tcd_osc.units == 0 && tcd_osc.pits == 1);
+    verdict("and in POWER-DOWN", tcd_pd.units == 0 && tcd_pd.pits == 1);
+    quiesce();
+}
+
 // ---- the menu -------------------------------------------------------------------------------
 
 using TestFn = void (*)();
@@ -1902,10 +2140,11 @@ struct Test { char key; TestFn fn; };
 constexpr Test tests[] = {
     {'a', ta_surface}, {'b', tb_idle}, {'c', tc_standby}, {'d', td_chain},
     {'e', te_pin_wake}, {'f', tf_power_down}, {'g', tg_vreg}, {'n', tn_ccl_wake},
+    {'o', to_runstdby},
     {'h', th_link}, {'i', ti_idle_latency}, {'j', tj_standby_latency},
     {'k', tk_power_down_latency}, {'l', tl_sfd}, {'m', tm_twi_wake},
 };
-constexpr char all_keys[] = "abcdefgn";      ///< z: the single-board half
+constexpr char all_keys[] = "abcdefgno";      ///< z: the single-board half
 constexpr char two_board_keys[] = "hijklm";  ///< y: the two-board half
 
 void run(TestFn fn) {
@@ -1931,7 +2170,8 @@ void help() {
     print(serial, "test_avr_sleep: a the register surface | b idle through enter() | "
                   "c standby is real | d the RUNSTDBY chain | e a pin wakes from the deep "
                   "modes | f power-down stops the rest | g the voltage regulator | "
-                  "n the CCL as a wake-up source    -> z = all of those", crlf);
+                  "n the CCL as a wake-up source | o RUNSTDBY of TCA, AC, ADC, op amp; "
+                  "the TCD    -> z = all of those", crlf);
     print(serial, "  two-board (the peer board = sleep_peer): h the link and the two wires | "
                   "i the awake baseline and idle | j standby timed from outside | "
                   "k power-down timed from outside | l start-of-frame | "
@@ -2005,6 +2245,20 @@ ISR(TWI0_TWIS_vect) {
             }
         }
     }
+}
+
+// Test o's units: each body clears its own flag and counts.
+ISR(AC0_AC_vect) {
+    (void)AcU::cmp();
+    unit_irqs = unit_irqs + 1;
+}
+ISR(ADC0_RESRDY_vect) {
+    adc_last = AdcU::resrdy();
+    unit_irqs = unit_irqs + 1;
+}
+ISR(TCD0_OVF_vect) {
+    TcdU::ovf();
+    unit_irqs = unit_irqs + 1;
 }
 
 ISR(CCL_CCL_vect) {

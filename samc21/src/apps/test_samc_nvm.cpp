@@ -30,6 +30,8 @@
 //   f  protection and error reporting: a locked region REFUSING an erase
 //      (nothing is erased, so this costs no wear), the lock readback,
 //      and STATUS.PROGE raised by a deliberately invalid command
+//   g  the cache measured as time: a flash-resident loop with CACHEDIS
+//      clear, set, and after INVALL
 //
 //   m  (by name only) THE MAIN ARRAY, which costs one row of code-flash
 //      endurance per run: the same erase/program round trip on the last
@@ -771,6 +773,72 @@ void tm_main_array() {
 // =============================================================================
 // The menu
 // =============================================================================
+// =============================================================================
+// g - the NVM cache, measured as time
+// =============================================================================
+//
+// A loop that lives in flash (noinline, its body a dozen instructions)
+// run 1000 times with interrupts masked - started on a tick edge, so the
+// window holds no reload - timed on the ticker's cycle count, with CTRLB.CACHEDIS clear and then set. At 48 MHz the flash
+// needs wait states (RWS, read back and printed), so with the cache off
+// every instruction fetch pays them; with it on the loop runs from the
+// cache. The same loop twice with the cache on bounds the measurement's
+// own spread.
+[[gnu::noinline]] uint32_t cache_body(uint32_t n) {
+    uint32_t a = 0x12345678u;
+    for (uint32_t i = 0; i < n; ++i) {
+        a = (a << 5) ^ (a >> 3) ^ i;
+        a += i * 3u;
+    }
+    return a;
+}
+
+volatile uint32_t cache_turns = 1000u;    ///< volatile: no constant folds the loop
+volatile uint32_t cache_sink = 0;
+
+uint32_t timed_body() {
+    const uint32_t n = cache_turns;
+    // Right after a tick edge: the masked window (well under the 48000
+    // cycles of a tick) then never holds a reload the masked tick would
+    // miss.
+    const uint32_t k = brio::Ticker::ticks();
+    while (brio::Ticker::ticks() == k) {
+    }
+    __disable_irq();
+    const uint32_t t0 = cycles_now();
+    const uint32_t r = cache_body(n);
+    const uint32_t t1 = cycles_now();
+    __enable_irq();
+    cache_sink = r;
+    return t1 - t0;
+}
+
+void tg_cache() {
+    const bool was = Nvm::cache_enabled();
+    Nvm::cache(true);
+    const uint32_t on1 = timed_body();
+    const uint32_t on2 = timed_body();
+    Nvm::cache(false);
+    const bool off_read = !Nvm::cache_enabled();
+    const uint32_t off = timed_body();
+    Nvm::cache(true);
+    (void)Nvm::invalidate_cache();
+    const uint32_t after = timed_body();
+    Nvm::cache(was);
+    print(serial, "  1000 turns of a flash-resident loop, RWS ", brio::FlashWaitStates::get(),
+          ": cache on ", on1, " and ", on2, " cycles, OFF ", off, ", on again after INVALL ",
+          after, crlf);
+    const uint32_t spread = on1 > on2 ? on1 - on2 : on2 - on1;
+    bench.verdict("CACHEDIS reads back as written", off_read);
+    bench.verdict("the same loop twice with the cache on agrees to 1 %",
+                  spread <= on1 / 100u);
+    bench.verdict("THE CACHE IS WORTH ITS WAIT STATES: with it off the loop is slower by "
+                  "more than a quarter",
+                  off > on1 + on1 / 4u);
+    bench.verdict("and an invalidated cache refills: back within 1 % of the first run",
+                  (after > on1 ? after - on1 : on1 - after) <= on1 / 100u);
+}
+
 void banner() {
     print(serial, crlf, "test_samc_nvm - SAMC21J18A NVMCTRL (ch. 27), clk=",
           SysClock::hz, " Hz", crlf);
@@ -809,6 +877,7 @@ int main() {
     bench.letter('d', "what it costs, and the no-stall claim", td_cost);
     bench.letter('e', "util/nv_heap.hpp on the RWWEE array", te_heap);
     bench.letter('f', "region locks and error reporting", tf_protection);
+    bench.letter('g', "the NVM cache, measured as time", tg_cache);
     bench.letter('m', "the MAIN array and its stall (one row of wear)",
                  tm_main_array, false);
 

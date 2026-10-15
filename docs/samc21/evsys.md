@@ -118,7 +118,7 @@ Evsys::trigger(0);
 
 ## Bench findings
 
-From `test_samc_evsys` (four letters). Nothing to wire: the software
+From `test_samc_evsys` (five letters). Nothing to wire: the software
 event supplies the stimulus, and TC4 in COUNT16 counting events
 (EVACT = COUNT, TCEI, 35.6.2.5.3) on its user 27 is the witness - its
 counter advances on an incoming event and on nothing else, so a count of
@@ -164,6 +164,15 @@ with the bit set and not once without it (32 awake). Every sleepwalking
 chain in this stratum depends on that bit -
 [platform.md](platform.md), "Sleep, peripheral by peripheral".
 
+**OVERRUN, provoked** (letter e, ten runs of ten): on letter b's
+synchronous channel, two spaced software events reach TC4 enabled -
+both counted, OVR clear - and the same two find TC4 DISABLED: nothing
+counted and OVR raised, 29.6.2.9's "an event user not ready when there
+is a new event". **Falling-edge detection on its own** is measured in
+the EIC's suite: a HIGH level's event output on a resynchronized channel
+detecting falling edges counts the pad's falls and not its rises
+([eic.md](eic.md), letter g).
+
 ## Not covered yet
 
 Driver gaps (deliberate):
@@ -189,6 +198,7 @@ Implemented but not bench-verified:
   converters, the TSENS, the CCL - each in its own suite, with a TC
   counting events, the PORT and the same peripherals as users. A code
   whose peripheral has no driver here is compile-checked at most.
-- Falling-edge detection on its own (both-edge detection runs in the
-  AC's and the TCC's suites); `overrun` actually being raised
-  (provoking one needs a generator faster than its user).
+- An overrun from a user merely SLOWER than its generator (the
+  disabled user above is the not-ready case of 29.6.2.9; the
+  not-yet-handled one wants a user in a slow clock domain behind a fast
+  generator).

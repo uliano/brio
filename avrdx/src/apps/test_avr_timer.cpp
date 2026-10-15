@@ -24,7 +24,8 @@
 // | 5 Pwm8 | 6 pulse counter | 7 32-bit cascade | 8 tick + timeout
 // | 9 event counter | c CCL | m comparators | n timeout duration
 // | o meter variants | r live rebase | s TCA split escape
-// | d centered PWM | l CCL logic | i CCL inputs | w AC extras | a all
+// | d centered PWM | l CCL logic | i CCL inputs | w AC extras
+// | t TCA modes | e EVSYS generators and positions | k CCL extras | a all
 //
 // Tests:
 //   1  FrequencyGenerator (TCA0, PD0) at 500 Hz / 1 kHz / 10 kHz /
@@ -67,10 +68,16 @@
 //      findings); interrupts per crossing; Window<Ac<0>, Ac<2>> 500..
 //      1500 mV: below / inside / above; AC0's event on a channel -> EVOUT
 //      is not checked (no analyzer in the loop).
-// Not testable here: the TCA1 PORTC three-channel route and the
-// TCB0/TCB1 ALT1 pins (they are the console; TCB2's ALT1 = PB4 is
-// tested), RUNSTDBY (no sleep in this suite), AC response time (the
-// DAC's slew dominates), TCD.
+//   t  TCA's other modes: dual slope with OVF at TOP (PER + CMP after
+//      the rising edge) and at BOTH (two a period); the split mode's
+//      LUNF/HUNF/LCMP0 vectors on TCA1 against the LUNF event counted
+//      by TCB1; event B's three restarts and event A's any-edge and
+//      while-high counting on PC1's level; an FRQ WO2 phase-shifted by
+//      CMP2 (PD2); the UPDATE command over LUPD; ALUPD; TCA1's PORTC
+//      route read back on PC4..PC6.
+// Not testable here: the TCB0/TCB1 ALT1 pins (they are the console;
+// TCB2's ALT1 = PB4 is tested), RUNSTDBY (no sleep in this suite:
+// test_avr_sleep o), AC response time (the DAC's slew dominates), TCD.
 
 // build: monitor_speed = 460800
 
@@ -84,6 +91,7 @@
 #include "avrdx/delay.hpp"
 #include "avrdx/evsys.hpp"
 #include "avrdx/pin.hpp"
+#include "avrdx/spi.hpp"
 #include "avrdx/tca.hpp"
 #include "avrdx/tcb.hpp"
 #include "avrdx/ticker.hpp"
@@ -642,6 +650,12 @@ uint16_t measure_duration() {                    // 0xFFFF = stamps missed
     for (uint16_t i = 0; i < 30000 && GenPin::read(); ++i) {}
     T1::clear_capt(); T3::clear_capt();
     stamp_phase = 0;
+    // The CAPT user still listens where the LAST measurement left it (the
+    // second stamp's channel): point it at the start channel BEFORE the
+    // init enables the event input, or an event on the old channel can be
+    // the first stamp (measured once in twelve runs: two OVFs stamped,
+    // 12000 apart, in letter t's dual slope at BOTH).
+    T0::capture_on(ChGen{});
     T0::init({.mode = TcbMode::capture, .clock = TcbClock::div1, .compare = 0,
               .event_input = true});
     T0::capture_on(ChGen{});
@@ -747,7 +761,11 @@ void to_meter_variants() {
     FrequencyMeter<T0>::init(clock, ChGen{}, TcbClock::tca1);
     clear_captures(); wait_captures(3, 20);
     print(serial, "  CLK_TCA1 (div8, 3 MHz) period: ", cap_a, " ticks (expect 3000)", crlf);
-    verdict("tca1-clocked period 3000 exact", cap_a == 3000);
+    // 24000 CLK_PER / 8 = 3000 ticks of CLK_TCA1, but the /8 prescaler's
+    // phase against the edge is this run's own (TCA1 started at an
+    // arbitrary instant), and the capture's restart lands on either side
+    // of a prescaled tick: 3000 +-1 (measured 2999 once in twelve runs).
+    verdict("tca1-clocked period 3000 +-1", near(cap_a, 3000, 1));
     verdict("tick_hz unknown on a TCA clock (0)", FrequencyMeter<T0>::tick_hz() == 0);
     T0::disable(); Tca<1>::disable();
 
@@ -1173,6 +1191,557 @@ void tw_ac_extras() {
         verdict("interrupt fires on entering the chosen state", ac_irqs >= 1);
     }
     Ac<0>::disable(); Ac<2>::disable(); D::set(0);
+    // PD3 was AC0's negative: init() switched its digital input buffer
+    // off (an analog input). Back to a plain input, or the next reader of
+    // PD3 - letter l's RS latch on LUT2's pin - reads 0 whatever the pad
+    // does (measured: l failed after w in every run but the first).
+    Pin<'D', 3>::configure({});
+    Pin<'D', 3>::input();
+    quiesce();
+}
+
+// ---- k CCL: the inputs, the latch and the clocks no other letter uses -----------------
+// TCB2's WO, USART1's TXD and SPI0's SCK as LUT inputs, each passed
+// through a LUT whose output event a TCB measures; the D LATCH sequencer
+// (transparent while G is high, holding while it is low) read on EVOUT
+// PD2; FEEDBACK closing a DFF on itself so it divides its clock by two,
+// that clock first the LUT's own INPUT 2 (a 1 kHz square from TCA0),
+// then OSC32K and OSC1K - the two slow clocks judged by their ratio.
+void tk_ccl_extras() {
+    print(serial, "k CCL: TCB, USART and SPI inputs; the D latch; FEEDBACK with an "
+                  "input-2, OSC32K and OSC1K clock", crlf);
+    quiesce(); ccl_quiesce();
+
+    // 1. TCB2's WO (Pwm8, period 256 ticks) on LUT2's input 2.
+    Pwm::init();
+    Pwm::duty(64);
+    Lut<2>::init({.in2 = LutInput::tcb, .truth = 0xF0});
+    Ccl::enable();
+    ChCarry::source(Lut<2>::OutEvent{});
+    tcb0_hook = tcb0_frequency;
+    FrequencyMeter<T0>::init(clock, ChCarry{});
+    clear_captures(); wait_captures(3, 20);
+    const uint16_t tcb_period = cap_a;
+    T0::disable(); tcb0_hook = nullptr; T2::disable();
+    print(serial, "  TCB2 WO through LUT2's input 2: period ", tcb_period, " ticks (expect 256)",
+          crlf);
+    verdict("TCB2's WO as a LUT input (256 +-1)", near(tcb_period, 256, 1));
+    ccl_quiesce();
+
+    // 2. USART1's TXD (asynchronous, ALT1 pins PC4/PC5) on LUT2's input 1:
+    //    four frames of 0x55 (8N1, LSB first: start 0, then 1 0 1 0 1 0 1
+    //    0, stop 1) rise five times each - 20 rising edges counted by TCB1.
+    Lut<2>::init({.in1 = LutInput::usart_txd, .truth = 0xCC});
+    Ccl::enable();
+    ChCarry::source(Lut<2>::OutEvent{});
+    PulseCounter<T1>::init(ChCarry{});
+    const uint16_t u1_baud = usart_baud_reg(SysClock::hz, 115200);
+    const bool u1 = u1_baud != 0 && Usart<1>::init({.route = UsartRoute::alt1, .baud = u1_baud});
+    hold_ms(1);
+    PulseCounter<T1>::reset();
+    bool sent = u1;
+    for (uint8_t i = 0; i < 4; ++i) sent = sent && Usart<1>::send(0x55);
+    hold_ms(2);
+    const uint16_t txd_rises = PulseCounter<T1>::count();
+    Usart<1>::release();
+    T1::disable();
+    print(serial, "  USART1 TXD through LUT2's input 1: ", txd_rises,
+          " rising edges over four 0x55 frames (expect 20)", crlf);
+    verdict("USART1's TXD as a LUT input (five rises a 0x55 frame)", sent && txd_rises == 20);
+    ccl_quiesce();
+
+    // 3. SPI0's SCK (a pinless host, mode 0) on LUT2's input 2: four
+    //    bytes, 32 rising edges.
+    Lut<2>::init({.in2 = LutInput::spi0, .truth = 0xF0});
+    Ccl::enable();
+    ChCarry::source(Lut<2>::OutEvent{});
+    PulseCounter<T1>::init(ChCarry{});
+    const bool spi_up = Spi<0>::init({.route = SpiRoute::none});
+    PulseCounter<T1>::reset();
+    bool spi_ok = spi_up;
+    for (uint8_t i = 0; i < 4; ++i) spi_ok = spi_ok && Spi<0>::transfer(0x00).has_value();
+    const uint16_t sck_rises = PulseCounter<T1>::count();
+    Spi<0>::release();
+    T1::disable();
+    print(serial, "  SPI0 SCK through LUT2's input 2: ", sck_rises,
+          " rising edges over four bytes (expect 32)", crlf);
+    verdict("SPI0's SCK as a LUT input (32)", spi_ok && sck_rises == 32);
+    ccl_quiesce();
+
+    // 4. The D latch on pair 0: D = LUT0 (PC1's level), G = LUT1 (PB0's
+    //    level), Q on EVOUT PD2.
+    using GPin = Pin<'B', 0>;
+    using QPin = Pin<'D', 2>;
+    DirPin::output(); DirPin::clear();
+    GPin::output(); GPin::clear();
+    ChC::source(EvPin<DirPin>{});
+    ChSoft::source(EvPin<GPin>{});
+    Ccl::sequencer<0>(Sequencer::d_latch);
+    Lut<0>::init({.in0 = LutInput::event_a, .truth = 0xAA});
+    Lut<0>::event_a_on(ChC{});
+    Lut<1>::init({.in0 = LutInput::event_a, .truth = 0xAA});
+    Lut<1>::event_a_on(ChSoft{});
+    Ccl::enable();
+    ChCarry::source(Lut<0>::OutEvent{});
+    EvOut<QPin>::listen(ChCarry{});
+    auto q = []() { delay_us(clock, 5); return QPin::read(); };
+    GPin::set();
+    DirPin::set();
+    const bool t1 = q();
+    DirPin::clear();
+    const bool t0 = q();
+    GPin::clear();                                 // latch Q = 0
+    DirPin::set();
+    const bool h0 = q();
+    GPin::set();                                   // transparent again
+    const bool t1b = q();
+    GPin::clear();                                 // latch Q = 1
+    DirPin::clear();
+    const bool h1 = q();
+    EvOut<QPin>::unlisten();
+    GPin::clear();
+    print(serial, "  D latch: G high D 1/0 -> Q ", t1, "/", t0, "; G low D 1 -> Q ", h0,
+          "; G high -> Q ", t1b, "; G low D 0 -> Q ", h1, crlf);
+    verdict("the D latch is transparent while G is high", t1 && !t0 && t1b);
+    verdict("and holds while G is low, both ways", !h0 && h1);
+    ccl_quiesce();
+
+    // 5. FEEDBACK: a DFF on pair 0 whose D is NOT its own Q (LUT0's input
+    //    0 = feedback, truth = the negation; LUT1, the enable, constant 1)
+    //    divides its clock by two. Clocked from LUT0's INPUT 2 - the
+    //    event B of TCA0's 1 kHz square on PD0 - it runs at 500 Hz: 48000
+    //    ticks a period, +-1 for the capture.
+    Gen::init(clock, 1000);
+    ChGen::source(EvPin<GenPin>{});
+    auto dff_leg = [](LutClock clk) -> uint16_t {
+        ccl_quiesce();
+        Ccl::sequencer<0>(Sequencer::d_flip_flop);
+        // Input 2 is the clock only when the clock is input 2; otherwise
+        // it is masked, or its level would enter the truth table.
+        Lut<0>::init({.in0 = LutInput::feedback,
+                      .in2 = clk == LutClock::input2 ? LutInput::event_b : LutInput::mask,
+                      .truth = 0x01, .clock = clk});
+        Lut<0>::event_b_on(ChGen{});
+        Lut<1>::init({.truth = 0x01});
+        Ccl::enable();
+        ChCarry::source(Lut<0>::OutEvent{});
+        tcb0_hook = tcb0_frequency;
+        FrequencyMeter<T0>::init(clock, ChCarry{});
+        clear_captures();
+        wait_captures(3, 200);
+        const uint16_t p = captures >= 3 ? static_cast<uint16_t>(cap_a) : 0;
+        T0::disable(); tcb0_hook = nullptr;
+        return p;
+    };
+    const uint16_t p_in2 = dff_leg(LutClock::input2);
+    Gen::stop();
+    Osc32k::run_standby(true);                     // keep the 32 kHz domain requested
+    const uint16_t p_32k = dff_leg(LutClock::osc32k);
+    const uint16_t p_1k = dff_leg(LutClock::osc1k);
+    Osc32k::run_standby(false);
+    print(serial, "  DFF fed back on itself: clocked by input 2 (1 kHz) period ", p_in2,
+          " ticks (expect 48000); by OSC32K ", p_32k, ", by OSC1K ", p_1k, " (ratio x32)",
+          crlf);
+    verdict("FEEDBACK closes the DFF: input 2 as its clock halves 1 kHz (48000 +-1)",
+            near(p_in2, 48000, 1));
+    // OSC1K is OSC32K / 32: the two periods measure the same oscillator,
+    // so their ratio is 32 to the capture's tick (32 x +-1 on the fast
+    // one, +-1 on the slow) plus the oscillator's wander between the two
+    // legs (600 ppm at most on this desk: 28 ticks) - 64 ticks.
+    verdict("OSC32K and OSC1K clock it too, at exactly a 32:1 ratio (+-64 ticks)",
+            p_32k > 1000 && near(p_1k, static_cast<int32_t>(p_32k) * 32, 64));
+    ccl_quiesce(); quiesce();
+}
+
+// ---- e EVSYS: the generators and positions no other letter routes ------------------
+// SPI0's SCK and USART1's XCK as LEVEL generators - SCK counted in
+// rising edges by TCB1 (a pinless SPI host), XCK timed by TCB0 as a
+// frequency meter (USART1 a synchronous host on its ALT1 pins PC4..PC7,
+// XCK on PC6); the software event on a channel a
+// level holds HIGH (16.3.2.6: it inverts for one CLK_PER - a low pulse,
+// whose end is a rising edge); EVOUT's ALT1 positions PA7, PC7 and PD7
+// following PC1's level.
+void te_evsys() {
+    print(serial, "e EVSYS: SPI SCK and USART XCK generators, the software event on a "
+                  "held level, EVOUT ALT1 on PA7/PC7/PD7", crlf);
+    quiesce();
+    D::disable();                     // PD7 below may share the analog suite's DAC wire
+
+    // 1. SPI0 SCK: four bytes in mode 0 = 32 rising edges.
+    ChCarry::source(EvSpiSck<0>{});
+    PulseCounter<T1>::init(ChCarry{});
+    const bool spi_up = Spi<0>::init({.route = SpiRoute::none});
+    PulseCounter<T1>::reset();
+    bool spi_ok = spi_up;
+    for (uint8_t i = 0; i < 4; ++i) spi_ok = spi_ok && Spi<0>::transfer(0xA5).has_value();
+    const uint16_t sck = PulseCounter<T1>::count();
+    Spi<0>::release();
+    T1::disable();
+    print(serial, "  SPI0 SCK event: ", sck, " rising edges over four bytes", crlf);
+    verdict("the SPI SCK generator: eight rising edges a byte (32)", spi_ok && sck == 32);
+
+    // 2. USART1 XCK, a synchronous host at 100 kHz on ALT1: BAUD 7680,
+    //    of which [15:6] count, 24 MHz / (2 x 120) = 100 kHz exactly. Its
+    //    event measured by TCB0 as a frequency meter: 240 CLK_PER ticks a
+    //    period, +-1 for the capture's synchronizer - first with no frame
+    //    sent at all, then under four frames.
+    using Xh = SyncHost<1, UsartRoute::alt1>;
+    ChCarry::source(EvUsartXck<1>{});
+    const bool xck_up = Xh::init(clock, 100'000u);
+    tcb0_hook = tcb0_frequency;
+    FrequencyMeter<T0>::init(clock, ChCarry{});
+    clear_captures();
+    const bool idle_got = wait_captures(3, 20);
+    const uint16_t xck_idle = cap_a;
+    bool sent = xck_up;
+    clear_captures();
+    for (uint8_t i = 0; i < 4; ++i) sent = sent && Usart<1>::send(0x5A);
+    const bool busy_got = wait_captures(3, 20);
+    const uint16_t xck_busy = cap_a;
+    T0::disable();
+    tcb0_hook = nullptr;
+    Usart<1>::release();
+    print(serial, "  USART1 XCK event: period ", xck_idle, " ticks with no frame sent, ",
+          xck_busy, " under four 8N1 frames (expect 240)", crlf);
+    verdict("the USART XCK generator: 100 kHz, 240 +-1 ticks", sent && busy_got &&
+            near(xck_busy, 240, 1));
+    verdict("and a synchronous host's XCK runs with no frame in flight", idle_got &&
+            near(xck_idle, 240, 1));
+
+    // 3. The software event on a channel PC1 holds HIGH: each pulse is a
+    //    one-CLK_PER LOW, ended by a rising edge TCB1 counts. The control:
+    //    the same three pulses with PC1 low (high pulses).
+    DirPin::output();
+    DirPin::set();
+    ChC::source(EvPin<DirPin>{});
+    PulseCounter<T1>::init(ChC{});
+    delay_us(clock, 10);
+    PulseCounter<T1>::reset();
+    for (uint8_t i = 0; i < 3; ++i) { ChC::pulse(); delay_us(clock, 5); }
+    const uint16_t on_high = PulseCounter<T1>::count();
+    DirPin::clear();
+    delay_us(clock, 10);
+    PulseCounter<T1>::reset();
+    for (uint8_t i = 0; i < 3; ++i) { ChC::pulse(); delay_us(clock, 5); }
+    const uint16_t on_low = PulseCounter<T1>::count();
+    T1::disable();
+    print(serial, "  three software events: ", on_high, " rising edges with the level "
+          "HIGH, ", on_low, " with it low", crlf);
+    verdict("on a held-high channel the software event INVERTS: a low pulse each (3)",
+            on_high == 3);
+    verdict("and on an idle channel a high pulse each (3)", on_low == 3);
+
+    // 4. EVOUT ALT1: PA7, PC7 and PD7 follow PC1's level on channel 3.
+    EvOut<Pin<'A', 7>>::listen(ChC{});
+    EvOut<Pin<'C', 7>>::listen(ChC{});
+    EvOut<Pin<'D', 7>>::listen(ChC{});
+    DirPin::set(); delay_us(clock, 5);
+    const bool all_high = Pin<'A', 7>::read() && Pin<'C', 7>::read() && Pin<'D', 7>::read();
+    DirPin::clear(); delay_us(clock, 5);
+    const bool all_low = !Pin<'A', 7>::read() && !Pin<'C', 7>::read() && !Pin<'D', 7>::read();
+    EvOut<Pin<'A', 7>>::unlisten();
+    EvOut<Pin<'C', 7>>::unlisten();
+    EvOut<Pin<'D', 7>>::unlisten();
+    print(serial, "  EVOUT ALT1 on PA7/PC7/PD7: level high read ", all_high ? "high" : "NOT high",
+          ", low read ", all_low ? "low" : "NOT low", crlf);
+    verdict("EVOUTA/C/D at their ALT1 positions (Px7) follow the channel", all_high && all_low);
+    quiesce();
+}
+
+// ---- t TCA: the modes the other tests leave ----------------------------------------
+// The dual-slope OVF placements other than BOTTOM, the split mode's
+// three vectors, event input B's three restart actions, event input A's
+// any-edge and while-high counting, an FRQ output phase-shifted by its
+// compare, the UPDATE command over a locked update, and ALUPD.
+volatile uint16_t lunf_irqs = 0, hunf_irqs = 0, lcmp0_irqs = 0;
+volatile uint16_t stamp2_start = 0, stamp2_end = 0;
+volatile uint8_t stamp2_phase = 0;
+
+/// TCB0's hook for the FRQ phase: the first stamp on PD0's rising edge
+/// (ChGen), the second on PD2's (ChC).
+void tcb0_stamp_wo2() {
+    const uint16_t v = T0::capture();
+    if (stamp2_phase == 0) { stamp2_start = v; T0::capture_on(ChC{}); stamp2_phase = 1; }
+    else { stamp2_end = v; stamp2_phase = 2; T0::capture_on_events(false); }
+}
+
+/// PD0 rising -> the next PD2 rising, in CLK_PER ticks (0xFFFF = missed).
+uint16_t measure_wo0_to_wo2() {
+    for (uint16_t i = 0; i < 30000 && GenPin::read(); ++i) {}
+    stamp2_phase = 0;
+    tcb0_hook = tcb0_stamp_wo2;
+    T0::capture_on(ChGen{});                       // as measure_duration(): the user first
+    T0::init({.mode = TcbMode::capture, .clock = TcbClock::div1, .compare = 0,
+              .event_input = true});
+    T0::capture_on(ChGen{});
+    T0::enable_capt_interrupt(true);
+    for (uint8_t i = 0; i < 40 && stamp2_phase != 2; ++i) hold_ms(1);
+    T0::disable();
+    tcb0_hook = nullptr;
+    return stamp2_phase == 2 ? static_cast<uint16_t>(stamp2_end - stamp2_start) : 0xFFFF;
+}
+
+/// TCA0's OVF events counted by TCB1 over 20 ms.
+uint16_t ovf_events_20ms() {
+    ChCarry::source(Tca<0>::OvfEvent{});
+    PulseCounter<T1>::init(ChCarry{});
+    PulseCounter<T1>::reset();
+    hold_ms(20);
+    const uint16_t n = PulseCounter<T1>::count();
+    T1::disable();
+    return n;
+}
+
+using LevelPin = DirPin;                       // PC1: the level the test drives
+using WO2Pin = Pin<'D', 2>;
+
+void tt_tca_modes() {
+    print(serial, "t TCA: dual-slope TOP/BOTH, split vectors, event B restarts, event A "
+                  "any-edge/while-high, FRQ phase, UPDATE over LUPD, ALUPD", crlf);
+    quiesce();
+
+    // 1. Dual slope, 1 kHz (12000 steps at div1). OVF at BOTTOM sits at
+    //    the pulse centre (test d); at TOP it sits PER + CMP after the
+    //    rising edge (the edge at CMP counting down, BOTTOM CMP later,
+    //    the falling edge CMP after that, TOP PER - CMP on); BOTH gives
+    //    two events a period. The counts over 20 ms are crystal time:
+    //    20 periods, +-1 for the window's two ends.
+    using C = TcaPwmCentered<0, 'D', 12000>;
+    ChGen::source(EvPin<GenPin>{});
+    verdict("dual slope, OVF at TOP: init", C::init(TcaClock::div1, 0x01, C::EventAt::top));
+    tcb0_hook = tcb0_stamp;                        // test d's stamps: PD0 rising, then OVF
+    ChCarry::source(Tca<0>::OvfEvent{});
+    C::duty<0>(3000); hold_ms(3);
+    const uint16_t top1 = measure_duration();
+    C::duty<0>(6000); hold_ms(3);
+    const uint16_t top2 = measure_duration();
+    const uint16_t n_top = ovf_events_20ms();
+    print(serial, "  OVF at TOP: rising -> OVF ", top1, " (CMP 3000), ", top2,
+          " (CMP 6000); expect PER + CMP; ", n_top, " OVF events in 20 ms", crlf);
+    verdict("OVF at TOP: PER + CMP after the rising edge (the skew of test d, 5)",
+            near(top1, 15000, 5) && static_cast<uint16_t>(top2 - top1) == 3000);
+    verdict("one OVF a period (20 +-1 in 20 ms)", near(n_top, 20, 1));
+    verdict("dual slope, OVF at BOTH: init", C::init(TcaClock::div1, 0x01, C::EventAt::both));
+    tcb0_hook = tcb0_stamp;
+    ChCarry::source(Tca<0>::OvfEvent{});
+    C::duty<0>(3000); hold_ms(3);
+    const uint16_t both1 = measure_duration();
+    const uint16_t n_both = ovf_events_20ms();
+    print(serial, "  OVF at BOTH: rising -> first OVF ", both1, " (CMP 3000); ", n_both,
+          " OVF events in 20 ms", crlf);
+    verdict("OVF at BOTH: the first after the rising edge is BOTTOM's, CMP after it",
+            near(both1, 3000, 5));
+    verdict("two OVF a period (40 +-1 in 20 ms)", near(n_both, 40, 1));
+    quiesce();
+
+    // 2. Split mode's three vectors on TCA1 (TcaPwm on PORTB, all six
+    //    outputs at duty 0 = pins low; WO0 at 128): LUNF, HUNF and LCMP0
+    //    each fire once per 8-bit period, 24 MHz / 16 / 256 = 5859 Hz.
+    //    The reference is the hardware: TCB1 counts the LUNF EVENTS over
+    //    the same window, so the three handlers' own time - which
+    //    stretches the cycle-loop hold by some 4 % here - moves both
+    //    counts alike; +-1 for the window's two ends, which the counter
+    //    read and the interrupt disables do not share.
+    using Bar = TcaPwm<1, 'B'>;
+    Bar::init();
+    Bar::duty<0>(128);
+    cli(); lunf_irqs = 0; hunf_irqs = 0; lcmp0_irqs = 0; sei();
+    Tca<1>::clear_lunf(); Tca<1>::clear_hunf(); Tca<1>::clear_lcmp<0>();
+    ChCarry::source(Tca<1>::OvfEvent{});           // LUNF, in split mode
+    PulseCounter<T1>::init(ChCarry{});
+    cli();
+    PulseCounter<T1>::reset();
+    Tca<1>::enable_lunf_interrupt(true);
+    Tca<1>::enable_hunf_interrupt(true);
+    Tca<1>::enable_lcmp_interrupt<0>(true);
+    sei();
+    hold_ms(20);
+    cli();
+    Tca<1>::enable_lunf_interrupt(false);
+    Tca<1>::enable_hunf_interrupt(false);
+    Tca<1>::enable_lcmp_interrupt<0>(false);
+    const uint16_t events = PulseCounter<T1>::count();
+    sei();
+    T1::disable();
+    print(serial, "  split TCA1, 20 ms of hold: LUNF ", lunf_irqs, ", HUNF ", hunf_irqs,
+          ", LCMP0 ", lcmp0_irqs, " interrupts; the LUNF event counted ", events,
+          " times by TCB1", crlf);
+    verdict("the split LUNF vector fires once per low-half period (the event count +-1)",
+            near(lunf_irqs, events, 1));
+    verdict("the split HUNF vector once per high-half period", near(hunf_irqs, events, 1));
+    verdict("the split LCMP0 vector once per low-half period", near(lcmp0_irqs, events, 1));
+    verdict("at 5859 Hz: over 100 in the window", events > 100);
+    Tca<1>::reset();
+    quiesce();
+
+    // 3. Event input B's restarts, normal mode at CLK_PER/1024 (23437 Hz:
+    //    2 ms = 46.9 counts). The event is PC1's level through EvPin.
+    LevelPin::output();
+    LevelPin::clear();
+    ChC::source(EvPin<LevelPin>{});
+    auto restart_leg = [](TcaEventB action) {
+        (void)Tca<0>::init({.mode = TcaMode::normal, .clock = TcaClock::div1024,
+                            .period = 0xFFFF, .event_b = action});
+        Tca<0>::event_b_on(ChC{});
+        hold_ms(2);
+    };
+    restart_leg(TcaEventB::restart_posedge);
+    const uint16_t pe0 = Tca<0>::count();
+    LevelPin::set(); delay_us(clock, 5);
+    const uint16_t pe1 = Tca<0>::count();
+    hold_ms(2);
+    LevelPin::clear(); delay_us(clock, 5);
+    const uint16_t pe2 = Tca<0>::count();
+    print(serial, "  event B restart on rising: ", pe0, " -> rise -> ", pe1, " ... ", "fall -> ",
+          pe2, crlf);
+    verdict("restart_posedge: the rise restarts the count (46.9 -> below 2)",
+            pe0 >= 40 && pe1 < 2);
+    verdict("and the fall does not (2 ms more counted)", pe2 >= 40);
+    restart_leg(TcaEventB::restart_anyedge);
+    LevelPin::set(); delay_us(clock, 5);
+    hold_ms(2);
+    const uint16_t ae0 = Tca<0>::count();
+    LevelPin::clear(); delay_us(clock, 5);
+    const uint16_t ae1 = Tca<0>::count();
+    print(serial, "  event B restart on any edge: ", ae0, " -> fall -> ", ae1, crlf);
+    verdict("restart_anyedge: the fall restarts it too", ae0 >= 40 && ae1 < 2);
+    restart_leg(TcaEventB::restart_while_high);
+    LevelPin::set(); delay_us(clock, 5);
+    hold_ms(2);
+    const uint16_t hl0 = Tca<0>::count();
+    LevelPin::clear();
+    hold_ms(2);
+    const uint16_t hl1 = Tca<0>::count();
+    print(serial, "  event B restart while high: ", hl0, " after 2 ms high, ", hl1,
+          " after 2 ms low", crlf);
+    verdict("restart_while_high: held at 0 while the level is high", hl0 < 2);
+    verdict("and counting once it is low", hl1 >= 40);
+    quiesce();
+
+    // 4. Event input A counting: any edge (ten edges = 10, the rising
+    //    count of the same edges = 5 as the control) and while high
+    //    (CLK_PER/1024 counted only while PC1 is high: 2 ms = 46.9, +1
+    //    for the prescaler's phase, -1 for the window's other end). The
+    //    hold is a cycle loop: the console is drained first, or its
+    //    transmit interrupts stretch it.
+    LevelPin::output();
+    LevelPin::clear();
+    ChC::source(EvPin<LevelPin>{});
+    auto count_leg = [](TcaEventA action) -> uint16_t {
+        (void)Tca<0>::init({.mode = TcaMode::normal, .clock = TcaClock::div1024,
+                            .period = 0xFFFF, .event_a = action});
+        Tca<0>::event_a_on(ChC{});
+        Tca<0>::count(0);
+        for (uint8_t i = 0; i < 5; ++i) {
+            LevelPin::set(); delay_us(clock, 20);
+            LevelPin::clear(); delay_us(clock, 20);
+        }
+        return Tca<0>::count();
+    };
+    const uint16_t any = count_leg(TcaEventA::count_anyedge);
+    const uint16_t pos = count_leg(TcaEventA::count_posedge);
+    while (!Serial::tx_idle()) {
+    }
+    (void)Tca<0>::init({.mode = TcaMode::normal, .clock = TcaClock::div1024,
+                        .period = 0xFFFF, .event_a = TcaEventA::count_while_high});
+    Tca<0>::event_a_on(ChC{});
+    Tca<0>::count(0);
+    hold_ms(2);
+    const uint16_t wh_low = Tca<0>::count();
+    LevelPin::set();
+    hold_ms(2);
+    LevelPin::clear();
+    const uint16_t wh_high = Tca<0>::count();
+    print(serial, "  event A: five pulses counted ", any, " on any edge, ", pos,
+          " on rising; while high: ", wh_low, " after 2 ms low, ", wh_high,
+          " after 2 ms more high", crlf);
+    verdict("count_anyedge counts both edges of five pulses: 10", any == 10);
+    verdict("count_posedge, the control, the rising ones: 5", pos == 5);
+    verdict("count_while_high: nothing while low", wh_low == 0);
+    verdict("and the prescaled clock while high (46.9 in 2 ms, 46..48)",
+            near(wh_high, 47, 1));
+    quiesce();
+
+    // 5. FRQ: WO2 toggles at its CMP2 inside WO0's counting period
+    //    (CMP0 = 2399, each output 5 kHz). From the init's RESTART both
+    //    outputs are low and both rise in the first period, WO2 at CMP2,
+    //    WO0 at CMP0; WO2's next rise is two periods later, so WO0's rise
+    //    is followed by WO2's after CMP0 + CMP2 + 2 ticks - a distance
+    //    that moves exactly with CMP2 (both edges stamped through a pin's
+    //    synchronizer, so the skew cancels). Each CMP2 from a fresh init:
+    //    an unbuffered CMP2 written mid-run can toggle WO2 twice in one
+    //    period and invert it against WO0 (measured).
+    auto frq_leg = [](uint16_t cmp2) -> uint16_t {
+        (void)Tca<0>::init({.mode = TcaMode::frequency, .clock = TcaClock::div1,
+                            .compare0 = 2399, .compare2 = cmp2, .outputs = 0x05, .route = 'D'});
+        ChGen::source(EvPin<GenPin>{});
+        ChC::source(EvPin<WO2Pin>{});
+        hold_ms(1);
+        return measure_wo0_to_wo2();
+    };
+    const uint16_t ph1 = frq_leg(600);
+    const uint16_t ph2 = frq_leg(1200);
+    print(serial, "  FRQ, CMP0 2399: WO0 rising -> WO2 rising ", ph1, " (CMP2 600), ", ph2,
+          " (CMP2 1200); expect CMP0 + CMP2 + 2", crlf);
+    verdict("the WO2 phase is CMP0 + CMP2 + 2 ticks behind WO0's rise",
+            ph1 == 3001 && ph2 == 3601);
+    quiesce();
+
+    // 6. The UPDATE command over a locked update, then ALUPD. Single
+    //    slope at 1 kHz (div1, PER 23999): with LUPD set a buffered CMP0
+    //    survives three TOPs untransferred; UPDATE moves it at once.
+    (void)Tca<0>::init({.mode = TcaMode::single_slope, .clock = TcaClock::div1, .period = 23999,
+                        .compare0 = 1000});
+    Tca<0>::lock_update(true);
+    Tca<0>::compare_buffered<0>(5000);
+    hold_ms(3);
+    const uint16_t locked = Tca<0>::compare<0>();
+    Tca<0>::update();
+    const uint16_t forced = Tca<0>::compare<0>();
+    Tca<0>::lock_update(false);
+    print(serial, "  LUPD: CMP0 after three TOPs ", locked, "; after UPDATE ", forced, crlf);
+    verdict("LUPD holds a buffered compare across TOPs", locked == 1000);
+    verdict("the UPDATE command transfers it at once, lock or not", forced == 5000);
+    // ALUPD with CMP0 and CMP2 enabled (WO0 PD0, WO2 PD2): the buffers
+    // land only once BOTH are written (23.5.2).
+    (void)Tca<0>::init({.mode = TcaMode::single_slope, .clock = TcaClock::div1, .period = 23999,
+                        .compare0 = 1000, .compare2 = 2000, .outputs = 0x05, .route = 'D',
+                        .auto_lock_update = true});
+    Tca<0>::compare_buffered<0>(3000);
+    hold_ms(3);
+    const uint16_t half0 = Tca<0>::compare<0>();
+    Tca<0>::compare_buffered<2>(4000);
+    hold_ms(3);
+    const uint16_t both0 = Tca<0>::compare<0>(), both2 = Tca<0>::compare<2>();
+    print(serial, "  ALUPD: CMP0 after its buffer alone ", half0, "; after CMP2's too: CMP0 ",
+          both0, ", CMP2 ", both2, crlf);
+    verdict("ALUPD: one enabled buffer written alone does not land", half0 == 1000);
+    verdict("both written, both land at the next TOP", both0 == 3000 && both2 == 4000);
+    quiesce();
+
+    // 7. TCA1's three-channel PORTC route: WO0..2 on PC4..PC6, each
+    //    parked high and then low through CTRLC with the timer disabled
+    //    and read back on its own pad (test s's method).
+    (void)Tca<1>::init({.mode = TcaMode::single_slope, .clock = TcaClock::div1,
+                        .period = 23999, .outputs = 0x07, .route = 'C'});
+    Tca<1>::disable();
+    Tca<1>::output_value<0>(true); Tca<1>::output_value<1>(true); Tca<1>::output_value<2>(true);
+    delay_us(clock, 2);
+    const bool hi = Pin<'C', 4>::read() && Pin<'C', 5>::read() && Pin<'C', 6>::read();
+    Tca<1>::output_value<0>(false); Tca<1>::output_value<1>(false); Tca<1>::output_value<2>(false);
+    delay_us(clock, 2);
+    const bool lo = !Pin<'C', 4>::read() && !Pin<'C', 5>::read() && !Pin<'C', 6>::read();
+    print(serial, "  TCA1 -> PORTC: WO0..2 parked high read ", hi ? "high" : "NOT high",
+          " on PC4..PC6, parked low read ", lo ? "low" : "NOT low", crlf);
+    verdict("TCA1's PORTC route drives WO0..2 on PC4..PC6", hi && lo);
+    Tca<1>::reset();
+    Pin<'C', 4>::input(); Pin<'C', 5>::input(); Pin<'C', 6>::input();
+    // TCA0 merely disabled keeps CMP2EN, and a disabled TCA with a compare
+    // output enabled still overrides its pin with CTRLC's value: PD2 would
+    // stay the TCA's (measured: letter k's latch, read on EVOUT PD2, read
+    // 1 throughout in every 'a' run). RESET clears CTRLB.
+    Tca<0>::reset();
+    Pin<'D', 2>::input();
     quiesce();
 }
 
@@ -1184,6 +1753,7 @@ constexpr Test tests[] = {
     {'9', t9_event_counter}, {'c', tc_ccl}, {'m', tm_comparators},
     {'n', tn_timeout_exact}, {'o', to_meter_variants}, {'r', tr_rebase_live},
     {'s', ts_tca_split}, {'d', td_pwm_centered}, {'l', tl_ccl_logic}, {'i', ti_ccl_inputs}, {'w', tw_ac_extras},
+    {'t', tt_tca_modes}, {'e', te_evsys}, {'k', tk_ccl_extras},
 };
 
 void run(TestFn fn) {
@@ -1195,7 +1765,8 @@ void run(TestFn fn) {
 void help() {
     print(serial, "test_avr_timer: 1 frequency | 2 PWM16 duty | 3 heartbeat | 4 one-shot | 5 Pwm8 | "
                   "6 pulse counter | 7 32-bit cascade | 8 tick+timeout | 9 event counter | c CCL | m comparators | "
-                  "n timeout duration | o meter variants | r live rebase | s TCA split escape | d centered PWM | l CCL logic | i CCL inputs | w AC extras | a all", crlf);
+                  "n timeout duration | o meter variants | r live rebase | s TCA split escape | d centered PWM | l CCL logic | i CCL inputs | w AC extras | "
+                  "t TCA modes | e EVSYS generators | k CCL extras | a all", crlf);
 }
 
 } // namespace
@@ -1207,6 +1778,10 @@ ISR(TCB0_INT_vect) { if (tcb0_hook) tcb0_hook(); else (void)T0::take_flags(); }
 ISR(TCB1_INT_vect) { if (tcb1_hook) tcb1_hook(); else (void)T1::take_flags(); }
 ISR(TCA0_OVF_vect) { Beat::beat(); beats = beats + 1; }
 ISR(AC0_AC_vect) { (void)Ac<0>::cmp(); ac_irqs = ac_irqs + 1; }
+// Test t's split-mode vectors on TCA1 (LUNF shares TCA1_OVF's slot).
+ISR(TCA1_LUNF_vect) { Tca<1>::lunf(); lunf_irqs = lunf_irqs + 1; }
+ISR(TCA1_HUNF_vect) { Tca<1>::hunf(); hunf_irqs = hunf_irqs + 1; }
+ISR(TCA1_LCMP0_vect) { Tca<1>::lcmp<0>(); lcmp0_irqs = lcmp0_irqs + 1; }
 
 int main() {
     const bool xtal = SysClock::init();
@@ -1228,8 +1803,8 @@ int main() {
         print(serial, static_cast<char>(c), crlf);
         if (c == '?') { help(); }
         else if (c == 'a' || c == 'A') {
-            uint8_t tp = 0, tf = 0;
-            for (const Test& t : tests) { run(t.fn); tp += passed; tf += failed; }
+            uint16_t tp = 0, tf = 0;
+            for (const Test& t : tests) { run(t.fn); tp = static_cast<uint16_t>(tp + passed); tf = static_cast<uint16_t>(tf + failed); }
             print(serial, "ALL: ", tp, " pass, ", tf, " fail", crlf);
         } else {
             bool found = false;

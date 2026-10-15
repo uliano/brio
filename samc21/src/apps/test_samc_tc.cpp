@@ -35,6 +35,7 @@
 //   f  the util contract, live: a MeterSampler AO inside a running
 //      kernel, paced by a time event, publishing MeterSample from a
 //      MeterLatch that the TC's own capture ISR fills
+//   g  TC1 alone, outside the pair: its own init and its prescaled rate
 //
 // build: boards = c21j
 // build: monitor_speed = 115200
@@ -820,6 +821,34 @@ void tf_meter_ao() {
     EicPad::configure({});
 }
 
+// =============================================================================
+// g - TC1 alone, a counter in its own right
+// =============================================================================
+//
+// TC1 has run here only as the client half of letter c's pair. On its
+// own - its own init(), the generic clock channel it shares with TC0
+// (35.5.3) connected by it - it must count at its prescaled rate like
+// TC0 does in letter b: /1024 over a SysTick-timed 250 ms window, within
+// 1 % (the window is the ticker's, the counter GCLK's - the same 48 MHz).
+void tg_tc1_alone() {
+    using Timer1 = Tc<1>;
+    constexpr uint32_t window_ms = 250;
+    const bool up = Timer1::init(0) &&
+                    Timer1::configure(TcConfig{.mode = TcMode::count16,
+                                               .prescaler = TcPrescaler::div1024}) &&
+                    Timer1::set_count16(0) && Timer1::enable(true);
+    const uint16_t before = Timer1::count16();
+    wait_ms(window_ms);
+    const uint16_t after = Timer1::count16();
+    const uint32_t delta = static_cast<uint16_t>(after - before);
+    const uint32_t expect = (tc_hz / 1024u) * window_ms / 1000u;
+    print(serial, "  TC1 alone at /1024 over ", window_ms, " ms: ", delta, " ticks (exact ",
+          expect, ")", crlf);
+    bench.verdict("TC1 comes up alone, as a 16-bit counter", up);
+    bench.verdict("and counts at GCLK/1024, within 1 %", near(delta, expect, expect / 100u + 2u));
+    Timer1::release();
+}
+
 void banner() {
     print(serial, crlf,
           "test_samc_tc - SAMC21J18A TC (ch. 35): five timers, the pairs, PWM, "
@@ -860,6 +889,7 @@ int main() {
     bench.letter('e', "capture from an event and capture from the pin",
                  te_capture);
     bench.letter('f', "a MeterSampler AO inside a running kernel", tf_meter_ao);
+    bench.letter('g', "TC1 alone, a counter in its own right", tg_tc1_alone);
 
     if (serial_ok) {
         print(serial, crlf, "boot: clk=", clock_ok ? "OSC48M" : "FAILED",

@@ -82,7 +82,7 @@ using SysClock = brio::Clock<brio::has_xoschf ? brio::ClockSource::crystal
                              24'000'000>;
 constexpr SysClock clock;
 
-/// The suite's own reset-surviving breadcrumb: test i spans four resets
+/// The suite's own reset-surviving breadcrumb: test i spans six resets
 /// and its verdicts, its tallies and the record it expects to find have
 /// to cross them, so `z` can still close with one ALL: line.
 ///
@@ -103,6 +103,7 @@ struct Token {
     uint16_t all_fail;
     uint16_t i_pass;      ///< test i's own tallies so far
     uint16_t i_fail;
+    uint16_t wakes;       ///< phases 5/6: the sleeps woken before the watchdog reset
 };
 [[gnu::section(".noinit")]] inline Token token;
 
@@ -1091,7 +1092,7 @@ void tk_turns() {
 }
 
 // ---- i the breadcrumb across real resets ----------------------------------------------
-// This test spans four resets. Its state lives in `token`, a .noinit
+// This test spans six resets. Its state lives in `token`, a .noinit
 // object of this app, and every leg is entered from main() at boot.
 
 void bank(uint8_t phase) {
@@ -1127,6 +1128,49 @@ void report_boot() {
     panic<P, HaltReporter>(PanicCode::assert_failed, 0x5A);
 }
 
+/// Phases 5 and 6: THE WATCHDOG THROUGH A SLEEP (22.2: it runs in every
+/// sleep mode). WDT at 64 ms, then the CPU put to sleep in `m` over and
+/// over, the Ticker's PIT (1024 Hz) the only wake source - the CPU awake
+/// a few microseconds a tick - and every wake counted in the token. A
+/// watchdog that counted only while the CPU runs would need 64 ms of
+/// AWAKE time, tens of thousands of ticks; one that counts through the
+/// sleep resets the device after its period, 64 PIT ticks plus the
+/// enable's synchronization into the WDT's own 1.024 kHz (2..3 of its
+/// cycles, 22.3.3: 2..6 ticks) - both clocks are OSC32K's, so its own
+/// error does not move the count. 200 ticks without a reset end the leg
+/// in software, and the next boot says so.
+[[noreturn]] void wdt_through_sleep(uint8_t phase, SleepMode m) {
+    bank(phase);
+    token.note = 0;
+    token.wakes = 0;
+    console_drain();
+    (void)Watchdog::arm(WdtTime::ms64);
+    uint16_t wakes = 0;
+    while (wakes < 200u) {
+        cli();
+        Sleep::arm(m);
+        sei();
+        Sleep::sleep();
+        Sleep::disarm();
+        ++wakes;
+        token.wakes = wakes;
+    }
+    (void)Watchdog::off();
+    token.note = 1;
+    Reset::software();
+}
+
+/// The verdicts of a phase-5/6 boot.
+void wdt_sleep_verdicts(const char* mode) {
+    print(serial, "  the watchdog through ", mode, ": ", token.wakes, " sleeps woken by "
+          "the 1024 Hz tick before the reset (64 ms = 64 ticks, + 2..6 for the "
+          "enable's synchronization)", token.note ? "; NO RESET came" : "", crlf);
+    verdict("the watchdog reset the device out of the sleep, not software",
+            token.note == 0 && boot_reset.watchdog && !boot_reset.software);
+    verdict("after its period counted THROUGH the sleeps: 62..72 ticks",
+            token.wakes >= 62u && token.wakes <= 72u);
+}
+
 void ti_reset() {
     print(serial, "i the panic breadcrumb across real resets", crlf);
     report_boot();
@@ -1157,7 +1201,7 @@ void ti_resume() {
     failed = token.i_fail;
     in_all_run = token.in_all != 0;
     const uint8_t phase = token.phase;
-    print(serial, crlf, "i (continued after reset ", phase, " of 4)", crlf);
+    print(serial, crlf, "i (continued after reset ", phase, " of 6)", crlf);
     report_boot();
 
     if (phase == 1) {
@@ -1233,11 +1277,23 @@ void ti_resume() {
         Reset::software();
     }
 
-    // phase 4: the last boot.
-    verdict("RSTFR names a SOFTWARE reset", boot_reset.software);
-    verdict("the reset released the watchdog lock", !Watchdog::locked());
-    verdict("a plain reset leaves no panic record", !boot_record.has_value());
-    verdict("the .noinit token crossed all four resets intact",
+    if (phase == 4) {
+        verdict("RSTFR names a SOFTWARE reset", boot_reset.software);
+        verdict("the reset released the watchdog lock", !Watchdog::locked());
+        verdict("a plain reset leaves no panic record", !boot_record.has_value());
+        print(serial, "  arming WDT 64 ms and sleeping in STANDBY on the tick ...", crlf);
+        wdt_through_sleep(5, SleepMode::standby);
+    }
+
+    if (phase == 5) {
+        wdt_sleep_verdicts("STANDBY");
+        print(serial, "  arming WDT 64 ms and sleeping in POWER-DOWN on the tick ...", crlf);
+        wdt_through_sleep(6, SleepMode::power_down);
+    }
+
+    // phase 6: the last boot.
+    wdt_sleep_verdicts("POWER-DOWN");
+    verdict("the .noinit token crossed all six resets intact",
             token.canary == token_canary);
     token.magic = 0;
     token.phase = 0;

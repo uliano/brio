@@ -38,6 +38,9 @@
 //      counts the result-ready events
 //   i  util/analog_sampler.hpp INSIDE A REAL KERNEL, walking a list of
 //      inputs on this converter
+//   j  LEFTADJ and GAINCORR measured, the WINMON and OVERRUN interrupts
+//      each armed alone, and RESRDY as a wake from STANDBY (RUNSTDBY set,
+//      and clear as the control) against bench_sleep.hpp's backstop
 //
 // build: boards = c21j
 // build: monitor_speed = 115200
@@ -63,6 +66,8 @@
 #include "util/analog_sampler.hpp"
 #include "util/print.hpp"
 #include "util/testbench.hpp"
+
+#include "bench_sleep.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::internal, 48'000'000>;
 constexpr SysClock clock;
@@ -1319,6 +1324,14 @@ using SamplerKernel = Tenuto<SamPlatform, Collector, Sampler>;
 
 volatile uint16_t adc_interrupts = 0;
 
+// Letter j: while `j_mode` is set the vector only counts what it was
+// called for, reading RESULT (which clears RESRDY and WINMON) when either
+// is pending.
+volatile bool j_mode = false;
+volatile uint16_t j_resrdy = 0;
+volatile uint16_t j_winmon = 0;
+volatile uint16_t j_overrun = 0;
+
 void ti_sampler_ao() {
     constexpr AdcConfig cfg{
         .reference = Ref::vddana,
@@ -1381,6 +1394,165 @@ void ti_sampler_ao() {
     Adc0::release();
 }
 
+// =============================================================================
+// j - LEFTADJ, GAINCORR, the WINMON and OVERRUN interrupts, and RESRDY as
+//     a wake from STANDBY
+// =============================================================================
+//
+// One input throughout: the quarter-scaled analog supply against VDDANA,
+// about 1024 counts. LEFTADJ is judged reading by reading (the low
+// nibble empty, the value the right-adjusted one shifted by four);
+// GAINCORR against the uncorrected mean (0.5 and 1.5 within the
+// converter's few counts of noise plus the multiply's rounding: 4); the
+// two interrupts the suite never armed are each armed ALONE; and the
+// RESRDY wake out of STANDBY uses the samc21 suites' backstop and sleep
+// (bench_sleep.hpp), with RUNSTDBY clear as the control.
+void tj_more() {
+    constexpr AdcConfig base{.prescaler = AdcPresc::div32, .sample_length = 15};
+    bench.verdict("ADC0 up on the main clock", adc_up<Adc0>(base));
+    Adc0::select(AdcInput::scaled_supply);
+    const uint32_t right = mean_of<Adc0>(16);
+
+    // ---- LEFTADJ ----------------------------------------------------------
+    AdcConfig left = base;
+    left.left_adjust = true;
+    bool nibbles_empty = true;
+    uint32_t sum = 0;
+    if (adc_up<Adc0>(left)) {
+        Adc0::select(AdcInput::scaled_supply);
+        Adc0::discard(2);
+        for (uint8_t i = 0; i < 8u; ++i) {
+            const uint16_t v = Adc0::read();
+            nibbles_empty = nibbles_empty && (v & 0x000Fu) == 0u;
+            sum += static_cast<uint32_t>(v >> 4);
+        }
+    }
+    const uint32_t left_mean = (sum + 4u) / 8u;
+    print(serial, "  VDDANA/4: right-adjusted mean ", right, ", left-adjusted >> 4 mean ",
+          left_mean, crlf);
+    bench.verdict("LEFTADJ: every reading's low four bits are empty",
+                  nibbles_empty && sum != 0u);
+    bench.verdict("and the reading is the right-adjusted one shifted up by four (within 4)",
+                  near(left_mean, right, 4));
+
+    // ---- GAINCORR ---------------------------------------------------------
+    AdcConfig half = base;
+    half.correction = true;
+    half.gain_correction = 0x400;
+    uint32_t g_half = 0, g_one_half = 0;
+    if (adc_up<Adc0>(half)) {
+        Adc0::select(AdcInput::scaled_supply);
+        g_half = mean_of<Adc0>(16);
+        if (Adc0::gain_correction(0xC00)) {
+            g_one_half = mean_of<Adc0>(16);
+        }
+    }
+    print(serial, "  GAINCORR 0.5: ", g_half, ", 1.5: ", g_one_half, " (uncorrected ", right,
+          ")", crlf);
+    bench.verdict("GAINCORR 0x400 halves the reading (within 4)", near(g_half, right / 2u, 4));
+    bench.verdict("and 0xC00 multiplies it by 1.5 (within 4)",
+                  near(g_one_half, (right * 3u) / 2u, 4));
+
+    // ---- WINMON and OVERRUN, each armed alone -----------------------------
+    bench.verdict("ADC0 back to the plain configuration", adc_up<Adc0>(base));
+    Adc0::select(AdcInput::scaled_supply);
+    Adc0::discard(2);
+    j_resrdy = 0;
+    j_winmon = 0;
+    j_overrun = 0;
+    j_mode = true;
+    Nvic::enable(Adc0::irq());
+    const bool win = Adc0::window(AdcWindow::above_lower, static_cast<uint16_t>(right / 2u),
+                                  0);
+    Adc0::clear_flags(Adc0::flag_resrdy | Adc0::flag_winmon | Adc0::flag_overrun);
+    Adc0::arm(Adc0::flag_winmon);
+    Adc0::start();
+    wait_ms(5);
+    Adc0::disarm(Adc0::flag_winmon);
+    const uint16_t winmons = j_winmon;
+    (void)Adc0::window_off();
+    Adc0::clear_flags(Adc0::flag_resrdy | Adc0::flag_winmon | Adc0::flag_overrun);
+    Adc0::arm(Adc0::flag_overrun);
+    (void)Adc0::free_running(true);
+    Adc0::start();
+    wait_ms(5);
+    (void)Adc0::free_running(false);
+    Adc0::disarm(Adc0::flag_overrun);
+    const uint16_t overruns = j_overrun;
+    Nvic::disable(Adc0::irq());
+    print(serial, "  WINMON armed alone: ", winmons, " interrupt(s) for one conversion above "
+          "WINLT; OVERRUN armed alone: ", overruns, " in 5 ms of unread free-running", crlf);
+    bench.verdict("the WINMON interrupt drives the NVIC: once for one conversion in the "
+                  "window", win && winmons == 1u);
+    bench.verdict("the OVERRUN interrupt drives it as results go unread", overruns >= 1u);
+
+    // ---- RESRDY as a wake from STANDBY -------------------------------------
+    //
+    // ONE SLOW RESULT started just before the sleep: CLK_ADC 48 MHz / 256
+    // (187.5 kHz), 64 sampling cycles, sixteen conversions averaged - about
+    // 6.5 ms, so the core is in STANDBY long before it lands (the console
+    // is drained first). With RUNSTDBY the result wakes the core - one WFI,
+    // ADC0's line the pending one, the 300 ms backstop silent. RUNSTDBY
+    // clear: the converter stops with the core and the backstop ends the
+    // sleep.
+    auto wake_leg = [](bool run_standby, uint8_t& wakes, uint32_t& pend, bool& backstop,
+                       uint16_t& results_seen) {
+        AdcConfig c{.prescaler = AdcPresc::div256, .resolution = AdcRes::bits16,
+                    .average = AdcAverage::samples16,
+                    .adjust = adc_adjres_for_average(AdcAverage::samples16),
+                    .sample_length = 63, .run_standby = run_standby};
+        wakes = 0;
+        pend = 0;
+        backstop = false;
+        results_seen = 0;
+        if (!adc_up<Adc0>(c)) {
+            return;
+        }
+        Adc0::select(AdcInput::scaled_supply);
+        Adc0::discard(2);
+        j_resrdy = 0;
+        Adc0::clear_flags(Adc0::flag_resrdy | Adc0::flag_winmon | Adc0::flag_overrun);
+        if (!benchsleep::backstop_arm(9830)) {    // 300 ms of 32768 Hz
+            return;
+        }
+        Nvic::enable(Adc0::irq());
+        Adc0::arm(Adc0::flag_resrdy);
+        while (!Serial::tx_idle()) {
+        }
+        const uint16_t r0 = j_resrdy;
+        Adc0::start();
+        wakes = benchsleep::sleep_until<Serial>(SleepMode::standby,
+                                                [r0] { return j_resrdy != r0; });
+        pend = benchsleep::first_pending;
+        backstop = benchsleep::rtc_fired;
+        wait_ms(20);                               // the result, whichever ended it
+        Adc0::disarm(Adc0::flag_resrdy);
+        Nvic::disable(Adc0::irq());
+        results_seen = static_cast<uint16_t>(j_resrdy - r0);
+    };
+    uint8_t w_on = 0, w_off = 0;
+    uint32_t p_on = 0, p_off = 0;
+    bool b_on = false, b_off = false;
+    uint16_t r_on = 0, r_off = 0;
+    const bool rtc = benchsleep::backstop_up();
+    wake_leg(true, w_on, p_on, b_on, r_on);
+    wake_leg(false, w_off, p_off, b_off, r_off);
+    benchsleep::backstop_down();
+    j_mode = false;
+    constexpr uint32_t adc_bit = 1u << static_cast<uint32_t>(ADC0_IRQn);
+    print(serial, "  STANDBY, RUNSTDBY set: ", w_on, " WFI, pending ", hex(p_on),
+          ", backstop ", b_on ? "FIRED" : "silent", "; RUNSTDBY clear: ", w_off,
+          " WFI, pending ", hex(p_off), ", backstop ", b_off ? "fired" : "SILENT", crlf);
+    bench.verdict("the backstop comes up", rtc);
+    bench.verdict("RESRDY WAKES THE CORE FROM STANDBY with RUNSTDBY: one WFI, ADC0's line, "
+                  "the backstop silent",
+                  w_on == 1u && (p_on & adc_bit) != 0u && !b_on && r_on >= 1u);
+    bench.verdict("without RUNSTDBY the converter stops with the core: the backstop ends "
+                  "the sleep",
+                  b_off && (p_off & adc_bit) == 0u);
+    Adc0::release();
+}
+
 void banner() {
     print(serial, crlf,
           "test_samc_adc - SAMC21J18A ADC (ch. 38): both converters, the "
@@ -1394,6 +1566,7 @@ void banner() {
 
 extern "C" void SysTick_Handler() { brio::Ticker::tick(); }
 extern "C" void SERCOM5_Handler() { (void)Serial::isr(); }
+extern "C" void RTC_Handler() { benchsleep::backstop_isr(); }
 
 /// The ISR glue util/analog_sampler.hpp's file comment describes, in the
 /// application where a vector name is allowed to appear: the selected
@@ -1403,6 +1576,21 @@ extern "C" void SERCOM5_Handler() { (void)Serial::isr(); }
 /// what clears RESRDY (38.8.7) in both shapes.
 extern "C" void ADC0_Handler() {
     const uint8_t pending = brio::Adc<0>::isr();
+    if (j_mode) {
+        if ((pending & brio::Adc<0>::flag_overrun) != 0u) {
+            j_overrun = static_cast<uint16_t>(j_overrun + 1u);
+        }
+        if ((pending & brio::Adc<0>::flag_winmon) != 0u) {
+            j_winmon = static_cast<uint16_t>(j_winmon + 1u);
+        }
+        if ((pending & brio::Adc<0>::flag_resrdy) != 0u) {
+            j_resrdy = static_cast<uint16_t>(j_resrdy + 1u);
+        }
+        if ((pending & (brio::Adc<0>::flag_resrdy | brio::Adc<0>::flag_winmon)) != 0u) {
+            (void)brio::Adc<0>::resrdy();
+        }
+        return;
+    }
     if ((pending & brio::Adc<0>::flag_resrdy) == 0u) {
         return;
     }
@@ -1446,6 +1634,7 @@ int main() {
     bench.letter('h', "the event chain: event in, interrupt out, events out",
                  th_event_chain);
     bench.letter('i', "AnalogSampler inside a real kernel", ti_sampler_ao);
+    bench.letter('j', "LEFTADJ, GAINCORR, WINMON and OVERRUN, the STANDBY wake", tj_more);
 
     if (serial_ok) {
         print(serial, crlf, "boot: clk=", clock_ok ? "OSC48M" : "FAILED",

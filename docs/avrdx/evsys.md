@@ -149,6 +149,22 @@ brio::EventChannel<3>::pulse();
   with no wires: `EvPin` generators feed TCB capture and count users,
   LUT outputs and event inputs route through channels, AC OUT drives
   a channel as a generator.
+- `test_avr_timer` e, the generators and positions no other letter
+  routes: SPI0's SCK (a pinless host, mode 0) gives exactly 32 rising
+  edges for four bytes; USART1's XCK as a synchronous host at 100 kHz
+  measures 240 CLK_PER ticks a period through a TCB frequency meter -
+  and it runs with NO frame in flight, the host's clock being free
+  running; the software event on a channel a pin holds HIGH gives a
+  LOW pulse each time (three pulses, three rising edges at their ends,
+  the same count as on an idle channel), the 16.3.2.6 inversion; EVOUT
+  at the ALT1 positions PA7, PC7 and PD7 follows the channel both ways.
+- The IRDA user carries USART2's IRCOM receiver off its pin
+  ([usart.md](usart.md), the IREI finding).
+- **Asynchronous delivery in standby and power-down**: EVOUT, an
+  asynchronous user, drives its pad from a PIT divider with every clock
+  but the 32 kHz one stopped, and that pad's edge wakes the device
+  ([platform.md](platform.md), the sleep modes); the ADC's event start,
+  another, converts in standby.
 
 ## Not covered yet
 
@@ -163,14 +179,9 @@ Driver gaps:
 Implemented but not bench-verified:
 
 - the vocabulary no driver exercises yet - the UPDI, MVIO and ZCD
-  generators, the USART XCK and SPI SCK generators, the IRDA user:
-  codes verified against the device header's own enums, never routed
-  (the OPAMP's READY generator and its four users, and the TCD's
-  generators and both inputs, run in their own suites -
+  generators: codes verified against the device header's own enums,
+  never routed (the OPAMP's READY generator and its four users, and the
+  TCD's generators and both inputs, run in their own suites -
   [opamp.md](opamp.md), [tcd.md](tcd.md));
-- the software event's inversion-on-level behavior (a low pulse on a
-  channel held high);
-- asynchronous delivery in standby (an async user with no clock);
-- the EVOUT ALT1 positions;
 - the two-to-three cycle latency of the synchronous subchannel
   (documented, never measured).

@@ -51,6 +51,8 @@
 //      index command holding one of them
 //   k  capture (PPW) and counting on an event
 //   l  host/client: TCC1's counter driven by TCC0's
+//   m  the OVERFLOW interrupt as a wake from STANDBY, RUNSTDBY clear the
+//      control
 //
 // build: boards = c21j
 // build: monitor_speed = 115200
@@ -68,6 +70,8 @@
 #include "samc21/ticker.hpp"
 #include "util/print.hpp"
 #include "util/testbench.hpp"
+
+#include "bench_sleep.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::internal, 48'000'000>;
 constexpr SysClock clock;
@@ -1862,6 +1866,70 @@ void tl_host_client() {
     Timer::release();
 }
 
+// =============================================================================
+// m - the OVERFLOW interrupt as a wake from STANDBY
+// =============================================================================
+//
+// TCC0 on the CPU's generator at /1024 with PER 2343: an overflow every
+// 50 ms. Restarted from zero with the console drained, the core then put
+// in STANDBY by the samc21 suites' sleep (bench_sleep.hpp), the RTC
+// backstop at 300 ms. RUNSTDBY set: the overflow ends the sleep - one
+// WFI, TCC0's line pending, the backstop silent. RUNSTDBY clear: the
+// counter stops with the core and the backstop ends the sleep.
+volatile uint32_t m_overflows = 0;
+volatile bool m_mode = false;
+
+void tm_wake() {
+    auto leg = [](bool run_standby, uint8_t& wakes, uint32_t& pend, bool& backstop) {
+        wakes = 0;
+        pend = 0;
+        backstop = false;
+        (void)Timer::enable(false);
+        if (!Timer::init(fast_gen) ||
+            !Timer::configure(TccConfig{.prescaler = TccPrescaler::div1024,
+                                        .run_standby = run_standby}) ||
+            !Timer::set_period(2343) || !benchsleep::backstop_arm(9830)) {
+            return;
+        }
+        Timer::clear_flags(Timer::overflow_flag);
+        const uint32_t o0 = m_overflows;
+        m_mode = true;
+        Timer::arm(Timer::overflow_flag);
+        Nvic::enable(Timer::irq());
+        while (!Serial::tx_idle()) {
+        }
+        (void)Timer::set_count(0);
+        (void)Timer::enable(true);
+        wakes = benchsleep::sleep_until<Serial>(SleepMode::standby,
+                                                [o0] { return m_overflows != o0; });
+        pend = benchsleep::first_pending;
+        backstop = benchsleep::rtc_fired;
+        Timer::disarm(Timer::overflow_flag);
+        Nvic::disable(Timer::irq());
+        m_mode = false;
+        (void)Timer::enable(false);
+    };
+    const bool rtc = benchsleep::backstop_up();
+    bench.verdict("the backstop comes up", rtc);
+    uint8_t w_on = 0, w_off = 0;
+    uint32_t p_on = 0, p_off = 0;
+    bool b_on = false, b_off = false;
+    leg(true, w_on, p_on, b_on);
+    leg(false, w_off, p_off, b_off);
+    benchsleep::backstop_down();
+    const uint32_t line = 1u << static_cast<uint32_t>(Timer::irq());
+    print(serial, "  STANDBY, RUNSTDBY set: ", w_on, " WFI, pending ", hex(p_on), ", backstop ",
+          b_on ? "FIRED" : "silent", "; RUNSTDBY clear: ", w_off, " WFI, pending ",
+          hex(p_off), ", backstop ", b_off ? "fired" : "SILENT", crlf);
+    bench.verdict("THE OVERFLOW WAKES THE CORE FROM STANDBY with RUNSTDBY: one WFI, "
+                  "TCC0's line, the backstop silent",
+                  w_on == 1u && (p_on & line) != 0u && !b_on);
+    bench.verdict("without RUNSTDBY the counter stops with the core: the backstop ends "
+                  "the sleep",
+                  b_off && (p_off & line) == 0u);
+    Timer::release();
+}
+
 void banner() {
     print(serial, crlf,
           "test_samc_tcc - SAMC21J18A TCC (ch. 36): three unequal timers, "
@@ -1874,6 +1942,14 @@ void banner() {
 
 extern "C" void SysTick_Handler() { brio::Ticker::tick(); }
 extern "C" void SERCOM5_Handler() { (void)Serial::isr(); }
+extern "C" void RTC_Handler() { benchsleep::backstop_isr(); }
+/// Letter m's wake: TCC0's one vector, counting overflows.
+extern "C" void TCC0_Handler() {
+    const uint32_t p = brio::Tcc<0>::isr();
+    if (m_mode && (p & brio::Tcc<0>::overflow_flag) != 0u) {
+        m_overflows = m_overflows + 1u;
+    }
+}
 
 int main() {
     const bool clock_ok = SysClock::init();
@@ -1900,6 +1976,7 @@ int main() {
     bench.letter('k', "capture (PPW) and counting on an event", tk_capture);
     bench.letter('l', "host and client: TCC1's counter driven by TCC0's",
                  tl_host_client);
+    bench.letter('m', "the overflow interrupt as a wake from STANDBY", tm_wake);
 
     if (serial_ok) {
         print(serial, crlf, "boot: clk=", clock_ok ? "OSC48M" : "FAILED",

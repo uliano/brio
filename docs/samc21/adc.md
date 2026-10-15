@@ -259,7 +259,7 @@ zero length because PA02 is DAC/VOUT and ADC0/AIN0 at once.
 
 ## Bench findings
 
-From `test_samc_adc`, 9 letters / 97 verdicts, wireless, on the C21J at
+From `test_samc_adc`, 10 letters / 108 verdicts, wireless, on the C21J at
 ~5.2 V.
 
 - **THE BANDGAP CHANNEL IS DEAD WITHOUT SUPC.VREF.VREFOE.** MUXPOS =
@@ -388,6 +388,25 @@ REPRODUCE**: SYNCBUSY reads zero at every such wake. The chain and the
 EVSYS bit it depends on are in [platform.md](platform.md), "Sleep,
 peripheral by peripheral".
 
+**Letter j, every run of twelve**, on VDDANA/4 against VDDANA (about
+1019 counts):
+
+- **LEFTADJ**: every left-adjusted reading has its low four bits empty
+  and is the right-adjusted value shifted up by four (the means agree to
+  the count).
+- **GAINCORR** with CORREN: 0x400 reads 509 (half of 1018..1019), 0xC00
+  reads 1528..1529 (one and a half) - the 1.11 fixed point as 38.6.2.14
+  describes it.
+- **WINMON and OVERRUN drive the NVIC**, each armed alone: one WINMON
+  interrupt for one conversion above WINLT; unread free-running results
+  raise OVERRUN 266 times in 5 ms (one per conversion at this rate).
+- **RESRDY WAKES THE CORE FROM STANDBY.** One slow result (CLK_ADC
+  187.5 kHz, 64 sampling cycles, sixteen conversions averaged, about
+  6.5 ms) started just before the sleep: with RUNSTDBY it ends the sleep
+  in one WFI with ADC0's line pending and the 300 ms backstop silent;
+  with RUNSTDBY clear the converter stops with the core and the backstop
+  ends the sleep.
+
 ## The host/client pair, the sequence, differential mode
 
 From `test_samc_analog` letters a to d, 47 verdicts.
@@ -505,26 +524,18 @@ Driver gaps:
   the DMAC for the Uart's transmitter alone ([dmac.md](dmac.md)).
 
 Implemented but not bench-verified:
-- **The ADC as a WAKE source**: RESRDY, WINMON and OVERRUN have never
-  driven the NVIC out of a sleep. Table 38-4 itself is measured (see
-  "Bench findings") through an event witness; the interrupt half of it
-  is not.
+- **WINMON and OVERRUN as WAKE sources** (RESRDY's is measured, and
+  both interrupts are measured awake): the same slow-result leg with
+  either armed instead would measure them.
 - **VREFA** (`Ref::vrefa`) is encodable and unreachable: the pin is PA03
   and nothing on this board drives it inside table 45-30's range. Needs
   a wire.
-- **`CTRLC.LEFTADJ`**, written and never read back. (The DAC's own
-  LEFTADJ is measured - [dac.md](dac.md) - and this one is a different
-  register in a different chapter.)
-- **The gain correction.** `GAINCORR` is written, range-checked and
-  read back; only the OFFSET half was measured against a reading.
 - **The FLUSH event input** (`flush_on()`): exercised for its refusal of
   a synchronous channel, never for its effect. `flush()` itself has one
   measured effect and it is a NEGATIVE one - it does not restart an
   interleaved sequence (see above) - and what it costs a conversion in
   flight is unmeasured here. (The SDADC's flush is measured both ways -
   [sdadc.md](sdadc.md).)
-- **The WINMON and OVERRUN interrupts.** Both flags are read and
-  cleared; only RESRDY has ever driven the NVIC.
 - **The dual pair beyond one shared pad.** The two converters are proven
   simultaneous on ONE node; nothing here samples two DIFFERENT nodes at
   one instant, which is what DUALSEL = BOTH is for, and nothing measures

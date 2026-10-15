@@ -28,6 +28,8 @@
 //      the closed window in window mode
 //   d  samc21/delay.hpp's delay_us on the SysTick counter: at-least
 //      never early, the sub-tick cap, and the refusals
+//   p  NVIC priorities: a line pended from inside a handler preempts it
+//      when more urgent, waits when less urgent or equal
 //
 //   w  THE IDLE HOOK AGAINST AN INTERRUPT'S EDGE, PLACED TO THE CYCLE:
 //      an edge D cycles after its placement, D = 0..399, then the
@@ -832,6 +834,20 @@ constexpr IRQn_Type spare_line = PTC_IRQn;
 volatile uint32_t spare_served = 0;
 volatile uint32_t spare_stamp = 0;
 
+// Letter p: the spare line pends a second one (DAC's, no DAC running)
+// from inside its handler, and the order the two bodies write down is
+// the verdict.
+constexpr IRQn_Type nest_line = DAC_IRQn;
+volatile bool nest_test = false;
+volatile uint8_t nest_order[4] = {0, 0, 0, 0};
+volatile uint8_t nest_n = 0;
+inline void nest_note(uint8_t v) {
+    if (nest_n < 4u) {
+        nest_order[nest_n] = v;
+        nest_n = static_cast<uint8_t>(nest_n + 1u);
+    }
+}
+
 bool watch_up() {
     (void)Watch::enable(false);
     const bool ok = Watch::init(0) &&
@@ -1419,11 +1435,22 @@ extern "C" void RTC_Handler() {
     rtc_fired = true;
 }
 
-/// Letters w and k's spare line: a stamp and a count, nothing else.
+/// Letters w and k's spare line: a stamp and a count, nothing else -
+/// and letter p's LOW line, which raises the HIGH one from inside.
 extern "C" void PTC_Handler() {
     spare_stamp = SysTick->VAL;
     spare_served = spare_served + 1u;
+    if (nest_test) {
+        nest_note(1);
+        brio::Nvic::set_pending(nest_line);
+        __DSB();
+        __ISB();
+        nest_note(2);
+    }
 }
+
+/// Letter p's second line: it only says when it ran.
+extern "C" void DAC_Handler() { nest_note(3); }
 
 extern "C" void WDT_Handler() {
     if (brio::Watchdog::isr() != 0u) {
@@ -1439,6 +1466,51 @@ extern "C" void HardFault_Handler() {
 }
 
 namespace {
+
+/// p: NVIC priorities. The spare line (PTC's) pends the DAC's line from
+/// inside its own handler: with the DAC's line MORE urgent it preempts
+/// at once (the order 1, 3, 2: entry, the nested body, the rest), with
+/// it LESS urgent or EQUAL it waits for the first to return (1, 2, 3).
+/// The DSB/ISB pair after the pend is what makes "at once" one
+/// instruction late at most, so the order is a contract and not a race.
+uint32_t nest_run(uint8_t low_level, uint8_t high_level) {
+    (void)Nvic::priority(spare_line, low_level);
+    (void)Nvic::priority(nest_line, high_level);
+    Nvic::clear_pending(nest_line);
+    Nvic::enable(nest_line);
+    nest_n = 0;
+    nest_test = true;
+    Nvic::enable(spare_line);
+    Nvic::set_pending(spare_line);
+    __DSB();
+    __ISB();
+    for (uint32_t i = 0; i < 1000u && nest_n < 3u; ++i) {
+    }
+    nest_test = false;
+    Nvic::disable(nest_line);
+    Nvic::disable(spare_line);
+    return static_cast<uint32_t>(nest_order[0]) * 100u + nest_order[1] * 10u + nest_order[2];
+}
+
+void tp_priorities() {
+    print(serial, "  the core implements ", irq_priority_levels, " priority levels", crlf);
+    bench.verdict("four levels on a Cortex-M0+ (2 bits)", irq_priority_levels == 4u);
+    bench.verdict("a level the core has not got is refused, and nothing changes",
+                  !Nvic::priority(nest_line, 4) && Nvic::priority(nest_line) == 0u);
+    bench.verdict("a level it has reads back",
+                  Nvic::priority(nest_line, 3) && Nvic::priority(nest_line) == 3u);
+    const uint32_t urgent = nest_run(2, 0);
+    const uint32_t lazy = nest_run(0, 2);
+    const uint32_t equal = nest_run(1, 1);
+    print(serial, "  order of the bodies (1 entry, 3 the pended line, 2 the rest): "
+          "pended line more urgent ", urgent, ", less urgent ", lazy, ", equal ", equal,
+          crlf);
+    bench.verdict("A MORE URGENT LINE PREEMPTS A RUNNING HANDLER: 1, 3, 2", urgent == 132u);
+    bench.verdict("a less urgent one waits for it to return: 1, 2, 3", lazy == 123u);
+    bench.verdict("and an equal one too - no preemption at the same level", equal == 123u);
+    (void)Nvic::priority(spare_line, 0);
+    (void)Nvic::priority(nest_line, 0);
+}
 
 /// t: the runtime's seven functions (rt/rt.cpp) over every alignment,
 /// length and overlap - rt/selftest.hpp's cases, the ones the host suite
@@ -1479,6 +1551,7 @@ int main() {
     bench.letter('d', "delay_us on the SysTick counter (samc21/delay.hpp)", td_delay);
     bench.letter('w', "THE IDLE HOOK against an interrupt's edge, placed to the cycle", tw_edge);
     bench.letter('k', "the kernel's turn: one per interrupt, and what one costs", tk_turns);
+    bench.letter('p', "NVIC priorities: preemption, and its absence", tp_priorities);
     bench.letter('i', "SIX REAL RESETS (reboots the board)", ti_resets, false);
     bench.letter('t', "the runtime's seven functions at every alignment (rt/rt.cpp)", tt_runtime);
 

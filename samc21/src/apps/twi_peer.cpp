@@ -190,6 +190,7 @@ void service_command() {
     if (Client::addressed()) {
         if (Client::host_reads()) {
             resp_pos_ = 0;
+            Client::clear_stop();   // PREC fresh: the next one is THIS read's STOP
         } else {
             decoder.reset();
         }
@@ -417,6 +418,14 @@ twilink::Report run_arb(const twilink::Params& a) {
 /// the line down, an INPUT gives it back to the pull-up.
 twilink::Report run_hold_sda(const twilink::Params& a) {
     twilink::Report r{};
+    // The ack read's STOP first. The action starts at the host's closing
+    // NACK (service_command), and SDA taken before the DUT's STOP leaves
+    // the DUT's host Owner with that STOP pending - a tenure stuck in its
+    // STOP, not the IDLE bus held low this action promises (measured: the
+    // DUT read BUSSTATE Owner, not Busy). The deadline bounds the wait.
+    const uint32_t t_stop = Ticker::millis();
+    while (!Client::stop_seen() && Ticker::millis() - t_stop < a.ms) {
+    }
     Client::release();
     Sda::clear();
     Scl::clear();

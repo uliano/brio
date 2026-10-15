@@ -446,6 +446,16 @@ UNDERRUN interrupts** in twenty milliseconds. The ISR body's own
 contract holds as written: it clears UNDERRUN, because nothing else
 carries that information, and leaves EMPTY to whoever feeds the buffer.
 
+**EMPTY wakes the core from STANDBY** (`test_samc_dac` l, every run of
+twelve). DATABUF written, the core in STANDBY, and TC2 (RUNSTDBY) on the
+CPU's generator overflowing 5.5 ms later - its event, on an asynchronous
+channel kept running in standby, starts the conversion that empties
+DATABUF. With the DAC's RUNSTDBY the EMPTY interrupt ends the sleep, the
+DAC's line the one pending and the 300 ms RTC backstop silent. With
+RUNSTDBY clear the backstop ends it, and the DAC's line is pending beside
+the RTC's at that wake: EMPTY raised on the exit from sleep with DATABUF
+still written - erratum 1.9.2 again (letter k).
+
 ## Not covered yet
 
 Driver gaps:
@@ -464,9 +474,8 @@ Implemented but not bench-verified, each with what it waits for:
   can be observed here. 41.6.8.3's "GCLK_DAC at least four times the
   sampling rate" is stated and unenforceable - the header knows neither
   rate.
-- **The DAC as a WAKE source**: EMPTY and UNDERRUN have never driven
-  the NVIC out of a sleep. (41.6.6's promise about the output buffer IS
-  measured - see "Bench findings".)
+- **UNDERRUN as a WAKE source** (EMPTY's is measured): the same letter
+  with UNDERRUN armed and DATABUF left unwritten would measure it.
 - **The SDADC's use of `CTRLB.IOEN` as a REFERENCE** (41.6.8.1's third
   consumer) is built and measured on the other side -
   [sdadc.md](sdadc.md) - including erratum 1.8.10. What is not measured

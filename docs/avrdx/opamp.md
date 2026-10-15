@@ -345,12 +345,23 @@ event on an op amp that has already settled re-issues READY at once.
 on VDD/2, - on the floating INN pad, ladder off) sits at the top rail,
 4976 mV. With the DUMP level high the switch closes VOUT onto VINN and
 the op amp becomes a follower of VDD/2: 2486 mV. When the level drops
-the output does NOT snap back - milliseconds later it is still in
-mid-range, because the floating INN pad has kept the dumped charge,
-and over hundreds of milliseconds it walks away again at a rate that
-differs from run to run. That is an integrator whose only capacitor is
-the pad's own stray, and it is the clearest demonstration the DUMP
-mechanism can give without external components.
+the output is an integrator whose only capacitor is the floating INN
+pad's stray, and what it does then is the pad's business, not the op
+amp's: 5 ms after the drop it read 578, 3854, 4444 and 4577 mV in four
+runs, and over hundreds of milliseconds it wanders on. The suite prints
+it and judges only the dump itself - the floating node is no
+instrument.
+
+**RUNSTBY, in a real STANDBY** (`test_avr_sleep` o, 5 V). OP0 a
+follower of VDD/2 with the pull-up on its pad, ADC0 converting that pad
+on an event in standby: with RUNSTBY the conversion reads 2044..2046 of
+4096 - the awake value - so the op amp stays on with the CPU asleep.
+Without it the same conversion reads **3545..3548**, about 4.33 V:
+the op amp is off, yet the pad is neither driven nor released - the
+same pull-up takes it to the rail (4094..4095) once the op amp is
+released (disabled, OUTMODE off). An op amp switched off BY THE SLEEP
+is a third state of the output, a load the pull-up only partly
+overcomes; what it is electrically is not isolated.
 
 ## Not covered yet
 
@@ -372,9 +383,6 @@ Driver gaps:
 
 Implemented but not bench-verified:
 
-- **RUNSTBY**: the bit is exposed and never exercised - it wants a
-  sleeping app, and belongs with the standby matrix in
-  [platform.md](platform.md).
 - **DBGCTRL.DBGRUN**: set and read back, never observed under a halted
   CPU.
 - **IRSEL's electrical effect**: writable on this die, and the input

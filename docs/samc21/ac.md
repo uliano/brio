@@ -324,6 +324,15 @@ produce ONE stray wake in thirty-two rounds across four runs. And
 ASYNCHRONOUS path - all table 29-3 grants the SOC users - starts a
 comparison DURING a standby and its INTFLAG is read at the wake.
 
+**A WINDOW across a standby, and the shared-RUNSTDBY rule**
+(`test_samc_sleepwalk` k, every run of twelve). The same walked pad
+into both comparators of window 0, their negatives the VDD scaler at a
+quarter and three quarters, WIN0 armed on "above": with RUNSTDBY on both
+the window wakes the device on the pad's rise in eight rounds of eight;
+with it on neither, the 91 ms backstop ends every sleep; and with it on
+the LOWER comparator only - 40.6.14's rule that a pair share the bit,
+broken - the window never wakes it either. Half a pair is no window.
+
 ## COMP2, COMP3, window 1, the bandgap and the hysteresis
 
 From `test_samc_analog` letters g to j, 41 verdicts, with the DAC on
@@ -427,11 +436,6 @@ Driver gaps (not built):
   halted core is out of a console suite's reach, and no user has asked.
 
 Implemented but not bench-verified:
-- **A window across a standby.** 40.6.14's two sequences are measured
-  for a single comparator (see "Bench findings"); a WINDOW across a
-  standby, and 40.6.14's rule that both comparators of a pair must
-  share RUNSTDBY, are stated and unexercised - the same letter with a
-  pair armed would measure them.
 - **AIN6 and AIN7** (PB05 and PB06), the two J-only inputs of the
   COMP2/3 pair: their per-package legality is compile-asserted per
   variant and neither pad has ever carried a comparison - the pair's

@@ -604,6 +604,13 @@ STANDBY with CTRLA.RUNSTDBY set, and 1 with it clear - the table's rows
 event counted by a timer, so nothing in the measurement is the CPU's.
 See [platform.md](platform.md), "Sleep, peripheral by peripheral".
 
+**And RESRDY wakes the core from STANDBY** (`test_samc_sdadc` l, every
+run of twelve valid ones): one conversion at OSR 1024 started with the
+console drained, the core then in STANDBY - with RUNSTDBY the result ends
+the sleep in one WFI with SDADC's line pending and the 300 ms RTC
+backstop silent; with RUNSTDBY clear the conversion waits for the core
+and the backstop ends the sleep.
+
 ## The flush, the window event, and the three interrupts
 
 From `test_samc_analog` letter k, with the pair's two pads driven to
@@ -671,10 +678,10 @@ Driver gaps:
 
 Implemented but not bench-verified:
 
-- **The converter as a WAKE source**: RESRDY, WINMON and OVERRUN have
-  never driven the NVIC out of a sleep (the standby measurement above
-  free-runs, its witness an event). `CTRLA.ONDEMAND` is written and read
-  back and nothing distinguishes it here.
+- **WINMON and OVERRUN as WAKE sources** (RESRDY's is measured): the
+  same letter with one of them armed instead would measure each.
+  `CTRLA.ONDEMAND` is written and read back and nothing distinguishes it
+  here.
 - **`DBGCTRL.DBGRUN`** is written and its survival across a software
   reset measured; its effect under a halted debugger is untested.
 - **`util/analog_sampler.hpp`** has NOT been given this converter. Its

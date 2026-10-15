@@ -641,8 +641,9 @@ struct SamTimedSleepSite {
             cfg.rtc_hz);                                         // floor
         const uint32_t awake = Ticker::ticks() - tick_at_arm_;   // wrap-safe
         if (span > awake) {
-            last_advance_ = span - awake;
-            Ticker::advance(last_advance_);
+            const uint32_t advance = span - awake;
+            last_advance_ = advance;
+            Ticker::advance(advance);
         } else {
             last_advance_ = 0;
         }
@@ -698,11 +699,16 @@ struct SamTimedSleepSite {
 
 private:
     static inline bool ready_ = false;
-    static inline bool alarm_armed_ = false;
+    /// Cleared by isr() and read by the thread (disarm(), alarm_armed()):
+    /// volatile. resync_armed_ and the two baselines are read under the
+    /// critical section only, whose barrier reloads them.
+    static inline volatile bool alarm_armed_ = false;
     static inline bool resync_armed_ = false;
     static inline uint32_t rtc_at_arm_ = 0;
     static inline uint32_t tick_at_arm_ = 0;
-    static inline uint32_t last_advance_ = 0;
+    /// Written by resync() - from isr() too - and read by last_advance()
+    /// in the thread: volatile.
+    static inline volatile uint32_t last_advance_ = 0;
 };
 
 } // namespace brio

@@ -33,6 +33,8 @@
 //   d  what the asynchronous path does NOT have: CHSTATUS and both
 //      interrupt flags read zero - and that SOFTWARE events on that
 //      path reach a TC's event input, every one
+//   e  an OVERRUN provoked: events to a user that never takes them,
+//      beside the same events to a ready one
 //
 // build: boards = c21j
 // build: monitor_speed = 115200
@@ -173,6 +175,7 @@ void ta_fabric() {
 // b - an event is counted
 // =============================================================================
 void tb_event_counted() {
+    Evsys::bus_clock(true);           // letter a's: a letter may run alone
     Evsys::reset();
     bench.verdict("the witness arms: TC4 counts events and nothing else",
                   witness_arm());
@@ -250,6 +253,7 @@ void tb_event_counted() {
 // asynchronous path does without. They are also the only paths with any
 // status at all.
 void tc_clocked_paths() {
+    Evsys::bus_clock(true);           // letter a's: a letter may run alone
     Evsys::reset();
 
     // A slow-ish channel clock, so the latency the chapter quotes in
@@ -318,6 +322,7 @@ void tc_clocked_paths() {
 // then a back-to-back burst, then a control with the user disconnected:
 // TC4 takes every one of either kind.
 void td_async_is_silent() {
+    Evsys::bus_clock(true);           // letter a's: a letter may run alone
     Evsys::reset();
     bench.verdict("the witness arms", witness_arm());
     bench.verdict("routed asynchronously",
@@ -382,6 +387,53 @@ void td_async_is_silent() {
     Witness::release();
 }
 
+// =============================================================================
+// e - an OVERRUN, provoked: events a user cannot take
+// =============================================================================
+//
+// 29.6.2.9: OVR rises when a new event finds a user not ready, or the
+// previous event not yet handled by every user. On letter b's
+// synchronous channel (its clock OSCULP32K through generator 5): two
+// spaced software events to TC4 enabled - the control, counted, no
+// overrun - then the same two to TC4 DISABLED, a user that never
+// acknowledges.
+void te_overrun() {
+    Evsys::bus_clock(true);           // letter a's: e may run alone
+    Evsys::reset();
+    bench.verdict("TC4 counts events on generator 0", witness_arm());
+    bench.verdict("the channel runs on OSCULP32K, synchronous, rising",
+                  GenSlow::configure(GclkConfig{.source = GclkSource::osculp32k}) &&
+                      GclkChannel::connect(Evsys::gclk_id(ev_ch), gen_slow) &&
+                      Evsys::connect(user_witness, ev_ch,
+                                     EventChannelConfig{.path = EventPath::synchronous,
+                                                        .edge = EventEdge::rising}));
+    settle();   // erratum 1.12.4
+    auto pair = [](bool spaced, uint16_t& counted, bool& ovr) {
+        Evsys::clear_flags(Evsys::detected_flag(ev_ch) | Evsys::overrun_flag(ev_ch));
+        const uint16_t c0 = witnessed();
+        Evsys::trigger(ev_ch);
+        if (spaced) settle();
+        Evsys::trigger(ev_ch);
+        settle();
+        counted = static_cast<uint16_t>(witnessed() - c0);
+        ovr = Evsys::overrun(ev_ch);
+    };
+    uint16_t n_spaced = 0, n_off = 0;
+    bool o_spaced = false, o_off = false;
+    pair(true, n_spaced, o_spaced);
+    (void)Witness::enable(false);
+    pair(true, n_off, o_off);
+    print(serial, "  two spaced events: to the enabled user ", n_spaced, " counted, OVR=",
+          o_spaced ? 1 : 0, "; to the disabled user ", n_off, " counted, OVR=",
+          o_off ? 1 : 0, crlf);
+    bench.verdict("spaced events: both counted, no overrun", n_spaced == 2u && !o_spaced);
+    bench.verdict("A USER THAT NEVER TAKES THEM: OVR rises (29.6.2.9)", o_off);
+
+    Evsys::disconnect(user_witness);
+    GclkChannel::disconnect(Evsys::gclk_id(ev_ch));
+    Witness::release();
+}
+
 void banner() {
     print(serial, crlf, "test_samc_evsys - SAMC21J18A EVSYS (ch. 29) with a "
           "TC counting events as its user, clk=", SysClock::hz, " Hz", crlf);
@@ -405,6 +457,7 @@ int main() {
                  tb_event_counted);
     bench.letter('c', "the synchronous and resynchronized paths", tc_clocked_paths);
     bench.letter('d', "what the asynchronous path does not have", td_async_is_silent);
+    bench.letter('e', "an overrun, provoked", te_overrun);
 
     if (serial_ok) {
         print(serial, crlf, "boot: clk=", clock_ok ? "OSC48M" : "FAILED",

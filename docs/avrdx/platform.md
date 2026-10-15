@@ -476,7 +476,7 @@ subtracted and interrupts masked.
   take returning nothing; after a software reset from inside a
   reporter it reads 0x10 and the record is equally intact. A boot
   after a clean take reports no record at all. The `.noinit` token the
-  suite carries for itself crosses all four resets unchanged.
+  suite carries for itself crosses all six resets unchanged.
 - **The watchdog behaves as chapter 22 says, including the trap.** The
   WDTCFG fuse is off on this board, so `LOCK` is clear and `CTRLA`
   starts at zero. `arm()` returns before its configuration is running:
@@ -486,6 +486,14 @@ subtracted and interrupts masked.
   62.5 ms closed window: watchdog reset, `RSTFR` 0x08. `lock()` reads
   back, makes `arm()` refuse with nothing written, and is released by
   the next reset.
+- **The watchdog counts through the sleep, in STANDBY and in
+  POWER-DOWN** (22.2). Armed at 64 ms with the CPU put back to sleep at
+  every 1024 Hz tick - awake a few microseconds a tick - it resets the
+  device after **66 ticks** in both modes: its period plus the enable's
+  synchronization into its own 1.024 kHz clock. A watchdog that counted
+  only while the CPU ran would have needed 64 ms of awake time. Both
+  clocks are OSC32K's, so the count does not move with that
+  oscillator's error.
 - **`break_here()` falls through as a plain NOP** with no debugger
   attached - the suite goes on running past it.
 - **A UPDI flash shows as `RSTFR` 0x20**, which is how a fresh boot
@@ -529,8 +537,36 @@ tick being 30.18 us.
   set **2966515** (oscillator flag off) and **2967628** (on). The
   oscillator's own `RUNSTDBY` changes nothing while a peripheral is
   requesting; without the peripheral's flag, nothing counts. The two
-  sources are told apart by the count itself - this board's OSCHF is
-  ~0.15 % slower than its crystal.
+  sources' counts differ by OSCHF's own error against the crystal, a
+  few hundred ppm either way - inside the OSC32K ruler's own wander
+  between two legs (the crystal's count moves 600 ppm from run to run),
+  so no verdict rests on it and the source in force is read back from
+  CLKCTRL instead.
+- **Every unit's own RUNSTDBY decides, unit by unit (letter o).** One
+  125 ms standby per leg, the PIT the backstop, each unit with its flag
+  and without:
+  - TCA0 at CLK_PER/64 counts 46452..46479 across the sleep against
+    46448..46469 awake over the same PIT period, and 758..759 without
+    the flag - the 2 ms of console drain before the sleep, nothing
+    during it ([tca.md](tca.md));
+  - AC0 on PD2 against its DACREF, the pad driven by EVOUT from a PIT
+    divider at 32 Hz: with RUNSTDBY its CMP interrupt ends the sleep at
+    the first edge, without it the PIT does - the interrupt WORKS with
+    CLK_PER stopped ([ac.md](ac.md));
+  - ADC0 started by the event system (the same divider) converts in
+    standby with its RUNSTDBY and its RESRDY ends the sleep; without the
+    flag nothing converts and the PIT ends it ([adc.md](adc.md));
+  - OP0 as a follower of VDD/2 on that converter's input, its pad pulled
+    up: with RUNSTBY the conversion in standby reads 2044..2046 of 4096,
+    the awake value; without it the op amp is off and the pad reads
+    3545..3548 - NOT the rail: the same pad with the op amp released
+    (disabled, OUTMODE off) reads 4094..4095 under the same pull-up, so
+    an op amp
+    switched off by the sleep keeps loading its output pad
+    ([opamp.md](opamp.md));
+  - TCD0's ramp, overflowing every 43.7 ms, ends an IDLE sleep and
+    never a STANDBY or POWER-DOWN one, on CLK_PER and on OSCHF kept
+    running by its own RUNSTDBY alike ([tcd.md](tcd.md)).
 - **A TCB wakes the CPU from standby by itself** when its chain is
   complete: its 2 ms period ends the sleep after 47909 CLK_PER ticks
   (nominal 48000, the missing 91 being the counter's restart). The same
@@ -699,6 +735,21 @@ dispatch, and only the loop is the suite's.
   to 0x00, `sleep_armed()` reads false, the manager forgets the round
   and `WakeReport{standby}` reaches the stakeholders that declare it -
   and the `SleepRequested{none}` that carried the wake still replies ok.
+- **A round into POWER-DOWN sleeps for real (letter f).** The same
+  two-voter round arms `SMODE` PDOWN, and the kernel's idle hook takes
+  it: across a sleep entered right after a tick edge the RUNSTDBY
+  stopwatch counts **134 CLK_PER cycles** where the same tick spun
+  counts 23024..23041 - power-down stops CLK_PER whatever any RUNSTDBY
+  says - and one PIT interrupt ends it. The site stays armed across the
+  wake, and the first event after it disarms and publishes
+  `WakeReport{deep}`.
+- **A `PowerLock` taken and released in a real ISR leaves the counts
+  whole.** TCB0 at 20 kHz takes a standby restriction on one interrupt
+  and releases it on the next (3133 turns) while the main context takes
+  and releases a light one 20000 times: inside its scope the ceiling is
+  always light, outside it only standby or deep, and with every lock
+  gone the ladder reads deep again - no count lost or leaked, in every
+  run of twelve.
 - **The timebase's own error shows up in the sleeping window.** The
   RUNSTDBY stopwatch counts 743000-744000 CLK_PER ticks across 32 PIT
   ticks where 1024 Hz exactly would be 749984: OSC32K running ~0.8 %
@@ -734,8 +785,8 @@ Implemented but not bench-verified:
   printed but this suite causes none of them - it can reach WDRF,
   SWRF and (through the programmer) UPDIRF only. A power cycle and a
   RESET-pin pulse are desk actions, not verdicts.
-- **The watchdog through sleep and a clock failure.** 22.2 promises
-  both; neither has been staged here.
+- **The watchdog through a clock failure.** 22.2 promises it; a
+  crystal that stops is a desk action no suite can stage.
 - **The two wake-up sources no second board can produce**: MVIO and the
   BOD's voltage-level monitor. The suites prove the PORT pin, the PIT,
   a TCB, the CCL, a USART start bit and a TWI address match.
@@ -747,17 +798,8 @@ Implemented but not bench-verified:
   microamps: what `PMODE`, `HTLLEN` and a stopped oscillator actually
   save is a bench-supply measurement this desk cannot make. It is the
   one thing the power manager cannot be judged on from inside the chip.
-- **A power-manager round into POWER-DOWN.** The manager arms PDOWN and
-  the register readback proves it, but no letter of `test_avr_power`
-  then executes the sleep: from power-down the only wake sources are
-  the PIT, a pin and a TWI match, and the suite's own stopwatch stops
-  there, so the round is verified up to the arming and the sleeping
-  itself is `test_avr_sleep`'s.
-- **A `PowerLock` taken from a real ISR.** The counters are guarded and
-  the verbs are exercised from the main context; that an interrupt may
-  take and release one mid-burst is asserted by construction, not
-  measured.
-- **Every WDT period but 8 ms, 64 ms and 8 s**, and the timing of a
-  time-out itself: the encoding is exercised through `arm()`'s
-  readback and `wdt_time_us()`'s arithmetic, but only the three used
-  by the reset legs have been timed against the silicon.
+- **Every WDT period but 8 ms, 64 ms and 8 s**: the encoding is
+  exercised through `arm()`'s readback and `wdt_time_us()`'s
+  arithmetic; the three the reset legs use act on the silicon, and the
+  64 ms time-out alone is timed (66 ticks, above) - the same leg at
+  each period would time the rest.

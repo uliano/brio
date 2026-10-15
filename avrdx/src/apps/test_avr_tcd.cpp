@@ -24,7 +24,7 @@
 // test a claims PF0..PF3 (the ALT2 route) only for as long as the
 // alternate-route erratum measurement takes.
 //
-// Commands: ? for the menu, z runs a..k.
+// Commands: ? for the menu, z runs a..l.
 
 // build: monitor_speed = 460800
 
@@ -1765,6 +1765,113 @@ void tk_vectors() {
     quiesce();
 }
 
+// ---- l: the programmable output event, and FIFTY with AUPDATE ------------------
+
+/// WOA's rising edge (ChA) -> the next PROGEV (ChTcd), in CLK_PER ticks,
+/// TCB0 free-running and polled: the first capture on the pin, the
+/// capture input then moved to the event (the move costs some 30 cycles,
+/// far inside the delays measured). 0xFFFF = missed.
+uint16_t woa_to_progev() {
+    CycleTcb::init({.mode = TcbMode::capture, .clock = TcbClock::div1, .compare = 0,
+                    .event_input = true});
+    CycleTcb::enable_capt_interrupt(false);
+    for (uint32_t i = 0; i < 100'000u && WoaPin::read(); ++i) {}
+    CycleTcb::capture_on(ChA{});
+    CycleTcb::clear_capt();
+    uint32_t spins = 400'000u;
+    while (!CycleTcb::capt_flag()) {
+        if (--spins == 0) return 0xFFFF;
+    }
+    const uint16_t s1 = CycleTcb::capture();
+    CycleTcb::capture_on(ChTcd{});
+    CycleTcb::clear_capt();
+    spins = 400'000u;
+    while (!CycleTcb::capt_flag()) {
+        if (--spins == 0) return 0xFFFF;
+    }
+    const uint16_t s2 = CycleTcb::capture();
+    CycleTcb::disable();
+    return static_cast<uint16_t>(s2 - s1);
+}
+
+void tl_progev_fifty() {
+    print(serial, "l PROGEV and its DLYVAL delay; FIFTY together with AUPDATE", crlf);
+    quiesce();
+    probe_ab();
+
+    // PROGEV: triggered at CMPASET (WOA's rising edge), delayed by
+    // DLYPRESC x DLYVAL CLK_TCD_SYNC cycles says 25.3.4.1 - CLK_PER here,
+    // SYNCPRES = 1. MEASURED: DLYPRESC x (DLYVAL + 1), with no skew left
+    // between the pin path and the event path (DIV1 x 200 = 201, DIV2 x
+    // 200 = 402, DIV4 x 100 = 404 - the +1 is a prescaled tick, not a
+    // constant). Each leg is judged against delay_cycles() within one
+    // tick, which tells the two formulas apart from DIV2 on; and the
+    // DIFFERENCES between legs carry no skew at all.
+    auto progev_leg = [](TcdDelayPrescaler pre, uint8_t value) -> uint16_t {
+        TcdConfig c = base_one_ramp(100, 400, 700, 1199);
+        c.delay = TcdDelaySelect::output_event;
+        c.delay_trigger = TcdDelayTrigger::cmpaset;
+        c.delay_prescaler = pre;
+        c.delay_value = value;
+        if (!D::init(c)) return 0xFFFE;
+        ChTcd::source(D::ProgEvent{});
+        delay_us(clock, 200);
+        return woa_to_progev();
+    };
+    const uint16_t d200 = progev_leg(TcdDelayPrescaler::div1, 200);
+    const uint16_t e200 = progev_leg(TcdDelayPrescaler::div2, 200);
+    const uint16_t c200 = D::delay_cycles();         // the last leg's: DIV2 x 200
+    const uint16_t e100 = progev_leg(TcdDelayPrescaler::div4, 100);
+    const uint16_t c100 = D::delay_cycles();
+    const uint16_t f50 = progev_leg(TcdDelayPrescaler::div8, 50);
+    const uint16_t c50 = D::delay_cycles();
+    print(serial, "    WOA rise -> PROGEV: DLYVAL 200 at DIV1 ", d200, ", 200 at DIV2 ", e200,
+          " (delay_cycles ", c200, "), 100 at DIV4 ", e100, " (", c100, "), 50 at DIV8 ",
+          f50, " (", c50, ") CLK_PER ticks", crlf);
+    verdict("PROGEV at DIV1 x 200: 201 ticks after its trigger", near(d200, 201, 1));
+    verdict("DIV2 x 200 is exactly 201 prescaled ticks: 201 later than DIV1 x 200",
+            d200 < 0xFFF0 && e200 < 0xFFF0 && static_cast<uint16_t>(e200 - d200) == 201);
+    verdict("each delay is delay_cycles() = DLYPRESC x (DLYVAL + 1), within a tick",
+            near(e200, c200, 1) && near(e100, c100, 1) && near(f50, c50, 1));
+    quiesce();
+
+    // FIFTY + AUPDATE, two ramps: both CLR registers mirror a write to
+    // either (25.5.3), and with AUPDATE the write of CMPACLRH requests the
+    // end-of-cycle sync too - the pair lands from ONE write. The control:
+    // FIFTY alone mirrors the register and moves nothing on the pins.
+    auto fifty_leg = [](bool aupdate, Wave& before, Wave& after, uint16_t& mirrored) {
+        TcdConfig c = base_one_ramp(100, 599, 100, 599);
+        c.waveform = TcdWaveform::two_ramp;
+        c.fifty_percent = true;
+        c.auto_update = aupdate;
+        const bool up = D::init(c);
+        before = measure();
+        const bool wrote = D::compare_a_clear(899);
+        delay_us(clock, 5000);
+        mirrored = D::compare_b_clear();
+        after = measure();
+        return up && wrote;
+    };
+    arm_meters(ChA{}, ChB{});
+    Wave b1, a1, b0, a0;
+    uint16_t m1 = 0, m0 = 0;
+    const bool ok1 = fifty_leg(true, b1, a1, m1);
+    const bool ok0 = fifty_leg(false, b0, a0, m0);
+    print(serial, "    FIFTY + AUPDATE: cycle ", b1.cycle.mean(), " -> ", a1.cycle.mean(),
+          ", WOA high ", b1.high_a.mean(), " -> ", a1.high_a.mean(), ", WOB high ",
+          a1.high_b.mean(), "; CMPBCLR reads ", m1, crlf);
+    print(serial, "    FIFTY alone:      cycle ", b0.cycle.mean(), " -> ", a0.cycle.mean(),
+          "; CMPBCLR reads ", m0, crlf);
+    verdict("two ramps of 600: cycle 1200, WOA high 499", ok1 && near(b1.cycle.mean(), 1200, 1) &&
+            near(b1.high_a.mean(), 499, 1));
+    verdict("FIFTY mirrors a CMPACLR write into CMPBCLR", m1 == 899 && m0 == 899);
+    verdict("with AUPDATE that one write lands both: cycle 1800, WOA and WOB high 799",
+            near(a1.cycle.mean(), 1800, 1) && near(a1.high_a.mean(), 799, 1) &&
+            near(a1.high_b.mean(), 799, 1));
+    verdict("without AUPDATE nothing moves on the pins", ok0 && near(a0.cycle.mean(), 1200, 1));
+    quiesce();
+}
+
 // ---- the menu ----------------------------------------------------------------
 
 using TestFn = void (*)();
@@ -1772,9 +1879,9 @@ struct Test { char key; TestFn fn; };
 constexpr Test tests[] = {
     {'a', ta_routes}, {'b', tb_one_ramp}, {'c', tc_ramps}, {'d', td_dual_slope},
     {'e', te_clocks}, {'f', tf_pll}, {'g', tg_capture}, {'h', th_input_modes},
-    {'i', ti_dither}, {'j', tj_outputs}, {'k', tk_vectors},
+    {'i', ti_dither}, {'j', tj_outputs}, {'k', tk_vectors}, {'l', tl_progev_fifty},
 };
-constexpr char all_tests[] = "abcdefghijk";
+constexpr char all_tests[] = "abcdefghijkl";
 
 void run(TestFn fn) {
     passed = failed = 0;
@@ -1799,7 +1906,8 @@ void help() {
     print(serial, "test_avr_tcd: a routes and the sync disciplines | b one ramp | "
                   "c two and four ramp | d dual slope | e clocks and prescalers | "
                   "f the PLL | g capture | h input modes | i dithering | "
-                  "j output plumbing | k the two vectors    -> z = all of a..k", crlf);
+                  "j output plumbing | k the two vectors | l PROGEV, FIFTY with AUPDATE"
+                  "    -> z = all of a..l", crlf);
     print(serial, "  No wires: WOA..WOD on PA4..PA7 read back as pin events into TCB "
                   "meters, the TCD's own CMPBCLR event as the cycle counter, PD3/PD4 "
                   "driven from PORT as the two input-event sources. PF0..PF3 (ALT2) are "

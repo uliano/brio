@@ -1451,7 +1451,9 @@ private:
     }
 
     static inline SdadcConfig cfg_{};
-    static inline bool last_hit_ = false;
+    /// Written by result(), which the RESRDY vector's body calls; read
+    /// by window_hit() in the thread: volatile.
+    static inline volatile bool last_hit_ = false;
 };
 
 } // namespace brio

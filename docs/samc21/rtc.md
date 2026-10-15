@@ -211,7 +211,7 @@ brio::Evsys::connect(user, channel,
 
 ## Bench findings
 
-`test_samc_rtc`, 8 letters / 126 verdicts, on the C21J at revision F,
+`test_samc_rtc`, 9 letters / 139 verdicts, on the C21J at revision F,
 wireless. The instruments: a TC0+TC1 pair as a 32-bit stopwatch
 clocked FROM THE BOARD'S 24 MHz CRYSTAL through generator 2
 (not from GCLK0, which is OSC48M - an RC 5100 ppm slow with a wander of
@@ -338,6 +338,24 @@ flags together. 24.6.2.3's note is exact.
 - **CLKREP is a reading, not a format.** The same CLOCK word that reads
   as 11 PM in the 12-hour representation reads as **hour 27** in the
   24-hour one, because HOUR[4] is part of the number there.
+- **The 12-hour clock rolls across both noons** (letter i): 11:59:59 PM
+  on 4 July becomes 12:00:00 AM on 5 July, 11:59:59 AM becomes
+  12:00:00 PM of the same day.
+- **Every rung of MASK.SEL compares exactly the fields it names**
+  (letter i). The clock rolled from 23:59:59 on 30/11 into 1/12; each
+  rung's alarm matches the rolled value up to its own field and differs
+  in the next: at its rung (SS, MMSS, HHMMSS, DDHHMMSS, MMDDHHMMSS) the
+  alarm fires a counter period after the match, one rung up - the wrong
+  field now compared - it does not.
+
+### The overflow event, and release()
+
+Letter i: OVFEO set, TC4 counting the RTC's overflow generator on an
+asynchronous channel, the counter set 64 ticks short of its top: nothing
+before the wrap, **exactly one event** after it. `release()` resets the
+block and takes its APB clock away (APBAMASK.RTC reads 0); `init()`
+brings it back in its reset state - disabled, mode 0 - and it configures
+and counts its source again.
 
 ### The frequency correction, and what this board cannot say about it
 
@@ -403,19 +421,6 @@ Driver gaps:
   implements it.
 
 Implemented but not bench-verified:
-- **The overflow EVENT** (EVCTRL.OVFEO) is configured and its flag is
-  observed, but no letter has taken an overflow event through EVSYS to
-  a user - only the compare and periodic ones.
-- **`RtcAlarmMask` levels other than `year_and_below` and `off`.** The
-  ladder is written and refused past SEL 6; only the two ends have been
-  exercised on silicon, because the intermediate ones need waits of up
-  to a minute.
-- **The 12-hour representation only round-trips through the register**;
-  no letter has watched a 12-hour clock roll from 11:59 PM to
-  12:00 AM, which is another minute of waiting for a bit whose meaning
-  is already proven by the two readings of the same word.
-- **`Rtc::release()`** and `bus_clock(false)`, which would make the
-  block unreachable, are never called by the suite.
 - **The XOSC1K / XOSC32K clock selects**, which wait for the 32 kHz
   pass of [osc32kctrl.md](osc32kctrl.md).
 - **`debug_run(true)` under an actual halted debugger.** The bit is set

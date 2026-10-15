@@ -361,7 +361,7 @@ public:
         if (!busy_) {
             return false;
         }
-        ++faults_;
+        faults_ = faults_ + 1u;
         (void)take_channel();
         in_flight_ = 0;
         busy_ = false;
@@ -515,9 +515,13 @@ private:
     static inline uint8_t owner_ = 0;
     /// arm() ran for the current claim: the block is clocked and set up.
     static inline bool armed_ = false;
-    static inline uint16_t in_flight_ = 0;
-    static inline uint32_t faults_ = 0;
-    static inline bool busy_ = false;
+    // Written by the owner's completion vector (complete(), abandon() on
+    // a transfer error) and read by the thread - busy() in the transport's
+    // refused-byte repair, faults() and in_flight() by whoever asks - so
+    // volatile: a thread loop must load them, not keep a stale copy.
+    static inline volatile uint16_t in_flight_ = 0;
+    static inline volatile uint32_t faults_ = 0;
+    static inline volatile bool busy_ = false;
 };
 
 } // namespace brio

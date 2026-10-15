@@ -849,11 +849,17 @@ public:
     static bool output_event_enabled() {
         return (regs().DLYCTRL & TCD_DLYSEL_gm) == static_cast<uint8_t>(TCD_DLYSEL_EVENT_gc);
     }
-    /// The blanking window / event delay in CLK_TCD_SYNC cycles.
+    /// The blanking window / event delay in CLK_TCD_SYNC cycles:
+    /// DLYPRESC x (DLYVAL + 1). 25.3.4.1 writes DLYPRESC x DLYVAL; the
+    /// silicon counts one prescaled tick more - measured on PROGEV, from
+    /// its CMPASET trigger, at DIV1 x 200, DIV2 x 200, DIV4 x 100 and
+    /// DIV8 x 50 (test_avr_tcd l), and input blanking runs on the same
+    /// delay counter (25.3.4.1: "the same logic").
     static uint16_t delay_cycles() {
         const TcdDelayPrescaler p =
             static_cast<TcdDelayPrescaler>(regs().DLYCTRL & TCD_DLYPRESC_gm);
-        return static_cast<uint16_t>(tcd_delay_divisor(p) * regs().DLYVAL);
+        return static_cast<uint16_t>(tcd_delay_divisor(p) *
+                                     (static_cast<uint16_t>(regs().DLYVAL) + 1u));
     }
 
     // ---- status, flags, interrupts ----------------------------------------

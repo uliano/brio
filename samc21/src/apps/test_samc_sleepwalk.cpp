@@ -69,6 +69,8 @@
 //      single-shot SleepWalking chain
 //   i  CCL 37.6.4 judged: which LUTs keep decoding in standby
 //   j  the leftovers: TCC, EVSYS channels, the BODVDD
+//   k  the AC's WINDOW across a standby: both comparators with RUNSTDBY,
+//      neither, and only one - 40.6.14's shared-RUNSTDBY rule broken
 //   p  (outside z) PM.bus_clock, whose "off" 19.5.2 calls one-way
 //
 // NOTE for anyone adding a letter: a printed line must NEVER contain
@@ -1895,6 +1897,118 @@ void th_ac() {
 } // namespace
 
 // ===========================================================================
+// k: the AC's WINDOW across a standby (40.6.4, 40.6.14)
+// ===========================================================================
+//
+// Letter h's walked pad (PA04, a rail-to-rail square, its next edge
+// half a 31 ms period after a retrigger) into BOTH comparators of window
+// 0, their negatives the VDD scaler at a quarter (COMP0) and three
+// quarters (COMP1): the pad leaving the window upward raises WIN0
+// (WINTSEL = above), which is the interrupt armed. Eight rounds per leg,
+// judged as letter h judges: an AC wake well inside the 91 ms RTC
+// backstop, or the backstop. Legs: both comparators with RUNSTDBY; both
+// without; and only the lower one with it - 40.6.14 asks that both of a
+// pair share RUNSTDBY, and this leg is what breaking that rule does.
+
+namespace {
+
+using Lower = AcComparator<0>;
+using Upper = AcComparator<1>;
+using Win = AcWindow<0>;
+
+void tk_ac_window() {
+    quiesce();
+    constexpr uint8_t wave = 16;
+    constexpr uint32_t window = 3000;   // ~91 ms
+    constexpr uint8_t rounds = 8;
+    bool ok = ac_pad_walker_up(wave, TcPrescaler::div64);
+    bench.verdict("PA04 is walked by the PORT event", ok);
+    if (!ok) {
+        ac_pad_walker_down();
+        return;
+    }
+    struct Leg {
+        bool lower_std;
+        bool upper_std;
+        uint8_t by_ac;
+        uint8_t by_rtc;
+        bool consistent;
+    };
+    Leg legs[3] = {{true, true, 0, 0, false},
+                   {false, false, 0, 0, false},
+                   {true, false, 0, 0, false}};
+    for (Leg& l : legs) {
+        if (!Ac::init(gen_ulp) ||
+            !Lower::configure(AcConfig{.positive = AcPositive::pin0,
+                                       .negative = AcNegative::vscale,
+                                       .run_standby = l.lower_std}) ||
+            !Upper::configure(AcConfig{.positive = AcPositive::pin0,
+                                       .negative = AcNegative::vscale,
+                                       .run_standby = l.upper_std}) ||
+            !Win::configure(true, AcWindowInterrupt::above)) {
+            continue;
+        }
+        Lower::scaler(15);    // VDD x 16/64
+        Upper::scaler(47);    // VDD x 48/64
+        (void)Ac::enable(true);
+        (void)Lower::enable(true);
+        (void)Upper::enable(true);
+        for (uint32_t k = 0; k < 200'000u && !Win::ready(); ++k) {
+        }
+        l.consistent = Win::pair_consistent();
+        for (uint8_t r = 0; r < rounds; ++r) {
+            (void)Toggler::retrigger();
+            Win::clear_flag();
+            Win::arm(true);
+            Nvic::enable(Ac::irq());
+            ac_irqs = 0;
+            watchdog_backstop(true);
+            const uint32_t woke = standby_until_wake(window);
+            watchdog_backstop(false);
+            Win::arm(false);
+            Nvic::disable(Ac::irq());
+            const uint32_t us = watch_us(woke);
+            if (ac_irqs != 0u && !rtc_fired && us < (rtc_us(window) * 2u) / 3u) {
+                l.by_ac = static_cast<uint8_t>(l.by_ac + 1u);
+            }
+            if (rtc_fired && us > (rtc_us(window) * 2u) / 3u) {
+                l.by_rtc = static_cast<uint8_t>(l.by_rtc + 1u);
+            }
+        }
+        (void)Win::configure(false, AcWindowInterrupt::above);
+        (void)Lower::enable(false);
+        (void)Upper::enable(false);
+        (void)Ac::enable(false);
+    }
+    print(serial, "  window 0 above, the pad's rise against a 91 ms backstop, ", rounds,
+          " rounds:", crlf);
+    print(serial, "    both RUNSTDBY      ", legs[0].by_ac, " AC wakes, ", legs[0].by_rtc,
+          " backstops", crlf);
+    print(serial, "    neither RUNSTDBY   ", legs[1].by_ac, " AC wakes, ", legs[1].by_rtc,
+          " backstops", crlf);
+    print(serial, "    the lower one only ", legs[2].by_ac, " AC wakes, ", legs[2].by_rtc,
+          " backstops", crlf);
+    bench.verdict("the pair is consistent (one positive, one mode) in every leg",
+                  legs[0].consistent && legs[1].consistent && legs[2].consistent);
+    bench.verdict("A WINDOW WAKES THE DEVICE FROM STANDBY when both comparators have "
+                  "RUNSTDBY: every round",
+                  legs[0].by_ac == rounds);
+    bench.verdict("and with neither, the window sleeps: the backstop every round",
+                  legs[1].by_ac == 0u && legs[1].by_rtc == rounds);
+    // Measured, not read: the upper comparator off in standby leaves the
+    // window unable to see the pad leave it upward, so the rule is not a
+    // nicety - half a pair is no window at all.
+    bench.verdict("40.6.14's rule broken - only the lower one with RUNSTDBY - and the "
+                  "window never wakes it: the backstop every round",
+                  legs[2].by_ac == 0u && legs[2].by_rtc == rounds);
+    Ac::release();
+    ac_pad_walker_down();
+    quiesce();
+}
+
+} // namespace
+
+// ===========================================================================
 // i: CCL 37.6.4 - which LUTs keep decoding in standby
 // ===========================================================================
 
@@ -2239,6 +2353,7 @@ void register_tests() {
     bench.letter('i', "CCL 37.6.4: which LUTs decode in standby", ti_ccl);
     bench.letter('j', "the leftovers: the TCC, an EVSYS channel, the BODVDD",
                  tj_leftovers);
+    bench.letter('k', "the AC's WINDOW across a standby", tk_ac_window);
     bench.letter('p', "PM.bus_clock, whose off 19.5.2 calls one-way",
                  tp_bus_clock, false);
 }

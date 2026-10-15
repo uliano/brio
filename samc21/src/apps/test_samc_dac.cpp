@@ -44,6 +44,8 @@
 //   j  the event-paced DAC: an event starts each conversion, the DAC's
 //      own EMPTY interrupt feeds DATABUF from a table
 //   k  erratum 1.9.2: the EMPTY flag across a standby
+//   l  EMPTY as a wake from STANDBY, a timer's event starting the
+//      conversion; RUNSTDBY clear the control
 //
 // build: boards = c21j
 // build: monitor_speed = 115200
@@ -1669,6 +1671,100 @@ void tk_standby_erratum() {
     Dac::release();
 }
 
+// =============================================================================
+// l - EMPTY as a wake from STANDBY
+// =============================================================================
+//
+// DATABUF written, then the core in STANDBY: TC2 (RUNSTDBY) overflows
+// 5.5 ms later (CLK_PER / 1024, PER 255) and its event, on an
+// asynchronous channel kept running in standby, starts the conversion
+// that empties DATABUF - EMPTY, the interrupt that ends the sleep. The
+// suite's own RTC compare 300 ms out is the backstop. RUNSTDBY set on the
+// DAC: one wake, DAC's line pending, the backstop silent. RUNSTDBY clear:
+// the converter is off in standby, nothing empties, the backstop ends the
+// sleep (erratum 1.9.2 may then raise EMPTY after the wake - letter k's
+// subject - so the control is judged on WHAT ENDED the sleep).
+void tl_wake() {
+    Evsys::bus_clock(true);
+    Evsys::reset();
+    bench.verdict("the RTC is up as the backstop", rtc_up());
+    auto leg = [](bool run_standby, uint32_t& pend, bool& backstop, uint32_t& empties) {
+        pend = 0;
+        backstop = false;
+        empties = 0;
+        Dac::release();
+        DacConfig cfg{};
+        cfg.external_output = true;
+        cfg.internal_output = true;
+        cfg.run_standby = run_standby;
+        constexpr TcConfig pace{.mode = TcMode::count8, .prescaler = TcPrescaler::div1024,
+                                .waveform = TcWaveform::normal_pwm, .run_standby = true};
+        if (!Dac::init(main_gen, cfg) || !Dac::enable(false) ||
+            !Dac::start_on(ev_start_channel,
+                           EventChannelConfig{.generator = Pacer::overflow_generator,
+                                              .path = EventPath::asynchronous,
+                                              .run_standby = true}) ||
+            !Dac::enable(true) || !Pacer::init(main_gen) || !Pacer::configure(pace) ||
+            !Pacer::set_period8(255) ||
+            !Pacer::event_config(pace, TcEventConfig{.overflow_out = true})) {
+            return;
+        }
+        Dac::buffer(700);
+        spin(20'000UL);
+        Dac::clear_flags(Dac::flag_empty | Dac::flag_underrun);
+        feed_left = 0;                    // the handler counts, then disarms
+        const uint32_t e0 = feed_empties;
+        Dac::arm(Dac::flag_empty);
+        Nvic::enable(Dac::irq());
+        const uint32_t now = Rtc::count32();
+        rtc_fired = false;
+        Rtc::clear_flags(RtcFlag::compare0);
+        if (!Rtc::set_comp32(now + 9830u)) {   // 300 ms
+            return;
+        }
+        console_drain();
+        if (!Pm::set_sleep_mode(SleepMode::standby)) {
+            return;
+        }
+        (void)Pacer::set_count8(0);
+        (void)Pacer::enable(true);
+        __disable_irq();
+        if (feed_empties == e0 && !rtc_fired) {
+            Pm::sleep();
+            pend = NVIC->ISPR[0];
+        }
+        __enable_irq();
+        (void)Pm::set_sleep_mode(SleepMode::idle0);
+        backstop = rtc_fired;
+        (void)Pacer::enable(false);
+        Dac::disarm(Dac::flag_empty);
+        Nvic::disable(Dac::irq());
+        empties = feed_empties - e0;
+    };
+    uint32_t p_on = 0, p_off = 0, e_on = 0, e_off = 0;
+    bool b_on = false, b_off = false;
+    leg(true, p_on, b_on, e_on);
+    leg(false, p_off, b_off, e_off);
+    const uint32_t line = 1u << static_cast<uint32_t>(Dac::irq());
+    print(serial, "  STANDBY, RUNSTDBY set: pending ", Hex{p_on}, ", EMPTY interrupts ",
+          e_on, ", backstop ", b_on ? "FIRED" : "silent", "; RUNSTDBY clear: pending ",
+          Hex{p_off}, ", backstop ", b_off ? "fired" : "SILENT", crlf);
+    bench.verdict("EMPTY WAKES THE CORE FROM STANDBY with RUNSTDBY: DAC's line, the "
+                  "backstop silent",
+                  (p_on & line) != 0u && e_on >= 1u && !b_on);
+    // The control's wake is the RTC's: the backstop RAN (300 ms, so the
+    // pacer's start 5.5 ms in woke nothing). DAC's line is pending beside
+    // it at that wake (measured, every run): EMPTY raised on the exit from
+    // sleep with DATABUF still written - erratum 1.9.2, letter k's subject.
+    const uint32_t rtc_line = 1u << static_cast<uint32_t>(Rtc::irq());
+    bench.verdict("without RUNSTDBY the backstop is what ends the sleep",
+                  b_off && (p_off & rtc_line) != 0u);
+    Dac::release();
+    Pacer::release();
+    Evsys::disconnect(Dac::start_event_user);
+    Evsys::release_channel(ev_start_channel);
+}
+
 void banner() {
     print(serial, crlf,
           "test_samc_dac - SAMC21J18A DAC (ch. 41) and the analog loop it "
@@ -1734,6 +1830,7 @@ int main() {
                  tj_event_feed);
     bench.letter('k', "erratum 1.9.2: the EMPTY flag across a standby",
                  tk_standby_erratum);
+    bench.letter('l', "EMPTY as a wake from STANDBY", tl_wake);
 
     if (serial_ok) {
         print(serial, crlf, "boot: clk=", clock_ok ? "OSC48M" : "FAILED",

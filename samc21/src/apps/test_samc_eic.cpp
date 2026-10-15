@@ -32,6 +32,13 @@
 //      and a line above 7, which is the question 26.6.7's prose leaves
 //      open
 //   f  the interrupt: one vector for sixteen lines, masked by INTENSET
+//   g  the FALLING edge and the LOW level through EVSYS, the channel's
+//      own falling-edge detector on a HIGH level, and LOW as an
+//      interrupt whose flag is a level
+//   h  PORT's WRCONFIG (samc21/pin.hpp's mask verbs): three pads in both
+//      half-words configured, then handed to the EIC, by one call each
+//   i  PORT event inputs 2 and 3 on one pad, alone and at one instant
+//      (table 28-3: SET with CLR executes TGL)
 //
 // Outside z, because they need a human:
 //   n  the NMI on PA08, edge-sensed and asynchronous (never a level: an
@@ -128,6 +135,9 @@ static_assert(tc_event_config_valid(witness_cfg, witness_events),
 volatile uint32_t eic_isr_count = 0;
 volatile uint32_t eic_isr_mask = 0;
 volatile uint32_t nmi_count = 0;
+/// Letter g: the handler disarms every line it served (a level held
+/// would otherwise re-fire it at once).
+volatile bool disarm_served = false;
 
 // ---------------------------------------------------------------------------
 // Small helpers
@@ -830,6 +840,294 @@ void tf_interrupt() {
 }
 
 // =============================================================================
+// g - the falling edge and the LOW level, through EVSYS and as an interrupt
+// =============================================================================
+//
+// Letter e routes a rising edge, the timer suites a HIGH level. Here: a
+// FALLING sense through EVSYS (the event pulses on the pad's fall, not
+// its rise), a LOW level through EVSYS (the event output is the
+// condition - high while the pad is low - so each low phase is one
+// rising edge at the witness), and LOW as an interrupt (the handler
+// disarms what it served; the flag, cleared with the pad still low,
+// comes back - a level - and stays down once the pad is high).
+void tg_falling_low() {
+    Evsys::bus_clock(true);
+    Evsys::reset();
+    bench.verdict("the block comes up on its slow generic clock", eic_up_slow());
+    bench.verdict("the event channel's own generic clock is routed",
+                  GclkChannel::connect(Evsys::gclk_id(ev_ch), eic_gen));
+
+    // --- FALLING through EVSYS
+    arm_pad<PadA>(true);
+    bench.verdict("line 0 senses a FALLING edge and drives its event output",
+                  Eic::configure_line(LineA::line,
+                                      EicLineConfig{.sense = EicSense::falling,
+                                                    .asynchronous = true,
+                                                    .event_out = true}) &&
+                      Eic::enable(true));
+    bench.verdict("the witness counts the channel carrying EXTINT0",
+                  witness_arm() &&
+                      Evsys::connect(user_witness, ev_ch,
+                                     EventChannelConfig{
+                                         .generator = LineA::event_generator,
+                                         .path = EventPath::resynchronized,
+                                         .edge = EventEdge::rising}));
+    settle();   // erratum 1.12.4: the first tick after configure is blind
+    const uint16_t f0 = witnessed();
+    pull_to<PadA>(false);
+    settle();
+    const uint16_t f1 = witnessed();
+    pull_to<PadA>(true);
+    settle();
+    const uint16_t f2 = witnessed();
+    pull_to<PadA>(false);
+    settle();
+    const uint16_t f3 = witnessed();
+    print(serial, "  falling sense: counted ", f0, " parked high, ", f1, " after a fall, ",
+          f2, " after the rise, ", f3, " after a second fall", crlf);
+    bench.verdict("a FALLING sense crosses EVSYS on the fall: one count each fall",
+                  f0 == 0u && f1 == 1u && f3 == 2u);
+    bench.verdict("and the rise between them is not an event", f2 == 1u);
+
+    // --- LOW through EVSYS
+    Witness::release();
+    Evsys::disconnect(user_witness);
+    (void)Eic::enable(false);
+    arm_pad<PadA>(true);
+    bench.verdict("line 0 senses a LOW level and drives its event output",
+                  Eic::configure_line(LineA::line,
+                                      EicLineConfig{.sense = EicSense::low,
+                                                    .event_out = true}) &&
+                      Eic::enable(true));
+    bench.verdict("the witness arms again from zero",
+                  witness_arm() &&
+                      Evsys::connect(user_witness, ev_ch,
+                                     EventChannelConfig{
+                                         .generator = LineA::event_generator,
+                                         .path = EventPath::resynchronized,
+                                         .edge = EventEdge::rising}));
+    settle();
+    const uint16_t l0 = witnessed();
+    for (uint8_t i = 0; i < 3; ++i) {
+        pull_to<PadA>(false);
+        settle();
+        pull_to<PadA>(true);
+        settle();
+    }
+    const uint16_t l3 = witnessed();
+    print(serial, "  low sense: counted ", l0, " parked high, ", l3,
+          " after three low phases", crlf);
+    bench.verdict("a LOW level crosses EVSYS as the condition: one rising edge per "
+                  "low phase (3), nothing while high",
+                  l0 == 0u && l3 == 3u);
+
+    // --- the CHANNEL's falling-edge detector (evsys.md's own item): a
+    //     HIGH level's output - a copy of the pad - on a resynchronized
+    //     channel detecting FALLING edges counts the pad's falls only.
+    Witness::release();
+    Evsys::disconnect(user_witness);
+    (void)Eic::enable(false);
+    arm_pad<PadA>(true);
+    bench.verdict("line 0 senses a HIGH level, its event output a copy of the pad",
+                  Eic::configure_line(LineA::line,
+                                      EicLineConfig{.sense = EicSense::high,
+                                                    .event_out = true}) &&
+                      Eic::enable(true));
+    bench.verdict("the channel detects FALLING edges",
+                  witness_arm() &&
+                      Evsys::connect(user_witness, ev_ch,
+                                     EventChannelConfig{
+                                         .generator = LineA::event_generator,
+                                         .path = EventPath::resynchronized,
+                                         .edge = EventEdge::falling}));
+    settle();
+    const uint16_t c0 = witnessed();
+    pull_to<PadA>(false);
+    settle();
+    const uint16_t c1 = witnessed();
+    pull_to<PadA>(true);
+    settle();
+    const uint16_t c2 = witnessed();
+    pull_to<PadA>(false);
+    settle();
+    const uint16_t c3 = witnessed();
+    print(serial, "  falling-edge channel on a high level: counted ", c0, " parked high, ",
+          c1, " after a fall, ", c2, " after the rise, ", c3, " after a second fall", crlf);
+    // Judged by the increments: the channel counts once while it is being
+    // set up on the high level (measured: 1 before any pad edge, every
+    // run - the arming is not the subject here).
+    bench.verdict("THE CHANNEL'S FALLING-EDGE DETECTION counts the falls of a level, "
+                  "and not its rises",
+                  c1 - c0 == 1u && c2 == c1 && c3 - c2 == 1u);
+    Witness::release();
+    Evsys::disconnect(user_witness);
+    GclkChannel::disconnect(Evsys::gclk_id(ev_ch));
+    (void)Eic::enable(false);
+
+    // --- LOW as an interrupt
+    arm_pad<PadB>(true);
+    bench.verdict("line 1 senses a LOW level",
+                  Eic::configure_line(LineB::line, EicLineConfig{.sense = EicSense::low}) &&
+                      Eic::enable(true));
+    Eic::clear_flags(0xFFFFu);
+    eic_isr_count = 0;
+    eic_isr_mask = 0;
+    disarm_served = true;
+    LineB::arm(true);
+    Nvic::enable(Eic::irq());
+    settle();
+    const uint32_t while_high = eic_isr_count;
+    pull_to<PadB>(false);
+    settle();
+    const uint32_t on_low = eic_isr_count;
+    const uint32_t mask = eic_isr_mask;
+    LineB::clear_flag();
+    spin(2000);
+    const bool back_while_low = LineB::flag();
+    pull_to<PadB>(true);
+    settle();
+    LineB::clear_flag();
+    spin(2000);
+    const bool back_while_high = LineB::flag();
+    Nvic::disable(Eic::irq());
+    disarm_served = false;
+    print(serial, "  low as an interrupt: ", while_high, " entries while high, ", on_low,
+          " once low (mask ", hex(mask), "); the flag cleared comes back while low: ",
+          back_while_low ? "yes" : "no", ", once high: ", back_while_high ? "yes" : "no",
+          crlf);
+    bench.verdict("no interrupt while the pad is high", while_high == 0u);
+    bench.verdict("the LOW level takes the interrupt, on line 1",
+                  on_low == 1u && (mask & LineB::mask) != 0u);
+    bench.verdict("the flag is a level: cleared while low it comes back, once high it "
+                  "does not",
+                  back_while_low && !back_while_high);
+
+    Eic::disarm(0xFFFFu);
+    (void)Eic::enable(false);
+    Eic::release();
+    PadA::configure({});
+    PadB::configure({});
+}
+
+// =============================================================================
+// h - PORT's WRCONFIG: three pads, both half-words, one verb
+// =============================================================================
+//
+// samc21/pin.hpp's configure_mask() and function_mask() write one PINCFG
+// (and one PMUX nibble) into every pad of a mask through WRCONFIG
+// (28.8.11), whose pin mask is a half-word: PA09 below 16 and PA16/PA17
+// above it take the two stores the verb must make. The pads are read
+// through IN under their pulls (both directions), then handed to the
+// EIC by ONE function_mask() call - all three lines then flag the edge
+// their pulls make.
+void th_wrconfig() {
+    using PortA = Port<'A'>;
+    constexpr uint32_t mask = (1u << 9) | (1u << 16) | (1u << 17);
+    bench.verdict("the three pads are free (each follows its own pull)",
+                  pad_is_free<PadA>() && pad_is_free<PadB>() && pad_is_free<PadHigh>());
+    PortA::configure_mask(mask, PinConfig{.input_enable = true, .pull = PinPull::up});
+    spin(2000);
+    const uint32_t up = PortA::in() & mask;
+    PortA::configure_mask(mask, PinConfig{.input_enable = true, .pull = PinPull::down});
+    spin(2000);
+    const uint32_t down = PortA::in() & mask;
+    print(serial, "  configure_mask over PA09/PA16/PA17: IN reads ", hex(up), " pulled up, ",
+          hex(down), " pulled down (mask ", hex(mask), ")", crlf);
+    bench.verdict("configure_mask(): one call configures pads in both half-words - "
+                  "all three pulled up",
+                  up == mask);
+    bench.verdict("and all three pulled down", down == 0u);
+
+    bench.verdict("the block comes up on its slow generic clock", eic_up_slow());
+    bench.verdict("lines 0, 1 and 9 sense a rising edge",
+                  Eic::configure_line(LineA::line, EicLineConfig{.sense = EicSense::rising,
+                                                                 .asynchronous = true}) &&
+                      Eic::configure_line(LineB::line,
+                                          EicLineConfig{.sense = EicSense::rising,
+                                                        .asynchronous = true}) &&
+                      Eic::configure_line(LineHigh::line,
+                                          EicLineConfig{.sense = EicSense::rising,
+                                                        .asynchronous = true}) &&
+                      Eic::enable(true));
+    PortA::function_mask(mask, PinFunction::a,
+                         PinConfig{.input_enable = true, .pull = PinPull::down});
+    settle();
+    Eic::clear_flags(0xFFFFu);
+    PortA::out_set(mask);              // the pulls' direction: up
+    settle();
+    const bool all = LineA::flag() && LineB::flag() && LineHigh::flag();
+    print(serial, "  function_mask to the EIC, pulls turned up: lines 0/1/9 flagged ",
+          LineA::flag() ? 1 : 0, "/", LineB::flag() ? 1 : 0, "/", LineHigh::flag() ? 1 : 0,
+          crlf);
+    bench.verdict("function_mask(): one call hands all three pads to the EIC, the pull "
+                  "kept - each line flags its pad's rise",
+                  all);
+    (void)Eic::enable(false);
+    Eic::release();
+    PortA::configure_mask(mask, PinConfig{});
+}
+
+// =============================================================================
+// i - PORT event inputs 2 and 3, and two inputs on one pad at one instant
+// =============================================================================
+//
+// PA16 under PORT's own output. A software event on an asynchronous
+// channel (the path table 29-3 grants the PORT users; letter d of
+// test_samc_evsys shows software events cross it) drives PORT event
+// input 2 (SET) and input 3 (CLR), both naming PA16. Each alone first:
+// SET raises the pad and a second event leaves it high, CLR lowers it.
+// Then BOTH on the one channel, so the two actions arrive at the same
+// instant: table 28-3 says SET with CLR executes TGL, so each event
+// flips the pad.
+void ti_port_events() {
+    using PortA = Port<'A'>;
+    Evsys::bus_clock(true);
+    Evsys::reset();
+    constexpr uint8_t ch = 2;
+    PadA::output();
+    PadA::clear();
+    bool ok = Evsys::configure(ch, EventChannelConfig{.path = EventPath::asynchronous}) &&
+              PortA::configure_event(2, PortEventConfig{.pin = PadA::pin_number,
+                                                        .action = PortEventAction::set,
+                                                        .enable = true}) &&
+              PortA::configure_event(3, PortEventConfig{.pin = PadA::pin_number,
+                                                        .action = PortEventAction::clear,
+                                                        .enable = true});
+    auto fire = []() {
+        Evsys::trigger(ch);
+        spin(200);
+        return PadA::read();
+    };
+    // Input 2 alone.
+    ok = ok && Evsys::attach(PortA::event_user(2), ch);
+    const bool set1 = fire();
+    const bool set2 = fire();
+    Evsys::disconnect(PortA::event_user(2));
+    // Input 3 alone.
+    ok = ok && Evsys::attach(PortA::event_user(3), ch);
+    const bool clr1 = fire();
+    // Both on the one channel.
+    ok = ok && Evsys::attach(PortA::event_user(2), ch);
+    const bool both1 = fire();
+    const bool both2 = fire();
+    const bool both3 = fire();
+    print(serial, "  input 2 (SET) alone: ", set1 ? 1 : 0, ", ", set2 ? 1 : 0,
+          "; input 3 (CLR) alone: ", clr1 ? 1 : 0, "; SET and CLR at once: ", both1 ? 1 : 0,
+          ", ", both2 ? 1 : 0, ", ", both3 ? 1 : 0, crlf);
+    bench.verdict("PORT event inputs 2 and 3 configure and connect", ok);
+    bench.verdict("input 2's SET raises the pad and holds it", set1 && set2);
+    bench.verdict("input 3's CLR lowers it", !clr1);
+    bench.verdict("SET AND CLR AT ONE INSTANT EXECUTE TGL (table 28-3): the pad flips "
+                  "on every event",
+                  both1 && !both2 && both3);
+    Evsys::disconnect(PortA::event_user(2));
+    Evsys::disconnect(PortA::event_user(3));
+    Evsys::release_channel(ch);
+    PortA::release_events();
+    PadA::configure({});
+}
+
+// =============================================================================
 // n - the NMI (outside z: it arms an interrupt nothing can mask)
 // =============================================================================
 //
@@ -973,6 +1271,9 @@ extern "C" void EIC_Handler() {
     if (m != 0u) {
         eic_isr_mask = eic_isr_mask | m;
         eic_isr_count = eic_isr_count + 1u;
+        if (disarm_served) {
+            brio::Eic::disarm(m);
+        }
     }
 }
 
@@ -998,6 +1299,12 @@ int main() {
     bench.letter('e', "an EIC edge through EVSYS, counted by a TC", te_event);
     bench.letter('f', "one vector, sixteen lines, masked by INTENSET",
                  tf_interrupt);
+    bench.letter('g', "the falling edge and the low level, through EVSYS and as an "
+                 "interrupt", tg_falling_low);
+    bench.letter('h', "PORT's WRCONFIG: three pads, both half-words, one verb",
+                 th_wrconfig);
+    bench.letter('i', "PORT event inputs 2 and 3, and SET with CLR at one instant",
+                 ti_port_events);
     bench.letter('n', "THE NMI on PA08 (outside z)", tn_nmi, false);
     bench.letter('u', "the user button PB22, pressed by hand (outside z)",
                  tu_button, false);

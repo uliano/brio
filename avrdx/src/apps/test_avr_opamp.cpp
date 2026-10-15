@@ -1098,18 +1098,13 @@ void ti_events() {
     // the op amp integrates whatever tiny current that node sees. So the
     // output neither stays put nor snaps back to the rail - it WANDERS,
     // which is exactly the behaviour figure 35-6 is drawn for.
-    const int32_t d5 = after_5ms > open_loop ? after_5ms - open_loop
-                                             : open_loop - after_5ms;
-    const int32_t d400 = after_400ms > open_loop ? after_400ms - open_loop
-                                                 : open_loop - after_400ms;
-    (void)d400;
-    verdict("milliseconds after the level drops the output is still nowhere near "
-            "the open-loop rail: the floating node keeps the dump",
-            d5 > counts_x(800));
-    verdict("and over hundreds of milliseconds it walks away again - an "
-            "integrator whose only capacitor is the pad's own stray",
-            (after_400ms > after_5ms ? after_400ms - after_5ms
-                                     : after_5ms - after_400ms) > counts_x(100));
+    // The floating node is no instrument: what the stray capacitance holds
+    // and leaks moves from run to run (measured 5 ms after the drop: 578,
+    // 3854, 4444 and 4577 mV in four runs; the old verdicts on it failed
+    // two runs of five). So it is printed and judged by nothing - the
+    // DUMP verdict above is the contract.
+    print(serial, "  (the floating node after the dump is printed, not judged: it "
+                  "wanders differently every run)", crlf);
     Op0::dump_off();
 
     quiesce();

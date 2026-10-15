@@ -392,13 +392,14 @@ What the rows say:
 
 Measured on rev. A5 at 5 V, CLK_PER 24 MHz, TWI0 on its DEFAULT route,
 one open-drain bus with 1.5k pull-ups. `test_avr_twi`: `z` = the
-single-board half; `y` = the two-board half, with a second AVR128DB48
-on the same node running instrument firmware. The desk gives that bus
-three taps of the DUT - PA2/PA3 (the host and the combined client),
-PC2/PC3 (the dual client, and a plain-GPIO bit-bang injector whenever
-Dual mode is off) and PB2/PB3 - plus the second board's own PA2/PA3, so
-a host, several clients, a second host and a foreign agitator all sit
-on one wire.
+single-board half; `y` = the two-board half, with an ATSAMC21J18A on
+the same node running the instrument firmware `twi_peer` (its SERCOM3
+on PA22/PA23, commanded in band over the bus under test). The desk gives
+that bus three taps of the DUT - PA2/PA3 (the host and the combined
+client), PC2/PC3 (the dual client, and a plain-GPIO bit-bang injector
+whenever Dual mode is off) and PB2/PB3 - plus the peer's pair, so a
+host, several clients, a foreign chip and a foreign agitator all sit on
+one wire.
 
 **The errata's OUT bits are real work, not ceremony.** With `PORTA.OUT`
 bits 2 and 3 deliberately set before `init`, the driver clears them and
@@ -569,62 +570,54 @@ client replied `i2c_ok` with the right bytes in both directions.
 
 ### With a second chip on the wire
 
-**Clock stretching is exactly what the client's flag costs.** A foreign
-client that delays clearing DIF by a commanded time per byte lengthens
-the whole tenure by that time times the number of DATA bytes - the
-address packet is answered from APIF, which this experiment does not
-hold. A six-byte write at 100 kHz:
+Every figure below is `test_avr_twi y` against the SAM C21's
+`twi_peer`, twelve runs of the same image, 136 verdicts each.
+
+**Clock stretching is exactly what the client's hold costs.** A foreign
+client that holds its answer to every DATA byte for a commanded time
+(the SAM C21's client stretches SCL at DRDY until its software speaks)
+lengthens the whole tenure by that time times the number of data bytes;
+the address is answered at once. A six-byte write at 100 kHz:
 
 | the client's hold | the tenure | the longest SCL low |
 |---|---|---|
-| none | 16892..17123 ticks (703..713 us) | 208..248 ticks (8.7..10.3 us) |
-| 100 us/byte | 32171 ticks (1340 us) | 2712..2739 ticks (113..114 us) |
-| 1 ms/byte | 162092..162143 ticks (6753..6755 us) | 24314..24335 ticks (1013 us) |
+| none | 16814..16817 ticks (700 us) | 183..185 ticks (7.7 us) |
+| 100 us/byte | 31303..31329 ticks (1304 us) | 2530..2537 ticks (105 us) |
+| 1 ms/byte | 162087..162151 ticks (6753..6756 us) | 24331..24343 ticks (1014 us) |
 
-The elongation measured 14841..15279 ticks against a model of 14400 and
-145140..145260 against 144000, i.e. the commanded hold plus the client's
-own software turnaround, five to nine microseconds a byte on a polled
-loop. The register's own SCL low time is 120 ticks (5 us), so **even an
-unstretched exchange with a polled client runs at the client's speed,
-not the divider's**: 208 ticks instead of 120. The host meanwhile
+The elongation measured 14489..14700 ticks against a model of 14400
+and 145273..145484 against 144000: the commanded hold plus 0.6 to 2.1
+us a byte at 100 us and 8.8 to 10.3 us at 1 ms - an excess that grows
+with the hold, so most of it is the peer's own timing of the hold, not
+the wire. The register's own SCL low time is 120 ticks (5 us), so **even
+an unstretched exchange with a polled client runs at the client's
+speed, not the divider's**: 185 ticks instead of 120. The host meanwhile
 reports CLKHOLD whenever ITS own flag stands and the bus reads Owner
 throughout - the two holds are different things and both are visible.
 An unstretched exchange immediately after a stretched one is back to
 nominal.
 
-**Both NACKs, injected by a board that is alive and listening.** A peer
+**Both NACKs, injected by a chip that is alive and listening.** A peer
 that parks its address elsewhere produces an ADDRESS NACK: the engine
 reports `i2c_nack_addr` and MSTATUS reads 0x72 (WIF, CLKHOLD, RXACK, bus
 Owner), while the peer's own report says it matched nothing at all. A
 peer told to NACK its third byte turns a six-byte write into
 `i2c_nack_data` with the same 0x72, and it kept exactly the three bytes
-it acknowledged. From the client side the host's closing NACK on a read
-is SSTATUS 0xB3 sampled AT that instant (DIF, CLKHOLD, RXACK, DIR, AP) -
-RXACK is a live bit and a copy taken after the transaction carries
-whatever the last one left behind.
+it acknowledged. The host's closing NACK on a read reaches the far
+client: the SAM C21's STATUS sampled at that instant reads 0x8C
+(CLKHOLD, DIR, RXNACK).
 
-**Multi-host arbitration, made deterministic by the silicon's own
-rule.** A software rendezvous cannot put two STARTs on a bus inside the
-hundred nanoseconds a genuine race needs; the hardware can. A host told
-to start while the bus is Busy HOLDS its START and releases it by itself
-when the bus goes Idle (29.3.2.2.3) - so both boards arm a START into a
-bus the bit-bang injector has made Busy, and the injected STOP releases
-the two of them on the same edge. What follows is real wired-AND
-arbitration and the winner is simply the smaller address byte, which is
-what lets the experiment choose the loser:
-
-- the loser reads MSTATUS **0x4B** - WIF with ARBLOST, and BUSSTATE
-  Busy: the bus belongs to the winner now. Its transaction did not land
-  (the addressed client saw no match at all) and the engine reports
-  `i2c_arb_lost`;
-- the winner reads **0x62** (WIF, CLKHOLD, bus Owner) and its bytes
-  arrive intact at the client it addressed;
-- the loser's retry on the idle bus simply works.
-
-Over 40 rounds (four runs of ten, with the gap between the two arming
-points swept 60/120/250/500/900 us) the tally was 20 losses each way and
-not one exception: **ARBLOST positively observed on both boards**, and
-the outcome decided by the addresses rather than by timing.
+**Multi-host arbitration is staged from the SAM C21's side.** This
+host's held START on a Busy bus fires when an injected STOP frees it
+(29.3.2.2.3), which is the race letter n stages - but it needs BOTH
+held STARTs to fire on the one edge, and the SAM C21's does not after a
+phantom hold ([../samc21/i2c.md](../samc21/i2c.md), "A tenure into a
+busy bus parks in hardware"), so against that peer the letter is
+skipped and says so. The live race between the two chips runs in
+`test_samc_i2c` o, both STARTs queued behind one REAL STOP: this
+chip's host, as the peer there, raises ARBLOST when the address
+decides against it and its tenure completes when the address decides
+for it ([../samc21/i2c.md](../samc21/i2c.md), "TWO LIVE HOSTS").
 
 **The collision case S4 is the wired-AND read.** Two clients at ONE
 address both acknowledge the same read and both put a byte on SDA, so
@@ -632,16 +625,20 @@ the host reads the AND of the two. The client that tried a high bit
 against the other's low cannot drive it: it raises COLL and un-drives,
 the other does not. With the DUT serving 0xFF against the peer's 0x55
 the host reads 0x55 and the DUT collides; swap the two bytes and the
-peer collides while the DUT does not - three runs, no exception. COLL
+peer collides (the SAM C21's STATUS.COLL; its client leaves the tenure
+after the byte that collided) while the DUT does not - every run. COLL
 stands after the collision and **clears itself on the next Start
 condition**, so a collision that is not read before the next START is
 gone.
 
 **A stuck wire needs clocks, not an ENABLE cycle.** With the peer
-holding SDA low from PORT, the DUT's host reads MSTATUS 0x03 - BUSSTATE
-Busy, because a falling SDA against a high SCL IS a Start condition to
-the state machine - and the address it was told to send never goes out,
-2 ms of waiting later. `unstick()` then:
+holding SDA low from PORT - taken after this host's STOP - the DUT's
+host reads MSTATUS 0x03, BUSSTATE Busy, because a falling SDA against a
+high SCL IS a Start condition to the state machine (letter p judges it),
+and the address it was told to send never goes out, 2 ms of waiting
+later. A peer that takes SDA BEFORE this host's STOP leaves the host
+Owner instead (MSTATUS 0x02, its STOP pending): the remedy below frees
+that bus the same way. `unstick()` then:
 
 | the bus | result |
 |---|---|
@@ -653,85 +650,48 @@ and it leaves both pins inputs with OUT = 0, which is what errata 2.15.1
 wants of the next owner.
 
 **A General Call is answered by every client that enabled it, at the
-same time.** One write to 0x00 reached both boards' clients in the same
+same time.** One write to 0x00 reached both chips' clients in the same
 tenure, each reporting the match as address 0x00. With the peer's
-SADDR[0] cleared the same call misses it entirely while its exact
-address still answers - proven inside ONE action, so there is no doubt
-the client was alive throughout. And a **Quick Command against a real
-second chip** is the same 10 SCL rising edges as against the instance's
-own client, with `i2c_ok`; to an address nobody holds it is
+General Call turned off the same call misses it entirely while its
+exact address still answers - proven inside ONE action, so there is no
+doubt the client was alive throughout. And a **Quick Command against a
+real second chip** is the same 10 SCL rising edges as against the
+instance's own client, with `i2c_ok`; to an address nobody holds it is
 `i2c_nack_addr`.
 
-**The peer costs the bus nothing electrically, and everything in
-latency.** With the peer's client enabled on the same node the minimum
-SCL period is 244 / 82 / 34 ticks at Sm / Fm / Fm+ - the same numbers
-the bus measures with the DUT alone, so the extra tap adds no rise time
-this meter can see. What a two-board exchange really pays is the peer's
-polled turnaround: on a read tenure the longest SCL low measured 1683 /
-3021 / 3413 ticks (70 / 126 / 142 us) at the three speeds. **The data is
-exact at all three speeds anyway** - which is the protocol working as
-designed: stretching costs time, never correctness. (During those
-stretched reads the low-width meter also caught pulses as short as 5
-ticks, 208 ns, which the period floor rules out as a clock period; the
-mechanism was not isolated and no verdict rests on it.)
+**The peer costs the bus nothing electrically, and its turnaround in
+latency.** With the peer's client on the same node the minimum SCL
+period is 244 / 82 / 34 ticks at Sm / Fm / Fm+ - the same numbers the
+bus measures with the DUT alone, so the extra tap adds no rise time
+this meter can see - and the mean in-byte period of letter r's
+exchanges reads 983, 729..731 and 703..705 thousandths of the rate
+asked, each on its tLOW floor's rate as with the DUT alone. What a
+two-board exchange pays is the peer's polled turnaround: on letter r's
+tenures the longest SCL low measured 204 / 234..257 / 170..253 ticks
+(8.5 / 9.8..10.7 / 7.1..10.5 us) at the three speeds, against the
+register's 120 / 39 / 15. **The data is exact at all three speeds** -
+which is the protocol working as designed: stretching costs time, never
+correctness.
 
-**A clock rebase does not notice the second board either.** Across
+**A clock rebase does not notice the second chip either.** Across
 24 -> 12 -> 24 MHz with the command channel and the peer's client live,
-MBAUD moved 115 -> 55 -> 115, `actual_scl_hz` stayed at 100 kHz, and
-every exchange across the wire was exact.
-
-**Against an ATSAMC21J18A running its own `twi_peer`** (the SAM C21's,
-the same protocol) the SCL is what the bus makes with the DUT alone: the
-mean in-byte period 98.36 kHz (983 thousandths) at Sm, 292.6 kHz (731)
-at Fm and 705.0 kHz (705) at Fm+ through letter r's exchanges, and
-98.36 kHz (983) at every step of letter s's 24 -> 12 -> 24 MHz rebase,
-every exchange of s exact - and letter r's plain four-byte read exact
-at all three speeds. (It once lost its last byte at Sm and Fm: the
-instrument ended its counted serve at the byte that reached the count
-and re-initialized its client while that byte was still in the shifter;
-a counted serve now ends on the STOP of the tenure that reached it.)
-Against that peer letter n has no race to stage - its held START does
-not fire when a phantom hold releases ([../samc21/i2c.md](../samc21/i2c.md),
-"A tenure into a busy bus parks in hardware") - and the live race
-between the two chips is staged from the SAM C21's side, behind a real
-STOP: collisions lost by either end, decided by the address
-([../samc21/i2c.md](../samc21/i2c.md), "TWO LIVE HOSTS").
+MBAUD moved 115 -> 55 -> 115, `actual_scl_hz` stayed at 100 kHz, the
+mean in-byte SCL read 983 thousandths at every step, and every exchange
+across the wire was exact.
 
 **A WEDGED TENURE IS THE ARBITER'S TO ANSWER, AND IT DOES (letter t).**
 `I2cBus` with a 35 ms `timeout_ticks` over this engine, against the
-SAM C21's `twi_peer` holding SDA low from its PORT for 60 ms: the
-tenure's START parks behind the held line (the address never goes out,
-as above), no interrupt follows, and the reply comes back `i2c_timeout`
-on the arbiter's clock (the RTC PIT at 1024 Hz, 36 ticks) at 35 ms
-WITH SDA STILL LOW - the diagnosis is the timeout's, not the release's.
-The arbiter's `recover()` (the ENABLE cycle and a forced Idle) runs in
-that same dispatch, and once the line is free the same bus AO carries
-the next tenure `i2c_ok` with no hand on the engine and no stale
-completion to drain. A client stretching every byte by 1 ms under the
-same limit completes `i2c_ok` in 9 ms: stretching is flow control, and
-the limit sits above a whole tenure.
-
-**A CLIENT WAKES ITS CHIP ON THE ADDRESS MATCH, AND THE WIRE PAYS FOR
-IT.** Measured by `test_avr_sleep` test m, which owns the sleep modes:
-this board is a client at 0x42 on the same office bus while the peer
-writes three bytes at 100 kHz, and B times the whole tenure on its own
-32-bit counter. Awake, the tenure is **418.7 us**. Out of STANDBY with
-the main clock kept alive it is **418.7 us again** - the wake costs
-1.8 us and an SCL bit at 100 kHz is 10 us, so it is invisible on the
-wire. Out of POWER-DOWN with a crystal main clock it is **2197 us**,
-which is that same 418.7 us plus the 1.78 ms the crystal takes to
-restart (platform.md measures it independently on a pin). The frame
-arrives intact in all three cases: 29.3.5's promise that the address
-match logic runs in every sleep mode and stretches the clock during
-wake-up is exactly what the numbers show, and the stretch is paid by the
-HOST, on the bus, for as long as the client's chip takes to come back.
-
-The other half of the same finding is a rule for anything that sleeps
-with a client enabled: **only the ADDRESS MATCH is a wake-up source**.
-The data interrupts that carry the rest of the frame are not, so a
-program that goes back to sleep after servicing the match stalls the
-tenure with the host holding SCL - observed as a host timeout with two
-of three bytes delivered. Stay awake from the match to the closing STOP.
+peer holding SDA low from its PORT for 60 ms: the tenure's START parks
+behind the held line (the address never goes out, as above), no
+interrupt follows, and the reply comes back `i2c_timeout` on the
+arbiter's clock (the RTC PIT at 1024 Hz, 36 ticks) at 35 ms WITH SDA
+STILL LOW - the diagnosis is the timeout's, not the release's. The
+arbiter's `recover()` (the ENABLE cycle and a forced Idle) runs in that
+same dispatch, and once the line is free the same bus AO carries the
+next tenure `i2c_ok` with no hand on the engine and no stale completion
+to drain. A client stretching every byte by 1 ms under the same limit
+completes `i2c_ok` in 9 ms: stretching is flow control, and the limit
+sits above a whole tenure.
 
 **A desk fact, not a silicon one**: TWI1's dual pair PB2/PB3 would make
 a third tap of this bus - the suite drives PB2 low and prints whether the
@@ -746,16 +706,27 @@ implement):
   byte when SADDR[7:3] is 0b11110 and the second byte is software's job
   (29.3.3.6); neither the client task nor the host's `Request` has a
   shape for it.
-- **Multi-host as a policy.** Arbitration is measured and the engine
-  reports `i2c_arb_lost`, but nothing above the engine decides what to
-  do with it: a retry policy, a back-off, a bus AO that knows it shares
-  the wire. `i2c_arb_lost` reaches the requester and stops there.
+- **Multi-host as a policy.** The engine reports `i2c_arb_lost`, but
+  nothing above the engine decides what to do with it: a retry policy, a
+  back-off, a bus AO that knows it shares the wire. `i2c_arb_lost`
+  reaches the requester and stops there.
 - **A client-side AO.** The client task is a polled/ISR surface; the
   kernel-level usage type (an AO that owns an address and answers
   register reads) is not built.
 
 **Implemented but not bench-verified**:
 
+- the engine's `i2c_arb_lost` on a lost arbitration (MSTATUS with
+  ARBLOST, the transaction not landing) with this chip as the DUT: the
+  ARBLOST itself is measured as the SAM C21's peer, the engine's report
+  of it is not - letter n's race needs a peer whose held START fires on
+  an injected STOP, which the SAM C21's does not; a leg of n queuing
+  this host's START and the peer's behind one REAL STOP, as
+  `test_samc_i2c` o does from that side, would measure it;
+- the client's address-match wake (29.3.5) out of STANDBY and
+  POWER-DOWN, and what it costs the host on the wire: a sleeping chip
+  cannot time its own wake, the peer must time the tenure from outside,
+  and no instrument on the desk partner does;
 - CTRLA.SDASETUP: the knob that shapes the client's own setup-time
   stretch is exposed and written, but its two settings are not measured
   apart on the wire;
