@@ -55,7 +55,7 @@
 //      test
 //   d  the tenure shapes against the peer - write, read, write-then-
 //      read with the repeated START counted from the far end, the
-//      general call
+//      counted serve ended once its read is over, the general call
 //   e  the vocabulary against the peer (nack_addr from a deaf client,
 //      nack_data at a commanded byte) and commanded stretching priced
 //   f  the two speeds against a second chip, byte-exact both ways, each
@@ -84,6 +84,12 @@
 //   k  THE STUCK BUS: the peer holding SDA, unstick() counting the
 //      clocks until it lets go, and the STOPF its hand-made STOP leaves
 //      cleared with no entry of the event vector
+//   p  THE DEAD CHANNEL, staged by a timer's compare request held on DMA
+//      channel 6 or 7 with no wire: a write over it ending i2c_dma_fault, a
+//      read over it never completing with its event vector unstormed, each
+//      landing whole once the timer is reset; and the block's own request
+//      left by a stalled read, let go four ways - release()'s reset pulse
+//      leaving the next owner of channel 7 nothing
 //   q  THE CONTROLLER'S OWN HABITS, raw, the vectors dark: how long BTF
 //      stands under a STOP or a repeated START requested at EVT8_2; a
 //      repeated START requested while a byte shifts, that byte refused -
@@ -95,6 +101,9 @@
 //      and summing what it took - then the peer REFUSING that last byte:
 //      i2c_nack_data, no START or STOP left standing, MSL clear, and the
 //      next tenure on the same host ending on the wire
+//   v  THIS BOARD AS THE CLIENT FROM ITS VECTORS: letter j's two client
+//      cases with the interrupt enables up, service() and error_service()
+//      on i2c1_ev and i2c1_er - one entry per event, the body timed
 //
 // With the peer attached `z` outlasts `brio run`'s default 60 s (the
 // peer's command windows are hundreds of milliseconds each): pass
@@ -102,13 +111,14 @@
 //
 // build: boards = v006k8,v003f4
 // build: groups = ai,bcw,d,e,fk,g,q,r
-// build: groups.v006k8 = abcdefgikrw,hjq
-// (the kernel letter h and the two-host letter j are in no group of the
-// CH32V003 build: each image alone is over the part's 15 KB, and their
-// prose is not for shortening - they run on the CH32V006. There the suite
-// whole is over the 40 KB of program flash, so it builds as two images:
-// the single-host wire letters, and the kernel with the two-host and the
-// raw letters)
+// build: groups.v006k8 = abcdefgikrw,hjpqv
+// (the kernel letter h, the two-host letters j and v and the dead-channel
+// letter p are in no group of the CH32V003 build: h and j each alone are
+// over the part's 15 KB and their prose is not for shortening, v and p are
+// born with the part's return to the desk - they run on the CH32V006.
+// There the suite whole is over the 40 KB of program flash, so it builds
+// as two images: the single-host wire letters, and the kernel with the
+// two-host, the dead-channel and the raw letters)
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -124,6 +134,7 @@
 #include "ch32v00x/pin.hpp"
 #include "ch32v00x/platform.hpp"
 #include "ch32v00x/ticker.hpp"
+#include "ch32v00x/tim.hpp"
 #include "ch32v00x/usart.hpp"
 #include "kernel/tenuto.hpp"
 #include "kernel/post.hpp"
@@ -787,6 +798,63 @@ void td_shapes() {
                   "procedures - each byte-exact and each closed at the right byte (the "
                   "peer counts no extra)",
                   counts_ok);
+
+    // THE COUNTED SERVE (twi_link.hpp's `count`): a serve armed for eight
+    // bytes and a deadline far beyond them must end once the read that
+    // moved the eighth is over - every byte the peer's own, the last one
+    // included, and the peer back in command mode long before its
+    // deadline. The bound: the read takes under a millisecond at 100 kHz,
+    // the peer's exit wants forty microseconds of wire at rest and its
+    // re-init well under a millisecond, and the poll below looks every
+    // 5 ms (a ping the serving peer does not answer fails at its address
+    // byte), so the counted exit is seen within some 10 ms and a serve that
+    // waited for its deadline at no less than 2000 ms; half the deadline
+    // parts the two with a factor of a hundred on the early side.
+    {
+        constexpr uint32_t deadline_ms = 2000;
+        twilink::Params cnt{};
+        cnt.count = 8;
+        cnt.ms = deadline_ms;
+        cnt.addr = twilink::dut_addr;
+        cnt.seed = 0x58;
+        cnt.pattern = twilink::pattern_counting;
+        if (peer_act(Op::serve, cnt)) {
+            for (uint8_t i = 0; i < 8; ++i) {
+                rx_buf[i] = 0xEE;
+            }
+            const uint8_t st = host_tenure(twilink::dut_addr, nullptr, 0, rx_buf, 8, link_speed);
+            const uint32_t t0 = Ticker::millis();
+            bool back = false;
+            while (!back && Ticker::millis() - t0 < deadline_ms + 500u) {
+                back = command_once(Op::ping, no_payload, 0);
+                if (!back) {
+                    link_ready();
+                    settle_ms(5);
+                }
+            }
+            const uint32_t back_ms = Ticker::millis() - t0;
+            uint8_t mism = 0;
+            for (uint8_t i = 0; i < 8; ++i) {
+                if (rx_buf[i] != twilink::pattern_value(cnt.pattern, cnt.seed, i)) {
+                    ++mism;
+                }
+            }
+            twilink::Report cr{};
+            const bool crep = peer_report(cr);
+            print(serial, "  counted serve of 8: read status=", st, " mism=", mism, " last=",
+                  hex(rx_buf[7]), "; the peer back in ", back_ms, " ms of its ", deadline_ms,
+                  " ms deadline, its count=", cr.count, " stops=", cr.stops, " flags=",
+                  hex(cr.flags), crlf);
+            bench.verdict("a COUNTED SERVE ends once the read that moved its count is over: the "
+                          "eight bytes the peer's own, the last included, and the peer back in "
+                          "command mode well inside half its deadline, not timed out",
+                          st == i2c_ok && mism == 0u && back && back_ms < deadline_ms / 2u &&
+                              crep && cr.count == 8u &&
+                              (cr.flags & twilink::report_timed_out) == 0u);
+        } else {
+            bench.verdict("the peer accepted the counted serve", false);
+        }
+    }
 
     twilink::Params g{};
     g.count = 64;
@@ -1982,6 +2050,178 @@ void tj_two_hosts() {
 }
 
 // ===========================================================================
+// v - this board as the client, served from its vectors
+// ===========================================================================
+//
+// Letter j's two client cases again with `I2cClientOptions::interrupts` up:
+// every flag reaches the program through i2c1_ev and i2c1_er, and the
+// bodies `service()` and `error_service()` decide - the glue below owes
+// take() on byte_received, give() on byte_wanted and flush() on the closing
+// NACK. ONE ENTRY PER EVENT is the shape the bodies promise: each entry
+// consumes the one flag it reports (ADDR and STOPF in the body, RxNE by
+// take(), TxE by give(), AF in error_service()), so an entry that finds
+// nothing (`none`) is the defect a level left standing would make. The
+// event body is timed on the STK at every entry (the entry's own
+// prologue outside the stamps).
+
+/// The vectors' tally for the client case (letter v), zeroed per case.
+struct ClientTally {
+    uint32_t entries;
+    uint32_t err_entries;
+    uint32_t cycles;
+    uint32_t cycles_max;
+    uint16_t given_sum;
+    uint8_t addressed;
+    uint8_t reads;
+    uint8_t rx;
+    uint8_t tx;
+    uint8_t stops;
+    uint8_t nacks;
+    uint8_t drops;
+    uint8_t nones;
+    uint8_t errors;
+    uint8_t seed;
+    uint8_t i_tx;
+    uint8_t got[16];
+};
+volatile bool client_live = false;
+ClientTally ct{};
+/// A client storm is silenced past this many entries in one case (a
+/// tenure of six bytes takes about ten).
+constexpr uint32_t client_entry_budget = 10'000;
+
+/// The event vector's client glue: one event, one action.
+[[gnu::always_inline]] inline void client_event() {
+    switch (Client::service()) {
+        case I2cClientEvent::addressed:
+            ++ct.addressed;
+            if (Client::host_reads()) {
+                ct.seed = static_cast<uint8_t>(0xC0u + 0x20u * ct.reads);
+                ++ct.reads;
+                ct.i_tx = 0;
+            }
+            break;
+        case I2cClientEvent::byte_received: {
+            const uint8_t v = Client::take();
+            if (ct.rx < sizeof ct.got) {
+                ct.got[ct.rx] = v;
+            }
+            ++ct.rx;
+            break;
+        }
+        case I2cClientEvent::byte_wanted: {
+            const uint8_t v = static_cast<uint8_t>(ct.seed + ct.i_tx);
+            Client::give(v);
+            ct.given_sum = static_cast<uint16_t>(ct.given_sum + v);
+            ++ct.i_tx;
+            ++ct.tx;
+            break;
+        }
+        case I2cClientEvent::stop: ++ct.stops; break;
+        default: ++ct.nones; break;
+    }
+}
+
+/// The error vector's client glue: the closing NACK flushes the byte the
+/// shifter asked for beyond it and gives it back to the tally.
+[[gnu::always_inline]] inline void client_error() {
+    const I2cClientEvent e = Client::error_service();
+    if (e == I2cClientEvent::nacked) {
+        ++ct.nacks;
+        if (Client::flush()) {
+            ++ct.drops;
+            ct.given_sum = static_cast<uint16_t>(ct.given_sum - static_cast<uint8_t>(ct.seed + ct.i_tx - 1u));
+        }
+    } else if (e == I2cClientEvent::error) {
+        ++ct.errors;
+    } else {
+        ++ct.nones;
+    }
+}
+
+/// One client case: the peer's host action armed, this board's client up
+/// ON ITS VECTORS, the window opened by hand, and the vectors left to it
+/// until `done` says the case is over or `ms` runs out.
+template <typename Done>
+bool client_case(Op op, const twilink::Params& a, uint32_t ms, Done done) {
+    if (!peer_act(op, a)) {
+        return false;
+    }
+    Host::release();
+    ct = ClientTally{};
+    client_live = true;
+    const bool up = Client::init(clock, {.own = twilink::dut_addr}, {.no_stretch = false, .interrupts = true});
+    hold_bus_busy(400);
+    const uint32_t t0 = Ticker::millis();
+    while (Ticker::millis() - t0 < ms && !done()) {
+        asm volatile("" ::: "memory");   // the vectors write the tally
+    }
+    Client::release();
+    client_live = false;
+    settle_ms(300);
+    host_ready();
+    return up;
+}
+
+void tv_client_vectors() {
+    if (!need_peer()) {
+        return;
+    }
+    // ---- WRITTEN TO: six bytes from the peer's controller ----
+    link_ready();
+    twilink::Params c = host_action(twilink::dut_addr, 6, 0xB0, 800);
+    c.aux16 = 400;
+    const bool wup = client_case(Op::arb, c, 900, [&] { return ct.rx >= c.count && ct.stops >= 1u; });
+    const ClientTally w = ct;
+    uint8_t mism = 0;
+    for (uint8_t i = 0; i < w.rx && i < c.count; ++i) {
+        if (w.got[i] != twilink::pattern_value(twilink::pattern_counting, c.seed, i)) {
+            ++mism;
+        }
+    }
+    print(serial, "  written to, from the vectors: init=", wup ? 1 : 0, " addressed=", w.addressed, " bytes=", w.rx,
+          " mism=", mism, " stops=", w.stops, " nones=", w.nones, " errors=", w.errors, "; event entries ",
+          w.entries, ", the body ", w.entries != 0u ? w.cycles / w.entries : 0u, " cycles on average, ",
+          w.cycles_max, " at most", crlf);
+    bench.verdict("FROM ITS VECTORS the client answered a real controller's write: its address, every byte "
+                  "byte-exact, the STOP seen",
+                  wup && w.addressed >= 1u && w.rx == c.count && mism == 0u && w.stops >= 1u);
+    bench.verdict("one entry per event: no entry found nothing, no error", w.nones == 0u && w.errors == 0u);
+
+    // ---- READ FROM: two reads of six, each read its own run ----
+    twilink::Params rd = host_action(twilink::dut_addr, 6, 0, 900);
+    rd.aux16 = 400;
+    rd.aux8 = 2;
+    const bool rup = client_case(Op::host_read, rd, 1000, [&] { return ct.nacks >= 2u; });
+    const ClientTally r = ct;
+    twilink::Report rr{};
+    const bool rrep = peer_report(rr);
+    uint16_t want_sum = 0;
+    for (uint8_t k = 0; k < 2u; ++k) {
+        for (uint8_t i = 0; i < 6u; ++i) {
+            want_sum = static_cast<uint16_t>(want_sum + static_cast<uint8_t>(0xC0u + 0x20u * k + i));
+        }
+    }
+    print(serial, "  read from, from the vectors: init=", rup ? 1 : 0, " reads=", r.reads, " given=", r.tx,
+          " closing NACKs=", r.nacks, " dropped=", r.drops, " nones=", r.nones, " errors=", r.errors,
+          "; the peer read ", rr.count, " bytes in ", rr.addr_hits, " reads, status ", rr.mstatus, ", sum ",
+          hex(rr.sum), " (", hex(want_sum), "), first ", hex(rr.first), ", the second read's first ",
+          hex(rr.aux0), "; event entries ", r.entries, " (the body ",
+          r.entries != 0u ? r.cycles / r.entries : 0u, " cycles on average, ", r.cycles_max,
+          " at most), error entries ", r.err_entries, crlf);
+    bench.verdict("FROM ITS VECTORS the client served a real controller's two reads as a transmitter, every "
+                  "byte the peer took its own run, and what the tally counts as sent - the drops given back - "
+                  "is what the peer read",
+                  rup && rrep && rr.mstatus == i2c_ok && rr.count == 12u && rr.addr_hits == 2u &&
+                      rr.sum == want_sum && rr.first == 0xC0u && rr.aux0 == 0xE0u && r.given_sum == want_sum);
+    bench.verdict("the closing NACK on the error vector each time, and flush() there dropped the byte asked "
+                  "beyond it - the second read opened on its own first byte",
+                  r.reads == 2u && r.nacks == 2u && r.drops == 2u && rr.aux0 == 0xE0u);
+    bench.verdict("one entry per event: no entry found nothing, no error", r.nones == 0u && r.errors == 0u);
+    bench.verdict("the command channel is back after the role swaps", command(Op::ping));
+}
+
+// ===========================================================================
 // q - the controller's own habits, raw, against this pairing's target
 // ===========================================================================
 
@@ -2167,6 +2407,275 @@ void tq_controller() {
 }
 
 // ===========================================================================
+// p - the dead channel and the release pulse
+// ===========================================================================
+//
+// A DMA channel's requests are an OR (RM 8.2), and on this die a raised
+// request is HELD until the channel takes it or its peripheral's reset line
+// is pulsed - measured on the CH32X035 and the CH32V203/V303
+// (docs/ch32x035/dma.md, docs/ch32vx03/dma.md, "A released requester"), and
+// asked of this die here: the next owner takes one stray item and the
+// channel then serves nothing more - a DEAD CHANNEL. The timers' compare
+// requests reach channels 6 and 7 (TIM1's channel 3 and TIM2's channel 2,
+// table 8-2), so a request
+// raised there with no channel enabled to take it, its gate closed without
+// a reset, stages a dead channel under the I2C host's engines with no wire
+// of its own.
+
+/// What a serve of the peer's is armed with (the twi_link `serve` action).
+twilink::Params serve_params(uint16_t count, uint16_t ms, uint8_t seed) {
+    twilink::Params a{};
+    a.count = count;
+    a.ms = ms;
+    a.addr = twilink::dut_addr;
+    a.seed = seed;
+    a.pattern = twilink::pattern_counting;
+    return a;
+}
+
+using DeadTx = Tim<1>;   ///< its channel 3's compare request: DMA channel 6
+using DeadRx = Tim<2>;   ///< its channel 2's compare request: DMA channel 7
+constexpr uint8_t dead_tx_ch = 2;
+constexpr uint8_t dead_rx_ch = 1;
+// Table 8-2: TIM1_CH3 rides channel 6 with I2C1_TX (and USART2_TX), TIM2_CH2
+// channel 7 with I2C1_RX (and USART2_RX); the timers' header carries no
+// table for its compare requests, so the two numbers are the table's.
+
+/// A compare request RAISED AND HELD: CCxDE set and the counter run from
+/// zero at HCLK past one match of the channel's compare (10 counts in, a
+/// period of 1000: some fifty microseconds, two matches), stopped, and the
+/// gate closed with no reset. (On the CH32X035 the software compare event,
+/// SWEVGR's CCxG, left the next owner nothing: the match is the request.)
+template <class T>
+void hold_compare_request(uint8_t ch) {
+    T::bus_clock(true);
+    TimRegs& r = T::regs();
+    r.PSC = 0;
+    r.ATRLR = 999;
+    r.CHCVR[ch] = 10;
+    r.CNT = 0;
+    r.DMAINTENR = static_cast<uint16_t>(1u << (9u + ch));
+    r.CTLR1 = tim_cen;
+    (void)delay_us(clock, 50);
+    r.CTLR1 = 0;
+    T::bus_clock(false);
+}
+
+/// The release contract on the timer: the reset line, then the gate.
+template <class T>
+void free_compare_request() {
+    T::bus_clock(true);
+    T::reset();
+    T::bus_clock(false);
+}
+
+/// The NEXT OWNER of a channel: a transmit block of four bytes into a RAM
+/// cell, request-paced (MEM2MEM clear), asked by nothing - any item it moves
+/// is a request still standing on the channel's OR. Its count read 300 us
+/// after the enable (a held request is taken within a few bus cycles).
+volatile uint8_t sink_cell = 0;
+template <uint8_t ch>
+uint16_t next_owner_moves() {
+    static const uint8_t four[4] = {1, 2, 3, 4};
+    using C = DmaChannel<ch>;
+    C::stop();
+    (void)C::prepare(DmaTransfer{.peripheral = &sink_cell, .memory = const_cast<uint8_t*>(four), .count = 4,
+                                 .config = {.direction = DmaDirection::memory_to_peripheral,
+                                            .memory_increment = true, .priority = DmaPriority::high}});
+    C::enable(true);
+    (void)delay_us(clock, 300);
+    const uint16_t moved = static_cast<uint16_t>(4u - C::count());
+    C::stop();
+    return moved;
+}
+
+/// A write of 32 on the engines over a channel 6 that TIM1 holds dead: the
+/// staging of both the transmit fault and the block's own held request
+/// (TxE raised under DMAEN on a channel that never answered it). The engine
+/// is left as the tenure left it, TIM1 reset.
+uint8_t dead_write() {
+    hold_compare_request<DeadTx>(dead_tx_ch);
+    (void)peer_act(Op::serve, serve_params(0, 300, 0x10));
+    dma_host_live = true;
+    (void)DmaHost::init(clock);
+    for (uint8_t i = 0; i < 32; ++i) {
+        tx_buf[i] = static_cast<uint8_t>(0x20u + i);
+    }
+    const uint8_t st = dma_tenure(twilink::dut_addr, tx_buf, 32, nullptr, 0, link_speed);
+    free_compare_request<DeadTx>();
+    return st;
+}
+
+/// The bytes the peer's serve counted, once its window is over (0xFFFF: no
+/// report). The plain host carries the command.
+uint16_t peer_took() {
+    settle_ms(350);
+    twilink::Report r{};
+    return peer_report(r) ? r.count : uint16_t{0xFFFF};
+}
+
+/// A read of 16 on the engines over a channel 7 that TIM2 holds dead, left
+/// STALLED: no recover(), the block as the stall left it (RxNE and BTF
+/// standing under DMAEN), TIM2 still holding.
+void stall_dead_read() {
+    hold_compare_request<DeadRx>(dead_rx_ch);
+    (void)peer_act(Op::serve, serve_params(0, 300, 0x40));
+    dma_host_live = true;
+    (void)DmaHost::init(clock);
+    DmaHost::Request r{};
+    r.addr = twilink::dut_addr;
+    r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(nullptr));
+    r.tx_len = 0;
+    r.rx = lend<Lease::reply>(static_cast<uint8_t*>(rx_buf));
+    r.rx_len = 16;
+    r.speed = link_speed;
+    host_done = false;
+    host_isr_entries = 0;
+    host_stormed = false;
+    if (!DmaHost::start(r)) {
+        settle_ms(20);
+    }
+}
+
+void tp_dead_channel() {
+    if (!need_peer()) {
+        return;
+    }
+    // THE CONTROL: nothing raised on either channel.
+    const uint16_t control6 = next_owner_moves<6>();
+    const uint16_t control7 = next_owner_moves<7>();
+
+    // 1. THE DEAD TRANSMIT CHANNEL. The hold proved first by a next owner
+    // (which takes the one stray item and leaves the channel dead), then a
+    // write of 32 over it: the channel moves the first byte at its enable
+    // and nothing more, BTF comes with the count standing, and the engine
+    // must answer i2c_dma_fault - never i2c_ok over a short write.
+    hold_compare_request<DeadTx>(dead_tx_ch);
+    const uint16_t held6 = next_owner_moves<6>();
+    free_compare_request<DeadTx>();
+    const uint8_t dws = dead_write();
+    const uint32_t dw_entries = host_isr_entries;
+    DmaHost::release();
+    host_ready();
+    const uint16_t dead_took = peer_took();
+    // The same write with the channel live again.
+    (void)peer_act(Op::serve, serve_params(0, 300, 0x10));
+    dma_host_live = true;
+    (void)DmaHost::init(clock);
+    const uint8_t lws = dma_tenure(twilink::dut_addr, tx_buf, 32, nullptr, 0, link_speed);
+    DmaHost::release();
+    host_ready();
+    const uint16_t live_took = peer_took();
+    print(serial, "  next owner, nothing raised: ch6 ", control6, " ch7 ", control7, "; after TIM1's held request: ",
+          held6, " (of 4)", crlf);
+    print(serial, "  the write of 32 over the dead channel 6: status ", dws, " (i2c_dma_fault ", i2c_dma_fault,
+          "), the peer took ", dead_took, ", event entries ", dw_entries, "; with the channel live: status ", lws,
+          ", the peer took ", live_took, crlf);
+    bench.verdict("with nothing raised, the next owner of channel 6 or 7 moves nothing", control6 == 0u &&
+                                                                                        control7 == 0u);
+    bench.verdict("TIM1's compare request, raised and its gate closed with no reset, is HELD: the next owner "
+                  "of channel 6 takes one stray item",
+                  held6 == 1u);
+    bench.verdict("A WRITE OVER THE DEAD CHANNEL ends i2c_dma_fault (BTF with the transmit count standing), "
+                  "never i2c_ok over a short write - and the far end took fewer than the 32",
+                  dws == i2c_dma_fault && dead_took < 32u);
+    bench.verdict("with TIM1 reset the same write lands whole, i2c_ok", lws == i2c_ok && live_took == 32u);
+
+    // 2. THE DEAD RECEIVE CHANNEL: TIM2's request held on channel 7 under
+    // an engined read of 16. The channel takes one stray item at its enable
+    // and serves no RxNE after it, so the read never completes: the event
+    // line is down for the block (the driver), so its vector is NOT stormed
+    // by the standing RxNE and BTF - the entries stay at the opening's (SB
+    // and ADDR: two, three with a re-entry; a storm would be 60 000) - and
+    // the caller's bound answers it (here dma_tenure's spin, some 50 ms,
+    // against the 1.5 ms the read takes at 100 kHz, then recover()).
+    hold_compare_request<DeadRx>(dead_rx_ch);
+    (void)peer_act(Op::serve, serve_params(0, 300, 0x40));
+    dma_host_live = true;
+    (void)DmaHost::init(clock);
+    for (uint8_t i = 0; i < 16; ++i) {
+        rx_buf[i] = 0xEE;
+    }
+    dma7_entries = 0;
+    const uint32_t err0 = error_isr_entries;
+    const uint8_t drs = dma_tenure(twilink::dut_addr, nullptr, 0, rx_buf, 16, link_speed);
+    const uint32_t dr_entries = host_isr_entries;
+    const uint32_t dr_err = error_isr_entries - err0;
+    const bool dr_storm = host_stormed;
+    const uint32_t dr_dma = dma7_entries;
+    DmaHost::release();
+    free_compare_request<DeadRx>();
+    host_ready();
+    settle_ms(350);
+    (void)peer_act(Op::serve, serve_params(0, 300, 0x40));
+    dma_host_live = true;
+    (void)DmaHost::init(clock);
+    for (uint8_t i = 0; i < 16; ++i) {
+        rx_buf[i] = 0xEE;
+    }
+    const uint8_t lrs = dma_tenure(twilink::dut_addr, nullptr, 0, rx_buf, 16, link_speed);
+    uint8_t mism = 0;
+    for (uint8_t i = 0; i < 16; ++i) {
+        if (rx_buf[i] != twilink::pattern_value(twilink::pattern_counting, 0x40, i)) {
+            ++mism;
+        }
+    }
+    DmaHost::release();
+    host_ready();
+    settle_ms(350);
+    print(serial, "  the read of 16 over the dead channel 7: status ", drs, " (no answer ", no_answer,
+          "), event entries ", dr_entries, ", error entries ", dr_err, ", channel 7 entries ", dr_dma,
+          dr_storm ? ", STORMED" : "", "; with the channel live: status ", lrs, " mism ", mism, crlf);
+    bench.verdict("A READ OVER THE DEAD CHANNEL never completes - no status claimed - and its event vector "
+                  "is not stormed: the line is down for the block (at most 4 entries, the opening's)",
+                  drs == no_answer && dr_entries <= 4u && !dr_storm);
+    bench.verdict("after recover(), release() and TIM2's reset the same read is byte-exact", lrs == i2c_ok &&
+                                                                                             mism == 0u);
+
+    // 3. THE RELEASE PULSE: the block's OWN request. A read over the dead
+    // channel 7 stalls with RxNE and BTF standing under DMAEN - the I2C's
+    // own request raised on a channel that never answered it - and TIM2 is
+    // then reset, so whatever the next owner of channel 7 takes is the
+    // I2C's. Four ways of letting go, each on a fresh stall: none (the
+    // vectors off, the block live: the request still asserted, which proves
+    // the staging raised one), the gate closed alone, PE cleared and the
+    // gate closed (no reset), and release() - the reset line before the
+    // gate - which must leave the next owner nothing.
+    uint16_t moved[4] = {};
+    for (uint8_t way = 0; way < 4u; ++way) {
+        stall_dead_read();
+        Pfic::disable(H::event_irq());
+        Pfic::disable(H::error_irq());
+        if (way == 1u) {
+            H::bus_clock(false);
+        } else if (way == 2u) {
+            H::disable();
+            H::bus_clock(false);
+        } else if (way == 3u) {
+            DmaHost::release();
+        }
+        free_compare_request<DeadRx>();
+        moved[way] = next_owner_moves<7>();
+        H::bus_clock(true);
+        H::reset();
+        DmaHost::release();
+        host_ready();
+        (void)peer_took();
+    }
+    print(serial, "  the block's own request on channel 7 (a read stalled under DMAEN), the next owner moved: "
+                  "left live ",
+          moved[0], ", the gate closed ", moved[1], ", PE cleared and the gate closed ", moved[2],
+          ", after release() ", moved[3], " (of 4)", crlf);
+    bench.verdict("the stalled read raised the block's own request on channel 7: left live, the next owner "
+                  "takes an item",
+                  moved[0] >= 1u);
+    bench.verdict("release() - the reset line before the gate - leaves the next owner nothing", moved[3] == 0u);
+    bench.verdict("and no way of letting go hands the next owner more than the one item a held request is",
+                  moved[1] <= 1u && moved[2] <= 1u);
+    bench.verdict("and the command channel is back", command(Op::ping));
+}
+
+// ===========================================================================
 // k - the stuck bus
 // ===========================================================================
 
@@ -2229,6 +2738,25 @@ extern "C" BRIO_CH32_INTERRUPT void systick_handler() { brio::Ticker::tick(); }
 extern "C" BRIO_CH32_INTERRUPT void usart1_handler() { (void)Serial::isr(); }
 
 extern "C" BRIO_CH32_INTERRUPT void i2c1_ev_handler() {
+    // The client's glue only where letter v is carried (a group image of
+    // the CH32V003 carries none of it).
+    if (brio::selection_carries(brio::test_letters, 'v') && client_live) {
+        const uint32_t t0 = brio::stk()->CNT;
+        ct.entries = ct.entries + 1u;
+        if (ct.entries > client_entry_budget) {
+            H::event_interrupt(false);
+            H::buffer_interrupt(false);
+            return;
+        }
+        client_event();
+        const uint32_t t1 = brio::stk()->CNT;
+        const uint32_t d = t1 >= t0 ? t1 - t0 : t1 + brio::stk()->CMP + 1u - t0;
+        ct.cycles = ct.cycles + d;
+        if (d > ct.cycles_max) {
+            ct.cycles_max = d;
+        }
+        return;
+    }
     host_isr_entries = host_isr_entries + 1u;
     if (host_isr_entries > host_isr_budget) {
         host_stormed = true;
@@ -2257,6 +2785,11 @@ extern "C" BRIO_CH32_INTERRUPT void i2c1_ev_handler() {
 }
 
 extern "C" BRIO_CH32_INTERRUPT void i2c1_er_handler() {
+    if (brio::selection_carries(brio::test_letters, 'v') && client_live) {
+        ct.err_entries = ct.err_entries + 1u;
+        client_error();
+        return;
+    }
     error_isr_entries = error_isr_entries + 1u;
     if (dma_host_live) {
         if (DmaHost::error_isr()) {
@@ -2312,6 +2845,10 @@ int main() {
     bench.letter('j', "TWO HOSTS ON ONE WIRE: arbitration both ways, a START into a live tenure, this "
                       "board as the peer's client - written to and read from", tj_two_hosts);
     bench.letter('k', "the stuck bus: the peer holding SDA, unstick() counting", tk_unstick);
+    bench.letter('p', "THE DEAD CHANNEL: a held request under the engines' write and read, and release()'s "
+                      "pulse", tp_dead_channel);
+    bench.letter('v', "THIS BOARD AS THE CLIENT FROM ITS VECTORS: written to and read from by the peer's "
+                      "controller", tv_client_vectors);
     bench.letter('q', "the controller's own habits, raw: BTF under a requested STOP, the repeated START "
                       "past a refused byte, the withdrawal's race", tq_controller);
     bench.letter('r', "THE REPEATED START on the last byte's TxE: 1 to 4 written then read, "

@@ -278,10 +278,8 @@ inline constexpr uint8_t pattern_fixed = 1;      ///< seed every time
 /// Every action command carries exactly this. What an op does not use
 /// stays zero; the meaning of the shared fields per op:
 ///
-///   serve      count = data bytes after which the action may end early
-///              (the ch32vx03 peer ends a counted serve on the STOP of
-///              the read that collects the command's ack: a DUT whose
-///              tenures must all be served arms it with count 0, the
+///   serve      count = data bytes after which the action may end early,
+///              at the end of the tenure that moved them (count 0: the
 ///              deadline alone), ms = deadline, addr = the client address to take,
 ///              seed/pattern = what it answers a read with, hold_us =
 ///              the CLOCK STRETCH it adds to every data byte, nack_at =
@@ -427,7 +425,7 @@ struct Report {
     uint16_t sum = 0;        ///< 8-bit-wide running sum of the RECEIVED bytes
     uint16_t addr_hits = 0;  ///< address packets its client matched
     uint8_t flags = 0;
-    uint8_t last_addr = 0;   ///< the address of the last match (SDATA)
+    uint8_t last_addr = 0;   ///< the 7-bit address of the last match (0x00 a general call)
     uint8_t first = 0;       ///< the first byte it received
     uint8_t sstatus = 0;     ///< SSTATUS at the end of the action
     /// The host half's MSTATUS at the end - except for `serve`, which

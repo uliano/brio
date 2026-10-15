@@ -314,6 +314,23 @@ CH32V203's answer. So the `Uart`'s `release()` pulses the block's reset
 before it closes the gate ([usart.md](usart.md)), the I2C host's and
 client's do the same ([i2c.md](i2c.md)), and the suite's own pacer too.
 
+The other requesters, measured by the same next owner in the I2C and SPI
+suites (the letters there):
+
+| requester (the channel) | left live | the gate closed | the enable cleared, then the gate | the reset line, then the gate |
+|---|---|---|---|---|
+| TIM1's channels 1 and 3, TIM2's channel 2 compare, raised by a match (2, 6, 7) | - | 1 | - | none: the next block whole |
+| SPI1's TXE under TXDMAEN, SPE up as a host (3) | 4 | 1 | 0 (SPE) | 0 |
+| I2C1's RxNE under DMAEN, a read stalled (7) | 4 | 0 | 0 (PE) | 0 |
+
+A timer's request is held like USART3's - the next owner takes one stray
+item and then serves nothing, a DEAD CHANNEL ([i2c.md](i2c.md), letter
+p); the software compare event (SWEVGR's CCxG) raised none. SPI1's
+outlives a closed gate while SPE stands and falls with SPE; I2C1's falls
+with its gate. Each block's `release()` pulses its reset line before the
+gate all the same: the contract's two stores leave nothing whatever the
+block holds.
+
 ## Not covered yet
 
 Driver gaps, each with its reason:

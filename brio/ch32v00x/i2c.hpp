@@ -980,8 +980,10 @@ public:
         // THE RESET LINE BEFORE THE GATE: on the CH32V203 and the CH32V303
         // a request DMAEN raised is held through DMAEN and PE cleared and
         // frozen on the channel's OR by the gate, stalling the next owner
-        // of channel 6 or 7 - USART2's here (docs/ch32vx03/dma.md). Not
-        // measured on this die (docs/ch32v00x/i2c.md); the pulse, the
+        // of channel 6 or 7 - USART2's here (docs/ch32vx03/dma.md). On this
+        // die this block's own request, raised by a read stalled over a
+        // dead channel, measured NOT to outlive its gate, where a timer's
+        // compare request does (docs/ch32v00x/i2c.md); the pulse, the
         // vendor's own I2C_DeInit, leaves none either way.
         S::reset();
         S::bus_clock(false);

@@ -52,6 +52,12 @@
 //   c  the refusals: the chapter's, the high-speed read off /2 at run
 //      time, a ceiling under HCLK/256, and the client configurations this
 //      die does not serve
+//   f  THE FAULT EXITS, wireless: spi_stalled from a polled request over a
+//      block held in reset, spi_dma_fault from the polled engines over a
+//      receive channel a timer's held request leaves dead, the asynchronous
+//      engines over it answered by the caller's bound and recover(); and the
+//      block's own transmit request let go four ways - release()'s reset
+//      pulse leaving the next owner of channel 3 nothing
 //   n  (y) THE PEER: the command channel, ident (the CH32V006, kind 0x06),
 //      ten pings
 //   o  (y) the matrix: this host in the four modes and both bit orders
@@ -71,19 +77,31 @@
 //   r  (y) THE ROLES INVERT: this chip as the CLIENT under the peer's
 //      host_burst, in all four modes and both bit orders - 16.2.3's "mode
 //      2 or mode 3" and 16.3.1's "LSB only as host" measured
+//   v  (y) THE CLIENT FROM ITS VECTOR: letter r's bursts served by spi1's
+//      vector (RXNEIE, TXEIE, SpiClient::isr()) in every admitted
+//      combination, judged both ways, the entries and the body printed
 //   m  (y) MODF from a second chip: a host whose NSS is a hardware input,
 //      demoted four times by the peer's ss_pulse on PA4, and the clearing
 //      sequence; and ODEN - SCK on a wire with no pull-up, NSS on the
 //      peer's
 //   w  (y) THE WAVEFORMS: this chip as the logic analyser of its four link
 //      pads - both hosts' SCK and MOSI, both clients' MISO, every mode
+//   s  (by name) the /2 frame and the core's share of the bus: letter b's
+//      engined frame at /2 twenty times with the completion polled in SRAM
+//      and twenty with the core waiting off the bus
 //   x  (by name) the slip statistics: each mode ten times
 //
 // THE SUPPLY at boot: the voltage detector at 3.0 V (pwr.hpp); an image
 // that drives a link pad from a sagging rail refuses every letter and
 // says so.
 //
+// THE SUITE IS TWO IMAGES (design/overview.md, "A suite's image fits the
+// family's smallest chip"): whole it comes within the 5 % of the 62 KB
+// every part of the series has, so test_x035_spi-1 carries the wireless
+// letters and test_x035_spi-2 the two-board ones (`y`) and the slip
+// statistics.
 // build: boards = x035f8
+// build: groups = abcfs,nopkqrvmwx
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -100,6 +118,7 @@
 #include "ch32x035/pwr.hpp"
 #include "ch32x035/spi.hpp"
 #include "ch32x035/ticker.hpp"
+#include "ch32x035/tim.hpp"
 #include "ch32x035/usart.hpp"
 #include "kernel/post.hpp"
 #include "kernel/tenuto.hpp"
@@ -142,7 +161,7 @@ using MosiPin = Pin<'A', 7>;
 TwoKeyTestBench<Serial, 'y'> bench;
 
 /// Which task owns SPI1 and its two channels: the vectors serve it.
-enum class Owner : uint8_t { host, dma_host, flash_host, flash_dma_host, bus_ao, none };
+enum class Owner : uint8_t { host, dma_host, flash_host, flash_dma_host, bus_ao, client_vectors, none };
 volatile Owner owner = Owner::host;
 volatile bool host_done = false;
 volatile uint32_t spi_isr_entries = 0;
@@ -1311,6 +1330,246 @@ void tc_refusals() {
 }
 
 // ===========================================================================
+// f - the fault exits, recover() and release()'s reset pulse (wireless)
+// ===========================================================================
+//
+// Every exit of the host that no healthy wire takes, provoked on purpose
+// with the select high (the far client deselected, R2): spi_stalled - a
+// polled request whose flag never comes, the block HELD IN RESET under it
+// (its registers ignore every write, RXNE never rises) -, spi_dma_fault - a
+// polled request on the engines over a DEAD receive channel, TIM1's
+// compare request held on DMA channel 2 (its channel 1's row, figure 9-1)
+// with no channel to take it, its gate closed with no reset (the I2C
+// suite's letter p measured the hold on this die) -, the asynchronous
+// engines over the same dead channel answered by the caller's bound and
+// recover(); and the block's own transmit request left on channel 3 under
+// TXDMAEN, let go four ways, release() the one that must leave nothing.
+
+using DeadRx = Tim<1>;   ///< its channel 1's compare request: DMA channel 2
+constexpr uint8_t dead_rx_ch = 0;
+static_assert(DeadRx::compare_dma_channel(dead_rx_ch) == 2, "figure 9-1: TIM1_CH1 rides channel 2 with SPI1_RX");
+
+/// A compare request RAISED AND HELD: CCxDE set, the counter run from zero
+/// at HCLK past one match (10 counts in, a period of 1000: some fifty
+/// microseconds, two matches), stopped, the gate closed with no reset.
+template <class T>
+void hold_compare_request(uint8_t ch) {
+    T::bus_clock(true);
+    TimRegs& r = T::regs();
+    r.PSC = 0;
+    r.ATRLR = 999;
+    r.CHCVR[ch] = 10;
+    r.CNT = 0;
+    r.DMAINTENR = static_cast<uint16_t>(1u << (9u + ch));
+    r.CTLR1 = tim_cen;
+    (void)delay_us(clock, 50);
+    r.CTLR1 = 0;
+    T::bus_clock(false);
+}
+
+/// The release contract on the timer: the reset line, then the gate.
+template <class T>
+void free_compare_request() {
+    T::bus_clock(true);
+    T::reset();
+    T::bus_clock(false);
+}
+
+/// The NEXT OWNER of a channel: a transmit block of four bytes into a RAM
+/// cell, request-paced, asked by nothing - any item it moves is a request
+/// still standing on the channel's OR. Its count read 300 us after the
+/// enable.
+volatile uint8_t sink_cell = 0;
+template <uint8_t ch>
+uint16_t next_owner_moves() {
+    static const uint8_t four[4] = {1, 2, 3, 4};
+    using C = DmaChannel<ch>;
+    C::stop();
+    (void)C::prepare(DmaTransfer{.peripheral = &sink_cell, .memory = const_cast<uint8_t*>(four), .count = 4,
+                                 .config = {.direction = DmaDirection::memory_to_peripheral,
+                                            .memory_increment = true, .priority = DmaPriority::high}});
+    C::enable(true);
+    (void)delay_us(clock, 300);
+    const uint16_t moved = static_cast<uint16_t>(4u - C::count());
+    C::stop();
+    return moved;
+}
+
+void tf_faults() {
+    fill_pattern(tx_buf, 64, 0x5A);
+    // 1. spi_stalled: a polled duplex request of 16 at /16 with SPI1 HELD in
+    // reset. The budget is the host's (poll_budget: several times the
+    // frames' cycles), so the request must come back spi_stalled within
+    // milliseconds, never hang.
+    host_ready<FlashHost>();
+    rcc()->APB2PRSTR = rcc()->APB2PRSTR | rcc_pb2_spi1;
+    uint32_t t0 = cycles_now();
+    const uint8_t st_stall = host_xfer<FlashHost>({}, nullptr, 0, tx_buf, rx_buf, 16, SpiMode::mode0,
+                                                  SpiClock::div16, SpiDataSize::bits8, true);
+    const uint32_t stall_cycles = cycles_now() - t0;
+    rcc()->APB2PRSTR = rcc()->APB2PRSTR & ~rcc_pb2_spi1;
+    const bool rec1 = FlashHost::recover();
+    const uint8_t st_after1 = host_xfer<FlashHost>({}, nullptr, 0, tx_buf, rx_buf, 16, SpiMode::mode0,
+                                                   SpiClock::div16, SpiDataSize::bits8, true);
+    FlashHost::release();
+    print(serial, "  a polled request of 16 at /16 with the block held in reset: status ", st_stall,
+          " (spi_stalled ", spi_stalled, ") after ", stall_cycles, " cycles (the wire's 2048); recover() ",
+          rec1 ? 1 : 0, ", the next request ", st_after1, crlf);
+    bench.verdict("A POLLED REQUEST OVER A BLOCK HELD IN RESET ends spi_stalled - the budget runs out, the "
+                  "call returns - within ten milliseconds (480 000 cycles), and after recover() the next "
+                  "request is spi_ok",
+                  st_stall == spi_stalled && stall_cycles < 480'000u && rec1 && st_after1 == spi_ok);
+
+    // 2. spi_dma_fault: a polled request of 64 on the engines (past
+    // dma_min_frames_polled) over the dead receive channel 2. The hold
+    // proved first by a next owner (one stray item, the channel then dead).
+    const uint16_t control2 = next_owner_moves<2>();
+    hold_compare_request<DeadRx>(dead_rx_ch);
+    const uint16_t held2 = next_owner_moves<2>();
+    dma_ready<FlashDmaHost>();
+    t0 = cycles_now();
+    const uint8_t st_fault = dma_xfer<FlashDmaHost>({}, nullptr, 0, tx_buf, rx_buf, 64, SpiClock::div16,
+                                                    SpiDataSize::bits8, true);
+    const uint32_t fault_cycles = cycles_now() - t0;
+    // 3. THE ASYNCHRONOUS ENGINES over the same dead channel: no completion
+    // edge ever comes; the caller's bound (dma_xfer's spin) and recover().
+    const uint8_t st_async = dma_xfer<FlashDmaHost>({}, nullptr, 0, tx_buf, rx_buf, 64, SpiClock::div16,
+                                                    SpiDataSize::bits8, false);
+    free_compare_request<DeadRx>();
+    const bool rec2 = FlashDmaHost::recover();
+    const uint8_t st_live_polled = dma_xfer<FlashDmaHost>({}, nullptr, 0, tx_buf, rx_buf, 64, SpiClock::div16,
+                                                          SpiDataSize::bits8, true);
+    const uint8_t st_live_async = dma_xfer<FlashDmaHost>({}, nullptr, 0, tx_buf, rx_buf, 64, SpiClock::div16,
+                                                         SpiDataSize::bits8, false);
+    FlashDmaHost::release();
+    print(serial, "  next owner of channel 2, nothing raised ", control2, ", after TIM1's held request ", held2,
+          " (of 4); over the dead channel: the polled engines ", st_fault, " (spi_dma_fault ", spi_dma_fault,
+          ") after ", fault_cycles, " cycles, the asynchronous engines ", st_async, " (no answer ", no_answer,
+          "); TIM1 reset and recover() ", rec2 ? 1 : 0, ": polled ", st_live_polled, ", asynchronous ",
+          st_live_async, crlf);
+    bench.verdict("with nothing raised the next owner of channel 2 moves nothing; after TIM1's held request "
+                  "it takes one stray item - the dead channel staged",
+                  control2 == 0u && held2 == 1u);
+    bench.verdict("A POLLED REQUEST ON THE ENGINES OVER THE DEAD CHANNEL ends spi_dma_fault (spin_dma's bound) "
+                  "and returns",
+                  st_fault == spi_dma_fault);
+    bench.verdict("the asynchronous engines over it never claim a completion: the caller's bound answers it, "
+                  "and once TIM1 is reset and recover() has run both paths complete spi_ok",
+                  st_async == no_answer && rec2 && st_live_polled == spi_ok && st_live_async == spi_ok);
+
+    // 4. THE RELEASE PULSE: the block's own transmit request. SPE up as a
+    // host with nothing written - TXE stands - and TXDMAEN set with no
+    // channel enabled: the request rises on channel 3. Let go four ways,
+    // each on a fresh raise: none (the request still asserted: the staging
+    // proved), the gate closed alone, SPE cleared and the gate closed, and
+    // release() - the reset line before the gate - which must leave the
+    // next owner nothing.
+    uint16_t moved[4] = {};
+    for (uint8_t way = 0; way < 4u; ++way) {
+        dma_ready<FlashDmaHost>();
+        FlashDmaHost::prime(SpiMode::mode0, SpiClock::div16);
+        DmaChannel<3>::stop();
+        S::dma_requests(true, false);
+        (void)delay_us(clock, 20);
+        if (way == 1u) {
+            S::bus_clock(false);
+        } else if (way == 2u) {
+            (void)S::disable();
+            S::bus_clock(false);
+        } else if (way == 3u) {
+            FlashDmaHost::release();
+        }
+        moved[way] = next_owner_moves<3>();
+        S::bus_clock(true);
+        S::reset();
+        FlashDmaHost::release();
+    }
+    print(serial, "  the block's own request on channel 3 (TXE under TXDMAEN), the next owner moved: left live ",
+          moved[0], ", the gate closed ", moved[1], ", SPE cleared and the gate closed ", moved[2],
+          ", after release() ", moved[3], " (of 4)", crlf);
+    bench.verdict("TXE under TXDMAEN raised the block's own request on channel 3: left live, the next owner "
+                  "takes an item",
+                  moved[0] >= 1u);
+    bench.verdict("release() - the reset line before the gate - leaves the next owner nothing", moved[3] == 0u);
+    bench.verdict("and no way of letting go hands the next owner more than the one item a held request is",
+                  moved[1] <= 1u && moved[2] <= 1u);
+    host_ready<Host>();
+}
+
+// ===========================================================================
+// s - the /2 frame and the core's share of the bus (a diagnostic, by name)
+// ===========================================================================
+//
+// Letter b's engined frame at /2 once read 1045 thousandths of the wire
+// where its other runs read 1006 to 1020. The core cannot sleep through
+// the block to take itself off the bus - in this die's Sleep the DMA moves
+// nothing (docs/ch32x035/dma.md) - so the two waits are compared awake:
+// the suite's own, a poll of the completion flag in SRAM every few cycles,
+// and one OFF THE BUS, delay_us() on the core's own STK between flag
+// looks five microseconds apart, the block's end stamped by the DMA
+// vector itself. A frame inside the block is the difference of a 256- and
+// a 32-frame block, as letter b takes it, twenty times each way.
+
+volatile uint32_t dma_done_at = 0;
+
+/// One engined block of `n` frames at /2, its time from start() to the
+/// completion: polled in SRAM (`quiet` false) or waited off the bus.
+uint32_t block_at_div2(uint16_t n, bool quiet) {
+    FlashDmaHost::Request r{};
+    r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(tx_buf));
+    r.rx = lend<Lease::reply>(static_cast<uint8_t*>(rx_buf));
+    r.len = n;
+    r.mode = SpiMode::mode0;
+    r.clock = SpiClock::div2;
+    r.bits = SpiDataSize::bits8;
+    host_done = false;
+    const uint32_t t0 = cycles_now();
+    if (FlashDmaHost::start(r)) {
+        return cycles_now() - t0;
+    }
+    if (quiet) {
+        for (uint32_t i = 0; i < 2000u && !host_done; ++i) {
+            (void)delay_us(clock, 5);
+        }
+        return host_done ? dma_done_at - t0 : 0u;
+    }
+    for (uint32_t i = 0; i < 8'000'000UL && !host_done; ++i) {
+    }
+    return host_done ? cycles_now() - t0 : 0u;
+}
+
+void ts_bus_share() {
+    dma_ready<FlashDmaHost>();
+    fill_pattern(tx_buf, 512, 0x3C);
+    console_drain();
+    for (uint8_t way = 0; way < 2u; ++way) {
+        uint32_t lo = 0xFFFFFFFFu, hi = 0, over = 0;
+        for (uint8_t k = 0; k < 20u; ++k) {
+            uint32_t big = 0xFFFFFFFFu, small = 0xFFFFFFFFu;
+            for (uint8_t j = 0; j < 3u; ++j) {
+                const uint32_t b = block_at_div2(256, way != 0u);
+                const uint32_t s = block_at_div2(32, way != 0u);
+                big = b < big ? b : big;
+                small = s < small ? s : small;
+            }
+            const uint32_t pm = big > small ? (big - small) * 1000u / (224u * 16u) : 0u;
+            lo = pm < lo ? pm : lo;
+            hi = pm > hi ? pm : hi;
+            if (!wire_ok(pm)) {
+                ++over;
+            }
+        }
+        print(serial, way != 0u ? "  waited OFF the bus (delay_us, the vector's stamp): "
+                                : "  the completion flag polled in SRAM:                ",
+              "the /2 frame ", lo, " to ", hi, " thousandths of the wire in 20 runs, ", over,
+              " outside -1..+3 %", crlf);
+    }
+    FlashDmaHost::release();
+    host_ready<Host>();
+    bench.verdict("ran", true);
+}
+
+// ===========================================================================
 // n - the peer's command channel
 // ===========================================================================
 
@@ -1846,7 +2105,24 @@ struct ClientRun {
 /// RESOURCE configured by hand (the measurement includes what SpiClient
 /// refuses): the NSS pad PA4 the hardware select, MISO driven, the run's
 /// first answer preloaded with the select high.
-ClientRun client_burst(uint8_t mode, bool lsb, uint8_t seed_a, uint8_t seed_b, uint16_t div) {
+/// The vectors' client (letter v): what spi1's glue answers from and
+/// takes into, and its tally.
+struct VecClient {
+    uint16_t n;
+    uint16_t sent;
+    uint16_t got;
+    uint32_t entries;
+    uint32_t both;
+    uint32_t nones;
+    uint32_t cycles_max;
+};
+volatile VecClient vc{};
+
+/// One burst with this chip as the client in `mode` and `lsb`, served by
+/// the polled exchange run or, with `vectors`, FROM SPI1'S VECTOR (letter
+/// v): RXNEIE and TXEIE up, the glue writing the next answer on TXE and
+/// taking the frame on RXNE.
+ClientRun client_burst(uint8_t mode, bool lsb, uint8_t seed_a, uint8_t seed_b, uint16_t div, bool vectors = false) {
     ClientRun out{};
     spilink::Params a{};
     a.count = 12;
@@ -1879,10 +2155,33 @@ ClientRun client_burst(uint8_t mode, bool lsb, uint8_t seed_a, uint8_t seed_b, u
         ctx[i] = answers.next();
         crx[i] = 0xEE;
     }
-    S::enable();
-    const Client::Run run = Client::exchange(std::span<const uint8_t>(ctx, a.count), std::span<uint8_t>(crx, a.count),
-                                             SysClock::hz / 8u);
-    out.got = run.count;
+    if (vectors) {
+        vc.n = a.count;
+        vc.sent = 0;
+        vc.got = 0;
+        vc.entries = 0;
+        vc.both = 0;
+        vc.nones = 0;
+        vc.cycles_max = 0;
+        owner = Owner::client_vectors;
+        S::rxne_interrupt(true);
+        S::txe_interrupt(true);
+        Pfic::enable(S::irq());
+        S::enable();   // TXE stands: the vector loads the first answer at once
+        const uint32_t t0 = Ticker::millis();
+        while (vc.got < a.count && Ticker::millis() - t0 < 300u) {
+        }
+        S::rxne_interrupt(false);
+        S::txe_interrupt(false);
+        Pfic::disable(S::irq());
+        owner = Owner::none;
+        out.got = vc.got;
+    } else {
+        S::enable();
+        const Client::Run run = Client::exchange(std::span<const uint8_t>(ctx, a.count),
+                                                 std::span<uint8_t>(crx, a.count), SysClock::hz / 8u);
+        out.got = run.count;
+    }
     out.ran = true;
     // The far host closes its select, then this end lets the pads go.
     const uint32_t t0 = Ticker::millis();
@@ -1952,6 +2251,54 @@ void tr_peer_client() {
     bench.verdict("and every combination SpiClient refuses was MEASURED broken on the wire - a refusal that "
                   "follows the measurement",
                   refused_broken == refused);
+    (void)link_command_mode();
+    bench.verdict("the command channel is back after the role swaps", command(Op::ping));
+}
+
+// ===========================================================================
+// v - this chip as the CLIENT served from its VECTOR
+// ===========================================================================
+//
+// Letter r's bursts again, the client's flags delivered by spi1 (RXNEIE and
+// TXEIE, the body SpiClient::isr() and the glue in the vector) instead of
+// the polled run: every combination SpiClient admits as an answering
+// client, the peer's host at 1.5 MHz (a frame 256 cycles of this end's 48
+// MHz, against an entry of about a hundred). Judged both ways as r judges;
+// the entries per frame and the longest body printed.
+
+void tv_client_vectors() {
+    if (!need_peer()) {
+        return;
+    }
+    uint8_t admitted = 0, exact = 0;
+    uint32_t entries = 0, frames = 0, nones = 0, longest = 0;
+    for (uint8_t m = 0; m < 4u; ++m) {
+        for (uint8_t o = 0; o < 2u; ++o) {
+            if (!spi_client_answers(static_cast<SpiMode>(m), o != 0u)) {
+                continue;
+            }
+            ++admitted;
+            const ClientRun c = client_burst(m, o != 0u, static_cast<uint8_t>(0x3C + m + 8u * o),
+                                             static_cast<uint8_t>(0x81 + m + 8u * o), 32, true);
+            const bool ok = c.ran && c.got == 12u && c.mism == 0u && c.peer.count == 12u && c.peer.mism == 0u;
+            print(serial, "  mode ", m, o != 0u ? " LSb" : " MSb", " from the vector: received ", c.got,
+                  "/12 mism ", c.mism, "; the host read our answers ", c.peer.count, "/12 mism ", c.peer.mism,
+                  "; entries ", vc.entries, " (", vc.both, " with both flags, ", vc.nones, " with none), the "
+                  "longest body ", vc.cycles_max, " cycles",
+                  crlf);
+            exact = static_cast<uint8_t>(exact + (ok ? 1u : 0u));
+            entries += vc.entries;
+            frames += c.got;
+            nones += vc.nones;
+            longest = vc.cycles_max > longest ? vc.cycles_max : longest;
+        }
+    }
+    print(serial, "  -> ", exact, " of ", admitted, " admitted combinations exact both ways; ", entries, " entries for ",
+          frames, " frames, the longest body ", longest, " cycles", crlf);
+    bench.verdict("THE CLIENT FROM ITS VECTOR receives a foreign host's burst and answers it exact in every "
+                  "combination SpiClient admits",
+                  admitted != 0u && exact == admitted);
+    bench.verdict("every entry found a flag it serves (no entry with none)", nones == 0u);
     (void)link_command_mode();
     bench.verdict("the command channel is back after the role swaps", command(Op::ping));
 }
@@ -2579,6 +2926,37 @@ extern "C" BRIO_CH32_INTERRUPT void spi1_handler() {
                 host_done = true;
             }
             break;
+        case Owner::client_vectors: {
+            // THE CLIENT FROM ITS VECTOR (letter v): the next answer on TXE -
+            // one ahead, the buffer's frame of window - the frame on RXNE.
+            const uint32_t up = Client::isr();
+            vc.entries = vc.entries + 1u;
+            if ((up & SpiFlag::rxne) != 0u) {
+                const uint8_t v = static_cast<uint8_t>(S::regs().DATAR);
+                if (vc.got < sizeof crx) {
+                    crx[vc.got] = v;
+                }
+                vc.got = static_cast<uint16_t>(vc.got + 1u);
+            }
+            if ((up & SpiFlag::txe) != 0u) {
+                if (vc.sent < vc.n) {
+                    S::regs().DATAR = ctx[vc.sent];
+                    vc.sent = static_cast<uint16_t>(vc.sent + 1u);
+                } else {
+                    S::txe_interrupt(false);
+                }
+            }
+            if ((up & (SpiFlag::rxne | SpiFlag::txe)) == (SpiFlag::rxne | SpiFlag::txe)) {
+                vc.both = vc.both + 1u;
+            } else if ((up & (SpiFlag::rxne | SpiFlag::txe)) == 0u) {
+                vc.nones = vc.nones + 1u;
+            }
+            const uint32_t d = stamp_span(t0, stamp());
+            if (d > vc.cycles_max) {
+                vc.cycles_max = d;
+            }
+            break;
+        }
         default:
             S::rxne_interrupt(false);
             S::txe_interrupt(false);
@@ -2596,6 +2974,7 @@ extern "C" BRIO_CH32_INTERRUPT void spi1_handler() {
     if (owner == Owner::dma_host && DmaHost::dma_isr()) {
         host_done = true;
     } else if (owner == Owner::flash_dma_host && FlashDmaHost::dma_isr()) {
+        dma_done_at = brio::Ticker::cycles();
         host_done = true;
     }
 }
@@ -2621,6 +3000,10 @@ int main() {
                  ta_block);
     bench.letter('b', "THE RATE LADDER on the wire, the high-speed read's rate, the host's costs", tb_ladder);
     bench.letter('c', "the refusals", tc_refusals);
+    bench.letter('s', "the /2 frame and the core's share of the bus: twenty runs polled in SRAM and waited "
+                      "off the bus (by name)", ts_bus_share, false);
+    bench.letter('f', "THE FAULT EXITS: spi_stalled over a block in reset, spi_dma_fault over a dead channel, "
+                      "recover(), release()'s pulse", tf_faults);
     bench.second_letter('n', "THE PEER: the command channel, ident, ten pings", tn_peer_link);
     bench.second_letter('o', "the matrix: four modes, both orders, a mismatch, the receive CRC", to_peer_matrix);
     bench.second_letter('p', "THE LADDER against the peer, both host paths, both serves, /2 with the high-speed read",
@@ -2630,6 +3013,8 @@ int main() {
                         tk_peer_runs);
     bench.second_letter('q', "THE KERNEL against the peer: four transactions in one select window", tq_peer_kernel);
     bench.second_letter('r', "THE ROLES INVERT: this chip as the client in every mode and order", tr_peer_client);
+    bench.second_letter('v', "THIS CHIP AS THE CLIENT FROM ITS VECTOR under the peer's host_burst",
+                        tv_client_vectors);
     bench.second_letter('m', "MODF from a second chip, and ODEN's NSS on its pull-up", tm_peer_modf);
     bench.second_letter('w', "THE WAVEFORMS: this chip as the analyser of both chips' SCK and data edges", tw_waveforms);
     bench.letter('x', "slip statistics against the peer: each mode ten times (no verdict)", tx_peer_slips, false);

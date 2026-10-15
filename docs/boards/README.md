@@ -42,7 +42,8 @@ Three concerns, deliberately kept apart:
    letters (`// build: groups = abg,cdf,e`): on a board type the
    project lists as splitting (the CH32V00x's `v003f4`, the CH32V203's
    `v203c6`, `v203f6`, `v203g6` and `v203k6`, the STM32G0's `g031k8`,
-   the SAM C21's `c21j`) the suite builds as one image per group -
+   the SAM C21's `c21j`, and every CH32X035 board type, all seven parts
+   having the same 62 KB) the suite builds as one image per group -
    `<app>-1`, `<app>-2`, ... - each carrying the letters its group
    names and registering those alone (`util/testbench.hpp`'s
    selection), while on every other board the suite is one image with

@@ -336,13 +336,32 @@ statement - lies on the bus's dead time (letter r).
   instructions - `start()`'s 73 and the two phases' entries, frames and
   tails 61 - about 335 cycles at the model's rate, where the same
   request on the previous host ran about 250 instructions and a 48-byte
-  `memcpy` call, about 650. The
-  vendor's own loop, the EVT's `2Lines_FullDuplex` host side
-  transcribed as a scratch program over the EVT's library (counted,
-  not run): 51 instructions a frame through three library calls, about
-  130 cycles - at the wire from HCLK/16, four times it at HCLK/4, where
-  brio's transmit-only loop is at the wire and its receive loop at
-  1.69.
+  `memcpy` call, about 650.
+- **THE VENDOR'S OWN LOOP, run beside this host's on the same board**:
+  the EVT's `2Lines_FullDuplex` host side transcribed over the EVT's
+  library (pinned archive 189c91b, `-Os`, its calls out of line in their
+  own TU as the EVT builds them), 51 instructions a frame through three
+  library calls, with one addition - a bound on its turns, a decrement
+  and a branch, because the loop has none - in a scratch image with
+  this host's polled receive in it, the far client deselected and MISO
+  floating, the best of four runs of 16 and 256 frames, the image run
+  three times. It sends on every TXE and reads on every RXNE in one turn, two
+  frames in flight with nothing holding the second back: at HCLK/16 it
+  runs 141 cycles a frame in 8-bit frames (the wire 128) and 256 in
+  16-bit ones (the wire 256), every frame received, where this host's
+  receive loop, one frame in flight below its write-ahead threshold,
+  runs 159 and 291 - the vendor's ahead by a tenth to an eighth there; at HCLK/4
+  it LOSES FRAMES: 8 of every 16 in 8-bit frames in every run, its loop
+  ending only on the added bound, and one of 16 or 256 in a third of its
+  16-bit runs, where this host's receive loop is exact at 54 and 99
+  cycles a frame (1.69 and 1.55 times the wire). The write-ahead this
+  host takes only past its hold-off threshold, the vendor's loop takes
+  at every rate.
+- **`spi_stalled`, provoked** (letter h): a polled duplex request of 16
+  at /16 with SPI1 HELD in reset - its registers ignoring every write,
+  RXNE never rising - ends `spi_stalled` after about 50 000 cycles, the
+  poll budget against the wire's 2048, and `recover()` puts the next
+  request back to `spi_ok`.
 
 ## The client's runs
 
@@ -431,7 +450,28 @@ them: from SRAM the same receive run hears 24 MHz back to back (below).
   program takes it by placing the function that calls the runs - a
   plain one with `[[gnu::section(".fast_text")]]`, an inline or template
   one through `Hot<InRam>::run` ([platform.md](platform.md), "A handler
-  in SRAM"); the runs themselves stay inline in it.
+  in SRAM"); the runs themselves stay inline in it. THE SPELLING,
+  measured: `spi_peer` built with its `polled_serve<T>` marked
+  `[[gnu::noinline, gnu::section(".fast_text")]]` - a template whose TU
+  places no plain function in that section, so GCC takes it; without
+  `noinline` the compiler inlines it back into its caller in the flash -
+  1666 bytes of SRAM for both widths, no call out of it, and under letter
+  k in two runs the 8-bit exchange back to back at 12 MHz in both (6 MHz
+  from the flash), gapped at 12 MHz in one and 6 in the other, the 8-bit
+  receive run back to back at 24 MHz in both (12 from the flash), every
+  16-bit run at 24 MHz but the back-to-back exchange's 12 in one run.
+- **A CLIENT WITH NO SELECT counts bits from SPE and nothing else.**
+  `spi_peer` built with its polled serve on a `SpiClient` whose pins name
+  no NSS - SSM set, SSI low for the run, each run ending on its count -
+  under letter k (two runs): behind the far host's gapped polled loop
+  every run exact, the 8-bit exchange to 12 MHz (one rung over the
+  pad-watching runs, the look at the pad gone), the answer and receive
+  runs to 24 MHz; behind its engines NOTHING exact at any rung, every
+  frame one bit off both ways (0xA9 read 0x52, 0x36 heard 0x9B) - an SCK
+  edge before the burst, after this client raised SPE, counted as the
+  first bit. A selectless run is only as good as the bus's quiet between
+  its SPE and the host's first frame; the pad's window is what makes a
+  stray edge harmless.
 
 ## How to use it
 
@@ -481,11 +521,14 @@ to the CH32X035F8U6's SPI1 (PA5, PA7, PA6, PA4), the far chip running its
 `spi_peer` ([../ch32x035/spi.md](../ch32x035/spi.md)) commanded in band
 through the other strata's spi_link protocol - every frame on the wire
 witnessed by a second chip, the 16-bit frames, the CRC and a receive-only
-client being the protocol's extended exchange. `z` is 63 verdicts, green
-whole twice on the final images: a, c, f and g with the peer deselected
-(their select is PC3, a pad with no wire, PC1 held high), the other
-letters against it; s (the pair's ceiling) and x (the slips: 0 of 40) run
-by name. On the CH32V003F4P6 the suite is fifteen group images, one letter
+client being the protocol's extended exchange. On this part the suite is
+two images - whole it came within 5 % of the 40 KB of program flash -
+`test_ch32_spi-1` (letters a to h) and `-2` (the command channel, the
+matrix, the ladder, the kernel against the peer, the client, MODF): `z`
+is 40 and 24 verdicts, green on the final images: a, c, f, g and h with
+the peer deselected (their select is PC3, a pad with no wire, PC1 held
+high), the other letters against it; s (the pair's ceiling) and x (the
+slips: 0 of 40) run by name. On the CH32V003F4P6 the suite is fifteen group images, one letter
 each - the part's 15 KB with no multiplier decide the cut
 (design/overview.md) - linked by `brio fit` and not run: that part is off
 the desk.
@@ -693,15 +736,6 @@ Implemented but not bench-verified, each with what would measure it:
 - The client's runs on the CH32V003F4P6: they compile there (`brio check
   ch32v00x`); a CH32V003 wired to the CH32X035 as the CH32V006 is, under
   letter k, would measure them.
-- A run on a client with no NSS pad (it ends on its count or its budget
-  alone): it compiles; a client whose pins name no select, under a host
-  framing its own, would run it.
-- A run's caller placed in `.fast_text`: the rung it buys was measured
-  with the caller moved into `.data` by hand (the exchange to 12 MHz in
-  8-bit frames, about 1.1 KB of SRAM a frame width); `spi_peer` built
-  with its `polled_serve()` in `.fast_text`, under `test_x035_spi`'s
-  letter k, would measure the spelling.
-
 - The suite on the CH32V003F4P6: its fifteen group images link and fit
   (`brio fit`); the part is off the desk, and a CH32V003 wired to the
   CH32X035 as the CH32V006 is would run them.
@@ -723,11 +757,5 @@ Implemented but not bench-verified, each with what would measure it:
   `idle()` that does not sleep while a pumped transaction is in
   flight, is the choice; `bench_ch32` letter e at HCLK/64 measures
   either.
-- `spi_stalled` as an exit: no run raised it (no flag late on any
-  polled line). A polled request with the block held in reset under it
-  would provoke it. (`spi_overrun` is measured: the hold-off declared
-  too short, above.)
-- The vendor's loop on the same board, counted above: its run beside
-  letter e.
 - HSCR's high-speed read mode: its rate formula against a scope on
   SCK.

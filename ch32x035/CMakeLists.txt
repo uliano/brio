@@ -22,11 +22,11 @@
 #  rv32imac_xw with the ilp32 ABI - the CH32V203's pair, which this gcc
 #  resolves to the rv32imac_zaamo_zalrsc_xw/ilp32 multilib.
 #
-#  NO GROUP AXIS IS NEEDED. Every part of the series has 62 KB of code
-#  flash and 20 KB of SRAM, so the family's smallest chip is every chip,
-#  and a suite that links on the bench part links on all seven. The
-#  "// build: groups" grammar is still read (the roster carries it) and
-#  changes nothing here: no board of this project splits a suite.
+#  EVERY PART IS THE SMALLEST CHIP. Every part of the series has 62 KB of
+#  code flash and 20 KB of SRAM, so a suite that links on the bench part
+#  links on all seven - and one that does not fit splits on all seven: a
+#  suite with a "// build: groups" line builds as one image per group on
+#  every board type of this project (the GROUP axis below).
 #
 #  Flash/debug: WCH's OpenOCD fork at /sw/wch-openocd, the only OpenOCD
 #  that speaks the WCH-Link's SDI transport, over the two-wire debug port
@@ -221,10 +221,18 @@ endfunction()
 #     board type of WCH's evaluation board in its QFN20 edition).
 #
 #     The GROUP axis (design/overview.md, "A suite's image fits the
-#     family's smallest chip") is parsed for the roster and splits nothing:
-#     CH32X035_SPLIT_BOARDS is empty because no part of this series is
-#     smaller than another (the file header).
+#     family's smallest chip"): no part of this series is smaller than
+#     another (the file header), so CH32X035_SPLIT_BOARDS is EVERY board
+#     type of the part table - a suite whose header names groups builds as
+#     <app>-1, <app>-2, ... on every part, each compiled with
+#     BRIO_TEST_LETTERS naming its group, and a suite with no groups line
+#     is one image everywhere.
 set(CH32X035_SPLIT_BOARDS "")
+foreach(_row IN LISTS CH32X035_PARTS)
+    string(REPLACE ":" ";" _fields "${_row}")
+    list(GET _fields 3 _btype)
+    list(APPEND CH32X035_SPLIT_BOARDS "${_btype}")
+endforeach()
 
 file(GLOB APP_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_SOURCE_DIR}/src/apps/*.cpp"
@@ -312,7 +320,17 @@ foreach(_app_path IN LISTS APP_SOURCES)
 endforeach()
 
 # This project's app roster for bin/brio (apps_ch32x035.json): a separate
-# file because app names collide across the trees. Its split-board list is
-# empty (the discovery comment above).
+# file because app names collide across the trees. It names the boards
+# that split a suite into its group images - every board type here (the
+# discovery comment above) - so the verbs can resolve "<app>-<n>" and
+# refuse the bare name of a suite with groups.
+set(_split_json "")
+foreach(_b IN LISTS CH32X035_SPLIT_BOARDS)
+    if(_split_json STREQUAL "")
+        set(_split_json "\"${_b}\"")
+    else()
+        set(_split_json "${_split_json},\"${_b}\"")
+    endif()
+endforeach()
 file(WRITE "${CMAKE_SOURCE_DIR}/../build-cmake/apps_ch32x035.json"
-    "{\n  \"split_boards\": [],\n  \"apps\": {\n    ${_manifest_entries}\n  }\n}\n")
+    "{\n  \"split_boards\": [${_split_json}],\n  \"apps\": {\n    ${_manifest_entries}\n  }\n}\n")

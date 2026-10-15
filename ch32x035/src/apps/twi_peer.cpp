@@ -254,6 +254,26 @@ bool wait_wire_quiet(uint32_t t0, uint32_t ms, uint16_t quiet_us) {
     return false;
 }
 
+/// THE WIRE AT REST, WATCHED THROUGHOUT: both lines high at every look for
+/// `us` microseconds; false at the first look that finds either low. Four
+/// looks (two INDR loads each) between two readings of the cycle counter,
+/// so no two looks are more than some forty HCLK cycles apart - under a
+/// microsecond at 48 MHz, shorter than the shortest SCL low a controller
+/// on this bus makes (1.3 us in fast mode), so a tenure in flight is seen
+/// at its first clock.
+bool wire_rests(uint32_t us) {
+    const uint32_t span = SysClock::hz / 1'000'000u * us;
+    const uint32_t t0 = Ticker::cycles();
+    do {
+        for (uint8_t k = 0; k < 4u; ++k) {
+            if (!SclPin::read() || !SdaPin::read()) {
+                return false;
+            }
+        }
+    } while (Ticker::cycles() - t0 < span);
+    return true;
+}
+
 // ---- the two standing configurations ----------------------------------------------
 
 /// Bring the target up at one exact address, POLLED (the header).
@@ -456,9 +476,6 @@ twilink::Report run_serve(const twilink::Params& a, bool fixed_byte) {
             r.flags |= twilink::report_timed_out;
             break;
         }
-        if (a.count != 0u && static_cast<uint16_t>(rx + tx) >= a.count && r.stops != 0u) {
-            break;
-        }
         if (Client::data_ready()) {
             if (a.hold_us != 0u) {
                 hold_us(a.hold_us);
@@ -525,6 +542,22 @@ twilink::Report run_serve(const twilink::Params& a, bool fixed_byte) {
                 r.flags |= twilink::report_buserr;
             }
             Raw::clear_errors(errs);
+            continue;
+        }
+        // THE COUNTED EXIT, looked for only with no flag pending: `count`
+        // bytes moved and THE WIRE AT REST after them, watched for forty
+        // microseconds - longer than any SCL high half a controller makes
+        // (five at 100 kHz), so a tenure in flight never passes for its end.
+        // NOT A STOP: a target transmitter's sequence ends in the closing
+        // NACK (RM 15.4's EVT3_2) where a receiver's ends in STOPF (EVT4), and
+        // a read of eight closed by NACK and Stop - the flush's PE cycle
+        // between the two - moves this loop's Stop count not at all
+        // (measured: the counted serve the DUT suites' letter d judges, which
+        // with a Stop as its witness waited out the deadline). Nor the moment
+        // the count is reached: a transmitter is asked for its bytes ahead of
+        // the wire, and a re-init then would take the last one out of DATAR.
+        if (a.count != 0u && static_cast<uint16_t>(rx + tx) >= a.count && wire_rests(40u)) {
+            break;
         }
     }
     Client::acknowledge(true);

@@ -520,7 +520,8 @@ brio fuses A bootsize=128  # read/write fuses over UPDI (fuses are
   package, so switching `configurePreset` switches which apps' targets
   exist; `// build: groups = abg,cdf` splits a suite into one image per
   group on a board type its project lists as splitting - the CH32V003,
-  the CH32V203's four 32 KB parts, the G031K8, the SAM C21 - and
+  the CH32V203's four 32 KB parts, the G031K8, the SAM C21, every
+  CH32X035 part - and
   `// build: groups.v006k8 = ...` on that board type alone),
   IDENTITY = the manifest `cli/bench/bench_boards.py` (which board
   sits where, its console by `/dev/serial/by-path` because the CH340s
@@ -590,7 +591,8 @@ compiles), `svd/` (the debugger's register map) - and the particulars
 below. `// build: boards = ...` gates which board types build an app;
 `// build: groups = ...` splits a suite into one image per group on a
 board type whose project lists it as splitting (the CH32V003, the
-CH32V203's four 32 KB parts, the G031K8, the SAM C21) and
+CH32V203's four 32 KB parts, the G031K8, the SAM C21, every CH32X035
+part) and
 `// build: groups.<board type> = ...` on that board type alone.
 
 | path | what it holds |
@@ -601,7 +603,7 @@ CH32V203's four 32 KB parts, the G031K8, the SAM C21) and
 | `stm32f4/` | a PART TABLE (`cmake/stm32f4-parts.cmake`: part -> ST's device define, crt stem, board type), presets for the F429ZI, F446RE, F411CE and F469NI, the hard-float flags |
 | `ch32v00x/` | WCH's gcc at /sw/wch-riscv; `CH32V00X_MCU` names the part and derives its definition, ISA and ld; `src/glue/startup_ch32v00x.S` (the table whose first word is an instruction, two entries shorter on the CH32V003); the GROUP axis on the CH32V003 (and per board type); the crt paints the free RAM |
 | `ch32vx03/` | the same compiler with the full register file; a PART TABLE of the thirteen parts with their memories, board type, ISA and ABI (`cmake/ch32vx03-parts.cmake`); one ld per part, each stopping 4 KB short of the zero-wait window; a crt with a vector tail per device class and the FPU enabled under F; the GROUP axis on the four 32 KB parts (and per board type); the C6 preset as the 32K tier's link guard |
-| `ch32x035/` | the shape of the two sibling WCH projects: a part table of the seven packages, one ld giving the image the whole 62 KB at the alias, a 55-word crt; no group axis, no svd |
+| `ch32x035/` | the shape of the two sibling WCH projects: a part table of the seven packages, one ld giving the image the whole 62 KB at the alias, a 55-word crt; the GROUP axis on every part (all seven are the smallest chip, 62 KB each); no svd |
 | `rp2040/` | the RP2040 project: the boot stage checked in as bytes, its own crt, `ld/` with `.ram_text` carried by `.data` (the flash engine and the PL022 host's hot path); the WeAct board's flash wants the OpenOCD built from git |
 | `rp2350/` | THE ONLY PROJECT WHOSE AXIS IS THE COMPILER: `cmake/toolchain-arm.cmake` and `cmake/toolchain-riscv.cmake` are two configures of the same sources, each setting `RP2350_ARCH`; a flash geometry and a PACKAGE (QFN-60 or QFN-80, a pad the package has not got a compile error) per configure; two crts binding the same handler names, each placing the IMAGE_DEF block - there is no second stage; the `-upload` target a rescue over the debug port, then programming as core 0 of the Arm pair, then a reset |
 | `host/` | the host's own programs, which RUN rather than run and exit (first: `supply_panel`); the same `// build:` grammar, nothing registered with ctest; flags identical to `test/`'s |

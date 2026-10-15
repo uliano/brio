@@ -203,18 +203,20 @@ shared twi_link protocol) on I2C1's column 3 - PB5 SCL, PB6 SDA to that
 board's PC16 and PC17, a 1.5 kOhm resistor from each line to its PB3,
 which its I2C images drive high - and decline when the wire reads low.
 On this part the suite is two images (`test_ch32_i2c-1`, the single-host
-wire letters, and `-2`, the kernel, the two-host and the raw letters),
-the whole being over the 40 KB of program flash; on the CH32V003F4P6 it
-builds as eight group images, the kernel and the two-host letters left
-out of that build, each alone over the part's 15 KB. What needs no peer:
+wire letters, and `-2`, the kernel, the two-host, the dead-channel and
+the raw letters), the whole being over the 40 KB of program flash; on the
+CH32V003F4P6 it builds as eight group images, the kernel and the
+two-host letters left out of that build, each alone over the part's 15
+KB, and the dead-channel and vectors' client letters born with the
+part's return to the desk. What needs no peer:
 
 - **The reset values are table 15-1's**, both speeds resolve exactly
   at 48 MHz (CCR 240 and 40), the own addresses land as spelled.
 - **OADDR1's bit 14 reads zero** when written: reserved, not the F1's
   fixed one.
 - **CKCFGR and FREQ take a write with PE set**: no enable lock.
-- **Against the CH32X035** the whole suite holds: 47 verdicts in the
-  first image and 29 in the second, the four receive procedures, the
+- **Against the CH32X035** the whole suite holds: 48 verdicts in the
+  first image and 45 in the second, the four receive procedures, the
   vocabulary, the repeated START acknowledged and refused, the engines,
   the kernel letter, the two hosts and the raw sequences, each on the
   first `z` after its flash.
@@ -256,6 +258,34 @@ over two runs.
   to back, it served each run byte-exact as a transmitter, one byte
   standing in DATAR at each closing NACK, and `flush()` dropped both -
   the second read opened on its own first byte.
+- **The client from its vectors** (letter v): the same two cases with the
+  interrupt enables up, `service()` and `error_service()` the bodies of
+  i2c1_ev and i2c1_er - six bytes written to it byte-exact (eight event
+  entries: ADDR, six RxNE, STOPF), two reads of six served as a
+  transmitter (each closing NACK on the error vector, `flush()` there
+  dropping the byte asked beyond it, the second read opening on its own
+  first byte), seventeen event entries and two error ones, no entry
+  finding nothing; the event body 85 to 92 cycles at 48 MHz, stamped
+  inside the vector.
+- **THE DEAD CHANNEL** (letter p): a timer's compare request raised by a
+  match with no channel enabled, the timer's gate then closed with no
+  reset - TIM1's channel 3 on DMA channel 6, TIM2's channel 2 on channel
+  7 (table 8-2) - is HELD on this die: the next owner of the channel takes
+  one stray item and serves nothing after it ([dma.md](dma.md)). A write
+  of 32 on the engines over the dead channel 6 ends `i2c_dma_fault` - BTF
+  with the transmit count standing, the far end holding one byte - where
+  an engine trusting BTF alone would report `i2c_ok`; a read of 16 over
+  the dead channel 7 never completes, its event vector entered twice (SB,
+  ADDR) and never stormed - the line is down for the block - so the
+  caller's bound and `recover()` answer it; each lands whole once the
+  timer is reset.
+- **The block's own request does not outlive its gate** (letter p): a
+  read stalled over that dead channel, RxNE and BTF standing under DMAEN,
+  left the next owner of channel 7 four items while the block stayed
+  live, and none once its gate was closed - with PE up or cleared - or
+  after `release()`. The release contract's reset pulse finds nothing of
+  this block's to clear in these lets-go; a timer's request does outlive
+  its gate, and the pulse is the contract for every requester.
 
 ### The repeated START: on the last byte's TxE, and the refusal
 
@@ -317,7 +347,8 @@ lines left down) and drops the byte it was asked beyond a closing NACK
 with `flush()`; its host action is the instance's role switch, writing
 (`arb`) or reading (`host_read`, the extended repertoire), and its
 `counters` answer what a report has no field for. Against the
-CH32X035's `test_x035_i2c` - every one of its 84 verdicts - it answered
+CH32X035's `test_x035_i2c` - every one of its 107 verdicts, over its two
+images - it answered
 108 commands with no nak and no vector entered while it was polled, and
 showed the habits of this block as a target, each measured from the far
 end:
@@ -347,6 +378,16 @@ end:
 - **The stuck line** is taken after forty microseconds of quiet wire and
   let go after the falling edges asked: the far host's `unstick()` counted
   four.
+- **A counted serve ends on the wire at rest, never on a Stop.** Polled
+  as a target transmitter, this block raised no STOPF the loop saw after
+  a read (its flush, a PE cycle, falls between the closing NACK and the
+  Stop, so whether the Stop alone would raise it is not separated), and a
+  count reached by reads alone never ended a serve that waited for a Stop
+  - it waited out its deadline. `twi_peer` ends a counted serve once its
+  count has moved and both lines have stood high for forty microseconds,
+  watched throughout (no two looks a microsecond apart): armed for eight
+  bytes and 2000 ms, it is back in command mode 9 ms after the read, the
+  eighth byte its own (the far suite's letter d, ten runs).
 
 ### The host's cost (bench_ch32_i2c, letter i)
 
@@ -440,28 +481,17 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
-- `release()`'s reset pulse, the `i2c_dma_fault` on a BTF with the
-  transmit count standing and the read phase with the event line down:
-  written from the CH32V203's measurement and staged on no board of
-  this family. A transmit channel held dead by USART2 released without
-  the pulse ([dma.md](dma.md)'s first item) under a DMA write to the
-  peer would stage the first answer; the peer's letters g and h stand
-  for the healthy path.
 - The DMA engines on the CH32V003: `test_ch32_i2c` letter g in its
   group image against a peer, the board being off the desk (on the
   CH32V006 the letter and `bench_ch32_i2c`'s engined lines are green).
-- The kernel letter and the two-host letter j on the CH32V003, which no
-  group image of the part holds (the suite's header says which letters
-  each image carries): the arbiter over the engine and the client against
-  a foreign controller are proven on the CH32V006, and that run stands
-  for both parts by decision - the block, the engine and the arbiter are
-  the same code on the same registers, and the wire letters around it run
+- The kernel letter, the two-host letters j and v and the dead-channel
+  letter p on the CH32V003, which no group image of the part holds (the
+  suite's header says which letters each image carries): the arbiter over
+  the engine, the client against a foreign controller and the dead
+  channel's guards are proven on the CH32V006, and that run stands for
+  both parts by decision - the block, the engine and the arbiter are the
+  same code on the same registers, and the wire letters around it run
   green on the CH32V003.
-- The client's ISR bodies against a foreign host: the client's polled
-  surface serves a foreign host in `test_ch32_i2c` letter j and in
-  `twi_peer` (above); `service()` and `error_service()` bound to the two
-  vectors are what an image serving the client from its vectors would
-  measure.
 - The repeated START's order against a target that LOSES the BTF-order
   byte: the desk's CH32X035 takes the last written byte in either order
   (the findings); the loss the order avoids is measured on the

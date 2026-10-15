@@ -52,6 +52,8 @@
 //      the other's CRC frame - and a polynomial mismatch caught at both
 //   f  THE KERNEL: SpiBus (= BusMaster) over SpiHost, replies in order,
 //      the rejection, both votes (the peer deselected)
+//   h  THE STALLED EXIT, wireless: a polled request over a block held in
+//      reset ends spi_stalled within its budget, and recover() after it
 //   n  THE PEER: the command channel, ident (kind 0x07), ten pings
 //   o  the matrix: this host in the four modes against the foreign
 //      client on both of its serves, LSb first as an exact two-way
@@ -72,7 +74,12 @@
 //   x  (outside z) the slip statistics: each mode ten times
 //
 // build: boards = v006k8,v003f4
-// build: groups = a,b,c,d,g,e,f,n,o,p,q,r,m,x,s
+// build: groups = a,b,c,d,g,e,f,h,n,o,p,q,r,m,x,s
+// build: groups.v006k8 = abcdgefh,nopqrmxs
+// (on the CH32V006 the suite whole comes within 5 % of the 40 KB of program
+// flash, so it builds as two images there: letters a to h, and the
+// command channel, the matrix, the ladder, the kernel against the peer, the
+// client, MODF and the two statistics letters)
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -1377,6 +1384,38 @@ void tf_kernel() {
 }
 
 // ===========================================================================
+// h - the stalled exit, wireless
+// ===========================================================================
+//
+// spi_stalled is the polled path's answer to a flag that never comes - a
+// clock that stopped, a block that is dead - spent from ONE budget for the
+// whole transaction (poll_budget: the frames' cycles plus two, in poll
+// turns of several instructions each). Provoked here with SPI1 HELD IN
+// RESET under a polled duplex request: its registers ignore every write,
+// RXNE never rises. The lone select (PC3) frames it, the peer's deselected.
+
+void th_stalled() {
+    host_ready();
+    fill_pattern(tx_buf, 16, 0x5A);
+    rcc()->PB2PRSTR |= rcc_pb2_spi1;
+    const uint32_t t0 = cycles_now();
+    const uint8_t st = host_xfer(LoneCs::ref(), nullptr, 0, tx_buf, rx_buf, 16, SpiMode::mode0,
+                                 SpiClock::div16, SpiDataSize::bits8, true);
+    const uint32_t took = cycles_now() - t0;
+    rcc()->PB2PRSTR &= ~rcc_pb2_spi1;
+    const bool rec = Host::recover();
+    const uint8_t after = host_xfer(LoneCs::ref(), nullptr, 0, tx_buf, rx_buf, 16, SpiMode::mode0,
+                                    SpiClock::div16, SpiDataSize::bits8, true);
+    print(serial, "  a polled request of 16 at /16 with the block held in reset: status ", st, " (spi_stalled ",
+          spi_stalled, ") after ", took, " cycles (the wire's 2048); recover() ", rec ? 1 : 0,
+          ", the next request ", after, crlf);
+    bench.verdict("A POLLED REQUEST OVER A BLOCK HELD IN RESET ends spi_stalled - the budget runs out, the call "
+                  "returns - within ten milliseconds (480 000 cycles), and after recover() the next request is "
+                  "spi_ok",
+                  st == spi_stalled && took < 480'000u && rec && after == spi_ok);
+}
+
+// ===========================================================================
 // n - the peer's command channel
 // ===========================================================================
 
@@ -2124,6 +2163,7 @@ int main() {
     bench.letter('g', "THE RATE ON THE WIRE: a frame inside an engined block, the peer deselected", tg_wire);
     bench.letter('e', "THE HARDWARE CRC against a foreign CRC unit, 8 and 16 bits, a mismatch caught", te_crc);
     bench.letter('f', "THE KERNEL: SpiBus over SpiHost, the rejection, the votes", tf_kernel);
+    bench.letter('h', "the stalled exit: a polled request over a block held in reset", th_stalled);
     bench.letter('n', "THE PEER: the spi_link command channel, ident, ten pings", tn_peer_link);
     bench.letter('o', "the matrix against the peer: four modes, both serves, both bit orders", to_peer_matrix);
     bench.letter('p', "the BR ladder against the peer, both host paths, both serves, the transmit-only path",

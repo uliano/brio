@@ -211,7 +211,10 @@ against the desk's CH32V006K8U6 running `twi_peer` on its column 3 (PB5,
 PB6), the bus pulled up by a 1.5 kOhm resistor from each line to this
 board's PB3, which the suite drives high from its boot - PC17 is the
 board's boot pin, and a pull-up to the supply would send every power-up
-into WCH's loader. `z` is 84 verdicts, green.
+into WCH's loader. The suite is two images, `test_x035_i2c-1` (the
+single-host wire letters) and `-2` (the kernel, the two hosts, the dead
+channel, the stuck BUSY, the vectors' client, the cost): `z` is 55 and
+52 verdicts, green.
 
 - **The lot probe** answered PRESENT: FREQ, CKCFGR and OADDR1 hold what
   they are given, PE sets, and a START on the idle bus raises SB with MSL
@@ -275,6 +278,49 @@ into WCH's loader. `z` is 84 verdicts, green.
   because a CH32 target keeps its acknowledge down after a refused byte
   until its window closes (the peer's own header).
 
+- **Fast mode at DUTY 16/9** (letter f): CKCFGR 0xC005 - F/S, DUTY and
+  CCR 5, 48 MHz / (25 x 400 kHz) = 4.8 rounded up so the bus never runs
+  faster than asked - the chooser's 384 kHz; an 8-byte write at about
+  322 kHz with the software inside it (334 at DUTY 2's 400: the same
+  0.96), a write and a read byte-exact.
+- **A BUSY left standing over an idle wire** (letter u): a START made by
+  hand, SDA let go while SCL was held low, then SCL - no STOP condition
+  ever on the wire - left BUSY up with both lines high; `start()`'s
+  100 us wait ran out, `unwedge_busy()` took SWRST (`unwedges()` one
+  more) and the tenure behind it completed `i2c_ok`, BUSY down after. A
+  STOP made with the block's GATE CLOSED leaves nothing: BUSY read 0 at
+  the reopening - the flag follows the wire.
+- **THE DEAD CHANNEL** (letter p): a timer's compare request raised by a
+  match with no channel enabled, the timer's gate then closed with no
+  reset - TIM1's channel 3 on DMA channel 6, TIM2's channel 2 on channel
+  7 (figure 9-1) - is HELD: the next owner of the channel takes one stray
+  item and serves nothing after it. (The software compare event, SWEVGR's
+  CCxG, left the next owner nothing: the match is the request.) A write
+  of 32 on the engines over the dead channel 6 ends `i2c_dma_fault` - BTF
+  with the transmit count standing, the far end holding one byte - where
+  an engine trusting BTF alone would report `i2c_ok`; a read of 16 over
+  the dead channel 7 never completes, its event vector entered twice (SB,
+  ADDR) and never stormed - the line is down for the block - so the
+  caller's bound and `recover()` answer it; each lands whole once the
+  timer is reset.
+- **The block's own request does not outlive its gate** (letter p): a
+  read stalled under DMAEN, RxNE and BTF standing, left the next owner of
+  channel 7 four items while the block stayed live, and none once its
+  gate was closed - with PE up or cleared - or after `release()`. The
+  release contract's reset pulse finds nothing of this block's to clear
+  in these lets-go; USART3's request on this die does outlive its gate
+  ([dma.md](dma.md), "A released requester"), and the pulse is the
+  contract for both.
+- **The client from its vectors** (letter v): letter j's two cases with
+  the interrupt enables up, `service()` and `error_service()` the bodies
+  of i2c1_ev and i2c1_er - six bytes written to it byte-exact (eight
+  event entries: ADDR, six RxNE, STOPF), two reads of six served as a
+  transmitter (each closing NACK on the error vector, `flush()` there
+  dropping the byte asked beyond it, the second read opening on its own
+  first byte), seventeen event entries and two error ones, no entry
+  finding nothing; the event body 113 to 128 cycles at 48 MHz, stamped
+  inside the vector.
+
 ### This part as the desk's instrument: `twi_peer`
 
 `twi_peer` (ch32x035/src/apps/twi_peer.cpp) is the CH32X035's peer on the
@@ -287,7 +333,7 @@ command mode and every action included. Its target is POLLED
 with `flush()`; its host action is the instance's role switch, writing
 (`arb`) or reading (`host_read`); `hold_sda` pulls the line down with a
 push-pull output over a clear bit, this series having no open-drain GPIO.
-Against the CH32V006's `test_ch32_i2c` - its 76 verdicts over the suite's
+Against the CH32V006's `test_ch32_i2c` - its 93 verdicts over the suite's
 two images on that part - it answered 111 commands with no nak and no
 vector entered while it was polled, and showed this block's habits as a
 target, each measured from the far end:
@@ -313,6 +359,16 @@ target, each measured from the far end:
 - **The stuck line** is taken after forty microseconds of quiet wire and
   let go after the falling edges asked: the far host's `unstick()` counted
   four.
+- **A counted serve ends on the wire at rest, never on a Stop.** Polled
+  as a target transmitter, this block raised no STOPF the loop saw after
+  a read (its flush, a PE cycle, falls between the closing NACK and the
+  Stop, so whether the Stop alone would raise it is not separated), and a
+  count reached by reads alone never ended a serve that waited for a Stop
+  - it waited out its deadline. `twi_peer` ends a counted serve once its
+  count has moved and both lines have stood high for forty microseconds,
+  watched throughout (no two looks a microsecond apart): armed for eight
+  bytes and 2000 ms, it is back in command mode 9 ms after the read, the
+  eighth byte its own (the far suite's letter d, ten runs).
 
 ### The host's cost (`test_x035_i2c`, letter x)
 
@@ -406,22 +462,6 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
-- **The client served from its vectors**: the suite's client and
-  `twi_peer`'s are polled (`I2cClientOptions`, the enables down); an
-  image binding `service()` and `error_service()` to i2c1_ev and i2c1_er
-  would measure it.
-- **`release()`'s reset pulse, the `i2c_dma_fault` on a BTF with the
-  transmit count standing, the read phase with the event line down over a
-  channel that does not serve**: written from the CH32V203's and this
-  die's USART3 measurements (a request held after a release); a request
-  left on channel 6 or 7 by a USART2 released without its pulse, under an
-  engined write, would stage the first answer.
-- **`unwedge_busy()`**: the suite's runs counted no BUSY standing over an
-  idle wire (`unwedges()` zero); a DMA-served read cut short, as on the
-  CH32V203, is what would raise one.
-- **DUTY 16/9 on the wire**: solved and pinned at compile time; a fast
-  mode write timed with `init(clock, I2cDuty::ratio_16_9)` would measure
-  it.
 - **The columns other than PC16/PC17**: PA10/PA11, PA13/PA14 and the
   debug port's pair on the other packages compile on every part (`brio
   check ch32x035`) and are refused where the package says; a board of

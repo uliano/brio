@@ -1189,12 +1189,14 @@ public:
     /**
      * The block given back. THE RESET LINE BEFORE THE GATE
      * (docs/design/dma.md, the release contract): on this die a raised DMA
-     * request outlives its peripheral's DMA enable, its enable and a closed
-     * gate unless the block is reset (measured on USART3,
-     * docs/ch32x035/dma.md, "A released requester") - and channels 6 and 7
-     * are ORs this block shares with USART2, so a request a tenure
-     * abandoned under DMAEN would hand the next owner one stray item. The
-     * pulse leaves none.
+     * request can outlive its peripheral's DMA enable, its enable and a
+     * closed gate unless the block is reset (measured on USART3 and on the
+     * timers, docs/ch32x035/dma.md, "A released requester"), and channels 6
+     * and 7 are ORs this block shares with USART2 and the timers. This
+     * block's own request, raised under DMAEN by a read stalled over a dead
+     * channel, measured NOT to outlive its gate (docs/ch32x035/i2c.md): the
+     * pulse is the contract's - the vendor's own DeInit - two stores that
+     * leave nothing whatever the block holds.
      */
     static void release() {
         if constexpr (has_engines) {

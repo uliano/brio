@@ -221,10 +221,13 @@ const auto run = C::exchange(std::span<const uint8_t>(answers), std::span<uint8_
 
 The reference suite is `test_x035_spi` on the CH32X035F8U6 at 48 MHz, its
 SPI1 on PA4..PA7 wired straight to the CH32V006K8U6's column 0 (PC1, PC5,
-PC6, PC7). `z` - the block, the ladder and the costs, the refusals - runs
-with the far board dark: 24 verdicts. `y` against the CH32V006 running
-`spi_peer` on its crystal, commanded in band through spi_link: 36
-verdicts. Each was green whole on the final images.
+PC6, PC7). The suite is two images - whole it came within 5 % of the
+62 KB every part has - `test_x035_spi-1` (the wireless letters) and `-2`
+(the two-board letters and the slip statistics). `z` on the first - the
+block, the ladder and the costs, the refusals, the fault exits - runs with
+the far board's client deselected: 34 verdicts. `y` on the second against
+the CH32V006 running `spi_peer` on its crystal, commanded in band through
+spi_link: 39 verdicts. Each was green whole on the final images.
 
 - **The reset values are table 16-2's** (STATR 0x0002, CRCR 0x0007, the
   rest zero), a control word lands as spelled, and eight of eight CTLR1
@@ -354,7 +357,7 @@ the frames within 10 per cent of it and the fixed costs within 30:
 
 | path | a frame, SRAM / flash | fixed, SRAM / flash | the wire a frame |
 |---|---|---|---|
-| the engines | the wire (1000 to 1006 thousandths, 1045 once at /2) | 1176 / 1012 | 16 at /2, 32 at /4 |
+| the engines | the wire (1000 to 1006 thousandths, 1041 and 1045 in two runs at /2) | 1176 / 1012 | 16 at /2, 32 at /4 |
 | the pump | 225.1 / 268.6 at /2, 254.2 / 264.6 at /16 - the handler bounds it | 1050 / 681 | - |
 | the receive loop, one in flight | 28.9 / 51.9 at /2, 46.9 / 52.0 at /4, 141.0 / 152.0 at /16 | 765 / 580 at /4 | 16, 32, 128 |
 | the receive loop, two in flight | 512.0 / 511.9 at /64 | - | 512 |
@@ -405,6 +408,40 @@ the frames within 10 per cent of it and the fixed costs within 30:
 - **The select and D/C edges are inline**: `PinRef`'s level verbs are
   always inline (pin.hpp), where an out-of-line call there had put four
   calls on every transaction's path.
+- **The fault exits, provoked** (letter f, the select high): a polled
+  duplex request of 16 at /16 with SPI1 HELD in reset ends `spi_stalled`
+  after about 58 500 cycles - the poll budget, some 28 times the wire's
+  2048 - and `recover()` puts the next request back to `spi_ok`. TIM1's
+  compare request held on DMA channel 2 (its channel 1's row) leaves the
+  receive channel DEAD - the next owner takes one stray item ([dma.md](dma.md))
+  - and a polled request of 64 on the engines over it ends `spi_dma_fault`,
+  but only after `spin_dma()`'s bound, 200 000 spins and 6 000 a frame
+  whatever the rate: 9.37 million cycles, 195 ms, against the 8 192 the
+  block's wire takes at /16 - the caller blocked that long. The
+  asynchronous engines over the same channel never claim a completion
+  (the suite's bound answers them); with TIM1 reset and `recover()` run,
+  both paths complete `spi_ok`.
+- **The block's own transmit request outlives its gate while SPE stands**
+  (letter f): SPE up as a host with nothing written - TXE standing - and
+  TXDMAEN set with no channel enabled; the next owner of channel 3 then
+  moved 4 items with the block live, 1 with its gate closed alone, none
+  with SPE cleared before the gate, none after `release()` - which clears
+  SPE and pulses the reset line before the gate.
+- **The client from its vector** (letter v): letter r's bursts, the peer's
+  host at 1.5 MHz, served by spi1's vector - RXNEIE and TXEIE, the body
+  `SpiClient::isr()`, the glue writing the next answer on TXE and taking
+  the frame on RXNE - exact both ways in every combination the client
+  admits (modes 0 to 3, MSb first): 25 entries for 12 frames (one a flag,
+  the last TXE turning its enable off), no entry finding nothing, the
+  longest body some 200 cycles with the suite's stamps and owner switch
+  inside it.
+- **The /2 frame and the core's poll** (letter s, by name): the engined
+  frame at /2 read 998 to 1001 thousandths of the wire in 100 of 100
+  measurements with the completion flag polled in SRAM, and 995 to 1004 in
+  100 of 100 with the core waiting off the bus (`delay_us` on its own STK,
+  the block's end stamped by the DMA vector) - the core's SRAM poll takes
+  nothing measurable from the channels. (Sleeping through the block is no
+  instrument here: in this die's Sleep the DMA moves nothing.)
 - **Against the EVT** (counted, not run): the `2Lines_FullDuplex` host
   loop over WCH's library, compiled with this project's compiler at -Os,
   is 22 instructions and four calls a frame (`SPI_I2S_GetFlagStatus`
@@ -436,15 +473,23 @@ Driver gaps, each with its reason:
 - The CRC as part of a Request: born with a device that checks one.
 - A second host on the bus (MODF as an event the engine reports): no
   multi-host user; the resource has the flag and its clear.
+- `spin_dma()`'s bound as the rate's: today 200 000 spins and 6 000 a
+  frame at any code - right for 16-bit frames at /256 (4 096 cycles each),
+  195 ms for 64 frames at /16 (measured, letter f), the caller blocked
+  that long on a dead channel. A bound from the poll budget's arithmetic
+  wants a margin for the channels' arbitration under a busy controller,
+  which is not measured; until then the bound stays the generous one.
 
 Implemented but not bench-verified, each with what would measure it:
 
-- **The engines' frame at /2, once 1045 thousandths of the wire**: one
-  run of letter b in four broke the ladder's +3 per cent there, the other
-  three 1006 to 1020, the engines' code the same in every build; what the
-  core's poll on the completion flag, a load from SRAM every few cycles,
-  takes from the channels' bus share is unmeasured - the ladder repeated
-  with the core asleep through the block would separate the two.
+- **The engines' frame at /2, 1041 and 1045 thousandths of the wire in
+  two runs**: letter b's ladder broke its +3 per cent there in one run of
+  four and again in a later single run, the others 1006 to 1020, the engines' code the same in every build; it is
+  not the core's poll of the completion flag (letter s: 0 of 100 outside
+  the bracket either way) and was not seen again in 200 measurements.
+  Letter b run many times over, with the bus's other masters - the
+  console's transport, the tick - accounted at the outlier, would catch
+  its cause.
 - **This host's receive in modes 1 and 2 against an answering client**:
   the desk's CH32V006 client does not answer in those modes, and this
   chip's own client answers only under a host clocking a frame per
@@ -461,15 +506,6 @@ Implemented but not bench-verified, each with what would measure it:
   read SCK high and sixteen edges): the prime before the frame, or the
   sampler's start, not isolated; the letter run again under a probe on
   PA5 would say which.
-- **The client's vectors**: the suite's clients are polled runs and DMA;
-  an image binding `isr()` to spi1 would measure them.
-- **`spi_stalled`, `spi_dma_fault` and `recover()`**: no run raised them;
-  a polled request with the block held in reset, or a channel stopped
-  under a block, would.
-- **`release()`'s reset pulse**: the controller holds a raised request
-  ([dma.md](dma.md)), so the pulse is the contract's; a request left on
-  channel 2 or 3 by a released SPI, under the next owner's block, would
-  stage it.
 - **The other columns and parts**: the other three columns compile on
   every part where they are bonded (`brio check ch32x035`); a board of
   each package would run them.
