@@ -499,6 +499,12 @@ DMA engine, the console's transport naming one in its transmit slot.
   leave them (9 to 12 read on the next owner's channel), and the
   TRIGGER drops them: the next owner, armed on a request that never
   comes, moved nothing.
+- **THE DW_apb_i2c HOST'S READ PHASE ON THESE ENGINES** - the transmit
+  engine pouring the half-word command cell, the receive engine
+  collecting the bytes - is measured on the pair's I2C wires against the
+  desk partner's peer, on both halves: `test_rp2350_i2c` letter g, eight
+  255-byte reads at 1 MHz with TX_OVER never raised, and the engined
+  read's cost and its first read's XIP fill in [i2c.md](i2c.md).
 
 ## Not covered yet
 
@@ -544,12 +550,6 @@ Implemented but not bench-verified, each with what would measure it:
   controller's debug registers read across it, would.
 - `DmaCopyEngine` completed on a line (`DmaReport::blocks`): letter l
   polls it; a letter that waits on the line's handler.
-- The DW_apb_i2c host's read phase on these engines - the transmit engine
-  pouring a half-word command cell, the receive engine collecting the
-  bytes: compiled for both halves; a tenure against the desk partner's
-  peer on the pair's I2C wires is what would measure it
-  ([i2c.md](i2c.md)).
-
 - A WRITE bus error (WRITE_ERROR): letter `h` provokes a read error; a
   block writing into an address the fabric cannot decode would be the
   other half.

@@ -35,6 +35,11 @@
 //   f  THE READ ACROSS A DAY'S ROLLOVER: read() never puts the new time
 //      beside the old date (300 rollovers of 10 ms seconds), where the
 //      single RTC_0-then-RTC_1 pair does now and then
+//   g  THE CENTURIES AND THE COARSER REPEATS: 2200 and 2400 crossed on the
+//      silicon with the flag the driver computes (and 2200 without it);
+//      an alarm on minute and second repeating once an hour (an hour of
+//      10 ms seconds, the interval timed), one on the hour too repeating
+//      once a day
 //
 // build: boards = pico,weact2040
 // build: monitor_speed = 115200
@@ -461,6 +466,140 @@ void tf_coherence() {
                   seen[1] == rolls && bad[1] != 0u);
 }
 
+// =============================================================================
+// g - the centuries, and the alarm that repeats once an hour
+// =============================================================================
+void tg_centuries() {
+    (void)rtc_up();
+    // The divide-by-100 and divide-by-400 rules on the silicon: the block
+    // knows only "divisible by four" (4.8.3), so 2200 needs
+    // FORCE_NOTLEAPYEAR and 2400 does not - each year's flag taken from
+    // the driver's own rtc_needs_force_not_leap(), the witness of 2200
+    // without it, one second each.
+    struct Case {
+        uint16_t year;
+        bool force;
+        uint8_t month_after;
+        uint8_t day_after;
+    };
+    const Case cases[] = {
+        {2200, rtc_needs_force_not_leap(2200), 3, 1},
+        {2200, false, 2, 29},
+        {2400, rtc_needs_force_not_leap(2400), 2, 29},
+    };
+    uint8_t ok = 0;
+    for (const Case& c : cases) {
+        Rtc::force_not_leap_year(c.force);
+        const uint8_t wd = rtc_weekday_of(c.year, 2, 28);
+        const RtcDateTime from{c.year, 2, 28, wd, 23, 59, 59};
+        const bool set = Rtc::set(from);
+        RtcDateTime next{};
+        const uint32_t at = next_second(next);
+        const bool good = set && at != 0u && next.year == c.year && next.month == c.month_after &&
+                          next.day == c.day_after && next.weekday == (wd + 1u) % 7u && next.hour == 0u;
+        print(serial, "  ", c.year, c.force ? " under FORCE_NOTLEAPYEAR: " : " without the force: ");
+        print_dt(from);
+        print(serial, " -> ");
+        print_dt(next);
+        print(serial, good ? "" : "  WRONG", crlf);
+        if (good) {
+            ++ok;
+        }
+    }
+    Rtc::force_not_leap_year(false);
+    bench.verdict("THE CENTURIES: 2200 crosses 28 February into 1 March under the flag rtc_needs_force_not_leap() asks "
+                  "for, and into a 29 February without it; 2400 - divisible by 400 - into 29 February with the flag "
+                  "the driver leaves off",
+                  ok == 3u && rtc_needs_force_not_leap(2200) && !rtc_needs_force_not_leap(2400));
+
+    // THE HOURLY REPEAT: an alarm matching minute 0, second 1 - once an
+    // hour - on seconds of 469 clk_rtc periods (CLKDIV_M1 468, written with
+    // the calendar stopped, set() starting it): 469 / 46875 Hz = 10.00533 ms,
+    // so an hour of the calendar is 3600 x 10.00533 = 36 019.2 ms of the
+    // timer. Fired at 13:00:01, re-armed after its second, it must fire
+    // ONCE more, at 14:00:01, and not between. The bound on the interval:
+    // the timer and clk_rtc share the crystal (no rate error between
+    // them); each stamp is the match's latency to the interrupt plus the
+    // handler's read of the timer, measured in letter d under 200 us, and
+    // one clk_rtc period (21.3 us) of phase - so the interval is within
+    // 200 + 21.3 < 250 us of 36 019.2 ms.
+    (void)rtc_up();
+    Rtc::regs().CLKDIV_M1 = 468u;
+    Nvic::enable(Rtc::irq());
+    (void)Rtc::set({2026, 9, 13, 0, 12, 59, 58});
+    rtc_isr_entries = 0;
+    rtc_fired_at = 0;
+    const bool armed = Rtc::alarm({.at = {.minute = 0, .second = 1}, .match_minute = true, .match_second = true});
+    Rtc::interrupt(true);
+    uint32_t t0 = us_now();
+    while (rtc_fired_at == 0u && us_now() - t0 < 1'000'000u) {
+    }
+    const uint32_t first = rtc_fired_at;
+    const auto at_first = Rtc::read();
+    const bool rearmed = Rtc::rearm_after();
+    rtc_fired_at = 0;
+    t0 = us_now();
+    while (rtc_fired_at == 0u && us_now() - t0 < 40'000'000u) {
+    }
+    const uint32_t second = rtc_fired_at;
+    const auto at_second = Rtc::read();
+    const uint32_t entries = rtc_isr_entries;
+    const uint32_t interval = second - first;
+    Rtc::disarm_alarm();
+    Rtc::interrupt(false);
+    // The hour matched too - once a day: fired at 13:00:00, re-armed, two
+    // seconds of nothing, then the calendar moved to the next day's
+    // 12:59:59 and the match comes again at 13:00:00.
+    (void)Rtc::set({2026, 9, 13, 0, 12, 59, 59});
+    rtc_isr_entries = 0;
+    rtc_fired_at = 0;
+    const bool armed_d = Rtc::alarm({.at = {.hour = 13, .minute = 0, .second = 0}, .match_hour = true,
+                                     .match_minute = true, .match_second = true});
+    Rtc::interrupt(true);
+    t0 = us_now();
+    while (rtc_fired_at == 0u && us_now() - t0 < 1'000'000u) {
+    }
+    const bool fired_d1 = rtc_fired_at != 0u;
+    const bool rearmed_d = Rtc::rearm_after();
+    spin_us(2'000'000);
+    const uint32_t between = rtc_isr_entries;
+    const bool moved = Rtc::adjust({2026, 9, 14, 1, 12, 59, 59});
+    rtc_fired_at = 0;
+    t0 = us_now();
+    while (rtc_fired_at == 0u && us_now() - t0 < 1'000'000u) {
+    }
+    const bool fired_d2 = rtc_fired_at != 0u;
+    const auto at_d2 = Rtc::read();
+    Rtc::disarm_alarm();
+    Rtc::interrupt(false);
+    Nvic::disable(Rtc::irq());
+    (void)rtc_up();
+    print(serial, "  minute 0 second 1, 10 ms seconds: fired at ");
+    if (at_first) {
+        print_dt(*at_first);
+    }
+    print(serial, ", re-armed ", rearmed, ", again at ");
+    if (at_second) {
+        print_dt(*at_second);
+    }
+    print(serial, " after ", interval, " us (36 019 200 expected), ", entries, " entries", crlf);
+    print(serial, "  hour 13 minute 0 second 0: fired ", fired_d1, ", re-armed ", rearmed_d, ", entries in the next 200 "
+          "calendar seconds ", between, ", again after the jump to the next day ", fired_d2, " at ");
+    if (at_d2) {
+        print_dt(*at_d2);
+    }
+    print(serial, crlf);
+    const int32_t err = static_cast<int32_t>(interval - 36'019'200u);
+    bench.verdict("A MINUTE-AND-SECOND ALARM REPEATS ONCE AN HOUR: fired at 13:00:01, re-armed after its second, it "
+                  "fires once more at 14:00:01 and not between, 3600 calendar seconds later within 250 us",
+                  armed && first != 0u && at_first && at_first->hour == 13u && rearmed && second != 0u && at_second &&
+                      at_second->hour == 14u && at_second->minute == 0u && entries == 2u && err > -250 && err < 250);
+    bench.verdict("an hour-minute-second alarm repeats once a day: fired at 13:00:00, silent through the next 200 "
+                  "seconds, again at the next day's 13:00:00",
+                  armed_d && fired_d1 && rearmed_d && between == 1u && moved && fired_d2 && at_d2 && at_d2->day == 14u &&
+                      at_d2->hour == 13u);
+}
+
 void banner() {
     print(serial, crlf, "test_rp2040_rtc - the RP2040 RTC (datasheet 4.8): clk_rtc = crystal / 256, nothing to wire; clk_sys=",
           SysClock::hz, " Hz", crlf);
@@ -500,6 +639,7 @@ int main() {
     bench.letter('d', "the alarm: latency, the level, the repeat, the one-shot", td_alarm);
     bench.letter('e', "adjust, stop, the forced interrupt", te_adjust);
     bench.letter('f', "the read across a day's rollover", tf_coherence);
+    bench.letter('g', "the centuries, the alarm once an hour and once a day", tg_centuries);
 
     if (serial_ok) {
         brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "PLL125" : "FAILED", " timer=", timer_ok ? "1us" : "FAILED",

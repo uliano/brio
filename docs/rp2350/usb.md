@@ -320,6 +320,15 @@ beside them. Every verdict reads the same on the two halves.
   USB report on a live port reads state 3, an address the host assigned,
   2 bus resets, 16 setups, 3 stalls, the isolation lifted and the last
   start of frame a few thousand 48 MHz cycles old.
+- TWO PORTS IN ONE DEVICE (letter x, host-assisted): the device restarted
+  with a second `UsbCdcAcm` on interfaces 2 and 3 (notification on
+  endpoint 3, the bulk pair on endpoint 4) - one configuration of four
+  interfaces, 125 bytes, the descriptors glued in order - enumerates to
+  CONFIGURED in 0.35 to 0.73 s, Linux's cdc-acm binding both as two
+  ttyACM (by-id `-if00` and `-if02`, with no interface association
+  descriptor); 8192 bytes written to each, port A echoing them and port
+  B each plus one, both exact at the host with no overrun and no SIE
+  error; then the one-port device back. Ten runs on each half.
 
 ## Not covered yet
 
@@ -371,9 +380,6 @@ Implemented but not bench-verified, each with what would measure it:
   length rather than the flag, nothing here wants an interrupt per NAK,
   and a remote wakeup needs a host that has armed it, which this one
   does not.
-- **Two ports in one device** (a second `UsbCdcAcm` on interfaces 2 and
-  3): the descriptors glue and the controller has buffers to spare, and
-  nothing has asked for it.
 - **The suspend and resume counters against a host that really
   suspends.** They advance here - the console's own report shows one
   suspend on a live port - but nothing arms an autosuspend on purpose or

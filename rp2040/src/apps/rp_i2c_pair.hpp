@@ -95,6 +95,12 @@ volatile uint16_t client_nacks = 0;
 volatile uint16_t client_flushes = 0;
 volatile uint16_t client_errors = 0;
 volatile uint16_t client_gcalls = 0;
+volatile uint16_t client_overruns = 0;
+/// Letter m's cut: the read request numbered `client_cut_at` (from 0) is
+/// not answered - its RD_REQ masked, SCL left held - and `client_cut` says
+/// so; 0xFFFF never.
+volatile uint16_t client_cut_at = 0xFFFFu;
+volatile bool client_cut = false;
 
 void client_reset_tally() {
     client_given = 0;
@@ -105,6 +111,9 @@ void client_reset_tally() {
     client_flushes = 0;
     client_errors = 0;
     client_gcalls = 0;
+    client_overruns = 0;
+    client_cut_at = 0xFFFFu;
+    client_cut = false;
     for (uint8_t i = 0; i < sizeof client_heard; ++i) {
         client_heard[i] = 0xEE;
     }
@@ -125,6 +134,11 @@ void client_serve(I2cClientEvent ev) {
             }
             break;
         case I2cClientEvent::byte_wanted:
+            if (client_given == client_cut_at) {
+                client_cut = true;
+                Client::interrupts(I2cInterrupt::rd_req, false);
+                break;
+            }
             Client::give(client_given < sizeof client_answers ? client_answers[client_given] : uint8_t{0xFF});
             client_given = client_given + 1u;
             Client::clear_read_request();
@@ -135,16 +149,20 @@ void client_serve(I2cClientEvent ev) {
         case I2cClientEvent::flushed: client_flushes = client_flushes + 1u; break;
         case I2cClientEvent::general_call: client_gcalls = client_gcalls + 1u; break;
         case I2cClientEvent::error: client_errors = client_errors + 1u; break;
+        case I2cClientEvent::overrun: client_overruns = client_overruns + 1u; break;
         default: break;
     }
 }
 
 /// This board as a client at `addr` (the general call answered or not),
 /// its events on its vector.
-bool client_ready(uint8_t addr, bool general_call) {
+bool client_ready(uint8_t addr, bool general_call, bool hold_when_rx_full = true) {
     owner = Owner::none;
     client_reset_tally();
-    const bool ok = Client::init(clock, {.address = addr, .general_call = general_call, .speed = I2cSpeed::fast_plus_1m});
+    const bool ok = Client::init(clock, {.address = addr,
+                                         .general_call = general_call,
+                                         .speed = I2cSpeed::fast_plus_1m,
+                                         .hold_when_rx_full = hold_when_rx_full});
     Client::interrupts(Client::events, true);
     owner = Owner::client;
     return ok;
@@ -823,6 +841,42 @@ void tg_dma() {
     const uint8_t m16 = pattern_mismatches(rx_buf, 16, a.seed, served);
     served = static_cast<uint16_t>(served + 16u);
     bench.verdict("... and the next engined read after that is clean", st6 == i2c_ok && m16 == 0u);
+    // THE FAULT PATH: a 64-byte engined read whose receive run points into
+    // a hole in the map (0x40100000, where no peripheral answers) - the
+    // receive engine's first write is a bus error, which raises the
+    // channel's line whatever its binding, and dma_isr() aborts the tenure
+    // (the STOP after the entry under way) and answers i2c_dma_fault. How
+    // far the peer got is the abort's: the next clean read's first byte
+    // says where its counting pattern stands, and the tally resumes there.
+    // The bound: the error comes at the first byte's move; the handler's
+    // entry is microseconds warm and at most 8600 cycles cold from the
+    // flash on the RP2040 (docs/rp2040/platform.md: 69 us, the slowest of
+    // the three images) - under four bytes of 22.5 us at 400 kHz - and the
+    // abort ends after the entry under way, the next already in the
+    // shifter: one to six bytes served (3 or 4 measured).
+    auto* const hole = reinterpret_cast<uint8_t*>(0x40100000u);
+    const uint8_t sf = tenure<DmaHost>(twilink::dut_addr, nullptr, 0, hole, 64, I2cSpeed::fast_400k, 20'000u);
+    const uint32_t fault_entries = isr_entries;
+    for (uint8_t i = 0; i < 16u; ++i) {
+        rx_buf[i] = 0xEE;
+    }
+    const uint8_t sa = tenure<DmaHost>(twilink::dut_addr, nullptr, 0, rx_buf, 16, I2cSpeed::fast_400k);
+    uint16_t skipped = 0xFFFFu;
+    for (uint16_t k = 0; k < 256u && skipped == 0xFFFFu; ++k) {
+        if (pattern_mismatches(rx_buf, 16, a.seed, static_cast<uint16_t>(served + k)) == 0u) {
+            skipped = k;
+        }
+    }
+    print(serial, "  an engined read into a hole in the map: status ", sf, " (i2c_dma_fault ", i2c_dma_fault, "), ",
+          fault_entries, " host interrupts; the peer had served ", skipped, " byte(s) by the abort; the next read ",
+          sa, crlf);
+    bench.verdict("THE ENGINES' FAULT PATH: a receive run into a hole in the map is a bus error on the receive "
+                  "channel, the tenure aborted and answered i2c_dma_fault - and the next engined read is clean, the "
+                  "peer's pattern resumed where the abort left it",
+                  sf == i2c_dma_fault && sa == i2c_ok && skipped >= 1u && skipped <= 6u);
+    if (skipped != 0xFFFFu) {
+        served = static_cast<uint16_t>(served + skipped + 16u);
+    }
     // The bursts: the request is a level the DMA banks credits on while the
     // FIFO is empty; a burst past the FIFO's depth would drop commands
     // (TX_OVER) and shorten the tenure. Eight reads of 255 at 1 MHz.
@@ -1315,6 +1369,181 @@ void tl_roles() {
                   "acknowledge), its three bytes taken, and no stop event (IC_CON's note)",
                   up3 && gcalls == 1u && gheard == 3u && gmism == 0u && gstops == 0u && grep && gr.mstatus == i2c_ok);
     bench.verdict("the command channel is back after the role swaps", command(Op::ping));
+}
+
+// =============================================================================
+// m - the client's edges: the overrun without the hold, the disable inside
+// a tenure
+// =============================================================================
+
+/// One peer host write of `count` bytes to this board's client, inside the
+/// hand-made window; `hold` the client's RX_FIFO_FULL_HLD_CTRL, `drain`
+/// whether its vector takes the bytes (RX_FULL unmasked), `cut_after` the
+/// bytes after which this side disables the block (0: never). The bytes
+/// the FIFO kept are read out after the STOP when the vector did not take
+/// them. Returns the peer's report.
+struct EdgeRun {
+    bool up = false;
+    bool rep = false;
+    twilink::Report r{};
+    uint16_t heard = 0;
+    uint8_t wrong = 0;
+    uint16_t overruns = 0;
+    uint16_t stops = 0;
+    bool idle = false;
+    bool busy_bit = false;
+    bool lost_bit = false;
+};
+
+EdgeRun client_write_run(uint8_t count, uint8_t seed, bool hold, bool drain, uint8_t cut_after,
+                         uint32_t drain_after_us = 0) {
+    EdgeRun e{};
+    twilink::Params c{};
+    c.ms = 800;
+    c.target = twilink::dut_addr;
+    c.count = count;
+    c.seed = seed;
+    c.aux16 = 200;
+    if (!peer_act(Op::arb, c)) {
+        return e;
+    }
+    const uint32_t s0 = us_now();
+    Host::release();
+    e.up = client_ready(twilink::dut_addr, false, hold);
+    if (!drain) {
+        Client::interrupts(I2cInterrupt::rx_full, false);
+    }
+    inject_start();
+    spin_us(400);
+    inject_stop();
+    if (cut_after != 0u) {
+        // The block disabled from here, the instant the vector has taken
+        // byte `cut_after` (polled: the vector stores each byte as it lands;
+        // the peer's host starts at the window's STOP, 90 us a byte).
+        const bool reached = wait_until([cut_after] { return client_count >= cut_after; }, 20'000u);
+        if (reached) {
+            (void)Raw::disable(0);
+        }
+        e.idle = wait_until([] { return !Raw::running(); }, 5000u);
+        e.busy_bit = Raw::client_disabled_while_busy();
+        e.lost_bit = Raw::client_rx_data_lost();
+        spin_us(3000);
+    } else {
+        if (drain_after_us != 0u) {
+            spin_us(drain_after_us);
+            Client::interrupts(I2cInterrupt::rx_full, true);
+        }
+        (void)wait_until([] { return client_stops != 0u; }, 300'000u);
+        if (!drain && drain_after_us == 0u) {
+            while (Client::data_ready()) {
+                const uint8_t b = Client::take();
+                if (client_count < sizeof client_heard) {
+                    client_heard[client_count] = b;
+                }
+                client_count = client_count + 1u;
+            }
+        }
+    }
+    e.heard = client_count;
+    e.wrong = pattern_mismatches(client_heard, static_cast<uint8_t>(e.heard < 64u ? e.heard : 64u), seed, 0);
+    e.overruns = client_overruns;
+    e.stops = client_stops;
+    owner = Owner::none;
+    Client::release();
+    host_ready();
+    outlast(c, s0);
+    e.rep = peer_report(e.r);
+    return e;
+}
+
+void tm_client_edges() {
+    if (!need_peer()) {
+        return;
+    }
+    constexpr uint8_t depth = 16;   // IC_RX_BUFFER_DEPTH on both chips (letter a reads it)
+    constexpr uint8_t sent = 24;
+    // ---- the overrun: no hold, nothing taken until the STOP ----
+    const EdgeRun o = client_write_run(sent, 0x31, false, false, 0);
+    print(serial, "  NO HOLD, the FIFO left full: ", sent, " bytes written by the peer's host (status ", o.r.mstatus,
+          "), ", o.heard, " kept (", o.wrong, " wrong), overrun events ", o.overruns, ", stops ", o.stops, crlf);
+    // One RX_OVER a byte lost: service() clears it in the vector within
+    // microseconds, and the next lost byte is 90 us later at 100 kHz.
+    bench.verdict("THE CLIENT'S OVERRUN: without RX_FIFO_FULL_HLD_CTRL the block acknowledges all 24 bytes of a real "
+                  "host's write (its tenure completes), keeps the first 16 - the FIFO's depth - byte-exact, and "
+                  "reports each of the 8 lost as an overrun event",
+                  o.up && o.rep && o.r.mstatus == i2c_ok && o.heard == depth && o.wrong == 0u &&
+                      o.overruns == sent - depth && o.stops == 1u);
+    // ---- the hold, the same write: SCL held until the FIFO is drained ----
+    const EdgeRun h = client_write_run(sent, 0x51, true, false, 0, 3000u);
+    print(serial, "  THE HOLD, the FIFO drained 3 ms after the window: ", h.heard, " taken (", h.wrong,
+          " wrong), overrun events ", h.overruns, ", the peer's host status ", h.r.mstatus, crlf);
+    bench.verdict("with the hold (the default) the same write loses nothing: SCL held at the full FIFO until the "
+                  "vector drains it, all 24 bytes byte-exact, no overrun, the host's tenure complete",
+                  h.up && h.rep && h.r.mstatus == i2c_ok && h.heard == sent && h.wrong == 0u && h.overruns == 0u);
+    // ---- the disable inside a host's write ----
+    const EdgeRun w = client_write_run(sent, 0x71, true, true, 4);
+    print(serial, "  DISABLED after the 4th of 24 written bytes: idle ", w.idle, ", SLV_DISABLED_WHILE_BUSY ",
+          w.busy_bit, ", SLV_RX_DATA_LOST ", w.lost_bit, ", bytes taken ", w.heard, ", the peer's host status ",
+          w.r.mstatus, crlf);
+    // The disable lands microseconds after the vector stored byte 4; byte 5
+    // takes 90 us on the wire, so it is the one in flight and refused.
+    bench.verdict("a client disabled inside a host's WRITE goes idle, refuses the byte in flight - the host's "
+                  "tenure ends on a data NACK after four - and reports SLV_DISABLED_WHILE_BUSY and SLV_RX_DATA_LOST",
+                  w.up && w.rep && w.idle && w.busy_bit && w.lost_bit && w.r.mstatus == i2c_nack_data &&
+                      w.heard == 4u);
+    // ---- the disable inside a host's read: the third read request left
+    // unanswered (SCL held by the block), the block disabled under it ----
+    twilink::Params rd{};
+    rd.ms = 900;
+    rd.target = twilink::dut_addr;
+    rd.count = 6;
+    rd.aux8 = 1;
+    rd.aux16 = 200;
+    if (!peer_act(Op::host_read, rd)) {
+        bench.verdict("the peer accepted the host_read command", false);
+        return;
+    }
+    const uint32_t s0 = us_now();
+    Host::release();
+    const bool up = client_ready(twilink::dut_addr, false);
+    for (uint8_t i = 0; i < sizeof client_answers; ++i) {
+        client_answers[i] = static_cast<uint8_t>(0x40u + 5u * i);
+    }
+    client_cut_at = 2;
+    client_window(400);
+    const bool held = wait_until([] { return client_cut; }, 50'000u);
+    (void)Raw::disable(0);
+    const bool idle_early = wait_until([] { return !Raw::running(); }, 2000u);
+    // Not idle while SCL is held for a byte: the request answered, then.
+    Client::give(0xA5);
+    Client::clear_read_request();
+    const uint32_t t_dis = us_now();
+    const bool idle = wait_until([] { return !Raw::running(); }, 50'000u);
+    const uint32_t idle_us = us_now() - t_dis;
+    const bool busy_bit = Raw::client_disabled_while_busy();
+    const bool lost_bit = Raw::client_rx_data_lost();
+    const uint16_t gave = client_given;
+    owner = Owner::none;
+    Client::release();
+    host_ready();
+    outlast(rd, s0);
+    twilink::Report rr{};
+    const bool rrep = peer_report(rr);
+    print(serial, "  DISABLED at the 3rd read request, SCL held: held ", held, ", idle within 2 ms ", idle_early,
+          "; after a byte given, idle ", idle, " in ", idle_us,
+          " us, SLV_DISABLED_WHILE_BUSY ", busy_bit, ", SLV_RX_DATA_LOST ", lost_bit, ", bytes given ", gave,
+          "; the peer's host: status ", rr.mstatus, ", flags ", hex(rr.flags), ", count ", rr.count, crlf);
+    // What the peer read: the two bytes given, then - the pads released -
+    // the pull-up's 0xFF for the other four.
+    const uint16_t want_sum = static_cast<uint16_t>(client_answers[0] + client_answers[1] + 4u * 0xFFu);
+    bench.verdict("A CLIENT DISABLED AT A READ REQUEST IT HOLDS SCL FOR NEVER GOES IDLE: IC_EN stays 1 through 2 ms "
+                  "and, a byte given after the disable (the FIFOs held erased: not taken), through 50 ms more, "
+                  "neither status bit set - the byte it waits for can never come",
+                  up && held && !idle_early && !idle && !busy_bit && !lost_bit && gave == 2u);
+    bench.verdict("and release() - the block reset - lets SCL go: the far host's tenure completes, the two given "
+                  "bytes then the pull-up's 0xFF",
+                  rrep && rr.mstatus == i2c_ok && rr.count == 6u && rr.sum == want_sum);
+    bench.verdict("the command channel is back after the client's edges", command(Op::ping));
 }
 
 // ---- the vector bodies ---------------------------------------------------------------

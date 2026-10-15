@@ -280,6 +280,19 @@ cost figures are `bench_rp2350` letter i's, against the same peer.
   all of it through GP36/GP37 and the unstick's verbs on the HIGH half
   of SIO. The client's stretch prices at 754 to 763 us for eight holds of
   100 us, a write under it within 4 us of the plain one.
+- **THE CLIENT'S EDGES** (letter m, the peer's host at 100 kHz, both
+  halves): without the hold, 24 bytes written into a receive FIFO nobody
+  drains are all acknowledged, the first 16 kept exact and EIGHT
+  `overrun` events raised, one a byte lost; with the hold the same write
+  stretches until the vector drains it, all 24 exact. A disable after the
+  fourth byte of a write refuses the fifth - the far host's data NACK -
+  with SLV_DISABLED_WHILE_BUSY and SLV_RX_DATA_LOST both set. A disable at
+  a read request the client holds SCL for NEVER COMPLETES: IC_EN stays 1
+  through 2 ms and 50 ms more, a byte written after it untaken, neither
+  bit set; `release()` lets SCL go and the far host's read finishes on the
+  pull-up - the RP2040's figures exactly
+  ([../dw_apb_i2c/README.md](../dw_apb_i2c/README.md)). Ten runs of z on
+  each half.
 - **THE HOST'S COST**, `bench_rp2350` letter i against the peer's
   client, the same image built for both halves, the host's vector placed
   in SRAM (the V image of [platform.md](platform.md), "A handler in SRAM",
@@ -343,6 +356,12 @@ cost figures are `bench_rp2350` letter i's, against the same peer.
   before the NACK and the STOP are on the wire; its long read keeps one
   read command in flight, waiting for each byte before the next command,
   where the pump pours them by the FIFO.
+- THE ENGINES' FAULT PATH (letter g): a 64-byte engined read whose
+  receive run points into a hole in the map (0x40100000) is a bus error
+  on the receive channel; `dma_isr()` aborts the tenure and answers
+  `i2c_dma_fault` with no host interrupt, the peer having served 3 or 4
+  bytes by the abort (21 and 9 of 30 runs over the three images of the
+  pair), and the next engined read is clean.
 - **THE ENGINES' FIRST READ IS THE XIP CACHE'S FILL.** A 64-byte engined
   read at 400 kHz takes 1485 to 1492 us (392 to 393 kHz) with two host
   interrupts; letter g's first after a flash takes 1543 / 1530 us
@@ -370,12 +389,5 @@ Implemented but not bench-verified, each with what would measure it:
 
 - `rebase()`: this stratum has no dynamic clock yet; measured when the
   clock chapter grows one, a tenure exact after a switch.
-- The client's `overrun` event: a client configured without the hold
-  when its receive FIFO is full.
-- `dma_isr()`'s fault path (`i2c_dma_fault`): a bus error on a channel,
-  staged with an address the fabric refuses.
-- `client_disabled_while_busy`, read after a disable timed inside a
-  host's read (its write-side twin, SLV_RX_DATA_LOST, is measured on the
-  wire).
 - The QFN-60's pin table: the stratum compiles for that package and
   refuses the pads it has not got, but no QFN-60 part is on the bench.

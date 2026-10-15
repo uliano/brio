@@ -161,6 +161,20 @@ extern "C" void isr_uart0() {
     7812500 (1 + 0/64), each byte-exact and taking its frames' time;
     119 and 7.9 M refused, and a rate within half a sixty-fourth of
     a divisor rounds onto it (7812501 is 7812500);
+  - THE RECEIVE TIMEOUT AT EVERY RUNG (letter c, the line masked and
+    UARTRIS.RTRIS polled): a lone byte raises it 41.5 bit periods after
+    its write - its stop bit's middle, where the byte enters the FIFO,
+    and 32 bit periods - at 120, 300, 9600, 115200, 921600, 2 M, 4 M and
+    7.8125 Mbaud alike (347.8 ms at 120 baud against 348.7, 363 us at
+    115200 against 360, 7 us at the ceiling against 5); the line
+    unmasked, the transport's vector hands the byte to the program 7 to
+    19 us later (eighty bytes, ten runs);
+  - `rebase` UNDER A RUNNING PORT (letter r): clk_peri moved from clk_sys
+    to the crystal under both UARTs, each rebased to its baud - the
+    console printing on, the loop byte-exact, 1024 frames in their wire
+    time at 115107 baud (6 + 33/64 of 12 MHz) - and back; `set_baud`
+    under a running port is how letter c climbs its ladder, every rung
+    exact and at the rate asked;
   - THE TWO DELIVERIES: a lone byte reaches the ring 371 us after
     its write at 115200 - one frame plus the 32-bit receive timeout;
     a burst of sixteen is delivered by the level, its first byte
@@ -226,7 +240,10 @@ extern "C" void isr_uart0() {
   ([../pl011/README.md](../pl011/README.md)).
 - THROUGH THE DEBUG PROBE'S BRIDGE, the console's own ladder fed by
   the host: byte-exact at 115200, 460800, 921600, 1 M, 2 M and 3 M
-  baud (142 KB at 3 M with no error and no overrun, host to board);
+  baud (142 KB at 3 M with no error and no overrun, host to board),
+  and board to host - a quarter of a second of line at each rung, 2880
+  bytes at 115200 to 75 000 at 3 M, the host judging - every byte
+  arrived exact;
   the bridge sends 8N1 whatever parity the host asks for, so a
   parity-error leg through it is a measure of the probe, not of the
   UART ([../probes/raspberry-pi-debug-probe.md](../probes/raspberry-pi-debug-probe.md)).
@@ -296,13 +313,14 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
-- The bridge's ceiling board to host (the suite measures host to
-  board): a `source` leg of the same host letter.
-- The receive timeout at the rates of the ladder other than 115200 and
-  1 Mbaud (letter u above) and 120 baud (the suite's cost at the
-  floor): a timed lone byte per rung.
-- `rebase` and `set_baud` under a running port: the suite.
 - Why a burst of 17 at 1 Mbaud is told 1.6 to 2.7 frames after its last
   stop bit, under the 32 bit periods of the time-out (letter u; the
-  M33 and Hazard3 read 3.26 on the same source): the entries timed
+  M33 and Hazard3 read 3.26 on the same source) - where a lone byte's
+  time-out is 32 bit periods from its stop bit at every rung (letter
+  c), so the shortfall is the burst's, not the rate's: the entries timed
   against the RX pad would place each one.
+- The 7 to 19 us from a masked time-out's line unmasked to the byte in
+  the program's hands (letter c), some 900 to 2400 cycles where the
+  receive path costs 46 a byte in a burst: the vector's entry and the
+  copy timed warm and cold on the meter (`bench_rp2040` letter u's
+  instrument) would split it.

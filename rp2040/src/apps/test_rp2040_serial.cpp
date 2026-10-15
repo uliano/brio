@@ -44,7 +44,8 @@
 //      the frame's length on the wire
 //   c  the baud ladder on the loop-back, from the floor (120 baud at
 //      125 MHz) to the ceiling (7.8125 Mbaud = clk_peri / 16), each rung
-//      byte-exact and timed against the frame count - plus the receive
+//      byte-exact and timed against the frame count, and a LONE BYTE
+//      delivered by the receive timeout at each rung - plus the receive
 //      timeout's 32 bit periods when the count is not a whole number of
 //      FIFO levels (a run of 8 is delivered by the timeout, not the
 //      level: at 120 baud that is 267 ms of the measure) - and THE RATE
@@ -60,6 +61,9 @@
 //   e  bulk traffic: 4096 bytes at 3 Mbaud through write_bulk/read_bulk
 //      on the loop, byte-exact, the interrupts per byte counted, and the
 //      line timed against the wire at the rate asked
+//   r  REBASE UNDER A RUNNING PORT: clk_peri moved from clk_sys to the
+//      crystal under both UARTs, each rebased, the loop exact and the
+//      line at the baud asked on each clock, and back
 //   t  tx_idle() ON THE PAD: eight frames on GP4 with the loop-back off,
 //      the pad read through SIO, and tx_idle() turning true at the last
 //      stop bit's end - never before it, within a bit time after - and
@@ -79,10 +83,11 @@
 //      not show this: an echo returns the same bits, parity included,
 //      which is why the peer sends for this letter); and the other way
 //      round, 64 frames sent at 7E1 into the peer's 8N1 echo back exact
-//   y  (by name only, brio stress) the CONSOLE's own ladder, host-fed:
-//      115200 to 3 Mbaud through the Debug Probe's bridge, the bytes
-//      verified on the board; the rungs to 921600 are verdicts, the
-//      ones above measure the bridge and are printed
+//   y  (by name only, brio stress) the CONSOLE's own ladder through the
+//      Debug Probe's bridge, 115200 to 3 Mbaud each way: a source leg
+//      (this end sends, the HOST judges - its tally) and a sink leg (the
+//      host pumps, the bytes verified here); the sink rungs to 921600
+//      are verdicts, the ones above measure the bridge and are printed
 //   w  (by name only, brio stress) WHETHER THE BRIDGE HONOURS A PARITY
 //      SETTING: the host announces 8E1 against the console's 8N1, and
 //      an even-parity frame whose parity bit is low is a frame error
@@ -439,6 +444,40 @@ void tc_ladder() {
               crlf);
         bench.verdict("and the line runs at the rate ASKED: those frames in their wire time, -1 % to "
                       "+3 %", wire_ok(pm));
+        // THE RECEIVE TIMEOUT AT THIS RUNG, the silicon's alone: UART1's
+        // line masked in the NVIC, a lone byte written into the idle line,
+        // and UARTRIS.RTRIS polled - the PL011 raises it when the receive
+        // FIFO holds data and no frame has come for 32 bit periods. The
+        // byte enters the FIFO at its stop bit's middle, 9.5 bit periods
+        // after the start bit (which leaves within a sixteenth of a bit of
+        // the write), so RTRIS rises 41.5 bit periods after the write. The
+        // bound: one bit period either side (the stop bit's sampling and
+        // the start's phase) and 2 us for the ruler's step and the poll.
+        // Then the line unmasked: the transport's vector delivers the byte.
+        {
+            uint8_t lb = 0;
+            while (Instrument::read_byte(lb)) {
+            }
+            const uint32_t bit_ns = static_cast<uint32_t>(1'000'000'000ull / actual);
+            const uint32_t want_us = static_cast<uint32_t>(83ull * 1'000'000u / (2ull * actual));
+            Nvic::disable(U1::irq());
+            const uint32_t t0 = us_now();
+            (void)Instrument::write_byte(0x5A);
+            while ((U1::raw_pending() & UartInterrupt::rx_timeout) == 0u && us_now() - t0 < want_us * 2u + 10'000u) {
+            }
+            const uint32_t lone = us_now() - t0;
+            Nvic::enable(U1::irq());
+            const uint32_t t1 = us_now();
+            while (!Instrument::read_byte(lb) && us_now() - t1 < 10'000u) {
+            }
+            const uint32_t handed = us_now() - t1;
+            const uint32_t slack = (bit_ns + 999u) / 1000u + 2u;
+            print(serial, "    a lone byte: RTRIS ", lone, " us after its write (41.5 bit periods: ", want_us,
+                  " us), the byte handed over ", handed, " us after the line was unmasked", crlf);
+            bench.verdict("a lone byte at this rung raises the receive timeout 41.5 bit periods after its write - a frame "
+                          "to the stop bit's middle and 32 bit periods - within a bit period and 2 us, and is delivered",
+                          set && lb == 0x5Au && lone + slack >= want_us && lone <= want_us + slack);
+        }
     }
     bench.verdict("set_baud refuses 119 and 8000000",
                   !Instrument::set_baud(SysClock::pclk_hz, 119) &&
@@ -644,9 +683,42 @@ uint32_t host_sink(uint32_t baud, uint32_t window_ms, uint32_t* received, bool* 
     return good;
 }
 
+/// One source leg: this end sends `count` bytes of the pattern at `baud`
+/// on the console, back to back, and the HOST judges them (brio stress's
+/// `source`: what arrived, and where the first wrong byte was - its
+/// verdict, printed on the host). Returns the bytes queued.
+uint32_t host_source(uint32_t baud, uint32_t window_ms, uint32_t count) {
+    host_announce("source", baud, "8N1", window_ms, count);
+    (void)Serial::set_baud(SysClock::pclk_hz, baud);
+    spin_us(200'000);
+    Lfsr tx;
+    uint32_t sent = 0;
+    while (sent < count && us_now() - host_window_t0 < (window_ms - 400u) * 1000u) {
+        uint8_t chunk[64];
+        uint32_t n = 0;
+        Lfsr probe{tx.state};
+        while (n < sizeof chunk && sent + n < count) {
+            chunk[n++] = probe.next();
+        }
+        const uint32_t q = Serial::write_bulk(std::span<const uint8_t>(chunk, n));
+        for (uint32_t i = 0; i < q; ++i) {
+            (void)tx.next();
+        }
+        sent += q;
+    }
+    console_drain();
+    return sent;
+}
+
 void ty_console_ladder() {
     constexpr uint32_t rungs[] = {115200, 460800, 921600, 1'000'000, 2'000'000, 3'000'000};
     for (uint32_t baud : rungs) {
+        // BOARD TO HOST: a quarter of a second of line, the host judging.
+        const uint32_t count = baud / 10u / 4u;
+        const uint32_t sent = host_source(baud, 1500, count);
+        host_settle();
+        print(serial, "  ", baud, " baud to the host: ", sent, " of ", count,
+              " bytes sent (the host's tally judges them)", crlf);
         uint32_t got = 0;
         bool wrong = false;
         const uint32_t good = host_sink(baud, 1200, &got, &wrong);
@@ -680,6 +752,52 @@ void tw_console_errors() {
     bench.verdict("the host's burst arrived through the bridge (the attribution above is the "
                   "bridge's finding, not a verdict)",
                   got > 1000u && pe == 0u);
+}
+
+// ---------------------------------------------------------------------------
+// r: rebase() under a running port - clk_peri moved under both UARTs
+// ---------------------------------------------------------------------------
+/// 64 bytes round the loop exact and 1024 frames out timed: one leg of r.
+bool rebase_leg(const char* name, uint32_t hz) {
+    Instrument::clear_errors();
+    uint32_t took = 0;
+    const uint32_t good = round_trip(64, UartBits::eight, 100'000u, &took);
+    const uint32_t pm = wire_permille(115200);
+    const uint32_t actual = Instrument::actual_baud(hz);
+    print(serial, "  ", name, ": 115200 asked, ", actual, " from the divisor; 64 bytes ", good, " exact in ", took,
+          " us; 1024 frames in ", pm, " thousandths of their wire time", crlf);
+    return good == 64u && wire_ok(pm) && Instrument::frame_errors() == 0u;
+}
+
+void tr_rebase() {
+    if (!instrument_up(115200)) {
+        bench.verdict("the instrument", false);
+        return;
+    }
+    // clk_peri is clk_sys (125 MHz) under the task; the crystal is the one
+    // other source that is a truth (12 MHz). Both UARTs run on clk_peri: the
+    // console is drained, clk_peri moved (the generator stopped, its source
+    // switched, restarted - Clocks::peri_select), and each port REBASED to
+    // the new rate keeping its baud. The 1024 frames' time is judged as in
+    // letter c (-1 % to +3 %): the crystal's divisor, 6 + 33/64, gives
+    // 115107 baud, 0.08 % slow.
+    const bool before = rebase_leg("clk_peri = clk_sys", SysClock::pclk_hz);
+    console_drain();
+    Clocks::peri_select(PeriAux::xosc);
+    Instrument::rebase(SysClock::xtal_hz);
+    Serial::rebase(SysClock::xtal_hz);
+    print(serial, "  (this line printed with clk_peri on the crystal, the console rebased)", crlf);
+    const bool on_xtal = rebase_leg("clk_peri = the crystal", SysClock::xtal_hz);
+    const uint32_t div_x = Instrument::Resource::divisor().integer;
+    console_drain();
+    Clocks::peri_select(PeriAux::clk_sys);
+    Instrument::rebase(SysClock::pclk_hz);
+    Serial::rebase(SysClock::pclk_hz);
+    const bool after = rebase_leg("clk_peri = clk_sys again", SysClock::pclk_hz);
+    bench.verdict("REBASE UNDER A RUNNING PORT: clk_peri moved from clk_sys to the crystal under both UARTs, each "
+                  "rebased - the console prints on, the loop is byte-exact and the line runs at the baud asked - "
+                  "and back",
+                  before && on_xtal && div_x == 6u && after);
 }
 
 // ---------------------------------------------------------------------------
@@ -782,6 +900,7 @@ int main() {
     bench.letter('d', "the FIFOs: timeout vs level, a break, an overrun", td_fifos);
     bench.letter('e', "bulk traffic at 3 Mbaud on the loop", te_bulk);
     bench.letter('t', "tx_idle() on the pad: the last stop bit", tt_tx_idle);
+    bench.letter('r', "rebase() under a running port: clk_peri moved", tr_rebase);
     bench.letter('p', "the wire against the partner's uart_peer, 512 bytes", tp_wire);
     bench.letter('s', "the error attribution on the wire: 7E1 against the peer's 8N1", ts_wire_errors);
     bench.letter('y', "HOST: the console's ladder through the probe's bridge (brio stress)", ty_console_ladder, false);

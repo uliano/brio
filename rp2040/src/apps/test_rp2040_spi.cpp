@@ -664,6 +664,8 @@ int main() {
     bench.letter('q', "the kernel read back by the peer", link::tq_kernel);
     bench.letter('r', "the roles invert: this PL022 as the client", link::tr_roles);
     bench.letter('m', "the client's answer pad: driven, SOD, released", link::tm_pads);
+    bench.letter('s', "the client from its vector: the ladder, the tail, the overrun", link::ts_client_vector);
+    bench.letter('w', "the wedge: the per-bus timeout and recover()", link::tw_wedge);
     bench.letter('x', "slip statistics (outside z)", link::tx_slips, false);
 
     if (serial_ok) {

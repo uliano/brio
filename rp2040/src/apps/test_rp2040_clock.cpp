@@ -72,18 +72,25 @@
 //      count is the RATIO OF THE TWO CRYSTALS, judged within 0.1 %
 //      (two consumer crystals are each within 50 ppm); with nothing
 //      on the wire the counter reports the source dead
+//   r  (by name only) THE PARTNER'S CLOCK OUTPUT MEASURED: GP20 carrying
+//      the RP2350B's GPOUT0 through its clock suite's `s` - six settings,
+//      a fractional divisor among them, odd divisors with and without
+//      duty correction - each heard at its frequency on the counter and
+//      its duty sampled by a PIO machine
 //
 // build: boards = pico,weact2040
 // build: monitor_speed = 115200
 
 #include <stdint.h>
 
+#include <bit>
 #include <optional>
 
 #include "rp2040/clock.hpp"
 #include "rp2040/delay.hpp"
 #include "rp2040/nvic.hpp"
 #include "rp2040/pin.hpp"
+#include "rp2040/pio.hpp"
 #include "rp2040/platform.hpp"
 #include "rp2040/ticker.hpp"
 #include "rp2040/timer.hpp"
@@ -475,6 +482,155 @@ void tp_input() {
     ClockIn<0>::release();
 }
 
+// -----------------------------------------------------------------------------
+// r - the partner's clock output measured: its frequency and its duty
+// -----------------------------------------------------------------------------
+
+/// THE DUTY METER: PIO0's machine 0 samples GP20 - a PIO reads any pad
+/// whoever owns it (2.19.2), here the clock input's - with one IN a cycle
+/// at clk_sys / 2 (62.5 MHz), autopushed 32 at a time into the joined
+/// receive FIFO; the core counts the ones. Sampled asynchronously against
+/// a signal off another crystal, the phases cover the period evenly: at
+/// the slowest signal here (960 kHz, 65 samples a period) the mean of
+/// 2048 words resolves the duty to well under one per cent.
+constexpr PioProgram<1> sample_program = [] {
+    PioProgram<1> p{};
+    p.code = {pio_in(PioIn::pins, 1)};
+    return p;
+}();
+using Sampler = PioSm<0, 0>;
+uint32_t sample_words[2048];
+
+/// The duty in tenths of a per cent over 2048 words of samples.
+uint32_t measure_duty() {
+    Sampler::enable(false);
+    while (!Sampler::rx_empty()) {
+        (void)Sampler::pop();
+    }
+    Sampler::restart();
+    Sampler::enable(true);
+    uint32_t n = 0;
+    const uint32_t t0 = us_now();
+    while (n < 2048u && us_now() - t0 < 20'000u) {
+        if (!Sampler::rx_empty()) {
+            sample_words[n++] = Sampler::pop();
+        }
+    }
+    Sampler::enable(false);
+    uint64_t ones = 0;
+    for (uint32_t i = 0; i < n; ++i) {
+        ones += static_cast<uint32_t>(std::popcount(sample_words[i]));
+    }
+    return n == 0u ? 0u : static_cast<uint32_t>(ones * 1000u / (static_cast<uint64_t>(n) * 32u));
+}
+
+/// THE PARTNER'S CLOCK OUTPUT MEASURED (by name, the RP2350B running its
+/// clock suite's `s` within the window): GP20 carries its GPOUT0, which
+/// steps through six settings of two seconds each - the crystal / 12, a
+/// FRACTIONAL / 12.5, and the odd divisors 3 and 7 without duty
+/// correction, 5 and 9 with it. For sixteen seconds this end counts the
+/// frequency (the counter against this board's crystal, 32 ms an interval)
+/// and samples the duty; each reading is filed under the setting whose
+/// frequency it matches. THE BOUNDS: a frequency within 100 ppm (two
+/// crystals of 50 ppm each) and the counter's 31.25 Hz step of the
+/// partner's crystal / divisor; a duty within 3 points of the expected:
+/// the sampling's resolution under 1, a few nanoseconds of rise-against-
+/// fall asymmetry on the wire under 1 at 4 MHz, and the rest margin. The
+/// expected duty: half for the even divisor and under correction; a third
+/// at 3 (8.1.3.4's example) and (n - 1) / 2n at 7 without it.
+void tr_partner_output() {
+    struct Setting {
+        const char* name;
+        uint32_t hz;          // the partner's 12 MHz over the divisor
+        uint16_t duty;        // permille; 0 = printed, not judged
+        uint16_t seen = 0;
+        uint32_t duty_sum = 0;
+        uint16_t duty_min = 1000;
+        uint16_t duty_max = 0;
+        uint32_t hz_min = 0xFFFFFFFFu;
+        uint32_t hz_max = 0;
+    };
+    Setting set[6] = {
+        {"/12", 1'000'000u, 500},
+        {"/12.5 (fractional)", 960'000u, 0},
+        {"/3, no correction", 4'000'000u, 333},
+        {"/5, duty corrected", 2'400'000u, 500},
+        {"/7, no correction", 1'714'286u, 429},
+        {"/9, duty corrected", 1'333'333u, 500},
+    };
+    ClockIn<0>::init();
+    (void)Pio<0>::reset();
+    const bool loaded = Pio<0>::load(sample_program, 0);
+    PioSmConfig c{};
+    c.clock = {2, 0};
+    c.in_base = ClockIn<0>::pin;
+    c.autopush = true;
+    c.push_threshold = 32;
+    c.fifo_join = PioFifoJoin::rx;
+    const bool sm_ok = loaded && Sampler::init(sample_program, 0, c);
+    print(serial, "  sixteen seconds of GP20 (start the partner's s now)", crlf);
+    uint16_t unknown = 0;
+    uint16_t dead = 0;
+    const uint32_t t0 = us_now();
+    while (us_now() - t0 < 16'000'000u) {
+        // The duty sampled on both sides of the count: a reading is filed
+        // only when the two agree within a point - a setting changed (or
+        // the output stopped) inside the 32 ms of the count otherwise
+        // files one setting's frequency with the next one's duty.
+        const uint32_t before = measure_duty();
+        const std::optional<uint32_t> hz = Boot::count_hz(ClockIn<0>::count_source);
+        const uint32_t duty = measure_duty();
+        if (!hz || *hz == 0u) {
+            ++dead;
+            continue;
+        }
+        if (before + 10u < duty || duty + 10u < before) {
+            ++unknown;
+            continue;
+        }
+        bool filed = false;
+        for (Setting& st : set) {
+            const uint32_t tol = st.hz / 10'000u + 32u;
+            if (*hz + tol >= st.hz && *hz <= st.hz + tol) {
+                ++st.seen;
+                st.duty_sum += duty;
+                st.duty_min = duty < st.duty_min ? static_cast<uint16_t>(duty) : st.duty_min;
+                st.duty_max = duty > st.duty_max ? static_cast<uint16_t>(duty) : st.duty_max;
+                st.hz_min = *hz < st.hz_min ? *hz : st.hz_min;
+                st.hz_max = *hz > st.hz_max ? *hz : st.hz_max;
+                filed = true;
+            }
+        }
+        unknown = static_cast<uint16_t>(unknown + (filed ? 0u : 1u));
+    }
+    (void)Pio<0>::reset();
+    ClockIn<0>::release();
+    uint8_t heard = 0;
+    uint8_t duty_ok = 0;
+    uint8_t judged = 0;
+    for (const Setting& st : set) {
+        const uint32_t mean = st.seen != 0u ? st.duty_sum / st.seen : 0u;
+        print(serial, "  ", st.name, ": ", st.seen, " readings, ", st.hz_min == 0xFFFFFFFFu ? 0u : st.hz_min, " to ",
+              st.hz_max, " Hz (", st.hz, "), duty ", mean, " permille (", st.duty_min, " to ", st.duty_max, ")",
+              st.duty != 0u ? "" : " - printed", crlf);
+        heard = static_cast<uint8_t>(heard + (st.seen >= 5u ? 1u : 0u));
+        if (st.duty != 0u) {
+            ++judged;
+            const bool ok = st.seen >= 5u && st.duty_min + 30u >= st.duty && st.duty_max <= st.duty + 30u;
+            duty_ok = static_cast<uint8_t>(duty_ok + (ok ? 1u : 0u));
+        }
+    }
+    print(serial, "  readings matching no setting or straddling a change: ", unknown, ", with nothing on the wire: ",
+          dead, crlf);
+    bench.verdict("the duty meter is up: PIO0's machine sampling GP20", sm_ok);
+    bench.verdict("THE PARTNER'S CLOCK OUTPUT, ITS FRACTION COUNTED: every one of the six settings heard at its "
+                  "frequency - the crystal over 12, 12.5, 3, 5, 7 and 9 - within 100 ppm and the counter's step",
+                  heard == 6u);
+    bench.verdict("AND ITS DUTY: half at the even divisor and wherever the correction is on (5 and 9), a third at 3 "
+                  "and three sevenths at 7 without it, each within three points",
+                  judged == 5u && duty_ok == 5u);
+}
+
 void banner() {
     print(serial, crlf, "test_rp2040_clock - the RP2040 clock tree (datasheet 2.15-2.18), boot clk=",
           Boot::hz, " Hz on the PLL, crystal ", Boot::xtal_hz, " Hz", crlf);
@@ -504,6 +660,7 @@ int main() {
     bench.letter('h', "the divider under a crystal-fed console; the PLL refused", th_divider_and_refusal);
     bench.letter('o', "GPOUT0 on GP21 = the crystal / 12, left running", to_output, false);
     bench.letter('p', "GPIN0 on GP20 counted: the other board's crystal", tp_input, false);
+    bench.letter('r', "the partner's clock output measured: frequency and duty", tr_partner_output, false);
 
     if (serial_ok) {
         brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "PLL125" : "FAILED",

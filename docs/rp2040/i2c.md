@@ -164,7 +164,8 @@ enable in this chip's IC_CON: the unstick is by hand.
   line's one flattened instance each in SRAM
   ([platform.md](platform.md), "A handler in SRAM").
 - `I2cClient<n, pins>`: `init(clock, Config)` (address, 10-bit, the
-  general call, the fastest speed it will see), `events` (the sources
+  general call, the fastest speed it will see, the hold at a full receive
+  FIFO - on by default), `events` (the sources
   `service()` reports on), `data_ready` / `take`, `data_wanted` /
   `give` / `writable` / `clear_read_request`, `stop_seen` /
   `clear_stop`, `host_nacked` / `clear_nack`, `overrun`,
@@ -274,6 +275,12 @@ client finding below is measured from both sides. The cost figures are
   engined read in a row; the first is the open item below -, a write-then-read,
   the short reads on the pump, a deaf client on an engined read, and
   eight 255-byte reads at 1 MHz byte-exact with TX_OVER never raised.
+- THE ENGINES' FAULT PATH (letter g): a 64-byte engined read whose
+  receive run points into a hole in the map (0x40100000) is a bus error
+  on the receive channel; `dma_isr()` aborts the tenure and answers
+  `i2c_dma_fault` with no host interrupt, the peer having served 3 or 4
+  bytes by the abort (21 and 9 of 30 runs over the three images of the
+  pair), and the next engined read is clean.
 - I2cBus OVER I2cHost: four queued tenures, the NACK in its place, the
   rejection of what a four-deep queue cannot hold, both votes, and THE
   TIMED BUS - the peer holding SCL 30 ms before the first byte of a read
@@ -296,6 +303,18 @@ client finding below is measured from both sides. The cost figures are
 - THIS BLOCK AS THE PEER HOST'S CLIENT: six bytes written to it exact
   with their STOP; two reads of six served one byte a read request, the
   peer's count, sum and both first bytes the run given, nothing flushed.
+- THE CLIENT'S EDGES (letter m, the peer's host at 100 kHz): without the
+  hold, 24 bytes written into a receive FIFO nobody drains are all
+  acknowledged, the first 16 kept exact and EIGHT `overrun` events
+  raised, one a byte lost; with the hold the same write stretches until
+  the vector drains it, all 24 exact. A disable after the fourth byte of
+  a write refuses the fifth - the far host's data NACK - with
+  SLV_DISABLED_WHILE_BUSY and SLV_RX_DATA_LOST both set. A disable at a
+  read request the client holds SCL for NEVER COMPLETES: IC_EN stays 1
+  through 2 ms and 50 ms more, a byte written after it untaken, neither
+  bit set; `release()` lets SCL go and the far host's read finishes on the
+  pull-up ([../dw_apb_i2c/README.md](../dw_apb_i2c/README.md)). Ten runs
+  of z, the same figures in each.
 - THE FIRST ENGINED READ IS THE XIP CACHE'S FILL. Letter g's first
   64-byte read at 400 kHz after a boot takes 1632 us with ONE host
   interrupt where the read right after it takes 1492 to 1500 us with two,
@@ -388,10 +407,3 @@ Implemented but not bench-verified, each with what would measure it:
 
 - `rebase()`: this stratum has no dynamic clock yet; measured when the
   clock chapter grows one, a tenure exact after a switch.
-- The client's `overrun` event: a client configured without the hold
-  when its receive FIFO is full.
-- `dma_isr()`'s fault path (i2c_dma_fault): a bus error on a channel,
-  staged with an address the fabric refuses.
-- `client_disabled_while_busy`, read after a disable timed inside a
-  host's read (its write-side twin, SLV_RX_DATA_LOST, is measured
-  above).

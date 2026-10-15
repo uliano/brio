@@ -264,11 +264,18 @@ a number is given for each.
   `init()`; and under the loop-back the GP4 pad still carries every frame
   (eight start bits for eight frames) - the IP's findings
   ([../pl011/README.md](../pl011/README.md)).
+- `rebase` UNDER A RUNNING PORT (letter r, ten runs on each half):
+  clk_peri moved from clk_sys to the crystal under both UARTs, each
+  rebased to its baud - the console printing on, the loop byte-exact,
+  1024 frames in their wire time at 115107 baud (6 + 33/64 of 12 MHz) -
+  and back to clk_sys.
 - THROUGH THE DEBUG PROBE'S BRIDGE, the console's own ladder fed by the
   host: byte-exact at 115200, 460800, 921600, 1 M, 2 M and 3 Mbaud, with
   no frame error, no hardware overrun and no ring overrun at any rung
   (144000 bytes at 3 Mbaud host to board on the Cortex-M33 half, 142500
-  on the Hazard3 half). The bridge sends 8N1 whatever parity the host
+  on the Hazard3 half); and board to host, the host judging, a quarter
+  of a second of line at each rung - 2880 bytes at 115200 to 75 000 at
+  3 Mbaud - every byte exact on both halves. The bridge sends 8N1 whatever parity the host
   asks for, so a parity-error leg through it measures the probe and not
   the UART
   ([../probes/raspberry-pi-debug-probe.md](../probes/raspberry-pi-debug-probe.md)).
@@ -353,5 +360,5 @@ Implemented but not bench-verified, each with what would measure it:
 - The QFN-60's pin table: the stratum compiles for that package and
   refuses the pads it has not got, but no QFN-60 part is on the bench.
 - `rebase` under a dynamic clock: this target has no dynamic clock yet,
-  so the verb is exercised only at a rate that does not change.
-- The bridge's ceiling board to host: the suite measures host to board.
+  so the verb is exercised by moving clk_peri (letter r, above), never
+  by a clk_sys that changes under a running port.

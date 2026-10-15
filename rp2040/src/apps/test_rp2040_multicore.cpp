@@ -44,6 +44,10 @@
 //      - the counts consistent, no mispost, no overflow on the return
 //   f  the mispost: a post<Echo>() from core 0 - Echo's queue is core
 //      1's - is refused and counted, the queue untouched
+//   i  A DMA ENGINE ON LINE 1 SERVED BY CORE 1: the copy engine on channel
+//      6 armed by core 1's Echo (the line enabled in core 1's NVIC), 4 KB
+//      copied, its completion's vector run on core 1 alone, the report
+//      crossed back to core 0
 //   g  core 1 dies and is brought back: a Halt sent, core 1's panic
 //      breadcrumb read by core 0 from core 1's own record, core 1 put
 //      back into the bootrom through the power-on state machine and
@@ -60,6 +64,7 @@
 #include "kernel/panic.hpp"
 #include "kernel/time_event.hpp"
 #include "rp2040/clock.hpp"
+#include "rp2040/dma.hpp"
 #include "rp2040/multicore.hpp"
 #include "rp2040/nvic.hpp"
 #include "rp2040/pin.hpp"
@@ -97,9 +102,23 @@ struct Pong { uint16_t n; };
 struct Halt { uint8_t context; };
 struct Beating { bool on; };
 struct Tick {};
+/// Letter i: a copy on core 1's DMA engine, its end on line 1, and the
+/// account of it sent back.
+struct CopyOn1 { uint16_t words; };
+struct CopyDone { uint8_t flags; };
+struct Copied { uint8_t flags; };
+
+/// Letter i's engine: channel 6, its completions on DMA_IRQ_1, armed BY
+/// CORE 1 - arm() enables the line in the calling core's NVIC.
+using Copier = DmaCopyEngine<6, 1>;
+alignas(4) uint32_t copy_src[1024];
+alignas(4) uint32_t copy_dst[1024];
+/// Which core ran line 1's vector, counted in the vector itself.
+volatile uint32_t line1_on_core0 = 0;
+volatile uint32_t line1_on_core1 = 0;
 
 // ---- core 0: the origin of every Ping, the home of every answer --------------
-struct Origin : Fsm<Origin, Pong, Tick> {
+struct Origin : Fsm<Origin, Pong, Tick, Copied> {
     static inline EventQueue<Event, 32, P0> queue;
     static constexpr uint8_t inbox_depth = 16;
 
@@ -108,6 +127,8 @@ struct Origin : Fsm<Origin, Pong, Tick> {
     static inline bool in_order = true;
     static inline uint32_t last_pong_us = 0;
     static inline uint32_t ticks_seen = 0;
+    static inline uint32_t copies = 0;
+    static inline uint8_t copy_flags = 0;
 
     static void reset_counts() {
         pongs = 0;
@@ -129,12 +150,13 @@ struct Origin : Fsm<Origin, Pong, Tick> {
                 return handled();
             },
             [](Tick) { ++ticks_seen; return handled(); },
+            [](Copied c) { ++copies; copy_flags = c.flags; return handled(); },
             [](auto) { return unhandled(); });
     }
 };
 
 // ---- core 1: the echo, and the metronome on core 1's own time -----------------
-struct Echo : Fsm<Echo, Ping, Halt> {
+struct Echo : Fsm<Echo, Ping, Halt, CopyOn1, CopyDone> {
     static inline EventQueue<Event, 32, P1> queue;
     static constexpr uint8_t inbox_depth = 16;
     static inline volatile uint32_t seen = 0;   // Pings dispatched, for core 0's account
@@ -144,6 +166,14 @@ struct Echo : Fsm<Echo, Ping, Halt> {
             [](Entry) { return handled(); },
             [](Ping p) { seen = seen + 1u; send<Origin>(Pong{p.n}); return handled(); },
             [](Halt h) { panic<P1>(PanicCode::assert_failed, h.context); return handled(); },
+            [](CopyOn1 c) {
+                Copier::arm(DmaReport::blocks);
+                if (!Copier::copy(copy_dst, static_cast<const uint32_t*>(copy_src), c.words)) {
+                    send<Origin>(Copied{0xFF});
+                }
+                return handled();
+            },
+            [](CopyDone d) { send<Origin>(Copied{d.flags}); return handled(); },
             [](auto) { return unhandled(); });
     }
 };
@@ -332,6 +362,47 @@ void tc_round_trip() {
     bench.verdict("no overflow either way, no mispost",
                   d.echo_in_over == 0u && d.origin_in_over == 0u && d.echo_q_mis == 0u &&
                       d.origin_q_over == 0u && d.echo_q_over == 0u);
+}
+
+// -----------------------------------------------------------------------------
+/// AN ENGINE ON LINE 1 SERVED BY CORE 1: core 0 asks core 1's Echo for a
+/// copy; Echo arms the copy engine on channel 6 with its completions on
+/// DMA_IRQ_1 - arm() enables the line in the CALLING core's NVIC, core 1's
+/// - and starts 4 KB; the vector runs the engine's service and posts the
+/// result to Echo, which sends it across. Core 0's NVIC never enabled the
+/// line, so the vector must have run on core 1 alone (counted by CPUID in
+/// the vector), the copy exact.
+void ti_dma_on_core1() {
+    for (uint32_t i = 0; i < 1024u; ++i) {
+        copy_src[i] = 0xC0DE'0000u + 7u * i;
+        copy_dst[i] = 0;
+    }
+    Origin::copies = 0;
+    Origin::copy_flags = 0;
+    const uint32_t c0 = line1_on_core0;
+    const uint32_t c1 = line1_on_core1;
+    const Counts k0 = Counts::now();
+    send<Echo>(CopyOn1{1024});
+    const uint32_t t0 = us_now();
+    while (Origin::copies == 0u && us_now() - t0 < 100'000u) {
+        (void)K0::step();
+    }
+    uint32_t wrong = 0;
+    for (uint32_t i = 0; i < 1024u; ++i) {
+        if (copy_dst[i] != copy_src[i]) {
+            ++wrong;
+        }
+    }
+    const Counts d = Counts::now().since(k0);
+    print(serial, "  4 KB on channel 6, line 1: ", Origin::copies, " report(s) back, flags ", hex(Origin::copy_flags),
+          ", ", wrong, " words wrong; line 1's vector ran ", line1_on_core1 - c1, " time(s) on core 1 and ",
+          line1_on_core0 - c0, " on core 0; core 0's NVIC has line 1 ",
+          Nvic::enabled(DmaLine<1>::irq()) ? "ENABLED" : "disabled", crlf);
+    bench.verdict("AN ENGINE ON LINE 1 SERVED BY CORE 1: the copy engine armed on core 1 completes its block on DMA_IRQ_1, "
+                  "the vector run on core 1 once and never on core 0, the copy exact, the report crossed back",
+                  Origin::copies == 1u && (Origin::copy_flags & Copier::flag_complete) != 0u && wrong == 0u &&
+                      line1_on_core1 == c1 + 1u && line1_on_core0 == c0 && !Nvic::enabled(DmaLine<1>::irq()) &&
+                      d.echo_q_mis == 0u);
 }
 
 // -----------------------------------------------------------------------------
@@ -538,12 +609,24 @@ extern "C" void isr_systick() {
 }
 extern "C" void isr_sio_proc0() { Drain0::isr(); }
 extern "C" void isr_sio_proc1() { Drain1::isr(); }
+extern "C" void isr_dma_1() {
+    if (P1::core_id() == 1u) {
+        line1_on_core1 = line1_on_core1 + 1u;
+    } else {
+        line1_on_core0 = line1_on_core0 + 1u;
+    }
+    const uint8_t f = Copier::service();
+    if (f != 0u) {
+        brio::post<Echo>(CopyDone{f});
+    }
+}
 
 int main() {
     const bool clock_ok = SysClock::init();
     const bool timer_ok = brio::Timer::init(clock);
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
+    (void)brio::Dma::init();   // letter i's engine, out of reset before core 1 runs
     K0::init_all();
     relaunch_core1();
     brio::enable_interrupts();
@@ -555,6 +638,7 @@ int main() {
     bench.letter('e', "both directions at once for a second", te_both_ways);
     bench.letter('f', "a post to the other core's queue: refused", tf_mispost);
     bench.letter('h', "saturation: the losses counted where they happen", th_saturation);
+    bench.letter('i', "a DMA engine on line 1, armed and served by core 1", ti_dma_on_core1);
     bench.letter('g', "core 1 halts on a panic, is reset and launched again", tg_panic_and_relaunch);
 
     if (serial_ok) {

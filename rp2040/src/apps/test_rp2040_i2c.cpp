@@ -240,6 +240,7 @@ int main() {
     bench.letter('i', "the stuck bus", ti_unstick);
     bench.letter('k', "arbitration on the wire", tk_arbitration);
     bench.letter('l', "the roles invert: this board as the peer's client", tl_roles);
+    bench.letter('m', "the client's edges: the overrun, the disable inside a tenure", tm_client_edges);
     bench.letter('x', "the hand-made window, traced (outside z)", tx_window, false);
 
     if (serial_ok) {

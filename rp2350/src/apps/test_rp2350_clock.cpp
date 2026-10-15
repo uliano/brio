@@ -100,6 +100,10 @@
 //      count is the RATIO OF THE TWO CRYSTALS, judged within 0.1 %
 //      (two consumer crystals are each within 50 ppm); with nothing on
 //      the wire the counter reports the source dead
+//   s  (by name only) THE OUTPUT'S SCHEDULE for the partner's meter (the
+//      RP2040's clock suite `r`): GPOUT0 on GP21 through six settings of
+//      two seconds - /12, the fractional /12.5, /3 and /7 without the
+//      duty correction, /5 and /9 with it - then stopped
 //
 // build: boards = weact2350b,weact2350b-rv
 // build: monitor_speed = 115200
@@ -876,6 +880,38 @@ void to_output() {
     bench.verdict("a zero divider is refused", !ClockOut<1>::init(GpoutSource::xosc, 0));
 }
 
+/// THE OUTPUT'S SCHEDULE FOR THE PARTNER'S METER (by name, behind the
+/// partner-rail guard: GP21 is a link pad): GPOUT0 off the crystal steps
+/// through six settings of two seconds each, the RP2040's clock suite `r`
+/// filing each reading by its frequency - the crystal / 12, a FRACTIONAL
+/// 12.5 (DIV_FRAC 32768 of 65536), 3 and 7 without the duty correction, 5
+/// and 9 with it - then the output stopped and the pad given back.
+void ts_schedule() {
+    struct Step {
+        uint32_t div_int;
+        uint16_t div_frac;
+        bool dc50;
+    };
+    constexpr Step steps[6] = {{12, 0, false}, {12, 32768, false}, {3, 0, false},
+                               {5, 0, true},   {7, 0, false},      {9, 0, true}};
+    uint8_t ok = 0;
+    for (const Step& st : steps) {
+        const bool up = ClockOut<0>::init(GpoutSource::xosc, st.div_int, st.div_frac);
+        ClockOut<0>::duty_correction(st.dc50);
+        const bool read_back = ClockOut<0>::divider() == st.div_int && ClockOut<0>::divider_frac() == st.div_frac &&
+                               ClockOut<0>::duty_correction() == st.dc50;
+        print(serial, "  GPOUT0 = the crystal / ", st.div_int, st.div_frac != 0u ? " + 32768/65536" : "",
+              st.dc50 ? ", duty corrected" : "", read_back ? "" : "  NOT AS WRITTEN", crlf);
+        ok = static_cast<uint8_t>(ok + (up && read_back && ClockOut<0>::running() ? 1u : 0u));
+        const uint32_t t0 = us_now();
+        while (us_now() - t0 < 2'000'000u) {
+        }
+    }
+    ClockOut<0>::stop();
+    bench.verdict("the six settings ran two seconds each, each read back as written, and the output is stopped",
+                  ok == 6u && !ClockOut<0>::enabled());
+}
+
 void tp_input() {
     (void)ClockIn<0>::init();
     const std::optional<uint32_t> hz = Boot::count_hz(ClockIn<0>::count_source);
@@ -936,6 +972,8 @@ int main() {
     bench.letter('q', "the resus circuit, armed and forced", tq_resus);
     bench.letter('o', "GPOUT0 on GP21 = the crystal / 12, left running", pair::guarded<bench, clock, to_output>, false);
     bench.letter('p', "GPIN0 on GP20 counted: the peer board's crystal", tp_input, false);
+    bench.letter('s', "GPOUT0's schedule for the partner's meter: fraction, duty correction",
+                 pair::guarded<bench, clock, ts_schedule>, false);
 
     if (serial_ok) {
         brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "PLL150" : "FAILED",

@@ -61,7 +61,7 @@ gap of 5 us or a second RTC_0 read before RTC_1 read coherent in 500 of
   (Sakamoto's method, Sunday 0), `rtc_datetime_valid` (table 551's
   ranges, the day against its month), `RtcAlarm` (a date-time with a
   match flag per field) with `rtc_alarm_repeats` and
-  `rtc_alarm_valid`, the register words `rtc_word0_of` /
+  `rtc_alarm_valid` and `rtc_alarm_matches`, the register words `rtc_word0_of` /
   `rtc_word1_of` / `rtc_datetime_of`, `RtcClock` (crystal_div256,
   gpin0_1hz).
 - `Rtc`: `init(clock, source)` (clk_rtc from the crystal over 256 or
@@ -81,8 +81,9 @@ gap of 5 us or a second RTC_0 read before RTC_1 read coherent in 500 of
   `alarm()` read back; `interrupt(on)`, `raw_pending` / `pending`,
   `force`, `isr()` (true on the alarm, WITH THE LINE MASKED AND THE
   MATCH DISARMED), `rearm_after()` (the match re-armed once the
-  calendar has left the matching value, the line unmasked; false with
-  both left off), `irq()`.
+  calendar READ has left the matching value - compared in software by
+  `rtc_alarm_matches`, not by MATCH_ACTIVE -, the line unmasked; false
+  with both left off), `irq()`.
 - `clock.hpp` grew `Clocks::rtc_select(aux, div_int, div_frac)`,
   `rtc_stop`, `rtc_enabled`, `rtc_source`, `rtc_divider256` with
   `RtcAux`.
@@ -146,6 +147,26 @@ the boundaries crossed one second at a time.
   second it fires at the next minute's :03, 4999 ms after a jump to
   :58; a fully matched alarm fires once and reads as non-repeating; an
   alarm on the wrong weekday never fires.
+- THE COARSER REPEATS (letter g, on 10 ms seconds, CLKDIV_M1 468): an
+  alarm on minute 0 and second 1 fires at 13:00:01 and, re-armed by
+  `rearm_after()` at once, again at 14:00:01 and not between, 36 019 183
+  us later against 3600 x 469 / 46875 Hz = 36 019 200 us; one on the
+  hour too fires at 13:00:00, stays silent through the next 200
+  seconds, and fires again at the next day's 13:00:00.
+- A RE-ARM CANNOT BE JUDGED BY MATCH_ACTIVE. An arm written right after
+  the ISR body's disarm reads MATCH_ACTIVE 1 throughout the 121 us
+  sampled after it - the disarm and the arm are each two clk_rtc
+  periods from landing - and a re-arm that toggled the match until
+  MATCH_ACTIVE read 0 returned inside the matching second: the match
+  fired again in that second, the ISR body disarmed it, and the hourly
+  alarm never came back (letter g, 2 entries and no 14:00:01).
+  `rearm_after()` therefore reads the calendar and compares it with the
+  alarm's fields; the read path lags the calendar and never leads it,
+  so a value read past the match is a calendar past it.
+- THE CENTURIES (letter g): 2200 crosses 28 February into 1 March with
+  the FORCE_NOTLEAPYEAR `rtc_needs_force_not_leap(2200)` asks for, and
+  into a 29 February without it; 2400, divisible by 400, crosses into
+  29 February with the flag the function leaves off.
 - Adjusted while running the calendar takes the new value; stopped it
   reports not running and restarted it counts on; the forced
   interrupt appears in the status with no raw flag.
@@ -163,12 +184,3 @@ Driver gaps, each with its reason:
 - The calendar across a chip reset: the block is not in the core's
   reset scope, and whether the watchdog's PSM selection spares it is a
   reset chapter's measurement across a reboot.
-
-Implemented but not bench-verified, each with what would measure it:
-
-- `rtc_needs_force_not_leap` across the years 2200 and 2400 and the
-  divide-by-400 rule: pinned at compile time; the 2100 crossing is
-  the one measured.
-- A coarser repeating alarm (a minute or an hour matched): the
-  minute's repeat would take an hour of the desk; the second's is the
-  one measured.

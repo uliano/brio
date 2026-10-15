@@ -351,6 +351,22 @@ fail** on the Hazard3 pair, from one source.
   visible in either direction - the one external reference this bench
   has, since a chip counting its own oscillators can only ever prove
   their ratios.
+- **THE FRACTION AND THE DUTY, MEASURED BY THE PARTNER** (letter s here,
+  the RP2040's clock suite `r` at the other end of wire 10: its
+  frequency counter against its own crystal, and the duty sampled by a
+  PIO machine at 62.5 MHz). GPOUT0 off the crystal through six settings
+  of two seconds: /12 read 999 968 to 1 000 000 Hz, the FRACTIONAL /12.5
+  (DIV_FRAC 32768) 959 968 to 960 000 Hz, /3 3 999 906 to 3 999 937, /5
+  2 399 937 to 2 399 968, /7 1 714 250 to 1 714 281 against 1 714 286,
+  /9 1 333 281 to 1 333 312 - each within the 100 ppm of two crystals and
+  the counter's 31.25 Hz step. THE DUTY: half at /12 (499 to 501
+  permille), A THIRD at /3 and THREE SEVENTHS at /7 without the
+  correction (333, 428 permille: the high time (n - 1) / 2 source cycles
+  of an odd n), HALF at /5 and /9 with it (500 to 501) - 8.1.3.4's
+  correction doing what it says. The fractional /12.5 reads 480 permille
+  (printed, not judged): 12 / 25, a /12 period and a /13 period of six
+  high cycles each, which is what a divider alternating its two integer
+  neighbours with no correction gives. Ten runs on each half.
 
 ## Not covered yet
 
@@ -415,13 +431,15 @@ Implemented but not bench-verified, each with what would measure it:
   LOCKED in 64 us, so the range is a promise of the datasheet and not a
   refusal of the silicon; `pll_config_for` is the guard, at compile
   time.
-- **`ClockOut`'s fractional divider, and the outputs on GP23..GP25**:
-  the integer divider is counted by a peer board, the fraction is not,
-  and the other three pins carry no wire - GP25 is this board's LED.
-  A counter on those pins would close both.
-- **`ClockOut`'s duty cycle correction, phase and nudge**: written and
-  read back, and invisible to a frequency counter by construction. An
-  oscilloscope on GP21, or a second board with a capture unit.
+- **The outputs on GP23..GP25**: the three pins carry no wire - GP25 is
+  this board's LED. A counter on those pins would close it.
+- **`ClockOut`'s phase and nudge**: written and read back. Each moves an
+  edge by source cycles against the output's own past, and the
+  partner's sampler runs on another crystal whose drift against this
+  one (tens of ppm, some 50 ns a second at 1 MHz) is of the order of
+  the step; an oscilloscope on GP21 against a second output of this
+  chip, or the partner's sampler timing a nudge against a phase it has
+  just locked, would measure them.
 - **The sleep gates.** `sleep_enables` is written and read back; what it
   does happens when both cores are asleep and the DMA idle, which is the
   power chapter's state and not this one's.

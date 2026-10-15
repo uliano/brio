@@ -76,8 +76,9 @@
  * re-entered until the second passes - the vendor's own handler
  * disarms it at every entry. The ISR body here disarms the match and
  * says so; a repeating alarm is re-armed by the application once the
- * matching period is over (arm_alarm()), the ISR body's own
- * `rearm_after` doing that from the next second.
+ * matching period is over (arm_alarm()), or by `rearm_after`, which
+ * waits for the calendar to leave the matching value and judges that
+ * on the calendar it reads, not on MATCH_ACTIVE (see the verb).
  */
 
 #pragma once
@@ -166,6 +167,14 @@ struct RtcAlarm {
 constexpr bool rtc_alarm_repeats(const RtcAlarm& a) {
     return !(a.match_year && a.match_month && a.match_day && a.match_hour && a.match_minute && a.match_second);
 }
+/// Whether a calendar value matches the alarm: every matched field
+/// equal, the wildcards ignored (4.8.3's comparison, done in software).
+constexpr bool rtc_alarm_matches(const RtcAlarm& a, const RtcDateTime& d) {
+    return (!a.match_year || a.at.year == d.year) && (!a.match_month || a.at.month == d.month) &&
+           (!a.match_day || a.at.day == d.day) && (!a.match_weekday || a.at.weekday == d.weekday) &&
+           (!a.match_hour || a.at.hour == d.hour) && (!a.match_minute || a.at.minute == d.minute) &&
+           (!a.match_second || a.at.second == d.second);
+}
 /// The matched fields in range, the rest ignored.
 constexpr bool rtc_alarm_valid(const RtcAlarm& a) {
     return (!a.match_year || a.at.year <= 4095u) && (!a.match_month || (a.at.month >= 1u && a.at.month <= 12u)) &&
@@ -214,7 +223,7 @@ enum class RtcClock : uint8_t {
  *   if (const auto now = Rtc::read()) { ... }
  *   Rtc::alarm({.at = {.second = 0}, .match_second = true});   // every minute at :00
  *   Rtc::interrupt(true);
- *   extern "C" void isr_rtc() { if (Rtc::isr()) { tick(); Rtc::rearm_after(); } }
+ *   extern "C" void isr_rtc() { if (Rtc::isr()) { tick(); } }   // rearm_after() once the second is over
  */
 struct Rtc {
     Rtc() = delete;
@@ -435,24 +444,34 @@ struct Rtc {
         return true;
     }
     /// Re-arm the match once the calendar has left the matching value
-    /// and unmask the line: polled here, bounded by `spins` (a
+    /// and unmask the line: the calendar READ and compared with the
+    /// alarm's fields in software, `spins` reads at most (a
     /// second-matched alarm leaves within a second; a coarser match
     /// takes its period - which is the application's to know and to
-    /// wait for elsewhere). True when re-armed with the match no
-    /// longer active; false with the match left disarmed and the line
+    /// wait for elsewhere). NOT MATCH_ACTIVE: an arm and a disarm each
+    /// take two clk_rtc periods to land, and MATCH_ACTIVE read across
+    /// them is not the calendar's - an arm written right after the ISR
+    /// body's disarm read MATCH_ACTIVE 1 throughout the 121 us sampled
+    /// after it, and a
+    /// re-arm judged by it returned inside the matching second, the
+    /// match fired again and the ISR body disarmed it for good
+    /// (measured, test_rp2040_rtc letter g). The read path lags the
+    /// calendar, never leads it, so a value read past the match is a
+    /// calendar past it, and the arm lands before the next match. True
+    /// when re-armed; false with the match left disarmed and the line
     /// masked.
     static bool rearm_after(uint32_t spins = 100'000u) {
-        arm_alarm();
-        while (alarm_matching() && spins-- != 0u) {
-            disarm_alarm();
-            arm_alarm();
+        const RtcAlarm a = alarm();
+        disarm_alarm();
+        while (spins-- != 0u) {
+            const auto now = read();
+            if (now && !rtc_alarm_matches(a, *now)) {
+                arm_alarm();
+                interrupt(true);
+                return true;
+            }
         }
-        if (alarm_matching()) {
-            disarm_alarm();
-            return false;
-        }
-        interrupt(true);
-        return true;
+        return false;
     }
 
 private:
@@ -486,6 +505,10 @@ static_assert(rtc_alarm_repeats({.match_second = true}) &&
               !rtc_alarm_repeats({.match_year = true, .match_month = true, .match_day = true, .match_hour = true, .match_minute = true,
                                   .match_second = true}));
 static_assert(rtc_alarm_valid({.at = {.month = 13}}) && !rtc_alarm_valid({.at = {.month = 13}, .match_month = true}));
+static_assert(rtc_alarm_matches({.at = {.minute = 0, .second = 1}, .match_minute = true, .match_second = true},
+                                {2026, 9, 13, 0, 14, 0, 1}) &&
+              !rtc_alarm_matches({.at = {.minute = 0, .second = 1}, .match_minute = true, .match_second = true},
+                                 {2026, 9, 13, 0, 14, 0, 2}));
 static_assert(rtc_datetime_of(rtc_word0_of({.year = 2026, .month = 9, .day = 13}), rtc_word1_of({.weekday = 6, .hour = 23, .minute = 59, .second = 58})) ==
               RtcDateTime{.year = 2026, .month = 9, .day = 13, .weekday = 6, .hour = 23, .minute = 59, .second = 58});
 

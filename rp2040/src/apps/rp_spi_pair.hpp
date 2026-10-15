@@ -69,6 +69,9 @@ volatile PairOwner pair_owner = PairOwner::none;
 volatile bool pair_done = false;
 volatile uint8_t pair_status = 0;
 volatile uint32_t pair_isr_entries = 0;
+/// Letter w's wedge: the pump's ISR body runs and its completion is NOT
+/// posted to the arbiter - the lost completion the per-bus timeout answers.
+volatile bool pair_swallow = false;
 
 // ---- shared waits ----------------------------------------------------------------------
 
@@ -664,7 +667,10 @@ void tp_ladder() {
 
 namespace pk {
 
-using SpiArb = SpiBus<LinkHost, P, 4>;
+/// A 100-tick per-bus timeout (100 ms of the ticker): three orders of
+/// magnitude above the longest transaction here (8 frames at /128, 65 us),
+/// so only a completion that never comes meets it (letter w).
+using SpiArb = SpiBus<LinkHost, P, 4, BusPassThrough, 100>;
 
 class Probe {
 public:
@@ -1152,6 +1158,344 @@ void tm_pads() {
 }
 
 // =============================================================================
+// s - THE CLIENT SERVED FROM ITS VECTOR: the ladder to the ceiling, the
+// receive timeout's tail, the overrun
+// =============================================================================
+
+// THE VECTOR'S STATE: what the ISR body below reads and writes. The vector
+// is entered on RXIM (the receive FIFO at half - four frames), RTIM (a
+// frame waiting with the wire idle 32 bit periods: the tail under the
+// half) and RORIM (the overrun); TXIM stays masked - every receive entry
+// refills the transmit FIFO, which the four frames just received have
+// half emptied.
+volatile uint16_t cv_got = 0;
+volatile uint16_t cv_sent = 0;
+volatile uint16_t cv_count = 0;
+volatile bool cv_wide = false;
+volatile bool cv_drain = true;
+volatile uint16_t cv_rx_entries = 0;
+volatile uint16_t cv_timeout_entries = 0;
+volatile uint16_t cv_overrun_entries = 0;
+
+[[gnu::always_inline]] inline uint16_t ctx_frame(uint16_t k, bool wide) {
+    return wide ? static_cast<uint16_t>(ctx[2u * k] | (static_cast<uint16_t>(ctx[2u * k + 1u]) << 8)) : ctx[k];
+}
+
+/// The client's ISR body: the sources counted, the receive FIFO drained,
+/// the transmit FIFO refilled to its depth. IN SRAM, like serve_client():
+/// from the flash its first entry after a quiet spell fetches its lines
+/// through the XIP cache - 6000 to 8600 cycles cold on the RP2040
+/// (docs/rp2040/platform.md) - while the far host clocks on: measured,
+/// the first entry let the receive FIFO overflow at /64 and the transmit
+/// FIFO run dry at /16. Only the vector's own lines stay in the flash.
+[[gnu::section(".fast_text"), gnu::noinline, gnu::flatten]] void client_vector_serve() {
+    using S = Pl022<1>;
+    const uint32_t up = LinkClient::isr();
+    if ((up & SpiInterrupt::overrun) != 0u) {
+        cv_overrun_entries = static_cast<uint16_t>(cv_overrun_entries + 1u);
+    }
+    if ((up & SpiInterrupt::rx_timeout) != 0u) {
+        cv_timeout_entries = static_cast<uint16_t>(cv_timeout_entries + 1u);
+    } else if ((up & SpiInterrupt::rx) != 0u) {
+        cv_rx_entries = static_cast<uint16_t>(cv_rx_entries + 1u);
+    }
+    if (!cv_drain) {
+        return;
+    }
+    const bool wide = cv_wide;
+    uint16_t got = cv_got;
+    while (S::rx_not_empty()) {
+        const uint16_t f = S::read_data();
+        if (got < cv_count) {
+            if (wide) {
+                crx[2u * got] = static_cast<uint8_t>(f);
+                crx[2u * got + 1u] = static_cast<uint8_t>(f >> 8);
+            } else {
+                crx[got] = static_cast<uint8_t>(f);
+            }
+        }
+        ++got;
+    }
+    cv_got = got;
+    uint16_t sent = cv_sent;
+    while (sent < cv_count && S::tx_not_full()) {
+        S::write_data(ctx_frame(sent, wide));
+        ++sent;
+    }
+    cv_sent = sent;
+}
+
+/// One burst of the peer's host with this chip's client served FROM ITS
+/// VECTOR (no loop on the core): `count` frames at `div` of the far
+/// clk_peri. `drain` false leaves the receive FIFO alone (the overrun run):
+/// the vector counts, takes nothing, refills nothing.
+ClientRun client_vector_burst(uint8_t mode, bool wide, uint16_t count, uint16_t div, uint8_t seed_a, uint8_t seed_b,
+                              bool drain = true) {
+    ClientRun out{};
+    spilink::Params a{};
+    a.count = count;
+    a.ms = 500;
+    a.seed_a = seed_a;
+    a.seed_b = seed_b;
+    a.pattern = spilink::pattern_prbs;
+    a.aux8 = 40;
+    a.aux16 = div;
+    a.cfg.apply = 1;
+    a.cfg.mode = mode;
+    a.spare = wide ? spilink::spare_wide : 0u;
+    if (!peer_act(Op::host_burst, a)) {
+        return out;
+    }
+    pair_owner = PairOwner::none;
+    LinkHost::release();
+    (void)CsPin::release();
+    const uint8_t bits = wide ? 16u : 8u;
+    if (!LinkClient::init(clock, {.mode = static_cast<SpiMode>(mode), .bits = bits})) {
+        return out;
+    }
+    LinkClient::interrupts(SpiInterrupt::all, false);
+    spilink::Stream answers(a.pattern, a.seed_b);
+    const uint16_t bytes = static_cast<uint16_t>(wide ? 2u * count : count);
+    for (uint16_t i = 0; i < bytes; ++i) {
+        ctx[i] = answers.next();
+        crx[i] = 0xEE;
+    }
+    count_windows();
+    LinkClient::enable(ctx_frame(0, wide));
+    uint16_t sent = 1;
+    while (sent < count && sent < LinkClient::frames_ahead && LinkClient::writable()) {
+        LinkClient::write(ctx_frame(sent++, wide));
+    }
+    cv_got = 0;
+    cv_sent = drain ? sent : count;
+    cv_count = count;
+    cv_wide = wide;
+    cv_drain = drain;
+    cv_rx_entries = 0;
+    cv_timeout_entries = 0;
+    cv_overrun_entries = 0;
+    pair_owner = PairOwner::client;
+    LinkClient::interrupts(drain ? (SpiInterrupt::rx | SpiInterrupt::rx_timeout | SpiInterrupt::overrun)
+                                 : SpiInterrupt::overrun,
+                           true);
+    // The select falls within the peer's lead-in (40 ms); in modes 0 and 2
+    // it pulses between frames, so the burst's end is the vector's count
+    // (the tail included: RTIM 32 bit periods after the last frame, under
+    // 6 us at /64) - or, for a client that takes nothing, 5 ms, twenty
+    // times a burst of 24 frames at /64.
+    (void)wait_until([] { return !CsPin::read(); }, 200'000u);
+    if (drain) {
+        (void)wait_until([] { return cv_got >= cv_count; }, 300'000u);
+    } else {
+        spin_us(5000);
+    }
+    spin_us(200);
+    LinkClient::interrupts(SpiInterrupt::all, false);
+    pair_owner = PairOwner::none;
+    out.windows = static_cast<uint16_t>(windows_seen());
+    out.overrun = LinkClient::overrun();
+    if (drain) {
+        out.got = cv_got;
+    } else {
+        // What the FIFO kept, read out after the burst.
+        uint16_t got = 0;
+        while (const auto f = LinkClient::poll()) {
+            if (got < count) {
+                if (wide) {
+                    crx[2u * got] = static_cast<uint8_t>(*f);
+                    crx[2u * got + 1u] = static_cast<uint8_t>(*f >> 8);
+                } else {
+                    crx[got] = static_cast<uint8_t>(*f);
+                }
+            }
+            ++got;
+        }
+        out.got = got;
+    }
+    out.ran = true;
+    LinkClient::release();
+    {
+        spilink::Stream want(a.pattern, a.seed_a);
+        const uint16_t rb = static_cast<uint16_t>(wide ? 2u * (out.got < count ? out.got : count)
+                                                       : (out.got < count ? out.got : count));
+        for (uint16_t i = 0; i < rb; ++i) {
+            const uint8_t exp = want.next();
+            if (crx[i] != exp) {
+                if (out.mism == 0u) {
+                    out.idx = static_cast<uint8_t>(i < 255u ? i : 255u);
+                    out.read = crx[i];
+                    out.want = exp;
+                }
+                ++out.mism;
+            }
+        }
+    }
+    settle_ms(20);
+    (void)peer_report(out.peer);
+    return out;
+}
+
+void ts_client_vector() {
+    if (!need_peer()) {
+        return;
+    }
+    // THE LADDER: every even division of the far host's clk_peri from /64
+    // down to the last this client admits (client_admits(): the far SCK no
+    // faster than this chip's clk_peri / 12), modes 0 and 3, 8- and 16-bit,
+    // 67 frames - sixteen receive entries of four and a TAIL OF THREE the
+    // receive timeout serves (the FIFO never reaches half again). The two
+    // rungs past the ceiling are printed, not judged.
+    // The vector keeps up when its entry, four reads and four writes come
+    // inside the four frames the transmit FIFO still holds: at the fastest
+    // admitted rung (12.5 MHz, 8-bit) that is 2.56 us, 320 cycles of the
+    // RP2040's clk_sys, 384 of the RP2350's.
+    // THE FIRST BURST IS COLD: the vector's own lines and the veneer into
+    // SRAM are fetched through the XIP cache at its first entry. Printed,
+    // not judged; every burst after it runs with them cached.
+    {
+        const ClientRun w = client_vector_burst(3, false, 67, 64, 0x11, 0x22);
+        const bool ok = w.ran && w.got == 67u && w.mism == 0u && w.peer.count == 67u && w.peer.mism == 0u;
+        print(serial, "  the first burst, cold (mode 3, 8-bit, /64): ", ok ? "ok" : "BAD", " ", cv_rx_entries, "+",
+              cv_timeout_entries);
+        if (!ok) {
+            print_client(w, 67);
+        }
+        print(serial, crlf);
+    }
+    uint8_t runs = 0, exact = 0, tails = 0;
+    uint16_t last_admitted = 0;
+    for (uint16_t d = 64; d >= 8u; d = static_cast<uint16_t>(d == 64u ? 32u : (d == 32u ? 16u : d - 2u))) {
+        const bool judged = client_admits(d);
+        if (!judged && d + 4u < last_admitted) {
+            break;
+        }
+        print(serial, "  /", d, judged ? "" : " (past the ceiling, printed)", ":");
+        for (uint8_t m = 0; m < 4u; m = static_cast<uint8_t>(m + 3u)) {
+            for (uint8_t w = 0; w < 2u; ++w) {
+                const ClientRun c = client_vector_burst(m, w != 0u, 67, d, static_cast<uint8_t>(0x19u + m + 2u * w + d),
+                                                        static_cast<uint8_t>(0x63u + m + 2u * w + d));
+                const bool ok = c.ran && c.got == 67u && c.mism == 0u && c.peer.count == 67u && c.peer.mism == 0u &&
+                                !c.overrun && cv_overrun_entries == 0u;
+                print(serial, " m", m, w != 0u ? "/16 " : "/8 ", ok ? "ok" : "BAD", " ", cv_rx_entries, "+",
+                      cv_timeout_entries);
+                if (!ok) {
+                    print_client(c, 67);
+                }
+                if (judged) {
+                    ++runs;
+                    exact = static_cast<uint8_t>(exact + (ok ? 1u : 0u));
+                }
+                if (d == 64u) {
+                    // At /64 a frame is 3.4 us or more and an entry from
+                    // SRAM a microsecond: the sixteenth level entry is over
+                    // before the 65th frame lands, so the last three are
+                    // RTIM's. Faster, an entry may still be draining when
+                    // they land and take them itself (printed).
+                    tails = static_cast<uint8_t>(tails + (cv_rx_entries == 16u && cv_timeout_entries == 1u ? 1u : 0u));
+                }
+            }
+        }
+        print(serial, crlf);
+        if (judged) {
+            last_admitted = d;
+        }
+    }
+    print(serial, "  (entries: receive-at-half + receive timeout; ", runs, " judged runs down to /", last_admitted, ")",
+          crlf);
+    bench.verdict("THE CLIENT FROM ITS VECTOR, every rung it admits down to the ceiling: 67 frames exact both ways in "
+                  "modes 0 and 3, 8- and 16-bit, no overrun - one entry per four frames",
+                  runs != 0u && exact == runs);
+    bench.verdict("THE RECEIVE TIMEOUT'S TAIL: at /64 the 67 frames are sixteen level entries of four and ONE "
+                  "receive-timeout entry for the three under the FIFO's half, in each of the four runs",
+                  tails == 4u);
+    // THE OVERRUN: 24 frames into a client that takes nothing - its eight
+    // answers preloaded, RORIM alone unmasked.
+    const ClientRun o = client_vector_burst(3, false, 24, 64, 0x2D, 0x8E, false);
+    print(serial, "  nothing taken: the FIFO kept ", o.got, " frames (", o.mism, " wrong), overrun ", o.overrun,
+          ", the vector entered ", cv_overrun_entries, " times on RORIM; the host read its first mismatch at ",
+          o.peer.idx, crlf);
+    // One RORIM entry a frame lost: the vector clears ROR (isr()) in about
+    // a microsecond and the next frame lands 3.4 us later at /64.
+    bench.verdict("THE CLIENT'S OVERRUN: a client that takes nothing keeps the FIFO's first eight frames exact and "
+                  "enters its vector on RORIM once for each of the sixteen lost; the far host reads the eight "
+                  "preloaded answers exact",
+                  o.ran && o.got == 8u && o.mism == 0u && cv_overrun_entries == 16u &&
+                      (o.peer.mism == 0u || o.peer.idx >= 8u));
+    (void)link_command_mode();
+    bench.verdict("the command channel is back after the client's runs", command(Op::ping));
+    pair_release();
+}
+
+// =============================================================================
+// w - THE WEDGE: a completion that never comes, the per-bus timeout,
+// recover()
+// =============================================================================
+
+void tw_wedge() {
+    if (!need_peer()) {
+        return;
+    }
+    // The select stays HIGH: the peer is not addressed, the transactions
+    // run against nobody (its answer line dark, this end reading the pull-up)
+    // and only their completions matter. The first is pumped with its
+    // completion swallowed (the ISR body run, nothing posted): the arbiter's
+    // 100-tick timeout must answer it spi_timeout and recover() the engine.
+    // The bound: the time event is armed at the start and matures on the
+    // 100th tick, the first of which comes anywhere within a tick: 99 to
+    // 100 ms, plus the pump's turn - judged 99 to 102 ms.
+    static uint8_t wtx[4][8];
+    static uint8_t wrx[4][8];
+    for (uint8_t i = 0; i < 4u; ++i) {
+        for (uint8_t k = 0; k < 8u; ++k) {
+            wtx[i][k] = static_cast<uint8_t>(0x30u + 8u * i + k);
+        }
+    }
+    pk::BusKernel::init_all();
+    pair_owner = PairOwner::bus_ao;
+    pair_swallow = true;
+    const uint32_t t0 = us_now();
+    post<pk::SpiArb>(pk::request(wtx[0], wrx[0], false));
+    (void)wait_until(
+        [] {
+            pk::pump();
+            return pk::Probe::n >= 1u;
+        },
+        800'000u);
+    const uint32_t took_us = us_now() - t0;
+    const uint8_t first = pk::Probe::replies[0];
+    const uint8_t first_n = pk::Probe::n;
+    pair_swallow = false;
+    pk::Probe::n = 0;
+    for (uint8_t i = 0; i < 4u; ++i) {
+        post<pk::SpiArb>(pk::request(wtx[i], wrx[i], i == 2u));
+    }
+    (void)wait_until(
+        [] {
+            pk::pump();
+            return pk::Probe::n >= 4u;
+        },
+        800'000u);
+    pk::pump();
+    uint8_t ok = 0;
+    for (uint8_t i = 0; i < 4u; ++i) {
+        ok = static_cast<uint8_t>(ok + (pk::Probe::replies[i] == spi_ok ? 1u : 0u));
+    }
+    const uint8_t after_n = pk::Probe::n;
+    pair_owner = PairOwner::host;
+    print(serial, "  the swallowed completion: ", first_n, " reply, status ", first, " after ", took_us,
+          " us; then ", after_n, " replies, ", ok, " spi_ok", crlf);
+    bench.verdict("A COMPLETION THAT NEVER COMES is answered spi_timeout in its place by the arbiter's per-bus "
+                  "timeout, 99 to 102 ms after the request (100 ticks)",
+                  first_n == 1u && first == spi_timeout && took_us >= 99'000u && took_us <= 102'000u);
+    bench.verdict("and recover() puts the engine back where start() is legal: the next four transactions on the same "
+                  "bus AO (three pumped, one polled) run to spi_ok",
+                  after_n == 4u && ok == 4u);
+    (void)link_command_mode();
+    bench.verdict("the command channel is back after the wedge", command(Op::ping));
+    pair_release();
+}
+
+// =============================================================================
 // x - (outside z) the slip statistics
 // =============================================================================
 
@@ -1261,10 +1605,11 @@ void tx_slips() {
             }
             break;
         case PairOwner::bus_ao:
-            if (LinkHost::isr()) {
+            if (LinkHost::isr() && !pair_swallow) {
                 post<pk::SpiArb>(TransferDone{LinkHost::status()});
             }
             break;
+        case PairOwner::client: client_vector_serve(); break;
         case PairOwner::dma_host:
             if (LinkDmaHost::isr()) {
                 pair_status = LinkDmaHost::status();

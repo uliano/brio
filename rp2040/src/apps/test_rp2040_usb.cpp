@@ -30,6 +30,11 @@
 //   v  (host-assisted) THROUGHPUT: three seconds of the device pouring
 //      a counting pattern into the port as fast as the host takes it,
 //      then three seconds counting what the host pours in
+//   x  (host-assisted) TWO PORTS IN ONE DEVICE: the device restarted with a
+//      second port on interfaces 2 and 3 (endpoints 3 and 4), enumerated
+//      to CONFIGURED; fifteen seconds of port A echoing and port B
+//      echoing each byte plus one, the host writing both; then the
+//      one-port device back
 //   u  A RECONNECT, no host action needed: the pull-up dropped for half
 //      a second and raised again - the host's bus reset counted, the
 //      device enumerated afresh and configured
@@ -91,6 +96,26 @@ struct Descriptors {
     }
 };
 using Device = UsbDevice<Usb, Descriptors, Port>;
+
+// LETTER x's DEVICE: the same port and a SECOND one on interfaces 2 and 3,
+// its notification on endpoint 3 and its bulk pair on endpoint 4 - one
+// configuration of four interfaces, the descriptors glued in order. Its
+// serial number differs so that the host's by-id names do too.
+using PortB = UsbCdcAcm<Usb, P, 2, 3, 4, 512, 512>;
+struct Descriptors2 {
+    static constexpr auto device = Descriptors::device;
+    static constexpr auto configuration =
+        usb_concat(usb_configuration_head(9 + Port::descriptor_bytes + PortB::descriptor_bytes,
+                                          Port::interface_count + PortB::interface_count),
+                   Port::descriptors, PortB::descriptors);
+    static constexpr auto serial_number = usb_string_descriptor("bench2");
+    static std::span<const uint8_t> string(uint8_t index) {
+        return index == 3u ? std::span<const uint8_t>(serial_number) : Descriptors::string(index);
+    }
+};
+using Device2 = UsbDevice<Usb, Descriptors2, Port, PortB>;
+/// Which device the vector serves: letter x's two-port one while it runs.
+volatile bool two_ports = false;
 
 uint32_t us_now() { return Timer::now_low(); }
 bool within(uint32_t got, uint32_t want, uint32_t per_mille) {
@@ -311,6 +336,80 @@ void tu_reconnect() {
     bench.verdict("the port is configured again with its bulk OUT armed", Port::configured() && Port::out_armed());
 }
 
+// =============================================================================
+// x - two ports in one device (host-assisted)
+// =============================================================================
+void tx_two_ports() {
+    // The block is touched only once it is out of reset: brought up here
+    // when letter a has not run, the one-port device stopped when it has.
+    if (usb_up) {
+        Device::stop();
+        Device2::stop();
+    } else {
+        usb_up = Usb::init(clock);
+    }
+    const uint32_t t0 = us_now();
+    while (us_now() - t0 < 500'000u) {
+    }
+    two_ports = true;
+    Device2::start();
+    uint32_t took = 0;
+    {
+        const uint32_t t1 = us_now();
+        while (!Device2::configured() && us_now() - t1 < 2'000'000u) {
+        }
+        took = Device2::configured() ? us_now() - t1 : 0u;
+    }
+    print(serial, "  the two-port device: configuration ", Descriptors2::configuration.size(), " bytes, ",
+          Descriptors2::configuration[4], " interfaces; configured in ", took, " us, address ", Device2::address(),
+          "; port A ", Port::configured(), ", port B ", PortB::configured(), crlf);
+    bench.verdict("TWO PORTS IN ONE DEVICE: one configuration of four interfaces (125 bytes) enumerates to CONFIGURED "
+                  "and both ports are configured with their bulk OUT armed",
+                  took != 0u && Descriptors2::configuration.size() == 125u && Descriptors2::configuration[4] == 4u &&
+                      Port::configured() && PortB::configured() && Port::out_armed() && PortB::out_armed());
+    print(serial, "  15 s: port A echoes every byte, port B every byte plus one - write both ports now", crlf);
+    const uint32_t a0 = Port::rx_bytes();
+    const uint32_t b0 = PortB::rx_bytes();
+    uint32_t a_echo = 0;
+    uint32_t b_echo = 0;
+    const uint32_t t2 = us_now();
+    uint8_t buf[64];
+    while (us_now() - t2 < 15'000'000u) {
+        uint32_t n = 0;
+        while (n < sizeof buf && Port::read_byte(buf[n])) {
+            ++n;
+        }
+        for (uint32_t w = 0; w < n;) {
+            w += Port::write_bulk(std::span<const uint8_t>(buf + w, n - w));
+        }
+        a_echo += n;
+        n = 0;
+        while (n < sizeof buf && PortB::read_byte(buf[n])) {
+            buf[n] = static_cast<uint8_t>(buf[n] + 1u);
+            ++n;
+        }
+        for (uint32_t w = 0; w < n;) {
+            w += PortB::write_bulk(std::span<const uint8_t>(buf + w, n - w));
+        }
+        b_echo += n;
+    }
+    print(serial, "  port A echoed ", a_echo, " of ", Port::rx_bytes() - a0, ", port B ", b_echo, " of ",
+          PortB::rx_bytes() - b0, "; overruns ", Port::rx_overruns(), " / ", PortB::rx_overruns(), ", SIE errors ",
+          hex(Usb::take_errors()), crlf);
+    bench.verdict("each port carried its own stream: both received and echoed every byte, no overrun (the host end "
+                  "judges the bytes - port B's each one more)",
+                  a_echo != 0u && b_echo != 0u && Port::rx_bytes() - a0 == a_echo && PortB::rx_bytes() - b0 == b_echo &&
+                      Port::rx_overruns() == 0u && PortB::rx_overruns() == 0u);
+    Device2::stop();
+    const uint32_t t3 = us_now();
+    while (us_now() - t3 < 500'000u) {
+    }
+    two_ports = false;
+    Device::start();
+    const uint32_t back = wait_configured(2'000'000u);
+    bench.verdict("and the one-port device enumerates again after it", back != 0u && Port::configured());
+}
+
 void banner() {
     print(serial, crlf, "test_rp2040_usb - the RP2040 USB device controller under the CDC ACM stack; the port on the host is the other end; clk_sys=",
           SysClock::hz, " Hz", crlf);
@@ -322,7 +421,13 @@ void banner() {
 // ---- target glue ------------------------------------------------------------
 extern "C" void isr_uart0() { (void)Serial::isr(); }
 extern "C" void isr_systick() { brio::Ticker::tick(); }
-extern "C" void isr_usbctrl() { Device::isr(); }
+extern "C" void isr_usbctrl() {
+    if (two_ports) {
+        Device2::isr();
+    } else {
+        Device::isr();
+    }
+}
 
 int main() {
     const bool clock_ok = SysClock::init();
@@ -336,6 +441,7 @@ int main() {
     bench.letter('w', "the line coding and DTR from the host (host-assisted)", tw_line, false);
     bench.letter('v', "throughput both ways (host-assisted)", tv_throughput, false);
     bench.letter('u', "a reconnect: the pull-up dropped and raised", tu_reconnect);
+    bench.letter('x', "two ports in one device, an echo on each (host-assisted)", tx_two_ports, false);
 
     if (serial_ok) {
         brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "PLL125" : "FAILED", " timer=", timer_ok ? "1us" : "FAILED",

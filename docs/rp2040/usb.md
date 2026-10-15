@@ -138,6 +138,15 @@ the host end) through a hub.
   banner held until the host raises DTR - on the WeAct board and on
   the Pico at once, two ports on one host, each enumerated in two
   resets and sixteen setup packets.
+- TWO PORTS IN ONE DEVICE (letter x, host-assisted): the device restarted
+  with a second `UsbCdcAcm` on interfaces 2 and 3 (notification on
+  endpoint 3, the bulk pair on endpoint 4) - one configuration of four
+  interfaces, 125 bytes, the descriptors glued in order - enumerates to
+  CONFIGURED in 0.35 to 0.73 s, Linux's cdc-acm binding both as two
+  ttyACM (by-id `-if00` and `-if02`, with no interface association
+  descriptor); 8192 bytes written to each, port A echoing them and port
+  B each plus one, both exact at the host with no overrun and no SIE
+  error; then the one-port device back. Ten runs.
 
 ## Not covered yet
 
@@ -160,9 +169,6 @@ Implemented but not bench-verified, each with what would measure it:
 
 - `Usb::take_errors` reporting a real error: a cable pulled mid-packet,
   which the chapter says raises them.
-- Two ports in one device (a second `UsbCdcAcm` on interfaces 2 and
-  3, endpoints 3 and 4): the descriptors glue, the host shows two
-  ttyACM.
 - The reference suite on a Pico: the console app enumerates and
   answers there; the suite's letters want the probe's console, which
   the Pico lends to the WeAct board's second core meanwhile.

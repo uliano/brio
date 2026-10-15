@@ -154,6 +154,15 @@ instrument that says whether the SLEEP state was reached.
   relocked, the console printing at its rate; the same with an EDGE
   wake (the letter outside the all-key) sleeps until a key's start
   bit.
+- THE FOUR DORMANT-WAKE EVENTS ON A PIN ANOTHER CHIP DRIVES (letter v,
+  the RP2350B's sleep suite `w` waving GP20 - wire 10 - a second a
+  level): a rising and a falling edge, a high and a low level, each armed
+  in the level before it and ending a dormant on the crystal at the
+  wave's next change - the pad read in the level after the event on the
+  way back, which a wake before the wave moved could not show - with the
+  event's raw flag and `DormantWake::pending()` standing (0x8 rising,
+  0x4 falling, 0x2 high, 0x1 low). The crystal stops, so no ruler of this
+  chip sees the second; the partner's wave is the clock. Ten runs.
 - THE MANAGER over the timed site: none accepted and nothing armed,
   light and standby armed with the register as stated, deep refused
   by the site and reported; a veto ends the round; a deadline one
@@ -187,9 +196,6 @@ Implemented but not bench-verified, each with what would measure it:
 
 - The wake enables pruned awake (`Clocks::wake_enables`): a UART
   whose gate is shut reading its registers as static.
-- The four dormant-wake events on any pin but GP1, and
-  `DormantWake::pending`: a wire from the second board's output,
-  each event in turn.
 - The timed site's dormant over a day boundary of the calendar and
   its refusal a day or more out: pinned by the arithmetic, a wake at
   23:59:59 plus two seconds would measure the carry.

@@ -27,7 +27,10 @@
 // a dormant by an edge it drives with its other pad; this desk does NOT
 // carry it (the board is wired to its desk partner and every self-link
 // is retired), and with no wire the letter declines before the dormant
-// it could not leave.
+// it could not leave. Two by-name letters use the pair's clock wires
+// instead (docs/boards/weact-rp2350b.md): w drives GP21 (wire 10) as a
+// wave for the RP2040's dormant letter, x sleeps until the RP2040's wave
+// on GP20 (wire 9) moves.
 //
 // A NOTE ON THE DEBUGGER, which letter a measures and every deep letter
 // re-states: the debug port's CSYSPWRUPREQ powers every domain and
@@ -84,6 +87,13 @@
 //      rescue over the debug port can be tried against a chip whose
 //      clocks are all stopped and which comes back by itself either way.
 //   v  (by name) THE RESCUE NET, powered down: the same for P1.0.
+//   w  (by name) THE WAVE for the partner's dormant letter: GP21 (into the
+//      RP2040's GP20) a second low, a second high, twenty times, behind
+//      the partner-rail guard
+//   x  (by name) THE DORMANT WAKES ON A PAD THE PARTNER DRIVES: GP20
+//      carrying the RP2040's wave (its sleep suite's `w`) - the four
+//      events on the crystal, a dormant on the ring oscillator ended by
+//      the pad, and pad and alarm armed together, each winning once
 //
 // build: boards = weact2350b,weact2350b-rv
 // build: monitor_speed = 115200
@@ -111,6 +121,8 @@
 #include "util/power.hpp"
 #include "util/print.hpp"
 #include "util/testbench.hpp"
+
+#include "pair_power.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::pll, 150'000'000>;
 constexpr SysClock clock;
@@ -1068,6 +1080,134 @@ void tp_dormant_ring() {
 }
 
 // =============================================================================
+// w, x - the desk partner as the wake: a wave on a link wire
+// =============================================================================
+
+/// THE WAVE, for the partner's dormant letter (by name, through the
+/// partner-rail guard: GP21 is a link pad): GP21 - wire 10, into the
+/// RP2040's GP20 - driven LOW one second, HIGH the next, twenty times,
+/// then given back.
+void tw_wave() {
+    using Out = Pin<21>;
+    print(serial, "  GP21 (into the partner's GP20): one second low, one second high, twenty times", crlf);
+    (void)Out::output(false);
+    const uint32_t t0 = us_now();
+    uint8_t halves = 0;
+    while (halves < 40u) {
+        while (us_now() - t0 < (static_cast<uint32_t>(halves) + 1u) * 1'000'000u) {
+        }
+        ++halves;
+        if ((halves & 1u) != 0u) {
+            Out::set();
+        } else {
+            Out::clear();
+        }
+    }
+    Out::clear();
+    (void)Out::release();
+    bench.verdict("the wave ran its forty seconds and the pad is given back", true);
+}
+
+/// The partner's wave on GP20 (wire 9): a change INTO `to` seen within
+/// `us`.
+bool await_change(bool to, uint32_t us) {
+    using In = Pin<20>;
+    const uint32_t t0 = us_now();
+    while (In::read() == to) {
+        if (us_now() - t0 >= us) {
+            return false;
+        }
+    }
+    while (In::read() != to) {
+        if (us_now() - t0 >= us) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// THE DORMANT WAKES ON A PAD THE PARTNER DRIVES (by name, the RP2040
+/// running its sleep suite's `w`): GP20 carries its wave, a second a level.
+/// Each leg waits for the wave's change into the level BEFORE its event,
+/// arms the wake and enters the dormant at once, so the wave's next change
+/// is one second (H) out. The always-on timer witnesses each: its own
+/// bracket (letter n's: the alarm at 3000 ms read 3000 to 3300, a tenth
+/// over) applied to H gives 900 to 1100 ms for a pad wake - the wave's
+/// crystal is good to 50 ppm and the time from its change to the arm is
+/// microseconds. The pad after the wake must read the level after the
+/// event (a wake before the wave moved reads the one before: it stands for
+/// the whole second).
+///   1-4  the four events (rising, falling, high, low), the crystal
+///        stopped, no alarm
+///   5    a dormant on the RING OSCILLATOR ended by the rising edge
+///   6    pad and alarm both armed, the alarm 300 ms out: the alarm ends
+///        it (300 to 330 ms, the pad still low)
+///   7    pad and alarm both armed, the alarm 3000 ms out: the pad ends it
+void tx_dormant_partner() {
+    using In = Pin<20>;
+    quiesce();
+    (void)In::input(PinPull::none);
+    struct Leg {
+        const char* name;
+        PinEvent ev;
+        bool before;
+        bool ring;
+        uint32_t alarm_ms;
+        bool pad_wins;
+    };
+    const Leg legs[7] = {
+        {"dormant/crystal/rising edge", PinEvent::edge_high, false, false, 0, true},
+        {"dormant/crystal/falling edge", PinEvent::edge_low, true, false, 0, true},
+        {"dormant/crystal/high level", PinEvent::level_high, false, false, 0, true},
+        {"dormant/crystal/low level", PinEvent::level_low, true, false, 0, true},
+        {"dormant/RING/rising edge", PinEvent::edge_high, false, true, 0, true},
+        {"dormant/crystal/rising edge + alarm 300 ms", PinEvent::edge_high, false, false, 300, false},
+        {"dormant/crystal/rising edge + alarm 3000 ms", PinEvent::edge_high, false, false, 3000, true},
+    };
+    uint8_t good = 0;
+    bool waved = true;
+    for (uint8_t k = 0; k < 7u; ++k) {
+        const Leg& l = legs[k];
+        if (!await_change(l.before, 3'000'000u)) {
+            print(serial, "  NO WAVE on GP20 - the partner must be running its sleep suite's w", crlf);
+            waved = false;
+            break;
+        }
+        const bool armed = DormantWake::enable(20, pin_events(l.ev));
+        const bool level_armed = In::read();
+        const DormantSpan sp = dormant_leg(l.name, l.ring, l.alarm_ms);
+        const bool level_after = In::read();
+        const PinEvents pend = DormantWake::pending(20);
+        DormantWake::disable_all();
+        DormantWake::acknowledge(20, pin_events(PinEvent::edge_high) | PinEvent::edge_low);
+        bool ok = armed && sp.returned && level_armed == l.before;
+        if (l.pad_wins) {
+            ok = ok && level_after == !l.before && pend.has(l.ev) && sp.since_arm >= 900u && sp.since_arm <= 1100u;
+        } else {
+            ok = ok && level_after == l.before && sp.since_arm >= l.alarm_ms && sp.since_arm <= l.alarm_ms + l.alarm_ms / 10u;
+        }
+        print(serial, "    the pad ", level_after ? "high" : "low", " on the way back, pending ", hex(pend.bits), ", ",
+              sp.since_arm, " ms since the arm", ok ? "" : "  WRONG", crlf);
+        bench.verdict(k < 4u ? "a dormant on the crystal ended by this event of the partner's wave at its next change, "
+                               "900 to 1100 ms on the always-on timer, the event pending"
+                             : (k == 4u ? "A DORMANT ON THE RING OSCILLATOR ENDED BY A PAD: the partner's rising edge, "
+                                          "900 to 1100 ms"
+                                        : (k == 5u ? "PAD AND ALARM ARMED TOGETHER, the alarm nearer: the alarm ends "
+                                                     "it at 300 to 330 ms, the pad not yet moved"
+                                                   : "PAD AND ALARM ARMED TOGETHER, the pad nearer: the pad ends it "
+                                                     "at 900 to 1100 ms, before the alarm")),
+                      ok);
+        good = static_cast<uint8_t>(good + (ok ? 1u : 0u));
+    }
+    if (!waved) {
+        bench.verdict("the partner's wave arrives on GP20", false);
+    }
+    (void)In::release();
+    print(serial, "  ", good, " of 7 legs as derived", crlf);
+    quiesce();
+}
+
+// =============================================================================
 // q - the power-down states (by name; each wake is a boot)
 // =============================================================================
 inline constexpr uint32_t token_magic = 0x5150'0000u;
@@ -1339,6 +1479,10 @@ int main() {
                  false);
     bench.letter('u', "THE RESCUE NET, dormant (60 s)", tu_rescue_dormant, false);
     bench.letter('v', "THE RESCUE NET, powered down (60 s)", tv_rescue_power_down, false);
+    bench.letter('w', "THE WAVE on GP21 for the partner's dormant letter",
+                 pair::guarded<bench, clock, tw_wave>, false);
+    bench.letter('x', "dormant until the partner's wave: four events, the ring, pad and alarm",
+                 tx_dormant_partner, false);
 
     if (serial_ok && (boot_powman_alive || boot_noinit_alive) && powman_leg() == 9u) {
         banner();

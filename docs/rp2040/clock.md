@@ -171,6 +171,11 @@ const auto hz = SysClock::count_hz(brio::ClockIn<0>::count_source);
   (`ClockOut<0>`), counted by the other on GP20 against its own
   crystal, reads 999968 Hz - the two crystals 32 ppm apart, the one
   external reference this bench has.
+- THIS BOARD AS THE PARTNER'S METER (letter r, by name): GPIN0 on GP20
+  counted against this crystal every 32 ms and the pad sampled by a PIO
+  machine at clk_sys / 2 for the duty - the RP2350B's GPOUT0 measured
+  through six settings, its fraction and its duty correction
+  ([../rp2350/clock.md](../rp2350/clock.md)).
 
 ## Not covered yet
 

@@ -73,6 +73,9 @@
 //      lets it back up - read through the bank, which always reads the
 //      pad whoever owns it), and the block byte-exact on the loop there,
 //      its line timed against the wire
+//   r  REBASE UNDER A RUNNING PORT: clk_peri moved from clk_sys to the
+//      crystal under both UARTs, each rebased, the loop exact and the
+//      line at the baud asked on each clock, and back
 //   t  tx_idle() ON THE PAD: eight frames on GP4 with the loop-back off,
 //      the pad read through SIO, and tx_idle() turning true at the last
 //      stop bit's end - never before it, within a bit time after - and
@@ -92,10 +95,11 @@
 //      show this, since an echo returns the bits it was given, so the peer
 //      SENDS for this letter; and the other way round, 64 frames sent at
 //      7E1 into the peer's 8N1 echo back exact
-//   y  (by name only, brio stress) the CONSOLE's own ladder, host-fed:
-//      115200 to 3 Mbaud through the probe's bridge, the bytes verified
-//      on the board; the rungs to 921600 are verdicts, the ones above
-//      measure the bridge and are printed
+//   y  (by name only, brio stress) the CONSOLE's own ladder through the
+//      probe's bridge, 115200 to 3 Mbaud each way: a source leg (this end
+//      sends, the HOST judges - its tally) and a sink leg (the host pumps,
+//      the bytes verified here); the sink rungs to 921600 are verdicts,
+//      the ones above measure the bridge and are printed
 //   w  (by name only, brio stress) WHETHER THE BRIDGE HONOURS A PARITY
 //      SETTING: the host announces 8E1 against the console's 8N1, and an
 //      even-parity frame whose parity bit is low is a frame error here -
@@ -827,9 +831,42 @@ uint32_t host_sink(uint32_t baud, uint32_t window_ms, uint32_t* received, bool* 
     return good;
 }
 
+/// One source leg: this end sends `count` bytes of the pattern at `baud`
+/// on the console, back to back, and the HOST judges them (brio stress's
+/// `source`: what arrived, and where the first wrong byte was - its
+/// verdict, printed on the host). Returns the bytes queued.
+uint32_t host_source(uint32_t baud, uint32_t window_ms, uint32_t count) {
+    host_announce("source", baud, "8N1", window_ms, count);
+    (void)Serial::set_baud(SysClock::pclk_hz, baud);
+    spin_us(200'000);
+    Lfsr tx;
+    uint32_t sent = 0;
+    while (sent < count && us_now() - host_window_t0 < (window_ms - 400u) * 1000u) {
+        uint8_t chunk[64];
+        uint32_t n = 0;
+        Lfsr probe{tx.state};
+        while (n < sizeof chunk && sent + n < count) {
+            chunk[n++] = probe.next();
+        }
+        const uint32_t q = Serial::write_bulk(std::span<const uint8_t>(chunk, n));
+        for (uint32_t i = 0; i < q; ++i) {
+            (void)tx.next();
+        }
+        sent += q;
+    }
+    console_drain();
+    return sent;
+}
+
 void ty_console_ladder() {
     constexpr uint32_t rungs[] = {115200, 460800, 921600, 1'000'000, 2'000'000, 3'000'000};
     for (uint32_t baud : rungs) {
+        // BOARD TO HOST: a quarter of a second of line, the host judging.
+        const uint32_t count = baud / 10u / 4u;
+        const uint32_t sent = host_source(baud, 1500, count);
+        host_settle();
+        print(serial, "  ", baud, " baud to the host: ", sent, " of ", count,
+              " bytes sent (the host's tally judges them)", crlf);
         uint32_t got = 0;
         bool wrong = false;
         const uint32_t good = host_sink(baud, 1200, &got, &wrong);
@@ -865,6 +902,52 @@ void tw_console_errors() {
     bench.verdict("the host's burst arrived through the bridge (the attribution above is "
                   "the bridge's finding, not a verdict)",
                   got > 1000u && pe == 0u);
+}
+
+// ---------------------------------------------------------------------------
+// r: rebase() under a running port - clk_peri moved under both UARTs
+// ---------------------------------------------------------------------------
+/// 64 bytes round the loop exact and 1024 frames out timed: one leg of r.
+bool rebase_leg(const char* name, uint32_t hz) {
+    Instrument::clear_errors();
+    uint32_t took = 0;
+    const uint32_t good = round_trip<Instrument>(64, UartBits::eight, 100'000u, &took);
+    const uint32_t pm = wire_permille<Instrument>(115200);
+    const uint32_t actual = Instrument::actual_baud(hz);
+    print(serial, "  ", name, ": 115200 asked, ", actual, " from the divisor; 64 bytes ", good, " exact in ", took,
+          " us; 1024 frames in ", pm, " thousandths of their wire time", crlf);
+    return good == 64u && wire_ok(pm) && Instrument::frame_errors() == 0u;
+}
+
+void tr_rebase() {
+    if (!instrument_up(115200)) {
+        bench.verdict("the instrument", false);
+        return;
+    }
+    // clk_peri is clk_sys (150 MHz) under the task; the crystal is the one
+    // other source that is a truth (12 MHz). Both UARTs run on clk_peri: the
+    // console is drained, clk_peri moved (the generator stopped, its source
+    // switched, restarted - Clocks::peri_select), and each port REBASED to
+    // the new rate keeping its baud. The 1024 frames' time is judged as in
+    // letter c (-1 % to +3 %): the crystal's divisor, 6 + 33/64, gives
+    // 115107 baud, 0.08 % slow.
+    const bool before = rebase_leg("clk_peri = clk_sys", SysClock::pclk_hz);
+    console_drain();
+    (void)Clocks::peri_select(PeriAux::xosc);
+    Instrument::rebase(SysClock::xtal_hz);
+    Serial::rebase(SysClock::xtal_hz);
+    print(serial, "  (this line printed with clk_peri on the crystal, the console rebased)", crlf);
+    const bool on_xtal = rebase_leg("clk_peri = the crystal", SysClock::xtal_hz);
+    const uint32_t div_x = Instrument::Resource::divisor().integer;
+    console_drain();
+    (void)Clocks::peri_select(PeriAux::clk_sys);
+    Instrument::rebase(SysClock::pclk_hz);
+    Serial::rebase(SysClock::pclk_hz);
+    const bool after = rebase_leg("clk_peri = clk_sys again", SysClock::pclk_hz);
+    bench.verdict("REBASE UNDER A RUNNING PORT: clk_peri moved from clk_sys to the crystal under both UARTs, each "
+                  "rebased - the console prints on, the loop is byte-exact and the line runs at the baud asked - "
+                  "and back",
+                  before && on_xtal && div_x == 6u && after);
 }
 
 // ---------------------------------------------------------------------------
@@ -972,6 +1055,7 @@ int main() {
     bench.letter('d', "the FIFOs: timeout vs level, a break, an overrun", pair::guarded<bench, clock, td_fifos>);
     bench.letter('e', "bulk traffic on the loop, five rungs to 3 Mbaud", pair::guarded<bench, clock, te_bulk>);
     bench.letter('t', "tx_idle() on the pad: the last stop bit", pair::guarded<bench, clock, tt_tx_idle>);
+    bench.letter('r', "rebase() under a running port: clk_peri moved", pair::guarded<bench, clock, tr_rebase>);
     bench.letter('f', "THE SECOND FUNCTION COLUMN: UART1 on GP6/GP7", tf_second_column);
     bench.letter('p', "the wire against the partner's uart_peer, 512 bytes", pair::guarded<bench, clock, tp_wire>);
     bench.letter('s', "the error attribution on the wire: 7E1 against the peer's 8N1",

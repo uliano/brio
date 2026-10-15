@@ -10,7 +10,10 @@
 //
 // NOTHING TO WIRE for `z`. What a state costs in microamps is the bench
 // meter's, with the probe detached: this suite proves the states are
-// entered and left, what they stop and what they do to kernel time.
+// entered and left, what they stop and what they do to kernel time. Two
+// by-name letters use the pair's clock wires (docs/boards/weact-rp2040.md):
+// v sleeps until the RP2350B's wave on GP20 (wire 10) moves, w drives
+// GP21 (wire 9) as a wave for the RP2350B's dormant letter.
 //
 // THE RULERS: the system timer (its gates kept open through every
 // standby), the PWM's counter as the instrument that says whether a
@@ -53,6 +56,14 @@
 //   x  (by name only, NOT in z) DORMANT ON THE CRYSTAL UNTIL A KEY: the
 //      RX pin's falling edge (a start bit) is the wake - press any key
 //      on the console once the board is dormant.
+//   v  (by name only, NOT in z) THE FOUR DORMANT-WAKE EVENTS ON GP20, a pin
+//      the DESK PARTNER drives: the WeAct RP2350B running its sleep
+//      suite's `w` (a wave on its GP21, a second a level) - a rising and a
+//      falling edge, a high and a low level, each ending a dormant on the
+//      crystal at the wave's next change
+//   w  (by name only, NOT in z) THE WAVE for the partner's letter: GP21
+//      (into the RP2350B's GP20) a second low, a second high, twenty
+//      times, then given back
 //
 // build: boards = pico,weact2040
 // build: monitor_speed = 115200
@@ -723,6 +734,118 @@ void tx_dormant_key() {
     quiesce();
 }
 
+// =============================================================================
+// w, v - the desk partner as the wake: a wave on a link wire
+// =============================================================================
+
+/// THE WAVE, for the partner's dormant letters (by name): GP21 - the
+/// pair's wire 9, into the RP2350B's GP20 - driven LOW one second, HIGH
+/// the next, twenty times, then given back. The partner's letter arms a
+/// wake for each edge and level in turn and sleeps until this wave moves.
+void tw_wave() {
+    using Out = Pin<21>;
+    print(serial, "  GP21 (into the partner's GP20): one second low, one second high, twenty times", crlf);
+    Out::output(false);
+    const uint32_t t0 = us_now();
+    uint8_t halves = 0;
+    while (halves < 40u) {
+        while (us_now() - t0 < (static_cast<uint32_t>(halves) + 1u) * 1'000'000u) {
+        }
+        ++halves;
+        if ((halves & 1u) != 0u) {
+            Out::set();
+        } else {
+            Out::clear();
+        }
+    }
+    Out::clear();
+    Out::release();
+    bench.verdict("the wave ran its forty seconds and the pad is given back", true);
+}
+
+/// The partner's wave on GP20 (wire 10): a level change seen - `to` read
+/// after the other level was - within `us`.
+bool await_change(bool to, uint32_t us) {
+    using In = Pin<20>;
+    const uint32_t t0 = us_now();
+    while (In::read() == to) {
+        if (us_now() - t0 >= us) {
+            return false;
+        }
+    }
+    while (In::read() != to) {
+        if (us_now() - t0 >= us) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// THE FOUR DORMANT-WAKE EVENTS ON A PIN THE PARTNER DRIVES (by name, the
+/// partner running its sleep suite's `w`): GP20 carries the RP2350B's
+/// wave, a second a level. For each event the level BEFORE it is waited
+/// for (the wave's change into it), the stale edges acknowledged, the wake
+/// armed and a dormant on the crystal entered: the next change of the
+/// wave - a second later - must end it, and nothing earlier. The proof that
+/// it did: the pad reads the level AFTER the event on the way back (a
+/// wake before the wave moved would read the one before - it stands for a
+/// whole second), the event raised in the wake logic, and the dormant
+/// counted. The crystal stops, so no ruler of this chip sees the second
+/// pass; the partner's wave is the clock.
+void tv_dormant_partner() {
+    using In = Pin<20>;
+    quiesce();
+    In::input(PinPull::none);
+    struct Leg {
+        const char* name;
+        DormantWakeEvent ev;
+        bool before;   // the level the wave holds when the wake is armed
+    };
+    const Leg legs[4] = {
+        {"a rising edge", DormantWakeEvent::edge_high, false},
+        {"a falling edge", DormantWakeEvent::edge_low, true},
+        {"a high level", DormantWakeEvent::level_high, false},
+        {"a low level", DormantWakeEvent::level_low, true},
+    };
+    uint8_t good = 0;
+    for (const Leg& l : legs) {
+        if (!await_change(l.before, 3'000'000u)) {
+            print(serial, "  ", l.name, ": NO WAVE on GP20 - the partner must be running its sleep suite's w", crlf);
+            break;
+        }
+        DormantWake::acknowledge(20, 0x0Fu);
+        const bool armed = DormantWake::enable(20, dormant_wake_bits(l.ev), true) && Plain::arm(SleepDepth::deep);
+        const bool level_armed = In::read();
+        print(serial, "  ", l.name, " on GP20: armed with the pad ", level_armed ? "high" : "low",
+              ", dormant on the crystal ...", crlf);
+        console_drain();
+        const uint32_t before = Plain::dormants();
+        volatile bool never = false;
+        if (armed) {
+            (void)idle_until(never, 1);
+        }
+        const bool level_after = In::read();
+        const uint8_t raised = DormantWake::raised(20);
+        const uint8_t pend = DormantWake::pending(20);
+        const bool back = tree_on_pll();
+        Plain::disarm();
+        (void)DormantWake::enable(20, 0x0Fu, false);
+        DormantWake::acknowledge(20, 0x0Fu);
+        const bool ok = armed && Plain::dormants() == before + 1u && back && level_armed == l.before &&
+                        level_after == !l.before && (raised & dormant_wake_bits(l.ev)) != 0u &&
+                        (pend & dormant_wake_bits(l.ev)) != 0u;
+        print(serial, "    back: the pad ", level_after ? "high" : "low", ", raised ", hex(raised), " pending ",
+              hex(pend), ", dormants ", before, " -> ", Plain::dormants(), ok ? "" : "  WRONG", crlf);
+        good = static_cast<uint8_t>(good + (ok ? 1u : 0u));
+    }
+    In::release();
+    bench.verdict("THE FOUR DORMANT-WAKE EVENTS ON A PIN ANOTHER CHIP DRIVES (GP20, the partner's wave): a rising "
+                  "and a falling edge, a high and a low level, each ending a dormant on the crystal at the wave's "
+                  "next change and not before, the event raised and pending in the wake logic",
+                  good == 4u);
+    quiesce();
+}
+
 void banner() {
     print(serial, crlf, "test_rp2040_sleep - the RP2040 power chapter (2.11): the SLEEP state and its gates, DORMANT on either oscillator, "
                         "the sites over util/power.hpp; clk_sys=",
@@ -773,6 +896,8 @@ int main() {
     bench.letter('g', "dormant on the crystal, a GPIO level the wake", tg_dormant_xosc);
     bench.letter('h', "the manager over the timed site", th_manager);
     bench.letter('x', "dormant on the crystal until a key", tx_dormant_key, false);
+    bench.letter('v', "dormant until the partner's wave: four events on GP20", tv_dormant_partner, false);
+    bench.letter('w', "THE WAVE on GP21 for the partner's dormant letters", tw_wave, false);
 
     if (serial_ok) {
         brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "PLL125" : "FAILED", " timer=", timer_ok ? "1us" : "FAILED",

@@ -48,7 +48,9 @@
 //      twins; the reversed and inverted result options
 //   h  a bus error: a block reading a hole in the map - what the silicon
 //      does is REPORTED (the error bits, the halt, the interrupt), the
-//      verdict only that the channel ended and came back clean
+//      verdict only that the channel ended and came back clean; then a
+//      block WRITING into it (WRITE_ERROR, the line raised once) and the
+//      read error on a channel bound IRQ_QUIET (the line still raised)
 //   i  the instrument's engines: 4096 bytes through UART1's loop-back at
 //      3 Mbaud with an engine in each slot, harvested by the loop,
 //      byte-exact, the line's interrupts counted against the bytes; then
@@ -467,6 +469,47 @@ void th_bus_error() {
     fill(src, 64, 0x42u);
     const bool again = run_c4({.read = src, .write = dst, .count = 64});
     bench.verdict("and the channel copies again afterwards", again && same(src, dst, 64));
+
+    // THE WRITE SIDE: a block WRITING into the same hole - WRITE_ERROR
+    // where the read leg set READ_ERROR (2.5.6's error bits), the channel
+    // halted, the line raised once.
+    const uint32_t l1 = ch4_on_line0;
+    auto* const hole_w = reinterpret_cast<volatile void*>(0x40100000u);
+    const bool started_w = C4::load({.read = src, .write = hole_w, .count = 16, .config = {.size = DmaSize::word}});
+    const uint32_t tw = us_now();
+    while (C4::busy() && us_now() - tw < 10'000u) {
+    }
+    spin_us(50);
+    const uint32_t werr = C4::errors();
+    print(serial, "  a word block writing 0x40100000: busy=", C4::busy(), " count=", C4::count(), " errors=", hex(werr),
+          " (AHB ", (werr & DmaError::ahb) != 0u, ", read ", (werr & DmaError::read) != 0u, ", write ",
+          (werr & DmaError::write) != 0u, "), line-0 handler +", ch4_on_line0 - l1, crlf);
+    bench.verdict("A WRITE INTO THE HOLE is a WRITE_ERROR: the channel halts with AHB_ERROR and WRITE_ERROR set, READ_ERROR "
+                  "clear, and raises its line once",
+                  started_w && !C4::busy() && (werr & DmaError::ahb) != 0u && (werr & DmaError::write) != 0u &&
+                      (werr & DmaError::read) == 0u && ch4_on_line0 == l1 + 1u);
+    C4::clear_errors();
+
+    // UNDER IRQ_QUIET (the SPI host's transmit engine binds its channel so,
+    // its completion proven by the receive engine): a completion is silent
+    // (letter c) but a bus error is not - CTRL.AHB_ERROR's note, the channel
+    // "always raises its channel IRQ flag" on an error.
+    const uint32_t l2 = ch4_on_line0;
+    const bool started_q =
+        C4::load({.read = hole, .write = dst, .count = 16, .config = {.size = DmaSize::word, .irq_quiet = true}});
+    const uint32_t tq = us_now();
+    while (C4::busy() && us_now() - tq < 10'000u) {
+    }
+    spin_us(50);
+    const uint32_t qerr = C4::errors();
+    print(serial, "  the same read error with IRQ_QUIET: errors=", hex(qerr), ", line-0 handler +", ch4_on_line0 - l2,
+          crlf);
+    bench.verdict("A BUS ERROR UNDER IRQ_QUIET STILL RAISES THE LINE: the read error halts the quiet channel and its "
+                  "handler runs once",
+                  started_q && !C4::busy() && (qerr & DmaError::read) != 0u && ch4_on_line0 == l2 + 1u);
+    C4::clear_errors();
+    const bool again2 = run_c4({.read = src, .write = dst, .count = 64});
+    bench.verdict("and the channel copies again after both", again2 && same(src, dst, 64) && C4::errors() == 0u);
     C4::stop();
 }
 

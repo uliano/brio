@@ -1563,7 +1563,11 @@ enum class I2cClientEvent : uint8_t {
  * an earlier one flushes them and says so (ABRT_SLVFLUSH_TXFIFO); bytes
  * queued beyond what the host takes are flushed at its NACK the same
  * way. There is no address-match event: the tenure is known by its first
- * byte or its first read request.
+ * byte or its first read request. A DISABLE AT A READ REQUEST NEVER
+ * COMPLETES - the block waits for a byte its erased FIFO cannot take,
+ * holding SCL (measured, docs/dw_apb_i2c/README.md) - so acknowledge()
+ * and flush_tx() are for a client between tenures, and release(), whose
+ * disable is bounded and whose reset lets SCL go, is the way out of one.
  *
  *   extern "C" void isr_i2c1() { act(Peer::service()); }
  */
@@ -1587,6 +1591,11 @@ public:
         /// The fastest bus this client will see: the spike filter and
         /// the setup time follow it.
         I2cSpeed speed = I2cSpeed::fast_400k;
+        /// IC_CON.RX_FIFO_FULL_HLD_CTRL: SCL held while the receive FIFO
+        /// is full (a stretch until take()). Off, the block still
+        /// acknowledges every byte, keeps the first FIFO's worth and
+        /// loses the rest, each loss an `overrun` event.
+        bool hold_when_rx_full = true;
     };
 
     /// Bring the instance up as a bus target. `clock` is the app's Clock
@@ -1610,6 +1619,7 @@ public:
         c.role = I2cRole::client;
         c.speed = cfg.speed;
         c.ten_bit_client = cfg.ten_bit;
+        c.hold_when_rx_full = cfg.hold_when_rx_full;
         if (!S::configure(c) || !S::timing(*t) || !S::own_address(cfg.address)) {
             return false;
         }

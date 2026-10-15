@@ -160,6 +160,10 @@ events), every fact about core 1 carried by an event that crossed:
   released once with the probe: `reset run` on both cores, then a
   DHCSR write of 0xA05F0000 on each
   ([../probes/raspberry-pi-debug-probe.md](../probes/raspberry-pi-debug-probe.md)).
+- A DMA ENGINE ON THE SECOND CORE (letter i): the copy engine armed by
+  core 1's kernel takes its line into core 1's NVIC, and its completion
+  is served there alone, the report crossing back through the inbox
+  ([dma.md](dma.md)).
 
 ## Not covered yet
 

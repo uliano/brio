@@ -501,6 +501,29 @@ same on both halves:
   cycles, the frame signal's own), and letter r judges /16 as it judges
   /32 and /64 - the three rungs this client admits, its clk_peri at
   least twelve times the far host's SCK.
+- THE CLIENT FROM ITS VECTOR, TO THE CEILING (letter s, both halves):
+  the client served by its interrupt instead of a loop - RXIM at the
+  receive FIFO's half, RTIM, RORIM; every entry drains the receive FIFO
+  and refills the transmit FIFO to its depth - 67 frames in modes 0 and
+  3, 8- and 16-bit, exact both ways at every even division of the
+  RP2040's 125 MHz from /64 down to /10 (12.5 MHz, this client's
+  clk_peri / 12, the last rung it admits), ten runs on each half: one
+  entry per four frames where the frames are slow enough, the three
+  under the half delivered by ONE receive-timeout entry at /64. Past the
+  ceiling, /8 (15.6 MHz), the far host read the client's very first
+  answer wrong in every setting of every run. The body runs from SRAM,
+  for the reason the RP2040's document gives (its cold first entry from
+  the flash is the XIP cache's fill); here the letter's first burst,
+  printed, was exact in all twenty runs.
+- THE CLIENT'S OVERRUN (letter s): eight answers preloaded, nothing
+  taken, 24 frames from the far host - the receive FIFO keeps the first
+  eight exact and the vector is entered on RORIM sixteen times, once a
+  frame lost; the far host reads the eight preloaded answers exact.
+- THE ARBITER'S PER-BUS TIMEOUT (letter w): a completion that never comes
+  (the pump's ISR body run, nothing posted) is answered `spi_timeout`
+  99.1 to 100.0 ms after the request against 100 ticks, and recover()
+  leaves the engine where the next four transactions on the same bus AO
+  run to `spi_ok`; ten runs on each half.
 - THE CLIENT'S ANSWER PAD (letter m, its output enable read in
   GPIO_STATUS): OFF while deselected, ON while selected, OFF under SOD
   selected or not - the far host reading its own pull-up, 0xFF x 32 -
@@ -535,12 +558,6 @@ than 8 and 16 in the Request, a client on the DMA engines - are in
   running bus.
 
 Implemented but not bench-verified, each with what would measure it:
-
-- `SpiClient`'s receive timeout's tail, its overrun flag, its interrupt
-  path (letter r serves it from a polled loop) and the rate ladder
-  between /16 of the far host and this chip's clk_peri / 12 ceiling: the
-  partner's host_burst at the divisions between, against a client served
-  from its vector.
 
 - The QFN-60's pin table and its compile-time refusals: the stratum
   compiles for that package and refuses the pads it has not got, and no

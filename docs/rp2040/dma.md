@@ -270,6 +270,20 @@ travelled by DMA):
   halts at its full count, AHB_ERROR and READ_ERROR set, the
   interrupt raised, BUSY down; the bits clear by writing one and the
   channel copies again.
+- A word block WRITING into the same hole: the channel halts with
+  AHB_ERROR and WRITE_ERROR set, READ_ERROR clear, its line raised once
+  - after two words, TRANS_COUNT reading 14 of 16 in each of ten runs
+  (the writes are posted; the read side's error stops a block before it
+  moves anything). The read error on a channel bound IRQ_QUIET - the
+  SPI host's transmit engine's binding - still raises the line, once: a
+  quiet channel is silent on its completion and never on an error
+  (letter h, ten runs).
+- AN ENGINE ON LINE 1 SERVED BY CORE 1 (`test_rp2040_multicore` letter
+  i): the copy engine on channel 6, armed by core 1's kernel - `arm()`
+  enables the line in the calling core's NVIC - copies 4 KB exact, its
+  completion's vector runs on core 1 once and never on core 0 (core 0's
+  NVIC never enabled DMA_IRQ_1), and the report crosses back through
+  the inbox. Ten runs of the suite's z.
 - THE ENGINES: 4096 bytes through UART1's loop-back at 3 Mbaud with an
   engine in each slot, harvested by the loop, byte-exact in 13.8 ms
   (the wire's 13.65) with 22 to 23 interrupts on the line. A burst of
@@ -347,13 +361,3 @@ Driver gaps, each with its reason:
 - `DmaSniffCalc::crc32_reversed`, `crc16_reversed` and `even_parity`,
   and the BSWAP option: written from 2.5.5.2 and not measured; a
   letter with their software twins.
-
-Implemented but not bench-verified, each with what would measure it:
-
-- A bus error raising the line on a channel bound IRQ_QUIET (the
-  SPI host's transmit engine): a block of that engine reading the
-  suite's hole in the map.
-- A write bus error (WRITE_ERROR): the suite provokes a read error;
-  a block writing into the hole.
-- An engine on line 1 served by core 1: the multicore suite with a
-  transport on core 1 - the routing is the same verb.

@@ -174,6 +174,20 @@ says whether the SLEEP state was reached.
   ([../boards/weact-rp2350b.md](../boards/weact-rp2350b.md)): with none
   fitted, letter o reads GP8 low and declines BEFORE the dormant, which
   nothing could end.
+- **THE DORMANT WAKES ON A PAD THE PARTNER DRIVES** (letter x, the
+  RP2040's sleep suite `w` waving GP20 - wire 9 - a second a level; both
+  halves): each leg waits for the wave's change into the level before
+  its event, arms the wake and stops at once, so the wave's next change
+  is a second out. A rising and a falling edge, a high and a low level
+  each end a dormant on the crystal 1000 to 1032 ms after the arm on the
+  always-on timer (mostly 1006 to 1009) (judged 900 to 1100: the timer's own tenth, letter n's
+  bracket), the pad in the level after the event on the way back and
+  `pending()` naming it (0x8, 0x4, 0x2, 0x1). A DORMANT ON THE RING
+  OSCILLATOR is ended by the partner's rising edge the same way. WITH
+  PAD AND ALARM ARMED TOGETHER the nearer wins: the alarm 300 ms out
+  ends it at 306 or 307 ms with the pad not yet moved, and with the alarm
+  3000 ms out the pad ends it at a second, the alarm disarmed after.
+  Ten runs on each half.
 - **A DORMANT ENDED BY THE ALARM: THE WAKE PATH NEEDS clk_ref RUNNING.**
   This is the chapter's finding and it cost four measured variants. With
   clk_ref on the crystal and the crystal stopped - the RP2040's own
@@ -253,15 +267,6 @@ Implemented but not bench-verified, each with what would measure it:
 - **The wake enables pruned awake** (`Clocks::wake_enables`): a UART
   whose gate is shut while the program runs, reading its registers as
   static. Nothing here prunes the awake mask.
-- **The four dormant-wake events on any pad but GP8, and `pending()`.**
-  The level wake is measured on a wire between two of the board's own
-  pads; the two edges and the low level want a pad something else drives
-  - the desk partner over a link wire (GP20, its GPOUT0, is the one
-  reaching an input here), with a program on that board that moves it
-  while this one sleeps.
-- **A dormant on the ring oscillator ended by a pad**, and a crystal
-  dormant with both a pad and an alarm armed at once: each wake path is
-  measured on its own site, and the pair has not been.
 - **`Rp2350SleepSite` on the ring oscillator with the always-on timer on
   the crystal.** The site accepts it - the crystal goes on running
   through that dormant - and every ring-oscillator letter here runs with

@@ -248,7 +248,13 @@ family's ([../rp2040/i2c.md](../rp2040/i2c.md),
 - **`RX_FIFO_FULL_HLD_CTRL`** - used: a full receive FIFO holds SCL
   instead of overrunning, and an empty command FIFO with no STOP holds it
   too (the block's own rule), so a handler that comes late stretches the
-  bus and loses nothing.
+  bus and loses nothing. The client takes it as a field
+  (`hold_when_rx_full`, on by default); off, the block still acknowledges
+  every byte, keeps a FIFO's worth and loses the rest, RX_OVER raised
+  once a byte lost (measured on both RP chips, their suites' letter m: 24
+  bytes into a 16-deep FIFO nobody drained, the first 16 exact and eight
+  `overrun` events; with the hold, the same write stretched until the
+  vector drained and all 24 exact).
 - **`IC_TAR` and `IC_CON` across tenures** - used: they take a write only
   with ENABLE clear, and they are kept across a disable and between
   tenures, so the disable/IC_TAR/enable cycle runs only when the address
@@ -315,7 +321,18 @@ family's ([../rp2040/i2c.md](../rp2040/i2c.md),
   data NACK the block can give mid-tenure: `IC_SLV_DATA_NACK_ONLY` takes
   a write with the block disabled and its client idle; so a refusal of
   the n-th byte is a disable once byte n - 1 is taken (measured, the two
-  RP suites' letter e).
+  RP suites' letter e). `SLV_DISABLED_WHILE_BUSY` is set beside it, and
+  the far host's tenure ends on a data NACK (letter m: four bytes taken,
+  the fifth refused).
+- **A disable at a read request never completes**: the block holds SCL
+  until a byte is given, and a disabled block holds its FIFOs erased, so
+  the byte cannot come - `IC_ENABLE_STATUS.IC_EN` stays 1 (2 ms, then
+  50 ms more with a byte written after the disable, untaken), neither
+  status bit set, SCL held. The register's (a) case - a disable during a
+  transmitter's ADDRESS byte - is the only transmit-side one it names.
+  `release()` ends it: its disable is bounded, and the block's reset
+  lets SCL go (letter m: the far host's tenure then completes on the
+  pull-up's 0xFF).
 
 ## Not covered yet
 

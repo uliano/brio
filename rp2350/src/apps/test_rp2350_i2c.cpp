@@ -348,6 +348,7 @@ int main() {
     bench.letter('j', "the pads and the isolation latch, above GP31", tj_pads);
     bench.letter('k', "arbitration on the wire", guarded<bench, clock, tk_arbitration>);
     bench.letter('l', "the roles invert: this board as the peer's client", guarded<bench, clock, tl_roles>);
+    bench.letter('m', "the client's edges: the overrun, the disable inside a tenure", guarded<bench, clock, tm_client_edges>);
     bench.letter('x', "the hand-made window, traced (outside z)", guarded<bench, clock, tx_window>, false);
 
     if (serial_ok) {

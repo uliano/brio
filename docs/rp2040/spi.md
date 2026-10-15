@@ -365,6 +365,35 @@ PIO program at 150 MHz, its host that chip's PL022):
   between two frames half an SCK period (48 ns at /16, 96 ns at /32); the
   burst at the wire's time (430 us for 64 16-bit frames at /64 in mode
   1, 470 in mode 0 with the 1.5-period gap a frame).
+- THE CLIENT FROM ITS VECTOR (letter s): the same client served by its
+  interrupt instead of a loop - RXIM at the receive FIFO's half, RTIM,
+  RORIM; every entry drains the receive FIFO and refills the transmit
+  FIFO to its depth, TXIM never needed - 67 frames in modes 0 and 3, 8-
+  and 16-bit, exact both ways at /64, /32 and /16 of the far host, every
+  rung this client admits: one entry per four frames (16 at /64, fewer
+  where the frames come faster than an entry drains them) and the three
+  frames under the half delivered by ONE receive-timeout entry at /64.
+  Ten runs of the letter. The body runs from SRAM (the program's
+  `.fast_text`): from the flash, its first entry after a quiet spell is
+  the XIP cache's fill and comes several frames late - the receive FIFO
+  overflowed at /64 and the transmit FIFO ran dry at /16, the far host
+  reading 0x00 from the ninth answer on. Even with the body in SRAM the
+  vector's own lines and the veneer into SRAM miss once: the first burst
+  after a flash broke at /64 in 8-bit frames (the ninth answer late),
+  the letter's later bursts never - so the letter's first burst is a
+  warm-up, printed. Past the ceiling, printed: /14 (10.7 MHz) exact in
+  every setting of ten runs, /12 (12.5 MHz) exact but in mode 3 with
+  8-bit frames, which failed in each.
+- THE CLIENT'S OVERRUN (letter s): eight answers preloaded, nothing
+  taken, 24 frames from the far host - the receive FIFO keeps the first
+  eight exact, and the vector is entered on RORIM sixteen times, once a
+  frame lost; the far host reads the eight preloaded answers exact.
+- THE ARBITER'S PER-BUS TIMEOUT (letter w, a completion that never comes
+  staged by running the pump's ISR body and posting nothing): answered
+  `spi_timeout` 99.2 to 99.9 ms after the request against the arbiter's
+  100 ticks, and recover() leaves the engine where the next four
+  transactions on the same bus AO - three pumped, one polled - run to
+  `spi_ok`. Ten runs.
 - THE CLIENT'S ANSWER PAD (letter m, its output enable read in
   GPIO_STATUS): DRIVEN while deselected as while selected, and under SOD
   - the far host then reading the client's FIRST answer in every frame,
@@ -393,20 +422,11 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
-- `SpiClient`'s receive timeout's tail, its overrun flag, its interrupt
-  path (letter r serves it from a polled loop) and the rate ladder
-  between /16 of the far host and this chip's clk_peri / 12 ceiling: the
-  partner's host_burst at the divisions between, against a client served
-  from its vector.
-
 - The vendor's loop on this board: the pinned pico-sdk's
   `spi_write_read_blocking` and `spi_write_blocking`, SRAM-resident by
   the SDK's own placement, against letter e's 37 and 21 cycles a frame
   at clk_peri / 2 - a program built by the SDK's own CMake and timed on
   the same ruler, as on the RP2350 ([../rp2350/spi.md](../rp2350/spi.md)).
 
-- The per-bus timeout with `recover()`: a lost completion staged as
-  the other targets' suites stage it (the ISR body run, the reply
-  never posted), then four transactions to spi_ok on the same bus AO.
 - `cs_setup_us`: a device that needs it, or a scope on the select and
   the first clock.
