@@ -34,7 +34,7 @@ two header rows. Design files: WeAct's own repository
   |---|---|---|---|
   | 1 | GP10 | GP30 | SPI1 SCK |
   | 2 | GP11 | GP28 | this SPI1 TX -> the RP2350B's SPI1 RX |
-  | 3 | GP8 | GP31 | the RP2350B's SPI1 TX -> this SPI1 RX |
+  | 3 | GP8 | GP31 | the RP2350B's SPI1 TX -> this SPI1 RX, 47 Ohm in series at the RP2350B's end |
   | 4 | GP29 | GP41 | SPI1 CSn, 1.5 kOhm to this board's 3V3 |
   | 5 | GP2 | GP36 | I2C SDA (I2C1 here), 1.5 kOhm to this board's 3V3 |
   | 6 | GP3 | GP37 | I2C SCL, 1.5 kOhm to this board's 3V3 |

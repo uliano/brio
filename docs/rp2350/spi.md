@@ -475,27 +475,32 @@ same on both halves:
   window, every byte read back by the peer.
 - THE ROLES INVERTED: this chip's `SpiClient` under the RP2040's PL022
   host, its select that block's own frame signal: 64 frames back to back
-  in every mode, 8- and 16-bit, exact both ways at /64 and /32 of the
-  host's clk_peri (1.95 and 3.91 MHz); a window a frame in modes 0 and 2
+  in every mode, 8- and 16-bit, exact both ways at /64, /32 and /16 of
+  the host's clk_peri (1.95, 3.91 and 7.81 MHz); a window a frame in
+  modes 0 and 2
   and one for the burst in modes 1 and 3, counted at this end by a PIO
   machine; the frame signal's high pulse half an SCK period (53 ns at
   /16, 120 ns at /32); the burst at the wire's time.
-- **AT /16 OF THE RP2040 (7.8 MHz) THIS CLIENT LOSES A FRAME NOW AND
-  THEN.** In 16-bit frames in modes 0 and 3 - the two whose data lines
-  change on SCK's falling edge - a burst of 64 receives 63 and both ends
-  read wrong from that frame on: 22 bursts of 278, 8 %; none of 238 in
-  modes 1 and 2, none of 156 in 8-bit frames, none of some 940 at /32
-  and /64.
-  In some of them this end's PIO gauge catches a high pulse of two
-  machine cycles (13 ns) on the select, far shorter than any the frame
-  signal makes; with this client's answer line RELEASED the same mode-3
-  bursts lost nothing (0 of 40, against 2 of 40 driven in the same run),
-  and the RP2040 as the client under this chip's host at /16 lost nothing
-  in 280. So the lead is this end's own answer line, wire 3 between the
-  far host's MOSI and the select, coupling into an input at the edges it
-  shares with the clock - a fact of the wire, not of either block, and
-  not yet closed (Not covered yet). Letter r judges /64 and /32 and
-  prints /16; letter x (outside z) counts it.
+- **AT /16 OF THE RP2040 (7.8 MHz) THIS CLIENT'S OWN ANSWER EDGE TOOK
+  FRAMES AWAY, until a series resistor at its pad.** On the bare wire,
+  in 16-bit frames in modes 0 and 3 - the two whose data lines change on
+  SCK's falling edge - a burst of 64 received 63 and both ends read wrong
+  from that frame on: 22 bursts of 278, 8 %; none of 238 in modes 1 and
+  2, none of 156 in 8-bit frames, none of some 940 at /32 and /64. In
+  some of them this end's PIO gauge caught a high pulse of two machine
+  cycles (13 ns) on the select, far shorter than any the frame signal
+  makes; with the answer line RELEASED the same mode-3 bursts lost
+  nothing (0 of 40, against 2 of 40 driven in the same run), and the
+  RP2040 as the client under this chip's host at /16 lost nothing in
+  280. The aggressor was this end's own answer line, wire 3, switching
+  beside SCK and the select. With 47 Ohm in series at this end of wire 3
+  (the board page's wiring) the edge is slowed at its source: 0 of 320
+  bursts not exact in the cases that lost 22 of 278 (letter x, four
+  runs over both halves, mode 3 with the answer line driven 0 of 40 in
+  each), the short pulse gone (the shortest high pulse 8 machine
+  cycles, the frame signal's own), and letter r judges /16 as it judges
+  /32 and /64 - the three rungs this client admits, its clk_peri at
+  least twelve times the far host's SCK.
 - THE CLIENT'S ANSWER PAD (letter m, its output enable read in
   GPIO_STATUS): OFF while deselected, ON while selected, OFF under SOD
   selected or not - the far host reading its own pull-up, 0xFF x 32 -
@@ -533,12 +538,9 @@ Implemented but not bench-verified, each with what would measure it:
 
 - `SpiClient`'s receive timeout's tail, its overrun flag, its interrupt
   path (letter r serves it from a polled loop) and the rate ladder
-  between /32 of the far host and this chip's clk_peri / 12 ceiling,
-  where the lost frame above comes first: a scope on the select and SCK
-  at this end during a mode-3 16-bit burst at /16, the answer pad at 2 mA
-  against 4, and the wire run with a ground beside it, to tell the
-  coupling from the pads; then the partner's host_burst at the divisions
-  between, against a client served from its vector.
+  between /16 of the far host and this chip's clk_peri / 12 ceiling: the
+  partner's host_burst at the divisions between, against a client served
+  from its vector.
 
 - The QFN-60's pin table and its compile-time refusals: the stratum
   compiles for that package and refuses the pads it has not got, and no

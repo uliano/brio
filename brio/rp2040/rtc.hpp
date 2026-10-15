@@ -39,7 +39,14 @@
  * to land (4.8.4's note - 43 us at 46875 Hz, two seconds on a 1 Hz
  * reference), a value crosses back to the read path some time after
  * RTC_ACTIVE rises, and a coherent reading is RTC_0 THEN RTC_1 - the
- * first read latches the second (4.8.5.3). AND THE ENABLE TICKS: a
+ * first read latches the second (4.8.5.3). BUT THE LATCH IS NOT ALWAYS
+ * THERE FOR THE VERY NEXT READ: an RTC_1 read issued right after its
+ * RTC_0 returned the latch of the previous RTC_0 read in 29 of 500 day
+ * rollovers (measured, a tight loop of pairs; RTC_1 read alone returns
+ * the previous latch every time) - the new time beside the old date,
+ * for a microsecond to a few. A gap of 5 us, or a second RTC_0 read
+ * before RTC_1, read coherent in 500 of 500. So read() reads the pair
+ * until two agree. AND THE ENABLE TICKS: a
  * calendar enabled from a stop counts one second at once, some 130 us
  * after RTC_ACTIVE, whatever the divider's phase was (measured: the
  * value set reads one second on, the next rollover a whole second
@@ -324,14 +331,32 @@ struct Rtc {
     static void enable(bool on) {
         if (on) { hw_set(regs().CTRL, RTC_CTRL_RTC_ENABLE_BITS); } else { hw_clear(regs().CTRL, RTC_CTRL_RTC_ENABLE_BITS); }
     }
-    /// The calendar now, RTC_0 read before RTC_1 (the first latches
-    /// the second, 4.8.5.3); nullopt while it is not running.
+    /// The calendar now; nullopt while it is not running. RTC_0 is read
+    /// before RTC_1 (the first latches the second, 4.8.5.3) - AND THE
+    /// PAIR IS READ UNTIL TWO IN A ROW AGREE: an RTC_1 read right after
+    /// its RTC_0 can still return the latch the PREVIOUS RTC_0 read
+    /// made (the file header), which at a day's rollover is the new
+    /// time beside the old date. RTC_1 returns this pair's latch or the
+    /// last pair's (measured), so a second pair equal to the first was
+    /// latched after any rollover the first straddled. A second is at
+    /// least 15 us (clk_rtc at most 65536 Hz, 4.8.4) and a pair well
+    /// under one, so the third comparison agrees at the latest: a
+    /// rollover between two pairs, then a stale date, then the match.
     static std::optional<RtcDateTime> read() {
         if (!running()) {
             return {};
         }
-        const uint32_t w1 = regs().RTC_0;
-        const uint32_t w0 = regs().RTC_1;
+        uint32_t w1 = regs().RTC_0;
+        uint32_t w0 = regs().RTC_1;
+        for (uint8_t tries = 0; tries < 3u; ++tries) {
+            const uint32_t again1 = regs().RTC_0;
+            const uint32_t again0 = regs().RTC_1;
+            if (again1 == w1 && again0 == w0) {
+                break;
+            }
+            w1 = again1;
+            w0 = again0;
+        }
         return rtc_datetime_of(w0, w1);
     }
     /// CTRL.FORCE_NOTLEAPYEAR: the silicon's leap rule switched off,

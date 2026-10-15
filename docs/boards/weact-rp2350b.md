@@ -48,7 +48,7 @@ every user GPIO on its header rows. Design files: WeAct's own repository
   |---|---|---|---|
   | 1 | GP30 | GP10 | SPI1 SCK |
   | 2 | GP28 | GP11 | the RP2040's SPI1 TX -> this SPI1 RX |
-  | 3 | GP31 | GP8 | this SPI1 TX -> the RP2040's SPI1 RX |
+  | 3 | GP31 | GP8 | this SPI1 TX -> the RP2040's SPI1 RX, 47 Ohm in series at this end |
   | 4 | GP41 | GP29 | SPI1 CSn, 1.5 kOhm to the RP2040's 3V3 |
   | 5 | GP36 | GP2 | I2C SDA (I2C0 here), 1.5 kOhm to the RP2040's 3V3 |
   | 6 | GP37 | GP3 | I2C SCL, 1.5 kOhm to the RP2040's 3V3 |
@@ -57,6 +57,11 @@ every user GPIO on its header rows. Design files: WeAct's own repository
   | 9 | GP20 | GP21 | the RP2040's GPOUT0 -> this GPIN0 |
   | 10 | GP21 | GP20 | this GPOUT0 -> the RP2040's GPIN0 |
 
+  THE 47 OHM ON WIRE 3 sits at this board's GP31, the driving end of
+  this chip's SPI answer line, and is part of the wiring: without it
+  this chip as the SPI client lost a frame now and then at /16 of the
+  RP2040's clk_peri, its own answer edge reaching the select and SCK
+  beside it ([../rp2350/spi.md](../rp2350/spi.md)).
   THIS BOARD'S GP29 DOES NOT DRIVE: its output reads 1 while driven low
   at 12 mA, with or without a wire on it, so the select is on GP41 (an
   SPI1 CSn pad as well, and the converter's input 1); nothing here

@@ -319,6 +319,30 @@ cost figures are `bench_rp2350` letter i's, against the same peer.
   the M33 and 226 / 1669 on Hazard3 with both in the flash, 110 / 110
   and 71 / 71 with both placed). `bench_rp2350` runs the handler from
   the flash, `bench_rp2350_ram` from SRAM.
+- THE VENDOR'S TENURE ON THE SAME WIRE: the pico-sdk 2.3.1's polled
+  `i2c_write_blocking` / `i2c_read_blocking` (its `i2c.c` compiled from
+  the pinned archive for each half, `clock_get_hz` answered with
+  clk_sys, brio's crt, clock, console and ruler around it) on I2C0,
+  GP36/GP37, against the same peer between the same serve commands; the
+  SDK's own `i2c_init`, then brio's counts written over its own, so the
+  SCL period measures the same (378.9 cycles at 400 kHz on both). At
+  400 kHz, fixed cost, the SDK against the default image (the table's
+  V image in brackets), Cortex-M33 / Hazard3: a one-byte write 362 / 354
+  against 491 / 549 (392 / 403), a 255-byte write 366 / 357 against
+  498 / 678, a 16-byte read 767 / 853 against 492 / 621, a 255-byte
+  read 13 675 / 15 203 (x 1.02) against 587 / 882 (x 1.00), a register
+  read of 1 + 1 -16 / -45 against 539 / 830; a refused address 348 / 317
+  against 560 / 583. Against the V image the write's gap is within a
+  fifth (8 and 12 %): what the SDK does not do - no interrupt, no wake
+  from the idle loop; the default image adds 100 to 150 cycles more, the
+  difference the bullet above states between its two conditions (the
+  vector in the flash or in SRAM). For it
+  the SDK holds the core the whole wire, busy 7714 / 7706 cycles
+  against 599 / 302. Its short reads' fixed cost is
+  below zero because `i2c_read_blocking` returns at the last byte,
+  before the NACK and the STOP are on the wire; its long read keeps one
+  read command in flight, waiting for each byte before the next command,
+  where the pump pours them by the FIFO.
 - **THE ENGINES' FIRST READ IS THE XIP CACHE'S FILL.** A 64-byte engined
   read at 400 kHz takes 1485 to 1492 us (392 to 393 kHz) with two host
   interrupts; letter g's first after a flash takes 1543 / 1530 us
@@ -353,8 +377,5 @@ Implemented but not bench-verified, each with what would measure it:
 - `client_disabled_while_busy`, read after a disable timed inside a
   host's read (its write-side twin, SLV_RX_DATA_LOST, is measured on the
   wire).
-- The vendor's tenure on this wire: the pico-sdk 2.3.1's polled
-  `i2c_write_blocking` / `i2c_read_blocking` built for each half, against
-  the same peer.
 - The QFN-60's pin table: the stratum compiles for that package and
   refuses the pads it has not got, but no QFN-60 part is on the bench.

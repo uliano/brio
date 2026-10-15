@@ -439,6 +439,17 @@ constexpr uint16_t judged_divisor() {
     return 512;
 }
 
+/// THE RUNGS LETTER r JUDGES: a division of the far host's clk_peri (its
+/// clk_sys, the peers' clock tree) whose SCK this chip's PL022 client
+/// admits - its clk_peri at least twelve times the client's clock, the input
+/// double-synchronized (docs/rp2040/spi.md, docs/rp2350/spi.md). /16 is 7.81
+/// MHz from the RP2040 host against the RP2350 client's 12.5 MHz ceiling,
+/// 9.375 MHz from the RP2350 host against the RP2040 client's 10.42; /8 is
+/// over either (15.6 and 18.75 MHz).
+constexpr bool client_admits(uint16_t d) {
+    return 12ull * partner_sys_hz <= static_cast<uint64_t>(SysClock::pclk_hz) * d;
+}
+
 // =============================================================================
 // n - THE PEER, and its dark listener
 // =============================================================================
@@ -1030,13 +1041,15 @@ void tr_roles() {
     // signal pulses between the frames (the PL022 client's need: its select
     // freezes the shift register under SPH = 0); in modes 1 and 3 it is held
     // through the burst, a multi-frame window.
-    // /16 is PRINTED and not judged: there the RP2350's select pad sees a
-    // rare pulse of two machine cycles in the modes whose data lines change
-    // on SCK's falling edge (0 and 3) and the client loses a frame (letter
-    // x counts it; docs/rp2350/spi.md) - a fact of the wire, not of either
-    // block, measured nowhere at /32 and /64.
+    // EVERY RUNG IS JUDGED: each is one the client admits (client_admits()).
+    // /16 is the RP2350 client's rung that lost a frame now and then until
+    // its answer line got its series resistor at the pad (wire 3,
+    // docs/boards/weact-rp2350b.md): the answer's own edge reached the
+    // select and SCK inputs beside it (letter x counts it).
     constexpr uint16_t divs[3] = {64, 32, 16};
-    uint8_t exact = 0, runs = 0, framed = 0, fast_exact = 0;
+    static_assert(client_admits(64) && client_admits(32) && client_admits(16),
+                  "letter r's verdicts name /64, /32 and /16 as rungs the client admits");
+    uint8_t exact = 0, runs = 0, framed = 0;
     for (uint8_t m = 0; m < 4u; ++m) {
         for (uint8_t w = 0; w < 2u; ++w) {
             print(serial, "  mode ", m, w != 0u ? " 16-bit:" : "  8-bit:");
@@ -1045,20 +1058,19 @@ void tr_roles() {
                                                  static_cast<uint8_t>(0x71u + m + 4u * w + d));
                 const bool ok = c.ran && c.got == 64u && c.mism == 0u && c.peer.count == 64u && c.peer.mism == 0u &&
                                 !c.overrun;
-                if (d >= 32u) {
-                    ++runs;
-                    exact = static_cast<uint8_t>(exact + (ok ? 1u : 0u));
-                } else {
-                    fast_exact = static_cast<uint8_t>(fast_exact + (ok ? 1u : 0u));
-                }
+                ++runs;
+                exact = static_cast<uint8_t>(exact + (ok ? 1u : 0u));
                 // The burst's time, the peer's ruler in tens of microseconds.
                 print(serial, " /", d, ok ? " ok" : " BAD", " ", c.windows, "w ", 10u * c.peer.aux0, "us");
                 if (!ok) {
                     print_client(c, 64);
                 }
                 // The window counter resolves a pulse of two machine cycles;
-                // the frame signal's is half an SCK period (letter x).
-                if (d >= 32u) {
+                // the frame signal's is about half an SCK period, 48 to 64 ns
+                // at /16 (measured on either end, docs/rp2040/spi.md and
+                // docs/rp2350/spi.md): six of the counting end's cycles at
+                // the least, three times what it resolves (letter x).
+                {
                     const uint16_t want = (m & 1u) == 0u ? 64u : 1u;
                     framed = static_cast<uint8_t>(framed + (c.windows == want ? 1u : 0u));
                 }
@@ -1067,16 +1079,16 @@ void tr_roles() {
         }
     }
     print(serial, "  (w = select windows the client saw close; us = the burst on the peer's ruler, against a wire "
-                  "of 64 x 8 or 16 SCK periods - plus 1.5 a frame in modes 0 and 2); /16 exact in ", fast_exact,
-          " of 8, printed", crlf);
+                  "of 64 x 8 or 16 SCK periods - plus 1.5 a frame in modes 0 and 2)", crlf);
     bench.verdict("THE HOST'S OWN FRAME SIGNAL ON THE WIRE, counted by a PIO machine: a window per frame in modes 0 "
-                  "and 2, ONE window for the 64 back-to-back frames in modes 1 and 3 (4.4.3.10 to 4.4.3.13), at /64 "
-                  "and /32",
-                  framed == 16u);
+                  "and 2, ONE window for the 64 back-to-back frames in modes 1 and 3 (4.4.3.10 to 4.4.3.13), at /64, "
+                  "/32 and /16",
+                  framed == 24u);
     bench.verdict("THIS CHIP'S PL022 AS CLIENT, under a foreign PL022 host's own frame signal, exact both ways in "
-                  "every mode, 8- and 16-bit, 64 frames back to back at /64 and /32 of the host's clk_peri - "
-                  "more than one frame per select in modes 0 and 2 on the terms SPH = 0 sets",
-                  runs == 16u && exact == runs);
+                  "every mode, 8- and 16-bit, 64 frames back to back at /64, /32 and /16 of the host's clk_peri - "
+                  "every rung the client admits - more than one frame per select in modes 0 and 2 on the terms "
+                  "SPH = 0 sets",
+                  runs == 24u && exact == runs);
     (void)link_command_mode();
     bench.verdict("the command channel is back after the role swaps", command(Op::ping));
     pair_release();

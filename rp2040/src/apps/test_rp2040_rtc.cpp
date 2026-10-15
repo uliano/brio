@@ -32,6 +32,9 @@
 //      wrong weekday never
 //   e  the calendar adjusted while running, stopped and restarted, the
 //      forced interrupt
+//   f  THE READ ACROSS A DAY'S ROLLOVER: read() never puts the new time
+//      beside the old date (300 rollovers of 10 ms seconds), where the
+//      single RTC_0-then-RTC_1 pair does now and then
 //
 // build: boards = pico,weact2040
 // build: monitor_speed = 115200
@@ -373,6 +376,91 @@ void te_adjust() {
                   forced && !Rtc::pending());
 }
 
+// =============================================================================
+// f - the read across a day's rollover
+// =============================================================================
+
+/// The date word a reading at 0:00:00 or 23:59:59 must carry, from
+/// letter f's 12 September 2026 23:59:59: false when a reading puts one
+/// day's time beside the other day's date.
+bool coherent_at_rollover(uint32_t time_word, uint32_t date_word) {
+    const RtcDateTime d = rtc_datetime_of(date_word, time_word);
+    if (d.hour == 0u && d.minute == 0u && d.second == 0u) {
+        return d.day == 13u;
+    }
+    if (d.hour == 23u && d.minute == 59u && d.second == 59u) {
+        return d.day == 12u;
+    }
+    return true;
+}
+
+void tf_coherence() {
+    (void)rtc_up();
+    // Seconds of 469 clk_rtc periods (10.005 ms) so that the rollovers come
+    // in hundreds: CLKDIV_M1 written with the calendar stopped, set() then
+    // starting it. Each rollover is read through 60 us after the time word
+    // changes, interrupts masked, by a pair after pair of reads: the
+    // driver's read(), then the vendor's single pair (RTC_0, RTC_1 at once).
+    // A reading is incoherent when one day's time sits beside the other's
+    // date.
+    Rtc::regs().CLKDIV_M1 = 468u;
+    constexpr uint16_t rolls = 300;
+    uint16_t bad[2] = {0, 0};
+    uint16_t seen[2] = {0, 0};
+    for (uint8_t shape = 0; shape < 2u; ++shape) {
+        for (uint16_t k = 0; k < rolls; ++k) {
+            if (!Rtc::set({2026, 9, 12, 6, 23, 59, 59})) {
+                break;
+            }
+            bool wrong = false;
+            bool crossed = false;
+            disable_interrupts();
+            const uint32_t t0 = us_now();
+            uint32_t changed_at = 0;
+            while (us_now() - t0 < 20'000u) {
+                uint32_t tw = 0;
+                uint32_t dw = 0;
+                if (shape == 0u) {
+                    const auto r = Rtc::read();
+                    if (!r) {
+                        continue;
+                    }
+                    tw = rtc_word1_of(*r);
+                    dw = rtc_word0_of(*r);
+                } else {
+                    tw = Rtc::regs().RTC_0;
+                    dw = Rtc::regs().RTC_1;
+                }
+                wrong = wrong || !coherent_at_rollover(tw, dw);
+                if (changed_at == 0u && rtc_datetime_of(dw, tw).second == 0u) {
+                    changed_at = us_now();
+                    crossed = true;
+                }
+                if (changed_at != 0u && us_now() - changed_at > 60u) {
+                    break;
+                }
+            }
+            enable_interrupts();
+            seen[shape] = static_cast<uint16_t>(seen[shape] + (crossed ? 1u : 0u));
+            bad[shape] = static_cast<uint16_t>(bad[shape] + (wrong ? 1u : 0u));
+        }
+    }
+    (void)rtc_up();
+    print(serial, "  ", rolls, " day rollovers of 10 ms seconds each way: read() crossed ", seen[0], ", incoherent in ",
+          bad[0], "; the single pair crossed ", seen[1], ", incoherent in ", bad[1], crlf);
+    bench.verdict("READ() IS COHERENT ACROSS A DAY'S ROLLOVER: never the new time beside the old date, in 300 "
+                  "rollovers read through",
+                  seen[0] == rolls && bad[0] == 0u);
+    // The witness that the letter can see the fault: the single pair read
+    // incoherent in 87 to 110 rollovers of 300 in this loop, and in 29 of
+    // 500 (5.8 %) in a tighter one with nothing between the pairs; even at
+    // that lower rate 300 rollovers show none with a probability of
+    // 0.942^300 = 1.7e-8.
+    bench.verdict("and the single pair - RTC_0 then RTC_1 at once, 4.8.5.3's sequence - is not: the latch the "
+                  "first read makes is late for the second now and then",
+                  seen[1] == rolls && bad[1] != 0u);
+}
+
 void banner() {
     print(serial, crlf, "test_rp2040_rtc - the RP2040 RTC (datasheet 4.8): clk_rtc = crystal / 256, nothing to wire; clk_sys=",
           SysClock::hz, " Hz", crlf);
@@ -411,6 +499,7 @@ int main() {
     bench.letter('c', "the boundaries, one second each", tc_boundaries);
     bench.letter('d', "the alarm: latency, the level, the repeat, the one-shot", td_alarm);
     bench.letter('e', "adjust, stop, the forced interrupt", te_adjust);
+    bench.letter('f', "the read across a day's rollover", tf_coherence);
 
     if (serial_ok) {
         brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "PLL125" : "FAILED", " timer=", timer_ok ? "1us" : "FAILED",

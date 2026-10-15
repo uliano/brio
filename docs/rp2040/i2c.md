@@ -343,6 +343,25 @@ client finding below is measured from both sides. The cost figures are
   the same one-byte write's `start()` reads 12429 cycles and its entry
   6182 with both in the flash ([platform.md](platform.md), "A handler in
   SRAM").
+- THE VENDOR'S TENURE ON THE SAME WIRE: the pico-sdk 2.3.1's polled
+  `i2c_write_blocking` / `i2c_read_blocking` (its `i2c.c` compiled from
+  the pinned archive, `clock_get_hz` answered with clk_sys, brio's crt,
+  clock, console and ruler around it) on I2C1, GP2/GP3, against the same
+  peer between the same serve commands; the SDK's own `i2c_init`, then
+  brio's counts written over its own, so the SCL period measures the
+  same (316.0 cycles at 400 kHz against letter i's 315.9). At 400 kHz,
+  fixed cost, the SDK against brio's default image: a one-byte write 398
+  against 700, a 255-byte write 388 against 696, a 16-byte read 1053
+  against 847, a 255-byte read 16 442 (x 1.02) against 834 (x 1.00), a
+  register read of 1 + 1 66 against 763; a refused address 383 against
+  822. THE WRITE'S GAP, some 300 cycles (4.6 % of a one-byte write's
+  wall), is what the SDK does not do: it takes no interrupt and no wake
+  from the idle loop - and holds the core for the whole wire, busy 6528
+  cycles against 709. Its short reads' fixed cost is near zero because
+  `i2c_read_blocking` returns at the last byte, before the NACK and the
+  STOP are on the wire; its long read keeps one read command in flight,
+  the bus held a loop turn every byte, where the pump pours them by the
+  FIFO.
 
 ## Not covered yet
 
@@ -376,6 +395,3 @@ Implemented but not bench-verified, each with what would measure it:
 - `client_disabled_while_busy`, read after a disable timed inside a
   host's read (its write-side twin, SLV_RX_DATA_LOST, is measured
   above).
-- The vendor's tenure on this wire: the pico-sdk 2.3.1's polled
-  `i2c_write_blocking` / `i2c_read_blocking` in a scratch program
-  against the same peer.

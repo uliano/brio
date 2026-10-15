@@ -29,7 +29,7 @@ synchronized into the clk_rtc domain: a write takes two clk_rtc
 periods to land, and a coherent reading is RTC_0 before RTC_1, the
 first read latching the second.
 
-Four facts measured that the chapter does not state: the block's
+Five facts measured that the chapter does not state: the block's
 reset completes without clk_rtc (the converter's does not); A
 CALENDAR ENABLED FROM A STOP TICKS AT ONCE - one second some 130 us
 after RTC_ACTIVE, whatever the divider's phase was, the next a whole
@@ -44,7 +44,13 @@ the value is loaded after the tick, into the running calendar;
 and THE ALARM IS A LEVEL - the interrupt stands for the whole matching
 second, and the disarm itself lands two clk_rtc periods later, during
 which the handler is re-entered (124 entries in 43 us measured), so a
-handler masks the line first.
+handler masks the line first; and THE LATCH IS SOMETIMES LATE - the
+RTC_1 read issued right after its RTC_0 returned the latch of the
+PREVIOUS RTC_0 read in 29 of 500 day rollovers (a tight loop of pairs),
+the new time beside the old date for a microsecond to a few, where a
+gap of 5 us or a second RTC_0 read before RTC_1 read coherent in 500 of
+500 - so read() reads the pair until two agree. The pico-sdk's
+`rtc_get_datetime` reads the single pair.
 
 ## Types and verbs
 
@@ -68,7 +74,8 @@ handler masks the line first.
   the first second whole, the value the one asked for, about 210 us
   in all), `adjust(datetime)`
   (a LOAD into the running calendar), `enable(on)`, `read()` (RTC_0
-  then RTC_1; nothing while stopped), `force_not_leap_year(on)`;
+  then RTC_1, the pair read again until two agree - at most four pairs;
+  nothing while stopped), `force_not_leap_year(on)`;
   `alarm(RtcAlarm)` (written disarmed, then armed), `arm_alarm` /
   `disarm_alarm` / `alarm_armed`, `alarm_matching` (MATCH_ACTIVE),
   `alarm()` read back; `interrupt(on)`, `raw_pending` / `pending`,
@@ -126,6 +133,12 @@ the boundaries crossed one second at a time.
   April ends, Saturday rolls to Sunday, and 2100 gets a 29 February
   the Gregorian calendar has not - unless FORCE_NOTLEAPYEAR, which
   gives 1 March.
+- THE READ ACROSS A DAY'S ROLLOVER (letter f): 300 rollovers of 10 ms
+  seconds (CLKDIV_M1 468), each read through 60 us past the change,
+  interrupts masked - read() never puts the new time beside the old
+  date, where the single RTC_0-then-RTC_1 pair does in 84 to 111 of 300.
+  The single pair is what made letter c read 7 of 64 boundaries wrong,
+  any of them, at random.
 - THE ALARM: a second-matched alarm fires 37 us after the read that
   saw the rollover, once, the ISR body masking the line and disarming
   the match; left armed, it re-enters the handler for the whole

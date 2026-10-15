@@ -356,9 +356,10 @@ PIO program at 150 MHz, its host that chip's PL022):
 - THE ROLES INVERTED: this chip's `SpiClient` under the peer's PL022
   host, whose select is its own frame signal: 64 frames back to back in
   every mode, 8- and 16-bit, exact both ways at /64 and /32 of the
-  host's clk_peri (2.34 and 4.69 MHz), judged, and at /16 (9.375 MHz),
-  printed (the RP2350's page says why the rung is not judged) - more than
-  one frame per select in modes 0 and 2 on the terms SPH = 0 sets. The
+  host's clk_peri (2.34 and 4.69 MHz) and at /16 (9.375 MHz), the three
+  rungs this client admits (its clk_peri at least twelve times the far
+  host's SCK), all judged - more than one frame per select in modes 0
+  and 2 on the terms SPH = 0 sets. The
   frame signal, counted at this end by a PIO machine: a window a frame in
   modes 0 and 2, one for the burst in modes 1 and 3; its high pulse
   between two frames half an SCK period (48 ns at /16, 96 ns at /32); the
