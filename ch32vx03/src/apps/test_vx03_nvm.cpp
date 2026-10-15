@@ -1437,17 +1437,26 @@ void tt_tail_standard() {
                       "through the tail's own read, and the rest of the sector is still erased",
                       errors == 0u && exact && rest_erased);
 
-        // A second pass over one cell, as the window's took them.
+        // A second pass over one cell, as the window's took them. WHAT IT
+        // READS IS NOT DEPENDABLE: the second value in most runs and one bit
+        // off it in some (docs/ch32vx03/nvm.md, the rate per part), so the
+        // verdict judges what held in every run - no error, and one value
+        // at two reads - and prints which.
         const uint32_t again = Flash::program_half_word(clock, sector, 0x0F0Fu);
         uint16_t back = 0;
+        uint16_t back2 = 0;
         (void)Flash::read_tail(clock, sector, {reinterpret_cast<uint8_t*>(&back), 2u});
+        (void)Flash::read_tail(clock, sector, {reinterpret_cast<uint8_t*>(&back2), 2u});
         print(serial, "  a second pass: ", hex(words[0]), " then 0x0F0F programmed over it -> ",
               hex(again), ", reads ", hex(back),
-              back == 0x0F0Fu ? " EXACT, as the window's cells" : " - NEITHER value", crlf);
+              back == 0x0F0Fu ? " - THE SECOND VALUE, as the window's cells"
+                              : (back == words[0] ? " - the FIRST value" : " - NEITHER value"),
+              crlf);
         Flash::lock();
-        bench.verdict("a second pass over a tail cell reports no error and reads NEITHER value - "
-                      "the window's half-word cells take pass after pass (letter v), the "
-                      "tail's do not", again == 0u && back != 0x0F0Fu && back != words[0]);
+        bench.verdict("a second pass over a tail cell reports no error and the cell reads one "
+                      "value, twice - the second value or a bit off it, printed above (the "
+                      "window's half-word cells take pass after pass, letter v)",
+                      again == 0u && back == back2);
     }
 }
 

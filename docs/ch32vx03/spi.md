@@ -575,7 +575,7 @@ The client, answering one frame ahead in a run and dark between windows:
 ```cpp
 using Peer = brio::SpiClient<2>;
 Peer::init(clock, {.nss = brio::SpiNss::hardware_input, .drive_output = true});
-Peer::pad_speed(brio::PinSpeed::slow);   // the answer edge on a jumper-wire bus
+Peer::pad_speed(brio::PinSpeed::medium); // an edge inside /4's half period
 Peer::enable();                          // the buffer empty, the select still high
 const auto run = Peer::exchange(std::span<const uint8_t>(answers),
                                 std::span<uint8_t>(heard), spins);
@@ -888,8 +888,12 @@ declines by name.
 against the other's `spi_peer`, both at 144 MHz on their crystals: the
 CH32V203C8T6's SPI2 (PB12..PB15) wired to the CH32V303VCT6's SPI3 on its
 second column (PA4, PC10, PC11, PC12), both selects hardware NSS pads,
-two grounds between the boards ([../boards/weact-ch32v203c8.md](../boards/weact-ch32v203c8.md),
-[../boards/ch32v303-evt.md](../boards/ch32v303-evt.md)). The bounds are
+over the pair's cable - SCK with 33 Ohm in series at each end and two
+grounds of its own, MISO with 56 Ohm at the CH32V203C8T6's PB14, MOSI
+with 56 Ohm at the CH32V303VCT6's PC12, the select on its own wire
+([../boards/weact-ch32v203c8.md](../boards/weact-ch32v203c8.md),
+[../boards/ch32v303-evt.md](../boards/ch32v303-evt.md)) - and every pad
+either end drives on it at the MEDIUM slew class. The bounds are
 derived in the suite from the two datasheets' SPI tables (the CH32V203's
 4-25, the CH32V303's 4-27) and the peer's loops: the far client's hearing
 judged from /4 down (a half period holds the 20 ns SCK edge the tables
@@ -903,15 +907,23 @@ verdict green in all twenty (32 a run).
   pump and the engines against the far client's DMA serve, and the polled
   request against its polled run, 64 frames a row - exact both ways at
   every code from /256 to /4 = 18 MHz, in both directions, the far run
-  included at /4 (above its judged bound); at /2 = 36 MHz NOT EXACT
-  either way, the far client mishearing half the frames and this end's
-  read-back wrong, with HSRXEN and without it - the datasheets' 20 ns SCK
-  edge inside a 13.9 ns half period, so the pair's ceiling is /4. THE
+  included at /4 (above its judged bound). At /2 = 36 MHz THE FAR CLIENT
+  HEARS EVERY FRAME, on every shape and in both directions (sixty
+  windows of 64 frames each way over the twenty runs, printed - /2 is
+  outside the tables' SCK edge), and THIS END READS ITS ANSWERS BACK ONE
+  BIT LATE (0xC2 for 0x84 in the first frame: every frame's bits one
+  place down, the frame before's last bit on top): the client's
+  MISO is valid 25 ns after its edge (tV(SO)) and the host wants 5 ns of
+  setup (tSU(MI)), 30 ns against the 13.9 ns of /2's half period - the
+  silicon's answer timing, not the wire's. The high-speed read (HSRXEN,
+  20.4.10's late sample) brought it back exact on the CH32V303VCT6's host
+  in 2 of 10 runs, on the CH32V203C8T6's in none. So the pair's ceiling
+  for an exchange is /4, and its write reaches /2 (below). THE
   COST OF EACH HOST SHAPE beside the wire's (cycles a frame, 8-bit, the
   wire 8 x division x 2): the polled request 4099 at /256 (the wire's
   4096), 259 at /16 (256), 153 to 159 at /8 (128, one frame in flight
   below the write-ahead threshold), 87 to 97 at /4 (64); the pump 213 to
-  217 at /8 and 151 to 153 at /4; the engines 134 to 135 at /8 and 70 to
+  217 at /8 and 150 to 155 at /4; the engines 134 to 135 at /8 and 70 to
   71 at /4 - at the wire from /16 down on every shape.
 - **The extended exchange against a foreign unit**: 16-bit frames exact
   both ways on every shape and both far serves (report_extended); the CRC
@@ -925,33 +937,31 @@ verdict green in all twenty (32 a run).
   where the answer path does not.
 - **THE ROLES INVERT**: each chip's `SpiClient::exchange()` run under the
   far chip's host_burst answers one frame ahead, both ends agreeing frame
-  for frame, in 8- and 16-bit frames, and hands its MISO back; the
-  CH32V303VCT6's client in all four modes and both bit orders.
-- **A CLIENT'S ANSWER EDGE REACHES ITS OWN INPUTS ON THESE WIRES.** With
-  its MISO at the fast class every client on the pair broke every burst,
-  at the medium class most of them, at the slow class none (letter l,
-  twenty runs: 0 of 3 bursts at the fast class on both ends, 0 of 3 at
-  the medium one on the CH32V203C8T6 and 0 to 2 on the CH32V303VCT6, 3 of
-  3 at the slow one on both; the spi_peer's answer windows
-  broke at 281 kHz at the fast class and the ladder at 4.5 and 9 MHz at
-  the medium one) - so both the peer and the suite's client answer at the
-  slowest class, which costs nothing to /4 (the ladder above). And on the
-  CH32V203C8T6's board even the slow class is not enough in MODES 1 AND
-  2 BELOW /8: there that client loses two to four frames of 32 in nearly
-  every exchange (letter x: 3 or 4 of 4 bad in every cell at /256 and
-  /64, none at /8), with its MISO driven - and none with it DARK, in
-  every mode and at every rate (letter x's listening column, 0 of 4 in
-  every cell). Those are the two modes whose answer changes while SCK is
-  high and that sample on the falling edge, so the measured shape is the
-  answer's falling edge pulling the high clock across the threshold; the
-  CH32V303VCT6's client shows none of it. Modes 0 and 3 on that end slip
-  rarely (one exchange in some 120 of letter x's, none in the twenty runs
-  of `y`); the cause is not isolated (a look at
-  PB13 against PB14 on that board would). So the suite judges modes 1
-  and 2 of the CH32V203C8T6's client LISTENING, and its answering ones
-  in modes 0 and 3.
-- **THE SELECT WIRE CARRIES THE OTHERS' TRANSIENTS.** On the CH32V203C8T6
-  as a client its NSS pad read high for an instant inside a window: a
+  for frame, in 8- and 16-bit frames, and hands its MISO back; each
+  part's client in all four modes and both bit orders, answering, and
+  in all four receive-only with its MISO dark.
+- **THE PADS' SLEW CLASS, THROUGH THE CABLE: EVERY CLASS EXACT.** Each
+  host's SCK and MOSI walked at the three classes in all four modes and
+  both bit orders (letter d: 8 of 8 at each class in every one of the
+  twenty runs), each client's MISO likewise (letter l: 3 of 3 bursts at
+  each class, twenty runs), and each part's client ANSWERING in all four
+  modes and both orders at the pair's class (letter l, ten runs on each
+  part; letter x's sixty cells - 240 exchanges at /256, /64 and /8 on both
+  far serves - none bad with the CH32V203C8T6 answering). Over loose wires
+  of the same length, with neither the resistors nor the grounds beside
+  SCK, a client's own answer edge reached its SCK and select inputs: the
+  fast class broke every answer window at 281 kHz, and on the
+  CH32V203C8T6's board even the slow class lost frames in modes 1 and 2 -
+  the two modes whose answer changes while SCK is high and that sample on
+  the falling edge (17 bad cells of letter x's 60) - while a series
+  resistor at that board's PB14 alone took it to no bad cell in 180. The pair
+  runs every pad at the MEDIUM class: the two datasheets' I/O AC tables
+  (the CH32V203's 4-21, the CH32V303's 4-23) give its edge as 25 ns at
+  most into 50 pF, inside the 27.8 ns half period of /4, the top judged
+  rung, where the slow class's 125 ns fits no rung above /32.
+- **THE SELECT WIRE CARRIES THE OTHERS' TRANSIENTS.** Over loose wires,
+  on the CH32V203C8T6 as a client, its NSS pad read high for an instant
+  inside a window: a
   polled run that took one high read for the host's close ended after 3
   to 17 frames of 32 (and once a DMA serve after 10), while the SPI
   block's own NSS input never saw it (the serves it fed were exact). The
@@ -980,12 +990,6 @@ verdict green in all twenty (32 a run).
   SSOE set keeps its NSS pad high under SPE until the first frame is
   written, drives it low from then to the disable, and the far client it
   frames carries sixteen frames exact both ways.
-- **THE HOST'S PADS TOO**: the four modes and both bit orders against
-  the CH32V303VCT6's client, walked at the three slew classes of the
-  CH32V203C8T6 host's SCK and MOSI - one slip in eight exchanges (always
-  mode 1, LSb first) in 3 of 10 runs at the fast class and 2 of 10 at the
-  medium one, none in 10 at the slow one, which costs nothing to /4 (the
-  ladder runs at it) - so the suite's pair host runs at the slow class.
 - **The rest, against a foreign client**: a bit-order mismatch an exact two-way reversal; a client that
   never drains keeps ONE frame and raises OVR; the select a real wire; a
   ten-second stress at 4.5 MHz, polled and engined in turn, 23 exchanges
@@ -1007,7 +1011,7 @@ What the silicon taught it: THE CORE LEAVES THE BUS TO THE ENGINES
 inside a DMA serve - a core polling the select pad back to back starved
 the receive channel on the CH32V303VCT6 (14 to 31 frames of 64 landed at
 18 MHz), polling it once every 256 turns of an SRAM loop kept every
-frame ([dma.md](dma.md)); its answer line at the slowest slew class; the
+frame ([dma.md](dma.md)); its answer line at the pair's medium slew class; the
 close on two reads. The answer path never runs from a vector, so the
 CH32V303's float tax does not reach it. Its polled run, in the release
 listing, is the client's fifteen instructions a frame; its measured
@@ -1081,15 +1085,6 @@ Implemented but not bench-verified, each with what would measure it:
 - **`rebase()` and the SCK ceiling across a clock change**: the fan-out
   is written and compiled, and no suite drives this chapter under a
   `DynamicClock` yet.
-- **The CH32V203C8T6's client in modes 1 and 2 ANSWERING below /8, and
-  the rare slip in modes 0 and 3** on the desk's board (the pair's
-  section): heard exact listening, its answers' own edge the measured
-  shape; a logic analyser on PB13 against PB14 of that board, or the
-  same part on another board, would say whether it is the board's or the
-  part's.
-- **The pair above /4**: /2 = 36 MHz fails both ways on the desk's wires,
-  inside the datasheets' 20 ns SCK edge; a shorter, terminated link
-  would measure the parts at their 36 MHz.
 - **The transmit interrupt (TXEIE) on a host**: the host engine arms
   RXNE alone, and a transmit-only stream with no reader would be its
   first user; on a client, answers written from TXE one frame ahead are

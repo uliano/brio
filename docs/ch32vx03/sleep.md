@@ -56,8 +56,8 @@ event did too, an exit 2.3.4 does not list at all - and every one of
 them came back through the RESET VECTOR and not through the instruction
 after the wait. So an ordinary EXTI line IS a way out of this mode, and
 there is no way out of it that returns. The independent watchdog is one
-of the documented exits and is measured as one on the CH32V303VCT6: its
-reset ended a Standby some 200 ms after it was armed, with IWDGRSTF and
+of the documented exits and is measured as one on both parts: its reset
+ended a Standby some 200 ms after it was armed, with IWDGRSTF and
 PORRSTF both standing at the boot.
 
 ### A sleep of any depth starves every other bus master
@@ -139,10 +139,11 @@ two hundred milliseconds and refreshed immediately before a Stop of two
 seconds did not reset the board in the sleep - the reset arrived 208 to
 215 milliseconds after the WAKE. So a watchdog is not a way back out of
 a Stop on this family, and a program that stops for longer than its
-time-out is not reset for doing so. A STANDBY IS THE OPPOSITE: on the
-CH32V303VCT6 the same watchdog, armed after an alarm two seconds out,
-ended the Standby at 225 ms - and the debug module's watchdog freeze bit
-read clear throughout, so neither answer is the probe's.
+time-out is not reset for doing so. A STANDBY IS THE OPPOSITE: on both
+parts the same watchdog, armed after an alarm two seconds out, ended the
+Standby - at 225 ms on the CH32V303VCT6 and 228 to 230 ms on the
+CH32V203C8T6 - and the debug module's watchdog freeze bits read clear,
+so neither answer is the probe's.
 
 Kernel time stands still for the whole of a Stop, because the core's STK
 counter counts HCLK. Two things follow, and both are answered in the
@@ -454,9 +455,9 @@ that counter has been seen counting.
 ### On the CH32V203C8T6
 
 `test_vx03_sleep` at 96 MHz from the board's crystal, with the RTC on
-its 32.768 kHz one - letters a to h, `w` (which enters Standby three
-times, each ending in a reset, fifteen verdicts) and `g` (which ends in
-one, two).
+its 32.768 kHz one - letters a to h, `k`, `w` (which enters Standby
+three times, each ending in a reset, fifteen verdicts), `r` (five
+resets, five), `x` (one, three) and `g` (one, two).
 
 **The debug module holds nothing up.** DBGMCU_CR reads 0x300 with the
 probe attached and its three low-power bits are clear, so every span
@@ -538,6 +539,27 @@ about 200 ms of its own LSI and refreshed immediately before a Stop
 asked for two seconds, it did not reset the board in the sleep: the
 Stop ran its full two seconds and the reset arrived 215 ms after the
 wake, with IWDGRSTF at the next boot. Twice, to a millisecond.
+
+**A Stop at every rate of a DynamicClock** (three runs). On the
+crystal's PLL at 96, 144 and 48 MHz and on the bare HSI: each Stop ended
+by the alarm on the HSI, the site's `disarm()` - the clock's own
+`restore()` - put back the rate in force, and the core's counter
+measured 96 006 to 96 007, 144 010, 48 001 to 48 007 and 8 039 to
+8 044 kHz against the RTC after it.
+
+**What a Standby keeps** (three runs). 3328 words painted from just
+above the linker's sections, all of them in the one bank this class
+has: a software reset kept every one; a Standby with R2KSTY kept every
+one and a Standby without it none, no lost word reading zero; each
+Standby ended by the alarm 2008 ms after it was placed, SBF and WUF
+standing, PORRSTF alone.
+
+**The independent watchdog ENDS a Standby** (six runs). Armed at /32
+with a reload of 249 after the alarm was placed two seconds out, it
+brought the board back 228 to 230 ms after the alarm was placed,
+IWDGRSTF and PORRSTF standing, SBF set and WUF clear - the watchdog's
+exit and not the alarm's - with no watchdog running into the new boot
+and DBGMCU_CR reading 0x0 at it.
 
 **The supply monitor.** The eight thresholds walked from the bottom up
 never read low on this board, which places its rail above the highest
@@ -701,12 +723,10 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
-- **Letters i to k, r and x on the CH32V203C8T6** - the edge on the
-  wire, a Stop at every rate of a DynamicClock, what a Standby keeps of
-  the whole 20 KB bank, the watchdog through a Standby (the
-  floating-point letter is the CH32V303's alone): they build for that
-  part and its 32 KB tier, and what would measure them is the suite on
-  that board, its wire from PA6 to PA1 in place.
+- **Letter j on the CH32V203C8T6** - a Sleep ended by TIM3's edge on
+  the wire: it builds for that part and its 32 KB tier, and what would
+  measure it is a wire from PA6 to PA1, which that board does not carry
+  (its PA6 is a pad of SPI1's loopback node).
 - **The retention banks and the write-only bits of the CH32V20x_D8.**
   The CH32V203RB's two banks fold through the part table like the
   CH32V303's, and the kept copy serves whether that die reads the bits

@@ -35,7 +35,7 @@ reads `0x20310500` and the unique identifier's two factory words
   well.
 - **The wires to the CH32V303 evaluation board**
   ([ch32v303-evt.md](ch32v303-evt.md)), the two boards being each other's
-  peers - eight signal wires and two grounds, the two I2C lines pulled up
+  peers - eight signal wires and their grounds, the two I2C lines pulled up
   to THIS board's 3.3 V by 2.2 kOhm each:
 
   | this board | the CH32V303 | carries |
@@ -49,14 +49,21 @@ reads `0x20310500` and the unique identifier's two factory words
   | PB10 | PB1 | USART3's TX into UART4's RX on its second column |
   | PB11 | PB0 | UART4's TX on its second column into USART3's RX |
 
-  The CH32V303's PA4 is not 5 V tolerant (the CH32V303 datasheet's pin
-  table) and this board's SPI2 select idles high, so this board does not
-  run an SPI2 image while the other board is unpowered. As an SPI CLIENT
-  on these wires this board's own MISO edge (PB14) reaches its SCK and
-  select inputs: it answers at the slowest slew class, and even so loses
-  frames in modes 1 and 2 below 9 MHz while answering - exact while only
-  listening ([../ch32vx03/spi.md](../ch32vx03/spi.md), the pair's
-  section). The two serial wires carry 4.5 Mbaud both ways with this
+  The four SPI wires are a CABLE of their own, a flat about 20 cm long
+  opened in a fan at each end: SCK with 33 Ohm in series at EACH end and
+  two grounds of its own, MISO with 56 Ohm at this board's PB14, MOSI
+  with 56 Ohm at the other board's PC12, the select on its own wire.
+  Through it every slew class of either end's pads carries every mode
+  exact, and each board's client answers in all four modes; over loose
+  wires of the same length this board's client, its own MISO edge
+  reaching its SCK input, lost frames in modes 1 and 2 even at the slow
+  class. The pair runs its pads at the medium class; 36 MHz is heard by
+  either client and read back one bit late by either host, the client's
+  answer timing ([../ch32vx03/spi.md](../ch32vx03/spi.md), the pair's
+  section). The CH32V303's PA4 is not 5 V tolerant (the CH32V303
+  datasheet's pin table) and this board's SPI2 select idles high, so this
+  board does not run an SPI2 image while the other board is unpowered.
+  The two serial wires carry 4.5 Mbaud both ways with this
   board's transmit pad at every class measured - fast, medium and slow -
   every rung of the two-board ladder exact
   ([../ch32vx03/usart.md](../ch32vx03/usart.md), the pair's section).

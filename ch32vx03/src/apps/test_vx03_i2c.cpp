@@ -78,8 +78,9 @@
 //      counted by the timer
 //   c  THE PEER: the twi_link command channel, ident, ten round trips
 //   d  the tenure shapes against the peer, the four receive
-//      procedures, the general call, the repeated START counted at the
-//      far end
+//      procedures, the counted serve ending at the STOP of the read that
+//      moved its count, the general call, the repeated START counted at
+//      the far end
 //   e  the vocabulary on the wire (nack_addr from a deaf client,
 //      nack_data at a commanded byte) and commanded stretching priced
 //   f  the speeds against a second chip, each timed on the wire and
@@ -151,7 +152,7 @@
 // fits the family's smallest chip"). The CH32V203C8 builds two images of
 // its own (the groups.v203c8 line); the CH32V303 builds one.
 // build: boards = v203c6,v203c8,v303vc
-// build: groups = abcd,efgh,ijkr,ln,o,pq
+// build: groups = ab,cd,efgh,ijkr,ln,o,pq
 // build: groups.v203c8 = abcdefgh,ijklnopqr
 // build: monitor_speed = 115200
 
@@ -1078,6 +1079,62 @@ void td_shapes() {
     bench.verdict("reads of ONE, TWO, THREE and FOUR bytes - the chapter's four receive "
                   "procedures - each byte-exact, and the far end served at least each one",
                   counts_ok);
+
+    // THE COUNTED SERVE (twi_link.hpp's `count`): a serve armed for eight
+    // bytes and a deadline far beyond them must end at the STOP of the read
+    // that moved the eighth - every byte the peer's own, the last one
+    // included, and the peer back in command mode long before its
+    // deadline. The bound: the read takes under a millisecond at either
+    // speed and the peer's re-init a few more, the poll below looks every
+    // 5 ms, so the counted exit is seen within some 10 ms and a serve that
+    // waited for its deadline at no less than 2000 ms; half the deadline
+    // parts the two with a factor of a hundred on the early side.
+    {
+        constexpr uint32_t deadline_ms = 2000;
+        twilink::Params cnt{};
+        cnt.count = 8;
+        cnt.ms = deadline_ms;
+        cnt.addr = twilink::dut_addr;
+        cnt.seed = 0x58;
+        cnt.pattern = twilink::pattern_counting;
+        if (peer_act(Op::serve, cnt)) {
+            for (uint8_t i = 0; i < 8; ++i) {
+                rx_buf[i] = 0xEE;
+            }
+            const uint8_t st = host_tenure(twilink::dut_addr, nullptr, 0, rx_buf, 8, link_speed);
+            const uint32_t t0 = Ticker::millis();
+            bool back = false;
+            while (!back && Ticker::millis() - t0 < deadline_ms + 500u) {
+                back = command_once(Op::ping, no_payload, 0);
+                if (!back) {
+                    link_ready();
+                    settle_ms(5);
+                }
+            }
+            const uint32_t back_ms = Ticker::millis() - t0;
+            settle_ms(twilink::arm_ms);
+            uint8_t mism = 0;
+            for (uint8_t i = 0; i < 8; ++i) {
+                if (rx_buf[i] != twilink::pattern_value(cnt.pattern, cnt.seed, i)) {
+                    ++mism;
+                }
+            }
+            twilink::Report cr{};
+            const bool crep = peer_report(cr);
+            print(serial, "  counted serve of 8: read status=", st, " mism=", mism, " last=",
+                  hex(rx_buf[7]), "; the peer back in ", back_ms, " ms of its ", deadline_ms,
+                  " ms deadline, its count=", cr.count, " stops=", cr.stops, " flags=",
+                  hex(cr.flags), crlf);
+            bench.verdict("a COUNTED SERVE ends at the STOP of the read that moved its count: "
+                          "the eight bytes the peer's own, the last included, and the peer "
+                          "back in command mode well inside half its deadline, not timed out",
+                          st == i2c_ok && mism == 0u && back && back_ms < deadline_ms / 2u &&
+                              crep && cr.count == 8u &&
+                              (cr.flags & twilink::report_timed_out) == 0u);
+        } else {
+            bench.verdict("the peer accepted the counted serve", false);
+        }
+    }
 
     twilink::Params g{};
     g.count = 64;

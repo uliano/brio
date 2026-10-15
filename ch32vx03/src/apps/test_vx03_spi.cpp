@@ -39,7 +39,8 @@
 //  - THE PAIR: the CH32V203C8T6's SPI2 (NSS PB12, SCK PB13, MISO PB14,
 //    MOSI PB15) wired to the CH32V303VCT6's SPI3 on its SECOND column (NSS
 //    PA4, SCK PC10, MISO PC11, MOSI PC12), both selects hardware NSS pads,
-//    two grounds between the boards (docs/boards/). Each board's suite
+//    over the pair's cable with its series resistors and its two grounds
+//    beside SCK (docs/boards/). Each board's suite
 //    links on its own end; the far board runs `spi_peer`.
 //  - On the CH32V303VCT6's evaluation board, four jumpers between SPI2's
 //    column and SPI3's default one - PB12-PA15, PB13-PB3, PB14-PB4,
@@ -234,13 +235,19 @@ using PairNss = Pin<pair_pins.nss.port, pair_pins.nss.pin>;
 using PairSck = Pin<pair_pins.sck.port, pair_pins.sck.pin>;
 using PairMiso = Pin<pair_pins.miso.port, pair_pins.miso.pin>;
 using PairMosi = Pin<pair_pins.mosi.port, pair_pins.mosi.pin>;
-/// The slew class of the pair host's SCK and MOSI: the slowest, 2 MHz.
-/// Letter d's walk is the measurement behind it - the CH32V203C8T6's host
-/// put a slip into the far CH32V303's client in mode 1, LSb first, at the
-/// fast class and at the medium one (one exchange in eight, in some runs),
-/// none at the slow class - and letter j's ladder holds at it to /4 =
-/// 18 MHz.
-constexpr PinSpeed pair_host_class = PinSpeed::slow;
+/// THE PAIR'S PAD CLASS, every pad either end drives on the link - this
+/// end's SCK and MOSI as the host, its MISO as the client, and spi_peer's
+/// answer line: the MEDIUM class, 10 MHz. The two datasheets' I/O AC
+/// tables (the CH32V203's 4-21, the CH32V303's 4-23) give its edge as
+/// 25 ns at most into 50 pF, inside the 27.8 ns half period of /4 = 18
+/// MHz, the top rung the section below judges; the slow class's 125 ns
+/// fits no rung above /32, and the fast class's 8 ns is the loudest edge
+/// on the wire. Letter d's walk (this end's SCK and MOSI) and letter l's
+/// (this end's MISO) print all three: through the pair's cable - SCK with
+/// a series resistor at each end and two grounds of its own, MISO with one
+/// at the CH32V203's end and MOSI with one at the CH32V303's
+/// (docs/boards/) - every class carries every mode exact.
+constexpr PinSpeed pair_pad_class = PinSpeed::medium;
 
 /// A transaction that never answered: the suite's own word.
 constexpr uint8_t no_answer = 200;
@@ -1953,9 +1960,6 @@ uint8_t raw_n = 0;
 spilink::Decoder dec;
 bool link_quiet = false;
 
-/// The far end is the CH32V203C8T6 (its label "V203C8"): letter d reads
-/// it once from the ident.
-bool far_is_v203 = pair_spi == 3u;
 volatile bool pair_pump_live = false;
 volatile bool pair_dma_live = false;
 volatile bool pair_err_live = false;
@@ -2144,8 +2148,8 @@ bool peer_act(Op op, const spilink::Params& a) {
 /// verdict - this is the second set, which needs the far board.
 bool need_peer() {
     pair_pads_alone();
-    PairHost::pad_speed(pair_host_class);
-    PairDma::pad_speed(pair_host_class);
+    PairHost::pad_speed(pair_pad_class);
+    PairDma::pad_speed(pair_pad_class);
     link_quiet = true;
     (void)link_command_mode();
     for (uint8_t k = 0; k < 3; ++k) {
@@ -2411,7 +2415,6 @@ void td_peer() {
         print(serial, "  peer: label '", label, "' xtal=", d.xtal, " sanity=", hex(d.sanity), " fw=", hex(d.version),
               crlf);
     }
-    far_is_v203 = got && d.label[0] == 'V' && d.label[1] == '2';
     bench.verdict("ident comes back and it IS spi_peer of this stratum (the sanity byte, kind 0x05), on its "
                   "crystal - the far part of the desk pair",
                   got && d.sanity == spilink::ident_sanity && spilink::peer_kind(d.version) == spilink::peer_ch32vx03 &&
@@ -2430,20 +2433,24 @@ void td_peer() {
     // ---- the four modes and both bit orders, at each of this end's pad classes ----
     //
     // A data line's edge coupled into the clock is one sampling edge too
-    // many on the desk's jumper wires, so the matrix is a measurement of
-    // the PADS as much as of the block: it is walked at each slew class of
-    // this end's SCK and MOSI, and judged at the class every pair letter
-    // runs at (pair_host_class, its reason beside it).
+    // many on a bus of loose wires, so the matrix is a measurement of the
+    // PADS as much as of the block: it is walked at each slew class of this
+    // end's SCK and MOSI, and judged at the class every pair letter runs at
+    // (pair_pad_class, its reason beside it). THE BOUND IS ZERO: at /64,
+    // 1.125 MHz, the half period is 444 ns, and the far client's answer
+    // (valid 25 ns after its edge, tV(SO)), this end's setup (5 ns,
+    // tSU(MI)) and a medium-class edge (25 ns into 50 pF) take 55 ns of it,
+    // so one frame wrong in any mode, either way, is a defect and not the
+    // timing's margin. The far client answers in every mode at that class
+    // too (spi_peer's boot choice).
     constexpr PinSpeed speeds[] = {PinSpeed::fast, PinSpeed::medium, PinSpeed::slow};
     const char* speed_names[] = {"fast (50 MHz)", "medium (10 MHz)", "slow (2 MHz)"};
     uint8_t good_at_class = 0;
-    uint8_t good_03_at_class = 0;
     for (uint8_t si = 0; si < 3u; ++si) {
         PairHost::pad_speed(speeds[si]);
         PairDma::pad_speed(speeds[si]);
         (void)link_command_mode();
         uint8_t good = 0;
-        uint8_t good03 = 0;
         for (uint8_t m = 0; m < 4; ++m) {
             for (uint8_t lsb = 0; lsb < 2; ++lsb) {
                 Exchange e{};
@@ -2456,9 +2463,6 @@ void td_peer() {
                 const Outcome o = run_exchange(e);
                 if (exact(e, o)) {
                     ++good;
-                    if (m == 0u || m == 3u) {
-                        ++good03;
-                    }
                 } else {
                     print(serial, "    ", speed_names[si], " mode ", m, lsb ? " LSb" : " MSb", " first:", crlf);
                     dump(o);
@@ -2468,49 +2472,16 @@ void td_peer() {
         print(serial, "  SCK and MOSI at ", speed_names[si], ": ", good,
               " of 8 (four modes x two bit orders) exact both ways at ", PairHost::sck_hz(SpiClock::div64) / 1000u,
               " kHz, the far client on its engines", crlf);
-        if (speeds[si] == pair_host_class) {
+        if (speeds[si] == pair_pad_class) {
             good_at_class = good;
-            good_03_at_class = good03;
         }
     }
-    PairHost::pad_speed(pair_host_class);
-    PairDma::pad_speed(pair_host_class);
+    PairHost::pad_speed(pair_pad_class);
+    PairDma::pad_speed(pair_pad_class);
     (void)link_command_mode();
-    // THE FAR CLIENT'S OWN ANSWER EDGES: a CH32V203C8T6 client on the
-    // desk's board loses frames in modes 1 and 2 below /8 with its MISO
-    // driven and none with it dark (letter x, the slip statistics) - the
-    // modes whose answer changes while SCK is high and which sample on the
-    // falling edge. Against that client modes 1 and 2 are printed above and
-    // judged by letter x's listening column; modes 0 and 3 are judged here.
-    if (far_is_v203) {
-        print(serial, "  the far client is the CH32V203C8T6: modes 1 and 2 are printed (its own answer edges, "
-                      "letter x), modes 0 and 3 judged",
-              crlf);
-        uint8_t heard12 = 0;
-        for (uint8_t m = 1; m < 3; ++m) {
-            for (uint8_t lsb = 0; lsb < 2; ++lsb) {
-                Exchange e{};
-                e.cfg.mode = m;
-                e.cfg.dord = lsb;
-                e.host_mode = static_cast<SpiMode>(m);
-                e.host_lsb = lsb != 0u;
-                e.spare = spilink::spare_receive_only;
-                e.read = false;
-                e.seed_a = static_cast<uint8_t>(0x23u + 2u * m + lsb);
-                const Outcome o = run_exchange(e);
-                if (heard(e, o)) {
-                    ++heard12;
-                }
-            }
-        }
-        bench.verdict("... and the far CH32V203C8T6 LISTENING (receive-only, its MISO dark) hears modes 1 and 2 "
-                      "exact in both orders - what its own answer edges take away",
-                      heard12 == 4u);
-    }
     bench.verdict("ALL FOUR TRANSFER MODES AND BOTH BIT ORDERS carry 32 frames exact both ways between the two "
-                  "chips, at the pair's pad class (modes 0 and 3 against a far CH32V203C8T6, whose own answer edges "
-                  "letter x measures)",
-                  far_is_v203 ? good_03_at_class == 4u : good_at_class == 8u);
+                  "chips, the far client ANSWERING in every one, at the pair's pad class",
+                  good_at_class == 8u);
 
     Exchange mism{};
     mism.cfg.dord = 1;      // the far client LSb first
@@ -3107,9 +3078,13 @@ void tl_client() {
         return;
     }
     // ---- the answer line's slew class, at mode 0 ----
+    // Walked at all three, judged at the pair's (pair_pad_class, its reason
+    // beside it); the bound is letter d's: at the instrument's /64 the
+    // answer's timing takes 55 ns of a 444 ns half period, so one frame
+    // wrong is a defect.
     constexpr PinSpeed speeds[] = {PinSpeed::fast, PinSpeed::medium, PinSpeed::slow};
     const char* names[] = {"fast (50 MHz)", "medium (10 MHz)", "slow (2 MHz)"};
-    bool slow_ok = false;
+    bool class_ok = false;
     for (uint8_t si = 0; si < 3u; ++si) {
         uint8_t good = 0;
         for (uint8_t k = 0; k < 3u; ++k) {
@@ -3120,30 +3095,22 @@ void tl_client() {
             }
         }
         print(serial, "  this end's MISO at ", names[si], ": ", good, " of 3 bursts exact both ways", crlf);
-        slow_ok = si == 2u && good == 3u;
+        if (speeds[si] == pair_pad_class) {
+            class_ok = good == 3u;
+        }
     }
-    bench.verdict("THIS CLIENT'S MISO AT THE SLOWEST CLASS carries every burst exact both ways - the class the "
-                  "letters below and the far peer use (a faster edge couples into the client's own SCK input on "
-                  "the desk's wires: printed above, not judged)",
-                  slow_ok);
+    bench.verdict("THIS CLIENT'S MISO AT THE PAIR'S PAD CLASS carries every burst exact both ways - the class the "
+                  "letters below and the far peer use (the other two printed above)",
+                  class_ok);
 
     // ---- every mode, both orders, and 16-bit frames ----
-    // THIS END'S OWN ANSWER EDGES, on the CH32V203C8T6 end of the pair:
-    // its client loses frames in modes 1 and 2 with its MISO driven (letter
-    // d's and x's finding, seen from the far end), so there modes 1 and 2
-    // are printed and judged LISTENING; modes 0 and 3 are judged answering.
-    constexpr bool own_edges = pair_spi == 2u;
     uint8_t good = 0;
-    uint8_t good03 = 0;
     for (uint8_t m = 0; m < 4; ++m) {
         for (uint8_t lsb = 0; lsb < 2; ++lsb) {
-            const ClientRun c = as_client(static_cast<SpiMode>(m), lsb != 0u, false, PinSpeed::slow,
+            const ClientRun c = as_client(static_cast<SpiMode>(m), lsb != 0u, false, pair_pad_class,
                                           static_cast<uint8_t>(0x45u + 2u * m + lsb), static_cast<uint8_t>(0x9Au + 2u * m + lsb));
             if (client_exact(c)) {
                 ++good;
-                if (m == 0u || m == 3u) {
-                    ++good03;
-                }
             } else {
                 print(serial, "    mode ", m, lsb ? " LSb" : " MSb", ": the run took ", c.run.count, " (end ",
                       static_cast<uint8_t>(c.run.end), "), here mism=", c.mism, ", the far host read ", c.r.count,
@@ -3153,27 +3120,22 @@ void tl_client() {
     }
     print(serial, "  this chip as the CLIENT: ", good, " of 8 (four modes x two orders) bursts exact both ways", crlf);
     bench.verdict("THE ROLES INVERT: this chip's SpiClient answers ONE FRAME AHEAD under the far chip's host in all "
-                  "four modes and both bit orders (modes 0 and 3 on the CH32V203C8T6 end), both ends agreeing frame "
-                  "for frame, and hands its MISO back after",
-                  own_edges ? good03 == 4u : good == 8u);
-    if constexpr (own_edges) {
-        uint8_t heard12 = 0;
-        for (uint8_t m = 1; m < 3; ++m) {
-            for (uint8_t lsb = 0; lsb < 2; ++lsb) {
-                const ClientRun c = as_client(static_cast<SpiMode>(m), lsb != 0u, false, PinSpeed::slow,
-                                              static_cast<uint8_t>(0x51u + 2u * m + lsb),
-                                              static_cast<uint8_t>(0xA1u + 2u * m + lsb), true);
-                if (client_heard(c)) {
-                    ++heard12;
-                }
-            }
+                  "four modes and both bit orders, both ends agreeing frame for frame, and hands its MISO back after",
+                  good == 8u);
+    // The receive-only run, its MISO never driven: what it hears alone.
+    uint8_t heard = 0;
+    for (uint8_t m = 0; m < 4; ++m) {
+        const ClientRun c = as_client(static_cast<SpiMode>(m), false, false, pair_pad_class,
+                                      static_cast<uint8_t>(0x51u + m), static_cast<uint8_t>(0xA1u + m), true);
+        if (client_heard(c)) {
+            ++heard;
         }
-        bench.verdict("... and LISTENING (its MISO dark) this client hears modes 1 and 2 exact in both orders",
-                      heard12 == 4u);
     }
+    bench.verdict("... and LISTENING (receive(), its MISO dark) this client hears all four modes exact",
+                  heard == 4u);
     uint8_t wide_good = 0;
     for (uint8_t m = 0; m < 4; m += 3) {
-        const ClientRun c = as_client(static_cast<SpiMode>(m), false, true, PinSpeed::slow, static_cast<uint8_t>(0x71u + m),
+        const ClientRun c = as_client(static_cast<SpiMode>(m), false, true, pair_pad_class, static_cast<uint8_t>(0x71u + m),
                                       static_cast<uint8_t>(0x1Fu + m));
         if (client_exact(c)) {
             ++wide_good;
@@ -3346,7 +3308,7 @@ void tx_slips() {
     if (!need_peer()) {
         return;
     }
-    PairHost::pad_speed(pair_host_class);
+    PairHost::pad_speed(pair_pad_class);
     constexpr SpiClock rates[] = {SpiClock::div256, SpiClock::div64, SpiClock::div8};
     for (uint8_t ri = 0; ri < 3u; ++ri)
     for (uint8_t m = 0; m < 4; ++m) {

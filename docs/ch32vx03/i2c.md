@@ -426,9 +426,9 @@ makes both speeds exact - each against the other running `twi_peer` (the
 peer's PLL on its 8 MHz crystal): I2C1 to I2C1 on PB6/PB7, a 2.2 kOhm
 pull-up on each line to the CH32V203C8T6 board's 3.3 V, a shared ground
 ([../boards/weact-ch32v203c8.md](../boards/weact-ch32v203c8.md)). Every
-letter both ways, ten runs of `z` in each direction with no failure (89
-verdicts on the CH32V303VCT6's one image, 52 and 37 in the CH32V203C8T6's
-two). TIM4's channel 1 is the second instrument: PB6 is I2C1's clock line
+letter both ways, ten runs of `z` in each direction with no failure,
+and ten of letter `d` each way since its counted serve (90 verdicts on
+the CH32V303VCT6's one image, 53 and 37 in the CH32V203C8T6's two). TIM4's channel 1 is the second instrument: PB6 is I2C1's clock line
 and TIM4_CH1 on its default column at once, so SCL is measured on the pad
 that carries it, with no scope and no wire. The figures below are the
 CH32V203C8T6's where one is given, the CH32V303VCT6's beside it where
@@ -492,6 +492,17 @@ they differ.
   three and four bytes - the chapter's four receive procedures - are
   each byte-exact, and a general-call write reaches the far target at
   address 0x00.
+- **A target transmitter's tenure ends with no Stop flag.** 19.4's two
+  target sequences end differently - the transmitter's in the closing
+  NACK (figure 19-6's EVT3_2), the receiver's in STOPF (figure 19-7's
+  EVT4) - and `twi_peer`'s polled target, read eight bytes by the far
+  controller, took the NACK and then no STOPF for the Stop behind it
+  (its flush, a PE cycle, falls between the two, so whether the Stop
+  alone would raise the flag is not separated). So `twi_peer` ends a
+  counted serve on the wire at rest after its count, never on a Stop: a
+  serve armed for eight bytes and a 2000 ms deadline is back in command
+  mode 8 ms after the read, the eighth byte its own (letter d, ten runs
+  each way).
 - **The vocabulary is real statuses across two chips.** A deaf target
   answers `i2c_nack_addr`; a target commanded to refuse the third byte
   answers `i2c_nack_data`.

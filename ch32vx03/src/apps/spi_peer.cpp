@@ -69,9 +69,10 @@
 //    one bit behind both ways, the window's last frame unfinished (measured
 //    on both parts, docs/ch32vx03/spi.md). A host measures which arrived,
 //    as spi_link.hpp tells it to.
-//  - THE ANSWER LINE AT THE SLOWEST SLEW CLASS: on the desk's wires a
-//    client's MISO edge reaches its own SCK and select inputs; the class is
-//    the peer's boot choice, f/m/s on the console a diagnostic.
+//  - THE ANSWER LINE AT THE MEDIUM SLEW CLASS, the pair's pad class
+//    (test_vx03_spi's pair_pad_class, its reason beside it): the slowest
+//    class whose datasheet edge fits the half period of the host's /4. The
+//    class is the peer's boot choice, f/m/s on the console a diagnostic.
 //  - THE PROTOCOL CARRIES OPTIONS THIS SILICON HAS NOT GOT: flag_wrcol and
 //    flag_feed_tx name conditions chapter 20 does not have and are
 //    ignored; Op::mspi asks for a USART in host-SPI mode, and no USART of
@@ -849,13 +850,13 @@ int main() {
     (void)PeerTx::arm(Raw::data_address(), 0u, DmaPriority::high);
     (void)PeerRx::arm(Raw::data_address(), 0u, DmaPriority::very_high);
 
-    // THE ANSWER LINE AT THE SLOWEST SLEW CLASS, a choice that survives
-    // every init(): on the desk's wires the client's MISO edge couples into
-    // its own SCK input, and a selected client counts the glitch as an edge
-    // (the far host reads garbage and this end hears garbage). Measured on
-    // the pair: fast broke every answer window at 281 kHz, medium broke the
-    // ladder at 4.5 and 9 MHz, slow was exact to 18 MHz (docs/ch32vx03/spi.md).
-    Client::pad_speed(PinSpeed::slow);
+    // THE ANSWER LINE AT THE MEDIUM SLEW CLASS, a choice that survives
+    // every init(): the two datasheets' I/O AC tables give that class's edge
+    // as 25 ns at most into 50 pF, inside the 27.8 ns half period of the
+    // far host's /4 = 18 MHz, where the slow class's 125 ns is not; through
+    // the pair's cable every class carries every rung to /4 exact
+    // (docs/ch32vx03/spi.md, the pair's section).
+    Client::pad_speed(PinSpeed::medium);
 
     char label[9] = {};
     vx03peer::label(label);

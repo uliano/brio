@@ -67,7 +67,7 @@ suite: `test_vx03_watchdog`.
   some 200 ms after the WAKE - so a program that sleeps that deep arms
   the RTC's alarm as its way back, which is what the timed sleep site
   does. Through a Standby it counts, and its reset is the exit RM 2.3.4
-  lists: measured on the CH32V303VCT6 ([sleep.md](sleep.md)).
+  lists: measured on both parts ([sleep.md](sleep.md)).
 
 ### The window watchdog
 
@@ -267,9 +267,11 @@ run its full length on both parts and reset the board **215 ms** (the
 CH32V203C8T6) and **208 and 209 ms** (the CH32V303VCT6) after the wake - the
 counter frozen for the whole sleep. Armed after an alarm placed two
 seconds out and followed by a Standby, it ended the Standby on the
-CH32V303VCT6 **225 ms** after the alarm was placed, twice, with IWDGRSTF and
-PORRSTF standing at the boot, SBF set and WUF clear - the watchdog's
-exit and not the alarm's - and no watchdog running into the new boot.
+CH32V303VCT6 **225 ms** after the alarm was placed, twice, and on the
+CH32V203C8T6 **228 to 230 ms**, six times, with IWDGRSTF and PORRSTF
+standing at the boot, SBF set and WUF clear - the watchdog's exit and
+not the alarm's - and no watchdog running into the new boot (the
+CH32V203C8T6's DBGMCU_CR reading 0x0 at it, its freeze bits clear).
 The debug module's two watchdog freeze bits read clear there
 (DBGMCU_CR 0x0), so neither answer is the probe's.
 
@@ -306,11 +308,6 @@ Implemented but not bench-verified:
   the reset letter arms one setting. The others would cost one reset
   each to measure, and what they would add is the same arithmetic at
   another rate.
-- **The independent watchdog through a Standby on the CH32V203C8T6**:
-  measured on the CH32V303VCT6 (above); what would measure it on the
-  other part is `test_vx03_sleep`'s letter `x` on that board - whose
-  probe leaves the two watchdog freeze bits of DBGMCU_CR set, which the
-  letter prints beside its answer.
 - **`force_reset()` on either block**: both are one store away from what
   the by-name letters already prove, and neither is called by a suite -
   a program that wants a deliberate reset has `Reset::software()`

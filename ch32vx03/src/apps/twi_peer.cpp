@@ -472,13 +472,32 @@ twilink::Report run_serve(const twilink::Params& a, bool fixed_byte) {
             --tx;
         }
     };
+    // THE COUNTED EXIT: `count` bytes moved and THE WIRE AT REST after
+    // them - both lines high for forty microseconds, longer than any SCL
+    // high half a controller makes (five at 100 kHz), so a tenure in flight
+    // never passes for its end - looked for only when no flag is pending.
+    // NOT A STOP: a target transmitter's sequence ends in the closing NACK
+    // (19.4, figure 19-6's EVT3_2) where a receiver's ends in STOPF (figure
+    // 19-7's EVT4, "after the response" in 19.12.6), and a read of eight
+    // closed by NACK and Stop - the flush's PE cycle between the two -
+    // moves this loop's Stop count not at all (measured, test_vx03_i2c
+    // letter d). Nor the moment the count is
+    // reached: a transmitter is asked for its bytes ahead of the wire, and
+    // a re-init then would take the last one out of DATAR (read as 0xFF).
+    // The read that collects the command's ack ends after the action has
+    // begun (ack before act), with nothing counted yet. The rest is a rest
+    // the loop WATCHED: a look more than two microseconds after the one
+    // before it - a commanded hold, any long branch - starts the forty
+    // again, so a wire the loop did not see cannot pass for a quiet one.
+    constexpr uint32_t rest_cycles = SysClock::hz / 1'000'000u * 40u;
+    constexpr uint32_t look_gap_cycles = SysClock::hz / 1'000'000u * 2u;
+    bool resting = false;
+    uint32_t rest_t0 = 0;
+    uint32_t last_look = 0;
     const uint32_t t0 = Ticker::millis();
     for (;;) {
         if (Ticker::millis() - t0 >= a.ms) {
             r.flags |= twilink::report_timed_out;
-            break;
-        }
-        if (a.count != 0u && static_cast<uint16_t>(rx + tx) >= a.count && r.stops != 0u) {
             break;
         }
         if (Client::data_ready()) {
@@ -550,6 +569,20 @@ twilink::Report run_serve(const twilink::Params& a, bool fixed_byte) {
                 r.flags |= twilink::report_buserr;
             }
             Raw::clear_errors(errs);
+            continue;
+        }
+        if (a.count != 0u && static_cast<uint16_t>(rx + tx) >= a.count) {
+            const uint32_t now = Ticker::cycles();
+            const bool unwatched = now - last_look > look_gap_cycles;
+            last_look = now;
+            if (unwatched || !SclPin::read() || !SdaPin::read()) {
+                resting = false;
+            } else if (!resting) {
+                resting = true;
+                rest_t0 = now;
+            } else if (now - rest_t0 >= rest_cycles) {
+                break;
+            }
         }
     }
     Client::acknowledge(true);

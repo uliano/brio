@@ -83,7 +83,7 @@ third reads the array's erased pattern
   window is named in the linker script and holds nothing.
 - **The wires to the WeAct CH32V203C8T6 board**
   ([weact-ch32v203c8.md](weact-ch32v203c8.md)), the two boards being each
-  other's peers - eight signal wires and two grounds, the I2C pair's
+  other's peers - eight signal wires and their grounds, the I2C pair's
   2.2 kOhm pull-ups hanging from that board's 3.3 V:
 
   | this board | the CH32V203 | carries |
@@ -97,8 +97,15 @@ third reads the array's erased pattern
   | PB1 | PB10 | UART4's RX on its second column, from USART3's TX |
   | PB0 | PB11 | UART4's TX on its second column, into USART3's RX |
 
-  PA4 is NOT 5 V tolerant (the datasheet's pin table: an I/O/A pad, no
-  FT), and the far board's SPI2 select idles high: S1 stays on whenever
+  The four SPI wires are the pair's cable, a flat about 20 cm long: SCK
+  with 33 Ohm in series at EACH end and two grounds of its own, MOSI with
+  56 Ohm at this board's PC12, MISO with 56 Ohm at the other board's
+  PB14, the select on its own wire - every slew class exact through it,
+  the pair's pads at the medium class
+  ([weact-ch32v203c8.md](weact-ch32v203c8.md),
+  [../ch32vx03/spi.md](../ch32vx03/spi.md)). PA4 is NOT 5 V tolerant
+  (the datasheet's pin table: an I/O/A pad, no FT), and the far board's
+  SPI2 select idles high: S1 stays on whenever
   the CH32V203 board runs, so the select never back-feeds an unpowered
   chip through PA4's clamp. The I2C pull-ups are the far board's, so a
   bus with that board unpowered has none. The two serial wires carry 4.5

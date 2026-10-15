@@ -80,13 +80,18 @@ against 20 out of the tail at 96 MHz** - and at 48 MHz, 20 with SCKMOD
 at half and 12 with it whole, while the window's 5 did not move with
 either setting. SCKMOD is a knob on the tail's price and not the
 window's. The same page of the tail read at 144 MHz cost 20 core cycles
-a word too.
+a word too. The CH32V203C8's tail costs nearly twice as much in the same
+units - 36 core cycles a word at 96 MHz, 20 at 48 with SCKMOD whole -
+eighteen periods of the access clock a word against the CH32V303VC's
+ten; the window's 5 is the same on both. Neither datasheet states the
+tail's access time, so the difference is the dies' and not a number this
+driver derives.
 
 THE TAIL TAKES BOTH METHODS. 32.2.1's note - "fast programming related
 functions can only be placed in the zero-wait area FLASH", which V2.5 of
 the manual words as "FLASH erase related functions" - could be read as
 a statement about the TARGET those operations write. Measured on the
-CH32V303VC, it is not: a fast page program into the tail's last page
+CH32V303VC and the CH32V203C8, it is not: a fast page program into the tail's last page
 landed there byte for byte, a fast page erase erased it, and a 32 KB
 erase took the tail's last block whole, each ending with BSY down, EOP
 up and no error. So the note is about where the CODE running them sits,
@@ -101,9 +106,9 @@ window is not: every image here executes out of it at 144 MHz with
 SCKMOD at its reset value, which is also WCH's own configuration. So the
 tail's read, `read_tail()`, takes the clock as the write verbs do and
 refuses the same rates the same two ways. The refusal is the RATING's:
-on the CH32V303VC a page of the tail read by hand at 144 MHz came back
-exact three times over, which is what one die did outside the rating
-and not a promise about any other.
+on the CH32V303VC and the CH32V203C8 alike a page of the tail read by
+hand at 144 MHz came back exact three times over, which is what two
+dies did outside the rating and not a promise about any other.
 
 ### The split, and the signature's number
 
@@ -162,8 +167,10 @@ TAKES PASS AFTER PASS between erases - five in a row, 0xF0F0 then
 0xF000, 0x0F0F, 0xFFFF, 0x0000 and 0xA5A5, each reading back EXACTLY
 what was written, so bits come back as well as go away - and on the
 CH32V303VC a cell given 0x9659 and then 0x0F0F still read 0x0F0F after
-a system reset. A half-word cell of the TAIL does not: given the same
-two values, it read 0x0E0F, neither of them, on the CH32V303VC. And a
+a system reset. A half-word cell of the TAIL is not dependable: given
+the same two values it read 0x0F0F in nine runs of eleven on the
+CH32V303VC and a value one bit off it in two (0x1F0F; 0x0E0F in a
+twelfth), and 0x0F0F in eleven of eleven on the CH32V203C8. And a
 PAGE PROGRAMMED TWICE with no erase between reports no error and ends
 up holding neither pattern and not their bitwise AND either - the same
 0x15E60CED in its first word on both parts, from the same two
@@ -488,7 +495,8 @@ and would not care); and a 256-byte cell is a coarse grain for small
 values, one page an entry. A two-byte cell has a mechanism here and a
 question over it: a half-word cell of the WINDOW takes pass after pass
 between erases and keeps the last one across a system reset, which is
-what such a store needs - but the tail's cells do not, and what a
+what such a store needs - but a tail cell's second pass is not
+dependable (one bit off in some runs), and what a
 window cell programmed twice reads after the window is loaded again is
 not measured (the section on the erased pattern). So the page is the
 cell by the decision above, and a two-byte cell would be born with that
@@ -612,26 +620,38 @@ erase each at the end of the tail, and `r` reads what `s` left there at
   20.05 and 12.03. Every run of the tail read the same words, through
   the raw loop and through `read_tail()`; the tail's read refused a run
   across the line, one past the end and 144 MHz, and every write verb a
-  run past the array.
+  run past the array. On the CH32V203C8 (four runs) the window costs the
+  same 5.00 and THE TAIL NEARLY TWICE THE CH32V303VC'S: 36.05 core cycles
+  a word at 96 MHz and with SCKMOD at half at 48, 20.03 with it whole -
+  eighteen access-clock periods a word where the CH32V303VC takes ten;
+  the same refusals.
 - **The tail written the standard way** (letter `t`, one sector erase),
   on the CH32V303VC: the tail's last sector erased in 16848 to 16856 us
   with the FPEC lock alone, reading the erased pattern throughout, the
   tick advancing 17 ms across it; thirty-two half-words programmed - the
   first in 2077 us, the rest in 64 ms - and read back exactly through
   the tail's read, the rest of the sector still erased; and a second
-  pass, 0x0F0F over 0x9659, reporting no error and reading 0x0E0F.
+  pass, 0x0F0F over 0x9659, reporting no error and reading 0x0F0F in
+  nine runs of eleven and 0x1F0F in two. On the CH32V203C8 (eleven runs) the
+  same sector of its tail erased in 9768 to 9898 us, the tick advancing
+  9 or 10 ms across it; the first half-word in 2577 to 2606 us and the
+  other thirty-one in 80 to 81 ms; the second pass reading 0x0F0F every
+  time.
 - **The tail written the fast way** (letter `s`, one 32 KB erase and
   one page erase), on the CH32V303VC: the tail's last 32 KB erased by
   `erase_block32()` in 16852 us over a page that was not erased, every
   word of the block reading the erased pattern afterwards; a page
   programmed by `program_page()` in 1524 us and read back byte for
-  byte; the same page erased by `erase_page()` in 16848 us.
+  byte; the same page erased by `erase_page()` in 16848 us. On the
+  CH32V203C8: the block in 9762 us, the page programmed in 1525 us and
+  erased in 9769 us.
 - **The tail read at 144 MHz** (letter `r`, no wear, outside the
   rating), on the CH32V303VC: the page letter `s` leaves, read by hand
   three times with the access clock at 72 MHz, differed from its
   pattern in no byte of 768, at 20.05 core cycles a word; the driver's
   read refused the rate with its code, and back at 96 MHz the tail read
-  what it read before.
+  what it read before. On the CH32V203C8 the same: no byte of 768
+  differing, at 36.05 cycles a word.
 
 ## Not covered yet
 
@@ -683,12 +703,6 @@ Implemented but not bench-verified, each with what would measure it:
   table stating the factory's 128 + 64 and the signature expected to
   read 160, the table's largest; what would measure both is that part
   on a board.
-- **The tail of the CH32V203.** Its three numbers, both methods'
-  erases and programs there, the tail's read and its rate refusal are
-  compiled for all nine CH32V203 parts and measured on the CH32V303VC;
-  what would measure them on the other series is `test_vx03_nvm`'s
-  letters i, t, s and r on the CH32V203C8, whose 160 KB of tail no
-  program there has read yet.
 - **The chip erase.** Written, refused unless a policy is spelled out,
   and destroying the running image, so it does not belong in a suite
   that must leave the board usable. What would measure it is a board
