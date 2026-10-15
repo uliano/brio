@@ -40,14 +40,24 @@ attached is untested).
   to work with the part BEFORE re-checking pins. MounRiver ships
   `libmcuupdate.so`, so the older probe can be brought up to date
   rather than retired.
-- **An attach through the LinkE at firmware 2.10 is not free** - on a
-  CH32V303 running at 144 MHz every fresh attach of the fork rewrote
-  RCC_CFGR0 (0x00BCC40A read 0x00B4040A after it: the console's divisor
-  garbled until the program set the tree again) and set the debug
-  module's low-power word (CSR 0x7C0) to 0x307, which keeps the clocks
-  running through Sleep, Stop and Standby until something clears it -
-  measured; the CH549 kind below did neither. A suite that sleeps is
-  judged on this probe only after that word is written back to zero.
+- **An attach through a LinkE is not free** - on a CH32V303 running at
+  144 MHz every fresh attach of the fork through a LinkE at firmware
+  2.10 rewrote RCC_CFGR0 (0x00BCC40A read 0x00B4040A after it: the
+  console's divisor garbled until the program set the tree again) and
+  set the debug module's low-power word (CSR 0x7C0) to 0x307, which
+  keeps the clocks running through Sleep, Stop and Standby until
+  something clears it - measured; the CH549 kind below did neither. A
+  LinkE at firmware **2.16** rewrites RCC_CFGR0 the same way on a
+  CH32V203C8 at 144 MHz: 0x00B4040A read right after `init`, the hart
+  still running, PLLMUL's x18 become x15 - the core at 120 MHz under
+  divisors computed for 144, so the console's bytes arrive garbled both
+  ways (a 0x55 from the host read as 0xEB with the noise flag) -
+  measured twice, while the CH549 probe on the CH32V303 beside it left
+  0x00BCC40A. A `reset halt` and `resume` lets the program set its tree
+  again, which is how the flash verb ends; any other attach (a register
+  read, a halt) is ended the same way before a console is trusted. A
+  suite that sleeps is judged on a 2.10 probe only after the low-power
+  word is written back to zero (on 2.16 that word was not read).
   AND ITS SERIAL BRIDGE TRANSMITS A QUARTER FAST: asked 115200, the
   probe's TX clocks the target's receiver at 144000 (a 0x55 read back
   as 0xA9 at the target's 115200 divisor, exact at a divisor for
