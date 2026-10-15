@@ -124,8 +124,9 @@ are at the HSI's rate.
 ## Bench findings
 
 The reference suite is `test_ch32_sleep` (36 verdicts in `z` on the
-CH32V006K8U6; on the CH32V003F4P6 two images, letters `a` to `e` in
-the first, 28 verdicts there, and letter `w` in the second) at 48 MHz,
+CH32V006K8U6, and letter `l` by name; on the CH32V003F4P6 two images,
+letters `a` to `e` in the first, 28 verdicts there, and letters `w` and
+`l` in the second) at 48 MHz,
 the probe attached (so no current was drawn into a number - the meter
 with the probe detached is the desk's next step).
 
@@ -145,6 +146,27 @@ with the probe detached is the desk's next step).
   `disarm()`, kernel time advanced by 280 ticks (286 on the CH32V003) -
   the span less what the core spent awake printing and waking - and
   the event due, not early, and matured by the next `process()`.
+- **The AWU's long windows** (letter `l`, three runs, the lines time-
+  stamped by a host reading the console on its NTP-disciplined clock):
+  timed awake on the STK against a reference of /4096 x 8 counts, 32
+  counts of the /10240 code read 1001 thousandths of the ten times the
+  codes name and 64 counts of the /61440 code 1001 thousandths of the
+  120 times - neither code divides by a power of two. The host times the
+  same windows at 2.620 s and 31.43 to 31.45 s: the LSI at 125.07 kHz,
+  -2.3 per cent of nominal (the STK, on the HSI's PLL, said 125.7 kHz -
+  [clock.md](clock.md)).
+- **A STANDBY IS SHORTER THAN THE SITE ACCOUNTS IT, the probe attached**
+  (letters `l` and `d`, three runs each, host-stamped): a 20 s deadline
+  placed at the /61440 code, window 40 - 41 counts, 20.30 s at the 124.1
+  kHz the site measured awake - ended after 18.15 to 18.16 s of host
+  time; letter d's 300 ms, /1024 and window 36 - 0.303 s planned - after
+  0.251 to 0.259 s, its wake and the clock's restoring inside that. The
+  AWU counts some 11 to 15 per cent faster than the LSI's awake rate
+  across the span, so kernel time, advanced by the planned span, runs
+  ahead of the host's by as much: a time event in a Standby comes early
+  in real time though never early in kernel time. A core in debug mode
+  never sleeps (QingKe V2 manual 5.1), so what the regulator or the core
+  does to the count with the probe detached is not separated here.
 - **Sleep is a light sleep**: armed light, two `idle()` calls cover a
   tick, the tick counts through it.
 - **A disarm with no alarm fired advances by nothing**, the clock
@@ -211,9 +233,12 @@ Implemented but not bench-verified, each with what would measure it:
   the flash setting's worth, the WFE's latch consumed or spinning -
   the bench meter, the probe detached (a core in debug mode never
   sleeps, QingKe V2 manual 5.1), the energy experiment's method.
-- The AWU's long windows (the /10240 and /61440 codes, tens of
-  seconds): the suite sleeps 300 ms; a letter outside `z` would wait
-  the thirty seconds and time them against the host.
+- **The Standby's real length with the probe detached**: attached, the
+  AWU runs 11 to 15 per cent faster across a Standby than the site's
+  awake LSI (above); letters `l` and `d` host-stamped with the probe
+  unplugged - a hand on the bench - would say whether a sleeping core's
+  span does the same, and so whether the site's account is to be
+  calibrated or the debug mode's doing.
 - The handler's count in the CH32V003's Standby walk: of the 11812
   tries that called `idle()`, 11262 entered the AWU's handler, so the
   verdict "its handler runs once per wake" fails there by 550 - no try

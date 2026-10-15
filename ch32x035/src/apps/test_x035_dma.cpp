@@ -32,8 +32,10 @@
 //   c  the vectors: a block on each of channels 1..5 and 8 ended by its own
 //      handler (6 and 7 are the console's engines'), the eighth at entry 44
 //   d  a transfer error: 9.2.1 promises TEIF and an automatic EN drop for a
-//      reserved address; holes in the map are read and what the silicon
-//      does is REPORTED, the verdict only that each block ended
+//      reserved address; holes in the map are read and written, and one
+//      word written into the flash (locked, onto a word already zero, so
+//      nothing can change), and what the silicon does is REPORTED, the
+//      verdict only that each block ended
 //   e  the console's transmit engine: a burst longer than its ring printed
 //      through it, the blocks counted, no fault, timed against its wire
 //   f  the console's receive engine: a typed line (asks; not in z)
@@ -52,6 +54,10 @@
 //   m  the benchmark row: copy, fill and copy from the flash at 16, 256 and
 //      4096 bytes, and 1024 bytes paced by USART3 at 1 Mbaud - the lines of
 //      docs/design/benchmark.md's grammar
+//   n  UNEQUAL WIDTHS (RM 9.2.2, table 9-1): four items copied at every pair
+//      of source and target widths, the nine cases, each target byte against
+//      the table - a narrow source zero-filled into a wide target, a wide one
+//      truncated to its low bytes
 //
 // build: boards = x035f8
 // build: monitor_speed = 115200
@@ -332,31 +338,104 @@ void tc_vectors() {
 // ---------------------------------------------------------------------------
 // d - a transfer error
 // ---------------------------------------------------------------------------
+/// A word of the image's own read-only data that reads ZERO: the target of
+/// the flash write. The flash is locked (FLASH_CTLR.LOCK from reset, and
+/// nothing in this image unlocks it), and a programmed bit can only go from
+/// one to zero, so a write of zero onto it changes nothing whatever the
+/// controller does with it.
+[[gnu::used]] const uint32_t flash_zero_word = 0;
+
+/// One block of `count` items, memory to memory, between `src` and `dst`
+/// at `width`, on channel 1: how it ended.
+struct Probe {
+    bool ended;
+    uint32_t flags;
+    bool enabled;
+    uint16_t left;
+};
+Probe probe_block(volatile void* src, volatile void* dst, DmaWidth width, uint16_t count = 4) {
+    Copier::stop();
+    const bool loaded = Copier::load(DmaTransfer{
+        .peripheral = src, .memory = dst, .count = count,
+        .config = {.memory_to_memory = true, .peripheral_increment = true, .memory_increment = true,
+                   .peripheral_width = width, .memory_width = width}});
+    const bool ended = loaded && wait_flag(DmaFlag::complete | DmaFlag::error, 200'000u);
+    return {ended, Copier::flags(), Copier::enabled(), static_cast<uint16_t>(Copier::count())};
+}
+
 void td_error() {
     // Holes in the map (RM 1.2's figure): between and past the buses, and
     // high above the memories. What the controller does with a read from
-    // each is the finding.
+    // each, and with a write into each, is the finding.
     constexpr uint32_t holes[] = {0x30000000u, 0x40030000u, 0x50000000u, 0x60000000u, 0xA0000000u};
     uint8_t errors = 0, completions = 0, hung = 0;
-    for (const uint32_t hole : holes) {
-        Copier::stop();
-        memset(dst8, 0x55, 4);
-        const bool loaded = Copier::load(DmaTransfer{
-            .peripheral = reinterpret_cast<volatile void*>(hole), .memory = dst8, .count = 4,
-            .config = {.memory_to_memory = true, .peripheral_increment = true}});
-        const bool ended = loaded && wait_flag(DmaFlag::complete | DmaFlag::error, 200'000u);
-        const uint32_t f = Copier::flags();
-        print(serial, "  read from ", hex(hole), ": flags=", hex(f), " EN=", Copier::enabled(),
-              " CNTR=", Copier::count(), " data=", hex(dst8[0]), crlf);
-        if (!ended) { ++hung; }
-        else if ((f & DmaFlag::error) != 0u) { ++errors; }
+    const auto tally = [&](const Probe& p) {
+        if (!p.ended) { ++hung; }
+        else if ((p.flags & DmaFlag::error) != 0u) { ++errors; }
         else { ++completions; }
+    };
+    for (const uint32_t hole : holes) {
+        memset(dst8, 0x55, 4);
+        const Probe p = probe_block(reinterpret_cast<volatile void*>(hole), dst8, DmaWidth::byte);
+        print(serial, "  read from ", hex(hole), ": flags=", hex(p.flags), " EN=", p.enabled,
+              " CNTR=", p.left, " data=", hex(dst8[0]), crlf);
+        tally(p);
     }
+    for (const uint32_t hole : holes) {
+        memset(src8, 0x55, 4);
+        const Probe p = probe_block(src8, reinterpret_cast<volatile void*>(hole), DmaWidth::byte);
+        print(serial, "  write into ", hex(hole), ": flags=", hex(p.flags), " EN=", p.enabled,
+              " CNTR=", p.left, crlf);
+        tally(p);
+    }
+    // The flash, a legal destination by 9.2.1's list: ONE word of zero
+    // (from the SRAM) written onto the image's own zero word, the flash
+    // locked - a block of one item, so no other word of the image is
+    // offered to it.
+    static uint32_t zero = 0;
+    const Probe f = probe_block(&zero, const_cast<uint32_t*>(&flash_zero_word), DmaWidth::word, 1);
+    const uint32_t word_after = *static_cast<const volatile uint32_t*>(&flash_zero_word);
+    print(serial, "  write into the flash at ", hex(reinterpret_cast<uintptr_t>(&flash_zero_word)),
+          " (locked: FLASH_CTLR=", hex(flash_ctl()->CTLR), "): flags=", hex(f.flags), " EN=", f.enabled,
+          " CNTR=", f.left, crlf);
+    // And with the program/erase controller's lock OPEN and no operation
+    // armed (no program or erase bit): the same word written through the
+    // array's own address and through its 0x0800 0000 alias, which is the
+    // one the chapter's programming sequence writes; STATR read after each
+    // for the controller's own refusal (WRPRTERR). Locked again at once.
+    const uint32_t word_addr = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&flash_zero_word));
+    const uint32_t alias_addr = 0x08000000u + (word_addr & 0x00FFFFFFu);
+    if ((flash_ctl()->CTLR & flash_lock) != 0u) {
+        flash_ctl()->KEYR = 0x45670123u;   // KEY1, KEY2 (the FPEC keys, RM 20.3.2)
+        flash_ctl()->KEYR = 0xCDEF89ABu;
+    }
+    const bool opened = (flash_ctl()->CTLR & flash_lock) == 0u;
+    flash_ctl()->STATR = flash_wrprterr | flash_eop;   // write-1-clear
+    const Probe fu = probe_block(&zero, reinterpret_cast<volatile void*>(word_addr), DmaWidth::word, 1);
+    const uint32_t st_u = flash_ctl()->STATR;
+    const Probe fa = probe_block(&zero, reinterpret_cast<volatile void*>(alias_addr), DmaWidth::word, 1);
+    const uint32_t st_a = flash_ctl()->STATR;
+    flash_ctl()->CTLR = flash_ctl()->CTLR | flash_lock;   // RW1: a one sets it
+    const bool relocked = (flash_ctl()->CTLR & flash_lock) != 0u;
+    const uint32_t word_end = *static_cast<const volatile uint32_t*>(&flash_zero_word);
+    print(serial, "  the lock open (", opened ? "opened" : "NOT OPENED", "), no operation armed: at ", hex(word_addr),
+          " flags=", hex(fu.flags), " EN=", fu.enabled, " STATR=", hex(st_u), "; at the alias ", hex(alias_addr),
+          " flags=", hex(fa.flags), " EN=", fa.enabled, " STATR=", hex(st_a), "; locked again ", relocked, crlf);
     Copier::stop();
-    print(serial, "  ", errors, " error(s), ", completions, " completion(s), ", hung, " hung, over 5 holes", crlf);
-    bench.verdict("every block from a hole ENDED (no channel left hanging)", hung == 0u);
+    print(serial, "  ", errors, " error(s), ", completions, " completion(s), ", hung,
+          " hung, over 5 holes read and written", crlf);
+    bench.verdict("every block from or into a hole ENDED (no channel left hanging)", hung == 0u);
     bench.verdict("each ended one of the two ways the chapter allows (an error, or a completion)",
-                  errors + completions == 5u);
+                  errors + completions == 10u);
+    if ((f.flags & DmaFlag::error) != 0u) {
+        print(serial, "  -> A WRITE INTO THE LOCKED FLASH RAISES TEIF: EN ", f.enabled ? "STILL SET" : "cleared",
+              ", ", f.left, " item(s) left", crlf);
+    }
+    bench.verdict("the write into the locked flash ENDED one of the two ways, and the word is still zero",
+                  f.ended && word_after == 0u);
+    bench.verdict("and with the lock open, through the array and its alias: each ENDED, the word still zero, "
+                  "the lock closed again",
+                  opened && fu.ended && fa.ended && word_end == 0u && relocked);
 }
 
 // ---------------------------------------------------------------------------
@@ -1006,6 +1085,69 @@ extern "C" BRIO_CH32_INTERRUPT void dma1_channel8_handler() {
     if (brio::DmaChannel<8>::isr() != 0u) { vector_hits[8] = vector_hits[8] + 1u; }
 }
 
+namespace {
+
+// ---------------------------------------------------------------------------
+// n - unequal widths (table 9-1)
+// ---------------------------------------------------------------------------
+/// The width in bytes.
+constexpr uint8_t bytes_of(DmaWidth w) {
+    return w == DmaWidth::byte ? 1u : w == DmaWidth::half ? 2u : 4u;
+}
+
+void tn_widths() {
+    // The source bytes as the table names them, B0 at the lowest address;
+    // the target painted with a value no case writes, four guard bytes
+    // past the widest target (4 items x 4 bytes).
+    alignas(4) static uint8_t src[16];
+    alignas(4) static uint8_t dst[20];
+    for (uint8_t i = 0; i < 16u; ++i) {
+        src[i] = static_cast<uint8_t>(0xB0u + i);
+    }
+    constexpr DmaWidth widths[] = {DmaWidth::byte, DmaWidth::half, DmaWidth::word};
+    uint8_t exact = 0;
+    for (const DmaWidth sw : widths) {
+        for (const DmaWidth tw : widths) {
+            memset(dst, 0xEE, sizeof dst);
+            Copier::stop();
+            const bool loaded = Copier::load(DmaTransfer{
+                .peripheral = src, .memory = dst, .count = 4,
+                .config = {.memory_to_memory = true, .peripheral_increment = true, .memory_increment = true,
+                           .peripheral_width = sw, .memory_width = tw}});
+            const bool ended = loaded && wait_flag(DmaFlag::complete | DmaFlag::error);
+            // Table 9-1: item i is read at i x the source's width and
+            // written at i x the target's, little-endian; a narrower source
+            // is zero-filled above, a wider one keeps its low bytes.
+            const uint8_t sb = bytes_of(sw);
+            const uint8_t tb = bytes_of(tw);
+            bool ok = ended && (Copier::flags() & DmaFlag::error) == 0u;
+            for (uint8_t item = 0; item < 4u; ++item) {
+                for (uint8_t k = 0; k < tb; ++k) {
+                    const uint8_t want = k < sb ? src[item * sb + k] : 0u;
+                    ok = ok && dst[item * tb + k] == want;
+                }
+            }
+            for (uint8_t k = static_cast<uint8_t>(4u * tb); k < sizeof dst; ++k) {
+                ok = ok && dst[k] == 0xEEu;   // nothing past the fourth item
+            }
+            print(serial, "  ", 8u * sb, " -> ", 8u * tb, ":");
+            for (uint8_t k = 0; k < 4u * tb; ++k) {
+                print(serial, " ", hex(dst[k]));
+            }
+            print(serial, ok ? "  as the table" : "  NOT AS THE TABLE", crlf);
+            if (ok) {
+                ++exact;
+            }
+        }
+    }
+    Copier::stop();
+    bench.verdict("the nine pairs of source and target widths land as table 9-1 spells them: a narrow "
+                  "source zero-filled, a wide one truncated to its low bytes, nothing past the fourth item",
+                  exact == 9u);
+}
+
+} // namespace
+
 int main() {
     dma_gate_at_boot = brio::rcc()->AHBPCENR;
     const bool clock_ok = SysClock::init();
@@ -1026,6 +1168,7 @@ int main() {
     bench.letter('j', "the arbiter: levels and the channel number", tj_arbiter);
     bench.letter('k', "the core's Sleep over a working channel", tk_sleep);
     bench.letter('m', "the benchmark row: copy, fill, paced", tm_bench);
+    bench.letter('n', "unequal widths: the nine pairs of table 9-1", tn_widths);
 
     if (serial_ok) {
         brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "HSI48" : "FAILED", " tick=",

@@ -25,11 +25,22 @@
 //      500-us waits still ten ticks, the wait states following the rate
 //   e  the system clock monitor and the MCO
 //   f  the peripheral gates: a clock opened, seen, reset, closed
+//   h  THE CRYSTAL AS SYSCLK ITSELF, in its own image (on the CH32V006K8
+//      the second group image, booted on the HSE at 24 MHz with no PLL):
+//      the tree as the boot left it - SWS the HSE, the PLL never on, the
+//      wait states for 24 MHz - and the console alive at 115200 on it;
+//      an image booted on the PLL says so and claims nothing
+//   k  (by name) a bracket of 30 000 ticks between two console lines, for
+//      a host that time-stamps them: the root's rate against the host's
+//      clock
 //
 // build: boards = v006k8,v003f4
+// build: groups.v006k8 = abcgdefk,hk
 // build: monitor_speed = 115200
 
 #include <stdint.h>
+
+#include <type_traits>
 
 #include "ch32v00x/clock.hpp"
 #include "ch32v00x/delay.hpp"
@@ -55,8 +66,14 @@ constexpr Serial serial;
 // crystal both bench boards carry on PA1/PA2 (docs/boards/), so every
 // letter runs on the HSE through the PLL and the console alive at
 // 115200 is the crystal clock's first proof; the other apps of the
-// project stay on the HSI, which every board has.
-using Boot = Clock<ClockSource::pll, 48'000'000, 24'000'000>;
+// project stay on the HSI, which every board has. AN IMAGE THAT CARRIES
+// LETTER h AND NOT a boots on the crystal ITSELF, 24 MHz with no PLL -
+// the root letter h is about; every other image on the PLL.
+constexpr bool hse_image = brio::test_letters != nullptr && brio::selection_carries(brio::test_letters, 'h') &&
+                           !brio::selection_carries(brio::test_letters, 'a');
+using PllBoot = Clock<ClockSource::pll, 48'000'000, 24'000'000>;
+using HseBoot = Clock<ClockSource::crystal, 24'000'000, 24'000'000>;
+using Boot = std::conditional_t<hse_image, HseBoot, PllBoot>;
 using SysClock = DynamicClock<Boot, Ticker, Serial>;
 constexpr SysClock clock;
 
@@ -247,8 +264,50 @@ void tg_hse() {
                   Rcc::pll_from_hse() && !Afio::pa1_pa2_are_gpio());
 }
 
+// ---------------------------------------------------------------------------
+// h - the crystal as SYSCLK itself
+// ---------------------------------------------------------------------------
+void th_hse_sysclk() {
+    if constexpr (!hse_image) {
+        print(serial, "  SKIPPED, no verdict claimed: this image boots on the PLL; the crystal as SYSCLK is the "
+                      "image that carries letter h without a", crlf);
+    } else {
+        print(serial, "  CTLR=", hex(rcc()->CTLR), " CFGR0=", hex(rcc()->CFGR0), " ACTLR=", hex(flash_ctl()->ACTLR),
+              crlf);
+        bench.verdict("SYSCLK is the HSE itself (SWS), HPRE 1: HCLK is the crystal's 24 MHz",
+                      Rcc::sysclk_source() == rcc_sws_hse && Rcc::hpre_code() == 0u);
+        bench.verdict("the HSE is on and ready, its pads the oscillator's, no bypass",
+                      Rcc::hse_on() && Rcc::hse_ready() && !Rcc::hse_bypass() && !Afio::pa1_pa2_are_gpio());
+        bench.verdict("the PLL was never turned on", !Rcc::pll_on());
+        bench.verdict("the wait states stand for 24 MHz", (flash_ctl()->ACTLR & 0x3u) == flash_latency_for(24'000'000));
+        bench.verdict("SYSCLK has not failed", !Rcc::clock_failed());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// k - a bracket of ticks for the host
+// ---------------------------------------------------------------------------
+/// 30 000 ticks - 30 s on the tick the root clocks - between two console
+/// lines: a host that time-stamps the lines as they arrive has the root's
+/// rate against its own clock (NTP-disciplined), to the arrival jitter of
+/// the probe's bridge over 30 s.
+void tk_bracket() {
+    constexpr uint32_t span = 30'000;
+    print(serial, "  bracket ", span, " ticks at ", Boot::hz / 1'000'000u, " MHz: the host's time between this "
+                  "line and the next", crlf);
+    console_drain();
+    const uint32_t t0 = Ticker::ticks();
+    while (Ticker::ticks() - t0 < span) {
+    }
+    print(serial, "  bracket done", crlf);
+    console_drain();
+    bench.verdict("the bracket ran to its count", Ticker::ticks() - t0 >= span);
+}
+
 void banner() {
-    print(serial, crlf, "test_ch32_clock - ", device::part_name, " (PLL 48 MHz root from the 24 MHz crystal, DynamicClock over HPRE)",
+    print(serial, crlf, "test_ch32_clock - ", device::part_name,
+          hse_image ? " (the 24 MHz crystal as SYSCLK, no PLL, DynamicClock over HPRE)"
+                    : " (PLL 48 MHz root from the 24 MHz crystal, DynamicClock over HPRE)",
           crlf);
     bench.menu();
 }
@@ -271,9 +330,11 @@ int main() {
     bench.letter('d', "the DynamicClock ladder", td_ladder);
     bench.letter('e', "the system clock monitor and the MCO", te_monitor);
     bench.letter('f', "the peripheral gates", tf_gates);
+    bench.letter('h', "the crystal as SYSCLK itself, no PLL (its own image)", th_hse_sysclk);
+    bench.letter('k', "a bracket of 30 000 ticks for a host to time (by name)", tk_bracket, false);
 
     if (serial_ok) {
-        brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "PLL48" : "FAILED",
+        brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? (hse_image ? "HSE24" : "PLL48") : "FAILED",
                     " tick=", tick_ok ? "STK" : "FAILED", brio::crlf);
         banner();
         bench.prompt();

@@ -74,12 +74,16 @@
 //      ResetReporter (the breadcrumb read back), and a deliberate fault
 //      through ebreak with no debugger attached (the fault vector's
 //      own record, kernel_fault).
+//   u  THE CONSOLE'S USART HANDLER'S ROUND TRIP, the larger case of
+//      letter e: its vector - the transport's isr() between two stamps -
+//      raised by hand with nothing for it to do; the same letter on both
+//      builds is what the hardware prologue buys a handler a program keeps
 //   t  the runtime's seven functions (rt/rt.cpp) over every alignment,
 //      length and overlap: rt/selftest.hpp's cases, the host suite's own,
 //      against the symbols this image links - in `z`
 //
 // build: boards = v006k8,v003f4
-// build: groups = abcdeiw,kt
+// build: groups = abcdeiw,ktu
 // (on the CH32V003 the suite is two images, test_ch32_platform-1 and -2:
 // whole it is over the part's 15 KB; `i` runs as
 // `--app test_ch32_platform-1` there)
@@ -541,67 +545,115 @@ volatile uint32_t sw_entry_cycles = 0;
 volatile uint32_t sw_exit_cycles = 0;
 volatile uint32_t sw_hits = 0;
 
-void te_latency() {
+/// The console's USART vector, stamped when letter u asks (its first and
+/// last statements around the transport's isr()).
+volatile bool u1_stamping = false;
+volatile uint32_t u1_entry_cycles = 0;
+volatile uint32_t u1_exit_cycles = 0;
+volatile uint32_t u1_hits = 0;
+
+void print_build() {
 #if defined(BRIO_CH32_HPE) && BRIO_CH32_HPE
     print(serial, "  built with the hardware prologue/epilogue (CH32V00X_HPE=ON)", crlf);
 #else
     print(serial, "  built with gcc's own prologue/epilogue (CH32V00X_HPE=OFF)", crlf);
 #endif
-    Pfic::enable(Irq::software);
+}
 
-    uint32_t best_entry = 0xFFFF'FFFFu, best_body = 0xFFFF'FFFFu;
-    uint32_t best_exit = 0xFFFF'FFFFu, best_trip = 0xFFFF'FFFFu;
-    uint32_t worst_entry = 0, worst_trip = 0;
-    const uint32_t rounds = 64;
+/// One interrupt line's round trip, 64 rounds: the line pended by hand
+/// through the PFIC with the cycle count read at the raise, its handler
+/// stamping its first and last statements, and the count read when the
+/// raiser sees the handler done. Each round starts on a fresh tick, so a
+/// whole millisecond of quiet holds it.
+struct Trip {
     uint32_t seen = 0;
-    for (uint32_t r = 0; r < rounds; ++r) {
+    uint32_t best_entry = 0xFFFF'FFFFu, worst_entry = 0;
+    uint32_t best_body = 0xFFFF'FFFFu;
+    uint32_t best_exit = 0xFFFF'FFFFu;
+    uint32_t best_trip = 0xFFFF'FFFFu, worst_trip = 0;
+};
+constexpr uint32_t trip_rounds = 64;
+
+Trip round_trip(Irq line, const volatile uint32_t& hits, volatile uint32_t& entry_at,
+                volatile uint32_t& exit_at) {
+    Trip t{};
+    Pfic::enable(line);
+    for (uint32_t r = 0; r < trip_rounds; ++r) {
         console_drain();
-        const uint32_t before = sw_hits;
-        sw_entry_cycles = 0;
-        sw_exit_cycles = 0;
-        // A tick landing inside the window would add its own handler to
-        // the measurement: wait for a fresh tick, then there is a whole
-        // millisecond of quiet.
-        const uint32_t t = Ticker::ticks();
-        while (Ticker::ticks() == t) {
+        const uint32_t before = hits;
+        entry_at = 0;
+        exit_at = 0;
+        const uint32_t tick = Ticker::ticks();
+        while (Ticker::ticks() == tick) {
         }
         const uint32_t c0 = cycles_now();
-        Pfic::set_pending(Irq::software);
-        // The pending write is posted and the core runs on until the
-        // line is taken: the raiser has to WAIT for the handler, and the
-        // reading after the wait carries one spin iteration of its own.
-        while (sw_hits == before) {
+        Pfic::set_pending(line);
+        // The pending write is posted and the core runs on until the line
+        // is taken: the raiser WAITS for the handler - bounded by a
+        // thousand turns, far beyond the few hundred cycles a trip is -
+        // and the reading after the wait carries one spin iteration.
+        for (uint32_t k = 0; k < 1000u && hits == before; ++k) {
         }
         const uint32_t c1 = cycles_now();
-        ++seen;
-        const uint32_t entry = cycles_between(c0, sw_entry_cycles);
-        const uint32_t body = cycles_between(sw_entry_cycles, sw_exit_cycles);
-        const uint32_t exit = cycles_between(sw_exit_cycles, c1);
+        if (hits == before) {
+            continue;
+        }
+        ++t.seen;
+        const uint32_t entry = cycles_between(c0, entry_at);
+        const uint32_t body = cycles_between(entry_at, exit_at);
+        const uint32_t exit = cycles_between(exit_at, c1);
         const uint32_t trip = cycles_between(c0, c1);
-        if (entry < best_entry) { best_entry = entry; }
-        if (entry > worst_entry) { worst_entry = entry; }
-        if (body < best_body) { best_body = body; }
-        if (exit < best_exit) { best_exit = exit; }
-        if (trip < best_trip) { best_trip = trip; }
-        if (trip > worst_trip) { worst_trip = trip; }
+        if (entry < t.best_entry) { t.best_entry = entry; }
+        if (entry > t.worst_entry) { t.worst_entry = entry; }
+        if (body < t.best_body) { t.best_body = body; }
+        if (exit < t.best_exit) { t.best_exit = exit; }
+        if (trip < t.best_trip) { t.best_trip = trip; }
+        if (trip > t.worst_trip) { t.worst_trip = trip; }
     }
-    Pfic::disable(Irq::software);
+    return t;
+}
 
-    print(serial, "  ", seen, " of ", rounds, " raises were taken", crlf);
-    print(serial, "  entry (raise -> the handler's first statement): ",
-          best_entry, "..", worst_entry, " cycles", crlf);
-    print(serial, "  body  (first -> last statement of the handler): ",
-          best_body, " cycles", crlf);
-    print(serial, "  exit  (last statement -> the raiser sees it done): ",
-          best_exit, " cycles, one spin iteration included", crlf);
-    print(serial, "  whole trip (raise -> the raiser sees it done): ",
-          best_trip, "..", worst_trip, " cycles", crlf);
-    bench.verdict("every raise of the software interrupt was taken",
-                  seen == rounds);
-    bench.verdict("the handler was entered within 100 cycles of the raise",
-                  best_entry <= 100u);
-    bench.verdict("and the whole trip is under 300 cycles",
-                  best_trip < 300u);
+void print_trip(const Trip& t) {
+    print(serial, "  ", t.seen, " of ", trip_rounds, " raises were taken", crlf);
+    print(serial, "  entry (raise -> the handler's first statement): ", t.best_entry, "..", t.worst_entry,
+          " cycles", crlf);
+    print(serial, "  body  (first -> last statement of the handler): ", t.best_body, " cycles", crlf);
+    print(serial, "  exit  (last statement -> the raiser sees it done): ", t.best_exit,
+          " cycles, one spin iteration included", crlf);
+    print(serial, "  whole trip (raise -> the raiser sees it done): ", t.best_trip, "..", t.worst_trip, " cycles",
+          crlf);
+}
+
+void te_latency() {
+    print_build();
+    const Trip t = round_trip(Irq::software, sw_hits, sw_entry_cycles, sw_exit_cycles);
+    Pfic::disable(Irq::software);
+    print_trip(t);
+    bench.verdict("every raise of the software interrupt was taken", t.seen == trip_rounds);
+    bench.verdict("the handler was entered within 100 cycles of the raise", t.best_entry <= 100u);
+    bench.verdict("and the whole trip is under 300 cycles", t.best_trip < 300u);
+}
+
+// ---------------------------------------------------------------------------
+// u - the console's USART handler, a round trip
+// ---------------------------------------------------------------------------
+/// The handler a program keeps: the console's vector around the transport's
+/// isr(), its register use the transport's, raised by hand with nothing for
+/// it to do - the ring empty, TXEIE down, no byte in - so the trip is the
+/// entry, the isr()'s status read and decisions, and the exit. The same
+/// letter in an image built with CH32V00X_HPE=OFF is the other half.
+void tu_usart_trip() {
+    print_build();
+    u1_stamping = true;
+    const Trip t = round_trip(Irq::usart1, u1_hits, u1_entry_cycles, u1_exit_cycles);
+    u1_stamping = false;   // the line stays enabled: it is the console's
+    print_trip(t);
+    bench.verdict("every raise of the console's USART line was taken, and the console's own work went on",
+                  t.seen == trip_rounds);
+    // The bound: the minimal handler's trip is under 100 cycles (letter e);
+    // the transport's isr() over an idle port is a status load and a few
+    // compares - a few tens more. 300 is the letter e bound.
+    bench.verdict("its whole trip is under 300 cycles", t.best_trip < 300u);
 }
 
 // ---------------------------------------------------------------------------
@@ -698,7 +750,16 @@ extern "C" BRIO_CH32_INTERRUPT void systick_handler() {
     }
 }
 
-extern "C" BRIO_CH32_INTERRUPT void usart1_handler() { (void)Serial::isr(); }
+/// The console's vector; letter u stamps its first and last statements.
+extern "C" BRIO_CH32_INTERRUPT void usart1_handler() {
+    const uint32_t in = brio::stk()->CNT;
+    (void)Serial::isr();
+    if (u1_stamping) {
+        u1_entry_cycles = in;
+        u1_exit_cycles = brio::stk()->CNT;
+        u1_hits = u1_hits + 1u;
+    }
+}
 
 /// Letter w's rescue and clock: TIM2's update, counted.
 extern "C" BRIO_CH32_INTERRUPT void tim2_handler() {
@@ -759,6 +820,7 @@ int main() {
     bench.letter('k', "the kernel's turn: how many per interrupt, what one costs", tk_turns);
     bench.letter('i', "THREE REAL RESETS (reboots the board)", ti_resets, false);
     bench.letter('t', "the runtime's seven functions at every alignment (rt/rt.cpp)", tt_runtime);
+    bench.letter('u', "the console's USART handler: its round trip, in cycles", tu_usart_trip);
 
     if (serial_ok && token.magic == token_magic && token.leg != 0) {
         ti_resume();

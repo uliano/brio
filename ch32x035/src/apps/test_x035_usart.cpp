@@ -69,8 +69,9 @@
 //   n  (y) the peer's engine shapes: a bit-banged frame, one stretched
 //      cell, a LIN break ahead of a frame
 //   o  (y) the modes on a wire: mute woken by an address mark and by an
-//      idle line, IrDA between two WCH SIR codecs, LIN's break detection
-//      at both lengths
+//      idle line, IrDA between two WCH SIR codecs in normal mode and in
+//      low-power mode at one prescaler, LIN's break detection at both
+//      lengths
 //   p  (y) half duplex on PB0 hearing a frame the peer drives onto that
 //      wire from its RX pad (drive_rxd)
 //   q  (y) the error flags' clear under a receive channel: a parity error
@@ -85,6 +86,14 @@
 //      suite's port with its restart in SRAM, gapless at every rate, and
 //      its flash twin, gapless to 1.5 Mbaud and idle above it for no more
 //      than the restart outlasts the frame the shifter holds
+//   t  (y) THE RECEIVE VECTOR'S GUARDS on the engined port: a block armed
+//      above the ring (channel 5 at very_high) under the far chip's burst -
+//      with the vector held off, the overrun with nothing to take cleared on
+//      the probe's entry; with it running and the ring starved 8.2 ms, the
+//      stall bound giving a live channel up once - and the next burst whole
+//   u  (y) THE IDLE LINE UNDER THE CHANNEL'S CLEAR, frame by frame: groups of
+//      one and of two frames into a one-shot channel 8, STATR read once
+//      after each - does one frame after an idle that was read raise IDLE?
 //
 // THE SUPPLY at boot: the voltage detector at 3.0 V (pwr.hpp); an image
 // that drives a link pad from a sagging rail refuses every letter and
@@ -535,7 +544,10 @@ bool dut_link(const link::Cfg& c) {
     if (!u4_open(f, c.rate)) {
         return false;
     }
-    if (c.mode == link::Mode::ircom && !U4::irda(IrdaConfig{})) {
+    // IrDA: normal mode, or with `txpl` named the low-power mode at that
+    // prescaler - the peer's own reading of the field (usart_peer).
+    if (c.mode == link::Mode::ircom &&
+        !U4::irda(c.txpl != 0u ? IrdaConfig{true, c.txpl} : IrdaConfig{})) {
         return false;
     }
     // TE's idle frame first: a pad handed to the function the moment TE
@@ -754,6 +766,7 @@ struct Calib {
     int16_t ppm = 0;
     uint32_t span = 0;
     uint32_t blocks = 0;   ///< the transmit engine's blocks (engined_calibrate)
+    uint32_t u4 = 0;       ///< USART4's own vector entries during the blast (engined_calibrate)
 };
 
 Calib calibrate(const link::Cfg& c, uint16_t n) {
@@ -1128,6 +1141,7 @@ Calib engined_calibrate(const link::Cfg& c, uint16_t n) {
     dma_entries = 0;
     dma_body_sum = 0;
     dma_body_max = 0;
+    const uint32_t u4_before = u4_entries;
     const uint32_t t0 = Ticker::ticks();
     while (up && queued < n && Ticker::ticks() - t0 < 200u) {
         const uint32_t want = n - queued < 64u ? n - queued : 64u;
@@ -1137,6 +1151,7 @@ Calib engined_calibrate(const link::Cfg& c, uint16_t n) {
     }
     const uint16_t faults = E::dma_faults();
     k.blocks = dma_entries;
+    k.u4 = u4_entries - u4_before;
     E::release();
     u4_owner = U4Owner::irq;
     link::Report r{};
@@ -1775,6 +1790,40 @@ void to_modes() {
         U4::irda_off();
         (void)link_command_mode();
     }
+    // 3b. IrDA's LOW-POWER mode, both codecs at the same prescaled clock:
+    //     PSC 26 makes 48 MHz into 1.846 MHz, the SIR low-power clock's usual
+    //     1.8432 MHz within 0.2 per cent, its pulse three of those periods
+    //     (1.63 us) at any rate - echoed at 9600 and at 115200, where a bit
+    //     is 104 and 8.7 us.
+    {
+        constexpr uint8_t lp_psc = 26;
+        uint16_t bad_all = 0;
+        bool all = true;
+        for (const uint32_t rate : {9600u, 115'200u}) {
+            link::Cfg c{};
+            c.rate = rate;
+            c.mode = link::Mode::ircom;
+            c.txpl = lp_psc;
+            link::Params a{};
+            a.cfg = c;
+            a.count = 8;
+            a.ms = bound_ms(rate, 24);
+            const bool acted = peer_act(link::Op::echo, a);
+            const bool up = acted && dut_link(c);
+            const bool lp_on = up && (U4::regs().CTLR3 & usart_irlp) != 0u && U4::prescaler() == lp_psc;
+            const uint16_t bad = up ? echo_mismatches(8, 0xFFu) : 8u;
+            link::Report r{};
+            const bool have = peer_report(r, 5);
+            print(serial, "  IrDA LOW POWER (PSC ", lp_psc, ") at ", rate, ": IRLP ", lp_on, ", wrong=", bad,
+                  " peer count=", r.count, " ferr=", r.ferr, crlf);
+            bad_all = static_cast<uint16_t>(bad_all + bad);
+            all = all && up && lp_on && bad == 0u && have && r.count == 8u;
+            U4::irda_off();
+            (void)link_command_mode();
+        }
+        judge("IrDA's LOW-POWER mode, both codecs at PSC 26: SIR frames echoed at 9600 and 115200, every one equal",
+              all && bad_all == 0u);
+    }
     // 4. LIN's break detection at both lengths.
     {
         struct BreakCase {
@@ -1980,6 +2029,275 @@ void tr_priority_load() {
 }
 
 // ---------------------------------------------------------------------------
+// t - the receive vector's guards
+// ---------------------------------------------------------------------------
+//
+// The engined port's two guards in its receive vector (ch32x035/usart.hpp):
+// THE OVERRUN WITH NOTHING TO TAKE (rx_overrun_probe) and THE STALL BOUND
+// (rx_stall_entries), each staged by a block ARMED ABOVE THE RING - channel 5,
+// a lower number than the ring's 8, at the ring's own very_high: the tie it
+// wins (9.2.1; test_x035_dma letter j) - copying one word cell onto another,
+// six HCLK cycles an item, while the far chip's burst of eight frames at
+// 115200 (86.8 us a frame, 4170 cycles) lands. The block starts once the
+// ring holds four frames.
+
+volatile uint32_t starve_src = 0x5A5A5A5Au;
+volatile uint32_t starve_dst = 0;
+using Starve = DmaChannel<5>;
+
+void starve_start(uint16_t items) {
+    Starve::stop();
+    (void)Starve::prepare(DmaTransfer{.peripheral = &starve_src, .memory = &starve_dst, .count = items,
+                                      .config = {.memory_to_memory = true, .memory_increment = false,
+                                                 .peripheral_width = DmaWidth::word,
+                                                 .memory_width = DmaWidth::word,
+                                                 .priority = DmaPriority::very_high}});
+    Starve::enable(true);
+}
+bool starve_done() { return (Starve::flags() & (DmaFlag::complete | DmaFlag::error)) != 0u; }
+
+/// A burst of eight from the far chip, `value` counting up, into the engined
+/// ring; answers whether it acted and came up.
+bool guard_burst(uint8_t value) {
+    link::Cfg c{};
+    c.rate = 115200;
+    link::Params a{};
+    a.cfg = c;
+    a.count = 8;
+    a.ms = bound_ms(115200, 16);
+    a.value = value;
+    a.pattern = link::pattern_counting;
+    const bool acted = peer_act(link::Op::blast, a);
+    u4_owner = U4Owner::engined;
+    const bool up = acted && Engined::init(clock, 115200);
+    (void)Rx4::input(PinPull::up);
+    Engined::clear_errors();
+    u4_entries = 0;
+    return up;
+}
+
+/// The ring's frames so far: its storage less CNTR.
+uint16_t ring_frames() { return static_cast<uint16_t>(512u - DmaChannel<8>::count()); }
+
+/// Everything the ring holds, judged against `value` counting up for the
+/// first `judged` bytes.
+uint16_t drain_ring(uint8_t value, uint16_t judged, bool& in_order) {
+    uint16_t got = 0;
+    in_order = true;
+    uint8_t b = 0;
+    while (Engined::read_byte(b)) {
+        if (got < judged && b != static_cast<uint8_t>(value + got)) {
+            in_order = false;
+        }
+        ++got;
+    }
+    return got;
+}
+
+struct GuardCase {
+    bool up = false;
+    bool staged = false;     ///< the ring held four frames when the block started
+    uint16_t got = 0;
+    bool in_order = false;
+    uint32_t entries = 0;
+    uint16_t hw = 0;
+    uint32_t skips = 0;
+    uint16_t faults = 0;
+    bool waiting_end = false;
+    uint16_t next = 0;
+    bool next_in_order = false;
+};
+
+/// `masked`: the vector held off from the block's start until the burst is
+/// over and the line idle (the overrun with nothing to take); otherwise the
+/// vector runs while a block of 65535 items - 8.2 ms - starves the ring
+/// (the stall bound gives a LIVE channel up).
+GuardCase guard_case(bool masked) {
+    GuardCase g{};
+    g.up = guard_burst(0x40);
+    const uint32_t k0 = Engined::rx_skips();
+    const uint32_t t0 = Ticker::ticks();
+    while (g.up && ring_frames() < 4u && Ticker::ticks() - t0 < 30u) {
+    }
+    g.staged = ring_frames() == 4u;
+    if (masked) {
+        P::CriticalSection cs;
+        // 4096 items: some 24 600 cycles (512 us), the burst's other four
+        // frames 350 us; then three frames of idle line for IDLE.
+        starve_start(4096);
+        const uint32_t c0 = Ticker::cycles();
+        while (!starve_done() && Ticker::cycles() - c0 < 48'000u) {
+        }
+        const uint32_t c1 = Ticker::cycles();
+        while (Ticker::cycles() - c1 < 12'600u) {
+        }
+    } else {
+        starve_start(65535);
+        const uint32_t t1 = Ticker::ticks();
+        while (!starve_done() && Ticker::ticks() - t1 < 30u) {
+        }
+        wait_ms(2);
+    }
+    wait_ms(3);
+    g.entries = u4_entries;
+    g.hw = Engined::hw_overruns();
+    g.faults = Engined::dma_faults();
+    const uint16_t c1 = U4::regs().CTLR1;
+    g.waiting_end = (c1 & usart_idleie) != 0u && (c1 & usart_rxneie) == 0u;
+    g.got = drain_ring(0x40, 4, g.in_order);
+    g.skips = Engined::rx_skips() - k0;
+    Engined::release();
+    u4_owner = U4Owner::irq;
+    link::Report r{};
+    (void)peer_report(r, 5);
+    // The next burst, whole.
+    const bool up2 = guard_burst(0x60);
+    wait_ms(5);
+    g.next = up2 ? drain_ring(0x60, 8, g.next_in_order) : 0u;
+    Engined::release();
+    u4_owner = U4Owner::irq;
+    (void)peer_report(r, 5);
+    return g;
+}
+
+void tt_guards() {
+    if (!ensure_link()) {
+        bench.verdict("the peer is reachable", false);
+        return;
+    }
+    const GuardCase probe = guard_case(true);
+    print(serial, "  THE OVERRUN WITH NOTHING TO TAKE: staged ", probe.staged, ", ", probe.got,
+          " delivered, the vector ", probe.entries, " entries, ", probe.hw, " overrun(s), ", probe.skips,
+          " gap(s), ", probe.faults, " given up, ", probe.waiting_end ? "waiting for the end" : "NOT waiting for the end",
+          "; the next burst ", probe.next, " of 8", probe.next_in_order ? " in order" : " NOT in order", crlf);
+    // The bound: the overrun's entry (EIE on ORE) and the probe's second
+    // unmoved one, IDLE's, a tick's: eight covers them; a storm is hundreds.
+    judge("THE OVERRUN WITH NOTHING TO TAKE: a handful of entries, no channel given up, the overrun and the gap "
+          "counted once each, the four frames before it in order, the vector back waiting for the end",
+          probe.up && probe.staged && probe.entries <= 8u && probe.faults == 0u && probe.hw == 1u &&
+              probe.skips == 1u && probe.got >= 4u && probe.got < 8u && probe.in_order && probe.waiting_end);
+    judge("... and the next burst arrives whole", probe.next == 8u && probe.next_in_order);
+    const GuardCase stall = guard_case(false);
+    print(serial, "  THE STALL BOUND, the ring starved 8.2 ms: staged ", stall.staged, ", the vector ", stall.entries,
+          " entries, ", stall.faults, " given up, ", stall.hw, " overrun(s), ", stall.got,
+          " byte(s) after the restart; the next burst ", stall.next, " of 8",
+          stall.next_in_order ? " in order" : " NOT in order", crlf);
+    // The bound: one entry on the overrun, then rx_stall_entries (255) of
+    // the wait for a frame, the 255th giving the channel up; 300 covers the
+    // ticks beside them over 8.2 ms.
+    judge("THE STALL BOUND gives a starved LIVE channel up once, after some 256 entries - no storm - and the "
+          "consumer's look binds it again",
+          stall.up && stall.staged && stall.faults == 1u && stall.entries >= 255u && stall.entries <= 300u);
+    judge("... and the next burst arrives whole", stall.next == 8u && stall.next_in_order);
+    (void)link_command_mode();
+}
+
+// ---------------------------------------------------------------------------
+// u - the idle line under the channel's clear
+// ---------------------------------------------------------------------------
+//
+// THE CLEAR IS ARMED BY A STATUS READ AND PERFORMED BY THE NEXT DATAR READ -
+// the channel's (letter q) - and on the CH32V006 that read also forgets the
+// idle its own frame arms: one frame after an idle that was read raises no
+// IDLE of its own, two frames do (docs/ch32v00x/usart.md). Asked here frame
+// by frame: a one-shot channel 8 takes the far chip's groups of one, then of
+// two, frames 5 ms apart; three frame times after each group lands - IDLE
+// rises one frame time after the line goes idle - STATR is read ONCE. Five
+// groups of one: a status read that found IDLE down follows every second
+// group, so whether a read that SAW no IDLE arms the clear is asked too.
+
+constexpr uint8_t idle_group_max = 5;
+
+struct IdleGroups {
+    bool up = false;
+    uint8_t landed = 0;
+    bool idle[idle_group_max] = {};
+    bool data_ok = false;
+};
+
+IdleGroups idle_groups(uint8_t per_group, uint8_t groups) {
+    IdleGroups ig{};
+    using Rx8 = DmaChannel<8>;
+    link::Cfg c{};
+    c.rate = 115200;
+    link::Params a{};
+    a.cfg = c;
+    a.count = per_group;
+    a.aux16 = groups;
+    a.aux8 = 50;    // 5 ms of idle line between them
+    a.ms = 200;
+    a.value = 0x21;
+    a.pattern = link::pattern_counting;
+    if (!peer_act(link::Op::blast, a) || !u4_open(UartFormat{}, c.rate)) {
+        return ig;
+    }
+    (void)Rx4::input(PinPull::up);
+    static uint8_t got[12];
+    for (uint8_t& b : got) {
+        b = 0;
+    }
+    Rx8::stop();
+    (void)Rx8::prepare(DmaTransfer{.peripheral = &U4::regs().DATAR, .memory = got, .count = 12,
+                                   .config = {.direction = DmaDirection::peripheral_to_memory,
+                                              .memory_increment = true, .priority = DmaPriority::very_high}});
+    // A clear armed by an earlier status read is performed here, by the
+    // CPU, so the first group starts from none.
+    (void)U4::status();
+    (void)U4::read_word();
+    U4::dma_receive(true);
+    Rx8::enable(true);
+    ig.up = true;
+    for (uint8_t g = 0; g < groups; ++g) {
+        const uint16_t want = static_cast<uint16_t>(12u - per_group * (g + 1u));
+        const uint32_t t0 = Ticker::ticks();
+        while (Rx8::count() > want && Ticker::ticks() - t0 < 40u) {
+        }
+        if (Rx8::count() > want) {
+            break;
+        }
+        ++ig.landed;
+        wait_us(3u * 87u);   // three frames of idle line at 115200
+        ig.idle[g] = (U4::status() & usart_idle) != 0u;   // the one status read: it arms the clear
+    }
+    __asm__ volatile("" ::: "memory");
+    ig.data_ok = true;
+    for (uint8_t i = 0; i < groups * per_group; ++i) {
+        ig.data_ok = ig.data_ok && got[i] == static_cast<uint8_t>(0x21u + i);
+    }
+    U4::dma_receive(false);
+    Rx8::stop();
+    U4::reset();
+    U4::bus_clock(false);
+    link::Report r{};
+    (void)peer_report(r, 5);
+    return ig;
+}
+
+void tu_idle_under_clear() {
+    if (!ensure_link()) {
+        bench.verdict("the peer is reachable", false);
+        return;
+    }
+    const IdleGroups one = idle_groups(1, 5);
+    const IdleGroups two = idle_groups(2, 3);
+    print(serial, "  groups of one frame: IDLE");
+    for (uint8_t g = 0; g < 5u; ++g) {
+        print(serial, " ", one.idle[g]);
+    }
+    print(serial, " (", one.landed, " landed); groups of two: IDLE ", two.idle[0], " ", two.idle[1], " ",
+          two.idle[2], " (", two.landed, " landed); data ", one.data_ok, two.data_ok, crlf);
+    judge("every group landed through the channel, the bytes in order",
+          one.up && two.up && one.landed == 5u && two.landed == 3u && one.data_ok && two.data_ok);
+    judge("ONE frame after an idle that was READ raises NO IDLE of its own (the second and fourth groups), and "
+          "one after a status read that found IDLE down does (the third and fifth): the read that saw IDLE "
+          "armed its clear, the one that saw none armed nothing",
+          one.idle[0] && !one.idle[1] && one.idle[2] && !one.idle[3] && one.idle[4]);
+    judge("TWO frames always do: every group of two followed by IDLE",
+          two.idle[0] && two.idle[1] && two.idle[2]);
+    (void)link_command_mode();
+}
+
+// ---------------------------------------------------------------------------
 // s - the transmit engine's blast
 // ---------------------------------------------------------------------------
 void ts_tx_engine() {
@@ -2016,16 +2334,25 @@ void ts_tx_engine() {
             print_ppm(eng.ppm - ref.ppm);
             print(serial, "), ", l.per_block < 0 ? "-" : "",
                   static_cast<uint32_t>(l.per_block < 0 ? -l.per_block : l.per_block), " cycles a block, a frame being ",
-                  frame, "; the completion's body ", l.body, " cycles (", l.body_max, " at most)", crlf);
+                  frame, "; the completion's body ", l.body, " cycles (", l.body_max, " at most), USART4's vector ",
+                  eng.u4, " times", crlf);
             return l;
         };
         const Leg ram = leg("SRAM ", engined_calibrate<Engined>(c, 4096));
         const Leg flash = leg("flash", engined_calibrate<EnginedFlash>(c, 4096));
-        // The completion's whole round trip - the vector's entry and exit
-        // and the restart's body - inside what the shifter still holds when
-        // the block's last item lands, a frame and a half (240 cycles at 3
-        // Mbaud): from SRAM the next block is in before the line runs dry,
-        // at every rate.
+        // The completion's whole round trip - the vector's entry, its owner
+        // test, the stamps and the call, then the port's DMA body whole in
+        // SRAM - inside what the shifter still holds when the block's last
+        // item lands: the next block is in before the line runs dry, at
+        // every rate, with some 15 to 20 cycles to spare at 3 Mbaud (16
+        // cycles of delay added before the body idled nothing beyond the
+        // instrument's spread, 24 idled 5 to 8 cycles a block;
+        // docs/ch32x035/usart.md). THE BOUND is the instrument's: two blasts
+        // back to back on the wandering HSI read -454 to +314 ppm apart over
+        // 252 legs that idle nothing, and a
+        // cycle a block at 3 Mbaud is 24 ticks in 328 000, 73 ppm - so 500
+        // ppm admits the wander, and a gap of seven cycles a block alone
+        // reaches it.
         judge(num(rate), " baud, the restart in SRAM: the transmit engine's blast is gapless - 4096 frames "
               "within 500 ppm of the polled blast's span",
               ref.ok && ram.eng.ok && near(ram.eng.ppm, ref.ppm, 500));
@@ -2138,6 +2465,9 @@ int main() {
     bench.second_letter('q', "the error flags' clear under a receive channel", tq_clear_under_dma);
     bench.second_letter('r', "the priority rule: the engined ring beside copies, at 3 Mbaud", tr_priority_load);
     bench.second_letter('s', "the transmit engine's blast, timed by the far chip", ts_tx_engine);
+    bench.second_letter('t', "the receive vector's guards: the overrun with nothing to take, the stall bound",
+                        tt_guards);
+    bench.second_letter('u', "the idle line under the channel's clear, frame by frame", tu_idle_under_clear);
 
     if (serial_ok) {
         brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "HSI48" : "FAILED", " tick=",

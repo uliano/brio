@@ -1285,10 +1285,14 @@ struct Uart {
     /// block is reset: clearing DMAT, DMAR and UE does not withdraw it, and
     /// a gated clock freezes it on the OR, where the next owner's first
     /// enable moves one item and the channel stalls
-    /// (docs/ch32vx03/dma.md). Whether this die holds one is not measured
-    /// (docs/ch32v00x/usart.md); the pulse - the vendor's own USART_DeInit,
-    /// two read-modify-writes of the bus's reset register - leaves none
-    /// either way, and takes CTLR3 with it.
+    /// (docs/ch32vx03/dma.md). THIS DIE HOLDS USART2's TOO, measured both
+    /// ways: its transmit request on channel 6 and its receive request on
+    /// channel 7, each raised with no channel enabled, outlive the request
+    /// bit cleared, UE, TE and RE cleared and the gate closed - the next
+    /// owner takes one stray item - and after this verb's reset line none
+    /// (docs/ch32v00x/usart.md). The pulse is the vendor's own
+    /// USART_DeInit, two read-modify-writes of the bus's reset register,
+    /// and takes CTLR3 with it.
     static void release() {
         Pfic::disable(usart_irq_for(instance));
         if constexpr (has_tx_engine) {
@@ -1555,10 +1559,11 @@ private:
      * overrun is counted once, there - and an IDLE risen since, whose edge
      * this entry reports itself. A frame completing between the two loads
      * is the one the reads reach: the CPU's read of DATAR comes after its
-     * RXNE and clears its error flags unseen; whether the request the frame
-     * raised outlives that read, so that the channel still stores the frame,
-     * this die has not been asked (docs/ch32v00x/usart.md). A frame waiting
-     * for a starved channel shows RXNE, and nothing is read but the status.
+     * RXNE and clears its error flags unseen, but the request the frame
+     * raised OUTLIVES that read: a starved channel stored the byte the CPU
+     * had read once it was let go (docs/ch32v00x/usart.md), so the frame
+     * itself is delivered. A frame waiting for a starved channel shows RXNE,
+     * and nothing is read but the status.
      */
     static constexpr uint8_t rx_overrun_probe = 2;
 
@@ -1591,9 +1596,10 @@ private:
     }
 
     /// Saturating: a counter that wrapped would understate the damage.
-    [[gnu::always_inline]] static void bump(uint16_t& counter) {
-        if (counter != 0xFFFFu) {
-            ++counter;
+    [[gnu::always_inline]] static void bump(volatile uint16_t& counter) {
+        const uint16_t n = counter;
+        if (n != 0xFFFFu) {
+            counter = static_cast<uint16_t>(n + 1u);
         }
     }
 
@@ -1617,12 +1623,17 @@ private:
     static inline volatile bool m_rx_given_up = false;
     static inline uint32_t m_baud = 0;
 
-    static inline uint16_t m_rx_overruns = 0;
-    static inline uint16_t m_frame_errors = 0;
-    static inline uint16_t m_parity_errors = 0;
-    static inline uint16_t m_noise_errors = 0;
-    static inline uint16_t m_hw_overruns = 0;
-    static inline uint16_t m_dma_faults = 0;
+    /// THE COUNTERS: bumped by the vector, read and cleared by the thread -
+    /// volatile, so a thread that reads one after a wait loads it again
+    /// rather than reusing a value from before the wait (a read of
+    /// dma_faults() hoisted over a settle answered 0 for a channel the
+    /// vector had given up; test_ch32_serial letter m).
+    static inline volatile uint16_t m_rx_overruns = 0;
+    static inline volatile uint16_t m_frame_errors = 0;
+    static inline volatile uint16_t m_parity_errors = 0;
+    static inline volatile uint16_t m_noise_errors = 0;
+    static inline volatile uint16_t m_hw_overruns = 0;
+    static inline volatile uint16_t m_dma_faults = 0;
     /// Under a receive engine, the bytes lost beside the view's skips (an
     /// overrun, a restart), never cleared: rx_skips()'s second term.
     static inline volatile uint32_t m_rx_lost = 0;

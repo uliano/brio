@@ -87,7 +87,8 @@ The reference suite is `test_ch32_clock` (32 verdicts in `z` on the
 CH32V006K8U6, 30 on the CH32V003F4P6), rooted on the 24 MHz crystal
 both bench boards carry through the PLL - so every letter is a
 measurement of the HSE path, and the console reading clean at 115200
-its first proof.
+its first proof. On the CH32V006K8 it is two images: the second, letters
+`h` and `k` (5 verdicts in its `z`), boots on the crystal ITSELF.
 
 - **The ladder holds at every rung.** 48 -> 24 -> 16 -> 12 -> 6 -> 3 MHz
   and back: at each rate the HPRE code and the wait states are what
@@ -115,6 +116,21 @@ its first proof.
 - **The tree at boot** after `Clock<pll, 48 MHz, 24 MHz>::init()`: SWS
   = PLL, HPRE = 1, HSE and HSI on, the trim at 16, PLL locked from the
   HSE, LSI off, the part's wait states.
+- **THE CRYSTAL AS SYSCLK ITSELF** (letter `h`, the second image, ten
+  runs): `Clock<crystal, 24 MHz, 24 MHz>::init()` from reset leaves SWS
+  the HSE, HPRE 1, the HSE on and ready with its pads the oscillator's
+  and no bypass, the PLL never turned on, the wait states for 24 MHz,
+  no clock failure - and the console at 115200 on it.
+- **The roots against a host's clock** (letter `k`, by name: 30 000 ticks
+  between two console lines, time-stamped as they arrive by a host on
+  an NTP-disciplined clock, the probe's bridge between them): the
+  crystal as SYSCLK read 25 to 38 ppm fast of the host over 30 s (three
+  runs), the PLL's 48 MHz from it 38 and 40 ppm (two) - one oscillator,
+  within the bracket's resolution of a millisecond or so of arrival
+  jitter, some 40 ppm. The HSI's PLL at 48 MHz, which the other suites
+  run on, reads 0.5 per cent slow: the sleep suite's long AWU windows
+  give the LSI 125.71 kHz on its STK and 125.07 kHz on the host's clock
+  ([sleep.md](sleep.md)).
 
 ## Not covered yet
 
@@ -134,15 +150,17 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
-- The rates in hertz: the ladder is proven by the console reading
-  clean at each rung (within UART tolerance) and by tick counts that
-  the rate itself clocks; a counter on the MCO (PC4) is what turns
-  that into parts per million, and what the trim steps are worth.
+- The rates of the divided rungs in hertz and the trim steps' worth:
+  the ladder is proven by the console reading clean at each rung
+  (within UART tolerance) and by tick counts that the rate itself
+  clocks, and the roots are measured against the host (above); letter
+  `k` at a divided rung, or the trim stepped on the HSI's image, would
+  put the rest in parts per million.
 - The system clock monitor's failure path and the CSS's: a failure
   needs a crystal that stops, which a soldered one does not; the CSS's
   NMI also needs a handler bound by the program that arms it.
-- The HSE as SYSCLK itself (`ClockSource::crystal` and `::external`
-  without the PLL) and the bypass: compiled and refused where the
-  chapter refuses (the rate outside 4..25 MHz, a PLL past 48 MHz, a
-  crystal not named); measured only as the PLL's source, since the
-  suites run at 48 MHz.
+- The bypass (`ClockSource::external`, a clock into PA1 with HSEBYP):
+  compiled and refused where the chapter refuses (the rate outside
+  4..25 MHz, a PLL past 48 MHz, a rate not named); both bench boards
+  carry a crystal on PA1/PA2, so a board with an oscillator's output on
+  PA1 instead would measure it.

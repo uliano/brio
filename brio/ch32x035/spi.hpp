@@ -87,14 +87,15 @@
  *  - THE INSTRUCTION FETCH: the code runs from a flash with two wait
  *    states at 48 MHz behind a prefetch (RM 1.2, 20.3.1), measured at three
  *    to four cycles an instruction in these loops, a taken branch the
- *    dearest, and SRAM as the faster place. OFFERED, THE PROGRAM'S CHOICE,
+ *    dearest - and costing what its address modulo four makes it, so the
+ *    polled loops' functions are aligned to the fetch's word - and SRAM
+ *    as the faster place. OFFERED, THE PROGRAM'S CHOICE,
  *    for the paths that run once a FRAME: the host's last template
  *    parameter is a placement (util/placement.hpp), `InFlash` by default,
  *    and under `InRam` the pump's entry and the two polled loops run from
  *    SRAM (`.fast_text.brio`, copied with .data by the crt) - the
  *    transmit-only loop at the wire at /2, the pump's frame shorter behind
- *    a vector in the flash, and a cost that no longer moves with where the
- *    code around it sits. The cost constants follow the placement, each
+ *    a vector in the flash. The cost constants follow the placement, each
  *    measured both ways. The paths that run once a TRANSACTION (start(),
  *    the phase openings, the engines' launch) stay in the flash under
  *    either - the pump's trampoline flattens what it calls, so the two the
@@ -1302,8 +1303,16 @@ private:
 
     /// The loops' four specializations, each one function of the host's
     /// placement (the file header): the trampoline's instance for that
-    /// specialization's lambda, the loop flattened into it.
-    static bool poll_write_phase(SpiDataSize bits, const uint8_t* out, uint16_t count, uint32_t& budget) {
+    /// specialization's lambda, the loop flattened into it. ALIGNED TO THE
+    /// FETCH'S WORD: from the flash a loop's cost is a function of its
+    /// address modulo four - the same instructions take 52.0 or 72.0
+    /// cycles a frame at /4 as the function starts on a word or half a word
+    /// into one, and no other bit of the address moves it (measured,
+    /// docs/ch32x035/spi.md, "The fetch") - and -Os aligns a function to two
+    /// bytes only, so without the attribute the image's layout picks the
+    /// cost. Two bytes of padding at most, and the cost constants below are
+    /// the aligned loops'.
+    [[gnu::aligned(4)]] static bool poll_write_phase(SpiDataSize bits, const uint8_t* out, uint16_t count, uint32_t& budget) {
         if (out == nullptr) {
             return spi_frame_is_halfword(bits) ? poll_write_at<uint16_t, true>(out, count, budget)
                                                : poll_write_at<uint8_t, true>(out, count, budget);
@@ -1311,8 +1320,8 @@ private:
         return spi_frame_is_halfword(bits) ? poll_write_at<uint16_t, false>(out, count, budget)
                                            : poll_write_at<uint8_t, false>(out, count, budget);
     }
-    static bool poll_duplex_phase(SpiDataSize bits, const uint8_t* out, uint8_t* in, uint16_t count,
-                                  uint32_t& budget, bool two) {
+    [[gnu::aligned(4)]] static bool poll_duplex_phase(SpiDataSize bits, const uint8_t* out, uint8_t* in,
+                                                      uint16_t count, uint32_t& budget, bool two) {
         if (out == nullptr) {
             return spi_frame_is_halfword(bits) ? poll_duplex_at<uint16_t, true>(out, in, count, budget, two)
                                                : poll_duplex_at<uint8_t, true>(out, in, count, budget, two);
@@ -1352,8 +1361,8 @@ private:
     /// frame's load, the store, the step and ONE taken branch. From the
     /// flash and its two wait states every taken branch is a fetch the
     /// core waits for: this loop takes more than the wire's 16 cycles a
-    /// frame at /2, and a loop's cost moves between two builds whose code
-    /// merely sits elsewhere; under InRam it runs at the wire (measured,
+    /// frame at /2, the figure its function's alignment fixes
+    /// (poll_write_phase); under InRam it runs at the wire (measured,
     /// docs/ch32x035/spi.md, "The host above the wire"). `count` >= 1.
     template <typename T, bool dummy>
     [[gnu::always_inline]] static bool poll_write(const uint8_t* p, uint16_t count, uint32_t& budget) {

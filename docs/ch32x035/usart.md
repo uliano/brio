@@ -294,7 +294,7 @@ column, PB0 and PB1, which are the desk's link: crossed to a CH32V006K8U6
 (its USART2 on column 4) running `usart_peer` on its 24 MHz crystal
 doubled. `z` (23 verdicts) is the single-board set, run with the far
 board dark - on its console or with its peer still searching, both
-leaving their link pads floating inputs; `y` (83 verdicts) is the
+leaving their link pads floating inputs; `y` (97 verdicts) is the
 two-board set against that peer, every leg judged from what the far chip
 reports. What it measured:
 
@@ -428,24 +428,38 @@ reports. What it measured:
 - **The transmit engine's blast, timed by the far chip** (letter `s`):
   4096 frames through the ring of 256 - 48 blocks, each started from the
   last one's completion - against the polled blast taken back to back,
-  in BOTH PLACEMENTS of the port. The restart - the ring's consume, the
-  claim, the next run, TC cleared and the five stores - is flattened, no
-  call left on it, in either. UNDER `InRam` GAPLESS AT EVERY RATE TO 3
-  MBAUD: the span within 500 ppm of the polled blast's at 1, 1.5, 2, 2.4
-  and 3 Mbaud (the HSI's wander between two runs; -495 once at 3 Mbaud,
-  the instrument's margin), -1 to 6 cycles a block; 170 to 175 cycles of
-  body between its first and last statement (191 at most), inside the
-  frame and a half the shifter still holds when the block's last item
-  lands (240 cycles at 3 Mbaud), 204 bytes of SRAM a port
-  (`.fast_text.brio`). FROM THE FLASH (`InFlash`, the default) the same
-  body takes 271 to 273 cycles (293 at most): gapless to 1.5 Mbaud, and
-  above it each block boundary idles the line for what the restart
-  outlasts that window - 4 to 33 cycles a block at 2 Mbaud, 37 to 62 at
-  2.4 and 83 to 119 at 3, the span 0.04 to 0.86 per cent over the polled
-  blast's - and for no more (the suite's verdict). The vector's own path
-  in the flash counts too: in a suite vector that tested the port's
-  owner twice before the body, the `InRam` body took 188 cycles and the
-  line idled 21 cycles a block at 3 Mbaud.
+  in BOTH PLACEMENTS of the port. The DMA vector's body - the flags'
+  read, the channels' service and the restart (the ring's consume, the
+  claim, the next run, TC cleared and the five stores) - is flattened, no
+  call left on it, and placed WHOLE with the port: under `InRam` the
+  suite's vector in the flash keeps its entry, the owner test, the stamps
+  and one call. UNDER `InRam` GAPLESS AT EVERY RATE TO 3 MBAUD, twelve
+  runs: the span within 500 ppm of the polled blast's at 1, 1.5, 2, 2.4
+  and 3 Mbaud - the instrument's own spread, two blasts back to back on a
+  wandering HSI, was -454 to +314 ppm over the 252 legs of 36 runs that
+  idle nothing, and one cycle a block at 3 Mbaud is 73 ppm - and -2 to 3
+  cycles a block at 3 Mbaud, USART4's own vector never entered during a
+  blast; 129 to 132 cycles of body between its first and last statement
+  (154 at most), 326 bytes of SRAM a port
+  (`.fast_text.brio`), a transfer error's path a call out of it. THE
+  MARGIN, measured by delaying the suite's vector before the body: 16
+  cycles more left the 3 Mbaud blast within the instrument's spread, 24
+  idled the line 5 to 8 cycles a block and 32 14 to 17 - the restart
+  lands some 15 to 20 cycles inside its window at 3 Mbaud - and 32 more
+  idled 0 to 7 at 2.4. FROM THE FLASH (`InFlash`, the default) the same
+  body inline in the suite's vector takes 285 to 288 cycles (324 at most)
+  with the vector on a word and 276 to 283 with it half a word off - the
+  vector's place in the flash moves it ([platform.md](platform.md), "A
+  handler in SRAM"): gapless to 1.5 Mbaud, and above it each block
+  boundary idles the line for what the restart outlasts that window - 12
+  to 20 cycles a block at 2 Mbaud, 47 to 57 at 2.4 and 98 to 106 at 3,
+  the span 0.06 to 0.77 per cent over the polled blast's - and for no
+  more (the suite's verdict). WHY THE WHOLE
+  BODY: the restart alone placed, the flags' read and the service left
+  inline in the suite's flash vector, measured 172 to 174 cycles and
+  idled the line 3 to 10 cycles a block at 3 Mbaud, outside the 500 ppm
+  in 2 runs of 6; the suite's vector itself placed in SRAM measured 116
+  to 117 cycles and -1 to 3.
 - **The frame matrix across the wire** (letter `l`): 8N1, 8E1, 8O1, 7E1,
   7O1, 9N1, 8N2, 8N0.5 and 8N1.5 at 115200, eight frames each echoed
   equal and counted clean; HALF A STOP BIT and one and a half timed as
@@ -475,8 +489,12 @@ reports. What it measured:
   apart under the idle-line wake, it drops that run's other three and
   wakes on the idle line for the next two (nine frames, 0 and 4..11);
   IrDA's SIR frames at 115200, normal mode, echoed equal by the far
-  chip's codec; LIN's detection: a 13-bit break raises LBD at both
-  lengths, a 9-bit low at neither, a 10-bit low not at 11.
+  chip's codec, and IN LOW-POWER MODE both codecs at PSC 26 (48 MHz into
+  1.846 MHz, the SIR low-power clock's usual 1.8432 MHz within 0.2 per
+  cent, a pulse of three of its periods, 1.63 us) echoed equal at 9600
+  and at 115200, IRLP read back set (ten runs); LIN's detection: a 13-bit
+  break raises LBD at both lengths, a 9-bit low at neither, a 10-bit low
+  not at 11.
 - **Half duplex hears a second chip** (letter `p`): HDSEL on PB0 with the
   pad an input - floating, and pulled up - receives the four 0x5A frames
   the far chip drives onto that wire from its own RX pad.
@@ -485,6 +503,28 @@ reports. What it measured:
   lineage): the link's end parks its TX pad as a GPIO output high across
   a reconfiguration and hands it back two bit times and 20 us after the
   enable.
+- **The receive vector's two guards** (letter `t`, ten runs), each staged
+  by a memory-to-memory block on channel 5 at very_high - the ring's own
+  level, and the lower number wins the tie - started once the far chip's
+  burst of eight at 115200 had put four frames in the ring: THE OVERRUN
+  WITH NOTHING TO TAKE, the vector held off until the block (4096 items,
+  512 us) and the burst were over - ORE up, RXNE down, no frame after it:
+  four entries, no channel given up, the overrun and the gap counted once
+  each, five bytes delivered (the four before and the one DATAR held), the
+  vector back waiting for the end; THE STALL BOUND, the vector running
+  while a block of 65535 items starved the ring 8.2 ms - RXNE standing
+  under RXNEIE: 257 entries (the overrun's, 255 of the wait for a frame,
+  a tick's), the live channel given up once, a DMA fault counted, and the
+  consumer's look binding it again. The next burst after each, whole and
+  in order.
+- **The idle line under the channel's clear, frame by frame** (letter
+  `u`, ten runs): a one-shot channel 8 takes the far chip's groups 5 ms
+  apart, STATR read once three frame times after each group. Groups of
+  one frame read IDLE 1 0 1 0 1: ONE frame after an idle that was read -
+  the status read SAW IDLE and armed its clear - raises no IDLE of its
+  own (its channel read performs the clear and forgets the idle its frame
+  armed), and one after a status read that found IDLE down does: that
+  read armed no clear of IDLE. Groups of two read IDLE every time.
 - **A frame that completes between the status read and the data read is
   LOST, its overrun cleared unseen**: the F1 clear sequence - STATR read,
   then DATAR - clears ORE whether it rose before the status read or after
@@ -540,20 +580,12 @@ Implemented but not bench-verified, each with what would measure it:
   the pads or a peer on a CK pad this package does not bond, and the
   flow-control pair's handshake a peer on the CTS and RTS pads (PB15 and
   PA8, unbonded on the QFN20).
-- **IrDA's low-power mode across the wire**: letter `o` echoes the
-  normal mode; the low-power pulse wants the far chip's decoder at the
-  same prescaled width, a second leg of that letter.
-- **The receive vector's guards**: the overrun with nothing to take
-  (`rx_overrun_probe`) and the channel given up after 255 unmoved entries
-  are written after the CH32V006's measurements and staged by no letter
-  here - the control of letter `r` broke on an overrun the wait for the end
-  counted, and gave nothing up; a copy armed ABOVE the ring for longer than
-  a message's tail, and a channel frozen by a request another block holds,
-  would stage them.
-- **The idle line's subtleties under the channel's clear** (one frame
-  after an idle that was read raising no IDLE of its own, which the
-  CH32V006 measured): letter `q` proves the clear on PE; the IDLE half
-  wants a frame-by-frame leg of it.
+- **The stall bound over a FROZEN channel**: measured over a live one a
+  block above the ring starved (letter `t`); a channel a request another
+  block holds on its OR leaves the vector the same unmoved count - the
+  CH32V006's suite measured that shape ([../ch32v00x/usart.md](../ch32v00x/usart.md)),
+  and here channel 8's other requesters are TIM2's trigger and COM
+  events, whose held request no letter stages yet.
 - **USART1 and USART3, and the other packages' columns**: USART1 has no
   usable column on the QFN20 and USART3's only one is the debug port's,
   so neither has carried a byte here; a board of another package would

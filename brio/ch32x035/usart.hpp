@@ -108,11 +108,16 @@
  * default, one instance each in SRAM under InRam. Two paths take it:
  *  - THE TRANSMIT ENGINE'S BLOCK BOUNDARY. A block's completion releases
  *    its bytes and starts the next run while the shifter still holds about
- *    a frame and a half. The restart is flattened - the ring's consume and
- *    read_span and the engine's launch inlined, no call left on the path -
- *    and from the flash, behind the two wait states, it outlasts that
- *    window above 1.5 Mbaud and the line idles at every boundary; under
- *    InRam it is gapless to 3 Mbaud (docs/ch32x035/usart.md, letter s).
+ *    a frame and a half. The DMA vector's whole body is the placement's -
+ *    the flags' read, the channels' service and the restart, the ring's
+ *    consume and read_span and the engine's launch inlined, no call left
+ *    on the path - and from the flash, behind the two wait states, it
+ *    outlasts that window above 1.5 Mbaud and the line idles at every
+ *    boundary; under InRam, behind a vector in the flash that keeps its
+ *    entry and one call, it is gapless to 3 Mbaud with some 15 to 20 cycles
+ *    to spare, where the restart alone in SRAM behind the flags' read and
+ *    service in the flash came out a few cycles past it
+ *    (docs/ch32x035/usart.md, letter s).
  *  - THE PER-BYTE INTERRUPT TRANSPORT'S isr(), which calls nothing: under
  *    InRam, behind a vector in the flash, it takes a gapless run in to
  *    2.4 Mbaud where the flash takes 2; a program that places the VECTOR
@@ -133,11 +138,15 @@
  * chip into USART4's receiver and the channel reading DATAR
  * (docs/ch32x035/usart.md): a read of STATR ARMS the clear (14.10.1:
  * "reading the status register and then the data register"), and the next
- * read of DATAR - the channel's - performs it (measured on PE); a flag with
- * no status read since the last DATAR read stands. The CH32V006's and the
- * CH32V203's USARTs answer the same, and the CH32V006 measured the rest of
- * the rule - every error flag and IDLE standing at that read cleared - which
- * this vector is written to.
+ * read of DATAR - the channel's - performs it (measured on PE and on IDLE);
+ * a flag with no status read since the last DATAR read stands. The clear of
+ * IDLE also forgets the idle its own frame armed: one frame after an idle
+ * that was READ raises no IDLE of its own, two frames do - and a status
+ * read that found IDLE down arms no clear of it, so one frame after THAT
+ * read raises IDLE (measured, docs/ch32x035/usart.md). The CH32V006's and
+ * the CH32V203's USARTs answer the same on PE, and the CH32V006 measured
+ * the rest of the rule - every error flag standing at that read cleared -
+ * which this vector is written to.
  *
  * THE BURST EDGE COMES FROM A VECTOR. With the receive engine the USART's
  * vector runs two states over that clear. WAITING FOR THE END: IDLEIE,
@@ -164,7 +173,8 @@
  * that find the count unmoved are counted, and the 255th gives the channel
  * up - a DMA fault counted, RXNEIE down, the edge reported - and the
  * consumer's next look restarts the ring from its first element and arms
- * the wait for the end, as after a transfer error.
+ * the wait for the end, as after a transfer error. Both guards are measured
+ * here, each staged by a block above the ring (docs/ch32x035/usart.md).
  */
 
 #pragma once
@@ -963,37 +973,7 @@ struct Uart {
      * and free, with the slots empty.
      */
     [[gnu::always_inline]] static bool dma_isr() {
-        bool edge = false;
-        uint32_t intfr = 0;
-        if constexpr (has_tx_engine) {
-            intfr = TxEngine::block_flags();
-        } else if constexpr (has_rx_engine) {
-            intfr = RxEngine::block_flags();
-        }
-        if constexpr (has_tx_engine) {
-            const uint8_t f = TxEngine::service(intfr);
-            if ((f & TxEngine::flag_error) != 0u) {
-                (void)TxEngine::abandon();
-                m_dma_faults = static_cast<uint16_t>(m_dma_faults + 1u);
-            } else if ((f & TxEngine::flag_complete) != 0u) {
-                tx_block_done();
-            }
-        }
-        if constexpr (has_rx_engine) {
-            const uint8_t f = RxEngine::service(intfr);
-            if ((f & RxEngine::flag_error) != 0u) {
-                (void)RxEngine::abandon();
-                m_dma_faults = static_cast<uint16_t>(m_dma_faults + 1u);
-                m_rx_drained = false;
-                edge = true;   // the consumer must come: its look starts the ring again
-            } else if (f != 0u) {
-                if ((f & RxEngine::flag_complete) != 0u) {
-                    RxEngine::lap();   // a lap: counted, nothing re-armed
-                }
-                edge = told();   // the half or the full mark of a lap
-            }
-        }
-        return edge;
+        return Hot<Placement>::run([] { return dma_entry(); });
     }
 
     /**
@@ -1042,6 +1022,54 @@ struct Uart {
     }
 
 private:
+    /// The DMA vector's body, written once: dma_isr() runs it through the
+    /// port's placement (the file header) - the flags' read and the
+    /// channels' service with the restart, all of it, so under InRam the
+    /// vector's own path in the flash is its entry and one call.
+    [[gnu::always_inline]] static bool dma_entry() {
+        bool edge = false;
+        uint32_t intfr = 0;
+        if constexpr (has_tx_engine) {
+            intfr = TxEngine::block_flags();
+        } else if constexpr (has_rx_engine) {
+            intfr = RxEngine::block_flags();
+        }
+        if constexpr (has_tx_engine) {
+            const uint8_t f = TxEngine::service(intfr);
+            if ((f & TxEngine::flag_error) != 0u) {
+                tx_fault();
+            } else if ((f & TxEngine::flag_complete) != 0u) {
+                tx_block_done();
+            }
+        }
+        if constexpr (has_rx_engine) {
+            const uint8_t f = RxEngine::service(intfr);
+            if ((f & RxEngine::flag_error) != 0u) {
+                rx_fault();
+                m_rx_drained = false;
+                edge = true;   // the consumer must come: its look starts the ring again
+            } else if (f != 0u) {
+                if ((f & RxEngine::flag_complete) != 0u) {
+                    RxEngine::lap();   // a lap: counted, nothing re-armed
+                }
+                edge = told();   // the half or the full mark of a lap
+            }
+        }
+        return edge;
+    }
+
+    /// A channel's transfer error, out of line: the body above is flattened
+    /// whole, and the rare path stays a call rather than bytes of the
+    /// frequent one - SRAM bytes under InRam. The fault counted, saturating.
+    [[gnu::noinline]] static void tx_fault() {
+        (void)TxEngine::abandon();
+        bump(m_dma_faults);
+    }
+    [[gnu::noinline]] static void rx_fault() {
+        (void)RxEngine::abandon();
+        bump(m_dma_faults);
+    }
+
     /// The interrupt body's path, written once: isr() runs it through the
     /// port's placement.
     [[gnu::always_inline]] static bool isr_entry() {
@@ -1422,13 +1450,11 @@ private:
     }
 
     /// The transmit block's completion: its bytes released from the ring,
-    /// the next run started - one flattened function of the port's
-    /// placement (the file header).
+    /// the next run started - flattened into dma_entry(), the port's
+    /// placement's (the file header).
     [[gnu::always_inline]] static void tx_block_done() {
-        Hot<Placement>::run([] {
-            m_tx.consume(static_cast<typename decltype(m_tx)::index_t>(TxEngine::complete()));
-            pump_tx();
-        });
+        m_tx.consume(static_cast<typename decltype(m_tx)::index_t>(TxEngine::complete()));
+        pump_tx();
     }
 
     /// The transmit ring out to the wire, bounded: what rebase() and
@@ -1652,9 +1678,10 @@ private:
     }
 
     /// Saturating: a counter that wraps would report a healthy port.
-    [[gnu::always_inline]] static void bump(uint16_t& counter) {
-        if (counter != 0xFFFFu) {
-            ++counter;
+    [[gnu::always_inline]] static void bump(volatile uint16_t& counter) {
+        const uint16_t n = counter;
+        if (n != 0xFFFFu) {
+            counter = static_cast<uint16_t>(n + 1u);
         }
     }
 
@@ -1675,12 +1702,17 @@ private:
     /// The vector gave the channel up: set there, cleared by the consumer's
     /// restart.
     static inline volatile bool m_rx_given_up = false;
-    static inline uint16_t m_rx_overruns = 0;
-    static inline uint16_t m_hw_overruns = 0;
-    static inline uint16_t m_frame_errors = 0;
-    static inline uint16_t m_noise_errors = 0;
-    static inline uint16_t m_parity_errors = 0;
-    static inline uint16_t m_dma_faults = 0;
+    /// THE COUNTERS: bumped by the vector, read and cleared by the thread -
+    /// volatile, so a thread that reads one after a wait loads it again
+    /// rather than reusing a value from before the wait (a read of
+    /// dma_faults() hoisted over a settle answered 0 for a channel the
+    /// vector had given up; test_ch32_serial letter m).
+    static inline volatile uint16_t m_rx_overruns = 0;
+    static inline volatile uint16_t m_hw_overruns = 0;
+    static inline volatile uint16_t m_frame_errors = 0;
+    static inline volatile uint16_t m_noise_errors = 0;
+    static inline volatile uint16_t m_parity_errors = 0;
+    static inline volatile uint16_t m_dma_faults = 0;
     /// Under a receive engine, the bytes lost beside the view's skips (an
     /// overrun, a restart), never cleared: rx_skips()'s second term.
     static inline volatile uint32_t m_rx_lost = 0;

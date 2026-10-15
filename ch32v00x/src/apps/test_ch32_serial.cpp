@@ -156,7 +156,7 @@
 //
 // build: boards = v006k8,v003f4
 // build: groups = k
-// build: groups.v006k8 = abcdefgh,ijkqrstuy,12345678
+// build: groups.v006k8 = abcdefgh,ijkqrstuymno,12345678
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -174,6 +174,7 @@
 #include "util/testbench.hpp"
 
 #include "../../../avrdx/src/apps/usart_link.hpp"
+#include "held_request.hpp"
 
 using P = brio::Ch32v00xPlatform<>;
 /// THE CLOCK BY THE LETTERS THE IMAGE CARRIES. The two-board key's
@@ -1253,6 +1254,46 @@ void th_flow() {
     const bool left = wait_flag(usart_tc, 5000);
     print(serial, "  CTS high: TC after 2 ms ", !held, "; CTS low: TC ", left, crlf);
     bench.verdict("CTS high holds the frame back, CTS low lets it out", held && left);
+
+    // THE CTS FLAG (14.8.1: set on a toggle of the CTS input while CTSE is
+    // on, cleared by writing zero) and CTSIE's vector, the suite's own
+    // accounting counting each entry and clearing the flag: the pad's pull
+    // moved four times, 1 ms apart - a toggle is the pull's edge through
+    // some tens of pF, a few microseconds.
+    U2::clear_flags(usart_cts);
+    settle_ms(1);
+    const bool flag_quiet = !U2::flag(usart_cts);
+    CtsPad::set();   // the pull up: a rise
+    settle_ms(1);
+    const bool flag_rise = U2::flag(usart_cts);
+    U2::clear_flags(usart_cts);
+    CtsPad::clear();   // a fall
+    settle_ms(1);
+    const bool flag_fall = U2::flag(usart_cts);
+    U2::clear_flags(usart_cts);
+    settle_ms(1);
+    const bool flag_cleared = !U2::flag(usart_cts);
+    u2_isr = nullptr;
+    u2_cts = 0;
+    u2_interrupts = 0;
+    U2::cts_interrupt(true);
+    Pfic::enable(Irq::usart2);
+    for (uint8_t k = 0; k < 4u; ++k) {
+        if ((k & 1u) == 0u) { CtsPad::set(); } else { CtsPad::clear(); }
+        settle_ms(1);
+    }
+    Pfic::disable(Irq::usart2);
+    U2::cts_interrupt(false);
+    const uint32_t cts_entries = u2_cts;
+    const uint32_t entries = u2_interrupts;
+    print(serial, "  the CTS flag: quiet ", flag_quiet, ", after a rise ", flag_rise, ", after a fall ", flag_fall,
+          ", cleared by a zero ", flag_cleared, "; CTSIE over four toggles: ", cts_entries, " CTS entries of ",
+          entries, crlf);
+    bench.verdict("the CTS flag rises on each edge of the CTS input under CTSE, both ways, and a written zero "
+                  "clears it",
+                  flag_quiet && flag_rise && flag_fall && flag_cleared);
+    bench.verdict("cts_interrupt(): one vector entry per toggle, four of four, the flag cleared in each",
+                  cts_entries == 4u && entries == 4u);
     U2::flow_control(false, false);
     all_off();
 
@@ -1806,8 +1847,10 @@ void after_a_tick() {
     }
 }
 
+/// What the starving fills write: letters u and n.
+uint8_t starve_dst[2048];
+
 void tu_overrun_tail() {
-    static uint8_t fill_dst[2048];
     static const uint8_t fill_cell = 0x5Au;
     if (!transport_on<DmaUart>(&dma_edge_isr, storm_baud)) {
         bench.verdict("USART2 with both engines comes up", false);
@@ -1826,7 +1869,7 @@ void tu_overrun_tail() {
         for (uint32_t i = 0; i < 4u; ++i) {
             bang_frame({.data = stream_byte(i), .baud = storm_baud});
         }
-        filled = Starver::fill(fill_dst, &fill_cell, sizeof fill_dst);
+        filled = Starver::fill(starve_dst, &fill_cell, sizeof starve_dst);
         for (uint32_t i = 4; i < 7u; ++i) {
             bang_frame({.data = stream_byte(i), .baud = storm_baud});
         }
@@ -1897,6 +1940,334 @@ void tu_overrun_tail() {
     bench.verdict("... and the next burst arrives whole, nothing else counted",
                   next == 8u && next_in_order && DmaUart::hw_overruns() - hw0 == 1u &&
                       DmaUart::dma_faults() == f0);
+    all_off();
+}
+
+// ===========================================================================
+// m - the released request, and the receive ring over a dead channel
+// ===========================================================================
+//
+// THE RELEASE CONTRACT on USART2 (docs/design/dma.md): its transmit request
+// (TXE under DMAT) on channel 6, its receive request (RXNE under DMAR) on
+// channel 7, each raised with no channel enabled to take it and let go one
+// way, then the channel's next owner counted (held_request.hpp). Then THE
+// RING OVER A DEAD CHANNEL: TIM2's channel 2 compare request held on
+// channel 7 before the transport arms its ring there, a frame banged into
+// the pad - the vector's stall bound (rx_stall_entries) is what keeps the
+// thread alive - and the timer's reset line, after which the ring lives.
+
+/// USART2 up bare at 9600 with one DMA request raised and nothing to take
+/// it: the transmit request by DMAT over a standing TXE, the receive one by
+/// DMAR and a frame banged in (RXNE then stands; the frame is 1 ms).
+void raise_u2_request(bool transmit) {
+    DmaChannel<6>::stop();
+    DmaChannel<7>::stop();
+    (void)resource_up({}, 9600);
+    if (transmit) {
+        U2::dma_transmit(true);
+        (void)delay_us(clock, 50);
+    } else {
+        U2::dma_receive(true);
+        bang_idle(9600, 2);
+        bang_frame({.data = 0xA5, .baud = 9600});
+        bang_idle(9600, 1);
+    }
+}
+
+/// The four ways of letting go, then the next owner of the request's channel.
+template <uint8_t ch>
+void release_ways(bool transmit, uint16_t (&moved)[5]) {
+    // The control: the block reset and gated, no request ever raised.
+    all_off();
+    moved[0] = held::next_owner_moves<ch>(clock);
+    // 1. The request bit cleared, the block clocked and enabled.
+    raise_u2_request(transmit);
+    if (transmit) { U2::dma_transmit(false); } else { U2::dma_receive(false); }
+    moved[1] = held::next_owner_moves<ch>(clock);
+    all_off();
+    // 2. UE, TE, RE and the request bit cleared, the clock on.
+    raise_u2_request(transmit);
+    U2::regs().CTLR3 = 0;
+    U2::regs().CTLR1 = 0;
+    moved[2] = held::next_owner_moves<ch>(clock);
+    all_off();
+    // 3. The gate closed with the request bit set, no reset.
+    raise_u2_request(transmit);
+    U2::bus_clock(false);
+    moved[3] = held::next_owner_moves<ch>(clock);
+    all_off();
+    // 4. The transport's release(): the reset line, then the gate.
+    raise_u2_request(transmit);
+    PlainUart::release();
+    moved[4] = held::next_owner_moves<ch>(clock);
+    all_off();
+}
+
+void tm_released_request() {
+    uint16_t tx[5] = {};
+    uint16_t rx[5] = {};
+    release_ways<6>(true, tx);
+    release_ways<7>(false, rx);
+    print(serial, "  the next owner moved (of 4) - control, request bit cleared, UE/TE/RE cleared, the gate closed, "
+                  "release():", crlf, "    channel 6 after USART2's transmit request: ", tx[0], " ", tx[1], " ", tx[2],
+          " ", tx[3], " ", tx[4], crlf, "    channel 7 after its receive request: ", rx[0], " ", rx[1], " ", rx[2], " ",
+          rx[3], " ", rx[4], crlf);
+    bench.verdict("with no request ever raised the next owner of channel 6 or 7 moves nothing", tx[0] == 0u && rx[0] == 0u);
+    bench.verdict("after the transport's release() - the reset line, then the gate - it moves nothing",
+                  tx[4] == 0u && rx[4] == 0u);
+    bench.verdict("every other way of letting go left the channel at most one stray item down",
+                  tx[1] <= 1u && tx[2] <= 1u && tx[3] <= 1u && rx[1] <= 1u && rx[2] <= 1u && rx[3] <= 1u);
+    if (tx[1] + tx[2] + tx[3] + rx[1] + rx[2] + rx[3] != 0u) {
+        print(serial, "  -> USART2's raised request OUTLIVES a release short of the reset line", crlf);
+    } else {
+        print(serial, "  -> USART2 withdraws its raised request on every release measured", crlf);
+    }
+
+    // THE RING OVER A DEAD CHANNEL. TIM2's held request first, then the
+    // transport by hand (transport_on() would reset TIM2 through all_off()).
+    all_off();
+    held::hold_compare_request<Tim<2>>(1, clock);
+    Dma::open();
+    u2_isr = &dma_edge_isr;
+    const bool up = DmaUart::init(clock, 9600);
+    RxPad::input(PinPull::up);
+    Pfic::enable(dma_channel_irq(6));
+    Pfic::enable(dma_channel_irq(7));
+    settle_ms(3);
+    uint8_t b = 0;
+    uint32_t stray = 0;
+    while (DmaUart::read_byte(b)) {
+        ++stray;   // the held request's one item: DATAR read into the ring
+    }
+    const uint16_t f0 = DmaUart::dma_faults();
+    const uint32_t k0 = DmaUart::rx_skips();
+    u2_interrupts = 0;
+    bang_idle(9600, 2);
+    bang_frame({.data = 0x5A, .baud = 9600});
+    bang_idle(9600, 2);
+    settle_ms(5);   // the idle line, then the wait for a frame meeting a channel that moves nothing
+    const uint32_t entries1 = u2_interrupts;
+    const uint16_t faults1 = static_cast<uint16_t>(DmaUart::dma_faults() - f0);
+    // The consumer's look: the ring given up is bound again - over the same
+    // dead channel, so the vector meets the frame again.
+    uint32_t got_dead = 0;
+    uint8_t first_dead = 0;
+    while (DmaUart::read_byte(b)) {
+        if (got_dead == 0u) { first_dead = b; }
+        ++got_dead;
+    }
+    settle_ms(5);
+    const uint32_t entries2 = u2_interrupts - entries1;
+    const uint16_t faults2 = static_cast<uint16_t>(DmaUart::dma_faults() - f0);
+    // The timer's reset line: the request drops, the channel lives - and,
+    // still enabled from the last look's binding, takes the frame DATAR
+    // holds into the lap that look started; the next look, finding the
+    // ring given up, binds it again from the first element and throws that
+    // lap away, the loss counted as a skip (restart_if_stopped()).
+    held::free_compare_request<Tim<2>>();
+    uint32_t got_after = 0;
+    uint8_t first_after = 0;
+    for (uint8_t look = 0; look < 3u; ++look) {   // the look that restarts, then the channel's item lands
+        while (DmaUart::read_byte(b)) {
+            if (got_after == 0u) { first_after = b; }
+            ++got_after;
+        }
+        settle_ms(1);
+    }
+    // Banged with the tick running, as letter i's frames at 9600: a masked
+    // stretch is only timed right for two tick periods (after_a_tick()), and
+    // the tick's handler stretches a bit of 5000 cycles by a few per cent.
+    bang_idle(9600, 2);
+    for (uint32_t i = 0; i < 8u; ++i) {
+        bang_frame({.data = stream_byte(60u + i), .baud = 9600});
+    }
+    bang_idle(9600, 2);
+    settle_ms(3);
+    uint32_t burst = 0;
+    bool in_order = true;
+    while (DmaUart::read_byte(b)) {
+        if (burst < 8u && b != stream_byte(60u + burst)) { in_order = false; }
+        ++burst;
+    }
+    const uint32_t skips = DmaUart::rx_skips() - k0;
+    print(serial, "  the ring over channel 7 held by TIM2: ", up ? "up" : "DOWN", ", ", stray,
+          " stray byte(s) at its arming; a frame banged: ", entries1, " vector entries, ", faults1,
+          " channel(s) given up; the consumer's look (",
+          got_dead, " byte(s), ", hex(first_dead), ") and ", entries2, " entries more, ", faults2,
+          " given up in all; TIM2 reset: ", got_after, " byte(s) (", hex(first_after), "), ", skips,
+          " skip(s) counted; then a burst of 8: ", burst, in_order ? " in order" : " NOT in order", crlf);
+    bench.verdict("the held request moves one stray item into the ring at its arming", up && stray == 1u);
+    // The bound: the idle line's entry, then rx_stall_entries (255) entries
+    // of the wait for a frame, the 255th giving the channel up - 256 - and
+    // a second give-up of the same size after the consumer's look binds the
+    // ring again over the same dead channel; 300 each covers a tick's entry
+    // or two beside them.
+    bench.verdict("THE STALL BOUND: the vector gives the dead channel up (a DMA fault counted) after some 256 "
+                  "entries and the thread runs on - no storm",
+                  faults1 == 1u && entries1 >= 255u && entries1 <= 300u && entries2 <= 300u && faults2 <= 2u);
+    bench.verdict("the frame banged over the dead channel never reaches the consumer - a channel bound again over "
+                  "the held request takes no second stray - and its loss is counted: a skip",
+                  got_dead == 0u && got_after == 0u && skips >= 1u);
+    bench.verdict("after TIM2's reset line a burst of 8 arrives whole and in order", burst == 8u && in_order);
+    Pfic::disable(dma_channel_irq(6));
+    Pfic::disable(dma_channel_irq(7));
+    all_off();
+}
+
+// ===========================================================================
+// n - the overrun clear's window: a frame's request against the CPU's read
+// ===========================================================================
+//
+// THE QUESTION ch32v00x/usart.hpp's rx_overrun_probe leaves open: a frame
+// that completes between the probe's STATR and DATAR loads - does the
+// request it raised outlive the CPU's read of DATAR, so that the receive
+// channel still stores its byte? Staged with the bare resource and a
+// one-shot channel 7 from DATAR (DMAR set, no USART interrupt): a fill on
+// channel 1 at very_high - the tie it wins (8.2.1, test_ch32_dma letter i) -
+// starves channel 7 while ONE frame is banged in at 115200; the CPU then
+// reads STATR and DATAR, the fill still running, and channel 7's count is
+// read once the fill has ended. The control leaves DATAR to the channel.
+
+struct WindowCase {
+    bool fill_ran_over;   ///< the fill still busy after the CPU's reads (the staging held)
+    uint16_t status;      ///< what STATR showed the CPU
+    uint8_t cpu_byte;     ///< what the CPU's DATAR read gave (the case)
+    uint16_t moved;       ///< items channel 7 moved
+    uint8_t ring_byte;    ///< what it stored
+};
+
+WindowCase clear_window(bool cpu_reads) {
+    static const uint8_t fill_cell = 0x3Cu;
+    static uint8_t ring[4];
+    using Rx7 = DmaChannel<7>;
+    all_off();
+    (void)resource_up({}, storm_baud);
+    Starver::arm(DmaPriority::very_high, false);
+    ring[0] = 0xEE;
+    Rx7::stop();
+    (void)Rx7::prepare(DmaTransfer{.peripheral = &U2::regs().DATAR, .memory = ring, .count = 4,
+                                   .config = {.direction = DmaDirection::peripheral_to_memory,
+                                              .memory_increment = true, .priority = DmaPriority::very_high}});
+    U2::clear_by_read();
+    U2::dma_receive(true);
+    Rx7::enable(true);
+    WindowCase w{};
+    after_a_tick();
+    {
+        P::CriticalSection cs;
+        bang_idle(storm_baud, 2);
+        // 2048 bytes at the controller's six cycles: some 12 300 cycles,
+        // where the frame and the reads below take some 4 600.
+        (void)Starver::fill(starve_dst, &fill_cell, sizeof starve_dst);
+        bang_frame({.data = 0xC6, .baud = storm_baud});
+        if (cpu_reads) {
+            w.status = U2::status();
+            w.cpu_byte = static_cast<uint8_t>(U2::read_word());
+        }
+        w.fill_ran_over = Starver::busy();
+        for (uint32_t i = 0; i < 100'000u && Starver::busy(); ++i) {
+        }
+        bang_idle(storm_baud, 4);
+    }
+    __asm__ volatile("" ::: "memory");
+    w.moved = static_cast<uint16_t>(4u - Rx7::count());
+    w.ring_byte = ring[0];
+    Rx7::stop();
+    all_off();
+    return w;
+}
+
+void tn_clear_window() {
+    const WindowCase control = clear_window(false);
+    const WindowCase caught = clear_window(true);
+    print(serial, "  the control (no CPU read): the fill over the frame ", control.fill_ran_over, ", channel 7 moved ",
+          control.moved, " (", hex(control.ring_byte), ")", crlf, "  the CPU's STATR ", hex(caught.status),
+          " and DATAR ", hex(caught.cpu_byte), " inside the fill (still running ", caught.fill_ran_over,
+          "): channel 7 moved ", caught.moved, " (", hex(caught.ring_byte), ")", crlf);
+    bench.verdict("the staging held: the fill outlasted the frame and the CPU's reads, the frame's RXNE seen by the "
+                  "CPU, and in the control the starved channel took the frame once the fill ended",
+                  control.fill_ran_over && caught.fill_ran_over && (caught.status & usart_rxne) != 0u &&
+                      caught.cpu_byte == 0xC6u && control.moved == 1u && control.ring_byte == 0xC6u);
+    bench.verdict("the frame's request after the CPU's read of DATAR: channel 7 moved one item or none",
+                  caught.moved <= 1u);
+    if (caught.moved == 1u) {
+        print(serial, "  -> THE REQUEST OUTLIVES THE CPU'S READ: the starved channel still stored ",
+              hex(caught.ring_byte), " - the frame's byte - once the fill ended", crlf);
+    } else {
+        print(serial, "  -> THE CPU'S READ WITHDRAWS THE REQUEST: the channel stored nothing of that frame", crlf);
+    }
+}
+
+// ===========================================================================
+// o - the flow-control options as a port
+// ===========================================================================
+//
+// The transport's `rts` and `cts` options (UartOptions) on column 3: the
+// port's own init() hands RTS (PA1) to the function and CTS (PA0) an input
+// pulled up, sets RTSE and CTSE; the interrupt transport then runs on it.
+// CTS is moved by its pad's pull, RTS read off its pad.
+
+void to_flow_port() {
+    all_off();
+    if (crystal_ok) {
+        print(serial, "  SKIPPED, no verdict claimed: RTS is PA1, the 24 MHz crystal's pad, and the crystal runs "
+                      "HCLK in this image", crlf);
+        return;
+    }
+    u2_isr = &FlowUart::isr;
+    const bool up = FlowUart::init(clock, storm_baud);
+    RxPad::input(PinPull::up);   // the banged line, over the transport's floating input
+    const bool options = U2::rts_enabled() && U2::cts_enabled();
+    CtsPad::clear();   // its pull down: clear to send
+    settle_ms(1);
+    // A run with CTS low: 64 frames at the wire's pace.
+    const uint32_t pm = transport_permille<FlowUart>(storm_baud, 64);
+    // CTS high: four bytes queued stay queued. At 115200 four frames are
+    // 347 us; 2 ms is nearly six times that.
+    CtsPad::set();
+    settle_ms(1);
+    static const uint8_t four[4] = {0x11, 0x22, 0x33, 0x44};
+    (void)FlowUart::write_bulk(std::span<const uint8_t>(four, 4));
+    settle_ms(2);
+    const bool held_back = !FlowUart::tx_idle();
+    CtsPad::clear();
+    const uint32_t t_go = Ticker::millis();
+    while (!FlowUart::tx_idle() && Ticker::millis() - t_go < 5u) {
+    }
+    const bool let_out = FlowUart::tx_idle();
+    // RTS: a frame banged in with the vector held off - the byte waits in
+    // DATAR and RTS stands high; the vector, once let in, reads it and RTS
+    // falls.
+    uint8_t junk = 0;
+    while (FlowUart::read_byte(junk)) {
+    }
+    const bool rts_idle_low = !RtsPad::read();
+    bool rts_high_pending = false;
+    after_a_tick();
+    {
+        P::CriticalSection cs;
+        bang_idle(storm_baud, 2);
+        bang_frame({.data = 0x6D, .baud = storm_baud});
+        bang_idle(storm_baud, 2);
+        rts_high_pending = RtsPad::read();
+    }
+    settle_ms(1);
+    const bool rts_low_again = !RtsPad::read();
+    uint8_t got = 0;
+    const bool came = FlowUart::read_byte(got);
+    print(serial, "  the port with rts and cts: up ", up, ", RTSE/CTSE ", options, "; 64 frames with CTS low in ", pm,
+          " thousandths of their wire time; CTS high: queued bytes held ", held_back, ", let out ", let_out,
+          "; RTS idle ", rts_idle_low ? "low" : "HIGH", ", a byte unread ", rts_high_pending ? "high" : "LOW",
+          ", read by the vector ", rts_low_again ? "low" : "HIGH", " (", hex(got), ")", crlf);
+    bench.verdict("the transport's rts and cts options make the port: RTSE and CTSE set by init(), a run at the "
+                  "wire's pace with CTS low, -1 % to +3 %",
+                  up && options && on_the_wire(pm));
+    bench.verdict("CTS high holds the queued bytes for 2 ms, six frames' time; CTS low lets them out",
+                  held_back && let_out);
+    bench.verdict("RTS low while the port can take a frame, high while one waits unread, low once the vector took "
+                  "it - the byte delivered",
+                  rts_idle_low && rts_high_pending && rts_low_again && came && got == 0x6Du);
+    FlowUart::release();
     all_off();
 }
 
@@ -3370,6 +3741,10 @@ int main() {
     bench.letter('s', "the burst edge from the vector, nothing polled", ts_edge);
     bench.letter('t', "the rate verbs: set_baud(), can_baud(), min_hz_for(), release()", tt_rate_verbs);
     bench.letter('u', "an overrun at a burst's tail under the receive engine: no storm", tu_overrun_tail);
+    bench.letter('m', "the released request: USART2's own on channels 6 and 7; the ring over a dead channel",
+                 tm_released_request);
+    bench.letter('n', "the overrun clear's window: a frame's request against the CPU's read", tn_clear_window);
+    bench.letter('o', "the flow-control options as a port: rts and cts", to_flow_port);
     bench.letter('y', "host-assisted (brio stress): the console's own error counters", ty_host, false);
     bench.second_letter('1', "the CH32X035 peer: the rendezvous, its HSI calibrated against this crystal", two::t1_link);
     bench.second_letter('2', "the echo ladder 9600..3 Mbaud, each rate timed by the far chip", two::t2_rates);

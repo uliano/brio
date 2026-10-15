@@ -118,7 +118,7 @@ is that board's suite's instrument (below).
 | CRC (16.2.5) | the resource's verbs | measured both calculators; a tenure shape with a CRC is born with a device that checks one |
 | BIDIMODE/BIDIOE, RXONLY (16.2.4) | the resource's configuration | a receive-only host clocks for as long as SPE stands, which no Request bounds; the client's dark listener is an undriven pad |
 | TXE, RXNE and the errors on one vector (16.2.8, table 7-1 entry 33) | RXNE alone | the pump's edge is the frame that came back, the witness that the bus is idle for the next |
-| SRAM execution (the instruction fetch) | offered, the program's choice per host, for the paths that run once a frame | the host's placement (util/placement.hpp): under `InRam` the pump's entry and both polled loops run from `.fast_text.brio` - the transmit-only loop at the wire at /2, the pump's frame a sixth shorter behind a vector in the flash, and their cost independent of the layout; under `InFlash`, the default, they cost no SRAM; the paths that run once a transaction stay in the flash under either (measured, below) |
+| SRAM execution (the instruction fetch) | offered, the program's choice per host, for the paths that run once a frame | the host's placement (util/placement.hpp): under `InRam` the pump's entry and both polled loops run from `.fast_text.brio` - the transmit-only loop at the wire at /2 and the pump's frame a sixth shorter behind a vector in the flash; under `InFlash`, the default, they cost no SRAM, and the two polled loops' functions are aligned to the fetch's word, which fixes their cost from the flash (below); the paths that run once a transaction stay in the flash under either (measured, below) |
 
 ## Types and verbs
 
@@ -282,16 +282,26 @@ spi_link: 39 verdicts. Each was green whole on the final images.
   MSTR and SPE cleared, four of four; STATR 0x22 before the clearing
   sequence, 0x02 after it, once the pad has been high a millisecond.
 - **The fetch** (letter b): the same bare transmit loop takes 20.8 cycles
-  a frame at /2 from the flash and 16.7 - the wire - from SRAM. From the
-  flash a loop's cost also moves with where the code around it sits: the
-  host's own transmit-only loop took 20.0 and 28.0 cycles a frame at /2
-  and its receive loop 76.0 and 52.0 at /4 in two builds that changed
-  nothing in the loops (and 32-byte alignment of the loop does not hold
-  it: 50.4 in one aligned image, 70.9 in another). So the host offers
-  the program its per-frame paths in SRAM - the pump's entry and both
-  polled loops, `InRam` ([platform.md](platform.md), "A handler in
-  SRAM") - and the table below gives both placements, the suite's own
-  vector in the flash.
+  a frame at /2 from the flash and 16.7 - the wire - from SRAM. FROM THE
+  FLASH A LOOP'S COST IS A FUNCTION OF ITS ADDRESS MODULO FOUR, the
+  fetch's word, and of no other bit of it: the host's polled functions,
+  the same instructions moved through 32 bytes in steps of two, took at
+  every offset 0 mod 4 51.9 to 52.0 cycles a frame at /2 and /4 and 152.0
+  at /16 for the receive loop and 24.0 at /2 for the transmit-only loop,
+  and at every offset 2 mod 4 47.9, 72.0, 176.0 and 28.0 - two values,
+  nothing between them. Code of four taken forward branches showed the
+  same period (68 and 72 cycles), straight-line code and three-instruction
+  loops none, and SRAM none within a cycle ([platform.md](platform.md), "A
+  handler in SRAM"). A function under -Os with the compressed
+  instructions is aligned to two bytes only, so the image's layout picked
+  the cost - a change elsewhere that moved these functions by 30 bytes
+  turned the receive loop's 52.0 at /4 into 72.0 - and `-falign-loops`
+  does nothing in a function optimized for size. The two polled
+  functions are therefore `aligned(4)`: two bytes of padding at most, the
+  cost the code's own. The host also offers the program its per-frame
+  paths in SRAM - the pump's entry and both polled loops, `InRam` - and
+  the table below gives both placements, the suite's own vector in the
+  flash.
 - **The pump's placement** (letter b at /2, where the handler bounds the
   bus, the suite's vector with its stamps and its owner switch): 268.6
   cycles a frame with the body inline in the vector in the flash
@@ -361,15 +371,15 @@ the frames within 10 per cent of it and the fixed costs within 30:
 | the pump | 225.1 / 268.6 at /2, 254.2 / 264.6 at /16 - the handler bounds it | 1050 / 681 | - |
 | the receive loop, one in flight | 28.9 / 51.9 at /2, 46.9 / 52.0 at /4, 141.0 / 152.0 at /16 | 765 / 580 at /4 | 16, 32, 128 |
 | the receive loop, two in flight | 512.0 / 511.9 at /64 | - | 512 |
-| the transmit-only loop | 15.9 / 28.0 at /2, 31.9 / 32.0 at /4, 63.9 / 63.9 at /8, 128.0 / 128.0 at /16 | - | 16, 32, 64, 128 |
+| the transmit-only loop | 15.9 / 24.0 at /2, 31.9 / 32.0 at /4, 63.9 / 63.9 at /8, 128.0 / 128.0 at /16 | - | 16, 32, 64, 128 |
 | a 3-frame polled request (a command and two data frames) | 1272 / 1136 in all at /16 | - | 384 |
 
 - **The transmit-only loop** is seven instructions a frame with one taken
   branch, specialized on whether the out buffer exists (the dummy an
   immediate): from SRAM within 5 per cent of the wire at /2 and /4 and at
   the wire from /8; from the flash within 5 per cent at /4 and at the
-  wire from /8, its frame at /2 the layout's (20.0 and 28.0 in two
-  builds).
+  wire from /8, its frame at /2 24.0, the fetch's bound (28.0 when the
+  function sat half a word off, above).
 - **The receive loop** keeps one frame in flight below the threshold:
   some 15 cycles of dead bus a frame at /4 from SRAM (the poll's last
   turn, the read, the write), 20 from the flash; two in flight from /64,

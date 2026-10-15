@@ -623,7 +623,7 @@ public:
     /// transfer error has already cleared it, a time-out has not) - and
     /// count the fault. The binding stands: the next start() needs no arm().
     static bool abandon() {
-        ++faults_;
+        faults_ = faults_ + 1u;
         Line::halt();
         busy_ = false;
         in_flight_ = 0;
@@ -654,7 +654,7 @@ private:
 
     static inline uint32_t word_ = 0;
     static inline uint32_t armed_ = 0;
-    static inline uint32_t faults_ = 0;
+    static inline volatile uint32_t faults_ = 0;   ///< bumped from a vector, read by the thread
     static inline uint16_t in_flight_ = 0;
     static inline volatile bool busy_ = false;
 };
@@ -766,7 +766,7 @@ public:
     /// Throw the running block away - the channel halted - and count the
     /// fault. The binding stands.
     static bool abandon() {
-        ++faults_;
+        faults_ = faults_ + 1u;
         Line::halt();
         capacity_ = 0;
         taken_ = 0;
@@ -834,7 +834,7 @@ private:
 
     static inline uint32_t word_ = 0;
     static inline uint32_t armed_ = 0;
-    static inline uint32_t faults_ = 0;
+    static inline volatile uint32_t faults_ = 0;   ///< bumped from a vector, read by the thread
     static inline volatile uint32_t laps_ = 0;
     static inline uint16_t capacity_ = 0;
     static inline uint16_t taken_ = 0;
@@ -920,7 +920,7 @@ public:
             return true;
         }
         if ((f & DmaFlag::error) != 0u) {
-            ++faults_;
+            faults_ = faults_ + 1u;
         }
         busy_ = false;
         return false;
@@ -945,7 +945,7 @@ public:
         const uint32_t up = Line::service(Dma::flags(), armed_);
         if (up != 0u) {
             if ((up & DmaFlag::error) != 0u) {
-                ++faults_;
+                faults_ = faults_ + 1u;
             }
             busy_ = false;
         }
@@ -968,7 +968,7 @@ private:
 
     static inline uint32_t word_ = 0;
     static inline uint32_t armed_ = 0;
-    static inline uint32_t faults_ = 0;
+    static inline volatile uint32_t faults_ = 0;   ///< bumped from a vector, read by the thread
     static inline volatile bool busy_ = false;
 };
 

@@ -57,9 +57,10 @@ reference suite `test_x035_dma`, the transport's engines across a wire in
   with a 16-bit width the module drops bit 0, with a 32-bit one bits 1:0 -
   a half-word block pointed at an odd address moves the even address's
   half-words and completes (measured).
-- **A read from a hole in the map completes as a normal block** (measured,
-  five holes): 9.2.1 promises TEIF and an automatic EN drop for a reserved
-  address, and no address the bench could name produced either.
+- **A read from or a write into a hole in the map, and a write into the
+  flash, complete as normal blocks** (measured, five holes each way and the
+  flash locked and open): 9.2.1 promises TEIF and an automatic EN drop for a
+  reserved address, and no address the bench could name produced either.
 - **Six HCLK cycles an item at every width** from SRAM, eleven and a half
   a word from the flash (two wait states at 48 MHz): the controller is a
   master of the bus matrix at HCLK, and an item is a read, a write and the
@@ -84,7 +85,7 @@ engines do with each:
 |---|---|---|
 | the register file (CFGR, CNTR, PADDR, MADDR) | yes | PADDR and the configuration word at `arm()`, once; a block is FIVE STORES - CFGR with EN clear, CNTR, MADDR, INTFCR, CFGR with EN - and no load; the copy engine's SIX, PADDR the second. The word is kept in the engine, because the enable store needs it and a read-modify-write would read it back from the bus |
 | the write protection of 9.2.1, and EN standing after a block | yes | the block's first store is the word with EN clear: the disable the note asks for, which EN standing from the last block makes necessary, and the store that changes the beat or the increment in the same access - and every address store comes after it (PADDR stored first was dropped, measured) |
-| the two width fields | yes | the BEAT: PSIZE and MSIZE both follow the element of the run a block is handed (8, 16 or 32 bits); unequal widths (table 9-1's packing and truncation) declined - no transport's register and buffer differ in width |
+| the two width fields | yes | the BEAT: PSIZE and MSIZE both follow the element of the run a block is handed (8, 16 or 32 bits); unequal widths (table 9-1's packing and truncation, measured as the table spells it) declined - no transport's register and buffer differ in width; the one-shot channel takes them |
 | the address alignment of 9.3.5/9.3.6 | yes | a run off its beat's boundary is REFUSED, its caller falling back to whatever moves it otherwise |
 | the increments | yes | MINC per block (a run, or one fixed cell a bus write clocks out or a discard cell a bus read fills); PINC for the copy |
 | memory to memory | yes | `DmaCopyEngine`: no request, the channel runs from its enable |
@@ -163,7 +164,7 @@ each half into a ring of their own:
 |---|---|---|---|
 | the USART's block start (`pump_tx`, a run in the ring) | 58 over three bodies (`pump_tx`, the ring's `read_span`, the engine's `launch`) | 5 stores, no load (and one USART store: TC written 0) | - |
 | the USART's mask around it | 6 between the `csrrci` and the `csrsi`: the claim, a byte in RAM | none | - |
-| the USART's completion vector (a block done, the next started) | the ring's `consume` and the block start flattened into one body, no call (`tx_block_done`): inline in the vector by default, 271 to 273 cycles from the flash measured between the body's first and last statement at 48 MHz; under the port's `InRam`, one instance of 204 bytes in SRAM, 170 to 175 cycles ([usart.md](usart.md), letter `s`) | one INTFR load, the INTFCR store | one a block |
+| the USART's completion vector (a block done, the next started) | the vector's whole body - the flags' read, both channels' service, the ring's `consume` and the block start - flattened into one, no call (`dma_isr()`): inline in the vector by default, 285 to 288 cycles from the flash in the suite's image, measured between the body's first and last statement at 48 MHz, a transfer error's path a call out of it; under the port's `InRam`, one instance of 326 bytes in SRAM, 129 to 132 cycles ([usart.md](usart.md), letter `s`) | one INTFR load, the INTFCR store | one a block |
 | the USART's receive ring | none a byte: the vector's two states and the ring's two marks | none a byte | two a burst, two a lap |
 | a memory-to-memory block (`DmaCopyEngine::copy()`) | the six stores and the busy flag | 6 stores | one a block, or none polled |
 
@@ -228,7 +229,7 @@ sleep: `idle()` returns at once while `Dma::any_working()` answers true
 ## Bench findings
 
 The reference suite is `test_x035_dma` on the CH32X035F8U6 at 48 MHz, ITS
-OWN CONSOLE ON THE TWO ENGINES (USART2 on channels 7 and 6), 52 verdicts
+OWN CONSOLE ON THE TWO ENGINES (USART2 on channels 7 and 6), 55 verdicts
 in `z`; the paced loads are USART3's transmitter, whose column is handed
 no pad. The transport's engines across a wire are `test_x035_usart`'s
 ([usart.md](usart.md)).
@@ -246,9 +247,20 @@ no pad. The transport's engines across a wire are `test_x035_usart`'s
   8 ended in its own handler, the eighth at entry 44; 6 and 7 are the
   console's engines'.
 - **No hole raises TEIF** (letter `d`): reads from 0x3000 0000 (which
-  answered a byte that changed from run to run), 0x4003 0000, 0x5000 0000,
-  0x6000 0000 and 0xA000 0000 each completed as a four-byte block, EN
-  still set.
+  answered a byte that changed between sessions and held within one),
+  0x4003 0000, 0x5000 0000, 0x6000 0000 and 0xA000 0000 each completed as
+  a four-byte block, EN still set, and writes into the same five completed
+  the same way. **Nor does a write into the flash**, a destination 9.2.1
+  lists: one word of zero written onto a word of the image that reads zero
+  completed with TCIF and EN standing, the program/erase controller locked;
+  and with its lock open and no operation armed, through the array's own
+  address and through its 0x0800 0000 alias, the same, STATR showing no
+  WRPRTERR and the word still zero (ten runs).
+- **Unequal widths land as table 9-1 spells them** (letter `n`, ten runs):
+  four items at each of the nine pairs of source and target widths, every
+  target byte compared - a narrow source zero-filled into a wide target, a
+  wide one truncated to its low bytes (32 to 8 bits: B0 B4 B8 BC), nothing
+  written past the fourth item.
 - **The console's transmit engine at the rate asked** (letter `e`): 272
   bytes in six blocks with no fault, 1001 thousandths of their wire time
   at 115200.
@@ -347,12 +359,11 @@ Driver gaps, each with its reason:
 Implemented but not bench-verified, each with what would measure it:
 
 - **The transfer-error path** (TEIE, the engines' `abandon()` and the
-  fault counters): written from 9.2.1 and provoked by no address the suite
-  could find; a peripheral that raises it, or a write into the flash,
-  would measure it.
-- Widening and truncation between unequal widths (table 9-1): the one-shot
-  channel takes two widths and the engines always set them equal; a copy
-  with PSIZE and MSIZE apart, compared against the table.
+  fault counters): written from 9.2.1 and provoked by nothing the bench
+  found - reads and writes of five holes in the map and writes into the
+  flash, locked and open, all complete as normal blocks (above); a
+  peripheral whose bus answers an access with an error, if this die has
+  one, would measure it.
 - The six parts other than the CH32X035F8U6: the request table's rows by
   part are compiled for all seven (`brio check ch32x035`); a board of each
   package would measure the USART1 rows the QFN20 does not offer.

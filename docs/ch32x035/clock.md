@@ -246,6 +246,13 @@ letter `a`. What they measured:
   session, +37, +248, +158 in another):
   the oscillator's wander bounds what a calibration is worth, and a
   program that needs better calibrates again before it needs it.
+- **The rate against a host's clock** (letter `d`, four runs, its lines
+  time-stamped by a host on an NTP-disciplined clock): 3000 ticks at 48
+  MHz in 3.0071 to 3.0074 s - 2370 to 2460 ppm slow, the HSI's error the
+  crystal measured; and 3000 ticks at the reset rate of 8 MHz, the same
+  oscillator divided by HPRE, in 3.0040 to 3.0044 s - 1330 to 1460 ppm
+  slow, a thousand ppm less: the two rates' brackets do not agree, which
+  is not explained (the list below).
 - **The clock output's multiplexer** (letter `e`): the source field takes
   SYSCLK, the HSI and nothing, and reads each back; `Mco::init()`
   answers false on this package, which does not bond PB9, and `off()`
@@ -309,6 +316,11 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
+- **The tick at 8 MHz a thousand ppm faster than at 48 MHz on one
+  oscillator** (letter `d`, above), measured and not explained: the
+  divided rung's tick, its STK's reload and the ticker's rebase are the
+  places to look; letter `d`'s brackets at the ladder's other rungs, and
+  the STK's CNT read across one reload at 8 MHz, would say which.
 - **The clock output's waveform**: the multiplexer is measured (letter
   `e`); what leaves PB9 wants a package that bonds it and a counter on
   the pad.

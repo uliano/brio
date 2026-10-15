@@ -308,10 +308,34 @@ the consume was measured before and after. What it measured:
   handler's first and last statements and when the raiser sees it done,
   64 rounds each and every raise taken: entry 37 in every round, body 27,
   exit 36 with one iteration of the raiser's spin in it, the whole trip
-  100 to 104 - the same in both runs. That is the image built with the
-  hardware prologue (`CH32X035_HPE=ON`, the default); the image built
-  without it has not run, so what the prologue buys on this core is not
-  measured (the list below).
+  100 to 104 - the image built with the hardware prologue
+  (`CH32X035_HPE=ON`, the default). In an image built with
+  `CH32X035_HPE=OFF` (its `z` green, 51 verdicts, ten runs of the letter):
+  entry 42, body 28, exit 50, the trip 120 to 128 - THE PROLOGUE BUYS 20
+  TO 24 CYCLES on the minimal handler, the sixteen registers saved and
+  restored by gcc's own code instead. The user stack the image never
+  touched reads 19004 bytes with it and 18972 without: 32 bytes, the
+  deepest handler frame's software saves, which the hardware stack takes
+  instead.
+- **The InRam bodies without the hardware prologue** (`test_x035_spi`
+  letter `b` in an image built with `CH32X035_HPE=OFF`, three runs): the
+  SPI pump's frame - its body placed in SRAM, called from a vector in the
+  flash - 289 cycles against 224 with the prologue, and from the flash
+  332.5 against 268: some 65 cycles a frame more either way, the vector
+  saving the caller-saved registers in software around the call. Its
+  handler bodies: the console's 148 cycles, the tick's 69, the pump's 270,
+  all still under the host's default hold-off of 380. The SRAM
+  transmit-only loop reads 17.0 cycles a frame at /2 against the wire's
+  16 (16.0 with the prologue), and the costs no longer match the
+  constants the host states, which are the default image's: the letter's
+  verdicts on both fail in that image, as they must.
+- **The tick inherits the HSI's error** (letter `g`, six runs): 5000
+  ticks bracketed by two console lines, the lines time-stamped as they
+  arrive by a host on an NTP-disciplined clock: 5.0120 to 5.0134 s - the
+  tick 2410 to 2690 ppm slow, the HSI's -0.24 to -0.27 per cent at the
+  factory calibration and the trim's centre, which the desk's crystal
+  measured too ([clock.md](clock.md)); the arrival jitter of the probe's
+  bridge is a millisecond or so, some 200 ppm of a 5 s bracket.
 - **corecfgr's 0x1F makes this core SLOWER** (letter `f`). The crt left
   0x1F in the register; 2000 iterations of a loop with a load and a
   data-dependent branch over a 64-byte pseudo-random table took 24204
@@ -418,9 +442,9 @@ suite with the path in the flash and in SRAM, nothing else moved:
 | path | placed by | from the flash | from SRAM | SRAM bytes |
 |---|---|---|---|---|
 | the SPI pump, a frame at /2, behind the suite's vector (stamps, owner switch) | the driver (`InRam`) | 268.6 cycles | 225.1 | 302, 332 with engines |
-| the SPI transmit-only loop, a frame at /2 (the wire 16) | the driver | 28.0 (20.0 in another build) | 16.0 | 798 a host type, both loops |
-| the SPI receive loop, a frame at /2 and /4 (the wire 16, 32) | the driver | 51.9, 52.0 (76.0 at /4 in another build) | 28.9, 46.9 | (above) |
-| the USART transmit engine's completion, its body | the driver | 271 to 273 (293 at most), the line idle at a block boundary above 1.5 Mbaud | 173 to 175 (191 at most), gapless to 3 Mbaud | 204 |
+| the SPI transmit-only loop, a frame at /2 (the wire 16) | the driver | 24.0, its function aligned to a word | 16.0 | 798 a host type, both loops |
+| the SPI receive loop, a frame at /2 and /4 (the wire 16, 32) | the driver | 51.9, 52.0, aligned likewise | 28.9, 46.9 | (above) |
+| the USART transmit engine's completion, the DMA vector's body | the driver | 285 to 288 (324 at most) with the vector on a word, 276 to 283 half a word off; the line idle at a block boundary above 1.5 Mbaud | 129 to 132 (154 at most), gapless to 3 Mbaud | 326 |
 | a USART's interrupt transport, a gapless run of 256 in | the driver, or the program's vector | whole to 2 Mbaud | to 2.4 Mbaud behind a vector in the flash; to 3 Mbaud with the vector placed | 488 an engined port's `isr()`; the suite's vector 1324 |
 | the I2C event pump's entry, a 255-byte write and a 16-byte read | the driver, or the program's vector | 205, 253 (333 at most) | 140, 157 behind a vector in the flash (195 at most); 79, 94 with the vector placed | 968 for one plain host |
 | the console's handler body (115200, `test_x035_spi`) | the program | 145 | 66 | 404 |
@@ -428,10 +452,18 @@ suite with the path in the flash and in SRAM, nothing else moved:
 
 The handler bodies are stamped on the STK between their first and last
 statement; the hardware prologue's entry and exit, 100 to 104 cycles a
-round trip with the vector in the flash (above), are outside them. A
-loop's cost from the flash moves with where the loop sits - the two
-builds in the table, nothing changed but the code around them - and
-from SRAM it does not.
+round trip with the vector in the flash (above), are outside them. FROM
+THE FLASH, CODE WITH TAKEN BRANCHES COSTS WHAT ITS ADDRESS MODULO FOUR
+MAKES IT, the fetch's word: the same instructions at every offset through
+32 bytes took one of two costs, by the offset's second bit and by
+nothing else - 52.0 or 72.0 cycles a frame for the SPI receive loop at
+/4, 68 or 72 for a body of four taken forward branches - where
+straight-line code and three-instruction loops did not move and SRAM
+moved by a cycle at most (a scratch sweep, [spi.md](spi.md), "The
+fetch"). gcc aligns a function to two bytes under -Os, so a function
+that keeps a stated flash cost is `aligned(4)` - the SPI host's polled
+loops; a VECTOR is the program's, placed where its image puts it, and
+the flash figures of the table are those of the suites' images.
 
 **What it costs.** The bytes in the last column, of the part's 20 KB -
 the load image stays in the flash beside them. A placed function exists
@@ -472,20 +504,6 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
-- **The drivers' `InRam` bodies without the hardware prologue**: a
-  vector that calls one saves the caller-saved registers in software in
-  an image built with `CH32X035_HPE=OFF`; test_x035_spi's letter `b` in
-  such an image would price the call.
-- **What the hardware prologue buys on this core**: letter `e` has run
-  in the image built with it (above); the same letter in an image built
-  with `CH32X035_HPE=OFF` is the other half of the difference, and
-  `stack_untouched()` after it the user stack the internal hardware stack
-  spares.
-- **The HSI's own accuracy**, which the tick inherits: letter `g`
-  brackets 5000 ticks between two console lines and runs to its count;
-  what is missing is a host that time-stamps the two lines as they
-  arrive - the clock suite's letter `d` asks the same at two rates
-  ([clock.md](clock.md)).
 - **The deep path, `idle_deep()`**: no verb of this stratum sets
   SLEEPDEEP, so the paused timebase, the unmask before the `wfi` and the
   absent consume are unmeasured; the sleep site born with the power

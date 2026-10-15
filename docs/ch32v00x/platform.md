@@ -158,9 +158,10 @@ goes through `panic<P, ResetReporter>(code, context)`.
 
 ## Bench findings
 
-The reference suite is `test_ch32_platform` (thirty-nine verdicts in
+The reference suite is `test_ch32_platform` (forty-one verdicts in
 `z`, nine more in letter `i`, which reboots the board three times), on
-the CH32V006K8U6 at 48 MHz. What it measured:
+the CH32V006K8U6 at 48 MHz, and letters `e` and `u` again in an image
+built with `CH32V00X_HPE=OFF` (its `z` green too). What it measured:
 
 - **The idle hook wakes.** With the console silent, two `idle()` calls
   covered the rest of the tick (632 to 888 us across runs; the first
@@ -216,25 +217,32 @@ the CH32V006K8U6 at 48 MHz. What it measured:
   (65 ppm, and under one period). `delay_us(100)` spent 4871 cycles
   for 4800 asked; twenty `delay_us(500)` took exactly 10 ticks; 1000
   us and above are refused.
-- **The interrupt round trip, in HCLK cycles**, a software interrupt
-  raised by hand with the cycle counter read at the raise, at the
-  handler's first and last statements and when the raiser sees it
-  done, 64 rounds each, every round identical:
+- **The interrupt round trip, in HCLK cycles** (letters `e` and `u`, ten
+  runs of each on each build): a line pended by hand through the PFIC
+  with the cycle counter read at the raise, at the handler's first and
+  last statements and when the raiser sees it done, 64 rounds each,
+  every round identical - the software interrupt's minimal handler, and
+  the console's own USART vector around the transport's `isr()` with
+  nothing for it to do:
 
-  | image | entry | body | exit | whole trip |
+  | handler, image | entry | body | exit | whole trip |
   |---|---|---|---|---|
-  | HPE on (`CH32V00X_HPE=ON`, the default) | 29 | 23 | 31 | **83** |
-  | HPE off (gcc's own prologue) | 35 | 24 | 33 | **92** |
+  | minimal, HPE on (`CH32V00X_HPE=ON`, the default) | 28 | 20 | 33 | **81** |
+  | minimal, HPE off (gcc's own prologue) | 31 | 21 | 32 | **84** |
+  | the console's USART handler, HPE on | 27 | 55 | 47 | **129** |
+  | the console's USART handler, HPE off | 32 | 61 | 57 | **150** |
 
-  Nine cycles on a minimal handler - 0.19 us at 48 MHz - is what the
-  hardware prologue is worth in latency: the ten registers go to the
+  Three cycles on the minimal handler and 21 - 0.44 us at 48 MHz, a
+  seventh of the trip - on the console's: the ten registers go to the
   stack either way, and what the hardware saves is the fetch of the
-  prologue and epilogue, which for a leaf handler gcc keeps small at
-  -Os. On a handler that calls into the kernel (the console's USART
-  handler saves twelve registers) the code saved is 48 bytes per
-  handler and the cycles proportionally more. Free in semantics, so it
-  is the default; what it costs is the vendor attribute, available
-  from WCH's gcc or from an upstream gcc with the fast-interrupt patch.
+  prologue and epilogue gcc writes, which grows with the registers a
+  handler uses (in the HPE-off build gcc's stores interleave with the
+  body's first loads, so its entry and body columns split the prologue
+  differently - the whole trip is the comparable figure). The code
+  saved in the same image: 28 bytes on the console's handler, 16 on the
+  software and the tick handlers. Free in semantics, so it is the
+  default; what it costs is the vendor attribute, available from WCH's
+  gcc or from an upstream gcc with the fast-interrupt patch.
 - **The reset flags.** The boot after the probe's post-programming
   reset reads 0x18000000: SFTRSTF and the power-on flag never cleared,
   and NO PINRSTF - the finding that rewrote reset.hpp's account of the
@@ -461,9 +469,6 @@ Implemented but not bench-verified, each with what would measure it:
   a current measurement with the probe detached (a core in debug mode
   never sleeps, QingKe V2 manual 5.1). The Standby it enters when
   [sleep.md](sleep.md)'s site has armed one is measured the same way.
-- The HPE's saving on a handler that calls into the kernel: the
-  minimal handler was measured; a letter timing the USART handler's
-  round trip both ways would put a number on the larger case.
 - The CH32V003's late edge: an enabled line other than the tick whose
   edge lands on the V2A's sleep-entry cycle itself waits, pending and
   masked, for the next wake - inferred from the masked order's hole,

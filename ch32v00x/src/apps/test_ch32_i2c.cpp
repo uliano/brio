@@ -147,6 +147,7 @@
 
 // THE PROTOCOL HEADER IS SHARED, NOT COPIED (see the header comment).
 #include "../../../avrdx/src/apps/twi_link.hpp"
+#include "held_request.hpp"
 
 using P = brio::Ch32v00xPlatform<>;
 using SysClock = brio::Clock<brio::ClockSource::pll, 48'000'000>;
@@ -2441,60 +2442,15 @@ constexpr uint8_t dead_rx_ch = 1;
 // channel 7 with I2C1_RX (and USART2_RX); the timers' header carries no
 // table for its compare requests, so the two numbers are the table's.
 
-/// A compare request RAISED AND HELD: CCxDE set and the counter run from
-/// zero at HCLK past one match of the channel's compare (10 counts in, a
-/// period of 1000: some fifty microseconds, two matches), stopped, and the
-/// gate closed with no reset. (On the CH32X035 the software compare event,
-/// SWEVGR's CCxG, left the next owner nothing: the match is the request.)
-template <class T>
-void hold_compare_request(uint8_t ch) {
-    T::bus_clock(true);
-    TimRegs& r = T::regs();
-    r.PSC = 0;
-    r.ATRLR = 999;
-    r.CHCVR[ch] = 10;
-    r.CNT = 0;
-    r.DMAINTENR = static_cast<uint16_t>(1u << (9u + ch));
-    r.CTLR1 = tim_cen;
-    (void)delay_us(clock, 50);
-    r.CTLR1 = 0;
-    T::bus_clock(false);
-}
-
-/// The release contract on the timer: the reset line, then the gate.
-template <class T>
-void free_compare_request() {
-    T::bus_clock(true);
-    T::reset();
-    T::bus_clock(false);
-}
-
-/// The NEXT OWNER of a channel: a transmit block of four bytes into a RAM
-/// cell, request-paced (MEM2MEM clear), asked by nothing - any item it moves
-/// is a request still standing on the channel's OR. Its count read 300 us
-/// after the enable (a held request is taken within a few bus cycles).
-volatile uint8_t sink_cell = 0;
-template <uint8_t ch>
-uint16_t next_owner_moves() {
-    static const uint8_t four[4] = {1, 2, 3, 4};
-    using C = DmaChannel<ch>;
-    C::stop();
-    (void)C::prepare(DmaTransfer{.peripheral = &sink_cell, .memory = const_cast<uint8_t*>(four), .count = 4,
-                                 .config = {.direction = DmaDirection::memory_to_peripheral,
-                                            .memory_increment = true, .priority = DmaPriority::high}});
-    C::enable(true);
-    (void)delay_us(clock, 300);
-    const uint16_t moved = static_cast<uint16_t>(4u - C::count());
-    C::stop();
-    return moved;
-}
+// The staging itself - a compare request held, freed, and the next owner
+// of a channel counted - is the suites' shared held_request.hpp.
 
 /// A write of 32 on the engines over a channel 6 that TIM1 holds dead: the
 /// staging of both the transmit fault and the block's own held request
 /// (TxE raised under DMAEN on a channel that never answered it). The engine
 /// is left as the tenure left it, TIM1 reset.
 uint8_t dead_write() {
-    hold_compare_request<DeadTx>(dead_tx_ch);
+    held::hold_compare_request<DeadTx>(dead_tx_ch, clock);
     (void)peer_act(Op::serve, serve_params(0, 300, 0x10));
     dma_host_live = true;
     (void)DmaHost::init(clock);
@@ -2502,7 +2458,7 @@ uint8_t dead_write() {
         tx_buf[i] = static_cast<uint8_t>(0x20u + i);
     }
     const uint8_t st = dma_tenure(twilink::dut_addr, tx_buf, 32, nullptr, 0, link_speed);
-    free_compare_request<DeadTx>();
+    held::free_compare_request<DeadTx>();
     return st;
 }
 
@@ -2518,7 +2474,7 @@ uint16_t peer_took() {
 /// STALLED: no recover(), the block as the stall left it (RxNE and BTF
 /// standing under DMAEN), TIM2 still holding.
 void stall_dead_read() {
-    hold_compare_request<DeadRx>(dead_rx_ch);
+    held::hold_compare_request<DeadRx>(dead_rx_ch, clock);
     (void)peer_act(Op::serve, serve_params(0, 300, 0x40));
     dma_host_live = true;
     (void)DmaHost::init(clock);
@@ -2542,17 +2498,17 @@ void tp_dead_channel() {
         return;
     }
     // THE CONTROL: nothing raised on either channel.
-    const uint16_t control6 = next_owner_moves<6>();
-    const uint16_t control7 = next_owner_moves<7>();
+    const uint16_t control6 = held::next_owner_moves<6>(clock);
+    const uint16_t control7 = held::next_owner_moves<7>(clock);
 
     // 1. THE DEAD TRANSMIT CHANNEL. The hold proved first by a next owner
     // (which takes the one stray item and leaves the channel dead), then a
     // write of 32 over it: the channel moves the first byte at its enable
     // and nothing more, BTF comes with the count standing, and the engine
     // must answer i2c_dma_fault - never i2c_ok over a short write.
-    hold_compare_request<DeadTx>(dead_tx_ch);
-    const uint16_t held6 = next_owner_moves<6>();
-    free_compare_request<DeadTx>();
+    held::hold_compare_request<DeadTx>(dead_tx_ch, clock);
+    const uint16_t held6 = held::next_owner_moves<6>(clock);
+    held::free_compare_request<DeadTx>();
     const uint8_t dws = dead_write();
     const uint32_t dw_entries = host_isr_entries;
     DmaHost::release();
@@ -2589,7 +2545,7 @@ void tp_dead_channel() {
     // and ADDR: two, three with a re-entry; a storm would be 60 000) - and
     // the caller's bound answers it (here dma_tenure's spin, some 50 ms,
     // against the 1.5 ms the read takes at 100 kHz, then recover()).
-    hold_compare_request<DeadRx>(dead_rx_ch);
+    held::hold_compare_request<DeadRx>(dead_rx_ch, clock);
     (void)peer_act(Op::serve, serve_params(0, 300, 0x40));
     dma_host_live = true;
     (void)DmaHost::init(clock);
@@ -2604,7 +2560,7 @@ void tp_dead_channel() {
     const bool dr_storm = host_stormed;
     const uint32_t dr_dma = dma7_entries;
     DmaHost::release();
-    free_compare_request<DeadRx>();
+    held::free_compare_request<DeadRx>();
     host_ready();
     settle_ms(350);
     (void)peer_act(Op::serve, serve_params(0, 300, 0x40));
@@ -2654,8 +2610,8 @@ void tp_dead_channel() {
         } else if (way == 3u) {
             DmaHost::release();
         }
-        free_compare_request<DeadRx>();
-        moved[way] = next_owner_moves<7>();
+        held::free_compare_request<DeadRx>();
+        moved[way] = held::next_owner_moves<7>(clock);
         H::bus_clock(true);
         H::reset();
         DmaHost::release();

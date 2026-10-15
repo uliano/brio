@@ -126,7 +126,9 @@ the CH32V003 its reference manual V1.9 (12.4 for the synchronous mode,
 - **The flow-control pair**: CTS high holds the next frame back (TC
   does not come) and low lets it out; RTS is low while the receiver
   can take a frame, high while a received byte waits unread, low
-  again once it is read.
+  again once it is read. The CTS flag rises on EACH edge of the CTS
+  input under CTSE, rising and falling, and a written zero clears it;
+  CTSIE enters the vector once a toggle (four of four).
 - **The flags**: TXE returns within a bit of a write on an idle
   transmitter, TC at the end of the frame (1093 us for a 1042 us frame
   at 9600); TC's clear is a PAIR, a STATR read then a DATAR write, or a
@@ -224,8 +226,8 @@ the CH32V003 its reference manual V1.9 (12.4 for the synchronous mode,
   nothing written when unreachable), `can_baud(pclk, baud)`,
   `min_hz_for(baud)`, `release()` (the vector off, the channels stopped,
   CTLR1 cleared, the block's reset pulsed - the vendor's DeInit, the one
-  act that withdraws a DMA request the block holds on the CH32V203
-  ([dma.md](dma.md)) - the gate closed, the pads released), the engine
+  act that withdraws a DMA request the block holds (measured, below;
+  [dma.md](dma.md)) - the gate closed, the pads released), the engine
   verbs `dma_isr()` (the ISR body of both channels, the controller's one
   flag register read once; its true is the receive edge, as `isr()`'s),
   `harvest()` (the same edge asked from the consumer's side, and a
@@ -266,11 +268,11 @@ the CH32V003 its reference manual V1.9 (12.4 for the synchronous mode,
   wait, so the clear it armed is armed still and the two reads count
   nothing twice and lose no count, the overrun counted once (measured,
   below). A frame landing between the two loads loses its error flags
-  to the clear, as the frame after any counted error does; on the
-  CH32V203 and the CH32V303 the request it raised outlived the CPU's
-  read and the channel still stored its byte
-  ([../ch32vx03/usart.md](../ch32vx03/usart.md)), which this die has not
-  been asked. The channel's half and full marks report it from
+  to the clear, as the frame after any counted error does, but not its
+  byte: the request it raised outlives the CPU's read and the channel
+  still stores it (measured, below - the CH32V203's and the CH32V303's
+  answer too, [../ch32vx03/usart.md](../ch32vx03/usart.md)). The
+  channel's half and full marks report it from
   `dma_isr()`. Two
   interrupts a burst, none a byte. WHAT THE CHANNEL'S READ BOUNDS is the
   counts, never the bytes: the frame after one whose error was counted
@@ -352,9 +354,10 @@ U::mute();                                        // asleep until a 9-bit frame 
 
 ## Bench findings
 
-The reference suite is `test_ch32_serial` (56 verdicts in `z`, five
-of its letters on the jumper PD2 to PD4 that lends TIM2's channel 1 as
-the ruler, one host-assisted letter outside `z` driven by `brio
+The reference suite is `test_ch32_serial` (70 verdicts in `z` with the
+jumper PD2 to PD4 fitted, which lends TIM2's channel 1 as the ruler to
+five of its letters - 56 without it, those letters then skipping and
+claiming nothing -, one host-assisted letter outside `z` driven by `brio
 stress`) on the CH32V006K8U6 at 48 MHz, with USART2 on column 3 as the
 instrument and the console untouched on USART1; and its TWO-BOARD KEY
 `w` (letters 1 to 8, 59 verdicts) on column 4 against the CH32X035's
@@ -430,6 +433,41 @@ out there.
   stall bound's 255 - the live channel given up as a DMA fault, the
   frames before it thrown away by the restart, and the next burst lost
   to the second storm the restart's own entry began.
+- **USART2 HOLDS ITS RELEASED REQUESTS** (letter m, ten runs): the
+  transmit request (TXE under DMAT) on channel 6 and the receive request
+  (a banged frame's RXNE under DMAR) on channel 7, each raised with no
+  channel enabled, then let go one way and the channel's next owner - a
+  request-paced block of four - counted: the request bit cleared 1 stray
+  item, UE, TE and RE cleared 1, the gate closed 1, `release()` - the
+  reset line, then the gate - 0, and the control with no request ever
+  raised 0. The pulse in `release()` is what keeps the next owner whole.
+- **The receive ring over a DEAD channel** (letter m): TIM2's channel 2
+  compare request held on channel 7 before the ring is armed there - the
+  arming takes its one stray item, and the channel then moves nothing. A
+  frame banged into the pad: THE STALL BOUND holds - the idle line's
+  entry, then 255 entries of the wait for a frame with the count unmoved,
+  the 255th giving the channel up (a DMA fault): 256 entries, and the
+  thread runs on. The consumer's look binds the ring again over the same
+  dead channel, which takes no second stray, and the vector gives it up
+  again after another 256. TIM2's reset line frees the channel, which -
+  still enabled from that look - takes the frame DATAR held into the lap
+  the next look throws away, counted as a skip; a burst of eight after it
+  arrives whole and in order.
+- **A frame's request outlives the CPU's read of DATAR** (letter n, ten
+  runs): channel 7 one-shot from DATAR, starved by a fill on channel 1 at
+  the same very_high (the tie the lower number wins), one frame banged in
+  at 115200 and STATR (RXNE up) and DATAR (the byte) read by the CPU while
+  the fill still ran - the channel, once the fill ended, still moved one
+  item and stored that same byte; the control, with no CPU read, moved
+  one. So the overrun probe's reads (above) cost a frame landing between
+  them its error flags and never its byte.
+- **The flow-control options as a port** (letter o, ten runs): the
+  transport with `rts` and `cts` on column 3, its own `init()` setting
+  RTSE and CTSE and the pads: 64 frames at 115200 in 1002 to 1003
+  thousandths of their wire time with CTS low; with CTS high four queued
+  bytes held 2 ms - six frame times - and let out once it fell; RTS low
+  idle, HIGH while a banged frame waited with the vector held off, low
+  once the vector took it, the byte delivered.
 - **The rate verbs** (letter t): `can_baud()` yes at 3 Mbaud and no at
   3.2 from 48 MHz, yes at 733 baud and no at 732; `set_baud(9600)` on a
   live port gives a start bit of exactly 5000 cycles where 115200 gave
@@ -567,27 +605,6 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
-- `release()`'s reset pulse: written from the CH32V203's measurement and
-  staged on no board of this family; the no-wire image of
-  [dma.md](dma.md)'s first item - USART2 released without the pulse,
-  then a TIM1-paced block on channel 6 - would measure it.
-- The overrun clear's window on this die: whether a frame's request
-  outlives a CPU read of DATAR, so that a frame landing between the
-  clear's two loads keeps its byte; a fill starving the ring under one
-  banged frame, the CPU reading STATR and DATAR before the fill ends and
-  the channel's count read after it, would measure it.
-- The receive ring over a DEAD channel: the stall bound is measured
-  (letter u's control gave a live channel up at its 255th entry), the
-  channel a held request froze is not; TIM2 gated by hand with its
-  channel 2 request standing, then USART2's receive ring on channel 7
-  fed a frame through its pad's pull, would stage it.
 - The run verbs, `write_bulk()` and `read_span()`/`consume()`, on the
   CH32V003: compiled and counted; one run of the console on that part
   would measure them.
-- The CTS flag and `cts_interrupt()`: the pair is driven and its hold
-  measured on TC; the flag's own rise and vector are not counted.
-- The transport's `rts`, `cts` and `half_duplex` options as a
-  console's personality: the resource's verbs behind them are
-  measured, the option'd `init()` path is compiled and the single-wire
-  one heard a frame; a program run on such a port is what would prove
-  the rest.

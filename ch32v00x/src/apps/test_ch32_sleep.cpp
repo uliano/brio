@@ -49,9 +49,16 @@
 //      THE NET: the letter arms the IWDG (256 ms), fed before every try
 //      and by the tick, so a sleep entry that wedges the core reboots the
 //      board instead of needing a hand (the tally then never comes).
+//   l  (by name, outside z: some 40 s) THE AWU'S LONG WINDOWS: the /10240
+//      and /61440 codes timed awake on the STK against a /4096 reference -
+//      the ratios their names give - each window's start and end printed
+//      as lines a host reading the console can time; then a Standby of 20 s
+//      through the timed site, its start and end printed the same way.
+//      Refused in a session letter w armed the IWDG in (it runs on in a
+//      Standby).
 //
 // build: boards = v006k8,v003f4
-// build: groups = abcde,w
+// build: groups = abcde,wl
 // (on the CH32V003 the suite is two images, test_ch32_sleep-1 and -2:
 // whole it leaves the part's 15 KB under 2 per cent)
 // build: monitor_speed = 115200
@@ -101,6 +108,8 @@ struct Sleeper {
     static void init() {}
     static void dispatch(const Event&) {}
 };
+
+volatile bool net_armed = false;   ///< letter w's IWDG: fed by every try and by the tick
 
 uint32_t cycles_now() { return stk()->CNT; }
 
@@ -305,6 +314,109 @@ void td_standby() {
 }
 
 // ---------------------------------------------------------------------------
+// l - the AWU's long windows, against the STK and the host
+// ---------------------------------------------------------------------------
+/// One AWU window awake, timed on the ticker's composed cycle count
+/// (wrapping at 2^32 cycles, 89 s at 48 MHz), bounded in milliseconds.
+/// Returns cycles, 0 when the window never fired.
+uint32_t time_long_window(uint8_t prescaler, uint8_t window, uint32_t bound_ms) {
+    Awu::arm(prescaler, window);
+    const uint32_t c0 = Ticker::cycles();
+    const uint32_t t0 = Ticker::millis();
+    while (!Awu::fired() && Ticker::millis() - t0 < bound_ms) {
+    }
+    const uint32_t c1 = Ticker::cycles();
+    const bool fired = Awu::fired();
+    Awu::disarm();
+    return fired ? c1 - c0 : 0u;
+}
+
+/// Thousandths of `num / den`, `num` up to some 4 x 10^6 so the product
+/// stays in 32 bits.
+uint32_t permille(uint32_t num, uint32_t den) {
+    return den == 0u ? 0u : static_cast<uint32_t>((static_cast<uint64_t>(num) * 1000u) / den);
+}
+
+void tl_long_windows() {
+    if (net_armed) {
+        print(serial, "  REFUSED: letter w armed the IWDG in this session, and it runs on through a Standby - "
+                      "reset the board and run this letter first", crlf);
+        bench.verdict("run in a session the IWDG is not armed in", false);
+        return;
+    }
+    if (!Awu::init()) {
+        bench.verdict("the AWU initializes", false);
+        return;
+    }
+    // THE REFERENCE: /4096 x 8 counts, some 0.26 s; then /10240 x 32 and
+    // /61440 x 64, some 2.6 s and 31 s at 128 kHz. Each printed line is a
+    // time stamp for a host that reads the console (the window's start and
+    // end lines).
+    console_drain();
+    const uint32_t ref = time_long_window(13, 7, 2'000);
+    print(serial, "  /4096 x 8 counts: ", ref, " cycles", crlf);
+    console_drain();
+    print(serial, "  window start: /10240 x 32 counts", crlf);
+    console_drain();
+    const uint32_t w14 = time_long_window(14, 31, 10'000);
+    print(serial, "  window end: ", w14, " cycles", crlf);
+    console_drain();
+    print(serial, "  window start: /61440 x 64 counts", crlf);
+    console_drain();
+    const uint32_t w15 = time_long_window(15, 63, 60'000);
+    print(serial, "  window end: ", w15, " cycles", crlf);
+    // The ratios the codes name: 10240 x 32 / (4096 x 8) = 10, and
+    // 61440 x 64 / (4096 x 8) = 120. A code that divided by its power of two
+    // instead (8192, 16384) would read 8 and 32.
+    const uint32_t r14 = permille(w14 / 10u, ref);    // thousandths of 10
+    const uint32_t r15 = permille(w15 / 120u, ref);   // thousandths of 120
+    const uint32_t lsi = ref == 0u ? 0u : static_cast<uint32_t>((static_cast<uint64_t>(SysClock::hz) * 32768u) / ref);
+    print(serial, "  LSI ", lsi, " Hz on the STK; code 14 ", r14, " and code 15 ", r15,
+          " thousandths of their named ratios to the reference", crlf);
+    // The bound: the LSI, an RC, wanders a few tenths of a per cent over
+    // seconds (letter b's windows agree within 2 per cent); 20 thousandths
+    // each way, where a wrong divider is off by 200 or more.
+    bench.verdict("the AWU's /10240 code divides by 10240: 32 counts are 10 times the reference, within 2 %",
+                  ref != 0u && r14 >= 980u && r14 <= 1020u);
+    bench.verdict("the /61440 code divides by 61440: 64 counts are 120 times the reference, within 2 %",
+                  ref != 0u && r15 >= 980u && r15 <= 1020u);
+
+    // A STANDBY OF TWENTY SECONDS through the timed site: the site places
+    // the AWU at a long code and the kernel's time is advanced by the span.
+    if (!Timed::init()) {
+        bench.verdict("the timed site initializes", false);
+        return;
+    }
+    Sleeper::alarm.arm(ticks_from_secs<P>(20));
+    const uint32_t remaining = TimeEvents<P>::ticks_to_next().value_or(0u);
+    const uint32_t t_before = Ticker::ticks();
+    const bool placed = Timed::arm(SleepDepth::deep) && Awu::enabled();
+    print(serial, "  standby start: LSI ", Timed::lsi_hz(), " Hz, code ", Timed::prescaler_code(), ", window ",
+          Timed::window(), " -> ", Timed::span_ticks(), " ticks", crlf);
+    console_drain();
+    uint8_t turns = 0;
+    while (!Awu::fired() && turns < 20u) {
+        P::CriticalSection cs;
+        P::idle();
+        ++turns;
+    }
+    const bool fired = Awu::fired();
+    Timed::disarm();
+    const uint32_t t_after = Ticker::ticks();
+    print(serial, "  standby end: AWU ", fired, ", tick advanced by ", Timed::last_advance(), ", ", t_after - t_before,
+          " ticks across the deadline's ", remaining, crlf);
+    // The bound: late, never early; the grain a long code rounds the
+    // deadline up by - 61440 counts, some 0.48 s - and letter d's 100 ticks.
+    bench.verdict("a 20 s deadline placed at a long code (14 or 15) and the Standby ended by the AWU",
+                  placed && (Timed::prescaler_code() == 14u || Timed::prescaler_code() == 15u) && fired);
+    bench.verdict("kernel time across it covers the deadline, late by at most the code's grain and 100 ticks",
+                  t_after - t_before >= remaining && t_after - t_before < remaining + 480u + 100u);
+    TimeEvents<P>::process();
+    (void)Sleeper::queue.pop();
+    Sleeper::alarm.disarm();
+}
+
+// ---------------------------------------------------------------------------
 // e - a Standby ended by something else
 // ---------------------------------------------------------------------------
 void te_other_wake() {
@@ -337,7 +449,6 @@ void te_other_wake() {
 using Rescue = Tim<2>;
 volatile uint32_t rescue_periods = 0;
 volatile uint32_t awu_entries = 0;
-volatile bool net_armed = false;   ///< letter w's IWDG: fed by every try and by the tick
 
 /// How line 9 reaches the core: the timed site's old shape (an EXTI event
 /// and a PFIC-disabled interrupt line, SEVONPEND's pending edge), that
@@ -629,6 +740,7 @@ int main() {
     bench.letter('d', "STANDBY through the timed site, ended by the AWU", td_standby);
     bench.letter('e', "a Standby armed and disarmed unslept", te_other_wake);
     bench.letter('w', "the AWU's edge against the sleep entry, placed to the cycle", tw_awu_edge);
+    bench.letter('l', "the AWU's long windows (31 s; by name, a host may time the lines)", tl_long_windows, false);
 
     if (serial_ok) {
         brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "PLL48" : "FAILED",

@@ -35,12 +35,17 @@ reference suite `test_ch32_dma`; the costs in `bench_ch32`'s letters d
   TIM2's channel 2 compare requests, raised by a match with no channel
   enabled and their gates closed with no reset, leave the next owner of
   channel 6 or 7 one stray item and a channel that serves nothing after
-  it - the dead channel the I2C host's guards answer ([i2c.md](i2c.md),
-  letter p); the I2C's own request, raised under DMAEN by a stalled read,
-  falls with its gate. The USART's and the I2C host's `release()` pulse
-  the block's reset before the gate - the vendor's own DeInit, correct
-  either way - and the timers' and the ADC's reset their blocks there
-  already.
+  it - the dead channel the I2C host's guards and the USART's receive
+  vector answer ([i2c.md](i2c.md), letter p; [usart.md](usart.md), letter
+  m); the I2C's own request, raised under DMAEN by a stalled read, falls
+  with its gate. USART2's both requests are HELD: its transmit request on
+  channel 6 and its receive request on channel 7, each raised with no
+  channel enabled, leave the next owner one stray item after the request
+  bit, UE, TE and RE or the gate alone is let go, and none after the
+  reset line ([usart.md](usart.md), letter m). The USART's and the I2C
+  host's `release()` pulse the block's reset before the gate - the
+  vendor's own DeInit, which the USART's case needs - and the timers' and
+  the ADC's reset their blocks there already.
 - **A channel is the STM32F1's**: CFGR (direction, circular,
   memory-to-memory, the two increments, the two widths, the priority,
   three interrupt enables, EN), CNTR counting down as items move,
@@ -64,10 +69,11 @@ reference suite `test_ch32_dma`; the costs in `bench_ch32`'s letters d
   8.3.6): with a 16-bit width the module drops bit 0, with a 32-bit
   one bits 1:0 - a half-word block pointed at an odd address moves the
   wrong bytes and completes.
-- **A read from a hole in the map completes as a normal block**
-  (measured, five holes): 8.2.1 promises TEIF and an automatic EN drop
-  for a reserved address, and no address the bench could name
-  produced either - zeros arrived, TCIF rose.
+- **A read from or a write into a hole in the map, and a write into
+  the flash, complete as normal blocks** (measured, five holes each way
+  and the flash locked and open): 8.2.1 promises TEIF and an automatic
+  EN drop for a reserved address, and no address the bench could name
+  produced either - TCIF rose, EN stood.
 - **About six HCLK cycles an item at every width** (measured): the
   controller is a master of the same bus matrix as the core, at HCLK,
   and a memory-to-memory item is a read, a write and the arbitration.
@@ -83,7 +89,7 @@ engines do with each:
 |---|---|---|
 | the register file (CFGR, CNTR, PADDR, MADDR) | yes | PADDR and the configuration word at `arm()`, once; a block is FIVE STORES - CFGR with EN clear, CNTR, MADDR, INTFCR, CFGR with EN - and no load. The word is kept in the engine, because the enable store needs it and a read-modify-write would read it back from the bus |
 | the write protection of 8.2.1 | yes | the block's first store is the word with EN clear: the disable the note asks for before CNTR and MADDR, which EN standing from the last block makes necessary, and the store that changes the beat or the increment in the same access |
-| the two width fields | yes | the BEAT: PSIZE and MSIZE both follow the element of the run a block is handed (8, 16 or 32 bits), so one channel moves bytes for one block and half-words for the next; unequal widths (table 8-1's packing and truncation) declined - no transport's register and buffer differ in width |
+| the two width fields | yes | the BEAT: PSIZE and MSIZE both follow the element of the run a block is handed (8, 16 or 32 bits), so one channel moves bytes for one block and half-words for the next; unequal widths (table 8-1's packing and truncation, measured as the table spells it) declined - no transport's register and buffer differ in width; the one-shot channel takes them |
 | the address alignment of 8.3.5/8.3.6 | yes | a run off its beat's boundary is REFUSED, its caller falling back to whatever moves it otherwise |
 | the increments | yes | MINC per block (a run, or one fixed cell a bus write clocks out or a discard cell a bus read fills); PINC for the copy |
 | memory to memory | yes | `DmaCopyEngine`: no request, the channel runs from its enable |
@@ -91,7 +97,7 @@ engines do with each:
 | the half-transfer flag | no | no engine acts on a midpoint before a stream does |
 | the completion interrupt | per binding | `arm()` names the flags whose interrupt the binding wants: a transport whose completion another event proves arms the errors alone - the SPI host's transmit block (the receive block's end proves it), the I2C host's (BTF proves it) |
 | one flag register for seven channels | yes | a transport serving two channels in one handler body reads INTFR ONCE |
-| the priorities | yes | an argument of `arm()`, and THE LEVEL IS THE PERIPHERAL'S ([../design/dma.md](../design/dma.md)): a memory-to-memory channel asks for the bus on every cycle of its block, so a channel it outranks moves nothing until it ends - by default the receive engine at very_high, the transmit engine at high, the copy at low; the USART's ring at very_high (`UartOptions::rx_priority` the knob) and its transmit at high, the SPI host's receive at very_high (OVR, 16.2.7) and transmit at high, the I2C host's two at high (the bus stretches, 15.3); ties go to the lower channel number (8.2.1) |
+| the priorities | yes | an argument of `arm()`, and THE LEVEL IS THE PERIPHERAL'S ([../design/dma.md](../design/dma.md)): a memory-to-memory channel asks for the bus on every cycle of its block, so a channel it outranks moves nothing until it ends - by default the receive engine at very_high, the transmit engine at high, the copy at low; the USART's ring at very_high (`UartOptions::rx_priority` the knob) and its transmit at high, the SPI host's receive at very_high (OVR, 16.2.7) and transmit at high, the I2C host's two at high (the bus stretches, 15.3); strict - the level, then the lower channel number (8.2.1, measured) |
 | the software trigger | yes | MEM2MEM is the only one (figure 8-1): there is no trigger register beside it |
 | the gate | yes | opened once, by `arm()` |
 | the transfer error | yes | armed on every engine; it clears EN by itself (8.2.1) and an engine's `abandon()` halts the channel and counts the fault |
@@ -288,9 +294,11 @@ while (!Copier::flag(brio::DmaFlag::complete)) { }
 
 ## Bench findings
 
-The reference suite is `test_ch32_dma` on the CH32V006K8U6 and on the
-CH32V003F4P6, both at 48 MHz, ITS OWN CONSOLE ON THE TWO ENGINES. Its
-letters a to d drive the channel's one-shot verbs:
+The reference suite is `test_ch32_dma` on the CH32V006K8U6 (39 verdicts
+in `z`) and on the CH32V003F4P6 (two group images there, letters d, h and
+i in the second), both at 48 MHz, ITS OWN CONSOLE ON THE TWO ENGINES. Its
+letters a to d, h and i drive the channel's one-shot verbs - letters h
+and i and letter d's writes measured on the CH32V006K8U6:
 
 - **Memory to memory, three widths, exact**: 64 bytes, 32 half-words
   and 16 words copied and compared, CNTR down to zero, TCIF with GIF
@@ -326,11 +334,34 @@ letters a to d drive the channel's one-shot verbs:
   dropping nothing on its own: the letter reconfigures under a
   running copy and gets false back.
 - **EN stays set after a completed block** (the finding the engines'
-  first store rests on), and **no hole raises TEIF**: reads from
-  0x3000 0000, 0x4003 0000, 0x5000 0000, 0x6000 0000 and 0xF000 0000
-  each completed as a four-byte block with zeros, EN still set. The
-  error path is armed on every engine and reachable by nothing the
-  bench found.
+  first store rests on), and **no hole raises TEIF** (letter d): reads
+  from 0x3000 0000, 0x4003 0000, 0x5000 0000, 0x6000 0000 and 0xF000
+  0000 each completed as a four-byte block, EN still set - zeros from
+  four of them, 0xA2 from 0x3000 0000 in every run -, and writes into
+  the same five completed the same way. **Nor does a write into the
+  flash**, a destination 8.2.1 lists: one word of zero written onto a
+  word of the image that reads zero completed with TCIF and EN standing,
+  the program/erase controller locked; and with its lock open and no
+  operation armed, through the array's own address and through the 0x0800
+  0000 alias the chapter's programming sequence writes, the same, STATR
+  showing no WRPRTERR and the word still zero (ten runs). The error path
+  is armed on every engine and reachable by nothing the bench found.
+- **Unequal widths land as table 8-1 spells them** (letter h, ten
+  runs): four items at each of the nine pairs of source and target
+  widths, every target byte compared - a narrow source zero-filled into
+  a wide target (8 to 32 bits: B0 00 00 00, B1 00 00 00 ...), a wide one
+  truncated to its low bytes (32 to 8: B0 B4 B8 BC), nothing written past
+  the fourth item.
+- **The level outranks the channel number** (letter i, ten runs): two
+  memory-to-memory blocks of 1024 words between fixed cells, started one
+  store apart, counts read in four quiet windows with nothing touching
+  the controller - channel 1 at low, enabled first, stood at 1022 through
+  every window while channel 7 at very_high fell 963, 901, 838, 776, and
+  took the bus back only once channel 7 completed; at one level (medium)
+  the same order with the numbers swapped, channel 7 first held while
+  channel 1 ran. Some 62 items a window, the controller's six cycles an
+  item (letter b). The tie is the rule `test_ch32_serial` letter u
+  stages its overrun with.
 
 - **In the CH32V003's Sleep the controller moves nothing** (measured
   with `bench_ch32` letter d on the CH32V003F4P6, the loop idling
@@ -369,16 +400,6 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
-- **Whether USART2 holds a released request on this die**: a timer's
-  compare request does (the finding above) and the I2C's does not outlive
-  its gate ([i2c.md](i2c.md), letter p); USART2 initialized with DMAT
-  (its transmit request standing on channel 6 with TXE up) and released
-  WITHOUT the pulse, CTLR1 and CTLR3 cleared and the gate closed, then
-  the next owner of channel 6 counted, would say which way the USART
-  goes. The receive ring's wait for a frame given up after 255 entries
-  ([usart.md](usart.md)) is the one dead-channel guard of the family not
-  staged yet: a timer's held request on channel 5 or 7 under the ring
-  would stage it.
 - **The I2C host's engines on the CH32V003F4P6**: `test_ch32_i2c`
   letter g in its group image against a peer, which that board's desk
   has not got (on the CH32V006K8U6 the letter is green, above).
@@ -392,17 +413,8 @@ Implemented but not bench-verified, each with what would measure it:
   the core's two and a half a straight-line instruction, the launch
   and the one vector).
 - **The transfer-error path** (TEIE, the engines' `abandon()` and the
-  fault counters): written from 8.2.1 and provoked by no address the
-  suite could find; a peripheral that raises it - or a write into
-  flash, which the chapter lists as a legal destination and the bench
-  has not tried - would measure it.
-- Widening and truncation between unequal widths (8.2.2's table 8-1):
-  the one-shot channel takes two widths and the engines always set
-  them equal; a copy with PSIZE and MSIZE apart, compared against the
-  table.
-- The level outranking the channel number: the tie rule is measured - a
-  fill on channel 1 at the receive ring's own level starved the ring on
-  channel 7 until it ended (`test_ch32_serial` letter u, the overrun it
-  stages) - and a level above the number is not; two memory-to-memory
-  blocks started together at two levels, their order read off the flags,
-  would measure it.
+  fault counters): written from 8.2.1 and provoked by nothing the bench
+  found - reads and writes of five holes in the map and writes into the
+  flash, locked and open, all complete as normal blocks (above); a
+  peripheral whose bus answers an access with an error, if this die has
+  one, would measure it.

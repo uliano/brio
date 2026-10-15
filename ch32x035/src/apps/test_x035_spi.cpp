@@ -1067,8 +1067,9 @@ bool within(uint32_t got, uint32_t want, uint32_t pct) {
 
 /// The costs measured against the constants the host states for its
 /// placement: the pump's frame within 10 % and the dead bus within 2
-/// cycles - the placement's own - and the fixed costs, which carry the
-/// wrapper's layout (the host's comment), within 30 %.
+/// cycles - the placement's own, and from the flash the polled function's
+/// own too, aligned to the fetch's word (the host's comment) - and the
+/// fixed costs, which carry the wrapper's layout, within 30 %.
 template <typename H>
 bool costs_match(const PathCosts& c) {
     const uint32_t gap = c.rd[1] > 320u ? (c.rd[1] - 320u + 5u) / 10u : 0u;
@@ -1213,8 +1214,9 @@ void tb_ladder() {
                   "(3 %) from /8",
                   ram.wr[0] <= 168u && ram.wr[1] <= 336u && ram.wr[3] <= 659u && ram.wr[2] <= 1319u);
     // From the flash at /2 the loop's turn fetched behind the wait states
-    // is the bound, and where the loop sits decides it (20.0 and 28.0
-    // cycles a frame measured in two builds): printed, not judged.
+    // is the bound - 24.0 cycles a frame with its function on a word, 28.0
+    // half a word off (the host aligns it): the fetch's figure, printed,
+    // not judged.
     bench.verdict("and from the flash within 5 % of the wire at /4 and at the wire from /8",
                   flash.wr[1] <= 336u && flash.wr[3] <= 659u && flash.wr[2] <= 1319u);
     bench.verdict("SRAM shortens the pump's frame and the receive loop's at /2",
