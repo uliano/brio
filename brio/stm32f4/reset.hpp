@@ -304,7 +304,8 @@ constexpr bool iwdg_config_valid(const IwdgConfig& c) {
  *
  * ORDER, AND WHY IT IS THE CHAPTER'S. 21.3 starts the watchdog with
  * 0xCCCC and then configures it behind 0x5555, and `arm()` is exactly
- * that: start, prescaler, reload, refresh. `configure()` is the same
+ * that: start, prescaler, reload, refresh - with each update waited for
+ * before the next register is written (configure() says why). `configure()` is the same
  * body WITHOUT the start, which is legal (the key protecting PR and RLR
  * has nothing to do with the start key) and is how a program re-times a
  * watchdog that is already running.
@@ -418,8 +419,23 @@ struct Iwdg {
      * False - and possibly a half-written configuration - when the
      * setting is impossible or when an update never crossed, which on a
      * STOPPED watchdog is always (fact 5: the block has no clock until
-     * the start key). The order is the chapter's: wait for a previous
-     * update, unlock, prescaler, reload, wait for both.
+     * the start key). The order: wait for a previous update, unlock,
+     * prescaler, WAIT FOR IT, reload, wait for that.
+     *
+     * THE RELOAD WAITS FOR THE PRESCALER'S CROSSING, measured. Right
+     * after the start key the block has no clock yet (the LSI takes
+     * about 120 us to start), so the start, PR and RLR all wait for the
+     * same first LSI edges - and with the two writes back to back, as
+     * 21.3 lists them, a reload of zero written there was in force
+     * before the start's own count began: the reset came 297 us after
+     * the start key with both update bits still standing, before this
+     * function could return (eight boots of eight, every one after an
+     * earlier reset of the bench run). With PVU cleared before RLR is
+     * written the block is provably clocked by then, and the same
+     * reload lands after the start: no early reset in 24 boots. A
+     * reload long
+     * enough to outlast the crossing never shows the difference; the
+     * shortest one, which force_reset() writes, does.
      */
     static bool configure(const IwdgConfig& cfg) {
         if (!iwdg_config_valid(cfg)) {
@@ -430,8 +446,11 @@ struct Iwdg {
         }
         unlock();
         IWDG->PR = static_cast<uint32_t>(cfg.prescaler);
+        if (!sync(IWDG_SR_PVU_Msk)) {
+            return false;
+        }
         IWDG->RLR = cfg.reload;
-        return sync();
+        return sync(IWDG_SR_RVU_Msk);
     }
 
     /// Compile-time twin: an impossible setting is a build error.

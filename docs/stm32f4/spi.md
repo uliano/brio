@@ -1190,8 +1190,12 @@ Implemented, not bench-verified (each with what would measure it):
 - The hardware NSS output (SSOE) as the engine's select: the bus AO's
   select is a GPIO on purpose; the hardware INPUT is measured through
   `claim_nss_pad()` (letter d's demotion), the output is not.
-- `rebase()` and the SCK ceiling across a clock change: this family has
-  no dynamic clock yet ([clock.md](clock.md)).
+- `rebase()` and the SCK ceiling across a clock change: the family's
+  `DynamicClock` ([clock.md](clock.md)) exists, and no program here makes
+  an `SpiHost` one of its users. `rebase()` derives the APB rate from
+  the new SYSCLK (`apb_hz_at`) - reading the divider back, the I2C hosts
+  measured, reads the rate being left. What would measure it is a
+  transfer timed against the partner at every rate of a pack.
 - The error interrupt (ERRIE) and the transmit interrupt (TXEIE): the
   engine arms RXNE alone, and the errors were measured by polling.
 - The frame error (FRE): it is a TI slave's and an I2S slave's, and

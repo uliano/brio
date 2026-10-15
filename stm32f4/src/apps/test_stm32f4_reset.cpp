@@ -38,6 +38,13 @@
 //      ResetReporter, a deliberate HardFault through hard_fault_reset(),
 //      a UsageFault with the fault enabled and its record read, and a
 //      WWDG time-out with the early warning armed.
+//   j  (by name only) FOUR MORE REAL RESETS, in the same .noinit token
+//      and run the same way (`brio run <board> j --app test_stm32f4_reset
+//      --expect="fail" --timeout 60`): the two DELIBERATE resets the
+//      driver offers, Iwdg::force_reset() and Wwdg::force_reset(), each
+//      timed from the call to the reset; a BusFault taken at its OWN
+//      vector by a load from the first address past the SRAM; and an
+//      unaligned word load turned into a UsageFault by UNALIGN_TRP.
 //
 // NOTHING IN `z` STARTS A WATCHDOG, and that is a measurement rather
 // than an oversight. Starting either is one-way in software (RM0090
@@ -115,9 +122,11 @@ struct Token {
     uint8_t armed_running;   ///< leg 2: Iwdg::running() with the watchdog live
     uint8_t ewi_seen;        ///< leg 7: did the early warning fire?
     uint8_t ewi_counter;     ///< and what the counter read inside its handler
-    uint32_t fault_cfsr;     ///< legs 5 and 6: the wreck, read in the handler
+    uint32_t fault_cfsr;     ///< legs 5, 6, 10 and 11: the wreck, read in the handler
     uint32_t fault_hfsr;
     uint32_t fault_address;
+    uint8_t forced_timed;    ///< leg 8: what Iwdg::force_reset() answered
+    uint32_t elapsed_cycles; ///< legs 8 and 9: from the force_reset() call to the reset
 };
 [[gnu::section(".noinit")]] inline Token token;
 
@@ -155,6 +164,7 @@ bool boot_lsi_on = false;        ///< LSION as the boot found it
 bool boot_lsi_ready = false;     ///< LSIRDY as the boot found it
 bool boot_wwdg_clocked = false;  ///< RCC_APB1ENR.WWDGEN as the boot found it
 uint32_t boot_shcsr = 0;         ///< the three configurable faults' enables
+uint32_t boot_ccr = 0;           ///< the two CCR traps, as the boot found them
 FaultRecord boot_fault{};        ///< CFSR/HFSR as the boot found them
 
 /// Set when letter i's second leg has left a watchdog running that its
@@ -865,6 +875,227 @@ volatile int32_t quotient = 0;
     await_reset("(waiting for the warning, then the counter reaching 0x3F)");
 }
 
+// =============================================================================
+// j - four more real resets (outside z: it reboots the board)
+// =============================================================================
+
+/// The first address past the SRAM, from the linker script: the RAM
+/// region is the whole of the part's contiguous SRAM on every part this
+/// suite builds for (192, 128, 128 and 320 KB), and what lies after it
+/// up to 0x3FFFFFFF is reserved in the memory map - an access there is
+/// answered with a bus error by the matrix.
+extern "C" uint32_t __stack_top[];
+
+/// Leg 8: Iwdg::force_reset(), TIMED from the call to the reset. The
+/// elapsed cycles are stored through a volatile pointer for the same
+/// reason as leg 2's milliseconds.
+[[noreturn]] void leg_iwdg_force() {
+    bank(8);
+    print(serial, "  leg 8: Iwdg::force_reset() on a stopped watchdog, flags "
+          "cleared first ...", crlf);
+    console_drain();
+    Reset::clear_flags();
+    token.flags_before = 0;
+    token.elapsed_cycles = 0;
+    token.forced_timed = 0;
+    volatile uint32_t* const elapsed = &token.elapsed_cycles;
+    const uint32_t t0 = cycles_now();
+    token.forced_timed = Iwdg::force_reset() ? 1u : 0u;
+    for (;;) {
+        *elapsed = cycles_now() - t0;
+    }
+}
+
+/// Leg 9: Wwdg::force_reset() - WDGA with T6 clear, 22.3's own note -
+/// timed the same way.
+[[noreturn]] void leg_wwdg_force() {
+    bank(9);
+    print(serial, "  leg 9: Wwdg::force_reset(), flags cleared first ...", crlf);
+    console_drain();
+    Reset::clear_flags();
+    token.flags_before = 0;
+    token.elapsed_cycles = 0;
+    Wwdg::bus_clock(true);   // the write lands nowhere with the gate shut
+    volatile uint32_t* const elapsed = &token.elapsed_cycles;
+    const uint32_t t0 = cycles_now();
+    Wwdg::force_reset();
+    for (;;) {
+        *elapsed = cycles_now() - t0;
+    }
+}
+
+/// Leg 10: a BusFault at ITS OWN VECTOR - a word load from the first
+/// address past the SRAM with BUSFAULTENA on. A load is a precise
+/// access, so BFAR must hold that very address. If the load does not
+/// fault the leg resets by software, and the missing record fails it.
+[[noreturn]] void leg_bus_fault() {
+    token.code = static_cast<uint8_t>(PanicCode::kernel_fault);
+    token.context = 0xB5;
+    token.fault_cfsr = 0;
+    token.fault_hfsr = 0;
+    token.fault_address = 0;
+    bank(10);
+    print(serial, "  leg 10: a load from ", hex(reinterpret_cast<uint32_t>(__stack_top)),
+          " (past the SRAM) with BUSFAULTENA on -> BusFault ...", crlf);
+    console_drain();
+    Reset::clear_flags();
+    token.flags_before = 0;
+    Faults::enable(false, true, false);
+    quotient = static_cast<int32_t>(*reinterpret_cast<volatile uint32_t*>(__stack_top));
+    print(serial, "  (the load did not fault)", crlf);
+    console_drain();
+    Reset::software();
+}
+
+/// Leg 11: an unaligned word load turned into a UsageFault by
+/// UNALIGN_TRP. The instruction is written by hand: the compiler splits
+/// any unaligned access it can see into byte loads, and an LDR is the
+/// one that must reach the core. The address is the second byte of a
+/// word, laundered through a volatile so nothing folds it.
+volatile uint32_t aligned_word = 0x11223344u;
+volatile uintptr_t odd_address = 0;
+
+[[noreturn]] void leg_unaligned() {
+    token.code = static_cast<uint8_t>(PanicCode::kernel_fault);
+    token.context = 0xA1;
+    token.fault_cfsr = 0;
+    token.fault_hfsr = 0;
+    token.fault_address = 0;
+    bank(11);
+    print(serial, "  leg 11: an LDR from an odd address with UNALIGN_TRP and "
+          "USGFAULTENA on -> UsageFault ...", crlf);
+    console_drain();
+    Reset::clear_flags();
+    token.flags_before = 0;
+    odd_address = reinterpret_cast<uintptr_t>(&aligned_word) + 1u;
+    const uintptr_t a = odd_address;
+    Faults::enable(false, false, true);
+    Faults::unaligned_trap(true);
+    uint32_t v = 0;
+    __asm__ volatile("ldr %0, [%1]" : "=r"(v) : "r"(a) : "memory");
+    quotient = static_cast<int32_t>(v);
+    Faults::unaligned_trap(false);
+    print(serial, "  (the unaligned load did not fault)", crlf);
+    console_drain();
+    Reset::software();
+}
+
+void tj_resets() {
+    report_boot();
+    bench.verdict("this boot names a reset source", (boot_flags & ResetFlag::all) != 0u);
+    bench.verdict("no panic record is pending on a clean start", !boot_record);
+    leg_iwdg_force();
+}
+
+/// Letter j after each of its resets: judge the leg, start the next.
+void tj_resume(uint8_t leg) {
+    print(serial, crlf, "j (continued after reset ", static_cast<uint8_t>(leg - 7u),
+          " of 4)", crlf);
+    report_boot();
+    // Every leg cleared the flags just before its reset, so a watchdog
+    // reset may show its own flag and the PINRSTF every internal source
+    // raises (leg 1 of letter i), and nothing else.
+    const auto alone = [](uint32_t flag) {
+        return (boot_flags & flag) != 0u &&
+               (boot_flags & ~(flag | ResetFlag::pin)) == 0u;
+    };
+
+    if (leg == 8) {
+        const uint32_t us = cycles_to_us(token.elapsed_cycles);
+        print(serial, "  force_reset() answered ", token.forced_timed != 0u ? "true" : "false",
+              "; the IWDG reset came ", us, " us after the call", crlf);
+        bench.verdict("Iwdg::force_reset() resets the device through the IWDG, "
+                      "and through nothing else",
+                      alone(ResetFlag::independent_watchdog));
+        bench.verdict("its configuration crossed into the LSI domain (the start "
+                      "came first, so the update bits cleared)",
+                      token.forced_timed != 0u);
+        // THE BOUND, derived at the slowest LSI the datasheet allows
+        // (17 kHz, 58.8 us a period): the LSI's start (40 us max, 116 us
+        // measured through a polling loop on the STM32F429ZI), the two
+        // keyed updates one after the other (up to 5 periods each,
+        // RM0390 20.4.4: 588 us), one count of the /4 prescaler to reach
+        // zero from the reload of 0 (4 periods: 235 us) and the
+        // refresh's own crossing (5 periods: 294 us) - 1.23 ms in all.
+        // 2 ms is that and the polling slack; the 512 ms an unconfigured
+        // watchdog would take is two hundred times further.
+        bench.verdict("and it lands in about a millisecond: under the 2 ms the "
+                      "slowest LSI allows, not the 512 ms of the reset setting",
+                      token.elapsed_cycles != 0u && us < 2000u);
+        leg_wwdg_force();
+    }
+
+    if (leg == 9) {
+        const uint32_t cyc = token.elapsed_cycles;
+        // One step of the counter at /1 is 4096 PCLK1 cycles; in core
+        // cycles that is 4096 x HCLK / PCLK1.
+        constexpr uint32_t step_cycles = 4096UL * (SysClock::hz / SysClock::pclk1_hz);
+        // Zero is a reading, not a failure to read: the loop's first
+        // store never happened, so the reset landed before the cycle
+        // counter could be read once after the write.
+        print(serial, "  the WWDG reset came ", cyc, " core cycles after the write",
+              cyc == 0u ? " (before the first store of the loop after it)" : "",
+              "; one counter step at /1 is ", step_cycles, crlf);
+        bench.verdict("Wwdg::force_reset() resets the device through the WWDG, "
+                      "and through nothing else",
+                      alone(ResetFlag::window_watchdog));
+        bench.verdict("and at once - inside one counter step, so the reset is "
+                      "T6 written clear (22.3) and not a count running down",
+                      cyc < step_cycles);
+        leg_bus_fault();
+    }
+
+    if (leg == 10) {
+        const FaultRecord r{token.fault_cfsr, token.fault_hfsr, token.fault_address};
+        print(serial, "  the wreck as the handler read it: CFSR=", hex(r.cfsr),
+              " HFSR=", hex(r.hfsr), " address=", hex(r.address), crlf);
+        bench.verdict("a BusFault reaches its OWN vector when SHCSR enables it, "
+                      "and hard_fault_reset() resets from there",
+                      alone(ResetFlag::software));
+        bench.verdict("the record says kernel_fault with this leg's context",
+                      boot_record && boot_record->code == token.code &&
+                          boot_record->context == token.context);
+        bench.verdict("CFSR names a PRECISE data bus error with a valid BFAR "
+                      "(BFSR.PRECISERR, BFSR.BFARVALID)",
+                      r.bus_fault() && (r.cfsr & SCB_CFSR_PRECISERR_Msk) != 0u &&
+                          r.address_valid());
+        bench.verdict("and BFAR is the very address loaded: the first one past "
+                      "the SRAM",
+                      r.address == reinterpret_cast<uint32_t>(__stack_top));
+        bench.verdict("nothing escalated (HFSR.FORCED clear), and the enable "
+                      "did not survive the reset",
+                      !r.escalated() &&
+                          (boot_shcsr & SCB_SHCSR_BUSFAULTENA_Msk) == 0u);
+        leg_unaligned();
+    }
+
+    // leg 11: the last boot.
+    const FaultRecord r{token.fault_cfsr, token.fault_hfsr, token.fault_address};
+    print(serial, "  the wreck as the handler read it: CFSR=", hex(r.cfsr),
+          " HFSR=", hex(r.hfsr), " address=", hex(r.address), "; CCR at this boot=",
+          hex(boot_ccr), crlf);
+    bench.verdict("an unaligned LDR with UNALIGN_TRP on is a UsageFault at its "
+                  "own vector, and the same body resets from there",
+                  alone(ResetFlag::software));
+    bench.verdict("the record says kernel_fault with this leg's context",
+                  boot_record && boot_record->code == token.code &&
+                      boot_record->context == token.context);
+    bench.verdict("CFSR names the unaligned access (UFSR.UNALIGNED), with no "
+                  "address (a UsageFault has none) and nothing escalated",
+                  (r.cfsr & SCB_CFSR_UNALIGNED_Msk) != 0u && !r.address_valid() &&
+                      !r.escalated());
+    bench.verdict("the trap did not survive the reset: CCR's UNALIGN_TRP is "
+                  "clear at this boot",
+                  (boot_ccr & SCB_CCR_UNALIGN_TRP_Msk) == 0u);
+    bench.verdict("the token crossed all four resets intact",
+                  token.magic == token_magic && token.canary == token_canary);
+
+    token.leg = 0;
+    token.magic = 0;
+    boot_record.reset();   // judged: a second run in this boot starts clean
+    bench.end_letter();
+}
+
 void ti_resets() {
     report_boot();
     bench.verdict("this boot names a reset source", (boot_flags & ResetFlag::all) != 0u);
@@ -882,6 +1113,10 @@ void ti_resume() {
     bench.resume_tally(token.pass, token.fail);
 
     const uint8_t leg = token.leg;
+    if (leg >= 8u) {
+        tj_resume(leg);
+        return;
+    }
     print(serial, crlf, "i (continued after reset ", leg, " of 7)", crlf);
     report_boot();
 
@@ -1072,6 +1307,7 @@ void ti_resume() {
 
     token.leg = 0;
     token.magic = 0;
+    boot_record.reset();   // judged: a second run in this boot starts clean
     bench.end_letter();
 }
 
@@ -1128,6 +1364,7 @@ static void bank_fault_and_reset() {
 }
 
 extern "C" void HardFault_Handler() { bank_fault_and_reset(); }
+extern "C" void BusFault_Handler() { bank_fault_and_reset(); }
 extern "C" void UsageFault_Handler() { bank_fault_and_reset(); }
 
 int main() {
@@ -1139,6 +1376,7 @@ int main() {
     boot_lsi_ready = brio::Rcc::lsi_ready();
     boot_wwdg_clocked = brio::Wwdg::bus_clock();
     boot_shcsr = SCB->SHCSR;
+    boot_ccr = SCB->CCR;
     boot_fault = brio::Faults::read();
 
     // A watchdog letter i left running - if the reset it caused did not
@@ -1160,6 +1398,8 @@ int main() {
     bench.letter('c', "the WWDG, never activated", tc_wwdg);
     bench.letter('d', "the fault vectors, without faulting", td_faults);
     bench.letter('i', "SEVEN REAL RESETS (reboots the board)", ti_resets, false);
+    bench.letter('j', "FOUR MORE REAL RESETS: the deliberate ones, two faults at "
+                 "their own vectors (reboots the board)", tj_resets, false);
 
     // A pending token means a leg of letter i is waiting to be judged:
     // resume it instead of printing a banner nobody asked for.

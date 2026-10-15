@@ -118,11 +118,16 @@
 #include "kernel/event_queue.hpp"
 #include "kernel/post.hpp"
 #include "kernel/tenuto.hpp"
+#include "kernel/time.hpp"
 #include "kernel/time_event.hpp"
 #include "util/i2c_bus.hpp"
 #include "util/power.hpp"
 #include "util/print.hpp"
 #include "util/testbench.hpp"
+
+#if defined(STM32F446xx)
+#include "twi_link_client.hpp"
+#endif
 
 #if defined(STM32F446xx)
 /// The Nucleo-64 fits no crystal: its 8 MHz is the ST-LINK's clock output,
@@ -274,7 +279,12 @@ constexpr PeerFacts peer{.name = "the STMPE811",
 using Serial = Uart<console_instance, console_pins>;
 constexpr Serial serial;
 
-TestBench<Serial> bench;
+// TWO SETS on the Nucleo-F446RE: `z` the board's own letters, runnable
+// with the desk partner on its dark console, and `t` the letters whose
+// instrument is the partner's `twi_peer` on the same wire (they FAIL
+// without it). The scan of letter d would meet the peer's command
+// address, so the far board is dark for `z`.
+TwoKeyTestBench<Serial, 't'> bench;
 
 using S = I2c<bus_instance>;
 using Host = I2cHost<bus_instance, bus_pins>;
@@ -462,7 +472,7 @@ struct Regs {
 };
 #endif
 
-#if defined(STM32F469xx)
+#if defined(STM32F469xx) || defined(STM32F446xx)
 void spin_ms(uint32_t ms) {
     const uint32_t t0 = Ticker::ticks();
     while (Ticker::ticks() - t0 < ms) {
@@ -1093,7 +1103,11 @@ void th_write_back() {
 
 namespace kl {
 
-using I2cArb = I2cBus<Host, P, 4>;
+/// The per-bus timeout is 20 ms: two orders above any tenure letter i
+/// queues (a register read is about 0.4 ms at 100 kHz), and the limit
+/// letter n's peer stretches past.
+constexpr uint32_t bus_timeout_ticks = ticks_from_ms<P>(20);
+using I2cArb = I2cBus<Host, P, 4, BusPassThrough, bus_timeout_ticks>;
 
 uint8_t rx_a[2];
 const uint8_t index_chip_id[1] = {reg_chip_id};
@@ -1377,7 +1391,11 @@ void tk_recovery() {
 /// does on its own after it.
 using Core48 = Clock<ClockSource::pll_hse, 48'000'000, 8'000'000, HseMode::bypass>;
 using Core16 = Clock<ClockSource::hsi, 16'000'000>;
-using Cores = DynamicClock<Rates<SysClock, Core48, Core16>, Ticker, Serial, Host, DmaHost>;
+// THE LIVE ENGINE LAST IN THE FAN-OUT: both hosts re-apply their own
+// cached speed to the one CCR and TRISE they share, so the last one
+// rebased decides what the registers hold - Host, which letter n's rebase
+// leg times.
+using Cores = DynamicClock<Rates<SysClock, Core48, Core16>, Ticker, Serial, DmaHost, Host>;
 constexpr Cores cores;
 
 /// What a run of refusals came to, over one core, one host, one speed.
@@ -1627,6 +1645,257 @@ void tl_finger() {
 }
 #endif
 
+#if defined(STM32F446xx)
+// =============================================================================
+// n - THE DESK PARTNER: the STM32G0's twi_peer on the same wire (set `t`)
+// =============================================================================
+//
+// The partner's I2C1 (PB8/PB9 on its side) taps the same two nodes as this
+// board's I2C1 and FMPI2C1. Its command client answers 0x6B alone, which
+// no letter of `z` sends but letter d's scan, so the partner is dark for
+// `z` and runs `twi_peer` for this set. What the peer can do that the
+// self-link's register file cannot: stretch the clock on command, hold SDA
+// low from its own GPIO until a number of SCL edges, and go deaf.
+
+/// Where the partner's client is told to answer: NOT twi_link's dut_addr
+/// (0x2C), which is this board's own FMPI2C1 target in every letter here -
+/// two targets on one address would collide on every read.
+constexpr uint8_t partner_addr = twilink::shared_addr;
+
+struct LinkPort {
+    static uint8_t tenure(uint8_t addr, const uint8_t* tx, uint8_t tx_len, uint8_t* rx,
+                          uint8_t rx_len) {
+        return ::tenure<Host>(addr, tx, tx_len, rx, rx_len);
+    }
+    static void ready() { (void)host_ready(); }
+    static void wait_ms(uint32_t ms) { spin_ms(ms); }
+};
+using Link = TwiLinkClient<LinkPort>;
+using twilink::Op;
+
+/// The opening line of every letter of the set: the peer answers, or the
+/// letter fails by name.
+bool need_twi_peer() {
+    (void)host_ready();
+    if (Link::command(Op::ping)) {
+        return true;
+    }
+    bench.verdict("the desk partner answers on the command address (the STM32G0 running "
+                  "twi_peer)",
+                  false);
+    return false;
+}
+
+/// One 8-byte write to the peer's serving address, timed on the tick.
+uint32_t timed_write(uint8_t& st) {
+    static const uint8_t w8[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+    const uint32_t t0 = Ticker::ticks();
+    st = tenure<Host>(partner_addr, w8, 8, nullptr, 0);
+    return Ticker::ticks() - t0;
+}
+
+void tn_partner() {
+    if (!need_twi_peer()) {
+        return;
+    }
+    twilink::Ident id{};
+    const bool got = Link::ident(id);
+    char label[9] = {};
+    for (uint8_t i = 0; i < 8; ++i) {
+        label[i] = id.label[i];
+    }
+    print(serial, "  peer: label '", label, "' sanity ", hex(id.sanity), " fw ", hex(id.version),
+          crlf);
+    bench.verdict("the partner is twi_peer (the sanity byte), an STM32G0 (fw 0x03xx)",
+                  got && id.sanity == twilink::ident_sanity &&
+                      twilink::peer_kind(id.version) == twilink::peer_stm32g0);
+    uint8_t good = 0;
+    for (uint8_t i = 0; i < 10; ++i) {
+        if (Link::command(Op::ping)) {
+            ++good;
+        }
+    }
+    bench.verdict("ten command round trips, each two tenures of this engine", good == 10u);
+
+    // ---- clock stretching as flow control ----
+    twilink::Params base{};
+    base.count = 128;   // never reached: the deadline ends the serve
+    base.ms = 300;
+    base.addr = partner_addr;
+    if (!Link::act(Op::serve, base)) {
+        bench.verdict("the peer accepted the unstretched serve", false);
+        return;
+    }
+    uint8_t st0 = 0;
+    const uint32_t base_ms = timed_write(st0);
+    spin_ms(350);
+    twilink::Params st{};
+    st.count = 64;
+    st.ms = 150;
+    st.addr = partner_addr;
+    st.hold_us = 2000;
+    if (!Link::act(Op::serve, st)) {
+        bench.verdict("the peer accepted the stretched serve", false);
+        return;
+    }
+    uint8_t st1 = 0;
+    const uint32_t held_ms = timed_write(st1);
+    spin_ms(200);
+    twilink::Report r{};
+    const bool rep = Link::report(r);
+    print(serial, "  an 8-byte write: ", base_ms, " ms unstretched (status ", st0, "), ", held_ms,
+          " ms with the peer holding SCL 2 ms before each byte (status ", st1, "); the peer took ",
+          r.aux0, crlf);
+    bench.verdict("unstretched, the 8-byte write completes i2c_ok inside a tick or two "
+                  "(81 bit periods at 100 kHz: 0.8 ms)",
+                  st0 == i2c_ok && base_ms <= 2u);
+    // THE BAND: the peer spends its hold at the address match and before
+    // every data byte, eight holds inside the controller's window (the
+    // ninth falls after its last byte) - 16 ms - plus the 0.8 ms of bits
+    // and the tick's own +-1: 16..19 ms.
+    bench.verdict("a target stretching SCL 2 ms a byte stretches this controller's tenure to "
+                  "the 16 ms the holds add, and it completes i2c_ok: the engine simply waits",
+                  st1 == i2c_ok && held_ms >= 16u && held_ms <= 19u && rep && r.aux0 == 8u);
+
+    // ---- unstick() against a client that really holds SDA ----
+    twilink::Params h{};
+    h.ms = 300;
+    h.aux8 = 4;   // let go at the fourth falling edge of SCL
+    if (!Link::act(Op::hold_sda, h)) {
+        bench.verdict("the peer accepted the SDA hold", false);
+        return;
+    }
+    spin_ms(5);
+    const bool held = !SdaPad::read();
+    const uint8_t pulses = Host::unstick();
+    spin_ms(350);
+    twilink::Report hr{};
+    const bool hrep = Link::report(hr);
+    print(serial, "  SDA held by the peer: ", held ? "low" : "NOT low", "; unstick() answered ",
+          pulses, " pulse(s); the peer counted ", hr.aux0, " falling edge(s) and saw SDA ",
+          hr.aux1 != 0u ? "high" : "low", " when it let go", crlf);
+    bench.verdict("a client holding SDA until four SCL edges is freed by unstick() at the "
+                  "fourth pulse, and unstick() says so",
+                  held && pulses == 4u && hrep && hr.aux0 == 4u);
+
+    twilink::Params h0{};
+    h0.ms = 100;
+    h0.aux8 = 0;   // only the deadline lets go
+    if (!Link::act(Op::hold_sda, h0)) {
+        bench.verdict("the peer accepted the SDA hold to its deadline", false);
+        return;
+    }
+    spin_ms(5);
+    const uint8_t stuck = Host::unstick();
+    spin_ms(150);
+    const uint8_t after = Host::unstick();
+    print(serial, "  SDA held to the peer's deadline: unstick() ", stuck,
+          "; once the hold is over: ", after, crlf);
+    bench.verdict("nine pulses and a STOP cannot free a pad nothing releases: 0xFF",
+                  stuck == 0xFFu);
+    bench.verdict("... and with the wire free again unstick() drives nothing", after == 0u);
+    bench.verdict("the command channel is back after the holds", need_twi_peer());
+
+    // ---- the arbiter's per-bus timeout over this engine ----
+    // The peer stretches 40 ms at the address: past the arbiter's 20 ms,
+    // and a tenure that never completes is what the timeout is for.
+    twilink::Params w{};
+    w.count = 64;
+    w.ms = 150;
+    w.addr = partner_addr;
+    w.hold_us = 40'000;
+    if (!Link::act(Op::serve, w)) {
+        bench.verdict("the peer accepted the wedging serve", false);
+        return;
+    }
+    kl::BusKernel::init_all();
+    bus_ao_live = true;
+    kl::Probe::clear_tally();
+    static uint8_t two[2] = {0x5A, 0xA5};
+    Host::Request rq{};
+    rq.addr = partner_addr;
+    rq.tx = lend<Lease::reply>(static_cast<const uint8_t*>(two));
+    rq.tx_len = 2;
+    rq.reply = reply_to<kl::Probe, I2cDone>();
+    const uint32_t t0 = Ticker::ticks();
+    post<kl::I2cArb>(rq);
+    uint32_t replied_at = 0;
+    while (Ticker::ticks() - t0 < 200u) {
+        kl::pump();
+        if (kl::Probe::n != 0u && replied_at == 0u) {
+            replied_at = Ticker::ticks() - t0;
+        }
+    }
+    bus_ao_live = false;
+    spin_ms(150);   // the peer's serve over
+    const uint8_t freed = Host::unstick();
+    print(serial, "  a tenure stretched 40 ms at its address: reply ", kl::Probe::replies[0],
+          " after ", replied_at, " ms (", i2c_timeout, " is i2c_timeout); unstick() afterwards ",
+          freed, crlf);
+    // THE BAND: the timeout is a time event of 20 ticks armed at the start
+    // and matured by the pump, which polls every tick: 20..21 ticks after
+    // the post, and the stopwatch's own tick either side - 19..22.
+    bench.verdict("the arbiter answers the wedged tenure with i2c_timeout, in its place",
+                  kl::Probe::n == 1u && kl::Probe::replies[0] == i2c_timeout);
+    bench.verdict("... at its 20 ms limit (19..22 ms on the tick)",
+                  replied_at >= 19u && replied_at <= 22u);
+    bench.verdict("and the same host carries the command channel again after recover()",
+                  need_twi_peer());
+
+    // ---- rebase() across the core's rate ----
+    // The host is a user of letter m's DynamicClock, so every switch runs
+    // its rebase(): FREQ, CCR and TRISE re-derived for the new APB1. A
+    // wrong derivation still moves bytes - at a wrong rate - so each rung
+    // TIMES its write against the rate asked.
+    uint8_t rungs_ok = 0;
+    for (uint8_t i = 0; i < 3u; ++i) {
+        const bool up = i == 0u   ? Cores::template set_index<0>()
+                        : i == 1u ? Cores::template set_index<1>()
+                                  : Cores::template set_index<2>();
+        twilink::Params sv{};
+        sv.count = 64;
+        sv.ms = 250;
+        sv.addr = partner_addr;
+        sv.seed = static_cast<uint8_t>(0x30u + i);
+        const bool cmd = up && Link::act(Op::serve, sv);
+        static const uint8_t w8[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+        uint8_t rb[8] = {};
+        const uint32_t c0 = Ticker::cycles();
+        const uint8_t ws = tenure<Host>(partner_addr, w8, 8, nullptr, 0);
+        const uint32_t cyc = Ticker::cycles() - c0;
+        const uint8_t rs = tenure<Host>(partner_addr, nullptr, 0, rb, 8);
+        uint8_t bad = 0;
+        for (uint8_t k = 0; k < 8u; ++k) {
+            if (rb[k] != twilink::pattern_value(twilink::pattern_counting, sv.seed, k)) {
+                ++bad;
+            }
+        }
+        spin_ms(300);
+        const uint32_t mhz = Cores::hz() / 1'000'000u;
+        // 81 SCL periods in the write: the address and eight bytes.
+        const uint32_t per_ns = mhz != 0u ? static_cast<uint32_t>(
+                                                static_cast<uint64_t>(cyc) * 1000u / mhz / 81u)
+                                          : 0u;
+        const uint32_t pm = per_ns != 0u ? 10'000'000u / per_ns : 0u;   // thousandths of 100 kHz
+        print(serial, "  core ", mhz, " MHz, APB1 ", Host::reference_hz() / 1000u,
+              " kHz: serve ", cmd, ", write ", ws, ", read ", rs, ", ", bad,
+              " wrong, the write's SCL at ", pm, " thousandths of 100 kHz", crlf);
+        // Never above the rate by more than 2 %, and within a quarter below
+        // it: a short tenure carries the request's own cost, and the
+        // partner's polled target stretches each byte a little.
+        if (cmd && ws == i2c_ok && rs == i2c_ok && bad == 0u && pm <= 1020u && pm >= 750u) {
+            ++rungs_ok;
+        }
+    }
+    (void)Cores::template set_index<0>();
+    (void)Regs::up(clock);
+    bench.verdict("at 180, 48 and 16 MHz of core the host's rebase() keeps the bus at the rate "
+                  "asked (within 2 % above, a quarter below) and byte-exact against the partner",
+                  rungs_ok == 3u);
+    bench.verdict("... and the channel is back at the boot rate", need_twi_peer());
+}
+#endif
+
 void banner() {
     print(serial, crlf, "test_stm32f4_i2c - I2C", bus_instance, " with ", peer.name, crlf);
     bench.menu();
@@ -1788,6 +2057,8 @@ int main() {
 #endif
 #if defined(STM32F446xx)
     bench.letter('m', "THE REFUSED LAST BYTE, the core at 180, 48 and 16 MHz", tm_refusal);
+    bench.second_letter('n', "THE DESK PARTNER: stretching, a held SDA, the per-bus timeout",
+                        tn_partner);
 #endif
 
     if (serial_ok) {

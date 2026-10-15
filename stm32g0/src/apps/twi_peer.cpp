@@ -74,6 +74,7 @@
 
 #include "stm32g0/clock.hpp"
 #include "stm32g0/delay.hpp"
+#include "stm32g0/exti.hpp"
 #include "stm32g0/flash.hpp"
 #include "stm32g0/i2c.hpp"
 #include "stm32g0/nvic.hpp"
@@ -500,23 +501,41 @@ twilink::Report run_hold_sda(const twilink::Params& a) {
     SdaPin::output(false, {.open_drain = true});
     r.flags |= twilink::report_host_ran;
 
+    // THE FALLING EDGES ARE LATCHED BY THE EXTI, not polled: its pending
+    // bit is set by the edge itself, so a falling edge that comes while
+    // this loop is not looking is counted all the same. MEASURED: a poll of
+    // the pad missed one edge of the first two at a 5 us half period (an
+    // unstick at 100 kHz), every time, and none at 50 us. The line's
+    // interrupt is UNMASKED in the EXTI, because 13.3.1 sets the pending
+    // bit for an unmasked line only (docs/stm32g0/exti.md measures it), and
+    // its NVIC line stays disabled, so no handler ever runs for it.
+    using SclLine = ExtInt<SclPin>;
+    Nvic::disable(SclLine::irq());
+    (void)SclLine::select();
+    (void)SclLine::configure(ExtiSense::falling);
+    (void)SclLine::clear();
+    (void)SclLine::arm(true);
     const uint32_t t0 = Ticker::millis();
     uint16_t falls = 0;
-    bool prev = SclPin::read();
     uint16_t guard = 0;
     for (;;) {
-        const bool now = SclPin::read();
-        if (prev && !now) {
+        if (SclLine::falling_pending()) {
+            (void)SclLine::clear();
             ++falls;
             if (a.aux8 != 0 && falls >= a.aux8) break;
         }
-        prev = now;
         if (++guard == 0 && Ticker::millis() - t0 >= a.ms) {
             r.flags |= twilink::report_timed_out;
             break;
         }
     }
+    // RELEASED BY ONE STORE: the pad is an open-drain output with its
+    // output register low, so setting it lets the line go at once - the
+    // mode change that follows is the slow part and comes after.
+    SdaPin::set();
     SdaPin::input();
+    (void)Exti::release(SclLine::line);
+    Nvic::clear_pending(SclLine::irq());
     r.count = falls;
     r.aux0 = static_cast<uint8_t>(falls);
     r.aux1 = SdaPin::read() ? 1u : 0u;

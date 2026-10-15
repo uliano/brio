@@ -1,9 +1,9 @@
 # I2C (STM32G0)
 
-The chapter is built whole and measured three ways - on the Nucleo's
-own self-link, and on the same two pads against two other chips, a SAM
-C21 and another STM32G0; what is not covered is listed at the end, with
-the reason in each case.
+The chapter is built whole and measured on the Nucleo's own self-link
+and, on the same bus, against the desk partner, an STM32F446RE - and on
+the two smaller parts against a second STM32G0; what is not covered is
+listed at the end, with the reason in each case.
 
 `brio/stm32g0/i2c.hpp` is RM0444 chapter 32 in the two strata every brio
 bus driver has: `I2c<n>`, the resource; `I2cHost<n, pins, TxEngine,
@@ -237,12 +237,13 @@ the reason is in the findings.
 
 ## Bench findings
 
-Measured by `test_stm32_i2c`. The findings down to "ES0548 2.10.2 did
-not fire once" are the SELF-LINK's (I2C1 host PB8/PB9, I2C2 client
-PA11/PA12, both AF6, 2.2 kOhm pull-ups): 13 letters in `z`, 155
-verdicts. The ones under "The peer bus" are a SECOND CHIP's, on the same
-two pads and the same pull-ups: 54 verdicts, against a SAM C21 and
-against a second STM32G0.
+Measured by `test_stm32_i2c` on the Nucleo-G0B1RE's desk, 190 verdicts
+in two sets, green ten times running in one boot. The findings down to
+"ES0548 2.10.2 did not fire once" are the SELF-LINK's (I2C1 host
+PB8/PB9, I2C2 client PA11/PA12, both AF6, 2.2 kOhm pull-ups): `z`,
+letters `a`..`m`, **155 verdicts**. The ones under "The peer bus" are a
+SECOND CHIP's, the STM32F446RE running `twi_peer` on the same two nodes:
+the second all-key `w`, letters `n`..`t`, **35 verdicts**.
 
 **The enable protection is REAL here, which is the opposite of the SPI's
 answer.** A raw write with PE set lands on NONE of the four PE-gated
@@ -564,31 +565,31 @@ the HAL's TIMINGR words solved against the manual's budgets:
   30 to 70 per cent, the second over the 120 ns Fm+ allows a rise. The
   data is byte-exact at that rung all the same, on this short link.
 
-### The peer bus (letters n..r)
+### The peer bus (letters n..t)
 
-The same two pads and the same two pull-ups reach a PEER BOARD running
-`twi_peer` when the jumpers go there instead of to I2C2, and the
-topologies EXCLUDE each other: the suite probes for the self-link at
-boot and letters b..l, x and y skip themselves when it is absent (letter
-m keeps its three wireless verdicts and drops its closing wire leg). On
-the peer desk `z` is 54 verdicts (letter `a` wireless, letter `m`
-wireless, letters `n`..`r` on the wire), and they hold against a SAM C21
-and against a second STM32G0 alike. THE TWO PEERS ARE INTERCHANGEABLE
-HERE: every verdict of the five letters holds against both, and the peer's `ident` is what says which one answered.
+The same two nodes carry a PEER BOARD running `twi_peer` - the desk's
+STM32F446RE, its I2C1 on PB8/PB9 (`ident` fw 0x0400) - beside I2C2's
+taps, so this desk carries the self-link AND the peer at once and the
+suite runs both: letters b..l, x and y skip only when the boot probe
+finds no self-link, and the peer letters - their own all-key, `w`, so
+that `z` runs with the far board on its dark console - FAIL when nobody
+answers. The two do not disturb each other: the peer's command client answers 0x6B
+alone, which no self-link letter sends, and I2C2 is released while a
+peer letter runs.
 
-**The wire format is `avrdx/src/apps/twi_link.hpp`, shared by all three
-architectures' peers.** Here **one command is TWO TENURES of the engine
+**The wire format is `avrdx/src/apps/twi_link.hpp`, shared by every
+architecture's peer.** Here **one command is TWO TENURES of the engine
 under test** - a write carrying the frame, then a read collecting the
-answer - so the
-command channel is itself a measurement of this driver. Ten of ten round
-trips at a measured 99 kHz, and `ident` names the peer's die serial and
+answer - so the command channel is itself a measurement of this driver.
+Ten of ten round trips, and `ident` names the peer's unique-ID word and
 its `twi_peer` sanity byte.
 
 **Every tenure shape against a real second chip.** A write, a read whose
 bytes are the peer's own pattern byte-exact, and the combined
 write-then-read - which the peer counts as **FOUR address matches for
 two tenures**, the repeated START seen from the far end exactly as the
-self-link's letter `b` sees it from I2C2. A general call reaches the peer
+self-link's letter `b` sees it from I2C2 - with the peer accounting
+every byte, 12 received and 12 served. A general call reaches the peer
 at address 0x00.
 
 **The vocabulary is real statuses across two architectures**: a client
@@ -599,21 +600,21 @@ priced against its own baseline - eight 8-byte tenures unstretched in 6
 ms, ONE 8-byte tenure at 2 ms a byte in 16 ms, completing `i2c_ok`: the
 controller simply waits, which is what flow control means.
 
-**ALL THREE SPEEDS CARRY THE LINK BYTE-EXACT, Fm+ INCLUDED** - 99 kHz,
-400 kHz and 1000 kHz against the register, a write and a read exact at
-each, against BOTH peers. That is worth stating as a WIRE result and not
-a controller one: a megahertz bus here is a property of these two short
-jumpers, their 2.2 kOhm pull-ups and the far end's own input path (the
-SAM's target has no input filter at all), and the suite's verdict on the
-Fm+ rung claims only that the
-kernel clock can produce it. **AND ONE TARGET CONFIGURATION SERVES ALL
-THREE RUNGS**: a target's `speed` names the row its SDADEL and SCLDEL
-are solved against and not a rate it generates (32.4.8), so the G0 peer
-sits on the bus solved for Fm+ - the fastest rung the ladder will bring
-- and the Sm and Fm rungs are byte-exact through the same delays.
+**THE RATE ASKED, BETWEEN TWO CHIPS** (letter `q`): the write's SCL at
+**950..951 and 859 thousandths** of 100 and 400 kHz over ten runs -
+under the rate, and inside the quarter the verdict allows, the request's
+own cost being inside the reading. All three speeds carry a write and a
+read byte-exact, Fm+ included - at **722..723 thousandths of 1 MHz**,
+which is the far end's doing and not this controller's: the peer's
+target is a 400 kHz block that stretches every byte, so the verdict on
+the Fm+ rung claims only that the kernel clock can produce it. **AND
+ONE TARGET CONFIGURATION SERVES ALL THREE RUNGS** on a target of this
+family: a target's `speed` names the row its SDADEL and SCLDEL are
+solved against and not a rate it generates (32.4.8), so a G0 target
+solved for Fm+ is byte-exact on the Sm and Fm rungs too.
 
 **The arbiter measured against a SECOND CHIP.** Letter
-`r` runs `I2cBus` (= `BusMaster`) over `I2cHost` with the SAM answering:
+`r` runs `I2cBus` (= `BusMaster`) over `I2cHost` with the peer answering:
 four tenures queued come back in order with the NACK from an address
 nobody answers delivered in its place, the sixth of six posted into a
 four-deep queue is rejected on the spot, an idle bus votes for the sleep
@@ -624,8 +625,8 @@ exactly as they are written.
 WIRE - RECORDED, NOT RECONCILED.** The self-link's letters `c` and `l`
 measure a client of this same die holding SDA down: the silicon sees a
 PARK and raises nothing (BUSY alone, no ARLO, no BERR), and the
-arbiter's `i2c_timeout` at 20 ms is the whole answer. With the SAM told
-to hold SDA from its own PORT for 300 ms, the same tenure comes back
+arbiter's `i2c_timeout` at 20 ms is the whole answer. With the peer told
+to hold SDA from its own GPIO for 300 ms, the same tenure comes back
 **`i2c_arb_lost` in 0 ms, with SDA still low at the reply** - the ENGINE
 reporting a wire code of its own where the other arrangement reported
 nothing at all. The two differ in who holds the line and in how the
@@ -635,6 +636,51 @@ is met either way - the requester is answered IN ITS PLACE, never with
 silence and never with `i2c_ok`, at the arbiter's limit or sooner, and
 the same bus AO carries the next tenure to `i2c_ok` once the line comes
 back.
+
+**TWO HELD STARTS RELEASED BY ONE STOP SERIALIZE** (letter `s`). The
+third node is this board's I2C2, whose pads tap the same bus: it opens a
+tenure nobody answers at about 2 kHz (4.7 ms busy), this controller sets
+START behind it - held, 32.4.9 - and the peer, told by `arb` to wait for
+BUSY and a lead-in, sets its own, held the same way. I2C2's STOP
+releases both. **Neither silicon commits its START early enough to meet
+the other's**: a sampled trace of both lines (8 core cycles a sample)
+puts this controller's START **5.75, 2.0 and 0.75 us** after the STOP at
+100, 400 and 1000 kHz and the peer's within about 2 us, and in twelve
+rendezvous over the three rates and two rendezvous rates the second
+controller saw the first's START every time, waited, and went second -
+no address was ever arbitrated, whichever order the addresses favoured.
+What the letter judges is what holds: ten rendezvous of ten end on the
+third node's own STOP, both controllers' tenures run whole to the
+address nobody answers (`i2c_nack_addr` at both ends), no arbitration is
+lost. A live arbitration is in the second list below.
+
+**A RATE CHANGE ON A BUSY BUS SENDS THE START INTO THE OTHER'S TENURE.**
+TIMINGR is PE-gated (32.9.5), so a request at a rate other than the one
+in force costs `I2cHost` a PE cycle - and PE = 0 CLEARS BUSY (32.9.7), so
+this controller forgets that another one holds the bus and the START
+that follows goes out at once. Measured in letter `s`'s staging: a
+request at 400 kHz or 1 MHz, made while the rendezvous tenure ran with
+100 or 400 kHz in force, put this controller's START into I2C2's
+tenure in eight stagings of ten in one sweep and in every single run
+before it - I2C2 left mid-tenure with both lines low (BUSY, no STOPF),
+the peer reporting a lost arbitration. A START requested at the rate
+already in force waits behind the busy bus as 32.4.9 says, every time. The letter therefore
+carries its commands at the rate it contends at; the driver's answer is
+a decision posed (the first list below).
+
+**THE WAKE FROM STOP, BY ANOTHER CHIP'S ADDRESS** (letter `t`). I2C2 -
+the instance whose kernel is HSI16 and whose EXTI line 22 is direct - is
+the client; the peer's `arb` writes four bytes to it 50 ms after this
+board's own rendezvous tenure made the bus busy, and by then this board
+is asleep. In Sleep first (the wake source proven in the shallower mode)
+and then in **Stop 1**, the address wakes the core: the RTC on the LSE,
+which is also the one-second backstop that never fired, reads the Stop
+at **46..50 ms against 50 due** over ten runs (its unit 3.9 ms), and the
+four bytes the address opened are taken whole, the peer's write
+completing `i2c_ok` - the client stretched SCL through the wake. The
+three conditions of 32.4.16 (HSI16 kernel, DNF 0, stretching on) are
+the ones `wake_from_stop()` grants on, and HSIDIV is 0 at the fast rung
+(ES0548 2.2.4).
 
 **TWO THINGS A TARGET OF THIS FAMILY DOES THAT ITS TALLY MUST KNOW**,
 both measured from the peer's side and both a property of the target
@@ -746,6 +792,16 @@ Driver gaps:
 - **No SMBus task.** The host and alert addresses, the PEC and the
   time-outs are resource verbs; a `SmbusHost` with the protocol's own
   vocabulary is born with its first device.
+- **A rate change while another controller holds the bus.** `start()`
+  at a rate other than the one in force cycles PE for TIMINGR, which
+  clears BUSY, and the START then goes out into the other controller's
+  tenure (measured, the peer bus above). Not settled: waiting for BUSY
+  first, bounded, as the vendor's library does before a blocking
+  transfer (25 ms),
+  or answering the request as lost to another controller, are the two
+  shapes, and the choice is posed. On a bus with one controller - every
+  program on this desk but letter `s`'s staging - the hazard cannot
+  arise.
 
 Implemented but not bench-verified:
 
@@ -764,11 +820,6 @@ Implemented but not bench-verified:
   measure it.
 - **I2C3** - present on this part, exercised in the family fixture and
   in letter a's refusals, but its pads carry no wire here.
-- **SCL against the rate asked between two chips** (letter `q`: the
-  write's SCL at 100 and 400 kHz judged never above the rate by more
-  than 2 % and within a quarter below it): the peer letters skip on a
-  desk that carries the self-link; one run of `q` against a `twi_peer`
-  measures it.
 - **The LQFP32's own self-link.** The STM32G031K8 bonds both ends of
   it (I2C1 on PB8/PB9, I2C2 on PA11/PA12), so the eleven self-link
   letters are compiled there and probe for it at boot - but that desk
@@ -776,18 +827,6 @@ Implemented but not bench-verified:
   I2C2 AS A CLIENT HAS NEVER RUN ON THAT DIE. Two jumpers from CN3-11
   and CN3-13 to CN4-7 and CN4-8, with the peer wires off, would run
   them.
-- **The wake from Stop on silicon.** Everything around it is measured -
-  the three conditions as refusals, WUPEN's readback, the direct EXTI
-  line, a bus that carries bytes with it armed - but the wake itself
-  needs an address on the wire while the core is stopped, which on the
-  SELF-LINK is impossible: both ends are on the same die, and a Stop
-  that silences the client silences the controller that would wake it.
-  The peer bus removes that obstacle - the peer is a second node and
-  `twi_link`'s `arb` op makes it a CONTROLLER, on all three of that
-  app's ports - so the wake is stageable and simply not built: it
-  wants this board's client on PB8/PB9 while the peer addresses it,
-  which is a role swap no letter of this suite does yet. ES0548 2.2.4
-  (HSIDIV must be 0) is stated for the same reason.
 - **The target half of the PEC**, which table 176 makes "SBC = 1,
   RELOAD = 0, PECBYTE = 1" - the check rides target byte control, whose
   NBYTES the suite's pump does not re-arm.
@@ -814,14 +853,14 @@ Implemented but not bench-verified:
 - **Arbitration lost against a real second controller.** ARLO is
   seen on silicon (letter `r`'s wedge, held by the peer from its own
   GPIO), but a LIVE RACE - two controllers driving addresses at once and
-  the smaller byte winning - is not staged, and it is the
-  cheapest gap on this list: `twi_link`'s `arb` op makes the peer a
-  controller (implemented on the stm32g0 port too, exercised by no
-  letter), `twilink::low_addr` exists so either end can be made to lose,
-  and the rendezvous it needs is a bus both ends see Busy at the same
-  instant. The self-link cannot help, since a held START on this silicon
-  does not fire when a phantom release comes - the SAM C21's answer
-  too.
+  the smaller byte winning - is not staged: letter `s` releases this
+  controller's held START and the peer's on one STOP and measures them
+  SERIALIZING (the second sees the first's START and waits, at every
+  rate, 0.75 to 5.75 us after the STOP against the peer's 2 us), so a
+  race wants one START committed inside the other's detection window, a
+  fraction of a microsecond that nothing on this desk can aim. A peer
+  whose START is released by software at a delay the DUT sweeps would
+  measure it.
 
 Declined, with the reason (what a wire or an instrument this bench has
 not got would measure):

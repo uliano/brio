@@ -246,12 +246,18 @@ extern "C" void UsageFault_Handler() {
 
 ## Bench findings
 
-`test_stm32f4_reset` on the STM32F429I-DISC1 at 180 MHz (PCLK1 45 MHz),
-nothing wired. Four letters in `z` (**44 verdicts**) and letter `i`
-outside it (**34 verdicts**), which reboots the board seven times and
-resumes from a `.noinit` token. Both sets green on the 32F469IDISCOVERY
-too, whose LSI the IWDG leg weighs at 35275 Hz (the DISC1's 33.5 kHz
-below) and whose seven legs land the same flags.
+`test_stm32f4_reset` at 180 MHz (PCLK1 45 MHz), nothing wired. Four
+letters in `z` (**44 verdicts**); letter `i` outside it (**34
+verdicts**), which reboots the board seven times and resumes from a
+`.noinit` token; and letter `j` (**17 verdicts**), four more reboots
+through the same token. `z` and `i` are green on the STM32F429I-DISC1,
+the 32F469IDISCOVERY and the Nucleo-F446RE; `j` on the Nucleo-F446RE,
+where `z` ran ten times in one boot, and `i` and `j` ten times each in
+alternation (plus twelve more of `j` alone), all green. The IWDG leg
+weighs each board's LSI: 33.5 kHz on the DISC1 (below), 35275 Hz on the
+32F469IDISCOVERY, 31.4 kHz on the Nucleo-F446RE (971..973 ms over the
+ten runs); every other figure below is the same on the three boards
+unless it names one.
 
 - **The flags accumulate, seen on real resets.** Leg 1 clears them and
   does a software reset: the next boot reads exactly `SFT | PIN`
@@ -283,9 +289,10 @@ below) and whose seven legs land the same flags.
   0x8200 (RTCEN set, RTCSEL = LSI) with LSIRDY clear all the same - an
   RTC's standing select does not force this oscillator, so the witness
   is not spoiled by it.
-- **The LSI starts in 116 us** from LSION to LSIRDY, against the
-  datasheet's 15 us typical and 40 us maximum - the same order, measured
-  through a polling loop that costs some of it.
+- **The LSI starts in 116 us** from LSION to LSIRDY (122 us on the
+  Nucleo-F446RE), against the datasheet's 15 us typical and 40 us
+  maximum - the same order, measured through a polling loop that costs
+  some of it.
 - **A keyed IWDG write raises its update bit AT THE STORE** (the read
   right after it already sees the bit) - only the CLEARING waits for the
   peripheral's clock. **With the watchdog stopped it never clears**:
@@ -296,6 +303,35 @@ below) and whose seven legs land the same flags.
   above confirms.
 - **A refresh really does re-lock the protected registers**: after
   0xAAAA a bare store into IWDG_PR raises no update bit at all.
+- **A reload written back to back with the prescaler, right after the
+  start key, can be in force before the start's own count begins.**
+  The LSI takes about 120 us to start, so the start key, PR and RLR all
+  wait for its first edges; with the two registers written one after
+  the other (21.3's list, and the vendor's initialization sequence) and
+  a reload of zero, the IWDG reset the Nucleo-F446RE 297 us after the
+  start key with PVU and RVU both still standing - before `configure()`
+  could return - in eight boots of eight that followed an earlier reset of
+  the run (two boots straight after a flash did not show it). With
+  the write of RLR held until PVU has cleared (24 runs of letter `j`'s
+  first leg), or until LSIRDY and 200 us more (3 runs), the block is
+  clocked by then and the same reload lands after the start: every run
+  returned from the call before the reset. `configure()` therefore waits for each update before the
+  next register; a reload long enough to outlast the crossing never
+  shows the difference.
+- **`Iwdg::force_reset()` resets the device 679 us after the call**
+  (Nucleo-F446RE, LSI 31.4 kHz; the same figure in 22 runs): the LSI's
+  start, the two crossings one after the other, the refresh's crossing
+  and one count of /4. The bound letter `j` judges, 2 ms, is the same
+  path at the datasheet's slowest LSI (17 kHz): 40 us of start, 2 x 5
+  periods of crossing, 5 more for the refresh, 4 for the count - 1.23
+  ms - with the polling's slack; the reset setting would take 512 ms.
+  The flags read `IWDG | PIN` and nothing else.
+- **`Wwdg::force_reset()` resets at once**: WDGA with T6 clear (22.3's
+  note) reset the board before the loop after the write could store a
+  single time - against one counter step at /1, 16384 core cycles - and
+  the flags read `WWDG | PIN` alone. The write needs the WWDG's bus
+  clock, which the caller opens (`bus_clock(true)`): through a closed
+  gate it lands nowhere.
 - **The WWDG's down-counter free-runs with WDGA clear** (0x7F to 0x5A in
   26851 us at /8, against 26943 us due for those 37 steps), and
   `in_window()` turns true exactly at the counter value the window
@@ -332,6 +368,18 @@ below) and whose seven legs land the same flags.
   Neither leg had an address (MMARVALID and BFARVALID clear, as they
   must be for a UsageFault). SHCSR comes back at its reset value after
   the reboot, so the enables are the program's to make again.
+- **A BusFault is taken at its own vector, precise, with the address.**
+  With BUSFAULTENA on, a word load from the first address past the
+  SRAM (the linker script's end of RAM: 0x20020000 on the
+  Nucleo-F446RE, where 0x20020000..0x3FFFFFFF is reserved) comes back
+  as CFSR 0x00008200 (BFSR.PRECISERR with BFARVALID), BFAR holding
+  that very address and HFSR zero, through the same
+  `hard_fault_reset()` body.
+- **UNALIGN_TRP turns an unaligned word load into a UsageFault**: an
+  LDR from an odd address, written by hand so the compiler cannot split
+  it into byte loads, with the trap and USGFAULTENA on, comes back as
+  CFSR 0x01000000 (UFSR.UNALIGNED), no address, HFSR zero; CCR reads
+  0x200 at the next boot, the trap gone with the reset.
 - **The three configurable faults are disabled at reset** (SHCSR reads
   zero at every boot) and the two CCR traps are off (CCR reads 0x200,
   STKALIGN alone).
@@ -362,28 +410,15 @@ Driver gaps (this chapter's option space the stratum does not touch):
 
 Implemented, not bench-verified:
 
-- `Iwdg::force_reset()` - the shortest-time-out path. Letter `i` reaches
-  the IWDG's reset by the ordinary time-out instead; what would measure
-  it is a leg that calls it and times the reset, which should land
-  inside a millisecond.
-- `Wwdg::force_reset()` - letter `i` reaches the same reset by letting
-  the counter run down; what would measure it is a leg that calls it and
-  checks WWDGRSTF at the next boot.
-- The MemManage and BusFault VECTORS. Letter `d` enables and disables
-  them, and no letter takes one: a MemManage needs the MPU (above) and a
-  BusFault needs an address the bus matrix rejects, which on this part
-  means an unmapped window or the external memory controller. What would
-  measure the second is a read of an unmapped address with BUSFAULTENA
-  on.
-- `Faults::unaligned_trap()` armed against a real unaligned access - the
-  compiler turns the obvious candidates into byte loads, so what would
-  measure it is a hand-written instruction on a pointer the optimizer
-  cannot see through.
+- The MemManage VECTOR. Letter `d` enables and disables it, and no
+  letter takes one: a MemManage needs the MPU (above), and what would
+  measure it is a leg that programs one region without access and
+  touches it.
 - LPWRRSTF, never seen set: it needs the `nRST_STOP` / `nRST_STDBY`
   option bytes (above), and with them at their shipped value a Standby
   wake looks like a power-on instead.
-- The suite on the other two parts. It builds for the Nucleo-F446RE and
-  the STM32F411CE black pill (`boards = f429zi,f446re,f411ce`) and has
-  run on neither; what would measure them is `z` and `i` on each. The
-  numbers above are the STM32F429ZI's, and the WWDG's are PCLK1's, so
-  they scale with each board's bus rate.
+- The suite on the STM32F411CE black pill (it builds there, `boards =
+  f429zi,f446re,f411ce,f469ni`), and letter `j` on the STM32F429ZI and
+  the STM32F469NI: what would measure them is `z`, `i` and `j` on each.
+  The WWDG's figures above are PCLK1's, so they scale with each board's
+  bus rate.

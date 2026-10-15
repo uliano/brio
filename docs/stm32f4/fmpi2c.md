@@ -570,6 +570,41 @@ stretches SCL from its address match until its vector has run, on the
 same core; I2C1 as the host against this block as the target pays 230
 for the same write ([i2c.md](i2c.md)).
 
+**AGAINST THE DESK PARTNER** (set `t`, letter `n`, 12 verdicts, green ten
+runs of ten): the STM32G0 beside this board on the same two nodes,
+running `twi_peer` - with it on its dark console for `z`, whose letter e
+counts 112 NACKs that its command address would spoil.
+
+- **FAST-MODE PLUS WITH EVERY BYTE ACKNOWLEDGED**: a write and a read of
+  eight bytes at the 1 MHz row, byte-exact, the partner's target - solved
+  for Fm+ - accounting 8 taken and 8 served; the write averages **762..773
+  kHz** of SCL (81 periods in a stopwatch that holds the request's cost
+  and the partner's polled target stretching each byte), never above
+  the rate.
+- **`unstick()` against a client that REALLY holds SDA**: held by the
+  partner's GPIO until four SCL falling edges (latched by its EXTI), the
+  line is free at the **fourth pulse** and `unstick()` answers 4; held to
+  its deadline, **0xFF**; on the freed wire, 0.
+- **The arbiter's per-bus timeout over this engine**: a tenure the
+  partner stretches 40 ms at its address is answered `i2c_timeout` by
+  `I2cBus` at its 20 ms limit, and the same host carries the command
+  channel after `recover()`.
+- **TIMEOUTA AGAINST A HELD CLOCK** - the half letter g could not stage:
+  with the clock-low watcher at 25 ms and the partner holding SCL 40 ms
+  at the address, TIMEOUT reaches the error vector **25 ms** into the
+  hold, every run - and THE TENURE GOES ON: this engine sweeps the flag
+  (no tenure here arms a time-out of its own), the silicon sends nothing
+  of its own on it, and when the holds are over the write completes
+  `i2c_ok` (146..147 ms for two bytes held 40 ms each and at the
+  address).
+- **`rebase()` WAS READING THE PAST, and now derives** the APB1 rate from
+  the new SYSCLK (`apb_hz_at`, [clock.md](clock.md)): the DynamicClock's
+  fan-out runs before the RCC moves, so a divider read back there is the
+  rate being left. Read back, a switch from 180 to 48 MHz solved TIMINGR
+  for 12 MHz where 24 ran and the bus went at **1811 thousandths** of 100
+  kHz, and at 16 MHz at 1694; derived, the three cores give **955, 942
+  and 901 thousandths**, byte-exact against the partner at each.
+
 ## Not covered yet
 
 Driver gaps, each with its reason:
@@ -598,34 +633,28 @@ Driver gaps, each with its reason:
   on every other stratum.
 
 Implemented, not bench-verified (each with what would measure it):
-- Fast-mode Plus with a byte acknowledged: the self-link's other end is
-  the classic I2C, a 400 kHz target; an Fm+ target on the wire would
-  measure the data path at 1 MHz.
-- Arbitration lost (`i2c_arb_lost`): a second controller on the wire.
+- Arbitration lost (`i2c_arb_lost`): a second controller is on the wire
+  now - the desk partner - but a race wants two STARTs committed inside
+  each other's detection window, and on this desk two held STARTs
+  released by one STOP serialize ([../stm32g0/i2c.md](../stm32g0/i2c.md),
+  "TWO HELD STARTS", measured with this chip's other I2C). What would
+  measure it is a peer releasing its START by software at a delay swept
+  across this one's.
 - A bus error and the spurious-BERR count: the chapter raises BERR on a
   misplaced START or STOP, which wants another controller misbehaving,
   and the erratum's own spurious one did not appear.
-- The arbiter's per-bus timeout and `i2c_timeout` over this engine: a
-  lost completion has to be staged, which wants a client that stretches
-  the clock past the limit.
-- `unstick()` against a client that really holds SDA down, and the 0xFF
-  it answers when nine clocks and a STOP do not free the line: nothing
-  here can hold SDA low without a wire.
 - The noise filters ON THE WIRE: the register is written and read back
   and the refusals the filter delay causes are measured, but what a
   9-period digital filter does to a glitch wants a glitch generator.
 - ES0298 2.12.8's stall: the ratio is computed and published, and the
   band was never entered with a transmission long enough to trip it -
-  every tenure on the HSI ended on its address. A device that accepts
-  bytes, at that kernel clock, would put the erratum on trial.
-- `rebase()` across a clock change: the fan-out is compiled and not
-  exercised; a transaction at every rate of a `DynamicClock` pack
-  ([clock.md](clock.md)) is what would measure it.
-- The SMBus time-outs that need a peer: TIMEOUTA's clock-low watcher was
-  shown NOT to fire on an idle bus, which is half the story - a client
-  holding SCL down past 25 ms is the other half. TIMEOUTB watches this
-  peripheral's own cumulative stretch, which only a target that is being
-  read produces.
+  every tenure on the HSI ended on its address. The desk partner accepts
+  bytes now; a write to it with this block on the HSI, at the ratio the
+  erratum names, would put the erratum on trial.
+- TIMEOUTB, this peripheral's own cumulative stretch, which only a
+  target being read produces: the partner's `twi_peer` has no `host_read`
+  (twi_link's extended repertoire) to read this block as a target, and
+  that op is what would measure it.
 - The Fast-mode Plus drive's EFFECT: the two bits are written and read
   back, but the 20 mA sink shows itself in a fall time, which wants an
   oscilloscope and a bus with real pull-ups.

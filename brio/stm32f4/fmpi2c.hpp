@@ -1984,7 +1984,12 @@ public:
      */
     static void rebase(uint32_t hz) {
         const bool was_enabled = S::enabled();
-        rebase_rates(hz / Rcc::apb1_divider(), hz);
+        // The APB1 rate DERIVED from the new SYSCLK (`apb_hz_at`): the
+        // fan-out runs before the RCC moves, and its divider is the rate
+        // being left - read back, a switch from 180 to 48 MHz solved
+        // TIMINGR for 12 MHz where 24 ran (the bus 1.8 times the rate
+        // asked, measured).
+        rebase_rates(apb_hz_at(hz, false), hz);
         if (was_enabled && valid_[static_cast<uint8_t>(applied_)]) {
             const FmpI2cSpeed keep = applied_;
             applied_ = static_cast<FmpI2cSpeed>(0xFFu);   // force apply() to act

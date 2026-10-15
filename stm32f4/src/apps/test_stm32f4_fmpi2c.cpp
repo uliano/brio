@@ -83,11 +83,14 @@
 #include "kernel/event_queue.hpp"
 #include "kernel/post.hpp"
 #include "kernel/tenuto.hpp"
+#include "kernel/time.hpp"
 #include "kernel/time_event.hpp"
 #include "util/i2c_bus.hpp"
 #include "util/power.hpp"
 #include "util/print.hpp"
 #include "util/testbench.hpp"
+
+#include "twi_link_client.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::pll_hse, 180'000'000, 8'000'000,
                              brio::HseMode::bypass>;
@@ -105,7 +108,11 @@ constexpr UartPins console_pins{.tx = {'A', 2, PinFunction::af7}, .rx = {'A', 3,
 using Serial = Uart<2, console_pins>;
 constexpr Serial serial;
 
-TestBench<Serial> bench;
+// TWO SETS: `z` the board's own letters - most of them measure a bus
+// NOBODY answers, so the desk partner is on its dark console - and `t`,
+// whose instrument is the partner's `twi_peer` on the same wire and which
+// FAILS without it.
+TwoKeyTestBench<Serial, 't'> bench;
 
 // ---- the bus -----------------------------------------------------------------------------
 
@@ -155,10 +162,17 @@ volatile bool xfer_done = false;
 volatile uint32_t ev_log[4] = {};
 volatile uint8_t ev_n = 0;
 volatile uint8_t er_n = 0;
+/// Every ISR value the ERROR vector met, ORed, and the tick of its first
+/// entry: letter n's TIMEOUT is swept by the engine's error body, and this
+/// is how the letter sees that it came and when.
+volatile uint32_t er_seen = 0;
+volatile uint32_t er_first_tick = 0;
 
 void arm_log() {
     ev_n = 0;
     er_n = 0;
+    er_seen = 0;
+    er_first_tick = 0;
     for (uint8_t i = 0; i < 4u; ++i) {
         ev_log[i] = 0;
     }
@@ -819,7 +833,15 @@ void tf_speeds() {
             print(serial, "  I2C1 (CCR) ", s == I2cSpeed::fast_400k ? "Fm  " : "Sm  ",
                   ": CCR states ", stated, " Hz, the pad's mean ", mean_hz, " Hz (",
                   r.edges, " rising edges), status ", ClassicHost::status(), crlf);
-            if (r.edges < 9u || ClassicHost::status() != i2c_nack_addr) {
+            // THE NINTH RISE MAY GO UNCOUNTED AT 400 kHz: the loop stops at
+            // the completion, and this engine's completion is the AF the
+            // ninth clock raises - inside a 0.6 us high phase that the
+            // error vector's entry can fill before the poll reads the pad
+            // (measured: 8 edges every run on one image's layout, 9 on
+            // another's). At 100 kHz the high phase is 4 us and the rise is
+            // always seen first.
+            const uint8_t least = s == I2cSpeed::fast_400k ? 8u : 9u;
+            if (r.edges < least || ClassicHost::status() != i2c_nack_addr) {
                 classic_ran = false;
             }
         }
@@ -1041,7 +1063,11 @@ void th_filters() {
 
 namespace kl {
 
-using I2cArb = I2cBus<Host, P, 4>;
+/// The per-bus timeout is 20 ms: far above any tenure letter i queues (a
+/// probe is about 0.1 ms at 100 kHz), and the limit letter n's peer
+/// stretches past.
+constexpr uint32_t bus_timeout_ticks = ticks_from_ms<P>(20);
+using I2cArb = I2cBus<Host, P, 4, BusPassThrough, bus_timeout_ticks>;
 
 struct Probe {
     using Event = std::variant<I2cDone, SleepVote>;
@@ -1565,6 +1591,276 @@ void tm_self_link() {
 }
 
 // =============================================================================
+// n - THE DESK PARTNER: the STM32G0's twi_peer on the same wire (set `t`)
+// =============================================================================
+//
+// The partner's I2C1 taps PC6/PC7's two nodes; its command client answers
+// 0x6B alone, so letter e's 112 NACKs want it dark and this set wants it
+// running `twi_peer`. What it gives this controller that the self-link's
+// classic I2C cannot: a TARGET SOLVED FOR FAST-MODE PLUS, a clock held low
+// on command, SDA held from its own GPIO until a count of SCL edges.
+
+/// THE CORES the rebase leg walks: the boot rate, the PLL at 48 MHz and the
+/// HSI alone at 16 MHz - a DynamicClock over the three, the console, the
+/// tick and this host its users (the DMA host left out: two sets of statics
+/// over one instance would each re-apply their own cached speed).
+using Core48 = Clock<ClockSource::pll_hse, 48'000'000, 8'000'000, HseMode::bypass>;
+using Core16 = Clock<ClockSource::hsi, 16'000'000>;
+using Cores = DynamicClock<Rates<SysClock, Core48, Core16>, Ticker, Serial, Host>;
+
+void wait_ms(uint32_t ms) {
+    const uint32_t t0 = Ticker::ticks();
+    while (Ticker::ticks() - t0 < ms) {
+    }
+}
+
+struct LinkPort {
+    static uint8_t tenure(uint8_t addr, const uint8_t* tx, uint8_t tx_len, uint8_t* rx,
+                          uint8_t rx_len) {
+        return ::tenure<Host>(addr, tx, tx_len, rx, rx_len);
+    }
+    static void ready() { (void)host_ready(); }
+    static void wait_ms(uint32_t ms) { ::wait_ms(ms); }
+};
+using Link = TwiLinkClient<LinkPort>;
+using twilink::Op;
+
+bool need_twi_peer() {
+    (void)host_ready();
+    if (Link::command(Op::ping)) {
+        return true;
+    }
+    bench.verdict("the desk partner answers on the command address (the STM32G0 running "
+                  "twi_peer)",
+                  false);
+    return false;
+}
+
+void tn_partner() {
+    if (!need_twi_peer()) {
+        return;
+    }
+    twilink::Ident id{};
+    bench.verdict("the partner is twi_peer, an STM32G0 (fw 0x03xx), and the channel is two "
+                  "tenures of this engine a command",
+                  Link::ident(id) && id.sanity == twilink::ident_sanity &&
+                      twilink::peer_kind(id.version) == twilink::peer_stm32g0);
+
+    // ---- Fast-mode Plus with every byte acknowledged ----
+    const bool fmp_ok = Host::speed_ok(FmpI2cSpeed::fast_plus_1m);
+    twilink::Params a{};
+    a.count = 64;   // never reached: the deadline ends the serve
+    a.ms = 250;
+    a.addr = twilink::dut_addr;
+    a.seed = 0x90;
+    a.pattern = twilink::pattern_counting;
+    if (!Link::act(Op::serve, a)) {
+        bench.verdict("the peer accepted the serve", false);
+        return;
+    }
+    static const uint8_t w8[8] = {0xC0, 0xC1, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7};
+    uint8_t r8[8] = {};
+    const uint32_t period = systick_period();
+    const uint32_t t0 = SysTick->VAL;
+    const uint8_t ws = tenure<Host>(twilink::dut_addr, w8, 8, nullptr, 0,
+                                    FmpI2cSpeed::fast_plus_1m);
+    const uint32_t w_cycles = since(t0, SysTick->VAL, period);
+    const uint8_t rs = tenure<Host>(twilink::dut_addr, nullptr, 0, r8, 8,
+                                    FmpI2cSpeed::fast_plus_1m);
+    uint8_t mism = 0;
+    for (uint8_t i = 0; i < 8u; ++i) {
+        if (r8[i] != twilink::pattern_value(a.pattern, a.seed, i)) {
+            ++mism;
+        }
+    }
+    wait_ms(300);
+    twilink::Report r{};
+    const bool rep = Link::report(r);
+    // 81 SCL periods (the address and eight bytes, nine bits each) in the
+    // write's stopwatch, which also holds the START, the STOP, the
+    // request's own cost and every stretch the peer's polled pump adds - so
+    // the figure is a floor on the period and the rate a ceiling.
+    const uint32_t per_mhz = SysClock::hz / 1'000'000u;
+    const uint32_t ns = static_cast<uint32_t>(static_cast<uint64_t>(w_cycles) * 1000u /
+                                              per_mhz / 81u);
+    const uint32_t khz = ns != 0u ? 1'000'000u / ns : 0u;
+    print(serial, "  Fm+ (reachable here: ", fmp_ok ? "yes" : "NO", ", kernel ",
+          Host::kernel_hz() / 1000u, " kHz): write ", ws, ", read ", rs, ", ", mism,
+          " byte(s) wrong; the write at ", khz, " kHz of SCL on average; the peer took ", r.aux0,
+          " and served ", r.aux1, crlf);
+    bench.verdict("at 1 MHz every byte is ACKNOWLEDGED by a real Fm+ target: a write and a read "
+                  "of eight, byte-exact, the peer accounting both",
+                  fmp_ok && ws == i2c_ok && rs == i2c_ok && mism == 0u && rep && r.aux0 == 8u &&
+                      r.aux1 == 8u);
+    bench.verdict("... and never above the rate asked (1 MHz plus 2 %)", khz <= 1020u);
+
+    // ---- unstick() against a client that really holds SDA ----
+    twilink::Params h{};
+    h.ms = 300;
+    h.aux8 = 4;
+    if (!Link::act(Op::hold_sda, h)) {
+        bench.verdict("the peer accepted the SDA hold", false);
+        return;
+    }
+    wait_ms(5);
+    const bool held = !SdaPad::read();
+    const uint8_t pulses = Host::unstick();
+    wait_ms(350);
+    twilink::Report hr{};
+    const bool hrep = Link::report(hr);
+    print(serial, "  SDA held by the peer: ", held ? "low" : "NOT low", "; unstick() answered ",
+          pulses, "; the peer counted ", hr.aux0, " falling edge(s)", crlf);
+    bench.verdict("a client holding SDA until four SCL edges is freed by unstick() at the "
+                  "fourth pulse, and unstick() says so",
+                  held && pulses == 4u && hrep && hr.aux0 == 4u);
+    twilink::Params h0{};
+    h0.ms = 100;
+    if (!Link::act(Op::hold_sda, h0)) {
+        bench.verdict("the peer accepted the SDA hold to its deadline", false);
+        return;
+    }
+    wait_ms(5);
+    const uint8_t stuck = Host::unstick();
+    wait_ms(150);
+    const uint8_t after = Host::unstick();
+    print(serial, "  SDA held to the deadline: unstick() ", stuck, "; afterwards ", after, crlf);
+    bench.verdict("nine pulses and a STOP cannot free a pad nothing releases (0xFF), and the "
+                  "free wire is then left alone (0)",
+                  stuck == 0xFFu && after == 0u);
+    bench.verdict("the command channel is back after the holds", need_twi_peer());
+
+    // ---- the arbiter's per-bus timeout over this engine ----
+    twilink::Params w{};
+    w.count = 64;
+    w.ms = 150;
+    w.addr = twilink::dut_addr;
+    w.hold_us = 40'000;
+    if (!Link::act(Op::serve, w)) {
+        bench.verdict("the peer accepted the wedging serve", false);
+        return;
+    }
+    kl::BusKernel::init_all();
+    bus_ao_live = true;
+    kl::Probe::clear_tally();
+    static uint8_t two[2] = {0x5A, 0xA5};
+    Host::Request rq{};
+    rq.addr = twilink::dut_addr;
+    rq.tx = lend<Lease::reply>(static_cast<const uint8_t*>(two));
+    rq.tx_len = 2;
+    rq.reply = reply_to<kl::Probe, I2cDone>();
+    const uint32_t k0 = Ticker::ticks();
+    post<kl::I2cArb>(rq);
+    uint32_t replied_at = 0;
+    while (Ticker::ticks() - k0 < 200u) {
+        kl::pump();
+        if (kl::Probe::n != 0u && replied_at == 0u) {
+            replied_at = Ticker::ticks() - k0;
+        }
+    }
+    bus_ao_live = false;
+    wait_ms(150);
+    (void)Host::unstick();
+    print(serial, "  a tenure stretched 40 ms at its address: reply ", kl::Probe::replies[0],
+          " after ", replied_at, " ms", crlf);
+    // The band: a time event of 20 ticks matured by a pump polling every
+    // tick, and the stopwatch's own tick either side - 19..22.
+    bench.verdict("the arbiter answers it with i2c_timeout, at its 20 ms limit (19..22 ms)",
+                  kl::Probe::n == 1u && kl::Probe::replies[0] == i2c_timeout &&
+                      replied_at >= 19u && replied_at <= 22u);
+    bench.verdict("and the same host carries the command channel again", need_twi_peer());
+
+    // ---- TIMEOUTA, the SMBus clock-low watcher, against a held clock ----
+    // Letter g showed it quiet on an idle bus; here the peer holds SCL low
+    // for 40 ms at the address, past the 25 ms SMBus limit.
+    const uint32_t ker = Host::kernel_hz();
+    const std::optional<uint16_t> code = fmpi2c_timeout_code_for(ker, 25'000u, false);
+    twilink::Params lo{};
+    lo.count = 64;
+    lo.ms = 150;
+    lo.addr = twilink::dut_addr;
+    lo.hold_us = 40'000;
+    if (!code || !Link::act(Op::serve, lo)) {
+        bench.verdict("a 25 ms code exists here and the peer accepted the holding serve", false);
+        return;
+    }
+    (void)S::timeouts(*code, false, true, 0, false);
+    S::clear(FmpI2cClear::timeout);
+    arm_log();
+    const uint32_t a0 = Ticker::ticks();
+    const uint8_t ts = tenure<Host>(twilink::dut_addr, two, 2, nullptr, 0);
+    const uint32_t done_ms = Ticker::ticks() - a0;
+    const uint32_t first_er = er_n != 0u ? er_first_tick - a0 : 0u;
+    const uint32_t seen = er_seen;
+    (void)S::timeouts(0, false, false, 0, false);
+    S::clear(FmpI2cClear::timeout);
+    wait_ms(150);
+    (void)Host::unstick();
+    print(serial, "  TIMEOUTA at ", fmpi2c_timeout_us(ker, *code, false) / 1000u,
+          " ms against a 40 ms hold: the error vector first at ", first_er, " ms with ISR bits ",
+          hex(seen), " (TIMEOUT is ", hex(FmpI2cFlag::timeout), "); the tenure ended ", ts,
+          " after ", done_ms, " ms", crlf);
+    // THE BAND: SCL goes low at the address's ninth clock (0.1 ms in), the
+    // watcher counts 25 ms of it in steps of 2048 kernel clocks (45 us at
+    // 45 MHz), and the tick reads +-1: 24..27 ms.
+    bench.verdict("TIMEOUTA fires on a clock held low by ANOTHER CHIP, about 25 ms into the "
+                  "hold (24..27 ms on the tick) - the half letter g could not stage",
+                  (seen & FmpI2cFlag::timeout) != 0u && first_er >= 24u && first_er <= 27u);
+    bench.verdict("the command channel is back after it", need_twi_peer());
+
+    // ---- rebase() across the core's rate ----
+    // The host is a user of the DynamicClock below, so every switch runs
+    // its rebase(): the kernel clock (APB1 here) re-read and TIMINGR
+    // re-derived. A wrong derivation still moves bytes - at a wrong rate -
+    // so each rung TIMES its write against the rate asked.
+    uint8_t rungs_ok = 0;
+    for (uint8_t i = 0; i < 3u; ++i) {
+        const bool up = i == 0u   ? Cores::template set_index<0>()
+                        : i == 1u ? Cores::template set_index<1>()
+                                  : Cores::template set_index<2>();
+        twilink::Params sv{};
+        sv.count = 64;
+        sv.ms = 250;
+        sv.addr = twilink::dut_addr;
+        sv.seed = static_cast<uint8_t>(0x30u + i);
+        const bool cmd = up && Link::act(Op::serve, sv);
+        uint8_t rb[8] = {};
+        // The kernel ticker's composed cycle count, not a bare VAL delta:
+        // at 16 MHz the write outlasts a tick's period.
+        const uint32_t c0 = Ticker::cycles();
+        const uint8_t ws2 = tenure<Host>(twilink::dut_addr, w8, 8, nullptr, 0);
+        const uint32_t cyc = Ticker::cycles() - c0;
+        const uint8_t rs2 = tenure<Host>(twilink::dut_addr, nullptr, 0, rb, 8);
+        uint8_t bad = 0;
+        for (uint8_t k = 0; k < 8u; ++k) {
+            if (rb[k] != twilink::pattern_value(twilink::pattern_counting, sv.seed, k)) {
+                ++bad;
+            }
+        }
+        wait_ms(300);
+        const uint32_t mhz = Cores::hz() / 1'000'000u;
+        const uint32_t per_ns = mhz != 0u ? static_cast<uint32_t>(
+                                                static_cast<uint64_t>(cyc) * 1000u / mhz / 81u)
+                                          : 0u;
+        const uint32_t pm = per_ns != 0u ? 10'000'000u / per_ns : 0u;   // thousandths of 100 kHz
+        print(serial, "  core ", mhz, " MHz, kernel ", Host::kernel_hz() / 1000u,
+              " kHz, TIMINGR ", hex(S::regs().TIMINGR), ": serve ", cmd, ", write ", ws2, ", read ", rs2, ", ", bad,
+              " wrong, the write's SCL at ", pm, " thousandths of 100 kHz", crlf);
+        // Never above the rate by more than 2 %, and within a quarter below
+        // it: a short tenure carries the request's own cost, and the
+        // partner's polled target stretches each byte a little.
+        if (cmd && ws2 == i2c_ok && rs2 == i2c_ok && bad == 0u && pm <= 1020u && pm >= 750u) {
+            ++rungs_ok;
+        }
+    }
+    (void)Cores::template set_index<0>();
+    (void)host_ready();
+    bench.verdict("at 180, 48 and 16 MHz of core the host's rebase() keeps the bus at the rate "
+                  "asked (within 2 % above, a quarter below) and byte-exact against the partner",
+                  rungs_ok == 3u);
+    bench.verdict("... and the channel is back at the boot rate", need_twi_peer());
+}
+
+// =============================================================================
 // the menu
 // =============================================================================
 
@@ -1620,6 +1916,10 @@ extern "C" void FMPI2C1_EV_IRQHandler() {
 }
 
 extern "C" void FMPI2C1_ER_IRQHandler() {
+    if (er_n == 0u) {
+        er_first_tick = brio::Ticker::ticks();
+    }
+    er_seen = er_seen | brio::FmpI2c<1>::flags();
     er_n = static_cast<uint8_t>(er_n + 1u);
     if (peer_live) {
         (void)Peer::error_service();
@@ -1703,6 +2003,8 @@ int main() {
     bench.letter('k', "the recovery verbs", tk_recovery);
     bench.letter('l', "the client, configured and never addressed", tl_client);
     bench.letter('m', "THE SELF-LINK: FMPI2C1 the host, I2C1 the target", tm_self_link);
+    bench.second_letter('n', "THE DESK PARTNER: Fm+ acknowledged, a held SDA, a held clock",
+                        tn_partner);
 
     if (serial_ok) {
         brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "PLL" : "FAILED",

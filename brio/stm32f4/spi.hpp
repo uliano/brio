@@ -1458,10 +1458,12 @@ public:
     /// is a DIVISION of the instance's APB clock and scales by itself;
     /// what is recomputed is the ceiling, the cs_setup timing and the
     /// frame's cycle count the write-ahead threshold is read against.
-    /// `hz` is SYSCLK, as every other task's rebase takes it - the APB
-    /// divider in force is read back from the RCC. THE BUS MUST BE IDLE.
+    /// `hz` is SYSCLK, as every other task's rebase takes it, and the APB
+    /// rate is DERIVED from it (`apb_hz_at`): the fan-out runs before the
+    /// RCC moves, so the divider in force is the rate being left (the I2C
+    /// hosts measured what reading it back costs). THE BUS MUST BE IDLE.
     static void rebase(uint32_t hz) {
-        const uint32_t pclk = hz / (S::on_apb2 ? Rcc::apb2_divider() : Rcc::apb1_divider());
+        const uint32_t pclk = apb_hz_at(hz, S::on_apb2);
         rebase_pclk(pclk, hz);
     }
 

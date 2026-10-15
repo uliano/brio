@@ -846,10 +846,14 @@ public:
 
     /// The core clock changed (DynamicClock fan-out): both rows solved
     /// again and the applied one rewritten. `hz` is SYSCLK, as every other
-    /// task's rebase takes it - the APB1 divider in force is read back from
-    /// the RCC. THE BUS MUST BE IDLE.
+    /// task's rebase takes it, and the APB1 rate is DERIVED from it
+    /// (`apb_hz_at`, clock.hpp's one statement of the prescaler rule): the
+    /// fan-out runs before the RCC moves, so the divider in force is the
+    /// rate being left. MEASURED the other way round: read back from the
+    /// RCC, a switch from 180 to 48 MHz solved for 12 MHz of APB1 where 24
+    /// ran, and the bus went 1.9 times the rate asked. THE BUS MUST BE IDLE.
     static void rebase(uint32_t hz) {
-        const uint32_t pclk = hz / (S::on_apb2 ? Rcc::apb2_divider() : Rcc::apb1_divider());
+        const uint32_t pclk = apb_hz_at(hz, S::on_apb2);
         const bool was_enabled = S::enabled();
         rebase_pclk(pclk, hz);
         if (was_enabled && valid_[static_cast<uint8_t>(applied_)]) {

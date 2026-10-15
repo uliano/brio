@@ -534,7 +534,11 @@ chip's own FMPI2C1 on PC6/PC7 - two wires and a 2.2 kOhm pull-up on each
 line - SERVED FROM ITS OWN VECTORS as a register file (an identity at
 0x00, a reset command at 0x03, a scratch register at 0x04, a pointer the
 first written byte sets), at 0x2C. `z` is 67 verdicts: every letter of
-the DISC1's runs against it, and one more.
+the DISC1's runs against it, and one more - with the desk partner, an
+STM32G0 on the same two nodes, on its dark console, since letter d's
+scan would otherwise meet the partner's command address. A SECOND SET,
+`t`, is the partner running `twi_peer`: letter `n`, 13 verdicts, green
+ten runs of ten (below).
 
 - **The scan finds 0x2C alone** of the 112 addresses; the three receive
   procedures agree byte for byte, the scratch register is written and
@@ -556,7 +560,32 @@ the DISC1's runs against it, and one more.
   two runs. With the close from the Sr: 192 refusals of 192 answered
   `i2c_nack_data`, the controller let go (START and STOP down, MSL clear,
   2 ms on) and the next tenure `i2c_ok`, the target never late, at all
-  three cores; and every count acknowledged whole, byte-exact.
+  three cores; and every count acknowledged whole, byte-exact. The core
+  switches are `rebase()`'s fan-out - the two hosts are the DynamicClock's
+  users - so these tenures at 48 and 16 MHz run on the timing it
+  re-derives; how fast is set `t`'s question (below).
+- **`rebase()` WAS READING THE PAST, and now derives** the APB1 rate from
+  the new SYSCLK (`apb_hz_at`, [clock.md](clock.md)): the fan-out runs
+  before the RCC moves, so a divider read back there is the rate being
+  left. Read back, a switch from 180 to 48 MHz solved FREQ, CCR and
+  TRISE for 12 MHz where 24 ran, and the partner's tenures went at
+  **1935 thousandths** of 100 kHz (and 1839 at 16 MHz) - byte-exact, which
+  is why letter `m` never saw it; derived, **989, 982 and 959
+  thousandths** at 180, 48 and 16 MHz, ten runs of ten (set `t`).
+- **CLOCK STRETCHING IS FLOW CONTROL, against the partner** (set `t`,
+  letter `n`): its target holding SCL 2 ms before each byte stretches an
+  8-byte write to **16 ms** (eight holds inside the controller's window;
+  0 ms on the tick unstretched), and the tenure completes `i2c_ok` - the
+  engine simply waits.
+- **`unstick()` against a client that REALLY holds SDA**: the partner
+  holding SDA from its own GPIO until four SCL falling edges (latched by
+  its EXTI) is freed at the **fourth pulse**, and `unstick()` answers 4;
+  held to its deadline, nine pulses and a STOP leave it low and
+  `unstick()` answers **0xFF**, and on the freed wire 0. Ten runs of ten.
+- **The arbiter's per-bus timeout over this engine**: a tenure the
+  partner stretches 40 ms at its address is answered `i2c_timeout` by
+  `I2cBus` at its 20 ms limit (20 ms on the tick, ten of ten), and the
+  same host carries the command channel again after `recover()`.
 
 **The host above the wire on the Nucleo-F446RE: `bench_stm32f4`'s letter
 `i`** on the same self-link, each block the host in turn and the other
@@ -647,26 +676,20 @@ Implemented, not bench-verified (each with what would measure it):
   the byte left to the buffer vector: TxE rose within twenty cycles in
   every tenure measured, so the branch never ran. A slower APB1 against
   a faster core would make it run.
-- Arbitration lost (`i2c_arb_lost`): a second controller on the wire.
+- Arbitration lost (`i2c_arb_lost`): a second controller is on the wire
+  now - the desk partner - and still no race: two held STARTs released
+  by one STOP serialize, this controller's going out about 2 us after
+  the STOP and the partner's waiting behind it
+  ([../stm32g0/i2c.md](../stm32g0/i2c.md), "TWO HELD STARTS"). What
+  would measure it is a peer releasing its START by software at a delay
+  swept across this one's.
 - A bus error (`i2c_bus_error`) and the spurious-BERR count: the
   chapter raises it on a misplaced START or STOP, which wants another
   controller misbehaving, and the errata's own spurious one did not
   appear in this suite.
-- `unstick()` against a client that really holds SDA down, and the
-  0xFF it answers when nine clocks and a STOP do not free the line: the
-  two pads are the device's, so nothing here can hold SDA low without a
-  wire to a spare pad.
-- The arbiter's per-bus timeout and `i2c_timeout` over this engine: a
-  lost completion has to be staged, which wants a client that stretches
-  the clock past the limit.
 - The noise filters ON THE WIRE: the register is written and read back
   and the ceiling arithmetic is checked, but what a 4-period digital
   filter does to a glitch wants a glitch generator.
-- `rebase()` across a clock change: the fan-out is compiled and not
-  exercised; what would measure it is a transaction against the device
-  at every rate of a `DynamicClock` pack ([clock.md](clock.md)).
-- Clock stretching by a target, as flow control: the STMPE811 does not
-  stretch measurably at either speed. A slow client would show it.
 - The 88 kHz workaround for ES0206 2.10.4: the suite reports that a
   100 kHz bus sits inside the errata's window, and every repeated start
   it made succeeded - which is not proof the timing is met, only that

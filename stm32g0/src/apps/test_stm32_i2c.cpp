@@ -39,16 +39,21 @@
 // truth for the wire format, whatever the peer's architecture - and its
 // command-mode client answers ONE address (0x6B) with no general call
 // and no mask, which is why nothing the wireless letters do can wake it.
-// Letters n..r are this instrument's.
+// Letters n..t are this instrument's (s and t want the self-link too: its
+// I2C2 is their third node).
 //
-// THE TWO CANNOT BE ON THE DESK AT ONCE (the two jumpers go to one end or
-// the other), so main() PROBES the self-link before any letter runs -
-// PB8 and PB9 driven both ways against the far pad's own internal pull -
-// and EACH SET SKIPS ITSELF ON THE OTHER DESK, printing the reason and
-// claiming no verdict either way: letters b..l, x and y when the probe
-// says no, letters n..r when it says yes. The one thing that still
-// FAILS is a peer that does not answer with the wires in place - that
-// is firmware to flash, not a desk this suite was not built for.
+// THE TWO MAY BE ON THE DESK AT ONCE: I2C2's pads and the peer's tap the
+// same two nodes, so a desk carries the self-link, the peer, or both.
+// main() PROBES the self-link before any letter runs - PB8 and PB9
+// driven both ways against the far pad's own internal pull - and
+// letters b..l, x and y skip themselves, printing the reason and
+// claiming no verdict, when the probe says no. THE PEER LETTERS ARE A
+// SECOND SET under their own all-key, `w`: `z` stays the single-board
+// set, runnable with the far board on its dark console, and `w` needs
+// `twi_peer` there and FAILS without it. With both on the wire neither
+// instrument disturbs the other - the peer's command client answers
+// 0x6B alone, which no self-link letter sends, and I2C2 is released
+// while the peer letters run.
 //
 // HOW A BUS RATE IS MEASURED WITH NO PAD TO SPARE. A timer capture or an
 // EXTI count would need a pad on SCL, and both ends of SCL are already
@@ -101,7 +106,8 @@
 //      the 300-byte write's and the engined write's SCL against 400 kHz
 //   i  SMBus: the PEC end to end, PECERR staged, and THE TIME-OUTS -
 //      whose hold does each of the three really police
-//   j  THE WAKE FROM STOP: the client in Stop 1, woken by its address
+//   j  THE WAKE FROM STOP, armed: everything around it on the self-link
+//      (the Stop itself is letter t's, woken from the other chip)
 //   k  THE STUCK BUS: a client holding SDA, and unstick() counting the
 //      clocks until it lets go
 //   l  THE KERNEL: I2cBus (= BusMaster) over I2cHost with the client
@@ -119,10 +125,17 @@
 //   r  THE KERNEL against the peer: I2cBus (= BusMaster) over I2cHost,
 //      the NACK in its place, the rejection, both votes, and the wedge
 //      the PEER holds answered by the per-bus timeout
+//   s  TWO CONTROLLERS, ONE STOP: this board's held START and the peer's,
+//      released together by I2C2's STOP - they serialize, both tenures
+//      whole, and no START goes out into the third node's tenure
+//   t  THE WAKE FROM STOP by the peer's address: I2C2 the client in Sleep
+//      and then in Stop 1, woken by a write from the other chip, the
+//      sleep timed by the RTC against the peer's lead-in
 //
 // NOTHING WRITES FLASH, no option byte is touched, and the RTC domain is
-// not reset. The pads this suite moves are the four of the I2C
-// self-link plus the console's two.
+// never reset (letter t claims the LSE only when the domain runs on it
+// already or has no clock at all). The pads this suite moves are the four
+// of the I2C self-link plus the console's two.
 //
 // build: boards = g0b1re,g071rb,g031k8
 // build: monitor_speed = 115200
@@ -145,6 +158,7 @@
 #include "stm32g0/pin.hpp"
 #include "stm32g0/platform.hpp"
 #include "stm32g0/pwr.hpp"
+#include "stm32g0/rtc.hpp"
 #include "stm32g0/sleep.hpp"
 #include "stm32g0/ticker.hpp"
 #include "stm32g0/usart.hpp"
@@ -230,7 +244,16 @@ using HostTx = DmaTxEngine<1, 1>;
 using HostRx = DmaRxEngine<1, 2>;
 using DmaHost = I2cHost<1, host_pins, HostTx, HostRx>;
 
-using SysClock = DynamicClock<Rates<Fast, Mid, Slow>, Ticker, Serial, Host, DmaHost>;
+// THE LIVE ENGINE LAST IN THE FAN-OUT. A rate switch rebases both sets
+// of statics, and each re-applies ITS cached speed to the one TIMINGR they
+// share - so the last one rebased decides what the register holds, while
+// the other's cache still names its own. With DmaHost last, letter h's
+// 400 kHz stood in TIMINGR after every later switch and Host, caching
+// 100 kHz, never rewrote it: letter d's 16 MHz rung then read its 100 kHz
+// tenure at 3216 thousandths of the rate (measured, whenever h had run
+// earlier in the same boot). Host is the engine every letter but h drives,
+// and h switches no rate.
+using SysClock = DynamicClock<Rates<Fast, Mid, Slow>, Ticker, Serial, DmaHost, Host>;
 constexpr SysClock clock;
 static_assert(SysClock::rate_count == 3);
 
@@ -239,7 +262,10 @@ constexpr uint8_t r_mid = 1;
 constexpr uint8_t r_slow = 2;
 
 Serial serial;
-TestBench<Serial, 24> bench;
+// TWO SETS: `z` the single-board letters, runnable with the far board on
+// its dark console; `w` the peer letters n..t, which need `twi_peer` on
+// the far board and FAIL without it.
+TwoKeyTestBench<Serial, 'w', 24> bench;
 
 /// The client's own address, and one it must be deaf to.
 constexpr uint8_t peer_addr = 0x42;
@@ -709,14 +735,12 @@ void settle_ms(uint32_t ms) {
 // Which desk is this? The self-link, asked of the wire
 // ===========================================================================
 //
-// THE SELF-LINK IS NOT A PROPERTY OF THIS BOARD, it is two jumpers, and
-// they have already moved: PB8/PB9 now carry the bus to a PEER BOARD
-// running `twi_peer`, and I2C2's pads are on nothing
-// (the same jumpers at different ends). So the suite ASKS THE WIRE
-// which desk it is on, once,
-// before any letter runs, and the letters whose second node is I2C2 SKIP
-// THEMSELVES - by name, with the reason printed - when the answer is no.
-// A skipped letter claims nothing and scores no verdict either way.
+// THE SELF-LINK IS NOT A PROPERTY OF THIS BOARD, it is two jumpers
+// from I2C1's pads to I2C2's, and a desk may carry them or not. So the
+// suite ASKS THE WIRE, once, before any letter runs, and the letters
+// whose second node is I2C2 SKIP THEMSELVES - by name, with the reason
+// printed - when the answer is no. A skipped letter claims nothing and
+// scores no verdict either way.
 
 bool self_link = false;
 
@@ -740,11 +764,11 @@ bool wire_follows() {
     return low && high;
 }
 
-// BOTH LINKS ARE A QUESTION FOR THE WIRE HERE, ON EVERY PART SO FAR.
-// The self-link is two jumpers between I2C1's pads and I2C2's and the peer
-// link is two more to another board, and the two are the same two pads at
-// different ends, so a desk carries one or the other and the probe below
-// is what says which. Unlike the SPI suite, whose SPI2 reaches no pin of
+// THE SELF-LINK IS A QUESTION FOR THE WIRE HERE, ON EVERY PART SO FAR.
+// It is two jumpers between I2C1's pads and I2C2's, and the peer link is
+// two more to another board on the same two nodes, so a desk carries
+// either or both and the probe below says whether the first is there.
+// Unlike the SPI suite, whose SPI2 reaches no pin of
 // the LQFP32, THIS package bonds every pad of both links - I2C1 on
 // PB8/PB9 and I2C2 on PA11/PA12, the Nucleo-32's own A5 and A4 (DS12992
 // table 12) - so nothing here is compiled out for a package, and the
@@ -811,6 +835,9 @@ bool need_self_link() {
 using twilink::Op;
 
 constexpr I2cSpeed link_speed = I2cSpeed::standard_100k;
+/// The command channel's own rate: link_speed, but for letter s, which
+/// carries its commands at the rate it races at (see there).
+I2cSpeed command_speed = link_speed;
 
 uint8_t frame_buf[twilink::max_payload + 4];
 uint8_t resp_buf[twilink::response_bytes];
@@ -836,7 +863,7 @@ bool send_frame(Op op, const uint8_t* p, uint8_t len) {
             }
         },
         op, p, len);
-    return host_tenure(twilink::command_addr, frame_buf, n, nullptr, 0, link_speed) ==
+    return host_tenure(twilink::command_addr, frame_buf, n, nullptr, 0, command_speed) ==
            i2c_ok;
 }
 
@@ -846,7 +873,7 @@ bool recv_frame(twilink::Frame& out) {
         resp_buf[i] = 0;
     }
     if (host_tenure(twilink::command_addr, nullptr, 0, resp_buf,
-                    twilink::response_bytes, link_speed) != i2c_ok) {
+                    twilink::response_bytes, command_speed) != i2c_ok) {
         return false;
     }
     for (uint8_t i = 0; i < twilink::response_bytes; ++i) {
@@ -938,22 +965,11 @@ bool ensure_link() {
 }
 
 /// The opening line of every letter whose instrument is the PEER BOARD.
-/// THE TWO WIRINGS ARE THE SAME JUMPERS AT DIFFERENT ENDS, so a desk
-/// carrying the self-link cannot be carrying the peer: that is a
-/// topology and it skips, exactly as the self-link letters skip on the
-/// other desk. An absent peer with the wires in place is a different
-/// thing - firmware to flash - and fails loudly.
+/// The self-link may share the wire with it (the probe's answer changes
+/// nothing here): I2C2 is released by link_ready() before every command.
+/// An absent peer fails loudly - firmware to flash, or a far board left on
+/// its console.
 bool need_peer() {
-    if (self_link) {
-        print(serial,
-              "  SKIPPED, no verdict claimed: this letter's instrument is the "
-              "PEER BOARD running `twi_peer`, and the probe says these two pads "
-              "carry the board's OWN self-link today - the two wirings are the "
-              "same jumpers at different ends. Letters b..m are "
-              "the instrument this desk has.",
-              crlf);
-        return false;
-    }
     if (ensure_link()) {
         return true;
     }
@@ -3137,8 +3153,9 @@ void to_peer_shapes() {
     twilink::Report r{};
     const bool rep = peer_report(r);
     print(serial, "  write=", ws, " read=", rs, " mism=", rmism, " combined=", cs,
-          "; peer: count=", r.count, " addr_hits=", r.addr_hits, " first=",
-          hex(r.first), " sum=", hex(r.sum), crlf);
+          "; peer: count=", r.count, " (received ", r.aux0, ", served ", r.aux1,
+          ") addr_hits=", r.addr_hits, " first=", hex(r.first), " sum=", hex(r.sum),
+          crlf);
     bench.verdict("a write tenure, a read tenure and the combined write-then-read "
                   "all complete i2c_ok against a SECOND CHIP",
                   ws == i2c_ok && rs == i2c_ok && cs == i2c_ok);
@@ -3509,6 +3526,400 @@ void tr_peer_kernel() {
     peer_stop();
 }
 
+// ===========================================================================
+// s - TWO CONTROLLERS, ONE STOP: the held STARTs against a second chip
+// ===========================================================================
+//
+// TWO CONTROLLERS' STARTS, RELEASED BY ONE EDGE. Neither controller can be
+// told when the other's START leaves, so a THIRD node frees the bus for
+// both at once. On this desk that node is the board's own I2C2, whose pads
+// tap the same two nodes (the self-link): it opens a tenure nobody answers
+// at about 2 kHz, so the bus is BUSY for some 4.7 ms; inside that window
+// this board's I2C1 sets START, which 32.4.9 holds behind the busy bus,
+// and the peer - told by `arb` to wait for BUSY and a lead-in - sets its
+// own, which RM0390 24.3.3 holds the same way once its engine's bounded
+// wait for a free bus (100 us) has run out. I2C2's STOP releases both.
+//
+// WHAT THE TWO SILICONS DO WITH IT IS SERIALIZE, measured: neither START
+// is committed early enough to meet the other's. A sampled trace of both
+// lines puts this controller's START 5.75, 2.0 and 0.75 us after the STOP
+// at 100 kHz, 400 kHz and 1 MHz, and the peer's within about 2 us; in
+// twelve rendezvous over the three rates and both rendezvous rates, the
+// second controller saw the first's START every time, waited behind it,
+// and went second - no address was ever arbitrated. So this letter judges
+// what holds: two held STARTs on one bus, released together, both run
+// their tenure whole and neither is lost or corrupted. A live arbitration
+// would want one START committed inside the other's few hundred
+// nanoseconds of detection, which nothing here can aim.
+
+/// The rendezvous node's slow timing: PRESC 15 on the 16 MHz kernel is a
+/// 1 us tick, SCLL and SCLH 256 ticks each - a 512 us SCL period, so a
+/// START, nine clocks and a STOP keep the bus busy for about 4.7 ms.
+constexpr I2cTiming rendezvous_timing{.presc = 15, .scll = 0xFF, .sclh = 0xFF,
+                                      .sdadel = 2, .scldel = 4};
+
+/// Put I2C2 on its pads with the slow timing, enabled and silent - BEFORE
+/// the peer is armed, so the pad claim's edges are seen by a peer still in
+/// command mode. False when I2C2 refuses the timing.
+bool rendezvous_prepare() {
+    uint8_t none[1] = {0};
+    (void)peer_arm(none, 0, I2cSpeed::standard_100k);
+    peer_live = false;
+    Nvic::disable(C::irq());
+    Peer::interrupt(I2cInterrupt::all, false);
+    if (!C::disable() || !C::timing(rendezvous_timing)) {
+        return false;
+    }
+    C::enable();
+    C::clear(I2cClear::all);
+    return true;
+}
+
+/// Open the tenure nobody answers on I2C2, as a CONTROLLER: the bus is
+/// busy from its START (some 256 us after this call - a SCLL's worth)
+/// until its own STOP, AUTOEND after the address NACK.
+bool rendezvous_fire() {
+    return C::transfer_now(twilink::deaf_addr, false, 0, true);
+}
+
+/// Wait for the rendezvous tenure's STOP (bounded: 20 ms, four times the
+/// 4.7 ms it takes) and give I2C2 back. True when the STOP was seen.
+bool rendezvous_close() {
+    const uint32_t t0 = Ticker::millis();
+    bool stopped = false;
+    while (Ticker::millis() - t0 < 20u) {
+        if (C::flag(I2cFlag::stop)) {
+            stopped = true;
+            break;
+        }
+    }
+    C::clear(I2cClear::all);
+    peer_stop();
+    return stopped;
+}
+
+void ts_two_controllers() {
+    if (!need_peer()) {
+        return;
+    }
+    if (!self_link) {
+        print(serial, "  SKIPPED, no verdict claimed: the rendezvous node is this "
+                      "board's I2C2 on the self-link's pads, and the probe says they "
+                      "are not on the desk", crlf);
+        return;
+    }
+    // THE COMMANDS GO AT THE RATE THIS CONTROLLER CONTENDS AT. TIMINGR is
+    // PE-gated, so a request at a new rate costs this block a PE cycle -
+    // and a PE cycle CLEARS BUSY (32.9.7), so the START that follows goes
+    // out INTO the rendezvous tenure instead of waiting behind it
+    // (measured: I2C2 left mid-address with both lines low, the peer
+    // reporting a lost arbitration against it). docs/stm32g0/i2c.md
+    // carries it as a finding.
+    constexpr I2cSpeed contend_speed = I2cSpeed::fast_400k;
+    struct CommandRate {
+        CommandRate() { command_speed = contend_speed; }
+        ~CommandRate() { command_speed = link_speed; }
+    } const rate_guard;
+    // 0x6B and 0x11 against the peer's 0x2C: an arbitration, had there
+    // been one, would have gone against this board in the first round and
+    // for it in the second.
+    const uint8_t aims[2] = {twilink::command_addr, twilink::low_addr};
+    constexpr uint8_t reps = 5;
+    uint8_t whole = 0;
+    uint8_t lost = 0;
+    uint8_t rendezvous_ok = 0;
+    for (uint8_t i = 0; i < 2u; ++i) {
+        for (uint8_t k = 0; k < reps; ++k) {
+            link_ready();
+            if (!rendezvous_prepare()) {
+                bench.verdict("I2C2 took the rendezvous timing", false);
+                peer_stop();
+                return;
+            }
+            twilink::Params a{};
+            a.ms = 600;
+            a.addr = twilink::dut_addr;
+            a.target = twilink::dut_addr;
+            a.count = 4;
+            a.seed = 0x40;
+            a.aux16 = 300;   // lead-in after BUSY, microseconds
+            if (!peer_act(Op::arb, a)) {
+                bench.verdict("the peer accepted the arbitration command", false);
+                peer_stop();
+                return;
+            }
+            // The peer re-inits its instance as a controller after the
+            // ack, with a reset of the block among it: a START it does
+            // not see is a bus it never knows to be busy.
+            settle_ms(20);
+            if (!rendezvous_fire()) {
+                bench.verdict("I2C2 opened the rendezvous tenure", false);
+                peer_stop();
+                return;
+            }
+            // Past the peer's lead-in and its engine's 100 us wait, so
+            // both STARTs are held in hardware when the STOP comes.
+            spin_us(1500);
+            for (uint8_t b = 0; b < 5u; ++b) {
+                tx_buf[b] = static_cast<uint8_t>(0xD0u + b);
+            }
+            const uint8_t st = host_tenure(aims[i], tx_buf, 5, nullptr, 0, contend_speed);
+            if (rendezvous_close()) {
+                ++rendezvous_ok;
+            }
+            settle_ms(650);   // past the peer's deadline: back in command mode
+            twilink::Report r{};
+            const bool rep = peer_report(r);
+            const bool peer_lost = rep && (r.flags & twilink::report_arblost) != 0u;
+            if (st == i2c_arb_lost || peer_lost) {
+                ++lost;
+            }
+            const bool ok = st == i2c_nack_addr && rep &&
+                            (r.flags & twilink::report_host_ran) != 0u &&
+                            r.mstatus == i2c_nack_addr;
+            if (ok) {
+                ++whole;
+            }
+            if (k == 0u || !ok) {
+                print(serial, "  this board -> ", hex(aims[i]), ", the peer -> 0x2C: this "
+                      "board status=", st, "; peer flags=", hex(r.flags), " mstatus=",
+                      r.mstatus, crlf);
+            }
+        }
+    }
+    print(serial, "  ", whole, " of ", 2u * reps, " rendezvous ran BOTH tenures whole; ",
+          lost, " arbitration(s) lost; ", rendezvous_ok, " rendezvous tenures closed by "
+          "their STOP", crlf);
+    bench.verdict("the third node's tenure ends on its own STOP every time - neither "
+                  "held START went out into it",
+                  rendezvous_ok == 2u * reps);
+    bench.verdict("two held STARTs released by one STOP SERIALIZE: both controllers run "
+                  "their tenure whole to the address nobody answers (i2c_nack_addr at "
+                  "both ends), every time, at either address order",
+                  whole == 2u * reps && lost == 0u);
+    bench.verdict("the command channel is back after the rendezvous", command(Op::ping));
+}
+
+// ===========================================================================
+// t - THE WAKE FROM STOP, the address coming from another chip
+// ===========================================================================
+//
+// Letter j arms everything around the wake and declines the Stop itself:
+// both ends of the self-link are on this die, and a Stop that silences the
+// client silences the controller that would wake it. The PEER removes the
+// obstacle - `arb` makes it a controller that writes to an address after a
+// lead-in of its choosing - and I2C2, whose pads tap the same bus, is the
+// client it wakes: HSI16 kernel, DNF 0, stretching on (32.4.16's three
+// conditions), its EXTI line 22 direct. The rendezvous is this board's
+// own: I2C1 opens a tenure nobody answers, the peer sees BUSY and waits
+// its lead-in (5 ms), and this board is in Stop by then.
+//
+// The wake source is proven in the shallower mode first - the same
+// arrangement in Sleep - and the Stop carries a BACKSTOP that does not
+// depend on the bus: the RTC's wake-up timer on the LSE at one second, so
+// a wake that never comes costs a second and a failed verdict, not a
+// board left asleep. The RTC is also the wall the Stop is timed with.
+
+volatile uint32_t rtc_backstops = 0;
+bool rtc_wall_ready = false;
+
+/// Claim the RTC domain on the LSE the way every sleeping suite here does:
+/// never reset (another suite's backup registers live there), claimed only
+/// when it is already on LSE or has no clock, the calendar set only when it
+/// never was. True when the RTC runs on the crystal.
+bool rtc_up() {
+    if (rtc_wall_ready) {
+        return true;
+    }
+    Pwr::bus_clock(true);
+    Pwr::rtc_domain_unlock(true);
+    RtcDomain::apb_clock(true);
+    const RtcClockSource now = RtcDomain::selected();
+    if (now != RtcClockSource::lse && now != RtcClockSource::none) {
+        return false;
+    }
+    RtcDomain::lse_enable(true);
+    if (!RtcDomain::lse_wait_ready(4'000'000UL)) {
+        return false;
+    }
+    bool ok = RtcDomain::open(RtcClockSource::lse);
+    Rtc::bypass_shadow(true);
+    if (ok && !Rtc::calendar_set()) {
+        ok = Rtc::init(RtcPrescalers{},
+                       RtcDateTime{.hour = 0, .minute = 0, .second = 0, .day = 1,
+                                   .month = 1, .year = 24, .weekday = 1});
+    }
+    if (ok) {
+        Nvic::enable(Rtc::irq());
+    }
+    rtc_wall_ready = ok;
+    return ok;
+}
+
+/// The RTC as a wall clock: subsecond ticks within the minute.
+uint32_t rtc_wall() {
+    RtcReading r{};
+    if (!Rtc::read(r)) {
+        return 0xFFFFFFFFu;
+    }
+    const uint32_t per_second = static_cast<uint32_t>(Rtc::prescalers().sync) + 1u;
+    return static_cast<uint32_t>(r.time.second) * per_second +
+           (per_second - 1u - r.subsecond);
+}
+uint32_t rtc_delta(uint32_t from, uint32_t to) {
+    const uint32_t mod = 60u * (static_cast<uint32_t>(Rtc::prescalers().sync) + 1u);
+    return (to >= from) ? (to - from) : (mod - from + to);
+}
+uint32_t rtc_ms(uint32_t ticks) {
+    const uint32_t hz = 32768u / (static_cast<uint32_t>(Rtc::prescalers().async) + 1u);
+    return static_cast<uint32_t>((static_cast<uint64_t>(ticks) * 1000ULL) / hz);
+}
+
+struct WakeLeg {
+    bool armed = false;      ///< the peer took the command and the client the wake
+    uint32_t slept_ms = 0;   ///< the RTC's reading of the sleep
+    uint32_t pre_ms = 0;     ///< from the rendezvous to the sleep, on the tick
+    bool by_backstop = false;
+    uint16_t got = 0;        ///< bytes the client took
+    bool exact = false;      ///< and they are the peer's pattern
+    uint8_t peer_status = 0xEE;
+};
+
+/// One wake: the peer told to write `n` bytes to the client `lead_ms`
+/// after BUSY, this board's own rendezvous tenure, then `mode`.
+WakeLeg wake_leg(PwrMode mode, uint8_t n, uint16_t lead_ms, uint8_t seed) {
+    WakeLeg w{};
+    link_ready();
+    uint8_t none[1] = {0};
+    if (!peer_arm(none, 0, I2cSpeed::standard_100k) || !Peer::wake_from_stop(true)) {
+        peer_stop();
+        return w;
+    }
+    twilink::Params a{};
+    a.ms = 900;
+    a.addr = twilink::dut_addr;
+    a.target = peer_addr;
+    a.count = n;
+    a.seed = seed;
+    a.aux16 = static_cast<uint16_t>(lead_ms * 1000u);
+    if (!peer_act(Op::arb, a)) {
+        (void)Peer::wake_from_stop(false);
+        peer_stop();
+        return w;
+    }
+    w.armed = true;
+    settle_ms(20);   // the peer's role switch, as in letter s
+    peer_rx_n = 0;
+    peer_addr_hits = 0;
+    // The rendezvous: a tenure nobody answers, done and STOPped before the
+    // sleep (a Stop entered with a tenure in flight hangs - letter j).
+    console_drain();
+    const uint32_t r0 = Ticker::millis();
+    (void)host_tenure(twilink::deaf_addr, nullptr, 0, nullptr, 0, link_speed);
+    (void)Rtc::set_wakeup(RtcWakeupClock::ck_spre, 1, true);
+    Rtc::clear_flags(RtcFlag::wakeup);
+    rtc_backstops = 0;
+    const uint32_t w0 = rtc_wall();
+    w.pre_ms = Ticker::millis() - r0;
+    Ticker::pause();
+    Pwr::enter(mode);
+    Ticker::resume();
+    (void)SysClock::restore();   // a Stop leaves SYSCLK on HSISYS
+    w.slept_ms = rtc_ms(rtc_delta(w0, rtc_wall()));
+    w.by_backstop = rtc_backstops != 0u;
+    Rtc::clear_wakeup();
+    // The tenure the address opened runs on the client's vector; wait it
+    // out, bounded (four bytes at 100 kHz are under half a millisecond).
+    const uint32_t t0 = Ticker::millis();
+    while (peer_rx_n < n && Ticker::millis() - t0 < 50u) {
+    }
+    w.got = peer_rx_n;
+    bool exact = w.got == n;
+    for (uint8_t i = 0; exact && i < n; ++i) {
+        exact = peer_rx[i] == twilink::pattern_value(twilink::pattern_counting, seed, i);
+    }
+    w.exact = exact;
+    (void)Peer::wake_from_stop(false);
+    settle_ms(950);   // past the peer's deadline
+    peer_stop();
+    twilink::Report r{};
+    if (peer_report(r)) {
+        w.peer_status = r.mstatus;
+    }
+    return w;
+}
+
+void tt_peer_wake() {
+    if (!need_peer()) {
+        return;
+    }
+    if (!self_link) {
+        print(serial, "  SKIPPED, no verdict claimed: the client the peer wakes is this "
+                      "board's I2C2 on the self-link's pads, and the probe says they are "
+                      "not on the desk", crlf);
+        return;
+    }
+    if (!C::wakes_from_stop) {
+        bench.verdict("this I2C2 has no wake from Stop (declined by table 165)", false);
+        return;
+    }
+    if (!rtc_up()) {
+        print(serial, "  the RTC domain is not on the LSE crystal and cannot be claimed: "
+                      "no backstop and no wall, so the Stop is DECLINED", crlf);
+        bench.verdict("the RTC runs on the LSE (the Stop's backstop)", false);
+        return;
+    }
+    // Fifty milliseconds of lead-in: long enough that a sleep which ended
+    // at once (a pending interrupt, a Stop never entered) cannot be
+    // mistaken for one the address ended, at the RTC's 3.9 ms unit.
+    constexpr uint16_t lead_ms = 50;
+    const uint32_t unit_us =
+        (static_cast<uint32_t>(Rtc::prescalers().async) + 1u) * 1'000'000UL / 32768u;
+    // THE BAND: the peer writes lead_ms after the rendezvous's BUSY and this
+    // board went to sleep pre_ms after it, so the sleep is due
+    // lead_ms - pre_ms. Two RTC readings each quantized by a unit put the
+    // reading within one unit of that either way; a unit more on each side
+    // for the tick's own millisecond on pre_ms and the peer's latency.
+    const auto in_band = [&](const WakeLeg& w) {
+        const uint32_t due = lead_ms > w.pre_ms ? lead_ms - w.pre_ms : 0u;
+        const uint32_t slack = (2u * unit_us + 999u) / 1000u + 1u;
+        return w.slept_ms + slack >= due && w.slept_ms <= due + slack;
+    };
+
+    // ---- Sleep first: the wake source proven in the shallower mode ----
+    const WakeLeg s1 = wake_leg(PwrMode::sleep, 4, lead_ms, 0x60);
+    print(serial, "  Sleep: armed=", s1.armed, " slept ", s1.slept_ms, " ms (due ",
+          lead_ms - s1.pre_ms, "), backstop ", s1.by_backstop ? "FIRED" : "quiet", ", ",
+          s1.got, " byte(s) taken, peer status ", s1.peer_status, crlf);
+    const bool sleep_ok = s1.armed && !s1.by_backstop && s1.exact && in_band(s1) &&
+                          s1.peer_status == i2c_ok;
+    bench.verdict("in SLEEP, the peer's write to this board's client ends the sleep and "
+                  "is taken whole (the wake source proven before the Stop)",
+                  sleep_ok);
+    if (!sleep_ok) {
+        print(serial, "  the Stop is not attempted without the Sleep leg", crlf);
+        return;
+    }
+
+    // ---- Stop 1 ----
+    const WakeLeg s2 = wake_leg(PwrMode::stop1, 4, lead_ms, 0x70);
+    print(serial, "  Stop 1: armed=", s2.armed, " slept ", s2.slept_ms, " ms (due ",
+          lead_ms - s2.pre_ms, "; the RTC's unit is ", unit_us, " us), backstop ",
+          s2.by_backstop ? "FIRED" : "quiet", ", ", s2.got, " byte(s) taken, peer status ",
+          s2.peer_status, crlf);
+    bench.verdict("in STOP 1 the client's own address, sent by ANOTHER CHIP, wakes the "
+                  "core - not the one-second backstop",
+                  s2.armed && !s2.by_backstop);
+    bench.verdict("... and it slept until the peer's address came: the RTC's reading "
+                  "of the Stop is the lead-in less the time to fall asleep, within the "
+                  "band derived above",
+                  in_band(s2));
+    bench.verdict("and the four bytes that address opened are taken whole, the peer's "
+                  "write completing i2c_ok - the client stretched the wake out of SCL",
+                  s2.exact && s2.peer_status == i2c_ok);
+    bench.verdict("the command channel is back after the Stop", command(Op::ping));
+}
+
 // ---------------------------------------------------------------------------
 // the banner
 // ---------------------------------------------------------------------------
@@ -3526,13 +3937,23 @@ void banner() {
     }
     print(serial, "  PB8/PB9 AF6 with their 2.2k pull-ups reach a PEER BOARD "
                   "running `twi_peer` (its ident says which port; command address ",
-          hex(twilink::command_addr), ") - letters n..r", crlf);
+          hex(twilink::command_addr), ") - letters n..t under 'w' (s and t on the "
+          "self-link too); they FAIL when it does not answer", crlf);
     bench.menu();
 }
 
 }  // namespace
 
 extern "C" void SysTick_Handler() { brio::Ticker::tick(); }
+
+/// The Stop's backstop (letter t): counted, because Rtc::isr() clears WUTF
+/// at entry and a flag read after the sleep would say it never fired.
+extern "C" void RTC_TAMP_IRQHandler() {
+    const uint32_t f = brio::Rtc::isr();
+    if ((f & brio::RtcFlag::wakeup) != 0u) {
+        rtc_backstops = rtc_backstops + 1u;
+    }
+}
 extern "C" void BRIO_SUITE_CONSOLE_HANDLER() { (void)Serial::isr(); }
 
 /// I2C1's line is its own. Which host owns it is a flag, because two
@@ -3625,15 +4046,19 @@ int main() {
     bench.letter('l', "THE KERNEL: I2cBus over I2cHost, and the per-bus timeout",
                  tl_kernel);
     bench.letter('m', "the errata: 2.10.1 as refusals, 2.10.2 as a count", tm_errata);
-    bench.letter('n', "THE PEER: the twi_link command channel to the peer board",
+    bench.second_letter('n', "THE PEER: the twi_link command channel to the peer board",
                  tn_peer_link);
-    bench.letter('o', "the tenure shapes against the peer, the repeated START "
+    bench.second_letter('o', "the tenure shapes against the peer, the repeated START "
                       "counted from the far end", to_peer_shapes);
-    bench.letter('p', "the vocabulary against the peer, and commanded stretching",
+    bench.second_letter('p', "the vocabulary against the peer, and commanded stretching",
                  tp_peer_vocabulary);
-    bench.letter('q', "the three speeds against a second chip", tq_peer_speeds);
-    bench.letter('r', "THE KERNEL against the peer: I2cBus over I2cHost, and the "
+    bench.second_letter('q', "the three speeds against a second chip", tq_peer_speeds);
+    bench.second_letter('r', "THE KERNEL against the peer: I2cBus over I2cHost, and the "
                       "wedge the peer holds", tr_peer_kernel);
+    bench.second_letter('s', "TWO CONTROLLERS, ONE STOP: the held STARTs against the peer's",
+                 ts_two_controllers);
+    bench.second_letter('t', "the wake from Stop by ANOTHER CHIP's address, Sleep first",
+                 tt_peer_wake);
     bench.letter('x', "a POLLED trace of one tenure, both ends by hand", tx_trace,
                  false);
     bench.letter('y', "the same tenure with the vectors LIVE, bounded and counted",

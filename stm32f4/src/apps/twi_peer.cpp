@@ -39,19 +39,26 @@
 //    watched; the DUT's own `i2c_nack_data` is the other half of that
 //    measurement. And because ACK down also refuses an ADDRESS, it goes
 //    back up at every Stop, or the instrument would go deaf for good.
-//  - A TARGET TRANSMITTER IS ASKED FOR ONE BYTE MORE THAN THE CONTROLLER
-//    TAKES: DR empties into the shifter and TxE rises again, so the byte
-//    standing in DR when the closing NACK arrives never reaches the wire.
-//    This chapter has no verb that throws it away, so the instrument does
-//    two things. In COMMAND MODE it never loads it: the protocol's read
-//    is exactly `response_bytes` long, so exactly that many are given and
-//    the twenty-first TxE is left standing. In an ACTION, where the
-//    controller's count is not known here, the byte is loaded and then
-//    DROPPED BY A PE CYCLE (27.6.1: with PE down "the internal state
-//    machines are reset and the communication control bits as well as the
-//    status bits come back to their reset value", while CR2, OAR1, OAR2,
-//    CCR and TRISE are untouched - so the address and the timing survive),
-//    and the tally gives the byte back. BOTH HALVES ARE MEASURED NOW: the
+//  - A TARGET TRANSMITTER ON TxE IS ASKED FOR ONE BYTE MORE THAN THE
+//    CONTROLLER TAKES: DR empties into the shifter and TxE rises again,
+//    before the byte's acknowledge pulse, so a byte loaded then never
+//    reaches the wire if the controller NACKs. This chapter has no verb
+//    that throws it away, so the instrument does two things. In COMMAND
+//    MODE it never loads it: the protocol's read is exactly
+//    `response_bytes` long, so exactly that many are given and the
+//    twenty-first TxE is left standing. In an ACTION, where the
+//    controller's count is not known here, every byte after the first is
+//    loaded on BTF - a byte out, ACKNOWLEDGED, and DR empty, with SCL
+//    stretched meanwhile - and a NACKed byte raises no BTF, so nothing
+//    stands behind the last one and the tally is the wire's (measured:
+//    on TxE alone the count over-ran by 0..2 per run, against 12
+//    clocked, depending on where the loop was when the NACK came). A PE
+//    CYCLE at the closing NACK stays as the guard against a byte left
+//    behind (27.6.1: with PE down "the internal state machines are reset
+//    and the communication control bits as well as the status bits come
+//    back to their reset value", while CR2, OAR1, OAR2, CCR and TRISE are
+//    untouched - so the address and the timing survive), and the tally
+//    gives back whatever it finds in DR. BOTH HALVES ARE MEASURED NOW: the
 //    command channel's twenty-byte read closes cleanly on the
 //    controller's NACK, so 27.3.3's BTF stretch falls AFTER the ninth
 //    pulse; and a controller at the far end reads the same answer twice
@@ -455,6 +462,7 @@ twilink::Report run_serve(const twilink::Params& a, bool fixed_byte) {
         return r;
     }
     uint16_t rx = 0, tx = 0;
+    uint16_t given = 0;   ///< bytes loaded since this read tenure's address match
     bool first_taken = false;
     const uint32_t t0 = Ticker::millis();
     for (;;) {
@@ -474,6 +482,7 @@ twilink::Report run_serve(const twilink::Params& a, bool fixed_byte) {
             if (a.hold_us) hold_us(a.hold_us);
             const bool reads = Client::answer_address();
             serving_ = reads;
+            given = 0;
             r.last_addr = matched_address();
             // The refusal is a RECEIVER's: arming it on a read tenure
             // would refuse the next address and report a NACK that never
@@ -500,17 +509,31 @@ twilink::Report run_serve(const twilink::Params& a, bool fixed_byte) {
             r.mstatus = status_byte();
             serving_ = false;
             Client::clear_nack();
-            // AND THE TALLY GIVES ONE BYTE BACK when there was one to
-            // drop: it was loaded into DR and never clocked out.
+            // The pump is paced on BTF (below), so no byte stands behind
+            // the NACKed one and the tally is the wire's. The PE cycle
+            // stays as the guard against a byte left in the shifter.
             if (drop_unclocked_byte() && tx != 0u) {
                 --tx;
             }
+            given = 0;
             continue;
         }
-        if (serving_ && Client::data_wanted()) {
+        // PACED ON BTF AFTER THE FIRST BYTE, so the pump is never ahead of
+        // the wire. TxE rises as soon as DR has moved into the shifter,
+        // which is before the byte's acknowledge pulse: a pump on TxE
+        // alone loads the next byte while the controller may still be
+        // NACKing this one, and how many bytes were loaded and never
+        // clocked then depends on where the loop was when the NACK came
+        // (measured: 12, 13 and 14 served for 12 clocked, run to run).
+        // BTF stands only once a byte is out AND acknowledged with DR
+        // empty - SCL stretched meanwhile (27.3.3) - and a NACKed byte
+        // raises AF and no BTF, so nothing is loaded behind it.
+        if (serving_ && Client::data_wanted() &&
+            (given == 0u || (Raw::status1() & I2cFlag::byte_finished) != 0u)) {
             if (a.hold_us) hold_us(a.hold_us);
             Client::give(fixed_byte ? a.seed : twilink::pattern_value(a.pattern, a.seed, tx));
             ++tx;
+            ++given;
             continue;
         }
         if (Client::stop_seen()) {
@@ -615,6 +638,19 @@ twilink::Report run_arb(const twilink::Params& a) {
         if (host_status == i2c_arb_lost) r.flags |= twilink::report_arblost;
         if (host_status == i2c_bus_error) r.flags |= twilink::report_buserr;
         r.aux1 = n;
+    }
+    // THE STOP LEAVES BEFORE THE ROLE SWITCH. The completion comes when
+    // the STOP is REQUESTED and the condition reaches the wire about a bit
+    // period later (STOP stands in CR1 until then, 27.6.1); go_command()'s
+    // init pulses the block's RCC reset, which took the request with it -
+    // measured from the far end: an address NACKed here and then NO STOP
+    // on the wire, SCL and SDA left high with every other controller's bus
+    // monitor still BUSY. Waited for, bounded by two ticks of the
+    // millisecond clock (a bit period at 100 kHz is ten microseconds).
+    {
+        const uint32_t s0 = Ticker::millis();
+        while (Raw::stopping() && Ticker::millis() - s0 < 2u) {
+        }
     }
     host_live = false;
     (void)go_command();
