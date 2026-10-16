@@ -442,7 +442,11 @@ struct Rcc {
     /// Arm exactly the ready interrupts in `mask` (rcc_lsirdyie ...
     /// rcc_pllrdyie) and disarm the rest. The clock security system is
     /// NOT one of them: it has no enable bit and no line of this
-    /// controller - it is the non-maskable interrupt.
+    /// controller - it is the non-maskable interrupt. And HSIRDYIE arms
+    /// nothing that ever fires: MEASURED on the CH32V203C8 and the
+    /// CH32V303VC, the HSI's restart raises no HSIRDYF, armed or not,
+    /// against 3.4.3 - a program waiting for the HSI polls HSIRDY, as
+    /// hsi_start() does (clock.md).
     static void ready_interrupts(uint32_t mask) {
         rcc()->INTR = mask & rcc_intr_enables;
     }

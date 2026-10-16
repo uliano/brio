@@ -118,7 +118,7 @@ judges it.
   (start, configure, refresh - the order the silicon needs),
   `refresh()` (the verb a loop calls, and what re-locks the two
   registers), `force_reset()` (the shortest setting there is, started
-  and never refreshed).
+  and refreshed once so the counter takes it).
 - **Configuring**: `configure(config)` and its compile-time twin
   `configure<config>()`, which refuses a prescaler code or a reload the
   fields cannot hold; `unlock()` for a caller that writes the registers
@@ -214,9 +214,10 @@ if ((flags & brio::ResetFlag::independent_watchdog) != 0u) { ... }
 
 `test_vx03_watchdog` at 144 MHz (PCLK1 72 MHz), nothing wired, on the
 CH32V203C8T6 and on the CH32V303VCT6 - the same verdicts on both:
-**16 pass, 0 fail** in `z`, plus **4 pass** in letter `w` and **8 pass**
-in letter `v`, the two by-name letters that reboot the board four times
-between them. Every number below is both parts' where one is given.
+**16 pass, 0 fail** in `z`, plus **4 pass** in letter `w`, **8 pass**
+in letter `v` and **13 pass** in letter `p`, the three by-name letters
+that reboot the board thirteen times between them (`p` ten times on each
+part). Every number below is both parts' where one is given.
 
 **The window watchdog's counter is frozen until it is armed.** With
 WDGA clear it read 127 and still read 127 twenty milliseconds later -
@@ -225,7 +226,10 @@ millisecond later.
 
 **Its tick is PCLK1 / 4096 / 2^WDGTB, to the microsecond.** The fall
 from 0x7F to 0x50 (47 ticks) measured **2628 us at /1 (2673 nominal),
-5346 and 5347 us at /2 (5347) and 21389 us at /8 (21390)**, and the
+5346 and 5347 us at /2 (5347), 10694 us at /4 (10695) and 21389 us at
+/8 (21390)** - the refresh lands at any phase of the prescaler, so the
+fall is 46 to 47 whole ticks and the letter's three per cent covers
+both - and the
 early-wakeup flag came up **28671 us after a refresh where 63 ticks at
 /8 are 28672**.
 
@@ -255,10 +259,43 @@ RLDR landed while the window was open; after a refresh, a naked store of
 **Its time-out, and what it says about each die's LSI.** Armed at /32
 with a reload of 249, refreshed ten times, then left: the CH32V203C8T6
 came back **206 and 207 ms** later in two runs, which puts its LSI at
-**38.8 kHz**, and the CH32V303VCT6 **199 ms** later in two runs, which
-puts its LSI at **40.2 kHz** - both inside the parts' rated 133 to 320
-ms and beside the datasheets' 39 kHz typical. IWDGRSTF stood alone at
-every boot, and each board had survived its ten refreshes before that.
+**38.8 kHz**, and the CH32V303VCT6 **199 ms** later in two runs of one
+session and **217 ms** in another, which puts its LSI at **40.2 and
+36.9 kHz** - the RC moving eight per cent between sessions, all of it
+inside the parts' rated 133 to 320 ms and around the datasheets' 39 kHz
+typical. IWDGRSTF stood alone at every boot, and each board had survived
+its ten refreshes before that.
+
+**Every prescaler divides the same oscillator by 4 << code.** Letter `p`
+arms each of the seven codes for the smallest reload that reaches 400 ms
+at the typical LSI, lets the update cross into the LSI's domain, and
+leaves it: every leg ended in IWDGRSTF alone, and the LSI each span
+implies agrees with the /32 leg's within that leg's window, derived in
+the letter from the tick's millisecond, one prescaled tick and half a
+per cent of the RC's wander between legs (1.2 % at /4, 2.9 % at /256).
+On the CH32V203C8T6 the seven read **38.5 to 38.7 kHz** at /4 to /128
+(403 to 405 ms) and **39.0 to 39.1 kHz** at /256 (399 to 400 ms); on
+the CH32V303VCT6 **36.79 to 36.83 kHz** at /4 to /64 (424 ms) and
+**37.00 kHz** at /128 and /256 (422 ms) - the same figures to the
+millisecond in all ten runs on each part. The longest prescaler reads
+fast on both, by 0.5 to 1.5 %: its span is short by up to most of one
+6.6 ms tick, which is what a refresh that reloads the counter without
+restarting the prescaler would do - chapter 7 does not say which, and
+the letter's window holds either way.
+
+**Both force_reset()s reset at once, through their own flag.**
+`Iwdg::force_reset()` - the start key, /4 with a reload of zero, a
+refresh - was back in **0 ms** on the CH32V203C8T6 and **3 ms** on the
+CH32V303VCT6 in every run, IWDGRSTF alone: the refresh right after the
+configure DID load the new reload (the reset setting would have been 273
+ms even at the fast corner), and the span is the LSI's own start, which
+the datasheets (CH32V203 table 4-14, CH32V303 table 4-15) give as 230
+us with the LSE running and 5 ms with it off, typical, no maximum. The letter's bound is 12 ms (that start taken twice,
+the crossing's five prescaled periods at /4, one /4 tick, the tick's
+millisecond).
+`Wwdg::force_reset()` - WDGA with the counter at zero - was back in
+**0 ms** on both, WWDGRSTF alone: T6 clear is the reset condition
+itself.
 
 **Through the two deep modes** (`test_vx03_sleep`, letters `g` and `x`,
 the RTC's alarm armed first as the way back in both). The same setting,
@@ -296,19 +333,3 @@ Driver gaps, each with its reason:
   the peripheral bus clock, which a Stop takes away, and what it does
   across one is untested; the independent one is measured there, and
   is no way back out of a Stop (above).
-
-Implemented but not bench-verified:
-
-- **The four prescaler codes of the window watchdog**: three of them are
-  timed above; /4 is written and read back and nothing times it,
-  because the three that are measured already fix the rule its code
-  follows.
-- **The independent watchdog at prescalers other than /32 on the
-  silicon**: every divider is decoded and asserted at compile time, and
-  the reset letter arms one setting. The others would cost one reset
-  each to measure, and what they would add is the same arithmetic at
-  another rate.
-- **`force_reset()` on either block**: both are one store away from what
-  the by-name letters already prove, and neither is called by a suite -
-  a program that wants a deliberate reset has `Reset::software()`
-  beside them.

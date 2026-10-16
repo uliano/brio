@@ -268,7 +268,7 @@ A triangle of amplitude 1023 over 512, stepped by a timer:
 
 `test_vx03_dac` on the CH32V303VCT6, with the PLL on the HSI at 96 MHz
 so that the converter judging the pads is in specification (ADCCLK
-12 MHz) and nothing wired: **26 pass, 0 fail**. The judge is
+12 MHz) and nothing wired: **35 pass, 0 fail**. The judge is
 ratiometric - the DAC's output and the ADC's count are both against the
 same supply, measured at 3299 to 3303 mV through VREFINT - so a code and
 the count it reads back are compared directly.
@@ -295,7 +295,9 @@ the count it reads back are compared directly.
   does not.
 - **Every trigger holds the datum until it comes.** The software trigger:
   DOR still at the old value five microseconds after the write, and the
-  new one right after SWTRIG1. The TRGO of all six timers table 17-1
+  new one right after SWTRIG1; channel 2's the same through SWTRIG2,
+  DOR1 left where it was, and both bits in one store moving both DORs
+  at once. The TRGO of all six timers table 17-1
   names - TIM2, TIM4, TIM5, TIM6, TIM7 and TIM8, codes 100, 101, 011,
   000, 010 and 001 - each held a datum written mid-period until its next
   update, 499 us later for a 1 ms period.
@@ -307,16 +309,22 @@ the count it reads back are compared directly.
   masked preload - 0x00A with MAMP 3, 0x8AA over a holding register of
   0x800 with MAMP 7, 0xAAA with MAMP 11 - and the twelve-bit run went on
   0xAAA, 0xD55, 0xEAA, 0xF55, 0xFAA, 0xFD5, 0xFEA, 0x7F5; sixty-four
-  triggers at each of the three widths all equal to the model's register.
+  triggers at each of the three widths all equal to the model's register
+  - on channel 2 too, its generator bits sixteen places above channel
+  1's, the same values to the trigger.
 - **The triangle turns at both ends.** MAMP 2 over 0x400 gave 0, 1, 2,
   3, 4, 5, 6, 7, 6, 5, 4, 3, 2, 1, 0, 1 above the holding register: the
   counter added and then updated, so the first trigger outputs the
-  holding register itself, and every step one count.
+  holding register itself, and every step one count - the same walk on
+  channel 2.
 - **The stream: DMA2's channel 3 playing a table into DAC1.** Eight
   levels, one a TIM6 update at 1 kHz, for 20 ms: the channel's own
   handler counted two laps and no fault, and 3738 conversions of PA4 in
   those 20 ms found all eight levels, nine in ten of them on a level of
-  the table - the rest caught mid-step.
+  the table - the rest caught mid-step. DAC2 on ITS OWN request, DMA2's
+  channel 4 (DMAEN2 alone), the same: two laps, no fault, all eight
+  levels on PA5, 3404 to 3410 of some 3740 conversions on a level, in
+  ten runs.
 - **The dual stream: one request, both channels.** DAC1's request alone
   (DMAEN1 set, DMAEN2 clear) feeding the dual holding register a word a
   TIM6 update: 1053 pairs of DOR1 and DOR2 read back to back were all
@@ -332,14 +340,6 @@ the count it reads back are compared directly.
 
 Implemented but not bench-verified, each with what would measure it:
 
-- **Channel 2's generators, its software trigger and the simultaneous
-  one** (`software_trigger(2)`, `software_trigger_both()`): the same bits
-  sixteen apart as channel 1's, which letters d and e measure; the same
-  two letters run on channel 2 would measure them.
-- **DAC2's own request on DMA2's channel 4.** The dual stream rides
-  DAC1's request by design; `claim_stream<2, Engine>()` is compiled and
-  refused at compile time off its slot, and the stream letter run on
-  channel 2 would measure it.
 - **The three PB1 cycles a hardware trigger takes to reach DOR** (17.2.3,
   against one for the software trigger): below what a core's read of DOR
   through the bus can resolve, so the suite measures that the datum is

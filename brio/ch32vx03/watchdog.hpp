@@ -339,10 +339,12 @@ struct Iwdg {
     }
 
     /// Reset the board through this watchdog, as fast as it can: the
-    /// shortest setting there is (one prescaled tick at /4), started
-    /// and not refreshed. At the nominal LSI of this part that is a
-    /// hundred microseconds and never returns. The start comes first
-    /// for arm()'s reason.
+    /// shortest setting there is (a reload of zero at /4, one prescaled
+    /// tick), the start key first for arm()'s reason, and one refresh so
+    /// the counter takes the setting. Never returns. What the span is
+    /// made of is the LSI's own start-up: measured, the reset arrives
+    /// 0 to 3 ms after the call, where the reset setting would take
+    /// hundreds (watchdog.md).
     [[noreturn]] static void force_reset() {
         start();
         (void)configure({.prescaler = IwdgPrescaler::div4, .reload = 0});

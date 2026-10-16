@@ -85,7 +85,9 @@ suite: `test_vx03_clock`.
   the flag. The detector is armed by hardware when HSERDY rises and
   disarmed when the oscillator stops. The ready flags of the five roots
   have ordinary interrupt enables in RCC_INTR and share the RCC vector,
-  and each flag is cleared by a write-only bit sixteen places above it.
+  and each flag is cleared by a write-only bit sixteen places above it -
+  but THE HSI'S IS NEVER RAISED (measured on both parts, below), so four
+  roots of the five can interrupt.
 - **The clock output is a pad on PA8** carrying SYSCLK, the HSI, the
   HSE or the PLL halved - the four codes of MCO[3:0] this class has,
   the rest belonging to the D8C families - and 3.3.5.5 warns that the
@@ -240,9 +242,10 @@ brio::Rcc::clock_monitor(true);
 
 ## Bench findings
 
-The reference suite is `test_vx03_clock` (49 verdicts in `z`, nothing
-wired, on the CH32V203C8T6 and on the CH32V303VCT6 - both boards carry
-an 8 MHz crystal). Its rate pack is the ten trees those boards can
+The reference suite is `test_vx03_clock` (55 verdicts in `z` on the
+CH32V203C8T6 and 54 on the CH32V303VCT6 - both boards carry an 8 MHz
+crystal and a 32.768 kHz one; the CH32V203C8T6's board straps PA8 to
+PA6, which counts the clock output, and nothing else is wired). Its rate pack is the ten trees those boards can
 make: the bare HSI, the PLL on the HSI at 48, 52, 96 and 144 MHz, the
 bare 8 MHz crystal, and the PLL on that crystal at 48, 72, 96 and
 144 MHz - 52 MHz being the one rate the PLL can only reach through the
@@ -287,7 +290,23 @@ HALVED input, which is what exercises the EXTEN bit.
 - **The ready interrupt reaches the RCC vector.** With HSERDYIE armed
   over that same ramp, the vector runs exactly once, its body finds
   HSERDYF - and only that flag - standing, and leaves none behind, so
-  the line does not re-enter.
+  the line does not re-enter. Letter `i` does the same for the other
+  roots, ten runs on each part: the LSI restarted with LSIRDYIE armed
+  (the vector once, LSIRDYF alone), the PLL - off under the bare
+  crystal - restarted by the switch back to the boot rate with
+  PLLRDYIE armed (PLLRDYF alone), and the LSE, behind the backup
+  domain's door, stopped and restarted with LSERDYIE armed (LSERDYF
+  alone, the crystal ready **754 to 755 ms** after LSEON on the
+  CH32V203C8T6's board and **785 to 802 ms** on the CH32V303's).
+- **THE HSI'S RESTART RAISES NO READY FLAG**, against 3.3.2's and
+  3.4.3's text, on both parts: stopped under the crystal's PLL (HSIRDY
+  falls) and started again with HSIRDYIE armed, the vector never runs
+  in 50 ms; unarmed, HSIRDYF does not stand once HSIRDY has risen,
+  whether the oscillator was off for 100 us or for 20 ms; and RCC_INTR
+  read at the top of main() after a reset holds no flag either. Letter
+  `i` judges exactly that, ten runs on each part. A program that wants
+  to know the HSI is back polls HSIRDY - which is what `hsi_start()`
+  does.
 - **The HSI can be stopped.** With SYSCLK on the PLL fed by the
   crystal, clearing HSION drops HSIRDY and the program runs on -
   measured because the chapter recommends against stopping it and says
@@ -298,7 +317,24 @@ HALVED input, which is what exercises the EXTEN bit.
   fire in 100 ms of monitoring; CSSON clears again on demand.
 - **The clock output takes all four sources of this class** - SYSCLK,
   the HSI, the HSE and the PLL halved - each read back through the
-  multiplexer, with the pad claimed and released.
+  multiplexer, with the pad claimed and released. **What leaves the pad
+  is counted** where PA8 is strapped to PA6 (the strap probed first,
+  both levels against the opposite pull): TIM3 in external clock mode
+  1 on PA6, over a 5 ms gate of a core clock made from the crystal,
+  reads the HSE at **7 999 911 to 8 000 111 Hz** - one edge either side
+  of 8 MHz exactly, the gate's resolution - and the HSI at **+0.59 to
+  +0.67 %** (8 046 909 to 8 053 309 Hz) over ten runs, inside the
+  datasheets' calibrated accuracy. SYSCLK and the PLL halved are 48 to
+  144 MHz at the rates that make them, past the pad's fastest class (50
+  MHz in the datasheets' I/O tables) and past what a timer clocked at
+  HCLK can count of an outside edge, so the letter reads them back and
+  does not count them.
+- **The USB divider's three codes each feed an enumeration**: /3 under
+  the USB console's 144 MHz, /2 under both USB suites' 96 MHz, and /1
+  under a tree rebuilt at 48 MHz - code 00 written before the gate opens
+  and the host enumerating the device on it, on the CH32V203C8T6's
+  device controller and the CH32V303VCT6's host/device one alike
+  ([usb.md](usb.md), [usbfs.md](usbfs.md), letter `k` of each suite).
 - **Every peripheral gate this part has opens and closes**, each read
   back one at a time - twenty-six on the three buses of the
   CH32V203C8T6, forty-two on the CH32V303VCT6 (DMA2, the FSMC, the RNG,
@@ -345,20 +381,13 @@ Implemented but not bench-verified:
 - **The HSE in bypass** (`ClockSource::external`): the board's pads
   carry a crystal, so an external clock into OSC_IN wants a signal
   generator or a second board's clock output on a wire.
-- **The ready interrupts of the other four roots.** The HSE's is
-  measured; the HSI's, the LSI's, the LSE's and the PLL's share the
-  vector and the same body, and no letter arms them.
 - **The clock security system's FAILURE.** Arming it is measured;
   firing it wants the crystal killed on a running board, which is a
   wire cut or a shorted pad and not something a suite can stage.
-- **The clock output's FREQUENCY.** The multiplexer is read back but
-  nothing counts what leaves the pad. The instrument is on the chip -
-  a timer meter ([tim.md](tim.md)) - and what it wants is a WIRE, PA8
-  being TIM1's own channel 1 pad and so unable to count what it
-  carries.
-- **The USB divider at 48 and 96 MHz.** The /3 code is what the USB
-  console runs on; the other two are arithmetic this suite reads back
-  but no enumeration has used.
+- **The clock output's frequency on the CH32V303VCT6's board**, which
+  has no strap from PA8 to a timer's pad: the multiplexer is read back
+  there and the letter says it does not count. What would measure it is
+  that strap (PA8 to PA6, as on the CH32V203C8T6's board).
 - **`hse_in_low_power()`**, the CH32V203RB's bit: written and read
   back nowhere but a family compile; what would measure it is that
   part on a board.

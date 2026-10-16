@@ -38,16 +38,20 @@
 //      with no trigger selected
 //   b  THE PADS, READ BY THE CONVERTER: seven codes on each channel,
 //      buffered and not, against table 4-45's offset, gain and rails
-//   c  THE TRIGGERS: the software one, the TRGO of every timer table 17-1
+//   c  THE TRIGGERS: the software one (each channel's, and both at once
+//      from one store), the TRGO of every timer table 17-1
 //      names that this build drives, and EXTI line 9 through each of its
 //      two enables - each time the datum held until the trigger comes
-//   d  THE NOISE GENERATOR: the preload on the first trigger and the whole
-//      sequence against figure 17-5's register, masked at three widths
-//   e  THE TRIANGLE: the counter walking up and down one step a trigger,
-//      between the holding register and the amplitude MAMP selects
+//   d  THE NOISE GENERATOR, on both channels: the preload on the first
+//      trigger and the whole sequence against figure 17-5's register,
+//      masked at three widths
+//   e  THE TRIANGLE, on both channels: the counter walking up and down
+//      one step a trigger, between the holding register and the
+//      amplitude MAMP selects
 //   f  THE STREAM: DmaLoopEngine on DMA2's channel 3 playing a table into
 //      DAC1 at the pace of TIM6's TRGO, the laps counted by the channel's
-//      handler and every level found on the pad by the converter
+//      handler and every level found on the pad by the converter - then
+//      the same into DAC2 on its own request, DMA2's channel 4
 //   g  THE DUAL STREAM: one engine on DAC1's request feeding both channels
 //      through the dual holding register, one word a TIM6 update
 //   h  BOTH CHANNELS AT ONCE: each pad following its own channel's
@@ -100,6 +104,11 @@ using Row1 = DmaRequestOf<DmaRequest::dac1>;
 using Player = DmaLoopEngine<Row1::controller, Row1::channel, uint16_t>;
 using DualPlayer = DmaLoopEngine<Row1::controller, Row1::channel, uint32_t>;
 static_assert(Row1::controller == 2u && Row1::channel == 3u);
+/// Letter f's second leg: DAC2's OWN request (table 11-3: DMA2's
+/// channel 4), named the same way.
+using Row2 = DmaRequestOf<DmaRequest::dac2>;
+using Player2 = DmaLoopEngine<Row2::controller, Row2::channel, uint16_t>;
+static_assert(Row2::controller == 2u && Row2::channel == 4u);
 
 /// The timer that paces letters f and g: TIM6, code 0 of table 17-1 - the
 /// basic timer whose one job is this TRGO, on the CH32V303RC and VC.
@@ -154,7 +163,7 @@ void wait_us(uint32_t us) {
 // ---------------------------------------------------------------------------
 
 /// What DMA2's channel 3 serves in the letter that is running.
-enum class Role : uint8_t { none, player, dual };
+enum class Role : uint8_t { none, player, dual, player2 };
 volatile Role role = Role::none;
 volatile uint16_t exti_calls = 0;
 
@@ -190,6 +199,9 @@ uint16_t distance(uint16_t a, uint16_t b) {
 void all_off() {
     Pfic::disable(dma_channel_irq(Row1::controller, Row1::channel));
     Pfic::clear_pending(dma_channel_irq(Row1::controller, Row1::channel));
+    Pfic::disable(dma_channel_irq(Row2::controller, Row2::channel));
+    Pfic::clear_pending(dma_channel_irq(Row2::controller, Row2::channel));
+    Player2::stop();
     Pfic::disable(Irq::exti9_5);
     Pfic::clear_pending(Irq::exti9_5);
     Player::stop();
@@ -464,6 +476,35 @@ void tc_triggers() {
                   "look",
                   base == 0x0F0u && held == 0x0F0u && taken == 0x0E1u);
 
+    // CHANNEL 2's OWN, and THE SIMULTANEOUS ONE: SWTRIG2 alone moves
+    // DOR2 and leaves DOR1; both bits in one store move both.
+    (void)Dac::configure(2, DacChannelConfig{.triggered = true, .trigger = DacTrigger::software});
+    (void)Dac::enable(2, true);
+    (void)Dac::write(2, 0x0A5);
+    (void)Dac::software_trigger(2);
+    const uint16_t two_base = Dac::output(2);
+    (void)Dac::write(1, 0x1B6);
+    (void)Dac::write(2, 0x2C7);
+    wait_us(5);
+    const uint16_t two_held = Dac::output(2);
+    (void)Dac::software_trigger(2);
+    const uint16_t two_taken = Dac::output(2);
+    const uint16_t one_left = Dac::output(1);
+    (void)Dac::write(2, 0x3D8);
+    Dac::software_trigger_both();
+    const uint16_t both1 = Dac::output(1);
+    const uint16_t both2 = Dac::output(2);
+    print(serial, "  channel 2: DOR2 ", hex(two_base), ", still ", hex(two_held),
+          " after the write, ", hex(two_taken), " right after SWTRIG2 with DOR1 left at ",
+          hex(one_left), "; both bits in one store: DOR1 ", hex(both1), ", DOR2 ", hex(both2),
+          crlf);
+    bench.verdict("channel 2's software trigger is SWTRIG2: its datum waits until it and "
+                  "DOR1 is left alone",
+                  two_base == 0x0A5u && two_held == 0x0A5u && two_taken == 0x2C7u &&
+                      one_left == 0x0E1u);
+    bench.verdict("and both bits in one store trigger both channels at once",
+                  both1 == 0x1B6u && both2 == 0x3D8u);
+
     // EVERY TIMER table 17-1 names that this build drives.
     uint8_t passed = 0;
     uint8_t tried = 0;
@@ -526,22 +567,22 @@ static_assert(lfsr_step(0x0AAA) == 0x0D55u);   // bits 6, 4, 1, 0 of 0xAAA: 0, 0
 /// `count` software triggers on a noise channel over `base`, each DOR
 /// compared with the model. Returns how many matched; the first value and
 /// the first eight are handed back for the report.
-uint8_t noise_run(uint8_t mamp, uint16_t base, uint8_t count, uint16_t& first,
+uint8_t noise_run(uint8_t ch, uint8_t mamp, uint16_t base, uint8_t count, uint16_t& first,
                   uint16_t (&head)[8]) {
-    (void)Dac::configure(1, DacChannelConfig{.triggered = true,
-                                             .trigger = DacTrigger::software,
-                                             .wave = DacWave::noise,
-                                             .amplitude = mamp});
-    (void)Dac::write(1, base);
-    (void)Dac::enable(1, true);
+    (void)Dac::configure(ch, DacChannelConfig{.triggered = true,
+                                              .trigger = DacTrigger::software,
+                                              .wave = DacWave::noise,
+                                              .amplitude = mamp});
+    (void)Dac::write(ch, base);
+    (void)Dac::enable(ch, true);
     wait_us(20);
     const uint16_t mask = dac_wave_amplitude(mamp);
     uint16_t model = dac_lfsr_preload;
     uint8_t matched = 0;
     for (uint8_t i = 0; i < count; ++i) {
-        (void)Dac::software_trigger(1);
+        (void)Dac::software_trigger(ch);
         wait_us(2);
-        const uint16_t got = Dac::output(1);
+        const uint16_t got = Dac::output(ch);
         const uint16_t want = static_cast<uint16_t>((base + (model & mask)) & 0x0FFFu);
         if (i == 0u) {
             first = got;
@@ -556,11 +597,11 @@ uint8_t noise_run(uint8_t mamp, uint16_t base, uint8_t count, uint16_t& first,
     }
     // WAVE back to 00 resets the generator (17.2.5), and the enable
     // drops with the next configure().
-    (void)Dac::wave(1, DacWave::none);
+    (void)Dac::wave(ch, DacWave::none);
     return matched;
 }
 
-void td_noise() {
+void noise_channel(uint8_t ch) {
     all_off();
     dac_up();
     constexpr uint8_t runs = 64;
@@ -568,9 +609,10 @@ void td_noise() {
     uint16_t first4 = 0;
     uint16_t first8 = 0;
     uint16_t first12 = 0;
-    const uint8_t m4 = noise_run(3, 0, runs, first4, head);
-    const uint8_t m8 = noise_run(7, 0x800, runs, first8, head);
-    const uint8_t m12 = noise_run(11, 0, runs, first12, head);
+    const uint8_t m4 = noise_run(ch, 3, 0, runs, first4, head);
+    const uint8_t m8 = noise_run(ch, 7, 0x800, runs, first8, head);
+    const uint8_t m12 = noise_run(ch, 11, 0, runs, first12, head);
+    print(serial, "  CHANNEL ", ch, crlf);
     print(serial, "  first values: ", hex(first4), " (mask 0x00F), ", hex(first8),
           " (0x800 + mask 0x0FF), ", hex(first12), " (mask 0xFFF); the preload is 0xAAA", crlf);
     print(serial, "  the twelve-bit run begins ", hex(head[0]), " ", hex(head[1]), " ",
@@ -587,28 +629,35 @@ void td_noise() {
     all_off();
 }
 
+/// Both channels' generators: channel 2's bits sit sixteen places above
+/// channel 1's in CTLR, and run against the same figure.
+void td_noise() {
+    noise_channel(1);
+    noise_channel(2);
+}
+
 // ===========================================================================
 // e - the triangle
 // ===========================================================================
-void te_triangle() {
+void triangle_channel(uint8_t ch) {
     all_off();
     dac_up();
     constexpr uint8_t mamp = 2;
     constexpr uint16_t amplitude = dac_wave_amplitude(mamp);   // 7
     constexpr uint16_t base = 0x400;
     constexpr uint8_t count = 40;
-    (void)Dac::configure(1, DacChannelConfig{.triggered = true,
-                                             .trigger = DacTrigger::software,
-                                             .wave = DacWave::triangle,
-                                             .amplitude = mamp});
-    (void)Dac::write(1, base);
-    (void)Dac::enable(1, true);
+    (void)Dac::configure(ch, DacChannelConfig{.triggered = true,
+                                              .trigger = DacTrigger::software,
+                                              .wave = DacWave::triangle,
+                                              .amplitude = mamp});
+    (void)Dac::write(ch, base);
+    (void)Dac::enable(ch, true);
     wait_us(20);
     uint16_t seen[count] = {};
     for (uint8_t i = 0; i < count; ++i) {
-        (void)Dac::software_trigger(1);
+        (void)Dac::software_trigger(ch);
         wait_us(2);
-        seen[i] = Dac::output(1);
+        seen[i] = Dac::output(ch);
     }
     bool in_band = true;
     bool single_steps = true;
@@ -628,12 +677,12 @@ void te_triangle() {
             ++bottoms;
         }
     }
-    print(serial, "  MAMP ", mamp, " over ", hex(base), ": ", seen[0] - base, " ", seen[1] - base,
+    print(serial, "  CHANNEL ", ch, ": MAMP ", mamp, " over ", hex(base), ": ", seen[0] - base, " ", seen[1] - base,
           " ", seen[2] - base, " ", seen[3] - base, " ", seen[4] - base, " ", seen[5] - base,
           " ", seen[6] - base, " ", seen[7] - base, " ", seen[8] - base, " ", seen[9] - base, " ",
           seen[10] - base, " ", seen[11] - base, " ", seen[12] - base, " ", seen[13] - base, " ",
           seen[14] - base, " ", seen[15] - base, " ...", crlf);
-    (void)Dac::wave(1, DacWave::none);
+    (void)Dac::wave(ch, DacWave::none);
     bench.verdict("the first trigger adds the counter's starting zero (17.3.3: the counter is "
                   "added, THEN updated)",
                   seen[0] == base);
@@ -644,6 +693,11 @@ void te_triangle() {
                   "back to the holding register more than once",
                   tops >= 2u && bottoms >= 2u);
     all_off();
+}
+
+void te_triangle() {
+    triangle_channel(1);
+    triangle_channel(2);
 }
 
 // ===========================================================================
@@ -717,6 +771,49 @@ void tf_stream() {
     bench.verdict("and the pad carries every level of the table, the converter finding "
                   "nine samples in ten on one of them",
                   levels_seen == 0xFFu && on_level * 10u >= samples * 9u);
+    all_off();
+
+    // DAC2's OWN REQUEST: the same table into channel 2 through DMA2's
+    // channel 4 (table 11-3), PA5 read by the converter.
+    converter_up();
+    Adc<1>::sample_time_all(AdcSampleTime::cycles28_5);
+    dac_up();
+    pace_at_1khz();
+    Dac::configure<2, DacChannelConfig{.triggered = true,
+                                       .trigger = pacer_trigger,
+                                       .dma = true}>();
+    role = Role::player2;
+    Dac::claim_stream<2, Player2>();
+    const bool started2 = Player2::start(table, levels);
+    const bool only_dac2 = Dac::dma(2) && !Dac::dma(1);
+    (void)Dac::enable(2, true);
+    Pacer::enable(true);
+    uint16_t samples2 = 0;
+    uint16_t on_level2 = 0;
+    uint16_t levels_seen2 = 0;
+    Stopwatch w2;
+    while (w2.us() < 20'000UL) {
+        const uint8_t l = level_of(pad_once(2));
+        ++samples2;
+        if (l < levels) {
+            ++on_level2;
+            levels_seen2 = static_cast<uint16_t>(levels_seen2 | (1u << l));
+        }
+    }
+    Pacer::enable(false);
+    const uint32_t laps2 = Player2::laps();
+    const uint32_t faults2 = Player2::faults();
+    Player2::stop();
+    (void)Dac::dma(2, false);
+    print(serial, "  channel 2: ", samples2, " conversions of PA5 in 20 ms: ", on_level2,
+          " on a table level, levels seen ", hex(levels_seen2), "; the engine on DMA2's channel "
+          "4 counted ", laps2, " laps and ", faults2, " faults", crlf);
+    bench.verdict("DAC2 raises its OWN request on DMA2's channel 4: DMAEN2 alone, the engine "
+                  "counting the laps of eight entries at 1 kHz in 20 ms",
+                  started2 && only_dac2 && laps2 >= 2u && laps2 <= 3u && faults2 == 0u);
+    bench.verdict("and PA5 carries every level of the table, nine samples in ten on one of "
+                  "them",
+                  levels_seen2 == 0xFFu && on_level2 * 10u >= samples2 * 9u);
     all_off();
 }
 
@@ -873,6 +970,20 @@ BRIO_CH32_VECTOR(dma2_channel3_handler) {
         }
     } else {
         (void)brio::DmaChannel<2, 3>::isr();
+    }
+}
+
+// DMA2's channel 4 carries DAC2's request: letter f's second leg.
+BRIO_CH32_VECTOR(dma2_channel4_handler) {
+    if (role == Role::player2) {
+        const uint8_t f = Player2::service();
+        if ((f & Player2::flag_error) != 0u) {
+            Player2::fail();
+        } else if ((f & Player2::flag_complete) != 0u) {
+            Player2::lap();
+        }
+    } else {
+        (void)brio::DmaChannel<2, 4>::isr();
     }
 }
 

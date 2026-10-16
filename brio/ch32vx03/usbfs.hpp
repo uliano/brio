@@ -465,6 +465,8 @@ struct Usbfs {
 
         for (uint8_t n = 1; n < endpoint_count; ++n) {
             release_number(n);
+            halted_tx_[n] = usbfs_uep_res_nak;
+            halted_rx_[n] = usbfs_uep_res_nak;
         }
         for (uint8_t r = 0; r < 4u; ++r) {
             regs().UEP_MOD[r] = 0;
@@ -625,21 +627,39 @@ struct Usbfs {
         next_ = usbfs_ep0_bytes;
     }
 
-    /// The halt of one direction. Clearing it restarts the toggle at
-    /// DATA0 on every endpoint but zero (chapter 9); zero's halt is
-    /// cleared by the next SETUP.
+    /**
+     * The halt of one direction. Endpoint zero's is the protocol stall a
+     * SETUP clears, and its release is NAK with the toggle kept.
+     *
+     * ON A DATA ENDPOINT THE RELEASE GIVES BACK WHAT THE HALT TOOK, AT
+     * DATA0. The halt keeps the response it replaced, and the release - a
+     * host's CLEAR_FEATURE(ENDPOINT_HALT) - writes that response back
+     * with the toggle at DATA0, which USB 2.0 9.4.5 asks of every such
+     * clear. MEASURED, and the reason: a release to NAK left a reception
+     * the class had armed unarmed for good while the class went on
+     * counting it armed - the host's next packet NAKed until a
+     * reconnect. A packet armed for an IN before the halt is offered
+     * again, never having been taken.
+     */
     static void stall(uint8_t address, bool on) {
         const uint8_t n = usb_ep_number(address);
         if (n >= endpoint_count) {
             return;
         }
-        volatile uint8_t& ctrl = usb_ep_is_in(address) ? regs().UEP[n].TX_CTRL : regs().UEP[n].RX_CTRL;
+        const bool in = usb_ep_is_in(address);
+        volatile uint8_t& ctrl = in ? regs().UEP[n].TX_CTRL : regs().UEP[n].RX_CTRL;
+        const uint8_t now = static_cast<uint8_t>(ctrl & usbfs_uep_res_mask);
         if (on) {
+            if (n != 0u && now != usbfs_uep_res_stall) {
+                (in ? halted_tx_ : halted_rx_)[n] = now;
+            }
             ctrl = static_cast<uint8_t>((ctrl & usbfs_uep_tog) | usbfs_uep_res_stall);
         } else if (n == 0u) {
             ctrl = static_cast<uint8_t>((ctrl & usbfs_uep_tog) | usbfs_uep_res_nak);
         } else {
-            ctrl = usbfs_uep_res_nak;
+            uint8_t& kept = (in ? halted_tx_ : halted_rx_)[n];
+            ctrl = now == usbfs_uep_res_stall ? kept : now;   // the toggle at DATA0
+            kept = usbfs_uep_res_nak;
         }
     }
 
@@ -1083,6 +1103,11 @@ private:
     }
 
     alignas(4) static inline volatile uint8_t pool_[pool_bytes]{};
+    /// The response each data endpoint's halt replaced (stall() above),
+    /// NAK when it holds none.
+    static_assert(usbfs_uep_res_nak == 2u);
+    static inline uint8_t halted_tx_[8]{2, 2, 2, 2, 2, 2, 2, 2};
+    static inline uint8_t halted_rx_[8]{2, 2, 2, 2, 2, 2, 2, 2};
     static inline uint16_t next_ = usbfs_ep0_bytes;
     static inline uint16_t slot_[endpoint_count]{};
     static inline uint8_t claimed_[endpoint_count]{};

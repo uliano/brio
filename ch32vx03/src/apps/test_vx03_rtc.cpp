@@ -57,9 +57,9 @@
 //      BKP_DATAR11..42 above the tamper registers: every one written and
 //      read back under two patterns, and neither block reaching into the
 //      other
-//   w  (by name, WIPES THE DOMAIN) the domain reset, and the HSE
-//      division MEASURED - 512 or 128, which 3.4.9 keys on the lot
-//      number
+//   w  (by name, WIPES THE DOMAIN) the domain reset, the HSE division
+//      MEASURED - 512 or 128, which 3.4.9 keys on the lot number - and
+//      the LSI as RTCCLK, its rate timed against the core's counter
 //   v  (by name, reboots) the data registers across a system reset
 //   t  (by name, WIPES THE DATA REGISTERS) the tamper input, driven
 //      from PC13's own port
@@ -869,6 +869,45 @@ void tw_domain_reset() {
                   "it has",
                   selected && configured && period_us != 0u &&
                       (div == device::rtc_hse_div[0] || div == device::rtc_hse_div[1]));
+
+    // THE LSI AS RTCCLK: the third source, which costs one more domain
+    // reset (RTCSEL is one-way). The RC is started by the program here -
+    // no watchdog forces it - the tick asked for at one hertz at the
+    // part's typical rate, and five of them timed against the core's
+    // crystal-rooted counter: (reload + 1) / period is the RC's rate.
+    RtcDomain::reset();
+    const bool lsi_up = Rcc::lsi_start();
+    const bool lsi_selected = RtcDomain::open(RtcClockSource::lsi);
+    (void)Rtc::synchronize();
+    const uint32_t lsi_reload = rtc_prescaler_for(device::lsi_typ_hz, 1);
+    const bool lsi_configured =
+        Rtc::configure(RtcConfig{.prescaler = lsi_reload, .count = 0, .set_count = true});
+    (void)wait_tick(3'000'000u);
+    Rtc::clear(rtc_secf);
+    Stopwatch lw;
+    uint32_t lsi_ticks = 0;
+    while (lsi_ticks < 5u && lw.us() < 10'000'000u) {
+        if (Rtc::second()) {
+            Rtc::clear(rtc_secf);
+            ++lsi_ticks;
+        }
+    }
+    const uint32_t lsi_span = lw.us();
+    const uint32_t lsi_count = Rtc::count();
+    const uint32_t lsi_rate =
+        lsi_ticks == 0u ? 0u
+                        : static_cast<uint32_t>((lsi_reload + 1ULL) * lsi_ticks * 1'000'000ULL /
+                                                lsi_span);
+    print(serial, "  RTCSEL on the LSI: five ticks asked for at one hertz through a reload of ",
+          lsi_reload, " took ", lsi_span, " us, the counter at ", lsi_count,
+          " - RTCCLK, the LSI, is ", lsi_rate, " Hz", crlf);
+    bench.verdict("the LSI clocks the counter: RTCSEL takes it, the second tick runs and the "
+                  "counter counts it, and the rate it implies lies in the part's rated 25 to "
+                  "60 kHz",
+                  lsi_up && lsi_selected && lsi_configured && lsi_ticks == 5u &&
+                      lsi_count >= 5u && lsi_rate >= device::lsi_min_hz &&
+                      lsi_rate <= device::lsi_max_hz);
+    Rcc::lsi_stop();
 
     // And back to the crystal, which needs the domain reset again
     // because RTCSEL is one-way.

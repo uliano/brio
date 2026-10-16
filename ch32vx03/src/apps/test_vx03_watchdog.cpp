@@ -20,6 +20,7 @@
 // a .noinit token:
 //     brio run <board> w --app test_vx03_watchdog --expect="->" --timeout 60
 //     brio run <board> v --app test_vx03_watchdog --expect="->" --timeout 60
+//     brio run <board> p --app test_vx03_watchdog --timeout 60
 // Their legs are the ones only a reset can prove: the independent
 // watchdog's time-out MEASURED against the tick and IWDGRSTF at the next
 // boot, the window one's time-out and WWDGRSTF, a refresh BEFORE the
@@ -39,7 +40,7 @@
 //      configuration read back, and the counter that does NOT run
 //      while WDGA is clear - against 8.2.1's own sentence
 //   b  ITS COUNTER ARMED and kept alive by hand: the tick rate at
-//      three prescalers timed against the STK, the window predicate
+//      all four prescalers timed against the STK, the window predicate
 //      over the moving counter, the early-wake-up flag caught and
 //      answered, and the block's reset line as the way back
 //   c  THE INDEPENDENT WATCHDOG'S REGISTERS, with the watchdog NOT
@@ -55,6 +56,11 @@
 //   v  (by name) THE WINDOW WATCHDOG'S THREE RESETS: the time-out from
 //      a refresh, a refresh BEFORE the window opens, and the early
 //      wake-up interrupt taken one tick before the reset
+//   p  (by name) THE INDEPENDENT WATCHDOG AT EVERY PRESCALER, AND THE
+//      TWO force_reset()s: seven resets, one per prescaler, each ~400 ms
+//      at the typical LSI, the seven implied LSI rates judged against
+//      one another; then Iwdg::force_reset() and Wwdg::force_reset(),
+//      each timed by the tick's vector and named by its flag
 //
 // build: boards = v203c6,v203c8,v303vc
 // build: monitor_speed = 115200
@@ -98,6 +104,13 @@ struct Token {
     volatile uint32_t elapsed_ms;
     volatile uint32_t marks;        ///< how many marks the loop managed
     volatile uint32_t handler_calls;   ///< what the early-wake-up vector counted
+    /// Letter p: the LSI each prescaler's time-out implies, leg by leg.
+    volatile uint32_t lsi_hz[7];
+    /// Letter p's two force_reset() legs, which never return to a loop
+    /// that could write a mark: the tick's vector writes elapsed_ms
+    /// from tick_start while tick_marks is set.
+    volatile uint32_t tick_start;
+    volatile uint8_t tick_marks;
 };
 [[gnu::section(".noinit")]] inline Token token;
 
@@ -279,13 +292,14 @@ void tb_wwdg_armed() {
     const uint8_t after = Wwdg::counter();
     Wwdg::refresh(0x7F);
 
-    // ITS RATE, at three of the four prescalers: 0x7F down to 0x50 is
-    // 47 ticks of PCLK1 / 4096 / 2^WDGTB.
+    // ITS RATE, at all four prescalers: 0x7F down to 0x50 is 47 ticks
+    // of PCLK1 / 4096 / 2^WDGTB.
     constexpr WwdgPrescaler rates[] = {WwdgPrescaler::div1, WwdgPrescaler::div2,
-                                       WwdgPrescaler::div8};
-    uint32_t seen[3] = {0, 0, 0};
-    uint32_t want[3] = {0, 0, 0};
-    for (uint8_t i = 0; i < 3u; ++i) {
+                                       WwdgPrescaler::div4, WwdgPrescaler::div8};
+    constexpr uint8_t rate_count = 4;
+    uint32_t seen[rate_count] = {0, 0, 0, 0};
+    uint32_t want[rate_count] = {0, 0, 0, 0};
+    for (uint8_t i = 0; i < rate_count; ++i) {
         seen[i] = fall_us(rates[i], 0x50);
         want[i] = 47u * wwdg_cycles_per_tick(rates[i]) / (pclk1 / 1000000u);
     }
@@ -335,8 +349,12 @@ void tb_wwdg_armed() {
           " half a millisecond later", crlf);
     bench.verdict("the counter starts falling when the watchdog is armed, and that is the "
                   "only time it moves", armed && after < at_start);
+    // THE BOUND: the refresh lands at any phase of the 4096 x 2^WDGTB
+    // prescaler, so the fall is 46 to 47 whole ticks - up to 1/47 = 2.1 %
+    // short - and the poll that sees 0x50 adds microseconds; three per
+    // cent covers both.
     uint8_t rates_ok = 0;
-    for (uint8_t i = 0; i < 3u; ++i) {
+    for (uint8_t i = 0; i < rate_count; ++i) {
         if (seen[i] * 100u > want[i] * 97u && seen[i] * 97u < want[i] * 100u) {
             ++rates_ok;
         }
@@ -345,8 +363,8 @@ void tb_wwdg_armed() {
               pclk1 / 1000000u, " MHz", crlf);
     }
     bench.verdict("the counter's tick is the peripheral clock over 4096 and over WDGTB, "
-                  "within three per cent of the core's own counter at three of the four "
-                  "prescalers", rates_ok == 3u);
+                  "within three per cent of the core's own counter at all four prescalers",
+                  rates_ok == rate_count);
     print(serial, "  a window at 0x60: refused at 0x7F, allowed at ", at_window, crlf);
     bench.verdict("in_window() refuses while the counter is above the window and allows it "
                   "between the window and 0x3F", too_early && inside && at_window <= 0x60u);
@@ -528,6 +546,156 @@ void judge(const char* what, bool ok) {
     }
 }
 
+// ===========================================================================
+// p - the independent watchdog at every prescaler, and both force_reset()s
+// ===========================================================================
+
+/// The seven prescalers, the one letter w measures FIRST: its leg is the
+/// reference every other leg's LSI is compared with.
+constexpr IwdgPrescaler p_order[7] = {IwdgPrescaler::div32, IwdgPrescaler::div4,
+                                      IwdgPrescaler::div8,  IwdgPrescaler::div16,
+                                      IwdgPrescaler::div64, IwdgPrescaler::div128,
+                                      IwdgPrescaler::div256};
+/// Each leg's setting: the smallest reload reaching 400 ms at the LSI's
+/// typical rate - long enough that the tick's millisecond and one
+/// prescaled tick are small against it, and inside the twelve-bit field
+/// at every prescaler (4096 x 4 / 39 kHz = 420 ms).
+constexpr uint32_t p_target_us = 400'000u;
+uint16_t p_reload(uint8_t leg) {
+    return iwdg_reload_for(p_order[leg], p_target_us, device::lsi_typ_hz);
+}
+
+/// Start leg `leg` (0..6): armed, the update let across into the LSI's
+/// domain so the refresh that starts the measured span loads THIS reload
+/// and not the reset one, then left.
+[[noreturn]] void tp_start_leg(uint8_t leg) {
+    Reset::clear_flags();
+    (void)Iwdg::arm({.prescaler = p_order[leg], .reload = p_reload(leg)});
+    (void)Iwdg::wait_idle();
+    mark_leg('p', static_cast<uint8_t>(leg + 1u));
+    Iwdg::refresh();
+    spin_until_reset();
+}
+
+void tp_iwdg_prescalers() {
+    token.pass = 0;
+    token.fail = 0;
+    print(serial, "  seven legs, one per prescaler, each armed for ~400 ms and left; then "
+                  "the two force_reset()s", crlf);
+    tp_start_leg(0);
+}
+
+/// The window of a leg's implied LSI against the reference leg's, in
+/// parts per million - DERIVED: each leg's span is the tick's
+/// millisecond (the last mark is written at most one tick before the
+/// reset) plus one prescaled LSI tick (the refresh reloads the counter,
+/// and nothing in chapter 7 says it restarts the prescaler, so the first
+/// tick may be short by up to one), both over the leg's own span; the
+/// reference leg carries the same two terms; and the LSI's own wander
+/// over the few seconds between the legs, taken at 0.5 % (the RC's
+/// rate at a constant temperature and supply - what both parts measured
+/// to the millisecond in two runs of letter w).
+uint32_t p_window_ppm(uint8_t leg, uint32_t lsi_hz, uint32_t ms, uint32_t ref_ms) {
+    const uint64_t tick_i_us = 1'000'000ULL * iwdg_prescaler_divider(p_order[leg]) / lsi_hz;
+    const uint64_t tick_r_us = 1'000'000ULL * iwdg_prescaler_divider(p_order[0]) / lsi_hz;
+    const uint64_t a = (1000ULL + tick_i_us) * 1'000'000ULL / (ms * 1000ULL);
+    const uint64_t b = (1000ULL + tick_r_us) * 1'000'000ULL / (ref_ms * 1000ULL);
+    return static_cast<uint32_t>(a + b + 5000u);
+}
+
+void tp_resume() {
+    const uint32_t ms = token.elapsed_ms;
+    const uint8_t leg = token.leg;
+    if (leg >= 1u && leg <= 7u) {
+        const uint8_t i = static_cast<uint8_t>(leg - 1u);
+        const uint16_t reload = p_reload(i);
+        const uint32_t div = iwdg_prescaler_divider(p_order[i]);
+        const uint32_t hz = ms == 0u ? 0u
+                                     : static_cast<uint32_t>((reload + 1ULL) * div * 1000ULL / ms);
+        token.lsi_hz[i] = hz;
+        print(serial, crlf, "-> leg ", leg, ": /", div, " reload ", reload, ", back after ", ms,
+              " ms - an LSI of ", hz, " Hz", crlf);
+        print_flags(boot_flags);
+        judge("the independent watchdog reset the board at this prescaler, IWDGRSTF alone",
+              (boot_flags & ResetFlag::independent_watchdog) != 0u &&
+                  (boot_flags & (ResetFlag::window_watchdog | ResetFlag::software)) == 0u);
+        if (leg < 7u) {
+            tp_start_leg(leg);
+        }
+        // Every leg back: each implied LSI against the reference leg's.
+        uint8_t agree = 0;
+        const uint32_t ref = token.lsi_hz[0];
+        const uint32_t ref_ms = static_cast<uint32_t>(
+            (p_reload(0) + 1ULL) * iwdg_prescaler_divider(p_order[0]) * 1000ULL /
+            (ref == 0u ? 1u : ref));
+        for (uint8_t k = 0; k < 7u; ++k) {
+            const uint32_t got = token.lsi_hz[k];
+            const uint32_t k_ms = static_cast<uint32_t>(
+                (p_reload(k) + 1ULL) * iwdg_prescaler_divider(p_order[k]) * 1000ULL /
+                (got == 0u ? 1u : got));
+            const uint32_t window = p_window_ppm(k, ref == 0u ? 1u : ref, k_ms == 0u ? 1u : k_ms,
+                                                 ref_ms == 0u ? 1u : ref_ms);
+            const int64_t off_ppm = ref == 0u ? 1'000'000LL
+                                              : (static_cast<int64_t>(got) - ref) * 1'000'000LL /
+                                                    static_cast<int64_t>(ref);
+            const bool ok = off_ppm <= static_cast<int64_t>(window) &&
+                            -off_ppm <= static_cast<int64_t>(window);
+            agree = static_cast<uint8_t>(agree + (ok ? 1u : 0u));
+            print(serial, "  /", iwdg_prescaler_divider(p_order[k]), ": ", got, " Hz, ",
+                  static_cast<int32_t>(off_ppm), " ppm from /32's, window ", window, " ppm", crlf);
+        }
+        judge("every prescaler divides the SAME oscillator by 4 << code: the seven implied LSI "
+              "rates agree with /32's within each leg's derived window",
+              agree == 7u);
+        judge("and that LSI lies in the part's rated 25 to 60 kHz",
+              ref >= device::lsi_min_hz && ref <= device::lsi_max_hz);
+        print(serial, "  leg 8: Iwdg::force_reset(), the tick's vector timing it", crlf);
+        Reset::clear_flags();
+        mark_leg('p', 8);
+        token.tick_start = Ticker::ticks();
+        token.tick_marks = 1;
+        Iwdg::force_reset();
+    }
+    if (leg == 8u) {
+        print(serial, crlf, "-> leg 8: back from Iwdg::force_reset() after ", ms, " ms", crlf);
+        print_flags(boot_flags);
+        judge("Iwdg::force_reset() resets the board through the independent watchdog",
+              (boot_flags & ResetFlag::independent_watchdog) != 0u &&
+                  (boot_flags & (ResetFlag::window_watchdog | ResetFlag::software)) == 0u);
+        // THE BOUND: the LSI's start (CH32V203 DS table 4-14, CH32V303 DS
+        // table 4-15: 230 us typical with the LSE running, 5 ms with it
+        // off, no maximum stated - taken twice over), the crossing of the two writes (five prescaled periods,
+        // the manual's own worst case, at /4 and the slow corner: 800
+        // us), one prescaled tick at /4 (160 us at 25 kHz) and the tick's
+        // millisecond: 12 ms; the setting it replaces - the reset one -
+        // is 273 ms even at the fast corner, so the two cannot be
+        // confused.
+        judge("and at once: within 12 ms (the LSI's start, the crossing, one /4 tick and the "
+              "tick's millisecond), not the reset setting's 273 ms or more",
+              ms <= 12u);
+        print(serial, "  leg 9: Wwdg::force_reset()", crlf);
+        Reset::clear_flags();
+        wwdg_off();
+        mark_leg('p', 9);
+        token.tick_start = Ticker::ticks();
+        token.tick_marks = 1;
+        Wwdg::force_reset();
+    }
+    if (leg == 9u) {
+        print(serial, crlf, "-> leg 9: back from Wwdg::force_reset() after ", ms, " ms", crlf);
+        print_flags(boot_flags);
+        judge("Wwdg::force_reset() resets the board through the window watchdog",
+              (boot_flags & ResetFlag::window_watchdog) != 0u &&
+                  (boot_flags & (ResetFlag::independent_watchdog | ResetFlag::software)) == 0u);
+        // T6 clear in the same store as WDGA is the reset condition
+        // itself (8.2.1): nothing to count down, so the span is the
+        // tick's millisecond at most.
+        judge("and at once: within the tick's millisecond - WDGA with T6 clear is the reset "
+              "condition itself", ms <= 1u);
+        bench.end_letter();
+    }
+}
+
 void tw_iwdg_reset() {
     token.pass = 0;
     token.fail = 0;
@@ -677,7 +845,12 @@ void banner() {
 
 }  // namespace
 
-BRIO_CH32_LEAF_VECTOR(systick_handler) { brio::Ticker::tick(); }
+BRIO_CH32_LEAF_VECTOR(systick_handler) {
+    brio::Ticker::tick();
+    if (token.tick_marks != 0u) {
+        token.elapsed_ms = brio::Ticker::ticks() - token.tick_start;
+    }
+}
 
 BRIO_CH32_LEAF_VECTOR(usart1_handler) { (void)Serial::isr(); }
 
@@ -694,6 +867,10 @@ BRIO_CH32_LEAF_VECTOR(wwdg_handler) {
 }
 
 int main() {
+    // Letter p's tick marks belong to the boot that set them: cleared
+    // before the tick starts, so the vector cannot overwrite the span
+    // the last boot left in the token.
+    token.tick_marks = 0;
     const bool clock_ok = SysClock::init();
     boot_flags = brio::Reset::take_flags();
     const bool serial_ok = Serial::init(clock, 115200);
@@ -712,6 +889,8 @@ int main() {
                  false);
     bench.letter('v', "THE WINDOW WATCHDOG'S THREE RESETS (reboots the board)", tv_wwdg_reset,
                  false);
+    bench.letter('p', "THE INDEPENDENT WATCHDOG AT EVERY PRESCALER, AND BOTH force_reset()s "
+                      "(reboots the board nine times)", tp_iwdg_prescalers, false);
 
     if (serial_ok) {
         brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "PLL144" : "FAILED",
@@ -724,6 +903,8 @@ int main() {
             bench.resume_tally(token.pass, token.fail);
             if (letter == 'w') {
                 tw_resume();
+            } else if (letter == 'p') {
+                tp_resume();
             } else {
                 tv_resume();
             }

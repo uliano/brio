@@ -1343,6 +1343,14 @@ public:
      * capability no other stratum in this tree has, and one family does
      * not make a contract: the verb is this driver's and the finding is
      * the document's.
+     *
+     * AND THE ALTERNATE TRIGGER'S TURN OUTLIVES THE MODE. Measured on the
+     * CH32V203C8 and the CH32V303VC: after an odd count of alternate
+     * triggers the next one is ADC2's through DUALMOD = 0 and into any
+     * other mode - ADC1's next JSWSTART converts ADC2's injected group
+     * alone and stands in its CTLR2, wedging ADC1's injected start until
+     * ADC1's init(); ADC2's init() leaves it, an even count leaves
+     * nothing. This verb does not hide it (adc.md).
      */
     static bool dual(AdcDualMode m) {
         static_assert(has_dual_mode,

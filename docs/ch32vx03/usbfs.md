@@ -155,6 +155,13 @@ such a packet - the host moved on and did not send it again - the
 driver dropped it, the stream showed one jump of one packet, and the
 two ends ran on in step. The stack never sees a PID.
 
+A cleared halt on a data endpoint gives back more than the toggle:
+`stall(address, false)` writes the RESPONSE the halt replaced, at DATA0.
+A reception the class had armed is armed again - released to NAK it was
+lost for good while the class went on counting it armed, the host's next
+packet NAKed until a reconnect (measured) - and a packet armed for an IN
+is offered again, never having been taken.
+
 ### A SETUP is taken whatever endpoint zero's response says
 
 Chapter 9 demands it, the vendor's sequence depends on it, and 23.2.2.9
@@ -208,9 +215,13 @@ datasheet's note under its clock tree, and the manual's under figure
 MEASURED with HCLK divided under a 96 MHz PLL whose 48 MHz USBPRE takes
 whole: the host enumerated the device, and a pour arrived with no jump
 and no overflow, at 96, 48, 24 and 12 MHz; at 6 MHz the device still
-enumerated every time, but the pour arrived with bytes missing in three
-runs of seven - with no overflow flagged; at 1.5 MHz it enumerated never,
-with the FIFO overflow counting, and the pour arrived broken. The
+enumerated every time, but some 2.3 to 3.4 % of the packets of a pour
+arrived WRITTEN WRONG - a right prefix, then bytes repeated and the
+previous packet's in place of the rest - with no overflow flagged and no
+packet missing whole (a pour whose every packet carries its own number,
+below); at 1.5 MHz it enumerated never, with the FIFO overflow counting,
+and the pour arrived broken. The PLL at 48 MHz with USBPRE at /1 feeds
+it as the 96 MHz tree does (an enumeration, below). The
 driver's floor, `usbfs_min_hclk_hz`, is therefore 12 MHz, refused below
 at compile time - half the device controller's, whose floor on the
 CH32V203 is 24. The 48 MHz source select of RCC_CFGR2 - bit 31,
@@ -390,9 +401,10 @@ attached controller holds one bus-master count and the platform's
 
 `test_vx03_usbfs` on the CH32V303VCT6 at 96 MHz from the board's
 crystal, the board's connector P14 on a Linux host through a hub:
-**23 pass, 0 fail** in `z`, and every host-assisted letter green with
+**26 pass, 0 fail** in `z`, and every host-assisted letter green with
 the bench's host script at the other end - the host end judging the
-bytes in the echo and in the device's pours.
+bytes in the echo and in the device's pours. The letters `k`, `g`, `r`
+and `q` ran ten times each, green every time.
 
 **The first enumeration, and the one change it forced.** As written
 against the manual the driver took a SETUP's endpoint from the status
@@ -428,6 +440,48 @@ ms every time and 11 kB of the pour carried, but with 2, 16 and 34 jumps
 in three runs of the seven and no overflow counted; at 1.5 MHz never
 configured, 8 to 12 FIFO overflows, and 2450 to 2725 jumps in 2919 to
 2975 bytes of the pour.
+
+**The divider at 1** (letter `k`): the tree rebuilt with the PLL at 48
+MHz on the crystal writes USBPRE code 00 (/1; /2 at the suite's 96 MHz),
+and the host enumerates the device on it with no FIFO overflow - then
+the 96 MHz tree and an enumeration again.
+
+**The numbered pour** (letter `q`, the host's packets each carrying a
+sixteen-bit number in bytes 0-1 and that number plus the index in the
+rest): at 96 MHz 19 865 to 24 628 packets in 2 s and at the 12 MHz floor
+6238 to 6298 in 4 s, every one whole and in order; at 6 MHz, 3126 to
+3324 whole packets in 5 s and 77 to 110 blocks that were no packet, each
+matched by a jump of ONE in the numbers - the mangled packet itself, the
+next one arriving whole - so NOTHING went missing whole: the packets were
+acknowledged, written and handed over WRONG. Byte by byte a mangled
+block is a right prefix of 1 to 52 bytes, then bytes of the same packet
+repeated and out of place, and at the tail the previous packet's bytes
+at their positions; in five runs of ten one mangled block had only its
+number's high byte wrong and read as a whole packet thousands back, the
+long jump after it being that byte. Holding the vector 50 us at every
+interrupt, or draining the ring five times slower, moved neither the
+rate nor the shape: the fault is in the block's write at that bus clock,
+not in the program's read. Why the FIFO overflow flag, which counts at
+1.5 MHz, stays down here is not visible from the program; the driver's
+floor of 12 MHz keeps it out of every build.
+
+**The bulk halt from the host** (letter `g`, the host's libusb with
+cdc-acm detached): SET_FEATURE(ENDPOINT_HALT) on the bulk OUT and IN set
+both responses to STALL, GET_STATUS read 1, a write and a read met a
+STALL handshake; CLEAR_FEATURE left both toggles at DATA0, the OUT
+response ACK as before the halt, and the packet the host wrote next
+came back exact, after the zero-length packet armed before the halt.
+Before the driver's release wrote that response back, the same clear
+left the OUT endpoint at NAK and the host's next packet was never taken.
+
+**The pool** (letter `r`): claims made by hand on the default pool with
+the host away - number 2's IN half alone at 64, the pair moved to 192 by
+its OUT claim with number 3's between; number 4's IN half moved up by 64
+by its own OUT claim (OUT 320, IN 384); number 5's IN beside its OUT at
+448; number 6's OUT claim refused with its IN half armed at 576 - each
+offset read back from the buffer register; then a device on `Usbfs<256>`,
+which a CDC port fills to the byte (256 of 256 spent), enumerated and
+echoing 3.4 MB in nine seconds, byte-exact at the host.
 
 **The frame counter**: 99 and 100 frames in 100 ms with INT_EN's bit 7
 set, and none in the ten milliseconds after it was cleared.
@@ -511,14 +565,9 @@ Implemented but not bench-verified, each with what would measure it:
   one USB connector on the device controller's pads, PA11/PA12. What
   would measure them - the wake-up line table 9-3 gives that class
   among the rest - is a board with a connector on PB6/PB7.
-- **A pool that is not the default**: `Usbfs<256>` compiles and a CDC
-  port fits it exactly; what would measure the relocation of a number's
-  halves is a class that claims an IN half before its OUT half and
-  something else between them.
-- **The endpoint halt on a bulk endpoint**: a host that halts and clears
-  one is what would measure `stall()` and `stalled()` there.
-- **What the pour loses at 6 MHz of HCLK, and why no flag says so**: the
-  bytes missing there came with no FIFO overflow, and whether they are
-  packets the block acknowledged and never wrote or bytes it wrote wrong
-  is not told apart by a counting stream of period 256; a stream whose
-  every packet carries its own sequence number would tell them apart.
+- **Traffic through a pair the claim order moved**: the moves and the
+  refusal are measured with the buffer register read back (letter `r`),
+  and every class in the tree claims a number's OUT half before its IN
+  half, so no packet has yet crossed a moved pair. What would measure it
+  is a class that claims an IN half before its OUT half with another
+  claim between, carrying data.

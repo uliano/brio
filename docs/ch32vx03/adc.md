@@ -73,7 +73,7 @@ arithmetic says 11; the datasheets' tables 4-27 (CH32V203) and 4-41
 (CH32V303) give the two ends as 14 and 252 ADCCLK, which is 12.5 behind
 every sampling time - and the silicon sides with the datasheets:
 sixty-four back-to-back conversions at each of the four long codes took
-12.5 cycles beyond their sampling time on the CH32V303VCT6 (the findings
+12.5 cycles beyond their sampling time on both parts (the findings
 below). The driver's arithmetic is the datasheets'.
 
 ### The power-up and the calibration
@@ -204,6 +204,21 @@ arrives in the UPPER HALF of the master's data register. 12.2.7's note
 asks for the external trigger to be set on the master and a software
 trigger on the slave, so that no spurious edge starts the follower
 alone, and for the two groups to take the same time.
+
+The interleaved modes are the regular group's on ONE channel: one
+trigger starts ADC2 at once and ADC1 7 ADCCLK later (fast) or 14 later
+(slow), and in the slow one a new ADC2 start follows every 28 ADCCLK
+with no CONT bit (the notes under figures 12-8 and 12-9, measured
+below). Alternate trigger is the injected groups': the first trigger
+converts ADC1's, the second ADC2's, and so on. AND ITS TURN OUTLIVES THE
+MODE - measured, and in no note: after an odd count of alternate
+triggers the next trigger is still ADC2's through DUALMOD = 0 and into
+any other mode, so the master's next JSWSTART converts ADC2's injected
+group alone and stands, set, in ADC1's CTLR2, wedging ADC1's injected
+start until ADC1's own `init()` (power down, up, calibration); ADC2's
+`init()` does not clear it, and an even count leaves nothing behind. A
+program that leaves alternate trigger either ends on an even count or
+re-initializes ADC1.
 
 `Adc<1>::dual()` is the verb; on the second converter, and on a part
 with one converter, it does not compile - the master's field is not a
@@ -509,8 +524,9 @@ MHz and ADCCLK at 12 MHz. NOTHING OUTSIDE THE CHIP: the levels are a pad
 driven or pulled by its own port, the internal reference and the
 temperature sensor - and on the CH32V303 its own DAC, whose first output
 is the converter's input 4 - and the core's own counter is the ruler. On
-the CH32V203C8T6 the ten letters of that part: **57 verdicts in `z`**.
-On the CH32V303VCT6 all fifteen: **73 pass, 0 fail**. Where one number
+the CH32V203C8T6 the fourteen letters of that part: **88 verdicts in
+`z`**. On the CH32V303VCT6 all nineteen: **102 pass, 0 fail**. The
+letters `p` to `s` ran ten times more on each part, green every time. Where one number
 is given below it is the CH32V203C8T6's unless the CH32V303VCT6 is
 named.
 
@@ -596,6 +612,24 @@ named.
   offset, was ground.
 - **JEOC is the GROUP's flag, not the conversion's**: it reached its
   handler exactly once for a two-conversion injected group.
+- **ADC2 is an instrument of its own** (letter `q`, both parts): letters
+  `e`, `f` and `g` run again on the second converter's registers, the
+  shared vector serving its flags - its injected group preempting its
+  continuous regular conversion and reading the rail less the offset
+  (2095; 2093 on the CH32V303VCT6), its analog watchdog a band with the
+  single-channel select, TIM3's TRGO pacing 399 of its conversions in
+  200 ms, and EXTI line 11 starting it through the EVENT enable alone:
+  the same answers as ADC1's, verdict for verdict.
+- **JAUTO: twenty conversions from one start** (letter `r`, both parts).
+  A scanned regular sequence of sixteen at 28.5 cycles, landed by the
+  DMA, then the injected group of four with JEXTTRIG off as 12.2.4
+  asks: one SWSTART, the DMA's last regular result 5275 to 5293 core
+  cycles after it (sixteen conversions are 5248), JEOC 1294 to 1328
+  later (four conversions are 1312, the poll's turn 25 to 32 cycles),
+  every result the level of its slot. And EOC STANDS at the end: the
+  DMA's reads clear it after each regular conversion, and the injected
+  group's end raises it again, as 12.2.4 says of a converted injected
+  group ("the EOC and IEOC flags is set").
 - **The watchdog is a band and not a ceiling.** A conversion above the
   high threshold raised the flag and its interrupt; one inside the
   window raised nothing; one below the low threshold raised it again.
@@ -618,6 +652,28 @@ named.
   at ground: the master's data register read 0x30FFF - 4095 in its low
   half, 3 in its high one (0xFFD on the CH32V303VCT6: 4093 and 0). All
   ten codes were written and read back and an eleventh was refused.
+- **The interleaved modes, timed** (letter `s`, both parts). One input
+  - DAC2 at mid-scale on PA5 on the CH32V303VCT6, the pad at the rail
+  on the CH32V203C8T6 - at 1.5 cycles of sampling, one SWSTART, both
+  converters' EOC stamped by a poll of the core's counter whose turn is
+  25 to 32 cycles (3 to 4 ADCCLK): FAST, ADC2's end at 136 to 159 core
+  cycles and ADC1's 37 to 74 after it (7 ADCCLK is 56); SLOW, ADC1's 87
+  to 118 after ADC2's (14 ADCCLK is 112), and ADC2 converting again
+  every 224 core cycles - 28 ADCCLK - from the one trigger, CONT clear
+  (205 to 242 between two stamps on the CH32V303VCT6, a turn either
+  side). Each
+  spacing is its figure to within a turn and nearer it than the other
+  mode's, which is what tells the two apart. Both halves of the
+  master's register held the source: 2044 to 2045 counts for DAC2's
+  2048 on the CH32V303VCT6, 4095 on the CH32V203C8T6.
+- **Injected simultaneous and alternate trigger** (letter `s`): one
+  JSWSTART converted both injected groups (ADC1's rail, ADC2's ground);
+  in alternate trigger three JSWSTARTs went to ADC1, ADC2, ADC1. And THE
+  TURN OUTLIVES THE MODE (above): back in injected simultaneous after
+  those three, the next JSWSTART converted ADC2's group alone and stood
+  in ADC1's CTLR2; after ADC2's `init()` the next converted nothing,
+  after ADC1's both; after an even count of alternate triggers both -
+  the same on both parts, every run.
 - **The follower's datum is there with the DMA bit DROPPED too.**
   12.2.7's note 1 says the DMA must be enabled "to read the slave
   converted data on the master data register"; the upper half carried it
@@ -636,13 +692,14 @@ named.
   a pad at the rail, VREFINT, a pad at ground - at a software pace:
   indices 0, 1, 2 with 4095, 1488 and 10 counts (4093, 1490 and 0 on the
   CH32V303VCT6), no result carrying a code the list does not hold.
-- **A CONVERSION IS ITS SAMPLING TIME PLUS 12.5 CYCLES** (CH32V303VCT6).
-  Sixty-four conversions back to back in continuous mode, landed by the
-  DMA and timed by the core's counter, took 54.1, 68.1, 84.1 and 252.1
-  ADCCLK cycles each at SMP codes 100 to 111 - 41.5, 55.5, 71.5 and
-  239.5 cycles of sampling and 12.5 or 12.6 behind every one of them: the
-  datasheets' 14..252, not 12.2.2's 11. The driver's
-  `conversion_half_cycles()` predicts each to half a cycle.
+- **A CONVERSION IS ITS SAMPLING TIME PLUS 12.5 CYCLES** (letter `p`,
+  both parts). Sixty-four conversions back to back in continuous mode,
+  landed by the DMA and timed by the core's counter, took 54.0 to 54.1,
+  68.0 to 68.1, 84.0 to 84.1 and 252.0 to 252.1 ADCCLK cycles each at
+  SMP codes 100 to 111 - 41.5, 55.5, 71.5 and 239.5 cycles of sampling
+  and 12.5 or 12.6 behind every one of them, on the CH32V203C8T6 as on
+  the CH32V303VCT6: the datasheets' 14..252, not 12.2.2's 11. The
+  driver's `conversion_half_cycles()` predicts each to half a cycle.
 - **THE SHORT SAMPLING TIMES ARE A LOT'S, AND THIS DIE HAS NONE**
   (CH32V303VCT6). ADC1_AUX with ADC_SMP_SEL1 written read back 0x0 - and
   ADC2's the same - so the short-time verbs answered false and the
@@ -701,22 +758,13 @@ Implemented but not bench-verified, each with what would measure it:
   landing conversions on DMA2's channel 5 and the 75 % duty are written
   against the manual and wait for a die of a lot whose penultimate sixth
   digit is not zero, where letters k, n and o measure them.
-- **The conversion's 12.5-cycle tail on the CH32V203.** Measured on the
-  CH32V303VCT6 and given by both datasheets; the letter that times it is
-  the CH32V303's, and the same timing on a CH32V203 would measure it.
-- **The interleaved and alternate-trigger dual modes.** All ten codes
-  are written and read back; only regular simultaneous is measured
-  converting. The others want two channels carrying a CHANGING signal to
-  tell a fast interleave from a slow one - the CH32V303's two DAC
-  channels are such a source, and no letter drives them that way yet.
-- **The second converter as a lone instrument.** ADC2 is brought up,
-  converts and is read in the dual-mode letter; its own watchdog, its
-  own injected group and its own triggers are the same registers at
-  another address and are exercised only by the family fixture.
-- **JAUTO, the automatic injected group** after the regular one: written
-  and refused where the chapter forbids it, and not driven - the
-  measurement is the same shape as the trigger letter's and waits for a
-  program that wants twenty conversions in one start.
+- **The four combined dual modes** (regular simultaneous with injected
+  simultaneous or with alternate trigger, injected simultaneous with
+  fast or slow interleaved): written and read back; each is two of the
+  modes measured above joined, and what is measured of their joint -
+  the regular group stopped by an injected event and resumed - is not.
+  What would measure it is letter `s`'s stamps with an injected trigger
+  raised in the middle of a regular sequence.
 - **The parts other than the CH32V203C8 and the CH32V303VC.** The
   converter count, the channel count and the pad map fold through each
   part's own table and the whole stratum compiles for all thirteen both

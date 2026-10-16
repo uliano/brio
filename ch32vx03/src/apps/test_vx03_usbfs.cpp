@@ -107,6 +107,21 @@
 //      to 1.5, bytes, jumps and overflows at each rung
 //   s  (host: s) SUSPEND AND RESUME, and which of the two wake-up lines
 //      table 9-3 names for this class - 18 and 20 - a resume raises
+//   k  THE USB DIVIDER AT 1, no host action: the tree rebuilt with the PLL
+//      at 48 MHz on the crystal, USBPRE written /1, the device enumerated
+//      on it - then the suite's 96 MHz again
+//   g  (host: h) THE BULK HALT: the host's SET_FEATURE(ENDPOINT_HALT) on
+//      both bulk directions, its CLEAR_FEATURE, the toggles and the armed
+//      state after it, one packet echoed after the clear, and the toggles
+//      a reconnect's configuration starts with
+//   r  (host: y) THE POOL: claims in an order no class makes - a number's
+//      IN half before its OUT half with a claim between, the move refused
+//      over an armed half - then a device on Usbfs<256>, which a CDC port
+//      fills to the byte, echoing
+//   q  (host: q) THE POUR AT 6 MHz, EVERY PACKET NUMBERED: the host's
+//      packets carry their own sequence numbers, so a packet that never
+//      arrived and one that arrived wrong are told apart - at 96 MHz and
+//      at 6
 //
 // Start the letter here FIRST, then the script's mode inside the window
 // the letter prints; a host already pouring when a letter begins fills
@@ -173,6 +188,21 @@ struct Descriptors {
     }
 };
 using Device = UsbDevice<Usb, Descriptors, Port>;
+
+/// LETTER r's DEVICE: the pool a CDC port fits EXACTLY - endpoint zero's
+/// 64, the notification's half, the bulk pair's two - so not one byte of
+/// it is left over. The same descriptors: the host sees the same device.
+using Usb256 = Usbfs<256>;
+using Port256 = UsbCdcAcm<Usb256, P>;
+using Device256 = UsbDevice<Usb256, Descriptors, Port256>;
+/// Which device the vector serves: letter r's while it runs.
+volatile bool small_pool = false;
+
+/// LETTER k's TREE: the PLL at 48 MHz on the crystal, which USBPRE takes
+/// whole - code 00, the divider no other letter of this target uses.
+using Clock48 = Clock<ClockSource::pll, 48'000'000, 8'000'000>;
+static_assert(Clock48::usb_divider == 1u && Clock48::usb_hz == usb_required_hz);
+static_assert(SysClock::usb_divider == 2u);
 
 /// The pads the part table names for the controller, and the other pair
 /// the datasheet's table also names, read as a contrast in letter p (on
@@ -1154,6 +1184,428 @@ void th_ladder_data() {
     bench.verdict("and the port is configured at the suite's own rate again", Device::configured());
 }
 
+
+// =============================================================================
+// k - the USB divider at 1: the PLL at 48 MHz
+// =============================================================================
+void tk_divider() {
+    Device::stop();
+    Usb::release();
+    wait_ms(20);
+    while (!Serial::tx_idle()) {
+    }
+    const uint8_t code96 = Rcc::usb_prescaler();
+    const bool tree = Clock48::init();
+    (void)Serial::init(Clock48{}, 115200);
+    (void)Ticker::init(Clock48{});
+    const uint8_t code48 = Rcc::usb_prescaler();
+    const bool up = Usb::init(Clock48{});
+    Device::start();
+    const uint32_t took = wait_configured(2000u);
+    const bool port_ok = Port::configured() && Port::out_armed();
+    const uint16_t overruns = Usb::overruns();
+    print(serial, "  the PLL at 48 MHz: USBPRE code ", code48, " (/", usbpre_divider(code48),
+          "; it was ", code96, ", /", usbpre_divider(code96), ", at 96), configured in ", took,
+          " ms, FIFO overflows ", overruns, crlf);
+    Device::stop();
+    Usb::release();
+    wait_ms(20);
+    while (!Serial::tx_idle()) {
+    }
+    (void)SysClock::init();
+    (void)Serial::init(clock, 115200);
+    (void)Ticker::init(clock);
+    (void)Usb::init(clock);
+    Device::start();
+    const uint32_t back = wait_configured(2000u);
+    print(serial, "  back at 96 MHz: USBPRE code ", Rcc::usb_prescaler(), ", configured in ", back,
+          " ms", crlf);
+    bench.verdict("at 96 MHz the divider is /2, and the tree at 48 MHz writes /1 - code 00 - "
+                  "before the controller's gate opens",
+                  code96 == 1u && tree && code48 == 0u && up);
+    bench.verdict("and on /1 the host enumerates the device to CONFIGURED, the port armed, no "
+                  "FIFO overflow",
+                  took != 0u && port_ok && overruns == 0u);
+    bench.verdict("and the suite's own tree is back, enumerated again", back != 0u);
+}
+
+// =============================================================================
+// h - the bulk halt, from the host (host: h) - letter g in the menu
+// =============================================================================
+struct EpView {
+    uint8_t res_rx;
+    uint8_t res_tx;
+    bool tog_rx;
+    bool tog_tx;
+};
+EpView ep_view() {
+    const uint8_t rx = Usb::regs().UEP[data_endpoint].RX_CTRL;
+    const uint8_t tx = Usb::regs().UEP[data_endpoint].TX_CTRL;
+    return {static_cast<uint8_t>(rx & usbfs_uep_res_mask), static_cast<uint8_t>(tx & usbfs_uep_res_mask),
+            (rx & usbfs_uep_tog) != 0u, (tx & usbfs_uep_tog) != 0u};
+}
+const char* res_name(uint8_t r) {
+    switch (r) {
+        case usbfs_uep_res_ack: return "ACK";
+        case usbfs_uep_res_none: return "NONE";
+        case usbfs_uep_res_nak: return "NAK";
+        default: return "STALL";
+    }
+}
+
+void tg_halt() {
+    if (!need_host()) {
+        return;
+    }
+    settle_port();
+    constexpr uint8_t out_ep = usb_ep_out(data_endpoint);
+    constexpr uint8_t in_ep = usb_ep_in(data_endpoint);
+    const EpView before = ep_view();
+    print(serial, "  run the script's h now (this letter waits 15 s for the halt); every byte that "
+                  "arrives is echoed", crlf);
+    uint32_t halted_at = 0;
+    uint32_t cleared_at = 0;
+    EpView at_halt{};
+    EpView at_clear{};
+    uint32_t after_clear = 0;
+    const uint32_t t0 = Ticker::millis();
+    uint8_t buf[64];
+    while (Ticker::millis() - t0 < 20'000u) {
+        uint32_t n = 0;
+        while (n < sizeof buf && Port::read_byte(buf[n])) {
+            ++n;
+        }
+        for (uint32_t w = 0; w < n;) {
+            w += Port::write_bulk(std::span<const uint8_t>(buf + w, n - w));
+        }
+        if (cleared_at != 0u) {
+            after_clear += n;
+        }
+        if (halted_at == 0u && Usb::stalled(out_ep) && Usb::stalled(in_ep)) {
+            halted_at = Ticker::millis() - t0;
+            at_halt = ep_view();
+        }
+        if (halted_at != 0u && cleared_at == 0u && !Usb::stalled(out_ep) && !Usb::stalled(in_ep)) {
+            cleared_at = Ticker::millis() - t0;
+            at_clear = ep_view();
+        }
+        if (cleared_at != 0u && Ticker::millis() - t0 > cleared_at + 3000u) {
+            break;
+        }
+    }
+    print(serial, "  before: OUT ", res_name(before.res_rx), " IN ", res_name(before.res_tx),
+          ", toggles RX ", before.tog_rx ? 1 : 0, " TX ", before.tog_tx ? 1 : 0, crlf);
+    print(serial, "  halted at ", halted_at, " ms: OUT ", res_name(at_halt.res_rx), " IN ",
+          res_name(at_halt.res_tx), ", toggles RX ", at_halt.tog_rx ? 1 : 0, " TX ",
+          at_halt.tog_tx ? 1 : 0, crlf);
+    print(serial, "  cleared at ", cleared_at, " ms: OUT ", res_name(at_clear.res_rx), " IN ",
+          res_name(at_clear.res_tx), ", toggles RX ", at_clear.tog_rx ? 1 : 0, " TX ",
+          at_clear.tog_tx ? 1 : 0, "; ", after_clear, " bytes arrived after it", crlf);
+    if (halted_at == 0u) {
+        print(serial, "  SKIPPED, and it passes as a skip: the host halted nothing - the host end "
+                      "is the bench's USB script, started in the window above.", crlf);
+        bench.verdict("the host letter is skipped and says so", true);
+    } else {
+        bench.verdict("the host's SET_FEATURE(ENDPOINT_HALT) halts each bulk direction: the "
+                      "stack hands it to stall() and both responses read STALL",
+                      at_halt.res_rx == usbfs_uep_res_stall && at_halt.res_tx == usbfs_uep_res_stall);
+        bench.verdict("its CLEAR_FEATURE takes the halt off and puts BOTH toggles back to DATA0 "
+                      "(USB 2.0 9.4.5) - the host's own toggles are reset by the same request",
+                      cleared_at != 0u && !at_clear.tog_rx && !at_clear.tog_tx);
+        bench.verdict("and the OUT endpoint is armed again as it was before the halt: the packet "
+                      "the host writes after the clear arrives (the host judges its echo)",
+                      at_clear.res_rx == before.res_rx && after_clear == 64u);
+    }
+    const EpView left = ep_view();
+    Device::stop();
+    wait_ms(500);
+    Device::start();
+    const uint32_t back = wait_configured(2000u);
+    const EpView fresh = ep_view();
+    print(serial, "  reconnected: configured in ", back, " ms; toggles RX ", left.tog_rx ? 1 : 0,
+          " TX ", left.tog_tx ? 1 : 0, " before it, RX ", fresh.tog_rx ? 1 : 0, " TX ",
+          fresh.tog_tx ? 1 : 0, " after", crlf);
+    bench.verdict("and a reconnect gives the host a fresh device whose configuration starts "
+                  "both bulk toggles at DATA0, whatever the last one left",
+                  back != 0u && !fresh.tog_rx && !fresh.tog_tx);
+}
+
+// =============================================================================
+// r - the pool: one that fits exactly, and a number's halves moved
+// =============================================================================
+/// A buffer register's place in the pool: its address's low bits, which
+/// is all it reads back, against endpoint zero's at the pool's start.
+uint16_t slot_of(uint8_t n) {
+    return static_cast<uint16_t>((Usb::regs().UEP_DMA[n] - Usb::regs().UEP_DMA[0]) & 0xFFFFu);
+}
+
+void tr_pool() {
+    // THE CLAIM ORDER, on the default pool with the host away: the
+    // pull-up down and every endpoint but zero released, then claims in
+    // an order no CDC class makes - an IN half before its OUT half with
+    // other claims between, an IN half moved up by its own OUT, and a
+    // move refused because the half it would move is armed.
+    Device::stop();
+    wait_ms(20);
+    Usb::deconfigure_endpoints();
+    const uint16_t free0 = Usb::buffer_free();
+    bool ok = Usb::configure_endpoint(usb_ep_in(2), UsbEndpointType::bulk, 64);   // 2 IN at 64
+    ok = Usb::configure_endpoint(usb_ep_out(3), UsbEndpointType::bulk, 64) && ok; // 3 OUT at 128
+    const uint16_t two_alone = slot_of(2);
+    ok = Usb::configure_endpoint(usb_ep_out(2), UsbEndpointType::bulk, 64) && ok; // 2 moves to 192
+    const uint16_t two_moved = slot_of(2);
+    ok = Usb::configure_endpoint(usb_ep_in(4), UsbEndpointType::bulk, 64) && ok;  // 4 IN at 320
+    ok = Usb::configure_endpoint(usb_ep_out(4), UsbEndpointType::bulk, 64) && ok; // beside: OUT 320, IN 384
+    const uint16_t four = slot_of(4);
+    ok = Usb::configure_endpoint(usb_ep_out(5), UsbEndpointType::bulk, 64) && ok; // 5 OUT at 448
+    ok = Usb::configure_endpoint(usb_ep_in(5), UsbEndpointType::bulk, 64) && ok;  // beside: IN 512
+    const uint16_t five = slot_of(5);
+    ok = Usb::configure_endpoint(usb_ep_in(6), UsbEndpointType::interrupt, 8) && ok;   // 6 IN at 576
+    const uint8_t one = 0x5A;
+    const bool armed = Usb::submit_in(6, std::span<const uint8_t>(&one, 1));
+    ok = Usb::configure_endpoint(usb_ep_out(7), UsbEndpointType::bulk, 64) && ok; // 7 OUT at 640
+    const bool refused = !Usb::configure_endpoint(usb_ep_out(6), UsbEndpointType::bulk, 64);
+    const uint16_t six = slot_of(6);
+    const uint16_t left = Usb::buffer_free();
+    print(serial, "  the default pool, ", free0, " bytes free past endpoint zero: number 2's IN "
+                  "half alone at ", two_alone, ", the pair moved to ", two_moved,
+          " by its OUT claim; number 4 at ", four, " (its IN half moved up), number 5 at ", five,
+          "; number 6's OUT claim ", refused ? "REFUSED" : "taken", " with its IN half armed, "
+                                                                   "which stays at ", six,
+          "; ", left, " bytes free", crlf);
+    bench.verdict("A NUMBER'S HALVES MOVE TOGETHER: an IN half claimed before its OUT half, with "
+                  "another claim between, goes with the OUT half to a fresh 128 bytes, the OUT "
+                  "half first - the buffer register following it",
+                  ok && two_alone == 64u && two_moved == 192u);
+    bench.verdict("an IN half claimed LAST before its own OUT half moves up by 64 instead, and an "
+                  "OUT half's IN partner lands beside it",
+                  four == 320u && five == 448u);
+    bench.verdict("and a claim that would move an ARMED half is refused, the armed half staying "
+                  "where it is - 256 bytes of the pool left",
+                  armed && refused && six == 576u && left == 256u);
+    Usb::deconfigure_endpoints();
+
+    // THE POOL THAT FITS EXACTLY: a device of the same descriptors on
+    // Usbfs<256>, enumerated, every byte of the pool spent, and an echo.
+    Usb::release();
+    wait_ms(300);
+    small_pool = true;
+    const bool up = Usb256::init(clock);
+    Device256::start();
+    const uint32_t t0 = Ticker::millis();
+    while (!Device256::configured() && Ticker::millis() - t0 < 2000u) {
+    }
+    const bool conf = Device256::configured();
+    print(serial, "  Usbfs<256>: ", conf ? "configured" : "NOT configured", ", ",
+          Usb256::buffer_used(), " of ", Usb256::pool_size, " bytes spent; run the script's y "
+          "now (an echo for 9 s)", crlf);
+    bench.verdict("A POOL OF 256 - endpoint zero's 64 and a CDC port's three halves - enumerates "
+                  "with not one byte left",
+                  up && conf && Usb256::buffer_free() == 0u && Usb256::buffer_used() == 256u &&
+                      Port256::configured() && Port256::out_armed());
+    const uint32_t rx0 = Port256::rx_bytes();
+    uint32_t echoed = 0;
+    uint32_t idle_since = Ticker::millis();
+    const uint32_t t1 = Ticker::millis();
+    uint8_t buf[64];
+    while (Ticker::millis() - t1 < 15'000u) {
+        uint32_t n = 0;
+        while (n < sizeof buf && Port256::read_byte(buf[n])) {
+            ++n;
+        }
+        for (uint32_t w = 0; w < n;) {
+            w += Port256::write_bulk(std::span<const uint8_t>(buf + w, n - w));
+        }
+        echoed += n;
+        if (n != 0u) {
+            idle_since = Ticker::millis();
+        } else if (echoed != 0u && Ticker::millis() - idle_since > 1500u) {
+            break;
+        }
+    }
+    print(serial, "  echoed ", echoed, " of ", Port256::rx_bytes() - rx0, " bytes, ring overruns ",
+          Port256::rx_overruns(), ", FIFO overflows ", Usb256::overruns(), crlf);
+    if (echoed == 0u) {
+        print(serial, "  SKIPPED, and it passes as a skip: the host sent nothing", crlf);
+        bench.verdict("the host letter is skipped and says so", true);
+    } else {
+        bench.verdict("and it carries the echo: every byte received went back, no overrun, no "
+                      "overflow (the host judges the bytes)",
+                      Port256::rx_bytes() - rx0 == echoed && Port256::rx_overruns() == 0u &&
+                          Usb256::overruns() == 0u);
+    }
+    Device256::stop();
+    Usb256::release();
+    wait_ms(300);
+    small_pool = false;
+    (void)Usb::init(clock);
+    Device::start();
+    const uint32_t back = wait_configured(2000u);
+    bench.verdict("and the device on the default pool enumerates again", back != 0u);
+}
+
+// =============================================================================
+// q - the pour at 6 MHz, every packet numbered (host: q)
+// =============================================================================
+/// The host's packets: bytes 0-1 a 16-bit number, bytes 2..63 that number
+/// plus their index, modulo 256 - so a whole packet missing is a JUMP in
+/// the numbers with every block intact, and a packet written wrong is a
+/// block that is not its own number's.
+struct SeqCheck {
+    uint8_t blk[64] = {};
+    uint8_t fill = 0;
+    uint16_t expect = 0;
+    bool started = false;
+    bool syncing = false;
+    uint32_t packets = 0;
+    uint32_t missing = 0;
+    uint32_t jumps = 0;
+    uint32_t singles = 0;   ///< jumps of exactly one packet
+    uint32_t backward = 0;
+    uint32_t corrupt = 0;
+    uint32_t skipped = 0;
+    /// The first two blocks that were not a packet, each byte classed
+    /// against the packet expected there ('n'), the one before it ('p')
+    /// or neither ('?') - what tells a packet written late from one
+    /// written wrong.
+    char shape[2][65] = {};
+    uint8_t shapes = 0;
+
+    static bool byte_of(const uint8_t* b, uint8_t j, uint16_t seq) {
+        if (j == 0u) {
+            return b[0] == static_cast<uint8_t>(seq & 0xFFu);
+        }
+        if (j == 1u) {
+            return b[1] == static_cast<uint8_t>(seq >> 8);
+        }
+        return b[j] == static_cast<uint8_t>(seq + j);
+    }
+
+    bool whole() const {
+        const uint16_t seq = static_cast<uint16_t>(blk[0] | (blk[1] << 8));
+        for (uint8_t j = 2; j < 64u; ++j) {
+            if (blk[j] != static_cast<uint8_t>(seq + j)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    void take(uint8_t b) {
+        blk[fill] = b;
+        fill = static_cast<uint8_t>(fill + 1u);
+        if (fill < 64u) {
+            return;
+        }
+        if (whole()) {
+            const uint16_t seq = static_cast<uint16_t>(blk[0] | (blk[1] << 8));
+            if (started) {
+                const uint16_t gap = static_cast<uint16_t>(seq - expect);
+                if (gap != 0u && gap < 0x8000u) {
+                    missing += gap;
+                    ++jumps;
+                    if (gap == 1u) {
+                        ++singles;
+                    }
+                } else if (gap != 0u) {
+                    ++backward;
+                }
+            }
+            started = true;
+            expect = static_cast<uint16_t>(seq + 1u);
+            ++packets;
+            fill = 0;
+            syncing = false;
+            return;
+        }
+        // Not a packet: counted once, then the window slides a byte at a
+        // time until a whole one lines up again. Before the first whole
+        // packet the window is only finding the packets' edges - a rung
+        // begins wherever the last one stopped reading - and that is not
+        // counted.
+        if (!syncing && started) {
+            ++corrupt;
+            syncing = true;
+            if (shapes < 2u) {
+                for (uint8_t j = 0; j < 64u; ++j) {
+                    shape[shapes][j] = byte_of(blk, j, expect)                          ? 'n'
+                                       : byte_of(blk, j, static_cast<uint16_t>(expect + 1u)) ? 'x'
+                                       : byte_of(blk, j, static_cast<uint16_t>(expect - 1u)) ? 'p'
+                                                                                           : '?';
+                }
+                shape[shapes][64] = '\0';
+                ++shapes;
+            }
+        }
+        for (uint8_t j = 0; j < 63u; ++j) {
+            blk[j] = blk[j + 1u];
+        }
+        fill = 63;
+        ++skipped;
+    }
+};
+
+void tq_numbered() {
+    if (!need_pour("q", 6000u)) {
+        return;
+    }
+    constexpr uint32_t rungs[3] = {SysClock::hz, usbfs_min_hclk_hz, 6'000'000UL};
+    constexpr uint32_t windows_ms[3] = {2000u, 4000u, 5000u};
+    SeqCheck checks[3];
+    uint16_t overflows[3] = {};
+    for (uint8_t i = 0; i < 3u; ++i) {
+        switch_hclk(rungs[i]);
+        const uint16_t ov0 = Usb::overruns();
+        const uint32_t t0 = Ticker::millis();
+        uint8_t b = 0;
+        while (Ticker::millis() - t0 < windows_ms[i]) {
+            if (Port::read_byte(b)) {
+                checks[i].take(b);
+            }
+        }
+        overflows[i] = static_cast<uint16_t>(Usb::overruns() - ov0);
+    }
+    switch_hclk(SysClock::hz);
+    for (uint8_t i = 0; i < 3u; ++i) {
+        print(serial, "  HCLK ", rungs[i] / 1000UL, " kHz, ", windows_ms[i], " ms: ",
+              checks[i].packets, " whole packets, ", checks[i].missing, " missing in ",
+              checks[i].jumps, " jumps (", checks[i].singles, " of one packet), ",
+              checks[i].backward, " backward, ", checks[i].corrupt,
+              " blocks not a packet (", checks[i].skipped, " bytes slid past), ", overflows[i],
+              " FIFO overflows", crlf);
+        for (uint8_t k = 0; k < checks[i].shapes; ++k) {
+            print(serial, "    a block that was not a packet, byte by byte against the one "
+                          "expected (n), the one after it (x) and the one before (p): ", checks[i].shape[k], crlf);
+
+        }
+    }
+    for (uint8_t i = 0; i < 2u; ++i) {
+        bench.verdict(i == 0u ? "at the suite's own rate every numbered packet arrives whole "
+                                "and in order"
+                              : "and at the driver's floor, 12 MHz, the same",
+                      checks[i].packets > 0u && checks[i].missing == 0u &&
+                          checks[i].corrupt == 0u && checks[i].backward == 0u &&
+                          overflows[i] == 0u);
+    }
+    // AT 6 MHz THE LOSS IS PACKETS WRITTEN WRONG, NOT PACKETS MISSING.
+    // A mangled block reads as no packet, and the next whole one is then
+    // ONE number ahead: a jump of one is the mangled packet itself. A
+    // mangled block that happens to read as an older whole packet (a
+    // backward number) makes the jump after it long. So: every block not
+    // a packet is matched by a jump (one either way for the window's
+    // edges), and every jump longer than one follows a backward number.
+    const SeqCheck& low = checks[2];
+    const uint32_t longs = low.jumps - low.singles;
+    const uint32_t matched = low.corrupt > low.jumps ? low.corrupt - low.jumps
+                                                     : low.jumps - low.corrupt;
+    bench.verdict("AT 6 MHz THE LOSS IS PACKETS WRITTEN WRONG, NEVER PACKETS MISSING WHOLE: every "
+                  "block that is not a packet is matched by a jump in the numbers, and every jump "
+                  "longer than one follows a block that read as an older packet",
+                  low.corrupt > 0u && matched <= 1u && longs <= low.backward);
+    bench.verdict("and no FIFO overflow says so - the flag stays down at every rung",
+                  overflows[0] == 0u && overflows[1] == 0u && overflows[2] == 0u);
+    bench.verdict("and the port is configured at the suite's own rate again", Device::configured());
+}
 // =============================================================================
 // s - suspend and resume, and the wake-up lines (host: s)
 // =============================================================================
@@ -1249,7 +1701,13 @@ BRIO_CH32_LEAF_VECTOR(systick_handler) { brio::Ticker::tick(); }
 BRIO_CH32_LEAF_VECTOR(usart1_handler) { (void)Serial::isr(); }
 
 /// The controller's one line: every event of this block in device mode.
-BRIO_CH32_VECTOR(usbfs_handler) { Device::isr(); }
+BRIO_CH32_VECTOR(usbfs_handler) {
+    if (small_pool) {
+        Device256::isr();
+    } else {
+        Device::isr();
+    }
+}
 /// The two wake-up vectors: the driver's line through its body, the
 /// other line counted by hand (letter s).
 BRIO_CH32_LEAF_VECTOR(usb_wakeup_handler) {
@@ -1292,6 +1750,10 @@ int main() {
     bench.letter('b', "the automatic pause, on and off (host: d)", tb_pause, false);
     bench.letter('h', "the bus floor: the pour at HCLK 96 MHz down to 1.5 (host: d)", th_ladder_data, false);
     bench.letter('s', "suspend and resume, and the wake-up lines (host: s)", ts_suspend, false);
+    bench.letter('k', "the USB divider at 1: the PLL at 48 MHz", tk_divider);
+    bench.letter('g', "the bulk halt from the host (host: h)", tg_halt, false);
+    bench.letter('r', "the pool: claims moved, and a pool of 256 (host: y)", tr_pool, false);
+    bench.letter('q', "the pour at 6 MHz, every packet numbered (host: q)", tq_numbered, false);
 
     if (serial_ok) {
         print(serial, crlf, "boot: clk=", clock_ok ? "XT96" : "FAILED", " usb=", usb_ok ? "48MHz" : "FAILED",

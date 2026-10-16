@@ -13,9 +13,11 @@
 // under it.
 //
 // NOTHING TO WIRE. Every clock this suite touches is inside the chip or
-// on the board's own 8 MHz crystal (both boards carry one, on PD0/PD1),
-// the console is the probe's serial (USART1 on PA9/PA10) and the clock
-// output takes a pad nothing else on the board uses.
+// on the board's own crystals (both boards carry an 8 MHz one on
+// PD0/PD1 and a 32.768 kHz one on PC14/PC15), the console is the
+// probe's serial (USART1 on PA9/PA10), and the clock output's pad PA8
+// is counted where a strap to PA6 already exists (the CH32V203C8T6's
+// board: SPI1's loop-back node) and only read back elsewhere.
 //
 // THE CONSOLE IS THE INSTRUMENT AND THE SUBJECT AT ONCE. Every letter
 // that moves the rate moves it through a DynamicClock whose users are
@@ -54,11 +56,19 @@
 //      reads back, the flag stays clear and the non-maskable interrupt
 //      never fires
 //   g  the clock output on PA8: every source this class has, set and
-//      read back, and the pad claimed and released
+//      read back, and the pad claimed and released; where PA8 is
+//      strapped to PA6 (the CH32V203C8T6's board - probed, not assumed)
+//      TIM3 counts what leaves it: the HSE and the HSI
 //   h  the peripheral gates: every enable the chapter lists for a block
 //      THIS PART has (the part table says which) opened and closed with
 //      the register read back, and what the register does with the
 //      gates of the blocks it has not got - reported, not judged
+//   i  the ready interrupts of the four other roots: the LSI, the PLL
+//      (off under the bare crystal, restarted by a switch) and the LSE
+//      (behind the backup domain's door, its crystal's start-up timed)
+//      each reaching the RCC vector with its own flag, the body leaving
+//      none behind - and the HSI (stopped under the crystal's PLL),
+//      whose restart raises no flag at all on this silicon
 //
 // build: boards = v203c6,v203c8,v303vc
 // build: monitor_speed = 115200
@@ -70,7 +80,9 @@
 #include "ch32vx03/pfic.hpp"
 #include "ch32vx03/pin.hpp"
 #include "ch32vx03/platform.hpp"
+#include "ch32vx03/rtc.hpp"
 #include "ch32vx03/ticker.hpp"
+#include "ch32vx03/tim.hpp"
 #include "ch32vx03/usart.hpp"
 #include "util/print.hpp"
 #include "util/testbench.hpp"
@@ -124,6 +136,7 @@ constexpr const char* rate_names[] = {
 };
 constexpr uint8_t boot_rate = 0;               ///< PllHsi144, what main() enters
 constexpr uint8_t xtal_144_rate = 5;           ///< PllXtal144, letter e's crystal tree
+constexpr uint8_t xtal_bare_rate = 9;          ///< XtalBare, the tree with the PLL off
 static_assert(sizeof(rate_names) / sizeof(rate_names[0]) == SysClock::rate_count);
 
 TestBench<Serial> bench;
@@ -458,6 +471,129 @@ void tf_css() {
 // ---------------------------------------------------------------------------
 // g - the clock output
 // ---------------------------------------------------------------------------
+
+/// WHAT LEAVES THE PAD, counted. PA8 is TIM1's own channel 1 pad, so no
+/// timer counts it in place; on the CH32V203C8T6's board PA8 is strapped
+/// to PA6 and PA7 (SPI1's loop-back node), and PA6 is TIM3's channel 1 in
+/// column 0 - the meter. The strap is a BOARD fact, so it is probed, not
+/// assumed: PA8 driven both ways and PA6 read against the opposite pull.
+constexpr Pad meter_pad = tim_channel_pad(3, 0, 0);   ///< PA6
+static_assert(meter_pad == Pad{'A', 6});
+using MeterTim = Tim<3>;
+using MeterIn = Pin<meter_pad.port, meter_pad.pin>;
+using McoPin = Pin<'A', 8>;
+
+bool mco_strapped() {
+    MeterIn::input(PinPull::down);
+    McoPin::output(true);
+    (void)delay_us(clock, 20);
+    const bool high = MeterIn::read();
+    MeterIn::input(PinPull::up);
+    McoPin::clear();
+    (void)delay_us(clock, 20);
+    const bool low = !MeterIn::read();
+    McoPin::release();
+    MeterIn::release();
+    return high && low;
+}
+
+/// The core's counter: HCLK cycles, wrapping once a tick at CMPLR + 1.
+uint32_t stk_span(uint32_t from, uint32_t to) {
+    const uint32_t period = stk()->CMPLR + 1u;
+    return to >= from ? to - from : to + period - from;
+}
+
+/// The pad's rate in Hz: TIM3 counting PA6's rising edges in external
+/// clock mode 1 over a gate of `gate_cycles` of HCLK. Each end reads the
+/// counter and the core's clock as one masked pair, so an interrupt
+/// cannot fall between them; 16 bits of count is 65 ms at 1 MHz and the
+/// gate is sized under it by the caller.
+uint32_t mco_count_hz(uint32_t gate_cycles) {
+    MeterTim::init();
+    (void)MeterTim::remap(0);
+    (void)MeterTim::configure({.prescaler = 0, .period = 0xFFFF});
+    (void)MeterTim::capture_channel(0, {.select = TimChannelSelect::direct,
+                                        .polarity = TimCapturePolarity::rising,
+                                        .prescaler = TimCapturePrescaler::every,
+                                        .filter = 0,
+                                        .enable = true});
+    (void)MeterTim::slave({.mode = TimSlaveMode::external_clock1, .trigger = TimTrigger::ti1});
+    MeterIn::input(PinPull::none);
+    MeterTim::set_count(0);
+    MeterTim::enable(true);
+    (void)delay_us(clock, 50);
+    uint32_t c0 = 0, t0 = 0, c1 = 0, t1 = 0;
+    {
+        P::CriticalSection cs;
+        c0 = MeterTim::count();
+        t0 = stk()->CNTL;
+    }
+    // The counter wraps once a tick, so the gate is accumulated poll by
+    // poll, a period folded in across each wrap; the last poll's
+    // position is where the closing pair takes over.
+    uint32_t last = t0;
+    uint32_t cycles = 0;
+    while (cycles < gate_cycles) {
+        const uint32_t now = stk()->CNTL;
+        cycles += stk_span(last, now);
+        last = now;
+    }
+    {
+        P::CriticalSection cs;
+        c1 = MeterTim::count();
+        t1 = stk()->CNTL;
+    }
+    cycles += stk_span(last, t1);
+    MeterTim::enable(false);
+    MeterIn::release();
+    const uint32_t edges = (c1 - c0) & 0xFFFFu;
+    return static_cast<uint32_t>(static_cast<uint64_t>(edges) * SysClock::hz() / cycles);
+}
+
+void mco_frequency() {
+    if (!mco_strapped()) {
+        print(serial, "  the pad's FREQUENCY: no strap from PA8 to PA6 on this board (driven "
+                      "both ways, PA6 did not follow) - not counted here; the CH32V203C8T6's "
+                      "board carries one", crlf);
+        bench.verdict("the frequency count is skipped and says why", true);
+        return;
+    }
+    // ON THE CRYSTAL'S TREE, so the core's counter is the crystal's too:
+    // the HSE counted against it is a ratio of one oscillator to itself,
+    // and the HSI against it is the HSI's own error.
+    const bool moved = go_to(xtal_144_rate) && rate_in_force(xtal_144_rate);
+    // 5 ms of HCLK: 40000 edges of an 8 MHz clock, inside the counter's
+    // sixteen bits.
+    constexpr uint32_t gate = 720'000u;
+    (void)Mco::init(McoSource::hse);
+    const uint32_t hse_hz = mco_count_hz(gate);
+    (void)Mco::init(McoSource::hsi);
+    const uint32_t hsi_hz = mco_count_hz(gate);
+    Mco::off();
+    (void)go_to(boot_rate);
+    const int32_t hsi_ppm = static_cast<int32_t>(
+        (static_cast<int64_t>(hsi_hz) - 8'000'000LL) * 1'000'000LL / 8'000'000LL);
+    print(serial, "  through the PA8-PA6 strap, TIM3 counting 5 ms of the crystal's tree: "
+                  "MCO = HSE reads ", hse_hz, " Hz, MCO = HSI reads ", hsi_hz, " Hz (",
+          hsi_ppm, " ppm)", crlf);
+    // THE BOUND for the HSE: the count is a whole number of edges (one
+    // in 40000, 25 ppm) and each end's masked pair is two loads apart
+    // (a few cycles of 720000) - 200 Hz and some; 250 Hz is the window.
+    bench.verdict("with MCO on the HSE the pad carries the crystal: 8 MHz to within one edge "
+                  "of the 5 ms gate (250 Hz), counted against a core clock made from it",
+                  moved && hse_hz + 250u >= 8'000'000u && hse_hz <= 8'000'000u + 250u);
+    // The HSI's own: within the datasheets' accuracy after calibration
+    // at 0..70 C (CH32V203 table 4-13: -1.0 to +1.6 %, CH32V303 table
+    // 4-14: -1.8 to +1.8 %) - the wider of the two.
+    bench.verdict("with MCO on the HSI the pad carries the internal oscillator, inside the "
+                  "datasheets' accuracy after calibration (-1.8 to +1.8 %)",
+                  hsi_ppm >= -18000 && hsi_ppm <= 18000);
+    print(serial, "  SYSCLK and PLL/2 are read back above and not counted: at the rates "
+                  "that make them they are 48 to 144 MHz, past both the pad's fastest class "
+                  "(50 MHz, the datasheets' I/O AC table) and what a timer clocked at HCLK "
+                  "can count of an outside edge", crlf);
+}
+
 void tg_mco() {
     bench.verdict("this package brings the output pad out", Mco::has_pad);
 
@@ -479,8 +615,122 @@ void tg_mco() {
     bench.verdict("off() takes the multiplexer to no clock and releases the pad",
                   Mco::source() == McoSource::none);
 
-    print(serial, "  what comes OUT of the pad is not measured here: it wants a "
-                  "counter, which arrives with the timers", crlf);
+    mco_frequency();
+}
+
+// ---------------------------------------------------------------------------
+// i - the ready interrupts of the other four roots
+// ---------------------------------------------------------------------------
+
+/// Arm one ready interrupt, run `start`, and wait (bounded, in kernel
+/// ticks) for the vector to have run: the flags the body found.
+template <typename Start, typename Ready>
+uint32_t ready_through_vector(uint32_t enable, Start start, Ready ready, uint32_t limit_ms,
+                              uint32_t& took_ms) {
+    Rcc::clear_interrupt_flags(rcc_intr_flags);
+    rcc_events = 0;
+    rcc_flags = 0;
+    Rcc::ready_interrupts(enable);
+    Pfic::clear_pending(Irq::rcc);
+    Pfic::enable(Irq::rcc);
+    const uint32_t t0 = Ticker::ticks();
+    start();
+    while ((rcc_events == 0u || !ready()) && Ticker::ticks() - t0 < limit_ms) {
+    }
+    took_ms = Ticker::ticks() - t0;
+    Rcc::ready_interrupts(0);
+    Pfic::disable(Irq::rcc);
+    return rcc_events == 0u ? 0u : rcc_flags;
+}
+
+void ti_ready() {
+    // THE LSI: stopped, then started with LSIRDYIE armed.
+    const bool lsi_was = Rcc::lsi_enabled();
+    Rcc::lsi_stop();
+    (void)wait_us([] { return !Rcc::lsi_ready(); }, 20'000);
+    uint32_t ms = 0;
+    const uint32_t lsi_f = ready_through_vector(
+        rcc_lsirdyie, [] { Rcc::lsi_enable(true); }, [] { return Rcc::lsi_ready(); }, 50, ms);
+    print(serial, "  LSI: the vector ran ", rcc_events, " time(s) within ", ms,
+          " ms, the body finding ", hex(lsi_f), crlf);
+    bench.verdict("the LSI's ready interrupt reaches the RCC vector with LSIRDYF standing, and "
+                  "the body leaves no flag behind",
+                  (lsi_f & rcc_lsirdyf) != 0u && (Rcc::interrupt_flags() & rcc_lsirdyf) == 0u);
+    if (!lsi_was) {
+        Rcc::lsi_stop();
+    }
+
+    // THE HSI: only stoppable under a tree that does not use it - the
+    // crystal's PLL - then started with HSIRDYIE armed.
+    const bool moved = go_to(xtal_144_rate) && rate_in_force(xtal_144_rate);
+    Rcc::hsi_stop();
+    (void)delay_us(clock, 100);
+    const bool hsi_off = !Rcc::hsi_ready();
+    // AND THE HSI RAISES NO READY FLAG, against 3.4.3 and 3.3.2 - the
+    // one root of the five that does not. Measured both ways on both
+    // parts: with HSIRDYIE armed the vector never runs, and unarmed the
+    // flag never stands after HSIRDY has risen, whether the oscillator
+    // was off for 100 us or for 20 ms.
+    const uint32_t hsi_f = ready_through_vector(
+        rcc_hsirdyie, [] { Rcc::hsi_enable(true); }, [] { return Rcc::hsi_ready(); }, 50, ms);
+    const uint32_t armed_runs = rcc_events;
+    Rcc::hsi_stop();
+    (void)delay_us(clock, 20'000);
+    const bool hsi_off_long = !Rcc::hsi_ready();
+    Rcc::clear_interrupt_flags(rcc_intr_flags);
+    Rcc::hsi_enable(true);
+    (void)wait_us([] { return Rcc::hsi_ready(); }, 1'000);
+    (void)delay_us(clock, 100);
+    const uint32_t unarmed_flags = Rcc::interrupt_flags();
+    print(serial, "  HSI: stopped under the crystal's PLL (", hsi_off ? "HSIRDY fell" : "HSIRDY STOOD",
+          "), restarted with HSIRDYIE armed: the vector ran ", armed_runs, " time(s) in ", ms,
+          " ms (body ", hex(hsi_f), "); off 20 ms (", hsi_off_long ? "HSIRDY fell" : "HSIRDY STOOD",
+          ") and restarted unarmed: HSIRDY ", Rcc::hsi_ready() ? "set" : "CLEAR", ", the flags ",
+          hex(unarmed_flags), crlf);
+    bench.verdict("the HSI's restart raises NO ready flag on this silicon, against 3.4.3: "
+                  "armed, the vector does not run; unarmed, HSIRDYF does not stand once HSIRDY "
+                  "has risen",
+                  moved && hsi_off && hsi_off_long && armed_runs == 0u &&
+                      Rcc::hsi_ready() && (unarmed_flags & rcc_hsirdyf) == 0u);
+
+    // THE PLL: off under the bare crystal, then started by the switch
+    // back to the boot rate with PLLRDYIE armed - the switch polls
+    // PLLRDY in CTLR, the vector reports the interrupt flag beside it.
+    const bool bare = go_to(xtal_bare_rate) && rate_in_force(xtal_bare_rate) && !Rcc::pll_ready();
+    const uint32_t pll_f = ready_through_vector(
+        rcc_pllrdyie, [] { (void)go_to(boot_rate); }, [] { return Rcc::pll_ready(); }, 50, ms);
+    print(serial, "  PLL: off under the bare crystal (", bare ? "PLLRDY clear" : "PLLRDY STOOD",
+          "), restarted by the switch back to the boot rate: the vector ran ", rcc_events,
+          " time(s), the body finding ", hex(pll_f), crlf);
+    bench.verdict("the PLL's ready interrupt reaches the RCC vector with PLLRDYF standing, and "
+                  "the boot rate is back",
+                  bare && (pll_f & rcc_pllrdyf) != 0u && rate_in_force(boot_rate));
+
+    // THE LSE: the backup domain's crystal, behind DBP. Stopped (3.4.9:
+    // LSERDY falls six LSE cycles later), then started with LSERDYIE
+    // armed, and its start-up - hundreds of milliseconds to seconds for a
+    // 32 kHz crystal - waited out in ticks. Left as it was found.
+    const bool locked_before = !RtcDomain::unlocked();
+    const bool door = RtcDomain::unlock(true);
+    const bool lse_was = RtcDomain::lse_enabled();
+    RtcDomain::lse_enable(false);
+    (void)wait_us([] { return !RtcDomain::lse_ready(); }, 20'000);
+    const bool lse_off = !RtcDomain::lse_ready();
+    const uint32_t lse_f = ready_through_vector(
+        rcc_lserdyie, [] { RtcDomain::lse_enable(true); }, [] { return RtcDomain::lse_ready(); },
+        5000, ms);
+    print(serial, "  LSE: stopped (", lse_off ? "LSERDY fell" : "LSERDY STOOD",
+          "), started: the vector ran ", rcc_events, " time(s), the crystal ready in ", ms,
+          " ms, the body finding ", hex(lse_f), crlf);
+    bench.verdict("the LSE's ready interrupt reaches the RCC vector with LSERDYF standing",
+                  door && lse_off && (lse_f & rcc_lserdyf) != 0u &&
+                      (Rcc::interrupt_flags() & rcc_lserdyf) == 0u);
+    if (!lse_was) {
+        RtcDomain::lse_enable(false);
+    }
+    if (locked_before) {
+        (void)RtcDomain::unlock(false);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -637,6 +887,7 @@ int main() {
     bench.letter('f', "the clock security system over a healthy crystal", tf_css);
     bench.letter('g', "the clock output on its pad", tg_mco);
     bench.letter('h', "the peripheral gates, one at a time", th_gates);
+    bench.letter('i', "the ready interrupts of the LSI, the HSI, the PLL and the LSE", ti_ready);
 
     if (serial_ok) {
         brio::print(serial, brio::crlf, "boot: clk=",

@@ -38,8 +38,8 @@
 // is what makes a linearity measurable with no wire.
 //
 // THE PADS. PA1 and PA2 (channels 1 and 2) are the two levels; PB11 is the
-// EXTI pad of letters g and m, toggled by the CPU; on the CH32V303 PA4 is
-// DAC1's output in letter l. NEVER TOUCHED: PA9/PA10 (the console),
+// EXTI pad of letters g, m and q, toggled by the CPU; on the CH32V303 PA4
+// is DAC1's output in letter l and PA5 DAC2's in letter s. NEVER TOUCHED: PA9/PA10 (the console),
 // PA13/PA14 (the debug port), PA11/PA12 (the USB pads), PC14/PC15 and
 // PD0/PD1 (the crystals), PA0 (the CH32V203 board's KEY) - and PB2, the
 // CH32V203 board's LED, left undriven, as in every suite of this target.
@@ -70,12 +70,24 @@
 //   i  DISCONTINUOUS MODE: a sequence of six stepped two at a time
 //   j  THE SAMPLER: util/analog_sampler.hpp walking three inputs at a
 //      software pace in a kernel, one AnalogSample published per input
+//   p  THE TAIL: the conversion's length beyond its sampling time at the
+//      four long codes, timed over 64 conversions landed by the DMA
+//   q  (two converters) ADC2 ALONE: letters e, f and g on the second
+//      converter's own registers - its injected group, its analog
+//      watchdog, its timer and EXTI triggers - the shared vector serving
+//      its flags
+//   r  JAUTO: one start converting a regular sequence of sixteen landed
+//      by the DMA, then the injected group of four with no start of its
+//      own, timed between the two ends
+//   s  (two converters) THE OTHER DUAL MODES: fast and slow interleaved
+//      on one input (the DAC's second channel at mid-scale on the
+//      CH32V303, the rail elsewhere) with both ends stamped, injected
+//      simultaneous, alternate trigger - and the alternation's turn that
+//      outlives the mode
 // and on the CH32V303 alone:
-//   k  THE SHORT SAMPLING TIMES AND THE TAIL: ADC_SMP_SEL asked of the
-//      die - the register is some lots' only, and a die without it keeps
-//      nothing written there - and the conversion's length beyond its
-//      sampling time at the four long codes, timed over 64 conversions
-//      landed by the DMA; the four short times where the die has them
+//   k  THE SHORT SAMPLING TIMES: ADC_SMP_SEL asked of the die - the
+//      register is some lots' only, and a die without it keeps nothing
+//      written there - and the four short times where the die has them
 //   l  THE DAC AS THE SOURCE: util/analog_sampler.hpp walking PA4 while
 //      DAC1 steps through thirty-one codes - monotonic, gain, offset and
 //      the residual against tables 4-43 and 4-45 - then the PGA's three
@@ -92,6 +104,7 @@
 //      conversion time against the 50 % clock's
 //
 // build: boards = v203c6,v203c8,v303vc
+// build: groups = abcdefg,hijpqrs
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -303,6 +316,10 @@ using DacKernel = Tenuto<P, DacConsumer, DacSampler>;
 enum class AdcMode : uint8_t { counting, sampling, dac_sampling };
 volatile AdcMode adc_mode = AdcMode::counting;
 
+/// Whether the vector serves ADC2 as well: set by the letters that run
+/// it as a lone instrument, so a converter whose gate is shut is never
+/// asked for flags.
+volatile bool adc2_live = false;
 volatile uint16_t eoc_calls = 0;
 volatile uint16_t jeoc_calls = 0;
 volatile uint16_t awd_calls = 0;
@@ -348,6 +365,7 @@ void all_off() {
     HighPin::release();
     LowPin::release();
     adc_mode = AdcMode::counting;
+    adc2_live = false;
     reset_counters();
 }
 
@@ -417,6 +435,16 @@ uint16_t scan_pair(uint8_t first, uint8_t second, AdcSampleTime t) {
 /// the caller asks for.
 bool bring_up(const AdcConfig& cfg = AdcConfig{.internal_sources = true}) {
     return Adc<1>::init(clock, cfg);
+}
+
+/// The same for either converter: ADC2 has no internal sources (TSVREFE
+/// is ADC1's, 12.3.3), so its configuration drops them.
+template <uint8_t n>
+bool bring_up_n(AdcConfig cfg = AdcConfig{.internal_sources = true}) {
+    if constexpr (n == 2u) {
+        cfg.internal_sources = false;
+    }
+    return Adc<n>::init(clock, cfg);
 }
 
 // ===========================================================================
@@ -784,44 +812,47 @@ void td_stream() {
 // ===========================================================================
 // e - the injected group
 // ===========================================================================
+template <uint8_t n = 1>
 void te_injected() {
+    using A = Adc<n>;
     all_off();
+    adc2_live = n == 2u;
     drive_levels();
-    (void)bring_up(AdcConfig{.scan = true, .internal_sources = true});
-    Adc<1>::sample_time_all(adc_sample_longest);
+    (void)bring_up_n<n>(AdcConfig{.scan = true, .internal_sources = true});
+    A::sample_time_all(adc_sample_longest);
 
     // The regular group converts the rail, continuously.
-    Adc<1>::select_channel(ch_high);
-    Adc<1>::continuous(true);
-    Adc<1>::clear_flags(AdcFlag::all);
-    Adc<1>::start();
+    A::select_channel(ch_high);
+    A::continuous(true);
+    A::clear_flags(AdcFlag::all);
+    A::start();
     wait_us(500);
-    const bool regular_running = Adc<1>::flag(AdcFlag::started);
+    const bool regular_running = A::flag(AdcFlag::started);
 
     // The injected group: two channels, one of them offset.
     const uint8_t injected[2] = {ch_high, ch_low};
-    const bool jseq = Adc<1>::injected_sequence(injected, 2);
+    const bool jseq = A::injected_sequence(injected, 2);
     constexpr uint16_t offset = 2000;
-    const bool joff = Adc<1>::injected_offset(0, offset);
-    (void)Adc<1>::injected_offset(1, 0);
+    const bool joff = A::injected_offset(0, offset);
+    (void)A::injected_offset(1, 0);
 
-    Adc<1>::clear_flags(AdcFlag::injected);
-    Pfic::enable(Adc<1>::irq());
-    Adc<1>::interrupts(Adc<1>::injected_interrupt, true);
+    A::clear_flags(AdcFlag::injected);
+    Pfic::enable(A::irq());
+    A::interrupts(A::injected_interrupt, true);
     reset_counters();
-    Adc<1>::injected_start();
+    A::injected_start();
     uint32_t spins = 1'000'000UL;
     while (jeoc_calls == 0u && spins-- != 0u) {
     }
     const uint16_t jeoc_seen = jeoc_calls;
-    const int16_t first = Adc<1>::injected_result(0);
-    const int16_t second = Adc<1>::injected_result(1);
-    const bool jstrt = Adc<1>::flag(AdcFlag::injected_started);
+    const int16_t first = A::injected_result(0);
+    const int16_t second = A::injected_result(1);
+    const bool jstrt = A::flag(AdcFlag::injected_started);
     wait_us(500);
-    const bool regular_still = Adc<1>::flag(AdcFlag::started);
+    const bool regular_still = A::flag(AdcFlag::started);
 
-    Adc<1>::continuous(false);
-    Adc<1>::interrupts(Adc<1>::injected_interrupt, false);
+    A::continuous(false);
+    A::interrupts(A::injected_interrupt, false);
 
     print(serial, "  the injected group: the rail less an offset of ", offset, " reads ", first,
           ", ground with no offset reads ", second, crlf);
@@ -848,56 +879,59 @@ void te_injected() {
 // ===========================================================================
 // f - the analog watchdog
 // ===========================================================================
+template <uint8_t n = 1>
 void tf_watchdog() {
+    using A = Adc<n>;
     all_off();
+    adc2_live = n == 2u;
     drive_levels();
-    (void)bring_up();
-    Adc<1>::sample_time_all(adc_sample_longest);
-    Pfic::enable(Adc<1>::irq());
+    (void)bring_up_n<n>();
+    A::sample_time_all(adc_sample_longest);
+    Pfic::enable(A::irq());
     reset_counters();
 
     // A window below the rail: the driven pad is outside it.
-    (void)Adc<1>::watchdog(AdcWatchdogConfig{
+    (void)A::watchdog(AdcWatchdogConfig{
         .low = 0, .high = 2000, .channel = ch_high, .interrupt = true});
-    Adc<1>::clear_flags(AdcFlag::watchdog);
-    Adc<1>::select_channel(ch_high);
-    (void)Adc<1>::read();
+    A::clear_flags(AdcFlag::watchdog);
+    A::select_channel(ch_high);
+    (void)A::read();
     const uint16_t above = awd_calls;
     const bool flag_above = awd_calls != 0u;
 
     // The same window around it: inside, so nothing fires.
-    Adc<1>::clear_flags(AdcFlag::watchdog);
+    A::clear_flags(AdcFlag::watchdog);
     reset_counters();
-    Adc<1>::watchdog_thresholds(2000, adc_max_count);
-    (void)Adc<1>::read();
-    (void)Adc<1>::read();
+    A::watchdog_thresholds(2000, adc_max_count);
+    (void)A::read();
+    (void)A::read();
     const bool quiet_inside = awd_calls == 0u;
 
     // The pad taken to ground by the port: now it is below the window.
     reset_counters();
     HighPin::output(false);
     wait_us(1000);
-    (void)Adc<1>::read();
+    (void)A::read();
     const bool flag_below = awd_calls != 0u;
-    const uint16_t low_reading = Adc<1>::result_counts();
+    const uint16_t low_reading = A::result_counts();
 
     // The channel select: guard channel 1 alone and convert channel 2,
     // which is outside the window and must raise nothing.
     reset_counters();
-    Adc<1>::clear_flags(AdcFlag::watchdog);
-    Adc<1>::select_channel(ch_low);
-    (void)Adc<1>::read();
-    (void)Adc<1>::read();
+    A::clear_flags(AdcFlag::watchdog);
+    A::select_channel(ch_low);
+    (void)A::read();
+    (void)A::read();
     const bool other_channel_quiet = awd_calls == 0u;
-    const uint8_t guarded = Adc<1>::watchdog_channel();
+    const uint8_t guarded = A::watchdog_channel();
 
     // The same channel with the watchdog widened to every channel.
     reset_counters();
-    Adc<1>::watchdog_off();
-    (void)Adc<1>::watchdog(
+    A::watchdog_off();
+    (void)A::watchdog(
         AdcWatchdogConfig{.low = 2000, .high = adc_max_count, .interrupt = true});
-    Adc<1>::clear_flags(AdcFlag::watchdog);
-    (void)Adc<1>::read();
+    A::clear_flags(AdcFlag::watchdog);
+    (void)A::read();
     const bool all_channels = awd_calls != 0u;
 
     print(serial, "  thresholds 0..2000 over the rail: the flag reached its handler ", above,
@@ -917,21 +951,24 @@ void tf_watchdog() {
     bench.verdict("and with the single-channel bit dropped, every regular channel is guarded",
                   all_channels);
 
-    Adc<1>::watchdog_off();
+    A::watchdog_off();
     all_off();
 }
 
 // ===========================================================================
 // g - the triggers
 // ===========================================================================
+template <uint8_t n = 1>
 void tg_triggers() {
+    using A = Adc<n>;
     all_off();
+    adc2_live = n == 2u;
     drive_levels();
-    (void)bring_up();
-    Adc<1>::sample_time(ch_high, AdcSampleTime::cycles28_5);
-    Adc<1>::select_channel(ch_high);
-    Pfic::enable(Adc<1>::irq());
-    Adc<1>::interrupts(Adc<1>::converted_interrupt, true);
+    (void)bring_up_n<n>();
+    A::sample_time(ch_high, AdcSampleTime::cycles28_5);
+    A::select_channel(ch_high);
+    Pfic::enable(A::irq());
+    A::interrupts(A::converted_interrupt, true);
 
     // A timer's TRGO at a known rate. TIM3 counts TIMxCLK, which this
     // tree makes 96 MHz (PB1 is divided, so its timers are doubled).
@@ -941,10 +978,10 @@ void tg_triggers() {
     Pacer::init();
     (void)Pacer::configure(TimConfig{.prescaler = psc, .period = arr - 1u});
     const bool master = Pacer::master(TimMasterMode::update);
-    Adc<1>::trigger(AdcTrigger::tim3_trgo);
+    A::trigger(AdcTrigger::tim3_trgo);
 
     reset_counters();
-    Adc<1>::clear_flags(AdcFlag::all);
+    A::clear_flags(AdcFlag::all);
     Pacer::enable(true);
     Stopwatch span;
     while (span.us() < 200'000UL) {
@@ -965,7 +1002,7 @@ void tg_triggers() {
     // TIM8's TRGO, which the CH32V303RC and VC can and letter m
     // measures; `exti11` is the spelling that clears that field. The pad
     // raising it is one of our own, toggled by the CPU.
-    Adc<1>::trigger(AdcTrigger::exti11);
+    A::trigger(AdcTrigger::exti11);
     ExtiPin::output(false);
     const bool selected = Exti::select(adc_regular_exti_line, 'B');
     (void)Exti::sense(adc_regular_exti_line, ExtiSense::rising);
@@ -1022,7 +1059,7 @@ void tg_triggers() {
                   "the handler ran for every edge and not one conversion started",
                   with_interrupt == 0u && exti_calls == edges);
 
-    Adc<1>::interrupts(Adc<1>::converted_interrupt, false);
+    A::interrupts(A::converted_interrupt, false);
     all_off();
 }
 
@@ -1310,6 +1347,453 @@ constexpr uint32_t conversion_half_x10(uint32_t core_cycles, uint16_t count) {
 }
 
 // ===========================================================================
+// p - the conversion's tail, on every part
+// ===========================================================================
+/// THE TAIL - what a conversion takes beyond its sampling time - at the
+/// four long codes, whatever the die: 64 back-to-back conversions landed
+/// by the DMA, timed by the core's counter. ADC1's, the converter with a
+/// request on every part.
+void tp_tail() {
+    using A = Adc<1>;
+    constexpr uint8_t n = 1;
+    all_off();
+    drive_levels();
+    (void)A::init(clock, AdcConfig{});
+    constexpr uint16_t count = tear_items;
+    // THE TAIL - what a conversion takes beyond its sampling time - at
+    // the four long codes, whatever the die: 64 back-to-back
+    // conversions landed by the DMA, timed by the core's counter.
+    constexpr AdcSampleTime longs[4] = {AdcSampleTime::cycles41_5, AdcSampleTime::cycles55_5,
+                                        AdcSampleTime::cycles71_5, AdcSampleTime::cycles239_5};
+    uint8_t long_right = 0;
+    uint8_t predicted = 0;
+    for (uint8_t i = 0; i < 4u; ++i) {
+        (void)A::sample_time(ch_high, longs[i]);
+        const uint32_t l = conversion_half_x10(time_conversions<n>(ch_high, count), count);
+        const uint32_t l_tail = l - adc_sample_half_cycles(longs[i]) * 10u;
+        print(serial, "  SMP code ", static_cast<uint8_t>(longs[i]), ": ", l / 20u, ".",
+              (l / 2u) % 10u, " cycles a conversion, a tail of ", l_tail / 20u, ".",
+              (l_tail / 2u) % 10u, " beyond the sampling time", crlf);
+        if (l > adc_sample_half_cycles(longs[i]) * 10u && l_tail >= 240u && l_tail <= 260u) {
+            ++long_right;
+        }
+        const uint32_t model = A::conversion_half_cycles(ch_high) * 10u;
+        if ((l > model ? l - model : model - l) <= 10u) {
+            ++predicted;
+        }
+    }
+    bench.verdict("a conversion is its sampling time plus 12.5 cycles at every long code - "
+                  "the datasheets' 14..252 cycles and not 12.2.2's 11",
+                  long_right == 4u);
+    bench.verdict("and the driver's conversion_half_cycles() predicts each of them to half a "
+                  "cycle",
+                  predicted == 4u);
+
+    A::sample_time_all(adc_sample_longest);
+    all_off();
+}
+
+// ===========================================================================
+// q - ADC2 as a lone instrument
+// ===========================================================================
+/// The second converter alone, independent of the first: its own injected
+/// group, its own analog watchdog and its own triggers - letters e, f and
+/// g run on ADC2's registers, the shared vector serving its flags.
+template <bool on = device::adc_count >= 2u>
+void tq_adc2_alone() {
+    if constexpr (on) {
+        print(serial, "  ADC2 ALONE: the injected group", crlf);
+        te_injected<2>();
+        print(serial, "  ADC2 ALONE: the analog watchdog", crlf);
+        tf_watchdog<2>();
+        print(serial, "  ADC2 ALONE: the triggers", crlf);
+        tg_triggers<2>();
+    }
+}
+
+// ===========================================================================
+// The poll both of the next letters stamp flags with
+// ===========================================================================
+/// Up to four rises of each of two flags after a start, stamped in core
+/// cycles from the start - each stamp late by at most one turn of the
+/// poll, which `turn` reports (the window's cycles over its turns). A
+/// flag seen is cleared by `take` so its next rise is a new event.
+struct Stamps {
+    uint32_t a[4];
+    uint32_t b[4];
+    uint8_t na;
+    uint8_t nb;
+    uint32_t turn;
+};
+
+template <typename Start, typename SeenA, typename SeenB, typename TakeA, typename TakeB>
+Stamps stamp_two(Start start, SeenA seen_a, SeenB seen_b, TakeA take_a, TakeB take_b,
+                 uint32_t window_cycles) {
+    Stamps r{};
+    P::CriticalSection cs;   // microseconds: no tick may stretch a turn
+    // The counter's period read once: the turn is the resolution, so the
+    // loop carries no load it can hoist.
+    const uint32_t period = stk()->CMPLR + 1u;
+    const uint32_t t0 = stk()->CNTL;
+    start();
+    uint32_t turns = 0;
+    uint32_t span = 0;
+    while (span < window_cycles) {
+        const uint32_t now = stk()->CNTL;
+        span = now >= t0 ? now - t0 : now + period - t0;
+        if (seen_a()) {
+            if (r.na < 4u) {
+                r.a[r.na] = span;
+                r.na = static_cast<uint8_t>(r.na + 1u);
+            }
+            take_a();
+        }
+        if (seen_b()) {
+            if (r.nb < 4u) {
+                r.b[r.nb] = span;
+                r.nb = static_cast<uint8_t>(r.nb + 1u);
+            }
+            take_b();
+        }
+        ++turns;
+    }
+    r.turn = turns == 0u ? 0u : (span + turns - 1u) / turns;
+    return r;
+}
+
+/// Core cycles an ADCCLK lasts on this suite's tree.
+constexpr uint32_t core_per_adcclk = SysClock::hz / SysClock::adc_hz;
+static_assert(core_per_adcclk == 8u);
+
+uint32_t gap(uint32_t a, uint32_t b) { return a > b ? a - b : b - a; }
+
+// ===========================================================================
+// r - JAUTO: the injected group after the regular one, from one start
+// ===========================================================================
+constexpr uint8_t jauto_regular = 16;
+constexpr uint8_t jauto_injected = 4;
+
+void tr_jauto() {
+    using A = Adc<1>;
+    using Ch = DmaChannel<A::dma_slot.controller, A::dma_slot.channel>;
+    all_off();
+    drive_levels();
+    const bool up = A::init(clock, AdcConfig{.scan = true, .auto_injected = true, .dma = true});
+    // 12.2.4: with JAUTO the injected group's external trigger must be
+    // off - the regular group's end is what starts it.
+    A::injected_trigger_enable(false);
+    constexpr AdcSampleTime t = AdcSampleTime::cycles28_5;
+    A::sample_time_all(t);
+    uint8_t order[jauto_regular];
+    for (uint8_t i = 0; i < jauto_regular; ++i) {
+        order[i] = (i % 2u) == 0u ? ch_high : ch_low;
+    }
+    const bool seq = A::sequence(order, jauto_regular);
+    const uint8_t jorder[jauto_injected] = {ch_low, ch_high, ch_low, ch_high};
+    const bool jseq = A::injected_sequence(jorder, jauto_injected);
+    for (uint8_t i = 0; i < jauto_injected; ++i) {
+        (void)A::injected_offset(i, 0);
+    }
+    for (uint8_t i = 0; i < jauto_regular; ++i) {
+        tear_dest[i] = 0xEEEEu;
+    }
+    Ch::stop();
+    (void)Ch::load(DmaTransfer{
+        .peripheral = A::data_address(),
+        .memory = const_cast<uint16_t*>(tear_dest),
+        .count = jauto_regular,
+        .config = {.direction = DmaDirection::peripheral_to_memory,
+                   .circular = false,
+                   .memory_to_memory = false,
+                   .peripheral_increment = false,
+                   .memory_increment = true,
+                   .peripheral_width = DmaWidth::half,
+                   .memory_width = DmaWidth::half,
+                   .priority = DmaPriority::very_high},
+    });
+    A::clear_flags(AdcFlag::all);
+    // ONE start, and the poll stamping EOC (the regular group's end) and
+    // JEOC (the injected group's) - 20 conversions of 28.5 + 12.5 cycles
+    // are 820 ADCCLK, 6560 core cycles; the window is half again.
+    const Stamps st = stamp_two([] { A::start(); }, [] { return Ch::flag(DmaFlag::complete); },
+                                [] { return A::flag(AdcFlag::injected); },
+                                [] { Ch::clear(DmaFlag::complete); },
+                                [] { A::clear_flags(AdcFlag::injected); }, 10'000u);
+    const bool eoc_standing = A::flag(AdcFlag::converted);
+    const bool dma_done = st.na == 1u;
+    Ch::stop();
+    uint8_t regular_right = 0;
+    for (uint8_t i = 0; i < jauto_regular; ++i) {
+        const uint16_t v = tear_dest[i];
+        const bool ok = (i % 2u) == 0u ? v >= 4000u : v <= 40u;
+        regular_right = static_cast<uint8_t>(regular_right + (ok ? 1u : 0u));
+    }
+    uint8_t injected_right = 0;
+    for (uint8_t i = 0; i < jauto_injected; ++i) {
+        const int16_t v = A::injected_result(i);
+        const bool ok = (i % 2u) == 0u ? (v >= -20 && v <= 40) : v >= 4000;
+        injected_right = static_cast<uint8_t>(injected_right + (ok ? 1u : 0u));
+    }
+    constexpr uint32_t conv = adc_conversion_half_cycles(t) * core_per_adcclk / 2u;   // 328
+    const uint32_t want_regular = jauto_regular * conv;
+    const uint32_t want_injected = jauto_injected * conv;
+    const uint32_t eoc = st.na != 0u ? st.a[0] : 0u;
+    const uint32_t jeoc = st.nb != 0u ? st.b[0] : 0u;
+    print(serial, "  one SWSTART: the DMA's last regular result ", eoc,
+          " core cycles after it, JEOC ", st.nb, "x, first ", jeoc, " (", jauto_regular, " + ",
+          jauto_injected, " conversions of ", conv, " core cycles: ", want_regular, " and ",
+          want_regular + want_injected, "); the poll's turn ", st.turn,
+          " cycles; EOC standing at the end: ", eoc_standing ? "yes" : "no", crlf);
+    print(serial, "  the DMA ", dma_done ? "took" : "did NOT take", " the ", jauto_regular,
+          " regular results, ", regular_right, " of them the level of their slot; ",
+          injected_right, " of ", jauto_injected, " injected results right", crlf);
+    bench.verdict("JAUTO configured: the regular sequence of sixteen and the injected one of "
+                  "four taken, the injected external trigger off",
+                  up && seq && jseq);
+    bench.verdict("ONE start converts all twenty: the sixteen regular results land by the DMA "
+                  "slot by slot, then the injected group's four - with no start of its own",
+                  dma_done && regular_right == jauto_regular &&
+                      injected_right == jauto_injected && st.na == 1u && st.nb == 1u);
+    // THE BOUND: every conversion is (Ts + 12.5) ADCCLK of one clock, so
+    // the injected group ends exactly four conversions after the regular
+    // one; each stamp is late by up to one turn of the poll, and the two
+    // flags rise on the same clock - so the spacing is right to within a
+    // turn and an ADCCLK.
+    bench.verdict("and the injected group follows the regular one at once: JEOC four "
+                  "conversions after the DMA took the last regular result, to within one "
+                  "turn of the poll and one ADCCLK",
+                  jeoc > eoc && gap(jeoc - eoc, want_injected) <= st.turn + core_per_adcclk);
+    A::injected_trigger_enable(true);
+    all_off();
+}
+
+// ===========================================================================
+// s - the interleaved, alternate-trigger and injected simultaneous modes
+// ===========================================================================
+/// The source both converters sample in the interleaved modes: on a part
+/// with a DAC its second channel at mid-scale on PA5 (input 5) - a known
+/// code behind a low impedance -, elsewhere the pad driven to the rail.
+template <bool has = device::has_dac, uint8_t ch = 2>
+uint8_t interleave_source_up() {
+    if constexpr (has) {
+        using D = DacUnit<has>;
+        D::init();
+        DacOut<ch>::claim();
+        (void)D::configure(ch, DacChannelConfig{});
+        (void)D::enable(ch, true);
+        (void)D::write(ch, 2048);
+        wait_us(20);
+        return DacOut<ch>::adc_channel;
+    } else {
+        return ch_high;
+    }
+}
+template <bool has = device::has_dac>
+void interleave_source_down() {
+    if constexpr (has) {
+        DacUnit<has>::release();
+    }
+}
+/// Whether a count is the source's: mid-scale within the DAC's and the
+/// converter's own errors on the part with a DAC (dac.md measured 13
+/// counts at mid-scale; 48 is that and the converter's table 4-29
+/// offset and gain), the rail elsewhere.
+template <bool has = device::has_dac>
+bool is_source(uint16_t v) {
+    if constexpr (has) {
+        return v + 48u >= 2048u && v <= 2048u + 48u;
+    } else {
+        return v >= 4000u;
+    }
+}
+
+template <bool on = device::adc_count >= 2u>
+void ts_dual_modes() {
+    if constexpr (on) {
+        using A1 = Adc<1>;
+        using A2 = Adc<2>;
+        all_off();
+        drive_levels();
+        const uint8_t src = interleave_source_up();
+        const bool up = A1::init(clock, AdcConfig{}) && A2::init(clock, AdcConfig{});
+        // Under 7 ADCCLK of sampling, the note under figure 12-8: the two
+        // converters' sampling of one channel must not overlap.
+        (void)A1::sample_time(src, AdcSampleTime::cycles1_5);
+        (void)A2::sample_time(src, AdcSampleTime::cycles1_5);
+        A1::select_channel(src);
+        A2::select_channel(src);
+        constexpr uint32_t conv = adc_conversion_half_cycles(AdcSampleTime::cycles1_5) *
+                                  core_per_adcclk / 2u;   // 14 ADCCLK, 112 core cycles
+
+        const auto run = [&](AdcDualMode m) -> Stamps {
+            (void)A1::dual(AdcDualMode::independent);
+            (void)A1::dual(m);
+            A1::clear_flags(AdcFlag::all);
+            A2::clear_flags(AdcFlag::all);
+            return stamp_two([] { A1::start(); }, [] { return A2::ready(); },
+                             [] { return A1::ready(); },
+                             [] { (void)A2::result(); }, [] { (void)A1::result(); },
+                             8u * conv);
+        };
+
+        // FAST INTERLEAVED (7): one trigger, ADC2 at once and ADC1 seven
+        // ADCCLK behind it.
+        const Stamps fast = run(AdcDualMode::fast_interleaved);
+        const uint32_t pair_fast = A1::data();
+        // SLOW INTERLEAVED (8): fourteen behind, and ADC2 again after 28.
+        const Stamps slow = run(AdcDualMode::slow_interleaved);
+        (void)A1::dual(AdcDualMode::independent);
+
+        const auto show = [](const char* name, const Stamps& st) {
+            print(serial, "  ", name, ": ADC2's EOC at");
+            for (uint8_t i = 0; i < st.na; ++i) {
+                print(serial, " ", st.a[i]);
+            }
+            print(serial, ", ADC1's at");
+            for (uint8_t i = 0; i < st.nb; ++i) {
+                print(serial, " ", st.b[i]);
+            }
+            print(serial, " core cycles after the start (turn ", st.turn, ")", crlf);
+        };
+        show("fast interleaved", fast);
+        show("slow interleaved", slow);
+        const uint16_t fast1 = static_cast<uint16_t>(pair_fast & adc_max_count);
+        const uint16_t fast2 = static_cast<uint16_t>((pair_fast >> 16) & adc_max_count);
+        print(serial, "  the source on input ", src, ": the fast pair read ", fast1, " (ADC1) and ",
+              fast2, " (ADC2)", crlf);
+        bench.verdict("both converters up and sampling one input under 7 ADCCLK", up);
+        // THE BOUND: both converters run on one ADCCLK, so the spacing of
+        // their ends is a whole number of its cycles; each stamp is late
+        // by up to one turn of the poll - so the measured spacing is the
+        // chapter's to within a turn.
+        // And the two modes told apart whatever the turn: each spacing
+        // nearer its own figure than the other mode's (the midpoint, 10.5
+        // ADCCLK).
+        constexpr uint32_t midpoint = 21u * core_per_adcclk / 2u;
+        bench.verdict("FAST INTERLEAVED: one trigger converts ADC2 first and ADC1 SEVEN ADCCLK "
+                      "after it (figure 12-8), to within one turn of the poll and nearer seven "
+                      "than fourteen",
+                      fast.na >= 1u && fast.nb >= 1u && fast.b[0] > fast.a[0] &&
+                          gap(fast.b[0] - fast.a[0], 7u * core_per_adcclk) <= fast.turn &&
+                          fast.b[0] - fast.a[0] < midpoint);
+        bench.verdict("and both converted the one input - the source's level in each half of "
+                      "the master's register",
+                      is_source(fast1) && is_source(fast2));
+        bench.verdict("SLOW INTERLEAVED: ADC1 FOURTEEN ADCCLK after ADC2 (figure 12-9), to "
+                      "within one turn and nearer fourteen than seven - the delay that tells "
+                      "the two modes apart",
+                      slow.na >= 1u && slow.nb >= 1u && slow.b[0] > slow.a[0] &&
+                          gap(slow.b[0] - slow.a[0], 14u * core_per_adcclk) <= slow.turn &&
+                          slow.b[0] - slow.a[0] > midpoint);
+        // Note 2 under figure 12-9: a new ADC2 start every 28 ADCCLK, with
+        // no CONT - so one trigger keeps the pair converting.
+        bench.verdict("and ONE trigger keeps it going: ADC2's next conversions 28 ADCCLK apart "
+                      "(note 2 under figure 12-9), to within one turn, with CONT clear",
+                      slow.na >= 3u &&
+                          gap(slow.a[1] - slow.a[0], 28u * core_per_adcclk) <= slow.turn &&
+                          gap(slow.a[2] - slow.a[1], 28u * core_per_adcclk) <= slow.turn);
+
+        // INJECTED SIMULTANEOUS (5) and ALTERNATE TRIGGER (9), on the
+        // injected groups: ADC1's the rail, ADC2's ground.
+        const uint8_t j1[1] = {ch_high};
+        const uint8_t j2[1] = {ch_low};
+        const auto groups_up = [&](bool one, bool two) {
+            if (one) {
+                (void)A1::init(clock, AdcConfig{});
+                (void)A1::injected_sequence(j1, 1);
+                (void)A1::injected_offset(0, 0);
+                (void)A1::sample_time(ch_high, AdcSampleTime::cycles28_5);
+            }
+            if (two) {
+                (void)A2::init(clock, AdcConfig{});
+                (void)A2::injected_sequence(j2, 1);
+                (void)A2::injected_offset(0, 0);
+                (void)A2::sample_time(ch_low, AdcSampleTime::cycles28_5);
+            }
+        };
+        /// One JSWSTART on the master, a wait four conversions long, and
+        /// which converter's JEOC rose: '1', '2', 'B' both, '-' neither.
+        const auto trigger = [](int16_t& r1, int16_t& r2) -> char {
+            A1::clear_flags(AdcFlag::all);
+            A2::clear_flags(AdcFlag::all);
+            A1::injected_start();
+            wait_us(20);
+            const bool f1 = A1::flag(AdcFlag::injected);
+            const bool f2 = A2::flag(AdcFlag::injected);
+            if (f1) {
+                r1 = A1::injected_result(0);
+            }
+            if (f2) {
+                r2 = A2::injected_result(0);
+            }
+            return f1 && f2 ? 'B' : f1 ? '1' : f2 ? '2' : '-';
+        };
+        const auto in_mode = [](AdcDualMode m) {
+            (void)A1::dual(AdcDualMode::independent);
+            (void)A1::dual(m);
+        };
+        groups_up(true, true);
+        int16_t s1 = 0;
+        int16_t s2 = 0;
+        in_mode(AdcDualMode::injected_simultaneous);
+        const char sim = trigger(s1, s2);
+        in_mode(AdcDualMode::alternate_trigger);
+        char who[4] = {'-', '-', '-', '-'};
+        int16_t v1 = 0;
+        int16_t v2 = 0;
+        for (uint8_t i = 0; i < 3u; ++i) {
+            who[i] = trigger(v1, v2);
+        }
+        // THE TURN OUTLIVES THE MODE. After an odd number of alternate
+        // triggers the next is ADC2's, and it stays so through DUALMOD =
+        // independent and into another dual mode: the master's JSWSTART
+        // then converts ADC2's group alone and stands, set, in ADC1's
+        // CTLR2 - measured; ADC1's own init() is what clears it (ADC2's
+        // is not), and an even count of alternate triggers leaves nothing.
+        in_mode(AdcDualMode::injected_simultaneous);
+        int16_t w1 = 0;
+        int16_t w2 = 0;
+        const char after = trigger(w1, w2);
+        const bool stuck = (A1::regs().CTLR2 & adc_jswstart) != 0u;
+        groups_up(false, true);
+        in_mode(AdcDualMode::injected_simultaneous);
+        const char after_adc2_init = trigger(w1, w2);
+        groups_up(true, false);
+        in_mode(AdcDualMode::injected_simultaneous);
+        const char after_adc1_init = trigger(w1, w2);
+        in_mode(AdcDualMode::alternate_trigger);
+        for (uint8_t i = 0; i < 2u; ++i) {
+            who[3] = trigger(w1, w2);
+        }
+        in_mode(AdcDualMode::injected_simultaneous);
+        const char after_even = trigger(w1, w2);
+        (void)A1::dual(AdcDualMode::independent);
+        print(serial, "  injected simultaneous: one JSWSTART ended in ", sim, " (the converter "
+                      "whose JEOC rose; B both), reading ", s1, " and ", s2, crlf);
+        print(serial, "  alternate trigger: three JSWSTARTs ended in ", who[0], ", ", who[1], ", ",
+              who[2], " - ADC1's group read ", v1, ", ADC2's ", v2, crlf);
+        print(serial, "  then injected simultaneous again: ", after, " with ADC1's JSWSTART ",
+              stuck ? "STANDING" : "clear", "; after ADC2's init() ", after_adc2_init,
+              ", after ADC1's ", after_adc1_init, "; after an EVEN count of alternate triggers ",
+              after_even, crlf);
+        bench.verdict("INJECTED SIMULTANEOUS: one trigger converts both injected groups",
+                      sim == 'B' && s1 >= 4000 && s2 >= -20 && s2 <= 40);
+        bench.verdict("ALTERNATE TRIGGER: the triggers go to ADC1's injected group, then ADC2's, "
+                      "then ADC1's again (figure 12-10), each group its own channel",
+                      who[0] == '1' && who[1] == '2' && who[2] == '1' && v1 >= 4000 &&
+                          v2 >= -20 && v2 <= 40);
+        bench.verdict("THE TURN OUTLIVES THE MODE: after an odd count of alternate triggers the "
+                      "next trigger in another mode converts ADC2 alone and ADC1's JSWSTART "
+                      "stands; ADC2's init() leaves it so, ADC1's clears it, and an even count "
+                      "leaves nothing",
+                      after == '2' && stuck && after_adc2_init == '-' && after_adc1_init == 'B' &&
+                          after_even == 'B');
+        interleave_source_down();
+        all_off();
+    }
+}
+
+// ===========================================================================
 // k - ADC_SMP_SEL: the four short sampling times
 // ===========================================================================
 template <uint8_t n = 1, bool on = adc_has_short_sampling>
@@ -1352,35 +1836,6 @@ void tk_short_sampling() {
                           "41.5..239.5 cycles in silence",
                           aux == 0u && !back.has_value() && kept && !all_took && all_kept);
         }
-
-        // THE TAIL - what a conversion takes beyond its sampling time - at
-        // the four long codes, whatever the die: 64 back-to-back
-        // conversions landed by the DMA, timed by the core's counter.
-        constexpr AdcSampleTime longs[4] = {AdcSampleTime::cycles41_5, AdcSampleTime::cycles55_5,
-                                            AdcSampleTime::cycles71_5, AdcSampleTime::cycles239_5};
-        uint8_t long_right = 0;
-        uint8_t predicted = 0;
-        for (uint8_t i = 0; i < 4u; ++i) {
-            (void)A::sample_time(ch_high, longs[i]);
-            const uint32_t l = conversion_half_x10(time_conversions<n>(ch_high, count), count);
-            const uint32_t l_tail = l - adc_sample_half_cycles(longs[i]) * 10u;
-            print(serial, "  SMP code ", static_cast<uint8_t>(longs[i]), ": ", l / 20u, ".",
-                  (l / 2u) % 10u, " cycles a conversion, a tail of ", l_tail / 20u, ".",
-                  (l_tail / 2u) % 10u, " beyond the sampling time", crlf);
-            if (l > adc_sample_half_cycles(longs[i]) * 10u && l_tail >= 240u && l_tail <= 260u) {
-                ++long_right;
-            }
-            const uint32_t model = A::conversion_half_cycles(ch_high) * 10u;
-            if ((l > model ? l - model : model - l) <= 10u) {
-                ++predicted;
-            }
-        }
-        bench.verdict("a conversion is its sampling time plus 12.5 cycles at every long code - "
-                      "the datasheets' 14..252 cycles and not 12.2.2's 11",
-                      long_right == 4u);
-        bench.verdict("and the driver's conversion_half_cycles() predicts each of them to half a "
-                      "cycle",
-                      predicted == 4u);
 
         if (took) {
             // The four short times, where the die has them.
@@ -1879,6 +2334,18 @@ void to_duty() {
 /// The CH32V303's five letters, registered where the part is one: a
 /// template, so the other series carries neither their code nor their
 /// prose.
+/// The letters that need ADC2: every part of the stratum has it but the
+/// CH32V203RB, whose one converter leaves them out of the menu.
+template <bool on = device::adc_count >= 2u>
+void register_two_converter_letters() {
+    if constexpr (on) {
+        bench.letter('q', "ADC2 alone: its injected group, its watchdog, its triggers",
+                     tq_adc2_alone<>);
+        bench.letter('s', "the interleaved, alternate-trigger and injected simultaneous modes",
+                     ts_dual_modes<>);
+    }
+}
+
 template <bool on = device::device_class == DeviceClass::v30x_d8>
 void register_v303_letters() {
     if constexpr (on) {
@@ -1922,6 +2389,25 @@ void banner() {
 
 }  // namespace
 
+/// What the vector counts of one converter's flags.
+template <uint8_t n>
+[[gnu::always_inline]] inline void count_hits() {
+    const uint32_t hit = brio::Adc<n>::isr();
+    if ((hit & brio::AdcFlag::converted) != 0u) {
+        eoc_calls = static_cast<uint16_t>(eoc_calls + 1u);
+        if (captured_count < 8u) {
+            captured[captured_count] = brio::Adc<n>::result_counts();
+            captured_count = static_cast<uint8_t>(captured_count + 1u);
+        }
+    }
+    if ((hit & brio::AdcFlag::injected) != 0u) {
+        jeoc_calls = static_cast<uint16_t>(jeoc_calls + 1u);
+    }
+    if ((hit & brio::AdcFlag::watchdog) != 0u) {
+        awd_calls = static_cast<uint16_t>(awd_calls + 1u);
+    }
+}
+
 // The one vector both converters report on. In the samplers' letters it
 // carries the result into a kernel; everywhere else it counts.
 BRIO_CH32_VECTOR(adc1_2_handler) {
@@ -1935,19 +2421,11 @@ BRIO_CH32_VECTOR(adc1_2_handler) {
     if (dac_sample_isr()) {
         return;
     }
-    const uint32_t hit = brio::Adc<1>::isr();
-    if ((hit & brio::AdcFlag::converted) != 0u) {
-        eoc_calls = static_cast<uint16_t>(eoc_calls + 1u);
-        if (captured_count < 8u) {
-            captured[captured_count] = brio::Adc<1>::result_counts();
-            captured_count = static_cast<uint8_t>(captured_count + 1u);
+    count_hits<1>();
+    if constexpr (brio::device::adc_count >= 2u) {
+        if (adc2_live) {
+            count_hits<2>();
         }
-    }
-    if ((hit & brio::AdcFlag::injected) != 0u) {
-        jeoc_calls = static_cast<uint16_t>(jeoc_calls + 1u);
-    }
-    if ((hit & brio::AdcFlag::watchdog) != 0u) {
-        awd_calls = static_cast<uint16_t>(awd_calls + 1u);
     }
 }
 
@@ -2001,6 +2479,9 @@ int main() {
     bench.letter('h', "the dual mode: two converters, one register", th_dual);
     bench.letter('i', "discontinuous mode: a sequence stepped by twos", ti_discontinuous);
     bench.letter('j', "the sampler walking three inputs in a kernel", tj_sampler);
+    bench.letter('p', "the conversion's tail at the four long sampling times", tp_tail);
+    register_two_converter_letters();
+    bench.letter('r', "JAUTO: twenty conversions from one start", tr_jauto);
     register_v303_letters();
 
     if (serial_ok) {

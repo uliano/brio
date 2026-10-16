@@ -380,7 +380,17 @@ struct Usbd {
         const uint16_t buffer = next_buffer_;
         next_buffer_ = static_cast<uint16_t>(next_buffer_ + size);
 
-        write_epr(n, static_cast<uint16_t>(n | eptype_code(type)));
+        // THE DIRECTION'S TOGGLE BACK TO DATA0, which a configuration
+        // promises the host (USB 2.0 9.4.5) and which nothing else here
+        // gives: the toggle bits survive a bus reset and a new
+        // configuration on this silicon - MEASURED, a reconnect after an
+        // odd count of packets left DTOG_RX at DATA1 and the host's first
+        // packet of the new configuration was ACKed and dropped as a
+        // repeat. The bit is written as it reads, which inverts a one.
+        const uint16_t epr = regs().EPR[n].R;
+        const uint16_t dtog = in ? static_cast<uint16_t>(epr & ep_dtog_tx)
+                                 : static_cast<uint16_t>(epr & ep_dtog_rx);
+        write_epr(n, static_cast<uint16_t>(n | eptype_code(type) | dtog));
         if (in) {
             tx_addr_[n] = buffer;
             pma(entry(n) + 0u) = buffer;
@@ -408,21 +418,68 @@ struct Usbd {
             rx_addr_[n] = 0;
             rx_size_[n] = 0;
             out_len_[n] = 0;
+            halted_tx_[n] = static_cast<uint8_t>(ep_stat_nak);
+            halted_rx_[n] = static_cast<uint8_t>(ep_stat_nak);
         }
         next_buffer_ = static_cast<uint16_t>(buffer_floor + 2u * max_packet);   // endpoint zero's two
     }
 
+    /**
+     * The halt of one direction. Endpoint zero's is the protocol stall a
+     * SETUP clears, and its release is NAK.
+     *
+     * ON A DATA ENDPOINT THE RELEASE GIVES BACK WHAT THE HALT TOOK, AT
+     * DATA0. The halt keeps the status it replaced, and the release - a
+     * host's CLEAR_FEATURE(ENDPOINT_HALT) - writes that status back with
+     * the toggle at DATA0, which USB 2.0 9.4.5 asks of every such clear
+     * (the host resets its own toggle with the same request). MEASURED,
+     * and the reason: a release to NAK left an endpoint the class had
+     * armed for a reception unarmed for good while the class went on
+     * counting it armed - the host's next packet NAKed until a reconnect
+     * - and the toggle left where the halt found it (DATA1 after one
+     * packet) made the endpoint drop the host's next DATA0 as a repeat.
+     * A packet armed for an IN before the halt is offered again, never
+     * having been taken.
+     */
     static void stall(uint8_t address, bool on) {
         const uint8_t n = static_cast<uint8_t>(address & 0x0Fu);
         if (n >= 8u) {
             return;
         }
-        const uint16_t stat = on ? ep_stat_stall : ep_stat_nak;
-        if ((address & 0x80u) != 0u) {
-            set_stat_tx(n, stat);
-        } else {
-            set_stat_rx(n, stat);
+        const bool in = (address & 0x80u) != 0u;
+        if (n == 0u) {
+            const uint16_t stat = on ? ep_stat_stall : ep_stat_nak;
+            if (in) {
+                set_stat_tx(n, stat);
+            } else {
+                set_stat_rx(n, stat);
+            }
+            return;
         }
+        const uint16_t epr = regs().EPR[n].R;
+        const uint16_t now = in ? static_cast<uint16_t>((epr & ep_stat_tx) >> 4)
+                                : static_cast<uint16_t>((epr & ep_stat_rx) >> 12);
+        uint8_t& kept = in ? halted_tx_[n] : halted_rx_[n];
+        if (on) {
+            if (now != ep_stat_stall) {
+                kept = static_cast<uint8_t>(now);
+            }
+            if (in) {
+                set_stat_tx(n, ep_stat_stall);
+            } else {
+                set_stat_rx(n, ep_stat_stall);
+            }
+            return;
+        }
+        const uint16_t back = now == ep_stat_stall ? kept : now;
+        kept = static_cast<uint8_t>(ep_stat_nak);
+        // The status and the toggle in one store: the toggle's bit is
+        // written as it reads, which INVERTS a one to zero and leaves a
+        // zero where it is (21.3.6).
+        const uint16_t keep = in ? static_cast<uint16_t>(ep_keep | ep_stat_tx | ep_dtog_tx)
+                                 : static_cast<uint16_t>(ep_keep | ep_stat_rx | ep_dtog_rx);
+        const uint16_t want = in ? static_cast<uint16_t>(back << 4) : static_cast<uint16_t>(back << 12);
+        regs().EPR[n].R = static_cast<uint16_t>(((epr & keep) ^ want) | ep_ctr_rx | ep_ctr_tx);
     }
 
     static bool stalled(uint8_t address) {
@@ -814,6 +871,11 @@ private:
     }
 
     static inline uint16_t next_buffer_ = buffer_floor;
+    /// The status each data endpoint's halt replaced (stall() above),
+    /// NAK - code 2 - when it holds none.
+    static_assert(ep_stat_nak == 2u);
+    static inline uint8_t halted_tx_[8]{2, 2, 2, 2, 2, 2, 2, 2};
+    static inline uint8_t halted_rx_[8]{2, 2, 2, 2, 2, 2, 2, 2};
     static inline uint16_t tx_addr_[8]{};
     static inline uint16_t rx_addr_[8]{};
     static inline uint16_t rx_size_[8]{};

@@ -73,6 +73,15 @@
 //   s  (host-assisted) SUSPEND AND RESUME: the bus idle long enough for
 //      the controller to report a suspend (Linux's autosuspend on the
 //      port's power/control), and the resume that ends it
+//   k  THE USB DIVIDER AT 1, no host action needed: the tree rebuilt with
+//      the PLL at 48 MHz on the crystal, USBPRE written /1, the device
+//      enumerated on it - then the suite's 96 MHz again
+//   h  (host-assisted) THE BULK HALT: the host's SET_FEATURE(ENDPOINT_HALT)
+//      on both bulk directions, its CLEAR_FEATURE, the toggles and the
+//      armed state after it, and one packet echoed after the clear
+//   x  (host-assisted) TWO PORTS IN THE WHOLE 512 BYTES: Usbd<512> under a
+//      device of two CDC ports, 464 bytes spent, port B's buffers above
+//      the 384 line, both echoing
 //   d  THE PACKET-MEMORY OVERFLOW: the counter this driver keeps -
 //      which counts from init() and stands still in a healthy run -
 //      and, with the host pouring, the finding staged on purpose with
@@ -80,7 +89,7 @@
 //      own size halfword read out of the packet memory to show what a
 //      lost packet leaves there and what the driver writes back
 //
-// The host end of y, w, v, s and d is
+// The host end of y, w, v, s, d, h and x is
 // private/tools/ch32vx03_usb_host.py, driven by hand one letter at a
 // time: START THE LETTER HERE FIRST, then run the script inside the
 // window the letter prints. The order matters for the two letters the
@@ -90,6 +99,7 @@
 // reports it as a skip.
 //
 // build: boards = v203c6,v203c8
+// build: groups = auywvsd,hkx
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -152,6 +162,37 @@ struct Descriptors {
 };
 using Device = UsbDevice<Usb, Descriptors, Port>;
 
+/// LETTER x's DEVICE: the whole 512 bytes of the shared memory - a program
+/// with no CAN may claim them (the file header of usb.hpp) - spent by TWO
+/// ports, the second on interfaces 2 and 3 with its notification on
+/// endpoint 3 and its bulk pair on 4. The table's 64, endpoint zero's 128
+/// and two ports' 136 each are 464 bytes: more than the 384 the default
+/// budget leaves, so the second port's buffers lie above that line. Its
+/// serial number differs so the host's by-id names do too.
+using Usb2 = Usbd<512>;
+using Port2A = UsbCdcAcm<Usb2, P>;
+using Port2B = UsbCdcAcm<Usb2, P, 2, 3, 4>;
+struct Descriptors2 {
+    static constexpr auto device = Descriptors::device;
+    static constexpr auto configuration =
+        usb_concat(usb_configuration_head(9 + Port2A::descriptor_bytes + Port2B::descriptor_bytes,
+                                          Port2A::interface_count + Port2B::interface_count),
+                   Port2A::descriptors, Port2B::descriptors);
+    static constexpr auto serial_number = usb_string_descriptor("bench2");
+    static std::span<const uint8_t> string(uint8_t index) {
+        return index == 3u ? std::span<const uint8_t>(serial_number) : Descriptors::string(index);
+    }
+};
+using Device2 = UsbDevice<Usb2, Descriptors2, Port2A, Port2B>;
+/// Which device the vector serves: letter x's while it runs.
+volatile bool two_ports = false;
+
+/// LETTER k's TREE: the PLL at 48 MHz on the crystal, which USBPRE takes
+/// whole - code 00, the divider no other letter of this target uses.
+using Clock48 = Clock<ClockSource::pll, 48'000'000, 8'000'000>;
+static_assert(Clock48::usb_divider == 1u && Clock48::usb_hz == usb_required_hz);
+static_assert(SysClock::usb_divider == 2u);
+
 // ---------------------------------------------------------------------------
 // The rulers
 // ---------------------------------------------------------------------------
@@ -205,6 +246,17 @@ const char* state_name(UsbDeviceState s) {
 uint32_t wait_configured(uint32_t budget_ms) {
     const uint32_t t0 = Ticker::millis();
     while (!Device::configured()) {
+        if (Ticker::millis() - t0 > budget_ms) {
+            return 0;
+        }
+    }
+    const uint32_t took = Ticker::millis() - t0;
+    return took == 0u ? 1u : took;
+}
+
+uint32_t wait_configured2(uint32_t budget_ms) {
+    const uint32_t t0 = Ticker::millis();
+    while (!Device2::configured()) {
         if (Ticker::millis() - t0 > budget_ms) {
             return 0;
         }
@@ -708,6 +760,245 @@ void td_overflow() {
                   after > 0u && Usb::overruns() == settled && Device::configured());
 }
 
+
+// =============================================================================
+// k - the USB divider at 1: the PLL at 48 MHz
+// =============================================================================
+void tk_divider() {
+    Device::stop();
+    Usb::release();
+    wait_ms(20);
+    while (!Serial::tx_idle()) {
+    }
+    const uint8_t code96 = Rcc::usb_prescaler();
+    // The whole tree again at 48 MHz, the console and the tick rebuilt on
+    // it, the controller brought up under it and the pull-up raised.
+    const bool tree = Clock48::init();
+    (void)Serial::init(Clock48{}, 115200);
+    (void)Ticker::init(Clock48{});
+    const uint8_t code48 = Rcc::usb_prescaler();
+    const bool up = Usb::init(Clock48{});
+    Device::start();
+    const uint32_t took = wait_configured(2000u);
+    const uint16_t f0 = Usb::frame();
+    wait_ms(10);
+    const uint16_t frames = static_cast<uint16_t>((Usb::frame() - f0) & 0x07FFu);
+    const uint32_t errors = Usb::errors();
+    const uint32_t overruns = Usb::overruns();
+    const bool port_ok = Port::configured() && Port::out_armed();
+    print(serial, "  the PLL at 48 MHz: USBPRE code ", code48, " (/",
+          usbpre_divider(code48), "; it was ", code96, ", /", usbpre_divider(code96),
+          ", at 96), configured in ", took, " ms, ", frames, " frames in 10 ms, errors ", errors,
+          ", overflows ", overruns, crlf);
+    // And back to the suite's own tree.
+    Device::stop();
+    Usb::release();
+    wait_ms(20);
+    while (!Serial::tx_idle()) {
+    }
+    (void)SysClock::init();
+    (void)Serial::init(clock, 115200);
+    (void)Ticker::init(clock);
+    (void)Usb::init(clock);
+    Device::start();
+    const uint32_t back = wait_configured(2000u);
+    print(serial, "  back at 96 MHz: USBPRE code ", Rcc::usb_prescaler(), ", configured in ", back,
+          " ms", crlf);
+    bench.verdict("at 96 MHz the divider is /2, and the tree at 48 MHz writes /1 - code 00 - "
+                  "before the controller's gate opens",
+                  code96 == 1u && tree && code48 == 0u && up);
+    bench.verdict("and on /1 the host enumerates the device to CONFIGURED, the port armed, a "
+                  "frame a millisecond, no bus error and no overflow",
+                  took != 0u && port_ok && frames >= 9u && frames <= 11u && errors == 0u &&
+                      overruns == 0u);
+    bench.verdict("and the suite's own tree is back, enumerated again", back != 0u);
+}
+
+// =============================================================================
+// h - the bulk halt, from the host (host: h)
+// =============================================================================
+/// The bulk pair's two STAT fields and two toggles, as the endpoint
+/// register holds them.
+struct EpView {
+    uint8_t stat_rx;
+    uint8_t stat_tx;
+    bool dtog_rx;
+    bool dtog_tx;
+};
+EpView ep_view() {
+    const uint16_t e = Usb::regs().EPR[data_endpoint].R;
+    return {static_cast<uint8_t>((e & ep_stat_rx) >> 12), static_cast<uint8_t>((e & ep_stat_tx) >> 4),
+            (e & ep_dtog_rx) != 0u, (e & ep_dtog_tx) != 0u};
+}
+const char* stat_name(uint8_t st) {
+    switch (st) {
+        case ep_stat_disabled: return "DISABLED";
+        case ep_stat_stall: return "STALL";
+        case ep_stat_nak: return "NAK";
+        default: return "VALID";
+    }
+}
+
+void th_halt() {
+    if (!need_host()) {
+        return;
+    }
+    settle_port();
+    constexpr uint8_t out_ep = usb_ep_out(data_endpoint);
+    constexpr uint8_t in_ep = usb_ep_in(data_endpoint);
+    const EpView before = ep_view();
+    print(serial, "  run the script's h now (this letter waits 15 s for the halt); every byte that "
+                  "arrives is echoed", crlf);
+    uint32_t halted_at = 0;
+    uint32_t cleared_at = 0;
+    EpView at_halt{};
+    EpView at_clear{};
+    uint32_t after_clear = 0;
+    const uint32_t t0 = Ticker::millis();
+    uint8_t buf[64];
+    while (Ticker::millis() - t0 < 20'000u) {
+        uint32_t n = 0;
+        while (n < sizeof buf && Port::read_byte(buf[n])) {
+            ++n;
+        }
+        for (uint32_t w = 0; w < n;) {
+            w += Port::write_bulk(std::span<const uint8_t>(buf + w, n - w));
+        }
+        if (cleared_at != 0u) {
+            after_clear += n;
+        }
+        const bool both = Usb::stalled(out_ep) && Usb::stalled(in_ep);
+        if (halted_at == 0u && both) {
+            halted_at = Ticker::millis() - t0;
+            at_halt = ep_view();
+        }
+        if (halted_at != 0u && cleared_at == 0u && !Usb::stalled(out_ep) && !Usb::stalled(in_ep)) {
+            cleared_at = Ticker::millis() - t0;
+            at_clear = ep_view();
+        }
+        if (cleared_at != 0u && Ticker::millis() - t0 > cleared_at + 3000u) {
+            break;
+        }
+    }
+    print(serial, "  before: OUT ", stat_name(before.stat_rx), " IN ", stat_name(before.stat_tx),
+          ", toggles RX ", before.dtog_rx ? 1 : 0, " TX ", before.dtog_tx ? 1 : 0, crlf);
+    print(serial, "  halted at ", halted_at, " ms: OUT ", stat_name(at_halt.stat_rx), " IN ",
+          stat_name(at_halt.stat_tx), ", toggles RX ", at_halt.dtog_rx ? 1 : 0, " TX ",
+          at_halt.dtog_tx ? 1 : 0, crlf);
+    print(serial, "  cleared at ", cleared_at, " ms: OUT ", stat_name(at_clear.stat_rx), " IN ",
+          stat_name(at_clear.stat_tx), ", toggles RX ", at_clear.dtog_rx ? 1 : 0, " TX ",
+          at_clear.dtog_tx ? 1 : 0, "; ", after_clear, " bytes arrived after it", crlf);
+    if (halted_at == 0u) {
+        print(serial, "  SKIPPED, and it passes as a skip: the host halted nothing - the host end "
+                      "is the bench's USB script, started in the window above.", crlf);
+        bench.verdict("the host letter is skipped and says so", true);
+    } else {
+        bench.verdict("the host's SET_FEATURE(ENDPOINT_HALT) halts each bulk direction: the "
+                      "stack hands it to stall() and both STAT fields read STALL",
+                      at_halt.stat_rx == ep_stat_stall && at_halt.stat_tx == ep_stat_stall);
+        bench.verdict("its CLEAR_FEATURE takes the halt off and puts BOTH toggles back to DATA0 "
+                      "(USB 2.0 9.4.5) - the host's own toggles are reset by the same request",
+                      cleared_at != 0u && !at_clear.dtog_rx && !at_clear.dtog_tx);
+        bench.verdict("and the OUT endpoint is armed again as it was before the halt: the packet "
+                      "the host writes after the clear arrives (the host judges its echo)",
+                      at_clear.stat_rx == before.stat_rx && after_clear == 64u);
+    }
+    // A fresh enumeration for the next letter: the host's driver was
+    // detached from this device instance by the script. AND THE TOGGLES
+    // IT STARTS WITH: the packet after the clear left RX at DATA1, and a
+    // new configuration must start it at DATA0 again (USB 2.0 9.4.5) -
+    // this silicon keeps the bits across a bus reset, so configure is
+    // what puts them back.
+    const EpView left = ep_view();
+    Device::stop();
+    wait_ms(500);
+    Device::start();
+    const uint32_t back = wait_configured(2000u);
+    const EpView fresh = ep_view();
+    print(serial, "  reconnected: configured in ", back, " ms; toggles RX ", left.dtog_rx ? 1 : 0,
+          " TX ", left.dtog_tx ? 1 : 0, " before it, RX ", fresh.dtog_rx ? 1 : 0, " TX ",
+          fresh.dtog_tx ? 1 : 0, " after", crlf);
+    bench.verdict("and a reconnect gives the host a fresh device whose configuration starts "
+                  "both bulk toggles at DATA0, whatever the last one left",
+                  back != 0u && !fresh.dtog_rx && !fresh.dtog_tx);
+}
+
+// =============================================================================
+// x - two ports in 512 bytes (host: x)
+// =============================================================================
+void tx_two_ports() {
+    Device::stop();
+    Usb::release();
+    wait_ms(500);
+    two_ports = true;
+    const bool up = Usb2::init(clock);
+    Device2::start();
+    const uint32_t took = wait_configured2(2000u);
+    const uint16_t used = Usb2::buffer_used();
+    const uint16_t total = static_cast<uint16_t>(Usb2::buffer_used() + Usb2::buffer_free());
+    print(serial, "  the two-port device: ", Descriptors2::configuration.size(),
+          " bytes of configuration, ", Descriptors2::configuration[4], " interfaces; configured in ",
+          took, " ms; the shared memory ", used, " of ", total, " bytes spent", crlf);
+    bench.verdict("TWO PORTS IN ONE DEVICE on the 512-byte budget: four interfaces enumerate to "
+                  "CONFIGURED, both ports armed",
+                  up && took != 0u && Descriptors2::configuration[4] == 4u &&
+                      Port2A::configured() && Port2B::configured() && Port2A::out_armed() &&
+                      Port2B::out_armed());
+    bench.verdict("and they spend 464 bytes of the 512 - past the 384 the default budget leaves, "
+                  "so port B's bulk buffers lie above that line",
+                  used == 464u && total == 512u);
+    print(serial, "  12 s: port A echoes every byte, port B every byte plus one - run the "
+                  "script's x now", crlf);
+    const uint32_t a0 = Port2A::rx_bytes();
+    const uint32_t b0 = Port2B::rx_bytes();
+    uint32_t a_echo = 0;
+    uint32_t b_echo = 0;
+    const uint32_t t0 = Ticker::millis();
+    uint8_t buf[64];
+    while (Ticker::millis() - t0 < 12'000u) {
+        uint32_t n = 0;
+        while (n < sizeof buf && Port2A::read_byte(buf[n])) {
+            ++n;
+        }
+        for (uint32_t w = 0; w < n;) {
+            w += Port2A::write_bulk(std::span<const uint8_t>(buf + w, n - w));
+        }
+        a_echo += n;
+        n = 0;
+        while (n < sizeof buf && Port2B::read_byte(buf[n])) {
+            buf[n] = static_cast<uint8_t>(buf[n] + 1u);
+            ++n;
+        }
+        for (uint32_t w = 0; w < n;) {
+            w += Port2B::write_bulk(std::span<const uint8_t>(buf + w, n - w));
+        }
+        b_echo += n;
+    }
+    print(serial, "  port A echoed ", a_echo, " of ", Port2A::rx_bytes() - a0, ", port B ", b_echo,
+          " of ", Port2B::rx_bytes() - b0, "; ring overruns ", Port2A::rx_overruns(), " / ",
+          Port2B::rx_overruns(), ", bus errors ", Usb2::errors(), ", overflows ",
+          Usb2::overruns(), crlf);
+    if (a_echo == 0u && b_echo == 0u) {
+        print(serial, "  SKIPPED, and it passes as a skip: the host wrote neither port", crlf);
+        bench.verdict("the host letter is skipped and says so", true);
+    } else {
+        bench.verdict("each port carried its own stream, port B's through the memory above 384: "
+                      "every byte received was echoed, no overrun, no bus error, no overflow (the "
+                      "host judges the bytes)",
+                      a_echo != 0u && b_echo != 0u && Port2A::rx_bytes() - a0 == a_echo &&
+                          Port2B::rx_bytes() - b0 == b_echo && Port2A::rx_overruns() == 0u &&
+                          Port2B::rx_overruns() == 0u && Usb2::errors() == 0u &&
+                          Usb2::overruns() == 0u);
+    }
+    Device2::stop();
+    Usb2::release();
+    wait_ms(500);
+    two_ports = false;
+    (void)Usb::init(clock);
+    Device::start();
+    const uint32_t back = wait_configured(2000u);
+    bench.verdict("and the one-port device on the default budget enumerates again", back != 0u);
+}
 // ===========================================================================
 // The menu
 // ===========================================================================
@@ -731,7 +1022,17 @@ BRIO_CH32_VECTOR(usart1_handler) { (void)Serial::isr(); }
 // single-buffered device arrives on; the high-priority one, shared with
 // the CAN's transmit, belongs to the double-buffered and isochronous
 // endpoints this driver does not use.
-BRIO_CH32_VECTOR(usb_lp_can1_rx0_handler) { Device::isr(); }
+BRIO_CH32_VECTOR(usb_lp_can1_rx0_handler) {
+    // Letter x's device only in an image that carries letter x: on the
+    // 32 KB tier's group images the rest never links it.
+    if constexpr (brio::selection_carries(brio::test_letters, 'x')) {
+        if (two_ports) {
+            Device2::isr();
+            return;
+        }
+    }
+    Device::isr();
+}
 
 int main() {
     const bool clock_ok = SysClock::init();
@@ -751,6 +1052,9 @@ int main() {
     bench.letter('s', "suspend and resume (host-assisted)", ts_suspend, false);
     bench.letter('d', "the packet-memory overflow counter, and the sleep that fills it",
                  td_overflow);
+    bench.letter('k', "the USB divider at 1: the PLL at 48 MHz", tk_divider);
+    bench.letter('h', "the bulk halt from the host (host-assisted)", th_halt, false);
+    bench.letter('x', "two ports in the whole 512 bytes (host-assisted)", tx_two_ports, false);
 
     if (serial_ok) {
         print(serial, crlf, "boot: clk=", clock_ok ? "XT96" : "FAILED",

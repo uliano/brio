@@ -88,6 +88,25 @@ The endpoint TYPE codes are the chapter's and not the descriptor's
 (bulk is 00 here and 10 on the wire), which is a translation the driver
 owns so that nothing above it has to know.
 
+### The toggles outlive a bus reset, and a halt's release is the driver's
+
+THE TWO DTOG BITS SURVIVE A BUS RESET AND A NEW CONFIGURATION on this
+silicon - measured: a reconnect after an odd count of packets left
+DTOG_RX at DATA1, and the host's first packet of the new configuration,
+sent as DATA0, was acknowledged and dropped as a repeat. USB 2.0 9.4.5
+gives every configured endpoint DATA0, so `configure_endpoint()` writes
+the direction's toggle back to zero (the bit written as it reads, which
+inverts a one).
+
+A host's CLEAR_FEATURE(ENDPOINT_HALT) asks the same of the halted
+endpoint, and on a data endpoint `stall(address, false)` does more: it
+writes back the STATUS the halt replaced, at DATA0. A reception the class
+had armed before the halt is armed again - released to NAK it was lost
+for good while the class went on counting it armed, the host's next
+packet NAKed until a reconnect (measured) - and a packet armed for an IN
+is offered again, never having been taken. Endpoint zero's halt is the
+protocol stall a SETUP clears, released to NAK as before.
+
 ### The pads are GPIO pads, and that is nowhere in the chapter
 
 D- and D+ are PA11 and PA12, and the block reaches them THROUGH PORT A.
@@ -321,7 +340,7 @@ it is written in.
 
 Measured on a CH32V203C8T6 with the board's USB-C in a Linux host, the
 core on the board's 8 MHz crystal through the PLL at 96 MHz with the
-USB fed 48. The reference suite is `test_vx03_usb`, whose console is
+USB fed 48 - and, in letter `k`, at 48 MHz with USBPRE at /1. The reference suite is `test_vx03_usb`, whose console is
 the probe's UART because the connector is the thing under test and
 whose host-assisted letters have a pyserial script at the other end;
 beside it two apparatus programs, the console over a CDC ACM port (the
@@ -393,6 +412,31 @@ the platform's WFE idle on command.
   the other it takes 923 kB in 2 s (461 KB/s) with no ring overrun,
   because the OUT endpoint is armed only while a whole packet fits and
   USB's own NAK is the flow control.
+- **THE DIVIDER AT 1** (letter `k`, ten runs): the tree rebuilt with the
+  PLL at 48 MHz on the crystal writes USBPRE code 00 (/1; /2 at the
+  suite's 96 MHz) before the gate opens, and the host enumerates the
+  device in 612 to 647 ms, nine or ten frames in 10 ms, no bus error, no
+  overflow - then the 96 MHz tree and an enumeration again.
+- **TWO PORTS IN THE WHOLE 512 BYTES** (letter `x`, ten runs): `Usbd<512>`
+  under one device of two CDC ports - four interfaces, a 125-byte
+  configuration - spends 464 bytes, the second port's bulk buffers lying
+  above the 384 the default budget leaves; twelve seconds of echo on
+  each port (port B adding one to every byte) carried some 1.7 MB each
+  way, byte-exact at the host, no ring overrun, no bus error, no
+  overflow.
+- **THE BULK HALT FROM THE HOST** (letter `h`, ten runs, the host's
+  libusb with cdc-acm detached): SET_FEATURE(ENDPOINT_HALT) on the bulk
+  OUT and IN set both STAT fields to STALL, GET_STATUS read 1, and a
+  write and a read each met a STALL handshake; CLEAR_FEATURE put both
+  toggles back to DATA0 (they stood at DATA1 after one echoed packet),
+  the OUT endpoint VALID as before the halt, and the packet the host
+  wrote next came back exact - after the zero-length packet the device
+  had armed before the halt, offered again first. Before the driver's
+  release wrote that status back, the same clear left both toggles at
+  DATA1 and the OUT endpoint at NAK, and the host's next packet was
+  never taken. The reconnect that ends the letter finds the toggles a
+  new configuration starts with at DATA0 every time, the post-clear
+  packet having left DTOG_RX at DATA1 behind it.
 - **THE LINE CODING IS REPORTED AND NOT OBEYED.** A host opening the
   port at 19200 7E2 with DTR and RTS up is read back as 19200/7/even/2
   with both lines raised, while this console - a real UART at its own
@@ -432,21 +476,13 @@ Driver gaps, each with its reason:
 - **The 1-wire (single-ended) mode of CNTR**, which the manual gives to
   another family's lot numbers, and the low-speed bit beside the
   pull-up in EXTEN: this stratum is a full-speed device.
-- **A second class, or a second port in one device.** The stack routes
-  by interface and endpoint and the descriptors are the application's
-  to glue, so nothing here is missing; it is born with the first
-  program that wants two ttyACM or a class that is not a serial port.
+- **A class that is not a serial port.** The stack routes by interface
+  and endpoint and the descriptors are the application's to glue (two
+  ports of one device are measured above), so nothing here is missing;
+  it is born with the first program that wants another class.
 
 Implemented but not bench-verified, each with what would measure it:
 
-- **The endpoint halt.** `stall()` and `stalled()` are exercised on
-  endpoint zero by every enumeration that answers a request the device
-  has not got; a host that halts and clears a BULK endpoint is what
-  would measure them there.
-- **A budget other than the default.** `Usbd<512>` and `Usbd<128>`
-  compile and the refusal above 512 is a compile error; what would
-  measure the larger one is an endpoint set that asks for more than the
-  384 bytes a CDC port leaves room in.
 - **The eight parts other than the CH32V203C8.** The block is a part
   fact only in its presence (`device::has_usbd`), the whole stratum
   compiles for all nine both ways the hardware prologue can be built

@@ -379,6 +379,15 @@ board.
   RTCCLK is 62500 Hz and THIS DIE DIVIDES THE CRYSTAL BY 128. A second
   domain reset was needed to put the crystal back, RTCSEL being
   one-way.
+- **The LSI as RTCCLK** (letter `w` again, one more domain reset): the
+  RC started by the program, RTCSEL taken on it, a tick asked for at one
+  hertz at the part's typical 39 kHz, and five of them timed against the
+  core's crystal-rooted counter: the CH32V203C8T6's LSI at **38 811 to
+  38 818 Hz** and the CH32V303VCT6's at **36 954 to 36 961 Hz** in ten
+  runs each (both dies divide the HSE by 128 too) - the same rates the
+  independent watchdog implies on each die within its coarser window
+  ([watchdog.md](watchdog.md)), and inside the rated 25 to 60 kHz,
+  which is all the verdict holds the RC to.
 - **Across a system reset** (letter `v`, reboots): the ten data
   registers read exactly what was written, the crystal, RTCSEL, RTCEN
   and the counter all came through, and only the interrupt enables were
@@ -424,11 +433,6 @@ Implemented but not bench-verified, each with what would measure it:
   BKP_DATAR11..42, under two patterns; it is measured on the
   CH32V303VCT6 (above) and what would measure it on this part is a board
   with it.
-- **The LSI as RTCCLK.** The third source is selected by the same verb
-  and the watchdog chapter has measured that oscillator at 38.8 kHz on
-  the CH32V203C8T6; what would measure this path is a run with RTCSEL on
-  the LSI, which costs a domain reset the suite spends on the HSE
-  instead.
 - **The pad's two outputs on the pad.** CCO and the alarm/second pulse
   are written and read back in BKP_OCTLR, and refused where the chapter
   refuses them; what would measure the waveform is a timer capturing
