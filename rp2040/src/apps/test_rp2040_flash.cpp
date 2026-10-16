@@ -11,7 +11,7 @@
 // (util/testbench.hpp). It is a REFERENCE test.
 //
 // NOTHING TO WIRE. GP0/GP1 are the console's, GP25 the LED. Every
-// letter but a and d writes flash, so the counts are kept small on
+// letter but a, d and g writes flash, so the counts are kept small on
 // purpose: a run of `z` costs a dozen sector erases out of the chip's
 // endurance.
 //
@@ -41,10 +41,23 @@
 //   f  NvJournal in the attic: typed save and load, an overwrite, a
 //      collection, a re-mount that holds - and the panic reserve
 //      (save_reserved() with no erase)
+//   g  THE CACHE'S TWO SWITCHES: ERR_BADWRITE - a write to the
+//      uncached alias dropped in silence with it clear, a bus fault
+//      (caught by this suite's HardFault body, which steps over the
+//      store) with it set, the flash unchanged either way; POWER_DOWN -
+//      EN forced clear, no hit while the image runs on from the flash,
+//      the cache-as-SRAM refused with a bus fault, and the data
+//      memories' contents kept across it
 //
 //   w  (by name only, NOT in z) WIPE the storage partition: the 64 KB
 //      from the floor to the top erased in one run (the 64 KB block
 //      command), timed, so the next run starts from virgin flash.
+//   x  (by name only, NOT in z) A RUN ACROSS THE 64 KB BOUNDARY: the
+//      sector below the floor and the whole partition erased in one
+//      run - the bootrom's sector command on the unaligned end, its
+//      block command on the aligned block - with a marker a sector
+//      lower kept. It wipes the partition and touches the two sectors
+//      below the floor, which the image never reaches (judged first).
 //
 // build: boards = pico,weact2040
 // build: monitor_speed = 115200
@@ -101,6 +114,26 @@ uint8_t page_buf[Flash::page_size];
 uint8_t got_buf[Flash::page_size];
 
 uint32_t us_now() { return Timer::now_low(); }
+
+// The HardFault body's hand-over: a fault expected by a letter is
+// counted and stepped over (the faulting instruction is a 16-bit store
+// or load, the "l" constraint below); any other spins, as the startup's
+// default does.
+volatile bool fault_expected = false;
+volatile uint32_t faults_taken = 0;
+volatile uint32_t fault_pc = 0;
+
+/// One word stored with a 16-bit STR (low registers, no offset), so the
+/// HardFault body may step over it by two bytes.
+[[gnu::always_inline]] inline void store16(uint32_t addr, uint32_t v) {
+    __asm__ volatile("str %1, [%0]" ::"l"(addr), "l"(v) : "memory");
+}
+/// One word loaded with a 16-bit LDR.
+[[gnu::always_inline]] inline uint32_t load16(uint32_t addr) {
+    uint32_t v = 0;
+    __asm__ volatile("ldr %0, [%1]" : "=l"(v) : "l"(addr) : "memory");
+    return v;
+}
 
 /// Does the range read `value` through the alias past the cache?
 bool range_is(uint32_t addr, uint32_t bytes, uint8_t value) {
@@ -448,6 +481,146 @@ void tf_journal() {
 // =============================================================================
 // w - wipe the storage (outside z)
 // =============================================================================
+// =============================================================================
+// g - the cache's two switches
+// =============================================================================
+/// The cache's data memory as SRAM (datasheet 2.2's address map,
+/// XIP_SRAM_BASE; 2.6.3.2): reachable only with the cache disabled and
+/// powered up.
+constexpr uint32_t xip_sram_base = 0x1500'0000u;
+constexpr uint32_t xip_sram_bytes = 16u * 1024u;
+
+void tg_switches() {
+    const uint32_t cell = QspiFlashPartition::storage_base + 3u * Flash::sector_size;
+    const bool bad_write_at_entry = Xip::faults_on_bad_write();
+    const uint32_t before = *reinterpret_cast<const volatile uint32_t*>(Flash::uncached_address(cell));
+    const uint32_t alias = xip_nocache_noalloc_base + cell;
+
+    // ERR_BADWRITE clear: the store is dropped, nothing faults.
+    Xip::fault_on_bad_write(false);
+    faults_taken = 0;
+    store16(alias, ~before);
+    const uint32_t quiet_faults = faults_taken;
+    const uint32_t after_quiet = *reinterpret_cast<const volatile uint32_t*>(Flash::uncached_address(cell));
+    // ERR_BADWRITE set: the same store faults, and is stepped over.
+    Xip::fault_on_bad_write(true);
+    fault_expected = true;
+    store16(alias, ~before);
+    fault_expected = false;
+    const uint32_t loud_faults = faults_taken;
+    const uint32_t after_loud = *reinterpret_cast<const volatile uint32_t*>(Flash::uncached_address(cell));
+    Xip::fault_on_bad_write(bad_write_at_entry);
+    print(serial, "  ERR_BADWRITE at entry ", bad_write_at_entry, " (reset value 1); a write to the uncached alias: cleared -> ",
+          quiet_faults, " faults, set -> ", loud_faults, " fault(s) at pc ", hex(fault_pc), "; the word ", hex(before), " -> ",
+          hex(after_quiet), " -> ", hex(after_loud), crlf);
+    bench.verdict("ERR_BADWRITE: a write to a non-cached alias is dropped in silence when clear and is a bus fault when set "
+                  "(one HardFault, stepped over); the flash word unchanged either way",
+                  quiet_faults == 0u && loud_faults == 1u && after_quiet == before && after_loud == before);
+
+    // POWER_DOWN. The data memory first written as SRAM (the cache
+    // disabled), then the memories powered down: EN forced clear, the
+    // image running on from the flash with no hit, the SRAM refused.
+    // Back up, the pattern read again - kept - and the tags FLUSHED
+    // before the cache is enabled, because the data memory no longer
+    // holds what they describe.
+    const uint32_t* data = reinterpret_cast<const uint32_t*>(Flash::address(QspiFlashPartition::storage_base));
+    const uint32_t* truth = reinterpret_cast<const uint32_t*>(Flash::uncached_address(QspiFlashPartition::storage_base));
+    Xip::enable(false);
+    // With EN clear alone, for the record: what the counters see.
+    Xip::reset_counters();
+    bool off_ok = true;
+    for (uint32_t i = 0; i < 256u; ++i) {
+        off_ok = off_ok && data[i] == truth[i];
+    }
+    const uint32_t off_hits = Xip::hits();
+    const uint32_t off_acc = Xip::accesses();
+    for (uint32_t i = 0; i < xip_sram_bytes / 4u; i += 64u) {
+        store16(xip_sram_base + 4u * i, 0xC0DE'0000u + i);
+    }
+    Xip::power_down(true);
+    const bool down = Xip::powered_down();
+    const bool en_down = Xip::enabled();
+    Xip::reset_counters();
+    bool reads_ok = true;
+    for (uint32_t i = 0; i < 256u; ++i) {
+        reads_ok = reads_ok && data[i] == truth[i];
+    }
+    const uint32_t down_hits = Xip::hits();
+    const uint32_t down_acc = Xip::accesses();
+    faults_taken = 0;
+    fault_expected = true;
+    (void)load16(xip_sram_base);
+    fault_expected = false;
+    const uint32_t sram_faults = faults_taken;
+    Xip::power_down(false);
+    uint32_t kept = 0;
+    for (uint32_t i = 0; i < xip_sram_bytes / 4u; i += 64u) {
+        if (load16(xip_sram_base + 4u * i) == 0xC0DE'0000u + i) {
+            ++kept;
+        }
+    }
+    Xip::flush();
+    Xip::enable(true);
+    Xip::reset_counters();
+    bool warm_ok = true;
+    for (uint32_t i = 0; i < 256u; ++i) {
+        warm_ok = warm_ok && data[i] == truth[i];
+    }
+    const uint32_t up_hits = Xip::hits();
+    print(serial, "  EN clear alone: 256 words read with ", off_hits, " hits of ", off_acc, " accesses counted, exact ", off_ok, crlf);
+    print(serial, "  POWER_DOWN: set ", down, ", EN read ", en_down, "; 256 words read with ", down_hits, " hits of ", down_acc,
+          " accesses, exact ", reads_ok, "; the SRAM read gave ", sram_faults, " fault(s); ", kept, " of ",
+          xip_sram_bytes / 256u, " SRAM words kept; after the flush and EN: ", up_hits, " hits, exact ", warm_ok, crlf);
+    // The counters count the cache's own lookups: with EN clear (alone
+    // or forced by POWER_DOWN) an access goes "straight to the flash,
+    // without querying the cache" (2.6.3's CTRL.EN) and neither counter
+    // moves - measured, the register's "each XIP access" read as each
+    // lookup. So the judgement is the hit counter at zero and the words.
+    bench.verdict("POWER_DOWN forces EN clear: the image runs on from the flash with no hit, every word read exact",
+                  down && !en_down && down_hits == 0u && reads_ok && off_hits == 0u && off_ok);
+    bench.verdict("... the cache-as-SRAM answers a bus fault while powered down, and its contents are kept across it",
+                  sram_faults == 1u && kept == xip_sram_bytes / 256u);
+    bench.verdict("... and, the tags flushed and EN set, the cache serves again", Xip::enabled() && !Xip::powered_down() &&
+                                                                                     up_hits > 0u && warm_ok);
+}
+
+// =============================================================================
+// x - a run across the 64 KB boundary
+// =============================================================================
+void tx_boundary() {
+    constexpr uint32_t floor = QspiFlashPartition::storage_base;
+    static_assert(floor % Flash::block_size == 0u, "the partition starts on a 64 KB block");
+    const uint32_t below = floor - Flash::sector_size;        // the run's unaligned end
+    const uint32_t keeper = floor - 2u * Flash::sector_size;  // outside the run, kept
+    const uint32_t bytes = QspiFlashPartition::storage_end - below;
+    // The image never reaches these two sectors: both read erased (or
+    // the keeper's own marker, left by an earlier run) before anything.
+    const bool free_below = range_is(below, Flash::sector_size, 0xFF) &&
+                            (range_is(keeper, Flash::sector_size, 0xFF) || range_is(keeper, Flash::page_size, 0x5A));
+    if (!free_below) {
+        bench.verdict("the two sectors below the floor are free (refused: the image or data is there)", false);
+        return;
+    }
+    for (uint32_t i = 0; i < Flash::page_size; ++i) {
+        page_buf[i] = 0x5Au;
+    }
+    bool marked = (range_is(keeper, Flash::page_size, 0x5A) || (Flash::erase_sector(keeper) && Flash::program(keeper, page_buf)));
+    marked = marked && Flash::program(below, page_buf) && Flash::program(floor, page_buf) &&
+             Flash::program(QspiFlashPartition::storage_end - Flash::page_size, page_buf);
+    const uint32_t t0 = us_now();
+    const bool ok = Flash::erase(below, bytes);
+    const uint32_t us = us_now() - t0;
+    const bool clean = range_is(below, bytes, 0xFF);
+    const bool kept = range_is(keeper, Flash::page_size, 0x5A);
+    const bool tidy = Flash::erase_sector(keeper) && range_is(keeper, Flash::sector_size, 0xFF);
+    print(serial, "  ", bytes / 1024u, " KB from ", hex(below), " (one sector below the floor, then the 64 KB block) erased in ",
+          us, " us; the marker a sector lower kept ", kept, crlf);
+    bench.verdict("a run across the 64 KB boundary: the sector below the floor and the whole block above it read erased, "
+                  "the sector below the run untouched (the unaligned end took the sector command, not a block)",
+                  marked && ok && clean && kept);
+    bench.verdict("the keeper's sector erased again afterwards", tidy);
+}
+
 void tw_wipe() {
     const uint32_t bytes = QspiFlashPartition::storage_end - QspiFlashPartition::storage_base;
     const uint32_t t0 = us_now();
@@ -473,6 +646,32 @@ void banner() {
 extern "C" void isr_uart0() { (void)Serial::isr(); }
 extern "C" void isr_systick() { brio::Ticker::tick(); }
 
+/// The HardFault body: the frame from the stack the faulting context
+/// used (EXC_RETURN bit 2), an expected fault stepped over.
+extern "C" void flash_fault_body(uint32_t* frame) {
+    if (!fault_expected) {
+        for (;;) {
+        }
+    }
+    fault_pc = frame[6];
+    frame[6] += 2u;
+    faults_taken = faults_taken + 1u;
+    fault_expected = false;
+}
+extern "C" [[gnu::naked]] void isr_hardfault() {
+    __asm__ volatile(
+        "movs r1, #4\n"
+        "mov r2, lr\n"
+        "tst r1, r2\n"
+        "beq 1f\n"
+        "mrs r0, psp\n"
+        "b 2f\n"
+        "1: mrs r0, msp\n"
+        "2: ldr r1, =flash_fault_body\n"
+        "bx r1\n"
+        ".ltorg\n");
+}
+
 int main() {
     const bool clock_ok = SysClock::init();
     const bool timer_ok = brio::Timer::init(clock);
@@ -486,7 +685,9 @@ int main() {
     bench.letter('d', "the window (the ticks lost) and the cache (hits, flush, coherence)", td_window);
     bench.letter('e', "the heap on a page-celled media", te_heap);
     bench.letter('f', "the journal in the attic, and its reserve", tf_journal);
+    bench.letter('g', "the cache's two switches: ERR_BADWRITE and POWER_DOWN", tg_switches);
     bench.letter('w', "WIPE the storage partition", tw_wipe, false);
+    bench.letter('x', "a run across the 64 KB boundary (wipes the partition)", tx_boundary, false);
 
     if (serial_ok) {
         brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "PLL125" : "FAILED", " timer=", timer_ok ? "1us" : "FAILED",

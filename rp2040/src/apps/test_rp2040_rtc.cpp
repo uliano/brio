@@ -40,6 +40,10 @@
 //      an alarm on minute and second repeating once an hour (an hour of
 //      10 ms seconds, the interval timed), one on the hour too repeating
 //      once a day
+//   h  (by name only: the partner drives the wire) THE ONE PULSE PER
+//      SECOND ON GP20: RtcClock::gpin0_1hz, the reference a second board
+//      gives - the RP2350B's letter u on wire 10 - the calendar set on it
+//      and its seconds timed against this board's timer
 //
 // build: boards = pico,weact2040
 // build: monitor_speed = 115200
@@ -600,6 +604,87 @@ void tg_centuries() {
                       at_d2->hour == 13u);
 }
 
+// =============================================================================
+// h - the one pulse per second on GP20
+// =============================================================================
+/// The pad's rising edges: the timer's stamp of the next one, 0 when
+/// none came within `us`.
+uint32_t next_rise(uint32_t us) {
+    const uint32_t t0 = us_now();
+    bool last = Pin<20>::read();
+    for (;;) {
+        const bool now = Pin<20>::read();
+        if (now && !last) {
+            return us_now();
+        }
+        last = now;
+        if (us_now() - t0 > us) {
+            return 0;
+        }
+    }
+}
+
+void th_gpin_1hz() {
+    rtc_leave_armed = false;
+    Rtc::disarm_alarm();
+    Rtc::interrupt(false);
+    ClockIn<0>::init();
+    // The reference first, on the pad: two rises a second apart.
+    const uint32_t r0 = next_rise(2'500'000u);
+    const uint32_t r1 = r0 != 0u ? next_rise(1'500'000u) : 0u;
+    if (r0 == 0u || r1 == 0u) {
+        bench.verdict("DECLINED: no pulse on GP20 - run the partner's letter u (the RP2350B's clock suite) first", false);
+        ClockIn<0>::release();
+        (void)rtc_up();
+        return;
+    }
+    print(serial, "  the pulse on GP20: a rise every ", r1 - r0, " us", crlf);
+    // The calendar on it: CLKDIV_M1 0, every wait of set() three
+    // clk_rtc periods long - seconds here, so the bound is passed as one
+    // (the default spins suit 46875 Hz).
+    const bool up = Rtc::init(clock, RtcClock::gpin0_1hz);
+    const RtcDateTime start{.year = 2026, .month = 10, .day = 16, .weekday = rtc_weekday_of(2026, 10, 16),
+                            .hour = 3, .minute = 4, .second = 5};
+    const uint32_t ts = us_now();
+    const bool set_ok = Rtc::set(start, 200'000'000u);
+    const uint32_t set_us = us_now() - ts;
+    if (!set_ok) {
+        if (const auto now = Rtc::read()) {
+            print(serial, "  set() refused; the calendar reads ");
+            print_dt(*now);
+            print(serial, crlf);
+        }
+    }
+    // Six seconds of the calendar, each change stamped on the timer.
+    uint32_t stamps[7] = {};
+    RtcDateTime seen{};
+    bool all = set_ok;
+    for (uint8_t i = 0; i < 7u && all; ++i) {
+        stamps[i] = next_second(seen, 2'500'000u);
+        all = stamps[i] != 0u;
+    }
+    uint32_t lo = 0xFFFF'FFFFu;
+    uint32_t hi = 0;
+    for (uint8_t i = 1; i < 7u && all; ++i) {
+        const uint32_t d = stamps[i] - stamps[i - 1u];
+        lo = d < lo ? d : lo;
+        hi = d > hi ? d : hi;
+    }
+    print(serial, "  RtcClock::gpin0_1hz: init ", up, ", divider ", Rtc::reference_divider(), ", set() took ", set_us,
+          " us; six seconds of the calendar ", lo, "..", hi, " us apart, the last read ");
+    print_dt(seen);
+    print(serial, crlf);
+    // Two crystals of 100 ppm each (200 us a second), the poll's few
+    // microseconds and the read path's sampling of a 1 Hz clock (the
+    // same lag every second) - judged at half a millisecond.
+    bench.verdict("THE CALENDAR ON A SECOND BOARD'S 1 Hz: divider one, set() through it, and six seconds of the calendar "
+                  "each 1 000 000 us of this board's timer within 500 us",
+                  up && Rtc::reference_divider() == 1u && all && lo + 500u >= 1'000'000u && hi <= 1'000'500u &&
+                      seen.hour == 3u && seen.minute == 4u && seen.second >= 11u && seen.second <= 13u);
+    ClockIn<0>::release();
+    (void)rtc_up();
+}
+
 void banner() {
     print(serial, crlf, "test_rp2040_rtc - the RP2040 RTC (datasheet 4.8): clk_rtc = crystal / 256, nothing to wire; clk_sys=",
           SysClock::hz, " Hz", crlf);
@@ -640,6 +725,7 @@ int main() {
     bench.letter('e', "adjust, stop, the forced interrupt", te_adjust);
     bench.letter('f', "the read across a day's rollover", tf_coherence);
     bench.letter('g', "the centuries, the alarm once an hour and once a day", tg_centuries);
+    bench.letter('h', "the 1 Hz reference on GP20 from the partner (by name)", th_gpin_1hz, false);
 
     if (serial_ok) {
         brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "PLL125" : "FAILED", " timer=", timer_ok ? "1us" : "FAILED",

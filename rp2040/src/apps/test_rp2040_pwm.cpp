@@ -48,6 +48,13 @@
 //      top of the range and 256, each frequency within one per cent
 //   h  THE LAMP: util/rgb_lamp.hpp over three outputs, two of them
 //      measured on the wires
+//   i  WIRELESS, three solved or counted paths: PwmPeriodicTick at
+//      1 kHz past 65536 counts (the divider solved for TOP 0xFFFF, 984
+//      Hz) counted on its wrap against the timer; PwmOutput::setup_hz
+//      PHASE-CORRECT at 1 kHz, its edges counted on its own pad's input
+//      and its wraps; PwmEdgeCounter rising and FALLING on a B pad whose
+//      level the pad's own output override walks (no wire: the pad's
+//      input buffer reads what the override drives)
 //   y  (outside z) THE INSTRUMENTS: the pad sampled through a period
 //      for the polarity, the level counter on the same signals, the
 //      edges counted against the wraps, the counter read at a growing
@@ -183,6 +190,106 @@ void all_off() {
     Pin<12>::release();
     Pin<15>::release();
     Pin<9>::release();
+}
+
+// =============================================================================
+// i - the solved divider, phase-correct, the falling edge (wireless)
+// =============================================================================
+using OutPc = PwmOutput<12, 999>;   // slice 6 A on GP12, no wire: its own pad read back
+
+/// Rising edges of pin 12's pad input over `us`, the loop polling it.
+uint32_t pad_rises(uint32_t us) {
+    uint32_t rises = 0;
+    bool last = Pin<12>::read();
+    const uint32_t t0 = us_now();
+    while (us_now() - t0 < us) {
+        const bool now = Pin<12>::read();
+        if (now && !last) {
+            ++rises;
+        }
+        last = now;
+    }
+    return rises;
+}
+
+/// GP15 (slice 7 B) as an edge counter's input, its level walked by the
+/// pad's own output override: from low, `pulses` high-low pulses, then
+/// high - `pulses` + 1 rising edges and `pulses` falling ones. Each
+/// level held 2 us (250 clk_sys cycles, far past the input's two-cycle
+/// synchronizer).
+uint16_t walk_edges(bool falling, uint16_t pulses) {
+    (void)Edges7::setup(falling);
+    Gpio::out_override(15, PinOverride::low);
+    Gpio::oe_override(15, PinOeOverride::enable);
+    spin_us(5);
+    Edges7::restart();
+    Edges7::run(true);
+    for (uint16_t i = 0; i < pulses; ++i) {
+        Gpio::out_override(15, PinOverride::high);
+        spin_us(2);
+        Gpio::out_override(15, PinOverride::low);
+        spin_us(2);
+    }
+    Gpio::out_override(15, PinOverride::high);
+    spin_us(5);
+    Edges7::run(false);
+    const uint16_t n = Edges7::count();
+    Gpio::oe_override(15, PinOeOverride::pass);
+    Gpio::out_override(15, PinOverride::pass);
+    Edges7::release();
+    return n;
+}
+
+void ti_solved() {
+    all_off();
+    // The solved divider: 1 kHz needs 125 000 counts, past TOP's 65536,
+    // so setup_hz solves the divider for TOP 0xFFFF - 31/16, 984.4 Hz
+    // (the static_asserts pin the arithmetic). Over 500 ms: 492.2 wraps,
+    // the window's quantization one either way.
+    clear_wraps();
+    const bool tick_ok = Tick3::setup_hz(clock, 1000);
+    const uint32_t t0 = us_now();
+    spin_us(500'000);
+    const uint32_t n = wraps[3];
+    const uint32_t took = us_now() - t0;
+    Tick3::stop();
+    print(serial, "  setup_hz(1000) on a tick: TOP ", Tick3::Slice::top(), ", divider ", Tick3::Slice::config().divider.sixteenths(),
+          "/16; ", n, " wraps in ", took, " us (984.4 Hz: 492.2 expected)", crlf);
+    bench.verdict("PwmPeriodicTick::setup_hz past 65536 counts: TOP 0xFFFF, the divider solved to 31/16, 491..493 wraps in "
+                  "500 ms (984.4 Hz, one either way)",
+                  tick_ok && Tick3::Slice::top() == 0xFFFFu && Tick3::Slice::config().divider.sixteenths() == 31u && n >= 491u &&
+                      n <= 493u);
+
+    // Phase-correct at the solved divider: 1 kHz on TOP 999 wants 2000
+    // counts a period, the divider 62.5 (1000/16). Its pad read back:
+    // 200 rising edges in 200 ms, one either way; its wraps the same
+    // (in phase-correct the wrap is once a period, 4.5.2.1).
+    const bool pc_ok = OutPc::setup_hz(clock, 1000, true);
+    OutPc::duty(500);
+    PwmSlice<6>::clear_pending();
+    PwmSlice<6>::interrupt(true);
+    clear_wraps();
+    const uint32_t rises = pad_rises(200'000);
+    const uint32_t pc_wraps = wraps[6];
+    PwmSlice<6>::interrupt(false);
+    const PwmSliceConfig pc = PwmSlice<6>::config();
+    OutPc::release();
+    Pin<12>::release();
+    print(serial, "  setup_hz(1000) phase-correct on TOP 999: divider ", pc.divider.sixteenths(), "/16, phase_correct ",
+          pc.phase_correct, "; the pad's own input: ", rises, " rising edges in 200 ms, ", pc_wraps, " wraps", crlf);
+    bench.verdict("pwm_config_for phase-correct: the divider solved to 62.5 for TOP 999, the pad toggling at 1 kHz (199..201 "
+                  "rises in 200 ms) and the slice wrapping once a period",
+                  pc_ok && pc.phase_correct && pc.divider.sixteenths() == 1000u && rises >= 199u && rises <= 201u &&
+                      pc_wraps >= 199u && pc_wraps <= 201u);
+
+    // The two edge modes on one walked signal.
+    const uint16_t up = walk_edges(false, 100);
+    const uint16_t down = walk_edges(true, 100);
+    print(serial, "  a level walked by the override, from low: 100 pulses then high - rising mode ", up, ", falling mode ",
+          down, crlf);
+    bench.verdict("PwmEdgeCounter: 101 rising edges counted in rising mode and 100 falling ones in falling mode, exact",
+                  up == 101u && down == 100u);
+    all_off();
 }
 
 // =============================================================================
@@ -846,6 +953,7 @@ int main() {
     bench.letter('f', "the second wire, lockstep", tf_second_wire, false);
     bench.letter('g', "the divider ladder", tg_ladder, false);
     bench.letter('h', "the lamp over three outputs", th_lamp, false);
+    bench.letter('i', "the solved divider, phase-correct, the falling edge (wireless)", ti_solved);
     bench.letter('y', "polarity, edges against wraps, the settle (diagnostics, outside z)", ty_probe, false);
 
     if (serial_ok) {

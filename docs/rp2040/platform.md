@@ -182,7 +182,10 @@ if (!brio::Resets::cycle(brio::ResetBlock::uart0)) { /* the block never came rea
     ARMv6-M B3.3), and a PERIPHERAL LINE, PWM slice 0 counting clk_sys
     to its wrap and placed by a counter write; each in the light rung
     (SLEEPDEEP clear) and the standby rung (set, through
-    `Rp2040SleepSite`, every SLEEP_EN gate left open). 3200 tries: none
+    `Rp2040SleepSite`) - every SLEEP_EN gate left open, and again with
+    the set PRUNED to the core's (`sleep_clocks_core`: the fabric, the
+    memories, SIO, the timer and its tick), the PWM's and the console's
+    UART. 4800 tries: none
     took the rescue, none ended a period late, the slowest one-edge try
     4 us. The edge crosses the whole path: the earliest lands 141 to 143
     cycles before the sleep takes it (a fixed lead of bus reads sits
@@ -197,7 +200,9 @@ if (!brio::Resets::cycle(brio::ResetBlock::uart0)) { /* the block never came rea
     whole and the WFI's return, 94 and 93. The standby rung measures
     the same: with the gates open, SLEEPDEEP changes nothing the core
     does here - the SysTick edge, which 2.4.2.8.4's wake-up interrupt
-    controller does not take, ends a standby WFI as it ends a light one.
+    controller does not take, ends a standby WFI as it ends a light one;
+    and with the gates pruned the same again, to the cycle (ten runs of
+    the letter).
   - ONE TURN PER INTERRUPT. A Tenuto pack of three quiet AOs, two of
     them with a periodic time event, turned as `run()` turns it with the
     tick the only interrupt: 100 turns over 100 ticks (letter `k`; a
@@ -214,6 +219,20 @@ if (!brio::Resets::cycle(brio::ResetBlock::uart0)) { /* the block never came rea
     edge to the loop against 91, measured); a lone try further on can
     meet a refill the same way, which is why the asleep plateau is read
     as three positions in a row.
+  - THE SAME CONTRACT ON CORE 1 (`test_rp2040_multicore` letter k, ten
+    runs of ten): the walk run by core 1 itself on `Rp2040Platform<1>`
+    and `CoreTicker<1>`, inside its kernel's dispatch - its own SysTick
+    placed by a reload, PWM slice 0's wrap in its own NVIC, and THE
+    DOORBELL, rung by core 0 a counted number of its own cycles after
+    core 1 asks; every position of 400, a plain WFI and with SLEEPDEEP
+    set, the timer's alarm 1 the rescue in core 1's NVIC. None lost,
+    none a period late; asleep, 34 cycles from the tick's edge to its
+    handler (the shared vector asks the core first) and 28 from the
+    line's, 110 and 102 to the loop. The doorbell's positions are
+    counted on core 0's clock: the two cores share none, so where the
+    bell lands in core 1's path is not read back, only that no position
+    of 400 lost it. A quiet pack on core 1 turns 100 times over 100 of
+    its ticks.
 
 ## A handler in SRAM
 
@@ -330,23 +349,12 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
-- The idle contract on CORE 1. The type is the same template and the
-  WFI path the same instructions, but core 1 has its own SysTick, its
-  own NVIC and one wake of its own - the SIO FIFO's doorbell
-  (`SIO_IRQ_PROC1`), which is how an event sent to it arrives
-  ([multicore.md](multicore.md)). Letters `w` and `k` launched on core
-  1 with `Rp2040Platform<1>` and `CoreTicker<1>`, the rescue alarm
-  enabled in core 1's NVIC, the doorbell as a third edge placed by a
-  FIFO write from core 0, the counts handed back through SRAM.
 - The idle path through the DORMANT hook: a wake that is already
   latched when the keyword is written (a GPIO dormant-wake event, the
   RTC's alarm) is not shown to end the state at once. A pad the chip
   drives itself, its dormant-wake event armed, PWM-placed edges walked
   across `go_dormant()` with the RTC on the ring oscillator as the
   rescue.
-- The standby rung with a pruned SLEEP_EN set: letter `w` walks it
-  with every gate open. The same letter with the program's own set,
-  the tick's and the rescue's clocks kept.
 - Letters `w` and `k` on the Pico: a `z` there.
 
 - `Resets::hold` on a running block and the block's state afterwards:

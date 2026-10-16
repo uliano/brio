@@ -112,6 +112,19 @@
 //      SPI1's transmit, PWM slice 3's wrap and the ADC's FIFO, each
 //      released six ways and the next owner's channel watched - what
 //      outlives a release, at the peripheral and in the channel
+//   w  THE CORNERS, no wire: the sniffer's other modes against their
+//      software twins (CRC-16 and CRC-32 over bit-reversed data, the
+//      even parity, BSWAP on word beats); a WRITE bus error; one
+//      abort(mask) ending a chain looped on itself (RP2350-E5's case);
+//      the copy engine's completion on a line; and THE ROUND counted -
+//      a normal channel's transfers beside one, two and three
+//      HIGH_PRIORITY channels always ready, from one MULTI_CHAN_TRIGGER
+//   x  (by name only) A PACED BLOCK'S FIRST TRANSFER AGAINST THE GAP
+//      AFTER arm(): the gap swept from 0 to 1000 clk_sys cycles, ten
+//      tries each, the first transfer timed on TIMER1 at clk_sys and the
+//      channel's request credits (DBG_CTDREQ) read across it; then gap 0
+//      with the XIP cache invalidated before each try, arm() and start()
+//      run cold
 //   p  (by name only, brio stress) THE CONSOLE'S RING BESIDE COPIES: the
 //      host's stream into a receive engine at 115200, 1 Mbaud and
 //      3 Mbaud, two 16 KB copies back to back beside it, the ring and the
@@ -133,12 +146,14 @@
 #include "rp2350/clock.hpp"
 #include "rp2350/core.hpp"
 #include "rp2350/dma.hpp"
+#include "rp2350/flash.hpp"
 #include "rp2350/mtime.hpp"
 #include "rp2350/pin.hpp"
 #include "rp2350/platform.hpp"
 #include "rp2350/pwm.hpp"
 #include "rp2350/spi.hpp"
 #include "rp2350/ticker.hpp"
+#include "rp2350/timer.hpp"
 #include "rp2350/uart.hpp"
 #include "util/crc.hpp"
 #include "util/print.hpp"
@@ -169,7 +184,7 @@ using InstrumentRx = DmaRxEngine<3>;
 using Instrument = Uart<1, instrument_pins, 1024, 1024, DmaTxEngine<2>, InstrumentRx>;
 
 
-TestBench<Serial, 20> bench;
+TestBench<Serial, 22> bench;
 
 volatile uint32_t line_irqs[4] = {0, 0, 0, 0};
 volatile uint32_t ch4_on_line[4] = {0, 0, 0, 0};
@@ -985,7 +1000,12 @@ void tl_engines() {
     bench.verdict("the copy engine fills from one cell at three beats, exact",
                   word_fill && half_fill && byte_fill);
     // A block thrown away in flight: abandon() is the abort polled to its
-    // end, and the channel copies again afterwards.
+    // end, and the channel copies again afterwards. The 1024 words take
+    // some 1070 cycles (bench_rp2350 letter d), and an abandon() run COLD
+    // out of the flash - its XIP misses at about a hundred cycles each -
+    // was measured outlasting them once in eleven runs: so it is run once
+    // on the idle engine first, warm when the race is run.
+    (void)Copy::abandon();
     fill(dst, 4096, 0);
     const bool long_started = Copy::copy(reinterpret_cast<uint32_t*>(dst),
                                          reinterpret_cast<const uint32_t*>(src), 1024);
@@ -1882,6 +1902,315 @@ void tr_released_requester() {
 }
 
 
+// =============================================================================
+// w - the corners, no wire
+// =============================================================================
+using LineCopy = DmaCopyEngine<11, 2>;   ///< its completion reported on line 2
+volatile uint32_t line_copy_done = 0;
+
+uint8_t reverse8(uint8_t b) {
+    b = static_cast<uint8_t>((b & 0xF0u) >> 4 | (b & 0x0Fu) << 4);
+    b = static_cast<uint8_t>((b & 0xCCu) >> 2 | (b & 0x33u) << 2);
+    b = static_cast<uint8_t>((b & 0xAAu) >> 1 | (b & 0x55u) << 1);
+    return b;
+}
+
+/// Transfers each of `chans` made over `window_us` from one
+/// MULTI_CHAN_TRIGGER: word beats, fixed to fixed, permanent requests -
+/// every channel ready every cycle - but the FIRST, which `first_treq`
+/// paces. `high_mask` names the HIGH_PRIORITY ones.
+template <uint8_t first, uint8_t... chans>
+void race(uint32_t high_mask, uint32_t window_us, uint32_t (&moved)[1 + sizeof...(chans)],
+          Dreq first_treq = Dreq::permanent) {
+    constexpr uint32_t start = 0x0FFF'0000u;   // under the 28 bits the mode leaves
+    DmaChannel<first>::clear_credits();
+    (void)DmaChannel<first>::prepare(
+        {.read = src, .write = dst, .count = start,
+         .config = {.size = DmaSize::word, .read_step = DmaStep::fixed, .write_step = DmaStep::fixed,
+                    .treq = first_treq, .high_priority = (high_mask & (1u << first)) != 0u}});
+    uint8_t k = 1;
+    (..., (void)DmaChannel<chans>::prepare(
+              {.read = src + 16u * k, .write = dst + 16u * (k++),
+               .count = start,
+               .config = {.size = DmaSize::word, .read_step = DmaStep::fixed, .write_step = DmaStep::fixed,
+                          .high_priority = (high_mask & (1u << chans)) != 0u}}));
+    constexpr uint32_t mask = (1u << first) | (0u | ... | (1u << chans));
+    Dma::trigger(mask);
+    spin_us(window_us);
+    const uint32_t left[1 + sizeof...(chans)] = {DmaChannel<first>::count(), DmaChannel<chans>::count()...};
+    (void)Dma::abort(mask);
+    for (uint8_t i = 0; i < 1u + sizeof...(chans); ++i) {
+        moved[i] = start - left[i];
+    }
+    DmaChannel<first>::stop();
+    (..., DmaChannel<chans>::stop());
+}
+
+void tw_corners() {
+    // THE SNIFFER'S OTHER MODES, byte beats over 256 bytes.
+    fill(src, 256, 0x5EEDu);
+    static uint8_t reversed[256];
+    uint32_t ones = 0;
+    for (uint32_t i = 0; i < 256u; ++i) {
+        reversed[i] = reverse8(src[i]);
+        ones += static_cast<uint32_t>(__builtin_popcount(src[i]));
+    }
+    DmaSniffer::start(4, {.calc = DmaSniffCalc::crc16_reversed}, 0xFFFFu);
+    (void)run_c4({.read = src, .write = dst, .count = 256, .config = {.sniff = true}});
+    const uint32_t crc16r = DmaSniffer::result() & 0xFFFFu;
+    DmaSniffer::start(4, {.calc = DmaSniffCalc::crc32_reversed}, crc32_ethernet_init);
+    (void)run_c4({.read = src, .write = dst, .count = 256, .config = {.sniff = true}});
+    const uint32_t crc32r = DmaSniffer::result();
+    DmaSniffer::start(4, {.calc = DmaSniffCalc::even_parity}, 0);
+    (void)run_c4({.read = src, .write = dst, .count = 256, .config = {.sniff = true}});
+    const uint32_t parity = DmaSniffer::result();
+    // BSWAP on WORD beats: 64 words, the CRC-32 with and without it,
+    // against the two orders a word's bytes can be fed in.
+    DmaSniffer::start(4, {.calc = DmaSniffCalc::crc32}, crc32_ethernet_init);
+    (void)run_c4({.read = src, .write = dst, .count = 64, .config = {.size = DmaSize::word, .sniff = true}});
+    const uint32_t w_plain = DmaSniffer::result();
+    DmaSniffer::start(4, {.calc = DmaSniffCalc::crc32, .byte_swap = true}, crc32_ethernet_init);
+    (void)run_c4({.read = src, .write = dst, .count = 64, .config = {.size = DmaSize::word, .sniff = true}});
+    const uint32_t w_swapped = DmaSniffer::result();
+    DmaSniffer::stop();
+    C4::stop();
+    const uint32_t want16r = crc16(reversed, 256, 0xFFFFu);
+    const uint32_t want32r = crc32_ethernet_bytes(reversed, 256);
+    const uint32_t memory_order = crc32_ethernet_bytes(src, 256);
+    const uint32_t word_order = crc32_ethernet(reinterpret_cast<const uint32_t*>(src), 64);
+    print(serial, "  CRC16R ", hex(crc16r), " (", hex(want16r), "), CRC32R ", hex(crc32r), " (", hex(want32r), "), EVEN ",
+          hex(parity), " (", ones, " ones), word beats CRC-32 ", hex(w_plain), " / BSWAP ", hex(w_swapped),
+          " (bytes in memory order ", hex(memory_order), ", a word most significant byte first ", hex(word_order), ")", crlf);
+    bench.verdict("CRC16R and CRC32R are the CRC-16-CCITT and the CRC-32 of the same bytes each bit-reversed (util/crc.hpp's twins)",
+                  crc16r == want16r && crc32r == want32r);
+    bench.verdict("EVEN is the XOR of every bit: the population count's parity in bit 0", parity == (ones & 1u));
+    bench.verdict("on word beats BSWAP changes the bytes the CRC is fed (12.6.8.2's BSWAP is on the DATA, not on the result): "
+                  "one setting is the bytes in memory order and the other a word most significant byte first",
+                  w_plain != w_swapped && ((w_plain == memory_order && w_swapped == word_order) ||
+                                           (w_plain == word_order && w_swapped == memory_order)));
+
+    // A WRITE bus error: a word block writing into the SIO window, which
+    // the DMA's ports cannot see (12.6.7).
+    fill(src, 64, 0x77u);
+    auto* sio = reinterpret_cast<volatile void*>(0xD0000000u);
+    const bool w_started = C4::load({.read = src, .write = sio, .count = 16,
+                                     .config = {.size = DmaSize::word, .write_step = DmaStep::fixed}});
+    const uint32_t t0 = us_now();
+    while (C4::busy() && us_now() - t0 < 10'000u) {
+    }
+    const uint32_t werr = C4::errors();
+    const uint32_t wleft = C4::count();
+    C4::clear_errors();
+    const bool wclear = C4::errors() == 0u;
+    fill(dst, 64, 0);
+    const bool wagain = run_c4({.read = src, .write = dst, .count = 64}) && same(src, dst, 64);
+    C4::stop();
+    print(serial, "  a word block WRITING the SIO window: errors ", hex(werr), " (AHB ", (werr & DmaError::ahb) != 0u,
+          ", read ", (werr & DmaError::read) != 0u, ", write ", (werr & DmaError::write) != 0u, "), count left ", wleft, crlf);
+    bench.verdict("a write the fabric cannot decode is WRITE_ERROR (and AHB_ERROR), not READ_ERROR; the channel halts, the "
+                  "flags clear by writing one, and it copies again",
+                  w_started && (werr & DmaError::write) != 0u && (werr & DmaError::ahb) != 0u && (werr & DmaError::read) == 0u &&
+                      wclear && wagain);
+
+    // ONE ABORT FOR A CHAIN LOOPED ON ITSELF: 4 chained to 5 and 5 to 4,
+    // each a paced block of 64 bytes at 150 MHz / 65535 (2.29 kHz, 28 ms a
+    // block) - the pair never ends by itself. Dma::abort(mask) clears both
+    // chains first (E5's half a single channel cannot answer) and ends
+    // both.
+    DmaTimer<1>::set(1, 0xFFFF);
+    const bool c5_ready = C5::prepare({.read = src, .write = dst + 256, .count = 64,
+                                       .config = {.treq = DmaTimer<1>::dreq(), .chain_to = 4}});
+    const bool c4_go = C4::load({.read = src, .write = dst, .count = 64, .config = {.treq = DmaTimer<1>::dreq(), .chain_to = 5}});
+    spin_us(70'000);   // past one block of each: the loop going round
+    const bool both_ran = C4::raised() && C5::raised();
+    const bool aborted = Dma::abort(C4::bit | C5::bit);
+    spin_us(2'000);
+    const bool idle_after = !C4::busy() && !C5::busy();
+    const uint32_t c4_left = C4::count();
+    const uint32_t c5_left = C5::count();
+    spin_us(60'000);   // past two blocks: nothing restarts
+    const bool still_idle = !C4::busy() && !C5::busy() && C4::count() == c4_left && C5::count() == c5_left;
+    C4::stop();
+    C5::stop();
+    fill(dst, 64, 0);
+    const bool chain_again = run_c4({.read = src, .write = dst, .count = 64}) && same(src, dst, 64);
+    C4::stop();
+    print(serial, "  4 and 5 chained to each other, paced: both ran ", both_ran, "; abort(4|5) ", aborted, ", idle after ",
+          idle_after, ", still idle 60 ms later ", still_idle, "; channel 4 copies again ", chain_again, crlf);
+    bench.verdict("abort(mask) ends a chain looped on itself in one call: both channels idle and neither restarted",
+                  c5_ready && c4_go && both_ran && aborted && idle_after && still_idle && chain_again);
+
+    // THE COPY ENGINE ON A LINE: DmaReport::blocks, its end counted by
+    // line 2's handler.
+    line_copy_done = 0;
+    LineCopy::arm(DmaReport::blocks);
+    fill(src, 1024, 0xC0DEu);
+    fill(dst, 1024, 0);
+    const bool lc = LineCopy::copy(reinterpret_cast<uint32_t*>(dst), reinterpret_cast<const uint32_t*>(src), 256);
+    const uint32_t t1 = us_now();
+    while (line_copy_done == 0u && us_now() - t1 < 10'000u) {
+    }
+    spin_us(100);
+    const uint32_t ends = line_copy_done;
+    LineCopy::stop();
+    print(serial, "  the copy engine on line 2: ", ends, " completion(s) in the handler, the 1 KB ",
+          same(src, dst, 1024) ? "exact" : "WRONG", crlf);
+    bench.verdict("DmaCopyEngine with DmaReport::blocks: the block's end reaches its line's handler once, the copy exact",
+                  lc && ends == 1u && same(src, dst, 1024));
+
+    // THE ROUND: channel 14 at normal beside one, two and three of 15,
+    // 11, 9 at HIGH_PRIORITY, all started by one MULTI_CHAN_TRIGGER, all
+    // ready every cycle, 20 us.
+    uint32_t r0[2] = {};
+    uint32_t r1[2] = {};
+    uint32_t r2[3] = {};
+    uint32_t r3[4] = {};
+    race<14, 15>(0, 20, r0);
+    race<14, 15>(1u << 15, 20, r1);
+    race<14, 15, 11>((1u << 15) | (1u << 11), 20, r2);
+    race<14, 15, 11, 9>((1u << 15) | (1u << 11) | (1u << 9), 20, r3);
+    print(serial, "  transfers in 20 us (normal / HIGH...): two normal ", r0[0], " / ", r0[1], "; beside one HIGH ", r1[0],
+          " / ", r1[1], "; beside two ", r2[0], " / ", r2[1], " ", r2[2], "; beside three ", r3[0], " / ", r3[1], " ", r3[2], " ",
+          r3[3], crlf);
+    // The same with the normal channel PACED - a request every 20 cycles
+    // from DMA timer 2 (7.5 MHz, 150 requests in the window): what a
+    // peripheral's channel is, letter p's ring among them.
+    DmaTimer<2>::set(1, 20);
+    uint32_t p0[2] = {};
+    uint32_t p1[2] = {};
+    uint32_t p2[3] = {};
+    uint32_t p3[4] = {};
+    race<14, 15>(0, 20, p0, DmaTimer<2>::dreq());
+    race<14, 15>(1u << 15, 20, p1, DmaTimer<2>::dreq());
+    race<14, 15, 11>((1u << 15) | (1u << 11), 20, p2, DmaTimer<2>::dreq());
+    race<14, 15, 11, 9>((1u << 15) | (1u << 11) | (1u << 9), 20, p3, DmaTimer<2>::dreq());
+    print(serial, "  the normal channel PACED at one request in 20 cycles (150 in the window): beside a normal ", p0[0],
+          " / ", p0[1], "; beside one HIGH ", p1[0], " / ", p1[1], "; beside two ", p2[0], " / ", p2[1], " ", p2[2],
+          "; beside three ", p3[0], " / ", p3[1], " ", p3[2], " ", p3[3], crlf);
+    // 12.6.10's round: every ready HIGH channel once, then ONE normal
+    // channel - so beside k HIGH channels a lone normal one takes one slot
+    // in k + 1, the same share as each of them (judged within a tenth).
+    const auto share_ok = [](uint32_t normal, uint32_t high_min) { return normal * 10u >= high_min * 9u; };
+    const uint32_t r2_min = r2[1] < r2[2] ? r2[1] : r2[2];
+    const uint32_t r3_min = r3[1] < r3[2] ? (r3[1] < r3[3] ? r3[1] : r3[3]) : (r3[2] < r3[3] ? r3[2] : r3[3]);
+    bench.verdict("THE ROUND: beside one, two and three HIGH_PRIORITY channels always ready, a normal channel always ready "
+                  "takes one slot a round - the share each HIGH one takes, within a tenth",
+                  share_ok(r1[0], r1[1]) && share_ok(r2[0], r2_min) && share_ok(r3[0], r3_min));
+    // A paced normal channel: 150 requests in a window the microsecond
+    // ruler times to 19..21 us (142.5..157.5), two more for its edges.
+    bench.verdict("a normal channel paced at one request in 20 cycles is served in full beside up to three HIGH channels "
+                  "always ready: 140 or more of the window's 150 requests in every case",
+                  p0[0] >= 140u && p1[0] >= 140u && p2[0] >= 140u && p3[0] >= 140u && p0[0] <= 160u && p3[0] <= 160u);
+}
+
+// =============================================================================
+// x - a paced block's first transfer against the gap after arm()
+// =============================================================================
+using PacedX = DmaTxEngine<14, uint32_t>;
+using Cycles = Timer<1>;   ///< switched to clk_sys for this letter
+alignas(4) uint32_t paced_words[16];
+volatile uint32_t paced_cell = 0;
+
+/// One try: arm(), `gap` clk_sys cycles, start() of 16 words paced at one
+/// request in 150 cycles; the cycles from the start to the first transfer
+/// seen (the count stepping down), and the channel's request credits
+/// (DBG_CTDREQ) read just before the start and just after the first step.
+struct FirstStep {
+    uint32_t first;
+    uint32_t credits_before;
+    uint32_t credits_after;
+};
+FirstStep paced_try(uint32_t gap, bool cold = false) {
+    FirstStep r{};
+    P::CriticalSection masked;
+    if (cold) {
+        Xip::invalidate_all();   // arm() and start() fetched from the flash again, as on a first call
+    }
+    PacedX::arm(&paced_cell, DmaTimer<0>::dreq(), false, DmaReport::errors);
+    const uint32_t a = Cycles::now_low();
+    while (Cycles::now_low() - a < gap) {
+    }
+    r.credits_before = DmaChannel<14>::debug_credits();
+    const uint32_t t0 = Cycles::now_low();
+    (void)PacedX::start(paced_words, 16u);
+    while (DmaChannel<14>::count() == 16u && Cycles::now_low() - t0 < 100'000u) {
+    }
+    r.first = Cycles::now_low() - t0;
+    r.credits_after = DmaChannel<14>::debug_credits();
+    const uint32_t t1 = Cycles::now_low();
+    while (DmaChannel<14>::busy() && Cycles::now_low() - t1 < 100'000u) {
+    }
+    (void)PacedX::complete();
+    return r;
+}
+
+void tx_paced_after_arm() {
+    (void)Cycles::init(clock);
+    Cycles::source(TimerSource::sysclk);
+    DmaTimer<0>::set(1, 150);   // one request in 150 cycles: a microsecond
+    for (uint32_t i = 0; i < 16u; ++i) {
+        paced_words[i] = i;
+    }
+    constexpr uint32_t gaps[10] = {0, 20, 40, 60, 80, 100, 150, 200, 400, 1000};
+    uint32_t late_warm = 0;   // tries whose first step came later than one pace period, the code warm
+    print(serial, "  gap after arm() -> the first transfer, in clk_sys cycles, ten tries each (min..max, late ones, "
+                  "credits before / after the first step):", crlf);
+    for (const uint32_t gap : gaps) {
+        // The first call's fetch out of the flash, discarded (measured
+        // below, cold) - right before each row, after the print that may
+        // have evicted the lines.
+        (void)paced_try(gap);
+        uint32_t lo = 0xFFFF'FFFFu;
+        uint32_t hi = 0;
+        uint32_t late = 0;
+        uint32_t cb_lo = 0xFFFF'FFFFu;
+        uint32_t cb_hi = 0;
+        uint32_t ca_hi = 0;
+        for (uint8_t k = 0; k < 10u; ++k) {
+            const FirstStep r = paced_try(gap);
+            lo = r.first < lo ? r.first : lo;
+            hi = r.first > hi ? r.first : hi;
+            cb_lo = r.credits_before < cb_lo ? r.credits_before : cb_lo;
+            cb_hi = r.credits_before > cb_hi ? r.credits_before : cb_hi;
+            ca_hi = r.credits_after > ca_hi ? r.credits_after : ca_hi;
+            // One pace period, plus the poll's own turn (a count read and
+            // a ruler read, both across the bus: tens of cycles).
+            if (r.first > 150u + 60u) {
+                ++late;
+                ++late_warm;
+            }
+        }
+        print(serial, "    gap ", gap, ": ", lo, "..", hi, ", ", late, " late; credits before ", cb_lo, "..", cb_hi,
+              ", after at most ", ca_hi, crlf);
+    }
+    // The same at gap 0 with the XIP cache invalidated before each try:
+    // arm() and start() run COLD, as the first call of a program does.
+    uint32_t cold_lo = 0xFFFF'FFFFu;
+    uint32_t cold_hi = 0;
+    uint32_t cold_late = 0;
+    for (uint8_t k = 0; k < 10u; ++k) {
+        const FirstStep r = paced_try(0, true);
+        cold_lo = r.first < cold_lo ? r.first : cold_lo;
+        cold_hi = r.first > cold_hi ? r.first : cold_hi;
+        cold_late += r.first > 150u + 60u ? 1u : 0u;
+    }
+    print(serial, "    gap 0, the cache invalidated before each try: ", cold_lo, "..", cold_hi, ", ", cold_late, " late", crlf);
+    PacedX::stop();
+    DmaTimer<0>::stop();
+    Cycles::source(TimerSource::tick);
+    // A late first transfer is the code's, not the channel's: cold, arm()
+    // and start() fetch their instructions out of the flash before the
+    // trigger is written - some 600 cycles of misses - and warm, at every
+    // gap after the binding, the first request the timer raises after the
+    // trigger is taken.
+    bench.verdict("a paced block's first transfer comes within one pace period of its start() at every gap after arm(), "
+                  "0 to 1000 cycles, the code warm (150 cycles and the poll's turn)",
+                  late_warm == 0u);
+    bench.verdict("... and 600 cycles or more later when arm() and start() run cold - the late first transfer is the "
+                  "instruction fetch before the trigger",
+                  cold_late == 10u && cold_lo >= 600u);
+}
+
 void banner() {
     print(serial, crlf, "test_rp2350_dma - the RP2350 DMA (datasheet 12.6) on ",
           core_kind == CoreKind::hazard3 ? "RISC-V Hazard3" : "Arm Cortex-M33",
@@ -1952,6 +2281,9 @@ extern "C" void isr_dma_1() {
 }
 extern "C" void isr_dma_2() {
     line_irqs[2] = line_irqs[2] + 1u;
+    if ((LineCopy::service() & LineCopy::flag_complete) != 0u) {
+        line_copy_done = line_copy_done + 1u;
+    }
     if (C4::pending(2)) {
         C4::clear_pending(2);
         ch4_on_line[2] = ch4_on_line[2] + 1u;
@@ -1994,6 +2326,10 @@ int main() {
     bench.letter('v', "K breaks in N slots: the interrupt receiver and the engine", pair::guarded<bench, clock, tv_breaks>);
     bench.letter('o', "the overrun a stalled receive engine leaves: no storm", pair::guarded<bench, clock, to_stalled_overrun>);
     bench.letter('r', "a released requester: what reaches the next owner", tr_released_requester);
+    bench.letter('w', "the corners: sniffer modes, a write error, a chain aborted, the copy on a line, the round",
+                 tw_corners);
+    bench.letter('x', "a paced block's first transfer against the gap after arm() (diagnostic)", tx_paced_after_arm,
+                 false);
     bench.letter('p', "HOST: the console's ring beside copies at each level (brio stress)",
                  pair::guarded<bench, clock, tp_ring_beside_copies>, false);
     bench.letter('m', "diagnostic: the transmit engine alone", pair::guarded<bench, clock, tm_tx_only>, false);

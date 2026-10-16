@@ -300,6 +300,13 @@ flash-and-run cycles. Every verdict reads the same on the two halves.
   against a word mean of 866 to 869 - the word over sixteen, within one.
   Of 256 entries at 500 ksps **none** is flagged as a failed conversion
   and CS.ERR_STICKY stays clear.
+- **THE UNDERFLOW AND THE FORCE** (letter i). A pop of the empty FIFO
+  raises the **sticky UNDER and not OVER**, and writing one clears it;
+  the word such a pop returns is not a conversion (0x8FD5 or 0x8ED5 here,
+  bit 15 the error flag's place - never judged). **INTF raises INTS with
+  INTE clear and INTR clear** - the status is "after masking & forcing",
+  the force not masked - and the vector runs once, its body dropping the
+  force. Ten runs of ten on each half.
 - **THE SAMPLER.** `AnalogSampler` over the sensor and two pads on a 5 ms
   software pace gives **39 to 40 samples in 200 ms, 13 or 14 of each
   input**, the sensor's near its own count, the pulled-up pad's at 3895
@@ -327,12 +334,9 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
-- **`Adc::force`** (the interrupt raised by software), **the FIFO
-  underflow flag** (a pop of an empty FIFO staged on purpose) and **a
-  failed conversion's own flag** (CS.ERR wants an input held right at a
-  code's threshold, which needs a source this bench has not got). The
-  verbs are there and no letter stages them; the first two are a letter's
-  worth of work and the third wants a precision source.
+- **A failed conversion's own flag** (CS.ERR wants an input held right
+  at a code's threshold): a precision source on an input, which this
+  bench has not got.
 - **The converter read against a KNOWN voltage.** Everything above is
   read against the pad's own pulls, the supply and the sensor's line; no
   reference on this bench says what a code is worth, so the millivolt

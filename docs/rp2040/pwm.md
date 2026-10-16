@@ -116,7 +116,7 @@ both levels per period.
 ## Bench findings
 
 The reference suite is `test_rp2040_pwm`, green on the WeAct board:
-two wireless letters in z (11 verdicts), and six by name on two wires
+three wireless letters in z (14 verdicts), and six by name on two wires
 between the
 chip's own slices - slice 6's B output on GP13 into slice 7's B input
 on GP15, slice 0's B output on GP17 into slice 4's B input on GP9 -
@@ -137,7 +137,9 @@ the wire is high over a window the system timer times.
   The force register raises the status with no raw flag and leaves
   with the force.
 - THE WRAP AS A TICK: 200 interrupts in 200 ms at 1 kHz, 1000 in 10
-  ms at 100 kHz. A 64-word level table streamed into CC by a DMA
+  ms at 100 kHz. PAST 65536 COUNTS (letter i): `setup_hz(1000)` takes
+  TOP 0xFFFF and solves the divider to 31/16 - 492 wraps in 500 ms,
+  984.4 Hz to the count. A 64-word level table streamed into CC by a DMA
   channel paced by the wrap at 10 kHz lands in 6.42 ms, one word per
   period, the last level in place.
 - ON THE WIRE: 1 kHz, 100 kHz and 1 MHz counted by edges exact; the
@@ -162,6 +164,16 @@ the wire is high over a window the system timer times.
   flipped under the counter (phase-correct to plain) left the output
   stuck at one level.
 
+- WITH NO WIRE (letter i, ten runs of ten): `PwmOutput::setup_hz`
+  PHASE-CORRECT at 1 kHz on TOP 999 solves the divider to 62.5, and the
+  output's own pad, read back through its input buffer, rises 200 times
+  in 200 ms while the slice wraps 200 times - once a period, as
+  phase-correct mode wraps. `PwmEdgeCounter` on GP15 with the pad's
+  level walked by its own output override (OEOVER enable, OUTOVER low
+  and high, two microseconds a level): from low, 100 pulses and a last
+  rise count 101 in rising mode and 100 in FALLING mode, exact - a B
+  input reads the pad, so an override is a wire.
+
 ## Not covered yet
 
 Driver gaps, each with its reason:
@@ -178,14 +190,8 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
-- `PwmPeriodicTick::setup_hz` past 65536 counts (the solved-divider
-  path, 984 Hz for 1 kHz asked at TOP 0xFFFF): a wrap count at that
-  rate against the timer.
-- `PwmEdgeCounter` in falling-edge mode: a count against the rising
-  one on the same signal.
-- `pwm_config_for` with phase-correct: the arithmetic is pinned; an
-  edge count at the solved divider.
 - A preset counter (`counter(v)` before a lockstep start, the phase
   relationship "determined by the initial counter values"): two
-  outputs started with different counters and the offset measured on
-  the two wires.
+  outputs started with different counters and the offset read off the
+  two pads' own inputs, sampled together through SIO - no wire needed,
+  letter i's method.

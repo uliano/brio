@@ -150,8 +150,10 @@ stay safe.
   `core_vector_base()`: the entry shim in the open - the naked, relocation-
   free first instructions core 1 runs, the four words core 0 leaves on its
   stack for them, and the ordinary function they jump to, which adopts the
-  vector base, sets the per-core state the ROM did not, and calls the
-  program's entry. A program names none of them; a document and a
+  vector base, sets the per-core state the ROM did not (the FPU on the
+  Arm half, and on both the mailbox's sticky flags cleared - the ROM's
+  side of the launch leaves ROE standing), and calls the program's
+  entry. A program names none of them; a document and a
   debugger do.
 - From `util/inbox.hpp`: `send<Ao>(ev)`, `Inbox<Ao>` (`overflows`,
   `pending`, `capacity`, `clear`), `Inboxes<Aos...>` (`isr()`,
@@ -227,7 +229,7 @@ it around `Core1::launch()`.
 All of them on an RP2350 in the QFN-80 package, **stepping A2**, at
 3.3 V, clk_sys on the PLL at 150 MHz, the ruler the SIO's platform timer,
 and all of them on BOTH architectures: `test_rp2350_multicore` reports
-**39 pass, 0 fail** on the Cortex-M33 pair and **39 pass, 0 fail** on the
+**43 pass, 0 fail** on the Cortex-M33 pair and **43 pass, 0 fail** on the
 Hazard3 pair, from one source. Core 1 has no console: every fact below
 about it was carried by an event that crossed.
 
@@ -312,6 +314,22 @@ about it was carried by an event that crossed.
   The launch still refuses while the MAILBOX interrupt is enabled, whose
   handler would eat the protocol's echoes, and the refusal costs nothing:
   the check is the first thing `protocol()` does.
+- **CORE 1'S OWN CHANNELS** (letter k, ten runs of ten on each half).
+  Core 1 ringing ITS OWN bell - `SioDoorbell<1>::ring()` from core 1,
+  DOORBELL_IN_SET, the CPUID choice's fourth case - runs its bell vector
+  there once. **EVERY LAUNCH LEAVES CORE 1'S ROE STANDING**: its FIFO_ST
+  read 0x1 after the boot's launch and after letter g's relaunch, and
+  SIO_IRQ_FIFO is VLD | ROE | WOF (3.1.5), so a core 1 opening its
+  mailbox line took the interrupt with no word in the FIFO - 541 437
+  entries in half a second, its kernel starved, before the entry shim
+  cleared the flags; now it reads 0 every time. THE MAILBOX AS A
+  PROGRAM'S CHANNEL UNDER LOAD: 4096 sequence words, one every 2 us,
+  through the FIFO into core 1's vector beside a Ping every 64 words
+  through the inbox - every word in sequence, all 64 Pongs in order, no
+  write on a full FIFO, no overflow. At full speed the FIFO never empties
+  and core 1's vector never returns: its kernel stood still and 31 of 64
+  Pings were dropped at Echo's queue - a load the channel takes and a
+  program would not give it.
 
 ## Not covered yet
 
@@ -355,12 +373,3 @@ Implemented but not bench-verified, each with what would measure it:
   bridge, so core 1 speaks only through the bridge here; the chip's own
   USB CDC port is the second console, and a letter that runs one would
   have to give core 1 the USB controller's interrupt line.
-- **`SioMailbox` as a program's own channel.** Its depth, its refusal
-  and its two sticky flags are measured; what is not is a program using
-  it under load beside the bell - two channels carrying traffic at once,
-  which wants a program that wants an ordered channel at all.
-- **`SioDoorbell::ring()` called FROM CORE 1 towards core 1.** Both
-  directions of the CPUID choice are exercised by the bridge - core 0
-  ringing core 1 and core 1 ringing core 0 - and core 0 ringing its own
-  bell is letter j's; the fourth case, core 1 ringing its own, has no
-  caller and would want an AO on core 1 that posts to itself.

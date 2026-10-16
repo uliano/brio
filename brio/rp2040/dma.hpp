@@ -803,7 +803,7 @@ public:
     /// Throw the running block away (E13's abort) and hand the channel
     /// back bound and ready.
     static bool abandon() {
-        ++faults_;
+        faults_ = faults_ + 1u;
         busy_ = false;
         in_flight_ = 0;
         bind();
@@ -845,9 +845,12 @@ private:
 
     static inline uint32_t data_ = 0;
     static inline uint32_t base_ = 0;
-    static inline uint32_t in_flight_ = 0;
-    static inline uint32_t faults_ = 0;
-    static inline bool busy_ = false;
+    // Written by the line's handler (complete(), abandon()) and read by
+    // the program (busy(), in_flight(), faults(), a transport's
+    // tx_idle()): volatile, so a loop polling them reads the cell.
+    static inline volatile uint32_t in_flight_ = 0;
+    static inline volatile uint32_t faults_ = 0;
+    static inline volatile bool busy_ = false;
 };
 
 /**
@@ -918,24 +921,25 @@ public:
 
     /// How many elements have arrived since the last take().
     static uint32_t take() {
-        if (capacity_ == 0u) {
+        const uint32_t capacity = capacity_;
+        if (capacity == 0u) {
             return 0;
         }
         const uint32_t remaining = Channel::count();
-        const uint32_t filled = remaining > capacity_ ? capacity_ : capacity_ - remaining;
-        if (filled <= taken_) {
+        const uint32_t filled = remaining > capacity ? capacity : capacity - remaining;
+        const uint32_t taken = taken_;
+        if (filled <= taken) {
             return 0;
         }
-        const uint32_t fresh = filled - taken_;
         taken_ = filled;
-        return fresh;
+        return filled - taken;
     }
     static bool full() { return capacity_ != 0u && taken_ >= capacity_; }
     static uint32_t capacity() { return capacity_; }
     static uint32_t taken() { return taken_; }
 
     static bool abandon() {
-        ++faults_;
+        faults_ = faults_ + 1u;
         capacity_ = 0;
         taken_ = 0;
         bind();
@@ -984,9 +988,13 @@ private:
 
     static inline uint32_t data_ = 0;
     static inline uint32_t base_ = 0;
-    static inline uint32_t capacity_ = 0;
-    static inline uint32_t taken_ = 0;
-    static inline uint32_t faults_ = 0;
+    // Written by the line's handler (a transport's completion re-arms
+    // and takes there, abandon() on an error) and read by the program
+    // (take(), full(), faults()): volatile, so a loop polling them reads
+    // the cell.
+    static inline volatile uint32_t capacity_ = 0;
+    static inline volatile uint32_t taken_ = 0;
+    static inline volatile uint32_t faults_ = 0;
 };
 
 /**

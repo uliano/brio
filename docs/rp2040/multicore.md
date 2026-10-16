@@ -164,6 +164,13 @@ events), every fact about core 1 carried by an event that crossed:
   core 1's kernel takes its line into core 1's NVIC, and its completion
   is served there alone, the report crossing back through the inbox
   ([dma.md](dma.md)).
+- A `Lease::reply` LOAN ACROSS AND BACK (letter j, ten runs of ten): 64
+  requests each lend core 0's 256-byte buffer to core 1's Echo, which
+  adds one to every byte, sums them and replies through the crossing
+  `ReplyTo` with the same loan; core 0, reading only once the reply is
+  dispatched, finds every byte incremented, the pointer and length its
+  own, the sum right - the inbox's fences carry the loan's contents as
+  they carry the event.
 
 ## Not covered yet
 
@@ -181,9 +188,3 @@ Driver gaps, each with its reason:
   kernels' consent: a vote through the bridge with the round's
   deadline as the veto): born with the first power-aware two-kernel
   program.
-
-Implemented but not bench-verified, each with what would measure it:
-
-- A `Lease::reply` buffer crossing inside a request and back inside
-  the reply: a letter with a buffer-carrying request; the fences are
-  the inbox's and the host test covers the capsule.

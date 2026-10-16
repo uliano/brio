@@ -53,9 +53,10 @@
 //      idle path and of the loop around it, the sleep entry included.
 //      Two edges: the tick's own (SysTick, a core exception, placed by a
 //      reload of D) and a peripheral line's (PWM slice 0 counting clk_sys
-//      to its wrap, placed by a counter write); each in both rungs the
+//      to its wrap, placed by a counter write); each in the rungs the
 //      idle path has without a hook, light (SLEEPDEEP clear) and standby
-//      (set, through the sleep site). The system timer times each try
+//      (set, through the sleep site) - every gate open, then the
+//      SLEEP_EN set PRUNED to the core's, the PWM's and the console's. The system timer times each try
 //      and alarm 1 RESCUES it 50 ms out: a try that takes the rescue is
 //      a wake idle() lost for good, one that ends half a period past the
 //      edge it waited for is a wake deferred to the next edge. The SysTick
@@ -783,14 +784,24 @@ struct Sweep {
     uint32_t earliest_loop;  ///< the first position's, to the caller's loop
 };
 
-/// Every position, one edge and two, in both rungs the idle path has
+/// The standby rung's third form: the SLEEP state with a PRUNED gate set -
+/// the core's (the fabric, the memories, SIO, the timer and its watchdog
+/// tick: the rescue's clocks), the PWM's (the line edge's source) and the
+/// console's UART - every other block unclocked while the core sleeps.
+constexpr SleepClocks pruned_gates = sleep_clocks_core | sleep_clocks_pwm | sleep_clocks_uart0;
+constexpr uint8_t walk_rungs = 3;
+const char* const rung_names[walk_rungs] = {"light  ", "standby", "pruned "};
+
+/// Every position, one edge and two, in the rungs the idle path has
 /// without a hook (light: SLEEPDEEP clear; standby: set, through the sleep
-/// site). Swept with the console silent, printed after.
+/// site, every gate open; and standby with the gates pruned to the set
+/// above). Swept with the console silent, printed after.
 template <typename Edge>
 void walk_edge() {
-    Sweep sweeps[2][2]{};
+    Sweep sweeps[walk_rungs][2]{};
     Edge::begin();
-    for (uint8_t rung = 0; rung < 2u; ++rung) {
+    for (uint8_t rung = 0; rung < walk_rungs; ++rung) {
+        Clocks::sleep_enables(rung == 2u ? pruned_gates : sleep_clocks_all);
         (void)SleepSite::arm(rung == 0u ? SleepDepth::light : SleepDepth::standby);
         for (uint32_t edges = 1; edges <= 2u; ++edges) {
             Sweep& s = sweeps[rung][edges - 1u];
@@ -849,15 +860,16 @@ void walk_edge() {
         }
     }
     SleepSite::disarm();
+    Clocks::sleep_enables(sleep_clocks_all);
     Edge::end();
 
     print(serial, "  ", Edge::name, ", D = ", Edge::first_d, "..", Edge::first_d + walk_positions - 1u,
           " cycles after the placement:", crlf);
     bool clean = true;
-    for (uint8_t rung = 0; rung < 2u; ++rung) {
+    for (uint8_t rung = 0; rung < walk_rungs; ++rung) {
         for (uint32_t edges = 1; edges <= 2u; ++edges) {
             const Sweep& s = sweeps[rung][edges - 1u];
-            print(serial, "    ", rung == 0u ? "light  " : "standby", " waiting for ", edges,
+            print(serial, "    ", rung_names[rung], " waiting for ", edges,
                   edges == 1u ? " edge:  " : " edges: ", s.lost, " lost, ", s.late, " late");
             if (s.lost + s.late != 0u) {
                 print(serial, " (first at D=", s.first_bad, ")");
@@ -873,8 +885,8 @@ void walk_edge() {
         }
         console_drain();
     }
-    bench.verdict("no edge position loses the wake or defers it a period, one edge or two, light or "
-                  "standby",
+    bench.verdict("no edge position loses the wake or defers it a period, one edge or two, light, "
+                  "standby, or standby with the sleep gates pruned to the core's, the PWM's and the console's",
                   clean);
 }
 

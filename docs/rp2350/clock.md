@@ -367,6 +367,13 @@ fail** on the Hazard3 pair, from one source.
   (printed, not judged): 12 / 25, a /12 period and a /13 period of six
   high cycles each, which is what a divider alternating its two integer
   neighbours with no correction gives. Ten runs on each half.
+- **ONE PULSE PER SECOND FOR THE PARTNER'S CALENDAR** (letter u, by
+  name, behind the rail guard): GPOUT0's divider - sixteen bits of
+  integer - stops at the crystal / 65535, 183 Hz, so GP21 is handed to a
+  PIO machine counting 100 000 cycles of 150 MHz / 1500 instead: 40
+  rises in 40 s on the pad's own input, and the RP2040's RTC set on it
+  counts its seconds 1 000 016 to 1 000 020 us apart on its own timer
+  ([../rp2040/rtc.md](../rp2040/rtc.md)).
 
 ## Not covered yet
 

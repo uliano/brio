@@ -147,7 +147,7 @@ if (auto* p = brio::Bootrom::lookup_function(brio::bootrom_code('G', 'B'))) {
 ## Bench findings
 
 On an RP2350 in the QFN-80 package, **stepping A2**, clk_sys at 150 MHz,
-on BOTH architectures: `test_rp2350_blocks` reports **71 pass, 0 fail**
+on BOTH architectures: `test_rp2350_blocks` reports **76 pass, 0 fail**
 on the Cortex-M33 pair and on the Hazard3 pair, from one source, each on
 three flash-and-run cycles. Two numbers of this chapter differ between
 the halves, and both must.
@@ -189,6 +189,10 @@ the halves, and both must.
   nothing in it, and the precondition code belongs to the boot paths that
   do not load it - a watchdog or a RAM boot. The boot info words read
   0xFE00FE and 0x500D.
+- **A CODE THE TABLE DOES NOT CARRY** (letter k, fifteen runs on each
+  half): the made-up 'QZ' looks up as nullptr on both helpers, the
+  function's and the data's - the state every wrapper here answers
+  with `BootromError::not_found` (-17) instead of calling through.
 
 ## Not covered yet
 
@@ -214,9 +218,6 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
-- **`BootromError::not_found`**, this wrapper's own answer when a lookup
-  fails: nothing has yet asked for a code the table does not carry. A
-  letter asking for a made-up two-byte code would close it.
 - **The precondition path of `get_partition_table_info`.** It is reached
   by a boot that does NOT load the partition table - a watchdog boot or a
   RAM boot - and every image here is a flash boot, where the call is

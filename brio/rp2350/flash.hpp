@@ -868,8 +868,11 @@ struct Xip {
         }
         return XIP_CTRL->STREAM_FIFO;
     }
-    /// The FIFO as an address, for a DMA channel: the APB one and the
-    /// auxiliary AHB port's single-cycle alias.
+    /// The FIFO as an address: the APB register, the processor's, and the
+    /// auxiliary AHB port's single-cycle alias, THE DMA's - ACCESSCTRL's
+    /// XIP_CTRL register leaves its DMA bit clear at reset (10.6), so a
+    /// channel reading the APB register takes a bus error (measured,
+    /// docs/rp2350/flash.md).
     static volatile uint32_t& stream_fifo() { return XIP_CTRL->STREAM_FIFO; }
     static volatile uint32_t& fast_stream_fifo() { return XIP_AUX->STREAM; }
 

@@ -444,6 +444,13 @@ struct Core1Of {
 #else
         __asm__ volatile("csrw mtvec, %0" :: "r"(vectors) : "memory");
 #endif
+        // The ROM's side of the launch leaves this core's ROE standing
+        // (measured after every launch, on both architectures:
+        // test_rp2350_multicore letter k), and SIO_IRQ_FIFO is VLD | ROE |
+        // WOF (3.1.5) - a program that opens its mailbox line would take
+        // an interrupt with no word in the FIFO, again and again. Its
+        // FIFO_ST starts clear.
+        SIO->FIFO_ST = SIO_FIFO_ST_ROE_BITS | SIO_FIFO_ST_WOF_BITS;
         entered_ = true;
         reinterpret_cast<void (*)()>(static_cast<uintptr_t>(entry))();
         // An entry that returns has no kernel to go back to.

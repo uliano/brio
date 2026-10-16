@@ -170,14 +170,27 @@ the boundaries crossed one second at a time.
 - Adjusted while running the calendar takes the new value; stopped it
   reports not running and restarted it counts on; the forced
   interrupt appears in the status with no raw flag.
+- THE ONE PULSE PER SECOND ON GPIO 20 (letter h, by name: the desk
+  partner's clock suite drives wire 10 with a PIO machine counting its
+  own crystal, ten runs): `RtcClock::gpin0_1hz` reads divider one; the
+  pulse rises every 1 000 018 us of this board's timer (18 ppm, the two
+  crystals); `set()` through it takes 12 to 13 s - every wait of the
+  enable, the tick and the LOAD is a clk_rtc period here, so the bound is
+  passed as 200 000 000 spins where the default suits 46 875 Hz -; and
+  six seconds of the calendar run 1 000 017 to 1 000 020 us apart, the
+  calendar where it was set plus the seconds counted. Twenty runs of
+  twenty. TWO RULES THE 1 Hz INPUT ENFORCES, both in the driver: `init()`
+  stops clk_rtc's generator and waits three periods of the source it
+  runs on before the mux changes (2.15.3.2's "2 cycles of the clock
+  source" - 2 s at 1 Hz, so leaving the input costs some 3 s), and
+  `set()`'s wait for the enable's tick is three clk_rtc periods long,
+  computed at `init()`. Without them four set() of twenty never saw the
+  calendar start.
 
 ## Not covered yet
 
 Driver gaps, each with its reason:
 
-- The one-pulse-per-second reference on GPIO 20 (`RtcClock::gpin0_1hz`):
-  selected and divided by one; a GPS or a second board's 1 Hz on the
-  wire would measure it.
 - The dormant wake by the alarm (4.8.5.5) is [sleep.md](sleep.md)'s
   measurement: the ring oscillator dormant, the crystal keeping
   clk_rtc, the alarm the wake.

@@ -50,6 +50,10 @@
 //   e  the streaming interface of 4.4.3: a run of words fetched in the
 //      background and popped by the processor, judged byte for byte
 //      against the same bytes read through the window
+//   j  THE STREAM INTO A DMA ENGINE: 4 KB through the streaming FIFO
+//      into a receive engine paced by Dreq::xip_stream, once through the
+//      FIFO's APB register and once through the auxiliary AHB port's
+//      alias - timed, every word judged against the uncached alias
 //   f  WHAT A WINDOW COSTS WITH NOTHING WRITTEN: a raw id command timed,
 //      the kernel ticks it eats, and the console's own bytes held across
 //      it
@@ -85,6 +89,7 @@
 
 #include "rp2350/clock.hpp"
 #include "rp2350/core.hpp"
+#include "rp2350/dma.hpp"
 #include "rp2350/flash.hpp"
 #include "rp2350/nvm_flash.hpp"
 #include "rp2350/pin.hpp"
@@ -125,6 +130,12 @@ using Chip = QmiWindow<0>;    // the window the board's flash sits in
 using Spare = QmiWindow<1>;   // nothing is attached to it on this board
 
 TestBench<Serial> bench;
+
+/// Letter j's engine: a receive engine paced by the streaming FIFO's
+/// request, its completion on line 0.
+using StreamEngine = DmaRxEngine<5, uint32_t>;
+volatile uint32_t stream_blocks = 0;
+volatile uint32_t stream_errors = 0;
 
 /// The partition, and the one sector every writing letter uses.
 constexpr uint32_t store_base = QspiFlashPartition::storage_base;
@@ -579,6 +590,65 @@ void te_stream() {
 }
 
 // =============================================================================
+// j - the stream into a DMA engine
+// =============================================================================
+alignas(4) uint32_t streamed[1024];
+
+/// One 4 KB run through the streaming FIFO into the engine, from `fifo`
+/// (the APB register or the auxiliary port's alias): the microseconds,
+/// the words wrong against the uncached alias, the block's end seen.
+struct StreamRun {
+    uint32_t us;
+    uint32_t wrong;
+    uint32_t errors;   ///< bus errors the line's handler served (service() clears the flags)
+    uint32_t moved;    ///< words the channel moved
+    bool done;
+};
+StreamRun stream_run(volatile uint32_t& fifo, uint32_t from) {
+    for (uint32_t& w : streamed) {
+        w = 0xDEAD'BEEFu;
+    }
+    stream_blocks = 0;
+    stream_errors = 0;
+    StreamEngine::arm(&fifo, Dreq::xip_stream);
+    StreamRun r{};
+    const bool started = StreamEngine::start(streamed, 1024u);
+    const uint32_t t0 = us_now();
+    Xip::stream_start(Flash::window + from, 1024u);
+    while (stream_blocks == 0u && us_now() - t0 < 100'000u) {
+    }
+    r.us = us_now() - t0;
+    r.errors = stream_errors;
+    r.moved = 1024u - DmaChannel<StreamEngine::channel>::count();
+    r.done = started && stream_blocks == 1u && stream_errors == 0u && Xip::stream_remaining() == 0u;
+    Xip::stream_stop();
+    StreamEngine::stop();
+    for (uint32_t i = 0; i < 1024u; ++i) {
+        if (streamed[i] != *reinterpret_cast<const volatile uint32_t*>(Flash::uncached_address(from + i * 4u))) {
+            ++r.wrong;
+        }
+    }
+    return r;
+}
+
+void tj_stream_dma() {
+    constexpr uint32_t from = 0x0000'1000u;
+    const StreamRun apb = stream_run(Xip::stream_fifo(), from);
+    const StreamRun aux = stream_run(Xip::fast_stream_fifo(), from + 0x1000u);
+    print(serial, "  4 KB streamed into a receive engine on Dreq::xip_stream: through the auxiliary AHB port ", aux.us, " us, ",
+          aux.moved, " words moved, ", aux.wrong, " wrong, ", aux.errors, " bus error(s); through the FIFO's APB register (for "
+          "the record) ", apb.us, " us, ", apb.moved, " moved, ", apb.errors, " bus error(s)", crlf);
+    // 4.4.3: "The DMA can then retrieve this data through the auxiliary
+    // AHB port" - the one path the chapter names for the engine. The APB
+    // register is printed: a channel reading it takes a bus error on its
+    // first read, ACCESSCTRL's XIP_CTRL register leaving the DMA bit
+    // clear at reset (10.6), which no driver here writes.
+    bench.verdict("the streaming FIFO paces a DMA engine through the auxiliary AHB port: 1024 words land, every one the word "
+                  "the uncached alias reads, the run's count spent, one completion, no bus error",
+                  aux.done && aux.moved == 1024u && aux.wrong == 0u && aux.errors == 0u);
+}
+
+// =============================================================================
 // f - what a window costs with nothing written
 // =============================================================================
 void tf_window_cost() {
@@ -819,6 +889,15 @@ void banner() {
 // an entry of Hazard3's own dispatch on the other.
 extern "C" void isr_uart0() { (void)Serial::isr(); }
 extern "C" void isr_systick() { brio::Ticker::tick(); }
+extern "C" void isr_dma_0() {
+    const uint8_t f = StreamEngine::service();
+    if ((f & StreamEngine::flag_error) != 0u) {
+        stream_errors = stream_errors + 1u;
+    }
+    if ((f & StreamEngine::flag_complete) != 0u) {
+        stream_blocks = stream_blocks + 1u;
+    }
+}
 
 int main() {
     const bool clock_ok = SysClock::init();
@@ -826,6 +905,7 @@ int main() {
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
     const bool flash_ok = brio::Flash::init();
+    (void)brio::Dma::init();   // letter j's engine: the block out of reset
     brio::enable_interrupts();
 
     bench.letter('a', "the engine, the chip's identity and the partition", ta_boot);
@@ -834,6 +914,7 @@ int main() {
     bench.letter('d', "address translation against the bootrom's own translator", td_translation);
     bench.letter('e', "the streaming interface", te_stream);
     bench.letter('f', "what a window costs with nothing written", tf_window_cost);
+    bench.letter('j', "the stream into a DMA engine on its own request", tj_stream_dma);
     bench.letter('g', "the refusals", tg_refusals);
     bench.letter('h', "one sector, one page (THREE ERASE CYCLES)", th_erase_program, false);
     bench.letter('i', "a second program between erases (ONE ERASE CYCLE)", ti_reprogram, false);

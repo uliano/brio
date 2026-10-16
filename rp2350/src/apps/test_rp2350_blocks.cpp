@@ -472,6 +472,26 @@ void td_edges() {
     bench.verdict("the block's pacing request is the one the DREQ table names, and "
                   "DMA_SIZE is left at words",
                   Sha256::dreq == Dreq::sha256 && Sha256::dma_size() == Sha256DmaSize::words);
+
+    // write_block() refuses a span that is not a whole block, before a
+    // word is written: the next whole message still hashes right.
+    Sha256::start();
+    const bool short_refused = !Sha256::write_block(std::span<const uint8_t>{one_block}.first(63));
+    const bool empty_refused = !Sha256::write_block(std::span<const uint8_t>{one_block}.first(0));
+    const bool still_right = Sha256::hash(std::span<const uint8_t>{one_block}) == sha256(std::span<const uint8_t>{one_block});
+    bench.verdict("write_block() refuses 63 bytes and an empty span (a block is 64), writing nothing: the next hash is right",
+                  short_refused && empty_refused && still_right);
+
+    // release(): the block back into reset (RESETS.RESET's bit up,
+    // RESET_DONE's down), and init() brings it back to a right digest.
+    Sha256::release();
+    const bool held = Resets::held(Sha256::reset_block) && !Resets::released(Sha256::reset_block);
+    const bool again = Sha256::init();
+    const bool right_again =
+        again && Sha256::hash(std::span<const uint8_t>{one_block}) == sha256(std::span<const uint8_t>{one_block});
+    print(serial, "  release(): held in reset ", held, "; init() after it ", again, ", the digest right ", right_again, crlf);
+    bench.verdict("release() holds the block in reset (RESET set, RESET_DONE clear), and init() brings it back hashing right",
+                  held && right_again);
 }
 
 // =============================================================================
@@ -595,16 +615,26 @@ void tg_recovery() {
     // is reset. It is the one error of this chapter a program cannot
     // wait out, so the branch that reports it and the verb that cures it
     // are exercised here rather than left to a board that misbehaves.
-    Trng::init({.sample_cycles = 25});
-    Trng::clear_autocorr_stats();
-    Trng::start();
-    const auto starved = Trng::read_blocking();
-    const Trng::AutocorrStats fatal = Trng::autocorr_stats();
-    const bool named = !starved.has_value() &&
-                       Trng::last_error() == TrngError::autocorrelation;
+    //
+    // NOT EVERY ATTEMPT: at 25 cycles 3 attempts of 36 measured saw the
+    // test pass once between failures and the collection go on. So up
+    // to three attempts, each a fresh init(): a miss rate of 1 in 12
+    // leaves about 1 in 1700 for three.
+    bool named = false;
+    Trng::AutocorrStats fatal{};
+    uint32_t attempts = 0;
+    while (!named && attempts < 3u) {
+        ++attempts;
+        Trng::init({.sample_cycles = 25});
+        Trng::clear_autocorr_stats();
+        Trng::start();
+        const auto starved = Trng::read_blocking();
+        fatal = Trng::autocorr_stats();
+        named = !starved.has_value() && Trng::last_error() == TrngError::autocorrelation;
+    }
     print(serial, "  at 25 cycles between samples: autocorrelation ", fatal.tries,
           " started, ", static_cast<uint32_t>(fatal.failures), " failed; read_blocking says ",
-          named ? "autocorrelation" : "something else", crlf);
+          named ? "autocorrelation" : "something else", " (attempt ", attempts, " of 3)", crlf);
     bench.verdict("a sampling interval far under the measured floor stops the block on "
                   "AUTOCORR_ERR, and read_blocking names that error rather than timing out",
                   named && fatal.failures >= 4u);
@@ -659,6 +689,33 @@ void tg_recovery() {
     bench.verdict("the bit counter refuses to reset while the source is enabled, and "
                   "takes it when the source is stopped",
                   refused && accepted);
+
+    // THE RUN-TIME REFUSAL: three settings the chapter forbids, built
+    // from run-time values (the compile-time init<cfg>() refuses the same
+    // three by the same predicate): a chain of 4, a sample count of zero,
+    // a count of 16 with the decorrelator bypassed. Each is refused with
+    // `misconfigured` before the block is touched - its settings read
+    // back as they stood.
+    static volatile uint8_t rt_chain = 4;
+    static volatile uint32_t rt_zero = 0;
+    static volatile uint32_t rt_sixteen = 16;
+    const uint8_t chain_before = Trng::chain();
+    const uint32_t sample_before = Trng::sample_cycles();
+    const bool r1 = !Trng::init({.chain = rt_chain});
+    const bool m1 = Trng::last_error() == TrngError::misconfigured;
+    const bool r2 = !Trng::init({.sample_cycles = rt_zero});
+    const bool m2 = Trng::last_error() == TrngError::misconfigured;
+    const bool r3 = !Trng::init({.sample_cycles = rt_sixteen, .von_neumann = false});
+    const bool m3 = Trng::last_error() == TrngError::misconfigured;
+    const bool untouched = Trng::chain() == chain_before && Trng::sample_cycles() == sample_before;
+    print(serial, "  init() at run time with chain 4, sample count 0, count 16 without von Neumann: refused ", r1, r2, r3,
+          ", misconfigured ", m1, m2, m3, ", the settings untouched ", untouched, crlf);
+    bench.verdict("init(cfg) refuses each illegal setting at run time with TrngError::misconfigured and leaves the block "
+                  "as it stood",
+                  r1 && r2 && r3 && m1 && m2 && m3 && untouched);
+    const bool legal_again = Trng::init({.sample_cycles = rt_sixteen + 1u, .von_neumann = false});
+    bench.verdict("... and the floor itself, seventeen without the decorrelator, is taken", legal_again);
+    (void)Trng::init();
 }
 
 // =============================================================================
@@ -998,6 +1055,16 @@ void tk_bootrom() {
     bench.verdict("and it reports NO partition table on this image, which is what an "
                   "unsigned image built with none should say",
                   rc >= 2 && (out[1] & 0x1FFu) == 0u);
+
+    // A code the table does not carry: both helpers answer nullptr, the
+    // state every wrapper here turns into BootromError::not_found.
+    constexpr uint32_t made_up = bootrom_code('Q', 'Z');
+    const void* no_fn = Bootrom::lookup_function(made_up);
+    const void* no_data = Bootrom::lookup_data(made_up);
+    print(serial, "  the made-up code 'QZ': function ", no_fn == nullptr ? "nullptr" : "FOUND", ", data ",
+          no_data == nullptr ? "nullptr" : "FOUND", "; BootromError::not_found = ", BootromError::not_found, crlf);
+    bench.verdict("a code the ROM's table does not carry is looked up as nullptr on both helpers - the wrappers' not_found",
+                  no_fn == nullptr && no_data == nullptr);
 }
 
 void banner() {

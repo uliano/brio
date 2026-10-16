@@ -468,6 +468,15 @@ flash endurance: `h`, `i` and `w`.
   02h, 06h, 01h or C7h opcode through the run-time face of the
   allow-list; an answer buffer in the XIP space; and the medium's own
   floor, ceiling and cell alignment.
+- **THE STREAM INTO A DMA ENGINE** (letter j, ten runs of ten on each
+  half): 4 KB through the streaming FIFO into a receive engine paced
+  by `Dreq::xip_stream`, read through the auxiliary AHB port's alias,
+  land in 179 to 180 us - 22.8 MB/s, every word the uncached alias's,
+  one completion, no bus error. Through the FIFO's APB register instead
+  the channel takes a BUS ERROR on its first read: ACCESSCTRL's XIP_CTRL
+  register resets with its DMA bit clear (10.6), and no driver here
+  writes it - which is why `fast_stream_fifo()` is the engine's address
+  and `stream_fifo()` the processor's.
 
 ## Not covered yet
 
@@ -509,11 +518,6 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
-- **Streaming into a DMA channel on `Dreq::xip_stream`.** The FIFO's two
-  addresses are there and the processor's own pops are measured; a
-  channel paced by that DREQ is not. It wants the DMA chapter's engine
-  slots pointed at the auxiliary AHB port and a letter that judges the
-  block it lands.
 - **The performance counters over a program's own work.** They are read
   and reset in a letter that makes its own locality; what a real
   program's hit ratio is, and what the nine-cycle cooldown after a miss

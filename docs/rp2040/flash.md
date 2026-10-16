@@ -146,6 +146,27 @@ but their timings, which is the point of the bootrom's engine.
   run through the 64 KB block command - 226 ms on the Winbond, 5.2 to
   5.5 ms on the Zetta, whose block costs what its sector costs - the
   chip idle when the window closes.
+- A RUN ACROSS THE 64 KB BOUNDARY (letter x, outside the all-key: it
+  wipes the partition). The partition is one aligned block, so the run
+  that crosses a block boundary starts one sector below the floor, in
+  the linker's region past every image (the letter refuses unless both
+  sectors below the floor read erased): 68 KB from 0x1EF000 in one
+  `erase()`. The sector below the run, marked, is kept - the unaligned
+  end took the sector command, not a block - and the whole run reads
+  erased; on the Zetta it takes 10.2 ms, two of its 5.2 ms commands,
+  where seventeen sector commands would take 88 ms. Ten runs of ten.
+- THE CACHE'S TWO SWITCHES (letter g). ERR_BADWRITE (reset value 1): a
+  write to the uncached, non-allocating alias is dropped in silence
+  with it clear and is a bus fault with it set - one HardFault, the
+  suite's body stepping over the store -, the flash word unchanged
+  either way. POWER_DOWN forces EN clear (read back); the image runs on
+  from the flash, every word read exact, no hit counted; the
+  cache-as-SRAM answers a bus fault while powered down, and 64 words
+  written into it before are all there after; with the tags flushed
+  and EN set the cache serves again. With EN clear, alone or forced,
+  NEITHER counter moves: CTR_ACC's "each XIP access, whether the cache
+  is hit or not" counts the cache's lookups, and a disabled cache makes
+  none. Ten runs of ten.
 
 ## Not covered yet
 
@@ -169,11 +190,3 @@ Driver gaps, each with its reason:
 - Flash sizes other than 2 MB: the linker script and the partition
   are drawn for the chips on the bench; a 16 MB board wants its own
   script and preset.
-
-Implemented but not bench-verified, each with what would measure it:
-
-- `Xip::power_down` and `fault_on_bad_write`: a write to a non-cached
-  alias with the fault armed, caught by the HardFault handler.
-- An erase that spans the 64 KB block boundary inside the partition:
-  the wipe erases one aligned block; a run from the middle of one
-  block into the next would take the sector command on its ends.

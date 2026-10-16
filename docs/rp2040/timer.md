@@ -71,6 +71,11 @@ brio::Timer::alarm_in(0, 2000u);              // fires in 2 ms, once
   ([multicore.md](multicore.md)). `debug_pause(true, true)` is the
   datasheet's default back, for a single-kernel program that wants a
   value read over SWD at a halt to be a stopped one.
+- PAUSE stops the count: paused across five of core 0's SysTick
+  milliseconds the timer moves 0 us, and it runs on from where it stood
+  - 5000 us over the next five; the raw pair read 20 000 times on EACH
+  core at once never steps backwards on either (`test_rp2040_multicore`
+  letter j, ten runs of ten).
 
 ## Not covered yet
 
@@ -84,11 +89,3 @@ Driver gaps, each with its reason:
   its building blocks.
 - An alarm task (a `TimeEvent`-like one-shot over an alarm): born with
   its first user.
-
-Implemented but not bench-verified, each with what would measure it:
-
-- `pause()`: a `test_rp2040_clock` letter reading the count across a
-  pause.
-- The second core's reads of the raw pair while the first core reads
-  too: the multicore suite times its crossings on core 0's reads
-  alone; a letter with both cores reading.

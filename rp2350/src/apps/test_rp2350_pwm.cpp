@@ -58,6 +58,12 @@
 //      of the range and 256 - and the fraction on top of 256 that this
 //      chapter forbids
 //   h  THE LAMP: util/rgb_lamp.hpp over three outputs, all three measured
+//   i  WIRELESS, the solved divider and the falling edge:
+//      PwmOutput::setup_hz PHASE-CORRECT at 1 kHz, its edges counted on
+//      its own pad's input and its wraps; PwmEdgeCounter rising and
+//      FALLING on a B pad whose level the pad's own output override
+//      walks (no wire: the pad's input buffer reads what the override
+//      drives)
 //   j  THE FOUR SLICES THIS CHIP ADDED: 8..11 as repeating timers on both
 //      lines, and slice 8's and slice 11's outputs on GPIO 32..47 sampled
 //      through SIO - including the two pads that carry ONE output
@@ -335,6 +341,88 @@ void all_off() {
     (void)Pin<14>::release();
     (void)Pin<15>::release();
     (void)Pin<9>::release();
+}
+
+// =============================================================================
+// i - phase-correct at the solved divider, the falling edge (wireless)
+// =============================================================================
+using OutPc = PwmOutput<12, 999>;   // slice 6 A on GP12, no wire: its own pad read back
+
+/// Rising edges of pin 12's pad input over `us`, the loop polling it.
+uint32_t pad_rises(uint32_t us) {
+    uint32_t rises = 0;
+    bool last = Pin<12>::read();
+    const uint32_t t0 = us_now();
+    while (us_now() - t0 < us) {
+        const bool now = Pin<12>::read();
+        if (now && !last) {
+            ++rises;
+        }
+        last = now;
+    }
+    return rises;
+}
+
+/// GP15 (slice 7 B) as an edge counter's input, its level walked by the
+/// pad's own output override: from low, `pulses` high-low pulses, then
+/// high - `pulses` + 1 rising edges and `pulses` falling ones. Each
+/// level held 2 us (300 clk_sys cycles, far past the input's two-cycle
+/// synchronizer).
+uint16_t walk_edges(bool falling, uint16_t pulses) {
+    (void)Edges7::setup(falling);
+    Gpio::out_override(15, PinOverride::low);
+    Gpio::oe_override(15, PinOeOverride::enable);
+    spin_us(5);
+    Edges7::restart();
+    Edges7::run(true);
+    for (uint16_t i = 0; i < pulses; ++i) {
+        Gpio::out_override(15, PinOverride::high);
+        spin_us(2);
+        Gpio::out_override(15, PinOverride::low);
+        spin_us(2);
+    }
+    Gpio::out_override(15, PinOverride::high);
+    spin_us(5);
+    Edges7::run(false);
+    const uint16_t n = Edges7::count();
+    Gpio::oe_override(15, PinOeOverride::pass);
+    Gpio::out_override(15, PinOverride::pass);
+    Edges7::release();
+    return n;
+}
+
+void ti_solved() {
+    all_off();
+    // Phase-correct at the solved divider: 1 kHz on TOP 999 wants 2000
+    // counts a period, the divider 75 at 150 MHz. Its pad read back: 200
+    // rising edges in 200 ms, one either way; its wraps the same (in
+    // phase-correct the wrap is once a period, 12.5.2.1).
+    const bool pc_ok = OutPc::setup_hz(clock, 1000, true);
+    OutPc::duty(500);
+    Pwm::clear_pending(PwmSlice<6>::bit);
+    Pwm::interrupts<0>(PwmSlice<6>::bit, true);
+    clear_wraps();
+    const uint32_t rises = pad_rises(200'000);
+    const uint32_t pc_wraps = wraps0[6];
+    Pwm::interrupts<0>(PwmSlice<6>::bit, false);
+    const PwmSliceConfig pc = PwmSlice<6>::config();
+    OutPc::release();
+    (void)Pin<12>::release();
+    print(serial, "  setup_hz(1000) phase-correct on TOP 999: divider ", pc.divider.sixteenths(), "/16, phase_correct ",
+          pc.phase_correct, "; the pad's own input: ", rises, " rising edges in 200 ms, ", pc_wraps, " wraps", crlf);
+    bench.verdict("pwm_config_for phase-correct: the divider solved to 75 for TOP 999, the pad toggling at 1 kHz (199..201 "
+                  "rises in 200 ms) and the slice wrapping once a period",
+                  pc_ok && pc.phase_correct && pc.divider.sixteenths() == 1200u && rises >= 199u && rises <= 201u &&
+                      pc_wraps >= 199u && pc_wraps <= 201u);
+
+    // The two edge modes on one walked signal.
+    const uint16_t up = walk_edges(false, 100);
+    const uint16_t down = walk_edges(true, 100);
+    print(serial, "  a level walked by the override, from low: 100 pulses then high - rising mode ", up, ", falling mode ",
+          down, crlf);
+    bench.verdict("PwmEdgeCounter: 101 rising edges counted in rising mode and 100 falling ones in falling mode, exact",
+                  up == 101u && down == 100u);
+    all_off();
 }
 
 // =============================================================================
@@ -1263,6 +1351,7 @@ int main() {
     bench.letter('f', "the second wire, lockstep", tf_second_wire, false);
     bench.letter('g', "the divider ladder", tg_ladder, false);
     bench.letter('h', "the lamp over three outputs", th_lamp, false);
+    bench.letter('i', "phase-correct at the solved divider, the falling edge (wireless)", ti_solved);
     bench.letter('j', "the four slices this chip added", tj_new_slices);
     bench.letter('k', "the level table streamed into CC, paced by the wrap", tk_stream, false);
     bench.letter('y', "the instruments (diagnostics, outside z)", ty_probe, false);

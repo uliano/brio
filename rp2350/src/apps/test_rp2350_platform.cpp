@@ -74,8 +74,9 @@
 //      on both halves: the platform timer's comparator, the counter run
 //      on clk_sys for the letter so that a counter write places it - the
 //      KERNEL'S TICK on Hazard3 (mip.MTIP), the system line
-//      SIO_IRQ_MTIMECMP on the Cortex-M33, whose tick is SysTick and is
-//      not walked here; and a peripheral line, PWM slice 0's wrap on
+//      SIO_IRQ_MTIMECMP on the Cortex-M33; on the Cortex-M33 alone a
+//      third, ITS tick - SysTick, a core exception, placed by a reload of
+//      D (the name exists on that half only); and a peripheral line, PWM slice 0's wrap on
 //      clk_sys placed by a counter write (the NVIC on one half, Xh3irq on
 //      the other). Each in both rungs the idle path has without a hook:
 //      light, and standby through the sleep site - which on Hazard3
@@ -845,6 +846,37 @@ struct LineEdge {
     static uint32_t entry() { return line_entry; }
 };
 
+#if defined(BRIO_RP2350_CORE_M33)
+/// THE CORTEX-M33'S TICK: SysTick, a core exception, placed by a reload
+/// of D - LOAD = D, a VAL write (which clears the counter, the reload
+/// taken on the next cycle: the Armv8-M SysTick's SYST_CVR), LOAD back
+/// to the period - and read since the edge from VAL. On the Arm half
+/// only: SysTick has no name on the other, whose tick is the comparator
+/// above.
+volatile uint32_t systick_entry_val = 0;
+struct SysTickEdge {
+    static constexpr uint32_t first_d = 8;   // the LOAD restore lands before the reload
+    static constexpr uint32_t period = SysClock::hz / Ticker::ticks_per_second;
+    static const char* name() { return "the tick (SysTick, a core exception - the Cortex-M33 alone)"; }
+    static void begin() {}
+    static void end() {}
+    static uint32_t count() { return Ticker::ticks(); }
+    /// Just after a tick: a whole period before the next natural edge.
+    static void sync() {
+        const uint32_t s = Ticker::ticks();
+        while (Ticker::ticks() == s) {
+        }
+    }
+    [[gnu::always_inline]] static void place(uint32_t d) {
+        SysTick->LOAD = d;
+        SysTick->VAL = 0;
+        SysTick->LOAD = period - 1u;
+    }
+    static uint32_t since_edge() { return period - 1u - SysTick->VAL; }
+    static uint32_t entry() { return period - 1u - systick_entry_val; }
+};
+#endif
+
 struct TryResult {
     uint32_t took;      ///< cycles from before the placement to the caller's loop
     uint32_t to_loop;   ///< cycles from the edge to the caller's loop, past the last edge
@@ -1012,6 +1044,10 @@ void tw_edge() {
     walk_edge<MtimeEdge>();
     drain_on_clockwork();
     walk_edge<LineEdge>();
+#if defined(BRIO_RP2350_CORE_M33)
+    drain_on_clockwork();
+    walk_edge<SysTickEdge>();
+#endif
 
     Clockwork::interrupt<0>(false);
     Irq::disable(Clockwork::irq<0>());
@@ -1160,6 +1196,9 @@ void banner() {
 // an entry of Hazard3's own dispatch on the other.
 extern "C" void isr_uart0() { (void)Serial::isr(); }
 extern "C" void isr_systick() {
+#if defined(BRIO_RP2350_CORE_M33)
+    systick_entry_val = SysTick->VAL;   // letter w on the Cortex-M33: where the period stood on entry
+#endif
     mtime_entry = SIO->MTIME;   // letter w on Hazard3, where this is the comparator's trap
     brio::Ticker::tick();
 }

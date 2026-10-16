@@ -285,6 +285,11 @@ below with the four wires fitted.
   `PinRef` past the bank is not valid and does nothing. A pad in the HIGH
   half (GP40) is driven and read through GPIO_HI_OUT and GPIO_HI_IN at
   its own bit, eight places down from its pin number.
+- **THE INTERRUPTS TOWARDS PROC 1** (`test_rp2350_multicore` letter k,
+  ten runs of ten on each half): GP6's rising edge enabled towards proc 1
+  by core 1, the bank's line open in BOTH cores' controllers, core 0
+  driving the pad through SIO - 25 edges, 25 entries of core 1's vector
+  and none of core 0's.
 
 ## Not covered yet
 
@@ -326,9 +331,6 @@ Implemented but not bench-verified, each with what would measure it:
   slew settings are written and read back, and this chip has no way to
   witness an edge rate or a source impedance from the inside: a scope on
   a pad, or a load that a 2 mA driver cannot hold and a 12 mA one can.
-- **The interrupts towards proc 1**: the registers are written and read
-  back through `PinIrqTarget::proc1`, and nothing has launched the
-  second core on this target yet - that is the multicore chapter.
 - **`Gpio::outputs` / `outputs_hi`** over a mask of many pads: used by
   the pin-check tool and not by a letter of this suite, which drives its
   pads one at a time because it has wires to judge.

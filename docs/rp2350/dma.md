@@ -373,7 +373,7 @@ brio::Dma::abort(brio::DmaChannel<4>::bit | brio::DmaChannel<5>::bit);
 
 All of them on an RP2350 in the QFN-80 package, **stepping A2**, clk_sys
 at 150 MHz, and all of them on BOTH architectures: `test_rp2350_dma`
-reports **49 pass, 0 fail** on the Cortex-M33 pair and on the Hazard3
+reports **73 pass, 0 fail** in its z on the Cortex-M33 pair and on the Hazard3
 pair, from one source - and every verdict of it was printed THROUGH a
 DMA engine, the console's transport naming one in its transmit slot.
 
@@ -499,6 +499,42 @@ DMA engine, the console's transport naming one in its transmit slot.
   leave them (9 to 12 read on the next owner's channel), and the
   TRIGGER drops them: the next owner, armed on a request that never
   comes, moved nothing.
+- **THE CORNERS, letter w** (ten runs on each half, no wire). THE
+  SNIFFER'S OTHER MODES against util/crc.hpp's twins: CRC16R and CRC32R
+  are the CRC-16-CCITT and the CRC-32 of the same bytes each
+  bit-reversed; EVEN is the parity of every bit (1 for 1023 ones); and
+  BSWAP is on the DATA, not on the result - on word beats the sniffer
+  takes a word's bytes in memory order, and with BSWAP a word most
+  significant byte first. A WRITE into the SIO window raises WRITE_ERROR
+  and AHB_ERROR (0xA0000000), not READ_ERROR, the channel halting after
+  one beat; the flags clear by writing one and it copies again. ONE
+  `abort(mask)` ends channels 4 and 5 chained to each other in a paced
+  loop (RP2350-E5's case a single channel cannot answer): both idle,
+  neither restarted 60 ms later. `DmaCopyEngine` with `DmaReport::blocks`
+  ends a 1 KB copy with one entry of its line's handler. And THE ROUND,
+  counted from one MULTI_CHAN_TRIGGER over 20 us, word beats always
+  ready: two normal channels share it evenly (some 750 each); beside
+  one, two and three HIGH_PRIORITY channels a normal one takes the same
+  share as each of them (some 740, 500, 370) - 12.6.10's round, every
+  ready HIGH channel once and then one normal channel, which with one
+  normal channel is even; and a normal channel PACED at one request in 20
+  cycles is served 143 to 150 times of the window's 150 beside up to three
+  HIGH ones. So the round does not starve a lone paced channel, and
+  letter p's starvation (below) is not the round.
+- **A PACED BLOCK'S FIRST TRANSFER IS THE CODE'S, NOT THE CHANNEL'S**
+  (letter x, by name, ten runs on each half). The gap between `arm()`
+  and `start()` swept from 0 to 1000 clk_sys cycles, ten tries each, the
+  first transfer timed on TIMER1 at clk_sys: with the code warm it comes
+  within one pace period of the start at EVERY gap (47 to 187 cycles at
+  one request in 150, the poll's own turn beside it), gap 0 included.
+  With the XIP cache invalidated before each try - `arm()` and `start()`
+  fetched from the flash, as on a program's first call - it comes 715 to
+  773 cycles after, every try: the misses before the trigger is written,
+  which is the 700 to 1200 cycles once read as the channel's. The
+  channel's request credits (DBG_CTDREQ) stand at 2 to 63 when the block
+  starts - banked by the bound channel from the free-running timer, up to
+  the counter's 63 - and at 0 after the first transfer: THE TRIGGER DROPS
+  THEM (letter r's finding), and the first request after it is taken.
 - **THE DW_apb_i2c HOST'S READ PHASE ON THESE ENGINES** - the transmit
   engine pouring the half-word command cell, the receive engine
   collecting the bytes - is measured on the pair's I2C wires against the
@@ -533,36 +569,13 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
-- WHY two HIGH_PRIORITY channels always ready starve a normal one here and
-  not on the RP2040 (letter p): the measurement stands, the mechanism is
-  12.6.1's removed idle cycle by inference only. A letter counting the
-  normal channel's transfers against one, two and three HIGH channels of
-  known demand, read off its TRANS_COUNT over a fixed window, would place
-  the round.
-- A PACED block started right after its `arm()`: its first transfer
-  comes 700 to 1200 cycles after the trigger at one request in 150,
-  where a block started 100 cycles or more after the binding - or after
-  the channel's credits are cleared, or the timer written again - begins
-  within one pace period; the pace itself is exact either way, and the
-  credits a free-running timer banks (the counter saturates at 63) start
-  no burst. Measured, not explained; a letter that sweeps the gap
-  between the abort `arm()` performs and the trigger, with the
-  controller's debug registers read across it, would.
-- `DmaCopyEngine` completed on a line (`DmaReport::blocks`): letter l
-  polls it; a letter that waits on the line's handler.
-- A WRITE bus error (WRITE_ERROR): letter `h` provokes a read error; a
-  block writing into an address the fabric cannot decode would be the
-  other half.
-- `DmaSniffCalc::crc16_reversed` and `even_parity`, and the sniffer's
-  BSWAP option: written from 12.6.8.2 and not measured; a letter with
-  their software twins. The sum, the two CRCs and the reversed-and-
-  inverted CRC-32 are measured above.
+- WHY two HIGH_PRIORITY byte copies starve a normal receive ring on a
+  UART here and not on the RP2040 (letter p): letter w counted the round
+  and it is not the cause - a paced normal channel between SRAM cells is
+  served in full beside three HIGH ones. What differs in letter p is the
+  ring's source, a peripheral read across the APB bridge, and byte beats
+  in the copies; the same count with the paced channel reading an APB
+  register beside byte copies would split the two.
 - An engine on line 1 served by core 1, and the two spare lines used as
   the convention above allows: the multicore chapter, with a transport
   on the second core - the routing is the same verb.
-- `Dma::abort(mask)` OVER A CHAIN, which is the half of RP2350-E5 a
-  single channel cannot answer: the suite aborts one channel at a time
-  (letters a and i), so the multi-channel verb and the by-index register
-  accessors it walks are exercised only up to channel 5. A letter that
-  chains two channels into a loop and then ends both with one mask would
-  close it.

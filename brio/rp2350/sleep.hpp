@@ -73,6 +73,7 @@
 
 #include <stdint.h>
 
+#include <atomic>
 #include <optional>
 
 #include "rp2350/device.hpp"
@@ -350,7 +351,10 @@ struct Rp2350SleepSite {
     }
 
 private:
-    static inline SleepDepth armed_ = SleepDepth::none;
+    // Disarmed by a timed site's handler (its isr() hands the machine
+    // back to a ticking sleep) and read by the program's idle and
+    // readbacks: volatile, so a poll reads the cell.
+    static inline volatile SleepDepth armed_ = SleepDepth::none;
     static inline uint32_t dormants_ = 0;
     static inline SleepClocks standby_ = sleep_clocks_all;
 };
@@ -421,6 +425,9 @@ struct Rp2350TimedSleepSite {
         tick_at_arm_ = Timebase::ticks();
         aon_at_arm_ = AonTimer::now_low();
         witnessed_ = true;
+        // The witness and its marks stored before the alarm can fire: its
+        // handler reads them (resync()).
+        std::atomic_signal_fence(std::memory_order_release);
         if (next.has_value()) {
             AonTimer::alarm_in(ticks_to_ms(*next));
             alarm_armed_ = true;
@@ -516,11 +523,15 @@ struct Rp2350TimedSleepSite {
 
 private:
     static inline bool ready_ = false;
-    static inline bool alarm_armed_ = false;
+    // alarm_armed_ and last_advance_ are written by the handler (isr())
+    // and read by the program (disarm(), the readbacks): volatile. The
+    // witness and the marks are written by arm() before the alarm is
+    // placed (the fence there) and read in resync()'s critical section.
+    static inline volatile bool alarm_armed_ = false;
     static inline bool witnessed_ = false;
     static inline uint32_t aon_at_arm_ = 0;
     static inline uint32_t tick_at_arm_ = 0;
-    static inline uint32_t last_advance_ = 0;
+    static inline volatile uint32_t last_advance_ = 0;
 };
 
 } // namespace brio

@@ -75,6 +75,11 @@
 //      while the mailbox interrupt would eat its echoes - and a whole
 //      relaunch with the bell interrupt left ENABLED, which is what the
 //      doorbell buys over the RP2040's FIFO bell
+//   k  CORE 1'S OWN CHANNELS: core 1 ringing its OWN bell; the mailbox
+//      FIFO as a program's channel UNDER LOAD beside the bell - 4096
+//      sequence words into core 1's FIFO vector while Pings cross the
+//      inbox; and a pin's interrupt aimed at PROC 1 - edges on a free
+//      pad core 0 drives, taken by core 1's vector and never core 0's
 //
 // build: boards = weact2350b,weact2350b-rv
 // build: monitor_speed = 115200
@@ -136,9 +141,28 @@ struct Beating {
     bool on;
 };
 struct Tick {};
+/// Letter k: a chore for core 1, and its report.
+struct Chore {
+    uint8_t what;
+};
+struct Chored {
+    uint8_t what;
+    uint32_t value;
+};
+
+/// Letter k's counts, kept by the vectors by the core that took them.
+volatile uint32_t bells_on_core0 = 0;
+volatile uint32_t bells_on_core1 = 0;
+volatile uint32_t pin_edges_on_core0 = 0;
+volatile uint32_t pin_edges_on_core1 = 0;
+volatile uint32_t mailbox_words = 0;
+volatile uint32_t mailbox_next = 0;
+volatile uint32_t mailbox_out_of_order = 0;
+volatile uint32_t fifo_entries0 = 0;
+volatile uint32_t fifo_entries1 = 0;
 
 // ---- core 0: the origin of every Ping, the home of every answer --------------
-struct Origin : Fsm<Origin, Pong, Tick> {
+struct Origin : Fsm<Origin, Pong, Tick, Chored> {
     static inline EventQueue<Event, 32, P0> queue;
     static constexpr uint8_t inbox_depth = 16;
 
@@ -147,6 +171,8 @@ struct Origin : Fsm<Origin, Pong, Tick> {
     static inline bool in_order = true;
     static inline uint32_t last_pong_us = 0;
     static inline uint32_t ticks_seen = 0;
+    static inline uint32_t chores = 0;
+    static inline Chored last_chore{};
 
     static void reset_counts() {
         pongs = 0;
@@ -171,12 +197,17 @@ struct Origin : Fsm<Origin, Pong, Tick> {
                 ++ticks_seen;
                 return handled();
             },
+            [](Chored c) {
+                last_chore = c;
+                ++chores;
+                return handled();
+            },
             [](auto) { return unhandled(); });
     }
 };
 
 // ---- core 1: the echo, and the metronome on core 1's own time -----------------
-struct Echo : Fsm<Echo, Ping, Halt> {
+struct Echo : Fsm<Echo, Ping, Halt, Chore> {
     static inline EventQueue<Event, 32, P1> queue;
     static constexpr uint8_t inbox_depth = 16;
     static inline volatile uint32_t seen = 0;   // Pings dispatched, for core 0's account
@@ -191,6 +222,52 @@ struct Echo : Fsm<Echo, Ping, Halt> {
             },
             [](Halt h) {
                 panic<P1>(PanicCode::assert_failed, h.context);
+                return handled();
+            },
+            [](Chore c) {
+                uint32_t value = 0;
+                switch (c.what) {
+                case 0:   // pins on: GP6's rising edge towards proc 1, the line in THIS core's controller
+                    PinIrq::clear(6, pin_events(PinEvent::edge_high));
+                    PinIrq::enable(6, pin_events(PinEvent::edge_high), PinIrqTarget::proc1);
+                    Irq::enable(PinIrq::irq());
+                    break;
+                case 1:   // pins off
+                    PinIrq::disable(6, pin_events(PinEvent::edge_high), PinIrqTarget::proc1);
+                    Irq::disable(PinIrq::irq());
+                    break;
+                case 2:   // the mailbox's vector on, in THIS core's controller
+                    mailbox_words = 0;
+                    mailbox_next = 0;
+                    mailbox_out_of_order = 0;
+                    // What this core's FIFO_ST carried in: a sticky flag
+                    // standing would assert the line with no data at all
+                    // (3.1.5: VLD | ROE | WOF). The launch's ROE is cleared
+                    // by Core1's entry shim; this letter judges that it is
+                    // gone, and clears anything else before the line opens.
+                    value = (SioMailbox::read_on_empty() ? 1u : 0u) | (SioMailbox::write_on_full() ? 2u : 0u) |
+                            (SioMailbox::readable() ? 4u : 0u);
+                    SioMailbox::clear_errors();
+                    (void)SioMailbox::drain();
+                    Irq::clear_pending(SioMailbox::irq());
+                    Irq::enable(SioMailbox::irq());
+                    break;
+                case 3:   // off, the count reported
+                    Irq::disable(SioMailbox::irq());
+                    value = mailbox_words;
+                    break;
+                case 4: {   // this core's own bell, rung by this core
+                    const uint32_t b = bells_on_core1;
+                    SioDoorbell<1>::ring();
+                    for (uint32_t spins = 0; spins < 10'000u && bells_on_core1 == b; ++spins) {
+                    }
+                    value = bells_on_core1 - b;
+                    break;
+                }
+                default:
+                    break;
+                }
+                send<Origin>(Chored{c.what, value});
                 return handled();
             },
             [](auto) { return unhandled(); });
@@ -752,6 +829,129 @@ void tj_two_channels() {
                   bell_on_before && bell_on_after && launch_ok && alive);
 }
 
+// -----------------------------------------------------------------------------
+/// THE THIRD CHANNEL, THE SELF-BELL AND THE PINS ON CORE 1: what core 1
+/// is asked to do (Chores) and what it says it did (Chored); the counts
+/// its vectors keep, by the core that took them.
+constexpr uint8_t chore_pins_on = 0;
+constexpr uint8_t chore_pins_off = 1;
+constexpr uint8_t chore_mailbox_on = 2;
+constexpr uint8_t chore_mailbox_off = 3;
+constexpr uint8_t chore_ring_self = 4;
+constexpr uint8_t edge_pin = 6;   ///< a free pad of the QFN-80, no wire: core 0 drives it through SIO
+
+/// Rising edges on edge_pin until `edges` more were seen (or a bound),
+/// each level held 20 us.
+void walk_pin(uint32_t edges) {
+    for (uint32_t i = 0; i < edges; ++i) {
+        Pin<edge_pin>::set();
+        const uint32_t t0 = us_now();
+        while (us_now() - t0 < 20u) {
+        }
+        Pin<edge_pin>::clear();
+        const uint32_t t1 = us_now();
+        while (us_now() - t1 < 20u) {
+        }
+    }
+}
+
+/// Send a chore to core 1 and serve core 0's kernel until it reports.
+bool chore(uint8_t what) {
+    const uint32_t before = Origin::chores;
+    send<Echo>(Chore{what});
+    const uint32_t t0 = us_now();
+    while (Origin::chores == before) {
+        (void)K0::step();
+        if (us_now() - t0 > 20'000u) {
+            return false;
+        }
+    }
+    return Origin::last_chore.what == what;
+}
+
+void tk_core1_channels() {
+    // THE SELF-BELL: core 1's Echo rings core 1's own bell (DOORBELL_IN_SET,
+    // the CPUID choice's fourth case); its vector runs on core 1 once,
+    // core 0's not at all.
+    const uint32_t b0 = bells_on_core0;
+    const bool rang = chore(chore_ring_self);
+    print(serial, "  core 1 rings its own bell: ", rang ? Origin::last_chore.value : 0u, " entry(ies) of its bell vector on core 1, ",
+          bells_on_core0 - b0, " on core 0 meanwhile (the chore's report itself rings core 0 once)", crlf);
+    bench.verdict("SioDoorbell<1>::ring() from core 1 rings core 1's own bell: its vector runs there once",
+                  rang && Origin::last_chore.value == 1u);
+
+    // THE MAILBOX UNDER LOAD BESIDE THE BELL: 4096 sequence words through
+    // the FIFO into core 1's mailbox vector while a Ping crosses the
+    // inbox every 64 words - two channels carrying traffic at once. One
+    // word every 2 us: at full speed the FIFO never empties, core 1's
+    // vector never returns and its kernel never turns (measured: the
+    // Pings piled up in Echo's queue and 31 of 64 were dropped there) -
+    // a load the channel takes and a program would not give it.
+    Origin::reset_counts();
+    const Counts k0 = Counts::now();
+    SioMailbox::clear_errors();
+    const bool mb_on = chore(chore_mailbox_on);
+    const uint32_t carried = Origin::last_chore.value;
+    uint32_t pushed = 0;
+    uint16_t pings = 0;
+    const uint32_t t0 = us_now();
+    uint32_t next_at = t0;
+    while (pushed < 4096u && us_now() - t0 < 500'000u) {
+        if (us_now() - next_at < 0x8000'0000u && SioMailbox::push(pushed)) {
+            ++pushed;
+            next_at += 2u;
+            if ((pushed & 63u) == 0u) {
+                send<Echo>(Ping{++pings});
+            }
+        }
+        (void)K0::step();
+    }
+    const uint32_t t1 = us_now();
+    while (Origin::pongs < pings && us_now() - t1 < 100'000u) {
+        (void)K0::step();
+    }
+    const bool wof = SioMailbox::write_on_full();
+    const bool mb_off = chore(chore_mailbox_off);
+    const uint32_t got = Origin::last_chore.value;
+    const Counts d = Counts::now().since(k0);
+    print(serial, "  the accounts: Echo saw ", d.echo_seen, " Pings; inbox overflows echo ", d.echo_in_over, " origin ", d.origin_in_over,
+          "; queue overflows echo ", d.echo_q_over, " origin ", d.origin_q_over, "; next ", mailbox_next, "; fifo entries core0 ",
+          fifo_entries0, " core1 ", fifo_entries1, crlf);
+    print(serial, "  4096 words through the mailbox into core 1's FIFO vector, ", pings, " Pings beside them: ", pushed,
+          " pushed, ", got, " taken in sequence, ", mailbox_out_of_order, " out of sequence; ", Origin::pongs, " Pongs ",
+          Origin::in_order ? "in order" : "OUT OF ORDER", ", WOF ", wof, "; core 1's FIFO_ST carried in ", hex(carried),
+          " (1 ROE, 2 WOF, 4 VLD)", crlf);
+    bench.verdict("core 1's FIFO_ST carries no sticky flag in - the launch's ROE cleared by the entry shim",
+                  mb_on && carried == 0u);
+    bench.verdict("THE MAILBOX AND THE BELL AT ONCE: every word of 4096 through the FIFO into core 1's vector in sequence, "
+                  "every Ping beside them answered in order, no write on a full FIFO, no inbox overflow",
+                  mb_on && mb_off && pushed == 4096u && got == 4096u && mailbox_out_of_order == 0u &&
+                      Origin::pongs == pings && Origin::in_order && !wof && d.echo_in_over == 0u && d.origin_in_over == 0u);
+
+    // THE PINS TOWARDS PROC 1: GP6's rising edge enabled towards core 1
+    // by core 1 (and the bank's line open in core 1's controller), core
+    // 0 driving the pad through SIO; core 0's own line open too, with no
+    // event enabled towards proc 0 - so its vector must stay quiet.
+    (void)Pin<edge_pin>::output(false);
+    pin_edges_on_core0 = 0;
+    pin_edges_on_core1 = 0;
+    Irq::enable(PinIrq::irq());
+    const bool pins_on = chore(chore_pins_on);
+    walk_pin(25);
+    const uint32_t t2 = us_now();
+    while (us_now() - t2 < 1000u) {
+    }
+    const uint32_t on1 = pin_edges_on_core1;
+    const uint32_t on0 = pin_edges_on_core0;
+    const bool pins_off = chore(chore_pins_off);
+    Irq::disable(PinIrq::irq());
+    (void)Pin<edge_pin>::release();
+    print(serial, "  25 rising edges on GP", edge_pin, " towards proc 1: ", on1, " taken by core 1's vector, ", on0,
+          " by core 0's", crlf);
+    bench.verdict("PinIrqTarget::proc1: a pin's events reach core 1's line alone - 25 edges, 25 entries on core 1, none on core 0",
+                  pins_on && pins_off && on1 == 25u && on0 == 0u);
+}
+
 void banner() {
     print(serial, crlf,
           "test_rp2350_multicore - two kernels on two cores (rp2350/multicore.hpp, "
@@ -775,9 +975,45 @@ extern "C" void isr_systick() {
 /// number on each, so the core that took it decides which drain runs.
 extern "C" void isr_sio_bell() {
     if (brio::core_id() == 0u) {
+        bells_on_core0 = bells_on_core0 + 1u;
         Drain0::isr();
     } else {
+        bells_on_core1 = bells_on_core1 + 1u;
         Drain1::isr();
+    }
+}
+/// Letter k: the mailbox's words, taken on core 1 and checked for
+/// sequence.
+extern "C" void isr_sio_fifo() {
+    if (brio::core_id() == 0u) {
+        fifo_entries0 = fifo_entries0 + 1u;
+    } else {
+        fifo_entries1 = fifo_entries1 + 1u;
+    }
+    uint32_t v = 0;
+    while (brio::SioMailbox::pop(v)) {
+        if (v != mailbox_next) {
+            mailbox_out_of_order = mailbox_out_of_order + 1u;
+        }
+        mailbox_next = v + 1u;
+        mailbox_words = mailbox_words + 1u;
+    }
+    // The line is VLD | ROE | WOF: a handler that only drains would storm
+    // on a sticky flag. Cleared here, after the drain.
+    if (brio::SioMailbox::read_on_empty() || brio::SioMailbox::write_on_full()) {
+        brio::SioMailbox::clear_errors();
+    }
+}
+/// Letter k: the bank's line, by the core that took it.
+extern "C" void isr_io_bank0() {
+    if (brio::core_id() == 1u) {
+        if (brio::PinIrq::status(6, brio::PinIrqTarget::proc1).has(brio::PinEvent::edge_high)) {
+            brio::PinIrq::clear(6, brio::pin_events(brio::PinEvent::edge_high));
+            pin_edges_on_core1 = pin_edges_on_core1 + 1u;
+        }
+    } else {
+        pin_edges_on_core0 = pin_edges_on_core0 + 1u;
+        brio::PinIrq::clear(6, brio::pin_events(brio::PinEvent::edge_high));
     }
 }
 
@@ -801,6 +1037,8 @@ int main() {
                  tg_panic_and_relaunch);
     bench.letter('h', "saturation: the losses counted where they happen", th_saturation);
     bench.letter('j', "the bell and the mailbox are two channels", tj_two_channels);
+    bench.letter('k', "core 1's own channels: the self-bell, the mailbox under load, the pins towards proc 1",
+                 tk_core1_channels);
 
     if (serial_ok) {
         brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "PLL150" : "FAILED",

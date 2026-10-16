@@ -247,6 +247,31 @@ struct Rtc {
     static bool init(Clock clock, RtcClock src = RtcClock::crystal_div256) {
         (void)clock;
         Nvic::disable(irq());
+        // THE GENERATOR STOPPED BEFORE ITS SOURCE CHANGES (2.15.3.2: a
+        // generator with only an aux mux is disabled, then "wait for the
+        // generated clock to stop (2 cycles of the clock source)", then
+        // the mux). clk_rtc may be as slow as the 1 Hz input, so the wait
+        // is three periods of what it runs on NOW - read from the
+        // registers, so a generator another image left running is
+        // covered: a GPIN source taken as the slowest brio gives it
+        // (1 Hz), anything else as the crystal over the divider. Clocks'
+        // own short wait suits the fast generators and not this one
+        // (measured: one set() in ten never saw its calendar start after
+        // a switch between the crystal and the 1 Hz input).
+        if (Clocks::rtc_enabled()) {
+            const RtcAux was = Clocks::rtc_source();
+            const uint32_t div256 = Clocks::rtc_divider256();
+            const uint64_t was_hz = (was == RtcAux::gpin0 || was == RtcAux::gpin1)
+                                        ? 1u
+                                        : (div256 == 0u ? 1u : (static_cast<uint64_t>(Clock::xtal_hz) * 256u) / div256);
+            Clocks::rtc_stop();
+            // A turn of the loop is four cycles at the least (the NOP, the
+            // decrement, the taken branch's two on the Cortex-M0+).
+            const uint64_t cycles = 3u * static_cast<uint64_t>(Clock::hz) / (was_hz == 0u ? 1u : was_hz);
+            for (uint32_t n = static_cast<uint32_t>(cycles / 4u) + 1u; n != 0u; --n) {
+                __NOP();
+            }
+        }
         if (src == RtcClock::crystal_div256) {
             if ((Clock::xtal_hz % crystal_divider) != 0u || Clock::xtal_hz / crystal_divider > 65536u) {
                 return false;
@@ -257,6 +282,14 @@ struct Rtc {
             Clocks::rtc_select(RtcAux::gpin0, 1);
             clk_hz_ = 1;
         }
+        // set()'s wait for the enable's tick: two clk_rtc periods with a
+        // margin, in polls of the read path - each poll two APB reads,
+        // four clk_sys cycles at the least. A fixed count suits the
+        // crystal's 46875 Hz and expires long before a 1 Hz reference's
+        // tick, the LOAD then issued before it - the timing set()'s own
+        // comment names as not seen in every case.
+        const uint64_t polls = 3ull * (Clock::hz / clk_hz_) / 4u;
+        tick_polls_ = polls < 4'000u ? 4'000u : (polls > 0xFFFF'FFFFull ? 0xFFFF'FFFFu : static_cast<uint32_t>(polls));
         if (!Resets::cycle(reset_bit)) {
             return false;
         }
@@ -314,7 +347,7 @@ struct Rtc {
         // not waited for.
         const uint32_t was0 = regs().RTC_0;
         const uint32_t was1 = regs().RTC_1;
-        uint32_t tick_spins = 4'000u;
+        uint32_t tick_spins = tick_polls_;
         while (tick_spins-- != 0u) {
             const uint32_t now0 = regs().RTC_0;
             const uint32_t now1 = regs().RTC_1;
@@ -487,6 +520,7 @@ private:
     }
 
     static inline uint32_t clk_hz_ = 0;
+    static inline uint32_t tick_polls_ = 4'000u;   ///< set()'s bound on the enable's tick (init())
 };
 
 // =============================================================================

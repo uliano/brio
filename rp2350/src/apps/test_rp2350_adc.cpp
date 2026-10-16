@@ -59,6 +59,10 @@
 //      instrument on this chip that can see the leakage as a VOLTAGE -
 //      the same pad, pulled down, read with its digital input buffer on
 //      and then off
+//   i  THE FIFO'S UNDERFLOW AND THE FORCED INTERRUPT: a pop of an empty
+//      FIFO raises the sticky UNDER, cleared by writing one; INTF raises
+//      INTS with INTE clear (status "after masking & forcing") and the
+//      vector is entered once, its body dropping the force
 //
 // build: boards = weact2350b,weact2350b-rv
 // build: monitor_speed = 115200
@@ -127,9 +131,11 @@ constexpr uint16_t vref = ref_mv(Ref::avdd_pin);
 volatile bool block_done = false;
 volatile bool stop_on_done = true;   // the DMA's completion stops the converter (12.4.3.5)
 volatile uint32_t fifo_isr_entries = 0;
+volatile uint32_t forced_entries = 0;
+volatile bool forced_raw_seen = false;
 volatile uint32_t fifo_isr_popped = 0;
 volatile uint8_t fifo_isr_max_level = 0;
-enum class FifoOwner : uint8_t { none, drain, sampler };
+enum class FifoOwner : uint8_t { none, drain, sampler, forced };
 volatile FifoOwner fifo_owner = FifoOwner::none;
 
 uint16_t block[256];
@@ -791,6 +797,50 @@ void th_leakage() {
     Adc::release();
 }
 
+// =============================================================================
+// i - the FIFO's underflow, the forced interrupt
+// =============================================================================
+void ti_under_force() {
+    (void)adc_up();
+    Adc::select(AdcInput::temperature);
+    // The underflow: the FIFO on and empty, one pop.
+    Adc::fifo({.enable = true, .dreq = false, .error_flag = true, .shift = false, .threshold = 1});
+    Adc::drain();
+    Adc::clear_fifo_flags();
+    const bool before = Adc::fifo_underflowed();
+    const uint16_t popped = Adc::pop();
+    const bool after = Adc::fifo_underflowed();
+    const bool over = Adc::fifo_overflowed();
+    Adc::clear_fifo_flags();
+    const bool cleared = Adc::fifo_underflowed();
+    print(serial, "  a pop of the empty FIFO: UNDER before ", before, ", after ", after, " (OVER ", over, "), the word read ",
+          hex(popped), ", UNDER after the write-one clear ", cleared, crlf);
+    bench.verdict("a pop of an empty FIFO raises the sticky UNDER (and not OVER); writing one clears it",
+                  !before && after && !over && !cleared);
+    // The force: INTE clear, the FIFO empty (INTR's level condition
+    // false), the line masked at the controller first, then open.
+    Adc::interrupt(false);
+    Adc::drain();
+    forced_entries = 0;
+    forced_raw_seen = false;
+    fifo_owner = FifoOwner::forced;
+    Irq::disable(Adc::irq());
+    Irq::clear_pending(Adc::irq());
+    const bool pending_before = Adc::pending();
+    Adc::force(true);
+    const bool raw = Adc::raw_pending();
+    const bool forced = Adc::pending();
+    Irq::enable(Adc::irq());
+    spin_us(100);
+    const bool pending_after = Adc::pending();
+    fifo_owner = FifoOwner::none;
+    print(serial, "  INTF with INTE clear and the FIFO empty: INTS before ", pending_before, ", INTR ", raw, ", INTS ", forced,
+          "; the vector entered ", forced_entries, " time(s), INTR in it ", forced_raw_seen, ", INTS after ", pending_after, crlf);
+    bench.verdict("INTF raises INTS past a clear INTE (INTR stays clear), and the vector runs once, its body dropping the force",
+                  !pending_before && !raw && forced && forced_entries == 1u && !forced_raw_seen && !pending_after);
+    Adc::release();
+}
+
 void banner() {
     print(serial, crlf, "test_rp2350_adc - this chip's ADC (datasheet 12.4): the sensor on AINSEL ",
           adc_temperature_code, ", GP", adc_first_pin, "..GP", adc_first_pin + adc_pad_inputs - 1u,
@@ -816,6 +866,11 @@ extern "C" void isr_adc_fifo() {
                 (void)brio::Adc::pop();
                 fifo_isr_popped = fifo_isr_popped + 1u;
             }
+            break;
+        case FifoOwner::forced:
+            forced_entries = forced_entries + 1u;
+            forced_raw_seen = brio::Adc::raw_pending();
+            brio::Adc::force(false);
             break;
         case FifoOwner::sampler:
             while (!brio::Adc::fifo_empty()) {
@@ -858,6 +913,7 @@ int main() {
     bench.letter('f', "the FIFO: threshold, overflow, shift, the error flag", tf_fifo);
     bench.letter('g', "the sampler", tg_sampler);
     bench.letter('h', "erratum RP2350-E9 in millivolts", th_leakage);
+    bench.letter('i', "the FIFO's underflow, the forced interrupt", ti_under_force);
 
     if (serial_ok) {
         brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "PLL150" : "FAILED",

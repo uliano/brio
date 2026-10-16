@@ -171,7 +171,7 @@ brio::Trng::init<brio::TrngConfig{.chain = 0,
 ## Bench findings
 
 On an RP2350 in the QFN-80 package, **stepping A2**, clk_sys at 150 MHz,
-on BOTH architectures: `test_rp2350_blocks` reports **71 pass, 0 fail**
+on BOTH architectures: `test_rp2350_blocks` reports **76 pass, 0 fail**
 on the Cortex-M33 pair and on the Hazard3 pair, from one source, each on
 three flash-and-run cycles. Every verdict of this chapter reads the same
 on the two halves; where a number differs, both are given.
@@ -181,7 +181,10 @@ on the two halves; where a number differs, both are given.
   the four chain lengths, ten runs a point: at **25, 50 and 100 cycles
   every run ends in AUTOCORR_ERR** - AUTOCORR_STATISTIC reads four tries
   and four failures, inside a few microseconds, and the block then hands
-  out nothing until it is reset. At **110 cycles seven runs in ten** do.
+  out nothing until it is reset. (Not quite every: at 25 cycles, four
+  attempts of 52 later counted saw the test pass once between failures -
+  three tries, two failures - and the collection go on; letter g makes
+  up to three attempts.) At **110 cycles seven runs in ten** do.
   From **120 cycles up, none of ten** does, at chain 0, 1 and 3 alike.
   120 cycles at 150 MHz is **800 ns**, and the chain length moves the
   boundary not at all: it is the INTERVAL that matters. 12.12.2's "sample
@@ -207,8 +210,8 @@ on the two halves; where a number differs, both are given.
   (counts 31..64 against an even 48), no word is zero and no word repeats
   the one before it.
 - **THE FATAL CHECK, RAISED ON PURPOSE AND CURED.** The suite sets
-  SAMPLE_CNT1 to 25 for one collection: AUTOCORR_STATISTIC reads **four
-  tries and four failures**, `read_blocking()` answers
+  SAMPLE_CNT1 to 25 for one collection (up to three, above):
+  AUTOCORR_STATISTIC reads **four tries and four failures**, `read_blocking()` answers
   `TrngError::autocorrelation` rather than running out its budget, and a
   write of every bit to RNG_ICR **leaves the flag standing** - which is
   the register description's own sentence, measured. `recover()` is the
@@ -220,6 +223,11 @@ on the two halves; where a number differs, both are given.
   left disturbed. RST_BITS_COUNTER refuses while the source is enabled
   and takes the write when it is stopped, which is 12.12.5's own
   condition.
+- **THE RUN-TIME REFUSAL** (letter g, fifteen runs on each half):
+  `init(cfg)` built from run-time values refuses a chain of 4, a sample
+  count of zero and a count of 16 with the decorrelator bypassed, each
+  with `TrngError::misconfigured` and the block's settings read back as
+  they stood; seventeen without the decorrelator - the floor - is taken.
 - **RNG_VERSION reads 0xF**: the 192-bit entropy holding register, the
   autocorrelation unit and the CRNGT both present. TRNG_DEBUG_CONTROL and
   RNG_DEBUG_EN_INPUT read zero after `init()`, so no check is bypassed
@@ -253,11 +261,3 @@ Driver gaps, each with its reason:
   a contract; the STM32F4's `Rng` and this block answer different
   questions (one word against 192 bits, a continuous test against three
   checks). It would be born at a third.
-
-Implemented but not bench-verified, each with what would measure it:
-
-- **The run-time refusal of an illegal setting.** The family check
-  refuses every one of them at compile time; `init(cfg)` returning
-  `false` with `TrngError::misconfigured` has no letter, because the only
-  way to reach it is a setting a suite would have to build on purpose out
-  of a run-time value. A letter that fed it one would close this.

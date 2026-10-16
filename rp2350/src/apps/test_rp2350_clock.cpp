@@ -105,6 +105,11 @@
 //      two seconds - /12, the fractional /12.5, /3 and /7 without the
 //      duty correction, /5 and /9 with it - then stopped
 //
+//   u  (by name only) ONE PULSE PER SECOND on GP21 for the partner's
+//      calendar (its RTC's GPIN0 reference): a PIO machine counting this
+//      board's crystal - GPOUT0's 16-bit divider cannot reach 1 Hz - for
+//      40 seconds, then the pad released
+//
 // build: boards = weact2350b,weact2350b-rv
 // build: monitor_speed = 115200
 
@@ -117,6 +122,7 @@
 #include "rp2350/delay.hpp"
 #include "rp2350/mtime.hpp"
 #include "rp2350/pin.hpp"
+#include "rp2350/pio.hpp"
 #include "rp2350/platform.hpp"
 #include "rp2350/ticker.hpp"
 #include "rp2350/uart.hpp"
@@ -912,6 +918,63 @@ void ts_schedule() {
                   ok == 6u && !ClockOut<0>::enabled());
 }
 
+/// THE ONE PULSE PER SECOND: the machine at 150 MHz / 1500 = 100 kHz,
+/// `set pins, 1 [1]; mov x, isr; loop: jmp x-- loop; set pins, 0; mov x,
+/// isr; loop: jmp x-- loop; jmp top` - N + 4 cycles high and N + 4 low
+/// with N in the ISR, so N = 49996 is 100 000 cycles: one second, the
+/// crystal's own accuracy.
+constexpr PioProgram<7> one_hz_program = [] {
+    PioProgram<7> p{};
+    p.code = {
+        pio_delay(pio_set(PioSetTo::pins, 1), 1),   // 0: high, two cycles
+        pio_mov(PioMovTo::x, PioMovFrom::isr),      // 1
+        pio_jmp(PioJmp::x_dec, 2),                  // 2: N + 1 cycles
+        pio_set(PioSetTo::pins, 0),                 // 3: low
+        pio_mov(PioMovTo::x, PioMovFrom::isr),      // 4
+        pio_jmp(PioJmp::x_dec, 5),                  // 5: N + 1 cycles
+        pio_jmp(PioJmp::always, 0),                 // 6
+    };
+    return p;
+}();
+static_assert(2u * (49'996u + 4u) == 100'000u, "a second of the machine's 100 kHz");
+
+void tu_one_hz() {
+    using P0 = Pio<0>;
+    using Sm = PioSm<0, 0>;
+    (void)P0::reset();
+    const auto at = P0::add(one_hz_program);
+    const auto pin = P0::pin_index(21);
+    bool ok = at.has_value() && pin.has_value();
+    if (ok) {
+        Sm::pin_levels(*pin, 1, false);
+        Sm::pin_directions(*pin, 1, true);
+        (void)Pin<21>::function(P0::pin_function);
+        ok = Sm::init(one_hz_program, *at, {.clock = {1500, 0}, .set_base = *pin, .set_count = 1});
+        Sm::push(49'996u);
+        (void)Sm::exec_wait(pio_pull(false, true));
+        (void)Sm::exec_wait(pio_out(PioOut::isr, 32));
+        Sm::enable(true);
+    }
+    print(serial, "  one pulse per second on GP21 for 40 s", crlf);
+    const uint32_t t0 = us_now();
+    uint32_t rises = 0;
+    bool last = Pin<21>::read();
+    while (us_now() - t0 < 40'000'000u) {
+        const bool now = Pin<21>::read();
+        if (now && !last) {
+            ++rises;
+        }
+        last = now;
+    }
+    Sm::enable(false);
+    (void)P0::reset();
+    (void)Pin<21>::release();
+    print(serial, "  ", rises, " rising edges seen on the pad's own input", crlf);
+    bench.verdict("the machine ran 40 s at one pulse a second (40 rising edges on the pad, one either way) and the pad "
+                  "is released",
+                  ok && rises >= 39u && rises <= 41u);
+}
+
 void tp_input() {
     (void)ClockIn<0>::init();
     const std::optional<uint32_t> hz = Boot::count_hz(ClockIn<0>::count_source);
@@ -974,6 +1037,8 @@ int main() {
     bench.letter('p', "GPIN0 on GP20 counted: the peer board's crystal", tp_input, false);
     bench.letter('s', "GPOUT0's schedule for the partner's meter: fraction, duty correction",
                  pair::guarded<bench, clock, ts_schedule>, false);
+    bench.letter('u', "one pulse per second on GP21 for 40 s (the partner's RTC reference)",
+                 pair::guarded<bench, clock, tu_one_hz>, false);
 
     if (serial_ok) {
         brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "PLL150" : "FAILED",

@@ -174,7 +174,7 @@ at 150 MHz, over the board's own wires GP13 -> GP15, GP17 -> GP9 and
 GP12 <-> GP14, and all of them on BOTH architectures: `test_rp2350_pwm`
 reported **41 pass, 0 fail** on the Cortex-M33 pair and **41 pass, 0
 fail** on the Hazard3 pair, from one source, with the wires fitted; its
-z, the three wireless letters, reports 21. NOTHING IN THIS CHAPTER
+z, the four wireless letters, reports 23 on each half. NOTHING IN THIS CHAPTER
 DIFFERS BETWEEN THE TWO HALVES - the block is one, its two interrupt
 lines are two system lines under one numbering, and the handler names are
 the same on both.
@@ -239,6 +239,15 @@ the same on both.
   stands in A and in B together. And the stream reaches the pad: the same
   table into slice 6 leaves the far end of GP13 -> GP15 reading **839 to
   840 per mille against the 840 the table's last word asks for**.
+- **WITH NO WIRE** (letter i, ten runs of ten on each half).
+  `PwmOutput::setup_hz` **PHASE-CORRECT** at 1 kHz on TOP 999 solves the
+  divider to 75, and the output's own pad, read back through its input
+  buffer, rises **200 times in 200 ms** while the slice wraps 200 times -
+  once a period, as phase-correct mode wraps. `PwmEdgeCounter` on GP15
+  with the pad's level walked by its own output override (OEOVER enable,
+  OUTOVER low and high, two microseconds a level): from low, 100 pulses
+  and a last rise count **101 in rising mode and 100 in FALLING mode**,
+  exact - a B input reads the pad, so an override is a wire.
 
 ## Not covered yet
 
@@ -262,13 +271,10 @@ Implemented but not bench-verified, each with what would measure it:
 - A stream into TOP rather than into CC: `top_address()` is exposed and
   the pace would be the same request, but nothing has asked for a
   frequency sweep yet.
-- `PwmEdgeCounter` in falling-edge mode, and `pwm_config_for` with
-  phase-correct: the arithmetic of both is pinned at compile time, and
-  what is missing is an edge count on the wire at the solved divider -
-  one more case in letter c's loop.
 - A preset counter (`counter(v)` before a lockstep start, the phase
   relationship "determined by the initial counter values"): two outputs
-  started with different counters, the offset measured on the two wires.
+  started with different counters, the offset read off the two pads' own
+  inputs, sampled in one SIO word - no wire needed, letter i's method.
 - Everything about this chapter in the QFN-60, where slices 8..11 have
   no pad: the stratum compiles for that package and refuses those pads,
   and no QFN-60 part is on the bench.

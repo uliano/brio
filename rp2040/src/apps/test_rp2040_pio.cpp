@@ -45,6 +45,15 @@
 //      until the system clears the flag
 //   g  THE SAMPLER: a machine shifting one pin into words at 1 MHz
 //      while the PWM block drives it at 25 %, 8192 samples counted
+//   h  WIRELESS, the corners: IRQ RELATIVE raised by machines 1..3
+//      (flag 0 + n, and 1 + 3 wrapping to 0 - the modulo-4 sum) and
+//      WAIT IRQ RELATIVE released by its own flag alone; MOV X, STATUS
+//      branched on (a machine that pulls only while its TX level is
+//      at or past two, the words it takes counted); THE 65536
+//      DIVIDER (PioClockDiv{0, 0}) on machine 3, its 476.8 Hz wave
+//      counted on its own pad's input; and the serial port on PIO1's
+//      machines 2 and 3 sharing ONE pad - the receiver reads the
+//      transmitter's output through the pad's input, no wire
 //
 // build: boards = pico,weact2040
 // build: monitor_speed = 115200
@@ -273,6 +282,208 @@ void ta_block() {
     bench.verdict("flag 0 raised through IRQ_FORCE reaches line 0, the ISR body clears it, one entry",
                   line0_entries == 1u && (line0_last & PioInterrupt::flag(0)) != 0u && !P0::flag(0));
     P0::unload(*at, probe_program.length);
+}
+
+// =============================================================================
+// h - the corners, wireless
+// =============================================================================
+constexpr PioProgram<2> irq_rel0_program = [] {
+    PioProgram<2> p{};
+    p.code = {pio_irq(0, false, false, true), pio_jmp(PioJmp::always, 1)};   // irq 0 rel; parked
+    return p;
+}();
+constexpr PioProgram<2> irq_rel1_program = [] {
+    PioProgram<2> p{};
+    p.code = {pio_irq(1, false, false, true), pio_jmp(PioJmp::always, 1)};   // irq 1 rel; parked
+    return p;
+}();
+constexpr PioProgram<5> wait_rel_program = [] {
+    PioProgram<5> p{};
+    p.code = {
+        pio_wait_irq(true, 0, true),             // wait 1 irq 0 rel: this machine's own flag, cleared on the way out
+        pio_set(PioSetTo::x, 21),
+        pio_mov(PioMovTo::isr, PioMovFrom::x),
+        pio_push(),
+        pio_jmp(PioJmp::always, 4),               // parked
+    };
+    return p;
+}();
+/// Pulls only while STATUS says the TX level is at or past N (STATUS is
+/// all ones below N, zero at or above): `mov x, status; jmp !x take;
+/// jmp top; take: pull; mov isr, osr; push; jmp top`.
+constexpr PioProgram<7> status_program = [] {
+    PioProgram<7> p{};
+    p.code = {
+        pio_mov(PioMovTo::x, PioMovFrom::status),   // 0
+        pio_jmp(PioJmp::x_zero, 3),                 // 1: level >= N
+        pio_jmp(PioJmp::always, 0),                 // 2
+        pio_pull(false, true),                      // 3
+        pio_mov(PioMovTo::isr, PioMovFrom::osr),    // 4
+        pio_push(),                                 // 5
+        pio_jmp(PioJmp::always, 0),                 // 6
+    };
+    return p;
+}();
+
+/// Rising edges of pin `pin`'s pad input over `us`, the loop polling it.
+template <uint8_t pin>
+uint32_t pad_rises(uint32_t us) {
+    uint32_t rises = 0;
+    bool last = Pin<pin>::read();
+    const uint32_t t0 = us_now();
+    while (us_now() - t0 < us) {
+        const bool now = Pin<pin>::read();
+        if (now && !last) {
+            ++rises;
+        }
+        last = now;
+    }
+    return rises;
+}
+
+void th_corners() {
+    pio_fresh();
+    // IRQ relative: machine n raises flag (index + n) mod 4 (3.4.10's
+    // "modulo-4 addition on the two LSBs").
+    const auto at0 = P0::add(irq_rel0_program);
+    const auto at1 = P0::add(irq_rel1_program);
+    uint8_t raised[4] = {};
+    for (uint8_t m = 1; m < 4u; ++m) {
+        P0::clear_flags(0xFF);
+        bool ok = false;
+        if (m == 1u) { ok = at0 && PioSm<0, 1>::init(irq_rel0_program, *at0, {}); PioSm<0, 1>::enable(true); }
+        if (m == 2u) { ok = at0 && PioSm<0, 2>::init(irq_rel0_program, *at0, {}); PioSm<0, 2>::enable(true); }
+        if (m == 3u) { ok = at0 && PioSm<0, 3>::init(irq_rel0_program, *at0, {}); PioSm<0, 3>::enable(true); }
+        spin_us(10);
+        P0::disable(0x0F);
+        raised[m] = ok ? P0::flags() : 0xEEu;
+    }
+    P0::clear_flags(0xFF);
+    const bool ok3 = at1 && PioSm<0, 3>::init(irq_rel1_program, *at1, {});
+    PioSm<0, 3>::enable(true);
+    spin_us(10);
+    P0::disable(0x0F);
+    const uint8_t wrapped = ok3 ? P0::flags() : 0xEEu;
+    P0::clear_flags(0xFF);
+    print(serial, "  IRQ 0 REL raised by machines 1, 2, 3: flags ", hex(raised[1]), " ", hex(raised[2]), " ", hex(raised[3]),
+          "; IRQ 1 REL by machine 3: ", hex(wrapped), crlf);
+    bench.verdict("IRQ relative from machines 1..3: machine n raises flag n alone, and index 1 from machine 3 wraps to flag 0",
+                  raised[1] == 0x02u && raised[2] == 0x04u && raised[3] == 0x08u && wrapped == 0x01u);
+    // WAIT IRQ relative on machine 2: flags 0, 1 and 3 do not release
+    // it; flag 2 does, and the wait clears it.
+    using W = PioSm<0, 2>;
+    P0::unload(*at0, irq_rel0_program.length);
+    P0::unload(*at1, irq_rel1_program.length);
+    const auto atw = P0::add(wait_rel_program);
+    const bool okw = atw && W::init(wait_rel_program, *atw, {});
+    W::enable(true);
+    spin_us(10);
+    P0::raise_flags(0x0B);   // 0, 1 and 3
+    spin_us(10);
+    const uint8_t held = W::rx_level();
+    P0::clear_flags(0x0B);
+    P0::raise_flags(0x04);   // 2: this machine's own
+    spin_us(10);
+    const uint8_t freed = W::rx_level();
+    const uint32_t word = freed != 0u ? W::pop() : 0u;
+    const bool cleared = !P0::flag(2);
+    W::enable(false);
+    P0::unload(*atw, wait_rel_program.length);
+    print(serial, "  WAIT 1 IRQ 0 REL on machine 2: after flags 0, 1, 3 ", held, " words; after flag 2 ", freed, " (", word,
+          "), flag 2 cleared ", cleared, crlf);
+    bench.verdict("WAIT IRQ relative on machine 2 waits for flag 2 alone, and clears it on the way out",
+                  okw && held == 0u && freed == 1u && word == 21u && cleared);
+
+    // MOV X, STATUS branched on: TX level >= 2 to pull. Four words (the
+    // FIFO's depth) pushed with the machine stopped; it takes them while
+    // the level is 4, 3 and 2, then stops at 1 - three out, one left.
+    using St = PioSm<0, 1>;
+    const auto ats = P0::add(status_program);
+    const bool oks = ats && St::init(status_program, *ats, {.status_select = PioStatus::tx_level, .status_n = 2});
+    for (uint32_t i = 1; i <= 4u; ++i) {
+        St::push(i);
+    }
+    St::enable(true);
+    spin_us(20);
+    St::enable(false);
+    const uint8_t taken = St::rx_level();
+    const uint8_t left = St::tx_level();
+    uint32_t w[3] = {};
+    for (uint8_t i = 0; i < 3u && !St::rx_empty(); ++i) {
+        w[i] = St::pop();
+    }
+    St::drain_tx();
+    // The other source: STATUS on the RX level, executed on the side.
+    (void)St::configure({.status_select = PioStatus::rx_level, .status_n = 2});
+    St::drain_rx();
+    uint32_t st[3] = {};
+    for (uint8_t i = 0; i < 3u; ++i) {
+        (void)St::exec_wait(pio_mov(PioMovTo::isr, PioMovFrom::status));
+        (void)St::exec_wait(pio_push());
+    }
+    for (uint8_t i = 0; i < 3u; ++i) {
+        st[i] = St::pop();
+    }
+    P0::unload(*ats, status_program.length);
+    print(serial, "  MOV X, STATUS on TX level >= 2: ", taken, " words taken (", w[0], " ", w[1], " ", w[2], "), ", left,
+          " left; on RX level < 2 at levels 0, 1, 2: ", hex(st[0]), " ", hex(st[1]), " ", hex(st[2]), crlf);
+    bench.verdict("STATUS as a branch: a machine pulling while its TX level is at or past two takes 1, 2, 3 of four and "
+                  "leaves one; on the RX level it reads all ones below N and zero at N",
+                  oks && taken == 3u && left == 1u && w[0] == 1u && w[1] == 2u && w[2] == 3u && st[0] == 0xFFFFFFFFu &&
+                      st[1] == 0xFFFFFFFFu && st[2] == 0u);
+
+    // The 65536 divider: the square wave's four cycles a period at
+    // 125 MHz / 65536 - 476.84 Hz, so 476 or 477 rising edges in one
+    // second (the machine and the timer share the crystal; the window's
+    // phase decides between the two).
+    using Sq = PioSm<0, 3>;
+    const auto atq = P0::add(pio_square_wave_program);
+    Sq::pin_directions(12, 1, true);
+    Pin<12>::function(P0::pin_function);
+    const bool okq = atq && Sq::init(pio_square_wave_program, *atq, {.clock = {0, 0}, .set_base = 12, .set_count = 1});
+    Sq::enable(true);
+    const uint32_t rises = pad_rises<12>(1'000'000);
+    const uint32_t div_reg = Sq::clkdiv();
+    Sq::enable(false);
+    P0::unload(*atq, pio_square_wave_program.length);
+    Pin<12>::release();
+    print(serial, "  CLKDIV ", hex(div_reg), " (PioClockDiv{0, 0}) on machine 3: ", rises, " rising edges in 1 s on GP12's own input",
+          crlf);
+    bench.verdict("the 65536 divider: CLKDIV's integer 0 divides by 65536, the four-cycle wave at 476.8 Hz (476..477 edges in 1 s)",
+                  okq && div_reg == 0u && rises >= 476u && rises <= 477u);
+
+    // The serial port on PIO1, machines 2 and 3, on ONE pad: the
+    // receiver set up first (the pin an input), the transmitter after
+    // (the pin an output, its level high) - the receiver reads the pad.
+    using LTx = PioUartTx<1, 2, 14>;
+    using LRx = PioUartRx<1, 3, 14>;
+    uint16_t good[2] = {};
+    constexpr uint32_t rates[2] = {115200, 1'000'000};
+    bool inits = true;
+    for (uint8_t r = 0; r < 2u; ++r) {
+        inits = LRx::init(clock, rates[r]) && inits;
+        inits = LTx::init(clock, rates[r]) && inits;
+        spin_us(100);
+        fill_pattern(tx_buf, 64, static_cast<uint8_t>(0x41u + r));
+        for (uint16_t i = 0; i < 64u; ++i) {
+            (void)LTx::write_wait(tx_buf[i]);
+            const auto b = LRx::read_wait(200'000u);
+            if (b && *b == tx_buf[i]) {
+                ++good[r];
+            }
+        }
+        const bool fe = LRx::frame_error();
+        if (fe) {
+            good[r] = 0;
+        }
+        LTx::release();
+        LRx::release();
+    }
+    print(serial, "  PIO1 machine 2 sending and machine 3 receiving on GP14 alone: ", good[0], "/64 at 115200, ", good[1],
+          "/64 at 1 Mbaud", crlf);
+    bench.verdict("the serial tasks on PIO1's machines 2 and 3, one pad: 64 bytes exact at 115200 and at 1 Mbaud, no frame error",
+                  inits && good[0] == 64u && good[1] == 64u);
+    pio_fresh();
 }
 
 // =============================================================================
@@ -641,6 +852,7 @@ int main() {
     bench.letter('e', "the PIO PWM as a PwmChannel", te_pwm, false);
     bench.letter('f', "the interrupts and the flags", tf_interrupts, false);
     bench.letter('g', "the sampler", tg_sampler, false);
+    bench.letter('h', "the corners: relative IRQ, STATUS, the 65536 divider, PIO1's machines 2 and 3 (wireless)", th_corners);
 
     if (serial_ok) {
         brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "PLL125" : "FAILED", " timer=", timer_ok ? "1us" : "FAILED",

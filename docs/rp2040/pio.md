@@ -143,7 +143,7 @@ Sm::enable(true);
 ## Bench findings
 
 The reference suite is `test_rp2040_pio`, green on the WeAct board:
-one letter wireless in z (8 verdicts), six by name on two wires (GP13
+two letters wireless in z (13 verdicts), six by name on two wires (GP13
 into GP15, GP17 into GP9) with the PWM block's counters at the far ends.
 
 - THE ENCODINGS: the transmitter's four words (0x9FA0 0xF727 0x6001
@@ -175,6 +175,24 @@ into GP15, GP17 into GP9) with the PWM block's counters at the far ends.
   program pushes.
 - THE SAMPLER: one instruction with autopush at 1 MHz, 8192 samples of
   a 25 % wave collected by the DMA in 8.2 ms, 250 per mille ones.
+- THE CORNERS, wireless (letter h, ten runs of ten):
+  - IRQ RELATIVE: `irq 0 rel` raises flag 1, 2, 3 on machines 1, 2, 3
+    and nothing else, and `irq 1 rel` on machine 3 raises flag 0 - the
+    modulo-4 sum on the two low bits. `wait 1 irq 0 rel` on machine 2
+    stays stalled under flags 0, 1 and 3 together and leaves on flag 2,
+    which the wait clears.
+  - MOV X, STATUS as a branch: a machine that pulls only while STATUS
+    (TX level, N = 2) reads zero takes 1, 2 and 3 of four words pushed
+    while it was stopped and leaves one; on the RX level (N = 2) STATUS
+    reads all ones at levels 0 and 1 and zero at 2.
+  - THE 65536 DIVIDER: CLKDIV 0 (`PioClockDiv{0, 0}`) on machine 3
+    divides by 65536 - the four-cycle square wave rises 477 times in a
+    second on the pad's own input (476.84 Hz; the machine and the timer
+    share the crystal).
+  - PIO1, MACHINES 2 AND 3: the serial tasks on ONE pad, the receiver
+    set up first and the transmitter after, the receiver reading the
+    transmitter's output through the pad's input: 64 bytes exact at
+    115200 and at 1 Mbaud, no frame error.
 
 ## Not covered yet
 
@@ -190,16 +208,7 @@ Driver gaps, each with its reason:
 - The synchronizer bypass and the sticky and inline-enable outputs:
   written by the configuration, no program here depends on them.
 - Two machines in lockstep through `restart_clocks` and a shared
-  flag: the wires reach one output at a time; two square waves on
-  the two wires phase-compared by a sampler would measure it.
-
-Implemented but not bench-verified, each with what would measure it:
-
-- `pio_wait_irq` with the relative flag and `pio_irq` relative from a
-  machine other than 0: two machines of one program synchronized, the
-  pattern read back.
-- The STATUS source (MOV x, STATUS with its level): a program
-  branching on the FIFO level, its words counted.
-- The 65536 divider (`PioClockDiv{0, 0}`): a wave at 476 Hz counted.
-- The tasks on PIO1 and on machines 2 and 3: the same programs, the
-  same wires.
+  flag: no program here depends on it; two square waves on two free
+  pads, phase-compared through the pads' own inputs by a sampler
+  machine (no wire needed - letter h reads a pad that way), would
+  measure it.

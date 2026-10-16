@@ -73,6 +73,16 @@
 //   l  THE LOGIC ANALYSER ON A DMA ENGINE: 8192 samples of a square wave
 //      pushed a word at a time and taken by a word-wide engine, so the
 //      capture is as long as the buffer and not as the FIFO
+//   m  WIRELESS, the corners: IRQ RELATIVE from machines 1..3 and WAIT
+//      IRQ RELATIVE; MOV X, STATUS branched on the TX level and read on
+//      a flag (this chip's IRQ source, here and in the next block); two
+//      machines in LOCKSTEP through restart_clocks, sampled on their own
+//      pads in one SIO word against the same two started apart; THE
+//      65536 DIVIDER on PIO1's machine 2, its 572 Hz wave counted; the
+//      serial tasks on PIO2's machines 2 and 3 sharing ONE pad;
+//      FJOIN_RX_PUT + GET, the cells the machine's own; and WAIT GPIO's
+//      index moving with GPIOBASE, two pads sixteen apart driven in
+//      turn
 //
 // build: boards = weact2350b,weact2350b-rv
 // build: monitor_speed = 115200
@@ -1140,6 +1150,376 @@ void tk_pins() {
 }
 
 // =============================================================================
+// m - the corners, wireless
+// =============================================================================
+constexpr PioProgram<2> irq_rel0_program = [] {
+    PioProgram<2> p{};
+    p.code = {pio_irq(0, false, false, PioIrqScope::relative), pio_jmp(PioJmp::always, 1)};
+    return p;
+}();
+constexpr PioProgram<2> irq_rel1_program = [] {
+    PioProgram<2> p{};
+    p.code = {pio_irq(1, false, false, PioIrqScope::relative), pio_jmp(PioJmp::always, 1)};
+    return p;
+}();
+constexpr PioProgram<5> wait_rel_program = [] {
+    PioProgram<5> p{};
+    p.code = {
+        pio_wait_irq(true, 0, PioIrqScope::relative),   // this machine's own flag, cleared on the way out
+        pio_set(PioSetTo::x, 21),
+        pio_mov(PioMovTo::isr, PioMovFrom::x),
+        pio_push(),
+        pio_jmp(PioJmp::always, 4),
+    };
+    return p;
+}();
+/// Pulls only while STATUS (TX level < N: all ones) reads zero.
+constexpr PioProgram<7> status_program = [] {
+    PioProgram<7> p{};
+    p.code = {
+        pio_mov(PioMovTo::x, PioMovFrom::status),   // 0
+        pio_jmp(PioJmp::x_zero, 3),                 // 1: level >= N
+        pio_jmp(PioJmp::always, 0),                 // 2
+        pio_pull(false, true),                      // 3
+        pio_mov(PioMovTo::isr, PioMovFrom::osr),    // 4
+        pio_push(),                                 // 5
+        pio_jmp(PioJmp::always, 0),                 // 6
+    };
+    return p;
+}();
+/// WAIT 1 GPIO 6, then 21 pushed.
+constexpr PioProgram<5> wait_gpio_program = [] {
+    PioProgram<5> p{};
+    p.code = {
+        pio_wait(true, PioWaitOn::gpio, 6),
+        pio_set(PioSetTo::x, 21),
+        pio_mov(PioMovTo::isr, PioMovFrom::x),
+        pio_push(),
+        pio_jmp(PioJmp::always, 4),
+    };
+    return p;
+}();
+
+/// Samples of GPIO_IN over `n` reads in which the bits of `a` and `b`
+/// differ; `b_high` the samples with `b` high (both waves running is
+/// half of them).
+uint32_t b_high = 0;
+uint32_t disagreements(uint8_t a, uint8_t b, uint32_t n) {
+    uint32_t d = 0;
+    b_high = 0;
+    for (uint32_t i = 0; i < n; ++i) {
+        const uint32_t w = Gpio::in();
+        if ((((w >> a) ^ (w >> b)) & 1u) != 0u) {
+            ++d;
+        }
+        b_high += (w >> b) & 1u;
+    }
+    return d;
+}
+
+/// The WAIT GPIO 6 machine on PIO2 with the window at `base`: which of
+/// GP6 and GP22 (both SIO outputs, low) releases it, raised in turn.
+/// 0 none, 6 or 22.
+uint8_t wait_gpio_released_by(uint8_t base) {
+    (void)P2::reset();
+    (void)P2::gpio_base(base);
+    using M = PioSm<2, 1>;
+    const auto at = P2::add(wait_gpio_program);
+    if (!at || !M::init(wait_gpio_program, *at, {})) {
+        return 0xEEu;
+    }
+    (void)Pin<6>::output(false);
+    (void)Pin<22>::output(false);
+    spin_us(5);
+    M::enable(true);
+    spin_us(10);
+    uint8_t by = M::rx_level() != 0u ? 0xFFu : 0u;   // released by nothing raised: a fault
+    if (by == 0u) {
+        Pin<6>::set();
+        spin_us(10);
+        if (M::rx_level() != 0u) {
+            by = 6;
+        } else {
+            Pin<22>::set();
+            spin_us(10);
+            if (M::rx_level() != 0u) {
+                by = 22;
+            }
+        }
+    }
+    M::enable(false);
+    P2::unload(*at, wait_gpio_program.length);
+    (void)Pin<6>::release();
+    (void)Pin<22>::release();
+    (void)P2::reset();
+    return by;
+}
+
+void tm_corners() {
+    pio_fresh();
+    // IRQ relative: machine n raises flag (index + n) mod 4 (11.4.10's
+    // "modulo-4 addition on the two LSBs").
+    const auto at0 = P0::add(irq_rel0_program);
+    const auto at1 = P0::add(irq_rel1_program);
+    uint8_t raised[4] = {};
+    for (uint8_t m = 1; m < 4u; ++m) {
+        P0::clear_flags(0xFF);
+        bool ok = false;
+        if (m == 1u) { ok = at0 && PioSm<0, 1>::init(irq_rel0_program, *at0, {}); PioSm<0, 1>::enable(true); }
+        if (m == 2u) { ok = at0 && PioSm<0, 2>::init(irq_rel0_program, *at0, {}); PioSm<0, 2>::enable(true); }
+        if (m == 3u) { ok = at0 && PioSm<0, 3>::init(irq_rel0_program, *at0, {}); PioSm<0, 3>::enable(true); }
+        spin_us(10);
+        P0::disable(0x0F);
+        raised[m] = ok ? P0::flags() : 0xEEu;
+    }
+    P0::clear_flags(0xFF);
+    const bool ok3 = at1 && PioSm<0, 3>::init(irq_rel1_program, *at1, {});
+    PioSm<0, 3>::enable(true);
+    spin_us(10);
+    P0::disable(0x0F);
+    const uint8_t wrapped = ok3 ? P0::flags() : 0xEEu;
+    P0::clear_flags(0xFF);
+    print(serial, "  IRQ 0 REL raised by machines 1, 2, 3: flags ", hex(raised[1]), " ", hex(raised[2]), " ", hex(raised[3]),
+          "; IRQ 1 REL by machine 3: ", hex(wrapped), crlf);
+    bench.verdict("IRQ relative from machines 1..3: machine n raises flag n alone, and index 1 from machine 3 wraps to flag 0",
+                  raised[1] == 0x02u && raised[2] == 0x04u && raised[3] == 0x08u && wrapped == 0x01u);
+    using W = PioSm<0, 2>;
+    P0::unload(*at0, irq_rel0_program.length);
+    P0::unload(*at1, irq_rel1_program.length);
+    const auto atw = P0::add(wait_rel_program);
+    const bool okw = atw && W::init(wait_rel_program, *atw, {});
+    W::enable(true);
+    spin_us(10);
+    P0::raise_flags(0x0B);   // 0, 1 and 3
+    spin_us(10);
+    const uint8_t held = W::rx_level();
+    P0::clear_flags(0x0B);
+    P0::raise_flags(0x04);   // 2: this machine's own
+    spin_us(10);
+    const uint8_t freed = W::rx_level();
+    const uint32_t word = freed != 0u ? W::pop() : 0u;
+    const bool cleared = !P0::flag(2);
+    W::enable(false);
+    P0::unload(*atw, wait_rel_program.length);
+    print(serial, "  WAIT 1 IRQ 0 REL on machine 2: after flags 0, 1, 3 ", held, " words; after flag 2 ", freed, " (", word,
+          "), flag 2 cleared ", cleared, crlf);
+    bench.verdict("WAIT IRQ relative on machine 2 waits for flag 2 alone, and clears it on the way out",
+                  okw && held == 0u && freed == 1u && word == 21u && cleared);
+
+    // MOV X, STATUS: the TX level as a branch (N = 2: four words pushed
+    // with the machine stopped, three taken at levels 4, 3, 2, one left),
+    // then this chip's flag source on the side, here and in the next
+    // block.
+    using St = PioSm<0, 1>;
+    const auto ats = P0::add(status_program);
+    const bool oks = ats && St::init(status_program, *ats, {.status_select = PioStatus::tx_level, .status_n = 2});
+    for (uint32_t i = 1; i <= 4u; ++i) {
+        St::push(i);
+    }
+    St::enable(true);
+    spin_us(20);
+    St::enable(false);
+    const uint8_t taken = St::rx_level();
+    const uint8_t left = St::tx_level();
+    uint32_t w[3] = {};
+    for (uint8_t i = 0; i < 3u && !St::rx_empty(); ++i) {
+        w[i] = St::pop();
+    }
+    St::drain_tx();
+    P0::unload(*ats, status_program.length);
+    uint32_t st[4] = {};
+    P0::clear_flags(0xFF);
+    P1::clear_flags(0xFF);
+    const auto read_status = [](uint8_t n) {
+        (void)St::configure({.status_select = PioStatus::irq_flag, .status_n = n});
+        (void)St::exec_wait(pio_mov(PioMovTo::isr, PioMovFrom::status));
+        (void)St::exec_wait(pio_push());
+        const auto v = St::pop_wait(10'000);
+        return v ? *v : 0x0BADu;
+    };
+    st[0] = read_status(pio_status_irq(5));
+    P0::raise_flags(1u << 5);
+    st[1] = read_status(pio_status_irq(5));
+    P0::clear_flags(0xFF);
+    st[2] = read_status(pio_status_irq(5, PioStatusIrq::next));
+    P1::raise_flags(1u << 5);
+    st[3] = read_status(pio_status_irq(5, PioStatusIrq::next));
+    P1::clear_flags(0xFF);
+    (void)St::configure({});
+    print(serial, "  MOV X, STATUS on TX level >= 2: ", taken, " words taken (", w[0], " ", w[1], " ", w[2], "), ", left,
+          " left; on flag 5 down/up ", hex(st[0]), " ", hex(st[1]), ", on the next block's flag 5 down/up ", hex(st[2]), " ",
+          hex(st[3]), crlf);
+    bench.verdict("STATUS as a branch: a machine pulling while its TX level is at or past two takes 1, 2, 3 of four and leaves one",
+                  oks && taken == 3u && left == 1u && w[0] == 1u && w[1] == 2u && w[2] == 3u);
+    bench.verdict("STATUS on a flag (STATUS_SEL IRQ): zero with flag 5 down and all ones with it up, here and in the next block",
+                  st[0] == 0u && st[1] == 0xFFFFFFFFu && st[2] == 0u && st[3] == 0xFFFFFFFFu);
+
+    // LOCKSTEP: two square waves of one program at divider 1000 (a
+    // machine cycle of 6.67 us, a period of 26.7 us) on GP6 and GP7,
+    // sampled in one SIO word. Started 10 us apart - one and a half
+    // machine cycles, each machine beginning on its own divider's next
+    // tick, so an offset of 0.5 to 2.5 cycles of a 4-cycle period - they
+    // disagree on min(d, 4 - d) / 2 of the samples, 25 % at the least;
+    // restarted with their dividers together and enabled in one write,
+    // on none.
+    using A = PioSm<0, 1>;
+    using B = PioSm<0, 2>;
+    const auto atq = P0::add(pio_square_wave_program);
+    bool okl = atq.has_value();
+    (void)Pin<6>::function(P0::pin_function);
+    (void)Pin<7>::function(P0::pin_function);
+    A::pin_directions(6, 1, true);
+    B::pin_directions(7, 1, true);
+    okl = okl && A::init(pio_square_wave_program, *atq, {.clock = {1000, 0}, .set_base = 6, .set_count = 1});
+    okl = okl && B::init(pio_square_wave_program, *atq, {.clock = {1000, 0}, .set_base = 7, .set_count = 1});
+    A::enable(true);
+    spin_us(10);
+    B::enable(true);
+    spin_us(100);
+    const uint32_t apart = disagreements(6, 7, 100'000);
+    P0::disable(A::bit | B::bit);
+    A::pin_levels(6, 1, false);
+    B::pin_levels(7, 1, false);
+    (void)A::exec_wait(pio_jmp(PioJmp::always, *atq));
+    (void)B::exec_wait(pio_jmp(PioJmp::always, *atq));
+    P0::restart(A::bit | B::bit);
+    P0::restart_clocks(A::bit | B::bit);
+    P0::enable(A::bit | B::bit);
+    spin_us(100);
+    const uint32_t together = disagreements(6, 7, 100'000);
+    const uint32_t together_high = b_high;
+    P0::disable(A::bit | B::bit);
+    // ACROSS TWO BLOCKS: PIO0's machine 1 on GP6 and PIO1's machine 1 on
+    // GP7, their dividers restarted and both enabled by PIO0's CTRL alone
+    // (NEXT_PIO_MASK) - the simultaneity the neighbour masks exist for.
+    using X = PioSm<1, 1>;
+    const auto atx = P1::add(pio_square_wave_program);
+    (void)Pin<7>::function(P1::pin_function);
+    X::pin_directions(7, 1, true);
+    okl = okl && atx && X::init(pio_square_wave_program, *atx, {.clock = {1000, 0}, .set_base = 7, .set_count = 1});
+    A::pin_levels(6, 1, false);
+    X::pin_levels(7, 1, false);
+    (void)A::exec_wait(pio_jmp(PioJmp::always, *atq));
+    P0::restart(A::bit);
+    P0::restart_clocks_across(A::bit, {.next = X::bit});
+    P0::enable_across(A::bit, {.next = X::bit});
+    spin_us(100);
+    const uint32_t across = disagreements(6, 7, 100'000);
+    const uint32_t across_high = b_high;
+    P0::disable_across(A::bit, {.next = X::bit});
+    P0::unload(*atq, pio_square_wave_program.length);
+    if (atx) {
+        P1::unload(*atx, pio_square_wave_program.length);
+    }
+    (void)Pin<6>::release();
+    (void)Pin<7>::release();
+    print(serial, "  two waves of one program on GP6 and GP7, 100000 one-word samples: started 10 us apart ", apart,
+          " disagree; restart_clocks and one enable ", together, " (GP7 high in ", together_high, "); across PIO0 and PIO1 by PIO0's "
+          "CTRL ", across, " (GP7 high in ", across_high, ")", crlf);
+    bench.verdict("restart_clocks and one enable put two machines in lockstep: their pads never disagree in a word, where "
+                  "the same two started apart disagree on 20 % of the samples or more",
+                  okl && together == 0u && apart >= 20'000u && together_high >= 40'000u && together_high <= 60'000u);
+    bench.verdict("... and the neighbour masks do it across two blocks: one CTRL write restarts and starts a machine of each, "
+                  "their pads never disagreeing",
+                  okl && across == 0u && across_high >= 40'000u && across_high <= 60'000u);
+
+    // The 65536 divider on PIO1's machine 2: four cycles a period at
+    // 150 MHz / 65536 - 572.2 Hz, 572 or 573 periods counted in one
+    // second (the counting machine and the timer share the crystal).
+    using Sq = PioSm<1, 2>;
+    const auto atd = P1::add(pio_square_wave_program);
+    (void)Pin<12>::function(P1::pin_function);
+    Sq::pin_directions(12, 1, true);
+    const bool okd = atd && Sq::init(pio_square_wave_program, *atd, {.clock = {0, 0}, .set_base = 12, .set_count = 1});
+    Sq::enable(true);
+    const auto periods = count_periods(12, 1'000'000);
+    const uint32_t div_reg = Sq::clkdiv();
+    Sq::enable(false);
+    P1::unload(*atd, pio_square_wave_program.length);
+    (void)Pin<12>::release();
+    print(serial, "  CLKDIV ", hex(div_reg), " (PioClockDiv{0, 0}) on PIO1 machine 2: ", periods ? *periods : 0u,
+          " periods in 1 s on GP12", crlf);
+    bench.verdict("the 65536 divider: CLKDIV's integer 0 divides by 65536, the four-cycle wave at 572.2 Hz (572..573 in 1 s)",
+                  okd && div_reg == 0u && periods && *periods >= 572u && *periods <= 573u);
+
+    // The serial tasks on PIO2's machines 2 and 3, ONE pad.
+    using LTx = PioUartTx<2, 2, 14>;
+    using LRx = PioUartRx<2, 3, 14>;
+    uint16_t good[2] = {};
+    constexpr uint32_t rates[2] = {115200, 1'000'000};
+    bool inits = true;
+    for (uint8_t r = 0; r < 2u; ++r) {
+        inits = LRx::init(clock, rates[r]) && inits;
+        inits = LTx::init(clock, rates[r]) && inits;
+        spin_us(100);
+        fill_pattern(tx_buf, 64, static_cast<uint8_t>(0x41u + r));
+        for (uint16_t i = 0; i < 64u; ++i) {
+            (void)LTx::write_wait(tx_buf[i]);
+            const auto b = LRx::read_wait(200'000u);
+            if (b && *b == tx_buf[i]) {
+                ++good[r];
+            }
+        }
+        if (LRx::frame_error()) {
+            good[r] = 0;
+        }
+        LTx::release();
+        LRx::release();
+    }
+    print(serial, "  PIO2 machine 2 sending and machine 3 receiving on GP14 alone: ", good[0], "/64 at 115200, ", good[1],
+          "/64 at 1 Mbaud", crlf);
+    bench.verdict("the serial tasks on PIO2's machines 2 and 3, one pad: 64 bytes exact at 115200 and at 1 Mbaud, no frame error",
+                  inits && good[0] == 64u && good[1] == 64u);
+
+    // FJOIN_RX_PUT + GET: the machine PUTs 21 into cell 2 and GETs it
+    // back; the system's write into cell 1 does not reach the storage
+    // (11.4.8.2: "the system can no longer access the RX FIFO storage
+    // registers" - both ports the machine's). The system's READ is
+    // printed and not judged: it is not refused, and what it returns is
+    // not defined (measured: the cell's value on most runs, other bits
+    // on the first run after a reset).
+    const bool pg = Probe::configure({.fifo_join = PioFifoJoin::rx_putget});
+    (void)Probe::exec_wait(pio_set(PioSetTo::x, 21));
+    (void)Probe::exec_wait(pio_mov(PioMovTo::isr, PioMovFrom::x));
+    (void)Probe::exec_wait(pio_put(2));
+    (void)Probe::exec_wait(pio_set(PioSetTo::x, 9));
+    (void)Probe::exec_wait(pio_mov(PioMovTo::isr, PioMovFrom::x));
+    (void)Probe::exec_wait(pio_put(1));
+    const uint32_t sys_reads = Probe::putget(2);
+    Probe::putget(1) = 0x5A5A5A5Au;
+    (void)Probe::exec_wait(pio_get(2));
+    (void)Probe::exec_wait(pio_mov(PioMovTo::x, PioMovFrom::osr));
+    (void)Probe::exec_wait(pio_get(1));
+    (void)Probe::exec_wait(pio_mov(PioMovTo::y, PioMovFrom::osr));
+    const bool back = Probe::configure({});
+    (void)Probe::exec_wait(pio_mov(PioMovTo::isr, PioMovFrom::x));
+    (void)Probe::exec_wait(pio_push());
+    (void)Probe::exec_wait(pio_mov(PioMovTo::isr, PioMovFrom::y));
+    (void)Probe::exec_wait(pio_push());
+    const auto own2 = Probe::pop_wait(10'000);
+    const auto own1 = Probe::pop_wait(10'000);
+    print(serial, "  PUT+GET: the machine's cell 2 back ", own2 ? *own2 : 0u, ", cell 1 back ", hex(own1 ? *own1 : 0u),
+          " (the system wrote 0x5A5A5A5A there); the system's read of cell 2 ", hex(sys_reads), crlf);
+    bench.verdict("FJOIN_RX_PUT + GET: the four cells are the machine's own - 21 and 9 PUT and GOT back, the system's write "
+                  "into cell 1 lost",
+                  pg && back && own2 && *own2 == 21u && own1 && *own1 == 9u);
+
+    // WAIT GPIO's index under the window: 6 with GPIOBASE 0, and the
+    // same instruction with GPIOBASE 16.
+    const uint8_t at_zero = wait_gpio_released_by(0);
+    const uint8_t at_sixteen = wait_gpio_released_by(16);
+    print(serial, "  WAIT 1 GPIO 6 on PIO2: released by GP", at_zero, " with GPIOBASE 0 and by GP", at_sixteen,
+          " with GPIOBASE 16 (0 = by neither)", crlf);
+    // MEASURED: the index moves with the window - 11.4.3 calls it "an
+    // absolute GPIO index ... not affected by the state machine's input
+    // IO mapping", and GPIOBASE is not that mapping: it relocates PIO's
+    // GPIO 0, the WAIT's index included.
+    bench.verdict("WAIT GPIO's index moves with GPIOBASE: index 6 is GP6 with the window at 0 and GP22 with it at 16",
+                  at_zero == 6u && at_sixteen == 22u);
+    pio_fresh();
+}
+
+// =============================================================================
 // l - the logic analyser on a DMA engine
 // =============================================================================
 //
@@ -1263,6 +1643,8 @@ int main() {
     bench.letter('j', "the receive FIFO as four registers", tj_putget);
     bench.letter('k', "the masked input and the new pin forms", tk_pins, false);
     bench.letter('l', "the logic analyser on a DMA engine", tl_sampler_dma, false);
+    bench.letter('m', "the corners, wireless: relative IRQ, STATUS, lockstep, 65536, machines 2 and 3, PUT+GET, WAIT GPIO",
+                 tm_corners);
 
     if (serial_ok) {
         brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "PLL150" : "FAILED", " mtime=",

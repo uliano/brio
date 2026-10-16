@@ -74,6 +74,7 @@
 
 #include <stdint.h>
 
+#include <atomic>
 #include <optional>
 
 #include "kernel/time_event.hpp"
@@ -265,7 +266,10 @@ struct Rp2040SleepSite {
     }
 
 private:
-    static inline SleepDepth armed_ = SleepDepth::none;
+    // Disarmed by a timed site's handler (its isr() hands the machine
+    // back to a ticking sleep) and read by the program's idle and
+    // readbacks: volatile, so a poll reads the cell.
+    static inline volatile SleepDepth armed_ = SleepDepth::none;
     static inline uint32_t dormants_ = 0;
 };
 
@@ -322,6 +326,9 @@ struct Rp2040TimedSleepSite {
                 // least", a shade early is a wasted vote round.
                 const uint64_t us = (static_cast<uint64_t>(*next) * 1'000'000u + P::ticks_per_second - 1u) /
                                     P::ticks_per_second;
+                // The witness and its marks stored before the alarm can
+                // fire: its handler reads them (resync()).
+                std::atomic_signal_fence(std::memory_order_release);
                 Timer::clear(alarm_n);
                 Timer::alarm_in(alarm_n, us > 0xFFFF'FFFFu ? 0xFFFF'FFFFu : static_cast<uint32_t>(us));
                 Timer::interrupt(alarm_n, true);
@@ -358,6 +365,7 @@ struct Rp2040TimedSleepSite {
             a.match_hour = a.match_minute = a.match_second = true;
             rtc_at_arm_ = seconds_of_day(*now);
             witness_ = Witness::rtc;
+            std::atomic_signal_fence(std::memory_order_release);   // before the alarm can fire (resync())
             if (!Rtc::alarm(a)) {
                 Plain::disarm();
                 return false;
@@ -471,13 +479,17 @@ private:
     }
 
     static inline bool ready_ = false;
-    static inline bool alarm_armed_ = false;
-    static inline bool rtc_alarm_armed_ = false;
+    // The next three are written by the handlers (isr(), rtc_isr()) and
+    // read by the program (disarm(), the readbacks): volatile. The
+    // witness and the marks are written by arm() before the alarm is
+    // placed (the fence there) and read in resync()'s critical section.
+    static inline volatile bool alarm_armed_ = false;
+    static inline volatile bool rtc_alarm_armed_ = false;
     static inline Witness witness_ = Witness::none;
     static inline uint32_t us_at_arm_ = 0;
     static inline uint32_t rtc_at_arm_ = 0;
     static inline uint32_t tick_at_arm_ = 0;
-    static inline uint32_t last_advance_ = 0;
+    static inline volatile uint32_t last_advance_ = 0;
 };
 
 } // namespace brio

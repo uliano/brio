@@ -188,9 +188,10 @@ architectures from one source. Where the halves differ, both numbers:
 | a wakeup raised INSIDE the mask | back in 3 us | back in 1 us |
 | a 5 ms masked window's ticks | 1 | 5 |
 | `Resets::release()` to RESET_DONE | 1 us | 0 us |
-| edge positions walked, lost / a period late | 3200, 0 / 0 | 3200, 0 / 0 |
+| edge positions walked, lost / a period late | 4800, 0 / 0 | 3200, 0 / 0 |
 | the comparator's edge, the core asleep, to the handler / to the loop | 31 / 79 cycles | 31 / 90 (36 / 95 in standby) |
 | the PWM line's edge, the same | 31 / 76 cycles | 36 / 92 (41 / 97 in standby) |
+| SysTick's edge, the same (the Cortex-M33's tick) | 26 / 88 cycles | - |
 | kernel turns over 100 quiet ticks | 100 | 100 |
 | `idle()` with a line pending / a quiet turn that finds one | 57 / 167 cycles | 82 / 175 cycles |
 
@@ -237,20 +238,25 @@ architectures from one source. Where the halves differ, both numbers:
   NVIC on one half and Xh3irq on the other. Each in the light rung and in
   standby through `Rp2350SleepSite`, which on Hazard3 releases the core's
   power request (MSLEEP.POWERDOWN) and on the Cortex-M33 changes nothing
-  the core does. 3200 tries per half: none took the rescue, none ended a
-  period late. The edge crosses the whole path: the earliest lands 80 to
+  the core does. And on the Cortex-M33 alone a THIRD edge, its own tick:
+  SysTick, a core exception, placed by a reload of D (LOAD = D, a VAL
+  write, LOAD back) - SysTick has no name on the other half. 4800 tries
+  on the Cortex-M33 and 3200 on Hazard3 (ten runs of the letter on the
+  Arm half): none took the rescue, none ended a period late; SysTick's
+  edge finds the core asleep from D = 88, 81 cycles after the earliest. The edge crosses the whole path: the earliest lands 80 to
   89 cycles before the sleep takes it (a fixed lead of bus reads sits
   between the placement and the loop, longer than the path from the
   loop's masked check to the sleep instruction, about 20 cycles in
   either listing), and from D = 81 to 90 on the edge finds the core asleep.
 - WHAT A WAKE COSTS: from an edge that finds the core asleep to the
-  handler's first statement 31 cycles on the Cortex-M33 - its exception
-  entry, the vector fetched with the state saved - and 31 to 36 on
+  handler's first statement 31 cycles on the Cortex-M33 for a line and 26
+  for SysTick - its exception entry, the vector fetched with the state
+  saved - and 31 to 36 on
   Hazard3, whose dispatch is the crt's own (the trap, the caller-saved
   registers, `meinext` for a line); releasing the power request adds 5
   cycles a wake there, the core waiting for its power-up acknowledge as
   3.8.9 says. To the caller's loop, the handler whole and the return: 76
-  to 79 cycles on one half, 90 to 97 on the other. The datasheet gives
+  to 88 cycles on one half, 90 to 97 on the other. The datasheet gives
   neither core's entry in cycles.
 - ONE TURN PER INTERRUPT, on both halves (letter `o`): a Tenuto pack of
   three quiet AOs, two of them with a periodic time event, turned as
@@ -437,12 +443,6 @@ Implemented but not bench-verified, each with what would measure it:
 - `Ticker::advance`: born with the first sleep site that stops the
   timebase, which is the power chapter's; `pause` and `resume` run
   around letter `w`'s passes and are judged by nothing there.
-- The Cortex-M33's SysTick edge across the idle path: letter `w` places
-  its edges by registers both halves have, and SysTick has no name on
-  the other one; the M33's tick wakes the same WFI by the same rule, and
-  the walk of it is the RP2040's letter `w` on a Cortex-M0+, not on this
-  core. A placement of SysTick's reload in a letter of the Arm half
-  alone would measure it.
 - The idle path through the DORMANT hook: its wake list is the dormant's
   own (a GPIO event, the always-on timer's alarm), and a wake already
   latched when the oscillator stops is not shown to end it at once. A

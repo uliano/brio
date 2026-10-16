@@ -48,6 +48,20 @@
 //      6 armed by core 1's Echo (the line enabled in core 1's NVIC), 4 KB
 //      copied, its completion's vector run on core 1 alone, the report
 //      crossed back to core 0
+//   j  A Lease::reply LOAN ACROSS THE BRIDGE AND BACK: 64 requests, each
+//      lending core 0's 256-byte buffer to core 1's Echo, which adds one
+//      to every byte and sums them and replies through the crossing
+//      ReplyTo with the same loan - every byte back incremented, the sum
+//      and the pointer right; then THE SYSTEM TIMER from both cores at
+//      once (the raw pair read by each, never backwards on either) and
+//      PAUSED (the count standing while core 0's SysTick counts on)
+//   k  THE IDLE CONTRACT ON CORE 1: test_rp2040_platform's letters w and
+//      k run by core 1 on Rp2040Platform<1> and CoreTicker<1> inside
+//      Echo's dispatch - its own SysTick placed by a reload, PWM slice 0's
+//      wrap in its own NVIC, and the SIO doorbell rung by core 0 a counted
+//      number of cycles after core 1 asks - every position of 400, a
+//      plain WFI and with SLEEPDEEP set, alarm 1 the rescue; then a quiet
+//      pack on core 1 turned over 100 of its ticks
 //   g  core 1 dies and is brought back: a Halt sent, core 1's panic
 //      breadcrumb read by core 0 from core 1's own record, core 1 put
 //      back into the bootrom through the power-on state machine and
@@ -62,6 +76,7 @@
 #include "kernel/fsm.hpp"
 #include "kernel/tenuto.hpp"
 #include "kernel/panic.hpp"
+#include "kernel/time.hpp"
 #include "kernel/time_event.hpp"
 #include "rp2040/clock.hpp"
 #include "rp2040/dma.hpp"
@@ -69,6 +84,7 @@
 #include "rp2040/nvic.hpp"
 #include "rp2040/pin.hpp"
 #include "rp2040/platform.hpp"
+#include "rp2040/pwm.hpp"
 #include "rp2040/ticker.hpp"
 #include "rp2040/timer.hpp"
 #include "rp2040/uart.hpp"
@@ -107,6 +123,25 @@ struct Tick {};
 struct CopyOn1 { uint16_t words; };
 struct CopyDone { uint8_t flags; };
 struct Copied { uint8_t flags; };
+/// Letter j: a buffer lent across for the length of a request, and the
+/// timer read from core 1 while core 0 reads it too.
+struct Folded {
+    Borrowed<uint8_t, Lease::reply> buf;
+    uint16_t len;
+    uint32_t sum;
+};
+struct Fold {
+    Borrowed<uint8_t, Lease::reply> buf;
+    uint16_t len;
+    ReplyTo<Folded> reply;
+};
+struct ClockRace { uint32_t reads; };
+/// Letter k: core 1 walks its idle path (namespace c1 below).
+struct WalkOn1 {};
+namespace c1 {
+void run_on_core1();
+}
+struct Raced { uint32_t reads; uint32_t backwards; };
 
 /// Letter i's engine: channel 6, its completions on DMA_IRQ_1, armed BY
 /// CORE 1 - arm() enables the line in the calling core's NVIC.
@@ -118,7 +153,7 @@ volatile uint32_t line1_on_core0 = 0;
 volatile uint32_t line1_on_core1 = 0;
 
 // ---- core 0: the origin of every Ping, the home of every answer --------------
-struct Origin : Fsm<Origin, Pong, Tick, Copied> {
+struct Origin : Fsm<Origin, Pong, Tick, Copied, Folded, Raced> {
     static inline EventQueue<Event, 32, P0> queue;
     static constexpr uint8_t inbox_depth = 16;
 
@@ -129,6 +164,10 @@ struct Origin : Fsm<Origin, Pong, Tick, Copied> {
     static inline uint32_t ticks_seen = 0;
     static inline uint32_t copies = 0;
     static inline uint8_t copy_flags = 0;
+    static inline uint32_t folds = 0;
+    static inline Folded last_fold{};
+    static inline uint32_t races = 0;
+    static inline Raced last_race{};
 
     static void reset_counts() {
         pongs = 0;
@@ -151,12 +190,14 @@ struct Origin : Fsm<Origin, Pong, Tick, Copied> {
             },
             [](Tick) { ++ticks_seen; return handled(); },
             [](Copied c) { ++copies; copy_flags = c.flags; return handled(); },
+            [](Folded f) { last_fold = f; ++folds; return handled(); },
+            [](Raced r) { last_race = r; ++races; return handled(); },
             [](auto) { return unhandled(); });
     }
 };
 
 // ---- core 1: the echo, and the metronome on core 1's own time -----------------
-struct Echo : Fsm<Echo, Ping, Halt, CopyOn1, CopyDone> {
+struct Echo : Fsm<Echo, Ping, Halt, CopyOn1, CopyDone, Fold, ClockRace, WalkOn1> {
     static inline EventQueue<Event, 32, P1> queue;
     static constexpr uint8_t inbox_depth = 16;
     static inline volatile uint32_t seen = 0;   // Pings dispatched, for core 0's account
@@ -174,6 +215,32 @@ struct Echo : Fsm<Echo, Ping, Halt, CopyOn1, CopyDone> {
                 return handled();
             },
             [](CopyDone d) { send<Origin>(Copied{d.flags}); return handled(); },
+            [](Fold f) {
+                uint32_t sum = 0;
+                for (uint16_t i = 0; i < f.len; ++i) {
+                    f.buf.get()[i] = static_cast<uint8_t>(f.buf.get()[i] + 1u);
+                    sum += f.buf.get()[i];
+                }
+                f.reply.send(Folded{f.buf, f.len, sum});
+                return handled();
+            },
+            [](ClockRace c) {
+                uint32_t backwards = 0;
+                uint64_t last = Timer::now();
+                for (uint32_t i = 0; i < c.reads; ++i) {
+                    const uint64_t t = Timer::now();
+                    if (t < last) {
+                        ++backwards;
+                    }
+                    last = t;
+                }
+                send<Origin>(Raced{c.reads, backwards});
+                return handled();
+            },
+            [](WalkOn1) {
+                c1::run_on_core1();
+                return handled();
+            },
             [](auto) { return unhandled(); });
     }
 };
@@ -406,6 +473,372 @@ void ti_dma_on_core1() {
 }
 
 // -----------------------------------------------------------------------------
+/// A LEASE::REPLY LOAN ACROSS THE BRIDGE: the buffer is core 0's, lent
+/// for the length of one request; core 1 writes it and replies with the
+/// loan, and core 0 reads it only once the reply is dispatched - the
+/// inbox's release and acquire fences (util/inbox.hpp) are what make
+/// core 1's writes visible. Then the system timer, the one clock the
+/// two cores share, read by both at once and paused.
+alignas(4) uint8_t lent[256];
+
+void tj_loan_and_timer() {
+    const Counts k0 = Counts::now();
+    uint32_t good = 0;
+    uint32_t bad_bytes = 0;
+    bool same_loan = true;
+    bool sums = true;
+    for (uint16_t round = 0; round < 64u; ++round) {
+        uint32_t want_sum = 0;
+        for (uint16_t i = 0; i < 256u; ++i) {
+            lent[i] = static_cast<uint8_t>(round * 7u + i);
+            want_sum += static_cast<uint8_t>(lent[i] + 1u);
+        }
+        const uint32_t before = Origin::folds;
+        send<Echo>(Fold{lend<Lease::reply>(lent), 256, send_reply_to<Origin, Folded>()});
+        const uint32_t t0 = us_now();
+        while (Origin::folds == before && us_now() - t0 < 20'000u) {
+            (void)K0::step();
+        }
+        if (Origin::folds == before) {
+            break;
+        }
+        uint32_t bad = 0;
+        for (uint16_t i = 0; i < 256u; ++i) {
+            if (lent[i] != static_cast<uint8_t>(round * 7u + i + 1u)) {
+                ++bad;
+            }
+        }
+        bad_bytes += bad;
+        same_loan = same_loan && Origin::last_fold.buf.get() == lent && Origin::last_fold.len == 256u;
+        sums = sums && Origin::last_fold.sum == want_sum;
+        if (bad == 0u) {
+            ++good;
+        }
+    }
+    const Counts d = Counts::now().since(k0);
+    print(serial, "  64 Folds of a 256-byte loan: ", good, " rounds exact, ", bad_bytes, " bytes wrong, the loan back the same ",
+          same_loan, ", the sums ", sums ? "right" : "WRONG", crlf);
+    bench.verdict("A Lease::reply LOAN CROSSES AND COMES BACK: 64 rounds, every byte core 1 wrote read by core 0 after the "
+                  "reply, the same pointer and length back, core 1's sum right",
+                  good == 64u && bad_bytes == 0u && same_loan && sums && d.echo_in_over == 0u && d.origin_in_over == 0u);
+
+    // The raw pair from both cores at once: core 1 reads it 20000 times
+    // while core 0 reads it the same, each counting a step backwards.
+    const uint32_t r0 = Origin::races;
+    send<Echo>(ClockRace{20'000});
+    uint32_t back0 = 0;
+    uint64_t last = Timer::now();
+    for (uint32_t i = 0; i < 20'000u; ++i) {
+        const uint64_t t = Timer::now();
+        if (t < last) {
+            ++back0;
+        }
+        last = t;
+    }
+    const uint32_t t1 = us_now();
+    while (Origin::races == r0 && us_now() - t1 < 100'000u) {
+        (void)K0::step();
+    }
+    print(serial, "  the raw pair read 20000 times on each core at once: core 0 backwards ", back0, ", core 1 ",
+          Origin::races != r0 ? Origin::last_race.reads : 0u, " reads, backwards ", Origin::last_race.backwards, crlf);
+    bench.verdict("the system timer's raw pair read from both cores at once never goes backwards on either",
+                  Origin::races == r0 + 1u && Origin::last_race.reads == 20'000u && Origin::last_race.backwards == 0u &&
+                      back0 == 0u);
+
+    // PAUSE: five of core 0's SysTick milliseconds with the timer paused
+    // - the count stands (the reads around it, a microsecond or two) -
+    // then five more running (5000 us, one tick of SysTick phase either
+    // way).
+    const uint32_t tk0 = CoreTicker<0>::ticks();
+    while (CoreTicker<0>::ticks() == tk0) {
+    }
+    const uint32_t tk1 = CoreTicker<0>::ticks();
+    const uint32_t a = Timer::now_low();
+    Timer::pause(true);
+    const bool flag = Timer::paused();
+    while (CoreTicker<0>::ticks() - tk1 < 5u) {
+    }
+    const uint32_t b = Timer::now_low();
+    Timer::pause(false);
+    const uint32_t tk2 = CoreTicker<0>::ticks();
+    while (CoreTicker<0>::ticks() - tk2 < 5u) {
+    }
+    const uint32_t c = Timer::now_low();
+    print(serial, "  the timer paused for 5 SysTick ms: it moved ", b - a, " us (PAUSE read ", flag, "); running for 5 more: ",
+          c - b, " us", crlf);
+    bench.verdict("PAUSE stops the count - 2 us at most across five milliseconds - and it runs on from where it stood "
+                  "(4000..6000 us over the next five)",
+                  flag && b - a <= 2u && c - b >= 4000u && c - b <= 6000u && !Timer::paused());
+}
+
+// -----------------------------------------------------------------------------
+/// THE IDLE CONTRACT ON CORE 1: test_rp2040_platform's letters w and k,
+/// run BY CORE 1 inside Echo's dispatch on Rp2040Platform<1> and
+/// CoreTicker<1> - core 1's own SysTick, its own NVIC (the rescue alarm,
+/// the PWM line, the doorbell enabled there by core 1) - with a third
+/// edge only core 1 has: the SIO doorbell, rung by core 0 a counted
+/// number of its own clk_sys cycles after core 1 asks for it. The
+/// results come back through SRAM.
+namespace c1 {
+
+constexpr uint8_t rescue_alarm = 1;
+constexpr uint32_t rescue_us = 50'000u;
+constexpr uint32_t positions = 400;
+constexpr uint32_t tick_period = SysClock::hz / CoreTicker<1>::ticks_per_second;
+using EdgeSlice = PwmSlice<0>;
+
+volatile uint32_t rescue_fires = 0;
+volatile uint32_t tick_entry_val = 0;
+volatile uint32_t line_hits = 0;
+volatile uint32_t line_entry = 0;
+volatile uint32_t bells = 0;          ///< core 1's bell vector entries
+volatile uint32_t bell_d = 0;         ///< the cycles core 0 waits before it rings
+volatile uint32_t bell_go = 0;        ///< raised by core 1 to ask for a ring
+volatile uint32_t bell_served = 0;    ///< and answered by core 0
+volatile bool walking = false;
+
+struct TickEdge {
+    static constexpr uint32_t first_d = 8;
+    static constexpr uint32_t period_us = 1000;
+    static void begin() {}
+    static void end() {}
+    static void sync() {
+        const uint32_t s = CoreTicker<1>::ticks();
+        while (CoreTicker<1>::ticks() == s) {
+        }
+    }
+    static uint32_t count() { return CoreTicker<1>::ticks(); }
+    [[gnu::always_inline]] static void place(uint32_t d) {
+        SysTick->LOAD = d;
+        SysTick->VAL = 0;
+        SysTick->LOAD = tick_period - 1u;
+    }
+    static uint32_t since_edge() { return tick_period - 1u - SysTick->VAL; }
+    static uint32_t entry() { return tick_period - 1u - tick_entry_val; }
+};
+
+struct LineEdge {
+    static constexpr uint32_t first_d = 2;
+    static constexpr uint32_t period_us = 65536u / (SysClock::hz / 1'000'000u);
+    static void begin() {
+        (void)Pwm::reset();
+        (void)EdgeSlice::configure(PwmSliceConfig{});
+        Pwm::clear_pending(EdgeSlice::bit);
+        Pwm::interrupts(EdgeSlice::bit, true);
+        Nvic::clear_pending(Pwm::irq());
+        Nvic::enable(Pwm::irq());   // core 1's NVIC: this runs on core 1
+        EdgeSlice::enable(true);
+        CoreTicker<1>::pause();
+    }
+    static void end() {
+        CoreTicker<1>::resume();
+        EdgeSlice::enable(false);
+        Pwm::interrupts(EdgeSlice::bit, false);
+        Nvic::disable(Pwm::irq());
+        Pwm::clear_pending(EdgeSlice::bit);
+        Nvic::clear_pending(Pwm::irq());
+    }
+    static void sync() {
+        const uint32_t s = line_hits;
+        while (line_hits == s) {
+        }
+    }
+    static uint32_t count() { return line_hits; }
+    [[gnu::always_inline]] static void place(uint32_t d) { EdgeSlice::ctr() = 0xFFFFu - d; }
+    static uint32_t since_edge() { return EdgeSlice::ctr(); }
+    static uint32_t entry() { return line_entry; }
+};
+
+/// THE DOORBELL: core 1 asks, core 0 counts d cycles of its own SysTick
+/// and rings. The two cores share no cycle counter, so the edge's time
+/// is not read back here - only whether a wake was lost.
+struct BellEdge {
+    static constexpr uint32_t first_d = 2;
+    static constexpr uint32_t period_us = 1000;   // no period: a lost bell is the rescue's
+    static void begin() { CoreTicker<1>::pause(); }
+    static void end() { CoreTicker<1>::resume(); }
+    static void sync() {
+        while (bell_served != bell_go) {
+        }
+    }
+    static uint32_t count() { return bells; }
+    [[gnu::always_inline]] static void place(uint32_t d) {
+        bell_d = d;
+        bell_go = bell_go + 1u;
+    }
+    static uint32_t since_edge() { return 0; }
+    static uint32_t entry() { return 0; }
+};
+
+struct Sweep {
+    uint32_t lost;
+    uint32_t late;
+    uint32_t slowest_us;
+    uint32_t asleep_entry;
+    uint32_t asleep_loop;
+};
+/// [edge][rung][edges - 1]: edge 0 tick, 1 line, 2 bell; rung 0 a plain
+/// WFI, 1 with SLEEPDEEP set on core 1.
+Sweep sweeps[3][2][2];
+volatile bool walked = false;
+
+template <typename Edge>
+bool one_try(uint32_t d, uint32_t edges, Sweep& s) {
+    Edge::sync();
+    P1::CriticalSection cs;
+    const uint32_t r0 = rescue_fires;
+    Timer::alarm_in(rescue_alarm, rescue_us);
+    Edge::place(d);
+    for (uint8_t k = 0; k < 12u; ++k) {
+        (void)us_now();
+    }
+    const uint32_t n0 = Edge::count();
+    const uint32_t u0 = us_now();
+    for (;;) {
+        P1::CriticalSection turn;
+        if (Edge::count() - n0 >= edges) {
+            break;
+        }
+        P1::idle();
+    }
+    const uint32_t to_loop = Edge::since_edge();
+    const uint32_t entry = Edge::entry();
+    const uint32_t took = us_now() - u0;
+    Timer::disarm(rescue_alarm);
+    Timer::clear(rescue_alarm);
+    Nvic::clear_pending(Timer::irq(rescue_alarm));
+    const bool rescued = rescue_fires != r0;
+    const bool late = !rescued && took > (edges - 1u) * Edge::period_us + Edge::period_us / 2u;
+    s.lost += rescued ? 1u : 0u;
+    s.late += late ? 1u : 0u;
+    s.slowest_us = took > s.slowest_us ? took : s.slowest_us;
+    if (edges == 1u && d == Edge::first_d + positions - 1u) {
+        s.asleep_entry = entry;
+        s.asleep_loop = to_loop;
+    }
+    return true;
+}
+
+template <typename Edge, uint8_t e>
+void walk(uint32_t max_edges) {
+    Edge::begin();
+    for (uint8_t rung = 0; rung < 2u; ++rung) {
+        if (rung == 1u) {
+            SCB->SCR |= SCB_SCR_SLEEPDEEP_Msk;   // core 1's own SCR
+        }
+        for (uint32_t edges = 1; edges <= max_edges; ++edges) {
+            Sweep& s = sweeps[e][rung][edges - 1u];
+            s = Sweep{};
+            (void)one_try<Edge>(Edge::first_d + positions - 1u, edges, s);   // the XIP fill, discarded
+            s = Sweep{};
+            for (uint32_t i = 0; i < positions; ++i) {
+                (void)one_try<Edge>(Edge::first_d + i, edges, s);
+            }
+        }
+        SCB->SCR &= ~SCB_SCR_SLEEPDEEP_Msk;
+    }
+    Edge::end();
+}
+
+/// Letter k's pack, on core 1's platform.
+template <uint8_t N>
+struct Quiet {
+    struct Event { uint8_t n; };
+    static inline EventQueue<Event, 2, P1> queue;
+    static inline TimeEvent<P1, Quiet, Event> beat{Event{N}};
+    static void init() {
+        if constexpr (N != 0u) {
+            beat.arm_every(ticks_from_ms<P1>(500u * N));
+        }
+    }
+    static void dispatch(const Event&) {}
+};
+using QuietKernel = Tenuto<P1, Quiet<1>, Quiet<2>, Quiet<0>>;
+volatile uint32_t turns = 0;
+
+/// What Echo runs on core 1 for letter k.
+void run_on_core1() {
+    rescue_fires = 0;
+    Timer::clear(rescue_alarm);
+    Timer::interrupt(rescue_alarm, true);
+    Nvic::clear_pending(Timer::irq(rescue_alarm));
+    Nvic::enable(Timer::irq(rescue_alarm));   // core 1's NVIC
+    walk<TickEdge, 0>(2);
+    walk<LineEdge, 1>(2);
+    walk<BellEdge, 2>(1);
+    Timer::interrupt(rescue_alarm, false);
+    Nvic::disable(Timer::irq(rescue_alarm));
+    // THE KERNEL'S TURN on core 1: a quiet pack turned as run() turns it
+    // over 100 of core 1's ticks.
+    QuietKernel::init_all();
+    const uint32_t t = CoreTicker<1>::ticks();
+    uint32_t n = 0;
+    while (CoreTicker<1>::ticks() - t < 100u) {
+        TimeEvents<P1>::process();
+        if (!QuietKernel::step()) {
+            QuietKernel::idle_if_empty();
+        }
+        ++n;
+    }
+    Quiet<1>::beat.disarm();
+    Quiet<2>::beat.disarm();
+    turns = n;
+    walked = true;
+}
+
+}   // namespace c1
+
+void tk_idle_on_core1() {
+    c1::walked = false;
+    c1::bell_go = 0;
+    c1::bell_served = 0;
+    send<Echo>(WalkOn1{});
+    // Core 0 serves the bell edge meanwhile: each request answered after
+    // `bell_d` cycles of its own SysTick (a 125 000-cycle period, read
+    // down), then the ring.
+    const uint32_t t0 = us_now();
+    uint32_t served = 0;
+    while (!c1::walked && us_now() - t0 < 120'000'000u) {
+        const uint32_t go = c1::bell_go;
+        if (go != served) {
+            const uint32_t d = c1::bell_d;
+            const uint32_t v0 = SysTick->VAL;
+            constexpr uint32_t period = SysClock::hz / CoreTicker<0>::ticks_per_second;
+            while (((v0 + period - SysTick->VAL) % period) < d) {
+            }
+            SioDoorbell<1>::ring();
+            served = go;
+            c1::bell_served = go;
+        }
+    }
+    const char* const edge_names[3] = {"the tick (core 1's SysTick)", "a peripheral line (PWM wrap, core 1's NVIC)",
+                                       "the doorbell (rung by core 0)"};
+    bool clean = c1::walked;
+    for (uint8_t e = 0; e < 3u; ++e) {
+        print(serial, "  ", edge_names[e], ", D = ", e == 0u ? 8u : 2u, "..", (e == 0u ? 8u : 2u) + c1::positions - 1u, crlf);
+        for (uint8_t rung = 0; rung < 2u; ++rung) {
+            for (uint32_t edges = 1; edges <= (e == 2u ? 1u : 2u); ++edges) {
+                const c1::Sweep& s = c1::sweeps[e][rung][edges - 1u];
+                print(serial, "    ", rung == 0u ? "light    " : "SLEEPDEEP", " waiting for ", edges, edges == 1u ? " edge:  " : " edges: ",
+                      s.lost, " lost, ", s.late, " late, the slowest try ", s.slowest_us, " us");
+                if (edges == 1u && e != 2u) {
+                    print(serial, "; asleep: ", s.asleep_entry, " cycles to the handler, ", s.asleep_loop, " to the loop");
+                }
+                print(serial, crlf);
+                clean = clean && s.lost == 0u && s.late == 0u;
+            }
+        }
+    }
+    print(serial, "  the rescue fired ", c1::rescue_fires, " time(s); core 1's quiet kernel: ", c1::turns,
+          " turns over 100 of its ticks", crlf);
+    bench.verdict("THE IDLE CONTRACT ON CORE 1: no position of its tick, of a line in its NVIC or of the doorbell rung by core "
+                  "0 loses the wake or defers it a period, one edge or two, plain WFI or SLEEPDEEP",
+                  clean && c1::rescue_fires == 0u);
+    bench.verdict("core 1's kernel turns once per tick: 100 ticks, 100 turns (one either way)",
+                  c1::walked && c1::turns + 1u >= 100u && c1::turns <= 101u);
+}
+
+// -----------------------------------------------------------------------------
 void td_burst() {
     Origin::reset_counts();
     const Counts c0 = Counts::now();
@@ -604,11 +1037,25 @@ extern "C" void isr_systick() {
     if (P0::core_id() == 0u) {
         brio::CoreTicker<0>::tick();
     } else {
+        c1::tick_entry_val = SysTick->VAL;   // letter k: where core 1's period stood on entry
         brio::CoreTicker<1>::tick();
     }
 }
 extern "C" void isr_sio_proc0() { Drain0::isr(); }
-extern "C" void isr_sio_proc1() { Drain1::isr(); }
+extern "C" void isr_sio_proc1() {
+    c1::bells = c1::bells + 1u;   // letter k's doorbell edge
+    Drain1::isr();
+}
+/// Letter k: the line edge and the rescue, both enabled in core 1's NVIC.
+extern "C" void isr_pwm_wrap() {
+    c1::line_entry = c1::EdgeSlice::ctr();
+    brio::Pwm::clear_pending(c1::EdgeSlice::bit);
+    c1::line_hits = c1::line_hits + 1u;
+}
+extern "C" void isr_timer_1() {
+    brio::Timer::clear(c1::rescue_alarm);
+    c1::rescue_fires = c1::rescue_fires + 1u;
+}
 extern "C" void isr_dma_1() {
     if (P1::core_id() == 1u) {
         line1_on_core1 = line1_on_core1 + 1u;
@@ -639,6 +1086,8 @@ int main() {
     bench.letter('f', "a post to the other core's queue: refused", tf_mispost);
     bench.letter('h', "saturation: the losses counted where they happen", th_saturation);
     bench.letter('i', "a DMA engine on line 1, armed and served by core 1", ti_dma_on_core1);
+    bench.letter('j', "a Lease::reply loan across and back; the timer from both cores, paused", tj_loan_and_timer);
+    bench.letter('k', "the idle contract on core 1: its tick, a line, the doorbell; its kernel's turn", tk_idle_on_core1);
     bench.letter('g', "core 1 halts on a panic, is reset and launched again", tg_panic_and_relaunch);
 
     if (serial_ok) {

@@ -57,8 +57,9 @@ WHAT IS THIS CHIP'S OWN (11.1.1), and what a driver has to say about each:
   and 16 are writable, so the two windows are GPIO0..31 and GPIO16..47.
   The register's own description is that it relocates GPIO 0 FROM PIO'S
   POINT OF VIEW, so everything a machine names in pin terms - the four
-  ranges of PINCTRL, EXECCTRL's JMP_PIN, the index of a WAIT GPIO - is
-  counted from there,
+  ranges of PINCTRL, EXECCTRL's JMP_PIN, the index of a WAIT GPIO
+  (measured: 11.4.3's "absolute GPIO index" is absolute against the
+  input mapping, not against the window) - is counted from there,
   so on the QFN-80 a pad above GP31 is reachable only with the window
   moved, and with it moved a pad below GP16 is not reachable at all.
   Sixteen pads, GP16..GP31, are in both windows.
@@ -237,7 +238,7 @@ All of them on an RP2350 in the QFN-80 package, **stepping A2**, clk_sys
 at 150 MHz, and all of them on BOTH architectures: `test_rp2350_pio`
 reported **30 pass, 0 fail** on the Cortex-M33 pair and on the Hazard3
 pair, from one source, each on three flash-and-run cycles, with the two
-wires fitted; its z, the four wireless letters, reports 15. No verdict of
+wires fitted; its z, the five wireless letters, reports 25 on each half. No verdict of
 this chapter reads differently between the halves.
 
 - **VERSION 1 ON ALL THREE BLOCKS**, with thirty-two instructions, four
@@ -310,6 +311,32 @@ this chapter reads differently between the halves.
   capture as long as the buffer instead of as long as four entries -
   reading **4096 ones of 8192, 500 per mille exactly**, of a 31.25 kHz
   square wave.
+- **THE CORNERS, WITH NO WIRE** (letter m, ten runs of ten on each half).
+  `irq 0 rel` raises flag 1, 2, 3 on machines 1, 2, 3 and nothing else,
+  and `irq 1 rel` on machine 3 raises flag 0 (the modulo-4 sum);
+  `wait 1 irq 0 rel` on machine 2 stays stalled under flags 0, 1 and 3
+  and leaves on flag 2, clearing it. MOV X, STATUS as a BRANCH: a machine
+  pulling while its TX level is at or past two takes 1, 2 and 3 of four
+  words and leaves one; with STATUS_SEL on a FLAG, STATUS reads zero with
+  flag 5 down and all ones with it up, in this block and - through
+  `pio_status_irq(5, next)` - in the next one. LOCKSTEP: two square waves
+  of one program at divider 1000 on GP6 and GP7, sampled in one SIO word,
+  disagree on **52 to 97 % of 100 000 samples** when started 10 us apart
+  (0.5 to 2.5 machine cycles of offset) and on **none** once
+  `restart_clocks` and one enable start them - and on none ACROSS TWO
+  BLOCKS, PIO0's CTRL alone restarting and starting a machine of PIO0
+  and one of PIO1 through NEXT_PIO_MASK, GP7 high on half the samples.
+  THE 65536 DIVIDER: CLKDIV 0 on PIO1's machine 2 gives the four-cycle
+  wave **572 periods in a second** (572.2 Hz). PIO2's MACHINES 2 AND 3
+  carry the serial tasks on ONE pad, the receiver reading the
+  transmitter's output through the pad's input: 64 bytes exact at
+  115200 and at 1 Mbaud. FJOIN_RX_PUT + GET makes the four cells the
+  machine's: 21 and 9 PUT and GOT back, the system's write into a cell
+  lost; the system's READ is not refused and what it returns is not
+  defined - the cell's value on nine runs of ten, other bits (0xE9B97BF1,
+  0x69B97F71) on the first run after a flash. And WAIT 1 GPIO 6 is
+  released by GP6 with GPIOBASE 0 and by **GP22** with GPIOBASE 16: the
+  index moves with the window.
 
 ## Not covered yet
 
@@ -331,27 +358,5 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
-- THE SIMULTANEITY CTRL's neighbour masks exist for. The masks are
-  measured - one write starts a machine of each of two blocks - but that
-  the two start on the SAME CYCLE is not: two outputs of two blocks
-  compared edge by edge would want a wire pair this desk has not got, so
-  the letter proves the effect and not the cycle.
-- `rx_putget`, both join bits at once: the four cells become the
-  machine's private scratch and the system is shut out. A program that
-  wants four more registers is its first user, and what would measure it
-  is a machine writing a cell the system then fails to read back.
-- `pio_status_irq` and the IRQ flags as a `MOV X, STATUS` source: a
-  program branching on a flag instead of blocking on it, its two paths
-  told apart by what it pushes.
-- Two machines in lockstep through `restart_clocks` within one block, and
-  `pio_irq` relative from a machine other than 0: the pattern read back
-  from two programs of one source.
-- WHETHER A WAIT GPIO'S INDEX MOVES WITH THE WINDOW. 11.4.3 calls that
-  index absolute and says only that the state machine's input mapping
-  does not touch it; GPIOBASE's own description - PIO's GPIO 0 relocated
-  - is what says the block's window does. A machine waiting on the same
-  index under both windows, with two pads sixteen apart driven in turn,
-  would settle it.
-- The 65536 divider (`PioClockDiv{0, 0}`): a wave at 572 Hz counted.
-- The tasks on machines 2 and 3 of each block, and on the QFN-60 package,
-  which the stratum compiles for and no board of this bench carries.
+- The tasks on the QFN-60 package, which the stratum compiles for and no
+  board of this bench carries.

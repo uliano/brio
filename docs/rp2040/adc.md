@@ -174,6 +174,12 @@ as the known voltages, the DMA as the reader.
   failed on a steady input. AFTER A BLOCK COMPLETES at 500 ksps the
   FIFO fills within 16 us: the converter is stopped from the DMA's
   completion, not from the loop (the chapter's "promptly").
+- THE UNDERFLOW AND THE FORCE (letter h): a pop of the empty FIFO
+  raises the sticky UNDER and not OVER, and writing one clears it (the
+  word such a pop returns is not a conversion - 0x2D5 in every run here,
+  never judged). INTF raises INTS with INTE clear and INTR clear - the
+  status is "after masking & forcing", the force not masked - and the
+  vector runs once, its body dropping the force. Ten runs of ten.
 - THE SAMPLER walks the sensor and input 0 on a 5 ms software pace,
   twenty samples each in 200 ms, the sensor's near its count and the
   pulled-up pad's near full scale.
@@ -196,5 +202,3 @@ Implemented but not bench-verified, each with what would measure it:
 - A failed conversion (CS.ERR, the entry's flag): the comparator's
   metastability needs an input held at a code's threshold; a slow
   ramp across a full scale with the flags counted.
-- The FIFO underflow flag: a pop of an empty FIFO, staged on purpose.
-- `Adc::force`: the interrupt raised by software, read in the status.
