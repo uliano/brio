@@ -233,7 +233,8 @@ the CH32V003 its reference manual V1.9 (12.4 for the synchronous mode,
   `harvest()` (the same edge asked from the consumer's side, and a
   stopped ring started again; it reads neither STATR nor DATAR),
   `dma_faults()`, and `actual_baud()`/`divisor_for()`. `Placement`,
-  after `opts`, is where the transmit engine's block restart runs from:
+  after `opts`, is where `dma_isr()`'s body runs from - the flags' read,
+  the channels' service and the transmit engine's block restart:
   util/placement.hpp's `InFlash` (the default, flattened into the
   channel's vector) or `InRam` (one instance in SRAM, a call from the
   vector), refused on a port without a transmit engine; `isr()` takes no
@@ -248,7 +249,11 @@ the CH32V003 its reference manual V1.9 (12.4 for the synchronous mode,
   the edge reported; then WAITING FOR A FRAME (RXNEIE alone), whose
   entry reads NO STATR (it would arm the clear the next frame's own read
   performs) but CNTR: a moved count turns the vector back and reports
-  the edge again - the only edge a burst of one frame gets. A frame the
+  the edge again - the only edge a burst of one frame gets. A port with
+  no transmit engine serves its interrupt transmitter from the same
+  vector, so that entry asks CTLR1 whether TXEIE stands and reads STATR
+  for TXE only then - the interrupt transmitter's entry is one of the
+  status reads that arm the clear (measured, below). A frame the
   channel NEVER takes (a channel a transfer error stopped, or one a held
   request froze) would leave RXNE re-entering the vector for ever: the
   entries that find the count unmoved - with no transmit engine, those
@@ -360,7 +365,7 @@ five of its letters - 56 without it, those letters then skipping and
 claiming nothing -, one host-assisted letter outside `z` driven by `brio
 stress`) on the CH32V006K8U6 at 48 MHz, with USART2 on column 3 as the
 instrument and the console untouched on USART1; and its TWO-BOARD KEY
-`w` (letters 1 to 8, 59 verdicts) on column 4 against the CH32X035's
+`w` (letters 1 to 8, 60 verdicts) on column 4 against the CH32X035's
 `usart_peer`. The whole suite does not fit the CH32V006K8's 40 KB, so on
 that part it is three images (the build's group axis): `-1` and `-2`
 the single-board letters on the HSI's PLL, `-3` the two-board key on
@@ -487,14 +492,29 @@ out there.
   longer than the 160-cycle frame leaves room for beside the tick.
 - **Where the hot paths run from** (`bench_ch32` letter u, each port's
   vector metered alone, the stamps' 46 cycles inside): the transmit
-  engine's block restart - the channel's vector, the ring's consume, the
-  next run read and launched, flattened into it - takes 239 to 247 cycles
-  from the flash (290 with the run's start a call out of the vector) and
-  207 to 210 as the `InRam` instance behind the same vector, 212 bytes of
-  SRAM; with the vector itself placed by the program, 141. At 3 Mbaud the
-  engine's line over 23 blocks of 4096 bytes idles some 24 cycles less a
-  block from SRAM; at the thousandths of letter i (1024 frames, four laps
-  of a 256-byte ring) it reads 1004 from the flash. The interrupt
+  engine's block boundary - the channel's vector, the flags' read, the
+  ring's consume, the next run read and launched, flattened into it -
+  takes 238 to 248 cycles from the flash, with the image's layout (290
+  with the run's start a call out of the vector), and 196 to 197 as
+  `dma_isr()`'s whole body in SRAM behind
+  the same vector, 268 bytes of SRAM (207 to 210 and 212 bytes with the
+  restart alone placed, the flags' read and service left in the flash);
+  with the vector itself placed by the program, 141. THE RESTART'S WINDOW
+  (`uart.tx.restart`: one restart alone - 100 frames, then 100 queued
+  behind them - timed against 200 sent as one block, nine times, the
+  thread spinning or asleep): at 3 Mbaud the median gap is within a bit
+  of none from either placement, before and after the whole body moved,
+  so the restart reaches its window; its margin, read by cycles spent in
+  the vector ahead of the body: 40 open a median gap of 52 to 78 cycles
+  from the flash and of 0 to 25 from SRAM, 80 one of 105 to 128 and of 63
+  to 69 (with the restart alone in SRAM, the flags' read and service in
+  the flash, 8 to 38 and 78 to 85) - the bench's own stamp and the
+  probe's test inside every figure. The 4096-byte
+  line through the bench's producer exceeds its wire by some 2100 cycles
+  from the flash and 1200 to 1450 from SRAM at 3 Mbaud, but by some 4700
+  at 1 Mbaud, where the window is three times longer: that excess is not
+  the restart's. At the thousandths of letter i (1024 frames, four laps
+  of a 256-byte ring) the engine reads 1004 from the flash. The interrupt
   transmitter's `isr()` is 135 to 136 cycles an entry inline in a vector
   in the flash and 76 in a vector the program placed, which takes it
   from 1.07 times the wire at 1 Mbaud and 1.42 at 3 Mbaud to 1.00 and
@@ -536,7 +556,7 @@ out there.
   the two reads of the clear sequence while a stamp is taken; under the
   160-cycle frame at 3 Mbaud, where the echo held.
 - **Column 4 as the DUT, against a second chip** (the two-board key `w`,
-  59 verdicts, the far chip a CH32X035 on its RC oscillator running
+  60 verdicts, the far chip a CH32X035 on its RC oscillator running
   `usart_peer`): the peer calibrated by this crystal first - its HSI found
   at -2718 to -3154 ppm at its trim's centre over two sessions, moved one
   step and ADOPTED, every run after that reading this crystal within 250
@@ -561,6 +581,18 @@ out there.
   frames at 1, 2 and 3 Mbaud, about a second each, every byte in
   sequence, no overrun, no fault; both mute wakes; IrDA's SIR frames
   between two WCH codecs.
+- **A RUN OF ERRORED FRAMES under the ring, from the far chip** (key
+  letter 6, ten runs): eight frames of 0x35 from the far engine at
+  115200, each with its last data cell stretched a whole bit over the
+  stop bit's sample - a framing error carrying its byte - four bit times
+  apart, into `LinkRing` (the receive engine on channel 7, no transmit
+  engine): all eight stored, FE counted FOUR, the every-other-one of the
+  header's rule, eight USART entries. A STATUS READ ON THE WAIT COSTS
+  THE COUNT WHOLE: the same ring reading STATR after the wait for a
+  frame - for the interrupt transmitter's TXE, with TXEIE down - counted
+  FE 1 of 8 (three of three runs, measured with that read in place),
+  which is why the wait asks CTLR1 for TXEIE and reads STATR only when
+  the interrupt transmitter is live.
 - **A ONE-WIRE BUS WITH A SECOND NODE** (letter 7): HDSEL on PB0, the pad
   an alternate-function open drain with its transmitter off, hears the
   four 0x5A frames the far chip drives onto that wire from its own RX

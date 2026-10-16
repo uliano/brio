@@ -108,7 +108,10 @@
  * already clear and CNTR moved). That entry READS NO STATR, which after
  * the channel's read would arm the clear the next frame's own read
  * performs, but CNTR alone: a moved count turns the vector back,
- * reporting the edge again - the only edge a burst of one frame gets. The
+ * reporting the edge again - the only edge a burst of one frame gets (a
+ * port with no transmit engine, whose interrupt transmitter shares the
+ * vector, asks CTLR1 whether TXEIE stands and reads STATR for TXE only
+ * then). The
  * channel's half and full marks report it from dma_isr(), so a stream
  * with no silence is told twice a lap. AN OVERRUN WITH NOTHING TO TAKE -
  * ORE left up with RXNE down by a channel that was starved, and no frame
@@ -146,12 +149,17 @@
  * parameter (util/placement.hpp) - inline in the vector that binds them by
  * default, one instance in SRAM (`.fast_text.brio`, which ld/ copies there
  * with .data) under InRam, where the fetch skips the code flash's two wait
- * states at 48 MHz (RM 18.3.1). ONE PATH TAKES IT, THE TRANSMIT ENGINE'S
- * BLOCK BOUNDARY: a block's completion releases its bytes and starts the
- * next run while the shifter still holds about a frame and a half,
- * flattened (the ring's consume and read_span and the engine's launch
- * inlined, no call left on the path) - from SRAM a third shorter behind a
- * vector in the flash. The interrupt transport's isr() is not placed: a
+ * states at 48 MHz (RM 18.3.1). ONE PATH TAKES IT, THE DMA VECTOR'S BODY,
+ * for the transmit engine's block boundary: a block's completion releases
+ * its bytes and starts the next run while the shifter still holds about a
+ * frame and a half. The whole body is the placement's - the flags' read,
+ * the channels' service and the restart, the ring's consume and read_span
+ * and the engine's launch inlined, no call left on the path, the fault
+ * paths out of line - so under InRam the vector in the flash keeps its
+ * entry and one call. At 3 Mbaud the restart reaches its window from
+ * either placement, with more to spare from SRAM: 40 cycles spent in the
+ * vector ahead of the body idle the line 52 to 78 cycles a boundary from
+ * the flash and at most 25 from SRAM (docs/ch32v00x/usart.md). The interrupt transport's isr() is not placed: a
  * call into SRAM and the return into the flash cost its short body more
  * than SRAM saves it (measured). A program that places the VECTOR itself
  * (`.fast_text`) runs either inline body from SRAM with it, no call at
@@ -730,9 +738,9 @@ struct Uart {
                   "brio Uart: the placement is util/placement.hpp's InFlash (the default) or InRam, and "
                   "InRam only on a platform whose linker scripts place .fast_text");
     static_assert(!std::is_same_v<Placement, InRam> || TxEngine::present,
-                  "brio Uart: InRam places the transmit engine's block restart - a port without a "
-                  "transmit engine has nothing to place (its isr() is the vector's: a program that "
-                  "wants it in SRAM places the vector)");
+                  "brio Uart: InRam places the DMA vector's body for the transmit engine's block "
+                  "restart - a port without a transmit engine has nothing to place (its isr() is the "
+                  "vector's: a program that wants it in SRAM places the vector)");
     static_assert(usart_base_for(instance) != 0,
                   "brio Uart: this family has USART1 and USART2 (the CH32V005/006/007)");
     static_assert(uart_format_valid(opts.format) && opts.format.bits != UartBits::nine,
@@ -894,43 +902,14 @@ struct Uart {
      * starts the next run; on the receive channel a completion is a LAP
      * of the ring, counted, and the lap's half and full marks are the
      * receive edge; a transfer error stops the channel, and the
-     * consumer's next look starts it again.
+     * consumer's next look starts it again. The whole body runs through
+     * the port's placement (the file header).
      *
      * Returns true when the receive ring holds bytes its consumer has not
      * been told of - the edge, as isr()'s: post RxActivity on true.
      */
     [[gnu::always_inline]] static bool dma_isr() {
-        bool edge = false;
-        uint32_t intfr = 0;
-        if constexpr (has_tx_engine) {
-            intfr = TxEngine::block_flags();
-        } else if constexpr (has_rx_engine) {
-            intfr = RxEngine::block_flags();
-        }
-        if constexpr (has_tx_engine) {
-            const uint8_t f = TxEngine::service(intfr);
-            if ((f & TxEngine::flag_error) != 0u) {
-                (void)TxEngine::abandon();
-                m_dma_faults = m_dma_faults + 1u;
-            } else if ((f & TxEngine::flag_complete) != 0u) {
-                tx_block_done();
-            }
-        }
-        if constexpr (has_rx_engine) {
-            const uint8_t f = RxEngine::service(intfr);
-            if ((f & RxEngine::flag_error) != 0u) {
-                (void)RxEngine::abandon();
-                m_dma_faults = m_dma_faults + 1u;
-                m_rx_drained = false;
-                edge = true;   // the consumer must come: its look starts the ring again
-            } else if (f != 0u) {
-                if ((f & RxEngine::flag_complete) != 0u) {
-                    RxEngine::lap();   // a lap: counted, nothing re-armed
-                }
-                edge = told();   // the half or the full mark of a lap
-            }
-        }
-        return edge;
+        return Hot<Placement>::run([] { return dma_entry(); });
     }
 
     /**
@@ -996,6 +975,17 @@ struct Uart {
                 rx_edge = rx_frame_entry();
                 if constexpr (has_tx_engine) {
                     return rx_edge;
+                } else {
+                    // THE WAIT FOR A FRAME READS NO STATR, with the
+                    // interrupt transmitter idle too: the status read below
+                    // is TXE's, and made with TXEIE down it armed the clear
+                    // of the NEXT frame's error for nothing - after one
+                    // counted error a run of errored frames counted no
+                    // more (measured, docs/ch32v00x/usart.md). CTLR1 is read
+                    // instead, which arms nothing.
+                    if ((regs().CTLR1 & usart_txeie) == 0u) {
+                        return rx_edge;
+                    }
                 }
             }
         }
@@ -1317,14 +1307,60 @@ struct Uart {
     }
 
 private:
+    /// The DMA vector's body, written once: dma_isr() runs it through the
+    /// port's placement (the file header) - the flags' read and the
+    /// channels' service with the restart, all of it, so under InRam the
+    /// vector's own path in the flash is its entry and one call.
+    [[gnu::always_inline]] static bool dma_entry() {
+        bool edge = false;
+        uint32_t intfr = 0;
+        if constexpr (has_tx_engine) {
+            intfr = TxEngine::block_flags();
+        } else if constexpr (has_rx_engine) {
+            intfr = RxEngine::block_flags();
+        }
+        if constexpr (has_tx_engine) {
+            const uint8_t f = TxEngine::service(intfr);
+            if ((f & TxEngine::flag_error) != 0u) {
+                tx_fault();
+            } else if ((f & TxEngine::flag_complete) != 0u) {
+                tx_block_done();
+            }
+        }
+        if constexpr (has_rx_engine) {
+            const uint8_t f = RxEngine::service(intfr);
+            if ((f & RxEngine::flag_error) != 0u) {
+                rx_fault();
+                m_rx_drained = false;
+                edge = true;   // the consumer must come: its look starts the ring again
+            } else if (f != 0u) {
+                if ((f & RxEngine::flag_complete) != 0u) {
+                    RxEngine::lap();   // a lap: counted, nothing re-armed
+                }
+                edge = told();   // the half or the full mark of a lap
+            }
+        }
+        return edge;
+    }
+
+    /// A channel's transfer error, out of line: the body above is flattened
+    /// whole, and the rare path stays a call rather than bytes of the
+    /// frequent one - SRAM bytes under InRam. The fault counted, saturating.
+    [[gnu::noinline]] static void tx_fault() {
+        (void)TxEngine::abandon();
+        bump(m_dma_faults);
+    }
+    [[gnu::noinline]] static void rx_fault() {
+        (void)RxEngine::abandon();
+        bump(m_dma_faults);
+    }
+
     /// The transmit block's completion: its bytes released from the ring,
-    /// the next run started - one flattened function of the port's
-    /// placement (the file header).
+    /// the next run started - flattened into dma_entry(), the port's
+    /// placement's (the file header).
     [[gnu::always_inline]] static void tx_block_done() {
-        Hot<Placement>::run([] {
-            m_tx.consume(static_cast<typename decltype(m_tx)::index_t>(TxEngine::complete()));
-            pump_tx();
-        });
+        m_tx.consume(static_cast<typename decltype(m_tx)::index_t>(TxEngine::complete()));
+        pump_tx();
     }
 
     /// Start the next contiguous run of the TX ring on the engine, if it

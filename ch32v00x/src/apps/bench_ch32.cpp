@@ -1243,15 +1243,18 @@ void te_spi_host() {
 // USART1's channels are 4 out and 5 in, USART2's 6 and 7 (table 8-2).
 // Each transmit line is followed by the port's own vector alone - its
 // entries and its body's cycles an entry - and the engined port runs twice,
-// its block restart in the flash (`uart.tx.dma`) and in SRAM
-// (`ram.uart.tx.dma`, util/placement.hpp's InRam).
+// its DMA vector's body in the flash (`uart.tx.dma`) and in SRAM
+// (`ram.uart.tx.dma`, util/placement.hpp's InRam). Then `uart.tx.restart`:
+// ONE block restart at 3 Mbaud timed alone in each placement, the thread
+// spinning and asleep, with 0, 40 and 80 cycles spent in the vector ahead
+// of the body - the restart's margin inside its window.
 constexpr bool has_usart2 = device::has_usart2;
 
 template <bool on = has_usart2>
 struct LoopTypes {
     using Irq = Uart<2, Plat, 64, 512, NoDmaEngine, NoDmaEngine, 3>;
     using Txe = Uart<2, Plat, 64, 512, DmaTxEngine<6>, NoDmaEngine, 3>;
-    /// The engined one with its block restart in SRAM (util/placement.hpp's
+    /// The engined one with its DMA vector's body in SRAM (util/placement.hpp's
     /// InRam, `ram.` lines). On the family's platform itself - BenchIdle's
     /// adapter does not carry the placement trait - whose guard is the same
     /// mask.
@@ -1268,6 +1271,8 @@ using ConsoleRxChannel = DmaChannel<5>;
 /// and USART2: 0 none, 1 LoopIrq, 2 LoopTxe, 4 TxeRam.
 volatile uint8_t console_owner = 0;
 volatile uint8_t loop_owner = 0;
+/// uart.tx.restart's margin probe (loop_dma_vector()): 0 elsewhere.
+volatile uint32_t restart_delay = 0;
 volatile bool rx_edge = false;
 volatile uint32_t rx_edge_at = 0;
 Meter loop_meter;      // USART2's vector
@@ -1365,6 +1370,90 @@ void loop_tx_rates() {
             for (const uint32_t n : {256u, 4096u}) {
                 loop_tx_line<typename L::TxeRam, DmaTxEngine<6>>("ram.uart.tx.dma", n, wire);
             }
+        }
+        loop_owner = 0;
+        Pfic::disable(usart_irq_for(2));
+    }
+}
+
+/// uart.tx.restart: THE BLOCK RESTART'S GAP, alone. Block A of `first`
+/// bytes launched, the rest queued behind it while A is on the wire (the
+/// copy unmasked, write_bulk's), so A's completion vector restarts the
+/// engine on B; wall from A's launch to TC, against the same total sent
+/// as ONE block - their difference is the line's idle at the boundary, no
+/// producer in it. The thread spins on TC, or sleeps through BenchIdle
+/// while a block runs (`sleep`: the vector entered from WFI, as a
+/// kernel's idle has it). Started on a tick's edge and over in less than
+/// a tick (200 frames at 3 Mbaud, 0.67 ms), so the tick's vector lands in
+/// neither wall.
+template <typename Port, bool sleep>
+uint32_t restart_wall(uint32_t baud, uint32_t first, uint32_t total) {
+    (void)Port::init(clock, baud);
+    Pin<'D', 3>::input(PinPull::up);
+    loop_wait_ms(2);
+    const uint32_t tick = Ticker::ticks();
+    while (Ticker::ticks() == tick) {
+    }
+    (void)Port::write_bulk(std::span<const uint8_t>(loop_pattern(), first));
+    const uint32_t t0 = Ruler::now();
+    if (total > first) {
+        (void)Port::write_bulk(std::span<const uint8_t>(loop_pattern() + first, total - first));
+    }
+    if constexpr (sleep) {
+        for (;;) {
+            Plat::CriticalSection cs;
+            if (Port::tx_idle() && Port::Resource::tx_complete()) {
+                break;
+            }
+            if (DmaTxEngine<6>::busy()) {
+                Plat::idle();
+            }
+        }
+    } else {
+        while (!(Port::tx_idle() && Port::Resource::tx_complete())) {
+        }
+    }
+    return Ruler::now() - t0;
+}
+
+/// Nine gaps of one restart - 100 bytes then 100, against 200 at once - at
+/// `baud` with `delay` cycles spent in the vector ahead of the body: least,
+/// median, greatest. Each wall carries the transmitter's phase (a frame
+/// starts on its bit clock) and the poll's turn, so one gap reads within
+/// about a bit either side of the line's real idle; a restart late by g
+/// cycles moves the nine by g.
+template <typename Port, bool sleep>
+void restart_line(uint8_t owner, const char* where, uint32_t baud, uint32_t delay) {
+    loop_owner = owner;
+    restart_delay = delay;
+    int32_t g[9] = {};
+    for (uint8_t k = 0; k < 9u; ++k) {
+        const uint32_t one = restart_wall<Port, sleep>(baud, 200, 200);
+        const uint32_t two = restart_wall<Port, sleep>(baud, 100, 200);
+        int32_t v = static_cast<int32_t>(two - one);
+        uint8_t i = k;
+        while (i > 0u && g[i - 1u] > v) {   // insertion, kept sorted
+            g[i] = g[i - 1u];
+            --i;
+        }
+        g[i] = v;
+    }
+    restart_delay = 0;
+    print(serial, "  uart.tx.restart ", baud, " ", where, sleep ? " asleep" : " spinning", ", +", delay,
+          " cycles in the vector: the gap ", g[0], " / ", g[4], " / ", g[8], " (least / median / greatest; a bit is ",
+          SysClock::hz / baud, " cycles)", crlf);
+}
+
+template <bool on = has_usart2>
+void restart_lines() {
+    if constexpr (on) {
+        using L = LoopTypes<on>;
+        constexpr uint32_t baud = 3'000'000;
+        for (const uint32_t delay : {0u, 40u, 80u}) {
+            restart_line<typename L::Txe, false>(2, "flash", baud, delay);
+            restart_line<typename L::Txe, true>(2, "flash", baud, delay);
+            restart_line<typename L::TxeRam, false>(4, "sram ", baud, delay);
+            restart_line<typename L::TxeRam, true>(4, "sram ", baud, delay);
         }
         loop_owner = 0;
         Pfic::disable(usart_irq_for(2));
@@ -1512,6 +1601,7 @@ void tu_uart() {
         print(serial, "  letter u declined on this part: it has one USART, the console's", crlf);
     } else {
         loop_tx_rates();
+        restart_lines();
         print(serial, "  the receive side on the console: brio stress --letters u --board <board>", crlf);
         static constexpr uint32_t rx_rates[] = {115200, 460800};
         for (const uint32_t baud : rx_rates) {
@@ -1697,6 +1787,13 @@ template <bool on = has_usart2 && brio::test_letter_carried('u')>
 template <bool on = has_usart2 && brio::test_letter_carried('u')>
 [[gnu::always_inline]] inline void loop_dma_vector() {
     if constexpr (on) {
+        // uart.tx.restart's margin probe: cycles spent before the body,
+        // ahead of the stamp, 0 outside that line.
+        if (const uint32_t d = restart_delay) {
+            const uint32_t t0 = Ruler::now();
+            while (Ruler::now() - t0 < d) {
+            }
+        }
         loop_dma_meter.enter();
         const uint8_t owner = loop_owner;
         if (owner == 2u) {

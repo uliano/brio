@@ -139,7 +139,9 @@
 //   5  the peer's engine shapes, one stretched cell against this end's own
 //      pull-banger on the same wire, a LIN break ahead of a frame
 //   6  the receive engine on channel 7 under the peer's blast, about a
-//      second at 1, 2 and 3 Mbaud, every byte in sequence
+//      second at 1, 2 and 3 Mbaud, every byte in sequence; and a run of
+//      eight errored frames into the same ring (no transmit engine) counted
+//      every other one
 //   7  half duplex on PB0 hearing the peer's drive_rxd, and the wired AND
 //      of an open-drain wire under its collide
 //   8  mute by address mark and by idle line, IrDA between two WCH codecs
@@ -3319,6 +3321,59 @@ void t6_engine() {
                   r.count == static_cast<uint16_t>(total));
     }
     (void)link_command_mode();
+
+    // A RUN OF ERRORED FRAMES into the same ring - a receive engine and no
+    // transmit engine, the interrupt transmitter idle: eight frames of 0x35
+    // from the peer's edge engine at 115200, each with its last data cell (a
+    // 0) stretched a whole bit over the stop bit's sample - a framing error
+    // carrying its byte - four bit times apart, so no idle line between
+    // (IDLE wants a whole frame of it). The frame after a counted one loses
+    // its error to the clear the counting status read armed (the header's
+    // rule): eight count four. A status read on the wait for a frame -
+    // TXE's, with TXEIE down - arms the clear for the NEXT frame too, and the
+    // run counts fewer.
+    {
+        constexpr uint16_t train = 8;
+        link::Params a{};
+        a.cfg.rate = 115'200;
+        a.count = train;
+        a.ms = 200;
+        a.value = 0x35;
+        a.cell = 8;    // data bit 7, a 0 in 0x35
+        a.pct = 100;   // two bits long: still low at the stop bit's sample
+        const bool acted = peer_act(link::Op::bitbang, a);
+        u2_isr = &LinkRing::isr;
+        ring_active = true;
+        const bool up = acted && LinkRing::init(clock, 115'200);
+        WRx::input(PinPull::up);
+        Pfic::enable(dma_channel_irq(7));
+        u2_interrupts = 0;
+        wait_ms(20);   // eight frames of 15 bit times at 115200: 1.1 ms
+        uint16_t got = 0;
+        bool all_0x35 = true;
+        uint8_t b = 0;
+        while (LinkRing::read_byte(b)) {
+            all_0x35 = all_0x35 && b == 0x35u;
+            ++got;
+        }
+        const uint16_t fe = LinkRing::frame_errors();
+        const uint16_t ore = LinkRing::hw_overruns();
+        const uint16_t faults = LinkRing::dma_faults();
+        const uint32_t entries = u2_interrupts;
+        Pfic::disable(dma_channel_irq(7));
+        LinkRing::release();
+        ring_active = false;
+        u2_isr = nullptr;
+        link::Report r{};
+        const bool ran = up && peer_report(r, 0) && (r.flags & link::report_ran) != 0u && r.count == train;
+        print(serial, "  eight errored frames into the ring: ", got, " stored",
+              all_0x35 ? ", every one 0x35" : ", NOT ALL 0x35", "; FE counted ", fe, ", ORE ", ore, ", faults ",
+              faults, ", ", entries, " USART entries", crlf);
+        judge("A RUN OF ERRORED FRAMES under the ring beside the interrupt transmitter: eight stored, every one "
+              "0x35, the framing errors counted every other one (4 of 8)",
+              ran && got == train && all_0x35 && fe == train / 2u && ore == 0u && faults == 0u);
+        (void)link_command_mode();
+    }
     w_release();
 }
 
@@ -3751,7 +3806,8 @@ int main() {
     bench.second_letter('3', "the frame matrix across the wire, the odd stops' lengths", two::t3_frames);
     bench.second_letter('4', "the receiver's errors from the calibrated peer: PE, FE onset, glitches, ORE, LIN", two::t4_errors);
     bench.second_letter('5', "the peer's engine shapes against this end's pull-banger", two::t5_shapes);
-    bench.second_letter('6', "the receive engine on channel 7 under the peer's blast, 1..3 Mbaud", two::t6_engine);
+    bench.second_letter('6', "the receive engine on channel 7 under the peer's blast; a run of errored frames",
+                        two::t6_engine);
     bench.second_letter('7', "half duplex on PB0: drive_rxd heard, the wired AND", two::t7_half_duplex);
     bench.second_letter('8', "mute by address and by idle line, IrDA between two WCH codecs", two::t8_modes);
 #endif

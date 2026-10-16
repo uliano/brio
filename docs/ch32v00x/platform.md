@@ -373,8 +373,9 @@ choice and its cost the program's to weigh (below), and a link that
 does not fit is refused by the script's `ram` region. A driver of this
 stratum takes util/placement.hpp's `InFlash` (the default) or `InRam`
 where a path of its own pays from SRAM, measured: `SpiHost`'s polled
-loops and the `Uart`'s transmit engine block restart (a port without a
-transmit engine refuses `InRam`: it has nothing to place). Under
+loops and the `Uart`'s DMA vector body, for the transmit engine's block
+restart (a port without a transmit engine refuses `InRam`: it has
+nothing to place). Under
 `InRam` each such path is ONE out-of-line instance in `.fast_text.brio`,
 flattened; under `InFlash` it is inline where it is called, as if there
 were no trampoline:
@@ -426,7 +427,7 @@ prologue's entry and exit outside:
 |---|---|---|---|---|
 | the SPI transmit-only loop, a frame at HCLK/2, 8 and 16 bits (the wire 16, 32) | the driver (`InRam`) | 24.9, 37.9 | 16.0, 33.7 | 446 a host type, both loops at both widths |
 | the SPI receive loop, an 8-bit frame at HCLK/2, /4, /16 (the wire 16, 32, 128) | the driver | 34.9, 56.8, 166.7 | 32.9, 42.8, 148.4 | (above) |
-| the USART transmit engine's block restart, the channel's vector | the driver | 239 to 247 | 207 to 210; 141 with the vector placed instead | 212 |
+| the USART DMA vector's body, the transmit engine's block restart | the driver | 238 to 248 | 196 to 197 (207 to 210 with the restart alone placed); 141 with the vector placed instead | 268 (212) |
 | the USART interrupt transmitter's `isr()` | the program's vector | 135 to 136 | 76 with the vector placed (145 as an instance behind the flash's vector) | the vector |
 | the SPI pump, an 8-bit frame at HCLK/4 with an in buffer | the program's vector | 259.4 a frame, 167 an entry | 174.7 a frame with the vector placed (274.4 as an instance behind the flash's vector) | 1114, the benchmark's vector with four hosts inline |
 | the I2C event pump, an entry of a 255-byte write and read | the program's vector | 154, 182 | 92, 106 with the vector placed (161, 177 as an instance behind the flash's vector) | 1818, the benchmark's vector with three hosts inline |
@@ -434,9 +435,10 @@ prologue's entry and exit outside:
 At the wire's level: the transmit-only loop holds HCLK/2 from SRAM, the
 receive loop's dead bus a frame falls from 25 cycles to 11 at HCLK/4,
 the interrupt transmitter goes from 1.42 times the wire at 3 Mbaud to
-1.08 with its vector placed, and the engine's line at a block boundary
-idles about 24 cycles less a block at 3 Mbaud (`bench_ch32` letters e
-and u, [spi.md](spi.md), [usart.md](usart.md), [i2c.md](i2c.md)).
+1.08 with its vector placed, and the engine's block restart, inside its
+window at 3 Mbaud from both placements, keeps more of it from SRAM: 40
+cycles spent ahead of the body idle the line 52 to 78 cycles a boundary
+from the flash and 0 to 25 from SRAM (`bench_ch32` letters e and u, [spi.md](spi.md), [usart.md](usart.md), [i2c.md](i2c.md)).
 
 **What it costs.** The bytes in the last column, of the part's SRAM -
 the load image stays in the flash beside them. On the CH32V003's 2 KB

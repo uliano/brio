@@ -157,7 +157,9 @@
  * came). That entry READS NO STATR, which after the channel's read would
  * arm the clear the next frame's own read performs, but CNTR alone: a
  * moved count turns the vector back, reporting the edge again - the only
- * edge a burst of one frame gets. The channel's half and full marks report
+ * edge a burst of one frame gets. A port with no transmit engine, whose
+ * interrupt transmitter shares the vector, asks CTLR1 whether TXEIE stands
+ * and reads STATR for TXE only then. The channel's half and full marks report
  * it from dma_isr(), so a stream with no silence is told twice a lap. AN
  * OVERRUN WITH NOTHING TO TAKE - ORE left up with RXNE down by a channel
  * that was starved, and no frame after it - would re-enter that wait back
@@ -1084,6 +1086,17 @@ private:
                 rx_edge = rx_frame_entry();
                 if constexpr (has_tx_engine) {
                     return rx_edge;
+                } else {
+                    // THE WAIT FOR A FRAME READS NO STATR, with the
+                    // interrupt transmitter idle too: the status read below
+                    // is TXE's, and made with TXEIE down it armed the clear
+                    // of the NEXT frame's error for nothing - after one
+                    // counted error a run of errored frames counted no
+                    // more (measured, docs/ch32x035/usart.md). CTLR1 is read
+                    // instead, which arms nothing.
+                    if ((regs().CTLR1 & usart_txeie) == 0u) {
+                        return rx_edge;
+                    }
                 }
             }
         }

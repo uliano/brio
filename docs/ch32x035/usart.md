@@ -294,7 +294,7 @@ column, PB0 and PB1, which are the desk's link: crossed to a CH32V006K8U6
 (its USART2 on column 4) running `usart_peer` on its 24 MHz crystal
 doubled. `z` (23 verdicts) is the single-board set, run with the far
 board dark - on its console or with its peer still searching, both
-leaving their link pads floating inputs; `y` (97 verdicts) is the
+leaving their link pads floating inputs; `y` (98 verdicts) is the
 two-board set against that peer, every leg judged from what the far chip
 reports. What it measured:
 
@@ -416,7 +416,17 @@ reports. What it measured:
   the status read armed the clear and the channel's read performed it;
   with no status read between, PE is still up after the second. The
   CH32V006's and the CH32V203's answer, which the transport's receive
-  vector is built on.
+  vector is built on. And A RUN OF ERRORED FRAMES under a ring with no
+  transmit engine (ten runs): eight frames of 0x35 from the far engine at
+  115200, each with its last data cell stretched a whole bit over the
+  stop bit's sample - a framing error carrying its byte - four bit times
+  apart, into channel 8's ring beside the interrupt transmitter: all
+  eight stored, FE counted FOUR, the every-other-one of the header's
+  rule, eight USART entries. The same ring reading STATR after the wait
+  for a frame - for the interrupt transmitter's TXE, with TXEIE down -
+  counted NONE of the eight (three of three runs, measured with that read
+  in place), which is why the wait asks CTLR1 for TXEIE and reads STATR
+  only when the interrupt transmitter is live.
 - **The priority rule on this controller** (letter `r`): 8192 frames at 3
   Mbaud into the ring at very_high on channel 8 while 2 KB copies ran back
   to back on channel 5 - a LOWER number - at the copy engine's low: every

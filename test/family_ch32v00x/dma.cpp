@@ -214,7 +214,7 @@ using Both = Uart<1, P, 64, 128, DmaTxEngine<4>, DmaRxEngine<5>>;
 /// The receive ring ranked by the program (docs/design/dma.md's option).
 using Ranked = Uart<1, P, 64, 128, DmaTxEngine<4>, DmaRxEngine<5>, 0,
                     UartOptions{.rx_priority = DmaPriority::high}>;
-/// The transmit engine's block restart in SRAM (util/placement.hpp's
+/// The DMA vector's body - the transmit engine's block restart - in SRAM (util/placement.hpp's
 /// InRam), on a port with both engines and on one with the transmit one.
 using RamBoth = Uart<1, P, 64, 128, DmaTxEngine<4>, DmaRxEngine<5>, 0, UartOptions{}, InRam>;
 using RamTx = Uart<1, P, 64, 128, DmaTxEngine<4>, NoDmaEngine, 0, UartOptions{}, InRam>;

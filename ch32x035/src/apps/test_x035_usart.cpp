@@ -76,7 +76,9 @@
 //      wire from its RX pad (drive_rxd)
 //   q  (y) the error flags' clear under a receive channel: a parity error
 //      from the far chip stands in STATR though the channel read DATAR; a
-//      STATR read arms the clear and the channel's next read performs it
+//      STATR read arms the clear and the channel's next read performs it;
+//      and a run of eight errored frames into a ring with no transmit
+//      engine counted every other one
 //   r  (y) the priority rule: 8192 frames at 3 Mbaud into the engined ring
 //      at very_high while 2 KB copies run back to back on a lower channel
 //      at low - and the control, the ring told to rank low
@@ -146,8 +148,11 @@ using Engined = Uart<4, P, 512, 256, UartFormat{}, DmaTxEngine<1>, DmaRxEngine<8
 using EnginedFlash = Uart<4, P, 512, 256, UartFormat{}, DmaTxEngine<1>, DmaRxEngine<8>>;
 using EnginedLow = Uart<4, P, 512, 256, UartFormat{}, DmaTxEngine<1>, DmaRxEngine<8>, 0,
                         UartOptions{.rx_priority = DmaPriority::low}>;
+/// Letter q's ring with NO transmit engine: the receive channel's ring
+/// beside the interrupt transmitter, which serves TXE from the same vector.
+using RingOnly = Uart<4, P, 512, 256, UartFormat{}, NoDmaEngine, DmaRxEngine<8>>;
 /// Which transport owns USART4 and its two channels: the vectors serve it.
-enum class U4Owner : uint8_t { irq, engined, engined_flash, engined_low };
+enum class U4Owner : uint8_t { irq, engined, engined_flash, engined_low, ring_only };
 volatile U4Owner u4_owner = U4Owner::irq;
 volatile uint32_t u4_entries = 0;
 volatile uint32_t dma_entries = 0;
@@ -1980,11 +1985,74 @@ ClearCase clear_case(bool status_between) {
     return cc;
 }
 
+/// A RUN OF ERRORED FRAMES into a ring with no transmit engine: eight frames
+/// of 0x35 from the far chip's edge engine at 115200, each with its last data
+/// cell (a 0) stretched a whole bit over the stop bit's sample - a framing
+/// error carrying its byte - four bit times apart, so no idle line between
+/// them (IDLE wants a whole frame of it). What the ring stored, in order, and
+/// what it counted.
+struct ErroredRun {
+    bool ran = false;
+    uint16_t got = 0;
+    bool all_0x35 = false;
+    uint16_t fe = 0;
+    uint16_t ore = 0;
+    uint16_t faults = 0;
+    uint32_t entries = 0;
+};
+
+ErroredRun errored_run() {
+    ErroredRun e{};
+    constexpr uint16_t train = 8;
+    link::Params a{};
+    a.cfg.rate = 115'200;
+    a.count = train;
+    a.ms = 200;
+    a.value = 0x35;
+    a.cell = 8;     // data bit 7, a 0 in 0x35
+    a.pct = 100;    // two bits long: still low at the stop bit's sample
+    const bool acted = peer_act(link::Op::bitbang, a);
+    u4_owner = U4Owner::ring_only;
+    const bool up = acted && RingOnly::init(clock, 115'200);
+    (void)Rx4::input(PinPull::up);
+    RingOnly::clear_errors();
+    u4_entries = 0;
+    wait_ms(20);   // eight frames of 15 bit times at 115200: 1.1 ms
+    e.all_0x35 = true;
+    uint8_t b = 0;
+    while (RingOnly::read_byte(b)) {
+        e.all_0x35 = e.all_0x35 && b == 0x35u;
+        ++e.got;
+    }
+    e.fe = RingOnly::frame_errors();
+    e.ore = RingOnly::hw_overruns();
+    e.faults = RingOnly::dma_faults();
+    e.entries = u4_entries;
+    RingOnly::release();
+    u4_owner = U4Owner::irq;
+    link::Report r{};
+    e.ran = up && peer_report(r, 0) && (r.flags & link::report_ran) != 0u && r.count == train;
+    return e;
+}
+
 void tq_clear_under_dma() {
     if (!ensure_link()) {
         bench.verdict("the peer is reachable", false);
         return;
     }
+    // THE COUNT A RUN OF ERRORED FRAMES GETS, the interrupt transmitter
+    // idle: the frame after a counted one loses its error to the clear the
+    // counting status read armed (the header's rule), so eight count four.
+    // A status read on the wait for a frame - TXE's, with TXEIE down - arms
+    // the clear for the NEXT frame too, and the run counts fewer.
+    const ErroredRun run = errored_run();
+    print(serial, "  eight errored frames into the ring with no transmit engine: ", run.got, " stored",
+          run.all_0x35 ? ", every one 0x35" : ", NOT ALL 0x35", "; FE counted ", run.fe, ", ORE ", run.ore,
+          ", faults ", run.faults, ", ", run.entries, " USART entries", crlf);
+    judge("A RUN OF ERRORED FRAMES under a ring beside the interrupt transmitter: eight stored, every one "
+          "0x35, the framing errors counted every other one (4 of 8)",
+          run.ran && run.got == 8u && run.all_0x35 && run.fe == 4u && run.ore == 0u && run.faults == 0u);
+    (void)link_command_mode();
     const ClearCase asked = clear_case(true);
     const ClearCase unasked = clear_case(false);
     print(serial, "  status read between: PE after the first ", asked.pe_after_first, ", after the second ",
@@ -2401,6 +2469,7 @@ extern "C" BRIO_CH32_INTERRUPT [[gnu::section(".fast_text")]] void usart4_handle
         case U4Owner::engined: (void)Engined::isr(); break;
         case U4Owner::engined_flash: (void)EnginedFlash::isr(); break;
         case U4Owner::engined_low: (void)EnginedLow::isr(); break;
+        case U4Owner::ring_only: (void)RingOnly::isr(); break;
         default: (void)Loop::isr(); break;
     }
 }
@@ -2432,6 +2501,8 @@ template <typename E>
         timed_dma<EnginedFlash>();
     } else if (o == U4Owner::engined_low) {
         (void)EnginedLow::dma_isr();
+    } else if (o == U4Owner::ring_only) {
+        (void)RingOnly::dma_isr();
     }
 }
 extern "C" BRIO_CH32_INTERRUPT void dma1_channel1_handler() { usart4_dma(); }
@@ -2462,7 +2533,8 @@ int main() {
     bench.second_letter('n', "the peer's engine shapes", tn_shapes);
     bench.second_letter('o', "mute, IrDA and LIN on a wire", to_modes);
     bench.second_letter('p', "half duplex hearing a second chip", tp_half_duplex_wire);
-    bench.second_letter('q', "the error flags' clear under a receive channel", tq_clear_under_dma);
+    bench.second_letter('q', "the error flags' clear under a receive channel; a run of errored frames",
+                        tq_clear_under_dma);
     bench.second_letter('r', "the priority rule: the engined ring beside copies, at 3 Mbaud", tr_priority_load);
     bench.second_letter('s', "the transmit engine's blast, timed by the far chip", ts_tx_engine);
     bench.second_letter('t', "the receive vector's guards: the overrun with nothing to take, the stall bound",
