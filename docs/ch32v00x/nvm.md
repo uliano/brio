@@ -79,35 +79,55 @@ Journal journal;
 heap.mount();                           // survival-aware, reports losses
 auto w = heap.alloc(record_id, bytes);  // a block, appended then sealed
 journal.mount();
-journal.save<Calibration>(id, cal);     // a page program, ~0.9 ms, the core stalled
+journal.save<Calibration>(id, cal);     // a page program, ~2 ms, the core stalled
 journal.save_reserved(id, value);       // the panic path: one program, no erase
 ```
 
-An ordinary save is a pause of the whole program of about a
-millisecond, not a background operation: this is the array the core
-executes from. Nothing that must run every tick should sit in the same
-turn as a save.
+An ordinary save is a pause of the whole program of about two
+milliseconds, and a save that collects one of some 78 ms on the
+CH32V006, not a background operation: this is the array the core
+executes from, and every interrupt waits too - the kernel's tick among
+them, which counts ONE tick for each stall of two or three periods (the
+bench findings). Nothing that must run every tick should sit in the
+same turn as a save, and kernel time runs slow across one.
 
 ## Bench findings
 
-The reference suite is `test_ch32_nvm` (43 verdicts in `z`; letter `w`
-wipes the partition) on the CH32V006K8U6 at 48 MHz, and 34 on the
+The reference suite is `test_ch32_nvm` (46 verdicts in `z`; letter `w`
+wipes the partition) on the CH32V006K8U6 at 48 MHz, and 37 on the
 CH32V003F4P6 - one source: no heap letter there, the page letters on
 the attic's pages, the sector letter erasing the attic itself, the
-journal at eight cells a half.
+journal at eight cells a half. Every time is read on TIM2 counting
+microseconds: an operation stalls the core longer than a tick period,
+so the STK - whose reloads inside one stall raise its pending bit once
+- cannot time it.
 
-- **The engine, measured with the core stalled**: on the CH32V006 a
-  fast page erase 928 us and a fast page program 865 us (44575 and
-  41524 HCLK cycles, both under one kernel tick); on the CH32V003 a
-  64-byte page erases in 136 us (6535 cycles) and programs in 914 us
-  (43886 cycles) - the program is a quarter of the bytes for the same
-  time, the erase seven times quicker; a 1 KB SECTOR erase 127 us - the
-  standard erase of four pages is seven times faster than the "fast"
-  erase of one, which is the opposite of what the names say. The
-  media erase by page because the heap and the journal count in erase
-  units and a smaller unit wastes less; a media that erased by sector
-  would be faster per byte, and is a choice the suite's number makes
-  available.
+- **The engine, measured with the core stalled** (letter `b` fifteen
+  runs, `d` three): on the CH32V006 a fast page erase 2925 to 2927 us,
+  a fast page program 1886 to 1890 us and a 1 KB sector erase 3124 to
+  3126 us - each inside the datasheet's maximum (CH32V006 datasheet table 3-14:
+  3.0, 2.0 and 3.3 ms), the sector's four pages erased in about the time
+  of one. The media erase by page because the heap and the journal count
+  in erase units and a smaller unit wastes less; a media that erased by
+  sector would be some four times faster per byte, and is a choice the
+  suite's numbers make available.
+- **The stall holds the kernel's tick off**: across a page erase of
+  three tick periods the tick advanced ONE (fifteen runs of fifteen) -
+  the STK's reloads inside a stall raise its one pending bit once, and
+  kernel time loses the periods between.
+- **The journal's saves, timed** (letter `f`, sixteen saves through a
+  collection or two, eighteen runs): an ordinary save 1950 to 1970 us -
+  one page program and some 80 us of the journal's own work; a save
+  that collects 76.0 ms with two live ids and 78.0 ms with three - both
+  halves' 24 page erases, the copies and the save's own program, which
+  the engine's figures above add up to (24 x 2.93 + 3 x 1.89 = 76.0 ms)
+  - with the kernel's tick advancing 28 to 32 across it: some 45 to 50
+  ticks of kernel time lost to the stall.
+- **A programming session through the WCH-LinkE leaves the partition
+  virgin**: the journal holding three live ids mounted them again after
+  the probe's reset alone, and mounted EMPTY after each programming of
+  the image (four times) - the probe erases beyond the image's pages, so
+  nothing the media keep survives a flash on this bench.
 - **A page accepts a second program between erases when only more
   bits are cleared.** Letter c programs a page with a pattern in its
   left half and 0xFF in its right, then programs it again with the
@@ -142,7 +162,8 @@ Driver gaps, each with its reason:
   the `brio fuses` work for this target, where a wrong write costs a
   chip erase and deserves its own session.
 - The 32 KB block erase (the CH32V006's) and the whole-array erase: no
-  user; the probe erases what it programs.
+  user; the probe erases the array when it programs (the bench
+  findings).
 - The CH32V003's half-word program mode: the page is the write cell on
   both parts, and a two-byte cell for the journal - 256 saves a half in
   place of 8 - is a decision the journal's cost per save on the bench
@@ -163,6 +184,9 @@ Implemented but not bench-verified, each with what would measure it:
   unprotected on the bench part, so the bit was never seen set; the
   option-byte work is where a unit gets protected on purpose and the
   engine's refusal reads it.
-- A collection's full timing in the journal (twelve page erases and
-  the copies): the suite counts cells, not microseconds; the same
-  cycle counter letters b and d use would give it.
+- **The CH32V003's engine times**: its page figures were read on a
+  counter that wrapped every millisecond, which no longer times them;
+  the stopwatch letters `b`, `d` and `f` now use, judged against that
+  part's datasheet (V1.6 table 3-14: 3.1 ms for a 64-byte page's
+  program and its erase), would - on a CH32V003 board, which the desk
+  has not got.

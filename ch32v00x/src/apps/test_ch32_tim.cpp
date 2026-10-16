@@ -28,7 +28,9 @@
 //      counted for 200 ms
 //   c  THE PERIODS: edge-aligned ATRLR + 1 counts per update; centre-
 //      aligned measured (2 x ATRLR or 2 x (ATRLR + 1) - the chapter
-//      does not say); the repetition counter dividing TIM1's updates
+//      does not say); the repetition counter dividing TIM1's updates;
+//      configure() asked for UDIS still loading the prescaler, and a down
+//      counter's start - what a UG does to a stopped and a running one
 //   d  ONE TIMER MEASURING ANOTHER, no wire: TIM2 counting TIM1's
 //      update on ITR0 (TimEventCounter), TIM1 counting TIM2's on ITR1,
 //      and TIM2 GATED by TIM1's OC1REF measuring a 25% duty internally
@@ -292,6 +294,67 @@ void tc_periods() {
     const uint32_t rep = updates_in_100ms(47, 99, TimAlignment::edge, 4);
     print(serial, "  edge-aligned with RPTCR 4: ", rep, " updates (200 expected)", crlf);
     bench.verdict("the repetition counter divides the updates by RPTCR + 1", rep >= 199u && rep <= 201u);
+
+    // configure() ASKED FOR UDIS still loads the prescaler: its UG goes
+    // before UDIS (11.4.1: with UDIS standing a UG loads no shadow). The
+    // rate is read over 4800 cycles with interrupts masked, good to one
+    // count of the hundred in the window (1 %); the period, 1000 counts,
+    // is longer than the window, so the count is taken modulo it.
+    all_off();
+    (void)T1::configure({.prescaler = 47, .period = 999, .update_disable = true});
+    T1::enable(true);
+    uint32_t window = 0;
+    uint32_t counts = 0;
+    {
+        InterruptGuard guard;
+        const uint16_t c0 = T1::count();
+        const uint32_t s0 = cycles_now();
+        while (cycles_now() - s0 < 4800u) {
+        }
+        const uint16_t c1 = T1::count();
+        window = cycles_now() - s0;
+        counts = (c1 + 1000u - c0) % 1000u;
+    }
+    T1::enable(false);
+    const uint32_t per_count_x100 = counts != 0u ? 100u * window / counts : 0u;
+    print(serial, "  configure() with UDIS, PSC 47: ", per_count_x100, " hundredths of a cycle a count", crlf);
+    bench.verdict("configure() asked for UDIS loads the prescaler all the same: one count every 48 cycles, "
+                  "within one count of the window",
+                  per_count_x100 >= 4752u && per_count_x100 <= 4848u);
+
+    // THE DOWN COUNTER's start: a UG reloads a RUNNING down counter with
+    // ATRLR and leaves a STOPPED one where it is, so configure() writes
+    // ATRLR itself, and the first underflow comes a whole period - 48000
+    // cycles - after the enable, never one count (48) after it. The bound:
+    // no earlier than the period (the prescaler starts from zero at the
+    // UG), no later than the stamp's lateness - a turn of the poll and at
+    // most one tick's vector, both well under 1000 cycles on this core.
+    all_off();
+    (void)T1::configure({.prescaler = 47, .period = 999, .direction = TimDirection::down});
+    const uint16_t start = T1::count();
+    T1::clear_flags(T1::update_flag);
+    const uint32_t e0 = cycles_now();
+    T1::enable(true);
+    uint32_t first = 0;
+    while (!T1::flag(T1::update_flag)) {
+        if (cycles_now() - e0 > 96'000u) {
+            break;
+        }
+    }
+    first = cycles_now() - e0;
+    T1::set_count(500);
+    T1::update();
+    const uint16_t running_ug = T1::count();
+    T1::enable(false);
+    T1::set_count(500);
+    T1::update();
+    const uint16_t stopped_ug = T1::count();
+    print(serial, "  down-counting: configure() leaves ", start, "; a UG from 500 leaves ", stopped_ug,
+          " stopped, ", running_ug, " running; the first underflow ", first, " cycles after the enable", crlf);
+    bench.verdict("a UG reloads a running down counter with ATRLR and leaves a stopped one's count alone",
+                  stopped_ug == 500u && running_ug >= 990u && running_ug <= 999u);
+    bench.verdict("configure() starts a down counter at ATRLR: the first underflow a whole period after the enable",
+                  start == 999u && first >= 48'000u && first <= 49'000u);
     all_off();
 }
 

@@ -25,8 +25,9 @@
 //      boundary against the storage floor, the two media's zones
 //   b  one page of the heap's share: erased to 0xFF, programmed to a
 //      pattern, read back exact, erased again - with the cost of each
-//      in HCLK cycles, which is also how long the core STALLS (this is
-//      the array it executes from)
+//      on a microsecond stopwatch (TIM2), which is also how long the core
+//      STALLS (this is the array it executes from), and what the stall
+//      does to the kernel's tick
 //   c  THE QUESTION THE CHAPTER DOES NOT ANSWER: can a page be
 //      programmed a second time between erases, clearing more bits?
 //      If it can, a smaller write cell is possible later; if not, the
@@ -38,7 +39,9 @@
 //      read back byte-exact
 //   f  NvJournal in the attic: typed save and load, an overwrite, a
 //      collection, a re-mount that holds - and the panic reserve
-//      (save_reserved() with no erase)
+//      (save_reserved() with no erase); every save TIMED, the ordinary
+//      one and the one that collects judged against the datasheet's
+//      program and erase times
 //
 //   w  (by name only, NOT in z) WIPE the storage partition: every page
 //      from the floor to the top erased, so the next run starts from
@@ -62,6 +65,7 @@
 #include "ch32v00x/pin.hpp"
 #include "ch32v00x/platform.hpp"
 #include "ch32v00x/ticker.hpp"
+#include "ch32v00x/tim.hpp"
 #include "ch32v00x/usart.hpp"
 #include "util/nv_heap.hpp"
 #include "util/nv_journal.hpp"
@@ -103,11 +107,33 @@ struct Calibration {
     uint8_t revision;
 };
 
-uint32_t cycles_now() { return stk()->CNT; }
-uint32_t cycles_between(uint32_t from, uint32_t to) {
-    const uint32_t period = stk()->CMP + 1u;
-    return to >= from ? to - from : to + period - from;
+/// THE STOPWATCH: TIM2 counting microseconds (PSC 47), sixteen bits - 65
+/// ms, longer than any one operation of the engine - or tens of them
+/// (PSC 479, 655 ms) for a journal's collection. Not the STK: a flash
+/// operation STALLS the core, two to three milliseconds here, and the
+/// STK's reloads inside one stall raise its one pending bit once - a
+/// cycle count composed of ticks and the counter's position loses the
+/// periods between, and a difference of two positions is the time modulo
+/// a period. A timer keeps counting through the stall.
+using Watch = Tim<2>;
+uint16_t watch_us_per_count = 1;
+void watch_start(uint16_t us_per_count) {
+    Watch::init();
+    (void)Watch::configure({.prescaler = static_cast<uint16_t>(48u * us_per_count - 1u), .period = 0xFFFF});
+    Watch::enable(true);
+    watch_us_per_count = us_per_count;
 }
+uint16_t us_now() { return Watch::count(); }
+uint32_t us_since(uint16_t from) {
+    return static_cast<uint32_t>(static_cast<uint16_t>(Watch::count() - from)) * watch_us_per_count;
+}
+
+/// The datasheets' maxima for one page (CH32V006 datasheet V2.0 table
+/// 3-14: a 256-byte page's program 2.0 ms, its erase 3.0 ms; CH32V003
+/// datasheet V1.6 table 3-14: a 64-byte page's, 3.1 ms each).
+constexpr bool page_of_64 = Flash::page_size == 64u;
+constexpr uint32_t program_max_us = page_of_64 ? 3100u : 2000u;
+constexpr uint32_t erase_max_us = page_of_64 ? 3100u : 3000u;
 
 uint8_t page_buf[Flash::page_size];
 
@@ -191,30 +217,39 @@ void ta_engine() {
 void tb_page() {
     const uint32_t page = MainFlashPartition::storage_base;   // the partition's first page
 
-    uint32_t c0 = cycles_now();
+    watch_start(1);
+    const uint32_t t0 = Ticker::ticks();
+    uint16_t c0 = us_now();
     uint32_t err = engine_erase(page);
-    const uint32_t erase_cycles = cycles_between(c0, cycles_now());
-    print(serial, "  fast page erase: err=", hex(err), " in ", erase_cycles, " cycles (",
-          erase_cycles / 48u, " us)", crlf);
+    const uint32_t erase_us = us_since(c0);
+    const uint32_t ticks_seen = Ticker::ticks() - t0;
+    print(serial, "  fast page erase: err=", hex(err), " in ", erase_us, " us; the kernel tick advanced ",
+          ticks_seen, crlf);
     bench.verdict("the fast page erase completes without error", err == 0u);
     bench.verdict("and the page reads all 0xFF", page_is(page, 0xFF));
 
     for (uint32_t i = 0; i < Flash::page_size; ++i) {
         page_buf[i] = static_cast<uint8_t>(i * 7u + 0x13u);
     }
-    c0 = cycles_now();
+    c0 = us_now();
     err = engine_program(page, page_buf);
-    const uint32_t program_cycles = cycles_between(c0, cycles_now());
-    print(serial, "  fast page program: err=", hex(err), " in ", program_cycles,
-          " cycles (", program_cycles / 48u, " us)", crlf);
+    const uint32_t program_us = us_since(c0);
+    print(serial, "  fast page program: err=", hex(err), " in ", program_us, " us", crlf);
     bench.verdict("the fast page program completes without error", err == 0u);
     uint8_t got[Flash::page_size];
     Flash::read(page, got);
     bench.verdict("and reads back byte-exact", memcmp(got, page_buf, Flash::page_size) == 0);
-    bench.verdict("an erase takes under a tick (the core stalls that long, "
-                  "executing from the array it erases)",
-                  erase_cycles < 48'000u);
-    bench.verdict("a program takes under a tick too", program_cycles < 48'000u);
+    // The bounds are the datasheet's maxima (program_max_us, erase_max_us
+    // above), the stopwatch good to a microsecond. The core STALLS that
+    // long - it executes from the array it erases - and so does every
+    // interrupt: the STK's reloads in a stall of two or three periods raise
+    // its pending bit once, and the kernel's tick advances by one where two
+    // or three periods passed.
+    bench.verdict("a page erase takes no longer than the datasheet's maximum", erase_us <= erase_max_us);
+    bench.verdict("a page program no longer than its maximum", program_us <= program_max_us);
+    bench.verdict("and the kernel tick, held off through the stall, advances by ONE across an erase of "
+                  "two to three of its periods",
+                  ticks_seen == 1u && erase_us > 2000u);
 
     err = engine_erase(page);
     bench.verdict("erased again, all 0xFF", err == 0u && page_is(page, 0xFF));
@@ -315,15 +350,15 @@ void td_sector() {
     }
     bench.verdict("every page of a sector programmed", programmed);
 
-    const uint32_t c0 = cycles_now();
+    watch_start(1);
+    const uint16_t c0 = us_now();
     uint32_t err = 0xFFFF'FFFFu;
     if (Flash::unlock()) {
         err = Flash::erase_sector(sector);
         Flash::lock();
     }
-    const uint32_t cycles = cycles_between(c0, cycles_now());
-    print(serial, "  sector erase (1 KB): err=", hex(err), " in ", cycles, " cycles (",
-          cycles / 48u, " us)", crlf);
+    const uint32_t sector_us = us_since(c0);
+    print(serial, "  sector erase (1 KB): err=", hex(err), " in ", sector_us, " us", crlf);
     bench.verdict("the sector erase completes without error", err == 0u);
     bool clean = true;
     for (uint32_t p = 0; p < pages; ++p) {
@@ -418,14 +453,64 @@ void tf_journal() {
     // Enough saves to force a collection: a half holds twelve cells (eight
     // on the CH32V003) and the reserve keeps one back, so churning a
     // second id past that point ping-pongs the halves.
+    // Each save TIMED on the stopwatch: the ordinary save and the one
+    // that collects told apart by their length.
+    watch_start(10);
     bool churned = true;
     uint8_t k = 0;
+    uint32_t save_us[16] = {};
+    uint8_t free_cells_at[16] = {};
+    // THE BOUNDS, from the datasheet's maxima (program_max_us,
+    // erase_max_us) and the journal's own work on top - the entry's image,
+    // its CRC over 44 bytes and the two locks' keys, under 0.2 ms at 48
+    // MHz. An ORDINARY save is one program. A COLLECTION erases the idle
+    // half (half_cells pages: twelve on the CH32V006, eight on the
+    // CH32V003), copies the live ids (three at most: the calibration, the
+    // churned value and the reserve's entry an earlier run left) and erases
+    // the half it left before the save's own program: no longer than two
+    // halves' erases and four programs at their maxima and 1 ms of the
+    // journal's work (81 ms on the CH32V006), and longer than ONE half's
+    // erases at their maximum (36 ms there) - the proof that both halves
+    // were erased. Anything over 20 ms is a collection.
+    constexpr uint32_t ordinary_most_us = program_max_us + 200u;
+    constexpr uint32_t collection_least_us = Journal::half_cells * erase_max_us;
+    constexpr uint32_t collection_most_us = 2u * Journal::half_cells * erase_max_us + 4u * program_max_us + 1000u;
+    uint8_t collections = 0;
+    bool bounded = true;
+    uint32_t collection_us = 0;
+    uint32_t collection_ticks = 0;
+    uint32_t ordinary_most = 0;
     for (; k < 16u; ++k) {
         memset(churn_buf, static_cast<uint8_t>(0x40u + k), sizeof churn_buf);
+        free_cells_at[k] = static_cast<uint8_t>(journal.free_cells());
+        const uint32_t t0 = Ticker::ticks();
+        const uint16_t c0 = us_now();
         churned = churned && journal.save(id_churn, churn_buf);
+        save_us[k] = us_since(c0);
+        const uint32_t ticks = Ticker::ticks() - t0;
+        if (save_us[k] > 20'000u) {
+            ++collections;
+            collection_us = save_us[k];
+            collection_ticks = ticks;
+            bounded = bounded && save_us[k] > collection_least_us && save_us[k] <= collection_most_us;
+        } else {
+            ordinary_most = save_us[k] > ordinary_most ? save_us[k] : ordinary_most;
+        }
     }
     print(serial, "  16 saves of a 32-byte value: free ", journal.free_cells(), "/",
           Journal::half_cells, " cells, reserve intact=", journal.reserve_intact(), crlf);
+    print(serial, "  each save, us (free cells before it):");
+    for (uint8_t i = 0; i < 16u; ++i) {
+        print(serial, " ", save_us[i], " (", free_cells_at[i], ")");
+    }
+    print(serial, crlf, "  ", collections, " collecting save(s), the last ", collection_us,
+          " us with the kernel tick advancing ", collection_ticks, "; the longest ordinary save ", ordinary_most,
+          " us", crlf);
+    bench.verdict("an ordinary save is one page program: none longer than the datasheet's maximum and 0.2 ms "
+                  "of the journal's own work", ordinary_most != 0u && ordinary_most <= ordinary_most_us);
+    bench.verdict("a collecting save erases both halves and copies the live ids: longer than one half's erases "
+                  "at their maximum, within the maxima of all of it",
+                  collections >= 1u && bounded);
     bench.verdict("sixteen saves through at least one collection all succeeded", churned);
     uint8_t back[32];
     const std::optional<uint8_t> n = journal.load(id_churn, back);
@@ -489,6 +574,7 @@ int main() {
     const bool clock_ok = SysClock::init();
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
+    watch_start(1);
     brio::enable_interrupts();
 
     bench.letter('a', "the engine and the partition", ta_engine);

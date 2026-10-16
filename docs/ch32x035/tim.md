@@ -33,6 +33,15 @@ driver here.
 - **The prescaler and the auto-reload are shadowed** (12.2.3): PSC is
   taken at the next update event (measured: PSC written alone left the
   count at 48 cycles a count until UG), ATRLR too under ARPE.
+- **A UG reinitializes a RUNNING counter only** (measured, both
+  directions): running, it gives 0 counting up and ATRLR counting down,
+  as 12.3.1 says; on a stopped counter it loads the shadows and leaves
+  the count where it was.
+- **UDIS makes a UG no update at all** (12.4.1): the shadows are not
+  loaded, no UIF rises, an overflow updates nothing - until UDIS is
+  cleared, when the next overflow raises UIF and takes the PSC written
+  meanwhile (measured). URS set, a UG loads the shadows and raises no
+  UIF; an overflow still does.
 - **INTFR is write-zero-to-clear** (12.4.5's RW0): a store of ones keeps
   every flag (measured).
 - **CTLR1 resets to 0x2000** (measured, both timers): bit 13, "Reserved"
@@ -81,7 +90,7 @@ driver does with each:
 
 | item | used | how, or why not |
 |---|---|---|
-| the time base (PSC, ATRLR, RPTCR, CMS, DIR, CKD, ARPE, UDIS, URS) | yes | `configure()`, one store of CTLR1 assembled whole, PSC, ATRLR, RPTCR, then UG to load the shadows and its UIF cleared; the counter left stopped |
+| the time base (PSC, ATRLR, RPTCR, CMS, DIR, CKD, ARPE, UDIS, URS) | yes | `configure()`, one store of CTLR1 assembled whole but for UDIS, PSC, ATRLR, RPTCR, the counter's start written (ATRLR for an edge-aligned down counter, 0 otherwise: a UG does not move a stopped counter), then UG to load the shadows, its UIF cleared, and UDIS stored after it (under UDIS a UG loads nothing); the counter left stopped; `direction()` reads DIR, the hardware's in a centre-aligned mode |
 | output compare, all eight OCxM codes | yes | `output_channel()` whole, `output_mode()` the field alone - what a waveform moves between toggle and a forced level, one read-modify-write |
 | the compare preload OCxPE | yes | on by default (a PWM that cannot glitch), off for a value a DMA request writes at each match (12.3.3's step 4) |
 | one-pulse mode | yes | `TimConfig::one_pulse`; the update clears CEN (measured) |
@@ -104,7 +113,7 @@ CH32V00x's TIM surface for the subset above:
   reverse; `remap(code)`, `remap()`, `column(code)`; `configure(TimConfig)`
   and the time base's single verbs (`enable`, `count`, `set_count`,
   `prescaler`, `set_prescaler`, `period`, `set_period`, `repetition`,
-  `set_repetition`, `one_pulse`); `update()`; `flags()`, `flag()`,
+  `set_repetition`, `one_pulse`, `direction`); `update()`; `flags()`, `flag()`,
   `clear_flags()`, `interrupts(mask, on)` over `update_flag`,
   `compare_flag(ch)`, `update_interrupt`, `compare_interrupt(ch)`,
   `update_dma`, `compare_dma(ch)`; `isr()`, the body for any of the
@@ -149,11 +158,14 @@ again with the counter stopped by the update.
 
 ## Bench findings
 
-`test_x035_tim` on the CH32X035F8U6, 33 verdicts with no wire of its own:
+`test_x035_tim` on the CH32X035F8U6, 47 verdicts with no wire of its own:
 CH3 on PB11, C2N and C3N on PB0 and PB1 - the desk's UART wires, the far
-CH32V006 dark - each pad's level read off INDR, each edge placed by a
-sampler reading port B into a buffer with interrupts masked, a sample
-every 9.01 HCLK cycles.
+CH32V006 dark - and TIM2's C2N on PB12, each pad's level read off INDR,
+each edge placed by a sampler reading port B into a buffer with
+interrupts masked, a sample every 9.01 HCLK cycles; the intervals
+between flags stamped on the STK's cycle count, good to the poll's
+lateness, which letter `f` measures in its own image (a turn of 108 to
+112 cycles, 204 to 232 with the tick's vector in it: 316 to 344).
 
 - **The reset values** are tables 12-3 and 12-4's but for CTLR1, 0x2000
   on both timers, and DMAADR, which reads CTLR1 (above).
@@ -188,6 +200,37 @@ every 9.01 HCLK cycles.
   items for three matches (or updates), none before the enable; three UGs
   under UDE moved three items on each timer's update channel; CC2G on an
   output channel raised no CC2IF, counter stopped or running.
+- **The repetition counter** (letter `f`, thirty-two runs): on both
+  timers one update in RPTCR + 1 periods - edge-aligned at RPTCR 0, 1, 4
+  and 255 (100 us to 25.6 ms), centre-aligned at 0, 1 and 3, where an
+  overflow and an underflow count one each - every interval within -208
+  to +248 cycles of the counts over 616 intervals. Centre-aligned at an
+  even RPTCR the updates alternate between overflow and underflow; at an
+  odd one every update falls on the underflow, the counter counting up
+  after it.
+- **Centre-aligned counting's flag policies**: with ATRLR 500 and a
+  compare of 200 at 1 MHz, CC1IF 1000 us apart and only counting down
+  under CMS 01, only counting up under 10; under 11 on both, the gaps
+  alternating 600 and 400 us.
+- **The down counter**: an underflow and a compare's CC1IF once a
+  period of ATRLR + 1 counts, DIR reading down; `configure()` starts it
+  at ATRLR and the first underflow comes 48160 to 48244 cycles after
+  `enable()`, a whole period of 48000. Before the driver wrote the
+  start, `configure()`'s UG on the stopped counter left it at 0 and the
+  first underflow came after one count.
+- **UDIS and URS**: `configure()` asked for UDIS counts at the
+  prescaler asked (48.0 cycles a count at PSC 47) - with UDIS stored
+  before its UG, as the driver once did, the counter ran at the reset's
+  PSC 0; under UDIS no UIF over three overflows and a PSC written
+  meanwhile not taken; UDIS cleared, UIF at the next overflow and the
+  new PSC (24.0 cycles a count). URS set: a UG raised no UIF and its new
+  PSC was taken; overflows still raised UIF a period apart.
+- **TIM2's outputs on a pad** (letter `g`): C2N reaches PB12 under
+  TIM2_RM 101 and under 110 - forced active high, forced inactive low,
+  CC2NP inverting, a toggle at a period of 1000 putting an edge every
+  1001 cycles on the pad. Both codes put channel 1's CH1 and C1N on the
+  debug port's PC19 and PC18: the letter never enables channel 1 nor
+  claims those pads, and the probe attached as before after every run.
 
 ## Not covered yet
 
@@ -216,13 +259,3 @@ Driver gaps, each with its reason:
   parts and the family check compiles every pad each package bonds; the
   bench has a CH32X035F8U6 alone.
 
-Implemented but not bench-verified, each with what would measure it:
-
-- **TIM2's outputs on a pad**: its registers, its remap field and its
-  four requests are measured; no TIM2 output was read off a pad - its
-  columns on the QFN20 reach PA0..PA3 (the console's and the SPI's pads)
-  and PB3, PB11, PB12, PC14, PC15, PC19. A letter on PB12 (C2N under codes
-  101 and 11x) would.
-- **Centre-aligned counting, the repetition counter, the down counter,
-  UDIS and URS**: written by `configure()` and read back by the family
-  check's instantiation only; a letter timing the update events would.

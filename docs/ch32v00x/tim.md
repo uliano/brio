@@ -146,9 +146,9 @@ The vectors: `tim1_up_handler`, `tim1_cc_handler`, `tim1_trg_com_handler`,
 
 ## Bench findings
 
-The reference suite is `test_ch32_tim` (25 verdicts in `z`, two of
+The reference suite is `test_ch32_tim` (28 verdicts in `z`, two of
 its letters on the jumper PD2 to PD4, one probe letter outside `z`)
-on the CH32V006K8U6 at 48 MHz, and 16 on the CH32V003F4P6, whose
+on the CH32V006K8U6 at 48 MHz, and 19 on the CH32V003F4P6, whose
 image has no TIM3 letter and whose jumper letters decline without the
 wire - the two parts' images are one source, the facts letter
 refusing a pair dead time on TIM2 where the part has none.
@@ -160,6 +160,19 @@ refusing a pair dead time on TIM2 where the part has none.
   divides them by RPTCR + 1.
 - **A centre-aligned period is 2 x ATRLR**: 1010 updates in 100 ms
   with ATRLR 99 at 1 MHz, two updates a period of 198 counts.
+- **UDIS turns a UG into no update at all, the shadows included**
+  (11.4.1): `configure()` sets UDIS AFTER its own UG, so a time base
+  asked for UDIS still has its prescaler - 48.3 cycles a count for PSC
+  47 (letter `c`, ten runs); with UDIS written before the UG, as the
+  driver once did, the counter ran at the previous PSC (5.6 hundredths
+  of a cycle aliased in the window, three runs of three).
+- **A UG reinitializes a RUNNING counter only**: from 500, a UG gives
+  999 = ATRLR to a down counter that runs and leaves a stopped one at
+  500. `configure()` therefore writes the start itself - ATRLR for an
+  edge-aligned down counter, 0 otherwise - and the first underflow of
+  a down counter comes 48116 to 48162 cycles after `enable()`, a whole
+  period of 48000 (ten runs); left to its UG it came after ONE count
+  (180 cycles).
 - **One timer measures another with no wire**: TIM2 counts TIM1's
   update on ITR0 (1000 in 100 ms), TIM1 counts TIM2's on ITR1 (500),
   and TIM2 gated by TIM1's OC1REF at 25% counts a quarter of a 10 ms

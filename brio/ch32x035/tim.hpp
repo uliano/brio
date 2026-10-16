@@ -405,8 +405,19 @@ public:
     /// RPTCR written, CTLR1 assembled in one store (the capture and
     /// comparator bits zero, the reserved bit 13 as it reads - the file
     /// header), the slave controller at its reset (SMCFGR zero: a
-    /// free-running counter), CNT zeroed, then UG loads the shadows and the
-    /// UIF it raised is cleared.
+    /// free-running counter), the counter's start written, then UG loads
+    /// the shadows and the UIF it raised is cleared. UDIS goes in AFTER the
+    /// UG, a second store: with it standing a UG is no update event and
+    /// loads no shadow (12.4.1) - measured, a configure() asked for UDIS
+    /// and a prescaler left the counter at the previous PSC.
+    ///
+    /// THE START IS WRITTEN, not left to the UG: on the CH32X035F8U6 a UG
+    /// reinitializes the counter only while it runs (to 0 counting up, to
+    /// ATRLR counting down, as 12.3.1 says), and with the counter stopped
+    /// leaves it where it was while still loading the shadows (measured).
+    /// So CNT is written with what a UG would give a running counter - 0,
+    /// or ATRLR for an edge-aligned down counter - and the first period
+    /// after enable() is a whole one either way.
     static bool configure(const TimConfig& c) {
         if (!config_valid(c)) {
             return false;
@@ -423,12 +434,14 @@ public:
         v |= static_cast<uint16_t>(static_cast<uint16_t>(c.clock_division) << 8);
         if (c.auto_reload_preload) { v |= tim_arpe; }
         if (c.one_pulse) { v |= tim_opm; }
-        if (c.update_disable) { v |= tim_udis; }
         if (c.update_on_overflow_only) { v |= tim_urs; }
         t.CTLR1 = v;
-        t.CNT = 0;
+        t.CNT = c.direction == TimDirection::down && c.alignment == TimAlignment::edge ? c.period : uint16_t{0};
         t.SWEVGR = tim_ug;
         clear_flags(tim_uif);
+        if (c.update_disable) {
+            t.CTLR1 = static_cast<uint16_t>(v | tim_udis);
+        }
         return true;
     }
 
@@ -453,6 +466,12 @@ public:
     static uint8_t repetition() { return static_cast<uint8_t>(regs().RPTCR); }
     static void set_repetition(uint8_t v) { regs().RPTCR = v; }
     static bool one_pulse() { return (regs().CTLR1 & tim_opm) != 0u; }
+    /// CTLR1.DIR read back. In a centre-aligned mode the bit is the
+    /// hardware's - "not writable, but updated by hardware" (12.3.1) - and
+    /// says which way the counter is counting now, not what was asked.
+    static TimDirection direction() {
+        return (regs().CTLR1 & tim_dir) != 0u ? TimDirection::down : TimDirection::up;
+    }
 
     // ---- software events (12.4.6) ------------------------------------------------
 

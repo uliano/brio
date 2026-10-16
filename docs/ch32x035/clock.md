@@ -184,7 +184,7 @@ const bool watchdog = (flags & (brio::rcc_iwdgrstf | brio::rcc_wwdgrstf)) != 0u;
 
 ## Bench findings
 
-The reference suite is `test_x035_clock` (21 verdicts in `z`, nothing
+The reference suite is `test_x035_clock` (26 verdicts in `z`, nothing
 wired) on a CH32X035F8U6 - WCH's evaluation board in its QFN20 edition,
 over a WCH-LinkE - with the reset flags from `test_x035_platform`'s
 letter `a`. What they measured:
@@ -246,27 +246,42 @@ letter `a`. What they measured:
   session, +37, +248, +158 in another):
   the oscillator's wander bounds what a calibration is worth, and a
   program that needs better calibrates again before it needs it.
-- **The rate against a host's clock** (letter `d`, four runs, its lines
-  time-stamped by a host on an NTP-disciplined clock): 3000 ticks at 48
-  MHz in 3.0071 to 3.0074 s - 2370 to 2460 ppm slow, the HSI's error the
-  crystal measured; and 3000 ticks at the reset rate of 8 MHz, the same
-  oscillator divided by HPRE, in 3.0040 to 3.0044 s - 1330 to 1460 ppm
-  slow, a thousand ppm less: the two rates' brackets do not agree, which
-  is not explained (the list below).
+- **The rate against a host's clock** (letter `d`, six runs, its lines
+  time-stamped by a host on an NTP-disciplined clock, each bracket's two
+  lines of one length sent on a tick's edge): 3000 to 10000 ticks at
+  every rung, down the ladder and back up - 2100 to 2715 ppm slow at 48
+  MHz with the core spinning, the HSI's error the crystal measured, and
+  1220 to 2310 at the rungs below, the fastest at 3 MHz; between two
+  passes over the same rung a minute apart the oscillator wanders by up
+  to 400 ppm.
+- **The tick counts HCLK / 1000 at every rung** (letter `h`, TIM1 at PSC
+  0 counting the same HCLK over 200 ticks): 9599992 for 9600000 at 48
+  MHz down to 599996 for 600000 at 3 MHz - the poll's grain, no rung's
+  period a cycle off. So the rungs' brackets disagree because the
+  OSCILLATOR does, not the tick.
+- **The HSI runs faster with the core asleep** (letter `d`'s last four
+  brackets, four runs, each pair a few seconds apart): at 48 MHz, the
+  core sleeping between ticks in `idle()` shortened the bracket by 385
+  to 481 ppm against the core spinning; at 3 MHz by 90 to 370. What the
+  core does - its current, the die's temperature, the flash's fetches -
+  moves the oscillator by some hundreds of ppm, and a rung's figure is
+  the load it ran under; which of those it is was not separated.
 - **The clock output's multiplexer** (letter `e`): the source field takes
   SYSCLK, the HSI and nothing, and reads each back; `Mco::init()`
   answers false on this package, which does not bond PB9, and `off()`
   leaves the field carrying nothing.
-- **Fifteen gates open and close** (letter `f`), each written and read
-  back one at a time and left as it was found: DMA1's on HB; AFIO's,
-  port B's and C's, ADC1's, TIM1's, SPI1's and USART1's on PB2; TIM2's,
-  TIM3's, the window watchdog's, USART3's, USART4's, I2C1's and PWR's on
-  PB1. USART1's is among them on a package that offers no USART1 column
-  ([usart.md](usart.md)): the gate is the die's, not the package's. The
-  five the letter leaves alone are the console's two and the three HB
-  gates on out of reset. A reset pulse on I2C1's line leaves its gate
-  open, and `reset()` answers false for the power controller's line,
-  writing nothing - the next finding is why.
+- **Every gate opens and closes** (letter `f`, ten runs), each written
+  and read back one at a time and left as it was found: DMA1's on HB;
+  AFIO's, port B's and C's, ADC1's, TIM1's, SPI1's and USART1's on PB2;
+  TIM2's, TIM3's, the window watchdog's, USART3's, USART4's, I2C1's and
+  PWR's on PB1. USART1's is among them on a package that offers no
+  USART1 column ([usart.md](usart.md)): the gate is the die's, not the
+  package's. The three HB gates on out of reset - SRAMEN's, the USB
+  host/device controller's and the USB PD's - close and open again; the
+  console's own two, USART2's and port A's, closed and opened with the
+  console drained, leave the port speaking after. A reset pulse on
+  I2C1's line leaves its gate open, and `reset()` answers false for the
+  power controller's line, writing nothing - the next finding is why.
 - **A reset pulse on the power controller's line cut the part off its
   debug port.** The gates letter pulsed RCC_APB1PRSTR.PWRRST after every
   gate had opened and closed; the console fell silent before the next
@@ -286,6 +301,15 @@ letter `a`. What they measured:
   and no PINRSTF, in both runs. Of the manual's two reset values for
   this register, 3.4.8's bit table is the silicon's on this package,
   which has no reset pin.
+- **The reset flags one event at a time** (`test_x035_clock` letters `g`
+  and `r`, the flags cleared before each event and a word in `.noinit`
+  telling the next boot which event it was): the probe's reset alone
+  (`reset halt`, `resume`, four times), a programming session ending in
+  it (twice) and the system reset through PFIC_CFGR's SYSRST with its key
+  (RM 7.5.2.10, three times) each boot to SFTRSTF and nothing else - the
+  probe's reset reads as the software's, as on the CH32V203
+  ([../ch32vx03/platform.md](../ch32vx03/platform.md)); the `.noinit`
+  word survived the programming.
 
 ## Not covered yet
 
@@ -316,23 +340,11 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
-- **The tick at 8 MHz a thousand ppm faster than at 48 MHz on one
-  oscillator** (letter `d`, above), measured and not explained: the
-  divided rung's tick, its STK's reload and the ticker's rebase are the
-  places to look; letter `d`'s brackets at the ladder's other rungs, and
-  the STK's CNT read across one reload at 8 MHz, would say which.
 - **The clock output's waveform**: the multiplexer is measured (letter
   `e`); what leaves PB9 wants a package that bonds it and a counter on
   the pad.
-- **The five gates letter `f` leaves alone**: port A's and USART2's,
-  which the console holds open (letter `a` reads them open), and
-  SRAMEN's and the two USB controllers', open out of reset; the three HB
-  gates are a letter away, the console's two want a letter that runs
-  without the console.
-- **The reset flags one event at a time**: the boots measured read
-  SFTRSTF and PORRSTF together, a power-on and the probe's resets behind
-  them; a boot after a clear, across a re-flash, would say whether the
-  probe's reset alone reads as SFTRSTF, as it does on the CH32V203
-  ([../ch32vx03/platform.md](../ch32vx03/platform.md)). The watchdogs',
-  the low-power and the OPA's flags wait for their chapters, and PINRSTF
-  for a package that bonds the reset pin.
+- **The other reset flags**: `reset_flags()` reads them all and letter
+  `g` has seen SFTRSTF and PORRSTF alone; the watchdogs', the low-power
+  and the OPA's are each a reset of its chapter's, which a letter of
+  that chapter would cause, and PINRSTF wants a package that bonds the
+  reset pin.

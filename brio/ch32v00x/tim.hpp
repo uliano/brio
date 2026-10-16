@@ -603,8 +603,17 @@ public:
     /// at its reset (SMCFGR zero: a free-running counter until a verb
     /// after this one says otherwise - a TimPeriodMeter's reset-on-TI1
     /// must not outlive it into the next task's setup on the same timer,
-    /// where every interval would read zero), CNT zeroed, then UG loads
-    /// both shadows and the UIF it raised is cleared.
+    /// where every interval would read zero), the counter's start
+    /// written, then UG loads both shadows and the UIF it raised is
+    /// cleared. UDIS goes in AFTER the UG, a second store: with it standing
+    /// a UG is no update event and loads no shadow (RM 11.4.1's UDIS) -
+    /// asked for UDIS and a prescaler, the counter would run at the
+    /// previous PSC (measured, test_ch32_tim letter c). The start is
+    /// WRITTEN - 0, or
+    /// ATRLR for an edge-aligned down counter, what a UG gives a RUNNING
+    /// counter - because a UG on a stopped counter leaves the count where
+    /// it is (measured, the same letter): the first period after enable()
+    /// is a whole one either way.
     static bool configure(const TimConfig& c) {
         if (!config_valid(c)) {
             return false;
@@ -623,15 +632,17 @@ public:
         v |= static_cast<uint16_t>(static_cast<uint16_t>(c.clock_division) << 8);
         if (c.auto_reload_preload) { v |= tim_arpe; }
         if (c.one_pulse) { v |= tim_opm; }
-        if (c.update_disable) { v |= tim_udis; }
         if (c.update_on_overflow_only) { v |= tim_urs; }
         if (c.capture_level) { v |= tim_caplvl; }
         if (c.capture_overflow) { v |= tim_capov; }
         if (c.outputs_float_when_stopped) { v |= tim_oe_mode; }
         t.CTLR1 = v;
-        t.CNT = 0;
+        t.CNT = c.direction == TimDirection::down && c.alignment == TimAlignment::edge ? c.period : uint16_t{0};
         t.SWEVGR = tim_ug;
         clear_flags(tim_uif);
+        if (c.update_disable) {
+            t.CTLR1 = static_cast<uint16_t>(v | tim_udis);
+        }
         return true;
     }
 

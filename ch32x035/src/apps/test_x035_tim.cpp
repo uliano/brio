@@ -42,6 +42,18 @@
 //   e  the DMA requests: CCxDE on each channel of both timers and UDE,
 //      each match or update moving one item on the channel figure 9-1
 //      names, and a software update raising the update's request
+//   f  the time base's other modes, every interval between flags stamped
+//      on the STK: THE REPETITION COUNTER on both timers, edge-aligned and
+//      centre-aligned; CENTRE-ALIGNED counting's three compare-flag
+//      policies; THE DOWN COUNTER; UDIS - configure() asked for it, no
+//      update at an overflow, a PSC written meanwhile not taken, the next
+//      overflow after it is cleared; URS - UG loading the shadows with no
+//      UIF, an overflow still raising it
+//   g  TIM2'S OUTPUTS ON A PAD: C2N on PB12 - a header pin and nothing
+//      else - under TIM2_RM 101 and 110, forced levels, CC2NP and a
+//      toggle read off the pad. Both codes put channel 1's CH1 and C1N on
+//      the debug port (PC19, PC18): the letter never enables channel 1
+//      and never claims those pads
 //
 // THE SUPPLY at boot: the voltage detector at 3.0 V (pwr.hpp); an image
 // that drives a link pad from a sagging rail refuses every letter.
@@ -95,15 +107,17 @@ constexpr uint32_t pb1 = 1UL << 1;
 
 bool pad(uint32_t mask) { return (Port<'B'>::in() & mask) != 0u; }
 
-/// Everything back: both timers reset and gated off, the remap at its
-/// default, the three pads floating inputs.
+/// Everything back: both timers reset and gated off, both remap fields at
+/// their default, the four pads floating inputs.
 void all_off() {
     T1::release();
     T2::release();
     (void)T1::remap(0);
+    (void)T2::remap(0);
     Ch3Pad::release();
     C2nPad::release();
     C3nPad::release();
+    Pin<'B', 12>::release();
 }
 
 void settle() { (void)delay_us(clock, 5); }
@@ -698,6 +712,449 @@ void te_dma() {
 }
 
 
+// ---------------------------------------------------------------------------
+// f - the time base's other modes: the repetition counter, centre-aligned
+// counting, the down counter, UDIS and URS
+// ---------------------------------------------------------------------------
+
+/// THE BOUND OF EVERY INTERVAL BELOW. Both the timers and the STK count
+/// HCLK, so an interval between two flags is an exact number of counter
+/// clocks and what a stamp adds is its poll's LATENESS - from the flag's
+/// rise to the stamp after the poll saw it: at most one whole turn of
+/// wait_flag()'s loop (an INTFR read across the bus and Ticker::cycles()'s
+/// five reads, from a flash behind two wait states) with whatever vector
+/// lands in it - the tick's, the console being drained first - and then
+/// the stamp's own read, under one plain turn. An interval is the
+/// difference of two latenesses, so it is good to the largest turn plus
+/// the smallest. Both are MEASURED in this image, on this very loop
+/// waiting for a flag that never rises over three tick periods (a tick's
+/// vector lands in at least one turn of it), not assumed: a turn's cost
+/// is the layout's (docs/ch32x035/platform.md, a flash loop costs by its
+/// address mod 4).
+uint32_t stamp_slack_cycles = 0;
+
+bool near_cycles(uint32_t got, uint32_t want) {
+    return got + stamp_slack_cycles >= want && got <= want + stamp_slack_cycles;
+}
+
+void console_drain() {
+    while (!Serial::tx_idle()) {
+    }
+    (void)delay_us(clock, 200);   // the last byte's own time on the wire
+}
+
+/// Wait for a flag, bounded on the STK.
+template <typename T>
+bool wait_flag(uint16_t flag, uint32_t limit_us) {
+    const uint32_t c0 = Ticker::cycles();
+    while (!T::flag(flag)) {
+        if (Ticker::cycles() - c0 > limit_us * (SysClock::hz / 1'000'000u)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// n intervals between rises of a flag, in HCLK cycles on the STK, and the
+/// counter's direction read at each rise (dir[0] at the first).
+template <typename T, uint8_t n>
+bool flag_intervals(uint16_t flag, uint32_t (&gaps)[n], TimDirection (&dir)[n + 1u], uint32_t limit_us) {
+    T::clear_flags(flag);
+    if (!wait_flag<T>(flag, limit_us)) {
+        return false;
+    }
+    uint32_t last = Ticker::cycles();
+    dir[0] = T::direction();
+    T::clear_flags(flag);
+    for (uint8_t i = 0; i < n; ++i) {
+        if (!wait_flag<T>(flag, limit_us)) {
+            return false;
+        }
+        const uint32_t now = Ticker::cycles();
+        dir[i + 1u] = T::direction();
+        T::clear_flags(flag);
+        gaps[i] = now - last;
+        last = now;
+    }
+    return true;
+}
+
+constexpr uint32_t us_cycles = SysClock::hz / 1'000'000u;
+
+/// The largest and the smallest turn of wait_flag()'s loop over three tick
+/// periods, TIM1's CC4IF - a channel no letter sets - its flag: the
+/// timeout's own reads are the stamps.
+void measure_slack() {
+    T1::init();
+    T1::clear_flags(0xFFFFu);
+    uint32_t most = 0;
+    uint32_t least = 0xFFFF'FFFFu;
+    const uint32_t c0 = Ticker::cycles();
+    uint32_t last = c0;
+    while (!T1::flag(T1::compare_flag(3))) {
+        const uint32_t now = Ticker::cycles();
+        const uint32_t step = now - last;
+        last = now;
+        most = step > most ? step : most;
+        least = step != 0u && step < least ? step : least;
+        if (now - c0 > 3u * (SysClock::hz / 1000u)) {
+            break;
+        }
+    }
+    T1::release();
+    stamp_slack_cycles = most + least;
+    print(serial, "  the poll's turn: ", least, " cycles, ", most, " with the tick's vector in it - every interval "
+          "below good to ", stamp_slack_cycles, crlf);
+}
+
+/// THE REPETITION COUNTER (12.3.1, 12.4.13): one update in RPTCR + 1
+/// periods, edge-aligned at 100 us a period, and centre-aligned, where an
+/// overflow and an underflow each count (the counter climbs 0..ATRLR - 1
+/// and falls ATRLR..1, 12.3.1: 100 us from an overflow to the next
+/// underflow at ATRLR 100) - four intervals at each setting against
+/// (RPTCR + 1) x 100 us. Centre-aligned with RPTCR even the updates fall
+/// on overflows and underflows alternately, odd on one kind alone: the
+/// direction at each rise says which.
+template <typename T>
+uint8_t repetition_round(uint8_t& cases) {
+    struct Case {
+        TimAlignment align;
+        uint8_t rep;
+    };
+    constexpr Case table[] = {{TimAlignment::edge, 0},        {TimAlignment::edge, 1},
+                              {TimAlignment::edge, 4},        {TimAlignment::edge, 255},
+                              {TimAlignment::center_both, 0}, {TimAlignment::center_both, 1},
+                              {TimAlignment::center_both, 3}};
+    uint8_t exact = 0;
+    cases = 0;
+    for (const Case& c : table) {
+        ++cases;
+        T::init();
+        const uint16_t arr = c.align == TimAlignment::edge ? 99u : 100u;
+        (void)T::configure({.prescaler = 47, .period = arr, .alignment = c.align, .repetition = c.rep});
+        T::enable(true);
+        uint32_t gaps[4] = {};
+        TimDirection dir[5] = {};
+        const uint32_t per_event = (static_cast<uint32_t>(c.rep) + 1u) * 100u;   // microseconds
+        const bool got = flag_intervals<T, 4>(T::update_flag, gaps, dir, per_event + 100u);
+        T::enable(false);
+        bool ok = got && T::repetition() == c.rep;
+        for (const uint32_t g : gaps) {
+            ok = ok && near_cycles(g, per_event * us_cycles);
+        }
+        bool alternating = true;
+        bool same = true;
+        for (uint8_t i = 1; i < 5u; ++i) {
+            alternating = alternating && dir[i] != dir[i - 1u];
+            same = same && dir[i] == dir[0];
+        }
+        if (c.align != TimAlignment::edge) {
+            ok = ok && (c.rep % 2u == 0u ? alternating : same);
+        } else {
+            ok = ok && same && dir[0] == TimDirection::up;
+        }
+        if (ok) {
+            ++exact;
+        }
+        print(serial, "  TIM", T::instance, c.align == TimAlignment::edge ? " edge-aligned" : " centre-aligned",
+              ", RPTCR ", c.rep, ": updates ", gaps[0], " ", gaps[1], " ", gaps[2], " ", gaps[3],
+              " cycles apart against ", per_event * us_cycles,
+              c.align == TimAlignment::edge ? ""
+              : alternating                 ? ", directions alternating"
+              : same ? (dir[0] == TimDirection::down ? ", every one counting down (an overflow's)"
+                                                     : ", every one counting up (an underflow's)")
+                     : ", DIRECTIONS MIXED",
+              got ? "" : " (A FLAG DID NOT COME)", crlf);
+        T::release();
+    }
+    return exact;
+}
+
+/// CENTRE-ALIGNED COUNTING's three compare-flag policies (CTLR1.CMS,
+/// 12.4.1): the counter climbs 0..ATRLR and falls back, and the modes
+/// differ only in WHEN CC1IF rises - counting down (01), up (10) or both
+/// (11). At 1 MHz, ATRLR 500 and a compare of 200 the up-count meets 200
+/// at 200 us and the down-count at 800 us of each 1000: a flag a period
+/// apart in modes 1 and 2, the direction at each rise the mode's own, and
+/// in mode 3 gaps alternating 600 us (up to down: 300 + 300) and 400 (down
+/// to up: 200 + 200).
+bool centre_flags(TimAlignment mode, const char* name) {
+    T1::init();
+    (void)T1::configure({.prescaler = 47, .period = 500, .alignment = mode});
+    (void)T1::output_channel(0, {.mode = TimOutputMode::pwm1, .compare = 200, .enable = false});
+    T1::update();
+    T1::clear_flags(0xFFFFu);
+    T1::enable(true);
+    uint32_t gaps[6] = {};
+    TimDirection dir[7] = {};
+    const bool got = flag_intervals<T1, 6>(T1::compare_flag(0), gaps, dir, 2000);
+    T1::enable(false);
+    uint8_t ups = 0;
+    for (const TimDirection d : dir) {
+        ups = static_cast<uint8_t>(ups + (d == TimDirection::up ? 1u : 0u));
+    }
+    bool ok = got;
+    if (mode == TimAlignment::center_both) {
+        // Which half the first gap is depends on where the poll began: the
+        // gaps alternate, each the one its starting direction says.
+        for (uint8_t i = 0; i < 6u; ++i) {
+            const uint32_t want = dir[i] == TimDirection::up ? 600u * us_cycles : 400u * us_cycles;
+            ok = ok && near_cycles(gaps[i], want) && dir[i + 1u] != dir[i];
+        }
+    } else {
+        const TimDirection want_dir = mode == TimAlignment::center_down ? TimDirection::down : TimDirection::up;
+        for (uint8_t i = 0; i < 6u; ++i) {
+            ok = ok && near_cycles(gaps[i], 1000u * us_cycles);
+        }
+        for (const TimDirection d : dir) {
+            ok = ok && d == want_dir;
+        }
+    }
+    print(serial, "  ", name, ": CC1IF ", gaps[0] / us_cycles, " ", gaps[1] / us_cycles, " ", gaps[2] / us_cycles,
+          " ", gaps[3] / us_cycles, " ", gaps[4] / us_cycles, " ", gaps[5] / us_cycles, " us apart, ", ups,
+          " of 7 rises counting up", got ? "" : " (A FLAG DID NOT COME)", crlf);
+    T1::release();
+    return ok;
+}
+
+/// HCLK cycles a count x100, over about 100 us on the STK with interrupts
+/// masked, the counter counting either way and wrapping at its period: the
+/// counts in the window are taken modulo ATRLR + 1, so a window must hold
+/// fewer counts than a period (every caller's period is 1000 counts or
+/// more, the window 200 at most). Good to one count in the window - 1 %
+/// at 48 cycles a count, the bound the verdicts take (x100: 48 at PSC 47,
+/// 24 at PSC 23).
+template <typename T>
+uint32_t rate_x100() {
+    InterruptGuard guard;
+    const uint32_t wrap = static_cast<uint32_t>(T::period()) + 1u;
+    const uint16_t c0 = T::count();
+    const uint32_t s0 = stk_now();
+    while (stk_since(s0, stk_now()) < 4800u) {
+    }
+    const uint16_t c1 = T::count();
+    const uint32_t s1 = stk_now();
+    const uint32_t d = T::direction() == TimDirection::down ? (c0 + wrap - c1) % wrap : (c1 + wrap - c0) % wrap;
+    return d == 0u ? 0u : (100u * stk_since(s0, s1)) / d;
+}
+
+void tf_time_base() {
+    all_off();
+    console_drain();
+    measure_slack();
+    console_drain();
+    uint8_t cases = 0;
+    const uint8_t exact1 = repetition_round<T1>(cases);
+    console_drain();
+    const uint8_t exact2 = repetition_round<T2>(cases);
+    bench.verdict("THE REPETITION COUNTER, TIM1: one update in RPTCR + 1 periods - edge-aligned at 0, 1, 4 and 255, "
+                  "centre-aligned at 0, 1 and 3 with an overflow and an underflow counting one each, the "
+                  "directions alternating at an even RPTCR and alike at an odd one - every interval within the "
+                  "measured slack of the counts",
+                  exact1 == cases);
+    bench.verdict("TIM2's, the same seven settings, the same bound", exact2 == cases);
+
+    console_drain();
+    const bool m1 = centre_flags(TimAlignment::center_down, "mode 1 (CMS 01)");
+    const bool m2 = centre_flags(TimAlignment::center_up, "mode 2 (CMS 10)");
+    const bool m3 = centre_flags(TimAlignment::center_both, "mode 3 (CMS 11)");
+    bench.verdict("CENTRE-ALIGNED, the three compare-flag policies: CC1IF only counting down in mode 1, only "
+                  "counting up in mode 2, a period of 2 x ATRLR apart; on both in mode 3, the gaps alternating "
+                  "600 and 400 us - every gap within the slack",
+                  m1 && m2 && m3);
+
+    // THE DOWN COUNTER (DIR 1, edge-aligned): it falls to 0 and reloads
+    // with ATRLR, an underflow - and an update - every ATRLR + 1 counts,
+    // and a compare raises CC1IF once a period as on the way up; 1 ms a
+    // period. A UG reloads it with ATRLR (12.3.1: "the counter will start
+    // counting again from the current auto-reload value") WHILE IT RUNS,
+    // and a UG on a STOPPED counter leaves the count where it is, either
+    // way (measured) - so configure() writes the start itself: ATRLR here,
+    // and the first underflow comes a whole period after the enable.
+    T1::init();
+    (void)T1::configure({.prescaler = 47, .period = 999});
+    T1::set_count(500);
+    T1::update();
+    const uint16_t ug_up_stopped = T1::count();
+    (void)T1::configure({.prescaler = 47, .period = 999, .direction = TimDirection::down});
+    const uint16_t loaded = T1::count();
+    T1::clear_flags(T1::update_flag);
+    const uint32_t enabled_at = Ticker::cycles();
+    T1::enable(true);
+    const bool first_came = wait_flag<T1>(T1::update_flag, 1100);
+    const uint32_t first_after = Ticker::cycles() - enabled_at;
+    T1::set_count(500);
+    T1::update();
+    const uint16_t ug_running = T1::count();
+    T1::enable(false);
+    T1::set_count(500);
+    T1::update();
+    const uint16_t ug_stopped = T1::count();
+    (void)T1::output_channel(0, {.mode = TimOutputMode::frozen, .compare = 30, .preload = false, .enable = false});
+    T1::enable(true);
+    const uint32_t down_rate = rate_x100<T1>();
+    console_drain();
+    uint32_t ugaps[4] = {};
+    TimDirection udir[5] = {};
+    const bool ugot = flag_intervals<T1, 4>(T1::update_flag, ugaps, udir, 1100);
+    uint32_t cgaps[4] = {};
+    TimDirection cdir[5] = {};
+    const bool cgot = flag_intervals<T1, 4>(T1::compare_flag(0), cgaps, cdir, 1100);
+    T1::enable(false);
+    bool down_ok = ugot && cgot;
+    for (uint8_t i = 0; i < 4u; ++i) {
+        down_ok = down_ok && near_cycles(ugaps[i], 1000u * us_cycles) && near_cycles(cgaps[i], 1000u * us_cycles);
+    }
+    for (uint8_t i = 0; i < 5u; ++i) {
+        down_ok = down_ok && udir[i] == TimDirection::down && cdir[i] == TimDirection::down;
+    }
+    print(serial, "  down-counting: the counter at ", loaded, " after configure(); a UG from 500 leaves ",
+          ug_stopped, " stopped and ", ug_running, " running (", ug_up_stopped,
+          " stopped counting up); the first underflow ", first_after,
+          " cycles after the enable; ", down_rate,
+          " hundredths of a cycle a count downwards; updates ", ugaps[0], " ", ugaps[1], " ", ugaps[2], " ",
+          ugaps[3], " and CC1IF ", cgaps[0], " ", cgaps[1], " ", cgaps[2], " ", cgaps[3], " cycles apart against ",
+          1000u * us_cycles, crlf);
+    bench.verdict("A UG reloads a running down counter with ATRLR, and leaves a stopped counter's count alone "
+                  "counting either way",
+                  ug_running >= 990u && ug_running <= 999u && ug_stopped == 500u && ug_up_stopped == 500u);
+    bench.verdict("THE DOWN COUNTER: configure() starts it at ATRLR, the first underflow a whole period after "
+                  "the enable (within the slack and a count), the count falling at the prescaled rate",
+                  loaded == 999u && first_came &&
+                      near(static_cast<int32_t>(first_after), 48000, static_cast<int32_t>(stamp_slack_cycles + 48u)) &&
+                      near(static_cast<int32_t>(down_rate), 4800, 48));
+    bench.verdict("an underflow every ATRLR + 1 counts, a compare's flag once a period, the direction reading "
+                  "down - within the slack", down_ok);
+    T1::release();
+
+    // UDIS (12.4.1): the update event disabled - no UIF at an overflow and
+    // the shadows not loaded, until it is cleared. First what configure()
+    // leaves when it is asked for UDIS: its own UG must still have loaded
+    // the prescaler's shadow, or the counter runs at the reset's PSC 0.
+    // 1 ms a period at PSC 47; PSC 23 halves the count's length.
+    T1::init();
+    (void)T1::configure({.prescaler = 47, .period = 999, .update_disable = true});
+    T1::enable(true);
+    const uint32_t udis_rate = rate_x100<T1>();
+    T1::clear_flags(T1::update_flag);
+    (void)delay_us(clock, 900);   // the delays stay under a tick period (delay.hpp)
+    (void)delay_us(clock, 900);
+    (void)delay_us(clock, 900);
+    (void)delay_us(clock, 900);   // three overflows and more
+    const bool udis_quiet = !T1::flag(T1::update_flag);
+    T1::set_prescaler(23);
+    (void)delay_us(clock, 900);
+    (void)delay_us(clock, 900);   // at least one overflow: no update, so the shadow stays 47
+    const uint32_t udis_kept = rate_x100<T1>();
+    T1::regs().CTLR1 = static_cast<uint16_t>(T1::regs().CTLR1 & ~tim_udis);
+    const bool udis_cleared_flag = wait_flag<T1>(T1::update_flag, 1100);
+    const uint32_t after_udis = rate_x100<T1>();
+    T1::enable(false);
+    print(serial, "  UDIS: configure() asked for it - ", udis_rate, " hundredths of a cycle a count; UIF ",
+          udis_quiet ? "quiet" : "RAISED", " over three overflows; PSC 23 written: ", udis_kept,
+          "; UDIS cleared: UIF ", udis_cleared_flag ? "at the next overflow" : "NEVER", ", then ", after_udis, crlf);
+    bench.verdict("configure() with UDIS loads the prescaler all the same: the counter at PSC 47 counts one every "
+                  "48 cycles", near(static_cast<int32_t>(udis_rate), 4800, 48));
+    bench.verdict("UDIS set: no UIF at an overflow, and a PSC written meanwhile is not taken",
+                  udis_quiet && near(static_cast<int32_t>(udis_kept), 4800, 48));
+    bench.verdict("UDIS cleared: the next overflow raises UIF and takes the PSC written",
+                  udis_cleared_flag && near(static_cast<int32_t>(after_udis), 2400, 24));
+    T1::release();
+
+    // URS (12.4.1): with it set, UG updates - the shadows loaded - without
+    // raising UIF; an overflow still raises it.
+    T1::init();
+    (void)T1::configure({.prescaler = 47, .period = 999, .update_on_overflow_only = true});
+    T1::enable(true);
+    T1::clear_flags(T1::update_flag);
+    T1::set_prescaler(23);
+    T1::update();
+    const bool urs_ug_flag = T1::flag(T1::update_flag);
+    const uint32_t urs_rate = rate_x100<T1>();
+    uint32_t rgaps[2] = {};
+    TimDirection rdir[3] = {};
+    const bool rgot = flag_intervals<T1, 2>(T1::update_flag, rgaps, rdir, 700);
+    T1::enable(false);
+    print(serial, "  URS: UG raised UIF ", urs_ug_flag, ", the rate after it ", urs_rate,
+          " hundredths of a cycle a count; overflows ", rgaps[0], " ", rgaps[1], " cycles apart", crlf);
+    bench.verdict("URS set: UG raises no UIF but loads the shadows (PSC 23 taken: one count every 24 cycles)",
+                  !urs_ug_flag && near(static_cast<int32_t>(urs_rate), 2400, 24));
+    bench.verdict("and an overflow still raises UIF, a period of 1000 counts apart",
+                  rgot && near_cycles(rgaps[0], 500u * us_cycles) && near_cycles(rgaps[1], 500u * us_cycles));
+    all_off();
+}
+
+// ---------------------------------------------------------------------------
+// g - TIM2's outputs on a pad: C2N on PB12
+// ---------------------------------------------------------------------------
+using T2C2n5 = TimPad<afio_tim2_pads(5).ch2n>;
+using T2C2n6 = TimPad<afio_tim2_pads(6).ch2n>;
+static_assert(T2C2n5::selection == Pad{'B', 12} && T2C2n6::selection == Pad{'B', 12},
+              "TIM2_RM 101 and 11x put C2N on PB12");
+constexpr uint32_t pb12 = 1UL << 12;
+
+/// TIM2's C2N under one code: forced active and inactive on a running
+/// counter read off PB12, CC2NP inverting, and a free-running toggle's
+/// half period on the pad. Channel 1 - whose CH1 and C1N these codes put
+/// on the debug port's PC19 and PC18 - is never enabled, and its pads are
+/// never claimed (TimPad refuses them while the port is the probe's).
+template <typename Pad2>
+bool tim2_c2n(uint8_t code) {
+    T2::init();
+    const bool remapped = T2::remap(code);
+    (void)T2::configure({.prescaler = 47, .period = 0xFFFF});
+    (void)T2::output_channel(1, {.mode = TimOutputMode::force_active, .preload = false, .enable = false,
+                                 .complementary_enable = true});
+    T2::main_output(true);
+    T2::enable(true);
+    const bool claimed = Pad2::claim();
+    settle();
+    const bool high = pad(pb12);
+    (void)T2::output_mode(1, TimOutputMode::force_inactive);
+    settle();
+    const bool low = !pad(pb12);
+    (void)T2::output_channel(1, {.mode = TimOutputMode::force_active, .preload = false,
+                                 .complementary_active_low = true, .enable = false, .complementary_enable = true});
+    settle();
+    const bool inverted = !pad(pb12);
+    // A toggle at PSC 0 and a period of 1000: an edge every 1000 cycles.
+    T2::enable(false);
+    (void)T2::output_channel(1, {.mode = TimOutputMode::force_active, .preload = false, .enable = false,
+                                 .complementary_enable = true});
+    (void)T2::configure({.prescaler = 0, .period = 999});
+    (void)T2::set_compare(1, 500);
+    (void)T2::output_mode(1, TimOutputMode::toggle);
+    T2::enable(true);
+    const Sampled r = sample_port_b(samples_most);
+    T2::enable(false);
+    uint16_t at[12] = {};
+    const uint8_t k = edges_of(r, static_cast<uint16_t>(pb12), at, 12);
+    const uint32_t span = k >= 2u ? cycles_of(r, at[k - 1u]) - cycles_of(r, at[0]) : 0u;
+    const uint32_t per = k >= 2u ? span / (k - 1u) : 0u;
+    const bool ch1_off = !T2::channel_enabled(0) && !T2::complementary_enabled(0);
+    print(serial, "  TIM2_RM ", code, ": C2N on PB12 forced active ", high ? "high" : "LOW", ", inactive ",
+          low ? "low" : "HIGH", ", CC2NP ", inverted ? "low" : "HIGH", "; the toggle ", k, " edges ", per,
+          " cycles apart (1000 asked)", crlf);
+    Pad2::release();
+    T2::release();
+    (void)T2::remap(0);
+    return remapped && claimed && high && low && inverted && ch1_off && k >= 5u &&
+           near(static_cast<int32_t>(per), 1000, 5);
+}
+
+void tg_tim2_pad() {
+    all_off();
+    const bool code5 = tim2_c2n<T2C2n5>(5);
+    bench.verdict("TIM2_RM 101: C2N reaches PB12 - forced active high, inactive low, CC2NP inverting, a toggle "
+                  "an edge every 1000 cycles within 0.5 %",
+                  code5);
+    const bool code6 = tim2_c2n<T2C2n6>(6);
+    bench.verdict("TIM2_RM 110: the same on the same pad", code6);
+    bench.verdict("and the remap field back at 000, the debug port the probe's",
+                  T2::remap() == 0u && Afio::debug_port_enabled());
+    all_off();
+}
+
 void banner() {
     print(serial, crlf, "test_x035_tim on ", device::part_name, " - the advanced-control timers", crlf, crlf);
     print(serial, "  supply at boot: ", supply_ok ? "above 3.0 V" : "UNDER 3.0 V, every letter refused",
@@ -727,6 +1184,8 @@ int main() {
     bench.letter('c', "the toggle, and an edge list streamed by DMA", tc_toggle);
     bench.letter('d', "one pulse, and the match modes", td_one_pulse);
     bench.letter('e', "the DMA requests of both timers, figure 9-1", te_dma);
+    bench.letter('f', "the time base: repetition, centre-aligned, down, UDIS, URS", tf_time_base);
+    bench.letter('g', "TIM2's outputs on a pad: C2N on PB12", tg_tim2_pad);
 
     if (serial_ok) {
         brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "HSI48" : "FAILED", " tick=",

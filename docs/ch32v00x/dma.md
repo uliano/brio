@@ -325,6 +325,25 @@ and i and letter d's writes measured on the CH32V006K8U6:
   on the ticker's cycle count from the first byte handed over to
   `tx_idle()`): 272 frames at 115200 in 1001 thousandths of their wire
   time on both parts ([usart.md](usart.md)).
+- **The costs in time** (`bench_ch32` letters d and s on the
+  CH32V006K8U6, each line from the launch to the completion interrupt):
+  a copy 6.0 cycles an item of four bytes, a copy from the flash and a
+  fill 8.0, the controller's own rate; a block's fixed cost 503 to 512
+  cycles in the image of seven letters and 381 to 393 in a scratch one
+  of three - the same code, so the figure is its image's layout as much
+  as its own; a block of 256 words paced by TIM1's update at 10 kHz
+  1.00 of its pace, the intervals 4794 to 4812 cycles against 4800 as a
+  polling core sees them. The SPI host's engined write at the wire,
+  32.0 and 128.0 cycles a byte at HCLK/4 and HCLK/16 in both widths,
+  846 to 852 cycles a transaction above it - some 360 of them the
+  bench's own instrument and some 500 the host's, the split
+  [spi.md](spi.md) gives ("The engines against the pump"). Stamps
+  placed in a scratch build put the launch at 587 cycles with two of
+  the ruler's reads (41 to 48 each) and the request's construction
+  inside - `start()`'s write path, `launch_dma()` and `launch_beats()`,
+  some 125 instructions where the count above takes `launch_beats()`'s
+  59 -, the completion vector's body at some 145 cycles, and its exit
+  and the wake from `idle()` at some 100.
 - **`DmaCopyEngine`** (letter g, both parts): copy and fill at the
   three beats, polled and by its own interrupt, exact; a half-word run
   off its boundary, a count of zero or over CNTR's and a block on a
@@ -403,15 +422,6 @@ Implemented but not bench-verified, each with what would measure it:
 - **The I2C host's engines on the CH32V003F4P6**: `test_ch32_i2c`
   letter g in its group image against a peer, which that board's desk
   has not got (on the CH32V006K8U6 the letter is green, above).
-- **The costs in time**: `bench_ch32`'s letter d - copy, fill and
-  copy from flash at three sizes with the controller's cycles an item
-  and the fixed cost a block, a block of 256 words paced by TIM1's
-  update at 10 kHz with its interrupts, busy and the pace's jitter -
-  and its letter s, the SPI host's engined write of 16 and 256 frames of 8 and 16
-  bits at HCLK/4 and HCLK/16 with MISO floating, the fixed cost a
-  transaction against the listing's count above (about 350 cycles at
-  the core's two and a half a straight-line instruction, the launch
-  and the one vector).
 - **The transfer-error path** (TEIE, the engines' `abandon()` and the
   fault counters): written from 8.2.1 and provoked by nothing the bench
   found - reads and writes of five holes in the map and writes into the
