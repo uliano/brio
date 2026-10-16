@@ -273,18 +273,36 @@ the PLL, the prescalers and the ticker's reload all followed:
 |---|---|---|---|---|
 | 180 MHz | 45 / 90 MHz | 5 | scale 1 + over-drive | 99975 us (250 ppm fast) |
 | 168 MHz | 42 / 84 MHz | 5 | scale 1 | 100006 us (60 ppm slow) |
+| 144 MHz | 36 / 72 MHz | 4 | **scale 2** | 100006 us (60 ppm slow) |
 | 120 MHz | 30 / 60 MHz | 3 | scale 3 | 100006 us (60 ppm slow) |
+| 96 MHz, **the PLL fed by the HSI** | 24 / 48 MHz | 3 | scale 3 | 99578 us (4220 ppm fast) |
 | 84 MHz | 42 / 84 MHz | 2 | scale 3 | 100006 us (60 ppm slow) |
 | 48 MHz | 24 / 48 MHz | 1 | scale 3 | 100006 us (60 ppm slow) |
 | 16 MHz HSI | 16 / 16 MHz | 0 | scale 3 | 99548 us (4520 ppm fast) |
 
-The five HSE-rooted rates land within 250 ppm of the crystal; the HSI is
-4520 ppm fast, which is an RC oscillator inside its own specification
-and not a defect. A switch costs **111 us in either direction**, six
-switches each way, and the two are equal because the park on the HSI is
-what dominates both. No APB was ever left above its ceiling, and the
+The HSE-rooted rates land within 250 ppm of the crystal; the HSI is
+3910..4520 ppm fast, which is an RC oscillator inside its own
+specification (DS10693 table 41) and not a defect, and the PLL it feeds
+at 96 MHz carries the same error (4220 ppm) - the one rate of the pack
+rooted there. **144 MHz is the pack's rate in regulator scale 2**
+(RM0390 3.4.1 note: scale 3 to 120 MHz, scale 2 to 144), between scale 1
+above it and scale 3 below, ten runs of letter `f` of
+`test_stm32f4_power`. A switch costs **106..114 us**, the park on the
+HSI dominating both directions. No APB was ever left above its ceiling, and the
 console spoke at every rate - the verdict lines themselves are that
 evidence.
+
+**THE ART ACCELERATOR'S SWITCHES, EACH TIMED** (`test_stm32f4_flash`
+letter `m`, 180 MHz, 5 WS, interrupts masked): a flash-resident loop of
+2048 rotate-and-xor rounds over a 32-word table in the flash costs 21656
+cycles with everything on, **35550 with the I-cache off**, 39601 with the
+prefetch off as well; a loop that only sums the same table costs 8071 on,
+**10591 with the D-cache off** (+31 %) and 16193 with all three off. The
+round loop does NOT see the D-cache at all - its dependent chain of some
+ten cycles a word hides the uncached loads. With both caches off the two
+resets are taken (and refused with a cache on), and they leave the
+caches COLD: the first call after them 21670 cycles, the second 21643,
+ten runs of ten.
 
 ## Not covered yet
 
@@ -307,11 +325,8 @@ Driver gaps:
 
 Implemented, not bench-verified: `Rcc::css`, `mco1`/`mco2` (no pad
 driven, no counter on the other end), `ahb2_clock`/`ahb3_clock` and the
-reset pulses (no driver on those buses yet), `FlashAccel`'s individual
-setters and the cache resets (`enable_all` is what runs), `Pwr::scale`
-at scale 2 (the dynamic pack's rates land on scale 1 and scale 3 - no
-rate between 120 and 144 MHz was named), the one-bit VOS path of the
-F405 class (compiled on its headers, no board), `Clock<hse>` undivided
-at run time (compiled everywhere, never flashed - the boards run the
-PLL or the HSI), and a PLL from HSI (`pll_hsi`; the boards' roots are
-their HSEs).
+reset pulses (no driver on those buses yet), the one-bit VOS path of
+the F405 class (compiled on its headers, no board), and `Clock<hse>`
+undivided at run time (compiled everywhere, never flashed - the boards
+run the PLL or the HSI). Scale 2 and the PLL from the HSI are measured
+on the STM32F446 alone (the other packs name neither).

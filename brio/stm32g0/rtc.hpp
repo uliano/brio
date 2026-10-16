@@ -1428,9 +1428,18 @@ struct Rtc {
      * periods - three SECONDS at the usual rate, which is why the bound
      * here is generous and why this verb is not something to call in a
      * loop.
+     *
+     * REFUSED FOR CALP WHILE PREDIV_A IS UNDER 3: 30.3.13's "Calibration
+     * when PREDIV_A < 3" - the bit "can not be set to 1" then, and the
+     * store drops it in silence (measured on the STM32F446's twin block,
+     * docs/stm32f4/rtc.md, and refused here on the same sentence). The
+     * chapter's way round it is a shorter PREDIV_S, the caller's to choose.
      */
     static bool calibrate(const RtcCalibration& c) {
         if (!rtc_calibration_valid(c)) {
+            return false;
+        }
+        if (c.plus && prescalers().async < 3u) {
             return false;
         }
         for (uint32_t i = 0; i < sync_spins; ++i) {

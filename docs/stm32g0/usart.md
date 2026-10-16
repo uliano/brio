@@ -1608,9 +1608,9 @@ Implemented, not bench-verified:
 - `usart_peer` on the STM32G071RB: built, never run (not on the desk).
 - The receive ring on the STM32G031K8: `test_stm32_dma`'s letter `o` is
   built for it and has not run there (the board is not on the desk); one
-  run of the suite measures it. The ring under an `LpUart`, its kick
-  included, is the same task's and compile-only, as the LPUART's engine
-  slots are ([lpuart.md](lpuart.md)).
+  run of the suite measures it. The ring under an `LpUart` runs
+  (`test_stm32_dma` letter `x`); its kick is read, not measured
+  ([lpuart.md](lpuart.md)).
 - The wake from Stop on any instance but USART1 and USART2 (and the
   LPUARTs, docs/stm32g0/lpuart.md).
 - The FIFO default on the STM32G031K8, and with it the paced receiver

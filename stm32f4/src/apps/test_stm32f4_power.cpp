@@ -140,13 +140,20 @@ using R4 = Clock<ClockSource::pll_hse, 48'000'000, 8'000'000>;
 using R5 = Clock<ClockSource::hsi, 16'000'000>;
 using RatePack = Rates<R0, R1, R2, R3, R4, R5>;
 #else
+// Two rungs the other packs have not: 144 MHz, the one rate of the pack
+// in regulator scale 2's band (RM0390 3.4.1 note: scale 3 to 120 MHz, scale 2
+// to 144), and 96 MHz from the PLL FED BY THE HSI - the root no board's
+// boot rate uses.
 using R0 = Clock<ClockSource::pll_hse, 180'000'000, 8'000'000, HseMode::bypass>;
 using R1 = Clock<ClockSource::pll_hse, 168'000'000, 8'000'000, HseMode::bypass>;
+using R1a = Clock<ClockSource::pll_hse, 144'000'000, 8'000'000, HseMode::bypass>;
 using R2 = Clock<ClockSource::pll_hse, 120'000'000, 8'000'000, HseMode::bypass>;
+using R2a = Clock<ClockSource::pll_hsi, 96'000'000>;
 using R3 = Clock<ClockSource::pll_hse, 84'000'000, 8'000'000, HseMode::bypass>;
 using R4 = Clock<ClockSource::pll_hse, 48'000'000, 8'000'000, HseMode::bypass>;
 using R5 = Clock<ClockSource::hsi, 16'000'000>;
-using RatePack = Rates<R0, R1, R2, R3, R4, R5>;
+using RatePack = Rates<R0, R1, R1a, R2, R2a, R3, R4, R5>;
+#define POWER_SCALE2_AND_PLL_HSI 1
 #endif
 
 using SysClock = DynamicClock<RatePack, Ticker, Serial>;
@@ -814,6 +821,10 @@ void tf_ladder() {
     uint32_t down_us = 0;
 
     constexpr SysclkLadder ladder = sysclk_ladder();
+#if defined(POWER_SCALE2_AND_PLL_HSI)
+    uint8_t scale_at[16] = {};
+    uint32_t ppm_at[16] = {};
+#endif
 
     // Down the pack (the pack is ordered top rate first), then up again.
     for (uint8_t i = 0; i < SysClock::rate_count; ++i) {
@@ -827,7 +838,16 @@ void tf_ladder() {
         const uint32_t want = 100'000u;
         const int32_t err = static_cast<int32_t>(measured) - static_cast<int32_t>(want);
         const uint32_t ppm = static_cast<uint32_t>(err < 0 ? -err : err) * 10u;
+#if defined(POWER_SCALE2_AND_PLL_HSI)
+        const bool hsi_rooted = SysClock::rate_source(i) == SysclkSource::hsi ||
+                                SysClock::rate_hz(i) == R2a::hz;
+#else
         const bool hsi_rooted = SysClock::rate_source(i) == SysclkSource::hsi;
+#endif
+#if defined(POWER_SCALE2_AND_PLL_HSI)
+        scale_at[i] = static_cast<uint8_t>(Pwr::scale());
+        ppm_at[i] = ppm;
+#endif
         print(serial, "  rate ", static_cast<uint32_t>(i), ": ", SysClock::hz(),
               " Hz (PCLK1 ", SysClock::pclk1_hz(), ", PCLK2 ", SysClock::pclk2_hz(),
               ", ", static_cast<uint32_t>(FlashWaitStates::get()), " WS, scale ",
@@ -882,6 +902,21 @@ void tf_ladder() {
                   clock_follows<SysClock, Serial>() && clock_follows<SysClock, Ticker>());
     bench.verdict("the ladder ended where it started",
                   SysClock::rate_index() == start && SysClock::hz() == SysClock::rate_hz(start));
+#if defined(POWER_SCALE2_AND_PLL_HSI)
+    // The two rungs only this pack has, by their index in it.
+    constexpr uint8_t i144 = 2;
+    constexpr uint8_t i96 = 4;
+    static_assert(SysClock::rate_hz(i144) == 144'000'000u && SysClock::rate_hz(i96) == 96'000'000u);
+    print(serial, "  144 MHz ran at scale ", scale_at[i144], " (", ppm_at[i144],
+          " ppm); 96 MHz from the HSI-fed PLL at scale ", scale_at[i96], " (", ppm_at[i96],
+          " ppm against the crystal's wall)", crlf);
+    bench.verdict("REGULATOR SCALE 2 is what 144 MHz runs at - the one rate of the pack in "
+                  "its band - between scale 1 above it and scale 3 below",
+                  scale_at[i144] == 2u && scale_at[i144 - 1u] == 1u && scale_at[i144 + 1u] == 3u);
+    bench.verdict("THE PLL FED BY THE HSI runs the core at 96 MHz, within the HSI's "
+                  "own accuracy (DS10693 table 41: 4 % from -10 to 85 C, the band above)",
+                  ppm_at[i96] <= 40'000u && SysClock::rate_source(i96) == SysclkSource::pll);
+#endif
 
     // The rate a program NAMES rather than indexes.
     bench.verdict("set(hz) finds a rate by its number",

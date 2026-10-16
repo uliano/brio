@@ -300,6 +300,14 @@ keeps converting the old datum, exactly as 14.3.7 says. `stop_dma()`
 clears the flag and drops both DMAENx and the channel enable, which is
 the DAC's half of the errata's stop sequence.
 
+**THE UNDERRUN INTERRUPT, on TIM6's line** (letter `s`): channel 1
+DMA-enabled on TIM6's TRGO at 10 kHz with NO stream serving it - every
+trigger after the first is an underrun, **21 entries of the shared
+vector in 2..3 ms of triggers**, ten runs of ten, each flag cleared by
+`isr()`. DMAENx STAYS SET through an underrun (each trigger re-raises
+the flag the body cleared): it is `stop_dma()` that drops it, as the
+spent-stream finding above shows from the other side.
+
 **Every refusal the driver makes was exercised**: a wave generator
 without a trigger, a DMA request off the software trigger, an amplitude
 past four bits, and a channel the part has not got.
@@ -333,9 +341,9 @@ Implemented, not bench-verified:
 
 - **The dual left-aligned and dual 8-bit registers**: written and
   compiled; the right-aligned dual one is what the suite measures.
-- **The underrun INTERRUPT.** The flag is raised, read and cleared here;
-  the vector is TIM6's too and the suite binds no handler for it.
 - **ES0206 2.6.2 / ES0298 2.7.2** (the underrun flag lost when an
   internal trigger lands on the acknowledge cycle): it needs software and
   hardware triggers used together on one channel, which no letter here
   does - and it has no workaround to verify anyway.
+- Letter `s`'s underrun leg on the STM32F429 and the STM32F469: their
+  boards are not on the desk.

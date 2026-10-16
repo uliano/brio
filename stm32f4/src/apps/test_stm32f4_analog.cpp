@@ -95,6 +95,9 @@
 //      same four with nobody taking them
 //   r  the DAC's DMA: a table played by a hardware trigger, and the
 //      underrun a spent stream leaves behind
+//   s  every timer trigger code of both tables on its timer's event, the
+//      falling and both-edge senses, the watchdog INTERRUPT, and the
+//      DAC's underrun INTERRUPT on TIM6's shared line
 //
 // build: boards = f429zi,f446re,f411ce,f469ni
 // build: monitor_speed = 115200
@@ -119,6 +122,7 @@
 #include "stm32f4/pin.hpp"
 #include "stm32f4/platform.hpp"
 #include "stm32f4/ticker.hpp"
+#include "stm32f4/tim.hpp"
 #include "stm32f4/usart.hpp"
 #include "util/analog.hpp"
 #include "util/analog_sampler.hpp"
@@ -2152,6 +2156,267 @@ void banner() {
     bench.menu();
 }
 
+// =============================================================================
+// s - the timer trigger codes, the edges, and the two interrupts
+// =============================================================================
+//
+// THE TIMERS THE CODES NAME, each brought up as a 10 kHz source: a 1 MHz
+// count on its own bus clock, ARR 99, and either TRGO on the update or
+// its channel in PWM mode 1 at a compare of 50 (MOE raised on the two
+// advanced-control timers). TIM8 is named through an alias whose number
+// depends on its presence - `Tim<8>` written down on an STM32F411 would be
+// a static_assert even where nothing calls it.
+volatile uint16_t awd_irqs = 0;
+volatile uint16_t dac_udr_irqs = 0;
+
+using SrcT8 = Tim<tim_present(8) ? uint8_t{8} : uint8_t{2}>;
+
+template <class T>
+bool source_up(uint8_t ch) {
+    T::init();
+    const uint16_t psc = static_cast<uint16_t>(T::clock_hz(clock) / 1'000'000u - 1u);
+    if (!T::configure({.prescaler = psc, .period = 99})) {
+        return false;
+    }
+    if (ch == 0u) {
+        if (!T::master(TimMasterMode::update)) {
+            return false;
+        }
+    } else if (!T::output_channel(static_cast<uint8_t>(ch - 1u),
+                                  {.mode = TimOutputMode::pwm1, .compare = 50})) {
+        return false;
+    }
+    if constexpr (T::has_break) {
+        (void)T::main_output(true);
+    }
+    T::enable(true);
+    return true;
+}
+
+bool source_on(uint8_t tim, uint8_t ch) {
+    switch (tim) {
+        case 1: return source_up<Tim<1>>(ch);
+        case 2: return source_up<Tim<2>>(ch);
+        case 3: return source_up<Tim<3>>(ch);
+        case 4: return source_up<Tim<4>>(ch);
+        case 5: return source_up<Tim<5>>(ch);
+        case 8: return tim_present(8) && source_up<SrcT8>(ch);
+        default: return false;
+    }
+}
+
+void sources_off() {
+    Tim<1>::release();
+    Tim<2>::release();
+    Tim<3>::release();
+    Tim<4>::release();
+    Tim<5>::release();
+    if constexpr (tim_present(8)) {
+        SrcT8::release();
+    }
+}
+
+/// `ms` kernel ticks - delay_us() refuses a wait of a SysTick period or
+/// more, so a millisecond is waited on the tick.
+void wait_ms(uint32_t ms) {
+    const uint32_t t0 = Ticker::ticks();
+    while (Ticker::ticks() - t0 <= ms) {
+    }
+}
+
+/// Conversions counted in a 10 ms window, regular (EOC) or injected (JEOC).
+uint32_t count_conversions(bool injected) {
+    uint32_t n = 0;
+    const uint32_t t0 = Ticker::ticks();
+    while (Ticker::ticks() - t0 < 10u) {
+        if (injected) {
+            if (Adc1::injected_ready()) {
+                Adc1::clear_flags(AdcFlag::injected_converted);
+                ++n;
+            }
+        } else if (Adc1::ready()) {
+            (void)Adc1::result();   // reading DR is what clears EOC
+            ++n;
+        }
+    }
+    return n;
+}
+
+void ts_triggers_and_interrupts() {
+    // Each code: which timer, which channel (0 = TRGO) - tables 71 and 72
+    // (RM0390 13.13.3 EXTSEL, 13.13.3 JEXTSEL), the order of the enums.
+    struct Src {
+        uint8_t tim, ch;
+    };
+    static constexpr Src regular[15] = {{1, 1}, {1, 2}, {1, 3}, {2, 2}, {2, 3},
+                                        {2, 4}, {2, 0}, {3, 1}, {3, 0}, {4, 4},
+                                        {5, 1}, {5, 2}, {5, 3}, {8, 1}, {8, 0}};
+    static constexpr Src injected[15] = {{1, 4}, {1, 0}, {2, 1}, {2, 0}, {3, 2},
+                                         {3, 4}, {4, 1}, {4, 2}, {4, 3}, {4, 0},
+                                         {5, 4}, {5, 0}, {8, 2}, {8, 3}, {8, 4}};
+    static uint8_t one[1] = {0};
+    one[0] = adc_input_channel(AdcInput::vrefint);
+    // 10 kHz of triggers for 10 ms: 100 conversions, +-1 for the window's
+    // phase; a VREFINT conversion at 480 cycles of the ADC clock is some
+    // 22 us, well inside the 100 us between triggers.
+    bool reg_ok = true, inj_ok = true;
+    uint8_t reg_seen = 0, inj_seen = 0;
+    // NOTHING IS PRINTED WHILE A WINDOW RUNS: the counts are kept and
+    // printed after both tables, and the first window waits 20 ms past
+    // console_drain(). MEASURED, NOT EXPLAINED: right behind the letter's
+    // header line - drained or not - the first window counted 91..98 of
+    // 100 where every later one read 99..100, and 20 ms of quiet more
+    // gives it 99 too. What the console's tail costs the polling loop
+    // was not chased.
+    uint32_t reg_n[15] = {}, inj_n[15] = {};
+    console_drain();
+    wait_ms(20);
+    for (uint8_t code = 0; code < 15u; ++code) {
+        const Src src = regular[code];
+        if (!tim_present(src.tim)) {
+            continue;
+        }
+        AdcConfig c = base_config();
+        c.trigger = static_cast<AdcTrigger>(code);
+        c.trigger_edge = AdcEdge::rising;
+        const bool up = adc_up(c);
+        AdcCommon::internal_sources(true);
+        Adc1::select(AdcInput::vrefint);
+        const bool src_up = source_on(src.tim, src.ch);
+        reg_n[code] = count_conversions(false);
+        sources_off();
+        reg_ok = reg_ok && up && src_up && reg_n[code] >= 99u && reg_n[code] <= 101u;
+        ++reg_seen;
+    }
+    for (uint8_t code = 0; code < 15u; ++code) {
+        const Src src = injected[code];
+        if (!tim_present(src.tim)) {
+            continue;
+        }
+        AdcConfig c = base_config();
+        c.injected_trigger = static_cast<AdcInjectedTrigger>(code);
+        c.injected_trigger_edge = AdcEdge::rising;
+        const bool up = adc_up(c);
+        AdcCommon::internal_sources(true);
+        (void)Adc1::injected_sequence(one, 1);
+        const bool src_up = source_on(src.tim, src.ch);
+        inj_n[code] = count_conversions(true);
+        sources_off();
+        inj_ok = inj_ok && up && src_up && inj_n[code] >= 99u && inj_n[code] <= 101u;
+        ++inj_seen;
+    }
+    print(serial, "  regular codes 0..14:");
+    for (const uint32_t n : reg_n) {
+        print(serial, " ", n);
+    }
+    print(serial, crlf, "  injected codes 0..14:");
+    for (const uint32_t n : inj_n) {
+        print(serial, " ", n);
+    }
+    print(serial, " (0: the timer is absent)", crlf);
+    bench.verdict("EVERY REGULAR TIMER TRIGGER CODE of table 71 starts a conversion on "
+                  "its timer's event: 100 conversions for 100 events, each code",
+                  reg_ok && reg_seen > 0u);
+    bench.verdict("and every INJECTED one of table 72", inj_ok && inj_seen > 0u);
+
+    // --- THE EDGES on one source: TIM2's TRGO made its channel-1 PWM
+    // (OC1REF, MMS 100) at 50 % - two edges 50 us apart each period, so a
+    // conversion can finish between them: rising 100, falling 100, both 200.
+    uint32_t by_edge[3] = {};
+    const AdcEdge edges[3] = {AdcEdge::rising, AdcEdge::falling, AdcEdge::both};
+    console_drain();
+    wait_ms(20);   // the same quiet the tables' first window needed
+    for (uint8_t e = 0; e < 3u; ++e) {
+        AdcConfig c = base_config();
+        c.trigger = AdcTrigger::tim2_trgo;
+        c.trigger_edge = edges[e];
+        (void)adc_up(c, AdcSampleTime::cycles56);
+        AdcCommon::internal_sources(true);
+        Adc1::select(AdcInput::vrefint);
+        (void)source_on(2, 1);
+        (void)Tim<2>::master(TimMasterMode::oc1ref);
+        by_edge[e] = count_conversions(false);
+        sources_off();
+    }
+    print(serial, "  TIM2's OC1REF as TRGO at 10 kHz, 10 ms: rising ", by_edge[0],
+          ", falling ", by_edge[1], ", both ", by_edge[2], crlf);
+    bench.verdict("the trigger's EDGE is chosen: falling converts once a period as "
+                  "rising does, and both twice",
+                  by_edge[0] >= 99u && by_edge[0] <= 101u && by_edge[1] >= 99u &&
+                      by_edge[1] <= 101u && by_edge[2] >= 198u && by_edge[2] <= 202u);
+
+    // --- THE WATCHDOG INTERRUPT: VREFINT (about 1500 counts) guarded by
+    // a window it is above, five software conversions, the ADC vector
+    // counting AWD.
+    (void)adc_up(base_config());
+    AdcCommon::internal_sources(true);
+    const uint8_t vref_ch = adc_input_channel(AdcInput::vrefint);
+    (void)Adc1::select_channel(vref_ch);
+    (void)delay_us(clock, 20);
+    const bool armed = Adc1::watchdog(0, 100, true, false, true, vref_ch);
+    awd_irqs = 0;
+    Adc1::clear_flags(AdcFlag::all);
+    Adc1::interrupts(AdcFlag::watchdog, true);
+    Nvic::clear_pending(Adc1::irq());
+    Nvic::enable(Adc1::irq());
+    for (uint8_t k = 0; k < 5u; ++k) {
+        (void)Adc1::read();
+        (void)delay_us(clock, 50);
+    }
+    Nvic::disable(Adc1::irq());
+    Adc1::interrupts(AdcFlag::watchdog, false);
+    print(serial, "  five conversions above a [0, 100] window: ", awd_irqs,
+          " watchdog interrupts", crlf);
+    bench.verdict("THE WATCHDOG INTERRUPT: one entry per conversion out of the window, "
+                  "on the vector every converter shares",
+                  armed && awd_irqs == 5u);
+    analog_down();
+
+#if defined(DAC_BASE)
+    // --- THE DAC UNDERRUN INTERRUPT: channel 1 DMA-enabled on TIM6's
+    // TRGO with NO stream serving it, so the second trigger is an underrun
+    // (14.3.8); the vector is TIM6's too, and its body asks the DAC.
+    Dac::init();
+    Dac::claim_pad<Pa4>();
+    DacChannelConfig cfg{};
+    cfg.triggered = true;
+    cfg.trigger = DacTrigger::tim6_trgo;
+    cfg.dma = true;
+    cfg.underrun_interrupt = true;
+    const bool dac_cfg = Dac::configure(dac_ch_pa4, cfg) && Dac::enable(dac_ch_pa4, true);
+    dac_udr_irqs = 0;
+    Nvic::clear_pending(Dac::irq());
+    Nvic::enable(Dac::irq());
+    using T6 = Tim<6>;
+    T6::init();
+    const bool t6_up =
+        T6::configure({.prescaler = static_cast<uint16_t>(T6::clock_hz(clock) / 1'000'000u - 1u),
+                       .period = 99}) &&
+        T6::master(TimMasterMode::update);
+    T6::enable(true);
+    wait_ms(2);   // some twenty triggers
+    T6::enable(false);
+    Nvic::disable(Dac::irq());
+    const bool flag_left = Dac::underrun(dac_ch_pa4);
+    print(serial, "  TIM6's TRGO on a DMA-enabled channel with no stream: ", dac_udr_irqs,
+          " underrun interrupt(s), the flag ", flag_left ? "STANDING" : "cleared by the body",
+          crlf);
+    // EVERY TRIGGER AFTER THE FIRST: the first raised a request nobody
+    // acknowledges, and DMAENx STAYS SET through an underrun (measured -
+    // it is stop_dma() that drops it), so each later trigger is an
+    // underrun of its own, and the body's clearing re-arms the flag for
+    // it. wait_ms(2) is 2..3 ms of 10 kHz triggers: 20..30, so 19..29
+    // underruns, one either side for the window's phase.
+    bench.verdict("THE DAC UNDERRUN INTERRUPT: with no stream every trigger after the "
+                  "first is an underrun, each entering TIM6's shared vector, its flag "
+                  "cleared by the body",
+                  dac_cfg && t6_up && dac_udr_irqs >= 18u && dac_udr_irqs <= 30u &&
+                      !flag_left);
+    T6::release();
+    analog_down();
+#endif
+}
+
 } // namespace
 
 // ---- target glue --------------------------------------------------------------
@@ -2198,7 +2463,19 @@ extern "C" void ADC_IRQHandler() {
     if (kernel_mode && (hit & brio::AdcFlag::converted) != 0u) {
         brio::post<Sampler>(brio::Sampled{Adc1::result(), Adc1::selected()});
     }
+    if ((hit & brio::AdcFlag::watchdog) != 0u) {
+        awd_irqs = awd_irqs + 1u;   // letter s
+    }
 }
+
+#if defined(DAC_BASE)
+/// TIM6's line, the DAC's underrun beside it: letter s arms the DAC's half.
+extern "C" void TIM6_DAC_IRQHandler() {
+    if (brio::Dac::isr() != 0u) {
+        dac_udr_irqs = dac_udr_irqs + 1u;
+    }
+}
+#endif
 
 int main() {
     const bool clock_ok = SysClock::init();
@@ -2224,6 +2501,8 @@ int main() {
     bench.letter('p', "AnalogSampler inside a real kernel", tp_sampler);
     bench.letter('q', "the ADC's DMA: a scan of four channels into memory", tq_adc_dma);
     bench.letter('r', "the DAC's DMA: a table played by a hardware trigger", tr_dac_dma);
+    bench.letter('s', "the timer trigger codes, the edges, the two interrupts",
+                 ts_triggers_and_interrupts);
 
     if (serial_ok) {
         brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "PLL" : "FAILED", " tick=",

@@ -69,6 +69,9 @@
 //      afterwards (ES0287 2.2.10)
 //   n  the timestamp on RTC_AF1, and what this board can and cannot
 //      stage on that pad with no wire
+//   o  the 8- and 16-second calibration cycles weighed, alarm A's hour,
+//      date and weekday matches (the calendar set three seconds short of
+//      each), and the alarm output inverted and in open drain
 //
 //   v  (by name only) THE SURVIVAL LETTER. Writes a token into the backup
 //      registers, and on its next run - after a system reset, which a
@@ -144,7 +147,7 @@ using RtcPad = Pin<rtc_af1_port, rtc_af1_pin>;
 using Serial = Uart<console_instance, console_pins>;
 constexpr Serial serial;
 
-TestBench<Serial> bench;
+TestBench<Serial, 20> bench;
 
 // The nominal crystal: the board file's fact, not the driver's.
 constexpr uint32_t lse_nominal_hz = 32768;
@@ -843,6 +846,21 @@ void th_init_erratum() {
 // =============================================================================
 // i - smooth calibration, measured
 // =============================================================================
+/// The reset prescalers (PREDIV_A 127, PREDIV_S 255) back in the domain,
+/// the time kept: letters that need them - the CALP calibration (17.3.11:
+/// not with PREDIV_A under 3) and the two calibration outputs - set them
+/// rather than inherit whatever a program before them left in a domain
+/// no reset touches. MEASURED: a domain found at PREDIV_A 0 failed letter
+/// i's CALP leg and letter m's two outputs.
+bool default_prescalers() {
+    const RtcPrescalers p = Rtc::prescalers();
+    if (p.async == 127u && p.sync == 255u) {
+        return true;
+    }
+    RtcReading now{};
+    return Rtc::read(now) && Rtc::init(RtcPrescalers{}, now.time);
+}
+
 int32_t weigh_calibration(const RtcCalibration& c, uint8_t seconds) {
     if (!Rtc::calibrate(c)) {
         return INT32_MIN;
@@ -858,6 +876,8 @@ int32_t weigh_calibration(const RtcCalibration& c, uint8_t seconds) {
 }
 
 void ti_calibration() {
+    bench.verdict("the domain runs the reset prescalers (set if found otherwise)",
+                  default_prescalers());
     const int32_t base = weigh_calibration(RtcCalibration{}, 2);
     const int32_t plus = weigh_calibration(RtcCalibration{.plus = true}, 2);
     const int32_t half = weigh_calibration(RtcCalibration{.minus = 256}, 2);
@@ -1041,6 +1061,162 @@ void tl_backup() {
 }
 
 // =============================================================================
+// o - the short calibration windows, the alarm masks, the output's two options
+// =============================================================================
+
+/// Set the calendar to `start`, arm alarm A as `a`, and say whether it
+/// fired within `ms` - the handler's own count, its flag cleared after.
+bool alarm_fires(const RtcDateTime& start, const RtcAlarm& a, uint32_t ms) {
+    Rtc::clear_alarm(RtcAlarmId::a);
+    if (!Rtc::init(Rtc::prescalers(), start)) {
+        return false;
+    }
+    alarm_count = 0;
+    if (!Rtc::set_alarm(RtcAlarmId::a, a)) {
+        return false;
+    }
+    const uint32_t t0 = Ticker::ticks();
+    while (alarm_count == 0u && Ticker::ticks() - t0 < ms) {
+    }
+    const bool fired = alarm_count != 0u;
+    Rtc::clear_alarm(RtcAlarmId::a);
+    return fired;
+}
+
+/// Ticks from now until RTC_AF1 reads `level`, at most `budget` cycles.
+uint32_t pad_reaches(bool level, uint32_t budget) {
+    const uint32_t c0 = Ticker::cycles();
+    while (RtcPad::read() != level) {
+        if (Ticker::cycles() - c0 > budget) {
+            return budget;
+        }
+    }
+    return Ticker::cycles() - c0;
+}
+
+void to_windows_masks_output() {
+    bench.verdict("the domain runs the reset prescalers (set if found otherwise)",
+                  default_prescalers());
+    // --- THE 8- AND 16-SECOND CALIBRATION CYCLES (17.3.11: CALW8 and
+    // CALW16 shorten the cycle and stick CALM's low bits at zero), each
+    // weighed over one cycle of its own length against the core clock.
+    const int32_t base = weigh_calibration(RtcCalibration{}, 2);
+    const int32_t m8 = weigh_calibration(
+        RtcCalibration{.minus = 256, .window = RtcCalibrationWindow::seconds8}, 8);
+    const int32_t p8 = weigh_calibration(
+        RtcCalibration{.plus = true, .window = RtcCalibrationWindow::seconds8}, 8);
+    const int32_t m16 = weigh_calibration(
+        RtcCalibration{.minus = 256, .window = RtcCalibrationWindow::seconds16}, 16);
+    const int32_t p16 = weigh_calibration(
+        RtcCalibration{.plus = true, .window = RtcCalibrationWindow::seconds16}, 16);
+    (void)Rtc::calibrate(RtcCalibration{});
+    print(serial, "  the calendar's second in ppm: ", base, " uncalibrated; the 8-second "
+          "cycle with CALM 256 ", m8, ", with CALP ", p8, "; the 16-second cycle ", m16,
+          " and ", p16, crlf);
+    // 17.3.11's formula in the 32-second cycle: CALM 256 is -244 ppm, CALP
+    // +488 (letter i measures both). A shorter cycle with the same register
+    // value: the bound is letter i's, 30 ppm either way of that figure, so
+    // the verdict says whether the short cycles keep the 32-second scale.
+    bench.verdict("THE SHORT CYCLES KEEP THE SCALE: CALM 256 is -244 ppm and CALP +488 "
+                  "ppm in the 8- and the 16-second cycle too, each weighed over one cycle",
+                  base - m8 > 214 && base - m8 < 274 && p8 - base > 458 && p8 - base < 518 &&
+                      base - m16 > 214 && base - m16 < 274 && p16 - base > 458 &&
+                      p16 - base < 518);
+
+    // --- CALP REFUSED UNDER PREDIV_A 3 (17.3.11): the prescalers moved to
+    // PREDIV_A 2 (PREDIV_S 10922: still a second, 3 x 10923 = 32769) for
+    // the question, then back.
+    RtcReading kept{};
+    const bool narrowed = Rtc::read(kept) && Rtc::init(RtcPrescalers{2, 10922}, kept.time);
+    const bool calp_refused = !Rtc::calibrate(RtcCalibration{.plus = true});
+    const bool calm_taken = Rtc::calibrate(RtcCalibration{.minus = 8});
+    (void)Rtc::calibrate(RtcCalibration{});
+    const bool restored = default_prescalers();
+    bench.verdict("CALP IS REFUSED while PREDIV_A is under 3 - the bit the silicon "
+                  "would drop in silence - and CALM is not",
+                  narrowed && calp_refused && calm_taken && restored);
+
+    // --- THE ALARM MASKS a seconds-only match leaves untried, each staged
+    // by setting the calendar three seconds short of its match, with a
+    // control one unit away that must stay silent: the hour, the date and
+    // the weekday (WDSEL).
+    RtcAlarm hour{};
+    hour.hour = 10;
+    hour.mask_hours = false;
+    hour.mask_minutes = false;
+    hour.mask_seconds = false;
+    RtcAlarm hour_no = hour;
+    hour_no.hour = 11;
+    const RtcDateTime before_ten{9, 59, 57, 14, 10, 26, 3};
+    const bool h_yes = alarm_fires(before_ten, hour, 4500);
+    const bool h_no = alarm_fires(before_ten, hour_no, 4500);
+
+    RtcAlarm date{};
+    date.day = 15;
+    date.mask_date = false;
+    date.mask_hours = false;
+    date.mask_minutes = false;
+    date.mask_seconds = false;
+    RtcAlarm date_no = date;
+    date_no.day = 16;
+    const RtcDateTime before_midnight{23, 59, 57, 14, 10, 26, 3};
+    const bool d_yes = alarm_fires(before_midnight, date, 4500);
+    const bool d_no = alarm_fires(before_midnight, date_no, 4500);
+
+    RtcAlarm wday = date;
+    wday.weekday_select = true;
+    wday.day = 4;
+    RtcAlarm wday_no = wday;
+    wday_no.day = 5;
+    const bool w_yes = alarm_fires(before_midnight, wday, 4500);
+    const bool w_no = alarm_fires(before_midnight, wday_no, 4500);
+    print(serial, "  alarm A three seconds short of its match: the hour ", h_yes ? "fired" : "SILENT",
+          " (the next hour ", h_no ? "FIRED" : "silent", "), the date ", d_yes ? "fired" : "SILENT",
+          " (the next date ", d_no ? "FIRED" : "silent", "), the weekday ",
+          w_yes ? "fired" : "SILENT", " (the next weekday ", w_no ? "FIRED" : "silent", ")",
+          crlf);
+    bench.verdict("THE HOUR, DATE AND WEEKDAY MATCHES: each fires on its own match and "
+                  "not on its neighbour's",
+                  h_yes && !h_no && d_yes && !d_no && w_yes && !w_no);
+
+    // --- THE ALARM OUTPUT'S POLARITY AND TYPE, on the wake-up flag as
+    // letter m does: POL = 1 inverts it, and in open drain the high level
+    // is the BOARD's - the pad rises only as fast as what pulls it.
+    RtcPad::input();   // the pad's input buffer, which the reads below need
+    (void)Rtc::set_wakeup(RtcWakeupClock::ck_spre, 0, false);
+    Rtc::alarm_output(RtcOutput::wakeup, true, true);
+    wait_ms(50);
+    Rtc::clear_flags(RtcFlag::wakeup);
+    wait_ms(20);
+    const bool inv_high_clear = RtcPad::read();
+    const bool inv_came = wait_flag(RtcFlag::wakeup, 1500);
+    wait_ms(1);
+    const bool inv_low_set = inv_came && !RtcPad::read();
+    // Push-pull and open drain, POL = 0, the rise timed from the flag.
+    uint32_t rise[2] = {};
+    for (uint8_t k = 0; k < 2u; ++k) {
+        const bool push_pull = k == 0u;
+        Rtc::alarm_output(RtcOutput::wakeup, false, push_pull);
+        Rtc::clear_flags(RtcFlag::wakeup);
+        wait_ms(20);
+        rise[k] = wait_flag(RtcFlag::wakeup, 1500) ? pad_reaches(true, SysClock::hz / 100u)
+                                                   : SysClock::hz / 100u;
+    }
+    Rtc::alarm_output(RtcOutput::off);
+    Rtc::clear_wakeup();
+    constexpr uint32_t cyc_us = SysClock::hz / 1'000'000u;
+    print(serial, "  POL = 1: the pad ", inv_high_clear ? "high" : "low", " with WUTF clear, ",
+          inv_low_set ? "low" : "high", " with it set; POL = 0, the pad high ",
+          rise[0] / cyc_us, " us after the flag in push-pull and ", rise[1] / cyc_us,
+          " us in open drain", crlf);
+    bench.verdict("POL = 1 inverts the alarm output", inv_high_clear && inv_low_set);
+    bench.verdict("OPEN DRAIN: the high level is not driven - the pad rises at the pace "
+                  "of what pulls it, where push-pull is high at once",
+                  rise[0] < 5u * cyc_us && rise[1] > 10u * rise[0] + 20u * cyc_us &&
+                      rise[1] < SysClock::hz / 100u);
+}
+
+// =============================================================================
 // m - the RTC_OUT pad
 // =============================================================================
 /// Count rising edges on RTC_AF1's own input register over `ms`, and give
@@ -1062,6 +1238,8 @@ uint32_t count_pad_edges(uint32_t ms, uint32_t& cycles) {
 }
 
 void tm_output() {
+    bench.verdict("the domain runs the reset prescalers (set if found otherwise)",
+                  default_prescalers());
     // The crystal, before the pad is asked to do anything (ES0287 2.2.10).
     uint32_t quiet_cycles = 0;
     const bool quiet = measure_seconds(2, quiet_cycles);
@@ -1413,6 +1591,8 @@ int main() {
     bench.letter('l', "the twenty backup registers", tl_backup);
     bench.letter('m', "the RTC_OUT pad: the outputs counted", tm_output);
     bench.letter('n', "the timestamp on RTC_AF1", tn_timestamp);
+    bench.letter('o', "the short calibration cycles, the alarm masks, the output's options",
+                 to_windows_masks_output);
     bench.letter('v', "the backup registers across a reset", tv_survival, false);
     bench.letter('w', "THE ERASE: a real tamper", tw_tamper, false);
     bench.letter('x', "the 1 Hz left on the pad", tx_show, false);

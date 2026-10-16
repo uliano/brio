@@ -1276,6 +1276,21 @@ public:
     }
     static bool main_output() { return has_break && (regs().BDTR & TIM_BDTR_MOE) != 0u; }
 
+    /// BDTR's fields read back as they stand - what a write under LOCK
+    /// actually left (17.4.18: LOCK itself is written once, and each
+    /// level makes its fields read-only until the next peripheral
+    /// reset). Zero / false on a timer without a break unit.
+    static uint8_t lock_level() {
+        return has_break ? static_cast<uint8_t>((regs().BDTR & TIM_BDTR_LOCK_Msk) >>
+                                                TIM_BDTR_LOCK_Pos)
+                         : uint8_t{0};
+    }
+    static uint8_t dead_time_code() {
+        return has_break ? static_cast<uint8_t>(regs().BDTR & TIM_BDTR_DTG_Msk) : uint8_t{0};
+    }
+    static bool off_state_idle() { return has_break && (regs().BDTR & TIM_BDTR_OSSI) != 0u; }
+    static bool off_state_run() { return has_break && (regs().BDTR & TIM_BDTR_OSSR) != 0u; }
+
     /// The dead time in force, in tDTS ticks (timer clock ticks divided
     /// by CR1.CKD).
     static uint16_t dead_time_ticks() {
@@ -1821,9 +1836,20 @@ struct TimPeriodicTick {
  * and the timer costs nothing between them.
  *
  * `delay` is where the pulse STARTS (the compare value) and the pulse
- * ends at the period, so width = period - delay. The trigger is the
- * caller's: a software start (fire()), a slave trigger mode on an ITRx
- * (arm()), or a TI edge.
+ * ends at the update: the counter runs 0..ARR and PWM mode 2 is active
+ * from CNT = CCR to ARR, so ARR = delay + width - 1 makes the pulse
+ * `width` counts wide (measured: ARR = delay + width gave one count
+ * more). The trigger is the caller's: a software start (fire()), a slave
+ * trigger mode on an ITRx (arm()), or a TI edge.
+ *
+ * THE COMPARE IS NOT PRELOADED here, against fact 4's default: a
+ * preloaded CCR reaches its shadow only at an update, and configure()'s
+ * EGR.UG comes BEFORE the channel is written - so without help the first
+ * pulse ran against the old shadow and came out the whole period wide
+ * (measured), and an update issued after the channel leaves the pad
+ * driven by a shadow of 0, PWM mode 2 active, for the stores in between.
+ * A one-pulse compare is written once with the counter stopped, so the
+ * runt pulse the preload exists to prevent cannot happen.
  */
 template <class T, uint8_t ch = 0>
 struct TimOnePulse {
@@ -1837,7 +1863,7 @@ struct TimOnePulse {
             return false;
         }
         if (!T::configure({.prescaler = prescaler,
-                           .period = delay + width,
+                           .period = delay + width - 1u,
                            .one_pulse = true})) {
             return false;
         }
@@ -1846,16 +1872,10 @@ struct TimOnePulse {
         // chapter's own recipe for a delayed pulse.
         if (!T::output_channel(ch, {.mode = TimOutputMode::pwm2,
                                     .compare = delay,
+                                    .preload = false,
                                     .active_low = active_low})) {
             return false;
         }
-        // THE COMPARE IS PRELOADED (fact 4 of the file header), and a
-        // one-pulse timer sees no update between here and its trigger -
-        // so without this the pulse would run against the ACTIVE compare
-        // register's old value and come out the whole period wide,
-        // measured. The update loads it and its own flag is cleared.
-        T::update();
-        T::clear_flags(T::update_flag);
         if constexpr (T::has_break) {
             (void)T::main_output(true);
         }

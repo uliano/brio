@@ -100,6 +100,9 @@
 //      through the two vectors, what harvest() costs, and the line timed
 //      against the wire at the rate asked (a loop shares one divisor at
 //      both ends and cannot tell a wrong one)
+//   x  THE SAME RING ON AN LPUART: LPUART1's single wire (PB11) as its
+//      own loop, both engines on letter o's channels, letter o's legs and
+//      the line's rate (skipped by name on the LQFP32)
 //   r  A RELEASED REQUESTER: USART1, SPI1 and TIM3 each released five
 //      ways with a request standing, and what the next owner of the same
 //      request line moves - the release contract measured with no wire
@@ -129,6 +132,7 @@
 #include "stm32g0/clock.hpp"
 #include "stm32g0/delay.hpp"
 #include "stm32g0/dma.hpp"
+#include "stm32g0/lpuart.hpp"
 #include "stm32g0/exti.hpp"
 #include "stm32g0/lptim.hpp"
 #include "stm32g0/pwr.hpp"
@@ -3049,7 +3053,9 @@ struct Stream {
 
 /// `n` bytes of `tx` into the transport's transmit ring, refused bytes
 /// retried - the transmit ring is 16 bytes, so a longer run waits for its
-/// engine. Nothing is read meanwhile.
+/// engine. Nothing is read meanwhile. Templated on the transport, its
+/// resource and its rate, so letter x runs the same helpers on an LPUART.
+template <class T = U1>
 void u1_send(Stream& tx, uint32_t n) {
     uint8_t stage[16];
     while (n != 0u) {
@@ -3060,7 +3066,7 @@ void u1_send(Stream& tx, uint32_t n) {
         uint32_t done = 0;
         uint32_t spins = 4'000'000u;
         while (done < len && spins-- != 0u) {
-            done += U1::write_bulk({stage + done, len - done});
+            done += T::write_bulk({stage + done, len - done});
         }
         n -= len;
     }
@@ -3068,22 +3074,24 @@ void u1_send(Stream& tx, uint32_t n) {
 
 /// Wait until the wire has carried everything queued, and `bytes` more
 /// character times for the receive side to land it.
+template <class T = U1, class R = Usart<1>, uint32_t byte_cycles = u1_byte_cycles>
 void u1_settle(uint32_t bytes) {
     uint32_t spins = 8'000'000u;
-    while ((!U1::tx_idle() || (Usart<1>::status() & UsartFlag::tc) == 0u) &&
+    while ((!T::tx_idle() || (R::status() & UsartFlag::tc) == 0u) &&
            spins-- != 0u) {
     }
-    spin_cycles(u1_byte_cycles * bytes);
+    spin_cycles(byte_cycles * bytes);
 }
 
 /// Read up to `max` bytes and judge each against `rx`; the count read.
+template <class T = U1>
 uint32_t u1_take(Stream& rx, uint32_t max, uint32_t& bad) {
     uint8_t chunk[16];
     uint32_t got = 0;
     while (got < max) {
         const uint32_t want = max - got < sizeof chunk ? max - got
                                                        : static_cast<uint32_t>(sizeof chunk);
-        const uint32_t n = U1::read_bulk({chunk, want});
+        const uint32_t n = T::read_bulk({chunk, want});
         for (uint32_t i = 0; i < n; ++i) {
             if (chunk[i] != rx.next()) {
                 ++bad;
@@ -3106,6 +3114,7 @@ uint32_t u1_take(Stream& rx, uint32_t max, uint32_t& bad) {
 /// comes back is read and thrown away meanwhile. What is read is the
 /// divisor and whatever gap the 16-byte transmit ring leaves between the
 /// engine's runs.
+template <class T = U1, class R = Usart<1>, uint32_t byte_cycles = u1_byte_cycles>
 uint32_t u1_wire_permille() {
     static uint8_t out[16];
     for (uint32_t i = 0; i < sizeof out; ++i) {
@@ -3113,27 +3122,134 @@ uint32_t u1_wire_permille() {
     }
     uint8_t sink[16];
     constexpr uint32_t frames = 1024;
-    const uint64_t wire = static_cast<uint64_t>(frames) * u1_byte_cycles;
+    const uint64_t wire = static_cast<uint64_t>(frames) * byte_cycles;
     const uint32_t budget = static_cast<uint32_t>(wire * 2u) + SysClock::hz / 50u;
     uint32_t queued = 0;
     const uint32_t t0 = cycles_now();
     while (queued < frames && cycles_now() - t0 < budget) {
         const uint32_t want = frames - queued;   // never a frame more than timed
-        queued += U1::write_bulk({out, want < sizeof out ? want : uint32_t{sizeof out}});
-        while (U1::read_bulk(sink) != 0u) {
+        queued += T::write_bulk({out, want < sizeof out ? want : uint32_t{sizeof out}});
+        while (T::read_bulk(sink) != 0u) {
         }
     }
-    while ((!U1::tx_idle() || (Usart<1>::status() & UsartFlag::tc) == 0u) &&
+    while ((!T::tx_idle() || (R::status() & UsartFlag::tc) == 0u) &&
            cycles_now() - t0 < budget) {
-        while (U1::read_bulk(sink) != 0u) {
+        while (T::read_bulk(sink) != 0u) {
         }
     }
     const uint32_t took = cycles_now() - t0;
-    u1_settle(4);
-    while (U1::read_bulk(sink) != 0u) {
+    u1_settle<T, R, byte_cycles>(4);
+    while (T::read_bulk(sink) != 0u) {
     }
-    U1::clear_errors();
+    T::clear_errors();
     return queued < frames ? 0u : static_cast<uint32_t>(1000ull * took / wire);
+}
+
+/// Letter o's three legs over a CIRCULAR receive ring - a stream across
+/// many laps, a burst with the consumer away, a consumer a lap behind -
+/// for any transport, its resource, its receive engine and its rate, so
+/// letter x runs them on an LPUART.
+template <class T, class R, class RxE, uint32_t byte_cycles>
+void ring_legs(Stream& tx, Stream& rx) {
+    // --- a stream across many laps, read as it lands.
+    constexpr uint32_t total = 4096;
+    uint8_t stage[16];
+    uint32_t staged = 0;
+    uint32_t sent_off = 0;
+    uint32_t generated = 0;
+    uint32_t got = 0;
+    uint32_t bad = 0;
+    uint32_t torn = 0;
+    const uint32_t t0 = cycles_now();
+    const uint32_t budget = byte_cycles * total * 4u;
+    while (got < total && cycles_now() - t0 < budget) {
+        if (sent_off == staged && generated < total) {
+            const uint32_t len = total - generated < sizeof stage
+                                     ? total - generated
+                                     : static_cast<uint32_t>(sizeof stage);
+            for (uint32_t i = 0; i < len; ++i) {
+                stage[i] = tx.next();
+            }
+            staged = len;
+            sent_off = 0;
+            generated += len;
+        }
+        if (sent_off < staged) {
+            sent_off += T::write_bulk({stage + sent_off, staged - sent_off});
+        }
+        const std::span<const uint8_t> run = T::read_span();
+        uint32_t wrong = 0;
+        Stream check = rx;
+        for (const uint8_t b : run) {
+            if (b != check.next()) {
+                ++wrong;
+            }
+        }
+        if (T::consume(static_cast<uint32_t>(run.size()))) {
+            rx = check;
+            bad += wrong;
+            got += static_cast<uint32_t>(run.size());
+        } else {
+            ++torn;
+        }
+    }
+    const uint32_t wall = cycles_now() - t0;
+    u1_settle<T, R, byte_cycles>(2);
+    const uint32_t laps = RxE::laps();
+    print(serial, "  ", got, " of ", total, " bytes back in ", cycles_to_us(wall),
+          " us (the wire ", total * 10u, " us): ", bad, " wrong, ", torn,
+          " runs torn, laps ", laps, ", ring overruns ", T::rx_overruns(),
+          ", ORE ", T::hw_overruns(), ", dma faults ", T::dma_faults(), crlf);
+    bench.verdict("4096 bytes through 64 laps of the ring BYTE-EXACT, read where "
+                  "the channel wrote them: every lap counted once by its own "
+                  "completion - a restart would have zeroed the count - and "
+                  "nothing lost on the way, no overrun of the ring, no ORE, no "
+                  "fault",
+                  got == total && bad == 0u && torn == 0u && laps == total / 64u &&
+                      T::rx_overruns() == 0u && T::hw_overruns() == 0u &&
+                      T::dma_faults() == 0u);
+
+    // --- a burst while the consumer is away, the tail in the middle.
+    uint32_t bad2 = 0;
+    u1_send<T>(tx, 40);
+    u1_settle<T, R, byte_cycles>(2);
+    const uint32_t first = u1_take<T>(rx, 40, bad2);
+    u1_send<T>(tx, 60);   // and nobody reads or re-arms meanwhile
+    u1_settle<T, R, byte_cycles>(4);
+    const uint32_t burst = u1_take<T>(rx, 60, bad2);
+    print(serial, "  40 bytes read, the tail at 40 of 64; then 60 in one burst "
+          "with the consumer away: ", burst, " of 60 read, ", bad2, " wrong, "
+          "ORE ", T::hw_overruns(), ", ring overruns ", T::rx_overruns(), crlf);
+    bench.verdict("NOTHING IS LOST BETWEEN RUNS, there being none: 60 bytes "
+                  "landing with the tail at 40 of a 64-byte ring wrap the "
+                  "storage with no step of the CPU's, and all 60 are read back "
+                  "exact - a run that ended at the storage's end would have "
+                  "left the receiver to its FIFO and an overrun",
+                  first == 40u && burst == 60u && bad2 == 0u &&
+                      T::hw_overruns() == 0u && T::rx_overruns() == 0u);
+
+    // --- a consumer a lap behind: told, skipped, resumed.
+    uint32_t bad3 = 0;
+    u1_send<T>(tx, 80);   // more than a lap, nobody reading
+    u1_settle<T, R, byte_cycles>(4);
+    for (uint32_t i = 0; i < 80u; ++i) {
+        (void)rx.next();   // the stream moves on whatever the consumer saw
+    }
+    const uint32_t behind = u1_take<T>(rx, 80, bad3);
+    const uint8_t overruns = T::rx_overruns();
+    u1_send<T>(tx, 20);
+    u1_settle<T, R, byte_cycles>(2);
+    const uint32_t after = u1_take<T>(rx, 20, bad3);
+    print(serial, "  80 bytes with nobody reading: ", behind, " read, ring "
+          "overruns ", overruns, "; the next 20: ", after, " read, ", bad3,
+          " wrong, ORE ", T::hw_overruns(), crlf);
+    bench.verdict("A CONSUMER A LAP BEHIND IS TOLD: one overrun counted and the "
+                  "lap skipped rather than read torn - nothing of it delivered "
+                  "- and the next bytes arrive exact; the silicon lost nothing "
+                  "(no ORE), the consumer did",
+                  behind == 0u && overruns == 1u && after == 20u && bad3 == 0u &&
+                      T::hw_overruns() == 0u);
+
 }
 
 void to_circular_receive() {
@@ -3159,106 +3275,9 @@ void to_circular_receive() {
                                                      DmaFlag::error) &&
                       at_rest == 64u && U1Rx::laps() == 0u);
 
-    // --- a stream across many laps, read as it lands.
-    constexpr uint32_t total = 4096;
     Stream tx{0x2545F491u};
     Stream rx{0x2545F491u};
-    uint8_t stage[16];
-    uint32_t staged = 0;
-    uint32_t sent_off = 0;
-    uint32_t generated = 0;
-    uint32_t got = 0;
-    uint32_t bad = 0;
-    uint32_t torn = 0;
-    const uint32_t t0 = cycles_now();
-    const uint32_t budget = u1_byte_cycles * total * 4u;
-    while (got < total && cycles_now() - t0 < budget) {
-        if (sent_off == staged && generated < total) {
-            const uint32_t len = total - generated < sizeof stage
-                                     ? total - generated
-                                     : static_cast<uint32_t>(sizeof stage);
-            for (uint32_t i = 0; i < len; ++i) {
-                stage[i] = tx.next();
-            }
-            staged = len;
-            sent_off = 0;
-            generated += len;
-        }
-        if (sent_off < staged) {
-            sent_off += U1::write_bulk({stage + sent_off, staged - sent_off});
-        }
-        const std::span<const uint8_t> run = U1::read_span();
-        uint32_t wrong = 0;
-        Stream check = rx;
-        for (const uint8_t b : run) {
-            if (b != check.next()) {
-                ++wrong;
-            }
-        }
-        if (U1::consume(static_cast<uint32_t>(run.size()))) {
-            rx = check;
-            bad += wrong;
-            got += static_cast<uint32_t>(run.size());
-        } else {
-            ++torn;
-        }
-    }
-    const uint32_t wall = cycles_now() - t0;
-    u1_settle(2);
-    const uint32_t laps = U1Rx::laps();
-    print(serial, "  ", got, " of ", total, " bytes back in ", cycles_to_us(wall),
-          " us (the wire ", total * 10u, " us): ", bad, " wrong, ", torn,
-          " runs torn, laps ", laps, ", ring overruns ", U1::rx_overruns(),
-          ", ORE ", U1::hw_overruns(), ", dma faults ", U1::dma_faults(), crlf);
-    bench.verdict("4096 bytes through 64 laps of the ring BYTE-EXACT, read where "
-                  "the channel wrote them: every lap counted once by its own "
-                  "completion - a restart would have zeroed the count - and "
-                  "nothing lost on the way, no overrun of the ring, no ORE, no "
-                  "fault",
-                  got == total && bad == 0u && torn == 0u && laps == total / 64u &&
-                      U1::rx_overruns() == 0u && U1::hw_overruns() == 0u &&
-                      U1::dma_faults() == 0u);
-
-    // --- a burst while the consumer is away, the tail in the middle.
-    uint32_t bad2 = 0;
-    u1_send(tx, 40);
-    u1_settle(2);
-    const uint32_t first = u1_take(rx, 40, bad2);
-    u1_send(tx, 60);   // and nobody reads or re-arms meanwhile
-    u1_settle(4);
-    const uint32_t burst = u1_take(rx, 60, bad2);
-    print(serial, "  40 bytes read, the tail at 40 of 64; then 60 in one burst "
-          "with the consumer away: ", burst, " of 60 read, ", bad2, " wrong, "
-          "ORE ", U1::hw_overruns(), ", ring overruns ", U1::rx_overruns(), crlf);
-    bench.verdict("NOTHING IS LOST BETWEEN RUNS, there being none: 60 bytes "
-                  "landing with the tail at 40 of a 64-byte ring wrap the "
-                  "storage with no step of the CPU's, and all 60 are read back "
-                  "exact - a run that ended at the storage's end would have "
-                  "left the receiver to its FIFO and an overrun",
-                  first == 40u && burst == 60u && bad2 == 0u &&
-                      U1::hw_overruns() == 0u && U1::rx_overruns() == 0u);
-
-    // --- a consumer a lap behind: told, skipped, resumed.
-    uint32_t bad3 = 0;
-    u1_send(tx, 80);   // more than a lap, nobody reading
-    u1_settle(4);
-    for (uint32_t i = 0; i < 80u; ++i) {
-        (void)rx.next();   // the stream moves on whatever the consumer saw
-    }
-    const uint32_t behind = u1_take(rx, 80, bad3);
-    const uint8_t overruns = U1::rx_overruns();
-    u1_send(tx, 20);
-    u1_settle(2);
-    const uint32_t after = u1_take(rx, 20, bad3);
-    print(serial, "  80 bytes with nobody reading: ", behind, " read, ring "
-          "overruns ", overruns, "; the next 20: ", after, " read, ", bad3,
-          " wrong, ORE ", U1::hw_overruns(), crlf);
-    bench.verdict("A CONSUMER A LAP BEHIND IS TOLD: one overrun counted and the "
-                  "lap skipped rather than read torn - nothing of it delivered "
-                  "- and the next bytes arrive exact; the silicon lost nothing "
-                  "(no ORE), the consumer did",
-                  behind == 0u && overruns == 1u && after == 20u && bad3 == 0u &&
-                      U1::hw_overruns() == 0u);
+    ring_legs<U1, Usart<1>, U1Rx, u1_byte_cycles>(tx, rx);
 
     // --- the edge THE VECTORS report: the line's IDLE through isr(), the
     // ring's half and full marks through dma_isr(), both answering
@@ -3331,6 +3350,76 @@ void to_circular_receive() {
     U1::release();
     u1_live = false;
     quiet_everything();
+}
+
+// ---- x: the circular receive on an LPUART ------------------------------------------
+//
+// LPUART1 in the same single-wire loop as letter o's USART1 (34.5.12:
+// the LPUART has the half-duplex mode too), on PB11 at AF1 (DS13560
+// table 14) - a pad nothing on the desk is wired to - with the same two
+// engines on the same channels 2 and 3, so the LPUART's own request codes
+// (table 55: 14 and 15) are what changes. The task is the USART's own
+// UartTask over the LPUART resource (stm32g0/lpuart.hpp), so the legs are
+// letter o's, run through ring_legs().
+
+constexpr UartPins lp_pins{
+    .tx = {'B', 11, PinFunction::af1},   // LPUART1_TX, the single wire
+    .rx = {'B', 10, PinFunction::af1},   // not claimed in half duplex
+};
+using LpTx = DmaTxEngine<1, 2>;
+using LpRx = DmaRxEngine<1, 3>;
+using Lp = LpUart<1, lp_pins, 64, 16, LpTx, LpRx,
+                  uart_half_duplex({.tx_speed = PinSpeed::very_high,
+                                    .single_wire_push_pull = true})>;
+constexpr uint32_t lp_baud = 1'000'000;
+constexpr uint32_t lp_byte_cycles = SysClock::hz / (lp_baud / 10u);
+volatile bool lp_live = false;
+
+// PB11 is bonded on the LQFP64s and not on the G031K8's LQFP32 (DS12992
+// table 12), whose 8 KB would not carry a second ring beside the
+// console's either.
+#if defined(STM32G031xx)
+constexpr bool lp_bonded = false;
+#else
+constexpr bool lp_bonded = true;
+#endif
+
+void tx_lpuart_ring() {
+    if constexpr (!lp_bonded) {
+        print(serial, "  SKIP: the LQFP32 bonds no LPUART1 single-wire pad "
+              "letter x can use (DS12992 table 12)", crlf);
+        return;
+    } else {
+        lp_live = true;
+        const bool up = Lp::init(clock, lp_baud);
+        Lp::clear_errors();
+        const bool circular = ChC::circular();
+        const uint32_t armed = ChC::armed();
+        const uint16_t at_rest = ChC::count();
+        print(serial, "  LPUART1 single wire on PB11 at ", lp_baud, " baud, ring "
+              "64 bytes: the receive channel ", circular ? "CIRCULAR" : "not circular",
+              ", armed ", hex(armed), ", CNDTR at rest ", at_rest, ", laps ",
+              LpRx::laps(), crlf);
+        bench.verdict("AN LPUART'S RECEIVE ENGINE IS THE SAME RING: the channel "
+                      "circular over the 64-byte ring, the three marks armed",
+                      up && circular &&
+                          armed == static_cast<uint32_t>(DmaFlag::complete |
+                                                         DmaFlag::half | DmaFlag::error) &&
+                          at_rest == 64u && LpRx::laps() == 0u);
+        Stream tx{0x9E3779B9u};
+        Stream rx{0x9E3779B9u};
+        ring_legs<Lp, Lpuart<1>, LpRx, lp_byte_cycles>(tx, rx);
+        const uint32_t pm = u1_wire_permille<Lp, Lpuart<1>, lp_byte_cycles>();
+        print(serial, "  1024 frames through the LPUART's transmit engine in ", pm,
+              " thousandths of their wire time at ", lp_baud, " baud", crlf);
+        bench.verdict("and the LPUART's loop runs at the rate asked: 1024 frames "
+                      "through its transmit engine in their wire time, -1 % to "
+                      "+3 % (letter o's bound)",
+                      pm >= 990u && pm <= 1030u);
+        Lp::release();
+        lp_live = false;
+        quiet_everything();
+    }
 }
 
 // ---- p, q: the receive ring against two copies (OUTSIDE z) ------------------------
@@ -3959,6 +4048,15 @@ extern "C" void USART1_IRQHandler() {
     }
 }
 
+/// LPUART1's line - its own on the G031, shared with USART3 and up on the
+/// G071 and the G0B1, the reserve's name either way. Letter x's transport
+/// arms no interrupt there either (both directions on engines).
+extern "C" void BRIO_STM32G0_LPUART1_HANDLER() {
+    if (lp_live) {
+        (void)Lp::isr();
+    }
+}
+
 /// Channel 1 has a vector to itself (table 61) - and channel 1 is the
 /// loop engine's, so this body is a player's whole CPU cost: one lap
 /// counted, nothing re-armed.
@@ -3982,6 +4080,10 @@ extern "C" void DMA1_Channel1_IRQHandler() {
 /// - there is no "which channel" register on this controller, so asking
 /// every owner IS the dispatch.
 extern "C" void DMA1_Channel2_3_IRQHandler() {
+    if (lp_live) {
+        (void)Lp::dma_isr();   // letter x's LPUART1, both engines
+        return;
+    }
     if (u1_live) {
         if (U1::dma_isr()) {   // letter o's single-wire USART1, both engines
             u1_edges = u1_edges + 1u;
@@ -4104,6 +4206,8 @@ int main() {
                  "channel frozen by a Stop", tn_sleep_story);
     bench.letter('o', "the circular receive: a ring the channel writes lap "
                  "after lap", to_circular_receive);
+    bench.letter('x', "the circular receive on an LPUART: letter o's legs, "
+                 "LPUART1's single wire", tx_lpuart_ring);
     bench.letter('r', "a released requester: what the next owner of its request "
                  "line finds", tr_released_requester);
     bench.letter('p', "the receive ring at its level beside two copies (brio stress)",

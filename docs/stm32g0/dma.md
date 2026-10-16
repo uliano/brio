@@ -8,8 +8,8 @@ on the bench chip's revision Z column, where all five apply. Driver:
 from `stm32g0/device_tables.hpp`, and the REQUEST IDS from the
 peripherals that publish them (`Usart<n>::dma_tx_request()`,
 `Tim<n>::dma_update_request()` and their kin). Bench suite:
-`test_stm32_dma` (15 letters in `z`, 74 verdicts, wireless; letters `u`
-and `w` outside `z` need `brio stress`); the engines' cost is
+`test_stm32_dma` (17 letters in `z`, 85 verdicts, wireless; letters `p`,
+`q`, `u` and `w` outside `z` need `brio stress`); the engines' cost is
 `bench_stm32`'s letter `d`. Family fixture
 `test/family_stm32g0/dma.cpp` plus ten negatives under
 `brio check stm32g0`.

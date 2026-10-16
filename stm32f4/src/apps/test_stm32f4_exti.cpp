@@ -41,6 +41,9 @@
 //      has not got refusing every verb
 //   k  the pending bit: rc_w1, and why a handler clears it FIRST
 //   l  the board's button: configured, reported, and quiet
+//   q  the port's own options on PC0/PC1 (Nucleo-F446RE): both pulls,
+//      open drain against push-pull, PinSet and a two-pin out_toggle(),
+//      and release() blinding the input buffer
 //   p  (not in z) wait for a press of the button
 //
 // build: boards = f429zi,f446re,f411ce,f469ni
@@ -117,7 +120,7 @@ static_assert(exti_lines_distinct<LedInt, ButtonInt>(),
 using Serial = Uart<console_instance, console_pins>;
 constexpr Serial serial;
 
-TestBench<Serial> bench;
+TestBench<Serial, 20> bench;
 
 // The lines this suite drives by software, none of them a pad's: line 1
 // has a vector of its own (the latency and the pending-bit letters), lines
@@ -895,6 +898,92 @@ void tk_pending() {
 }
 
 // =============================================================================
+// q - the port's own options: open drain, the pull-down, two pins at once,
+//     release()
+// =============================================================================
+//
+// Two pads free on the Nucleo-F446RE and on nothing of the desk's link -
+// PC0 and PC1 (A5 and A4 of the Arduino header, UM1724 table 19) - each
+// read back through its own input buffer; the letter runs on that board
+// alone (the other boards' PC0/PC1 are their SDRAM's or unbonded).
+#if defined(STM32F446xx)
+constexpr bool port_pads = true;
+#else
+constexpr bool port_pads = false;
+#endif
+using PadC0 = Pin<'C', 0>;
+using PadC1 = Pin<'C', 1>;
+
+void settle_pad() { (void)delay_us(clock, 200); }   // a 40 k pull against the pad's pF
+
+void tq_port() {
+    if constexpr (!port_pads) {
+        print(serial, "  SKIP: the two pads are chosen on the Nucleo-F446RE", crlf);
+        return;
+    } else {
+        // The pulls, both ways (the down one is the item).
+        PadC0::input(PinPull::up);
+        settle_pad();
+        const bool up = PadC0::read();
+        PadC0::input(PinPull::down);
+        settle_pad();
+        const bool down = !PadC0::read();
+        bench.verdict("PC0 follows its own pull UP and its pull DOWN", up && down);
+
+        // OPEN DRAIN: a 1 is released, not driven - so it reads what the
+        // pull makes of it; a 0 is driven either way.
+        PadC0::output(true, PinConfig{.pull = PinPull::down, .open_drain = true});
+        settle_pad();
+        const bool od_one_on_down = PadC0::read();
+        PadC0::pull(PinPull::up);
+        settle_pad();
+        const bool od_one_on_up = PadC0::read();
+        PadC0::clear();
+        settle_pad();
+        const bool od_zero_on_up = PadC0::read();
+        PadC0::output(true, PinConfig{.pull = PinPull::down});
+        settle_pad();
+        const bool pp_one_on_down = PadC0::read();
+        print(serial, "  open drain: a 1 over the pull-down reads ", od_one_on_down,
+              ", over the pull-up ", od_one_on_up, ", a 0 over the pull-up ", od_zero_on_up,
+              "; push-pull: a 1 over the pull-down reads ", pp_one_on_down, crlf);
+        bench.verdict("OPEN DRAIN releases a 1 to the pull and drives a 0, where push-pull "
+                      "drives the 1 over the pull-down",
+                      !od_one_on_down && od_one_on_up && !od_zero_on_up && pp_one_on_down);
+
+        // Two pins of one port at once: PinSet's configuration and
+        // Port<'C'>::out_toggle() over both - one store each.
+        PinSet<PadC0, PadC1>::configure(PinMode::output);
+        PadC0::clear();
+        PadC1::set();
+        settle_pad();
+        const bool before = !PadC0::read() && PadC1::read();
+        Port<'C'>::out_toggle(PadC0::mask | PadC1::mask);
+        settle_pad();
+        const bool after = PadC0::read() && !PadC1::read();
+        bench.verdict("PinSet configures both pads in one call, and out_toggle() over both "
+                      "flips each of them",
+                      PadC0::is_output() && PadC1::is_output() && before && after);
+
+        // release(): analog, the input buffer off - a pad pulled up reads 0.
+        PadC1::input(PinPull::up);
+        settle_pad();
+        const bool live = PadC1::read();
+        PadC1::release();
+        PadC1::pull(PinPull::up);
+        settle_pad();
+        const bool blind = !PadC1::read();
+        bench.verdict("release() parks a pad in analog mode: pulled up, it now reads 0 - "
+                      "its input buffer is off",
+                      live && blind);
+        PadC0::release();
+        PadC1::release();
+        PadC0::pull(PinPull::none);
+        PadC1::pull(PinPull::none);
+    }
+}
+
+// =============================================================================
 // l - the board's button
 // =============================================================================
 void tl_button() {
@@ -1018,6 +1107,8 @@ int main() {
     bench.letter('j', "the lines above 15", tj_peripheral_lines);
     bench.letter('k', "the pending bit, and why a handler clears it first", tk_pending);
     bench.letter('l', "the board's button, armed and quiet", tl_button);
+    bench.letter('q', "the port: open drain, the pull-down, two pins at once, release()",
+                 tq_port);
     bench.letter('p', "wait for a press of the button", tp_press, false);
 
     if (serial_ok) {

@@ -7,7 +7,7 @@ clock 5.2.13, the interrupt table 12.3 (table 61); DS13560 Rev 5 table 7
 channel pads); errata ES0548 Rev 3 items 2.7.1..2.7.3, read on the bench
 chip's revision Z column. Driver: `stm32g0/tim.hpp`; the per-instance
 presence and vector facts come from `stm32g0/device_tables.hpp`. Bench
-suite: `test_stm32_tim` (12 letters, 118 verdicts, wireless). Family
+suite: `test_stm32_tim` (13 letters, 128 verdicts, wireless). Family
 fixture `test/family_stm32g0/tim.cpp` plus seven negatives under
 `brio check stm32g0`.
 
@@ -130,11 +130,13 @@ stated on the verb.
   `update_interrupt`, `trigger_interrupt`, `break_interrupt`,
   `compare_interrupt(ch)` and the three `*_dma` twins; `isr()`;
   `compare(ch)` / `set_compare(ch, v)`, `output_channel(ch,
-  TimChannelConfig)`, `capture_channel(ch, TimCaptureConfig)`,
+  TimChannelConfig)` / `output_mode(ch)`, `capture_channel(ch, TimCaptureConfig)`,
   `channel_enable` / `channel_enabled` / `complementary_enable`;
   `slave(TimSlaveConfig)` / `slave_mode()` / `slave_trigger()`,
   `master(TimMasterMode)`; `break_dead_time(TimBreakDeadTime)`,
-  `main_output(on)`; `input_select(ch, code)`. Constants: `counter_bits`,
+  `main_output(on)`, and BDTR read back - `lock_level()`,
+  `dead_time_code()`, `off_state_idle()`, `off_state_run()`;
+  `input_select(ch, code)`. Constants: `counter_bits`,
   `max_period`, `channels`, `complementary_channels`, `has_slave_mode`,
   `has_master_mode`, `has_break`, `has_repetition`, `has_direction`,
   `has_center_aligned`, `has_tisel`, `has_dma_burst`,
@@ -371,6 +373,42 @@ their reasons and not staged - 2.7.1 needs a trigger placed exactly at
 CNT = ARR of a cascaded master, 2.7.3 needs an ocref_clr source (ETR or a
 comparator) this stratum has neither a wire nor a driver for.
 
+**THE TASKS AND MODES NO OTHER LETTER RUNS** (letter `m`, ten runs of
+ten):
+
+- `TimPeriodicTick` on TIM14 at 1 kHz (PSC 63, ARR 999): 100 update
+  interrupts in 100 kernel ticks, and `stop()` stops them.
+- **`TimOnePulse` HAD TWO FAULTS, both fixed in the driver.** Its compare
+  was PRELOADED (fact 4's default) and written after `configure()`'s
+  update, so the shadow still held 0: the first `fire()` rose AT ONCE
+  and stayed high 1509 us for a 500 us delay and a 1000 us width, and
+  the pad sat high from `setup()` on. And its period was `delay + width`,
+  one count too many: the counter runs 0..ARR and PWM mode 2 is active
+  from CCR to ARR, so a 100-count width came out 101 (1009 us). The
+  task now writes its compare unbuffered - a one-pulse compare is
+  written once with the counter stopped, so no runt can come of it - and
+  sets ARR to `delay + width - 1`: on PA6 at 10 us a count the pulse
+  rises 500 us after `fire()` and is high 999 us (a polling turn is 84
+  cycles); armed on TIM2's update over ITR1 it rises 1501 us after TIM2
+  starts (TIM2's 1000 us, then the delay) with the same width, and both
+  counters stop themselves.
+- **Capture on BOTH edges** (CCyP = CCyNP = 1): five pull-walks of PA6
+  are ten captures, where rising and falling take five each.
+- **UIFREMAP** copies UIF into CNT bit 31: 0 before the update of a
+  one-pulse TIM3, 1 after it, 0 once UIF is cleared - and `count()`
+  masks it away.
+- **OSSI and OSSR** on TIM1's pair, both pads pulled UP: with MOE clear
+  OSSI 0 releases both pads (2000 of 2000 reads high) and OSSI 1 drives
+  them to their idle level 0 (none high); with MOE set and only CH1
+  enabled, OSSR 0 releases CH1N and OSSR 1 drives it inactive while CH1
+  keeps running (21.4.18 table 124).
+- **`BDTR.LOCK`'s three levels**, each undone by the peripheral reset:
+  every level keeps DTG at its locked 10 against a write of 20 and keeps
+  LOCK itself against a write of 0; level 1 still lets OSSI move, level
+  2 freezes it, and only level 3 freezes the channel's output mode
+  (`lock_level()`, `dead_time_code()`, `off_state_idle()`,
+  `output_mode()` read them back).
+
 ## The DMA requests a timer publishes
 
 `TIMx_DIER`'s `UDE`, `TDE` and `CCxDE` bits are what makes a timer ASSERT
@@ -585,13 +623,15 @@ Driver gaps, each with its reason:
 Implemented, not bench-verified:
 
 - The output modes above `pwm2` (retriggerable one-pulse, combined and
-  asymmetric PWM); `TimOnePulse` and `TimPeriodicTick` on silicon (no
-  suite instantiates either task - a letter running each against the
-  EXTI edge counter would measure them).
+  asymmetric PWM): each wants a trigger placed inside a running period
+  or a second channel's waveform read beside the first - a letter of
+  their own on two pads.
 - `TimSlaveConfig::master_slave` (MSM), whose default is ES0548 2.7.1's
-  own workaround; `BDTR.LOCK`, which is one-way and would cost a
-  peripheral reset to undo; `OSSR`/`OSSI` other than clear;
-  `CR1.UIFREMAP` and `count_update_flag()`; the capture polarity `both`.
+  own workaround: what it changes is one TIMPCLK cycle of a cascade's
+  alignment, which wants two slaves started by one master and their
+  counts compared to the cycle.
+- Letter `m` on the STM32G071RB and the STM32G031K8: the boards are not
+  on the desk.
 - The ETR input from a pad and from the comparators: MCO and LSE into
   TIM2's ETR are what has run on silicon, as the dynamic clock's wall
   and its Stop witness ([clock.md](clock.md)).

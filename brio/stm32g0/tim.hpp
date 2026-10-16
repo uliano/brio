@@ -961,6 +961,21 @@ public:
         return true;
     }
 
+    /// CCMRx.OCyM of channel `ch` as it stands, its four bits split as
+    /// output_channel() writes them (21.4.7) - what a write under LOCK
+    /// level 3 actually left. `frozen` for a channel this timer has not.
+    static TimOutputMode output_mode(uint8_t ch) {
+        if (ch >= channels) {
+            return TimOutputMode::frozen;
+        }
+        const TIM_TypeDef& t = regs();
+        const uint32_t v = ch < 2u ? t.CCMR1 : t.CCMR2;
+        const uint8_t shift = static_cast<uint8_t>(8u * (ch & 1u));
+        const uint32_t mode = ((v >> (shift + 4u)) & 0x7u) |
+                              (((v >> (16u + shift)) & 0x1u) << 3u);
+        return static_cast<TimOutputMode>(mode);
+    }
+
     /// Configure channel `ch` as an INPUT. The channel is disabled in
     /// CCER first, because 21.4.9 makes CCyS writable only then - the
     /// silicon's own rule, and the reason this is not one store.
@@ -1117,6 +1132,21 @@ public:
         }
     }
     static bool main_output() { return has_break && (regs().BDTR & TIM_BDTR_MOE) != 0u; }
+
+    /// BDTR's fields read back as they stand - what a write under LOCK
+    /// actually left (21.4.18: LOCK itself is written once, and each
+    /// level makes its fields read-only until the next peripheral
+    /// reset). Zero / false on a timer without a break unit.
+    static uint8_t lock_level() {
+        return has_break ? static_cast<uint8_t>((regs().BDTR & TIM_BDTR_LOCK_Msk) >>
+                                                TIM_BDTR_LOCK_Pos)
+                         : uint8_t{0};
+    }
+    static uint8_t dead_time_code() {
+        return has_break ? static_cast<uint8_t>(regs().BDTR & TIM_BDTR_DTG_Msk) : uint8_t{0};
+    }
+    static bool off_state_idle() { return has_break && (regs().BDTR & TIM_BDTR_OSSI) != 0u; }
+    static bool off_state_run() { return has_break && (regs().BDTR & TIM_BDTR_OSSR) != 0u; }
 
     // ---- the external trigger input (21.4.3, 21.4.28) -----------------------
 
@@ -1598,9 +1628,20 @@ struct TimPeriodicTick {
  * trigger and the timer costs nothing between them.
  *
  * `delay` is where the pulse STARTS (the compare value) and the pulse
- * ends at the period, so width = period - delay. The trigger is the
- * caller's: a software start (T::enable(true)), a slave trigger mode on
- * an ITRx, or a TI edge.
+ * ends at the update: the counter runs 0..ARR, PWM mode 2 is active from
+ * CNT = CCR to ARR, so ARR = delay + width - 1 makes the pulse `width`
+ * counts wide (measured: ARR = delay + width gave one count more). The
+ * trigger is the caller's: a software start (T::enable(true)), a slave
+ * trigger mode on an ITRx, or a TI edge.
+ *
+ * THE COMPARE IS NOT PRELOADED here, against fact 4's default: a
+ * preloaded CCR reaches its shadow only at an update, and configure()'s
+ * EGR.UG comes BEFORE the channel is written - so the first pulse ran
+ * with a shadow of 0, PWM mode 2 active from CNT = 0 and the pad HIGH
+ * from setup() on (measured: the first fire() rose at once and stayed
+ * high 1509 us for a 500 us delay and a 1000 us width). A one-pulse
+ * compare is written once, with the counter stopped, so the runt pulse
+ * the preload exists to prevent cannot happen.
  */
 template <class T, uint8_t ch = 0>
 struct TimOnePulse {
@@ -1614,7 +1655,7 @@ struct TimOnePulse {
             return false;
         }
         if (!T::configure({.prescaler = prescaler,
-                           .period = delay + width,
+                           .period = delay + width - 1u,
                            .one_pulse = true})) {
             return false;
         }
@@ -1623,6 +1664,7 @@ struct TimOnePulse {
         // chapter's own recipe for a delayed pulse.
         if (!T::output_channel(ch, {.mode = TimOutputMode::pwm2,
                                     .compare = delay,
+                                    .preload = false,
                                     .active_low = active_low})) {
             return false;
         }

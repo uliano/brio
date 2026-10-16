@@ -48,6 +48,9 @@
 //      error counter climbs to bus-off and comes back
 //   k  CAN2: the shared filter block, the start bank that splits it, and
 //      the slave's own loopback
+//   l  CAN1's vectors (transmit, FIFO 0, status change) under real
+//      traffic and a real bus-off, request_bus_off_recovery() timed, and
+//      four rates past letter i's: 3 and 1.5 Mbit/s, 50 and 10 kbit/s
 //
 // build: boards = f429zi,f446re,f411ce,f469ni
 // build: monitor_speed = 115200
@@ -1272,6 +1275,188 @@ void tk_can2() {
 }
 
 #endif // CAN2_BASE
+// =============================================================================
+// l - the vectors, the software bus-off recovery, the rates past the four
+// =============================================================================
+volatile uint16_t can_tx_entries = 0, can_tx_done = 0;
+volatile uint16_t can_rx0_entries = 0, can_rx0_frames = 0, can_rx0_bad = 0;
+volatile uint16_t can_sce_entries = 0, can_sce_bus_off = 0;
+
+void reset_can_counts() {
+    P::CriticalSection cs;
+    can_tx_entries = 0; can_tx_done = 0;
+    can_rx0_entries = 0; can_rx0_frames = 0; can_rx0_bad = 0;
+    can_sce_entries = 0; can_sce_bus_off = 0;
+}
+
+void can_vectors(bool on) {
+    for (const IRQn_Type v : {Bus::tx_irq(), Bus::rx_irq(0), Bus::sce_irq()}) {
+        if (on) {
+            Nvic::clear_pending(v);
+            Nvic::enable(v);
+        } else {
+            Nvic::disable(v);
+            Nvic::clear_pending(v);
+        }
+    }
+}
+
+/// The frame letter l's receive vector checks every copy against.
+constexpr uint8_t vec_byte(uint8_t k, uint8_t i) { return static_cast<uint8_t>(0x30u + 7u * k + i); }
+
+void tl_can_vectors_recovery_rates() {
+    // --- THE VECTORS in loopback at 500 kbit/s: five frames, each sent
+    // when the last has come back, the transmit vector on the mailbox's
+    // completion and the FIFO 0 vector on the message pending - the
+    // receive body reads every pending message and checks it.
+    reset_can_counts();
+    bool up = can_up(500'000u, true, false);
+    // A mailbox an earlier letter left completed still says so here -
+    // can_up()'s master reset does not take RQCP down (counted, printed)
+    // - and TMEIE would enter the vector for it at once. Each is cleared
+    // first, so the vector counts this letter's frames alone.
+    uint8_t stale = 0;
+    for (uint8_t mb = 0; mb < 3u; ++mb) {
+        if (Bus::result(mb).completed) {
+            ++stale;
+            (void)Bus::clear_result(mb);
+        }
+    }
+    print(serial, "  completed mailboxes standing after the master reset: ", stale, crlf);
+    Bus::interrupt(CanInterrupt::tx_mailbox_empty, true);
+    Bus::interrupt(CanInterrupt::fifo0_pending, true);
+    can_vectors(true);
+    bool sent_all = up;
+    for (uint8_t k = 0; k < 5u && sent_all; ++k) {
+        CanFrame f{};
+        f.id = static_cast<uint32_t>(0x100u + k);
+        f.length = 8;
+        for (uint8_t i = 0; i < 8u; ++i) {
+            f.data[i] = vec_byte(k, i);
+        }
+        sent_all = Bus::transmit(f).has_value() &&
+                   timed_wait([k] { return can_rx0_frames > k; }, 20u).has_value();
+    }
+    (void)timed_wait([] { return false; }, 2u);
+    can_vectors(false);
+    Bus::interrupts_off();
+    print(serial, "  five loopback frames under the vectors: transmit vector ",
+          can_tx_entries, " entries for ", can_tx_done, " completions; FIFO 0 vector ",
+          can_rx0_entries, " entries, ", can_rx0_frames, " frames read, ", can_rx0_bad,
+          " wrong", crlf);
+    bench.verdict("THE TRANSMIT AND RECEIVE VECTORS: each frame's completion enters "
+                  "the transmit vector and its copy the FIFO 0 vector, whose body "
+                  "reads it whole - five of five, byte-exact",
+                  sent_all && can_tx_done == 5u && can_tx_entries == 5u &&
+                      can_rx0_entries == 5u && can_rx0_frames == 5u && can_rx0_bad == 0u);
+    Bus::master_reset();
+
+    // --- THE STATUS VECTOR and the SOFTWARE bus-off recovery: letter j's
+    // recessive bus at 1 Mbit/s with ABOM clear, the error interrupts
+    // armed; bus-off, then request_bus_off_recovery() timed until BOFF
+    // clears.
+    reset_can_counts();
+    Bus::clock(true);
+    Bus::claim_rx_pad<can_rx_pad>(PinPull::up);
+    Bus::master_reset();
+    up = Bus::init_mode(true);
+    up = Bus::options(CanOptions{.auto_bus_off = false, .no_retransmit = true}) && up;
+    up = Bus::timing(can_timing_for(can_pclk, 1'000'000u), false, false) && up;
+    up = Bus::start() && up;
+    Bus::interrupt(CanInterrupt::bus_off, true);
+    Bus::interrupt(CanInterrupt::error, true);
+    can_vectors(true);
+    CanFrame f{};
+    f.id = 0x123;
+    f.length = 1;
+    f.data[0] = 0x5A;
+    uint32_t attempts = 0;
+    while (attempts < 64u && !Bus::bus_off()) {
+        const auto m = Bus::transmit(f);
+        if (!m || !timed_wait([&] { return Bus::result(*m).completed; }, 20u)) {
+            break;
+        }
+        (void)Bus::clear_result(*m);
+        ++attempts;
+    }
+    const bool off = Bus::bus_off();
+    const uint16_t sce_at_off = can_sce_entries;
+    const uint16_t bo_seen = can_sce_bus_off;
+    can_vectors(false);
+    Bus::interrupts_off();
+    (void)timed_wait([] { return false; }, 5u);
+    const bool stayed = Bus::bus_off();
+    const bool asked = Bus::request_bus_off_recovery();
+    const auto took = timed_wait([] { return !Bus::bus_off(); }, 50u);
+    const uint32_t took_us = took ? *took / cycles_per_us : 0u;
+    print(serial, "  bus-off after ", attempts, " attempts; the status vector entered ",
+          sce_at_off, " times, ", bo_seen, " of them with BOFF; with ABOM clear the "
+          "node stayed off, and request_bus_off_recovery() brought it back in ",
+          took_us, " us (128 x 11 = 1408 bit times at 1 Mbit/s)", crlf);
+    bench.verdict("THE STATUS VECTOR: the error interrupts enter it on the way to "
+                  "bus-off, and it sees BOFF set",
+                  up && off && sce_at_off >= 1u && bo_seen >= 1u);
+    // THE BOUND: 128 occurrences of 11 recessive bits (30.7.6) on a bus
+    // held recessive by the pad's pull, 1408 us at 1 Mbit/s, timed from
+    // the verb's return: the stamp floors to the microsecond (-1), and the
+    // 11 recessive bits leaving initialization needs (before the verb
+    // returns) may already be the first occurrence (-11) - 1396..1408, and
+    // 20 us of slack above for the wait's own polling. Letter j's ABOM
+    // recovery, the same count started by hardware, reads 1407.
+    bench.verdict("request_bus_off_recovery(): with ABOM clear the node stays off "
+                  "until asked, and comes back 128 x 11 recessive bits after the ask",
+                  stayed && asked && took.has_value() && took_us >= 1396u &&
+                      took_us <= 1428u);
+    Bus::master_reset();
+
+    // --- THE RATES PAST LETTER i's FOUR, in loopback: two above the
+    // chapter's 1 Mbit/s ceiling and two below 125 kbit/s, each exact from
+    // PCLK1 (the search refuses an inexact one).
+    static constexpr uint32_t more[4] = {3'000'000u, 1'500'000u, 50'000u, 10'000u};
+    bool rates_ok = true;
+    for (const uint32_t rate : more) {
+        const CanTiming t = can_timing_for(can_pclk, rate);
+        if (!can_timing_valid(t) || !can_up(rate, true, false)) {
+            print(serial, "  ", rate, " bit/s: no exact timing from ", can_pclk, " Hz", crlf);
+            rates_ok = false;
+            continue;
+        }
+        CanFrame g{};
+        g.id = 0x123;
+        g.length = 8;
+        for (uint8_t k = 0; k < 8u; ++k) {
+            g.data[k] = static_cast<uint8_t>(0x5Au ^ k);
+        }
+        const auto mb = Bus::transmit(g);
+        const auto cycles = mb ? timed_wait([&] { return Bus::result(*mb).completed; }, 100u)
+                               : std::optional<uint32_t>{};
+        const bool ok = cycles && Bus::result(*mb).ok;
+        const auto back = Bus::receive(0);
+        const bool same = back && back->id == g.id && back->length == 8u &&
+                          back->data[7] == g.data[7];
+        const uint32_t us100 = cycles ? *cycles * 100u / cycles_per_us : 0u;
+        const uint32_t nominal100 = static_cast<uint32_t>(
+            static_cast<uint64_t>(can_frame_bits(8, false)) * 100'000'000ULL / rate);
+        print(serial, "  ", rate, " bit/s (BRP ", t.brp, ", ", 1u + t.ts1 + t.ts2,
+              " quanta): ", us100 / 100u, ".", us100 % 100u / 10u, " us for the frame, ",
+              nominal100 == 0u ? 0u : us100 * 100u / nominal100, "% of its unstuffed bits; "
+              "the copy ", same ? "exact" : "WRONG", crlf);
+        // Letter i's bound: at least the unstuffed bits, at most half as
+        // much again (stuffing adds at most one bit in five).
+        rates_ok = rates_ok && ok && same && us100 >= nominal100 &&
+                   us100 <= nominal100 * 3u / 2u;
+        if (mb) {
+            (void)Bus::clear_result(*mb);
+        }
+        Bus::master_reset();
+    }
+    bench.verdict("3 and 1.5 Mbit/s above the chapter's ceiling, 50 and 10 kbit/s "
+                  "below letter i's floor: each frame round-trips in loopback in its "
+                  "own bit time",
+                  rates_ok);
+    Bus::master_reset();
+}
+
 #endif // CAN1_BASE && (STM32F446xx || STM32F469xx)
 
 void banner() {
@@ -1292,6 +1477,45 @@ extern "C" void USART1_IRQHandler() { (void)Serial::isr(); }
 #endif
 extern "C" void SysTick_Handler() { brio::Ticker::tick(); }
 
+#if defined(CAN1_BASE) && (defined(STM32F446xx) || defined(STM32F469xx))
+// Letter l's three CAN1 lines, the bodies the driver offers.
+extern "C" void CAN1_TX_IRQHandler() {
+    const auto e = Bus::tx_isr();
+    can_tx_entries = can_tx_entries + 1u;
+    for (const auto& r : e.mailbox) {
+        if (r.completed) {
+            can_tx_done = can_tx_done + 1u;
+        }
+    }
+}
+extern "C" void CAN1_RX0_IRQHandler() {
+    const auto e = Bus::rx_isr(0);
+    can_rx0_entries = can_rx0_entries + 1u;
+    for (uint8_t i = 0; i < e.pending; ++i) {
+        const auto f = Bus::receive(0);
+        if (!f) {
+            break;
+        }
+        const uint8_t k = static_cast<uint8_t>(f->id - 0x100u);
+        bool good = f->length == 8u && k < 5u;
+        for (uint8_t j = 0; j < 8u && good; ++j) {
+            good = f->data[j] == vec_byte(k, j);
+        }
+        if (!good) {
+            can_rx0_bad = can_rx0_bad + 1u;
+        }
+        can_rx0_frames = can_rx0_frames + 1u;
+    }
+}
+extern "C" void CAN1_SCE_IRQHandler() {
+    const auto e = Bus::sce_isr();
+    can_sce_entries = can_sce_entries + 1u;
+    if (e.bus_off) {
+        can_sce_bus_off = can_sce_bus_off + 1u;
+    }
+}
+#endif
+
 int main() {
     const bool clock_ok = SysClock::init();
     const bool serial_ok = Serial::init(clock, 115200);
@@ -1311,6 +1535,8 @@ int main() {
     bench.letter('h', "the receive FIFO and its overrun policy", th_can_fifo);
     bench.letter('i', "four bit rates measured against the arithmetic", ti_can_rates);
     bench.letter('j', "silent mode and the error counters on a recessive bus", tj_can_errors);
+    bench.letter('l', "the vectors, the software bus-off recovery, four more rates",
+                 tl_can_vectors_recovery_rates);
 #if defined(CAN2_BASE)
     bench.letter('k', "CAN2 and the filter block the pair shares", tk_can2);
 #endif

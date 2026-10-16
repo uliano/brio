@@ -5,7 +5,7 @@ Documents of record: RM0444 Rev 6 - CRC ch. 14, the AHB enable and reset
 ES0548 Rev 3: NO ITEM TOUCHES THE CRC - a statement about the document,
 not a claim about the silicon. Driver: `stm32g0/crc.hpp`; the presence
 and mask facts come from `stm32g0/device_tables.hpp`. Bench suite:
-`test_stm32_crc` (5 letters, 27 verdicts, wireless). Family fixture
+`test_stm32_crc` (6 letters, 33 verdicts, wireless). Family fixture
 `test/family_stm32g0/crc.cpp` plus two negatives under
 `brio check stm32g0`.
 
@@ -196,10 +196,35 @@ transaction plus 14.3.3's four computation cycles would cost more than
 ten.
 
 **16 KB of this program's own flash, three routes, one number.** The
-same region checksummed CPU-fed (54458 cycles), DMA-fed (28736 cycles)
-and by a bitwise software reference agree exactly. The DMA path moves
-36.5 MB/s with no CPU in the loop and is nearly twice as fast as the CPU
-one, having no instruction fetch between beats.
+same region checksummed CPU-fed, DMA-fed and by a bitwise software
+reference agree exactly - and so do the DMA's NARROW beats: the same 16
+KB moved into `CRC_DR` a byte at a time (REV_IN by byte) and a half-word
+at a time (REV_IN by half-word) is the same reflected CRC-32 (letter
+`d`, ten runs of ten). **A beat costs about seven cycles whatever its
+width** - 7.00 a byte, 7.01 a half-word - so the narrow channels move
+the region at a quarter and a half of the word channel's rate.
+
+**THE FIGURES FOLLOW THE PLACEMENT, NOT THE CHECKSUM.** In the image as
+built the word channel takes 32843..32853 cycles (8.02 a beat, 31.9 MB/s)
+and the CPU-fed loop 37185..37250; an image whose only change is a 20 us
+pause inside the DMA's polling loop gives 30196 (7.06 a beat once the
+pause's quantization is taken off - the narrow beats' figure) and moves
+the CPU-fed loop, elsewhere in the function, to 53885. The DMA's beat
+shares the flash with the CPU: the tight polling loop reloads the
+controller's address from a literal pool in the flash on every turn
+(read in the listing), and spaced out it no longer competes. Why the
+CPU-fed loop's own cost moves by 45 % between the two images is NOT
+measured (the loop's alignment against the flash's lines is the
+candidate). The verdict that holds in both - the DMA path is the faster
+- is the one judged.
+
+**A CLOSED GATE KEEPS A RUNNING CALCULATION** (letter `f`): four words
+fed, the AHB gate shut, a fifth stored and DR read through the closed
+gate (0, 5.2.17), the gate reopened - DR holds the four-word value, the
+store made through the closed gate went nowhere, and the fifth word fed
+then gives the five-word value. **`release()` ends one**: after it, the
+gate alone reopened shows table 70's reset values (DR 0xFFFFFFFF, POL
+0x04C11DB7, CR cleared). Ten runs of ten.
 
 **Both refusals fire before a register is touched**: an even polynomial
 and one too wide for its POLYSIZE are rejected with the polynomial in
@@ -242,10 +267,6 @@ driver.)
 
 Implemented but not bench-verified:
 
-- **`release()`** - the gate is closed and the block reset, but no
-  letter checks what a closed gate does to a running calculation
-  (5.2.17's answer is measured for a READ, at the top of letter a).
-- **A DMA channel narrower than a word.** `data_address()` is width
-  agnostic and the suite feeds words; a byte-wide MEM2MEM channel into
-  `CRC_DR` would exercise the narrow access from the DMA's side rather
-  than the CPU's, and nothing here needs it yet.
+- Letter `f` and letter `d`'s narrow beats on the STM32G071RB and the
+  STM32G031K8: one run of the suite on each board measures them (the
+  boards are not on the desk).

@@ -39,6 +39,14 @@
 //   m  the encoder, driven by two pads the program toggles
 //   n  the meter tasks against the ruler
 //   o  the vectors: four lines on one timer, one line for two timers
+//   q  the counting modes: the three centre-aligned CMS codes told apart
+//      by the direction their CC1 flag rises in, the down-counter; the
+//      one-pulse ARMED on TIM2's update; and BDTR.LOCK's three levels
+//   p  the instances the STM32F411 has not - TIM6, TIM7, TIM12, TIM13 and
+//      TIM14 counting at their own lines, TIM8's four vectors, TIM8's
+//      third pair with a dead time on PC8/PB1 and TIM13/TIM14 on PA6/PA7
+//      (the pads on the Nucleo-F446RE alone; the letter skips by name
+//      where the six are absent)
 //
 // build: boards = f411ce,f446re,f469ni
 // build: monitor_speed = 115200
@@ -128,7 +136,7 @@ using Small1 = Tim<11>;    // one channel, no slave controller, HSE_RTC on its i
 using Serial = Uart<console_instance, console_pins>;
 constexpr Serial serial;
 
-TestBench<Serial> bench;
+TestBench<Serial, 20> bench;
 
 // ---- what the registers held before this program touched them -------------------
 struct BootState {
@@ -143,6 +151,9 @@ BootState boot;
 volatile uint16_t adv_update = 0, adv_cc = 0, adv_brk = 0, adv_trg = 0;
 volatile uint16_t small2_entries = 0, small1_entries = 0;
 volatile uint32_t adv_brk_flags = 0;
+// Letter p's instances, each counted by the body of its own line.
+volatile uint16_t t6_up = 0, t7_up = 0, t12_up = 0, t13_up = 0, t14_up = 0;
+volatile uint16_t t8_up = 0, t8_cc = 0, t8_brk = 0, t8_trg = 0;
 
 void reset_counters() {
     P::CriticalSection cs;
@@ -531,27 +542,41 @@ void td_gated_duty() {
 // e - a PWM output read back on its own pad
 // =============================================================================
 
-/// Sample a pad `samples` times as fast as the loop can and return how
-/// many reads were high.
-uint32_t sample_high(uint32_t samples) {
+/// Sample a pad `samples` times and return how many reads were high.
+///
+/// THE SAMPLES ARE DITHERED, and that is the whole of letter e's old
+/// failure on the STM32F446. A tight polling loop runs off the same
+/// oscillator as the timer it watches, so its period and the PWM's are a
+/// fixed ratio: measured on the F446 at 180 MHz, a transition-stamping
+/// loop LOCKED onto a 10 kHz PWM (18004 cycles) and stopped seeing its
+/// 27-cycle low at all after four periods, and the plain counting loop
+/// read 98 954 of 100 000 high at a compare of 999 where the waveform is
+/// low one count in 1000 - the few hundred periods the samples covered
+/// visited only a few phases, and where they sat decided the figure. A
+/// pseudo-random spin of 0..31 turns between reads spreads the samples
+/// over every phase of the period, so the high fraction is the duty's.
+template <class Pad>
+uint32_t sample_pad(uint32_t samples) {
     uint32_t high = 0;
+    uint32_t x = 0x2545F491u;
+    volatile uint32_t sink = 0;
     for (uint32_t i = 0; i < samples; ++i) {
-        if (WavePad::read()) {
+        if (Pad::read()) {
             ++high;
         }
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        for (uint32_t d = x & 31u; d != 0u; --d) {
+            sink = d;
+        }
     }
+    (void)sink;
     return high;
 }
 
-uint32_t sample_adv(uint32_t samples) {
-    uint32_t high = 0;
-    for (uint32_t i = 0; i < samples; ++i) {
-        if (AdvPad::read()) {
-            ++high;
-        }
-    }
-    return high;
-}
+uint32_t sample_high(uint32_t samples) { return sample_pad<WavePad>(samples); }
+uint32_t sample_adv(uint32_t samples) { return sample_pad<AdvPad>(samples); }
 
 constexpr uint32_t pad_samples = 100000;
 
@@ -579,10 +604,19 @@ void te_pwm_pad() {
     const uint32_t at_half = sample_high(pad_samples);
     print(serial, "  100000 reads of the pad's own IDR: ", at_zero, " high at duty 0, ",
           at_half, " at 500, ", at_full, " at 999", crlf);
+    // THE BOUND at a compare of 999: the waveform is low one count in
+    // 1000 (0.1 %); the pad's own input, read with the samples spread over
+    // every phase, sees about twice that on the STM32F446 - 192..207 low
+    // reads of 100 000, some 36 cycles of an 18004-cycle period where a
+    // count is 18 (the low-speed pad's two edges through the input
+    // threshold the candidate). At p = 0.002 the binomial sigma of 100 000
+    // reads is 14: 300 low (0.3 %) is seven sigma above that, and still
+    // three times under the 1 % the undithered loop read.
     bench.verdict("AN ALTERNATE-FUNCTION PAD FEEDS ITS OWN INPUT BUFFER: the waveform "
                   "the timer drives is readable on IDR with nothing attached - a "
-                  "compare of zero never rises and a compare at the period barely falls",
-                  up && at_zero == 0u && at_full > pad_samples - pad_samples / 100u);
+                  "compare of zero never rises and a compare at the period barely "
+                  "falls (under 0.3 % of dithered reads)",
+                  up && at_zero == 0u && at_full >= pad_samples - pad_samples * 3u / 1000u);
     bench.verdict("and half the period is half the samples, within three per cent",
                   near(at_half, pad_samples / 2u, pad_samples / 33u));
 
@@ -819,6 +853,377 @@ void th_option_hse() {
 }
 
 // =============================================================================
+// q - the counting modes, the armed one-pulse, and BDTR.LOCK
+// =============================================================================
+
+/// What `ms` milliseconds of TIM3 (Wave) report by polling: the CC1 matches
+/// seen while it counted up and while it counted down, and the updates.
+struct ModeCount {
+    uint32_t up = 0, down = 0, updates = 0;
+};
+ModeCount count_mode(TimAlignment align, TimDirection dir, uint32_t ms) {
+    Wave::init();
+    // 1 MHz count, ARR 1000: an edge-aligned period of 1001 us, a centred
+    // one of 2 x 1000 = 2000 us (RM0383 13.3.2: the counter runs 0..ARR..0).
+    (void)Wave::configure({.prescaler = static_cast<uint16_t>(apb1_tim_hz / 1'000'000u - 1u),
+                           .period = 1000, .direction = dir, .alignment = align});
+    (void)Wave::output_channel(0, {.mode = TimOutputMode::frozen, .compare = 300,
+                                   .enable = false});
+    Wave::clear_flags(Wave::all_flags);
+    Wave::enable(true);
+    ModeCount m;
+    const uint32_t t0 = Ticker::ticks();
+    while (within(t0, ms)) {
+        const uint32_t f = Wave::flags();
+        if ((f & Wave::compare_flag(0)) != 0u) {
+            const bool down = Wave::direction() == TimDirection::down;
+            Wave::clear_flags(Wave::compare_flag(0));
+            if (down) {
+                ++m.down;
+            } else {
+                ++m.up;
+            }
+        }
+        if ((f & Wave::update_flag) != 0u) {
+            Wave::clear_flags(Wave::update_flag);
+            ++m.updates;
+        }
+    }
+    Wave::enable(false);
+    Wave::release();
+    return m;
+}
+
+void tq_modes_and_lock() {
+    quiet_everything();
+    // --- the three centre-aligned modes and the down-counter, over 20 ms:
+    // ten centred periods (2000 us) or twenty edge-aligned ones (1001
+    // us). A centred counter matches CCR = 300 twice a period, once each
+    // way, and updates at the top and at the bottom; CMS picks which
+    // match raises CC1IF. +-1 on every count for the window's phase.
+    const ModeCount c1 = count_mode(TimAlignment::center_down, TimDirection::up, 20);
+    const ModeCount c2 = count_mode(TimAlignment::center_up, TimDirection::up, 20);
+    const ModeCount c3 = count_mode(TimAlignment::center_both, TimDirection::up, 20);
+    const ModeCount dn = count_mode(TimAlignment::edge, TimDirection::down, 20);
+    print(serial, "  20 ms of CC1 matches (up/down) and updates: CMS 1 ", c1.up, "/", c1.down,
+          " ", c1.updates, "; CMS 2 ", c2.up, "/", c2.down, " ", c2.updates, "; CMS 3 ",
+          c3.up, "/", c3.down, " ", c3.updates, "; edge-aligned DOWN ", dn.up, "/", dn.down,
+          " ", dn.updates, crlf);
+    auto about = [](uint32_t v, uint32_t want) { return v + 1u >= want && v <= want + 1u; };
+    bench.verdict("CENTRE-ALIGNED: CMS 1 raises CC1IF only counting down, CMS 2 only "
+                  "counting up, CMS 3 both ways - ten centred periods of 2 x ARR",
+                  c1.up == 0u && about(c1.down, 10) && about(c2.up, 10) && c2.down == 0u &&
+                      about(c3.up, 10) && about(c3.down, 10));
+    bench.verdict("and a centred counter updates twice a period, at the top and at "
+                  "the bottom",
+                  about(c1.updates, 20) && about(c2.updates, 20) && about(c3.updates, 20));
+    bench.verdict("THE DOWN-COUNTER (DIR = 1): every match seen counting down, one "
+                  "update a period of ARR + 1",
+                  dn.up == 0u && about(dn.down, 20) && about(dn.updates, 20));
+
+    // --- the armed one-pulse: letter i's pulse, waiting in trigger mode on
+    // ITR1 for TIM2's update - TIM2 one-pulse itself, 1000 counts of 1 MHz.
+    WavePad::claim();
+    Wave::init();
+    Wide::init();
+    using Pulse = TimOnePulse<Wave, 0>;
+    const uint16_t psc10 = static_cast<uint16_t>(apb1_tim_hz / 100'000u - 1u);
+    constexpr TimTrigger from_t2 = static_cast<TimTrigger>(tim_trigger_index_for(3, 2));
+    // The master FIRST: its configure() ends in EGR.UG, and with MMS
+    // still at its reset code (000, "reset") that UG IS a TRGO - a slave
+    // armed before it would fire there.
+    const bool master_up =
+        Wide::configure({.prescaler = static_cast<uint16_t>(apb1_tim_hz / 1'000'000u - 1u),
+                         .period = 999, .one_pulse = true}) &&
+        Wide::master(TimMasterMode::update);
+    const bool armed = Pulse::setup(psc10, 20, 50) && Pulse::arm(from_t2);
+    (void)delay_us(clock, 1000);
+    const bool waiting = !Pulse::busy() && !WavePad::read();
+    const uint32_t deadline = Ticker::ticks();
+    const uint32_t g0 = cycles_now();
+    Wide::enable(true);
+    while (!WavePad::read() && within(deadline, 20)) {
+    }
+    const uint32_t g_rise = cycles_now();
+    while (WavePad::read() && within(deadline, 40)) {
+    }
+    const uint32_t g_fall = cycles_now();
+    (void)delay_us(clock, 1000);
+    const bool once = !Pulse::busy() && !Wide::enabled();
+    const uint32_t rise_us = (g_rise - g0) / cycles_per_us;
+    const uint32_t width_us = (g_fall - g_rise) / cycles_per_us;
+    print(serial, "  the pulse armed on TIM2's update (ITR1): rises ", rise_us,
+          " us after TIM2 starts, high ", width_us, " us; waiting before it ",
+          waiting ? "yes" : "NO", crlf);
+    // TIM2's 1000 us, then letter i's 200 us and 500 us; the bounds are
+    // letter i's (a count of 10 us on the rise, a polling turn - under a
+    // microsecond here - either side).
+    bench.verdict("arm(): the one-pulse WAITS in trigger mode and fires once on TIM2's "
+                  "update - 1000 us + the 200 us delay, 500 us wide",
+                  armed && master_up && waiting && rise_us >= 1200u && rise_us <= 1211u &&
+                      width_us + 1u >= 500u && width_us <= 501u && once);
+    WavePad::release();
+    Wave::release();
+    Wide::release();
+
+    // --- BDTR.LOCK on TIM1, one level at a time, each undone by the
+    // peripheral reset init() pulses (17.4.18).
+    bool lock_ok = true;
+    for (uint8_t level = 1; level <= 3u; ++level) {
+        Adv::init();
+        (void)Adv::output_channel(0, {.mode = TimOutputMode::pwm1, .compare = 10,
+                                      .enable = false});
+        (void)Adv::break_dead_time({.dead_time = 10, .main_output_enable = false,
+                                    .lock = level});
+        (void)Adv::break_dead_time({.dead_time = 20, .main_output_enable = false,
+                                    .off_state_idle = true, .lock = 0});
+        (void)Adv::output_channel(0, {.mode = TimOutputMode::pwm2, .compare = 10,
+                                      .enable = false});
+        const uint8_t lv = Adv::lock_level();
+        const uint8_t dtg = Adv::dead_time_code();
+        const bool ossi = Adv::off_state_idle();
+        const TimOutputMode mode = Adv::output_mode(0);
+        print(serial, "  LOCK ", level, ": reads ", lv, ", DTG ", dtg,
+              " (10 locked, 20 asked), OSSI ", ossi ? "1" : "0", ", OC1M ",
+              mode == TimOutputMode::pwm2 ? "pwm2" : mode == TimOutputMode::pwm1 ? "pwm1" : "?",
+              crlf);
+        lock_ok = lock_ok && lv == level && dtg == 10u && ossi == (level < 2u) &&
+                  (mode == TimOutputMode::pwm2) == (level < 3u);
+    }
+    Adv::init();
+    const bool unlocked = Adv::lock_level() == 0u;
+    bench.verdict("BDTR.LOCK: level 1 freezes DTG, level 2 OSSI as well, level 3 the "
+                  "output mode too; LOCK itself cannot be written back, and the "
+                  "peripheral reset is what undoes it",
+                  lock_ok && unlocked);
+    quiet_everything();
+}
+
+// =============================================================================
+// p - the instances the STM32F411 has not: TIM6, TIM7, TIM8, TIM12..14
+// =============================================================================
+//
+// THE SIX ARE PRESENT TOGETHER OR NOT AT ALL on the parts this suite
+// builds for (the F446 and the F469 carry them, the F411 none), so one
+// presence fact gates the letter, and each timer is named through an
+// alias whose NUMBER depends on it - `Tim<8>` written down on an F411
+// would be a static_assert, even in a branch `if constexpr` discards.
+constexpr bool six_present = tim_present(6) && tim_present(7) && tim_present(8) &&
+                             tim_present(12) && tim_present(13) && tim_present(14);
+template <uint8_t n>
+using Six = Tim<six_present ? n : uint8_t{2}>;
+using T6 = Six<6>;
+using T7 = Six<7>;
+using T8 = Tim<six_present ? uint8_t{8} : uint8_t{1}>;   // a stand-in with a break unit
+using T12 = Six<12>;
+using T13 = Six<13>;
+using T14 = Six<14>;
+
+// The pads, chosen on the Nucleo-F446RE (UM1724 table 29) and claimed
+// there alone: TIM8's third pair on PC8 (CH3) and PB1 (CH3N), and TIM13
+// and TIM14 on PA6 and PA7 - AF3 and AF9 (DS10693 table 11). Nothing of
+// the desk's link is on them.
+#if defined(STM32F446xx)
+constexpr bool six_pads = true;
+#else
+constexpr bool six_pads = false;
+#endif
+using T8Pad = TimPad<PinSel{'C', 8, PinFunction::af3}>;
+using T8nPad = TimPad<PinSel{'B', 1, PinFunction::af3}>;
+using T13Pad = TimPad<PinSel{'A', 6, PinFunction::af9}>;
+using T14Pad = TimPad<PinSel{'A', 7, PinFunction::af9}>;
+
+void reset_six() {
+    P::CriticalSection cs;
+    t6_up = 0; t7_up = 0; t12_up = 0; t13_up = 0; t14_up = 0;
+    t8_up = 0; t8_cc = 0; t8_brk = 0; t8_trg = 0;
+}
+
+void quiet_six() {
+    if constexpr (six_present) {
+        for (const IRQn_Type v : {T6::irq(), T7::irq(), T8::irq(), T8::cc_irq(),
+                                  T8::break_irq(), T8::trigger_irq()}) {
+            Nvic::disable(v);
+            Nvic::clear_pending(v);
+        }
+        T6::release(); T7::release(); T8::release();
+        T12::release(); T13::release(); T14::release();
+        T8Pad::release(); T8nPad::release(); T13Pad::release(); T14Pad::release();
+    }
+}
+
+void tp_six_instances() {
+    if constexpr (!six_present) {
+        print(serial, "  SKIP: this part has none of TIM6, TIM7, TIM8 and "
+              "TIM12..TIM14 (the reserve's tim_present)", crlf);
+        return;
+    } else {
+        quiet_everything();
+        quiet_six();
+        // --- the five APB1 ones as periodic ticks at 10 kHz (PSC to a 1
+        // MHz count, ARR 99), all at once, each on its own line - TIM12,
+        // TIM13 and TIM14 on lines they share with TIM8's break, update and
+        // trigger. 100 kernel ticks of the same oscillator are 1000
+        // periods: 1000 updates each, +-1 for the window's phase.
+        const uint16_t psc1 = static_cast<uint16_t>(apb1_tim_hz / 1'000'000u - 1u);
+        reset_six();
+        for (const IRQn_Type v : {T6::irq(), T7::irq(), T12::irq(), T13::irq(), T14::irq()}) {
+            Nvic::clear_pending(v);
+            Nvic::enable(v);
+        }
+        T6::init(); T7::init(); T12::init(); T13::init(); T14::init();
+        const bool up = TimPeriodicTick<T6>::setup(psc1, 99) &&
+                        TimPeriodicTick<T7>::setup(psc1, 99) &&
+                        TimPeriodicTick<T12>::setup(psc1, 99) &&
+                        TimPeriodicTick<T13>::setup(psc1, 99) &&
+                        TimPeriodicTick<T14>::setup(psc1, 99);
+        uint32_t tk = Ticker::ticks();
+        while (Ticker::ticks() == tk) {
+        }
+        reset_six();   // AFTER the tick edge, so the window is the 100 ticks alone
+        tk = Ticker::ticks();
+        while (Ticker::ticks() - tk < 100u) {
+        }
+        const uint16_t c6 = t6_up, c7 = t7_up, c12 = t12_up, c13 = t13_up, c14 = t14_up;
+        TimPeriodicTick<T6>::stop(); TimPeriodicTick<T7>::stop();
+        TimPeriodicTick<T12>::stop(); TimPeriodicTick<T13>::stop();
+        TimPeriodicTick<T14>::stop();
+        print(serial, "  100 kernel ticks of 10 kHz ticks: TIM6 ", c6, ", TIM7 ", c7,
+              ", TIM12 ", c12, ", TIM13 ", c13, ", TIM14 ", c14,
+              "; TIM8's bodies on the shared lines ", t8_up + t8_brk + t8_trg, crlf);
+        auto near1000 = [](uint16_t c) { return c >= 999u && c <= 1001u; };
+        bench.verdict("TIM6, TIM7, TIM12, TIM13 AND TIM14 count, each at its own "
+                      "vector: 1000 updates in 100 ms, +-1",
+                      up && near1000(c6) && near1000(c7) && near1000(c12) &&
+                          near1000(c13) && near1000(c14));
+        bench.verdict("and on the lines TIM12..14 share with TIM8, TIM8's bodies "
+                      "answered for nothing of theirs",
+                      t8_up == 0u && t8_brk == 0u && t8_trg == 0u);
+        quiet_six();
+
+        // --- TIM8's four lines: TIM1's leg of letter o on the second
+        // advanced-control timer - at PSC 9, a period of 1000 core cycles:
+        // at PSC 0 (550 ns) two interrupts a period, each line's body
+        // asking two owners, took every cycle the thread had (measured:
+        // the board stopped answering).
+        T8::init();
+        (void)T8::configure({.prescaler = 9, .period = 99});
+        (void)T8::output_channel(0, {.mode = TimOutputMode::frozen, .compare = 50,
+                                     .enable = false});
+        (void)T8::break_dead_time({.main_output_enable = true});
+        T8::interrupts(T8::update_interrupt | T8::compare_interrupt(0) |
+                           T8::break_interrupt | T8::trigger_interrupt |
+                           T8::commutation_interrupt,
+                       true);
+        for (const IRQn_Type v : {T8::irq(), T8::cc_irq(), T8::break_irq(), T8::trigger_irq()}) {
+            Nvic::clear_pending(v);
+            Nvic::enable(v);
+        }
+        reset_six();
+        T8::enable(true);
+        (void)delay_us(clock, 200);
+        T8::enable(false);
+        const uint16_t ups = t8_up, ccs = t8_cc;
+        (void)T8::break_event();
+        (void)delay_us(clock, 20);
+        (void)T8::trigger_event();
+        (void)delay_us(clock, 20);
+        (void)T8::commutation_event();
+        (void)delay_us(clock, 20);
+        print(serial, "  TIM8, 200 us of a 5.6 us period: ", ups, " update and ", ccs,
+              " compare calls; break ", t8_brk, ", trigger/commutation ", t8_trg,
+              "; TIM12/13/14 bodies ", t12_up + t13_up + t14_up, crlf);
+        bench.verdict("TIM8'S FOUR EVENT GROUPS REACH ITS FOUR VECTORS, the trigger "
+                      "and the commutation sharing the fourth, and the small timers "
+                      "on three of them answer for none of it",
+                      ups > 0u && ccs > 0u && t8_brk == 1u && t8_trg == 2u &&
+                          t12_up == 0u && t13_up == 0u && t14_up == 0u);
+        quiet_six();
+
+        if constexpr (!six_pads) {
+            print(serial, "  the pad legs SKIP: their pads are chosen on the "
+                  "Nucleo-F446RE", crlf);
+        } else {
+            // --- TIM8's third pair on PC8/PB1 with a dead time: never both
+            // high, and what the two duties lack is the dead time.
+            using Pair8 = TimPairPwm<T8, 2, 999>;
+            T8::init();
+            T8Pad::claim();
+            T8nPad::claim();
+            // 180 kHz of PWM from the 180 MHz APB2 timer clock; DTG 100 is
+            // 100 tDTS = 556 ns of each 5556 ns period at CKD/1.
+            const bool pair_up = Pair8::setup(0, 100);
+            Pair8::duty(500);
+            (void)delay_us(clock, 1000);
+            uint32_t both = 0, a_hi = 0, b_hi = 0;
+            uint32_t x = 0x2545F491u;
+            volatile uint32_t sink = 0;
+            for (uint32_t i = 0; i < 100000u; ++i) {
+                // The pads are on two ports, so a sample is TWO reads, and
+                // an interrupt between them (the tick) would pair two
+                // instants a dead time apart (measured: once in 100 000,
+                // twice in ten runs). Masked, the two reads are cycles apart
+                // where the dead time is a hundred.
+                bool a = false;
+                bool b = false;
+                {
+                    P::CriticalSection cs;
+                    a = T8Pad::pin::read();
+                    b = T8nPad::pin::read();
+                }
+                a_hi += a ? 1u : 0u;
+                b_hi += b ? 1u : 0u;
+                both += (a && b) ? 1u : 0u;
+                x ^= x << 13; x ^= x >> 17; x ^= x << 5;
+                for (uint32_t d = x & 31u; d != 0u; --d) {
+                    sink = d;
+                }
+            }
+            (void)sink;
+            const uint32_t sum_pm = (a_hi + b_hi) / 100u;
+            print(serial, "  TIM8 CH3/CH3N at 50 %, DTG 100: ", a_hi, " and ", b_hi,
+                  " high of 100000, both ", both, "; the duties sum to ", sum_pm,
+                  " per mille where 1000 less twice 556 ns of 5556 is 800", crlf);
+            // THE BOUND: each duty is 50 % less one dead time, so the sum
+            // is 1000 - 2 x 100 / 1000 per mille = 800; the dithered reads'
+            // sigma at p = 0.4 over 100 000 is 0.15 % of each, and each pad
+            // edge's own threshold crossing a few ns of 5556 - 20 per
+            // mille either way holds them all.
+            bench.verdict("TIM8's complementary pair on its own pads is NEVER both "
+                          "high, and what the duties lack is twice the dead time",
+                          pair_up && both == 0u && sum_pm >= 780u && sum_pm <= 820u);
+            quiet_six();
+
+            // --- TIM13 and TIM14 on their pads at a quarter duty.
+            T13::init();
+            T14::init();
+            T13Pad::claim();
+            T14Pad::claim();
+            using Lamp13 = TimPwm<T13, 0, 999>;
+            using Lamp14 = TimPwm<T14, 0, 999>;
+            const uint16_t psc = static_cast<uint16_t>(apb1_tim_hz / 1000u / 10000u - 1u);
+            const bool lamps = Lamp13::setup(psc) && Lamp14::setup(psc);
+            Lamp13::duty(250);
+            Lamp14::duty(750);
+            (void)delay_us(clock, 5000);
+            const uint32_t h13 = sample_pad<T13Pad>(pad_samples);
+            const uint32_t h14 = sample_pad<T14Pad>(pad_samples);
+            print(serial, "  TIM13 on PA6 at 250/1000: ", h13, " high; TIM14 on PA7 at "
+                  "750/1000: ", h14, " high, of ", pad_samples, crlf);
+            // Letter e's arithmetic: the dithered reads land within 1 %
+            // (sigma 0.14 %, plus letter e's 0.1 % of edge) - 3 % is the
+            // bound letter e's half-duty verdict uses.
+            bench.verdict("TIM13 and TIM14 drive their own pads at the duty asked, "
+                          "within three per cent",
+                          lamps && near(h13, pad_samples / 4u, pad_samples / 33u) &&
+                              near(h14, pad_samples * 3u / 4u, pad_samples / 33u));
+            quiet_six();
+        }
+        quiet_everything();
+    }
+}
+
+// =============================================================================
 // i - one-pulse mode: the width on the pad, and the counter that stops
 // =============================================================================
 void ti_one_pulse() {
@@ -827,14 +1232,29 @@ void ti_one_pulse() {
     Wave::init();
     using Pulse = TimOnePulse<Wave, 0>;
 
-    // A pulse of about 500 us after a delay of about 200 us, counted in
-    // microseconds so the pad can be watched by a polling loop.
-    const uint16_t psc = static_cast<uint16_t>(apb1_tim_hz / 1'000'000u - 1u);
-    const bool armed = Pulse::setup(psc, 200, 500);
+    // A pulse of 500 us after a delay of 200 us, counted in 10 us steps:
+    // a count coarse enough that one count too many (10 us) stands out of
+    // the polling loop's resolution.
+    const uint16_t psc = static_cast<uint16_t>(apb1_tim_hz / 100'000u - 1u);
+    const bool armed = Pulse::setup(psc, 20, 50);
     bench.verdict("a pulse of zero width is refused - there is nothing to make",
-                  armed && !Pulse::setup(psc, 200, 0));
+                  armed && !Pulse::setup(psc, 20, 0) && Pulse::setup(psc, 20, 50));
 
     const bool low_before = !WavePad::read();
+    // What one turn of the polling loops below costs - the resolution of
+    // every stamp they take.
+    uint32_t turn = 0;
+    {
+        const uint32_t d0 = Ticker::ticks();
+        const uint32_t c0 = cycles_now();
+        for (uint32_t i = 0; i < 100u; ++i) {
+            if (WavePad::read() && !within(d0, 20)) {
+                break;
+            }
+        }
+        turn = (cycles_now() - c0) / 100u;
+    }
+    const uint32_t turn_us = turn / cycles_per_us + 1u;
     const uint32_t deadline = Ticker::ticks();
     const uint32_t t_fire = cycles_now();
     Pulse::fire();
@@ -849,12 +1269,18 @@ void ti_one_pulse() {
     const bool stopped = !Pulse::busy();
     print(serial, "  fire to rise ", delay_us_measured, " us (200 asked), high for ",
           width_us, " us (500 asked); the counter is ", stopped ? "stopped" : "STILL RUNNING",
-          crlf);
+          "; a polling turn is ", turn, " cycles", crlf);
+    // THE BOUNDS: the count is the timer clock / (PSC + 1) = 100 kHz
+    // exactly, on the ruler's own oscillator, so all that remains is each
+    // stamp's resolution - one polling turn (measured, printed) - and, on
+    // the rise, the start's first count edge (up to one count, 10 us). The
+    // width is the 50 counts asked, 500 us, not the 51 that ARR = delay +
+    // width made (510 us).
     bench.verdict("ONE-PULSE MODE MAKES ONE PULSE: the pad rises at the compare and "
-                  "falls at the update, within two per cent of the asked width",
-                  low_before && width_us > 490u && width_us < 510u);
-    bench.verdict("the delay before it is the compare value, to five per cent",
-                  delay_us_measured > 190u && delay_us_measured < 215u);
+                  "falls at the update, as wide as asked to a polling turn",
+                  low_before && width_us + turn_us >= 500u && width_us <= 500u + turn_us);
+    bench.verdict("the delay before it is the compare value, to a count and a turn",
+                  delay_us_measured >= 200u && delay_us_measured <= 210u + turn_us);
     bench.verdict("AND THE COUNTER STOPS ITSELF: CR1.OPM clears CEN at the update, so "
                   "the timer costs nothing until the next trigger",
                   stopped);
@@ -1470,6 +1896,49 @@ extern "C" void TIM1_TRG_COM_TIM11_IRQHandler() {
     }
 }
 
+#if defined(TIM8_BASE)
+// Letter p's six, TIM8's four lines three of them shared with TIM12..14.
+extern "C" void TIM6_DAC_IRQHandler() {
+    if (T6::isr() != 0u) {
+        t6_up = t6_up + 1u;
+    }
+}
+extern "C" void TIM7_IRQHandler() {
+    if (T7::isr() != 0u) {
+        t7_up = t7_up + 1u;
+    }
+}
+extern "C" void TIM8_UP_TIM13_IRQHandler() {
+    if (T8::isr(T8::vector_flags(T8::irq())) != 0u) {
+        t8_up = t8_up + 1u;
+    }
+    if (T13::isr() != 0u) {
+        t13_up = t13_up + 1u;
+    }
+}
+extern "C" void TIM8_CC_IRQHandler() {
+    if (T8::isr(T8::vector_flags(T8::cc_irq())) != 0u) {
+        t8_cc = t8_cc + 1u;
+    }
+}
+extern "C" void TIM8_BRK_TIM12_IRQHandler() {
+    if (T8::isr(T8::vector_flags(T8::break_irq())) != 0u) {
+        t8_brk = t8_brk + 1u;
+    }
+    if (T12::isr() != 0u) {
+        t12_up = t12_up + 1u;
+    }
+}
+extern "C" void TIM8_TRG_COM_TIM14_IRQHandler() {
+    if (T8::isr(T8::vector_flags(T8::trigger_irq())) != 0u) {
+        t8_trg = t8_trg + 1u;
+    }
+    if (T14::isr() != 0u) {
+        t14_up = t14_up + 1u;
+    }
+}
+#endif
+
 int main() {
     // What the silicon held before a line of this program ran: the gates
     // are read out of RCC, which does not open them, and a timer behind a
@@ -1513,6 +1982,10 @@ int main() {
                  tl_break);
     bench.letter('m', "the encoder, on two pads the timer drives itself", tm_encoder);
     bench.letter('n', "the meter tasks against the ruler", tn_meters);
+    bench.letter('q', "the counting modes, the armed one-pulse, BDTR.LOCK",
+                 tq_modes_and_lock);
+    bench.letter('p', "the instances the F411 has not: TIM6, TIM7, TIM8, TIM12..14",
+                 tp_six_instances);
     bench.letter('o', "the vectors: four lines on one timer, one line for two timers",
                  to_vectors);
 

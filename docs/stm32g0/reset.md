@@ -109,7 +109,8 @@ so it holds whatever touched it last, across every warm boot.
   `arm(cfg)` (start, configure, and a closing refresh only when the
   window is disabled - with a live window the counter has just been
   reloaded ABOVE it and a refresh there would be the reset),
-  `force_reset()`, `debug_freeze()`.
+  `force_reset()` (the start key, then a refresh into a closed window:
+  it ends a stopped watchdog's run too), `debug_freeze()`.
 - `WwdgPrescaler` (`div1`..`div128`), `wwdg_step_cycles(p)`,
   `wwdg_timeout_us(pclk_hz, p, t)` - RM0444 29.3.4's formula in 32
   bits, exact at any whole-megahertz PCLK.
@@ -161,9 +162,9 @@ int main() {
 ## Bench findings
 
 `test_stm32_platform` on the Nucleo-G0B1RE at 64 MHz, nothing wired.
-Six letters in `z` (53 verdicts) and letter `i` outside it (26
-verdicts), which reboots the board six times and resumes from a
-`.noinit` token.
+Six letters in `z` (53 verdicts) and letters `i` (26 verdicts) and `j`
+(20) outside it, each of which reboots the board six times and resumes
+from a `.noinit` token.
 
 - **The flags accumulate, seen on real resets.** Leg 1 clears them and
   does a software reset: the next boot reads exactly `SFT | PIN`
@@ -237,6 +238,55 @@ verdicts), which reboots the board six times and resumes from a
   reset on a system reset, they stand on warm boots and are clear on
   cold ones.
 
+- **PR AND RLR WRITTEN BACK TO BACK ARE SAFE ON THIS FAMILY: the
+  reload counts from the reload, never from the start.** On the
+  STM32F446 a short reload written right behind the prescaler after
+  the start key was in force before the start's own count
+  ([../stm32f4/reset.md](../stm32f4/reset.md)); here, letter `j`'s first
+  leg arms /4 with a reload of 7 (8 counts, about 1 ms) on a watchdog
+  the last reset stopped, with LSI off at the call: `arm()` returns
+  true 1664..1665 us after the call (PR and RLR crossed at about 930
+  us, WINR at 1665) and the reset lands 3133..3134 us after it - eight
+  counts after the closing refresh's own crossing, in 12 runs of 12.
+  Counted from the start it would have reset the board inside `arm()`.
+  A stepwise copy of `arm()`'s sequence, run six times per variant,
+  agrees: with RLR written behind PR or only after PVU had cleared, with
+  LSI already running or not, the reset is tied to WINR's write.
+- **The reload a WINR write performs lands about three prescaled cycles
+  after the store, two before WVU drops, and a refresh lands about four
+  after its key.** Measured with that stepwise copy at /4 (123 us a
+  count): WINR stored at 930 us, WVU clear at 1665 us, and with reload
+  R the reset at 1417 + 123 R us for R = 0..6 - the WINR reload's own
+  count, the refresh never landing first; from R = 7 on, at 3135 +
+  123 (R - 7) us, eight counts after the refresh's. So **a reload of 0,
+  1 or 2 resets the board inside `arm()`**, before WVU can drop, and
+  any reload under about five prescaled cycles (28.4.4's crossing
+  figure) is shorter than the crossing that would confirm it.
+- **`Iwdg::force_reset()` on a running watchdog lands about four
+  prescaled cycles after the call**: 31394..31411 us at /256 (12 runs;
+  7.9 ms a count at this die's LSI), the flags `IWDG | PIN` alone. **On
+  a stopped watchdog the window and the refresh go nowhere** (nothing
+  in two seconds, `SFT | PIN` from the fallback's reset): the verb
+  writes the start key first, and then a stopped watchdog is reset
+  683..684 us after the call (12 runs) - the IWDG's clock and four
+  counts at the reset setting's /4.
+- **THE LIVE WINDOW, served and violated.** /32, RL 999, WIN 499:
+  three refreshes 700 ms apart are legal (the window opens 470..542 ms
+  in at the datasheet's LSI range, the time-out is 941..1085 ms in);
+  `configure()` re-times the RUNNING watchdog to /16 and answers true,
+  and a refresh 350 ms after it is legal - under the old timing it
+  would have been a reset; a refresh 20 ms after that, with the counter
+  far above the window, resets the board 1473..1919 us after the key
+  (12 runs; the spread is one /16 count, the key's phase against the
+  prescaler), `IWDG | PIN` alone.
+- **`Wwdg::force_reset()` resets at once**: WDGA with T6 clear (29.3.3)
+  reset the board before the loop after the write could store a single
+  stamp, in 12 runs of 12; `WWDG | PIN` alone.
+- **THE EARLY WARNING AS A RECOVERY (29.4).** With the WWDG at /8 and
+  W = 0x7F, a handler that refreshes on the warning kept the board
+  running through five warnings (the counter read 0x40 inside each),
+  and the sixth, left alone, ended it in a WWDG reset - 12 runs of 12.
+
 ## On the STM32G071RB
 
 `test_stm32_platform` runs on the Nucleo-G071RB (DEV_ID 0x460, REV_ID
@@ -280,16 +330,8 @@ Driver gaps (this chapter's option space the stratum does not touch):
   supply monitor, is built in [pwr.md](pwr.md).
 
 Implemented, not bench-verified:
-- `Iwdg::force_reset()` (the window-violation path; the WWDG's
-  equivalent IS exercised, and the IWDG's window is never armed by any
-  letter), `Iwdg::configure<cfg>()`'s run-time half on a RUNNING
-  watchdog other than through `arm()`, and the IWDG's window option
-  itself - no letter arms a live window.
-- `Wwdg::force_reset()` (letter `i` reaches the same reset by letting
-  the counter run down instead), and the WWDG's early-wakeup interrupt
-  as a REFRESHING recovery handler (29.4's second use), which no letter
-  stages because activating the watchdog is one-way inside a power
-  cycle.
+- Letter `j` on the STM32G071RB and the STM32G031K8: it needs their
+  boards on the desk (letter `i` is measured on both).
 - LPWRRSTF and OBLRSTF, never seen set. LPWRRSTF needs `nRST_STOP` /
   `nRST_STDBY` / `nRST_SHDW` cleared, and those are option bytes (above);
   with them at their shipped value a Standby or Shutdown wake sets SBF

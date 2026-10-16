@@ -443,9 +443,14 @@ struct Can {
         return wait(CAN_MSR_SLAK, on);
     }
 
-    /// CAN_MCR.RESET: a master reset of the block - every register to its
-    /// reset value and SLEEP mode entered - through the peripheral's own
-    /// bit rather than through RCC. Self-clearing.
+    /// CAN_MCR.RESET: a master reset of the block through the
+    /// peripheral's own bit rather than through RCC - "FMP bits and
+    /// CAN_MCR register are initialized to the reset values" and SLEEP
+    /// mode entered (30.9.1). Self-clearing. NOT EVERY REGISTER: the
+    /// transmit status survives it - measured, two mailboxes an earlier
+    /// run left completed still read RQCP after it, and TMEIE armed then
+    /// enters the transmit vector at once for them. `clear_result()` per
+    /// mailbox, or `reset_block()` (the RCC's), is what takes them down.
     static void master_reset() { regs().MCR |= CAN_MCR_RESET; }
 
     /**

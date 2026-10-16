@@ -52,6 +52,11 @@
 //      what one quiet turn costs when a pending line makes its idle()
 //      return at once, against that idle() alone.
 //
+//   n  the NVIC's priorities: the field's four levels and the refusal of
+//      a fifth, two software-pended lines served by level and then by
+//      number, and a more urgent line pended inside a handler preempting
+//      it where one at the same level waits
+//
 //   i  (by name only) SIX REAL RESETS. This letter reboots the board
 //      once per leg and resumes from a .noinit token, so it is NOT in
 //      `z`: `z` has to be one console session a tool can judge from a
@@ -62,6 +67,16 @@
 //      real one and with it LSI), a WWDG window violation, a panic
 //      through ResetReporter, a deliberate HardFault through
 //      hard_fault_reset(), and a WWDG time-out.
+//   j  (by name only) SIX MORE REAL RESETS, in the same .noinit token
+//      and run the same way (`brio run <board> j --app
+//      test_stm32_platform --expect="->" --timeout 40`): arm() with a
+//      short reload on a stopped watchdog, timed (the reload must count
+//      from arm()'s own reload, not from the start); Iwdg::force_reset()
+//      on a watchdog running at /256 and on a stopped one, each timed;
+//      the IWDG's LIVE WINDOW - legal refreshes, a re-timing of the
+//      running watchdog by configure(), a refresh above the window;
+//      Wwdg::force_reset() timed; and the WWDG's early warning as a
+//      RECOVERY, refreshing it five times before the sixth is let go.
 //   t  the runtime's seven functions (rt/rt.cpp) over every alignment,
 //      length and overlap: rt/selftest.hpp's cases, the host suite's own,
 //      against the symbols this image links - in `z`
@@ -71,8 +86,8 @@
 // software (RM0444 28.3.1, 29.3.2), so no letter of `z` starts one at
 // all - the whole of chapter 29's timing is reachable with WDGA clear,
 // and chapter 28's keyed registers with the start key never written.
-// Letter i does start both, on legs that are about to be reset by them,
-// and its second leg is where "the IWDG cannot be stopped EXCEPT UPON A
+// Letters i and j do start both, on legs that are about to be reset by
+// them, and i's second leg is where "the IWDG cannot be stopped EXCEPT UPON A
 // RESET" is proven literal: the boot after an IWDG reset sits for a
 // second and a half with nobody refreshing anything and lives.
 //
@@ -132,7 +147,14 @@ struct Token {
     uint32_t elapsed_ms;     ///< the IWDG leg's own stopwatch
     uint8_t ewi_seen;        ///< leg 6: did the early warning fire?
     uint8_t ewi_counter;     ///< and what the counter read inside its handler
-    uint8_t armed_ok;        ///< leg 2: what Iwdg::arm() answered
+    uint8_t armed_ok;        ///< legs 2 and 7..8, 10: what Iwdg::arm() answered
+    uint8_t returned;        ///< legs 7..10: the call under test came back
+    uint8_t fell_back;       ///< legs 8..9: no reset came, Reset::software() did
+    uint8_t retimed_ok;      ///< leg 10: what configure() answered on a running watchdog
+    uint8_t refreshes;       ///< leg 10: legal refreshes made; leg 12: the handler's
+    uint8_t lsi_ready;       ///< leg 7: LSIRDY at the call
+    uint32_t returned_cycles;  ///< legs 7..10: from the call to its return
+    uint32_t elapsed_cycles;   ///< legs 7..11: from the call to the reset
 };
 [[gnu::section(".noinit")]] inline Token token;
 
@@ -1226,6 +1248,124 @@ void tf_wwdg() {
 }
 
 // =============================================================================
+// n - the NVIC's priorities: order and preemption
+// =============================================================================
+//
+// Two lines nothing else in this suite raises, FLASH (position 3) and
+// I2C1 (position 23), pended by software with their handlers bound
+// below; each handler appends to a log, the FLASH one an entry and an
+// exit mark, and on request pends I2C1 from inside itself.
+
+volatile uint8_t prio_log[8];
+volatile uint8_t prio_n = 0;
+volatile bool flash_pends_i2c = false;
+
+constexpr uint8_t log_flash_in = 3;
+constexpr uint8_t log_flash_out = 0x83;
+constexpr uint8_t log_i2c = 23;
+
+void prio_note(uint8_t v) {
+    if (prio_n < sizeof(prio_log)) {
+        prio_log[prio_n] = v;
+        prio_n = static_cast<uint8_t>(prio_n + 1u);
+    }
+}
+
+/// Pend `first` (and `second` when given) in one masked window, release
+/// the mask, and give both handlers time to run.
+void prio_round(uint8_t flash_level, uint8_t i2c_level, bool both, bool nest) {
+    (void)Nvic::priority(FLASH_IRQn, flash_level);
+    (void)Nvic::priority(I2C1_IRQn, i2c_level);
+    prio_n = 0;
+    flash_pends_i2c = nest;
+    {
+        Stm32g0Platform<>::CriticalSection cs;
+        Nvic::set_pending(FLASH_IRQn);
+        if (both) {
+            Nvic::set_pending(I2C1_IRQn);
+        }
+    }
+    (void)delay_us(clock, 50);
+    flash_pends_i2c = false;
+}
+
+bool prio_is(uint8_t a, uint8_t b, uint8_t c) {
+    return prio_n == 3u && prio_log[0] == a && prio_log[1] == b && prio_log[2] == c;
+}
+
+void print_prio_log() {
+    print(serial, "[");
+    for (uint8_t i = 0; i < prio_n; ++i) {
+        print(serial, i != 0u ? " " : "", prio_log[i] == log_flash_in ? "FLASH"
+                                          : prio_log[i] == log_flash_out ? "/FLASH"
+                                                                         : "I2C1");
+    }
+    print(serial, "]");
+}
+
+void tn_priorities() {
+    Nvic::clear_pending(FLASH_IRQn);
+    Nvic::clear_pending(I2C1_IRQn);
+    Nvic::enable(FLASH_IRQn);
+    Nvic::enable(I2C1_IRQn);
+
+    // The field: two implemented bits (__NVIC_PRIO_BITS), four levels.
+    const bool set3 = Nvic::priority(I2C1_IRQn, 3);
+    const uint8_t read3 = Nvic::priority(I2C1_IRQn);
+    const bool set4 = Nvic::priority(I2C1_IRQn, 4);
+    const uint8_t after4 = Nvic::priority(I2C1_IRQn);
+    print(serial, "  ", irq_priority_levels, " levels; level 3 set ",
+          set3 ? "true" : "false", ", read back ", read3, "; level 4 ",
+          set4 ? "ACCEPTED" : "refused", ", the line still at ", after4, crlf);
+    bench.verdict("the priority field holds the four levels the core has, and a "
+                  "fifth is refused with the level standing unchanged",
+                  irq_priority_levels == 4u && set3 && read3 == 3u && !set4 &&
+                      after4 == 3u);
+
+    prio_round(0, 0, true, false);
+    print(serial, "  both pending at one level: ");
+    print_prio_log();
+    print(serial, crlf);
+    bench.verdict("at ONE level the lower exception number is served first, and "
+                  "each handler runs to its end before the next",
+                  prio_is(log_flash_in, log_flash_out, log_i2c));
+
+    prio_round(3, 0, true, false);
+    print(serial, "  both pending, I2C1 more urgent: ");
+    print_prio_log();
+    print(serial, crlf);
+    bench.verdict("with I2C1 the more urgent, I2C1 is served first although its "
+                  "number is higher",
+                  prio_is(log_i2c, log_flash_in, log_flash_out));
+
+    prio_round(2, 1, false, true);
+    print(serial, "  I2C1 (level 1) pended from inside FLASH's handler (level 2): ");
+    print_prio_log();
+    print(serial, crlf);
+    bench.verdict("a MORE URGENT line pended inside a handler PREEMPTS it - the "
+                  "nesting the kernel's flat model never asks for",
+                  prio_is(log_flash_in, log_i2c, log_flash_out));
+
+    prio_round(1, 1, false, true);
+    print(serial, "  the same at one level: ");
+    print_prio_log();
+    print(serial, crlf);
+    bench.verdict("at one level it waits for the handler to return - what every "
+                  "brio program runs with, every line at its reset level 0",
+                  prio_is(log_flash_in, log_flash_out, log_i2c));
+
+    Nvic::disable(FLASH_IRQn);
+    Nvic::disable(I2C1_IRQn);
+    Nvic::clear_pending(FLASH_IRQn);
+    Nvic::clear_pending(I2C1_IRQn);
+    (void)Nvic::priority(FLASH_IRQn, 0);
+    (void)Nvic::priority(I2C1_IRQn, 0);
+    bench.verdict("both lines are left at level 0, disabled",
+                  Nvic::priority(FLASH_IRQn) == 0u && Nvic::priority(I2C1_IRQn) == 0u &&
+                      !Nvic::enabled(FLASH_IRQn) && !Nvic::enabled(I2C1_IRQn));
+}
+
+// =============================================================================
 // i - six real resets (outside z: it reboots the board)
 // =============================================================================
 
@@ -1534,6 +1674,367 @@ void ti_resume() {
 }
 
 // =============================================================================
+// j - six more real resets: the deliberate ones and the live window
+// =============================================================================
+
+/// The flags of a reset caused by `f`: f itself and the PINRSTF every
+/// system reset raises (5.4.24 bit 26, letter i's leg 1), nothing else.
+bool alone(uint32_t f) {
+    return (boot_flags & ResetFlag::all) == (f | ResetFlag::pin);
+}
+
+/// Two seconds of core cycles: every deliberate reset here lands in a
+/// few milliseconds, every time-out the legs could fall into is longer.
+constexpr uint32_t fallback_cycles = 2u * SysClock::hz;
+
+/// Stamp the elapsed cycles through a volatile pointer (a plain store
+/// in a loop that never exits may be sunk out of it - leg 2's reason)
+/// and, past `fallback_cycles`, say so and reset by software, so that a
+/// verb that did NOT reset still ends the leg and is judged by the next
+/// boot.
+[[noreturn]] void stamp_until_reset(uint32_t t0) {
+    volatile uint32_t* const elapsed = &token.elapsed_cycles;
+    for (;;) {
+        const uint32_t e = cycles_now() - t0;
+        *elapsed = e;
+        if (e > fallback_cycles) {
+            token.fell_back = 1;
+            Reset::software();
+        }
+    }
+}
+
+/// Clear what the legs of j bank, before each one.
+void bank_j(uint8_t leg) {
+    bank(leg);
+    token.armed_ok = 0;
+    token.returned = 0;
+    token.fell_back = 0;
+    token.retimed_ok = 0;
+    token.refreshes = 0;
+    token.returned_cycles = 0;
+    token.elapsed_cycles = 0;
+}
+
+/// Leg 7: arm() with a SHORT reload, on a watchdog the last reset
+/// stopped, LSI off at the call (letter a reads LSION and LSIRDY clear
+/// with the RTC domain on LSE): the start key, PR and RLR all wait for
+/// the oscillator's first edges, and a reload that crossed before the
+/// start's own count began would be counted from the start instead of
+/// from the reload arm() performs - which is what the STM32F446's IWDG
+/// did with PR and RLR written back to back (docs/stm32f4/reset.md).
+///
+/// THE RELOAD IS 7 AT /4, 8 counts of 117.6..135.6 us (DS13560 table
+/// 46's 29.5..34 kHz): 0.94..1.09 ms. Counted from the start, that
+/// reset lands inside arm(), whose crossings (PR and RLR, then WINR)
+/// take 1.67 ms after the call at this die's 32.5 kHz. Counted from
+/// arm()'s own reload, it lands after arm() has returned true.
+[[noreturn]] void leg_iwdg_short() {
+    bank_j(7);
+    print(serial, "  leg 7: Iwdg::arm() at /4 with a reload of 7, the LSI "
+          "stopped, flags cleared first ...", crlf);
+    console_drain();
+    Reset::clear_flags();
+    token.flags_before = 0;
+    token.lsi_ready = Rcc::lsi_ready() ? 1u : 0u;
+    const uint32_t t0 = cycles_now();
+    token.armed_ok = Iwdg::arm(IwdgConfig{.prescaler = IwdgPrescaler::div4,
+                                          .reload = 7,
+                                          .window = 0x0FFF})
+                         ? 1u : 0u;
+    token.returned_cycles = cycles_now() - t0;
+    token.returned = 1;
+    stamp_until_reset(t0);
+}
+
+/// Leg 8: force_reset() on a RUNNING watchdog at the SLOWEST prescaler,
+/// where a register's crossing takes the longest (RVU and WVU: five
+/// prescaled cycles, 28.4.4 - 39 ms at /256).
+[[noreturn]] void leg_iwdg_force_running() {
+    bank_j(8);
+    print(serial, "  leg 8: Iwdg::force_reset() on a watchdog running at "
+          "/256 (a 32 s time-out), flags cleared first ...", crlf);
+    console_drain();
+    Reset::clear_flags();
+    token.flags_before = 0;
+    token.armed_ok = Iwdg::arm(IwdgConfig{.prescaler = IwdgPrescaler::div256,
+                                          .reload = 0x0FFF,
+                                          .window = 0x0FFF})
+                         ? 1u : 0u;
+    const uint32_t t0 = cycles_now();
+    Iwdg::force_reset();
+    token.returned_cycles = cycles_now() - t0;
+    token.returned = 1;
+    stamp_until_reset(t0);
+}
+
+/// Leg 9: force_reset() on a watchdog the last reset stopped.
+[[noreturn]] void leg_iwdg_force_stopped() {
+    bank_j(9);
+    print(serial, "  leg 9: Iwdg::force_reset() on a STOPPED watchdog, "
+          "flags cleared first ...", crlf);
+    console_drain();
+    Reset::clear_flags();
+    token.flags_before = 0;
+    const uint32_t t0 = cycles_now();
+    Iwdg::force_reset();
+    token.returned_cycles = cycles_now() - t0;
+    token.returned = 1;
+    stamp_until_reset(t0);
+}
+
+/// Busy-wait `ms` kernel ticks from `t0`; the tick is the only clock the
+/// windows below are planned on.
+void until_ms(uint32_t t0, uint32_t ms) {
+    while (Ticker::ticks() - t0 < ms) {
+    }
+}
+
+/// Leg 10: the IWDG's LIVE WINDOW - three legal refreshes, a re-timing
+/// of the running watchdog by configure(), a fourth refresh legal only
+/// under the NEW timing, and then a refresh made too early.
+///
+/// THE PLAN, against DS13560 table 46's LSI (29.5..34 kHz: a period of
+/// 29.4..33.9 us). arm() writes WINR last, and that write reloads the
+/// counter (28.3.2), so each window is counted from the verb's return
+/// (the crossing it waits for is the reload). A refresh is a reset
+/// while the counter is ABOVE the window, i.e. before RL - WIN counts.
+/// - /32, RL 999, WIN 499: a count is 0.941..1.085 ms, the window opens
+///   500 counts in (470..542 ms), the time-out is 1000 counts in
+///   (941..1085 ms). A refresh 700 ms after the last is legal at every
+///   LSI the part may have: 158 ms from the window's slowest opening,
+///   241 ms from the fastest time-out.
+/// - configure() to /16, RL 999, WIN 499: a count is 0.471..0.542 ms,
+///   the window opens at 235..271 ms, the time-out is at 471..542 ms.
+///   A refresh 350 ms after configure() returned is legal (79 ms after
+///   the slowest opening, 121 ms before the fastest time-out) - and
+///   under the OLD timing it would be a reset (its window opens at 470
+///   ms at the earliest), so the refresh proves the re-timing landed.
+/// - 20 ms after that refresh the counter is at 999 - 37 or above (37
+///   counts at the fastest LSI), far above 499: the refresh is a
+///   window violation.
+[[noreturn]] void leg_iwdg_window() {
+    bank_j(10);
+    print(serial, "  leg 10: the IWDG with a live window (/32, RL 999, WIN "
+          "499), refreshed three times at 700 ms, re-timed to /16 on the "
+          "run, refreshed at 350 ms, then at 20 ms ...", crlf);
+    console_drain();
+    Reset::clear_flags();
+    token.flags_before = 0;
+    volatile uint8_t* const refreshes = &token.refreshes;
+    token.armed_ok = Iwdg::arm(IwdgConfig{.prescaler = IwdgPrescaler::div32,
+                                          .reload = 999,
+                                          .window = 499})
+                         ? 1u : 0u;
+    uint32_t t = Ticker::ticks();
+    for (uint8_t k = 0; k < 3u; ++k) {
+        until_ms(t, 700u);
+        Iwdg::refresh();
+        t = Ticker::ticks();
+        *refreshes = static_cast<uint8_t>(*refreshes + 1u);
+    }
+    token.retimed_ok = Iwdg::configure(IwdgConfig{.prescaler = IwdgPrescaler::div16,
+                                                  .reload = 999,
+                                                  .window = 499})
+                           ? 1u : 0u;
+    t = Ticker::ticks();
+    until_ms(t, 350u);
+    Iwdg::refresh();
+    t = Ticker::ticks();
+    *refreshes = static_cast<uint8_t>(*refreshes + 1u);
+    until_ms(t, 20u);
+    const uint32_t t0 = cycles_now();
+    Iwdg::refresh();
+    token.returned = 1;
+    stamp_until_reset(t0);
+}
+
+/// Leg 11: Wwdg::force_reset() - WDGA with T6 clear, 29.3.3's own note -
+/// timed from the write.
+[[noreturn]] void leg_wwdg_force() {
+    bank_j(11);
+    print(serial, "  leg 11: Wwdg::force_reset(), flags cleared first ...", crlf);
+    console_drain();
+    Reset::clear_flags();
+    token.flags_before = 0;
+    Wwdg::bus_clock(true);   // the write lands nowhere with the gate shut
+    const uint32_t t0 = cycles_now();
+    Wwdg::force_reset();
+    stamp_until_reset(t0);
+}
+
+/// Leg 12: the WWDG's early warning as a RECOVERY (29.4's second use):
+/// the handler refreshes the counter `ewi_recoveries` times, then lets
+/// the next warning run down into the reset.
+constexpr uint8_t ewi_recoveries = 5;
+
+[[noreturn]] void leg_wwdg_recovery() {
+    bank_j(12);
+    token.ewi_seen = 0;
+    token.ewi_counter = 0;
+    print(serial, "  leg 12: the WWDG activated, its early warning REFRESHING "
+          "it five times, then not ...", crlf);
+    console_drain();
+    Reset::clear_flags();
+    token.flags_before = 0;
+    Wwdg::bus_clock(true);
+    Wwdg::clear_flag();
+    Nvic::clear_pending(Wwdg::irq());
+    Nvic::enable(Wwdg::irq());
+    (void)Wwdg::configure(WwdgConfig{.prescaler = WwdgPrescaler::div8,
+                                     .window = 0x7F,
+                                     .early_wakeup = true});
+    Wwdg::start(0x7F);
+    await_reset("(waiting for five recoveries, then the counter reaching 0x3F)");
+}
+
+void tj_resets() {
+    report_boot();
+    bench.verdict("no panic record is pending on a clean start", !boot_record);
+    leg_iwdg_short();
+}
+
+/// The boots of letter j, as ti_resume() is letter i's.
+void tj_resume() {
+    bench.resume_tally(token.pass, token.fail);
+
+    const uint8_t leg = token.leg;
+    print(serial, crlf, "j (continued after reset ", leg - 6u, " of 6)", crlf);
+    report_boot();
+    const uint32_t ret_us = cycles_to_us(token.returned_cycles);
+    const uint32_t us = cycles_to_us(token.elapsed_cycles);
+
+    if (leg == 7) {
+        print(serial, "  LSIRDY was ", token.lsi_ready, " at the call", crlf);
+        print(serial, "  arm() ", token.returned != 0u ? "returned " : "never returned",
+              token.returned != 0u ? (token.armed_ok != 0u ? "true" : "false") : "",
+              " after ", ret_us, " us; the reset came ", us, " us after the call", crlf);
+        bench.verdict("the short arm() resets the device through the IWDG, "
+                      "and through nothing else",
+                      alone(ResetFlag::independent_watchdog));
+        bench.verdict("arm() came back, and true, before its own time-out: the "
+                      "reload was not in force before the start's count",
+                      token.returned != 0u && token.armed_ok != 0u);
+        bench.verdict("and the reset came after it returned",
+                      token.elapsed_cycles > token.returned_cycles);
+        // THE BOUND. Measured at this die's 32.5 kHz (letter i's leg 2):
+        // 3.14 ms from the call - the IWDG's clock, PR and RLR crossing
+        // (0.93 ms), WINR's crossing (0.73 ms), the closing refresh's
+        // (about 4 prescaled cycles) and the 8 counts. Every term is a
+        // count of LSI cycles bar the start, so at the slowest LSI the
+        // part may have (29.5 kHz) the chain is 3.14 x 32.5 / 29.5 = 3.46
+        // ms; 4 ms is that and the polling's slack, and the 512 ms of the
+        // reset setting is a hundred times further.
+        bench.verdict("and it lands inside the 4 ms the slowest LSI allows, "
+                      "not the 512 ms of the reset setting",
+                      token.elapsed_cycles != 0u && us < 4000u);
+        leg_iwdg_force_running();
+    }
+
+    if (leg == 8) {
+        print(serial, "  arm() answered ", token.armed_ok != 0u ? "true" : "false",
+              "; force_reset() returned after ", ret_us, " us; the reset came ",
+              us, " us after the call",
+              token.fell_back != 0u ? " - BY THE FALLBACK, not the watchdog" : "",
+              crlf);
+        bench.verdict("arm() at /256 reported its configuration landed",
+                      token.armed_ok != 0u);
+        bench.verdict("force_reset() on a running watchdog resets the device "
+                      "through the IWDG, and through nothing else",
+                      alone(ResetFlag::independent_watchdog) && token.fell_back == 0u);
+        // THE BOUND at /256 and the slowest LSI: WINR's crossing, five
+        // prescaled cycles (28.4.4: 5 x 256 x 33.9 us = 43.4 ms), the
+        // refresh's own crossing and comparison (one prescaled cycle
+        // more, 8.7 ms) - 52 ms; 60 ms against the 32 s time-out.
+        bench.verdict("and lands inside the 60 ms the slowest LSI allows at "
+                      "/256, not the 32 s time-out",
+                      token.elapsed_cycles != 0u && us < 60'000u);
+        leg_iwdg_force_stopped();
+    }
+
+    if (leg == 9) {
+        print(serial, "  force_reset() returned after ", ret_us,
+              " us; the reset came ", us, " us after the call",
+              token.fell_back != 0u ? " - BY THE FALLBACK, not the watchdog" : "",
+              crlf);
+        bench.verdict("force_reset() on a STOPPED watchdog resets the device "
+                      "through the IWDG, and through nothing else",
+                      alone(ResetFlag::independent_watchdog) && token.fell_back == 0u);
+        // THE BOUND, the reset setting's /4 at the slowest LSI: the start
+        // (130 us), WINR's crossing (5 prescaled cycles, 678 us), the
+        // refresh's (one prescaled cycle more, 136 us) - 0.94 ms; 2 ms
+        // against the 512 ms time-out of the reset setting.
+        bench.verdict("and lands inside the 2 ms the slowest LSI allows, not "
+                      "the 512 ms time-out of the reset setting",
+                      token.elapsed_cycles != 0u && us < 2000u);
+        leg_iwdg_window();
+    }
+
+    if (leg == 10) {
+        print(serial, "  arm() answered ", token.armed_ok != 0u ? "true" : "false",
+              ", configure() on the running watchdog ",
+              token.retimed_ok != 0u ? "true" : "false", "; ", token.refreshes,
+              " legal refreshes; the early refresh reset the device ", us,
+              " us after it", crlf);
+        bench.verdict("arm() with a live window reported its configuration landed",
+                      token.armed_ok != 0u);
+        bench.verdict("three refreshes inside the window and one under the new "
+                      "timing were legal: none of them reset the device",
+                      token.refreshes == 4u);
+        bench.verdict("configure() re-timed the RUNNING watchdog, and true "
+                      "(the fourth refresh, at 350 ms, is a reset under the old "
+                      "timing)",
+                      token.retimed_ok != 0u);
+        bench.verdict("the refresh made ABOVE the window resets the device "
+                      "through the IWDG, and through nothing else",
+                      token.returned != 0u && alone(ResetFlag::independent_watchdog));
+        // THE BOUND: the key's crossing (no figure in 28.4; the
+        // registers' five prescaled cycles taken for it, 5 x 16 x 33.9 us
+        // = 2.71 ms at the slowest LSI) and one prescaled cycle for the
+        // comparison (0.54 ms) - 3.25 ms; 4 ms, against the 450 ms the
+        // time-out would still take.
+        bench.verdict("and at once - inside the 4 ms the slowest LSI allows, not "
+                      "the time-out",
+                      token.elapsed_cycles != 0u && us < 4000u);
+        leg_wwdg_force();
+    }
+
+    if (leg == 11) {
+        const uint32_t cyc = token.elapsed_cycles;
+        // One step of the counter at /1 is 4096 PCLK cycles; PCLK is the
+        // core clock here (APB at /1), so 4096 core cycles.
+        constexpr uint32_t step_cycles = 4096u;
+        print(serial, "  the WWDG reset came ", cyc, " core cycles after the write",
+              cyc == 0u ? " (before the first store of the loop after it)" : "",
+              "; one counter step at /1 is ", step_cycles, crlf);
+        bench.verdict("Wwdg::force_reset() resets the device through the WWDG, "
+                      "and through nothing else",
+                      alone(ResetFlag::window_watchdog));
+        bench.verdict("and at once - inside one counter step, so the reset is "
+                      "T6 written clear (29.3.3) and not a count running down",
+                      cyc < step_cycles);
+        leg_wwdg_recovery();
+    }
+
+    // leg 12: the last boot.
+    print(serial, "  the early warning refreshed the counter ", token.refreshes,
+          " times; the last warning saw ", hex(token.ewi_counter), crlf);
+    bench.verdict("a WWDG left to run down after its recoveries resets the device "
+                  "through the WWDG, and through nothing else",
+                  alone(ResetFlag::window_watchdog));
+    bench.verdict("THE EARLY WARNING RECOVERED IT: five refreshes from the "
+                  "handler kept the device running (29.4), and the sixth "
+                  "warning, left alone, ended it",
+                  token.refreshes == ewi_recoveries && token.ewi_seen != 0u);
+    bench.verdict("the token crossed all six resets intact",
+                  token.magic == token_magic && token.canary == token_canary);
+
+    token.leg = 0;
+    token.magic = 0;
+    bench.end_letter();
+}
+
+// =============================================================================
 // The menu
 // =============================================================================
 void banner() {
@@ -1585,8 +2086,32 @@ extern "C" void WWDG_IRQHandler() {
             token.ewi_seen = 1;
             token.ewi_counter = t;
         }
+        // Letter j's twelfth leg: the warning as a recovery (29.4) -
+        // refreshed inside the window (W = 0x7F, the counter at 0x40)
+        // five times, then left to run down.
+        if (token.magic == token_magic && token.leg == 12) {
+            token.ewi_seen = 1;
+            token.ewi_counter = t;
+            if (token.refreshes < ewi_recoveries) {
+                brio::Wwdg::refresh();
+                token.refreshes = static_cast<uint8_t>(token.refreshes + 1u);
+            }
+        }
     }
 }
+
+/// Letter n's two lines: FLASH logs its entry and exit and, on request,
+/// pends I2C1 from inside itself and gives it time to preempt.
+extern "C" void FLASH_IRQHandler() {
+    prio_note(log_flash_in);
+    if (flash_pends_i2c) {
+        brio::Nvic::set_pending(I2C1_IRQn);
+        for (volatile uint8_t i = 0; i < 20u; i = static_cast<uint8_t>(i + 1u)) {
+        }
+    }
+    prio_note(log_flash_out);
+}
+extern "C" void I2C1_IRQHandler() { prio_note(log_i2c); }
 
 /// The whole point of stm32g0/reset.hpp's fault body: a crash becomes a
 /// note the next boot can read, instead of a spin nobody sees.
@@ -1647,13 +2172,20 @@ int main() {
     bench.letter('f', "the WWDG, never activated", tf_wwdg);
     bench.letter('w', "the idle hook against an interrupt's edge, placed to the cycle", tw_edge);
     bench.letter('k', "the kernel's turn: how many per interrupt, what one costs", tk_turns);
+    bench.letter('n', "the NVIC's priorities: order and preemption", tn_priorities);
     bench.letter('i', "SIX REAL RESETS (reboots the board)", ti_resets, false);
+    bench.letter('j', "SIX MORE REAL RESETS: the deliberate ones, the IWDG's "
+                 "window (reboots the board)", tj_resets, false);
     bench.letter('t', "the runtime's seven functions at every alignment (rt/rt.cpp)", tt_runtime);
 
     // A pending token means a leg of letter i is waiting to be judged:
     // resume it instead of printing a banner nobody asked for.
     if (serial_ok && token.magic == token_magic && token.leg != 0) {
-        ti_resume();
+        if (token.leg >= 7u) {
+            tj_resume();
+        } else {
+            ti_resume();
+        }
         bench.prompt();
     } else if (serial_ok) {
         const auto idcode = brio::DeviceIdcode::read();

@@ -226,14 +226,23 @@ int main() {
 
 ## Bench findings
 
-The reference suite is `test_stm32_platform` (nine letters in `z`, 65
-verdicts; letter `i` outside it reboots the board six times -
-[reset.md](reset.md) carries the reset and watchdog half).
+The reference suite is `test_stm32_platform` (ten letters in `z`, 71
+verdicts; letters `i` and `j` outside it reboot the board six times
+each - [reset.md](reset.md) carries the reset and watchdog half).
 What it measures of THIS chapter:
 
 - **PRIMASK nesting is nesting**: leaving an INNER critical section does
   not unmask, because the guard saves and restores the bit rather than
   clearing it.
+- **The NVIC's two priority bits order and preempt** (letter `n`, on
+  FLASH and I2C1, two lines pended by software): the field holds levels
+  0..3 and `priority()` refuses a fifth with the level standing; two
+  lines pending at one level are served lower number first, each
+  handler to its end; with the higher-numbered line the more urgent, it
+  is served first; and a more urgent line pended from INSIDE a handler
+  preempts it, where one at the same level waits for it to return -
+  which is what every brio program runs with, every line left at its
+  reset level 0 (ten runs of `z`).
 - **A masked window loses ticks and does not lose time**: 5 ms with
   interrupts masked advances the tick by 1 ms - SysTick's interrupt is
   a pending BIT, so the coalesced ticks are gone, and a timebase that
@@ -589,10 +598,10 @@ Driver gaps (this chapter's option space the stratum does not touch):
 - VTOR relocation, which nothing here needs while the vector table is
   the crt's and sits where the part boots; born with its first user (a
   bootloader).
-- NVIC priorities: exposed, and nothing assigns one, because the kernel
-  is flat - every interrupt is one hardware level above the loop, and a
-  priority scheme is the preemptive kernel's question
-  ([design/kernel.md](../design/kernel.md)).
+- NVIC priorities: exposed and measured (letter `n`), and nothing in
+  the stratum assigns one, because the kernel is flat - every interrupt
+  is one hardware level above the loop, and a priority scheme is the
+  preemptive kernel's question ([design/kernel.md](../design/kernel.md)).
 - A per-package pin-bonding table - [port.md](port.md) says why not.
 - The veneer between the flash and SRAM: every `InRam` call from the
   flash pays the linker's long-branch stub; GCC's ARM `long_call` on
@@ -611,8 +620,7 @@ measurement); the idle path of `idle_until()` on the tickless
 timebase, whose arming adds instructions between the masked check and
 the WFI - the same WFI under PRIMASK closes it, and letter `w`'s walk
 over `Stm32g0Platform<LptimTicker>` with the LPTIM's compare as the
-edge is what would measure it; `Nvic::priority` (nothing assigns one,
-above); `abort()`'s and `HardFault_Handler`'s spins (the fault VECTOR is
+edge is what would measure it; `abort()`'s and `HardFault_Handler`'s spins (the fault VECTOR is
 exercised, by `hard_fault_reset` - [reset.md](reset.md); the spins are
 what runs when no body is bound, and every suite binds one). The
 cortex-debug launch entry ([README.md](README.md)) has not been driven

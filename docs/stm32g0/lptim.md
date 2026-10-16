@@ -12,7 +12,7 @@ column. Driver: `stm32g0/lptim.hpp`; the third sleep site over it is
 `LptimTicker` in `stm32g0/lptim_ticker.hpp` and is documented in
 [platform.md](platform.md). The per-instance presence, vector, EXTI and
 DMAMUX facts come from `stm32g0/device_tables.hpp`. Bench suites:
-`test_stm32_lptim` (10 letters, 82 verdicts, wireless) and
+`test_stm32_lptim` (10 letters, 85 verdicts, wireless) and
 `test_stm32_tickless` (the timebase). Family fixtures
 `test/family_stm32g0/lptim.cpp` and `lptim_ticker.cpp` plus their
 negatives under `brio check stm32g0` (the third sleep site's own
@@ -319,7 +319,14 @@ forbidden pair, whose flat low IS zero duty. Measured ladder: 0, 251,
 500..502, 751..752, 1000 per mille off the pad for 0, 250, 500, 750,
 999. WAVPOL inverts the waveform and nothing else. One-pulse leaves the
 output low for ever after its pulse; set-once leaves it at its last
-level, which is the whole difference between them.
+level, which is the whole difference between them. **A LATER TRIGGER IS
+NOT DISCARDED BY SET-ONCE**, against 26.4.8's "the counter is only
+started once following the first trigger, and any subsequent trigger
+event is discarded" (figure 274): armed single-shot on the ETR pad, a
+second edge after the first cycle has stopped starts the counter again
+(149 counts 300 us later at 500 kHz, ARRM reached, EXTTRIG set) in
+set-once exactly as in one-pulse mode - ten runs of letter `e`. What
+WAVE keeps once is the output's level, not the counter's start.
 
 **26.4.10's "up to the LPTIM clock frequency divided by 2" is exact**,
 and it is measured with no pad, no peripheral and no CPU in the loop:
@@ -350,8 +357,11 @@ TRGFLT together and this is the measurement that says they behave alike.
 
 **The internal routes work with no pad on the timer's side at all**:
 IN1SEL = COMP1_OUT counts 12 comparator flips as 12 (the comparator's
-own input being a precharged PA1), and the RTC's ALARM A and COMP1_OUT
-each start the counter through the trigger multiplexer. On LPTIM2,
+own input being a precharged PA1), and the RTC's ALARM A and all three
+comparators' outputs each start the counter through the trigger
+multiplexer - COMP1_OUT (row 6), COMP2_OUT (row 7, on COMP2's own PB6)
+and COMP3_OUT (row 5, LPTIM1's alone, on COMP3's PB0), each with the
+same precharge stimulus. On LPTIM2,
 IN1SEL = 3 - the OR of the two comparators, a code table 140 leaves
 unconnected on LPTIM1 - carries the same 12 flips of COMP1 with COMP2
 quiet.
@@ -451,7 +461,7 @@ G0B1's 2.8.1 and 2.8.2, and both are answered the same way.
 ## On the STM32G031K8
 
 On the Nucleo-G031K8 (DEV_ID 0x466, REV_ID 0x1003) four of
-`test_stm32_lptim`'s 82 verdicts are not claimed, each a skip by name,
+`test_stm32_lptim`'s verdicts are not claimed, each a skip by name,
 and all four are the PART's: two comparator routes - IN1SEL = COMP1_OUT
 and the comparator OR - and the comparator row of the trigger table,
 because **this part has no COMP at all**, so the type cannot even be
@@ -506,12 +516,10 @@ Implemented but not bench-verified:
   it would only say the same thing twice.
 - **The trigger rows this board cannot reach**: TAMP1, TAMP2 and
   TAMP_TRG3 (arming a tamper input erases the backup registers this
-  stratum leans on - the same decline rtc.md makes), and COMP2_OUT and
-  COMP3_OUT as triggers (COMP1_OUT is measured; the other two are the
-  same multiplexer row on a comparator this suite does not flip).
-- **Set-once mode's discarded triggers** (26.4.8's figure 274): the
-  waveform is measured, the "any subsequent trigger event is discarded"
-  half is not.
+  stratum leans on - the same decline rtc.md makes).
+- Letter `e`'s comparator rows 7 and 5 and its set-once leg on the
+  STM32G071RB (row 7 and the leg; it has no COMP3) and the STM32G031K8
+  (the leg; it has no comparator): the boards are not on the desk.
 - **`debug_freeze()`**: the DBG block's own gate is opened and the bit
   is written, but nothing here halts a core to watch the counter freeze.
 - **The output rate at the PCLK extreme** (32 MHz with ARR = 1),

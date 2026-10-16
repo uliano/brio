@@ -60,6 +60,8 @@
 //      with no interrupt at all
 //   h  ExtInt inside a REAL KERNEL: an edge becomes an event an active
 //      object receives
+//   p  port D: PD4 walked and driven through line 4's multiplexer
+//      (skipped by name where the package bonds no port-D pad)
 //   u  the user button as a plain input
 //
 // build: boards = g0b1re,g071rb,g031k8
@@ -110,6 +112,7 @@ using PadB3 = Pin<'B', 3>;
 using PadB7 = Pin<'B', 7>;
 using PadA8 = Pin<'A', 8>;
 using PadButton = Pin<'C', 13>;
+using PadD4 = Pin<'D', 4>;
 
 // THE USER BUTTON IS A BOARD-AND-PACKAGE FACT and not a part one: B1
 // sits on PC13 on the Nucleo-64s, while the LQFP32 does not bond PC13 at
@@ -124,11 +127,23 @@ constexpr bool button_bonded = false;
 constexpr bool button_bonded = true;
 #endif
 
+// PORT D's PD4 the same way: the G0B1RE's LQFP64 bonds PD0..PD6
+// (DS13560 figure 8) and the G031K8's LQFP32 bonds no port-D pad at all
+// (DS12992 table 12), while every one of the three device headers
+// declares the port. PD4 rather than PD0 or PD2, which carry UCPD1's
+// dead-battery pull-downs out of a power-on (port.md).
+#if defined(STM32G031xx)
+constexpr bool port_d_bonded = false;
+#else
+constexpr bool port_d_bonded = true;
+#endif
+
 using IntA0 = ExtInt<PadA0>;
 using IntB0 = ExtInt<PadB0>;
 using IntB3 = ExtInt<PadB3>;
 using IntB7 = ExtInt<PadB7>;
 using IntA8 = ExtInt<PadA8>;
+using IntD4 = ExtInt<PadD4>;
 
 // The application-level guard the driver cannot apply for us: PA0 and
 // PB0 ARE the same line, and this suite means them to be - it uses them
@@ -274,6 +289,9 @@ void quiet_everything() {
     IntB3::release();
     IntB7::release();
     IntA8::release();
+    if constexpr (port_d_bonded) {
+        IntD4::release();
+    }
     Nvic::clear_pending(EXTI0_1_IRQn);
     Nvic::clear_pending(EXTI2_3_IRQn);
     Nvic::clear_pending(EXTI4_15_IRQn);
@@ -1038,6 +1056,78 @@ void th_kernel() {
 }
 
 // =============================================================================
+// p - port D: a line through the fourth port of the multiplexer
+// =============================================================================
+void tp_port_d() {
+    if constexpr (!port_d_bonded) {
+        print(serial, "  SKIP: this package bonds no port-D pad (DS12992 table "
+              "12); ExtInt<Pin<'D', n>> compiles here and has no pad to walk", crlf);
+        return;
+    } else {
+        quiet_everything();
+        bench.verdict("PD4 is electrically free (it follows its own pull)",
+                      pad_follows_pull<PadD4>());
+
+        // Polled, both senses: the pull, then the port's own driver.
+        PadD4::input(PinPull::down);
+        const bool armed = poll_line<IntD4, PadD4>(ExtiSense::both);
+        settle();
+        (void)IntD4::clear();
+        print(serial, "  line 4's multiplexer reads port ", Exti::selected(4), crlf);
+        bench.verdict("line 4's multiplexer takes port D (EXTICR code 3) and "
+                      "reads it back",
+                      armed && IntD4::selected() && Exti::selected(4) == 'D');
+        walk_to<PadD4>(true);
+        const bool up_rising = IntD4::rising_pending() && !IntD4::falling_pending();
+        (void)IntD4::clear();
+        walk_to<PadD4>(false);
+        const bool down_falling = IntD4::falling_pending() && !IntD4::rising_pending();
+        (void)IntD4::clear();
+        park_driven<PadD4>(false);
+        (void)IntD4::clear();
+        drive_to<PadD4>(true);
+        const bool driven_rising = IntD4::rising_pending();
+        (void)IntD4::clear();
+        drive_to<PadD4>(false);
+        const bool driven_falling = IntD4::falling_pending();
+        (void)IntD4::clear();
+        bench.verdict("a pull-walked PD4 raises the rising and then the falling "
+                      "pending bit, each alone",
+                      up_rising && down_falling);
+        bench.verdict("and so does PD4 driven by its own port",
+                      driven_rising && driven_falling);
+
+        // Through the vector: line 4 is EXTI4_15's.
+        clear_counts();
+        (void)IntD4::arm(true);
+        Nvic::clear_pending(IntD4::irq());
+        Nvic::enable(IntD4::irq());
+        for (uint8_t k = 0; k < 3u; ++k) {
+            drive_to<PadD4>(true);
+            drive_to<PadD4>(false);
+        }
+        Nvic::disable(IntD4::irq());
+        print(serial, "  three driven pulses on PD4: ", line_rising[4], " rising, ",
+              line_falling[4], " falling, served by vector tag ", line_vector[4],
+              crlf);
+        bench.verdict("three pulses on PD4 are three rising and three falling "
+                      "edges at EXTI4_15's vector",
+                      line_rising[4] == 3u && line_falling[4] == 3u &&
+                          line_vector[4] == 3u);
+
+        // The multiplexer moved off port D: the same pulses are silent.
+        (void)Exti::select(4, 'A');
+        (void)IntD4::clear();
+        drive_to<PadD4>(true);
+        drive_to<PadD4>(false);
+        const bool silent = !IntD4::pending();
+        bench.verdict("with line 4 pointed at port A, PD4's edges reach nothing",
+                      silent);
+        quiet_everything();
+    }
+}
+
+// =============================================================================
 // u - the user button, as a plain input
 // =============================================================================
 //
@@ -1183,6 +1273,8 @@ int main() {
     bench.letter('g', "the masks: a masked line, and an event out of WFE",
                  tg_masks);
     bench.letter('h', "ExtInt inside a real kernel", th_kernel);
+    bench.letter('p', "port D: a line through the multiplexer's fourth port",
+                 tp_port_d);
     bench.letter('u', "the user button as a plain input", tu_button);
 
     if (serial_ok) {

@@ -67,9 +67,10 @@
 //      the input AS the clock with 26.4.12's lost first edges COUNTED,
 //      the glitch filter as a real threshold, and a comparator's output
 //      counted with no pad on the timer's side at all
-//   e  triggers: an RTC alarm and a comparator starting the counter, the
-//      ETR pad's trigger latency in kernel clocks, a trigger ignored
-//      while running, and the timeout function
+//   e  triggers: an RTC alarm and the comparators starting the counter,
+//      the ETR pad's trigger latency in kernel clocks, a trigger ignored
+//      while running, a later trigger in set-once mode, and the timeout
+//      function
 //   f  encoder mode on LPTIM1: quadrature walked by two pulls, the three
 //      sub-modes of table 144, the direction flags, and LPTIM2 refused
 //   g  THROUGH STOP: the counter on each of the four kernel clocks
@@ -1711,6 +1712,48 @@ void td_counter_mode() {
     quiet_everything();
 }
 
+/// ROWS 5 AND 7, the other two comparators as triggers: the COMP1 leg's
+/// precharge stimulus on the comparator's own plus pad (the pad driven
+/// low, left floating, then driven high and left floating - its own
+/// capacitance holds the level against half of VREFINT), and LPTIM1
+/// counting from the trigger's edge. Returns what the leg judged.
+template <class C, class Pad>
+bool comp_trigger_row(CompPositive positive, LptimTrigger trigger, uint8_t row) {
+    C::init();
+    const CompConfig cfg{.positive = positive, .negative = CompNegative::vrefint_half};
+    const bool up = C::claim_inputs(cfg) && C::configure(cfg) && C::enable(true);
+    Pad::output(false);
+    spin_us(300);
+    Pad::analog();
+    spin_us(300);
+    L1::init();
+    L1::kernel_clock(LptimClock::pclk);
+    const bool cfg_ok = L1::configure({.prescaler = LptimPrescaler::div128,
+                                       .trigger = trigger,
+                                       .trigger_edge = LptimTriggerEdge::rising});
+    L1::enable();
+    (void)L1::set_arr(0xFFFFu);
+    (void)L1::wait_arr_ok();
+    (void)L1::clear_flags(LptimFlag::all);
+    (void)L1::start_continuous();
+    spin_us(1000);
+    const uint16_t before = L1::count_raw();
+    Pad::output(true);
+    spin_us(300);
+    Pad::analog();
+    spin_us(2000);
+    const uint16_t after = L1::count_raw();
+    const bool trig = (L1::status() & LptimFlag::exttrig) != 0u;
+    print(serial, "  row ", row, ", a comparator's output as the trigger: the "
+          "counter went from ", before, " to ", after, ", EXTTRIG ",
+          trig ? "set" : "CLEAR", crlf);
+    (void)C::enable(false);
+    Pad::analog();
+    L1::init();
+    L1::release();
+    return up && cfg_ok && before == 0u && after != 0u && trig;
+}
+
 // =============================================================================
 // e - triggers
 // =============================================================================
@@ -1770,6 +1813,66 @@ void te_triggers() {
                   "AND ITS FLAG IS NOT SET - 26.7.1's easily-missed sentence, "
                   "measured",
                   ignored && still_running != running);
+
+    // SET-ONCE AND A LATER TRIGGER (26.4.8, figure 274: "the counter is
+    // only started once following the first trigger, and any subsequent
+    // trigger event is discarded"), against one-pulse mode, where a
+    // trigger after the stop is a new cycle. Both legs single-shot, armed
+    // on the ETR pad: 500 ticks at 500 kHz (1 ms), the first edge, 2 ms
+    // for the cycle to end, then a second edge - the counter read 300 us
+    // after it, ARRM and EXTTRIG 2 ms after it.
+    bool once_same = true;
+    for (uint8_t leg = 0; leg < 2u; ++leg) {
+        feed();
+        const bool set_once = leg == 1u;
+        EtrPin::pull(PinPull::down);
+        spin_us(200);
+        L1::init();
+        L1::kernel_clock(LptimClock::pclk);
+        const bool cfg = L1::configure({.prescaler = LptimPrescaler::div128,
+                                        .trigger = LptimTrigger::etr_pad,
+                                        .trigger_edge = LptimTriggerEdge::rising,
+                                        .waveform = set_once ? LptimWaveform::set_once
+                                                             : LptimWaveform::pwm_or_pulse});
+        L1::enable();
+        (void)L1::set_arr(499);
+        (void)L1::wait_arr_ok();
+        (void)L1::set_cmp(249);
+        (void)L1::wait_cmp_ok();
+        (void)L1::clear_flags(LptimFlag::all);
+        (void)L1::start_single();
+        spin_us(500);
+        const bool idle_armed = (L1::status() & LptimFlag::arrm) == 0u &&
+                                L1::count_raw() == 0u;
+        EtrPin::pull(PinPull::up);
+        spin_us(2000);
+        const bool first = (L1::status() & LptimFlag::arrm) != 0u;
+        const uint16_t stopped = L1::count_raw();
+        (void)L1::clear_flags(LptimFlag::all);
+        EtrPin::pull(PinPull::down);
+        spin_us(200);
+        EtrPin::pull(PinPull::up);
+        spin_us(300);
+        const uint16_t counting = L1::count_raw();
+        spin_us(2000);
+        const uint32_t st = L1::status();
+        const bool second = (st & LptimFlag::arrm) != 0u;
+        const bool second_trig = (st & LptimFlag::exttrig) != 0u;
+        print(serial, "  ", set_once ? "set-once" : "one-pulse",
+              ", single-shot on ETR: the first edge ran a cycle ", first ? "yes" : "NO",
+              " (stopped at ", stopped, "); a second edge after the stop: the "
+              "counter at ", counting, " 300 us later, ARRM ", second ? "set" : "clear",
+              ", EXTTRIG ", second_trig ? "set" : "clear", crlf);
+        once_same = once_same && cfg && idle_armed && first && stopped == 0u &&
+                    counting != 0u && second && second_trig;
+    }
+    bench.verdict("A LATER TRIGGER IS NOT DISCARDED IN SET-ONCE MODE on this "
+                  "silicon: after the single-shot cycle has stopped, a second "
+                  "edge starts the counter again exactly as in one-pulse mode "
+                  "(EXTTRIG set, ARRM reached) - 26.4.8's 'started only once' "
+                  "does not hold for the counter; what WAVE keeps is the "
+                  "output's level (letter d)",
+                  once_same);
     EtrPad::release();
 
     // THE TIMEOUT FUNCTION (26.4.9): the same trigger now RESETS the
@@ -1909,6 +2012,25 @@ void te_triggers() {
           "reserve refuses the comparator rows at compile time, which letter "
           "j's trigger census checks.",
           crlf);
+#endif
+
+    // ROW 7, COMP2_OUT, on COMP2's own plus pad PB6 (INPSEL 1), and ROW 5,
+    // COMP3_OUT (LPTIM1's alone), on COMP3's PB0 (INPSEL 0) - each
+    // comparator present on fewer parts than the last (18.1: none on the
+    // G031/G041, two on the G05x..G08x, three on the G0B1/G0C1).
+    feed();
+#if defined(COMP2_BASE)
+    bench.verdict("table 138's row 7: COMP2's output starts the counter",
+                  comp_trigger_row<Comp<2>, Pin<'B', 6>>(CompPositive::input1,
+                                                         LptimTrigger::comp2_out, 7));
+#endif
+#if defined(COMP3_BASE)
+    bench.verdict("and row 5: COMP3's output starts LPTIM1",
+                  comp_trigger_row<Comp<3>, Pin<'B', 0>>(CompPositive::input0,
+                                                         LptimTrigger::comp3_out, 5));
+#else
+    print(serial, "  row 5 SKIPPED, no verdict claimed: COMP3 is the "
+          "G0B1/G0C1's alone (18.1)", crlf);
 #endif
 
     quiet_everything();

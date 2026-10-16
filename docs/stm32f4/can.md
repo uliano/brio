@@ -262,7 +262,7 @@ const auto sce = Bus::sce_isr();    // ERRI/WKUI/SLAKI cleared, ESR reported
 
 ## Bench findings
 
-From `test_stm32f4_misc` letters `c` to `k` on an STM32F446 at 180 MHz,
+From `test_stm32f4_misc` letters `c` to `l` on an STM32F446 at 180 MHz,
 PCLK1 45 MHz, with no transceiver, no peer and no wire - the receive
 pads claimed as inputs with their pull-ups and the transmit pads never
 claimed, so the chip drives nothing (the same nine letters green on the
@@ -332,7 +332,27 @@ pull-up cannot give - and its CAN2_RX on PB5):
 - **Bus-off recovery.** With ABOM clear the node is still bus-off 30 ms
   later. With ABOM set the recovery took **1407 us at 1 Mbit/s** -
   128 x 11 = 1408 bit times, to the microsecond - and left TEC and REC
-  at 0.
+  at 0. **`request_bus_off_recovery()`**, the ABOM-clear path (letter
+  `l`): the node stays bus-off until asked, and comes back **1407 us**
+  after the verb returns - the same count, started by software, in ten
+  runs of ten.
+- **The three vectors, under traffic** (letter `l`): five loopback frames
+  at 500 kbit/s with TMEIE and FMPIE0 armed enter the transmit vector
+  five times for five completions and the FIFO 0 vector five times, its
+  body reading each message whole and byte-exact; on the way to a real
+  bus-off (letter `j`'s recessive bus, BOFIE and ERRIE armed) the status
+  vector entered once, with BOFF set. **The master reset does not clear
+  the transmit status**: two mailboxes letter `j` left completed still
+  read RQCP after `master_reset()` - the register's own description
+  promises only the FMP bits and CAN_MCR (30.9.1) - and TMEIE armed then
+  enters the transmit vector at once for them; the letter clears each
+  mailbox's result first.
+- **Four rates past the classic four**, in loopback (letter `l`): 3 and
+  1.5 Mbit/s above the chapter's 1 Mbit/s ceiling (BRP 1 and 2, fifteen
+  quanta from 45 MHz) and 50 and 10 kbit/s below 125 (BRP 60 and 300):
+  each 108-bit frame round-trips exact in 36.2, 73.1, 2198.5 and
+  10998.4 us, 100 to 101 % of its unstuffed bits. Above 1 Mbit/s that is
+  the block's arithmetic, not a bus's: no transceiver is specified there.
 - **The pair's filter block.** CAN_FMR.CAN2SB reads 14 out of reset, so
   CAN1 owns banks 0..13 and CAN2 banks 14..27; the split reads back
   where it is written, each instance is refused a bank on the other's
@@ -371,25 +391,15 @@ Driver gaps:
   to a live bus is a debugger session's question, not a suite's.
 
 Implemented, not bench-verified:
-- **The four vectors and the three ISR bodies.** Every letter polls;
-  nothing here binds a CAN vector, because a loopback node's traffic is
-  the program's own and polling shows the same flags. What would measure
-  them: a letter that arms `fifo0_pending` and counts entries against
-  frames sent, and one that arms `bus_off` and catches the transition
-  letter `j` provokes.
+- **The fourth vector** (FIFO 1's) and the bodies on it: letter `l`
+  binds the transmit, FIFO 0 and status vectors; a filter routing a
+  frame to FIFO 1 under FMPIE1 is what would measure it.
 - **`claim_pads()` with both pads**, and therefore the transmit pad's
   alternate function and slew class: the suite claims receive pads only,
   on purpose. A transceiver would measure it.
 - **`sleep()` leaving on bus activity** (AWUM) and the WKUI flag: the
   sleep entry and exit are measured, the wake-up EVENT is not - it needs
   a dominant edge from another node.
-- **`request_bus_off_recovery()`**, the ABOM-clear path: letter `j`
-  measures that the node STAYS bus-off with ABOM clear, and then
-  recovers it by setting ABOM. What would measure the verb: the same
-  letter asking for the software recovery instead, and timing it against
-  the 1407 us the automatic one took.
 - **`Can<3>`** in every respect: no part on this desk carries a third
   instance.
-- **Bit rates above 1 Mbit/s** (the chapter's ceiling) and below
-  125 kbit/s: the four measured are the classic ones; the search is
-  exercised on others only in the fixture's constant expressions.
+- Letter `l` on the STM32F469 (its board is not on the desk).

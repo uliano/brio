@@ -51,6 +51,9 @@
 //   h  write protection through the option bytes: a sector protected,
 //      the WRPERR it earns, and the way back                  (WEAR)
 //   k  a wrong unlock key: the engine locked until reset      (LAST)
+//   m  the ART accelerator's three switches, each timed on a flash-resident
+//      loop over a flash-resident table, and the two cache resets leaving
+//      a cold cache
 //
 // build: boards = f429zi,f446re,f411ce,f469ni
 // build: monitor_speed = 115200
@@ -187,6 +190,136 @@ volatile uint32_t flash_irq_flags = 0;
 volatile uint32_t bus_faults = 0;
 volatile uint32_t hard_faults = 0;
 volatile uint32_t fault_cfsr = 0;
+
+// =============================================================================
+// m - the ART accelerator's switches, each one timed
+// =============================================================================
+//
+// A piece of work that lives in the flash and reads a table that does too:
+// 64 rounds over a 32-word constant table (128 bytes - the D-cache's eight
+// 128-bit lines exactly), its code a few dozen bytes - so with the
+// I-cache on the loop never refetches, and with the D-cache on the table
+// never re-reads. Timed on the cycle counter with interrupts masked, one
+// call per setting after a warming call.
+
+alignas(16) const uint32_t art_table[32] = {
+    0x9E3779B9u, 0x7F4A7C15u, 0xF39CC060u, 0x5CEDC834u, 0x1B873593u, 0xCC9E2D51u,
+    0x85EBCA6Bu, 0xC2B2AE35u, 0x27D4EB2Fu, 0x165667B1u, 0xD3A2646Cu, 0xFD7046C5u,
+    0xB55A4F09u, 0x2545F491u, 0x4F1BBCDCu, 0x6A09E667u, 0xBB67AE85u, 0x3C6EF372u,
+    0xA54FF53Au, 0x510E527Fu, 0x9B05688Cu, 0x1F83D9ABu, 0x5BE0CD19u, 0xCBBB9D5Du,
+    0x629A292Au, 0x9159015Au, 0x152FECD8u, 0x67332667u, 0x8EB44A87u, 0xDB0C2E0Du,
+    0x47B5481Du, 0xAE5F9156u};
+
+[[gnu::noinline]] uint32_t art_work(uint32_t rounds) {
+    uint32_t acc = 0;
+    for (uint32_t r = 0; r < rounds; ++r) {
+        for (uint32_t i = 0; i < 32u; ++i) {
+            acc = ((acc << 1) | (acc >> 31)) ^ art_table[i] ^ i;
+        }
+    }
+    return acc;
+}
+
+/// The table's address through a volatile, so the compiler cannot fold
+/// the sums below out of a table whose values it knows.
+const uint32_t* volatile art_table_at = art_table;
+
+/// The same table summed, nothing else in the loop: the load is the work.
+[[gnu::noinline]] uint32_t art_loads(uint32_t rounds) {
+    const uint32_t* const t = art_table_at;
+    uint32_t acc = 0;
+    for (uint32_t r = 0; r < rounds; ++r) {
+        for (uint32_t i = 0; i < 32u; i += 4u) {
+            acc += t[i] + t[i + 1u] + t[i + 2u] + t[i + 3u];
+        }
+    }
+    return acc;
+}
+
+volatile uint32_t art_sink = 0;
+
+uint32_t art_time_loads() {
+    Stm32f4Platform<>::CriticalSection cs;
+    art_sink = art_loads(64);
+    const uint32_t c0 = Ticker::cycles();
+    art_sink = art_loads(64);
+    return Ticker::cycles() - c0;
+}
+
+/// One call of the work, timed with interrupts masked; `warm` makes a
+/// first, untimed call so the caches hold what they will hold.
+uint32_t art_time(bool warm) {
+    Stm32f4Platform<>::CriticalSection cs;
+    if (warm) {
+        art_sink = art_work(64);
+    }
+    const uint32_t c0 = Ticker::cycles();
+    art_sink = art_work(64);
+    return Ticker::cycles() - c0;
+}
+
+void tm_art() {
+    struct Setting {
+        bool prefetch, icache, dcache;
+        const char* name;
+    };
+    static constexpr Setting settings[5] = {
+        {true, true, true, "all on"},
+        {true, false, true, "I-cache off"},
+        {false, false, true, "I-cache and prefetch off"},
+        {true, true, false, "D-cache off"},
+        {false, false, false, "all off"},
+    };
+    uint32_t t[5] = {};
+    uint32_t l[5] = {};
+    for (uint8_t k = 0; k < 5u; ++k) {
+        FlashAccel::prefetch(settings[k].prefetch);
+        FlashAccel::icache(settings[k].icache);
+        FlashAccel::dcache(settings[k].dcache);
+        t[k] = art_time(true);
+        l[k] = art_time_loads();
+        print(serial, "  ", settings[k].name, " (ACR reads P", FlashAccel::prefetch(), " I",
+              FlashAccel::icache(), " D", FlashAccel::dcache(), "): ", t[k],
+              " cycles for 2048 table rounds; ", l[k], " for 2048 loads alone", crlf);
+    }
+    FlashAccel::prefetch(true);
+    FlashAccel::icache(true);
+    FlashAccel::dcache(true);
+    bench.verdict("THE I-CACHE CARRIES THE LOOP: switched off alone, the same work "
+                  "costs more",
+                  t[1] > t[0]);
+    bench.verdict("the PREFETCH carries what the I-cache leaves: with both off it costs "
+                  "more again",
+                  t[2] > t[1]);
+    // THE D-CACHE shows on the loop whose work IS the load: the round
+    // loop, a dependent rotate-and-xor chain of some ten cycles a word,
+    // costs the same with it off (measured) - its loads wait behind the
+    // chain - where the bare sum pays for every uncached line.
+    bench.verdict("THE D-CACHE CARRIES THE TABLE: switched off alone, the loads-only loop "
+                  "over the flash's table costs more",
+                  l[3] > l[0]);
+    bench.verdict("and all three off is the slowest of all, both loops",
+                  t[4] >= t[2] && t[4] > t[3] && l[4] > l[2] && l[4] > l[3]);
+
+    // The cache RESETS (3.9.1): legal only with the cache off, and what
+    // they leave is a cold cache - the first call after one costs more
+    // than the second.
+    FlashAccel::icache(false);
+    FlashAccel::dcache(false);
+    const bool i_reset = FlashAccel::icache_reset();
+    const bool d_reset = FlashAccel::dcache_reset();
+    FlashAccel::icache(true);
+    FlashAccel::dcache(true);
+    const uint32_t cold = art_time(false);
+    const uint32_t warm = art_time(false);
+    print(serial, "  after both resets: the first call ", cold, " cycles, the second ",
+          warm, crlf);
+    bench.verdict("with the caches off both resets are taken, and they leave the caches "
+                  "COLD: the first call after them costs more than the second",
+                  i_reset && d_reset && cold > warm);
+    bench.verdict("and the accelerator is left all on",
+                  FlashAccel::prefetch() && FlashAccel::icache() && FlashAccel::dcache());
+}
 
 // =============================================================================
 // a - the array, its sectors and its option bytes
@@ -917,6 +1050,7 @@ int main() {
     bench.letter('b', "the lock and the keyed unlock", tb_lock);
     bench.letter('c', "the four malformed sequences, each aborted", tc_missteps);
     bench.letter('d', "the error interrupt and the ISR body", td_interrupt);
+    bench.letter('m', "the ART accelerator's switches, each timed", tm_art);
     bench.letter('e', "erase and program the last sector", te_round_trip, false);
     bench.letter('f', "a second program into a programmed word", tf_second_write, false);
     bench.letter('g', "the erase stall, per sector size and per ART", tg_stall, false);

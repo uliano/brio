@@ -49,6 +49,9 @@
 //      update and ADC1's conversion, each with its request standing and
 //      released five ways, then a stream on its own cell as the next
 //      owner - what the release contract's reset buys on this silicon
+//   s  the copy engine's three beats at every source and destination
+//      offset from 0 to 15, copy and fill, the guards beside them, the
+//      unaligned element refused, and abandon() mid-block
 //   u  (outside z) brio stress: the host's stream into the receive
 //      engine at 115200, 460800 and 921600, the consumer looking at most
 //      once a millisecond and only after an edge from the vectors - every
@@ -150,7 +153,7 @@ constexpr uint32_t stress_ring_bytes = 256;
 using StressSerial = Uart<console_instance, console_pins, stress_ring_bytes, 256,
                           ConsoleTxEngine, ConsoleRxEngine>;
 
-TestBench<Serial> bench;
+TestBench<Serial, 20> bench;
 
 // ---- the wireless instrument: memory to memory on DMA2 ------------------------
 
@@ -1441,6 +1444,134 @@ using LoadD = DmaCopyEngine<2, 6>;
 uint8_t load_copies = 0;      ///< how many of the four a sink leg keeps busy
 uint32_t load_blocks = 0;     ///< blocks they started in the leg
 
+// ---- s: the copy engine at every width and misalignment, and abandon() ------------
+//
+// The engine bursts a port only from a sixteen-byte boundary and beats it
+// singly elsewhere (stm32f4/dma.hpp), so every source and destination
+// offset from 0 to 15 in steps of the element is a different burst
+// arrangement: 37 elements (an odd count, so no width divides it into
+// whole bursts) copied and filled at each, the result checked against the
+// pattern and the sixteen bytes on either side against their guard.
+
+alignas(16) uint8_t cp_src[256];
+alignas(16) uint8_t cp_dst[256];
+using Copier = DmaCopyEngine<2, 1>;
+constexpr uint32_t cp_elems = 37;
+constexpr uint8_t cp_guard = 0xEE;
+
+bool cp_wait() {
+    const uint32_t t0 = Ticker::ticks();
+    while (Copier::busy()) {
+        if (Ticker::ticks() - t0 > 10u) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// True when dst[at, at + len) is `want(i)` and the guard stands on both
+/// sides of it, sixteen bytes each (dst has room: at + len + 16 <= 256).
+template <typename F>
+bool cp_check(uint32_t at, uint32_t len, F want) {
+    for (uint32_t i = 0; i < sizeof(cp_dst); ++i) {
+        const bool inside = i >= at && i < at + len;
+        const bool near = i + 16u >= at && i < at + len + 16u;
+        if (inside ? cp_dst[i] != want(i - at) : (near && cp_dst[i] != cp_guard)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+template <typename T>
+uint32_t cp_sweep(uint32_t& cases) {
+    uint32_t fails = 0;
+    for (uint32_t so = 0; so < 16u; so += sizeof(T)) {
+        for (uint32_t d = 0; d < 16u; d += sizeof(T)) {
+            const uint32_t at = 16u + d;
+            for (uint32_t i = 0; i < sizeof(cp_src); ++i) {
+                cp_src[i] = static_cast<uint8_t>(i * 37u + so + 1u);
+                cp_dst[i] = cp_guard;
+            }
+            const bool ok = Copier::copy(reinterpret_cast<T*>(cp_dst + at),
+                                         reinterpret_cast<const T*>(cp_src + so), cp_elems) &&
+                            cp_wait() &&
+                            cp_check(at, cp_elems * sizeof(T), [so](uint32_t k) {
+                                return cp_src[so + k];
+                            });
+            ++cases;
+            fails += ok ? 0u : 1u;
+        }
+    }
+    // fill(): the cell read at every beat, single.
+    for (uint32_t d = 0; d < 16u; d += sizeof(T)) {
+        const uint32_t at = 16u + d;
+        for (uint8_t& b : cp_dst) {
+            b = cp_guard;
+        }
+        alignas(4) static T cell;
+        uint8_t pattern[4] = {0x5A, 0xC3, 0x96, 0x3C};
+        __builtin_memcpy(&cell, pattern, sizeof(T));
+        const bool ok = Copier::fill(reinterpret_cast<T*>(cp_dst + at), &cell, cp_elems) &&
+                        cp_wait() &&
+                        cp_check(at, cp_elems * sizeof(T), [&pattern](uint32_t k) {
+                            return pattern[k % sizeof(T)];
+                        });
+        ++cases;
+        fails += ok ? 0u : 1u;
+    }
+    return fails;
+}
+
+void ts_copy_widths() {
+    Copier::arm();
+    uint32_t c8 = 0, c16 = 0, c32 = 0;
+    const uint32_t f8 = cp_sweep<uint8_t>(c8);
+    const uint32_t f16 = cp_sweep<uint16_t>(c16);
+    const uint32_t f32 = cp_sweep<uint32_t>(c32);
+    print(serial, "  37-element copies and fills at every source and destination "
+          "offset 0..15: bytes ", c8 - f8, "/", c8, ", half-words ", c16 - f16, "/", c16,
+          ", words ", c32 - f32, "/", c32, " exact with their guards standing", crlf);
+    bench.verdict("THE COPY ENGINE AT EVERY WIDTH AND EVERY MISALIGNMENT: bytes, "
+                  "half-words and words, burst from a sixteen-byte boundary and beaten "
+                  "singly off one, land exact and touch nothing beside them",
+                  f8 == 0u && f16 == 0u && f32 == 0u && c8 == 272u && c16 == 72u &&
+                      c32 == 20u);
+    bench.verdict("and an unaligned element is refused before anything starts",
+                  !Copier::copy(reinterpret_cast<uint16_t*>(cp_dst + 1),
+                                reinterpret_cast<const uint16_t*>(cp_src), 4u) &&
+                      !Copier::copy(reinterpret_cast<uint32_t*>(cp_dst),
+                                    reinterpret_cast<const uint32_t*>(cp_src + 2), 4u) &&
+                      !Copier::busy());
+
+    // abandon(): a 4096-word block stopped a few microseconds in - true,
+    // the engine free, the block counted lost, part of it landed - and the
+    // engine copies whole again right after.
+    for (uint32_t i = 0; i < 1024u; ++i) {
+        load_src[0][i] = 0xA5A50000u + i;
+        load_dst[0][i] = 0u;
+    }
+    const uint32_t faults0 = Copier::faults();
+    const bool started = Copier::copy(&load_dst[0][0], &load_src[0][0], 1024u);
+    (void)delay_us(clock, 2);
+    const bool stopped = Copier::abandon();
+    uint32_t landed = 0;
+    for (const uint32_t w : load_dst[0]) {
+        landed += w != 0u ? 1u : 0u;
+    }
+    const bool freed = !Copier::busy() && Copier::faults() == faults0 + 1u;
+    const bool again = Copier::copy(&load_dst[1][0], &load_src[0][0], 1024u) && cp_wait() &&
+                       load_dst[1][1023] == 0xA5A503FFu && load_dst[1][0] == 0xA5A50000u;
+    print(serial, "  abandon() 2 us into a 1024-word block: ", stopped ? "true" : "false",
+          ", ", landed, " words had landed, the engine ", freed ? "free" : "NOT free",
+          ", the next block ", again ? "whole" : "WRONG", crlf);
+    bench.verdict("abandon(): a running block stopped where it is and counted lost, part "
+                  "of it landed, and the engine copies whole again at once",
+                  started && stopped && landed > 0u && landed < 1024u && freed && again &&
+                      !Copier::abandon());
+}
+
+
 template <typename E>
 void keep_loaded(uint8_t i) {
     if (!E::busy() && E::copy(load_dst[i], load_src[i], 1024u)) {
@@ -2064,6 +2195,8 @@ int main() {
     bench.letter('m', "the circular receive, on the transmitter's own echo", tm_receive);
     bench.letter('n', "the circular receive's two edges: a lap missed, the drain",
                  tn_receive_edges);
+    bench.letter('s', "the copy engine at every width and misalignment, and abandon()",
+                 ts_copy_widths);
     bench.letter('r', "a released requester: what the next owner of its cell sees",
                  tr_released_requester);
     bench.letter('u', "brio stress: the host's stream into the receive engine", tu_stress,

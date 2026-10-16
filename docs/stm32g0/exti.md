@@ -202,9 +202,9 @@ afterwards.
 
 ## Bench findings
 
-`test_stm32_exti`, 9 letters, 89 verdicts, WIRELESS. Pads PA0/PB0 (line
-0), PB3 (line 3), PB7 (line 7), PA8 (line 8), PC13 (the user button,
-read only); the console (PA2/PA3), LD4 (PA5), SWD (PA13/PA14), the LSE
+`test_stm32_exti`, 10 letters, 95 verdicts, WIRELESS. Pads PA0/PB0 (line
+0), PB3 (line 3), PD4 (line 4), PB7 (line 7), PA8 (line 8), PC13 (the
+user button, read only); the console (PA2/PA3), LD4 (PA5), SWD (PA13/PA14), the LSE
 pads (PC14/PC15) and the HSE pads (PF0/PF1) are all avoided.
 
 **The stimulus, measured before anything rests on it.** All five pads
@@ -220,6 +220,14 @@ driven edges, 16 of 16 pull-walked edges, no edge ever double-counted
 by an unfiltered detector. **Analog mode is the one that blinds a
 line**: with the input buffer off, the pad's own pull moves nothing the
 EXTI can see.
+
+**Port D through the multiplexer** (letter `p`): PD4 follows its own
+pull, line 4's EXTICR field takes port D's code and reads it back as
+port D, the pull-walked and the self-driven pad each raise the rising and
+then the falling pending bit alone, three driven pulses are three rising
+and three falling edges at EXTI4_15's vector, and with the line pointed
+at port A the same pulses reach nothing - ten runs of ten. On the
+STM32G031K8 the letter skips by name: its LQFP32 bonds no port-D pad.
 
 **The reset value of IMR1** (see above): 0xFFE80000, not the 0xFFF80000
 13.5.12 prints - the manual's own rule beats the manual's own number,
@@ -336,9 +344,12 @@ the pending state.
 
 Implemented, not bench-verified: the second register group's own verbs
 (line 34's trigger, pending and software trigger - `VDDIO2` monitoring
-has no stimulus without a supply change); `ExtInt` on ports D, E and F
-(compile-checked on every header; letter b's pull-walk on a bonded
-port-D pad would carry straight over, and the LQFP64 bonds PD0..PD6);
+has no stimulus without a supply change); `ExtInt` on ports E and F
+(compile-checked on every header; port E exists on the G0B1/G0C1 class
+alone and no package on the bench bonds a port-E pad; the G0B1RE's
+LQFP64 bonds PF0..PF2 alone, the HSE's two pads and NRST - DS13560
+figure 8); letter `p` on the STM32G071RB, which bonds PD4 too (it needs
+that board on the desk);
 `Exti::release()` on a direct line (every release a suite spends is on a
 GPIO or a comparator line).
 

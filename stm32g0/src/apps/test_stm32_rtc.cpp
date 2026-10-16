@@ -1232,6 +1232,14 @@ void th_erratum() {
 // i - smooth calibration, measured
 // =============================================================================
 void ti_calibration() {
+    // THE WORKING PRESCALERS FIRST: CALP cannot be set while PREDIV_A is
+    // under 3 (30.3.13), and the RTC domain keeps whatever a program
+    // before this one left in it - test_stm32_lptim runs PREDIV_A 0 - so
+    // the letter puts its own back, the calendar kept.
+    if (Rtc::prescalers().async != working_prescalers().async) {
+        RtcReading now{};
+        (void)(Rtc::read(now) && Rtc::init(working_prescalers(), now.time));
+    }
     // TWO INSTRUMENTS, and the difference between them is this letter's
     // finding. Both are wake-up periods captured on TIM16 at 32 us per
     // tick, long enough that a few hundred ppm is many ticks, and both
@@ -1330,6 +1338,20 @@ void ti_calibration() {
                                           .window = RtcCalibrationWindow::seconds8}) &&
                       rtc_calibration_valid({.minus = 4,
                                              .window = RtcCalibrationWindow::seconds8}));
+
+    // CALP REFUSED UNDER PREDIV_A 3 (30.3.13): PREDIV_A 2 with PREDIV_S
+    // 10922 for the question (3 x 10923 = 32769 RTCCLK, a second still),
+    // then the working prescalers back, the calendar kept.
+    RtcReading kept{};
+    const bool narrowed =
+        Rtc::read(kept) && Rtc::init(RtcPrescalers{.async = 2, .sync = 10922}, kept.time);
+    const bool calp_refused = !Rtc::calibrate(RtcCalibration{.plus = true, .minus = 0});
+    const bool calm_taken = Rtc::calibrate(RtcCalibration{.plus = false, .minus = 8});
+    (void)Rtc::calibrate(RtcCalibration{});
+    const bool restored = Rtc::read(kept) && Rtc::init(working_prescalers(), kept.time);
+    bench.verdict("CALP IS REFUSED while PREDIV_A is under 3 - a bit the silicon would "
+                  "drop in silence - and CALM is not",
+                  narrowed && calp_refused && calm_taken && restored);
 }
 
 // =============================================================================

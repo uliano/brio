@@ -339,15 +339,20 @@ struct Iwdg {
     /**
      * Reset the device by refreshing into a closed window.
      *
-     * NOT INSTANTANEOUS and not [[noreturn]]: the refresh crosses into
-     * the LSI domain, so the CPU executes whatever follows for a few
-     * tens of microseconds. A caller that means to end here says so
-     * with a spin of its own.
+     * NOT INSTANTANEOUS and not [[noreturn]]: the window and the refresh
+     * cross into the LSI domain, counted in PRESCALED cycles (28.4.4),
+     * so the CPU runs on for about four of them at the prescaler in
+     * force - 31 ms at /256 (measured), about a millisecond at /4. A
+     * caller that means to end here says so with a spin of its own.
      *
-     * Requires a running watchdog: with the counter stopped there is
-     * nothing to compare against a window.
+     * IT STARTS THE WATCHDOG FIRST. On a stopped one the window's write
+     * never crosses (fact 4) and the refresh has no counter to compare,
+     * so the bare sequence is a silent no-op there (measured: nothing in
+     * two seconds); the start key gives the block its clock, and on a
+     * running watchdog it changes nothing.
      */
     static void force_reset() {
+        start();
         unlock();
         IWDG->WINR = 0u;   // no counter value is below zero
         refresh();
@@ -419,6 +424,15 @@ struct Iwdg {
      * the counter (28.3.2), so it is also the refresh that makes the
      * new timing take effect - and doing it in the other order would
      * leave a counter reloaded against the old window.
+     *
+     * PR AND RLR BACK TO BACK ARE SAFE HERE (measured, after a reset
+     * and with LSI off at the start): the new reload counts from that
+     * WINR reload, never from the start key's count. What a short
+     * reload does meet is the crossing itself: the WINR reload lands
+     * about three prescaled cycles after the store and WVU drops two
+     * later, so a reload of 0..2 resets the device before this verb can
+     * return - a time-out shorter than the crossing that would confirm
+     * it (docs/stm32g0/reset.md).
      */
     static bool configure(const IwdgConfig& cfg) {
         if (!iwdg_config_valid(cfg)) {

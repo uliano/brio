@@ -252,7 +252,10 @@ enum class LptimTriggerEdge : uint8_t {
 /// CFGR.WAVE (26.4.10). `pwm_or_pulse` is WAVE = 0, where WHICH of the
 /// two it is depends on the start verb: CNTSTRT gives PWM, SNGSTRT gives
 /// one pulse. WAVE = 1 is Set-once: one pulse, then the output stays at
-/// its last level and every later trigger is discarded.
+/// its last level. A later trigger is NOT discarded as far as the counter
+/// goes - measured: after a single-shot cycle has stopped, a second edge
+/// starts it again exactly as under WAVE = 0, EXTTRIG and ARRM both
+/// raised, against 26.4.8's "the counter is only started once".
 enum class LptimWaveform : uint8_t {
     pwm_or_pulse = 0,
     set_once = 1,

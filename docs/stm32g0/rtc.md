@@ -247,7 +247,7 @@ while (brio::Rtc::shift_pending()) { }
 
 ## Bench findings
 
-The reference suite is `test_stm32_rtc` (fourteen letters in `z`, 125
+The reference suite is `test_stm32_rtc` (fourteen letters in `z`, 126
 verdicts; letter `v` outside it reboots the board once, and letter `w`
 outside it spends the five backup registers and the calendar's value on
 the erase and the calendar overflow). Nothing is wired: TIM16's input
@@ -310,6 +310,14 @@ no pad.
   pulses into the PRESCALERS, so the calendar moves and the divided
   wake-up clocks do not; no chapter says so, and an application pacing
   something off RTCCLK/16 should know its period is uncalibrated.
+- **CALP IS REFUSED WHILE PREDIV_A IS UNDER 3** (30.3.13's "Calibration
+  when PREDIV_A < 3": the bit "can not be set to 1" then): `calibrate()`
+  answers false for it, letter `i` staging PREDIV_A 2 (PREDIV_S 10922) -
+  CALM is taken - and putting the working prescalers back. The silicon
+  drops such a CALP in silence (measured on the STM32F446's twin block,
+  [../stm32f4/rtc.md](../stm32f4/rtc.md)), and the RTC domain keeps
+  whatever split a program before left in it - `test_stm32_lptim` runs
+  PREDIV_A 0 - so letter `i` sets its own before it measures.
 - **An alarm lands AT its match**, not a whole period after it - the
   opposite of the SAM's counter compare: alarm A on a seconds match
   fired with the calendar reading second 5, 0 ms into it, and a

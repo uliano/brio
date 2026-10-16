@@ -378,6 +378,22 @@ a polling loop locates to a few hundred nanoseconds.
   (-503 measured, -487 priced). The residual on the last is the
   two-second window against the 32-second calibration cycle: the masked
   pulses are spread over the whole cycle, not over the window.
+- **The 8- and 16-second cycles keep the scale** (letter `o`): weighed
+  over one cycle of their own length, CALM 256 is -243 ppm and CALP +488
+  ppm in both (41 uncalibrated, -202 and 529) - CALW8 and CALW16 shorten
+  the cycle and stick CALM's low bits, they do not rescale the setting.
+- **CALP IS DROPPED IN SILENCE WHILE PREDIV_A IS UNDER 3** (17.3.11's
+  "Calibration when PREDIV_A<3"): with the domain found at PREDIV_A 0 -
+  left so by a program before this one, in a domain no reset touches -
+  CALR read back 0x4000 for CALP with CALW8, the calendar's rate did not
+  move, and letter `i`'s CALP verdict failed. `calibrate()` now refuses
+  CALP there (letter `o` stages PREDIV_A 2 and is refused; CALM is
+  taken), and letters `i`, `m` and `o` put the reset prescalers back
+  before they measure, the calendar kept.
+- **Alarm A's hour, date and weekday matches** (letter `o`): with the
+  calendar set three seconds short of each match, an hour match (minutes
+  and seconds compared), a date match and a weekday match (WDSEL) each
+  fire, and the same alarm one unit away stays silent - ten runs of ten.
 - **A shift is visible as the length of one second** (letter `k`):
   SUBFS = 128 with PREDIV_S = 255 made the second it landed in 1499 ms
   long, and ADD1S with the same SUBFS put two calendar seconds inside
@@ -387,7 +403,10 @@ a polling loop locates to a few hundred nanoseconds.
   0.99938 s at COSEL = 0, and exactly 4 in 4.2 s at COSEL = 1, read
   through PC13's own input register with no instrument. The alarm
   output follows the flag it is pointed at - low with WUTF clear, high
-  with it set, POL = 0.
+  with it set, POL = 0. **POL = 1 inverts it**, and **OPEN DRAIN leaves
+  the high to the board** (letter `o`): in push-pull the pad reads high
+  at the first poll after the flag, in open drain 327 us later, the
+  Nucleo's own pull-up on the user button's line charging its pad.
 - **ES0287 2.2.10 is not measurable here**: the crystal weighed 36 ppm
   before RTC_AF1 was driven and 36 ppm after a second of 512 Hz on it
   (letter `m`). The erratum stands - the measurement's floor is about a
@@ -505,15 +524,6 @@ Implemented, not bench-verified:
 - **The 17-bit wake-up range** (`ck_spre_high`) - the code is compiled
   and the encoding checked; the shortest interval it can be asked for is
   18 hours.
-- **The alarm masks other than the two measured.** The seconds-only
-  match and the sub-second match are weighed; the date, weekday and hour
-  masks are compiled, and each would cost a day, a week or an hour to
-  see fire.
-- **The alarm output's open-drain type and POL = 1** - `alarm_output`
-  writes both and only push-pull with POL = 0 was read back on the pad.
-- **The 8- and 16-second calibration windows** - their stuck-bit
-  refusals are proven; their effect on the correction's distribution is
-  not (it wants a window as long as the cycle).
 - **VBAT.** The backup registers and the calendar are measured across a
   system reset; surviving a loss of VDD is the manual's statement and
   needs a cell on the board's VBAT pin.

@@ -712,6 +712,18 @@ gate, no call and no register of the USART: the edge is the vectors' now
 ([usart.md](usart.md)), and `harvest()` the same gate asked from the
 consumer's side by an owner that still asks.
 
+**The copy engine at every width and every misalignment** (letter `s`):
+37 elements - an odd count, so no width divides into whole bursts -
+copied at every source and destination offset from 0 to 15 in steps of
+the element, and filled at every destination offset: bytes 272 cases of
+272, half-words 72 of 72, words 20 of 20 land exact with the sixteen
+guard bytes on either side untouched, the ports bursting from a
+sixteen-byte boundary and beating singly off one; an element off its
+own alignment is refused before anything starts. **`abandon()`** two
+microseconds into a 1024-word block stops it with 152 words landed in
+every run of ten, counts it lost, frees the engine, and the next block
+copies whole.
+
 **The reset state**: both AHB1 gates closed, every flag register at zero,
 every stream's SxCR at zero and SxFCR at 0x21 (the FIFO empty, threshold a
 half, direct mode on).
@@ -770,12 +782,6 @@ Implemented but not bench-verified, each with what would measure it:
   because memory-to-memory is the instrument and DMA1 has not got it. A
   peripheral on DMA1 with its own suite - a timer, an SPI - is what would
   measure the second controller's own arbitration and flags.
-- **The copy engine's narrower beats and its unaligned bursts.** Letter d
-  copies and fills words between sixteen-byte boundaries; the half-word
-  and byte beats, a port that starts off a sixteen-byte boundary (single
-  beats there) and `abandon()` are compiled and checked in the family
-  fixture and not run. A copy letter over the three widths at every
-  misalignment would measure them, as `test_rt` does for the runtime.
 - **The engines on the other three boards.** Letter d and the suites ran on
   the STM32F446RE; the F429's SPI and I2C suites and the F411's and F469's
   `test_stm32f4_dma` (letters m and n among them, the circular receive on

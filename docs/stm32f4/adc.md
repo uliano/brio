@@ -503,6 +503,24 @@ because `select()` is void by the sampler's contract. Reading the datum
 takes both flags down, and letter a asserts that a selection right after
 a completed conversion is accepted.
 
+**EVERY TIMER TRIGGER CODE, BOTH TABLES** (letter `s`): each of the
+fifteen timer rows of table 71 (regular) and of table 72 (injected) on
+its own timer brought up as a 10 kHz source - a 1 MHz count, ARR 99, TRGO
+on the update or the channel in PWM mode 1 at a compare of 50 - starts a
+VREFINT conversion on each event: **99 or 100 conversions in each 10 ms
+window, all thirty codes**, ten runs of ten. The channel's compare event
+needs no pad and no output enable on the bench beyond CCyE, and the
+advanced-control timers' MOE is raised for them. **The edge is chosen**:
+TIM2's TRGO made its OC1REF at 50 % (MMS 100, two edges 50 us apart) gave
+100 conversions on the rising edge, 100 on the falling and 199 on both.
+**The watchdog interrupt**: VREFINT above a [0, 100] window, five
+software conversions, five entries of the ADC vector with AWD.
+MEASURED, NOT EXPLAINED: the first 10 ms window right behind the letter's
+own header line counted 91..98 of 100 - with the console drained, too -
+where every later window read 99..100; 20 ms of quiet more gives it 99.
+What the console's tail costs a polling loop was not chased; the letter
+waits.
+
 ## Not covered yet
 
 Driver gaps:
@@ -556,12 +574,6 @@ Implemented, not bench-verified:
 - **The low-supply ceiling** (18 MHz below 2.4 V): `init()` takes it as
   an argument and the chooser is tested against it, but every board here
   runs at 3.3 V.
-- **The falling and both-edge trigger senses**: the rising one is
-  measured on a pad; the other two are one field's value away and need a
-  falling edge held the same way.
-- **The timer trigger codes.** Fifteen of the sixteen in each table are a
-  timer's, refused where the timer is absent and otherwise untried: they
-  need the timer chapter.
-- **A watchdog INTERRUPT.** The flag is raised, polled and cleared here;
-  the vector is shared by every converter and the suite binds it for the
-  sampler alone.
+- Letter `s` on the STM32F411, the STM32F429 and the STM32F469: their
+  boards are not on the desk (on the F411, which has no TIM8, the two
+  TIM8 rows of each table are skipped by name).

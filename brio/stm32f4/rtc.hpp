@@ -1626,10 +1626,18 @@ struct Rtc {
      * Write RTC_CALR. RECALPF is waited out first: 17.6.4 says the
      * register "is blocked" while it stands, and 17.3.11's
      * re-calibration-on-the-fly makes that up to three ck_apre periods.
-     * Refused while the COARSE calibrator is enabled (fact 8).
+     * Refused while the COARSE calibrator is enabled (fact 8), and
+     * REFUSED FOR CALP WHILE PREDIV_A IS UNDER 3: 17.3.11's "Calibration
+     * when PREDIV_A<3" - the bit "can not be set to 1" then, and the store
+     * drops it in silence (measured: CALR read 0x4000 for CALP with CALW8,
+     * the calendar's rate unmoved, with PREDIV_A at 0). The chapter's way
+     * round it is a shorter PREDIV_S, which is the caller's to choose.
      */
     static bool calibrate(const RtcCalibration& c) {
         if (!rtc_calibration_valid(c)) {
+            return false;
+        }
+        if (c.plus && prescalers().async < 3u) {
             return false;
         }
         if ((RTC->CR & RTC_CR_DCE) != 0u) {

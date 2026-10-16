@@ -229,6 +229,19 @@ millisecond, so the byte has to be waited for; reading RDR the instant
 the WFI returns reads an empty register and calls a working wake a lost
 byte.
 
+**THE ENGINES ON AN LPUART** (`test_stm32_dma` letter `x`). LPUART1 in
+the single-wire loop on PB11 (AF1), driven (`single_wire_push_pull`), its
+transmit engine on DMA1 channel 2 and its receive engine on channel 3 in
+the CIRCULAR shape over a 64-byte ring, at 1 Mbaud - the USART letter
+`o`'s legs run through the same helpers: the channel circular at rest
+with its three marks armed; 4096 bytes back byte-exact in 40991 us
+against 40960 of wire through 64 laps, each counted once, no ring
+overrun, no ORE, no fault; a 60-byte burst with the consumer away read
+whole; a consumer a lap behind told by one overrun and the next 20 exact;
+and 1024 frames through the transmit engine in 1001 thousandths of
+their wire time. The LPUART's request codes (table 55's 14 and 15) are
+what moved; everything above them is the USART's. Ten runs of `z`.
+
 ## On the STM32G071RB
 
 The Nucleo-G071RB (DEV_ID 0x460, REV_ID 0x2000) has **one LPUART and not
@@ -288,13 +301,12 @@ Implemented, not bench-verified on an LPUART (all of them are the
 USART's own code, measured there on a USART):
 - Mute mode and the character match, driver enable and flow control, the
   swap and the three inversions, MSB first, the break request.
-- The two DMA engine slots. They compile (the family fixture
-  instantiates them and a negative refuses two engines on one channel)
-  and no byte has ever moved through one on an LPUART - and with them the
-  receive FIFO's kick: the LPUART's FIFO and its request are the
-  USART's, and whether they wedge the same way behind a starved channel
-  is read, not measured. A ring on an LPUART beside the two copies of
-  `test_stm32_dma` letter `q` would measure both.
+- The receive FIFO's kick on an LPUART: the LPUART's FIFO and its
+  request are the USART's, and whether they wedge the same way behind a
+  starved channel is read, not measured - the engines themselves run
+  (letter `x` of `test_stm32_dma`, above); a ring on an LPUART ranked
+  below two copies, as `test_stm32_dma` letter `q` does on the console,
+  would measure it.
 - 7- and 9-bit words, parity and two stop bits.
 - LPUART2 on any kernel clock but PCLK, and LPUART2 as a wake source
   (its EXTI line 35 is in the second register group; only LPUART1's 28

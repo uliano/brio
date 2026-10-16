@@ -120,6 +120,18 @@ from any context.
   datasheets give are the ones the silicon takes.
 - The RX pad's pull-up: an unconnected RX (the black pill before its
   wires were crossed right) read idle, no framing noise, zero received.
+- **The port's own options** (`test_stm32f4_exti` letter `q`, PC0 and PC1
+  of the Nucleo-F446RE, each read back through its own input buffer):
+  the pad follows its pull up AND its pull DOWN; in OPEN DRAIN a 1 is
+  released to the pull (it reads 0 over the pull-down and 1 over the
+  pull-up) and a 0 is driven, where push-pull drives the 1 over the
+  pull-down; `PinSet` configures both pads in one call and one
+  `Port<'C'>::out_toggle()` over both flips each; and `release()` parks a
+  pad in analog mode, where a pull-up no longer reaches IDR - it reads 0.
+  Ten runs of ten.
+- `PinRef` from a bus event: the SPI host's Request carries its select
+  and its D/C line as `PinRef`s, and `test_stm32f4_spi` drives the select
+  through one ([spi.md](spi.md)).
 
 ## Not covered yet
 
@@ -135,10 +147,7 @@ Driver gaps:
 - The compensation cell (SYSCFG_CMPCR, for I/Os toggling at 50 MHz and
   above at 3.3 V - RM0090 9.2.6): nothing here toggles that fast yet.
 
-Implemented, not bench-verified: `PinSpeed` above `low` (the console's
-TX runs at the reset class; a multi-megabaud or SPI clock will judge
-the others), open-drain outputs and the `down` pull (no peripheral on
-the desk asks for them yet), `PinRef` from a bus event (no bus driver
-on this family yet), `PinSet`, `Port<L>::out_toggle` of several pins at
-once, `release()` (compiled on every header, no letter parks a pad and
-reads its buffer off).
+Implemented, not bench-verified: `PinSpeed` above `low` - the SPI's and
+the USART's pads run at `high` and `very_high` on the desk's link
+([spi.md](spi.md)), and what a class changes is the edge's slope, which
+nothing here can see (a scope on a pad would).

@@ -81,6 +81,10 @@
 //   j  MeterSampler inside a REAL KERNEL, fed by a capture ISR
 //   k  the G0B1's TIM erratum 2.7.2 staged with a control, 2.7.1 and
 //      2.7.3 declared - the numbers being ES0548's, one sheet per part
+//   m  the tasks and modes no letter had run: TimPeriodicTick on TIM14
+//      against the kernel tick, TimOnePulse on PA6 fired and armed on
+//      TIM2's update, capture on BOTH edges, UIFREMAP's bit 31, OSSI and
+//      OSSR on TIM1's pair, and BDTR.LOCK's three levels
 //   l  THE INSTANCES this suite had never counted - TIM14 and TIM17
 //      always, and TIM4, TIM6, TIM7 and TIM15 where the part has them:
 //      each counting PCLK at its prescaler, each update reaching the
@@ -1955,6 +1959,283 @@ void tk_errata() {
 }
 
 // =============================================================================
+// m - the tasks and modes no letter had run
+// =============================================================================
+
+/// The cycles one turn of a pad-polling loop costs on the ruler - the
+/// resolution every pad stamp below has. Measured, not assumed.
+uint32_t poll_turn_cycles() {
+    uint32_t n = 0;
+    const uint32_t c0 = cycles_now();
+    while (n < 100u) {
+        (void)PadCap::read();
+        (void)cycles_now();
+        ++n;
+    }
+    return (cycles_now() - c0) / 100u;
+}
+
+struct PulseStamp {
+    uint32_t rise = 0;    ///< cycles from t0 to the first high read
+    uint32_t fall = 0;    ///< cycles from the rise to the first low read
+    bool seen = false;
+};
+
+/// The pulse on PA6 stamped from `t0`: the first high read, then the
+/// first low one, each wait bounded by `limit` cycles.
+PulseStamp stamp_pulse(uint32_t t0, uint32_t limit) {
+    PulseStamp p;
+    uint32_t now = cycles_now();
+    while (!PadCap::read() && now - t0 < limit) {
+        now = cycles_now();
+    }
+    if (!PadCap::read()) {
+        return p;
+    }
+    p.rise = now - t0;
+    const uint32_t r = now;
+    while (PadCap::read() && now - r < limit) {
+        now = cycles_now();
+    }
+    p.fall = now - r;
+    p.seen = !PadCap::read();
+    return p;
+}
+
+void tm_tasks_and_modes() {
+    quiet_everything();
+    constexpr uint32_t cyc_us = SysClock::hz / 1'000'000u;
+
+    // --- TimPeriodicTick on TIM14: PSC 63, ARR 999 - one update a
+    // millisecond on the PCLK that SysTick's HCLK is (Clock<> pins the
+    // APB prescaler at 1), so 100 ticks of the kernel are 100 updates,
+    // give or take the one the window's phase cuts.
+    using Tick = TimPeriodicTick<T14>;
+    T14::init();
+    t14_update_calls = 0;
+    Nvic::clear_pending(T14::irq());
+    Nvic::enable(T14::irq());
+    const bool tick_up = Tick::setup(63, 999);
+    uint32_t tk = Ticker::ticks();
+    while (Ticker::ticks() == tk) {
+    }
+    tk = Ticker::ticks();
+    const uint32_t u0 = t14_update_calls;
+    while (Ticker::ticks() - tk < 100u) {
+    }
+    const uint32_t updates = t14_update_calls - u0;
+    Tick::stop();
+    const uint32_t u1 = t14_update_calls;
+    spin_cycles(SysClock::hz / 200u);
+    const bool stopped = t14_update_calls == u1;
+    Nvic::disable(T14::irq());
+    print(serial, "  TimPeriodicTick<TIM14> at 1 kHz: ", updates,
+          " updates in 100 kernel ticks; after stop() ",
+          stopped ? "none" : "STILL COUNTING", crlf);
+    bench.verdict("TimPeriodicTick: an update interrupt every period + 1 counts, "
+                  "100 of them in 100 ms of the same oscillator, +-1 for the "
+                  "window's phase",
+                  tick_up && updates >= 99u && updates <= 101u);
+    bench.verdict("and stop() stops it", stopped);
+    T14::release();
+
+    // --- TimOnePulse on TIM3's channel 1, PA6: PSC 639 is a 100 kHz count
+    // (10 us), the delay 50 counts and the width 100. PWM mode 2 is
+    // active while CNT >= CCR, so the pulse rises at the 50th count and
+    // falls at the update that stops the counter.
+    const uint32_t turn = poll_turn_cycles();
+    using Pulse = TimOnePulse<T3, 0>;
+    T3::init();
+    CapIn::claim();
+    const bool pulse_up = Pulse::setup(639, 50, 100);
+    spin_cycles(SysClock::hz / 1000u);
+    const bool low_before = !PadCap::read();
+    const uint32_t f0 = cycles_now();
+    Pulse::fire();
+    const PulseStamp p = stamp_pulse(f0, SysClock::hz / 100u);
+    spin_cycles(SysClock::hz / 1000u);
+    const bool idle_after = !Pulse::busy() && !PadCap::read();
+    const uint32_t rise_us = p.rise / cyc_us;
+    const uint32_t width_us = p.fall / cyc_us;
+    print(serial, "  TimOnePulse (delay 50, width 100 at 10 us): rises ", rise_us,
+          " us after fire(), high for ", width_us, " us; the counter stopped ",
+          idle_after ? "yes" : "NO", "; a polling turn is ", turn, " cycles", crlf);
+    // THE BOUNDS: the count is PCLK/640 on the ruler's own oscillator,
+    // so only the stamps' resolution remains - one polling turn each
+    // (measured, printed), and the start's first count edge (up to one
+    // count, 10 us) on the rise. 500..510 us plus a turn for the rise,
+    // and the width the 100 counts the task was asked for, a turn either
+    // side.
+    const uint32_t turn_us = turn / cyc_us + 1u;
+    bench.verdict("TimOnePulse fires once: the pulse rises after the delay asked "
+                  "and the counter stops itself",
+                  pulse_up && low_before && p.seen && rise_us >= 500u &&
+                      rise_us <= 510u + turn_us && idle_after);
+    bench.verdict("and it is as wide as asked: 100 counts, 1000 us",
+                  p.seen && width_us + turn_us >= 1000u && width_us <= 1000u + turn_us);
+
+    // The TRIGGER half: arm() puts TIM3 in trigger mode on ITR1, and
+    // TIM2 - one-pulse itself, 1000 counts at 1 MHz, TRGO on its update -
+    // starts it once.
+    T2::init();
+    const bool t2_up = T2::configure({.prescaler = 63, .period = 999, .one_pulse = true}) &&
+                       T2::master(TimMasterMode::update);
+    (void)Pulse::setup(639, 50, 100);
+    const bool armed = Pulse::arm(trg_t2);
+    spin_cycles(SysClock::hz / 1000u);
+    const bool waiting = !Pulse::busy() && !PadCap::read();
+    const uint32_t g0 = cycles_now();
+    T2::enable(true);
+    const PulseStamp q = stamp_pulse(g0, SysClock::hz / 100u);
+    spin_cycles(SysClock::hz / 1000u);
+    const bool once = !Pulse::busy() && !T2::enabled();
+    const uint32_t q_rise = q.rise / cyc_us;
+    const uint32_t q_width = q.fall / cyc_us;
+    print(serial, "  armed on TIM2's update (1000 us): rises ", q_rise,
+          " us after TIM2 started, high for ", q_width, " us", crlf);
+    // TIM2's 1000 counts, then the same 500..510 us: 1500..1510 plus a
+    // turn and the ITR's synchronisation (a few PCLK cycles).
+    bench.verdict("arm(): the pulse WAITS for its trigger and fires once on it - "
+                  "TIM2's update over ITR1, 1000 us + the delay",
+                  t2_up && armed && waiting && q.seen && q_rise >= 1500u &&
+                      q_rise <= 1511u + turn_us && once &&
+                      q_width + turn_us >= 1000u && q_width <= 1000u + turn_us);
+    T2::release();
+    T3::release();
+
+    // --- capture on BOTH edges: TIM3's channel 1 on PA6 walked by its own
+    // pull, five up-and-down walks, the capture flag counted per edge.
+    auto walks = [](TimCapturePolarity pol) {
+        T3::init();
+        CapIn::claim_input(PinPull::down);
+        spin_cycles(SysClock::hz / 5000u);
+        (void)T3::configure({.prescaler = 0, .period = 0xFFFFu});
+        (void)T3::capture_channel(0, {.polarity = pol});
+        T3::enable(true);
+        T3::clear_flags(T3::compare_flag(0));
+        uint32_t caught = 0;
+        for (uint8_t k = 0; k < 5u; ++k) {
+            for (const bool up : {true, false}) {
+                PadCap::pull(up ? PinPull::up : PinPull::down);
+                spin_cycles(SysClock::hz / 5000u);   // 200 us: the pad's RC under 40 k
+                if (T3::flag(T3::compare_flag(0))) {
+                    ++caught;
+                    (void)T3::compare(0);   // the read is the acknowledgement
+                }
+            }
+        }
+        T3::release();
+        return caught;
+    };
+    const uint32_t c_rise = walks(TimCapturePolarity::rising);
+    const uint32_t c_fall = walks(TimCapturePolarity::falling);
+    const uint32_t c_both = walks(TimCapturePolarity::both);
+    print(serial, "  five pull-walks of PA6: captures on rising ", c_rise, ", falling ",
+          c_fall, ", both ", c_both, crlf);
+    bench.verdict("capture polarity BOTH (CCyP = CCyNP = 1) takes every edge: ten "
+                  "for five walks, where rising and falling take five each",
+                  c_rise == 5u && c_fall == 5u && c_both == 10u);
+
+    // --- UIFREMAP: TIM3 one-pulse with the update flag copied into CNT
+    // bit 31 (21.4.13) - the counter stops at its update, so the flag
+    // stands until it is cleared and the read is deterministic.
+    T3::init();
+    const bool remap_up = T3::configure({.prescaler = 63, .period = 99,
+                                         .one_pulse = true, .uif_remap = true});
+    T3::clear_flags(T3::update_flag);
+    const bool before = T3::count_update_flag();
+    T3::enable(true);
+    spin_cycles(SysClock::hz / 2000u);   // 500 us against a 100 us period
+    const bool raised = T3::count_update_flag() && T3::flag(T3::update_flag);
+    T3::clear_flags(T3::update_flag);
+    const bool cleared = !T3::count_update_flag();
+    print(serial, "  UIFREMAP: CNT bit 31 ", before ? "1" : "0", " before the update, ",
+          raised ? "1" : "0", " after it, ", cleared ? "0" : "1", " once UIF is cleared",
+          crlf);
+    bench.verdict("UIFREMAP copies UIF into the counter's bit 31: count_update_flag() "
+                  "follows the flag, and count() masks it away",
+                  remap_up && !before && raised && cleared && T3::count() <= 99u);
+    T3::release();
+
+    // --- OSSI and OSSR on TIM1's pair, both pads pulled UP so a released
+    // output reads high and a driven inactive one low (Pair's idle and
+    // inactive levels are low).
+    T1::init();
+    PairOut::claim();
+    PairNOut::claim();
+    PadPair::pull(PinPull::up);
+    PadPairN::pull(PinPull::up);
+    (void)Pair::setup(3, 128);
+    Pair::duty(500);
+    T1::update();
+    spin_cycles(SysClock::hz / 1000u);
+    auto both_levels = [] {
+        spin_cycles(SysClock::hz / 5000u);
+        PairCensus c = census_pair(PadPair::pin_number, PadPairN::pin_number, 2000u);
+        return c;
+    };
+    (void)T1::break_dead_time({.dead_time = 128, .main_output_enable = false});
+    const PairCensus idle_off = both_levels();
+    (void)T1::break_dead_time({.dead_time = 128, .main_output_enable = false,
+                               .off_state_idle = true});
+    const PairCensus idle_on = both_levels();
+    print(serial, "  MOE clear, OSSI 0: CH1 high ", idle_off.a_high, ", CH1N high ",
+          idle_off.b_high, " of 2000; OSSI 1: ", idle_on.a_high, " and ",
+          idle_on.b_high, crlf);
+    bench.verdict("OSSI 0 RELEASES the pads in the idle state (they rest on their "
+                  "pull-ups), OSSI 1 DRIVES them to OIS = 0 (21.4.18 table 124)",
+                  idle_off.a_high == 2000u && idle_off.b_high == 2000u &&
+                      idle_on.a_high == 0u && idle_on.b_high == 0u &&
+                      T1::off_state_idle());
+    // OSSR, in the RUN state: MOE set, CH1 enabled and CH1N not.
+    (void)T1::break_dead_time({.dead_time = 128});
+    (void)T1::output_channel(0, {.mode = TimOutputMode::pwm1, .compare = 500,
+                                 .enable = true, .complementary_enable = false});
+    const PairCensus run_off = both_levels();
+    (void)T1::break_dead_time({.dead_time = 128, .off_state_run = true});
+    const PairCensus run_on = both_levels();
+    print(serial, "  MOE set, CH1N disabled: OSSR 0 CH1N high ", run_off.b_high,
+          " of 2000, OSSR 1 ", run_on.b_high, " (CH1 runs: ", run_off.a_high, ", ",
+          run_on.a_high, ")", crlf);
+    bench.verdict("OSSR 0 releases the DISABLED half of a running pair, OSSR 1 drives "
+                  "it inactive - while the enabled half keeps running",
+                  run_off.b_high == 2000u && run_on.b_high == 0u && run_off.a_high > 0u &&
+                      run_off.a_high < 2000u && run_on.a_high > 0u && T1::off_state_run());
+
+    // --- BDTR.LOCK, one level at a time, each undone by the peripheral
+    // reset init() pulses (21.4.18: written once, read-only until reset).
+    bool lock_ok = true;
+    for (uint8_t level = 1; level <= 3u; ++level) {
+        T1::init();
+        (void)T1::output_channel(0, {.mode = TimOutputMode::pwm1, .compare = 10});
+        (void)T1::break_dead_time({.dead_time = 10, .main_output_enable = false,
+                                   .lock = level});
+        // Every guarded field asked to move, and LOCK asked back to 0.
+        (void)T1::break_dead_time({.dead_time = 20, .main_output_enable = false,
+                                   .off_state_idle = true, .lock = 0});
+        (void)T1::output_channel(0, {.mode = TimOutputMode::pwm2, .compare = 10});
+        const uint8_t lv = T1::lock_level();
+        const uint8_t dtg = T1::dead_time_code();
+        const bool ossi = T1::off_state_idle();
+        const TimOutputMode mode = T1::output_mode(0);
+        print(serial, "  LOCK ", level, ": reads ", lv, ", DTG ", dtg, " (10 locked, 20 "
+              "asked), OSSI ", ossi ? "1" : "0", ", OC1M ",
+              mode == TimOutputMode::pwm2 ? "pwm2" : mode == TimOutputMode::pwm1 ? "pwm1" : "?",
+              crlf);
+        lock_ok = lock_ok && lv == level && dtg == 10u &&
+                  ossi == (level < 2u) &&
+                  (mode == TimOutputMode::pwm2) == (level < 3u);
+    }
+    T1::init();
+    const bool unlocked = T1::lock_level() == 0u;
+    bench.verdict("BDTR.LOCK: level 1 freezes DTG, level 2 OSSI as well, level 3 "
+                  "the output mode too; LOCK itself cannot be written back, and "
+                  "the peripheral reset is what undoes it",
+                  lock_ok && unlocked);
+    quiet_everything();
+}
+
+// =============================================================================
 // l - the instances this suite had never counted
 // =============================================================================
 //
@@ -2640,6 +2921,8 @@ int main() {
                  tj_meter_ao);
     bench.letter('k', "the G0B1's TIM erratum 2.7.2 staged with a control",
                  tk_errata);
+    bench.letter('m', "the tasks and modes no letter had run: TimPeriodicTick, "
+                 "TimOnePulse, BOTH edges, UIFREMAP, OSSI/OSSR, LOCK", tm_tasks_and_modes);
     bench.letter('l', "the instances never counted here: TIM14, TIM17, and "
                       "TIM4, TIM6, TIM7 and TIM15 where the part has them",
                  tl_six_instances);

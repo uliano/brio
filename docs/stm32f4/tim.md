@@ -80,9 +80,11 @@ configuration is in force is to have generated an update. `configure()`
 therefore ends with EGR.UG and clears the UIF that raised. A compare
 register is preloaded too, and **that is where a one-pulse timer bites**: it
 sees no update between its configuration and its trigger, so the pulse
-would be made against the ACTIVE compare's old value. `TimOnePulse::setup()`
-generates the update that loads it (measured: without it the pulse comes
-out the whole period wide).
+would be made against the ACTIVE compare's old value (measured: the whole
+period wide). `TimOnePulse::setup()` therefore writes its compare
+UNBUFFERED - once, with the counter stopped, where no runt can come of it -
+and an update after the channel would not do as well: it leaves the pad
+driven by a shadow of 0, PWM mode 2 active, for the stores in between.
 
 **CCyS is writable only while the channel is OFF** (17.4.7: "CCyE = 0").
 A channel switched from input to output with its enable still up keeps the
@@ -218,7 +220,9 @@ PWM), `TimChannelSelect`, `TimCapturePolarity`, `TimCapturePrescaler`,
   `master(mode)` / `master()`, `ti1_xor(on)` / `ti1_xor()`,
   `preload_channels(on, on_trigger)`, `compare_dma_on_update(on)`. Break
   and dead time: `break_dead_time(cfg)`, `main_output(on)` /
-  `main_output()`, `dead_time_ticks()`. The external trigger:
+  `main_output()`, `dead_time_ticks()`, and BDTR read back -
+  `lock_level()`, `dead_time_code()`, `off_state_idle()`,
+  `off_state_run()`. The external trigger:
   `external_trigger(cfg)`, `external_clock_mode2()`. The option register:
   `option(code)` / `option()`, and the typed pair per instance -
   `trigger1_source` on TIM2, `input4_source` on TIM5, `input1_source` on
@@ -395,10 +399,20 @@ in gated mode: with a compare of 250 out of 1000 the gate stood open
 zero it never opened and at a compare of 1000 it never closed.
 
 **A PWM read back on its own pad.** 100 000 reads of PA6's IDR while
-TIM3_CH1 drove it at 10 kHz: 0 high at a compare of 0, **50 093** at 500 and
-99 441 at 999 (the last one per mille is the single tick a compare equal to
-the period cannot cover). PWM mode 2 gave 50 289 on the same compare and an
-active-low pad at a compare of 250 gave 75 113 - two independent inversions.
+TIM3_CH1 drove it at 10 kHz (Nucleo-F446RE): 0 high at a compare of 0,
+**50 113..50 136** at 500 and 99 793..99 808 at 999 - the waveform's one
+low count in 1000 read as about two per mille, some 36 cycles of an
+18 004-cycle period where a count is 18 (the low-speed pad's two edges
+through the input threshold the candidate). PWM mode 2 gave 49 891..49 905
+on the same compare and an active-low pad at a compare of 250 gave
+75 081..75 093 - two independent inversions. **THE READS ARE DITHERED,
+AND HAVE TO BE**: a tight polling loop runs off the oscillator the timer
+does, so the two periods stand in a fixed ratio - a transition-stamping
+loop on the F446 LOCKED onto the PWM and stopped seeing its 27-cycle low
+after four periods, and the plain counting loop read 98 954 high at 999
+(1 % low against the 0.1 % drawn), the few hundred periods it covered
+visiting a few phases only. A pseudo-random spin of 0..31 turns between
+reads spreads them over every phase (`sample_pad`).
 
 **The repetition counter.** 50 ms of a 1000-tick TIM1 at RCR 0, 1, 3 and 7:
 **5000 / 2500 / 1250 / 625** update events, exactly the four halvings, once
@@ -416,11 +430,20 @@ Raising MOE again brought the waveform straight back. With AOE set MOE came
 back on its own within four reads of the register - the automatic re-enable
 the errata's first item is about.
 
-**One-pulse mode.** Fire to rise 200 us against 200 asked, high for
-**501 us** against 500, and CEN clear afterwards. The pulse is made against
-the ACTIVE compare register, and that register is preloaded: without an
-update event between the configuration and the trigger the pulse came out
-701 us wide - the whole period. `TimOnePulse::setup()` generates it.
+**One-pulse mode** (Nucleo-F446RE, counted in 10 us steps so one count
+too many stands out of a polling turn of 17 cycles): fire to rise 200 us
+against 200 asked, high for **499 us** against 500, and CEN clear
+afterwards. `TimOnePulse` once set ARR to delay + width and the pulse came
+out ONE COUNT WIDE OF ITS ASK - 509 us here, and the 501 us the 1 MHz
+count read before passed a two-per-cent bound - because the counter runs
+0..ARR and PWM mode 2 is active from CCR to ARR; ARR is now delay + width
+- 1. **ARMED** in trigger mode on ITR1 with TIM2 - one-pulse itself, 1000
+us, TRGO on its update - as the master, the pulse rose 1200 us after TIM2
+started and was 500 us wide (letter `q`), and both counters stopped.
+**THE MASTER IS CONFIGURED FIRST**: its `configure()` ends in EGR.UG, and
+with MMS still at its reset code (000) a UG is itself a TRGO; armed
+before it, the pulse rose 199 us after TIM2 was enabled instead of 1200 -
+why at the enable and not at that UG was not chased.
 
 **The oscillators through TIM5's option register.** The 32768 Hz crystal
 weighs **32 769.167 Hz, +35 ppm** against the core clock (2048 captures of
@@ -465,6 +488,38 @@ served only its own flags. A flag whose interrupt is not enabled is left
 standing for a poller, which is what makes every measurement above possible
 with no handler at all.
 
+**On the STM32F446** (Nucleo-F446RE, 180 MHz, APB1 at /4 with TIMPRE):
+`z` scores **78 of 78** - the F411's letters and `p` and `q`. Its APB1
+timers count 179 999 614 Hz with TIMPRE set (the header's 180 000 000).
+**THE SIX INSTANCES THE F411 HAS NOT** (letter `p`): TIM6, TIM7, TIM12,
+TIM13 and TIM14 as `TimPeriodicTick`s at 10 kHz, all at once, each at its
+own line - TIM12..14 on lines they share with TIM8 - count **1000 updates
+in 100 kernel ticks** each, and TIM8's bodies on the shared lines answer
+for none of it. TIM8's four event groups reach its four vectors (36
+update and 35 compare calls in 200 us of a 5.6 us period, the break once,
+the trigger/commutation line twice) - at PSC 0, a 550 ns period, two
+interrupts a period each asking two owners took every cycle the thread
+had and the board stopped answering, so the letter runs it at PSC 9. Its
+third pair, CH3 on PC8 and CH3N on PB1, at 50 % with DTG 100 (556 ns of a
+5556 ns period): never both high in 100 000 dithered reads, the duties
+summing to **800 per mille** - 1000 less twice the dead time. The two pads
+are on two ports, so a sample is two reads: unmasked, the tick landing
+between them paired two instants a dead time apart and read both high
+once in 100 000 (two runs of ten); each pair of reads is now masked, and
+1 200 000 samples in twelve runs have read none. TIM13 on
+PA6 and TIM14 on PA7 at 250 and 750 of 1000: 24 943 and 75 029 high of
+100 000. **THE COUNTING MODES** (letter `q`, TIM3 at 1 MHz, ARR 1000,
+CCR 300, 20 ms polled): CMS 1 raised CC1IF only counting DOWN (0 up, 9
+down), CMS 2 only UP (9/0), CMS 3 both (9/10); each updated 19 times,
+twice a centred period of 2 x ARR; the edge-aligned DOWN-counter saw all
+20 matches counting down and 19 updates (the window's phase takes one
+of each). **BDTR.LOCK**, one level at a time on TIM1 and each undone by
+the RCC reset: every level kept DTG at its locked 10 against a write of
+20 and LOCK itself against a write of 0; level 1 let OSSI move, level 2
+froze it, and only level 3 froze channel 1's output mode
+(`lock_level()`, `dead_time_code()`, `off_state_idle()`,
+`output_mode()` read them back). Ten runs of each of `e`, `i`, `p`, `q`.
+
 ## Not covered yet
 
 Driver gaps:
@@ -504,29 +559,10 @@ Driver gaps:
 
 Implemented, not bench-verified:
 
-- **TIM8 and the basic timers TIM6/TIM7**, and TIM12/TIM13/TIM14 with them:
-  the part on the bench has none of them. They compile on every header that
-  declares them and their geometry, vectors and refusals are asserted in
-  the family fixture; what would measure them is the suite run on an
-  STM32F429 or STM32F446, whose pad map for the five pads it drives is the
-  one thing that has to be written first.
-- **The chapter on STM32F429 silicon, and the STM32F446's numbers.** The
-  driver compiles on all twenty-three headers; every number above is the
-  STM32F411's. On the Nucleo-F446RE the suite scores 67 of 68: the
-  doubling rule and TIMPRE measured on a part whose APB1 is divided by
-  four (an APB1 timer at 179 999 614 Hz with TIMPRE set, the header's
-  180 000 000), and ONE FAILURE, letter `e`'s compare at the period - PA6
-  read high 98 817 to 98 972 times of 100 000 in four runs where the
-  verdict wants more than 99 000 and the F411 read 99 441, the pad
-  carrying nothing. Its cause is not measured: what the pad's input
-  sees at 10 kHz against the sampling loop's own rate on this core
-  would split it.
-- **Centre-aligned counting and the three CMS modes**, down-counting, and
-  the alignment's effect on when CCyIF is raised: written, refused on the
-  instances that have no CMS, and not staged - a centre-aligned PWM's
-  waveform is measurable exactly as the edge-aligned one is here, and the
-  three modes differ only in the flag's timing, which wants a capture on
-  another timer to pin down.
+- **TIM8, TIM6/TIM7 and TIM12..TIM14 on the STM32F429 and the STM32F469**,
+  and the chapter on STM32F429 silicon at all: letter `p` measures the six
+  on the F446; the F469's pads are not chosen (the letter's pad legs run on
+  the Nucleo-F446RE alone) and neither board is on the desk.
 - **The external trigger input** (ETR, external clock mode 2, ETPS, ETF)
   and the ocref_clr path that shares it: every code is written and read
   back, but ETR is a PAD on this family with no internal source to select -
@@ -543,13 +579,6 @@ Implemented, not bench-verified:
   itself needs BOTH channels as inputs, which leaves the pad undriven: a
   wire from another timer's output pad, or a signal generator, is what
   would measure it.
-- **The one-pulse mode's TRIGGER half.** `fire()` is measured; `arm()` on
-  an ITRx composes two verbs that are each measured on their own and is not
-  staged as a pair.
 - **CR2.TI1S**, the XOR of the first three channel inputs: written and read
   back, and exercising it wants three pads carrying three different
   waveforms.
-- **The BDTR LOCK levels.** Written and read back at level 0 and 1; the
-  levels are ONE-WAY until the next peripheral reset, so proving that a
-  locked field refuses a write costs a `reset()` per level and wants a
-  letter of its own.

@@ -34,8 +34,11 @@
 //   c  what it costs: cycles per word, per half-word and per byte
 //      against the software loop's cycles per byte
 //   d  DMA-fed: 16 KB of this program's own flash checksummed with no
-//      CPU in the loop, judged against two independent references
+//      CPU in the loop, judged against two independent references, in
+//      word, half-word and byte beats
 //   e  the two rules 14.3.3 states and no register enforces
+//   f  the gate and release() across a running calculation: what a
+//      closed gate keeps, and what release() leaves
 //
 // build: boards = g0b1re,g071rb,g031k8
 // build: monitor_speed = 115200
@@ -598,8 +601,129 @@ void td_dma() {
     bench.verdict("the DMA path is faster than the CPU one, having no "
                   "instruction fetch between beats",
                   dma_cycles < cpu_cycles);
+
+    // 4. THE NARROW BEATS: the same 16 KB moved a byte and a half-word at
+    // a time into CRC_DR, so the narrow access is the DMA's and not the
+    // CPU's. 14.3.3's REV_IN by byte (by half-word) reflects each unit
+    // the bus writes, and a little-endian stream processed unit by unit,
+    // each reflected, is the same reflected CRC-32 of the same bytes.
+    struct Narrow {
+        DmaWidth width;
+        CrcReverse reverse;
+        uint16_t count;
+        const char* name;
+    };
+    constexpr Narrow narrow[] = {
+        {DmaWidth::byte, CrcReverse::byte, static_cast<uint16_t>(code_bytes), "byte"},
+        {DmaWidth::half, CrcReverse::halfword,
+         static_cast<uint16_t>(code_bytes / 2u), "half-word"},
+    };
+    for (const Narrow& n : narrow) {
+        CrcConfig cfg = dma_cfg;
+        cfg.reverse_in = n.reverse;
+        (void)Crc::configure(cfg);
+        const bool ok = ChA::prepare(
+            DmaTransfer{.peripheral = const_cast<uint32_t*>(code),
+                        .memory = Crc::data_address(),
+                        .count = n.count,
+                        .config = {.direction = DmaDirection::peripheral_to_memory,
+                                   .memory_to_memory = true,
+                                   .peripheral_increment = true,
+                                   .memory_increment = false,
+                                   .peripheral_width = n.width,
+                                   .memory_width = n.width,
+                                   .priority = DmaPriority::high}});
+        const uint32_t n0 = cycles_now();
+        (void)ChA::enable(true);
+        uint32_t left = 4'000'000u;
+        while (!ChA::flag(DmaFlag::complete) && left-- != 0u) {
+        }
+        const uint32_t n1 = cycles_now();
+        const bool finished = ChA::flag(DmaFlag::complete);
+        ChA::stop();
+        const uint32_t value = crc32_ieee_finish(Crc::value());
+        print(serial, "  ", n.count, " ", n.name, " beats into CRC_DR: ", hex(value),
+              " in ", n1 - n0, " cycles (", (n1 - n0) * 100u / n.count,
+              " hundredths of a cycle a beat)", crlf);
+        bench.verdict(n.width == DmaWidth::byte
+                          ? "BYTE-WIDE DMA beats into CRC_DR, REV_IN by byte: the "
+                            "same reflected CRC-32 of the same 16 KB"
+                          : "and HALF-WORD beats, REV_IN by half-word: the same "
+                            "number again",
+                      ok && finished && value == sw_value);
+    }
     Dma1::reset();
     Dma1::bus_clock(false);
+}
+
+// =============================================================================
+// f - the gate and release() across a running calculation
+// =============================================================================
+void tf_gate() {
+    Crc::init();
+    constexpr CrcConfig cfg{.polynomial = 0x04C11DB7u,
+                            .size = CrcWidth::w32,
+                            .init = 0xFFFFFFFFu,
+                            .reverse_in = CrcReverse::none,
+                            .reverse_out = false};
+    constexpr uint32_t words[5] = {0x01234567u, 0x89ABCDEFu, 0xFEDCBA98u,
+                                   0x76543210u, 0xA5A5C3C3u};
+    // The reference: four words, then the fifth, with the gate open.
+    (void)Crc::configure(cfg);
+    for (uint8_t i = 0; i < 4u; ++i) {
+        Crc::feed(words[i]);
+    }
+    const uint32_t after4 = Crc::value();
+    Crc::feed(words[4]);
+    const uint32_t after5 = Crc::value();
+
+    // The same four, then the GATE CLOSED in the middle of the calculation:
+    // a store and a read through it, and the gate opened again.
+    (void)Crc::configure(cfg);
+    for (uint8_t i = 0; i < 4u; ++i) {
+        Crc::feed(words[i]);
+    }
+    Crc::bus_clock(false);
+    Crc::feed(words[4]);
+    const uint32_t read_closed = Crc::value();
+    Crc::bus_clock(true);
+    const uint32_t reopened = Crc::value();
+    Crc::feed(words[4]);
+    const uint32_t resumed = Crc::value();
+    print(serial, "  four words: ", hex(after4), ", five: ", hex(after5),
+          "; with the gate closed after four, a read gives ", hex(read_closed),
+          ", reopened ", hex(reopened), ", the fifth fed then ", hex(resumed), crlf);
+    bench.verdict("a CLOSED GATE KEEPS THE CALCULATION: reopened, DR holds the "
+                  "four-word value, and the store made through the closed gate "
+                  "went nowhere",
+                  reopened == after4);
+    bench.verdict("and the calculation resumes from there: the fifth word "
+                  "fed after the reopening gives the five-word value",
+                  resumed == after5);
+    bench.verdict("a read through the closed gate answers zero (5.2.17), "
+                  "not the value standing behind it",
+                  read_closed == 0u);
+
+    // release(): the block reset, then the gate closed - a running
+    // calculation ends with it.
+    (void)Crc::configure(cfg);
+    for (uint8_t i = 0; i < 4u; ++i) {
+        Crc::feed(words[i]);
+    }
+    Crc::release();
+    const bool gate_closed = !Crc::bus_clock();
+    Crc::bus_clock(true);   // the gate alone, no reset: what release() left
+    const uint32_t dr = Crc::value();
+    const uint32_t pol = Crc::polynomial();
+    const bool cr_reset = Crc::width() == CrcWidth::w32 &&
+                          Crc::reverse_in() == CrcReverse::none && !Crc::reverse_out();
+    print(serial, "  after release() and the gate alone reopened: DR ", hex(dr),
+          ", POL ", hex(pol), ", CR ", cr_reset ? "at reset" : "NOT at reset", crlf);
+    bench.verdict("release() ends a running calculation: the gate is shut and "
+                  "the registers it leaves are the reset values (DR 0xFFFFFFFF, "
+                  "POL 0x04C11DB7, CR's fields cleared)",
+                  gate_closed && dr == 0xFFFFFFFFu && pol == 0x04C11DB7u && cr_reset);
+    Crc::release();
 }
 
 // =============================================================================
@@ -673,6 +797,8 @@ int main() {
                  td_dma);
     bench.letter('e', "the two rules 14.3.3 states and no register enforces",
                  te_refusals);
+    bench.letter('f', "the gate and release() across a running calculation",
+                 tf_gate);
 
     if (serial_ok) {
         const auto idcode = brio::DeviceIdcode::read();
