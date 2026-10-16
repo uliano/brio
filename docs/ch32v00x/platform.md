@@ -360,7 +360,17 @@ The vector table's words after the first are ABSOLUTE addresses (the
 QingKe V2's vectored mode, RM 6.3), so a handler placed in SRAM is
 entered from its vector directly, and a call between SRAM and the flash
 is an `auipc` and a `jalr`, which reach 2 GB either side: no veneer
-either way.
+either way. WHERE IN THE FLASH THE CODE SITS COSTS ALMOST NOTHING on the
+CH32V006K8U6: the same body of four taken forward branches, looped a
+hundred times at 48 MHz with interrupts masked, took 3363 cycles at every
+offset 0 mod 4 and 3366 at every offset 2 mod 4 through 32 bytes, in
+three passes of the same sweep (a scratch program) - three cycles once,
+at the entry, and none a branch, where the CH32X035's QingKe V4C pays
+four cycles a turn of that body by its address modulo four
+([../ch32x035/platform.md](../ch32x035/platform.md)). So this stratum's
+`BRIO_CH32_INTERRUPT` does not align its handlers: two bytes a handler of
+the CH32V003's 16 KB would buy three cycles an entry. The CH32V003's V2A
+has not been swept.
 
 **The option and its spelling: opt-in, per driver, and per vector.**
 Both linker scripts place the input sections `.fast_text` and
