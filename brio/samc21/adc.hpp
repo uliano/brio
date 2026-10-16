@@ -1112,8 +1112,10 @@ public:
     static void start() { regs().ADC_SWTRIG = ADC_SWTRIG_START_Msk; }
 
     /// SWTRIG.FLUSH: abandon everything in the pipeline and restart the
-    /// ADC clock; a pending conversion begins again (38.8.17). Also
-    /// without a wait, and for the same reason.
+    /// ADC clock (38.8.17). Also without a wait, and for the same reason.
+    /// MEASURED (docs/samc21/adc.md): the conversion in flight begins
+    /// again only with EVCTRL.FLUSHEI set; with it clear it is lost and
+    /// none follows.
     static void flush() { regs().ADC_SWTRIG = ADC_SWTRIG_FLUSH_Msk; }
 
     static bool ready() { return (regs().ADC_INTFLAG & flag_resrdy) != 0u; }

@@ -174,7 +174,7 @@ extern "C" void TC2_Handler() {
 
 ## Bench findings
 
-From `test_samc_tc`, seven letters. Nothing to wire. Every timer runs from
+From `test_samc_tc`, eight letters. Nothing to wire. Every timer runs from
 generator 0 - the CPU's own 48 MHz OSC48M - so every expected number
 below is exact arithmetic and not a measurement of an oscillator, and
 SysTick is the independent witness.
@@ -257,6 +257,12 @@ SysTick is the independent witness.
   21 captures overwritten in the latch.** That is `meter_sampler.hpp`'s
   design as written, measured on silicon: the AO paces PUBLICATION, not
   capture.
+- **Capture counting DOWN stamps MAX less the time** (letter h, every
+  run of twelve): the same PPW meter with CTRLBSET.DIR set from the
+  configuration read the 20 ms / 30 ms wave as CC0 = 63191..63192 and
+  CC1 = 64597..64598 - MAX less 2343..2344 and 937..938, the up-counting
+  figures exactly - so the capture's restart of the counter is a reload
+  of TOP when counting down, and nothing is lost (INTFLAG.ERR clear).
 - **TC1 alone is a counter in its own right** (letter g, every run of
   twelve): brought up by its own `init()` - the generic clock channel it
   shares with TC0 connected by it - at /1024 it counts 11677 over the
@@ -356,6 +362,5 @@ Not judged, and deliberately so:
 
 Implemented but not bench-verified:
 
-- **`count_down` with a capture action**, and **`debug_run`** beyond the
-  bit being writable - a halted debugger is out of a console suite's
-  reach.
+- **`debug_run`** beyond the bit being writable - a halted debugger is
+  out of a console suite's reach.

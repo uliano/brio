@@ -595,7 +595,7 @@ tick being 30.18 us.
   CLK_RTC ticks (30.18 us) between the PIT's own edge and the woken
   program, with a spinning baseline subtracted: crystal with its
   `RUNSTDBY` set **0 ticks**, cleared **+48**; OSCHF with it set **0**,
-  cleared **+10**. The second board's 41.7 ns ruler puts real numbers
+  cleared **+10**. The partner board's 41.7 ns ruler puts real numbers
   on those three classes below.
 - **`PMODE` shortens the OSCHF restart in that sweep** (+10 ticks in
   Normal against **+1 in Performance**) and changes nothing on the
@@ -603,37 +603,39 @@ tick being 30.18 us.
   next section's finding. With HTLLEN set, the PIT still wakes the
   device from power-down.
 
-### Wake-up latency, measured from a second board
+### Wake-up latency, measured from the partner board
 
 A sleeping chip cannot time its own return: the only clock power-down
 leaves running is the PIT's, and the counter that would measure the
 restart is the one the mode stops. So the ruler is off-chip.
-`test_avr_sleep`'s two-board set `y` drives the peer board over a
-one-wire link: the peer zeroes a 32-bit CLK_PER stopwatch and raises a stimulus pin in
-the same instruction pair, this board's PORT ISR raises an echo pin as
-its first statement, and that edge CAPTURES the stopwatch through B's
-event system. One tick is 41.7 ns (B's OSCHF at 24 MHz nominal, a
-per-cent-class reference - ample for these figures). Medians of eight
-shots.
+`test_avr_sleep`'s two-board set `y` drives the desk's SAM C21 over a
+one-wire command link: the peer raises the stimulus
+pin (this board's PE2) by a compare match of a free-running 32-bit
+stopwatch of its 24 MHz crystal, through its event system to the pad;
+this board's PORT ISR raises an echo pin (PE3) as its first statement,
+and that edge captures the same stopwatch through the peer's EIC and
+event system. One tick is 41.7 ns. Medians of eight shots; every figure
+below is the median of twelve runs, its spread beside it where it moved.
 
-- **The fixed cost of the measurement is 23 ticks - 958 ns.** That is
-  the AWAKE baseline: B's zero-to-edge gap, the wire, this chip's
-  interrupt latency and the ISR prologue up to the store. Every number
-  below includes it and is read against it.
-- **IDLE costs 30 ticks, 7 more than awake** - 292 ns against the six
-  CLK_PER cycles (250 ns) 13.3.3.2 promises and `test_avr_platform` f
-  counts on-chip.
+- **The fixed cost of the measurement is 20 ticks - 833 ns** (19..21).
+  That is the AWAKE baseline: the peer's compare-to-edge path, the wire,
+  this chip's interrupt latency and the ISR prologue up to the store, the
+  peer's capture path. Every number below includes it and is read against
+  it.
+- **IDLE costs 27 ticks, 7 more than awake** (26..27) - 292 ns against
+  the six CLK_PER cycles (250 ns) 13.3.3.2 promises and
+  `test_avr_platform` f counts on-chip.
 - **STANDBY, five clock configurations** (medians, and the whole point
   is the last two):
 
   | main clock | other oscillators | `PMODE` | ticks | us |
   |---|---|---|---|---|
-  | crystal, its `RUNSTDBY` clear | - | Normal | 42452 | 1768 |
-  | crystal, its `RUNSTDBY` set | - | Normal | 43 | 1.8 |
-  | OSCHF | crystal still oscillating | Normal | 567 | 23.6 |
-  | OSCHF | crystal still oscillating | Performance | 567 | 23.6 |
-  | OSCHF | all stopped | Normal | 7510 | 313 |
-  | OSCHF | all stopped | Performance | 568 | 23.7 |
+  | crystal, its `RUNSTDBY` clear | - | Normal | 35500 (35069..36054) | 1479 |
+  | crystal, its `RUNSTDBY` set | - | Normal | 42 (41..42) | 1.8 |
+  | OSCHF | crystal still oscillating | Normal | 562 | 23.4 |
+  | OSCHF | crystal still oscillating | Performance | 562 | 23.4 |
+  | OSCHF | all stopped | Normal | 7510 (7509..7513) | 313 |
+  | OSCHF | all stopped | Performance | 562 | 23.4 |
 
 - **THE REGULATOR IS PAID FOR SEPARATELY, AND ONLY WHEN THE DEVICE
   REALLY LETS GO.** `VREGCTRL`'s AUTO profile drops to low power "in
@@ -641,44 +643,46 @@ shots.
   running" (13.3.5) - and the bench reads that sentence strictly: an
   oscillator left running by its own `RUNSTDBY` keeps the regulator at
   full drive even when it is not the main clock source. Beside a
-  running crystal, an OSCHF restart out of standby is 23.6 us and
+  running crystal, an OSCHF restart out of standby is 23.4 us and
   `PMODE` moves it by nothing; stop the crystal and the same restart
   becomes 313 us, of which `PMODE = FULL` removes 290. The 24-30 us of
   table 13-5 is the oscillator; the other 290 us is the regulator.
-- **A crystal main clock costs 1.77 ms to restart**, in standby and in
-  power-down alike, and no regulator profile touches it: its own
-  start-up buries everything else. Kept alive by its `RUNSTDBY` it
-  costs 43 ticks - 20 ticks, 833 ns, over the awake baseline, which is
-  standby's own six cycles plus the synchronization.
+- **A crystal main clock costs about 1.5 ms to restart** on this board,
+  in standby and in power-down alike, and no regulator profile touches
+  it: its own start-up buries everything else, and it is the one figure
+  here that moves from run to run (by about 40 us). Kept alive by its
+  `RUNSTDBY` it costs 42 ticks - 22 ticks, 917 ns, over the awake
+  baseline, which is standby's own six cycles plus the synchronization.
 - **POWER-DOWN has no oscillator to hold the regulator up**, so the
   Performance profile earns its keep unconditionally there:
 
   | main clock | `PMODE` | ticks | us |
   |---|---|---|---|
-  | crystal | Normal | 42615 | 1775 |
-  | OSCHF | Normal | 7518 | 313 |
-  | OSCHF | Performance | 567 | 23.6 |
+  | crystal | Normal | 35583 (35124..35994) | 1483 |
+  | OSCHF | Normal | 7510 (7504..7514) | 313 |
+  | OSCHF | Performance | 562 | 23.4 |
 
   Same three classes as standby, and the OSCHF figures are the same
-  313 us / 23.6 us: power-down is not slower than a standby that has
+  313 us / 23.4 us: power-down is not slower than a standby that has
   been allowed to drop everything - it is that same case, made
   unavoidable.
 - **A pin edge wakes from power-down every time.** The stimulus arrives
   on a Px2 pin, one of the two fully asynchronous positions of every
   port (port.md), which is what makes an edge a wake-up source with
   every clock in the device stopped. Eight shots per configuration,
-  three configurations, no misses.
+  three configurations, twelve runs, no misses.
 - **A TWI address match wakes from both deep modes, and the wire pays.**
-  This board as a client at 0x42 on the office bus, the peer writing
-  three bytes at 100 kHz: the tenure lasts 418.7 us with this board
-  awake, **418.7 us out of standby** with the main clock kept alive
-  (the 1.8 us wake is invisible under a 10 us SCL bit) and **2197 us
-  out of power-down** - exactly the 1.78 ms crystal restart measured
-  above, held on SCL by the client from the address match until the
-  first serviced byte. The frame arrives intact in all three cases.
-  Only the ADDRESS MATCH is a wake-up source: the data interrupts that
-  carry the rest of the frame are not, so a program that goes back to
-  sleep after the match stalls the tenure with the host holding SCL.
+  This board as a client at 0x42, the SAM C21 as the host on the desk's
+  I2C pair writing three bytes at 100 kHz and timing the tenure on the
+  same stopwatch: **393.5 us with this board awake, 393.5 us out of
+  standby** with the main clock kept alive (the 1.8 us wake is invisible
+  under a 10 us SCL bit) and **1865 us out of power-down** (1835..1891)
+  - the 1.48 ms crystal restart measured above, held on SCL by the client
+  from the address match until the first serviced byte. The frame
+  arrives intact in all three cases. Only the ADDRESS MATCH is a wake-up
+  source: the data interrupts that carry the rest of the frame are not,
+  so a program that goes back to sleep after the match stalls the
+  tenure with the host holding SCL.
 - **A USART start bit wakes from standby, and what it costs the frame
   is a rule** - see usart.md, whose start-of-frame section this suite
   closes.
@@ -710,7 +714,7 @@ dispatch, and only the loop is the suite's.
   halves - which is what lets it time the sleep at all, and which by
   the chain rule above keeps the crystal running - so this is the
   "kept alive" row of the latency table (1.8 us there includes a wire
-  and a second board's ISR), not a cold restart.
+  and the partner's capture path), not a cold restart.
 - **A full round costs 3771 CLK_PER cycles - 157 us** from the `post()`
   of the request to the site being armed, with two voters answering
   through the kernel. That is the price of the negotiation, and it is

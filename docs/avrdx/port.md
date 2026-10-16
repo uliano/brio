@@ -129,7 +129,7 @@ backstop silent; PE3 FALLING does NOT - the select really fell, the peer
 clocked its whole burst, and the backstop ended the sleep with no pin
 interrupt at all; PE3 on BOTH edges wakes it with PE3's interrupt. The
 both-edges wake needs the level to outlast the wake-up (the table's
-note): the select is held 4.9 ms against the 1.77 ms a standby wake
+note): the select is held 4.9 ms against the 1.5 ms a standby wake
 takes on the crystal ([platform.md](platform.md)). Fourteen runs, no
 exception.
 

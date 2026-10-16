@@ -275,10 +275,13 @@ Tcc<0>::clear_non_recoverable(0);
 
 ## Bench findings
 
-From `test_samc_tcc` (13 letters, 146 verdicts). Nothing to wire. Five of
-TCC0's eight outputs reach pads this board leaves free - PA08 (WO0,
+From `test_samc_tcc` (15 letters, 179 verdicts). Nothing to wire. Four of
+TCC0's eight outputs are read back off their pads - PA08 (WO0,
 function E), PA09 (WO1, E), PA22 (WO4, F) and PA12 (WO6, F) - and PA16
-carries EXTINT0, which is the fault stimulus.
+carries EXTINT0, which is the fault stimulus. PA22 is the bench's I2C
+SDA and PA16 a wire to the partner board ([i2c.md](i2c.md),
+[spi.md](spi.md)): a driven pad reads back through the bus's pull-ups,
+and PA16 moves under its own pull, both with the partner's end idle.
 Every timer runs from OSC48M, so the expected numbers are exact
 arithmetic and not a measurement of an oscillator. A second TC, free
 running at 3 MHz, is the stopwatch; a third counts events.
@@ -417,6 +420,79 @@ running at 3 MHz, is the stopwatch; a third counts events.
     **47 to 937 a second** (the host's cycle rate), while TCC1's own
     overflows stay at **47** throughout. STATUS.SLAVE follows MSYNC.
 
+**The event inputs and outputs, and the fault extras** (letters n and
+o, every run of twelve)
+
+24. **TCE1 is the second non-recoverable fault**, the mirror of TCE0's:
+    its own FAULT1IN, FAULT1 and INTFLAG.FAULT1, WO0 forced to its NRV
+    (1000 per mille), the counter stopped - and FAULT0 untouched.
+25. **EVACT1 = STOP stops the counter on the event, and the stop
+    outlives everything a program would try**: after the input falls
+    the counter stays stopped (no overflow in 30 ms of a 1 kHz counter)
+    and STATUS.STOP stands through a RETRIGGER command, a STOP then a
+    RETRIGGER, and a disable and re-enable of the TCC. Only EVCTRL
+    rewritten without the action lets it run - where 36.6.2.4 says a
+    RETRIGGER resumes a stopped counter, and a counter stopped by the
+    STOP COMMAND does resume (letter b).
+26. **EVACT1 = DIR makes the event LEVEL the direction**, and CTRLB.DIR
+    reads it back: 10 ms windows at 46875 Hz advanced +435 with
+    the input low, -468 with it high, +468 low again.
+27. **EVACT1 = DEC takes one count per pulse**: beside EVACT0 = COUNTEV
+    with nothing on TCE0 (so no clock tick moves the counter), five pin
+    pulses took COUNT from 1000 to exactly 995, and 5 ms idle moved it
+    by nothing.
+28. **EVACT0 = STAMP marks the wrap, it does not capture.** The channel
+    still captures COUNT on its OWN event input (MCE0 with MCEI0: the
+    pulse raised at COUNT 10000 read 10000); what STAMP adds is MAX
+    (0xFFFFFF) put into the capture channel at an overflow with MC0
+    raised - without it the same overflow captures nothing. 36.8.10's
+    one line ("capture overflow times (Max value)") is the whole of it.
+29. **The counter event output fires once a cycle at BEGIN, END and
+    BETWEEN** - 999 events in a window holding 999..1001 cycles of a
+    1 kHz single slope - and **BOUNDARY gives none** on a free-running
+    counter: its "first" and "last" cycle never come.
+30. **TRGEO is one event per retrigger, and a RETRIGGER that resumes a
+    stopped counter is not a retrigger**: ten commands to a running
+    counter gave ten events and ten INTFLAG.TRG; ten STOP-then-RETRIGGER
+    pairs resumed the counter ten times with no TRG flag and no event.
+31. **A RETRIGGER COMMAND THAT LANDS ON THE WRAP IS LOST, and
+    `command()` cannot tell.** On a 200 kHz count clock with TOP 199,
+    the command issued as the CC0 match flag rises was taken 10 of 10
+    times at CC0 = 179 and 0 of 10 at CC0 = 195; with TOP = MAX, or
+    TOP 1999 and the command at 1959, every one was taken. On this clock
+    CTRLBSET.CMD still reads the command when the SYNCBUSY.CTRLB wait
+    returns, so the command executes a few count clocks after the write
+    - and one that executes on the wrap vanishes. INTFLAG.TRG is the
+    witness a caller has.
+32. **ALTFAULT makes fault B fault A's state at the end of the previous
+    period** (36.8.6), measured on a 20 ms period: 2 ms after A rises,
+    A = 1 and B = 0 with no FAULTB flag; after that period ends B = 1
+    with its flag, and WO1 - fault B's own channel - is held at 0 per
+    mille with no input of its own. Letting go is the same: with the
+    input down A clears at once and B a period later (WO1 back at ~500).
+33. **The advanced capture actions, with faults raised at chosen COUNT
+    values** of a one-second cycle, the capture on CC3:
+    - **CAPTMAX keeps the maximum, CAPTMIN the minimum**: 10000 and 30000
+      captured and a later 20000 left out (CAPTMIN: 30000, 10000, 20000
+      left out). MC3 rises ONLY on the left-out fault - the one that shows
+      the previous value was the extreme - never on a new extreme
+      itself, which is what 36.6.3.5's "higher or equal (for CAPTMIN)"
+      sentence says read literally.
+    - **LOCMAX, LOCMIN and DERIV0 capture every fault** (CC3 follows the
+      counter) and **flag the capture after a TURN of direction**:
+      LOCMAX a turn down (10000, 30000, 20000 flags the 20000), LOCMIN a
+      turn up (30000, 10000, 20000 flags the 20000), DERIV0 every turn
+      (it flags the 10000 and the 20000 of 30000, 10000, 20000). CCx's
+      initial value is the start, so a first capture above it is a rise
+      and never flags.
+34. **Erratum 1.21.5 was staged and did not reproduce.** In the erratum's
+    own shape - CAPTMAX on CC1 with CC2 and CC3 as basic capture
+    channels - CC1 kept the maximum exactly as CC3 does above. The
+    workaround's arrangement works too: CAPTMAX on CC2 under CAPTMIN on
+    CC3, both faults on one event, kept 30000 and 10000 of 20000, 30000,
+    10000. Recorded as unreproduced, not disproved; the driver's caller
+    obligation at `TccFaultCapture` stands.
+
 **Erratum 1.21.8 did not reproduce.** With the overflow rate as the
 witness - a register read cannot be one, see finding 2 - CTRLB.LUPD held
 the period at 748 overflows a second in **NPWM counting up, NPWM counting
@@ -537,9 +613,8 @@ Not judged, and deliberately so:
   have seen it. Recorded as unreproduced, not disproved.
 - **Erratum 1.21.8** - see above. Recorded as unreproduced, not
   disproved.
-- **Erratum 1.21.5** (advance capture modes needing the upper channels)
-  is stated and not exercised: the bench uses only the plain CAPT action,
-  which the item does not touch.
+- **Erratum 1.21.5** - see finding 34. Recorded as unreproduced, not
+  disproved.
 
 Implemented but not bench-verified:
 
@@ -547,14 +622,10 @@ Implemented but not bench-verified:
   measured (its overflow, letter m); a fault arriving while the core
   sleeps is untouched - a fault event from a pad the sleepwalking pad
   walker drives would measure it.
-- **The `alternate` fault source** (FCTRLn.SRC = ALTFAULT, one fault
-  taking the other's state at the end of the previous period).
-- **The advanced capture actions** (CAPTMIN/CAPTMAX/LOCMIN/LOCMAX/
-  DERIV0/CAPTMARK) - see erratum 1.21.5 above.
-- **The second non-recoverable fault input (TCE1)**: only the TCE0 half
-  has run. Recoverable fault B is bench-verified (above).
-- **`TccEvent0Action`'s `stamp`, and `TccEvent1Action`'s `direction`,
-  `stop` and `decrement`**: `increment`, `count_while_active`, `count`,
-  `retrigger`, `fault` and the PPW capture have all run.
-- **The count event output** (EVCTRL.CNTEO with its four CNTSEL choices)
-  and the retrigger event output.
+- **CAPTMARK** (the capture with the ramp index as its MSB): the other
+  five advanced actions are bench-verified (finding 33); this one wants
+  a RAMP2 waveform with a fault in each of its two cycles.
+- **CNTSEL = BOUNDARY on a counter that has a first and a last cycle**
+  (one-shot, or a ramp): on a free-running counter it gives nothing
+  (finding 29), and what it gives where it means something is
+  unmeasured.

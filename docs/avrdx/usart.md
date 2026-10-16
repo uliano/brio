@@ -699,17 +699,18 @@ the listing's count above.
 
 Measured by `test_avr_sleep` (set `y`, 10 verdicts on this alone) rather
 than by `test_avr_serial`: it needs a device that is genuinely asleep,
-and that suite owns the sleep modes. A second AVR128DB48 sent one
-commanded byte at a commanded rate on a shared one-wire link while the DUT waited in
-Standby with `SFDEN` armed and `RXSIE` on. Three main-clock restart
-times are swept - a crystal (1.77 ms), OSCHF with the regulator asleep
-(313 us) and OSCHF with `PMODE = FULL` (23.6 us), all measured in
-platform.md.
+and that suite owns the sleep modes. The desk's SAM C21 sent one
+commanded byte at a commanded rate on the shared one-wire link
+while this board waited in Standby with `SFDEN` armed and `RXSIE` on;
+every leg below came out the same in twelve runs of twelve. Three
+main-clock restart times are swept - a crystal (1.48 ms on this board),
+OSCHF with the regulator asleep (313 us) and OSCHF with `PMODE = FULL`
+(23.4 us), all measured in platform.md.
 
 - **It works through LBME.** The detector listens to whatever the
-  receiver listens to, so on that wiring - one wire between the two TXD
-  pads - it is the TXD PAD that wakes the device. That is a fact of the
-  wiring, not a promise of chapter 27.
+  receiver listens to, so on that wiring - one wire from this board's
+  TXD pad (PE0) to the peer's - it is the TXD PAD that wakes the device.
+  That is a fact of the wiring, not a promise of chapter 27.
 - **With the main clock kept alive, a start bit wakes the device at
   every rate and the WAKING FRAME survives**: 9600, 115200 and 460800
   all wake and all deliver the byte intact.
@@ -723,16 +724,16 @@ platform.md.
 
   | restart | rate | low time | 0xFF | 0x00 |
   |---|---|---|---|---|
-  | 23.6 us | 115200 | 8.7 us / 78 us | no wake | WAKES |
+  | 23.4 us | 115200 | 8.7 us / 78 us | no wake | WAKES |
   | 313 us | 9600 | 104 us / 938 us | no wake | WAKES |
-  | 1.77 ms | 2400 | 417 us / 3.75 ms | no wake | WAKES |
+  | 1.48 ms | 2400 | 417 us / 3.75 ms | no wake | WAKES |
 
   So a slow-restarting device wakes or not depending on the BYTE's own
   bit pattern - `RXSIF` is set when the clock returns onto a line that
   is still low, whether that low is the start bit or a run of zero data
   bits. A frame of all ones at a fast rate never wakes it at all.
 - **The frame survives only if the clock is back before the MIDDLE of
-  the start bit**, where the receiver takes its sample: 23.6 us against
+  the start bit**, where the receiver takes its sample: 23.4 us against
   a 52 us half-bit at 9600 gives an intact byte, while every wake that
   landed later delivered a garbled one (0xE0 for a transmitted 0x00).
 - **From IDLE, `RXSIF` never fires.** 27.5.5 says the flag is set when

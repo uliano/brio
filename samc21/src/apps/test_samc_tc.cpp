@@ -36,6 +36,7 @@
 //      kernel, paced by a time event, publishing MeterSample from a
 //      MeterLatch that the TC's own capture ISR fills
 //   g  TC1 alone, outside the pair: its own init and its prescaled rate
+//   h  the period/pulse-width capture with the counter COUNTING DOWN
 //
 // build: boards = c21j
 // build: monitor_speed = 115200
@@ -87,7 +88,14 @@ using brio::print;
 // ---------------------------------------------------------------------------
 using LedPin = Pin<'B', 23>;
 using LedWave = TcWo<LedPin>;      // TC3, WO1 - from the device header
-using PwmPad = Pin<'A', 22>;
+// Letter e's capture-on-pin leg moves a TC0/WO0 pad with nothing but
+// its own internal pull, so the pad must carry nothing external. PA22,
+// the first TC0/WO0 pad in the header, is the bench's I2C SDA (SERCOM3,
+// docs/samc21/i2c.md) with external pull-ups, which out-pull the
+// internal one; PB12, also TC0/WO0, is unwired - the leg's first
+// verdict checks that it follows its own pull before the timer ever
+// sees it.
+using PwmPad = Pin<'B', 12>;
 using PwmWave = TcWo<PwmPad>;      // TC0, WO0
 using EicPad = Pin<'A', 16>;
 using EicLine = ExtInt<EicPad>;    // EXTINT0
@@ -194,8 +202,8 @@ void ta_block() {
 
     // THE PAD MAP, out of the device header and not out of arithmetic.
     print(serial, "  pads: PB23 -> TC", LedWave::timer, "/WO", LedWave::channel,
-          ", PA22 -> TC", PwmWave::timer, "/WO", PwmWave::channel, crlf);
-    bench.verdict("the board's LED is TC3's WO1 and PA22 is TC0's WO0",
+          ", PB12 -> TC", PwmWave::timer, "/WO", PwmWave::channel, crlf);
+    bench.verdict("the board's LED is TC3's WO1 and PB12 is TC0's WO0",
                   LedWave::timer == 3u && LedWave::channel == 1u &&
                       PwmWave::timer == 0u && PwmWave::channel == 0u);
     bench.verdict("and a pad with no waveform output has none", !tc_wo_exists<'A', 16>);
@@ -588,9 +596,9 @@ void te_capture() {
     PwmPad::input(PinPull::down);
     wait_ms(2);
     const bool pull_down = PwmPad::read();
-    print(serial, "  PA22 under its own pull: up -> ", pull_up ? "1" : "0",
+    print(serial, "  PB12 under its own pull: up -> ", pull_up ? "1" : "0",
           ", down -> ", pull_down ? "1" : "0", crlf);
-    bench.verdict("PA22 follows its own internal pull, which is what the "
+    bench.verdict("PB12 follows its own internal pull, which is what the "
                   "capture-on-pin stimulus needs",
                   pull_up && !pull_down);
 
@@ -684,6 +692,76 @@ void te_capture() {
     PwmPad::release();
     PwmPad::configure({});
     Timer0::release();
+    (void)Eic::enable(false);
+    Eic::release();
+    EicPad::configure({});
+}
+
+// =============================================================================
+// h - capture while counting DOWN
+// =============================================================================
+//
+// Letter e's PPW meter on TC2, the same EIC line and the same 20 ms /
+// 30 ms wave (938 and 2344 ticks at 46875 Hz), with CTRLBSET.DIR set
+// from the configuration (TcConfig::count_down). 35.6.2.8.2's capture
+// "restarts the counter" on the period edge, which counting down is a
+// reload of TOP (MAX in COUNT16): so the stamps read MAX less the time.
+// The band is letter e's: 5 % plus 4 ticks.
+void th_capture_down() {
+    Evsys::bus_clock(true);
+    Evsys::reset();
+    bench.verdict("the EIC line comes up as letter e's",
+                  Eic::init() && Eic::clock_select(EicClock::ulp32k));
+    EicPad::input(PinPull::down);
+    EicLine::claim(PinPull::down);
+    const TcConfig down{.mode = TcMode::count16,
+                        .prescaler = TcPrescaler::div1024,
+                        .capture_enable = 0x3,
+                        .count_down = true};
+    bench.verdict("TC2 comes up as a period/pulse-width meter COUNTING DOWN",
+                  Eic::configure_line(EicLine::line,
+                                      EicLineConfig{.sense = EicSense::high,
+                                                    .event_out = true}) &&
+                      Eic::enable(true) && timer_up<Timer2>() &&
+                      Timer2::configure(down) &&
+                      Timer2::event_config(
+                          down, TcEventConfig{.action = TcEventAction::period_pulse_width,
+                                              .input_enable = true}) &&
+                      Timer2::enable(true) && Timer2::counting_down() &&
+                      Evsys::connect(Timer2::event_user, ev_pin_channel,
+                                     EventChannelConfig{
+                                         .generator = EicLine::event_generator,
+                                         .path = EventPath::asynchronous}));
+    uint16_t period = 0;
+    uint16_t width = 0;
+    (void)Meter::period_ticks();
+    (void)Meter::width_ticks();
+    Timer2::clear_flags(0xFFu);
+    for (uint8_t i = 0; i < 4u; ++i) {
+        EicPad::set();
+        wait_ms(20);
+        EicPad::clear();
+        wait_ms(30);
+        period = Meter::period_ticks();
+        width = Meter::width_ticks();
+    }
+    const bool clean = (Timer2::flags() & Timer2::error_flag) == 0u;
+    const uint32_t expect_period = (capture_hz * 50u) / 1000u;
+    const uint32_t expect_width = (capture_hz * 20u) / 1000u;
+    print(serial, "  counting down: CC0 ", period, " = MAX - ",
+          0xFFFFu - static_cast<uint32_t>(period), ", CC1 ", width, " = MAX - ",
+          0xFFFFu - static_cast<uint32_t>(width), " (a period is ~", expect_period,
+          " ticks, a width ~", expect_width, "); ERR ", clean ? "0" : "1", crlf);
+    bench.verdict("COUNTING DOWN, THE PERIOD STAMP IS MAX LESS THE PERIOD: the "
+                  "capture's restart is a reload of TOP",
+                  near(0xFFFFu - static_cast<uint32_t>(period), expect_period,
+                       expect_period / 20u + 4u));
+    bench.verdict("and the width stamp MAX less the width, with no capture lost",
+                  near(0xFFFFu - static_cast<uint32_t>(width), expect_width,
+                       expect_width / 20u + 4u) &&
+                      clean);
+    Evsys::disconnect(Timer2::event_user);
+    Timer2::release();
     (void)Eic::enable(false);
     Eic::release();
     EicPad::configure({});
@@ -890,6 +968,7 @@ int main() {
                  te_capture);
     bench.letter('f', "a MeterSampler AO inside a running kernel", tf_meter_ao);
     bench.letter('g', "TC1 alone, a counter in its own right", tg_tc1_alone);
+    bench.letter('h', "capture while counting down", th_capture_down);
 
     if (serial_ok) {
         print(serial, crlf, "boot: clk=", clock_ok ? "OSC48M" : "FAILED",

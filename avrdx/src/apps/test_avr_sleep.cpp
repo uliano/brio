@@ -24,10 +24,12 @@
 // wake-up takes. A sleeping chip cannot time its own return - the only
 // clock power-down leaves running is the PIT's, and the counter that
 // would measure the restart is exactly the one the mode stops (test f).
-// So the ruler moves off-chip: a second board (src/apps/sleep_peer.cpp)
-// drives a stimulus edge, starts a 32-bit CLK_PER stopwatch on the same
-// instruction, and CAPTURES it in hardware when this board's wake-up
-// ISR answers with an edge of its own. Tests h..m then time idle,
+// So the ruler moves off-chip: the desk partner, a SAM C21 running
+// samc21/src/apps/sleep_peer.cpp (src/apps/sleep_peer.cpp is an AVR
+// peer speaking the same sleep_link.hpp), drives a stimulus edge at a
+// known count of a 32-bit stopwatch of its 24 MHz crystal and CAPTURES
+// that stopwatch in hardware when this board's wake-up ISR answers with
+// an edge of its own. Tests h..m then time idle,
 // standby and power-down against every clock configuration that
 // matters, wake this board on a start bit and on a TWI address match,
 // and read the numbers back over the same link.
@@ -45,11 +47,12 @@
 // WIRING. The single-board half (z) needs NOTHING beyond the desk's
 // standing state - but PD1/PD2 MUST BE FREE of the bus jumpers, because
 // test e drives PD2 from the event system and senses its own edge on
-// the pad. The two-board half (y) needs a second board running
-// sleep_peer and this wiring: PE0 the shared one-wire command channel
-// (both USART4 TXD pads, LBME), PE2 the peer's stimulus into this
-// board, PE3 this board's echo into the peer's capture, and an I2C bus
-// on PA2/PA3 for test m. PE1 is spare. Event channels 0 (the PIT divider
+// the pad. The two-board half (y) needs the peer board running
+// sleep_peer and this wiring - the desk's link to the SAM C21: PE0 the
+// shared one-wire command channel (this board's USART4 TXD pad under
+// LBME, the SAM's PA16), PE2 the peer's stimulus into this board (PA19),
+// PE3 this board's echo into the peer's capture (PA17), and the I2C bus
+// on PA2/PA3 (the SAM's PA22/PA23) for test m. PE1 is spare. Event channels 0 (the PIT divider
 // to the pad), 1 (the PIT divider into the CCL, test n), 4 and 5 (the
 // 32-bit stopwatch's carry and snapshot).
 //
@@ -883,19 +886,20 @@ void tg_vreg() {
 //
 //  THE MEASUREMENT, once, so no test has to re-explain it:
 //
-//    B zeroes a 32-bit CLK_PER stopwatch and raises PE2 in the same
-//    instruction pair. That edge is what has to wake this chip. This
-//    chip's PORTE ISR raises PE3 as its first statement; on B that edge
-//    is an event that latches the stopwatch into a capture register.
-//    The number that comes back is therefore
+//    The peer raises PE2 at a known count of a free-running 32-bit
+//    stopwatch (the SAM C21 by a compare match, through its event
+//    system to the pad). That edge is what has to wake this chip. This
+//    chip's PORTE ISR raises PE3 as its first statement; at the peer
+//    that edge is an event that latches the same stopwatch into a
+//    capture register. The number that comes back is therefore
 //
 //      the peer's stimulus -> this chip's wake-up -> ISR prologue -> the store
 //
-//    in B's CLK_PER ticks (24 MHz nominal from ITS OSCHF - a per-cent
-//    class reference, ample for microsecond-to-millisecond figures). The
-//    fixed part - B's zero-to-edge gap, the wire, this chip's vector
-//    latency and ISR prologue - is measured AWAKE in test i and is the
-//    baseline every sleep figure is read against.
+//    in the peer's 24 MHz ticks (41.7 ns; from its crystal, which ident
+//    reports). The fixed part - the peer's compare-to-edge path, the
+//    wire, this chip's vector latency and ISR prologue, the peer's
+//    capture path - is measured AWAKE in test i and is the baseline
+//    every sleep figure is read against.
 // ==============================================================================
 
 const uint8_t no_payload[1] = {0};
@@ -1169,8 +1173,8 @@ uint32_t median_of(const Train& t) {
     return s[k / 2];
 }
 
-/// B's CLK_PER ticks, in the unit that reads best. Its clock is OSCHF at
-/// 24 MHz nominal, so one tick is 41.7 ns.
+/// The peer's 24 MHz ticks, in the unit that reads best: one tick is
+/// 41.7 ns.
 void print_ticks(uint32_t ticks) {
     if (ticks == slink::no_capture) { print(serial, "MISS"); return; }
     print(serial, ticks, " ticks = ");
@@ -1320,7 +1324,7 @@ void th_link() {
                       "latency: it proves the path)", crlf);
     }
 
-    // PE2: B drives, this board senses - awake, through the very ISR
+    // PE2: the peer drives, this board senses - awake, through the very ISR
     // every later test measures.
     Train t{};
     bool ok = train_arm(3, 250);
@@ -1373,7 +1377,7 @@ void ti_idle_latency() {
             "250 ns at 24 MHz)",
             bi != slink::no_capture && ba != slink::no_capture && bi < ba + 24u);
     print(serial, "  IDLE - awake = ", static_cast<int32_t>(bi) - static_cast<int32_t>(ba),
-          " of B's ticks (41.7 ns each); the six-cycle figure itself is measured "
+          " of the peer's ticks (41.7 ns each); the six-cycle figure itself is measured "
           "on-chip by test_avr_platform f.", crlf);
     quiesce();
 }
@@ -1506,7 +1510,7 @@ void tk_power_down_latency() {
 // rate is slow enough concerning the oscillator start-up time". The legs
 // below take that sentence apart into TWO independent questions, each
 // with its own designed experiment, against the three main-clock restart
-// times test j has already measured: a crystal (about 1.8 ms), OSCHF
+// times test j has already measured: a crystal (about 1.5 ms), OSCHF
 // with the regulator asleep (about 300 us) and OSCHF with PMODE =
 // performance (about 24 us).
 //
@@ -1637,9 +1641,9 @@ void tl_sfd() {
         {9'600, 0x00, SfdClock::oschf_slow, SleepMode::standby,
          "OSCHF alone, normal   9600   0x00 (300 us vs 938 us of low)   "},
         {2'400, 0xFF, SfdClock::xtal_restart, SleepMode::standby,
-         "crystal restarts      2400   0xFF (1.8 ms vs 417 us of low)   "},
+         "crystal restarts      2400   0xFF (1.5 ms vs 417 us of low)   "},
         {2'400, 0x00, SfdClock::xtal_restart, SleepMode::standby,
-         "crystal restarts      2400   0x00 (1.8 ms vs 3.75 ms of low)  "},
+         "crystal restarts      2400   0x00 (1.5 ms vs 3.75 ms of low)  "},
         {115'200, 0x5A, SfdClock::xtal_kept, SleepMode::idle,
          "IDLE, clock running   115200 0x5A                             "},
     };
@@ -1665,7 +1669,7 @@ void tl_sfd() {
             "wake, 0x00 (low for 78 us) does", !woke[4] && woke[5]);
     verdict("the same rule at a 300 us restart: 104 us of low is not enough, "
             "938 us is", !woke[6] && woke[7]);
-    verdict("and at a 1.8 ms crystal restart: 417 us of low is not enough, 3.75 ms "
+    verdict("and at a 1.5 ms crystal restart: 417 us of low is not enough, 3.75 ms "
             "is", !woke[8] && woke[9]);
     print(serial, "  so the detector does not latch an EDGE: it needs the line still "
                   "LOW when the peripheral clock comes back, which is why the byte's "
@@ -1746,7 +1750,7 @@ bool twi_tenure(SleepMode m, bool sleeping, uint8_t first, slink::Report& r) {
 
 void tm_twi_wake() {
     print(serial, "m a TWI address match wakes this board from standby and from "
-                  "power-down (the peer board is the host on the office bus)", crlf);
+                  "power-down (the peer board is the host on the I2C bus)", crlf);
     quiesce();
     if (!ensure_link()) { verdict("the peer board is reachable", false); return; }
     Pit::period(PitPeriod::cyc8192);

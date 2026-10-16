@@ -41,6 +41,8 @@
 //   j  LEFTADJ and GAINCORR measured, the WINMON and OVERRUN interrupts
 //      each armed alone, and RESRDY as a wake from STANDBY (RUNSTDBY set,
 //      and clear as the control) against bench_sleep.hpp's backstop
+//   k  FLUSH timed on a slow result: from software into a conversion in
+//      flight and onto an idle converter, and from an event both ways
 //
 // build: boards = c21j
 // build: monitor_speed = 115200
@@ -1553,6 +1555,174 @@ void tj_more() {
     Adc0::release();
 }
 
+// =============================================================================
+// k - FLUSH: what it does to a conversion in flight, from software and
+//     from an event
+// =============================================================================
+//
+// 38.8.17 (SWTRIG.FLUSH): "all conversions in progress will be aborted
+// and lost ... After the flush, the ADC will resume where it left off;
+// i.e., if a conversion was pending, the ADC will start a new
+// conversion". 38.8.4, EVCTRL.FLUSHEI: "a flush and new conversion will be
+// triggered on any incoming event". Both are timed on letter j's slow
+// result (187.5 kHz, 64 sampling cycles, sixteen averaged: T is about
+// 6.5 ms) with TC3 as a 750 kHz stopwatch (48 MHz / 64, 1.33 us a tick,
+// 87 ms before it wraps) and RESRDY polled - with FLUSHEI clear, then
+// set, because the measurement says the software flush depends on it.
+//
+// THE BOUND on "a new conversion of the full length T": the flush
+// restarts CLK_ADC on the next peripheral clock edge, so the restart
+// lands within one CLK_ADC period (256 CPU cycles, 5.3 us, 4 ticks) of
+// the flush; each stopwatch read is a double READSYNC (~6 us, 5 ticks)
+// and the RESRDY poll one such read: 4 + 5 + 5 = 14 ticks, judged at 20.
+// An event flush adds the one-shot TC2's own start: enable() crosses
+// into its clock and its first prescaled tick is up to one /1024 period
+// late (21.3 us, 16 ticks), so that leg is judged at 40.
+using Stopwatch3 = Tc<3>;
+constexpr uint16_t k_none = 0xFFFFu;
+
+bool k_stopwatch_up() {
+    return Stopwatch3::init(adc_gen) &&
+           Stopwatch3::configure(TcConfig{.mode = TcMode::count16,
+                                          .prescaler = TcPrescaler::div64}) &&
+           Stopwatch3::enable(true);
+}
+
+/// Stopwatch ticks until RESRDY, from a stopwatch zeroed by the caller;
+/// k_none when it does not come within `limit` ticks.
+uint16_t k_until_result(uint16_t limit) {
+    for (;;) {
+        const uint16_t t = Stopwatch3::count16();
+        if ((Adc0::flags() & Adc0::flag_resrdy) != 0u) {
+            return t;
+        }
+        if (t > limit) {
+            return k_none;
+        }
+    }
+}
+
+void k_wait_ticks(uint16_t until) {
+    while (Stopwatch3::count16() < until) {
+    }
+}
+
+/// One leg: a software START at stopwatch zero, then at `flush_at` a
+/// software flush (when `flush_at` is not k_none), then the time of the
+/// next RESRDY - and SWTRIG read right after the flush.
+struct KLeg {
+    uint16_t result_at;
+    uint8_t swtrig;
+};
+KLeg k_leg(bool start, uint16_t flush_at) {
+    constexpr uint16_t limit = 30000;   // 40 ms
+    (void)Adc0::result();
+    Adc0::clear_flags(Adc0::flag_resrdy | Adc0::flag_overrun);
+    (void)Stopwatch3::set_count16(0);
+    if (start) {
+        Adc0::start();
+    }
+    uint8_t sw = 0;
+    if (flush_at != k_none) {
+        k_wait_ticks(flush_at);
+        Adc0::flush();
+        sw = Adc0::regs().ADC_SWTRIG;
+    }
+    return KLeg{k_until_result(limit), sw};
+}
+
+void tk_flush() {
+    constexpr AdcConfig slow{.prescaler = AdcPresc::div256, .resolution = AdcRes::bits16,
+                             .average = AdcAverage::samples16,
+                             .adjust = adc_adjres_for_average(AdcAverage::samples16),
+                             .sample_length = 63};
+    bench.verdict("the stopwatch runs at 750 kHz", k_stopwatch_up());
+    bench.verdict("ADC0 up with the slow result", adc_up<Adc0>(slow));
+    Adc0::select(AdcInput::scaled_supply);
+    Adc0::discard(2);
+
+    // EVCTRL.FLUSHEI clear: T, then a flush 3 ms into a conversion, then a
+    // flush with nothing in flight.
+    const KLeg plain = k_leg(true, k_none);
+    const KLeg sw_busy = k_leg(true, 2250);
+    const KLeg sw_idle = k_leg(false, 0);
+
+    // EVCTRL.FLUSHEI set, its user on TC2's one-shot overflow: 47
+    // prescaled ticks at /1024 after the TC's enable, 752 stopwatch ticks.
+    const TcConfig shot{.mode = TcMode::count8, .prescaler = TcPrescaler::div1024,
+                        .one_shot = true};
+    Evsys::bus_clock(true);
+    const bool ev_up =
+        Pacer::init(adc_gen) && Pacer::configure(shot) && Pacer::set_period8(46) &&
+        Pacer::event_config(shot, TcEventConfig{.overflow_out = true}) &&
+        Adc0::enable(false) &&
+        Adc0::flush_on(ev_start_channel,
+                       EventChannelConfig{.generator = Pacer::overflow_generator,
+                                          .path = EventPath::asynchronous}) &&
+        Adc0::enable(true);
+    bench.verdict("TC2's one-shot overflow reaches ADC0's FLUSH user", ev_up);
+    constexpr uint16_t shot_ticks = 752;
+    auto fire = [](bool start) {
+        (void)Pacer::enable(false);
+        (void)Pacer::set_count8(0);
+        (void)Adc0::result();
+        Adc0::clear_flags(Adc0::flag_resrdy | Adc0::flag_overrun);
+        (void)Stopwatch3::set_count16(0);
+        if (start) {
+            Adc0::start();
+        }
+        (void)Pacer::enable(true);
+        return k_until_result(30000);
+    };
+    const KLeg ei_sw_busy = k_leg(true, 2250);
+    const KLeg ei_sw_idle = k_leg(false, 0);
+    const uint16_t ev_idle = fire(false);
+    const uint16_t ev_busy = fire(true);
+    const uint16_t ev_idle_again = fire(false);
+    const KLeg after = k_leg(true, k_none);
+    (void)Pacer::enable(false);
+    (void)Adc0::enable(false);
+    (void)Adc0::stop_events();
+    Evsys::release_channel(ev_start_channel);
+    Pacer::release();
+    Stopwatch3::release();
+    Adc0::release();
+
+    auto t = [](uint16_t v) { return v == k_none ? 0u : static_cast<uint32_t>(v); };
+    print(serial, "  stopwatch ticks of 1.33 us, 0 = no result in 40 ms. FLUSHEI clear: "
+          "plain T = ", t(plain.result_at), "; flush at 2250 into it -> ", t(sw_busy.result_at),
+          " (SWTRIG ", hex(sw_busy.swtrig), "); flush with nothing in flight -> ",
+          t(sw_idle.result_at), crlf);
+    print(serial, "  FLUSHEI set: software flush at 2250 into a conversion -> ",
+          t(ei_sw_busy.result_at), " (SWTRIG ", hex(ei_sw_busy.swtrig), "), with nothing "
+          "in flight -> ", t(ei_sw_idle.result_at), "; the event (", shot_ticks,
+          " ticks in) on an idle converter -> ", t(ev_idle), ", into a software start -> ",
+          t(ev_busy), ", on the idle converter again -> ", t(ev_idle_again),
+          "; a plain start after -> ", t(after.result_at), crlf);
+    auto close = [](uint16_t got, uint32_t want, uint32_t band) {
+        return got != k_none && near(got, want, band);
+    };
+    const uint32_t T = plain.result_at;
+    bench.verdict("a plain slow conversion lands", plain.result_at != k_none && T > 4000u);
+    bench.verdict("WITH FLUSHEI CLEAR A FLUSH LOSES THE CONVERSION IN FLIGHT AND "
+                  "STARTS NONE: no result in 40 ms, SWTRIG reads FLUSH alone",
+                  sw_busy.result_at == k_none && sw_busy.swtrig == ADC_SWTRIG_FLUSH_Msk);
+    bench.verdict("WITH FLUSHEI SET THE SAME FLUSH RE-ARMS START (SWTRIG reads "
+                  "both) AND THE RESULT LANDS ONE WHOLE T AFTER THE FLUSH",
+                  close(ei_sw_busy.result_at, 2250u + T, 20u) &&
+                      ei_sw_busy.swtrig == (ADC_SWTRIG_FLUSH_Msk | ADC_SWTRIG_START_Msk));
+    bench.verdict("a flush with nothing in flight starts nothing, FLUSHEI or not",
+                  sw_idle.result_at == k_none && ei_sw_idle.result_at == k_none);
+    bench.verdict("THE FLUSH EVENT STARTS A CONVERSION ON AN IDLE CONVERTER - 'a flush "
+                  "and new conversion' (EVCTRL.FLUSHEI) - every time",
+                  close(ev_idle, shot_ticks + T, 40u) &&
+                      close(ev_idle_again, shot_ticks + T, 40u));
+    bench.verdict("BUT INTO A CONVERSION IN FLIGHT IT LOSES IT and starts none",
+                  ev_busy == k_none);
+    bench.verdict("and the converter is whole after all of it: a plain start takes T",
+                  close(after.result_at, T, 20u));
+}
+
 void banner() {
     print(serial, crlf,
           "test_samc_adc - SAMC21J18A ADC (ch. 38): both converters, the "
@@ -1635,6 +1805,7 @@ int main() {
                  th_event_chain);
     bench.letter('i', "AnalogSampler inside a real kernel", ti_sampler_ao);
     bench.letter('j', "LEFTADJ, GAINCORR, WINMON and OVERRUN, the STANDBY wake", tj_more);
+    bench.letter('k', "FLUSH from software and from an event, timed", tk_flush);
 
     if (serial_ok) {
         print(serial, crlf, "boot: clk=", clock_ok ? "OSC48M" : "FAILED",

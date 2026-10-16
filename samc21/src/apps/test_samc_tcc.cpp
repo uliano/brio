@@ -53,6 +53,11 @@
 //   l  host/client: TCC1's counter driven by TCC0's
 //   m  the OVERFLOW interrupt as a wake from STANDBY, RUNSTDBY clear the
 //      control
+//   n  the counter event inputs' other actions - TCE1 as the second
+//      non-recoverable fault, STOP, DIR, DEC, TCE0's STAMP - and the
+//      count and retrigger event outputs
+//   o  the recoverable faults' extras: fault B on ALTFAULT, the advanced
+//      capture actions, and erratum 1.21.5 measured both ways
 //
 // build: boards = c21j
 // build: monitor_speed = 115200
@@ -1478,7 +1483,7 @@ void th_recoverable() {
 // enabled output to a level the application chose in DRVCTRL - which is
 // the "instant and predictable shut down" the chapter opens with.
 
-bool non_recoverable_up(uint8_t nre, uint8_t nrv) {
+bool non_recoverable_up(uint8_t nre, uint8_t nrv, uint8_t input = 0) {
     if (!SlowGclk::configure(GclkConfig{.source = GclkSource::osc48m,
                                         .div = slow_div})) {
         return false;
@@ -1490,8 +1495,12 @@ bool non_recoverable_up(uint8_t nre, uint8_t nrv) {
     if (!Timer::configure(cfg) ||
         !Timer::drive(TccDriveConfig{.fault_output_enable = nre,
                                      .fault_output_value = nrv}) ||
-        !Timer::event_config(cfg, TccEventConfig{.action0 = TccEvent0Action::fault,
-                                                 .input0_enable = true})) {
+        !Timer::event_config(
+            cfg, input == 0u
+                     ? TccEventConfig{.action0 = TccEvent0Action::fault,
+                                      .input0_enable = true}
+                     : TccEventConfig{.action1 = TccEvent1Action::fault,
+                                      .input1_enable = true})) {
         return false;
     }
     if (!Timer::wave(TccWaveConfig{.waveform = TccWaveform::normal_pwm}) ||
@@ -1499,7 +1508,7 @@ bool non_recoverable_up(uint8_t nre, uint8_t nrv) {
         !Timer::set_cc(0, (pad_top + 1u) / 2u)) {
         return false;
     }
-    if (!Evsys::connect(Timer::event_user(0), ev_pin_channel,
+    if (!Evsys::connect(Timer::event_user(input), ev_pin_channel,
                         EventChannelConfig{.generator = EicLine::event_generator,
                                            .path = EventPath::asynchronous})) {
         return false;
@@ -1930,6 +1939,684 @@ void tm_wake() {
     Timer::release();
 }
 
+// =============================================================================
+// n - the counter event inputs' remaining actions, and the event outputs
+// =============================================================================
+//
+// Letters i and k ran TCE0's FAULT, COUNTEV and TCE1's PPW; this letter
+// runs the rest of 36.6.2.4's list on the same stimulus - PA16's level
+// through the EIC and an asynchronous channel - and then the two counter
+// event OUTPUTS letter k did not use (CNTEO with its four CNTSEL values,
+// TRGEO), counted by a TC as letter l counts matches.
+
+/// TCC0 with ONE event input action, the input fed by PA16's level.
+bool event_input_up(uint8_t generator, const TccConfig& cfg,
+                    const TccEventConfig& ev, uint8_t input, uint32_t top) {
+    if (!SlowGclk::configure(GclkConfig{.source = GclkSource::osc48m,
+                                        .div = slow_div})) {
+        return false;
+    }
+    if (!Timer::init(generator) || !Timer::configure(cfg) ||
+        !Timer::event_config(cfg, ev) || !Timer::set_period(top)) {
+        return false;
+    }
+    if (!Evsys::connect(Timer::event_user(input), ev_pin_channel,
+                        EventChannelConfig{.generator = EicLine::event_generator,
+                                           .path = EventPath::asynchronous})) {
+        return false;
+    }
+    return Timer::enable(true);
+}
+
+void event_input_down(uint8_t input) {
+    EicPad::clear();
+    Evsys::disconnect(Timer::event_user(input));
+    Timer::release();
+}
+
+/// One PA16 pulse: 2 ms high, 2 ms low (raise_fault's own settling).
+void pin_pulse() {
+    raise_fault();
+    clear_fault_input();
+}
+
+/// True when INTFLAG.OVF rises within `ms` milliseconds; it is cleared
+/// first, so the edge found is a fresh one.
+bool wait_overflow(uint32_t ms) {
+    Timer::clear_flags(Timer::overflow_flag);
+    const uint32_t start = Ticker::millis();
+    while ((Timer::flags() & Timer::overflow_flag) == 0u) {
+        if (Ticker::millis() - start > ms) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void tn_events() {
+    bench.verdict("the EIC turns PA16's level into an event", fault_pin_up());
+
+    // ---- TCE1 as the SECOND non-recoverable fault (36.6.3.6) -------------
+    bench.verdict("TCC0 runs with EVACT1 = FAULT on TCE1 and DRVCTRL forcing "
+                  "WO0 high",
+                  non_recoverable_up(0x01, 0x01, 1));
+    Wo0::claim();
+    wait_ms(20);
+    const uint32_t nr_free = duty_permille<Wo0Pin>();
+    Timer::clear_flags(0xFFFFFFFFul);
+    raise_fault();
+    const bool nr_in1 = Timer::non_recoverable_input(1);
+    const bool nr_st1 = Timer::non_recoverable_state(1);
+    const bool nr_st0 = Timer::non_recoverable_state(0);
+    const bool nr_fl1 = (Timer::flags() & Timer::non_recoverable_flag(1)) != 0u;
+    const uint32_t nr_held = duty_permille<Wo0Pin>();
+    Timer::clear_flags(Timer::overflow_flag);
+    wait_ms(30);
+    const bool nr_ran = (Timer::flags() & Timer::overflow_flag) != 0u;
+    clear_fault_input();
+    const bool nr_cleared = Timer::clear_non_recoverable(1);
+    wait_ms(20);
+    const uint32_t nr_back = duty_permille<Wo0Pin>();
+    print(serial, "  TCE1 fault: PA08 free ", nr_free, ", held ", nr_held,
+          ", after the clear ", nr_back, " per mille; FAULT1IN ",
+          nr_in1 ? "1" : "0", " FAULT1 ", nr_st1 ? "1" : "0", " FAULT0 ",
+          nr_st0 ? "1" : "0", " INTFLAG.FAULT1 ", nr_fl1 ? "1" : "0",
+          ", overflows in 30 ms ", nr_ran ? "yes" : "none", crlf);
+    bench.verdict("TCE1 IS THE SECOND NON-RECOVERABLE FAULT: its own input, "
+                  "state and flag, the output forced to its NRV and the "
+                  "counter stopped - and FAULT0 untouched",
+                  near(nr_free, 500u, 60u) && nr_in1 && nr_st1 && !nr_st0 &&
+                      nr_fl1 && nr_held >= 990u && !nr_ran);
+    bench.verdict("and the write to STATUS.FAULT1 gives WO0 back",
+                  nr_cleared && near(nr_back, 500u, 60u));
+    event_input_down(1);
+    release_pads();
+
+    // ---- EVACT1 = STOP ---------------------------------------------------
+    // The 1 kHz counter of letters h and i, overflowing every ms: the
+    // overflow flag is the witness, as there. 36.6.2.4 calls this action
+    // the "pause" and says a RETRIGGER command resumes a stopped counter;
+    // measured, the stop this action makes OUTLIVES the event and every
+    // command - only rewriting EVCTRL without it lets the counter go.
+    const TccConfig plain{};
+    bench.verdict("TCC0 runs at 1 kHz with EVACT1 = STOP",
+                  event_input_up(slow_gen, plain,
+                                 TccEventConfig{.action1 = TccEvent1Action::stop,
+                                                .input1_enable = true},
+                                 1, pad_top));
+    wait_ms(5);
+    const bool stop_ran_before = wait_overflow(5);
+    raise_fault();
+    const bool stop_ran_held = wait_overflow(30);
+    const bool stop_status = Timer::stopped();
+    clear_fault_input();
+    const bool stop_ran_after = wait_overflow(30);
+    const bool rt_resumes = Timer::retrigger() && wait_overflow(5);
+    const bool sr_resumes = Timer::stop() && Timer::retrigger() && wait_overflow(5);
+    (void)Timer::enable(false);
+    const bool en_resumes = Timer::enable(true) && wait_overflow(5);
+    const bool still_stopped = Timer::stopped();
+    (void)Timer::enable(false);
+    const bool off_resumes = Timer::event_config(plain, TccEventConfig{}) &&
+                             Timer::enable(true) && wait_overflow(5);
+    print(serial, "  EVACT1 = STOP: overflow before ", stop_ran_before ? "yes" : "none",
+          ", in 30 ms with the event ", stop_ran_held ? "yes" : "none",
+          ", STATUS.STOP ", stop_status ? "1" : "0", ", in 30 ms after it ",
+          stop_ran_after ? "yes" : "none", crlf);
+    print(serial, "  then running again after: RETRIGGER ", rt_resumes ? "yes" : "no",
+          ", STOP + RETRIGGER ", sr_resumes ? "yes" : "no", ", disable + enable ",
+          en_resumes ? "yes" : "no", " (STATUS.STOP ", still_stopped ? "1" : "0",
+          "), EVCTRL rewritten without the action ", off_resumes ? "yes" : "no", crlf);
+    bench.verdict("THE STOP ACTION STOPS THE COUNTER on the event - STATUS.STOP "
+                  "set, no overflow in thirty periods",
+                  stop_ran_before && !stop_ran_held && stop_status);
+    bench.verdict("AND THE STOP OUTLIVES THE EVENT AND EVERY COMMAND: neither "
+                  "RETRIGGER, nor STOP then RETRIGGER, nor a disable and "
+                  "re-enable restarts the counter while EVACT1 = STOP stands",
+                  !stop_ran_after && !rt_resumes && !sr_resumes && !en_resumes &&
+                      still_stopped);
+    bench.verdict("and EVCTRL rewritten without the action lets it run",
+                  off_resumes);
+    event_input_down(1);
+    // ---- EVACT1 = DIR: the event LEVEL is the direction -------------------
+    // 48 MHz / 1024 = 46875 Hz on the 24-bit counter, started mid-range so
+    // nothing wraps: a 10 ms window is 468.75 ticks. wait_ms() on the 1 ms
+    // tick lasts between 9 and 10 ms, and each READSYNC'd read costs ~6
+    // us (0.3 tick), so a window reads 421..470 - judged as >= 400 in the
+    // expected direction.
+    const TccConfig dir_cfg{.prescaler = TccPrescaler::div1024};
+    bench.verdict("TCC0 counts at 46875 Hz with EVACT1 = DIR",
+                  event_input_up(fast_gen, dir_cfg,
+                                 TccEventConfig{.action1 = TccEvent1Action::direction,
+                                                .input1_enable = true},
+                                 1, Timer::max_count) &&
+                      Timer::set_count(0x800000ul));
+    auto window = []() {
+        const uint32_t a = Timer::count();
+        wait_ms(10);
+        return static_cast<int32_t>(Timer::count() - a);
+    };
+    const int32_t up_low = window();
+    const bool dir_low = Timer::counting_down();
+    EicPad::set();
+    wait_ms(2);
+    const bool dir_high = Timer::counting_down();
+    const int32_t down_high = window();
+    clear_fault_input();
+    const bool dir_back = Timer::counting_down();
+    const int32_t up_again = window();
+    print(serial, "  EVACT1 = DIR: 10 ms windows advance ", up_low,
+          " (input low, CTRLB.DIR ", dir_low ? "1" : "0", "), ", down_high,
+          " (input high, DIR ", dir_high ? "1" : "0", "), ", up_again,
+          " (low again, DIR ", dir_back ? "1" : "0", ")", crlf);
+    bench.verdict("THE EVENT LEVEL IS THE DIRECTION: the counter climbs while "
+                  "the input is low and descends while it is high",
+                  up_low >= 400 && down_high <= -400 && up_again >= 400);
+    bench.verdict("and CTRLB.DIR reads the level back - 'the direction bit "
+                  "value is updated accordingly' (36.6.2.4)",
+                  !dir_low && dir_high && !dir_back);
+    event_input_down(1);
+
+    // ---- EVACT1 = DEC beside EVACT0 = COUNTEV ----------------------------
+    // With COUNTEV on TCE0 and nothing connected to it the counter takes
+    // no clock tick at all, so every move is TCE1's.
+    const TccConfig dec_cfg{};
+    bench.verdict("TCC0 counts only events (EVACT0 = COUNTEV, TCE0 idle) with "
+                  "EVACT1 = DEC",
+                  event_input_up(fast_gen, dec_cfg,
+                                 TccEventConfig{.action0 = TccEvent0Action::count,
+                                                .action1 = TccEvent1Action::decrement,
+                                                .input0_enable = true,
+                                                .input1_enable = true},
+                                 1, Timer::max_count) &&
+                      Timer::set_count(1000));
+    wait_ms(5);
+    const uint32_t dec_idle = Timer::count();
+    for (uint8_t i = 0; i < 5u; ++i) {
+        pin_pulse();
+    }
+    const uint32_t dec_after = Timer::count();
+    print(serial, "  EVACT1 = DEC: COUNT 1000 -> ", dec_idle, " after 5 ms idle, ",
+          dec_after, " after five pulses", crlf);
+    bench.verdict("THE DECREMENT ACTION TAKES ONE COUNT PER PULSE - five pulses, "
+                  "five counts down, and nothing between them",
+                  dec_idle == 1000u && dec_after == 995u);
+    event_input_down(1);
+
+    // ---- EVACT0 = STAMP ---------------------------------------------------
+    // 36.8.10's one line, "capture overflow times (Max value)", read
+    // against the TC's 35.6.3.2: the channel's own capture event (MCE0,
+    // with MCEI0) stores COUNT, and with STAMP an overflow between two
+    // captures stores MAX. The control is the same channel without the
+    // action. 46875 Hz with PER 46874 is a one-second cycle; the pulse
+    // rises when COUNT first reads 10000, and the capture lands after the
+    // EIC's synchronization (three CLK_ULP32K periods, 92 us at most) and
+    // one ~6 us READSYNC read of the poll: (92 + 6) / 21.3 = 4.6, so CC0
+    // is judged in [10000, 10006].
+    constexpr uint32_t stamp_top = 46874;
+    const TccConfig stamp_cfg{.prescaler = TccPrescaler::div1024,
+                              .capture_enable = 0x1};
+    struct StampLeg {
+        bool up;
+        bool event_mc;
+        uint32_t event_cc;
+        bool ovf_seen;
+        bool ovf_mc;
+        uint32_t ovf_cc;
+    };
+    auto stamp_leg = [&](bool stamp) {
+        StampLeg r{};
+        r.up = event_input_up(fast_gen, stamp_cfg,
+                              TccEventConfig{.action0 = stamp ? TccEvent0Action::stamp
+                                                              : TccEvent0Action::off,
+                                             .input0_enable = stamp,
+                                             .match_in = 0x1},
+                              0, stamp_top);
+        Evsys::disconnect(Timer::event_user(0));
+        r.up = r.up && Evsys::connect(Timer::match_user(0), ev_pin_channel,
+                                      EventChannelConfig{
+                                          .generator = EicLine::event_generator,
+                                          .path = EventPath::asynchronous});
+        (void)wait_overflow(1100);
+        (void)Timer::cc(0);
+        (void)Timer::cc(0);
+        Timer::clear_flags(0xFFFFFFFFul);
+        const uint32_t t0 = Ticker::millis();
+        while (Timer::count() < 10000u && Ticker::millis() - t0 < 1100u) {
+        }
+        EicPad::set();
+        wait_ms(2);
+        r.event_mc = (Timer::flags() & Timer::match_flag(0)) != 0u;
+        r.event_cc = Timer::cc(0);
+        EicPad::clear();
+        r.ovf_seen = wait_overflow(1100);
+        wait_ms(2);
+        r.ovf_mc = (Timer::flags() & Timer::match_flag(0)) != 0u;
+        r.ovf_cc = Timer::cc(0);
+        EicPad::clear();
+        Evsys::disconnect(Timer::match_user(0));
+        Timer::release();
+        return r;
+    };
+    const StampLeg st = stamp_leg(true);
+    const StampLeg plain_capture = stamp_leg(false);
+    print(serial, "  EVACT0 = STAMP: the event at COUNT 10000 captured ", st.event_cc,
+          " (MC0 ", st.event_mc ? "1" : "0", "); the next overflow ", hex(st.ovf_cc),
+          " (MC0 ", st.ovf_mc ? "1" : "0", "), MAX ", hex(Timer::max_count),
+          "; without STAMP: ", plain_capture.event_cc, " (MC0 ",
+          plain_capture.event_mc ? "1" : "0", "), the overflow MC0 ",
+          plain_capture.ovf_mc ? "1" : "0", crlf);
+    bench.verdict("the capture channel takes COUNT on its event, with STAMP and "
+                  "without",
+                  st.up && plain_capture.up && st.event_mc &&
+                      st.event_cc >= 10000u && st.event_cc <= 10006u &&
+                      plain_capture.event_mc && plain_capture.event_cc >= 10000u &&
+                      plain_capture.event_cc <= 10006u);
+    bench.verdict("STAMP PUTS MAX IN THE CHANNEL AT AN OVERFLOW - the mark that "
+                  "says the counter wrapped between two time stamps - and "
+                  "without it the overflow captures nothing",
+                  st.ovf_seen && st.ovf_mc && st.ovf_cc == Timer::max_count &&
+                      plain_capture.ovf_seen && !plain_capture.ovf_mc);
+    fault_pin_down();
+
+    // ---- the counter event output, CNTEO, and its four CNTSEL values -----
+    // TCC0 at 1 kHz single slope; a TC counts the CNT events for one
+    // second. The window opens and closes on two counter accesses with
+    // the 1 ms tick between, so it holds 999..1001 cycles.
+    uint32_t cnt[4] = {};
+    for (uint8_t sel = 0; sel < 4u; ++sel) {
+        const TccEventConfig ev{.count_out = true,
+                                .count_select = static_cast<TccCountEvent>(sel)};
+        const bool up = SlowGclk::configure(GclkConfig{.source = GclkSource::osc48m,
+                                                       .div = slow_div}) &&
+                        Timer::init(slow_gen) && Timer::configure(plain) &&
+                        Timer::event_config(plain, ev) &&
+                        Timer::wave(TccWaveConfig{.waveform = TccWaveform::normal_pwm}) &&
+                        Timer::set_period(pad_top) && Timer::enable(true) &&
+                        count_events_from(Timer::count_generator);
+        cnt[sel] = up ? events_in(1000) : 0u;
+        release_event_counter();
+        Timer::release();
+    }
+    print(serial, "  CNTEO, single slope at 1 kHz, events in 1 s: BEGIN ", cnt[0],
+          ", END ", cnt[1], ", BETWEEN ", cnt[2], ", BOUNDARY ", cnt[3], crlf);
+    bench.verdict("THE COUNTER EVENT OUTPUT FIRES ONCE A CYCLE at BEGIN, END and "
+                  "BETWEEN, and a free-running counter has no BOUNDARY",
+                  near(cnt[0], 1000u, 1u) && near(cnt[1], 1000u, 1u) &&
+                      near(cnt[2], 1000u, 1u) && cnt[3] == 0u);
+
+    // ---- the retrigger event output, TRGEO, and what a RETRIGGER is -------
+    // PER = MAX on the 200 kHz clock, so no wrap comes near a command: ten
+    // RETRIGGER commands 3 ms apart, each judged by INTFLAG.TRG and
+    // counted by a TC as TRGEO events.
+    auto trg_up = [&](uint32_t top) {
+        return SlowGclk::configure(GclkConfig{.source = GclkSource::osc48m,
+                                              .div = slow_div}) &&
+               Timer::init(slow_gen) && Timer::configure(plain) &&
+               Timer::event_config(plain, TccEventConfig{.retrigger_out = true}) &&
+               Timer::set_period(top) && Timer::enable(true) &&
+               count_events_from(Timer::retrigger_generator);
+    };
+    auto retriggers = [](uint8_t& flags) {
+        flags = 0;
+        for (uint8_t i = 0; i < 10u; ++i) {
+            wait_ms(3);
+            Timer::clear_flags(Timer::retrigger_flag);
+            (void)Timer::retrigger();
+            wait_ms(2);
+            if ((Timer::flags() & Timer::retrigger_flag) != 0u) {
+                ++flags;
+            }
+        }
+    };
+    bench.verdict("TCC0 runs with TRGEO, and a TC counts its retrigger events",
+                  trg_up(Timer::max_count));
+    (void)EventCounter::set_count16(0);
+    wait_ms(5);
+    const uint32_t trg_idle = EventCounter::count16();
+    uint8_t trg_flags = 0;
+    retriggers(trg_flags);
+    const uint32_t trg = EventCounter::count16();
+    // A RETRIGGER that RESUMES a stopped counter (letter b's verb pair):
+    (void)EventCounter::set_count16(0);
+    uint8_t resumed = 0;
+    for (uint8_t i = 0; i < 10u; ++i) {
+        (void)Timer::stop();
+        wait_ms(2);
+        Timer::clear_flags(Timer::retrigger_flag);
+        (void)Timer::retrigger();
+        wait_ms(2);
+        if (!Timer::stopped() && (Timer::flags() & Timer::retrigger_flag) == 0u) {
+            ++resumed;
+        }
+    }
+    const uint32_t trg_resume = EventCounter::count16();
+    release_event_counter();
+    Timer::release();
+    print(serial, "  TRGEO: ", trg_idle, " events running free, ", trg, " events and ",
+          trg_flags, " TRG flags for ten RETRIGGER commands; ten RETRIGGERs out of "
+          "STOP: ", resumed, " resumed with no TRG flag, ", trg_resume, " events", crlf);
+    bench.verdict("ONE RETRIGGER EVENT PER RETRIGGER, none from the counter's own "
+                  "cycle",
+                  trg_idle == 0u && trg == 10u && trg_flags == 10u);
+    bench.verdict("AND A RETRIGGER THAT RESUMES A STOPPED COUNTER IS NOT ONE: it "
+                  "runs again with no INTFLAG.TRG and no TRGEO event",
+                  resumed == 10u && trg_resume == 0u);
+
+    // A RETRIGGER COMMAND ON THE WRAP IS LOST. TOP 199 on the 200 kHz
+    // clock, the command issued as the CC0 match flag rises, ten times
+    // per position: the count clock's 5 us against the command's
+    // crossing (CTRLBSET.CMD still reads the command when the SYNCBUSY
+    // wait returns on this clock).
+    uint8_t at_179 = 0;
+    uint8_t at_195 = 0;
+    bench.verdict("TCC0 at TOP 199 again",
+                  trg_up(pad_top));
+    for (uint32_t x : {179u, 195u}) {
+        (void)Timer::set_cc(0, x);
+        uint8_t taken = 0;
+        for (uint8_t i = 0; i < 10u; ++i) {
+            wait_ms(3);
+            Timer::clear_flags(Timer::match_flag(0));
+            const uint32_t t0 = Ticker::millis();
+            while ((Timer::flags() & Timer::match_flag(0)) == 0u &&
+                   Ticker::millis() - t0 < 5u) {
+            }
+            Timer::clear_flags(Timer::retrigger_flag);
+            (void)Timer::retrigger();
+            wait_ms(2);
+            if ((Timer::flags() & Timer::retrigger_flag) != 0u) {
+                ++taken;
+            }
+        }
+        (x == 179u ? at_179 : at_195) = taken;
+    }
+    release_event_counter();
+    Timer::release();
+    print(serial, "  RETRIGGER issued on the match at 179 of TOP 199: ", at_179,
+          "/10 taken; at 195: ", at_195, "/10", crlf);
+    bench.verdict("A RETRIGGER COMMAND THAT LANDS ON THE WRAP IS LOST, and "
+                  "command() cannot tell: every one issued at 195 of 199 "
+                  "vanished, every one at 179 was taken",
+                  at_179 == 10u && at_195 == 0u);
+}
+
+// =============================================================================
+// o - the recoverable faults' extras: the alternate source and the
+//     advanced capture actions
+// =============================================================================
+//
+// Letter h ran fault A from its own event. Here fault B takes FCTRLB.SRC =
+// ALTFAULT - "alternate fault A state at the end of the previous period"
+// (36.8.6) - and the capture actions past plain CAPT are run on a slow
+// counter with the faults raised at chosen COUNT values.
+
+/// TCC0 with fault A on PA16's event, fault B as configured, a period of
+/// `top` + 1 ticks of `generator` / `prescaler`.
+bool faults_up(uint8_t generator, const TccConfig& cfg, const TccFaultConfig& fa,
+               const TccFaultConfig& fb, uint8_t match_in, uint32_t top) {
+    if (!SlowGclk::configure(GclkConfig{.source = GclkSource::osc48m,
+                                        .div = slow_div})) {
+        return false;
+    }
+    if (!Timer::init(generator) || !Timer::configure(cfg) ||
+        !Timer::fault(TccFault::a, fa) || !Timer::fault(TccFault::b, fb) ||
+        !Timer::event_config(cfg, TccEventConfig{.match_in = match_in})) {
+        return false;
+    }
+    if (!Timer::wave(TccWaveConfig{.waveform = TccWaveform::normal_pwm}) ||
+        !Timer::set_period(top) || !Timer::set_cc(0, (top + 1u) / 2u) ||
+        !Timer::set_cc(1, (top + 1u) / 2u)) {
+        return false;
+    }
+    const EventChannelConfig ch{.generator = EicLine::event_generator,
+                                .path = EventPath::asynchronous};
+    for (uint8_t f = 0; f < 2u; ++f) {
+        if ((match_in & (1u << f)) != 0u &&
+            !Evsys::connect(Timer::match_user(f), ev_pin_channel, ch)) {
+            return false;
+        }
+    }
+    return Timer::enable(true);
+}
+
+void faults_down() {
+    EicPad::clear();
+    Evsys::disconnect(Timer::match_user(0));
+    Evsys::disconnect(Timer::match_user(1));
+    Timer::release();
+}
+
+/// One fault pulse with its rising edge when COUNT first reads `at` or
+/// more - in the NEXT counter cycle when this one is already past it,
+/// so a sequence of positions is a sequence in time - and the channel's
+/// state right after it: INTFLAG whole (read before CCx, whose read
+/// clears MCx - 36.8.13) and CCx.
+struct Shot {
+    uint32_t flags;
+    uint32_t cc;
+};
+Shot fault_at(uint32_t at, uint8_t ch) {
+    if (Timer::count() >= at) {
+        (void)wait_overflow(1100);
+    }
+    const uint32_t t0 = Ticker::millis();
+    while (Timer::count() < at && Ticker::millis() - t0 < 1100u) {
+    }
+    raise_fault();
+    const uint32_t flags = Timer::flags();
+    Timer::clear_flags(0xFFFFFFFFul);
+    const uint32_t cc = Timer::cc(ch);
+    clear_fault_input();
+    return Shot{flags, cc};
+}
+
+void to_faults() {
+    bench.verdict("the EIC turns PA16's level into an event", fault_pin_up());
+
+    // ---- FCTRLB.SRC = ALTFAULT ------------------------------------------
+    // 200 kHz with TOP 3999: a 20 ms period, long enough to see "the end
+    // of the previous period" from software. Fault A takes PA16's event
+    // (MCEI0 only); fault B has no input of its own.
+    constexpr uint32_t alt_top = 3999;
+    bench.verdict("TCC0 runs a 20 ms period with fault A on the event and "
+                  "fault B on ALTFAULT",
+                  faults_up(slow_gen, TccConfig{},
+                            TccFaultConfig{.source = TccFaultSource::event},
+                            TccFaultConfig{.source = TccFaultSource::alternate},
+                            tcc_fault_input_bit(TccFault::a), alt_top));
+    Wo1::claim();
+    const bool alt_sync = wait_overflow(30);
+    EicPad::set();
+    wait_ms(2);                      // the period ends 18 ms from here
+    const bool a_now = Timer::fault_state(TccFault::a);
+    const bool b_now = Timer::fault_state(TccFault::b);
+    const bool b_flag_now = (Timer::flags() & Timer::fault_b_flag) != 0u;
+    (void)wait_overflow(30);
+    wait_ms(2);
+    const bool b_next = Timer::fault_state(TccFault::b);
+    const bool b_flag_next = (Timer::flags() & Timer::fault_b_flag) != 0u;
+    const uint32_t wo1_held = duty_permille<Wo1Pin>();
+    (void)wait_overflow(30);
+    EicPad::clear();
+    wait_ms(2);
+    const bool a_gone = Timer::fault_state(TccFault::a);
+    const bool b_stays = Timer::fault_state(TccFault::b);
+    (void)wait_overflow(30);
+    wait_ms(2);
+    const bool b_gone = Timer::fault_state(TccFault::b);
+    const uint32_t wo1_free = duty_permille<Wo1Pin>(200'000UL);
+    print(serial, "  ALTFAULT: 2 ms into the period A ", a_now ? "1" : "0", " B ",
+          b_now ? "1" : "0", " (flag ", b_flag_now ? "1" : "0",
+          "); after the period's end B ", b_next ? "1" : "0", " (flag ",
+          b_flag_next ? "1" : "0", "), PA09 ", wo1_held,
+          " per mille; input down: A ", a_gone ? "1" : "0", " B ",
+          b_stays ? "1" : "0", ", a period later B ", b_gone ? "1" : "0",
+          ", PA09 ", wo1_free, crlf);
+    bench.verdict("FAULT B ON ALTFAULT FOLLOWS FAULT A ONE PERIOD LATE: clear "
+                  "while A rises inside a period, set after that period ends",
+                  alt_sync && a_now && !b_now && !b_flag_now && b_next &&
+                      b_flag_next);
+    bench.verdict("and it clamps fault B's own channel - WO1 held low with no "
+                  "input of its own",
+                  wo1_held == 0u);
+    bench.verdict("and it lets go the same way: still set in the period A "
+                  "falls in, clear a period later, WO1 free again",
+                  !a_gone && b_stays && !b_gone && near(wo1_free, 500u, 60u));
+    faults_down();
+    release_pads();
+
+    // ---- the advanced capture actions (FCTRLn.CAPTURE, 36.6.3.5) ---------
+    // 46875 Hz with PER 46874: a one-second cycle. Each leg puts fault A's
+    // capture on CC3 - the TOP channel, so erratum 1.21.5's "every upper
+    // channel" is empty - and raises three faults at chosen COUNT values.
+    // A capture lands after the EIC's synchronization (three CLK_ULP32K
+    // periods, 92 us at most) and one ~6 us READSYNC read of the poll:
+    // (92 + 6) / 21.3 us = 4.6 ticks, so a captured value is judged in
+    // [at, at + 6].
+    constexpr uint32_t cap_top = 46874;
+    const TccConfig cap_cfg{.prescaler = TccPrescaler::div1024,
+                            .capture_enable = 0x8};
+    auto at = [](uint32_t v, uint32_t want) { return v >= want && v <= want + 6u; };
+    auto mc = [](const Shot& x, uint8_t ch) {
+        return (x.flags & Timer::match_flag(ch)) != 0u;
+    };
+    struct Leg {
+        TccFaultCapture mode;
+        const char* name;
+        uint32_t init;
+        uint32_t when[3];
+        Shot shot[3];
+    };
+    Leg legs[] = {
+        {TccFaultCapture::capture_max, "CAPTMAX", 0, {10000, 30000, 20000}, {}},
+        {TccFaultCapture::capture_min, "CAPTMIN", cap_top, {30000, 10000, 20000}, {}},
+        {TccFaultCapture::local_max, "LOCMAX", 0, {10000, 30000, 20000}, {}},
+        {TccFaultCapture::local_min, "LOCMIN", 0, {30000, 10000, 20000}, {}},
+        {TccFaultCapture::extremum, "DERIV0", 0, {10000, 30000, 20000}, {}},
+        {TccFaultCapture::extremum, "DERIV0", 0, {30000, 10000, 20000}, {}},
+    };
+    bool legs_up = true;
+    for (auto& leg : legs) {
+        const bool up =
+            faults_up(fast_gen, cap_cfg,
+                      TccFaultConfig{.source = TccFaultSource::event,
+                                     .capture = leg.mode,
+                                     .capture_channel = 3},
+                      TccFaultConfig{}, tcc_fault_input_bit(TccFault::a), cap_top) &&
+            Timer::set_cc(3, leg.init);
+        legs_up = legs_up && up;
+        (void)wait_overflow(1100);
+        Timer::clear_flags(0xFFFFFFFFul);
+        for (uint8_t i = 0; i < 3u; ++i) {
+            leg.shot[i] = fault_at(leg.when[i], 3);
+        }
+        faults_down();
+        print(serial, "  ", leg.name, " (CC3 from ", leg.init, "): faults at ",
+              leg.when[0], ", ", leg.when[1], ", ", leg.when[2], " -> CC3 ",
+              leg.shot[0].cc, ", ", leg.shot[1].cc, ", ", leg.shot[2].cc,
+              "; INTFLAG ", hex(leg.shot[0].flags), " ", hex(leg.shot[1].flags), " ",
+              hex(leg.shot[2].flags), crlf);
+    }
+    bench.verdict("six legs come up with the capture on CC3", legs_up);
+    const Leg& mx = legs[0];
+    const Leg& mn = legs[1];
+    const Leg& lmx = legs[2];
+    const Leg& lmn = legs[3];
+    const Leg& dv_up = legs[4];
+    const Leg& dv_down = legs[5];
+    // MCx: set only on the capture that shows the PREVIOUS one was the
+    // extreme - never on the first, never on a new extreme itself.
+    auto only_third = [&](const Leg& l) {
+        return !mc(l.shot[0], 3) && !mc(l.shot[1], 3) && mc(l.shot[2], 3);
+    };
+    bench.verdict("CAPTMAX KEEPS THE MAXIMUM: 10000 and 30000 captured, the "
+                  "later 20000 not - and MC3 rises only on that 20000, the "
+                  "fault that shows 30000 was the maximum",
+                  at(mx.shot[0].cc, 10000) && at(mx.shot[1].cc, 30000) &&
+                      at(mx.shot[2].cc, 30000) && only_third(mx));
+    bench.verdict("CAPTMIN KEEPS THE MINIMUM the same way: 30000, 10000, then "
+                  "20000 left out and flagged",
+                  at(mn.shot[0].cc, 30000) && at(mn.shot[1].cc, 10000) &&
+                      at(mn.shot[2].cc, 10000) && only_third(mn));
+    bench.verdict("LOCMAX, LOCMIN AND DERIV0 CAPTURE EVERY FAULT - CC3 follows "
+                  "the counter",
+                  at(lmx.shot[1].cc, 30000) && at(lmx.shot[2].cc, 20000) &&
+                      at(lmn.shot[1].cc, 10000) && at(lmn.shot[2].cc, 20000) &&
+                      at(dv_up.shot[2].cc, 20000) && at(dv_down.shot[2].cc, 20000));
+    bench.verdict("AND FLAG THE CAPTURE AFTER A TURN of direction - LOCMAX a "
+                  "turn down, LOCMIN a turn up, DERIV0 every turn, CCx's initial "
+                  "0 the start (so a first capture is a rise): DERIV0 flags both "
+                  "faults of 30000, 10000, 20000",
+                  only_third(lmx) && only_third(lmn) && only_third(dv_up) &&
+                      !mc(dv_down.shot[0], 3) && mc(dv_down.shot[1], 3) &&
+                      mc(dv_down.shot[2], 3));
+
+    // ---- erratum 1.21.5: an advanced mode BELOW a basic channel ----------
+    // CAPTMAX on CC1 while CC2 and CC3 are BASIC capture channels (CPTENx
+    // with no action of their own - the erratum's own example), and then
+    // the documented arrangement - both faults on the same event, CAPTMAX on
+    // CC2 and CAPTMIN on CC3, so the upper channel is advanced too.
+    const TccConfig low_cfg{.prescaler = TccPrescaler::div1024,
+                            .capture_enable = 0xE};
+    Shot lone[3] = {};
+    const bool lone_up =
+        faults_up(fast_gen, low_cfg,
+                  TccFaultConfig{.source = TccFaultSource::event,
+                                 .capture = TccFaultCapture::capture_max,
+                                 .capture_channel = 1},
+                  TccFaultConfig{}, tcc_fault_input_bit(TccFault::a), cap_top) &&
+        Timer::set_cc(1, 0);
+    (void)wait_overflow(1100);
+    Timer::clear_flags(0xFFFFFFFFul);
+    const uint32_t lone_when[3] = {10000, 30000, 20000};
+    for (uint8_t i = 0; i < 3u; ++i) {
+        lone[i] = fault_at(lone_when[i], 1);
+    }
+    faults_down();
+
+    const TccConfig pair_cfg{.prescaler = TccPrescaler::div1024,
+                             .capture_enable = 0xC};
+    Shot hi[3] = {};
+    uint32_t hi2[3] = {};
+    const bool pair_up =
+        faults_up(fast_gen, pair_cfg,
+                  TccFaultConfig{.source = TccFaultSource::event,
+                                 .capture = TccFaultCapture::capture_max,
+                                 .capture_channel = 2},
+                  TccFaultConfig{.source = TccFaultSource::event,
+                                 .capture = TccFaultCapture::capture_min,
+                                 .capture_channel = 3},
+                  0x3, cap_top) &&
+        Timer::set_cc(2, 0) && Timer::set_cc(3, cap_top);
+    (void)wait_overflow(1100);
+    Timer::clear_flags(0xFFFFFFFFul);
+    const uint32_t pair_when[3] = {20000, 30000, 10000};
+    for (uint8_t i = 0; i < 3u; ++i) {
+        hi[i] = fault_at(pair_when[i], 3);
+        hi2[i] = Timer::cc(2);
+    }
+    const uint32_t pair_cc2 = hi2[2];
+    faults_down();
+    print(serial, "  erratum 1.21.5: CAPTMAX on CC1 under basic captures on CC2 and "
+          "CC3 -> CC1 ", lone[0].cc, ", ", lone[1].cc, ", ", lone[2].cc, "; INTFLAG ",
+          hex(lone[0].flags), " ", hex(lone[1].flags), " ", hex(lone[2].flags), crlf);
+    print(serial, "  CAPTMAX on CC2 under CAPTMIN on CC3, faults at 20000, 30000, "
+          "10000: CC3 ", hi[0].cc, ", ", hi[1].cc, ", ", hi[2].cc, ", CC2 ",
+          hi2[0], ", ", hi2[1], ", ", hi2[2], crlf);
+    bench.verdict("ERRATUM 1.21.5 STAGED AND NOT REPRODUCED: CAPTMAX on CC1 "
+                  "under two basic capture channels keeps the maximum all the "
+                  "same, MC1 on the third fault as in the arrangement above",
+                  lone_up && at(lone[0].cc, 10000) && at(lone[1].cc, 30000) &&
+                      at(lone[2].cc, 30000) && !mc(lone[1], 1) && mc(lone[2], 1));
+    bench.verdict("AND THE ERRATUM'S ARRANGEMENT WORKS: with CC3 advanced too, "
+                  "CC2 keeps the maximum and CC3 the minimum of the same faults",
+                  pair_up && at(pair_cc2, 30000) && at(hi[2].cc, 10000));
+
+    release_pads();
+    fault_pin_down();
+}
+
 void banner() {
     print(serial, crlf,
           "test_samc_tcc - SAMC21J18A TCC (ch. 36): three unequal timers, "
@@ -1977,6 +2664,10 @@ int main() {
     bench.letter('l', "host and client: TCC1's counter driven by TCC0's",
                  tl_host_client);
     bench.letter('m', "the overflow interrupt as a wake from STANDBY", tm_wake);
+    bench.letter('n', "TCE1's fault, STOP, DIR, DEC, STAMP; CNTEO and TRGEO",
+                 tn_events);
+    bench.letter('o', "the alternate fault and the advanced capture actions",
+                 to_faults);
 
     if (serial_ok) {
         print(serial, crlf, "boot: clk=", clock_ok ? "OSC48M" : "FAILED",

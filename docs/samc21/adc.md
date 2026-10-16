@@ -259,7 +259,7 @@ zero length because PA02 is DAC/VOUT and ADC0/AIN0 at once.
 
 ## Bench findings
 
-From `test_samc_adc`, 10 letters / 108 verdicts, wireless, on the C21J at
+From `test_samc_adc`, 11 letters / 118 verdicts, wireless, on the C21J at
 ~5.2 V.
 
 - **THE BANDGAP CHANNEL IS DEAD WITHOUT SUPC.VREF.VREFOE.** MUXPOS =
@@ -407,6 +407,25 @@ peripheral by peripheral".
   with RUNSTDBY clear the converter stops with the core and the backstop
   ends the sleep.
 
+**Letter k, FLUSH timed, every run of twelve**, on letter j's slow
+result (T = 4869..4871 ticks of a 750 kHz stopwatch, 6.5 ms):
+
+- **A software FLUSH into a conversion in flight depends on
+  EVCTRL.FLUSHEI**, which 38.8.17 never mentions. With FLUSHEI clear the
+  conversion is lost and none follows (no result in 40 ms; SWTRIG reads
+  FLUSH alone right after the write). With FLUSHEI set the same write
+  re-arms START (SWTRIG reads FLUSH and START) and the result lands one
+  whole T after the flush (7121..7127 for a flush at 2250) - which is the
+  sentence's "if a conversion was pending, the ADC will start a new
+  conversion", true on this silicon only with the event input enabled.
+- **A flush with nothing in flight starts nothing**, FLUSHEI or not.
+- **The FLUSH EVENT starts a conversion on an idle converter** - "a
+  flush and new conversion" (38.8.4, FLUSHEI): the result
+  lands T after the event (5620..5623 for an event 752 ticks in, twice a
+  run) - **but an event into a conversion in flight loses it and starts
+  none**, the reverse of the software flush beside the same FLUSHEI.
+- The converter is whole after all of it: a plain start takes T again.
+
 ## The host/client pair, the sequence, differential mode
 
 From `test_samc_analog` letters a to d, 47 verdicts.
@@ -530,12 +549,6 @@ Implemented but not bench-verified:
 - **VREFA** (`Ref::vrefa`) is encodable and unreachable: the pin is PA03
   and nothing on this board drives it inside table 45-30's range. Needs
   a wire.
-- **The FLUSH event input** (`flush_on()`): exercised for its refusal of
-  a synchronous channel, never for its effect. `flush()` itself has one
-  measured effect and it is a NEGATIVE one - it does not restart an
-  interleaved sequence (see above) - and what it costs a conversion in
-  flight is unmeasured here. (The SDADC's flush is measured both ways -
-  [sdadc.md](sdadc.md).)
 - **The dual pair beyond one shared pad.** The two converters are proven
   simultaneous on ONE node; nothing here samples two DIFFERENT nodes at
   one instant, which is what DUALSEL = BOTH is for, and nothing measures

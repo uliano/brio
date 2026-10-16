@@ -693,6 +693,16 @@ to drain. A client stretching every byte by 1 ms under the same limit
 completes `i2c_ok` in 9 ms: stretching is flow control, and the limit
 sits above a whole tenure.
 
+**The client's address match wakes this chip from STANDBY and from
+POWER-DOWN, and the host pays the restart on SCL** (`test_avr_sleep` m,
+the SAM C21 as the host timing the tenure, twelve runs): three bytes at
+100 kHz take 393.5 us awake and out of a standby with the clock kept
+alive, 1865 us out of power-down - the crystal's restart held on SCL
+from the match to the first serviced byte. The figures and the rule
+(the data interrupts are no wake source) are in
+[platform.md](platform.md), "Wake-up latency, measured from the partner
+board".
+
 **A desk fact, not a silicon one**: TWI1's dual pair PB2/PB3 would make
 a third tap of this bus - the suite drives PB2 low and prints whether the
 SDA node follows, instead of assuming either way.
@@ -723,10 +733,6 @@ implement):
   an injected STOP, which the SAM C21's does not; a leg of n queuing
   this host's START and the peer's behind one REAL STOP, as
   `test_samc_i2c` o does from that side, would measure it;
-- the client's address-match wake (29.3.5) out of STANDBY and
-  POWER-DOWN, and what it costs the host on the wire: a sleeping chip
-  cannot time its own wake, the peer must time the tenure from outside,
-  and no instrument on the desk partner does;
 - CTRLA.SDASETUP: the knob that shapes the client's own setup-time
   stretch is exposed and written, but its two settings are not measured
   apart on the wire;

@@ -3443,7 +3443,7 @@ void tv_client() {
 // PE2 RISING, PE2 FALLING, PE3 FALLING (the control: the select's fall
 // happens - the peer's report says it clocked the burst - and no
 // interrupt follows), PE3 BOTHEDGES. THE BURST'S LENGTH IS THE NOTE'S: a
-// standby wake on the crystal with its RUNSTDBY clear takes 1.77 ms
+// standby wake on the crystal with its RUNSTDBY clear takes 1.5 ms
 // (docs/avrdx/platform.md, the latency table), so the select is held low
 // for 160 characters at the peer's 750 kHz and 20 us gaps - 4.9 ms.
 

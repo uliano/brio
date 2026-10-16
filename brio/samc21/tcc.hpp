@@ -349,6 +349,10 @@ enum class TccEvent1Action : uint8_t {
     retrigger = TCC_EVCTRL_EVACT1_RETRIGGER_Val,
     /// The event LEVEL overrides CTRLB.DIR. Asynchronous events only.
     direction = TCC_EVCTRL_EVACT1_DIR_Val,
+    /// Stop on the event. MEASURED (docs/samc21/tcc.md): the stop outlives
+    /// the event - RETRIGGER, STOP then RETRIGGER, a disable and re-enable
+    /// all leave STATUS.STOP standing - until EVCTRL is rewritten without
+    /// this action.
     stop = TCC_EVCTRL_EVACT1_STOP_Val,
     decrement = TCC_EVCTRL_EVACT1_DEC_Val,
     /// Period into CC0, pulse width into CC1.
@@ -1113,6 +1117,11 @@ public:
         }
         return sync_wait(TCC_SYNCBUSY_CTRLB_Msk, spins);
     }
+    /// MEASURED (docs/samc21/tcc.md): a RETRIGGER that executes on the
+    /// counter's wrap is LOST, and the true this returns cannot say so -
+    /// on a slow GCLK_TCC the command executes count clocks after the
+    /// SYNCBUSY wait returns. INTFLAG.TRG is the witness; a RETRIGGER
+    /// that resumes a STOPPED counter raises no TRG at all.
     static bool retrigger(uint32_t spins = 0xFFFFu) {
         return command(TccCommand::retrigger, spins);
     }
