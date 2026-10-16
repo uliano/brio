@@ -62,10 +62,16 @@
 /// The attribute of every interrupt handler of this target (see the file
 /// header): what an app writes on a vector binding, and the ONE place
 /// the choice between the core's hardware prologue and gcc's is spelled.
+/// EVERY HANDLER IS ALIGNED TO FOUR: from the flash, code with taken
+/// branches costs what its address modulo four makes it (the fetch reads
+/// a word; docs/ch32x035/platform.md, "A handler in SRAM"), and gcc
+/// aligns a function to two under -Os - so without it a handler's cost
+/// moved with whatever the image put before it, by up to ten cycles on
+/// the USART's completion. Two bytes of padding a handler at most.
 #if defined(BRIO_CH32_HPE) && BRIO_CH32_HPE
-#define BRIO_CH32_INTERRUPT [[gnu::interrupt("WCH-Interrupt-fast"), gnu::no_icf]]
+#define BRIO_CH32_INTERRUPT [[gnu::interrupt("WCH-Interrupt-fast"), gnu::no_icf, gnu::aligned(4)]]
 #else
-#define BRIO_CH32_INTERRUPT [[gnu::interrupt, gnu::no_icf]]
+#define BRIO_CH32_INTERRUPT [[gnu::interrupt, gnu::no_icf, gnu::aligned(4)]]
 #endif
 
 namespace brio {

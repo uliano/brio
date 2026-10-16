@@ -79,8 +79,8 @@ question.
   prologue of its own. On the CH32V203's V4B the hardware saved 10
   cycles and 64 bytes of user stack a round trip
   ([../ch32vx03/platform.md](../ch32vx03/platform.md)); on this core the
-  round trip WITH it is 100 to 104 cycles at 48 MHz (measured), and the
-  image without it has not run.
+  round trip is 96 to 100 cycles at 48 MHz with it and 120 to 128
+  without (letter `e`, below).
 - **The STK is sixty-four bits wide** (RM 7.2, 7.5.5): CNTL/CNTH count
   up (or down, MODE) at HCLK or HCLK/8 towards CMPLR/CMPHR, reload from
   zero with STRE, and raise CNTIF, which the handler clears by writing
@@ -306,13 +306,13 @@ the consume was measured before and after. What it measured:
   software interrupt - vector 14 - raised by hand through the PFIC's
   pending register, with the cycle counter read at the raise, at the
   handler's first and last statements and when the raiser sees it done,
-  64 rounds each and every raise taken: entry 37 in every round, body 27,
-  exit 36 with one iteration of the raiser's spin in it, the whole trip
-  100 to 104 - the image built with the hardware prologue
+  64 rounds each and every raise taken: entry 36 in every round, body 26,
+  exit 34 with one iteration of the raiser's spin in it, the whole trip
+  96 to 100 - the image built with the hardware prologue
   (`CH32X035_HPE=ON`, the default). In an image built with
   `CH32X035_HPE=OFF` (its `z` green, 51 verdicts, ten runs of the letter):
-  entry 42, body 28, exit 50, the trip 120 to 128 - THE PROLOGUE BUYS 20
-  TO 24 CYCLES on the minimal handler, the sixteen registers saved and
+  entry 42, body 28, exit 50, the trip 120 to 128 - THE PROLOGUE BUYS 24
+  TO 28 CYCLES on the minimal handler, the sixteen registers saved and
   restored by gcc's own code instead. The user stack the image never
   touched reads 19004 bytes with it and 18972 without: 32 bytes, the
   deepest handler frame's software saves, which the hardware stack takes
@@ -451,7 +451,7 @@ suite with the path in the flash and in SRAM, nothing else moved:
 | the tick's handler body | the program | 65 | 29 | 100 |
 
 The handler bodies are stamped on the STK between their first and last
-statement; the hardware prologue's entry and exit, 100 to 104 cycles a
+statement; the hardware prologue's entry and exit, 96 to 100 cycles a
 round trip with the vector in the flash (above), are outside them. FROM
 THE FLASH, CODE WITH TAKEN BRANCHES COSTS WHAT ITS ADDRESS MODULO FOUR
 MAKES IT, the fetch's word: the same instructions at every offset through
@@ -462,8 +462,10 @@ straight-line code and three-instruction loops did not move and SRAM
 moved by a cycle at most (a scratch sweep, [spi.md](spi.md), "The
 fetch"). gcc aligns a function to two bytes under -Os, so a function
 that keeps a stated flash cost is `aligned(4)` - the SPI host's polled
-loops; a VECTOR is the program's, placed where its image puts it, and
-the flash figures of the table are those of the suites' images.
+loops, and EVERY VECTOR, through `BRIO_CH32_INTERRUPT` (pfic.hpp): a
+vector's own code costs the same wherever the image puts it, two bytes
+of padding at most, while a function it calls in the flash keeps a
+stated cost only if it is aligned itself.
 
 **What it costs.** The bytes in the last column, of the part's 20 KB -
 the load image stays in the flash beside them. A placed function exists

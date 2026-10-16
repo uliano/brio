@@ -457,12 +457,14 @@ reports. What it measured:
   idled the line 5 to 8 cycles a block and 32 14 to 17 - the restart
   lands some 15 to 20 cycles inside its window at 3 Mbaud - and 32 more
   idled 0 to 7 at 2.4. FROM THE FLASH (`InFlash`, the default) the same
-  body inline in the suite's vector takes 285 to 288 cycles (324 at most)
-  with the vector on a word and 276 to 283 with it half a word off - the
-  vector's place in the flash moves it ([platform.md](platform.md), "A
-  handler in SRAM"): gapless to 1.5 Mbaud, and above it each block
+  body inline in the suite's vector takes 285 to 289 cycles (308 to 324
+  at most), the vector on a word as `BRIO_CH32_INTERRUPT` aligns every
+  vector - half a word off, the same body took 276 to 283, the vector's
+  place in the flash moving its cost ([platform.md](platform.md), "A
+  handler in SRAM"): the alignment buys a figure that stays, not always a
+  lower one. Gapless to 1.5 Mbaud, and above it each block
   boundary idles the line for what the restart outlasts that window - 12
-  to 20 cycles a block at 2 Mbaud, 47 to 57 at 2.4 and 98 to 106 at 3,
+  to 20 cycles a block at 2 Mbaud, 47 to 57 at 2.4 and 98 to 107 at 3,
   the span 0.06 to 0.77 per cent over the polled blast's - and for no
   more (the suite's verdict). WHY THE WHOLE
   BODY: the restart alone placed, the flags' read and the service left

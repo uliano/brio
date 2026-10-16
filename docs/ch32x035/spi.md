@@ -303,9 +303,9 @@ spi_link: 39 verdicts. Each was green whole on the final images.
   the table below gives both placements, the suite's own vector in the
   flash.
 - **The pump's placement** (letter b at /2, where the handler bounds the
-  bus, the suite's vector with its stamps and its owner switch): 268.6
+  bus, the suite's vector with its stamps and its owner switch): 256.5
   cycles a frame with the body inline in the vector in the flash
-  (`InFlash`), 225.1 with it in SRAM behind that vector (`InRam`); the
+  (`InFlash`), 224.5 with it in SRAM behind that vector (`InRam`); the
   flash body out of line, a call from the vector, took 300.5 - the reason
   `InFlash` is inline (util/placement.hpp). A program that places the
   vector itself (`.fast_text`) runs an `InFlash` body from SRAM with it,
@@ -368,7 +368,7 @@ the frames within 10 per cent of it and the fixed costs within 30:
 | path | a frame, SRAM / flash | fixed, SRAM / flash | the wire a frame |
 |---|---|---|---|
 | the engines | the wire (1000 to 1006 thousandths, 1041 and 1045 in two runs at /2) | 1176 / 1012 | 16 at /2, 32 at /4 |
-| the pump | 225.1 / 268.6 at /2, 254.2 / 264.6 at /16 - the handler bounds it | 1050 / 681 | - |
+| the pump | 224.5 / 256.5 at /2, 251.3 / 252.5 at /16 - the handler bounds it | 906 / 708 | - |
 | the receive loop, one in flight | 28.9 / 51.9 at /2, 46.9 / 52.0 at /4, 141.0 / 152.0 at /16 | 765 / 580 at /4 | 16, 32, 128 |
 | the receive loop, two in flight | 512.0 / 511.9 at /64 | - | 512 |
 | the transmit-only loop | 15.9 / 24.0 at /2, 31.9 / 32.0 at /4, 63.9 / 63.9 at /8, 128.0 / 128.0 at /16 | - | 16, 32, 64, 128 |
@@ -387,9 +387,9 @@ the frames within 10 per cent of it and the fixed costs within 30:
 - **The pump**: one interrupt a frame (no FIFO), the DATAR read the first
   access after the RXNE test, the OVR test a STATR load after it, the
   frame prepared by the previous handler written next, about 45
-  instructions a frame, a leaf - 225.1 cycles in the suite from SRAM with
+  instructions a frame, a leaf - 224.5 cycles in the suite from SRAM with
   the hardware prologue's entry and exit and its vector's own work in the
-  flash, 268.6 inline in that vector.
+  flash, 256.5 inline in that vector.
 - **What `InRam` costs in SRAM** (the map, `.fast_text.brio`): the pump's
   entry 302 bytes (332 with engines bound), the polled loops 798 bytes a
   host type - eight instances, the two widths with and without an out

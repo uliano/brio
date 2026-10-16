@@ -413,9 +413,9 @@ the same vector:
   default hold-off is drawn from ([spi.md](spi.md)).
 - **THE PUMP IN SRAM, TWO WAYS, AND ONLY IF THE PROGRAM WANTS THE CORE**:
   the host's `InRam` places the event body (`.fast_text.brio`, 968 bytes
-  for a plain host, flattened, a leaf): 140 cycles an entry over the
-  255-byte write and 157 over the 16-byte read, the longest 195, behind
-  the suite's vector in the flash. A program that places the VECTOR
+  for a plain host, flattened, a leaf): 140 to 141 cycles an entry over
+  the 255-byte write and 157 to 159 over the 16-byte read, the longest
+  195 to 207, behind the suite's vector in the flash. A program that places the VECTOR
   (`.fast_text`, [platform.md](platform.md), "A handler in SRAM") carries
   the default host's inline body with it: measured in a variant of the
   suite, 79 and 94 cycles - a fourteenth of the core at 400 kHz - and an
