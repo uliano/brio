@@ -391,6 +391,32 @@ the sleep, clocked from CLK_PER and from OSCHF kept running by the
 oscillator's own RUNSTDBY alike, and in POWER-DOWN the same. The TCD
 has no RUNSTDBY of its own, and an oscillator's does not lend it one.
 
+**On the AVR128DA48** (REVID 0x17, rev A7, the 24 MHz external clock as
+CLK_PER, 5 V; `z` 256 verdicts, letters `f` and `j` twelve runs each):
+
+- Every formula, discipline, capture and input-mode figure repeats the
+  DB's to the tick. Its errata under their DA numbers: **2.13.2**
+  observed exactly as 2.14.2 on the DB (on ALT2 a WOB-only configuration
+  drives nothing, CMPAEN brings it back); **2.13.1 NOT reproduced**
+  either (16/16 captures and 8/8 blocked on-times at CNTPRES 4 and 32,
+  down to a back-to-back set/clear); **2.13.3 NOT provoked** (mode 7
+  with CMPASET = 0 halts, holds and restarts like CMPASET = 300). The
+  refusals stand on the DA for the same reason as on the DB.
+- **`TcdClock::extclk` and the PLL from the external clock, measured.**
+  The DA's external clock is CLK_PER here: a TCD on EXTCLK counts the
+  3200-tick cycle as 3200 CLK_PER ticks, and on the PLL from it
+  (`PllSource::xoschf`, SOURCE = 1, the DA's EXTCLK) x2 as 1600 -
+  exact, every run, PLLS set. 2.4.1 (the DA's PLLS item) as the DB's
+  2.5.3.
+- **OSCHF reads the external clock's own rate** in letter f (24 MHz:
+  3200 ticks of 3200; 16 MHz: 4800 of 4800) where the DB's read 3205:
+  OSCHF is pulled onto the external clock while that clock is CLK_PER
+  (clkctrl.md). The multiplier ratios are untouched - every leg runs
+  from the one oscillator.
+- **The board's PA7 carries 100 nF**, so letter j reads WOC and WOD on
+  the ALT2 route (PF2/PF3) there: WOC = A carries 300, WOD = B 499 and
+  swapped 499/300, to the tick - the first waveforms measured on ALT2.
+
 ## Not covered yet
 
 Driver gaps:
@@ -408,13 +434,14 @@ Driver gaps:
 
 Implemented but not bench-verified:
 
-- **`TcdClock::extclk`.** The board boots from a crystal on PA0/PA1
-  and the TCD's external-clock input has no wiring of its own here.
-- **The ALT1, ALT2 and ALT3 routes as waveform sources.** ALT1's pin
-  claim and release are verified and ALT2 carries the errata 2.14.2
-  measurement, but no waveform is measured on PB4/PB5 or PF0..PF3
-  (the console owns PF4/PF5 and the desk's LED sits on PF2); ALT3 is
-  PORTG, absent from the 48-pin bench chip.
+- **`TcdClock::extclk` on the DB.** That board boots from a crystal on
+  PA0/PA1 and has no external clock to give the TCD (measured on the
+  DA, above).
+- **The ALT1 and ALT3 routes as waveform sources.** ALT1's pin claim and
+  release are verified but no waveform is measured on PB4/PB5; ALT3 is
+  PORTG, absent from the 48-pin bench chips. (ALT2 carries the
+  alternate-route erratum's measurement on both and WOC/WOD's waveforms
+  on the DA.)
 - **Input modes 1, 2, 3, 5 and 6.** Exposed and validity-checked
   against table 25-5; their signatures need per-state discrimination
   that the wireless rig does not have, so none of them is measured.

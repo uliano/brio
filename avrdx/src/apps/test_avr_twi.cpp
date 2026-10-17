@@ -67,6 +67,7 @@
 // Commands: ? for the menu, z = the single-board half, y = the two-board
 // half.
 
+// build: boards = db48,da48
 // build: monitor_speed = 460800
 
 #include <avr/interrupt.h>
@@ -90,7 +91,9 @@
 
 #include "twi_link.hpp"
 
-using SysClock = brio::Clock<brio::ClockSource::crystal, 24'000'000>;
+using SysClock = brio::Clock<brio::has_xoschf ? brio::ClockSource::crystal
+                                              : brio::ClockSource::external,
+                             24'000'000>;
 constexpr SysClock clock;
 
 namespace {
@@ -2663,7 +2666,7 @@ int main() {
     auto board = board_id();
     if (board.empty()) board = "?";
     print(serial, crlf, "test_avr_twi - TWI/I2C test suite (board ", board,
-          ", clk=", xtal ? "XTAL" : "OSCHF",
+          ", clk=", xtal ? (has_xoschf ? "XTAL" : "EXTCLK") : "OSCHF",
           " 24 MHz, silicon rev ", hex(SYSCFG.REVID), ")", crlf);
     (void)wire_sane(true);
     help();

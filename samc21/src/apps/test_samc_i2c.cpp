@@ -106,7 +106,7 @@ using Raw = I2cm<3>;
 using Client = I2cClient<3, bus_pads, core_gen>;
 
 /// The bus's rise time: 1.5k to 5 V on a breadboard node, whose rise the
-/// AVR128DB48's TCB meters measure at 166 ns (test_avr_twi letter b). It
+/// AVR128DA48's TCB meters measure at 166 ns (test_avr_twi letter b). It
 /// is the wire's figure and not a margin: 33.6.2.4.1's formula SUBTRACTS
 /// the rise from the period the divisor makes, so a budget longer than
 /// the wire's rise runs SCL faster than asked - at 300 ns on this node,

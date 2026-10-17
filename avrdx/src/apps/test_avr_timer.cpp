@@ -79,6 +79,7 @@
 // TCB2's ALT1 = PB4 is tested), RUNSTDBY (no sleep in this suite:
 // test_avr_sleep o), AC response time (the DAC's slew dominates), TCD.
 
+// build: boards = db48,da48
 // build: monitor_speed = 460800
 
 #include <avr/interrupt.h>
@@ -99,7 +100,9 @@
 #include "avrdx/userrow.hpp"
 #include "util/print.hpp"
 
-using SysClock = brio::Clock<brio::ClockSource::crystal, 24'000'000>;
+using SysClock = brio::Clock<brio::has_xoschf ? brio::ClockSource::crystal
+                                              : brio::ClockSource::external,
+                             24'000'000>;
 constexpr SysClock clock;
 
 namespace {
@@ -1792,7 +1795,7 @@ int main() {
     auto board = board_id();
     if (board.empty()) board = "?";
     print(serial, crlf, "test_avr_timer - TCA/TCB/CCL/AC test suite (board ", board,
-          ", clk=", xtal ? "XTAL" : "OSCHF",
+          ", clk=", xtal ? (has_xoschf ? "XTAL" : "EXTCLK") : "OSCHF",
           " 24 MHz, silicon rev ", hex(SYSCFG.REVID), ")", crlf);
     help();
     print(serial, "> ");

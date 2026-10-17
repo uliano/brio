@@ -42,6 +42,7 @@
 // Every single-letter run also closes with an ALL: line, so bench.py
 // judges any of them with its default marker.
 
+// build: boards = db48,da48
 // build: monitor_speed = 460800
 
 #include <avr/interrupt.h>
@@ -59,7 +60,9 @@
 #include "util/nv_heap.hpp"
 #include "util/print.hpp"
 
-using SysClock = brio::Clock<brio::ClockSource::crystal, 24'000'000>;
+using SysClock = brio::Clock<brio::has_xoschf ? brio::ClockSource::crystal
+                                              : brio::ClockSource::external,
+                             24'000'000>;
 constexpr SysClock clock;
 
 /// The suite's reset-surviving breadcrumb: test d spans a real reset and
@@ -623,7 +626,7 @@ int main() {
         if (board.empty()) board = "?";
         print(serial, crlf, "test_avr_nvheap - flash block allocator suite "
                             "(board ", board, ", clk=",
-              xtal ? "XTAL" : "OSCHF", " 24 MHz, BOOTSIZE ", FUSE.BOOTSIZE,
+              xtal ? (has_xoschf ? "XTAL" : "EXTCLK") : "OSCHF", " 24 MHz, BOOTSIZE ", FUSE.BOOTSIZE,
               "/CODESIZE ", FUSE.CODESIZE, ", build ",
               hex(NvmFlash::build_id()), ")", crlf);
         help();

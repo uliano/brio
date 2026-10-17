@@ -386,7 +386,7 @@ left to each app:
   that never names the heap never references the symbol and pays
   nothing for it.
 
-## Bench findings (`test_avr_nvm`, AVR128DB48 rev A5, 24 MHz, 5 V)
+## Bench findings (`test_avr_nvm`: the AVR128DB48, rev A5, 24 MHz, 5 V, unless a section names the AVR128DA48)
 
 Times are counted in CLK_PER cycles by a TCB pair cascaded into one
 32-bit counter, which keeps counting while the CPU is halted.
@@ -498,6 +498,28 @@ exactly as they were, as 11.3.3 and 11.3.1.4 promise.
   one erase takes all 32 bytes down; the row writes back byte by byte
   and `board_id()` reads the label again.
 
+### The AVR128DA48 (REVID 0x17, rev A7, 24 MHz from its external clock, 5 V)
+
+- `z` runs green (112 verdicts) on the DA as on the DB. The times sit
+  where the DB's do and where the DA's own table (DS40002183A table
+  37-8) puts them: EEWR 65 us, EEERWR 10077 us, EEBER 10029 us,
+  EEMBER32 10030 us, Flash word write 85 us (70 typ.), page erase 10068
+  us (10 ms typ.); a page erase halts the CPU for all of it and delays
+  an interrupt by 9067 us, exactly the DB's picture.
+- **DS80000882C 2.7.1, the window's protection check, reproduced**
+  (letter `m`, the DA only, ten runs of ten): FLMAP moved to section 2,
+  the window READS the scratch page at 88064 correctly (a marker written
+  through SPM comes through it), but a page erase through the window
+  into that page - APPCODE, which BOOT may write, and which SPM erases
+  in letter `d` - raises `write_protect` and leaves the marker intact.
+  With BOOTSIZE 128 every offset of the 32 KB window is BOOT's, which is
+  exactly what the erratum says the check looks at. The positive control
+  - a window offset OUTSIDE BOOT, where the same erase must be accepted -
+  needs BOOTSIZE below 64, a fuse this bench does not move.
+- `test_avr_nvheap` `z` runs green on the DA too (51 verdicts, one run:
+  the mount, the round trip, the map rotation, the rewrite in place and
+  the persistence across a real reset, at its dozen page erases).
+
 ### The declared wear budget
 
 `test_avr_nvm z` uses a fixed set of pages so the arithmetic means
@@ -513,7 +535,9 @@ something. Per run of `z`, counted in erase cycles:
 | User Row | 0 | Flash class | - |
 
 Letter `u` costs the User Row **one erase cycle per run** and is
-therefore not part of `z`. Letter `g` needs a fuse change and works on
+therefore not part of `z`; letter `m` (a DA only) costs scratch page 44
+(88064) two erase cycles per run - the marker's erase and the cleanup
+erase - and is outside `z` too. Letter `g` needs a fuse change and works on
 two pages of its own, high in the Flash and outside the scratch region
 (113664 and 114176 under the geometry it asks for), at about four erase
 cycles each; it is not part of `z` either.
@@ -543,12 +567,12 @@ Driver gaps - the chapter's features this driver does not implement:
 
 Implemented but not bench verified:
 
-- **AVR DA silicon.** There is none on this desk. The DA-only erratum
-  DS80000882C 2.7.1 (FLMAP ignored by the protection check) is honoured
-  by construction - no verb reads or writes Flash through the data
-  space window - but nothing has been measured on a DA part. Likewise
-  the DA's lower PFM endurance (DS80000882C 2.17.1, 1k instead of 10k)
-  is what the wear budget above already assumes.
+- **The DA's lower PFM endurance** (DS80000882C 2.17.1, 1k instead of
+  10k): the wear budget above already assumes it; measuring it means
+  wearing a page out, a thousand erase cycles of the part on the desk.
+- **2.7.1's positive control**: a window write outside BOOT, accepted -
+  the scratch region is BOOT-mirrored under the bench geometry, and
+  BOOTSIZE below 64 would be needed (a fuse change).
 - **The `command_collision` and `ongoing_program` error codes.** The
   driver's own sequencing waits for the busy flags and passes through
   NOCMD, so it cannot produce either; they have never been seen.

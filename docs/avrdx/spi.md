@@ -183,12 +183,12 @@ board on its internal oscillator at 16 and 20 MHz; it judges a SAM C21
 peer to 8 MHz and prints every other peer's ladder; letter `v` makes this
 board the CLIENT of the peer's burst (The client's runs, below), and
 letter `w` uses that burst's select and clock as pin edges out of
-STANDBY ([port.md](port.md)). Measured: `z` 193 of
-193 with that peer attached, `y` 114 of 114 - `l` read a dummy leading
-every normal and buffer combination of that peer and none of its
-buffer+BUFWR, `m` exact through CLK_PER/4 and its answers broken at
-CLK_PER/2, `u` exact back to back to 8 MHz and broken at 10 and 12
-gapped and back to back alike ([../samc21/spi.md](../samc21/spi.md)
+STANDBY ([port.md](port.md)). Measured on the AVR128DA48 (rev A7, its
+external 24 MHz clock, 5 V): `z` 193 of 193 with that peer attached and
+`y` 114 of 114, three runs each - `l` read a dummy leading every normal
+and buffer combination of that peer and none of its buffer+BUFWR, `m`
+exact through CLK_PER/4 and its answers broken at CLK_PER/2, `u` exact
+back to back to 10 MHz and broken at 12 gapped and back to back alike ([../samc21/spi.md](../samc21/spi.md)
 holds that client's facts). An AVR host that watches its SS (SSD = 0) pulls
 the line up itself, which is what holds it against that peer: its SS
 pad can carry no pull-up.

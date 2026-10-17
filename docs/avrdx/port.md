@@ -4,7 +4,10 @@ Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B
 (PORT chapter 18, I/O multiplexing chapter 3), errata DS80000915F
 (2.9.1 PD0 floating input on 28/32-pin; 2.2.4 VPORT stores after a
 store to >= 64 - Pin uses SBI/CBI and PinRef stores into the PORT's
-OUTSET/OUTCLR in the extended I/O space, so neither is exposed). Driver:
+OUTSET/OUTCLR in the extended I/O space, so neither is exposed) and,
+for the DA parts, DS80000882C (2.8.1: a pin selected as an analog input
+loses its digital input - the ADC and AC drivers disable it themselves,
+so nothing reads it digitally meanwhile). Driver:
 `avrdx/pin.hpp`. Reference test: `test_avr_pin`.
 
 ## What the silicon does
@@ -102,7 +105,8 @@ brio::Pin<'D', 1>::configure({.sense = brio::PinSense::input_disable});
 
 ## Bench findings
 
-`test_avr_pin` (A5, 27 verdicts): every sense counts exactly (10
+`test_avr_pin` (A5, 27 verdicts; the same 27 green on the AVR128DA48,
+rev A7, 5 V): every sense counts exactly (10
 rising, 10 falling, 20 both, 0 with none, on self-driven edges 2 us
 apart); `level_low` is quiet while high, re-fires continuously while
 low (245 ISRs in a ~20 us window) and stops on the rising edge;

@@ -162,7 +162,21 @@ struct Oschf {
 
     /// Auto-tune the frequency against a running 32.768 kHz crystal
     /// (Xosc32k must be started and stable). Locks the manual tune.
-    static void autotune(bool on) { flag(CLKCTRL_AUTOTUNE_bm, on); }
+    ///
+    /// Clearing it copies the auto-tune's last value into TUNE (11.5.6),
+    /// and the copy lands AFTER the protected write: measured on an
+    /// AVR128DA48, a read in the next instructions still returns the old
+    /// TUNE and one 3 us later the new one - a tune() written in between
+    /// was overwritten. The auto-tune runs on OSCHF's internal 1 MHz
+    /// clock (11.3.5) and the copy crosses from it, so the clear waits
+    /// 120 CPU cycles - 5 us at the fastest CLK_PER, longer at any slower
+    /// one - before it returns.
+    static void autotune(bool on) {
+        flag(CLKCTRL_AUTOTUNE_bm, on);
+        if (!on) {
+            __builtin_avr_delay_cycles(120);
+        }
+    }
 
     /// Manual tune: -32 .. +31 steps of ~0.4 % (6-bit two's complement
     /// in OSCHFTUNE; ignored while AUTOTUNE is on).

@@ -46,6 +46,7 @@
 // ceiling, so its quality is itself a bench fact and the DUT asks for it
 // with the `ident` command.
 
+// build: boards = db48,da48
 // build: monitor_speed = 460800
 
 #include <avr/interrupt.h>
@@ -63,7 +64,13 @@
 
 #include "spi_link.hpp"
 
-using SysClock = brio::Clock<brio::ClockSource::crystal, 24'000'000>;
+// The 24 MHz: the DB's crystal on its XOSCHF, or the DA's external clock
+// on PA0 (brio::has_xoschf) - on the AVR128DA48 board a quartz oscillator
+// feeding EXTCLK, so the time base is crystal-referenced on either part
+// and `ident` reports it so (xtal = 1) whenever the source started.
+using SysClock = brio::Clock<brio::has_xoschf ? brio::ClockSource::crystal
+                                              : brio::ClockSource::external,
+                             24'000'000>;
 constexpr SysClock clock;
 
 namespace {
@@ -716,7 +723,7 @@ int main() {
     auto board = board_id();
     if (board.empty()) board = "?";
     print(console, crlf, "spi_peer - SPI instrument client (board ", board,
-          ", clk=", crystal_ok ? "XTAL" : "OSCHF", " 24 MHz, silicon rev ",
+          ", clk=", crystal_ok ? (has_xoschf ? "XTAL" : "EXTCLK") : "OSCHF", " 24 MHz, silicon rev ",
           hex(SYSCFG.REVID), ", fw ", hex(firmware_version), ")", crlf);
     print(console, "client SPI0 ALT1: MOSI PE0, MISO PE1, SCK PE2, SS PE3; command mode "
                    "= SPI mode 0, MSb first", crlf);

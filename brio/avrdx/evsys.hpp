@@ -39,7 +39,10 @@
  * on a 32.768 kHz source), independent of the RTC counter's own
  * PRESCALER (rtc.hpp); software events need CLK_PER (not in standby);
  * async users respond in standby without a clock. Errata DS80000915F:
- * no EVSYS items.
+ * no EVSYS items; DS80000882C 2.6.1 (every AVR DA revision): PB6/PB7
+ * and PE4..PE7 are not connected to the event system, neither as a pin
+ * generator nor as EVOUT - refused at compile time on a DA (told from
+ * the DB by its missing MVIO, pin.hpp), which bonds them on 64 pins.
  */
 
 #pragma once
@@ -51,6 +54,11 @@
 #include "avrdx/pin.hpp"
 
 namespace brio {
+
+/// DS80000882C 2.6.1: a pin the event system does not reach on a DA.
+constexpr bool evsys_pin_unconnected(char port, uint8_t pin) {
+    return !has_mvio && ((port == 'B' && pin >= 6) || (port == 'E' && pin >= 4));
+}
 
 // ---- contracts --------------------------------------------------------------
 
@@ -340,6 +348,9 @@ struct EvPin {
     static constexpr uint8_t pin = P::pin_number;
     static_assert(port >= 'A' && port <= 'G', "pin events: PORTA..PORTG");
     static_assert(port_exists(port), "this port does not exist on this package");
+    static_assert(!evsys_pin_unconnected(port, pin),
+                  "PB6/PB7 and PE4..PE7 are not connected to the event system on an "
+                  "AVR DA (DS80000882C 2.6.1)");
     static constexpr uint8_t code =
         static_cast<uint8_t>(((port - 'A') % 2 == 0 ? 0x40 : 0x48) + pin);
     static constexpr bool legal_on(uint8_t ch) {
@@ -378,6 +389,9 @@ struct EvOut : EventUserBase<EvOut<P>> {
                   "(ALT1) on every port except PORTF (17.5.1; whether THIS "
                   "package bonds pin 7 of an existing port is a pin-level "
                   "fact for the device tables)");
+    static_assert(!evsys_pin_unconnected(port, pin),
+                  "EVOUT on PB7/PE7 does not reach its pin on an AVR DA "
+                  "(DS80000882C 2.6.1)");
 
     static volatile uint8_t& reg() {
         if constexpr (port == 'A') return EVSYS.USEREVSYSEVOUTA;

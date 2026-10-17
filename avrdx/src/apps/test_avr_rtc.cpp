@@ -1,6 +1,8 @@
 // test_avr_rtc - the RTC/PIT test SUITE for the AVR DA/DB target: the
 // real-time counter and the periodic interrupt timer measured against
-// the 24 MHz crystal, with no wires at all. A TCB cascade (TCB1+TCB2,
+// the 24 MHz main clock - the DB's crystal, the DA's external quartz
+// oscillator on EXTCLK, crystal-referenced either way ("crystal ticks"
+// below) - with no wires at all. A TCB cascade (TCB1+TCB2,
 // 32 bits at CLK_PER) is the stopwatch; the RTC's own OVF and CMP
 // events latch it through an event channel, so every interval is
 // timestamped by hardware and the CPU only reads the latches.
@@ -15,7 +17,8 @@
 //
 // Commands: ? | 1 resource verbs | 2 counter period | 3 compare phase
 // | 4 crystal error correction | 5 busy flags | 6 first tick
-// | 7 PIT and counter together | 8 OSC1K | a all
+// | 7 PIT and counter together | 8 OSC1K | 9 XOSC32K (the DA board)
+// | a all
 //
 // Tests:
 //   1  the verbs: clock select and readback, init/enable, CNT advancing
@@ -46,11 +49,20 @@
 //      prescaler changes - the PIT does not see PRESCALER;
 //   8  OSC1K as CLK_RTC: the same 1 s from a 1.024 kHz clock (PER =
 //      1023), and the Ticker's rate divided by 32.
-// Not testable here: XOSC32K and the external clock (no 32 kHz crystal
-// and no external clock on the bench board), RUNSTDBY and the PIT as a
-// power-down wake-up (no sleep in this suite), DBGRUN (needs a halted
-// CPU).
+//   9  XOSC32K as CLK_RTC (the board with a 32.768 kHz crystal: the
+//      AVR128DA48 board; the AVR128DB48 board fits none and its build
+//      has no letter 9): preferred() names the crystal once it runs, the
+//      counter's period against the 24 MHz external clock within the two
+//      crystals' tolerance - forced on, then held by the RTC's request
+//      alone - and the Ticker's default init taking the crystal, 1024
+//      ticks to its second.
+// Not testable here: the RTC's external clock (no 32 kHz clock on either
+// board's XTAL32K1; RtcSource::extclk is the EXTCLK pin, whose 24 MHz on
+// the DA board is far past the CLK_PER >= 4 x CLK_RTC rule of 26.3),
+// RUNSTDBY and the PIT as a power-down wake-up (no sleep in this suite),
+// DBGRUN (needs a halted CPU).
 
+// build: boards = db48,da48
 // build: monitor_speed = 460800
 
 #include <avr/interrupt.h>
@@ -66,7 +78,9 @@
 #include "avrdx/userrow.hpp"
 #include "util/print.hpp"
 
-using SysClock = brio::Clock<brio::ClockSource::crystal, 24'000'000>;
+using SysClock = brio::Clock<brio::has_xoschf ? brio::ClockSource::crystal
+                                              : brio::ClockSource::external,
+                             24'000'000>;
 constexpr SysClock clock;
 
 namespace {
@@ -87,6 +101,9 @@ using ChCarry = EventChannel<4>;
 using ChSnap = EventChannel<5>;      // software / RTC OVF / RTC CMP
 
 constexpr uint32_t crystal_hz = SysClock::hz;
+/// One board per part on this desk: the AVR128DA48 board fits a 32.768
+/// kHz crystal on PF0/PF1, the AVR128DB48 board none.
+constexpr bool board_xosc32k = !has_xoschf;
 constexpr uint32_t nominal_hz = 32768;           // CLK_RTC from OSC32K
 // Crystal ticks in one nominal CLK_RTC cycle (24e6 / 32768 = 732.42).
 constexpr uint32_t ticks_per_rtc_x100 = (crystal_hz * 100ul) / nominal_hz;
@@ -619,6 +636,89 @@ void t8_osc1k() {
     quiesce();
 }
 
+
+// ---- 9 XOSC32K as CLK_RTC (the board with the crystal) --------------------------
+// Bound of the rate verdicts: a 32.768 kHz tuning fork against the board's
+// 24 MHz oscillator, neither part number on record - 100 ppm allowed each;
+// the stamps' quantization is two ticks in 24e6 per second.
+constexpr int32_t crystals_ppm = 200;
+
+void t9_xosc32k() {
+    print(serial, "9 XOSC32K as CLK_RTC: the 32.768 kHz crystal against the 24 MHz external clock",
+          crlf);
+    quiesce();
+    Xosc32k::start_crystal(Xosc32kStartup::cycles1k, false, true);   // forced on: nothing requests it yet
+    bool up = false;
+    for (uint16_t ms = 0; ms < 1500 && !up; ++ms) {
+        up = Xosc32k::stable();
+        delay_us(clock, 1000);
+    }
+    verdict("XOSC32K runs (started forced on, stable within 1.5 s)", up);
+    verdict("RtcClock::preferred() names the crystal once it runs",
+            RtcClock::preferred() == RtcSource::xosc32k);
+    if (!up) {
+        Xosc32k::stop();
+        quiesce();
+        return;
+    }
+
+    Rtc::disable();
+    Pit::disable();
+    RtcClock::select(RtcSource::xosc32k);
+    verdict("CLKSEL reads back XOSC32K", RtcClock::selected() == RtcSource::xosc32k);
+    verdict("source rate 32768 Hz", RtcClock::hz() == 32768u);
+    Rtc::init({.prescaler = RtcPrescaler::div1, .period = 32767});
+    ChSnap::source(Rtc::OvfEvent{});
+    uint32_t forced = 0;
+    const bool got_forced = measure(4, forced, 1500);
+    // The force dropped: the RTC is a requester (CLKCTRL 11.3.6), so the
+    // crystal must keep running for it alone.
+    Xosc32k::force_on(false);
+    uint32_t requested = 0;
+    const bool got_requested = measure(4, requested, 1500);
+    const int32_t p_forced = ppm_of(forced, 4u * crystal_hz);
+    const int32_t p_requested = ppm_of(requested, 4u * crystal_hz);
+    print(serial, "  4 s of XOSC32K = ", forced, " ticks forced on (the crystal ", -p_forced,
+          " ppm fast against the external clock); ", requested, " (", -p_requested,
+          " ppm fast) held by the RTC's request alone", crlf);
+    verdict("four periods measured, forced on and requested", got_forced && got_requested);
+    verdict("the crystal's second is the external clock's within 200 ppm",
+            got_forced && near(p_forced, 0, crystals_ppm));
+    verdict("and still is with the RTC as its only requester",
+            got_requested && near(p_requested, 0, crystals_ppm));
+
+    // The Ticker's default init takes the crystal (preferred()) and counts
+    // 1024 ticks to its second: the PIT and the counter share CLK_RTC.
+    Ticker::init();
+    verdict("Ticker::init() selected XOSC32K by itself", RtcClock::selected() == RtcSource::xosc32k);
+    Rtc::init({.prescaler = RtcPrescaler::div1, .period = 32767});
+    ChSnap::source(Rtc::OvfEvent{});
+    uint32_t dummy = 0;
+    const bool s0 = stamp(dummy, 1500);
+    const uint32_t k0 = Ticker::ticks();
+    const bool s1 = stamp(dummy, 1500);
+    const uint32_t k1 = Ticker::ticks();
+    print(serial, "  Ticker ticks in one crystal second: ", k1 - k0, " (expect 1024)", crlf);
+    verdict("the Ticker counts 1024 ticks to the crystal's second",
+            s0 && s1 && near(static_cast<int32_t>(k1 - k0), 1024, 1));
+    Ticker::pause();
+    // Stopped, the crystal's XOSC32KS lingers (test_avr_clock letter 8
+    // froze a Ticker that way): quiesce() re-inits the Ticker through
+    // preferred(), so the status must be down before it runs.
+    Rtc::disable();
+    Pit::disable();
+    RtcClock::select(RtcSource::osc32k);
+    Xosc32k::stop();
+    uint16_t lingered = 0;
+    while (Xosc32k::stable() && lingered < 2000) {
+        delay_us(clock, 1000);
+        ++lingered;
+    }
+    print(serial, "  XOSC32KS read 1 for ", lingered, " ms after the stop", crlf);
+    verdict("the stopped crystal's status drops within 2 s", !Xosc32k::stable());
+    quiesce();
+}
+
 using TestFn = void (*)();
 struct Test { char key; TestFn fn; };
 constexpr Test tests[] = {
@@ -633,9 +733,15 @@ void run(TestFn fn) {
 }
 
 void help() {
-    print(serial, "test_avr_rtc: 1 resource verbs | 2 counter period | 3 compare phase | "
-                  "4 crystal error correction | 5 busy flags | 6 first tick | "
-                  "7 PIT and counter together | 8 OSC1K | a all", crlf);
+    if constexpr (board_xosc32k) {
+        print(serial, "test_avr_rtc: 1 resource verbs | 2 counter period | 3 compare phase | "
+                      "4 crystal error correction | 5 busy flags | 6 first tick | "
+                      "7 PIT and counter together | 8 OSC1K | 9 XOSC32K | a all", crlf);
+    } else {
+        print(serial, "test_avr_rtc: 1 resource verbs | 2 counter period | 3 compare phase | "
+                      "4 crystal error correction | 5 busy flags | 6 first tick | "
+                      "7 PIT and counter together | 8 OSC1K | a all", crlf);
+    }
 }
 
 } // namespace
@@ -663,7 +769,7 @@ int main() {
     auto board = board_id();
     if (board.empty()) board = "?";
     print(serial, crlf, "test_avr_rtc - RTC/PIT test suite (board ", board,
-          ", clk=", xtal ? "XTAL" : "OSCHF",
+          ", clk=", xtal ? (has_xoschf ? "XTAL" : "EXTCLK") : "OSCHF",
           " 24 MHz, silicon rev ", hex(SYSCFG.REVID), ")", crlf);
     help();
     print(serial, "> ");
@@ -676,10 +782,16 @@ int main() {
         else if (c == 'a' || c == 'A') {
             uint8_t tp = 0, tf = 0;
             for (const Test& t : tests) { run(t.fn); tp += passed; tf += failed; }
+            if constexpr (board_xosc32k) {
+                run(t9_xosc32k); tp += passed; tf += failed;
+            }
             print(serial, "ALL: ", tp, " pass, ", tf, " fail", crlf);
         } else {
             bool found = false;
             for (const Test& t : tests) if (t.key == c) { run(t.fn); found = true; }
+            if constexpr (board_xosc32k) {
+                if (c == '9') { run(t9_xosc32k); found = true; }
+            }
             if (!found) print(serial, "? for help", crlf);
         }
         print(serial, "> ");

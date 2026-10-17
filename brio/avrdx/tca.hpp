@@ -28,7 +28,8 @@
  *                                 direction from input B if wanted
  *  A task owns its instance.
  *
- * Facts that shape the code (23.3, 23.5, errata DS80000915F 2.12.1):
+ * Facts that shape the code (23.3, 23.5, errata DS80000915F 2.12.1 and,
+ * for the DA parts, DS80000882C 2.11.1/2.11.2):
  *  - CLK_PER / N, N in 1/2/4/8/16/64/256/1024 (the same CLKSEL codes in
  *    both modes); the prescaled clock is exported to the TCBs;
  *  - PER and CMPn are double-buffered: write PERBUF/CMPnBUF and the
@@ -43,8 +44,9 @@
  *    dual-slope: up then down, OVF at TOP / both / BOTTOM by mode;
  *    FRQ: WOn toggles at each CMPn match, period in CMP0: f = CLK_PER
  *    / (2 N (CMP0 + 1)), at most CLK_PER / 2;
- *  - RESTART (command or event) zeroes CNT and all WO; on A4/A5 it also
- *    resets DIR to up in NORMAL/FRQ (2.12.1); RESET only when disabled;
+ *  - RESTART (command or event) zeroes CNT and all WO; it also resets
+ *    DIR to up in NORMAL/FRQ on the DB's A4/A5 (2.12.1) and on every DA
+ *    revision (2.11.2); RESET only when disabled;
  *    switching normal <-> split wants disable + RESET;
  *  - event input A: count on positive/any edge, count the clock while
  *    high, or direction from the level (up when low); input B: restart
@@ -55,8 +57,11 @@
  *    48 pins); TCA1 -> PORTB or PORTG (64-pin) pins 0..5, or the
  *    three-channel PORTC/PORTE (64-pin) with WO0..2 on pins 4..6; the
  *    device header defines exactly this package's codes and
- *    tca_route_code() mirrors it. WOn drives the pin only if CMPnEN
- *    and the pin is an output (PORT INVEN inverts it).
+ *    tca_route_code() mirrors it - less TCA1's PORTE and PORTG on a DA,
+ *    whose header defines them but whose silicon does not route them on
+ *    any revision (DS80000882C 2.11.1, no workaround: refused here). WOn
+ *    drives the pin only if CMPnEN and the pin is an output (PORT INVEN
+ *    inverts it).
  */
 
 #pragma once
@@ -149,7 +154,9 @@ struct TcaConfig {
 /// (it defines exactly the codes each package routes: e.g. TCA0 ->
 /// PORTG and TCA1 -> PORTE/PORTG on 64-pin parts only, no PORTB/
 /// PORTE codes at all on 28/32-pin). TCA1 on PORTC and PORTE are
-/// three-channel routes (WO0..2 on pins 4..6).
+/// three-channel routes (WO0..2 on pins 4..6). The one exception to the
+/// header: a DA (no MVIO, pin.hpp) gets 0xFF for TCA1's PORTE and PORTG,
+/// the ALT2/ALT3 that DS80000882C 2.11.1 says do not work.
 constexpr uint8_t tca_route_code(uint8_t n, char p) {
     // The gates are the PORT instance macros (the route codes are
     // enumerators, not macros): a package routes a TCA to exactly the
@@ -178,8 +185,8 @@ constexpr uint8_t tca_route_code(uint8_t n, char p) {
         case 'B': return PORTMUX_TCA1_PORTB_gc;
         case 'C': return PORTMUX_TCA1_PORTC_gc;
 #ifdef PORTG
-        case 'E': return PORTMUX_TCA1_PORTE_gc;
-        case 'G': return PORTMUX_TCA1_PORTG_gc;
+        case 'E': return has_mvio ? static_cast<uint8_t>(PORTMUX_TCA1_PORTE_gc) : 0xFF;
+        case 'G': return has_mvio ? static_cast<uint8_t>(PORTMUX_TCA1_PORTG_gc) : 0xFF;
 #endif
         default: return 0xFF;
     }

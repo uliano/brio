@@ -37,6 +37,7 @@
 // Console: USART2 ALT1 (PF4/PF5) at 460800, observability only.
 //   ? help | i status and counters | 0 back to command mode | 3 trace
 
+// build: boards = db48,da48
 // build: monitor_speed = 460800
 
 #include <avr/interrupt.h>
@@ -55,7 +56,13 @@
 
 #include "sleep_link.hpp"
 
-using SysClock = brio::Clock<brio::ClockSource::crystal, 24'000'000>;
+// The 24 MHz: the DB's crystal on its XOSCHF, or the DA's external clock
+// on PA0 (brio::has_xoschf) - on the AVR128DA48 board a quartz oscillator
+// feeding EXTCLK, crystal-referenced either way: ident reports
+// slink::clock_crystal for both whenever the source started.
+using SysClock = brio::Clock<brio::has_xoschf ? brio::ClockSource::crystal
+                                              : brio::ClockSource::external,
+                             24'000'000>;
 constexpr SysClock clock;
 
 namespace {
@@ -500,7 +507,7 @@ int main() {
     auto board = board_id();
     if (board.empty()) board = "?";
     print(console, crlf, "sleep_peer - sleep instrument peer (board ", board,
-          ", clk=", crystal_ok ? "XTAL" : "OSCHF", " 24 MHz, silicon rev ",
+          ", clk=", crystal_ok ? (has_xoschf ? "XTAL" : "EXTCLK") : "OSCHF", " 24 MHz, silicon rev ",
           hex(SYSCFG.REVID), ", fw ", hex(firmware_version), ")", crlf);
     print(console, "link USART4 default on the SHARED PE0 wire, 8N1 @ ",
           slink::command_baud, "; PE2 = stimulus out, PE3 = echo in (captured)", crlf);

@@ -2,7 +2,8 @@
 
 Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B (TCA
 chapter 23, PORTMUX 17.3.7, EVSYS 16 generators 0x80-0x8E / users
-0x1A-0x1D), errata DS80000915F (2.12.1). Complements: TB3217 "Getting
+0x1A-0x1D), errata DS80000915F (2.12.1) and, for the DA parts,
+DS80000882C (2.11.1, 2.11.2). Complements: TB3217 "Getting
 Started with TCA", AN2434 (quadrature decoding with CCL + TCA + TCB) -
 see [vendor/README.md](vendor/README.md). Driver: `avrdx/tca.hpp` (the
 `Tca<n>` resource and the tasks), the TCA event vocabulary in
@@ -55,9 +56,9 @@ Facts that matter to code:
 - **Commands (`CTRLESET.CMD`)**: UPDATE (forces the buffer copy,
   ignores LUPD), RESTART (CNT = 0 and all WO low - restarts the
   period), RESET (all registers to reset, only when disabled).
-  Errata 2.12.1 (A4/A5): a RESTART command or restart EVENT in
-  NORMAL/FRQ mode resets DIR to up - a down-counting FRQ user must
-  rewrite DIR after every restart.
+  Errata DB 2.12.1 (A4/A5) / DA 2.11.2 (every revision): a RESTART
+  command or restart EVENT in NORMAL/FRQ mode resets DIR to up - a
+  down-counting FRQ user must rewrite DIR after every restart.
 - **Output**: `CMPnEN` makes WOn override PORT.OUT in any waveform
   mode (pin must be an output; PORT `INVEN` inverts it); the endpoints
   of single-slope (0 = low, > TOP = high) are clean in normal mode -
@@ -114,7 +115,11 @@ it; split mode is reached by the `TcaPwm` task through the resource's
 Routes are checked where the port is a template argument (the tasks)
 and at run time in `init(cfg)`; `tca_route_code` mirrors exactly the
 codes THIS package's device header defines (PORTG and TCA1 -> PORTE
-on 64-pin parts only; no PORTB/PORTE routes on 28/32-pin). TCA1 on
+on 64-pin parts only; no PORTB/PORTE routes on 28/32-pin) - less
+TCA1's PORTE and PORTG (ALT2, ALT3) on a DA, which DS80000882C 2.11.1
+says do not work on any revision, with no workaround: the DA's header
+defines the codes, the driver refuses them there (the negative test
+`tca_no_tca1_alt23_on_da`). TCA1 on
 PORTC or PORTE is a three-channel route (WO0..2 on pins 4..6):
 `TcaPwm` refuses it - six channels or nothing. One pin-level caveat
 survives the port-level gates: TCA0 -> PORTE on 48-pin parts bonds
@@ -187,6 +192,9 @@ calls `clock(c)` itself.
 
 ## Bench findings
 
+- On the AVR128DA48 (rev A7, 5 V) `test_avr_timer` runs green whole (197
+  verdicts), TCA1's PORTC route (ALT1, which DS80000882C 2.11.1 leaves
+  working) included.
 - Twelve split-mode channels on two timers drive four RGB LEDs on the
   bench; colour mixing is limited by the LEDs' dies, not by the PWM.
 - The split -> normal escape works (RESET carries CMDEN through the
@@ -263,6 +271,8 @@ Implemented but not bench-verified:
 - The FRQ phase on CMP1 (WO1 = PD1, the pad the analog suite's DAC wire
   may share; CMP2's is measured above by the same method).
 - The PORTG and TCA1 PORTE routes (compile-verified on the 64-pin
-  headers, no such part on the bench).
-- Errata 2.12.1 is documented, not worked around (no down-counting
-  FRQ user; B0 silicon is not affected).
+  headers, no such part on the bench), and on a DA64 the refusal of
+  TCA1's two by DS80000882C 2.11.1 (compile-enforced, unmeasured).
+- Errata DB 2.12.1 / DA 2.11.2 is documented, not worked around (no
+  down-counting FRQ user; DB B0 silicon is not affected, every DA
+  revision is).

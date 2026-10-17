@@ -19,6 +19,8 @@
 // Between keystrokes the CPU sleeps in IDLE, woken by the PIT tick or
 // the USART interrupts. No polling anywhere.
 
+// build: boards = db48,da48
+
 #include <avr/interrupt.h>
 #include <stdint.h>
 #include <variant>
@@ -39,9 +41,12 @@
 using P = brio::AvrPlatform;
 
 // The clock: the ONE truth about CLK_PER for every driver of this
-// target (avrdx/clock.hpp). 24 MHz crystal on PA0/PA1, OSCHF fallback at
+// target (avrdx/clock.hpp). 24 MHz from the DB's crystal on PA0/PA1 or
+// the DA's external clock on PA0 (brio::has_xoschf), OSCHF fallback at
 // the same rate; `clock` is an empty tag passed to driver inits.
-using SysClock = brio::Clock<brio::ClockSource::crystal, 24'000'000>;
+using SysClock = brio::Clock<brio::has_xoschf ? brio::ClockSource::crystal
+                                              : brio::ClockSource::external,
+                             24'000'000>;
 constexpr SysClock clock;
 
 namespace {
@@ -188,8 +193,10 @@ int main() {
     brio::Ticker::init();
     sei();
 
-    brio::print(serial, brio::crlf, "AVR128DB48 brio console (clk=",
-                xtal ? "XTAL" : "OSCHF", "), type HELP", brio::crlf, "> ");
+    brio::print(serial, brio::crlf,
+                brio::has_xoschf ? "AVR128DB48 brio console (clk=" : "AVR128DA48 brio console (clk=",
+                xtal ? (brio::has_xoschf ? "XTAL" : "EXTCLK") : "OSCHF", "), type HELP",
+                brio::crlf, "> ");
 
     // Pack order = priority AND correctness: the line CONSUMER (Console)
     // must precede the PRODUCER (SerialLines) - scheduling contract.

@@ -144,7 +144,9 @@ ISR(CCL_CCL_vect) { const uint8_t who = brio::Ccl::take_flags(); ... }
 
 ## Bench findings
 
-`test_avr_timer` tests l and i (A5): LINK verified (LUT4 passes
+`test_avr_timer` tests l and i (A5, and green again on the AVR128DA48,
+rev A7, whose 48 pins keep LUT3's LINK - DS80000882C 2.3.1 breaks it on
+28/32 pins only): LINK verified (LUT4 passes
 LUT5's constant both ways onto PB3); the DFF follows a 1 kHz D
 exactly (EN high, CLK_PER clock); the RS latch sets and resets from
 two software channels, read on LUT2's pin; LUT1's ALT1 drives PC6

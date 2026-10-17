@@ -6,7 +6,7 @@ shared SERCOM ch. 30) and errata DS80000740S 1.17.x. Driver:
 owns the address ladder, the clocks and the NVIC line - one table,
 shared by every personality). Family fixture
 `test/family_samc21/spi.cpp` + nine negatives; bench suite `test_samc_spi`
-(9 letters, two-board: the peer board runs `spi_peer` on an AVR128DB48
+(9 letters, two-board: the peer board runs `spi_peer` on an AVR128DA48
 or on a second SAM C21, the suite asks ident and does not care -
 commanded in band over the bus under test with the `spi_link.hpp` wire
 format, one source file serving both architectures - except letters h
@@ -146,11 +146,11 @@ phase, back to back: facts of the silicon, not paths of this driver.)
 A CLIENT's response
 path carries tSOSS (~41 ns) plus the far end's setup plus TWO APB
 PERIODS (41.7 ns at 48 MHz), which lands the paper ceiling for client
-transmission at a few MHz; measured against an AVR128DB48 host it lies
-between 8 and 10 MHz, and the client's polled runs reach it back to back
+transmission at a few MHz; measured against an AVR128DA48 host it lies
+between 10 and 12 MHz, and the client's polled runs reach it back to back
 (bench findings). Design guidance, then: writes to a device up to 24
 MHz, reads from a real device at 6..8 MHz by the paper (12 MHz is what
-this die did), a SAM client's responses up to 8 MHz on this bench - and a
+this die did), a SAM client's responses up to 10 MHz on this bench - and a
 faster SPI client is an FPGA's job, the two bus cycles in every answer
 being construction, not tuning.
 
@@ -318,7 +318,7 @@ the two spans:
 
 - Two benches carry this driver. The cross-architecture bench: SAM
   SERCOM1 function C (PA16 MOSI, PA17 SS, PA18 MISO, PA19 SCK) against
-  an AVR128DB48 peer's SPI0 ALT1 (PE0 MOSI, PE3 SS, PE1 MISO, PE2 SCK)
+  an AVR128DA48 peer's SPI0 ALT1 (PE0 MOSI, PE3 SS, PE1 MISO, PE2 SCK)
   plus GND, both boards at 5 V. And the SAM-SAM bench (both boards'
   PA16..PA19 straight through plus GND). On either desk the same wires
   carry a board as host (DOPO row 0x3) and as client (row 0x1).
@@ -345,27 +345,26 @@ the two spans:
   bind at the PEER: its answer reload, or its silicon under it. The AVR
   peer serves each window with one call of its driver's runs
   ([../avrdx/spi.md](../avrdx/spi.md), the client's runs): exact both
-  ways to 2 MHz in every ladder of letter d (210), and at 3 MHz every
-  answer that is wrong is wrong in its first bit alone while the client
+  ways to 2 MHz in every ladder of letter d, and at 3 MHz every answer
+  that is wrong is wrong in its first bit alone while the client
   receives every character exact - the AVR's clarification 3.5.2, its
   buffer's copy into the shifter later than this host's first edge. No
-  window stopped short: the ladder's 1260 from 200 kHz to 4 MHz, and
-  letter i's 6720 of 256 characters inside the client's ceiling.
+  window stopped short: letter i's 36 windows of 256 characters inside
+  the client's ceiling, in each of three runs against the AVR128DA48.
 - THIS CLIENT BACK TO BACK REACHES THE WIRE (`test_avr_spi` letter u:
-  an AVR128DB48 host, sixteen characters in one polled request of its
+  an AVR128DA48 host, sixteen characters in one polled request of its
   engine - its own pace 2 CLK_PER between characters at CLK_PER/4 and
   about 7 at CLK_PER/2 - at 1.5, 3, 4, 5, 6, 8, 10 and 12 MHz, the
   rungs between the crystal's divisions taken from the host's internal
   oscillator at 16 and 20 MHz; at each, a GAPPED control - one character
   at a time, 20 us between them - then the exchange run, then the answer
   run). With the peer's windows on `exchange()` and `answer()` placed in
-  SRAM, both runs are exact back to back at every rung to 8 MHz, in each
-  of four ladders and in three of four more - the fourth missed once in
-  the exchange run at 6 MHz (below). At 10 and 12 MHz every answer arrives wrong - and so
+  SRAM, both runs are exact back to back at every rung to 10 MHz, in each
+  of three ladders. At 12 MHz every answer arrives wrong - and so
   does every answer of the gapped control, while the client receives
   every character exact: THE ANSWER'S PATH ON THE WIRE breaks there
-  (tSOSS and the two APB periods above, against a half SCK period of 50
-  ns at 10 MHz), not the reload. The loop the runs replaced - a call of
+  (tSOSS and the two APB periods above, against a half SCK period of 42
+  ns at 12 MHz), not the reload. The loop the runs replaced - a call of
   `poll()` per turn returning its optional through the stack, the
   millisecond deadline read every turn and the select sampled every
   character, from the flash - was NOT exact back to back at 1.5 MHz (2
@@ -396,8 +395,8 @@ the two spans:
   verdict `test_avr_spi` draws against an AVR client holds with a SAM
   C21 clocking it - the three regimes' alignment (the dummy 0x00), the
   CLK_PER/6 ceiling (exact at 3 and 1.5 MHz; at 6 MHz the client
-  received 12 of 12 wrong and 6 of its answers arrived wrong, at 12 MHz
-  every character wrong both ways), what it
+  received 12 of 12 wrong and 4 to 7 of its answers arrived wrong, at 12
+  MHz every character wrong both ways), what it
   keeps undrained (normal the last of eight, buffer the first two and
   the last, BUFOVF only with its transmitter fed), the write-collision
   boundary and the missed load, and its self-selected client in the
@@ -414,7 +413,7 @@ the two spans:
   (regime_buffer) the exchange run is exact both ways through 2 MHz too,
   this host reading the leading dummy and then every answer one place
   late, as spi_link.hpp's table says.
-- THIS CLIENT'S RUNS AGAINST A HOST'S BURST (letter j: the AVR128DB48
+- THIS CLIENT'S RUNS AGAINST A HOST'S BURST (letter j: the AVR128DA48
   peer's host_burst, one character at a time with 20 us between them,
   750 kHz; a character and its gap 35 us, measured from the select's
   fall to the run's end): the exchange run complete and exact both ways;
@@ -458,20 +457,20 @@ the two spans:
   loop-back engine, SERCOM1's NVIC line taken away once the request was
   on the wire - spi_timeout at 20 ms on the arbiter's clock, `recover()`
   giving the same bus back, the next request ok, no stale completion.
-- THIS SILICON AS THE CLIENT, measured against an AVR128DB48 host
+- THIS SILICON AS THE CLIENT, measured against an AVR128DA48 host
   (`test_avr_spi` y with the samc21 `spi_peer`, one character at a time
   with 20 us between them, the select held for the window):
   - THE REGIMES: with PLOADEN (the peer's regime_buffer_wait) the answer
     stream arrives from the first character; without it (its normal and
     buffer) a DUMMY leads, 0x00 after a fresh init, and the stream is one
     place late - 8 of 8 combinations each, every mode and bit order.
-  - THE RATE: exact both ways from 187.5 kHz to 8 MHz; at 10 and 12 MHz
-    the client still receives every character exact while its answers
+  - THE RATE: exact both ways from 187.5 kHz to 10 MHz; at 12 MHz the
+    client still receives every character exact while its answers
     arrive wrong (16 of 16 in letter u, 11 of 12 in letter m, whose first
     answer - preloaded, its first bit on the pad since the select fell -
-    survives) - the answer path's ceiling lies between 8 and 10 MHz on
+    survives) - the answer path's ceiling lies between 10 and 12 MHz on
     this bench (the paper's "a few MHz" above is the conservative side of
-    it).
+    it), the host's own input sampling part of that path.
   - UNDRAINED (eight characters at 750 kHz with DATA never read): the
     two-level receive buffer keeps the FIRST TWO and the rest is lost; the
     drain then reads one more 0x00 and INTFLAG.ERROR stands after it -
@@ -583,7 +582,7 @@ Implemented but not bench-verified:
 - The SAM-SAM pairing on the harness's rows (0x3 host, 0x1 client), and
   the samc21 `spi_peer`'s window end and unpulled select against a host
   that clocks the whole answer budget (`test_samc_spi` itself): needs a
-  second SAM C21 at 5 V; the AVR128DB48 pairing on these rows is
+  second SAM C21 at 5 V; the AVR128DA48 pairing on these rows is
   measured, both ways.
 
 - The SCK at 12 and 24 MHz ON THE WIRE (BAUD 1 and 0): the polled
@@ -598,7 +597,7 @@ Implemented but not bench-verified:
   it, and the desk has none on this board.
 - On silicon: 9-bit characters through a real two-board transfer
   (loop-back only), and every client run on them - the peer that clocks
-  this board is an AVR128DB48, eight bits only, so a second SAM C21 would
+  this board is an AVR128DA48, eight bits only, so a second SAM C21 would
   measure them; IBON = 0's travelling overflow flavour.
 - A client run's rarest end: the select raised in the instructions
   between the poll's read and the store it decides, which the store's own

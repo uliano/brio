@@ -1,7 +1,8 @@
 # DAC - the 10-bit digital-to-analog converter (AVR DA/DB)
 
 Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B
-(DAC chapter, electricals 39.19), errata DS80000915F (2.6.1). Driver:
+(DAC chapter, electricals 39.19), errata DS80000915F (2.6.1) and, for
+the DA parts, DS80000882C (2.5.1). Driver:
 `avrdx/dac.hpp`; `Ref` from `avrdx/vref.hpp`, arithmetic in `util/analog.hpp`. Reference test:
 `test_avr_analog` (tests 1-4, 6, 11, 14).
 
@@ -38,8 +39,9 @@ Two physical facts to design with (both measured on the bench):
   the buffer's offset (spec EOFF +-5 LSb, i.e. +-10 mV at the
   2.048 V reference).
 
-Errata 2.6.1 (silicon A4/A5): the buffer's offset drifts over the
-device's lifetime if the part is powered with the buffer OFF. The
+Errata DB 2.6.1 (silicon A4/A5) / DA 2.5.1 (every DA revision): the
+buffer's offset drifts over the device's lifetime if the part is
+powered with the buffer OFF. The
 driver therefore keeps the buffer on once enabled (`disable()` turns
 the converter off, not the buffer); an application that wants the
 pin free says `output_pin = false` explicitly and owns the drift (or
@@ -87,6 +89,12 @@ Code <-> millivolts with the reference's value: `dac_code(mv, Out::steps,
 ref_mv)` and `dac_mv(code, Out::steps, ref_mv)` in `util/analog.hpp`.
 
 ## Bench findings (`test_avr_analog`, rev A5, 3.3 V and 5 V)
+
+On the **AVR128DA48** (rev A7, 5 V) the internal path reads as on the DB
+(the unbuffered output 2043 of 2048 with a 32-cycle sample, every
+reference pair's DAC0 within a few counts of its expectation); the
+legs that read the pin are owed there, its board carrying no PD6 wire
+([adc.md](adc.md)'s list).
 
 - Ramp 0..1023 against the ADC on the wire: monotonic, error within
   +-7 LSB12 over the range, i.e. well inside the specified INL +

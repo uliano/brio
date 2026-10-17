@@ -56,6 +56,16 @@
 // to the pad), 1 (the PIT divider into the CCL, test n), 4 and 5 (the
 // 32-bit stopwatch's carry and snapshot).
 //
+// THE TWO PARTS. The DB's main clock is a crystal on XOSCHF, with a
+// start-up of its own and a RUNSTDBY that keeps it - and the regulator -
+// up in standby. The DA's is an external clock on PA0: an input with no
+// start-up and no RUNSTDBY, so a wake on it pays the regulator alone, and
+// the one oscillator a DA can hold up in standby is OSCHF. Every "crystal
+// with its RUNSTDBY" leg is therefore, on a DA, the external clock with
+// OSCHF's RUNSTDBY set or clear (use_crystal()), and the verdicts that
+// judge a crystal's start-up judge the regulator's there instead; each
+// leg's label says which part's meaning it carries.
+//
 // Tests e, f, k, m and n enter POWER-DOWN. Every such sleep is bracketed
 // by a watchdog and a .noinit token, so a mode that fails to wake resets
 // the board and SAYS SO at the next boot instead of hanging the bench.
@@ -69,6 +79,7 @@
 //   k power-down, timed from outside | l start-of-frame | m a TWI
 //   address match | y = all of h..m
 
+// build: boards = db48,da48
 // build: monitor_speed = 460800
 
 #include <avr/interrupt.h>
@@ -96,7 +107,9 @@
 
 #include "sleep_link.hpp"
 
-using SysClock = brio::Clock<brio::ClockSource::crystal, 24'000'000>;
+using SysClock = brio::Clock<brio::has_xoschf ? brio::ClockSource::crystal
+                                              : brio::ClockSource::external,
+                             24'000'000>;
 constexpr SysClock clock;
 
 /// The escape hatch of the two power-down tests. A mode that does not
@@ -235,6 +248,7 @@ bool use_oschf(bool osc_standby) {
 /// the switch is what starts it, and MCLKSTATUS.SOSC stays set until it
 /// is stable - which is why the wait moves into select() here, with a
 /// bound generous enough for the 4096-cycle start-up.
+#if defined(CLKCTRL_XOSCHFCTRLA)
 bool use_crystal(bool osc_standby) {
     if (MainClock::source() == MainSource::extclk) {
         if (!use_oschf(true)) return false;
@@ -243,6 +257,24 @@ bool use_crystal(bool osc_standby) {
     if (osc_standby && !Xoschf::wait_stable()) return false;
     return MainClock::select(MainSource::extclk, 0x00FFFFFFu) && Xoschf::stable();
 }
+#else
+/// The DA: CLK_PER from the external clock on PA0. There is no oscillator
+/// behind it on the chip, so it has no RUNSTDBY and no start-up of its
+/// own; what a standby wake on it pays is the voltage regulator, which
+/// VREGCTRL's AUTO profile drops whenever OSC32K is the last clock
+/// running (13.3.5). The one oscillator the DA can hold up in standby is
+/// OSCHF, so `osc_standby` is OSCHF's RUNSTDBY here - the DA's stand-in
+/// for the DB crystal's own bit: set, the regulator stays at full drive
+/// and the external clock wakes at once; clear, the wake pays the
+/// regulator's start-up (measured: test j). The board's oscillator runs
+/// whatever the chip does; the boot's Clock init proved it is there (it
+/// asked through a TCD request before selecting it, clock.hpp).
+bool use_crystal(bool osc_standby) {
+    Oschf::run_standby(osc_standby);
+    if (MainClock::source() == MainSource::extclk) return true;
+    return MainClock::select(MainSource::extclk, 0x00FFFFFFu);
+}
+#endif
 
 // ---- one sleep, measured ----------------------------------------------------------
 
@@ -549,7 +581,7 @@ struct Leg {
 
 const char* source_name(uint8_t s) {
     return s == static_cast<uint8_t>(MainSource::oschf) ? "OSCHF"
-         : s == static_cast<uint8_t>(MainSource::extclk) ? "XOSCHF"
+         : s == static_cast<uint8_t>(MainSource::extclk) ? (has_xoschf ? "XOSCHF" : "EXTCLK")
          : "other";
 }
 
@@ -564,18 +596,21 @@ void td_chain() {
 
     // 1. the baseline of test c, on the crystal: no peripheral request.
     watch_init(false);
-    legs[0] = leg("crystal (RUNSTDBY on) + TCB RUNSTDBY off");
+    legs[0] = leg(has_xoschf ? "crystal (RUNSTDBY on) + TCB RUNSTDBY off"
+                             : "EXTCLK (OSCHF held up) + TCB RUNSTDBY off");
 
     // 2. the peripheral asks; the crystal was started with its own
     //    RUNSTDBY set (that is what Clock<crystal>::init does).
     watch_init(true);
-    legs[1] = leg("crystal (RUNSTDBY on) + TCB RUNSTDBY on");
+    legs[1] = leg(has_xoschf ? "crystal (RUNSTDBY on) + TCB RUNSTDBY on"
+                             : "EXTCLK (OSCHF held up) + TCB RUNSTDBY on");
 
     // 3. the same, with the crystal's own RUNSTDBY cleared.
     console_drain();
     const bool re_xtal = use_crystal(false);
     watch_init(true);
-    legs[2] = leg("crystal (RUNSTDBY off) + TCB RUNSTDBY on");
+    legs[2] = leg(has_xoschf ? "crystal (RUNSTDBY off) + TCB RUNSTDBY on"
+                             : "EXTCLK (OSCHF not held) + TCB RUNSTDBY on");
 
     // 4./5. the same two on OSCHF. The console is silent across both
     //       switches: its baud belongs to the crystal.
@@ -630,8 +665,10 @@ void td_chain() {
     // behind it - alive in standby; the oscillator's own RUNSTDBY adds
     // nothing while something is requesting it (what it does buy shows
     // up in test g, as wake-up latency).
-    verdict("the peripheral's RUNSTDBY ALONE is enough on the crystal: its "
-            "request keeps the oscillator running", counted[2]);
+    verdict(has_xoschf ? "the peripheral's RUNSTDBY ALONE is enough on the crystal: its "
+                         "request keeps the oscillator running"
+                       : "the peripheral's RUNSTDBY ALONE is enough on the external clock: its "
+                         "request keeps CLK_PER running", counted[2]);
     verdict("and the same on OSCHF", counted[3]);
     // The two sources' counts differ by OSCHF's own error against the
     // crystal - a few hundred ppm - and the ruler is OSC32K, whose period
@@ -641,8 +678,13 @@ void td_chain() {
     // source in force is read back from CLKCTRL instead (above).
     const int32_t apart = static_cast<int32_t>(legs[4].ticks) -
                           static_cast<int32_t>(legs[1].ticks);
-    print(serial, "  OSCHF minus crystal over the same PIT period: ", apart,
-          " ticks (OSCHF's error, inside the OSC32K ruler's wander)", crlf);
+    if constexpr (has_xoschf) {
+        print(serial, "  OSCHF minus crystal over the same PIT period: ", apart,
+              " ticks (OSCHF's error, inside the OSC32K ruler's wander)", crlf);
+    } else {
+        print(serial, "  OSCHF minus the external clock over the same PIT period: ", apart,
+              " ticks (OSCHF's error, inside the OSC32K ruler's wander)", crlf);
+    }
     verdict("a TCB whose chain is complete wakes the CPU from standby by itself",
             by_tcb.wakers >= 1 && by_tcb.pits == 0);
     verdict("a TCB whose RUNSTDBY is clear cannot: the PIT had to end that sleep",
@@ -829,10 +871,17 @@ void tg_vreg() {
             xtal_free && on_oschf && oschf_free && back);
     print(serial, "  CNT - 4096 after the wake, in CLK_RTC ticks of 30.5 us (awake ",
           awake, " is the baseline: the settle and the CNT zeroing)", crlf);
-    print(serial, "    crystal, its RUNSTDBY on:  ", xtal_on, " normal, ", xtal_on_perf,
-          " performance", crlf);
-    print(serial, "    crystal, its RUNSTDBY off: ", xtal_off, " normal, ", xtal_off_perf,
-          " performance", crlf);
+    if constexpr (has_xoschf) {
+        print(serial, "    crystal, its RUNSTDBY on:  ", xtal_on, " normal, ", xtal_on_perf,
+              " performance", crlf);
+        print(serial, "    crystal, its RUNSTDBY off: ", xtal_off, " normal, ", xtal_off_perf,
+              " performance", crlf);
+    } else {
+        print(serial, "    EXTCLK, OSCHF held up:     ", xtal_on, " normal, ", xtal_on_perf,
+              " performance", crlf);
+        print(serial, "    EXTCLK, nothing held up:   ", xtal_off, " normal, ", xtal_off_perf,
+              " performance", crlf);
+    }
     print(serial, "    OSCHF,   its RUNSTDBY on:  ", oschf_on, " normal", crlf);
     print(serial, "    OSCHF,   its RUNSTDBY off: ", oschf_off, " normal, ", oschf_off_perf,
           " performance", crlf);
@@ -840,25 +889,49 @@ void tg_vreg() {
             xtal_on >= awake && xtal_on_perf >= awake && xtal_off >= awake &&
                 xtal_off_perf >= awake && oschf_on >= awake && oschf_off >= awake &&
                 oschf_off_perf >= awake);
-    verdict("an oscillator kept alive by its OWN RUNSTDBY costs nothing to wake "
-            "from", xtal_on <= awake + 2 && oschf_on <= awake + 2);
-    verdict("one that has to start again costs real time, and the crystal costs "
-            "much more than OSCHF", xtal_off > oschf_off && oschf_off > oschf_on);
+    verdict(has_xoschf ? "an oscillator kept alive by its OWN RUNSTDBY costs nothing to wake "
+                         "from"
+                       : "an oscillator kept alive by its RUNSTDBY costs nothing to wake from: "
+                         "OSCHF, and the external clock while OSCHF is held up",
+            xtal_on <= awake + 2 && oschf_on <= awake + 2);
+    if constexpr (has_xoschf) {
+        verdict("one that has to start again costs real time, and the crystal costs "
+                "much more than OSCHF", xtal_off > oschf_off && oschf_off > oschf_on);
+    } else {
+        // The DA: the external clock has no start-up, but with nothing
+        // held up the regulator drops and its start-up - test j: about
+        // 130 us, four ticks of 30.5 us - is what the wake pays.
+        verdict("the external clock with nothing held up pays the regulator's start-up "
+                "(3 ticks or more), and so does OSCHF restarting",
+                xtal_off >= awake + 3 && oschf_off >= awake + 3);
+    }
     print(serial, "  that is the whole point of an oscillator's RUNSTDBY: test d showed "
                   "it is not what keeps a peripheral counting - this is what it buys.",
           crlf);
-    print(serial, "  the regulator's profile moves the restarting cases by ",
-          xtal_off - xtal_off_perf, " (crystal) and ", oschf_off - oschf_off_perf,
-          " (OSCHF) ticks; a difference of zero or one tick is below this ruler's "
-          "resolution and is reported, not claimed.", crlf);
+    if constexpr (has_xoschf) {
+        print(serial, "  the regulator's profile moves the restarting cases by ",
+              xtal_off - xtal_off_perf, " (crystal) and ", oschf_off - oschf_off_perf,
+              " (OSCHF) ticks; a difference of zero or one tick is below this ruler's "
+              "resolution and is reported, not claimed.", crlf);
+    } else {
+        print(serial, "  the regulator's profile moves the restarting cases by ",
+              xtal_off - xtal_off_perf, " (EXTCLK) and ", oschf_off - oschf_off_perf,
+              " (OSCHF) ticks; a difference of zero or one tick is below this ruler's "
+              "resolution and is reported, not claimed.", crlf);
+    }
     // The one place a single board can SEE the regulator: an OSCHF
     // restart out of standby is two costs in series, the oscillator's
     // and the regulator's, and PMODE = FULL pays the second one in
     // advance. On the crystal the oscillator's own start-up buries it.
     verdict("PMODE = performance really shortens a wake-up that has to restart "
             "OSCHF", oschf_off - oschf_off_perf >= 4);
-    verdict("and it cannot shorten the crystal's own start-up",
-            xtal_off_perf > oschf_off_perf);
+    if constexpr (has_xoschf) {
+        verdict("and it cannot shorten the crystal's own start-up",
+                xtal_off_perf > oschf_off_perf);
+    } else {
+        verdict("and on the external clock it removes the whole cost: no oscillator is "
+                "left to start", xtal_off_perf <= awake + 2);
+    }
 
     // HTLLEN shortens power-down's wake-up list to the PORT pin, BOD
     // VLM, MVIO and the PIT. The PIT half of that is testable here.
@@ -1223,10 +1296,18 @@ bool apply_leg_clock(LegClock c) {
         case LegClock::xtal_kept:
             return use_crystal(true);
         case LegClock::oschf_xtal_alive:
-            return use_oschf(false);
+            // The DA has no second oscillator to leave running: its leg
+            // holds OSCHF itself up (test j's DA legs).
+            if constexpr (has_xoschf) {
+                return use_oschf(false);
+            } else {
+                return use_oschf(true);
+            }
         default: {
             const bool ok = use_oschf(false);
+#if defined(CLKCTRL_XOSCHFCTRLA)
             Xoschf::stop();
+#endif
             return ok;
         }
     }
@@ -1397,10 +1478,14 @@ void tj_standby_latency() {
 
     struct Leg { LegClock clk; bool perf; const char* what; };
     constexpr Leg legs[] = {
-        {LegClock::xtal_restart, false, "crystal, its RUNSTDBY off (it must start again)"},
-        {LegClock::xtal_kept, false, "crystal, its RUNSTDBY on  (kept alive)         "},
-        {LegClock::oschf_xtal_alive, false, "OSCHF, the crystal still running, normal      "},
-        {LegClock::oschf_xtal_alive, true, "OSCHF, the crystal still running, performance "},
+        {LegClock::xtal_restart, false, has_xoschf ? "crystal, its RUNSTDBY off (it must start again)"
+                                                   : "EXTCLK, nothing held up in standby          "},
+        {LegClock::xtal_kept, false, has_xoschf ? "crystal, its RUNSTDBY on  (kept alive)         "
+                                                : "EXTCLK, OSCHF held up by its RUNSTDBY        "},
+        {LegClock::oschf_xtal_alive, false, has_xoschf ? "OSCHF, the crystal still running, normal      "
+                                                       : "OSCHF held up by its RUNSTDBY, normal        "},
+        {LegClock::oschf_xtal_alive, true, has_xoschf ? "OSCHF, the crystal still running, performance "
+                                                      : "OSCHF held up by its RUNSTDBY, performance   "},
         {LegClock::oschf_alone, false, "OSCHF ALONE, every other oscillator off, normal"},
         {LegClock::oschf_alone, true, "OSCHF ALONE, every other oscillator off, perf. "},
     };
@@ -1416,31 +1501,58 @@ void tj_standby_latency() {
     if (!ok) { quiesce(); return; }
     for (uint8_t i = 0; i < 6; ++i) print_train(legs[i].what, t[i]);
     verdict("every configuration woke on every stimulus", all_woke);
-    verdict("a crystal that has to restart costs the milliseconds phase one "
-            "inferred from 48 RTC ticks (0.8 .. 3 ms)",
-            med[0] != slink::no_capture && med[0] > 19'200u && med[0] < 72'000u);
-    verdict("a crystal kept alive by its own RUNSTDBY costs almost nothing "
-            "(under 50 us)", med[1] != slink::no_capture && med[1] < 1'200u);
-    verdict("OSCHF restarting with the crystal still oscillating is the data "
-            "sheet's own 24-30 us and NOTHING MORE (10 .. 60 us here)",
-            med[2] != slink::no_capture && med[2] > 240u && med[2] < 1'440u);
-    verdict("and the regulator's profile does not move it by a microsecond: "
-            "there is no regulator start-up to pay for",
-            med[3] != slink::no_capture &&
-                (med[3] > med[2] ? med[3] - med[2] : med[2] - med[3]) < 24u);
+    if constexpr (has_xoschf) {
+        verdict("a crystal that has to restart costs the milliseconds phase one "
+                "inferred from 48 RTC ticks (0.8 .. 3 ms)",
+                med[0] != slink::no_capture && med[0] > 19'200u && med[0] < 72'000u);
+        verdict("a crystal kept alive by its own RUNSTDBY costs almost nothing "
+                "(under 50 us)", med[1] != slink::no_capture && med[1] < 1'200u);
+        verdict("OSCHF restarting with the crystal still oscillating is the data "
+                "sheet's own 24-30 us and NOTHING MORE (10 .. 60 us here)",
+                med[2] != slink::no_capture && med[2] > 240u && med[2] < 1'440u);
+        verdict("and the regulator's profile does not move it by a microsecond: "
+                "there is no regulator start-up to pay for",
+                med[3] != slink::no_capture &&
+                    (med[3] > med[2] ? med[3] - med[2] : med[2] - med[3]) < 24u);
+    } else {
+        // The DA: no crystal to restart, so legs 0 and 1 are the external
+        // clock with and without OSCHF held up, and legs 2 and 3 OSCHF held up
+        // by its own bit. With nothing held up the wake pays the regulator's
+        // start-up - the band DB's OSCHF-alone leg was given, 100 .. 800 us,
+        // the data sheet's 100 us (table 37-10, power-down, AUTO) its floor;
+        // with something held up it pays nothing the 50 us of a kept-alive
+        // clock does not cover.
+        verdict("the external clock with nothing held up pays the regulator's start-up "
+                "and nothing else (100 .. 800 us)",
+                med[0] != slink::no_capture && med[0] > 2'400u && med[0] < 19'200u);
+        verdict("with OSCHF held up by its RUNSTDBY it costs almost nothing (under 50 us)",
+                med[1] != slink::no_capture && med[1] < 1'200u);
+        verdict("OSCHF held up by its own RUNSTDBY costs almost nothing too (under 50 us)",
+                med[2] != slink::no_capture && med[2] < 1'200u);
+        verdict("and the regulator's profile does not move it by a microsecond: the "
+                "regulator never dropped",
+                med[3] != slink::no_capture &&
+                    (med[3] > med[2] ? med[3] - med[2] : med[2] - med[3]) < 24u);
+    }
     verdict("stop the crystal too and the SAME OSCHF restart suddenly costs "
             "hundreds of microseconds (100 .. 800 us)",
             med[4] != slink::no_capture && med[4] > 2'400u && med[4] < 19'200u);
     verdict("because that cost is the REGULATOR, and PMODE = performance pays it "
             "in advance: back to the bare oscillator restart",
             med[5] != slink::no_capture && med[5] < 1'440u && med[5] * 3u < med[4]);
-    print(serial, "  that is the standby rule this bench found: VREGCTRL's AUTO profile "
-                  "drops the regulator only when OSC32K is the last clock left, so an "
-                  "oscillator held up by its own RUNSTDBY buys a fast wake-up for the "
-                  "OTHER source as well.", crlf);
-    print(serial, "  the ordering: kept-alive < OSCHF beside a running crystal = OSCHF "
-                  "alone with PMODE = performance < OSCHF alone < a crystal restart.",
-          crlf);
+    if constexpr (has_xoschf) {
+        print(serial, "  that is the standby rule this bench found: VREGCTRL's AUTO profile "
+                      "drops the regulator only when OSC32K is the last clock left, so an "
+                      "oscillator held up by its own RUNSTDBY buys a fast wake-up for the "
+                      "OTHER source as well.", crlf);
+        print(serial, "  the ordering: kept-alive < OSCHF beside a running crystal = OSCHF "
+                      "alone with PMODE = performance < OSCHF alone < a crystal restart.",
+              crlf);
+    } else {
+        print(serial, "  the same standby rule on the DA: its external clock is an input with "
+                      "no RUNSTDBY, so OSCHF's is the one bit that keeps the regulator up - "
+                      "for the external clock as well.", crlf);
+    }
     quiesce();
 }
 
@@ -1462,7 +1574,8 @@ void tk_power_down_latency() {
 
     struct Leg { LegClock clk; bool perf; uint8_t stage; const char* what; };
     constexpr Leg legs[] = {
-        {LegClock::xtal_kept, false, 4, "crystal main clock                       "},
+        {LegClock::xtal_kept, false, 4, has_xoschf ? "crystal main clock                       "
+                                                   : "EXTCLK main clock                        "},
         {LegClock::oschf_alone, false, 5, "OSCHF main clock, normal regulator       "},
         {LegClock::oschf_alone, true, 6, "OSCHF main clock, PMODE = performance    "},
     };
@@ -1480,8 +1593,19 @@ void tk_power_down_latency() {
     for (uint8_t i = 0; i < 3; ++i) print_train(legs[i].what, t[i]);
     verdict("a pin edge wakes this device from POWER-DOWN, every time, on all "
             "three configurations", all_woke);
-    verdict("out of power-down a crystal main clock costs milliseconds (0.5 .. 6 ms)",
-            med[0] != slink::no_capture && med[0] > 12'000u && med[0] < 144'000u);
+    if constexpr (has_xoschf) {
+        verdict("out of power-down a crystal main clock costs milliseconds (0.5 .. 6 ms)",
+                med[0] != slink::no_capture && med[0] > 12'000u && med[0] < 144'000u);
+    } else {
+        // Power-down stops every oscillator whatever its RUNSTDBY: the
+        // external clock has none to restart, so it pays the regulator
+        // alone - the 100 .. 800 us band - and never more than OSCHF,
+        // which pays that and its own start-up.
+        verdict("out of power-down the external clock pays the regulator's start-up and no "
+                "oscillator's (100 .. 800 us), no more than OSCHF's restart",
+                med[0] != slink::no_capture && med[0] > 2'400u && med[0] < 19'200u &&
+                    med[0] <= med[1]);
+    }
     verdict("OSCHF out of power-down costs hundreds of microseconds (100 .. 800 us): "
             "the oscillator's 24 us plus the regulator's own start-up",
             med[1] != slink::no_capture && med[1] > 2'400u && med[1] < 19'200u);
@@ -1491,8 +1615,10 @@ void tk_power_down_latency() {
     verdict("which is a factor of several, not a rounding: this is the one place "
             "the regulator's profile is worth its quiescent current",
             med[2] * 3u < med[1]);
-    print(serial, "  the crystal's start-up buries the regulator entirely: its restart "
-                  "is the same milliseconds in standby and in power-down.", crlf);
+    if constexpr (has_xoschf) {
+        print(serial, "  the crystal's start-up buries the regulator entirely: its restart "
+                      "is the same milliseconds in standby and in power-down.", crlf);
+    }
     quiesce();
 }
 
@@ -1539,7 +1665,9 @@ bool apply_sfd_clock(SfdClock c) {
         case SfdClock::xtal_restart: return use_crystal(false);
         default: {
             const bool ok = use_oschf(false);
+#if defined(CLKCTRL_XOSCHFCTRLA)
             Xoschf::stop();          // test j: a running crystal holds the regulator up
+#endif
             if (c == SfdClock::oschf_fast) Vreg::power(VregPower::performance);
             return ok;
         }
@@ -1625,11 +1753,14 @@ void tl_sfd() {
 
     constexpr SfdLeg legs[sfd_legs] = {
         {9'600, 0x5A, SfdClock::xtal_kept, SleepMode::standby,
-         "clock kept alive      9600   0x5A (no restart at all)         "},
+         has_xoschf ? "clock kept alive      9600   0x5A (no restart at all)         "
+                    : "EXTCLK, OSCHF held up 9600   0x5A (no restart at all)         "},
         {115'200, 0x5A, SfdClock::xtal_kept, SleepMode::standby,
-         "clock kept alive      115200 0x5A (no restart at all)         "},
+         has_xoschf ? "clock kept alive      115200 0x5A (no restart at all)         "
+                    : "EXTCLK, OSCHF held up 115200 0x5A (no restart at all)         "},
         {460'800, 0x5A, SfdClock::xtal_kept, SleepMode::standby,
-         "clock kept alive      460800 0x5A (no restart at all)         "},
+         has_xoschf ? "clock kept alive      460800 0x5A (no restart at all)         "
+                    : "EXTCLK, OSCHF held up 460800 0x5A (no restart at all)         "},
         {9'600, 0x5A, SfdClock::oschf_fast, SleepMode::standby,
          "OSCHF alone, perf.    9600   0x5A (24 us vs a 52 us half-bit) "},
         {115'200, 0xFF, SfdClock::oschf_fast, SleepMode::standby,
@@ -1641,9 +1772,11 @@ void tl_sfd() {
         {9'600, 0x00, SfdClock::oschf_slow, SleepMode::standby,
          "OSCHF alone, normal   9600   0x00 (300 us vs 938 us of low)   "},
         {2'400, 0xFF, SfdClock::xtal_restart, SleepMode::standby,
-         "crystal restarts      2400   0xFF (1.5 ms vs 417 us of low)   "},
+         has_xoschf ? "crystal restarts      2400   0xFF (1.5 ms vs 417 us of low)   "
+                    : "EXTCLK alone          2400   0xFF (130 us vs 417 us of low)   "},
         {2'400, 0x00, SfdClock::xtal_restart, SleepMode::standby,
-         "crystal restarts      2400   0x00 (1.5 ms vs 3.75 ms of low)  "},
+         has_xoschf ? "crystal restarts      2400   0x00 (1.5 ms vs 3.75 ms of low)  "
+                    : "EXTCLK alone          2400   0x00 (130 us vs 3.75 ms of low)  "},
         {115'200, 0x5A, SfdClock::xtal_kept, SleepMode::idle,
          "IDLE, clock running   115200 0x5A                             "},
     };
@@ -1661,22 +1794,70 @@ void tl_sfd() {
     }
     verdict("with the main clock kept alive a start bit wakes this board from "
             "STANDBY at every rate", woke[0] && woke[1] && woke[2]);
-    verdict("and the WAKING FRAME itself survives, all three rates",
-            intact[0] && intact[1] && intact[2]);
+    if constexpr (has_xoschf) {
+        verdict("and the WAKING FRAME itself survives, all three rates",
+                intact[0] && intact[1] && intact[2]);
+    } else {
+        // The DA's external clock, even with OSCHF held up, wakes about a
+        // microsecond later than awake (test j: 44 ticks of 41.7 ns against
+        // 20) - inside 9600's and 115200's half-bits (52 and 4.3 us), level
+        // with 460800's (1.09 us), which is printed above and not judged.
+        verdict("and the WAKING FRAME itself survives at 9600 and 115200 (half-bits of 52 "
+                "and 4.3 us against a wake of about 1 us)", intact[0] && intact[1]);
+    }
     verdict("a restart well inside the start bit's first half keeps the frame too: "
             "24 us against a 52 us half-bit at 9600", woke[3] && intact[3]);
     verdict("THE WAKE-UP RULE, at a 24 us restart: 0xFF (low for 8.7 us) does not "
             "wake, 0x00 (low for 78 us) does", !woke[4] && woke[5]);
     verdict("the same rule at a 300 us restart: 104 us of low is not enough, "
             "938 us is", !woke[6] && woke[7]);
-    verdict("and at a 1.5 ms crystal restart: 417 us of low is not enough, 3.75 ms "
-            "is", !woke[8] && woke[9]);
+    if constexpr (has_xoschf) {
+        verdict("and at a 1.5 ms crystal restart: 417 us of low is not enough, 3.75 ms "
+                "is", !woke[8] && woke[9]);
+    } else {
+        // The external clock alone pays the regulator, about 130 us (test
+        // j): inside 2400 baud's 208 us half-bit, so the start bit of 0xFF
+        // is low long enough AND the frame is back in time.
+        verdict("and at the external clock's 130 us (the regulator alone): 417 us of low is "
+                "enough, and both 2400-baud frames survive (130 us is inside a 208 us "
+                "half-bit)", woke[8] && woke[9] && intact[8] && intact[9]);
+    }
     print(serial, "  so the detector does not latch an EDGE: it needs the line still "
                   "LOW when the peripheral clock comes back, which is why the byte's "
                   "own bit pattern decides whether a slow-restarting device wakes at "
                   "all.", crlf);
     verdict("every wake that arrived after the middle of the start bit cost the "
-            "frame", !intact[5] && !intact[7] && !intact[9]);
+            "frame", has_xoschf ? !intact[5] && !intact[7] && !intact[9]
+                                : !intact[5] && !intact[7]);
+    if constexpr (!has_xoschf) {
+        // The external clock alone at 9600: the same wake-up rule at the
+        // regulator's 130 us - a start bit alone (104 us) is too short, nine
+        // bit times (938 us) are not, and arrive after the half-bit (52 us).
+        constexpr SfdLeg extra[3] = {
+            {9'600, 0xFF, SfdClock::xtal_restart, SleepMode::standby,
+             "EXTCLK alone          9600   0xFF (130 us vs 104 us of low)   "},
+            {9'600, 0x00, SfdClock::xtal_restart, SleepMode::standby,
+             "EXTCLK alone          9600   0x00 (130 us vs 938 us of low)   "},
+            {9'600, 0x5A, SfdClock::xtal_restart, SleepMode::standby,
+             "EXTCLK alone          9600   0x5A (130 us vs 208 us of low)   "},
+        };
+        bool xw[3] = {}, xi[3] = {}, xa[3] = {};
+        uint8_t xg[3] = {};
+        bool xok = true;
+        for (uint8_t i = 0; i < 3; ++i) {
+            xok = xok && sfd_once(extra[i], xw[i], xi[i], xa[i], xg[i]);
+        }
+        for (uint8_t i = 0; i < 3; ++i) {
+            print(serial, "    ", extra[i].what, ": ", xw[i] ? "WOKE   " : "no wake",
+                  "  frame ", xi[i] ? "INTACT" : (xa[i] ? "GARBLED" : "lost   "),
+                  " (got ", hex(xg[i]), ", sent ", hex(extra[i].value), ")", crlf);
+        }
+        verdict("the three 9600-baud legs on the external clock alone got through the link",
+                xok);
+        verdict("the rule at the external clock's 130 us: a start bit alone (104 us) does "
+                "not wake, nine bit times do - and that frame is lost or garbled",
+                !xw[0] && xw[1] && !xi[1]);
+    }
     verdict("from IDLE the start-of-frame flag never fires - RXSIF is set only in "
             "Standby (27.5.5) - and the frame is simply received",
             !woke[10] && intact[10]);
@@ -1803,17 +1984,34 @@ void tm_twi_wake() {
             "nothing measurable: the tenure is the awake one to within 10 us",
             standby.ticks > awake.ticks ? standby.ticks - awake.ticks < 240u
                                         : awake.ticks - standby.ticks < 240u);
-    verdict("waking from POWER-DOWN costs the bus the whole crystal restart - the "
-            "0.8 .. 3 ms test k measured on a pin",
-            pd.ticks > awake.ticks && pd.ticks - awake.ticks > 19'200u &&
-                pd.ticks - awake.ticks < 72'000u);
-    print(serial, "  the stretch over the awake baseline: standby +",
-          static_cast<int32_t>(standby.ticks / 24u) -
-              static_cast<int32_t>(awake.ticks / 24u),
-          " us, power-down +", (pd.ticks - awake.ticks) / 24u,
-          " us. At 100 kHz an SCL bit is 10 us, which is why a standby wake of "
-          "under two microseconds is invisible on the wire and a crystal restart "
-          "is not.", crlf);
+    if constexpr (has_xoschf) {
+        verdict("waking from POWER-DOWN costs the bus the whole crystal restart - the "
+                "0.8 .. 3 ms test k measured on a pin",
+                pd.ticks > awake.ticks && pd.ticks - awake.ticks > 19'200u &&
+                    pd.ticks - awake.ticks < 72'000u);
+    } else {
+        verdict("waking from POWER-DOWN costs the bus the regulator's start-up - the "
+                "100 .. 800 us test k measured on a pin",
+                pd.ticks > awake.ticks && pd.ticks - awake.ticks > 2'400u &&
+                    pd.ticks - awake.ticks < 19'200u);
+    }
+    if constexpr (has_xoschf) {
+        print(serial, "  the stretch over the awake baseline: standby +",
+              static_cast<int32_t>(standby.ticks / 24u) -
+                  static_cast<int32_t>(awake.ticks / 24u),
+              " us, power-down +", (pd.ticks - awake.ticks) / 24u,
+              " us. At 100 kHz an SCL bit is 10 us, which is why a standby wake of "
+              "under two microseconds is invisible on the wire and a crystal restart "
+              "is not.", crlf);
+    } else {
+        print(serial, "  the stretch over the awake baseline: standby +",
+              static_cast<int32_t>(standby.ticks / 24u) -
+                  static_cast<int32_t>(awake.ticks / 24u),
+              " us, power-down +", (pd.ticks - awake.ticks) / 24u,
+              " us. At 100 kHz an SCL bit is 10 us, which is why a standby wake of "
+              "under two microseconds is invisible on the wire and the regulator's "
+              "start-up is not.", crlf);
+    }
 
     Client::release();
     quiesce();
@@ -1943,7 +2141,9 @@ void tn_ccl_wake() {
 using TcaU = Tca<0>;
 using AcU = Ac<0>;
 using AdcU = Adc<0>;
+#ifdef OPAMP
 using OpU = Opamp<0>;
+#endif
 using TcdU = Tcd<0>;
 
 constexpr uint32_t tca_per_pit = ticks_per_pit / 64u;      ///< 46875 at CLK_PER/64
@@ -1988,18 +2188,34 @@ struct AdcLeg {
     uint16_t freed;      ///< awake again, the op amp released, the pull-up alone
 };
 
-/// One standby with ADC0 started by the event system, converting OP0.
+/// One standby with ADC0 started by the event system, converting OP0 -
+/// or, on a part with no op amp (the DA), the pad with its pull-up alone.
 AdcLeg adc_leg(bool adc_standby, bool op_standby) {
     AdcLeg l{};
+#ifdef OPAMP
     OpampSystem::init(clock);
     (void)OpU::init({.positive = OpampPos::vdd_div2, .negative = OpampNeg::out,
                      .output = OpampOutput::normal, .mode = OpampMode::software,
                      .run_standby = op_standby});
+#else
+    (void)op_standby;
+#endif
     // The pull-up on the output pad: the op amp overrides it while on;
     // off, it takes the pad to VDD - the two states a conversion tells
     // apart. The digital input buffer stays off (the op amp's analog pad).
     PadPin::configure({.pull = PinPull::up, .sense = PinSense::input_disable});
+#ifdef OPAMP
     OpU::wait_settled();
+#else
+    // No op amp: the pad is DRIVEN high from PORT instead - a low-impedance
+    // VDD the converter reads at full scale asleep as awake (a pull-up
+    // alone is tens of kilohms, which the sampling capacitor loads down
+    // differently from one conversion to the next: measured 3962 awake,
+    // 3908 asleep).
+    PadPin::set();
+    PadPin::output();
+    delay_us(clock, 1000u);
+#endif
     (void)AdcU::init(clock, {.reference = Ref::vdd, .run_standby = adc_standby});
     AdcU::select(AnalogIn<PadPin>{});
     l.awake = AdcU::read();
@@ -2014,12 +2230,19 @@ AdcLeg adc_leg(bool adc_standby, bool op_standby) {
     ChPad::off();
     // The control: the same pad with the op amp released (disabled,
     // OUTMODE off), the pull-up alone on it.
+#ifdef OPAMP
     OpU::release();
+#endif
     PadPin::configure({.pull = PinPull::up, .sense = PinSense::input_disable});
     delay_us(clock, 1000u);
     l.freed = AdcU::read();
     AdcU::disable();
+#ifdef OPAMP
     OpampSystem::disable();
+#else
+    PadPin::clear();
+    PadPin::input();
+#endif
     PadPin::configure({});
     return l;
 }
@@ -2081,6 +2304,7 @@ void to_runstdby() {
     // scale, thirty times the band a driven pad stays in) above it; the
     // control - the op amp released, the pull-up alone - says where the
     // pull-up takes the pad.
+#ifdef OPAMP
     const AdcLeg both = adc_leg(true, true);
     const AdcLeg op_off = adc_leg(true, false);
     const AdcLeg adc_off = adc_leg(false, true);
@@ -2112,6 +2336,27 @@ void to_runstdby() {
             "the pad to the rail", op_off.freed > 4000u && both.freed > 4000u);
     verdict("the ADC without RUNSTDBY converts nothing in standby: the PIT ends the "
             "sleep", adc_off.run.units == 0 && adc_off.run.pits == 1);
+#else
+    // No op amp on this part (the DA): the event-started conversion
+    // reads the pad driven high from PORT, VDD against VDD - full scale,
+    // within 95 counts of 4095 (the converter's few counts of noise, no
+    // load). What stays measurable is the ADC's own RUNSTDBY.
+    const AdcLeg on = adc_leg(true, false);
+    const AdcLeg off = adc_leg(false, false);
+    print(serial, "  ADC0 on PD2 driven high (no op amp on this part): awake ", on.awake,
+          "; standby with RUNSTDBY: ", on.run.units, " RESRDY, ", on.run.pits,
+          " PIT, result ", on.slept, "; without: ", off.run.units, " RESRDY, ",
+          off.run.pits, " PIT", crlf);
+    verdict("the driven pad reads the rail awake (above 4000 of 4096)", on.awake > 4000u);
+    verdict("an event-started conversion runs in STANDBY with the ADC's RUNSTDBY: its "
+            "RESRDY ends the sleep, the PIT never fires",
+            on.run.units >= 1 && on.run.pits == 0);
+    verdict("and converts the pad as it reads awake (within 32)",
+            near_u32(on.slept, on.awake, 32));
+    verdict("the ADC without RUNSTDBY converts nothing in standby: the PIT ends the "
+            "sleep", off.run.units == 0 && off.run.pits == 1);
+    print(serial, "  the op amp's RUNSTBY: SKIP - this part has no OPAMP", crlf);
+#endif
 
     // TCD0. Its ramp overflows every 43.7 ms (24 MHz / 8 / 32, 4096
     // counts), inside the 125 ms PIT window: in IDLE its OVF ends the
@@ -2297,7 +2542,7 @@ int main() {
     auto board = board_id();
     if (board.empty()) board = "?";
     print(serial, crlf, "test_avr_sleep - sleep test suite (board ", board,
-          ", clk=", xtal ? "XTAL" : "OSCHF", " 24 MHz, silicon rev ", hex(SYSCFG.REVID),
+          ", clk=", xtal ? (has_xoschf ? "XTAL" : "EXTCLK") : "OSCHF", " 24 MHz, silicon rev ", hex(SYSCFG.REVID),
           ", RSTFR=", hex(why.raw), ")", crlf);
     print(serial, "  PD1/PD2 must be free of the bus jumpers: test e drives PD2 from the "
                   "event system and senses its own edge.", crlf);

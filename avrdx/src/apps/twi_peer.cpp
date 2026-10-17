@@ -53,6 +53,7 @@
 // client can turn a byte around before it starts stretching, so its
 // clock is itself a bench fact and the DUT asks for it with `ident`.
 
+// build: boards = db48,da48
 // build: monitor_speed = 460800
 
 #include <avr/interrupt.h>
@@ -69,7 +70,13 @@
 
 #include "twi_link.hpp"
 
-using SysClock = brio::Clock<brio::ClockSource::crystal, 24'000'000>;
+// The 24 MHz: the DB's crystal on its XOSCHF, or the DA's external clock
+// on PA0 (brio::has_xoschf) - on the AVR128DA48 board a quartz oscillator
+// feeding EXTCLK, so the time base is crystal-referenced on either part
+// and `ident` reports it so (xtal = 1) whenever the source started.
+using SysClock = brio::Clock<brio::has_xoschf ? brio::ClockSource::crystal
+                                              : brio::ClockSource::external,
+                             24'000'000>;
 constexpr SysClock clock;
 
 namespace {
@@ -622,7 +629,7 @@ int main() {
     auto board = board_id();
     if (board.empty()) board = "?";
     print(console, crlf, "twi_peer - TWI instrument client (board ", board,
-          ", clk=", crystal_ok ? "XTAL" : "OSCHF", " 24 MHz, silicon rev ",
+          ", clk=", crystal_ok ? (has_xoschf ? "XTAL" : "EXTCLK") : "OSCHF", " 24 MHz, silicon rev ",
           hex(SYSCFG.REVID), ", fw ", hex(firmware_version), ")", crlf);
     print(console, "client TWI0 DEFAULT: SDA PA2, SCL PA3; command address ",
           hex(twilink::command_addr), " exactly - no general call, no mask, no PMEN, "

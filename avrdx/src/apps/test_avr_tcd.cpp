@@ -19,6 +19,19 @@
 //
 // Reference test of avrdx/tcd.hpp (docs/avrdx/tcd.md): keep it passing.
 //
+// THE TWO PARTS. The TCD errata are the same three items under two
+// numbers - DB DS80000915F 2.14.1/2.14.2/2.14.3, DA DS80000882C
+// 2.13.1/2.13.2/2.13.3 - and the PLL's PLLS item is DB 2.5.3 / DA 2.4.1;
+// every verdict names the item of the part it runs on. The DB's 2.5.4
+// (no PLL from an XOSCHF crystal) has no DA twin: the DA has no crystal
+// oscillator, its PLL SOURCE = 1 IS the external clock on PA0, and on
+// the AVR128DA48 board that clock is also CLK_PER - so letter f measures
+// the PLL from it against its own source, exactly. And the AVR128DA48
+// board's PA7 (WOD on the DEFAULT route) carries 100 nF to ground, an RC
+// no whole-tick verdict survives: letter j reads WOC/WOD on the ALT2
+// route there (PF2/PF3 - the LED, lit for the measurement, and the
+// button's pin, which must not be pressed meanwhile).
+//
 // Bench diagnostic, NOT a kernel app (sequential, blocking). Console on
 // USART2 ALT1 (PF4/PF5) at 460800 - PF4/PF5 are never claimed here, and
 // test a claims PF0..PF3 (the ALT2 route) only for as long as the
@@ -26,6 +39,7 @@
 //
 // Commands: ? for the menu, z runs a..l.
 
+// build: boards = db48,da48
 // build: monitor_speed = 460800
 
 #include <avr/interrupt.h>
@@ -41,7 +55,9 @@
 #include "avrdx/userrow.hpp"
 #include "util/print.hpp"
 
-using SysClock = brio::Clock<brio::ClockSource::crystal, 24'000'000>;
+using SysClock = brio::Clock<brio::has_xoschf ? brio::ClockSource::crystal
+                                              : brio::ClockSource::external,
+                             24'000'000>;
 constexpr SysClock clock;
 
 namespace {
@@ -71,6 +87,11 @@ using ChB = EventChannel<1>;       ///< a second PORTA output pin
 using ChInA = EventChannel<2>;     ///< PD3 -> TCD input A
 using ChInB = EventChannel<3>;     ///< PD4 -> TCD input B
 using ChTcd = EventChannel<4>;     ///< a TCD event generator, or a PORTF pin
+using ChF = EventChannel<5>;       ///< a second PORTF pin (test j on the DA board)
+
+/// One board per part on this desk: the AVR128DB48 board leaves PA7 free,
+/// the AVR128DA48 board's PA7 carries 100 nF to ground (the header).
+constexpr bool board_pa7_free = has_xoschf;
 
 // The instruments.
 using CycleTcb = Tcb<0>;
@@ -237,8 +258,10 @@ void quiesce() {
 // ---- a: routes, the sync disciplines, the alternate-route erratum ------------
 
 void ta_routes() {
-    print(serial, "a routes, the three synchronization disciplines, and errata 2.14.2 "
-                  "on an alternate route", crlf);
+    print(serial, has_xoschf ? "a routes, the three synchronization disciplines, and errata "
+                               "2.14.2 on an alternate route"
+                             : "a routes, the three synchronization disciplines, and errata "
+                               "2.13.2 on an alternate route", crlf);
     quiesce();
 
     // --- the route table this package offers
@@ -394,9 +417,11 @@ void ta_routes() {
 
         print(serial, "    ALT2 route: CMPBEN alone -> ", alt_b_only,
               " WOB edges; CMPAEN + CMPBEN -> ", alt_both, " edges (20 ms)", crlf);
-        verdict("errata 2.14.2: on ALT2 a WOB-only configuration drives NOTHING",
+        verdict(has_xoschf ? "errata 2.14.2: on ALT2 a WOB-only configuration drives NOTHING"
+                           : "errata 2.13.2: on ALT2 a WOB-only configuration drives NOTHING",
                 alt_b_only == 0);
-        verdict("errata 2.14.2: adding CMPAEN makes WOB drive again", alt_both > 100);
+        verdict(has_xoschf ? "errata 2.14.2: adding CMPAEN makes WOB drive again"
+                           : "errata 2.13.2: adding CMPAEN makes WOB drive again", alt_both > 100);
     }
     quiesce();
 }
@@ -813,7 +838,8 @@ void tf_pll() {
         while (!Pll::locked() && spins < 0xFFFF) ++spins;
         print(serial, "    RUNSTDBY = 1, TCD down: PLLS = ", Pll::locked(), " after ",
               spins, " spins", crlf);
-        verdict("errata 2.5.3: PLLS stays 0 with RUNSTDBY and no requester",
+        verdict(has_xoschf ? "errata 2.5.3: PLLS stays 0 with RUNSTDBY and no requester"
+                           : "errata 2.4.1: PLLS stays 0 with RUNSTDBY and no requester",
                 !Pll::locked());
         TcdConfig c = base_one_ramp(50, 150, 200, static_cast<uint16_t>(period - 1));
         c.clock = TcdClock::pll;
@@ -825,6 +851,7 @@ void tf_pll() {
         verdict("PLLS sets as soon as a peripheral requests the PLL", Pll::locked());
     }
 
+#if defined(CLKCTRL_XOSCHFCTRLA)
     // Errata 2.5.4 (DB A4/A5): the PLL will not run from an XOSCHF
     // CRYSTAL - and this board's 24 MHz source IS a crystal. The driver
     // refuses the combination outright; the refusal is what is observed.
@@ -839,6 +866,40 @@ void tf_pll() {
         verdict("and PLLCTRLA was left untouched", CLKCTRL.PLLCTRLA == before);
         verdict("source_ok(oschf) is true", Pll::source_ok(PllSource::oschf));
     }
+#else
+    // The DA: no crystal oscillator, so PLLCTRLA.SOURCE = 1 is the external
+    // clock on PA0 itself - and on this board that clock is CLK_PER too.
+    // A TCD on EXTCLK then counts CLK_PER's own cycles, and a TCD on the
+    // PLL from it twice as many: the multiplier against its own source,
+    // with no oscillator error in between - so the bound is the meter's
+    // one tick. x2 only: 24 MHz x 3 is past the PLL's 48 MHz (39.10.5).
+    {
+        (void)D::disable();
+        Pll::stop();
+        verdict("source_ok(xoschf) holds on the DA: SOURCE = 1 is EXTCLK, no crystal "
+                "mode to refuse", Pll::source_ok(PllSource::xoschf));
+        TcdConfig c = base_one_ramp(50, 150, 200, static_cast<uint16_t>(period - 1));
+        c.clock = TcdClock::extclk;
+        const bool on_ext = D::init(c);
+        delay_us(clock, 2000);
+        const Stat ext = gather<CycleTcb>([] { return Cycle::period_ticks(); }, 8);
+        (void)D::disable();
+        const bool started = Pll::start(PllSource::xoschf, PllMultiplier::x2);
+        c.clock = TcdClock::pll;
+        const bool on_pll = started && D::init(c);
+        delay_us(clock, 2000);
+        const Stat pll = gather<CycleTcb>([] { return Cycle::period_ticks(); }, 8);
+        const bool locked = Pll::locked();
+        print(serial, "    TCD on EXTCLK: cycle = ", ext.mean(), " CLK_PER ticks (expect ",
+              period, "); on the PLL from EXTCLK x2: ", pll.mean(), " (expect ", period / 2,
+              "), PLLS = ", locked, crlf);
+        verdict("a TCD on EXTCLK counts CLK_PER's own cycles: the cycle is the period",
+                on_ext && near(ext.mean(), period, 1));
+        verdict("start(xoschf, x2) is accepted and the TCD runs on it", on_pll && locked);
+        verdict("the PLL from EXTCLK x2 halves the cycle exactly (one tick)",
+                on_pll && near(pll.mean(), period / 2, 1));
+    }
+#endif
 
     quiesce();
     Pll::stop();
@@ -1030,8 +1091,10 @@ bool output_moving(uint32_t samples = 100'000) {
 }
 
 void th_input_modes() {
-    print(serial, "h the input modes, the qualifiers (async / filter / blanking) and "
-                  "errata 2.14.1 and 2.14.3", crlf);
+    print(serial, has_xoschf ? "h the input modes, the qualifiers (async / filter / blanking) and "
+                               "errata 2.14.1 and 2.14.3"
+                             : "h the input modes, the qualifiers (async / filter / blanking) and "
+                               "errata 2.13.1 and 2.13.3", crlf);
     quiesce();
     probe_ab();
     arm_meters(ChA{}, ChB{});
@@ -1220,8 +1283,10 @@ void th_input_modes() {
               " while held, ", z_still, " after release, ", z_resumed,
               " after RESTART (strobe accepted: ", z_restart, "); WOA moving after: ",
               z_moving, crlf);
-        print(serial, "    errata 2.14.3 says this combination 'does not work'; the "
-                      "numbers above are what it actually does on this die", crlf);
+        print(serial, has_xoschf ? "    errata 2.14.3 says this combination 'does not work'; the "
+                                   "numbers above are what it actually does on this die"
+                                 : "    errata 2.13.3 says this combination 'does not work'; the "
+                                   "numbers above are what it actually does on this die", crlf);
         TcdConfig broken = input_base(TcdInputMode::wait_sw, TcdEventConfig::neither,
                                       TcdEventAction::fault);
         broken.compare_a_set = 0;
@@ -1390,7 +1455,7 @@ void th_input_modes() {
                                      TcdEventAction::capture);
             c.sync_prescaler = TcdSyncPrescaler::div1;
             c.count_prescaler = legs[l].p;
-            if (!D::init(c)) { verdict("errata 2.14.1 leg init", false); continue; }
+            if (!D::init(c)) { verdict(has_xoschf ? "errata 2.14.1 leg init" : "errata 2.13.1 leg init", false); continue; }
             arm_level_sources();
             for (uint8_t wi = 0; wi < 3; ++wi) {
                 uint8_t hits = 0;
@@ -1414,8 +1479,10 @@ void th_input_modes() {
         print(serial, "    the CAPTURE path (ACTION = capture, INPUTMODE = 0) loses ",
               lost ? "some" : "NOTHING", " here", crlf);
         verdict("CNTPRES = DIV1 (the documented workaround) loses no capture", clean);
-        verdict("on THIS die the capture path loses none with a counter prescaler "
-                "either - errata 2.14.1 NOT reproduced there", !lost);
+        verdict(has_xoschf ? "on THIS die the capture path loses none with a counter prescaler "
+                             "either - errata 2.14.1 NOT reproduced there"
+                           : "on THIS die the capture path loses none with a counter prescaler "
+                             "either - errata 2.13.1 NOT reproduced there", !lost);
 
         // The erratum says "events can be missed", and the events that
         // matter to this peripheral are the ones that reach the OUTPUT
@@ -1445,7 +1512,7 @@ void th_input_modes() {
             c.input_a = {.enable = true, .action = TcdEventAction::fault, .rising = true,
                          .config = TcdEventConfig::async,
                          .mode = TcdInputMode::edge_trig_freq};
-            if (!D::init(c)) { verdict("errata 2.14.1 fault leg init", false); continue; }
+            if (!D::init(c)) { verdict(has_xoschf ? "errata 2.14.1 fault leg init" : "errata 2.13.1 fault leg init", false); continue; }
             arm_level_sources();
             const Stat nominal = gather<WidthATcb>([] { return WidthA::width_ticks(); }, 4);
             uint8_t hits = 0;
@@ -1470,13 +1537,21 @@ void th_input_modes() {
                   " ticks, ", hits, "/8 shortest-possible ASYNC events blocked it", crlf);
         }
         verdict("the SYNCPRES workaround misses no output override", blocked[1] == 8);
-        verdict("and on THIS die neither does CNTPRES = 32 - errata 2.14.1 NOT "
-                "reproduced on the output path either", blocked[0] == 8);
-        print(serial, "    errata 2.14.1 says asynchronous input events can be missed "
-                      "with CNTPRES != DIV1 on this revision. Neither path lost one here, "
-                      "at any prescaler, down to a back-to-back set/clear (~125 ns). The "
-                      "driver carries the erratum and names the workaround; the bench "
-                      "records it as NOT REPRODUCED, not as absent.", crlf);
+        verdict(has_xoschf ? "and on THIS die neither does CNTPRES = 32 - errata 2.14.1 NOT "
+                             "reproduced on the output path either"
+                           : "and on THIS die neither does CNTPRES = 32 - errata 2.13.1 NOT "
+                             "reproduced on the output path either", blocked[0] == 8);
+        print(serial, has_xoschf
+                          ? "    errata 2.14.1 says asynchronous input events can be missed "
+                            "with CNTPRES != DIV1 on this revision. Neither path lost one here, "
+                            "at any prescaler, down to a back-to-back set/clear (~125 ns). The "
+                            "driver carries the erratum and names the workaround; the bench "
+                            "records it as NOT REPRODUCED, not as absent."
+                          : "    errata 2.13.1 says asynchronous input events can be missed "
+                            "with CNTPRES != DIV1 on this revision. Neither path lost one here, "
+                            "at any prescaler, down to a back-to-back set/clear (~125 ns). The "
+                            "driver carries the erratum and names the workaround; the bench "
+                            "records it as NOT REPRODUCED, not as absent.", crlf);
     }
     quiesce();
 }
@@ -1588,9 +1663,19 @@ void tj_outputs() {
         c.enable_wod = true;
         c.wo_c = TcdWaveformSelect::pwm_a;
         c.wo_d = TcdWaveformSelect::pwm_b;
-        verdict("all four outputs, WOC = A and WOD = B", D::init(c));
-        probe_cd();
-        arm_meters(ChA{}, ChB{});
+        if constexpr (board_pa7_free) {
+            verdict("all four outputs, WOC = A and WOD = B", D::init(c));
+            probe_cd();
+            arm_meters(ChA{}, ChB{});
+        } else {
+            // PA7's 100 nF: WOC/WOD read on ALT2's PF2/PF3 instead.
+            c.route = TcdRoute::alt2;
+            verdict("all four outputs on ALT2 (PA7 carries 100 nF), WOC = A and WOD = B",
+                    D::init(c));
+            ChTcd::source(EvPin<Pin<'F', 2>>{});
+            ChF::source(EvPin<Pin<'F', 3>>{});
+            arm_meters(ChTcd{}, ChF{});
+        }
         const Wave w = measure();
         show_wave(w);
         verdict("WOC carries WOA's on-time", near(w.high_a.mean(), 300, 2));
@@ -1908,11 +1993,18 @@ void help() {
                   "f the PLL | g capture | h input modes | i dithering | "
                   "j output plumbing | k the two vectors | l PROGEV, FIFTY with AUPDATE"
                   "    -> z = all of a..l", crlf);
-    print(serial, "  No wires: WOA..WOD on PA4..PA7 read back as pin events into TCB "
-                  "meters, the TCD's own CMPBCLR event as the cycle counter, PD3/PD4 "
-                  "driven from PORT as the two input-event sources. PF0..PF3 (ALT2) are "
-                  "claimed only inside test a; PF4/PF5 are the console and are never "
-                  "touched.", crlf);
+    print(serial, board_pa7_free
+                      ? "  No wires: WOA..WOD on PA4..PA7 read back as pin events into TCB "
+                        "meters, the TCD's own CMPBCLR event as the cycle counter, PD3/PD4 "
+                        "driven from PORT as the two input-event sources. PF0..PF3 (ALT2) are "
+                        "claimed only inside test a; PF4/PF5 are the console and are never "
+                        "touched."
+                      : "  No wires: WOA..WOC on PA4..PA6 read back as pin events into TCB "
+                        "meters (PA7 carries 100 nF on this board), the TCD's own CMPBCLR "
+                        "event as the cycle counter, PD3/PD4 driven from PORT as the two "
+                        "input-event sources. PF0..PF3 (ALT2) are claimed inside tests a and "
+                        "j (WOC/WOD on PF2/PF3: the LED lights, the button must stay up); "
+                        "PF4/PF5 are the console and are never touched.", crlf);
 }
 
 } // namespace
@@ -1953,7 +2045,7 @@ int main() {
     auto board = board_id();
     if (board.empty()) board = "?";
     print(serial, crlf, "test_avr_tcd - TCD test suite (board ", board,
-          ", clk=", xtal ? "XTAL" : "OSCHF", " 24 MHz, silicon rev ", hex(SYSCFG.REVID),
+          ", clk=", xtal ? (has_xoschf ? "XTAL" : "EXTCLK") : "OSCHF", " 24 MHz, silicon rev ", hex(SYSCFG.REVID),
           ")", crlf);
     help();
     print(serial, "> ");

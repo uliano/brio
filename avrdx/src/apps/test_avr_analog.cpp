@@ -20,7 +20,9 @@
 // DAC +-10 LSB absolute) with the wire's own errors added.
 //
 // Supply-independent: VDD is MEASURED at start (VDDDIV10 against the
-// 2.048 V reference) and everything that depends on it follows -
+// 2.048 V reference on a DB; on a DA, which has no VDDDIV10 input - no
+// MVIO - DAC0 at 2000 mV from the 2.048 V reference read against VDD
+// itself) and everything that depends on it follows -
 // which internal references have headroom (2.048 needs 2.5 V, 2.5
 // needs 2.95 V, 4.096 needs 4.55 V: at 5 V all four are exercised),
 // the VDD/10 expectations. Run it at 3.3 V and at 5 V.
@@ -46,7 +48,8 @@
 //      codes;
 //  12  errata 2.3.2: with init_delay != 0, select() after enable gives
 //      the OLD input for one conversion - shown, then flush() fixes it;
-//  13  internal inputs: GND ~ 0, VDDDIV10 ~ VDD/10, VDDIO2DIV10,
+//  13  internal inputs: GND ~ 0, VDDDIV10 ~ VDD/10, VDDIO2DIV10 (DB
+//      only; on a DA the DAC-against-VDD reading repeats instead),
 //      TEMPSENSE plausible (15..45 C);
 //  14  VREFA = the DAC itself: with the ADC referenced to VREFA and
 //      reading DAC0 internally, the result is full scale for any DAC
@@ -56,6 +59,7 @@
 // from the datasheet), RUNSTDBY/ALWAYSON (sleep timing), DACREF0-2
 // (needs the ACs), the RESRDY event as a generator (needs a TCB).
 
+// build: boards = db48,da48
 // build: monitor_speed = 460800
 
 #include <avr/interrupt.h>
@@ -75,7 +79,9 @@
 #include "util/analog.hpp"
 #include "util/print.hpp"
 
-using SysClock = brio::Clock<brio::ClockSource::crystal, 24'000'000>;
+using SysClock = brio::Clock<brio::has_xoschf ? brio::ClockSource::crystal
+                                              : brio::ClockSource::external,
+                             24'000'000>;
 constexpr SysClock clock;
 
 namespace {
@@ -89,7 +95,7 @@ using D = Dac<0>;
 using A = Adc<0>;
 using Wire = AnalogIn<Pin<'D', 1>>;            // PD6 -> PD1
 
-uint16_t vdd_mv = 0;                            // measured at start (VDDDIV10 vs 2.048 V)
+uint16_t vdd_mv = 0;                            // measured at start (see main())
 
 // The internal references this supply has headroom for (VREF specs:
 // 2.048 needs VDD >= 2.5 V, 2.5 needs 2.95 V, 4.096 needs 4.55 V).
@@ -149,6 +155,24 @@ void dac_default(Ref r) {
     D::set(0);
     delay_us(clock, 300);       // reference start-up (200 us worst) + settling
 }
+
+#if !defined(MVIO)
+/// VDD on a part with no VDDDIV10 input (the DA: no MVIO): DAC0 at 2000 mV
+/// from the 2.048 V reference, read internally against VDD as the ADC's
+/// reference - VDD = 2000 mV x 4096 / counts. The DAC's +-10 LSB and the
+/// reference's tolerance are the error, the same class as the DB's path.
+uint16_t vdd_by_dac() {
+    dac_default(Ref::v2048);
+    D::set(1000);
+    delay_us(clock, 300);
+    A::init(clock, AdcConfig{.reference = Ref::vdd, .sample_length = internal_sample_length});
+    A::select(AdcInput::dac0);
+    A::flush();
+    const uint16_t counts = read_avg(16);
+    const uint32_t dac = dac_mv(1000, D::steps, 2048);
+    return counts ? static_cast<uint16_t>(dac * 4096u / counts) : 0;
+}
+#endif
 
 // ---- 1: references cross-check ---------------------------------------------------
 void t1_references() {
@@ -470,6 +494,7 @@ void t13_internal() {
     A::init(clock, AdcConfig{.reference = Ref::v2048});
     A::select(AdcInput::gnd);
     const uint16_t g = read_avg(8);
+#if defined(MVIO)
     A::select(AdcInput::vdd_div10);
     const uint16_t v = read_avg(8);
     A::select(AdcInput::vddio2_div10);
@@ -479,6 +504,14 @@ void t13_internal() {
           ")  vddio2/10 -> ", adc_mv(v2, 4096, 2048) * 10, " mV", crlf);
     verdict("gnd ~ 0", g < 8);
     verdict("VDD/10 repeatable vs the start-up measurement (2 %)", near(vdd_meas, vdd_mv, vdd_mv / 50));
+#else
+    const uint16_t vdd_meas = vdd_by_dac();
+    print(serial, "  gnd ", g, "  DAC0 against VDD -> VDD ~ ", vdd_meas, " mV (start-up: ",
+          vdd_mv, "); no VDDDIV10 / VDDIO2DIV10 input on this part (no MVIO)", crlf);
+    verdict("gnd ~ 0", g < 8);
+    verdict("VDD by DAC0 repeatable vs the start-up measurement (2 %)",
+            near(vdd_meas, vdd_mv, vdd_mv / 50));
+#endif
     // temperature: 2.048 V ref, init delay >= 25 us, sample length >= 28 us
     // at CLK_ADC = 24 MHz / 64 = 375 kHz: 1 cycle = 2.67 us -> 32 cycles > 25 us... use
     // 64 for the init delay and sample_length 12 (32 us).
@@ -518,6 +551,7 @@ void t14_vrefa() {
         if (!near(r, 4095, tol)) ok = false;
     }
     verdict("full scale for every VREFA level, within the buffer's 20 mV", ok);
+#if defined(MVIO)
     // and VDD/10 against a known VREFA: 3300/10 = 330 mV / (DAC 1023 = 2046 mV) * 4096
     D::set(1023);
     delay_us(clock, 300);
@@ -527,6 +561,9 @@ void t14_vrefa() {
     const uint32_t exp = (static_cast<uint32_t>(vdd_mv) / 10) * 4096u / 2046u;
     print(serial, "  VDD/10 with VREFA = 2046 mV: ", v, " (exp ", exp, ")", crlf);
     verdict("VDD/10 vs VREFA", near(v, static_cast<int32_t>(exp), static_cast<int32_t>(exp / 8)));
+#else
+    print(serial, "  VDD/10 against VREFA: SKIP - no VDDDIV10 input on this part (no MVIO)", crlf);
+#endif
 }
 
 // ---- 15: extras (dacref inputs, signed window, DAC readback, live rebase) --------
@@ -631,14 +668,18 @@ int main() {
     sei();
     // Measure the supply first: VDD/10 against the 2.048 V reference,
     // sampled long (internal divider), averaged. Everything else follows.
+#if defined(MVIO)
     A::init(clock, AdcConfig{.reference = Ref::v2048, .sample_length = internal_sample_length});
     A::select(AdcInput::vdd_div10);
     A::flush();
     vdd_mv = static_cast<uint16_t>(adc_mv(read_avg(16), 4096, 2048) * 10);
+#else
+    vdd_mv = vdd_by_dac();
+#endif
     auto board = board_id();
     if (board.empty()) board = "?";
     print(serial, crlf, "test_avr_analog - VREF/DAC/ADC self-test suite (board ", board,
-          ", clk=", xtal ? "XTAL" : "OSCHF",
+          ", clk=", xtal ? (has_xoschf ? "XTAL" : "EXTCLK") : "OSCHF",
           ", silicon rev ", hex(SYSCFG.REVID), ")", crlf,
           "wire PD6->PD1 and PD6->PD7; VDD measured ", vdd_mv, " mV", crlf);
     help();

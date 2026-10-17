@@ -2,7 +2,8 @@
 
 Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B (TCB
 chapter 24, PORTMUX 17.3.8, EVSYS 16 generators 0xA0-0xA9 / users
-0x1E-0x27), errata DS80000915F (2.13.1, 2.13.2). Complements: TB3214
+0x1E-0x27), errata DS80000915F (2.13.1, 2.13.2) and, for the DA parts,
+DS80000882C (2.12.1). Complements: TB3214
 "Getting Started with TCB" and the Microchip examples
 `avr128da48-getting-started-with-tcb`,
 `avr128da48-tcb-frequency-dutycycle-measurement` (see
@@ -103,9 +104,10 @@ Facts that matter to code:
   (measured both ways: [platform.md](platform.md)). `DBGRUN` keeps it
   running under a debugger halt (default: halted and blind to events -
   a single-shot under PyAvrOCD stops with the CPU).
-- **Errata 2.13.1 (A4/A5)**: in PWM8 the CCMP and CNT bytes are not
-  independent - write CCMP as one 16-bit value (period and duty
-  together), never byte-wise.
+- **Errata DB 2.13.1 (A4/A5) / DA 2.12.1 (every revision)**: in PWM8
+  the CCMP and CNT bytes are not independent - write CCMP as one 16-bit
+  value (period and duty together), never byte-wise; the driver always
+  does, on both families.
 
 As event generator: `TCBn CAPT` (0xA0 + 2n) and `TCBn OVF` (0xA1 +
 2n), one CLK_PER pulses, same conditions as the flags. As event user:
@@ -203,7 +205,8 @@ and OVF share it).
 ## Bench findings
 
 `test_avr_timer` (silicon rev A5, 24 MHz crystal, 3.3 V), all
-measured against the same crystal:
+measured against the same crystal - and the same suite green on the
+AVR128DA48 (rev A7, its 24 MHz external clock, 5 V; 197 verdicts):
 
 - **The capture is the interval minus one CLK_PER cycle** in FRQ, PW and
   FRQPW (24000 ticks read 23999; Pwm8 with CCMPL = 255 reads 255 for

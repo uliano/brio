@@ -391,7 +391,10 @@ What the rows say:
 ## Bench findings
 
 Measured on rev. A5 at 5 V, CLK_PER 24 MHz, TWI0 on its DEFAULT route,
-one open-drain bus with 1.5k pull-ups. `test_avr_twi`: `z` = the
+one open-drain bus with 1.5k pull-ups - and on an AVR128DA48 rev. A7
+(its external 24 MHz clock, 5 V, the same node), where `z` runs 206 of
+206 and `y` 136 of 136, twice and three times, its meters reading the
+bus rise as the same 166 ns. `test_avr_twi`: `z` = the
 single-board half; `y` = the two-board half, with an ATSAMC21J18A on
 the same node running the instrument firmware `twi_peer` (its SERCOM3
 on PA22/PA23, commanded in band over the bus under test). The desk gives
@@ -571,7 +574,10 @@ client replied `i2c_ok` with the right bytes in both directions.
 ### With a second chip on the wire
 
 Every figure below is `test_avr_twi y` against the SAM C21's
-`twi_peer`, twelve runs of the same image, 136 verdicts each.
+`twi_peer`, twelve runs of the same image, 136 verdicts each - and three
+more runs on the AVR128DA48 (rev A7, its external 24 MHz clock, 5 V),
+136 of 136 each, land inside every range it gives (the 1 ms hold's
+tenure 162100 ticks, the unstretched one 16814).
 
 **Clock stretching is exactly what the client's hold costs.** A foreign
 client that holds its answer to every DATA byte for a commanded time
@@ -736,6 +742,10 @@ implement):
 - CTRLA.SDASETUP: the knob that shapes the client's own setup-time
   stretch is exposed and written, but its two settings are not measured
   apart on the wire;
+- the DA's swapped SDAHOLD codes (DS80000882C 2.14.2): `sda_hold` writes
+  the swapped code on a DA and `sda_hold_code` reads it back, but no
+  letter measures a hold time on the wire, on either family - an
+  oscilloscope on SDA against SCL's fall would;
 - SMBus as an ELECTRICAL fact: CTRLA/DUALCTRL.INPUTLVL is exposed and
   written, but the input transition level itself is not measured;
 - DBGCTRL.DBGRUN;

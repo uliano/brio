@@ -42,6 +42,8 @@
 // u the User Row write path (one erase cycle of the row)
 // g the APPDATA legs and the multi-page-erase erratum, which need a
 //   temporary CODESIZE fuse (see the message the test prints)
+// m (an AVR DA only, first after a reset) the data-space window's
+//   protection check, DS80000882C 2.7.1: two erase cycles of one page
 
 // build: boards = db48,da48
 // build: monitor_speed = 460800
@@ -258,6 +260,12 @@ constexpr uint16_t scratch_page_mp8 = 8;
 constexpr uint16_t scratch_page_mp16 = 16;
 constexpr uint16_t scratch_page_mp32 = 32;
 constexpr uint16_t scratch_page_latency = 40;  ///< e: four pages, one erase each
+constexpr uint16_t scratch_page_window = 44;   ///< m: the data-space window (DA only)
+
+/// The DA family's errata carry the data-space window's protection bug
+/// (DS80000882C 2.7.1); the DB's (DS80000915F) have no such item. The
+/// stratum tells the two families apart by XOSCHF (clock.hpp).
+constexpr bool window_erratum = !has_xoschf;
 
 uint32_t scratch_page(uint16_t index) {
     return Nvm::scratch_region().begin +
@@ -1238,6 +1246,83 @@ void tg_appdata() {
     quiesce();
 }
 
+
+// ---- m the data-space window's protection check (DA: DS80000882C 2.7.1) -----------
+// The erratum: the inter-section protection ignores FLMAP and compares only
+// the offset into the 32 KB window, so BOOT is mirrored into every section
+// the window maps - writes through the window work only with FLMAP = 0.
+// On this geometry (BOOTSIZE = 128: BOOT is the first 64 KB) every offset
+// of the window lands in BOOT, so a page erase through the window into
+// the scratch region - APPCODE, which BOOT may write and which letter d
+// erases through SPM - is predicted REFUSED with WRITEPROTECT, the page
+// left as it was; a part without the erratum would erase it. The read half
+// is the control: the same window READS the section it maps.
+//
+// Not in z, and run before letter a after a reset: a moves FLMAP and then
+// locks it, and only a reset clears FLMAPLOCK. The window is moved with
+// interrupts off and nothing between the two FLMAP writes may read
+// .rodata, which the window normally shows (FLMAP 3). Wear: one erase and
+// one word write to mark the page, one erase to leave it blank - two erase
+// cycles of one scratch page per run.
+void tm_window() {
+    print(serial, "m the data-space window's protection check (DS80000882C 2.7.1): a page "
+                  "erase through the window, into APPCODE", crlf);
+    quiesce();
+    if (!scratch_usable()) {
+        print(serial, "  no writable scratch region under these fuses: SKIPPED", crlf);
+        return;
+    }
+    if (Nvm::flmap_locked()) {
+        verdict("FLMAPLOCK is clear (letter a sets it: run m first after a reset)", false);
+        return;
+    }
+    const uint32_t page = scratch_page(scratch_page_window);
+    const uint8_t boot_map = Nvm::flmap();
+    const uint8_t map = static_cast<uint8_t>(page >> 15);       // its 32 KB section
+    const uint16_t offset = static_cast<uint16_t>(page & 0x7FFFu);
+    print(serial, "  the page at ", page, " (", section_name(Nvm::section_of(page)),
+          "): window section ", map, ", offset ", offset, "; .rodata's section ", boot_map,
+          crlf);
+    verdict("the page is APPCODE, which BOOT may write",
+            Nvm::section_of(page) == FlashSection::appcode &&
+                Nvm::writable(page, page + flash_page_size));
+    verdict("a marker 0xA55A is written through SPM",
+            Nvm::erase(page) && Nvm::write_word(page, 0xA55Au) &&
+                Nvm::flash_read_word(page) == 0xA55Au);
+
+    volatile uint8_t* const window =
+        reinterpret_cast<volatile uint8_t*>(MAPPED_PROGMEM_START + offset);
+    cli();
+    Nvm::clear_error();
+    const bool moved = Nvm::set_flmap(map);
+    const uint8_t lo = window[0];
+    const uint8_t hi = window[1];
+    Nvm::select(NvmCommand::flash_page_erase);
+    window[0] = 0xFF;                        // the store is the erase request
+    const bool idle = Nvm::wait_idle();
+    Nvm::clear_command();
+    const NvmError err = Nvm::error();
+    const bool restored = Nvm::set_flmap(boot_map);
+    sei();
+    const uint16_t after = Nvm::flash_read_word(page);
+
+    print(serial, "  through the window: read ", hex(hi), hex(lo), "; the erase left ERROR ",
+          static_cast<uint8_t>(err), " (2 = WRITEPROTECT) and the page reading ", hex(after),
+          crlf);
+    verdict("FLMAP moved to the page's section and back", moved && restored &&
+                                                           Nvm::flmap() == boot_map);
+    verdict("the window READS the section it maps: the marker comes through it",
+            lo == 0x5Au && hi == 0xA5u);
+    verdict("the controller went idle again", idle);
+    verdict("2.7.1: a page erase through the window into APPCODE is refused "
+            "(WRITEPROTECT: the offset alone was checked, and it is BOOT's)",
+            err == NvmError::write_protect);
+    verdict("and the page still holds the marker", after == 0xA55Au);
+    Nvm::clear_error();
+    verdict("the page is left blank again through SPM", Nvm::erase(page) &&
+                                                        Nvm::flash_read_word(page) == 0xFFFFu);
+}
+
 // ---- the menu -----------------------------------------------------------------------
 
 using TestFn = void (*)();
@@ -1281,6 +1366,10 @@ void help() {
           "  outside z (each costs more than a test should cost per run): "
           "u the User Row write path | g APPDATA and the multi-page-erase "
           "erratum (needs a temporary CODESIZE fuse)", crlf);
+    if constexpr (window_erratum) {
+        print(serial, "  and, first after a reset: m the data-space window's protection "
+                      "check (DS80000882C 2.7.1)", crlf);
+    }
 }
 
 } // namespace
@@ -1331,7 +1420,7 @@ int main() {
         auto board = board_id();
         if (board.empty()) board = "?";
         print(serial, crlf, "test_avr_nvm - NVMCTRL test suite (board ", board,
-              ", clk=", xtal ? "XTAL" : "OSCHF", " 24 MHz, silicon rev ",
+              ", clk=", xtal ? (has_xoschf ? "XTAL" : "EXTCLK") : "OSCHF", " 24 MHz, silicon rev ",
               hex(SYSCFG.REVID), ", BOOTSIZE ", FUSE.BOOTSIZE, "/CODESIZE ",
               FUSE.CODESIZE, ")", crlf);
         report_boot();
@@ -1348,6 +1437,9 @@ int main() {
         else {
             bool found = false;
             for (const Test& t : tests) if (t.key == c) { run(t.fn); found = true; }
+            if constexpr (window_erratum) {
+                if (c == 'm') { run(tm_window); found = true; }
+            }
             if (!found) print(serial, "? for help", crlf);
         }
         print(serial, "> ");

@@ -273,6 +273,17 @@ AO (request/reply), it does not touch the registers.
 
 ## Bench findings (`test_avr_analog`, rev A5, 3.3 V and 5 V)
 
+On the **AVR128DA48** (rev A7, 5 V) - whose board has not got the suite's
+PD6-to-PD1 and PD6-to-PD7 wires, so every leg that reads the wire is
+owed there (below) - the internal paths measure as on the DB: the
+reference cross-check through DAC0 within a few counts of every
+expectation (3068 of 3072, 1534 of 1536, 2517 of 2516), the DAC
+unbuffered path, the prescaler rates, the sampling-time formula, the
+DACREF inputs at 997 / 2001 / 2997 of 1000 / 2000 / 3000, the die at 27
+C. With no VDDDIV10 input on a DA (no MVIO) the suite reads VDD as DAC0
+at 2000 mV from the 2.048 V reference against VDD as the reference:
+5022..5028 mV, ten runs, where the probe reads 5.04 V.
+
 - The warm-up after enabling is real: the first conversion before
   ~6 us is garbage. `init()` waits 10 us - that is why it takes the
   clock.
@@ -322,6 +333,9 @@ Driver gaps:
 
 Implemented but not bench-verified:
 
+- every leg of `test_avr_analog` that reads PD1 or takes VREFA from PD7,
+  on the AVR128DA48: its board carries no PD6-to-PD1 and PD6-to-PD7
+  wires; fitting the two is what measures them there;
 - the 200 us reference start-up case (32.768 kHz main clock: a serial
   console cannot follow it, so it needs a sleepy application);
   `debug_run` (needs a debugger session).

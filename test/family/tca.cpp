@@ -36,13 +36,23 @@ void tca1_exists() {
 }
 #endif
 
-#if defined(__AVR_AVR128DB64__) || defined(__AVR_AVR128DA64__)
+#if defined(__AVR_AVR128DB64__)
 // 64-pin: the PORTG routes and TCA1 -> PORTE exist (device header).
 void tca_big_package() {
     Tca<0>::init<TcaConfig{.mode = TcaMode::normal, .period = 100, .route = 'G'}>();
     TcaPwm<1, 'G'>::init();
     static_assert(tca_route_code(1, 'E') != 0xFF);
     static_assert(tca_wo_pin(1, 'E', 0) == 4);          // WO0 = PE4
+}
+#endif
+
+#if defined(__AVR_AVR128DA64__)
+// 64-pin DA: TCA0's PORTG route exists; TCA1's PORTE and PORTG, which the
+// header defines, are refused (DS80000882C 2.11.1: not functional).
+void tca_big_package() {
+    Tca<0>::init<TcaConfig{.mode = TcaMode::normal, .period = 100, .route = 'G'}>();
+    static_assert(tca_route_code(1, 'E') == 0xFF);
+    static_assert(tca_route_code(1, 'G') == 0xFF);
 }
 #endif
 

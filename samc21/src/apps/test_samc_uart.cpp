@@ -112,7 +112,7 @@
 //      assert_failed; context 0xD6, the claim of SERCOM5 refused)
 //
 // THE TWO-BOARD LETTERS (y; SERCOM1 on the desk's four wires against an
-// AVR128DB48's usart_peer - the section below says how the wires are used):
+// AVR128DA48's usart_peer - the section below says how the wires are used):
 //   J  the link and the far peer: who answers, on what time base
 //   K  THE RATE judged by a foreign receiver on a crystal: every regime of
 //      the generator, 2400 baud to 3 Mbaud, a gapless burst timed by the
@@ -2399,9 +2399,9 @@ void tx_refusal() {
 // crystal at the other end (the second all-key, y)
 // =============================================================================
 //
-// THE FAR END is an AVR128DB48 running avrdx's usart_peer (usart_link.hpp,
+// THE FAR END is an AVR128DA48 running avrdx's usart_peer (usart_link.hpp,
 // kind 0x01): its USART4 on the crossed pair, its time base its own 24 MHz
-// crystal, driven IN BAND over the very link under test - the client half
+// quartz clock, driven IN BAND over the very link under test - the client half
 // below is test_avr_serial's, speaking the same protocol header. What it
 // gives this suite that the loop and the host bridge cannot: a FOREIGN
 // receiver on a crystal, which times this SERCOM's frames (the Report's

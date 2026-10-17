@@ -23,7 +23,7 @@
 //   plus a dedicated GND.
 //
 // Against a second SAM C21 the four run STRAIGHT THROUGH (same pin names
-// both ends); against an AVR128DB48 they meet its SPI0 ALT1 - PA16 to
+// both ends); against an AVR128DA48 they meet its SPI0 ALT1 - PA16 to
 // PE0 (MOSI), PA18 to PE1 (MISO), PA19 to PE2 (SCK), PA17 to PE3 (SS).
 //
 // THE SAME FOUR WIRES CARRY BOTH ROLES, ON TWO DIFFERENT DOPO ROWS, and
@@ -1078,7 +1078,7 @@ void td_rates() {
     // the next-plus-one answer at least three SCK cycles before a
     // character boundary (32.6.2.6.2), and a polled loop's turnaround
     // sets where that stops holding, and it differs from peer to peer -
-    // and so does the silicon under it: an AVR128DB48 client's runs hold
+    // and so does the silicon under it: an AVR128DA48 client's runs hold
     // to 2 MHz, where its buffer's copy into the shifter stops meeting
     // the host's first edge (its errata clarification 3.5.2; letter i).
     // WHERE it lands is the print, with the first two rungs that are not
@@ -1786,7 +1786,7 @@ void tg_kernel() {
 // ===========================================================================
 //
 // test_avr_spi's two-board half draws some verdicts that are facts about
-// its PEER, an AVR128DB48 client - its buffering regimes, its CLK_PER/6
+// its PEER, an AVR128DA48 client - its buffering regimes, its CLK_PER/6
 // ceiling, its loss semantics and its write collision, its self-selected
 // client - and on a desk where that suite's only peer is a SAM C21 it
 // prints them and judges what is portable. This letter is where they are
@@ -2285,7 +2285,7 @@ void ti_avr_runs() {
 // the client's RUNS (samc21/spi.hpp SpiClient: exchange, receive) against
 // the peer's host_burst - one character at a time with spilink::gap_us
 // between them, the select low for the whole burst, at the peer's clock /
-// 32 (750 kHz on the AVR128DB48's 24 MHz) - and stages what no other
+// 32 (750 kHz on the AVR128DA48's 24 MHz) - and stages what no other
 // letter does: the receive run and its echo, a run whose host never
 // clocks (`stalled`), the select's fall as INTFLAG.SSL (CTRLB.SSDE,
 // 32.6.3.6) and as the wake-up from IDLE and then from STANDBY

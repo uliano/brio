@@ -247,7 +247,7 @@
 //           acknowledge), one for a repeated START, one for the STOP -
 //           times the SCL period the register pair in force gives on this
 //           node, 10 + BAUD + BAUDLOW + f x T_RISE cycles (33.6.2.4.1),
-//           T_RISE the node's 166 ns as the AVR128DB48's TCB meters measure
+//           T_RISE the node's 166 ns as the AVR128DA48's TCB meters measure
 //           it (test_avr_twi letter b): PA23 cannot be both SERCOM3's pad
 //           and an EIC line, so this chip cannot time its own SCL. As n
 //           data bytes over that time; the probes wire=0.
@@ -1232,7 +1232,7 @@ constexpr I2cPads bus_pads{
 /// slot).
 using Pump = I2cHost<3, bus_pads>;
 
-/// The bus's rise time, measured on this node by the AVR128DB48's
+/// The bus's rise time, measured on this node by the AVR128DA48's
 /// TCB meters (test_avr_twi letter b: the SCL period over the register's
 /// floor): 166 ns. The chapter's formula (33.6.2.4.1) with it is the SCL
 /// period the wire field charges, and init() is told the same figure.

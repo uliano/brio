@@ -1,7 +1,11 @@
 # EVSYS - the event system (AVR DA/DB)
 
 Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B (EVSYS
-chapter 16, PORTMUX 17.5.1), errata DS80000915F (no EVSYS items).
+chapter 16, PORTMUX 17.5.1), errata DS80000915F (no EVSYS items) and,
+for the DA parts, DS80000882C (2.6.1: PB6/PB7 and PE4..PE7 are not
+connected to the event system, as generators or as EVOUT - pins a DA
+bonds on 64 pins only; `EvPin` and `EvOut` refuse them there, the
+negative tests `evsys_no_pe4_event_on_da` and `evsys_no_evoutb_alt_on_da`).
 Driver: `avrdx/evsys.hpp`. Reference test: `test_avr_timer` (TCB capture
 and count by event, CCL LUT routing, AC OUT as generator).
 
@@ -135,6 +139,11 @@ brio::EventChannel<3>::pulse();
 
 ## Bench findings
 
+- On the AVR128DA48 (rev A7) every event route `test_avr_timer`,
+  `test_avr_tcd` and `test_avr_sleep` build runs as on the DB; its 48
+  pins bond none of the pins DS80000882C 2.6.1 cuts off. EVOUT's ALT1
+  pin PA7, loaded there with the board's 100 nF, reads the held level 5
+  us after the change in twelve runs of twelve.
 - `EvPitDiv<64>` on an odd channel measures 512 Hz on an EVOUT pin,
   `EvPitDiv<8192>` on an even one 4 Hz: the dividers count CLK_RTC
   cycles (32768 / div), and the RTC counter's own prescaler does not

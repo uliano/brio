@@ -64,7 +64,7 @@
 //   PA18 = PAD[2]  MISO (DO, driven only to answer)
 //   PA19 = PAD[3]  SCK
 // straight through to a second SAM C21's same pads, or to an
-// AVR128DB48's SPI0 ALT1 as PE0, PE3, PE1 and PE2 - the rows
+// AVR128DA48's SPI0 ALT1 as PE0, PE3, PE1 and PE2 - the rows
 // test_samc_spi's header explains. The same four pads carry this board
 // as the bus HOST for Op::host_burst - DOPO row 0x3, chip select by
 // PORT on PA17.

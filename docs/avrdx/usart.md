@@ -278,7 +278,9 @@ U::disarm_start_of_frame();         // first thing on the way back
 ## Bench findings
 
 `test_avr_serial` runs on an AVR128DB48 rev. A5 (24 MHz crystal, 5 V)
-and has two halves: `z` is the SINGLE-BOARD set (11 tests,
+- and, green the same, on an AVR128DA48 rev. A7 (its external 24 MHz
+quartz clock, 5 V: `z` 163 of 163 and `y` 118 of 118 twice, `v` `w` `x`
+green, the SAM C21 at -28 ppm against it) - and has two halves: `z` is the SINGLE-BOARD set (11 tests,
 163 verdicts, nothing to wire) and `y` is the TWO-BOARD set (13 tests,
 118 verdicts and one SKIPPED leg against this desk's peer)
 against a peer board driven IN BAND over the very link under test
@@ -745,6 +747,28 @@ OSCHF with the regulator asleep (313 us) and OSCHF with `PMODE = FULL`
   before the sleep, disarmed as the first thing after it, with no
   `RXDATA` read in between (errata 2.16.2). The frame is read only once
   the flag is down.
+- **On the AVR128DA48** (rev A7, 5 V; ten runs of ten, every leg the same
+  each time) the main clock is an external clock with no start-up of its
+  own, held up in standby only through OSCHF's `RUNSTDBY`
+  ([platform.md](platform.md)). The rule above holds at the DA's restart
+  times - OSCHF under FULL and OSCHF alone exactly as on the DB - and adds
+  a boundary at each end:
+  - with OSCHF held up the start bit wakes the device at every rate and
+    the frame survives at 9600 and 115200, but at **460800 it arrives one
+    bit late, every time** (0x5A read as 0xAD): the external clock's wake,
+    about a microsecond more than awake, is level with that rate's
+    1.09 us half-bit;
+  - with nothing held up the wake pays the regulator: at 2400 a start bit
+    alone (417 us of low) wakes it and BOTH frames survive; at 9600 the
+    start bit alone (104 us) and 0x5A (208 us of low) do not wake it,
+    nine bit times of zeros do and that frame is garbled. That pins the
+    rule down further than the DB's legs could: what wakes the device is
+    a start bit the receiver CONFIRMS, the line still low HALF A BIT
+    after the clock's return - a high there is a false start, and
+    27.3.4.2 sends the device back to standby. 0x5A not waking at 9600
+    puts the restart above 208 - 52 = 156 us, both 2400 frames surviving
+    puts it below 208 us: the start-of-frame path pays 156 to 208 us,
+    more than the 131 us a pin edge pays through the same regulator.
 
 ### Two facts about the flags that shape half-duplex code
 

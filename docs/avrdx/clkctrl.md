@@ -2,13 +2,14 @@
 
 Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B
 (CLKCTRL chapter, electricals 39.10 and 39.3), errata DS80000915F
-(2.5.1-2.5.4). Driver: `avrdx/clock.hpp` (resources `Oschf`, `Osc32k`,
+(2.5.1-2.5.4); for the DA parts DS40002183A (CLKCTRL chapter 11,
+electricals 37.5.1) and DS80000882C (2.4.1). Driver: `avrdx/clock.hpp` (resources `Oschf`, `Osc32k`,
 `Xosc32k`, `Xoschf`, `Pll`, `MainClock`, `ClockFailure`; tasks `Clock`,
 `DynamicClock`), `avrdx/delay.hpp`; the target-independent contracts in
 `util/clock.hpp`. The clock MODEL (one rate truth, static and dynamic
 regimes, the rebase fan-out) is [clock.md](../design/clock.md); this page is the
 peripheral. Reference test: `test_avr_clock` (CLKOUT on PA7 to an
-oscilloscope); the dynamic regime is bench-verified under a running
+oscilloscope, on the board whose PA7 is free); the dynamic regime is bench-verified under a running
 console (24 -> 12 -> 2 MHz at 115200).
 
 ## What the silicon does
@@ -68,7 +69,7 @@ through CCP):
 
 | Resource | Verbs |
 |----------|-------|
-| `Oschf` | `set_hz(hz)` (one of the nine rates; immediate, also while it is the main clock; false, touching nothing, for a rate OSCHF does not produce), `run_standby(bool)`, `autotune(bool)` (needs a running XOSC32K), `tune(-32..31)` / `tune()`, `stable()` |
+| `Oschf` | `set_hz(hz)` (one of the nine rates; immediate, also while it is the main clock; false, touching nothing, for a rate OSCHF does not produce), `run_standby(bool)`, `autotune(bool)` (needs a running XOSC32K; the clear waits 5 us for the auto-tune's value to land in TUNE, so a `tune()` right after it holds), `tune(-32..31)` / `tune()`, `stable()` |
 | `Osc32k` | `run_standby(bool)`, `stable()` |
 | `Xosc32k` | `start_crystal(Xosc32kStartup, low_power, run_standby)`, `start_external(run_standby)` (both stop a running oscillator first: CSUT/SEL are latched while enabled, so the new configuration always lands - at the price of the start-up time again), `stop()`, `enabled()`, `stable()`, `wait_stable(spins)`, `force_on(bool)` / `forced_on()` (RUNSTDBY on a running oscillator). `stable()` answers only while something REQUESTS the oscillator or it is forced on (below) |
 | `Xoschf` (DB) | `start_crystal(hz, XoschfStartup, run_standby)`, `start_external(hz, run_standby)` (both stop first: SELHF/FRQRANGE/CSUTHF are latched while enabled), `stop()`, `enabled()`, `stable()`, `wait_stable(spins)`, `range_for(hz)` |
@@ -228,6 +229,56 @@ directly: with RUNSTDBY = 1 and no requester, PLLS stays 0 through
 XOSCHF in crystal mode `Pll::source_ok(xoschf)` is false and
 `Pll::start(xoschf, ...)` returns false with PLLCTRLA untouched.
 
+**On the AVR128DA48** (REVID 0x17, rev A7, the board's 24 MHz external
+clock into PA0, 5 V; `test_avr_clock` 25 verdicts with the two letters
+only that board builds, CLKOUT never enabled - its PA7 carries 100 nF):
+
+- The OSCHF sweep, the twelve prescalers of the external clock and the
+  manual tune behave as on the DB, the console following at 9600; the
+  clock failure detector is absent from the part and its letter says so.
+- **XOSC32K** forced on comes up within 1.5 s (ten runs of ten).
+- **`Clock<xosc32k>` as the main clock** (letter 9, ten runs): `init()`
+  reports the crystal, MCLKCTRLA reads XOSC32K, and CLK_PER timed by a
+  TCB across 32 periods of a TCD on EXTCLK (1048576 external-clock
+  cycles each) reads 45815 ticks against 45813 nominal - **+22 to +43
+  ppm**, the two crystals' difference (`test_avr_rtc` letter 9 measures
+  it at 38..39 ppm) in steps of the 21 ppm a tick is there.
+- **OSCHF runs at EXACTLY the external clock's rate while that clock is
+  CLK_PER.** A TCD on OSCHF timed by a TCB at CLK_PER (32768 OSCHF
+  cycles a period, eight periods): at TUNE 0, 0 ppm in nine runs of ten
+  and -15 in the tenth, where TUNE -1 reads -3436..-3788 ppm and TUNE +1
+  +3302..+3664 - a step either side, the oscillator runs free. With OSCHF
+  itself as CLK_PER, timed against the 32.768 kHz crystal through the RTC,
+  the same TUNE 0 reads -156..-277 ppm whether or not a TCD requests the
+  external clock. So OSCHF is pulled onto the external clock when that
+  clock is CLK_PER and OSCHF's free-running rate is within a step of it -
+  on this die's calibration, at this bench's temperature. An OSCHF
+  measured against the DA's external clock near 24 MHz measures the
+  lock, not the oscillator (`test_avr_tcd` letter f: OSCHF 24 MHz
+  reads 3200 ticks of 3200).
+- **Auto-tune** (letter 8, ten runs of ten): TUNE -16 takes OSCHF to
+  -49154..-49344 ppm of the crystal; AUTOTUNE then brings it to
+  -126..-338 ppm (TUNE settles at 0), keeps it there with a TCD
+  requesting the external clock (-126..-300), and OSCHF keeps that rate
+  once AUTOTUNE is cleared (-129..-257). With no crystal running the
+  auto-tune moves nothing (-48634 -> -48720): 11.5.5's "the crystal must
+  be enabled".
+- **Clearing AUTOTUNE copies the tune AFTER the write returns**: TUNE
+  read in the next instructions still held the -16 written before
+  AUTOTUNE was set, and 3 us later the auto-tune's 0. A `tune()` written
+  in between was overwritten by the late copy - measured: TUNE 0
+  written right after the clear left OSCHF at -4.9 %. `autotune(false)`
+  now waits the copy out (120 CPU cycles, 5 us at 24 MHz; the copy
+  crosses from the auto-tune's 1 MHz clock); a TUNE of 5 written at once
+  after it is kept, eight of eight in each of ten runs.
+- **The PLL from the external clock** (`test_avr_tcd` letter f, twelve
+  runs): with SOURCE = 1 - the DA's EXTCLK, its only HF input - a TCD
+  on EXTCLK counts 3200 CLK_PER ticks per 3200-tick cycle and the same
+  TCD on the PLL x2 counts 1600: the multiplier against its own source,
+  exact. Errata 2.4.1 (the DA's twin of the DB's 2.5.3) as on the DB:
+  PLLS stays 0 with RUNSTDBY and no requester, sets at once with the TCD
+  requesting.
+
 The task's two restrictions are DELIBERATE positions, not gaps: it
 accepts only source rates OSCHF can also produce, so the CFD
 fallback keeps `Clock::hz` true (a 7.3728/11.0592/14.7456 MHz UART
@@ -248,12 +299,10 @@ Driver gaps:
 
 Implemented but not bench-verified:
 
-- OSCHF auto-tune against XOSC32K (the crystal now runs on the DA
-  board; the tuning itself is not measured); `Clock<xosc32k>` as the
-  main clock on a board with the crystal; `ClockSource::external` on the
-  DB (no external clock on a DB board); the PLL from XOSCHF (errata
-  2.5.4 makes it need an external CLOCK on PA0); the PLL from the DA's
-  EXTCLK; `run_standby` on the PLL beyond the 2.5.3 observation; A4
-  silicon (the DB board is A5); the DA's other chapters (the AVR128DA48
-  runs the platform, meter, power and nvm suites green; the rest
-  compile-verified on all four DA packages).
+- `ClockSource::external` on the DB and the PLL from its XOSCHF (no
+  external clock on the DB board, and errata 2.5.4 makes the PLL need
+  one); `run_standby` on the PLL beyond the 2.5.3 / 2.4.1 observation;
+  A4 silicon (the DB board is A5); the auto-tune's accuracy under a
+  temperature change (one bench temperature); the clock failure detector
+  watching XOSC32K (the crystal now runs, on the DA board, which has no
+  detector - the DB board, which has one, fits no crystal).

@@ -57,6 +57,7 @@
 // auto-baud and error-tolerance tests are measured against, so its
 // quality is itself a bench fact.
 
+// build: boards = db48,da48
 // build: monitor_speed = 460800
 
 #include <avr/interrupt.h>
@@ -75,7 +76,13 @@
 
 #include "usart_link.hpp"
 
-using SysClock = brio::Clock<brio::ClockSource::crystal, 24'000'000>;
+// The 24 MHz: the DB's crystal on its XOSCHF, or the DA's external clock
+// on PA0 (brio::has_xoschf) - on the AVR128DA48 board a quartz oscillator
+// feeding EXTCLK, so the time base is crystal-referenced on either part
+// and `ident` reports it so (xtal = 1) whenever the source started.
+using SysClock = brio::Clock<brio::has_xoschf ? brio::ClockSource::crystal
+                                              : brio::ClockSource::external,
+                             24'000'000>;
 constexpr SysClock clock;
 
 namespace {
@@ -1024,7 +1031,7 @@ int main() {
     auto board = board_id();
     if (board.empty()) board = "?";
     print(console, crlf, "usart_peer - USART instrument peer (board ", board,
-          ", clk=", crystal_ok ? "XTAL" : "OSCHF", " 24 MHz, silicon rev ",
+          ", clk=", crystal_ok ? (has_xoschf ? "XTAL" : "EXTCLK") : "OSCHF", " 24 MHz, silicon rev ",
           hex(SYSCFG.REVID), ", fw ", hex(firmware_version), ")", crlf);
     print(console, "link USART4 default: TXD PE0, RXD PE1, XCK PE2; command mode 8N1 @ ",
           link::command_baud, crlf);

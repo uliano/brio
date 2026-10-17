@@ -206,22 +206,55 @@ interval below is latched by hardware, not by an ISR.
   one built from 32767 counts of the 32.768 kHz one, and a Ticker asked
   for 1024 ticks/s on OSC1K delivers exactly 32.
 
+On the **AVR128DA48** (REVID 0x17, rev A7, the board's 24 MHz external
+clock as CLK_PER, 5 V; 88 verdicts with letter 9, which only the board
+with a 32.768 kHz crystal builds):
+
+- Letters 1 to 8 run as on the DB. This die's OSC32K runs about
+  **+0.15 % fast** (a counter second 23.96 M external-clock ticks,
+  -1453..-1580 ppm of interval, eight seconds 1487 ppm fast); the busy
+  flags clear in 2023..2172 ticks, the same 2.8 CLK_RTC periods; the
+  trim measured +123 and -136 ppm for +-127 asked.
+- **XOSC32K as CLK_RTC** (letter 9, twelve runs of twelve): forced on,
+  stable within 1.5 s and named by `preferred()`; the counter's four
+  seconds measure 95996274..95996275 ticks of the external clock - the
+  crystal **38..39 ppm fast** against it - forced on and again with the
+  force dropped and the RTC as its only requester; `Ticker::init()`
+  with no argument takes the crystal and counts exactly 1024 ticks to
+  its second.
+- **XOSC32KS outlives the oscillator by up to a millisecond**: stopped,
+  the crystal's status bit still read 1 at the next poll and was down
+  within 1 ms. A `Ticker::init()` in that window takes `preferred()`'s
+  answer - the stopped crystal - and the PIT never ticks again
+  (`test_avr_clock` froze a hold that way; both suites now select
+  OSC32K by name after a stop, and the RTC suite waits the status out).
+
 ## Not covered yet
 
-Driver gaps: none. Every register of chapter 26 - CTRLA, STATUS,
-INTCTRL, INTFLAGS, DBGCTRL, CALIB, CLKSEL, CNT, PER, CMP, PITCTRLA,
-PITSTATUS, PITINTCTRL, PITINTFLAGS, PITDBGCTRL - is exposed by a verb,
-and the four clock sources, sixteen prescaler settings and fifteen PIT
-periods are the enums' full range. TEMP is the compiler's, not the
-driver's.
+Driver gaps:
+
+- **`RtcClock::preferred()` right after a stop.** It asks XOSC32KS
+  alone, which lingers up to a millisecond after `Xosc32k::stop()`
+  (bench findings), so a timebase re-initialised inside that window
+  lands on a stopped crystal. Asking `Xosc32k::enabled()` as well closes
+  it; the change moves every image that calls `Ticker::init()`, and the
+  AVR128DB48 those images run on is not on the desk to re-verify them -
+  so it is not made yet, and a program that stops the crystal names
+  OSC32K itself.
+
+Every register of chapter 26 - CTRLA, STATUS, INTCTRL, INTFLAGS,
+DBGCTRL, CALIB, CLKSEL, CNT, PER, CMP, PITCTRLA, PITSTATUS, PITINTCTRL,
+PITINTFLAGS, PITDBGCTRL - is exposed by a verb, and the four clock
+sources, sixteen prescaler settings and fifteen PIT periods are the
+enums' full range. TEMP is the compiler's, not the driver's.
 
 Implemented but not bench-verified:
 
-- `RtcSource::xosc32k` and `RtcSource::extclk`: the bench board fits no
-  32.768 kHz crystal and no external 32 kHz clock (the EXTCLK pin
-  carries the 24 MHz crystal), so both codes are driver surface and
-  family-compile coverage only. `Ticker::preferred()` picks the crystal
-  when CLKCTRL reports one running - that branch has never fired here.
+- `RtcSource::extclk` and an external 32 kHz CLOCK on XTAL32K1: neither
+  board feeds a clock to XTAL32K1, and the EXTCLK pin carries 24 MHz on
+  the DA board (the DB's carries its crystal) - six times past 26.3's
+  CLK_PER >= 4 x CLK_RTC for reading CNT - so both are driver surface
+  and family-compile coverage only.
 - The counter's `RUNSTDBY` and the PIT as a wake-up source are proven
   in standby and in power-down by `test_avr_sleep` (findings in
   [platform.md](platform.md)); what no suite has staged is the RTC

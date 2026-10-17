@@ -498,6 +498,19 @@ subtracted and interrupts masked.
   attached - the suite goes on running past it.
 - **A UPDI flash shows as `RSTFR` 0x20**, which is how a fresh boot
   after `brio flash` is told apart from every other start.
+- **On the AVR128DA48** (REVID 0x17, rev A7, the board's 24 MHz
+  external clock, 5 V; 109 verdicts) every figure above repeats: the
+  folded delay exact, the runtime path 122 cycles, the dispatch's fixed
+  cost 157, the watchdog through STANDBY and POWER-DOWN 66 and 67 ticks,
+  the reset flags the same. The idle contract, letters `w` and `k`,
+  fifteen runs of each, all green and identical run to run: an edge
+  that finds the core asleep reaches the loop in 130 cycles on the
+  arming path and 126 on the armed one, the pending-edge plateau 29 and
+  23 positions long, STANDBY 136 cycles (the slowest try 162 for one
+  edge, 232 for two), the rulers' constant 46; a quiet kernel turn 323
+  cycles, its `idle()` 122, the same interrupt awake 93 - `idle()`
+  itself 29. The DA's core and sleep controller pay the DB's figures to
+  the cycle.
 
 ### The sleep modes
 
@@ -603,6 +616,19 @@ tick being 30.18 us.
   next section's finding. With HTLLEN set, the PIT still wakes the
   device from power-down.
 
+On the **AVR128DA48** (rev A7, 5 V; `z` twelve runs, all green) the
+same letters measure the same rules: this die's OSC32K runs at 32827 Hz
+(+1800 ppm), CLK_PER stops in standby (177 ticks counted asleep, the
+code around the sleep), the peripheral's `RUNSTDBY` is what keeps a
+counter running on the external clock as on OSCHF, a TCB with a
+complete chain wakes the CPU by itself, and TCA, AC, the event-started
+ADC and the TCD keep the DB's standby behaviour. The DA has no op amp:
+letter `o` converts a pad driven high from PORT instead (4095 awake
+and asleep), the op amp's half skipped. On the 30.5 us RTC ruler of
+letter `g` the external clock with OSCHF held up costs nothing over
+awake, with nothing held up 5 ticks (the regulator), and `PMODE = FULL`
+removes them; OSCHF restarting costs 6, FULL removes those too.
+
 ### Wake-up latency, measured from the partner board
 
 A sleeping chip cannot time its own return: the only clock power-down
@@ -688,6 +714,38 @@ below is the median of twelve runs, its spread beside it where it moved.
   closes.
 - **The CCL wakes from standby when it has RUNSTDBY, and from
   power-down when its clock survives the mode** - see ccl.md.
+
+**On the AVR128DA48** (rev A7, 5 V, the same SAM C21 and wires; `y` ten
+runs of ten, every figure the spread of the ten medians). The DA's main
+clock is an external clock on PA0 - no start-up and no `RUNSTDBY` of its
+own - so the one oscillator it can hold up in standby is OSCHF, and the
+suite's "crystal" legs are there the external clock with OSCHF's
+`RUNSTDBY` set or clear:
+
+- Awake 20 ticks (833 ns), IDLE 26..27: the DB's baseline exactly.
+
+  | main clock | held up in standby | `PMODE` | ticks | us |
+  |---|---|---|---|---|
+  | external clock | nothing | Normal | 3138..3142 | 130.8 |
+  | external clock | OSCHF (its `RUNSTDBY`) | Normal | 44..45 | 1.9 |
+  | OSCHF | OSCHF itself | Normal | 40 | 1.7 |
+  | OSCHF | OSCHF itself | Performance | 25 | 1.0 |
+  | OSCHF | nothing | Normal | 3504..3508 | 146.1 |
+  | OSCHF | nothing | Performance | 532 | 22.2 |
+
+  and out of POWER-DOWN: the external clock 3152..3166 (131.7 us), OSCHF
+  3507..3509 (146.2 us), OSCHF with `PMODE = FULL` 532 (22.2 us).
+- **The same rule, a faster regulator.** The DA's wake from a sleep that
+  let everything go is the regulator's start-up - about 125 us at 5 V,
+  where the DB's is 290 - plus the oscillator's own 16 us when OSCHF has
+  to restart (22.2 us under FULL, the DB's 23.4); the external clock adds
+  none, and an OSCHF held up by its own `RUNSTDBY` keeps the regulator
+  at full drive for it as well, exactly as the DB's running crystal did.
+- **A TWI address match** costs the bus nothing out of standby with OSCHF
+  held up (the tenure is the awake 393.4 us) and 128..129 us out of
+  power-down - the regulator, held on SCL.
+- The start-of-frame detector's rule holds on the DA's restart times
+  too, with one new boundary: see usart.md.
 
 ### The power manager on this target
 
@@ -779,9 +837,6 @@ Driver gaps:
 
 Implemented but not bench-verified:
 
-- **The idle contract on an AVR DA part.** Letters `w` and `k` build for
-  the AVR128DA48 and ran on the AVR128DB48 alone; the same two letters
-  on a DA board would measure it.
 - **`break_here()` with the OCD active.** The NOP half is proven; the
   half that halts in the debugger needs a debug session, which no
   console suite can be.
