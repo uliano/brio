@@ -79,7 +79,7 @@
 // until reset: run once, on purpose, not in a suite). The PLL running is
 // test_avr_tcd's letter f, where the TCD requests it.
 
-// build: boards = db48,da48
+// build: boards = db48,da48,ea48
 // build: monitor_speed = 9600
 
 #include <avr/interrupt.h>
@@ -97,9 +97,9 @@
 #include "avrdx/userrow.hpp"
 #include "util/print.hpp"
 
-using SysClock = brio::Clock<brio::has_xoschf ? brio::ClockSource::crystal
-                                              : brio::ClockSource::external,
-                             24'000'000>;
+#include "avr_board.hpp"
+
+using SysClock = BoardClock;   // the board's HF source (avr_board.hpp)
 constexpr SysClock clock;
 
 namespace {
@@ -110,17 +110,16 @@ using Serial = Uart<2, Route::alt1>;
 constexpr Serial serial;
 constexpr uint32_t baud = 9600;
 
-// The two bench boards (the header): one per part, so the part decides.
-/// PA7 is free for CLKOUT (the DB board) - or carries 100 nF (the DA's).
-constexpr bool board_clkout = has_xoschf;
-/// A 32.768 kHz crystal sits on PF0/PF1 (the DA board) - or none (the DB's).
-constexpr bool board_xosc32k = !has_xoschf;
+// The board's facts (board_clkout, board_xosc32k, board_pa7_free) are
+// the board table's (avr_board.hpp).
 
 uint8_t passed = 0, failed = 0;
 void verdict(const char* name, bool ok) {
     if (ok) ++passed; else ++failed;
     print(serial, "  ", ok ? "PASS" : "FAIL", "  ", name, crlf);
 }
+
+#if defined(CLKCTRL_FRQSEL_gm)   // the AVR DA/DB: OSCHF's rate a register field, the PLL, the TCD
 
 // ---- running at another rate for a while ------------------------------------
 // The console can follow a rate only if the USART can make the baud.
@@ -833,3 +832,574 @@ int main() {
         print(serial, "> ");
     }
 }
+
+#else  // the AVR EA: OSCHF at the OSCCFG fuse's one rate, no PLL, no TCD
+
+// ---- the EA letters (DS40002443A ch. 12) -------------------------------------------
+// THE RULER of every timed letter is "ruler B": the RTC counting the
+// 32.768 kHz crystal, its overflow every 32768 cycles (one second) latching
+// a TCB cascade that counts CLK_PER - so CLK_PER itself, whatever drives
+// it, is timed against the crystal, and the Ticker runs on that crystal
+// too (it holds no matter what CLK_PER does). Bound of every ppm verdict
+// on it: the two crystals' tolerances, no part number on record, 100 ppm
+// each allowed (200), plus the cascade's quantization - one tick at each
+// end of the window, 2 / (n x CLK_PER) - which is under 7 ppm for the
+// slowest rate timed here (312.5 kHz over one second): 250 ppm.
+constexpr uint32_t board_hz = SysClock::hz;          // 20 MHz: the crystal, CLK_PER at boot
+constexpr int32_t ruler_ppm = 250;
+
+using WideLo = Tcb<1>;
+using WideHi = Tcb<2>;
+using Wide = CascadedCounter<WideLo, WideHi>;
+using ChCarry = EventChannel<2>;
+using ChSnap = EventChannel<3>;
+
+/// What the registers read before SysClock::init() touched them (main()).
+uint8_t boot_mclkctrla = 0, boot_mclkctrlb = 0, boot_oschfctrla = 0, boot_timebase = 0,
+        boot_osccfg = 0;
+bool boot_matches = false, boot_xtal = false;
+
+/// XOSC32K started forced on (nothing requests it yet) and waited for,
+/// at most 1.5 s on busy waits (the Ticker may not run on it yet).
+bool xosc32k_up() {
+    if (Xosc32k::enabled() && Xosc32k::stable()) return true;
+    Xosc32k::start_crystal(Xosc32kStartup::cycles1k, false, true);
+    for (uint16_t i = 0; i < 1500; ++i) {
+        if (Xosc32k::stable()) return true;
+        delay_us(clock, 1000);
+    }
+    return Xosc32k::stable();
+}
+
+/// Ruler B up: the crystal, the Ticker moved onto it, the RTC counter's
+/// overflow on the snapshot channel, the cascade at CLK_PER.
+bool ruler_up() {
+    if (!xosc32k_up()) return false;
+    if (RtcClock::selected() != RtcSource::xosc32k) {
+        Ticker::init();                     // preferred(): the running crystal
+    }
+    (void)Rtc::init({.prescaler = RtcPrescaler::div1, .period = 32767});
+    Wide::init(TcbClock::div1, ChCarry{}, ChSnap{});
+    ChSnap::source(Rtc::OvfEvent{});
+    Wide::reset();
+    return RtcClock::selected() == RtcSource::xosc32k;
+}
+
+/// CLK_PER ticks across `n` overflows of the 32768-cycle RTC period; 0
+/// when a stamp did not come (a spin bound per stamp: seconds at any
+/// CLK_PER timed here).
+uint32_t xtal_window(uint8_t n) {
+    auto stamp = [](uint32_t& out) {
+        WideLo::clear_capt();
+        WideHi::clear_capt();
+        for (uint32_t i = 0; i < 4'000'000u; ++i) {
+            if (WideLo::capt_flag() && WideHi::capt_flag()) {
+                out = Wide::captured();
+                return true;
+            }
+        }
+        return false;
+    };
+    uint32_t first = 0, last = 0;
+    if (!stamp(first)) return 0;
+    for (uint8_t i = 0; i < n; ++i) {
+        if (!stamp(last)) return 0;
+    }
+    return last - first;
+}
+
+/// CLK_PER against the crystal over `n` seconds, in ppm of the ticks the
+/// nominal rate would count (`expected_ticks` = n x the rate); INT32_MIN
+/// when the ruler did not answer.
+int32_t per_vs_xtal(uint8_t n, uint64_t expected_ticks) {
+    const uint32_t t = xtal_window(n);
+    if (t == 0) return INT32_MIN;
+    return static_cast<int32_t>((static_cast<int64_t>(t) - static_cast<int64_t>(expected_ticks)) *
+                                1'000'000LL / static_cast<int64_t>(expected_ticks));
+}
+
+bool within(int32_t ppm, int32_t bound) {
+    return ppm != INT32_MIN && ppm > -bound && ppm < bound;
+}
+
+// ---- r: the reset state and the fuse ------------------------------------------------
+// Read in main() before the Clock init: the EA starts on OSCHF at the
+// fuse's rate behind the prescaler at /6 (12.3.3; MCLKCTRLB resets to
+// 0x11, 12.5.2), TIMEBASE at 0 (12.5.7), OSCHFCTRLA at 0x0C with bits 3:2
+// undocumented (12.5.8). The init then claims the fuse's rate (matches_fuse,
+// one read of FUSE.OSCCFG) and leaves TIMEBASE at ceil(20 MHz / 1 MHz).
+void tr_reset() {
+    print(serial, "r the reset state (read before the init) and the OSCCFG fuse", crlf);
+    print(serial, "  at reset: MCLKCTRLA ", hex(boot_mclkctrla), " MCLKCTRLB ", hex(boot_mclkctrlb),
+          " OSCHFCTRLA ", hex(boot_oschfctrla), " TIMEBASE ", boot_timebase, "; FUSE.OSCCFG ",
+          hex(boot_osccfg), " (OSCHF ", (boot_osccfg & FUSE_OSCHFFRQ_bm) ? 16 : 20, " MHz)", crlf);
+    verdict("CLKSEL at reset is OSCHF", (boot_mclkctrla & CLKCTRL_CLKSEL_gm) == 0);
+    verdict("MCLKCTRLB at reset is 0x11 (PEN, DIV6: 12.5.2)", boot_mclkctrlb == 0x11);
+    verdict("TIMEBASE at reset is 0 (12.5.7)", boot_timebase == 0);
+    // 12.5.8 gives the reset value 0x0C (bits 3:2 set, undocumented);
+    // the rev B1 part reads 0x00 there (ten runs of ten).
+    verdict("OSCHFCTRLA at reset reads 0x00 (12.5.8 says 0x0C: bits 3:2 read 0 on rev B1)",
+            boot_oschfctrla == 0x00);
+    verdict("the Clock type's claim matches the fuse (20 MHz)", boot_matches);
+    verdict("the init started the crystal", boot_xtal);
+    const uint8_t tb = ClockTimebase::read();
+    const uint8_t b = CLKCTRL.MCLKCTRLB;
+    const uint8_t o = CLKCTRL.OSCHFCTRLA;
+    print(serial, "  after the init: MCLKCTRLB ", hex(b), " TIMEBASE ", tb, " OSCHFCTRLA ", hex(o), crlf);
+    verdict("TIMEBASE = ceil(CLK_PER / 1 MHz) = 20 after the init", tb == 20);
+    verdict("the prescaler off (CLK_PER = the crystal's 20 MHz)", b == 0);
+    verdict("OSCHFCTRLA's bits 3:2 survive the init's read-modify-write", (o & 0x0C) == (boot_oschfctrla & 0x0C));
+}
+
+// ---- 1: the twelve prescalers from the crystal, timed -------------------------------
+// Each rate of the ladder is CLK_PER timed against the 32 kHz crystal:
+// 20 MHz over the divider exactly (the six-, twelve-, 24- and 48-fold
+// ones fractional), within the two crystals. The rates a DynamicClock can
+// reach (whole-Hz divisions of 20 MHz) go through Dyn::set(), which must
+// leave TIMEBASE at ceil(rate / 1 MHz) on every switch; the four
+// fractional ones Dyn::set() must refuse, and they are reached with the
+// prescaler alone.
+using Dyn = DynamicClock<SysClock, Serial>;
+
+void t1_ladder() {
+    print(serial, "1 the twelve prescalers from the 20 MHz crystal, CLK_PER timed on the 32 kHz crystal", crlf);
+    // Without the ruler the ladder still runs: TIMEBASE and the refusals
+    // are judged, the rates are not (a refused leg is skipped, not judged).
+    const bool ruler = ruler_up();
+    if (!ruler) {
+        print(serial, "  no 32 kHz crystal running: the rates are not timed", crlf);
+    }
+    (void)Dyn::init();
+    constexpr ClockDiv divs[] = {ClockDiv::div1, ClockDiv::div2, ClockDiv::div4, ClockDiv::div6,
+                                 ClockDiv::div8, ClockDiv::div10, ClockDiv::div12, ClockDiv::div16,
+                                 ClockDiv::div24, ClockDiv::div32, ClockDiv::div48, ClockDiv::div64};
+    bool all_close = true, tb_right = true, refusals_right = true;
+    for (ClockDiv d : divs) {
+        const uint32_t div = clock_divisor(d);
+        const uint32_t hz = board_hz / div;                 // truncated for a fractional rate
+        const bool whole = board_hz % div == 0;
+        print(serial, "  /", div, ": ", hz, " Hz", whole ? "" : " (fractional)", crlf);
+        Serial::rebase(hz);
+        if (whole) {
+            if (!Dyn::set(hz)) refusals_right = false;
+        } else {
+            if (Dyn::set(hz)) refusals_right = false;           // must refuse, write nothing
+            MainClock::prescale(d);
+            ClockTimebase::write(clock_timebase_for(hz + 1u));  // ceil of the true rate
+        }
+        int32_t ppm = 0;
+        if (ruler) {
+            (void)xtal_window(1);                            // a window wholly at the new rate
+            const uint64_t want = (2ull * board_hz) / div;   // two seconds' ticks, exact for whole rates
+            ppm = per_vs_xtal(2, want);
+        } else {
+            delay_us(clock, 2000);                           // a hold at the rate, untimed
+        }
+        const uint8_t tb = ClockTimebase::read();
+        const uint8_t tb_want = whole ? clock_timebase_for(hz) : clock_timebase_for(hz + 1u);
+        if (!within(ppm, ruler_ppm + (whole ? 0 : 1))) all_close = false;
+        if (tb != tb_want) tb_right = false;
+        print(serial, "     ", ppm, " ppm against the crystal; TIMEBASE ", tb, " (want ", tb_want, ")", crlf);
+    }
+    Serial::rebase(board_hz);
+    (void)Dyn::set(board_hz);
+    if (ruler) {
+        verdict("every rate is 20 MHz over its divider, within 250 ppm of the crystal", all_close);
+    }
+    verdict("TIMEBASE = ceil(CLK_PER / 1 MHz) after every switch", tb_right);
+    verdict("Dyn::set() reaches the whole-Hz rates and refuses the fractional ones", refusals_right);
+    verdict("back at 20 MHz, TIMEBASE 20", ClockTimebase::read() == 20 && CLKCTRL.MCLKCTRLB == 0);
+}
+
+// ---- 2: OSCHF at the fuse's rate against the crystal ---------------------------------
+// OSCHF as CLK_PER, untuned, against the 32 kHz crystal: its calibrated
+// accuracy at 20 MHz, 5 V and room temperature (35.10.1 gives <1 % at
+// 25 C / 3 V and <3 % over the full range - typicals, untested): judged
+// against the full-range 3 %.
+void t2_oschf() {
+    print(serial, "2 OSCHF at the fuse's 20 MHz as CLK_PER, against the 32 kHz crystal", crlf);
+    const bool ruler = ruler_up();
+    verdict("ruler B runs", ruler);
+    if (!ruler) return;
+    Oschf::autotune(false);
+    Oschf::tune(0);
+    (void)MainClock::select(MainSource::oschf);
+    (void)xtal_window(1);
+    const int32_t ppm = per_vs_xtal(2, 2ull * board_hz);
+    const bool stable = Oschf::stable();
+    (void)SysClock::init();                  // back to the crystal
+    print(serial, "  OSCHF, TUNE 0: ", ppm, " ppm against the crystal (OSCHFS ", stable, ")", crlf);
+    verdict("OSCHF within 3 % of 20 MHz (35.10.1, full range)", within(ppm, 30'000));
+    verdict("back on the crystal", MainClock::source() == MainSource::extclk);
+}
+
+// ---- 3: the manual tune -------------------------------------------------------------
+// TUNE swept -32..+31 in steps of 8 with OSCHF as CLK_PER, each step timed
+// on the crystal (console silent: +-6 % is beyond a UART's tolerance).
+// 35.10.1 gives 0.2 % a step, typical, and no bound: the verdicts are the
+// shape (a rising curve, both ends beyond the middle), the step printed.
+void t3_tune() {
+    print(serial, "3 OSCHF manual tune at 20 MHz: TUNE -32..+31, CLK_PER timed on the crystal "
+                  "(silent for ~20 s)", crlf);
+    const bool ruler = ruler_up();
+    verdict("ruler B runs", ruler);
+    if (!ruler) return;
+    constexpr int8_t steps[] = {-32, -24, -16, -8, 0, 8, 16, 24, 31};
+    int32_t ppm[9];
+    while (!Serial::tx_idle()) {
+    }
+    Oschf::autotune(false);
+    Oschf::tune(0);
+    (void)MainClock::select(MainSource::oschf);
+    for (uint8_t i = 0; i < 9; ++i) {
+        Oschf::tune(steps[i]);
+        (void)xtal_window(1);
+        ppm[i] = per_vs_xtal(1, board_hz);
+    }
+    Oschf::tune(0);
+    (void)SysClock::init();
+    bool rising = true;
+    print(serial, "  ppm by TUNE:");
+    for (uint8_t i = 0; i < 9; ++i) {
+        print(serial, " ", static_cast<int16_t>(steps[i]), ":", ppm[i]);
+        if (ppm[i] == INT32_MIN || (i > 0 && ppm[i] <= ppm[i - 1])) rising = false;
+    }
+    const int32_t down = (ppm[4] - ppm[0]) / 32;         // ppm per step, downward half
+    const int32_t up = (ppm[8] - ppm[4]) / 31;           // upward half
+    print(serial, crlf, "  mean step: ", down, " ppm downward, ", up,
+          " ppm upward (35.10.1: 2000 ppm typical)", crlf);
+    verdict("every step timed and the curve rises with TUNE", rising);
+    verdict("TUNE reads back 0 and clamps at -32 / +31", [] {
+        Oschf::tune(-40); const int8_t m = Oschf::tune();
+        Oschf::tune(40); const int8_t p = Oschf::tune();
+        Oschf::tune(0);
+        return m == -32 && p == 31 && Oschf::tune() == 0;
+    }());
+}
+
+// ---- 4: the auto-tune ---------------------------------------------------------------
+// OSCHF as CLK_PER detuned by -16 steps, then AUTOTUNE against the 32 kHz
+// crystal (12.3.7): it must come back within one tune step of 20 MHz -
+// the step measured here, at the tuned value, not the data sheet's
+// typical - plus the crystals' 250 ppm, and stay there once cleared. The
+// field's code (XOSC32K = 1) reads back with bit 1 clear (12.5.8). The
+// TUNE copy after a clear lands within 0.75 us + 3 CLK_MAIN (12.5.9): a
+// TUNE written right after the driver's clear must stay written.
+void t4_autotune() {
+    print(serial, "4 OSCHF auto-tune against the 32 kHz crystal (silent for ~12 s)", crlf);
+    const bool ruler = ruler_up();
+    verdict("ruler B runs", ruler);
+    if (!ruler) return;
+    while (!Serial::tx_idle()) {
+    }
+    Oschf::autotune(false);
+    Oschf::tune(0);
+    (void)MainClock::select(MainSource::oschf);
+    Oschf::tune(-16);
+    (void)xtal_window(1);
+    const int32_t detuned = per_vs_xtal(1, board_hz);
+    Oschf::autotune(true);
+    const uint8_t field = static_cast<uint8_t>(CLKCTRL.OSCHFCTRLA & oschf_autotune_field);
+    (void)xtal_window(2);                        // two seconds to converge
+    const int32_t tuned = per_vs_xtal(2, 2ull * board_hz);
+    Oschf::autotune(false);
+    const int8_t at = Oschf::tune();
+    (void)xtal_window(1);
+    const int32_t held = per_vs_xtal(2, 2ull * board_hz);
+    // One step at the tuned value: TUNE + 1 against TUNE.
+    Oschf::tune(static_cast<int8_t>(at + 1));
+    (void)xtal_window(1);
+    const int32_t plus1 = per_vs_xtal(1, board_hz);
+    Oschf::tune(at);
+    (void)xtal_window(1);
+    const int32_t at0 = per_vs_xtal(1, board_hz);
+    const int32_t step = plus1 - at0;
+    uint8_t kept = 0;
+    for (uint8_t i = 0; i < 8; ++i) {
+        Oschf::autotune(true);
+        delay_us(clock, 10'000);
+        Oschf::autotune(false);
+        Oschf::tune(5);
+        delay_us(clock, 10'000);
+        if (Oschf::tune() == 5) ++kept;
+    }
+    Oschf::tune(0);
+    (void)SysClock::init();
+    print(serial, "  TUNE -16: ", detuned, " ppm; AUTOTUNE on (field ", hex(field), "): ", tuned,
+          " ppm; off, TUNE ", static_cast<int16_t>(at), ": ", held, " ppm; one step there ", step,
+          " ppm; a TUNE of 5 after the clear kept ", kept, " of 8", crlf);
+    const int32_t bound = (step > 0 ? step : -step) + ruler_ppm;
+    verdict("AUTOTUNE's field reads back the XOSC32K code alone", field == oschf_autotune_on);
+    verdict("TUNE -16 takes OSCHF below 20 MHz by more than 1 %", detuned != INT32_MIN && detuned < -10'000);
+    verdict("the auto-tune brings it within one measured step (+250 ppm) of the crystal",
+            step > 0 && within(tuned, bound));
+    verdict("cleared, OSCHF keeps the tuned rate (within one step)", step > 0 && within(held, bound));
+    verdict("a TUNE written right after the clear is kept (the driver waits the copy out)", kept == 8);
+}
+
+// ---- 5: the 32 kHz main clocks ------------------------------------------------------
+// OSC32K, then the 32 kHz crystal, as CLK_PER (silent; the Ticker paused:
+// a 1024 Hz tick cannot be served at 32 kHz), each timed on the crystal:
+// OSC32K within its 10 % (35.10.1, full range), the crystal exactly 32768
+// ticks a period (the two ends of the window are the same clock: +-2
+// ticks).
+void t5_32k() {
+    print(serial, "5 OSC32K and the 32 kHz crystal as the main clock (silent for ~8 s)", crlf);
+    const bool ruler = ruler_up();
+    verdict("ruler B runs", ruler);
+    if (!ruler) return;
+    Serial::rebase(32'768);                  // cannot make the baud there: just drains TX
+    Ticker::pause();
+    const bool osc_ok = Clock<ClockSource::osc32k, 32'768>::init();
+    (void)xtal_window(1);
+    const uint32_t osc = xtal_window(2);
+    const bool x_ok = Clock<ClockSource::xosc32k, 32'768>::init();
+    const MainSource src = MainClock::source();
+    (void)xtal_window(1);
+    const uint32_t x = xtal_window(2);
+    const uint8_t tb = ClockTimebase::read();
+    Serial::rebase(board_hz);
+    (void)SysClock::init();
+    Ticker::resume();
+    const int32_t osc_ppm = osc ? static_cast<int32_t>((static_cast<int64_t>(osc) - 65'536LL) *
+                                                       1'000'000LL / 65'536LL) : INT32_MIN;
+    print(serial, "  OSC32K: ", osc, " ticks in 2 s (", osc_ppm, " ppm); the crystal: ", x,
+          " ticks in 2 s (nominal 65536), source ", hex(static_cast<uint8_t>(src)),
+          ", TIMEBASE ", tb, crlf);
+    verdict("Clock<osc32k> and Clock<xosc32k> init", osc_ok && x_ok);
+    verdict("OSC32K within 10 % (35.10.1, full range)", within(osc_ppm, 100'000));
+    verdict("the crystal as CLK_PER: 65536 ticks in two of its own seconds (+-2)",
+            src == MainSource::xosc32k && x >= 65'534u && x <= 65'538u);
+    verdict("TIMEBASE 1 at 32 kHz (ceil)", tb == 1);
+    verdict("back on the 20 MHz crystal", MainClock::source() == MainSource::extclk);
+}
+
+// ---- 6: the clock failure detector --------------------------------------------------
+// A (12.3.5.3.1): CFDSRC = XOSC32K and CFDTST - the flag and the interrupt,
+// the main clock untouched. B (12.3.5.3.2): CFDSRC = the main clock and
+// CFDTST - the main clock falls back to the start-up source "at its reset
+// frequency" with CLKOUT cleared: what the prescaler does then is not
+// said, so MCLKCTRLB is read and CLK_PER timed on the crystal; the flag
+// re-fires every ten OSC32K cycles while the condition holds (12.3.5.2):
+// counted over 20 ms - 65.6 expected at 305 us, OSC32K's 10 % and one
+// edge either end: 58..74.
+volatile uint16_t cfd_hits = 0;
+volatile uint8_t cfd_source_seen = 0xFF;
+
+void t6_cfd() {
+    print(serial, "6 the clock failure detector: A on the 32 kHz crystal (test bit), B on the main clock", crlf);
+    const bool ruler = ruler_up();
+    verdict("ruler B runs", ruler);
+    if (!ruler) return;
+    // A
+    cfd_hits = 0;
+    ClockFailure::clear();
+    ClockFailure::interrupt(true, /*nmi=*/false);
+    ClockFailure::watch(CfdSource::xosc32k);
+    ClockFailure::test(true);
+    delay_us(clock, 20'000);
+    const uint16_t a_hits = cfd_hits;
+    const MainSource a_src = MainClock::source();
+    ClockFailure::test(false);
+    ClockFailure::stop();
+    delay_us(clock, 2'000);
+    ClockFailure::clear();
+    cfd_hits = 0;
+    print(serial, "  A: interrupts in 20 ms ", a_hits, ", main clock ", hex(static_cast<uint8_t>(a_src)),
+          " (EXTCLK = 3)", crlf);
+    verdict("A: the test bit on XOSC32K raises the interrupt, repeatedly (58..74 in 20 ms)",
+            a_hits >= 58 && a_hits <= 74);
+    verdict("A: the main clock untouched", a_src == MainSource::extclk);
+    // B: the console cannot know the fallback rate until it is read back.
+    while (!Serial::tx_idle()) {
+    }
+    ClockFailure::watch(CfdSource::main);
+    ClockFailure::test(true);
+    delay_us(clock, 2'000);                  // at most 2 ms, possibly 12 at a /6 fallback
+    const uint8_t a = CLKCTRL.MCLKCTRLA;
+    const uint8_t b = CLKCTRL.MCLKCTRLB;
+    const MainSource b_src = MainClock::source();
+    const uint32_t div = (b & CLKCTRL_PEN_bm) ? clock_divisor(static_cast<ClockDiv>(b)) : 1u;
+    (void)xtal_window(1);
+    const int32_t b_ppm = per_vs_xtal(1, board_hz / div);
+    ClockFailure::test(false);
+    ClockFailure::interrupt(false);
+    ClockFailure::stop();
+    ClockFailure::clear();
+    const uint16_t b_hits = cfd_hits;
+    (void)SysClock::init();
+    Serial::rebase(board_hz);
+    print(serial, "  B: after the forced failure: MCLKCTRLA ", hex(a), " MCLKCTRLB ", hex(b),
+          " -> CLK_PER = OSCHF / ", div, ": ", b_ppm, " ppm of that against the crystal; "
+          "interrupts ", b_hits, crlf);
+    verdict("B: the main clock fell back to OSCHF, CLKOUT cleared", b_src == MainSource::oschf &&
+            (a & CLKCTRL_CLKOUT_bm) == 0);
+    verdict("B: CLK_PER is OSCHF at the fuse's rate over the prescaler read back (within 3 %)",
+            within(b_ppm, 30'000));
+    verdict("B: the interrupt ran", b_hits >= 1);
+    verdict("recovered: the crystal re-selected", MainClock::source() == MainSource::extclk);
+}
+
+// ---- 7: the status bits, the request, the read-modify-write ------------------------
+// MCLKSTATUS with the crystal as the main clock; OSCHFS with OSCHF idle
+// and RUNSTDBY on (on the DB the status follows the REQUEST: printed);
+// Oschf::run_standby() never writes OSCHFCTRLA's undocumented bits 3:2.
+void t7_status() {
+    print(serial, "7 MCLKSTATUS, OSCHFCTRLA's read-modify-write, TIMEBASE", crlf);
+    const uint8_t st = CLKCTRL.MCLKSTATUS;
+    print(serial, "  MCLKSTATUS=", hex(st), ": EXTS=", (st >> 4) & 1, " XOSC32KS=", (st >> 3) & 1,
+          " OSC32KS=", (st >> 2) & 1, " OSCHFS=", (st >> 1) & 1, " SOSC=", st & 1, crlf);
+    verdict("EXTS set (the crystal running)", (st & CLKCTRL_EXTS_bm) != 0);
+    verdict("not switching", (st & CLKCTRL_SOSC_bm) == 0);
+    const uint8_t before = CLKCTRL.OSCHFCTRLA;
+    Oschf::run_standby(false);
+    const uint8_t off = CLKCTRL.OSCHFCTRLA;
+    const uint8_t st_off = CLKCTRL.MCLKSTATUS;
+    Oschf::run_standby(true);
+    const uint8_t on = CLKCTRL.OSCHFCTRLA;
+    print(serial, "  OSCHFCTRLA ", hex(before), " -> RUNSTDBY off ", hex(off), " (OSCHFS ",
+          (st_off >> 1) & 1, ") -> on ", hex(on), crlf);
+    verdict("RUNSTDBY writable through CCP", (off & CLKCTRL_RUNSTDBY_bm) == 0 &&
+            (on & CLKCTRL_RUNSTDBY_bm) != 0);
+    verdict("bits 3:2 kept by both writes", (off & 0x0C) == (before & 0x0C) && (on & 0x0C) == (before & 0x0C));
+    verdict("TIMEBASE 20 at 20 MHz", ClockTimebase::read() == 20);
+    verdict("the fuse still matches the claim", SysClock::matches_fuse());
+}
+
+// ---- 8: the crystal's start-up --------------------------------------------------------
+/// The last run's start-up times and the driver's wait, kept where a
+/// debugger reads them as well as the console.
+volatile uint32_t startup_us[3] = {0, 0, 0};
+volatile uint32_t wait_bound_us = 0;
+volatile uint8_t exts_before_start = 0;   ///< bit i: EXTS still read 1 a millisecond after the stop
+volatile uint8_t t8_failed = 0;           ///< bit i: verdict i of the letter failed
+
+// With the main clock on OSCHF (20 MHz), XOSCHF is stopped and started
+// again forced on (RUNSTDBY) with each CSUTHF (256 / 1k / 4k cycles,
+// 12.5.12); the cascade counts CLK_PER from the start to EXTS. 35.10.3
+// leaves the start-up blank: the times are printed, judged only against
+// the floor (the counted cycles at 20 MHz: 12.8 / 51.2 / 204.8 us) and
+// the driver's wait_stable() bound, which must outlast every one. The
+// times are read on OSCHF (untuned, within 3 %): the floor is the counted
+// cycles less that 3 %.
+void t8_xtal_startup() {
+    print(serial, "8 XOSCHF start-up with CSUTHF 256 / 1k / 4k cycles", crlf);
+    Wide::init(TcbClock::div1, ChCarry{}, ChSnap{});
+    Wide::reset();
+    while (!Serial::tx_idle()) {
+    }
+    (void)MainClock::select(MainSource::oschf);
+    constexpr XoschfStartup suts[] = {XoschfStartup::cycles256, XoschfStartup::cycles1k,
+                                      XoschfStartup::cycles4k};
+    constexpr uint32_t floors_cycles[] = {256, 1024, 4096};
+    volatile uint32_t (&us)[3] = startup_us;
+    bool came = true, above = true;
+    exts_before_start = 0;
+    for (uint8_t i = 0; i < 3; ++i) {
+        Xoschf::stop();
+        delay_us(clock, 1000);
+        if (Xoschf::stable()) exts_before_start = static_cast<uint8_t>(exts_before_start | (1u << i));
+        const uint32_t t0 = Wide::read();
+        Xoschf::start_crystal(board_hz, suts[i], true);
+        uint32_t t1 = t0;
+        while (!Xoschf::stable()) {
+            t1 = Wide::read();
+            if (t1 - t0 > 20'000'000u) break;       // a second
+        }
+        if (!Xoschf::stable()) came = false;
+        us[i] = (t1 - t0) / (board_hz / 1'000'000u);
+        // CLK_PER is OSCHF at 20 MHz here, the crystal's own nominal
+        // rate, untuned: up to 3 % off over the full range (35.10.1). So
+        // the counted crystal cycles are at least 97 % of as many CLK_PER
+        // ticks (4096 -> 3973); the two clocks agree no better than that.
+        if (t1 - t0 < floors_cycles[i] * 97u / 100u) above = false;
+    }
+    // The driver's bound: wait_stable(0xFFFF) spins, timed on a stable
+    // oscillator's worst case - each spin a load, a test and the loop.
+    const uint32_t s0 = Wide::read();
+    (void)clkctrl_wait(0, 0xFFFFu);                  // a mask nothing sets: the full bound
+    const uint32_t spin_cycles = Wide::read() - s0;
+    wait_bound_us = spin_cycles / (board_hz / 1'000'000u);
+    (void)SysClock::init();
+    WideLo::disable();
+    WideHi::disable();
+    print(serial, "  start-up to EXTS: ", us[0], " / ", us[1], " / ", us[2],
+          " us; wait_stable(0xFFFF) spins for ", spin_cycles / (board_hz / 1'000'000u),
+          " us at 20 MHz", crlf);
+    const bool outlasts = came && spin_cycles / (board_hz / 1'000'000u) > us[2];
+    const bool back = MainClock::source() == MainSource::extclk;
+    t8_failed = static_cast<uint8_t>((came ? 0 : 1) | (above ? 0 : 2) | (outlasts ? 0 : 4) | (back ? 0 : 8));
+    verdict("the crystal came up with every CSUTHF", came);
+    verdict("each start-up at least its counted cycles (less OSCHF's 3 %)", above);
+    verdict("the driver's wait outlasts the slowest start-up seen", outlasts);
+    verdict("back on the crystal", back);
+}
+
+using TestFn = void (*)();
+struct Test { char key; TestFn fn; };
+constexpr Test tests[] = {
+    {'r', tr_reset}, {'1', t1_ladder}, {'2', t2_oschf}, {'3', t3_tune}, {'4', t4_autotune},
+    {'5', t5_32k}, {'6', t6_cfd}, {'7', t7_status}, {'8', t8_xtal_startup},
+};
+
+void run(TestFn fn) {
+    passed = failed = 0;
+    fn();
+    print(serial, "  -> ", passed, " pass, ", failed, " fail", crlf, crlf);
+}
+
+void help() {
+    print(serial, "test_avr_clock (AVR EA): r reset state + fuse | 1 prescaler ladder | 2 OSCHF | "
+                  "3 tune | 4 auto-tune | 5 32 kHz main | 6 clock failure | 7 status | "
+                  "8 crystal start-up | a all", crlf);
+}
+
+} // namespace
+
+ISR(USART2_RXC_vect) { (void)Serial::rxc(); }
+ISR(USART2_DRE_vect) { Serial::dre(); }
+ISR(RTC_PIT_vect)    { Ticker::pit(); }
+ISR(CLKCTRL_CFD_vect) {
+    cfd_source_seen = static_cast<uint8_t>(ClockFailure::cfd());   // clears the flag
+    if (cfd_hits != 0xFFFF) cfd_hits = cfd_hits + 1;
+}
+
+int main() {
+    // FIRST: the reset state, before the init writes any of it.
+    boot_mclkctrla = CLKCTRL.MCLKCTRLA;
+    boot_mclkctrlb = CLKCTRL.MCLKCTRLB;
+    boot_oschfctrla = CLKCTRL.OSCHFCTRLA;
+    boot_timebase = ClockTimebase::read();
+    boot_osccfg = FUSE.OSCCFG;
+    boot_matches = SysClock::matches_fuse();
+    boot_xtal = SysClock::init();
+    Serial::init(clock, baud);
+    Ticker::init();
+    sei();
+    auto board = board_id();
+    if (board.empty()) board = "?";
+    print(serial, crlf, "test_avr_clock - CLKCTRL test suite (board ", board,
+          ", boot clk=", boot_xtal ? "XTAL" : "OSCHF", " ", board_hz / 1'000'000u,
+          " MHz, silicon rev ", hex(SYSCFG.REVID), ", CLKOUT off: PA7 carries 100 nF)", crlf);
+    help();
+    print(serial, "> ");
+    for (;;) {
+        uint8_t c;
+        if (!Serial::read_byte(c)) continue;
+        if (c == '\r' || c == '\n') continue;
+        print(serial, static_cast<char>(c), crlf);
+        if (c == '?') { help(); }
+        else if (c == 'a' || c == 'A') {
+            uint8_t tp = 0, tf = 0;
+            for (const Test& t : tests) { run(t.fn); tp += passed; tf += failed; }
+            print(serial, "ALL: ", tp, " pass, ", tf, " fail", crlf);
+        } else {
+            bool found = false;
+            for (const Test& t : tests) if (t.key == c) { run(t.fn); found = true; }
+            if (!found) print(serial, "? for help", crlf);
+        }
+        print(serial, "> ");
+    }
+}
+
+#endif  // CLKCTRL_FRQSEL_gm

@@ -2,6 +2,9 @@
 // only). TCD0 exists on every DA/DB package; what changes is the route
 // table (ALT1 needs PORTB, ALT3 needs PORTG) and the pin-level bonding
 // inside an existing port (48-pin ALT1 and 28-pin ALT2 stop at WOB).
+#include <avr/io.h>
+// The AVR EA has no TCD: tcd.hpp declares nothing there, and this TU compiles to nothing.
+#if defined(TCD0)
 #include "avrdx/clock.hpp"
 #include "avrdx/evsys.hpp"
 #include "avrdx/tcd.hpp"
@@ -11,7 +14,7 @@ using namespace brio;
 // The clock contract: TcdPwm is a ClockUser (a TCD clocked from CLK_PER
 // changes frequency with the main prescaler), so a DynamicClock can list
 // it and its init(clock) asserts clock_follows.
-using Boot = Clock<ClockSource::internal, 24'000'000>;
+using Boot = Clock<ClockSource::internal, has_oschf_frqsel ? 24'000'000 : 20'000'000>;
 using Dyn = DynamicClock<Boot, TcdPwm<TcdRoute::def>>;
 
 void tcd_resource() {
@@ -198,3 +201,5 @@ static_assert(tcd_dither_cycle_cost(TcdWaveform::four_ramp, TcdDitherSelect::dea
 static_assert(tcd_pin(TcdRoute::def, TcdOutput::woa).port == 'A' &&
               tcd_pin(TcdRoute::def, TcdOutput::woa).pin == 4 &&
               tcd_pin(TcdRoute::def, TcdOutput::wod).bonded);
+
+#endif // TCD0

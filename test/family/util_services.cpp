@@ -26,7 +26,7 @@
 using namespace brio;
 
 using P = AvrPlatform;
-using SysClock = Clock<ClockSource::internal, 24'000'000>;
+using SysClock = Clock<ClockSource::internal, has_oschf_frqsel ? 24'000'000 : 20'000'000>;
 
 // ---- the meter latches and their sampler ---------------------------------------
 // Two latches of the SAME width: what makes them two objects is the id.

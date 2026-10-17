@@ -88,6 +88,28 @@
                 "CMAKE_BUILD_TYPE": "Debug",
                 "AVR_MCU": "avr128da48"
             }
+        },
+        {
+            "name": "avr64ea48-release",
+            "displayName": "AVR64EA48 (release, -Os)",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/../build-cmake/avr64ea48-release",
+            "toolchainFile": "${sourceDir}/cmake/toolchain-avr.cmake",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "AVR_MCU": "avr64ea48"
+            }
+        },
+        {
+            "name": "avr64ea48-debug",
+            "displayName": "AVR64EA48 (debug, -Og -g3, PyAvrOCD)",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/../build-cmake/avr64ea48-debug",
+            "toolchainFile": "${sourceDir}/cmake/toolchain-avr.cmake",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "AVR_MCU": "avr64ea48"
+            }
         }
     ],
     "buildPresets": [
@@ -122,6 +144,14 @@
         {
             "name": "avr128da48-debug",
             "configurePreset": "avr128da48-debug"
+        },
+        {
+            "name": "avr64ea48-release",
+            "configurePreset": "avr64ea48-release"
+        },
+        {
+            "name": "avr64ea48-debug",
+            "configurePreset": "avr64ea48-debug"
         }
     ]
 }

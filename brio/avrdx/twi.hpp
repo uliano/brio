@@ -122,16 +122,22 @@ namespace brio {
 // ---- routes and pins (17.5.9, 29.2.2) ---------------------------------------
 
 /// TWI pin routing (PORTMUX.TWIROUTEA). The values ARE the device
-/// header's own group values. There is no "none" code: the TWI cannot
-/// run pinless.
+/// header's own group values on every layout (the device tables'
+/// twi_route_codes, asserted below); ALT3 is the AVR EA's alone
+/// (DS40002443A 17.3.6: SDA PA0, SCL PA1, dual PC2/PC3). There is no
+/// "none" code: the TWI cannot run pinless.
 enum class TwiRoute : uint8_t {
     def = 0,
     alt1 = 1,
     alt2 = 2,
+#if PORTMUX_USART0_gm == 0x07   // the AVR EA's layout (device tables' portmux_layout)
+    alt3 = 3,
+#endif
 };
-static_assert(static_cast<uint8_t>(TwiRoute::def) == PORTMUX_TWI0_DEFAULT_gv &&
-              static_cast<uint8_t>(TwiRoute::alt1) == PORTMUX_TWI0_ALT1_gv &&
-              static_cast<uint8_t>(TwiRoute::alt2) == PORTMUX_TWI0_ALT2_gv,
+static_assert(twi_route_codes[0][0] == static_cast<uint8_t>(TwiRoute::def) &&
+              twi_route_codes[0][1] == static_cast<uint8_t>(TwiRoute::alt1) &&
+              twi_route_codes[0][2] == static_cast<uint8_t>(TwiRoute::alt2) &&
+              (twi_route_codes[0][3] == route_absent || twi_route_codes[0][3] == 3),
               "the route codes must be the device header's group values");
 
 // The package's pin count and its TWI instances are device_tables.hpp's
@@ -153,24 +159,27 @@ struct TwiPin {
 
 /// Whether this package offers a route at all (the device headers'
 /// route enums):
-///   TWI0  DEFAULT / ALT1 / ALT2 on every package;
+///   TWI0  DEFAULT / ALT1 / ALT2 on every package; ALT3 on the AVR EA;
 ///   TWI1  DEFAULT / ALT1 from 32 pins up, ALT2 from 48 pins up.
 constexpr bool twi_route_exists(uint8_t n, TwiRoute r) {
     if (n >= twi_count) return false;
-    if (n == 0) return true;
+    if (n == 0) return true;                                 // ALT3 named only where it exists
     if (r == TwiRoute::alt2) return package_pins >= 48;   // PB2/PB3
     return true;                                             // PF2/PF3
 }
 
 /// The MAIN pin pair of a route - where the host, and a client that is
 /// not in Dual mode, sit:
-///   TWI0  DEFAULT PA2/PA3   ALT1 PA2/PA3   ALT2 PC2/PC3
+///   TWI0  DEFAULT PA2/PA3   ALT1 PA2/PA3   ALT2 PC2/PC3   ALT3 PA0/PA1 (EA)
 ///   TWI1  DEFAULT PF2/PF3   ALT1 PF2/PF3   ALT2 PB2/PB3
 constexpr TwiPin twi_pin(uint8_t n, TwiRoute r, TwiSignal s) {
     if (!twi_route_exists(n, r)) return {};
     const uint8_t off = static_cast<uint8_t>(s);
     if (n == 0) {
         if (r == TwiRoute::alt2) return {'C', static_cast<uint8_t>(2 + off), true};
+#if PORTMUX_USART0_gm == 0x07
+        if (r == TwiRoute::alt3) return {'A', off, true};
+#endif
         return {'A', static_cast<uint8_t>(2 + off), true};
     }
     if (r == TwiRoute::alt2) {
@@ -184,12 +193,16 @@ constexpr TwiPin twi_pin(uint8_t n, TwiRoute r, TwiSignal s) {
 /// smaller packages, which is what the `bonded` flag says:
 ///   TWI0  DEFAULT PC2/PC3 (every package)
 ///         ALT1/ALT2 PC6/PC7 (48 pins and up)
+///         ALT3 PC2/PC3 (the AVR EA, every package)
 ///   TWI1  DEFAULT PB2/PB3 (48 pins and up)
 ///         ALT1/ALT2 PB6/PB7 (64 pins)
 constexpr TwiPin twi_dual_pin(uint8_t n, TwiRoute r, TwiSignal s) {
     if (!twi_route_exists(n, r)) return {};
     const uint8_t off = static_cast<uint8_t>(s);
     if (n == 0) {
+#if PORTMUX_USART0_gm == 0x07
+        if (r == TwiRoute::alt3) return {'C', static_cast<uint8_t>(2 + off), true};
+#endif
         if (r == TwiRoute::def) return {'C', static_cast<uint8_t>(2 + off), true};
         return {'C', static_cast<uint8_t>(6 + off), package_pins >= 48};
     }

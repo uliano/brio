@@ -1,7 +1,7 @@
 # ============================================================================
 #  CMakeLists.txt - the AVR build.
 #
-#  One executable target per (app x AVR128DB package): every src/apps/*.cpp
+#  One executable target per (app x board type): every src/apps/*.cpp
 #  with a main() is discovered automatically at configure time
 #  (CONFIGURE_DEPENDS), gated by its own "// build: boards = ..." header
 #  comment (default: db48 only, matching every app that doesn't name the
@@ -49,7 +49,7 @@ include(cmake/avr-mcus.cmake)
 # --- Which AVR package this configure targets - one CMake configure = one
 #     package, selected by a configurePreset. avr-mcus.cmake is the
 #     reference for valid values.
-set(AVR_MCU "avr128db48" CACHE STRING "target AVR MCU, e.g. avr128db48/avr128db28/avr128db32 (see cmake/avr-mcus.cmake)")
+set(AVR_MCU "avr128db48" CACHE STRING "target AVR MCU, e.g. avr128db48/avr128da48/avr64ea48 (see cmake/avr-mcus.cmake)")
 string(TOUPPER "${AVR_MCU}" AVR_MCU_DEFINE)
 avr_short_board("${AVR_MCU}" AVR_BOARD)
 
@@ -177,7 +177,11 @@ function(avr_add_app name)
     )
 
     target_include_directories(${name} PRIVATE ${CMAKE_SOURCE_DIR}/../brio)
-    target_compile_definitions(${name} PRIVATE ${AVR_MCU_DEFINES})
+    # The board TYPE this configure builds for, as a macro: the apps'
+    # src/apps/avr_board.hpp maps it to the facts of that assembly (the HF
+    # source and its rate, the 32 kHz crystal, what hangs on PA7) - facts of
+    # the PCB and what is fitted on it, which the chip's header cannot know.
+    target_compile_definitions(${name} PRIVATE ${AVR_MCU_DEFINES} BRIO_BOARD_${AVR_BOARD})
 
     target_compile_options(${name} PRIVATE
         ${BRIO_COMMON_FLAGS}

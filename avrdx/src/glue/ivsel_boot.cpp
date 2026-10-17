@@ -6,11 +6,12 @@
 //  an app and it has no main(); it is one build invariant expressed as
 //  four instructions.
 //
-//  WHY IT EXISTS. The AVR DA/DB splits the Flash into a BOOT section and
-//  an application section, and by default (CPUINT.CTRLA.IVSEL = 0) the
-//  hardware looks for the interrupt vector table at the START OF THE
-//  APPLICATION SECTION - not at address 0 (DS40002247B 15.5.1, and
-//  11.3.1.1 note 1). Every brio image is linked at 0: reset entry,
+//  WHY IT EXISTS. The AVR DA/DB and the AVR EA split the Flash into a
+//  BOOT section and an application section, and by default
+//  (CPUINT.CTRLA.IVSEL = 0) the hardware looks for the interrupt vector
+//  table at the START OF THE APPLICATION SECTION - not at address 0
+//  (DS40002247B 15.5.1 and 11.3.1.1 note 1; DS40002443A 15.5.1 and
+//  11.3.1.1.2 table 11-2 note 1, the same bit). Every brio image is linked at 0: reset entry,
 //  vector table, code, all of it inside BOOT. So the moment the
 //  BOOTSIZE fuse stops being 0 - which is what any image that writes
 //  its own Flash needs, since code can never write the section it runs
@@ -48,9 +49,10 @@
 //  are loaded FIRST so that the store is the very next instruction
 //  after the key - one instruction of the four, with three to spare.
 //
-//  Errata DS80000915F 2.2.4 (a store to an address >= 64 immediately
-//  followed by a write to SLPCTRL.CTRLA loses that write) does not
-//  apply: nothing here writes SLPCTRL. Verified in firmware.lst, which
+//  Errata DS80000915F 2.2.4 (DS80001048D 2.2.3 on the AVR EA: a store to
+//  an address >= 64 immediately followed by a write to SLPCTRL.CTRLA, or
+//  by an ST/STD below 64, loses that write) does not apply: nothing here
+//  writes SLPCTRL, and the key goes to CCP with OUT. Verified in firmware.lst, which
 //  is where the same claim is checked for the sleep driver.
 //
 //  The run-time twin of these four instructions is

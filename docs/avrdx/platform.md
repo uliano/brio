@@ -1,11 +1,13 @@
-# Platform - what the kernel stands on (AVR DA/DB)
+# Platform - what the kernel stands on (AVR DA, DB and EA)
 
 Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B -
 SLPCTRL chapter 13, RSTCTRL chapter 14, WDT chapter 22, the CPU's
 Configuration Change Protection in 7.4.6 - plus errata DS80000915F
 (item 2.2.4 is code here; clarifications 3.3.1 and 3.4.1 rewrite two
 of those chapters' tables) and, for the DA parts, DS80000882C, which
-lists no SLPCTRL, WDT or CPU item at all. Drivers:
+lists no SLPCTRL, WDT or CPU item at all; for the AVR64EA28/32/48
+DS40002443A (SLPCTRL 13, RSTCTRL 14, WDT 21, CCP 7.4.6) and DS80001048D
+(2.2.3, the DB's 2.2.4 word for word, on revisions B1 and B2). Drivers:
 `avrdx/platform.hpp` (`AvrPlatform`, this target's realization of
 the kernel's `Platform` concept), `avrdx/delay.hpp` (the short-wait
 role), `avrdx/sleep.hpp` (`Sleep`, `Vreg`) and `avrdx/reset.hpp`
@@ -129,6 +131,25 @@ number of cycles from flash, with no prefetch, cache or wait states,
 so counting cycles IS timing - which is why the short-wait role is a
 cycle loop here and a hardware counter (DWT CYCCNT, SysTick, mcycle)
 on the cores that have one.
+
+**On the AVR EA** (DS40002443A ch. 13, 14, 21): the same core (AVRxt,
+the same instruction timings, a two-byte return address, CCP with the
+IOREG key, 7.4) and the same three blocks with three differences. SLPCTRL
+is CTRLA alone (13.4): the same three modes, no VREGCTRL and no
+regulator control anywhere - `Vreg`/`VregPower` do not exist there,
+refused by name; whether the wake pays a regulator bill the data sheet
+does not list (13.3.2.2 against table 13-4) is measured by the sleep
+suite on the EA, a later step. The software-reset bit is called SWRE
+(the device tables' `software_reset_bm`, the same bit 0 under CCP); and
+UPDIRF is also set by a high-voltage UPDI enable (14.5.1). `.noinit` and
+the stack: `.noinit` lands after `.bss`, `__stack` at 0x7FFF; SRAM is in
+no row of the reset table (14.3.2.1.8), so the breadcrumb's magic word
+stays. The idle path's NOP before every SLPCTRL.CTRLA store is
+DS80001048D 2.2.3's workaround there. The delay paths are the DB's to
+the cycle; only the rate moves (20 MHz on the EA board: 20 cycles a
+microsecond, `delay_mult(20 MHz)` = 20480 exactly), and from a 16 or
+20 MHz source four of a `DynamicClock`'s twelve rates are not whole
+hertz (clkctrl.md).
 
 ## Types and verbs
 
@@ -817,6 +838,32 @@ dispatch, and only the loop is the suite's.
   ticks where 1024 Hz exactly would be 749984: OSC32K running ~0.8 %
   fast, the same +8000-to-+11000 ppm this desk measures everywhere else.
 
+**On the AVR64EA48** (rev B1, the board's 20 MHz quartz; the suites
+driven and their tallies read through the debugger - the bench board's
+console path is open, its page): `test_avr_platform` 109 verdicts, 109
+green, every letter in ten runs of ten - the delays derived from the
+20 MHz rate (1 us = 20 cycles = 5 loops, the dynamic regime 20 -> 10 ->
+20 MHz and 1.25 MHz with its exact Q4.12 factor 1280), the critical
+section, idle, the ring and queue, the timebase, the idle promise (w:
+no lost wake on any of the three paths; k: one turn per wake), and the
+breadcrumb across the six resets of letter i, SWRE's software reset
+among them; `test_avr_power` 53 of 53 (a to f: the ladder, a real
+standby round, the deadline guard, the voters, the standing
+restrictions, a power-down round) - the power model over the EA's
+three modes with no regulator verb - in eight runs of ten, and in two
+letter b's "the standby wake costs less than a microsecond" red: the
+standby wake from the PIT measures -3..+17 CLK_PER cycles against the
+same period spun (fifteen captures: 19588..19607 asleep against
+19579..19596 spinning), within the two legs' own spread, and the verdict
+asks `slept >= spun` - a bound not derived for that spread, which the
+DB's larger wake cost never met. In every EA release image each
+SLPCTRL.CTRLA store follows a non-store instruction (the NOP of
+DS80001048D 2.2.3's workaround, or a load between it and the store).
+Letter g fills the kernel queue it then judges and does not drain it,
+so it is green once per boot (ten boots of ten here) and two of its
+verdicts fail when it is run again in the same boot - a suite defect on
+every die.
+
 ## Not covered yet
 
 Driver gaps:
@@ -837,6 +884,9 @@ Driver gaps:
 
 Implemented but not bench-verified:
 
+- **The AVR EA's sleep modes** (the sleep suite on the EA, a later
+  step): the wake costs, whether the wake pays a regulator bill the data
+  sheet does not list, the async pin wake from power-down.
 - **`break_here()` with the OCD active.** The NOP half is proven; the
   half that halts in the debugger needs a debug session, which no
   console suite can be.

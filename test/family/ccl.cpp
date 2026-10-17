@@ -2,6 +2,9 @@
 // 28/32-pin, 6 on 48/64); a LUT whose PORT the package does not bond
 // (LUT5's pins are PORTG, 64-pin only) still works on events - only
 // the pin faces are refused.
+#include <avr/io.h>
+// On the AVR EA input 2 selects AC1 under the AC code, which LutInput::ac does not spell yet: ccl.hpp refuses a part without AC2 by name, and this TU compiles to nothing there.
+#if defined(AC2)
 #include "avrdx/ccl.hpp"
 #include "avrdx/evsys.hpp"
 
@@ -45,3 +48,5 @@ void ccl_64pin() {
 // LUT3 has no ALT1 anywhere (reserved route bit, PF6 = RESET).
 static_assert(!Lut<3>::has_alt_pin);
 static_assert(Lut<1>::has_alt_pin);
+
+#endif // AC2

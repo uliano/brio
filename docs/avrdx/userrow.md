@@ -1,12 +1,14 @@
-# USERROW - the board identity label (AVR DA/DB)
+# USERROW - the board identity label (AVR DA, DB and EA)
 
 Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B 8.7,
-errata DS80000915F (no USERROW items). Driver: `avrdx/userrow.hpp`.
+errata DS80000915F (no USERROW items); for the AVR64EA28/32/48
+DS40002443A 8.2, 8.6 and 8.7 (64 bytes at the same address; the CPU's
+write path is NVM version 3's, declined there - [nvm.md](nvm.md)). Driver: `avrdx/userrow.hpp`.
 Every `test_avr_*` suite prints the label in its banner.
 
 ## What the silicon does
 
-The User Row is 32 bytes of nonvolatile memory, mapped in data space
+The User Row is 32 bytes (64 on the AVR EA) of nonvolatile memory, mapped in data space
 at `USERROW` (0x1080) and read by the CPU like ordinary memory. Two
 properties make it an identity store:
 

@@ -204,6 +204,11 @@ source ENDED each sleep is read off the counts taken inside the sleep.
 
 Driver gaps:
 
+- The AVR EA: `ccl.hpp` refuses the part by name. On the EA input 2's
+  AC code selects AC1, not the AC2 that `LutInput::ac`'s contract "ACx
+  on input x" means (DS40002443A 29.2.2.1; the part has no AC2), and the
+  driver does not spell that yet; the fixture compiles to nothing there.
+
 - Typed per-input legality of the peripheral instances (today: the
   enum + the table above, an input whose peripheral the part has not
   got at all - `tca1` without TCA1, `zcd` without a ZCD - not named):

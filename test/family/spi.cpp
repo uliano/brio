@@ -11,20 +11,28 @@
 
 using namespace brio;
 
-using SysClock = Clock<ClockSource::internal, 24'000'000>;
+using SysClock = Clock<ClockSource::internal, has_oschf_frqsel ? 24'000'000 : 20'000'000>;
 
 // ---- the route table against the device header's route enums --------------
 
-// The default routes exist on every package: SPI0 PA4-PA7, SPI1 PC0-PC3.
+// The default routes exist on every package: SPI0 PA4-PA7, SPI1 PC0-PC3
+// (SPI1 where the part has one: the AVR DA/DB).
 static_assert(spi_route_exists(0, SpiRoute::def));
-static_assert(spi_route_exists(1, SpiRoute::def));
 static_assert(spi_route_exists(0, SpiRoute::none));
-static_assert(spi_route_exists(1, SpiRoute::none));
 static_assert(spi_pin(0, SpiRoute::def, SpiSignal::mosi).port == 'A');
 static_assert(spi_pin(0, SpiRoute::def, SpiSignal::mosi).pin == 4);
 static_assert(spi_pin(0, SpiRoute::def, SpiSignal::ss).pin == 7);
+#if defined(SPI1)
+static_assert(spi_route_exists(1, SpiRoute::def));
+static_assert(spi_route_exists(1, SpiRoute::none));
 static_assert(spi_pin(1, SpiRoute::def, SpiSignal::sck).port == 'C');
 static_assert(spi_pin(1, SpiRoute::def, SpiSignal::sck).pin == 2);
+#else
+static_assert(spi_count == 1 && !spi_route_exists(1, SpiRoute::def));
+#endif
+
+// The instance the client half of this TU uses: SPI1 where it exists.
+constexpr uint8_t client_spi = spi_count - 1;
 
 // A pinless route has no pins at all - that is what makes it pinless.
 static_assert(!spi_pin(0, SpiRoute::none, SpiSignal::sck).bonded);
@@ -61,7 +69,34 @@ static_assert(spi_config_valid<0>({.role = SpiRole::client, .buffer_mode = true,
 
 // ---- per-package route tables --------------------------------------------
 
-#if defined(PORTG)
+#if PORTMUX_SPI0_gm == 0x07
+// The AVR EA (DS40002443A 17.3.5): SPI0 alone; code 2 reserved (no ALT2
+// name at all), NONE 7;
+// ALT4 PD4-PD7 and ALT5 PC0-PC3 on every package, ALT1 PE0-PE3 on 48
+// pins; ALT3 (PA0, PA1, PC0, PC1) and ALT6 (SS on PF7, the UPDI pin)
+// exist in the silicon and are refused by the tasks (neg/).
+static_assert(spi_route_code(0, SpiRoute::none) == 7 && spi_route_codes[0][2] == route_absent);
+static_assert(spi_route_of_code(0, 7) == SpiRoute::none && spi_route_of_code(0, 5) == SpiRoute::alt5);
+static_assert(spi_route_exists(0, SpiRoute::alt4) && spi_route_exists(0, SpiRoute::alt5));
+static_assert(spi_pin(0, SpiRoute::alt4, SpiSignal::mosi).port == 'D' &&
+              spi_pin(0, SpiRoute::alt4, SpiSignal::ss).pin == 7);
+static_assert(spi_pin(0, SpiRoute::alt5, SpiSignal::sck).port == 'C' &&
+              spi_pin(0, SpiRoute::alt5, SpiSignal::sck).pin == 2);
+static_assert(spi_route_on_updi_pin(0, SpiRoute::alt6) && spi_route_crosses_ports(0, SpiRoute::alt3));
+static_assert(!spi_config_valid<0>({.route = SpiRoute::alt6}));
+static_assert(!spi_config_valid<0>({.route = SpiRoute::alt3}));
+#if defined(PORTE)
+static_assert(spi_route_exists(0, SpiRoute::alt1));
+static_assert(PORTMUX_SPI0_ALT1_gv == spi_route_code(0, SpiRoute::alt1));
+static_assert(spi_pin(0, SpiRoute::alt1, SpiSignal::sck).port == 'E');
+#else
+static_assert(!spi_route_exists(0, SpiRoute::alt1));
+#endif
+void use_ea() {
+    (void)SpiHost<0, SpiRoute::alt4>::init(SysClock{});
+    (void)SpiClient<0, SpiRoute::alt5>::init();
+}
+#elif defined(PORTG)
 // 64 pins: every route of both instances, ALT2 included.
 static_assert(package_pins == 64);
 static_assert(spi_route_exists(0, SpiRoute::alt1));
@@ -114,10 +149,10 @@ void use_small() {
 // ---- the resource and the tasks on what every package has ----------------
 
 using S0 = Spi<0>;
-using S1 = Spi<1>;
+using S1 = Spi<client_spi>;
 using Host0 = SpiHost<0>;                       // DEFAULT route
 using Pinless = SpiHost<0, SpiRoute::none>;     // a host with no pins at all
-using Client1 = SpiClient<1>;
+using Client1 = SpiClient<client_spi>;
 
 static_assert(Host0::available);
 static_assert(Pinless::available);

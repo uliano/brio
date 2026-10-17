@@ -55,9 +55,9 @@
 #include "avrdx/userrow.hpp"
 #include "util/print.hpp"
 
-using SysClock = brio::Clock<brio::has_xoschf ? brio::ClockSource::crystal
-                                              : brio::ClockSource::external,
-                             24'000'000>;
+#include "avr_board.hpp"
+
+using SysClock = BoardClock;   // the board's HF source (avr_board.hpp)
 constexpr SysClock clock;
 
 namespace {
@@ -89,9 +89,8 @@ using ChInB = EventChannel<3>;     ///< PD4 -> TCD input B
 using ChTcd = EventChannel<4>;     ///< a TCD event generator, or a PORTF pin
 using ChF = EventChannel<5>;       ///< a second PORTF pin (test j on the DA board)
 
-/// One board per part on this desk: the AVR128DB48 board leaves PA7 free,
-/// the AVR128DA48 board's PA7 carries 100 nF to ground (the header).
-constexpr bool board_pa7_free = has_xoschf;
+// The board's facts (board_clkout, board_xosc32k, board_pa7_free) are
+// the board table's (avr_board.hpp).
 
 // The instruments.
 using CycleTcb = Tcb<0>;

@@ -11,7 +11,7 @@
 
 using namespace brio;
 
-using SysClock = Clock<ClockSource::internal, 24'000'000>;
+using SysClock = Clock<ClockSource::internal, has_oschf_frqsel ? 24'000'000 : 20'000'000>;
 using DynClock = DynamicClock<SysClock>;
 
 static_assert(Platform<AvrPlatform>);

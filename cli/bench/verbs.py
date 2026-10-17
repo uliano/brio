@@ -27,7 +27,7 @@
 #    3. THIS    - resolves 1 against 2 and drives the hardware.
 #
 #  TWO ARCHITECTURES SHARE THIS TOOL. The board's TYPE decides everything
-#  that differs (BOARD_TYPES below): db* is an AVR-Dx built by avrdx/ and
+#  that differs (BOARD_TYPES below): db*, da48 and ea48 are AVRs built by avrdx/ and
 #  written by avrdude over UPDI, c21j is a SAM C21 built by samc21/ and written
 #  by OpenOCD over SWD. Everything above that line - the console protocol,
 #  the "ALL: N pass, M fail" verdict grammar, the campaign shape - is one

@@ -1,9 +1,13 @@
-# USART - the serial port (AVR DA/DB)
+# USART - the serial port (AVR DA, DB and EA)
 
 Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B (USART
 chapter 27, PORTMUX chapter 17, electricals 39.14), errata
 DS80000915F 2.16.1-2.16.3 and, for the DA parts, DS80000882C
-2.15.1-2.15.2. Three errata items shape the code:
+2.15.1-2.15.2; for the AVR64EA28/32/48 DS40002443A (USART chapter 25 -
+the DB's chapter register for register - PORTMUX 17.3.3-17.3.4,
+electricals 35.13) and DS80001048D 2.5.1 (the DB's 2.16.3, word for
+word; the DB's 2.16.1 and 2.16.2 have no EA twin, and brio applies both
+workarounds on every part). Three errata items shape the code:
 
 - **2.16.1 / 2.15.1, open drain**: with the TXD pin configured as an
   output it drives high whether ODME is set or not. The work around is
@@ -43,6 +47,20 @@ Facts that matter to code:
   every pin and the peripheral still runs - the generator, the
   transmitter and its flags all work - but the internal loop-back and
   open-drain do not, because both act on the TXD PAD (measured).
+- **The AVR EA's route table has another SHAPE** (DS40002443A 17.3.3-4,
+  table 3-1): three USARTs on every package; USART0's field three bits
+  wide with routes DEFAULT PA0-PA3, ALT1 PA4-PA7, ALT2 PA2/PA3
+  (TXD/RXD only), ALT3 PD4-PD7, ALT4 PC1-PC3 (no XDIR) and NONE = 5;
+  USART1 DEFAULT PC0-PC3, ALT1 PC4-PC7 (48 pins), ALT2 PD6/PD7
+  (TXD/RXD), NONE 3; USART2 DEFAULT PF0-PF3 (PF0/PF1 alone on 28 pins),
+  ALT1 PF4/PF5 (TXD/RXD, 32 and 48 pins), NONE 3 - and USART2's field
+  in USARTROUTEB. A route may move the instance to another port; every
+  signal of one route sits on one port. brio names routes, never codes:
+  `UsartRoute::alt2..alt4` exist only where the layout has them, every
+  route's code is the device tables' `usart_route_codes` (the header's
+  `_gv` enumerators, the chapter's number where only some packages name
+  one), the register and the field are the header's `_gm`/`_gp`, and
+  `routed()` maps the code back to the name.
 - **Which positions exist is a per-package fact**, and the device
   header's route enums are the authority. Three instances on 28/32
   pins, five on 48, six on 64; and the ALT1 halves appear one signal at
@@ -807,8 +825,18 @@ Driver gaps (not implemented):
 - **No RUNSTDBY**: the peripheral has none. Standby operation is
   SFDEN's business, and that is a verb, not a mode.
 
-Implemented and compile-checked for all eight DA/DB packages, but NOT
-bench-verified:
+Implemented and compile-checked for all eight DA/DB packages and the
+three AVR64EA packages, but NOT bench-verified:
+
+- **every AVR EA route but the console's** (USART0 ALT2..ALT4, USART1's
+  three) and the console itself on the bench board: its USART2 ALT1
+  measured configured over the debugger (USARTROUTEB 0x01, BAUD 174,
+  RXEN/TXEN) and transmitting, but the board's PF4/PF5 reach nothing on
+  this desk (its page) - `test_avr_serial` on the EA is a later step,
+  with a route-by-route readback letter;
+- **the ODME and SFDEN workarounds on the AVR EA**: DS80001048D carries
+  no twin of the DB's 2.16.1/2.16.2; whether the transmitter still pulls
+  an INPUT pad low there is measured by a one-wire letter on the EA;
 
 - **`DBGCTRL.DBGRUN`**;
 - **IRCOM's fixed transmit pulse across the wire** (TXPLCTRL other than

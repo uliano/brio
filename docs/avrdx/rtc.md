@@ -1,4 +1,4 @@
-# RTC / PIT - the real-time counter and periodic interrupt timer (AVR DA/DB)
+# RTC / PIT - the real-time counter and periodic interrupt timer (AVR DA, DB and EA)
 
 Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B (RTC
 chapter 26), errata DS80000915F and, for the DA parts, DS80000882C -
@@ -237,9 +237,16 @@ Every register of chapter 26 - CTRLA, STATUS, INTCTRL, INTFLAGS,
 DBGCTRL, CALIB, CLKSEL, CNT, PER, CMP, PITCTRLA, PITSTATUS, PITINTCTRL,
 PITINTFLAGS, PITDBGCTRL - is exposed by a verb, and the four clock
 sources, sixteen prescaler settings and fifteen PIT periods are the
-enums' full range. TEMP is the compiler's, not the driver's.
+enums' full range. TEMP is the compiler's, not the driver's. On the
+AVR EA (DS40002443A ch. 24, the same chapter) the one register more,
+PITEVGENCTRLA, is the event routes' (`EvPitDiv<div, slot>`,
+[evsys.md](evsys.md)) and `Pit::event_selection(slot)` reads it back.
 
 Implemented but not bench-verified:
+
+- The whole driver on the AVR EA: it compiles on the three packages,
+  and the bench board's 32.768 kHz crystal does not run (its page) - the
+  Ticker there runs from OSC32K; the PIT event slots are evsys.md's.
 
 - `RtcSource::extclk` and an external 32 kHz CLOCK on XTAL32K1: neither
   board feeds a clock to XTAL32K1, and the EXTCLK pin carries 24 MHz on

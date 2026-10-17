@@ -51,7 +51,7 @@
 //      turn costs - measured with an interrupt pending, so its idle()
 //      returns at once.
 
-// build: boards = db48,da48
+// build: boards = db48,da48,ea48
 // build: monitor_speed = 460800
 
 #include <avr/interrupt.h>
@@ -76,10 +76,10 @@
 #include "util/print.hpp"
 #include "util/ring.hpp"
 
-// The DB's 24 MHz crystal, or the DA's external 24 MHz clock on PA0.
-using SysClock = brio::Clock<brio::has_xoschf ? brio::ClockSource::crystal
-                                              : brio::ClockSource::external,
-                             24'000'000>;
+#include "avr_board.hpp"
+
+// The board's HF clock: its source and rate are the board table's.
+using SysClock = BoardClock;   // the board's HF source (avr_board.hpp)
 constexpr SysClock clock;
 
 /// The suite's own reset-surviving breadcrumb: test i spans six resets
@@ -126,8 +126,14 @@ using ChCarry = EventChannel<4>;
 using ChSnap = EventChannel<5>;
 
 constexpr uint32_t crystal_hz = SysClock::hz;
-/// CLK_PER cycles in one PIT tick at 24 MHz (24e6 / 1024).
+/// CLK_PER cycles in one PIT tick (24e6 / 1024 on the DA/DB boards,
+/// 20e6 / 1024 on the EA board).
 constexpr uint32_t cycles_per_tick = crystal_hz / Ticker::ticks_per_second;
+/// The letters' arithmetic was first written at 24 MHz and keeps its
+/// literal text there; at any other board rate (the AVR EA board's 20 MHz)
+/// the same verdicts are derived from the rate.
+constexpr bool at24 = crystal_hz == 24'000'000u;
+constexpr uint32_t mhz = crystal_hz / 1'000'000u;
 
 /// The 32-bit CLK_PER stamp: a software event latches both halves.
 uint32_t cycles_now() { return Watch::read(); }
@@ -293,7 +299,12 @@ void tb_runtime() {
     quiesce();
     const uint32_t cost = stamp_cost();
     const uint8_t cpu = cycles_per_us(crystal_hz);
-    verdict("cycles_per_us(24 MHz) = 24", cpu == 24);
+    if constexpr (at24) {
+        verdict("cycles_per_us(24 MHz) = 24", cpu == 24);
+    } else {
+        print(serial, "  cycles_per_us(", crystal_hz, " Hz) = ", cpu, crlf);
+        verdict("cycles_per_us(the board rate) = its whole MHz", cpu == mhz);
+    }
 
     struct Row { uint32_t us; uint32_t measured; };
     volatile uint32_t v = 0;
@@ -319,13 +330,24 @@ void tb_runtime() {
     print(serial, "  path overhead spans ", lo, " .. ", hi, " cycles", crlf);
     verdict("the overhead is a constant, not a per-us cost", hi - lo <= 6);
 
-    // The ceil is what makes 1 us honest: 24 cycles is exactly 6 loops.
-    verdict("1 us at 24 MHz is exactly 6 loops", (1u * cpu + 3u) / 4u == 6u);
-    // The bare loop, without the delay_us wrapper: the pure cost of
-    // _delay_loop_2's own iteration.
-    const uint32_t bare = cycles_of(cost, [] { delay_us_runtime(24, 1); });
-    print(serial, "  delay_us_runtime(24, 1) alone: ", bare, " cycles (6 loops = 24)", crlf);
-    verdict("the bare loop is at least its nominal 24 cycles", bare >= 24);
+    if constexpr (at24) {
+        // The ceil is what makes 1 us honest: 24 cycles is exactly 6 loops.
+        verdict("1 us at 24 MHz is exactly 6 loops", (1u * cpu + 3u) / 4u == 6u);
+        // The bare loop, without the delay_us wrapper: the pure cost of
+        // _delay_loop_2's own iteration.
+        const uint32_t bare = cycles_of(cost, [] { delay_us_runtime(24, 1); });
+        print(serial, "  delay_us_runtime(24, 1) alone: ", bare, " cycles (6 loops = 24)", crlf);
+        verdict("the bare loop is at least its nominal 24 cycles", bare >= 24);
+    } else {
+        // The ceil is what makes 1 us honest: mhz cycles in ceil(mhz / 4)
+        // loops (20 cycles = exactly 5 loops at 20 MHz).
+        constexpr uint32_t loops1 = (mhz + 3u) / 4u;
+        verdict("1 us at the board rate is ceil(MHz / 4) loops", (1u * cpu + 3u) / 4u == loops1);
+        const uint32_t bare = cycles_of(cost, [] { delay_us_runtime(mhz, 1); });
+        print(serial, "  delay_us_runtime(", mhz, ", 1) alone: ", bare, " cycles (", loops1,
+              " loops = ", 4u * loops1, ")", crlf);
+        verdict("the bare loop is at least its nominal loops x 4 cycles", bare >= 4u * loops1);
+    }
     quiesce();
 }
 
@@ -339,7 +361,12 @@ void tb_runtime() {
 // ceiling verdict is what bars a runtime division from creeping back
 // in), and at 1.5 MHz there must be no 4/3 overshoot.
 void tc_rebase() {
-    print(serial, "c delay_us under DynamicClock: the index dispatch, 24 -> 12 -> 24 MHz and 1.5 MHz exact", crlf);
+    if constexpr (at24) {
+        print(serial, "c delay_us under DynamicClock: the index dispatch, 24 -> 12 -> 24 MHz and 1.5 MHz exact", crlf);
+    } else {
+        print(serial, "c delay_us under DynamicClock: the index dispatch, ", mhz, " -> ", mhz / 2u,
+              " -> ", mhz, " MHz and ", crystal_hz / 16u, " Hz exact", crlf);
+    }
     quiesce();
     const bool dyn_ok = DynClock::init();
     console_drain();                  // the console is about to be re-owned
@@ -356,18 +383,18 @@ void tc_rebase() {
     Leg legs[3];
     volatile uint32_t v = 1000;
 
-    legs[0].hz = 24'000'000u;
+    legs[0].hz = crystal_hz;
     legs[0].d1 = cycles_of(cost, [&] { delay_us(DynClock{}, v); });
     v = 2000;
     legs[0].d2 = cycles_of(cost, [&] { delay_us(DynClock{}, v); });
-    verdict("switch to 12 MHz", DynClock::set(12'000'000u));
-    legs[1].hz = 12'000'000u;
+    verdict(at24 ? "switch to 12 MHz" : "switch to half the board rate", DynClock::set(crystal_hz / 2u));
+    legs[1].hz = crystal_hz / 2u;
     v = 1000;
     legs[1].d1 = cycles_of(cost, [&] { delay_us(DynClock{}, v); });
     v = 2000;
     legs[1].d2 = cycles_of(cost, [&] { delay_us(DynClock{}, v); });
-    verdict("back to 24 MHz", DynClock::set(24'000'000u));
-    legs[2].hz = 24'000'000u;
+    verdict(at24 ? "back to 24 MHz" : "back to the board rate", DynClock::set(crystal_hz));
+    legs[2].hz = crystal_hz;
     v = 1000;
     legs[2].d1 = cycles_of(cost, [&] { delay_us(DynClock{}, v); });
     v = 2000;
@@ -404,11 +431,16 @@ void tc_rebase() {
     // A CONSTANT us under the dynamic clock: each dispatch branch folds
     // its own exact loop, so the only runtime cost is the index chain.
     const uint32_t k1000 = cycles_of(cost, [] { delay_us(DynClock{}, 1000); });
-    print(serial, "  constant 1000 us at 24 MHz through the dispatch: ", k1000,
-          " cycles (nominal 24000)", crlf);
-    verdict("a constant us under DynamicClock is at least nominal", k1000 >= 24000u);
+    if constexpr (at24) {
+        print(serial, "  constant 1000 us at 24 MHz through the dispatch: ", k1000,
+              " cycles (nominal 24000)", crlf);
+    } else {
+        print(serial, "  constant 1000 us at ", mhz, " MHz through the dispatch: ", k1000,
+              " cycles (nominal ", 1000u * mhz, ")", crlf);
+    }
+    verdict("a constant us under DynamicClock is at least nominal", k1000 >= 1000u * mhz);
     verdict("and its overhead is the dispatch alone, under 100 cycles",
-            k1000 - 24000u < 100u);
+            k1000 - 1000u * mhz < 100u);
 
     // The sub-MHz honesty. 1.5 MHz is 24 MHz / 16, a rate the prescaler
     // really reaches. Whole-cycles-per-us rounding - still what the
@@ -418,30 +450,52 @@ void tc_rebase() {
     // 1000 us and not 1333. The console cannot survive 1.5 MHz (BAUD would
     // have to go below its floor of 64), so the leg is measured in
     // silence and printed after the climb back.
-    verdict("the driver knows 460800 is unreachable at 1.5 MHz",
-            !Serial::can_baud(1'500'000u, 460800u));
-    verdict("cycles_per_us still rounds 1.5 up to 2 (the stored-byte helper)",
-            cycles_per_us(1'500'000u) == 2);
-    verdict("the dispatch's Q4.12 factor for 1.5 MHz is exact",
-            delay_mult(1'500'000u) == 1536u);
+    // The slow rate is the board rate over 16: 1.5 MHz from 24 MHz (Q4.12
+    // factor 1536, ceil 2 = 4/3 of nominal), 1.25 MHz from 20 MHz (factor
+    // 1280 exactly, ceil 2 = 8/5 of nominal).
+    constexpr uint32_t slow_hz = crystal_hz / 16u;
+    constexpr uint16_t slow_mult = static_cast<uint16_t>((slow_hz * 4096ull + 3'999'999u) / 4'000'000u);
+    if constexpr (at24) {
+        verdict("the driver knows 460800 is unreachable at 1.5 MHz",
+                !Serial::can_baud(1'500'000u, 460800u));
+        verdict("cycles_per_us still rounds 1.5 up to 2 (the stored-byte helper)",
+                cycles_per_us(1'500'000u) == 2);
+        verdict("the dispatch's Q4.12 factor for 1.5 MHz is exact",
+                delay_mult(1'500'000u) == 1536u);
+    } else {
+        verdict("the driver knows 460800 is unreachable at the board rate / 16",
+                !Serial::can_baud(slow_hz, 460800u));
+        verdict("cycles_per_us still rounds the slow rate up to 2 (the stored-byte helper)",
+                cycles_per_us(slow_hz) == 2);
+        verdict("the dispatch's Q4.12 factor for the slow rate is exact",
+                delay_mult(slow_hz) == slow_mult && slow_mult * 4'000'000ull == slow_hz * 4096ull);
+    }
     console_drain();
     uint32_t s1 = 0, s2 = 0;
-    bool slow_ok = DynClock::set(1'500'000u);
+    bool slow_ok = DynClock::set(slow_hz);
     if (slow_ok) {
         v = 1000;
         s1 = cycles_of(cost, [&] { delay_us(DynClock{}, v); });
         v = 2000;
         s2 = cycles_of(cost, [&] { delay_us(DynClock{}, v); });
-        slow_ok = DynClock::set(24'000'000u);
+        slow_ok = DynClock::set(crystal_hz);
     }
     Serial::init(clock, 460800);
-    verdict("the rate really reached 1.5 MHz and came back", slow_ok);
-    const uint32_t slow_us = (s1 * 1'000'000u) / 1'500'000u;
-    const uint32_t slope_us = ((s2 - s1) * 1'000'000u) / 1'500'000u;
-    print(serial, "  at 1500000 Hz: 1000 us -> ", s1, " cycles (", slow_us,
-          " us), per-1000-us slope ", s2 - s1, " cycles = ", slope_us,
-          " us: the per-rate factor is exact, the old 4/3 overshoot is gone", crlf);
-    verdict("1000 us at 1.5 MHz is at least 1000 us", slow_us >= 1000u);
+    verdict(at24 ? "the rate really reached 1.5 MHz and came back"
+                 : "the rate really reached the slow rate and came back", slow_ok);
+    const uint32_t slow_us = (s1 * 1'000'000u) / slow_hz;
+    const uint32_t slope_us = ((s2 - s1) * 1'000'000u) / slow_hz;
+    if constexpr (at24) {
+        print(serial, "  at 1500000 Hz: 1000 us -> ", s1, " cycles (", slow_us,
+              " us), per-1000-us slope ", s2 - s1, " cycles = ", slope_us,
+              " us: the per-rate factor is exact, the old 4/3 overshoot is gone", crlf);
+        verdict("1000 us at 1.5 MHz is at least 1000 us", slow_us >= 1000u);
+    } else {
+        print(serial, "  at ", slow_hz, " Hz: 1000 us -> ", s1, " cycles (", slow_us,
+              " us), per-1000-us slope ", s2 - s1, " cycles = ", slope_us,
+              " us: the per-rate factor is exact", crlf);
+        verdict("1000 us at the slow rate is at least 1000 us", slow_us >= 1000u);
+    }
     verdict("and the slope is the exact 1000 us, not the old ceil's 1333",
             near(static_cast<int32_t>(slope_us), 1000, 10));
     quiesce();
@@ -585,7 +639,8 @@ void tf_idle() {
     console_drain();
     Ticker::pause();
     alarm_mode = 1;
-    (void)Alarm::init({.mode = TcbMode::periodic, .clock = TcbClock::div1, .compare = 24000});
+    (void)Alarm::init({.mode = TcbMode::periodic, .clock = TcbClock::div1,
+                       .compare = static_cast<uint16_t>(crystal_hz / 1000u)});
     Alarm::enable_capt_interrupt(true);
     uint32_t slept = 0xFFFFFFFFu, spun = 0xFFFFFFFFu;
     for (uint8_t i = 0; i < 8; ++i) {
@@ -1414,9 +1469,15 @@ int main() {
         token.magic = 0;
         auto board = board_id();
         if (board.empty()) board = "?";
-        print(serial, crlf, "test_avr_platform - platform test suite (board ", board,
-              ", clk=", xtal ? "XTAL" : "OSCHF",
-              " 24 MHz, silicon rev ", hex(SYSCFG.REVID), ")", crlf);
+        if constexpr (at24) {
+            print(serial, crlf, "test_avr_platform - platform test suite (board ", board,
+                  ", clk=", xtal ? "XTAL" : "OSCHF",
+                  " 24 MHz, silicon rev ", hex(SYSCFG.REVID), ")", crlf);
+        } else {
+            print(serial, crlf, "test_avr_platform - platform test suite (board ", board,
+                  ", clk=", xtal ? "XTAL" : "OSCHF", " ", mhz,
+                  " MHz, silicon rev ", hex(SYSCFG.REVID), ")", crlf);
+        }
         report_boot();
         help();
     }

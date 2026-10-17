@@ -256,6 +256,14 @@ calls `clock(c)` itself.
 
 Driver gaps:
 
+- The AVR EA's TCA1 routes (DS40002443A 17.3.7): TCA1 exists on every
+  EA package, with three-channel routes on PORTA (PA4..PA6) and PORTD
+  (PD4..PD6) the route table does not hold yet - refused like any route
+  it does not know; its PORTB and PORTC routes are refused where PORTB
+  is absent (the 28/32-pin EA: PORTC's code is not in that header and
+  PORTB's is "not connected"). The rest of the chapter on the EA - the
+  same IP, word for word - compiles and is a later step on the bench.
+
 - The split halves' counters/periods/compares as verbs (LCNT/HCNT,
   LPER/HPER, LCMPn/HCMPn - today only through the raw `split()`
   view; the flags, interrupts and ISR bodies are verbs already).

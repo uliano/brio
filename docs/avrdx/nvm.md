@@ -546,6 +546,16 @@ cycles each; it is not part of `z` either.
 
 Driver gaps - the chapter's features this driver does not implement:
 
+- **The AVR EA's NVM version 3** (DS40002443A ch. 11: a page buffer,
+  page write and page erase commands, RWW/NRWW sections in 256-byte
+  blocks, EEWP): `nvm.hpp` and `nvm_flash.hpp` refuse the part by name,
+  and with them the flash heap and journal; their fixtures compile to
+  nothing there. The EA's EEPROM is a later step; its flash and USERROW
+  self-programming are DECLINED - a 64 KB part with a 512-byte EEPROM
+  keeps its small values in the EEPROM, and its rev B1's 2.4.2 (a flash
+  read during an RWW write fails the write) has no user then. The
+  USERROW stays readable (`userrow.hpp`, the board label).
+
 - **No bootloader.** Nothing here writes BOOT (nothing can), and no
   boot loader is built. The door is left open at zero cost: BOOTSIZE 1
   is 512 bytes, which is what an Optiboot-DX fits in.

@@ -1,7 +1,10 @@
-# EVSYS - the event system (AVR DA/DB)
+# EVSYS - the event system (AVR DA, DB and EA)
 
 Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B (EVSYS
-chapter 16, PORTMUX 17.5.1), errata DS80000915F (no EVSYS items) and,
+chapter 16, PORTMUX 17.5.1), errata DS80000915F (no EVSYS items); for
+the AVR64EA28/32/48 DS40002443A (EVSYS chapter 16, PORT.EVGENCTRLA
+18.5.17, RTC.PITEVGENCTRLA 24.13.17, EVSYSROUTEA 17.5) and DS80001048D
+(no EVSYS, PORT or RTC item); and,
 for the DA parts, DS80000882C (2.6.1: PB6/PB7 and PE4..PE7 are not
 connected to the event system, as generators or as EVOUT - pins a DA
 bonds on 64 pins only; `EvPin` and `EvOut` refuse them there, the
@@ -71,6 +74,20 @@ packages lack the instances they do not bond out.
 exists; EVOUTF has no ALT1 on any package. Any generator becomes a
 signal on a pin: the test instrument of this peripheral.
 
+**The AVR EA's model** (DS40002443A 16.4, 16.5.2). Six channels
+(`CHANNEL0..5`, one `SWEVENTA`) on every package, and EVERY generator
+legal on every channel: no parity, no port pair. Pins and PIT dividers
+reach the channels through SLOTS - two per port, `PORTx.EVGENCTRLA`
+picking which pin each carries (18.5.17, reset PIN0), and two in the RTC,
+`RTC.PITEVGENCTRLA` picking which divider each carries, DIV4 .. DIV32768
+(code log2(div) - 1, 24.13.17; the divider chain runs only while RTCEN or
+PITEN is set, 24.5.2.2). The channel code names the slot: 0x40 + 2 x
+port + slot for a pin, 0x08 + slot for the PIT. So at most two pins of
+one port and two PIT dividers are routed at once - a contended resource
+the DA/DB do not have. ADC0 adds SAMPLE and WINDOW generators (0x25,
+0x26). EVOUT: PA2/PA7, PB2, PC2/PC7, PD2/PD7, PE2, PF2/PF7 (17.5) - and
+PF7 is the UPDI pin.
+
 ## Types and verbs
 
 The model: a GENERATOR is a type carrying its `CHANNELn` code and its
@@ -85,24 +102,25 @@ worked around with a raw register write.
 | Type | Meaning |
 |------|---------|
 | `EventChannel<n>` | channel handle (existence checked): `source(G{})` routes generator G (legality static_asserted), `off()` idles the channel, `pulse()` fires a software event |
-| `EvPitDiv<div>` | prescaled RTC clock / div; 1024..8192 legal on even channels, 64..512 on odd |
+| `EvPitDiv<div, slot = 0>` | prescaled RTC clock / div. AVR DA/DB: 1024..8192 legal on even channels, 64..512 on odd, slot 0 only. AVR EA: a PIT event SLOT (0 or 1) carrying any divider 4..32768, on any channel; `source()` first calls its `prepare()`, a read-modify-write of the slot's nibble in RTC.PITEVGENCTRLA; `release()` turns the slot off |
 | `EvRtcOvf`, `EvRtcCmp` | RTC overflow / compare match, all channels |
-| `EvPin<Pin>` | the pin's level; legal on the port pair's two channels |
+| `EvPin<Pin, slot = 0>` | the pin's level. AVR DA/DB: legal on the port pair's two channels, slot 0 only. AVR EA: through the port's event SLOT (0 or 1), on any channel; `source()` first calls its `prepare()`, a read-modify-write of the slot's field in PORTx.EVGENCTRLA (`Port<L>::event_selection(slot)` reads it back) |
+| `EvAdc0Sample`, `EvAdc0Window` (EA) | ADC0 sample ready and window compare, all channels |
 | `EvAdc0Ready` | ADC0 result ready, all channels |
 | `EvTcaOvf<n>`, `EvTcaHunf<n>`, `EvTcaCmp<n, ch>` | TCA overflow / high-byte underflow / compare match, all channels; n gated by the package's TCA count (TCA1 on 48/64-pin) |
 | `EvTcbCapt<n>`, `EvTcbOvf<n>` | TCB CAPT flag / counter overflow (the 32-bit cascade carry), all channels; n gated by the package's TCB count (TCB4 on 64-pin) |
 | `EvLut<n>` | CCL LUT output level, all channels |
 | `EvUpdiSynch`, `EvMvioOk` (DB), `EvZcdOut<n>`, `EvOpampReady<n>` (DB), `EvUsartXck<n>`, `EvSpiSck<n>`, `EvTcdCmpBClr/ASet/BSet/ProgEv` (TCD parts) | the rest of the generator table (16.5.2), codes verified against the device header's enums; instance counts gated per package (ZCD0 alone on 28/32 pins, ZCD0..1 on the AVR DA48, ZCD0..2 on the DB48 and the 64-pin parts) |
 | `EvAcOut<n>` | comparator output level, all channels |
-| `EvOut<Pin>` | the channel's signal on a pin: Px2 default on every port present, Px7 ALT1 on every port but PORTF; `listen` selects the PORTMUX position, drives the pin as output, connects; `unlisten` tears it all down (pin back to input, PORTMUX back to default) |
+| `EvOut<Pin>` | the channel's signal on a pin: Px2 default on every port present, Px7 ALT1 on every port but PORTF (AVR DA/DB) or on PORTA, PORTC and PORTD (AVR EA - its PF7 ALT1 is the UPDI pin, refused by name: a GPIO only with UPDIPINCFG = 0, which loses the debug link without a high-voltage programmer); `listen` selects the PORTMUX position, drives the pin as output, connects; `unlisten` tears it all down (pin back to input, PORTMUX back to default) |
 | `EvAdc0Start` | ADC0 start on event (the ADC's `start_on()` also sets STARTEI; listening alone arms nothing) |
 | `EvTcaCntA<n>`, `EvTcaCntB<n>` | TCA event inputs A and B; the action is EVACTA/EVACTB in the TCA; n gated by the package's TCA count |
 | `EvTcbCaptIn<n>`, `EvTcbCountIn<n>` | TCB capture input (the TCB must also set CAPTEI) and count input |
 | `EvLutIn<n, 'A'/'B'>` | CCL LUT n event input A or B |
 | `EvUsartIrda<n>`, `EvTcdInputA/B` (TCD parts), `EvOpampCtl<n, OpampAction::enable/disable/dump/drive>` (DB) | the rest of the user table (16.5.3); `usart_count` gates the instances per package |
 | `EventUserBase` | `listen(brio::EventChannel<n>{})` / `unlisten()` for every user |
-| concepts | `EventGenerator` (code, per-channel legality), `EventUser` (the USER register, unlisten) |
-| helpers | `event_channels` (8 or 10, the device tables' probe of the EVSYS struct), `evsys_pulse(ch)` (software event on a run-time channel - what a driver holding its channel as a value uses) |
+| concepts | `EventGenerator` (code, per-channel legality), `SlottedEventGenerator` (a generator with a `prepare()`, called by `source()` BEFORE CHANNELn is written, so a listened channel never carries the slot's previous selection after the route is made), `EventUser` (the USER register, unlisten) |
+| helpers | `event_channels` (6, 8 or 10, the device tables' probe of the EVSYS struct), `evsys_pulse(ch)` (software event on a run-time channel - what a driver holding its channel as a value uses) |
 
 The peripheral drivers wrap the users (`Tcb<n>::capture_on`,
 `Tca<n>::event_a_on`, `Lut<n>::event_a_on`, `Adc<0>::start_on`): an
@@ -130,6 +148,19 @@ brio::EventChannel<1>::off();
 brio::EventChannel<0>::source(brio::EvPin<brio::Pin<'A', 2>>{});  // A/B pair: channels 0-1
 brio::EvTcbCaptIn<0>::listen(brio::EventChannel<0>{});            // Tcb<0> mode + CAPTEI arm it
 ```
+
+**On the AVR EA, the slots named in the type** - the second pin of
+PORTA rides slot 1, so it does not move what slot 0 carries:
+
+```cpp
+brio::EventChannel<5>::source(brio::EvPin<brio::Pin<'A', 4>, 1>{});   // PA4 via PORTA slot 1
+brio::EventChannel<0>::source(brio::EvPitDiv<4, 0>{});                 // CLK_RTC / 4: 8.192 kHz
+```
+
+The cost of a slotted route: the slot's read-modify-write (a load, an
+AND, an OR, a store: about five cycles) before the channel's store. Two
+contexts re-selecting the two slots of one port race on the shared
+register: one owner per port's slots, as per channel.
 
 **A software event** (test stimulus, one CLK_PER inversion):
 
@@ -179,6 +210,11 @@ brio::EventChannel<3>::pulse();
 
 Driver gaps:
 
+- on the AVR EA, an allocator of the pin and PIT slots: the slot is in
+  the type and the app's to keep unique per port (as a channel is):
+  declined, no driver allocates a resource the app did not name;
+- EVOUTF's ALT1 on the AVR EA (PF7, the UPDI pin) - declined above;
+
 - pin-level bonding of an EVOUT ALT1 pin within an existing port
   (whether THIS package bonds Px7) - deferred to the device tables;
 - the static allocator (`EventSystem<Route...>`: routes declared once,
@@ -186,6 +222,13 @@ Driver gaps:
   which are the peripheral.
 
 Implemented but not bench-verified:
+
+- the AVR EA's PIT slots on the silicon (the pin slot is measured: port.md,
+  `test_avr_pin` e, ten runs of ten): the dividers DIV4..DIV32 and
+  DIV16384/32768 (24.13.17 lists them, the overview 24.2 says 64..8192),
+  whether a slot needs RTCEN or PITEN, and the latency from a slot
+  write to the event - each measured by a divider on EVOUT counted
+  against the 32 kHz crystal;
 
 - the vocabulary no driver exercises yet - the UPDI, MVIO and ZCD
   generators: codes verified against the device header's own enums,

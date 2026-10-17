@@ -107,9 +107,9 @@
 
 #include "sleep_link.hpp"
 
-using SysClock = brio::Clock<brio::has_xoschf ? brio::ClockSource::crystal
-                                              : brio::ClockSource::external,
-                             24'000'000>;
+#include "avr_board.hpp"
+
+using SysClock = BoardClock;   // the board's HF source (avr_board.hpp)
 constexpr SysClock clock;
 
 /// The escape hatch of the two power-down tests. A mode that does not

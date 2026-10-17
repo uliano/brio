@@ -15,8 +15,16 @@
 // Not testable here: INLVL thresholds and the slew rate (analog
 // levels / a scope), the fully-async wake (needs a standby sleep),
 // the buttons PA2..PA5 (a human finger).
+//
+// On a part with pin event SLOTS (the AVR EA, PORTx.EVGENCTRLA) letter e
+// routes PD3 through PORTD's slot 1 onto an event channel counted by a
+// TCB, reads the slot back, and re-selects the slot to a quiet pin; the
+// count must follow the selection (slot 0, never routed here, must read
+// its reset PIN0 throughout). On the AVR EA board PC6/PC7 are
+// jumpered to PE2/PE3 (and on to the partner board): PE2/PE3 stay inputs
+// with no pull, so driving PC6/PC7 drives the net alone.
 
-// build: boards = db48,da48
+// build: boards = db48,da48,ea48
 // build: monitor_speed = 460800
 
 #include <avr/interrupt.h>
@@ -24,14 +32,16 @@
 
 #include "avrdx/clock.hpp"
 #include "avrdx/delay.hpp"
+#include "avrdx/evsys.hpp"
 #include "avrdx/pin.hpp"
+#include "avrdx/tcb.hpp"
 #include "avrdx/usart.hpp"
 #include "avrdx/userrow.hpp"
 #include "util/print.hpp"
 
-using SysClock = brio::Clock<brio::has_xoschf ? brio::ClockSource::crystal
-                                              : brio::ClockSource::external,
-                             24'000'000>;
+#include "avr_board.hpp"
+
+using SysClock = BoardClock;   // the board's HF source (avr_board.hpp)
 constexpr SysClock clock;
 
 namespace {
@@ -302,12 +312,60 @@ void t9_pinref() {
     quiesce();
 }
 
+#if defined(PORT_EVGEN0SEL_gm)
+// ---- e: the pin event slot (the AVR EA) -------------------------------------------
+// PD3 through PORTD's slot 1 (EvPin<D3, 1>) onto channel 2, the positive
+// edges counted by TCB0 clocked by the event (TcbClock::event, CNT the
+// count): the route's prepare() selects the pin in the slot before the
+// channel is written. Then the slot is re-selected to PD5, held low: the
+// same toggling of PD3 must count nothing. The slot's field is read back
+// at each step (Port::event_selection).
+void te_event_slot() {
+    print(serial, "e pin event slot: PD3 via PORTD slot 1 -> channel 2 -> TCB0 count", crlf);
+    quiesce();
+    using Count = Tcb<0>;
+    using Ch = EventChannel<2>;
+    using D5 = Pin<'D', 5>;
+    D3::output(); D3::clear();
+    D5::output(); D5::clear();
+    (void)Count::init({.mode = TcbMode::periodic, .clock = TcbClock::event, .compare = 0xFFFF});
+    Count::count_on(Ch{});
+    Ch::source(EvPin<D3, 1>{});
+    const uint8_t sel = Port<'D'>::event_selection(1);
+    const uint8_t other = Port<'D'>::event_selection(0);
+    Count::count(0);
+    for (uint8_t i = 0; i < 10; ++i) {
+        D3::set(); delay_us(clock, 2); D3::clear(); delay_us(clock, 2);
+    }
+    const uint16_t counted = Count::count();
+    Ch::source(EvPin<D5, 1>{});
+    const uint8_t sel5 = Port<'D'>::event_selection(1);
+    Count::count(0);
+    for (uint8_t i = 0; i < 10; ++i) {
+        D3::set(); delay_us(clock, 2); D3::clear(); delay_us(clock, 2);
+    }
+    const uint16_t quiet = Count::count();
+    print(serial, "  slot 1 -> pin ", sel, " (slot 0 -> pin ", other, "): 10 rises on PD3 counted ",
+          counted, "; slot 1 -> pin ", sel5, ": counted ", quiet, crlf);
+    verdict("the route selected PD3 in slot 1, slot 0 untouched", sel == 3 && other == 0);
+    verdict("the channel carries PD3's level: 10 rises, 10 counts", counted == 10);
+    verdict("re-selected to PD5 (low): PD3's rises count nothing", sel5 == 5 && quiet == 0);
+    Ch::off();
+    Count::disable();
+    D5::input();
+    quiesce();
+}
+#endif
+
 using TestFn = void (*)();
 struct Test { char key; TestFn fn; };
 constexpr Test tests[] = {
     {'1', t1_senses}, {'2', t2_level}, {'3', t3_invert}, {'4', t4_flags},
     {'5', t5_pullup}, {'6', t6_input_off}, {'7', t7_multipin}, {'8', t8_port},
     {'9', t9_pinref},
+#if defined(PORT_EVGEN0SEL_gm)
+    {'e', te_event_slot},
+#endif
 };
 
 void run(TestFn fn) {
@@ -317,8 +375,14 @@ void run(TestFn fn) {
 }
 
 void help() {
+#if defined(PORT_EVGEN0SEL_gm)
+    print(serial, "test_avr_pin: 1 senses | 2 level | 3 invert | 4 flags | 5 pullup | "
+                  "6 input off | 7 multi-pin | 8 port verbs | 9 PinRef | e event slot | a all",
+          crlf);
+#else
     print(serial, "test_avr_pin: 1 senses | 2 level | 3 invert | 4 flags | 5 pullup | "
                   "6 input off | 7 multi-pin | 8 port verbs | 9 PinRef | a all", crlf);
+#endif
 }
 
 } // namespace
@@ -344,9 +408,15 @@ int main() {
     sei();
     auto board = board_id();
     if (board.empty()) board = "?";
-    print(serial, crlf, "test_avr_pin - PORT test suite (board ", board,
-          ", clk=", xtal ? (has_xoschf ? "XTAL" : "EXTCLK") : "OSCHF",
-          " 24 MHz, silicon rev ", hex(SYSCFG.REVID), ")", crlf);
+    if constexpr (SysClock::hz == 24'000'000u) {
+        print(serial, crlf, "test_avr_pin - PORT test suite (board ", board,
+              ", clk=", xtal ? (has_xoschf ? "XTAL" : "EXTCLK") : "OSCHF",
+              " 24 MHz, silicon rev ", hex(SYSCFG.REVID), ")", crlf);
+    } else {
+        print(serial, crlf, "test_avr_pin - PORT test suite (board ", board,
+              ", clk=", xtal ? "XTAL" : "OSCHF", " ", SysClock::hz / 1'000'000u,
+              " MHz, silicon rev ", hex(SYSCFG.REVID), ")", crlf);
+    }
     help();
     print(serial, "> ");
     for (;;) {

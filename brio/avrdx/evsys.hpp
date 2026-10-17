@@ -1,12 +1,16 @@
 /*
  * evsys.hpp
  *
- * The AVR DA/DB event system (EVSYS, DS40002247B ch. 16) as brio sees
- * it - see docs/avrdx/evsys.md for the analysis and the model:
+ * The event system (EVSYS) of the AVR DA/DB (DS40002247B ch. 16) and of
+ * the AVR EA (DS40002443A ch. 16) as brio sees it - see
+ * docs/avrdx/evsys.md for the analysis and the model:
  *
  *  - a GENERATOR is a type: its CHANNELn code and the channels it may
  *    legally drive are constexpr facts (EvPitDiv<64>, EvPin<Pin<'A',2>>,
- *    EvRtcOvf...); the concept EventGenerator names the contract;
+ *    EvRtcOvf...); the concept EventGenerator names the contract. A
+ *    generator that is a SLOT of another peripheral (the AVR EA's pin
+ *    and PIT generators) carries the slot in its type and a prepare()
+ *    that selects what the slot carries; source() calls it first;
  *  - a USER is a type that knows its USERxxx register (EvOut<Pin<'D',2>>,
  *    EvAdc0Start, EvTcbCaptIn<0>...); the concept EventUser;
  *  - a CHANNEL is a resource handle, EventChannel<n>.
@@ -32,6 +36,19 @@
  * is planned as sugar over these primitives when an app has more than
  * a couple of fixed routes.
  *
+ * THE TWO MODELS. On the AVR DA/DB every pin and eight fixed PIT
+ * dividers are generators of their own, confined to channel pairs and
+ * parities (16.5.2). On the AVR EA (16.4, 16.5.2) six channels take EVERY
+ * generator, but pins and PIT dividers reach them through SLOTS: two per
+ * port (PORTx.EVGENCTRLA picks which pin each carries, 18.5.17) and two
+ * in the RTC (RTC.PITEVGENCTRLA picks which divider, DIV4..DIV32768,
+ * 24.13.17) - a resource the app names as it names a channel:
+ * EvPin<Pin<'A', 4>, 1> is "PA4 through PORTA's slot 1",
+ * EvPitDiv<1024, 0> "CLK_RTC/1024 through the PIT's slot 0". The compiler
+ * checks the slot exists; that two routes wanting two pins of one port
+ * took different slots is ownership, like a channel's. On the DA/DB the
+ * slot is 0 and nothing else (no slot register exists there).
+ *
  * Facts worth remembering (16.3.2): a pin generator is the pin LEVEL
  * (the user's edge detection makes the edge; the pin's input driver
  * must be enabled); PIT_DIVn are levels - a free square wave off the
@@ -43,8 +60,9 @@
  * and PE4..PE7 are not connected to the event system, neither as a pin
  * generator nor as EVOUT - refused at compile time on a DA (the die,
  * avrdx/device_tables.hpp's erratum_da_evsys_pins), which bonds them on
- * 64 pins. The channel and instance counts the types below assert
- * against are the device tables' too.
+ * 64 pins. DS80001048D (the AVR EA) has no EVSYS, PORT or RTC item. The
+ * channel and instance counts the types below assert against are the
+ * device tables' too.
  */
 
 #pragma once
@@ -71,6 +89,13 @@ concept EventGenerator = requires(uint8_t ch) {
     { G::code } -> std::convertible_to<uint8_t>;
     { G::legal_on(ch) } -> std::same_as<bool>;
 };
+
+/// A generator that is a slot of its peripheral: prepare() selects what
+/// the slot carries, and EventChannel::source() calls it BEFORE writing
+/// CHANNELn, so a channel already listened to never carries the slot's
+/// previous selection after the route is made.
+template <typename G>
+concept SlottedEventGenerator = EventGenerator<G> && requires { G::prepare(); };
 
 /// A user: exposes its USER register (the channel mux) and the
 /// listen/unlisten pair (usually inherited from EventUserBase).
@@ -111,8 +136,11 @@ struct EventChannel {
     static void source(G) {
         static_assert(G::legal_on(n),
                       "this event generator cannot be routed onto this channel "
-                      "(PIT_DIV8192..1024: even channels; PIT_DIV512..64: odd; "
-                      "PORTA/B pins: channels 0-1, PORTC/D: 2-3, PORTE/F: 4-5)");
+                      "(AVR DA/DB: PIT_DIV8192..1024 on even channels, PIT_DIV512..64 on "
+                      "odd; PORTA/B pins on channels 0-1, PORTC/D 2-3, PORTE/F 4-5)");
+        if constexpr (SlottedEventGenerator<G>) {
+            G::prepare();
+        }
         reg() = G::code;
     }
 
@@ -138,23 +166,63 @@ private:
 
 // ---- generators (16.5.2) ------------------------------------------------------
 
-/// The prescaled RTC clock divided by div: 8192/4096/2048/1024 on EVEN
-/// channels only, 512/256/128/64 on ODD channels only (the two families
-/// share codes 0x08..0x0B - the parity of the channel picks the family).
-template <uint16_t div>
+/// The PIT's divided RTC clock as an event (a level: a free square wave
+/// off the RTC's prescaler chain, div cycles of CLK_RTC per period).
+///
+/// AVR DA/DB: eight fixed generators, 8192/4096/2048/1024 on EVEN channels
+/// only, 512/256/128/64 on ODD channels only (the two families share
+/// codes 0x08..0x0B - the parity of the channel picks the family); the
+/// slot must be 0.
+///
+/// AVR EA: two SLOTS in the RTC, each carrying one divider 4..32768
+/// chosen in RTC.PITEVGENCTRLA (code log2(div) - 1, DS40002443A
+/// 24.13.17), on any channel; the channel code names the slot (0x08 +
+/// slot). The divider chain runs only while RTCEN or PITEN is set
+/// (24.5.2.2).
+template <uint16_t div, uint8_t slot = 0>
 struct EvPitDiv {
-    static_assert(div == 64 || div == 128 || div == 256 || div == 512 ||
-                  div == 1024 || div == 2048 || div == 4096 || div == 8192,
+    static constexpr uint8_t log2_div =
+        static_cast<uint8_t>(div == 0 ? 0 : 15 - __builtin_clz(static_cast<unsigned>(div)));
+    static constexpr bool power_of_two = div != 0 && (div & (div - 1)) == 0;
+    static_assert(slot <= 1, "two PIT event slots: 0 and 1");
+    static_assert(has_pit_evgen || slot == 0,
+                  "this part has no PIT event slots (RTC.PITEVGENCTRLA is the AVR EA's): "
+                  "its PIT dividers are fixed generators - leave the slot 0");
+    static_assert(has_pit_evgen || (power_of_two && div >= 64 && div <= 8192),
                   "PIT event dividers: 64, 128, 256, 512 (odd channels), "
                   "1024, 2048, 4096, 8192 (even channels)");
+    static_assert(!has_pit_evgen || (power_of_two && div >= 4),
+                  "PIT event slot dividers: 4, 8, ..., 32768 (DS40002443A 24.13.17)");
     static constexpr bool even_family = div >= 1024;
     static constexpr uint8_t code =
+        has_pit_evgen ? static_cast<uint8_t>(0x08 + slot) :
         div == 8192 || div == 512 ? 0x08 :
         div == 4096 || div == 256 ? 0x09 :
         div == 2048 || div == 128 ? 0x0A : 0x0B;
     static constexpr bool legal_on(uint8_t ch) {
-        return even_family ? (ch % 2 == 0) : (ch % 2 == 1);
+        if constexpr (has_pit_evgen) {
+            (void)ch;
+            return true;
+        } else {
+            return even_family ? (ch % 2 == 0) : (ch % 2 == 1);
+        }
     }
+#if defined(RTC_EVGEN0SEL_gm)
+    /// The slot's divider: a read-modify-write of its nibble in
+    /// RTC.PITEVGENCTRLA (the other slot untouched; no synchronization
+    /// is documented for this register).
+    static void prepare() {
+        constexpr uint8_t gp = slot == 0 ? RTC_EVGEN0SEL_gp : RTC_EVGEN1SEL_gp;
+        constexpr uint8_t gm = slot == 0 ? RTC_EVGEN0SEL_gm : RTC_EVGEN1SEL_gm;
+        RTC.PITEVGENCTRLA = static_cast<uint8_t>((RTC.PITEVGENCTRLA & ~gm) |
+                                                 ((log2_div - 1u) << gp));
+    }
+    /// Stop the slot (OFF): its channel then carries a constant low.
+    static void release() {
+        constexpr uint8_t gm = slot == 0 ? RTC_EVGEN0SEL_gm : RTC_EVGEN1SEL_gm;
+        RTC.PITEVGENCTRLA = static_cast<uint8_t>(RTC.PITEVGENCTRLA & ~gm);
+    }
+#endif
 };
 
 /// RTC counter overflow (pulse, CLK_RTC). All channels.
@@ -174,6 +242,19 @@ struct EvAdc0Ready {
     static constexpr uint8_t code = 0x24;
     static constexpr bool legal_on(uint8_t) { return true; }
 };
+
+#if defined(ADC_PGAEN_bm)
+/// ADC0 sample ready and window compare (the AVR EA's differential ADC,
+/// DS40002443A 16.5.2): pulses, all channels. 0x25, 0x26.
+struct EvAdc0Sample {
+    static constexpr uint8_t code = 0x25;
+    static constexpr bool legal_on(uint8_t) { return true; }
+};
+struct EvAdc0Window {
+    static constexpr uint8_t code = 0x26;
+    static constexpr bool legal_on(uint8_t) { return true; }
+};
+#endif
 
 /// UPDI SYNCH character seen (pulse). All channels. 0x01.
 struct EvUpdiSynch {
@@ -310,10 +391,17 @@ struct EvAcOut {
 };
 
 /// A port pin's LEVEL as an event (async; zero if the input driver is
-/// disabled). PORTA/PORTB: channels 0-1; PORTC/PORTD: 2-3; PORTE/PORTF:
-/// 4-5. The two ports of a pair share the code space: 0x40+n for the
-/// first, 0x48+n for the second.
-template <typename P>
+/// disabled).
+///
+/// AVR DA/DB: every pin is a generator of its own, confined to a channel
+/// pair - PORTA/PORTB on channels 0-1, PORTC/PORTD 2-3, PORTE/PORTF 4-5;
+/// the two ports of a pair share the code space (0x40 + n for the first,
+/// 0x48 + n for the second). The slot must be 0.
+///
+/// AVR EA: a port has two event SLOTS (PORTx.EVGENCTRLA, DS40002443A
+/// 18.5.17), each carrying ONE of its pins, on any channel; the channel
+/// code names the port and the slot (0x40 + 2 x port + slot, 16.5.2).
+template <typename P, uint8_t slot = 0>
 struct EvPin {
     static constexpr char port = P::port_letter;
     static constexpr uint8_t pin = P::pin_number;
@@ -322,12 +410,34 @@ struct EvPin {
     static_assert(!evsys_pin_unconnected(port, pin),
                   "PB6/PB7 and PE4..PE7 are not connected to the event system on an "
                   "AVR DA (DS80000882C 2.6.1)");
+    static_assert(slot <= 1, "two pin event slots per port: 0 and 1");
+    static_assert(has_port_evgen || slot == 0,
+                  "this part has no pin event slots (PORTx.EVGENCTRLA is the AVR EA's): "
+                  "every pin is a generator of its own - leave the slot 0");
     static constexpr uint8_t code =
-        static_cast<uint8_t>(((port - 'A') % 2 == 0 ? 0x40 : 0x48) + pin);
+        has_port_evgen ? static_cast<uint8_t>(0x40 + 2 * (port - 'A') + slot)
+                       : static_cast<uint8_t>(((port - 'A') % 2 == 0 ? 0x40 : 0x48) + pin);
     static constexpr bool legal_on(uint8_t ch) {
-        const uint8_t pair = static_cast<uint8_t>((port - 'A') / 2);   // A/B=0, C/D=1, E/F=2, G=3
-        return ch / 2 == pair;
+        if constexpr (has_port_evgen) {
+            (void)ch;
+            return true;
+        } else {
+            const uint8_t pair = static_cast<uint8_t>((port - 'A') / 2);   // A/B=0, C/D=1, E/F=2, G=3
+            return ch / 2 == pair;
+        }
     }
+#if defined(PORT_EVGEN0SEL_gm)
+    /// Select this pin in the port's slot: a read-modify-write of the
+    /// slot's field in PORTx.EVGENCTRLA, the other slot untouched. Two
+    /// contexts re-selecting the two slots of one port would race on the
+    /// shared register; one owner per port's slots is the app's.
+    static void prepare() {
+        constexpr uint8_t gp = slot == 0 ? PORT_EVGEN0SEL_gp : PORT_EVGEN1SEL_gp;
+        constexpr uint8_t gm = slot == 0 ? PORT_EVGEN0SEL_gm : PORT_EVGEN1SEL_gm;
+        volatile uint8_t& r = P::port().EVGENCTRLA;
+        r = static_cast<uint8_t>((r & ~gm) | (pin << gp));
+    }
+#endif
 };
 
 // ---- users (16.5.3) -----------------------------------------------------------
@@ -355,11 +465,19 @@ struct EvOut : EventUserBase<EvOut<P>> {
     static constexpr uint8_t pin = P::pin_number;
     static_assert(port >= 'A' && port <= 'G', "EVOUT: PORTA..PORTG");
     static_assert(port_exists(port), "this port does not exist on this package");
-    static_assert(pin == 2 || (pin == 7 && port != 'F'),
+    static_assert(!(port == 'F' && pin == 7 && avr_die == AvrDie::avr64ea),
+                  "EVOUTF's ALT1 position on the AVR EA is PF7, the UPDI pin: a GPIO only "
+                  "with FUSE.SYSCFG0.UPDIPINCFG = 0, which leaves the part unreachable "
+                  "without a high-voltage programmer - refused");
+    static_assert(pin == 2 || (pin == 7 && (avr_die == AvrDie::avr64ea
+                                                ? (port == 'A' || port == 'C' || port == 'D' ||
+                                                   port == 'F')
+                                                : port != 'F')),
                   "EVOUT pins: Px2 in the default position on every port, Px7 "
-                  "(ALT1) on every port except PORTF (17.5.1; whether THIS "
-                  "package bonds pin 7 of an existing port is a pin-level "
-                  "fact for the device tables)");
+                  "(ALT1) on every port except PORTF on the AVR DA/DB (DS40002247B "
+                  "17.5.1), on PORTA, PORTC and PORTD on the AVR EA (DS40002443A "
+                  "17.5.1); whether THIS package bonds pin 7 of an existing port is "
+                  "a pin-level fact for the device tables");
     static_assert(!evsys_pin_unconnected(port, pin),
                   "EVOUT on PB7/PE7 does not reach its pin on an AVR DA "
                   "(DS80000882C 2.6.1)");
@@ -490,7 +608,7 @@ struct EvOpampCtl : EventUserBase<EvOpampCtl<n, a>> {
 };
 #endif
 
-static_assert(EventGenerator<EvPitDiv<64>>);
+static_assert(EventGenerator<EvPitDiv<1024>>);
 static_assert(EventGenerator<EvPin<Pin<'A', 2>>>);
 static_assert(EventGenerator<EvUpdiSynch>);
 #ifdef ZCD0

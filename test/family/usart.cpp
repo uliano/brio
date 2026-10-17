@@ -12,7 +12,7 @@
 
 using namespace brio;
 
-using SysClock = Clock<ClockSource::internal, 24'000'000>;
+using SysClock = Clock<ClockSource::internal, has_oschf_frqsel ? 24'000'000 : 20'000'000>;
 
 // ---- the route table against the device header's route enums --------------
 
@@ -30,7 +30,43 @@ static_assert(!usart_pin(0, UsartRoute::none, UsartSignal::txd).bonded);
 // USART2's ALT1 has no XCK position on any package (17.5.9).
 static_assert(!usart_pin(2, UsartRoute::alt1, UsartSignal::xck).bonded);
 
-#if defined(USART5)
+#if PORTMUX_USART0_gm == 0x07
+// The AVR EA (DS40002443A 17.3.3-4, table 3-1): three USARTs on every
+// package, per-instance code sets, routes on other ports, USART2's field
+// in USARTROUTEB.
+static_assert(usart_count == 3);
+static_assert(usart_route_in_b(2) && !usart_route_in_b(1));
+static_assert(usart_route_code(0, UsartRoute::none) == 5 && usart_route_code(0, UsartRoute::alt3) == 3);
+static_assert(usart_route_code(1, UsartRoute::none) == 3 && usart_route_code(2, UsartRoute::none) == 3);
+static_assert(usart_route_code(2, UsartRoute::alt2) == route_absent);
+static_assert(usart_route_of_code(0, 5) == UsartRoute::none && usart_route_of_code(0, 4) == UsartRoute::alt4);
+static_assert(usart_route_exists(0, UsartRoute::alt2) && usart_route_exists(0, UsartRoute::alt3) &&
+              usart_route_exists(0, UsartRoute::alt4));
+static_assert(usart_pin(0, UsartRoute::alt3, UsartSignal::txd).port == 'D' &&
+              usart_pin(0, UsartRoute::alt3, UsartSignal::xdir).pin == 7);
+static_assert(usart_pin(0, UsartRoute::alt4, UsartSignal::txd).port == 'C' &&
+              usart_pin(0, UsartRoute::alt4, UsartSignal::xck).pin == 3 &&
+              !usart_pin(0, UsartRoute::alt4, UsartSignal::xdir).bonded);
+static_assert(usart_pin(0, UsartRoute::alt2, UsartSignal::rxd).pin == 3 &&
+              !usart_pin(0, UsartRoute::alt2, UsartSignal::xck).bonded);
+static_assert(usart_pin(1, UsartRoute::alt2, UsartSignal::txd).port == 'D' &&
+              usart_pin(1, UsartRoute::alt2, UsartSignal::rxd).pin == 7);
+static_assert(!usart_route_exists(2, UsartRoute::alt3) && !usart_route_exists(1, UsartRoute::alt4));
+#if defined(PORTE)
+static_assert(package_pins == 48);
+static_assert(usart_route_exists(1, UsartRoute::alt1) && usart_route_exists(2, UsartRoute::alt1));
+static_assert(PORTMUX_USART1_ALT1_gv == usart_route_code(1, UsartRoute::alt1));
+static_assert(PORTMUX_USART2_ALT1_gv == usart_route_code(2, UsartRoute::alt1));
+static_assert(usart_pin(2, UsartRoute::alt1, UsartSignal::txd).pin == 4);   // the bench console: PF4
+#elif defined(__AVR_AVR64EA32__)
+static_assert(!usart_route_exists(1, UsartRoute::alt1) && usart_route_exists(2, UsartRoute::alt1));
+static_assert(PORTMUX_USART2_ALT1_gv == usart_route_code(2, UsartRoute::alt1));
+#else
+static_assert(package_pins == 28);
+static_assert(!usart_route_exists(1, UsartRoute::alt1) && !usart_route_exists(2, UsartRoute::alt1));
+static_assert(!usart_pin(2, UsartRoute::def, UsartSignal::xck).bonded);   // no PF2
+#endif
+#elif defined(USART5)
 // 64 pins: everything exists, ALT1 included.
 static_assert(usart_count == 6);
 static_assert(package_pins == 64);

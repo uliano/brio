@@ -1,8 +1,10 @@
 /*
  * rtc.hpp
  *
- * The AVR DA/DB real-time counter and periodic interrupt timer (RTC,
- * DS40002247B ch. 26) as three resources - see docs/avrdx/rtc.md:
+ * The real-time counter and periodic interrupt timer (RTC) of the AVR
+ * DA/DB (DS40002247B ch. 26) and of the AVR EA (DS40002443A ch. 24, the
+ * same chapter but for one register: RTC.PITEVGENCTRLA, the PIT's two
+ * event slots, 24.13.17) as three resources - see docs/avrdx/rtc.md:
  *
  *   RtcClock - the CLK_RTC selector (CLKSEL), shared by both functions;
  *   Rtc      - the 16-bit counter: prescaler, CNT/PER/CMP, OVF and CMP
@@ -18,8 +20,8 @@
  * `Rtc` and `Pit` are otherwise independent: their control, status,
  * interrupt and debug registers are disjoint.
  *
- * Facts that shape the code (26.3 - 26.11, both errata documents list
- * NO RTC items - DB DS80000915F, DA DS80000882C):
+ * Facts that shape the code (26.3 - 26.11; no errata document lists an
+ * RTC item - DB DS80000915F, DA DS80000882C, EA DS80001048D):
  *  - the two functions share the prescaler's internal counter and it
  *    RUNS as soon as EITHER is enabled: the first PIT interrupt and the
  *    first RTC count tick fall anywhere inside one full period
@@ -52,7 +54,10 @@
  *    halted, so a break taken with the output high costs one extra
  *    interrupt on resume (26.11);
  *  - the event generators (EvRtcOvf, EvRtcCmp, EvPitDiv<n>, evsys.hpp)
- *    fire on exactly the conditions that raise the flags.
+ *    fire on exactly the conditions that raise the flags. On the AVR EA
+ *    the PIT's dividers reach the event system through two slots
+ *    (EvPitDiv<div, slot>, whose route selects the slot's divider in
+ *    PITEVGENCTRLA); Pit::event_selection() reads a slot back.
  */
 
 #pragma once
@@ -425,6 +430,17 @@ public:
     /// interrupt when the CPU resumes (26.11).
     static void debug_run(bool on) { RTC.PITDBGCTRL = on ? RTC_DBGRUN_bm : 0; }
     static bool debug_run() { return (RTC.PITDBGCTRL & RTC_DBGRUN_bm) != 0; }
+
+#if defined(RTC_EVGEN0SEL_gm)
+    /// The divider an event slot carries, as PITEVGENCTRLA codes it (0 =
+    /// off, n = CLK_RTC / 2^(n+1), DS40002443A 24.13.17). The slots are
+    /// selected by the event routes (EvPitDiv<div, slot>, evsys.hpp).
+    static uint8_t event_selection(uint8_t slot) {
+        const uint8_t v = RTC.PITEVGENCTRLA;
+        return static_cast<uint8_t>(slot == 0 ? (v & RTC_EVGEN0SEL_gm) >> RTC_EVGEN0SEL_gp
+                                              : (v & RTC_EVGEN1SEL_gm) >> RTC_EVGEN1SEL_gp);
+    }
+#endif
 
 private:
     static void pitctrla_bits(uint8_t bits, bool on) {

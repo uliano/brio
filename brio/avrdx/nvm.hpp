@@ -91,6 +91,21 @@
 
 #pragma once
 
+// NVM VERSION 3 IS NOT THIS DRIVER'S. The AVR EA's NVMCTRL (DS40002443A
+// ch. 11) writes flash and EEPROM through a page buffer, by page and by
+// command, with RWW/NRWW sections of 256-byte blocks - a different
+// chapter from the AVR DA/DB's word-at-a-time NVM version 2 this file is
+// written from. The EA's EEPROM engine is a later step; its flash and
+// USERROW self-programming are declined (docs/avrdx/nvm.md). Until then
+// the header refuses the part by name, and so does everything built on it
+// (nvm_flash.hpp, the flash heap and journal over it).
+#include <avr/io.h>
+#include "avrdx/device_tables.hpp"
+#if defined(NVMCTRL_FLBUSY_bm)
+static_assert(!brio::has_nvm_page_buffer,
+              "brio avrdx: nvm.hpp is written for NVM version 2 (the AVR DA/DB); NVM version 3 on the AVR EA (page buffer, page commands, RWW sections) is not written yet - EEPROM is a later step, flash and USERROW self-programming are declined (docs/avrdx/nvm.md)");
+#else
+
 #include <stdint.h>
 #include <avr/io.h>
 #include <avr/pgmspace.h>
@@ -1121,3 +1136,5 @@ static_assert(NvStore<EepromStore>);
 static_assert(NvPacedStore<EepromStore>);
 
 } // namespace brio
+
+#endif // NVMCTRL_FLBUSY_bm

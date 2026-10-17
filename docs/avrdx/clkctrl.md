@@ -1,11 +1,14 @@
-# CLKCTRL - the clock controller (AVR DA/DB)
+# CLKCTRL - the clock controller (AVR DA, DB and EA)
 
 Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B
 (CLKCTRL chapter, electricals 39.10 and 39.3), errata DS80000915F
 (2.5.1-2.5.4); for the DA parts DS40002183A (CLKCTRL chapter 11,
-electricals 37.5.1) and DS80000882C (2.4.1). Driver: `avrdx/clock.hpp` (resources `Oschf`, `Osc32k`,
-`Xosc32k`, `Xoschf`, `Pll`, `MainClock`, `ClockFailure`; tasks `Clock`,
-`DynamicClock`), `avrdx/delay.hpp`; the target-independent contracts in
+electricals 37.5.1) and DS80000882C (2.4.1); for the AVR64EA28/32/48
+DS40002443A (chapter 12, the OSCCFG fuse 8.8.2.3, electricals 35.10) and
+DS80001048D (no CLKCTRL item) - the EA's chapter is its own section
+below. Driver: `avrdx/clock.hpp` (resources `Oschf`, `Osc32k`,
+`Xosc32k`, `Xoschf`, `Pll`, `MainClock`, `ClockTimebase` (EA),
+`ClockFailure`; tasks `Clock`, `DynamicClock`), `avrdx/delay.hpp`; the target-independent contracts in
 `util/clock.hpp`. The clock MODEL (one rate truth, static and dynamic
 regimes, the rebase fan-out) is [clock.md](../design/clock.md); this page is the
 peripheral. Reference test: `test_avr_clock` (CLKOUT on PA7 to an
@@ -81,9 +84,9 @@ Tasks - what an application names ([clock.md](../design/clock.md)):
 
 | Task | Verbs |
 |------|-------|
-| `Clock<ClockSource, source_hz, ClockDiv>` | `init()` -> bool (running from the requested source), `hz`, `is_static = true`; sources `internal`, `crystal` (DB), `external` (DB via XOSCHF; DA directly on PA0, asked of TCD0 first because EXTS answers only while the clock is requested, and selected only when it answers), `osc32k`, `xosc32k` (forced on while it is waited for, the force dropped once the main clock requests it) |
+| `Clock<ClockSource, source_hz, ClockDiv, oschf_hz>` | `init()` -> bool (running from the requested source), `matches_fuse()` (true where FRQSEL sets OSCHF's rate; the EA's one fuse read), `hz`, `is_static = true`; `oschf_hz` the fallback's OSCHF rate, the source's own on the DA/DB and the fuse's claim on the EA (below); sources `internal`, `crystal` (DB, EA), `external` (DB via XOSCHF; DA directly on PA0, asked of TCD0 first because EXTS answers only while the clock is requested, and selected only when it answers), `osc32k`, `xosc32k` (forced on while it is waited for, the force dropped once the main clock requests it) |
 | `DynamicClock<Boot, Users...>` | `init()`, `hz()`, `set<hz>()` / `set(hz)` -> bool, `can_run_at(hz)`, `rebases<U>`; `is_static = false` |
-| vocabulary | `ClockDiv`, `clock_divisor()`, `div_for()`, `oschf_frqsel()`, `MainSource`, `CfdSource`, `PllSource`, `PllMultiplier`, `Xosc32kStartup`, `XoschfStartup` |
+| vocabulary | `ClockDiv`, `clock_divisor()`, `div_for()`, `oschf_frqsel()` (DA/DB), `clock_timebase_for()`, `MainSource`, `CfdSource`, `PllSource`, `PllMultiplier`, `Xosc32kStartup`, `XoschfStartup` |
 | waits | `delay_us(clock, us)`, `delay_us_runtime(cycles_per_us, us)`, `cycles_per_us(hz)`, `delay_cycles(n)` (raw cycles: for clocks below 1 MHz) (`avrdx/delay.hpp`) |
 
 ## How to use it
@@ -288,10 +291,150 @@ hard-wires RUNSTDBY on for OSCHF/OSC32K, trading standby power for
 no start-up wait - an opt-out knob appears when a sleepy application
 asks for it.
 
+## The AVR EA (DS40002443A ch. 12)
+
+The same controller in shape - CLKSEL, the twelve prescalers with the
+SAME codes (12.5.2; the header names them `CLKCTRL_PDIV_DIV2_gc` where
+the DA/DB's say `CLKCTRL_PDIV_2X_gc`, so `ClockDiv` is written as the
+chapter's numbers and `test/family/clock.cpp` holds them against both
+sets of names), OSC32K, XOSC32K, the clock failure detector, CCP on
+every control register - with four differences that make it an engine
+of its own:
+
+- **OSCHF runs at ONE rate, chosen by a fuse.** `FUSE.OSCCFG.OSCHFFRQ`
+  (8.8.2.3): 0 = 20 MHz, 1 = 16 MHz; OSCHFCTRLA has RUNSTDBY and
+  AUTOTUNE and no frequency field (12.5.8). The CPU reads the fuse at
+  0x1052 and only UPDI writes it. The `Clock` type names the rate as a
+  CLAIM - an internal source's own rate, or the fourth argument
+  `oschf_hz` beside a crystal or a clock (defaulting to the source's
+  rate) - asserted to be 16 or 20 MHz; `init()` checks it against the
+  fuse with one read (`matches_fuse()`) and on a mismatch writes
+  NOTHING and returns false: the part keeps its reset clock.
+- **The reset clock is OSCHF over /6** (12.3.3; MCLKCTRLB resets to
+  0x11): 3.33 MHz from a 20 MHz fuse.
+- **CLK_MAIN tops at 20 MHz, and only from 4.5 V** (35.10.5, table
+  35-14: 5 MHz from 1.8 V, 10 MHz from 2.7 V, 20 MHz from 4.5 V,
+  -40..85 C; 8 / 16 MHz to 125 C). brio asserts the part's 20 MHz
+  (`clk_main_max_hz`, the device tables) and no supply: the rows are
+  the reader's.
+- **MCLKTIMEBASE** (12.3.6, 12.5.7; not under CCP): the count of CLK_PER
+  cycles that is one microsecond or more, rounded UP - the time base the
+  ADC's and the PGA's internal timings and the TWI's bus time-out count
+  in (31.3.2, 31.3.3.4, 27.3.3.1). Too small (the reset 0 included) makes
+  those delays short. It is a CLKCTRL register and a pure function of
+  CLK_PER, so the CLOCK owns it: `ClockTimebase` is its resource, every
+  `Clock::init()` writes `clock_timebase_for(hz)`, and every
+  `DynamicClock` switch rewrites it - BEFORE the prescaler when the rate
+  rises, AFTER it when the rate falls, so it never covers less than a
+  microsecond. No driver writes it.
+
+**The silicon's offer, item by item:**
+
+| Item | Section | In brio |
+|------|---------|---------|
+| OSCHF at the fuse's 16 or 20 MHz | 8.8.2.3, 12.3.4.1.1 | used: `ClockSource::internal` with the rate as a claim checked by `matches_fuse()` |
+| The main prescaler, /1../64 | 12.5.2 | used: `ClockDiv`, `MainClock::prescale`, the fallback's prescaler resolved at compile time (`div_for(oschf_hz, hz)`) |
+| XOSCHF crystal 4-20 MHz on PA0/PA1, CSUTHF 256/1k/4k, RUNSTDBY | 12.5.12, 35.10.3 | used: `Xoschf::start_crystal` (4k cycles by default), `ClockSource::crystal`; no FRQRANGE field on this die (`range_for` is 0) |
+| XOSCHF external clock on PA0, up to 20 MHz | 12.3.4.2.1, 35.10.4 | used: `Xoschf::start_external`, `ClockSource::external` (not on the bench board: a crystal sits on PA0) |
+| XOSC32K crystal or clock, CSUT 1k..64k, LPMODE | 12.5.11 | used: `Xosc32k`, the DA/DB's resource unchanged (same register) |
+| OSC32K | 12.5.10 | used: `Osc32k` |
+| Auto-tune against XOSC32K | 12.3.7, 12.5.8 | used: `Oschf::autotune` - the field is two bits in the header (code XOSC32K = 1), one documented: written with the code, cleared whole (the device tables' `oschf_autotune_on/field`); the clear waits 120 cycles for the TUNE copy (0.75 us + 3 CLK_MAIN, 12.5.9) |
+| Manual tune, -32..+31, 0.2 % a step typical | 12.5.9, 35.10.1 | used: `Oschf::tune`; bit 5 mirrored into 7:6 by the hardware |
+| OSCHFCTRLA bits 3:2 (reset 0x0C on paper, undocumented) | 12.5.8 | declined: never written whole, every write a read-modify-write of the bit it means |
+| MCLKTIMEBASE | 12.3.6, 12.5.7 | used: `ClockTimebase`, owned by the clock (above) |
+| Clock failure detection: main / XOSCHF / XOSC32K, INT or NMI, test bit | 12.3.5 | used: `ClockFailure`, the DB's resource unchanged; the fallback is OSCHF at the fuse's rate ("at its reset frequency") |
+| CLKOUT on PA7 | 12.5.1 | used: `MainClock::clkout`; never on the bench board, whose PA7 carries 100 nF |
+| The supply grade | 35.10.5 | declined as a parameter (the reader's; above) |
+| PLL, FRQSEL | - | absent on this die: `Pll` and `Oschf::set_hz` do not exist here (refused by name) |
+
+**Types and verbs on the EA.** As above, less `Pll`, `oschf_frqsel()`
+and `Oschf::set_hz` (absent), plus `ClockTimebase::write(cycles)` /
+`read()`, `clock_timebase_for(hz)`, and on `Clock` the fourth argument
+`oschf_hz` and `matches_fuse()`. `Clock::init()` sequence: the fuse
+check; RUNSTDBY on OSCHF (read-modify-write); the fallback prescaler;
+CLKSEL to OSCHF and its status waited; TIMEBASE; then, for a crystal or
+a clock, XOSCHF started and EXTS waited (0xFFFF polls), and the switch -
+where the fallback's prescaler differs from the source's, the one that
+lowers CLK_PER in between goes first.
+
+**How to use it on the EA:**
+
+```cpp
+// The bench board: a 20 MHz quartz, the part fused at 20 MHz (the factory OSCCFG 0x00).
+using SysClock = brio::Clock<brio::ClockSource::crystal, 20'000'000>;
+// The internal oscillator claimed at the fuse's 20 MHz, CLK_PER 5 MHz:
+using Slow = brio::Clock<brio::ClockSource::internal, 20'000'000, brio::ClockDiv::div4>;
+// An 8 MHz crystal on a part fused at 16 MHz: the fallback is OSCHF / 2.
+using Xtal8 = brio::Clock<brio::ClockSource::crystal, 8'000'000, brio::ClockDiv::div1, 16'000'000>;
+```
+
+A `DynamicClock` over a 20 MHz source reaches the rates 20 MHz over a
+divider gives in whole hertz - /1, /2, /4, /8, /10, /16, /32, /64 - and
+refuses /6, /12, /24, /48 (3.33, 1.67, 0.83, 0.42 MHz are not whole);
+`delay.hpp`'s per-rate dispatch still expands those four branches, dead
+flash on this source (a cost note, not a fault).
+
+**Cost.** `Clock::init()` on the EA: one fuse read, five protected
+writes (RUNSTDBY, prescaler, CLKSEL, XOSCHFCTRLA, CLKSEL), one store of
+TIMEBASE, and the status polls. A `DynamicClock::set<hz>()` adds ONE
+store of a constant (TIMEBASE) to the prescaler's protected write; the
+run-time `set(hz)` adds a lookup of the rate's index and a 32-bit
+compare with the current rate to place that store - counted in
+`test_avr_clock`'s listing, against the run-time `div_for`'s divisions
+it already pays.
+
+**Bench findings (AVR64EA48 rev B1, REVID 0x21, 5 V; `test_avr_clock`'s
+EA letters driven and read through the debugger, the board's console
+path being open and its 32 kHz crystal not running - its page - so
+letters 2 to 6, which time on that crystal, stop at their first verdict
+there, and letter 1 runs its ladder untimed).**
+
+- Reset state, read at the reset vector over UPDI: MCLKCTRLA 0x00,
+  **MCLKCTRLB 0x11** (DIV6, PEN, as 12.5.2 says), MCLKSTATUS 0x02
+  (OSCHFS), **MCLKTIMEBASE 0x00**, **OSCHFCTRLA 0x00 - not the 0x0C of
+  12.5.8**: bits 3:2 read 0 at reset on this silicon; NVMCTRL.CTRLB
+  0x30 (FLMAP 3).
+- `Clock<crystal, 20 MHz>::init()` (pin_check, the console): CLKSEL
+  EXTCLK with EXTS set on the board's 20 MHz quartz, MCLKCTRLB 0,
+  MCLKTIMEBASE 20, XOSCHFCTRLA 0xA1 (CSUTHF 4k, RUNSTDBY, ENABLE),
+  OSCHFCTRLA 0x80 after the RUNSTDBY read-modify-write; the console's
+  USART2 at BAUD 174 for 460800 (64 x 20 MHz / (16 x 460800) = 173.6).
+- `Clock<internal, 20 MHz, div4>` (family_probe): CLKSEL OSCHF,
+  MCLKCTRLB 0x03 (DIV4, PEN), MCLKTIMEBASE 5 - 5 MHz, PA7 toggling.
+- Letter r (ten runs of ten, 9 verdicts each): the reset state as above,
+  read by the program itself before its init - OSCHFCTRLA 0x00 at every
+  reset - the fuse's 20 MHz matching the type's claim, TIMEBASE 20 and
+  the prescaler off after the init, OSCHFCTRLA's bits 3:2 left as found.
+- **TIMEBASE follows every rate** (letter 1, ten runs of ten): across the
+  twelve prescalers from the 20 MHz crystal MCLKTIMEBASE reads
+  ceil(CLK_PER / 1 MHz) after every switch - through `DynamicClock::set()`
+  for the eight whole-hertz rates, which it reaches, and by hand for the
+  four fractional ones, which it refuses - and 20 again at the end.
+- Letter 7 (ten of ten, 6 verdicts): MCLKSTATUS with the crystal as the
+  main clock has EXTS set and no switch pending; RUNSTDBY toggles through
+  CCP without touching bits 3:2.
+- **XOSCHF's start-up per CSUTHF** (letter 8, twelve runs of twelve):
+  from the protected write to EXTS, with OSCHF (untuned) as the ruler,
+  15 / 52 / 203..208 us for 256 / 1k / 4k cycles - the counted cycles at
+  20 MHz (12.8 / 51.2 / 204.8 us) and a microsecond or two, the board's
+  quartz up at once; EXTS reads 0 a millisecond after `Xoschf::stop()`
+  in every run. The driver's `wait_stable(0xFFFF)` spins for 52.7 ms at
+  20 MHz (1054080 cycles, 16 a poll) - 250 times the slowest start-up
+  seen. The floor of that verdict is the counted cycles less OSCHF's 3 %
+  (an exact floor failed by 2 us: the ruler, not the oscillator).
+
 ## Not covered yet
 
 Driver gaps:
 
+- The AVR EA's supply grade (5 / 10 / 20 MHz from 1.8 / 2.7 / 4.5 V,
+  35.10.5): declined as a parameter - the type asserts the part's 20 MHz
+  and the reader of the table above owns the supply. A 20 MHz `Clock` on
+  a 3.3 V EA board compiles and runs out of specification.
+- The AVR EA's `DynamicClock` booted below its source rate: `Boot` must
+  be the source at /1, so an EA board under 4.5 V cannot boot a dynamic
+  regime from a 20 MHz source at a legal rate (a static `Clock` at its
+  prescaled rate can) - born with the first sleepy EA application.
 - Errata 2.5.1 (A4 silicon): `Clock<external>::init` waits for EXTS
   before anything requests the source, which on A4 never sets - the
   init as written always falls back to OSCHF there (documented
@@ -299,6 +442,15 @@ Driver gaps:
 
 Implemented but not bench-verified:
 
+- On the AVR EA, the letters of `test_avr_clock` that time on the 32 kHz
+  crystal (the bench board's does not run - its page): the prescaler
+  ladder's rates, OSCHF's accuracy at the fuse's
+  rate, the tune curve, the auto-tune and the late TUNE copy, the 32 kHz
+  main clocks, the clock failure detector on XOSC32K and on the main
+  clock (what the prescaler does at the fallback) - each measures on a
+  board whose 32 kHz crystal runs; `ClockSource::external` on the EA (the board puts a
+  crystal on PA0); `Clock<internal, 16 MHz>` (the bench part is fused
+  at 20 MHz).
 - `ClockSource::external` on the DB and the PLL from its XOSCHF (no
   external clock on the DB board, and errata 2.5.4 makes the PLL need
   one); `run_standby` on the PLL beyond the 2.5.3 / 2.4.1 observation;

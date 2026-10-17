@@ -100,29 +100,72 @@
 
 namespace brio {
 
-// ---- routes and pins (17.5.9 - 17.5.10) --------------------------------------
+// ---- routes and pins (DS40002247B 17.5.9 - 17.5.10, DS40002443A 17.3) ------
 
-/// USART pin routing (PORTMUX.USARTROUTEA/B). The values ARE the
-/// device header's own group values, `none` included: an instance with
-/// no pins still runs (baud generator, internal loop-back).
+/// USART pin routing (PORTMUX.USARTROUTEA/B), by NAME. On the AVR DA/DB
+/// the values ARE the device header's group values (DEFAULT 0, ALT1 1,
+/// NONE 3, the same for every instance). The AVR EA's layout gives each
+/// instance its own code set (USART0 up to ALT4 with NONE = 5, USART1 an
+/// ALT2, DS40002443A 17.3.3-4): there the names ALT2..ALT4 exist and every
+/// route's code is the device tables' (usart_route_codes) - a name the
+/// layout has not got does not exist, rather than a code that writes
+/// another route. `none` is a route: an instance with no pins still runs
+/// (baud generator, internal loop-back).
 enum class UsartRoute : uint8_t {
     def = 0,
     alt1 = 1,
+#if PORTMUX_USART0_gm == 0x07   // the AVR EA's layout (device tables' portmux_layout)
+    alt2 = 2,
+#endif
     none = 3,
+#if PORTMUX_USART0_gm == 0x07
+    alt3 = 4,
+    alt4 = 5,
+#endif
 };
-static_assert(static_cast<uint8_t>(UsartRoute::def) == PORTMUX_USART0_DEFAULT_gv &&
-              static_cast<uint8_t>(UsartRoute::alt1) == PORTMUX_USART0_ALT1_gv &&
-              static_cast<uint8_t>(UsartRoute::none) == PORTMUX_USART0_NONE_gv,
+static_assert(portmux_layout != PortmuxLayout::dx ||
+              (static_cast<uint8_t>(UsartRoute::def) == PORTMUX_USART0_DEFAULT_gv &&
+               static_cast<uint8_t>(UsartRoute::alt1) == PORTMUX_USART0_ALT1_gv &&
+               static_cast<uint8_t>(UsartRoute::none) == PORTMUX_USART0_NONE_gv),
               "the route codes must be the device header's group values");
 
 /// The name the console call sites use.
 using Route = UsartRoute;
 
-// The pin count of this package (device_tables.hpp's package_pins) is
-// what distinguishes the four route tables below.
+/// The code a route writes into instance n's field: the value itself on
+/// the AVR DA/DB, the device tables' per-instance code on the AVR EA
+/// (route_absent for a route the instance has not got).
+constexpr uint8_t usart_route_code(uint8_t n, UsartRoute r) {
+    if constexpr (portmux_layout == PortmuxLayout::dx) {
+        (void)n;
+        return static_cast<uint8_t>(r);
+    } else {
+        return n < usart_count ? usart_route_codes[n][static_cast<uint8_t>(r)] : route_absent;
+    }
+}
 
-/// The port every USART's four signals live on: one port per instance,
-/// the default route on pins 0..3 and ALT1 on pins 4..7 of it.
+/// The route a field code means for instance n (`none` for a code no
+/// route of the instance carries).
+constexpr UsartRoute usart_route_of_code(uint8_t n, uint8_t code) {
+    if constexpr (portmux_layout == PortmuxLayout::dx) {
+        (void)n;
+        return static_cast<UsartRoute>(code);
+    } else {
+        for (uint8_t i = 0; i < 6; ++i) {
+            if (usart_route_code(n, static_cast<UsartRoute>(i)) == code) {
+                return static_cast<UsartRoute>(i);
+            }
+        }
+        return UsartRoute::none;
+    }
+}
+
+// The pin count of this package (device_tables.hpp's package_pins) is
+// what distinguishes the route tables below.
+
+/// The port every USART's four signals live on, on the AVR DA/DB: one
+/// port per instance, the default route on pins 0..3 and ALT1 on pins
+/// 4..7 of it.
 constexpr char usart_port_letter(uint8_t n) {
     switch (n) {
         case 0: return 'A';
@@ -148,6 +191,57 @@ struct UsartPin {
     bool bonded = false;
     constexpr explicit operator bool() const { return bonded; }
 };
+
+#if PORTMUX_USART0_gm == 0x07
+// ---- the AVR EA's route table ------------------------------------------------
+// One per-signal row per route (DS40002443A 17.3.3-4, table 3-1; the
+// header's route enum comments say the same), every signal of ONE route on
+// one port - but a route may move the instance to another port:
+//   USART0 DEFAULT PA0-PA3   ALT1 PA4-PA7   ALT2 PA2,PA3 (TXD/RXD only)
+//          ALT3 PD4-PD7      ALT4 PC1-PC3 (no XDIR)
+//   USART1 DEFAULT PC0-PC3   ALT1 PC4-PC7 (48 pins)   ALT2 PD6,PD7 (TXD/RXD)
+//   USART2 DEFAULT PF0-PF3 (28 pins: PF0/PF1 only)    ALT1 PF4,PF5 (TXD/RXD,
+//                                                     32 and 48 pins)
+
+/// The port a route's signals live on.
+constexpr char usart_route_port(uint8_t n, UsartRoute r) {
+    if (n == 0) return r == UsartRoute::alt3 ? 'D' : r == UsartRoute::alt4 ? 'C' : 'A';
+    if (n == 1) return r == UsartRoute::alt2 ? 'D' : 'C';
+    return 'F';
+}
+
+constexpr bool usart_route_exists(uint8_t n, UsartRoute r) {
+    if (n >= usart_count) return false;
+    if (usart_route_code(n, r) == route_absent) return false;
+    if (r != UsartRoute::alt1) return true;            // every other route on every package
+    return n == 0 || (n == 1 ? package_pins >= 48 : package_pins >= 32);
+}
+
+constexpr UsartPin usart_pin(uint8_t n, UsartRoute r, UsartSignal s) {
+    if (!usart_route_exists(n, r) || r == UsartRoute::none) {
+        return {};
+    }
+    uint8_t first = 0, signals = 4;
+    if (n == 0) {
+        if (r == UsartRoute::alt1 || r == UsartRoute::alt3) first = 4;
+        else if (r == UsartRoute::alt2) { first = 2; signals = 2; }
+        else if (r == UsartRoute::alt4) { first = 1; signals = 3; }
+    } else if (n == 1) {
+        if (r == UsartRoute::alt1) first = 4;
+        else if (r == UsartRoute::alt2) { first = 6; signals = 2; }
+    } else {
+        if (r == UsartRoute::alt1) { first = 4; signals = 2; }
+        else if (package_pins < 32) signals = 2;        // PORTF bonds PF0, PF1, PF6, PF7
+    }
+    const uint8_t idx = static_cast<uint8_t>(s);
+    return {usart_route_port(n, r), static_cast<uint8_t>(first + idx), idx < signals};
+}
+
+#else
+// ---- the AVR DA/DB's route table ---------------------------------------------
+
+/// The port a route's signals live on: the instance's own.
+constexpr char usart_route_port(uint8_t n, UsartRoute) { return usart_port_letter(n); }
 
 /// Whether this package offers a route at all (the device header's
 /// route enum for the instance either lists ALT1 or it does not).
@@ -208,6 +302,7 @@ constexpr UsartPin usart_pin(uint8_t n, UsartRoute r, UsartSignal s) {
     if (n == 3 && idx >= 2 && package_pins < 64) return {port, pin, false};
     return {port, pin, true};
 }
+#endif
 
 // ---- the knobs (27.5.6 - 27.5.11) --------------------------------------------
 
@@ -415,7 +510,8 @@ public:
     template <UsartConfig cfg>
     static void init() {
         static_assert(usart_route_exists(n, cfg.route),
-                      "this package does not bond this USART's ALT1 position");
+                      "this part has not got this USART route, or this package does not bond "
+                      "it (usart_route_exists)");
         static_assert(usart_config_valid<n>(cfg),
                       "this USART configuration is not legal on this package: a "
                       "synchronous or Host SPI mode needs an XCK pin, RS-485 needs "
@@ -754,19 +850,31 @@ public:
 #endif
     }
 
+    /// Write this instance's route field: the route's CODE (the device
+    /// tables' usart_route_codes) into the header's mask and position.
     static void write_route(UsartRoute r) {
         constexpr uint8_t gp = route_gp();
         constexpr uint8_t gm = usart_route_gm(n);
         volatile uint8_t& reg = route_reg();
-        reg = static_cast<uint8_t>((reg & ~gm) |
-                                   static_cast<uint8_t>(static_cast<uint8_t>(r) << gp));
+        if constexpr (portmux_layout == PortmuxLayout::dx) {
+            reg = static_cast<uint8_t>((reg & ~gm) |
+                                       static_cast<uint8_t>(static_cast<uint8_t>(r) << gp));
+        } else {
+            reg = static_cast<uint8_t>((reg & ~gm) |
+                                       static_cast<uint8_t>(usart_route_code(n, r) << gp));
+        }
     }
 
-    /// The route bits as they read back.
+    /// The route the field reads back as (a code no route of this
+    /// instance carries reads as `none`).
     static UsartRoute routed() {
         constexpr uint8_t gp = route_gp();
         constexpr uint8_t gm = usart_route_gm(n);
-        return static_cast<UsartRoute>((route_reg() & gm) >> gp);
+        if constexpr (portmux_layout == PortmuxLayout::dx) {
+            return static_cast<UsartRoute>((route_reg() & gm) >> gp);
+        } else {
+            return usart_route_of_code(n, static_cast<uint8_t>((route_reg() & gm) >> gp));
+        }
     }
 
 private:
@@ -805,7 +913,8 @@ private:
         write_route(c.route);
         route_ = c.route;
         if (c.route == UsartRoute::none) return;
-        const char p = usart_port_letter(n);
+        const char p = portmux_layout == PortmuxLayout::dx ? usart_port_letter(n)
+                                                            : usart_route_port(n, c.route);
         volatile PORT_t& port = port_by_letter(p);
         const UsartPin t = usart_pin(n, c.route, UsartSignal::txd);
         const UsartPin r = usart_pin(n, c.route, UsartSignal::rxd);
@@ -847,10 +956,11 @@ private:
     }
 
     /// Everything this driver drove goes back to being an input with
-    /// its pull-up cleared.
+    /// its pull-up cleared - on the port of the route it drove them on.
     static void release_pins() {
         if (driven_ == 0) return;
-        const char p = usart_port_letter(n);
+        const char p = portmux_layout == PortmuxLayout::dx ? usart_port_letter(n)
+                                                            : usart_route_port(n, route_);
         volatile PORT_t& port = port_by_letter(p);
         port.DIRCLR = driven_;
         for (uint8_t i = 0; i < 8; ++i) {
@@ -930,7 +1040,8 @@ class Uart {
     static_assert(usart_num >= 0 && usart_num <= 5, "usart_num must be 0..5");
     using U = Usart<static_cast<uint8_t>(usart_num)>;
     static_assert(usart_route_exists(static_cast<uint8_t>(usart_num), route),
-                  "this package does not bond this USART's ALT1 position");
+                  "this part has not got this USART route, or this package does not bond "
+                      "it (usart_route_exists)");
 
     // One ring pair per instantiation (static inline -> .bss, no ctor).
     // The receive ring is told when rxc() lost a byte (SkipRing): lost()

@@ -183,9 +183,16 @@ constexpr uint8_t tca_route_code(uint8_t n, char p) {
         }
     }
 #ifdef TCA1
+    // TCA1's PORTB and PORTC routes exist where PORTB does (the 48/64-pin
+    // parts; on the 28/32-pin AVR EA, TCA1's PORTB code is "not
+    // connected" and PORTC's is absent). The AVR EA's three-channel PORTA
+    // and PORTD routes (DS40002443A 17.3.7) are not in this table yet:
+    // refused like any other absent route (docs/avrdx/tca.md).
     switch (p) {
+#ifdef PORTB
         case 'B': return PORTMUX_TCA1_PORTB_gc;
         case 'C': return PORTMUX_TCA1_PORTC_gc;
+#endif
 #ifdef PORTG
         case 'E': return erratum_da_tca1_alt23 ? 0xFF : static_cast<uint8_t>(PORTMUX_TCA1_PORTE_gc);
         case 'G': return erratum_da_tca1_alt23 ? 0xFF : static_cast<uint8_t>(PORTMUX_TCA1_PORTG_gc);

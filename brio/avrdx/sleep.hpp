@@ -2,7 +2,10 @@
  * sleep.hpp
  *
  * SLPCTRL (DS40002247B ch. 13) - the three sleep modes and the voltage
- * regulator's power profile. The MECHANISM only: which mode is armed,
+ * regulator's power profile. The AVR EA's SLPCTRL (DS40002443A ch. 13) is
+ * CTRLA alone, the same three modes: no VREGCTRL and no regulator control
+ * anywhere, so Vreg and VregPower do not exist there (device tables'
+ * has_vreg). What follows is the AVR DB's chapter unless it names the EA. The MECHANISM only: which mode is armed,
  * what a SLEEP instruction then does, and what the regulator is told to
  * do while the CPU is stopped. The POLICY - when a program may stop its
  * clocks - is not here and is not the kernel's either (see the design
@@ -82,8 +85,9 @@
  * errata DS80000915F 2.2.4 (all revisions): a store to an address >= 64
  * immediately followed by a write to SLPCTRL.CTRLA loses that write, so
  * every CTRLA store below is preceded by a NOP - the documented
- * workaround. The DA errata of record predates the item and carries no
- * twin; the NOP costs one cycle and is emitted on both families.
+ * workaround. The AVR EA's twin is DS80001048D 2.2.3. The DA errata of
+ * record predates the item and carries no twin; the NOP costs one cycle
+ * and is emitted on every family.
  *
  * A DEBUGGER BREAK WAKES THE DEVICE to Active mode whether or not an
  * interrupt is pending (13.3.4): a sleep measured under a debug session

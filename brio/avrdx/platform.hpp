@@ -70,10 +70,12 @@ struct AvrPlatform {
         // loses that write - a NOP before each CTRLA write is the
         // documented workaround (avr-libc's set_sleep_mode/sleep_enable
         // pair would be two back-to-back read-modify-writes of CTRLA).
+        // The AVR EA's twin is DS80001048D 2.2.3 (revisions B1 and B2).
         // The DA errata of record (DS80000882C) predates the item and
-        // has no twin; the NOP costs one cycle and is emitted on both
-        // families rather than trusting that silence.
-        // SLPCTRL.CTRLA is NOT under CCP (13.3.5): only VREGCTRL is.
+        // has no twin; the NOP costs one cycle and is emitted on every
+        // family rather than trusting that silence.
+        // SLPCTRL.CTRLA is NOT under CCP (13.3.5): only VREGCTRL is, and
+        // the AVR EA's SLPCTRL is CTRLA alone (DS40002443A 13.4).
         if ((SLPCTRL.CTRLA & SLPCTRL_SEN_bm) != 0) {
             sei();
             sleep_cpu();

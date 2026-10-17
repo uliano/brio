@@ -2,7 +2,7 @@
 # Family compile check (part of every driver's definition of done).
 #
 # Positive: every test/family/*.cpp must COMPILE for every package of
-# the AVR DA/DB family (the bench chip alone masks half the family:
+# the AVR DA, DB and EA families (the bench chip alone masks half the family:
 # missing ports, instances, registers, enum values).
 # Negative: every test/family/neg/*.cpp must FAIL to compile for each
 # MCU named on its "// mcu: <list>" line (what must be refused must be
@@ -23,7 +23,8 @@ CXX=/sw/avr/bin/avr-g++
 [ -x "$CXX" ] || { echo "$(basename "$0"): the compiler $CXX is not installed - nothing checked" >&2; exit 2; }
 FLAGS="-std=gnu++23 -Os -Wall -Wextra -Werror -c -Ibrio"
 MCUS="avr128db28 avr128db32 avr128db48 avr128db64 \
-      avr128da28 avr128da32 avr128da48 avr128da64"
+      avr128da28 avr128da32 avr128da48 avr128da64 \
+      avr64ea28 avr64ea32 avr64ea48"
 FILTER="${1:-}"
 fail=0
 

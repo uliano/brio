@@ -20,8 +20,10 @@ using namespace brio;
 static_assert(static_cast<uint8_t>(SleepMode::idle) == SLPCTRL_SMODE_IDLE_gc);
 static_assert(static_cast<uint8_t>(SleepMode::standby) == SLPCTRL_SMODE_STDBY_gc);
 static_assert(static_cast<uint8_t>(SleepMode::power_down) == SLPCTRL_SMODE_PDOWN_gc);
+#if defined(SLPCTRL_PMODE_gm)
 static_assert(static_cast<uint8_t>(VregPower::normal) == SLPCTRL_PMODE_AUTO_gc);
 static_assert(static_cast<uint8_t>(VregPower::performance) == SLPCTRL_PMODE_FULL_gc);
+#endif
 
 // The SLEEP instruction is compiled, never executed by this TU: a smoke
 // build has no wake-up source and would stop the device for good.
@@ -42,6 +44,10 @@ void sleep_verbs() {
     Sleep::disarm();
 }
 
+// The regulator's sleep control is the AVR DA/DB's (SLPCTRL.VREGCTRL);
+// the AVR EA's SLPCTRL is CTRLA alone (DS40002443A 13.4) and Vreg does
+// not exist there (neg/sleep_no_vreg_on_ea.cpp).
+#if defined(SLPCTRL_PMODE_gm)
 void vreg_verbs() {
     Vreg::power(VregPower::performance);
     Vreg::power(VregPower::normal);
@@ -54,3 +60,4 @@ void vreg_verbs() {
     }
     (void)Vreg::high_temp_low_leakage();
 }
+#endif

@@ -45,6 +45,71 @@ FUSES = {
     "bootsize": "BOOTEND in 512-byte blocks (0 = the whole Flash is BOOT)",
 }
 
+# The AVR EA's fuses: the same seven names (avrdude's .avr-ex part), other
+# fields (DS40002443A 8.8.2). OSCCFG holds OSCHFFRQ alone - OSCHF's ONE
+# rate, 20 or 16 MHz; SYSCFG0 adds UPDIPINCFG (bit 4) and CRCSEL (bit 5)
+# and keeps one RSTPINCFG bit; BOOTSIZE/CODESIZE count 256-byte blocks.
+EA_FUSES = {
+    "wdtcfg":   "watchdog PERIOD/WINDOW at boot (0 = off, and unlocked)",
+    "bodcfg":   "brown-out detector level, sampling and active modes",
+    "osccfg":   "OSCHFFRQ (bit 3): OSCHF at 20 MHz (0) or 16 MHz (1)",
+    "syscfg0":  "EESAVE (bit 0), RSTPINCFG (bit 3), UPDIPINCFG (bit 4), CRCSEL (bit 5), CRCSRC (7:6)",
+    "syscfg1":  "SUT: start-up time",
+    "codesize": "boot + application code in 256-byte blocks (unused while BOOTSIZE = 0)",
+    "bootsize": "BOOT in 256-byte blocks (0 = the whole Flash is BOOT)",
+}
+
+EA_MCU = re.compile(r"^avr\d+ea\d+$")
+EA_SYSCFG0_UPDIPINCFG = 0x10
+EA_CRCSRC_SHIFT = 6
+EA_CRCSRC_NOCRC = 0x3
+EA_CRCSRC_BOOT = 0x1
+EA_CRCSRC_BOOTAPP = 0x2
+
+
+def is_ea(mcu):
+    return EA_MCU.match(mcu) is not None
+
+
+def ea_refusals(values):
+    """What brio refuses to write into an AVR EA's fuses, as reasons. `values`
+    is the fuse state the write would leave ({name: byte}); a name absent
+    from it is not known yet (the chip has not been read) and every rule
+    that needs it is left for the call that knows it. Pure: it reads no
+    chip, so a refusal it can make from the assignment alone is made
+    BEFORE any probe is touched."""
+    reasons = []
+    sys0 = values.get("syscfg0")
+    if sys0 is not None and not sys0 & EA_SYSCFG0_UPDIPINCFG:
+        reasons.append(
+            "SYSCFG0 0x%02X clears UPDIPINCFG (bit 4): PF7 would start as a GPIO and the "
+            "UPDI link would need a high-voltage pulse on RESET to come back (DS40002443A "
+            "8.8.2.4, 33.3.2.1.2) - no programmer on this bench makes one. (A DA/DB SYSCFG0 "
+            "such as 0xC8 has bit 4 clear: it is NOT an EA value.)" % sys0)
+    if sys0 is not None:
+        crcsrc = (sys0 >> EA_CRCSRC_SHIFT) & 0x3
+        boot = values.get("bootsize")
+        code = values.get("codesize")
+        if crcsrc == EA_CRCSRC_BOOT and boot is not None and boot != 0:
+            reasons.append(
+                "SYSCFG0 0x%02X asks a CRC of the BOOT section with BOOTSIZE 0x%02X: on rev B1 "
+                "that scan does not work (DS80001048D 2.3.1) and a failed CRC halts the CPU"
+                % (sys0, boot))
+        if crcsrc == EA_CRCSRC_BOOTAPP and code is not None and code != 0:
+            reasons.append(
+                "SYSCFG0 0x%02X asks a CRC of BOOT + APPCODE with CODESIZE 0x%02X: on rev B1 "
+                "that scan does not work (DS80001048D 2.3.1) and a failed CRC halts the CPU"
+                % (sys0, code))
+        if crcsrc != EA_CRCSRC_NOCRC:
+            for name in ("bootsize", "codesize"):
+                v = values.get(name)
+                if v is not None and v & 1:
+                    reasons.append(
+                        "SYSCFG0 0x%02X enables a CRC with an odd %s 0x%02X: on rev B2 a CRC "
+                        "needs both sizes in multiples of 512 bytes (DS80001048D 2.2.4)"
+                        % (sys0, name.upper(), v))
+    return reasons
+
 
 def fuse_read(prog, mcu, names):
     """{name: byte} straight from the chip."""
@@ -61,6 +126,54 @@ def fuse_read(prog, mcu, names):
         sys.stderr.write(out.stdout + out.stderr)
         die("expected %d fuse value(s), got %d" % (len(names), len(values)))
     return dict(zip(names, (int(v, 0) for v in values)))
+
+
+def parse_avr_assignment(assignment, board):
+    """{name: byte} from the name=value words of the command line; a name of
+    the other family, an unknown name or a value that is not a byte stops
+    the verb before anything is read or written."""
+    writes = {}
+    for spec in assignment:
+        if "=" not in spec:
+            die("a fuse assignment is <name>=<value>, got '%s'" % spec)
+        name, value = spec.split("=", 1)
+        name = name.strip().lower()
+        if name in SAM_FUSE_BY_NAME:
+            die("'%s' is a SAM C21 NVM User Row field and board '%s' is an "
+                "AVR: its fuses are %s"
+                % (name, board, ", ".join(sorted(FUSES))))
+        if name not in FUSES:
+            die("unknown fuse '%s' (known: %s)" % (name, ", ".join(sorted(FUSES))))
+        try:
+            writes[name] = int(value.strip(), 0) & 0xFF
+        except ValueError:
+            die("fuse %s: '%s' is not a byte" % (name, value))
+    return writes
+
+
+def ea_print_layout(values):
+    """The AVR EA's reading of the fuses (DS40002443A 8.8.2, 11.3.1.1)."""
+    boot = values["bootsize"]
+    code = values["codesize"]
+    sys0 = values["syscfg0"]
+    print("  -> OSCHF %s MHz" % ("16" if values["osccfg"] & 0x08 else "20"))
+    print("     BOOT %s" % ("the whole Flash (nothing is writable from software)"
+                            if boot == 0 else "0x0000..0x%04X" % (boot * 256 - 1)))
+    if boot != 0:
+        print("     APPCODE %s"
+              % ("0x%04X..FLASHEND" % (boot * 256) if code == 0 else
+                 ("none" if code <= boot else
+                  "0x%04X..0x%04X" % (boot * 256, code * 256 - 1))))
+    for name, v in (("BOOTSIZE", boot), ("CODESIZE", code)):
+        if v & 1:
+            print("     %s is odd: no CRC may run on rev B2 (DS80001048D 2.2.4)" % name)
+    print("     RESET pin %s, UPDI pin %s, CRC %s, EESAVE %s"
+          % ("PF6" if sys0 & 0x08 else "off (PF6 a GPIO)",
+             "PF7" if sys0 & 0x10 else "OFF - a GPIO: only an HV pulse brings UPDI back",
+             ("off" if (sys0 >> 6) == 3 else
+              ("full flash", "boot", "boot+appcode")[sys0 >> 6] + (" CRC32" if sys0 & 0x20 else " CRC16")),
+             "set" if sys0 & 1 else "clear"))
+    return 0
 
 
 def cmd_fuses(args):
@@ -91,22 +204,24 @@ def avr_cmd_fuses(args, prog, tspec):
                 "AVR-Dx: a fuse byte here is written on its own over UPDI, "
                 "with no row to erase and no guarded field" % (flag, args.name))
 
-    writes = {}
-    for spec in args.assignment:
-        if "=" not in spec:
-            die("a fuse assignment is <name>=<value>, got '%s'" % spec)
-        name, value = spec.split("=", 1)
-        name = name.strip().lower()
-        if name in SAM_FUSE_BY_NAME:
-            die("'%s' is a SAM C21 NVM User Row field and board '%s' is an "
-                "AVR-Dx: its fuses are %s"
-                % (name, args.name, ", ".join(sorted(FUSES))))
-        if name not in FUSES:
-            die("unknown fuse '%s' (known: %s)" % (name, ", ".join(sorted(FUSES))))
-        try:
-            writes[name] = int(value.strip(), 0) & 0xFF
-        except ValueError:
-            die("fuse %s: '%s' is not a byte" % (name, value))
+    writes = parse_avr_assignment(args.assignment, args.name)
+    ea = is_ea(mcu)
+
+    if writes and ea:
+        # The AVR EA's refusals, in two passes, BOTH before any write: what
+        # the assignment alone decides (no probe touched), then what needs
+        # the fuses it leaves alone (read first - a read changes nothing).
+        reasons = ea_refusals(writes)
+        if reasons:
+            die("refusing to write the fuses of AVR EA board '%s':\n  - %s"
+                % (args.name, "\n  - ".join(reasons)))
+        missing = sorted({"syscfg0", "bootsize", "codesize"} - set(writes))
+        state = dict(fuse_read(prog, mcu, missing)) if missing else {}
+        state.update(writes)
+        reasons = ea_refusals(state)
+        if reasons:
+            die("refusing to write the fuses of AVR EA board '%s':\n  - %s"
+                % (args.name, "\n  - ".join(reasons)))
 
     if writes:
         before = fuse_read(prog, mcu, sorted(writes))
@@ -131,7 +246,9 @@ def avr_cmd_fuses(args, prog, tspec):
     values = fuse_read(prog, mcu, names)
     print("board %s (%s):" % (args.name, mcu))
     for name in names:
-        print("  %-9s 0x%02X  %s" % (name, values[name], FUSES[name]))
+        print("  %-9s 0x%02X  %s" % (name, values[name], (EA_FUSES if ea else FUSES)[name]))
+    if ea:
+        return ea_print_layout(values)
     boot = values["bootsize"]
     code = values["codesize"]
     print("  -> BOOT %s" % ("the whole Flash (nothing is writable from software)"

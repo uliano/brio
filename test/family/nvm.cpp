@@ -9,6 +9,9 @@
 // everywhere, that the enums really carry the device header's own
 // codes, and that the compile-time verbs accept what the declared Flash
 // layout allows.
+#include <avr/io.h>
+// NVM version 3 (the AVR EA) has no driver yet: nvm.hpp refuses that part by name, and this TU compiles to nothing there.
+#if !defined(NVMCTRL_FLBUSY_bm)
 #include "avrdx/nvm.hpp"
 
 using namespace brio;
@@ -243,3 +246,5 @@ void nvm_util() {
         Writer::dispatch(*e);
     }
 }
+
+#endif // NVMCTRL_FLBUSY_bm

@@ -14,7 +14,9 @@ void pin_common() {
     P::configure({.sense = PinSense::input_disable});
     static_assert(Pin<'D', 2>::fully_async);
     static_assert(Pin<'D', 6>::fully_async);
-    static_assert(!Pin<'D', 3>::fully_async);
+    // The AVR DA/DB: pins 2 and 6 alone; the AVR EA: every pin (the
+    // device tables' all_pins_fully_async, DS40002443A 18.3.3.1).
+    static_assert(Pin<'D', 3>::fully_async == all_pins_fully_async);
 
     using PA = Port<'A'>;
     PA::dir_set(0x0C); PA::out_toggle(0x04);

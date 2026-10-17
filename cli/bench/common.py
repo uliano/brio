@@ -38,6 +38,11 @@ BOARD_TYPES = {
              "mcu": "avr128db48", "flash": "avrdude"},
     "da48": {"project": "avrdx", "preset": "avr128da48-release",
              "mcu": "avr128da48", "flash": "avrdude"},
+    # The REV 1.2 PCB fitted with an AVR64EA48 (docs/boards/avr64ea48.md):
+    # the same project, its own preset and the same avrdude over UPDI - an
+    # Atmel-ICE at firmware 1.46 or later, which knows the EA's NVM.
+    "ea48": {"project": "avrdx", "preset": "avr64ea48-release",
+             "mcu": "avr64ea48", "flash": "avrdude"},
     "c21j": {"project": "samc21", "preset": "samc21j-release",
              "mcu": "samc21j18a", "flash": "openocd",
              "target_cfg": "target/at91samdXX.cfg"},

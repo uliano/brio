@@ -68,10 +68,10 @@
 #include "util/persistent_panic.hpp"
 #include "util/print.hpp"
 
-// The DB's 24 MHz crystal, or the DA's external 24 MHz clock on PA0.
-using SysClock = brio::Clock<brio::has_xoschf ? brio::ClockSource::crystal
-                                              : brio::ClockSource::external,
-                             24'000'000>;
+#include "avr_board.hpp"
+
+// The board's HF clock: its source and rate are the board table's.
+using SysClock = BoardClock;   // the board's HF source (avr_board.hpp)
 constexpr SysClock clock;
 
 /// The suite's own reset-surviving breadcrumb: test f spans four resets

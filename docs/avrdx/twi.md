@@ -1,9 +1,11 @@
-# TWI - the two-wire interface (AVR DA/DB)
+# TWI - the two-wire interface (AVR DA, DB and EA)
 
 Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B (TWI
 chapter 29, PORTMUX chapter 17, electricals 39.16), errata DS80000915F
 (2.15.1, 2.15.2) and, for the DA parts, DS80000882C (2.14.1, 2.14.2,
-2.14.3 and clarification 3.2). Three errata items shape the code:
+2.14.3 and clarification 3.2); for the AVR64EA28/32/48 DS40002443A (TWI
+chapter 27, PORTMUX 17.3.6, electricals 35.15) and DS80001048D (no TWI
+item). Three errata items shape the code:
 
 - **DB 2.15.1 / DA 2.14.1, the output pin override**: with the TWI
   enabled the override covers the pin DRIVER but not the pin VALUE, so a
@@ -718,6 +720,16 @@ SDA node follows, instead of assuming either way.
 
 **Driver gaps** (the chapter's own features this driver does not
 implement):
+
+- **The AVR EA's TWI engine.** TWI0 alone (TWI1 refused by name) and its
+  route table with ALT3 (SDA PA0, SCL PA1, dual PC2/PC3; 17.3.6) compile
+  on the three AVR64EA packages; the engine over them is the DB's, not
+  yet written from DS40002443A ch. 27: CTRLA.FMEN (the Fm duty cycle) is
+  neither used nor declined, the baud arithmetic is the DB's (the EA's
+  Sm low time is BAUD + 6 cycles where the DB's is + 5: one tick
+  conservative), and the bus time-out counts in CLKCTRL.MCLKTIMEBASE,
+  which the clock now owns and writes (clkctrl.md) - so `TwiTimeout`
+  means microseconds there as on the DB. A later step, with its letters.
 
 - **10-bit addressing.** The client's match logic recognizes the first
   byte when SADDR[7:3] is 0b11110 and the second byte is software's job

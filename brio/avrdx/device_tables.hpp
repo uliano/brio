@@ -34,8 +34,6 @@
  *    defines `__AVR_AVR128DB48__`, ...), grouped by errata sheet, and a
  *    part this table does not list is a compile error: the stratum's
  *    claim (avrdx/cmake/avr-mcus.cmake's packages) made at compile time.
- *    The AVR64EA rows describe the parts the stratum is widening to;
- *    the rest of the stratum does not build for them yet.
  *
  *  - THE ERRATA AND THE FAMILY FACTS NO HEADER CARRIES, as values keyed
  *    on the die, each with its section. Only the items a driver reads
@@ -174,6 +172,19 @@ inline constexpr bool has_oschf_frqsel = false;
 inline constexpr bool has_clock_timebase = true;
 #else
 inline constexpr bool has_clock_timebase = false;
+#endif
+
+/// OSCHFCTRLA's auto-tune field: what turns it on and what clears it. One
+/// bit (AUTOTUNE_bm) on the AVR DA/DB; on the AVR EA a field the header
+/// declares two bits wide (AUTOTUNE_gm, code XOSC32K = 1, DS40002443A
+/// 12.5.8 documenting bit 0 and "other - reserved"): the code turns it on
+/// and the whole field is cleared to turn it off.
+#if defined(CLKCTRL_AUTOTUNE_bm)
+inline constexpr uint8_t oschf_autotune_on = CLKCTRL_AUTOTUNE_bm;
+inline constexpr uint8_t oschf_autotune_field = CLKCTRL_AUTOTUNE_bm;
+#else
+inline constexpr uint8_t oschf_autotune_on = CLKCTRL_AUTOTUNE_XOSC32K_gc;
+inline constexpr uint8_t oschf_autotune_field = CLKCTRL_AUTOTUNE_gm;
 #endif
 
 /// The voltage regulator's sleep control (SLPCTRL.VREGCTRL.PMODE).
@@ -469,6 +480,70 @@ constexpr uint8_t tca_route_gm(uint8_t n) {
     }
 }
 
+/// The PORTMUX layout the header declares, probed once. The AVR DA/DB:
+/// two-bit route fields, every USART and SPI speaking DEFAULT 0, ALT1 1,
+/// (ALT2 2 on the SPIs), NONE 3. The AVR EA (DS40002443A 17.3): USART0
+/// and SPI0 fields three bits wide, a code set per instance (USART0 up to
+/// ALT4 and NONE 5, SPI0 up to ALT6 and NONE 7 with code 2 reserved),
+/// USART2 in USARTROUTEB, TWI0 with an ALT3.
+enum class PortmuxLayout : uint8_t { dx, ea };
+#if PORTMUX_USART0_gm == 0x07
+inline constexpr PortmuxLayout portmux_layout = PortmuxLayout::ea;
+#else
+inline constexpr PortmuxLayout portmux_layout = PortmuxLayout::dx;
+#endif
+
+/// A route this layout has not got.
+inline constexpr uint8_t route_absent = 0xFF;
+
+// The route CODES each instance's field takes, per layout. Each table is
+// indexed by the value of the driver's route enumerator - UsartRoute {def,
+// alt1, alt2, none, alt3, alt4}, SpiRoute {def, alt1, alt2, none, alt3,
+// alt4, alt5, alt6}, TwiRoute {def, alt1, alt2, alt3}, whose values are
+// chosen so that the AVR DA/DB's codes are their own values - and holds
+// the header's `_gv` enumerator wherever the name exists on every package
+// of the layout, the chapter's number where only some packages name it
+// (test/family/device_tables.cpp holds those against the header on the
+// packages that do). Whether THIS package bonds a route's pins is the
+// driver's pin table; a code here says the silicon has the route.
+
+#if PORTMUX_USART0_gm == 0x07
+inline constexpr uint8_t usart_route_codes[3][6] = {
+    {PORTMUX_USART0_DEFAULT_gv, PORTMUX_USART0_ALT1_gv, PORTMUX_USART0_ALT2_gv,
+     PORTMUX_USART0_NONE_gv, PORTMUX_USART0_ALT3_gv, PORTMUX_USART0_ALT4_gv},
+    {PORTMUX_USART1_DEFAULT_gv, 0x01, PORTMUX_USART1_ALT2_gv,
+     PORTMUX_USART1_NONE_gv, route_absent, route_absent},
+    {PORTMUX_USART2_DEFAULT_gv, 0x01, route_absent,
+     PORTMUX_USART2_NONE_gv, route_absent, route_absent},
+};
+inline constexpr uint8_t spi_route_codes[1][8] = {
+    {PORTMUX_SPI0_DEFAULT_gv, 0x01, route_absent, PORTMUX_SPI0_NONE_gv,
+     PORTMUX_SPI0_ALT3_gv, PORTMUX_SPI0_ALT4_gv, PORTMUX_SPI0_ALT5_gv, PORTMUX_SPI0_ALT6_gv},
+};
+inline constexpr uint8_t twi_route_codes[1][4] = {
+    {PORTMUX_TWI0_DEFAULT_gv, PORTMUX_TWI0_ALT1_gv, PORTMUX_TWI0_ALT2_gv, PORTMUX_TWI0_ALT3_gv},
+};
+#else
+inline constexpr uint8_t usart_route_codes[6][6] = {
+    {PORTMUX_USART0_DEFAULT_gv, PORTMUX_USART0_ALT1_gv, route_absent,
+     PORTMUX_USART0_NONE_gv, route_absent, route_absent},
+    {PORTMUX_USART1_DEFAULT_gv, 0x01, route_absent, PORTMUX_USART1_NONE_gv, route_absent, route_absent},
+    {PORTMUX_USART2_DEFAULT_gv, 0x01, route_absent, PORTMUX_USART2_NONE_gv, route_absent, route_absent},
+    {0x00, 0x01, route_absent, 0x03, route_absent, route_absent},
+    {0x00, 0x01, route_absent, 0x03, route_absent, route_absent},
+    {0x00, 0x01, route_absent, 0x03, route_absent, route_absent},
+};
+inline constexpr uint8_t spi_route_codes[2][8] = {
+    {PORTMUX_SPI0_DEFAULT_gv, 0x01, 0x02, PORTMUX_SPI0_NONE_gv,
+     route_absent, route_absent, route_absent, route_absent},
+    {0x00, 0x01, 0x02, 0x03, route_absent, route_absent, route_absent, route_absent},
+};
+inline constexpr uint8_t twi_route_codes[2][4] = {
+    {PORTMUX_TWI0_DEFAULT_gv, PORTMUX_TWI0_ALT1_gv, PORTMUX_TWI0_ALT2_gv, route_absent},
+    {0x00, 0x01, 0x02, route_absent},
+};
+#endif
+
 // =============================================================================
 // Errata and family facts, keyed on the die
 // =============================================================================
@@ -489,6 +564,28 @@ inline constexpr bool erratum_da_twi_sdahold_swap = avr_die == AvrDie::avr128da;
 /// DS80000882C 2.7.1 (every AVR DA revision): the flash's data-space
 /// window ignores the section protections.
 inline constexpr bool erratum_da_window = avr_die == AvrDie::avr128da;
+
+/// The absolute maximum of CLK_MAIN: 24 MHz at any supply on the AVR DA
+/// and DB (DS40002247B 39.10.6 table 39-14); 20 MHz on the AVR EA, and
+/// only at VDD >= 4.5 V (DS40002443A 35.10.5 table 35-14: 5 MHz from
+/// 1.8 V, 10 MHz from 2.7 V, 20 MHz from 4.5 V, -40..85 C). The supply
+/// grade is the reader's: brio asserts the part's maximum only and
+/// docs/avrdx/clkctrl.md states the rows.
+inline constexpr uint32_t clk_main_max_hz =
+    avr_die == AvrDie::avr64ea ? 20'000'000u : 24'000'000u;
+
+/// The OSCCFG fuse's OSCHF rates where the fuse chooses it (no FRQSEL):
+/// FUSE.OSCCFG.OSCHFFRQ = 0 runs it at 20 MHz, 1 at 16 MHz (DS40002443A
+/// 8.8.2.3). Zero where the rate is a register field instead.
+inline constexpr uint32_t oschf_fuse_hz_clear = has_oschf_frqsel ? 0u : 20'000'000u;
+inline constexpr uint32_t oschf_fuse_hz_set = has_oschf_frqsel ? 0u : 16'000'000u;
+
+/// Every pin of every port senses asynchronously - a pulse shorter than
+/// one CLK_PER cycle is caught and every sense configuration wakes from
+/// every sleep mode - on the AVR EA (DS40002443A 18.3.3.1). On the AVR
+/// DA/DB only pins 2 and 6 of each port do (DS40002247B 18.3.3.1, table
+/// 18-4); a fact of the die's PORT, carried by no header symbol.
+inline constexpr bool all_pins_fully_async = avr_die == AvrDie::avr64ea;
 
 /// USART2's ALT1 route keeps XDIR on PF3 on the AVR DB; the AVR DA's
 /// route table lists no XDIR for it (the two device headers' route

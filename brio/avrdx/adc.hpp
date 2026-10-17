@@ -74,6 +74,19 @@
 
 #pragma once
 
+// THE AVR EA'S ADC IS ANOTHER CONVERTER. Its 12-bit differential ADC
+// with a programmable gain amplifier (DS40002443A ch. 31: SAMPLE/RESULT,
+// burst and series accumulation, MCLKTIMEBASE-timed start-up, an
+// unbuffered input mux) shares almost no register with the AVR DA/DB's
+// ADC this file is written from. Its engine is a later step; until then
+// the header refuses the part by name (docs/avrdx/adc.md).
+#include <avr/io.h>
+#include "avrdx/device_tables.hpp"
+#if defined(ADC_PGAEN_bm)
+static_assert(!brio::has_adc_pga,
+              "brio avrdx: adc.hpp is written for the ADC of the AVR DA/DB; the differential ADC with PGA of the AVR EA (DS40002443A ch. 31) is not written yet (docs/avrdx/adc.md)");
+#else
+
 #include <stdint.h>
 #include <avr/io.h>
 
@@ -491,3 +504,5 @@ private:
 static_assert(ClockUser<Adc<0>>);
 
 } // namespace brio
+
+#endif // ADC_PGAEN_bm

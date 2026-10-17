@@ -118,19 +118,57 @@
 
 namespace brio {
 
-// ---- routes and pins (17.5.8, 28.2.2) ---------------------------------------
+// ---- routes and pins (DS40002247B 17.5.8, 28.2.2; DS40002443A 17.3.5) -------
 
-/// SPI pin routing (PORTMUX.SPIROUTEA). The values ARE the device
-/// header's own group values, `none` included.
+/// SPI pin routing (PORTMUX.SPIROUTEA), by NAME. On the AVR DA/DB the
+/// values ARE the device header's group values, `none` included (DEFAULT
+/// 0, ALT1 1, ALT2 2, NONE 3). On the AVR EA's layout SPI0's field is
+/// three bits wide, code 2 is reserved and NONE is 7 (DS40002443A 17.3.5):
+/// there the names ALT3..ALT6 exist, ALT2 does not, and every route's code
+/// is the device tables' (spi_route_codes).
 enum class SpiRoute : uint8_t {
     def = 0,
     alt1 = 1,
+#if PORTMUX_SPI0_gm == 0x07   // the AVR EA's layout (device tables' portmux_layout)
+    none = 3,
+    alt3 = 4,
+    alt4 = 5,
+    alt5 = 6,
+    alt6 = 7,
+#else
     alt2 = 2,
     none = 3,
+#endif
 };
-static_assert(static_cast<uint8_t>(SpiRoute::def) == PORTMUX_SPI0_DEFAULT_gv &&
-              static_cast<uint8_t>(SpiRoute::none) == PORTMUX_SPI0_NONE_gv,
+static_assert(portmux_layout != PortmuxLayout::dx ||
+              (static_cast<uint8_t>(SpiRoute::def) == PORTMUX_SPI0_DEFAULT_gv &&
+               static_cast<uint8_t>(SpiRoute::none) == PORTMUX_SPI0_NONE_gv),
               "the route codes must be the device header's group values");
+
+/// The code a route writes into instance n's field: the value itself on
+/// the AVR DA/DB, the device tables' code on the AVR EA.
+constexpr uint8_t spi_route_code(uint8_t n, SpiRoute r) {
+    if constexpr (portmux_layout == PortmuxLayout::dx) {
+        (void)n;
+        return static_cast<uint8_t>(r);
+    } else {
+        return n < spi_count ? spi_route_codes[n][static_cast<uint8_t>(r)] : route_absent;
+    }
+}
+
+/// The route a field code means for instance n (`none` for a code no
+/// route of the instance carries).
+constexpr SpiRoute spi_route_of_code(uint8_t n, uint8_t code) {
+    if constexpr (portmux_layout == PortmuxLayout::dx) {
+        (void)n;
+        return static_cast<SpiRoute>(code);
+    } else {
+        for (uint8_t i = 0; i < 8; ++i) {
+            if (spi_route_code(n, static_cast<SpiRoute>(i)) == code) return static_cast<SpiRoute>(i);
+        }
+        return SpiRoute::none;
+    }
+}
 
 // The pin count of this package is device_tables.hpp's package_pins:
 // only its >= 48 and >= 64 steps change an SPI route table.
@@ -147,6 +185,65 @@ struct SpiPin {
     bool bonded = false;
     constexpr explicit operator bool() const { return bonded; }
 };
+
+#if PORTMUX_SPI0_gm == 0x07
+// ---- the AVR EA's route table ------------------------------------------------
+// SPI0 alone (DS40002443A 17.3.5, table 3-1):
+//   DEFAULT PA4-PA7   ALT1 PE0-PE3 (48 pins)   ALT4 PD4-PD7   ALT5 PC0-PC3
+//   ALT3 MOSI PA0, MISO PA1, SCK PC0, SS PC1   (two ports)
+//   ALT6 MOSI PC1, MISO PC2, SCK PC3, SS PF7   (two ports; SS on the UPDI pin)
+
+/// The routes whose SS position is PF7, the UPDI pin (ALT6). PF7 is a GPIO
+/// only with FUSE.SYSCFG0.UPDIPINCFG = 0, which leaves the part
+/// unreachable without a high-voltage programmer: refused at compile time
+/// rather than offered as a pin that costs the debug link.
+constexpr bool spi_route_on_updi_pin(uint8_t n, SpiRoute r) { return n == 0 && r == SpiRoute::alt6; }
+
+/// The routes whose four signals do not sit on one port (ALT3 and ALT6).
+/// The pin set-up below hands over one port per route; such a route is
+/// refused until the engine is written for it (docs/avrdx/spi.md).
+constexpr bool spi_route_crosses_ports(uint8_t n, SpiRoute r) {
+    return n == 0 && (r == SpiRoute::alt3 || r == SpiRoute::alt6);
+}
+
+constexpr char spi_port_letter(uint8_t, SpiRoute r) {
+    switch (r) {
+        case SpiRoute::def: return 'A';
+        case SpiRoute::alt1: return 'E';
+        case SpiRoute::alt4: return 'D';
+        case SpiRoute::alt5: return 'C';
+        default: return '?';
+    }
+}
+
+constexpr uint8_t spi_first_pin(uint8_t, SpiRoute r) {
+    return r == SpiRoute::def || r == SpiRoute::alt4 ? 4 : 0;
+}
+
+/// Whether this package offers a route at all. NONE always exists (an
+/// instance runs pinless). ALT1 needs the 48-pin part's PORTE; ALT3 and
+/// ALT6 exist in the silicon and are refused by name at the tasks.
+constexpr bool spi_route_exists(uint8_t n, SpiRoute r) {
+    if (n >= spi_count) return false;
+    if (spi_route_code(n, r) == route_absent) return false;
+    if (r == SpiRoute::alt1) return package_pins >= 48;
+    return true;
+}
+
+/// The position of one signal of one route on THIS package.
+constexpr SpiPin spi_pin(uint8_t n, SpiRoute r, SpiSignal s) {
+    if (n >= spi_count || r == SpiRoute::none || !spi_route_exists(n, r)) return {};
+    const char port = spi_port_letter(n, r);
+    if (port == '?' || !port_exists(port)) return {};
+    return {port, static_cast<uint8_t>(spi_first_pin(n, r) + static_cast<uint8_t>(s)), true};
+}
+
+#else
+// ---- the AVR DA/DB's route table ---------------------------------------------
+
+/// No route of this layout puts SS on the UPDI pin, and none crosses ports.
+constexpr bool spi_route_on_updi_pin(uint8_t, SpiRoute) { return false; }
+constexpr bool spi_route_crosses_ports(uint8_t, SpiRoute) { return false; }
 
 /// The port and first pin of a route, straight from the device headers:
 ///   SPI0 DEFAULT PA4-PA7   ALT1 PE0-PE3 (48+)   ALT2 PG4-PG7 (64)
@@ -205,6 +302,7 @@ constexpr SpiPin spi_pin(uint8_t n, SpiRoute r, SpiSignal s) {
     }
     return {port, pin, true};
 }
+#endif
 
 // ---- the knobs (28.5.1 - 28.5.2) --------------------------------------------
 
@@ -334,6 +432,7 @@ template <uint8_t n>
 constexpr bool spi_config_valid(const SpiConfig& c) {
     if (n >= spi_count) return false;
     if (!spi_route_exists(n, c.route)) return false;
+    if (spi_route_on_updi_pin(n, c.route) || spi_route_crosses_ports(n, c.route)) return false;
     const bool pinless = c.route == SpiRoute::none;
     if (c.role == SpiRole::host) {
         if (pinless) return c.client_select_disable && !c.ss_output;
@@ -384,10 +483,17 @@ public:
     /// errata forbid - is refused here.
     template <SpiConfig cfg>
     static bool init() {
+        static_assert(!spi_route_on_updi_pin(n, cfg.route),
+                      "SPI0 ALT6 puts SS on PF7, the UPDI pin: a GPIO only with "
+                      "FUSE.SYSCFG0.UPDIPINCFG = 0, which leaves the part unreachable "
+                      "without a high-voltage programmer - refused");
+        static_assert(!spi_route_crosses_ports(n, cfg.route),
+                      "this route's signals sit on two ports (AVR EA SPI0 ALT3: PA0, PA1, "
+                      "PC0, PC1), which the pin hand-over does not drive yet");
         static_assert(spi_route_exists(n, cfg.route),
-                      "this package does not bond this SPI route (28/32 pins have "
-                      "DEFAULT only; SPI1 ALT2 is refused on 48-pin parts: DB errata "
-                      "2.11.1, and no SCK position is bonded there anyway)");
+                      "this part has not got this SPI route, or this package does not bond it "
+                      "(AVR DA/DB: 28/32 pins have DEFAULT only, SPI1 ALT2 is refused on 48-pin "
+                      "parts by DB errata 2.11.1; AVR EA: code 2 is reserved, ALT1 needs 48 pins)");
         static_assert(spi_config_valid<n>(cfg),
                       "this SPI configuration is not legal on this package: a pinless "
                       "host must disable Client Select (DA errata 2.10.1), a host needs "
@@ -669,18 +775,30 @@ public:
     /// header's own group position, device_tables.hpp).
     static constexpr uint8_t route_gp() { return spi_route_gp(n); }
 
+    /// Write this instance's route field: the route's CODE (the device
+    /// tables' spi_route_codes) into the header's mask and position.
     static void write_route(SpiRoute r) {
         constexpr uint8_t gp = route_gp();
         constexpr uint8_t gm = spi_route_gm(n);
-        PORTMUX.SPIROUTEA = static_cast<uint8_t>(
-            (PORTMUX.SPIROUTEA & ~gm) | static_cast<uint8_t>(static_cast<uint8_t>(r) << gp));
+        if constexpr (portmux_layout == PortmuxLayout::dx) {
+            PORTMUX.SPIROUTEA = static_cast<uint8_t>(
+                (PORTMUX.SPIROUTEA & ~gm) | static_cast<uint8_t>(static_cast<uint8_t>(r) << gp));
+        } else {
+            PORTMUX.SPIROUTEA = static_cast<uint8_t>(
+                (PORTMUX.SPIROUTEA & ~gm) | static_cast<uint8_t>(spi_route_code(n, r) << gp));
+        }
     }
 
-    /// The route bits as they read back.
+    /// The route the field reads back as (a code no route of this
+    /// instance carries reads as `none`).
     static SpiRoute routed() {
         constexpr uint8_t gp = route_gp();
         constexpr uint8_t gm = spi_route_gm(n);
-        return static_cast<SpiRoute>((PORTMUX.SPIROUTEA & gm) >> gp);
+        if constexpr (portmux_layout == PortmuxLayout::dx) {
+            return static_cast<SpiRoute>((PORTMUX.SPIROUTEA & gm) >> gp);
+        } else {
+            return spi_route_of_code(n, static_cast<uint8_t>((PORTMUX.SPIROUTEA & gm) >> gp));
+        }
     }
 
 private:
@@ -895,9 +1013,17 @@ private:
 template <uint8_t n, SpiRoute route = SpiRoute::def>
 class SpiHost {
     using S = Spi<n>;
+    static_assert(!spi_route_on_updi_pin(n, route),
+                  "SPI0 ALT6 puts SS on PF7, the UPDI pin: a GPIO only with "
+                  "FUSE.SYSCFG0.UPDIPINCFG = 0, which leaves the part unreachable "
+                  "without a high-voltage programmer - refused");
+    static_assert(!spi_route_crosses_ports(n, route),
+                  "this route's signals sit on two ports (AVR EA SPI0 ALT3: PA0, PA1, "
+                  "PC0, PC1), which the pin hand-over does not drive yet");
     static_assert(spi_route_exists(n, route),
-                  "this package does not bond this SPI route (28/32 pins have DEFAULT "
-                  "only; SPI1 ALT2 is refused on 48-pin parts: DB errata 2.11.1)");
+                  "this part has not got this SPI route, or this package does not bond it "
+                      "(AVR DA/DB: 28/32 pins have DEFAULT only, SPI1 ALT2 is refused on 48-pin "
+                      "parts by DB errata 2.11.1; AVR EA: code 2 is reserved, ALT1 needs 48 pins)");
 
 public:
     SpiHost() = delete;
@@ -1526,9 +1652,17 @@ private:
 template <uint8_t n, SpiRoute route = SpiRoute::def>
 class SpiClient {
     using S = Spi<n>;
+    static_assert(!spi_route_on_updi_pin(n, route),
+                  "SPI0 ALT6 puts SS on PF7, the UPDI pin: a GPIO only with "
+                  "FUSE.SYSCFG0.UPDIPINCFG = 0, which leaves the part unreachable "
+                  "without a high-voltage programmer - refused");
+    static_assert(!spi_route_crosses_ports(n, route),
+                  "this route's signals sit on two ports (AVR EA SPI0 ALT3: PA0, PA1, "
+                  "PC0, PC1), which the pin hand-over does not drive yet");
     static_assert(spi_route_exists(n, route),
-                  "this package does not bond this SPI route (28/32 pins have DEFAULT "
-                  "only; SPI1 ALT2 is refused on 48-pin parts: DB errata 2.11.1)");
+                  "this part has not got this SPI route, or this package does not bond it "
+                      "(AVR DA/DB: 28/32 pins have DEFAULT only, SPI1 ALT2 is refused on 48-pin "
+                      "parts by DB errata 2.11.1; AVR EA: code 2 is reserved, ALT1 needs 48 pins)");
 
 public:
     SpiClient() = delete;

@@ -41,7 +41,8 @@ namespace brio {
 /// OUT - a window in which an ISR's edge on another pin of the same
 /// port is written back over (test_avr_pin's letter 9 measures it) -
 /// and its store would be an STD into the low I/O space, the target
-/// erratum DS80000915F 2.2.4 loses after a store to an address >= 64.
+/// erratum DS80000915F 2.2.4 (DS80001048D 2.2.3 on the AVR EA) loses
+/// after a store to an address >= 64.
 /// OUTSET/OUTCLR sit in the extended I/O space (PORTA at 0x0400), and
 /// the store is one STD: 1 cycle against the LDD/OR/STD's 4.
 ///
@@ -127,9 +128,11 @@ enum class PinSense : uint8_t {
 };
 
 #ifdef PORT_INLVL_bm
-/// Input threshold (DB only): Schmitt from the supply, or TTL levels
-/// (an MVIO companion). Change it only with the pin's interrupts and
-/// peripherals quiet: the switch can fake a transition (18.3.3).
+/// Input threshold (the DB and the EA; the DA has no INLVL): Schmitt from
+/// the supply, or TTL levels (VIL < 0.8 V, VIH > 2.0 V; on the EA for VDD
+/// above 2.7 V, DS80001048D 3.5). Change it only with the pin's
+/// interrupts and peripherals quiet: the switch can fake a transition
+/// (18.3.3).
 enum class PinLevel : uint8_t { schmitt = 0, ttl = PORT_INLVL_bm };
 #endif
 
@@ -242,6 +245,17 @@ struct Port {
         regs().PINCONFIG = pin_ctrl_byte(cfg);
         regs().PINCTRLUPD = pins;
     }
+
+#if defined(PORT_EVGEN0SEL_gm)
+    /// The pin an event SLOT of this port carries (PORTx.EVGENCTRLA,
+    /// DS40002443A 18.5.17; the AVR EA). The slots are selected by the
+    /// event routes (EvPin<P, slot>, evsys.hpp); this reads one back.
+    static uint8_t event_selection(uint8_t slot) {
+        const uint8_t v = regs().EVGENCTRLA;
+        return static_cast<uint8_t>(slot == 0 ? (v & PORT_EVGEN0SEL_gm) >> PORT_EVGEN0SEL_gp
+                                              : (v & PORT_EVGEN1SEL_gm) >> PORT_EVGEN1SEL_gp);
+    }
+#endif
 };
 
 template <char PortLetter, uint8_t PinNum>
@@ -263,11 +277,13 @@ struct Pin {
     // Virtual PORT for single-cycle bit access (SBI/CBI)
     static constexpr volatile VPORT_t& vport() { return Port<PortLetter>::vregs(); }
 
-    /// Px2 and Px6 sense FULLY asynchronously (I/O mux note 2): they
-    /// wake from every sleep mode on every sense, catch sub-CLK_PER
-    /// pulses and have no three-cycle dead-time; the other pins need
-    /// CLK_PER (or BOTHEDGES/LEVEL held long enough) to wake.
-    static constexpr bool fully_async = PinNum == 2 || PinNum == 6;
+    /// Whether this pin senses FULLY asynchronously: it wakes from every
+    /// sleep mode on every sense, catches sub-CLK_PER pulses and has no
+    /// three-cycle dead-time. On the AVR DA/DB only Px2 and Px6 do (I/O
+    /// mux note 2, DS40002247B 18.3.3.1); the other pins need CLK_PER (or
+    /// BOTHEDGES/LEVEL held long enough) to wake. On the AVR EA every pin
+    /// does (DS40002443A 18.3.3.1) - the device tables' fact.
+    static constexpr bool fully_async = all_pins_fully_async || PinNum == 2 || PinNum == 6;
 
     // Access PINnCTRL register for this pin
     static volatile uint8_t& pinctrl() {

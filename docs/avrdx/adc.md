@@ -324,6 +324,13 @@ at 2000 mV from the 2.048 V reference against VDD as the reference:
 
 Driver gaps:
 
+- The AVR EA's ADC (DS40002443A ch. 31: a 12-bit differential converter
+  with a programmable gain amplifier, SAMPLE and RESULT, burst and series
+  accumulation to 1024 samples, MCLKTIMEBASE-timed start-up, an
+  unbuffered input mux) shares almost no register with this one:
+  `adc.hpp` refuses the part by name and its fixture compiles to nothing
+  there - an engine of its own, a later step.
+
 - `left_adjust` stays write-only by choice: the result helpers
   assume right adjustment and say so (the shift varies with the
   accumulation count, Table 33-1) - left-adjust-aware helpers only

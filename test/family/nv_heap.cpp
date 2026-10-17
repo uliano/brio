@@ -10,6 +10,9 @@
 // this TU proves is that the media satisfies the concept, that the
 // derived constants come out right, and that every verb of the heap
 // compiles against a real target.
+#include <avr/io.h>
+// No flash heap on the AVR EA (no flash self-programming there): nvm_flash.hpp refuses that part by name, and this TU compiles to nothing there.
+#if !defined(NVMCTRL_FLBUSY_bm)
 #include "avrdx/nvm_flash.hpp"
 #include "util/nv_heap.hpp"
 
@@ -109,3 +112,5 @@ void nv_heap_media() {
     heap_sink = static_cast<uint8_t>(NvmFlash::erase(0x10000u));
     heap_sink32 = NvmFlash::build_id();
 }
+
+#endif // NVMCTRL_FLBUSY_bm

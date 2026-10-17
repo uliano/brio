@@ -56,13 +56,12 @@
 
 #include "sleep_link.hpp"
 
-// The 24 MHz: the DB's crystal on its XOSCHF, or the DA's external clock
-// on PA0 (brio::has_xoschf) - on the AVR128DA48 board a quartz oscillator
-// feeding EXTCLK, crystal-referenced either way: ident reports
+#include "avr_board.hpp"
+
+// The board's HF clock (avr_board.hpp): the DB board's crystal on its
+// XOSCHF, or on the AVR128DA48 board a quartz oscillator feeding EXTCLK, crystal-referenced either way: ident reports
 // slink::clock_crystal for both whenever the source started.
-using SysClock = brio::Clock<brio::has_xoschf ? brio::ClockSource::crystal
-                                              : brio::ClockSource::external,
-                             24'000'000>;
+using SysClock = BoardClock;   // the board's HF source (avr_board.hpp)
 constexpr SysClock clock;
 
 namespace {

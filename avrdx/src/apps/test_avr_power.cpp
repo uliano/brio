@@ -30,7 +30,7 @@
 // | c the deadline guard | d the voters | e the standing restrictions
 // | f a power-down round slept, and a lock taken in an ISR | z = a..f
 
-// build: boards = db48,da48
+// build: boards = db48,da48,ea48
 // build: monitor_speed = 460800
 
 #include <avr/interrupt.h>
@@ -53,13 +53,15 @@
 #include "util/print.hpp"
 #include "util/testbench.hpp"
 
+#include "avr_board.hpp"
+
 namespace {
 
 using namespace brio;
 
 using P = AvrPlatform;
-// The DB's 24 MHz crystal, or the DA's external 24 MHz clock on PA0.
-using SysClock = Clock<has_xoschf ? ClockSource::crystal : ClockSource::external, 24'000'000>;
+// The board's HF clock: its source and rate are the board table's.
+using SysClock = BoardClock;   // the board's HF source (avr_board.hpp)
 constexpr SysClock clock;
 
 using Serial = Uart<2, Route::alt1>;
@@ -79,7 +81,7 @@ using ChCarry = EventChannel<4>;
 using ChSnap = EventChannel<5>;
 
 constexpr uint32_t crystal_hz = SysClock::hz;
-/// CLK_PER cycles in one PIT tick at 24 MHz (24e6 / 1024).
+/// CLK_PER cycles in one PIT tick (the board rate / 1024).
 constexpr uint32_t cycles_per_tick = crystal_hz / Ticker::ticks_per_second;
 
 // ---- shared with the ISRs ---------------------------------------------------------
@@ -748,9 +750,15 @@ int main() {
     if (board.empty()) {
         board = "?";
     }
-    print(serial, crlf, "test_avr_power - power-management test suite (board ", board,
-          ", clk=", xtal ? "XTAL" : "OSCHF", " 24 MHz, silicon rev ", hex(SYSCFG.REVID),
-          ", RSTFR=", hex(why.raw), ")", crlf);
+    if constexpr (crystal_hz == 24'000'000u) {
+        print(serial, crlf, "test_avr_power - power-management test suite (board ", board,
+              ", clk=", xtal ? "XTAL" : "OSCHF", " 24 MHz, silicon rev ", hex(SYSCFG.REVID),
+              ", RSTFR=", hex(why.raw), ")", crlf);
+    } else {
+        print(serial, crlf, "test_avr_power - power-management test suite (board ", board,
+              ", clk=", xtal ? "XTAL" : "OSCHF", " ", crystal_hz / 1'000'000u,
+              " MHz, silicon rev ", hex(SYSCFG.REVID), ", RSTFR=", hex(why.raw), ")", crlf);
+    }
     print(serial, "  timebase ", Ticker::ticks_per_second, " Hz = ", cycles_per_tick,
           " CLK_PER cycles per tick; the PIT is also the wake source", crlf);
     register_tests();

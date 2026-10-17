@@ -10,7 +10,7 @@ using namespace brio;
 // The clock contract: the microsecond-speaking tasks are ClockUsers -
 // a DynamicClock can list them (which requires their rebase), and
 // their init(clock) asserts clock_follows.
-using Boot = Clock<ClockSource::internal, 24'000'000>;
+using Boot = Clock<ClockSource::internal, has_oschf_frqsel ? 24'000'000 : 20'000'000>;
 using Dyn = DynamicClock<Boot, PeriodicTick<Tcb<0>>, Timeout<Tcb<1>>,
                          OneShotPulse<Tcb<2>>, FrequencyMeter<Tcb<0>>,
                          PulseWidthMeter<Tcb<1>>, DutyMeter<Tcb<2>>>;
@@ -41,9 +41,11 @@ void tcb_common() {
     (void)EvTcbCapt<2>::code;
     // the freshly filled EVSYS vocabulary instantiates everywhere
     (void)EvUpdiSynch::code;
+#ifdef ZCD0
     (void)EvZcdOut<zcd_count - 1>::code;     // the last ZCD of THIS package
+#endif
     (void)EvUsartXck<0>::code;
-    (void)EvSpiSck<1>::code;
+    (void)EvSpiSck<spi_count - 1>::code;
     EvUsartIrda<0>::listen(EventChannel<0>{});
     EvUsartIrda<0>::unlisten();
     EvOut<Pin<'A', 7>>::listen(EventChannel<0>{});

@@ -45,13 +45,15 @@
 #include "util/print.hpp"
 #include "util/testbench.hpp"
 
+#include "avr_board.hpp"
+
 namespace {
 
 using namespace brio;
 
 using P = AvrPlatform;
-// The DB's 24 MHz crystal, or the DA's external 24 MHz clock on PA0.
-using SysClock = Clock<has_xoschf ? ClockSource::crystal : ClockSource::external, 24'000'000>;
+// The board's HF clock: its source and rate are the board table's.
+using SysClock = BoardClock;   // the board's HF source (avr_board.hpp)
 constexpr SysClock clock;
 
 using Serial = Uart<2, Route::alt1>;

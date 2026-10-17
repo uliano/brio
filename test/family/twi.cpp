@@ -10,7 +10,7 @@
 
 using namespace brio;
 
-using SysClock = Clock<ClockSource::internal, 24'000'000>;
+using SysClock = Clock<ClockSource::internal, has_oschf_frqsel ? 24'000'000 : 20'000'000>;
 
 // ---- the route table against the device header's route enums --------------
 
@@ -101,7 +101,21 @@ static_assert(!twi_config_valid<0>({.client = true, .address = 0x80}));
 
 // ---- per-package route and dual tables -----------------------------------
 
-#if defined(PORTG)
+#if PORTMUX_USART0_gm == 0x07
+// The AVR EA (DS40002443A 17.3.6): TWI0 alone on every package, with an
+// ALT3 (PA0/PA1, dual PC2/PC3); ALT1/ALT2's dual pair PC6/PC7 on 48 pins.
+static_assert(twi_count == 1);
+static_assert(twi_route_exists(0, TwiRoute::alt3));
+static_assert(twi_pin(0, TwiRoute::alt3, TwiSignal::sda).port == 'A' &&
+              twi_pin(0, TwiRoute::alt3, TwiSignal::scl).pin == 1);
+static_assert(twi_has_dual(0, TwiRoute::alt3));
+static_assert(twi_has_dual(0, TwiRoute::alt1) == (package_pins >= 48));
+static_assert(twi_has_dual(0, TwiRoute::alt2) == (package_pins >= 48));
+void use_ea() {
+    (void)I2cHost<0, TwiRoute::alt2>::init(SysClock{});
+    (void)I2cClient<0, TwiRoute::alt3, true>::init(SysClock{}, {.address = 0x40});
+}
+#elif defined(PORTG)
 // 64 pins: every route of both instances, and every dual pair.
 static_assert(package_pins == 64);
 static_assert(twi_count == 2);

@@ -34,9 +34,22 @@ manifest records the probe's USB serial per board.
   how it shows), which is why `brio flash` never passes it and why an
   `NvHeap` image's build id is derived from the sources rather than
   from the clock. `brio flash --erase` is the way to wipe a heap.
+- **The AVR EA needs firmware 1.46 or later.** With jtag3-class UPDI
+  the ICE runs the NVM sequences itself, and firmware 1.41 does not know
+  NVM version 3: it acknowledges every write to an AVR64EA - fuses,
+  flash, a chip erase - and loses it (the fuse reads back unchanged, the
+  flash reads 0xFF). MPLAB IPE updates the firmware (to 1.46, rel. 11).
 - **Fuses** are provisioning, UPDI-only: `brio fuses <board> [name=value
   ...]` reads and writes them (BOOTSIZE, CODESIZE, EESAVE ...) and
-  refuses what a board type cannot do.
+  refuses what a board type cannot do - on an AVR EA, before anything is
+  read or written: a SYSCFG0 with UPDIPINCFG (bit 4) clear, which this
+  probe could not undo (no high-voltage pulse), and the CRC/size
+  combinations DS80001048D 2.3.1 and 2.2.4 forbid.
+- **Reading a running AVR EA with the debugger**: `pyavrocd -a` attaches
+  without a reset (`-d avr64ea48 -i updi -t atmelice -u <serial>`, no
+  `-m`: nothing of the fuses is managed) and avr-gdb reads the I/O space
+  at 0x800000 + address; a detach lets the program run on. This is how
+  a board whose console does not reach the host is still read.
 - **Debugging**: PyAvrOCD as the GDB server, launched by the IDE's
   cppdbg entry ([../avrdx/README.md](../avrdx/README.md)). Effectively
   ONE free hardware breakpoint (GDB borrows the second); line

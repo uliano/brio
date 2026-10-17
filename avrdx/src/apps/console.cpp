@@ -19,7 +19,7 @@
 // Between keystrokes the CPU sleeps in IDLE, woken by the PIT tick or
 // the USART interrupts. No polling anywhere.
 
-// build: boards = db48,da48
+// build: boards = db48,da48,ea48
 
 #include <avr/interrupt.h>
 #include <stdint.h>
@@ -38,21 +38,25 @@
 #include "util/proto/line_parser.hpp"
 #include "util/serial_port.hpp"
 
+#include "avr_board.hpp"
+
 using P = brio::AvrPlatform;
 
 // The clock: the ONE truth about CLK_PER for every driver of this
-// target (avrdx/clock.hpp). 24 MHz from the DB's crystal on PA0/PA1 or
-// the DA's external clock on PA0 (brio::has_xoschf), OSCHF fallback at
-// the same rate; `clock` is an empty tag passed to driver inits.
-using SysClock = brio::Clock<brio::has_xoschf ? brio::ClockSource::crystal
-                                              : brio::ClockSource::external,
-                             24'000'000>;
+// target (avrdx/clock.hpp): the board's HF source at its rate (the DB
+// board's 24 MHz crystal, the DA board's 24 MHz external clock, the EA
+// board's 20 MHz crystal - avr_board.hpp), OSCHF fallback at the same
+// CLK_PER; `clock` is an empty tag passed to driver inits.
+using SysClock = BoardClock;   // the board's HF source (avr_board.hpp)
 constexpr SysClock clock;
 
 namespace {
 
 using Led = brio::Pin<'F', 2>;
-using Serial = brio::Uart<2, brio::Route::alt1>;  // rings 64/256 (defaults)
+// The board's console (avr_board.hpp); the vectors bound below are
+// USART2's, which the static_assert keeps honest.
+using Serial = brio::Uart<board_console_usart, board_console_route>;  // rings 64/256 (defaults)
+static_assert(board_console_usart == 2, "console.cpp binds USART2's vectors");
 constexpr Serial serial;                          // tag for print(serial, ...)
 
 // ---- events -----------------------------------------------------------------
@@ -193,10 +197,16 @@ int main() {
     brio::Ticker::init();
     sei();
 
-    brio::print(serial, brio::crlf,
-                brio::has_xoschf ? "AVR128DB48 brio console (clk=" : "AVR128DA48 brio console (clk=",
-                xtal ? (brio::has_xoschf ? "XTAL" : "EXTCLK") : "OSCHF", "), type HELP",
-                brio::crlf, "> ");
+    if constexpr (brio::avr_die == brio::AvrDie::avr64ea) {
+        brio::print(serial, brio::crlf, "AVR64EA48 brio console (clk=",
+                    xtal ? "XTAL" : "OSCHF", ", silicon rev ", brio::hex(SYSCFG.REVID),
+                    "), type HELP", brio::crlf, "> ");
+    } else {
+        brio::print(serial, brio::crlf,
+                    brio::has_xoschf ? "AVR128DB48 brio console (clk=" : "AVR128DA48 brio console (clk=",
+                    xtal ? (brio::has_xoschf ? "XTAL" : "EXTCLK") : "OSCHF", "), type HELP",
+                    brio::crlf, "> ");
+    }
 
     // Pack order = priority AND correctness: the line CONSUMER (Console)
     // must precede the PRODUCER (SerialLines) - scheduling contract.

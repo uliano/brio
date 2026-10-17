@@ -1,9 +1,12 @@
-# SPI - the serial peripheral interface (AVR DA/DB)
+# SPI - the serial peripheral interface (AVR DA, DB and EA)
 
 Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B (SPI
 chapter 28, PORTMUX chapter 17, electricals 39.15), errata DS80000915F
 (2.11.1 and clarifications 3.5.1, 3.5.2, 3.7.3) and, for the DA parts,
-DS80000882C (2.10.1). Three items shape the code:
+DS80000882C (2.10.1); for the AVR64EA28/32/48 DS40002443A (SPI chapter
+26 - the DB's chapter word for word - PORTMUX 17.3.5) and DS80001048D
+(clarifications 3.1, 3.2, 3.7 = the DB's 3.5.1, 3.5.2, 3.7.3). Three
+items shape the code:
 
 - **DB 2.11.1, SPI1 ALT2 on 48-pin devices**: the position is
   NON-FUNCTIONAL there (rev. A4/A5; fixed in B0). The 48-pin device
@@ -24,6 +27,21 @@ DS80000882C (2.10.1). Three items shape the code:
 - **clarification 3.5.2** also warns that a client in buffer mode near
   its maximum SCK may not set up data in time for the first sample edge
   of a back-to-back transfer.
+
+**The AVR EA's route table** (DS40002443A 17.3.5, table 3-1): SPI0
+alone, its field three bits wide - DEFAULT PA4-PA7, ALT1 PE0-PE3 (48
+pins), code 2 reserved, ALT3 MOSI PA0 / MISO PA1 / SCK PC0 / SS PC1,
+ALT4 PD4-PD7, ALT5 PC0-PC3, ALT6 MOSI PC1 / MISO PC2 / SCK PC3 / SS
+PF7, NONE = 7. brio names routes, never codes: `SpiRoute::alt3..alt6`
+exist only where the layout has them and `alt2` only where it does not
+(the DA/DB), every code is the device tables' `spi_route_codes`, and
+`routed()` maps the code back. Two routes are refused at compile time on
+the EA, each by name: **ALT6**, whose SS is PF7 - the UPDI pin, a GPIO
+only with FUSE.SYSCFG0.UPDIPINCFG = 0, which leaves the part unreachable
+without a high-voltage programmer; and **ALT3**, whose signals cross two
+ports, which the pin hand-over (one port per route) does not drive (a
+driver gap below). The engines over the table are the DB's, the IP being
+the same.
 
 Driver: `avrdx/spi.hpp`. The arbiter above it:
 [spi-bus.md](../design/spi-bus.md) (`util/bus_master.hpp`,
@@ -784,8 +802,17 @@ client selects itself with INVEN on its own pulled-up SS pin.
 - the engine's SCK ceiling clamps a request DOWN silently; it does not
   report that it did - a stated caveat, since a slower transfer is
   still a correct one;
+- the AVR EA's SPI0 ALT3 (PA0, PA1, PC0, PC1): refused - the pin
+  hand-over drives one port per route; born with a user that wants it
+  (on the bench board its PA0/PA1 are the HF crystal's anyway);
+- the AVR EA's SPI0 ALT6 (SS on PF7, the UPDI pin): declined (above);
 
 **Implemented but not bench-verified:**
+
+- everything on the AVR EA: the route table compiles and refuses as
+  above on the three packages, the engines are the DB's unchanged - the
+  SPI suite on the EA is a later step (its PE0..PE3 run to the desk's
+  SAM C21 peer, as on the DA/DB board);
 
 - `test_avr_spi` letter `u` against the avrdx peer: run only against a
   SAM C21 peer, where it is judged; against a second AVR128DB48 it

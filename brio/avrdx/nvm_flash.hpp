@@ -55,6 +55,17 @@
 
 #pragma once
 
+// The flash behind the FlashMedia contract is NVM version 2's (nvm.hpp);
+// on the AVR EA, whose NVM version 3 has no driver here, flash
+// self-programming is declined (docs/avrdx/nvm.md) and so are the flash
+// heap and journal that would sit on it.
+#include <avr/io.h>
+#include "avrdx/device_tables.hpp"
+#if defined(NVMCTRL_FLBUSY_bm)
+static_assert(!brio::has_nvm_page_buffer,
+              "brio avrdx: NvmFlash (and the flash NvHeap or NvJournal over it) is declined on the AVR EA - no flash self-programming there (docs/avrdx/nvm.md)");
+#else
+
 #include <stdint.h>
 
 #include <array>
@@ -143,3 +154,5 @@ private:
 static_assert(FlashMedia<NvmFlash>);
 
 } // namespace brio
+
+#endif // NVMCTRL_FLBUSY_bm

@@ -1,4 +1,4 @@
-// mcu: avr128db28 avr128db32 avr128da28 avr128da32
+// mcu: avr128db28 avr128db32 avr128da28 avr128da32 avr64ea28 avr64ea32
 // USART1's ALT1 is PC4..PC7: PORTC stops at PC3 on 28/32 pins.
 #include "avrdx/usart.hpp"
 using namespace brio;

@@ -78,9 +78,9 @@
 #include "avrdx/userrow.hpp"
 #include "util/print.hpp"
 
-using SysClock = brio::Clock<brio::has_xoschf ? brio::ClockSource::crystal
-                                              : brio::ClockSource::external,
-                             24'000'000>;
+#include "avr_board.hpp"
+
+using SysClock = BoardClock;   // the board's HF source (avr_board.hpp)
 constexpr SysClock clock;
 
 namespace {
@@ -101,9 +101,8 @@ using ChCarry = EventChannel<4>;
 using ChSnap = EventChannel<5>;      // software / RTC OVF / RTC CMP
 
 constexpr uint32_t crystal_hz = SysClock::hz;
-/// One board per part on this desk: the AVR128DA48 board fits a 32.768
-/// kHz crystal on PF0/PF1, the AVR128DB48 board none.
-constexpr bool board_xosc32k = !has_xoschf;
+// The board's facts (board_clkout, board_xosc32k, board_pa7_free) are
+// the board table's (avr_board.hpp).
 constexpr uint32_t nominal_hz = 32768;           // CLK_RTC from OSC32K
 // Crystal ticks in one nominal CLK_RTC cycle (24e6 / 32768 = 732.42).
 constexpr uint32_t ticks_per_rtc_x100 = (crystal_hz * 100ul) / nominal_hz;

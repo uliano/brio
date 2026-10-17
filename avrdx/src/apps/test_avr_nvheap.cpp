@@ -60,9 +60,9 @@
 #include "util/nv_heap.hpp"
 #include "util/print.hpp"
 
-using SysClock = brio::Clock<brio::has_xoschf ? brio::ClockSource::crystal
-                                              : brio::ClockSource::external,
-                             24'000'000>;
+#include "avr_board.hpp"
+
+using SysClock = BoardClock;   // the board's HF source (avr_board.hpp)
 constexpr SysClock clock;
 
 /// The suite's reset-surviving breadcrumb: test d spans a real reset and

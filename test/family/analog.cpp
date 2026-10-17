@@ -1,6 +1,9 @@
 // VREF/DAC/ADC family smoke TU. The DB-only internal inputs
 // (vdd_div10/vddio2_div10) are gated by the MVIO marker: on the DA
 // they do not exist at all (the mux codes are reserved there).
+#include <avr/io.h>
+// The ADC of the AVR EA (a differential ADC with PGA) has no driver yet: adc.hpp refuses that part by name, and this TU compiles to nothing there.
+#if !defined(ADC_PGAEN_bm)
 #include "avrdx/adc.hpp"
 #include "avrdx/dac.hpp"
 #include "avrdx/vref.hpp"
@@ -8,7 +11,7 @@
 
 using namespace brio;
 
-using Boot = Clock<ClockSource::internal, 24'000'000>;
+using Boot = Clock<ClockSource::internal, has_oschf_frqsel ? 24'000'000 : 20'000'000>;
 using Dyn = DynamicClock<Boot, Adc<0>>;
 
 void analog_common() {
@@ -32,3 +35,5 @@ void analog_common() {
     Adc<0>::select(AdcInput::vdd_div10);       // DB only
 #endif
 }
+
+#endif // ADC_PGAEN_bm

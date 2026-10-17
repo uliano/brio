@@ -1,8 +1,10 @@
 /*
  * reset.hpp
  *
- * RSTCTRL (chapter 14) and the WDT (chapter 22) of the AVR DA/DB: why
- * the program is running, and how to end it on purpose.
+ * RSTCTRL (chapter 14) and the WDT (chapter 22) of the AVR DA/DB, and
+ * the same two blocks of the AVR EA (DS40002443A ch. 14 and 21: the same
+ * bits, SWRR's one bit named SWRE): why the program is running, and how
+ * to end it on purpose.
  *
  * These two blocks are the other half of the panic breadcrumb. The
  * kernel writes a PanicRecord into reset-surviving storage
@@ -62,7 +64,8 @@ struct ResetFlags {
     bool external;    ///< EXTRF - the RESET pin
     bool watchdog;    ///< WDRF - a time-out or a window violation
     bool software;    ///< SWRF - a write to RSTCTRL.SWRR
-    bool updi;        ///< UPDIRF - the debugger/programmer
+    bool updi;        ///< UPDIRF - the debugger/programmer (on the AVR EA also a
+                      ///< high-voltage UPDI enable, DS40002443A 14.5.1)
     uint8_t raw;
 
     constexpr bool any() const { return raw != 0; }
