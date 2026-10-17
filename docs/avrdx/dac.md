@@ -92,9 +92,18 @@ ref_mv)` and `dac_mv(code, Out::steps, ref_mv)` in `util/analog.hpp`.
 
 On the **AVR128DA48** (rev A7, 5 V) the internal path reads as on the DB
 (the unbuffered output 2043 of 2048 with a 32-cycle sample, every
-reference pair's DAC0 within a few counts of its expectation); the
-legs that read the pin are owed there, its board carrying no PD6 wire
-([adc.md](adc.md)'s list).
+reference pair's DAC0 within a few counts of its expectation); THE PIN
+DOES NOT. Wired to PD1 and PD7, a falling step discharges at about
+200 V/s and at constant current - 2.0 V to 0.2 V in about 9 ms, the
+same with the ADC converting throughout the fall or reading once at
+its end - where the DB's pin falls at ~20 kV/s: a sink of a few tens of
+nanoamperes on that net, not ~1 uA. A rising step overshoots and the
+overshoot comes down at the same rate: from 0 V to 1.536 V the wire
+read above 2.048 V at once, and 0.2 V to 2.0 V read full scale against
+the 2.048 V reference within two conversions. Whether the part or the
+5 V supply makes the difference is not separated. The suite's legs that
+read the pin stay owed there until the wire carries the resistor to
+ground ([adc.md](adc.md)'s list).
 
 - Ramp 0..1023 against the ADC on the wire: monotonic, error within
   +-7 LSB12 over the range, i.e. well inside the specified INL +
