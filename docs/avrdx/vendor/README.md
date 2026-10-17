@@ -27,6 +27,15 @@ letter is in the first-page footer (`DS40002247B`, `DS80000915F`).
 | AN2451 Getting Started with Core Independent Peripherals on AVR | DS00002451 | not copied (`https://www.microchip.com/DS00002451`) | EVSYS/CCL/timer composition patterns; background only |
 | Microchip examples (github.com/microchip-pic-avr-examples): `avr128da48-getting-started-with-tcb-*`, `avr128da48-tcb-frequency-dutycycle-measurement-*` (TCB FRQPW + PIT, 500 Hz..200 kHz), `avr128db48-blink-led-ccl-mplab-mcc` (CCL JK flip-flop toggled by a timer event) | - | online | register-level recipes to compare our drivers against; MCC-generated, not authoritative |
 
+## AVR EA (the stratum's widening, not yet a build target)
+
+| Document | Number / revision of record | File name here | Notes |
+|----------|-----------------------------|----------------|-------|
+| AVR64EA28/32/48 Data Sheet | **DS40002443A** (565 pp) | `AVR64EA-28-32-48-DataSheet-DS40002443.pdf` | the EA's own chapters where they differ from the DA/DB: CLKCTRL (OSCHF frequency chosen by the OSCCFG fuse, the main clock prescaler, XOSCHF, no PLL), NVMCTRL (NVM version 3, page-buffer writes), the 12-bit differential ADC with PGA, the fuses (SYSCFG0's UPDIPINCFG bit) |
+| AVR64EA28/32/48 Silicon Errata and Data Sheet Clarifications | **DS80001048D** (2024, 17 pp; silicon rev. B1/B2) | `AVR64EA-28-32-48-SilConErrataClarif-DS80001048.pdf` | seven of its eight items apply to rev. B1 (NVM below 2.7 V, flash endurance below BODLEVEL3, partial CRC scan, multi-page erase from UPDI, self-programming with a flash read in progress, the USART's inconsistent sync field, consecutive writes to specific address spaces); B2 keeps three and adds the boot/code size fuse limitation |
+| TB3254 How to Use the 12-Bit Differential ADC in Burst Accumulation Mode | DS90003254A | `TB3254-How-to-Use-the-12-Bit-Differential-ADC-Burst-Accumulation-Mode-DS90003254A.pdf` | Microchip's register-level recipe for the EA's ADC; not authoritative |
+| TB3256 How to Use the 12-Bit Differential ADC with PGA in Single Mode | DS90003256A | `TB3256-How-to-Use-the-12-Bit-Differential-ADC-with-PGA-in-Single-Mode-DS90003256A.pdf` | the same, for the PGA; not authoritative |
+
 Canonical URLs (redirect to the current revision):
 `https://www.microchip.com/DS40002247` (datasheet),
 `https://www.microchip.com/DS80000915` (errata). Direct file URLs:
