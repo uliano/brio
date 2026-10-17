@@ -22,8 +22,9 @@ chapter 29, PORTMUX chapter 17, electricals 39.16), errata DS80000915F
   the 50 ns and 300 ns selections of CTRLA.SDAHOLD are swapped in the
   silicon. `TwiSdaHold` names TRUE nanoseconds and the encoding is
   swapped on the DA, so the same enumerator means the same hold time on
-  both families. The families are told apart by `MVIO`, which only the
-  DB has.
+  both families. The swap is keyed on the die
+  (`erratum_da_twi_sdahold_swap`, `avrdx/device_tables.hpp`), never on
+  a feature that happens to separate the two families.
 
 Driver: `avrdx/twi.hpp`. The arbiter above it:
 [i2c-bus.md](../design/i2c-bus.md) (`util/bus_master.hpp`,

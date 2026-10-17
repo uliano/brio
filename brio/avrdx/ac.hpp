@@ -50,6 +50,7 @@
 #include <stdint.h>
 #include <avr/io.h>
 
+#include "avrdx/device_tables.hpp"
 #include "avrdx/evsys.hpp"
 #include "avrdx/pin.hpp"
 #include "avrdx/vref.hpp"
@@ -71,10 +72,13 @@ enum class AcHysteresis : uint8_t {
     none = AC_HYSMODE_NONE_gc, small = AC_HYSMODE_SMALL_gc,       ///< ~10 mV
     medium = AC_HYSMODE_MEDIUM_gc, large = AC_HYSMODE_LARGE_gc,   ///< ~25 / ~50 mV
 };
+/// The third profile's code is the device tables' probe of the header's
+/// enumerator (0xFF where the part has no third profile, and a config
+/// asking for it is refused there).
 enum class AcPower : uint8_t {
     fast = AC_POWER_PROFILE0_gc,      ///< ~85 ns, most current
     medium = AC_POWER_PROFILE1_gc,    ///< ~250 ns, 17 uA
-    low = AC_POWER_PROFILE2_gc,       ///< ~460 ns
+    low = ac_power_profile2_code,     ///< ~460 ns
 };
 /// Normal-mode interrupt sense (INTMODE).
 enum class AcSense : uint8_t {
@@ -145,6 +149,7 @@ constexpr AcPin ac_neg_pin(uint8_t n, AcNeg p) {
 /// 28/32) await the device tables - the table above is the 48/64-pin
 /// column, identical on both families.
 constexpr bool ac_config_valid(uint8_t n, const AcConfig& c) {
+    if (c.power == AcPower::low && !has_ac_profile2) return false;
     if (!port_exists(ac_pos_pin(n, c.positive).port)) return false;
     if (c.negative != AcNeg::dacref &&
         !port_exists(ac_neg_pin(n, c.negative).port)) return false;
@@ -155,7 +160,7 @@ constexpr bool ac_config_valid(uint8_t n, const AcConfig& c) {
 
 template <uint8_t n>
 class Ac {
-    static_assert(n <= 2, "AVR DA/DB: AC0..AC2");
+    static_assert(n < ac_count, "no such analog comparator on this part (AVR DA/DB: AC0..AC2)");
 
 public:
     Ac() = delete;
@@ -169,7 +174,8 @@ public:
     static void init() {
         static_assert(ac_config_valid(n, cfg),
                       "this package does not bond the selected input's pin "
-                      "(the PORTE positives exist on 48/64-pin parts only)");
+                      "(the PORTE positives exist on 48/64-pin parts only), or this "
+                      "part has no third power profile for AcPower::low");
         (void)init(cfg);
     }
 
@@ -233,17 +239,24 @@ public:
     template <uint8_t partner>
     static void window(AcWindowSense when) {
         static_assert(partner == n + 1 || partner == n + 2, "window partner: ACn+1 or ACn+2");
-        static_assert(partner <= 2, "no such comparator");
+        static_assert(partner < ac_count, "no such comparator");
+        static_assert(partner == n + 1 || has_ac_upsel2,
+                      "this part's window pairs a comparator with ACn+1 only (no UPSEL2)");
         regs().INTCTRL = static_cast<uint8_t>((regs().INTCTRL & AC_CMP_bm) | static_cast<uint8_t>(when));
-        regs().CTRLB = partner == n + 1 ? AC_WINSEL_UPSEL1_gc : AC_WINSEL_UPSEL2_gc;
+        regs().CTRLB = partner == n + 1 ? static_cast<uint8_t>(AC_WINSEL_UPSEL1_gc)
+                                        : ac_winsel_upsel2_code;
     }
     static void window_off() { regs().CTRLB = AC_WINSEL_DISABLED_gc; }
     static AcWindowState window_state() { return static_cast<AcWindowState>(regs().STATUS >> 6); }
 
     static constexpr AC_t& regs() {
         if constexpr (n == 0) return AC0;
+#if defined(AC2)
         else if constexpr (n == 1) return AC1;
         else return AC2;
+#else
+        else return AC1;
+#endif
     }
 
 private:

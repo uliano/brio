@@ -205,7 +205,13 @@ source ENDED each sleep is read off the counts taken inside the sleep.
 Driver gaps:
 
 - Typed per-input legality of the peripheral instances (today: the
-  enum + the table above); born with its first user.
+  enum + the table above, an input whose peripheral the part has not
+  got at all - `tca1` without TCA1, `zcd` without a ZCD - not named):
+  `zcd` on input 1 or 2 where the package carries only ZCD0 (28/32
+  pins), or on input 2 of the AVR DA48 (ZCD0..1), selects a reserved
+  code and is not refused, because the refusal is a run-time check every
+  image that builds a `LutConfig` at run time would pay; born with its
+  first user.
 
 Implemented but not bench-verified:
 

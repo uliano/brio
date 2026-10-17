@@ -4,8 +4,9 @@
  * The AVR DB analog signal conditioning block (OPAMP, DS40002247B
  * ch. 35) as brio sees it - see docs/avrdx/opamp.md. DB ONLY: the DA
  * family has no such peripheral, so this whole header is gated on the
- * device header's `OPAMP` symbol and `opamp_count` (evsys.hpp) is 0
- * there. Include it anywhere; use it inside `#ifdef OPAMP`.
+ * device header's `OPAMP` symbol and `opamp_count`
+ * (avrdx/device_tables.hpp) is 0 there. Include it anywhere; use it
+ * inside `#ifdef OPAMP`.
  *
  *  RESOURCES - OpampSystem: the block every op amp shares (the one
  *  ENABLE, the TIMEBASE that turns CLK_PER into microseconds for the

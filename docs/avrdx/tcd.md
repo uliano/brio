@@ -4,9 +4,11 @@ Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B (TCD
 chapter 25, PORTMUX 17.5, EVSYS 16 generators 0xB0-0xB3 / users, CLKCTRL
 12.3.5, electricals 39.10.5), errata DS80000915F (2.14.1-2.14.3, 2.5.3,
 2.5.4) and DS80000882C (2.13.1-2.13.3, 2.4.1). Driver: `avrdx/tcd.hpp`
-(`Tcd<0>`, `TcdPwm<route>`), the TCD event vocabulary in
-`avrdx/evsys.hpp`, the PLL in `avrdx/clock.hpp`. Reference test:
-`test_avr_tcd`.
+(`Tcd<0>`, `TcdPwm<route>`; the whole header is gated on the device
+header's `TCD0`, so on a part without the TCD it is includable and
+names nothing), the TCD event vocabulary in `avrdx/evsys.hpp`, the PLL
+in `avrdx/clock.hpp` (gated likewise on its status bit). Reference
+test: `test_avr_tcd`.
 
 ## What the silicon does
 
@@ -158,7 +160,7 @@ B. Two interrupt vectors: TCD0_OVF (once per TCD cycle) and TCD0_TRIG
 | status, flags, interrupts | `take_pwm_activity()` / `clear_pwm_activity()`, `ovf_flag`/`trig_a_flag`/`trig_b_flag`, `clear_ovf`/`clear_trig_a`/`clear_trig_b`/`clear_flags`, `enable_ovf_interrupt`/`enable_trig_a_interrupt`/`enable_trig_b_interrupt`, ISR bodies `ovf()` (TCD0_OVF_vect) and `take_triggers()` (TCD0_TRIG_vect) |
 | events | `input_a_on(channel)` / `input_b_on(channel)` / `input_a_off()` / `input_b_off()`; the types `CmpBClrEvent`, `CmpASetEvent`, `CmpBSetEvent`, `ProgEvent`, `InputA`, `InputB` |
 | readback | `route()`, `claimed_outputs()`, `input_blanking_enabled()`, `output_event_enabled()`, `delay_cycles()`, `fault_control()` |
-| helpers | `tcd_route_exists`, `tcd_pin(route, output)`, `tcd_package_pins`, `tcd_sync_divisor`/`tcd_count_divisor`/`tcd_delay_divisor`, `tcd_sync_hz`/`tcd_counter_hz`, `tcd_cycle_ticks`, `tcd_input_mode_valid`, `tcd_dither_cycle_cost`, `tcd_config_valid`, `tcd_compare_max` |
+| helpers | `tcd_route_exists`, `tcd_pin(route, output)`, `package_pins` (the device tables'), `tcd_sync_divisor`/`tcd_count_divisor`/`tcd_delay_divisor`, `tcd_sync_hz`/`tcd_counter_hz`, `tcd_cycle_ticks`, `tcd_input_mode_valid`, `tcd_dither_cycle_cost`, `tcd_config_valid`, `tcd_compare_max` |
 | `TcdPwm<route>` | `init(clock, TcdPwmConfig)` -> bool, `rebase(hz)` (a ClockUser), `duty(ticks)` -> bool / `duty()`, `max()`, `period_ticks()`, `dead_ticks()`, `counter_hz()`, `cycle_hz()`, `sync()`, `sync_at_end()`, `start()`, `stop()`, `stop_at_end()`, `release()` |
 
 `tcd_config_valid()` is the one place the legality lives: the route

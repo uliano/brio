@@ -79,13 +79,10 @@ static_assert(twi_sdahold_code(TwiSdaHold::off) == 0);
 static_assert(twi_sdahold_code(TwiSdaHold::ns500) == 3);
 static_assert(twi_sdahold_of(twi_sdahold_code(TwiSdaHold::ns50)) == TwiSdaHold::ns50);
 static_assert(twi_sdahold_of(twi_sdahold_code(TwiSdaHold::ns300)) == TwiSdaHold::ns300);
-#if defined(MVIO)
-static_assert(twi_sdahold_code(TwiSdaHold::ns50) == 1);    // DB: straight
-static_assert(twi_sdahold_code(TwiSdaHold::ns300) == 2);
-#else
-static_assert(twi_sdahold_code(TwiSdaHold::ns50) == 2);    // DA: swapped
-static_assert(twi_sdahold_code(TwiSdaHold::ns300) == 1);
-#endif
+// DB: straight; DA: swapped (the die's erratum, device_tables.hpp).
+static_assert(twi_sdahold_code(TwiSdaHold::ns50) == (erratum_da_twi_sdahold_swap ? 2 : 1));
+static_assert(twi_sdahold_code(TwiSdaHold::ns300) == (erratum_da_twi_sdahold_swap ? 1 : 2));
+static_assert(erratum_da_twi_sdahold_swap == (avr_die == AvrDie::avr128da));
 
 // ---- configuration legality ----------------------------------------------
 
@@ -106,8 +103,8 @@ static_assert(!twi_config_valid<0>({.client = true, .address = 0x80}));
 
 #if defined(PORTG)
 // 64 pins: every route of both instances, and every dual pair.
-static_assert(twi_package_pins == 64);
-static_assert(twi_instance_count == 2);
+static_assert(package_pins == 64);
+static_assert(twi_count == 2);
 static_assert(twi_route_exists(1, TwiRoute::alt2));
 static_assert(twi_has_dual(0, TwiRoute::alt1));                       // PC6/PC7
 static_assert(twi_dual_pin(0, TwiRoute::alt2, TwiSignal::scl).pin == 7);
@@ -124,8 +121,8 @@ void use_64() {
 #elif defined(PORTE)
 // 48 pins: TWI1 has all three routes; PB6/PB7 do not exist, so TWI1
 // ALT1/ALT2 have no dual pair here.
-static_assert(twi_package_pins == 48);
-static_assert(twi_instance_count == 2);
+static_assert(package_pins == 48);
+static_assert(twi_count == 2);
 static_assert(twi_route_exists(1, TwiRoute::alt2));
 static_assert(twi_has_dual(0, TwiRoute::alt1));                       // PC6/PC7
 static_assert(twi_has_dual(1, TwiRoute::def));                        // PB2/PB3
@@ -141,8 +138,8 @@ void use_48() {
 #elif defined(TWI1)
 // 32 pins: TWI1 exists with DEFAULT and ALT1 only, and NO route of
 // either instance bonds a dual pair except TWI0 DEFAULT.
-static_assert(twi_package_pins == 32);
-static_assert(twi_instance_count == 2);
+static_assert(package_pins == 32);
+static_assert(twi_count == 2);
 static_assert(twi_route_exists(1, TwiRoute::def));
 static_assert(twi_route_exists(1, TwiRoute::alt1));
 static_assert(!twi_route_exists(1, TwiRoute::alt2));                  // no PB2/PB3
@@ -154,8 +151,8 @@ void use_32() {
 }
 #else
 // 28 pins: TWI0 only, and only its DEFAULT route has a dual pair.
-static_assert(twi_package_pins == 28);
-static_assert(twi_instance_count == 1);
+static_assert(package_pins == 28);
+static_assert(twi_count == 1);
 static_assert(!twi_route_exists(1, TwiRoute::def));
 static_assert(!twi_has_dual(0, TwiRoute::alt1));
 static_assert(!twi_has_dual(0, TwiRoute::alt2));

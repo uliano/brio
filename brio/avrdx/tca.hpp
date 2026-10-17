@@ -69,6 +69,7 @@
 #include <stdint.h>
 #include <avr/io.h>
 
+#include "avrdx/device_tables.hpp"
 #include "avrdx/evsys.hpp"
 #include "avrdx/pin.hpp"
 #include "util/clock.hpp"
@@ -155,8 +156,9 @@ struct TcaConfig {
 /// PORTG and TCA1 -> PORTE/PORTG on 64-pin parts only, no PORTB/
 /// PORTE codes at all on 28/32-pin). TCA1 on PORTC and PORTE are
 /// three-channel routes (WO0..2 on pins 4..6). The one exception to the
-/// header: a DA (no MVIO, pin.hpp) gets 0xFF for TCA1's PORTE and PORTG,
-/// the ALT2/ALT3 that DS80000882C 2.11.1 says do not work.
+/// header: a DA (the die, device_tables.hpp's erratum_da_tca1_alt23)
+/// gets 0xFF for TCA1's PORTE and PORTG, the ALT2/ALT3 that DS80000882C
+/// 2.11.1 says do not work.
 constexpr uint8_t tca_route_code(uint8_t n, char p) {
     // The gates are the PORT instance macros (the route codes are
     // enumerators, not macros): a package routes a TCA to exactly the
@@ -185,8 +187,8 @@ constexpr uint8_t tca_route_code(uint8_t n, char p) {
         case 'B': return PORTMUX_TCA1_PORTB_gc;
         case 'C': return PORTMUX_TCA1_PORTC_gc;
 #ifdef PORTG
-        case 'E': return has_mvio ? static_cast<uint8_t>(PORTMUX_TCA1_PORTE_gc) : 0xFF;
-        case 'G': return has_mvio ? static_cast<uint8_t>(PORTMUX_TCA1_PORTG_gc) : 0xFF;
+        case 'E': return erratum_da_tca1_alt23 ? 0xFF : static_cast<uint8_t>(PORTMUX_TCA1_PORTE_gc);
+        case 'G': return erratum_da_tca1_alt23 ? 0xFF : static_cast<uint8_t>(PORTMUX_TCA1_PORTG_gc);
 #endif
         default: return 0xFF;
     }
@@ -229,11 +231,8 @@ struct TcaFlags {
 
 template <uint8_t n>
 class Tca {
-#ifdef TCA1
-    static_assert(n <= 1, "AVR DA/DB: TCA0 and (48/64-pin parts) TCA1");
-#else
-    static_assert(n == 0, "AVR DA/DB 28/32-pin: TCA0 only");
-#endif
+    static_assert(n < tca_count, "no such TCA on this package (AVR DA/DB: TCA1 on 48/64-pin "
+                                 "parts only)");
 
 public:
     Tca() = delete;
@@ -307,11 +306,7 @@ public:
     }
 
     static void route(char p) {
-#ifdef TCA1
-        constexpr uint8_t mask = n == 0 ? PORTMUX_TCA0_gm : PORTMUX_TCA1_gm;
-#else
-        constexpr uint8_t mask = PORTMUX_TCA0_gm;
-#endif
+        constexpr uint8_t mask = tca_route_gm(n);
         PORTMUX.TCAROUTEA = static_cast<uint8_t>(
             (PORTMUX.TCAROUTEA & ~mask) | tca_route_code(n, p));
     }

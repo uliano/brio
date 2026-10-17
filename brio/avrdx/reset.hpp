@@ -44,6 +44,8 @@
 #include <stdint.h>
 #include <avr/io.h>
 
+#include "avrdx/device_tables.hpp"
+
 namespace brio {
 
 // =============================================================================
@@ -87,12 +89,13 @@ struct Reset {
     /// Clear every flag without reading them.
     static void clear_flags() { RSTCTRL.RSTFR = 0x3F; }
 
-    /// Software reset: a CCP-protected write of SWRST (14.3.2.1.5).
+    /// Software reset: a CCP-protected write of SWRR's one bit
+    /// (14.3.2.1.5; its name is the device tables' software_reset_bm).
     /// The reset sequence starts immediately (tSWR ~150 ns), so the
     /// loop below is only there to make the never-returns promise true
     /// for the compiler.
     [[noreturn]] static void software() {
-        _PROTECTED_WRITE(RSTCTRL.SWRR, RSTCTRL_SWRST_bm);
+        _PROTECTED_WRITE(RSTCTRL.SWRR, software_reset_bm);
         for (;;) {
         }
     }

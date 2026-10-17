@@ -90,6 +90,7 @@
 #include <avr/io.h>
 
 #include "avrdx/delay.hpp"
+#include "avrdx/device_tables.hpp"
 #include "avrdx/evsys.hpp"
 #include "avrdx/pin.hpp"
 #include "avrdx/platform.hpp"
@@ -117,19 +118,8 @@ static_assert(static_cast<uint8_t>(UsartRoute::def) == PORTMUX_USART0_DEFAULT_gv
 /// The name the console call sites use.
 using Route = UsartRoute;
 
-/// The pin count of this package, read off the device header's own
-/// tiers (PORTG and USART5 are 64-pin, USART3 is 48-pin and up, TWI1
-/// is 32-pin and up). It is what distinguishes the four route tables
-/// below; nothing else in brio needs it, so it lives here.
-#if defined(USART5)
-inline constexpr uint8_t usart_package_pins = 64;
-#elif defined(USART3)
-inline constexpr uint8_t usart_package_pins = 48;
-#elif defined(TWI1)
-inline constexpr uint8_t usart_package_pins = 32;
-#else
-inline constexpr uint8_t usart_package_pins = 28;
-#endif
+// The pin count of this package (device_tables.hpp's package_pins) is
+// what distinguishes the four route tables below.
 
 /// The port every USART's four signals live on: one port per instance,
 /// the default route on pins 0..3 and ALT1 on pins 4..7 of it.
@@ -166,10 +156,10 @@ constexpr bool usart_route_exists(uint8_t n, UsartRoute r) {
     if (r == UsartRoute::none || r == UsartRoute::def) return true;
     switch (n) {
         case 0: return true;                              // PA4..PA7 on every package
-        case 1: return usart_package_pins >= 48;          // PC4..PC7: 48 and 64 pins
-        case 2: return usart_package_pins >= 32;          // PF4/PF5: 32 pins and up
+        case 1: return package_pins >= 48;                // PC4..PC7: 48 and 64 pins
+        case 2: return package_pins >= 32;                // PF4/PF5: 32 pins and up
         case 3: return true;                              // PB4/PB5: the instance is 48+ already
-        case 4: return usart_package_pins >= 64;          // PE4..PE7: 64 pins only
+        case 4: return package_pins >= 64;                // PE4..PE7: 64 pins only
         default: return true;                             // USART5 is 64-pin only
     }
 }
@@ -183,7 +173,8 @@ constexpr bool usart_route_exists(uint8_t n, UsartRoute r) {
 ///                                   there; ALT1 has no XCK position on
 ///                                   any package and keeps XDIR on PF3
 ///                                   (AVR DB only - the DA route tables
-///                                   list no XDIR for it)
+///                                   list no XDIR for it: device
+///                                   tables' usart2_alt1_has_xdir)
 ///   USART3 PB0-PB3 / PB4-PB7        48 pins stop at PB5: ALT1 has
 ///                                   TXD/RXD but no XCK/XDIR
 ///   USART4 PE0-PE3 / PE4-PE7        48 pins stop at PE3: no ALT1
@@ -197,25 +188,24 @@ constexpr UsartPin usart_pin(uint8_t n, UsartRoute r, UsartSignal s) {
     const uint8_t pin = static_cast<uint8_t>((r == UsartRoute::alt1 ? 4 : 0) + idx);
     if (r == UsartRoute::def) {
         // PORTF on a 28-pin package bonds PF0, PF1 and PF6 only.
-        if (n == 2 && idx >= 2 && usart_package_pins < 32) return {port, pin, false};
+        if (n == 2 && idx >= 2 && package_pins < 32) return {port, pin, false};
         return {port, pin, true};
     }
     // ALT1
     if (n == 2) {
         if (idx == 2) return {port, pin, false};       // no XCK position in this route
         if (idx == 3) {
-#ifdef MVIO
             // AVR DB: the route table keeps XDIR on PF3, the DEFAULT
-            // route's own pin.
-            return {port, 3, true};
-#else
-            // AVR DA: no XDIR in this route.
-            return {port, pin, false};
-#endif
+            // route's own pin; AVR DA: no XDIR in this route.
+            if constexpr (usart2_alt1_has_xdir) {
+                return {port, 3, true};
+            } else {
+                return {port, pin, false};
+            }
         }
         return {port, pin, true};
     }
-    if (n == 3 && idx >= 2 && usart_package_pins < 64) return {port, pin, false};
+    if (n == 3 && idx >= 2 && package_pins < 64) return {port, pin, false};
     return {port, pin, true};
 }
 
@@ -746,38 +736,27 @@ public:
         else return USART0;
     }
 
-    /// PORTMUX position of this instance's two route bits (the device
-    /// header's own group positions).
-    static constexpr uint8_t route_gp() {
-        if constexpr (n == 0) return PORTMUX_USART0_gp;
-        else if constexpr (n == 1) return PORTMUX_USART1_gp;
-        else if constexpr (n == 2) return PORTMUX_USART2_gp;
-#ifdef USART3
-        else if constexpr (n == 3) return PORTMUX_USART3_gp;
-#endif
-#ifdef USART4
-        else if constexpr (n == 4) return PORTMUX_USART4_gp;
-#endif
-#ifdef USART5
-        else if constexpr (n == 5) return PORTMUX_USART5_gp;
-#endif
-        else return 0;
-    }
+    /// PORTMUX position of this instance's route field (the device
+    /// header's own group position, device_tables.hpp).
+    static constexpr uint8_t route_gp() { return usart_route_gp(n); }
 
-    /// USARTROUTEA holds USART0..3, USARTROUTEB USART4..5 (the second
-    /// register only exists on the packages that have those instances).
+    /// The route register holding this instance's field: USARTROUTEB for
+    /// an instance whose field overlaps a lower instance's in USARTROUTEA
+    /// (device_tables.hpp's usart_route_in_b: USART4..5 on the AVR DA/DB).
+    /// The second register only exists on the parts that need it.
     static volatile uint8_t& route_reg() {
-#ifdef USART4
-        if constexpr (n > 3) return PORTMUX.USARTROUTEB;
+#ifdef PORTMUX_USARTROUTEB
+        if constexpr (usart_route_in_b(n)) return PORTMUX.USARTROUTEB;
         else return PORTMUX.USARTROUTEA;
 #else
+        static_assert(!usart_route_in_b(n), "a route field in a register this part has not got");
         return PORTMUX.USARTROUTEA;
 #endif
     }
 
     static void write_route(UsartRoute r) {
         constexpr uint8_t gp = route_gp();
-        constexpr uint8_t gm = static_cast<uint8_t>(0x03u << gp);
+        constexpr uint8_t gm = usart_route_gm(n);
         volatile uint8_t& reg = route_reg();
         reg = static_cast<uint8_t>((reg & ~gm) |
                                    static_cast<uint8_t>(static_cast<uint8_t>(r) << gp));
@@ -786,7 +765,7 @@ public:
     /// The route bits as they read back.
     static UsartRoute routed() {
         constexpr uint8_t gp = route_gp();
-        constexpr uint8_t gm = static_cast<uint8_t>(0x03u << gp);
+        constexpr uint8_t gm = usart_route_gm(n);
         return static_cast<UsartRoute>((route_reg() & gm) >> gp);
     }
 

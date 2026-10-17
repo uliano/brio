@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include <avr/io.h>
 
+#include "avrdx/device_tables.hpp"
 #include "util/pwm_channel.hpp"
 
 // The AVR DA/DB I/O pins (PORT, DS40002247B ch. 18), register-level:
@@ -69,42 +70,18 @@ struct PinRef {
     constexpr bool valid() const { return port != nullptr; }
 };
 
-/// Whether this package bonds out the port at all: 28/32-pin parts
-/// lack PORTB and PORTE, PORTG exists on 64-pin only (the device
-/// header is the authority, hence the #ifdefs). Port-level only -
-/// a pin missing from an EXISTING port (e.g. PF4 on 28-pin parts)
-/// is the per-family device tables' job. Drivers use this to keep an
-/// instance usable when only one of its pin POSITIONS is absent
-/// (an `if constexpr` on the missing branch), and to refuse a config
-/// that asks for it.
-constexpr bool port_exists(char p) {
-    switch (p) {
-        case 'A': case 'C': case 'D': case 'F': return true;
-#ifdef PORTB
-        case 'B': return true;
-#endif
-#ifdef PORTE
-        case 'E': return true;
-#endif
-#ifdef PORTG
-        case 'G': return true;
-#endif
-        default: return false;
-    }
-}
-
-/// Whether PORTC is the MVIO domain, powered from VDDIO2: the DB's is,
-/// the DA has no MVIO and its PORTC runs from VDD like every other port.
-#ifdef MVIO
-inline constexpr bool has_mvio = true;
-#else
-inline constexpr bool has_mvio = false;
-#endif
+/// Named in a branch only an ABSENT port letter reaches: a call that
+/// survives the optimizer is a compile error (see port_by_letter).
+[[gnu::error("port_by_letter: this port does not exist on this package")]]
+void port_by_letter_absent();
 
 /// The PORT of a letter chosen at RUN time (for drivers whose pin is a
 /// configuration value: a route's port, a comparator's input). Folds
-/// to one address when the letter is a constant; an absent port (by
-/// package) falls back to PORTA - callers validate the letter first.
+/// to one address when the letter is a constant. A CONSTANT letter
+/// naming a port this package has not got is a compile error - the
+/// call to port_by_letter_absent() survives exactly then (a letter the
+/// compiler cannot see is a run-time value the caller has validated:
+/// it falls back to PORTA, as an absent port has no registers to give).
 constexpr volatile PORT_t& port_by_letter(char p) {
     switch (p) {
 #ifdef PORTB
@@ -119,7 +96,9 @@ constexpr volatile PORT_t& port_by_letter(char p) {
 #ifdef PORTG
         case 'G': return PORTG;
 #endif
-        default: return PORTA;
+        default:
+            if (__builtin_constant_p(p) && p != 'A') port_by_letter_absent();
+            return PORTA;
     }
 }
 

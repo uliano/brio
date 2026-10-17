@@ -265,7 +265,7 @@ void ta_routes() {
     quiesce();
 
     // --- the route table this package offers
-    print(serial, "  package = ", tcd_package_pins, " pins; route table:", crlf);
+    print(serial, "  package = ", package_pins, " pins; route table:", crlf);
     verdict("DEFAULT exists and bonds WOA..WOD (PA4..PA7)",
             tcd_route_exists(TcdRoute::def) && tcd_pin(TcdRoute::def, TcdOutput::woa).port == 'A' &&
             tcd_pin(TcdRoute::def, TcdOutput::woa).pin == 4 &&

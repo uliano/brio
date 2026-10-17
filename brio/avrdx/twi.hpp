@@ -69,9 +69,9 @@
  *    spend unstick() on it, stays the application's (design/i2c-bus.md);
  *      * DA 2.14.2 (every DA rev., DA only): the SDAHOLD 50 ns and
  *        300 ns SELECTIONS are swapped in the silicon. TwiSdaHold names
- *        TRUE nanoseconds and twi_sdahold_bits() swaps the encoding on
- *        the DA - the family is told apart by MVIO, which only the DB
- *        has;
+ *        TRUE nanoseconds and twi_sdahold_code() swaps the encoding on
+ *        the DA - the die, device_tables.hpp's
+ *        erratum_da_twi_sdahold_swap;
  *  - the baud arithmetic is the chapter's own three steps (29.3.2.2.1):
  *    equation 29-3, then equation 29-4 for tLOW, then equation 29-5
  *    when that tLOW came out below the mode's floor (4700 / 1300 /
@@ -110,6 +110,7 @@
 #include <avr/io.h>
 
 #include "avrdx/delay.hpp"
+#include "avrdx/device_tables.hpp"
 #include "avrdx/pin.hpp"
 #include "kernel/borrowed.hpp"
 #include "kernel/post.hpp"
@@ -133,25 +134,9 @@ static_assert(static_cast<uint8_t>(TwiRoute::def) == PORTMUX_TWI0_DEFAULT_gv &&
               static_cast<uint8_t>(TwiRoute::alt2) == PORTMUX_TWI0_ALT2_gv,
               "the route codes must be the device header's group values");
 
-/// The pin count of this package, read off the device header's own
-/// tiers (the same ladder spi.hpp/usart.hpp use).
-#if defined(PORTG)
-inline constexpr uint8_t twi_package_pins = 64;
-#elif defined(PORTE)
-inline constexpr uint8_t twi_package_pins = 48;
-#elif defined(TWI1)
-inline constexpr uint8_t twi_package_pins = 32;
-#else
-inline constexpr uint8_t twi_package_pins = 28;
-#endif
-
-/// How many TWI instances this package carries: TWI1 arrives with the
-/// 32-pin step.
-#if defined(TWI1)
-inline constexpr uint8_t twi_instance_count = 2;
-#else
-inline constexpr uint8_t twi_instance_count = 1;
-#endif
+// The package's pin count and its TWI instances are device_tables.hpp's
+// package_pins and twi_count: on the AVR DA/DB, TWI1 arrives with the
+// 32-pin step.
 
 /// The two signals of a route.
 enum class TwiSignal : uint8_t { sda = 0, scl = 1 };
@@ -171,9 +156,9 @@ struct TwiPin {
 ///   TWI0  DEFAULT / ALT1 / ALT2 on every package;
 ///   TWI1  DEFAULT / ALT1 from 32 pins up, ALT2 from 48 pins up.
 constexpr bool twi_route_exists(uint8_t n, TwiRoute r) {
-    if (n >= twi_instance_count) return false;
+    if (n >= twi_count) return false;
     if (n == 0) return true;
-    if (r == TwiRoute::alt2) return twi_package_pins >= 48;   // PB2/PB3
+    if (r == TwiRoute::alt2) return package_pins >= 48;   // PB2/PB3
     return true;                                             // PF2/PF3
 }
 
@@ -206,12 +191,12 @@ constexpr TwiPin twi_dual_pin(uint8_t n, TwiRoute r, TwiSignal s) {
     const uint8_t off = static_cast<uint8_t>(s);
     if (n == 0) {
         if (r == TwiRoute::def) return {'C', static_cast<uint8_t>(2 + off), true};
-        return {'C', static_cast<uint8_t>(6 + off), twi_package_pins >= 48};
+        return {'C', static_cast<uint8_t>(6 + off), package_pins >= 48};
     }
     if (r == TwiRoute::def) {
-        return {'B', static_cast<uint8_t>(2 + off), twi_package_pins >= 48};
+        return {'B', static_cast<uint8_t>(2 + off), package_pins >= 48};
     }
-    return {'B', static_cast<uint8_t>(6 + off), twi_package_pins >= 64};
+    return {'B', static_cast<uint8_t>(6 + off), package_pins >= 64};
 }
 
 /// Does this package bond BOTH dual pins of this route? (What a Dual
@@ -239,16 +224,12 @@ enum class TwiSdaHold : uint8_t { off = 0, ns50 = 1, ns300 = 2, ns500 = 3 };
 
 /// The SDAHOLD field value that really produces this hold time here.
 constexpr uint8_t twi_sdahold_code(TwiSdaHold h) {
-#if defined(MVIO)
-    // DB: the encoding is straight (MVIO is the DB's own peripheral and
-    // the cheapest way to tell the two families apart in the headers).
+    if constexpr (erratum_da_twi_sdahold_swap) {
+        // DA errata 2.14.2: use the 50 ns selection for 300 ns and vice versa.
+        if (h == TwiSdaHold::ns50) return static_cast<uint8_t>(TwiSdaHold::ns300);
+        if (h == TwiSdaHold::ns300) return static_cast<uint8_t>(TwiSdaHold::ns50);
+    }
     return static_cast<uint8_t>(h);
-#else
-    // DA errata 2.14.2: use the 50 ns selection for 300 ns and vice versa.
-    if (h == TwiSdaHold::ns50) return static_cast<uint8_t>(TwiSdaHold::ns300);
-    if (h == TwiSdaHold::ns300) return static_cast<uint8_t>(TwiSdaHold::ns50);
-    return static_cast<uint8_t>(h);
-#endif
 }
 
 /// The hold time a SDAHOLD field value really produces (the inverse of
@@ -481,7 +462,7 @@ struct TwiConfig {
 ///  - an instance that enables neither half has nothing to do.
 template <uint8_t n>
 constexpr bool twi_config_valid(const TwiConfig& c) {
-    if (n >= twi_instance_count) return false;
+    if (n >= twi_count) return false;
     if (!twi_route_exists(n, c.route)) return false;
     if (twi_needs_fm_plus(c.speed) && !c.fm_plus) return false;
     if (c.dual && (!c.client || !twi_has_dual(n, c.route))) return false;
@@ -495,7 +476,7 @@ constexpr bool twi_config_valid(const TwiConfig& c) {
 template <uint8_t n>
 class Twi {
     static_assert(n <= 1, "AVR DA/DB carry TWI0 and TWI1");
-    static_assert(n < twi_instance_count,
+    static_assert(n < twi_count,
                   "this package does not carry this TWI instance (TWI1 arrives "
                   "with the 32-pin step)");
 
@@ -993,19 +974,13 @@ public:
 #endif
     }
 
-    /// PORTMUX position of this instance's two route bits.
-    static constexpr uint8_t route_gp() {
-#if defined(TWI1)
-        if constexpr (n == 0) return PORTMUX_TWI0_gp;
-        else return PORTMUX_TWI1_gp;
-#else
-        return PORTMUX_TWI0_gp;
-#endif
-    }
+    /// PORTMUX position of this instance's route field (the device
+    /// header's own group position, device_tables.hpp).
+    static constexpr uint8_t route_gp() { return twi_route_gp(n); }
 
     static void write_route(TwiRoute r) {
         constexpr uint8_t gp = route_gp();
-        constexpr uint8_t gm = static_cast<uint8_t>(0x03u << gp);
+        constexpr uint8_t gm = twi_route_gm(n);
         PORTMUX.TWIROUTEA = static_cast<uint8_t>(
             (PORTMUX.TWIROUTEA & ~gm) | static_cast<uint8_t>(static_cast<uint8_t>(r) << gp));
     }
@@ -1013,7 +988,7 @@ public:
     /// The route bits as they read back.
     static TwiRoute routed() {
         constexpr uint8_t gp = route_gp();
-        constexpr uint8_t gm = static_cast<uint8_t>(0x03u << gp);
+        constexpr uint8_t gm = twi_route_gm(n);
         return static_cast<TwiRoute>((PORTMUX.TWIROUTEA & gm) >> gp);
     }
 

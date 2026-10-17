@@ -1,7 +1,7 @@
 // OPAMP family smoke TU. The peripheral is DB-ONLY: on the DA parts
 // avrdx/opamp.hpp must still be INCLUDABLE and compile to nothing, and
-// `opamp_count` (evsys.hpp, which every target header pulls in) must
-// read 0 there. On DB it is 2 op amps at 28/32 pins and 3 at 48/64 -
+// `opamp_count` (avrdx/device_tables.hpp, which every target header
+// pulls in) must read 0 there. On DB it is 2 op amps at 28/32 pins and 3 at 48/64 -
 // the device header is the authority, and the detection is a `requires`
 // on the OP2 registers rather than a device-name list.
 #include "avrdx/clock.hpp"

@@ -264,8 +264,8 @@ constexpr uint16_t scratch_page_window = 44;   ///< m: the data-space window (DA
 
 /// The DA family's errata carry the data-space window's protection bug
 /// (DS80000882C 2.7.1); the DB's (DS80000915F) have no such item. The
-/// stratum tells the two families apart by XOSCHF (clock.hpp).
-constexpr bool window_erratum = !has_xoschf;
+/// die decides it (avrdx/device_tables.hpp).
+constexpr bool window_erratum = erratum_da_window;
 
 uint32_t scratch_page(uint16_t index) {
     return Nvm::scratch_region().begin +

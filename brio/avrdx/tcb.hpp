@@ -70,6 +70,7 @@
 #include <avr/io.h>
 #include <type_traits>
 
+#include "avrdx/device_tables.hpp"
 #include "avrdx/evsys.hpp"
 #include "avrdx/pin.hpp"
 #include "util/clock.hpp"
@@ -144,13 +145,8 @@ constexpr uint32_t tcb_ticks_for_us(uint32_t tick_hz, uint32_t us) {
 
 template <uint8_t n>
 class Tcb {
-#if defined(TCB4)
-    static_assert(n <= 4, "AVR DA/DB 64-pin: TCB0..TCB4");
-#elif defined(TCB3)
-    static_assert(n <= 3, "AVR DA/DB 48-pin: TCB0..TCB3 (TCB4 on 64 pins only)");
-#else
-    static_assert(n <= 2, "AVR DA/DB 28/32-pin: TCB0..TCB2");
-#endif
+    static_assert(n < tcb_count, "no such TCB on this package (AVR DA/DB: TCB0..TCB2 on "
+                                 "28/32 pins, TCB3 from 48 pins, TCB4 on 64 pins only)");
 
 public:
     Tcb() = delete;

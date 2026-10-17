@@ -33,7 +33,7 @@ static_assert(!usart_pin(2, UsartRoute::alt1, UsartSignal::xck).bonded);
 #if defined(USART5)
 // 64 pins: everything exists, ALT1 included.
 static_assert(usart_count == 6);
-static_assert(usart_package_pins == 64);
+static_assert(package_pins == 64);
 static_assert(usart_route_exists(5, UsartRoute::alt1));
 static_assert(usart_pin(5, UsartRoute::alt1, UsartSignal::txd).port == 'G');
 static_assert(usart_pin(3, UsartRoute::alt1, UsartSignal::xck).bonded);   // PB6
@@ -41,7 +41,7 @@ static_assert(usart_pin(4, UsartRoute::alt1, UsartSignal::txd).bonded);   // PE4
 #elif defined(USART3)
 // 48 pins: USART0..4; PORTB stops at PB5 and PORTE at PE3.
 static_assert(usart_count == 5);
-static_assert(usart_package_pins == 48);
+static_assert(package_pins == 48);
 static_assert(usart_route_exists(3, UsartRoute::alt1));                   // PB4/PB5
 static_assert(!usart_pin(3, UsartRoute::alt1, UsartSignal::xck).bonded);  // no PB6
 static_assert(!usart_pin(3, UsartRoute::alt1, UsartSignal::xdir).bonded); // no PB7
@@ -52,11 +52,11 @@ static_assert(usart_pin(4, UsartRoute::def, UsartSignal::xdir).bonded);   // PE3
 static_assert(usart_count == 3);
 static_assert(!usart_route_exists(1, UsartRoute::alt1));
 #if defined(TWI1)
-static_assert(usart_package_pins == 32);
+static_assert(package_pins == 32);
 static_assert(usart_route_exists(2, UsartRoute::alt1));                   // PF4/PF5
 static_assert(usart_pin(2, UsartRoute::def, UsartSignal::xck).bonded);    // PF2
 #else
-static_assert(usart_package_pins == 28);
+static_assert(package_pins == 28);
 static_assert(!usart_route_exists(2, UsartRoute::alt1));                  // no PF4/PF5
 static_assert(!usart_pin(2, UsartRoute::def, UsartSignal::xck).bonded);   // no PF2
 #endif

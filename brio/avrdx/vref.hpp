@@ -25,6 +25,7 @@
 #include <stdint.h>
 #include <avr/io.h>
 
+#include "avrdx/device_tables.hpp"
 #include "util/analog.hpp"
 
 namespace brio {
@@ -51,7 +52,11 @@ constexpr uint16_t ref_mv(Ref r, uint16_t known_mv = 0) {
 struct Vref {
     Vref() = delete;
 
+#if defined(VREF_ADC0REF)
+    /// The ADC's reference, where the VREF block chooses it (device
+    /// tables' has_vref_adc0ref).
     static void adc0(Ref r, bool always_on = false) { VREF.ADC0REF = bits(r, always_on); }
+#endif
     static void dac0(Ref r, bool always_on = false) { VREF.DAC0REF = bits(r, always_on); }
     static void ac(Ref r, bool always_on = false) { VREF.ACREF = bits(r, always_on); }
 

@@ -107,6 +107,7 @@
 #include <avr/io.h>
 
 #include "avrdx/delay.hpp"
+#include "avrdx/device_tables.hpp"
 #include "avrdx/evsys.hpp"
 #include "avrdx/pin.hpp"
 #include "avrdx/platform.hpp"
@@ -131,20 +132,8 @@ static_assert(static_cast<uint8_t>(SpiRoute::def) == PORTMUX_SPI0_DEFAULT_gv &&
               static_cast<uint8_t>(SpiRoute::none) == PORTMUX_SPI0_NONE_gv,
               "the route codes must be the device header's group values");
 
-/// The pin count of this package, read off the device header's own
-/// tiers (PORTG is 64-pin, PORTB/PORTE are 32-pin and up... on this
-/// family PORTB and PORTE appear together at 48 pins, and TWI1 marks
-/// the 32-pin step). Only the >= 48 and >= 64 steps change an SPI route
-/// table; the smaller ones are kept for the doc's sake.
-#if defined(PORTG)
-inline constexpr uint8_t spi_package_pins = 64;
-#elif defined(PORTE)
-inline constexpr uint8_t spi_package_pins = 48;
-#elif defined(TWI1)
-inline constexpr uint8_t spi_package_pins = 32;
-#else
-inline constexpr uint8_t spi_package_pins = 28;
-#endif
+// The pin count of this package is device_tables.hpp's package_pins:
+// only its >= 48 and >= 64 steps change an SPI route table.
 
 /// The four signals of a route (28.2.2), in pin order.
 enum class SpiSignal : uint8_t { mosi = 0, miso = 1, sck = 2, ss = 3 };
@@ -191,26 +180,26 @@ constexpr uint8_t spi_first_pin(uint8_t n, SpiRoute r) {
 /// mode, the SCK event generator are all live). The rest is the device
 /// header's route enum, plus the erratum that beats it.
 constexpr bool spi_route_exists(uint8_t n, SpiRoute r) {
-    if (n > 1) return false;
+    if (n >= spi_count) return false;
     if (r == SpiRoute::none) return true;
     if (r == SpiRoute::def) return true;                  // both instances, every package
-    if (r == SpiRoute::alt1) return spi_package_pins >= 48;
+    if (r == SpiRoute::alt1) return package_pins >= 48;
     // ALT2: SPI0 on PORTG (64-pin only); SPI1 on PORTB - listed by the
     // 48-pin headers without SCK/SS and declared non-functional there
     // by DB errata 2.11.1, so 64 pins for both.
-    if (spi_package_pins < 64) return false;
+    if (package_pins < 64) return false;
     return port_exists(spi_port_letter(n, r));
 }
 
 /// The position of one signal of one route on THIS package.
 constexpr SpiPin spi_pin(uint8_t n, SpiRoute r, SpiSignal s) {
-    if (n > 1 || r == SpiRoute::none) return {};
+    if (n >= spi_count || r == SpiRoute::none) return {};
     const char port = spi_port_letter(n, r);
     if (port == '?' || !port_exists(port)) return {};
     const uint8_t pin = static_cast<uint8_t>(spi_first_pin(n, r) + static_cast<uint8_t>(s));
     // SPI1 ALT2 on a 48-pin package stops at PB5: the route as a whole
     // is refused above, but the table stays honest about why.
-    if (n == 1 && r == SpiRoute::alt2 && spi_package_pins < 64 &&
+    if (n == 1 && r == SpiRoute::alt2 && package_pins < 64 &&
         static_cast<uint8_t>(s) >= 2) {
         return {port, pin, false};
     }
@@ -343,7 +332,7 @@ struct SpiConfig {
 ///    pinless client to be clocked by.
 template <uint8_t n>
 constexpr bool spi_config_valid(const SpiConfig& c) {
-    if (n > 1) return false;
+    if (n >= spi_count) return false;
     if (!spi_route_exists(n, c.route)) return false;
     const bool pinless = c.route == SpiRoute::none;
     if (c.role == SpiRole::host) {
@@ -366,7 +355,8 @@ constexpr bool spi_config_valid(const SpiConfig& c) {
 
 template <uint8_t n>
 class Spi {
-    static_assert(n <= 1, "AVR DA/DB carry SPI0 and SPI1 on every package");
+    static_assert(n < spi_count, "no such SPI on this part (the AVR DA/DB carry SPI0 and "
+                                 "SPI1 on every package)");
 
 public:
     Spi() = delete;
@@ -667,19 +657,21 @@ public:
     // ---- registers and pins ----------------------------------------------
 
     static constexpr SPI_t& regs() {
+#if defined(SPI1)
         if constexpr (n == 0) return SPI0;
         else return SPI1;
+#else
+        return SPI0;
+#endif
     }
 
-    /// PORTMUX position of this instance's two route bits.
-    static constexpr uint8_t route_gp() {
-        if constexpr (n == 0) return PORTMUX_SPI0_gp;
-        else return PORTMUX_SPI1_gp;
-    }
+    /// PORTMUX position of this instance's route field (the device
+    /// header's own group position, device_tables.hpp).
+    static constexpr uint8_t route_gp() { return spi_route_gp(n); }
 
     static void write_route(SpiRoute r) {
         constexpr uint8_t gp = route_gp();
-        constexpr uint8_t gm = static_cast<uint8_t>(0x03u << gp);
+        constexpr uint8_t gm = spi_route_gm(n);
         PORTMUX.SPIROUTEA = static_cast<uint8_t>(
             (PORTMUX.SPIROUTEA & ~gm) | static_cast<uint8_t>(static_cast<uint8_t>(r) << gp));
     }
@@ -687,7 +679,7 @@ public:
     /// The route bits as they read back.
     static SpiRoute routed() {
         constexpr uint8_t gp = route_gp();
-        constexpr uint8_t gm = static_cast<uint8_t>(0x03u << gp);
+        constexpr uint8_t gm = spi_route_gm(n);
         return static_cast<SpiRoute>((PORTMUX.SPIROUTEA & gm) >> gp);
     }
 

@@ -293,8 +293,9 @@ driver is made and WHAT it produces upward, not what the peripheral is.
   suite and a family's compile check both build.
 - **Board facts vs device facts.** Which timer reaches which port,
   which USART sits on which pins per route, are facts of the DEVICE:
-  on the AVR tables inside `tca.hpp`, `usart.hpp`, on the two ARMv6-M
-  strata the RESERVE (`samc21/device_tables.hpp`,
+  on the AVR tables inside `tca.hpp`, `usart.hpp` over the stratum's
+  reserve (`avrdx/device_tables.hpp`), on the two ARMv6-M strata the
+  RESERVE itself (`samc21/device_tables.hpp`,
   `stm32g0/device_tables.hpp` - the one file where the preprocessor
   may probe a vendor macro, exporting what it finds as constexpr
   data). Which timer drives which LEDs, which pins are buttons, which

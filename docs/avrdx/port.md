@@ -71,6 +71,7 @@ Facts that matter to code:
 | `Pin<'A', 5>` | `output`/`input(pull)`, `set`/`clear`/`toggle`/`read`/`is_output` (VPORT, single cycle), `configure(cfg)` (the whole PINnCTRL in ONE store), the single-field RMW verbs `invert`/`pull`/`sense`, `input_enable(bool)` (the digital input buffer - a code of the ISC field, so it leaves an armed sense at INTDISABLE), `flag`/`clear_flag` (this pin's W1C bit), `pinctrl()`, `ref()` (runtime PinRef), `fully_async` (Px2/Px6), PwmChannel (max 1) |
 | `Port<'C'>` | the port's own registers: `in`/`dir_set`/`dir_clear`/`out_set`/`out_clear`/`out_toggle` (masks), `flags`/`clear_flags(mask)`, `take_flags` (ISR body of PORTx_PORT_vect: the fired mask, cleared), `slew_limit(bool)`/`slew_limit()`, `configure_mask(pins, cfg)` (the multi-pin engine), `regs()`/`vregs()` |
 | `PinSet<Pins...>` | up to 8 pins on ANY ports as one bit mask: `input(pull)`, `output`, `read`, `write`, `configure(cfg)` (grouped BY PORT at compile time: one mirrored PINCONFIG store plus one PINCTRLUPD per involved port - the set behaves like a single register), `port_mask<'C'>()` |
+| `port_by_letter(c)`, `pinctrl_of(c, n)`, `port_exists(c)` | a port named by a letter that is a configuration VALUE (a route's port, a comparator's input): the PORT (or one PINnCTRL), folded to one address when the letter is a constant; a constant letter naming a port this package has not got is a compile error wherever the call is optimized (every release image and the family fixtures; in a build that inlines nothing, the debug one, the letter is not seen as a constant and an absent one falls back to PORTA, the run-time path of a letter the caller has validated); `port_exists` is the device tables' question the drivers ask first |
 | `PinRef` | the runtime descriptor (3 bytes): a pin inside a request event; `set`/`clear` are ONE store into the PORT's `OUTSET`/`OUTCLR` through the pointer (1 cycle; atomic against an ISR that moves another pin of the same port, where a read-modify-write of `OUT` would write that pin back), `valid()`; null = no-op |
 
 ## How to use it
@@ -142,7 +143,9 @@ exception.
 Driver gaps:
 
 - Pin-level bonding within an existing port (which Pxn THIS package
-  bonds) - deferred to the family device tables, as everywhere.
+  bonds) - the reserve (`avrdx/device_tables.hpp`) knows the package's
+  pin count but carries no per-pin mask yet; born with the first
+  package where only the pin count tells two pin sets apart.
 
 Implemented but not bench-verified:
 

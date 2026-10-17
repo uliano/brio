@@ -106,6 +106,7 @@
 #include <stdint.h>
 #include <avr/io.h>
 
+#include "avrdx/device_tables.hpp"
 #include "util/power.hpp"
 
 namespace brio {
@@ -174,6 +175,10 @@ struct Sleep {
     }
 };
 
+// The regulator's sleep control exists only where SLPCTRL has VREGCTRL
+// (device tables' has_vreg): elsewhere Vreg and VregPower are not named.
+#if defined(SLPCTRL_PMODE_gm)
+
 /// SLPCTRL.VREGCTRL.PMODE (13.5.2): what the internal voltage regulator
 /// does while the device sleeps. The data sheet calls the two settings
 /// "Normal" (AUTO: low-power mode in standby and power-down, and
@@ -241,6 +246,8 @@ private:
 
     static bool ccl_enabled() { return (CCL.CTRLA & CCL_ENABLE_bm) != 0; }
 };
+
+#endif // SLPCTRL_PMODE_gm
 
 /**
  * The SleepSite of this target: the depth ladder of util/power.hpp

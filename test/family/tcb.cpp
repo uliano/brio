@@ -41,7 +41,7 @@ void tcb_common() {
     (void)EvTcbCapt<2>::code;
     // the freshly filled EVSYS vocabulary instantiates everywhere
     (void)EvUpdiSynch::code;
-    (void)EvZcdOut<2>::code;
+    (void)EvZcdOut<zcd_count - 1>::code;     // the last ZCD of THIS package
     (void)EvUsartXck<0>::code;
     (void)EvSpiSck<1>::code;
     EvUsartIrda<0>::listen(EventChannel<0>{});

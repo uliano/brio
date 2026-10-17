@@ -63,7 +63,7 @@ static_assert(spi_config_valid<0>({.role = SpiRole::client, .buffer_mode = true,
 
 #if defined(PORTG)
 // 64 pins: every route of both instances, ALT2 included.
-static_assert(spi_package_pins == 64);
+static_assert(package_pins == 64);
 static_assert(spi_route_exists(0, SpiRoute::alt1));
 static_assert(spi_route_exists(0, SpiRoute::alt2));
 static_assert(spi_route_exists(1, SpiRoute::alt1));
@@ -82,7 +82,7 @@ void use_64() {
 // 48 pins: ALT1 on both instances; SPI0 ALT2 (PORTG) does not exist and
 // SPI1 ALT2 is refused - the header bonds PB4/PB5 only and DB errata
 // 2.11.1 declares the position non-functional.
-static_assert(spi_package_pins == 48);
+static_assert(package_pins == 48);
 static_assert(spi_route_exists(0, SpiRoute::alt1));
 static_assert(!spi_route_exists(0, SpiRoute::alt2));
 static_assert(spi_route_exists(1, SpiRoute::alt1));
@@ -100,7 +100,7 @@ void use_48() {
 }
 #else
 // 28/32 pins: DEFAULT and NONE only, for both instances.
-static_assert(spi_package_pins <= 32);
+static_assert(package_pins <= 32);
 static_assert(!spi_route_exists(0, SpiRoute::alt1));
 static_assert(!spi_route_exists(0, SpiRoute::alt2));
 static_assert(!spi_route_exists(1, SpiRoute::alt1));

@@ -130,7 +130,7 @@ in standby sleep, with its enable behaviour unchanged.
 | `OpampPga<Op>` | `init(wiper, source, settle_us, out, mode)`, `set(wiper)`, `gain()`/`gain_of(w)`, `for_gain(num, den)` -> `optional<OpampWiper>`, `settled`/`wait_settled`, `release` |
 | `OpampInvertingPga<Op>` | `init(wiper, source as an OpampBot, settle_us, out, mode)`, `set`, `gain`/`gain_of`/`for_gain`, `settled`/`wait_settled`, `release` |
 | `InstrumentationAmp<Op0, Op1, Op2>` | `init(gain, v2_source, v1_source, settle_us, observe_stages)`, `set(gain)`, `gain()`/`gain_of(g)`, `settled`/`wait_settled`, `release` - the type needs OP2 |
-| helpers | `opamp_count` (evsys.hpp), `opamp_ladder_r1/r2(w)`, `opamp_noninverting_gain(w)`, `opamp_inverting_gain(w)`, `opamp_gain_x1000(g)`, `opamp_noninverting_wiper(num, den)`, `opamp_inverting_wiper(num, den)`, `opamp_inp_pin/out_pin/inn_pin(n)`, `opamp_config_valid(n, cfg)`, `opamp_timebase(hz)`, `opamp_timebase_ns(hz)`, `instrumentation_gain(g)`, `instrumentation_wiper_op0/op2(g)` |
+| helpers | `opamp_count` (device_tables.hpp), `opamp_ladder_r1/r2(w)`, `opamp_noninverting_gain(w)`, `opamp_inverting_gain(w)`, `opamp_gain_x1000(g)`, `opamp_noninverting_wiper(num, den)`, `opamp_inverting_wiper(num, den)`, `opamp_inp_pin/out_pin/inn_pin(n)`, `opamp_config_valid(n, cfg)`, `opamp_timebase(hz)`, `opamp_timebase_ns(hz)`, `instrumentation_gain(g)`, `instrumentation_wiper_op0/op2(g)` |
 
 What `opamp_config_valid` refuses, at compile time in `init<cfg>()`
 and at run time in `init(cfg)`: an instance this package does not have,

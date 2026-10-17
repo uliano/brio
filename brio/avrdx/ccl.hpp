@@ -59,6 +59,7 @@
 #include <stdint.h>
 #include <avr/io.h>
 
+#include "avrdx/device_tables.hpp"
 #include "avrdx/evsys.hpp"
 #include "avrdx/pin.hpp"
 
@@ -68,22 +69,76 @@ namespace brio {
 
 /// INSELx: one of the three inputs of a LUT. The instance the
 /// peripheral entries mean depends on WHICH input (0/1/2) they sit on.
+/// The codes are the device header's INSEL0 enumerators, and the static
+/// assertions below check that the same code means the same kind on
+/// INSEL1 and INSEL2. An input whose peripheral this part has not got
+/// is not named at all: `tca1` without TCA1 (the 28/32-pin parts),
+/// `zcd` without a ZCD, `tcd0` without the TCD.
 enum class LutInput : uint8_t {
-    mask = 0x0,        ///< tied low
-    feedback = 0x1,    ///< the pair's sequencer output
-    link = 0x2,        ///< LUT[n+1] output (the last LUT takes LUT0)
-    event_a = 0x3,     ///< EVSYS user LUTnA
-    event_b = 0x4,     ///< EVSYS user LUTnB
-    pin = 0x5,         ///< the LUT's own pin INx
-    ac = 0x6,          ///< ACx OUT (x = input index)
-    zcd = 0x7,         ///< ZCDx OUT
-    usart_txd = 0x8,   ///< USARTx TXD (host modes)
-    spi0 = 0x9,        ///< SPI0 MOSI (inputs 0/1), SCK (input 2); host mode
-    tca0 = 0xA,        ///< TCA0 WOx
-    tca1 = 0xB,        ///< TCA1 WOx
-    tcb = 0xC,         ///< TCBx WO
-    tcd0 = 0xD,        ///< TCD0 WOA/WOB/WOC
+    mask = CCL_INSEL0_MASK_gc,             ///< tied low
+    feedback = CCL_INSEL0_FEEDBACK_gc,     ///< the pair's sequencer output
+    link = CCL_INSEL0_LINK_gc,             ///< LUT[n+1] output (the last LUT takes LUT0)
+    event_a = CCL_INSEL0_EVENTA_gc,        ///< EVSYS user LUTnA
+    event_b = CCL_INSEL0_EVENTB_gc,        ///< EVSYS user LUTnB
+    pin = CCL_INSEL0_IN0_gc,               ///< the LUT's own pin INx
+    ac = CCL_INSEL0_AC0_gc,                ///< ACx OUT (x = input index)
+#ifdef ZCD0
+    zcd = CCL_INSEL0_ZCD0_gc,              ///< ZCDx OUT
+#endif
+    usart_txd = CCL_INSEL0_USART0_gc,      ///< USARTx TXD (host modes)
+    spi0 = CCL_INSEL0_SPI0_gc,             ///< SPI0 MOSI (inputs 0/1), SCK (input 2); host mode
+    tca0 = CCL_INSEL0_TCA0_gc,             ///< TCA0 WOx
+#ifdef TCA1
+    tca1 = CCL_INSEL0_TCA1_gc,             ///< TCA1 WOx
+#endif
+    tcb = CCL_INSEL0_TCB0_gc,              ///< TCBx WO
+#ifdef TCD0
+    tcd0 = CCL_INSEL0_TCD0_gc,             ///< TCD0 WOA/WOB/WOC
+#endif
 };
+
+/// One code per kind serves the three inputs (INSEL1 four bits up in
+/// CTRLB, INSEL2 in CTRLC): checked kind by kind against the header,
+/// for every instance-indexed kind whose instance on that input exists.
+constexpr bool ccl_insel_same(uint8_t in0, uint8_t in1, uint8_t in2) {
+    return in1 == static_cast<uint8_t>(in0 << 4) && in2 == in0;
+}
+static_assert(ccl_insel_same(CCL_INSEL0_MASK_gc, CCL_INSEL1_MASK_gc, CCL_INSEL2_MASK_gc) &&
+              ccl_insel_same(CCL_INSEL0_FEEDBACK_gc, CCL_INSEL1_FEEDBACK_gc, CCL_INSEL2_FEEDBACK_gc) &&
+              ccl_insel_same(CCL_INSEL0_LINK_gc, CCL_INSEL1_LINK_gc, CCL_INSEL2_LINK_gc) &&
+              ccl_insel_same(CCL_INSEL0_EVENTA_gc, CCL_INSEL1_EVENTA_gc, CCL_INSEL2_EVENTA_gc) &&
+              ccl_insel_same(CCL_INSEL0_EVENTB_gc, CCL_INSEL1_EVENTB_gc, CCL_INSEL2_EVENTB_gc) &&
+              ccl_insel_same(CCL_INSEL0_IN0_gc, CCL_INSEL1_IN1_gc, CCL_INSEL2_IN2_gc) &&
+              ccl_insel_same(CCL_INSEL0_USART0_gc, CCL_INSEL1_USART1_gc, CCL_INSEL2_USART2_gc) &&
+              ccl_insel_same(CCL_INSEL0_SPI0_gc, CCL_INSEL1_SPI0_gc, CCL_INSEL2_SPI0_gc) &&
+              ccl_insel_same(CCL_INSEL0_TCA0_gc, CCL_INSEL1_TCA0_gc, CCL_INSEL2_TCA0_gc) &&
+              ccl_insel_same(CCL_INSEL0_TCB0_gc, CCL_INSEL1_TCB1_gc, CCL_INSEL2_TCB2_gc),
+              "LutInput: a kind's INSEL code differs between the three inputs on this part");
+static_assert(static_cast<uint8_t>(CCL_INSEL1_AC1_gc) == static_cast<uint8_t>(CCL_INSEL0_AC0_gc << 4),
+              "LutInput::ac: the AC code differs between inputs 0 and 1 on this part");
+#ifdef AC2
+static_assert(static_cast<uint8_t>(CCL_INSEL2_AC2_gc) == static_cast<uint8_t>(CCL_INSEL0_AC0_gc),
+              "LutInput::ac: the AC code differs between inputs 0 and 2 on this part");
+#else
+static_assert(false, "LutInput::ac means ACx on input x, and this part has no AC2: what its "
+                     "INSEL2 AC code selects is not this driver's vocabulary");
+#endif
+#ifdef ZCD1
+static_assert(static_cast<uint8_t>(CCL_INSEL1_ZCD1_gc) == static_cast<uint8_t>(CCL_INSEL0_ZCD0_gc << 4),
+              "LutInput::zcd: the ZCD code differs between inputs 0 and 1 on this part");
+#endif
+#ifdef ZCD2
+static_assert(static_cast<uint8_t>(CCL_INSEL2_ZCD2_gc) == static_cast<uint8_t>(CCL_INSEL0_ZCD0_gc),
+              "LutInput::zcd: the ZCD code differs between inputs 0 and 2 on this part");
+#endif
+#ifdef TCA1
+static_assert(ccl_insel_same(CCL_INSEL0_TCA1_gc, CCL_INSEL1_TCA1_gc, CCL_INSEL2_TCA1_gc),
+              "LutInput::tca1: the TCA1 code differs between the three inputs on this part");
+#endif
+#ifdef TCD0
+static_assert(ccl_insel_same(CCL_INSEL0_TCD0_gc, CCL_INSEL1_TCD0_gc, CCL_INSEL2_TCD0_gc),
+              "LutInput::tcd0: the TCD0 code differs between the three inputs on this part");
+#endif
 
 enum class LutFilter : uint8_t {
     none = CCL_FILTSEL_DISABLE_gc,

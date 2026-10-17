@@ -66,6 +66,7 @@
 #include <stdint.h>
 #include <avr/io.h>
 
+#include "avrdx/device_tables.hpp"
 #include "util/clock.hpp"
 
 namespace brio {
@@ -125,7 +126,10 @@ inline bool extclk_seen(uint32_t spins) {
 
 // ---- OSCHF ------------------------------------------------------------------
 
-/// OSCHF FRQSEL code for a rate it can produce, 0xFF otherwise.
+#if defined(CLKCTRL_FRQSEL_gm)
+/// OSCHF FRQSEL code for a rate it can produce, 0xFF otherwise. Only
+/// where OSCHF's rate is a register field (device tables'
+/// has_oschf_frqsel); where a fuse chooses it there is no such table.
 constexpr uint8_t oschf_frqsel(uint32_t hz) {
     switch (hz) {
     case 1'000'000: return CLKCTRL_FRQSEL_1M_gc;
@@ -140,11 +144,13 @@ constexpr uint8_t oschf_frqsel(uint32_t hz) {
     default: return 0xFF;
     }
 }
+#endif // CLKCTRL_FRQSEL_gm
 
 /// The internal high-frequency oscillator.
 struct Oschf {
     Oschf() = delete;
 
+#if defined(CLKCTRL_FRQSEL_gm)
     /// Set the output frequency (one oschf_frqsel() can produce); keeps
     /// the RUNSTDBY and AUTOTUNE bits. Takes effect immediately, also
     /// while OSCHF is the main clock. False, touching nothing, for a
@@ -158,6 +164,7 @@ struct Oschf {
         _PROTECTED_WRITE(CLKCTRL.OSCHFCTRLA, static_cast<uint8_t>(sel | keep));
         return true;
     }
+#endif
     static void run_standby(bool on) { flag(CLKCTRL_RUNSTDBY_bm, on); }
 
     /// Auto-tune the frequency against a running 32.768 kHz crystal
@@ -271,14 +278,8 @@ struct Xosc32k {
 
 // ---- XOSCHF -----------------------------------------------------------------
 
-/// Whether this part has the high-frequency crystal oscillator: the DB
-/// does, the DA takes an external CLOCK on PA0 and no crystal - so a
-/// program choosing its HF source asks this, never the device header.
-#if defined(CLKCTRL_XOSCHFCTRLA)
-inline constexpr bool has_xoschf = true;
-#else
-inline constexpr bool has_xoschf = false;
-#endif
+// Whether this part has the crystal oscillator is device_tables.hpp's
+// has_xoschf: a program choosing its HF source asks that value.
 
 #if defined(CLKCTRL_XOSCHFCTRLA)
 enum class XoschfStartup : uint8_t { cycles256 = 0, cycles1k = 1, cycles4k = 2 };
@@ -326,6 +327,9 @@ struct Xoschf {
 #endif
 
 // ---- PLL --------------------------------------------------------------------
+// Only where the part has one (its status bit is the block, device
+// tables' has_pll); without it, Pll and its vocabulary do not exist.
+#if defined(CLKCTRL_PLLS_bm)
 
 enum class PllSource : uint8_t { oschf = 0, xoschf = 1 };
 enum class PllMultiplier : uint8_t {
@@ -391,6 +395,7 @@ constexpr uint32_t pll_output_hz(uint32_t in_hz, PllMultiplier mul) {
                        : mul == PllMultiplier::x3 ? in_hz * 3u : 0u;
     return out > 48'000'000u ? 0u : out;
 }
+#endif // CLKCTRL_PLLS_bm
 
 // ---- main clock -------------------------------------------------------------
 

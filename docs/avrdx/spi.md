@@ -90,7 +90,7 @@ RUNSTDBY control of its own.
 
 | Entity | What it is |
 |--------|------------|
-| `SpiRoute`, `SpiSignal`, `SpiPin` | the route vocabulary; `spi_route_exists`, `spi_pin`, `spi_package_pins` are the per-package table |
+| `SpiRoute`, `SpiSignal`, `SpiPin` | the route vocabulary; `spi_route_exists`, `spi_pin` and the device tables' `package_pins` are the per-package table |
 | `SpiRole`, `SpiMode`, `SpiClock` | host/client, the four transfer modes (with `spi_cpol`/`spi_cpha`), the seven divisions |
 | `spi_division`, `spi_sck_hz`, `spi_presc_bits`, `spi_clock_of` | the rate arithmetic, both directions |
 | `spi_clock_for(clk_per, max_sck)` | the chooser: the fastest division that does not exceed a device's limit |

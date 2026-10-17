@@ -89,20 +89,20 @@ worked around with a raw register write.
 | `EvRtcOvf`, `EvRtcCmp` | RTC overflow / compare match, all channels |
 | `EvPin<Pin>` | the pin's level; legal on the port pair's two channels |
 | `EvAdc0Ready` | ADC0 result ready, all channels |
-| `EvTcaOvf<n>`, `EvTcaHunf<n>`, `EvTcaCmp<n, ch>` | TCA overflow / high-byte underflow / compare match, all channels |
+| `EvTcaOvf<n>`, `EvTcaHunf<n>`, `EvTcaCmp<n, ch>` | TCA overflow / high-byte underflow / compare match, all channels; n gated by the package's TCA count (TCA1 on 48/64-pin) |
 | `EvTcbCapt<n>`, `EvTcbOvf<n>` | TCB CAPT flag / counter overflow (the 32-bit cascade carry), all channels; n gated by the package's TCB count (TCB4 on 64-pin) |
 | `EvLut<n>` | CCL LUT output level, all channels |
-| `EvUpdiSynch`, `EvMvioOk` (DB), `EvZcdOut<n>`, `EvOpampReady<n>` (DB), `EvUsartXck<n>`, `EvSpiSck<n>`, `EvTcdCmpBClr/ASet/BSet/ProgEv` (TCD parts) | the rest of the generator table (16.5.2), codes verified against the device header's enums; instance counts gated per package |
+| `EvUpdiSynch`, `EvMvioOk` (DB), `EvZcdOut<n>`, `EvOpampReady<n>` (DB), `EvUsartXck<n>`, `EvSpiSck<n>`, `EvTcdCmpBClr/ASet/BSet/ProgEv` (TCD parts) | the rest of the generator table (16.5.2), codes verified against the device header's enums; instance counts gated per package (ZCD0 alone on 28/32 pins, ZCD0..1 on the AVR DA48, ZCD0..2 on the DB48 and the 64-pin parts) |
 | `EvAcOut<n>` | comparator output level, all channels |
 | `EvOut<Pin>` | the channel's signal on a pin: Px2 default on every port present, Px7 ALT1 on every port but PORTF; `listen` selects the PORTMUX position, drives the pin as output, connects; `unlisten` tears it all down (pin back to input, PORTMUX back to default) |
 | `EvAdc0Start` | ADC0 start on event (the ADC's `start_on()` also sets STARTEI; listening alone arms nothing) |
-| `EvTcaCntA<n>`, `EvTcaCntB<n>` | TCA event inputs A and B; the action is EVACTA/EVACTB in the TCA |
+| `EvTcaCntA<n>`, `EvTcaCntB<n>` | TCA event inputs A and B; the action is EVACTA/EVACTB in the TCA; n gated by the package's TCA count |
 | `EvTcbCaptIn<n>`, `EvTcbCountIn<n>` | TCB capture input (the TCB must also set CAPTEI) and count input |
 | `EvLutIn<n, 'A'/'B'>` | CCL LUT n event input A or B |
 | `EvUsartIrda<n>`, `EvTcdInputA/B` (TCD parts), `EvOpampCtl<n, OpampAction::enable/disable/dump/drive>` (DB) | the rest of the user table (16.5.3); `usart_count` gates the instances per package |
 | `EventUserBase` | `listen(brio::EventChannel<n>{})` / `unlisten()` for every user |
 | concepts | `EventGenerator` (code, per-channel legality), `EventUser` (the USER register, unlisten) |
-| helpers | `event_channels` (8 or 10, from the device header), `evsys_pulse(ch)` (software event on a run-time channel - what a driver holding its channel as a value uses) |
+| helpers | `event_channels` (8 or 10, the device tables' probe of the EVSYS struct), `evsys_pulse(ch)` (software event on a run-time channel - what a driver holding its channel as a value uses) |
 
 The peripheral drivers wrap the users (`Tcb<n>::capture_on`,
 `Tca<n>::event_a_on`, `Lut<n>::event_a_on`, `Adc<0>::start_on`): an

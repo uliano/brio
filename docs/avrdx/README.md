@@ -3,10 +3,13 @@
 The stratum `brio/avrdx/` is everything in brio that knows
 `avr/io.h`: clock init, `Pin`, `Uart`, `Spi`, `Twi`, `BasicTicker`,
 and `AvrPlatform` (the kernel's `Platform` concept implemented with
-AVR intrinsics). Family differences inside DA/DB are handled with
-device-macro guards (`CLKCTRL_XOSCHFCTRLA` exists only on DB;
-`PORTB`/`PORTE`/`PORTG` depend on the package), so the same headers
-build for both. This page is the operational side: toolchain, board,
+AVR intrinsics). Family differences inside DA/DB are read off the
+device header in one place, `avrdx/device_tables.hpp` (the reserve):
+each feature from the symbol that IS it (`CLKCTRL_XOSCHFCTRLA` exists
+only on DB, `PORTB`/`PORTE`/`PORTG` depend on the package), the die
+from the compiler's device macro and the errata keyed on the die, so
+the same headers build for both and a part the stratum does not claim
+is a compile error. This page is the operational side: toolchain, board,
 probe, debugger, and their quirks. The design side (why the ticker
 is declaredly AVR, the ISR binding pattern, ...) is in
 [../design/](../design/).
@@ -26,6 +29,7 @@ documents of record.
 
 | Document | Content |
 |----------|---------|
+| [device_tables.hpp](../../brio/avrdx/device_tables.hpp) | The reserve - no document of its own, its header comment is the reference: the features and instance counts each probed from its own header symbol (a macro, an enumerator or a struct member), the part (die and pin count) keyed on the compiler's device macro with every unclaimed part refused, the PORTMUX route fields (mask, position, which register holds them), and the errata and family facts keyed on the die - the DA's EVSYS pins (DS80000882C 2.6.1), its TCA1 ALT2/ALT3 (2.11.1), its swapped SDA hold (2.14.2), its data-space window (2.7.1), and the DB's XDIR on USART2's ALT1; checked part by part by the `device_tables` fixture |
 | [platform.md](platform.md) | Platform: what the kernel stands on - `AvrPlatform` (critical section, idle and the SLPCTRL erratum, timebase, atomic_width, the `.noinit` breadcrumb), the short-wait role with both delay paths measured, `Sleep`/`Vreg` over all three sleep modes and the regulator plus `AvrSleepSite`, the adapter that carries the power model onto them, and `Reset`/`Watchdog` over RSTCTRL and the WDT, the idle contract and the sleep modes measured on an AVR128DB48 and an AVR128DA48; not covered: idle detection and the RUNSTDBY policy, the BOD, the sleep current, and the wake-up sources a lone board cannot produce |
 | [clkctrl.md](clkctrl.md) | CLKCTRL: oscillators, PLL, main clock mux/prescaler/CLKOUT, clock failure detection (DB) as resources; Clock/DynamicClock as tasks; on the AVR128DA48 the external clock, XOSC32K as the main clock, the auto-tune and the PLL from EXTCLK measured, OSCHF found pulled onto the external clock while that clock is CLK_PER; not covered: the DB's external-clock paths, the PLL's RUNSTDBY, A4 silicon |
 | [evsys.md](evsys.md) | EVSYS: the full typed vocabulary (generators and users, package-gated) + run-time connect/disconnect; not covered: static allocation, the vocabulary no driver exercises yet |
