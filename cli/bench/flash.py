@@ -692,6 +692,18 @@ def nvheap_preflight(prog, mcu, hexfile, chip_erase=False):
               "in this image's pages." % (len(entries), seq))
 
 
+# The UPDI clock of an EDBG-class probe. Without -B avrdude leaves the
+# probe's own default: 500 kHz on the Atmel-ICE (firmware 1.46), 100 kHz
+# on the PICkit 4 (firmware 1.14) - measured, 32 KB written in 11.9 s and
+# verified in 5.9 s there, 4.4 s and 2.5 s at 500 kHz. Above 225 kHz the
+# probe moves the target's UPDI off its 4 MHz reset clock (DS40002247B
+# 37.3.1.1, Table 37-1), which the data sheet recommends only with the
+# BOD at its highest level; every image this tool writes is verified.
+# 900 kHz gains another second, 1800 kHz nothing more. A SerialUPDI
+# adapter takes its rate from "baud" instead.
+UPDI_CLOCK = "500kHz"
+
+
 def avrdude_base(prog, mcu):
     argv = [manifest.AVRDUDE, "-p", mcu, "-c", prog["type"]]
     if prog["type"] == "serialupdi":
@@ -699,8 +711,10 @@ def avrdude_base(prog, mcu):
         if not port:
             die("serialupdi programmer without a 'port' in the manifest")
         argv += ["-P", port, "-b", str(prog.get("baud", 230400))]
-    elif prog.get("serial"):
-        argv += ["-P", "usb:" + prog["serial"]]
+    else:
+        argv += ["-B", UPDI_CLOCK]
+        if prog.get("serial"):
+            argv += ["-P", "usb:" + prog["serial"]]
     return argv
 
 

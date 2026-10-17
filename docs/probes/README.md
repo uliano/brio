@@ -14,6 +14,10 @@ flash MECHANISMS `bin/brio` knows - the `"type"` of a board's
 | `stlink_msd` | the ST-LINK's mass-storage flasher | USB drive | the STM32G0 Nucleos, when the debug port does not answer |
 | `wch_link` | a [WCH-Link](wch-link.md), WCH's OpenOCD fork | SDI (1-wire) on the CH32V00x, two-wire on the CH32V203 | the CH32V00x and CH32V203 boards |
 
+The two EDBG-class probes are driven at one UPDI clock, 500 kHz (`-B`):
+the Atmel-ICE's own default, five times the PICkit 4's
+(`UPDI_CLOCK` in `cli/bench/flash.py`).
+
 Rules that hold for every probe: a probe is SINGLE-CLIENT (close the
 debug session before flashing); a probe is addressed by its own USB
 serial and needs it only when two of a kind are attached; every

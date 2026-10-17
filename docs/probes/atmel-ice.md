@@ -10,7 +10,10 @@ manifest records the probe's USB serial per board.
   the wrong port: Vtarget reads about 1.7 V and the sign-on answers
   `0xa0`.
 - `brio flash <board> <app>` runs avrdude (`/sw/avr/bin/avrdude`) with
-  `-c atmelice_updi`, `-P usb:<serial>` when the manifest names one.
+  `-c atmelice_updi`, `-P usb:<serial>` when the manifest names one, and
+  `-B 500kHz` - the ICE's own default UPDI clock, passed so that every
+  EDBG-class probe runs at it (`UPDI_CLOCK` in `cli/bench/flash.py`
+  says why).
 - **Three erase regimes**, and the option names invite exactly the
   wrong assumption. These parts' flash is rated 1k erase/write cycles
   (DS40002247B 39-7), so which pages an erase touches is a budget
