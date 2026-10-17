@@ -652,12 +652,13 @@ void t8_autotune() {
     WideHi::disable();
     ChSnap::off();
     ChCarry::off();
-    // Back to OSC32K by NAME: Ticker::init() alone takes preferred(), and
-    // XOSC32KS still reads 1 for a while after the oscillator is stopped
-    // - a PIT on a stopped crystal would freeze every Ticker hold after.
-    RtcClock::select(RtcSource::osc32k);
+    // Back to the internal oscillator through Ticker::init() alone: XOSC32KS
+    // still reads 1 for a while after the stop, and preferred() names
+    // OSC32K all the same because the oscillator is no longer enabled
+    // (rtc.hpp) - the sequence that froze every later Ticker hold of this
+    // letter while preferred() asked the status alone.
     Xosc32k::stop();
-    Ticker::init(RtcSource::osc32k);
+    Ticker::init();
 
     // The driver's clear waits the copy out (clock.hpp's autotune()): a
     // TUNE written at once after it must stay written. Eight tries, each a

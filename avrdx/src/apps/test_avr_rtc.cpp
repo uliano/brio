@@ -702,19 +702,25 @@ void t9_xosc32k() {
     verdict("the Ticker counts 1024 ticks to the crystal's second",
             s0 && s1 && near(static_cast<int32_t>(k1 - k0), 1024, 1));
     Ticker::pause();
-    // Stopped, the crystal's XOSC32KS lingers (test_avr_clock letter 8
-    // froze a Ticker that way): quiesce() re-inits the Ticker through
-    // preferred(), so the status must be down before it runs.
+    // Stopped, the crystal's XOSC32KS lingers (a Ticker re-initialised in
+    // that window froze test_avr_clock letter 8 before preferred() asked
+    // enabled() too): preferred() is asked at once, while the status may
+    // still read 1, and must already name the internal oscillator.
     Rtc::disable();
     Pit::disable();
     RtcClock::select(RtcSource::osc32k);
     Xosc32k::stop();
+    const bool status_after_stop = Xosc32k::stable();
+    const RtcSource preferred_after_stop = RtcClock::preferred();
     uint16_t lingered = 0;
     while (Xosc32k::stable() && lingered < 2000) {
         delay_us(clock, 1000);
         ++lingered;
     }
-    print(serial, "  XOSC32KS read 1 for ", lingered, " ms after the stop", crlf);
+    print(serial, "  XOSC32KS read ", status_after_stop ? 1 : 0, " when preferred() was asked, 1 for ",
+          lingered, " ms after the stop", crlf);
+    verdict("right after the stop preferred() names OSC32K",
+            preferred_after_stop == RtcSource::osc32k);
     verdict("the stopped crystal's status drops within 2 s", !Xosc32k::stable());
     quiesce();
 }

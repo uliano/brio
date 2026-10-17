@@ -102,9 +102,15 @@ struct RtcClock {
     /// 32.768 kHz crystal if one was started and is running, the internal
     /// OSC32K otherwise. "Running" is XOSC32KS, which a crystal nothing
     /// requests yet sets only when it was started forced on
-    /// (clock.hpp's Xosc32k).
+    /// (clock.hpp's Xosc32k) - AND the oscillator still enabled: the
+    /// status outlives a stop by up to a millisecond (measured on an
+    /// AVR128DA48, rtc.md), and a timebase started in that window would
+    /// land on a stopped crystal and never tick again.
     static RtcSource preferred() {
-        return Xosc32k::stable() ? RtcSource::xosc32k : RtcSource::osc32k;
+        if (Xosc32k::enabled() && Xosc32k::stable()) {
+            return RtcSource::xosc32k;
+        }
+        return RtcSource::osc32k;
     }
 };
 

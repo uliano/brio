@@ -86,7 +86,7 @@ Facts that matter to code:
 | Entity | Verbs |
 |--------|-------|
 | `RtcSource` | the four CLK_RTC sources: `osc32k`, `osc1k`, `xosc32k`, `extclk`; `rtc_source_hz()` gives the nominal rate (0 for `extclk`, which only the application knows) |
-| `RtcClock` | the shared clock select: `select()`, `selected()`, `hz()`, `preferred()` (the crystal if the clock init started one, the internal oscillator otherwise) |
+| `RtcClock` | the shared clock select: `select()`, `selected()`, `hz()`, `preferred()` (the crystal if one was started and is still enabled and running, the internal oscillator otherwise) |
 | `RtcPrescaler`, `rtc_prescaler_div()` | DIV1..DIV32768 and the divisor each stands for |
 | `RtcConfig` | the counter's whole configuration: prescaler, period (PER), compare (CMP), correction in ppm, run-standby, debug-run |
 | `rtc_correction_valid()` | the legality rule of 26.6, shared by the config and `calibrate()` |
@@ -224,23 +224,14 @@ with a 32.768 kHz crystal builds):
   its second.
 - **XOSC32KS outlives the oscillator by up to a millisecond**: stopped,
   the crystal's status bit still read 1 at the next poll and was down
-  within 1 ms. A `Ticker::init()` in that window takes `preferred()`'s
-  answer - the stopped crystal - and the PIT never ticks again
-  (`test_avr_clock` froze a hold that way; both suites now select
-  OSC32K by name after a stop, and the RTC suite waits the status out).
+  within 1 ms. A timebase started in that window on the status alone
+  lands on the stopped crystal and the PIT never ticks again
+  (`test_avr_clock` letter 8 froze its holds that way), so
+  `preferred()` asks `Xosc32k::enabled()` as well: letter 9 asks it
+  right after the stop and gets OSC32K, and letter 8 re-initialises its
+  Ticker with no source named straight after stopping the crystal.
 
 ## Not covered yet
-
-Driver gaps:
-
-- **`RtcClock::preferred()` right after a stop.** It asks XOSC32KS
-  alone, which lingers up to a millisecond after `Xosc32k::stop()`
-  (bench findings), so a timebase re-initialised inside that window
-  lands on a stopped crystal. Asking `Xosc32k::enabled()` as well closes
-  it; the change moves every image that calls `Ticker::init()`, and the
-  AVR128DB48 those images run on is not on the desk to re-verify them -
-  so it is not made yet, and a program that stops the crystal names
-  OSC32K itself.
 
 Every register of chapter 26 - CTRLA, STATUS, INTCTRL, INTFLAGS,
 DBGCTRL, CALIB, CLKSEL, CNT, PER, CMP, PITCTRLA, PITSTATUS, PITINTCTRL,
