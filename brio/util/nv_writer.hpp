@@ -11,12 +11,15 @@
  * thirty-byte record freezes every other active object for a third of a
  * second. That is not a slow write, it is a dead system.
  *
- * The shape. One byte per interrupt: the store announces "ready" with
- * its own interrupt, the app's ISR glue posts NvReady, and the writer's
- * dispatch writes exactly ONE byte and returns. Between two bytes the
- * kernel runs everything else. The whole transfer is therefore made of
- * ten-microsecond dispatches spread over as long as the memory needs,
- * and no code anywhere waits.
+ * The shape. One operation per interrupt: the store announces "ready"
+ * with its own interrupt, the app's ISR glue posts NvReady, and the
+ * writer's dispatch starts exactly ONE operation and returns - one byte
+ * on a byte store, one RUN (the differing bytes of one write unit,
+ * util/nv_record.hpp's NvRunStore) on a store that takes a run. Between
+ * two operations the kernel runs everything else. The whole transfer is
+ * therefore made of dispatches of some tens of microseconds (what one
+ * run costs on the AVR EA: docs/avrxt/nvm.md) spread over as long as
+ * the memory needs, and no code anywhere waits.
  *
  * The interface is BusMaster's, for the same reason (util/bus_master.hpp):
  * a request that outlives its dispatch needs a queue to wait in and a
@@ -25,7 +28,7 @@
  * nv_rejected rather than blocking or dropping.
  *
  * OWNERSHIP. The bytes travel as a Borrowed<..., Lease::reply> inside
- * the request and are read one at a time as the writer advances: the
+ * the request and are read as the writer advances: the
  * requester must keep them alive and unchanged until its NvDone arrives.
  * A static buffer or a member of the requesting AO is the normal answer.
  *
@@ -68,8 +71,8 @@ inline constexpr uint8_t nv_refused = 3;    ///< the store refused a byte
 /// in the reply is normally smaller than `len`.
 struct NvWrite {
     uint16_t addr;
-    /// The source bytes, read one at a time as the writer advances:
-    /// LENT until the reply lands.
+    /// The source bytes, read as the writer advances: LENT until the
+    /// reply lands.
     Borrowed<const uint8_t, Lease::reply> data;
     uint16_t len;
     ReplyTo<NvDone> reply;
@@ -101,8 +104,8 @@ public:
     static uint8_t rejected_count() { return rejected_; }
 
 private:
-    /// What one advance of the active request found: a byte is now in
-    /// flight, the request is complete, or the store refused a byte.
+    /// What one advance of the active request found: an operation is now
+    /// in flight, the request is complete, or the store refused it.
     enum class Step : uint8_t { in_flight, done, refused };
 
     static Status idle(const Event& e) {
@@ -169,9 +172,27 @@ private:
     }
 
     /// Skip every byte already equal to its target and start the first
-    /// one that differs. The reply is NOT sent here - the caller decides,
-    /// because it is also the one that chains the next request.
+    /// one that differs - on a store that takes a run, the run from it to
+    /// the last differing byte of its write unit. The reply is NOT sent
+    /// here - the caller decides, because it is also the one that chains
+    /// the next request.
     static Step step() {
+        if constexpr (NvRunStore<Store>) {
+            const NvRunScan r =
+                nv_scan_run<Store>(active_.addr, active_.data.get(), next_, active_.len);
+            next_ = r.resume;
+            if (r.len == 0) {
+                return Step::done;
+            }
+            if (!Store::write_run(static_cast<uint16_t>(active_.addr + r.from),
+                                  active_.data.get() + r.from, r.len)) {
+                return Step::refused;
+            }
+            written_ = static_cast<uint16_t>(written_ + r.changed);
+            Store::clear_ready_flag();
+            Store::arm_ready_interrupt(true);
+            return Step::in_flight;
+        }
         while (next_ < active_.len) {
             const uint16_t addr = static_cast<uint16_t>(active_.addr + next_);
             const uint8_t want = active_.data.get()[next_];

@@ -159,6 +159,43 @@ question is OPEN now that the STM32G0 runs the journal too, and it
 stays a question until a real cross-target application asks it; until
 then two spellings, each honest about its silicon, is the smaller lie.
 
+### The EEPROM spelling's store: a byte, and a run where the silicon writes one
+
+`NvStore` ([`util/nv_record.hpp`](../../brio/util/nv_record.hpp)) is
+the store the EEPROM spelling stands on: static verbs that read a byte,
+START writing one, say whether the store is ready, wait for it with a
+bound, and release what the writes armed - `NvPacedStore` adds the
+ready interrupt the writer AO paces itself by. Its unit is the byte,
+and on an EEPROM with a page buffer the byte is the degenerate case: an
+operation writes any subset of a page in the time one byte takes.
+
+So the contract has an OPTIONAL verb, the `NvRunStore` refinement:
+`run_room(a)` - the bytes from `a` to the end of the store's write unit,
+the longest run one operation writes from there - and `write_run(a,
+src, n)`, which starts that one operation for `1 <= n <= run_room(a)`
+and refuses, starting nothing, a run past its room. Every writer asks
+for it at compile time (`if constexpr (NvRunStore<S>)`) and takes it
+when it is offered: `NvRecord::store` and the writer AO find the first
+byte that differs, the last one that differs within that byte's room,
+and write that run - an operation per write unit the change touches
+instead of one per byte, the same bytes stored and the same count
+returned; `PersistentPanic`'s eight bytes on a unit boundary are one
+operation. On the run path a writer waits for the store before every
+read, because on such silicon a read during an operation is a bus wait
+that holds the CPU and its interrupts to the operation's end. A store
+that does not offer the verb is served a byte at a time, exactly as the
+contract always did, and nothing in its images changes. The byte verbs
+keep their meaning beside the run: `write(a, b)` is a run of one.
+
+| stratum | the store | the run |
+|---|---|---|
+| avrxt, the AVR EA | `EepromStore` over NVM version 3 (`avrxt/nvm.hpp`) | OFFERED: the page of 8 bytes, `write_run` the engine's store run (only the differing bytes loaded, the cheapest of the three operations); the panic record one operation of 2.73 ms where the byte path takes eight (21.4 ms), measured ([../avrxt/nvm.md](../avrxt/nvm.md)) |
+| avrxt, the AVR DA/DB | `EepromStore` over NVM version 2 | not offered: the EEPROM writes a byte per operation there, so the room would be one; adopted in its family's phase (its document's gap list) |
+| host | the suites' simulated stores | one without the verb and one with it at any write unit: the run path proven equal to the byte path, run by run inside its room, with a power cut between any two runs |
+
+The other families keep their small values in flash through the
+journal and have no `NvStore`.
+
 ### Realizations
 
 Common to all: `NvJournal<Media, max_ids, max_payload, half_pages>` and

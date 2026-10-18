@@ -618,7 +618,7 @@ cycles, and tuning OSCHF (not running under the crystal) moves nothing.
 
 | Item | Here | Why |
 |------|------|-----|
-| The EEPROM page buffer and the page run (1..8 bytes, one operation) | USED: `eeprom_run`, `eeprom_store_run` | eight bytes cost what one does (measured to 0.1 %): the unit of cost is the page |
+| The EEPROM page buffer and the page run (1..8 bytes, one operation) | USED: `eeprom_run`, `eeprom_store_run`, and through the store contract's run verb (`EepromStore::write_run`) by the record, the writer AO and the panic record | eight bytes cost what one does (measured to 0.1 %): the unit of cost is the page |
 | EEPW / EEPER apart | USED: the store chooser picks EEPW onto 0xFF bytes and EEPER to 0xFF | each is half an EEPERW (2.6 against 5.2 ms); EEPW onto a byte that is not 0xFF is outside the chapter's precondition (11.3.2.4.1) and never chosen |
 | EEPERW | USED where neither half alone does | one operation for a byte that is neither erased nor becoming 0xFF |
 | EEPBCLR | USED before every operation | a stray load would AND itself into the next operation (measured); its cost is a few cycles of halted CPU per operation |
@@ -675,7 +675,10 @@ Every verb that starts an operation returns as soon as it has STARTED,
 and refuses - touching nothing - a run that leaves its page or the
 array, a span not aligned to itself, EEWP set, or a controller that
 never went idle. `EepromStore` is the EEPROM as the `util/nv_record.hpp`
-store: `write()` is `eeprom_store()`.
+store, and one that TAKES A RUN (`NvRunStore`): `run_room()` is
+`eeprom_run_room()`, `write_run()` is `eeprom_store_run()` (a length past
+the room refused before it is narrowed to the engine's byte), `write()`
+is `eeprom_store()`.
 
 **The cost of an operation**, CPU side, by the release listing of
 `test_avr_nvm`: **58 cycles for one byte** (`eeprom_erase_write`: the
@@ -724,7 +727,9 @@ whatever stray load the buffer holds along with its byte.
 
 A setting, the panic record and the writer are the DA/DB's code above,
 unchanged - the store is `EepromStore` on both - with the EA's vector
-name:
+name. Here the store takes a run, so each of them spends an operation
+per page its change touches, not per byte: the panic record at offset 0
+is one operation, a writer request of a page one interrupt.
 
 ```c++
 ISR(NVMCTRL_EEREADY_vect) {               // #33, NVMREADY: EEREADY and FLREADY
@@ -750,7 +755,7 @@ if (!brio::Nvm::supply_guarded()) { /* provision: brio fuses <board> bodcfg=0x4D
 
 ### Bench findings (`test_avr_nvm` on the AVR64EA48, rev B1, 20 MHz quartz, 5 V, BODCFG 0x4D)
 
-`test_avr_nvm z`: **103 of 103 in ten runs of ten.**
+`test_avr_nvm z`: **110 of 110 in ten runs of ten.**
 
 **The times**, the page buffer's operations on letter b's page (bytes
 40..47) against table 35-8 (which publishes typical figures only, 2 ms
@@ -790,13 +795,41 @@ for a one-byte call, 173 for an 8-byte run, 201 for an 8-byte store run
 that finds nothing to do, 78 for `EepromStore::write`; an EEPBCLR with
 its key 14, one buffer load 12 - the same in every run.
 
-**The services**: `NvRecord`, `NvWriter` and `PersistentPanic` behave
-as on the DA/DB (an unchanged store writes nothing, one changed byte
-costs three, one interrupt per byte, the panic record across a software
-reset); the writer's eight bytes onto erased cells take 21.6 to 21.7 ms
-(eight EEPWs), the main loop's longest stretch between two turns 775 to
-876 cycles, the PIT's ticks all kept. The same eight bytes as one page
-run take 2.69 to 2.70 ms - one EEPW.
+**The services**, on the store's run path: `NvRecord`, `NvWriter` and
+`PersistentPanic` behave as on the DA/DB (an unchanged store writes
+nothing, one changed byte costs three, the panic record across a
+software reset), an operation per page. The writer's eight bytes onto
+erased cells are ONE operation and one interrupt, 2.78 to 2.81 ms, the
+main loop's longest stretch between two turns 1539 to 1640 cycles (the
+dispatch that scans and starts the run), the PIT's ticks all kept; the
+same request through a store without the run verb (the suite's
+`EepromByteStore`, the same EEPROM with the verb hidden) is eight
+operations and eight interrupts, 21.58 to 21.60 ms.
+
+The panic record's report with interrupts masked, onto an erased page
+0: **2.73 ms on the run path** (54 507 to 54 747 cycles) - one operation
+of page 0, timed in the same run at 53 399 to 53 663, plus 1000 to 1264
+cycles of the reporter's own work - against **21.37 to 21.45 ms on the
+byte path**, eight operations to within 0.33 %.
+
+A run's CPU cost, masked, eight differing bytes: **the scan 319
+cycles** (the first and last differing byte within the room: eight
+EEPROM reads at about nine cycles each and the loop around them, the
+call and its returned struct), **`write_run` 510** (the store run reads
+the eight bytes again to choose its command, then EEPBCLR, eight loads
+and the command: the 201 cycles a store run that finds nothing to do
+costs, above, plus the loads at 12 each). The double read, some 80 cycles, is the price of a store that
+chooses its own command from the bytes it holds; against a 2.6 ms
+operation it is 0.15 %. The byte path spends about the same CPU in
+total - eight `EepromStore::write`s at 78 - but in eight dispatches
+and eight operations.
+
+A 12-byte record over two pages, stored under a 1 ms alarm: on the run
+path the longest gap between two alarm runs is **20 002 cycles** for a
+period of 20 000 - nothing held the interrupt, because the record waits
+for the EEPROM before every read; on the byte path it is 54 493 to
+54 744 cycles: each read of the next byte holds the CPU and the alarm to
+the end of the write before it.
 
 **EEWP**: set, every verb refuses; the raw sequence past the driver is
 refused by the silicon with WRITEPROTECT, an erase included, the byte
@@ -813,13 +846,14 @@ EEPER alone):
 
 | EEPROM bytes | Letters | Operations per run | Endurance | Runs before the spec |
 |--------------|---------|--------------------|-----------|----------------------|
-| 0..7 (the panic slot) | f | 2 on byte 0, at most 1 on the others | 100k | ~50000 |
+| 0..7 (the panic slot) | c, f | 7 on byte 0, at most 5 on the others | 100k | ~14000 |
 | 16..23 (the settings record) | c | at most 5 | 100k | ~20000 |
 | 32..39 (letter b's first page) | b | at most 8 | 100k | ~12000 |
 | 40..47 (letter b's second page) | b | at most 16 (byte 40) | 100k | ~6000 |
 | 48..55 (letter e's page) | e | at most 15 (byte 48) | 100k | ~6600 |
 | 56 | f | 2 | 100k | ~50000 |
-| 96..103 (the writer's run) | c | 4 | 100k | ~25000 |
+| 96..103 (the writer's run) | c | 6 | 100k | ~16000 |
+| 104..119 (letter e's record, pages 13 and 14) | e | 5 | 100k | ~20000 |
 
 No flash and no User Row cycle: the EA's suite writes neither.
 
@@ -834,17 +868,18 @@ Driver gaps - the chapter's features this driver does not implement:
   and journal over it - refuses the part; its rev B1's flash errata
   (DS80001048D 2.4.1, 2.4.2) have no user then. UPDI writes the User
   Row ([userrow.md](userrow.md)).
-- **The page run through the store contract (AVR EA).** `NvStore` takes
-  a byte, so `NvRecord`, `NvWriter` and `PersistentPanic` spend one
-  operation per differing byte where the engine's `eeprom_store_run`
-  spends one per page: the 8-byte panic record is eight operations (up
-  to 42 ms) instead of one. Born with the contract's run verb, a util
-  change every family's store takes at once.
-- **`NvRecord::store` reads the next byte before it waits for the
-  previous write.** On the AVR EA such a read is a bus wait that holds
-  the CPU and its interrupts until the operation ends (measured above):
-  a record store blacks interrupts out for most of every operation but
-  its last. The record's loop is util's; it changes with the run verb.
+- **The store contract's run verb on the AVR DA/DB.** The DA/DB's
+  `EepromStore` does not offer `NvRunStore`, so `NvRecord`, `NvWriter`
+  and `PersistentPanic` serve it a byte at a time. That generation
+  writes its EEPROM a byte per operation, so its room would be one and
+  the verb would change only the writers' loop (the item below):
+  adopted in its family's phase.
+- **`NvRecord::store`'s byte path reads the next byte before it waits
+  for the previous write** - the path the DA/DB's store takes. The run
+  path waits before every read (on the AVR EA such a read is a bus wait
+  that holds the CPU and its interrupts to the operation's end,
+  measured above); the byte path keeps its shape until the DA/DB adopt
+  the run verb in their family's phase.
 - **The VLM as a write guard (AVR EA, 11.3.3)**: declined until a
   battery-powered program needs a write refused near the brown-out
   level; `supply_guarded()` covers the erratum on a mains-powered one.

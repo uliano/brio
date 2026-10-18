@@ -18,7 +18,9 @@ two very different needs, and one storage class each.
 A handful of small values, rewritten often - a calibration offset, a
 mode, a counter - belong in the EEPROM: byte-granular, 100k cycles, and
 a record layout that writes only the bytes that changed
-([nv_record](../../brio/util/nv_record.hpp)).
+([nv_record](../../brio/util/nv_record.hpp)), a run per operation where
+the store's silicon writes one ([nv-journal.md](nv-journal.md), "The
+EEPROM spelling's store").
 
 A table belongs somewhere else. A thermocouple linearization, a font, a
 captured waveform, a lookup grid: kilobytes, written once in a while,

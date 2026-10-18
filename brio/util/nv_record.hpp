@@ -28,6 +28,15 @@
  * magic twice per store would wear one byte at twice the rate of the
  * payload it guards.
  *
+ * THE RUN. A store whose silicon writes several neighbouring bytes in
+ * ONE operation (a page buffer) says so with two more verbs - the
+ * NvRunStore refinement below - and store() then writes a RUN per
+ * operation instead of a byte: the same bytes end up stored and the
+ * same count is returned, in as many operations as the record touches
+ * write units. A store without them is served a byte at a time,
+ * exactly as before. The choice is made at compile time from the
+ * store's type; nothing is asked at run time.
+ *
  * NOT BUILT: wear levelling, journaling, more than one copy. Those are
  * policies that need a user with real numbers behind them; the
  * mechanism here is the floor they would be built on.
@@ -85,6 +94,79 @@ concept NvPacedStore = NvStore<S> && requires(bool on) {
     { S::ready_flag() } -> std::convertible_to<bool>;
     { S::clear_ready_flag() };
 };
+
+/**
+ * A store that writes a RUN in one operation: the contract's optional
+ * verb, offered by a store whose silicon has a page buffer and taken by
+ * every writer here when it is offered (a contract's unit is the run;
+ * the byte is its degenerate case).
+ *
+ *  - run_room(a)          the bytes from offset a to the end of the
+ *                         store's WRITE UNIT that holds it: the longest
+ *                         run one operation writes from a. At least 1
+ *                         for every a < size(), never past size();
+ *  - write_run(a, src, n) START one operation that leaves src[0..n) in
+ *                         [a, a + n), 1 <= n <= run_room(a). Bytes that
+ *                         already hold their value may be left alone (a
+ *                         store whose silicon marks bytes does). False =
+ *                         refused, nothing started: a run past its room
+ *                         or the store, a protected store, or one that
+ *                         never became idle. The operation may still be
+ *                         in flight when this returns, as for write().
+ *
+ * The byte verbs keep their meaning: write(a, b) is a run of one, and a
+ * caller may mix the two. A run never crosses the room the store
+ * reports - the writers below cut every run at it.
+ */
+template <typename S>
+concept NvRunStore = NvStore<S> &&
+    requires(uint16_t addr, const uint8_t* src, uint16_t len) {
+        { S::run_room(addr) } -> std::convertible_to<uint16_t>;
+        { S::write_run(addr, src, len) } -> std::convertible_to<bool>;
+    };
+
+/// What a writer scanning an image for its next run found: the run
+/// [from, from + len) of the image (len 0 = nothing left differs), the
+/// bytes in it that differ from the store, and where the scan resumes.
+struct NvRunScan {
+    uint16_t from;
+    uint16_t len;
+    uint16_t changed;
+    uint16_t resume;
+};
+
+/**
+ * The next run of image[i..n) to write at store offset `base`: the first
+ * byte that differs from the store, and the last one that differs
+ * within that byte's room - so the run carries no equal byte at either
+ * end, and never more than one operation's worth. READS THE STORE: call
+ * it with the store idle (a read during an operation can be a bus wait
+ * that holds the CPU and its interrupts to the operation's end).
+ */
+template <NvRunStore S>
+NvRunScan nv_scan_run(uint16_t base, const uint8_t* image, uint16_t i, uint16_t n) {
+    while (i < n && S::read(static_cast<uint16_t>(base + i)) == image[i]) {
+        ++i;
+    }
+    if (i == n) {
+        return NvRunScan{n, 0, 0, n};
+    }
+    const uint16_t room = static_cast<uint16_t>(S::run_room(static_cast<uint16_t>(base + i)));
+    const uint16_t window = room < static_cast<uint16_t>(n - i)
+                                ? room
+                                : static_cast<uint16_t>(n - i);
+    uint16_t last = 0;
+    uint16_t changed = 1;   // byte i itself
+    for (uint16_t k = 1; k < window; ++k) {
+        const uint16_t j = static_cast<uint16_t>(i + k);
+        if (S::read(static_cast<uint16_t>(base + j)) != image[j]) {
+            last = k;
+            ++changed;
+        }
+    }
+    return NvRunScan{i, static_cast<uint16_t>(last + 1u), changed,
+                     static_cast<uint16_t>(i + window)};
+}
 
 /// The magic byte at the head of every record. Any value would do; this
 /// one is not 0x00 and not the 0xFF an erased store reads back.
@@ -153,6 +235,10 @@ struct NvRecord {
     /// endurance the whole design is for. A store that refuses a byte or
     /// never becomes ready ends the run: the count returned is what got
     /// through, and load() will report the record invalid.
+    ///
+    /// On an NvRunStore the differing bytes go a run per operation, and
+    /// every read waits for the store to be idle first; on a byte store
+    /// each differing byte is an operation of its own.
     static uint16_t store(const T& value) {
         if (!fits()) {
             return 0;
@@ -160,6 +246,27 @@ struct NvRecord {
         uint8_t image[nv_record_size<T>];
         build(value, image);
         uint16_t written = 0;
+        if constexpr (NvRunStore<S>) {
+            uint16_t i = 0;
+            while (i < nv_record_size<T>) {
+                if (!S::wait_ready()) {
+                    break;
+                }
+                const NvRunScan r = nv_scan_run<S>(offset, image, i, nv_record_size<T>);
+                if (r.len == 0) {
+                    break;
+                }
+                if (!S::write_run(static_cast<uint16_t>(offset + r.from),
+                                  image + r.from, r.len)) {
+                    break;
+                }
+                written = static_cast<uint16_t>(written + r.changed);
+                i = r.resume;
+            }
+            (void)S::wait_ready();
+            S::finish();
+            return written;
+        }
         for (uint16_t i = 0; i < nv_record_size<T>; ++i) {
             const uint16_t addr = static_cast<uint16_t>(offset + i);
             if (S::read(addr) == image[i]) {

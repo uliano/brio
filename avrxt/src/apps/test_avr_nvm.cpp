@@ -10,8 +10,10 @@
 // keep their keys and change their matter: a the EA's identity, the
 // supply guard of DS80001048D 2.2.1 and the FLMAP window under CCP; b the
 // page-buffer command model, the three page operations and their times;
-// c the services, plus the page run; d and u print why they are skipped;
-// e what an EEPROM operation costs the CPU and its interrupts; f the
+// c the services on the store's run path (a run per page), each beside
+// the byte path of a store without the run verb, the panic record's time
+// on both; d and u print why they are skipped; e what an EEPROM operation
+// costs the CPU and its interrupts, a record store's included; f the
 // persistent panic and EEWP across two resets. No g, no m.
 //
 // Reference test of those headers (docs/avrxt/nvm.md): keep it passing.
@@ -150,6 +152,36 @@ using SettingsRecord = NvRecord<Settings, Store, 16>;
 constexpr uint16_t raw_base = 32;      ///< scratch EEPROM for b
 constexpr uint16_t writer_base = 96;   ///< scratch EEPROM for the writer AO
 
+#if defined(NVMCTRL_FLBUSY_bm)
+/// The same EEPROM as a store WITHOUT the contract's run verb: the
+/// writers serve it a byte at a time. It exists so the suite measures
+/// the byte path beside the run path on one silicon.
+struct EepromByteStore {
+    EepromByteStore() = delete;
+    static constexpr uint16_t size() { return EepromStore::size(); }
+    static uint8_t read(uint16_t addr) { return EepromStore::read(addr); }
+    static bool write(uint16_t addr, uint8_t value) { return EepromStore::write(addr, value); }
+    static bool ready() { return EepromStore::ready(); }
+    static bool wait_ready() { return EepromStore::wait_ready(); }
+    static void finish() { EepromStore::finish(); }
+    static void arm_ready_interrupt(bool on) { EepromStore::arm_ready_interrupt(on); }
+    static bool ready_flag() { return EepromStore::ready_flag(); }
+    static void clear_ready_flag() { EepromStore::clear_ready_flag(); }
+};
+static_assert(NvPacedStore<EepromByteStore> && !NvRunStore<EepromByteStore>);
+static_assert(NvRunStore<Store>);
+using BytePanic = PersistentPanic<EepromByteStore, 0>;
+
+/// Letter e's record: twelve bytes straddling pages 13 (104..111) and
+/// 14 (112..119), so its run path is two operations with a wait between.
+struct Wide8 {
+    uint8_t b[8];
+};
+constexpr uint16_t record_e = 108;
+using RunRecordE = NvRecord<Wide8, Store, record_e>;
+using ByteRecordE = NvRecord<Wide8, EepromByteStore, record_e>;
+#endif
+
 // ---- the instrument ----------------------------------------------------------
 using Alarm = Tcb<0>;                  ///< the interrupt whose latency e measures
 using WatchLo = Tcb<1>;
@@ -189,11 +221,18 @@ volatile uint32_t alarm_stamp = 0;
 volatile bool alarm_ran = false;
 #if defined(NVMCTRL_FLBUSY_bm)
 volatile bool alarm_saw_busy = false;   ///< e: an EEPROM operation ran at the stamp
+volatile uint32_t alarm_last = 0;       ///< alarm_mode 2: the previous run's stamp
+volatile uint32_t alarm_gap = 0;        ///< alarm_mode 2: the longest gap between runs
+volatile uint8_t alarm_runs = 0;        ///< alarm_mode 2: runs so far
+volatile uint8_t ready_target = 0;      ///< whose NvReady: 0 Writer, 1 ByteWriter
 #endif
 volatile uint16_t nvm_interrupts = 0;
 
 // ---- the writer AO ------------------------------------------------------------
 using Writer = NvWriter<Store, P, 2>;
+#if defined(NVMCTRL_FLBUSY_bm)
+using ByteWriter = NvWriter<EepromByteStore, P, 2>;
+#endif
 
 /// The AO that asks for a write and counts the answer.
 struct Requester {
@@ -1194,7 +1233,13 @@ void tc_services() {
         }
     }
     verdict("the bytes are in the EEPROM", bytes_ok);
+#if !defined(NVMCTRL_FLBUSY_bm)
     verdict("one interrupt per byte", nvm_interrupts == 8);
+#else
+    // The store takes a run: the eight bytes are one page, one operation.
+    verdict("one interrupt for the page: the eight bytes are one operation",
+            nvm_interrupts == 1);
+#endif
 #if !defined(NVMCTRL_FLBUSY_bm)
     verdict("the main loop kept turning throughout (no busy wait anywhere)",
             loop_turns > 10000u);
@@ -1251,34 +1296,131 @@ void tc_services() {
     verdict("a request past the end of the store is refused with nv_bad_range",
             Requester::replies == 1 && Requester::last.status == nv_bad_range);
 #if defined(NVMCTRL_FLBUSY_bm)
-    // ---- the page run: the same eight bytes as ONE operation ----
-    // The writer above spends one operation, one interrupt and one
-    // dispatch per byte because the store contract takes a byte; the
-    // engine's page run takes the page. Eight bytes erased first, then
-    // stored as one run: one EEPW where the writer made eight.
+    // ---- the byte path: the same eight bytes through a store without the run verb ----
+    // The writer above is on the store's run path: one operation, one
+    // interrupt, one dispatch for the page. The same writer over
+    // EepromByteStore (the same EEPROM, the run verb hidden) spends one
+    // of each per byte: eight EEPWs onto the erased bytes.
     (void)Nvm::eeprom_erase(writer_base, EepromErase::bytes8);
     (void)Nvm::wait_eeprom();
-    const uint32_t run_start = cycles_now();
-    const bool run_ok = Nvm::eeprom_store_run(writer_base, payload, sizeof payload);
-    const NvmCommand run_cmd = Nvm::selected();
-    (void)Nvm::wait_eeprom();
-    const uint32_t run_cycles = cycles_now() - run_start;
     Nvm::clear_command();
-    bool run_bytes = run_ok;
-    for (uint8_t i = 0; i < 8; ++i) {
-        if (Nvm::eeprom_read(static_cast<uint16_t>(writer_base + i)) != payload[i]) {
-            run_bytes = false;
+    Requester::init();
+    ByteWriter::init();
+    ready_target = 1;
+    nvm_interrupts = 0;
+    const uint32_t byte_start = cycles_now();
+    post<ByteWriter>(NvWrite{writer_base, lend<Lease::reply>(payload), sizeof payload,
+                             reply_to<Requester, NvDone>()});
+    for (uint32_t guard = 0; guard < 20'000'000u && Requester::replies == 0; ++guard) {
+        if (const std::optional<ByteWriter::Event> e = ByteWriter::queue.pop()) {
+            ByteWriter::dispatch(*e);
+        }
+        if (const std::optional<Requester::Event> r = Requester::queue.pop()) {
+            Requester::dispatch(*r);
         }
     }
-    print(serial, "  the same 8 bytes as one page run: ", us_of(run_cycles), " us, ",
-          command_name(run_cmd), " once (the writer: ", us_of(elapsed),
-          " us, eight operations)", crlf);
-    verdict("one page run stores the eight bytes", run_bytes);
-    // The writer made eight operations of the run's kind (each onto an
-    // erased byte, an EEPW like the run's), so its time is at least
-    // eight runs; a quarter leaves a factor of two for the dispatches.
-    verdict("in under a quarter of the byte-at-a-time writer's time",
-            run_cycles < elapsed / 4u);
+    const uint32_t byte_elapsed = cycles_now() - byte_start;
+    ready_target = 0;
+    bool byte_bytes = Requester::replies == 1 && Requester::last.status == nv_ok &&
+                      Requester::last.written == 8;
+    for (uint8_t i = 0; i < 8; ++i) {
+        if (Nvm::eeprom_read(static_cast<uint16_t>(writer_base + i)) != payload[i]) {
+            byte_bytes = false;
+        }
+    }
+    print(serial, "  the same 8 bytes on the byte path: ", us_of(byte_elapsed), " us, ",
+          nvm_interrupts, " interrupts (the run path: ", us_of(elapsed), " us, one)",
+          crlf);
+    verdict("the byte path stores the same eight bytes, one interrupt each",
+            byte_bytes && nvm_interrupts == 8);
+    // Both legs write onto erased bytes, so every operation is an EEPW of
+    // page 12: the byte path's time is at least eight of the run path's
+    // one; a quarter leaves a factor of two for the dispatches.
+    verdict("the run path in under a quarter of the byte path's time",
+            elapsed < byte_elapsed / 4u);
+
+    // ---- the run path's CPU cost of one operation, masked ----
+    // What the writer's dispatch and the record spend per run: the scan
+    // (the first and last differing byte within the room) and the
+    // store's write_run (the engine's store run: re-read, EEPBCLR, the
+    // loads, the command). Eight differing bytes, onto erased cells.
+    (void)Nvm::eeprom_erase(writer_base, EepromErase::bytes8);
+    (void)Nvm::wait_eeprom();
+    uint32_t t_scan = 0, t_start_run = 0;
+    bool cost_ok = false;
+    {
+        const uint32_t ruler = stamp_cost();
+        P::CriticalSection cs;
+        const uint32_t c0 = cycles_now();
+        const NvRunScan r = nv_scan_run<Store>(writer_base, payload, 0, sizeof payload);
+        const uint32_t c1 = cycles_now();
+        cost_ok = Store::write_run(static_cast<uint16_t>(writer_base + r.from),
+                                   payload + r.from, r.len);
+        const uint32_t c2 = cycles_now();
+        t_scan = c1 - c0 - ruler;
+        t_start_run = c2 - c1 - ruler;
+        cost_ok = cost_ok && r.from == 0 && r.len == 8 && r.changed == 8;
+        (void)Nvm::wait_eeprom();
+    }
+    Nvm::clear_command();
+    print(serial, "  one run's CPU cost (8 bytes, masked): the scan ", t_scan,
+          " cycles, write_run ", t_start_run, " cycles", crlf);
+    verdict("the scan finds the whole page as one run and the store takes it",
+            cost_ok && page_reads(writer_base, payload, 8));
+
+    // ---- the panic record: one operation on the run path, eight on the byte path ----
+    // Interrupts masked, as panic() leaves them. Page 0 is erased first
+    // each time and the erase is the ruler: an EEPER and an EEPW of one
+    // page take the same time to a few cycles (letter b), so the run
+    // path is one ruler plus the reporter's own work, the byte path eight.
+    uint32_t t_ref = 0, t_run = 0, t_byte = 0;
+    bool panic_back = false, panic_byte_back = false;
+    {
+        P::CriticalSection cs;
+        uint32_t t0 = cycles_now();
+        (void)Nvm::eeprom_erase(0, EepromErase::bytes8);
+        (void)Nvm::wait_eeprom();
+        t_ref = cycles_now() - t0;
+        t0 = cycles_now();
+        Panic::report(PanicCode::assert_failed, 0x3C);
+        t_run = cycles_now() - t0;
+    }
+    {
+        const std::optional<PanicRecord> r = Panic::peek();
+        panic_back = r && r->code == static_cast<uint8_t>(PanicCode::assert_failed) &&
+                     r->context == 0x3C;
+    }
+    {
+        P::CriticalSection cs;
+        (void)Nvm::eeprom_erase(0, EepromErase::bytes8);
+        (void)Nvm::wait_eeprom();
+        const uint32_t t0 = cycles_now();
+        BytePanic::report(PanicCode::assert_failed, 0x3C);
+        t_byte = cycles_now() - t0;
+    }
+    {
+        const std::optional<PanicRecord> r = Panic::take();
+        panic_byte_back = r && r->code == static_cast<uint8_t>(PanicCode::assert_failed) &&
+                          r->context == 0x3C && !Panic::pending();
+    }
+    print(serial, "  the panic record's report, interrupts masked: ", us_of(t_run),
+          " us on the run path (", t_run, " cycles), ", us_of(t_byte),
+          " us on the byte path (", t_byte, "); one operation of page 0: ",
+          us_of(t_ref), " us (", t_ref, ")", crlf);
+    verdict("the panic record reads back after the run path's report", panic_back);
+    verdict("and after the byte path's, and is taken once", panic_byte_back);
+    // One operation is t_ref to letter b's 1 % (same page, same kind of
+    // operation) plus the reporter's work - the record built, its CRC,
+    // eight reads, the store run: under 2000 cycles, 4 % of t_ref. Two
+    // operations would be 1.98 t_ref at the least: 1.5 sits between.
+    verdict("the run path's report is ONE operation",
+            t_run + t_ref / 100u >= t_ref && t_run < t_ref + t_ref / 2u);
+    // Eight operations, each t_ref to 1 %, each read of the next byte
+    // held to the operation's end and 70..120 us beyond it (letter e: at
+    // most 2400 cycles, 5 % of t_ref) seven times: under 8.4 t_ref; 9
+    // leaves room, 7.5 sits a half operation below the floor.
+    verdict("the byte path's is eight",
+            t_byte > t_ref * 15u / 2u && t_byte < t_ref * 9u);
 #endif
     quiesce();
 }
@@ -1675,6 +1817,79 @@ void te_stall() {
     // 4.4 ms on: more than half the operation is a floor with room.
     verdict("but a read of the EEPROM holds it for the rest of the operation",
             reading_worst > op / 2u);
+
+    // ---- a record store, on each path, under a 1 ms alarm ----
+    // The record straddles two pages. On the store's run path it waits
+    // for the EEPROM before every read, so nothing it does holds an
+    // interrupt; on the byte path it reads the next byte while the last
+    // one is being written, and that read holds the CPU and the alarm
+    // to the operation's end (above). The ISR keeps the longest gap
+    // between two of its runs; the main context reads no stopwatch
+    // meanwhile (the cascade's latch is shared with the ISR).
+    const auto worst_gap = [](bool run_path, uint8_t seed) -> uint32_t {
+        Wide8 v{};
+        for (uint8_t i = 0; i < sizeof v.b; ++i) {
+            v.b[i] = static_cast<uint8_t>(seed + 17u * i);
+        }
+        (void)Nvm::eeprom_erase(104, EepromErase::bytes8);
+        (void)Nvm::wait_eeprom();
+        (void)Nvm::eeprom_erase(112, EepromErase::bytes8);
+        (void)Nvm::wait_eeprom();
+        cli();
+        alarm_runs = 0;
+        alarm_gap = 0;
+        alarm_mode = 2;
+        Alarm::count(0);
+        Alarm::clear_capt();
+        sei();
+        while (alarm_runs < 2) {
+        }
+        const uint16_t written = run_path ? RunRecordE::store(v) : ByteRecordE::store(v);
+        const uint8_t after = alarm_runs;
+        while (static_cast<uint8_t>(alarm_runs - after) < 2u && alarm_runs != 0xFFu) {
+        }
+        cli();
+        alarm_mode = 0;
+        const uint32_t gap = alarm_gap;
+        sei();
+        const std::optional<Wide8> back = RunRecordE::load();
+        const bool ok = written == nv_record_size<Wide8> && back &&
+                        back->b[7] == static_cast<uint8_t>(seed + 17u * 7u);
+        return ok ? gap : 0u;
+    };
+    Ticker::pause();
+    (void)Alarm::init({.mode = TcbMode::periodic,
+                       .clock = TcbClock::div1,
+                       .compare = one_ms});
+    Alarm::enable_capt_interrupt(true);
+    console_drain();
+    const uint32_t gap_run = worst_gap(true, 0x21u);
+    const uint32_t gap_byte = worst_gap(false, 0x43u);
+    Alarm::enable_capt_interrupt(false);
+    Alarm::disable();
+    Ticker::resume();
+    (void)Nvm::eeprom_erase(104, EepromErase::bytes8);
+    (void)Nvm::wait_eeprom();
+    (void)Nvm::eeprom_erase(112, EepromErase::bytes8);
+    (void)Nvm::wait_eeprom();
+    print(serial, "  a 12-byte record over two pages under a 1 ms alarm: the "
+                  "longest gap between two alarm runs ", gap_run, " cycles on the run "
+                  "path, ", gap_byte, " (", us_of(gap_byte), " us) on the byte path "
+                  "(the period: ", one_ms, ")", crlf);
+    // A gap is the period plus this run's lateness minus the last's;
+    // a lateness is under 100 cycles with the CPU free (the verdicts
+    // above), so the gap stays under period + 100 when nothing holds
+    // the alarm; 200 is the bound. A zero gap is a record that did not
+    // store or load back.
+    verdict("the run path's record store holds no interrupt",
+            gap_run >= one_ms && gap_run < one_ms + 200u);
+    // On the byte path each read of the next byte holds the alarm for
+    // the rest of an EEPW onto an erased byte - 52 000 cycles less the
+    // few hundred the store took to start it - so the longest gap is at
+    // least that. `op` is the erase-and-write above, two EEPWs: the
+    // period plus a quarter of it is 46 000, under the floor.
+    verdict("the byte path's holds one for most of an operation",
+            gap_byte > one_ms + op / 4u);
 
     (void)erase_page(page_e);
     Nvm::clear_command();
@@ -2192,8 +2407,9 @@ void help() {
 void help() {
     print(serial, "test_avr_nvm (AVR EA: the EEPROM engine): a identity, the "
                   "supply guard, FLMAP | b the page buffer, the three operations, "
-                  "the times | c record, writer AO, endurance, the page run | d "
-                  "Flash (declined) | e what an EEPROM operation costs the CPU | "
+                  "the times | c record, writer AO, endurance, the run path beside "
+                  "the byte path | d Flash (declined) | e what an EEPROM operation "
+                  "costs the CPU | "
                   "f the persistent panic and EEWP across REAL resets    -> z = "
                   "all of a..f", crlf,
           "  outside z: u the User Row write path (declined)", crlf);
@@ -2216,6 +2432,12 @@ ISR(NVMCTRL_EEREADY_vect) {
 #endif
     brio::Nvm::eeready();
     nvm_interrupts = nvm_interrupts + 1;
+#if defined(NVMCTRL_FLBUSY_bm)
+    if (ready_target != 0) {
+        brio::post<ByteWriter>(brio::NvReady{});
+        return;
+    }
+#endif
     brio::post<Writer>(brio::NvReady{});
 }
 
@@ -2228,6 +2450,16 @@ ISR(TCB0_INT_vect) {
 #endif
         alarm_ran = true;
     }
+#if defined(NVMCTRL_FLBUSY_bm)
+    if (alarm_mode == 2) {
+        const uint32_t now = cycles_now();
+        if (alarm_runs != 0 && now - alarm_last > alarm_gap) {
+            alarm_gap = now - alarm_last;
+        }
+        alarm_last = now;
+        if (alarm_runs != 0xFFu) alarm_runs = static_cast<uint8_t>(alarm_runs + 1u);
+    }
+#endif
 }
 // The cascade's two halves have vectors of their own; an unbound vector
 // on this part is a jump to 0, which is a reset loop and not a crash.

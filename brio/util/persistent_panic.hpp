@@ -27,7 +27,11 @@
  * thing that matters is that the bytes are down before the reporter
  * hands over.
  *
- * SIZE. Eight bytes of the store (four of header, four of record).
+ * SIZE. Eight bytes of the store (four of header, four of record). On
+ * a store that takes a run (util/nv_record.hpp's NvRunStore) whose
+ * write unit holds all eight - an `offset` on a unit boundary of eight
+ * bytes or more - report() is ONE operation; on a byte store it is one
+ * per differing byte.
  * ENDURANCE. Written once per panic and cleared once per boot that
  * finds one, so the wear is one erase/write per failure, not per run.
  */

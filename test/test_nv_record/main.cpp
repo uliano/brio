@@ -6,8 +6,11 @@
 // (util/persistent_panic.hpp).
 //
 // None of it knows what an EEPROM is: the store is a concept, and here
-// it is an array with a counter on it. What runs on the silicon is the
-// same source with avrxt/nvm.hpp's EepromStore in its place.
+// it is an array with a counter on it - one store that takes a byte
+// (FakeStore) and a family that also takes a run (RunStore<unit>, the
+// NvRunStore refinement), so every writer is proven on both of its
+// paths. What runs on the silicon is the same source with
+// avrxt/nvm.hpp's EepromStore in its place.
 //
 // Run with: ctest --preset host (or ctest --preset host -R <suite name>)
 
@@ -15,7 +18,9 @@
 #include <doctest.h>
 
 #include <stdint.h>
+#include <cstring>
 #include <optional>
+#include <utility>
 
 #include "host/platform.hpp"
 #include "kernel/panic.hpp"
@@ -45,19 +50,25 @@ struct FakeStore {
     static inline bool interrupt_armed = false;
     static inline bool ready_flag_ = false;
     static inline uint16_t finishes = 0;
+    static inline uint16_t reads_while_busy = 0;   ///< reads during a write
 
     static void reset(bool deferred = false) {
         for (uint16_t i = 0; i < bytes; ++i) {
             cells[i] = 0xFF;
         }
-        writes = refusals = finishes = 0;
+        writes = refusals = finishes = reads_while_busy = 0;
         refuse_next = busy_flag = false;
         defer = deferred;
         interrupt_armed = ready_flag_ = false;
     }
 
     static constexpr uint16_t size() { return bytes; }
-    static uint8_t read(uint16_t a) { return a < bytes ? cells[a] : 0xFF; }
+    static uint8_t read(uint16_t a) {
+        if (busy_flag) {
+            ++reads_while_busy;
+        }
+        return a < bytes ? cells[a] : 0xFF;
+    }
 
     static bool write(uint16_t a, uint8_t v) {
         if (a >= bytes || refuse_next) {
@@ -461,4 +472,453 @@ TEST_CASE("a store that refuses a byte ends the request with nv_refused") {
     CHECK(Requester::replies == 1);
     CHECK(Requester::last.status == nv_refused);
     CHECK(FakeStore::refusals == 1);
+}
+
+// ---------------------------------------------------------------------------
+//  the run: a store that writes a run of one write unit in one operation
+// ---------------------------------------------------------------------------
+
+namespace {
+
+/// A store with the contract's run verb, its write unit `unit` bytes
+/// (the last unit cut short by the store's end when `unit` does not
+/// divide it). It behaves as a page-buffered EEPROM does: an operation
+/// touches only the bytes that differ, a read while an operation is in
+/// flight waits it out (and is counted - the bus wait that holds a CPU's
+/// interrupts on the AVR EA), and the power can be cut after any number
+/// of operations, after which nothing reaches the array.
+template <uint16_t unit>
+struct RunStore {
+    static constexpr uint16_t bytes = 64;
+
+    static inline uint8_t cells[bytes];
+    static inline uint16_t wear[bytes];     ///< operations that changed each byte
+    static inline uint16_t ops = 0;         ///< operations started (runs and bytes)
+    static inline uint16_t run_ops = 0;     ///< of which runs
+    static inline uint16_t over_room = 0;   ///< runs refused for leaving their room
+    static inline uint16_t reads_while_busy = 0;
+    static inline uint16_t finishes = 0;
+    static inline bool refuse_next = false;
+    static inline int32_t power_left = -1;  ///< operations before the cut; -1 never
+    static inline bool defer = false;
+    static inline bool busy_flag = false;
+    static inline bool interrupt_armed = false;
+    static inline bool ready_flag_ = false;
+    static inline uint16_t pending_at = 0;
+    static inline uint16_t pending_len = 0;
+    static inline uint8_t pending[bytes];
+
+    static void reset(bool deferred = false) {
+        for (uint16_t i = 0; i < bytes; ++i) {
+            cells[i] = 0xFF;
+            wear[i] = 0;
+        }
+        ops = run_ops = over_room = reads_while_busy = finishes = 0;
+        refuse_next = busy_flag = interrupt_armed = ready_flag_ = false;
+        power_left = -1;
+        defer = deferred;
+    }
+
+    static constexpr uint16_t size() { return bytes; }
+    static constexpr uint16_t run_room(uint16_t a) {
+        const uint16_t to_unit = static_cast<uint16_t>(unit - a % unit);
+        const uint16_t to_end = a < bytes ? static_cast<uint16_t>(bytes - a) : 1u;
+        return to_unit < to_end ? to_unit : to_end;
+    }
+
+    static uint8_t read(uint16_t a) {
+        if (busy_flag) {
+            ++reads_while_busy;
+            settle();
+        }
+        return a < bytes ? cells[a] : 0xFF;
+    }
+
+    static bool write_run(uint16_t a, const uint8_t* src, uint16_t n) {
+        if (n == 0 || a >= bytes || n > run_room(a)) {
+            ++over_room;
+            return false;
+        }
+        if (refuse_next || busy_flag) {
+            refuse_next = false;
+            return false;
+        }
+        ++ops;
+        ++run_ops;
+        if (power_left == 0) {
+            return true;              // the chip is off: nothing lands
+        }
+        if (power_left > 0) {
+            --power_left;
+        }
+        pending_at = a;
+        pending_len = n;
+        for (uint16_t i = 0; i < n; ++i) {
+            pending[i] = src[i];
+        }
+        busy_flag = true;
+        if (!defer) {
+            settle();
+        }
+        return true;
+    }
+    static bool write(uint16_t a, uint8_t v) {
+        if (a >= bytes) {
+            return false;
+        }
+        const bool ok = write_run(a, &v, 1);
+        if (ok) {
+            --run_ops;
+        }
+        return ok;
+    }
+
+    static void settle() {
+        if (!busy_flag) {
+            return;
+        }
+        for (uint16_t i = 0; i < pending_len; ++i) {
+            const uint16_t at = static_cast<uint16_t>(pending_at + i);
+            if (cells[at] != pending[i]) {    // byte marking: equal bytes untouched
+                cells[at] = pending[i];
+                ++wear[at];
+            }
+        }
+        busy_flag = false;
+        ready_flag_ = true;
+    }
+
+    static bool ready() { return !busy_flag; }
+    static bool wait_ready() {
+        settle();
+        return true;
+    }
+    static void finish() { ++finishes; }
+
+    static void arm_ready_interrupt(bool on) { interrupt_armed = on; }
+    static bool ready_flag() { return ready_flag_; }
+    static void clear_ready_flag() { ready_flag_ = false; }
+
+    /// Write units in [a, a + n) holding a byte that differs from `want`.
+    static uint16_t units_differing(uint16_t a, const uint8_t* want, uint16_t n) {
+        uint16_t units = 0;
+        uint16_t last_unit = 0xFFFFu;
+        for (uint16_t i = 0; i < n; ++i) {
+            const uint16_t at = static_cast<uint16_t>(a + i);
+            if (cells[at] != want[i] && at / unit != last_unit) {
+                ++units;
+                last_unit = static_cast<uint16_t>(at / unit);
+            }
+        }
+        return units;
+    }
+};
+
+static_assert(NvRunStore<RunStore<8>>);
+static_assert(NvPacedStore<RunStore<8>>);
+static_assert(!NvRunStore<FakeStore>);   // the byte store stays a byte store
+
+/// A record that spans several write units of every size swept below.
+struct Wide {
+    uint8_t b[13];
+};
+static_assert(nv_record_size<Wide> == 17);
+
+template <typename T>
+T pattern(uint8_t seed) {
+    T v{};
+    uint8_t* const p = reinterpret_cast<uint8_t*>(&v);
+    for (uint16_t i = 0; i < sizeof(T); ++i) {
+        p[i] = static_cast<uint8_t>(seed * 37u + i * 11u + 1u);
+    }
+    return v;
+}
+
+/// The values a record goes through: from erased, a whole new value,
+/// the same again, one byte changed, a value with 0xFF bytes in it, and
+/// back - every kind of change the writers distinguish.
+template <typename T>
+T step_value(uint8_t step) {
+    T v = pattern<T>(1);
+    uint8_t* const p = reinterpret_cast<uint8_t*>(&v);
+    switch (step) {
+        case 0: return v;
+        case 1: return v;                              // unchanged
+        case 2: p[sizeof(T) - 1] ^= 0x40u; return v;   // one byte
+        case 3: p[0] = 0xFFu; p[sizeof(T) / 2] = 0xFFu; return v;
+        case 4: return pattern<T>(7);                  // everything
+        default: return pattern<T>(1);
+    }
+}
+constexpr uint8_t value_steps = 6;
+
+/// One record at one offset, stored through the same value sequence on
+/// the byte store and on a run store of write unit `unit`: the same
+/// bytes in the array, the same count returned, every run inside its
+/// room, an operation per unit touched, no read of a busy store.
+template <typename T, uint16_t unit, uint16_t offset>
+void same_as_byte_path() {
+    using ByteRec = NvRecord<T, FakeStore, offset>;
+    using Store = RunStore<unit>;
+    using RunRec = NvRecord<T, Store, offset>;
+    FakeStore::reset();
+    Store::reset(true);   // deferred: a read before a wait would show
+    for (uint8_t step = 0; step < value_steps; ++step) {
+        const T v = step_value<T>(step);
+        uint8_t image[nv_record_size<T>];
+        RunRec::build(v, image);
+        const uint16_t units = Store::units_differing(offset, image, nv_record_size<T>);
+        const uint16_t ops_before = Store::run_ops;
+        const uint16_t n_byte = ByteRec::store(v);
+        const uint16_t n_run = RunRec::store(v);
+        CAPTURE(unit);
+        CAPTURE(offset);
+        CAPTURE(step);
+        CHECK(n_run == n_byte);
+        CHECK(Store::run_ops - ops_before == units);
+        bool same = true;
+        for (uint16_t i = 0; i < FakeStore::bytes; ++i) {
+            if (FakeStore::cells[i] != Store::cells[i]) same = false;
+        }
+        CHECK(same);
+        const std::optional<T> back = RunRec::load();
+        REQUIRE(back.has_value());
+        CHECK(std::memcmp(&*back, &v, sizeof(T)) == 0);
+    }
+    CHECK(Store::over_room == 0);
+    CHECK(Store::reads_while_busy == 0);
+    CHECK(Store::ops == Store::run_ops);   // the record never fell back to a byte
+}
+
+template <typename T, uint16_t unit, uint16_t... offsets>
+void sweep_offsets(std::integer_sequence<uint16_t, offsets...>) {
+    (same_as_byte_path<T, unit, offsets>(), ...);
+}
+
+template <typename T, uint16_t unit>
+void sweep() {
+    // Every offset of two whole units of the widest unit swept, so the
+    // record starts at every position a room boundary can take.
+    sweep_offsets<T, unit>(std::make_integer_sequence<uint16_t, 17>{});
+}
+
+} // namespace
+
+TEST_CASE("the record on a run store: the byte path's bytes and count, a run "
+          "per write unit touched, at every offset against every unit") {
+    sweep<Settings, 1>();
+    sweep<Settings, 2>();
+    sweep<Settings, 3>();
+    sweep<Settings, 4>();
+    sweep<Settings, 5>();
+    sweep<Settings, 8>();
+    sweep<Settings, 16>();
+    sweep<Wide, 1>();
+    sweep<Wide, 3>();
+    sweep<Wide, 4>();
+    sweep<Wide, 8>();
+    sweep<Wide, 16>();
+    sweep<Wide, 64>();
+}
+
+TEST_CASE("the byte path reads the next byte while the last one is still "
+          "being written; the run path waits before every read") {
+    FakeStore::reset(true);
+    (void)Rec::store(Settings{0x1234, 0x56, 0x78});
+    CHECK(FakeStore::reads_while_busy > 0);
+
+    using Store = RunStore<8>;
+    using RunRec = NvRecord<Settings, Store, 4>;   // straddles a unit boundary
+    Store::reset(true);
+    (void)RunRec::store(Settings{0x1234, 0x56, 0x78});
+    (void)RunRec::store(Settings{0x4321, 0x65, 0x87});
+    CHECK(Store::run_ops == 4);   // two units, twice
+    CHECK(Store::reads_while_busy == 0);
+}
+
+TEST_CASE("a power cut between the runs of a store leaves the old value, the "
+          "new one or none - never another") {
+    using Store = RunStore<4>;
+    using RunRec = NvRecord<Wide, Store, 2>;        // 17 bytes over six units
+    const Wide old_value = pattern<Wide>(3);
+    const Wide new_value = pattern<Wide>(9);
+    Store::reset();
+    (void)RunRec::store(old_value);
+    const uint16_t full = Store::run_ops;
+    uint8_t image[nv_record_size<Wide>];
+    RunRec::build(new_value, image);
+    const uint16_t needed = Store::units_differing(2, image, nv_record_size<Wide>);
+    REQUIRE(needed >= 2);
+    uint16_t saw_none = 0;
+    for (uint16_t cut = 0; cut <= needed; ++cut) {
+        Store::reset();
+        (void)RunRec::store(old_value);
+        Store::power_left = cut;
+        (void)RunRec::store(new_value);
+        Store::power_left = -1;                     // the power is back
+        const std::optional<Wide> back = RunRec::load();
+        CAPTURE(cut);
+        if (!back) {
+            ++saw_none;
+        } else {
+            const bool is_old = std::memcmp(&*back, &old_value, sizeof(Wide)) == 0;
+            const bool is_new = std::memcmp(&*back, &new_value, sizeof(Wide)) == 0;
+            CHECK((is_old || is_new));
+            CHECK(is_old == (cut == 0));
+            CHECK(is_new == (cut == needed));
+        }
+        // And the next store, with the power on, completes it.
+        (void)RunRec::store(new_value);
+        const std::optional<Wide> again = RunRec::load();
+        REQUIRE(again.has_value());
+        CHECK(std::memcmp(&*again, &new_value, sizeof(Wide)) == 0);
+    }
+    CHECK(full >= 2);
+    CHECK(saw_none == needed - 1);   // every cut strictly inside the store
+}
+
+TEST_CASE("the panic record on a run store is one operation, and is taken "
+          "once") {
+    using Store = RunStore<8>;
+    using Panic = PersistentPanic<Store, 0>;
+    using BytePanic = PersistentPanic<FakeStore, 0>;
+    Store::reset();
+    FakeStore::reset();
+    Panic::report(PanicCode::assert_failed, 0x5A);
+    BytePanic::report(PanicCode::assert_failed, 0x5A);
+    CHECK(Store::run_ops == 1);
+    CHECK(FakeStore::writes == nv_record_size<PanicRecord>);   // eight, one each
+    for (uint16_t i = 0; i < 8; ++i) {
+        CHECK(Store::cells[i] == FakeStore::cells[i]);
+    }
+    const std::optional<PanicRecord> r = Panic::take();
+    REQUIRE(r.has_value());
+    CHECK(r->code == static_cast<uint8_t>(PanicCode::assert_failed));
+    CHECK(r->context == 0x5A);
+    CHECK(Store::ops == 2);           // the take's clear is a byte: one more
+    CHECK(!Panic::take().has_value());
+
+    // Off a unit boundary the eight bytes straddle two units: two runs.
+    using Straddling = PersistentPanic<Store, 12>;
+    Store::reset();
+    Straddling::report(PanicCode::kernel_fault, 1);
+    CHECK(Store::run_ops == 2);
+    CHECK(Straddling::pending());
+}
+
+// ---------------------------------------------------------------------------
+//  the writer AO on a run store
+// ---------------------------------------------------------------------------
+
+namespace {
+
+using RStore = RunStore<8>;
+using RunWriter = NvWriter<RStore, P, 2>;
+
+/// pump() for the run writer: the store's operation completes, the ISR
+/// disarms and posts, exactly as for the byte writer.
+uint16_t pump_run() {
+    uint16_t steps = 0;
+    for (uint16_t guard = 0; guard < 1000; ++guard) {
+        if (const std::optional<RunWriter::Event> e = RunWriter::queue.pop()) {
+            RunWriter::dispatch(*e);
+            ++steps;
+            continue;
+        }
+        if (const std::optional<Requester::Event> r = Requester::queue.pop()) {
+            Requester::dispatch(*r);
+            ++steps;
+            continue;
+        }
+        if (RStore::interrupt_armed && !RStore::ready()) {
+            RStore::settle();
+            RStore::arm_ready_interrupt(false);
+            post<RunWriter>(NvReady{});
+            continue;
+        }
+        break;
+    }
+    return steps;
+}
+
+} // namespace
+
+TEST_CASE("the writer on a run store: one operation per write unit touched, "
+          "the byte writer's bytes and count") {
+    // 20 bytes from offset 5 over units of 8: [5..7] [8..15] [16..23] [24].
+    static uint8_t payload[20];
+    for (uint8_t i = 0; i < sizeof payload; ++i) {
+        payload[i] = static_cast<uint8_t>(0x30u + i);
+    }
+    RStore::reset(true);
+    FakeStore::reset(true);
+    Requester::init();
+    RunWriter::init();
+    Writer::init();
+
+    post<RunWriter>(NvWrite{5, lend<Lease::reply>(payload), sizeof payload,
+                            reply_to<Requester, NvDone>()});
+    (void)pump_run();
+    CHECK(Requester::replies == 1);
+    CHECK(Requester::last.status == nv_ok);
+    CHECK(Requester::last.written == 20);
+    CHECK(RStore::run_ops == 4);
+    CHECK(RStore::over_room == 0);
+    CHECK(RStore::reads_while_busy == 0);
+    CHECK(!RStore::interrupt_armed);
+    CHECK(RStore::finishes == 1);
+
+    post<Writer>(NvWrite{5, lend<Lease::reply>(payload), sizeof payload,
+                         reply_to<Requester, NvDone>()});
+    (void)pump();
+    CHECK(Requester::replies == 2);
+    CHECK(Requester::last.written == 20);
+    for (uint16_t i = 0; i < FakeStore::bytes; ++i) {
+        CHECK(FakeStore::cells[i] == RStore::cells[i]);
+    }
+
+    // Two bytes changed in the middle of the third unit, one in the
+    // first: two operations, three bytes counted, the rest untouched.
+    payload[0] = 0x00;
+    payload[12] = 0x01;
+    payload[14] = 0x02;
+    const uint16_t ops_before = RStore::run_ops;
+    post<RunWriter>(NvWrite{5, lend<Lease::reply>(payload), sizeof payload,
+                            reply_to<Requester, NvDone>()});
+    (void)pump_run();
+    CHECK(Requester::last.status == nv_ok);
+    CHECK(Requester::last.written == 3);
+    CHECK(RStore::run_ops - ops_before == 2);
+    for (uint8_t i = 0; i < sizeof payload; ++i) {
+        CHECK(RStore::cells[5 + i] == payload[i]);
+    }
+
+    // Unchanged: answered without an operation or an interrupt.
+    const uint16_t ops_now = RStore::run_ops;
+    post<RunWriter>(NvWrite{5, lend<Lease::reply>(payload), sizeof payload,
+                            reply_to<Requester, NvDone>()});
+    (void)pump_run();
+    CHECK(Requester::last.written == 0);
+    CHECK(RStore::run_ops == ops_now);
+}
+
+TEST_CASE("the run writer answers a bad range and a refusal as the byte "
+          "writer does") {
+    static const uint8_t payload[4] = {1, 2, 3, 4};
+    RStore::reset(true);
+    Requester::init();
+    RunWriter::init();
+    post<RunWriter>(NvWrite{RStore::bytes - 2, lend<Lease::reply>(payload), sizeof payload,
+                            reply_to<Requester, NvDone>()});
+    (void)pump_run();
+    CHECK(Requester::last.status == nv_bad_range);
+    CHECK(RStore::ops == 0);
+
+    RStore::refuse_next = true;
+    post<RunWriter>(NvWrite{0, lend<Lease::reply>(payload), sizeof payload,
+                            reply_to<Requester, NvDone>()});
+    (void)pump_run();
+    CHECK(Requester::replies == 2);
+    CHECK(Requester::last.status == nv_refused);
+    CHECK(Requester::last.written == 0);
 }

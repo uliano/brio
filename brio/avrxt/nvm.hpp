@@ -1125,6 +1125,12 @@ private:
  * ~10 ms belong to the store, not to the caller. ready()/wait_ready()
  * and the ready interrupt are how the two callers above cope with that,
  * each in its own way.
+ *
+ * It does not offer the contract's run verb (NvRunStore): the writers
+ * serve it a byte at a time. This generation writes its EEPROM a byte
+ * per operation, so its room would be one and the verb would change
+ * only the writers' loop (the record's read before its wait); adopted
+ * in the DA/DB's own phase.
  */
 struct EepromStore {
     EepromStore() = delete;
@@ -1786,14 +1792,16 @@ private:
 };
 
 /**
- * The EEPROM as a util/nv_record.hpp store, on this generation.
+ * The EEPROM as a util/nv_record.hpp store, on this generation - a store
+ * that TAKES A RUN (NvRunStore).
  *
- * write() is Nvm::eeprom_store(), the store run of one byte: the cheapest
- * of the three operations that leaves the byte in place - EEPW onto an erased
- * byte and EEPER to 0xFF at 2.6 ms, EEPERW at 5.2 ms otherwise - and it
- * RETURNS BEFORE THE BYTE IS DOWN. The NvStore contract is a byte at a
- * time, so each byte is one operation; the page run (eight bytes for the
- * price of one) is the engine's, waiting for the contract to take a run.
+ * write_run() is Nvm::eeprom_store_run(): the differing bytes of one page
+ * in ONE operation, the cheapest of the three that leaves them in place -
+ * EEPW onto erased bytes and EEPER to 0xFF at 2.6 ms, EEPERW at 5.2 ms
+ * otherwise - and run_room() is the page's remainder, so the record, the
+ * writer AO and the panic record spend an operation per page touched
+ * where a byte store spends one per byte. write() is its run of one,
+ * Nvm::eeprom_store(). Every write RETURNS BEFORE THE BYTES ARE DOWN.
  */
 struct EepromStore {
     EepromStore() = delete;
@@ -1802,6 +1810,18 @@ struct EepromStore {
     static uint8_t read(uint16_t addr) { return Nvm::eeprom_read(addr); }
     static bool write(uint16_t addr, uint8_t value) {
         return Nvm::eeprom_store(addr, value);
+    }
+    static constexpr uint16_t run_room(uint16_t addr) {
+        return Nvm::eeprom_run_room(addr);
+    }
+    /// The contract's length is 16 bits wide; the engine's run is a page
+    /// at most, so the length is checked against the room before it is
+    /// narrowed (a wide one would otherwise wrap into a short run).
+    static bool write_run(uint16_t addr, const uint8_t* src, uint16_t len) {
+        if (len > Nvm::eeprom_run_room(addr)) {
+            return false;
+        }
+        return Nvm::eeprom_store_run(addr, src, static_cast<uint8_t>(len));
     }
     static bool ready() { return !Nvm::eeprom_busy(); }
     static bool wait_ready() { return Nvm::wait_eeprom(); }
@@ -1816,6 +1836,7 @@ struct EepromStore {
 
 static_assert(NvStore<EepromStore>);
 static_assert(NvPacedStore<EepromStore>);
+static_assert(NvRunStore<EepromStore>);
 
 } // namespace brio
 
