@@ -148,9 +148,8 @@ note): the select is held 4.9 ms against the 1.5 ms a standby wake
 takes on the crystal ([platform.md](platform.md)). Fourteen runs, no
 exception.
 
-**On the AVR64EA48** (rev B1, 20 MHz, `test_avr_pin` driven and read
-through the debugger - the bench board's console path is open, its
-page): letters 1 to 9 green as on the DA/DB, 27 verdicts, and letter e
+**On the AVR64EA48** (rev B1, 20 MHz, `test_avr_pin` from the console,
+30 of 30): letters 1 to 9 green as on the DA/DB, 27 verdicts, and letter e
 - PD3 through PORTD's event slot 1 to a TCB counting its rises, the slot
 read back as pin 3 with slot 0 untouched at PIN0, ten rises counted ten,
 the slot moved to a quiet PD5 counting none - three of three in ten runs

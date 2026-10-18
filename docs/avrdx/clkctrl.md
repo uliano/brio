@@ -384,10 +384,9 @@ compare with the current rate to place that store - counted in
 it already pays.
 
 **Bench findings (AVR64EA48 rev B1, REVID 0x21, 5 V; `test_avr_clock`'s
-EA letters driven and read through the debugger, the board's console
-path being open and its 32 kHz crystal not running - its page - so
-letters 2 to 6, which time on that crystal, stop at their first verdict
-there, and letter 1 runs its ladder untimed).**
+EA letters from the console, 22 of 27 - the board's 32 kHz crystal does
+not run, its page, so letters 2 to 6, which time on that crystal, stop at
+their first verdict there, and letter 1 runs its ladder untimed).**
 
 - Reset state, read at the reset vector over UPDI: MCLKCTRLA 0x00,
   **MCLKCTRLB 0x11** (DIV6, PEN, as 12.5.2 says), MCLKSTATUS 0x02

@@ -54,30 +54,21 @@ this one differs from the DA's on the same PCB in what is fitted.
 
 ## Bench findings
 
-- Read over the debugger with the resident images (the console path
-  being open, below): the 20 MHz quartz starts and is the main clock
-  (`Clock<crystal>::init()` true, MCLKCTRLA EXTCLK, EXTS set, TIMEBASE
-  20); `Clock<internal, 20 MHz, div4>` runs at 5 MHz with TIMEBASE 5 and
-  PA7 toggling (`family_probe`); the console image configures USART2
-  ALT1 (USARTROUTEB 0x01, BAUD 174 for 460800) and transmits, and sits
-  in the kernel's idle.
-- **PF4/PF5 reach no bridge**: PF5 floats (it reads 0, and 1 with its
-  pull-up enabled) and stays flat while the host streams bytes into the
-  CH340B, and nothing the board transmits arrives - the "to UART"
-  jumpers JP11/JP12 are not closed on this assembly (or the isolator's
-  board side is unpowered). Until they are, no suite's console runs.
+- The 20 MHz quartz starts and is the main clock (`Clock<crystal>::init()`
+  true, MCLKCTRLA EXTCLK, EXTS set, TIMEBASE 20); `Clock<internal, 20
+  MHz, div4>` runs at 5 MHz with TIMEBASE 5 and PA7 toggling
+  (`family_probe`); the console runs at 460800 on USART2 ALT1
+  (USARTROUTEB 0x01, BAUD 174) through the isolated CH340B.
 - **The 32.768 kHz crystal does not oscillate**: XOSC32K enabled and
   forced on (RUNSTDBY, 64k cycles of start-up, LPMODE off) never sets
   XOSC32KS, and the RTC selected onto it never synchronizes its CTRLA
   (CTRLABUSY stuck), where the same RTC on OSC32K synchronizes at once -
   a joint, a crystal not fitted, or its load. The Ticker runs from
   OSC32K meanwhile (`preferred()`).
-- Driven through the debugger instead of the console - a command byte
-  pushed into the Uart's receive ring, the suite's tallies read back
-  ([../probes/atmel-ice.md](../probes/atmel-ice.md)): `test_avr_pin`
-  30 of 30, `test_avr_platform` 109 of 109 and `test_avr_power` 53 of
-  53 (one verdict of its letter b red in two runs of ten - platform.md)
-  at 20 MHz on the quartz, and the clock suite's letters that need no
-  32 kHz crystal ([../avrdx/platform.md](../avrdx/platform.md),
+- From the console, at 20 MHz on the quartz: `test_avr_pin` 30 of 30,
+  `test_avr_platform` 109 of 109, `test_avr_power` 53 of 53 (one verdict
+  of its letter b red in two runs of ten - platform.md), `test_avr_clock`
+  22 of 27 - its five reds are the rulers timed against the 32 kHz
+  crystal above ([../avrdx/platform.md](../avrdx/platform.md),
   [../avrdx/port.md](../avrdx/port.md),
   [../avrdx/clkctrl.md](../avrdx/clkctrl.md)).

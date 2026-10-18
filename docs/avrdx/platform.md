@@ -839,8 +839,7 @@ dispatch, and only the loop is the suite's.
   fast, the same +8000-to-+11000 ppm this desk measures everywhere else.
 
 **On the AVR64EA48** (rev B1, the board's 20 MHz quartz; the suites
-driven and their tallies read through the debugger - the bench board's
-console path is open, its page): `test_avr_platform` 109 verdicts, 109
+from the console): `test_avr_platform` 109 verdicts, 109
 green, every letter in ten runs of ten - the delays derived from the
 20 MHz rate (1 us = 20 cycles = 5 loops, the dynamic regime 20 -> 10 ->
 20 MHz and 1.25 MHz with its exact Q4.12 factor 1280), the critical
