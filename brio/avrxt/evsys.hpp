@@ -478,7 +478,7 @@ struct EvOut : EventUserBase<EvOut<P>> {
                   "EVOUT pins: Px2 in the default position on every port, Px7 "
                   "(ALT1) on every port except PORTF on the AVR DA/DB (DS40002247B "
                   "17.5.1), on PORTA, PORTC and PORTD on the AVR EA (DS40002443A "
-                  "17.5.1); whether THIS package bonds pin 7 of an existing port is "
+                  "17.3.1); whether THIS package bonds pin 7 of an existing port is "
                   "a pin-level fact for the device tables");
     static_assert(!evsys_pin_unconnected(port, pin),
                   "EVOUT on PB7/PE7 does not reach its pin on an AVR DA "

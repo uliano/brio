@@ -243,7 +243,16 @@ enum class TwiInputLevel : uint8_t { i2c = 0, smbus = 1 };
 
 /// CTRLA.SDASETUP: how many peripheral clocks the CLIENT stretches SCL
 /// to guarantee the setup time of its SDA output (29.5.1; the DA
-/// clarification 3.2 restates it as the clock-hold time).
+/// clarification 3.2 restates it as the clock-hold time). Every default
+/// of this driver is EIGHT, not the reset value's four: above 16 MHz four
+/// clocks are shorter than the I2C specification's Standard-mode data
+/// setup (250 ns), and on the wire they are not enough - a transmitting
+/// client whose SDA must FALL as it releases its stretch (it holds SDA
+/// through the stretch at the served byte's bit 6: after a byte with bit
+/// 6 set, before one whose first bit is 0) moves SDA as SCL rises,
+/// within 146 ns of it, and drops out of the read
+/// (docs/avrxt/twi.md, "The client's data setup"). The cost is four
+/// clocks more of stretch where the client releases SCL itself.
 enum class TwiSdaSetup : uint8_t { cycles4 = 0, cycles8 = 1 };
 
 /// CTRLA/DUALCTRL.SDAHOLD, named in TRUE nanoseconds. The DA silicon
@@ -496,7 +505,7 @@ struct TwiConfig {
 
     // CTRLA - shared by the host and by a client that is NOT in Dual mode.
     TwiInputLevel input_level = TwiInputLevel::i2c;
-    TwiSdaSetup sda_setup = TwiSdaSetup::cycles4;
+    TwiSdaSetup sda_setup = TwiSdaSetup::cycles8;
     TwiSdaHold sda_hold = TwiSdaHold::off;
     bool fm_plus = false;
     bool debug_run = false;             ///< DBGCTRL.DBGRUN
@@ -1383,7 +1392,7 @@ public:
         uint16_t fall_ns = 0;
         TwiTimeout timeout = TwiTimeout::disabled;
         TwiSdaHold sda_hold = TwiSdaHold::off;
-        TwiSdaSetup sda_setup = TwiSdaSetup::cycles4;
+        TwiSdaSetup sda_setup = TwiSdaSetup::cycles8;
         TwiInputLevel input_level = TwiInputLevel::i2c;
         /// MCTRLA.SMEN: the ACK rides the MDATA read (29.3.3.3). ON by
         /// default: a received byte but the last is then answered by the
@@ -1738,7 +1747,7 @@ public:
         bool stop_interrupt = true;         ///< PIEN: let a STOP raise APIF
         bool data_interrupt = false;        ///< DIEN
         bool address_interrupt = false;     ///< APIEN
-        TwiSdaSetup sda_setup = TwiSdaSetup::cycles4;
+        TwiSdaSetup sda_setup = TwiSdaSetup::cycles8;
         TwiSdaHold sda_hold = TwiSdaHold::off;
         TwiInputLevel input_level = TwiInputLevel::i2c;
         bool fm_plus = false;               ///< the pads, when the host runs Fm+

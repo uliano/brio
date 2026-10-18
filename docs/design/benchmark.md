@@ -61,7 +61,7 @@ cycles: one measurement is bounded at about 90 s at 48 MHz and 24 s at
 | STM32F4 | the DWT's cycle counter (`cortexm/dwt.hpp`) | HCLK cycles in one load, the M3+ core unit |
 | RP2350, both architectures | `Timer<1>` with its source on clk_sys (`rp2350/timer.hpp`) | clk_sys cycles: one ruler for both instruction sets, as the stratum's `delay_us` is |
 | CH32V006, CH32V203, CH32V303 | `Ticker::cycles()` on the STK (`ch32v00x/ticker.hpp`, `ch32vx03/ticker.hpp`) | HCLK cycles |
-| AVR DA/DB | two TCBs cascaded at CLK_PER (`avrxt/tcb.hpp`'s `CascadedCounter`) | CLK_PER cycles, 32 bits |
+| AVR DA/DB/EA | two TCBs cascaded at CLK_PER (`avrxt/tcb.hpp`'s `CascadedCounter`) | CLK_PER cycles, 32 bits |
 
 The self-check, letter `r` of every bench app: `delay_us(clock, 1000)`
 read on the ruler must be at least hz/1000 and not more than a few per
@@ -157,6 +157,7 @@ app prints it); the tick floor is busy cycles in one idle second.
 | family (board, clock) | ruler | stamp | window | memcpy 4096 x | memset 4096 x | print 4096: irq, isr, x | tick floor |
 |---|---|---|---|---|---|---|---|
 | AVR128DB48 (24 MHz crystal) | 78 | 217 | 355 | 2.36 | 5.02 | 4463 (4096 DRE + 367 ticks), 101 (25), 0.99 | 366 k, 1.52 % |
+| AVR64EA48 (20 MHz quartz) | 72 | 205 | 337 | 2.34 at 2048 (two buffers of 4096 would be more than the part's 6 KB) | 5.03 at 2048 | 2228 at 2048 (2048 DRE + 180 ticks), 95, 0.99 | 338 k, 1.69 % |
 | SAM C21J18A (48 MHz OSC48M, 2 WS) | 65 | 150 | 261 | 1.43 | 1.63 | 4452 (4097 SERCOM5 + 355 ticks), 153 (100 with the handlers in SRAM), 0.99 | 254 k, 0.53 % |
 | STM32G0B1RE (64 MHz PLL, 2 WS, the prefetch and the FIFO on) | 62 | 118 | 225 | 1.41 | 1.58 | 871 (515 USART2 refills + 356 ticks), 338 a refill of up to eight = 43 a character, 1.00 | 211 k, 0.33 % |
 | CH32V006K8U6 (48 MHz PLL, 2 WS) | 46 | 112 | 255 | 4.48 at 2048 (two buffers of 4096 would be the part's SRAM) | 4.08 | 4454 (4098 USART1 + 356 ticks), 133 (87), 0.99 | 251 k, 0.52 % |
@@ -332,6 +333,7 @@ sequence where no library was read). The rates named are SCK.
 | family (clock) | spi.poll x at /4, /16 | spi.poll.rx x at /4, /16 | spi.pump x at /4, /16; interrupts per 256 | spi.req 3 bytes, fixed cost (before) | the vendor's loop, x at /4, /16 |
 |---|---|---|---|---|---|
 | AVR128DB48 (24 MHz; 6 and 1.5 MHz) | 1.09, 1.02 (two cycles a byte the block's, beyond the wire) | 1.09, 1.02 | 7.17, 1.79; 130 (two bytes an entry; the handler, 230 cycles a byte, bounds both rates) | 286, the stopwatch's 65 inside | the data sheet's buffer-mode sequence 1.09, 1.01 |
+| AVR64EA48 (20 MHz; 5 and 1.25 MHz) | 1.09, 1.02 (the DB's cycles a byte, to the cycle) | 1.09, 1.02 | 7.00, 1.75; 131 (the handler, 223 cycles a byte, bounds both rates) | 280, the stopwatch's 60 inside | not run on this board |
 | SAM C21J18A (48 MHz; 12 and 3 MHz) | 1.05, 1.01 | 1.38, 1.01 (44 cycles a character at 12 MHz: the two-flag turn does not fit a 32-cycle character behind two wait states) | 12.64, 3.16; 258 (the handler, 404 cycles a character, outlasts the character at both rates) | 568 (943) | the data sheet's sequence, 1.14, 1.00 (36.6 cycles a character at 12 MHz: the bare loop is not wire-bound there either) |
 | STM32G0B1RE (64 MHz; 16 and 4 MHz) | 1.04, 1.01 | 1.17, 1.01 | 5.31, 1.34; 86 (three byte frames an interrupt, the FIFO's capacity) | 384 (998) | HAL 5.29, 1.79 (one in flight and a tick call per turn) |
 | STM32F446RE (180 MHz; 22.5 and 5.625 MHz) | 1.01, 1.00 | 1.60 (one in flight below the 236-cycle threshold), 1.00 (two) | 2.61, 1.00 (two in flight from /16); 256 | 243 (517) | HAL 2.97, 1.30 |
@@ -416,6 +418,7 @@ receive, at the rate named.
 | RP2350, Cortex-M33 (150 MHz; 9.375 Mbaud) | 1.01 (1.06), 1.00 (1.00) | 1.00, 1.00 and 1.05, the engine 1.00, 1.00 and 1.05; 21 entries for 256 at 1 Mbaud | 3.20 frames at 115200, 3.37 at 1 Mbaud; the engine's tail at the owner's ask | 0 to 1 us, a bit 104 us | 1.1 % (17 a byte), 2.1 % (27 a byte) | pico-sdk: 34 cycles a byte against 27 |
 | RP2350, Hazard3 (150 MHz; 9.375 Mbaud) | 1.00 (1.03), 1.00 (1.00) | 1.00, 1.00 and 1.05, the engine 1.00, 1.00 and 1.04; 21 entries for 256 at 1 Mbaud | 3.19 and 3.03 frames; the engine's tail at the owner's ask | 0 to 1 us, a bit 104 us | 1.2 % (17 a byte), 1.9 % (27 a byte) | pico-sdk: 29 cycles a byte against 27 |
 | AVR128DB48 (24 MHz; 3 Mbaud) | 1.03, 1.00 | 1.00 at 115200 and 1 Mbaud, 1.04 at 2, 3.9 at 3 (the consumer starved, below); 256 and 254 to 1 Mbaud | -2 to 0 cycles at 115200; +69 to +78 at 1 to 3 Mbaud, under a frame | +35 to +37 cycles at 115200 (a bit is 208), +47 at 460800 (52), +26 at 1 Mbaud (24) | 25 %, 31 to 35 % (27 %) | the data sheet's sequence: 1.00 at 115200 and 1 Mbaud, 1.01 at 2, 2.9 at 3 |
+| AVR64EA48 (20 MHz; 2.5 Mbaud) | 1.03, 1.01 | 1.00 at 115200 and 1 Mbaud, 1.08 at 2, 1.69 at 2.5 (the consumer starved, as the DB's at 3); 256 and 257 to 1 Mbaud | +10 cycles at 115200; +70 to +74 at 1 to 2.5 Mbaud, under a frame | +20 cycles at 115200 (a bit is 174), +48 at 460800 (44) | the DB's cycles: a DRE entry 95 metered, a lone frame's receive entry 107, against a 200-cycle frame | not run on this board |
 
 What the rows say:
 
@@ -509,7 +512,8 @@ partner's handlers included where they run on the same core.
 
 | family (clock; the partner) | 1-byte write, fixed cost at 400 kHz (before) | register read 1+1, fixed (before) | 255-byte write: x, interrupts | 255-byte read: interrupts (before), handler cycles | busy of a 1-byte write | the vendor | longest host entry (before) |
 |---|---|---|---|---|---|---|---|
-| AVR128DB48 (24 MHz; the same TWI's client on PC2/PC3, served on the same core) | 509 (599) | 1003 (1112) | 1.12 (1.16), one interrupt a byte - the data sheet's own loop 1.11 | 1.14, smart mode | 1056 metered; the plain binding is busy for the tenure, the client's handler on the same core | the data sheet's polled loop: 316 and 808 fixed, the core held the whole tenure | 95 (120); 305 metered |
+| AVR128DB48 (24 MHz; the same TWI's client on PC2/PC3, served on the same core, SDASETUP four clocks) | 509 (599) | 1003 (1112) | 1.12 (1.16), one interrupt a byte - the data sheet's own loop 1.11 | 1.14, smart mode | 1056 metered; the plain binding is busy for the tenure, the client's handler on the same core | the data sheet's polled loop: 316 and 808 fixed, the core held the whole tenure | 95 (120); 305 metered |
+| AVR64EA48 (20 MHz; the same TWI's client on PC2/PC3, served on the same core, SDASETUP eight clocks) | 406 bare | 703 bare (the 1 + 1 register read, Smart) | 1.21 bare, one interrupt a byte | 1.23, smart mode | 998 metered; the plain binding is busy for the tenure | not run on this board | not taken on this board |
 | ATSAMC21J18A (48 MHz OSC48M, 2 WS; the AVR's `twi_peer`, which stretches every byte about 220 cycles) | 978 through the pump, the plain binding (1205); 1341 metered | 1371 plain, 1835 metered | the pump 1.24 | the pump 104 575 (137 679) | 1505 metered | the data sheet's loop: about 320 fixed on a one-byte write, the pump's wall about a fifth behind it; within half a per cent on long tenures | 383 |
 | STM32F429ZI (180 MHz; the board's STMPE811 on I2C3; the F429's figures, its board not on the desk) | 139 (961), three interrupts (seven) | 389 (816), five (ten) | 1.00 through the pump and the engines | - (the device answers no read a write did not open: reads are register reads) | 708 | HAL: 387 and 1171 fixed; 148 and 153 cycles a byte written and read, against 80 and 99 | 203 |
 | STM32F446RE (180 MHz; FMPI2C1 on the self-link, served on the same core) | 230, three interrupts | 611, five | 1.00 through the pump (256 interrupts, 98 cycles a byte) and the engines (4) | 256 through the pump (117 cycles a byte), 3 through the engines | 1225 | - | 214 |

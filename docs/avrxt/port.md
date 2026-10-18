@@ -189,7 +189,9 @@ Implemented but not bench-verified:
   witnessed above (PE2); no wire of the DB's desk reaches a Px6 pad - a
   peer driving one would measure it the same way.
 - On the AVR EA: the other half of 18.3.3.1, a pulse shorter than one
-  CLK_PER caught (a pulse source shorter than 50 ns at 20 MHz), and the
+  CLK_PER caught - a pulse shorter than 50 ns at 20 MHz, which the
+  SAM C21 partner can put on the stimulus net (PE2) as two IOBUS stores
+  one 48 MHz cycle apart, its edge counted by the pin's flag - and the
   single-edge wake of the pins no self-made or partner edge reaches on
   the bench board - PA4, PA5, PB0..PB5, PC0, PC1, PC5 and PE1, PD0, PD1,
   PD4, PD5, and the pins its I2C bus, LED and button hold - which a wire

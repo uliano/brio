@@ -171,7 +171,10 @@ differential).
 Implemented but not bench-verified:
 
 - `run_standby` on the AVR EA (a Standby with the DAC kept on): the
-  sleep suite's DAC leg is the DA/DB's;
+  sleep suite's DAC leg is the DA/DB's; on the EA a comparator kept in
+  Standby by its own `RUNSTDBY` (measured there, [platform.md](platform.md))
+  watching the DAC's output on the board's analog net, the DAC's flag the
+  only variable, would measure it;
 - the AVR EA's output ranges under a load heavier than the board's
   10 k: table 35-22 gives no drive figure per range, and at 0.2 mA the
   four codes drive the top alike - a few milliamperes at the top of the

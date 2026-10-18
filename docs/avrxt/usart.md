@@ -443,10 +443,10 @@ at 2 Mbaud and 80 at 2.5):
 |---|---|---|---|---|
 | `uart.tx` 256 bytes, x | 1.00 | 1.00 | 1.02 | 1.03 |
 | `uart.tx` 4096 bytes, x | 0.99 | 1.00 | 1.00 | 1.01 |
-| `uart.rx` 16-byte burst, x | 1.00 | 1.10 | 2.15, one frame lost | 2.61 |
-| `uart.rx` 256-byte burst, x | 1.00 | 1.00 | 1.13, two lost | 1.70, two lost and one FERR |
-| receive entries for 256 bytes (counted) | 256 | 255 | 427 for 263 | 257 for 258 |
-| the edge after the last stop bit's end, cycles | +9 | +70 | +74 | +74 |
+| `uart.rx` 16-byte burst, x | 1.00 | 1.10 | 1.34 | 4.30, a FERR |
+| `uart.rx` 256-byte burst, x | 1.00 | 1.00 | 1.08, an overrun | 1.69, an overrun and a FERR |
+| receive entries for 256 bytes (counted) | 256 | 257 | 438 for 275 | 247 for 258 |
+| the edge after the last stop bit's end, cycles | +10 | +70 | +73 | +74 |
 
 The cycles are the DB's - the same core, the same handlers: the
 transmitter's DRE entry 95 cycles metered, a lone frame's receive entry

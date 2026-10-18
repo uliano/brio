@@ -219,7 +219,7 @@ reads 99.5 kHz at 20 MHz and 101.0 kHz at 10 MHz.
 | `I2cSpeed` | `standard_100k`, `fast_400k`, `fast_plus_1m` | `standard_100k` | the bus speed class; MBAUD is solved from it and Fm+ also demands FMPEN |
 | `rise_ns` / `fall_ns` | nanoseconds, 0 = the mode's specification maximum | 0 | the bus's own edges, the only inputs equations 29-3 and 29-5 take beyond the clock |
 | `TwiInputLevel` | `i2c`, `smbus` | `i2c` | CTRLA/DUALCTRL.INPUTLVL, the input transition level |
-| `TwiSdaSetup` | `cycles4`, `cycles8` | `cycles4` | CTRLA.SDASETUP: the clocks the CLIENT stretches SCL to set up its SDA output |
+| `TwiSdaSetup` | `cycles4`, `cycles8` | `cycles8` | CTRLA.SDASETUP: the clocks the CLIENT stretches SCL to set up its SDA output - eight in every default, not the reset value's four (below, "The client's data setup") |
 | `TwiSdaHold` | `off`, `ns50`, `ns300`, `ns500` | `off` | SDAHOLD in TRUE nanoseconds (the DA encoding swap undone) |
 | `TwiTimeout` | `disabled`, `us50`, `us100`, `us200` | `disabled` | MCTRLA.TIMEOUT, the SMBus inactive-bus supervisor |
 | `quick_command` | bool | false | MCTRLA.QCEN: the address packet IS the transaction |
@@ -388,14 +388,16 @@ and the bus, each item used or declined:
 | Quick Command (QCEN) | 29.3.3.5 | EXPOSED (`quick_command(true)`), not the probe's shape: the empty probe costs one interrupt either way |
 | FLUSH | 29.5.5, errata 2.15.2 / 2.14.3 | DECLINED: broken on every DA/DB revision; `recover()` is the errata's ENABLE cycle. The AVR EA has no such item, and 1000 strobes on an idle host never left it stuck (letter v); still unexposed - `recover()` is the verb on every die, and a FLUSH in the middle of a tenure is unmeasured |
 | the client's Smart mode | 29.3.3.3 | the client task's option; the bench's own client runs it |
+| CTRLA.SDASETUP, the client's own setup stretch | 29.5.1, DS40002443A 27.5.1 | USED at EIGHT clocks, every default of the driver: four are shorter than the I2C specification's Standard-mode data setup (250 ns) above 16 MHz, and on the AVR EA's wire at 20 MHz they lose a Smart-mode client in a long read (On the AVR64EA48, "The client's data setup"); the price is four clocks of stretch on a byte whose clock the client releases |
 | CTRLA.FMEN, the AVR EA's Fm duty | DS40002443A 27.5.1 | USED with the Fm speed: the floor's low phase bought from the high phase (The AVR EA's SCL clock) |
 | the inactive-bus time-out's base, CLKCTRL.MCLKTIMEBASE | DS40002443A 27.3.3.1 | USED: the clock writes TIMEBASE at every init and rate change, so `TwiTimeout` is microseconds; at TIMEBASE 0, its reset value, every setting fires at once (letter v) |
 
 ### The host's cost, measured (bench_avr letter i)
 
 The bench: TWI0's host on PA2/PA3 against the SAME instance's client on
-the dual pair PC2/PC3, served from its own vector in Smart mode (the
-dual loop of the findings below), 1.5k to 5 V, CLK_PER 24 MHz. Both handlers run on one
+the dual pair PC2/PC3, served from its own vector in Smart mode at
+SDASETUP four clocks (the dual loop of the findings below), 1.5k to 5 V,
+CLK_PER 24 MHz. Both handlers run on one
 core, so every byte waits TWO handler latencies - the client's before
 the acknowledge, the host's after it - and wall minus wire holds both.
 The SCL period is measured on PA3 (TCB0 between rising edges): 244, 82
@@ -459,26 +461,28 @@ period:
 
 | tenure | wire | measured | x |
 |---|---|---|---|
-| 1-byte write, 100 kHz | 3819 | 4272 | 1.12 |
-| 255-byte write, 100 kHz | 463305 | 481252 | 1.04 |
-| 255-byte read, Smart, 100 kHz | 463305 | 481921 | 1.04 |
+| 1-byte write, 100 kHz | 3819 | 4236 | 1.11 |
+| 255-byte write, 100 kHz | 463305 | 481967 | 1.04 |
+| 255-byte read, Smart, 100 kHz | 463305 | 481857 | 1.04 |
 | 1 + 1 register read, 100 kHz | 7638 | 8548 | 1.12 |
-| 1-byte write, 400 kHz | 1045 | 1442 | 1.38 |
-| 255-byte write, 400 kHz | 126775 | 153373 | 1.21 |
-| 1 + 1 register read, 400 kHz | 2090 | 2766 | 1.32 |
-| 1-byte write, Fm+ | 399 | 799 | 2.00 |
-| 255-byte write, Fm+ | 48405 | 76788 | 1.59 |
-| 255-byte read, Smart, Fm+ | 48405 | 81769 | 1.69 |
-| 1 + 1 register read, Fm+ | 798 | 1489 | 1.87 |
+| 1-byte write, 400 kHz | 1045 | 1451 | 1.39 |
+| 255-byte write, 400 kHz | 126775 | 153292 | 1.21 |
+| 255-byte read, Smart, 400 kHz | 126775 | 155757 | 1.23 |
+| 1 + 1 register read, 400 kHz | 2090 | 2793 | 1.34 |
+| 1-byte write, Fm+ | 399 | 808 | 2.03 |
+| 255-byte write, Fm+ | 48405 | 77327 | 1.60 |
+| 255-byte read, Smart, Fm+ | 48405 | 83038 | 1.72 |
+| 1 + 1 register read, Fm+ | 798 | 1507 | 1.89 |
 
 The cycles above the wire are the DB's to within an eighth - the same
-core and the same handlers: a 255-byte write at 400 kHz carries 26598
-above the wire here, 23723 on the DB at 24 MHz; at Fm+ 28383 against
+core and the same handlers: a 255-byte write at 400 kHz carries 26517
+above the wire here, 23723 on the DB at 24 MHz; at Fm+ 28922 against
 28033. A long write is wire-bound at 100 kHz and the two
 handlers on one core cost a fifth at 400 kHz and three fifths at Fm+,
-as on the DB. The 255-byte READ at 400 kHz has no row: on this die's
-dual loop the client drops out of a long read (Bench findings, "On the
-AVR64EA48").
+as on the DB. The client runs SDASETUP at eight clocks here, the
+driver's default (Bench findings, "The client's data setup"), which a
+long read pays on each byte whose clock the client releases; across ten
+runs of letter i each 255-byte row spreads by 0.2 per cent at most.
 
 ## Bench findings
 
@@ -896,20 +900,43 @@ reads 994, 1009 and 994; every other letter as on the DA/DB. Letter n
 (multi-host arbitration) is skipped against this peer, as it is on the
 DA/DB.
 
-**A long read on the dual loop loses the client** (`bench_avr` letter i,
-three runs; the one image that reads 255 bytes from the same instance's
-dual client): at 400 kHz, and at 100 kHz with the stamps in both
-vectors, the client stops answering partway - SSTATUS and MSTATUS both
-read BUSERR afterwards, the client's last byte arrives with its first
-bit alone and the rest of the read is 0xFF - while the host's request
-completes `i2c_ok`. The byte it happens at is fixed run to run by the
-DATA, not by the time: 65 of 255 with the client serving 0, 1, 2 ...,
-128 with those values' top bit inverted; FMEN cleared, a 300 ns SDAHOLD
-on either half or both, Smart mode on or off change nothing. At Fm+, and
-at 100 kHz without the stamps, the 255-byte reads are exact; the DB runs
-the same image exact at every speed; this die as the client of the SAM
-C21's host serves 255-byte reads exact at 400 kHz and Fm+
-([../samc21/i2c.md](../samc21/i2c.md)). Gap below.
+**The client's data setup: four clocks lose a Smart client in a long
+read, eight do not** (`bench_avr` letter i's 255-byte read from the dual
+client, at 400 kHz; recorded by the SAM C21 on the same node - PA22 and
+PA23 read as plain inputs, nothing driven, every change stamped by a
+seven-cycle loop at 48 MHz, so a record's time is its edge's to within
+146 ns and two edges inside one such turn share a record - with the two
+TWI vectors marking their bodies on two link wires the recorder reads
+with the bus). Through its stretch after a served byte's acknowledge the
+client holds SDA at that byte's bit 6: low after 0x00..0x3F and
+0x80..0xBF, released after 0x40..0x7F and 0xC0..0xFF, both read off the
+record. In Smart mode the SDATA write is the release: at SDASETUP four
+(200 ns at 20 MHz) the new byte's first bit and SCL's rise land in the
+same turn of the record. Where the two levels differ the WRONG way - bit
+6 set, the next byte's first bit 0, so SDA falls as SCL rises, within
+one turn of the record (a START, if SCL rises first) - the client drives
+that first bit and the next, then nothing, and its vector is not entered
+again: the rest of the read is 0xFF (the host sampling the first bit
+either side of the fall, 0x7F or 0xFF for that byte), the host saw no
+bus error at any of its 255 entries, and both halves read BUSERR after
+the STOP, the request complete with `i2c_ok` - a read carries no check
+the engine could apply. The byte is the data's: 65 of a read serving 0,
+1, 2 ... (after 0x40), 128 with the top bit inverted (after 0xFF); 100
+reads of 100 at 400 kHz lost it there, host Smart mode on or off, the
+thread spinning or asleep, the vectors marked or plain. It wants the
+CLIENT to release SCL (at 400 kHz its stretch, about 4 us, outlasts the
+host's low phase every byte): at 100 kHz the host's own low phase mostly
+ends later and SCL rises with SDA long settled - one read of ten lost
+its client, at byte 91 after 0x5A - and 48 cycles more in the client's
+vector lose ten of ten; at Fm+ the client's pads run FMPEN and ten of
+ten are exact. At SDASETUP EIGHT (400 ns) SDA moves a record or more
+before SCL, and 420 reads of 420 are exact - 100 kHz, 400 kHz and Fm+,
+both patterns, the same variants, the 48 cycles included. Microchip's
+bare-metal TWI client example for the AVR128DB48 (the same chapter) runs
+Smart mode off and writes SDATA, then SCMD's RESPONSE: 11 reads of 11
+exact at four clocks too, the store between the two the setup. The
+driver's default is eight on every die (Configuration); `bench_avr`
+letter i reads 255 bytes exact at every speed with it (the table above).
 
 **A desk fact, not a silicon one**: TWI1's dual pair PB2/PB3 would make
 a third tap of this bus - the suite drives PB2 low and prints whether the
@@ -928,12 +955,6 @@ implement):
 - **The AVR EA's ALT3** (SDA PA0, SCL PA1): in the route table and the
   fixture only - this desk's EA board has its quartz on PA0/PA1, and no
   letter routes there.
-- **The AVR EA's dual-loop read** (Bench findings, "A long read on the
-  dual loop loses the client"): the cause is not found. The engine tests
-  BUSERR at every RIF, the last included, and none carries it - the flag
-  is read standing only after the STOP - so the request reports `i2c_ok`
-  over a tail of 0xFF. When the flag rises, and what the silicon does
-  between the two halves, wants a record of the wire around the byte.
 - **10-bit addressing.** The client's match logic recognizes the first
   byte when SADDR[7:3] is 0b11110 and the second byte is software's job
   (29.3.3.6); neither the client task nor the host's `Request` has a
@@ -955,9 +976,12 @@ implement):
   an injected STOP, which the SAM C21's does not; a leg of n queuing
   this host's START and the peer's behind one REAL STOP, as
   `test_samc_i2c` o does from that side, would measure it;
-- CTRLA.SDASETUP: the knob that shapes the client's own setup-time
-  stretch is exposed and written, but its two settings are not measured
-  apart on the wire;
+- the AVR DA/DB's client at SDASETUP eight: every DA/DB figure and
+  verdict on this page was taken with the client at four clocks (exact
+  there - the DB's dual loop at 24 MHz, 167 ns); the default's eight add
+  four clocks a byte where the client releases SCL, and the DB's letter
+  i and its two `test_avr_twi` images would measure the change - the DA
+  board on this desk has no pull-ups without the SAM C21's pair;
 - the DA's swapped SDAHOLD codes (DS80000882C 2.14.2): `sda_hold` writes
   the swapped code on a DA and `sda_hold_code` reads it back; the AVR
   EA's letter v measures the codes on the wire (straight there), and the

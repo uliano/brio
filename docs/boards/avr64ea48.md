@@ -81,66 +81,76 @@ this one differs from the DA's on the same PCB in what is fitted.
   XOSC32KS, and the RTC selected onto it never synchronizes its CTRLA
   (CTRLABUSY stuck), where the same RTC on OSC32K synchronizes at once -
   a joint, a crystal not fitted, or its load. The Ticker runs from
-  OSC32K meanwhile (`preferred()`).
-- From the console, at 20 MHz on the quartz: `test_avr_pin` 30 of 30,
-  `test_avr_platform` 109 of 109, `test_avr_power` 53 of 53 (twelve runs
-  of twelve, letter b's bound derived - platform.md), `test_avr_clock`
-  22 of 27 - its five reds are the rulers timed against the 32 kHz
-  crystal above ([../avrxt/platform.md](../avrxt/platform.md),
+  OSC32K meanwhile (`preferred()`). It is the one red of the board: five
+  verdicts of `test_avr_clock` (the rulers timed against it) and two of
+  `test_avr_rtc` (letter 9, XOSC32K as CLK_RTC).
+- **Every suite image of the board, each run in its final form** (the
+  partner the SAM C21 board on the I2C node and the four link wires;
+  the partner on `console` for the single-board keys):
+
+  | image | key | partner | result |
+  |---|---|---|---|
+  | `test_avr_platform` | `z` | - | 109 of 109 |
+  | `test_avr_pin` | `a` | - | 30 of 30 |
+  | `test_avr_clock` | `a` | - | 22 of 27, the five the 32 kHz crystal's |
+  | `test_avr_power` | `z` | - | 53 of 53 |
+  | `test_avr_meter` | `z` | - | 38 of 38 |
+  | `test_avr_rtc` | `a` | - | 89 of 91, the two the 32 kHz crystal's |
+  | `test_avr_nvm` | `z` | - | 110 of 110 |
+  | `test_avr_analog` | `a` | - | 158 of 158 |
+  | `test_avr_timer-1`, `-2` | `a` | - | 141 of 141, 67 of 67 |
+  | `test_avr_sleep-1` | `z` | - | 56 of 56 |
+  | `test_avr_sleep-2` | `y` | `sleep_peer` | 47 of 47, three runs |
+  | `test_avr_twi-1` | `z` | - | 226 of 226, ten runs |
+  | `test_avr_twi-2` | `y` | `twi_peer` | 136 of 136, ten runs |
+  | `test_avr_spi-1` | `z` | - | 180 of 180 |
+  | `test_avr_spi-2` | `y`, `z` | `spi_peer` | 51 of 51, 20 of 20 |
+  | `test_avr_spi-3` | `y` | `spi_peer` | 54 of 54 |
+  | `test_avr_serial-1` | `z` | - | 163 of 163 |
+  | `test_avr_serial-2` | `y` | `usart_peer` | 88 of 88 |
+  | `test_avr_serial-3` | `y`, `w`, `x` | `usart_peer` | 30 of 30, 6 of 6, 3 of 3 |
+  | the partner's `test_samc_i2c` | `z` | this board's `twi_peer` | 72 of 72, ten runs |
+  | the partner's `test_samc_spi` | `z` | this board's `spi_peer` | 138 of 138 |
+  | the partner's `test_samc_uart` | `y` | this board's `usart_peer` | 190 of 190 |
+  | `bench_avr` | `r` `m` `p` `t` `e` `u` `i` | - | each "ran"; letter i's reads byte-exact in ten runs of ten |
+
+  What each suite measured is its chapter's document:
+  [../avrxt/platform.md](../avrxt/platform.md),
   [../avrxt/port.md](../avrxt/port.md),
-  [../avrxt/clkctrl.md](../avrxt/clkctrl.md)); `test_avr_timer`, two
-  images on this board (the group axis, [../avrxt/README.md](../avrxt/README.md)),
-  141 of 141 (`test_avr_timer-1`) and 67 of 67 (`test_avr_timer-2`,
-  twelve runs of twelve) - the two legs on the analog net wait for it or
-  leave it: letter c's second LUT input moves from PD1 to LUT2's IN2 on
-  PD2 (a pad took more than its 2 us read to charge the net), letter x
-  parks TCA1's PORTD route 30 us before it reads PD6; `test_avr_meter`
-  38 of 38, `test_avr_rtc` 89 of 91 - its two reds
-  are letter 9's, the 32 kHz crystal again ([../avrxt/tca.md](../avrxt/tca.md),
+  [../avrxt/clkctrl.md](../avrxt/clkctrl.md),
+  [../avrxt/rtc.md](../avrxt/rtc.md), [../avrxt/nvm.md](../avrxt/nvm.md),
+  [../avrxt/adc.md](../avrxt/adc.md), [../avrxt/dac.md](../avrxt/dac.md),
+  [../avrxt/vref.md](../avrxt/vref.md), [../avrxt/tca.md](../avrxt/tca.md),
   [../avrxt/tcb.md](../avrxt/tcb.md), [../avrxt/ccl.md](../avrxt/ccl.md),
-  [../avrxt/rtc.md](../avrxt/rtc.md)).
-- `test_avr_nvm` (the EEPROM engine) 103 of 103, ten runs of ten
-  ([../avrxt/nvm.md](../avrxt/nvm.md)).
-- `test_avr_sleep` 56 of 56 alone (`z`, the image `test_avr_sleep-1`)
-  and 47 of 47 against the SAM C21 board's `sleep_peer` (`y`,
-  `test_avr_sleep-2`), ten runs of ten each: the link on USART1
-  ALT1 through the PC4-PE0 jumper, the stimulus and the echo on PE2/PE3,
-  the I2C pair on PA2/PA3. No regulator start-up at any wake; OSCHF
-  restarts in 9.2 us, this board's 20 MHz quartz in 0.61..0.67 ms from
-  cold; one edge of any of ten pins wakes the chip from power-down
-  ([../avrxt/platform.md](../avrxt/platform.md),
-  [../avrxt/port.md](../avrxt/port.md), [../avrxt/usart.md](../avrxt/usart.md)).
-  The BOD runs continuously asleep by this board's BODCFG, its current in
-  every sleep. Letter p drives PC7 at 32 Hz, which is the echo net into
-  the partner: the partner's first capture after it reads stale (letter
-  h's printed "arming to that edge" figure), every train after it is
-  right.
-- The buses against the SAM C21 board, every image ten runs of ten
-  unless named: `test_avr_twi` 226 of 226 alone (`test_avr_twi-1`) and
-  136 of 136 against the partner's `twi_peer` (`test_avr_twi-2`), and the
-  partner's `test_samc_i2c` 72 of 72 against this board's `twi_peer`
-  ([../avrxt/twi.md](../avrxt/twi.md)); `test_avr_spi` 180 of 180 alone
-  (`test_avr_spi-1`), 51 and 20 of 51 and 20 against the partner's
-  `spi_peer` (`test_avr_spi-2`, `y` and `z`) and 54 of 54
-  (`test_avr_spi-3`), the partner's `test_samc_spi` 138 of 138 against
-  this board's `spi_peer` ([../avrxt/spi.md](../avrxt/spi.md));
-  `test_avr_serial` 163 of 163 alone (`test_avr_serial-1`), 88 of 88
-  against the partner's `usart_peer` in nine runs of ten
-  (`test_avr_serial-2`; the one red an extra frame at letter q's 100 kHz
-  client, one of letter q's thirty-one runs,
-  [../avrxt/usart.md](../avrxt/usart.md)) and 30 of 30
-  (`test_avr_serial-3`), the partner's `test_samc_uart` 190 of 190
-  against this board's `usart_peer` in twelve runs of twelve
-  ([../samc21/sercom.md](../samc21/sercom.md)). The partner's crystal
-  reads 108..111 ppm slow against this board's 20 MHz quartz
-  (`test_avr_serial` x).
-- `test_avr_analog` 158 of 158 in each of fifteen runs: the ADC, the DAC,
-  the VREF and the comparators' DACREFs against the analog net
-  ([../avrxt/adc.md](../avrxt/adc.md), [../avrxt/dac.md](../avrxt/dac.md),
-  [../avrxt/vref.md](../avrxt/vref.md)); `sampler` walking PD1, the die
-  temperature and VDD/10 under the PIT pace.
+  [../avrxt/evsys.md](../avrxt/evsys.md), [../avrxt/twi.md](../avrxt/twi.md),
+  [../avrxt/spi.md](../avrxt/spi.md), [../avrxt/usart.md](../avrxt/usart.md),
+  [../samc21/sercom.md](../samc21/sercom.md); the costs `bench_avr` prints
+  at 20 MHz are in [../design/benchmark.md](../design/benchmark.md).
 - The timer suite's pads on this board: TCA0 on PORTD (PD0, PD2), TCA1
   on PORTB, PORTC (PC4..PC6, the jumpered pins - nothing drives their
   PE partners meanwhile), PORTA (PA4..PA6) and PORTD (PD4..PD6), the CCL
   on LUT2's PD0/PD2/PD3, the DAC on PD6, EVOUT on PD2, PC7 and PA7 (each
-  read 5 us after a change).
+  read 5 us after a change). The analog net's 96 nF sets what a pad
+  driving it sees: letter c of `test_avr_timer` takes its second LUT
+  input on PD2 rather than PD1, and letter x waits 30 us before it reads
+  PD6 under TCA1's PORTD route.
+- No regulator start-up at any wake; OSCHF restarts in 9.2 us, this
+  board's 20 MHz quartz in 0.61..0.67 ms from cold; one edge of any of ten
+  pins wakes the chip from power-down (`test_avr_sleep`,
+  [../avrxt/platform.md](../avrxt/platform.md)). The BOD runs continuously
+  asleep by this board's BODCFG, its current in every sleep.
+- `test_avr_sleep` letter p (in `test_avr_sleep-1`) drives PC7 at 32 Hz,
+  which is the echo net into the partner: run with the partner on its
+  `sleep_peer`, the partner's first capture after it reads stale (letter
+  h's printed "arming to that edge" figure), every train after it right.
+  The peer drains both capture stages before it arms; why a stamp older
+  than the arming survives that is not explained - a peer variant
+  printing CC1, STATUS.CCBUFV1 and INTFLAG at the arming, after letter p,
+  would tell.
+- **The TWI client's data setup** (the dual loop of `bench_avr` letter i
+  and `test_avr_twi`): at SDASETUP four clocks a Smart-mode client loses
+  a long read where its stretch must end with SDA falling; the driver's
+  default is eight ([../avrxt/twi.md](../avrxt/twi.md), "The client's
+  data setup" - recorded on this node by the partner board).
+- The two crystals differ by about 110 ppm: the partner's reads 109 ppm
+  slow against this board's 20 MHz quartz (`test_avr_serial` x).

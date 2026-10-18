@@ -180,7 +180,7 @@ fuse, so its current is in every sleep below.
 |------|---------|---------|
 | SMODE IDLE / STANDBY / PDOWN, SEN | 13.5.1 | used: `SleepMode`, `Sleep`, `AvrSleepSite` (the ladder the identity) |
 | The NOP before a CTRLA store | DS80001048D 2.2.3 | used: in every store (`Sleep`, `AvrPlatform::idle()`), checked in the listings |
-| A peripheral's `RUNSTDBY`: RTC, CCL, ADC, TCA, TCB, AC, DAC | 24.9, 29.3.4, 31.3.6, 22.3.6, 23.3.6, 30.3.5, 32.3.3 | used: each driver's `run_standby` field (`Ccl::enable(true)` for the CCL); the ADC's belongs to the EA's ADC engine, not written ([adc.md](adc.md)) |
+| A peripheral's `RUNSTDBY`: RTC, CCL, ADC, TCA, TCB, AC, DAC | 24.9, 29.3.4, 31.3.6, 22.3.6, 23.3.6, 30.3.5, 32.3.3 | used: each driver's `run_standby` field (`Ccl::enable(true)` for the CCL), the EA's ADC engine's included ([adc.md](adc.md)) |
 | An oscillator's `RUNSTDBY`: OSCHF, OSC32K, XOSC32K, XOSCHF | 12.3.8 | used: `Oschf::run_standby`, `Osc32k::run_standby`, the start verbs' flag; what it buys is the wake's start-up, in standby only (measured below) |
 | Every pin's asynchronous sense | 18.3.3.1 | used: `Pin::configure({.sense})` on any pin, any edge |
 | The PORT's and the PIT's event slots in sleep | 18.3.4, 24.13.17, 16.3.3 | used: `EvPin<P, slot>`, `EvPitDiv<div, slot>` ([evsys.md](evsys.md)) |
@@ -1010,12 +1010,14 @@ Driver gaps:
   wake pays for a BOD started at the wake (tBOD_ST, 30 us typical on the
   EA, DS40002443A table 35-15, with `FUSE.BODCFG`'s ENABLEWAIT) is
   unmeasured: the boards' fuses keep it continuous.
-- **The AVR EA's ADC in a real standby**: its `RUNSTDBY` belongs to the
-  EA's ADC engine, which is not written ([adc.md](adc.md)); letter `o`
-  keeps the TCA's and the AC's legs there.
 
 Implemented but not bench-verified:
 
+- **The AVR EA's ADC in a real standby**: the EA engine writes its
+  `run_standby` field ([adc.md](adc.md)); letter `o` keeps the
+  TCA's and the AC's legs on the EA, and an ADC leg there - a conversion
+  that ends a Standby by its RESRDY, as the DA/DB's does - would measure
+  it.
 - **`test_avr_power` b's wake-cost bound on the AVR DA/DB**: still
   `slept >= spun`, not derived for the two legs' spread; the EA's
   derivation applied there moves both images, and is to be run on an

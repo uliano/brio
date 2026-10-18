@@ -109,7 +109,7 @@ not obeyed: a virtual port has no baud rate.
 Every other family with a controller (STM32 G0B1 and G4, and the
 CH32X035 - whose full-speed controller is the CH32V303's host/device
 block, so `Usbfs` becomes an IP stratum at its second family, beside a
-USB PD controller) is a chapter of its own; the ones without (AVR DA/DB,
+USB PD controller) is a chapter of its own; the ones without (AVR DA/DB/EA,
 SAM C21, CH32V006) keep their console on a probe's bridge.
 
 ## Not covered yet

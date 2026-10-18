@@ -26,20 +26,21 @@ NVM version 3 write). Board wiring and what each board carries:
 [../boards/avr128da48.md](../boards/avr128da48.md),
 [../boards/avr64ea48.md](../boards/avr64ea48.md).
 
-**On the AVR EA, in bring-up**: the build, the clock (the fuse's OSCHF
-rate as a claim, MCLKTIMEBASE owned by the clock), the pins (every pin
-fully asynchronous), the event system's pin and PIT slots, the USART,
-SPI and TWI route tables re-expressed per PORTMUX layout, reset, sleep
-and the platform are written from DS40002443A and compile on the three
-packages; the TCA (its own route table), the TCB, the CCL (its input
-menu read from the header, AC1 on input 2) and the RTC (the PIT's event
-slots) and NVMCTRL's EEPROM engine (NVM version 3: the page buffer, the
-three page operations, EEWP, the supply guard of DS80001048D 2.2.1) are
-on the bench, its flash and User Row self-programming declined; the
-differential ADC with its PGA has an engine of its own behind the
-ADC's surface, and it, the DAC, the VREF and the comparators are on the
-bench against the board's analog net. What the silicon has confirmed is
-each document's.
+**On the AVR EA** every chapter the part carries is written from
+DS40002443A and DS80001048D, compiles on the AVR64EA28, 32 and 48, and is
+on the bench on the AVR64EA48 board: the clock (the fuse's OSCHF rate as
+a claim checked at boot, MCLKTIMEBASE owned by the clock), the pins
+(every pin fully asynchronous), the event system's pin and PIT slots,
+the USART, SPI and TWI with their route tables per PORTMUX layout, the
+TCA, the TCB, the CCL (AC1 on input 2), the RTC, reset, sleep and the
+platform, NVMCTRL's EEPROM engine of NVM version 3 (its flash and User
+Row self-programming declined), and the differential ADC with its PGA -
+an engine of its own behind the ADC's surface - with the DAC, the VREF
+and the comparators against the board's analog net. Every suite image of
+the board runs green there but for the letters that time on the board's
+32.768 kHz crystal, which does not start (its page); what each chapter
+leaves open is its document's two lists, and the AVR64EA28 and 32 are
+compiled, not run.
 
 ## The documents
 
@@ -51,7 +52,7 @@ documents of record.
 |----------|---------|
 | [device_tables.hpp](../../brio/avrxt/device_tables.hpp) | The reserve - no document of its own, its header comment is the reference: the features and instance counts each probed from its own header symbol (a macro, an enumerator or a struct member), the part (die and pin count) keyed on the compiler's device macro with every unclaimed part refused, the PORTMUX layout and route fields (mask, position, which register holds them) and the route CODES per layout, and the errata and family facts keyed on the die - the DA's EVSYS pins (DS80000882C 2.6.1), its TCA1 ALT2/ALT3 (2.11.1), its swapped SDA hold (2.14.2), its data-space window (2.7.1), the DB's XDIR on USART2's ALT1, CLK_MAIN's maximum, the EA's fuse rates and its every-pin asynchrony; checked part by part by the `device_tables` fixture |
 | [platform.md](platform.md) | Platform (DA, DB, EA): what the kernel stands on - `AvrPlatform` (critical section, idle and the SLPCTRL erratum, timebase, atomic_width, the `.noinit` breadcrumb), the short-wait role with both delay paths measured, `Sleep`/`Vreg` over all three sleep modes and the regulator (`Vreg` the DA/DB's: the EA has no regulator control) plus `AvrSleepSite`, the adapter that carries the power model onto them, and `Reset`/`Watchdog` over RSTCTRL and the WDT, the idle contract and the sleep modes measured on an AVR128DB48, an AVR128DA48 and an AVR64EA48 - the EA's offer inventoried, its wake paying no regulator start-up; not covered: idle detection and the RUNSTDBY policy, the BOD, the sleep current, and the wake-up sources a lone board cannot produce |
-| [clkctrl.md](clkctrl.md) | CLKCTRL: oscillators, PLL, main clock mux/prescaler/CLKOUT, clock failure detection (DB, EA) as resources; Clock/DynamicClock as tasks; on the AVR128DA48 the external clock, XOSC32K as the main clock, the auto-tune and the PLL from EXTCLK measured, OSCHF found pulled onto the external clock while that clock is CLK_PER; the AVR EA's chapter - OSCHF at the fuse's rate as a claim checked at boot, MCLKTIMEBASE owned by the clock, the offer inventoried, its reset state read (OSCHFCTRLA 0x00, not the 0x0C on paper); not covered: the DB's external-clock paths, the PLL's RUNSTDBY, A4 silicon, the EA's suite on the bench |
+| [clkctrl.md](clkctrl.md) | CLKCTRL: oscillators, PLL, main clock mux/prescaler/CLKOUT, clock failure detection (DB, EA) as resources; Clock/DynamicClock as tasks; on the AVR128DA48 the external clock, XOSC32K as the main clock, the auto-tune and the PLL from EXTCLK measured, OSCHF found pulled onto the external clock while that clock is CLK_PER; the AVR EA's chapter - OSCHF at the fuse's rate as a claim checked at boot, MCLKTIMEBASE owned by the clock, the offer inventoried, its reset state read (OSCHFCTRLA 0x00, not the 0x0C on paper); not covered: the DB's external-clock paths, the PLL's RUNSTDBY, A4 silicon, the EA's letters timed on a 32 kHz crystal (the bench board's does not start) |
 | [evsys.md](evsys.md) | EVSYS: the full typed vocabulary (generators and users, package-gated) + run-time connect/disconnect; the AVR EA's six channels and its pin and PIT SLOTS named in the generator's type, the PIT slots measured (every divider DIV4..DIV32768, both at once, PITEN gating them); not covered: static allocation, the vocabulary no driver exercises yet, a slot write's latency |
 | [vref.md](vref.md) | VREF (DA, DB, EA): the reference selector - levels, headroom and tolerance per die, how the ADC/DAC name it (the EA's ADC in a register of its own) |
 | [dac.md](dac.md) | DAC (DA, DB, EA): the 10-bit actuator - buffered/unbuffered outputs, the OUTEN policy keyed on the errata, the EA's OUTRANGE, the drive measured into the board's 96 nF net; usage |
@@ -61,7 +62,7 @@ documents of record.
 | [port.md](port.md) | PORT: Port<L> resource, Pin (one-store PinConfig, senses, flags), PinSet across ports on the multi-pin engine, PinRef; every pin fully asynchronous on the AVR EA, one edge of each of twelve pins waking it from power-down on the bench; not covered: INLVL/slew measurements, the DA/DB's fully-async wake on a Px6 pad, the EA's sub-CLK_PER pulse and the pins no edge reaches on its board |
 | [usart.md](usart.md) | USART: the `Usart<n>` resource - routes incl. the pinless one (and the AVR EA's route table of another shape: per-instance codes, routes on other ports, USART2 in USARTROUTEB, every USART0/USART1 route read back on an AVR64EA48), every frame format, the receiver modes, the errata verbs (the EA's SFDEN-in-Active and open-drain halves measured) - and the tasks over it (`Uart`, `OneWire`, `Rs485`, `SyncHost`/`SyncClient`, `MspiHost`, `IrdaLink`, `AutoBaud`), the transport's cost measured at 24 and 20 MHz; the SAM C21 its second board; not covered: LIN above auto-baud, the polled tasks' interrupt versions |
 | [spi.md](spi.md) | SPI: the `Spi<n>` resource - the per-package route table with the errata that beats it (the AVR EA's SPI0 ALT1..ALT6, its UPDI-pin ALT6 and two-port ALT3 refused, NONE at code 7 and ALT4/ALT5 read back on an AVR64EA48), both roles, the seven rates, both INTFLAGS layouts and their clear disciplines, the host demotion - and the tasks over it (`SpiHost` transfer engine in buffer mode, its costs counted in the listing and measured by `bench_avr`'s letter `e` at 24 and 20 MHz, `SpiClient`), and the read the silicon does not take when it empties the FIFO as a byte enters it, which the engine reads around; the SAM C21 the second device on the wire; not covered: a client-side AO, multi-host as a protocol |
-| [twi.md](twi.md) | TWI: the `Twi<n>` resource - the per-package route table with its dual pin pairs (the AVR EA's ALT3 included), the three errata as code, the chapter's own baud arithmetic with the bus's edges as arguments - on the AVR EA its own SCL duty, measured (FMEN used with Fm, the low phase's model, the MBAUD floor, Fm+'s 12 MHz), the time-out on MCLKTIMEBASE, SDAHOLD straight - both halves, and the tasks over it (`I2cHost` transfer engine, its cost measured by `bench_avr`'s letter `i` at 24 and 20 MHz, `I2cClient` including Dual mode - a long read on the AVR EA's dual loop losing its client, cause open); its second chip on the wire the SAM C21; not bench-verified: the engine's `i2c_arb_lost` as the DUT, SDASETUP and INPUTLVL as electricals, the EA's Fm+ pads, TWI1 and the routes other than TWI0's |
+| [twi.md](twi.md) | TWI: the `Twi<n>` resource - the per-package route table with its dual pin pairs (the AVR EA's ALT3 included), the three errata as code, the chapter's own baud arithmetic with the bus's edges as arguments - on the AVR EA its own SCL duty, measured (FMEN used with Fm, the low phase's model, the MBAUD floor, Fm+'s 12 MHz), the time-out on MCLKTIMEBASE, SDAHOLD straight - both halves, and the tasks over it (`I2cHost` transfer engine, its cost measured by `bench_avr`'s letter `i` at 24 and 20 MHz, `I2cClient` including Dual mode - SDASETUP at eight clocks by default, four losing a Smart client in a long read on the AVR EA's dual loop); its second chip on the wire the SAM C21; not bench-verified: the engine's `i2c_arb_lost` as the DUT, the DA/DB's client at SDASETUP eight, INPUTLVL as an electrical, the EA's Fm+ pads, TWI1 and the routes other than TWI0's |
 | [rtc.md](rtc.md) | RTC/PIT: RtcClock/Rtc/Pit resources (one clock for both functions, counter with period and compare, crystal error correction, the busy flags) + BasicTicker over the PIT, the 32.768 kHz crystal as CLK_RTC measured on the AVR128DA48 board, the AVR EA's PIT event slots from the RTC's side (`Pit::event_divider<slot>`), the AVR64EA48's OSC32K and busy flags measured; not covered: XOSC32K on the AVR EA (the bench board's crystal does not start), the external-clock sources, the standby and debug-run paths |
 | [tca.md](tca.md) | TCA: the Tca resource (normal mode, buffered compares, event inputs, commands) + tasks TcaPwm/TcaPwm16/FrequencyGenerator/Heartbeat/EventCounter; the route table per layout (the AVR EA's TCA1 on every package, its three-channel PORTA/PORTD routes); not covered: the split halves' counters as verbs |
 | [tcb.md](tcb.md) | TCB: the Tcb resource (eight modes, event clock/capture, cascade, routes) + tasks PeriodicTick/Timeout/OneShotPulse/PulseCounter/CascadedCounter/meters/Pwm8; not covered: pin-level bonding within a port |

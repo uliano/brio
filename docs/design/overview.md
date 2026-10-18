@@ -2,8 +2,8 @@
 
 `brio` (from "con brio", the musical marking - deliberately not tied to
 any silicon) is a modern-C++ bare-metal framework growing on the
-AVR128DB48 testbed, aiming to cover at least the AVR DA/DB families and
-to stay portable beyond them. Its core is a QP/QV-style active-object
+AVR128DB48 testbed, aiming to cover at least the AVR DA, DB and EA
+families and to stay portable beyond them. Its core is a QP/QV-style active-object
 kernel, written clean-room (concepts from Samek's book, never the QP
 source).
 
@@ -511,7 +511,7 @@ their timer, and an application picks one in its board file:
 
 | stratum | realizations | beyond the contract |
 |---|---|---|
-| avrxt | `TcaPwm<n, port>::Channel<ch>` (six 8-bit channels of a split TCA), `TcaPwm16`, `TcaPwmCentered` (dual slope, OVF at the centre), `Pwm8<Tcb>`, `TcdPwm<route>` (the complementary pair with dead time, on the TCD) | the TCA and TCB channels are ratiometric on purpose and NOT `ClockUser`s (a duty survives a clock change, the frequency moves with it); `TcdPwm` is one when the TCD runs on CLK_PER and was asked for a rate in hertz, and follows nothing otherwise |
+| avrxt | `TcaPwm<n, port>::Channel<ch>` (six 8-bit channels of a split TCA), `TcaPwm16`, `TcaPwmCentered` (dual slope, OVF at the centre), `Pwm8<Tcb>`, `TcdPwm<route>` (the complementary pair with dead time, on the TCD, which the AVR EA has not got) | the TCA and TCB channels are ratiometric on purpose and NOT `ClockUser`s (a duty survives a clock change, the frequency moves with it); `TcdPwm` is one when the TCD runs on CLK_PER and was asked for a rate in hertz, and follows nothing otherwise |
 | samc21 | `TcPwm`, `TcPwm8`, `TccPwm` (a caller-chosen max), `TccPairPwm` (the complementary pair with dead time) | - |
 | stm32g0 | `TimPwm`, `TimPairPwm` (the complementary pair, on the timers with a break and dead-time unit), `LptimPwm` (on a timer that keeps counting in Stop) | the timers refuse a dynamic clock: their periods are PCLK cycles and no rebase can keep them |
 | ch32v00x | `TimPwm<Tim, ch, top>`, `TimPairPwm<Tim, ch, top>` (the complementary pair: under TIM1's break unit as OCx/OCxN, or on TIM2 as channel ch with channel ch + 2 under DTCR, the dead time in each block's own unit) (`ch32v00x/tim.hpp`) | the G0's two names on the F1's timers; a TIM2 pair costs two channels where a TIM1 pair costs one; the timers take a static clock alone, as on the G0 |
