@@ -7,7 +7,7 @@ carry is the newest source mtime) and the build directories wiped
 (ninja relinks stale objects otherwise), and the images are compared
 by md5 - per preset, identical count and movers by name.
 
-    brio gate                          HEAD vs the working tree, the release presets of DEFAULT_PRESETS
+    brio gate                          HEAD vs the working tree, every release preset of every build project
     brio gate --against <ref>          another reference commit
     brio gate --preset avr128db48-release --preset samc21j-release
     brio gate --keep                   leave the two trees in place for a look
@@ -34,12 +34,23 @@ import subprocess
 import sys
 import tempfile
 
+from cli.fit import PROJECTS
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PINNED = 1767225600  # 2026-01-01 00:00:00 UTC, any fixed instant will do
-DEFAULT_PRESETS = ("avr128db48-release", "samc21j-release", "stm32g0b1re-release", "ch32v006k8-release",
-                   "ch32v003f4-release", "rp2040-release", "stm32f429zi-release",
-                   "ch32v203c8-release", "ch32v303vc-release", "ch32x035f8-release",
-                   "rp2350-arm-release", "rp2350-riscv-release")
+
+
+def default_presets(tree=ROOT):
+    """Every release build preset of every build project (fit.py's
+    PROJECTS), read from the projects' own CMakePresets.json: the gate is
+    a census of the images, never a sample of one part per family, and a
+    preset added to a project is gated from its first commit."""
+    presets = []
+    for project in PROJECTS:
+        with open(os.path.join(tree, project, "CMakePresets.json"), encoding="ascii") as f:
+            presets += [p["name"] for p in json.load(f).get("buildPresets", [])
+                        if p["name"].endswith("-release")]
+    return presets
 
 
 def project_of(preset, tree=ROOT):
@@ -61,6 +72,15 @@ def project_of(preset, tree=ROOT):
                 if os.path.isdir(os.path.join(tree, project)):
                     return project
             return projects[0]
+    # A part the prefixes above do not name (a second package line of a
+    # family, say): the project whose own presets file lists it.
+    for project in PROJECTS:
+        try:
+            with open(os.path.join(tree, project, "CMakePresets.json"), encoding="ascii") as f:
+                if any(p.get("name") == preset for p in json.load(f).get("configurePresets", [])):
+                    return project
+        except (OSError, ValueError):
+            continue
     raise SystemExit("brio gate: no project for preset %r" % preset)
 
 
@@ -153,7 +173,8 @@ def gate_images(ref, presets, keep):
         pin(ref_tree)
         pin(work_tree)
         for preset in presets:
-            a = {} if not preset_exists(ref_tree, preset) else build(ref_tree, preset)
+            known = preset_exists(ref_tree, preset)
+            a = build(ref_tree, preset) if known else {}
             b = build(work_tree, preset)
             if a is None or b is None:
                 print("%s: BUILD FAILED in the %s tree" % (preset, "reference" if a is None else "working"))
@@ -163,8 +184,10 @@ def gate_images(ref, presets, keep):
             movers = sorted(n for n in a if n in b and a[n] != b[n])
             new = sorted(n for n in b if n not in a)
             gone = sorted(n for n in a if n not in b)
-            if not a:
+            if not known:
                 line = "%s: absent in the reference" % preset
+            elif not a and not b:
+                line = "%s: no images in either tree (no app builds for it)" % preset
             else:
                 line = "%s: %d/%d byte-identical" % (preset, len(same), len(a))
             if movers:
@@ -229,8 +252,8 @@ def main(argv):
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--against", default="HEAD", metavar="REF", help="the reference commit (default HEAD)")
     ap.add_argument("--preset", action="append", metavar="PRESET",
-                    help="a preset to build and compare (repeatable; default: the release presets "
-                         "DEFAULT_PRESETS names, at least one per build project)")
+                    help="a preset to build and compare (repeatable; default: every release "
+                         "preset of every build project)")
     ap.add_argument("--keep", action="store_true", help="keep the two built trees")
     ap.add_argument("--tokens", action="store_true", help="token-identity of FILES instead of images")
     ap.add_argument("--strings", action="store_true", help="with --tokens: blank string literal contents")
@@ -242,7 +265,7 @@ def main(argv):
         return gate_tokens(args.against, args.files, args.strings)
     if args.files:
         ap.error("files are only meaningful with --tokens")
-    return gate_images(args.against, args.preset or list(DEFAULT_PRESETS), args.keep)
+    return gate_images(args.against, args.preset or default_presets(), args.keep)
 
 
 if __name__ == "__main__":
