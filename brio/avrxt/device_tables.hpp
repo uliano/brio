@@ -621,6 +621,15 @@ inline constexpr bool erratum_da_twi_sdahold_swap = avr_die == AvrDie::avr128da;
 /// window ignores the section protections.
 inline constexpr bool erratum_da_window = avr_die == AvrDie::avr128da;
 
+/// DS80001048D 2.2.1 (AVR EA rev B1 only): an NVM erase or write below
+/// 2.7 V may fail, the sheet's alternative to the supply being the BOD
+/// at BODLEVEL2 or above. The value is the SYSCFG.REVID that carries the
+/// item (0x21 = rev B1, the initial release; rev B2 is clear of it), 0 on
+/// a die whose sheet has no such item - the revision itself is a run-time
+/// fact, read by Nvm::supply_guarded().
+inline constexpr uint8_t erratum_ea_nvm_supply_revid =
+    avr_die == AvrDie::avr64ea ? 0x21u : 0u;
+
 /// The TCB's CCMPL and CCMPH as two INDEPENDENT 8-bit registers in PWM8
 /// mode, as each chapter says (DS40002247B 24.5.10, DS40002443A 23.5.10):
 /// true on the AVR EA, whose errata DS80001048D list no TCB item and

@@ -6,6 +6,42 @@
  * all sit behind it, and every one of them has a different granularity,
  * a different command and a different way of going wrong.
  *
+ * TWO GENERATIONS OF THE CONTROLLER, TWO ENGINES, ONE FILE. The AVR DA
+ * and DB carry NVM version 2 (DS40002247B ch. 11): a command is
+ * SELECTED in CTRLA and carried out by a store, the Flash is written a
+ * word at a time and the EEPROM a byte at a time. The AVR EA carries
+ * NVM version 3 (DS40002443A ch. 11): stores LOAD a page buffer and a
+ * command written to CTRLA carries it out, by page. The two share the
+ * surface where the operation is the same (the EEPROM's verbs, the
+ * EEREADY interrupt, the Signature Row, the reads, EepromStore) and
+ * nothing of the engine; each half below is written from its own
+ * chapter, and the part's header decides which half compiles
+ * (STATUS.FLBUSY is version 3's own bit).
+ *
+ * WHAT THE AVR EA KEEPS: THE EEPROM. Its flash and User Row
+ * self-programming are DECLINED - a 64 KB part with a 512-byte EEPROM
+ * keeps its small values in the EEPROM, and with no flash write there
+ * is no user for its rev B1's flash errata (DS80001048D 2.4.1, 2.4.2).
+ * The verbs that would write either are refused at compile time, by
+ * name and with the reason (docs/avrxt/nvm.md); the User Row stays
+ * readable, and the flash heap and journal over this driver
+ * (avrxt/nvm_flash.hpp) refuse the part too.
+ */
+
+#pragma once
+
+#include <stdint.h>
+#include <avr/io.h>
+#include <avr/pgmspace.h>
+
+#include "avrxt/device_tables.hpp"
+#include "util/nv_record.hpp"
+
+#if !defined(NVMCTRL_FLBUSY_bm)
+
+/*
+ * NVM VERSION 2 - THE AVR DA AND DB (DS40002247B chapter 11).
+ *
  * THREE MEMORIES, THREE JOBS (the division this driver is built around):
  *
  *  - FLASH is big and cheap to read and expensive to keep: 512-byte
@@ -88,29 +124,6 @@
  * running, which is what makes an interrupt-paced writer possible at
  * all (util/nv_writer.hpp).
  */
-
-#pragma once
-
-// NVM VERSION 3 IS NOT THIS DRIVER'S. The AVR EA's NVMCTRL (DS40002443A
-// ch. 11) writes flash and EEPROM through a page buffer, by page and by
-// command, with RWW/NRWW sections of 256-byte blocks - a different
-// chapter from the AVR DA/DB's word-at-a-time NVM version 2 this file is
-// written from. The EA's EEPROM engine is a later step; its flash and
-// USERROW self-programming are declined (docs/avrxt/nvm.md). Until then
-// the header refuses the part by name, and so does everything built on it
-// (nvm_flash.hpp, the flash heap and journal over it).
-#include <avr/io.h>
-#include "avrxt/device_tables.hpp"
-#if defined(NVMCTRL_FLBUSY_bm)
-static_assert(!brio::has_nvm_page_buffer,
-              "brio avrxt: nvm.hpp is written for NVM version 2 (the AVR DA/DB); NVM version 3 on the AVR EA (page buffer, page commands, RWW sections) is not written yet - EEPROM is a later step, flash and USERROW self-programming are declined (docs/avrxt/nvm.md)");
-#else
-
-#include <stdint.h>
-#include <avr/io.h>
-#include <avr/pgmspace.h>
-
-#include "util/nv_record.hpp"
 
 extern "C" {
 /// LMA just past .text and the .data initializers, and the LMAs of the
@@ -1120,6 +1133,675 @@ struct EepromStore {
     static uint8_t read(uint16_t addr) { return Nvm::eeprom_read(addr); }
     static bool write(uint16_t addr, uint8_t value) {
         return Nvm::eeprom_erase_write(addr, value);
+    }
+    static bool ready() { return !Nvm::eeprom_busy(); }
+    static bool wait_ready() { return Nvm::wait_eeprom(); }
+    static void finish() { Nvm::clear_command(); }
+
+    static void arm_ready_interrupt(bool on) {
+        Nvm::enable_eeprom_ready_interrupt(on);
+    }
+    static bool ready_flag() { return Nvm::eeprom_ready_flag(); }
+    static void clear_ready_flag() { Nvm::clear_eeprom_ready_flag(); }
+};
+
+static_assert(NvStore<EepromStore>);
+static_assert(NvPacedStore<EepromStore>);
+
+} // namespace brio
+
+#else // NVM version 3
+
+/*
+ * NVM VERSION 3 - THE AVR EA (DS40002443A chapter 11; errata
+ * DS80001048D). THE EEPROM ENGINE.
+ *
+ * THE MEMORY. 512 bytes in 64 pages of 8 (table 8-3), mapped in data
+ * space at 0x1400, read with a plain load; erased and written by the
+ * BYTE, any subset of one page in one operation (11.3.1.2, table 11-4):
+ * only the bytes loaded into the page buffer are touched. 100k
+ * erase/write cycles per byte (table 35-8), EESAVE keeps it across a
+ * chip erase (8.8.2.4).
+ *
+ * THE COMMAND MODEL, AS THE SILICON RUNS IT (rev B1, measured by
+ * test_avr_nvm b). The chapter states it two ways - "fill the page
+ * buffer, then write the command" (11.3.2.3, 11.3.2.4.2) and "commands
+ * are enabled by CTRLA and must be followed by writes using ST"
+ * (11.3.2.4, 11.5.1) - and the silicon follows the first, as
+ * Microchip's own avr-libc (eeprom_write_byte for this part) and
+ * pymcuprog's NVM version 3 driver do:
+ *  - a store into the EEPROM's range LOADS its page buffer (ANDed with
+ *    what the buffer holds, 11.3.2.2) whatever CTRLA holds, and never
+ *    starts anything;
+ *  - WRITING a page command to CTRLA starts it at once, on the page of
+ *    the LAST load, over the bytes loaded; the buffer clears when it
+ *    ends. The DA/DB order - command, then store - writes nothing here;
+ *  - the buffer is indexed by the low three address bits alone: loads
+ *    in two pages land in ONE page, the last load's, at the other's
+ *    offsets. A run is page-local by construction - eeprom_run()
+ *    refuses one that is not;
+ *  - CTRLA written WHILE an operation runs is refused with
+ *    command_collision and the operation completes: a command cannot be
+ *    cleared behind an operation, only after it, so the verbs below
+ *    leave theirs in CTRLA and the next operation simply overwrites it
+ *    (a command written over a command with the controller idle starts
+ *    with no error);
+ *  - the buffer is cleared after each operation, by EEPBCLR (on its
+ *    write, no store needed), by a reset and by a wake from any sleep
+ *    (11.3.2.2, 11.3.5). A load left behind by anyone - a store that
+ *    preempted code made, or a sequence a panic cut short - would AND
+ *    itself into the next operation, so EVERY operation here starts with
+ *    EEPBCLR: seven cycles of halted CPU (11.3.2.4.5) for a buffer known
+ *    to hold the run's bytes and nothing else.
+ *
+ * ONE OPERATION, ITS COST. Wait until idle, EEPBCLR, one store per
+ * byte, the command: two CCP-keyed CTRLA writes and the run's stores,
+ * all inside one call - a sleep between the loads and the command
+ * would clear the buffer. The call costs the CPU 58 cycles for one byte
+ * and 143 for a page of eight, by the release listing (about 70 and 170
+ * measured with the NVM accesses' own waits). The operation then takes
+ * 2.6 to 2.7 ms for an erase or a write and twice that for an
+ * erase-and-write, for 1 byte or 8 alike (measured; table 35-8 gives
+ * 2 ms typical for each half and no maximum), timed by an oscillator
+ * of the controller's own - not CLK_PER, not OSCHF - so it does not
+ * shrink with a faster clock. The EEPROM's unit of cost is the PAGE:
+ * eight bytes cost what one does.
+ *
+ * WHO STALLS WHOM. An EEPROM operation leaves the CPU running
+ * (11.3.2.4.1) - the milliseconds are the program's, interrupts served
+ * on time - BUT any EEPROM read or buffer load meanwhile is a bus wait
+ * that suspends the instruction, and every interrupt with it, until the
+ * operation ends (11.3.2.1, 11.3.2.2 note; measured: the access waits
+ * out the remainder and about 0.1 ms more). The CPU is free while it
+ * touches no EEPROM: every verb below
+ * that loads or reads waits for idle first, and the interrupt-paced
+ * writer (util/nv_writer.hpp) touches the EEPROM only on EEREADY.
+ *
+ * THE ERRATA AS CODE.
+ *  - DS80001048D 2.2.1 (rev B1): an NVM erase or write below 2.7 V may
+ *    fail; the sheet's alternative is the BOD at BODLEVEL2 or above.
+ *    supply_guarded() reads it at run time (a boot-time fact the suites
+ *    assert, not a refusal inside every write) and brio's fuse verb
+ *    warns when an EA's BODCFG leaves the writes unguarded.
+ *  - 2.2.3 (B1, B2): a store to an address >= 64 followed by an ST/STD
+ *    below 64 or by a write to SLPCTRL.CTRLA loses the second. The run
+ *    stores into 0x1400.. and the next store below 64 is the CCP key,
+ *    which avr/xmega.h's _PROTECTED_WRITE_SPM writes with OUT - the
+ *    sheet's own workaround; nothing here writes SLPCTRL.
+ *  - 2.4.1, 2.4.2 and 2.2.2 are the flash's: no flash write, no user.
+ *
+ * EEWP (CTRLB bit 3, new in this generation): one-way until a reset; a
+ * command under it is refused with write_protect and touches nothing,
+ * an erase included (measured). The verbs check it first and refuse
+ * without starting.
+ */
+
+namespace brio {
+
+// =============================================================================
+// Geometry, from the device header
+// =============================================================================
+
+inline constexpr uint32_t flash_size = PROGMEM_SIZE;
+inline constexpr uint16_t flash_page_size = PROGMEM_PAGE_SIZE;
+
+inline constexpr uint16_t eeprom_size = EEPROM_SIZE;
+inline constexpr uint16_t eeprom_base = EEPROM_START;
+/// The EEPROM page: the most bytes one operation erases or writes
+/// (table 8-3).
+inline constexpr uint8_t eeprom_page_size = EEPROM_PAGE_SIZE;
+
+inline constexpr uint8_t userrow_size = USER_SIGNATURES_SIZE;
+inline constexpr uint16_t userrow_base = USER_SIGNATURES_START;
+
+/// NVMCTRL.STATUS.ERROR (11.5.5): this generation's four codes. Code 1
+/// does not exist here.
+enum class NvmError : uint8_t {
+    none = 0,
+    write_protect = 2,      ///< WRITEPROTECT: EEWP set (or a flash section)
+    command_collision = 3,  ///< CMDCOLLISION: CTRLA written while an operation runs
+    wrong_section = 4,      ///< WRONGSECTION: a command for another memory
+};
+
+/**
+ * NVMCTRL.CTRLA.CMD (11.5.1), the commands this driver issues. On this
+ * generation WRITING a page command STARTS it on the buffer as it
+ * stands (above). The flash commands are not here - flash
+ * self-programming is declined on this part - and neither are CHER
+ * (UPDI only) and EECHER: erasing a whole memory is a provisioning act.
+ */
+enum class NvmCommand : uint8_t {
+    none = 0x00,                     ///< NOCMD
+    noop = 0x01,                     ///< NOOP
+    eeprom_page_write = 0x14,        ///< EEPW
+    eeprom_page_erase_write = 0x15,  ///< EEPERW
+    eeprom_page_erase = 0x17,        ///< EEPER
+    eeprom_buffer_clear = 0x1F,      ///< EEPBCLR
+    /// Not a command (11.5.1's "Other"). Kept named because what the
+    /// controller does with one is worth knowing: the field holds six
+    /// bits (0x7F reads back 0x3F) and a reserved code raises no error.
+    reserved = 0x7F,
+};
+
+/// The three EEPROM page operations, each over the bytes a run loads.
+enum class EepromOp : uint8_t {
+    write = 0x14,        ///< EEPW: the bytes must read 0xFF before
+    erase_write = 0x15,  ///< EEPERW: erase, then write, in one operation
+    erase = 0x17,        ///< EEPER: the bytes read 0xFF after
+};
+
+/// How many bytes one EEPROM erase takes down: an aligned span inside
+/// one page, the most one operation reaches (table 8-3). The 16- and
+/// 32-byte spans of the AVR DA/DB have no counterpart here.
+enum class EepromErase : uint8_t {
+    byte = 1,
+    bytes2 = 2,
+    bytes4 = 4,
+    bytes8 = 8,
+};
+static_assert(eeprom_page_size == 8,
+              "EepromErase's widest span is the 8-byte page of DS40002443A table 8-3");
+
+constexpr uint8_t erase_bytes(EepromErase e) { return static_cast<uint8_t>(e); }
+
+/// The dependent false that lets a declined verb exist as a name and
+/// refuse with its reason when, and only when, it is used.
+template <typename...>
+inline constexpr bool nvm_declined_on_ea = false;
+
+// =============================================================================
+// SIGROW - the factory-programmed row (8.9)
+// =============================================================================
+
+/// The Signature Row: the device ID (three bytes, the TYPE), the serial
+/// number (16 bytes, the SPECIMEN) and the temperature sensor's two
+/// calibration words - TEMPSENSE0 a SIGNED gain correction on this
+/// generation (8.9.2.2), TEMPSENSE1 the offset.
+struct Sigrow {
+    Sigrow() = delete;
+
+    static constexpr uint8_t serial_bytes = 16;
+
+    static uint8_t device_id(uint8_t i) {
+        return (&SIGROW.DEVICEID0)[i & 0x3u];
+    }
+    static uint32_t device_id() {
+        return (static_cast<uint32_t>(SIGROW.DEVICEID0) << 16) |
+               (static_cast<uint32_t>(SIGROW.DEVICEID1) << 8) |
+               static_cast<uint32_t>(SIGROW.DEVICEID2);
+    }
+    static uint8_t serial(uint8_t i) {
+        return (&SIGROW.SERNUM0)[i < serial_bytes ? i : 0];
+    }
+    static int16_t tempsense0() { return static_cast<int16_t>(SIGROW.TEMPSENSE0); }
+    static uint16_t tempsense1() { return SIGROW.TEMPSENSE1; }
+};
+
+// =============================================================================
+// NVMCTRL
+// =============================================================================
+
+struct Nvm {
+    Nvm() = delete;
+
+    // ---- state -------------------------------------------------------------
+
+    /// STATUS.EEBUSY (bit 0 here - bit 1 on the AVR DA/DB).
+    static bool eeprom_busy() { return (NVMCTRL.STATUS & NVMCTRL_EEBUSY_bm) != 0; }
+    /// STATUS.FLBUSY: a flash operation runs. Nothing in this driver
+    /// starts one; only a programmer over UPDI does.
+    static bool flash_busy() { return (NVMCTRL.STATUS & NVMCTRL_FLBUSY_bm) != 0; }
+    [[gnu::always_inline]] static bool busy() {
+        return (NVMCTRL.STATUS & (NVMCTRL_EEBUSY_bm | NVMCTRL_FLBUSY_bm)) != 0;
+    }
+
+    /// STATUS.ERROR, the last error the controller saw; sticky until
+    /// cleared (11.5.5).
+    static NvmError error() {
+        return static_cast<NvmError>((NVMCTRL.STATUS & NVMCTRL_ERROR_gm) >>
+                                     NVMCTRL_ERROR_gp);
+    }
+    /// Clear ERROR by writing the field to zero; the busy bits are
+    /// read-only and STATUS is not under CCP.
+    static void clear_error() {
+        NVMCTRL.STATUS = static_cast<uint8_t>(NVMCTRL.STATUS & ~NVMCTRL_ERROR_gm);
+    }
+
+    /// Bounded waits. The bound is a stuck controller's, not a slow
+    /// one's: table 35-8 publishes typical times only (2 ms an erase or
+    /// a write), the longest operation measured here is 5.4 ms, and the
+    /// loop below (about seven cycles a turn) runs over a second at
+    /// 20 MHz before giving up.
+    static bool wait_idle() {
+        for (uint32_t i = 0; i < wait_limit; ++i) {
+            if (!busy()) {
+                return true;
+            }
+        }
+        return false;
+    }
+    static bool wait_eeprom() {
+        for (uint32_t i = 0; i < wait_limit; ++i) {
+            if (!eeprom_busy()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// Write NOCMD. Only with the controller idle: CTRLA written while an
+    /// operation runs is refused with command_collision (measured), so a
+    /// caller clears AFTER the operation - EepromStore::finish() and the
+    /// writer's last step are both called there.
+    static void clear_command() { write_ctrla(NVMCTRL_CMD_NOCMD_gc); }
+
+    static NvmCommand selected() {
+        return static_cast<NvmCommand>(NVMCTRL.CTRLA & NVMCTRL_CMD_gm);
+    }
+
+    /// Write CTRLA as is. On this generation a page command written here
+    /// STARTS, on the page buffer as it stands: this is the raw step the
+    /// verbs below are built of, exposed so the bench can ask the
+    /// controller what it does with a code.
+    static void issue(NvmCommand cmd) { write_ctrla(static_cast<uint8_t>(cmd)); }
+
+    // ---- CTRLB: mapping and protection -------------------------------------
+
+    /// CTRLB.FLMAP: which 32 KB half of the flash the data-space window
+    /// shows (11.5.2; 0 and 2 the low half, 1 and 3 the high half on
+    /// 64 KB). The C runtime sets it for .rodata and locks it.
+    static uint8_t flmap() {
+        return static_cast<uint8_t>((NVMCTRL.CTRLB & NVMCTRL_FLMAP_gm) >>
+                                    NVMCTRL_FLMAP_gp);
+    }
+    static bool flmap_locked() {
+        return (NVMCTRL.CTRLB & NVMCTRL_FLMAPLOCK_bm) != 0;
+    }
+    /// Move the window. The WHOLE of CTRLB is under CCP on this
+    /// generation (table 11-7 - no exemption for FLMAP as on the AVR
+    /// DA/DB), so this is a keyed read-modify-write. False when locked
+    /// or out of range. The image's .rodata is read through the window:
+    /// moving it away and back is the caller's whole responsibility.
+    static bool set_flmap(uint8_t section) {
+        if (section > 3 || flmap_locked()) {
+            return false;
+        }
+        const uint8_t v = static_cast<uint8_t>(
+            (NVMCTRL.CTRLB & ~NVMCTRL_FLMAP_gm) |
+            (static_cast<uint8_t>(section) << NVMCTRL_FLMAP_gp));
+        _PROTECTED_WRITE(NVMCTRL.CTRLB, v);
+        return true;
+    }
+    static void lock_flmap() { set_ctrlb(NVMCTRL_FLMAPLOCK_bm); }
+
+    /// CTRLB.EEWP: refuse every further EEPROM write and erase until a
+    /// reset (11.5.2). One-way.
+    static void protect_eeprom() { set_ctrlb(NVMCTRL_EEWP_bm); }
+    [[gnu::always_inline]] static bool eeprom_protected() {
+        return (NVMCTRL.CTRLB & NVMCTRL_EEWP_bm) != 0;
+    }
+
+    // ---- the interrupt vector table ----------------------------------------
+
+    /// CPUINT.CTRLA.IVSEL (DS40002443A 15.5.1): the vectors at the start
+    /// of BOOT. Every image sets it in .init3 (src/glue/ivsel_boot.cpp);
+    /// with BOOTSIZE 0 - this part's provisioning, the whole flash BOOT -
+    /// the hardware ignores it.
+    static void vectors_in_boot() {
+        const uint8_t v = static_cast<uint8_t>(CPUINT.CTRLA | CPUINT_IVSEL_bm);
+        _PROTECTED_WRITE(CPUINT.CTRLA, v);
+    }
+    static bool vectors_in_boot_armed() {
+        return (CPUINT.CTRLA & CPUINT_IVSEL_bm) != 0;
+    }
+
+    // ---- Flash: reading -----------------------------------------------------
+    //
+    // LPM through Z: the 16-bit Z reaches the whole 64 KB, and the part
+    // has no RAMPZ - pgm_read_*_far compiles to LPM here.
+
+    static uint8_t flash_read(uint32_t addr) { return pgm_read_byte_far(addr); }
+    static uint16_t flash_read_word(uint32_t addr) { return pgm_read_word_far(addr); }
+    static void flash_read(uint32_t addr, uint8_t* dst, uint16_t len) {
+        for (uint16_t i = 0; i < len; ++i) {
+            dst[i] = pgm_read_byte_far(addr + i);
+        }
+    }
+
+    // ---- EEPROM: reading ----------------------------------------------------
+
+    /// A plain load. While an operation runs it is a bus wait until the
+    /// operation ends (11.3.2.1) - call it with the EEPROM idle.
+    static uint8_t eeprom_read(uint16_t offset) {
+        return *reinterpret_cast<volatile uint8_t*>(eeprom_base + offset);
+    }
+    static void eeprom_read(uint16_t offset, uint8_t* dst, uint16_t len) {
+        for (uint16_t i = 0; i < len; ++i) {
+            dst[i] = eeprom_read(static_cast<uint16_t>(offset + i));
+        }
+    }
+
+    // ---- EEPROM: the run, the unit of one operation -------------------------
+    //
+    // A RUN is 1..8 consecutive bytes inside one page: what one
+    // operation writes. The three steps it is made of are public too -
+    // open, a load per byte, commit - because a caller that writes only
+    // some bytes of a page (the ones that differ) is the reason the
+    // silicon marks bytes at all.
+
+    /// The bytes from `offset` to the end of its page: the longest run
+    /// that starts there.
+    static constexpr uint8_t eeprom_run_room(uint16_t offset) {
+        return static_cast<uint8_t>(eeprom_page_size - offset % eeprom_page_size);
+    }
+
+    /// Step 1: wait for the controller, then EEPBCLR - the buffer holds
+    /// nothing but what the caller loads next. False, touching nothing,
+    /// when EEWP is set or the controller never went idle.
+    [[gnu::always_inline]] static bool eeprom_open() {
+        if (eeprom_protected() || (busy() && !wait_idle())) {
+            return false;
+        }
+        write_ctrla(NVMCTRL_CMD_EEPBCLR_gc);
+        return true;
+    }
+    /// Step 2: one store into the buffer. Every load of one operation
+    /// lands in the page of the LAST load: keep them in one page.
+    [[gnu::always_inline]] static void eeprom_load(uint16_t offset, uint8_t value) {
+        *reinterpret_cast<volatile uint8_t*>(eeprom_base + offset) = value;
+    }
+    /// Step 3: write the command - the operation starts now, and the
+    /// call returns while it runs.
+    static void eeprom_commit(EepromOp op) { write_ctrla(static_cast<uint8_t>(op)); }
+
+    /// One operation over [offset, offset + len), len 1..eeprom_run_room.
+    /// Returns as soon as it has STARTED. False, touching nothing, for a
+    /// run that leaves its page or the array, or when eeprom_open() is.
+    static bool eeprom_run(uint16_t offset, const uint8_t* src, uint8_t len,
+                           EepromOp op) {
+        if (len == 0 || offset >= eeprom_size || len > eeprom_run_room(offset)) {
+            return false;
+        }
+        if (!eeprom_open()) {
+            return false;
+        }
+        for (uint8_t i = 0; i < len; ++i) {
+            eeprom_load(static_cast<uint16_t>(offset + i), src[i]);
+        }
+        eeprom_commit(op);
+        return true;
+    }
+
+    /// Leave src's bytes in [offset, offset + len) with the cheapest
+    /// operation that does it: only the bytes that DIFFER are loaded
+    /// (endurance), and the command is EEPER when they all become 0xFF,
+    /// EEPW when they all read 0xFF now (the chapter's precondition for
+    /// a write, 11.3.2.4.1), EEPERW otherwise - half the time. True
+    /// with no operation started when nothing differs. Same refusals as
+    /// eeprom_run().
+    static bool eeprom_store_run(uint16_t offset, const uint8_t* src, uint8_t len) {
+        if (len == 0 || offset >= eeprom_size || len > eeprom_run_room(offset)) {
+            return false;
+        }
+        if (eeprom_protected() || (busy() && !wait_idle())) {
+            return false;
+        }
+        uint8_t differ = 0;   // bit i: byte i differs
+        bool all_erased = true;
+        bool all_ones = true;
+        uint8_t bit = 1;
+        for (uint8_t i = 0; i < len; ++i, bit = static_cast<uint8_t>(bit << 1)) {
+            const uint8_t old = eeprom_read(static_cast<uint16_t>(offset + i));
+            if (old == src[i]) {
+                continue;
+            }
+            differ = static_cast<uint8_t>(differ | bit);
+            if (old != 0xFFu) all_erased = false;
+            if (src[i] != 0xFFu) all_ones = false;
+        }
+        if (differ == 0) {
+            return true;
+        }
+        write_ctrla(NVMCTRL_CMD_EEPBCLR_gc);
+        bit = 1;
+        for (uint8_t i = 0; i < len; ++i, bit = static_cast<uint8_t>(bit << 1)) {
+            if ((differ & bit) != 0) {
+                eeprom_load(static_cast<uint16_t>(offset + i), src[i]);
+            }
+        }
+        eeprom_commit(all_ones ? EepromOp::erase
+                               : (all_erased ? EepromOp::write : EepromOp::erase_write));
+        return true;
+    }
+
+    // ---- EEPROM: the byte verbs (a run of one) --------------------------------
+    //
+    // The run's degenerate case, written as its own short path: one value
+    // in a register, no buffer, no loop.
+
+    /// One operation on one byte. Same refusals as eeprom_run().
+    static bool eeprom_byte(uint16_t offset, uint8_t value, EepromOp op) {
+        if (offset >= eeprom_size || !eeprom_open()) {
+            return false;
+        }
+        eeprom_load(offset, value);
+        eeprom_commit(op);
+        return true;
+    }
+    /// EEPW of one byte: the byte must read 0xFF (11.3.2.4.1).
+    static bool eeprom_write(uint16_t offset, uint8_t value) {
+        return eeprom_byte(offset, value, EepromOp::write);
+    }
+    /// EEPERW of one byte: the honest "store this byte", 5.2 to 5.4 ms.
+    static bool eeprom_erase_write(uint16_t offset, uint8_t value) {
+        return eeprom_byte(offset, value, EepromOp::erase_write);
+    }
+    /// eeprom_store_run() of one byte: nothing when it already holds
+    /// `value`, else EEPER to 0xFF, EEPW onto 0xFF, EEPERW otherwise.
+    static bool eeprom_store(uint16_t offset, uint8_t value) {
+        if (offset >= eeprom_size || eeprom_protected() || (busy() && !wait_idle())) {
+            return false;
+        }
+        const uint8_t old = eeprom_read(offset);
+        if (old == value) {
+            return true;
+        }
+        write_ctrla(NVMCTRL_CMD_EEPBCLR_gc);
+        eeprom_load(offset, value);
+        eeprom_commit(value == 0xFFu ? EepromOp::erase
+                                     : (old == 0xFFu ? EepromOp::write : EepromOp::erase_write));
+        return true;
+    }
+    /// EEPER of an aligned span of 1, 2, 4 or 8 bytes - one operation,
+    /// the same 2.6 to 2.7 ms whatever the span. An erased byte reads 0xFF.
+    static bool eeprom_erase(uint16_t offset, EepromErase span = EepromErase::byte) {
+        const uint8_t n = erase_bytes(span);
+        // n is a power of two: a mask, not the division a runtime % calls.
+        if ((offset & (n - 1u)) != 0 || offset >= eeprom_size) {
+            return false;
+        }
+        if (!eeprom_open()) {
+            return false;
+        }
+        for (uint8_t i = 0; i < n; ++i) {
+            eeprom_load(static_cast<uint16_t>(offset + i), 0xFFu);
+        }
+        eeprom_commit(EepromOp::erase);
+        return true;
+    }
+
+    /// Store a run of any length, one page run at a time through
+    /// eeprom_store_run() with a bounded wait after each: BLOCKING, up
+    /// to 5.4 ms per page touched (half that where the cheaper command
+    /// does), the CPU free but this call not returning. The non-blocking
+    /// way is util/nv_writer.hpp.
+    static bool eeprom_write_block(uint16_t offset, const uint8_t* src, uint16_t len) {
+        if (static_cast<uint32_t>(offset) + len > eeprom_size) {
+            return false;
+        }
+        while (len > 0) {
+            uint8_t n = eeprom_run_room(offset);
+            if (n > len) {
+                n = static_cast<uint8_t>(len);
+            }
+            if (!eeprom_store_run(offset, src, n) || !wait_eeprom()) {
+                return false;
+            }
+            offset = static_cast<uint16_t>(offset + n);
+            src += n;
+            len = static_cast<uint16_t>(len - n);
+        }
+        clear_command();
+        return true;
+    }
+
+    template <uint16_t offset, EepromErase span = EepromErase::byte>
+    static bool eeprom_erase_at() {
+        static_assert(offset < eeprom_size,
+                      "the offset is beyond this device's EEPROM");
+        static_assert(offset % erase_bytes(span) == 0,
+                      "an EEPROM erase starts at a multiple of its own span");
+        return eeprom_erase(offset, span);
+    }
+
+    // ---- EEREADY ------------------------------------------------------------
+
+    /// INTFLAGS.EEREADY: a LEVEL flag, set continuously while the EEPROM
+    /// is not busy (11.5.4).
+    static bool eeprom_ready_flag() {
+        return (NVMCTRL.INTFLAGS & NVMCTRL_EEREADY_bm) != 0;
+    }
+    static void clear_eeprom_ready_flag() {
+        NVMCTRL.INTFLAGS = NVMCTRL_EEREADY_bm;
+    }
+    /// INTCTRL.EEREADY. Enable it only after the operation it reports
+    /// has started, and disable it in the handler (11.5.3: a level
+    /// interrupt). The register is written whole: its other bit,
+    /// FLREADY, has no user on this part (no flash self-programming).
+    static void enable_eeprom_ready_interrupt(bool on) {
+        NVMCTRL.INTCTRL = on ? NVMCTRL_EEREADY_bm : 0u;
+    }
+    /// The handler body. The vector is NVMCTRL_NVMREADY_vect (#33, also
+    /// named _EEREADY_ and _FLREADY_); the app binds it:
+    ///
+    ///     ISR(NVMCTRL_EEREADY_vect) { Nvm::eeready(); post<Writer>(NvReady{}); }
+    [[gnu::always_inline]] static void eeready() { NVMCTRL.INTCTRL = 0; }
+
+    // ---- USERROW: reading ---------------------------------------------------
+    //
+    // 64 bytes of RWW flash at 0x1080 (8.6, 11.3.1.3), read with a plain
+    // load. Its write path is the flash's page buffer and is declined
+    // with the flash (below); UPDI writes it, even on a locked part.
+
+    static uint8_t userrow_read(uint8_t offset) {
+        return *reinterpret_cast<volatile uint8_t*>(userrow_base + offset);
+    }
+    static void userrow_read(uint8_t offset, uint8_t* dst, uint8_t len) {
+        for (uint8_t i = 0; i < len; ++i) {
+            dst[i] = userrow_read(static_cast<uint8_t>(offset + i));
+        }
+    }
+
+    // ---- the supply (DS80001048D 2.2.1) -------------------------------------
+
+    /// True when an EEPROM erase or write cannot fall under DS80001048D
+    /// 2.2.1: the silicon is not the revision that carries it (rev B1,
+    /// device tables' erratum_ea_nvm_supply_revid), or the BOD holds the
+    /// supply at BODLEVEL2 or above in CONTINUOUS mode both awake (ENABLE
+    /// or ENABLEWAIT) and asleep - an operation outlives the dispatch
+    /// that started it and runs on through a sleep (11.3.5), and a
+    /// sampled BOD (128 Hz at best) can miss a dip shorter than its
+    /// period while a 5.4 ms operation runs. A boot-time fact: the BOD's
+    /// fields load from FUSE.BODCFG at reset.
+    static bool supply_guarded() {
+        if (SYSCFG.REVID != erratum_ea_nvm_supply_revid) {
+            return true;
+        }
+        const uint8_t a = BOD.CTRLA;
+        const uint8_t active = static_cast<uint8_t>(a & BOD_ACTIVE_gm);
+        const bool awake = active == BOD_ACTIVE_ENABLED_gc ||
+                           active == BOD_ACTIVE_ENABLEWAIT_gc;
+        const bool asleep = (a & BOD_SLEEP_gm) == BOD_SLEEP_ENABLE_gc;
+        const uint8_t level = static_cast<uint8_t>(BOD.CTRLB & BOD_LVL_gm);
+        return awake && asleep && level >= BOD_LVL_BODLEVEL2_gc;
+    }
+
+    // ---- declined on this part ----------------------------------------------
+    //
+    // Flash and User Row self-programming: the AVR DA/DB names exist so
+    // that a program written against them stops HERE, with the reason,
+    // instead of at an unknown member.
+
+    template <typename... A>
+    static bool erase(A...) {
+        static_assert(nvm_declined_on_ea<A...>,
+                      "brio avrxt: flash self-programming is declined on the AVR EA - the part keeps its small values in its EEPROM (docs/avrxt/nvm.md)");
+        return false;
+    }
+    template <typename... A>
+    static bool write_word(A...) {
+        static_assert(nvm_declined_on_ea<A...>,
+                      "brio avrxt: flash self-programming is declined on the AVR EA - the part keeps its small values in its EEPROM (docs/avrxt/nvm.md)");
+        return false;
+    }
+    template <typename... A>
+    static bool write_block(A...) {
+        static_assert(nvm_declined_on_ea<A...>,
+                      "brio avrxt: flash self-programming is declined on the AVR EA - the part keeps its small values in its EEPROM (docs/avrxt/nvm.md)");
+        return false;
+    }
+    template <typename... A>
+    static bool userrow_write(A...) {
+        static_assert(nvm_declined_on_ea<A...>,
+                      "brio avrxt: the User Row is written over UPDI on the AVR EA, never by the CPU - its write path is the declined flash one (docs/avrxt/nvm.md)");
+        return false;
+    }
+    template <typename... A>
+    static bool userrow_write_block(A...) {
+        static_assert(nvm_declined_on_ea<A...>,
+                      "brio avrxt: the User Row is written over UPDI on the AVR EA, never by the CPU - its write path is the declined flash one (docs/avrxt/nvm.md)");
+        return false;
+    }
+    template <typename... A>
+    static bool userrow_erase(A...) {
+        static_assert(nvm_declined_on_ea<A...>,
+                      "brio avrxt: the User Row is written over UPDI on the AVR EA, never by the CPU - its write path is the declined flash one (docs/avrxt/nvm.md)");
+        return false;
+    }
+
+private:
+    static constexpr uint32_t wait_limit = 4'000'000u;
+
+    /// CTRLA is CCP-protected with the SPM key (table 11-7); the key goes
+    /// in with OUT (DS80001048D 2.2.3, above).
+    static void write_ctrla(uint8_t cmd) { _PROTECTED_WRITE_SPM(NVMCTRL.CTRLA, cmd); }
+
+    /// CTRLB is CCP-protected with the IOREG key, every bit of it (table
+    /// 11-7). The bits this sets are one-way, so the read-modify-write
+    /// cannot lose one.
+    static void set_ctrlb(uint8_t bits) {
+        const uint8_t v = static_cast<uint8_t>(NVMCTRL.CTRLB | bits);
+        _PROTECTED_WRITE(NVMCTRL.CTRLB, v);
+    }
+};
+
+/**
+ * The EEPROM as a util/nv_record.hpp store, on this generation.
+ *
+ * write() is Nvm::eeprom_store(), the store run of one byte: the cheapest
+ * of the three operations that leaves the byte in place - EEPW onto an erased
+ * byte and EEPER to 0xFF at 2.6 ms, EEPERW at 5.2 ms otherwise - and it
+ * RETURNS BEFORE THE BYTE IS DOWN. The NvStore contract is a byte at a
+ * time, so each byte is one operation; the page run (eight bytes for the
+ * price of one) is the engine's, waiting for the contract to take a run.
+ */
+struct EepromStore {
+    EepromStore() = delete;
+
+    static constexpr uint16_t size() { return eeprom_size; }
+    static uint8_t read(uint16_t addr) { return Nvm::eeprom_read(addr); }
+    static bool write(uint16_t addr, uint8_t value) {
+        return Nvm::eeprom_store(addr, value);
     }
     static bool ready() { return !Nvm::eeprom_busy(); }
     static bool wait_ready() { return Nvm::wait_eeprom(); }

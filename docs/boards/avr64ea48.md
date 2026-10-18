@@ -19,7 +19,12 @@ this one differs from the DA's on the same PCB in what is fitted.
   would have to run its clock at 10 MHz or less.
 - **Fuses**: OSCCFG 0x00 (OSCHF at 20 MHz, the factory value), SYSCFG0
   **0xD8** (RSTPINCFG = RESET on PF6, UPDIPINCFG = UPDI on PF7, CRC off,
-  EESAVE clear), SYSCFG1 0x07, WDTCFG 0x00, BODCFG 0x00, BOOTSIZE 0x00 and
+  EESAVE clear), SYSCFG1 0x07, WDTCFG 0x00, **BODCFG 0x4D** (the BOD at
+  BODLEVEL2, continuous with the start-up wait awake and continuous
+  asleep: the rev B1's NVM writes guarded against DS80001048D 2.2.1, as
+  `test_avr_nvm` asserts - [../avrxt/nvm.md](../avrxt/nvm.md); written
+  with `brio fuses <board> bodcfg=0x4D`, which warns on an EA whose
+  BODCFG leaves them unguarded), BOOTSIZE 0x00 and
   CODESIZE 0x00 (the whole flash is BOOT: nothing writes flash from
   software, and the EA's flash self-programming is declined - its
   storage is the EEPROM). **SYSCFG0 bit 4 (UPDIPINCFG) must never
@@ -49,6 +54,8 @@ this one differs from the DA's on the same PCB in what is fitted.
   pin and its PC partner at once: `pin_check` waves PC4..PC7 and leaves
   PE0..PE3 inputs with no pull, and the suites leave the unused half an
   input (`board_pc_pe_jumpers`).
+- **Identity**: a label in the USERROW, written once over UPDI
+  ([../avrxt/userrow.md](../avrxt/userrow.md)).
 - Manifest type `ea48`; the project is `avrxt/`
   ([../avrxt/README.md](../avrxt/README.md)).
 
@@ -76,6 +83,8 @@ this one differs from the DA's on the same PCB in what is fitted.
   are letter 9's, the 32 kHz crystal again ([../avrxt/tca.md](../avrxt/tca.md),
   [../avrxt/tcb.md](../avrxt/tcb.md), [../avrxt/ccl.md](../avrxt/ccl.md),
   [../avrxt/rtc.md](../avrxt/rtc.md)).
+- `test_avr_nvm` (the EEPROM engine) 103 of 103, ten runs of ten
+  ([../avrxt/nvm.md](../avrxt/nvm.md)).
 - The timer suite's pads on this board: TCA0 on PORTD (PD0, PD2), TCA1
   on PORTB, PORTC (PC4..PC6, the jumpered pins - nothing drives their
   PE partners meanwhile), PORTA (PA4..PA6) and PORTD (PD4..PD6), the CCL

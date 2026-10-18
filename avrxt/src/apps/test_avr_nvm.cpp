@@ -1,8 +1,18 @@
-// test_avr_nvm - the NVMCTRL test SUITE for the AVR DA/DB target:
+// test_avr_nvm - the NVMCTRL test SUITE for the avrxt target:
 // avrxt/nvm.hpp (Flash, EEPROM, User Row, Signature Row, the section
 // protections and the vector-table invariant) and the three services
 // built on it - util/nv_record.hpp, util/nv_writer.hpp and
 // util/persistent_panic.hpp.
+//
+// TWO ENGINES, ONE SUITE. On the AVR DA/DB (NVM version 2) every letter
+// below runs as described. On the AVR EA (NVM version 3, EEPROM only:
+// its flash and User Row self-programming are declined) the letters
+// keep their keys and change their matter: a the EA's identity, the
+// supply guard of DS80001048D 2.2.1 and the FLMAP window under CCP; b the
+// page-buffer command model, the three page operations and their times;
+// c the services, plus the page run; d and u print why they are skipped;
+// e what an EEPROM operation costs the CPU and its interrupts; f the
+// persistent panic and EEWP across two resets. No g, no m.
 //
 // Reference test of those headers (docs/avrxt/nvm.md): keep it passing.
 //
@@ -18,7 +28,9 @@
 // whole Flash is one BOOT section and no software can write any of it,
 // so the Flash legs report the geometry and skip. The standing bench
 // geometry is BOOTSIZE = 128 (BOOT = the first 64 KB, where all the
-// code is) and CODESIZE = 0; brio's `fuses` verb writes it.
+// code is) and CODESIZE = 0; brio's `fuses` verb writes it. On the AVR
+// EA the factory BOOTSIZE 0 stays, and the BODCFG fuse guards the EEPROM
+// writes (letter a asserts it: brio fuses <board> bodcfg=0x4D).
 //
 // Times are COUNTED IN CLK_PER CYCLES: a TCB pair (TCB1+TCB2) cascaded
 // into one 32-bit counter at CLK_PER is the stopwatch, latched by a
@@ -29,10 +41,13 @@
 // Bench diagnostic, NOT a kernel app (sequential, blocking). Console on
 // USART2 ALT1 (PF4/PF5) at 460800. No pin is driven, nothing to wire.
 // Event channels 4 (the cascade's carry) and 5 (its snapshot).
+// The verdicts' bounds are derived beside each one; times are counted
+// in CLK_PER cycles of the board's crystal (24 MHz on the DA/DB boards,
+// 20 MHz on the EA's).
 //
-// Test f RESETS THE BOARD four times on purpose and carries its own
-// verdicts across the resets in a .noinit token, so `z` still ends with
-// one ALL: line. It is always run last.
+// Test f RESETS THE BOARD three times on purpose (twice on the AVR EA)
+// and carries its own verdicts across the resets in a .noinit token, so
+// `z` still ends with one ALL: line. It is always run last.
 //
 // Commands: ? | a identity and geometry | b EEPROM primitives and times
 // | c the record, the writer AO and the endurance policy | d Flash in
@@ -45,7 +60,7 @@
 // m (an AVR DA only, first after a reset) the data-space window's
 //   protection check, DS80000882C 2.7.1: two erase cycles of one page
 
-// build: boards = db48,da48
+// build: boards = db48,da48,ea48
 // build: monitor_speed = 460800
 // build: flmap_lock = 0
 
@@ -69,6 +84,14 @@
 #include "util/print.hpp"
 
 #include "avr_board.hpp"
+
+#if defined(NVMCTRL_FLBUSY_bm)
+#include "avrxt/sleep.hpp"
+
+/// The load address of the image's .rodata (the AVR64EA's linker script
+/// defines it): letter a checks FLMAP against it.
+extern "C" const char __rodata_load_start[];
+#endif
 
 // The board's HF clock: its source and rate are the board table's.
 using SysClock = BoardClock;   // the board's HF source (avr_board.hpp)
@@ -104,10 +127,12 @@ using P = AvrPlatform;
 using Serial = Uart<2, Route::alt1>;
 constexpr Serial serial;
 
+#if !defined(NVMCTRL_FLBUSY_bm)
 /// The fuse geometry this image is built for. Every compile-time Flash
 /// verb below is checked against it, and test a checks it against the
 /// silicon.
 using Layout = FlashLayout<128, 0>;
+#endif
 
 /// The EEPROM map this suite claims. The panic slot first (it is the
 /// one thing another program would also want at a known place), the
@@ -162,6 +187,9 @@ uint32_t stamp_cost() {
 volatile uint8_t alarm_mode = 0;   ///< 0 off, 1 = e's latency alarm
 volatile uint32_t alarm_stamp = 0;
 volatile bool alarm_ran = false;
+#if defined(NVMCTRL_FLBUSY_bm)
+volatile bool alarm_saw_busy = false;   ///< e: an EEPROM operation ran at the stamp
+#endif
 volatile uint16_t nvm_interrupts = 0;
 
 // ---- the writer AO ------------------------------------------------------------
@@ -205,10 +233,12 @@ void verdict(const char* name, bool ok) {
     if (ok) ++passed; else ++failed;
     print(serial, "  ", ok ? "PASS" : "FAIL", "  ", name, crlf);
 }
+#if !defined(NVMCTRL_FLBUSY_bm)
 bool near(int32_t a, int32_t b, int32_t tol) {
     const int32_t d = a > b ? a - b : b - a;
     return d <= tol;
 }
+#endif
 
 void console_drain() {
     while (!Serial::tx_idle()) {
@@ -217,6 +247,11 @@ void console_drain() {
 }
 
 void quiesce() {
+#if defined(NVMCTRL_FLBUSY_bm)
+    // CTRLA written while an operation runs is refused (nvm.hpp): let the
+    // last one end before clear_command() below.
+    (void)Nvm::wait_idle();
+#endif
     alarm_mode = 0;
     Alarm::enable_capt_interrupt(false);
     Alarm::disable();
@@ -227,6 +262,7 @@ void quiesce() {
     stopwatch_init();
 }
 
+#if !defined(NVMCTRL_FLBUSY_bm)
 const char* error_name(NvmError e) {
     switch (e) {
         case NvmError::none: return "none";
@@ -237,7 +273,19 @@ const char* error_name(NvmError e) {
     }
     return "?";
 }
+#else
+const char* error_name(NvmError e) {
+    switch (e) {
+        case NvmError::none: return "none";
+        case NvmError::write_protect: return "write_protect";
+        case NvmError::command_collision: return "command_collision";
+        case NvmError::wrong_section: return "wrong_section";
+    }
+    return "?";
+}
+#endif
 
+#if !defined(NVMCTRL_FLBUSY_bm)
 const char* section_name(FlashSection s) {
     switch (s) {
         case FlashSection::boot: return "BOOT";
@@ -565,6 +613,478 @@ void tb_eeprom() {
     quiesce();
 }
 
+#else // the AVR EA: NVM version 3, the EEPROM alone
+
+// ---- EA helpers -------------------------------------------------------------------
+
+/// The EEPROM pages letter b works on: page 4 (32..39) and page 5
+/// (40..47), inside the suite's raw area.
+constexpr uint16_t page_a = raw_base;
+constexpr uint16_t page_b = static_cast<uint16_t>(raw_base + eeprom_page_size);
+/// Letter e's page (48..55) and letter f's (56..63).
+constexpr uint16_t page_e = static_cast<uint16_t>(raw_base + 2 * eeprom_page_size);
+constexpr uint16_t page_f = static_cast<uint16_t>(raw_base + 3 * eeprom_page_size);
+
+bool page_reads(uint16_t at, const uint8_t* want, uint8_t n) {
+    for (uint8_t i = 0; i < n; ++i) {
+        if (Nvm::eeprom_read(static_cast<uint16_t>(at + i)) != want[i]) return false;
+    }
+    return true;
+}
+bool page_blank(uint16_t at) {
+    for (uint8_t i = 0; i < eeprom_page_size; ++i) {
+        if (Nvm::eeprom_read(static_cast<uint16_t>(at + i)) != 0xFFu) return false;
+    }
+    return true;
+}
+/// One 8-byte erase, waited out: the page reads 0xFF after.
+bool erase_page(uint16_t at) {
+    return Nvm::eeprom_erase(at, EepromErase::bytes8) && Nvm::wait_eeprom();
+}
+void print_page(const char* what, uint16_t at) {
+    print(serial, "  ", what, " [", at, "..]:");
+    for (uint8_t i = 0; i < eeprom_page_size; ++i) {
+        print(serial, " ", hex(Nvm::eeprom_read(static_cast<uint16_t>(at + i))));
+    }
+    print(serial, crlf);
+}
+const char* command_name(NvmCommand c) {
+    switch (c) {
+        case NvmCommand::none: return "NOCMD";
+        case NvmCommand::noop: return "NOOP";
+        case NvmCommand::eeprom_page_write: return "EEPW";
+        case NvmCommand::eeprom_page_erase_write: return "EEPERW";
+        case NvmCommand::eeprom_page_erase: return "EEPER";
+        case NvmCommand::eeprom_buffer_clear: return "EEPBCLR";
+        case NvmCommand::reserved: return "reserved";
+    }
+    return "?";
+}
+/// |a - b| <= a / 100: two operation times that the silicon makes
+/// equal, measured within one letter. The bound: both are timed by the
+/// same crystal (50 ppm, common to both, so it cancels), each stamp
+/// pair's own cost is the same in both legs, the wait loop polls every
+/// ~8 cycles (a 0.01 % quantization of a 54 000-cycle erase), and the
+/// controller's own timebase moves between two legs a few milliseconds
+/// apart only with the die's temperature, which a letter does not move
+/// by a degree (an internal RC oscillator drifts well under 0.5 % per
+/// degree). One percent covers all of it twice over.
+bool same_time(uint32_t a, uint32_t b) {
+    const uint32_t d = a > b ? a - b : b - a;
+    return d <= a / 100u;
+}
+
+// ---- a identity, geometry, the supply, the window ------------------------------
+void ta_identity() {
+    print(serial, "a identity, geometry, the fuses, the supply guard and the "
+                  "data-space window", crlf);
+    quiesce();
+
+    print(serial, "  SIGROW device id ", hex(Sigrow::device_id(0)), " ",
+          hex(Sigrow::device_id(1)), " ", hex(Sigrow::device_id(2)),
+          " (0x1E961E = the AVR64EA), silicon rev ", hex(SYSCFG.REVID),
+          " (0x21 = B1)", crlf);
+    verdict("the device id starts with Atmel's 0x1E", Sigrow::device_id(0) == 0x1Eu);
+    verdict("the second byte says 64 KB (0x96)", Sigrow::device_id(1) == 0x96u);
+    verdict("and the third names the AVR64EA (0x1E)", Sigrow::device_id(2) == 0x1Eu);
+    print(serial, "  serial number");
+    bool serial_varies = false;
+    for (uint8_t i = 0; i < Sigrow::serial_bytes; ++i) {
+        const uint8_t b = Sigrow::serial(i);
+        if (b != 0x00 && b != 0xFF) serial_varies = true;
+        print(serial, " ", hex(b));
+    }
+    print(serial, crlf);
+    verdict("the serial number is programmed, not blank", serial_varies);
+    print(serial, "  TEMPSENSE0 (a signed gain) ", Sigrow::tempsense0(),
+          ", TEMPSENSE1 ", Sigrow::tempsense1(), crlf);
+    verdict("the temperature calibration is programmed",
+            static_cast<uint16_t>(Sigrow::tempsense0()) != 0xFFFFu &&
+                Sigrow::tempsense1() != 0xFFFFu);
+
+    verdict("the Flash is the header's 64 KB in 128-byte pages",
+            flash_size == 65536u && flash_page_size == 128u);
+    verdict("the EEPROM is 512 bytes in 8-byte pages at 0x1400",
+            eeprom_size == 512u && eeprom_page_size == 8u && eeprom_base == 0x1400u);
+    verdict("the User Row is 64 bytes at 0x1080",
+            userrow_size == 64u && userrow_base == 0x1080u);
+
+    print(serial, "  fuses: BOOTSIZE ", FUSE.BOOTSIZE, ", CODESIZE ", FUSE.CODESIZE,
+          ", SYSCFG0 ", hex(FUSE.SYSCFG0), " (EESAVE ",
+          (FUSE.SYSCFG0 & FUSE_EESAVE_bm) ? "set" : "clear", "), BODCFG ",
+          hex(FUSE.BODCFG), crlf);
+    verdict("BOOTSIZE is the factory 0: the whole Flash is BOOT, and nothing "
+            "in this image writes it", FUSE.BOOTSIZE == 0);
+
+    // DS80001048D 2.2.1: on rev B1 an EEPROM write below 2.7 V may fail;
+    // the BOD at BODLEVEL2 or above is the sheet's alternative.
+    const uint8_t bod_a = BOD.CTRLA;
+    print(serial, "  BOD: CTRLA ", hex(bod_a), " (ACTIVE ", (bod_a >> 2) & 3u,
+          ", SLEEP ", bod_a & 3u, "), CTRLB ", hex(BOD.CTRLB), " (LVL ",
+          BOD.CTRLB & 7u, ": 2 = BODLEVEL2, 2.60 V typical)", crlf);
+    const bool guarded = Nvm::supply_guarded();
+    verdict("DS80001048D 2.2.1: the BOD guards every EEPROM write "
+            "(Nvm::supply_guarded)", guarded);
+    if (!guarded) {
+        print(serial, "  provision it: brio fuses <board> bodcfg=0x4D (BODLEVEL2, "
+                      "continuous awake with the start-up wait, continuous asleep)", crlf);
+    }
+
+    verdict("IVSEL is armed (the hardware ignores it while the whole Flash is BOOT)",
+            Nvm::vectors_in_boot_armed());
+
+    // FLMAP. This image opts out of the project-wide lock so the field
+    // can be moved here; .rodata lives in the upper 32 KB.
+    const uint8_t boot_map = Nvm::flmap();
+    const uint32_t rodata = pgm_get_far_address(__rodata_load_start);
+    print(serial, "  FLMAP reads ", boot_map, ", FLMAPLOCK ",
+          Nvm::flmap_locked() ? "SET" : "clear", "; .rodata loads at ", rodata, crlf);
+    verdict("the C runtime mapped the half .rodata was linked into",
+            static_cast<uint32_t>(boot_map & 1u) * 32768u == rodata / 32768u * 32768u);
+    if (Nvm::flmap_locked()) {
+        print(serial, "  FLMAPLOCK already set (an earlier run of this letter "
+                      "locked it): the mobility half is skipped - reset or "
+                      "reflash for the full letter", crlf);
+    } else {
+        verdict("this image was linked with FLMAPLOCK left open", !Nvm::flmap_locked());
+        // A plain store, no key: FLMAP 1 -> 3, which maps the SAME half
+        // on 64 KB (11.5.2), so .rodata stays readable whatever happens.
+        const uint8_t before = NVMCTRL.CTRLB;
+        NVMCTRL.CTRLB = static_cast<uint8_t>(before ^ 0x20u);
+        const uint8_t after = NVMCTRL.CTRLB;
+        print(serial, "  a plain store of ", hex(static_cast<uint8_t>(before ^ 0x20u)),
+              " into CTRLB (", hex(before), ") reads back ", hex(after), crlf);
+        verdict("a plain store does not move FLMAP: the whole of CTRLB is "
+                "under CCP here (table 11-7)", after == before);
+        bool moved = true;
+        for (uint8_t s = 0; s < 4; ++s) {
+            if (!Nvm::set_flmap(s) || Nvm::flmap() != s) moved = false;
+        }
+        const bool restored = Nvm::set_flmap(boot_map) && Nvm::flmap() == boot_map;
+        verdict("the keyed set_flmap() selects every one of the four sections",
+                moved);
+        verdict("FLMAP is restored to the one .rodata needs", restored);
+    }
+    Nvm::lock_flmap();
+    verdict("FLMAPLOCK reads back after being set", Nvm::flmap_locked());
+    verdict("and the field refuses to move from now on",
+            !Nvm::set_flmap(boot_map ^ 1u) && Nvm::flmap() == boot_map);
+
+    // The User Row: read, never written from here.
+    auto board = board_id();
+    print(serial, "  USERROW label \"", board.empty() ? "?" : board.data(), "\"", crlf);
+    verdict("the board carries a printable identity label", !board.empty());
+    uint8_t row[4];
+    Nvm::userrow_read(0, row, sizeof row);
+    verdict("the driver reads the row the label is read from",
+            !board.empty() && row[0] == static_cast<uint8_t>(board[0]) &&
+                Nvm::userrow_read(0) == row[0]);
+    quiesce();
+}
+
+// ---- b the EEPROM engine: the command model, the operations, the times -----------
+void tb_eeprom() {
+    print(serial, "b EEPROM: the page buffer's command model, the three page "
+                  "operations, the chooser, the times and the engine's cost", crlf);
+    quiesce();
+    verdict("the controller is idle and error-free at the start",
+            !Nvm::busy() && Nvm::error() == NvmError::none);
+    verdict("EEREADY stands while the EEPROM is idle (it is a LEVEL flag)",
+            Nvm::eeprom_ready_flag());
+    verdict("an 8-byte erase leaves both pages blank",
+            erase_page(page_a) && erase_page(page_b) && page_blank(page_a) &&
+                page_blank(page_b));
+
+    // ---- the command model ----
+    // A store loads the buffer; the command written after it starts the
+    // operation on the loaded bytes.
+    Nvm::clear_command();
+    Nvm::clear_error();
+    Nvm::eeprom_load(page_a, 0x5Au);
+    const bool started_by_store = Nvm::eeprom_busy();
+    verdict("a store into the EEPROM starts nothing: it loads the page buffer",
+            !started_by_store && Nvm::eeprom_read(page_a) == 0xFFu &&
+                Nvm::error() == NvmError::none);
+    Nvm::eeprom_commit(EepromOp::write);
+    const bool started_by_command = Nvm::eeprom_busy();
+    (void)Nvm::wait_eeprom();
+    verdict("the command written after the load starts the operation at once",
+            started_by_command);
+    verdict("and writes the loaded byte", Nvm::eeprom_read(page_a) == 0x5Au);
+    verdict("the command stays in CTRLA after the operation",
+            Nvm::selected() == NvmCommand::eeprom_page_write);
+    Nvm::eeprom_load(static_cast<uint16_t>(page_a + 1), 0x00u);
+    verdict("a store with that command still selected only loads, too",
+            !Nvm::eeprom_busy() &&
+                Nvm::eeprom_read(static_cast<uint16_t>(page_a + 1)) == 0xFFu);
+    // That load is a stray now. Every verb opens with EEPBCLR ...
+    const bool w2 = Nvm::eeprom_write(static_cast<uint16_t>(page_a + 2), 0x33u);
+    (void)Nvm::wait_eeprom();
+    verdict("a verb opens with EEPBCLR: the stray load is not written",
+            w2 && Nvm::eeprom_read(static_cast<uint16_t>(page_a + 1)) == 0xFFu &&
+                Nvm::eeprom_read(static_cast<uint16_t>(page_a + 2)) == 0x33u);
+    // ... because without it the stray rides along.
+    Nvm::eeprom_load(static_cast<uint16_t>(page_a + 3), 0x00u);   // a stray
+    Nvm::eeprom_load(static_cast<uint16_t>(page_a + 4), 0x44u);   // the intended byte
+    Nvm::eeprom_commit(EepromOp::write);
+    (void)Nvm::wait_eeprom();
+    verdict("without EEPBCLR a stray load is written with the next operation",
+            Nvm::eeprom_read(static_cast<uint16_t>(page_a + 3)) == 0x00u &&
+                Nvm::eeprom_read(static_cast<uint16_t>(page_a + 4)) == 0x44u);
+    // The AVR DA/DB order: the command first, then the store.
+    (void)Nvm::eeprom_open();
+    uint32_t t0 = cycles_now();
+    Nvm::eeprom_commit(EepromOp::write);
+    const bool empty_ran = Nvm::eeprom_busy();
+    (void)Nvm::wait_eeprom();
+    const uint32_t empty_cycles = cycles_now() - t0;
+    Nvm::eeprom_load(static_cast<uint16_t>(page_a + 5), 0x55u);
+    const bool started_late = Nvm::eeprom_busy();
+    (void)Nvm::wait_eeprom();
+    print(serial, "  a command on an empty buffer: busy ", empty_ran ? "yes" : "no",
+          ", for ", us_of(empty_cycles), " us", crlf);
+    verdict("the AVR DA/DB order - command, then store - writes nothing here",
+            !started_late && Nvm::eeprom_read(static_cast<uint16_t>(page_a + 5)) == 0xFFu);
+    (void)Nvm::eeprom_open();        // drop that load
+    // CTRLA during an operation.
+    Nvm::clear_error();
+    (void)Nvm::eeprom_erase(page_b, EepromErase::bytes8);
+    Nvm::clear_command();             // while the erase runs
+    const NvmError collision = Nvm::error();
+    const NvmCommand kept = Nvm::selected();
+    (void)Nvm::wait_eeprom();
+    print(serial, "  NOCMD written during an erase -> ERROR ", error_name(collision),
+          ", CTRLA still ", command_name(kept), crlf);
+    verdict("CTRLA written during an operation is refused with command_collision",
+            collision == NvmError::command_collision);
+    verdict("the command stays and the operation completes",
+            kept == NvmCommand::eeprom_page_erase && page_blank(page_b));
+    Nvm::clear_error();
+    // One run fills a page: the loads made with EEPBCLR still selected
+    // stay in the buffer.
+    uint8_t pattern[8];
+    for (uint8_t i = 0; i < 8; ++i) pattern[i] = static_cast<uint8_t>(0xA0u + i);
+    const bool run8 = Nvm::eeprom_run(page_b, pattern, 8, EepromOp::write);
+    (void)Nvm::wait_eeprom();
+    verdict("one run writes all eight bytes of a page in one operation",
+            run8 && page_reads(page_b, pattern, 8));
+    verdict("and nothing in the sequence raised an error",
+            Nvm::error() == NvmError::none);
+    // The buffer is indexed by the low three address bits alone.
+    (void)Nvm::eeprom_open();
+    Nvm::eeprom_load(static_cast<uint16_t>(page_a + 6), 0x66u);   // page 4, offset 6
+    Nvm::eeprom_load(static_cast<uint16_t>(page_b + 7), 0x77u);   // page 5, offset 7
+    Nvm::eeprom_commit(EepromOp::erase_write);
+    (void)Nvm::wait_eeprom();
+    print_page("page 4", page_a);
+    print_page("page 5", page_b);
+    verdict("loads in two pages land in ONE page, the last load's, at the "
+            "first load's offset",
+            Nvm::eeprom_read(static_cast<uint16_t>(page_b + 6)) == 0x66u &&
+                Nvm::eeprom_read(static_cast<uint16_t>(page_b + 7)) == 0x77u &&
+                Nvm::eeprom_read(static_cast<uint16_t>(page_a + 6)) == 0xFFu);
+    verdict("so a run that leaves its page is refused",
+            !Nvm::eeprom_run(static_cast<uint16_t>(page_a + 6), pattern, 4,
+                             EepromOp::write) &&
+                !Nvm::eeprom_store_run(static_cast<uint16_t>(page_a + 6), pattern, 4));
+    verdict("and so are an empty run and an offset past the array",
+            !Nvm::eeprom_run(page_a, pattern, 0, EepromOp::write) &&
+                !Nvm::eeprom_erase_write(eeprom_size, 0));
+    verdict("an erase span that is not aligned to itself is refused",
+            !Nvm::eeprom_erase(static_cast<uint16_t>(page_a + 4), EepromErase::bytes8) &&
+                !Nvm::eeprom_erase(static_cast<uint16_t>(page_a + 1), EepromErase::bytes2));
+    // A wake from Idle clears the buffer (11.3.5): the PIT wakes it.
+    (void)Nvm::eeprom_open();
+    Nvm::eeprom_load(static_cast<uint16_t>(page_a + 7), 0x00u);
+    Sleep::enter(SleepMode::idle);
+    Nvm::eeprom_commit(EepromOp::write);
+    (void)Nvm::wait_eeprom();
+    verdict("a wake from Idle clears the buffer: the load made before the "
+            "sleep is not written",
+            Nvm::eeprom_read(static_cast<uint16_t>(page_a + 7)) == 0xFFu);
+
+    // ---- the three operations, and the chooser ----
+    (void)erase_page(page_a);
+    verdict("an erase-and-write stores a byte over a programmed one",
+            Nvm::eeprom_write(page_a, 0x0Fu) && Nvm::wait_eeprom() &&
+                Nvm::eeprom_erase_write(page_a, 0xA5u) && Nvm::wait_eeprom() &&
+                Nvm::eeprom_read(page_a) == 0xA5u);
+    verdict("a write stores a byte onto an erased one",
+            Nvm::eeprom_write(static_cast<uint16_t>(page_a + 1), 0x12u) &&
+                Nvm::wait_eeprom() &&
+                Nvm::eeprom_read(static_cast<uint16_t>(page_a + 1)) == 0x12u);
+    // EEPW over a programmed byte: outside the chapter's precondition, so
+    // the chooser never does it - here only to say what the cell does.
+    (void)Nvm::eeprom_write(static_cast<uint16_t>(page_a + 1), 0x5Au);
+    (void)Nvm::wait_eeprom();
+    print(serial, "  (a write of 0x5A over 0x12, outside the chapter's "
+                  "precondition, reads back ",
+          hex(Nvm::eeprom_read(static_cast<uint16_t>(page_a + 1))),
+          "; 0x5A AND 0x12 = 0x12)", crlf);
+    const uint8_t one_new = 0x21u;
+    const uint8_t one_ff = 0xFFu;
+    const uint8_t one_other = 0x5Au;
+    const uint16_t c_at = static_cast<uint16_t>(page_a + 5);
+    const bool s1 = Nvm::eeprom_store_run(c_at, &one_new, 1);
+    const NvmCommand c1 = Nvm::selected();
+    (void)Nvm::wait_eeprom();
+    const bool v1 = Nvm::eeprom_read(c_at) == one_new;
+    const bool s2 = Nvm::eeprom_store_run(c_at, &one_other, 1);
+    const NvmCommand c2 = Nvm::selected();
+    (void)Nvm::wait_eeprom();
+    const bool v2 = Nvm::eeprom_read(c_at) == one_other;
+    const bool s3 = Nvm::eeprom_store_run(c_at, &one_ff, 1);
+    const NvmCommand c3 = Nvm::selected();
+    (void)Nvm::wait_eeprom();
+    const bool v3 = Nvm::eeprom_read(c_at) == one_ff;
+    const bool s4 = Nvm::eeprom_store_run(c_at, &one_ff, 1);
+    const bool busy4 = Nvm::eeprom_busy();
+    print(serial, "  the chooser: onto 0xFF ", command_name(c1), ", over a byte ",
+          command_name(c2), ", to 0xFF ", command_name(c3), crlf);
+    verdict("store onto an erased byte is a write (EEPW)",
+            s1 && v1 && c1 == NvmCommand::eeprom_page_write);
+    verdict("store over a programmed byte is an erase-and-write (EEPERW)",
+            s2 && v2 && c2 == NvmCommand::eeprom_page_erase_write);
+    verdict("store of 0xFF is an erase (EEPER)",
+            s3 && v3 && c3 == NvmCommand::eeprom_page_erase);
+    verdict("store of what is already there starts nothing", s4 && !busy4);
+    // A mixed page: some bytes equal, some erased, some programmed.
+    uint8_t mixed[8];
+    for (uint8_t i = 0; i < 8; ++i) {
+        mixed[i] = Nvm::eeprom_read(static_cast<uint16_t>(page_a + i));
+    }
+    mixed[0] = 0x01u;   // over a programmed byte
+    mixed[6] = 0x02u;   // onto an erased one
+    const bool sm = Nvm::eeprom_store_run(page_a, mixed, 8);
+    const NvmCommand cm = Nvm::selected();
+    (void)Nvm::wait_eeprom();
+    verdict("a mixed page run leaves exactly the bytes asked, in one EEPERW",
+            sm && cm == NvmCommand::eeprom_page_erase_write &&
+                page_reads(page_a, mixed, 8));
+    // A block across the page boundary: one store run per page touched.
+    uint8_t block[12];
+    for (uint8_t i = 0; i < 12; ++i) block[i] = static_cast<uint8_t>(0x30u + i);
+    const bool wb = Nvm::eeprom_write_block(static_cast<uint16_t>(page_a + 2), block,
+                                            sizeof block);
+    verdict("a 12-byte block across a page boundary writes and reads back",
+            wb && page_reads(static_cast<uint16_t>(page_a + 2), block, sizeof block) &&
+                !Nvm::eeprom_busy() && Nvm::selected() == NvmCommand::none);
+    verdict("and a block past the array is refused",
+            !Nvm::eeprom_write_block(static_cast<uint16_t>(eeprom_size - 4), block, 8));
+
+    // ---- the times (table 35-8: 2 ms typical for a byte or page erase
+    // and for a write, no maximum; an erase-and-write is not listed) ----
+    const uint32_t cost = stamp_cost();
+    uint8_t zeros[8] = {};
+    struct Leg { const char* what; uint32_t cycles; };
+    Leg legs[6];
+    auto timed = [&](const char* what, bool started) -> Leg {
+        const uint32_t start = cycles_now();
+        (void)started;
+        while (Nvm::eeprom_busy()) {
+        }
+        return Leg{what, cycles_now() - start};
+    };
+    // Each leg: the engine's call, then the wait; the call's own cycles
+    // (tens, measured below) are not in the figure.
+    (void)erase_page(page_b);
+    legs[0] = timed("write 1 byte (EEPW)", Nvm::eeprom_write(page_b, 0x00u));
+    legs[1] = timed("erase 1 byte (EEPER)", Nvm::eeprom_erase(page_b));
+    legs[2] = timed("erase-and-write 1 byte (EEPERW)",
+                    Nvm::eeprom_erase_write(page_b, 0x5Au));
+    legs[3] = timed("erase 8 bytes (EEPER)", Nvm::eeprom_erase(page_b, EepromErase::bytes8));
+    legs[4] = timed("write 8 bytes (EEPW)",
+                    Nvm::eeprom_run(page_b, zeros, 8, EepromOp::write));
+    legs[5] = timed("erase-and-write 8 bytes (EEPERW)",
+                    Nvm::eeprom_run(page_b, pattern, 8, EepromOp::erase_write));
+    for (const Leg& l : legs) {
+        print(serial, "  ", l.what, ": ", us_of(l.cycles), " us (", l.cycles,
+              " CLK_PER cycles)", crlf);
+    }
+    verdict("eight bytes cost what one does: write",
+            same_time(legs[0].cycles, legs[4].cycles));
+    verdict("eight bytes cost what one does: erase",
+            same_time(legs[1].cycles, legs[3].cycles));
+    verdict("eight bytes cost what one does: erase-and-write",
+            same_time(legs[2].cycles, legs[5].cycles));
+    verdict("an erase and a write take the same time",
+            same_time(legs[1].cycles, legs[0].cycles));
+    verdict("an erase-and-write is an erase plus a write",
+            same_time(legs[2].cycles, legs[0].cycles + legs[1].cycles));
+    verdict("and the page holds the run", page_reads(page_b, pattern, 8));
+
+    // ---- the engine's own cost: CPU cycles from the call to its return,
+    // the controller idle at the call (the operation runs on after).
+    // Each call is timed with interrupts masked, like the stamp pair
+    // whose cost is subtracted: a console interrupt inside the window
+    // would be counted as the engine's. ----
+    (void)erase_page(page_b);
+    uint32_t a = 0, call1 = 0, call8 = 0, call_same = 0, call_store = 0;
+    uint32_t clear_cost = 0, load_cost = 0;
+    {
+        P::CriticalSection cs;
+        a = cycles_now();
+        (void)Nvm::eeprom_erase_write(page_b, 0x11u);
+        call1 = cycles_now() - a - cost;
+    }
+    (void)Nvm::wait_eeprom();
+    {
+        P::CriticalSection cs;
+        a = cycles_now();
+        (void)Nvm::eeprom_run(page_b, pattern, 8, EepromOp::erase_write);
+        call8 = cycles_now() - a - cost;
+    }
+    (void)Nvm::wait_eeprom();
+    {
+        P::CriticalSection cs;
+        a = cycles_now();
+        (void)Nvm::eeprom_store_run(page_b, pattern, 8);
+        call_same = cycles_now() - a - cost;
+    }
+    const uint8_t one = 0x11u;
+    {
+        P::CriticalSection cs;
+        a = cycles_now();
+        (void)EepromStore::write(page_b, one);
+        call_store = cycles_now() - a - cost;
+    }
+    (void)Nvm::wait_eeprom();
+    // The NVM accesses inside those calls, one at a time: the buffer
+    // clear (its key and store, then the halt 11.3.2.4.5 puts at seven
+    // cycles) and one buffer load (a store, one cycle by the instruction
+    // set, plus whatever the bus adds).
+    {
+        P::CriticalSection cs;
+        a = cycles_now();
+        Nvm::issue(NvmCommand::eeprom_buffer_clear);
+        clear_cost = cycles_now() - a - cost;
+        a = cycles_now();
+        Nvm::eeprom_load(page_b, 0xFFu);
+        load_cost = cycles_now() - a - cost;
+    }
+    Nvm::issue(NvmCommand::eeprom_buffer_clear);
+    Nvm::clear_command();
+    print(serial, "  the engine's call, CPU cycles: one byte ", call1,
+          ", an 8-byte run ", call8, ", an 8-byte store run with nothing to "
+          "do ", call_same, ", EepromStore::write of one byte ", call_store,
+          " (the operation itself runs on, the CPU free); inside them, an "
+          "EEPBCLR costs ", clear_cost, " and one buffer load ", load_cost, crlf);
+    // The bounds: the release listing counts 58 cycles for the one-byte
+    // call (the EEPBCLR halt at the chapter's seven, a store at one) and
+    // 143 for the 8-byte run; the NVM accesses add what the line above
+    // measures. 100 and 250 hold both with room and still refuse the
+    // three-call shape this path replaced (138 cycles for one byte).
+    verdict("one operation's CPU cost is tens of cycles against its "
+            "milliseconds", call1 < 100u && call_store < 100u && call8 < 250u);
+
+    (void)erase_page(page_a);
+    (void)erase_page(page_b);
+    Nvm::clear_command();
+    quiesce();
+}
+
+#endif // the EA's letters a and b
+
 // ---- c the record, the writer AO, the endurance policy ---------------------------
 void tc_services() {
     print(serial, "c the typed record, its endurance policy and the writer AO", crlf);
@@ -633,6 +1153,10 @@ void tc_services() {
     const uint32_t t_start = cycles_now();
     const uint32_t tick_start = P::now();
     uint32_t loop_turns = 0;
+#if defined(NVMCTRL_FLBUSY_bm)
+    uint32_t turn_last = t_start;
+    uint32_t turn_gap = 0;   ///< the longest stretch between two turns
+#endif
     post<Writer>(NvWrite{writer_base, lend<Lease::reply>(payload), sizeof payload,
                          reply_to<Requester, NvDone>()});
     // The main loop the kernel would be running: it must keep turning
@@ -641,6 +1165,11 @@ void tc_services() {
     for (uint32_t guard = 0; guard < 20'000'000u && Requester::replies == 0;
          ++guard) {
         ++loop_turns;
+#if defined(NVMCTRL_FLBUSY_bm)
+        const uint32_t turn_now = cycles_now();
+        if (turn_now - turn_last > turn_gap) turn_gap = turn_now - turn_last;
+        turn_last = turn_now;
+#endif
         if (const std::optional<Writer::Event> e = Writer::queue.pop()) {
             Writer::dispatch(*e);
         }
@@ -666,9 +1195,26 @@ void tc_services() {
     }
     verdict("the bytes are in the EEPROM", bytes_ok);
     verdict("one interrupt per byte", nvm_interrupts == 8);
+#if !defined(NVMCTRL_FLBUSY_bm)
     verdict("the main loop kept turning throughout (no busy wait anywhere)",
             loop_turns > 10000u);
     verdict("the 1024 Hz timebase never stopped", ticks > 50u);
+#else
+    // A wait for an operation anywhere in a turn would show as a gap of
+    // the operation (52 000 cycles for the shortest); a tenth of that
+    // holds a dispatch, the two queue pops and an ISR or two.
+    print(serial, "  the longest stretch between two main-loop turns: ", turn_gap,
+          " cycles", crlf);
+    verdict("the main loop kept turning throughout (no busy wait anywhere)",
+            turn_gap < 5000u);
+    // The PIT runs on OSC32K, within 10 % over the full range
+    // (DS40002443A table 35-10), and each end of the window quantizes by
+    // a tick: a held interrupt would lose two ticks per operation.
+    const uint32_t expected_ticks = static_cast<uint32_t>(
+        static_cast<uint64_t>(elapsed) * P::ticks_per_second / crystal_hz);
+    verdict("the 1024 Hz timebase never stopped",
+            ticks + 2u >= expected_ticks * 9u / 10u);
+#endif
     verdict("the ready interrupt is disarmed at the end",
             (NVMCTRL.INTCTRL & NVMCTRL_EEREADY_bm) == 0);
 
@@ -704,9 +1250,40 @@ void tc_services() {
     }
     verdict("a request past the end of the store is refused with nv_bad_range",
             Requester::replies == 1 && Requester::last.status == nv_bad_range);
+#if defined(NVMCTRL_FLBUSY_bm)
+    // ---- the page run: the same eight bytes as ONE operation ----
+    // The writer above spends one operation, one interrupt and one
+    // dispatch per byte because the store contract takes a byte; the
+    // engine's page run takes the page. Eight bytes erased first, then
+    // stored as one run: one EEPW where the writer made eight.
+    (void)Nvm::eeprom_erase(writer_base, EepromErase::bytes8);
+    (void)Nvm::wait_eeprom();
+    const uint32_t run_start = cycles_now();
+    const bool run_ok = Nvm::eeprom_store_run(writer_base, payload, sizeof payload);
+    const NvmCommand run_cmd = Nvm::selected();
+    (void)Nvm::wait_eeprom();
+    const uint32_t run_cycles = cycles_now() - run_start;
+    Nvm::clear_command();
+    bool run_bytes = run_ok;
+    for (uint8_t i = 0; i < 8; ++i) {
+        if (Nvm::eeprom_read(static_cast<uint16_t>(writer_base + i)) != payload[i]) {
+            run_bytes = false;
+        }
+    }
+    print(serial, "  the same 8 bytes as one page run: ", us_of(run_cycles), " us, ",
+          command_name(run_cmd), " once (the writer: ", us_of(elapsed),
+          " us, eight operations)", crlf);
+    verdict("one page run stores the eight bytes", run_bytes);
+    // The writer made eight operations of the run's kind (each onto an
+    // erased byte, an EEPW like the run's), so its time is at least
+    // eight runs; a quarter leaves a factor of two for the dispatches.
+    verdict("in under a quarter of the byte-at-a-time writer's time",
+            run_cycles < elapsed / 4u);
+#endif
     quiesce();
 }
 
+#if !defined(NVMCTRL_FLBUSY_bm)
 // ---- d Flash in the scratch region ------------------------------------------------
 void td_flash() {
     print(serial, "d Flash: erase, word write, ELPM read-back, the five "
@@ -949,6 +1526,163 @@ void te_stall() {
     quiesce();
 }
 
+#else // the AVR EA
+
+// ---- d Flash: declined on this part ------------------------------------------------
+void td_flash() {
+    print(serial, "d Flash: SKIPPED - flash self-programming is declined on the "
+                  "AVR EA (the part keeps its small values in its EEPROM; "
+                  "docs/avrxt/nvm.md)", crlf);
+}
+
+// ---- e what an EEPROM operation costs the rest of the system -----------------------
+void te_stall() {
+    print(serial, "e what an EEPROM operation costs the CPU and its interrupts", crlf);
+    quiesce();
+    const uint32_t cost = stamp_cost();
+    (void)erase_page(page_e);
+
+    // The CPU runs while the EEPROM is programmed, as long as it touches
+    // no EEPROM: a loop that reads STATUS alone keeps turning.
+    uint32_t turns = 0;
+    uint32_t t0 = cycles_now();
+    (void)Nvm::eeprom_erase_write(page_e, 0x33u);
+    while (Nvm::eeprom_busy()) {
+        ++turns;
+    }
+    const uint32_t op = cycles_now() - t0;
+    print(serial, "  an erase-and-write of ", us_of(op), " us: a loop polling STATUS "
+                  "turned ", turns, " times", crlf);
+    // The loop (STATUS load, test, a 32-bit increment, the branch) is
+    // about ten cycles: some 10 000 turns in a 107 000-cycle operation; a
+    // halted CPU would turn at most once. 1000 sits a decade from both.
+    verdict("the CPU keeps running through an EEPROM operation", turns > 1000u);
+
+    // A READ of the EEPROM during an operation is a bus wait (11.3.2.1):
+    // the instruction is suspended until the operation ends.
+    t0 = cycles_now();
+    (void)Nvm::eeprom_erase_write(page_e, 0x44u);
+    const uint32_t issued = cycles_now();
+    const uint8_t seen = Nvm::eeprom_read(static_cast<uint16_t>(page_e + 1));
+    const uint32_t read_done = cycles_now();
+    const bool idle_after_read = !Nvm::eeprom_busy();
+    const uint32_t read_stall = read_done - issued - cost;
+    const uint32_t rest = op - (issued - t0);
+    print(serial, "  a read 1 us into it took ", us_of(read_stall), " us (", read_stall,
+          " cycles; the operation had ", rest, " to go), and read ", hex(seen), crlf);
+    // And right after EEBUSY drops: is the array readable at once?
+    uint32_t after_worst = 0;
+    for (uint8_t i = 0; i < 4; ++i) {
+        (void)Nvm::eeprom_erase_write(page_e, static_cast<uint8_t>(0x60u + i));
+        while (Nvm::eeprom_busy()) {
+        }
+        const uint32_t c0 = cycles_now();
+        (void)Nvm::eeprom_read(static_cast<uint16_t>(page_e + 1));
+        const uint32_t took = cycles_now() - c0 - cost;
+        if (took > after_worst) after_worst = took;
+    }
+    print(serial, "  a read right after EEBUSY drops took ", after_worst,
+          " cycles at worst (4 tries)", crlf);
+    // The read is held to the operation's end at least: its stall is no
+    // shorter than the remainder of an operation as long as the one
+    // above, to letter b's same_time() percent.
+    verdict("a read meanwhile waits out the rest of the operation",
+            read_stall + rest / 100u >= rest && idle_after_read);
+
+    // A buffer LOAD during an operation halts the CPU likewise
+    // (11.3.2.2's note). The load is a stray afterwards: dropped.
+    t0 = cycles_now();
+    (void)Nvm::eeprom_erase_write(page_e, 0x55u);
+    const uint32_t issued2 = cycles_now();
+    Nvm::eeprom_load(static_cast<uint16_t>(page_e + 2), 0xFFu);
+    const uint32_t load_done = cycles_now();
+    const bool idle_after_load = !Nvm::eeprom_busy();
+    const uint32_t load_stall = load_done - issued2 - cost;
+    const uint32_t rest2 = op - (issued2 - t0);
+    (void)Nvm::eeprom_open();
+    print(serial, "  a buffer load 1 us into it took ", us_of(load_stall), " us (",
+          load_stall, " cycles; the operation had ", rest2, " to go)", crlf);
+    verdict("a buffer load meanwhile waits it out too",
+            load_stall + rest2 / 100u >= rest2 && idle_after_load);
+
+    // And an interrupt waits with the instruction. The alarm falls due
+    // one millisecond into an erase-and-write; the ISR stamps the cascade
+    // itself, so what is measured is how late it ran.
+    Ticker::pause();
+    alarm_mode = 1;
+    constexpr uint16_t one_ms = static_cast<uint16_t>(cycles_per_us * 1000u);
+    (void)Alarm::init({.mode = TcbMode::periodic,
+                       .clock = TcbClock::div1,
+                       .compare = one_ms});
+    Alarm::enable_capt_interrupt(true);
+    uint32_t quiet_worst = 0, polling_worst = 0, reading_worst = 0;
+    struct Probe { uint32_t late; uint32_t spins; uint32_t gap; bool busy; };
+    Probe probes[3][3] = {};
+    for (uint8_t i = 0; i < 3; ++i) {
+        for (uint8_t leg = 0; leg < 3; ++leg) {
+            cli();
+            alarm_ran = false;
+            Alarm::count(0);
+            Alarm::clear_capt();
+            const uint32_t due = cycles_now() + one_ms;
+            sei();
+            uint32_t last = 0, gap = 0, spins = 0;
+            if (leg != 0) {
+                (void)Nvm::eeprom_erase_write(page_e, static_cast<uint8_t>(leg + i));
+                if (leg == 2) {
+                    (void)Nvm::eeprom_read(static_cast<uint16_t>(page_e + 1));
+                }
+            }
+            last = cycles_now();
+            while (!alarm_ran) {
+                const uint32_t t = cycles_now();
+                if (t - last > gap) gap = t - last;
+                last = t;
+                ++spins;
+            }
+            // Taken now: the alarm is periodic and stamps again every
+            // millisecond while the operation below is waited out.
+            const uint32_t late = alarm_stamp - due;
+            (void)Nvm::wait_eeprom();
+            probes[i][leg] = Probe{late, spins, gap, alarm_saw_busy};
+            uint32_t& worst = leg == 0 ? quiet_worst : (leg == 1 ? polling_worst : reading_worst);
+            if (late > worst) worst = late;
+        }
+    }
+    alarm_mode = 0;
+    Alarm::enable_capt_interrupt(false);
+    Alarm::disable();
+    Ticker::resume();
+    bool ran_during = true;   // every leg-1 stamp found the operation running
+    uint32_t loop_gap = 0;    // the longest stretch between two waiting turns
+    for (uint8_t i = 0; i < 3; ++i) {
+        if (!probes[i][1].busy) ran_during = false;
+        if (probes[i][1].gap > loop_gap) loop_gap = probes[i][1].gap;
+    }
+    print(serial, "  while the operation ran, the waiting loop's longest stretch "
+                  "between two turns was ", loop_gap, " cycles", crlf);
+    print(serial, "  interrupt latency, CLK_PER cycles: ", quiet_worst, " quiet, ",
+          polling_worst, " with an operation running and the CPU polling STATUS, ",
+          reading_worst, " (", us_of(reading_worst), " us) with the CPU reading "
+          "the EEPROM", crlf);
+    // Quiet: the response (5 cycles), the prologue's pushes before the
+    // stamp and the instruction in flight - the DA/DB letter's own bound.
+    verdict("an interrupt is answered in a handful of cycles when nothing "
+            "is happening", quiet_worst < 100u);
+    verdict("and just as fast while an EEPROM operation runs, the CPU free",
+            polling_worst < 100u && ran_during);
+    // Reading: the alarm (1 ms in) waits for the operation's end, some
+    // 4.4 ms on: more than half the operation is a floor with room.
+    verdict("but a read of the EEPROM holds it for the rest of the operation",
+            reading_worst > op / 2u);
+
+    (void)erase_page(page_e);
+    Nvm::clear_command();
+    quiesce();
+}
+
+#endif // the EA's letters d and e
+
 // ---- f protections and the persistent panic across real resets ---------------------
 // This test spans four resets. Its state lives in `token`, a .noinit
 // object, and every leg is entered from main() at boot.
@@ -979,9 +1713,13 @@ void tf_protections() {
     verdict("this boot names a reset source", boot_reset.any());
     verdict("nothing was left over from a previous run",
             !boot_record && !boot_nv_record);
+#if !defined(NVMCTRL_FLBUSY_bm)
     verdict("no protection bit is set after a reset",
             !Nvm::appcode_protected() && !Nvm::appdata_protected() &&
                 !Nvm::boot_read_protected());
+#else
+    verdict("EEWP is clear after a reset", !Nvm::eeprom_protected());
+#endif
     print(serial, "  FLMAPLOCK is ", Nvm::flmap_locked() ? "SET" : "clear",
           " going in (test a sets it, and only a reset takes it off)", crlf);
 
@@ -1001,7 +1739,11 @@ void tf_resume() {
     failed = token.f_fail;
     in_all_run = token.in_all != 0;
     const uint8_t phase = token.phase;
+#if !defined(NVMCTRL_FLBUSY_bm)
     print(serial, crlf, "f (continued after reset ", phase, " of 3)", crlf);
+#else
+    print(serial, crlf, "f (continued after reset ", phase, " of 2)", crlf);
+#endif
     report_boot();
 
     if (phase == 1) {
@@ -1018,6 +1760,7 @@ void tf_resume() {
                 !Panic::pending());
         verdict("the reset cleared FLMAPLOCK as well", !Nvm::flmap_locked());
 
+#if !defined(NVMCTRL_FLBUSY_bm)
         // Phase 2: APPCODEWP. One-way until a reset, and the driver must
         // refuse a write to the protected section before the silicon
         // sees it.
@@ -1046,6 +1789,42 @@ void tf_resume() {
                     Nvm::flash_read_word(page) == 0x55AAu);
             Nvm::clear_error();
         }
+#else
+        // Phase 2: EEWP. One-way until a reset; the driver refuses before
+        // the silicon sees anything, and the silicon refuses too.
+        const uint16_t at = page_f;
+        verdict("an EEPROM write works before the protection is set",
+                Nvm::eeprom_erase_write(at, 0x55u) && Nvm::wait_eeprom() &&
+                    Nvm::eeprom_read(at) == 0x55u);
+        Nvm::protect_eeprom();
+        verdict("EEWP reads back", Nvm::eeprom_protected());
+        const uint8_t other = 0x12u;
+        verdict("the driver now refuses every EEPROM write and erase",
+                !Nvm::eeprom_erase_write(at, other) && !Nvm::eeprom_erase(at) &&
+                    !Nvm::eeprom_store_run(at, &other, 1) && !Nvm::eeprom_open());
+        // The raw steps, past the driver's check.
+        Nvm::clear_error();
+        (void)Nvm::wait_idle();
+        Nvm::issue(NvmCommand::eeprom_buffer_clear);
+        Nvm::eeprom_load(at, 0x00u);
+        Nvm::eeprom_commit(EepromOp::erase_write);
+        (void)Nvm::wait_eeprom();
+        const NvmError e = Nvm::error();
+        print(serial, "  an erase-and-write past the driver's guard -> ERROR ",
+              error_name(e), ", byte ", hex(Nvm::eeprom_read(at)), crlf);
+        verdict("the silicon refuses it too, with write_protect",
+                e == NvmError::write_protect);
+        Nvm::clear_error();
+        Nvm::issue(NvmCommand::eeprom_buffer_clear);
+        Nvm::eeprom_load(at, 0xFFu);
+        Nvm::eeprom_commit(EepromOp::erase);
+        (void)Nvm::wait_eeprom();
+        const NvmError e2 = Nvm::error();
+        verdict("an erase included, and the byte is intact",
+                e2 == NvmError::write_protect && Nvm::eeprom_read(at) == 0x55u);
+        Nvm::clear_error();
+        Nvm::clear_command();
+#endif
         bank(2);
         print(serial, "  resetting to prove the protection is cleared by a "
                       "reset ...", crlf);
@@ -1053,6 +1832,22 @@ void tf_resume() {
         Reset::software();
     }
 
+#if defined(NVMCTRL_FLBUSY_bm)
+    if (phase == 2) {
+        verdict("a reset cleared EEWP", !Nvm::eeprom_protected());
+        verdict("and the EEPROM is writable again",
+                Nvm::eeprom_erase(page_f) && Nvm::wait_eeprom() &&
+                    Nvm::eeprom_read(page_f) == 0xFFu);
+        Nvm::clear_command();
+        verdict("RSTFR names a SOFTWARE reset", boot_reset.software);
+        verdict("no breadcrumb is left anywhere",
+                !boot_record.has_value() && !boot_nv_record.has_value());
+        verdict("the .noinit token crossed both resets intact",
+                token.canary == token_canary);
+        verdict("IVSEL is still armed after every one of them",
+                Nvm::vectors_in_boot_armed());
+    }
+#else
     if (phase == 2) {
         verdict("a reset cleared APPCODEWP", !Nvm::appcode_protected());
         if (scratch_usable()) {
@@ -1085,6 +1880,7 @@ void tf_resume() {
             token.canary == token_canary);
     verdict("IVSEL is still armed after every one of them",
             Nvm::vectors_in_boot_armed());
+#endif
     token.magic = 0;
     token.phase = 0;
     print(serial, "  -> ", passed, " pass, ", failed, " fail", crlf, crlf);
@@ -1095,6 +1891,7 @@ void tf_resume() {
     }
 }
 
+#if !defined(NVMCTRL_FLBUSY_bm)
 // ---- u the User Row write path -------------------------------------------------
 // Not in z: the row is Flash-class storage and this test costs it one
 // erase cycle, which is one of about a thousand.
@@ -1323,15 +2120,34 @@ void tm_window() {
                                                         Nvm::flash_read_word(page) == 0xFFFFu);
 }
 
+#else // the AVR EA
+
+// ---- u the User Row: declined on this part -----------------------------------------
+void tu_userrow() {
+    print(serial, "u the User Row write path: SKIPPED - the AVR EA's CPU never "
+                  "writes its User Row (its write path is the declined flash "
+                  "one); UPDI writes it, even on a locked part "
+                  "(docs/avrxt/nvm.md)", crlf);
+}
+
+#endif // the DA/DB's letters u, g, m and the EA's u
+
 // ---- the menu -----------------------------------------------------------------------
 
 using TestFn = void (*)();
 struct Test { char key; TestFn fn; };
+#if !defined(NVMCTRL_FLBUSY_bm)
 constexpr Test tests[] = {
     {'a', ta_identity}, {'b', tb_eeprom}, {'c', tc_services}, {'d', td_flash},
     {'e', te_stall},    {'f', tf_protections}, {'u', tu_userrow},
     {'g', tg_appdata},
 };
+#else
+constexpr Test tests[] = {
+    {'a', ta_identity}, {'b', tb_eeprom}, {'c', tc_services}, {'d', td_flash},
+    {'e', te_stall},    {'f', tf_protections}, {'u', tu_userrow},
+};
+#endif
 constexpr char all_keys[] = "abcdef";
 
 void run(TestFn fn) {
@@ -1357,6 +2173,7 @@ void run_set(const char* keys) {
     print(serial, "ALL: ", tp, " pass, ", tf, " fail", crlf);
 }
 
+#if !defined(NVMCTRL_FLBUSY_bm)
 void help() {
     print(serial, "test_avr_nvm: a identity and geometry | b EEPROM primitives "
                   "and times | c record, writer AO, endurance | d Flash in the "
@@ -1371,6 +2188,17 @@ void help() {
                       "check (DS80000882C 2.7.1)", crlf);
     }
 }
+#else
+void help() {
+    print(serial, "test_avr_nvm (AVR EA: the EEPROM engine): a identity, the "
+                  "supply guard, FLMAP | b the page buffer, the three operations, "
+                  "the times | c record, writer AO, endurance, the page run | d "
+                  "Flash (declined) | e what an EEPROM operation costs the CPU | "
+                  "f the persistent panic and EEWP across REAL resets    -> z = "
+                  "all of a..f", crlf,
+          "  outside z: u the User Row write path (declined)", crlf);
+}
+#endif
 
 } // namespace
 
@@ -1381,7 +2209,11 @@ ISR(RTC_PIT_vect)    { Ticker::pit(); }
 /// The EEPROM's ready interrupt. Its flag is a LEVEL: disabling the
 /// interrupt here is not an optimization, it is the only thing that
 /// stops the vector re-entering forever (11.5.4).
+#if !defined(NVMCTRL_FLBUSY_bm)
 ISR(NVMCTRL_EE_vect) {
+#else
+ISR(NVMCTRL_EEREADY_vect) {
+#endif
     brio::Nvm::eeready();
     nvm_interrupts = nvm_interrupts + 1;
     brio::post<Writer>(brio::NvReady{});
@@ -1391,6 +2223,9 @@ ISR(TCB0_INT_vect) {
     (void)Alarm::take_flags();
     if (alarm_mode == 1) {
         alarm_stamp = cycles_now();
+#if defined(NVMCTRL_FLBUSY_bm)
+        alarm_saw_busy = Nvm::eeprom_busy();
+#endif
         alarm_ran = true;
     }
 }
@@ -1419,10 +2254,17 @@ int main() {
         token.magic = 0;
         auto board = board_id();
         if (board.empty()) board = "?";
+#if !defined(NVMCTRL_FLBUSY_bm)
         print(serial, crlf, "test_avr_nvm - NVMCTRL test suite (board ", board,
               ", clk=", xtal ? (has_xoschf ? "XTAL" : "EXTCLK") : "OSCHF", " 24 MHz, silicon rev ",
               hex(SYSCFG.REVID), ", BOOTSIZE ", FUSE.BOOTSIZE, "/CODESIZE ",
               FUSE.CODESIZE, ")", crlf);
+#else
+        print(serial, crlf, "test_avr_nvm - NVMCTRL test suite, the EEPROM engine (board ",
+              board, ", clk=", xtal ? "XTAL" : "OSCHF", " ", SysClock::hz / 1'000'000u,
+              " MHz, silicon rev ", hex(SYSCFG.REVID), ", BODCFG ", hex(FUSE.BODCFG),
+              ", supply ", Nvm::supply_guarded() ? "guarded" : "NOT GUARDED", ")", crlf);
+#endif
         report_boot();
         help();
     }
@@ -1437,9 +2279,11 @@ int main() {
         else {
             bool found = false;
             for (const Test& t : tests) if (t.key == c) { run(t.fn); found = true; }
+#if !defined(NVMCTRL_FLBUSY_bm)
             if constexpr (window_erratum) {
                 if (c == 'm') { run(tm_window); found = true; }
             }
+#endif
             if (!found) print(serial, "? for help", crlf);
         }
         print(serial, "> ");

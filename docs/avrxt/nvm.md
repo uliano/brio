@@ -1,9 +1,13 @@
-# NVMCTRL - the nonvolatile memories
+# NVMCTRL - the nonvolatile memories (AVR DA, DB and EA)
 
 Documents of record: data sheet **DS40002247B** chapter 11 (NVMCTRL),
 chapter 15 (CPUINT, for the vector-table bit) and section 39.8 (the
 memory programming times); errata **DS80000915F** 2.7.1 / 2.7.2 (AVR
-DB) and **DS80000882C** 2.7.1 / 2.7.2 / 2.17.1 (AVR DA). Driver:
+DB) and **DS80000882C** 2.7.1 / 2.7.2 / 2.17.1 (AVR DA). For the AVR EA
+- NVM version 3, the EEPROM alone, its own section below - data sheet
+**DS40002443A** chapter 11, sections 8.5 and 8.6 (the EEPROM and the
+User Row), 8.8.2.2 (BODCFG), chapter 19 (the BOD) and table 35-8 (the
+programming times); errata **DS80001048D** 2.2.1 and 2.2.3. Driver:
 [`brio/avrxt/nvm.hpp`](../../brio/avrxt/nvm.hpp), with
 the target-independent services over it in
 [`util/nv_record.hpp`](../../brio/util/nv_record.hpp),
@@ -11,6 +15,9 @@ the target-independent services over it in
 [`util/persistent_panic.hpp`](../../brio/util/persistent_panic.hpp)
 and [`util/crc.hpp`](../../brio/util/crc.hpp). Reference test
 suites: `test_avr_nvm` on the bench, `test_nv_record` on the host.
+
+Everything from here to the AVR EA's own section is the AVR DA/DB's
+NVM version 2.
 
 ## What the silicon does
 
@@ -542,20 +549,305 @@ two pages of its own, high in the Flash and outside the scratch region
 (113664 and 114176 under the geometry it asks for), at about four erase
 cycles each; it is not part of `z` either.
 
+## The AVR EA (DS40002443A ch. 11): NVM version 3, the EEPROM engine
+
+The AVR EA's NVMCTRL is another generation of the controller, and the
+second half of `nvm.hpp` is written from its own chapter; the part's
+header decides which half compiles. What the EA keeps is the EEPROM:
+its flash and User Row self-programming are declined (a 64 KB part
+with a 512-byte EEPROM keeps its small values in the EEPROM), so the
+DA/DB's flash and User Row write verbs exist on the EA only as names
+that refuse at compile time with that reason, `NvmFlash` and the heap
+and journal over it refuse the part, and BOOTSIZE stays at the
+factory 0 - the whole flash BOOT. The User Row stays readable
+([userrow.md](userrow.md)).
+
+### What the silicon does
+
+The EEPROM is 512 bytes in **64 pages of 8** (table 8-3) at 0x1400,
+read with a plain load, endurance 100k erase/write cycles per byte
+(table 35-8), kept across a chip erase by EESAVE (8.8.2.4). It has a
+page buffer of its own (the flash and the User Row share another,
+11.3.2.2), and an operation erases or writes **any subset of one page**:
+only the bytes loaded into the buffer are touched (11.3.1.2, table
+11-4). Three page operations - EEPW (write), EEPER (erase), EEPERW
+(erase, then write) - plus EEPBCLR (clear the buffer) and EECHER (the
+whole EEPROM). STATUS's busy bits are swapped against the DA/DB (EEBUSY
+is bit 0 here), its ERROR field has its own codes (2 WRITEPROTECT, 3
+CMDCOLLISION, 4 WRONGSECTION, no 1), CTRLB grows EEWP (bit 3, one-way
+until a reset), and the one NVMREADY vector (#33) carries EEREADY and
+the flash's FLREADY.
+
+**The command model, as the silicon runs it** (rev B1, `test_avr_nvm`
+b). The chapter states it two ways - "fill the page buffer, then write
+the command" (11.3.2.3, 11.3.2.4.2) and "commands are enabled by CTRLA
+and must be followed by writes using ST" (11.3.2.4, 11.5.1) - and the
+silicon runs the first, the way Microchip's own avr-libc
+(`eeprom_write_byte` for this part) and pymcuprog's NVM version 3
+driver do:
+
+- a store into the EEPROM's range **loads** the buffer (ANDed with what
+  it holds) whatever CTRLA holds, and starts nothing;
+- **writing** a page command to CTRLA starts it at once, on the page of
+  the last load, over the loaded bytes; the command stays in CTRLA
+  after the operation. The DA/DB's order - command, then store - writes
+  nothing here (the command finds an empty buffer and does not even
+  run);
+- the buffer is indexed by the **low three address bits alone**: loads
+  into two pages land in one page, the last load's, at the first
+  load's offset;
+- CTRLA written **while an operation runs** is refused with
+  CMDCOLLISION and the operation completes - so a command can be
+  cleared only after its operation; a command written over a command
+  with the controller idle starts with no error;
+- the buffer is cleared by every operation, by EEPBCLR on its write
+  (no store needed), by a reset and by a wake from sleep (11.3.2.2,
+  11.3.5; measured for Idle). A load nobody committed rides along into
+  the next operation: measured, which is why every operation here opens
+  with EEPBCLR.
+
+**Who stalls whom.** An EEPROM operation leaves the CPU running
+(11.3.2.4.1) and interrupts are served on time meanwhile - but any
+EEPROM read or buffer load during it is a bus wait that suspends the
+instruction, and every interrupt with it, until the operation ends
+(11.3.2.1; 11.3.2.2's note). The operations are timed by an oscillator
+of the controller's own: halving CLK_PER halves the count in CLK_PER
+cycles, and tuning OSCHF (not running under the crystal) moves nothing.
+
+### The silicon's offer, used or declined
+
+| Item | Here | Why |
+|------|------|-----|
+| The EEPROM page buffer and the page run (1..8 bytes, one operation) | USED: `eeprom_run`, `eeprom_store_run` | eight bytes cost what one does (measured to 0.1 %): the unit of cost is the page |
+| EEPW / EEPER apart | USED: the store chooser picks EEPW onto 0xFF bytes and EEPER to 0xFF | each is half an EEPERW (2.6 against 5.2 ms); EEPW onto a byte that is not 0xFF is outside the chapter's precondition (11.3.2.4.1) and never chosen |
+| EEPERW | USED where neither half alone does | one operation for a byte that is neither erased nor becoming 0xFF |
+| EEPBCLR | USED before every operation | a stray load would AND itself into the next operation (measured); its cost is a few cycles of halted CPU per operation |
+| Byte-granular marking (only loaded bytes are touched) | USED: the store chooser loads only the bytes that differ | endurance: an unchanged byte costs no cycle |
+| The CPU running during an operation | USED by `NvWriter` (one interrupt per operation) | the milliseconds are the program's while it touches no EEPROM |
+| EEREADY interrupt | USED (`enable_eeprom_ready_interrupt`, `eeready()`) | the writer's pace; a level interrupt, disabled in its handler |
+| EEWP | USED: `protect_eeprom()`, checked by every verb before it starts | one-way protection of the settings; the silicon refuses under it too, an erase included (measured) |
+| EECHER | DECLINED | one mistaken call erases every setting: a provisioning act for the programmer |
+| FLREADY, the flash commands, the User Row's CPU write | DECLINED with flash self-programming | the part keeps its small values in the EEPROM (above); the verbs refuse by name |
+| The VLM (BOD chapter) to refuse a write near the brown-out level (11.3.3) | DECLINED | the supply guard below covers the erratum; a battery-powered program is its first user |
+| NVMCTRL.DATA and ADDR | not exposed | observers of the last access, they program nothing |
+
+### Types and verbs
+
+Geometry from the header (`eeprom_size`, `eeprom_base`,
+`eeprom_page_size`, `userrow_size`, `userrow_base`, `flash_size`,
+`flash_page_size`); `NvmError` with this generation's four codes;
+`NvmCommand` with the EEPROM's commands only; `EepromOp` - `write`,
+`erase`, `erase_write`, each the command itself; `EepromErase` with
+spans of 1, 2, 4 and 8 bytes - the DA/DB's 16 and 32 do not exist.
+`Nvm`:
+
+- **The run**: `eeprom_run(offset, src, len, op)` - one operation over
+  1..`eeprom_run_room(offset)` bytes inside one page; and its three
+  steps, public for a caller that writes only some bytes of a page:
+  `eeprom_open()` (wait for idle, EEPBCLR), `eeprom_load(offset,
+  value)`, `eeprom_commit(op)`. `eeprom_store_run(offset, src, len)`
+  leaves src's bytes in place with the cheapest operation, loading only
+  the bytes that differ, nothing at all when none does.
+- **The byte** (the run's degenerate case, a short path of its own):
+  `eeprom_byte(offset, value, op)`, `eeprom_write` (EEPW),
+  `eeprom_erase_write` (EEPERW), `eeprom_store` (the chooser's), and
+  `eeprom_erase(offset, span)` (EEPER of an aligned span).
+  `eeprom_write_block` stores any run, a store run per page, blocking.
+  `eeprom_erase_at<offset, span>` refuses at compile time what the
+  alignment forbids.
+- **State and the controller**: `eeprom_busy`, `flash_busy`, `busy`,
+  `error`, `clear_error`, `wait_idle`, `wait_eeprom`, `selected`,
+  `clear_command` (only with the controller idle), `issue(NvmCommand)`
+  (CTRLA as is - on this generation a page command written there
+  starts).
+- **CTRLB**: `protect_eeprom`, `eeprom_protected`; `flmap`,
+  `flmap_locked`, `set_flmap` (keyed: the whole of CTRLB is under CCP
+  here, table 11-7 - measured: a plain store does not move FLMAP),
+  `lock_flmap`.
+- **EEREADY**: `eeprom_ready_flag`, `clear_eeprom_ready_flag`,
+  `enable_eeprom_ready_interrupt`, the handler body `eeready()`.
+- **Reads**: `flash_read` (LPM: the 16-bit Z reaches all 64 KB, no
+  RAMPZ), `userrow_read`, `Sigrow` (TEMPSENSE0 a signed gain on this
+  generation, 8.9.2.2); `vectors_in_boot`.
+- **The supply**: `supply_guarded()`, below.
+
+Every verb that starts an operation returns as soon as it has STARTED,
+and refuses - touching nothing - a run that leaves its page or the
+array, a span not aligned to itself, EEWP set, or a controller that
+never went idle. `EepromStore` is the EEPROM as the `util/nv_record.hpp`
+store: `write()` is `eeprom_store()`.
+
+**The cost of an operation**, CPU side, by the release listing of
+`test_avr_nvm`: **58 cycles for one byte** (`eeprom_erase_write`: the
+range and EEWP checks, the idle test, EEPBCLR with its key and the
+chapter's seven halted cycles, one store, the command with its key)
+and **143 for a page of eight** (`eeprom_run`: eight cycles a byte in
+its load loop). Letter b measures 70 and 173: the NVM accesses'
+own waits on top of the count (it measures an EEPBCLR at 14 cycles
+with its key and a buffer load at 12).
+Against the operation's 2.6 to 5.2 ms that is 0.1 %, with interrupts
+never masked. avr-libc's `eeprom_write_byte` for this part spends about
+30: it has no EEPBCLR, no EEWP check and no bounded wait, and writes
+whatever stray load the buffer holds along with its byte.
+
+### The errata as code
+
+- **DS80001048D 2.2.1** (rev B1): an NVM erase or write below 2.7 V may
+  fail; the sheet's alternative is the BOD at BODLEVEL2 or above.
+  `Nvm::supply_guarded()` is true when the silicon is not rev B1 (the
+  device tables' `erratum_ea_nvm_supply_revid`, SYSCFG.REVID 0x21), or
+  when the BOD holds BODLEVEL2 or above in CONTINUOUS mode both awake
+  (ENABLE or ENABLEWAIT) and asleep - an operation runs on through a
+  sleep (11.3.5), and a sampled BOD (128 Hz at best) can miss a dip
+  shorter than its period while a 5.2 ms operation runs. A boot-time
+  fact the suites assert, not a refusal inside every write (a cost every
+  image would pay for a lab condition); `brio fuses` decodes BODCFG on
+  an EA and WARNS when it leaves the writes unguarded. The provisioning
+  is **BODCFG 0x4D**: LVL 2 (BODLEVEL2, 2.60 V typical rising, 2.47 V
+  minimum falling - table 35-15; the sheet's own threshold for the
+  workaround), SAMPFREQ 0, ACTIVE 3 (ENABLEWAIT), SLEEP 1 (continuous)
+  - DS40002443A 8.8.2.2. The BOD then draws its continuous current
+  (14 uA typical, DS80001048D 3.4) in every sleep.
+- **2.2.3** (B1, B2): a store to an address >= 64 followed by an ST/STD
+  below 64 or a write to SLPCTRL.CTRLA loses the second. A run's
+  stores go to 0x1400.. and the next store below 64 is the CCP key,
+  which avr/xmega.h's `_PROTECTED_WRITE_SPM` writes with OUT - the
+  sheet's own workaround; read in the release listing of every engine
+  path (`eeprom_byte`, `eeprom_store`, `eeprom_run`, `eeprom_erase`,
+  `eeprom_store_run`).
+- **2.4.1, 2.4.2, 2.2.2** are the flash's: with no flash write they
+  have no user. 2.2.2 (flash endurance 1k when the part ever runs below
+  BODLEVEL3) still bounds the reflashing a board on a lower supply can
+  take.
+
+### How to use it
+
+A setting, the panic record and the writer are the DA/DB's code above,
+unchanged - the store is `EepromStore` on both - with the EA's vector
+name:
+
+```c++
+ISR(NVMCTRL_EEREADY_vect) {               // #33, NVMREADY: EEREADY and FLREADY
+    brio::Nvm::eeready();
+    brio::post<Writer>(brio::NvReady{});
+}
+```
+
+The page run, where a caller holds a page's worth of bytes:
+
+```c++
+uint8_t page[8] = {...};
+brio::Nvm::eeprom_store_run(64, page, sizeof page);   // one operation, the cheapest
+brio::Nvm::wait_eeprom();                              // or let EEREADY say it
+brio::Nvm::clear_command();                            // only once it is idle
+```
+
+At boot, on a rev B1 part:
+
+```c++
+if (!brio::Nvm::supply_guarded()) { /* provision: brio fuses <board> bodcfg=0x4D */ }
+```
+
+### Bench findings (`test_avr_nvm` on the AVR64EA48, rev B1, 20 MHz quartz, 5 V, BODCFG 0x4D)
+
+`test_avr_nvm z`: **103 of 103 in ten runs of ten.**
+
+**The times**, the page buffer's operations on letter b's page (bytes
+40..47) against table 35-8 (which publishes typical figures only, 2 ms
+for an erase or a write), the range over the runs:
+
+| Operation | 1 byte | 8 bytes | Table 35-8 |
+|-----------|--------|---------|------------|
+| EEPW (write) | 2622 us (52443..52446 cycles) | 2622 us (52447..52450) | 2 ms typ |
+| EEPER (erase) | 2622 us (52447..52450) | 2622 us (52447..52450) | 2 ms typ |
+| EEPERW (erase, then write) | 5246 us (104914..104917) | 5246 us (104914..104917) | not listed |
+
+Eight bytes cost what one does and an erase-and-write is an erase plus
+a write, to a few cycles in 105 000. On one page an operation repeats
+to the cycle; between pages it does not: an EEPW takes 2622 us on page
+5, 2640 us (half an EEPERW) on page 6, 2674 us on page 58 and 2691 to
+2700 us on page 12 - 31 to 35 % above the table's typical. It is timed
+by an oscillator of the controller's own: halving CLK_PER halves the
+count in CLK_PER cycles (53486 -> 26791 on page 58), and OSCHF's tune
+(+-24 steps; OSCHF does not even run under the crystal) moves nothing.
+Which oscillator, and why the time depends on the page, is not
+identified; a write that adapts its pulses to the cells it programs
+would show both.
+
+**What an operation costs the rest of the system**: a loop polling
+STATUS turns 7000 to 7450 times through a 5.3 ms EEPERW; an interrupt
+due 1 ms into it is served 33 cycles late, as on a quiet CPU (and the
+operation is running at its stamp); a read of the EEPROM 1 us into it
+returns only when the operation is over - the alarm waits with it,
+86 800 to 87 400 cycles late - and so does a buffer load. Such an
+access returns 70 to 120 us after the operation's own length (107 000
+cycles against 105 400); a read right after EEBUSY drops takes 10
+cycles. Whether the operation runs longer with an access pending or
+the bus is released late is not separated.
+
+**The engine's CPU cost**, measured with interrupts masked: 70 cycles
+for a one-byte call, 173 for an 8-byte run, 201 for an 8-byte store run
+that finds nothing to do, 78 for `EepromStore::write`; an EEPBCLR with
+its key 14, one buffer load 12 - the same in every run.
+
+**The services**: `NvRecord`, `NvWriter` and `PersistentPanic` behave
+as on the DA/DB (an unchanged store writes nothing, one changed byte
+costs three, one interrupt per byte, the panic record across a software
+reset); the writer's eight bytes onto erased cells take 21.6 to 21.7 ms
+(eight EEPWs), the main loop's longest stretch between two turns 775 to
+876 cycles, the PIT's ticks all kept. The same eight bytes as one page
+run take 2.69 to 2.70 ms - one EEPW.
+
+**EEWP**: set, every verb refuses; the raw sequence past the driver is
+refused by the silicon with WRITEPROTECT, an erase included, the byte
+intact; a reset clears it. **FLMAP**: CTRLB is wholly under CCP (a plain
+store reads back unchanged), `set_flmap` selects each of the four
+sections. **CTRLA**: six bits of CMD are implemented (0x7F reads 0x3F),
+and a reserved code raises no error.
+
+### The declared wear budget
+
+`test_avr_nvm z` on the EA, counted in operations per byte (each
+counted as a full erase/write cycle, which overstates an EEPW or an
+EEPER alone):
+
+| EEPROM bytes | Letters | Operations per run | Endurance | Runs before the spec |
+|--------------|---------|--------------------|-----------|----------------------|
+| 0..7 (the panic slot) | f | 2 on byte 0, at most 1 on the others | 100k | ~50000 |
+| 16..23 (the settings record) | c | at most 5 | 100k | ~20000 |
+| 32..39 (letter b's first page) | b | at most 8 | 100k | ~12000 |
+| 40..47 (letter b's second page) | b | at most 16 (byte 40) | 100k | ~6000 |
+| 48..55 (letter e's page) | e | at most 15 (byte 48) | 100k | ~6600 |
+| 56 | f | 2 | 100k | ~50000 |
+| 96..103 (the writer's run) | c | 4 | 100k | ~25000 |
+
+No flash and no User Row cycle: the EA's suite writes neither.
+
 ## Not covered yet
 
 Driver gaps - the chapter's features this driver does not implement:
 
-- **The AVR EA's NVM version 3** (DS40002443A ch. 11: a page buffer,
-  page write and page erase commands, RWW/NRWW sections in 256-byte
-  blocks, EEWP): `nvm.hpp` and `nvm_flash.hpp` refuse the part by name,
-  and with them the flash heap and journal; their fixtures compile to
-  nothing there. The EA's EEPROM is a later step; its flash and USERROW
-  self-programming are DECLINED - a 64 KB part with a 512-byte EEPROM
-  keeps its small values in the EEPROM, and its rev B1's 2.4.2 (a flash
-  read during an RWW write fails the write) has no user then. The
-  USERROW stays readable (`userrow.hpp`, the board label).
-
+- **The AVR EA's flash and User Row self-programming**: DECLINED - a
+  64 KB part with a 512-byte EEPROM keeps its small values in the
+  EEPROM. The DA/DB's flash and User Row write verbs refuse on the EA at
+  compile time with that reason, and `NvmFlash` - with the flash heap
+  and journal over it - refuses the part; its rev B1's flash errata
+  (DS80001048D 2.4.1, 2.4.2) have no user then. UPDI writes the User
+  Row ([userrow.md](userrow.md)).
+- **The page run through the store contract (AVR EA).** `NvStore` takes
+  a byte, so `NvRecord`, `NvWriter` and `PersistentPanic` spend one
+  operation per differing byte where the engine's `eeprom_store_run`
+  spends one per page: the 8-byte panic record is eight operations (up
+  to 42 ms) instead of one. Born with the contract's run verb, a util
+  change every family's store takes at once.
+- **`NvRecord::store` reads the next byte before it waits for the
+  previous write.** On the AVR EA such a read is a bus wait that holds
+  the CPU and its interrupts until the operation ends (measured above):
+  a record store blacks interrupts out for most of every operation but
+  its last. The record's loop is util's; it changes with the run verb.
+- **The VLM as a write guard (AVR EA, 11.3.3)**: declined until a
+  battery-powered program needs a write refused near the brown-out
+  level; `supply_guarded()` covers the erratum on a mains-powered one.
 - **No bootloader.** Nothing here writes BOOT (nothing can), and no
   boot loader is built. The door is left open at zero cost: BOOTSIZE 1
   is 512 bytes, which is what an Optiboot-DX fits in.
@@ -577,13 +869,22 @@ Driver gaps - the chapter's features this driver does not implement:
 
 Implemented but not bench verified:
 
+- **DS80001048D 2.2.1 itself on the AVR EA** - a write below 2.7 V
+  failing, and the BOD's reset preventing it: the bench supply is a
+  fixed 5 V; a variable supply would measure it.
+- **The AVR64EA28 and AVR64EA32**: the same die as the bench's
+  AVR64EA48, compiled on every package by the family fixture; no board.
+- **The EA's `wrong_section` error**: the driver issues EEPROM commands
+  on EEPROM addresses only and cannot produce it.
+
 - **The DA's lower PFM endurance** (DS80000882C 2.17.1, 1k instead of
   10k): the wear budget above already assumes it; measuring it means
   wearing a page out, a thousand erase cycles of the part on the desk.
 - **2.7.1's positive control**: a window write outside BOOT, accepted -
   the scratch region is BOOT-mirrored under the bench geometry, and
   BOOTSIZE below 64 would be needed (a fuse change).
-- **The `command_collision` and `ongoing_program` error codes.** The
+- **The AVR DA/DB's `command_collision` and `ongoing_program` error
+  codes** (the EA's collision is measured, above). The
   driver's own sequencing waits for the busy flags and passes through
   NOCMD, so it cannot produce either; they have never been seen.
 - **A power loss during a write.** The checksum is designed to catch a

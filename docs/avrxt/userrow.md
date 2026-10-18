@@ -2,8 +2,10 @@
 
 Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B 8.7,
 errata DS80000915F (no USERROW items); for the AVR64EA28/32/48
-DS40002443A 8.2, 8.6 and 8.7 (64 bytes at the same address; the CPU's
-write path is NVM version 3's, declined there - [nvm.md](nvm.md)). Driver: `avrxt/userrow.hpp`.
+DS40002443A 8.2, 8.6, 8.7 and 11.3.1.3 (64 bytes of RWW flash at the
+same address; the CPU's write path is the flash's page buffer,
+declined there with flash self-programming - [nvm.md](nvm.md)), errata
+DS80001048D (no USERROW items). Driver: `avrxt/userrow.hpp`.
 Every `test_avr_*` suite prints the label in its banner.
 
 ## What the silicon does
@@ -18,12 +20,16 @@ properties make it an identity store:
   its stated purpose); reading it back over UPDI requires the part to
   be unlocked.
 
-The CPU can also write it through the NVMCTRL Flash commands - the
-row is erased and written as Flash, one byte at a time, with the erase
-taking all 32 bytes at once ([nvm.md](nvm.md), `Nvm::userrow_write` and
-`Nvm::userrow_erase`). `board_id()` stays a read: a label is
-provisioning, not a run-time act, and the programmer already owns the
-write.
+On the AVR DA/DB the CPU can also write it through the NVMCTRL Flash
+commands - the row is erased and written as Flash, one byte at a time,
+with the erase taking all 32 bytes at once ([nvm.md](nvm.md),
+`Nvm::userrow_write` and `Nvm::userrow_erase`). On the AVR EA the row
+is one 64-byte page written through the flash's page buffer, and the
+CPU's write is declined with the part's flash self-programming: the
+same verbs refuse there at compile time, with the reason, and
+`Nvm::userrow_read` reads the row. `board_id()` stays a read on both:
+a label is provisioning, not a run-time act, and the programmer
+already owns the write.
 
 Related but different: SIGROW (DS40002247B 8.6) carries a factory
 serial number, unique per chip and read-only. It identifies the die;
@@ -69,3 +75,6 @@ desk position is expected to carry; the suites' banners let the human
   UPDI read back correctly from firmware and survive reflashing the
   application (the banner still names the board after a new
   `-U flash:w`).
+- On the AVR64EA48 the label written over UPDI (`-p avr64ea48`, the
+  same `-U userrow:w:...:m`) reads back through `board_id()` and
+  `Nvm::userrow_read()` alike (`test_avr_nvm` a).

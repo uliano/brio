@@ -19,8 +19,10 @@
 //  bytes at once (avrxt/nvm.hpp: Nvm::userrow_write, userrow_write_block,
 //  userrow_erase) - it is simply not something an identity label should
 //  be reached through; on the AVR EA the CPU's USERROW write is declined
-//  with the rest of its NVM version 3 (docs/avrxt/nvm.md), and UPDI
-//  writes the row even on a locked part (DS40002443A 8.7).
+//  with its flash self-programming (the row is written through the
+//  flash's page buffer, avrxt/nvm.hpp refuses the verbs by name;
+//  docs/avrxt/nvm.md), Nvm::userrow_read() reads it, and UPDI writes
+//  the row even on a locked part (DS40002443A 8.7).
 //
 //  board_id() validates instead of trusting: a row that does not follow
 //  the convention (erased, no terminator, non-printable bytes) comes

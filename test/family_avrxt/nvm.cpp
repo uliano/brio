@@ -1,16 +1,16 @@
 // NVMCTRL family smoke TU: every package must compile this
 // (instantiation only - nothing here is ever executed).
 //
-// NVMCTRL is the same block on all eight AVR128DA/DB packages: the
-// register set, every command code, every error code and the whole
-// geometry (128 KB Flash in 512-byte pages, 512 bytes of EEPROM, a
-// 32-byte User Row) are identical, so there are no package tiers to
-// gate. What this TU proves is that the surface instantiates
-// everywhere, that the enums really carry the device header's own
-// codes, and that the compile-time verbs accept what the declared Flash
-// layout allows.
+// Two generations, two halves. NVM version 2 is the same block on all
+// eight AVR128DA/DB packages: the register set, every command code,
+// every error code and the whole geometry (128 KB Flash in 512-byte
+// pages, 512 bytes of EEPROM, a 32-byte User Row) are identical, so
+// there are no package tiers to gate. NVM version 3 is the same block
+// on the three AVR64EA packages, and its driver is the EEPROM's alone.
+// What this TU proves is that each surface instantiates everywhere,
+// that the enums really carry the device header's own codes, and that
+// the compile-time verbs accept what the geometry allows.
 #include <avr/io.h>
-// NVM version 3 (the AVR EA) has no driver yet: nvm.hpp refuses that part by name, and this TU compiles to nothing there.
 #if !defined(NVMCTRL_FLBUSY_bm)
 #include "avrxt/nvm.hpp"
 
@@ -224,6 +224,172 @@ static_assert(nv_record_size<Settings> == 4 + sizeof(Settings));
 static_assert(SettingsRecord::end <= eeprom_size);
 static_assert(Panic::end <= SettingsRecord::begin,
               "the panic slot and the settings record must not overlap");
+
+void nvm_util() {
+    const std::optional<Settings> s = SettingsRecord::load();
+    nvm_sink = static_cast<uint8_t>(s.has_value());
+    nvm_sink = static_cast<uint8_t>(SettingsRecord::store(Settings{12, 3}));
+    nvm_sink = static_cast<uint8_t>(SettingsRecord::valid());
+    nvm_sink = static_cast<uint8_t>(SettingsRecord::clear());
+
+    Panic::report(PanicCode::assert_failed, 7);
+    nvm_sink = static_cast<uint8_t>(Panic::pending());
+    const std::optional<PanicRecord> r = Panic::take();
+    nvm_sink = r ? r->code : 0;
+    nvm_sink = static_cast<uint8_t>(Panic::save(PanicRecord{panic_magic, 1, 2}));
+
+    static const uint8_t payload[3] = {1, 2, 3};
+    Writer::init();
+    post<Writer>(NvWrite{32, lend<Lease::reply>(payload), sizeof payload, ReplyTo<NvDone>{}});
+    nvm_sink = Writer::rejected_count();
+    while (const std::optional<Writer::Event> e = Writer::queue.pop()) {
+        Writer::dispatch(*e);
+    }
+}
+
+#else // NVM version 3: the AVR EA, the EEPROM engine
+
+#include "avrxt/nvm.hpp"
+
+using namespace brio;
+
+static_assert(flash_size == PROGMEM_SIZE);
+static_assert(flash_page_size == PROGMEM_PAGE_SIZE);
+static_assert(eeprom_size == EEPROM_SIZE);
+static_assert(eeprom_base == EEPROM_START);
+static_assert(eeprom_page_size == EEPROM_PAGE_SIZE);
+static_assert(userrow_size == USER_SIGNATURES_SIZE);
+static_assert(userrow_base == USER_SIGNATURES_START);
+
+// The error codes ARE this generation's (11.5.5).
+static_assert(static_cast<uint8_t>(NvmError::none) ==
+              (NVMCTRL_ERROR_NOERROR_gc >> NVMCTRL_ERROR_gp));
+static_assert(static_cast<uint8_t>(NvmError::write_protect) ==
+              (NVMCTRL_ERROR_WRITEPROTECT_gc >> NVMCTRL_ERROR_gp));
+static_assert(static_cast<uint8_t>(NvmError::command_collision) ==
+              (NVMCTRL_ERROR_CMDCOLLISION_gc >> NVMCTRL_ERROR_gp));
+static_assert(static_cast<uint8_t>(NvmError::wrong_section) ==
+              (NVMCTRL_ERROR_WRONGSECTION_gc >> NVMCTRL_ERROR_gp));
+
+// The command codes ARE the register's (11.5.1), and the page
+// operations are the commands themselves.
+static_assert(static_cast<uint8_t>(NvmCommand::none) == NVMCTRL_CMD_NOCMD_gc);
+static_assert(static_cast<uint8_t>(NvmCommand::noop) == NVMCTRL_CMD_NOOP_gc);
+static_assert(static_cast<uint8_t>(NvmCommand::eeprom_page_write) == NVMCTRL_CMD_EEPW_gc);
+static_assert(static_cast<uint8_t>(NvmCommand::eeprom_page_erase_write) ==
+              NVMCTRL_CMD_EEPERW_gc);
+static_assert(static_cast<uint8_t>(NvmCommand::eeprom_page_erase) == NVMCTRL_CMD_EEPER_gc);
+static_assert(static_cast<uint8_t>(NvmCommand::eeprom_buffer_clear) ==
+              NVMCTRL_CMD_EEPBCLR_gc);
+static_assert(static_cast<uint8_t>(EepromOp::write) == NVMCTRL_CMD_EEPW_gc);
+static_assert(static_cast<uint8_t>(EepromOp::erase_write) == NVMCTRL_CMD_EEPERW_gc);
+static_assert(static_cast<uint8_t>(EepromOp::erase) == NVMCTRL_CMD_EEPER_gc);
+static_assert(static_cast<uint8_t>(NvmCommand::reserved) != NVMCTRL_CMD_CHER_gc &&
+              static_cast<uint8_t>(NvmCommand::reserved) != NVMCTRL_CMD_EECHER_gc);
+
+// The run's room is the rest of its page.
+static_assert(Nvm::eeprom_run_room(0) == eeprom_page_size);
+static_assert(Nvm::eeprom_run_room(5) == 3);
+static_assert(Nvm::eeprom_run_room(eeprom_size - 1) == 1);
+static_assert(erase_bytes(EepromErase::bytes8) == eeprom_page_size);
+
+volatile uint8_t nvm_sink;
+
+void nvm_state() {
+    nvm_sink = static_cast<uint8_t>(Nvm::eeprom_busy());
+    nvm_sink = static_cast<uint8_t>(Nvm::flash_busy());
+    nvm_sink = static_cast<uint8_t>(Nvm::busy());
+    nvm_sink = static_cast<uint8_t>(Nvm::error());
+    Nvm::clear_error();
+    nvm_sink = static_cast<uint8_t>(Nvm::wait_idle());
+    nvm_sink = static_cast<uint8_t>(Nvm::wait_eeprom());
+    Nvm::clear_command();
+    nvm_sink = static_cast<uint8_t>(Nvm::selected());
+    Nvm::issue(NvmCommand::eeprom_buffer_clear);
+    nvm_sink = static_cast<uint8_t>(Nvm::supply_guarded());
+}
+
+void nvm_ctrlb() {
+    nvm_sink = Nvm::flmap();
+    nvm_sink = static_cast<uint8_t>(Nvm::flmap_locked());
+    nvm_sink = static_cast<uint8_t>(Nvm::set_flmap(1));
+    Nvm::lock_flmap();
+    Nvm::protect_eeprom();
+    nvm_sink = static_cast<uint8_t>(Nvm::eeprom_protected());
+    Nvm::vectors_in_boot();
+    nvm_sink = static_cast<uint8_t>(Nvm::vectors_in_boot_armed());
+}
+
+void nvm_flash_read() {
+    uint8_t buf[8]{};
+    nvm_sink = Nvm::flash_read(0x8000u);
+    nvm_sink = static_cast<uint8_t>(Nvm::flash_read_word(0x8000u));
+    Nvm::flash_read(0x8000u, buf, sizeof buf);
+}
+
+void nvm_eeprom() {
+    uint8_t buf[8]{};
+    nvm_sink = Nvm::eeprom_read(0);
+    Nvm::eeprom_read(0, buf, sizeof buf);
+    nvm_sink = static_cast<uint8_t>(Nvm::eeprom_open());
+    Nvm::eeprom_load(3, 0x5Au);
+    Nvm::eeprom_commit(EepromOp::write);
+    nvm_sink = static_cast<uint8_t>(Nvm::eeprom_run(8, buf, 8, EepromOp::erase_write));
+    nvm_sink = static_cast<uint8_t>(Nvm::eeprom_run(8, buf, 4, EepromOp::erase));
+    nvm_sink = static_cast<uint8_t>(Nvm::eeprom_store_run(16, buf, 8));
+    nvm_sink = static_cast<uint8_t>(Nvm::eeprom_byte(1, 0x5Au, EepromOp::write));
+    nvm_sink = static_cast<uint8_t>(Nvm::eeprom_write(0, 0x5Au));
+    nvm_sink = static_cast<uint8_t>(Nvm::eeprom_erase_write(1, 0xA5u));
+    nvm_sink = static_cast<uint8_t>(Nvm::eeprom_store(2, 0xA5u));
+    nvm_sink = static_cast<uint8_t>(Nvm::eeprom_erase(0));
+    nvm_sink = static_cast<uint8_t>(Nvm::eeprom_erase(0, EepromErase::bytes2));
+    nvm_sink = static_cast<uint8_t>(Nvm::eeprom_erase(0, EepromErase::bytes4));
+    nvm_sink = static_cast<uint8_t>(Nvm::eeprom_erase(0, EepromErase::bytes8));
+    nvm_sink = static_cast<uint8_t>(Nvm::eeprom_write_block(5, buf, sizeof buf));
+    nvm_sink = static_cast<uint8_t>(Nvm::eeprom_erase_at<8, EepromErase::bytes8>());
+    nvm_sink = static_cast<uint8_t>(Nvm::eeprom_ready_flag());
+    Nvm::clear_eeprom_ready_flag();
+    Nvm::enable_eeprom_ready_interrupt(true);
+    Nvm::eeready();
+}
+
+void nvm_userrow() {
+    uint8_t row[userrow_size]{};
+    nvm_sink = Nvm::userrow_read(0);
+    Nvm::userrow_read(0, row, userrow_size);
+}
+
+void nvm_sigrow() {
+    nvm_sink = Sigrow::device_id(0);
+    nvm_sink = static_cast<uint8_t>(Sigrow::device_id() >> 16);
+    for (uint8_t i = 0; i < Sigrow::serial_bytes; ++i) {
+        nvm_sink = Sigrow::serial(i);
+    }
+    nvm_sink = static_cast<uint8_t>(Sigrow::tempsense0());
+    nvm_sink = static_cast<uint8_t>(Sigrow::tempsense1());
+}
+
+// The EEPROM as the util-stratum store, and the three things built on
+// it, over this generation's engine.
+#include "avrxt/platform.hpp"
+#include "util/nv_writer.hpp"
+#include "util/persistent_panic.hpp"
+
+struct Settings {
+    uint16_t baud_div;
+    uint8_t flags;
+};
+
+using Store = EepromStore;
+using SettingsRecord = NvRecord<Settings, Store, 16>;
+using Panic = PersistentPanic<Store, 0>;
+using Writer = NvWriter<Store, AvrPlatform>;
+
+static_assert(SettingsRecord::end <= eeprom_size);
+static_assert(Panic::end <= SettingsRecord::begin,
+              "the panic slot and the settings record must not overlap");
+static_assert(Panic::end - Panic::begin == eeprom_page_size,
+              "the panic record fills exactly one EEPROM page");
 
 void nvm_util() {
     const std::optional<Settings> s = SettingsRecord::load();

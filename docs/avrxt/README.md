@@ -33,9 +33,11 @@ SPI and TWI route tables re-expressed per PORTMUX layout, reset, sleep
 and the platform are written from DS40002443A and compile on the three
 packages; the TCA (its own route table), the TCB, the CCL (its input
 menu read from the header, AC1 on input 2) and the RTC (the PIT's event
-slots) are on the bench; NVMCTRL (NVM version 3) and the ADC refuse the
-part by name; the AC/DAC/VREF chapters compile unchanged and are a later
-step. What the silicon has confirmed is each document's.
+slots) and NVMCTRL's EEPROM engine (NVM version 3: the page buffer, the
+three page operations, EEWP, the supply guard of DS80001048D 2.2.1) are
+on the bench, its flash and User Row self-programming declined; the ADC
+refuses the part by name; the AC/DAC/VREF chapters compile unchanged and
+are a later step. What the silicon has confirmed is each document's.
 
 ## The documents
 
@@ -52,8 +54,8 @@ documents of record.
 | [vref.md](vref.md) | VREF: the reference selector - levels, headroom, how the ADC/DAC name it |
 | [dac.md](dac.md) | DAC: the 10-bit actuator - buffered/unbuffered outputs, the slow fall on a bare pin, usage |
 | [adc.md](adc.md) | ADC: one task with knobs - inputs as types, triggers, accumulation, window (signed too), results as events, DB-only inputs gated; not covered: pin-level input legality, the standby paths |
-| [nvm.md](nvm.md) | NVMCTRL: the `Nvm` resource - the four memories and what each is for, the Flash sections as a compile-time claim cross-checked against the fuses, ELPM/SPM only (never the data-space window), the command model, the one-way protections, the vector-table invariant every image carries, and the multi-page-erase erratum guarded page by page - plus the services over it (typed record, interrupt-paced writer AO, persistent panic record), and the DA's window erratum reproduced on an AVR128DA48; not covered: a boot loader, any flash policy, the DA's lower endurance (a page worn out to measure it) |
-| [userrow.md](userrow.md) | USERROW: the board identity label - survives chip erase, written once over UPDI, read into every suite banner by board_id() |
+| [nvm.md](nvm.md) | NVMCTRL, two generations: on the DA/DB the `Nvm` resource - the four memories and what each is for, the Flash sections as a compile-time claim cross-checked against the fuses, ELPM/SPM only (never the data-space window), the command model, the one-way protections, the vector-table invariant every image carries, and the multi-page-erase erratum guarded page by page - plus the services over it (typed record, interrupt-paced writer AO, persistent panic record), and the DA's window erratum reproduced on an AVR128DA48; on the AVR EA the EEPROM engine of NVM version 3 - the page buffer's command model as the silicon runs it (fill, then command), the page run and the cheapest-operation chooser, EEWP, the offer inventoried, the cost counted in the listing and measured on an AVR64EA48, the supply guard of DS80001048D 2.2.1 with BODCFG 0x4D - its flash and User Row self-programming declined; not covered: a boot loader, any flash policy, the DA's lower endurance (a page worn out to measure it), the page run through the store contract |
+| [userrow.md](userrow.md) | USERROW: the board identity label - survives chip erase, written once over UPDI, read into every suite banner by board_id(); 64 bytes on the AVR EA, its CPU write declined there |
 | [port.md](port.md) | PORT: Port<L> resource, Pin (one-store PinConfig, senses, flags), PinSet across ports on the multi-pin engine, PinRef; every pin fully asynchronous on the AVR EA; not covered: INLVL/slew measurements, the fully-async wake on a Px6 pad, the EA's on the bench |
 | [usart.md](usart.md) | USART: the `Usart<n>` resource - routes incl. the pinless one (and the AVR EA's route table of another shape: per-instance codes, routes on other ports, USART2 in USARTROUTEB), every frame format, the receiver modes, the errata verbs - and the tasks over it (`Uart`, `OneWire`, `Rs485`, `SyncHost`/`SyncClient`, `MspiHost`, `IrdaLink`, `AutoBaud`); not bench-verified: everything that needs a second board |
 | [spi.md](spi.md) | SPI: the `Spi<n>` resource - the per-package route table with the errata that beats it (the AVR EA's SPI0 ALT1..ALT6, its UPDI-pin ALT6 and two-port ALT3 refused), both roles, the seven rates, both INTFLAGS layouts and their clear disciplines, the host demotion - and the tasks over it (`SpiHost` transfer engine in buffer mode, its costs counted in the listing and measured by `bench_avr`'s letter `e`, `SpiClient`), and the read the silicon does not take when it empties the FIFO as a byte enters it, which the engine reads around; not bench-verified: everything that needs a second device on the wire |

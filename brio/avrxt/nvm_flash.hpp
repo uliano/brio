@@ -56,9 +56,9 @@
 #pragma once
 
 // The flash behind the FlashMedia contract is NVM version 2's (nvm.hpp);
-// on the AVR EA, whose NVM version 3 has no driver here, flash
-// self-programming is declined (docs/avrxt/nvm.md) and so are the flash
-// heap and journal that would sit on it.
+// on the AVR EA, whose NVM version 3 engine in nvm.hpp keeps the EEPROM
+// alone, flash self-programming is declined (docs/avrxt/nvm.md) and so
+// are the flash heap and journal that would sit on it.
 #include <avr/io.h>
 #include "avrxt/device_tables.hpp"
 #if defined(NVMCTRL_FLBUSY_bm)

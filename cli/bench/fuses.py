@@ -71,6 +71,33 @@ def is_ea(mcu):
     return EA_MCU.match(mcu) is not None
 
 
+# BODCFG on the AVR EA (DS40002443A 8.8.2.2): LVL 7:5, SAMPFREQ 4, ACTIVE
+# 3:2, SLEEP 1:0. DS80001048D 2.2.1 (rev B1): an NVM erase or write below
+# 2.7 V may fail, and the sheet's alternative is the BOD at BODLEVEL2 or
+# above. The same reading as brio's Nvm::supply_guarded(): the level, and
+# CONTINUOUS operation awake (ENABLE or ENABLEWAIT) and asleep - an EEPROM
+# operation runs on through a sleep, and a sampled BOD can miss a dip
+# shorter than its period.
+EA_BOD_LEVELS = ("BODLEVEL0 (armed only during a chip erase: the BOD is off)",
+                 "BODLEVEL1, 1.90 V", "BODLEVEL2, 2.60 V", "BODLEVEL3, 4.30 V")
+EA_BOD_MODES = ("disabled", "continuous", "sampled", "continuous with the start-up wait")
+
+
+def ea_bod_unguarded(bodcfg):
+    """Why an AVR EA's BODCFG leaves its NVM writes open to DS80001048D
+    2.2.1, as a list of reasons (empty: guarded)."""
+    lvl, active, sleep = bodcfg >> 5, (bodcfg >> 2) & 0x3, bodcfg & 0x3
+    why = []
+    if lvl < 2:
+        why.append("LVL %d is below BODLEVEL2" % lvl)
+    if active not in (1, 3):
+        why.append("ACTIVE is %s, not continuous" % EA_BOD_MODES[active])
+    if sleep != 1:
+        why.append("SLEEP is %s, not continuous"
+                   % (EA_BOD_MODES[sleep] if sleep < 3 else "reserved"))
+    return why
+
+
 def ea_refusals(values):
     """What brio refuses to write into an AVR EA's fuses, as reasons. `values`
     is the fuse state the write would leave ({name: byte}); a name absent
@@ -167,6 +194,18 @@ def ea_print_layout(values):
     for name, v in (("BOOTSIZE", boot), ("CODESIZE", code)):
         if v & 1:
             print("     %s is odd: no CRC may run on rev B2 (DS80001048D 2.2.4)" % name)
+    bod = values["bodcfg"]
+    print("     BOD %s, %s awake, %s asleep, sampling at %s Hz"
+          % (EA_BOD_LEVELS[bod >> 5] if (bod >> 5) < 4 else "LVL reserved",
+             EA_BOD_MODES[(bod >> 2) & 0x3],
+             EA_BOD_MODES[bod & 0x3] if (bod & 0x3) < 3 else "reserved",
+             "32" if bod & 0x10 else "128"))
+    why = ea_bod_unguarded(bod)
+    if why:
+        print("     WARNING: this BODCFG leaves the NVM writes unguarded on rev B1 "
+              "(DS80001048D 2.2.1: an erase or write below 2.7 V may fail): %s. "
+              "brio's provisioning is bodcfg=0x4D (BODLEVEL2, continuous with the "
+              "wait awake, continuous asleep)." % "; ".join(why))
     print("     RESET pin %s, UPDI pin %s, CRC %s, EESAVE %s"
           % ("PF6" if sys0 & 0x08 else "off (PF6 a GPIO)",
              "PF7" if sys0 & 0x10 else "OFF - a GPIO: only an HV pulse brings UPDI back",
