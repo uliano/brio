@@ -7,6 +7,16 @@
 // Wiring: PD6 (DAC0 OUT) -> PD1 (AIN1), the jumper of test_avr_analog.
 // Console @ 115200 on USART2 ALT1 (PF4/PF5). LED PF2.
 //
+// On the AVR EA (board type ea48) the converter is the differential ADC
+// (adc.hpp's second half): the temperature wants the 1.024 V reference
+// (DS40002443A 31.3.3.7), so the whole walk - and the DAC with it - runs
+// on 1.024 V (DAC 0..1023 mV); the sampler's converter is
+// AdcConfigured<0, adc_cfg>, the configuration a type, whose result
+// width the sampler checks at compile time; and under the hardware pace
+// the driver's select aborts an event-started conversion before it moves
+// the unbuffered mux (adc.hpp).
+//
+// build: boards = db48,ea48
 // build: monitor_speed = 115200
 //
 // Commands:
@@ -51,8 +61,14 @@
 #include "util/proto/line_parser.hpp"
 #include "util/serial_port.hpp"
 
+#include "avr_board.hpp"
+
 using P = brio::AvrPlatform;
+#if defined(ADC_PGAEN_bm)
+using Boot = BoardClock;                          // the board's HF source (avr_board.hpp)
+#else
 using Boot = brio::Clock<brio::ClockSource::crystal, 24'000'000>;
+#endif
 
 namespace {
 
@@ -66,6 +82,18 @@ using SysClock = brio::DynamicClock<Boot, Serial, Adc>;   // both rebased on set
 constexpr SysClock clock;
 constexpr uint32_t baud = 115200;
 
+#if defined(ADC_PGAEN_bm)
+constexpr brio::Ref ref = brio::Ref::v1024;
+constexpr uint16_t ref_mv = brio::ref_mv(ref);
+
+// The converter's configuration is the owner's (main): 1.024 V, CLK_ADC
+// 2 MHz (20 MHz / 10), SAMPDUR 64 = the temperature sensor's 32 us
+// (31.3.3.7) - more than the internal reference's 4 us x 2 MHz = 8 -, a
+// single 12-bit conversion so the temperature formula applies to the raw
+// result.
+constexpr brio::AdcConfig adc_cfg{.reference = ref, .prescaler = brio::AdcPresc::div10,
+                                  .sample_duration = 64};
+#else
 constexpr brio::Ref ref = brio::Ref::v2048;
 constexpr uint16_t ref_mv = brio::ref_mv(ref);
 
@@ -76,6 +104,7 @@ constexpr uint16_t ref_mv = brio::ref_mv(ref);
 constexpr brio::AdcConfig adc_cfg{.reference = ref, .prescaler = brio::AdcPresc::div64,
                                   .sample_length = 12,
                                   .init_delay = brio::AdcInitDelay::cycles64};
+#endif
 
 // ---- the inputs, by position ------------------------------------------------
 using Loop = brio::AnalogIn<brio::Pin<'D', 1>>;   // index 0: the DAC loop
@@ -83,8 +112,14 @@ constexpr uint8_t idx_loop = 0, idx_temp = 1, idx_vdd = 2;
 
 struct Monitor;
 struct Alarm;
+#if defined(ADC_PGAEN_bm)
+using Conv = brio::AdcConfigured<0, adc_cfg>;     // the configuration a type: its width checked
+using Sampler = brio::AnalogSampler<Conv, P, brio::Subscribers<Monitor, Alarm>,
+                                    Loop{}, brio::AdcInput::temp, brio::AdcInput::vdd_div10>;
+#else
 using Sampler = brio::AnalogSampler<Adc, P, brio::Subscribers<Monitor, Alarm>,
                                     Loop{}, brio::AdcInput::temp, brio::AdcInput::vdd_div10>;
+#endif
 
 // ---- the hardware pace: PIT divider -> channel 1 -> ADC start ---------------
 // TARGET GLUE, like the ISR vector bindings below: which generator,
@@ -328,12 +363,20 @@ int main() {
 
     Dac::init({.reference = ref});                 // buffered out on PD6
     Dac::set_mv(1000, ref_mv);
+#if defined(ADC_PGAEN_bm)
+    Conv::init(clock);                             // the owner configures; the sampler walks
+#else
     Adc::init<adc_cfg>(clock);                     // the owner configures; the sampler walks
+#endif
     Adc::enable_resrdy_interrupt(true);
     Pace::hw(256);                                 // 128 samples/s, no CPU between them
     sei();
 
+#if defined(ADC_PGAEN_bm)
+    brio::print(serial, brio::crlf, "AVR64EA48 brio sampler (src=", xtal ? "XTAL" : "OSCHF",
+#else
     brio::print(serial, brio::crlf, "AVR128DB48 brio sampler (src=", xtal ? "XTAL" : "OSCHF",
+#endif
                 ", ", SysClock::hz(), " Hz, CLK_ADC ", Adc::clock_hz_adc(), " Hz), DAC 1000 mV, "
                 "PIT/256 pace, type HELP", brio::crlf, "> ");
 

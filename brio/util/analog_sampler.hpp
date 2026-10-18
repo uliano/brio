@@ -47,6 +47,20 @@
  * change (docs/design/clock.md), and never selecting an input behind
  * the sampler's back.
  *
+ * Two optional verbs of the converter, used when it has them: claim(in)
+ * - the sampler claims each input of its list once at init (a pin's
+ * digital input buffer off), so that a select is the mux store alone;
+ * and a constant `sample_bits`, the width of what the converter delivers
+ * as configured - Sampled.value is 16 bits, and a converter declaring
+ * more (an unscaled sum of many samples) is refused at compile time.
+ *
+ * A converter whose input mux is NOT buffered (a select landing during
+ * a conversion corrupts it) keeps the promise in its own select: under
+ * a hardware pace the driver aborts the conversion in flight before it
+ * moves the mux and re-arms the pace after - one dropped or aborted
+ * trigger at worst, never a result under another input's label (the
+ * AVR EA's adc.hpp; docs/design/analog.md).
+ *
  * The contract wants a converter that reports ONE result per interrupt
  * with the selected input readable from a register - which a converter
  * carrying a hardware sequencer and DMA also satisfies, because the
@@ -104,6 +118,17 @@ struct AnalogSample {
     uint16_t value;
 };
 
+/// The width a converter declares for what it delivers (its constant
+/// `sample_bits`), or 16 where it declares none.
+template <typename C>
+constexpr uint8_t converter_sample_bits() {
+    if constexpr (requires { C::sample_bits; }) {
+        return static_cast<uint8_t>(C::sample_bits);
+    } else {
+        return 16;
+    }
+}
+
 template <AnalogConverter C, Platform P, typename Subs, auto... inputs>
     requires (sizeof...(inputs) > 0) && (SamplerInput<C, inputs> && ...)
 class AnalogSampler
@@ -116,6 +141,10 @@ public:
 
     static constexpr uint8_t input_count = sizeof...(inputs);
 
+    static_assert(converter_sample_bits<C>() <= 16,
+                  "AnalogSampler: Sampled.value is 16 bits and this converter delivers more as "
+                  "configured (an unscaled sum of many samples) - scale the sum, or accumulate fewer");
+
     /// Depth: results arrive from the ISR at the pace; a slow dispatch
     /// elsewhere queues a few. Overflows are counted by the queue.
     static inline EventQueue<Event, 4, P> queue;
@@ -125,6 +154,7 @@ public:
     static void init() {
         index_ = 0;
         unknown_ = 0;
+        (claim(inputs), ...);
         select_index(0);
         Base::start(&running);
     }
@@ -156,6 +186,14 @@ private:
             },
             [](SamplerTick) { C::start(); return Base::handled(); },
             [](auto) { return Base::unhandled(); });
+    }
+
+    /// C::claim(in) where the converter has it: once, at init.
+    template <typename In>
+    static void claim(In in) {
+        if constexpr (requires { C::claim(in); }) {
+            C::claim(in);
+        }
     }
 
     /// C::select(inputs[i]) - the pack unrolled into a chain of compares.

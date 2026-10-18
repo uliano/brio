@@ -29,6 +29,15 @@
 //                     PC4-PE0, PC5-PE1, PC6-PE2, PC7-PE3 wired: each pair
 //                     ONE net (and PE0..PE3 run on to the partner board),
 //                     so no program drives both pins of a pair
+//   board_analog_net  PD1, PD6 (the DAC's output) and PD7 (VREFA) wired
+//                     together: one analog net, for the DAC-to-ADC and
+//                     DAC-to-AC loops; a program that drives one of the
+//                     three drives the net, and a leg that needs one of
+//                     them as a free digital pad moves elsewhere
+//   board_dac_load_ohms
+//                     the resistor from that net to ground (0 = none): the
+//                     DAC sources it, and a falling step is the resistor's
+//                     rather than the buffer's weak sink
 //   board_console_*   the console's USART instance and route
 //
 // The packages without a board (db28, db32) have no row: their presets
@@ -50,28 +59,35 @@ inline constexpr bool board_xosc32k = false;
 inline constexpr bool board_pa7_free = true;
 inline constexpr bool board_wave_crystal_pins = true;
 inline constexpr bool board_pc_pe_jumpers = false;
+inline constexpr bool board_analog_net = false;
+inline constexpr uint16_t board_dac_load_ohms = 0;
 #elif defined(BRIO_BOARD_da48)
 // The REV 1.2 PCB with an AVR128DA48: a 24 MHz oscillator (a quartz and
-// two inverters) into PA0 as EXTCLK, 32.768 kHz on PF0/PF1, 100 nF on PA7
-// (docs/boards/avr128da48.md).
+// two inverters) into PA0 as EXTCLK, 32.768 kHz on PF0/PF1, 100 nF on PA7,
+// PD6 wired to PD1 and PD7 with no resistor (docs/boards/avr128da48.md).
 using BoardClock = brio::Clock<brio::ClockSource::external, 24'000'000>;
 inline constexpr bool board_xosc32k = true;
 inline constexpr bool board_pa7_free = false;
 inline constexpr bool board_wave_crystal_pins = true;
 inline constexpr bool board_pc_pe_jumpers = false;
+inline constexpr bool board_analog_net = true;
+inline constexpr uint16_t board_dac_load_ohms = 0;
 #elif defined(BRIO_BOARD_ea48)
 // The REV 1.2 PCB with an AVR64EA48: a 20 MHz quartz on PA0/PA1
 // (XOSCHF), 32.768 kHz on PF0/PF1, 100 nF on PA7, 5 V - the supply the
 // 20 MHz needs (DS40002443A 35.10.5); the chip's OSCCFG left at the
 // factory 0x00, OSCHF at 20 MHz; USART1 ALT1's PC4..PC7 jumpered to
-// PE0..PE3 (docs/boards/avr64ea48.md). Its crystals' pins are never
-// driven, started or not.
+// PE0..PE3; PD6 wired to PD1 and PD7 with 10 kOhm from the net to ground
+// (docs/boards/avr64ea48.md). Its crystals' pins are never driven,
+// started or not.
 using BoardClock = brio::Clock<brio::ClockSource::crystal, 20'000'000, brio::ClockDiv::div1,
                                20'000'000>;
 inline constexpr bool board_xosc32k = true;
 inline constexpr bool board_pa7_free = false;
 inline constexpr bool board_wave_crystal_pins = false;
 inline constexpr bool board_pc_pe_jumpers = true;
+inline constexpr bool board_analog_net = true;
+inline constexpr uint16_t board_dac_load_ohms = 10'000;
 #else
 #error "avr_board.hpp: a board type this table does not know - add its row (an assembly: PCB, chip, crystals, jumpers)"
 #endif

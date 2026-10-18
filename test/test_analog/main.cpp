@@ -28,3 +28,18 @@ TEST_CASE("dac code and back") {
     CHECK(dac_mv(512, 1024, 2048) == 1024);
     CHECK(dac_mv(1023, 1024, 2048) == 2046);
 }
+
+TEST_CASE("adc sums of any width to millivolts") {
+    // the 32-bit form overflows here: 4095 x 1024 x 1024 + half > 2^32
+    CHECK(adc_mv(4095u * 1024u, 4096u * 1024u, 1024) != 1024);
+    CHECK(adc_sum_mv(4095u * 1024u, 4096u * 1024u, 1024) == 1024);     // 1023.75 rounds up
+    CHECK(adc_sum_mv(2048u * 1024u, 4096u * 1024u, 4096) == 2048);
+    CHECK(adc_sum_mv(4095u * 1024u, 4096u * 1024u, 5000) == 4999);     // 4998.8
+    CHECK(adc_sum_mv(0, 4096u * 1024u, 5000) == 0);
+    CHECK(adc_sum_mv(2048, 4096, 2048) == adc_mv(2048, 4096, 2048));    // agrees where both fit
+    CHECK(adc_sum_mv(1, 4096u * 1024u, 65535) == 0);
+    CHECK(adc_sum_mv_signed(-2048 * 1024, 2048u * 1024u, 2048) == -2048);
+    CHECK(adc_sum_mv_signed(2047 * 1024, 2048u * 1024u, 4096) == 4094);
+    CHECK(adc_sum_mv_signed(-1, 2048, 2048) == -1);
+    static_assert(adc_sum_mv(4095u * 1024u, 4096u * 1024u, 1024) == 1024);
+}

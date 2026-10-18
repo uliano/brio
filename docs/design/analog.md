@@ -22,7 +22,7 @@ the DAC's shape.
 
 | stratum | realization | beyond the contract |
 |---|---|---|
-| avrxt | `Adc<0>` and `AnalogIn<Pin>` (`avrxt/adc.hpp`); `Dac<0>` with `set(code)`/`set_mv()` (`avrxt/dac.hpp`); `Ref` in `avrxt/vref.hpp` | `Ref` names a VOLTAGE (`v1024`, `v2048`, `v2500`, `v4096`, `vdd`, `vrefa`) - the VREF block selects one for each consumer; the ADC is one instance spelled with its number |
+| avrxt | `Adc<0>` and `AnalogIn<Pin>` (`avrxt/adc.hpp`); `Dac<0>` with `set(code)`/`set_mv()` (`avrxt/dac.hpp`); `Ref` in `avrxt/vref.hpp` | `Ref` names a VOLTAGE (`v1024`, `v2048`, `v2500`, `v4096`, `vdd`, `vrefa`) - the VREF block selects one for each consumer on the AVR DA/DB, and the AVR EA's ADC selects the same six in a register of its own; the ADC is one instance spelled with its number, TWO ENGINES behind one surface: the DA/DB's SAR converter, and the EA's differential converter with a PGA, whose differential pair is an input VALUE (`AdcDiff<pos, neg>`, `selected()` folding DIFF into bit 7), whose accumulation reaches a 32-bit sum (`sum()`), whose `claim()` takes a pad once, whose `AdcConfigured<0, cfg>` makes the configuration a type with a `sample_bits` the sampler checks, and whose input mux is NOT buffered (below) |
 | samc21 | `Adc<n>` for two converters in a host/client pair and `AnalogIn<Pin>` (`samc21/adc.hpp`); `Dac` (a monostate) with `set(value)` returning `bool` (`samc21/dac.hpp`); `Ref` in `samc21/adc.hpp` | there is no shared reference block, so `Ref` names a SOURCE of the ADC's own REFSEL (`intref`, `vddana_div1p6`, `vddana_div2`, `vrefa`, `dac`, `vddana`) and the DAC and the SDADC carry enums of their own (`DacRef`, `SdadcRef`); a synchronized write waits before storing, hence the `bool`; the SDADC and the TSENS are converters of their own shape, not `AnalogConverter`s |
 | stm32g0 | `Adc` (a monostate) and `AnalogIn<Pin, channel>` (`stm32g0/adc.hpp`); `Dac` with `write(channel, code)` (`stm32g0/dac.hpp`); `Ref` in `stm32g0/vref.hpp` | ONE rail, VREF+, shared by the ADC, the DAC and the comparators, so `Ref` names what that pin carries (`external`, `buffer_2v048`, `buffer_2v5`); an input states its CHANNEL beside its pin, no header table mapping one to the other; the DAC has two channels, so its verb takes one and is spelled `write` |
 | ch32v00x | `Adc` (a monostate) and `AnalogIn<Pin>` deriving the channel from the pad (`ch32v00x/adc.hpp`); no DAC on this family; `Ref` in `ch32v00x/adc.hpp` | the converter has NO reference input, so `Ref` is one word, `vdd`: the rail is the scale, and the 1.2 V VREFINT is an INPUT (`AdcInput::vrefint`) from which `supply_mv()` derives what the rail is; the OPA's output is another input (`AdcInput::opa`, channel 9); three analog watchdogs that can reset the chip, one per rank under the watchdog scan; `recover()` for the converter that stops under a hardware-triggered, DMA-served group ([the target's document](../ch32v00x/adc.md)) |
@@ -58,9 +58,16 @@ ISR(ADC0_RESRDY_vect) { post<Sampler>(Sampled{Adc<0>::resrdy(), Adc<0>::selected
   input): `start()`, `selected()` (the input code in effect),
   `select(input)` and a constexpr `input_code(input)` for each input
   of the list. The inputs are values of the driver's own vocabulary
-  given as template arguments - pin tags, internal sources - so
-  selection is an overload resolved at compile time and an input the
-  converter cannot take is a compile error.
+  given as template arguments - pin tags, internal sources, a
+  differential pair - so selection is an overload resolved at compile
+  time and an input the converter cannot take is a compile error.
+  Two verbs are optional and used where the converter has them:
+  `claim(input)`, called once per input at the sampler's `init()` (a
+  pad's digital input buffer off, so that a select is the mux store
+  alone), and a constant `sample_bits`, the width of what the
+  converter delivers as configured - `Sampled.value` is 16 bits, and a
+  converter declaring more (an unscaled sum of many samples) is
+  refused at compile time.
 - **Result path** = the kernel's ISR contract: the driver's
   result-ready ISR body returns the value, the app's vector binding
   posts `Sampled{value, input}`; the sampler publishes
@@ -71,7 +78,15 @@ ISR(ADC0_RESRDY_vect) { post<Sampler>(Sampled{Adc<0>::resrdy(), Adc<0>::selected
   conversion, read in the ISR with the value. A late dispatch, a pace
   faster than the dispatch, a queue overflow can delay or lose
   samples - they cannot mislabel them. A code outside the list is
-  dropped and counted.
+  dropped and counted. Where the input mux is NOT buffered (a select
+  landing on a conversion in flight corrupts it, or - when the result
+  is already in its output stage - lets it land under the new label),
+  the promise is the driver's: its select under a hardware pace aborts
+  the conversion in flight, waits the output latency, moves the mux
+  and re-arms the pace - one lost trigger at worst. On the AVR EA a
+  sweep of the select's lag over the whole pace period measured no
+  mislabel of 4000 with the driver's select and 32 of 4000 with a bare
+  mux store, in each of fifteen runs ([the target's document](../avrxt/adc.md)).
 - **Two paces, one sampler.** Software: `start_every(ticks)` (a
   TimeEvent of the sampler; kernel-tick granularity). Hardware: the
   application routes ANY event generator - a PIT divider, a timer
@@ -91,8 +106,9 @@ ISR(ADC0_RESRDY_vect) { post<Sampler>(Sampled{Adc<0>::resrdy(), Adc<0>::selected
   measurement (bench: 512 samples/s, two subscribers, no drops on AVR
   DA/DB at 24 MHz).
 
-Validated on AVR DA/DB only: the contract carries that silicon's
-shape (one result per interrupt, the selected input readable). A
+Validated on the AVR DA/DB and the AVR EA: the contract carries that
+silicon's shape (one result per interrupt, the selected input
+readable). A
 sequencer/DMA converter delivers blocks and counts its own position;
 the pace-by-hardware-event idea holds everywhere, the delivery shape
 may not (overview.md, "Authority of util/").
@@ -118,8 +134,10 @@ may not (overview.md, "Authority of util/").
 
 | Entity | Header | Role |
 |--------|--------|------|
-| `adc_mv`, `adc_mv_signed`, `dac_code`, `dac_mv` | `util/analog.hpp` | counts <-> millivolts for any converter |
+| `adc_mv`, `adc_mv_signed`, `dac_code`, `dac_mv` | `util/analog.hpp` | counts <-> millivolts for any converter, exact for every 16-bit result |
+| `adc_sum_mv`, `adc_sum_mv_signed` | `util/analog.hpp` | the same for a sum of any width (a 64-bit product: a cold path) |
 | `AnalogConverter`, `SamplerInput` (concepts) | `util/analog_sampler.hpp` | what the sampler needs of a converter and of each input |
+| `converter_sample_bits<C>()` | `util/analog_sampler.hpp` | the width a converter declares (16 where it declares none) |
 | `AnalogSampler<C, P, Subscribers<...>, inputs...>` | `util/analog_sampler.hpp` | the owner AO: `init`, `start_every(ticks)`, `stop`, `unknown_inputs()`, `queue` |
 | `Sampled{value, input}` | `util/analog_sampler.hpp` | posted by the ISR glue |
 | `AnalogSample{index, value}` | `util/analog_sampler.hpp` | published to the subscribers |

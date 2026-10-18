@@ -22,9 +22,31 @@ namespace brio {
 
 /// Unsigned ADC counts -> millivolts, for a full-scale of `steps`
 /// (4096 for 12 bits, 1024 for 10; multiply by the accumulation count
-/// for accumulated results). Rounded to nearest.
+/// for accumulated results). Rounded to nearest. The product is formed
+/// in 32 bits: exact for every 16-bit result (counts <= 65535, steps <=
+/// 65536); a wider sum - the unscaled accumulation of 32 or more 12-bit
+/// samples some converters deliver - goes to adc_sum_mv().
 constexpr uint16_t adc_mv(uint32_t counts, uint32_t steps, uint16_t ref_mv_) {
     return static_cast<uint16_t>((counts * ref_mv_ + steps / 2) / steps);
+}
+
+/// adc_mv() for a sum of any width: the quotient and the remainder of
+/// counts / steps scaled apart, the remainder's product in 64 bits (a
+/// 22-bit remainder times a 16-bit reference does not fit 32). Rounded
+/// to nearest. A cold-path conversion: a 64-bit multiply and divide.
+constexpr uint16_t adc_sum_mv(uint32_t counts, uint32_t steps, uint16_t ref_mv_) {
+    const uint32_t q = counts / steps;
+    const uint64_t r = counts % steps;
+    return static_cast<uint16_t>(q * ref_mv_ + (r * ref_mv_ + steps / 2) / steps);
+}
+
+/// adc_mv_signed() for a signed sum of any width (a differential
+/// accumulation); `half_steps` = 2048 x the samples summed.
+constexpr int16_t adc_sum_mv_signed(int32_t counts, uint32_t half_steps, uint16_t ref_mv_) {
+    const uint32_t mag = counts >= 0 ? static_cast<uint32_t>(counts)
+                                     : static_cast<uint32_t>(-static_cast<int64_t>(counts));
+    const uint16_t mv = adc_sum_mv(mag, half_steps, ref_mv_);
+    return counts >= 0 ? static_cast<int16_t>(mv) : static_cast<int16_t>(-static_cast<int32_t>(mv));
 }
 
 /// Signed (differential) ADC counts -> millivolts; `half_steps` = 2048

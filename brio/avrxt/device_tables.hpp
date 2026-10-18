@@ -395,6 +395,26 @@ constexpr uint8_t ccl_insel2_ac_code_of() {
 inline constexpr uint8_t ccl_insel2_ac_instance = ccl_insel2_ac_instance_of<CCL_INSEL2_t>();
 inline constexpr uint8_t ccl_insel2_ac_code = ccl_insel2_ac_code_of<CCL_INSEL2_t>();
 
+/// The comparators' fifth positive and fourth negative pin (AINP4 = PC3,
+/// AINN3 = PC2 on the AVR EA, DS40002443A 3.1, 30.5.3): the code, 0xFF
+/// where the header has no such enumerator.
+template <typename E>
+concept HasAcMuxposAinp4 = requires { E::AC_MUXPOS_AINP4_gc; };
+template <typename E>
+concept HasAcMuxnegAinn3 = requires { E::AC_MUXNEG_AINN3_gc; };
+template <typename E>
+constexpr uint8_t ac_muxpos_ainp4_code_of() {
+    if constexpr (HasAcMuxposAinp4<E>) return static_cast<uint8_t>(E::AC_MUXPOS_AINP4_gc);
+    else return 0xFF;
+}
+template <typename E>
+constexpr uint8_t ac_muxneg_ainn3_code_of() {
+    if constexpr (HasAcMuxnegAinn3<E>) return static_cast<uint8_t>(E::AC_MUXNEG_AINN3_gc);
+    else return 0xFF;
+}
+inline constexpr uint8_t ac_ainp4_code = ac_muxpos_ainp4_code_of<AC_MUXPOS_t>();
+inline constexpr uint8_t ac_ainn3_code = ac_muxneg_ainn3_code_of<AC_MUXNEG_t>();
+
 inline constexpr uint8_t ac_power_profile2_code = ac_power_profile2_code_of<AC_POWER_t>();
 inline constexpr uint8_t ac_winsel_upsel2_code = ac_winsel_upsel2_code_of<AC_WINSEL_t>();
 inline constexpr bool has_ac_profile2 = ac_power_profile2_code != 0xFF;
@@ -629,6 +649,14 @@ inline constexpr bool erratum_da_window = avr_die == AvrDie::avr128da;
 /// fact, read by Nvm::supply_guarded().
 inline constexpr uint8_t erratum_ea_nvm_supply_revid =
     avr_die == AvrDie::avr64ea ? 0x21u : 0u;
+
+/// The DAC output buffer's offset drifts over the device's life while
+/// the part is powered with OUTEN off: DS80000882C 2.5.1 (every AVR DA
+/// revision), DS80000915F 2.6.1 (AVR DB A4/A5 - the die value cannot tell
+/// a B0 apart). The DAC driver keeps OUTEN on for the program's life
+/// there; DS80001048D has no DAC item, so on the AVR EA disable()
+/// releases the pin with the converter.
+inline constexpr bool erratum_dac_outen_drift = avr_die != AvrDie::avr64ea;
 
 /// The TCB's CCMPL and CCMPH as two INDEPENDENT 8-bit registers in PWM8
 /// mode, as each chapter says (DS40002247B 24.5.10, DS40002443A 23.5.10):

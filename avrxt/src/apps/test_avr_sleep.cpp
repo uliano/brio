@@ -2917,12 +2917,12 @@ SleepRun tcd_leg(SleepMode m, TcdClock src) {
 #endif
 
 #if defined(BRIO_BOARD_ea48)
-// The AVR EA: TCA0 and AC0 as on the DA/DB. Its ADC is a new block whose
-// engine is not written yet (adc.hpp refuses the EA), it has no op amp
-// and no TCD - those legs are the DA/DB's.
+// The AVR EA: TCA0 and AC0 as on the DA/DB. It has no op amp and no TCD;
+// its ADC is another engine (adc.hpp's second half) whose standby leg
+// is not written here yet (docs/avrxt/adc.md) - those legs are the DA/DB's.
 void to_runstdby() {
     print(serial, "o RUNSTDBY of the timers and the analog, in a real STANDBY: TCA, AC "
-                  "(the AVR EA: no op amp, no TCD, the ADC's engine not written)", crlf);
+                  "(the AVR EA: no op amp, no TCD, the ADC's leg not written)", crlf);
     quiesce();
 
     // TCA0: the asleep count differs from the awake one only by the wake

@@ -101,6 +101,7 @@
 
 #include <avr/interrupt.h>
 #include <stdint.h>
+#include <type_traits>
 
 #include "avrxt/ac.hpp"
 #include "avrxt/ccl.hpp"
@@ -588,10 +589,28 @@ void t9_event_counter() {
 
 // ---- c CCL ---------------------------------------------------------------------
 #if defined(BRIO_BOARD_ea48)
-using LutP = Lut<2>;                 // the AVR EA board: LUT2, IN0/IN1 = PD0/PD1, OUT = PD3
+// The AVR EA board: LUT2, IN0 = PD0, OUT = PD3, and the second input
+// LUT2's IN1 = PD1 - or, where PD1 is on the board's analog net
+// (avr_board.hpp), its IN2 = PD2: the net carries 96 nF (VREFA's
+// capacitor, test_avr_analog letter n), which a pad charges with a time
+// constant of microseconds - past the 2 us the letter reads its output
+// after a change (measured: the OR's 0 -> 1 on PD1 read 0 at 2 us, 1 at
+// 200 us).
+using LutP = Lut<2>;
 using LutA = Pin<'D', 0>;
-using LutB = Pin<'D', 1>;
+using LutB = std::conditional_t<board_analog_net, Pin<'D', 2>, Pin<'D', 1>>;
 using LutOut = Pin<'D', 3>;
+/// The two-input LUT of the letter on the second input's position.
+template <typename F>
+constexpr LutConfig lut_pair(F f) {
+    if constexpr (board_analog_net) {
+        return {.in0 = LutInput::pin, .in2 = LutInput::pin,
+                .truth = lut_truth([f](bool a, bool, bool c) { return f(a, c); }), .output_pin = true};
+    } else {
+        return {.in0 = LutInput::pin, .in1 = LutInput::pin,
+                .truth = lut_truth([f](bool a, bool b, bool) { return f(a, b); }), .output_pin = true};
+    }
+}
 #else
 using LutP = Lut<4>;
 using LutA = Pin<'B', 0>;
@@ -601,7 +620,8 @@ using LutOut = Pin<'B', 3>;
 
 void tc_ccl() {
 #if defined(BRIO_BOARD_ea48)
-    print(serial, "c CCL: LUT2 AND/OR of PD0/PD1 on PD3; ToggleFlipFlop LUT0/1 by TCB1 events; edge detector", crlf);
+    print(serial, "c CCL: LUT2 AND/OR of PD0/", board_analog_net ? "PD2" : "PD1",
+          " on PD3; ToggleFlipFlop LUT0/1 by TCB1 events; edge detector", crlf);
     quiesce();
     Tca<0>::reset();                 // PD0 is TCA0's WO0: an enabled compare output owns it even disabled
 #else
@@ -611,9 +631,13 @@ void tc_ccl() {
     LutA::clear(); LutB::clear();
     LutA::output(); LutB::output();
     Ccl::disable();
+#if defined(BRIO_BOARD_ea48)
+    verdict("LUT2 init (AND)", LutP::init(lut_pair([](bool a, bool b) { return a && b; })));
+#else
     verdict(lut_count == 6 ? "LUT4 init (AND)" : "LUT2 init (AND)", LutP::init({.in0 = LutInput::pin, .in1 = LutInput::pin,
                                              .truth = lut_truth([](bool a, bool b, bool) { return a && b; }),
                                              .output_pin = true}));
+#endif
     Ccl::enable();
     bool ok = true;
     for (uint8_t k = 0; k < 4; ++k) {
@@ -627,8 +651,12 @@ void tc_ccl() {
     verdict("AND truth table on the pins", ok);
     // reconfigure to OR: the whole block off meanwhile (errata 2.4.1)
     Ccl::disable();
+#if defined(BRIO_BOARD_ea48)
+    LutP::init(lut_pair([](bool a, bool b) { return a || b; }));
+#else
     LutP::init({.in0 = LutInput::pin, .in1 = LutInput::pin,
                   .truth = lut_truth([](bool a, bool b, bool) { return a || b; }), .output_pin = true});
+#endif
     Ccl::enable();
     ok = true;
     for (uint8_t k = 0; k < 4; ++k) {
@@ -1999,9 +2027,12 @@ void tx_ea() {
     using D4 = Pin<'D', 4>; using D5 = Pin<'D', 5>; using D6 = Pin<'D', 6>;
     A4::configure({}); A5::configure({}); A6::configure({});
     D4::configure({}); D5::configure({}); D6::configure({});
+    // PD6 is on the board's analog net (avr_board.hpp): its 96 nF and 10 k
+    // take a pad 4.7 us to VIH and 3.3 us to VIL (test_avr_analog letter
+    // n) - 30 us is six times that; a bare pad settles in nanoseconds.
     auto park = [](bool high) {
         Tca<1>::output_value<0>(high); Tca<1>::output_value<1>(high); Tca<1>::output_value<2>(high);
-        delay_us(clock, 2);
+        delay_us(clock, board_analog_net ? 30 : 2);
     };
     (void)Tca<1>::init({.mode = TcaMode::single_slope, .clock = TcaClock::div1,
                         .period = tpms - 1u, .outputs = 0x07, .route = 'A'});

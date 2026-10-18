@@ -1,11 +1,15 @@
 /*
  * ac.hpp
  *
- * The AVR DA/DB analog comparators (AC, DS40002247B ch. 32) as brio
- * sees them - see docs/avrxt/ac.md:
+ * The analog comparators (AC) of the AVR DA/DB (DS40002247B ch. 32) and
+ * the AVR EA (DS40002443A ch. 30) as brio sees them - one IP, the EA's
+ * with two instances, a fifth positive and a fourth negative pin, two
+ * power profiles and the window pairing ACn+1 only - see
+ * docs/avrxt/ac.md:
  *
- *  RESOURCE - Ac<n>, n = 0..2: a config struct owns the inputs (one of
- *  four positive pins, one of three negative pins or DACREF), the DACREF
+ *  RESOURCE - Ac<n>, n = 0..2 (0..1 on the EA): a config struct owns the
+ *  inputs (one of four positive pins - five on the EA - one of three
+ *  negative pins - four on the EA - or DACREF), the DACREF
  *  code, hysteresis, power profile, inversion, initial value, output
  *  pin and route, run-standby, interrupt sense; init<cfg>() / init(cfg)
  *  write it (and turn the chosen pins into analog inputs). Verbs:
@@ -20,23 +24,30 @@
  *    Window<Ac, Ac>    "the input is above / inside / below": two
  *                      comparators on one pin, WINSEL, the state
  *
- * Facts that shape the code (32.3, 39.17; no AC silicon erratum -
- * the errata document's clarification 3.7.4 adds tDACREF = 25 us):
+ * Facts that shape the code (DS40002247B 32.3, 39.17; DS40002443A 30.3,
+ * 35.18; no AC silicon erratum on either - the DB errata document's
+ * clarification 3.7.4 adds tDACREF = 25 us, the EA's DS80001048D 3.8
+ * fills table 35-27):
  *  - V_DACREF = DACREF x V_ACREF / 256 (8-bit); offset +-5 mV typ.,
  *    hysteresis 0 / 10 / 25 / 50 mV, response 85 / 250 / 460 ns by
- *    power profile; the AC and (if internal) the reference take their
+ *    power profile on the DB; offset +-10 typ. and +-30 mV max,
+ *    hysteresis 0 / 10 / 20 / 30 mV, response 50 ns rising and 150 ns
+ *    falling at profile 0 on the EA; the AC and (if internal) the reference take their
  *    start-up after enable, a new input pin or reference wants settling
  *    - INITVAL holds the output meanwhile;
  *  - inputs on the 48-pin part: AINP0 PD2 (all), AINP1 PE0/PD3/PD4,
  *    AINP2 PE2/PD4/PE1, AINP3 PD6 (all: the DAC pin), AINN0 PD3/PD5/PD7,
- *    AINN1 PD0 (all), AINN2 PD7 (all) for AC0/AC1/AC2; the pins' digital
- *    input buffer is disabled by init();
+ *    AINN1 PD0 (all), AINN2 PD7 (all) for AC0/AC1/AC2; on the EA also
+ *    AINP4 PC3 and AINN3 PC2 (both instances, every package); the pins'
+ *    digital input buffer is disabled by init();
  *  - the output: CMPSTATE in STATUS, the OUT event (level, async, 0x20
  *    + n), the pin (OUTEN: PA7 default - CLKOUT's pin - or ALT1 PC6, one
  *    route bit per instance in PORTMUX.ACROUTEA), the CCL input menu
- *    (ACn OUT on LUT input n), one interrupt per instance (CMP) with
+ *    (ACn OUT on LUT input n; input 2 carries AC1 on the EA, which has no
+ *    AC2 - ccl.hpp), one interrupt per instance (CMP) with
  *    sense both / falling / rising;
- *  - window mode: ACn pairs with ACn+1 or ACn+2 (WINSEL), both MUXPOS on
+ *  - window mode: ACn pairs with ACn+1 or ACn+2 (WINSEL; ACn+1 only on
+ *    the EA, which has no UPSEL2), both MUXPOS on
  *    the same pin, the partner holds the UPPER limit on its negative
  *    input and ACn the lower; WINSTATE reads above/inside/below and
  *    INTMODE picks which state (above/inside/below/outside) raises the
@@ -60,13 +71,18 @@ namespace brio {
 
 // ---- the knobs (32.5) -------------------------------------------------------------
 
+/// AINP4 and AINN3 carry the device tables' probe of the header's
+/// enumerator: 0xFF where the part has no such pin (the AVR DA/DB), and a
+/// config naming one is refused there.
 enum class AcPos : uint8_t {
     ainp0 = AC_MUXPOS_AINP0_gc, ainp1 = AC_MUXPOS_AINP1_gc,
     ainp2 = AC_MUXPOS_AINP2_gc, ainp3 = AC_MUXPOS_AINP3_gc,
+    ainp4 = ac_ainp4_code,
 };
 enum class AcNeg : uint8_t {
     ainn0 = AC_MUXNEG_AINN0_gc, ainn1 = AC_MUXNEG_AINN1_gc,
     ainn2 = AC_MUXNEG_AINN2_gc, dacref = AC_MUXNEG_DACREF_gc,
+    ainn3 = ac_ainn3_code,
 };
 enum class AcHysteresis : uint8_t {
     none = AC_HYSMODE_NONE_gc, small = AC_HYSMODE_SMALL_gc,       ///< ~10 mV
@@ -124,20 +140,28 @@ constexpr uint16_t ac_dacref_mv(uint8_t code, uint16_t ref_mv) {
 /// (DS40002247B ch. 3, 48-pin column). {0, 0} = none.
 struct AcPin { char port; uint8_t pin; };
 constexpr AcPin ac_pos_pin(uint8_t n, AcPos p) {
+    if constexpr (ac_ainp4_code != 0xFF) {
+        if (p == AcPos::ainp4) return {'C', 3};
+    }
     switch (p) {
         case AcPos::ainp0: return {'D', 2};
         case AcPos::ainp1: return n == 0 ? AcPin{'E', 0} : n == 1 ? AcPin{'D', 3} : AcPin{'D', 4};
         case AcPos::ainp2: return n == 0 ? AcPin{'E', 2} : n == 1 ? AcPin{'D', 4} : AcPin{'E', 1};
         case AcPos::ainp3: return {'D', 6};
+        default: break;                   // AINP4 above, where the part has it
     }
     return {0, 0};
 }
 constexpr AcPin ac_neg_pin(uint8_t n, AcNeg p) {
+    if constexpr (ac_ainn3_code != 0xFF) {
+        if (p == AcNeg::ainn3) return {'C', 2};
+    }
     switch (p) {
         case AcNeg::ainn0: return n == 0 ? AcPin{'D', 3} : n == 1 ? AcPin{'D', 5} : AcPin{'D', 7};
         case AcNeg::ainn1: return {'D', 0};
         case AcNeg::ainn2: return {'D', 7};
         case AcNeg::dacref: return {0, 0};
+        default: break;                   // AINN3 above, where the part has it
     }
     return {0, 0};
 }
@@ -147,7 +171,8 @@ constexpr AcPin ac_neg_pin(uint8_t n, AcNeg p) {
 /// 28/32-pin parts and init refuses them. Pin-level absences within a
 /// bonded port (PD0 = AINN1 on DB 28/32, PC6 = the ALT1 output on
 /// 28/32) await the device tables - the table above is the 48/64-pin
-/// column, identical on both families.
+/// column, identical on the three dies. AINP4 and AINN3 map to no pin on
+/// a part without them (the DA/DB), so the same test refuses them.
 constexpr bool ac_config_valid(uint8_t n, const AcConfig& c) {
     if (c.power == AcPower::low && !has_ac_profile2) return false;
     if (!port_exists(ac_pos_pin(n, c.positive).port)) return false;
@@ -160,7 +185,7 @@ constexpr bool ac_config_valid(uint8_t n, const AcConfig& c) {
 
 template <uint8_t n>
 class Ac {
-    static_assert(n < ac_count, "no such analog comparator on this part (AVR DA/DB: AC0..AC2)");
+    static_assert(n < ac_count, "no such analog comparator on this part (AVR DA/DB: AC0..AC2, AVR EA: AC0, AC1)");
 
 public:
     Ac() = delete;
@@ -175,7 +200,8 @@ public:
         static_assert(ac_config_valid(n, cfg),
                       "this package does not bond the selected input's pin "
                       "(the PORTE positives exist on 48/64-pin parts only), or this "
-                      "part has no third power profile for AcPower::low");
+                      "part has no third power profile for AcPower::low, or no "
+                      "AINP4/AINN3 (the AVR EA's PC3/PC2)");
         (void)init(cfg);
     }
 

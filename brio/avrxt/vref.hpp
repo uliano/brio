@@ -1,15 +1,20 @@
 /*
  * vref.hpp
  *
- * The AVR DA/DB voltage reference selector (VREF, DS40002247B ch. 21):
- * one REFSEL per consumer - ADC0, DAC0, the analog comparators - each
- * picking 1.024 / 2.048 / 2.500 / 4.096 V (internal, +-4 % untrimmed;
- * 2.048 needs VDD >= 2.5 V, 2.5 needs 2.95 V, 4.096 needs 4.55 V), VDD,
- * or the external VREFA pin (PD7, 1.024 V .. VDD). A source turns on
- * when its consumer needs it; ALWAYSON keeps it on (start-up 10 us
- * with a high-frequency main clock - OSCHF or EXTCLK/XOSCHF - and
- * 200 us with a 32.768 kHz one, Table 39-17; 2 us to change level)
- * for ~40-175 uA.
+ * The voltage reference selector (VREF) of the AVR DA/DB (DS40002247B
+ * ch. 21) and the AVR EA (DS40002443A ch. 20): one REFSEL per consumer -
+ * ADC0 (DA/DB only), DAC0, the analog comparators - each picking 1.024 /
+ * 2.048 / 2.500 / 4.096 V, VDD, or the external VREFA pin (PD7, 1.024 V
+ * .. VDD). On the DA/DB the internal levels are +-4 % untrimmed, 2.048
+ * needs VDD >= 2.5 V, 2.5 needs 2.95 V, 4.096 needs 4.55 V, and a source
+ * starts in 10 us with a high-frequency main clock (200 us with a
+ * 32.768 kHz one, Table 39-17; 2 us to change level), ~40-175 uA kept
+ * on. On the EA the levels are +-2 % (1.024, 2.048) and +-3 % (2.5,
+ * 4.096) to 85 C and need VDD >= 1.8 / 2.55 / 3.0 / 4.6 V (table 35-17),
+ * a source starts in 130 us typ., 180 max (tVREF_ST); its ADC chooses
+ * its reference in its own CTRLC, with its own encoding (adc.hpp's
+ * adc_refsel(): never refsel() below). A source turns on when its
+ * consumer needs it; ALWAYSON keeps it on.
  *
  * This is a vocabulary plus three setters, not a device: the enum Ref
  * names this silicon's levels (another target's vref header defines

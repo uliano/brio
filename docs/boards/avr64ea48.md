@@ -56,8 +56,13 @@ this one differs from the DA's on the same PCB in what is fitted.
   input (`board_pc_pe_jumpers`).
 - **Analog wires**: PD6 (the DAC's output) to PD1 and to PD7, and
   10 kOhm from PD6 to ground - one net of three pins, for the DAC-to-ADC
-  and DAC-to-AC loops ([../avrxt/dac.md](../avrxt/dac.md)). A suite
-  that drives PD1, PD6 or PD7 drives that net.
+  and DAC-to-AC loops ([../avrxt/dac.md](../avrxt/dac.md)), stated in
+  `avr_board.hpp` (`board_analog_net`, `board_dac_load_ohms`). The net
+  carries **96 nF** besides (its decay through the 10 k, 0.96 ms to 1/e:
+  `test_avr_analog` letter n) - the capacitor the PCB puts on VREFA: a
+  pad driving the net reaches VIH in 4.7 us and VIL in 3.3 us, the DAC's
+  buffer moves it in tens of microseconds, and a suite that drives PD1,
+  PD6 or PD7 drives that net and waits for it.
 - **Identity**: a label in the USERROW, written once over UPDI
   ([../avrxt/userrow.md](../avrxt/userrow.md)).
 - Manifest type `ea48`; the project is `avrxt/`
@@ -84,11 +89,11 @@ this one differs from the DA's on the same PCB in what is fitted.
   [../avrxt/port.md](../avrxt/port.md),
   [../avrxt/clkctrl.md](../avrxt/clkctrl.md)); `test_avr_timer`, two
   images on this board (the group axis, [../avrxt/README.md](../avrxt/README.md)),
-  141 of 141 (`test_avr_timer-1`) and 65 of 67 (`test_avr_timer-2`) - its
-  two reds are legs on the analog net above: letter c's OR after the
-  reconfiguration (LUT2's input on PD1) and letter x's TCA1 PORTD route
-  parked high (WO2 on PD6), red alike when one image carries both
-  groups, and 208 of 208 with the analog wires lifted; `test_avr_meter`
+  141 of 141 (`test_avr_timer-1`) and 67 of 67 (`test_avr_timer-2`,
+  twelve runs of twelve) - the two legs on the analog net wait for it or
+  leave it: letter c's second LUT input moves from PD1 to LUT2's IN2 on
+  PD2 (a pad took more than its 2 us read to charge the net), letter x
+  parks TCA1's PORTD route 30 us before it reads PD6; `test_avr_meter`
   38 of 38, `test_avr_rtc` 89 of 91 - its two reds
   are letter 9's, the 32 kHz crystal again ([../avrxt/tca.md](../avrxt/tca.md),
   [../avrxt/tcb.md](../avrxt/tcb.md), [../avrxt/ccl.md](../avrxt/ccl.md),
@@ -109,8 +114,13 @@ this one differs from the DA's on the same PCB in what is fitted.
   the partner: the partner's first capture after it reads stale (letter
   h's printed "arming to that edge" figure), every train after it is
   right.
+- `test_avr_analog` 158 of 158 in each of fifteen runs: the ADC, the DAC,
+  the VREF and the comparators' DACREFs against the analog net
+  ([../avrxt/adc.md](../avrxt/adc.md), [../avrxt/dac.md](../avrxt/dac.md),
+  [../avrxt/vref.md](../avrxt/vref.md)); `sampler` walking PD1, the die
+  temperature and VDD/10 under the PIT pace.
 - The timer suite's pads on this board: TCA0 on PORTD (PD0, PD2), TCA1
   on PORTB, PORTC (PC4..PC6, the jumpered pins - nothing drives their
   PE partners meanwhile), PORTA (PA4..PA6) and PORTD (PD4..PD6), the CCL
-  on LUT2's PD0/PD1/PD3, the DAC on PD6, EVOUT on PD2, PC7 and PA7 (the
+  on LUT2's PD0/PD2/PD3, the DAC on PD6, EVOUT on PD2, PC7 and PA7 (the
   100 nF there reads the held level 5 us after a change).

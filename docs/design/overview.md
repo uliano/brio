@@ -97,7 +97,8 @@ of theirs its contract may carry (SerialPort: a byte stream with an
 RX edge; BusMaster: a transaction that runs on interrupts and
 completes later; Ring: an index that fits the platform's atomic
 width; AnalogSampler: one result per interrupt with the selected
-input readable). With one target, that line is a warning: the second
+input readable, and a select that cannot mislabel a result - which an
+unbuffered input mux owes to its driver's select). With one target, that line is a warning: the second
 target is expected to force a synthesis - possibly a rewrite of the
 concept - and that is the plan, not a failure: the stability
 hierarchy puts util/ below the kernel's ideas for this reason. Two

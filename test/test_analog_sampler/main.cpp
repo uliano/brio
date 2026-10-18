@@ -1,6 +1,6 @@
 // Host tests for util/analog_sampler.hpp: the input walk, attribution by
 // the converter's reported input code, publication to the subscribers,
-// the software pace, unknown codes. Run with: ctest --preset host (or ctest --preset host -R <suite name>)
+// the software pace, unknown codes, the optional claim() and sample width. Run with: ctest --preset host (or ctest --preset host -R <suite name>)
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest.h>
@@ -156,4 +156,36 @@ TEST_CASE("software pace: one start per period") {
         run_scheduler();
     }
     CHECK(FakeAdc::starts == 3);
+}
+
+// ---- the optional verbs: claim(in) at init, a declared sample width ----------
+namespace {
+
+struct ClaimAdc : FakeAdc {
+    static inline std::vector<uint8_t> claimed;
+    template <uint8_t n>
+    static void claim(PinIn<n>) { claimed.push_back(n); }
+    static void claim(Internal i) { claimed.push_back(static_cast<uint8_t>(i)); }
+    static constexpr uint8_t sample_bits = 12;
+};
+
+using ClaimSampler = brio::AnalogSampler<ClaimAdc, HostPlatform, brio::Subscribers<SubA>,
+                                         PinIn<3>{}, Internal::vdd>;
+
+static_assert(brio::converter_sample_bits<FakeAdc>() == 16);    // declares none
+static_assert(brio::converter_sample_bits<ClaimAdc>() == 12);
+
+} // namespace
+
+TEST_CASE("a converter's claim() is called once per input, at init") {
+    ClaimAdc::claimed.clear();
+    while (ClaimSampler::queue.pop().has_value()) {}
+    ClaimSampler::init();
+    REQUIRE(ClaimAdc::claimed.size() == 2);
+    CHECK(ClaimAdc::claimed[0] == 3);
+    CHECK(ClaimAdc::claimed[1] == 0x44);
+    CHECK(ClaimAdc::mux == 3);                 // and the first input selected after
+    brio::post<ClaimSampler>(Sampled{10, ClaimAdc::selected()});
+    if (auto s = ClaimSampler::queue.pop()) ClaimSampler::dispatch(*s);
+    CHECK(ClaimAdc::claimed.size() == 2);      // not again on the walk
 }

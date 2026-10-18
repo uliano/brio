@@ -1,9 +1,12 @@
-# AC - the analog comparators (AVR DA/DB)
+# AC - the analog comparators (AVR DA/DB, AVR EA)
 
 Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B (AC
 chapter 32, electricals 39.17, PORTMUX 17.3.10, EVSYS 16 generators
 0x20-0x22, I/O multiplexing chapter 3), errata DS80000915F (no AC
-silicon erratum; the data sheet clarification 3.7.4 adds tDACREF).
+silicon erratum; the data sheet clarification 3.7.4 adds tDACREF);
+AVR64EA28/32/48 data sheet DS40002443A (chapter 30, I/O multiplexing
+chapter 3), errata DS80001048D (no AC silicon erratum; its
+clarification 3.8 fills table 35-27). One IP on the three dies.
 Complements: TB3211 "Getting Started with AC" (see
 [vendor/README.md](vendor/README.md)). Driver: `avrxt/ac.hpp` (`Ac<n>`,
 `Threshold`, `Window`); the reference is `Vref::ac` in `avrxt/vref.hpp`
@@ -34,9 +37,21 @@ flags are NOT updated with the clock stopped. The bench sides with
 comparator meanwhile is not measured, so the two sentences may yet
 both hold.
 
-Input pins, identical on the 48- and 64-pin parts of both families
+**The AVR EA's** comparators are two, AC0 and AC1, with a fifth
+positive pin (AINP4 = PC3) and a fourth negative (AINN3 = PC2) on both
+and on every package, the DACREF negative at code 4 (the header's), two
+power profiles (no third: `AcPower::low` refused), the window pairing
+ACn with ACn+1 only (no UPSEL2), and the CCL's AC input 2 carrying AC1
+(no AC2, [ccl.md](ccl.md)). Electricals (DS80001048D 3.8): offset +-10
+mV typ., +-30 max; hysteresis 10 / 20 / 30 mV typ.; response 50 ns
+rising, 150 ns falling at profile 0; CMRR 70 dB. Its DAC reaches the
+comparators only through PD6 (AINP3) - no internal route
+([dac.md](dac.md)).
+
+Input pins, identical on the 48- and 64-pin parts of the three dies
 (chapter 3; on 28/32-pin parts the PORTE entries do not exist, and
-on DB 28/32 neither does PD0 - see "Not covered yet"):
+on DB 28/32 neither does PD0 - see "Not covered yet"; the EA's AINP4
+and AINN3 are PC3 and PC2 on both its instances):
 
 | | AINP0 | AINP1 | AINP2 | AINP3 | AINN0 | AINN1 | AINN2 |
 |---|---|---|---|---|---|---|---|
@@ -135,6 +150,14 @@ EA's chapter in favour of 30.3.5 and table 13-3 (the AC runs in standby
 with its RUNSTDBY, its interrupt a wake source) against table 13-1,
 which leaves the AC off its standby list.
 
+On the **AVR64EA48** (rev B1, 5 V, `test_avr_timer`'s second image, the
+board's 96 nF net on PD6): the crossings sit at **999 mV up and 968 mV
+down** (1003 / 970 in one run of twelve), hysteresis 31..33 mV for the
+medium setting (the clarification's 20 typ.), the window, pin-vs-pin, INVERT, the OUT pins and the window
+senses as above; AC1 on the CCL's input 2 counts its three crossings.
+The comparators' DACREF0/1 as the ADC's negative input read their
+level within 11 mV once sampled for 64 us ([adc.md](adc.md)).
+
 ## Not covered yet
 
 Driver gaps:
@@ -146,6 +169,11 @@ Driver gaps:
   each comparator's `dacref`).
 
 Implemented but not bench-verified:
+
+- The AVR EA's AINP4 (PC3) and AINN3 (PC2): on its board both pins
+  carry the I2C pair's dual-mode wires to the partner board, and
+  nothing drives an analog level on them; a test there needs those
+  wires lifted or a level from the partner.
 
 - Response time and start-up (a TCB capturing the OUT event against
   a DAC step is swamped by the DAC's own slew - a faster edge is
