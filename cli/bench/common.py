@@ -383,7 +383,11 @@ def usb_programmers():
             e = {}
             for what in ("idVendor", "idProduct", "product", "serial"):
                 try:
-                    with open(os.path.join(base, dev, what), encoding="ascii") as f:
+                    # UTF-8, not ASCII: a probe in its vendor's own mode
+                    # names itself with marks (an MPLAB PICkit 4 reports
+                    # "MPLAB(R) PICkit 4" with the registered sign).
+                    with open(os.path.join(base, dev, what), encoding="utf-8",
+                              errors="replace") as f:
                         e[what] = f.read().strip()
                 except OSError:
                     pass
