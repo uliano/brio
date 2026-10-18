@@ -307,11 +307,22 @@ foreach(_app_path IN LISTS APP_SOURCES)
 
     if(CH32X035_BOARD IN_LIST _boards)
         if(CH32X035_BOARD IN_LIST CH32X035_SPLIT_BOARDS AND NOT _groups STREQUAL "")
+            # A line that names any upper-case key partitions those keys as it
+            # partitions the rest: its groups carry the '.' marker, so an image
+            # whose group names none carries none (util/testbench.hpp,
+            # upper_mask_of).
+            set(_upper_marker "")
+            foreach(_g IN LISTS _groups)
+                if(_g MATCHES "[A-Z]")
+                    set(_upper_marker ".")
+                endif()
+            endforeach()
+
             set(_i 0)
             foreach(_g IN LISTS _groups)
                 math(EXPR _i "${_i} + 1")
                 ch32x035_add_app(${_app}-${_i} ${_app_path})
-                target_compile_definitions(${_app}-${_i} PRIVATE "BRIO_TEST_LETTERS=\"${_g}\"")
+                target_compile_definitions(${_app}-${_i} PRIVATE "BRIO_TEST_LETTERS=\"${_g}${_upper_marker}\"")
             endforeach()
         else()
             ch32x035_add_app(${_app} ${_app_path})

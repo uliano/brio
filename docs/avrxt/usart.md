@@ -7,7 +7,9 @@ DS80000915F 2.16.1-2.16.3 and, for the DA parts, DS80000882C
 the DB's chapter register for register - PORTMUX 17.3.3-17.3.4,
 electricals 35.13) and DS80001048D 2.5.1 (the DB's 2.16.3, word for
 word; the DB's 2.16.1 and 2.16.2 have no EA twin, and brio applies both
-workarounds on every part). Three errata items shape the code:
+workarounds on every part - measured on the EA, below: they cost nothing
+there and the half of each this desk can probe holds). Three errata
+items shape the code:
 
 - **2.16.1 / 2.15.1, open drain**: with the TXD pin configured as an
   output it drives high whether ODME is set or not. The work around is
@@ -432,6 +434,30 @@ the listing's count above.
   (letter B takes its command and the ack through the task itself, then
   `set_baud()`s it to the blast's rate).
 
+On the AVR64EA48 at 20 MHz (rev B1, the same image; its loop is USART1
+on its DEFAULT route, TXD PC0, where TCA0's PORTC route puts WO0, and
+its top rate CLK_PER/8, 2.5 Mbaud - a frame 200 cycles at 1 Mbaud, 100
+at 2 Mbaud and 80 at 2.5):
+
+| op, plain binding | 115200 | 1 Mbaud | 2 Mbaud | 2.5 Mbaud |
+|---|---|---|---|---|
+| `uart.tx` 256 bytes, x | 1.00 | 1.00 | 1.02 | 1.03 |
+| `uart.tx` 4096 bytes, x | 0.99 | 1.00 | 1.00 | 1.01 |
+| `uart.rx` 16-byte burst, x | 1.00 | 1.10 | 2.15, one frame lost | 2.61 |
+| `uart.rx` 256-byte burst, x | 1.00 | 1.00 | 1.13, two lost | 1.70, two lost and one FERR |
+| receive entries for 256 bytes (counted) | 256 | 255 | 427 for 263 | 257 for 258 |
+| the edge after the last stop bit's end, cycles | +9 | +70 | +74 | +74 |
+
+The cycles are the DB's - the same core, the same handlers: the
+transmitter's DRE entry 95 cycles metered, a lone frame's receive entry
+107, the edge some 80 cycles after RXCIF. What moves is the frame they
+are weighed against: 2 Mbaud here is 100 cycles a frame (the DB's 120)
+and 2.5 Mbaud 80 (the DB's 3 Mbaud), so the receive path keeps the wire
+to 1 Mbaud and starves the consumer from 2 Mbaud, where the DB starved
+at 3. The metered binding outlasts a frame from 1 Mbaud (200 cycles a
+frame against the stamps' 206 an entry) and, from 2 Mbaud, hands out
+nothing, as on the DB at 2 and 3.
+
 ### The two boards
 
 - **The DUT discovers the link's topology, and never latches it.** The
@@ -809,6 +835,63 @@ OSCHF with the regulator asleep (313 us) and OSCHF with `PMODE = FULL`
   - from IDLE `RXSIF` never fires and the frame is received, at 115200
     and 460800.
 
+- **On the AVR64EA48** (rev B1, 5 V, CLK_PER 20 MHz from the board's
+  quartz). The EA has no USART on PORTE, so `test_avr_serial`'s link is
+  USART1 on ALT1 - TXD PC4, RXD PC5, XCK PC6, XDIR PC7 - which the board
+  jumpers onto PE0..PE3, the wires to the partner SAM C21 (one driver a
+  net: the PE pads stay inputs); `usart_peer` and `bench_avr` take the
+  same instance (bench_avr's loop USART1's DEFAULT route, PC0, where TCA0's
+  PORTC route puts WO0). Three images (the group axis), each ten runs of
+  ten: `test_avr_serial-1` (`z`) 163 of 163, `test_avr_serial-2` (`y`, j..q)
+  88 of 88 in all but one run (below), `test_avr_serial-3` (`y`, r..u and
+  B) 30 of 30, its `w` 6 of 6 and `x` 3 of 3.
+  - **Every route of USART0 and USART1 read back** (letter a): released,
+    USARTROUTEA reads NONE as 5 in USART0's three-bit field and 3 in
+    USART1's [4:3], and USARTROUTEB holds the console's USART2 ALT1 (code
+    1); USART0 ALT1 (TXD PA4), ALT3 (PD4) and ALT4 (PC1), USART1 DEFAULT
+    (PC0) and ALT1 (PC4) each read back their code with four frames looped
+    through their TXD pad, USART0 ALT2 (PA2/PA3, the I2C bus) and USART1
+    ALT2 (PD6/PD7, the analog net) read back routed with both directions
+    off, which claims no pin; every release reads NONE. USART0's DEFAULT
+    (PA0/PA1, the quartz) and USART2 (the console) are not routed.
+  - **The generator at 20 MHz** (letter f): the register's floor is now
+    1221 baud (BAUD 65520), the 16-sample ceiling 1.25 Mbaud and CLK2X's
+    2.5 Mbaud (BAUD 64), every start bit within a tick of the divisor and
+    every run 999 to 1002 thousandths of the rate asked; 921600 is BAUD 87,
+    0.22 % slow. Across the wire (letter k) every rate from 2400 to 1
+    Mbaud and 2 Mbaud in double speed echoes clean; the repeated blast
+    (letter B) arrives whole at 115200, 500 000, 1 000 000 and 1 250 000
+    baud. The SAM C21's 24 MHz crystal reads -109 ppm against this
+    board's quartz (letter x, at 4000 baud: BAUD 20000 here and 375.0 on
+    that peer's fractional generator, both exact).
+  - **SFDEN set in Active mode corrupts nothing here** (letter F, the EA's
+    own): 256 back-to-back frames on the loop, each read three bit times
+    after its RXCIF - inside the next frame's reception - arrive exact
+    with SFDEN set as without it, three runs and ten (in `z`). DS80001048D
+    has no twin of the DB's 2.16.2 and the silicon agrees; the verb pair
+    stays, costing nothing.
+  - **The transmitter pulls an INPUT pad low** (letter u): the one-wire
+    discipline - TXD an input under its pull-up, ODME set - reads its own
+    frames back, and the loop-back receiver hears the peer driving the
+    pad. Whether a TXD left an OUTPUT drives high under ODME (the DB's
+    2.16.1, absent from DS80001048D) is not measured: every way this desk
+    has of telling a driven high from a pull-up's drives a net the
+    partner or the analog net holds.
+  - **`tx_idle()` turns true 15 to 50 CLK_PER after the last stop bit**
+    (letter T; 81 with the PIT's tick handler inside the poll): within a
+    bit at 115200 (174), not at 460800, where a bit is 44 CLK_PER at 20 MHz
+    - the poll's cost is cycles and the bit is time, so the letter judges
+    "within one bit" where a bit outlasts the poll.
+  - **Auto-baud and the rest** read as on the DA/DB: the GENAUTO/LINAUTO
+    legs, the bit-banged operational range (FERR from -6 % and nothing up
+    to +6 %), a stretched cell surviving to +50 %, the synchronous roles,
+    RS-485's XDIR guard, IrDA both ways against the SAM C21's coder, and a
+    20 -> 10 -> 20 MHz rebase under the peer's count.
+  - **One extra 0xFF frame** at the synchronous client's 100 kHz leg
+    (letter q), in one run of 31: the client counted nine frames where the
+    peer clocked eight. Its source is not measured (a scope on the XCK
+    net would say whether an edge reached it before the peer's first).
+
 ### Two facts about the flags that shape half-duplex code
 
 - **RXCIF is raised half a bit BEFORE the sender's TXCIF** - at the
@@ -849,18 +932,15 @@ Driver gaps (not implemented):
 Implemented and compile-checked for all eight DA/DB packages and the
 three AVR64EA packages, but NOT bench-verified:
 
-- **every AVR EA route but the console's and USART1's ALT1** (USART0
-  ALT2..ALT4, USART1 default and ALT2): the console (USART2 ALT1) runs
-  every EA suite, and USART1 ALT1 carries `test_avr_sleep`'s link - its
-  TXD under LBME, transmitting, receiving and waking the device on a
-  start bit - but no other route has been driven; `test_avr_serial` on
-  the EA is a later step, with a route-by-route readback letter;
-- **the ODME and SFDEN workarounds on the AVR EA**: DS80001048D carries
-  no twin of the DB's 2.16.1/2.16.2; whether the transmitter still pulls
-  an INPUT pad low there is measured by a one-wire letter on the EA, and
-  whether an `RXDATA` read with `SFDEN` set in Active restarts a frame
-  there by a leg that reads it so - the verbs keep the DB's discipline
-  meanwhile, which costs nothing;
+- **the AVR EA's USART0 ALT2 and USART1 ALT2 with traffic**: read back
+  routed, never driven - their pads are this board's I2C bus and analog
+  net; USART0 DEFAULT and USART2's routes are not routed at all (the
+  quartz, the console);
+- **ODME with TXD left an output, on the AVR EA**: the DB's 2.16.1 has no
+  EA twin, the workaround stays (above); an external pull-down or a scope
+  on a free TXD pad would say whether the output drives high;
+- **the synchronous client's extra frame** (one run of 31, above): a
+  scope on the XCK net;
 
 - **`DBGCTRL.DBGRUN`**;
 - **IRCOM's fixed transmit pulse across the wire** (TXPLCTRL other than

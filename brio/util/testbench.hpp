@@ -141,18 +141,25 @@ constexpr uint16_t digit_mask_of(const char* selection) {
 /// groups line that partitions only the lower-case letters and the
 /// digits leaves each upper-case key in every image of the line; a line
 /// that names any upper-case key partitions them as it partitions the
-/// rest, and an upper-case key no group of it names is in no image.
+/// rest, and an upper-case key no group of it names is in no image. A
+/// group sees only its own keys, so the line's choice reaches it as a
+/// MARKER: the split build appends '.' to every group of a line that
+/// names any upper-case key (each project's CMakeLists.txt), and a
+/// selection carrying '.' names its upper-case keys explicitly, none
+/// included.
 constexpr uint32_t upper_mask_of(const char* selection) {
     if (selection == nullptr) {
         return 0x03FFFFFFUL;
     }
     uint32_t mask = 0;
+    bool marked = false;
     for (const char* p = selection; *p != '\0'; ++p) {
         if (*p >= 'A' && *p <= 'Z') {
             mask |= 1UL << (*p - 'A');
         }
+        marked = marked || *p == '.';
     }
-    return mask == 0 ? 0x03FFFFFFUL : mask;
+    return mask == 0 && !marked ? 0x03FFFFFFUL : mask;
 }
 
 /// Whether a selection carries `key`: a lower-case letter or a digit when
@@ -198,14 +205,15 @@ inline constexpr uint32_t test_uppers_carried = upper_mask_of(test_letters);
 }
 
 /// The registry's default size: a whole suite's 24, or the selection's
-/// count - the table is .data, and a 2 KB part counts every byte of it.
+/// count of keys (upper_mask_of()'s marker is none) - the table is .data,
+/// and a 2 KB part counts every byte of it.
 constexpr uint8_t test_letters_default_max() {
     if (test_letters == nullptr) {
         return 24;
     }
     uint8_t n = 0;
     for (const char* p = test_letters; *p != '\0'; ++p) {
-        ++n;
+        if (*p != '.') ++n;
     }
     return n;
 }

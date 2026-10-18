@@ -42,11 +42,11 @@
 //   ? help | i status and counters | 0 back to the dark client | 3 trace
 //
 // The banner reports the USERROW board label and whether THIS board's
-// 24 MHz crystal started: the peer's clock sets its CLK_PER/6 client
-// ceiling, so its quality is itself a bench fact and the DUT asks for it
-// with the `ident` command.
+// crystal (24 MHz on the DA/DB boards, 20 MHz on the AVR EA's) started:
+// the peer's clock sets its CLK_PER/6 client ceiling, so its quality is
+// itself a bench fact and the DUT asks for it with the `ident` command.
 
-// build: boards = db48,da48
+// build: boards = db48,da48,ea48
 // build: monitor_speed = 460800
 
 #include <avr/interrupt.h>
@@ -722,15 +722,19 @@ int main() {
     auto board = board_id();
     if (board.empty()) board = "?";
     print(console, crlf, "spi_peer - SPI instrument client (board ", board,
-          ", clk=", crystal_ok ? (has_xoschf ? "XTAL" : "EXTCLK") : "OSCHF", " 24 MHz, silicon rev ",
+          ", clk=", crystal_ok ? (has_xoschf ? "XTAL" : "EXTCLK") : "OSCHF",
+          SysClock::hz == 24'000'000u ? " 24 MHz, silicon rev " : " 20 MHz, silicon rev ",
           hex(SYSCFG.REVID), ", fw ", hex(firmware_version), ")", crlf);
     print(console, "client SPI0 ALT1: MOSI PE0, MISO PE1, SCK PE2, SS PE3; command mode "
                    "= SPI mode 0, MSb first", crlf);
     print(console, "DARK by default: MISO is driven only for one answer window, after a "
                    "frame that checked out", crlf);
     if (!crystal_ok) {
-        print(console, "WARNING: the 24 MHz crystal did NOT start - this client's "
-                       "CLK_PER/6 ceiling is OSCHF's, not the crystal's", crlf);
+        print(console, SysClock::hz == 24'000'000u
+                           ? "WARNING: the 24 MHz crystal did NOT start - this client's "
+                             "CLK_PER/6 ceiling is OSCHF's, not the crystal's"
+                           : "WARNING: the 20 MHz crystal did NOT start - this client's "
+                             "CLK_PER/6 ceiling is OSCHF's, not the crystal's", crlf);
     }
     (void)go_dark();
     last_byte_ms = Ticker::millis();

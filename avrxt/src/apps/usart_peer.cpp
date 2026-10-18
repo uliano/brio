@@ -38,10 +38,17 @@
 // once a frame has proven the wiring.
 //
 // TIME (usart_link.hpp, TIME IN THE PAYLOAD): the protocol's 24 MHz ticks
-// are this peer's CPU cycles, the core running the 24 MHz crystal
-// undivided (a static_assert below); the Report's span is read on TCB0 +
-// TCB1 cascaded at CLK_PER (avrxt/tcb.hpp's CascadedCounter), so its
-// counts are the same ticks with no conversion.
+// are this peer's CPU cycles on a 24 MHz board, the core running the
+// crystal undivided; the Report's span is read on TCB0 + TCB1 cascaded at
+// CLK_PER (avrxt/tcb.hpp's CascadedCounter), so its counts are the same
+// ticks with no conversion. On the AVR EA board the core runs its 20 MHz
+// quartz, and cycles_of_ticks()/ticks_of_cycles() convert both ways (a
+// glitch width in, the span and a bit-banged cell out).
+//
+// THE AVR EA: no USART reaches PORTE, so the link is USART1 on ALT1 - TXD
+// PC4, RXD PC5, XCK PC6 - which the AVR64EA48 board jumpers onto PE0..PE2
+// (avr_board.hpp's board_pc_pe_jumpers): the same nets; the PE pads stay
+// inputs.
 //
 // A DUT OF ANOTHER FAMILY is met where its silicon differs (the SAM C21's
 // SERCOM on this desk): an IRCOM receive finds the far coder's pulse sense
@@ -57,7 +64,7 @@
 // auto-baud and error-tolerance tests are measured against, so its
 // quality is itself a bench fact.
 
-// build: boards = db48,da48
+// build: boards = db48,da48,ea48
 // build: monitor_speed = 460800
 
 #include <avr/interrupt.h>
@@ -92,10 +99,27 @@ using link::Op;
 using Console = Uart<2, Route::alt1>;
 constexpr Console console;
 
-using Link = Usart<4>;
-using LinePin = Pin<'E', 0>;      // TXD pad: the bit-bang and break line
-using RxdPin = Pin<'E', 1>;       // RXD pad: DRIVE_RXD drives the DUT's TXD
-using XckPin = Pin<'E', 2>;
+/// THE LINK: the USART whose pads are the board-to-board wires PE0..PE3 -
+/// USART4 at its default route on the AVR DA/DB; on the AVR EA, which has
+/// no USART on PORTE, USART1 on ALT1 (TXD PC4, RXD PC5, XCK PC6), which
+/// its board jumpers onto PE0..PE3 (avr_board.hpp's board_pc_pe_jumpers):
+/// the same nets, each with one driver - the PE pads stay inputs.
+constexpr bool link_on_porte = usart_count >= 5;
+static_assert(link_on_porte || board_pc_pe_jumpers,
+              "the link reaches the board-to-board wires through the PC4..PC7 jumpers");
+constexpr uint8_t link_n = link_on_porte ? 4 : 1;
+constexpr UsartRoute link_route = link_on_porte ? UsartRoute::def : UsartRoute::alt1;
+constexpr char link_port = link_on_porte ? 'E' : 'C';
+constexpr uint8_t link_pin0 = link_on_porte ? 0 : 4;
+#if defined(USART4)
+#define LINK_PORT PORTE
+#else
+#define LINK_PORT PORTC
+#endif
+using Link = Usart<link_n>;
+using LinePin = Pin<link_port, link_pin0>;                               // TXD pad: the bit-bang and break line
+using RxdPin = Pin<link_port, static_cast<uint8_t>(link_pin0 + 1u)>;    // RXD pad: DRIVE_RXD drives the DUT's TXD
+using XckPin = Pin<link_port, static_cast<uint8_t>(link_pin0 + 2u)>;
 
 constexpr uint16_t firmware_version = 0x0105;   ///< see usart_link.hpp's Ident
 
@@ -178,8 +202,36 @@ uint16_t data_mask(uint8_t bits) {
 /// here is built from, never a magic number. On this peer a CPU cycle IS
 /// the protocol's 24 MHz tick (usart_link.hpp, TIME IN THE PAYLOAD): the
 /// core runs the crystal's 24 MHz undivided.
-static_assert(SysClock::hz == 24'000'000UL,
-              "usart_link.hpp counts time in 24 MHz ticks: this peer's CPU cycle must be one");
+static_assert(SysClock::hz == 24'000'000UL || SysClock::hz == 20'000'000UL,
+              "usart_link.hpp counts time in 24 MHz ticks: this peer converts from 24 or 20 MHz");
+
+/// The protocol's 24 MHz ticks against this core's cycles (usart_link.hpp,
+/// TIME IN THE PAYLOAD): one each on a 24 MHz board, five cycles for six
+/// ticks on the AVR EA board's 20 MHz.
+constexpr uint32_t cycles_of_ticks(uint32_t ticks) {
+    return SysClock::hz == 24'000'000UL
+               ? ticks
+               : static_cast<uint32_t>(static_cast<uint64_t>(ticks) * SysClock::hz / 24'000'000ULL);
+}
+constexpr uint32_t ticks_of_cycles(uint32_t cycles) {
+    return SysClock::hz == 24'000'000UL
+               ? cycles
+               : static_cast<uint32_t>(static_cast<uint64_t>(cycles) * 24'000'000ULL / SysClock::hz);
+}
+/// IRCOM's pulse lengths count CLK_PER cycles (TXPLCTRL, RXPLCTRL), so the
+/// payload's are 24 MHz ticks: converted here, but for the codes that are
+/// not lengths - 0 (3/16 of a bit, and no filter) and TXPL's 0xFF (the
+/// coder off).
+uint8_t pulse_of_ticks(uint8_t ticks, bool tx) {
+    if constexpr (SysClock::hz == 24'000'000UL) {
+        (void)tx;
+        return ticks;
+    } else {
+        if (ticks == 0u || (tx && ticks == 0xFFu)) return ticks;
+        return static_cast<uint8_t>(cycles_of_ticks(ticks));
+    }
+}
+
 uint32_t cycles_per_bit(uint32_t rate) {
     if (rate == 0) return 2500;
     return SysClock::hz / rate;
@@ -227,8 +279,8 @@ void turnaround_guard() {
 void line_talk() {
     turnaround_guard();
     if (shared()) Link::enable_rx(false);
-    PORTE.OUTSET = LinePin::mask;
-    PORTE.DIRSET = LinePin::mask;
+    LINK_PORT.OUTSET = LinePin::mask;
+    LINK_PORT.DIRSET = LinePin::mask;
     Link::enable_tx(true);
     Link::clear_txc();          // so line_listen waits for THIS burst
 }
@@ -238,8 +290,8 @@ void line_talk() {
 /// receive pad's once the crossed pair is proven, the shared wire's (PE0)
 /// once a shared line is.
 void hold_pads() {
-    volatile uint8_t& pe0 = pinctrl_of('E', 0);
-    volatile uint8_t& pe1 = pinctrl_of('E', 1);
+    volatile uint8_t& pe0 = pinctrl_of(link_port, link_pin0 + 0u);
+    volatile uint8_t& pe1 = pinctrl_of(link_port, link_pin0 + 1u);
     const bool shared_up = proven && shared();
     const bool rx_up = proven && !shared();
     if (shared_up) pe0 |= PORT_PULLUPEN_bm;
@@ -256,7 +308,7 @@ void line_listen(bool wait = true) {
     if (wait) (void)Link::wait_line_idle(200'000u);
     if (!tx_idle_on()) {
         Link::enable_tx(false);
-        PORTE.DIRCLR = LinePin::mask;
+        LINK_PORT.DIRCLR = LinePin::mask;
         hold_pads();
     }
     if (shared()) {
@@ -272,13 +324,13 @@ void line_listen(bool wait = true) {
 /// the transmitter is off, PE0 an input and NEITHER data pad pulled
 /// (hold_pads): the peer is dark.
 bool command_mode() {
-    set_inven('E', 2, false);
-    set_inven('E', 1, false);
-    const bool ok = Link::init({.route = UsartRoute::def,
+    set_inven(link_port, link_pin0 + 2u, false);
+    set_inven(link_port, link_pin0 + 1u, false);
+    const bool ok = Link::init({.route = link_route,
                                 .baud = usart_baud_reg(SysClock::hz, link::command_baud),
                                 .tx = tx_idle_on(),
                                 .loop_back = shared()});
-    if (shared() || !proven) PORTE.DIRCLR = LinePin::mask;
+    if (shared() || !proven) LINK_PORT.DIRCLR = LinePin::mask;
     // Once proven, the idle level of an input that nobody drives is the
     // pull-up's: a floating RXD invents frames. Before that, the frames
     // it invents are the decoder's to absorb - a pull here would load the
@@ -300,7 +352,7 @@ bool apply_cfg(const link::Cfg& c) {
     // capability this USART has not got, refused like any other.
     if (c.stop != 1u && c.stop != 2u) return false;
     UsartConfig u{};
-    u.route = UsartRoute::def;
+    u.route = link_route;
     switch (c.mode) {
         case link::Mode::sync_client:
         case link::Mode::sync_host: u.mode = UsartMode::sync; break;
@@ -313,8 +365,8 @@ bool apply_cfg(const link::Cfg& c) {
     u.rx_mode = (c.flags & link::flag_clk2x) ? UsartRxMode::clk2x : UsartRxMode::normal;
     u.sync_client = c.mode == link::Mode::sync_client;
     u.multiprocessor = (c.flags & link::flag_mpcm) != 0;
-    u.tx_pulse = c.txpl;
-    u.rx_pulse = c.rxpl;
+    u.tx_pulse = pulse_of_ticks(c.txpl, true);
+    u.rx_pulse = pulse_of_ticks(c.rxpl, false);
     if (shared()) {
         u.loop_back = true;      // the receiver listens to the TXD pad
         u.tx = false;            // the wire is taken only to answer
@@ -326,8 +378,8 @@ bool apply_cfg(const link::Cfg& c) {
         else return false;
     }
     if (!Link::init(u)) return false;
-    set_inven('E', 2, (c.flags & link::flag_invert_xck) != 0);
-    if (shared()) PORTE.DIRCLR = LinePin::mask;
+    set_inven(link_port, link_pin0 + 2u, (c.flags & link::flag_invert_xck) != 0);
+    if (shared()) LINK_PORT.DIRCLR = LinePin::mask;
     hold_pads();
     Link::flush_rx();
     return true;
@@ -381,7 +433,7 @@ uint16_t cell_cycles(uint32_t nominal, int8_t cell, int8_t pct, int8_t idx) {
     return static_cast<uint16_t>(v);
 }
 
-/// One 8N1 frame, LSB first, on `bm` of PORTE. Interrupts off: this is
+/// One 8N1 frame, LSB first, on `bm` of LINK_PORT. Interrupts off: this is
 /// the only place in the peer where a cycle is a unit of measurement.
 /// The ten cell widths are worked out BEFORE the timed section -
 /// cell_cycles() multiplies and divides 32-bit values, which inside the
@@ -392,14 +444,14 @@ void bb_frame(uint8_t bm, uint32_t nominal, uint8_t value, int8_t cell, int8_t p
     for (int8_t i = 0; i < 10; ++i) w[i] = cell_cycles(nominal, cell, pct, i);
     const uint8_t saved = SREG;
     cli();
-    PORTE.OUTCLR = bm;                                    // start bit
+    LINK_PORT.OUTCLR = bm;                                    // start bit
     bb_wait(w[0]);
     for (uint8_t i = 0; i < 8; ++i) {
-        if (value & (1u << i)) PORTE.OUTSET = bm;
-        else PORTE.OUTCLR = bm;
+        if (value & (1u << i)) LINK_PORT.OUTSET = bm;
+        else LINK_PORT.OUTCLR = bm;
         bb_wait(w[i + 1]);
     }
-    PORTE.OUTSET = bm;                                    // stop bit
+    LINK_PORT.OUTSET = bm;                                    // stop bit
     bb_wait(w[9]);
     SREG = saved;
 }
@@ -416,10 +468,10 @@ void bb_glitch(uint8_t bm, uint16_t pulses, uint16_t width, uint8_t gap_us) {
     for (uint16_t i = 0; i < pulses; ++i) {
         const uint8_t saved = SREG;
         cli();
-        PORTE.OUTCLR = bm;
+        LINK_PORT.OUTCLR = bm;
         if (fine) _delay_loop_1(loops);
         else delay_cycles(width - 8u);
-        PORTE.OUTSET = bm;
+        LINK_PORT.OUTSET = bm;
         SREG = saved;
         delay_us_runtime(cycles_per_us(SysClock::hz), gap_us ? gap_us : 1u);
     }
@@ -427,10 +479,10 @@ void bb_glitch(uint8_t bm, uint16_t pulses, uint16_t width, uint8_t gap_us) {
 
 /// Take one PORTE pin away from the USART and hold it idle high.
 void claim_line(uint8_t bm) {
-    PORTE.OUTSET = bm;
+    LINK_PORT.OUTSET = bm;
     Link::release();
-    PORTE.OUTSET = bm;
-    PORTE.DIRSET = bm;
+    LINK_PORT.OUTSET = bm;
+    LINK_PORT.DIRSET = bm;
     delay_us(clock, 200);
 }
 
@@ -451,10 +503,10 @@ void claim_line(uint8_t bm) {
 void match_ircom_sense() {
     if (shared()) return;
     for (uint16_t k = 0; k < 300u; ++k) {          // 300 us of idle line
-        if ((PORTE.IN & RxdPin::mask) != 0u) return;   // idles high: the sense matches
+        if ((LINK_PORT.IN & RxdPin::mask) != 0u) return;   // idles high: the sense matches
         delay_us(clock, 1);
     }
-    set_inven('E', 1, true);
+    set_inven(link_port, link_pin0 + 1u, true);
     delay_us(clock, 20);
     Link::flush_rx();
 }
@@ -520,7 +572,7 @@ template <UsartBits B>
     r.ferr = ferr;
     r.perr = perr;
     r.ovf = ovf;
-    if (n >= 2) r.span = Span::captured() - first;
+    if (n >= 2) r.span = ticks_of_cycles(Span::captured() - first);
     line_listen();
     return r;
 }
@@ -608,12 +660,12 @@ link::Report run_break(const link::Params& a) {
     const uint32_t bit_cyc = cycles_per_bit(a.cfg.rate);
     line_talk();
     Link::enable_tx(false);
-    PORTE.OUTSET = LinePin::mask;
-    PORTE.DIRSET = LinePin::mask;
+    LINK_PORT.OUTSET = LinePin::mask;
+    LINK_PORT.DIRSET = LinePin::mask;
     delay_cycles(bit_cyc * 2u);
-    PORTE.OUTCLR = LinePin::mask;
+    LINK_PORT.OUTCLR = LinePin::mask;
     delay_cycles(bit_cyc * a.count);
-    PORTE.OUTSET = LinePin::mask;
+    LINK_PORT.OUTSET = LinePin::mask;
     delay_cycles(bit_cyc * 2u);
     Link::enable_tx(true);
     line_listen(/*wait=*/false);        // nothing was transmitted, only a level held
@@ -631,12 +683,12 @@ link::Report run_autobaud_tx(const link::Params& a) {
     const uint32_t bit_cyc = cycles_per_bit(a.cfg.rate);
     line_talk();
     Link::enable_tx(false);
-    PORTE.OUTSET = LinePin::mask;
-    PORTE.DIRSET = LinePin::mask;
+    LINK_PORT.OUTSET = LinePin::mask;
+    LINK_PORT.DIRSET = LinePin::mask;
     delay_cycles(bit_cyc * 4u);
-    PORTE.OUTCLR = LinePin::mask;
+    LINK_PORT.OUTCLR = LinePin::mask;
     delay_cycles(bit_cyc * (a.aux16 ? a.aux16 : 16u));
-    PORTE.OUTSET = LinePin::mask;
+    LINK_PORT.OUTSET = LinePin::mask;
     delay_cycles(bit_cyc * 2u);
     Link::enable_tx(true);
     (void)Link::send(a.value, 200'000u);                 // the sync field
@@ -662,9 +714,9 @@ link::Report run_bitbang(const link::Params& a, uint8_t bm) {
         // A break field ahead of the frames: the auto-baud probes need
         // the break and the (distorted) sync character to come from the
         // same cycle-counted generator, with no command frame between.
-        PORTE.OUTCLR = bm;
+        LINK_PORT.OUTCLR = bm;
         delay_cycles(nominal * a.aux16);
-        PORTE.OUTSET = bm;
+        LINK_PORT.OUTSET = bm;
         delay_cycles(nominal * 2u);
     }
     for (uint16_t i = 0; i < a.count; ++i) {
@@ -673,7 +725,7 @@ link::Report run_bitbang(const link::Params& a, uint8_t bm) {
         r.sum = static_cast<uint16_t>(r.sum + a.value);
         ++r.count;
     }
-    r.aux16 = static_cast<uint16_t>(nominal);
+    r.aux16 = static_cast<uint16_t>(ticks_of_cycles(nominal));
     return r;
 }
 
@@ -681,7 +733,7 @@ link::Report run_glitch(const link::Params& a, uint8_t bm) {
     link::Report r{};
     claim_line(bm);
     settle();
-    bb_glitch(bm, a.count, a.aux16, a.aux8);
+    bb_glitch(bm, a.count, static_cast<uint16_t>(cycles_of_ticks(a.aux16)), a.aux8);
     r.count = a.count;
     r.aux16 = a.aux16;
     return r;
@@ -704,14 +756,14 @@ link::Report run_hold_pad(const link::Params& a) {
         default: r.flags |= link::report_cfg_failed; return r;
     }
     Link::release();
-    if (a.aux8 != 0) PORTE.OUTSET = bm; else PORTE.OUTCLR = bm;
-    PORTE.DIRSET = bm;
+    if (a.aux8 != 0) LINK_PORT.OUTSET = bm; else LINK_PORT.OUTCLR = bm;
+    LINK_PORT.DIRSET = bm;
     const uint32_t t0 = Ticker::millis();
     while (Ticker::millis() - t0 < a.ms) {
     }
-    r.aux16 = (PORTE.IN & bm) != 0 ? 1u : 0u;
-    PORTE.DIRCLR = bm;
-    PORTE.OUTCLR = bm;
+    r.aux16 = (LINK_PORT.IN & bm) != 0 ? 1u : 0u;
+    LINK_PORT.DIRCLR = bm;
+    LINK_PORT.OUTCLR = bm;
     r.count = 1;
     return r;
 }
@@ -722,7 +774,7 @@ link::Report run_hold_pad(const link::Params& a) {
 link::Report run_onewire(const link::Params& a) {
     link::Report r{};
     UsartConfig u{};
-    u.route = UsartRoute::def;
+    u.route = link_route;
     u.baud = usart_baud_reg(SysClock::hz, a.cfg.rate ? a.cfg.rate : link::command_baud);
     u.loop_back = true;
     u.open_drain = true;
@@ -763,7 +815,7 @@ link::Report run_onewire(const link::Params& a) {
 link::Report run_collide(const link::Params& a) {
     link::Report r{};
     UsartConfig u{};
-    u.route = UsartRoute::def;
+    u.route = link_route;
     u.baud = usart_baud_reg(SysClock::hz, a.cfg.rate ? a.cfg.rate : link::command_baud);
     u.loop_back = true;
     u.open_drain = true;
@@ -945,33 +997,39 @@ void status() {
 constexpr uint16_t probe_ms = 6000;
 constexpr uint16_t probe_half_ms[4] = {250, 125, 62, 31};
 
+/// The link's four pads as one nibble of its port.
+constexpr uint8_t probe_mask = static_cast<uint8_t>(0x0Fu << link_pin0);
+
 void probe_drive() {
-    PORTE.DIRSET = 0x0Fu;
+    LINK_PORT.DIRSET = probe_mask;
     for (uint16_t t = 0; t < probe_ms; ++t) {
         uint8_t out = 0;
         for (uint8_t i = 0; i < 4; ++i) {
             if ((t / probe_half_ms[i]) & 1u) out = static_cast<uint8_t>(out | (1u << i));
         }
-        PORTE.OUT = static_cast<uint8_t>((PORTE.OUT & 0xF0u) | out);
+        LINK_PORT.OUT = static_cast<uint8_t>((LINK_PORT.OUT & static_cast<uint8_t>(~probe_mask)) |
+                                             static_cast<uint8_t>(out << link_pin0));
         delay_us(clock, 1000);
     }
-    PORTE.DIRCLR = 0x0Fu;
+    LINK_PORT.DIRCLR = probe_mask;
 }
 
 void probe_listen(uint16_t* edges) {
-    PORTE.DIRCLR = 0x0Fu;
-    for (uint8_t i = 0; i < 4; ++i) pinctrl_of('E', i) |= PORT_PULLUPEN_bm;
-    uint8_t prev = static_cast<uint8_t>(PORTE.IN & 0x0Fu);
+    LINK_PORT.DIRCLR = probe_mask;
+    for (uint8_t i = 0; i < 4; ++i) pinctrl_of(link_port, link_pin0 + i) |= PORT_PULLUPEN_bm;
+    uint8_t prev = static_cast<uint8_t>((LINK_PORT.IN & probe_mask) >> link_pin0);
     for (uint16_t t = 0; t < probe_ms; ++t) {
         delay_us(clock, 1000);
-        const uint8_t now = static_cast<uint8_t>(PORTE.IN & 0x0Fu);
+        const uint8_t now = static_cast<uint8_t>((LINK_PORT.IN & probe_mask) >> link_pin0);
         const uint8_t ch = static_cast<uint8_t>(now ^ prev);
         for (uint8_t i = 0; i < 4; ++i) {
             if (ch & (1u << i)) ++edges[i];
         }
         prev = now;
     }
-    for (uint8_t i = 0; i < 4; ++i) pinctrl_of('E', i) &= static_cast<uint8_t>(~PORT_PULLUPEN_bm);
+    for (uint8_t i = 0; i < 4; ++i) {
+        pinctrl_of(link_port, link_pin0 + i) &= static_cast<uint8_t>(~PORT_PULLUPEN_bm);
+    }
 }
 
 /// Which driven pin an edge count names, or -1 when the pin heard nothing.
@@ -992,7 +1050,8 @@ void wire_probe() {
     probe_listen(edges);
     for (uint8_t i = 0; i < 4; ++i) {
         const int8_t src = probe_source(edges[i]);
-        print(console, "  here PE", i, ": ", edges[i], " edges -> ");
+        print(console, link_on_porte ? "  here PE" : "  here PC",
+              static_cast<uint8_t>(i + link_pin0), ": ", edges[i], " edges -> ");
         if (src >= 0) print(console, "the DUT's PE", static_cast<uint8_t>(src), crlf);
         else if (src == -1) print(console, "nothing", crlf);
         else print(console, "several or noise", crlf);
@@ -1002,7 +1061,7 @@ void wire_probe() {
 
 void one_wire_standby_mode() {
     UsartConfig u{};
-    u.route = UsartRoute::def;
+    u.route = link_route;
     u.baud = usart_baud_reg(SysClock::hz, link::command_baud);
     u.loop_back = true;
     u.open_drain = true;
@@ -1030,15 +1089,21 @@ int main() {
     auto board = board_id();
     if (board.empty()) board = "?";
     print(console, crlf, "usart_peer - USART instrument peer (board ", board,
-          ", clk=", crystal_ok ? (has_xoschf ? "XTAL" : "EXTCLK") : "OSCHF", " 24 MHz, silicon rev ",
+          ", clk=", crystal_ok ? (has_xoschf ? "XTAL" : "EXTCLK") : "OSCHF",
+          SysClock::hz == 24'000'000UL ? " 24 MHz, silicon rev " : " 20 MHz, silicon rev ",
           hex(SYSCFG.REVID), ", fw ", hex(firmware_version), ")", crlf);
-    print(console, "link USART4 default: TXD PE0, RXD PE1, XCK PE2; command mode 8N1 @ ",
+    print(console, link_on_porte ? "link USART4 default: TXD PE0, RXD PE1, XCK PE2; command mode 8N1 @ "
+                                 : "link USART1 ALT1: TXD PC4, RXD PC5, XCK PC6 (jumpered onto "
+                                   "PE0..PE2); command mode 8N1 @ ",
           link::command_baud, crlf);
     print(console, "waiting for the DUT: the wiring (crossed pair or shared PE0 line) is "
                    "found by alternating", crlf);
     if (!crystal_ok) {
-        print(console, "WARNING: the 24 MHz crystal did NOT start - every rate on this "
-                       "board comes from OSCHF", crlf);
+        print(console, SysClock::hz == 24'000'000UL
+                           ? "WARNING: the 24 MHz crystal did NOT start - every rate on this "
+                             "board comes from OSCHF"
+                           : "WARNING: the 20 MHz crystal did NOT start - every rate on this "
+                             "board comes from OSCHF", crlf);
     }
     (void)command_mode();
     last_frame_ms = Ticker::millis();

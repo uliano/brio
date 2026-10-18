@@ -157,15 +157,16 @@ of ten. PC6/PC7 drive the jumpered nets to PE2/PE3 with no change to any
 verdict.
 
 **On the AVR EA ONE edge of any pin wakes POWER-DOWN** (`test_avr_sleep`
-p and q on the AVR64EA48, ten runs of ten; DS40002443A 18.3.3.1). Eight
+p and q on the AVR64EA48, ten runs of ten; DS40002443A 18.3.3.1). Six
 pads driven by the PIT's 32 Hz divider through the event system while
-every clock but the 32 kHz one is stopped - EVOUT on PD2, PD7, PA7 and
-PC7, a LUT's asynchronous output on PA6, PD3 and PD6 - each sense their
-own drive, and PE3 senses PC7's on the jumpered net: a FALLING sense
-alone and a RISING sense alone each end one power-down sleep with the
-pad's own interrupt, a 1 s PIT backstop never firing. Five of them (PD7,
-PA7, PC7, PE3, PD3) sit where the DA/DB's pins are only partially
-asynchronous. The partner's edges add three: a start bit's single
+every clock but the 32 kHz one is stopped - EVOUT on PD2, PA7 and PC7, a
+LUT's asynchronous output on PA6 and PD3 - each sense their own drive,
+and PE3 senses PC7's on the jumpered net: a FALLING sense alone and a
+RISING sense alone each end one power-down sleep with the pad's own
+interrupt, a 1 s PIT backstop never firing. Four of them (PA7, PC7, PE3,
+PD3) sit where the DA/DB's pins are only partially asynchronous. PD6 and
+PD7 (EVOUTD's and LUT2's ALT1 pads) are the board's analog net and are
+not driven. The partner's edges add three: a start bit's single
 falling edge on PE0 and on PC4, and the stimulus on PC6, whose wake out
 of power-down costs the crystal's restart as PE2's does
 ([platform.md](platform.md)).

@@ -107,7 +107,7 @@ this one differs from the DA's on the same PCB in what is fitted.
   ALT1 through the PC4-PE0 jumper, the stimulus and the echo on PE2/PE3,
   the I2C pair on PA2/PA3. No regulator start-up at any wake; OSCHF
   restarts in 9.2 us, this board's 20 MHz quartz in 0.61..0.67 ms from
-  cold; one edge of any of twelve pins wakes the chip from power-down
+  cold; one edge of any of ten pins wakes the chip from power-down
   ([../avrxt/platform.md](../avrxt/platform.md),
   [../avrxt/port.md](../avrxt/port.md), [../avrxt/usart.md](../avrxt/usart.md)).
   The BOD runs continuously asleep by this board's BODCFG, its current in
@@ -115,6 +115,25 @@ this one differs from the DA's on the same PCB in what is fitted.
   the partner: the partner's first capture after it reads stale (letter
   h's printed "arming to that edge" figure), every train after it is
   right.
+- The buses against the SAM C21 board, every image ten runs of ten
+  unless named: `test_avr_twi` 226 of 226 alone (`test_avr_twi-1`) and
+  136 of 136 against the partner's `twi_peer` (`test_avr_twi-2`), and the
+  partner's `test_samc_i2c` 72 of 72 against this board's `twi_peer`
+  ([../avrxt/twi.md](../avrxt/twi.md)); `test_avr_spi` 180 of 180 alone
+  (`test_avr_spi-1`), 51 and 20 of 51 and 20 against the partner's
+  `spi_peer` (`test_avr_spi-2`, `y` and `z`) and 54 of 54
+  (`test_avr_spi-3`), the partner's `test_samc_spi` 138 of 138 against
+  this board's `spi_peer` ([../avrxt/spi.md](../avrxt/spi.md));
+  `test_avr_serial` 163 of 163 alone (`test_avr_serial-1`), 88 of 88
+  against the partner's `usart_peer` in nine runs of ten
+  (`test_avr_serial-2`; the one red an extra frame at letter q's 100 kHz
+  client, one of letter q's thirty-one runs,
+  [../avrxt/usart.md](../avrxt/usart.md)) and 30 of 30
+  (`test_avr_serial-3`), the partner's `test_samc_uart` 190 of 190
+  against this board's `usart_peer` in twelve runs of twelve
+  ([../samc21/sercom.md](../samc21/sercom.md)). The partner's crystal
+  reads 108..111 ppm slow against this board's 20 MHz quartz
+  (`test_avr_serial` x).
 - `test_avr_analog` 158 of 158 in each of fifteen runs: the ADC, the DAC,
   the VREF and the comparators' DACREFs against the analog net
   ([../avrxt/adc.md](../avrxt/adc.md), [../avrxt/dac.md](../avrxt/dac.md),

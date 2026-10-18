@@ -1604,7 +1604,8 @@ void tk_ccl_extras() {
 // XCK on PC6); the software event on a channel a
 // level holds HIGH (16.3.2.6: it inverts for one CLK_PER - a low pulse,
 // whose end is a rising edge); EVOUT's ALT1 positions PA7, PC7 and PD7
-// following PC1's level.
+// following PC1's level - PD7 only on a board that leaves it a free pad
+// (avr_board.hpp's board_analog_net).
 void te_evsys() {
     print(serial, "e EVSYS: SPI SCK and USART XCK generators, the software event on a "
                   "held level, EVOUT ALT1 on PA7/PC7/PD7", crlf);
@@ -1681,20 +1682,40 @@ void te_evsys() {
             on_high == 3);
     verdict("and on an idle channel a high pulse each (3)", on_low == 3);
 
-    // 4. EVOUT ALT1: PA7, PC7 and PD7 follow PC1's level on channel 3.
-    EvOut<Pin<'A', 7>>::listen(ChC{});
-    EvOut<Pin<'C', 7>>::listen(ChC{});
-    EvOut<Pin<'D', 7>>::listen(ChC{});
-    DirPin::set(); delay_us(clock, 5);
-    const bool all_high = Pin<'A', 7>::read() && Pin<'C', 7>::read() && Pin<'D', 7>::read();
-    DirPin::clear(); delay_us(clock, 5);
-    const bool all_low = !Pin<'A', 7>::read() && !Pin<'C', 7>::read() && !Pin<'D', 7>::read();
-    EvOut<Pin<'A', 7>>::unlisten();
-    EvOut<Pin<'C', 7>>::unlisten();
-    EvOut<Pin<'D', 7>>::unlisten();
-    print(serial, "  EVOUT ALT1 on PA7/PC7/PD7: level high read ", all_high ? "high" : "NOT high",
-          ", low read ", all_low ? "low" : "NOT low", crlf);
-    verdict("EVOUTA/C/D at their ALT1 positions (Px7) follow the channel", all_high && all_low);
+    // 4. EVOUT ALT1: PA7, PC7 and PD7 follow PC1's level on channel 3 -
+    //    PD7 only where it is a free pad: on a board whose PD7 is on the
+    //    analog net (avr_board.hpp's board_analog_net: VREFA's 100 nF and
+    //    the DAC's resistor) no digital output drives it, and EVOUTD ALT1
+    //    has no other position, so PA7 and PC7 alone are read there.
+    if constexpr (board_analog_net) {
+        static_assert(board_pa7_free, "letter e reads EVOUTA ALT1 on PA7");
+        EvOut<Pin<'A', 7>>::listen(ChC{});
+        EvOut<Pin<'C', 7>>::listen(ChC{});
+        DirPin::set(); delay_us(clock, 5);
+        const bool all_high = Pin<'A', 7>::read() && Pin<'C', 7>::read();
+        DirPin::clear(); delay_us(clock, 5);
+        const bool all_low = !Pin<'A', 7>::read() && !Pin<'C', 7>::read();
+        EvOut<Pin<'A', 7>>::unlisten();
+        EvOut<Pin<'C', 7>>::unlisten();
+        print(serial, "  EVOUT ALT1 on PA7/PC7 (PD7 on the analog net, not driven): level high "
+                      "read ", all_high ? "high" : "NOT high", ", low read ",
+              all_low ? "low" : "NOT low", crlf);
+        verdict("EVOUTA/C at their ALT1 positions (Px7) follow the channel", all_high && all_low);
+    } else {
+        EvOut<Pin<'A', 7>>::listen(ChC{});
+        EvOut<Pin<'C', 7>>::listen(ChC{});
+        EvOut<Pin<'D', 7>>::listen(ChC{});
+        DirPin::set(); delay_us(clock, 5);
+        const bool all_high = Pin<'A', 7>::read() && Pin<'C', 7>::read() && Pin<'D', 7>::read();
+        DirPin::clear(); delay_us(clock, 5);
+        const bool all_low = !Pin<'A', 7>::read() && !Pin<'C', 7>::read() && !Pin<'D', 7>::read();
+        EvOut<Pin<'A', 7>>::unlisten();
+        EvOut<Pin<'C', 7>>::unlisten();
+        EvOut<Pin<'D', 7>>::unlisten();
+        print(serial, "  EVOUT ALT1 on PA7/PC7/PD7: level high read ", all_high ? "high" : "NOT high",
+              ", low read ", all_low ? "low" : "NOT low", crlf);
+        verdict("EVOUTA/C/D at their ALT1 positions (Px7) follow the channel", all_high && all_low);
+    }
     quiesce();
 }
 

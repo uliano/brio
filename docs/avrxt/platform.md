@@ -712,11 +712,11 @@ crystal restarting 49, twenty ticks of 0.62 ms. Letter `o`: TCA0 counts
 awake, 633 without (the code around the sleep), and AC0's CMP interrupt
 ends a standby with its `RUNSTDBY` and never without - table 13-1 leaves
 the AC off its standby list, 30.3.5 and table 13-3 are right. Letter `p`
-wakes the device from power-down on ONE edge of each of eight pads - EVOUT
-on PD2, PD7, PA7 and PC7, a LUT's asynchronous output on PA6, PD3 and
-PD6, and PE3 on PC7's net, each sensing its own drive, a falling sense
-alone and a rising sense alone - five of them pins the DA/DB sense only
-partially asynchronously ([port.md](port.md)); a LUT's output and EVOUT
+wakes the device from power-down on ONE edge of each of six pads - EVOUT
+on PD2, PA7 and PC7, a LUT's asynchronous output on PA6 and PD3, and PE3
+on PC7's net, each sensing its own drive, a falling sense alone and a
+rising sense alone - four of them pins the DA/DB sense only partially
+asynchronously ([port.md](port.md)); a LUT's output and EVOUT
 both drive their pads through power-down.
 
 ### Wake-up latency, measured from the partner board

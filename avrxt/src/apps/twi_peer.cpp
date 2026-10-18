@@ -49,11 +49,12 @@
 //   ? help | i status and counters | 0 back to command mode | 3 trace
 //
 // The banner reports the USERROW board label and whether THIS board's
-// 24 MHz crystal started: the peer's CLK_PER decides how fast its polled
-// client can turn a byte around before it starts stretching, so its
-// clock is itself a bench fact and the DUT asks for it with `ident`.
+// crystal (24 MHz on the DA/DB boards, 20 MHz on the AVR EA's) started:
+// the peer's CLK_PER decides how fast its polled client can turn a byte
+// around before it starts stretching, so its clock is itself a bench fact
+// and the DUT asks for it with `ident`.
 
-// build: boards = db48,da48
+// build: boards = db48,da48,ea48
 // build: monitor_speed = 460800
 
 #include <avr/interrupt.h>
@@ -628,14 +629,18 @@ int main() {
     auto board = board_id();
     if (board.empty()) board = "?";
     print(console, crlf, "twi_peer - TWI instrument client (board ", board,
-          ", clk=", crystal_ok ? (has_xoschf ? "XTAL" : "EXTCLK") : "OSCHF", " 24 MHz, silicon rev ",
+          ", clk=", crystal_ok ? (has_xoschf ? "XTAL" : "EXTCLK") : "OSCHF",
+          SysClock::hz == 24'000'000u ? " 24 MHz, silicon rev " : " 20 MHz, silicon rev ",
           hex(SYSCFG.REVID), ", fw ", hex(firmware_version), ")", crlf);
     print(console, "client TWI0 DEFAULT: SDA PA2, SCL PA3; command address ",
           hex(twilink::command_addr), " exactly - no general call, no mask, no PMEN, "
           "no PIEN", crlf);
     if (!crystal_ok) {
-        print(console, "WARNING: the 24 MHz crystal did NOT start - this client turns a "
-                       "byte around at OSCHF's rate, not the crystal's", crlf);
+        print(console, SysClock::hz == 24'000'000u
+                           ? "WARNING: the 24 MHz crystal did NOT start - this client turns a "
+                             "byte around at OSCHF's rate, not the crystal's"
+                           : "WARNING: the 20 MHz crystal did NOT start - this client turns a "
+                             "byte around at OSCHF's rate, not the crystal's", crlf);
     }
     (void)go_command();
     help();

@@ -1,4 +1,4 @@
-// test_avr_spi - the SPI test SUITE for the AVR DA/DB target.
+// test_avr_spi - the SPI test SUITE for the AVR DA/DB/EA target.
 //
 // SINGLE BOARD (a..j and t, `z`): route handling and teardown (including
 // the pinless NONE route and the two refusals the package and the errata
@@ -85,6 +85,17 @@
 //
 // Commands: ? for the menu, z = the single-board half, y = the two-board
 // half.
+//
+// THE AVR EA (DS40002443A ch. 26, the DB's SPI word for word; SPI0 alone,
+// its route field three bits wide, 17.3.5): the same four pins, PE0..PE3
+// on SPI0 ALT1 - the AVR64EA48 board's PC4..PC7 are jumpered onto them and
+// stay inputs. Letter a reads NONE back as code 7 and takes ALT4 and ALT5
+// as a client (MISO alone: a host's SCK would drive PD6, the board's analog
+// net, and PC2, the I2C bus), and drives a pinless host with SSD cleared
+// by hand; letter r's Host SPI is USART1 on ALT1 (PC4..PC6, the same
+// nets); letter u's ladder is the 20 MHz crystal's four divisions (OSCHF
+// runs at the fuse's rate alone); letter w's PE3 is fully asynchronous,
+// as every EA pin is.
 
 // Its groups (the line below; docs/avrxt/README.md, "The group axis")
 // are the images a board type of the split tier builds it as, held to
@@ -92,7 +103,7 @@
 // k..p in the second, q..w in the third. The 128 KB DA and DB build one
 // image.
 //
-// build: boards = db48,da48
+// build: boards = db48,da48,ea48
 // build: groups = abcdefghij,tklmnop,qrsuvw
 // build: monitor_speed = 460800
 
@@ -128,8 +139,16 @@ using namespace brio;
 using Serial = Uart<2, Route::alt1>;
 constexpr Serial serial;
 
+/// The clock in MHz - every tick count below derives from it - and
+/// whether it is the DA/DB boards' 24 MHz (the AVR EA board runs 20).
+constexpr unsigned mhz = SysClock::hz / 1'000'000u;
+constexpr bool at24 = SysClock::hz == 24'000'000u;
+static_assert(at24 || SysClock::hz == 20'000'000u, "the strings below name 24 or 20 MHz");
+
 using S0 = Spi<0>;
+#if defined(SPI1)   // the AVR EA carries SPI0 alone
 using S1 = Spi<1>;
+#endif
 
 using Mosi = Pin<'E', 0>;
 using Miso = Pin<'E', 1>;
@@ -233,7 +252,7 @@ void hold_arm(HoldShape shape, uint16_t offset_us, uint16_t spin_us, uint8_t ski
     Hold::enable_ovf_interrupt(false);
     Hold::disable();
     hold_shape = shape;
-    hold_offset = static_cast<uint16_t>(offset_us * 24u);   // CLK_PER = 24 MHz
+    hold_offset = static_cast<uint16_t>(offset_us * mhz);   // TCA1 at CLK_PER
     hold_spin = static_cast<uint16_t>(spin_us * 6u);        // four cycles a turn
     hold_skip = skip;
     hold_fired = 0;
@@ -255,7 +274,9 @@ bool near(int32_t a, int32_t b, int32_t tol) {
 /// back to plain inputs, the SPI vector back to the counting body.
 void quiesce() {
     S0::release();
+#if defined(SPI1)
     S1::release();
+#endif
     T0::enable_capt_interrupt(false);
     T0::disable();
     T1::disable();
@@ -454,6 +475,59 @@ void frame_verdict(const char* what, uint32_t division, uint32_t mc) {
 
 // ---- a: routes, pins and the refusals ----------------------------------------
 
+/// The instances and routes this part has beyond SPI0's ALT1 and NONE.
+/// The AVR DA/DB: SPI1 pinless, and the two ALT2 refusals. The AVR EA
+/// (DS40002443A 17.3.5): SPI0 alone, its field three bits wide with NONE
+/// at 7 and code 2 reserved (no ALT2 name), ALT4 (PD4..PD7) and ALT5
+/// (PC0..PC3) taken as a CLIENT - which drives MISO alone, PD5 / PC1:
+/// as a host ALT4's SCK would drive PD6, this board's analog net, and
+/// ALT5's PC2, the I2C bus - each read back and released; ALT3 (PA0/PA1:
+/// this board's quartz) and ALT6 (SS on PF7, the UPDI pin) refused by
+/// name at compile time (family fixture negatives). And a pinless host
+/// with SSD cleared - which init refuses - made by hand, to see what
+/// NONE's internal select reads.
+#if !defined(SPI1)
+template <typename R = SpiRoute>
+void ea_route_legs() {
+    if constexpr (requires { R::alt4; R::alt5; }) {
+        // The field as the register holds it (a 2-bit mask on the DA/DB).
+        const auto code = [] { return static_cast<uint8_t>(PORTMUX.SPIROUTEA & PORTMUX_SPI0_gm); };
+        verdict("NONE is code 7 in PORTMUX.SPIROUTEA after a release (DS40002443A 17.3.5)",
+                code() == 0x07u);
+        verdict("SPI0 ALT4 client init (MOSI PD4, MISO PD5, SCK PD6, SS PD7)",
+                S0::init({.route = R::alt4, .role = SpiRole::client}));
+        verdict("ALT4 reads back, code 4", S0::routed() == R::alt4 && code() == 0x04u);
+        verdict("the ALT4 client drives MISO PD5 alone",
+                Pin<'D', 5>::is_output() && !Pin<'D', 4>::is_output() &&
+                    !Pin<'D', 6>::is_output() && !Pin<'D', 7>::is_output());
+        S0::release();
+        verdict("release hands PD5 back and routes to NONE",
+                !Pin<'D', 5>::is_output() && S0::routed() == SpiRoute::none);
+        verdict("SPI0 ALT5 client init (MOSI PC0, MISO PC1, SCK PC2, SS PC3)",
+                S0::init({.route = R::alt5, .role = SpiRole::client}));
+        verdict("ALT5 reads back, code 5", S0::routed() == R::alt5 && code() == 0x05u);
+        verdict("the ALT5 client drives MISO PC1 alone",
+                Pin<'C', 1>::is_output() && !Pin<'C', 0>::is_output() &&
+                    !Pin<'C', 2>::is_output() && !Pin<'C', 3>::is_output());
+        S0::release();
+        verdict("release hands PC1 back and routes to NONE",
+                !Pin<'C', 1>::is_output() && S0::routed() == SpiRoute::none);
+        // A pinless host whose SSD is cleared after init (init refuses
+        // it): what NONE's internal select reads, which no data-sheet
+        // text states.
+        verdict("pinless host init (SSD set)", S0::init({.route = SpiRoute::none}));
+        S0::client_select_disable(false);
+        const auto got = S0::transfer(0xA5);
+        const bool still_host = S0::is_host();
+        print(serial, "  pinless host, SSD cleared by hand: transfer ", got ? "completed" : "did not",
+              ", MASTER ", still_host ? "kept" : "CLEARED (demoted)", crlf);
+        verdict("on NONE the internal select reads high: SSD = 0 does not demote a pinless host",
+                got.has_value() && still_host);
+        S0::release();
+    }
+}
+#endif
+
 void ta_routes() {
     print(serial, "a routes: PORTMUX, pin claim and teardown, the package and errata "
                   "refusals", crlf);
@@ -478,6 +552,7 @@ void ta_routes() {
     verdict("SPI0 pinless host init", S0::init({.route = SpiRoute::none}));
     verdict("no pin claimed on the pinless route", !Mosi::is_output() && !Sck::is_output());
     S0::release();
+#if defined(SPI1)
     verdict("SPI1 pinless host init", S1::init({.route = SpiRoute::none}));
     verdict("SPI1 PORTMUX reads NONE", S1::routed() == SpiRoute::none);
     S1::release();
@@ -487,6 +562,12 @@ void ta_routes() {
     verdict("SPI1 ALT2 refused on a 48-pin part (DB errata 2.11.1)",
             !S1::init({.route = SpiRoute::alt2}));
     verdict("SPI0 ALT2 refused (PORTG is 64-pin)", !S0::init({.route = SpiRoute::alt2}));
+#else
+    ea_route_legs();
+
+    // What must be refused at run time (the compile-time twins live in
+    // test/family_avrxt/neg/).
+#endif
     verdict("a pinless host watching SS refused (DA errata 2.10.1)",
             !S0::init({.route = SpiRoute::none, .client_select_disable = false}));
     verdict("a pinless client refused", !S0::init({.route = SpiRoute::none,
@@ -1062,14 +1143,17 @@ uint16_t measure_now() {
 }
 
 void ti_rebase() {
-    print(serial, "i rebase 24 -> 12 -> 24 MHz: the engine re-picks the division that "
-                  "honours its SCK ceiling", crlf);
+    print(serial, at24 ? "i rebase 24 -> 12 -> 24 MHz: the engine re-picks the division that "
+                         "honours its SCK ceiling"
+                       : "i rebase 20 -> 10 -> 20 MHz: the engine re-picks the division that "
+                         "honours its SCK ceiling", crlf);
     quiesce();
     verdict("DynamicClock init (boot = the crystal)", DynClock::init());
 
     constexpr uint32_t ceiling = 1'500'000u;
     verdict("engine init with a 1.5 MHz ceiling", Host::init(DynClock{}, ceiling));
-    verdict("at 24 MHz the ceiling resolves to CLK_PER/16",
+    verdict(at24 ? "at 24 MHz the ceiling resolves to CLK_PER/16"
+                 : "at 20 MHz the ceiling resolves to CLK_PER/16",
             Host::ceiling_clock() && *Host::ceiling_clock() == SpiClock::div16);
 
     ChSck::source(S0::SckEvent{});
@@ -1078,41 +1162,46 @@ void ti_rebase() {
     // The engine's own division is in force after init(); the resource's
     // polled transfer is the traffic.
     const uint16_t t24 = measure_now();
-    print(serial, "  24 MHz: min period ", t24, " ticks = ",
-          t24 ? 24'000'000u / t24 : 0, " Hz", crlf);
-    verdict("SCK is CLK_PER/16 at 24 MHz", t24 == 16);
+    print(serial, at24 ? "  24 MHz: min period " : "  20 MHz: min period ", t24, " ticks = ",
+          t24 ? SysClock::hz / t24 : 0, " Hz", crlf);
+    verdict(at24 ? "SCK is CLK_PER/16 at 24 MHz" : "SCK is CLK_PER/16 at 20 MHz", t24 == 16);
     // A request for CLK_PER/2 under the ceiling: the frame is the
     // ceiling's, 1.5 MHz asked.
-    frame_verdict("CLK_PER/2 asked under the ceiling at 24 MHz", 16, frame_mc(SpiClock::div2));
+    frame_verdict(at24 ? "CLK_PER/2 asked under the ceiling at 24 MHz"
+                       : "CLK_PER/2 asked under the ceiling at 20 MHz", 16, frame_mc(SpiClock::div2));
     T0::enable_capt_interrupt(true);
 
-    verdict("switch to 12 MHz", DynClock::set(12'000'000u));
+    verdict(at24 ? "switch to 12 MHz" : "switch to 10 MHz", DynClock::set(SysClock::hz / 2u));
     verdict("the ceiling now resolves to CLK_PER/8",
             Host::ceiling_clock() && *Host::ceiling_clock() == SpiClock::div8);
     verdict("a request faster than the ceiling is clamped",
             Host::sck_hz(SpiClock::div2) <= ceiling);
     // Re-arm the peripheral at the re-picked division (init() is what an
     // application calls after a switch; the engine keeps the ceiling).
-    verdict("engine re-init at 12 MHz", Host::init(DynClock{}, ceiling));
+    verdict(at24 ? "engine re-init at 12 MHz" : "engine re-init at 10 MHz",
+            Host::init(DynClock{}, ceiling));
     miso_level(true);
     const uint16_t t12 = measure_now();
-    print(serial, "  12 MHz: min period ", t12, " ticks = ",
-          t12 ? 12'000'000u / t12 : 0, " Hz", crlf);
-    verdict("SCK is CLK_PER/8 at 12 MHz", t12 == 8);
+    print(serial, at24 ? "  12 MHz: min period " : "  10 MHz: min period ", t12, " ticks = ",
+          t12 ? SysClock::hz / 2u / t12 : 0, " Hz", crlf);
+    verdict(at24 ? "SCK is CLK_PER/8 at 12 MHz" : "SCK is CLK_PER/8 at 10 MHz", t12 == 8);
     // The ruler counts the CLK_PER in force: eight SCK at 12 MHz / 8 are
     // 64 of its cycles - the clock itself being what the DynamicClock
     // says it set (test_avr_clock's subject).
-    frame_verdict("CLK_PER/2 asked under the ceiling at 12 MHz", 8, frame_mc(SpiClock::div2));
+    frame_verdict(at24 ? "CLK_PER/2 asked under the ceiling at 12 MHz"
+                       : "CLK_PER/2 asked under the ceiling at 10 MHz", 8, frame_mc(SpiClock::div2));
     T0::enable_capt_interrupt(true);
     verdict("the ceiling holds in Hz across the switch",
-            near(static_cast<int32_t>(t24 ? 24'000'000u / t24 : 0),
-                 static_cast<int32_t>(t12 ? 12'000'000u / t12 : 0), 1000));
+            near(static_cast<int32_t>(t24 ? SysClock::hz / t24 : 0),
+                 static_cast<int32_t>(t12 ? SysClock::hz / 2u / t12 : 0), 1000));
 
-    verdict("back to 24 MHz", DynClock::set(24'000'000u));
-    verdict("engine re-init at 24 MHz", Host::init(DynClock{}, ceiling));
+    verdict(at24 ? "back to 24 MHz" : "back to 20 MHz", DynClock::set(SysClock::hz));
+    verdict(at24 ? "engine re-init at 24 MHz" : "engine re-init at 20 MHz",
+            Host::init(DynClock{}, ceiling));
     const uint16_t back = measure_now();
     verdict("SCK is CLK_PER/16 again", back == 16);
-    frame_verdict("CLK_PER/2 asked under the ceiling, back at 24 MHz", 16,
+    frame_verdict(at24 ? "CLK_PER/2 asked under the ceiling, back at 24 MHz"
+                       : "CLK_PER/2 asked under the ceiling, back at 20 MHz", 16,
                   frame_mc(SpiClock::div2));
     T0::enable_capt_interrupt(false);
     quiesce();
@@ -2266,11 +2355,12 @@ void tm_rates() {
         verdict("the peer answers a ping", false);
         return;
     }
-    static const RateCase inside[5] = {{SpiClock::div8, "CLK_PER/8 (3 MHz)"},
-                                       {SpiClock::div16, "CLK_PER/16 (1.5 MHz)"},
-                                       {SpiClock::div32, "CLK_PER/32 (750 kHz)"},
-                                       {SpiClock::div64, "CLK_PER/64 (375 kHz)"},
-                                       {SpiClock::div128, "CLK_PER/128 (187.5 kHz)"}};
+    static const RateCase inside[5] = {
+        {SpiClock::div8, at24 ? "CLK_PER/8 (3 MHz)" : "CLK_PER/8 (2.5 MHz)"},
+        {SpiClock::div16, at24 ? "CLK_PER/16 (1.5 MHz)" : "CLK_PER/16 (1.25 MHz)"},
+        {SpiClock::div32, at24 ? "CLK_PER/32 (750 kHz)" : "CLK_PER/32 (625 kHz)"},
+        {SpiClock::div64, at24 ? "CLK_PER/64 (375 kHz)" : "CLK_PER/64 (312.5 kHz)"},
+        {SpiClock::div128, at24 ? "CLK_PER/128 (187.5 kHz)" : "CLK_PER/128 (156.25 kHz)"}};
     // CLK_PER/8 is inside an AVR client's ceiling, and inside a SAM C21
     // client's too: measured exact both ways in every run against that
     // peer (and to 6 MHz, docs/samc21/spi.md), so all five rungs are
@@ -2301,8 +2391,9 @@ void tm_rates() {
     // observe its own failure signal passes vacuously. That is a fact
     // about an AVR client, judged against one; another peer's figures are
     // printed (and the AVR's ceiling judged in test_samc_spi h).
-    static const RateCase above[2] = {{SpiClock::div4, "CLK_PER/4 (6 MHz)"},
-                                      {SpiClock::div2, "CLK_PER/2 (12 MHz)"}};
+    static const RateCase above[2] = {
+        {SpiClock::div4, at24 ? "CLK_PER/4 (6 MHz)" : "CLK_PER/4 (5 MHz)"},
+        {SpiClock::div2, at24 ? "CLK_PER/2 (12 MHz)" : "CLK_PER/2 (10 MHz)"}};
     for (const RateCase& rc : above) {
         Exchange e{};
         e.rate = rc.c;
@@ -2765,7 +2856,14 @@ void tq_demotion() {
 
 // ---- r: the USART's own Host SPI against a real client -----------------------------
 
-using Mspi = MspiHost<4, UsartRoute::def>;
+/// The USART that meets PE0..PE2: USART4 at its default route on the
+/// AVR DA/DB; on the AVR EA, which has no USART on PORTE, USART1 on ALT1
+/// (TXD PC4, RXD PC5, XCK PC6), which this board jumpers onto PE0..PE2
+/// (avr_board.hpp's board_pc_pe_jumpers): the same three nets.
+using Mspi = std::conditional_t<(usart_count >= 5), MspiHost<4, UsartRoute::def>,
+                                MspiHost<1, UsartRoute::alt1>>;
+static_assert(usart_count >= 5 || board_pc_pe_jumpers,
+              "letter r's Host SPI reaches the SPI pins through the PC4..PC7 jumpers");
 
 struct MspiCase {
     uint8_t mode;         ///< bit 0 = UCPHA, bit 1 = the SCK inversion
@@ -2830,8 +2928,12 @@ bool run_mspi_case(const MspiCase& mc, uint32_t sck_hz, Exchange& shape, Verify&
 }
 
 void tr_mspi() {
-    print(serial, "r the USART's own Host SPI (MspiHost on USART4) against a real SPI "
-                  "client - usart.md's deferred electrical check", crlf);
+    print(serial, usart_count >= 5
+                      ? "r the USART's own Host SPI (MspiHost on USART4) against a real SPI "
+                        "client - usart.md's deferred electrical check"
+                      : "r the USART's own Host SPI (MspiHost on USART1 ALT1, PC4..PC6 jumpered "
+                        "onto PE0..PE2) against a real SPI client - usart.md's deferred "
+                        "electrical check", crlf);
     quiesce();
     if (!ensure_link()) {
         verdict("the peer answers a ping", false);
@@ -2903,19 +3005,21 @@ bool rebase_step(uint32_t hz, const char* what) {
 }
 
 void ts_rebase() {
-    print(serial, "s 24 -> 12 -> 24 MHz under two-board traffic: the command channel is a "
-                  "DIVISION of CLK_PER and follows it", crlf);
+    print(serial, at24 ? "s 24 -> 12 -> 24 MHz under two-board traffic: the command channel is a "
+                         "DIVISION of CLK_PER and follows it"
+                       : "s 20 -> 10 -> 20 MHz under two-board traffic: the command channel is a "
+                         "DIVISION of CLK_PER and follows it", crlf);
     quiesce();
     verdict("DynamicClock init (boot = the crystal)", DynClock::init());
     if (!ensure_link()) {
         verdict("the peer answers a ping", false);
         return;
     }
-    (void)rebase_step(24'000'000u, "at 24 MHz");
-    verdict("switch to 12 MHz", DynClock::set(12'000'000u));
-    (void)rebase_step(12'000'000u, "at 12 MHz");
-    verdict("back to 24 MHz", DynClock::set(24'000'000u));
-    (void)rebase_step(24'000'000u, "back at 24 MHz");
+    (void)rebase_step(SysClock::hz, at24 ? "at 24 MHz" : "at 20 MHz");
+    verdict(at24 ? "switch to 12 MHz" : "switch to 10 MHz", DynClock::set(SysClock::hz / 2u));
+    (void)rebase_step(SysClock::hz / 2u, at24 ? "at 12 MHz" : "at 10 MHz");
+    verdict(at24 ? "back to 24 MHz" : "back to 20 MHz", DynClock::set(SysClock::hz));
+    (void)rebase_step(SysClock::hz, at24 ? "back at 24 MHz" : "back at 20 MHz");
     quiesce();
 }
 
@@ -2937,7 +3041,8 @@ using Osc20 = Clock<ClockSource::internal, 20'000'000>;
 
 /// CLK_PER for a rung, the console re-initialized at the new rate. The
 /// waits this half spends (gap(), settle()) are timed off the constexpr
-/// 24 MHz clock, so on a slower source they are longer, never shorter.
+/// board clock, so on a slower source they are longer, never shorter.
+#if defined(CLKCTRL_FRQSEL_gm)   // OSCHF's rate a register field: the DA/DB
 bool rung_clock(uint32_t hz) {
     while (!Serial::tx_idle()) {
     }
@@ -2954,6 +3059,18 @@ bool rung_clock(uint32_t hz) {
     }
     return ok;
 }
+
+#else
+/// The AVR EA board: every rung is its crystal's - OSCHF runs at the
+/// fuse's rate alone (no FRQSEL), so no rung lies between its divisions.
+bool rung_clock(uint32_t) {
+    while (!Serial::tx_idle()) {
+    }
+    const bool ok = SysClock::init();
+    Serial::init(clock, 460800);
+    return ok;
+}
+#endif
 
 uint8_t b2b_tx[max_exchange];
 
@@ -3007,6 +3124,7 @@ bool b2b_exchange(const Exchange& e, bool answer_only, uint32_t& ticks) {
     return ok;
 }
 
+#if defined(CLKCTRL_FRQSEL_gm)
 void tu_back_to_back() {
     print(serial, "u back to back: the client's answer reload against the wire - a gapped "
                   "exchange, then the same one gapless, full duplex and answer-only, at "
@@ -3092,6 +3210,96 @@ void tu_back_to_back() {
     verdict("CLK_PER/32 is exact after the ladder", ok);
     quiesce();
 }
+
+#else
+void tu_back_to_back() {
+    print(serial, "u back to back: the client's answer reload against the wire - a gapped "
+                  "exchange, then the same one gapless, full duplex and answer-only, at "
+                  "every rung", crlf);
+    quiesce();
+    if (!ensure_link()) {
+        verdict("the peer answers a ping", false);
+        return;
+    }
+    // The verdicts are the SAM C21 peer's (docs/samc21/spi.md): its runs
+    // exact back to back up to 8 MHz, where the gapped control is exact
+    // too; above it the gapped control breaks the same way - the
+    // answer's path on the wire, not the reload - so those rungs are
+    // printed. Any other peer's ladder is printed whole: its boundary is
+    // its own document's.
+    const bool samc = peer_arch == spilink::peer_samc21;
+    uint8_t k = 0;
+    // The AVR EA board: its 20 MHz crystal's four divisions. OSCHF runs
+    // at the fuse's 20 MHz alone (no FRQSEL), so no rung lies between
+    // them.
+    static const B2bRung rungs[] = {
+        {20'000'000u, SpiClock::div16, "1.25 MHz"}, {20'000'000u, SpiClock::div8, "2.5 MHz"},
+        {20'000'000u, SpiClock::div4, "5 MHz"},     {20'000'000u, SpiClock::div2, "10 MHz"},
+    };
+    for (const B2bRung& g : rungs) {
+        ++k;
+        if (!rung_clock(g.clk_hz)) {
+            verdict("the clock switch", false);
+            break;
+        }
+        const uint32_t div = spi_division(g.c);
+        const uint32_t sck = g.clk_hz / div;
+        Exchange e{};
+        e.rate = g.c;
+        e.count = max_exchange;
+        e.cfg.regime = spilink::regime_buffer_wait;   // exact on every peer
+        e.seed_a = static_cast<uint8_t>(0x31 + k);
+        e.seed_b = static_cast<uint8_t>(0xA3 + 7u * k);
+
+        Verify gv{};
+        spilink::Report gr{};
+        const bool gapped = exchange_exact(e, gv, gr);
+
+        uint32_t t_full = 0;
+        const bool ran_full = b2b_exchange(e, false, t_full);
+        spilink::Report fr{};
+        const bool rep_full = ran_full && peer_report(fr);
+        const Verify fv = verify_rx(e);
+        const bool full = ran_full && rep_full && fv.mism == 0 && fr.mism == 0 &&
+                          fr.count == e.count;
+        if (!full) dump_exchange(e, fv, fr);
+
+        uint32_t t_ans = 0;
+        const bool ran_ans = b2b_exchange(e, true, t_ans);
+        spilink::Report ar{};
+        const bool rep_ans = ran_ans && peer_report(ar);
+        const Verify av = verify_rx(e);
+        const bool ans = ran_ans && av.mism == 0;
+        if (!ans) dump_exchange(e, av, ar);
+
+        print(serial, "  ", sck / 1000u, " kHz (", g.clk_hz / 1'000'000u, " MHz / ", div,
+              "): gapped ", gapped ? "exact" : "BROKEN", " (host mism ", gv.mism,
+              ", client ", gr.mism, ") | b2b full ", full ? "exact" : "BROKEN", " (host ",
+              fv.mism, ", client ", fr.mism, "/", fr.count, ") | b2b answers ",
+              ans ? "exact" : "BROKEN", " (host ", av.mism, ", loaded ", ar.count,
+              rep_ans ? "" : ", no report", ")", crlf);
+        print(serial, "      a request of ", e.count, " back to back: ", t_full, " and ",
+              t_ans, " CLK_PER, the wire's ", 8u * div * e.count, crlf);
+        if (samc && sck <= 8'000'000u) {
+            verdict("gapped exchange exact at ", g.name, gapped);
+            verdict("back to back, the exchange run exact at ", g.name, full);
+            verdict("back to back, the answer run exact at ", g.name, ans);
+        }
+    }
+    verdict("back on the 20 MHz crystal", rung_clock(SysClock::hz));
+    Exchange back{};
+    back.count = 12;
+    back.seed_a = 0x4D;
+    back.seed_b = 0xE1;
+    Verify v{};
+    spilink::Report r{};
+    const bool ok = exchange_exact(back, v, r);
+    if (!ok) dump_exchange(back, v, r);
+    verdict("CLK_PER/32 is exact after the ladder", ok);
+    quiesce();
+}
+
+#endif
 
 // ---- v: this board as the CLIENT, the peer as the host ---------------------------
 //
@@ -3541,8 +3749,13 @@ void print_wake(const char* name, const PinWake& w) {
 }
 
 void tw_pin_wake() {
-    print(serial, "w a pin edge out of STANDBY: PE2 (fully asynchronous) on every sense, PE3 "
-                  "(partially) on both edges only - the peer's host_burst driving them", crlf);
+    if constexpr (all_pins_fully_async) {
+        print(serial, "w a pin edge out of STANDBY: PE2 and PE3 on every sense (on the AVR EA "
+                      "every pin is fully asynchronous) - the peer's host_burst driving them", crlf);
+    } else {
+        print(serial, "w a pin edge out of STANDBY: PE2 (fully asynchronous) on every sense, PE3 "
+                      "(partially) on both edges only - the peer's host_burst driving them", crlf);
+    }
     quiesce();
     if (!ensure_link()) {
         verdict("the peer answers a ping", false);
@@ -3560,15 +3773,30 @@ void tw_pin_wake() {
                 f.reported && f.host.count == 160u);
     const PinWake c = pin_wake(PinSense::none, PinSense::falling);
     print_wake("PE3 falling", c);
-    verdict("THE CONTROL: PE3's falling edge - the select really fell, the peer clocked its "
-            "burst - does NOT wake STANDBY: a partially asynchronous pin's edge sense needs "
-            "CLK_PER, and the backstop ends the sleep",
-            c.commanded && c.irqs == 0u && c.backstop && c.reported && c.host.count == 160u);
+    if constexpr (all_pins_fully_async) {
+        // The AVR EA: every pin senses asynchronously (DS40002443A
+        // 18.3.3.1), PE3 included - the DA/DB's control becomes a wake.
+        verdict("on the AVR EA PE3's falling edge wakes STANDBY too: every pin is fully "
+                "asynchronous there",
+                c.commanded && c.wfis == 1u && c.irqs == 1u && c.pins == 2u && !c.backstop &&
+                    c.reported && c.host.count == 160u);
+    } else {
+        verdict("THE CONTROL: PE3's falling edge - the select really fell, the peer clocked its "
+                "burst - does NOT wake STANDBY: a partially asynchronous pin's edge sense needs "
+                "CLK_PER, and the backstop ends the sleep",
+                c.commanded && c.irqs == 0u && c.backstop && c.reported && c.host.count == 160u);
+    }
     const PinWake b = pin_wake(PinSense::none, PinSense::both);
     print_wake("PE3 both edges", b);
-    verdict("and PE3 on BOTH edges does wake it: the partially asynchronous pin's one way out",
-            b.commanded && b.wfis == 1u && b.irqs == 1u && b.pins == 2u && !b.backstop &&
-                b.reported && b.host.count == 160u);
+    if constexpr (all_pins_fully_async) {
+        verdict("and PE3 on BOTH edges as well",
+                b.commanded && b.wfis == 1u && b.irqs == 1u && b.pins == 2u && !b.backstop &&
+                    b.reported && b.host.count == 160u);
+    } else {
+        verdict("and PE3 on BOTH edges does wake it: the partially asynchronous pin's one way out",
+                b.commanded && b.wfis == 1u && b.irqs == 1u && b.pins == 2u && !b.backstop &&
+                    b.reported && b.host.count == 160u);
+    }
     quiesce();
     (void)link_command_mode();
 }
@@ -3709,7 +3937,7 @@ int main() {
     if (board.empty()) board = "?";
     print(serial, crlf, "test_avr_spi - SPI test suite (board ", board,
           ", clk=", xtal ? (has_xoschf ? "XTAL" : "EXTCLK") : "OSCHF",
-          " 24 MHz, silicon rev ", hex(SYSCFG.REVID), ")", crlf);
+          at24 ? " 24 MHz, silicon rev " : " 20 MHz, silicon rev ", hex(SYSCFG.REVID), ")", crlf);
     register_tests();
     help();
     bench.prompt();

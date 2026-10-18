@@ -8,8 +8,8 @@ beside the SPI view). Family fixture `test/family_samc21/i2c.cpp` +
 seven negatives (the per-bus timeout adds an
 eighth at the util level: an engine without `recover()` refused);
 bench suite `test_samc_i2c`, bench letter `bench_samc` i
-(15 letters, two-board: the peer board runs `twi_peer` on an AVR128DA48
-or on a second SAM C21, one `twi_link.hpp` wire format between them -
+(15 letters, two-board: the peer board runs `twi_peer` on an AVR64EA48,
+an AVR DA/DB or a second SAM C21, one `twi_link.hpp` wire format between them -
 commanded in band over the bus under test).
 
 ## THE HEADLINE: this peripheral has no input filter, and the WIRE
@@ -295,13 +295,14 @@ with no workaround, and no bench wire here could carry 3.4 MHz).
 
 ## The host's cost, measured (bench_samc letter i)
 
-SERCOM3 on PA22/PA23 at 48 MHz against an AVR128DA48 running
-`twi_peer` as a client at 0x2C on the desk's 5 V node; the SCL period is
+SERCOM3 on PA22/PA23 at 48 MHz against an AVR64EA48 running
+`twi_peer` as a client at 0x2C on the desk's 5 V node (its CLK_PER the
+board's 20 MHz quartz); the SCL period is
 the register pair's on this node (481, 121 and 49 cycles at 100 kHz,
 400 kHz and Fm+, 166 ns rise); `wire` is the tenure's SCL rising edges
 times that period. THE PEER IS A POLLED CLIENT and stretches every byte
 by its own turnaround - about 300 cycles a frame at 400 kHz, which a
-255-byte read reads almost alone (x 1.28) - so the host's own share is
+255-byte read reads almost alone (x 1.25) - so the host's own share is
 the difference between the columns, and its CPU is `busy` and `isr`.
 Best of 8, CLK_CPU cycles; `plain` is the engine with the thread
 spinning on the completion edge and no stamp in the vector, `metered`
@@ -310,14 +311,14 @@ edges and every entry stamped (56 cycles an entry inside `isr`):
 
 | tenure | wire | plain | metered: wall (irq, isr, busy) |
 |---|---|---|---|
-| 1-byte write, 400 kHz | 2299 | 3141 | 3536 (3, 571, 1830) |
-| 1 + 1 register read, 400 kHz | 4598 | 5881 | 6385 (4, 933, 2304) |
-| 16-byte write, 400 kHz | 18634 | 22735 | 25099 (18, 3376, 7939) |
-| 16-byte read, 400 kHz | 18634 | 23773 | 24118 (16, 2755, 6878) |
-| 255-byte read, 400 kHz | 278905 | 356686 (x 1.28) | 357642 (262, 40797, 100411) |
-| 255-byte write, 400 kHz | 278905 | 338742 (x 1.21) | 368244 (264, 48349, 108316) |
-| 255-byte read, 100 kHz | 1108705 | 1136893 (x 1.03) | 1154988 (279, 41477, 104866) |
-| 255-byte read, Fm+ | 112945 | 194220 (x 1.72) | 194789 (259, 40677, 99420) |
+| 1-byte write, 400 kHz | 2299 | 3142 | 3612 (2, 531, 1446) |
+| 1 + 1 register read, 400 kHz | 4598 | 5944 | 6415 (4, 933, 2304) |
+| 16-byte write, 400 kHz | 18634 | 24270 | 24823 (18, 3376, 8055) |
+| 16-byte read, 400 kHz | 18634 | 23449 | 26037 (17, 2795, 6918) |
+| 255-byte read, 400 kHz | 278905 | 349971 (x 1.25) | 388644 (263, 40837, 100492) |
+| 255-byte write, 400 kHz | 278905 | 362506 (x 1.30) | 363530 (263, 48309, 107947) |
+| 255-byte read, 100 kHz | 1108705 | 1136956 (x 1.02) | 1168892 (279, 41477, 105564) |
+| 255-byte read, Fm+ | 112945 | 194360 (x 1.72) | 207234 (260, 40717, 99788) |
 
 What the rows say:
 
@@ -330,11 +331,10 @@ What the rows say:
 - IN SRAM (`bench_samc_ram`, the vector in `.fast_text`): the pump's
   entry costs 112 cycles for a written byte and 97 for a read one at
   100 kHz (31311 over 280 entries, 27045 over 279), against 175 and 149
-  from the flash behind two wait states in the same letter. At Fm+ a
-  255-byte write's wall is 204723 cycles placed against 205116 from the
-  flash: the polled peer's turnaround, not the host, paces that tenure.
-  The written byte's SYSOP wait stays a call, through a veneer back into
-  the flash; the host takes no placement.
+  from the flash behind two wait states in the same letter. At Fm+ the
+  polled peer's turnaround, not the host, paces a long tenure (x 1.72
+  above). The written byte's SYSOP wait stays a call, through a veneer
+  back into the flash; the host takes no placement.
 
 ## Bench findings (beyond the headline)
 
@@ -368,10 +368,10 @@ What the rows say:
   SysTick's count at every rising edge; the mean of the rise-to-rise
   intervals within a quarter of their lower quartile is the host's unhindered
   period (the holds and stretches fall between bytes and before an
-  acknowledge). With the node's 166 ns rise given to `init()`, three
-  runs against the AVR128DA48 peer: 100 kHz at 1001 thousandths of the
-  rate asked (479.0 to 479.4 cycles a period), 400 kHz at 1010 to 1012
-  (118.5 to 118.7), Fm+ at 932 to 933 (51.4 to 51.5) - inside the
+  acknowledge). With the node's 166 ns rise given to `init()`, ten
+  runs against the AVR64EA48 peer: 100 kHz at 997 to 1002 thousandths of
+  the rate asked (479.0 to 481.0 cycles a period), 400 kHz at 1011 to 1012
+  (118.5 to 118.6), Fm+ at 933 to 934 (51.3 to 51.4) - inside the
   bracket, never more than 2 % above the rate asked and within a quarter
   below it. At Fm+ the sampler is at its limit: an edge's own path and a
   period nearly meet, so some 115 of 154 rises are caught, about half the
@@ -461,7 +461,7 @@ Implemented but not bench-verified:
 
 - **The engine against the naive shape and the data sheet's own polled
   loop** (33.6.2.4, smart mode off) on this desk: both are scratch
-  programs beside `bench_samc`, and the AVR128DA48 peer paces every
+  programs beside `bench_samc`, and the AVR64EA48 peer paces every
   tenure with its own turnaround, so their columns are owed against it
   before the comparison is stated again.
 - **XOSC32K as the time-outs' 32 kHz source**: the letter runs on a

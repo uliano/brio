@@ -265,6 +265,14 @@ inline constexpr bool has_tcd = true;
 inline constexpr bool has_tcd = false;
 #endif
 
+/// TWIn.CTRLA.FMEN, the host's Fast-mode duty cycle (DS40002443A 27.5.1):
+/// the bit's mask where the TWI has it, 0 where it has not.
+#if defined(TWI_FMEN_bm)
+inline constexpr uint8_t twi_fmen_bm = TWI_FMEN_bm;
+#else
+inline constexpr uint8_t twi_fmen_bm = 0;
+#endif
+
 /// Instance counts, each read off the instances' own macros.
 #if defined(TCA1)
 inline constexpr uint8_t tca_count = 2;
@@ -636,6 +644,25 @@ inline constexpr bool erratum_da_tca1_alt23 = avr_die == AvrDie::avr128da;
 /// DS80000882C 2.14.2 (every AVR DA revision): the TWI's SDAHOLD 50 ns
 /// and 300 ns selections are swapped in the silicon.
 inline constexpr bool erratum_da_twi_sdahold_swap = avr_die == AvrDie::avr128da;
+
+/// The TWI host's SCL duty, in CLK_PER, against MBAUD. The AVR DA/DB's is
+/// 50/50: low = BAUD + 5 at every speed (DS40002247B 29.3.2.2.1, equation
+/// 29-4). The AVR EA's is not (DS40002443A 27.3.2.2.1): low = BAUD + 6 in
+/// Sm (equation 3.2) and BAUD + 6 + min(SCLDUTY, BAUD) in Fm and Fm+
+/// (3.1), the period unchanged (equation 1), with SCLDUTY defined nowhere
+/// in the data sheet - measured on rev B1 (docs/avrxt/twi.md): CTRLA.FMEN
+/// moves min(5, BAUD) clocks from the high phase to the low, CTRLA.FMPEN
+/// min(8, BAUD + 2) whatever FMEN says, and the host makes no regular
+/// clock at MBAUD 0..3 with FMPEN off nor at 0..1 with it on.
+inline constexpr bool twi_ea_scl = avr_die == AvrDie::avr64ea;
+
+/// The CLK_PER below which the TWI's 1 MHz is not specified: "max.
+/// frequency requires system clock over 12 MHz" on the AVR EA
+/// (DS40002443A 35.15 table 35-21). 0 where brio does not enforce one -
+/// the AVR DA/DB's table names 10 MHz (docs/avrxt/twi.md, "Not covered
+/// yet").
+inline constexpr uint32_t twi_fm_plus_min_clk_hz =
+    avr_die == AvrDie::avr64ea ? 12'000'000u : 0u;
 
 /// DS80000882C 2.7.1 (every AVR DA revision): the flash's data-space
 /// window ignores the section protections.

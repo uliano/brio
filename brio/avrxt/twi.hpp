@@ -1,8 +1,8 @@
 /*
  * twi.hpp
  *
- * The AVR DA/DB Two-Wire Interface (DS40002247B ch. 29) in two strata,
- * as docs/avrxt/twi.md describes:
+ * The AVR DA/DB/EA Two-Wire Interface (DS40002247B ch. 29, DS40002443A
+ * ch. 27) in two strata, as docs/avrxt/twi.md describes:
  *
  *  RESOURCE - Twi<n>: the typed view of one instance. A config struct
  *  owns the whole configuration (route, the shared CTRLA knobs, the
@@ -94,6 +94,23 @@
  *    interrupt (PIEN, 29.5.10). speed_ok() is the readback of that
  *    condition; the tasks report it, they do not enforce it (a slower
  *    main clock is legal, it only blinds those two features);
+ *  - THE AVR EA (DS40002443A ch. 27: the DB's register description but
+ *    CTRLA.FMEN; DS80001048D has no TWI item). TWI0 alone, with an ALT3
+ *    (SDA PA0, SCL PA1, dual PC2/PC3). Its SCL is not 50/50: the low phase
+ *    is BAUD + 6 in Sm (equation 3.2), and FMEN (Fm) or FMPEN (Fm+) move
+ *    clocks from the high phase into it, the period equation 1's - the
+ *    chapter's SCLDUTY measured, twi_low_ticks() its model, the engine
+ *    setting FMEN with the Fm speed as it sets FMPEN with Fm+: 400 kHz
+ *    with the specification's edges charged is MBAUD 21 at 20 MHz with
+ *    it, 364 kHz on the bench's bus, and would be 26 without, 308 kHz
+ *    (equation 1). MBAUD 0..3 make no regular clock with FMPEN off
+ *    (0..1 with it on): twi_baud_min(). Fm+ needs CLK_PER over 12 MHz
+ *    (35.15 table 35-21): twi_baud_for() refuses it below. The time-out
+ *    counts MCLKTIMEBASE (TwiTimeout); SDAHOLD's codes are straight; a
+ *    PORT.OUT bit at '1' does not hold the bus and 1000 FLUSH strobes on
+ *    an idle host never left it stuck (both measured, docs/avrxt/twi.md) -
+ *    the init's OUT clear is kept, one store a pin, and FLUSH stays
+ *    unexposed, recover() the verb on every die;
  *  - two vectors, two ISR bodies: TWIn_TWIM_vect (host: RIF/WIF) and
  *    TWIn_TWIS_vect (client: DIF/APIF). Neither body clears anything -
  *    the host's flags clear when the handler writes MADDR/MDATA/MCMD
@@ -257,7 +274,13 @@ constexpr uint8_t twi_sdahold_bits(TwiSdaHold h) {
 }
 
 /// MCTRLA.TIMEOUT: the SMBus inactive-bus supervisor. A non-zero value
-/// puts the bus state machine back to Idle after that much silence.
+/// puts the bus state machine back to Idle after that much silence. The
+/// AVR DA/DB derive its time from MBAUD (DS40002247B 29.3.3.1); the AVR
+/// EA counts it in CLKCTRL.MCLKTIMEBASE clocks a microsecond (DS40002443A
+/// 27.3.3.1) - at TIMEBASE 0, its reset value, every setting fires at
+/// once (measured) - and there brio's clock writes TIMEBASE at every init
+/// and rate change (avrxt/clock.hpp's ClockTimebase), so the names are
+/// microseconds on both.
 enum class TwiTimeout : uint8_t { disabled = 0, us50 = 1, us100 = 2, us200 = 3 };
 
 /// MCTRLB.ACKACT / SCTRLB.ACKACT: what the next command sends.
@@ -364,9 +387,40 @@ constexpr bool twi_needs_fm_plus(I2cSpeed s) { return s == I2cSpeed::fast_plus_1
  * a slower SCL than asked, and a speed is never approximated in
  * silence) or above 255 (nor that slow).
  */
+/// The SCL LOW phase the host drives for this MBAUD at a speed, in
+/// CLK_PER: equation 29-4's BAUD + 5 on the AVR DA/DB, whatever the speed;
+/// on the AVR EA the duty its speed sets (device_tables.hpp's twi_ea_scl):
+/// BAUD + 6 in Sm, plus min(5, BAUD) in Fm (the engine sets FMEN with that
+/// speed) and min(8, BAUD + 2) in Fm+ (FMPEN). What a pulse-width meter on
+/// the SCL pin reads is this less the bus's fall.
+constexpr uint16_t twi_low_ticks(uint8_t baud, I2cSpeed s = I2cSpeed::standard_100k) {
+    if constexpr (twi_ea_scl) {
+        const uint16_t b = baud;
+        if (s == I2cSpeed::fast_400k) return static_cast<uint16_t>(b + 6u + (b < 5u ? b : 5u));
+        if (s == I2cSpeed::fast_plus_1m) {
+            return static_cast<uint16_t>(b + 6u + (b + 2u < 8u ? b + 2u : 8u));
+        }
+        return static_cast<uint16_t>(b + 6u);
+    } else {
+        (void)s;
+        return static_cast<uint16_t>(baud + 5u);
+    }
+}
+
+/// The smallest MBAUD that makes a regular SCL: none below 4 with FMPEN
+/// off and below 2 with it on, on the AVR EA (measured, twi_ea_scl); every
+/// value on the AVR DA/DB.
+constexpr uint8_t twi_baud_min(I2cSpeed s) {
+    if constexpr (twi_ea_scl) return s == I2cSpeed::fast_plus_1m ? 2u : 4u;
+    else return 0u;
+}
+
 constexpr std::optional<uint8_t> twi_baud_for(uint32_t clk_hz, I2cSpeed s,
                                               uint32_t rise_ns = 0, uint32_t fall_ns = 0) {
     if (clk_hz == 0) return {};
+    if constexpr (twi_fm_plus_min_clk_hz != 0) {
+        if (s == I2cSpeed::fast_plus_1m && clk_hz <= twi_fm_plus_min_clk_hz) return {};
+    }
     if (rise_ns == 0) rise_ns = twi_rise_budget_ns(s);
     if (fall_ns == 0) fall_ns = twi_fall_budget_ns(s);
     const uint32_t f_scl = twi_scl_hz(s);
@@ -374,6 +428,27 @@ constexpr std::optional<uint8_t> twi_baud_for(uint32_t clk_hz, I2cSpeed s,
     const int32_t first = static_cast<int32_t>((clk_hz + 2 * f_scl - 1) / (2 * f_scl));
     int32_t baud = first - 5 - static_cast<int32_t>(rise);
     if (baud < 0) return {};
+    if constexpr (twi_ea_scl) {
+        // The AVR EA (27.3.2.2.1, its duty measured): BAUD from equation
+        // 2, raised to the smallest that makes a regular clock, then to
+        // the smallest whose LOW phase covers the mode's floor plus the
+        // fall - the inverse of twi_low_ticks() at this speed (the
+        // chapter's equation 4, written for its own duty).
+        if (baud < twi_baud_min(s)) baud = twi_baud_min(s);
+        const int32_t need = static_cast<int32_t>(
+            (static_cast<uint64_t>(clk_hz) * (twi_low_min_ns(s) + fall_ns) + 999'999'999ull) /
+            1'000'000'000ull);
+        if (static_cast<int32_t>(twi_low_ticks(static_cast<uint8_t>(baud > 255 ? 255 : baud), s)) <
+            need) {
+            int32_t b;
+            if (s == I2cSpeed::fast_400k) b = need - 11 >= 5 ? need - 11 : (need - 6 + 1) / 2;
+            else if (s == I2cSpeed::fast_plus_1m) b = need - 14 >= 6 ? need - 14 : (need - 8 + 1) / 2;
+            else b = need - 6;
+            baud = b > baud ? b : baud;
+        }
+        if (baud > 255) return {};
+        return static_cast<uint8_t>(baud);
+    }
     // tLOW = (BAUD + 5)/f_CLK - tOF, in nanoseconds, against the floor.
     const uint64_t low_ns = static_cast<uint64_t>(baud + 5) * 1'000'000'000ull / clk_hz;
     if (low_ns < static_cast<uint64_t>(twi_low_min_ns(s)) + fall_ns) {
@@ -386,11 +461,6 @@ constexpr std::optional<uint8_t> twi_baud_for(uint32_t clk_hz, I2cSpeed s,
     if (baud > 255) return {};
     return static_cast<uint8_t>(baud);
 }
-
-/// The SCL LOW time this MBAUD produces, in peripheral clock ticks
-/// (equation 29-4 with tOF = 0): the number a pulse-width meter on the
-/// SCL pin should read.
-constexpr uint16_t twi_low_ticks(uint8_t baud) { return static_cast<uint16_t>(baud + 5u); }
 
 /// The SCL PERIOD this MBAUD produces, in peripheral clock ticks, on a
 /// bus whose rise time is `t_rise_ns` (equation 29-2 rearranged). With
@@ -488,10 +558,10 @@ constexpr bool twi_config_valid(const TwiConfig& c) {
 
 template <uint8_t n>
 class Twi {
-    static_assert(n <= 1, "AVR DA/DB carry TWI0 and TWI1");
+    static_assert(n <= 1, "the AVR DA/DB carry TWI0 and TWI1, the AVR EA TWI0 alone");
     static_assert(n < twi_count,
-                  "this package does not carry this TWI instance (TWI1 arrives "
-                  "with the 32-pin step)");
+                  "this part does not carry this TWI instance (TWI1 arrives with the "
+                  "AVR DA/DB's 32-pin step; the AVR EA has TWI0 alone)");
 
 public:
     Twi() = delete;
@@ -627,6 +697,20 @@ public:
     static void fm_plus(bool on) { with_halves_down([on] { ctrla_bits(TWI_FMPEN_bm, on); }); }
     static bool fm_plus() { return (regs().CTRLA & TWI_FMPEN_bm) != 0; }
 
+    /// CTRLA.FMEN, the AVR EA's Fast-mode duty cycle for the HOST
+    /// (DS40002443A 27.5.1; no effect on a client or under FMPEN). Only
+    /// where the bit exists (device_tables.hpp's twi_fmen_bm).
+    static void fm_duty(bool on)
+        requires(twi_fmen_bm != 0)
+    {
+        with_halves_down([on] { ctrla_bits(twi_fmen_bm, on); });
+    }
+    static bool fm_duty()
+        requires(twi_fmen_bm != 0)
+    {
+        return (regs().CTRLA & twi_fmen_bm) != 0;
+    }
+
     // ---- DUALCTRL (29.5.2) -----------------------------------------------
 
     /// Dual mode: the client moves to the route's SECOND pin pair and
@@ -667,8 +751,9 @@ public:
     static void quick_command(bool on) { mctrla_bits(TWI_QCEN_bm, on); }
     static bool quick_command() { return (regs().MCTRLA & TWI_QCEN_bm) != 0; }
 
-    /// The SMBus inactive-bus supervisor. 29.3.3.1 recommends writing
-    /// MBAUD first: the time-out counter is derived from it.
+    /// The SMBus inactive-bus supervisor. The AVR DA/DB's 29.3.3.1
+    /// recommends writing MBAUD first, the counter derived from it; the
+    /// AVR EA's counts MCLKTIMEBASE clocks (TwiTimeout).
     static void timeout(TwiTimeout t) {
         regs().MCTRLA = static_cast<uint8_t>((regs().MCTRLA & ~TWI_TIMEOUT_gm) |
                                              static_cast<uint8_t>(static_cast<uint8_t>(t)
@@ -1049,6 +1134,14 @@ public:
         if (!b) return false;
         const bool want_fmp = twi_needs_fm_plus(s);
         if (want_fmp != fm_plus()) fm_plus(want_fmp);
+        if constexpr (twi_fmen_bm != 0) {
+            // FMEN is the Fm half of the AVR EA's duty, as FMPEN is the
+            // pad half of Fm+: it moves with the speed (twi_low_ticks).
+            const bool want_fm = s == I2cSpeed::fast_400k;
+            if (want_fm != ((regs().CTRLA & twi_fmen_bm) != 0)) {
+                with_halves_down([want_fm] { ctrla_bits(twi_fmen_bm, want_fm); });
+            }
+        }
         set_baud(*b);
         speed_ = s;
         return true;
@@ -1076,7 +1169,9 @@ private:
             (c.input_level == TwiInputLevel::smbus ? TWI_INPUTLVL_bm : 0) |
             (c.sda_setup == TwiSdaSetup::cycles8 ? TWI_SDASETUP_bm : 0) |
             twi_sdahold_bits(c.sda_hold) |
-            (c.fm_plus ? TWI_FMPEN_bm : 0));
+            (c.fm_plus ? TWI_FMPEN_bm : 0) |
+            // the AVR EA's FMEN with a host at Fm (twi_low_ticks); 0 elsewhere
+            ((twi_fmen_bm != 0 && c.host && c.speed == I2cSpeed::fast_400k) ? twi_fmen_bm : 0));
     }
 
     static constexpr uint8_t dualctrl_byte(const TwiConfig& c) {

@@ -1894,7 +1894,8 @@ void th_avr_client() {
         return;
     }
     print(serial, "  the peer is the avrxt spi_peer (fw ", hex(d.version), ", crystal ",
-          d.xtal ? "up" : "DOWN", "): its CLK_PER is ", d.xtal ? "24 MHz" : "its OSCHF", crlf);
+          d.xtal ? "up" : "DOWN", "): its CLK_PER is ", d.xtal ? "its crystal's" : "its OSCHF",
+          " (24 MHz on the AVR DA/DB boards, 20 MHz on the AVR EA's)", crlf);
 
     // (1) THE ALIGNMENT TABLE (test_avr_spi l's AVR-client half): the
     // three regimes, in mode 0 MSb first and in mode 3 LSb first.
@@ -1936,10 +1937,11 @@ void th_avr_client() {
     bench.verdict("and that leading dummy is the shift register a fresh init cleared",
                   dummies == 2 && dummy_nonzero == 0);
 
-    // (2) THE CLK_PER/6 CEILING (test_avr_spi m): 4 MHz on a 24 MHz peer
-    // (the AVR errata's clarification 3.7.3). Inside it exact, above it
-    // POSITIVELY corrupted - a test that cannot see its failure signal
-    // passes vacuously.
+    // (2) THE CLK_PER/6 CEILING (test_avr_spi m): 4 MHz on a 24 MHz peer,
+    // 3.33 MHz on a 20 MHz one (the AVR errata's clarification 3.7.3 / the
+    // EA's 3.7). Inside it exact, above it POSITIVELY corrupted - a test
+    // that cannot see its failure signal passes vacuously. 3 MHz is inside
+    // either, 6 MHz above either.
     static const uint32_t inside[] = {3'000'000UL, 1'500'000UL};
     static const uint32_t above[] = {6'000'000UL, 12'000'000UL};
     for (const uint32_t hz : inside) {
@@ -1954,9 +1956,9 @@ void th_avr_client() {
         spilink::Report r{};
         const bool ok = exchange_exact(e, v, r) && Bus::sck_hz(e.baud) == hz;
         if (!ok) dump_exchange(e, v, r);
-        bench.verdict(hz == 3'000'000UL ? "an AVR client is exact at 3 MHz (CLK_PER/8), "
-                                          "inside its ceiling"
-                                        : "and at 1.5 MHz (CLK_PER/16)",
+        bench.verdict(hz == 3'000'000UL ? "an AVR client is exact at 3 MHz, inside its "
+                                          "CLK_PER/6 ceiling"
+                                        : "and at 1.5 MHz",
                       ok);
     }
     for (const uint32_t hz : above) {
@@ -1974,9 +1976,9 @@ void th_avr_client() {
         print(serial, "  ", hz / 1000u, " kHz, above the client's CLK_PER/6: host mism=",
               v.mism, "/", e.count, " (first idx ", v.idx, " got ", hex(v.got), " exp ",
               hex(v.exp), "), client count=", r.count, " mism=", r.mism, "/", e.count, crlf);
-        bench.verdict(hz == 6'000'000UL ? "an AVR client is positively corrupted at 6 MHz "
-                                          "(CLK_PER/4), above its ceiling"
-                                        : "and at 12 MHz (CLK_PER/2)",
+        bench.verdict(hz == 6'000'000UL ? "an AVR client is positively corrupted at 6 MHz, "
+                                          "above its ceiling"
+                                        : "and at 12 MHz",
                       ran && rep && (v.mism > 0 || r.mism > 0));
     }
 

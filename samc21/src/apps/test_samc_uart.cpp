@@ -3250,7 +3250,7 @@ void tJ_link() {
     print(plain, "  peer: label '", label, "', kind ", hex(link::peer_kind(d.version)), ", fw ",
           hex(d.version), ", xtal ", d.xtal, ", sanity ", hex(d.sanity), crlf);
     bench.verdict("it identifies as usart_peer", have && d.sanity == link::ident_sanity);
-    bench.verdict("the avrxt peer (kind 0x01), its time base the 24 MHz crystal",
+    bench.verdict("the avrxt peer (kind 0x01), its time base its crystal",
                   have && link::peer_kind(d.version) == link::peer_avrxt && d.xtal == 1u);
     link_end();
 }
@@ -3266,13 +3266,22 @@ void tJ_link() {
 // transmitter). The span against the run's length at the rate ASKED is
 // this SERCOM's rate error in ppm, and it is judged against the error the
 // register itself predicts (table 30-2's equations at the reference, in
-// 64 bits), within what the instrument can tell: 50 ppm for the two
-// crystals, and each of the span's two stamps late by up to one sample of
-// the far receiver (a sixteenth of a bit, an eighth under its CLK2X) and
-// one idle turn of the far loop (64 ticks, its release listing) - the runs
-// long enough, 300 ms or 30000 frames, that the grain stays near the
-// crystals' budget. Every regime the generator offers: 16x and 8x on both
-// generators, 3x arithmetic, from 2400 baud to 3 Mbaud, and one rung on
+// 64 bits) PLUS THE TWO CRYSTALS' OFFSET, within what the instrument can
+// tell. The offset is read first, on the 1 Mbaud fractional rung, whose
+// register is exact on this generator (1.5: predicted 0 ppm) and whose
+// 30000 frames make the finest grain of any rung, so its reading IS the
+// far crystal against this one - judged only to be under 200 ppm, the
+// crystals' parts unknown here (the far board's quartz may sit a hundred
+// ppm from this one: the AVR64EA48 board's does); every other
+// rung is judged against its prediction plus that offset, within the two
+// readings' grain - each of a span's two stamps late by up to one sample
+// of the far receiver (a sixteenth of a bit, an eighth under its CLK2X)
+// and one idle turn of the far loop (64 ticks, its release listing) - and
+// 10 ppm for the crystals' drift across the letter (the AVR's letter x
+// reads the pair to 3 ppm over ten runs). The runs are long enough, 300
+// ms or 30000 frames, that the grain stays near that budget. Every regime
+// the generator offers: 16x and 8x on both generators, 3x arithmetic,
+// from 2400 baud to 3 Mbaud, and one rung on
 // generator 0 - OSC48M, the console's own regime - whose reading is that
 // oscillator's offset, judged inside table 31-3's +-2 %. Each rung then
 // echoes eight frames the far UART sends back: the receiver at that rate.
@@ -3333,6 +3342,7 @@ void tK_rate() {
         return;
     }
     const RateRung rungs[] = {
+        {UartSampling::x16_fractional, 1'000'000, gen_xtal},   // first: the crystals' offset
         {UartSampling::x16_arithmetic, 2'400, gen_xtal},
         {UartSampling::x16_arithmetic, 9'600, gen_xtal},
         {UartSampling::x16_fractional, 3'750, gen_xtal},
@@ -3340,7 +3350,6 @@ void tK_rate() {
         {UartSampling::x16_fractional, 115'200, gen_xtal},
         {UartSampling::x16_arithmetic, 921'600, gen_xtal},
         {UartSampling::x16_arithmetic, 1'000'000, gen_xtal},
-        {UartSampling::x16_fractional, 1'000'000, gen_xtal},
         {UartSampling::x16_arithmetic, 1'500'000, gen_xtal},
         {UartSampling::x8_arithmetic, 2'000'000, gen_xtal},
         {UartSampling::x8_fractional, 2'000'000, gen_xtal},
@@ -3351,6 +3360,9 @@ void tK_rate() {
         {UartSampling::x16_arithmetic, 115'200, 0},
     };
     print(plain, "  rung  BAUD  frames  far count/errors  span  ppm (predicted)  echo", crlf);
+    int32_t offset = 0;           ///< the far crystal against this one, ppm
+    int32_t offset_grain = 0;     ///< the reference reading's own grain, ppm
+    bool offset_read = false;
     for (const RateRung& g : rungs) {
         const uint32_t ref = g.generator == 0u ? SysClock::hz : xtal_hz;
         const auto reg = sercom_uart_baud_reg(ref, g.rate, g.sampling);
@@ -3391,9 +3403,11 @@ void tK_rate() {
         const int32_t want = predicted_ppm(ref, *reg, g.sampling, g.rate);
         const uint32_t far_samples = g.rate > 1'500'000u ? 8u : 16u;
         const uint32_t grain = 2u * (xtal_hz / g.rate / far_samples + 64u);
-        const int32_t tol = 50 + (have && r.span != 0u
-                                      ? static_cast<int32_t>((1'000'000ull * grain) / r.span)
-                                      : 0);
+        const int32_t grain_ppm =
+            have && r.span != 0u ? static_cast<int32_t>((1'000'000ull * grain) / r.span) : 0;
+        const bool reference = !offset_read && g.generator != 0u && g.rate == 1'000'000u &&
+                               uart_fractional(g.sampling) && uart_samples(g.sampling) == 16u;
+        const int32_t tol = reference ? 200 : grain_ppm + offset_grain + 10;
 
         // The echo: the far UART sends this end's frames back.
         link::Params e{};
@@ -3422,6 +3436,10 @@ void tK_rate() {
         print_ppm(ppm);
         print(plain, " (");
         print_ppm(want);
+        if (!reference && g.generator != 0u) {
+            print(plain, " ");
+            print_ppm(offset);
+        }
         print(plain, ", within ", static_cast<uint32_t>(tol), ")  echo ", 8u - bad, "/8, far ",
               ehave ? er.count : 0u, "/", ehave ? er.ferr : 0u, crlf);
         if (bad != 0u) {
@@ -3437,9 +3455,17 @@ void tK_rate() {
         if (g.generator == 0u) {
             judge(rung_name(g), ": OSC48M within table 31-3's recommended 2 %",
                   counted && abs32(ppm) <= 20'000);
+        } else if (reference) {
+            offset = ppm - want;
+            offset_grain = grain_ppm;
+            offset_read = counted && r.span != 0u;
+            judge(rung_name(g), ": an exact register, so the reading is the far crystal against "
+                                "this one - under 200 ppm",
+                  offset_read && abs32(offset) <= tol);
         } else {
-            judge(rung_name(g), ": the far crystal times the rate the register predicts",
-                  counted && r.span != 0u && abs32(ppm - want) <= tol);
+            judge(rung_name(g), ": the far crystal times the rate the register predicts, its "
+                                "offset added",
+                  counted && r.span != 0u && offset_read && abs32(ppm - want - offset) <= tol);
         }
         judge(rung_name(g), ": and this receiver takes the far echo",
               bad == 0u && ehave && er.count == 8u && er.ferr == 0u);
@@ -3980,11 +4006,15 @@ void tN_waveforms() {
         }
         // The decision lies BETWEEN the longest clean run and the shortest
         // broken one - the ladder's step is the measurement's grain, and the
-        // decision itself moves by a sample (1/16 bit) with the start edge's
-        // phase against the receiver's clock - so what is judged is that
-        // the bracket meets the vote's window and is no wider than two
-        // samples: a midpoint near the window's edge would fail on the
-        // grain alone.
+        // decision itself moves by a sample (1/16 bit, 62.5 thousandths)
+        // with the start edge's phase against the receiver's clock - so
+        // what is judged is that the bracket meets the vote's window and is
+        // no wider than two samples: a midpoint near the window's edge would
+        // fail on the grain alone. The same sample of phase lets two runs
+        // closer than it come out in either order (9.438 bits read clean
+        // and 9.398 broken, measured), and the pad log's turn - 1/75 of a
+        // bit, 14 thousandths - blurs each run's length once more: the
+        // bracket may cross by 63 + 14 = 77 thousandths.
         print(plain, "  read clean up to a low of ");
         print_millibits(clean_most);
         print(plain, " bits, FERR from ");
@@ -3992,8 +4022,9 @@ void tN_waveforms() {
         print(plain, ": the stop bit is decided between them", crlf);
         bench.verdict("the stop bit is decided at its vote, 9 6/16 to 9 8/16 bits from the start",
                       clean_most != 0u && broken_least != 0xFFFFFFFFu &&
-                          clean_most < broken_least && clean_most <= 9'500u &&
-                          broken_least >= 9'375u && broken_least - clean_most <= 125u);
+                          clean_most <= broken_least + 77u && clean_most <= 9'500u &&
+                          broken_least >= 9'375u &&
+                          (broken_least < clean_most || broken_least - clean_most <= 125u));
     }
 
     // 3. A lone low pulse: a start bit only once it outlasts the start
@@ -4481,9 +4512,18 @@ void tS_irda() {
             if (!clean && first_block == 0u) first_block = rx;
         }
         print(plain, crlf, "    taken up to RXPL ", last_pass, ", refused from ", first_block, crlf);
+        // The edge: the last RXPL taken, plus two, against the pulse. A
+        // pulse of L generator cycles is counted floor(L) or one fewer with
+        // its phase, and the ladder's even rungs take the largest even RXPL
+        // at most that count less two - so a pulse of its nominal length
+        // lands the edge between -2 and 0. The far coder's pulse is
+        // quantized to its own clock: 3/16 of a 115200 bit is 32.55 cycles
+        // of a 20 MHz AVR EA, so 32 or 33, 38.4 or 39.6 of this generator -
+        // one count lower still (-3, measured). The edge lies within two
+        // of -1.
         const int32_t edge = static_cast<int32_t>(last_pass) + 2 - static_cast<int32_t>(pl.pulse);
         judge("a pulse is a 0 while it lasts RXPL + 2 core cycles (31.8.5, to two cycles)",
-              last_pass != 0u && first_block != 0u && abs32(edge) <= 2);
+              last_pass != 0u && first_block != 0u && edge >= -3 && edge <= 1);
     }
     // 3. The coding means something: a plain far receiver cannot read this
     //    coder, and this receiver cannot read a plain far transmitter.

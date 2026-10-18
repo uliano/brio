@@ -38,6 +38,8 @@ static_assert(twi_rise_budget_ns(I2cSpeed::fast_400k) == 300u);
 static_assert(twi_needs_fm_plus(I2cSpeed::fast_plus_1m));
 static_assert(!twi_needs_fm_plus(I2cSpeed::fast_400k));
 
+#if PORTMUX_USART0_gm != 0x07
+// THE AVR DA/DB (a 50/50 clock, low = BAUD + 5 at every speed).
 // At 24 MHz, with the specification's worst-case rise AND fall charged
 // to the bus, all three speeds are decided by the tLOW FLOOR (equation
 // 29-5): equation 29-3 alone would give 103 / 22 / 6.
@@ -67,6 +69,35 @@ static_assert(!twi_baud_for(64'000'000u, I2cSpeed::standard_100k).has_value());
 // so the speed is refused there, not approximated; 12 MHz reaches it.
 static_assert(!twi_baud_for(8'000'000u, I2cSpeed::fast_plus_1m).has_value());
 static_assert(twi_baud_for(12'000'000u, I2cSpeed::fast_plus_1m).has_value());
+#else
+// THE AVR EA (DS40002443A 27.3.2.2.1, its duty measured: twi_low_ticks).
+// At 20 MHz with the specification's edges charged every speed is decided
+// by the tLOW floor, Fm with FMEN's five clocks in the low phase.
+static_assert(*twi_baud_for(20'000'000u, I2cSpeed::standard_100k) == 94);
+static_assert(*twi_baud_for(20'000'000u, I2cSpeed::fast_400k) == 21);
+static_assert(*twi_baud_for(20'000'000u, I2cSpeed::fast_plus_1m) == 4);
+static_assert(twi_low_ticks(94) == 100u);
+static_assert(twi_low_ticks(21, I2cSpeed::fast_400k) == 32u);
+static_assert(twi_low_ticks(4, I2cSpeed::fast_plus_1m) == 16u);
+static_assert(twi_low_ticks(2, I2cSpeed::fast_400k) == 10u);   // min(5, BAUD) below 5
+// ... clearing the mode's floor with the fall subtracted (x 1000 / 20).
+static_assert(twi_low_ticks(94) * 1000ul / 20ul - 300ul >= 4700ul);
+static_assert(twi_low_ticks(21, I2cSpeed::fast_400k) * 1000ul / 20ul - 300ul >= 1300ul);
+static_assert(twi_low_ticks(4, I2cSpeed::fast_plus_1m) * 1000ul / 20ul - 120ul >= 500ul);
+// The floor step is exact: one MBAUD less would miss the floor.
+static_assert(twi_low_ticks(93) * 1000ul / 20ul - 300ul < 4700ul);
+static_assert(twi_low_ticks(20, I2cSpeed::fast_400k) * 1000ul / 20ul - 300ul < 1300ul);
+// No regular clock below MBAUD 4 without FMPEN, 2 with it.
+static_assert(twi_baud_min(I2cSpeed::standard_100k) == 4u);
+static_assert(twi_baud_min(I2cSpeed::fast_400k) == 4u);
+static_assert(twi_baud_min(I2cSpeed::fast_plus_1m) == 2u);
+// The period is equation 1 (the DA/DB's 29-2) whatever the duty.
+static_assert(twi_period_ticks(20'000'000u, 94, 0) == 198u);
+// Fm+ needs CLK_PER over 12 MHz (35.15 table 35-21): refused at 12, reached at 16.
+static_assert(!twi_baud_for(12'000'000u, I2cSpeed::fast_plus_1m).has_value());
+static_assert(twi_baud_for(16'000'000u, I2cSpeed::fast_plus_1m).has_value());
+static_assert(!twi_baud_for(8'000'000u, I2cSpeed::fast_plus_1m).has_value());
+#endif
 static_assert(twi_clock_ok(24'000'000u, I2cSpeed::fast_plus_1m));
 static_assert(!twi_clock_ok(2'000'000u, I2cSpeed::fast_plus_1m));
 

@@ -188,15 +188,14 @@ brio::EventChannel<3>::pulse();
   the EA's six channels with each generator on the channel the letter
   names (no parity, no port pairs), the second pin of a port through its
   slot 1 (letter t's PD2 beside PD0's slot 0): SPI0's SCK, USART1's XCK
-  (200 ticks at 20 MHz), the software event's inversion, EVOUT at PA7,
-  PC7 and PD7, each read 5 us after the change (twenty runs of twenty;
-  PD7 drives the board's analog net, VREFA's 100 nF on it).
+  (200 ticks at 20 MHz), the software event's inversion, EVOUT at PA7
+  and PC7, each read 5 us after the change (ten runs of ten); PD7, the
+  board's analog net with VREFA's 100 nF on it, is not driven.
 - On the AVR128DA48 (rev A7) every event route `test_avr_timer`,
   `test_avr_tcd` and `test_avr_sleep` build runs as on the DB; its 48
   pins bond none of the pins DS80000882C 2.6.1 cuts off. EVOUT's ALT1
-  pins PA7, PC7 and PD7 read the held level 5 us after the change in
-  twelve runs of twelve, PD7 driving the board's analog net and VREFA's
-  100 nF on it.
+  pins PA7 and PC7 read the held level 5 us after the change in ten
+  runs of ten; PD7, the board's analog net, is not driven.
 - `EvPitDiv<64>` on an odd channel measures 512 Hz on an EVOUT pin,
   `EvPitDiv<8192>` on an even one 4 Hz: the dividers count CLK_RTC
   cycles (32768 / div), and the RTC counter's own prescaler does not
@@ -219,7 +218,8 @@ brio::EventChannel<3>::pulse();
   running; the software event on a channel a pin holds HIGH gives a
   LOW pulse each time (three pulses, three rising edges at their ends,
   the same count as on an idle channel), the 16.3.2.6 inversion; EVOUT
-  at the ALT1 positions PA7, PC7 and PD7 follows the channel both ways.
+  at the ALT1 positions PA7, PC7 and PD7 follows the channel both ways
+  (PA7 and PC7 alone on a board whose PD7 is its analog net).
 - The IRDA user carries USART2's IRCOM receiver off its pin
   ([usart.md](usart.md), the IREI finding).
 - **Asynchronous delivery in standby and power-down**: EVOUT, an
@@ -227,7 +227,7 @@ brio::EventChannel<3>::pulse();
   but the 32 kHz one stopped, and that pad's edge wakes the device
   ([platform.md](platform.md), the sleep modes); the ADC's event start,
   another, converts in standby. On the AVR64EA48 (rev B1) the PIT's
-  event slot drives EVOUT through power-down on PD2, PD7, PA7 and PC7
+  event slot drives EVOUT through power-down on PD2, PA7 and PC7
   and a LUT's input on channel 2 the same way (`test_avr_sleep` e and p,
   ten runs of ten): the EA's event system routes with every clock but
   the 32 kHz one stopped, as 16.3.3 says.

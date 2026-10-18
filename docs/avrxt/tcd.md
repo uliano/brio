@@ -397,9 +397,9 @@ has no RUNSTDBY of its own, and an oscillator's does not lend it one.
 CLK_PER, 5 V; `z` 256 verdicts, letters `f` and `j` twelve runs each):
 
 - Every formula, discipline, capture and input-mode figure repeats the
-  DB's to the tick. Its errata under their DA numbers: **2.13.2**
-  observed exactly as 2.14.2 on the DB (on ALT2 a WOB-only configuration
-  drives nothing, CMPAEN brings it back); **2.13.1 NOT reproduced**
+  DB's to the tick. Its errata under their DA numbers: **2.13.2** not
+  taken - ALT2's PF0/PF1 carry this board's 32.768 kHz crystal, which
+  letter `a` never drives (`board_xosc32k`); **2.13.1 NOT reproduced**
   either (16/16 captures and 8/8 blocked on-times at CNTPRES 4 and 32,
   down to a back-to-back set/clear); **2.13.3 NOT provoked** (mode 7
   with CMPASET = 0 halts, holds and restarts like CMPASET = 300). The
@@ -443,8 +443,11 @@ Implemented but not bench-verified:
 - **The ALT1 and ALT3 routes as waveform sources.** ALT1's pin claim and
   release are verified but no waveform is measured on PB4/PB5; ALT3 is
   PORTG, absent from the 48-pin bench chips. (ALT2 carries the
-  alternate-route erratum's measurement on both and WOC/WOD's waveforms
-  on the DA.)
+  alternate-route erratum's measurement on the DB and WOC/WOD's
+  waveforms on the DA.)
+- **Errata 2.13.2 on the DA.** The DA board's ALT2 pads PF0/PF1 carry
+  its 32.768 kHz crystal; a DA board with them free would take letter
+  `a`'s two verdicts.
 - **Input modes 1, 2, 3, 5 and 6.** Exposed and validity-checked
   against table 25-5; their signatures need per-state discrimination
   that the wireless rig does not have, so none of them is measured.

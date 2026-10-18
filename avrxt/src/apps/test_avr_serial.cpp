@@ -1,4 +1,4 @@
-// test_avr_serial - the USART test SUITE for the AVR DA/DB target, in
+// test_avr_serial - the USART test SUITE for the AVR DA/DB/EA target, in
 // two halves.
 //
 // SINGLE BOARD (a..i, I, T, `z`): instance and route handling (including
@@ -63,6 +63,18 @@
 // PA4 doubles as SPI0 MOSI and traffic button 2 - do not hold a button
 // down while test b runs.
 //
+// THE AVR EA (DS40002443A ch. 25, the DB's USART register for register,
+// a route table of another shape - 17.3.3/17.3.4). No USART reaches PORTE
+// there, so THE LINK - every loop-back letter and the two-board half - is
+// USART1 on ALT1: TXD PC4, RXD PC5, XCK PC6, XDIR PC7, which the AVR64EA48
+// board jumpers onto PE0..PE3 (avr_board.hpp's board_pc_pe_jumpers), the
+// same four nets to the peer; the PE pads stay inputs, one driver a net.
+// The instance smoke is USART0 ALT1 and USART1 DEFAULT (there is no
+// USART3), letter a reads every USART0/USART1 route back in USARTROUTEA,
+// and letter F - the EA's own - asks whether SFDEN set in Active mode
+// corrupts a frame (the DB's 2.16.2, absent from DS80001048D). Every rate
+// and bound derives from SysClock::hz: 20 MHz on that board.
+//
 // Commands: ? for the menu, z = all single-board, y = all two-board.
 
 // Its groups (the line below; docs/avrxt/README.md, "The group axis")
@@ -71,8 +83,8 @@
 // in two halves with the by-name letters in the second. The 128 KB DA
 // and DB build one image.
 //
-// build: boards = db48,da48
-// build: groups = abcdefghiIT,jklmnopq,rstuvwxB
+// build: boards = db48,da48,ea48
+// build: groups = abcdefghiITF,jklmnopq,rstuvwxB
 // build: monitor_speed = 460800
 
 #include <avr/interrupt.h>
@@ -103,15 +115,50 @@ using namespace brio;
 using Serial = Uart<2, Route::alt1>;
 constexpr Serial serial;
 
+/// The clock in MHz and whether it is the DA/DB boards' 24 MHz (the AVR
+/// EA board runs 20): every clock-dependent figure below derives from
+/// SysClock::hz, the strings name one or the other.
+constexpr bool at24 = SysClock::hz == 24'000'000u;
+static_assert(at24 || SysClock::hz == 20'000'000u, "the strings below name 24 or 20 MHz");
+
 using U0 = Usart<0>;
 using U1 = Usart<1>;
+#if defined(USART3)
 using U3 = Usart<3>;
-using U4 = Usart<4>;
+#endif
 
-using TxPin = Pin<'E', 0>;                 // USART4 TXD, default route
-using RxPin = Pin<'E', 1>;                 // USART4 RXD
-using XckPin = Pin<'E', 2>;                // USART4 XCK
-using ChTx = EventChannel<4>;              // PORTE/PORTF pin events: channels 4-5
+/// THE LINK: the USART whose pads are the board-to-board wires PE0..PE3.
+/// On the AVR DA/DB it is USART4 at its default route (TXD PE0, RXD PE1,
+/// XCK PE2, XDIR PE3). The AVR EA has no USART on PORTE: there it is
+/// USART1 on ALT1 (TXD PC4, RXD PC5, XCK PC6, XDIR PC7), which this board
+/// jumpers onto PE0..PE3 (avr_board.hpp's board_pc_pe_jumpers) - the same
+/// four nets, each with one driver: the PE pads stay inputs throughout.
+constexpr bool link_on_porte = usart_count >= 5;
+static_assert(link_on_porte || board_pc_pe_jumpers,
+              "the link reaches the board-to-board wires through the PC4..PC7 jumpers");
+constexpr uint8_t link_n = link_on_porte ? 4 : 1;
+constexpr UsartRoute link_route = link_on_porte ? UsartRoute::def : UsartRoute::alt1;
+constexpr char link_port = link_on_porte ? 'E' : 'C';
+constexpr uint8_t link_pin0 = link_on_porte ? 0 : 4;
+using Ul = Usart<link_n>;
+#if defined(USART4)
+#define LINK_USART "USART4"
+#define LINK_TXD "PE0"
+#define LINK_RXD "PE1"
+#define LINK_XCK "PE2"
+#define LINK_XDIR "PE3"
+#else
+#define LINK_USART "USART1 ALT1"
+#define LINK_TXD "PC4"
+#define LINK_RXD "PC5"
+#define LINK_XCK "PC6"
+#define LINK_XDIR "PC7"
+#endif
+
+using TxPin = Pin<link_port, link_pin0>;                                    // the link's TXD
+using RxPin = Pin<link_port, static_cast<uint8_t>(link_pin0 + 1u)>;         // its RXD
+using XckPin = Pin<link_port, static_cast<uint8_t>(link_pin0 + 2u)>;        // its XCK
+using ChTx = EventChannel<4>;              // PORTE/PORTF pin events: channels 4-5 (any, on the EA)
 
 // The start-bit meter: a TCB measuring the LOW pulse on the TX line.
 using T0 = Tcb<0>;
@@ -145,8 +192,8 @@ void ruler_down() {
 // The transport task, used only by the rebase test (its ISRs are bound
 // unconditionally; they are harmless while USART4 is configured as a
 // bare resource, because the resource never enables those interrupts).
-using U4Tx = Uart<4, Route::def, 32, 32>;
-using DynClock = DynamicClock<SysClock, Serial, U4Tx, Meter>;
+using UlTx = Uart<link_n, link_route, 32, 32>;
+using DynClock = DynamicClock<SysClock, Serial, UlTx, Meter>;
 
 /// z runs the single-board letters, y the two-board ones; v, w and x are
 /// run by name. The table holds every letter of the suite where the
@@ -181,12 +228,15 @@ bool near(int32_t a, int32_t b, int32_t tol) {
 }
 
 /// Everything back to a known quiet state: USART0/1/3/4 released (pins
-/// handed to PORT), the meter and its channels off.
+/// handed to PORT), the meter and its channels off - USART3 where the
+/// part has it (the AVR EA carries USART0..2, the link its USART1).
 void quiesce() {
     U0::release();
     U1::release();
+#if defined(USART3)
     U3::release();
-    U4::release();
+#endif
+    Ul::release();
     T0::disable();
     T0::enable_capt_interrupt(false);
     ChTx::off();
@@ -203,15 +253,15 @@ bool lbme4(const UsartFormat& f, uint32_t baud, UsartRxMode rx = UsartRxMode::no
            bool mpcm = false) {
     const uint16_t r = usart_baud_reg(SysClock::hz, baud, usart_samples(UsartMode::async, rx));
     if (r == 0) return false;
-    return U4::init({.route = UsartRoute::def, .bits = f.bits, .parity = f.parity,
+    return Ul::init({.route = link_route, .bits = f.bits, .parity = f.parity,
                      .two_stop = f.two_stop, .rx_mode = rx, .baud = r,
                      .loop_back = true, .multiprocessor = mpcm});
 }
 
 /// One frame out and back through the loop-back.
 std::optional<UsartFrame> roundtrip(uint16_t v) {
-    if (!U4::send(v)) return {};
-    return U4::wait();
+    if (!Ul::send(v)) return {};
+    return Ul::wait();
 }
 
 /// "5N1", "9LE2": the frame format as a label.
@@ -371,31 +421,70 @@ void pinless_smoke(const char* name) {
     U::release();
 }
 
+#if !defined(USART4)
+/// Every route of the AVR EA's USART0 and USART1, read back (below).
+template <typename R = UsartRoute>
+void ea_route_legs();
+#endif
+
+#if defined(USART4)
 void ta_instances() {
     print(serial, "a instances and routes (USART0/1/3 pinless, USART4 routed and released)", crlf);
     quiesce();
     pinless_smoke<U0>("USART0");
     pinless_smoke<U1>("USART1");
     pinless_smoke<U3>("USART3");
-    pinless_smoke<U4>("USART4");
+    pinless_smoke<Ul>("USART4");
 
     // USART4's default route claims PE0 (TXD, driven) and PE1 (RXD, input).
-    const bool ok = U4::init({.route = UsartRoute::def,
+    const bool ok = Ul::init({.route = link_route,
                               .baud = usart_baud_reg(SysClock::hz, 115'200u)});
     verdict("USART4 default route init", ok);
-    verdict("PORTMUX reads DEFAULT", U4::routed() == UsartRoute::def);
+    verdict("PORTMUX reads DEFAULT", Ul::routed() == UsartRoute::def);
     verdict("TXD PE0 driven as an output", TxPin::is_output());
     verdict("RXD PE1 left an input", !RxPin::is_output());
     verdict("the route table names PE0/PE1/PE2/PE3",
-            U4::txd(UsartRoute::def).port == 'E' && U4::txd(UsartRoute::def).pin == 0 &&
-            U4::rxd(UsartRoute::def).pin == 1 && U4::xck(UsartRoute::def).pin == 2 &&
-            U4::xdir(UsartRoute::def).pin == 3);
-    verdict("this package has no USART4 ALT1", !U4::has_route(UsartRoute::alt1));
-    U4::release();
-    verdict("release() routes back to NONE", U4::routed() == UsartRoute::none);
+            Ul::txd(UsartRoute::def).port == 'E' && Ul::txd(UsartRoute::def).pin == 0 &&
+            Ul::rxd(UsartRoute::def).pin == 1 && Ul::xck(UsartRoute::def).pin == 2 &&
+            Ul::xdir(UsartRoute::def).pin == 3);
+    verdict("this package has no USART4 ALT1", !Ul::has_route(UsartRoute::alt1));
+    Ul::release();
+    verdict("release() routes back to NONE", Ul::routed() == UsartRoute::none);
     verdict("release() hands PE0 back as an input", !TxPin::is_output());
     quiesce();
 }
+
+#else
+void ta_instances() {
+    print(serial, "a instances and routes (USART0/1 pinless, USART1 ALT1 routed and released, "
+                  "every USART0/USART1 route read back)", crlf);
+    quiesce();
+    pinless_smoke<U0>("USART0");
+    pinless_smoke<U1>("USART1");
+
+    // The AVR EA's link: USART1 ALT1 claims PC4 (TXD, driven) and PC5
+    // (RXD, input); their jumpered partners PE0/PE1 stay inputs.
+    const bool ok = Ul::init({.route = link_route,
+                              .baud = usart_baud_reg(SysClock::hz, 115'200u)});
+    verdict("USART1 ALT1 (the link) init", ok);
+    verdict("PORTMUX reads ALT1", Ul::routed() == UsartRoute::alt1);
+    verdict("TXD PC4 driven as an output", TxPin::is_output());
+    verdict("RXD PC5 left an input", !RxPin::is_output());
+    verdict("the route table names PC4/PC5/PC6/PC7",
+            Ul::txd(link_route).port == 'C' && Ul::txd(link_route).pin == 4 &&
+                Ul::rxd(link_route).pin == 5 && Ul::xck(link_route).pin == 6 &&
+                Ul::xdir(link_route).pin == 7);
+    verdict("their jumpered partners PE0..PE3 are inputs: one driver a net",
+            !Pin<'E', 0>::is_output() && !Pin<'E', 1>::is_output() &&
+                !Pin<'E', 2>::is_output() && !Pin<'E', 3>::is_output());
+    Ul::release();
+    verdict("release() routes back to NONE", Ul::routed() == UsartRoute::none);
+    verdict("release() hands PC4 back as an input", !TxPin::is_output());
+    ea_route_legs();
+    quiesce();
+}
+
+#endif
 
 // ---- b: the frame-format matrix in loop-back ---------------------------------
 
@@ -448,8 +537,88 @@ uint32_t instance_permille(UsartRoute route) {
     return pm;
 }
 
+#if !defined(USART4)
+/// smoke() with the route read back in the register while it stands:
+/// `field()` reads the instance's field, `code` is what it must hold.
+template <typename U, typename F>
+bool smoke_routed(UsartRoute route, uint8_t code, F field) {
+    if (!U::init({.route = route, .baud = usart_baud_reg(SysClock::hz, 115'200u),
+                  .loop_back = true})) {
+        return false;
+    }
+    bool ok = field() == code && U::routed() == route;
+    for (uint8_t k = 0; ok && k < 4; ++k) {
+        const uint8_t v = static_cast<uint8_t>(0xA5 + k);
+        ok = U::send(v);
+        const auto got = ok ? U::wait() : std::optional<UsartFrame>{};
+        ok = ok && got && got->clean() && got->data == v;
+    }
+    U::release();
+    return ok;
+}
+
+/// Every route of the AVR EA's USART0 and USART1 (DS40002443A 17.3.3:
+/// USARTROUTEA, USART0's field three bits wide at [2:0], USART1's two at
+/// [4:3]; USART2 alone in USARTROUTEB), each initialized and read back in
+/// the register, then released and read back as NONE. A route whose TXD
+/// pad is free runs a loop-back of four frames through it; one whose
+/// pads are this board's - USART0 ALT2's PA2/PA3 (the I2C bus) and
+/// USART1 ALT2's PD6/PD7 (the analog net) - is routed with both
+/// directions off, which claims no pin, and read back alone. USART0's
+/// DEFAULT (PA0/PA1, the quartz) is not routed at all, and USART2 is the
+/// console: its field is only read.
+template <typename R>
+void ea_route_legs() {
+    if constexpr (requires { R::alt2; R::alt3; R::alt4; }) {
+        const auto u0 = [] { return static_cast<uint8_t>(PORTMUX.USARTROUTEA & 0x07u); };
+        const auto u1 = [] { return static_cast<uint8_t>((PORTMUX.USARTROUTEA >> 3) & 0x03u); };
+        verdict("released, USART0 reads NONE = 5 in USARTROUTEA[2:0] and USART1 NONE = 3 in "
+                "[4:3]", u0() == 5u && u1() == 3u);
+        verdict("USART2's field is in USARTROUTEB: the console's ALT1, code 1",
+                (PORTMUX.USARTROUTEB & 0x03u) == 1u);
+        struct Leg {
+            uint8_t n;
+            R route;
+            uint8_t code;
+            bool loop;
+            const char* name;
+        };
+        static const Leg legs[] = {
+            {0, R::alt1, 1, true, "USART0 ALT1 (TXD PA4)"},
+            {0, R::alt2, 2, false, "USART0 ALT2 (PA2/PA3, routed with both directions off)"},
+            {0, R::alt3, 3, true, "USART0 ALT3 (TXD PD4)"},
+            {0, R::alt4, 4, true, "USART0 ALT4 (TXD PC1)"},
+            {1, R::def, 0, true, "USART1 DEFAULT (TXD PC0)"},
+            {1, R::alt1, 1, true, "USART1 ALT1 (TXD PC4, the link)"},
+            {1, R::alt2, 2, false, "USART1 ALT2 (PD6/PD7, routed with both directions off)"},
+        };
+        for (const Leg& l : legs) {
+            bool ok = false;
+            if (l.loop) {
+                ok = l.n == 0 ? smoke_routed<U0>(l.route, l.code, u0) : smoke_routed<U1>(l.route, l.code, u1);
+            } else {
+                const UsartConfig c{.route = l.route, .baud = usart_baud_reg(SysClock::hz, 115'200u),
+                                    .rx = false, .tx = false};
+                const bool up = l.n == 0 ? U0::init(c) : U1::init(c);
+                const uint8_t got = l.n == 0 ? u0() : u1();
+                const bool named = l.n == 0 ? U0::routed() == l.route : U1::routed() == l.route;
+                if (l.n == 0) U0::release(); else U1::release();
+                ok = up && got == l.code && named;
+            }
+            const bool back = l.n == 0 ? u0() == 5u : u1() == 3u;
+            verdict(l.name, l.loop ? ": the code reads back, four frames loop, NONE after release"
+                                   : ": the code reads back, NONE after release", ok && back);
+        }
+    }
+}
+#endif
+
 void tb_frames() {
+#if defined(USART4)
     print(serial, "b frame formats in loop-back on USART4 (default route, 115200)", crlf);
+#else
+    print(serial, "b frame formats in loop-back on USART1 (ALT1, 115200)", crlf);
+#endif
     quiesce();
     const UsartBits sizes[6] = {UsartBits::five, UsartBits::six, UsartBits::seven,
                                 UsartBits::eight, UsartBits::nine_low_first,
@@ -466,14 +635,14 @@ void tb_frames() {
             for (uint8_t s = 0; s < 2; ++s) {
                 const UsartFormat f{.bits = b, .parity = p, .two_stop = s != 0};
                 if (!lbme4(f, 115'200u)) { verdict("init ", fmt_name(f), false); continue; }
-                verdict("USART4 ", fmt_name(f), frame_ok(f));
+                verdict(LINK_USART " ", fmt_name(f), frame_ok(f));
                 uint32_t pm = 0;
                 if (b == UsartBits::nine_low_first) {
-                    pm = wire_permille<U4, UsartBits::nine_low_first>(115'200u, frame_bits(f), 256u);
+                    pm = wire_permille<Ul, UsartBits::nine_low_first>(115'200u, frame_bits(f), 256u);
                 } else if (b == UsartBits::nine_high_first) {
-                    pm = wire_permille<U4, UsartBits::nine_high_first>(115'200u, frame_bits(f), 256u);
+                    pm = wire_permille<Ul, UsartBits::nine_high_first>(115'200u, frame_bits(f), 256u);
                 } else {
-                    pm = wire_permille<U4>(115'200u, frame_bits(f), 256u);
+                    pm = wire_permille<Ul>(115'200u, frame_bits(f), 256u);
                 }
                 timed = timed && wire_ok(pm);
                 pm_low = pm < pm_low ? pm : pm_low;
@@ -492,8 +661,10 @@ void tb_frames() {
     wire_verdict("USART0", 115'200u, 1024u, instance_permille<U0>(UsartRoute::alt1));
     verdict("USART1 default 8N1 loop-back", smoke<U1>(UsartRoute::def));
     wire_verdict("USART1", 115'200u, 1024u, instance_permille<U1>(UsartRoute::def));
+#if defined(USART3)
     verdict("USART3 ALT1 8N1 loop-back", smoke<U3>(UsartRoute::alt1));
     wire_verdict("USART3", 115'200u, 1024u, instance_permille<U3>(UsartRoute::alt1));
+#endif
     quiesce();
 }
 
@@ -505,15 +676,15 @@ void tc_overflow() {
     if (!lbme4({}, 115'200u)) { verdict("init", false); quiesce(); return; }
     // Six frames go out back to back with nothing read.
     for (uint8_t i = 0; i < 6; ++i) {
-        (void)U4::send(static_cast<uint16_t>(0xA0 + i));
+        (void)Ul::send(static_cast<uint16_t>(0xA0 + i));
     }
-    (void)U4::wait_line_idle();
+    (void)Ul::wait_line_idle();
     delay_us(clock, 500);
 
     UsartFrame got[8];
     uint8_t cnt = 0;
-    while (U4::rxc_flag() && cnt < 8) {
-        got[cnt++] = U4::receive();
+    while (Ul::rxc_flag() && cnt < 8) {
+        got[cnt++] = Ul::receive();
     }
     print(serial, "  drained ", cnt, " frames:");
     for (uint8_t i = 0; i < cnt; ++i) {
@@ -536,7 +707,7 @@ void tc_overflow() {
     const auto again = roundtrip(0x5A);
     verdict("clean reception again after draining",
             again && again->clean() && again->data == 0x5A);
-    wire_verdict("8N1 on the loop", 115'200u, 1024u, wire_permille<U4>(115'200u, 10u, 1024u));
+    wire_verdict("8N1 on the loop", 115'200u, 1024u, wire_permille<Ul>(115'200u, 10u, 1024u));
     quiesce();
 }
 
@@ -549,28 +720,28 @@ void td_mpcm() {
     if (!lbme4(f9, 115'200u, UsartRxMode::normal, /*mpcm=*/true)) {
         verdict("init", false); quiesce(); return;
     }
-    (void)U4::send(0x055);                       // bit 8 = 0: a data frame
-    (void)U4::wait_line_idle();
+    (void)Ul::send(0x055);                       // bit 8 = 0: a data frame
+    (void)Ul::wait_line_idle();
     delay_us(clock, 300);
-    verdict("a data frame is filtered out", !U4::rxc_flag());
+    verdict("a data frame is filtered out", !Ul::rxc_flag());
 
-    (void)U4::send(0x133);                       // bit 8 = 1: an address frame
-    const auto addr = U4::wait();
+    (void)Ul::send(0x133);                       // bit 8 = 1: an address frame
+    const auto addr = Ul::wait();
     verdict("the address frame passes", addr && addr->data == 0x133);
 
-    U4::multiprocessor(false);                   // "this client is addressed"
+    Ul::multiprocessor(false);                   // "this client is addressed"
     const auto data = roundtrip(0x055);
     verdict("data frames arrive once MPCM is cleared", data && data->data == 0x055);
 
-    U4::multiprocessor(true);                    // back to listening for addresses
-    (void)U4::send(0x066);
-    (void)U4::wait_line_idle();
+    Ul::multiprocessor(true);                    // back to listening for addresses
+    (void)Ul::send(0x066);
+    (void)Ul::wait_line_idle();
     delay_us(clock, 300);
-    verdict("filtered again after re-arming MPCM", !U4::rxc_flag());
+    verdict("filtered again after re-arming MPCM", !Ul::rxc_flag());
     // Nine data bits on the wire: eleven bit periods a frame, data
     // frames the filter drops.
     wire_verdict("9N1 data frames", 115'200u, 1024u,
-                 wire_permille<U4, UsartBits::nine_low_first>(115'200u, frame_bits(f9), 1024u, 0x055));
+                 wire_permille<Ul, UsartBits::nine_low_first>(115'200u, frame_bits(f9), 1024u, 0x055));
     quiesce();
 }
 
@@ -590,9 +761,9 @@ void te_txc_dre() {
     print(serial, "e DRE = TXDATA accepts, TXC = the line went idle (9600)", crlf);
     quiesce();
     if (!lbme4({}, 9600u)) { verdict("init", false); quiesce(); return; }
-    verdict("DREIF is set on an idle transmitter", U4::dre_flag());
-    U4::clear_txc();
-    verdict("TXCIF cleared by a plain write-one store", !U4::txc_flag());
+    verdict("DREIF is set on an idle transmitter", Ul::dre_flag());
+    Ul::clear_txc();
+    verdict("TXCIF cleared by a plain write-one store", !Ul::txc_flag());
 
     // No printing between the writes and the measurement: a console line
     // at 460800 lasts longer than a frame at 9600 and every flag would
@@ -608,15 +779,15 @@ void te_txc_dre() {
     // lands in its own slot; three bare stores to TXDATA in a row are a
     // race - the second can arrive before the first has been handed on
     // and simply overwrite it.
-    (void)U4::send(0xAA);                        // straight through to the shifter
-    (void)U4::send(0x55);                        // into the buffer
-    (void)U4::send(0x3C);                        // into TXDATA: all three slots full
+    (void)Ul::send(0xAA);                        // straight through to the shifter
+    (void)Ul::send(0x55);                        // into the buffer
+    (void)Ul::send(0x3C);                        // into TXDATA: all three slots full
     delay_us(clock, 20);                         // the last write lands
-    const bool dre_busy = !U4::dre_flag();
-    const bool txc_busy = !U4::txc_flag();
-    const uint32_t to_dre = spin_until([] { return U4::dre_flag(); });
-    const bool txc_at_dre = U4::txc_flag();
-    const uint32_t to_txc = spin_until([] { return U4::txc_flag(); });
+    const bool dre_busy = !Ul::dre_flag();
+    const bool txc_busy = !Ul::txc_flag();
+    const uint32_t to_dre = spin_until([] { return Ul::dre_flag(); });
+    const bool txc_at_dre = Ul::txc_flag();
+    const uint32_t to_txc = spin_until([] { return Ul::txc_flag(); });
 
     verdict("DREIF low with three frames queued", dre_busy);
     verdict("TXCIF still low while shifting", txc_busy);
@@ -624,14 +795,14 @@ void te_txc_dre() {
     verdict("DREIF returns while the line is still busy", to_dre > 0 && !txc_at_dre);
     verdict("TXCIF only once the last frame has left", to_txc > 0);
 
-    const auto a = U4::poll();
-    const auto b = U4::poll();
-    const auto c = U4::poll();
+    const auto a = Ul::poll();
+    const auto b = Ul::poll();
+    const auto c = Ul::poll();
     verdict("all three frames arrived",
             a && b && c && a->data == 0xAA && b->data == 0x55 && c->data == 0x3C);
-    U4::clear_txc();
+    Ul::clear_txc();
     wire_verdict("8N1 on the loop", 9600u, run_frames(9600u),
-                 wire_permille<U4>(9600u, 10u, run_frames(9600u)));
+                 wire_permille<Ul>(9600u, 10u, run_frames(9600u)));
     quiesce();
 }
 
@@ -664,14 +835,14 @@ void measure_baud(uint32_t baud, bool clk2x) {
     const uint16_t reg = usart_baud_reg(SysClock::hz, baud, s);
     if (reg == 0) { verdict("baud not expressible", false); return; }
     // The receiver stays off: PE1 hangs on the neighbour board's input.
-    const bool ok = U4::init({.route = UsartRoute::def,
+    const bool ok = Ul::init({.route = link_route,
                               .rx_mode = clk2x ? UsartRxMode::clk2x : UsartRxMode::normal,
                               .baud = reg, .rx = false});
     if (!ok) { verdict("init", false); return; }
     Meter::init(clock, ChTx{}, TcbClock::div1, /*low=*/true);
     clear_captures();
     for (uint16_t i = 0; i < 200 && captures < 8; ++i) {
-        (void)U4::send(0xFF);
+        (void)Ul::send(0xFF);
     }
     (void)wait_captures(8, 200);
     const uint16_t w = last_width;
@@ -690,19 +861,24 @@ void measure_baud(uint32_t baud, bool clk2x) {
     // this one.
     const uint16_t frames = run_frames(baud);
     wire_verdict(clk2x ? "this rung, CLK2X" : "this rung", baud, frames,
-                 wire_permille<U4>(baud, 10u, frames, 0xFF));
-    U4::release();
+                 wire_permille<Ul>(baud, 10u, frames, 0xFF));
+    Ul::release();
 }
 
+/// The register's floor: the slowest rate BAUD's 65535 expresses at 16
+/// samples, rounded up (1465 baud at 24 MHz, 1221 at 20).
+constexpr uint32_t baud_floor = static_cast<uint32_t>(
+    (64ull * SysClock::hz + 16ull * 65535u - 1u) / (16ull * 65535u));
+
 void tf_baud_on_the_wire() {
-    print(serial, "f baud generator measured on PE0 (start bit -> EvPin -> TCB0 PW meter), "
+    print(serial, "f baud generator measured on " LINK_TXD " (start bit -> EvPin -> TCB0 PW meter), "
                   "each rung's run timed against the rate asked", crlf);
     quiesce();
     ChTx::source(EvPin<TxPin>{});
     // The register's floor (BAUD 65529 at 24 MHz), every rate the
     // two-board baud matrix (k) sets, and both ceilings: BAUD = 64 at
     // 16 samples (1.5 Mbaud) and at 8 (3 Mbaud).
-    measure_baud(1465u, false);
+    measure_baud(baud_floor, false);
     measure_baud(2400u, false);
     measure_baud(9600u, false);
     measure_baud(115'200u, false);
@@ -710,31 +886,32 @@ void tf_baud_on_the_wire() {
     measure_baud(460'800u, false);
     measure_baud(921'600u, false);
     measure_baud(1'000'000u, false);
-    measure_baud(1'500'000u, false);
+    measure_baud(SysClock::hz / 16u, false);
     measure_baud(460'800u, true);
     measure_baud(2'000'000u, true);
-    measure_baud(3'000'000u, true);
+    measure_baud(SysClock::hz / 8u, true);
     quiesce();
 }
 
 // ---- g: the clock rebase under traffic ---------------------------------------
 
 void tg_rebase() {
-    print(serial, "g rebase 24 -> 12 -> 24 MHz with USART4 among the clock's users", crlf);
+    print(serial, at24 ? "g rebase 24 -> 12 -> 24 MHz with " LINK_USART " among the clock's users"
+                       : "g rebase 20 -> 10 -> 20 MHz with " LINK_USART " among the clock's users", crlf);
     quiesce();
     ChTx::source(EvPin<TxPin>{});
     verdict("DynamicClock init (boot = the crystal)", DynClock::init());
-    U4Tx::init(DynClock{}, 115'200u);
-    U4::loop_back(true);                          // TXD still drives PE0 for the meter
+    UlTx::init(DynClock{}, 115'200u);
+    Ul::loop_back(true);                          // TXD still drives PE0 for the meter
     Meter::init(DynClock{}, ChTx{}, TcbClock::div1, /*low=*/true);
 
     // 0xFF frames only: the start bit is then the ONLY low pulse on the
     // line, so what the meter reads is exactly one bit time.
     auto exchange = []() {
-        (void)U4Tx::write_byte(0xFF);
+        (void)UlTx::write_byte(0xFF);
         for (uint32_t i = 0; i < 400'000u; ++i) {
             uint8_t b;
-            if (U4Tx::read_byte(b)) return b == 0xFF;
+            if (UlTx::read_byte(b)) return b == 0xFF;
         }
         return false;
     };
@@ -742,7 +919,7 @@ void tg_rebase() {
     clear_captures();
     bool clean24 = true;
     for (uint8_t i = 0; i < 8; ++i) clean24 = clean24 && exchange();
-    verdict("loop-back clean at 24 MHz", clean24);
+    verdict(at24 ? "loop-back clean at 24 MHz" : "loop-back clean at 20 MHz", clean24);
     (void)wait_captures(4, 100);
     const uint16_t t24 = last_width;
     const uint32_t us24 = Meter::us(t24);
@@ -754,42 +931,46 @@ void tg_rebase() {
     auto drain = []() {
         delay_us(clock, 200);
         uint8_t b;
-        while (U4Tx::read_byte(b)) {
+        while (UlTx::read_byte(b)) {
         }
     };
-    const uint32_t pm24 = task_wire_permille<U4Tx>(115'200u, 1024u, 0xFF);
+    const uint32_t pm24 = task_wire_permille<UlTx>(115'200u, 1024u, 0xFF);
     drain();
 
-    verdict("switch to 12 MHz", DynClock::set(12'000'000u));
+    verdict(at24 ? "switch to 12 MHz" : "switch to 10 MHz", DynClock::set(SysClock::hz / 2u));
     clear_captures();
     bool clean12 = true;
     for (uint8_t i = 0; i < 8; ++i) clean12 = clean12 && exchange();
-    verdict("loop-back clean at 12 MHz", clean12);
+    verdict(at24 ? "loop-back clean at 12 MHz" : "loop-back clean at 10 MHz", clean12);
     (void)wait_captures(4, 200);
     const uint16_t t12 = last_width;
     const uint32_t us12 = Meter::us(t12);
-    const uint32_t pm12 = task_wire_permille<U4Tx>(115'200u, 1024u, 0xFF, 12'000'000u);
+    const uint32_t pm12 = task_wire_permille<UlTx>(115'200u, 1024u, 0xFF, SysClock::hz / 2u);
     drain();
 
-    print(serial, "  24 MHz: ", t24, " ticks = ", us24, " us; 12 MHz: ", t12,
+    print(serial, at24 ? "  24 MHz: " : "  20 MHz: ", t24, " ticks = ", us24,
+          at24 ? " us; 12 MHz: " : " us; 10 MHz: ", t12,
           " ticks = ", us12, " us", crlf);
     verdict("ticks follow CLK_PER (halved +-2)", near(t12 * 2, t24, 4));
     verdict("the bit time stands still (+-1 us)", near(static_cast<int32_t>(us12),
                                                        static_cast<int32_t>(us24), 1));
-    wire_verdict("at 24 MHz, through the task", 115'200u, 1024u, pm24);
-    wire_verdict("at 12 MHz, through the task", 115'200u, 1024u, pm12);
-    verdict("back to 24 MHz", DynClock::set(24'000'000u));
+    wire_verdict(at24 ? "at 24 MHz, through the task" : "at 20 MHz, through the task", 115'200u,
+                 1024u, pm24);
+    wire_verdict(at24 ? "at 12 MHz, through the task" : "at 10 MHz, through the task", 115'200u,
+                 1024u, pm12);
+    verdict(at24 ? "back to 24 MHz" : "back to 20 MHz", DynClock::set(SysClock::hz));
     clear_captures();
     bool back = true;
     for (uint8_t i = 0; i < 8; ++i) back = back && exchange();
-    verdict("loop-back clean again at 24 MHz", back);
+    verdict(at24 ? "loop-back clean again at 24 MHz" : "loop-back clean again at 20 MHz", back);
     (void)wait_captures(4, 100);
     verdict("bit time restored (+-2 ticks)", near(last_width, t24, 2));
-    const uint32_t pm_back = task_wire_permille<U4Tx>(115'200u, 1024u, 0xFF);
+    const uint32_t pm_back = task_wire_permille<UlTx>(115'200u, 1024u, 0xFF);
     drain();
-    wire_verdict("back at 24 MHz, through the task", 115'200u, 1024u, pm_back);
+    wire_verdict(at24 ? "back at 24 MHz, through the task" : "back at 20 MHz, through the task",
+                 115'200u, 1024u, pm_back);
 
-    U4::enable_rxc_interrupt(false);
+    Ul::enable_rxc_interrupt(false);
     quiesce();
 }
 
@@ -801,7 +982,7 @@ void tg_rebase() {
 // receiver stays dead until RXEN is toggled - which is exactly what
 // AutoBaud::recover() does.
 
-using Ab = AutoBaud<4, UsartRoute::def>;
+using Ab = AutoBaud<link_n, link_route>;
 
 /// The instance in an auto-baud mode WITH the loop-back on from the
 /// first store: configuring it in two steps would leave the receiver
@@ -810,14 +991,14 @@ using Ab = AutoBaud<4, UsartRoute::def>;
 bool autobaud_init(uint32_t baud, bool lin) {
     const uint16_t r = usart_baud_reg(SysClock::hz, baud);
     if (r == 0) return false;
-    if (!U4::init({.route = UsartRoute::def,
+    if (!Ul::init({.route = link_route,
                    .rx_mode = lin ? UsartRxMode::linauto : UsartRxMode::genauto,
                    .baud = r, .loop_back = true})) {
         return false;
     }
-    U4::flush_rx();
-    U4::clear_break();
-    U4::clear_isf();
+    Ul::flush_rx();
+    Ul::clear_break();
+    Ul::clear_isf();
     return true;
 }
 
@@ -826,9 +1007,9 @@ bool autobaud_init(uint32_t baud, bool lin) {
 /// receiver. Short of a real LIN break, but enough for GENAUTO once
 /// WFB is armed.
 void send_break_and_sync(uint8_t sync) {
-    (void)U4::send(0x00);
-    (void)U4::send(sync);
-    (void)U4::wait_line_idle();
+    (void)Ul::send(0x00);
+    (void)Ul::send(sync);
+    (void)Ul::wait_line_idle();
     delay_us(clock, 4000);
 }
 
@@ -837,7 +1018,7 @@ void send_break_and_sync(uint8_t sync) {
 /// released, which is the only way a single board can produce the 12+
 /// low bit times LINAUTO insists on. Then the sync character.
 void manual_break_and_sync(uint8_t sync, uint32_t bit_us, uint8_t bits) {
-    U4::enable_tx(false);                        // the pad is PORT's again
+    Ul::enable_tx(false);                        // the pad is PORT's again
     TxPin::set();
     TxPin::output();
     delay_us(clock, bit_us * 2);
@@ -845,9 +1026,9 @@ void manual_break_and_sync(uint8_t sync, uint32_t bit_us, uint8_t bits) {
     delay_us(clock, bit_us * bits);
     TxPin::set();
     delay_us(clock, bit_us * 2);
-    U4::enable_tx(true);                         // the USART overrides it again
-    (void)U4::send(sync);
-    (void)U4::wait_line_idle();
+    Ul::enable_tx(true);                         // the USART overrides it again
+    (void)Ul::send(sync);
+    (void)Ul::wait_line_idle();
     delay_us(clock, 4000);
 }
 
@@ -868,7 +1049,7 @@ void th_autobaud() {
             near(measured, nominal, nominal / 100));
     // Whatever the counter's scale, transmitter and receiver share BAUD,
     // so the link must still round-trip after the update.
-    U4::flush_rx();
+    Ul::flush_rx();
     const auto after = roundtrip(0xC3);
     verdict("the link still round-trips at the measured rate",
             after && after->clean() && after->data == 0xC3);
@@ -876,7 +1057,7 @@ void th_autobaud() {
     // WIRE says whether it is the sender's: a run at the learned BAUD
     // against the 19200 the sync field was sent at.
     wire_verdict("at the learned BAUD", 19'200u, run_frames(19'200u),
-                 wire_permille<U4>(19'200u, 10u, run_frames(19'200u)));
+                 wire_permille<Ul>(19'200u, 10u, run_frames(19'200u)));
 
     // LINAUTO insists the sync character be 0x55 (27.3.3.2.5): anything
     // else sets ISFIF, which is the deterministic way to reach errata
@@ -890,18 +1071,18 @@ void th_autobaud() {
     if (isf) {
         // Errata 2.16.3: the receiver is dead and clearing the flag alone
         // does not revive it.
-        U4::clear_isf();
-        U4::rx_mode(UsartRxMode::normal);
-        U4::baud_reg(nominal);
-        U4::flush_rx();
-        (void)U4::send(0x3C);
-        (void)U4::wait_line_idle();
+        Ul::clear_isf();
+        Ul::rx_mode(UsartRxMode::normal);
+        Ul::baud_reg(nominal);
+        Ul::flush_rx();
+        (void)Ul::send(0x3C);
+        (void)Ul::wait_line_idle();
         delay_us(clock, 2000);
-        verdict("clearing ISFIF alone leaves the receiver dead", !U4::rxc_flag());
+        verdict("clearing ISFIF alone leaves the receiver dead", !Ul::rxc_flag());
         Ab::recover();
-        U4::flush_rx();
-        (void)U4::send(0x3C);
-        const auto alive = U4::wait();
+        Ul::flush_rx();
+        (void)Ul::send(0x3C);
+        const auto alive = Ul::wait();
         verdict("RXEN toggled: the receiver is back", alive && alive->data == 0x3C);
     }
     quiesce();
@@ -913,13 +1094,13 @@ void th_autobaud() {
 // what it sent. The electrical side (a real client on XCK/TXD/RXD) is
 // test_avr_spi's, which drives this mode against a real SPI client.
 
-using Mspi = MspiHost<4, UsartRoute::def>;
+using Mspi = MspiHost<link_n, link_route>;
 
 bool mspi_pass(bool lsb_first, bool trailing) {
     if (!Mspi::init(clock, 1'000'000u, {.lsb_first = lsb_first, .sample_trailing = trailing})) {
         return false;
     }
-    U4::loop_back(true);
+    Ul::loop_back(true);
     const uint8_t patterns[4] = {0x00, 0xFF, 0x5A, 0xA5};
     for (uint8_t p : patterns) {
         const auto got = Mspi::transfer(p);
@@ -929,22 +1110,22 @@ bool mspi_pass(bool lsb_first, bool trailing) {
 }
 
 void ti_mspi() {
-    print(serial, "i Host SPI mode on USART4 (XCK PE2, MOSI looped back internally)", crlf);
+    print(serial, "i Host SPI mode on " LINK_USART " (XCK " LINK_XCK ", MOSI looped back internally)", crlf);
     quiesce();
-    verdict("XCK PE2 is bonded on this package", U4::xck(UsartRoute::def).bonded);
+    verdict("XCK " LINK_XCK " is bonded on this package", Ul::xck(link_route).bonded);
     verdict("MSB first, sample leading", mspi_pass(false, false));
-    verdict("XCK PE2 driven as an output", XckPin::is_output());
+    verdict("XCK " LINK_XCK " driven as an output", XckPin::is_output());
     verdict("LSB first, sample leading", mspi_pass(true, false));
     verdict("MSB first, sample trailing", mspi_pass(false, true));
     verdict("LSB first, sample trailing", mspi_pass(true, true));
     verdict("the SPI rate is CLK_PER / (2 x BAUD[15:6])",
-            U4::actual_baud(SysClock::hz) == 1'000'000u);
+            Ul::actual_baud(SysClock::hz) == 1'000'000u);
     // XCK on the wire: 1024 frames of eight clock periods streamed
     // through the double-buffered transmitter (27.3.3.1.4), against
     // 1 MHz asked.
     (void)Mspi::init(clock, 1'000'000u, {});
-    U4::loop_back(true);
-    const uint32_t pm = wire_permille<U4>(1'000'000u, 8u, 1024u);
+    Ul::loop_back(true);
+    const uint32_t pm = wire_permille<Ul>(1'000'000u, 8u, 1024u);
     print(serial, "  1024 frames at 1 MHz in ", pm, " thousandths of eight XCK periods each",
           crlf);
     verdict("XCK runs at the rate asked: 1024 frames of eight periods, -1 % to +3 %",
@@ -975,14 +1156,14 @@ void tI_injected() {
     quiesce();
     constexpr uint8_t runs = 4;         // K breaks, one after each run
     constexpr uint8_t per_run = 15;     // N = runs * (per_run + 1) = 64 slots
-    U4Tx::init(clock, 115'200u);
-    U4::loop_back(true);
-    verdict("tx_idle() before the first byte (nothing sent since init)", U4Tx::tx_idle());
+    UlTx::init(clock, 115'200u);
+    Ul::loop_back(true);
+    verdict("tx_idle() before the first byte (nothing sent since init)", UlTx::tx_idle());
     // The task's transmit path on the wire, the receiver off meanwhile.
-    U4::enable_rx(false);
-    wire_verdict("through the task", 115'200u, 1024u, task_wire_permille<U4Tx>(115'200u, 1024u));
-    U4::enable_rx(true);
-    U4::flush_rx();
+    Ul::enable_rx(false);
+    wire_verdict("through the task", 115'200u, 1024u, task_wire_permille<UlTx>(115'200u, 1024u));
+    Ul::enable_rx(true);
+    Ul::flush_rx();
     uint8_t sent[runs * per_run];
     for (uint8_t i = 0; i < sizeof sent; ++i) {
         sent[i] = static_cast<uint8_t>(0x30 + i * 3u);
@@ -991,32 +1172,32 @@ void tI_injected() {
     uint8_t got[sizeof sent + 8];
     uint8_t n = 0;
     uint8_t b = 0;
-    const uint32_t skips0 = U4Tx::rx_skips();
+    const uint32_t skips0 = UlTx::rx_skips();
     for (uint8_t r = 0; r < runs; ++r) {
         const uint8_t* run = sent + r * per_run;
         uint8_t queued = 0;
         while (queued < per_run) {
             queued = static_cast<uint8_t>(
-                queued + U4Tx::write_bulk({run + queued, static_cast<size_t>(per_run - queued)}));
+                queued + UlTx::write_bulk({run + queued, static_cast<size_t>(per_run - queued)}));
         }
-        while (!U4Tx::tx_idle()) {
+        while (!UlTx::tx_idle()) {
         }
         // The run is in the ring (RXCIF rises before the sender's TXCIF):
         // taken now, so the task's 32-byte ring holds one run at a time.
-        while (n < sizeof got && U4Tx::read_byte(b)) {
+        while (n < sizeof got && UlTx::read_byte(b)) {
             got[n++] = b;
         }
-        U4::enable_tx(false);
+        Ul::enable_tx(false);
         TxPin::clear();
         TxPin::output();
         delay_us(clock, 12u * bit_us);      // the break: twelve bit times low
         TxPin::set();
         delay_us(clock, 2u * bit_us);
-        U4::enable_tx(true);
-        (void)U4Tx::read_byte(b);           // the look that skips the break
+        Ul::enable_tx(true);
+        (void)UlTx::read_byte(b);           // the look that skips the break
     }
     delay_us(clock, 2'000);
-    while (n < sizeof got && U4Tx::read_byte(b)) {
+    while (n < sizeof got && UlTx::read_byte(b)) {
         got[n++] = b;
     }
     bool in_order = n == sizeof sent;
@@ -1024,39 +1205,39 @@ void tI_injected() {
         in_order = got[i] == sent[i];
     }
     print(serial, "  ", runs * (per_run + 1), " slots, ", runs, " breaks: delivered ", n,
-          ", frame errors ", U4Tx::frame_errors(), ", parity ", U4Tx::parity_errors(),
-          ", ring ", U4Tx::rx_overruns(), ", hw ", U4Tx::hw_overruns(), crlf);
-    const uint32_t skips = (U4Tx::rx_skips() - skips0) & 0xFFu;
+          ", frame errors ", UlTx::frame_errors(), ", parity ", UlTx::parity_errors(),
+          ", ring ", UlTx::rx_overruns(), ", hw ", UlTx::hw_overruns(), crlf);
+    const uint32_t skips = (UlTx::rx_skips() - skips0) & 0xFFu;
     verdict("N - K bytes delivered, intact and in order", in_order);
-    verdict("the frame-error counter reads K", U4Tx::frame_errors() == runs);
+    verdict("the frame-error counter reads K", UlTx::frame_errors() == runs);
     verdict("one skip a break", skips == runs);
     verdict("no other counter moved",
-            U4Tx::parity_errors() == 0 && U4Tx::rx_overruns() == 0 && U4Tx::hw_overruns() == 0);
+            UlTx::parity_errors() == 0 && UlTx::rx_overruns() == 0 && UlTx::hw_overruns() == 0);
 
     // BUFOVF: the receive interrupt off, six frames sent polled.
-    U4Tx::clear_errors();
-    U4::enable_rxc_interrupt(false);
+    UlTx::clear_errors();
+    Ul::enable_rxc_interrupt(false);
     for (uint8_t i = 0; i < 6; ++i) {
-        (void)U4::send(static_cast<uint16_t>(0xA0 + i));
+        (void)Ul::send(static_cast<uint16_t>(0xA0 + i));
     }
     delay_us(clock, 1'000);                 // six frames at 115200 are 521 us
-    U4::enable_rxc_interrupt(true);         // one entry takes what the buffer holds
+    Ul::enable_rxc_interrupt(true);         // one entry takes what the buffer holds
     delay_us(clock, 100);
-    const uint32_t queued = U4Tx::rx_pending();
-    const uint32_t skips1 = U4Tx::rx_skips();
+    const uint32_t queued = UlTx::rx_pending();
+    const uint32_t skips1 = UlTx::rx_skips();
     n = 0;
-    while (n < sizeof got && U4Tx::read_byte(b)) {
+    while (n < sizeof got && UlTx::read_byte(b)) {
         got[n++] = b;
     }
-    const uint32_t skips_after = (U4Tx::rx_skips() - skips1) & 0xFFu;
+    const uint32_t skips_after = (UlTx::rx_skips() - skips1) & 0xFFu;
     print(serial, "  six frames into a full buffer: ", queued, " queued by one entry, ", n,
-          " delivered, skips ", skips_after, ", hw ", U4Tx::hw_overruns(), crlf);
+          " delivered, skips ", skips_after, ", hw ", UlTx::hw_overruns(), crlf);
     verdict("one entry took the buffer's three: the two oldest and the newest", queued == 3);
     verdict("the look after the overflow skips them: none delivered, one skip",
             n == 0 && skips_after == 1);
-    verdict("one hardware overrun counted", U4Tx::hw_overruns() == 1);
-    verdict("RXCIF clear: the entry took the buffer whole", !U4::rxc_flag());
-    U4::enable_rxc_interrupt(false);
+    verdict("one hardware overrun counted", UlTx::hw_overruns() == 1);
+    verdict("RXCIF clear: the entry took the buffer whole", !Ul::rxc_flag());
+    Ul::enable_rxc_interrupt(false);
     quiesce();
 }
 
@@ -1066,48 +1247,105 @@ void tI_injected() {
 // has one rising edge in its last frame, the start of the stop bit, so the
 // stop bit ends one bit time (S x BAUD / 64 CLK_PER) after the capture. The
 // thread spins on tx_idle() and reads TCB0 the moment it turns true: never
-// before the stop bit's end, and within one bit time after it at 115200
-// and 460800. At 1 Mbaud a bit is 24 CLK_PER, the poll's own turn about
-// twenty: printed, judged only for "never before". The receiver is off,
-// so no RXC entry lands in the poll.
+// before the stop bit's end, and within one bit time after it where a bit
+// outlasts the poll's turn and the capture's read - at 115200, and at
+// 460800 on a 24 MHz board (52 CLK_PER a bit; 26 to 47 measured after the
+// stop bit). At 1 Mbaud a bit is 24 CLK_PER, and at 20 MHz a bit at 460800
+// is 44 - neither above that turn (15 to 50 measured at 20 MHz, 81 with
+// the PIT's tick handler inside the poll): printed, judged only for "never
+// before". The receiver is off, so no RXC entry lands in the poll.
 
 void tT_tx_idle() {
-    print(serial, "T tx_idle() against the last stop bit on the pad (TCB0 capture of PE0)", crlf);
+    print(serial, "T tx_idle() against the last stop bit on the pad (TCB0 capture of " LINK_TXD ")", crlf);
     quiesce();
     static const uint8_t burst[16] = {0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55,
                                       0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x00};
     constexpr uint32_t rates[] = {115'200u, 460'800u, 1'000'000u};
     for (const uint32_t baud : rates) {
-        U4Tx::init(clock, baud);
-        U4::enable_rx(false);
-        verdict("tx_idle() true before the first run", U4Tx::tx_idle());
+        UlTx::init(clock, baud);
+        Ul::enable_rx(false);
+        verdict("tx_idle() true before the first run", UlTx::tx_idle());
         T0::init({.mode = TcbMode::capture, .clock = TcbClock::div1, .event_input = true});
         ChTx::source(EvPin<TxPin>{});
         T0::capture_on(ChTx{});
-        const uint32_t queued = U4Tx::write_bulk({burst, sizeof burst});
-        const bool busy = !U4Tx::tx_idle();
-        while (!U4Tx::tx_idle()) {
+        const uint32_t queued = UlTx::write_bulk({burst, sizeof burst});
+        const bool busy = !UlTx::tx_idle();
+        while (!UlTx::tx_idle()) {
         }
         const uint16_t at = T0::count();
         delay_us(clock, 200);
         const uint16_t cap = T0::capture();
         const int32_t bit = static_cast<int32_t>(
-            (static_cast<uint32_t>(U4::baud_reg()) * U4::samples() + 32u) / 64u);
+            (static_cast<uint32_t>(Ul::baud_reg()) * Ul::samples() + 32u) / 64u);
         const int32_t after = static_cast<int32_t>(static_cast<int16_t>(at - cap)) - bit;
         print(serial, "  ", baud, ": bit ", bit, " CLK_PER, tx_idle() turned true ", after,
               " CLK_PER after the last stop bit", crlf);
         verdict("the run queued whole and tx_idle() false behind it", queued == sizeof burst && busy);
         verdict("tx_idle() never before the last stop bit's end", after >= 0);
-        if (baud <= 460'800u) {
+        if (baud <= (at24 ? 460'800u : 115'200u)) {
             verdict("and within one bit time after it", after <= bit);
         }
-        wire_verdict("through the task", baud, 1024u, task_wire_permille<U4Tx>(baud, 1024u));
-        U4Tx::release();
+        wire_verdict("through the task", baud, 1024u, task_wire_permille<UlTx>(baud, 1024u));
+        UlTx::release();
         T0::disable();
         ChTx::off();
     }
     quiesce();
 }
+
+#if !defined(USART4)
+// ---- F: SFDEN left set in ACTIVE mode (the AVR EA) ---------------------------
+// The DB's DS80000915F 2.16.2 (and the DA's 2.15.2): with SFDEN set in
+// Active mode a read of RXDATA re-triggers the start-of-frame detector and
+// corrupts the frame being received - which is why SFDEN is a verb pair
+// here and not a configuration field. DS80001048D lists no such item for
+// the AVR EA. The probe: the link's loop-back at 115200, frames sent back
+// to back by the resource (DREIF before each store), each one read three
+// bit times after its RXCIF - RXCIF rises in the middle of the stop bit,
+// so the read lands inside the NEXT frame's reception, its start bit and
+// first data bits, where the erratum's re-trigger would cut it - 256
+// frames without SFDEN (the control) and 256 with it, each compared with
+// what was sent.
+void tF_sfden_active() {
+    print(serial, "F SFDEN set in ACTIVE mode: 256 back-to-back frames each read inside the "
+                  "next one's reception, without SFDEN and with it (DB errata 2.16.2's twin?)",
+          crlf);
+    quiesce();
+    uint16_t bad[2] = {0, 0};
+    uint16_t got[2] = {0, 0};
+    for (uint8_t leg = 0; leg < 2; ++leg) {
+        if (!lbme4({}, 115'200u)) {
+            verdict("init", false);
+            quiesce();
+            return;
+        }
+        if (leg == 1) Ul::arm_start_of_frame();
+        uint16_t sent = 0;
+        uint8_t next = 0;
+        for (uint32_t spins = 0; got[leg] < 256u && spins < 2'000'000u; ++spins) {
+            if (sent < 256u && Ul::dre_flag()) {
+                Ul::transmit_as<UsartBits::eight>(static_cast<uint8_t>(0x40u + sent));
+                ++sent;
+            }
+            if (Ul::rxc_flag()) {
+                delay_us(clock, 3u * 1'000'000u / 115'200u);   // three bit times: inside the next frame
+                const UsartFrame f = Ul::receive();
+                if (!f.clean() || f.data != static_cast<uint8_t>(0x40u + next)) ++bad[leg];
+                ++next;
+                ++got[leg];
+            }
+        }
+        if (leg == 1) Ul::disarm_start_of_frame();
+        Ul::release();
+    }
+    print(serial, "  without SFDEN: ", got[0], " frames, ", bad[0], " wrong; with SFDEN set: ",
+          got[1], " frames, ", bad[1], " wrong", crlf);
+    verdict("the control: 256 frames read back to back, none wrong", got[0] == 256u && bad[0] == 0u);
+    verdict("with SFDEN set in Active mode the same 256 arrive, none wrong (no twin of DB "
+            "2.16.2 on this die)", got[1] == 256u && bad[1] == 0u);
+    quiesce();
+}
+#endif
 
 // ==============================================================================
 //  THE TWO-BOARD HALF (j .. u, w): the far board runs `usart_peer`, driven
@@ -1119,15 +1357,15 @@ void tT_tx_idle() {
 //  hanging.
 // ==============================================================================
 
-using XdirPin = Pin<'E', 3>;               // USART4 XDIR: DUT-local, not wired
+using XdirPin = Pin<link_port, static_cast<uint8_t>(link_pin0 + 3u)>;   // the link's XDIR
 using Ch2 = EventChannel<5>;               // the second PORTE/PORTF channel
 
 // The tasks the two-board half puts on the wire.
-using Irda = IrdaLink<4, UsartRoute::def>;
-using Bus = Rs485<4, UsartRoute::def>;
-using SyncH = SyncHost<4, UsartRoute::def>;
-using SyncC = SyncClient<4, UsartRoute::def>;
-using Line = OneWire<4, UsartRoute::def>;
+using Irda = IrdaLink<link_n, link_route>;
+using Bus = Rs485<link_n, link_route>;
+using SyncH = SyncHost<link_n, link_route>;
+using SyncC = SyncClient<link_n, link_route>;
+using Line = OneWire<link_n, link_route>;
 
 link::Decoder dec;
 const uint8_t no_payload[1] = {0};
@@ -1140,7 +1378,7 @@ bool topo_known = false;
 bool link_quiet = false;      ///< suppress the failure dump while probing
 bool shared_line() { return topo == link::Topology::shared; }
 
-void put4(uint8_t b) { (void)U4::send(b, 200'000u); }
+void put4(uint8_t b) { (void)Ul::send(b, 200'000u); }
 
 /// Half-duplex turnaround guard. RXCIF is raised at the MIDDLE of the
 /// stop bit - half a bit BEFORE the sender's TXCIF - so an end that
@@ -1151,7 +1389,7 @@ void put4(uint8_t b) { (void)U4::send(b, 200'000u); }
 /// BAUD register in force, before taking the line.
 void turnaround_guard() {
     const uint32_t bit_cycles =
-        (static_cast<uint32_t>(U4::baud_reg()) * U4::samples()) / 64u;
+        (static_cast<uint32_t>(Ul::baud_reg()) * Ul::samples()) / 64u;
     delay_cycles(4u * (bit_cycles ? bit_cycles : 1u));
 }
 
@@ -1161,12 +1399,12 @@ void turnaround_guard() {
 void line_talk() {
     turnaround_guard();
     if (shared_line()) {
-        U4::enable_rx(false);
+        Ul::enable_rx(false);
         TxPin::set();
         TxPin::output();
-        U4::enable_tx(true);
+        Ul::enable_tx(true);
     }
-    U4::clear_txc();            // so line_listen waits for THIS burst
+    Ul::clear_txc();            // so line_listen waits for THIS burst
 }
 
 /// Give it back to the pull-up and listen again. It OWNS the wait for
@@ -1174,17 +1412,17 @@ void line_talk() {
 /// waits first and then calls this would spin out its whole budget with
 /// the receiver still off - and miss the answer.
 void line_listen(bool wait = true) {
-    if (wait) (void)U4::wait_line_idle(200'000u);
+    if (wait) (void)Ul::wait_line_idle(200'000u);
     if (!shared_line()) return;
-    U4::enable_tx(false);
+    Ul::enable_tx(false);
     TxPin::input();
-    pinctrl_of('E', 0) |= PORT_PULLUPEN_bm;
-    U4::flush_rx();
-    U4::enable_rx(true);
+    pinctrl_of(link_port, link_pin0 + 0u) |= PORT_PULLUPEN_bm;
+    Ul::flush_rx();
+    Ul::enable_rx(true);
 }
 
 void xck_invert(bool on) {
-    volatile uint8_t& c = pinctrl_of('E', 2);
+    volatile uint8_t& c = pinctrl_of(link_port, link_pin0 + 2u);
     if (on) c |= PORT_INVEN_bm;
     else c &= static_cast<uint8_t>(~PORT_INVEN_bm);
 }
@@ -1192,7 +1430,7 @@ void xck_invert(bool on) {
 /// RXD's INVEN (PE1): the one inversion this end can supply to a peer
 /// whose IrDA coder pulses the other way (letter s).
 void rxd_invert(bool on) {
-    volatile uint8_t& c = pinctrl_of('E', 1);
+    volatile uint8_t& c = pinctrl_of(link_port, link_pin0 + 1u);
     if (on) c |= PORT_INVEN_bm;
     else c &= static_cast<uint8_t>(~PORT_INVEN_bm);
 }
@@ -1201,18 +1439,18 @@ void rxd_invert(bool on) {
 bool link_command_mode() {
     xck_invert(false);
     rxd_invert(false);
-    const bool ok = U4::init({.route = UsartRoute::def,
+    const bool ok = Ul::init({.route = link_route,
                               .baud = usart_baud_reg(SysClock::hz, link::command_baud),
                               .tx = !shared_line(),
                               .loop_back = shared_line()});
     if (shared_line()) {
         TxPin::input();
-        pinctrl_of('E', 0) |= PORT_PULLUPEN_bm;
+        pinctrl_of(link_port, link_pin0 + 0u) |= PORT_PULLUPEN_bm;
     } else {
-        pinctrl_of('E', 1) |= PORT_PULLUPEN_bm;
+        pinctrl_of(link_port, link_pin0 + 1u) |= PORT_PULLUPEN_bm;
     }
-    U4::flush_rx();
-    U4::clear_txc();
+    Ul::flush_rx();
+    Ul::clear_txc();
     dec.reset();
     return ok;
 }
@@ -1232,8 +1470,8 @@ bool recv_frame(link::Frame& out, uint16_t ms) {
     while (Ticker::millis() - t0 < ms) {
         const bool now = shared_line() ? TxPin::read() : RxPin::read();
         if (now != prev) { ++pin_edges; prev = now; }
-        if (!U4::rxc_flag()) continue;
-        const UsartFrame f = U4::receive();
+        if (!Ul::rxc_flag()) continue;
+        const UsartFrame f = Ul::receive();
         if (raw_n < 12) {
             raw_seen[raw_n++] = f.clean() ? static_cast<uint8_t>(f.data) : 0xEE;
         }
@@ -1247,7 +1485,7 @@ bool recv_frame(link::Frame& out, uint16_t ms) {
 }
 
 bool command_once(link::Op op, const uint8_t* p, uint8_t len, uint16_t ms) {
-    U4::flush_rx();
+    Ul::flush_rx();
     line_talk();
     link::write_frame(put4, op, p, len);
     line_listen();
@@ -1280,8 +1518,8 @@ bool command(link::Op op, const uint8_t* p = no_payload, uint8_t len = 0,
     print(serial, "    LINK FAILURE op ", hex(link::byte_of(op)), ": line edges=",
           first_edges, ", decoded ", first_n, " byte(s):");
     for (uint8_t i = 0; i < first_n; ++i) print(serial, " ", hex(first_seen[i]));
-    print(serial, " (CTRLA=", hex(U4::regs().CTRLA), " CTRLB=", hex(U4::regs().CTRLB),
-          " BAUD=", U4::baud_reg(), ")", crlf);
+    print(serial, " (CTRLA=", hex(Ul::regs().CTRLA), " CTRLB=", hex(Ul::regs().CTRLB),
+          " BAUD=", Ul::baud_reg(), ")", crlf);
     if (first_edges == 0) {
         print(serial, "      no edges at all: the peer board is not transmitting. It re-enters "
                       "discovery by itself after ", link::rediscover_ms,
@@ -1434,7 +1672,7 @@ uint16_t mask_of(uint8_t bits) {
 /// so a test hands the peer one Cfg and itself the mirrored one.
 bool dut_link(const link::Cfg& c, bool rx = true, bool tx = true) {
     UsartConfig u{};
-    u.route = UsartRoute::def;
+    u.route = link_route;
     // On a shared line the receiver listens to the TXD pad and the
     // transmitter is taken up only for the turnaround.
     const bool one_line = shared_line();
@@ -1461,18 +1699,18 @@ bool dut_link(const link::Cfg& c, bool rx = true, bool tx = true) {
         if (u.sync_client) u.baud = 64;
         else return false;
     }
-    if (!U4::init(u)) return false;
+    if (!Ul::init(u)) return false;
     xck_invert((c.flags & link::flag_invert_xck) != 0);
     if (one_line && rx) {
         TxPin::input();
-        pinctrl_of('E', 0) |= PORT_PULLUPEN_bm;
+        pinctrl_of(link_port, link_pin0 + 0u) |= PORT_PULLUPEN_bm;
     } else {
         // On the crossed pair the peer's TXD is undriven between answers
         // while its discovery is still guessing: hold RXD up so a
         // floating pin never invents a start bit.
-        pinctrl_of('E', 1) |= PORT_PULLUPEN_bm;
+        pinctrl_of(link_port, link_pin0 + 1u) |= PORT_PULLUPEN_bm;
     }
-    U4::flush_rx();
+    Ul::flush_rx();
     return true;
 }
 
@@ -1502,9 +1740,9 @@ uint16_t echo_mismatches(uint8_t bits, uint16_t n) {
     for (uint16_t i = 0; i < n; ++i) {
         const uint16_t v = static_cast<uint16_t>(0x5A + i * 37u) & mask;
         line_talk();
-        if (!U4::send(v, 400'000u)) { line_listen(); ++bad; continue; }
+        if (!Ul::send(v, 400'000u)) { line_listen(); ++bad; continue; }
         line_listen();
-        const auto got = U4::wait(400'000u);
+        const auto got = Ul::wait(400'000u);
         if (!got || !got->clean() || got->data != v) {
             if (bad == 0) {
                 echo_first_sent = v;
@@ -1547,8 +1785,8 @@ Drain collect(uint16_t ms) {
     Drain d{};
     const uint32_t t0 = Ticker::millis();
     while (Ticker::millis() - t0 < ms) {
-        if (!U4::rxc_flag()) continue;
-        const UsartFrame f = U4::receive();
+        if (!Ul::rxc_flag()) continue;
+        const UsartFrame f = Ul::receive();
         ++d.frames;
         if (f.frame_error) ++d.ferr;
         if (f.parity_error) ++d.perr;
@@ -1561,8 +1799,8 @@ Drain collect(uint16_t ms) {
 
 Drain drain(uint16_t max = 64) {
     Drain d{};
-    while (U4::rxc_flag() && d.frames < max) {
-        const UsartFrame f = U4::receive();
+    while (Ul::rxc_flag() && d.frames < max) {
+        const UsartFrame f = Ul::receive();
         ++d.frames;
         if (f.frame_error) ++d.ferr;
         if (f.parity_error) ++d.perr;
@@ -1583,7 +1821,7 @@ void quiet(uint16_t ms) { delay_us(clock, static_cast<uint32_t>(ms) * 1000u); }
 bool dut_autobaud(uint32_t fallback, bool lin, UsartAbWindow w = UsartAbWindow::wdw0) {
     const uint16_t r = usart_baud_reg(SysClock::hz, fallback);
     if (r == 0) return false;
-    const bool ok = U4::init({.route = UsartRoute::def,
+    const bool ok = Ul::init({.route = link_route,
                               .rx_mode = lin ? UsartRxMode::linauto : UsartRxMode::genauto,
                               .baud = r,
                               .tx = !shared_line(),
@@ -1591,11 +1829,11 @@ bool dut_autobaud(uint32_t fallback, bool lin, UsartAbWindow w = UsartAbWindow::
                               .ab_window = w});
     if (shared_line()) {
         TxPin::input();
-        pinctrl_of('E', 0) |= PORT_PULLUPEN_bm;
+        pinctrl_of(link_port, link_pin0 + 0u) |= PORT_PULLUPEN_bm;
     }
-    U4::flush_rx();
-    U4::clear_break();
-    U4::clear_isf();
+    Ul::flush_rx();
+    Ul::clear_break();
+    Ul::clear_isf();
     return ok;
 }
 
@@ -1609,17 +1847,17 @@ bool dut_ircom(uint8_t txpl, uint8_t rxpl, uint32_t rate = 115'200, bool invert_
     rxd_invert(invert_rx);
     if (!shared_line()) {
         const bool ok = Irda::init(clock, rate, txpl, rxpl);
-        U4::flush_rx();
+        Ul::flush_rx();
         return ok;
     }
     const uint16_t r = usart_baud_reg(SysClock::hz, rate);
     if (r == 0) return false;
-    const bool ok = U4::init({.route = UsartRoute::def, .mode = UsartMode::ircom,
+    const bool ok = Ul::init({.route = link_route, .mode = UsartMode::ircom,
                               .baud = r, .tx = false, .loop_back = true,
                               .tx_pulse = txpl, .rx_pulse = rxpl});
     TxPin::input();
-    pinctrl_of('E', 0) |= PORT_PULLUPEN_bm;
-    U4::flush_rx();
+    pinctrl_of(link_port, link_pin0 + 0u) |= PORT_PULLUPEN_bm;
+    Ul::flush_rx();
     return ok;
 }
 
@@ -1655,7 +1893,10 @@ void tx_clocks() {
     quiesce();
     if (!ensure_link()) { verdict("the peer is reachable", false); return; }
     const uint8_t kind = ask_peer_kind();
-    const uint32_t rate = kind == link::peer_samc21 ? 3750u : 3600u;
+    // At 20 MHz neither rate is exact here; 4000 baud is (BAUD 20000), and
+    // on either peer's generator too (a samc21 peer's 375.0, a DA/DB's
+    // 24000), so the AVR EA asks it of any peer.
+    const uint32_t rate = !at24 ? 4000u : (kind == link::peer_samc21 ? 3750u : 3600u);
     const uint16_t reg = usart_baud_reg(SysClock::hz, rate);
     print(serial, "  peer kind ", hex(kind), ": ", rate, " baud (BAUD ", reg,
           " here, the peer's generator exact or identical there)", crlf);
@@ -1702,7 +1943,8 @@ void tx_clocks() {
               "), spread ", wmin, "..", wmax, crlf);
         print(serial, "  the peer board runs ", b_fast >= 0 ? "+" : "-",
               static_cast<uint32_t>(b_fast >= 0 ? b_fast : -b_fast),
-              " ppm against this board's crystal (single tick = 17 ppm)", crlf);
+              at24 ? " ppm against this board's crystal (single tick = 17 ppm)"
+                   : " ppm against this board's crystal (single tick = 22 ppm)", crlf);
         verdict("the two clocks agree within 200 ppm",
                 b_fast > -200 && b_fast < 200);
     }
@@ -1724,6 +1966,7 @@ void tx_clocks() {
 constexpr uint16_t probe_ms = 6000;
 constexpr uint16_t probe_half_ms[4] = {250, 125, 62, 31};
 
+#if defined(USART4)
 void probe_drive() {
     PORTE.DIRSET = 0x0Fu;
     for (uint16_t t = 0; t < probe_ms; ++t) {
@@ -1753,6 +1996,47 @@ void probe_listen(uint16_t* edges) {
     for (uint8_t i = 0; i < 4; ++i) pinctrl_of('E', i) &= static_cast<uint8_t>(~PORT_PULLUPEN_bm);
 }
 
+#else
+/// The link's four pads as one nibble of its port (PE0..PE3, or on the
+/// AVR EA PC4..PC7 - the PE pads, their jumpered partners, stay inputs).
+constexpr uint8_t probe_mask = static_cast<uint8_t>(0x0Fu << link_pin0);
+
+void probe_drive() {
+    volatile PORT_t& port = port_by_letter(link_port);
+    port.DIRSET = probe_mask;
+    for (uint16_t t = 0; t < probe_ms; ++t) {
+        uint8_t out = 0;
+        for (uint8_t i = 0; i < 4; ++i) {
+            if ((t / probe_half_ms[i]) & 1u) out = static_cast<uint8_t>(out | (1u << i));
+        }
+        port.OUT = static_cast<uint8_t>((port.OUT & static_cast<uint8_t>(~probe_mask)) |
+                                        static_cast<uint8_t>(out << link_pin0));
+        delay_us(clock, 1000);
+    }
+    port.DIRCLR = probe_mask;
+}
+
+void probe_listen(uint16_t* edges) {
+    volatile PORT_t& port = port_by_letter(link_port);
+    port.DIRCLR = probe_mask;
+    for (uint8_t i = 0; i < 4; ++i) pinctrl_of(link_port, link_pin0 + i) |= PORT_PULLUPEN_bm;
+    uint8_t prev = static_cast<uint8_t>((port.IN & probe_mask) >> link_pin0);
+    for (uint16_t t = 0; t < probe_ms; ++t) {
+        delay_us(clock, 1000);
+        const uint8_t now = static_cast<uint8_t>((port.IN & probe_mask) >> link_pin0);
+        const uint8_t ch = static_cast<uint8_t>(now ^ prev);
+        for (uint8_t i = 0; i < 4; ++i) {
+            if (ch & (1u << i)) ++edges[i];
+        }
+        prev = now;
+    }
+    for (uint8_t i = 0; i < 4; ++i) {
+        pinctrl_of(link_port, link_pin0 + i) &= static_cast<uint8_t>(~PORT_PULLUPEN_bm);
+    }
+}
+
+#endif
+
 int8_t probe_source(uint16_t edges) {
     if (edges < 8) return -1;
     for (uint8_t i = 0; i < 4; ++i) {
@@ -1772,7 +2056,12 @@ void tv_wiring() {
     bool crossed = true;
     for (uint8_t i = 0; i < 4; ++i) {
         const int8_t src = probe_source(edges[i]);
+#if defined(USART4)
         print(serial, "  here PE", i, ": ", edges[i], " edges -> ");
+#else
+        print(serial, "  here PC", static_cast<uint8_t>(i + link_pin0), ": ", edges[i],
+              " edges -> ");
+#endif
         if (src >= 0) print(serial, "the peer's PE", static_cast<uint8_t>(src), crlf);
         else if (src == -1) print(serial, "nothing", crlf);
         else print(serial, "several drivers or noise", crlf);
@@ -1798,7 +2087,7 @@ void tj_link() {
     print(serial, "  topology: ", shared_line() ? "SHARED LINE (one wire between the two "
                                                   "TXD pads, half duplex)"
                                                 : "full duplex (the crossed pair)", crlf);
-    verdict("command mode on USART4 (8N1, 115200)", found);
+    verdict("command mode on " LINK_USART " (8N1, 115200)", found);
     verdict("the peer answers a ping", found && command(link::Op::ping));
 
     link::Ident d{};
@@ -1831,7 +2120,7 @@ void tj_link() {
     }
 
     // A frame whose checksum does not check out must be refused, not obeyed.
-    U4::flush_rx();
+    Ul::flush_rx();
     line_talk();
     put4(link::magic);
     put4(link::byte_of(link::Op::ping));
@@ -2042,32 +2331,32 @@ void tm_errors() {
         a.value = 0x5A;
         a.aux16 = 40;              // Uart::init holds TX idle for 10 ms first
         const bool sent = peer_act(link::Op::send, a);
-        U4Tx::init(clock, 115'200u);
+        UlTx::init(clock, 115'200u);
         if (shared_line()) {
-            U4::enable_tx(false);
-            U4::loop_back(true);
+            Ul::enable_tx(false);
+            Ul::loop_back(true);
             TxPin::input();
-            pinctrl_of('E', 0) |= PORT_PULLUPEN_bm;
+            pinctrl_of(link_port, link_pin0 + 0u) |= PORT_PULLUPEN_bm;
         }
-        U4::frame({.bits = UsartBits::eight, .parity = UsartParity::even});
-        U4::enable_rxc_interrupt(true);
+        Ul::frame({.bits = UsartBits::eight, .parity = UsartParity::even});
+        Ul::enable_rxc_interrupt(true);
         // The reconfiguration itself moved the pad, and a moved pad is a
         // start bit to a loop-back receiver: let that settle, throw it
         // away, and only then start counting.
         quiet(4);
         uint8_t b, delivered = 0;
-        while (U4Tx::read_byte(b)) {
+        while (UlTx::read_byte(b)) {
         }
-        U4Tx::clear_errors();
-        U4::flush_rx();
+        UlTx::clear_errors();
+        Ul::flush_rx();
         delivered = 0;
         const uint32_t t0 = Ticker::millis();
         while (Ticker::millis() - t0 < bound_ms(115'200, 12)) {
-            if (U4Tx::read_byte(b)) ++delivered;
+            if (UlTx::read_byte(b)) ++delivered;
         }
-        const uint8_t pe = U4Tx::parity_errors();
+        const uint8_t pe = UlTx::parity_errors();
         const bool any = delivered != 0;
-        U4::enable_rxc_interrupt(false);
+        Ul::enable_rxc_interrupt(false);
         print(serial, "  Uart task: parity_errors=", pe, " bytes delivered=", delivered,
               crlf);
         verdict("the Uart task counts the parity errors", sent && pe == 6);
@@ -2329,8 +2618,8 @@ void to_autobaud_foreign() {
                     measured = Ab::measured_baud_reg();
                 }
                 if (Ab::sync_error()) isf = true;
-                if (!U4::rxc_flag()) continue;
-                const UsartFrame f = U4::receive();
+                if (!Ul::rxc_flag()) continue;
+                const UsartFrame f = Ul::receive();
                 ++d.frames;
                 if (f.frame_error) ++d.ferr;
                 d.last = f.data;
@@ -2498,15 +2787,15 @@ void tp_mpcm_cross() {
         uint16_t addr = 0, data = 0, second = 0;
         const uint32_t t0 = Ticker::millis();
         while (Ticker::millis() - t0 < 60) {
-            if (!U4::rxc_flag()) continue;
-            const UsartFrame f = U4::receive();
+            if (!Ul::rxc_flag()) continue;
+            const UsartFrame f = Ul::receive();
             if (f.data == 0x141 && addr == 0) {
                 addr = f.data;
-                U4::multiprocessor(false);               // this client is addressed
+                Ul::multiprocessor(false);               // this client is addressed
             } else if (addr != 0 && second == 0 && (f.data & 0x100u) == 0) {
                 ++data;
                 if (data == 3) {
-                    U4::multiprocessor(true);            // done: listen for addresses
+                    Ul::multiprocessor(true);            // done: listen for addresses
                 }
             } else if ((f.data & 0x100u) != 0 && addr != 0) {
                 second = f.data;
@@ -2556,7 +2845,7 @@ void tp_mpcm_cross() {
 // ---- q: the synchronous roles on a real XCK ------------------------------------
 
 void tq_sync() {
-    print(serial, "q synchronous USART on PE2: host, client, and the client's ceiling",
+    print(serial, "q synchronous USART on " LINK_XCK ": host, client, and the client's ceiling",
           crlf);
     quiesce();
     if (!ensure_link()) { verdict("the peer is reachable", false); return; }
@@ -2585,10 +2874,10 @@ void tq_sync() {
             uint16_t sum = 0;
             for (uint8_t i = 0; i < 8; ++i) {
                 const uint16_t v = static_cast<uint16_t>(0x30 + i);
-                (void)U4::send(v, 400'000u);
+                (void)Ul::send(v, 400'000u);
                 sum = static_cast<uint16_t>(sum + v);
             }
-            (void)U4::wait_line_idle();
+            (void)Ul::wait_line_idle();
             SyncH::invert_xck(false);
             link::Report r{};
             const bool have = peer_report(r, 10);
@@ -2629,7 +2918,7 @@ void tq_sync() {
 
     // Above the client's CLK_PER/4: the ceiling is supposed to be real.
     {
-        const uint32_t xck = 12'000'000;                 // CLK_PER / 2, twice the ceiling
+        const uint32_t xck = SysClock::hz / 2u;          // CLK_PER / 2, twice the ceiling
         link::Cfg pc{};
         pc.mode = link::Mode::sync_host;
         pc.rate = xck;
@@ -2644,7 +2933,8 @@ void tq_sync() {
         uint16_t want = 0;
         for (uint8_t i = 0; i < 8; ++i) want = static_cast<uint16_t>(want + 0x60 + i);
         const bool clean = d.frames == 8 && d.sum == want && d.ferr == 0;
-        print(serial, "  client at 12 MHz (ceiling is CLK_PER/4 = 6 MHz): frames=",
+        print(serial, at24 ? "  client at 12 MHz (ceiling is CLK_PER/4 = 6 MHz): frames="
+                           : "  client at 10 MHz (ceiling is CLK_PER/4 = 5 MHz): frames=",
               d.frames, " sum=", hex(d.sum), " want=", hex(want), " ferr=", d.ferr,
               clean ? "  <-- CLEAN: the data sheet's ceiling did not bite" : "", crlf);
         verdict("XCK at twice the client's ceiling does not come through cleanly",
@@ -2658,7 +2948,7 @@ void tq_sync() {
 // ---- r: RS-485 and the XDIR guard time -----------------------------------------
 
 void tr_rs485() {
-    print(serial, "r RS-485: the peer receives while a TCB measures XDIR on PE3", crlf);
+    print(serial, "r RS-485: the peer receives while a TCB measures XDIR on " LINK_XDIR, crlf);
     quiesce();
     if (!ensure_link()) { verdict("the peer is reachable", false); return; }
     const uint32_t rates[] = {9600, 115'200};
@@ -2764,7 +3054,7 @@ void ts_irda() {
         const uint16_t bad = up ? echo_mismatches(8, 6) : 6;
         link::Report r{};
         const bool have = peer_report(r, 10);
-        print(serial, "  ", ic.name, ic.inverted ? " (PE1 inverted)" : "", ": wrong=", bad,
+        print(serial, "  ", ic.name, ic.inverted ? " (" LINK_RXD " inverted)" : "", ": wrong=", bad,
               " peer count=", have ? r.count : 0, " ferr=", have ? r.ferr : 0, crlf);
         if (bad != 0 && bad != 6) {
             print(serial, "    first mismatch: sent ", hex(echo_first_sent), " got ",
@@ -2797,8 +3087,10 @@ void ts_irda() {
             if (bad == 6 && first_block == 0) first_block = rx;
             (void)link_command_mode();
         }
-        print(serial, "  the 3/16 pulse (39 CLK_PER of a 208-clock bit) is rejected from "
-              "RXPL ", first_block, crlf);
+        print(serial, at24 ? "  the 3/16 pulse (39 CLK_PER of a 208-clock bit) is rejected from "
+                             "RXPL "
+                           : "  the 3/16 pulse (33 CLK_PER of a 174-clock bit) is rejected from "
+                             "RXPL ", first_block, crlf);
         verdict("the RXPL filter does reject the 3/16 pulse somewhere in 0..127",
                 first_block != 0);
     }
@@ -2846,7 +3138,7 @@ void ts_irda() {
         line_talk();
         for (uint8_t i = 0; i < 6; ++i) {
             const uint16_t v = static_cast<uint16_t>(0x41 + i);
-            (void)U4::send(v, 400'000u);
+            (void)Ul::send(v, 400'000u);
             sum = static_cast<uint16_t>(sum + v);
         }
         line_listen();
@@ -2880,7 +3172,7 @@ void ts_irda() {
             a.cfg = pc;
             a.count = 6;
             // The control's six round trips each wait out the echo they
-            // never hear (U4::wait's 400 000 spins: the peer, given 1.5 s,
+            // never hear (Ul::wait's 400 000 spins: the peer, given 1.5 s,
             // was still echoing at the fifth and not at the sixth), so the
             // peer is given 3 s to be echoing at the sixth.
             a.ms = leg == 0 ? bound_ms(115'200, 24) : 3000;
@@ -2893,7 +3185,7 @@ void ts_irda() {
                 Ch2::source(EvPin<XdirPin>{});
             }
             Irda::receive_on(Ch2{});
-            U4::flush_rx();
+            Ul::flush_rx();
             up = up && !shared_line();
             const uint16_t bad = up ? echo_mismatches(8, 6) : 6;
             link::Report r{};
@@ -2921,7 +3213,8 @@ void ts_irda() {
 // ---- t: a clock rebase under real traffic ---------------------------------------
 
 void tt_rebase_traffic() {
-    print(serial, "t 24 -> 12 -> 24 MHz mid-stream, the peer counting every byte", crlf);
+    print(serial, at24 ? "t 24 -> 12 -> 24 MHz mid-stream, the peer counting every byte"
+                       : "t 20 -> 10 -> 20 MHz mid-stream, the peer counting every byte", crlf);
     quiesce();
     if (!ensure_link()) { verdict("the peer is reachable", false); return; }
     link::Cfg pc{};
@@ -2933,26 +3226,28 @@ void tt_rebase_traffic() {
     const bool sent = peer_act(link::Op::sink, a);
     verdict("the peer accepts a 96-frame SINK", sent);
     verdict("DynamicClock init (boot = the crystal)", DynClock::init());
-    U4Tx::init(DynClock{}, 115'200u);
+    UlTx::init(DynClock{}, 115'200u);
 
     uint16_t sum = 0;
     auto stream = [&sum](uint8_t from, uint8_t to) {
         for (uint16_t v = from; v < to; ++v) {
             for (uint32_t s = 0; s < 400'000u; ++s) {
-                if (U4Tx::write_byte(static_cast<uint8_t>(v))) break;
+                if (UlTx::write_byte(static_cast<uint8_t>(v))) break;
             }
             sum = static_cast<uint16_t>(sum + v);
         }
     };
     stream(0, 32);
-    verdict("switch to 12 MHz under traffic", DynClock::set(12'000'000u));
+    verdict(at24 ? "switch to 12 MHz under traffic" : "switch to 10 MHz under traffic",
+            DynClock::set(SysClock::hz / 2u));
     stream(32, 64);
-    verdict("back to 24 MHz under traffic", DynClock::set(24'000'000u));
+    verdict(at24 ? "back to 24 MHz under traffic" : "back to 20 MHz under traffic",
+            DynClock::set(SysClock::hz));
     stream(64, 96);
-    for (uint32_t s = 0; s < 800'000u && !U4Tx::tx_idle(); ++s) {
+    for (uint32_t s = 0; s < 800'000u && !UlTx::tx_idle(); ++s) {
     }
     delay_us(clock, 20'000);
-    U4::enable_rxc_interrupt(false);
+    Ul::enable_rxc_interrupt(false);
 
     link::Report r{};
     const bool have = peer_report(r, 40);
@@ -2996,7 +3291,7 @@ void tu_lbme_pad() {
     verdict("the peer accepts DRIVE_RXD (bit-bang on its own RXD pad)", sent);
     // Open drain: PE0 stays an input held high by its pull-up (errata
     // 2.16.1), so the peer's push-pull driver meets only the pull-up.
-    const bool up = U4::init({.route = UsartRoute::def,
+    const bool up = Ul::init({.route = link_route,
                               .baud = usart_baud_reg(SysClock::hz, 9600u),
                               .loop_back = true, .open_drain = true});
     verdict("DUT in loop-back with the open-drain pin discipline", up);
@@ -3017,14 +3312,14 @@ void tu_lbme_pad() {
     // The complementary half: the DUT's own transmission always comes
     // back through the same path (this one is purely internal - on the
     // crossed wiring the peer cannot hear PE0 at all).
-    verdict("DUT one-wire init", U4::init({.route = UsartRoute::def,
+    verdict("DUT one-wire init", Ul::init({.route = link_route,
                                            .baud = usart_baud_reg(SysClock::hz, 9600u),
                                            .loop_back = true, .open_drain = true}));
     bool echoed = true;
     for (uint8_t i = 0; i < 4; ++i) {
         const uint8_t v = static_cast<uint8_t>(0xC0 + i);
-        (void)U4::send(v, 400'000u);
-        const auto back = U4::wait(400'000u);
+        (void)Ul::send(v, 400'000u);
+        const auto back = Ul::wait(400'000u);
         echoed = echoed && back && back->clean() && back->data == v;
     }
     verdict("an open-drain transmitter reads its own frames back", echoed);
@@ -3073,7 +3368,7 @@ void tw_onewire() {
         (void)Line::send(v, 400'000u);
         echoed = echoed && Line::echo_matches(v, 400'000u);
         (void)Line::listen(400'000u);
-        const auto back = U4::wait(400'000u);
+        const auto back = Ul::wait(400'000u);
         const bool ok = back && back->clean() &&
                         static_cast<uint8_t>(back->data) == static_cast<uint8_t>(v ^ 0xFFu);
         if (!ok && answered) {
@@ -3122,7 +3417,7 @@ void tw_onewire() {
 // usart_link.hpp's REPEATED blast: `count` gapless frames, repeated aux16
 // times with the counting pattern RUNNING ON across the repeats, so a lost
 // frame anywhere is a jump in the sequence. The receiver is the Uart task
-// (U4Tx, its 32-entry ring, the RXC vector bound plain), the consumer a
+// (UlTx, its 32-entry ring, the RXC vector bound plain), the consumer a
 // loop over read_span()/consume() comparing every byte with the next of
 // the stream.
 //
@@ -3163,27 +3458,27 @@ bool task_command(link::Op op, const link::Params& a) {
     uint8_t frame[link::max_payload + 4];
     uint8_t n = 0;
     link::write_frame([&](uint8_t b) { frame[n++] = b; }, op, p, link::params_size);
-    for (std::span<const uint8_t> old = U4Tx::read_span(); !old.empty();
-         old = U4Tx::read_span()) {
-        U4Tx::consume(old.size());
+    for (std::span<const uint8_t> old = UlTx::read_span(); !old.empty();
+         old = UlTx::read_span()) {
+        UlTx::consume(old.size());
     }
     uint8_t queued = 0;
     for (uint32_t k = 0; k < 400'000u && queued < n; ++k) {
         queued = static_cast<uint8_t>(
-            queued + U4Tx::write_bulk({frame + queued, static_cast<size_t>(n - queued)}));
+            queued + UlTx::write_bulk({frame + queued, static_cast<size_t>(n - queued)}));
     }
     link::Decoder d;
     const uint32_t t0 = Ticker::millis();
     while (Ticker::millis() - t0 < 80u) {
-        const std::span<const uint8_t> run = U4Tx::read_span();
+        const std::span<const uint8_t> run = UlTx::read_span();
         for (const uint8_t b : run) {
             if (d.feed(b) == link::Decoder::Result::frame) {
-                U4Tx::consume(run.size());
+                UlTx::consume(run.size());
                 const link::Frame& f = d.frame();
                 return f.op == link::Op::ack && f.len == 2 && f.data[0] == link::byte_of(op);
             }
         }
-        U4Tx::consume(run.size());
+        UlTx::consume(run.size());
     }
     return false;
 }
@@ -3191,8 +3486,8 @@ bool task_command(link::Op op, const link::Params& a) {
 /// The task up at the command rate, the blast commanded through it, the
 /// task moved to the blast's rate. False: no blast to receive.
 bool blast_on_task(uint32_t rate, uint16_t block, uint16_t repeats, uint8_t value) {
-    if (shared_line() || !U4Tx::can_baud(SysClock::hz, rate)) return false;
-    U4Tx::init(clock, link::command_baud);
+    if (shared_line() || !UlTx::can_baud(SysClock::hz, rate)) return false;
+    UlTx::init(clock, link::command_baud);
     link::Cfg pc{};
     pc.rate = rate;
     link::Params a{};
@@ -3205,7 +3500,7 @@ bool blast_on_task(uint32_t rate, uint16_t block, uint16_t repeats, uint8_t valu
     a.pattern = link::pattern_counting;
     for (uint8_t k = 0; k < 3; ++k) {
         if (task_command(link::Op::blast, a)) {
-            return U4Tx::set_baud(SysClock::hz, rate);
+            return UlTx::set_baud(SysClock::hz, rate);
         }
         delay_us(clock, 70'000);
     }
@@ -3217,21 +3512,21 @@ void tB_blast() {
                   "rate, then one stalled consumer", crlf);
     quiesce();
     if (!ensure_link()) { verdict("the peer is reachable", false); return; }
-    static constexpr uint32_t rates[] = {115'200u, 500'000u, 1'000'000u, 1'500'000u};
+    static constexpr uint32_t rates[] = {115'200u, 500'000u, 1'000'000u, SysClock::hz / 16u};
     for (const uint32_t rate : rates) {
         const uint16_t block = static_cast<uint16_t>(rate / 1000u);   // 10 ms of frames
         const uint16_t repeats = 100;
         const uint32_t total = static_cast<uint32_t>(block) * repeats;
         const bool up = blast_on_task(rate, block, repeats, 0x30);
-        U4Tx::clear_errors();
-        const uint32_t skips0 = U4Tx::rx_skips();
+        UlTx::clear_errors();
+        const uint32_t skips0 = UlTx::rx_skips();
         uint32_t got = 0;
         uint8_t expect = 0x30;
         bool broken = false;
         uint8_t wrong = 0;
         const uint32_t t0 = Ticker::millis();
         while (up && got < total && !broken && Ticker::millis() - t0 < 2500u) {
-            const std::span<const uint8_t> run = U4Tx::read_span();
+            const std::span<const uint8_t> run = UlTx::read_span();
             uint32_t n = 0;
             for (const uint8_t b : run) {
                 if (b != expect) {
@@ -3243,12 +3538,12 @@ void tB_blast() {
                 ++n;
             }
             got += n;
-            U4Tx::consume(n);
+            UlTx::consume(n);
         }
-        const uint32_t skips = (U4Tx::rx_skips() - skips0) & 0xFFu;
-        const uint8_t fe = U4Tx::frame_errors(), ring = U4Tx::rx_overruns(),
-                      hw = U4Tx::hw_overruns();
-        U4Tx::release();
+        const uint32_t skips = (UlTx::rx_skips() - skips0) & 0xFFu;
+        const uint8_t fe = UlTx::frame_errors(), ring = UlTx::rx_overruns(),
+                      hw = UlTx::hw_overruns();
+        UlTx::release();
         link::Report r{};
         // A stream that broke early is still running at the peer: its
         // report waits the rest of the second out.
@@ -3269,8 +3564,8 @@ void tB_blast() {
         const uint16_t repeats = 10;
         const uint32_t total = static_cast<uint32_t>(block) * repeats;
         const bool up = blast_on_task(115'200u, block, repeats, 0x00);
-        U4Tx::clear_errors();
-        const uint32_t skips0 = U4Tx::rx_skips();
+        UlTx::clear_errors();
+        const uint32_t skips0 = UlTx::rx_skips();
         uint32_t got = 0;
         uint8_t expect = 0x00;
         uint8_t jumps = 0;
@@ -3288,7 +3583,7 @@ void tB_blast() {
                 }
                 ruler_down();
             }
-            const std::span<const uint8_t> run = U4Tx::read_span();
+            const std::span<const uint8_t> run = UlTx::read_span();
             for (const uint8_t b : run) {
                 if (b != expect) {
                     ++jumps;
@@ -3297,11 +3592,11 @@ void tB_blast() {
                 expect = static_cast<uint8_t>(b + 1u);
             }
             got += run.size();
-            U4Tx::consume(run.size());
+            UlTx::consume(run.size());
         }
-        const uint32_t skips = (U4Tx::rx_skips() - skips0) & 0xFFu;
-        const uint8_t ring = U4Tx::rx_overruns(), hw = U4Tx::hw_overruns();
-        U4Tx::release();
+        const uint32_t skips = (UlTx::rx_skips() - skips0) & 0xFFu;
+        const uint8_t ring = UlTx::rx_overruns(), hw = UlTx::hw_overruns();
+        UlTx::release();
         link::Report r{};
         const bool have = peer_report(r, 20);
         print(serial, "  115200, the consumer stalled 10 ms after 2000 bytes: ", got, " of ", total,
@@ -3392,6 +3687,9 @@ void register_tests() {
     bench.letter('i', "host spi", prelude<ti_mspi>);
     bench.letter('I', "injected errors", prelude<tI_injected>);
     bench.letter('T', "tx_idle on the pad", prelude<tT_tx_idle>);
+#if !defined(USART4)
+    bench.letter('F', "SFDEN in Active mode (the AVR EA)", prelude<tF_sfden_active>);
+#endif
     bench.second_letter('j', "link", prelude<tj_link>);
     bench.second_letter('k', "baud matrix", prelude<tk_baud>);
     bench.second_letter('l', "frame matrix", prelude<tl_frames_cross>);
@@ -3414,8 +3712,13 @@ void register_tests() {
 
 ISR(USART2_RXC_vect) { (void)Serial::rxc(); }
 ISR(USART2_DRE_vect) { Serial::dre(); }
-ISR(USART4_RXC_vect) { (void)U4Tx::rxc(); }
-ISR(USART4_DRE_vect) { U4Tx::dre(); }
+#if defined(USART4)
+ISR(USART4_RXC_vect) { (void)UlTx::rxc(); }
+ISR(USART4_DRE_vect) { UlTx::dre(); }
+#else
+ISR(USART1_RXC_vect) { (void)UlTx::rxc(); }
+ISR(USART1_DRE_vect) { UlTx::dre(); }
+#endif
 ISR(TCB0_INT_vect) {
     last_width = Meter::width_ticks();
     captures = captures + 1;
@@ -3431,7 +3734,7 @@ int main() {
     if (board.empty()) board = "?";
     print(serial, crlf, "test_avr_serial - USART test suite (board ", board,
           ", clk=", xtal ? (has_xoschf ? "XTAL" : "EXTCLK") : "OSCHF",
-          " 24 MHz, silicon rev ", hex(SYSCFG.REVID), ")", crlf);
+          at24 ? " 24 MHz, silicon rev " : " 20 MHz, silicon rev ", hex(SYSCFG.REVID), ")", crlf);
     register_tests();
     help();
     bench.prompt();

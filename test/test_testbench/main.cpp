@@ -557,6 +557,22 @@ TEST_CASE("a selection that names an upper-case key gates them all; one that nam
     CHECK(!brio::selection_carries("xyzW", 'V'));
 }
 
+TEST_CASE("the '.' marker: a group of a line that names upper-case keys carries only those it names, none included") {
+    // The split build marks every group of such a line (each project's
+    // CMakeLists.txt), so a group naming NO upper-case key carries none.
+    constexpr const char* g1 = "abcIT.";
+    constexpr const char* g2 = "jkl.";
+    constexpr const char* g3 = "rsB.";
+    static_assert(brio::upper_mask_of(g2) == 0u);
+    static_assert(!brio::selection_carries(g2, 'I') && !brio::selection_carries(g2, 'B'));
+    static_assert(brio::selection_carries(g2, 'j') && !brio::selection_carries(g2, 'a'));
+    static_assert(brio::selection_carries(g1, 'I') && !brio::selection_carries(g1, 'B'));
+    static_assert(brio::selection_carries(g3, 'B') && !brio::selection_carries(g3, 'T'));
+    // The marker is no key: an unmarked group still carries every upper-case one.
+    static_assert(brio::upper_mask_of("jkl") == 0x03FFFFFFUL);
+    CHECK(!brio::selection_carries("jkl.", 'T'));
+}
+
 TEST_CASE("no selection carries every key, and a key that is neither letter nor digit is always carried") {
     static_assert(brio::selection_carries(nullptr, 'z') && brio::selection_carries(nullptr, '0') &&
                   brio::selection_carries(nullptr, '9'));

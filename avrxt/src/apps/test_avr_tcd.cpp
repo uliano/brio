@@ -36,7 +36,8 @@
 // Bench diagnostic, NOT a kernel app (sequential, blocking). Console on
 // USART2 ALT1 (PF4/PF5) at 460800 - PF4/PF5 are never claimed here, and
 // test a claims PF0..PF3 (the ALT2 route) only for as long as the
-// alternate-route erratum measurement takes.
+// alternate-route erratum measurement takes - and only on a board whose
+// PF0/PF1 carry no 32 kHz crystal (avr_board.hpp's board_xosc32k).
 //
 // Commands: ? for the menu, z runs a..l.
 
@@ -395,33 +396,42 @@ void ta_routes() {
 
         // ALT2: PF0 = WOA, PF1 = WOB. PORTF pin events live on channels
         // 4-5. PF1 gets a pull-up so an UNDRIVEN pad reads a steady high
-        // (zero edges) instead of floating.
-        Pin<'F', 1>::pull(PinPull::up);
-        c.route = TcdRoute::alt2;
-        verdict("ALT2, WOB only: init", D::init(c));
-        ChTcd::source(EvPin<Pin<'F', 1>>{});
-        Edges::init(ChTcd{});
-        quiet_meters();
-        Edges::reset();
-        delay_us(clock, 20'000);
-        const uint16_t alt_b_only = Edges::count();
-        (void)D::release();
+        // (zero edges) instead of floating. A board whose 32.768 kHz
+        // crystal sits on PF0/PF1 (avr_board.hpp's board_xosc32k) never
+        // has them driven: ALT2 is the only alternate route this package
+        // bonds, so the erratum's two verdicts are not taken there.
+        if constexpr (board_xosc32k) {
+            print(serial, "    ALT2 route (PF0/PF1) not driven: this board's 32 kHz crystal "
+                          "is there - errata ", has_xoschf ? "2.14.2" : "2.13.2",
+                  " not measured", crlf);
+        } else {
+            Pin<'F', 1>::pull(PinPull::up);
+            c.route = TcdRoute::alt2;
+            verdict("ALT2, WOB only: init", D::init(c));
+            ChTcd::source(EvPin<Pin<'F', 1>>{});
+            Edges::init(ChTcd{});
+            quiet_meters();
+            Edges::reset();
+            delay_us(clock, 20'000);
+            const uint16_t alt_b_only = Edges::count();
+            (void)D::release();
 
-        c.enable_woa = true;                       // CMPAEN as well
-        verdict("ALT2, CMPAEN + CMPBEN: init", D::init(c));
-        Edges::reset();
-        delay_us(clock, 20'000);
-        const uint16_t alt_both = Edges::count();
-        (void)D::release();
-        Pin<'F', 1>::pull(PinPull::none);
+            c.enable_woa = true;                       // CMPAEN as well
+            verdict("ALT2, CMPAEN + CMPBEN: init", D::init(c));
+            Edges::reset();
+            delay_us(clock, 20'000);
+            const uint16_t alt_both = Edges::count();
+            (void)D::release();
+            Pin<'F', 1>::pull(PinPull::none);
 
-        print(serial, "    ALT2 route: CMPBEN alone -> ", alt_b_only,
-              " WOB edges; CMPAEN + CMPBEN -> ", alt_both, " edges (20 ms)", crlf);
-        verdict(has_xoschf ? "errata 2.14.2: on ALT2 a WOB-only configuration drives NOTHING"
-                           : "errata 2.13.2: on ALT2 a WOB-only configuration drives NOTHING",
-                alt_b_only == 0);
-        verdict(has_xoschf ? "errata 2.14.2: adding CMPAEN makes WOB drive again"
-                           : "errata 2.13.2: adding CMPAEN makes WOB drive again", alt_both > 100);
+            print(serial, "    ALT2 route: CMPBEN alone -> ", alt_b_only,
+                  " WOB edges; CMPAEN + CMPBEN -> ", alt_both, " edges (20 ms)", crlf);
+            verdict(has_xoschf ? "errata 2.14.2: on ALT2 a WOB-only configuration drives NOTHING"
+                               : "errata 2.13.2: on ALT2 a WOB-only configuration drives NOTHING",
+                    alt_b_only == 0);
+            verdict(has_xoschf ? "errata 2.14.2: adding CMPAEN makes WOB drive again"
+                               : "errata 2.13.2: adding CMPAEN makes WOB drive again", alt_both > 100);
+        }
     }
     quiesce();
 }

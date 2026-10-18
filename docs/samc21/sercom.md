@@ -168,8 +168,8 @@ pad, so the signal is also available externally"). `UartPads` admits
 the pair when it names one pin for both directions (`uart_pads_loop_back`);
 the suite and the bench run SERCOM1 that way on PAD[2], PA18 (TXPO 0x1,
 RXPO 0x2), at every rate the generator makes - a pad nothing drives but
-this board: on a desk whose four SERCOM1 wires reach an AVR128DA48's
-USART4, PA18 meets that board's RxD, an input.
+this board: on a desk whose four SERCOM1 wires reach an AVR64EA48's
+USART1, PA18 meets that board's RxD, an input.
 
 **The transmit side, item by item** - what the chapter offers that bears
 on a run's cost:
@@ -822,23 +822,26 @@ bridge between the pads and the PC - as much as of the driver.
   receiver, which takes a LOW pulse as a 0, reads nothing clean of it
   through the pad. A far IrDA receiver that expects low pulses on an
   idle-high line reads this transmitter only inverted.
-- **ACROSS THE WIRE, against an AVR128DA48's USART4** (`test_avr_serial`'s
+- **ACROSS THE WIRE, against an AVR64EA48's USART1** (`test_avr_serial`'s
   two-board letters, SERCOM1 on the crossed pair, generator 2 on the
-  24 MHz crystal, each rate on the generator closest to it): every rate
-  from 2400 baud to 1 Mbaud at 16x and 2 Mbaud at 8x (fractional, 3.0)
-  echoed byte-exact with no error at either end; 5N1, 6O2, 7E1, 8O2,
-  8E2, 9N1 and 9E1 the same at 115 200; a start bit at 9600 2500 ticks
-  of the far clock against 2500, and the fractional generator at 3750
-  baud (400.0) a nine-bit low of 57601.6 far ticks (57601 to 57602)
-  against 57600.0 - -28 ppm, under two of the far ruler's 17-ppm ticks
-  (the far clock the DA's external 24 MHz quartz oscillator). The synchronous
-  CLIENT took the far host's 8 frames exact at 100 kHz and 1 MHz with
-  CPOL 0 and 1 (the far INVEN followed by CPOL), and the HOST put XCK on
-  PA19 at 100 kHz and 1 MHz exact, and at 12 MHz (BAUD 0) - past the far
-  client's own ceiling, its frames corrupted there as that chip's
-  datasheet says. The IrDA RECEIVER took the far coder's six frames
-  (low pulses on an idle-high line) clean at 115 200; the far receiver
-  read this coder's frames only with its RxD pin inverted (above).
+  24 MHz crystal, each rate on the generator closest to it; ten runs):
+  every rate from 2400 baud to 1 Mbaud at 16x and 2 Mbaud at 8x
+  (fractional, 3.0) echoed byte-exact with no error at either end; 5N1,
+  6O2, 7E1, 8O2, 8E2, 9N1 and 9E1 the same at 115 200; a start bit at
+  9600 2083 to 2084 ticks of the far 20 MHz quartz against 2083.3, and
+  nine-bit lows at 4000 baud 45004.9 far ticks against 45000.0 - -108
+  to -111 ppm, five of the far ruler's 22-ppm ticks: the two crystals'
+  own offset, which this board's letter K reads too (below). The
+  synchronous CLIENT took the far host's 8 frames exact at 100 kHz and
+  1 MHz with CPOL 0 and 1 (the far INVEN followed by CPOL), and the HOST
+  put XCK on PA19 at 100 kHz and 1 MHz exact - one run of letter q's
+  thirty-one delivering one extra frame at 100 kHz
+  ([../avrxt/usart.md](../avrxt/usart.md)) - and at 10 MHz, past the far
+  client's own CLK_PER/4 ceiling, its frames corrupted there as that
+  chip's data sheet says. The IrDA RECEIVER took the far coder's six
+  frames (low pulses on an idle-high line) clean at 115 200; the far
+  receiver read this coder's frames only with its RxD pin inverted
+  (above).
 - **On an external clock the enable does not complete until XCK runs**:
   a synchronous client's `enable(true)` timed out on SYNCBUSY.CTRLB
   every time with the far host not yet clocking - while SYNCBUSY.ENABLE
@@ -847,9 +850,9 @@ bridge between the pads and the PC - as much as of the driver.
   caller on an external clock bounds that wait short and judges
   `enabled()`.
 **THIS SERCOM AS THE DUT, ACROSS THE WIRE** (`test_samc_uart`'s second
-set, `y`: SERCOM1 on the four wires against an AVR128DA48's USART4 on its
-external 24 MHz quartz clock, this board's core on generator 2 - its own
-24 MHz crystal -
+set, `y`: SERCOM1 on the four wires against an AVR64EA48's USART1 on its
+20 MHz quartz, this board's core on generator 2 - its own 24 MHz
+crystal -
 unless a figure says otherwise; the far end times characters on its
 crystal, and a pad log - a masked loop counting its own turns, calibrated
 by the signal's own bit edges - times this board's pads):
@@ -857,24 +860,21 @@ by the signal's own bit edges - times this board's pads):
 - **The rate, judged by a foreign receiver** (letter K): a gapless burst
   of 300 ms (30000 frames at most) per rung, its span on the far crystal
   against the run's length at the rate asked, beside the error the
-  register predicts (three runs): 2400 baud +1322 to +1412 ppm (+1358
-  predicted), 9600 -1019 to -1041 (-1026), 3750 on the fractional
-  generator +1 to +3 (0), 115200 arithmetic -40 to -42 (-32) and
-  fractional +1592 to +1594 (+1602), 921600 -15 to -18 (-7), 1 Mbaud
-  arithmetic -2 to 0 (+7) and fractional -8 to -9 (0), 1.5 Mbaud -5 to -8
-  (0), 2 Mbaud at 8x arithmetic 0 (+7) and fractional -6 to -7 (0), 3 Mbaud
-  at 8x -4 to -6 (0), 3x arithmetic at 1, 2 and 3 Mbaud -4 to -10 (0) -
-  every rung within the clocks' budget and the far stamping grain of the
-  prediction, and every rung's eight echoes back clean. The two clocks
-  agree to some ten ppm. On generator 0, OSC48M, the console's 115200
-  reads -6329 to -6428 ppm: that oscillator is 0.64 % slow against the far
-  clock on this board ([../boards/samc21j.md](../boards/samc21j.md)),
-  inside table 31-3's recommended 2 %. THE FEEDER MATTERS AT 3 MBAUD: a
-  DATA refill polled with interrupts enabled loses the one frame of slack
-  the transmit buffer gives to a single SysTick entry, so the judged runs
-  are fed masked; the same run through the transmit engine (blocks of
-  half its 512-byte ring) reads -373 to -459 ppm, some 4 us in the 10 ms
-  burst - about one frame time in all.
+  register predicts plus the two crystals' offset - read first, on the
+  1 Mbaud fractional rung (exact, 32.0), -82 to -87 ppm (twenty-two
+  runs): 2400 baud +1242 to +1333 ppm (+1358 predicted), 9600 -1104 to
+  -1113 (-1026), 3750 on the fractional generator -93 to -97 (0), 115200
+  arithmetic -115 to -121 (-32) and fractional +1512 to +1518 (+1602),
+  921600 -91 to -96 (-7), 1 Mbaud arithmetic -76 to -80 (+7), 2 Mbaud at
+  8x arithmetic -45 to -82 (+7) and fractional -79 to -86 (0), 3x
+  arithmetic at 1 and 2 Mbaud -79 to -88 (0) - every rung within the
+  clocks' budget and the far stamping grain of the prediction with the
+  offset added, and every rung's eight echoes back clean; 1.5 and 3
+  Mbaud the far USART cannot make on 20 MHz and refuses. On generator 0,
+  OSC48M, the console's 115200 reads -6044 to -6420 ppm: that oscillator
+  is 0.60 to 0.64 % slow against the far clock on this board
+  ([../boards/samc21j.md](../boards/samc21j.md)), inside table 31-3's
+  recommended 2 %.
 - **The frame matrix** (letter L) against the far USART, echoed both ways
   at 115200: 5N1, 6O2, 7E1, 8O2, 8E2, 8N2, 9N1 and 9E1 clean, one stop bit
   receiving two and two received by one; CTRLA.DORD = 0 receives a far
@@ -886,8 +886,8 @@ by the signal's own bit edges - times this board's pads):
   shift register (0xB0, 0xB1, 0xB7) - under IBON 0 STATUS.BUFOVF appears
   as the second read makes room (31.6.2.6.2's "after the received data is
   read"), under IBON 1 it stands before any read.
-- **Start-of-frame detection** (letter M): with SFDE, RXS rises 9.31 to
-  9.37 bit times ahead of RXC (the start bit's edge against the stop bit's
+- **Start-of-frame detection** (letter M): with SFDE, RXS rises 9.29 to
+  9.39 bit times ahead of RXC (the start bit's edge against the stop bit's
   vote); without it, no RXS.
 - **The operational range** (letter N), frames of zeros from the far
   USART at 9600 off by a whole per cent: clean from -4 % to +5 %, broken
@@ -896,30 +896,31 @@ by the signal's own bit edges - times this board's pads):
   to the per cent.
 - **The receiver's votes, measured on the pad** (letter N): a frame of
   zeros whose cell 5 the far bit-banger stretches reads clean up to a low
-  run of 9.318 to 9.452 bits and raises FERR from 9.385 to 9.480 - the stop
-  bit decided between 9.32 and 9.48 bits from the start edge, the bracket
-  of one run never wider than two samples (the ladder's step and the
-  sample the decision moves by with the start edge's phase); a lone low
-  pulse is a start bit from 0.40 to 0.44 of a bit under SAMPA 0 (decided at 0.38 to
-  0.42) and from 0.65 to 0.71 under SAMPA 2 (0.63 to 0.69) - four samples
-  later, to the sample of synchronization 31.6.3.10's note allows each
-  frame.
+  run of 9.332 to 9.438 bits and raises FERR from 9.398 to 9.438 - the
+  stop bit decided between 9.33 and 9.44 bits from the start edge, the
+  bracket of one run never wider than two samples, and two runs closer
+  than a sample coming out in either order once in twenty-two (9.438 clean,
+  9.398 broken: the sample the decision moves by with the start edge's
+  phase); a lone low pulse is a start bit from 0.40 to 0.46 of a bit
+  under SAMPA 0 (decided at 0.38 to 0.45) and from 0.65 to 0.72 under
+  SAMPA 2 (0.64 to 0.70) - four samples later, to the sample of
+  synchronization 31.6.3.10's note allows each frame.
 - **Auto-baud from a foreign sender** (letter O): the far board's break,
   0x55 and four payload frames at 9600, 57600, 115200 and 123456 baud,
   this receiver starting from the rate itself and from half of it: BAUD
-  and FP learned as 156.250, 26.0, 13.0 and 12.125 - 8 f_ref / (16 f_baud)
+  and FP learned as 156.125, 26.0, 13.0 and 12.125 - 8 f_ref / (16 f_baud)
   to the eighth below - and the payload read at the learned rate. A sync of
   0x53 raises ISF with ERROR and leaves BAUD at its fallback; a low of 10
   bit times is no break, 12 is. On this die (revision F) a sync whose stop
   bit is missing - the bit-banger's last data bit stretched over it -
   raises ISF: erratum 1.17.2 does not apply.
 - **The LIN header, on its own pad** (letter O, 19200): the break 13.01 to
-  13.05, 16.99 to 17.03, 20.99 to 21.12 and 25.99 to 26.15 bits for BRKLEN
-  0 to 3; from the break's end to the sync 0.98 to 1.02, 3.98 to 4.01,
-  7.99 to 8.04 and 13.97 to 14.07 bits for HDRDLY 0 to 3, as 31.8.3 says;
-  and from the sync's stop bit to the identifier 0.00 to 0.02, 2.98 to
-  3.01, 6.99 to 7.04 and 12.97 to 13.07 bits - ONE LESS THAN THE
-  BREAK-TO-SYNC DELAY AT EVERY HDRDLY, where 31.8.3's table gives the
+  13.05, 16.99 to 17.02, 21.00 to 21.07 and 25.99 to 26.07 bits for BRKLEN
+  0 to 3; from the break's end to the sync 0.98 to 1.02, 3.98 to 4.02,
+  7.99 to 8.02 and 13.99 to 14.04 bits for HDRDLY 0 to 3, as 31.8.3 says;
+  and from the sync's stop bit to the identifier 0.00 to 0.02, 3.00 to
+  3.03, 6.99 to 7.05 and 12.96 to 13.04 bits - ONE LESS THAN THE
+BREAK-TO-SYNC DELAY AT EVERY HDRDLY, where 31.8.3's table gives the
   sync-to-identifier delay as 1, 4, 4 and 4 (`lin_sync_to_id_gap_bits()`
   speaks the silicon). STATUS.TXE stands once the header is out; the far
   plain receiver takes the break as one 0x00 with FERR, then 0x55 and the
@@ -927,15 +928,18 @@ by the signal's own bit edges - times this board's pads):
   by software.
 - **The synchronous roles** (letter Q): as the host at 100 kHz and 1 MHz,
   CPOL 0 and 1, eight frames into the far client exact; as the client on
-  the far host's XCK at 100 kHz, 1 MHz, 4 MHz and 12 MHz (CLK_PER / 2 of
-  the far board), eight frames exact at each.
+  the far host's XCK at 100 kHz, 1 MHz and its nearest to 4 MHz (CLK_PER/6,
+  3.33 MHz), eight frames exact at each - and at its fastest, CLK_PER/2
+  (10 MHz), the same, unjudged.
 - **IrDA** (letter S, 115200): both ways clean - the far receiver inverts
   its own pin for this coder's high pulses; RXPL against the far coder's
-  3/16 pulse (39 core cycles) takes it up to RXPL 36 and refuses it from
-  38, against its fixed 60-cycle pulse up to 56 and from 58 - a pulse is a
-  0 while it lasts RXPL + 2 core cycles (31.8.5), to the cycle the
-  asynchronous edge gives. The coder cannot be read by a plain receiver,
-  nor a plain transmitter by the decoder.
+  3/16 pulse (nominally 39 core cycles; 32 or 33 cycles of the far 20
+  MHz, 38.4 or 39.6 here) takes it up to RXPL 36 and refuses it from 38
+  in thirteen runs of twenty-two, up to 34 and from 36 in nine; against
+  its fixed 60-cycle pulse up to 56 and from 58 in every run - a pulse is a 0 while it
+  lasts RXPL + 2 core cycles (31.8.5), to the cycle the asynchronous edge
+  gives. The coder cannot be read by a plain receiver, nor a plain
+  transmitter by the decoder.
 - **Hardware handshaking** (letter C): the far board holds its XCK pad at
   a level (usart_link.hpp's hold_pad - its synchronous host's XCK would
   run while the instance is enabled), the level confirmed against this
@@ -946,8 +950,9 @@ by the signal's own bit edges - times this board's pads):
   has room and high once it is disabled.
 - **RS485** (letter R, on the shared wire): TE rises with the start bit
   and falls GTIME bit times after the stop bit's end - 0.00, 0.99, 2.97,
-  6.98 bits for GTIME 0, 1, 3, 7 at 19200, the same on both generators,
-  6.98 to 7.00 at 9600, 7.09 at 57600 (a log turn is a twelfth of a bit there) -,
+  6.98 bits for GTIME 0, 1, 3, 7 at 19200, the same on both generators
+  (2.97 to 3.02 and 6.98 to 7.06 run to run), 6.99 to 7.02 at 9600,
+  7.09 at 57600 (a log turn is a twelfth of a bit there) -,
   TXC rises as TE falls, and TE stays up across four gapless frames.
 - **The one-wire bus and collision detection** (letter W, on the shared
   wire): half duplex at 19200 against the far onewire, every frame heard

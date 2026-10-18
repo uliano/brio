@@ -409,14 +409,15 @@ SleepRun power_down_once(uint8_t stage, bool sync = true) {
 // with no wire: an EVOUT position, or a LUT's output on an asynchronous
 // path (FILTSEL = 0, EDGEDET = 0: table 13-3 note 3). Each pad senses its
 // own drive. On this board PA2/PA3 and PC2/PC3 are the I2C bus, PC6 is the
-// peer's stimulus net, PF2/PF3 the LED and the button and PF6 RESET -
-// none of them is driven here.
+// peer's stimulus net, PF2/PF3 the LED and the button, PF6 RESET, and
+// PD1/PD6/PD7 the analog net (avr_board.hpp's board_analog_net: VREFA's
+// 100 nF and the DAC's resistor) - none of them is driven here, so
+// EVOUTD's ALT1 (PD7) and LUT2's ALT1 (PD6) are not among the pads.
 using PinA6 = Pin<'A', 6>;           ///< LUT0's ALT1 output
 using PinA7 = Pin<'A', 7>;           ///< EVOUTA ALT1
 using PinC7 = Pin<'C', 7>;           ///< EVOUTC ALT1: the echo's net, PE3 its partner
 using PinD3 = Pin<'D', 3>;           ///< LUT2's output
-using PinD6 = Pin<'D', 6>;           ///< LUT2's ALT1 output
-using PinD7 = Pin<'D', 7>;           ///< EVOUTD ALT1
+static_assert(board_analog_net, "letter p keeps PD6/PD7 (the analog net) undriven");
 using PortaLut = Lut<0>;
 using PortdLut = Lut<2>;
 using ChPin = EventChannel<2>;       ///< the PIT divider into a LUT (letter p)
@@ -429,7 +430,6 @@ volatile uint16_t portc_irqs = 0;    ///< PORTC: letter p's PC7, letter q's PC4/
 void quiesce_pins() {
     EvOut<PinA7>::unlisten();
     EvOut<PinC7>::unlisten();
-    EvOut<PinD7>::unlisten();
     (void)PortaLut::init({});        // the output pin released, the route back to default
     PortaLut::disable();
     (void)PortdLut::init({});
@@ -441,8 +441,6 @@ void quiesce_pins() {
     PinA7::configure({});
     PinC7::configure({});
     PinD3::configure({});
-    PinD6::configure({});
-    PinD7::configure({});
     Pin<'C', 6>::configure({});
     LinePin::configure({.pull = PinPull::up});   // the command wire's idle level, as command mode leaves it
     Pin<'E', 0>::configure({});
@@ -3172,54 +3170,47 @@ void tp_pin_wake() {
     ChPad::source(EvPitDiv<1024>{});          // 32 Hz: an edge every 15.6 ms
     ChPin::source(EvPitDiv<1024>{});          // the same divider, the same slot
 
-    constexpr uint8_t n = 8;
+    constexpr uint8_t n = 6;
     const char* const what[n] = {
-        "PD2 (EVOUTD, a Px2)         ", "PD7 (EVOUTD ALT1)           ",
-        "PA7 (EVOUTA ALT1)           ", "PC7 (EVOUTC ALT1)           ",
-        "PE3 (PC7's net, PC7 driving)", "PA6 (LUT0 ALT1, a Px6)      ",
-        "PD3 (LUT2)                  ", "PD6 (LUT2 ALT1, a Px6)      ",
+        "PD2 (EVOUTD, a Px2)         ", "PA7 (EVOUTA ALT1)           ",
+        "PC7 (EVOUTC ALT1)           ", "PE3 (PC7's net, PC7 driving)",
+        "PA6 (LUT0 ALT1, a Px6)      ", "PD3 (LUT2)                  ",
     };
     PadWake w[n];
     EvOut<PadPin>::listen(ChPad{});
     w[0] = pad_wake<PadPin>(pad_irqs, 20);
     EvOut<PadPin>::unlisten();
-    EvOut<PinD7>::listen(ChPad{});
-    w[1] = pad_wake<PinD7>(pad_irqs, 22);
-    EvOut<PinD7>::unlisten();
     EvOut<PinA7>::listen(ChPad{});
-    w[2] = pad_wake<PinA7>(porta_irqs, 24);
+    w[1] = pad_wake<PinA7>(porta_irqs, 24);
     EvOut<PinA7>::unlisten();
     EchoPin::input();                         // one driver per net: PC7 drives, PE3 listens
     EvOut<PinC7>::listen(ChPad{});
-    w[3] = pad_wake<PinC7>(portc_irqs, 26);
-    w[4] = pad_wake<EchoPin>(wake_irqs, 28);
+    w[2] = pad_wake<PinC7>(portc_irqs, 26);
+    w[3] = pad_wake<EchoPin>(wake_irqs, 28);
     EvOut<PinC7>::unlisten();
     EchoPin::clear();
     EchoPin::output();
     ChPad::off();
     const bool l0 = lut_drive<PortaLut>(true);
-    w[5] = pad_wake<PinA6>(porta_irqs, 30);
+    w[4] = pad_wake<PinA6>(porta_irqs, 30);
     Ccl::disable();
     (void)PortaLut::init({});                 // PA6 released before the block runs again
     PortaLut::disable();
     const bool l1 = lut_drive<PortdLut>(false);
-    w[6] = pad_wake<PinD3>(pad_irqs, 32);
-    const bool l2 = lut_drive<PortdLut>(true);
-    w[7] = pad_wake<PinD6>(pad_irqs, 34);
+    w[5] = pad_wake<PinD3>(pad_irqs, 32);
     Ccl::disable();
 
-    verdict("the three LUT drivers came up", l0 && l1 && l2);
+    verdict("the two LUT drivers came up", l0 && l1);
     for (uint8_t i = 0; i < n; ++i) print_pad(what[i], w[i]);
     bool all = true;
     for (uint8_t i = 0; i < n; ++i) all = all && pad_woke(w[i]);
     verdict("every pad toggles awake, and ONE falling edge and ONE rising edge each "
             "woke the device from POWER-DOWN before the 1 s backstop", all);
-    verdict("among them five pins that are neither Px2 nor Px6 (PD7, PA7, PC7, PE3, "
-            "PD3): no DA/DB pin of those positions wakes on a single edge there",
-            pad_woke(w[1]) && pad_woke(w[2]) && pad_woke(w[3]) && pad_woke(w[4]) &&
-                pad_woke(w[6]));
+    verdict("among them four pins that are neither Px2 nor Px6 (PA7, PC7, PE3, PD3): "
+            "no DA/DB pin of those positions wakes on a single edge there",
+            pad_woke(w[1]) && pad_woke(w[2]) && pad_woke(w[3]) && pad_woke(w[5]));
     verdict("and a LUT's asynchronous output drives its pad through POWER-DOWN (PA6, "
-            "PD3, PD6)", pad_woke(w[5]) && pad_woke(w[6]) && pad_woke(w[7]));
+            "PD3)", pad_woke(w[4]) && pad_woke(w[5]));
     quiesce();
 }
 

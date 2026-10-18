@@ -5,7 +5,9 @@ chapter 29, PORTMUX chapter 17, electricals 39.16), errata DS80000915F
 (2.15.1, 2.15.2) and, for the DA parts, DS80000882C (2.14.1, 2.14.2,
 2.14.3 and clarification 3.2); for the AVR64EA28/32/48 DS40002443A (TWI
 chapter 27, PORTMUX 17.3.6, electricals 35.15) and DS80001048D (no TWI
-item). Three errata items shape the code:
+item). Three errata items shape the code - and on the AVR EA the chapter
+itself, whose SCL clock is not the DA/DB's (below, "The AVR EA's SCL
+clock"):
 
 - **DB 2.15.1 / DA 2.14.1, the output pin override**: with the TWI
   enabled the override covers the pin DRIVER but not the pin VALUE, so a
@@ -121,6 +123,19 @@ arrives with the 32-pin step.
 | TWI1 ALT1 | - | PF2/PF3, no dual | PF2/PF3, no dual | PF2/PF3, dual PB6/PB7 |
 | TWI1 ALT2 | - | - | PB2/PB3, no dual | PB2/PB3, dual PB6/PB7 |
 
+The AVR EA (DS40002443A 17.3.6) carries TWI0 alone, on every package,
+with a fourth route:
+
+| | 28 pins | 32 pins | 48 pins |
+|---|---|---|---|
+| TWI0 DEFAULT | PA2/PA3, dual PC2/PC3 | PA2/PA3, dual PC2/PC3 | PA2/PA3, dual PC2/PC3 |
+| TWI0 ALT1 | PA2/PA3, no dual | PA2/PA3, no dual | PA2/PA3, dual PC6/PC7 |
+| TWI0 ALT2 | PC2/PC3, no dual | PC2/PC3, no dual | PC2/PC3, dual PC6/PC7 |
+| TWI0 ALT3 | PA0/PA1, dual PC2/PC3 | PA0/PA1, dual PC2/PC3 | PA0/PA1, dual PC2/PC3 |
+
+`TwiRoute::alt3` exists only on that layout (a name the layout has not
+got is a compile error, never a code that writes another route).
+
 TWI0's DEFAULT and ALT1 carry the SAME main pair and differ only in
 where the dual client lands. A route whose dual pair this package does
 not bond stays perfectly usable for the host and for a non-dual client;
@@ -152,6 +167,47 @@ Fast-mode Plus is a PAD setting as much as a divider one (29.3.3.1: x10
 output drive instead of the slew limit), so `I2cSpeed::fast_plus_1m`
 and CTRLA.FMPEN are checked against each other: asking for 1 MHz with
 FMPEN off is refused rather than run on slew-limited drivers.
+
+### The AVR EA's SCL clock
+
+DS40002443A 27.3.2.2.1 keeps the period (equation 1, the DA/DB's 29-2:
+`f_SCL = f_CLK / (10 + 2 BAUD + f_CLK tR)`) and changes the duty: the
+low phase is `(BAUD + 6)/f_CLK - tOF` in Sm (equation 3.2) and
+`(BAUD + 6 + min(SCLDUTY, BAUD))/f_CLK - tOF` in Fm and Fm+ (3.1), with
+SCLDUTY defined nowhere, and the new CTRLA.FMEN "adjusts the SCL duty
+cycle to comply with I2C specification in Fast mode" for the host
+(27.5.1; no effect on a client or under FMPEN). `test_avr_twi` letter u
+measured what the silicon does (Bench findings): FMEN moves `min(5,
+BAUD)` clocks from the high phase into the low, FMPEN `min(8, BAUD + 2)`
+whatever FMEN says, the period stays equation 1's at every MBAUD, and
+with FMPEN off MBAUD 0..3 make no regular clock (none at all at 3), with
+FMPEN on MBAUD 0 and 1 none. The driver takes it whole:
+
+- `twi_low_ticks(baud, speed)` is the low phase the host drives at a
+  speed - BAUD + 6 in Sm, plus `min(5, BAUD)` in Fm, plus `min(8,
+  BAUD + 2)` in Fm+ - and `twi_baud_for()` the chapter's procedure with
+  it: equation 2 for BAUD, raised to `twi_baud_min()` (4, or 2 under
+  FMPEN), then to the smallest BAUD whose low phase covers the mode's
+  floor plus the fall charged - equation 4 rewritten for the measured
+  duty (the data sheet's "- 3" matches neither its own 3.2 nor the
+  silicon). The DA/DB keep equation 29-4's BAUD + 5 at every speed
+  (`twi_ea_scl`, device_tables.hpp, keys the die).
+- FMEN is USED: the engine sets it with the Fm speed (`set_speed()`, and
+  `init()` for a host configured at Fm) as it sets FMPEN with Fm+. At
+  20 MHz with the specification's edges charged, Fm is MBAUD 21 with it
+  - 364 kHz on this desk's bus - and would be MBAUD 26 without, 308 kHz:
+  the low phase the floor needs is bought from the high phase instead of
+  from the period. `Twi::fm_duty()` is the raw verb, where the bit
+  exists.
+- 1 MHz needs CLK_PER over 12 MHz (35.15 table 35-21): `twi_baud_for()`
+  refuses Fm+ at or below it (`twi_fm_plus_min_clk_hz`). The DA/DB's
+  table names 10 MHz and is not enforced ("Not covered yet").
+
+The duty has one consequence the 50/50 clock has not: the floor step's
+period at tR = 0 is two CLK_PER under 50/50's, so on a bus whose rise is
+under two CLK_PER the SCL runs up to two CLK_PER fast - at the rise the
+speed charges it never does (equation 2), and this desk's 150 ns rise
+reads 99.5 kHz at 20 MHz and 101.0 kHz at 10 MHz.
 
 ## Types and verbs
 
@@ -330,8 +386,10 @@ and the bus, each item used or declined:
 | MCTRLB with ACKACT and MCMD in one store | 29.5.5, table 29-2 note 1 | USED: every command is one store |
 | the held START on a Busy bus | 29.3.2.2.3 | USED by construction: `start()` writes MADDR and never waits for the bus |
 | Quick Command (QCEN) | 29.3.3.5 | EXPOSED (`quick_command(true)`), not the probe's shape: the empty probe costs one interrupt either way |
-| FLUSH | 29.5.5, errata 2.15.2 / 2.14.3 | DECLINED: broken on every revision; `recover()` is the errata's ENABLE cycle |
+| FLUSH | 29.5.5, errata 2.15.2 / 2.14.3 | DECLINED: broken on every DA/DB revision; `recover()` is the errata's ENABLE cycle. The AVR EA has no such item, and 1000 strobes on an idle host never left it stuck (letter v); still unexposed - `recover()` is the verb on every die, and a FLUSH in the middle of a tenure is unmeasured |
 | the client's Smart mode | 29.3.3.3 | the client task's option; the bench's own client runs it |
+| CTRLA.FMEN, the AVR EA's Fm duty | DS40002443A 27.5.1 | USED with the Fm speed: the floor's low phase bought from the high phase (The AVR EA's SCL clock) |
+| the inactive-bus time-out's base, CLKCTRL.MCLKTIMEBASE | DS40002443A 27.3.3.1 | USED: the clock writes TIMEBASE at every init and rate change, so `TwiTimeout` is microseconds; at TIMEBASE 0, its reset value, every setting fires at once (letter v) |
 
 ### The host's cost, measured (bench_avr letter i)
 
@@ -390,6 +448,37 @@ What the rows say:
   frame on one core - 85 cycles a frame in the polled loop, where the
   host spins and only the client's handler is left, 92 under the engine
   at 400 kHz. A client on another chip pays its own turnaround instead.
+
+**On the AVR64EA48 at 20 MHz** (rev B1, the same dual loop on PA2/PA3
+and PC2/PC3, the same image; plain bindings, the thread spinning, best
+of 8, in CLK_PER cycles). The SCL period measured on PA3: 201, 55 and
+21 cycles at 100 kHz, 400 kHz and Fm+ (99.5 kHz, 363.6 kHz with FMEN,
+952.4 kHz - MBAUD 94, 21 and 4, the register's floor 198, 52 and 18
+plus the bus's rise); `wire` is the tenure's SCL rises times that
+period:
+
+| tenure | wire | measured | x |
+|---|---|---|---|
+| 1-byte write, 100 kHz | 3819 | 4272 | 1.12 |
+| 255-byte write, 100 kHz | 463305 | 481252 | 1.04 |
+| 255-byte read, Smart, 100 kHz | 463305 | 481921 | 1.04 |
+| 1 + 1 register read, 100 kHz | 7638 | 8548 | 1.12 |
+| 1-byte write, 400 kHz | 1045 | 1442 | 1.38 |
+| 255-byte write, 400 kHz | 126775 | 153373 | 1.21 |
+| 1 + 1 register read, 400 kHz | 2090 | 2766 | 1.32 |
+| 1-byte write, Fm+ | 399 | 799 | 2.00 |
+| 255-byte write, Fm+ | 48405 | 76788 | 1.59 |
+| 255-byte read, Smart, Fm+ | 48405 | 81769 | 1.69 |
+| 1 + 1 register read, Fm+ | 798 | 1489 | 1.87 |
+
+The cycles above the wire are the DB's to within an eighth - the same
+core and the same handlers: a 255-byte write at 400 kHz carries 26598
+above the wire here, 23723 on the DB at 24 MHz; at Fm+ 28383 against
+28033. A long write is wire-bound at 100 kHz and the two
+handlers on one core cost a fifth at 400 kHz and three fifths at Fm+,
+as on the DB. The 255-byte READ at 400 kHz has no row: on this die's
+dual loop the client drops out of a long read (Bench findings, "On the
+AVR64EA48").
 
 ## Bench findings
 
@@ -715,6 +804,113 @@ the DB's engine does the same on TWI0's default pins: 393.4 us awake and
 out of standby, about 1.0 ms out of power-down - the crystal's cold
 restart (0.6 ms) held on SCL; DS40002443A 27.3.5 promises the stretch.
 
+### On the AVR64EA48
+
+Rev B1 at 5 V, CLK_PER 20 MHz from the board's quartz, TWI0 on its
+DEFAULT route on the same kind of node - 1.5k pull-ups to +5 V, the dual
+pair PC2/PC3 and the partner SAM C21's PA22/PA23 on it (the board's
+page). `test_avr_twi` builds two images there (the group axis):
+`test_avr_twi-1` (`z`, with the EA's letters u and v) 226 of 226 in ten
+runs of ten, `test_avr_twi-2` (`y`, against the SAM C21's `twi_peer`)
+136 of 136 in ten runs of ten.
+
+**The duty, measured** (letter u: MBAUD swept, the shortest low and high
+pulses and the period on PA3 under NACK traffic, CLK_PER ticks; the bus's
+rise is 3 ticks):
+
+| MBAUD | Sm: period / low / high | Fm (FMEN): period / low / high | Fm+ (FMPEN): period / low / high |
+|---|---|---|---|
+| 0, 1 | 8 / 2 / 6, 10 / 4 / 6 | the same (FMEN does nothing) | no clock |
+| 2 | 11 / 5 / 6 | no clock | 17 / 8 / 9 |
+| 3 | no clock | no clock | 19 / 10 / 9 |
+| 4 | 21 / 6 / 15 | 21 / 9 / 12 | 21 / 12 / 9 |
+| 6 | 25 / 8 / 17 | 25 / 13 / 12 | 25 / 16 / 9 |
+| 8 | 29 / 10 / 19 | 29 / 15 / 14 | 29 / 18 / 11 |
+| 32 | 77 / 34 / 43 | 77 / 39 / 38 | 77 / 42 / 35 |
+| 95 | 203 / 97 / 106 | 203 / 102 / 101 | 203 / 105 / 98 |
+
+The period is `10 + 2 BAUD` plus the rise at every MBAUD from 4 (2 under
+FMPEN), in all three duties; FMEN lengthens the low by `min(5, BAUD)`
+within a tick and FMPEN by `min(8, BAUD + 2)`, FMEN or not; and the low
+reads `twi_low_ticks()` less one offset - 4 ticks, the fall and the input
+path, read once at MBAUD 95 - within a tick at every MBAUD, ten runs of
+ten. The Sm low reads BAUD + 2 against the DA/DB's BAUD + 1 on the same
+kind of node (the 24 MHz table above: 116 for 115): the one clock the
+chapter's 3.2 adds. Below `twi_baud_min()` the host makes no regular
+clock - periods of 8 to 11 ticks, shorter than equation 1's, and none at
+all at MBAUD 3 without FMPEN, at 2 and 3 with FMEN, at 0 and 1 with FMPEN.
+
+**The three speeds** (letter b, the default timing; then this bus's edges
+declared, 190 ns rise and 240 ns fall):
+
+| speed | MBAUD | period | SCL | tLOW | reading (thousandths) |
+|---|---|---|---|---|---|
+| Sm | 94 | 201 ticks (floor 198) | 99.50 kHz | 96 of 100 ticks = 4800 ns | 995 |
+| Fm, FMEN | 21 | 55 (floor 52) | 363.6 kHz | 28 of 32 = 1400 ns | 909 |
+| Fm+ | 4 | 21 (floor 18) | 952.4 kHz | 12 of 16 = 600 ns | 952 |
+| Sm, declared | 94 | 201 | 99.50 kHz | 4800 ns | 995 |
+| Fm, declared | 20 | 53 | 377.4 kHz | 27 of 31 = 1350 ns | 943 |
+| Fm+, declared | 4 | 21 | 952.4 kHz | 600 ns | 952 |
+| Sm at 20, 10 and 20 MHz (letter j) | 94, 44, 94 | 201, 99, 201 | 99.50, 101.0, 99.50 kHz | | 995, 1010, 995 |
+
+tR reads 150 ns and tOF 200 ns here. Fm with FMEN runs within a tenth of
+the rate asked where the DA/DB's 50/50 clock ran at 0.73 of it; at 10
+MHz Sm runs a percent fast (The AVR EA's SCL clock).
+
+**The time-out counts MCLKTIMEBASE** (letter v; the injector's START
+leaves the bus Busy, the bus state is polled from the injector's return,
+20 us after the START): with the clock's TIMEBASE (20) the three settings
+release the bus 31, 81..82 and 181..182 us after the return - 50, 100 and
+200 us from the START, within the stopwatch's microsecond; with TIMEBASE
+10 at 6, 31 and 82 us - half of each; with TIMEBASE 0, the register's
+reset value, at once (0 to 1 us). Letter h's verdicts on 50/100/200 us
+read 31/82/181 from the same return.
+
+**SDAHOLD's codes are straight** (letter v: LUT0 high while SCL is low
+and SDA high, SCL by its pin event, SDA on LUT0's own IN2 = PA2, the
+window's shortest pulse in TCB0 - the host's SDA change after SCL's fall
+under NACK traffic): 8, 9, 12 and 20..21 ticks for codes 0..3 - code 1
+adds 50 ns, code 2 200 ns, code 3 600..650 ns (table 35-21: 300..900 ns
+for code 3, nothing for 1 and 2). No swap: `erratum_da_twi_sdahold_swap`
+is the DA's alone.
+
+**No OUT override, and FLUSH did not stick** (letter v): with PORT.OUT =
+1 on PA2 and PA3 under the enabled TWI a two-byte write completes and the
+client takes both bytes - the DA/DB's 2.15.1 / 2.14.1 has no twin here,
+and the init's clearing of OUT (one store a pin) stays, harmless; 1000
+FLUSH strobes on an idle host never left BUSSTATE other than Idle and the
+bus ran after them.
+
+**A STOP inside a byte is not a bus error here.** Letter h's injected
+START, one clock and then a STOP: the DA/DB host raises BUSERR and keeps
+its held START pending; the AVR EA's takes the STOP as the end of the
+foreign tenure - MSTATUS 0x02, no BUSERR, the bus Owner - and launches the
+START it was holding at once (the address reached the client on the next
+pass), ten runs of ten. 27.5.6's BUSERR text is the DA/DB's word for word.
+
+**Against the SAM C21's client** (`y`): the three speeds read 994, 909
+and 952 thousandths of the rate asked; a 1 ms hold a byte stretches six
+bytes by 121033 ticks against a model of 120000 (100 us a byte: 12051
+against 12000); the 20 -> 10 -> 20 MHz rebase under two-board traffic
+reads 994, 1009 and 994; every other letter as on the DA/DB. Letter n
+(multi-host arbitration) is skipped against this peer, as it is on the
+DA/DB.
+
+**A long read on the dual loop loses the client** (`bench_avr` letter i,
+three runs; the one image that reads 255 bytes from the same instance's
+dual client): at 400 kHz, and at 100 kHz with the stamps in both
+vectors, the client stops answering partway - SSTATUS and MSTATUS both
+read BUSERR afterwards, the client's last byte arrives with its first
+bit alone and the rest of the read is 0xFF - while the host's request
+completes `i2c_ok`. The byte it happens at is fixed run to run by the
+DATA, not by the time: 65 of 255 with the client serving 0, 1, 2 ...,
+128 with those values' top bit inverted; FMEN cleared, a 300 ns SDAHOLD
+on either half or both, Smart mode on or off change nothing. At Fm+, and
+at 100 kHz without the stamps, the 255-byte reads are exact; the DB runs
+the same image exact at every speed; this die as the client of the SAM
+C21's host serves 255-byte reads exact at 400 kHz and Fm+
+([../samc21/i2c.md](../samc21/i2c.md)). Gap below.
+
 **A desk fact, not a silicon one**: TWI1's dual pair PB2/PB3 would make
 a third tap of this bus - the suite drives PB2 low and prints whether the
 SDA node follows, instead of assuming either way.
@@ -724,16 +920,20 @@ SDA node follows, instead of assuming either way.
 **Driver gaps** (the chapter's own features this driver does not
 implement):
 
-- **The AVR EA's TWI engine.** TWI0 alone (TWI1 refused by name) and its
-  route table with ALT3 (SDA PA0, SCL PA1, dual PC2/PC3; 17.3.6) compile
-  on the three AVR64EA packages; the engine over them is the DB's, not
-  yet written from DS40002443A ch. 27: CTRLA.FMEN (the Fm duty cycle) is
-  neither used nor declined, the baud arithmetic is the DB's (the EA's
-  Sm low time is BAUD + 6 cycles where the DB's is + 5: one tick
-  conservative), and the bus time-out counts in CLKCTRL.MCLKTIMEBASE,
-  which the clock now owns and writes (clkctrl.md) - so `TwiTimeout`
-  means microseconds there as on the DB. A later step, with its letters.
-
+- **The AVR DA/DB's Fm+ clock floor.** DS40002247B's TWI electricals
+  give 1 MHz only over 10 MHz of CLK_PER; `twi_fm_plus_min_clk_hz` is 0
+  there, so the divider alone decides (it reaches 1 MHz's floor from
+  about 9 MHz). Enforcing it moves every DA/DB image that builds the
+  engine, owed with a DA/DB board on the desk.
+- **The AVR EA's ALT3** (SDA PA0, SCL PA1): in the route table and the
+  fixture only - this desk's EA board has its quartz on PA0/PA1, and no
+  letter routes there.
+- **The AVR EA's dual-loop read** (Bench findings, "A long read on the
+  dual loop loses the client"): the cause is not found. The engine tests
+  BUSERR at every RIF, the last included, and none carries it - the flag
+  is read standing only after the STOP - so the request reports `i2c_ok`
+  over a tail of 0xFF. When the flag rises, and what the silicon does
+  between the two halves, wants a record of the wire around the byte.
 - **10-bit addressing.** The client's match logic recognizes the first
   byte when SADDR[7:3] is 0b11110 and the second byte is software's job
   (29.3.3.6); neither the client task nor the host's `Request` has a
@@ -759,13 +959,26 @@ implement):
   stretch is exposed and written, but its two settings are not measured
   apart on the wire;
 - the DA's swapped SDAHOLD codes (DS80000882C 2.14.2): `sda_hold` writes
-  the swapped code on a DA and `sda_hold_code` reads it back, but no
-  letter measures a hold time on the wire, on either family - an
-  oscilloscope on SDA against SCL's fall would;
+  the swapped code on a DA and `sda_hold_code` reads it back; the AVR
+  EA's letter v measures the codes on the wire (straight there), and the
+  same letter on a DA board with this bus's pull-ups would measure the
+  swap;
+- the AVR EA's Fm+ pads (FMPEN, 3 mA at 0.4 V in table 35-21 where the
+  DB's is 5): VOL and tOF at FMPEN 0 and 1 against 1.5k to 5 V - PA3 is
+  AIN23, so an ADC leg reading the held SCL would measure it; and Fm+ on
+  the dual client's PC6/PC7 (the DB limits them to Sm/Fm, the EA's
+  chapter is silent) - the dual pair this desk wires is PC2/PC3;
+- the AVR EA's INPUTLVL thresholds: no TWI VIL/VIH row in 35.7 or
+  DS80001048D; the DAC ramping the node would find them, which needs a
+  wire from PD6 to the bus;
+- 1 MHz between 10 and 12 MHz of CLK_PER on the AVR EA: this board's
+  clock ladder reaches 20 and 10 MHz (refused at 10 by the divider and the
+  12 MHz floor alike), not the band between;
 - SMBus as an ELECTRICAL fact: CTRLA/DUALCTRL.INPUTLVL is exposed and
   written, but the input transition level itself is not measured;
 - DBGCTRL.DBGRUN;
 - the timings of electricals 39.16 as numbers;
 - TWI1, and every route other than TWI0 DEFAULT/ALT1/ALT2, are compiled
-  for all eight packages and refused where they must be, but only TWI0's
-  DEFAULT pair has carried traffic on this desk.
+  for all eight DA/DB packages and the three AVR EA ones and refused
+  where they must be, but only TWI0's DEFAULT pair has carried traffic
+  on this desk.

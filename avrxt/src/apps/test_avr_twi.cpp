@@ -1,4 +1,4 @@
-// test_avr_twi - the TWI (I2C) test SUITE for the AVR DA/DB target.
+// test_avr_twi - the TWI (I2C) test SUITE for the AVR DA/DB/EA target.
 //
 // SINGLE BOARD (a..j, `z`): the route table and its refusals, the three
 // bus speeds MEASURED on SCL against the chapter's own baud equations,
@@ -64,6 +64,16 @@
 // above cannot see it at all - which is why `z` runs unchanged with the
 // peer attached to the node.
 //
+// THE AVR EA (DS40002443A ch. 27): TWI0 alone, the same node and taps
+// (PB2/PB3 are plain GPIO there). Its SCL duty is its own: letter b
+// judges the speeds on the driver's model of it (twi_low_ticks), letter u
+// measures that model against the silicon - the low and high phases and
+// the period at MBAUD 0..95 in Sm, with FMEN and with FMPEN - and letter v
+// the time-out against CLKCTRL.MCLKTIMEBASE, the SDA hold codes (a CCL
+// window from SCL's fall to SDA's change), PORT.OUT = 1 under the TWI and
+// a thousand FLUSH strobes. Letters u and v are the EA's alone; every
+// rate and bound derives from SysClock::hz, 20 MHz on that board.
+//
 // Commands: ? for the menu, z = the single-board half, y = the two-board
 // half.
 
@@ -72,13 +82,17 @@
 // the ATmega4809's 48 KB: the single-board set in one, the two-board set
 // in the other. The 128 KB DA and DB build one image.
 //
-// build: boards = db48,da48
-// build: groups = abcdefghij,klmnopqrst
+// build: boards = db48,da48,ea48
+// build: groups = abcdefghijuv,klmnopqrst
 // build: monitor_speed = 460800
 
 #include <avr/interrupt.h>
 #include <stdint.h>
 
+#include <avr/io.h>
+#if defined(TWI_FMEN_bm)   // letter v's SDA-hold window (the AVR EA)
+#include "avrxt/ccl.hpp"
+#endif
 #include "avrxt/clock.hpp"
 #include "avrxt/delay.hpp"
 #include "avrxt/evsys.hpp"
@@ -112,8 +126,16 @@ using P = AvrPlatform;
 using Serial = Uart<2, Route::alt1>;
 constexpr Serial serial;
 
+/// The clock in MHz - every tick count below derives from it - and
+/// whether it is the DA/DB boards' 24 MHz (the AVR EA board runs 20).
+constexpr unsigned mhz = SysClock::hz / 1'000'000u;
+constexpr bool at24 = SysClock::hz == 24'000'000u;
+static_assert(at24 || SysClock::hz == 20'000'000u, "the strings below name 24 or 20 MHz");
+
 using T = Twi<0>;
+#if defined(TWI1)   // the AVR EA carries TWI0 alone
 using T1 = Twi<1>;
+#endif
 
 using Sda = Pin<'A', 2>;
 using Scl = Pin<'A', 3>;
@@ -395,7 +417,10 @@ void meter_reset() {
 // floor bounds the rate below a quarter under the rate asked - Fm and
 // Fm+ with the specification's edges charged - the lower bound is the
 // floor's rate, computed here from equation 29-5 and the floors the
-// chapter names (4700, 1300, 500 ns), less 2 %.
+// chapter names (4700, 1300, 500 ns), less 2 %. The AVR EA's clock is not
+// 50/50 (DS40002443A 27.3.2.2.1, its duty measured by letter u): there the
+// floor's rate is equation 1's period at the smallest BAUD whose low phase
+// (twi_low_ticks) covers the floor and the fall.
 
 struct SclReading {
     uint32_t mean_mt = 0;   ///< the mean in-byte period, thousandths of a CLK_PER tick
@@ -433,7 +458,16 @@ uint32_t chapter_low_floor_ns(I2cSpeed s) {
 uint32_t floor_period_ticks(uint32_t hz, I2cSpeed s, uint32_t fall_ns, uint32_t rise_ticks) {
     const uint64_t half = (static_cast<uint64_t>(hz) * (chapter_low_floor_ns(s) + fall_ns) +
                            999'999'999ull) / 1'000'000'000ull;
-    return static_cast<uint32_t>(2u * half) + rise_ticks;
+    if constexpr (twi_ea_scl) {
+        // The AVR EA's clock is not 50/50 (letter u measures its duty,
+        // twi_low_ticks): the smallest BAUD whose low phase covers the
+        // floor and the fall, then equation 1's period at it.
+        uint16_t b = twi_baud_min(s);
+        while (b < 255u && twi_low_ticks(static_cast<uint8_t>(b), s) < half) ++b;
+        return 10u + 2u * b + rise_ticks;
+    } else {
+        return static_cast<uint32_t>(2u * half) + rise_ticks;
+    }
 }
 
 /// The reading printed and judged: `fall_ns` is the fall the host was
@@ -465,7 +499,9 @@ void meter_stop() {
 /// Everything back to a known quiet state.
 void quiesce() {
     T::release();
+#if defined(TWI1)
     T1::release();
+#endif
     meter_stop();
     Stopwatch::disable();
     WatchLo::disable();
@@ -500,7 +536,9 @@ bool client_polled(uint8_t addr = client_addr, Client::Options o = {}) {
 /// both TWIs disabled, both taps of both nodes must read HIGH.
 bool wire_sane(bool loud) {
     T::release();
+#if defined(TWI1)
     T1::release();
+#endif
     inj_park();
     delay_us(clock, 1000);
     const bool a2 = Sda::read(), a3 = Scl::read();
@@ -559,6 +597,32 @@ void report_portb_tap() {
 }
 
 // ---- a: routes, pins and the refusals ----------------------------------------
+
+#if !defined(TWI1)
+/// The route table of the AVR EA: TWI0 alone, and an ALT3 whose main pair
+/// is PA0/PA1 - this board's 20 MHz quartz - read in the table and never
+/// routed here (DS40002443A 17.3.6).
+template <typename R = TwiRoute>
+void ea_route_table() {
+    if constexpr (requires { R::alt3; }) {
+        constexpr R a3 = R::alt3;
+        const TwiPin sda = twi_pin(0, a3, TwiSignal::sda);
+        const TwiPin scl = twi_pin(0, a3, TwiSignal::scl);
+        const TwiPin dsda = twi_dual_pin(0, a3, TwiSignal::sda);
+        const TwiPin dscl = twi_dual_pin(0, a3, TwiSignal::scl);
+        verdict("this part carries TWI0 alone", twi_count == 1 && !twi_route_exists(1, TwiRoute::def));
+        verdict("TWI0 DEFAULT has its dual pair (PC2/PC3)", twi_has_dual(0, TwiRoute::def));
+        verdict("TWI0 ALT1's dual pair is PC6/PC7 here",
+                twi_dual_pin(0, TwiRoute::alt1, TwiSignal::sda).port == 'C' &&
+                twi_dual_pin(0, TwiRoute::alt1, TwiSignal::sda).pin == 6 &&
+                twi_has_dual(0, TwiRoute::alt1));
+        verdict("TWI0 ALT3 exists: SDA PA0, SCL PA1, its dual pair PC2/PC3 (the table; "
+                "PA0/PA1 carry this board's quartz and are never routed)",
+                twi_route_exists(0, a3) && sda.port == 'A' && sda.pin == 0 && scl.pin == 1 &&
+                    dsda.port == 'C' && dsda.pin == 2 && dscl.pin == 3 && twi_has_dual(0, a3));
+    }
+}
+#endif
 
 void ta_routes() {
     print(serial, "a routes: PORTMUX, the pin claim and its errata hygiene, the dual "
@@ -631,6 +695,7 @@ void ta_routes() {
             !T::init({.client = true, .address = 0x80}, SysClock::hz));
     verdict("dual mode without a client refused",
             !T::init({.dual = true}, SysClock::hz));
+#if defined(TWI1)
     // TWI1 exists here; its ALT1 route has no dual pair on a 48-pin part
     // (PB6/PB7 are 64-pin), so a dual client there is refused at run time.
     verdict("TWI1 ALT1 dual client refused on 48 pins (PB6/PB7 absent)",
@@ -647,6 +712,9 @@ void ta_routes() {
             twi_has_dual(0, TwiRoute::alt1));
     verdict("TWI1 DEFAULT's dual pair is PB2/PB3 here", twi_has_dual(1, TwiRoute::def));
     verdict("TWI1 ALT1 has no dual pair here", !twi_has_dual(1, TwiRoute::alt1));
+#else
+    ea_route_table();
+#endif
 
     quiesce();
 }
@@ -690,13 +758,13 @@ void measure_speed(I2cSpeed s, const char* name, uint16_t rise = 0, uint16_t fal
     const uint16_t period = measure(0);
     const SclReading run = scl_reading();
     const uint16_t low = measure(1);
-    const uint16_t reg_low = twi_low_ticks(baud);           // (BAUD + 5), equation 29-4
+    const uint16_t reg_low = twi_low_ticks(baud, s);        // (BAUD + 5), equation 29-4; the AVR EA's duty
     // The two bus properties this measurement resolves: the rise adds to
     // the period beyond the register's floor, the fall is subtracted
     // from the register's low time (equations 29-2 and 29-4).
-    const uint32_t rise_ns = (period > floor_ticks ? period - floor_ticks : 0) * 1000ul / 24ul;
-    const uint32_t fall_ns = (reg_low > low ? reg_low - low : 0) * 1000ul / 24ul;
-    const uint32_t low_ns = low * 1000ul / 24ul;
+    const uint32_t rise_ns = (period > floor_ticks ? period - floor_ticks : 0) * 1000ul / mhz;
+    const uint32_t fall_ns = (reg_low > low ? reg_low - low : 0) * 1000ul / mhz;
+    const uint32_t low_ns = low * 1000ul / mhz;
     const uint32_t hz = period ? SysClock::hz / period : 0;
     last_rise_ns = static_cast<uint16_t>(rise_ns);
     last_fall_ns = static_cast<uint16_t>(fall_ns);
@@ -757,8 +825,18 @@ void tb_speeds() {
           Host::actual_scl_hz(twi_rise_budget_ns(I2cSpeed::standard_100k)),
           " Hz (the 1000 ns budget), ", Host::actual_scl_hz(desk_rise),
           " Hz (this desk's measured rise)", crlf);
-    verdict("actual_scl_hz never claims more than the nominal rate",
-            Host::actual_scl_hz(0) <= 100'000u);
+    if constexpr (twi_ea_scl) {
+        // The AVR EA's floor step lands on a low phase of BAUD + 6 and a
+        // high of BAUD + 4 (twi_low_ticks): at tR = 0, a bus no pull-up
+        // makes, that period is two clocks under 50/50's - 101 kHz at 20
+        // MHz - and at the rise the speed charges it is under 100 kHz.
+        verdict("actual_scl_hz at the rise the speed charges never claims more than the "
+                "nominal rate",
+                Host::actual_scl_hz(twi_rise_budget_ns(I2cSpeed::standard_100k)) <= 100'000u);
+    } else {
+        verdict("actual_scl_hz never claims more than the nominal rate",
+                Host::actual_scl_hz(0) <= 100'000u);
+    }
     verdict("the divider reaches the speed in force (so CLK_PER is at least four times SCL)",
             Host::speed_ok() && twi_clock_ok(SysClock::hz, Host::speed()));
     quiesce();
@@ -1175,7 +1253,7 @@ uint16_t time_to_idle(uint32_t budget_us) {
         if (T::bus_state() == TwiBusState::idle) {
             const uint16_t t = Stopwatch::count();
             Stopwatch::disable();
-            return static_cast<uint16_t>(t / 24u);
+            return static_cast<uint16_t>(t / mhz);
         }
     }
     Stopwatch::disable();
@@ -1255,14 +1333,25 @@ void th_busstate() {
     verdict("nothing reached the client", cl_addr_hits == 0);
     // Releasing THAT bus with a hand-made STOP is itself a violation: the
     // injected START was followed by a clock, so the STOP lands inside a
-    // byte. The host calls it BUSERR and drops the transaction it was
-    // holding - measured, not assumed.
+    // byte. The DA/DB host calls it BUSERR and drops the transaction it
+    // was holding; the AVR EA's takes it as the tenure's end and launches
+    // its own - measured, not assumed, both.
     inject_stop();
     const uint8_t imm = T::host_status();
     print(serial, "  a STOP injected mid-byte: MSTATUS=", hex(imm), ", client matches=",
           cl_addr_hits, crlf);
-    verdict("a STOP inside a byte is a violation: BUSERR, and the address still has "
-            "not gone out", (imm & TWI_BUSERR_bm) && cl_addr_hits == 0);
+    if constexpr (avr_die == AvrDie::avr64ea) {
+        // Measured: the AVR EA's bus-state logic takes that STOP as the
+        // end of the foreign tenure - no BUSERR - and launches the START it
+        // has been holding at once (27.5.6's BUSERR text is the DA/DB's).
+        verdict("on the AVR EA a STOP inside a byte is NOT a violation: no BUSERR, and the "
+                "held START goes out at once (the bus Owner)",
+                !(imm & TWI_BUSERR_bm) && (imm & TWI_BUSSTATE_gm) == TWI_BUSSTATE_OWNER_gc &&
+                    cl_addr_hits == 0);
+    } else {
+        verdict("a STOP inside a byte is a violation: BUSERR, and the address still has "
+                "not gone out", (imm & TWI_BUSERR_bm) && cl_addr_hits == 0);
+    }
 
     // The START the host has been holding all this time is still
     // pending: clearing BUSERR and declaring the bus idle lets it go.
@@ -1448,8 +1537,10 @@ bool rebase_step(uint32_t hz, const char* what) {
 }
 
 void tj_rebase() {
-    print(serial, "j 24 -> 12 -> 24 MHz under traffic, then the I2cBus/BusMaster stack "
-                  "over the engine", crlf);
+    print(serial, at24 ? "j 24 -> 12 -> 24 MHz under traffic, then the I2cBus/BusMaster stack "
+                         "over the engine"
+                       : "j 20 -> 10 -> 20 MHz under traffic, then the I2cBus/BusMaster stack "
+                         "over the engine", crlf);
     quiesce();
     verdict("DynamicClock init (boot = the crystal)", DynClock::init());
     verdict("host init on the dynamic clock", Host::init(DynClock{}));
@@ -1458,11 +1549,11 @@ void tj_rebase() {
     verdict("client init on the dynamic clock",
             Client::init(DynClock{}, {.address = client_addr}));
 
-    (void)rebase_step(24'000'000u, "at 24 MHz");
-    verdict("switch to 12 MHz", DynClock::set(12'000'000u));
-    (void)rebase_step(12'000'000u, "at 12 MHz");
-    verdict("back to 24 MHz", DynClock::set(24'000'000u));
-    (void)rebase_step(24'000'000u, "back at 24 MHz");
+    (void)rebase_step(SysClock::hz, at24 ? "at 24 MHz" : "at 20 MHz");
+    verdict(at24 ? "switch to 12 MHz" : "switch to 10 MHz", DynClock::set(SysClock::hz / 2u));
+    (void)rebase_step(SysClock::hz / 2u, at24 ? "at 12 MHz" : "at 10 MHz");
+    verdict(at24 ? "back to 24 MHz" : "back to 20 MHz", DynClock::set(SysClock::hz));
+    (void)rebase_step(SysClock::hz, at24 ? "back at 24 MHz" : "back at 20 MHz");
 
     // The arbiter, on the real bus, against this instance's own client.
     Bus::init();
@@ -1502,11 +1593,12 @@ void tj_rebase() {
 
     // A speed the clock in force cannot make is refused INSIDE start()
     // and reaches the requester through the arbiter as i2c_rejected: at
-    // 6 MHz a 1 MHz bus would need a negative MBAUD. Nothing moves on
-    // the wire, and the arbiter's own tally stays (its rejection is the
-    // full FIFO's, a different fact).
-    verdict("switch to 6 MHz", DynClock::set(6'000'000u));
-    verdict("speed_ok says no to 1 MHz at 6 MHz, yes to 100 kHz",
+    // a quarter of the board's clock (6 or 5 MHz) a 1 MHz bus would need
+    // a negative MBAUD. Nothing moves on the wire, and the arbiter's own
+    // tally stays (its rejection is the full FIFO's, a different fact).
+    verdict(at24 ? "switch to 6 MHz" : "switch to 5 MHz", DynClock::set(SysClock::hz / 4u));
+    verdict(at24 ? "speed_ok says no to 1 MHz at 6 MHz, yes to 100 kHz"
+                 : "speed_ok says no to 1 MHz at 5 MHz, yes to 100 kHz",
             !Host::speed_ok(I2cSpeed::fast_plus_1m) && Host::speed_ok(I2cSpeed::standard_100k));
     cl_reset();
     replied = false;
@@ -1520,14 +1612,267 @@ void tj_rebase() {
             status = r->status;
         }
     }
-    print(serial, "  a 1 MHz request at 6 MHz replied ", status, " (i2c_rejected = ", i2c_rejected,
+    print(serial, at24 ? "  a 1 MHz request at 6 MHz replied " : "  a 1 MHz request at 5 MHz replied ",
+          status, " (i2c_rejected = ", i2c_rejected,
           "), the client saw ", cl_rx_n, " bytes", crlf);
     verdict("the request is answered i2c_rejected inside start(), the wire untouched",
             replied && status == i2c_rejected && cl_rx_n == 0 && Bus::rejected_count() == 0);
-    verdict("back to 24 MHz", DynClock::set(24'000'000u));
+    verdict(at24 ? "back to 24 MHz" : "back to 20 MHz", DynClock::set(SysClock::hz));
 
     quiesce();
 }
+
+// ---- u, v: the AVR EA's own TWI facts (DS40002443A ch. 27) ---------------------
+// Letters only the AVR EA carries (the CTRLA.FMEN bit is the probe): the
+// SCL clock its chapter describes with new equations (u), and the facts
+// its time base and its errata sheet move (v).
+#if defined(TWI_FMEN_bm)
+
+/// The minimum HIGH width on the SCL node under NACK traffic (the in-byte
+/// high; the idle bus between attempts is the maximum).
+uint16_t measure_high() {
+    meter_mode = 1;
+    SclLow::init(clock, ChScl{}, TcbClock::div1, false);
+    meter_reset();
+    nack_traffic(8);
+    meter_stop();
+    return meter_min;
+}
+
+/// u: SCL's low and high times against MBAUD with FMEN and FMPEN off and
+/// on. 27.3.2.2.1 gives the period as equation 1 (the DA/DB's 29-2), the
+/// low phase as BAUD + 6 in Sm (equation 3.2, where the DA/DB's 29-4 says
+/// BAUD + 5) and BAUD + 6 + min(SCLDUTY, BAUD) in Fm/Fm+ (3.1), SCLDUTY
+/// defined nowhere; 27.5.1 says FMEN "adjusts the SCL duty cycle" for the
+/// host and does nothing under FMPEN. The sweep reads, at each MBAUD, the
+/// period (TCB0 frequency meter) and the shortest low and high pulses on
+/// PA3 under NACK traffic, in each of the three duties the driver uses.
+///
+/// THE BOUNDS. A capture of an asynchronous pin event is true within one
+/// CLK_PER; each figure is the shortest of some 70 pulses, so it reads
+/// the true width or one tick less. The period against equation 1 with
+/// the bus's own rise r (read once, at MBAUD 95 in Sm) is therefore +-1.
+/// The low phase against the driver's model twi_low_ticks() is read as
+/// the model less ONE offset o - the bus's fall and the input path's
+/// delay, read once at MBAUD 95 in Sm - so each low is within +-1 of
+/// model - o: the model's duty is what is judged, not the bus. Below
+/// twi_baud_min() the host makes no regular clock (printed; the
+/// verdicts below judge only MBAUD 3 with FMPEN off and 0, 1 with it on,
+/// where it makes none at all).
+void tu_scl_duty() {
+    {
+        print(serial, "u the AVR EA's SCL: period, low and high against MBAUD in Sm, Fm (FMEN) "
+                      "and Fm+ (FMPEN) (27.3.2.2.1, 27.5.1), NACK traffic on PA3", crlf);
+        quiesce();
+        ChScl::source(EvPin<Scl>{});
+        verdict("host init", host_polled());
+        static const uint8_t bauds[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 12, 20, 32, 64, 95};
+        constexpr uint8_t nb = sizeof bauds;
+        // The reference: MBAUD 95 in Sm gives the bus's rise and offset.
+        T::set_baud(95);
+        const uint16_t per95 = measure(0);
+        const uint16_t lo95 = measure(1);
+        const int16_t r = static_cast<int16_t>(per95 - (10u + 2u * 95u));
+        const int16_t o = static_cast<int16_t>(twi_low_ticks(95) - lo95);
+        print(serial, "  reference at MBAUD 95, Sm: period ", per95, " = 10 + 2 x 95 + r, r = ", r,
+              " (the bus's rise); low ", lo95, " = twi_low_ticks - o, o = ", o, crlf);
+        // The three duties: Sm (both off), Fm (FMEN), Fm+ (FMPEN; FMEN on as
+        // well, to show it does nothing there).
+        const I2cSpeed modes[3] = {I2cSpeed::standard_100k, I2cSpeed::fast_400k,
+                                   I2cSpeed::fast_plus_1m};
+        const char* const names[3] = {"Sm", "Fm (FMEN)", "Fm+ (FMPEN, FMEN on too)"};
+        bool period_ok[3] = {true, true, true};
+        bool low_ok[3] = {true, true, true};
+        bool none_below = true;
+        for (uint8_t m = 0; m < 3; ++m) {
+            T::fm_plus(m == 2);
+            T::fm_duty(m != 0);
+            print(serial, "  ", names[m], ": BAUD period low high (model low - o)", crlf);
+            for (uint8_t i = 0; i < nb; ++i) {
+                const uint8_t b = bauds[i];
+                T::set_baud(b);
+                const uint16_t per = measure(0);
+                const uint16_t lo = measure(1);
+                const uint16_t hi = measure_high();
+                const int16_t model = static_cast<int16_t>(twi_low_ticks(b, modes[m]) - o);
+                print(serial, "    ", b, " ", per, " ", lo, " ", hi, " (", model, ")", crlf);
+                if (b < twi_baud_min(modes[m])) {
+                    const bool judged = (m != 2 && b == 3) || (m == 2 && b <= 1);
+                    if (judged) none_below = none_below && per == 0xFFFFu && lo == 0xFFFFu;
+                    continue;
+                }
+                const int16_t want_per = static_cast<int16_t>(10u + 2u * b) + r;
+                if (per == 0xFFFFu || static_cast<int16_t>(per) - want_per > 1 ||
+                    want_per - static_cast<int16_t>(per) > 1) {
+                    period_ok[m] = false;
+                }
+                if (lo == 0xFFFFu || static_cast<int16_t>(lo) - model > 1 ||
+                    model - static_cast<int16_t>(lo) > 1) {
+                    low_ok[m] = false;
+                }
+            }
+        }
+        T::fm_duty(false);
+        T::fm_plus(false);
+        for (uint8_t m = 0; m < 3; ++m) {
+            verdict("the period is equation 1 at every MBAUD from twi_baud_min (+-1) in ",
+                    names[m], period_ok[m]);
+            verdict("the low phase is twi_low_ticks less one offset (+-1) in ", names[m], low_ok[m]);
+        }
+        verdict("no clock at all at MBAUD 3 with FMPEN off, nor at 0 and 1 with it on",
+                none_below);
+        quiesce();
+    }
+}
+
+/// The SDA-hold window: LUT0 high while SCL is low and SDA high (SCL by
+/// its pin event on event input A, SDA on LUT0's own IN2 = PA2), its
+/// output event into TCB0's pulse-width meter. Under NACK traffic to 0x77
+/// (0xEE on the wire, two 1-to-0 data transitions a byte) the SHORTEST
+/// such window is SCL's fall to the host's SDA change: the hold.
+uint16_t hold_window(TwiSdaHold h) {
+    {
+        T::sda_hold(h);
+        using L = Lut<0>;
+        Ccl::disable();
+        (void)L::init({.in0 = LutInput::event_a,
+                       .in2 = LutInput::pin,
+                       .truth = lut_truth([](bool scl, bool, bool sda) { return !scl && sda; })});
+        ChScl::source(EvPin<Scl>{});
+        L::event_a_on(ChScl{});
+        Ccl::enable();
+        EventChannel<1>::source(EvLut<0>{});
+        meter_mode = 1;
+        SclLow::init(clock, EventChannel<1>{}, TcbClock::div1, false);
+        meter_reset();
+        nack_traffic(16);
+        meter_stop();
+        Ccl::disable();
+        L::EventA::unlisten();
+        EventChannel<1>::off();
+        return meter_min;
+    }
+}
+
+/// v: the inactive-bus time-out against CLKCTRL.MCLKTIMEBASE (27.3.3.1:
+/// "it is necessary to configure the TIMEBASE bit field"), the SDA hold
+/// codes (the DA swaps two of them, DS80000882C 2.14.2; DS80001048D has no
+/// TWI item), the PORT.OUT override the DA/DB's errata name (DB 2.15.1,
+/// DA 2.14.1; none on this die), and MCTRLB.FLUSH (DB 2.15.2 / DA 2.14.3).
+///
+/// THE BOUNDS. The time-out: the injector puts a START on the bus and
+/// returns 20 us later (four phases of inj_us); time_to_idle() counts
+/// from its return in whole microseconds of a CLK_PER stopwatch, polling
+/// the bus state in under a microsecond. A supervisor that counts its
+/// setting from the START therefore reads setting - 20 us, within the
+/// stopwatch's truncation (-1), the poll (+1) and the call overheads
+/// around the injector (+-1): +-3 us. At half the time base each
+/// "microsecond" is half as long: setting / 2 - 20, the same +-3. At a
+/// time base of 0 - its reset value - a supervisor that fires at once
+/// reads 0..2 us. The SDA hold: the window from SCL's fall to the host's
+/// SDA change, each the shortest of some 30 and true within a tick (one
+/// tick, 50 ns, each side); table 35-21 gives 300..900 ns for code 3 and
+/// nothing for codes 1 and 2, which are judged by their order alone.
+void tv_ea_facts() {
+    {
+        print(serial, "v the AVR EA: the time-out on MCLKTIMEBASE, the SDA hold codes, the "
+                      "OUT override, FLUSH", crlf);
+        quiesce();
+        verdict("the injector's pins really are the host's own bus node", node_tied(true));
+        verdict("host init", host_polled());
+        verdict("client init", client_polled());
+        const uint8_t tb_clock = ClockTimebase::read();
+        print(serial, "  MCLKTIMEBASE as the clock wrote it: ", tb_clock, crlf);
+        verdict("the clock wrote MCLKTIMEBASE = ceil(CLK_PER / 1 MHz)",
+                tb_clock == clock_timebase_for(SysClock::hz));
+        // 1. The time-out at three time bases: the clock's, half of it, 0.
+        const uint8_t tbs[3] = {tb_clock, static_cast<uint8_t>(tb_clock / 2u), 0};
+        const TwiTimeout tos[3] = {TwiTimeout::us50, TwiTimeout::us100, TwiTimeout::us200};
+        const int16_t nominal[3] = {50, 100, 200};
+        bool full_ok = true, half_ok = true, zero_ok = true;
+        for (uint8_t k = 0; k < 3; ++k) {
+            ClockTimebase::write(tbs[k]);
+            uint16_t t[3];
+            for (uint8_t i = 0; i < 3; ++i) {
+                T::timeout(tos[i]);
+                inject_start_and_leave();
+                t[i] = time_to_idle(4000);
+                T::timeout(TwiTimeout::disabled);
+                inject_stop();
+                T::force_idle();
+                const int16_t want = k == 0 ? static_cast<int16_t>(nominal[i] - 20)
+                                   : k == 1 ? static_cast<int16_t>(nominal[i] / 2 - 20) : 0;
+                const int16_t got = static_cast<int16_t>(t[i]);
+                if (k == 2) zero_ok = zero_ok && t[i] <= 2u;
+                else if (t[i] == 0xFFFFu || got - want > 3 || want - got > 3) {
+                    if (k == 0) full_ok = false;
+                    else half_ok = false;
+                }
+            }
+            print(serial, "  TIMEBASE ", tbs[k], ": 50/100/200 us -> ", t[0], " / ", t[1], " / ",
+                  t[2], " us after the injector's return (its START 20 us before)", crlf);
+        }
+        ClockTimebase::write(tb_clock);
+        verdict("with the clock's time base the time-outs are 50/100/200 us from the START "
+                "(+-3 us)", full_ok);
+        verdict("with half of it they are half as long (+-3 us): the supervisor counts "
+                "MCLKTIMEBASE clocks a microsecond", half_ok);
+        verdict("with MCLKTIMEBASE = 0 (its reset value) every setting fires at once (<= 2 us)",
+                zero_ok);
+        // 2. The SDA hold codes, read as the window from SCL's fall.
+        const TwiSdaHold holds[4] = {TwiSdaHold::off, TwiSdaHold::ns50, TwiSdaHold::ns300,
+                                     TwiSdaHold::ns500};
+        uint16_t w[4];
+        for (uint8_t k = 0; k < 4; ++k) {
+            w[k] = hold_window(holds[k]);
+        }
+        T::sda_hold(TwiSdaHold::off);
+        const uint16_t mhz16 = static_cast<uint16_t>(mhz);
+        print(serial, "  SDA-hold window (CLK_PER ticks), codes 0..3: ", w[0], " ", w[1], " ",
+              w[2], " ", w[3], "; codes 1..3 add ", static_cast<int16_t>(w[1] - w[0]) * 1000 / mhz16,
+              " / ", static_cast<int16_t>(w[2] - w[0]) * 1000 / mhz16, " / ",
+              static_cast<int16_t>(w[3] - w[0]) * 1000 / mhz16, " ns", crlf);
+        verdict("the window was measured at every code", w[0] != 0xFFFFu && w[1] != 0xFFFFu &&
+                                                              w[2] != 0xFFFFu && w[3] != 0xFFFFu);
+        verdict("the codes are in their own order, short to long (no swap: code 1 the "
+                "shortest added hold)", w[0] <= w[1] && w[1] < w[2] && w[2] < w[3]);
+        verdict("code 1 adds at most two ticks (its 50 ns, a tick each side)",
+                w[1] - w[0] <= 2u);
+        verdict("code 3 adds 300..900 ns (table 35-21; a tick each side)",
+                w[3] > w[0] &&
+                    static_cast<uint32_t>(w[3] - w[0] + 2u) * 1000u >= 300ul * mhz16 &&
+                    static_cast<uint32_t>(w[3] - w[0]) * 1000u <= 900ul * mhz16 + 2000u);
+        // 3. PORT.OUT = 1 on both pins under the enabled TWI.
+        Sda::set();
+        Scl::set();
+        for (uint8_t i = 0; i < 2; ++i) tx_buf[i] = static_cast<uint8_t>(0x6A + i);
+        const uint8_t st = run_request<Client>({client_addr, lend<Lease::reply>(tx_buf), 2, {}, 0, {}});
+        const bool out_ok = st == i2c_ok && cl_rx_n == 2 && cl_rx[0] == 0x6A && cl_rx[1] == 0x6B;
+        Sda::clear();
+        Scl::clear();
+        print(serial, "  with PORT.OUT = 1 on PA2/PA3 under the TWI: status ", st, ", client got ",
+              cl_rx_n, crlf);
+        verdict("PORT.OUT = 1 on SDA and SCL does not hold the bus: a write completes (no "
+                "twin of DB 2.15.1 / DA 2.14.1 on this die)", out_ok);
+        // 4. FLUSH strobed a thousand times on an idle host.
+        uint16_t not_idle = 0;
+        for (uint16_t i = 0; i < 1000; ++i) {
+            TWI0.MCTRLB = TWI_FLUSH_bm;
+            if (T::bus_state() != TwiBusState::idle) {
+                ++not_idle;
+                T::force_idle();
+            }
+        }
+        const uint8_t st2 = run_request<Client>({client_addr, lend<Lease::reply>(tx_buf), 2, {}, 0, {}});
+        print(serial, "  1000 FLUSH strobes: BUSSTATE left not Idle after ", not_idle,
+              "; a write after them: status ", st2, crlf);
+        verdict("1000 FLUSH strobes on an idle host never leave the bus state other than Idle",
+                not_idle == 0);
+        verdict("and the bus works after them", st2 == i2c_ok);
+        quiesce();
+    }
+}
+#endif
 
 // ==== TWO BOARDS (k..t): the far board runs twi_peer ==========================
 
@@ -1791,9 +2136,9 @@ void tl_stretch() {
     Stretch r[4];
     for (uint8_t i = 0; i < 4; ++i) {
         r[i] = stretch_round(tiers[i]);
-        print(serial, "  ", names[i], ": ", r[i].ticks, " ticks = ", r[i].ticks / 24u,
+        print(serial, "  ", names[i], ": ", r[i].ticks, " ticks = ", r[i].ticks / mhz,
               " us for ", stretch_bytes, " bytes; SCL low min ", r[i].low_min,
-              " max ", r[i].low_max, " ticks (", r[i].low_max / 24u,
+              " max ", r[i].low_max, " ticks (", r[i].low_max / mhz,
               " us); status ", r[i].status, crlf);
         verdict("the stretched write still lands exactly ", names[i],
                 r[i].status == i2c_ok);
@@ -1804,21 +2149,21 @@ void tl_stretch() {
     // not hold.
     const uint32_t base = r[0].ticks;
     for (uint8_t i = 1; i <= 2; ++i) {
-        const uint32_t want = static_cast<uint32_t>(tiers[i]) * stretch_bytes * 24u;
+        const uint32_t want = static_cast<uint32_t>(tiers[i]) * stretch_bytes * mhz;
         const uint32_t got = r[i].ticks > base ? r[i].ticks - base : 0;
         print(serial, "  elongation at ", names[i], ": ", got, " ticks, model ", want,
               " (", stretch_bytes, " bytes x ", tiers[i], " us)", crlf);
         verdict("the tenure grows by count x hold ", names[i],
                 got > want - want / 5u && got < want + want / 5u + 3000u);
         verdict("and the longest SCL low is that hold, not the divider's ", names[i],
-                r[i].low_max > static_cast<uint16_t>(tiers[i] * 20u));
+                r[i].low_max > static_cast<uint16_t>(tiers[i] * (mhz * 5u / 6u)));
     }
 
     verdict("the HOST holds the clock while its own flag stands (CLKHOLD)",
             r[0].clkhold && r[2].clkhold);
     verdict("the bus reads Owner throughout", r[0].owner && r[2].owner);
     print(serial, "  the peer's own software turnaround, unstretched: SCL low up to ",
-          r[0].low_max, " ticks = ", r[0].low_max * 1000ul / 24ul, " ns (the register's "
+          r[0].low_max, " ticks = ", r[0].low_max * 1000ul / mhz, " ns (the register's "
           "own low time is ", twi_low_ticks(T::baud()), " ticks)", crlf);
     verdict("an unstretched exchange right after the 1 ms one is back to nominal",
             r[3].low_max < r[2].low_max / 4u && r[3].ticks < base * 2u);
@@ -2353,7 +2698,7 @@ void speed_round(I2cSpeed s, const char* name) {
     const uint16_t floor_ticks = static_cast<uint16_t>(twi_period_ticks(SysClock::hz, baud, 0));
     print(serial, "  ", name, ": MBAUD=", baud, " min period ", period, " ticks = ", hz,
           " Hz (register floor ", floor_ticks, "); SCL low min ", low_min, " max ",
-          low_max, " ticks = ", low_max * 1000ul / 24ul, " ns", crlf);
+          low_max, " ticks = ", low_max * 1000ul / mhz, " ns", crlf);
     print(serial, "    write-then-read (", st, ") gave ", hex(rx_buf[0]), " ",
           hex(rx_buf[1]), " ", hex(rx_buf[2]), " ", hex(rx_buf[3]), ", the read (", st2,
           ") gave ", hex(rx_buf[4]), " ", hex(rx_buf[5]), " ", hex(rx_buf[6]), " ",
@@ -2364,7 +2709,7 @@ void speed_round(I2cSpeed s, const char* name) {
     verdict("nor above the mode's nominal rate at ", name, hz <= twi_scl_hz(s));
     scl_verdict(name, run, SysClock::hz, s, twi_fall_budget_ns(s),
                 period > floor_ticks ? period - floor_ticks : 0u);
-    const uint16_t nominal_low = twi_low_ticks(baud);
+    const uint16_t nominal_low = twi_low_ticks(baud, s);
     print(serial, "    the peer's turnaround stretches the longest SCL low to ",
           low_max, " ticks against the register's ", nominal_low, crlf);
     peer_settle();
@@ -2417,8 +2762,17 @@ bool two_board_step(uint32_t hz, const char* what) {
           ", actual_scl_hz(0) = ", Host::actual_scl_hz(0), " Hz, actual_scl_hz(166 ns) = ",
           Host::actual_scl_hz(166), " Hz; exchange status ", st, crlf);
     verdict("the exchange across the wire is exact ", what, exact);
-    verdict("MBAUD was re-derived for this clock ", what,
-            Host::actual_scl_hz(0) <= 100'000u && Host::actual_scl_hz(0) > 80'000u);
+    if constexpr (twi_ea_scl) {
+        // The AVR EA's duty: at tR = 0 the floor step's period runs a
+        // percent fast (letter b), at the rise the speed charges it does not.
+        const uint32_t at_budget =
+            Host::actual_scl_hz(twi_rise_budget_ns(I2cSpeed::standard_100k));
+        verdict("MBAUD was re-derived for this clock (at the rise the speed charges) ", what,
+                at_budget <= 100'000u && at_budget > 80'000u);
+    } else {
+        verdict("MBAUD was re-derived for this clock ", what,
+                Host::actual_scl_hz(0) <= 100'000u && Host::actual_scl_hz(0) > 80'000u);
+    }
     const uint16_t floor_ticks = static_cast<uint16_t>(twi_period_ticks(hz, baud, 0));
     scl_verdict(what, run, hz, I2cSpeed::standard_100k, twi_fall_budget_ns(I2cSpeed::standard_100k),
                 period > floor_ticks ? period - floor_ticks : 0u);
@@ -2427,22 +2781,24 @@ bool two_board_step(uint32_t hz, const char* what) {
 }
 
 void ts_rebase() {
-    print(serial, "s 24 -> 12 -> 24 MHz with the command channel and the peer's client "
-                  "live on the wire", crlf);
+    print(serial, at24 ? "s 24 -> 12 -> 24 MHz with the command channel and the peer's client "
+                         "live on the wire"
+                       : "s 20 -> 10 -> 20 MHz with the command channel and the peer's client "
+                         "live on the wire", crlf);
     quiesce();
     verdict("DynamicClock init (boot = the crystal)", DynClock::init());
     verdict("host init on the dynamic clock", Host::init(DynClock{}));
     T::enable_read_interrupt(false);
     T::enable_write_interrupt(false);
-    verdict("the peer answers at 24 MHz", link_cmd(Op::ping));
+    verdict(at24 ? "the peer answers at 24 MHz" : "the peer answers at 20 MHz", link_cmd(Op::ping));
 
-    (void)two_board_step(24'000'000u, "at 24 MHz");
-    verdict("switch to 12 MHz", DynClock::set(12'000'000u));
+    (void)two_board_step(SysClock::hz, at24 ? "at 24 MHz" : "at 20 MHz");
+    verdict(at24 ? "switch to 12 MHz" : "switch to 10 MHz", DynClock::set(SysClock::hz / 2u));
     verdict("the command channel survived the switch", link_cmd(Op::ping));
-    (void)two_board_step(12'000'000u, "at 12 MHz");
-    verdict("back to 24 MHz", DynClock::set(24'000'000u));
+    (void)two_board_step(SysClock::hz / 2u, at24 ? "at 12 MHz" : "at 10 MHz");
+    verdict(at24 ? "back to 24 MHz" : "back to 20 MHz", DynClock::set(SysClock::hz));
     verdict("the command channel survived the switch back", link_cmd(Op::ping));
-    (void)two_board_step(24'000'000u, "back at 24 MHz");
+    (void)two_board_step(SysClock::hz, at24 ? "back at 24 MHz" : "back at 20 MHz");
 
     quiesce();
 }
@@ -2586,6 +2942,10 @@ void register_tests() {
     bench.letter('h', "bus state and the injector", th_busstate);
     bench.letter('i', "isr bodies", ti_interrupts);
     bench.letter('j', "rebase and the arbiter", tj_rebase);
+#if defined(TWI_FMEN_bm)
+    bench.letter('u', "the AVR EA's SCL duty (FMEN)", tu_scl_duty);
+    bench.letter('v', "the AVR EA's time base, SDA hold, OUT, FLUSH", tv_ea_facts);
+#endif
     bench.second_letter('k', "bring-up", tk_bringup);
     bench.second_letter('l', "clock stretching", tl_stretch);
     bench.second_letter('m', "NACK injection", tm_nacks);
@@ -2602,11 +2962,19 @@ void help() {
     print(serial, "test_avr_twi: z = the single-board letters, y = the two-board ones (the peer "
                   "board running twi_peer)", crlf);
     bench.menu();
+#if defined(TWI1)
     print(serial, "  ONE open-drain bus, three taps of this board: PA2/PA3 (the host and "
                   "the combined client), PC2/PC3 (the DUAL client, and the bit-bang "
                   "injector of tests h and n while Dual mode is off) and PB2/PB3; the "
                   "peer board taps it with its own PA2/PA3. 1.5k pull-ups to +5 V; TWI1 stays "
                   "disabled.", crlf);
+#else
+    print(serial, "  ONE open-drain bus, three taps of this board: PA2/PA3 (the host and "
+                  "the combined client), PC2/PC3 (the DUAL client, and the bit-bang "
+                  "injector of tests h and n while Dual mode is off) and PB2/PB3; the "
+                  "peer board taps it with its own pair. 1.5k pull-ups to +5 V; the part "
+                  "has no TWI1.", crlf);
+#endif
 }
 
 } // namespace
@@ -2655,7 +3023,7 @@ int main() {
     if (board.empty()) board = "?";
     print(serial, crlf, "test_avr_twi - TWI/I2C test suite (board ", board,
           ", clk=", xtal ? (has_xoschf ? "XTAL" : "EXTCLK") : "OSCHF",
-          " 24 MHz, silicon rev ", hex(SYSCFG.REVID), ")", crlf);
+          at24 ? " 24 MHz, silicon rev " : " 20 MHz, silicon rev ", hex(SYSCFG.REVID), ")", crlf);
     (void)wire_sane(true);
     register_tests();
     help();

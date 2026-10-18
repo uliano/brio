@@ -41,7 +41,11 @@ only with FUSE.SYSCFG0.UPDIPINCFG = 0, which leaves the part unreachable
 without a high-voltage programmer; and **ALT3**, whose signals cross two
 ports, which the pin hand-over (one port per route) does not drive (a
 driver gap below). The engines over the table are the DB's, the IP being
-the same.
+the same register for register, and measured so on the EA board (Bench
+findings, "On the AVR64EA48"). On NONE the internal select reads high:
+a pinless host whose SSD is cleared by hand keeps Host mode and transfers
+(measured; the header's "SS set to 1" for NONE, no data-sheet text) -
+`init()` still refuses the configuration, for want of a use.
 
 Driver: `avrxt/spi.hpp`. The arbiter above it:
 [spi-bus.md](../design/spi-bus.md) (`util/bus_master.hpp`,
@@ -564,6 +568,28 @@ around the one DATA read, some 30 cycles of the on-time body; what it
 bought, besides surviving the read the silicon does not take, is the
 late handler taking two bytes an entry.
 
+**On the AVR64EA48 at 20 MHz** (rev B1, the same image, letter `e` on
+SPI0's ALT1 pads, the select and the D/C of `spi.req` on PD2/PD3), in
+CLK_PER cycles beside the wire's:
+
+| line | measured | the wire | x |
+|---|---|---|---|
+| `spi.poll`, 256 bytes at CLK_PER/4 (5 MHz) | 8961 | 8192 | 1.09 |
+| `spi.poll`, 256 bytes at CLK_PER/16 (1.25 MHz) | 33648 | 32768 | 1.03 |
+| `spi.poll.tx`, 256 bytes at CLK_PER/4 | 8941 | 8192 | 1.09 |
+| `spi.poll.tx`, 256 bytes at CLK_PER/16 | 33628 | 32768 | 1.03 |
+| `spi.pump`, 256 bytes, metered, either rate | 57053 (130 interrupts, BUFOVF clear) | 8192, 32768 | 6.96, 1.74 |
+| `spi.req`, one command byte and two of data at CLK_PER/16 | 664 | 384 | 1.73 |
+
+Every count is the DB's: a byte beyond the sixteenth 34.0 cycles at
+CLK_PER/4 and 130.5 at CLK_PER/16 ((8961 - 801) / 240 and (33648 -
+2337) / 240), the request's fixed cost 220 cycles (664 less the wire's
+384 and this ruler's stopwatch floor of 60), 169 for the command byte
+alone and 253 with fifteen bytes of data; the metered pump 223 cycles a
+byte against the DB's 228, the stamp here 206 against 217. The same
+core runs the same instructions, so the engine's cost in cycles does
+not move with the part, and its cost in time scales with CLK_PER.
+
 **`apply()`**: the request's `mode` and `clock` folded into the two
 register bytes the block takes (CTRLA = MASTER, the PRESC/CLK2X bits
 of `spi_presc_bits()` - arithmetic on the enum, no table -, ENABLE;
@@ -675,6 +701,49 @@ time for the next transfer: nothing rises, and the byte it missed is gone
 - measured, the run ended `closed` at nine of twelve, seven of them
 wrong. A run that must know is a buffer-mode run, or the caller masks
 around it.
+
+### On the AVR64EA48
+
+Rev B1 at 5 V, CLK_PER 20 MHz from the board's quartz, SPI0 on ALT1
+(PE0..PE3, the wires to the partner SAM C21; the board's PC4..PC7 are
+jumpered onto them and stay inputs). `test_avr_spi` builds three images
+there (the group axis): `test_avr_spi-1` (`z`, a..j) 180 of 180,
+`test_avr_spi-2` (t in `z`, 20 of 20; k..p in `y`, 51 of 51) and
+`test_avr_spi-3` (`y`, q..w, 54 of 54), each ten runs of ten, the two-board
+keys against the SAM C21's `spi_peer`.
+
+- **The route table, read back** (letter a): released, SPIROUTEA reads
+  NONE as code 7; ALT4 (PD4..PD7) and ALT5 (PC0..PC3) taken as a CLIENT -
+  which drives MISO alone, PD5 / PC1: as a host ALT4's SCK would drive
+  PD6 (the board's analog net) and ALT5's PC2 (the I2C bus) - read back as
+  codes 4 and 5, then NONE after the release.
+- **The cycles are the DB's.** A frame inside a block (letter b): 18, 34,
+  66, 130, 258, 514 and 1026 CLK_PER at the seven divisions, the wire's
+  eight periods and the block's two cycles at each, 1000 thousandths of
+  the wire; the rebase (letter i) re-picks CLK_PER/16 at 20 MHz and
+  CLK_PER/8 at 10 MHz under the 1.5 MHz ceiling, the same divisions as
+  24 and 12 MHz.
+- **Back to back against the SAM C21's client** (letter u): the crystal's
+  four divisions - the EA's OSCHF runs at the fuse's 20 MHz alone, so no
+  rung lies between them - exact gapped and back to back at 1.25, 2.5 and
+  5 MHz (a request of 16: 2357, 1359 and 838 CLK_PER against the wire's
+  2048, 1024 and 512); at 10 MHz, above the SAM C21's 8 MHz, printed:
+  exact in 10 of 11 runs, the full-duplex run broken once (7 bytes).
+- **This board as the client** (letter v, the peer's host_burst at its
+  750 kHz) reads as on the DB, every end the same; and **from the SAM
+  C21's host** (`test_samc_spi` h and i, this board running `spi_peer`,
+  ten runs): exact at 3 MHz inside the client's CLK_PER/6 = 3.33 MHz,
+  positively corrupted at 6 and 12 MHz; 256 characters back to back
+  exact both ways at 500 kHz, 1 and 2 MHz; at 3 MHz every character
+  received and the answers broken on their first bit alone (the DB's
+  clarification 3.5.2, the EA's 3.2) - the DB's boundary; at 4 MHz,
+  above this clock's ceiling, about 147 of 256 received wrong.
+- **PE3 wakes STANDBY on one edge** (letter w): every EA pin is fully
+  asynchronous (DS40002443A 18.3.3.1), so the DA/DB's control - PE3's
+  falling edge not waking - becomes a wake here, as PE2's does.
+- Letter r (`MspiHost`) is SKIPPED against this peer as on the DA/DB; on
+  the EA its USART is USART1 on ALT1 (PC4..PC6), which the board's jumpers
+  put on the same three nets.
 
 ### Two boards, one four-wire bus
 
@@ -809,10 +878,9 @@ client selects itself with INVEN on its own pulled-up SS pin.
 
 **Implemented but not bench-verified:**
 
-- everything on the AVR EA: the route table compiles and refuses as
-  above on the three packages, the engines are the DB's unchanged - the
-  SPI suite on the EA is a later step (its PE0..PE3 run to the desk's
-  SAM C21 peer, as on the DA/DB board);
+- the AVR EA's DEFAULT route (PA4..PA7) and ALT4/ALT5 as a HOST: the
+  board's PD6 and PC2 forbid the latter two (above), and DEFAULT carries
+  no wire; ALT4 and ALT5 are measured as a client's readback;
 
 - `test_avr_spi` letter `u` against the avrxt peer: run only against a
   SAM C21 peer, where it is judged; against a second AVR128DB48 it

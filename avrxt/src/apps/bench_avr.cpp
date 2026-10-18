@@ -1,4 +1,4 @@
-// bench_avr - the benchmark skeleton on the AVR DA/DB (docs/design/
+// bench_avr - the benchmark skeleton on the AVR DA/DB/EA (docs/design/
 // benchmark.md, util/bench.hpp): letters that print NUMBERS, one
 // `bench` line per operation and size, in the grammar every family
 // prints. NOT A TEST: a letter's one verdict is "ran", except letter r,
@@ -21,7 +21,13 @@
 // THE CLOCK: CLK_PER at 24 MHz, the rate test_avr_platform runs at - the
 // DB's crystal on PA0/PA1, or on a DA (no crystal oscillator) an external
 // 24 MHz clock on PA0, with OSCHF at the same rate as the fallback either
-// way (avrxt/clock.hpp); the banner says which one runs.
+// way (avrxt/clock.hpp); the banner says which one runs. On the AVR EA
+// board CLK_PER is its 20 MHz quartz, and three things move with the part
+// (each a constant below): letter m's runs stop at a third of the SRAM
+// (2048 bytes on its 6 KB), letter u's loop is USART1 on its DEFAULT
+// route (TXD PC0, where TCA0's PORTC route puts WO0; the EA has no USART4)
+// and its top rate CLK_PER/8 (2.5 Mbaud), and letter e's select and D/C
+// are PD2/PD3 (that board's PA2/PA3 are the I2C bus its partner shares).
 //
 // THE RULER is `Ruler` below: TCB1 and TCB2 cascaded into one 32-bit
 // counter of CLK_PER cycles (avrxt/tcb.hpp's CascadedCounter, the
@@ -312,7 +318,7 @@
 // as idle, and a handler landing between the SLEEP's wake and the
 // window's close counts in both.
 //
-// build: boards = db48,da48
+// build: boards = db48,da48,ea48
 // build: monitor_speed = 115200
 
 #include <avr/interrupt.h>
@@ -402,8 +408,16 @@ constexpr uint32_t print_wire_bps = console_baud / frame_bits;
 constexpr uint32_t memcpy_wire_bps = SysClock::hz / 3u;
 constexpr uint32_t memset_wire_bps = SysClock::hz;
 
-constexpr std::array<uint16_t, 4> sizes{1u, 16u, 256u, 4096u};
-constexpr uint16_t max_size = 4096u;
+/// The largest run letter m copies and letter p prints: the largest power
+/// of two under a third of the part's SRAM, 4096 at most - letter m holds
+/// two buffers of it - so 4096 on the AVR DA/DB's 16 KB and 2048 on the
+/// AVR EA's 6 KB, the split tier's (docs/avrxt/README.md, "The group axis").
+constexpr uint16_t max_size = [] {
+    uint16_t n = 4096u;
+    while (n > static_cast<uint32_t>(INTERNAL_SRAM_SIZE) / 3u) n = static_cast<uint16_t>(n / 2u);
+    return n;
+}();
+constexpr std::array<uint16_t, 4> sizes{1u, 16u, 256u, max_size};
 
 // ---- the console's drain ------------------------------------------------------
 
@@ -654,8 +668,12 @@ void tt_tick() {
 namespace de {
 
 using SpiHw = SpiHost<0, SpiRoute::alt1>;   // PE0 MOSI, PE1 MISO, PE2 SCK
-using Cs = Pin<'A', 2>;                     // the select, a real pad
-using Dc = Pin<'A', 3>;                     // the D/C, a real pad
+// The select and the D/C, two real pads: PA2/PA3 where they are free;
+// on the AVR EA board (PC4..PC7 jumpered to the partner's wires,
+// avr_board.hpp's board_pc_pe_jumpers) PA2/PA3 are the I2C bus the
+// partner board shares, so PD2/PD3 there.
+using Cs = std::conditional_t<board_pc_pe_jumpers, Pin<'D', 2>, Pin<'A', 2>>;
+using Dc = std::conditional_t<board_pc_pe_jumpers, Pin<'D', 3>, Pin<'A', 3>>;
 using S0 = SpiHw::Resource;
 
 /// The pump's completion edge, written by the vector.
@@ -819,12 +837,18 @@ void te_spi() {
 // =============================================================================
 namespace du {
 
-using Loop = Uart<4, Route::def, 256u, 256u>;   // TXD PE0, RXD PE1 (unused: LBME)
+/// The loop's USART: USART4 at its default route (TXD PE0) on the AVR
+/// DA/DB; on the AVR EA, which has none, USART1 at its default route (TXD
+/// PC0) - where TCA0's WO0 reaches the TXD pad too, on its PORTC route.
+constexpr bool loop_on_porte = usart_count >= 5;
+constexpr uint8_t loop_n = loop_on_porte ? 4 : 1;
+constexpr char loop_port = loop_on_porte ? 'E' : 'C';
+using Loop = Uart<loop_n, Route::def, 256u, 256u>;   // TXD PE0 / PC0, RXD unused (LBME)
 using U4 = Loop::Resource;
 using Stamp = Tcb<0>;                           // CLK_PER, capture on the pad's rising edge
 using ChPad = EventChannel<4>;
-using Pad = Pin<'E', 0>;
-using Gen = Tca<0>;                             // uart.rx's sender: WO0 on PE0
+using Pad = Pin<loop_port, 0>;
+using Gen = Tca<0>;                             // uart.rx's sender: WO0 on the TXD pad
 
 /// The binding GPR0 selects (the file header): bit 7 marks an
 /// instrumented binding, so the plain one is the dispatch's first exit.
@@ -844,7 +868,7 @@ struct LoopRate {
     bool clk2x;
 };
 constexpr LoopRate loop_rates[] = {
-    {115'200u, false}, {1'000'000u, false}, {2'000'000u, true}, {3'000'000u, true}};
+    {115'200u, false}, {1'000'000u, false}, {2'000'000u, true}, {SysClock::hz / 8u, true}};
 
 /// The loop at a rate: the task's init (normal speed), loop-back, and in
 /// double speed RXMODE and the divisor rewritten under it.
@@ -957,7 +981,7 @@ void rx_lines() {
             Loop::clear_errors();
             (void)Gen::init({.mode = TcaMode::single_slope, .clock = TcaClock::div1,
                              .period = static_cast<uint16_t>(frame - 1u),
-                             .compare0 = static_cast<uint16_t>(9u * bit), .route = 'E'});
+                             .compare0 = static_cast<uint16_t>(9u * bit), .route = loop_port});
             Gen::disable();
             Gen::output_value<0>(true);
             Gen::count(static_cast<uint16_t>(9u * bit - 1u));
@@ -1419,7 +1443,14 @@ extern "C" {
 }
 }
 #pragma GCC diagnostic pop
-ISR(USART4_RXC_vect, ISR_NAKED) {
+#if defined(USART4)
+#define BENCH_LOOP_RXC_vect USART4_RXC_vect
+#define BENCH_LOOP_DRE_vect USART4_DRE_vect
+#else
+#define BENCH_LOOP_RXC_vect USART1_RXC_vect
+#define BENCH_LOOP_DRE_vect USART1_DRE_vect
+#endif
+ISR(BENCH_LOOP_RXC_vect, ISR_NAKED) {
     asm volatile("sbis %[gpr], 7\n\t"
                  "jmp bench_u4_rxc_plain\n\t"
                  "sbic %[gpr], 0\n\t"
@@ -1428,7 +1459,7 @@ ISR(USART4_RXC_vect, ISR_NAKED) {
                  "jmp bench_u4_rxc_stamped\n\t"
                  "jmp bench_u4_rxc_counted\n\t" ::[gpr] "I"(_SFR_IO_ADDR(GPR_GPR0)));
 }
-ISR(USART4_DRE_vect, ISR_NAKED) {
+ISR(BENCH_LOOP_DRE_vect, ISR_NAKED) {
     asm volatile("sbis %[gpr], 7\n\t"
                  "jmp bench_u4_dre_plain\n\t"
                  "sbic %[gpr], 0\n\t"
