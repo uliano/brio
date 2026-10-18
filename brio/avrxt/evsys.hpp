@@ -177,8 +177,10 @@ private:
 /// AVR EA: two SLOTS in the RTC, each carrying one divider 4..32768
 /// chosen in RTC.PITEVGENCTRLA (code log2(div) - 1, DS40002443A
 /// 24.13.17), on any channel; the channel code names the slot (0x08 +
-/// slot). The divider chain runs only while RTCEN or PITEN is set
-/// (24.5.2.2).
+/// slot). A slot carries its divider only while the PIT is enabled
+/// (PITEN): with the counter alone running the shared prescaler, which
+/// 24.5.2.2 says runs while either function is, the slots stay still
+/// (measured, docs/avrxt/evsys.md).
 template <uint16_t div, uint8_t slot = 0>
 struct EvPitDiv {
     static constexpr uint8_t log2_div =

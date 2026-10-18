@@ -17,8 +17,8 @@
 //
 // Commands: ? | 1 resource verbs | 2 counter period | 3 compare phase
 // | 4 crystal error correction | 5 busy flags | 6 first tick
-// | 7 PIT and counter together | 8 OSC1K | 9 XOSC32K (the DA board)
-// | a all
+// | 7 PIT and counter together | 8 OSC1K | 9 XOSC32K (the boards with
+// the crystal) | p PIT event slots (the AVR EA) | a all
 //
 // Tests:
 //   1  the verbs: clock select and readback, init/enable, CNT advancing
@@ -56,13 +56,18 @@
 //      crystals' tolerance - forced on, then held by the RTC's request
 //      alone - and the Ticker's default init taking the crystal, 1024
 //      ticks to its second.
+//   p  the PIT's event slots (the AVR EA, RTC.PITEVGENCTRLA): every
+//      divider 4..32768 through each slot, its period against the OSC32K
+//      second just measured; both slots at once; the divider chain still
+//      while neither RTCEN nor PITEN is set, running with either; a slot
+//      turned off carries nothing.
 // Not testable here: the RTC's external clock (no 32 kHz clock on either
 // board's XTAL32K1; RtcSource::extclk is the EXTCLK pin, whose 24 MHz on
 // the DA board is far past the CLK_PER >= 4 x CLK_RTC rule of 26.3),
 // RUNSTDBY and the PIT as a power-down wake-up (no sleep in this suite),
 // DBGRUN (needs a halted CPU).
 
-// build: boards = db48,da48
+// build: boards = db48,da48,ea48
 // build: monitor_speed = 460800
 
 #include <avr/interrupt.h>
@@ -106,12 +111,29 @@ constexpr uint32_t crystal_hz = SysClock::hz;
 constexpr uint32_t nominal_hz = 32768;           // CLK_RTC from OSC32K
 // Crystal ticks in one nominal CLK_RTC cycle (24e6 / 32768 = 732.42).
 constexpr uint32_t ticks_per_rtc_x100 = (crystal_hz * 100ul) / nominal_hz;
+/// The letters' text was first written at 24 MHz and keeps it there; at
+/// another board rate the same verdicts are derived from the rate.
+constexpr bool at24 = crystal_hz == 24'000'000u;
+/// Two one-second windows of the OSC32K a few seconds apart differ by the
+/// oscillator's wander, a property of the die no data sheet states (OSC32K
+/// +-10 % total, DB and EA alike): within 300 ppm on the AVR128DB48 (the
+/// 500 ppm - crystal_hz / 2000 - and 333 ppm - / 3000 - of the verdicts
+/// below), up to 663 ppm on the AVR64EA48 over twenty-four runs
+/// (rtc.md): 800 ppm allowed there, crystal_hz / 1250.
+constexpr bool ea_osc32k = avr_die == AvrDie::avr64ea;
+constexpr uint32_t wander_ea = crystal_hz / 1250u;
 
 volatile uint16_t rtc_ovf_irqs = 0;
 volatile uint16_t rtc_cmp_irqs = 0;
 volatile uint16_t captures = 0;
 volatile uint16_t cap_a = 0;
 volatile bool meter_on = false;
+#if defined(RTC_EVGEN0SEL_gm)
+// Letter p's averaging: the sum, the shortest and the longest of the
+// periods captured since the last clear.
+volatile uint32_t cap_sum = 0;
+volatile uint16_t cap_min = 0xFFFF, cap_max = 0;
+#endif
 
 // ---- tiny test harness --------------------------------------------------------
 uint8_t passed = 0, failed = 0;
@@ -299,7 +321,8 @@ void t2_period() {
     const int32_t d13 = static_cast<int32_t>(seen[0]) - static_cast<int32_t>(seen[2]);
     print(serial, "  prescaler agreement: DIV1-DIV2 = ", d12, ", DIV1-DIV32 = ", d13, " ticks", crlf);
     verdict("the three prescalers divide identically (0.05 %)",
-            near(d12, 0, 12'000) && near(d13, 0, 12'000));
+            near(d12, 0, ea_osc32k ? wander_ea : crystal_hz / 2000) &&
+            near(d13, 0, ea_osc32k ? wander_ea : crystal_hz / 2000));
 
     // eight periods in one measurement: the same rate, less quantization
     Rtc::init({.prescaler = RtcPrescaler::div1, .period = 32767});
@@ -308,7 +331,8 @@ void t2_period() {
     print(serial, "  8 s = ", total8, " crystal ticks -> OSC32K is ",
           -ppm_of(total8, 8u * crystal_hz), " ppm FAST", crlf);
     verdict("eight periods agree with one (within the oscillator's wander)",
-            near(static_cast<int32_t>(total8 / 8), static_cast<int32_t>(seen[0]), 8000));
+            near(static_cast<int32_t>(total8 / 8), static_cast<int32_t>(seen[0]),
+                 ea_osc32k ? wander_ea : crystal_hz / 3000));
     quiesce();
 }
 
@@ -588,9 +612,9 @@ void t7_together() {
     print(serial, "  PIT_DIV64 period: ", div1_ticks, " ticks with PRESCALER=DIV1, ",
           div32_ticks, " with DIV32 (nominal ", 64u * (ticks_per_rtc_x100 / 100), ")", crlf);
     verdict("PIT_DIV64 = 64 CLK_RTC cycles",
-            near(div1_ticks, static_cast<int32_t>(64u * (ticks_per_rtc_x100 / 100)), 2000));
+            near(div1_ticks, static_cast<int32_t>(64u * (ticks_per_rtc_x100 / 100)), crystal_hz / 12000));
     verdict("the PIT does not see the counter's PRESCALER",
-            near(div1_ticks, div32_ticks, 100));
+            near(div1_ticks, div32_ticks, crystal_hz / 240000));
     meter_on = false;
     T0::disable();
     quiesce();
@@ -620,7 +644,8 @@ void t8_osc1k() {
     print(serial, "  one second: ", at32k, " ticks from OSC32K, ", at1k, " from OSC1K, difference ",
           static_cast<int32_t>(at1k) - static_cast<int32_t>(at32k), crlf);
     verdict("the divider is exact (0.05 %)",
-            near(static_cast<int32_t>(at1k) - static_cast<int32_t>(at32k), 0, 12'000));
+            near(static_cast<int32_t>(at1k) - static_cast<int32_t>(at32k), 0,
+                 ea_osc32k ? wander_ea : crystal_hz / 2000));
 
     // the Ticker's rate follows the source: 1024/32 = 32 ticks/s
     Ticker::init(RtcSource::osc1k);
@@ -724,6 +749,172 @@ void t9_xosc32k() {
     quiesce();
 }
 
+#if defined(RTC_EVGEN0SEL_gm)
+// ---- p the PIT's event slots (the AVR EA) ------------------------------------
+// RTC.PITEVGENCTRLA (DS40002443A 24.13.17) gives the event system two
+// SLOTS, each carrying CLK_RTC divided by 4..32768 - where the chapter's
+// overview (24.2) still names "64..8192". Each divider is selected from
+// the RTC's side (Pit::event_divider<slot>) under a route made once
+// (EvPitDiv<4, slot>: the channel names the slot, not the divider) and
+// its period measured in crystal ticks: by TCB0 as a frequency meter up
+// to DIV64 (39062 ticks at 20 MHz, inside the 16-bit capture), by the
+// cascade's hardware stamps from DIV128 (3.9 ms, past the stamp loop's
+// 1 ms poll) - against the SAME oscillator's second, measured first
+// through the counter's OVF.
+//
+// The bound of a period against d / 32768 of that second: the OSC32K's
+// wander between the reference and the measurement (letter 2: eight
+// seconds agree with one within 1 / 3000 - 333 ppm - so 1000 ppm here,
+// three times that) plus the instrument's quantization, +-1 tick for the
+// meter and +-1 for each of the two stamps: expected / 1000 + 2 ticks. A
+// neighbouring divider is a factor of two away.
+/// The mean of sixteen consecutive periods (the first capture after the
+/// change discarded: it may straddle it), and their spread: a single
+/// DIV4 period - four cycles of an RC oscillator - read 0.24 % short
+/// once in ten runs, the oscillator's cycle-to-cycle jitter; the mean of
+/// consecutive periods telescopes it to its two ends.
+uint16_t slot_spread = 0;
+uint16_t slot_meter_period(uint8_t slot, PitEventDiv d) {
+    if (slot == 0) Pit::event_divider<0>(d); else Pit::event_divider<1>(d);
+    delay_us(clock, 100);
+    cli(); captures = 0; sei();
+    for (uint16_t ms = 0; ms < 50 && captures < 1; ++ms) delay_us(clock, 1000);
+    cli(); captures = 0; cap_sum = 0; cap_min = 0xFFFF; cap_max = 0; sei();
+    // Sixteen periods of DIV64 are 32 ms: up to 200 ms.
+    for (uint16_t ms = 0; ms < 2000 && captures < 16; ++ms) delay_us(clock, 100);
+    cli();
+    const uint16_t n = captures;
+    const uint32_t sum = cap_sum;
+    slot_spread = static_cast<uint16_t>(cap_max - cap_min);
+    sei();
+    return n >= 16 ? static_cast<uint16_t>((sum + n / 2) / n) : 0;
+}
+uint32_t slot_stamp_period(uint8_t slot, PitEventDiv d) {
+    if (slot == 0) Pit::event_divider<0>(d); else Pit::event_divider<1>(d);
+    uint32_t a = 0, b = 0;
+    // A stamp after the change, then the period between the next two.
+    if (!stamp(a, 1500) || !stamp(a, 1500) || !stamp(b, 1500)) return 0;
+    return b - a;
+}
+bool slot_period_ok(uint32_t measured, uint32_t second, uint16_t cycles) {
+    const uint32_t expect = static_cast<uint32_t>(
+        (static_cast<uint64_t>(second) * cycles + 16384u) / 32768u);
+    return measured != 0 && near(static_cast<int32_t>(measured), static_cast<int32_t>(expect),
+                                 static_cast<int32_t>(expect / 1000u + 2u));
+}
+
+void tp_pit_slots() {
+    print(serial, "p the PIT event slots: every divider through each slot, both at once, "
+                  "the chain's enables", crlf);
+    quiesce();
+    // The reference: one OSC32K second through the counter's OVF.
+    Rtc::init({.prescaler = RtcPrescaler::div1, .period = 32767});
+    ChSnap::source(Rtc::OvfEvent{});
+    uint32_t second = 0;
+    verdict("the OSC32K second measured (the reference)", measure(1, second, 1500));
+    print(serial, "  one OSC32K second = ", second, " crystal ticks", crlf);
+
+    // 1. Every divider, each slot in turn.
+    meter_on = true;
+    FrequencyMeter<T0>::init(clock, ChPit{});
+    for (uint8_t slot = 0; slot < 2; ++slot) {
+        if (slot == 0) {
+            ChPit::source(EvPitDiv<4, 0>{});
+            ChSnap::source(EvPitDiv<4, 0>{});
+        } else {
+            ChPit::source(EvPitDiv<4, 1>{});
+            ChSnap::source(EvPitDiv<4, 1>{});
+        }
+        bool all = true, readback = true;
+        for (uint8_t code = 1; code <= 14; ++code) {
+            const PitEventDiv d = static_cast<PitEventDiv>(code);
+            const uint16_t cycles = pit_event_cycles(d);
+            const uint32_t t = code <= 5 ? slot_meter_period(slot, d) : slot_stamp_period(slot, d);
+            const PitEventDiv back = slot == 0 ? Pit::event_divider<0>() : Pit::event_divider<1>();
+            const bool ok = slot_period_ok(t, second, cycles);
+            print(serial, "  slot ", slot, " DIV", cycles, ": ", t, " ticks (expect ",
+                  static_cast<uint32_t>((static_cast<uint64_t>(second) * cycles + 16384u) / 32768u),
+                  ")");
+            if (code <= 5) print(serial, ", 16 periods spread ", slot_spread);
+            print(serial, ok ? "" : " - OFF", crlf);
+            all = all && ok;
+            readback = readback && back == d;
+        }
+        verdict(slot == 0 ? "slot 0 carries every divider 4..32768 (period within 0.1 % + 2)"
+                          : "slot 1 carries every divider 4..32768 (period within 0.1 % + 2)", all);
+        verdict(slot == 0 ? "slot 0's divider reads back" : "slot 1's divider reads back",
+                readback);
+        if (slot == 0) EvPitDiv<4, 0>::release(); else EvPitDiv<4, 1>::release();
+    }
+
+    // 2. Both slots at once: slot 0 DIV64 on the meter, slot 1 DIV4096 on
+    //    the stamps, measured together; slot 1's selection leaves slot 0's
+    //    nibble alone.
+    ChPit::source(EvPitDiv<64, 0>{});
+    ChSnap::source(EvPitDiv<4096, 1>{});
+    const PitEventDiv kept0 = Pit::event_divider<0>();
+    cli(); captures = 0; sei();
+    uint32_t a = 0, b = 0;
+    const bool st = stamp(a, 1500) && stamp(b, 1500);
+    const uint16_t m64 = cap_a;
+    const uint16_t n_caps = captures;
+    print(serial, "  together: slot 0 DIV64 ", m64, " ticks (", n_caps, " captures meanwhile), "
+          "slot 1 DIV4096 ", b - a, " ticks", crlf);
+    verdict("selecting slot 1 leaves slot 0's divider", kept0 == PitEventDiv::div64);
+    verdict("both slots run at once, each at its own divider",
+            st && n_caps > 2 && slot_period_ok(m64, second, 64) && slot_period_ok(b - a, second, 4096));
+    EvPitDiv<4096, 1>::release();
+    ChSnap::off();
+
+    // 3. The prescaler runs while RTCEN or PITEN is set (24.5.2.2): slot 0
+    //    at DIV4 (8 kHz) on the meter, both functions off - nothing in
+    //    20 ms; the PIT alone - the slot runs; the counter alone - the
+    //    counter counts (its CNT read across the window), and the slot
+    //    stays STILL: the slots follow PITEN, not the prescaler's run
+    //    condition (measured, every run; the chapter does not say so).
+    Ticker::pause();
+    Pit::disable();
+    Rtc::disable();
+    rtc_wait(RTC_CTRLABUSY_bm);
+    rtc_pit_wait();
+    Pit::event_divider<0>(PitEventDiv::div4);
+    auto caps_20ms = []() -> uint16_t {
+        delay_us(clock, 200);
+        cli(); captures = 0; sei();
+        for (uint8_t ms = 0; ms < 20; ++ms) delay_us(clock, 1000);
+        cli(); const uint16_t n = captures; sei();
+        return n;
+    };
+    const uint16_t off_caps = caps_20ms();
+    Pit::init(PitPeriod::cyc1024, false);
+    const uint16_t pit_caps = caps_20ms();
+    Pit::disable();
+    Rtc::init({.prescaler = RtcPrescaler::div1, .period = 32767});
+    rtc_wait(RTC_CTRLABUSY_bm);
+    const uint16_t cnt0 = Rtc::count();
+    const uint16_t rtc_caps = caps_20ms();
+    const uint16_t cnt_moved = static_cast<uint16_t>(Rtc::count() - cnt0);
+    // 4. The slot turned off: a constant low, nothing to capture.
+    Pit::event_divider<0>(PitEventDiv::off);
+    const uint16_t slot_off_caps = caps_20ms();
+    print(serial, "  DIV4 captures in 20 ms: both off ", off_caps, ", PIT on ", pit_caps,
+          ", counter on ", rtc_caps, " (its CNT moved ", cnt_moved, "); the slot off ",
+          slot_off_caps, crlf);
+    // 20 ms of 8192 Hz is 164 periods: "running" is anything past 100;
+    // the counter at CLK_RTC counts some 655 in the window (32768 Hz,
+    // OSC32K within 10 %): "counting" is anything past 500.
+    verdict("neither RTCEN nor PITEN: the slot's divider is still", off_caps == 0);
+    verdict("PITEN alone runs the slot", pit_caps > 100);
+    verdict("RTCEN alone: the counter counts and the slot stays still (it follows PITEN)",
+            cnt_moved > 500 && rtc_caps == 0);
+    verdict("a slot set OFF carries nothing", slot_off_caps == 0);
+    meter_on = false;
+    T0::disable();
+    ChPit::off();
+    quiesce();
+}
+#endif
+
 using TestFn = void (*)();
 struct Test { char key; TestFn fn; };
 constexpr Test tests[] = {
@@ -738,6 +929,13 @@ void run(TestFn fn) {
 }
 
 void help() {
+#if defined(RTC_EVGEN0SEL_gm)
+    print(serial, "test_avr_rtc: 1 resource verbs | 2 counter period | 3 compare phase | "
+                  "4 crystal error correction | 5 busy flags | 6 first tick | "
+                  "7 PIT and counter together | 8 OSC1K | 9 XOSC32K | p PIT event slots | a all",
+          crlf);
+    return;
+#endif
     if constexpr (board_xosc32k) {
         print(serial, "test_avr_rtc: 1 resource verbs | 2 counter period | 3 compare phase | "
                       "4 crystal error correction | 5 busy flags | 6 first tick | "
@@ -760,7 +958,18 @@ ISR(RTC_CNT_vect) {
     if (f.cmp) rtc_cmp_irqs = rtc_cmp_irqs + 1;
 }
 ISR(TCB0_INT_vect) {
+#if defined(RTC_EVGEN0SEL_gm)
+    if (meter_on) {
+        const uint16_t t = brio::FrequencyMeter<T0>::period_ticks();
+        cap_a = t;
+        captures = captures + 1;
+        cap_sum = cap_sum + t;
+        if (t < cap_min) cap_min = t;
+        if (t > cap_max) cap_max = t;
+    }
+#else
     if (meter_on) { cap_a = brio::FrequencyMeter<T0>::period_ticks(); captures = captures + 1; }
+#endif
     else (void)T0::take_flags();
 }
 
@@ -773,9 +982,15 @@ int main() {
     sei();
     auto board = board_id();
     if (board.empty()) board = "?";
-    print(serial, crlf, "test_avr_rtc - RTC/PIT test suite (board ", board,
-          ", clk=", xtal ? (has_xoschf ? "XTAL" : "EXTCLK") : "OSCHF",
-          " 24 MHz, silicon rev ", hex(SYSCFG.REVID), ")", crlf);
+    if constexpr (at24) {
+        print(serial, crlf, "test_avr_rtc - RTC/PIT test suite (board ", board,
+              ", clk=", xtal ? (has_xoschf ? "XTAL" : "EXTCLK") : "OSCHF",
+              " 24 MHz, silicon rev ", hex(SYSCFG.REVID), ")", crlf);
+    } else {
+        print(serial, crlf, "test_avr_rtc - RTC/PIT test suite (board ", board,
+              ", clk=", xtal ? (has_xoschf ? "XTAL" : "EXTCLK") : "OSCHF", " ",
+              crystal_hz / 1'000'000u, " MHz, silicon rev ", hex(SYSCFG.REVID), ")", crlf);
+    }
     help();
     print(serial, "> ");
     for (;;) {
@@ -790,6 +1005,9 @@ int main() {
             if constexpr (board_xosc32k) {
                 run(t9_xosc32k); tp += passed; tf += failed;
             }
+#if defined(RTC_EVGEN0SEL_gm)
+            run(tp_pit_slots); tp += passed; tf += failed;
+#endif
             print(serial, "ALL: ", tp, " pass, ", tf, " fail", crlf);
         } else {
             bool found = false;
@@ -797,6 +1015,9 @@ int main() {
             if constexpr (board_xosc32k) {
                 if (c == '9') { run(t9_xosc32k); found = true; }
             }
+#if defined(RTC_EVGEN0SEL_gm)
+            if (c == 'p') { run(tp_pit_slots); found = true; }
+#endif
             if (!found) print(serial, "? for help", crlf);
         }
         print(serial, "> ");

@@ -170,6 +170,27 @@ brio::EventChannel<3>::pulse();
 
 ## Bench findings
 
+- **The AVR EA's PIT slots** (`test_avr_rtc` p, AVR64EA48 rev B1, ten
+  runs of ten): every divider of 24.13.17 exists - DIV4 through
+  DIV32768 through each of the two slots, each period within 0.1 % of
+  div / 32768 of the OSC32K second measured just before (the chapter's
+  overview, 24.2, still says "64..8192"); both slots run at once, each
+  at its own divider, and selecting one leaves the other's nibble. A
+  slot needs **PITEN**: with the PIT disabled and the counter enabled -
+  CNT counting some 650 in 20 ms - DIV4 carries no edge at all, where
+  24.5.2.2 says the shared prescaler runs while either function is
+  enabled; with PITEN it runs (165 edges in 20 ms), with both off and
+  with the slot OFF it is still. An app that routes a PIT slot keeps
+  the PIT enabled (its interrupt may stay off: the Ticker's `pause()`
+  keeps PITEN). The pin slot is port.md's (`test_avr_pin` e).
+
+- On the AVR64EA48 (rev B1) every route `test_avr_timer` makes runs on
+  the EA's six channels with each generator on the channel the letter
+  names (no parity, no port pairs), the second pin of a port through its
+  slot 1 (letter t's PD2 beside PD0's slot 0): SPI0's SCK, USART1's XCK
+  (200 ticks at 20 MHz), the software event's inversion, EVOUT at PA7
+  (its 100 nF read 5 us after the change, twenty runs of twenty), PC7
+  and PD7.
 - On the AVR128DA48 (rev A7) every event route `test_avr_timer`,
   `test_avr_tcd` and `test_avr_sleep` build runs as on the DB; its 48
   pins bond none of the pins DS80000882C 2.6.1 cuts off. EVOUT's ALT1
@@ -223,12 +244,10 @@ Driver gaps:
 
 Implemented but not bench-verified:
 
-- the AVR EA's PIT slots on the silicon (the pin slot is measured: port.md,
-  `test_avr_pin` e, ten runs of ten): the dividers DIV4..DIV32 and
-  DIV16384/32768 (24.13.17 lists them, the overview 24.2 says 64..8192),
-  whether a slot needs RTCEN or PITEN, and the latency from a slot
-  write to the event - each measured by a divider on EVOUT counted
-  against the 32 kHz crystal;
+- the latency from a PITEVGENCTRLA or EVGENCTRLA write to the event
+  (no synchronization is documented for either register): a write
+  stamped by the TCB cascade against the EVOUT edge it causes would
+  measure it;
 
 - the vocabulary no driver exercises yet - the UPDI, MVIO and ZCD
   generators: codes verified against the device header's own enums,

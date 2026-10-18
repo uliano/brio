@@ -71,4 +71,13 @@ this one differs from the DA's on the same PCB in what is fitted.
   22 of 27 - its five reds are the rulers timed against the 32 kHz
   crystal above ([../avrxt/platform.md](../avrxt/platform.md),
   [../avrxt/port.md](../avrxt/port.md),
-  [../avrxt/clkctrl.md](../avrxt/clkctrl.md)).
+  [../avrxt/clkctrl.md](../avrxt/clkctrl.md)); `test_avr_timer` 208 of
+  208, `test_avr_meter` 38 of 38, `test_avr_rtc` 89 of 91 - its two reds
+  are letter 9's, the 32 kHz crystal again ([../avrxt/tca.md](../avrxt/tca.md),
+  [../avrxt/tcb.md](../avrxt/tcb.md), [../avrxt/ccl.md](../avrxt/ccl.md),
+  [../avrxt/rtc.md](../avrxt/rtc.md)).
+- The timer suite's pads on this board: TCA0 on PORTD (PD0, PD2), TCA1
+  on PORTB, PORTC (PC4..PC6, the jumpered pins - nothing drives their
+  PE partners meanwhile), PORTA (PA4..PA6) and PORTD (PD4..PD6), the CCL
+  on LUT2's PD0/PD1/PD3, the DAC on PD6, EVOUT on PD2, PC7 and PA7 (the
+  100 nF there reads the held level 5 us after a change).

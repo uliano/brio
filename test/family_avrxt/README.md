@@ -5,7 +5,7 @@ package of the AVR DA, DB and EA families - instantiation only, no
 hardware, no main(). `brio check avrxt` compiles each `*.cpp` here for
 avr128da/db x 28/32/48/64 and avr64ea x 28/32/48 (seconds), and each
 `neg/*.cpp` must FAIL for the MCUs its `// mcu:` header line names. A
-chapter the AVR EA has no driver for (NVM version 3, its ADC, the CCL)
+chapter the AVR EA has no driver for (NVM version 3, its ADC)
 compiles to nothing there, and its refusal by name is a negative.
 
 Part of every driver's definition of done (CLAUDE.md "Working

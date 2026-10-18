@@ -1,10 +1,10 @@
 // CCL family smoke TU. LUT counts come from the device header (4 on
-// 28/32-pin, 6 on 48/64); a LUT whose PORT the package does not bond
-// (LUT5's pins are PORTG, 64-pin only) still works on events - only
-// the pin faces are refused.
+// the 28/32-pin AVR DA/DB and on every AVR EA, 6 on the 48/64-pin AVR
+// DA/DB); a LUT whose PORT the package does not bond (LUT5's pins are
+// PORTG, 64-pin only) still works on events - only the pin faces are
+// refused. The AC input means ACx on input x, AC1 on the AVR EA's
+// input 2 (no AC2 there).
 #include <avr/io.h>
-// On the AVR EA input 2 selects AC1 under the AC code, which LutInput::ac does not spell yet: ccl.hpp refuses a part without AC2 by name, and this TU compiles to nothing there.
-#if defined(AC2)
 #include "avrxt/ccl.hpp"
 #include "avrxt/evsys.hpp"
 
@@ -49,4 +49,22 @@ void ccl_64pin() {
 static_assert(!Lut<3>::has_alt_pin);
 static_assert(Lut<1>::has_alt_pin);
 
-#endif // AC2
+static_assert(lut_input_ac(0) == 0 && lut_input_ac(1) == 1);
+static_assert(lut_input_ac(2) == (ac_count == 3 ? 2 : 1));
+
+#if defined(__AVR_AVR64EA28__) || defined(__AVR_AVR64EA32__) || defined(__AVR_AVR64EA48__)
+// The AVR EA: four LUTs and two sequencers on every package, TCA1 (and so
+// its LUT input) on every package, input 2's AC code selecting AC1.
+static_assert(lut_count == 4);
+static_assert(lut_input_ac(2) == 1);
+void ccl_ea() {
+    Ccl::disable();
+    Lut<3>::init<LutConfig{.in0 = LutInput::link, .in1 = LutInput::tca1,
+                           .in2 = LutInput::ac, .truth = 0x80}>();
+    Lut<2>::init<LutConfig{.in0 = LutInput::spi0, .in1 = LutInput::usart_txd,
+                           .in2 = LutInput::tcb, .truth = 0x01}>();
+    Ccl::sequencer<1>(Sequencer::jk_flip_flop);
+    ToggleFlipFlop<1>::init(EventChannel<5>{});
+    Ccl::enable();
+}
+#endif

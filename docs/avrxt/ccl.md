@@ -1,9 +1,11 @@
-# CCL - the configurable custom logic (AVR DA/DB)
+# CCL - the configurable custom logic (AVR DA, DB and EA)
 
 Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B (CCL
 chapter 31, PORTMUX 17.3.2, EVSYS 16 generators 0x10-0x15 / users
 0x00-0x0B, I/O multiplexing chapter 3), errata DS80000915F (2.4.1,
-2.4.2). Complements: TB3218 "Getting Started with CCL", AN2434, the
+2.4.2) and, for the DA parts, DS80000882C (2.3.1); for the AVR EA,
+AVR64EA28/32/48 data sheet DS40002443A (CCL chapter 29, PORTMUX
+17.3.2) and errata DS80001048D (no CCL item). Complements: TB3218 "Getting Started with CCL", AN2434, the
 Microchip example `avr128db48-blink-led-ccl` (see
 [vendor/README.md](vendor/README.md)). Driver: `avrxt/ccl.hpp` (`Ccl`,
 `Lut<n>`, `ToggleFlipFlop<pair>`), the LUT event vocabulary in
@@ -11,10 +13,10 @@ Microchip example `avr128db48-blink-led-ccl` (see
 
 ## What the silicon does
 
-One CCL with six look-up tables (LUT0..LUT5 on 48/64-pin parts,
-LUT0..3 on 28/32 - the driver takes the count from the device
-header) grouped in three pairs (0-1, 2-3, 4-5), each pair
-owning one sequencer. A LUT is: three inputs chosen from a menu, an
+One CCL with six look-up tables (LUT0..LUT5 on the 48/64-pin AVR DA/DB,
+LUT0..3 on their 28/32-pin parts and on every AVR EA - the driver takes
+the count from the device header) grouped in pairs (0-1, 2-3, 4-5),
+each pair owning one sequencer. A LUT is: three inputs chosen from a menu, an
 8-bit truth table (`TRUTHn[k]` = the output for input pattern k, IN2
 the MSB), then optionally a synchronizer or a glitch filter, then
 optionally a rising-edge detector (one-clock pulse), then the output
@@ -37,6 +39,17 @@ WO1/WO2 on input 0/1/2), `TCBn` (TCB0/1/2 WO on input 0/1/2), `TCD0`
 fixed table: TCB3 and TCA WO3..5 are NOT reachable except through an
 event channel, and AC2 only on input 2.
 
+The AVR EA's menu (DS40002443A 29.2.2.1) is the same IP's with its
+peripherals: no ZCD and no TCD (those inputs are not names there), the
+same codes for every kind it has - the driver takes them from the
+header's enumerators and asserts the three inputs agree - and the AC
+code on input 2 selects **AC1** (the part has no AC2): `lut_input_ac
+(input)` says which comparator an input's AC code is, from the device
+tables' probe of the header's INSEL2 enumerators. Two contradictions in
+the EA's own documents are settled on the bench (findings): the
+register summary 29.5.8 calls INSEL2's AC code reserved, and the
+header's comments call SPI0 "MISO" on all three inputs.
+
 Facts that matter to code:
 
 - **Enable protection**: `LUTnCTRLA/B/C`, `TRUTHn` and `SEQCTRL` can
@@ -50,7 +63,10 @@ Facts that matter to code:
   drops every other LUT meanwhile - a driver must build the complete
   configuration first and enable once; a runtime change of one LUT is
   a glitch on all of them. Changing a clock source also wants the CCL
-  disabled. The errata document's sleep clarification adds that the CCL
+  disabled. The AVR EA has no such erratum: its protection is the
+  LUT's own (the even LUT's for a sequencer, DS40002443A 29.3.1.1), and
+  one LUT re-initialised under a running block takes its new table at
+  once with the others undisturbed (measured, below). The errata document's sleep clarification adds that the CCL
   interrupt wakes the device from POWER-DOWN only when the LUT path is
   fully asynchronous (no filter, no edge detector); the bench refines
   that into a statement about the LUT's CLOCK - see the findings.
@@ -97,12 +113,16 @@ Facts that matter to code:
 | `Ccl` | `enable(run_standby)`, `disable` (the state every reconfiguration starts from), `enabled`, `sequencer<pair>(Sequencer)` (none, d_flip_flop, jk_flip_flop, d_latch, rs_latch), `take_flags` (ISR body of CCL_CCL_vect: bit n per LUT, cleared) |
 | `Lut<n>` | `init<cfg>()` / `init(cfg)` (block disabled: inputs, truth, route, pin, sense, then CTRLA with ENABLE), `enable`/`disable` (this LUT), `sense(LutSense)`, `flag`/`clear_flag`, `event_a_on(channel)`/`event_b_on(channel)`, the register accessors; `In0`/`In1`/`In2`/`OutDefault`/`OutAlt` pin types, `port`, `has_pins`/`has_alt_pin` (this package's facts); `OutEvent` generator, `EventA`/`EventB` users |
 | `ToggleFlipFlop<pair>` | `init(toggle_channel, output_pin, alt_pin)`: JK on LUT 2p/2p+1, J = K = the event: one toggle per pulse (a divide-by-two, no CPU); `Even`/`Odd` |
-| helpers | `lut_truth(f)`, `lut_config_valid`, `lut_port(n)` |
+| helpers | `lut_truth(f)`, `lut_config_valid`, `lut_port(n)`, `lut_input_ac(input)` |
 
 The protocol, dictated by errata 2.4.1 and the enable protection:
 `Ccl::disable()`, `Ccl::sequencer<p>(...)` (before the even LUT's
 init - `sequencer` disables that LUT itself), every `Lut<n>::init(...)`,
-`Ccl::enable()` - the whole wiring at once. A CCL application is a fixed wiring: the
+`Ccl::enable()` - the whole wiring at once. On the AVR EA a lone
+`Lut<n>::init(...)` under a running block is legal too (it disables and
+re-enables that LUT alone), and the others keep running.
+`lut_input_ac(input)` names the comparator an input's AC code selects
+(AC2 on input 2 of the DA/DB, AC1 on the EA's). A CCL application is a fixed wiring: the
 EventSystem static allocation of [evsys.md](evsys.md) is its natural
 companion.
 
@@ -180,6 +200,39 @@ period is 1451..1454 ticks and from OSC1K 46439..46509 - the 32:1 of
 the two clocks within the capture's ticks and the oscillator's wander
 between the two legs.
 
+On the **AVR64EA48** (rev B1, 5 V, 20 MHz quartz; `test_avr_timer`,
+twenty runs of twenty) with its four LUTs - letter c's pin LUT is
+LUT2 (PD0/PD1 -> PD3), the pinless one LUT3, LINK LUT3 -> LUT2 -
+every CCL verdict of the DA/DB holds: the truth tables on pins, the JK
+toggle (40000 ticks, 500 Hz), the edge detector (one pulse per event),
+the DFF and RS sequencers, LUT1's ALT1 on PC6, TCA0 WO0, AC0, TCB2,
+USART1's TXD and SPI0's SCK as inputs, the D latch, FEEDBACK, the
+filter delays (sync +2, filter +4 CLK_PER) and the OSC32K filter (1917..
+2470 ticks, 3 to 4 cycles of this die's 618-tick OSC32K cycle). And the
+EA's own (letter x):
+
+- **Input 2's AC code is AC1**, as 29.2.2.1 and the header say and the
+  register summary 29.5.8 ("reserved") does not: AC1 crossing the DAC
+  three times gives three rising edges through LUT2's input 2 with AC0
+  off.
+- **SPI0 on inputs 0 and 1 is MOSI**, as the data sheet says and the
+  header's "MISO" comments do not: a pinless host sending four 0x55
+  gives 16 rising edges through each (MOSI rises four times a byte;
+  SCK would give 32, an undriven MISO none); on input 2 it is SCK (32,
+  letter k).
+- **LINK reaches LUT3**: LUT3 passes LUT0's constant both ways (the DA/
+  DB's 28/32-pin erratum has no EA twin).
+- **One LUT reconfigures under a running block**: LUT2 re-initialised
+  fifty times with the block enabled shows each new table at once on
+  EVOUT PD2, while LUT0, passing TCA0's 1 kHz WO0, rises exactly once
+  per two CMP0 events across the whole sequence (52 against 103) - no
+  gap, no glitch the counters see.
+- The OSC32K-clocked DFF of letter k needs the mean of 32 periods here:
+  this die's OSC32K jitters by a few CLK_PER from cycle to cycle
+  ([rtc.md](rtc.md)), and one two-cycle period, multiplied by 32 against
+  OSC1K, read up to 132 ticks off the ratio; the mean (rounded to the
+  tick, so +-16 once multiplied) reads within 29 in twenty runs.
+
 ### The CCL as a wake-up source
 
 `test_avr_sleep` test n (A5, no wires): a PIT divider through the event
@@ -204,11 +257,6 @@ source ENDED each sleep is read off the counts taken inside the sleep.
 
 Driver gaps:
 
-- The AVR EA: `ccl.hpp` refuses the part by name. On the EA input 2's
-  AC code selects AC1, not the AC2 that `LutInput::ac`'s contract "ACx
-  on input x" means (DS40002443A 29.2.2.1; the part has no AC2), and the
-  driver does not spell that yet; the fixture compiles to nothing there.
-
 - Typed per-input legality of the peripheral instances (today: the
   enum + the table above, an input whose peripheral the part has not
   got at all - `tca1` without TCA1, `zcd` without a ZCD - not named):
@@ -222,10 +270,13 @@ Implemented but not bench-verified:
 
 - The D-latch/DFF distinction under a slow LUT clock (the latch and
   the DFF are each measured, never side by side on one slow clock).
-- The ZCD and TCD0 inputs, and SPI0's MOSI on inputs 0/1 (SCK is
-  measured above): typed, no letter drives them - the same pass-through
-  on a TCD waveform, a ZCD crossing or a MOSI pattern would measure
-  them. `LutClock::oschf`, likewise: the FEEDBACK divider above on it
+- The ZCD and TCD0 inputs, and SPI0's MOSI on inputs 0/1 on the AVR
+  DA/DB (SCK is measured above, MOSI on the EA): typed, no letter drives
+  them on those dies - the same pass-through on a TCD waveform, a ZCD
+  crossing or the EA's MOSI leg run on a DB would measure them.
+- The 28/32-pin AVR EA (compile-verified, no such part on the bench):
+  its four LUTs as the 48-pin part's, TCA1's input on parts whose TCA1
+  has only PORTA/PORTD routes. `LutClock::oschf`, likewise: the FEEDBACK divider above on it
   would.
 - A slow-domain-proof stamp protocol (the OSC32K delay measurement
   is single-shot today: a back-to-back repeat races the re-arm).

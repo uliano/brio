@@ -1,8 +1,9 @@
 /*
  * tcb.hpp
  *
- * The AVR DA/DB 16-bit timer/counter type B (TCB, DS40002247B ch. 24)
- * in two strata, as docs/avrxt/tcb.md describes:
+ * The 16-bit timer/counter type B (TCB) of the AVR DA/DB (DS40002247B
+ * ch. 24) and of the AVR EA (DS40002443A ch. 23, the same IP) in two
+ * strata, as docs/avrxt/tcb.md describes:
  *
  *  RESOURCE - Tcb<n>: the typed view of one instance. A config struct
  *  owns the whole configuration (mode, clock, compare, event input and
@@ -59,7 +60,10 @@
  *    input is delayed one CLK_PER to absorb the carry), both in the
  *    same capture mode, one CAPT event to both;
  *  - errata 2.13.1 (A4/A5): in PWM8 CCMP and CNT are 16-bit only -
- *    Pwm8 writes CCMP as one word (period and duty together);
+ *    Pwm8 writes CCMP as one word (period and duty together); on the
+ *    AVR EA (DS40002443A ch. 23, the same IP, no TCB erratum) the two
+ *    bytes are independent as the chapter says, and Pwm8 writes CCMPH
+ *    alone;
  *  - routes (PORTMUX.TCBROUTEA, one bit per instance): TCB0 PA2 /
  *    PF4, TCB1 PA3 / PF5, TCB2 PC0 / PB4, TCB3 PB5 / PC1.
  */
@@ -727,7 +731,12 @@ struct DutyMeter : CaptureMeterBase<T> {
 /// Ratiometric on purpose - NOT a ClockUser: the duty survives a clock
 /// change, only the PWM frequency moves with CLK_PER (a LED does not
 /// care; an app that does re-inits).
-/// Errata 2.13.1: CCMP written as one 16-bit word.
+/// The duty is CCMPH alone where the two bytes are independent (the AVR
+/// EA, device_tables.hpp's tcb_pwm8_bytes: one store, and no pass
+/// through the instance's TEMP register, which an ISR reading CNT or CCMP
+/// of the same TCB would otherwise share); one 16-bit word, period and
+/// duty together, where errata DB 2.13.1 / DA 2.12.1 make CCMP 16-bit
+/// only.
 template <typename T, uint8_t period = 255>
 struct Pwm8 {
     Pwm8() = delete;
@@ -747,7 +756,11 @@ struct Pwm8 {
             set_pin();
             return;
         }
-        T::compare(static_cast<uint16_t>((v << 8) | period));   // one word: errata 2.13.1
+        if constexpr (tcb_pwm8_bytes) {
+            T::regs().CCMPH = static_cast<uint8_t>(v);           // one byte: CCMPL keeps the period
+        } else {
+            T::compare(static_cast<uint16_t>((v << 8) | period));   // one word: errata 2.13.1
+        }
         T::regs().CTRLB |= TCB_CCMPEN_bm;
     }
 

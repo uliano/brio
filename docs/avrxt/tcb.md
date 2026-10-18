@@ -1,9 +1,12 @@
-# TCB - the 16-bit timer/counter type B (AVR DA/DB)
+# TCB - the 16-bit timer/counter type B (AVR DA, DB and EA)
 
 Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B (TCB
 chapter 24, PORTMUX 17.3.8, EVSYS 16 generators 0xA0-0xA9 / users
 0x1E-0x27), errata DS80000915F (2.13.1, 2.13.2) and, for the DA parts,
-DS80000882C (2.12.1). Complements: TB3214
+DS80000882C (2.12.1); for the AVR EA, AVR64EA28/32/48 data sheet
+DS40002443A (TCB chapter 23 - the same IP, the same CLKSEL, CNTMODE,
+CASCADE, SYNCUPD, ASYNC and FILTER - PORTMUX 17.3.8) and errata
+DS80001048D (no TCB item). Complements: TB3214
 "Getting Started with TCB" and the Microchip examples
 `avr128da48-getting-started-with-tcb`,
 `avr128da48-tcb-frequency-dutycycle-measurement` (see
@@ -14,7 +17,9 @@ DS80000882C (2.12.1). Complements: TB3214
 ## What the silicon does
 
 Five instances on the family, TCB0..TCB3 on the 48-pin parts (TCB4
-only on 64 pins). Each is a 16-bit counter with ONE capture/compare
+only on 64 pins), TCB0..TCB3 on every AVR EA package (TCB3's default
+PB5 and TCB2's ALT1 PB4 bonded on its 48-pin part only: `has_default_
+pin` / `has_alt_pin` say so, the driver unchanged). Each is a 16-bit counter with ONE capture/compare
 register (`CCMP`), ONE waveform output (`WO`), two flags (`CAPT`,
 `OVF`) that are interrupt sources and event generators alike, and a
 mode field that turns the same counter into eight different tools:
@@ -106,8 +111,13 @@ Facts that matter to code:
   a single-shot under PyAvrOCD stops with the CPU).
 - **Errata DB 2.13.1 (A4/A5) / DA 2.12.1 (every revision)**: in PWM8
   the CCMP and CNT bytes are not independent - write CCMP as one 16-bit
-  value (period and duty together), never byte-wise; the driver always
-  does, on both families.
+  value (period and duty together), never byte-wise; the driver does,
+  on both families. The AVR EA has no such item, and its chapter's
+  CCMPL and CCMPH are "two independent registers" in PWM8 (DS40002443A
+  23.5.10) - measured so on rev B1 - so there `Pwm8::duty` writes CCMPH
+  alone (the device tables' `tcb_pwm8_bytes`): one store instead of
+  two, and no pass through the instance's TEMP register, which an ISR
+  reading CNT or CCMP of the same TCB would share.
 
 As event generator: `TCBn CAPT` (0xA0 + 2n) and `TCBn OVF` (0xA1 +
 2n), one CLK_PER pulses, same conditions as the flags. As event user:
@@ -203,6 +213,21 @@ The ISR vector binding is the app's (one vector per instance, CAPT
 and OVF share it).
 
 ## Bench findings
+
+On the **AVR64EA48** (rev B1, 5 V, the board's 20 MHz quartz;
+`test_avr_timer`, 208 verdicts, twenty runs of twenty; the TCB is the
+instrument of every letter): every TCB verdict of the DA/DB holds with
+its ticks derived from the rate - the meters exact to the tick (40000
+.. 200 ticks a period, 14000 low of a 700 us low time), the capture's
+interval-minus-one at `div1` corrected by the meters (and at `div2` the
+same half tick: 9999 for 10000, as the DB's 11999), the one-shot widths
+200 / 2000 / 20000 ticks and the async pulse 2004 for 2000 (inside the
+letter's four ticks), Pwm8 at period 256, the cascade's second 20 M ticks
+within 0.2 %, Timeout firing TOP + 2 after its start with the filter's
++3, and the CAPT gate. And the EA's own (letter x): **PWM8's CCMPH takes
+a lone byte write with CCMPL kept** - written after a read of CNT that
+left 0 in TEMP, the period stays 256 and the width follows (64, then
+192) - which is what `Pwm8::duty` does there (above).
 
 `test_avr_timer` (silicon rev A5, 24 MHz crystal, 3.3 V), all
 measured against the same crystal - and the same suite green on the

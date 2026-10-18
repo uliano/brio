@@ -369,6 +369,32 @@ constexpr uint8_t ac_winsel_upsel2_code_of() {
     else return 0xFF;
 }
 
+/// The CCL's AC input on LUT input 2 (INSEL2): the header names the
+/// comparator that code selects there - AC2 on the AVR DA/DB, AC1 on the
+/// AVR EA, which has no AC2 (DS40002443A 29.2.2.1; its register summary
+/// 29.5.8 calls the code reserved, the bench says which). The instance
+/// and the code, 0xFF where the header names neither.
+template <typename E>
+concept HasCclInsel2Ac2 = requires { E::CCL_INSEL2_AC2_gc; };
+template <typename E>
+concept HasCclInsel2Ac1 = requires { E::CCL_INSEL2_AC1_gc; };
+
+template <typename E>
+constexpr uint8_t ccl_insel2_ac_instance_of() {
+    if constexpr (HasCclInsel2Ac2<E>) return 2;
+    else if constexpr (HasCclInsel2Ac1<E>) return 1;
+    else return 0xFF;
+}
+template <typename E>
+constexpr uint8_t ccl_insel2_ac_code_of() {
+    if constexpr (HasCclInsel2Ac2<E>) return static_cast<uint8_t>(E::CCL_INSEL2_AC2_gc);
+    else if constexpr (HasCclInsel2Ac1<E>) return static_cast<uint8_t>(E::CCL_INSEL2_AC1_gc);
+    else return 0xFF;
+}
+
+inline constexpr uint8_t ccl_insel2_ac_instance = ccl_insel2_ac_instance_of<CCL_INSEL2_t>();
+inline constexpr uint8_t ccl_insel2_ac_code = ccl_insel2_ac_code_of<CCL_INSEL2_t>();
+
 inline constexpr uint8_t ac_power_profile2_code = ac_power_profile2_code_of<AC_POWER_t>();
 inline constexpr uint8_t ac_winsel_upsel2_code = ac_winsel_upsel2_code_of<AC_WINSEL_t>();
 inline constexpr bool has_ac_profile2 = ac_power_profile2_code != 0xFF;
@@ -496,6 +522,36 @@ inline constexpr PortmuxLayout portmux_layout = PortmuxLayout::dx;
 /// A route this layout has not got.
 inline constexpr uint8_t route_absent = 0xFF;
 
+/// TCA1's routes to PORTA and PORTD (WO0..2 on pins 4..6, three
+/// channels): the AVR EA's TCAROUTEA names them on every package
+/// (DS40002443A 17.3.7), the AVR DA/DB's on none. Enumerators, so the
+/// probe is a lookup in the enum type; route_absent where the header has
+/// no such code (and on a part without TCA1, whose header has no TCA1
+/// route type at all).
+template <typename E>
+concept HasTca1PortaRoute = requires { E::PORTMUX_TCA1_PORTA_gc; };
+template <typename E>
+concept HasTca1PortdRoute = requires { E::PORTMUX_TCA1_PORTD_gc; };
+
+template <typename E>
+constexpr uint8_t tca1_porta_code_of() {
+    if constexpr (HasTca1PortaRoute<E>) return static_cast<uint8_t>(E::PORTMUX_TCA1_PORTA_gc);
+    else return route_absent;
+}
+template <typename E>
+constexpr uint8_t tca1_portd_code_of() {
+    if constexpr (HasTca1PortdRoute<E>) return static_cast<uint8_t>(E::PORTMUX_TCA1_PORTD_gc);
+    else return route_absent;
+}
+
+#if defined(TCA1)
+inline constexpr uint8_t tca1_route_porta = tca1_porta_code_of<PORTMUX_TCA1_t>();
+inline constexpr uint8_t tca1_route_portd = tca1_portd_code_of<PORTMUX_TCA1_t>();
+#else
+inline constexpr uint8_t tca1_route_porta = route_absent;
+inline constexpr uint8_t tca1_route_portd = route_absent;
+#endif
+
 // The route CODES each instance's field takes, per layout. Each table is
 // indexed by the value of the driver's route enumerator - UsartRoute {def,
 // alt1, alt2, none, alt3, alt4}, SpiRoute {def, alt1, alt2, none, alt3,
@@ -564,6 +620,16 @@ inline constexpr bool erratum_da_twi_sdahold_swap = avr_die == AvrDie::avr128da;
 /// DS80000882C 2.7.1 (every AVR DA revision): the flash's data-space
 /// window ignores the section protections.
 inline constexpr bool erratum_da_window = avr_die == AvrDie::avr128da;
+
+/// The TCB's CCMPL and CCMPH as two INDEPENDENT 8-bit registers in PWM8
+/// mode, as each chapter says (DS40002247B 24.5.10, DS40002443A 23.5.10):
+/// true on the AVR EA, whose errata DS80001048D list no TCB item and
+/// whose rev B1 takes a lone CCMPH write with CCMPL kept (measured,
+/// docs/avrxt/tcb.md). False on the AVR DA (DS80000882C 2.12.1, every
+/// revision) and the AVR DB (DS80000915F 2.13.1, A4/A5 - the die value
+/// cannot tell a B0 apart): CCMP is 16-bit only there, written as one
+/// word through TEMP.
+inline constexpr bool tcb_pwm8_bytes = avr_die == AvrDie::avr64ea;
 
 /// The absolute maximum of CLK_MAIN: 24 MHz at any supply on the AVR DA
 /// and DB (DS40002247B 39.10.6 table 39-14); 20 MHz on the AVR EA, and

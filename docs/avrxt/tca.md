@@ -1,9 +1,11 @@
-# TCA - the 16-bit timer/counter type A (AVR DA/DB)
+# TCA - the 16-bit timer/counter type A (AVR DA, DB and EA)
 
 Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B (TCA
 chapter 23, PORTMUX 17.3.7, EVSYS 16 generators 0x80-0x8E / users
 0x1A-0x1D), errata DS80000915F (2.12.1) and, for the DA parts,
-DS80000882C (2.11.1, 2.11.2). Complements: TB3217 "Getting
+DS80000882C (2.11.1, 2.11.2); for the AVR EA, AVR64EA28/32/48 data
+sheet DS40002443A (TCA chapter 22, PORTMUX 17.3.7) and errata
+DS80001048D (no TCA item). Complements: TB3217 "Getting
 Started with TCA", AN2434 (quadrature decoding with CCL + TCA + TCB) -
 see [vendor/README.md](vendor/README.md). Driver: `avrxt/tca.hpp` (the
 `Tca<n>` resource and the tasks), the TCA event vocabulary in
@@ -11,7 +13,8 @@ see [vendor/README.md](vendor/README.md). Driver: `avrxt/tca.hpp` (the
 
 ## What the silicon does
 
-Two instances, TCA0 and TCA1 (48/64-pin parts). One 16-bit counter
+Two instances, TCA0 and TCA1 (TCA1 on the 48/64-pin AVR DA/DB and on
+every AVR EA package). One 16-bit counter
 with a period register (`PER`), three compare channels (`CMP0..2`)
 each with its waveform output (`WO0..2`), ALL double-buffered
 (`PERBUF`, `CMPnBUF` with buffer-valid flags in `CTRLF`, copied at the
@@ -58,7 +61,8 @@ Facts that matter to code:
   period), RESET (all registers to reset, only when disabled).
   Errata DB 2.12.1 (A4/A5) / DA 2.11.2 (every revision): a RESTART
   command or restart EVENT in NORMAL/FRQ mode resets DIR to up - a
-  down-counting FRQ user must rewrite DIR after every restart.
+  down-counting FRQ user must rewrite DIR after every restart. The AVR
+  EA keeps DIR (measured, below).
 - **Output**: `CMPnEN` makes WOn override PORT.OUT in any waveform
   mode (pin must be an output; PORT `INVEN` inverts it); the endpoints
   of single-slope (0 = low, > TOP = high) are clean in normal mode -
@@ -66,7 +70,14 @@ Facts that matter to code:
   drives the endpoints from PORT. Routes (PORTMUX `TCAROUTEA`, 3 bits
   per instance, the whole group moves): TCA0 to PORTA/B/C/D/E/F/G
   pins 0..5; TCA1 to PORTB pins 0..5 (full), PORTC PC4..PC6 and PORTE
-  PE4..PE6 (WO0..2 only), PORTG.
+  PE4..PE6 (WO0..2 only), PORTG. On the AVR EA (DS40002443A 17.3.7)
+  TCA1 routes to PORTB (code 0, 48 pins; on 28/32 pins the code stays
+  in the header as "not connected to any pins" and is TCA1's reset
+  value: it drives no pin until routed), PORTC PC4..PC6 (48 pins) and,
+  on every package, PORTA PA4..PA6 (code 4) and PORTD PD4..PD6 (code
+  5) - three-channel routes like PORTC; codes 2 and 3 are reserved
+  there (PORTE and PORTG on the 64-pin DA/DB: the same number, another
+  meaning, never written because the codes are taken by name).
 - **CTRLC parks the waveform pins**: the CMPnOV bits (split:
   LCMPnOV/HCMPnOV) read the WO level any time and WRITE it while the
   timer is disabled - the one handle on a parked pin between runs.
@@ -85,6 +96,20 @@ Facts that matter to code:
 - `RUNSTDBY` keeps it counting in standby; `DBGRUN` under a debugger
   halt. Writing CNT has priority over count/clear/reload and is
   immediate.
+
+**The AVR EA's offer against the DA/DB's** (DS40002443A ch. 22 is
+the DB's chapter word for word; what moves is around it). Each item
+used or declined:
+
+| What the EA has | Used / declined, and why |
+|---|---|
+| TCA1 on every package, the 28/32-pin parts included | used: `Tca<1>`, its tasks, its event generators and the `tca1` LUT input exist wherever the header names TCA1 |
+| TCA1's three-channel PORTA (PA4..PA6) and PORTD (PD4..PD6) routes on every package | used: the route table above; three channels, so `TcaPwm` refuses them and `TcaPwm16`/`TcaPwmCentered`/`FrequencyGenerator`/`Heartbeat` take them |
+| TCA1's PORTB code kept as "not connected" on 28/32 pins, the reset value | used as a refusal: no route; TCA1 there feeds the CCL and the event system with no pin until a route is written |
+| no RESTART-resets-DIR erratum (22.3.3.5 names the counter and the outputs) | measured: DIR survives a RESTART on rev B1; nothing to work around (no down-counting FRQ user exists on any die) |
+| every event generator legal on every channel (16.5.2) | used through evsys.hpp: a TCA's OVF/CMP/HUNF event needs no channel parity there |
+| CLK_PER at most 20 MHz, its supply grades the reader's (clkctrl.md) | a fact of the arithmetic: the tasks take the clock's rate, so every frequency and width is derived, not assumed |
+| the rest - buffering, ALUPD, LUPD, split mode, the event actions, CLK_TCA to the TCBs, CTRLC parking, one TEMP per instance | used as on the DA/DB, the same code and the same costs: `init(cfg)` is one write per register, a buffered duty one 16-bit store, `TcaPwm::duty` one byte |
 
 What TCA is NOT: no input capture of any kind (a TCB captures,
 optionally clocked by `CLK_TCA` and restarted with the TCA via
@@ -113,17 +138,27 @@ it; split mode is reached by the `TcaPwm` task through the resource's
 | helpers | `tca_divisor(c)`, `tca_route_code(n, p)`, `tca_wo_pin(n, p, wo)`, `tca_pin_mask`, `tca_timing(ticks_at_div1)` (the smallest prescaler that fits), `tca_period_ticks(clk_per, hz)` |
 
 Routes are checked where the port is a template argument (the tasks)
-and at run time in `init(cfg)`; `tca_route_code` mirrors exactly the
-codes THIS package's device header defines (PORTG and TCA1 -> PORTE
-on 64-pin parts only; no PORTB/PORTE routes on 28/32-pin) - less
-TCA1's PORTE and PORTG (ALT2, ALT3) on a DA, which DS80000882C 2.11.1
-says do not work on any revision, with no workaround: the DA's header
-defines the codes, the driver refuses them there (the negative test
-`tca_no_tca1_alt23_on_da`). TCA1 on
-PORTC or PORTE is a three-channel route (WO0..2 on pins 4..6):
-`TcaPwm` refuses it - six channels or nothing. One pin-level caveat
-survives the port-level gates: TCA0 -> PORTE on 48-pin parts bonds
-only PE0..PE3 (WO4/5 land nowhere).
+and at run time in `init(cfg)`. The route table is two functions read
+whole by `tca_route(n, p)` (code, first WO pin, channel count):
+`tca_route_code` mirrors exactly the codes THIS package's device header
+defines (PORTG and TCA1 -> PORTE on 64-pin parts only; no PORTB/PORTE
+routes on 28/32-pin; TCA1 -> PORTA/PORTD on the AVR EA alone, the
+device tables' `tca1_route_porta`/`portd`, probed from the header's
+enumerators) - less TCA1's PORTE and PORTG (ALT2, ALT3) on a DA, which
+DS80000882C 2.11.1 says do not work on any revision, with no
+workaround: the DA's header defines the codes, the driver refuses them
+there (the negative test `tca_no_tca1_alt23_on_da`), and less TCA1's
+PORTB on the 28/32-pin EA (`tca_no_tca1_portb_on_ea_small`).
+`tca_wo_pin` holds the route's shape: TCA1 on PORTC or PORTE (AVR
+DA/DB) and on PORTA, PORTC or PORTD (AVR EA) is a three-channel route
+(WO0..2 on pins 4..6), every other route six channels on pins 0..5 -
+one expression, because it sits on `init(cfg)`'s run-time path where a
+helper call changes what the compiler inlines. `TcaPwm` refuses a
+three-channel route - six channels or nothing (`tca_pwm_three_channel_
+route`, `..._ea`). One pin-level caveat survives the port-level gates:
+TCA0 -> PORTE on 48-pin parts bonds only PE0..PE3 (WO4/5 land nowhere),
+as TCA0 -> PORTC does on the 28/32-pin parts (PC0..PC3) and PORTF on
+the 28-pin parts (PF0/PF1) - the headers' own route comments.
 
 ## How to use it
 
@@ -252,17 +287,31 @@ calls `clock(c)` itself.
   TCB's does ([platform.md](platform.md)) - and only the 758..759 of
   the code around the sleep without the flag, every run of twelve.
 
+On the **AVR64EA48** (rev B1, 5 V, the board's 20 MHz quartz;
+`test_avr_timer`, 208 verdicts, twenty runs of twenty), every TCA
+letter of the DA/DB runs with its tick counts derived from the rate:
+FRQ generation exact from 500 Hz to 100 kHz (40000 down to 200 ticks),
+16-bit PWM at 20000 steps exact, the Heartbeat's 500 us pulse 10000
+ticks, the split escape, HUNF (99 events in 20 ms against the 97.7 of
+CLK_PER / 4096: the hold is a cycle loop, never short), the dual-slope
+placements (OVF at TOP 12997 = PER + CMP - 3, the same -3 skew), the
+event actions (39 counts in 2 ms of CLK_PER / 1024), the FRQ phase
+(3001 / 3601 - clock-free), LUPD and ALUPD, TCA1's split vectors on
+PORTB and its PORTC route. And the EA's own (letter x):
+
+- **TCA1's PORTA and PORTD routes drive WO0..2 on PA4..PA6 and
+  PD4..PD6** (each parked high and low through CTRLC, read back on its
+  pad); TCA1's WO0 with no route and no output enabled reaches a LUT
+  (20000 ticks a period through LUT2) - the internal signal is the
+  route-free one.
+- **RESTART keeps DIR on the AVR EA**: counting down, restarted, DIR
+  reads down and CNT is 65492 two milliseconds later (down from the
+  restart's 0 through MAX) - the DB A4/A5's and the DA's erratum has no
+  twin here.
+
 ## Not covered yet
 
 Driver gaps:
-
-- The AVR EA's TCA1 routes (DS40002443A 17.3.7): TCA1 exists on every
-  EA package, with three-channel routes on PORTA (PA4..PA6) and PORTD
-  (PD4..PD6) the route table does not hold yet - refused like any route
-  it does not know; its PORTB and PORTC routes are refused where PORTB
-  is absent (the 28/32-pin EA: PORTC's code is not in that header and
-  PORTB's is "not connected"). The rest of the chapter on the EA - the
-  same IP, word for word - compiles and is a later step on the bench.
 
 - The split halves' counters/periods/compares as verbs (LCNT/HCNT,
   LPER/HPER, LCMPn/HCMPn - today only through the raw `split()`
@@ -281,6 +330,9 @@ Implemented but not bench-verified:
 - The PORTG and TCA1 PORTE routes (compile-verified on the 64-pin
   headers, no such part on the bench), and on a DA64 the refusal of
   TCA1's two by DS80000882C 2.11.1 (compile-enforced, unmeasured).
+- The 28/32-pin AVR EA (compile-verified on both headers, no such part
+  on the bench): TCA1 with only its PORTA and PORTD routes, and its
+  reset route "not connected".
 - Errata DB 2.12.1 / DA 2.11.2 is documented, not worked around (no
   down-counting FRQ user; DB B0 silicon is not affected, every DA
   revision is).

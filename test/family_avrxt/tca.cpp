@@ -63,3 +63,34 @@ static_assert(tca_route_code(0, 'B') == 0xFF);
 static_assert(tca_route_code(0, 'E') == 0xFF);
 static_assert(tca_route_code(0, 'G') == 0xFF);
 #endif
+
+#if defined(__AVR_AVR64EA28__) || defined(__AVR_AVR64EA32__) || defined(__AVR_AVR64EA48__)
+// The AVR EA: TCA1 on every package, its PORTA and PORTD routes three
+// channels on pins 4..6 (DS40002443A 17.3.7); PORTB (six) and PORTC
+// (three) on the 48-pin part only - the 28/32-pin header keeps PORTB's
+// code as "not connected" and names no PORTC.
+static_assert(tca_route(1, 'A').channels == 3 && tca_route(1, 'A').first_pin == 4);
+static_assert(tca_route(1, 'D').channels == 3 && tca_wo_pin(1, 'D', 2) == 6);
+static_assert(tca_route_code(1, 'A') == PORTMUX_TCA1_PORTA_gc);
+static_assert(tca_route_code(1, 'D') == PORTMUX_TCA1_PORTD_gc);
+static_assert(tca_route(0, 'A').channels == 6 && tca_wo_pin(0, 'A', 5) == 5);
+static_assert(tca_route_code(1, 'E') == 0xFF && tca_route_code(1, 'G') == 0xFF);
+void tca_ea() {
+    Tca<1>::init<TcaConfig{.mode = TcaMode::single_slope, .period = 999, .outputs = 0x07,
+                           .route = 'A'}>();
+    (void)TcaPwmCentered<1, 'D', 12000>::init();
+    TcaPwmCentered<1, 'D', 12000>::duty<2>(3000);
+    (void)TcaPwm16<1, 'A', 20000>::max;
+    FrequencyGenerator<1, 'D'>::rebase(10'000'000);
+    EventChannel<0>::source(Tca<1>::OvfEvent{});
+}
+#if defined(__AVR_AVR64EA48__)
+static_assert(tca_route(1, 'B').channels == 6);
+static_assert(tca_route(1, 'C').channels == 3 && tca_wo_pin(1, 'C', 0) == 4);
+#else
+static_assert(tca_route_code(1, 'B') == 0xFF && tca_route_code(1, 'C') == 0xFF);
+#endif
+#else
+// The AVR DA/DB: no TCA1 route to PORTA or PORTD on any package.
+static_assert(tca_route_code(1, 'A') == 0xFF && tca_route_code(1, 'D') == 0xFF);
+#endif

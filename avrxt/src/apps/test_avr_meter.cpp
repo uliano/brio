@@ -23,7 +23,7 @@
 // Commands: ? | a a known signal, latched and paced | b staleness and
 // the overwrite count | c two sources in one sampler | z = a..c
 
-// build: boards = db48,da48
+// build: boards = db48,da48,ea48
 // build: monitor_speed = 460800
 
 #include <avr/interrupt.h>
@@ -62,13 +62,19 @@ constexpr Serial serial;
 // ---- the closed loop ----------------------------------------------------------
 using GenPin = Pin<'D', 0>;              // TCA0 WO0 on the PORTD route
 using Gen = FrequencyGenerator<0, 'D'>;  // a rate, 50 % duty
-using Pwm = TcaPwm16<0, 'D', 24000>;     // 1 kHz at div1, width = the duty value
+/// One millisecond in CLK_PER ticks: the PWM's steps for 1 kHz at div1
+/// (24000 on the 24 MHz boards, 20000 on the AVR EA board's 20 MHz).
+constexpr uint16_t steps_1khz = static_cast<uint16_t>(SysClock::hz / 1000u);
+using Pwm = TcaPwm16<0, 'D', steps_1khz>;  // 1 kHz at div1, width = the duty value
 
 using T0 = Tcb<0>;                       // the frequency meter
 using T1 = Tcb<1>;                       // the pulse-width meter
 using ChGen = EventChannel<2>;           // PD0's level (PORTC/D live on 2-3)
 
 constexpr uint32_t crystal_hz = SysClock::hz;
+/// The letters' text was first written at 24 MHz and keeps it there; at
+/// another board rate the same verdicts are derived from the rate.
+constexpr bool at24 = crystal_hz == 24'000'000u;
 
 // ---- the objects under test ------------------------------------------------------
 // One latch per meter. They are the SAME width, so what makes them two
@@ -302,7 +308,7 @@ void tb_stale() {
     print(serial, "  one burst then quiet, 8 sampler ticks: ", Sink::total,
           " sample published, value ", Sink::last[0], crlf);
     verdict("the one value waiting is published once and once only",
-            Sink::total == 1 && near(static_cast<int32_t>(Sink::last[0]), 24000, 2));
+            Sink::total == 1 && near(static_cast<int32_t>(Sink::last[0]), steps_1khz, 2));
 
     // Now the wire outruns the pace by three orders of magnitude.
     quiesce();
@@ -338,7 +344,7 @@ void tc_two_sources() {
     print(serial, "c TcaPwm16 PD0 -> FrequencyMeter TCB0 + PulseWidthMeter TCB1, one sampler",
           crlf);
 
-    constexpr uint16_t duties[] = {6000, 12000, 18000};
+    constexpr uint16_t duties[] = {steps_1khz / 4u, steps_1khz / 2u, static_cast<uint16_t>(3ul * steps_1khz / 4u)};
     for (uint16_t duty : duties) {
         quiesce();
         ChGen::source(EvPin<GenPin>{});
@@ -360,12 +366,18 @@ void tc_two_sources() {
         const uint32_t period = Sink::last[0];
         const uint32_t width = Sink::last[1];
 
-        print(serial, "  duty ", duty, "/24000: index 0 = ", period, " ticks (",
-              Sink::got[0], " samples, ", c0, " captures), index 1 = ", width, " ticks (",
-              Sink::got[1], " samples, ", c1, " captures)", crlf);
+        if constexpr (at24) {
+            print(serial, "  duty ", duty, "/24000: index 0 = ", period, " ticks (",
+                  Sink::got[0], " samples, ", c0, " captures), index 1 = ", width, " ticks (",
+                  Sink::got[1], " samples, ", c1, " captures)", crlf);
+        } else {
+            print(serial, "  duty ", duty, "/", steps_1khz, ": index 0 = ", period, " ticks (",
+                  Sink::got[0], " samples, ", c0, " captures), index 1 = ", width, " ticks (",
+                  Sink::got[1], " samples, ", c1, " captures)", crlf);
+        }
 
         verdict("index 0 is the PERIOD, within a tick",
-                near(static_cast<int32_t>(period), 24000, 1));
+                near(static_cast<int32_t>(period), steps_1khz, 1));
         verdict("index 1 is the WIDTH, within a tick",
                 near(static_cast<int32_t>(width), static_cast<int32_t>(duty), 1));
         verdict("both sources published, at the sampler's one pace",
@@ -383,7 +395,7 @@ void tc_two_sources() {
     // is what makes source 1 a source nobody feeds.
     T1::enable_capt_interrupt(false);
     Pwm::init(TcaClock::div1, 0x01);
-    Pwm::duty<0>(9000);
+    Pwm::duty<0>(static_cast<uint16_t>(3ul * steps_1khz / 8u));
     delay_us(clock, 3000);
     settle_after_arming();
     Sampler::init(128);
@@ -449,9 +461,15 @@ int main() {
     if (board.empty()) {
         board = "?";
     }
-    print(serial, crlf, "test_avr_meter - meter-sampler test suite (board ", board,
-          ", clk=", xtal ? "XTAL" : "OSCHF", " 24 MHz, silicon rev ", hex(SYSCFG.REVID),
-          ", RSTFR=", hex(why.raw), ")", crlf);
+    if constexpr (at24) {
+        print(serial, crlf, "test_avr_meter - meter-sampler test suite (board ", board,
+              ", clk=", xtal ? "XTAL" : "OSCHF", " 24 MHz, silicon rev ", hex(SYSCFG.REVID),
+              ", RSTFR=", hex(why.raw), ")", crlf);
+    } else {
+        print(serial, crlf, "test_avr_meter - meter-sampler test suite (board ", board,
+              ", clk=", xtal ? "XTAL" : "OSCHF", " ", crystal_hz / 1'000'000u,
+              " MHz, silicon rev ", hex(SYSCFG.REVID), ", RSTFR=", hex(why.raw), ")", crlf);
+    }
     print(serial, "  timebase ", Ticker::ticks_per_second,
           " Hz; the loop is TCA0 WO0 on PD0 read back through EVSYS - no wires", crlf);
     register_tests();

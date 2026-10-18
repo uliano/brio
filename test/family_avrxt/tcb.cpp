@@ -37,6 +37,7 @@ void tcb_common() {
     Tcb<2>::count_on(EventChannel<1>{});
     (void)Pwm8<Tcb<2>>::init();
     Pwm8<Tcb<2>>::duty(255);        // the >= max path drives the pin from PORT
+    Pwm8<Tcb<2>>::duty(64);         // CCMPH alone on the AVR EA, the word elsewhere
     EvTcbCaptIn<2>::listen(EventChannel<0>{});
     (void)EvTcbCapt<2>::code;
     // the freshly filled EVSYS vocabulary instantiates everywhere

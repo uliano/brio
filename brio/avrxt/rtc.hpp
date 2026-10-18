@@ -57,7 +57,8 @@
  *    fire on exactly the conditions that raise the flags. On the AVR EA
  *    the PIT's dividers reach the event system through two slots
  *    (EvPitDiv<div, slot>, whose route selects the slot's divider in
- *    PITEVGENCTRLA); Pit::event_selection() reads a slot back.
+ *    PITEVGENCTRLA); Pit::event_divider<slot>() selects, stops or reads
+ *    a slot from the RTC's side.
  */
 
 #pragma once
@@ -369,6 +370,40 @@ constexpr uint16_t pit_cycles(PitPeriod p) {
     return code == 0 ? 0 : static_cast<uint16_t>(4u << (code - 1));
 }
 
+#if defined(RTC_EVGEN0SEL_gm)
+/// What one of the AVR EA's two PIT event slots carries (RTC.
+/// PITEVGENCTRLA, DS40002443A 24.13.17): nothing, or CLK_RTC divided by
+/// 4..32768 - a square wave off the prescaler chain, independent of the
+/// counter's PRESCALER like the PIT's PERIOD. The header's codes (the
+/// slot-0 field's values; the slot-1 field takes the same).
+enum class PitEventDiv : uint8_t {
+    off = RTC_EVGEN0SEL_OFF_gv,
+    div4 = RTC_EVGEN0SEL_DIV4_gv,
+    div8 = RTC_EVGEN0SEL_DIV8_gv,
+    div16 = RTC_EVGEN0SEL_DIV16_gv,
+    div32 = RTC_EVGEN0SEL_DIV32_gv,
+    div64 = RTC_EVGEN0SEL_DIV64_gv,
+    div128 = RTC_EVGEN0SEL_DIV128_gv,
+    div256 = RTC_EVGEN0SEL_DIV256_gv,
+    div512 = RTC_EVGEN0SEL_DIV512_gv,
+    div1024 = RTC_EVGEN0SEL_DIV1024_gv,
+    div2048 = RTC_EVGEN0SEL_DIV2048_gv,
+    div4096 = RTC_EVGEN0SEL_DIV4096_gv,
+    div8192 = RTC_EVGEN0SEL_DIV8192_gv,
+    div16384 = RTC_EVGEN0SEL_DIV16384_gv,
+    div32768 = RTC_EVGEN0SEL_DIV32768_gv,
+};
+static_assert(static_cast<uint8_t>(RTC_EVGEN1SEL_DIV32768_gc) ==
+                  static_cast<uint8_t>(RTC_EVGEN0SEL_DIV32768_gv << RTC_EVGEN1SEL_gp),
+              "PitEventDiv: the two slots' fields take the same codes");
+
+/// CLK_RTC cycles a PitEventDiv stands for (0 for `off`).
+constexpr uint16_t pit_event_cycles(PitEventDiv d) {
+    const uint8_t code = static_cast<uint8_t>(d);
+    return code == 0 ? 0 : static_cast<uint16_t>(2u << code);
+}
+#endif
+
 /// The PIT: one interrupt every PERIOD cycles of CLK_RTC, alive in
 /// every sleep mode. Its own control, status, interrupt and debug
 /// registers - enabling it does not disturb the counter, and vice
@@ -432,13 +467,30 @@ public:
     static bool debug_run() { return (RTC.PITDBGCTRL & RTC_DBGRUN_bm) != 0; }
 
 #if defined(RTC_EVGEN0SEL_gm)
-    /// The divider an event slot carries, as PITEVGENCTRLA codes it (0 =
-    /// off, n = CLK_RTC / 2^(n+1), DS40002443A 24.13.17). The slots are
-    /// selected by the event routes (EvPitDiv<div, slot>, evsys.hpp).
-    static uint8_t event_selection(uint8_t slot) {
-        const uint8_t v = RTC.PITEVGENCTRLA;
-        return static_cast<uint8_t>(slot == 0 ? (v & RTC_EVGEN0SEL_gm) >> RTC_EVGEN0SEL_gp
-                                              : (v & RTC_EVGEN1SEL_gm) >> RTC_EVGEN1SEL_gp);
+    /// The divider PIT event slot `slot` carries (RTC.PITEVGENCTRLA, the
+    /// AVR EA's, DS40002443A 24.13.17): a read-modify-write of the slot's
+    /// nibble, the other slot untouched. The event routes write the same
+    /// field (EvPitDiv<div, slot>::prepare(), evsys.hpp) - this is the
+    /// RTC-side spelling, for a slot the app selects or stops on its own
+    /// (no synchronization is documented for this register). A slot carries
+    /// its divider only while PITEN is set: the counter alone (RTCEN), which
+    /// keeps the shared prescaler running (24.5.2.2), leaves the slots
+    /// still (measured, docs/avrxt/evsys.md).
+    template <uint8_t slot>
+    static void event_divider(PitEventDiv d) {
+        static_assert(slot <= 1, "two PIT event slots: 0 and 1");
+        constexpr uint8_t gp = slot == 0 ? RTC_EVGEN0SEL_gp : RTC_EVGEN1SEL_gp;
+        constexpr uint8_t gm = slot == 0 ? RTC_EVGEN0SEL_gm : RTC_EVGEN1SEL_gm;
+        RTC.PITEVGENCTRLA = static_cast<uint8_t>((RTC.PITEVGENCTRLA & ~gm) |
+                                                 (static_cast<uint8_t>(d) << gp));
+    }
+    /// The divider slot `slot` carries now.
+    template <uint8_t slot>
+    static PitEventDiv event_divider() {
+        static_assert(slot <= 1, "two PIT event slots: 0 and 1");
+        constexpr uint8_t gp = slot == 0 ? RTC_EVGEN0SEL_gp : RTC_EVGEN1SEL_gp;
+        constexpr uint8_t gm = slot == 0 ? RTC_EVGEN0SEL_gm : RTC_EVGEN1SEL_gm;
+        return static_cast<PitEventDiv>((RTC.PITEVGENCTRLA & gm) >> gp);
     }
 #endif
 

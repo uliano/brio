@@ -1,7 +1,10 @@
 /*
  * ccl.hpp
  *
- * The AVR DA/DB configurable custom logic (CCL, DS40002247B ch. 31) in
+ * The configurable custom logic (CCL) of the AVR DA/DB (DS40002247B
+ * ch. 31: six LUTs and three sequencers on 48/64 pins, four and two on
+ * 28/32) and of the AVR EA (DS40002443A ch. 29: four LUTs and two
+ * sequencers on every package, the same IP but for the input menu) in
  * two strata, as docs/avrxt/ccl.md describes:
  *
  *  RESOURCES - Ccl: the block (enable/disable, RUNSTDBY, the three
@@ -26,11 +29,19 @@
  *    write after it is silently ignored, measured); Lut<..>::init(...)
  *    for each; Ccl::enable(). A LUT reconfigured under a running block
  *    is a glitch on all of them, by design of the silicon, not of this
- *    driver;
+ *    driver. The AVR EA has no such erratum: its protection is the LUT's
+ *    own, the even LUT's for a sequencer (DS40002443A 29.3.1.1), and on
+ *    its rev B1 one LUT re-initialised under a running block
+ *    (Lut<n>::init() alone, which disables and re-enables that LUT only)
+ *    takes its new table at once with the other LUTs undisturbed
+ *    (measured, docs/avrxt/ccl.md) - there the block's disable is a
+ *    choice, not the protocol;
  *  - inputs: the same menu for the three inputs, but the peripheral
  *    entries select the INSTANCE by input index - input 0/1/2 of a LUT
- *    sees AC0/1/2, TCB0/1/2 WO, TCA WO0/1/2, USART0/1/2 TXD, ZCD0/1/2,
- *    SPI0 MOSI/MOSI/SCK, TCD0 WOA/WOB/WOC; `in`/`pin` is the LUT's own
+ *    sees AC0/1/2 (AC0/1/1 on the AVR EA, which has no AC2), TCB0/1/2
+ *    WO, TCA WO0/1/2, USART0/1/2 TXD, ZCD0/1/2, SPI0 MOSI/MOSI/SCK,
+ *    TCD0 WOA/WOB/WOC (no ZCD and no TCD on the AVR EA: those inputs are
+ *    not named there); `in`/`pin` is the LUT's own
  *    pin IN0/1/2 (pins 0/1/2 of its port), `link` is LUT[n+1]'s output
  *    (LUT0 into the last), `feedback` the pair's sequencer output,
  *    `event_a`/`event_b` the two EVSYS users (raw, no detection);
@@ -71,9 +82,10 @@ namespace brio {
 /// peripheral entries mean depends on WHICH input (0/1/2) they sit on.
 /// The codes are the device header's INSEL0 enumerators, and the static
 /// assertions below check that the same code means the same kind on
-/// INSEL1 and INSEL2. An input whose peripheral this part has not got
-/// is not named at all: `tca1` without TCA1 (the 28/32-pin parts),
-/// `zcd` without a ZCD, `tcd0` without the TCD.
+/// INSEL1 and INSEL2 (on the AVR EA, whose AC code means AC1 on input 2,
+/// lut_input_ac() says which comparator). An input whose peripheral this
+/// part has not got is not named at all: `tca1` without TCA1 (the
+/// 28/32-pin AVR DA/DB), `zcd` without a ZCD, `tcd0` without the TCD.
 enum class LutInput : uint8_t {
     mask = CCL_INSEL0_MASK_gc,             ///< tied low
     feedback = CCL_INSEL0_FEEDBACK_gc,     ///< the pair's sequencer output
@@ -81,12 +93,12 @@ enum class LutInput : uint8_t {
     event_a = CCL_INSEL0_EVENTA_gc,        ///< EVSYS user LUTnA
     event_b = CCL_INSEL0_EVENTB_gc,        ///< EVSYS user LUTnB
     pin = CCL_INSEL0_IN0_gc,               ///< the LUT's own pin INx
-    ac = CCL_INSEL0_AC0_gc,                ///< ACx OUT (x = input index)
+    ac = CCL_INSEL0_AC0_gc,                ///< ACx OUT (x = input index; lut_input_ac())
 #ifdef ZCD0
     zcd = CCL_INSEL0_ZCD0_gc,              ///< ZCDx OUT
 #endif
     usart_txd = CCL_INSEL0_USART0_gc,      ///< USARTx TXD (host modes)
-    spi0 = CCL_INSEL0_SPI0_gc,             ///< SPI0 MOSI (inputs 0/1), SCK (input 2); host mode
+    spi0 = CCL_INSEL0_SPI0_gc,             ///< SPI0 MOSI (inputs 0/1), SCK (input 2); host mode (ccl.md)
     tca0 = CCL_INSEL0_TCA0_gc,             ///< TCA0 WOx
 #ifdef TCA1
     tca1 = CCL_INSEL0_TCA1_gc,             ///< TCA1 WOx
@@ -116,13 +128,16 @@ static_assert(ccl_insel_same(CCL_INSEL0_MASK_gc, CCL_INSEL1_MASK_gc, CCL_INSEL2_
               "LutInput: a kind's INSEL code differs between the three inputs on this part");
 static_assert(static_cast<uint8_t>(CCL_INSEL1_AC1_gc) == static_cast<uint8_t>(CCL_INSEL0_AC0_gc << 4),
               "LutInput::ac: the AC code differs between inputs 0 and 1 on this part");
-#ifdef AC2
-static_assert(static_cast<uint8_t>(CCL_INSEL2_AC2_gc) == static_cast<uint8_t>(CCL_INSEL0_AC0_gc),
+static_assert(ccl_insel2_ac_code == static_cast<uint8_t>(CCL_INSEL0_AC0_gc),
               "LutInput::ac: the AC code differs between inputs 0 and 2 on this part");
-#else
-static_assert(false, "LutInput::ac means ACx on input x, and this part has no AC2: what its "
-                     "INSEL2 AC code selects is not this driver's vocabulary");
-#endif
+
+/// The comparator `LutInput::ac` selects on LUT input `input` (0..2):
+/// ACx on input x, except where the part has no AC2 - the AVR EA, whose
+/// input 2 sees AC1 under the same code (the device tables' probe of the
+/// header's INSEL2 enumerators, DS40002443A 29.2.2.1).
+constexpr uint8_t lut_input_ac(uint8_t input) {
+    return input < 2 ? input : ccl_insel2_ac_instance;
+}
 #ifdef ZCD1
 static_assert(static_cast<uint8_t>(CCL_INSEL1_ZCD1_gc) == static_cast<uint8_t>(CCL_INSEL0_ZCD0_gc << 4),
               "LutInput::zcd: the ZCD code differs between inputs 0 and 1 on this part");
@@ -216,7 +231,7 @@ struct Ccl {
     template <uint8_t pair>
     static void sequencer(Sequencer s) {
         static_assert(2 * pair + 1 < lut_count,
-                      "no such LUT pair on this package (pair 2 = LUT4/5, 48/64-pin parts)");
+                      "no such LUT pair on this package (pair 2 = LUT4/5, the 48/64-pin AVR DA/DB only)");
         (&CCL.LUT0CTRLA)[8 * pair] &= static_cast<uint8_t>(~CCL_ENABLE_bm);   // the even LUT off
         (&CCL.SEQCTRL0)[pair] = static_cast<uint8_t>(s);
     }
@@ -241,7 +256,7 @@ constexpr bool lut_config_valid(uint8_t n, const LutConfig& c) {
 
 template <uint8_t n>
 class Lut {
-    static_assert(n < lut_count, "no such CCL LUT on this package (LUT4/5 on 48/64-pin parts)");
+    static_assert(n < lut_count, "no such CCL LUT on this package (LUT4/5 on the 48/64-pin AVR DA/DB only)");
 
 public:
     Lut() = delete;
@@ -274,7 +289,8 @@ public:
         init(cfg);
     }
 
-    /// Run-time form. Call with the block DISABLED (Ccl::disable()):
+    /// Run-time form. Call with the block DISABLED (Ccl::disable(); on the
+    /// AVR EA a running block takes it too, the file header):
     /// writes inputs, truth, route, output pin, interrupt sense, then
     /// CTRLA with ENABLE = 1 (the enable-protected fields land together
     /// with the enable). False, touching nothing, for an invalid config.
@@ -370,7 +386,7 @@ template <uint8_t pair>
 struct ToggleFlipFlop {
     ToggleFlipFlop() = delete;
     static_assert(2 * pair + 1 < lut_count,
-                  "no such LUT pair on this package (pair 2 = LUT4/5, 48/64-pin parts)");
+                  "no such LUT pair on this package (pair 2 = LUT4/5, the 48/64-pin AVR DA/DB only)");
 
     using Even = Lut<2 * pair>;
     using Odd = Lut<2 * pair + 1>;

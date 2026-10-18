@@ -120,3 +120,21 @@ void rtc_ticker() {
     BasicTicker<16>::init();
     BasicTicker<512>::init(RtcSource::xosc32k);
 }
+
+#if defined(__AVR_AVR64EA28__) || defined(__AVR_AVR64EA32__) || defined(__AVR_AVR64EA48__)
+// The AVR EA's PIT event slots from the RTC's side (RTC.PITEVGENCTRLA,
+// DS40002443A 24.13.17): two slots, any divider 4..32768, and the event
+// routes writing the same field.
+static_assert(pit_event_cycles(PitEventDiv::div4) == 4);
+static_assert(pit_event_cycles(PitEventDiv::div32768) == 32768);
+static_assert(pit_event_cycles(PitEventDiv::off) == 0);
+static_assert(static_cast<uint8_t>(PitEventDiv::div64) == EvPitDiv<64, 1>::log2_div - 1u);
+void rtc_pit_slots() {
+    Pit::event_divider<0>(PitEventDiv::div4);
+    Pit::event_divider<1>(PitEventDiv::div32768);
+    (void)Pit::event_divider<0>();
+    Pit::event_divider<1>(PitEventDiv::off);
+    EventChannel<5>::source(EvPitDiv<16384, 1>{});
+    EvPitDiv<16384, 1>::release();
+}
+#endif

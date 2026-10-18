@@ -1,8 +1,10 @@
 /*
  * tca.hpp
  *
- * The AVR DA/DB 16-bit timer/counter type A (TCA, DS40002247B ch. 23)
- * in two strata, as docs/avrxt/tca.md describes:
+ * The 16-bit timer/counter type A (TCA) of the AVR DA/DB (DS40002247B
+ * ch. 23) and of the AVR EA (DS40002443A ch. 22, the same IP word for
+ * word; its route table differs) in two strata, as docs/avrxt/tca.md
+ * describes:
  *
  *  RESOURCE - Tca<n>: the typed view of one instance in NORMAL mode
  *  (16-bit counter, PER, three buffered compare channels, the waveform
@@ -46,7 +48,9 @@
  *    / (2 N (CMP0 + 1)), at most CLK_PER / 2;
  *  - RESTART (command or event) zeroes CNT and all WO; it also resets
  *    DIR to up in NORMAL/FRQ on the DB's A4/A5 (2.12.1) and on every DA
- *    revision (2.11.2); RESET only when disabled;
+ *    revision (2.11.2), and keeps it on the AVR EA (22.3.3.5 names only
+ *    the counter and the outputs, no erratum; measured on rev B1,
+ *    docs/avrxt/tca.md); RESET only when disabled;
  *    switching normal <-> split wants disable + RESET;
  *  - event input A: count on positive/any edge, count the clock while
  *    high, or direction from the level (up when low); input B: restart
@@ -55,13 +59,15 @@
  *  - routes (PORTMUX.TCAROUTEA, the whole group moves): TCA0 -> PORTA/
  *    B/C/D/E/F (and PORTG on 64-pin) pins 0..5 (PORTE only PE0..3 on
  *    48 pins); TCA1 -> PORTB or PORTG (64-pin) pins 0..5, or the
- *    three-channel PORTC/PORTE (64-pin) with WO0..2 on pins 4..6; the
- *    device header defines exactly this package's codes and
- *    tca_route_code() mirrors it - less TCA1's PORTE and PORTG on a DA,
- *    whose header defines them but whose silicon does not route them on
- *    any revision (DS80000882C 2.11.1, no workaround: refused here). WOn
- *    drives the pin only if CMPnEN and the pin is an output (PORT INVEN
- *    inverts it).
+ *    three-channel PORTC/PORTE (64-pin) with WO0..2 on pins 4..6; on
+ *    the AVR EA (DS40002443A 17.3.7) TCA1 is on every package, with
+ *    PORTB (48-pin), and three-channel PORTC (48-pin), PORTA and PORTD
+ *    (every package), WO0..2 on pins 4..6. The device header defines
+ *    exactly this package's codes and tca_route() mirrors it - less
+ *    TCA1's PORTE and PORTG on a DA, whose header defines them but whose
+ *    silicon does not route them on any revision (DS80000882C 2.11.1,
+ *    no workaround: refused here). WOn drives the pin only if CMPnEN and
+ *    the pin is an output (PORT INVEN inverts it).
  */
 
 #pragma once
@@ -150,15 +156,18 @@ struct TcaConfig {
     bool debug_run = false;
 };
 
-/// PORTMUX code for "TCA n to port p", or 0xFF when that route does
-/// not exist on THIS package - the device header is the authority
-/// (it defines exactly the codes each package routes: e.g. TCA0 ->
-/// PORTG and TCA1 -> PORTE/PORTG on 64-pin parts only, no PORTB/
-/// PORTE codes at all on 28/32-pin). TCA1 on PORTC and PORTE are
-/// three-channel routes (WO0..2 on pins 4..6). The one exception to the
-/// header: a DA (the die, device_tables.hpp's erratum_da_tca1_alt23)
-/// gets 0xFF for TCA1's PORTE and PORTG, the ALT2/ALT3 that DS80000882C
-/// 2.11.1 says do not work.
+/// PORTMUX code for "TCA n to port p", or route_absent (0xFF) when that
+/// route does not exist on THIS package - the device header is the
+/// authority (it defines exactly the codes each package routes: TCA0 ->
+/// PORTG and TCA1 -> PORTE/PORTG on 64-pin parts only, no PORTB/PORTE
+/// codes at all on 28/32-pin parts, TCA1 -> PORTA/PORTD on the AVR EA
+/// alone). Two exceptions to the header: a DA (the die, device_tables.
+/// hpp's erratum_da_tca1_alt23) gets no route for TCA1's PORTE and
+/// PORTG, the ALT2/ALT3 that DS80000882C 2.11.1 says do not work; and
+/// the 28/32-pin AVR EA gets none for TCA1's PORTB, whose code its header
+/// keeps as "not connected to any pins" (the reset value: TCA1 there
+/// drives no pin until routed). This and tca_wo_pin() are the route
+/// table; tca_route() reads it whole.
 constexpr uint8_t tca_route_code(uint8_t n, char p) {
     // The gates are the PORT instance macros (the route codes are
     // enumerators, not macros): a package routes a TCA to exactly the
@@ -183,11 +192,17 @@ constexpr uint8_t tca_route_code(uint8_t n, char p) {
         }
     }
 #ifdef TCA1
+    // The AVR EA's PORTA and PORTD routes (DS40002443A 17.3.7), on every
+    // package of it; the device tables' codes, absent on the AVR DA/DB.
+    if constexpr (tca1_route_porta != route_absent) {
+        if (p == 'A') return tca1_route_porta;
+    }
+    if constexpr (tca1_route_portd != route_absent) {
+        if (p == 'D') return tca1_route_portd;
+    }
     // TCA1's PORTB and PORTC routes exist where PORTB does (the 48/64-pin
     // parts; on the 28/32-pin AVR EA, TCA1's PORTB code is "not
-    // connected" and PORTC's is absent). The AVR EA's three-channel PORTA
-    // and PORTD routes (DS40002443A 17.3.7) are not in this table yet:
-    // refused like any other absent route (docs/avrxt/tca.md).
+    // connected" and PORTC's is absent).
     switch (p) {
 #ifdef PORTB
         case 'B': return PORTMUX_TCA1_PORTB_gc;
@@ -205,10 +220,35 @@ constexpr uint8_t tca_route_code(uint8_t n, char p) {
 #endif
 }
 
-/// The pin number of WO wo on that route: pin wo, except TCA1's
-/// three-channel routes (PORTC, PORTE) where WO0..2 sit on pins 4..6.
+/// The pin number of WO wo on TCA n's route to port p: pin wo, except
+/// on TCA1's three-channel routes, WO0..2 on pins 4..6 - PORTC and PORTE
+/// on the AVR DA/DB, PORTA, PORTC and PORTD on the AVR EA (DS40002443A
+/// 17.3.7). Every other route carries six channels on pins 0..5. The
+/// route's SHAPE is this one expression (written out here rather than
+/// through a helper: it sits on Tca::init's run-time path, where a call
+/// layer changes what the compiler inlines); meaningful for a route that
+/// exists (tca_route_code).
 constexpr uint8_t tca_wo_pin(uint8_t n, char p, uint8_t wo) {
-    return (n == 1 && (p == 'C' || p == 'E')) ? static_cast<uint8_t>(4 + wo) : wo;
+    return (n == 1 && (p == 'C' || p == 'E' ||
+                       (tca1_route_porta != route_absent && (p == 'A' || p == 'D'))))
+               ? static_cast<uint8_t>(4 + wo) : wo;
+}
+
+/// One TCA route on THIS package, read whole from the table above
+/// (tca_route_code, tca_wo_pin): its code (route_absent where the package
+/// has not got it), the pin WO0 sits on, and how many waveform outputs it
+/// carries (0 for an absent route) - what the tasks' compile-time checks
+/// ask.
+struct TcaRoute {
+    uint8_t code = route_absent;
+    uint8_t first_pin = 0;
+    uint8_t channels = 0;
+};
+constexpr TcaRoute tca_route(uint8_t n, char p) {
+    const uint8_t code = tca_route_code(n, p);
+    if (code == route_absent) return {};
+    const uint8_t first = tca_wo_pin(n, p, 0);
+    return {code, first, static_cast<uint8_t>(first == 0 ? 6 : 3)};
 }
 
 /// The port pin mask of a WO mask (bits 0..5) on that route.
@@ -239,7 +279,7 @@ struct TcaFlags {
 template <uint8_t n>
 class Tca {
     static_assert(n < tca_count, "no such TCA on this package (AVR DA/DB: TCA1 on 48/64-pin "
-                                 "parts only)");
+                                 "parts only; every AVR EA has it)");
 
 public:
     Tca() = delete;
@@ -374,7 +414,8 @@ public:
 
     // ---- commands, direction ----------------------------------------------
 
-    /// CNT = 0, all WO low, the period restarts (2.12.1: DIR back to up on A4/A5).
+    /// CNT = 0, all WO low, the period restarts (2.12.1: DIR back to up on
+    /// the DB's A4/A5 and every DA; kept on the AVR EA).
     static void restart() { single().CTRLESET = TCA_SINGLE_CMD_RESTART_gc; }
     /// Force the buffer copy now (ignores LUPD).
     static void update() { single().CTRLESET = TCA_SINGLE_CMD_UPDATE_gc; }
@@ -541,11 +582,11 @@ constexpr uint64_t tca_period_ticks(uint32_t clk_per_hz, uint32_t hz) {
 template <uint8_t n, char PortLetter>
 class TcaPwm {
     using R = Tca<n>;
-    static_assert(tca_route_code(n, PortLetter) != 0xFF
-                      && !(n == 1 && (PortLetter == 'C' || PortLetter == 'E')),
+    static_assert(tca_route(n, PortLetter).channels == 6,
                   "TcaPwm needs a six-channel route: any route of this package except "
-                  "TCA1 -> PORTC/PORTE (three channels on pins 4..6). Caveat: TCA0 -> "
-                  "PORTE on 48-pin parts has only PE0..PE3 bonded (WO4/5 land nowhere)");
+                  "TCA1's three-channel ones (PORTC/PORTE on the AVR DA/DB, PORTA/PORTC/"
+                  "PORTD on the AVR EA: WO0..2 on pins 4..6). Caveat: TCA0 -> PORTE on "
+                  "48-pin parts has only PE0..PE3 bonded (WO4/5 land nowhere)");
 
 public:
     TcaPwm() = delete;
@@ -674,8 +715,8 @@ public:
 /// waveform and drive the pin from PORT, like TcaPwm. Only channels
 /// in init's `outputs` mask have their pins driven. Ratiometric -
 /// NOT a ClockUser: the duty survives a clock change, the frequency
-/// follows CLK_PER. Works on the three-channel TCA1 routes too
-/// (WO0..2 on pins 4..6).
+/// follows CLK_PER. Works on TCA1's three-channel routes too (WO0..2
+/// on pins 4..6).
 template <uint8_t n, char PortLetter, uint16_t steps = 0xFFFF>
 class TcaPwmCentered {
     using R = Tca<n>;

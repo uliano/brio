@@ -2,7 +2,9 @@
 
 Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B (RTC
 chapter 26), errata DS80000915F and, for the DA parts, DS80000882C -
-neither lists an RTC item; the one that touches this peripheral is
+neither lists an RTC item; for the AVR EA, AVR64EA28/32/48 data sheet
+DS40002443A (RTC chapter 24, the same chapter but for one register,
+PITEVGENCTRLA, 24.13.17) and errata DS80001048D (no RTC item); the one that touches this peripheral is
 CLKCTRL 2.5.2 (DB rev. A4), where `RUNSTDBY` in `XOSC32KCTRLA` fails
 to hold an external 32 kHz source alive through sleep, so a
 standby-running RTC on the crystal needs another user of that clock.
@@ -76,7 +78,12 @@ Facts that matter to code:
   conditions that raise the flags; the PIT's divided clocks
   (PIT_DIV64..DIV8192) are free-running levels off the same chain. Both
   families live in [evsys.md](evsys.md) as `EvRtcOvf` / `EvRtcCmp` /
-  `EvPitDiv<n>`.
+  `EvPitDiv<n>`. On the AVR EA the PIT's dividers reach the event system
+  through two SLOTS (PITEVGENCTRLA, 24.13.17): each carries OFF or
+  CLK_RTC / 4 .. / 32768, chosen by the event route
+  (`EvPitDiv<div, slot>`) or from the RTC's side
+  (`Pit::event_divider<slot>`); a slot carries its divider only while
+  PITEN is set (measured below).
 - The peripheral is identical on every DA/DB package: one instance, the
   same registers and the same four clock sources everywhere - nothing
   to gate.
@@ -92,7 +99,8 @@ Facts that matter to code:
 | `rtc_correction_valid()` | the legality rule of 26.6, shared by the config and `calibrate()` |
 | `Rtc` | the counter: `init<cfg>()` / `init(cfg)`, `enable`/`disable`/`enabled`, `count`, `period`, `compare` (each a getter and a busy-waiting setter), `prescaler`, `tick_hz`, `calibrate`/`calibration_ppm`/`correcting`, `run_standby`, `debug_run`, the flags `ovf_flag`/`cmp_flag`/`clear_ovf`/`clear_cmp`, the enables `enable_ovf_interrupt`/`enable_cmp_interrupt`, the ISR body `take_flags` (OVF and CMP share `RTC_CNT_vect`), the synchronization state `ctrla_busy`/`count_busy`/`period_busy`/`compare_busy`/`sync`, and the event types `OvfEvent`/`CmpEvent` |
 | `PitPeriod`, `pit_cycles()` | OFF, CYC4..CYC32768 and the CLK_RTC cycles each stands for |
-| `Pit` | the periodic timer: `init(period, interrupt)`, `period`, `enable`/`disable`/`enabled`, `tick_hz`, `enable_interrupt`/`interrupt_enabled`, `flag`/`clear_flag`, the ISR body `take_flag` (`RTC_PIT_vect`), `ctrl_busy`, `debug_run` |
+| `Pit` | the periodic timer: `init(period, interrupt)`, `period`, `enable`/`disable`/`enabled`, `tick_hz`, `enable_interrupt`/`interrupt_enabled`, `flag`/`clear_flag`, the ISR body `take_flag` (`RTC_PIT_vect`), `ctrl_busy`, `debug_run`; on the AVR EA `event_divider<slot>(PitEventDiv)` (a read-modify-write of the slot's nibble) and `event_divider<slot>()` (read back) |
+| `PitEventDiv`, `pit_event_cycles()` | the AVR EA's slot values: `off`, `div4`..`div32768` (the header's codes) and the CLK_RTC cycles each stands for |
 | `BasicTicker<tps>`, `Ticker` | the kernel's timebase over the PIT: `init()` (or `init(source)`), `pit()` (ISR body), `ticks()`, `millis()`, `secs()`, `now(TimeStamp&)`, `pause()`/`resume()`; `ticks_per_second` |
 | kernel side | `AvrPlatform::now()` = ticks; `ticks_from_ms<P>()`, `TimeEvent` ([kernel.md](../design/kernel.md)) |
 
@@ -150,6 +158,17 @@ ADC, a LED that blinks with the CPU asleep.
 
 ```cpp
 brio::EventChannel<1>::source(brio::EvPitDiv<64>{});  // 512 Hz from a 32.768 kHz CLK_RTC
+```
+
+On the AVR EA a slot can also be re-tuned from the RTC's side under a
+route made once - the channel names the slot, not the divider - and
+it carries nothing unless the PIT is enabled:
+
+```cpp
+brio::EventChannel<3>::source(brio::EvPitDiv<4, 1>{});   // slot 1, CLK_RTC / 4
+brio::Pit::init(brio::PitPeriod::cyc1024, false);         // PITEN: the slots run
+brio::Pit::event_divider<1>(brio::PitEventDiv::div2048); // the same channel at 16 Hz
+brio::Pit::event_divider<1>(brio::PitEventDiv::off);     // and still
 ```
 
 ## Bench findings
@@ -231,6 +250,43 @@ with a 32.768 kHz crystal builds):
   right after the stop and gets OSC32K, and letter 8 re-initialises its
   Ticker with no source named straight after stopping the crystal.
 
+On the **AVR64EA48** (REVID 0x21, rev B1, 5 V, the board's 20 MHz
+quartz as CLK_PER; `test_avr_rtc`, 91 verdicts, letters 1-8 and p ten
+runs of ten; letter 9 owes the board's 32.768 kHz crystal, which does
+not oscillate - [../boards/avr64ea48.md](../boards/avr64ea48.md)):
+
+- **This die's OSC32K runs about 1.3 % slow**: a counter second is
+  20.25..20.27 M quartz ticks against a nominal 20 M (+12600..+13300
+  ppm of interval), inside the data sheet's +-10 % (DS40002443A 35.10.1;
+  under 1 % only at 25 C and 3.0 V). It **wanders more than the DB's**:
+  over twenty-four runs one second against the mean of the next eight
+  differs by up to 391 ppm, two seconds a moment apart through
+  different prescalers by up to 663, and a second from OSC1K against one
+  from OSC32K by up to 345, where the AVR128DB48's stayed within 300 -
+  the three verdicts' bound is the die's own (800 ppm on the EA, 500
+  and 333 on the DA/DB). Its cycle-to-cycle jitter shows in a single
+  period of four cycles (one DIV4 slot period read 0.24 % short once in
+  ten runs; sixteen consecutive ones spread over 5..6 ticks of 2473),
+  hence letter p's mean of sixteen.
+- The prescaler divides exactly, the compare lands at CMP + 1 (100 for
+  CMP = 99 every run, 8190..8193 for 8191 - the conversion's wander),
+  OSC1K is the same oscillator divided by 32, the PIT does not see the
+  counter's PRESCALER (PIT_DIV64 39552..39596 ticks at DIV1, 39559..
+  39593 at DIV32) and 1024 PIT ticks fall in every 32768-cycle counter
+  period - all as on the DB.
+- The trim works as on the DB, granularly: +127 ppm measured +66..+189,
+  -127 measured -67..-166, the signs spanning 133..355 ppm.
+- **The busy flags live 2.8 CLK_RTC periods here too** (DB/DA 2.8): CNTBUSY
+  1722..1824, PERBUSY 1698..1752, CMPBUSY 1698..1806, CTRLABUSY
+  1688..1796 and the PIT's CTRLBUSY 1688..1742 quartz ticks, one CLK_RTC
+  period being 610 nominal.
+- The first PIT interrupt after an enable, CYC32 (19520 ticks): with
+  the prescaler stopped 12283..14105 ticks, mean 13990; free-running
+  4103..13440, mean 6567 - the DB's shape, at this clock.
+- **The PIT's event slots** (letter p): every divider DIV4..DIV32768 on
+  each slot, both slots at once, and the slots following PITEN rather
+  than the prescaler - [evsys.md](evsys.md)'s findings.
+
 ## Not covered yet
 
 Every register of chapter 26 - CTRLA, STATUS, INTCTRL, INTFLAGS,
@@ -239,14 +295,15 @@ PITINTFLAGS, PITDBGCTRL - is exposed by a verb, and the four clock
 sources, sixteen prescaler settings and fifteen PIT periods are the
 enums' full range. TEMP is the compiler's, not the driver's. On the
 AVR EA (DS40002443A ch. 24, the same chapter) the one register more,
-PITEVGENCTRLA, is the event routes' (`EvPitDiv<div, slot>`,
-[evsys.md](evsys.md)) and `Pit::event_selection(slot)` reads it back.
+PITEVGENCTRLA, is `Pit::event_divider<slot>`'s and the event routes'
+(`EvPitDiv<div, slot>`, [evsys.md](evsys.md)).
 
 Implemented but not bench-verified:
 
-- The whole driver on the AVR EA: it compiles on the three packages,
-  and the bench board's 32.768 kHz crystal does not run (its page) - the
-  Ticker there runs from OSC32K; the PIT event slots are evsys.md's.
+- XOSC32K as CLK_RTC on the AVR EA (letter 9): the bench board's 32.768
+  kHz crystal does not oscillate (its page) - the letter runs and fails
+  at its first verdict there, and the Ticker runs from OSC32K; a board
+  whose crystal starts runs it as it stands.
 
 - `RtcSource::extclk` and an external 32 kHz CLOCK on XTAL32K1: neither
   board feeds a clock to XTAL32K1, and the EXTCLK pin carries 24 MHz on
