@@ -90,7 +90,13 @@
 // TCB2's ALT1 = PB4 is tested), RUNSTDBY (no sleep in this suite:
 // test_avr_sleep o), AC response time (the DAC's slew dominates), TCD.
 
+// THE AVR64EA48 builds the suite as two images, held to the ATmega4809's
+// 48 KB (the groups line below; docs/avrxt/README.md, "The group axis"):
+// the TCA and TCB letters in one, the CCL, AC and event-system letters
+// with the EA's own x in the other; the 128 KB DA and DB build one.
+//
 // build: boards = db48,da48,ea48
+// build: groups = 123456789norsdt,cmliwekx
 // build: monitor_speed = 460800
 
 #include <avr/interrupt.h>
@@ -110,6 +116,7 @@
 #include "avrxt/usart.hpp"
 #include "avrxt/userrow.hpp"
 #include "util/print.hpp"
+#include "util/testbench.hpp"
 
 #include "avr_board.hpp"
 
@@ -199,13 +206,11 @@ void clear_captures() {
     sei();
 }
 
-// ---- tiny test harness --------------------------------------------------------
-uint8_t passed = 0, failed = 0;
+// ---- the bench ---------------------------------------------------------------
+// 'a' runs every letter this image carries (the suite's all-key).
+TestBench<Serial> bench('a');
 
-void verdict(const char* name, bool ok) {
-    if (ok) ++passed; else ++failed;
-    print(serial, "  ", ok ? "PASS" : "FAIL", "  ", name, crlf);
-}
+void verdict(const char* name, bool ok) { bench.verdict(name, ok); }
 bool near(int32_t a, int32_t b, int32_t tol) {
     const int32_t d = a > b ? a - b : b - a;
     return d <= tol;
@@ -2213,35 +2218,37 @@ void tx_ea() {
 }
 #endif
 
-using TestFn = void (*)();
-struct Test { char key; TestFn fn; };
-constexpr Test tests[] = {
-    {'1', t1_frequency}, {'2', t2_pwm16}, {'3', t3_heartbeat}, {'4', t4_one_shot},
-    {'5', t5_pwm8}, {'6', t6_pulse_counter}, {'7', t7_cascade}, {'8', t8_tick_timeout},
-    {'9', t9_event_counter}, {'c', tc_ccl}, {'m', tm_comparators},
-    {'n', tn_timeout_exact}, {'o', to_meter_variants}, {'r', tr_rebase_live},
-    {'s', ts_tca_split}, {'d', td_pwm_centered}, {'l', tl_ccl_logic}, {'i', ti_ccl_inputs}, {'w', tw_ac_extras},
-    {'t', tt_tca_modes}, {'e', te_evsys}, {'k', tk_ccl_extras},
+void register_tests() {
+    bench.letter('1', "frequency", t1_frequency);
+    bench.letter('2', "PWM16 duty", t2_pwm16);
+    bench.letter('3', "heartbeat", t3_heartbeat);
+    bench.letter('4', "one-shot", t4_one_shot);
+    bench.letter('5', "Pwm8", t5_pwm8);
+    bench.letter('6', "pulse counter", t6_pulse_counter);
+    bench.letter('7', "32-bit cascade", t7_cascade);
+    bench.letter('8', "tick + timeout", t8_tick_timeout);
+    bench.letter('9', "event counter", t9_event_counter);
+    bench.letter('c', "CCL", tc_ccl);
+    bench.letter('m', "comparators", tm_comparators);
+    bench.letter('n', "timeout duration", tn_timeout_exact);
+    bench.letter('o', "meter variants", to_meter_variants);
+    bench.letter('r', "live rebase", tr_rebase_live);
+    bench.letter('s', "TCA split escape", ts_tca_split);
+    bench.letter('d', "centered PWM", td_pwm_centered);
+    bench.letter('l', "CCL logic", tl_ccl_logic);
+    bench.letter('i', "CCL inputs", ti_ccl_inputs);
+    bench.letter('w', "AC extras", tw_ac_extras);
+    bench.letter('t', "TCA modes", tt_tca_modes);
+    bench.letter('e', "EVSYS generators and positions", te_evsys);
+    bench.letter('k', "CCL extras", tk_ccl_extras);
 #if defined(BRIO_BOARD_ea48)
-    {'x', tx_ea},
+    bench.letter('x', "the AVR EA's own", tx_ea);
 #endif
-};
-
-void run(TestFn fn) {
-    passed = failed = 0;
-    fn();
-    print(serial, "  -> ", passed, " pass, ", failed, " fail", crlf, crlf);
 }
 
 void help() {
-    print(serial, "test_avr_timer: 1 frequency | 2 PWM16 duty | 3 heartbeat | 4 one-shot | 5 Pwm8 | "
-                  "6 pulse counter | 7 32-bit cascade | 8 tick+timeout | 9 event counter | c CCL | m comparators | "
-                  "n timeout duration | o meter variants | r live rebase | s TCA split escape | d centered PWM | l CCL logic | i CCL inputs | w AC extras | "
-                  "t TCA modes | e EVSYS generators | k CCL extras"
-#if defined(BRIO_BOARD_ea48)
-                  " | x the AVR EA's own"
-#endif
-                  " | a all", crlf);
+    print(serial, "test_avr_timer:", crlf);
+    bench.menu();
 }
 
 } // namespace
@@ -2275,23 +2282,16 @@ int main() {
               ", clk=", xtal ? (has_xoschf ? "XTAL" : "EXTCLK") : "OSCHF", " ", mhz,
               " MHz, silicon rev ", hex(SYSCFG.REVID), ")", crlf);
     }
+    register_tests();
     help();
-    print(serial, "> ");
+    bench.prompt();
     for (;;) {
         uint8_t c;
         if (!Serial::read_byte(c)) continue;
         if (c == '\r' || c == '\n') continue;
         print(serial, static_cast<char>(c), crlf);
         if (c == '?') { help(); }
-        else if (c == 'a' || c == 'A') {
-            uint16_t tp = 0, tf = 0;
-            for (const Test& t : tests) { run(t.fn); tp = static_cast<uint16_t>(tp + passed); tf = static_cast<uint16_t>(tf + failed); }
-            print(serial, "ALL: ", tp, " pass, ", tf, " fail", crlf);
-        } else {
-            bool found = false;
-            for (const Test& t : tests) if (t.key == c) { run(t.fn); found = true; }
-            if (!found) print(serial, "? for help", crlf);
-        }
-        print(serial, "> ");
+        else if (!bench.handle(static_cast<char>(c))) { print(serial, "? for help", crlf); }
+        bench.prompt();
     }
 }

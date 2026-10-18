@@ -86,7 +86,14 @@
 // Commands: ? for the menu, z = the single-board half, y = the two-board
 // half.
 
+// Its groups (the line below; docs/avrxt/README.md, "The group axis")
+// are the images a board type of the split tier builds it as, held to
+// the ATmega4809's 48 KB: the single-board letters but t in one, t with
+// k..p in the second, q..w in the third. The 128 KB DA and DB build one
+// image.
+//
 // build: boards = db48,da48
+// build: groups = abcdefghij,tklmnop,qrsuvw
 // build: monitor_speed = 460800
 
 #include <avr/interrupt.h>
@@ -105,6 +112,7 @@
 #include "avrxt/userrow.hpp"
 #include "kernel/active_object.hpp"
 #include "util/print.hpp"
+#include "util/testbench.hpp"
 
 #include "spi_link.hpp"
 
@@ -174,7 +182,8 @@ volatile uint8_t isr_bytes[12];
 volatile uint8_t isr_flag_log[12];
 volatile uint8_t isr_idx = 0;
 
-uint8_t passed = 0, failed = 0;
+/// z runs the single-board letters, y the two-board ones.
+TwoKeyTestBench<Serial, 'y'> bench;
 
 // ---- the held core: a handler timed into a run --------------------------------
 //
@@ -234,14 +243,8 @@ void hold_arm(HoldShape shape, uint16_t offset_us, uint16_t spin_us, uint8_t ski
     if (shape != HoldShape::off && shape != HoldShape::backstop) Ss::sense(PinSense::falling);
 }
 
-void verdict(const char* name, bool ok) {
-    if (ok) ++passed; else ++failed;
-    print(serial, "  ", ok ? "PASS" : "FAIL", "  ", name, crlf);
-}
-void verdict(const char* a, const char* b, bool ok) {
-    if (ok) ++passed; else ++failed;
-    print(serial, "  ", ok ? "PASS" : "FAIL", "  ", a, b, crlf);
-}
+void verdict(const char* name, bool ok) { bench.verdict(name, ok); }
+void verdict(const char* a, const char* b, bool ok) { bench.verdict(a, b, ok); }
 bool near(int32_t a, int32_t b, int32_t tol) {
     const int32_t d = a > b ? a - b : b - a;
     return d <= tol;
@@ -3572,48 +3575,35 @@ void tw_pin_wake() {
 
 // ---- the menu ----------------------------------------------------------------
 
-using TestFn = void (*)();
-struct Test { char key; TestFn fn; };
-constexpr Test tests[] = {
-    {'a', ta_routes}, {'b', tb_rates}, {'c', tc_data}, {'d', td_modes},
-    {'e', te_wrcol}, {'f', tf_buffer}, {'g', tg_demotion}, {'h', th_interrupts},
-    {'i', ti_rebase}, {'j', tj_engine}, {'t', tt_untaken},
-    {'k', tk_bringup}, {'l', tl_matrix}, {'m', tm_rates}, {'n', tn_mismatch},
-    {'o', to_ss_midbyte}, {'p', tp_loss}, {'q', tq_demotion}, {'r', tr_mspi},
-    {'s', ts_rebase}, {'u', tu_back_to_back}, {'v', tv_client}, {'w', tw_pin_wake},
-};
-constexpr char single_board[] = "abcdefghijt";
-constexpr char two_board[] = "klmnopqrsuvw";
-
-void run(TestFn fn) {
-    passed = failed = 0;
-    fn();
-    print(serial, "  -> ", passed, " pass, ", failed, " fail", crlf, crlf);
-}
-
-void run_set(const char* keys) {
-    uint16_t tp = 0, tf = 0;
-    for (const char* k = keys; *k != 0; ++k) {
-        for (const Test& t : tests) {
-            if (t.key != *k) continue;
-            run(t.fn);
-            tp += passed;
-            tf += failed;
-        }
-    }
-    print(serial, "ALL: ", tp, " pass, ", tf, " fail", crlf);
+void register_tests() {
+    bench.letter('a', "routes", ta_routes);
+    bench.letter('b', "bit rates", tb_rates);
+    bench.letter('c', "data path", tc_data);
+    bench.letter('d', "modes", td_modes);
+    bench.letter('e', "write collision", te_wrcol);
+    bench.letter('f', "buffer mode", tf_buffer);
+    bench.letter('g', "host demotion", tg_demotion);
+    bench.letter('h', "isr bodies", th_interrupts);
+    bench.letter('i', "rebase", ti_rebase);
+    bench.letter('j', "engine", tj_engine);
+    bench.letter('t', "the untaken read", tt_untaken);
+    bench.second_letter('k', "bring-up", tk_bringup);
+    bench.second_letter('l', "client matrix", tl_matrix);
+    bench.second_letter('m', "rates and the client ceiling", tm_rates);
+    bench.second_letter('n', "mismatches", tn_mismatch);
+    bench.second_letter('o', "SS mid-byte", to_ss_midbyte);
+    bench.second_letter('p', "undrained client", tp_loss);
+    bench.second_letter('q', "real demotion", tq_demotion);
+    bench.second_letter('r', "Host SPI", tr_mspi);
+    bench.second_letter('s', "rebase", ts_rebase);
+    bench.second_letter('u', "back to back", tu_back_to_back);
+    bench.second_letter('v', "this board as the client", tv_client);
+    bench.second_letter('w', "a pin edge out of STANDBY", tw_pin_wake);
 }
 
 void help() {
-    print(serial, "test_avr_spi: a routes | b bit rates | c data path | d modes | "
-                  "e write collision | f buffer mode | g host demotion | "
-                  "h isr bodies | i rebase | j engine | t the untaken read    -> z = a..j and t",
-          crlf);
-    print(serial, "  two boards: k bring-up | l client matrix | m rates and the client "
-                  "ceiling | n mismatches | o SS mid-byte | p undrained client | "
-                  "q real demotion | r Host SPI | s rebase | u back to back | "
-                  "v this board as the client | w a pin edge out of STANDBY    -> y = k..s, u, "
-                  "v and w", crlf);
+    print(serial, "test_avr_spi: z = the single-board letters, y = the two-board ones", crlf);
+    bench.menu();
     print(serial, "  NO WIRES of its own: PE0..PE3 (SPI0 ALT1) to the peer board's SPI - "
                   "an AVR's PE0..PE3 straight across, or a SAM C21's PA16, PA18, PA19, PA17. "
                   "The peer board runs `spi_peer`, which stays DARK - it drives MISO only for "
@@ -3720,21 +3710,16 @@ int main() {
     print(serial, crlf, "test_avr_spi - SPI test suite (board ", board,
           ", clk=", xtal ? (has_xoschf ? "XTAL" : "EXTCLK") : "OSCHF",
           " 24 MHz, silicon rev ", hex(SYSCFG.REVID), ")", crlf);
+    register_tests();
     help();
-    print(serial, "> ");
+    bench.prompt();
     for (;;) {
         uint8_t c;
         if (!Serial::read_byte(c)) continue;
         if (c == '\r' || c == '\n') continue;
         print(serial, static_cast<char>(c), crlf);
         if (c == '?') { help(); }
-        else if (c == 'z' || c == 'Z') { run_set(single_board); }
-        else if (c == 'y' || c == 'Y') { run_set(two_board); }
-        else {
-            bool found = false;
-            for (const Test& t : tests) if (t.key == c) { run(t.fn); found = true; }
-            if (!found) print(serial, "? for help", crlf);
-        }
-        print(serial, "> ");
+        else if (!bench.handle(static_cast<char>(c))) { print(serial, "? for help", crlf); }
+        bench.prompt();
     }
 }

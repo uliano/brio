@@ -97,7 +97,13 @@
 //   address match | q (the AVR EA) the peer's edges on more pins |
 //   y = all of h..m (and q)
 
+// THE AVR64EA48 builds the suite as two images, held to the ATmega4809's
+// 48 KB (the groups line below; docs/avrxt/README.md, "The group axis"):
+// the single-board set z in one, the two-board set y in the other; the
+// 128 KB DA and DB build one.
+//
 // build: boards = db48,da48,ea48
+// build: groups = abcdefgnop,hijklmq
 // build: monitor_speed = 460800
 
 #include <avr/interrupt.h>
@@ -128,6 +134,7 @@
 #include "avrxt/usart.hpp"
 #include "avrxt/userrow.hpp"
 #include "util/print.hpp"
+#include "util/testbench.hpp"
 
 #include "sleep_link.hpp"
 
@@ -226,13 +233,11 @@ volatile uint16_t twis_stops = 0;     ///< TWI client: STOP conditions
 volatile uint8_t twis_rx[8];
 volatile uint8_t twis_n = 0;
 
-// ---- tiny test harness ------------------------------------------------------------
-uint16_t passed = 0, failed = 0;
+// ---- the bench ---------------------------------------------------------------------
+// z runs the single-board letters, y the two-board ones.
+TwoKeyTestBench<Serial, 'y'> bench;
 
-void verdict(const char* name, bool ok) {
-    if (ok) ++passed; else ++failed;
-    print(serial, "  ", ok ? "PASS" : "FAIL", "  ", name, crlf);
-}
+void verdict(const char* name, bool ok) { bench.verdict(name, ok); }
 bool near_u32(uint32_t a, uint32_t b, uint32_t tol) {
     return (a > b ? a - b : b - a) <= tol;
 }
@@ -3315,76 +3320,41 @@ void tq_peer_pins() {
 
 // ---- the menu -------------------------------------------------------------------------------
 
-using TestFn = void (*)();
-struct Test { char key; TestFn fn; };
+void register_tests() {
+    bench.letter('a', "the register surface", ta_surface);
+    bench.letter('b', "idle through enter()", tb_idle);
+    bench.letter('c', "standby is real", tc_standby);
+    bench.letter('d', "the RUNSTDBY chain", td_chain);
+    bench.letter('e', "a pin wakes from the deep modes", te_pin_wake);
+    bench.letter('f', "power-down stops the rest", tf_power_down);
 #if defined(BRIO_BOARD_ea48)
-constexpr Test tests[] = {
-    {'a', ta_surface}, {'b', tb_idle}, {'c', tc_standby}, {'d', td_chain},
-    {'e', te_pin_wake}, {'f', tf_power_down}, {'g', tg_wake_ticks}, {'n', tn_ccl_wake},
-    {'o', to_runstdby}, {'p', tp_pin_wake},
-    {'h', th_link}, {'i', ti_idle_latency}, {'j', tj_standby_latency},
-    {'k', tk_power_down_latency}, {'l', tl_sfd}, {'m', tm_twi_wake}, {'q', tq_peer_pins},
-};
-constexpr char all_keys[] = "abcdefgnop";     ///< z: the single-board half
-constexpr char two_board_keys[] = "hijklmq"; ///< y: the two-board half
+    bench.letter('g', "the wake-up in 32 kHz ticks", tg_wake_ticks);
 #else
-constexpr Test tests[] = {
-    {'a', ta_surface}, {'b', tb_idle}, {'c', tc_standby}, {'d', td_chain},
-    {'e', te_pin_wake}, {'f', tf_power_down}, {'g', tg_vreg}, {'n', tn_ccl_wake},
-    {'o', to_runstdby},
-    {'h', th_link}, {'i', ti_idle_latency}, {'j', tj_standby_latency},
-    {'k', tk_power_down_latency}, {'l', tl_sfd}, {'m', tm_twi_wake},
-};
-constexpr char all_keys[] = "abcdefgno";      ///< z: the single-board half
-constexpr char two_board_keys[] = "hijklm";  ///< y: the two-board half
+    bench.letter('g', "the voltage regulator", tg_vreg);
 #endif
-
-void run(TestFn fn) {
-    passed = failed = 0;
-    fn();
-    print(serial, "  -> ", passed, " pass, ", failed, " fail", crlf, crlf);
-}
-
-void run_set(const char* keys) {
-    uint16_t tp = 0, tf = 0;
-    for (const char* k = keys; *k != 0; ++k) {
-        for (const Test& t : tests) {
-            if (t.key != *k) continue;
-            run(t.fn);
-            tp = static_cast<uint16_t>(tp + passed);
-            tf = static_cast<uint16_t>(tf + failed);
-        }
-    }
-    print(serial, "ALL: ", tp, " pass, ", tf, " fail", crlf);
-}
-
+    bench.letter('n', "the CCL as a wake-up source", tn_ccl_wake);
 #if defined(BRIO_BOARD_ea48)
-void help() {
-    print(serial, "test_avr_sleep: a the register surface | b idle through enter() | "
-                  "c standby is real | d the RUNSTDBY chain | e a pin wakes from the deep "
-                  "modes | f power-down stops the rest | g the wake-up in 32 kHz ticks | "
-                  "n the CCL as a wake-up source | o RUNSTDBY of TCA and AC | p every "
-                  "self-driven pin wakes from power-down on one edge    -> z = all of those",
-          crlf);
-    print(serial, "  two-board (the peer board = sleep_peer): h the link and the two wires | "
-                  "i the awake baseline and idle | j standby timed from outside | "
-                  "k power-down timed from outside | l start-of-frame | "
-                  "m a TWI address match | q the peer's edges on PE0, PC4, PC6    -> y = all "
-                  "of h..m and q", crlf);
-}
+    bench.letter('o', "RUNSTDBY of TCA and AC", to_runstdby);
+    bench.letter('p', "every self-driven pin wakes from power-down on one edge", tp_pin_wake);
 #else
-void help() {
-    print(serial, "test_avr_sleep: a the register surface | b idle through enter() | "
-                  "c standby is real | d the RUNSTDBY chain | e a pin wakes from the deep "
-                  "modes | f power-down stops the rest | g the voltage regulator | "
-                  "n the CCL as a wake-up source | o RUNSTDBY of TCA, AC, ADC, op amp; "
-                  "the TCD    -> z = all of those", crlf);
-    print(serial, "  two-board (the peer board = sleep_peer): h the link and the two wires | "
-                  "i the awake baseline and idle | j standby timed from outside | "
-                  "k power-down timed from outside | l start-of-frame | "
-                  "m a TWI address match    -> y = all of h..m", crlf);
-}
+    bench.letter('o', "RUNSTDBY of TCA, AC, ADC, op amp; the TCD", to_runstdby);
 #endif
+    bench.second_letter('h', "the link and the two wires", th_link);
+    bench.second_letter('i', "the awake baseline and idle", ti_idle_latency);
+    bench.second_letter('j', "standby timed from outside", tj_standby_latency);
+    bench.second_letter('k', "power-down timed from outside", tk_power_down_latency);
+    bench.second_letter('l', "start-of-frame", tl_sfd);
+    bench.second_letter('m', "a TWI address match", tm_twi_wake);
+#if defined(BRIO_BOARD_ea48)
+    bench.second_letter('q', "the peer's edges on PE0, PC4, PC6", tq_peer_pins);
+#endif
+}
+
+void help() {
+    print(serial, "test_avr_sleep: z = the single-board letters, y = the two-board ones (the "
+                  "peer board = sleep_peer)", crlf);
+    bench.menu();
+}
 
 } // namespace
 
@@ -3550,22 +3520,17 @@ int main() {
               ") was ended by the watchdog", why.watchdog ? "" : " - though RSTFR does not "
               "name the watchdog", ". That is a FINDING, not a pass.", crlf);
     }
+    register_tests();
     help();
 
-    print(serial, "> ");
+    bench.prompt();
     for (;;) {
         uint8_t c;
         if (!Serial::read_byte(c)) continue;
         if (c == '\r' || c == '\n') continue;
         print(serial, static_cast<char>(c), crlf);
         if (c == '?') { help(); }
-        else if (c == 'z' || c == 'Z') { run_set(all_keys); }
-        else if (c == 'y' || c == 'Y') { run_set(two_board_keys); }
-        else {
-            bool found = false;
-            for (const Test& t : tests) if (t.key == c) { run(t.fn); found = true; }
-            if (!found) print(serial, "? for help", crlf);
-        }
-        print(serial, "> ");
+        else if (!bench.handle(static_cast<char>(c))) { print(serial, "? for help", crlf); }
+        bench.prompt();
     }
 }

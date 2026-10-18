@@ -54,6 +54,10 @@ this one differs from the DA's on the same PCB in what is fitted.
   pin and its PC partner at once: `pin_check` waves PC4..PC7 and leaves
   PE0..PE3 inputs with no pull, and the suites leave the unused half an
   input (`board_pc_pe_jumpers`).
+- **Analog wires**: PD6 (the DAC's output) to PD1 and to PD7, and
+  10 kOhm from PD6 to ground - one net of three pins, for the DAC-to-ADC
+  and DAC-to-AC loops ([../avrxt/dac.md](../avrxt/dac.md)). A suite
+  that drives PD1, PD6 or PD7 drives that net.
 - **Identity**: a label in the USERROW, written once over UPDI
   ([../avrxt/userrow.md](../avrxt/userrow.md)).
 - Manifest type `ea48`; the project is `avrxt/`
@@ -78,15 +82,22 @@ this one differs from the DA's on the same PCB in what is fitted.
   22 of 27 - its five reds are the rulers timed against the 32 kHz
   crystal above ([../avrxt/platform.md](../avrxt/platform.md),
   [../avrxt/port.md](../avrxt/port.md),
-  [../avrxt/clkctrl.md](../avrxt/clkctrl.md)); `test_avr_timer` 208 of
-  208, `test_avr_meter` 38 of 38, `test_avr_rtc` 89 of 91 - its two reds
+  [../avrxt/clkctrl.md](../avrxt/clkctrl.md)); `test_avr_timer`, two
+  images on this board (the group axis, [../avrxt/README.md](../avrxt/README.md)),
+  141 of 141 (`test_avr_timer-1`) and 65 of 67 (`test_avr_timer-2`) - its
+  two reds are legs on the analog net above: letter c's OR after the
+  reconfiguration (LUT2's input on PD1) and letter x's TCA1 PORTD route
+  parked high (WO2 on PD6), red alike when one image carries both
+  groups, and 208 of 208 with the analog wires lifted; `test_avr_meter`
+  38 of 38, `test_avr_rtc` 89 of 91 - its two reds
   are letter 9's, the 32 kHz crystal again ([../avrxt/tca.md](../avrxt/tca.md),
   [../avrxt/tcb.md](../avrxt/tcb.md), [../avrxt/ccl.md](../avrxt/ccl.md),
   [../avrxt/rtc.md](../avrxt/rtc.md)).
 - `test_avr_nvm` (the EEPROM engine) 103 of 103, ten runs of ten
   ([../avrxt/nvm.md](../avrxt/nvm.md)).
-- `test_avr_sleep` 56 of 56 alone (`z`) and 47 of 47 against the SAM C21
-  board's `sleep_peer` (`y`), ten runs of ten each: the link on USART1
+- `test_avr_sleep` 56 of 56 alone (`z`, the image `test_avr_sleep-1`)
+  and 47 of 47 against the SAM C21 board's `sleep_peer` (`y`,
+  `test_avr_sleep-2`), ten runs of ten each: the link on USART1
   ALT1 through the PC4-PE0 jumper, the stimulus and the echo on PE2/PE3,
   the I2C pair on PA2/PA3. No regulator start-up at any wake; OSCHF
   restarts in 9.2 us, this board's 20 MHz quartz in 0.61..0.67 ms from

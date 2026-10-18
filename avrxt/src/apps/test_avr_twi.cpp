@@ -67,7 +67,13 @@
 // Commands: ? for the menu, z = the single-board half, y = the two-board
 // half.
 
+// Its groups (the line below; docs/avrxt/README.md, "The group axis")
+// are the images a board type of the split tier builds it as, held to
+// the ATmega4809's 48 KB: the single-board set in one, the two-board set
+// in the other. The 128 KB DA and DB build one image.
+//
 // build: boards = db48,da48
+// build: groups = abcdefghij,klmnopqrst
 // build: monitor_speed = 460800
 
 #include <avr/interrupt.h>
@@ -88,6 +94,7 @@
 #include "kernel/time.hpp"
 #include "kernel/time_event.hpp"
 #include "util/print.hpp"
+#include "util/testbench.hpp"
 
 #include "twi_link.hpp"
 
@@ -164,16 +171,11 @@ constexpr uint8_t absent_addr = 0x77;
 
 // ---- verdicts ----------------------------------------------------------------
 
-uint8_t passed = 0, failed = 0;
+/// z runs the single-board letters, y the two-board ones.
+TwoKeyTestBench<Serial, 'y'> bench;
 
-void verdict(const char* name, bool ok) {
-    if (ok) ++passed; else ++failed;
-    print(serial, "  ", ok ? "PASS" : "FAIL", "  ", name, crlf);
-}
-void verdict(const char* a, const char* b, bool ok) {
-    if (ok) ++passed; else ++failed;
-    print(serial, "  ", ok ? "PASS" : "FAIL", "  ", a, b, crlf);
-}
+void verdict(const char* name, bool ok) { bench.verdict(name, ok); }
+void verdict(const char* a, const char* b, bool ok) { bench.verdict(a, b, ok); }
 // ---- the client half, serviced by polling (and by the vector in test i) ------
 
 volatile uint16_t cl_addr_hits = 0;
@@ -2573,47 +2575,33 @@ void tt_timed() {
 
 // ---- the menu ----------------------------------------------------------------
 
-using TestFn = void (*)();
-struct Test { char key; TestFn fn; };
-constexpr Test tests[] = {
-    {'a', ta_routes}, {'b', tb_speeds}, {'c', tc_loops}, {'d', td_addresses},
-    {'e', te_cases}, {'f', tf_smart}, {'g', tg_quick}, {'h', th_busstate},
-    {'i', ti_interrupts}, {'j', tj_rebase},
-    {'k', tk_bringup}, {'l', tl_stretch}, {'m', tm_nacks}, {'n', tn_arbitration},
-    {'o', to_collision}, {'p', tp_recovery}, {'q', tq_general_call}, {'r', tr_speeds},
-    {'s', ts_rebase}, {'t', tt_timed},
-};
-constexpr char single_board[] = "abcdefghij";
-constexpr char two_board[] = "klmnopqrst";
-
-void run(TestFn fn) {
-    passed = failed = 0;
-    fn();
-    print(serial, "  -> ", passed, " pass, ", failed, " fail", crlf, crlf);
-}
-
-void run_set(const char* keys) {
-    uint16_t tp = 0, tf = 0;
-    for (const char* k = keys; *k != 0; ++k) {
-        for (const Test& t : tests) {
-            if (t.key != *k) continue;
-            run(t.fn);
-            tp += passed;
-            tf += failed;
-        }
-    }
-    print(serial, "ALL: ", tp, " pass, ", tf, " fail", crlf);
+void register_tests() {
+    bench.letter('a', "routes", ta_routes);
+    bench.letter('b', "bus speeds", tb_speeds);
+    bench.letter('c', "combined and dual loops", tc_loops);
+    bench.letter('d', "address match", td_addresses);
+    bench.letter('e', "the chapter's cases", te_cases);
+    bench.letter('f', "smart modes", tf_smart);
+    bench.letter('g', "quick command", tg_quick);
+    bench.letter('h', "bus state and the injector", th_busstate);
+    bench.letter('i', "isr bodies", ti_interrupts);
+    bench.letter('j', "rebase and the arbiter", tj_rebase);
+    bench.second_letter('k', "bring-up", tk_bringup);
+    bench.second_letter('l', "clock stretching", tl_stretch);
+    bench.second_letter('m', "NACK injection", tm_nacks);
+    bench.second_letter('n', "multi-host arbitration", tn_arbitration);
+    bench.second_letter('o', "collision S4", to_collision);
+    bench.second_letter('p', "bus recovery", tp_recovery);
+    bench.second_letter('q', "general call", tq_general_call);
+    bench.second_letter('r', "the three speeds", tr_speeds);
+    bench.second_letter('s', "rebase", ts_rebase);
+    bench.second_letter('t', "the timed bus", tt_timed);
 }
 
 void help() {
-    print(serial, "test_avr_twi: a routes | b bus speeds | c combined and dual loops | "
-                  "d address match | e the chapter's cases | f smart modes | "
-                  "g quick command | h bus state and the injector | i isr bodies | "
-                  "j rebase and the arbiter    -> z = all of a..j", crlf);
-    print(serial, "  TWO BOARDS (the peer board running twi_peer): k bring-up | l clock "
-                  "stretching | m NACK injection | n multi-host arbitration | "
-                  "o collision S4 | p bus recovery | q general call | r the three "
-                  "speeds | s rebase | t the timed bus    -> y = all of k..t", crlf);
+    print(serial, "test_avr_twi: z = the single-board letters, y = the two-board ones (the peer "
+                  "board running twi_peer)", crlf);
+    bench.menu();
     print(serial, "  ONE open-drain bus, three taps of this board: PA2/PA3 (the host and "
                   "the combined client), PC2/PC3 (the DUAL client, and the bit-bang "
                   "injector of tests h and n while Dual mode is off) and PB2/PB3; the "
@@ -2669,21 +2657,16 @@ int main() {
           ", clk=", xtal ? (has_xoschf ? "XTAL" : "EXTCLK") : "OSCHF",
           " 24 MHz, silicon rev ", hex(SYSCFG.REVID), ")", crlf);
     (void)wire_sane(true);
+    register_tests();
     help();
-    print(serial, "> ");
+    bench.prompt();
     for (;;) {
         uint8_t c;
         if (!Serial::read_byte(c)) continue;
         if (c == '\r' || c == '\n') continue;
         print(serial, static_cast<char>(c), crlf);
         if (c == '?') { help(); }
-        else if (c == 'z' || c == 'Z') { run_set(single_board); }
-        else if (c == 'y' || c == 'Y') { run_set(two_board); }
-        else {
-            bool found = false;
-            for (const Test& t : tests) if (t.key == c) { run(t.fn); found = true; }
-            if (!found) print(serial, "? for help", crlf);
-        }
-        print(serial, "> ");
+        else if (!bench.handle(static_cast<char>(c))) { print(serial, "? for help", crlf); }
+        bench.prompt();
     }
 }

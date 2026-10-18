@@ -65,7 +65,14 @@
 //
 // Commands: ? for the menu, z = all single-board, y = all two-board.
 
+// Its groups (the line below; docs/avrxt/README.md, "The group axis")
+// are the images a board type of the split tier builds it as, held to
+// the ATmega4809's 48 KB: the single-board set in one, the two-board set
+// in two halves with the by-name letters in the second. The 128 KB DA
+// and DB build one image.
+//
 // build: boards = db48,da48
+// build: groups = abcdefghiIT,jklmnopq,rstuvwxB
 // build: monitor_speed = 460800
 
 #include <avr/interrupt.h>
@@ -80,6 +87,7 @@
 #include "avrxt/usart.hpp"
 #include "avrxt/userrow.hpp"
 #include "util/print.hpp"
+#include "util/testbench.hpp"
 
 #include "usart_link.hpp"
 
@@ -140,7 +148,11 @@ void ruler_down() {
 using U4Tx = Uart<4, Route::def, 32, 32>;
 using DynClock = DynamicClock<SysClock, Serial, U4Tx, Meter>;
 
-uint8_t passed = 0, failed = 0;
+/// z runs the single-board letters, y the two-board ones; v, w and x are
+/// run by name. The table holds every letter of the suite where the
+/// image carries them all, a group's where it carries one group.
+constexpr uint8_t letters_max = test_letters == nullptr ? 27 : test_letters_default_max();
+TwoKeyTestBench<Serial, 'y', letters_max> bench;
 
 /// A leg the peer REFUSED (usart_link.hpp: report_cfg_failed, a
 /// capability it has not got) is skipped, never judged: peer_report()
@@ -154,16 +166,14 @@ void verdict(const char* name, bool ok) {
         print(serial, "  SKIP  ", name, crlf);
         return;
     }
-    if (ok) ++passed; else ++failed;
-    print(serial, "  ", ok ? "PASS" : "FAIL", "  ", name, crlf);
+    bench.verdict(name, ok);
 }
 void verdict(const char* a, const char* b, bool ok) {
     if (leg_refused) {
         print(serial, "  SKIP  ", a, b, crlf);
         return;
     }
-    if (ok) ++passed; else ++failed;
-    print(serial, "  ", ok ? "PASS" : "FAIL", "  ", a, b, crlf);
+    bench.verdict(a, b, ok);
 }
 bool near(int32_t a, int32_t b, int32_t tol) {
     const int32_t d = a > b ? a - b : b - a;
@@ -3310,41 +3320,11 @@ void tB_blast() {
 
 // ---- the menu ------------------------------------------------------------------
 
-using TestFn = void (*)();
-struct Test { char key; TestFn fn; };
-constexpr Test tests[] = {
-    {'a', ta_instances}, {'b', tb_frames}, {'c', tc_overflow}, {'d', td_mpcm},
-    {'e', te_txc_dre}, {'f', tf_baud_on_the_wire}, {'g', tg_rebase},
-    {'h', th_autobaud}, {'i', ti_mspi}, {'I', tI_injected}, {'T', tT_tx_idle},
-    {'j', tj_link}, {'k', tk_baud}, {'l', tl_frames_cross}, {'m', tm_errors},
-    {'n', tn_waveforms}, {'o', to_autobaud_foreign}, {'p', tp_mpcm_cross},
-    {'q', tq_sync}, {'r', tr_rs485}, {'s', ts_irda}, {'t', tt_rebase_traffic},
-    {'u', tu_lbme_pad}, {'v', tv_wiring}, {'w', tw_onewire}, {'x', tx_clocks},
-    {'B', tB_blast},
-};
-constexpr char single_board[] = "abcdefghiIT";
-constexpr char two_board[] = "jklmnopqrstuB";
-
-void run(TestFn fn) {
-    passed = failed = 0;
-    leg_refused = false;
-    fn();
-    print(serial, "  -> ", passed, " pass, ", failed, " fail", crlf, crlf);
-}
-
 void help() {
-    print(serial, "test_avr_serial, one board: a instances | b frames | c overflow | "
-                  "d mpcm | e txc/dre | f baud on the wire | g rebase | h auto-baud | "
-                  "i host spi | I injected errors | T tx_idle on the pad", crlf);
-    print(serial, "  two boards (needs usart_peer on the peer board): j link | k baud matrix | "
-                  "l frame matrix | m errors | n waveforms | o auto-baud foreign | "
-                  "p mpcm | q sync roles | r rs-485 | s ircom | t rebase | u lbme pad | "
-                  "B the repeated blast through the Uart task",
-          crlf);
-    print(serial, "  v wiring probe (with the peer board's '2') | w one-wire (a PE0-PE0 "
-                  "jumper, or a samc21 peer) | x clock comparison (ppm); none of these is in y",
-          crlf);
-    print(serial, "  z = all single-board, y = all two-board", crlf);
+    print(serial, "test_avr_serial: one board (z), two boards (y; needs usart_peer on the "
+                  "peer board), and v, w, x by name: v with the peer board's '2', w with a "
+                  "PE0-PE0 jumper or a samc21 peer", crlf);
+    bench.menu();
 }
 
 /// The single-board half runs on the DUT's own loop-back. On a SHARED
@@ -3381,21 +3361,53 @@ void end_peer_stand_off() {
     (void)command(link::Op::standby, stand_off_payload(0), link::params_size);
 }
 
-void run_set(const char* keys, bool renew_stand_off = false) {
-    uint16_t tp = 0, tf = 0;
-    for (const char* k = keys; *k != 0; ++k) {
-        for (const Test& t : tests) {
-            if (t.key != *k) continue;
-            if (renew_stand_off) {
-                (void)command(link::Op::standby, stand_off_payload(stand_off_ms),
-                              link::params_size);
-            }
-            run(t.fn);
-            tp += passed;
-            tf += failed;
-        }
+/// While the guarded z runs: the stand-off is re-armed before each letter.
+bool stand_off_renew = false;
+
+/// What every letter does first: a refused leg of the previous letter is
+/// forgotten, and the stand-off re-armed while z is guarded. One body,
+/// called by each letter's prelude<> below.
+[[gnu::noinline]] void before_letter() {
+    leg_refused = false;
+    if (stand_off_renew) {
+        (void)command(link::Op::standby, stand_off_payload(stand_off_ms), link::params_size);
     }
-    print(serial, "ALL: ", tp, " pass, ", tf, " fail", crlf);
+}
+
+template <void (*F)()>
+void prelude() {
+    before_letter();
+    F();
+}
+
+void register_tests() {
+    bench.letter('a', "instances", prelude<ta_instances>);
+    bench.letter('b', "frames", prelude<tb_frames>);
+    bench.letter('c', "overflow", prelude<tc_overflow>);
+    bench.letter('d', "mpcm", prelude<td_mpcm>);
+    bench.letter('e', "txc/dre", prelude<te_txc_dre>);
+    bench.letter('f', "baud on the wire", prelude<tf_baud_on_the_wire>);
+    bench.letter('g', "rebase", prelude<tg_rebase>);
+    bench.letter('h', "auto-baud", prelude<th_autobaud>);
+    bench.letter('i', "host spi", prelude<ti_mspi>);
+    bench.letter('I', "injected errors", prelude<tI_injected>);
+    bench.letter('T', "tx_idle on the pad", prelude<tT_tx_idle>);
+    bench.second_letter('j', "link", prelude<tj_link>);
+    bench.second_letter('k', "baud matrix", prelude<tk_baud>);
+    bench.second_letter('l', "frame matrix", prelude<tl_frames_cross>);
+    bench.second_letter('m', "errors", prelude<tm_errors>);
+    bench.second_letter('n', "waveforms", prelude<tn_waveforms>);
+    bench.second_letter('o', "auto-baud foreign", prelude<to_autobaud_foreign>);
+    bench.second_letter('p', "mpcm", prelude<tp_mpcm_cross>);
+    bench.second_letter('q', "sync roles", prelude<tq_sync>);
+    bench.second_letter('r', "rs-485", prelude<tr_rs485>);
+    bench.second_letter('s', "ircom", prelude<ts_irda>);
+    bench.second_letter('t', "rebase", prelude<tt_rebase_traffic>);
+    bench.second_letter('u', "lbme pad", prelude<tu_lbme_pad>);
+    bench.letter('v', "wiring probe (with the peer board's '2')", prelude<tv_wiring>, false);
+    bench.letter('w', "one-wire (a PE0-PE0 jumper, or a samc21 peer)", prelude<tw_onewire>, false);
+    bench.letter('x', "clock comparison (ppm)", prelude<tx_clocks>, false);
+    bench.second_letter('B', "the repeated blast through the Uart task", prelude<tB_blast>);
 }
 
 } // namespace
@@ -3420,8 +3432,9 @@ int main() {
     print(serial, crlf, "test_avr_serial - USART test suite (board ", board,
           ", clk=", xtal ? (has_xoschf ? "XTAL" : "EXTCLK") : "OSCHF",
           " 24 MHz, silicon rev ", hex(SYSCFG.REVID), ")", crlf);
+    register_tests();
     help();
-    print(serial, "> ");
+    bench.prompt();
     for (;;) {
         uint8_t c;
         if (!Serial::read_byte(c)) continue;
@@ -3429,23 +3442,27 @@ int main() {
         print(serial, static_cast<char>(c), crlf);
         if (c == '?') { help(); }
         else if (c == 'z' || c == 'Z') {
+            // The single-board set, guarded where the line is shared.
             const bool guarded = ask_peer_to_stand_off(stand_off_ms);
             if (guarded) {
                 print(serial, "  (shared line: the peer board asked to stay quiet, ",
                       stand_off_ms, " ms re-armed per test)", crlf);
             }
-            run_set(single_board, guarded);
+            stand_off_renew = guarded;
+            (void)bench.handle('z');
+            stand_off_renew = false;
             if (guarded) end_peer_stand_off();
         }
-        else if (c == 'y' || c == 'Y') { run_set(two_board); }
         // 'w' is a SET of its own (the shared-wire block, outside y/z):
         // close it with the "ALL:" line so bench.py run can judge it.
-        else if (c == 'w' || c == 'W') { run_set("w"); }
-        else {
-            bool found = false;
-            for (const Test& t : tests) if (t.key == c) { run(t.fn); found = true; }
-            if (!found) print(serial, "? for help", crlf);
+        else if (c == 'w' || c == 'W') {
+            if (const auto t = bench.handle('w')) {
+                print(serial, "ALL: ", t->pass, " pass, ", t->fail, " fail", crlf);
+            } else {
+                print(serial, "? for help", crlf);
+            }
         }
-        print(serial, "> ");
+        else if (!bench.handle(static_cast<char>(c))) { print(serial, "? for help", crlf); }
+        bench.prompt();
     }
 }

@@ -25,6 +25,13 @@ every target the stack grows down from the top of that region (on the
 RP2040 and the RP2350 it lives in the scratch banks instead), so a RAM
 margin is the room the stack has.
 
+A configure may hold its images to a TIER smaller than its part - the
+smallest chip in view, which no preset builds yet: it writes the tier's
+flash and RAM to tier.json in its build directory, and each image of
+that preset is measured against the tier wherever the tier is the
+smaller (the avrxt project's split board types, held to the
+ATmega4809's 48 KB and 6 KB; avrxt/CMakeLists.txt).
+
 `brio check <stratum>` runs the same build after its fixtures - the link
 guard: an image that fails to compile or link on any preset fails the
 check, and an image under the margin is named. Exit status: 0 when
@@ -143,7 +150,11 @@ def failures(log):
             image = target[:-4]
             over = [re.search(r"region `(\w+)' overflowed by (\d+) bytes", t) for t in tail]
             over = [o for o in over if o]
-            if over:
+            tier = next((re.search(r"does not fit the split tier: (.*)", t) for t in tail
+                         if "does not fit the split tier" in t), None)
+            if tier:
+                out[image] = "over the split tier: " + tier.group(1).strip()[:160]
+            elif over:
                 out[image] = ", ".join("%s overflowed by %s bytes" % (o.group(1), o.group(2)) for o in over)
             else:
                 err = next((t for t in tail if "error" in t), "the link failed")
@@ -171,6 +182,12 @@ def build(project, preset, into, jobs):
     failed = failures(res.stdout + res.stderr) if res.returncode != 0 else {}
     if res.returncode != 0 and not failed:
         failed = {"(build)": (res.stdout + res.stderr).strip()[-300:]}
+    tier = None
+    try:
+        with open(os.path.join(bdir, "tier.json"), encoding="ascii") as f:
+            tier = json.load(f)
+    except (OSError, ValueError):
+        pass
     rows = []
     for image in elf_targets(bdir):
         if image in failed:
@@ -181,6 +198,8 @@ def build(project, preset, into, jobs):
             continue
         u = usage(elf, regions(mapfile))
         if u is not None:
+            if tier is not None:
+                u = (u[0], min(u[1], int(tier["flash"])), u[2], min(u[3], int(tier["ram"])))
             rows.append((preset, image) + u)
     return seconds, failed, rows
 

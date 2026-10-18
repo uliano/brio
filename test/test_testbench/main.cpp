@@ -538,11 +538,31 @@ TEST_CASE("a selection carries the letters and the digits it names, and no other
     CHECK(!brio::selection_carries("ab12", '3'));
 }
 
+TEST_CASE("a selection that names an upper-case key gates them all; one that names none carries them all") {
+    // A line that partitions only the lower-case letters and the digits:
+    // each of its groups carries every upper-case key.
+    static_assert(brio::selection_carries("abcdefghij", 'I') && brio::selection_carries("123", 'B'));
+    static_assert(brio::upper_mask_of("abc123") == 0x03FFFFFFUL);
+    // A line that names upper-case keys: a group carries the ones it names
+    // and no other, and its lower-case and digit keys as before.
+    constexpr const char* g1 = "abcIT";
+    constexpr const char* g2 = "jkB";
+    static_assert(brio::selection_carries(g1, 'I') && brio::selection_carries(g1, 'T'));
+    static_assert(!brio::selection_carries(g1, 'B'));
+    static_assert(brio::selection_carries(g2, 'B') && !brio::selection_carries(g2, 'I'));
+    static_assert(brio::selection_carries(g1, 'a') && !brio::selection_carries(g1, 'j'));
+    static_assert(!brio::selection_carries(g2, '1') && brio::selection_carries(g2, '#'));
+    static_assert(brio::upper_mask_of(g1) == ((1UL << ('I' - 'A')) | (1UL << ('T' - 'A'))));
+    CHECK(brio::selection_carries("xyzW", 'W'));
+    CHECK(!brio::selection_carries("xyzW", 'V'));
+}
+
 TEST_CASE("no selection carries every key, and a key that is neither letter nor digit is always carried") {
     static_assert(brio::selection_carries(nullptr, 'z') && brio::selection_carries(nullptr, '0') &&
                   brio::selection_carries(nullptr, '9'));
     static_assert(brio::letter_mask_of(nullptr) == 0x03FFFFFFUL && brio::digit_mask_of(nullptr) == 0x03FFu);
     static_assert(brio::selection_carries("abc", 'T') && brio::selection_carries("123", '#'));
+    static_assert(brio::upper_mask_of(nullptr) == 0x03FFFFFFUL);
     // This test binary names no selection: the image carries everything.
     CHECK(brio::test_letter_carried('a'));
     CHECK(brio::test_letter_carried('7'));

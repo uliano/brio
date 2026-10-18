@@ -249,6 +249,61 @@ CMake Tools status bar switches which apps show up in the Target
 dropdown. A target is a build, never a physical board: the boards on
 the desk live in the bench manifest, see [../boards/README.md](../boards/README.md).
 
+### The group axis: suites sized for the smallest AVR in view
+
+A suite's image is held to the smallest chip of the family
+(design/overview.md, "A suite's image fits the family's smallest
+chip"), and on the AVR that chip is one IN VIEW rather than one the
+project builds: the **ATmega4809, 48 KB of flash and 6 KB of SRAM**,
+below the AVR64EA48's 64 KB and 6 KB. `CMakeLists.txt` names it as
+the SPLIT TIER (`AVR_SPLIT_TIER_FLASH`, `AVR_SPLIT_TIER_RAM`) and lists
+the board types that stand in for it (`AVR_SPLIT_BOARDS`: `ea48`, the
+smallest part the project builds; the ATmega4809's own board type joins
+the list when it is born). On those board types:
+
+- a suite that declares its groups of letters (`// build: groups =
+  123456789norsdt,cmliwekx`) builds as one image per group -
+  `test_avr_timer-1`, `test_avr_timer-2` - each compiled with
+  `BRIO_TEST_LETTERS` naming its group, which `util/testbench.hpp`
+  reads to register those letters alone; the menu of such an image says
+  which letters it carries. A group names lower-case letters, digits
+  and, once its line names any, upper-case keys (`util/testbench.hpp`,
+  `upper_mask_of()`);
+- EVERY image, grouped or not, is held to the tier after its link:
+  `cmake/avr-tier-guard.cmake` sums its flash (`.text`, `.data`,
+  `.rodata`) and its static RAM (`.data`, `.bss`, `.noinit`) and fails
+  the build over 48 KB or 6 KB, though the AVR64EA48 would hold the
+  image. The configure writes the tier to `tier.json` in the build
+  directory, and `brio fit` measures that preset's margins against it:
+  an image with under 5 % of the tier left is named, and is regrouped.
+
+On the 128 KB DA and DB board types a suite stays ONE image with every
+letter - unless it names that board type's own groups (`// build:
+groups.da48 = ...`), which split it there alone. The roster
+(`build-cmake/apps_avrxt.json`) carries `split_boards` and each app's
+groups, so `brio flash <board> test_avr_timer-2` names an image on an
+EA board and the bare name is refused there with the list; `brio run`
+judges each image's own `ALL:` line, and a two-key suite (`z` alone,
+`y` against the partner) answers each key with the letters of that set
+the image carries - an `ALL: 0 pass, 0 fail` where it carries none.
+
+The suites grouped, each split along a line its letters already draw,
+with every image's margin against the tier (`brio fit avrxt`):
+
+| suite | groups | what each group is |
+|---|---|---|
+| `test_avr_timer` | `123456789norsdt`, `cmliwekx` | the TCA and TCB tasks; the CCL, the AC, the event system and the EA's own letter |
+| `test_avr_sleep` | `abcdefgnop`, `hijklmq` | the single-board set `z`; the two-board set `y` |
+| `test_avr_serial` | `abcdefghiIT`, `jklmnopq`, `rstuvwxB` | the single-board set; the two-board set in two halves, the by-name letters with the second |
+| `test_avr_spi` | `abcdefghij`, `tklmnop`, `qrsuvw` | the single-board set but letter t; t with the first half of the two-board set; its second half |
+| `test_avr_twi` | `abcdefghij`, `klmnopqrst` | the single-board set; the two-board set |
+
+The serial, SPI and TWI suites do not build for `ea48`: the EA's
+USART, SPI and TWI engines are gaps of usart.md, spi.md and twi.md. Their
+groups are measured on the AVR128DB48's build of each group, every one
+of which leaves 18 % or more of the tier. Every other suite fits the
+tier whole.
+
 ## Clock, delay and timebase
 
 (The target-independent model - one rate truth, static and dynamic

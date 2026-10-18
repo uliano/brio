@@ -66,8 +66,8 @@
  * key compiles none of it: the set's mask is an empty member and every
  * branch that reads it is `if constexpr`. The mask is one bit per
  * registered letter, as wide as the table needs: 32 bits up to 32
- * letters, 64 up to 64 (the keys a group can gate - 'a'..'z' and
- * '0'..'9' - are 36, and upper-case keys add to them).
+ * letters, 64 up to 64 (the keys a group can gate - 'a'..'z',
+ * '0'..'9' and 'A'..'Z' - are 62).
  */
 
 #pragma once
@@ -89,7 +89,8 @@ namespace brio {
  * keys; every other image carries every letter (design/overview.md, "A
  * suite's image fits the family's smallest chip"). A group names letters
  * and digits alike - a second set's digit keys belong to the group that
- * names them, as letters do. letter() registers
+ * names them, as letters do - and upper-case keys too, once its line
+ * names any (upper_mask_of()). letter() registers
  * nothing for a key outside the selection, so a letter the image does
  * not carry is never referenced and the linker drops it with its
  * verdict prose - the SOURCE is the same in every image, and the menu
@@ -135,12 +136,35 @@ constexpr uint16_t digit_mask_of(const char* selection) {
     return mask;
 }
 
-/// Whether a selection carries `key`: a letter or a digit when the
-/// selection names it (every one when there is no selection); any other
-/// key - an upper-case letter, a sign - always.
+/// The same for the upper-case keys 'A'..'Z', with one difference: a
+/// selection that names NO upper-case key carries every one of them. A
+/// groups line that partitions only the lower-case letters and the
+/// digits leaves each upper-case key in every image of the line; a line
+/// that names any upper-case key partitions them as it partitions the
+/// rest, and an upper-case key no group of it names is in no image.
+constexpr uint32_t upper_mask_of(const char* selection) {
+    if (selection == nullptr) {
+        return 0x03FFFFFFUL;
+    }
+    uint32_t mask = 0;
+    for (const char* p = selection; *p != '\0'; ++p) {
+        if (*p >= 'A' && *p <= 'Z') {
+            mask |= 1UL << (*p - 'A');
+        }
+    }
+    return mask == 0 ? 0x03FFFFFFUL : mask;
+}
+
+/// Whether a selection carries `key`: a lower-case letter or a digit when
+/// the selection names it, an upper-case letter by upper_mask_of()'s rule
+/// (every key of the three kinds when there is no selection); any other
+/// key - a sign - always.
 constexpr bool selection_carries(const char* selection, char key) {
     if (key >= '0' && key <= '9') {
         return ((digit_mask_of(selection) >> (key - '0')) & 1u) != 0u;
+    }
+    if (key >= 'A' && key <= 'Z') {
+        return ((upper_mask_of(selection) >> (key - 'A')) & 1UL) != 0u;
     }
     if (key < 'a' || key > 'z') {
         return true;
@@ -151,16 +175,21 @@ constexpr bool selection_carries(const char* selection, char key) {
 constexpr uint32_t test_letter_mask() { return letter_mask_of(test_letters); }
 inline constexpr uint32_t test_letters_carried = test_letter_mask();
 inline constexpr uint16_t test_digits_carried = digit_mask_of(test_letters);
+inline constexpr uint32_t test_uppers_carried = upper_mask_of(test_letters);
 
 /// Whether this image carries `key`: every key when the build named no
-/// selection; a letter or a digit when the selection names it; any other
-/// key always. Read off the two masks, and ALWAYS INLINED: letter()'s
+/// selection; a lower-case letter or a digit when the selection names
+/// it, an upper-case letter by upper_mask_of()'s rule; any other key
+/// always. Read off the three masks, and ALWAYS INLINED: letter()'s
 /// check must fold to a constant at the call site, and a call the
 /// optimizer leaves standing (-Os weighs this body against its callers)
 /// keeps every letter's address alive in every group image.
 [[gnu::always_inline]] constexpr bool test_letter_carried(char key) {
     if (key >= '0' && key <= '9') {
         return ((test_digits_carried >> (key - '0')) & 1u) != 0u;
+    }
+    if (key >= 'A' && key <= 'Z') {
+        return ((test_uppers_carried >> (key - 'A')) & 1UL) != 0u;
     }
     if (key < 'a' || key > 'z') {
         return true;

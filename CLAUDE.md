@@ -456,7 +456,8 @@ brio check all                  # every stratum above, in a row; each check ends
                                 # the F images every naked vector's body walked in the ELF,
                                 # any f-register instruction or unresolved indirect call fatal
 brio fit [stratum|all]          # that build alone, and the census: each image's flash and
-                                # RAM against its linker script's regions, by margin
+                                # RAM against its linker script's regions (or the smaller
+                                # tier its project holds it to), by margin
 brio prose [paths...]           # the prose net: no dates/process words/Doxygen tags in
                                 # comments and docs, every cited path exists, ASCII only;
                                 # "review" lines are claims of absence to re-read, not errors
@@ -520,7 +521,8 @@ brio fuses A bootsize=128  # read/write fuses over UPDI (fuses are
   exist; `// build: groups = abg,cdf` splits a suite into one image per
   group on a board type its project lists as splitting - the CH32V003,
   the CH32V203's four 32 KB parts, the G031K8, the SAM C21, every
-  CH32X035 part - and
+  CH32X035 part, the AVR64EA48 (held to the ATmega4809's 48 KB and
+  6 KB, the smallest AVR in view) - and
   `// build: groups.v006k8 = ...` on that board type alone),
   IDENTITY = the manifest `cli/bench/bench_boards.py` (which board
   sits where, its console by `/dev/serial/by-path` because the CH340s
@@ -591,13 +593,13 @@ below. `// build: boards = ...` gates which board types build an app;
 `// build: groups = ...` splits a suite into one image per group on a
 board type whose project lists it as splitting (the CH32V003, the
 CH32V203's four 32 KB parts, the G031K8, the SAM C21, every CH32X035
-part) and
+part, the AVR64EA48) and
 `// build: groups.<board type> = ...` on that board type alone.
 
 | path | what it holds |
 |---|---|
 | `brio/` | the framework, one directory per stratum (the roster above); the headers' comments are the reference, `docs/<stratum>/README.md` the map. `brio/.clangd` routes each stratum to its own compile database; a fragment in each stratum and each project beside it |
-| `avrxt/` | the AVR project: `cmake/avr-mcus.cmake` (package -> mcu), `cmake/avr-refused-libc.rsp` (the linker's --wrap list refusing avr-libc's heap and stdio), `src/glue/ivsel_boot.cpp` in every image (vectors at BOOT start), the FLMAPLOCK and build-id defsyms; presets for the AVR128DB's three packages, the AVR128DA48 and the AVR64EA48 |
+| `avrxt/` | the AVR project: `cmake/avr-mcus.cmake` (package -> mcu), `cmake/avr-refused-libc.rsp` (the linker's --wrap list refusing avr-libc's heap and stdio), `src/glue/ivsel_boot.cpp` in every image (vectors at BOOT start), the FLMAPLOCK and build-id defsyms; presets for the AVR128DB's three packages, the AVR128DA48 and the AVR64EA48; the GROUP axis on the AVR64EA48, every image there held after its link to the SPLIT TIER, the ATmega4809's 48 KB and 6 KB (`cmake/avr-tier-guard.cmake`) |
 | `samc21/`, `stm32g0/` | the SAM C21 and STM32G0 projects in the shared shape; the G0's presets for the G0B1RE, G071RB and G031K8 with one ld and crt per part; the GROUP axis on the G031K8 and the SAM's one part |
 | `stm32f4/` | a PART TABLE (`cmake/stm32f4-parts.cmake`: part -> ST's device define, crt stem, board type), presets for the F429ZI, F446RE, F411CE and F469NI, the hard-float flags |
 | `ch32v00x/` | WCH's gcc at /sw/wch-riscv; `CH32V00X_MCU` names the part and derives its definition, ISA and ld; `src/glue/startup_ch32v00x.S` (the table whose first word is an instruction, two entries shorter on the CH32V003); the GROUP axis on the CH32V003 (and per board type); the crt paints the free RAM |

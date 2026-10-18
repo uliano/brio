@@ -417,8 +417,12 @@ driver is made and WHAT it produces upward, not what the peripheral is.
   2 KB of RAM, this rule is what decides the shape of every suite; on
   the CH32V203 it is the 32 KB tier - four parts with no board - that a
   suite is grouped for; on the STM32G0 it is the G031K8's 64 KB, on the
-  SAM C21 its one part's 32 KB of RAM; on the other families no image
-  comes near its part's memory yet.
+  SAM C21 its one part's 32 KB of RAM; on the AVR it is the smallest
+  chip IN VIEW rather than the smallest the project builds - the
+  ATmega4809's 48 KB and 6 KB, below the AVR64EA48's 64 KB - so the
+  AVR64EA48's build holds every image to that tier after its link, the
+  guard standing in for a part no preset builds yet; on the other
+  families no image comes near its part's memory yet.
 - **Package variability, the pattern.** The device header is the
   authority, at three granularities. A missing INSTANCE is compiled
   out in tiers on its header symbol (`#if defined(TCB4)`). An instance
