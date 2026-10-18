@@ -25,7 +25,7 @@ receive shapes under a stretched tick handler, and the rate on the wire
 at every BR code -,
 letters `n`..`r` (20 verdicts) and `u`..`w` (18) on the link to a PEER
 BOARD running `spi_peer`, commanded in band over
-`avrdx/src/apps/spi_link.hpp` - `u`..`w` through its EXTENDED EXCHANGE
+`avrxt/src/apps/spi_link.hpp` - `u`..`w` through its EXTENDED EXCHANGE
 (16-bit frames, a client that only listens, both ends' CRC units), with
 `t` and `x` beside them outside `z`. The peer may be any of the three ports of
 that app - the AVR's, the SAM C21's, this stratum's own, which answers
@@ -850,7 +850,7 @@ scores **74 of 74** (letters `a` and `m` and `s` wireless, letters
 from its own SPI2 suite (`test_stm32f4_spi`, docs/stm32f4/spi.md), and
 those figures close this section.
 
-**One wire format, every architecture.** `avrdx/src/apps/spi_link.hpp`
+**One wire format, every architecture.** `avrxt/src/apps/spi_link.hpp`
 is compiled by every port of `spi_peer` and this suite speaks it
 unchanged: the
 command channel runs at PCLK/256 = 250 kHz, one frame per chip-select

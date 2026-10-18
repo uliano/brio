@@ -178,7 +178,7 @@
 //   i  THE I2C HOST ABOVE THE WIRE (dw_apb_i2c/i2c.hpp over rp2040/i2c.hpp)
 //      against THE DESK PARTNER: I2C1 on GP2 (SDA) / GP3 (SCL), the pair's I2C
 //      wires to the WeAct RP2350B, which runs `twi_peer` and is commanded over
-//      the same bus (avrdx/src/apps/twi_link.hpp): one `serve` a speed at
+//      the same bus (avrxt/src/apps/twi_link.hpp): one `serve` a speed at
 //      twilink's dut_addr (0x2C), every read answered with one fixed byte
 //      given a FIFO ahead, so the far end's own pace is the wire's and
 //      nothing of it runs on this core. The letter runs BY NAME ONLY,
@@ -283,7 +283,7 @@
 
 // THE PROTOCOL HEADER IS SHARED, NOT COPIED: letter i commands the partner's
 // twi_peer through it.
-#include "../../../avrdx/src/apps/twi_link.hpp"
+#include "../../../avrxt/src/apps/twi_link.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::pll, 125'000'000>;
 constexpr SysClock clock;

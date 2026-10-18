@@ -40,7 +40,7 @@ import sys
 import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PROJECTS = ("avrdx", "samc21", "stm32g0", "stm32f4", "ch32v00x", "ch32vx03", "ch32x035", "rp2040", "rp2350")
+PROJECTS = ("avrxt", "samc21", "stm32g0", "stm32f4", "ch32v00x", "ch32vx03", "ch32x035", "rp2040", "rp2350")
 FLASH_REGIONS = ("rom", "flash", "text")
 RAM_REGIONS = ("ram", "data")
 SHF_ALLOC = 0x2

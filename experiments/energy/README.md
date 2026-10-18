@@ -51,7 +51,7 @@ A plausible LiPo product with two genuinely different compute regimes:
   (filter + CRC-16), deadline T_proc. A missed deadline DISQUALIFIES
   the run - it is not "efficient".
 
-Three strategies, one DUT binary (`experiments/energy/avrdx/energy_logger.cpp`):
+Three strategies, one DUT binary (`experiments/energy/avrxt/energy_logger.cpp`):
 
 1. `sprint` - fixed 24 MHz; CPU in standby, the ADC free-running with
    its window comparator as the only wake. Peripherals watch.

@@ -4,7 +4,7 @@
 // on its link pads, and for letters r and m the CLIENT - the desk partner
 // running `spi_peer` (rp_spi_peer.hpp: a PIO client, the roles inverted on
 // its PL022) commanded IN BAND over the very bus under test through
-// avrdx/src/apps/spi_link.hpp - the RP2040 against the RP2350's peer, the
+// avrxt/src/apps/spi_link.hpp - the RP2040 against the RP2350's peer, the
 // RP2350 (both halves) against the RP2040's.
 //
 // ONE BODY, TWO CHIPS: what is a chip's - the pads, the clock, the ruler,

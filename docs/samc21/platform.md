@@ -222,7 +222,7 @@ plus this family's measured facts - [../cortexm/README.md](../cortexm/README.md)
 timed on SysTick's own counter and CAPPED BELOW ONE KERNEL TICK by
 contract: a wait of a tick or more is TimeEvent territory, and the call
 REFUSES it (false, no time spent) instead of serving a latency bug -
-a boundary `avrdx/delay.hpp` does not draw. It reads VAL only (no side
+a boundary `avrxt/delay.hpp` does not draw. It reads VAL only (no side
 effect; SysTick stays the Ticker's in writing), accumulates deltas with
 the reload wrap folded in - so it is exact across tick boundaries and
 inside SysTickInterruptGuard windows alike - and converts through

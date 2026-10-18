@@ -14,7 +14,7 @@
     // `monitor reset`, `load`, a breakpoint hit with a correct backtrace
     // through the whole AO kernel chain, `monitor ioregister PORTF.DIR`
     // style peripheral reads (the mcu-debug Peripheral Viewer's read path,
-    // confirmed against avrdx/svd/avr128db48.svd). "svdPath" below is exactly
+    // confirmed against avrxt/svd/avr128db48.svd). "svdPath" below is exactly
     // the key the Peripheral Viewer extension reads from the active debug
     // session's launch config (its svdPathConfig setting defaults to
     // trying "svdPath" then "svdFile" - confirmed in the extension's own
@@ -49,7 +49,7 @@
     // session free-runs past it. Set true to actually land on main().
     // End-to-end verified: connect, monitor reset, load,
     // stopAtEntry on main(), Peripheral Viewer reading live CLKCTRL/PORTF
-    // register values against avrdx/svd/avr128db48.svd.
+    // register values against avrxt/svd/avr128db48.svd.
     "version": "0.2.0",
     "configurations": [
         {
@@ -59,7 +59,7 @@
             "cwd": "${workspaceFolder}",
             "program": "${command:cmake.launchTargetPath}",
             "stopAtEntry": true,
-            "svdPath": "${workspaceFolder}/avrdx/svd/avr128db48.svd",
+            "svdPath": "${workspaceFolder}/avrxt/svd/avr128db48.svd",
             "miMode": "gdb",
             "miDebuggerPath": "/sw/avr/bin/avr-gdb",
             "debugServerPath": "/usr/bin/env",

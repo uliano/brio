@@ -86,7 +86,7 @@
 // THE PROTOCOL HEADER IS SHARED, NOT COPIED: pure encoding, not one
 // register, and every architecture on this link compiles the same
 // file.
-#include "../../../avrdx/src/apps/twi_link.hpp"
+#include "../../../avrxt/src/apps/twi_link.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::pll, 64'000'000>;
 constexpr SysClock clock{};

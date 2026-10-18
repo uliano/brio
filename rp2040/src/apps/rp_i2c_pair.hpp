@@ -3,7 +3,7 @@
 // i2c.hpp) and included by test_rp2040_i2c and test_rp2350_i2c: this chip
 // the DUT and the bus host, the desk partner running `twi_peer`
 // (rp_twi_peer.hpp) commanded IN BAND over the very bus under test through
-// avrdx/src/apps/twi_link.hpp - the RP2040 against the RP2350's peer, the
+// avrxt/src/apps/twi_link.hpp - the RP2040 against the RP2350's peer, the
 // RP2350 (both halves) against the RP2040's.
 //
 // ONE BODY, TWO CHIPS: what is a chip's - the instance, the pads, the

@@ -93,7 +93,7 @@ and every stratum under `brio/` is a row here:
 | `kernel/` | queues, scheduler, FSM, delivery, time events, panic - pure logic | nothing of brio |
 | `util/` | services on top of the kernel: `SerialPort`, `BusMaster` (SPI/I2C arbiter), `print`, `Ring`, line parsers | `kernel/` |
 | `gfx/` | drawing: the three kinds of surface, the primitives over a write-only base, fonts and opaque text, the pen | nothing of brio - not even the kernel |
-| `avrdx/` | everything that knows `avr/io.h`: clock, pins, UART, SPI, TWI, ticker, `AvrPlatform` | `kernel/`, `util/` |
+| `avrxt/` | everything that knows `avr/io.h`: clock, pins, UART, SPI, TWI, ticker, `AvrPlatform` | `kernel/`, `util/` |
 | `cortexm/` | what ARM designed into every Cortex-M and the families below share: NVIC + PRIMASK guard, the SysTick ticker, the microsecond busy-wait on SysTick's counter | `util/` (and the including family's device header) |
 | `pl011/`, `pl022/`, `dw_apb_i2c/` | IP strata: a peripheral DESIGN written once and knowing no chip - ARM's PrimeCell UART and SSP, Synopsys's DesignWare I2C - each stating a concept the family's own traits type satisfies | `kernel/`, `util/` |
 | `samc21/` | everything that knows `sam.h` (Cortex-M0+): clock tree, pins, SERCOM UART, `SamPlatform`; its NVIC and ticker are `cortexm/`'s | `kernel/`, `util/`, `cortexm/` |
@@ -139,7 +139,7 @@ where it can, its exceptions where a reader looks").
 
 | Target | State | Bench silicon | Notes |
 |--------|-------|---------------|-------|
-| AVR DA/DB/EA (`avrdx/`) | supported; the AVR EA in bring-up | AVR128DB48, AVR128DA48, AVR64EA48 | avr-gcc 16.2; on the AVR64EA28/32/48 the NVM, the differential ADC and the CCL are not built yet; see [docs/avrdx/README.md](docs/avrdx/README.md) |
+| AVR DA/DB/EA (`avrxt/`) | supported; the AVR EA in bring-up | AVR128DB48, AVR128DA48, AVR64EA48 | avr-gcc 16.2; on the AVR64EA28/32/48 the NVM, the differential ADC and the CCL are not built yet; see [docs/avrxt/README.md](docs/avrxt/README.md) |
 | SAM C21 (`samc21/`) | supported | ATSAMC21J18A | arm-none-eabi-gcc 16.2, SysTick tick at 1000 Hz against the AVR's 1024 - the kernel tick's opacity, exercised for real; see [docs/samc21/README.md](docs/samc21/README.md) |
 | STM32G0 (`stm32g0/`) | supported | STM32G0B1RE, STM32G071RB, STM32G031K8 | arm-none-eabi-gcc 16.2, HSI16 x PLL at 64 MHz, the third clock model (shared bus prescalers + per-peripheral enables) and a tickless timebase option; see [docs/stm32g0/README.md](docs/stm32g0/README.md) |
 | CH32V00x (`ch32v00x/`) | supported | CH32V006K8U6 | WCH's riscv32 gcc 15.2 with its `xw` extension, RV32EC (sixteen registers, 8 KB of RAM - the smallest core brio runs on), HSI x2 at 48 MHz, its own register map with no vendor header, the console on the WCH-Link's own serial; the CH32V003F4P6 (16 KB, 2 KB, no multiplier) is the family's second and last part, supported on the same stratum with its own part table, presets and ISA - every chapter tiered for it, its suites green on the board as group images, the buses on the wire against a peer, the smallest silicon brio runs on; see [docs/ch32v00x/README.md](docs/ch32v00x/README.md) |
@@ -156,7 +156,7 @@ The framework in `brio/` is headers, included directly, and one source
 file every 32-bit image compiles: the runtime, `brio/rt/rt.cpp`
 ([docs/design/runtime.md](docs/design/runtime.md)). The
 builds are sibling CMake projects, one per target, all peers (the repo
-root is not a CMake project): `avrdx/`, `samc21/`, `stm32g0/`,
+root is not a CMake project): `avrxt/`, `samc21/`, `stm32g0/`,
 `stm32f4/`, `ch32v00x/`, `ch32vx03/`, `rp2040/`, `rp2350/` and
 `host/` each auto-discover one `main()` per `src/apps/<app>.cpp` at
 configure time - an app may pin build options such as its console baud
@@ -165,8 +165,8 @@ holds the host unit tests (a configure has exactly one compiler).
 
 ```bash
 (cd test    && ctest --preset host)                                       # host tests: kernel, queues, FSM, time events, buses, ring...
-(cd avrdx   && cmake --build --preset avr128db48-release --target <app>)  # build one AVR app (release, -Os)
-(cd avrdx   && cmake --build --preset avr128db48-release --target <app>-upload)   # flash it over UPDI
+(cd avrxt   && cmake --build --preset avr128db48-release --target <app>)  # build one AVR app (release, -Os)
+(cd avrxt   && cmake --build --preset avr128db48-release --target <app>-upload)   # flash it over UPDI
 (cd samc21  && cmake --build --preset samc21j-release --target <app>)     # build one SAM app
 (cd samc21  && cmake --build --preset samc21j-release --target <app>-upload)      # flash it over SWD
 (cd stm32g0 && cmake --build --preset stm32g0b1re-release --target <app>)  # build one STM32G0 app

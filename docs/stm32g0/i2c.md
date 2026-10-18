@@ -9,7 +9,7 @@ listed at the end, with the reason in each case.
 bus driver has: `I2c<n>`, the resource; `I2cHost<n, pins, TxEngine,
 RxEngine>`, the transfer engine `util/i2c_bus.hpp` drives; and
 `I2cClient<n, pins>`, the target role. `I2cHost`'s Request is
-`avrdx/twi.hpp`'s and `samc21/i2c.hpp`'s **verbatim**, so
+`avrxt/twi.hpp`'s and `samc21/i2c.hpp`'s **verbatim**, so
 `util/i2c_bus.hpp` and `util/bus_master.hpp` drive this engine exactly
 as they are written.
 
@@ -577,7 +577,7 @@ answers. The two do not disturb each other: the peer's command client answers 0x
 alone, which no self-link letter sends, and I2C2 is released while a
 peer letter runs.
 
-**The wire format is `avrdx/src/apps/twi_link.hpp`, shared by every
+**The wire format is `avrxt/src/apps/twi_link.hpp`, shared by every
 architecture's peer.** Here **one command is TWO TENURES of the engine
 under test** - a write carrying the frame, then a read collecting the
 answer - so the command channel is itself a measurement of this driver.

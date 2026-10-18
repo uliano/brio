@@ -293,7 +293,7 @@
 
 // The twi_link wire format the peer speaks: one file, included by its
 // relative path from every board that speaks it.
-#include "../../../avrdx/src/apps/twi_link.hpp"
+#include "../../../avrxt/src/apps/twi_link.hpp"
 
 // The placement of the bound vectors and of letter r's stamp loop: flash
 // here; in bench_samc_ram.cpp, SRAM through the attribute this family's

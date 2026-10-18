@@ -46,7 +46,7 @@
 // one class below the driver's default (peer_link_config(), with the
 // measurement that asks for it). The instrument
 // is commanded IN BAND over the bus under test, over
-// avrdx/src/apps/spi_link.hpp included by relative path - one source of
+// avrxt/src/apps/spi_link.hpp included by relative path - one source of
 // truth for the wire format, whatever the peer's architecture. Letters
 // n..r and t..y are this instrument's.
 //
@@ -195,7 +195,7 @@
 // so every architecture on this link compiles the same file. A copy here
 // would be a second source of truth for a wire format, which is exactly
 // the thing that drifts.
-#include "../../../avrdx/src/apps/spi_link.hpp"
+#include "../../../avrxt/src/apps/spi_link.hpp"
 
 namespace {
 
@@ -637,7 +637,7 @@ bool need_self_link() {
 // The peer: spi_link.hpp over the bus under test
 // =============================================================================
 //
-// The wire format is avrdx/src/apps/spi_link.hpp, included by relative
+// The wire format is avrxt/src/apps/spi_link.hpp, included by relative
 // path and NOT copied - it names no register, includes nothing of brio
 // and every architecture that speaks the link compiles it. The
 // instrument at the other end is `spi_peer`, in whichever of its ports

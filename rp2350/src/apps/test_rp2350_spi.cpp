@@ -27,7 +27,7 @@
 //    (docs/boards/weact-rp2350b.md). That board runs `spi_peer`
 //    (rp2040/src/apps/spi_peer.cpp: its client a PIO program, its host a
 //    PL022), commanded IN BAND over the bus under test through
-//    avrdx/src/apps/spi_link.hpp; the letters are the ones both Raspberry
+//    avrxt/src/apps/spi_link.hpp; the letters are the ones both Raspberry
 //    Pi suites share, rp2040/src/apps/rp_spi_pair.hpp, whose header says
 //    what they ask of a suite and derives the ceiling letter p judges to.
 //    Every one of them runs through the partner-rail guard
@@ -115,7 +115,7 @@
 
 // THE PROTOCOL HEADER IS SHARED, NOT COPIED: one file for every board
 // that speaks it.
-#include "../../../avrdx/src/apps/spi_link.hpp"
+#include "../../../avrxt/src/apps/spi_link.hpp"
 
 #include "pair_power.hpp"
 

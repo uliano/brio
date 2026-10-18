@@ -64,7 +64,7 @@
 //   NSS   PB12 GPIO ->  the G0's PA15 AF0 (its pull-up holds the wire)
 //
 // plus a GND between the two chips' own ground pins, both boards at 3.3 V,
-// the peer commanded IN BAND over avrdx/src/apps/spi_link.hpp (one source
+// the peer commanded IN BAND over avrxt/src/apps/spi_link.hpp (one source
 // of truth for the wire format, whatever the architecture). SPI2 is the
 // APB1 instance: BR divides 45 MHz, /2 = 22.5 MHz the host's ceiling, and
 // RM0390 26.1.1 gives the client "frequency up to fPCLK/2" as well. Its
@@ -159,7 +159,7 @@
 
 // THE PROTOCOL HEADER IS SHARED, NOT COPIED: pure encoding, not one
 // register, and every architecture on this link compiles the same file.
-#include "../../../avrdx/src/apps/spi_link.hpp"
+#include "../../../avrxt/src/apps/spi_link.hpp"
 
 /// The Nucleo's HSE is the ST-LINK's 8 MHz clock, taken in bypass (no
 /// crystal is fitted); 180 MHz puts SPI2's APB1 at 45 MHz.

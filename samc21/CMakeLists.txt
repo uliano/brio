@@ -324,7 +324,7 @@ foreach(_app_path IN LISTS APP_SOURCES)
 endforeach()
 
 # This project's app roster for bin/brio - the twin of the AVR
-# project's apps_avrdx.json, and a SEPARATE FILE on purpose: app names
+# project's apps_avrxt.json, and a SEPARATE FILE on purpose: app names
 # collide across the two source trees (blink, console, probe exist in
 # both), so only a per-project roster can say which tree, which toolchain
 # and which flash mechanism an app name means. Variant-agnostic, exactly

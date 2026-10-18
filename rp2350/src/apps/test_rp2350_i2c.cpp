@@ -19,7 +19,7 @@
 // wired to the WeAct RP2040's I2C1, each line with 1.5 kOhm to THAT
 // board's 3V3 (docs/boards/weact-rp2350b.md). That board runs `twi_peer`
 // (rp2040/src/apps/twi_peer.cpp), commanded IN BAND over the bus under
-// test through avrdx/src/apps/twi_link.hpp; the two-board letters are the
+// test through avrxt/src/apps/twi_link.hpp; the two-board letters are the
 // ones both Raspberry Pi suites share, rp2040/src/apps/rp_i2c_pair.hpp,
 // whose header states what they ask of a suite. Every letter that drives
 // the link reads the partner's rail first through
@@ -101,7 +101,7 @@
 
 // THE PROTOCOL HEADER IS SHARED, NOT COPIED: one file for every board
 // that speaks it.
-#include "../../../avrdx/src/apps/twi_link.hpp"
+#include "../../../avrxt/src/apps/twi_link.hpp"
 
 #include "pair_power.hpp"
 

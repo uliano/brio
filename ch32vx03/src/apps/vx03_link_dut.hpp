@@ -41,7 +41,7 @@
 #include "util/print.hpp"
 
 // THE LINK PROTOCOL IS SHARED, NOT COPIED: pure encoding, not one register.
-#include "../../../avrdx/src/apps/usart_link.hpp"
+#include "../../../avrxt/src/apps/usart_link.hpp"
 
 namespace vx03link {
 

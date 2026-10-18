@@ -1,7 +1,7 @@
 # ============================================================================
 #  stm32g0/CMakeLists.txt - the STM32G0 build: brio's third hardware target,
 #  a SIBLING CMake project (own toolchain file, own presets) exactly like
-#  samc21/ and avrdx/ - nothing shared, one configure = one compiler, and
+#  samc21/ and avrxt/ - nothing shared, one configure = one compiler, and
 #  still no factored "app discovery" module: this is the THIRD instance of
 #  the shape, written by hand from the samc21 one, and the factoring (if it
 #  ever happens) happens with all three in hand.

@@ -1,7 +1,7 @@
 // twi_peer - a scriptable second chip on the bus for the far end of a
 // two-board I2C test, on an RP2350: the far board is the DUT and the bus
 // host, and it drives this one IN BAND over the very bus both are testing
-// (avrdx/src/apps/twi_link.hpp). The body is the one both Raspberry Pi
+// (avrxt/src/apps/twi_link.hpp). The body is the one both Raspberry Pi
 // chips share over the Synopsys DW_apb_i2c,
 // rp2040/src/apps/rp_twi_peer.hpp, whose header says what this silicon
 // makes of the protocol; this file binds it to the RP2350, ONE SOURCE FOR
@@ -40,7 +40,7 @@
 #include "util/print.hpp"
 
 // THE PROTOCOL HEADER IS SHARED, NOT COPIED (rp_twi_peer.hpp's header).
-#include "../../../avrdx/src/apps/twi_link.hpp"
+#include "../../../avrxt/src/apps/twi_link.hpp"
 
 #include "pair_power.hpp"
 

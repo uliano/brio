@@ -11,7 +11,7 @@ or on a second SAM C21, the suite asks ident and does not care -
 commanded in band over the bus under test with the `spi_link.hpp` wire
 format, one source file serving both architectures - except letters h
 and i, which judge the facts of an AVR CLIENT and run only when the
-ident names the avrdx peer).
+ident names the avrxt peer).
 
 ## What the silicon does
 
@@ -344,7 +344,7 @@ the two spans:
 - Back-to-back characters (no inter-byte gap - one engine request)
   bind at the PEER: its answer reload, or its silicon under it. The AVR
   peer serves each window with one call of its driver's runs
-  ([../avrdx/spi.md](../avrdx/spi.md), the client's runs): exact both
+  ([../avrxt/spi.md](../avrxt/spi.md), the client's runs): exact both
   ways to 2 MHz in every ladder of letter d, and at 3 MHz every answer
   that is wrong is wrong in its first bit alone while the client
   receives every character exact - the AVR's clarification 3.5.2, its

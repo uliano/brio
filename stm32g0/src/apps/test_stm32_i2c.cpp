@@ -35,7 +35,7 @@
 // - an stm32g0 peer answers on the SAME PIN NAMES this board hosts on,
 // plus a dedicated GND, both boards at 3.3 V. The
 // instrument is commanded IN BAND over the bus under test, over
-// avrdx/src/apps/twi_link.hpp included by relative path - one source of
+// avrxt/src/apps/twi_link.hpp included by relative path - one source of
 // truth for the wire format, whatever the peer's architecture - and its
 // command-mode client answers ONE address (0x6B) with no general call
 // and no mask, which is why nothing the wireless letters do can wake it.
@@ -170,7 +170,7 @@
 // THE PROTOCOL HEADER IS SHARED, NOT COPIED. twi_link.hpp
 // is pure encoding - it names no register and includes nothing of brio -
 // so every architecture on this link compiles the same file.
-#include "../../../avrdx/src/apps/twi_link.hpp"
+#include "../../../avrxt/src/apps/twi_link.hpp"
 
 namespace {
 
@@ -817,7 +817,7 @@ bool need_self_link() {
 // The peer: twi_link.hpp over the bus under test
 // ===========================================================================
 //
-// The wire format is avrdx/src/apps/twi_link.hpp, included by relative
+// The wire format is avrxt/src/apps/twi_link.hpp, included by relative
 // path and NOT copied - it names no register, includes nothing of brio
 // and every architecture that speaks the link compiles it. The
 // instrument at the other end is `twi_peer`, in whichever of its ports

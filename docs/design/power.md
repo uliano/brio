@@ -8,7 +8,7 @@ the list of things able to wake the machine. This page is the model that
 makes that decision explicit, negotiated and target-independent. The
 mechanism it stands on - which modes exist, what each gates, what wakes
 it - is each target's, documented in that target's folder
-(`docs/avrdx/platform.md`).
+(`docs/avrxt/platform.md`).
 
 Contracts and services: `util/power.hpp`. The kernel question it needs:
 `TimeEvents<P>::ticks_to_next()` (`kernel/time_event.hpp`).
@@ -23,7 +23,7 @@ offer, and whether the kernel tick survives the rung.
 
 | stratum | realization | beyond the contract |
 |---|---|---|
-| avrdx | `AvrSleepSite` over `Sleep` (`avrdx/sleep.hpp`) | the ladder is the identity: `light` -> IDLE, `standby` -> STANDBY, `deep` -> POWER-DOWN; the tick (the RTC's PIT on the 32 kHz oscillator) runs through every rung, so nothing needs resyncing |
+| avrxt | `AvrSleepSite` over `Sleep` (`avrxt/sleep.hpp`) | the ladder is the identity: `light` -> IDLE, `standby` -> STANDBY, `deep` -> POWER-DOWN; the tick (the RTC's PIT on the 32 kHz oscillator) runs through every rung, so nothing needs resyncing |
 | samc21 | `SamSleepSite` and `SamTimedSleepSite` over `Pm` (`samc21/sleep.hpp`) | `light` -> IDLE2 (IDLE0 is the reset value, so `armed()` could not read it back), `standby` AND `deep` -> STANDBY (nothing deeper exists; `armed()` reports `standby` for a `deep` request); the tick stops in standby, so the plain site restricts standby to a program with no time event armed and the TIMED site lifts that with the RTC as alarm and witness (below) |
 | stm32g0 | `Stm32g0SleepSite`, `Stm32g0TimedSleepSite` and `Stm32g0LptimTimedSleepSite` over `Pwr` (`stm32g0/sleep.hpp`) | `none` AND `light` -> Sleep (the only mode between Sleep and Stop wants the whole program at 2 MHz, which a site may not do), `standby` -> Stop 0, `deep` -> Stop 1; Standby and Shutdown are OFF the ladder because the program does not resume; a SYSCLK restore and a ticker pause ride the two verbs; the timed sites take the RTC or the LPTIM as alarm and witness, and both refuse a `Tickless` platform, whose timebase counts through the Stop by itself |
 | stm32f4 | `Stm32f4SleepSite` and `Stm32f4TimedSleepSite` over `Pwr` (`stm32f4/sleep.hpp`) | `none` AND `light` -> Sleep (this family has nothing between Sleep and Stop), `standby` -> a Stop on the MAIN regulator, `deep` -> the same Stop on the LOW-POWER one with the flash in power-down - one mode with two prices, so `armed()` answers from the mirror the site wrote and `deep` for a Stop somebody else armed; Standby is off the ladder AND ENFORCED off it, every `arm()` clearing PDDS, because its wake is the reset vector; a SYSCLK restore rides `disarm()` (a Stop leaves the core on the HSI with the PLL, the HSE and over-drive gone) and the ticker is paused across a deep rung, which is also ES0298 2.2.1's workaround; the timed site takes the RTC whole - the wake-up timer as alarm, the calendar and sub-second counter as witness - and the Stop is left only through the NVIC line the application must enable |

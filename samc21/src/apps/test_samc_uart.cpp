@@ -157,7 +157,7 @@
 
 // The two-board half's protocol: shared with the far board's usart_peer,
 // pure encoding and no register.
-#include "../../../avrdx/src/apps/usart_link.hpp"
+#include "../../../avrxt/src/apps/usart_link.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::internal, 48'000'000>;
 constexpr SysClock clock;
@@ -2399,7 +2399,7 @@ void tx_refusal() {
 // crystal at the other end (the second all-key, y)
 // =============================================================================
 //
-// THE FAR END is an AVR128DA48 running avrdx's usart_peer (usart_link.hpp,
+// THE FAR END is an AVR128DA48 running avrxt's usart_peer (usart_link.hpp,
 // kind 0x01): its USART4 on the crossed pair, its time base its own 24 MHz
 // quartz clock, driven IN BAND over the very link under test - the client half
 // below is test_avr_serial's, speaking the same protocol header. What it
@@ -2885,7 +2885,7 @@ bool ensure_link() {
     link_quiet = false;
     topo_known = false;
     print(plain, "  the peer did not answer on the ", shared_line() ? "shared wire" : "crossed pair",
-          ": the far board must run avrdx's usart_peer", crlf);
+          ": the far board must run avrxt's usart_peer", crlf);
     return false;
 }
 
@@ -3250,8 +3250,8 @@ void tJ_link() {
     print(plain, "  peer: label '", label, "', kind ", hex(link::peer_kind(d.version)), ", fw ",
           hex(d.version), ", xtal ", d.xtal, ", sanity ", hex(d.sanity), crlf);
     bench.verdict("it identifies as usart_peer", have && d.sanity == link::ident_sanity);
-    bench.verdict("the avrdx peer (kind 0x01), its time base the 24 MHz crystal",
-                  have && link::peer_kind(d.version) == link::peer_avrdx && d.xtal == 1u);
+    bench.verdict("the avrxt peer (kind 0x01), its time base the 24 MHz crystal",
+                  have && link::peer_kind(d.version) == link::peer_avrxt && d.xtal == 1u);
     link_end();
 }
 
@@ -4417,7 +4417,7 @@ void tQ_sync() {
 // far board's IRCOM pins carry the inverted values - a 0 a LOW pulse on an
 // idle-high line - so its frames reach this receiver as they are, and this
 // coder's reach it only through its receive pin's INVEN, which the far
-// peer sets itself when it finds its line idling low (avrdx usart_peer,
+// peer sets itself when it finds its line idling low (avrxt usart_peer,
 // match_ircom_sense()). RXPL (31.8.5) counts the core clock: a pulse is a
 // 0 when it lasts at least RXPL + 2 cycles of the 24 MHz generator.
 

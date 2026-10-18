@@ -64,7 +64,7 @@
 // THE PROTOCOL HEADER IS SHARED, NOT COPIED: pure encoding, not one
 // register, and every architecture on this link compiles the same
 // file.
-#include "../../../avrdx/src/apps/twi_link.hpp"
+#include "../../../avrxt/src/apps/twi_link.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::internal, 48'000'000>;
 constexpr SysClock clock{};
@@ -280,7 +280,7 @@ twilink::Report run_serve(const twilink::Params& a, bool fixed_byte) {
         }
         if (Client::addressed()) {
             ++r.addr_hits;
-            // The 7-bit address, as the Report carries it (the avrdx
+            // The 7-bit address, as the Report carries it (the avrxt
             // peer's convention): the matched byte holds it in bits 7:1.
             r.last_addr = static_cast<uint8_t>(Client::matched_byte() >> 1);
             Client::answer_address(true);

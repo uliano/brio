@@ -50,7 +50,7 @@ controller under them can do.
 
 | stratum | realization | beyond the contract |
 |---|---|---|
-| avrdx | none | this family has no DMA; an interrupt-fed source satisfying `BlockSource` from a handler is the stated shape and is born with its first user |
+| avrxt | none | this family has no DMA; an interrupt-fed source satisfying `BlockSource` from a handler is the stated shape and is born with its first user |
 | samc21 | none | the DMAC is driven for the Uart's transmitter alone: erratum 1.10.4 corrupts the live descriptor of concurrently triggered channels ([the target's document](../samc21/dmac.md)); an interrupt-fed source is the stated shape and is born with its first user |
 | stm32g0 | the same two names in `stm32g0/dma.hpp` | the player rides the controller's HARDWARE CIRCULAR MODE (the lap interrupt only counts); the source cannot (skip-rather-tear is undecidable after the edge, below) and stops itself at every block |
 | ch32v00x | none yet: `DmaTxEngine` and `DmaRxEngine` alone in `ch32v00x/dma.hpp` | the controller has a circular mode (CFGR.CIRC) and no multiplexer - the channel is the request - so the two block engines would be the G0's shape on seven fixed channels; born with their first block user on this family, a source the ADC's stall makes worth measuring first ([the target's document](../ch32v00x/dma.md)) |

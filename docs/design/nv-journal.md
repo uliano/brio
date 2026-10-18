@@ -169,7 +169,7 @@ whether the family needs a journal at all.
 
 | stratum | realization | beyond the contract |
 |---|---|---|
-| avrdx | none | this family has an EEPROM, and its small values are `NvRecord` over `EepromStore` (`util/nv_record.hpp`, `avrdx/nvm.hpp`); the journal is host-tested on this family's 512 / 2 geometry and born here with its first user |
+| avrxt | none | this family has an EEPROM, and its small values are `NvRecord` over `EepromStore` (`util/nv_record.hpp`, `avrxt/nvm.hpp`); the journal is host-tested on this family's 512 / 2 geometry and born here with its first user |
 | samc21 | `RwweeJournalZone` (`samc21/nvm_flash.hpp`), rows 28..31 of the RWWEE partition | 256 / 64 - the attic the heap's rows leave; `JournalPanic` over it is the breadcrumb that survives a POWER LOSS, the `.noinit` one surviving resets alone |
 | stm32g0 | `MainFlashJournalZone` (`stm32g0/nvm_flash.hpp`), the top of bank 2 | 2048 / 8; the same panic reserve, the same read-while-write property; absent on a single-bank part until the storage geometry there is decided |
 | ch32v00x | `MainFlashJournalZone` (`ch32v00x/nvm_flash.hpp`), the 6 KB attic above the heap's zone | 256 / 256, so every entry costs a page and a half of twelve pages holds twelve entries - the geometry assertion sizes `max_ids` accordingly and the attic is for a handful of values; the same panic reserve, `save_reserved()` one page program with no erase, the core stalled for it |

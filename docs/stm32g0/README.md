@@ -78,7 +78,7 @@ PC13, and the absence of an HSE crystal (X3 is not fitted by default
 and the ST-LINK's 8 MHz MCO reaches HSE only through solder bridges -
 the HSE root is unbuilt anyway).
 
-`stm32g0/` is its own CMake project, a sibling and peer of `avrdx/`,
+`stm32g0/` is its own CMake project, a sibling and peer of `avrxt/`,
 `samc21/` and `test/`. Apps are auto-discovered from
 `stm32g0/src/apps/*.cpp` - plus `experiments/*/stm32g0/*.cpp` - by
 their `// build:` header comment, the other two projects' grammar with

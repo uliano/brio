@@ -1,4 +1,4 @@
-"""brio check [avrdx|samc21|stm32g0|ch32v00x|ch32vx03|ch32x035|rp2040|rp2350|stm32f4|all]
+"""brio check [avrxt|samc21|stm32g0|ch32v00x|ch32vx03|ch32x035|rp2040|rp2350|stm32f4|all]
 [filter] - the family compile fixtures: every smoke TU under
 test/family*/ compiles for every package or variant of the stratum, and
 every negative TU is REFUSED. The fixtures are the shell scripts under
@@ -32,7 +32,7 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPTS = {
-    "avrdx": "check_family.sh",
+    "avrxt": "check_avrxt.sh",
     "samc21": "check_samc21.sh",
     "stm32g0": "check_stm32g0.sh",
     "ch32v00x": "check_ch32v00x.sh",

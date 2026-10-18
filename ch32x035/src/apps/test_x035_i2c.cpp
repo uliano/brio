@@ -27,7 +27,7 @@
 // line, and PB3 sources at most about 4.4 mA with both lines held low.
 //
 // THE PEER is commanded IN BAND over the bus under test through
-// avrdx/src/apps/twi_link.hpp, included by relative path: one source of
+// avrxt/src/apps/twi_link.hpp, included by relative path: one source of
 // truth for the wire format, whatever the peer's architecture. Its
 // command-mode client answers ONE address (0x6B) with no general call and
 // no second address.
@@ -136,7 +136,7 @@
 #include "util/testbench.hpp"
 
 // THE PROTOCOL HEADER IS SHARED, NOT COPIED (see the header comment).
-#include "../../../avrdx/src/apps/twi_link.hpp"
+#include "../../../avrxt/src/apps/twi_link.hpp"
 
 using P = brio::Ch32x035Platform<>;
 using SysClock = brio::Clock<brio::ClockSource::internal, 48'000'000>;

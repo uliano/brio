@@ -34,7 +34,7 @@
 //    this stratum, the desk partner - the CH32V303 of a CH32V203 and the
 //    other way round - or a board of another family; the peer's ident
 //    says which), commanded IN BAND over the bus under test through
-//    avrdx/src/apps/twi_link.hpp, included by relative path: one source
+//    avrxt/src/apps/twi_link.hpp, included by relative path: one source
 //    of truth for the wire format on every architecture. Three wires,
 //    both boards at 3.3 V:
 //
@@ -182,7 +182,7 @@
 
 // THE PROTOCOL HEADER IS SHARED, NOT COPIED: pure encoding, not one
 // register, and every architecture on this link compiles the same file.
-#include "../../../avrdx/src/apps/twi_link.hpp"
+#include "../../../avrxt/src/apps/twi_link.hpp"
 
 namespace {
 

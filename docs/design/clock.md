@@ -6,11 +6,11 @@ and states, once and target-independently, how drivers relate to it -
 in particular what happens when the rate changes at run time. This
 page is the model; the shape of a given tree (which oscillators, which
 prescalers or PLL parameters, which rates are reachable) is that
-target's business, documented in that target's folder (`docs/avrdx/`, ...).
+target's business, documented in that target's folder (`docs/avrxt/`, ...).
 
 Contracts and helpers: `util/clock.hpp` (pure, no hardware). The AVR
-DA/DB realization: `avrdx/clock.hpp` (`Clock`, `DynamicClock` over the
-CLKCTRL resources - see [clkctrl.md](../avrdx/clkctrl.md)) and `avrdx/delay.hpp`
+DA/DB realization: `avrxt/clock.hpp` (`Clock`, `DynamicClock` over the
+CLKCTRL resources - see [clkctrl.md](../avrxt/clkctrl.md)) and `avrxt/delay.hpp`
 (`delay_us`).
 
 ## One truth for the rate
@@ -68,7 +68,7 @@ the two every part has.
 
 | stratum | realization | beyond the contract |
 |---|---|---|
-| avrdx | `Clock<src, hz, div>` and `DynamicClock<Boot, Users...>` (`avrdx/clock.hpp`) | the dynamic set is the boot rate over the twelve main prescalers; `set<hz>()`/`set(hz)` fan `rebase` out then switch; `ClockSource` adds `external`, `osc32k`, `xosc32k`; `delay_us` returns nothing - it has no cap |
+| avrxt | `Clock<src, hz, div>` and `DynamicClock<Boot, Users...>` (`avrxt/clock.hpp`) | the dynamic set is the boot rate over the twelve main prescalers; `set<hz>()`/`set(hz)` fan `rebase` out then switch; `ClockSource` adds `external`, `osc32k`, `xosc32k`; `delay_us` returns nothing - it has no cap |
 | samc21 | `Clock<src, hz>` alone (`samc21/clock.hpp`) | NO dynamic clock, by position: every peripheral has a generic clock channel of its own, so "one rate for everything" is not this family's shape (below); `Clock` builds `internal` alone today, the crystal and the DPLL are resources the program runs the CPU from by hand; `ClockSource` adds `dpll` |
 | stm32g0 | `Clock<src, hz, regime>` and `DynamicClock<Rates<R0, R1, ...>, Users...>` (`stm32g0/clock.hpp`) | a rate is a TUPLE (root, VCORE range, regulator) and the dynamic set an EXPLICIT PACK of such tuples, R0 the boot rate; `PowerRegime` sequences table 13's latency and the range around a switch; `restore()` after a Stop; `ClockSource` adds `pll`, `lsi`, `lse` (the 32 kHz roots under ST's names) |
 | ch32v00x | `Clock<src, hz>` and `DynamicClock<Boot, Users...>` (`ch32v00x/clock.hpp`) | the AVR's shape, the simplest of the four: one root (the HSI, or `ClockSource::pll` - the PLL is a fixed doubler of it) and one divider, HPRE, so the dynamic set is the boot rate over the divider's ladder; `set<hz>()`/`set(hz)` fan `rebase` out then move the divider, the flash wait states raised before a rise and lowered after a fall; `restore()` puts the rate back after a Standby, from which the core wakes on the HSI; `crystal` is named and refused until a board carries one; `delay_us` on the STK counter, refused at a tick period or more |
@@ -84,7 +84,7 @@ the two every part has.
 but the AVR it is capped below one kernel tick and REFUSES (a `bool`,
 nothing spent) a wait that long - a tick or more is `TimeEvent`
 territory - where the AVR's has no cap and returns nothing
-(`avrdx/delay.hpp`; `cortexm/delay.hpp` for the Cortex-M families that
+(`avrxt/delay.hpp`; `cortexm/delay.hpp` for the Cortex-M families that
 ride SysTick's counter; `ch32v00x/delay.hpp`, `ch32vx03/delay.hpp` and
 `ch32x035/delay.hpp` on the three QingKe families' STK;
 `rp2350/delay.hpp` on a timer that is neither core's, because that
@@ -269,15 +269,15 @@ USART personalities without a `rebase` refuse a dynamic clock at their
 | `ClockUser` (concept) | `util/clock.hpp` | what a dynamic clock's user must offer (`rebase(hz)`) |
 | `clock_hz(clock)` | `util/clock.hpp` | the rate of either kind of clock |
 | `clock_follows<C, Driver>()` | `util/clock.hpp` | the reverse check for a driver's `init(clock)` |
-| `Clock<source, hz, div>` | `avrdx/clock.hpp` | AVR DA/DB static clock |
-| `DynamicClock<Boot, Users...>` | `avrdx/clock.hpp` | AVR DA/DB dynamic clock over a static Boot |
-| `delay_us(clock, us)` | `avrdx/delay.hpp` | AVR DA/DB short wait, "at least" |
+| `Clock<source, hz, div>` | `avrxt/clock.hpp` | AVR DA/DB static clock |
+| `DynamicClock<Boot, Users...>` | `avrxt/clock.hpp` | AVR DA/DB dynamic clock over a static Boot |
+| `delay_us(clock, us)` | `avrxt/delay.hpp` | AVR DA/DB short wait, "at least" |
 | `Clock<source, hz>` | `samc21/clock.hpp` | the SAM C21's static clock (no dynamic one - see above) |
 | `Clock<source, hz, regime>` | `stm32g0/clock.hpp` | the STM32G0's static clock, with its voltage regime |
 | `DynamicClock<Rates<...>, Users...>` | `stm32g0/clock.hpp` | the STM32G0's dynamic clock over a pack of rate tuples |
 | `Rates<...>` + `DynamicClock<Rates<...>, Users...>` | `stm32f4/clock.hpp` | the STM32F4's dynamic clock, the same pack with the park on the HSI |
 | `delay_us(clock, us)`, `delay_rates<Clock>` | `cortexm/delay.hpp` | both Cortex-M0+ families' short wait, on SysTick's counter; the per-rate table of a dynamic clock |
 
-Target pages: [../avrdx/README.md](../avrdx/README.md),
+Target pages: [../avrxt/README.md](../avrxt/README.md),
 [../samc21/clock.md](../samc21/clock.md),
 [../stm32g0/clock.md](../stm32g0/clock.md).

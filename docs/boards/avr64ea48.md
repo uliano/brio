@@ -4,13 +4,13 @@ The REV 1.2 PCB of the self-built 48-pin design ("AVRxxx[DA|DB|EA]48 /
 ATmega4809 - REV 1.2", the same board as [avr128da48.md](avr128da48.md))
 fitted with an **AVR64EA48** (64 KB flash, 6 KB SRAM, 512 B EEPROM,
 signature `1E 96 1E`, `SYSCFG.REVID` 0x21 = silicon revision B1), the
-EA of the `avrdx/` stratum's bench. A board type names an ASSEMBLY, and
+EA of the `avrxt/` stratum's bench. A board type names an ASSEMBLY, and
 this one differs from the DA's on the same PCB in what is fitted.
 
 - **Clock**: a **20 MHz quartz on PA0/PA1** for the EA's crystal
   oscillator (XOSCHF) - the "EXT CLK OPTS" solder jumpers in the quartz
   position; `BoardClock` is `Clock<ClockSource::crystal, 20'000'000>`
-  with OSCHF claimed at 20 MHz (`avrdx/src/apps/avr_board.hpp`). A
+  with OSCHF claimed at 20 MHz (`avrxt/src/apps/avr_board.hpp`). A
   **32.768 kHz crystal on PF0/PF1**. Neither crystal's pins are ever
   driven by a program on this board, started or not.
 - **Supply**: **5 V** (VDD jumper), measured 5.03 V by the probe. The EA's
@@ -49,8 +49,8 @@ this one differs from the DA's on the same PCB in what is fitted.
   pin and its PC partner at once: `pin_check` waves PC4..PC7 and leaves
   PE0..PE3 inputs with no pull, and the suites leave the unused half an
   input (`board_pc_pe_jumpers`).
-- Manifest type `ea48`; the project is `avrdx/`
-  ([../avrdx/README.md](../avrdx/README.md)).
+- Manifest type `ea48`; the project is `avrxt/`
+  ([../avrxt/README.md](../avrxt/README.md)).
 
 ## Bench findings
 
@@ -69,6 +69,6 @@ this one differs from the DA's on the same PCB in what is fitted.
   `test_avr_platform` 109 of 109, `test_avr_power` 53 of 53 (one verdict
   of its letter b red in two runs of ten - platform.md), `test_avr_clock`
   22 of 27 - its five reds are the rulers timed against the 32 kHz
-  crystal above ([../avrdx/platform.md](../avrdx/platform.md),
-  [../avrdx/port.md](../avrdx/port.md),
-  [../avrdx/clkctrl.md](../avrdx/clkctrl.md)).
+  crystal above ([../avrxt/platform.md](../avrxt/platform.md),
+  [../avrxt/port.md](../avrxt/port.md),
+  [../avrxt/clkctrl.md](../avrxt/clkctrl.md)).

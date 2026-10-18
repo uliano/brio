@@ -72,7 +72,7 @@ Three concerns, deliberately kept apart:
    its images; `brio run` judges each image's own ALL: line.
 
 **The board type carries the architecture**: `db28`/`db32`/`db48` are
-AVR DA/DB parts built by the `avrdx/` project and written by avrdude
+AVR DA/DB parts built by the `avrxt/` project and written by avrdude
 over UPDI; `c21j` a SAM C21 built by `samc21/` and written by OpenOCD
 over SWD; `g0b1re`/`g071rb`/`g031k8` the STM32G0 Nucleos built by
 `stm32g0/` and written by OpenOCD through the board's own ST-LINK;
@@ -122,7 +122,7 @@ a kind are attached. The kinds - `atmelice_updi`, `serialupdi`,
 hardware, so each carries something a suite can print in its banner
 and a human can compare against the manifest: an AVR board a label in
 its USERROW, written once over UPDI
-([../avrdx/userrow.md](../avrdx/userrow.md)); a SAM board its factory
+([../avrxt/userrow.md](../avrxt/userrow.md)); a SAM board its factory
 die serial; an STM32 its 96-bit unique device ID.
 
 **What a suite needs wired** is in the suite's own header comment, the

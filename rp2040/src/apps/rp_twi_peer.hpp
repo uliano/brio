@@ -3,7 +3,7 @@
 // rp2040/src/apps/twi_peer.cpp and rp2350/src/apps/twi_peer.cpp: a
 // scriptable second chip on the bus for the far end of a two-board I2C
 // test, commanded IN BAND over the very bus both are testing through
-// avrdx/src/apps/twi_link.hpp.
+// avrxt/src/apps/twi_link.hpp.
 //
 // ONE BODY, TWO CHIPS: everything below is the IP's and the protocol's;
 // what is a chip's - the instance, the two pads, the clock, the console,
@@ -96,7 +96,7 @@
 
 // THE PROTOCOL HEADER IS SHARED, NOT COPIED: pure encoding, not one
 // register, and every architecture on this link compiles the same file.
-#include "../../../avrdx/src/apps/twi_link.hpp"
+#include "../../../avrxt/src/apps/twi_link.hpp"
 
 using twilink::Op;
 

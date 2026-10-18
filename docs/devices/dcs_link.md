@@ -63,7 +63,7 @@ hands the member to `Host::start()`. The arbiter's contract
 enough: a request is lent for the call, and a polled one completes inside
 it, so nothing of the member is read after the return. Counted in the
 compile fixtures' listing (`test/family_stm32f4/devices_link.cpp`,
-`test/family/devices_link.cpp`): a verb is the command byte, the two
+`test/family_avrxt/devices_link.cpp`): a verb is the command byte, the two
 spans and the length - four stores on a Cortex-M4, seven on the AVR -
 where it was a 48-byte copy of the prototype plus seven field stores on
 the M4 and a 21-byte copy loop plus twelve on the AVR. Both spans are

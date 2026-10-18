@@ -84,7 +84,7 @@ oscillator the suites start and measure against ([clock.md](clock.md)) -
 console CH340 on PB30/PB31 (SERCOM5 PAD0/PAD1), user button PB22,
 LED PB23, SWD on PA30/PA31.
 
-`samc21/` is its own CMake project, a sibling and peer of `avrdx/`,
+`samc21/` is its own CMake project, a sibling and peer of `avrxt/`,
 `stm32g0/` and `test/` (one configure has exactly one compiler; the
 repo root is not a CMake project). Apps are auto-discovered from
 `samc21/src/apps/*.cpp` - plus `experiments/*/samc21/*.cpp`, the SAM half

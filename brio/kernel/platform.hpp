@@ -4,7 +4,7 @@
  * The Platform concept: the complete list of what the brio kernel needs
  * from the machine underneath. Kernel code is templated on a Platform and
  * NEVER includes a hardware header; each target implements the concept in
- * its own <stratum>/platform.hpp (avrdx/, samc21/, stm32g0/, and host/
+ * its own <stratum>/platform.hpp (avrxt/, samc21/, stm32g0/, and host/
  * for the native test build) and the app names its platform once. No
  * #ifdef: the door to the next target stays open by construction.
  *

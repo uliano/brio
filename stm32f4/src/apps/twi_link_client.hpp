@@ -5,7 +5,7 @@
 // APP-LEVEL BENCH TOOLING, not framework, kept beside the two suites that
 // share it (test_stm32f4_i2c over I2C1, test_stm32f4_fmpi2c over FMPI2C1)
 // so that one reviewed copy of the request/response choreography serves
-// both. The wire format is avrdx/src/apps/twi_link.hpp, included by
+// both. The wire format is avrxt/src/apps/twi_link.hpp, included by
 // relative path and not copied.
 //
 // ONE COMMAND IS TWO TENURES of the engine under test - a write carrying
@@ -27,7 +27,7 @@
 
 #include "util/i2c_bus.hpp"
 
-#include "../../../avrdx/src/apps/twi_link.hpp"
+#include "../../../avrxt/src/apps/twi_link.hpp"
 
 template <typename Port>
 struct TwiLinkClient {

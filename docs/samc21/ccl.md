@@ -106,7 +106,7 @@ field here because it is decided by WHICH verb runs.
 
 **`lut_truth(predicate)`** builds the table from a lambda of three
 bools, with IN[0] as the LSB (table 37-1) - the same convention as
-`avrdx/ccl.hpp`, so a table written for one family reads correctly on
+`avrxt/ccl.hpp`, so a table written for one family reads correctly on
 the other. `lut_truth_pass(i)` / `lut_truth_invert(i)` are the two
 tables every probe needs.
 

@@ -51,7 +51,7 @@ manifest records the probe's USB serial per board.
   at 0x800000 + address; a detach lets the program run on. This is how
   a board whose console does not reach the host is still read.
 - **Debugging**: PyAvrOCD as the GDB server, launched by the IDE's
-  cppdbg entry ([../avrdx/README.md](../avrdx/README.md)). Effectively
+  cppdbg entry ([../avrxt/README.md](../avrxt/README.md)). Effectively
   ONE free hardware breakpoint (GDB borrows the second); line
   breakpoints need `-fno-inline`, hence the Debug preset's flags.
 

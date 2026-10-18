@@ -253,7 +253,7 @@ a compile-time refusal in the task.
   is an address match, and `rx_paced` and `rx_tail` - the receiver's
   pace and the flag that ends a burst, as the instantiation resolved
   them. The public surface is
-  IDENTICAL to avrdx's and samc21's, which is what lets
+  IDENTICAL to avrxt's and samc21's, which is what lets
   `util/serial_port.hpp` and `print()` compile here untouched.
 - `Rs485<n, pins, de_pin, assertion, deassertion, ..., Placement>` - the
   same task with the driver enable filled in. **`OneWire` is NOT a task here**:
@@ -1031,7 +1031,7 @@ exists only past the point where the FIFO off already loses every frame.
 The desk pairs this board's USART1 with the STM32F446RE's, CROSSED - PA9
 to its PA10, PA10 from its PA9 - the far board running the stm32f4
 `usart_peer` (firmware 0x0401), driven IN BAND with the protocol every
-architecture on the link compiles (`avrdx/src/apps/usart_link.hpp`): an
+architecture on the link compiles (`avrxt/src/apps/usart_link.hpp`): an
 ack before every action, a bounded action, the peer back in command
 mode by itself. Letters `1` to `9`, `0`, `r`, `s` and `u` run under the
 second all-key `t` and never under `z`, which runs with the far board on its

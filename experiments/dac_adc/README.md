@@ -52,6 +52,6 @@ uses 10. That measurement is why `SpiHost::Request` carries
 
 ## Building
 
-Both apps are discovered by the avrdx project like any other
-(`experiments/*/avrdx/*.cpp`): `cmake --build --preset
+Both apps are discovered by the avrxt project like any other
+(`experiments/*/avrxt/*.cpp`): `cmake --build --preset
 avr128db48-release --target dac_adc` (or `mcp_diag`).

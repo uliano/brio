@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Family compile check for the SAM C21 stratum (part of every driver's
-# definition of done, the samc21 twin of cli/checks/check_family.sh).
+# definition of done, the samc21 twin of cli/checks/check_avrxt.sh).
 #
 # Positive: every test/family_samc21/*.cpp must COMPILE for every device
 # header named below - the E/G/J variants of the 18A, i.e. the three pin
@@ -10,7 +10,7 @@
 # each variant named on its "// mcu: <list>" line (what must be refused
 # must be refused at compile time).
 #
-# No CMake coupling on purpose (same as check_family.sh): the compiler is
+# No CMake coupling on purpose (same as check_avrxt.sh): the compiler is
 # called directly, the whole sweep takes seconds and needs no hardware.
 #
 # Usage: brio check samc21            all TUs, all variants

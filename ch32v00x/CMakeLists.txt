@@ -1,7 +1,7 @@
 # ============================================================================
 #  ch32v00x/CMakeLists.txt - the CH32V00x build: brio's fourth hardware
 #  target and its first RISC-V one, a SIBLING CMake project (own
-#  toolchain file, own presets) exactly like avrdx/, samc21/ and
+#  toolchain file, own presets) exactly like avrxt/, samc21/ and
 #  stm32g0/ - nothing shared, one configure = one compiler.
 #
 #  One executable target per app: every ch32v00x/src/apps/*.cpp with a

@@ -21,7 +21,7 @@
 //    nothing: the pair's select is never driven low by them.
 //  - `y`, THE PAIR'S LETTERS (d, j, k, l, m), against the far board
 //    running `spi_peer`, commanded IN BAND over the bus under test through
-//    avrdx/src/apps/spi_link.hpp, included by relative path: one source of
+//    avrxt/src/apps/spi_link.hpp, included by relative path: one source of
 //    truth for the wire format on every architecture. They FAIL loudly
 //    when nobody answers. `x`, by name, is the slip statistics behind
 //    letter d's matrix (no verdict).
@@ -160,7 +160,7 @@
 #include "util/spi_bus.hpp"
 #include "util/testbench.hpp"
 
-#include "../../../avrdx/src/apps/spi_link.hpp"
+#include "../../../avrxt/src/apps/spi_link.hpp"
 
 namespace {
 
@@ -1914,7 +1914,7 @@ void register_spi3_letters() {
 //
 // THE OTHER END IS THE DESK PARTNER running `spi_peer` (the CH32V303 for a
 // CH32V203 DUT, the CH32V203 for a CH32V303 DUT), commanded IN BAND over
-// the bus under test through avrdx/src/apps/spi_link.hpp. Every letter here
+// the bus under test through avrxt/src/apps/spi_link.hpp. Every letter here
 // FAILS loudly when the peer does not answer: it is in the second set, which
 // `z` never runs.
 //

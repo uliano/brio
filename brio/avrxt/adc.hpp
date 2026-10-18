@@ -1,0 +1,508 @@
+/*
+ * adc.hpp
+ *
+ * Adc<n>: the AVR DA/DB 12-bit SAR ADC (DS40002247B ch. 33) as ONE
+ * brio task with knobs - see docs/avrxt/adc.md for why not several:
+ * every use (single reading, paced stream, oversampled reading, window
+ * watch, temperature, supply monitor) is the same sequence - select
+ * input, trigger, wait RESRDY, read RES - with different knobs and
+ * different consumers of the same two events. So: one type, a config
+ * struct that owns the whole configuration, inputs as types, the two
+ * ISR bodies for the app to bind and post, and event start through the
+ * event system. Ownership of the one converter belongs to one AO.
+ *
+ *   using Meter = brio::Adc<0>;
+ *   Meter::init<brio::AdcConfig{.reference = brio::Ref::v2048,
+ *                               .prescaler = brio::AdcPresc::div12,
+ *                               .accumulate = 16}>(clock); // checked at compile time
+ *   Meter::select(brio::AnalogIn<brio::Pin<'D', 1>>{});   // AIN1
+ *   Meter::start();  while (Meter::busy()) {}  auto raw = Meter::result();
+ *
+ * The config comes in two forms with one implementation: init<cfg>()
+ * (the struct as a template argument: static_asserts on the knobs,
+ * every register write folded) and init(cfg) (a run-time value: same
+ * writes computed on the fly - reconfigure from a console command).
+ * reconfigure(cfg) is init(cfg) that first waits for an idle converter
+ * (the datasheet forbids changing RESSEL/CONVMODE/PRESC/SAMPNUM during
+ * a conversion, and free-running must be stopped first).
+ *
+ * Knobs, named as the datasheet names them (33.5): reference (VREF.
+ * ADC0REF), resolution 12/10 bit, differential, prescaler CLK_ADC =
+ * CLK_PER / {2..256} (keep CLK_ADC within 125 kHz .. 2 MHz; accuracy
+ * is specified at 500 kHz), sample_length (0-255 extra CLK_ADC cycles
+ * of sampling: high-impedance sources, the temperature sensor's 28 us),
+ * sample_delay (0-15, to move sampling off a noise harmonic),
+ * init_delay (0/16/../256 CLK_ADC cycles before the first sample after
+ * enable or standby: reference and warm-up settling, >= 6 us),
+ * accumulate 1..128 samples per result (hardware oversampling; RES is
+ * the SUM, truncated to 16 bits above 16), left_adjust, free_running,
+ * run_standby. Conversion time = 2/fPER + n*(13.5 + 2 + sample_delay +
+ * sample_length)/fADC + 2/fPER (12-bit; 11.5 at 10 bits).
+ *
+ * Errata DS80000915F: 2.3.2 (all silicon) - with init_delay != 0, a
+ * MUXPOS/MUXNEG/accumulate change made after enabling the ADC or after
+ * a reference change takes effect only after ONE conversion. init()
+ * writes the mux before enabling, so the first configured input is
+ * right; a later select() with init_delay != 0 must be followed by a
+ * throw-away conversion - flush() does exactly that, blocking. 2.3.1
+ * (A4): -3 mV typical single-ended offset.
+ *
+ * The clock: CLK_ADC = CLK_PER / prescaler must stay within 125 kHz ..
+ * 2 MHz - init() refuses (compile time for a static clock) a prescaler
+ * that does not. Adc is a ClockUser: on a DynamicClock change rebase()
+ * re-picks the prescaler to keep the CLK_ADC chosen at init (stopped,
+ * idle, rewritten, free-running resumed); the owner pauses event-
+ * started conversions around the switch.
+ *
+ * Bench facts (silicon A5): the converter needs its warm-up (t_ADC_INIT
+ * 6 us typ.) after ENABLE before the first conversion is trustworthy -
+ * init(clock, cfg) waits for it; INITDLY is paid only for the first
+ * conversion after enable (not per start); the UNBUFFERED
+ * DAC0 input (MUXPOS DAC0) is high-impedance and reads 3-4 % low with
+ * the default 2-cycle sampling - give it sample_length (16-32 at
+ * 1.5 MHz) like any source above 10 kOhm; the WCMP flag is cleared by
+ * reading RES (33.5.12) - result() captures it first, window_hit()
+ * tells about the LAST result read.
+ *
+ * ISR bodies (the app binds ADC0_RESRDY_vect / ADC0_WCMP_vect and
+ * posts what they return - the ISR condenses, the AO decides):
+ *   ISR(ADC0_RESRDY_vect) { post<Meter>(AdcResult{Adc<0>::resrdy()}); }
+ * Event start: Adc<0>::start_on(EventChannel<n>{}) makes the converter
+ * a user of that channel (async, works in standby): the natural pacer
+ * is EvPitDiv<n> on the channel.
+ */
+
+#pragma once
+
+// THE AVR EA'S ADC IS ANOTHER CONVERTER. Its 12-bit differential ADC
+// with a programmable gain amplifier (DS40002443A ch. 31: SAMPLE/RESULT,
+// burst and series accumulation, MCLKTIMEBASE-timed start-up, an
+// unbuffered input mux) shares almost no register with the AVR DA/DB's
+// ADC this file is written from. Its engine is a later step; until then
+// the header refuses the part by name (docs/avrxt/adc.md).
+#include <avr/io.h>
+#include "avrxt/device_tables.hpp"
+#if defined(ADC_PGAEN_bm)
+static_assert(!brio::has_adc_pga,
+              "brio avrxt: adc.hpp is written for the ADC of the AVR DA/DB; the differential ADC with PGA of the AVR EA (DS40002443A ch. 31) is not written yet (docs/avrxt/adc.md)");
+#else
+
+#include <stdint.h>
+#include <avr/io.h>
+
+#include "avrxt/delay.hpp"
+#include "avrxt/evsys.hpp"
+#include "util/clock.hpp"
+#include "avrxt/pin.hpp"
+#include "avrxt/vref.hpp"
+#include "util/analog.hpp"
+
+namespace brio {
+
+// ---- the knobs ------------------------------------------------------------------
+
+enum class AdcRes : uint8_t { bits12, bits10 };
+
+enum class AdcPresc : uint8_t {
+    div2, div4, div8, div12, div16, div20, div24, div28,
+    div32, div48, div64, div96, div128, div256
+};
+
+constexpr uint16_t adc_presc_divisor(AdcPresc p) {
+    constexpr uint16_t d[] = {2, 4, 8, 12, 16, 20, 24, 28, 32, 48, 64, 96, 128, 256};
+    return d[static_cast<uint8_t>(p)];
+}
+
+enum class AdcInitDelay : uint8_t { none, cycles16, cycles32, cycles64, cycles128, cycles256 };
+
+constexpr uint16_t adc_init_delay_cycles(AdcInitDelay d) {
+    constexpr uint16_t c[] = {0, 16, 32, 64, 128, 256};
+    return c[static_cast<uint8_t>(d)];
+}
+
+struct AdcConfig {
+    Ref reference = Ref::vdd;
+    bool reference_always_on = false;
+    AdcRes resolution = AdcRes::bits12;
+    bool differential = false;
+    AdcPresc prescaler = AdcPresc::div16;   ///< 24 MHz / 16 = 1.5 MHz
+    uint8_t sample_length = 0;             ///< extra CLK_ADC cycles, 0..255
+    uint8_t sample_delay = 0;              ///< 0..15 CLK_ADC cycles
+    AdcInitDelay init_delay = AdcInitDelay::none;
+    uint8_t accumulate = 1;                ///< 1, 2, 4, ... 128 samples per result
+    bool left_adjust = false;
+    bool free_running = false;
+    bool run_standby = false;
+    bool debug_run = false;        ///< DBGRUN: keep converting while the CPU is halted
+};
+
+/// What the compile-time form static_asserts and the run-time form
+/// returns false for.
+constexpr bool adc_config_valid(const AdcConfig& c) {
+    const uint8_t a = c.accumulate;
+    const bool acc_ok = a != 0 && (a & (a - 1)) == 0 && a <= 128;
+    return acc_ok && c.sample_delay <= 15;
+}
+
+/// CLK_ADC in Hz for a peripheral clock and a prescaler.
+constexpr uint32_t adc_clock_hz(uint32_t clk_per_hz, AdcPresc p) {
+    return clk_per_hz / adc_presc_divisor(p);
+}
+
+/// The CLK_ADC range the silicon supports (TCLK_ADC 0.5 .. 8 us).
+inline constexpr uint32_t adc_clock_min_hz = 125'000;
+inline constexpr uint32_t adc_clock_max_hz = 2'000'000;
+
+constexpr bool adc_clock_in_range(uint32_t clk_per_hz, AdcPresc p) {
+    const uint32_t f = adc_clock_hz(clk_per_hz, p);
+    return f >= adc_clock_min_hz && f <= adc_clock_max_hz;
+}
+
+/// The prescaler giving the CLK_ADC closest to `target_hz` at
+/// `clk_per_hz`, within range (the nearest in-range one otherwise).
+constexpr AdcPresc adc_presc_for(uint32_t clk_per_hz, uint32_t target_hz) {
+    AdcPresc best = AdcPresc::div256;
+    uint32_t best_err = 0xFFFFFFFFu;
+    for (uint8_t i = 0; i < 14; ++i) {
+        const AdcPresc p = static_cast<AdcPresc>(i);
+        if (!adc_clock_in_range(clk_per_hz, p)) continue;
+        const uint32_t f = adc_clock_hz(clk_per_hz, p);
+        const uint32_t err = f > target_hz ? f - target_hz : target_hz - f;
+        if (err < best_err) { best_err = err; best = p; }
+    }
+    return best;
+}
+
+/// Total conversion time in CLK_PER cycles for a configuration (33.3.3.4).
+constexpr uint32_t adc_conversion_cycles(const AdcConfig& c) {
+    const uint32_t div = adc_presc_divisor(c.prescaler);
+    const uint32_t per_sample_x2 = (c.resolution == AdcRes::bits12 ? 27u : 23u) +   // 13.5 / 11.5 doubled
+                                   2u * (2u + c.sample_delay + c.sample_length);
+    return 2u + (c.accumulate * per_sample_x2 * div + 1u) / 2u + 2u;
+}
+
+// ---- inputs as types -----------------------------------------------------------
+
+/// Internal inputs (MUXPOS codes; MUXNEG accepts gnd and dac0 only).
+enum class AdcInput : uint8_t {
+    gnd = 0x40, temp = 0x42,
+#ifdef MVIO
+    // DB only: the DA reserves these mux codes (no MVIO there).
+    vdd_div10 = 0x44, vddio2_div10 = 0x45,
+#endif
+    dac0 = 0x48, dacref0 = 0x49, dacref1 = 0x4A, dacref2 = 0x4B
+};
+
+/// The negatives the differential mux accepts among the internal
+/// codes: GND and DAC0 (the AIN negatives go through AnalogIn pins).
+constexpr bool adc_neg_valid(AdcInput in) {
+    return in == AdcInput::gnd || in == AdcInput::dac0;
+}
+
+/// A pin as an analog input: AIN0-7 = PD0-7, AIN8-15 = PE0-7, AIN16-21
+/// = PF0-5 (the device's mapping - a seed of the per-family table).
+/// AIN16-21 cannot be a negative input.
+template <typename P>
+struct AnalogIn {
+    static constexpr char port = P::port_letter;
+    static constexpr uint8_t pin = P::pin_number;
+    static_assert(port == 'D' || port == 'E' || (port == 'F' && pin <= 5),
+                  "ADC inputs: PD0-7 (AIN0-7), PE0-7 (AIN8-15), PF0-5 (AIN16-21)");
+    static constexpr uint8_t ain = static_cast<uint8_t>(
+        port == 'D' ? pin : port == 'E' ? 8 + pin : 16 + pin);
+    static constexpr uint8_t code = ain;
+    static constexpr bool negative_ok = ain <= 15;
+    using PinType = P;
+};
+
+// ---- the converter -------------------------------------------------------------
+
+template <uint8_t adc_num>
+class Adc {
+    static_assert(adc_num == 0, "AVR DA/DB have one ADC: ADC0");
+
+public:
+    Adc() = delete;
+
+    /// Full scale of one sample: 4096 or 1024 (times accumulate for a result).
+    static uint32_t steps() { return steps_; }
+    static uint8_t accumulate() { return acc_; }
+    static Ref reference() { return ref_; }
+    /// RES holds the SUM of the accumulated samples truncated to 16 bits:
+    /// above 16 samples the hardware drops LSBs - 32 -> 1 bit, 64 -> 2,
+    /// 128 -> 3. sum = result() << result_shift().
+    static uint8_t result_shift() { return acc_ <= 16 ? 0 : acc_ == 32 ? 1 : acc_ == 64 ? 2 : 3; }
+    /// Full scale of a RESULT as read (accumulated, truncated).
+    static uint32_t result_steps() { return (steps_ * acc_) >> result_shift(); }
+
+    // ---- configuration ----------------------------------------------------
+
+    /// Compile-time form: the whole configuration as a constant, checked
+    /// - including the CLK_ADC range for a static clock.
+    template <AdcConfig cfg, typename Clock>
+    static bool init(Clock clock) {
+        static_assert(adc_config_valid(cfg),
+                      "AdcConfig: accumulate must be 1,2,4,..,128 and sample_delay <= 15");
+        if constexpr (Clock::is_static) {
+            static_assert(adc_clock_in_range(Clock::hz, cfg.prescaler),
+                          "AdcConfig: CLK_PER / prescaler must stay within 125 kHz .. 2 MHz");
+        }
+        return init(clock, cfg);      // a DynamicClock's current rate can still refuse
+    }
+
+    /// Run-time form. Writes the mux (GND) and every knob BEFORE enabling
+    /// (errata 2.3.2), enables, then waits the converter's warm-up
+    /// (t_ADC_INIT, 6 us typ.: the first conversion before that is
+    /// garbage - measured). Returns false, touching nothing, for an
+    /// invalid configuration.
+    template <typename Clock>
+    static bool init(Clock clock, const AdcConfig& cfg) {
+        static_assert(clock_follows<Clock, Adc>(),
+                      "this Adc is initialized with a DynamicClock that does not list it "
+                      "among its Users: CLK_ADC would drift out of range on a clock change");
+        if (!adc_config_valid(cfg) || !adc_clock_in_range(clock_hz(clock), cfg.prescaler)) {
+            return false;
+        }
+        auto& r = regs();
+        r.CTRLA = 0;                                       // off while configuring
+        Vref::adc0(cfg.reference, cfg.reference_always_on);
+        ref_ = cfg.reference;
+        steps_ = cfg.resolution == AdcRes::bits12 ? 4096u : 1024u;
+        acc_ = cfg.accumulate;
+        clk_adc_hz_ = adc_clock_hz(clock_hz(clock), cfg.prescaler);   // what rebase() preserves
+        free_running_ = cfg.free_running;
+        r.MUXPOS = ADC_MUXPOS_GND_gc;
+        r.MUXNEG = ADC_MUXNEG_GND_gc;
+        r.CTRLB = sampnum_bits(cfg.accumulate);
+        r.CTRLC = static_cast<uint8_t>(cfg.prescaler);    // PRESC codes 0x0..0xD in enum order
+        r.CTRLD = static_cast<uint8_t>((static_cast<uint8_t>(cfg.init_delay) << 5) |
+                                       (cfg.sample_delay & ADC_SAMPDLY_gm));
+        r.SAMPCTRL = cfg.sample_length;
+        r.CTRLE = ADC_WINCM_NONE_gc;
+        r.EVCTRL = 0;
+        r.INTCTRL = 0;
+        r.INTFLAGS = ADC_RESRDY_bm | ADC_WCMP_bm;
+        r.CTRLA = static_cast<uint8_t>(
+            ADC_ENABLE_bm |
+            (cfg.free_running ? ADC_FREERUN_bm : 0) |
+            (cfg.resolution == AdcRes::bits10 ? ADC_RESSEL_10BIT_gc : ADC_RESSEL_12BIT_gc) |
+            (cfg.left_adjust ? ADC_LEFTADJ_bm : 0) |
+            (cfg.differential ? ADC_CONVMODE_bm : 0) |
+            (cfg.run_standby ? ADC_RUNSTBY_bm : 0));
+        r.DBGCTRL = cfg.debug_run ? ADC_DBGRUN_bm : 0;
+        delay_us(clock, 10);                                // t_ADC_INIT (6 us typ.)
+        return true;
+    }
+
+    /// Change the configuration under a running program: stops free-
+    /// running, waits for the converter to be idle, then init(cfg).
+    /// The mux selection is reset to GND: select() again.
+    template <typename Clock>
+    static bool reconfigure(Clock clock, const AdcConfig& cfg) {
+        if (!adc_config_valid(cfg)) {
+            return false;
+        }
+        stop();
+        while (busy()) {
+        }
+        return init(clock, cfg);
+    }
+
+    /// The peripheral clock changed (DynamicClock fan-out): keep CLK_ADC
+    /// as close as possible to the one chosen at init, within range.
+    /// PRESC must not change during a conversion: this stops, waits for
+    /// idle, rewrites, and restarts free-running if it was on. The OWNER
+    /// must have paused event-started conversions (start_on_events(false))
+    /// before the clock switches - a conversion can begin at any time
+    /// otherwise. Sample and init delays are in CLK_ADC cycles: they
+    /// scale with the new CLK_ADC like everything else.
+    /// clock_ok() tells whether the last rebase found an in-range
+    /// prescaler: rebase() itself must stay void (the ClockUser
+    /// contract) and best-effort, but a CLK_PER too slow for
+    /// 125 kHz .. 2 MHz must not fail in silence.
+    static bool clock_ok() { return clock_ok_; }
+    static void rebase(uint32_t hz) {
+        const AdcPresc p = adc_presc_for(hz, clk_adc_hz_);
+        clock_ok_ = adc_clock_in_range(hz, p);
+        stop();
+        while (busy()) {
+        }
+        regs().CTRLC = static_cast<uint8_t>(p);
+        clk_adc_hz_ = adc_clock_hz(hz, p);
+        if (free_running_) {
+            start();
+        }
+    }
+
+    /// CLK_ADC in effect (after init/rebase).
+    static uint32_t clock_hz_adc() { return clk_adc_hz_; }
+
+    // ---- input selection --------------------------------------------------
+
+    /// Positive input from a pin (its digital input buffer is disabled,
+    /// as the datasheet recommends). Buffered by the hardware: takes
+    /// effect at the next conversion. With init_delay != 0 see flush().
+    template <typename P>
+    static void select(AnalogIn<P>) {
+        P::input_enable(false);
+        regs().MUXPOS = AnalogIn<P>::code;
+    }
+    static void select(AdcInput in) { regs().MUXPOS = static_cast<uint8_t>(in); }
+
+    /// Differential pair: positive pin/internal, negative pin (AIN0-15),
+    /// GND or DAC0.
+    template <typename Pp, typename Pn>
+    static void select(AnalogIn<Pp> p, AnalogIn<Pn>) {
+        static_assert(AnalogIn<Pn>::negative_ok, "AIN16-21 (PF0-5) cannot be a negative input");
+        Pn::input_enable(false);
+        select(p);
+        regs().MUXNEG = AnalogIn<Pn>::code;
+    }
+    template <typename Pp>
+    static bool select(AnalogIn<Pp> p, AdcInput neg) {
+        if (!adc_neg_valid(neg)) return false;
+        select(p);
+        regs().MUXNEG = neg_code(neg);
+        return true;
+    }
+    static bool select(AdcInput pos, AdcInput neg) {
+        if (!adc_neg_valid(neg)) return false;
+        select(pos);
+        regs().MUXNEG = neg_code(neg);
+        return true;
+    }
+
+    /// The positive input code in effect (MUXPOS): what AnalogIn<P>::code
+    /// or AdcInput says for the input selected. Read it in the RESRDY ISR
+    /// body's glue to label a result (util/analog_sampler.hpp).
+    static uint8_t selected() { return regs().MUXPOS; }
+
+    /// The code selected() reports for an input, at compile time.
+    template <typename P>
+    static constexpr uint8_t input_code(AnalogIn<P>) { return AnalogIn<P>::code; }
+    static constexpr uint8_t input_code(AdcInput in) { return static_cast<uint8_t>(in); }
+
+    /// Errata 2.3.2: one throw-away conversion after a select() made
+    /// with init_delay != 0 (or after a reference change). Blocking.
+    static void flush() { (void)read(); }
+
+    // ---- conversions ------------------------------------------------------
+
+    static void start() { regs().COMMAND = ADC_STCONV_bm; }
+    static void stop() { regs().COMMAND = ADC_SPCONV_bm; }
+    static bool busy() { return (regs().COMMAND & ADC_STCONV_bm) != 0; }
+
+    /// True once a result is ready (RESRDY flag); result() clears it.
+    static bool ready() { return (regs().INTFLAGS & ADC_RESRDY_bm) != 0; }
+
+    /// The result (RES: a sample, or the SUM of `accumulate` samples,
+    /// right- or left-adjusted as configured). Reading RES clears both
+    /// RESRDY and WCMP: the window verdict is captured first, see
+    /// window_hit().
+    static uint16_t result() {
+        last_hit_ = (regs().INTFLAGS & ADC_WCMP_bm) != 0;
+        return regs().RES;
+    }
+    static int16_t result_signed() { return static_cast<int16_t>(result()); }
+
+    /// Blocking one-shot: start, wait for the RESULT (RESRDY - STCONV
+    /// clears 2 CLK_PER before the result and its flags are formatted;
+    /// waiting on busy() alone reads the previous result), read.
+    static uint16_t read() {
+        start();
+        while (!ready()) {
+        }
+        return result();
+    }
+
+    // ---- window comparator --------------------------------------------------
+
+    enum class Window : uint8_t { none = 0, below = 1, above = 2, inside = 3, outside = 4 };
+
+    /// Compare each RESULT (the accumulated value) against the thresholds;
+    /// WCMP flag/interrupt when the condition holds.
+    static void window(Window mode, uint16_t low, uint16_t high) {
+        regs().WINLT = low;
+        regs().WINHT = high;
+        regs().CTRLE = static_cast<uint8_t>(mode);
+    }
+    /// The thresholds in the DIFFERENTIAL conversion's format (33.5.16:
+    /// two's complement) - the unsigned form above is for single-ended.
+    static void window_signed(Window mode, int16_t low, int16_t high) {
+        window(mode, static_cast<uint16_t>(low), static_cast<uint16_t>(high));
+    }
+    static void window_off() { regs().CTRLE = ADC_WINCM_NONE_gc; }
+    /// Did the LAST result read by result()/read() match the window?
+    /// (The hardware flag is cleared by the RES read itself, 33.5.12.)
+    static bool window_hit() { return last_hit_; }
+    /// The live flag, before any RES read (e.g. in a polling loop that
+    /// only wants hits): true when the last conversion matched.
+    static bool window_flag() { return (regs().INTFLAGS & ADC_WCMP_bm) != 0; }
+    static void clear_window_flag() { regs().INTFLAGS = ADC_WCMP_bm; }
+
+    // ---- interrupts and events ------------------------------------------------
+
+    static void enable_resrdy_interrupt(bool on) { irq(ADC_RESRDY_bm, on); }
+    static void enable_wcmp_interrupt(bool on) { irq(ADC_WCMP_bm, on); }
+
+    /// ISR body for ADCn_RESRDY_vect: the result (flags cleared by the read).
+    /// Die temperature in kelvin from a 12-bit single-ended reading of
+    /// AdcInput::temp with the 2.048 V reference (DS40002247B 33.3.3.8:
+    /// T = (offset - result) * slope / 4096, the two factors from the
+    /// signature row). Pure arithmetic over the reading: call it with
+    /// result() / read() of a temp conversion.
+    static uint16_t temp_kelvin(uint16_t result12) {
+        uint32_t t = static_cast<uint32_t>(SIGROW.TEMPSENSE1) - result12;
+        t *= SIGROW.TEMPSENSE0;
+        t += 4096u / 2;
+        t /= 4096u;
+        return static_cast<uint16_t>(t);
+    }
+
+    [[gnu::always_inline]] static uint16_t resrdy() { return result(); }
+    /// ISR body for ADCn_WCMP_vect: the matching result (flags cleared by the read).
+    [[gnu::always_inline]] static uint16_t wcmp() { return result(); }
+
+    /// Start a conversion on every rising edge of the channel's event
+    /// (async: works in standby). Pace with EvPitDiv<n> on the channel.
+    template <uint8_t n>
+    static void start_on(EventChannel<n> ch) {
+        EvAdc0Start::listen(ch);
+        regs().EVCTRL = ADC_STARTEI_bm;
+    }
+    static void start_on_events(bool on) { regs().EVCTRL = on ? ADC_STARTEI_bm : 0; }
+
+    static void disable() { regs().CTRLA &= static_cast<uint8_t>(~ADC_ENABLE_bm); }
+
+private:
+    static constexpr ADC_t& regs() { return ADC0; }
+
+    static void irq(uint8_t bit, bool on) {
+        if (on) regs().INTCTRL |= bit; else regs().INTCTRL &= static_cast<uint8_t>(~bit);
+    }
+
+    static constexpr uint8_t sampnum_bits(uint8_t acc) {
+        uint8_t v = 0;
+        while ((1u << v) < acc) ++v;          // 1->0, 2->1, 4->2, ... 128->7
+        return v;
+    }
+    static constexpr uint8_t neg_code(AdcInput in) {
+        return in == AdcInput::dac0 ? ADC_MUXNEG_DAC0_gc : ADC_MUXNEG_GND_gc;
+    }
+
+    static inline Ref ref_ = Ref::vdd;
+    static inline uint32_t steps_ = 4096;
+    static inline uint8_t acc_ = 1;
+    /// Written by result(), which the RESRDY vector's body calls; read
+    /// by window_hit() in the thread: volatile.
+    static inline volatile bool last_hit_ = false;
+    static inline uint32_t clk_adc_hz_ = 0;
+    static inline bool free_running_ = false;
+    static inline bool clock_ok_ = true;
+};
+
+static_assert(ClockUser<Adc<0>>);
+
+} // namespace brio
+
+#endif // ADC_PGAEN_bm

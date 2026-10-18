@@ -61,7 +61,7 @@ cycles: one measurement is bounded at about 90 s at 48 MHz and 24 s at
 | STM32F4 | the DWT's cycle counter (`cortexm/dwt.hpp`) | HCLK cycles in one load, the M3+ core unit |
 | RP2350, both architectures | `Timer<1>` with its source on clk_sys (`rp2350/timer.hpp`) | clk_sys cycles: one ruler for both instruction sets, as the stratum's `delay_us` is |
 | CH32V006, CH32V203, CH32V303 | `Ticker::cycles()` on the STK (`ch32v00x/ticker.hpp`, `ch32vx03/ticker.hpp`) | HCLK cycles |
-| AVR DA/DB | two TCBs cascaded at CLK_PER (`avrdx/tcb.hpp`'s `CascadedCounter`) | CLK_PER cycles, 32 bits |
+| AVR DA/DB | two TCBs cascaded at CLK_PER (`avrxt/tcb.hpp`'s `CascadedCounter`) | CLK_PER cycles, 32 bits |
 
 The self-check, letter `r` of every bench app: `delay_us(clock, 1000)`
 read on the ruler must be at least hz/1000 and not more than a few per
@@ -186,7 +186,7 @@ What the rows say, and the two platform columns:
   ([../pl011/README.md](../pl011/README.md)).
 - The AVR's DRE entry is 101 cycles with its stamps, 25 between them:
   `dre()` flattened, so no ring verb is a call
-  ([../avrdx/usart.md](../avrdx/usart.md)). The SAM's console vector is
+  ([../avrxt/usart.md](../avrxt/usart.md)). The SAM's console vector is
   its receiver's too: 153 cycles a transmit entry from the flash and 100
   from SRAM, the transmit path spilling and reloading the flag word the
   receive side's body crowds out of the registers (the listing).
@@ -348,7 +348,7 @@ What the rows say:
   family measured but two (x 1.01 to 1.05 at /4), where the
   retrospective found it at two to seven times the wire: the AVR's 1.09
   is the block's two cycles a byte, the data sheet's own loop the same
-  ([../avrdx/spi.md](../avrdx/spi.md)), and the RP2040's 1.13 in mode 3
+  ([../avrxt/spi.md](../avrxt/spi.md)), and the RP2040's 1.13 in mode 3
   its loop's 35 cycles a frame against 32 on the M0+. Every command phase
   and a display's pixel run pay the wire and a fixed cost of 235 to 390
   cycles a request on the 32-bit cores, 460 on the RP2040 and 570 on the
@@ -427,7 +427,7 @@ What the rows say:
   a frame lasts 80 cycles, the handler takes 75 of them, and the
   consumer starves - the core's limit, which the data sheet's own
   sequence (65 cycles a frame) meets too
-  ([../avrdx/usart.md](../avrdx/usart.md)). A starved consumer meets the
+  ([../avrxt/usart.md](../avrxt/usart.md)). A starved consumer meets the
   receive ring's skips besides: a look after a frame the full ring
   refused discards what the ring holds, so 256 bytes consumed take 3.9
   times their wire time of a stream that does not stop. With the meters
@@ -549,7 +549,7 @@ What the rows say:
   same cause.
 - The AVR's TWI holds SCL from each flag until the software answers, so
   a long tenure at 400 kHz runs at the handler's pace - 1.12, the data
-  sheet's own loop 1.11 ([../avrdx/twi.md](../avrdx/twi.md)).
+  sheet's own loop 1.11 ([../avrxt/twi.md](../avrxt/twi.md)).
 - A block with a byte counter and AUTOEND but no FIFO - the STM32G0's
   - takes the pump's one interrupt a byte, and the tenure's fixed cost
   is what is left to cut: the first data byte preloaded into TXDR

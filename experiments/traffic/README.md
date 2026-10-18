@@ -24,6 +24,6 @@ references it.
 
 ## Building
 
-Discovered by the avrdx project like any other app
-(`experiments/*/avrdx/*.cpp`): `cmake --build --preset
+Discovered by the avrxt project like any other app
+(`experiments/*/avrxt/*.cpp`): `cmake --build --preset
 avr128db48-release --target traffic2` (or `traffic0`, `traffic1`).

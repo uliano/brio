@@ -8,7 +8,7 @@ rationale and the contracts between layers, as they are today.
 
 The directory mirrors the strata of `brio/`: `design/` is the
 target-independent framework (kernel, services, the models every target
-realizes); one folder per target (`avrdx/`, `samc21/`, `stm32g0/`,
+realizes); one folder per target (`avrxt/`, `samc21/`, `stm32g0/`,
 `stm32f4/`, `ch32v00x/`, `ch32vx03/`, `ch32x035/`, `rp2040/`, `rp2350/`,
 `host/`) holds that target's operational page (`README.md`), one
 document per peripheral driver, and its vendor documents; and one folder
@@ -55,7 +55,7 @@ pages say what is theirs and what a family owes them:
 
 | Target | Front page |
 |--------|------------|
-| AVR DA/DB (`brio/avrdx/`) | [avrdx/README.md](avrdx/README.md) - Toolchain, board, Atmel-ICE upload, PyAvrOCD debugging and its quirks, clock/timebase; then its documents |
+| AVR DA, DB and EA (`brio/avrxt/`) | [avrxt/README.md](avrxt/README.md) - Toolchain, board, Atmel-ICE upload, PyAvrOCD debugging and its quirks, clock/timebase; then its documents |
 | SAM C21 (`brio/samc21/`) | [samc21/README.md](samc21/README.md) - Toolchain (vendored DFP/CMSIS, no device headers in arm-none-eabi-gcc), board, OpenOCD upload over SWD, cortex-debug, the clangd routing, the family smoke check; then its documents |
 | STM32G0 (`brio/stm32g0/`) | [stm32g0/README.md](stm32g0/README.md) - Toolchain, the three Nucleo boards, ST-LINK upload and debug, the SWD-under-WFI caveat, and FAMILY COVERAGE: both the x1 line and the x0 value line, the stratum compiling on all twelve headers of the pack with every vector derived from peripheral presence; then its documents |
 | CH32V00x (`brio/ch32v00x/`) | [ch32v00x/README.md](ch32v00x/README.md) - Toolchain (WCH's gcc 15 with its xw extension, each part's full ISA), the two boards and the part table the build states, the WCH-Link and WCH's OpenOCD fork, the console on the probe's own serial, and what the QingKe V2 core taught the stratum (a WFI that wakes only for an interrupt it can take, the MIE not cleared on entry); then its documents - one per chapter of the reference manual, each with what the CH32V006K8 measured with no wire and what waits for a jumper or a peer |

@@ -1,7 +1,7 @@
 // spi_peer - a scriptable SPI CLIENT for the far end of a two-board SPI
 // test, on an RP2350: the far board is the DUT and the bus host, and it
 // drives this one IN BAND over the very bus both are testing
-// (avrdx/src/apps/spi_link.hpp). The body is the one both Raspberry Pi chips
+// (avrxt/src/apps/spi_link.hpp). The body is the one both Raspberry Pi chips
 // share, rp2040/src/apps/rp_spi_peer.hpp - the client a PIO program, the
 // roles inverted on the PL022 - whose header says what the silicon makes of
 // the protocol; this file binds it to the RP2350, ONE SOURCE FOR BOTH
@@ -52,7 +52,7 @@
 #include "util/print.hpp"
 
 // THE PROTOCOL HEADER IS SHARED, NOT COPIED (rp_spi_peer.hpp's header).
-#include "../../../avrdx/src/apps/spi_link.hpp"
+#include "../../../avrxt/src/apps/spi_link.hpp"
 
 #include "pair_power.hpp"
 

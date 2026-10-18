@@ -117,7 +117,7 @@
 
 // THE PROTOCOL HEADER IS SHARED, NOT COPIED: pure encoding, not one
 // register, and every architecture on this link compiles the same file.
-#include "../../../avrdx/src/apps/usart_link.hpp"
+#include "../../../avrxt/src/apps/usart_link.hpp"
 
 using SysClock =
     brio::Clock<brio::ClockSource::pll_hse, 180'000'000, 8'000'000, brio::HseMode::bypass>;

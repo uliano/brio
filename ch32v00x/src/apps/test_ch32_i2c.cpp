@@ -11,7 +11,7 @@
 // self-link; every wire letter talks to a second board running
 // `twi_peer` - on this desk the CH32X035F8U6 evaluation board (the peer
 // names itself in its ident) - commanded IN BAND over the bus under test
-// through avrdx/src/apps/twi_link.hpp, included by relative path: one
+// through avrxt/src/apps/twi_link.hpp, included by relative path: one
 // source of truth for the wire format, whatever the peer's
 // architecture. The peer's command-mode client answers ONE address
 // (0x6B) with no general call and no second address.
@@ -146,7 +146,7 @@
 #include "util/testbench.hpp"
 
 // THE PROTOCOL HEADER IS SHARED, NOT COPIED (see the header comment).
-#include "../../../avrdx/src/apps/twi_link.hpp"
+#include "../../../avrxt/src/apps/twi_link.hpp"
 #include "held_request.hpp"
 
 using P = brio::Ch32v00xPlatform<>;

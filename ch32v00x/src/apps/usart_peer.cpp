@@ -94,7 +94,7 @@
 #include "ch32v00x/usart.hpp"
 #include "util/print.hpp"
 
-#include "../../../avrdx/src/apps/usart_link.hpp"
+#include "../../../avrxt/src/apps/usart_link.hpp"
 
 using P = brio::Ch32v00xPlatform<>;
 

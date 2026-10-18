@@ -336,7 +336,7 @@
 #include "util/testbench.hpp"
 
 // Letter i's far end speaks the TWI suites' protocol: shared, not copied.
-#include "../../../avrdx/src/apps/twi_link.hpp"
+#include "../../../avrxt/src/apps/twi_link.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::pll, 144'000'000>;
 constexpr SysClock clock;

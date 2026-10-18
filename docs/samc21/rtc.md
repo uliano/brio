@@ -300,7 +300,7 @@ flags together. 24.6.2.3's note is exact.
   second against a source measured at 33041 Hz gives **1001 ticks a
   period for PER = 999**, and the counter is never seen above 998. The
   same one-off that the AVR TCD's printed dual-slope formula got wrong
-  ([avrdx/tcd.md](../avrdx/tcd.md)) is right here, and 24.6.2.4's
+  ([avrxt/tcd.md](../avrxt/tcd.md)) is right here, and 24.6.2.4's
   wording ("increments until it reaches the PER value, and then wraps")
   is exact.
 - **A MODE CHANGE DOES NOT CLEAR COUNT**, and a 16-bit counter that

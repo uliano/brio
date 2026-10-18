@@ -29,7 +29,7 @@
 //    floating and never judged.
 //  - `y`, THE TWO-BOARD LETTERS (n, o, p, k, q, r, m, w), against the
 //    CH32V006 running spi_peer on its 24 MHz crystal, commanded IN BAND
-//    over the bus under test through avrdx/src/apps/spi_link.hpp - FAILING
+//    over the bus under test through avrxt/src/apps/spi_link.hpp - FAILING
 //    loudly when nobody answers. That peer serves its answer windows in
 //    mode 3, spi_link's alternate answer mode, and the rendezvous finds it.
 //
@@ -129,7 +129,7 @@
 #include "util/spi_bus.hpp"
 #include "util/testbench.hpp"
 
-#include "../../../avrdx/src/apps/spi_link.hpp"
+#include "../../../avrxt/src/apps/spi_link.hpp"
 
 using P = brio::Ch32x035Platform<>;
 using SysClock = brio::Clock<brio::ClockSource::internal, 48'000'000>;

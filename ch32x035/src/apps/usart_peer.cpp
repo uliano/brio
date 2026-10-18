@@ -124,7 +124,7 @@
 #include "ch32x035/usart.hpp"
 #include "util/print.hpp"
 
-#include "../../../avrdx/src/apps/usart_link.hpp"
+#include "../../../avrxt/src/apps/usart_link.hpp"
 
 using P = brio::Ch32x035Platform<>;
 using SysClock = brio::Clock<brio::ClockSource::internal, 48'000'000>;

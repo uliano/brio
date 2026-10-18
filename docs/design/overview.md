@@ -124,7 +124,7 @@ lends its received run in place (`SpanSource`).
 ## Layering: the strata
 
 Directories under `brio/`; includes always carry the stratum
-prefix (`#include "avrdx/usart.hpp"`) so an app's portability is
+prefix (`#include "avrxt/usart.hpp"`) so an app's portability is
 readable at a glance.
 
 | Stratum | May include | Content |
@@ -134,11 +134,11 @@ readable at a glance.
 | `util/` | `kernel/` | pure services: print, stream concepts, line parser, Ring, SerialPort, SpiBus, timestamp |
 | `gfx/` | nothing of brio | drawing: the surface contract, the primitives, fonts and text (design/gfx.md) |
 | `devices/` | `kernel/`, `util/`, `gfx/` | what sits OFF the chip and is reached over a link the chip provides: the DCS vocabulary, a traits type per display controller, the panel drivers over a link concept (design/gfx.md, "The command tier") |
-| `avrdx/` | `kernel/`, `util/` | everything that knows `avr/io.h`: drivers + AvrPlatform |
+| `avrxt/` | `kernel/`, `util/` | everything that knows `avr/io.h`: drivers + AvrPlatform |
 | `host/` | `kernel/`, `util/`, `gfx/`, `devices/` | the test "target": HostPlatform and the simulated devices |
 
 Two targets never meet in one binary, so another target's stratum
-is a sibling of `avrdx/` and the flat namespace stays collision-free.
+is a sibling of `avrxt/` and the flat namespace stays collision-free.
 One library, not one per stratum: discipline comes from this rule,
 multi-library would add ceremony without enforcement. Shared
 pure types produced by a target and consumed by util live in `util/`
@@ -253,7 +253,7 @@ driver is made and WHAT it produces upward, not what the peripheral is.
   wait states make cycle counting a lottery. Same name and semantics,
   no shared algorithm.
 - **Every addition to the AVR stratum is designed with the other
-  targets in mind.** Before a new avrdx/ type or a change to one, ask
+  targets in mind.** Before a new avrxt/ type or a change to one, ask
   what its shape would be on a Cortex-M0+ with a rich clock tree, on
   a RISC-V core, on a chip with per-pin alternate functions instead of
   per-timer routing: the answer decides what goes above the concept
@@ -294,7 +294,7 @@ driver is made and WHAT it produces upward, not what the peripheral is.
 - **Board facts vs device facts.** Which timer reaches which port,
   which USART sits on which pins per route, are facts of the DEVICE:
   on the AVR tables inside `tca.hpp`, `usart.hpp` over the stratum's
-  reserve (`avrdx/device_tables.hpp`), on the two ARMv6-M strata the
+  reserve (`avrxt/device_tables.hpp`), on the two ARMv6-M strata the
   RESERVE itself (`samc21/device_tables.hpp`,
   `stm32g0/device_tables.hpp` - the one file where the preprocessor
   may probe a vendor macro, exporting what it finds as constexpr
@@ -441,7 +441,7 @@ target - is the claim; the REALIZATIONS TABLES are where it is
 checked. Every design page whose contract has more than one
 realization carries a `### Realizations` section right after the
 contract it documents: one sentence saying what is common, then one
-row per stratum in a fixed order (avrdx, samc21, stm32g0, ch32v00x,
+row per stratum in a fixed order (avrxt, samc21, stm32g0, ch32v00x,
 host) with
 the realization - header and type - and ONLY what lies beyond the
 contract there (`-` for nothing; an absent realization is a row too,
@@ -487,7 +487,7 @@ is what a pad can be told to do, and how it is handed to a peripheral.
 
 | stratum | realization | beyond the contract |
 |---|---|---|
-| avrdx | `Pin` in `avrdx/pin.hpp` | `pull(PinPull)` and `input(PinPull)` as on the other two, with a `PinPull` that has no `down` - the family has no pull-down, and the missing enumerator is the refusal; `sense()`, `flag()`, `clear_flag()` (the pin interrupts are the PORT's here), `invert()`, `input_enable(bool)` (the input buffer, in a field shared with the sense: it leaves an armed sense at INTDISABLE); no `function()`/`release()` - a pad is handed to a peripheral by that peripheral's PORTMUX route; `PinSet` |
+| avrxt | `Pin` in `avrxt/pin.hpp` | `pull(PinPull)` and `input(PinPull)` as on the other two, with a `PinPull` that has no `down` - the family has no pull-down, and the missing enumerator is the refusal; `sense()`, `flag()`, `clear_flag()` (the pin interrupts are the PORT's here), `invert()`, `input_enable(bool)` (the input buffer, in a field shared with the sense: it leaves an armed sense at INTDISABLE); no `function()`/`release()` - a pad is handed to a peripheral by that peripheral's PORTMUX route; `PinSet` |
 | samc21 | `Pin` in `samc21/pin.hpp` | `function(PinFunction)` hands the pad to a peripheral function letter and `release()` takes PMUXEN off - the pin back to PORT as it was; `input_enable(bool)` (INEN, the same buffer with no sense beside it); `strong_drive()`; the WRCONFIG multi-pin engine (`configure_mask`); no `PinSet` |
 | stm32g0 | `Pin` in `stm32g0/pin.hpp` | `function(PinFunction)` with the AF number, and `release()` = `analog()`, the reset state - THE SAME NAME AS THE SAM'S WITH A DIFFERENT LANDING; `output(level)` before the mode (the port-clock rule); `analog()` is a MODE, not the input buffer alone; `read_out()`; speed and open drain in `PinConfig`; `PinSet` |
 | stm32f4 | `Pin` in `stm32f4/pin.hpp` | the STM32G0's block register for register, with three differences a caller can see: NO BRR, so `clear()` is a store into the upper half of BSRR - still one store; the port clock is on AHB1 and every configuring verb opens it; and THE RESET STATE IS INPUT FLOATING, so `release()` = `analog()` parks a pad in a state that is NOT the one it was born in - said in the header, because the G0's equation of the two does not hold here either; `function(PinFunction)` with the AF number, whose meaning on a pad is the DATASHEET's table and not a header symbol; `output(level)`, `read_out()`, `pull(PinPull)`, `is_output`, `has_function`; speed and open drain in `PinConfig`; `PinSet` |
@@ -506,7 +506,7 @@ their timer, and an application picks one in its board file:
 
 | stratum | realizations | beyond the contract |
 |---|---|---|
-| avrdx | `TcaPwm<n, port>::Channel<ch>` (six 8-bit channels of a split TCA), `TcaPwm16`, `TcaPwmCentered` (dual slope, OVF at the centre), `Pwm8<Tcb>`, `TcdPwm<route>` (the complementary pair with dead time, on the TCD) | the TCA and TCB channels are ratiometric on purpose and NOT `ClockUser`s (a duty survives a clock change, the frequency moves with it); `TcdPwm` is one when the TCD runs on CLK_PER and was asked for a rate in hertz, and follows nothing otherwise |
+| avrxt | `TcaPwm<n, port>::Channel<ch>` (six 8-bit channels of a split TCA), `TcaPwm16`, `TcaPwmCentered` (dual slope, OVF at the centre), `Pwm8<Tcb>`, `TcdPwm<route>` (the complementary pair with dead time, on the TCD) | the TCA and TCB channels are ratiometric on purpose and NOT `ClockUser`s (a duty survives a clock change, the frequency moves with it); `TcdPwm` is one when the TCD runs on CLK_PER and was asked for a rate in hertz, and follows nothing otherwise |
 | samc21 | `TcPwm`, `TcPwm8`, `TccPwm` (a caller-chosen max), `TccPairPwm` (the complementary pair with dead time) | - |
 | stm32g0 | `TimPwm`, `TimPairPwm` (the complementary pair, on the timers with a break and dead-time unit), `LptimPwm` (on a timer that keeps counting in Stop) | the timers refuse a dynamic clock: their periods are PCLK cycles and no rebase can keep them |
 | ch32v00x | `TimPwm<Tim, ch, top>`, `TimPairPwm<Tim, ch, top>` (the complementary pair: under TIM1's break unit as OCx/OCxN, or on TIM2 as channel ch with channel ch + 2 under DTCR, the dead time in each block's own unit) (`ch32v00x/tim.hpp`) | the G0's two names on the F1's timers; a TIM2 pair costs two channels where a TIM1 pair costs one; the timers take a static clock alone, as on the G0 |

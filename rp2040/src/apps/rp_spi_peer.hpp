@@ -2,7 +2,7 @@
 // and bound by rp2040/src/apps/spi_peer.cpp and rp2350/src/apps/spi_peer.cpp:
 // a scriptable SPI CLIENT for the far end of a two-board SPI test, commanded
 // IN BAND over the very bus both are testing through
-// avrdx/src/apps/spi_link.hpp.
+// avrxt/src/apps/spi_link.hpp.
 //
 // ONE BODY, TWO CHIPS: everything below is the PIO's, the PL022's and the
 // protocol's; what is a chip's - the four pads, the PIO's window onto them,
@@ -159,7 +159,7 @@
 
 // THE PROTOCOL HEADER IS SHARED, NOT COPIED: pure encoding, not one
 // register, and every architecture on this link compiles the same file.
-#include "../../../avrdx/src/apps/spi_link.hpp"
+#include "../../../avrxt/src/apps/spi_link.hpp"
 
 using spilink::Op;
 

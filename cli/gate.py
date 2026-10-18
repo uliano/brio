@@ -58,7 +58,7 @@ def project_of(preset, tree=ROOT):
     named after parts and never move, but a stratum's directory may be
     renamed, so the reference tree of a rename commit is asked with the
     old name and the working tree with the new one."""
-    for prefix, projects in (("avr", ("avrdx",)),
+    for prefix, projects in (("avr", ("avrxt", "avrdx")),
                              ("samc21", ("samc21",)),
                              ("stm32g0", ("stm32g0",)),
                              ("stm32f4", ("stm32f4",)),
@@ -85,7 +85,7 @@ def project_of(preset, tree=ROOT):
 
 
 def image_ext(project):
-    return ".hex" if project == "avrdx" else ".bin"
+    return ".hex" if project in ("avrxt", "avrdx") else ".bin"
 
 
 def run(cmd, cwd=None, capture=False):

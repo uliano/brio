@@ -82,7 +82,7 @@
 //      reject-when-full, and the PrepareSleep vote idle vs busy; the
 //      requests' rates timed on the wire
 //   h  THE AVR CLIENT'S FACTS, judged here because here the AVR is the
-//      instrument: when the peer's ident names the avrdx peer (the
+//      instrument: when the peer's ident names the avrxt peer (the
 //      version's high byte 0x01, spi_link.hpp's Ident), the verdicts
 //      test_avr_spi draws against an AVR CLIENT - the three buffering
 //      regimes' alignment (its l), the CLK_PER/6 ceiling (its m), the
@@ -90,7 +90,7 @@
 //      self-selected client the USART's Host SPI is served by (the
 //      client half of its r) - drawn with this board as the host, paced
 //      as that suite paces them. Any other peer: SKIPPED, no verdict.
-//   i  the AVR client's RUNS back to back (an avrdx peer only): 256
+//   i  the AVR client's RUNS back to back (an avrxt peer only): 256
 //      characters as one request, the exchange, the answer run, the
 //      receive run and the exchange without BUFWR, 500 kHz to 4 MHz
 //   j  THE CLIENT'S EDGES: this board's runs against the peer's
@@ -132,7 +132,7 @@
 // so both boards' apps compile the same file. A copy here would be a
 // second source of truth for a wire format, which is exactly the thing
 // that drifts.
-#include "../../../avrdx/src/apps/spi_link.hpp"
+#include "../../../avrxt/src/apps/spi_link.hpp"
 #include "bench_sleep.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::internal, 48'000'000>;
@@ -1790,7 +1790,7 @@ void tg_kernel() {
 // ceiling, its loss semantics and its write collision, its self-selected
 // client - and on a desk where that suite's only peer is a SAM C21 it
 // prints them and judges what is portable. This letter is where they are
-// judged instead, whenever THIS suite's peer is the avrdx spi_peer: the
+// judged instead, whenever THIS suite's peer is the avrxt spi_peer: the
 // same commands, the same streams and seeds, the same pacing (one
 // character at a time with the chip-select hold between them, never less
 // than spilink::gap_us, at the AVR suite's CLK_PER/32 of a 24 MHz peer),
@@ -1822,7 +1822,7 @@ bool h_sink(uint8_t regime, uint8_t seed, uint16_t count, uint8_t flags, spilink
     return peer_report(r);
 }
 
-/// The client half of test_avr_spi r. The avrdx peer's Op::mspi client
+/// The client half of test_avr_spi r. The avrxt peer's Op::mspi client
 /// selects ITSELF - INVEN on its pulled-up SS pin, because the USART's
 /// Host SPI it is built to serve has no client select - and both ends
 /// count the same lead-in instead of a select edge. This end clocks the
@@ -1886,14 +1886,14 @@ void th_avr_client() {
     const bool got = peer_ident(d);
     bench.verdict("ident comes back", got);
     if (!got) return;
-    if (spilink::peer_kind(d.version) != spilink::peer_avrdx) {
+    if (spilink::peer_kind(d.version) != spilink::peer_avrxt) {
         print(serial, "  SKIPPED, no verdict claimed: the peer (fw ", hex(d.version),
-              ") is not the avrdx spi_peer, and every verdict of this letter is a fact "
+              ") is not the avrxt spi_peer, and every verdict of this letter is a fact "
               "about an AVR128DB client",
               crlf);
         return;
     }
-    print(serial, "  the peer is the avrdx spi_peer (fw ", hex(d.version), ", crystal ",
+    print(serial, "  the peer is the avrxt spi_peer (fw ", hex(d.version), ", crystal ",
           d.xtal ? "up" : "DOWN", "): its CLK_PER is ", d.xtal ? "24 MHz" : "its OSCHF", crlf);
 
     // (1) THE ALIGNMENT TABLE (test_avr_spi l's AVR-client half): the
@@ -2094,8 +2094,8 @@ void th_avr_client() {
 // i - the AVR client's runs, back to back
 // ===========================================================================
 //
-// The avrdx peer serves an exchange with ONE CALL of its driver's runs
-// (avrdx/spi.hpp, SpiClient: read by count, never by RXCIF), so a window
+// The avrxt peer serves an exchange with ONE CALL of its driver's runs
+// (avrxt/spi.hpp, SpiClient: read by count, never by RXCIF), so a window
 // can be as long as the run: 256 characters as ONE polled request of this
 // engine, nothing between them but the engine's own gap. Four runs - the
 // exchange, the answer run (spilink::spare_answer_only), the receive run
@@ -2163,9 +2163,9 @@ void ti_avr_runs() {
     const bool got = peer_ident(d);
     bench.verdict("ident comes back", got);
     if (!got) return;
-    if (spilink::peer_kind(d.version) != spilink::peer_avrdx || (d.version & 0xFFu) < 0x01u) {
+    if (spilink::peer_kind(d.version) != spilink::peer_avrxt || (d.version & 0xFFu) < 0x01u) {
         print(serial, "  SKIPPED, no verdict claimed: the peer (fw ", hex(d.version),
-              ") is not the avrdx spi_peer with the client's runs (0x0101 and up)", crlf);
+              ") is not the avrxt spi_peer with the client's runs (0x0101 and up)", crlf);
         return;
     }
     struct Rung {
@@ -2919,8 +2919,8 @@ int main() {
                  te_client);
     bench.letter('f', "loop-back, the SCK ladder, nine bits, BUFOVF and MSSEN", tf_wireless);
     bench.letter('g', "THE KERNEL: SpiBus over SpiHost, util unchanged", tg_kernel);
-    bench.letter('h', "the AVR client's facts (an avrdx peer only)", th_avr_client);
-    bench.letter('i', "the AVR client's runs back to back (an avrdx peer only)", ti_avr_runs);
+    bench.letter('h', "the AVR client's facts (an avrxt peer only)", th_avr_client);
+    bench.letter('i', "the AVR client's runs back to back (an avrxt peer only)", ti_avr_runs);
     bench.letter('j', "THE CLIENT'S EDGES: its runs against the peer's burst, every end, "
                       "SSL as a wake-up (needs the peer)",
                  tj_client_edges);

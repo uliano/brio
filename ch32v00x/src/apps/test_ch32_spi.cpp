@@ -10,7 +10,7 @@
 //
 // THE PEER is the desk's CH32X035 running `spi_peer` (kind 0x07),
 // commanded IN BAND over the bus under test through
-// avrdx/src/apps/spi_link.hpp, included by relative path: one source of
+// avrxt/src/apps/spi_link.hpp, included by relative path: one source of
 // truth for the wire format on every architecture. SPI1's column 0 to the
 // CH32X035's SPI1 column 0:
 //
@@ -103,7 +103,7 @@
 #include "util/spi_bus.hpp"
 #include "util/testbench.hpp"
 
-#include "../../../avrdx/src/apps/spi_link.hpp"
+#include "../../../avrxt/src/apps/spi_link.hpp"
 
 using P = brio::Ch32v00xPlatform<>;
 using SysClock = brio::Clock<brio::ClockSource::pll, 48'000'000>;

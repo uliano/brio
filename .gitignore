@@ -31,7 +31,7 @@ plots/
 # per run - see experiments/*/README.md): bench data, not source.
 experiments/*/logs/
 
-# vendor datasheets: local copies only (see docs/avrdx/vendor/README.md)
+# vendor datasheets: local copies only (see docs/avrxt/vendor/README.md)
 docs/*/vendor/*.pdf
 docs/*/vendor/extracts/
 

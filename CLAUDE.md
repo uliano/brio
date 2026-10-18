@@ -32,7 +32,7 @@ Only ASCII <= 127 in every file of the repo (code, docs, this file).
   is the strata diagram. Each page says in its first paragraph what it
   decides.
 - `docs/<target>/` - one folder per target, mirroring `brio/<target>/`
-  (`avrdx/`, `samc21/`, `stm32g0/`, `stm32f4/`, `ch32v00x/`, `ch32vx03/`,
+  (`avrxt/`, `samc21/`, `stm32g0/`, `stm32f4/`, `ch32v00x/`, `ch32vx03/`,
   `ch32x035/`, `rp2040/`, `rp2350/`, `host/`), plus one per stratum that
   is not a target (`cortexm/`, `pl011/`, `pl022/`, `dw_apb_i2c/`,
   `devices/`). `README.md` is the operational page (toolchain, board,
@@ -81,7 +81,7 @@ one source file of its runtime - for bare-metal MCUs built around a
 cooperative active-object kernel, written clean-room after Samek's book
 (never the QP source). One flat namespace `brio`; one directory per
 STRATUM under `brio/`; includes carry the stratum prefix
-(`#include "avrdx/usart.hpp"`). A stratum includes only what lies below
+(`#include "avrxt/usart.hpp"`). A stratum includes only what lies below
 it: the kernel includes nothing of brio, util/ includes kernel/ and
 never a target, no target include leaves the target strata, and the
 kernel never knows which silicon it runs on. What each stratum holds is
@@ -97,7 +97,7 @@ its headers' business (their comments) and its documents' (the map in
 | `devices/` | what sits OFF the chip over a link the chip provides: the DCS vocabulary, a traits type per display controller, the serial DCS link over any family's SpiHost, the panel driver; includes kernel/, util/ and gfx/, never a family |
 | `cortexm/` | the CORE stratum every Cortex-M family includes after its device header: NVIC + PRIMASK guard, the SysTick ticker, delay_us, the DWT cycle counter |
 | `pl011/`, `pl022/`, `dw_apb_i2c/` | the IP STRATA: ARM's PrimeCell UART and SSP, Synopsys's DesignWare I2C - a peripheral DESIGN written once over a traits type the family supplies (register block, reset, interrupt line, guard, pads, clock, DMA requests), the family keeping the public names; born at the SECOND family whose register description is IDENTICAL |
-| `avrdx/` | everything that knows `avr/io.h`: AVR DA/DB; bench chips AVR128DB48 and AVR128DA48 |
+| `avrxt/` | everything that knows `avr/io.h`: the AVR DA, DB and EA over the AVRxt core they share; bench chips AVR128DB48, AVR128DA48 and AVR64EA48 |
 | `samc21/` | everything that knows `sam.h`: SAM C21, Cortex-M0+; bench chip ATSAMC21J18A |
 | `stm32g0/` | everything that knows `stm32g0xx.h`: STM32G0, Cortex-M0+; bench chip STM32G0B1RE; compiles on all twelve G0 headers with the reserve deriving every vector from peripheral presence, the x0 value line pending a board |
 | `stm32f4/` | everything that knows `stm32f4xx.h`: STM32F4, Cortex-M4F with the hard-float ABI; bench chips STM32F429ZI, STM32F446RE, STM32F411CE, STM32F469NI |
@@ -110,8 +110,9 @@ its headers' business (their comments) and its documents' (the map in
 
 Names are claims: a stratum is named for exactly the family it has
 been proven on and widens only when a real chip proves it shares the
-stratum (`samc21` is final; avrdx -> avrxt when an EA/mega0 part proves
-it; stm32g0 shares its name with the G0x0 line, decided on the headers).
+stratum (`samc21` is final; `avrxt` names the core the DA, DB and EA
+share, a part of another AVRxt line admitted when it proves the stratum;
+stm32g0 shares its name with the G0x0 line, decided on the headers).
 ONE NAME PER ARCHITECTURE on three axes: `brio/<arch>/` (stratum),
 `docs/<arch>/` (docs), `<arch>/` (the build project); chip precision
 lives in preset names, per-chip ld/svd files and the `*_MCU` cache
@@ -401,8 +402,7 @@ horizon itself, one entry each.
   chip.
 - **Queued**: the SAM's CAN (its M_CAN would be the second FD
   controller design/can.md's shared FD frame waits for), the energy
-  experiment's G0 instance, Multislope (an application), avrdx -> avrxt
-  when a part proves it.
+  experiment's G0 instance, Multislope (an application).
 - **Borrowed, phase 2 (debug epoch)**: `Borrowed<T, Lease::dispatch>` is
   a plain pointer today; in debug builds an 8-bit lender epoch compared
   on every access would panic a stale loan on the guilty instruction.
@@ -430,7 +430,7 @@ horizon itself, one entry each.
 # plus test/. cmake presets resolve against their own project dir -
 # run cmake FROM that dir (or let bin/brio do it).
 (cd test  && ctest --preset host)                                  # host tests (doctest); no hardware needed
-brio check avrdx [name]         # every avrdx smoke TU compiles for all 8 DA/DB packages;
+brio check avrxt [name]         # every avrxt smoke TU compiles for all 11 DA/DB/EA packages;
                                 # neg/ TUs must FAIL (definition of done)
 brio check samc21 [name]        # same for the samc21 stratum (E/G/J 18A headers)
 brio check stm32g0 [name]       # same for the stm32g0 stratum (ALL TWELVE G0 headers, x1 + x0)
@@ -467,9 +467,9 @@ brio gate [--against REF]       # THE BYTE-IDENTITY GATE: reference and working 
                                 # images, never a sample)
 brio gate --tokens [--strings] FILE...   # a source token-identical to REF? (--strings: ignoring
                                 # what string literals say) - the gate for a comments-only claim
-(cd avrdx && cmake --build --preset avr128db48-release --target <app>)         # AVR release build (-Os)
-(cd avrdx && cmake --build --preset avr128db48-release --target <app>-upload)  # flash via Atmel-ICE (UPDI)
-(cd avrdx && cmake --build --preset avr128db48-debug --target <app>)           # AVR debug build, then F5
+(cd avrxt && cmake --build --preset avr128db48-release --target <app>)         # AVR release build (-Os)
+(cd avrxt && cmake --build --preset avr128db48-release --target <app>-upload)  # flash via Atmel-ICE (UPDI)
+(cd avrxt && cmake --build --preset avr128db48-debug --target <app>)           # AVR debug build, then F5
 (cd samc21 && cmake --build --preset samc21j-release --target <app>)            # SAM release build
 (cd samc21 && cmake --build --preset samc21j-release --target <app>-upload)     # flash via OpenOCD (SWD)
 (cd stm32g0 && cmake --build --preset stm32g0b1re-release --target <app>)          # STM32G0 release build
@@ -492,7 +492,7 @@ brio gate --tokens [--strings] FILE...   # a source token-identical to REF? (--s
                                                                                  # rescue over the debug port, then program as
                                                                                  # core 0 of the Arm pair, then reset run
 # apps are auto-discovered from <project>/src/apps/*.cpp - plus
-# experiments/*/{avrdx,samc21}/*.cpp, each experiment's per-arch app
+# experiments/*/{avrxt,samc21}/*.cpp, each experiment's per-arch app
 # halves - at every configure; no generation step; a new/removed app
 # or a changed "// build: opt = value" line takes effect on the next
 # configure
@@ -529,7 +529,7 @@ brio fuses A bootsize=128  # read/write fuses over UPDI (fuses are
   and is the first firmware for a new board.
 
 - Toolchains: self-built avr-gcc 16.2 at `/sw/avr`
-  (`avrdx/cmake/toolchain-avr.cmake`), arm-none-eabi-gcc 16.2 at
+  (`avrxt/cmake/toolchain-avr.cmake`), arm-none-eabi-gcc 16.2 at
   `/sw/arm-none-eabi` (`samc21/cmake/toolchain-arm.cmake`) and OpenOCD
   0.12.0 at `/sw/openocd` (`/sw/src/build-openocd.sh`, from the release
   tarball: CMSIS-DAP on hidapi + ST-LINK; the manifest's OPENOCD, the
@@ -570,7 +570,7 @@ brio fuses A bootsize=128  # read/write fuses over UPDI (fuses are
 - The bench board: 24 MHz crystal on PA0/PA1 (not GPIO) -
   `Clock<ClockSource::crystal, 24'000'000>` - no 32k crystal (do not
   enable XOSC32K), serial on USART2 ALT1 PF4/PF5.
-- Full detail and rationale: `docs/avrdx/README.md`,
+- Full detail and rationale: `docs/avrxt/README.md`,
   `docs/host/README.md`, `docs/boards/README.md`, `docs/probes/README.md`.
 
 
@@ -597,7 +597,7 @@ part) and
 | path | what it holds |
 |---|---|
 | `brio/` | the framework, one directory per stratum (the roster above); the headers' comments are the reference, `docs/<stratum>/README.md` the map. `brio/.clangd` routes each stratum to its own compile database; a fragment in each stratum and each project beside it |
-| `avrdx/` | the AVR project: `cmake/avr-mcus.cmake` (package -> mcu), `cmake/avr-refused-libc.rsp` (the linker's --wrap list refusing avr-libc's heap and stdio), `src/glue/ivsel_boot.cpp` in every image (vectors at BOOT start), the FLMAPLOCK and build-id defsyms; presets for the AVR128DB's three packages and the AVR128DA48 |
+| `avrxt/` | the AVR project: `cmake/avr-mcus.cmake` (package -> mcu), `cmake/avr-refused-libc.rsp` (the linker's --wrap list refusing avr-libc's heap and stdio), `src/glue/ivsel_boot.cpp` in every image (vectors at BOOT start), the FLMAPLOCK and build-id defsyms; presets for the AVR128DB's three packages, the AVR128DA48 and the AVR64EA48 |
 | `samc21/`, `stm32g0/` | the SAM C21 and STM32G0 projects in the shared shape; the G0's presets for the G0B1RE, G071RB and G031K8 with one ld and crt per part; the GROUP axis on the G031K8 and the SAM's one part |
 | `stm32f4/` | a PART TABLE (`cmake/stm32f4-parts.cmake`: part -> ST's device define, crt stem, board type), presets for the F429ZI, F446RE, F411CE and F469NI, the hard-float flags |
 | `ch32v00x/` | WCH's gcc at /sw/wch-riscv; `CH32V00X_MCU` names the part and derives its definition, ISA and ld; `src/glue/startup_ch32v00x.S` (the table whose first word is an instruction, two entries shorter on the CH32V003); the GROUP axis on the CH32V003 (and per board type); the crt paints the free RAM |

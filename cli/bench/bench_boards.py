@@ -86,7 +86,7 @@
 #                       USART is wired to the probe's TX/RX pins
 #
 #  IDENTITY IN THE CHIP. An "id" is the label an AVR board carries in its
-#  USERROW (avrdx/userrow.hpp: written once over UPDI, printed by every
+#  USERROW (avrxt/userrow.hpp: written once over UPDI, printed by every
 #  suite's banner); a SAM board is told by its factory die serial and an
 #  STM32 by its 96-bit unique device ID, both read over SWD - recorded
 #  here so a suite can compare the chip in hand against the manifest.
@@ -196,7 +196,7 @@ BOARDS = {
 DEFAULT_MONITOR_SPEED = 460800
 
 # The tools, by absolute path: the self-built ones under /sw
-# (docs/avrdx/README.md, docs/samc21/README.md), never a distribution's.
+# (docs/avrxt/README.md, docs/samc21/README.md), never a distribution's.
 AVRDUDE = "/sw/avr/bin/avrdude"
 OPENOCD = "/sw/openocd/bin/openocd"
 # WCH's OpenOCD fork for the WCH-Link (docs/ch32v00x/README.md): a

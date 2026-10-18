@@ -21,7 +21,7 @@
 // SDA, to the desk's CH32X035 running `twi_peer` on its PC16/PC17, the
 // wire's pull-ups 1.5 kOhm from each line to that board's PB3 (the module
 // carries none), commanded in band over the same two wires through
-// avrdx/src/apps/twi_link.hpp: the peer SERVES at 0x2C for a bounded
+// avrxt/src/apps/twi_link.hpp: the peer SERVES at 0x2C for a bounded
 // window, counting the bytes it takes and gives and summing those it
 // takes, its answers the protocol's counting pattern; after the window its
 // report is held against this side's tally.
@@ -83,7 +83,7 @@
 
 // The peer protocol: the wire format every twi_peer speaks, shared by
 // relative path, not copied.
-#include "../../../avrdx/src/apps/twi_link.hpp"
+#include "../../../avrxt/src/apps/twi_link.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::pll, 48'000'000>;
 constexpr SysClock clock;

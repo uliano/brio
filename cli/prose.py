@@ -45,7 +45,7 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-SOURCE_ROOTS = ["brio", "avrdx/src", "samc21/src", "stm32g0/src", "experiments"]
+SOURCE_ROOTS = ["brio", "avrxt/src", "samc21/src", "stm32g0/src", "experiments"]
 DOC_ROOTS = ["docs"]
 DOC_FILES = ["README.md", "CLAUDE.md"]
 EXCLUDE_DIRS = ("third_party", "build-cmake", ".git", "private")
@@ -87,7 +87,7 @@ SOURCE_REVIEW_PATTERNS = [
 
 PATH_RE = re.compile(
     r"(?<![/A-Za-z0-9_.-])"
-    r"(?:brio|docs|tools|bench|cli|bin|avrdx|samc21|stm32g0|stm32f4|ch32v00x|ch32vx03|ch32x035"
+    r"(?:brio|docs|tools|bench|cli|bin|avrxt|samc21|stm32g0|stm32f4|ch32v00x|ch32vx03|ch32x035"
     r"|rp2040|rp2350|pl011|pl022|dw_apb_i2c|cortexm|kernel|util|gfx|host|test|experiments)"
     r"/[A-Za-z0-9_][A-Za-z0-9_./-]*(?:\.(?:hpp|cpp|md|py|sh|json|svg|ld|cmake|txt)|(?<=bin/brio))\b"
 )
@@ -96,7 +96,7 @@ PATH_RE = re.compile(
 def resolves(cited):
     """A cited path is written the way the code includes it or the way a
     document links it: `samc21/rtc.hpp` is brio/samc21/rtc.hpp (the -I brio
-    convention), `avrdx/tcd.md` is docs/avrdx/tcd.md."""
+    convention), `avrxt/tcd.md` is docs/avrxt/tcd.md."""
     for base in ("", "brio", "docs"):
         if os.path.exists(os.path.join(ROOT, base, cited)):
             return True

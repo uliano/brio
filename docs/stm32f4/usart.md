@@ -452,7 +452,7 @@ The desk pairs the Nucleo-F446RE's USART1 with the STM32G0B1RE's,
 CROSSED - PA9 (AF7) to its PA10, PA10 from its PA9 - the far board
 running the stm32g0 `usart_peer` (firmware 0x0301), driven IN BAND with
 the protocol every architecture on the link compiles
-(`avrdx/src/apps/usart_link.hpp`). Letters `1` to `9`, `0`, `r`, `s` and
+(`avrxt/src/apps/usart_link.hpp`). Letters `1` to `9`, `0`, `r`, `s` and
 `u` of `test_stm32f4_serial` run under the second all-key `t` and never under
 `z`, which runs with the far board on its dark console. The far peer's
 core is an HSI16 it TRACKS against its LSE crystal (docs/stm32g0/

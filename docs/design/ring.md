@@ -13,7 +13,7 @@ consumer. Driver byte rings (UART), sample
 buffers, logs - anything that needs a queue but not the MPSC
 semantics of the kernel `EventQueue`. It is a general tool, not a
 driver detail: whoever needs a two-party FIFO names the platform and
-uses it, in `avrdx/`, in `util/`, in an app, in a host test.
+uses it, in `avrxt/`, in `util/`, in an app, in a host test.
 
 ## Why no interrupt masking
 
@@ -36,7 +36,7 @@ Two candidates were rejected:
   but a hard limit chosen for a case that does not exist today, on a
   target family where 32-bit indices will be the norm;
 - keep the guard as `ATOMIC_BLOCK` behind `if constexpr` - keeps Ring
-  in `avrdx/`, keeps `util/atomic.h`, keeps it host-untestable.
+  in `avrxt/`, keeps `util/atomic.h`, keeps it host-untestable.
 
 Adopted: Ring is templated on the Platform like every other brio
 service, and the Platform concept gains one constant, `atomic_width`,
@@ -70,7 +70,7 @@ the one constant it reads and therefore the path a given size takes.
 
 | stratum | `atomic_width` | the path a ring takes |
 |---|---|---|
-| avrdx | 1 | lock-free up to 256 slots (an 8-bit index), guarded above - the console's 256-byte rings are lock-free, a 1024-slot one is not |
+| avrxt | 1 | lock-free up to 256 slots (an 8-bit index), guarded above - the console's 256-byte rings are lock-free, a 1024-slot one is not |
 | samc21 | 4 | lock-free at every size this framework declares (a 32-bit index is one access) |
 | stm32g0 | 4 | the same |
 | ch32v00x | 4 | the same - a 32-bit index is one access on this core too |

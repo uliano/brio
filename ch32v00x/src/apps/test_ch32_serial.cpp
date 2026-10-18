@@ -175,7 +175,7 @@
 #include "util/print.hpp"
 #include "util/testbench.hpp"
 
-#include "../../../avrdx/src/apps/usart_link.hpp"
+#include "../../../avrxt/src/apps/usart_link.hpp"
 #include "held_request.hpp"
 
 using P = brio::Ch32v00xPlatform<>;

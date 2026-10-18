@@ -125,7 +125,7 @@
 
 // THE PROTOCOL HEADER IS SHARED, NOT COPIED: the far board's usart_peer
 // compiles the same file.
-#include "../../../avrdx/src/apps/usart_link.hpp"
+#include "../../../avrxt/src/apps/usart_link.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::pll_hse, 180'000'000, 8'000'000, brio::HseMode::bypass>;
 constexpr SysClock clock;

@@ -41,8 +41,8 @@ bench suites use SPI0 ALT1 (PE0..PE3) instead.
 
 ## Building
 
-Discovered by the avrdx project like any other app
-(`experiments/*/avrdx/*.cpp`): `cmake --build --preset
+Discovered by the avrxt project like any other app
+(`experiments/*/avrxt/*.cpp`): `cmake --build --preset
 avr128db48-release --target spi_duo` (or the other three).
 
 ## The STM32F4 half: the panel's GRAM read back as an oracle

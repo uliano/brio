@@ -92,14 +92,14 @@ What the rule buys beyond the seven - a C-library call that cannot
 link - the AVR gets another way. Its images do take more of avr-libc
 than the seven (the number conversions util/print.hpp calls, the
 float ones among them), so the library stays on the link line and the
-refusal is a list: `avrdx/cmake/avr-refused-libc.rsp` wraps every
+refusal is a list: `avrxt/cmake/avr-refused-libc.rsp` wraps every
 function avr-libc's heap and stdio define - `malloc`, `calloc`,
 `realloc`, `free`, `strdup`, `strndup` and `atexit` (which allocates),
 and every `printf`, `scanf`, stream and character entry - and no image
 defines a wrapper. A call to one fails the link as an undefined
 `__wrap_<name>`, at the caller's own line. `operator new` needs no
 entry: this toolchain's link gives it no definition. `brio check
-avrdx` links a reference to every listed name and to `operator new`,
+avrxt` links a reference to every listed name and to `operator new`,
 for every package, and expects every one refused.
 
 ## The seven functions

@@ -102,7 +102,7 @@
 // THE PROTOCOL HEADER IS SHARED, NOT COPIED: pure encoding, not one
 // register, and every architecture on this link compiles the same
 // file.
-#include "../../../avrdx/src/apps/spi_link.hpp"
+#include "../../../avrxt/src/apps/spi_link.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::internal, 48'000'000>;
 constexpr SysClock clock{};
@@ -318,7 +318,7 @@ constexpr uint32_t spins_for_ms(uint32_t ms) { return ms * (48'000u / 8u); }
 ///
 /// THE WINDOW ENDS WHEN THE HOST CLOSES IT. A host may clock all of
 /// spilink::answer_bytes, or stop as soon as its decoder holds the frame
-/// and raise the select (the avrdx DUT does): a window still being served
+/// and raise the select (the avrxt DUT does): a window still being served
 /// then would swallow the NEXT window's traffic - the data frame behind
 /// an ack, the exchange behind its command - as dummies. The run ends on
 /// the client's TXC, set when SS is pulled high (32.8.6); the select PIN

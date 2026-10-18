@@ -76,7 +76,7 @@
 
   <!-- ===== TARGETS ===== -->
   <rect x="24" y="500" width="470.4" height="130" fill="#ffffff" stroke="#333333" stroke-width="1.7"/>
-  <text x="36" y="520" font-size="15" font-weight="bold" fill="#111111">avrdx/</text>
+  <text x="36" y="520" font-size="15" font-weight="bold" fill="#111111">avrxt/</text>
   <text x="110.4" y="520" font-size="11" fill="#333333">everything that knows avr/io.h</text>
   <rect x="43.2" y="532" width="132" height="40" fill="#f0f0f0" stroke="#555555" stroke-width="1.2"/>
   <text x="52.8" y="549" fill="#111111">AvrPlatform</text>

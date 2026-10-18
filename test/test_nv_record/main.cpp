@@ -7,7 +7,7 @@
 //
 // None of it knows what an EEPROM is: the store is a concept, and here
 // it is an array with a counter on it. What runs on the silicon is the
-// same source with avrdx/nvm.hpp's EepromStore in its place.
+// same source with avrxt/nvm.hpp's EepromStore in its place.
 //
 // Run with: ctest --preset host (or ctest --preset host -R <suite name>)
 

@@ -23,25 +23,25 @@ except ImportError:
 # BOARD TYPE -> everything that follows from it. A board type names a chip
 # package, and the chip package is what decides which of the sibling CMake
 # projects builds for it, which release preset that project uses, which
-# app roster to read, and how firmware gets in. Mirrors avrdx/cmake/
+# app roster to read, and how firmware gets in. Mirrors avrxt/cmake/
 # avr-mcus.cmake and samc21/CMakePresets.json by hand - keep them in sync.
 #
 # "project" is also why the rosters are per project: app names COLLIDE
-# across the source trees (blink, console and probe exist in both avrdx/
+# across the source trees (blink, console and probe exist in both avrxt/
 # and samc21/), so an app name alone never identifies an app.
 BOARD_TYPES = {
-    "db28": {"project": "avrdx", "preset": "avr128db28-release",
+    "db28": {"project": "avrxt", "preset": "avr128db28-release",
              "mcu": "avr128db28", "flash": "avrdude"},
-    "db32": {"project": "avrdx", "preset": "avr128db32-release",
+    "db32": {"project": "avrxt", "preset": "avr128db32-release",
              "mcu": "avr128db32", "flash": "avrdude"},
-    "db48": {"project": "avrdx", "preset": "avr128db48-release",
+    "db48": {"project": "avrxt", "preset": "avr128db48-release",
              "mcu": "avr128db48", "flash": "avrdude"},
-    "da48": {"project": "avrdx", "preset": "avr128da48-release",
+    "da48": {"project": "avrxt", "preset": "avr128da48-release",
              "mcu": "avr128da48", "flash": "avrdude"},
     # The REV 1.2 PCB fitted with an AVR64EA48 (docs/boards/avr64ea48.md):
     # the same project, its own preset and the same avrdude over UPDI - an
     # Atmel-ICE at firmware 1.46 or later, which knows the EA's NVM.
-    "ea48": {"project": "avrdx", "preset": "avr64ea48-release",
+    "ea48": {"project": "avrxt", "preset": "avr64ea48-release",
              "mcu": "avr64ea48", "flash": "avrdude"},
     "c21j": {"project": "samc21", "preset": "samc21j-release",
              "mcu": "samc21j18a", "flash": "openocd",
@@ -256,7 +256,7 @@ def resolve_app(name, app):
         die("app '%s' is one image on board '%s' (type %s): flash '%s'"
             % (base, name, btype, base))
     if btype not in info["boards"]:
-        default = {"avrdx": "db48", "rp2040": "pico"}.get(spec["project"], "c21j")
+        default = {"avrxt": "db48", "rp2040": "pico"}.get(spec["project"], "c21j")
         hint = ("" if btype == default else
                 " - add a '// build: boards = %s' line to %s/src/apps/%s.cpp "
                 "and reconfigure" % (btype, spec["project"], app))

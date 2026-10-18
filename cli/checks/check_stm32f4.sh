@@ -15,7 +15,7 @@
 # each variant named on its "// mcu: <list>" line (what must be refused
 # must be refused at compile time).
 #
-# No CMake coupling on purpose (same as check_family.sh): the compiler is
+# No CMake coupling on purpose (same as check_avrxt.sh): the compiler is
 # called directly, the whole sweep takes seconds and needs no hardware.
 #
 # Usage: brio check stm32f4            all TUs, all variants

@@ -56,7 +56,7 @@
 // THE PROTOCOL HEADER IS SHARED, NOT COPIED: pure encoding, not one
 // register, and every architecture on this link compiles the same
 // file.
-#include "../../../avrdx/src/apps/twi_link.hpp"
+#include "../../../avrxt/src/apps/twi_link.hpp"
 #include "bench_sleep.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::internal, 48'000'000>;
@@ -1051,7 +1051,7 @@ void th_client() {
     // Make the bus Busy so the peer arms: one tiny tenure to an address
     // NOBODY holds (an address NACK - content-free traffic). Not the
     // peer's own low_addr: a peer whose client stays live through `arb`
-    // (the avrdx peer, a combined TWI) matches it and STRETCHES the
+    // (the avrxt peer, a combined TWI) matches it and STRETCHES the
     // dummy through its whole lead-in, its held START then firing on the
     // dummy's own STOP - before this board has become a client.
     uint8_t dummy[1] = {0};
