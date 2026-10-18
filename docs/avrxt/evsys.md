@@ -188,14 +188,15 @@ brio::EventChannel<3>::pulse();
   the EA's six channels with each generator on the channel the letter
   names (no parity, no port pairs), the second pin of a port through its
   slot 1 (letter t's PD2 beside PD0's slot 0): SPI0's SCK, USART1's XCK
-  (200 ticks at 20 MHz), the software event's inversion, EVOUT at PA7
-  (its 100 nF read 5 us after the change, twenty runs of twenty), PC7
-  and PD7.
+  (200 ticks at 20 MHz), the software event's inversion, EVOUT at PA7,
+  PC7 and PD7, each read 5 us after the change (twenty runs of twenty;
+  PD7 drives the board's analog net, VREFA's 100 nF on it).
 - On the AVR128DA48 (rev A7) every event route `test_avr_timer`,
   `test_avr_tcd` and `test_avr_sleep` build runs as on the DB; its 48
   pins bond none of the pins DS80000882C 2.6.1 cuts off. EVOUT's ALT1
-  pin PA7, loaded there with the board's 100 nF, reads the held level 5
-  us after the change in twelve runs of twelve.
+  pins PA7, PC7 and PD7 read the held level 5 us after the change in
+  twelve runs of twelve, PD7 driving the board's analog net and VREFA's
+  100 nF on it.
 - `EvPitDiv<64>` on an odd channel measures 512 Hz on an EVOUT pin,
   `EvPitDiv<8192>` on an even one 4 Hz: the dividers count CLK_RTC
   cycles (32768 / div), and the RTC counter's own prescaler does not

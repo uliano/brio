@@ -2,8 +2,7 @@
 // package of the stratum: it toggles PA7 at ~2 Hz on the internal
 // oscillator and touches nothing else. PA7 is bonded out on every
 // package of the AVR DA, DB and EA alike, so the same source builds and
-// blinks on all of them (on the REV 1.2 PCB PA7 carries 100 nF: at 2 Hz
-// the RC is invisible).
+// blinks on all of them.
 //
 // Two jobs. On the desk it is the carrier of the board matrix (the
 // "// build: boards" line below): a build of it for every board TYPE

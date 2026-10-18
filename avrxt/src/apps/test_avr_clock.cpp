@@ -1,9 +1,9 @@
 // test_avr_clock - the CLKCTRL test SUITE for the AVR DA/DB target:
 // every clock source, the prescaler, the OSCHF tune, the 32 kHz main
 // clock, the clock failure detector - exercised with CLK_PER on the
-// CLKOUT pin (PA7) for an oscilloscope where the board leaves PA7 free,
-// and the console reporting what to expect and what the status bits
-// say. Reference test of avrxt/clock.hpp (docs/avrxt/clkctrl.md): keep
+// CLKOUT pin (PA7) for an oscilloscope where the board leaves PA7 free
+// (avr_board.hpp's board_clkout), and the console reporting what to
+// expect and what the status bits say. Reference test of avrxt/clock.hpp (docs/avrxt/clkctrl.md): keep
 // it passing.
 //
 // Bench diagnostic, NOT a kernel app (sequential, blocking). Console
@@ -19,15 +19,13 @@
 // THE TWO BENCH BOARDS differ where this suite looks, and one board per
 // part sits on the desk (the manifest's board type IS the part), so the
 // part decides at compile time:
-//   - the AVR128DB48 board: the 24 MHz crystal on XOSCHF (PA0/PA1), PA7
-//     free for CLKOUT, no 32.768 kHz crystal;
-//   - the AVR128DA48 board: a 24 MHz quartz oscillator into EXTCLK (PA0),
-//     PA7 carrying 100 nF to ground - CLKOUT is NEVER enabled there, the
-//     pad would source and sink its short-circuit current for as long as
-//     CLK_PER ran into the capacitor - and a 32.768 kHz crystal on
-//     PF0/PF1, which letters 8 and 9 measure.
+//   - the AVR128DB48 board: the 24 MHz crystal on XOSCHF (PA0/PA1), no
+//     32.768 kHz crystal;
+//   - the AVR128DA48 board: a 24 MHz quartz oscillator into EXTCLK (PA0)
+//     and a 32.768 kHz crystal on PF0/PF1, which letters 8 and 9 measure.
+// PA7 is free on both: CLKOUT runs there from boot.
 //
-// Wiring: scope on PA7 (CLKOUT) on the DB board. Nothing else.
+// Wiring: scope on PA7 (CLKOUT). Nothing else.
 // Commands: ? | 1 OSCHF sweep | 2 prescalers | 3 tune | 4 crystal vs
 // OSCHF | 5 32 kHz main clock | 6 clock failure | 7 PLL + status
 // | 8 auto-tune | 9 the 32 kHz crystal as the main clock | a all
@@ -797,7 +795,7 @@ int main() {
     } else {
         print(serial, crlf, "test_avr_clock - CLKCTRL test suite (board ", board,
               ", boot clk=", xtal ? (has_xoschf ? "XTAL" : "EXTCLK") : "OSCHF",
-              " 24 MHz, silicon rev ", hex(SYSCFG.REVID), ", CLKOUT off: PA7 carries 100 nF)",
+              " 24 MHz, silicon rev ", hex(SYSCFG.REVID), ", CLKOUT off: PA7 not free)",
               crlf);
     }
     help();
@@ -836,6 +834,10 @@ int main() {
 #else  // the AVR EA: OSCHF at the OSCCFG fuse's one rate, no PLL, no TCD
 
 // ---- the EA letters (DS40002443A ch. 12) -------------------------------------------
+// CLK_PER runs on PA7 (CLKOUT) from boot where the board leaves PA7 free
+// (board_clkout), for an oscilloscope, as on the DA/DB; letter 6 B then
+// sees the hardware clear it, and puts it back.
+//
 // THE RULER of every timed letter is "ruler B": the RTC counting the
 // 32.768 kHz crystal, its overflow every 32768 cycles (one second) latching
 // a TCB cascade that counts CLK_PER - so CLK_PER itself, whatever drives
@@ -1228,16 +1230,22 @@ void t6_cfd() {
     ClockFailure::clear();
     const uint16_t b_hits = cfd_hits;
     (void)SysClock::init();
+    if constexpr (board_clkout) MainClock::clkout(true);
     Serial::rebase(board_hz);
     print(serial, "  B: after the forced failure: MCLKCTRLA ", hex(a), " MCLKCTRLB ", hex(b),
           " -> CLK_PER = OSCHF / ", div, ": ", b_ppm, " ppm of that against the crystal; "
           "interrupts ", b_hits, crlf);
+    // CLKOUT was set before the failure where the board allows it
+    // (main()), so the bit's clear is the hardware's (12.3.5.3.2).
     verdict("B: the main clock fell back to OSCHF, CLKOUT cleared", b_src == MainSource::oschf &&
             (a & CLKCTRL_CLKOUT_bm) == 0);
     verdict("B: CLK_PER is OSCHF at the fuse's rate over the prescaler read back (within 3 %)",
             within(b_ppm, 30'000));
     verdict("B: the interrupt ran", b_hits >= 1);
-    verdict("recovered: the crystal re-selected", MainClock::source() == MainSource::extclk);
+    verdict(board_clkout ? "recovered: the crystal re-selected, CLKOUT on"
+                         : "recovered: the crystal re-selected",
+            MainClock::source() == MainSource::extclk &&
+                (!board_clkout || (CLKCTRL.MCLKCTRLA & CLKCTRL_CLKOUT_bm) != 0));
 }
 
 // ---- 7: the status bits, the request, the read-modify-write ------------------------
@@ -1375,12 +1383,14 @@ int main() {
     boot_xtal = SysClock::init();
     Serial::init(clock, baud);
     Ticker::init();
+    if constexpr (board_clkout) MainClock::clkout(true);   // CLK_PER on PA7
     sei();
     auto board = board_id();
     if (board.empty()) board = "?";
     print(serial, crlf, "test_avr_clock - CLKCTRL test suite (board ", board,
           ", boot clk=", boot_xtal ? "XTAL" : "OSCHF", " ", board_hz / 1'000'000u,
-          " MHz, silicon rev ", hex(SYSCFG.REVID), ", CLKOUT off: PA7 carries 100 nF)", crlf);
+          " MHz, silicon rev ", hex(SYSCFG.REVID),
+          board_clkout ? ", CLKOUT on PA7)" : ", CLKOUT off: PA7 not free)", crlf);
     help();
     print(serial, "> ");
     for (;;) {

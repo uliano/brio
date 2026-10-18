@@ -137,8 +137,8 @@ entering its state.
 On the **AVR128DA48** (rev A7, 5 V; the whole of `test_avr_timer`, 197
 verdicts, green): the crossings sit at **1005 mV up and 978 mV down**,
 hysteresis 27 mV (the spec's 25 typ.), the window and pin legs as above
-- the OUT pin on PA7 read as a level despite the 100 nF that board puts
-on it, 2 ms after each DAC step (twelve runs of twelve).
+- the OUT pin on PA7 read as a level 2 ms after each DAC step (twelve
+runs of twelve).
 
 **RUNSTDBY in a real STANDBY** (`test_avr_sleep` o, 5 V): AC0 on AINP0 =
 PD2 against DACREF, the pad driven by EVOUT from a PIT divider at 32 Hz.

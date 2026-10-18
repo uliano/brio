@@ -138,19 +138,22 @@ that R C, 0.96 ms to 1/e and twice that to 1/e^2 (letter n). On it:
 On the **AVR128DA48** (rev A7, 5 V) the internal path reads as on the DB
 (the unbuffered output 2043 of 2048 with a 32-cycle sample, every
 reference pair's DAC0 within a few counts of its expectation); THE PIN
-DOES NOT. Wired to PD1 and PD7, a falling step discharges at about
-200 V/s and at constant current - 2.0 V to 0.2 V in about 9 ms, the
-same with the ADC converting throughout the fall or reading once at
-its end - where the DB's pin falls at ~20 kV/s. A rising step
-overshoots and the overshoot comes down at the same rate: from 0 V to
-1.536 V the wire read above 2.048 V at once, and 0.2 V to 2.0 V read
-full scale against the 2.048 V reference within two conversions. The
-AVR EA's assembly of the same PCB measures 96 nF on that net (below):
-at that capacitance the DA's fall is a constant sink of ~20 uA, not a
-pin's few picofarads discharged by tens of nanoamperes - the DA
-assembly's own net is not measured. The suite's legs that read the pin
-stay owed there until the wire carries the resistor to ground
-([adc.md](adc.md)'s list).
+SINKS LITTLE. Wired to PD1 and PD7 it carries PD7's 100 nF (VREFA's
+decoupling, [../boards/avr128da48.md](../boards/avr128da48.md)), and
+with no resistor to ground a falling step discharges at about 200 V/s
+and at constant current - 2.0 V to 0.2 V in about 9 ms, the same with
+the ADC converting throughout the fall or reading once at its end -
+the buffer sinking about 20 uA (100 nF x 200 V/s), where the DB's bare
+pin falls at ~20 kV/s. A rising step overshoots and the overshoot comes
+down at the same rate: from 0 V to 1.536 V the wire read above 2.048 V
+at once, and 0.2 V to 2.0 V read full scale against the 2.048 V
+reference within two conversions. The board's net carries 10 kOhm to
+ground, the AVR EA's assembly's: a falling step is then that resistor's
+RC (10 kOhm x 100 nF = 1 ms), the half's waits (2 to 5 ms after a
+falling step) hold, and the whole DA/DB half reads 80 of 80, ten runs
+of ten - the wire within -39..+25 LSB12 of 4 x code on the ramp, the
+buffered pin 9..14 counts over the internal node (wire - DAC0,
+differential).
 
 - Ramp 0..1023 against the ADC on the wire: monotonic, error within
   +-7 LSB12 over the range, i.e. well inside the specified INL +

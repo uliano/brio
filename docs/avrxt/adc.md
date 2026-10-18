@@ -287,9 +287,11 @@ AO (request/reply), it does not touch the registers.
 
 ### Bench findings (`test_avr_analog`, rev A5, 3.3 V and 5 V)
 
-On the **AVR128DA48** (rev A7, 5 V) - where the DAC's slow edges on the
-wire ([dac.md](dac.md)) leave every leg that reads it owed (below) -
-the internal paths measure as on the DB: the
+On the **AVR128DA48** (rev A7, 5 V; the board's net with its 10 kOhm
+to ground, which the DAC's weak sink needs - [dac.md](dac.md) - the
+whole half 80 of 80 in ten runs of ten) the wire reads within the
+buffer's offset of the internal path, and the internal paths measure as
+on the DB: the
 reference cross-check through DAC0 within a few counts of every
 expectation (3068 of 3072, 1534 of 1536, 2517 of 2516), the DAC
 unbuffered path, the prescaler rates, the sampling-time formula, the
@@ -710,12 +712,6 @@ Driver gaps:
 
 Implemented but not bench-verified:
 
-- every leg of the DA/DB half that reads PD1 or takes VREFA from PD7,
-  on the AVR128DA48: with the two wires fitted, the DAC's pin falls at
-  ~200 V/s and holds a rising step's overshoot for milliseconds there
-  ([dac.md](dac.md)) - on the AVR EA's assembly of the same PCB the net
-  measures 96 nF, which would make that fall a sink of ~20 uA rather
-  than a pin's weak one; the DA's own net is not measured;
 - the 200 us reference start-up case on the DA/DB (32.768 kHz main
   clock: a serial console cannot follow it, so it needs a sleepy
   application); `debug_run` (needs a debugger session); on the EA

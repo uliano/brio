@@ -415,9 +415,10 @@ CLK_PER, 5 V; `z` 256 verdicts, letters `f` and `j` twelve runs each):
   OSCHF is pulled onto the external clock while that clock is CLK_PER
   (clkctrl.md). The multiplier ratios are untouched - every leg runs
   from the one oscillator.
-- **The board's PA7 carries 100 nF**, so letter j reads WOC and WOD on
-  the ALT2 route (PF2/PF3) there: WOC = A carries 300, WOD = B 499 and
-  swapped 499/300, to the tick - the first waveforms measured on ALT2.
+- **Letter j's WOC and WOD on the DEFAULT route's PA6/PA7**: WOC = A
+  carries 300, WOD = B 499 and swapped 499/300, every capture to the
+  tick, ten runs of ten. On the ALT2 route (PF2/PF3, where a board's PA7
+  is not free) the same four widths read to the tick as well.
 
 ## Not covered yet
 

@@ -234,7 +234,7 @@ XOSCHF in crystal mode `Pll::source_ok(xoschf)` is false and
 
 **On the AVR128DA48** (REVID 0x17, rev A7, the board's 24 MHz external
 clock into PA0, 5 V; `test_avr_clock` 25 verdicts with the two letters
-only that board builds, CLKOUT never enabled - its PA7 carries 100 nF):
+only that board builds, CLKOUT on PA7 from boot):
 
 - The OSCHF sweep, the twelve prescalers of the external clock and the
   manual tune behave as on the DB, the console following at 9600; the
@@ -343,7 +343,7 @@ of its own:
 | OSCHFCTRLA bits 3:2 (reset 0x0C on paper, undocumented) | 12.5.8 | declined: never written whole, every write a read-modify-write of the bit it means |
 | MCLKTIMEBASE | 12.3.6, 12.5.7 | used: `ClockTimebase`, owned by the clock (above) |
 | Clock failure detection: main / XOSCHF / XOSC32K, INT or NMI, test bit | 12.3.5 | used: `ClockFailure`, the DB's resource unchanged; the fallback is OSCHF at the fuse's rate ("at its reset frequency") |
-| CLKOUT on PA7 | 12.5.1 | used: `MainClock::clkout`; never on the bench board, whose PA7 carries 100 nF |
+| CLKOUT on PA7 | 12.5.1 | used: `MainClock::clkout`, on from boot in `test_avr_clock`, whose letter 6 B judges the hardware's clear of it at a clock failure |
 | The supply grade | 35.10.5 | declined as a parameter (the reader's; above) |
 | PLL, FRQSEL | - | absent on this die: `Pll` and `Oschf::set_hz` do not exist here (refused by name) |
 
@@ -384,7 +384,7 @@ compare with the current rate to place that store - counted in
 it already pays.
 
 **Bench findings (AVR64EA48 rev B1, REVID 0x21, 5 V; `test_avr_clock`'s
-EA letters from the console, 22 of 27 - the board's 32 kHz crystal does
+EA letters from the console, CLKOUT on PA7, 22 of 27 - the board's 32 kHz crystal does
 not run, its page, so letters 2 to 6, which time on that crystal, stop at
 their first verdict there, and letter 1 runs its ladder untimed).**
 
@@ -446,7 +446,8 @@ Implemented but not bench-verified:
   ladder's rates, OSCHF's accuracy at the fuse's
   rate, the tune curve, the auto-tune and the late TUNE copy, the 32 kHz
   main clocks, the clock failure detector on XOSC32K and on the main
-  clock (what the prescaler does at the fallback) - each measures on a
+  clock (what the prescaler does at the fallback, CLKOUT cleared and
+  set again) - each measures on a
   board whose 32 kHz crystal runs; `ClockSource::external` on the EA (the board puts a
   crystal on PA0); `Clock<internal, 16 MHz>` (the bench part is fused
   at 20 MHz).

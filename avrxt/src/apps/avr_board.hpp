@@ -17,9 +17,9 @@
 //                     fallback; on the AVR EA the OSCCFG fuse's rate, a
 //                     provisioning fact of this board's chip)
 //   board_xosc32k     a 32.768 kHz crystal on PF0/PF1
-//   board_pa7_free    nothing on PA7 (the REV 1.2 PCB puts 100 nF there:
-//                     an edge on it is an RC's, a clock on it a pad held
-//                     at its short-circuit current)
+//   board_pa7_free    nothing fitted on PA7: CLKOUT, a TCD's WOD on its
+//                     DEFAULT route and EVOUTA ALT1 may drive it and be
+//                     read back as a level
 //   board_clkout      CLK_PER may be put on PA7 (CLKOUT) - PA7 free
 //   board_wave_crystal_pins
 //                     a crystal pin whose oscillator did not start may be
@@ -33,7 +33,11 @@
 //                     together: one analog net, for the DAC-to-ADC and
 //                     DAC-to-AC loops; a program that drives one of the
 //                     three drives the net, and a leg that needs one of
-//                     them as a free digital pad moves elsewhere
+//                     them as a free digital pad moves elsewhere. The net
+//                     carries VREFA's decoupling capacitor, 100 nF from
+//                     PD7 to ground on the REV 1.2 PCB (the row says so):
+//                     a pad driving the net charges it, and a DAC step
+//                     moves it at the buffer's current
 //   board_dac_load_ohms
 //                     the resistor from that net to ground (0 = none): the
 //                     DAC sources it, and a falling step is the resistor's
@@ -63,27 +67,29 @@ inline constexpr bool board_analog_net = false;
 inline constexpr uint16_t board_dac_load_ohms = 0;
 #elif defined(BRIO_BOARD_da48)
 // The REV 1.2 PCB with an AVR128DA48: a 24 MHz oscillator (a quartz and
-// two inverters) into PA0 as EXTCLK, 32.768 kHz on PF0/PF1, 100 nF on PA7,
-// PD6 wired to PD1 and PD7 with no resistor (docs/boards/avr128da48.md).
+// two inverters) into PA0 as EXTCLK, 32.768 kHz on PF0/PF1, PA7 free, PD6
+// wired to PD1 and PD7 with PD7's 100 nF (VREFA's decoupling) on the net and
+// 10 kOhm from the net to ground, the AVR64EA48 board's net
+// (docs/boards/avr128da48.md).
 using BoardClock = brio::Clock<brio::ClockSource::external, 24'000'000>;
 inline constexpr bool board_xosc32k = true;
-inline constexpr bool board_pa7_free = false;
+inline constexpr bool board_pa7_free = true;
 inline constexpr bool board_wave_crystal_pins = true;
 inline constexpr bool board_pc_pe_jumpers = false;
 inline constexpr bool board_analog_net = true;
-inline constexpr uint16_t board_dac_load_ohms = 0;
+inline constexpr uint16_t board_dac_load_ohms = 10'000;
 #elif defined(BRIO_BOARD_ea48)
 // The REV 1.2 PCB with an AVR64EA48: a 20 MHz quartz on PA0/PA1
-// (XOSCHF), 32.768 kHz on PF0/PF1, 100 nF on PA7, 5 V - the supply the
-// 20 MHz needs (DS40002443A 35.10.5); the chip's OSCCFG left at the
-// factory 0x00, OSCHF at 20 MHz; USART1 ALT1's PC4..PC7 jumpered to
-// PE0..PE3; PD6 wired to PD1 and PD7 with 10 kOhm from the net to ground
-// (docs/boards/avr64ea48.md). Its crystals' pins are never driven,
-// started or not.
+// (XOSCHF), 32.768 kHz on PF0/PF1, PA7 free, 5 V - the supply the 20 MHz
+// needs (DS40002443A 35.10.5); the chip's OSCCFG left at the factory 0x00,
+// OSCHF at 20 MHz; USART1 ALT1's PC4..PC7 jumpered to PE0..PE3; PD6 wired
+// to PD1 and PD7 with PD7's 100 nF (VREFA's decoupling) on the net and
+// 10 kOhm from the net to ground (docs/boards/avr64ea48.md). Its crystals'
+// pins are never driven, started or not.
 using BoardClock = brio::Clock<brio::ClockSource::crystal, 20'000'000, brio::ClockDiv::div1,
                                20'000'000>;
 inline constexpr bool board_xosc32k = true;
-inline constexpr bool board_pa7_free = false;
+inline constexpr bool board_pa7_free = true;
 inline constexpr bool board_wave_crystal_pins = false;
 inline constexpr bool board_pc_pe_jumpers = true;
 inline constexpr bool board_analog_net = true;

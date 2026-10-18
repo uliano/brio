@@ -46,8 +46,9 @@ this one differs from the DA's on the same PCB in what is fitted.
   [../probes/atmel-ice.md](../probes/atmel-ice.md).
 - **LED and button**: the LED on **PF2**, the button on **PF3** (to
   ground, pulled up), each through a jumper.
-- **PA7** carries 100 nF to ground, as on the DA's assembly: CLKOUT is
-  never put there.
+- **PD7 (VREFA)** carries **100 nF** to ground, the reference's
+  decoupling, as on the DA's assembly. **PA7** carries nothing: CLKOUT
+  runs there in `test_avr_clock` (`avr_board.hpp`'s `board_pa7_free`).
 - **USART1 ALT1 jumpers**: PC4-PE0, PC5-PE1, PC6-PE2, PC7-PE3 - each
   pair ONE net, and PE0..PE3 run on to the partner board's wires (the
   SPI and USART links of the two-board suites). No program drives a PE
@@ -59,7 +60,7 @@ this one differs from the DA's on the same PCB in what is fitted.
   and DAC-to-AC loops ([../avrxt/dac.md](../avrxt/dac.md)), stated in
   `avr_board.hpp` (`board_analog_net`, `board_dac_load_ohms`). The net
   carries **96 nF** besides (its decay through the 10 k, 0.96 ms to 1/e:
-  `test_avr_analog` letter n) - the capacitor the PCB puts on VREFA: a
+  `test_avr_analog` letter n) - PD7's 100 nF, within its tolerance: a
   pad driving the net reaches VIH in 4.7 us and VIL in 3.3 us, the DAC's
   buffer moves it in tens of microseconds, and a suite that drives PD1,
   PD6 or PD7 drives that net and waits for it.
@@ -122,5 +123,5 @@ this one differs from the DA's on the same PCB in what is fitted.
 - The timer suite's pads on this board: TCA0 on PORTD (PD0, PD2), TCA1
   on PORTB, PORTC (PC4..PC6, the jumpered pins - nothing drives their
   PE partners meanwhile), PORTA (PA4..PA6) and PORTD (PD4..PD6), the CCL
-  on LUT2's PD0/PD2/PD3, the DAC on PD6, EVOUT on PD2, PC7 and PA7 (the
-  100 nF there reads the held level 5 us after a change).
+  on LUT2's PD0/PD2/PD3, the DAC on PD6, EVOUT on PD2, PC7 and PA7 (each
+  read 5 us after a change).

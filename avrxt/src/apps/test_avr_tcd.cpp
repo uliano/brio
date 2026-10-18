@@ -26,11 +26,12 @@
 // (no PLL from an XOSCHF crystal) has no DA twin: the DA has no crystal
 // oscillator, its PLL SOURCE = 1 IS the external clock on PA0, and on
 // the AVR128DA48 board that clock is also CLK_PER - so letter f measures
-// the PLL from it against its own source, exactly. And the AVR128DA48
-// board's PA7 (WOD on the DEFAULT route) carries 100 nF to ground, an RC
-// no whole-tick verdict survives: letter j reads WOC/WOD on the ALT2
-// route there (PF2/PF3 - the LED, lit for the measurement, and the
-// button's pin, which must not be pressed meanwhile).
+// the PLL from it against its own source, exactly. Letter j reads WOC and
+// WOD on the DEFAULT route's PA6/PA7 where the board leaves PA7 free
+// (avr_board.hpp's board_pa7_free); a board that loads PA7 reads them
+// on the ALT2 route instead (PF2/PF3 - on the REV 1.2 PCB the LED, lit
+// for the measurement, and the button's pin, which must not be pressed
+// meanwhile).
 //
 // Bench diagnostic, NOT a kernel app (sequential, blocking). Console on
 // USART2 ALT1 (PF4/PF5) at 460800 - PF4/PF5 are never claimed here, and
@@ -87,7 +88,7 @@ using ChB = EventChannel<1>;       ///< a second PORTA output pin
 using ChInA = EventChannel<2>;     ///< PD3 -> TCD input A
 using ChInB = EventChannel<3>;     ///< PD4 -> TCD input B
 using ChTcd = EventChannel<4>;     ///< a TCD event generator, or a PORTF pin
-using ChF = EventChannel<5>;       ///< a second PORTF pin (test j on the DA board)
+using ChF = EventChannel<5>;       ///< a second PORTF pin (test j where PA7 is not free)
 
 // The board's facts (board_clkout, board_xosc32k, board_pa7_free) are
 // the board table's (avr_board.hpp).
@@ -1655,7 +1656,13 @@ void tj_outputs() {
         verdict("and leaves WOB alone", near(v.high_b.mean(), 499, 2));
     }
 
-    // WOC and WOD follow whichever waveform CTRLC selects.
+    // WOC and WOD follow whichever waveform CTRLC selects. The bound: the
+    // TCD and the TCBs count CLK_PER at DIV1, so on-time A is CMPACLR -
+    // CMPASET = 300 ticks and on-time B CMPBCLR - CMPBSET = 499 (25.3.3.2);
+    // both edges of a pin cross the same port synchronizer and EVSYS path,
+    // so a captured width is the true one within the TCB's one tick, and
+    // the rounded mean of eight adds half a tick: +-2 - on a pad nothing
+    // loads, as letter b's WOA/WOB on PA4/PA5.
     {
         TcdConfig c = base_one_ramp(100, 400, 700, 1199);
         c.enable_woc = true;
@@ -1667,9 +1674,9 @@ void tj_outputs() {
             probe_cd();
             arm_meters(ChA{}, ChB{});
         } else {
-            // PA7's 100 nF: WOC/WOD read on ALT2's PF2/PF3 instead.
+            // PA7 not free: WOC/WOD read on ALT2's PF2/PF3 instead.
             c.route = TcdRoute::alt2;
-            verdict("all four outputs on ALT2 (PA7 carries 100 nF), WOC = A and WOD = B",
+            verdict("all four outputs on ALT2 (PA7 not free), WOC = A and WOD = B",
                     D::init(c));
             ChTcd::source(EvPin<Pin<'F', 2>>{});
             ChF::source(EvPin<Pin<'F', 3>>{});
@@ -1999,7 +2006,7 @@ void help() {
                         "claimed only inside test a; PF4/PF5 are the console and are never "
                         "touched."
                       : "  No wires: WOA..WOC on PA4..PA6 read back as pin events into TCB "
-                        "meters (PA7 carries 100 nF on this board), the TCD's own CMPBCLR "
+                        "meters (PA7 is not free on this board), the TCD's own CMPBCLR "
                         "event as the cycle counter, PD3/PD4 driven from PORT as the two "
                         "input-event sources. PF0..PF3 (ALT2) are claimed inside tests a and "
                         "j (WOC/WOD on PF2/PF3: the LED lights, the button must stay up); "

@@ -412,7 +412,7 @@ SleepRun power_down_once(uint8_t stage, bool sync = true) {
 // peer's stimulus net, PF2/PF3 the LED and the button and PF6 RESET -
 // none of them is driven here.
 using PinA6 = Pin<'A', 6>;           ///< LUT0's ALT1 output
-using PinA7 = Pin<'A', 7>;           ///< EVOUTA ALT1 (100 nF on this board)
+using PinA7 = Pin<'A', 7>;           ///< EVOUTA ALT1
 using PinC7 = Pin<'C', 7>;           ///< EVOUTC ALT1: the echo's net, PE3 its partner
 using PinD3 = Pin<'D', 3>;           ///< LUT2's output
 using PinD6 = Pin<'D', 6>;           ///< LUT2's ALT1 output
@@ -3175,7 +3175,7 @@ void tp_pin_wake() {
     constexpr uint8_t n = 8;
     const char* const what[n] = {
         "PD2 (EVOUTD, a Px2)         ", "PD7 (EVOUTD ALT1)           ",
-        "PA7 (EVOUTA ALT1, 100 nF)   ", "PC7 (EVOUTC ALT1)           ",
+        "PA7 (EVOUTA ALT1)           ", "PC7 (EVOUTC ALT1)           ",
         "PE3 (PC7's net, PC7 driving)", "PA6 (LUT0 ALT1, a Px6)      ",
         "PD3 (LUT2)                  ", "PD6 (LUT2 ALT1, a Px6)      ",
     };
