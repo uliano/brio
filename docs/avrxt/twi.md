@@ -710,7 +710,10 @@ alive, 1865 us out of power-down - the crystal's restart held on SCL
 from the match to the first serviced byte. The figures and the rule
 (the data interrupts are no wake source) are in
 [platform.md](platform.md), "Wake-up latency, measured from the partner
-board".
+board". On the **AVR64EA48** (rev B1, ten runs of ten) the client over
+the DB's engine does the same on TWI0's default pins: 393.4 us awake and
+out of standby, about 1.0 ms out of power-down - the crystal's cold
+restart (0.6 ms) held on SCL; DS40002443A 27.3.5 promises the stretch.
 
 **A desk fact, not a silicon one**: TWI1's dual pair PB2/PB3 would make
 a third tap of this bus - the suite drives PB2 low and prints whether the

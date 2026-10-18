@@ -225,7 +225,11 @@ brio::EventChannel<3>::pulse();
   asynchronous user, drives its pad from a PIT divider with every clock
   but the 32 kHz one stopped, and that pad's edge wakes the device
   ([platform.md](platform.md), the sleep modes); the ADC's event start,
-  another, converts in standby.
+  another, converts in standby. On the AVR64EA48 (rev B1) the PIT's
+  event slot drives EVOUT through power-down on PD2, PD7, PA7 and PC7
+  and a LUT's input on channel 2 the same way (`test_avr_sleep` e and p,
+  ten runs of ten): the EA's event system routes with every clock but
+  the 32 kHz one stopped, as 16.3.3 says.
 
 ## Not covered yet
 

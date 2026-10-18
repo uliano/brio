@@ -70,28 +70,50 @@
 // by a watchdog and a .noinit token, so a mode that fails to wake resets
 // the board and SAYS SO at the next boot instead of hanging the bench.
 //
+// THE AVR EA (DS40002443A ch. 13). Its SLPCTRL is CTRLA alone: the same
+// three modes and no regulator control, so every leg that sets PMODE or
+// HTLLEN is the DA/DB's alone, and what the EA's legs ask instead is
+// whether its wake pays a regulator bill the chapter does not list
+// (13.3.2.2 names one, table 13-4 does not). Every EA pin senses fully
+// asynchronously (18.3.3.1): letter p wakes the device from power-down on
+// ONE edge of each pin a self-made edge reaches (EVOUT and the CCL's
+// outputs, driven by the PIT through the event system), and letter q on
+// the pins the partner board's wires reach. The EA has no USART4 and no
+// USART reaches PE0, so the link is USART1 on ALT1: its TXD PC4 is
+// jumpered onto PE0 (and PC5..PC7 onto PE1..PE3, avr_board.hpp's
+// board_pc_pe_jumpers), the stimulus and the echo stay on PE2/PE3 and
+// their PC partners stay inputs. No ADC (its EA engine is not written),
+// no TCD and no op amp: letter o keeps its TCA and AC legs.
+//
 // Commands: ? | a the register surface | b idle through enter() |
 // c standby is real | d the RUNSTDBY chain | e a pin wakes from the
-// deep modes | f power-down stops the rest | g the voltage regulator |
-// n the CCL as a wake-up source | z = all of those
+// deep modes | f power-down stops the rest | g the voltage regulator
+// (the AVR EA: the wake-up in 32 kHz ticks) | n the CCL as a wake-up
+// source | o RUNSTDBY unit by unit | p (the AVR EA) every self-driven pin
+// wakes from power-down on one edge | z = all of those
 //   two-board (the peer runs sleep_peer): h the link and the two wires |
 //   i the awake baseline and idle | j standby, timed from outside |
 //   k power-down, timed from outside | l start-of-frame | m a TWI
-//   address match | y = all of h..m
+//   address match | q (the AVR EA) the peer's edges on more pins |
+//   y = all of h..m (and q)
 
-// build: boards = db48,da48
+// build: boards = db48,da48,ea48
 // build: monitor_speed = 460800
 
 #include <avr/interrupt.h>
 #include <stdint.h>
 
 #include "avrxt/ac.hpp"
+#if !defined(BRIO_BOARD_ea48)
 #include "avrxt/adc.hpp"
+#endif
 #include "avrxt/ccl.hpp"
 #include "avrxt/clock.hpp"
 #include "avrxt/delay.hpp"
 #include "avrxt/evsys.hpp"
+#if !defined(BRIO_BOARD_ea48)
 #include "avrxt/opamp.hpp"
+#endif
 #include "avrxt/pin.hpp"
 #include "avrxt/platform.hpp"
 #include "avrxt/reset.hpp"
@@ -99,7 +121,9 @@
 #include "avrxt/sleep.hpp"
 #include "avrxt/tca.hpp"
 #include "avrxt/tcb.hpp"
+#if !defined(BRIO_BOARD_ea48)
 #include "avrxt/tcd.hpp"
+#endif
 #include "avrxt/twi.hpp"
 #include "avrxt/usart.hpp"
 #include "avrxt/userrow.hpp"
@@ -158,8 +182,21 @@ using PadPin = Pin<'D', 2>;          ///< EVOUTD, and a fully asynchronous sense
 // of the two FULLY ASYNCHRONOUS positions of every port (port.md),
 // which is what lets an edge on it wake this device from power-down at
 // all; PE3 is this chip's echo back into the peer's hardware capture.
-using U4 = Usart<4>;
+#if defined(BRIO_BOARD_ea48)
+// The AVR EA: no USART4, and no USART route reaches PE0 (DS40002443A
+// 17.3.3, 17.3.4): USART1's ALT1 TXD is PC4, jumpered onto PE0 on this board, so
+// the command wire is the same net through another pad. PE0 itself stays
+// an input with no pull - one driver per net.
+using LinkUart = Usart<1>;
+constexpr UsartRoute link_route = UsartRoute::alt1;
+using LinePin = Pin<'C', 4>;
+#else
+using LinkUart = Usart<4>;
+constexpr UsartRoute link_route = UsartRoute::def;
 using LinePin = Pin<'E', 0>;
+#endif
+constexpr char line_port = LinePin::port_letter;
+constexpr uint8_t line_pin = LinePin::pin_number;
 using WakePin = Pin<'E', 2>;
 using EchoPin = Pin<'E', 3>;
 using Client = I2cClient<0, TwiRoute::def>;
@@ -171,6 +208,8 @@ constexpr PitPeriod pit_period = PitPeriod::cyc4096;     // 125 ms at 32.768 kHz
 constexpr uint16_t pit_cycles_used = 4096;
 /// CLK_PER ticks in one PIT period, nominal (OSC32K's own error moves it).
 constexpr uint32_t ticks_per_pit = crystal_hz / (32768u / pit_cycles_used);
+/// A 2 ms TCB period at CLK_PER/1.
+constexpr uint16_t waker_2ms = static_cast<uint16_t>(crystal_hz / 500u);
 
 // ---- shared with the ISRs ---------------------------------------------------------
 volatile uint16_t pit_irqs = 0;
@@ -227,6 +266,15 @@ void watch_init(bool standby) {
 // crystal - good enough to keep a byte, not good enough to trust a
 // whole test's output to.
 
+#if defined(BRIO_BOARD_ea48)
+/// CLK_PER from OSCHF at the rate its fuse chose (OSCCFG, 20 MHz on this
+/// board's chip: the EA has no FRQSEL), through the prescaler the boot's
+/// Clock left at /1, with the oscillator's own RUNSTDBY as asked.
+bool use_oschf(bool osc_standby) {
+    Oschf::run_standby(osc_standby);
+    return MainClock::select(MainSource::oschf);
+}
+#else
 /// CLK_PER from OSCHF at 24 MHz, with the oscillator's own RUNSTDBY as
 /// asked.
 bool use_oschf(bool osc_standby) {
@@ -234,6 +282,7 @@ bool use_oschf(bool osc_standby) {
     Oschf::run_standby(osc_standby);
     return MainClock::select(MainSource::oschf);
 }
+#endif
 
 /// CLK_PER from the crystal again, restarted with the RUNSTDBY flag
 /// asked. XOSCHFCTRLA's fields are read-only while the oscillator is
@@ -349,26 +398,82 @@ SleepRun power_down_once(uint8_t stage, bool sync = true) {
     return r;
 }
 
+#if defined(BRIO_BOARD_ea48)
+// ---- the AVR EA's self-driven pads (letter p) ------------------------------------
+// The pins a PIT divider can drive while the device is in POWER-DOWN,
+// with no wire: an EVOUT position, or a LUT's output on an asynchronous
+// path (FILTSEL = 0, EDGEDET = 0: table 13-3 note 3). Each pad senses its
+// own drive. On this board PA2/PA3 and PC2/PC3 are the I2C bus, PC6 is the
+// peer's stimulus net, PF2/PF3 the LED and the button and PF6 RESET -
+// none of them is driven here.
+using PinA6 = Pin<'A', 6>;           ///< LUT0's ALT1 output
+using PinA7 = Pin<'A', 7>;           ///< EVOUTA ALT1 (100 nF on this board)
+using PinC7 = Pin<'C', 7>;           ///< EVOUTC ALT1: the echo's net, PE3 its partner
+using PinD3 = Pin<'D', 3>;           ///< LUT2's output
+using PinD6 = Pin<'D', 6>;           ///< LUT2's ALT1 output
+using PinD7 = Pin<'D', 7>;           ///< EVOUTD ALT1
+using PortaLut = Lut<0>;
+using PortdLut = Lut<2>;
+using ChPin = EventChannel<2>;       ///< the PIT divider into a LUT (letter p)
+
+volatile uint16_t porta_irqs = 0;    ///< PORTA: letter p's PA6/PA7
+volatile uint16_t portc_irqs = 0;    ///< PORTC: letter p's PC7, letter q's PC4/PC6
+
+/// Every pad letters p and q drive or sense back to an input with no
+/// sense, its driver released, its flag cleared.
+void quiesce_pins() {
+    EvOut<PinA7>::unlisten();
+    EvOut<PinC7>::unlisten();
+    EvOut<PinD7>::unlisten();
+    (void)PortaLut::init({});        // the output pin released, the route back to default
+    PortaLut::disable();
+    (void)PortdLut::init({});
+    PortdLut::disable();
+    PortaLut::EventA::unlisten();
+    PortdLut::EventA::unlisten();
+    ChPin::off();
+    PinA6::configure({});
+    PinA7::configure({});
+    PinC7::configure({});
+    PinD3::configure({});
+    PinD6::configure({});
+    PinD7::configure({});
+    Pin<'C', 6>::configure({});
+    LinePin::configure({.pull = PinPull::up});   // the command wire's idle level, as command mode leaves it
+    Pin<'E', 0>::configure({});
+    (void)Port<'A'>::take_flags();
+    (void)Port<'C'>::take_flags();
+    (void)Port<'D'>::take_flags();
+}
+#endif
+
 // ---- the state every test starts from ----------------------------------------------
 
 void quiesce() {
     console_drain();                  // it moves the main clock: no byte in flight
     Sleep::disarm();
     (void)Watchdog::off();
+#if !defined(BRIO_BOARD_ea48)
     Vreg::power(VregPower::normal);
     (void)Vreg::high_temp_low_leakage(false);
+#endif
     Ccl::disable();
     WakeLut::disable();
     WakeLut::sense(LutSense::none);
     WakeLut::EventA::unlisten();
     ChCcl::off();
+#if !defined(BRIO_BOARD_ea48)
     Twi<1>::client_enable(false);
+#endif
     Twi<0>::client_enable(false);     // test m's address-match wake source
 
     EvOut<PadPin>::unlisten();
     ChPad::off();
     PadPin::configure({});
     PadPin::clear_flag();
+#if defined(BRIO_BOARD_ea48)
+    quiesce_pins();
+#endif
 
     // The two-board half's pins: the stimulus stops being a wake-up
     // source, the echo parks low. Nothing here touches USART4 - the
@@ -378,6 +483,9 @@ void quiesce() {
     EchoPin::output();
     (void)Port<'E'>::take_flags();
 
+#if defined(BRIO_BOARD_ea48)
+    Oschf::run_standby(true);         // as Clock::init() left it
+#endif
     (void)use_crystal(true);          // the board's boot configuration
 
     Waker::enable_capt_interrupt(false);
@@ -398,12 +506,58 @@ void quiesce() {
     twis_stops = 0;
     twis_addr = twis_stops;
     twis_n = 0;
+#if defined(BRIO_BOARD_ea48)
+    porta_irqs = 0;
+    portc_irqs = 0;
+#endif
     sei();
 }
 
 // ---- a the register surface ----------------------------------------------------------
 // No sleeping here: what a program can ask SLPCTRL for, and the two
 // rules the driver enforces rather than merely documents.
+#if defined(BRIO_BOARD_ea48)
+// The AVR EA's SLPCTRL is CTRLA alone (DS40002443A 13.4): the three modes
+// and the erratum's NOP (DS80001048D 2.2.3, the DB's 2.2.4 word for
+// word); there is no VREGCTRL, so no regulator verb exists to test - its
+// absence is a compile-time refusal (test/family/neg/sleep_no_vreg_on_ea).
+void ta_surface() {
+    print(serial, "a SLPCTRL: the surface and the NOP (the AVR EA: CTRLA alone, no "
+                  "regulator control)", crlf);
+    quiesce();
+
+    verdict("nothing is armed at rest", !Sleep::armed());
+    Sleep::arm(SleepMode::idle);
+    verdict("arm(idle): SEN set, SMODE reads back idle",
+            Sleep::armed() && Sleep::armed_mode() == SleepMode::idle);
+    Sleep::arm(SleepMode::standby);
+    verdict("arm(standby) reads back",
+            Sleep::armed() && Sleep::armed_mode() == SleepMode::standby);
+    Sleep::arm(SleepMode::power_down);
+    verdict("arm(power_down) reads back",
+            Sleep::armed() && Sleep::armed_mode() == SleepMode::power_down);
+    Sleep::disarm();
+    verdict("disarm() clears SEN", !Sleep::armed());
+    verdict("and the platform's own readback agrees", !P::sleep_armed());
+
+    // DS80001048D 2.2.3 (revisions B1 and B2): a store to an address
+    // >= 0x40 immediately followed by a write to SLPCTRL.CTRLA loses that
+    // write. A TCB counter store (0x0B0A) and an arm() with nothing in
+    // between must still arm, the NOP being in sleep.hpp; that it is
+    // really adjacent to the store is read in the listing.
+    Waker::count(0);
+    Sleep::arm(SleepMode::standby);
+    verdict("a store above 0x40 immediately before arm() does not eat it "
+            "(DS80001048D 2.2.3's NOP)",
+            Sleep::armed() && Sleep::armed_mode() == SleepMode::standby);
+    Waker::count(0);
+    Sleep::disarm();
+    verdict("and the same holds for disarm()", !Sleep::armed());
+    print(serial, "  no VREGCTRL on this die: PMODE and HTLLEN do not exist, and Vreg is "
+                  "refused by name at compile time.", crlf);
+    quiesce();
+}
+#else
 void ta_surface() {
     print(serial, "a SLPCTRL and VREGCTRL: the surface, the NOP and the HTLLEN interlock", crlf);
     quiesce();
@@ -479,6 +633,7 @@ void ta_surface() {
                   "sources any more.", crlf);
     quiesce();
 }
+#endif
 
 // ---- b IDLE through Sleep::enter() ----------------------------------------------------
 // The platform's idle() is the kernel's hook, and the six-cycle cost of
@@ -626,7 +781,7 @@ void td_chain() {
     // whose chain is complete. Table 13-4 lists TCB among standby's
     // wake-up sources - for the instances left running.
     (void)Waker::init({.mode = TcbMode::periodic, .clock = TcbClock::div1,
-                       .compare = 48000, .run_standby = true});     // 2 ms
+                       .compare = waker_2ms, .run_standby = true});     // 2 ms
     Waker::enable_capt_interrupt(true);
     Pit::enable_interrupt(false);
     const SleepRun by_tcb = sleep_once(SleepMode::standby, false);
@@ -637,7 +792,7 @@ void td_chain() {
     // And the same TCB with its RUNSTDBY cleared: it cannot wake what
     // it cannot count. The PIT is the backstop that ends the sleep.
     (void)Waker::init({.mode = TcbMode::periodic, .clock = TcbClock::div1,
-                       .compare = 48000});
+                       .compare = waker_2ms});
     Waker::enable_capt_interrupt(true);
     const SleepRun by_pit = sleep_once(SleepMode::standby);
     Waker::enable_capt_interrupt(false);
@@ -689,8 +844,13 @@ void td_chain() {
             by_tcb.wakers >= 1 && by_tcb.pits == 0);
     verdict("a TCB whose RUNSTDBY is clear cannot: the PIT had to end that sleep",
             by_pit.wakers == 0 && by_pit.pits == 1);
+#if defined(BRIO_BOARD_ea48)
+    print(serial, "  the TCB wake ended after ", by_tcb.ticks, " CLK_PER ticks (its 2 ms "
+                  "period is ", waker_2ms, ")", crlf);
+#else
     print(serial, "  the TCB wake ended after ", by_tcb.ticks, " CLK_PER ticks (its 2 ms "
                   "period is 48000)", crlf);
+#endif
     quiesce();
 }
 
@@ -789,7 +949,7 @@ void tf_power_down() {
     // The two counters measure the same interval in two clock domains,
     // which is what makes OSC32K's own error a number here.
     const uint32_t rtc_hz = standby.ticks
-        ? static_cast<uint32_t>((static_cast<uint64_t>(pit_cycles_used) * 24'000'000u) /
+        ? static_cast<uint32_t>((static_cast<uint64_t>(pit_cycles_used) * crystal_hz) /
                                 standby.ticks)
         : 0;
     print(serial, "  the same 4096 CLK_RTC cycles measured ", standby.ticks,
@@ -800,6 +960,89 @@ void tf_power_down() {
     quiesce();
 }
 
+#if defined(BRIO_BOARD_ea48)
+// ---- g the wake-up in 32 kHz ticks (the AVR EA) -------------------------------------------------
+// The DB's letter g times VREGCTRL's profile on this ruler; the EA has no
+// profile to set, and the question it leaves is whether a wake pays a
+// regulator start-up at all - 13.3.2.2 names one, table 13-4 lists only
+// "one OSC start-up". One board answers it coarsely: the RTC counter is
+// the one clock a standby sleep keeps (its RUNSTDBY), CNT zeroed after a
+// PIT interrupt reads 4096 plus the wake-up at the next one, read after a
+// settle (letter f: CNT is stale at the instant of the wake), and the
+// same sequence awake is the baseline that removes the settle and the
+// zeroing. One tick is 1/32768 s nominal, 30.9 us on this die (OSC32K
+// 1.3 % slow, the RTC suite's figure). The partner board's 41.7 ns ruler
+// (letter j) measures the same configurations.
+void tg_wake_ticks() {
+    print(serial, "g the wake-up out of standby in 32 kHz ticks: what an oscillator's "
+                  "RUNSTDBY buys, and whether a regulator start-up is paid (no regulator "
+                  "control on this die)", crlf);
+    quiesce();
+    (void)Rtc::init({.prescaler = RtcPrescaler::div1, .period = 0xFFFF,
+                     .run_standby = true});
+
+    auto wake_ticks = [](bool spin) -> int16_t {
+        console_drain();
+        pit_sync();
+        cli();
+        Rtc::count(0);
+        sei();
+        (void)sleep_once(SleepMode::standby, false, spin);
+        delay_us(clock, 1000);
+        return static_cast<int16_t>(static_cast<int16_t>(Rtc::count()) -
+                                    static_cast<int16_t>(pit_cycles_used));
+    };
+
+    // quiesce() leaves the crystal the main clock with its RUNSTDBY set,
+    // and OSCHF with its own (Clock::init()'s state).
+    const int16_t awake = wake_ticks(true);
+    const int16_t xtal_kept = wake_ticks(false);
+    console_drain();
+    const bool m1 = use_oschf(false);            // the crystal still runs: its RUNSTDBY
+    const int16_t oschf_beside = wake_ticks(false);
+    const bool m2 = use_oschf(true);
+    Xoschf::stop();
+    const int16_t oschf_kept = wake_ticks(false);
+    const bool m3 = use_oschf(false);            // nothing left but the 32 kHz domain
+    const int16_t oschf_alone = wake_ticks(false);
+    console_drain();
+    const bool m4 = use_crystal(false);
+    Oschf::run_standby(false);
+    const int16_t xtal_restart = wake_ticks(false);
+    console_drain();
+    Oschf::run_standby(true);
+    const bool back = use_crystal(true);
+
+    verdict("every clock move of the sweep landed", m1 && m2 && m3 && m4 && back);
+    print(serial, "  CNT - 4096 after the wake, in CLK_RTC ticks of 30.9 us (awake ", awake,
+          " is the baseline: the settle and the CNT zeroing)", crlf);
+    print(serial, "    crystal, its RUNSTDBY on:              ", xtal_kept, crlf);
+    print(serial, "    OSCHF restarting, the crystal running:  ", oschf_beside, crlf);
+    print(serial, "    OSCHF, its RUNSTDBY on:                ", oschf_kept, crlf);
+    print(serial, "    OSCHF restarting, nothing else running: ", oschf_alone, crlf);
+    print(serial, "    crystal restarting (its RUNSTDBY off):  ", xtal_restart, crlf);
+    // A kept-alive clock wakes in six CLK_PER cycles (0.3 us): on this
+    // ruler only the two reads' quantization is left, one tick either way.
+    verdict("an oscillator kept alive by its RUNSTDBY costs nothing on this ruler: the "
+            "crystal's and OSCHF's within one tick of awake",
+            xtal_kept >= awake - 1 && xtal_kept <= awake + 1 && oschf_kept >= awake - 1 &&
+                oschf_kept <= awake + 1);
+    // The crystal's restart is 4096 of its cycles (CSUTHF 4k, the boot's
+    // and use_crystal()'s) = 204.8 us at 20 MHz = 6.6 ticks of 30.9 us:
+    // at least 6 ticks, less the quantization's one.
+    verdict("a crystal that has to restart costs its counted start-up at least "
+            "(4096 cycles = 204.8 us = 6.6 ticks: 5 or more)", xtal_restart >= awake + 5);
+    // What letting go of every oscillator adds to OSCHF's restart: the
+    // DA/DB's regulator start-up (125 us on the DA, 290 us on the DB) would
+    // be four and nine ticks here; one is the quantization.
+    verdict("OSCHF alone costs what OSCHF beside a running crystal costs, to a tick: no "
+            "regulator start-up is paid", oschf_alone >= oschf_beside - 1 &&
+                                           oschf_alone <= oschf_beside + 1);
+    print(serial, "  the crystal's restart: ", xtal_restart - awake, " ticks over awake (the "
+          "counted 204.8 us is 6.6; letter j has it in 41.7 ns ticks)", crlf);
+    quiesce();
+}
+#else
 // ---- g the voltage regulator ----------------------------------------------------------------
 // What one board can say about VREGCTRL: that PMODE is a configuration
 // and not a pulse (it survives a sleep), that HTLLEN does not cost the
@@ -947,6 +1190,7 @@ void tg_vreg() {
           crlf);
     quiesce();
 }
+#endif
 
 // ==============================================================================
 //  THE TWO-BOARD HALF (h..m, set y)
@@ -985,7 +1229,7 @@ slink::Decoder dec;
 /// peer's own deadline, never to be accurate.
 constexpr uint32_t spins_per_ms = 2000;
 
-void put4(uint8_t b) { (void)U4::send(b, 200'000u); }
+void put4(uint8_t b) { (void)LinkUart::send(b, 200'000u); }
 
 /// Half-duplex turnaround guard. RXCIF is raised at the MIDDLE of the
 /// stop bit - half a bit BEFORE the sender's TXCIF - so an end that
@@ -994,7 +1238,7 @@ void put4(uint8_t b) { (void)U4::send(b, 200'000u); }
 /// register in force.
 void turnaround_guard() {
     const uint32_t bit_cycles =
-        (static_cast<uint32_t>(U4::baud_reg()) * U4::samples()) / 64u;
+        (static_cast<uint32_t>(LinkUart::baud_reg()) * LinkUart::samples()) / 64u;
     delay_cycles(4u * (bit_cycles ? bit_cycles : 1u));
 }
 
@@ -1002,37 +1246,37 @@ void turnaround_guard() {
 /// own echo), pin driven, transmitter on.
 void line_talk() {
     turnaround_guard();
-    U4::enable_rx(false);
+    LinkUart::enable_rx(false);
     LinePin::set();
     LinePin::output();
-    U4::enable_tx(true);
-    U4::clear_txc();            // so line_listen waits for THIS burst
+    LinkUart::enable_tx(true);
+    LinkUart::clear_txc();            // so line_listen waits for THIS burst
 }
 
 /// Give it back to the pull-up and listen again. It OWNS the wait for
 /// the line to go idle: TXCIF is write-one-to-clear, so a caller that
 /// waits first and then calls this would spin out its budget deaf.
 void line_listen(bool wait = true) {
-    if (wait) (void)U4::wait_line_idle(200'000u);
-    U4::enable_tx(false);
+    if (wait) (void)LinkUart::wait_line_idle(200'000u);
+    LinkUart::enable_tx(false);
     LinePin::input();
-    pinctrl_of('E', 0) |= PORT_PULLUPEN_bm;
-    U4::flush_rx();
-    U4::enable_rx(true);
+    pinctrl_of(line_port, line_pin) |= PORT_PULLUPEN_bm;
+    LinkUart::flush_rx();
+    LinkUart::enable_rx(true);
 }
 
 /// Command mode, the state everything returns to: 8N1 at the command
 /// baud, receiver listening to the TXD pad through LBME, the pad itself
 /// released to the pull-up.
 bool link_command_mode() {
-    const bool ok = U4::init({.route = UsartRoute::def,
-                              .baud = usart_baud_reg(SysClock::hz, slink::command_baud),
-                              .tx = false,
-                              .loop_back = true});
+    const bool ok = LinkUart::init({.route = link_route,
+                                    .baud = usart_baud_reg(SysClock::hz, slink::command_baud),
+                                    .tx = false,
+                                    .loop_back = true});
     LinePin::input();
-    pinctrl_of('E', 0) |= PORT_PULLUPEN_bm;
-    U4::flush_rx();
-    U4::clear_txc();
+    pinctrl_of(line_port, line_pin) |= PORT_PULLUPEN_bm;
+    LinkUart::flush_rx();
+    LinkUart::clear_txc();
     dec.reset();
     return ok;
 }
@@ -1043,8 +1287,8 @@ bool recv_frame(slink::Frame& out, uint16_t ms) {
     dec.reset();
     const uint32_t budget = static_cast<uint32_t>(ms) * spins_per_ms;
     for (uint32_t i = 0; i < budget; ++i) {
-        if (!U4::rxc_flag()) continue;
-        const UsartFrame f = U4::receive();
+        if (!LinkUart::rxc_flag()) continue;
+        const UsartFrame f = LinkUart::receive();
         if (!f.clean()) { dec.reset(); continue; }
         if (dec.feed(static_cast<uint8_t>(f.data)) == slink::Decoder::Result::frame) {
             out = dec.frame();
@@ -1055,7 +1299,7 @@ bool recv_frame(slink::Frame& out, uint16_t ms) {
 }
 
 bool command_once(slink::Op op, const uint8_t* p, uint8_t len, uint16_t ms) {
-    U4::flush_rx();
+    LinkUart::flush_rx();
     line_talk();
     slink::write_frame(put4, op, p, len);
     line_listen();
@@ -1269,6 +1513,83 @@ void print_train(const char* what, const Train& t) {
 
 constexpr uint8_t train_shots = 8;
 
+#if defined(BRIO_BOARD_ea48)
+// ---- the clock configurations the deep modes are measured against (the AVR EA) ----
+//
+// Five of them. The EA has no regulator profile to set, so what the legs
+// separate is the oscillator's restart from whatever else a wake pays:
+// OSCHF restarting beside a crystal its own RUNSTDBY keeps running,
+// against OSCHF restarting with nothing but the 32 kHz domain left - the
+// configuration in which the DA/DB regulator drops (13.3.5 of theirs) and
+// which DS40002443A 13.3.2.2 still describes ("the time it takes to start
+// the regulator if it has been switched off") while table 13-4 lists one
+// oscillator start-up only.
+enum class LegClock : uint8_t {
+    xtal_restart,       ///< crystal main clock, its own RUNSTDBY clear, OSCHF's clear
+    xtal_kept,          ///< crystal main clock, kept alive by its RUNSTDBY
+    oschf_xtal_alive,   ///< OSCHF main clock restarting, the crystal still oscillating
+    oschf_kept,         ///< OSCHF main clock kept alive by its RUNSTDBY, the crystal stopped
+    oschf_alone,        ///< OSCHF main clock restarting, every other oscillator stopped
+};
+
+/// Entered with the crystal the main clock and its RUNSTDBY set (quiesce()
+/// and run_leg() leave it so).
+bool apply_leg_clock(LegClock c) {
+    switch (c) {
+        case LegClock::xtal_restart: {
+            const bool ok = use_crystal(false);
+            Oschf::run_standby(false);      // after: use_crystal() hops through OSCHF
+            return ok;
+        }
+        case LegClock::xtal_kept:
+            return use_crystal(true);
+        case LegClock::oschf_xtal_alive:
+            return use_oschf(false);
+        case LegClock::oschf_kept: {
+            const bool ok = use_oschf(true);
+            Xoschf::stop();
+            return ok;
+        }
+        default: {
+            const bool ok = use_oschf(false);
+            Xoschf::stop();
+            return ok;
+        }
+    }
+}
+
+/// One whole leg: arm the peer, move the clock, answer the train, put
+/// everything back and fetch the numbers. Nothing is printed between the
+/// two console_drain() calls - the console's BAUD belongs to the crystal.
+///
+/// NO OTHER WAKE THAN THE STIMULUS: the PIT's interrupt is off for the
+/// train and the watchdog, with `stage` in the .noinit token, is the
+/// escape hatch of every leg, standby included. A crystal that ran a
+/// moment before restarts faster than a cold one - measured with the
+/// PIT's 250 ms backstop left on: one or two shots of eight, where the
+/// two periods' beat puts a PIT wake just before them, restarted in
+/// 0.16 .. 0.39 ms against the cold 0.61 .. 0.67; with it off, none in
+/// eighty-eight - so a backstop wake inside the train would time the
+/// PIT's history, not the stimulus.
+bool run_leg(LegClock c, SleepMode m, uint8_t stage, Train& t) {
+    if (!train_arm(train_shots)) return false;
+    console_drain();
+    const bool moved = apply_leg_clock(c);
+    Pit::enable_interrupt(false);
+    token.magic = token_magic;
+    token.stage = stage;
+    (void)Watchdog::arm(WdtTime::s8);
+    train_answer(true, m, train_shots);
+    (void)Watchdog::off();
+    token.magic = 0;
+    token.stage = 0;
+    Pit::enable_interrupt(true);
+    console_drain();
+    Oschf::run_standby(true);
+    const bool back = use_crystal(true);
+    return train_collect(t) && moved && back;
+}
+#else
 // ---- the clock configurations the deep modes are measured against ---------------
 //
 // Four of them, and the fourth is the one the bench found and the data
@@ -1339,6 +1660,7 @@ bool run_leg(LegClock c, bool perf, SleepMode m, uint8_t stage, Train& t) {
     const bool back = use_crystal(true);
     return train_collect(t) && moved && back;
 }
+#endif
 
 // ---- h the link and the two measurement wires ------------------------------------
 // Wire sanity BEFORE any sleep is involved: the command channel both
@@ -1367,7 +1689,7 @@ void th_link() {
 
     // A frame whose checksum does not add up is refused, and the link
     // survives the desync.
-    U4::flush_rx();
+    LinkUart::flush_rx();
     line_talk();
     put4(slink::magic);
     put4(slink::byte_of(slink::Op::ping));
@@ -1454,15 +1776,142 @@ void ti_idle_latency() {
             idle.woke == train_shots && idle.hits == train_shots);
     verdict("the awake baseline is a couple of microseconds: interrupt latency "
             "plus the ISR prologue", ba != slink::no_capture && ba < 240u);
+#if defined(BRIO_BOARD_ea48)
+    verdict("IDLE adds less than a microsecond to it (the six-cycle wake is "
+            "300 ns at 20 MHz)",
+            bi != slink::no_capture && ba != slink::no_capture && bi < ba + 24u);
+#else
     verdict("IDLE adds less than a microsecond to it (the six-cycle wake is "
             "250 ns at 24 MHz)",
             bi != slink::no_capture && ba != slink::no_capture && bi < ba + 24u);
+#endif
     print(serial, "  IDLE - awake = ", static_cast<int32_t>(bi) - static_cast<int32_t>(ba),
           " of the peer's ticks (41.7 ns each); the six-cycle figure itself is measured "
           "on-chip by test_avr_platform f.", crlf);
     quiesce();
 }
 
+#if defined(BRIO_BOARD_ea48)
+// ---- j STANDBY, timed from outside (the AVR EA) -----------------------------------
+// The five clock configurations of the EA (apply_leg_clock), in the
+// peer's 41.7 ns ticks. The two OSCHF restarts are the experiment: beside
+// a running crystal, and with every other oscillator stopped - their
+// difference is what the device pays besides the oscillator when it lets
+// go of everything, the regulator start-up 13.3.2.2 names. Nothing is
+// printed while the main clock is not the crystal.
+void tj_standby_latency() {
+    print(serial, "j STANDBY wake-up latency against five clock configurations (no "
+                  "regulator control on this die)", crlf);
+    quiesce();
+    if (!ensure_link()) { verdict("the peer board is reachable", false); return; }
+    Pit::period(PitPeriod::cyc8192);
+
+    struct Leg { LegClock clk; const char* what; };
+    constexpr Leg legs[] = {
+        {LegClock::xtal_restart, "crystal, its RUNSTDBY off (it must start again)"},
+        {LegClock::xtal_kept, "crystal, its RUNSTDBY on  (kept alive)         "},
+        {LegClock::oschf_xtal_alive, "OSCHF restarting, the crystal still running   "},
+        {LegClock::oschf_kept, "OSCHF kept by its RUNSTDBY, the crystal off    "},
+        {LegClock::oschf_alone, "OSCHF restarting, every other oscillator off   "},
+    };
+    constexpr uint8_t n = sizeof(legs) / sizeof(legs[0]);
+    Train t[n];
+    uint32_t med[n];
+    bool ok = true, all_woke = true;
+    for (uint8_t i = 0; i < n; ++i) {
+        ok = ok && run_leg(legs[i].clk, SleepMode::standby,
+                           static_cast<uint8_t>(13 + i), t[i]);
+        med[i] = median_of(t[i]);
+        if (t[i].woke != train_shots) all_woke = false;
+    }
+    verdict("all five trains got through the link and every clock move landed", ok);
+    if (!ok) { quiesce(); return; }
+    for (uint8_t i = 0; i < n; ++i) print_train(legs[i].what, t[i]);
+    bool captured = true;
+    for (uint8_t i = 0; i < n; ++i) captured = captured && med[i] != slink::no_capture;
+    verdict("every configuration woke on every stimulus", all_woke && captured);
+    if (!captured) { quiesce(); return; }
+    const int32_t bill = static_cast<int32_t>(med[4]) - static_cast<int32_t>(med[2]);
+    print(serial, "  OSCHF alone minus OSCHF beside the crystal: ", bill, " ticks = ",
+          bill / 24, " us - what letting go of every oscillator adds", crlf);
+    verdict("a clock kept alive by its own RUNSTDBY costs almost nothing (under 50 us), "
+            "the crystal's and OSCHF's", med[1] < 1'200u && med[3] < 1'200u);
+    // tOSCHF_ST (DS40002443A 35.10.1, table 35-10) is 10 us typical "from
+    // the wake-up event to code execution", with no limits: the restart
+    // over the kept-alive OSCHF of the same path is held to that figure
+    // halved and doubled, 5..20 us = 120..480 ticks - a band no regulator
+    // start-up of this family (125 us on the DA, 290 us on the DB) fits in.
+    const uint32_t restart = med[2] > med[3] ? med[2] - med[3] : 0;
+    print(serial, "  OSCHF's restart over the kept OSCHF: ", restart, " ticks = ",
+          (restart * 125u) / 3u, " ns (tOSCHF_ST: 10 us typical)", crlf);
+    verdict("OSCHF restarting beside a running crystal costs its own start-up: 5..20 us "
+            "over the kept OSCHF (tOSCHF_ST, 10 us typical)",
+            restart > 120u && restart < 480u);
+    // THE REGULATOR QUESTION. Each median is one of eight shots quantized
+    // to a tick (41.7 ns), the shots of one leg spread by two ticks: a
+    // microsecond (24 ticks) is twelve times that, and a hundredth of the
+    // smallest regulator start-up this family has shown (the DA's 125 us).
+    verdict("OSCHF restarting with EVERY other oscillator stopped costs the same to a "
+            "microsecond: this die pays no regulator start-up (13.3.2.2's clause is "
+            "never met)", (bill < 0 ? -bill : bill) < 24);
+    // A crystal's restart is CSUTHF's 4096 counted cycles (204.8 us at
+    // 20 MHz, the boot's and use_crystal()'s setting) after the oscillation
+    // has built up; the chapter gives no figure for that build-up (table
+    // 35-12's start-up row is empty), so the upper bound is the class's - three
+    // milliseconds - not a derivation.
+    verdict("a crystal that has to restart costs its counted start-up at least (4096 "
+            "cycles at 20 MHz = 204.8 us) and less than 3 ms",
+            med[0] > 4'915u && med[0] < 72'000u);
+    quiesce();
+}
+
+// ---- k POWER-DOWN, timed from outside (the AVR EA) --------------------------------
+// Power-down stops every oscillator whatever its RUNSTDBY says (12.3.8:
+// "run constantly, except for Power-Down"), so OSCHF held by its flag
+// restarts like OSCHF left alone, and the crystal like a crystal. The
+// stimulus lands on PE2, a pin whose sense is asynchronous on every
+// family; letter p and letter q wake the EA on its other pins.
+void tk_power_down_latency() {
+    print(serial, "k POWER-DOWN wake-up latency on an asynchronous pin", crlf);
+    quiesce();
+    if (!ensure_link()) { verdict("the peer board is reachable", false); return; }
+    Pit::period(PitPeriod::cyc8192);
+
+    struct Leg { LegClock clk; uint8_t stage; const char* what; };
+    constexpr Leg legs[] = {
+        {LegClock::xtal_kept, 4, "crystal main clock                       "},
+        {LegClock::oschf_kept, 5, "OSCHF main clock, its RUNSTDBY set       "},
+        {LegClock::oschf_alone, 6, "OSCHF main clock, its RUNSTDBY clear     "},
+    };
+    constexpr uint8_t n = sizeof(legs) / sizeof(legs[0]);
+    Train t[n];
+    uint32_t med[n];
+    bool ok = true, all_woke = true;
+    for (uint8_t i = 0; i < n; ++i) {
+        ok = ok && run_leg(legs[i].clk, SleepMode::power_down, legs[i].stage, t[i]);
+        med[i] = median_of(t[i]);
+        if (t[i].woke != train_shots) all_woke = false;
+    }
+    verdict("all three trains got through the link and every clock move landed", ok);
+    if (!ok) { quiesce(); return; }
+    for (uint8_t i = 0; i < n; ++i) print_train(legs[i].what, t[i]);
+    bool captured = true;
+    for (uint8_t i = 0; i < n; ++i) captured = captured && med[i] != slink::no_capture;
+    verdict("a pin edge wakes this device from POWER-DOWN, every time, on all three "
+            "configurations", all_woke && captured);
+    if (!captured) { quiesce(); return; }
+    verdict("a crystal main clock costs its counted start-up at least (204.8 us) and "
+            "less than 3 ms (letter j's bounds)", med[0] > 4'915u && med[0] < 72'000u);
+    verdict("OSCHF's RUNSTDBY buys nothing in POWER-DOWN: the two OSCHF legs within "
+            "a microsecond (letter j's resolution argument)",
+            (med[1] > med[2] ? med[1] - med[2] : med[2] - med[1]) < 24u);
+    // tOSCHF_ST doubled (20 us) plus a kept clock's whole path (letter j:
+    // 2.2 us, the peer's capture and this chip's vector included): 22 us.
+    verdict("and OSCHF out of POWER-DOWN costs its own start-up and nothing more: under "
+            "22 us, no regulator start-up here either", med[2] < 528u);
+    quiesce();
+}
+#else
 // ---- j STANDBY, timed from outside ----------------------------------------------
 // Phase one proved WHICH RUNSTDBY keeps a peripheral counting and got at
 // the wake-up cost only through the 30.5 us RTC ruler. Here the peer
@@ -1621,6 +2070,7 @@ void tk_power_down_latency() {
     }
     quiesce();
 }
+#endif
 
 // ---- l start-of-frame detection --------------------------------------------------
 // usart.md's one bench gap: SFDEN needs a device that is really in
@@ -1649,7 +2099,14 @@ void tk_power_down_latency() {
 //
 //   DID THE FRAME SURVIVE? Only if the clock is back before the middle
 //   of the start bit, where the receiver takes its samples: half a bit.
+#if defined(BRIO_BOARD_ea48)
+// The AVR EA's four: no regulator profile, so OSCHF restarts either
+// beside the running crystal or with every other oscillator stopped (the
+// two restarts letter j separates).
+enum class SfdClock : uint8_t { xtal_kept, xtal_restart, oschf_beside, oschf_alone };
+#else
 enum class SfdClock : uint8_t { xtal_kept, xtal_restart, oschf_slow, oschf_fast };
+#endif
 
 struct SfdLeg {
     uint32_t baud;
@@ -1659,6 +2116,24 @@ struct SfdLeg {
     const char* what;
 };
 
+#if defined(BRIO_BOARD_ea48)
+bool apply_sfd_clock(SfdClock c) {
+    switch (c) {
+        case SfdClock::xtal_kept: return use_crystal(true);
+        case SfdClock::xtal_restart: {
+            const bool ok = use_crystal(false);
+            Oschf::run_standby(false);
+            return ok;
+        }
+        case SfdClock::oschf_beside: return use_oschf(false);
+        default: {
+            const bool ok = use_oschf(false);
+            Xoschf::stop();
+            return ok;
+        }
+    }
+}
+#else
 bool apply_sfd_clock(SfdClock c) {
     switch (c) {
         case SfdClock::xtal_kept: return use_crystal(true);
@@ -1673,6 +2148,7 @@ bool apply_sfd_clock(SfdClock c) {
         }
     }
 }
+#endif
 
 /// One SFD leg. `woke` and `intact` come back by reference; false means
 /// the link or a clock move failed.
@@ -1690,23 +2166,23 @@ bool sfd_once(const SfdLeg& leg, bool& woke, bool& intact, bool& arrived,
     // This board's end of the shared wire at the peer's rate: receiver
     // only, listening to the TXD pad through LBME.
     const uint16_t br = usart_baud_reg(SysClock::hz, leg.baud);
-    if (!U4::init({.route = UsartRoute::def, .baud = br, .tx = false, .loop_back = true})) {
+    if (!LinkUart::init({.route = link_route, .baud = br, .tx = false, .loop_back = true})) {
         return false;
     }
     LinePin::input();
-    pinctrl_of('E', 0) |= PORT_PULLUPEN_bm;
-    U4::flush_rx();
-    U4::clear_rxs();
+    pinctrl_of(line_port, line_pin) |= PORT_PULLUPEN_bm;
+    LinkUart::flush_rx();
+    LinkUart::clear_rxs();
     cli();
     sfd_irqs = 0;
     sei();
-    U4::enable_rxs_interrupt(true);
+    LinkUart::enable_rxs_interrupt(true);
 
     console_drain();
     const bool moved = apply_sfd_clock(leg.clk);
     // Armed only around the transition, and only here: with SFDEN set in
     // Active mode a read of RXDATA restarts the frame (errata 2.16.2).
-    U4::arm_start_of_frame();
+    LinkUart::arm_start_of_frame();
     cli();
     const uint16_t s0 = sfd_irqs;
     sei();
@@ -1717,14 +2193,18 @@ bool sfd_once(const SfdLeg& leg, bool& woke, bool& intact, bool& arrived,
         sei();
         if (done) break;
     }
-    U4::disarm_start_of_frame();
-    U4::enable_rxs_interrupt(false);
+    LinkUart::disarm_start_of_frame();
+    LinkUart::enable_rxs_interrupt(false);
     // The wake happens at the START BIT: the rest of the frame is still
     // on the wire. Give it three character times before asking.
     delay_us(clock, (30u * 1'000'000u) / leg.baud + 300u);
-    const bool have = U4::rxc_flag();
-    const UsartFrame f = have ? U4::receive() : UsartFrame{};
+    const bool have = LinkUart::rxc_flag();
+    const UsartFrame f = have ? LinkUart::receive() : UsartFrame{};
+#if defined(BRIO_BOARD_ea48)
+    Oschf::run_standby(true);
+#else
     Vreg::power(VregPower::normal);
+#endif
     const bool back = use_crystal(true);
     cli();
     woke = sfd_irqs != s0;
@@ -1736,6 +2216,91 @@ bool sfd_once(const SfdLeg& leg, bool& woke, bool& intact, bool& arrived,
     return moved && back;
 }
 
+#if defined(BRIO_BOARD_ea48)
+// The AVR EA's legs, at the console's rate (460800) and the link's
+// (115200), against the restart times letter j measures: a kept clock
+// back 0.5 us after the edge (j's kept leg less i's awake baseline, 52 -
+// 41 ticks), OSCHF's restart about 9.7 us (its 275 ticks less the 41),
+// the crystal's 0.61..0.67 ms from cold (0.16 ms the fastest seen when a
+// PIT wake had just restarted it: run_leg()).
+// The rule the DA/DB legs found, held to those times: the device wakes
+// if the line is still LOW when the clock is back (a start bit alone is
+// one bit time, 0x00 nine), and the frame survives if the clock is back
+// before the middle of the start bit, where the receiver samples.
+constexpr uint8_t sfd_legs = 13;
+
+void tl_sfd() {
+    print(serial, "l USART start-of-frame detection: a start bit on the shared wire "
+                  "wakes this board (USART1 under LBME on PC4, the PE0 net)", crlf);
+    quiesce();
+    if (!ensure_link()) { verdict("the peer board is reachable", false); return; }
+    Pit::period(PitPeriod::cyc32768);         // a 1 s backstop (the DB's reason, above)
+
+    constexpr SfdLeg legs[sfd_legs] = {
+        {9'600, 0x5A, SfdClock::xtal_kept, SleepMode::standby,
+         "clock kept alive      9600   0x5A (0.5 us vs a 52 us half-bit)  "},
+        {115'200, 0x5A, SfdClock::xtal_kept, SleepMode::standby,
+         "clock kept alive      115200 0x5A (0.5 us vs a 4.3 us half-bit) "},
+        {460'800, 0x5A, SfdClock::xtal_kept, SleepMode::standby,
+         "clock kept alive      460800 0x5A (0.5 us vs a 1.09 us half-bit)"},
+        {9'600, 0x5A, SfdClock::oschf_beside, SleepMode::standby,
+         "OSCHF beside crystal  9600   0x5A (9.7 us vs a 52 us half-bit) "},
+        {115'200, 0x5A, SfdClock::oschf_beside, SleepMode::standby,
+         "OSCHF beside crystal  115200 0x5A (9.7 us vs 17.4 us of low)   "},
+        {115'200, 0xFF, SfdClock::oschf_alone, SleepMode::standby,
+         "OSCHF alone           115200 0xFF (9.7 us vs 8.7 us of low)    "},
+        {115'200, 0x00, SfdClock::oschf_alone, SleepMode::standby,
+         "OSCHF alone           115200 0x00 (9.7 us vs 78 us of low)     "},
+        {9'600, 0xFF, SfdClock::oschf_alone, SleepMode::standby,
+         "OSCHF alone           9600   0xFF (9.7 us vs 104 us of low)    "},
+        {9'600, 0x00, SfdClock::oschf_alone, SleepMode::standby,
+         "OSCHF alone           9600   0x00 (9.7 us vs 938 us of low)    "},
+        {9'600, 0xFF, SfdClock::xtal_restart, SleepMode::standby,
+         "crystal restarts      9600   0xFF (0.61..0.67 ms vs 104 us)    "},
+        {9'600, 0x00, SfdClock::xtal_restart, SleepMode::standby,
+         "crystal restarts      9600   0x00 (0.61..0.67 ms vs 938 us)    "},
+        {115'200, 0x5A, SfdClock::xtal_kept, SleepMode::idle,
+         "IDLE, clock running   115200 0x5A                              "},
+        {460'800, 0x5A, SfdClock::xtal_kept, SleepMode::idle,
+         "IDLE, clock running   460800 0x5A                              "},
+    };
+    bool woke[sfd_legs] = {}, intact[sfd_legs] = {}, arrived[sfd_legs] = {};
+    uint8_t got[sfd_legs] = {};
+    bool ok = true;
+    for (uint8_t i = 0; i < sfd_legs; ++i) {
+        ok = ok && sfd_once(legs[i], woke[i], intact[i], arrived[i], got[i]);
+    }
+    verdict("the peer sent every commanded byte and the link survived", ok);
+    for (uint8_t i = 0; i < sfd_legs; ++i) {
+        print(serial, "    ", legs[i].what, ": ", woke[i] ? "WOKE   " : "no wake",
+              "  frame ", intact[i] ? "INTACT" : (arrived[i] ? "GARBLED" : "lost   "),
+              " (got ", hex(got[i]), ", sent ", hex(legs[i].value), ")", crlf);
+    }
+    verdict("with the main clock kept alive a start bit wakes this board from STANDBY at "
+            "9600, at the link's 115200 and at the console's 460800",
+            woke[0] && woke[1] && woke[2]);
+    verdict("and the WAKING FRAME survives at all three: the clock is back 0.5 us after "
+            "the edge, inside even 460800's 1.09 us half-bit", intact[0] && intact[1] &&
+                                                                 intact[2]);
+    verdict("an OSCHF restart (9.7 us) keeps the frame at 9600 (52 us half-bit) and "
+            "loses it at 115200 (4.3 us half-bit), though 17.4 us of low wake it",
+            woke[3] && intact[3] && woke[4] && !intact[4]);
+    verdict("THE WAKE-UP RULE at OSCHF's 9.7 us: 0xFF at 115200 (low for 8.7 us) does not "
+            "wake, 0x00 (78 us) does - and its frame is lost or garbled", !woke[5] && woke[6] &&
+                                                                         !intact[6]);
+    verdict("at 9600 OSCHF is back inside the start bit's first half: 0xFF and 0x00 both "
+            "wake and both frames survive", woke[7] && intact[7] && woke[8] && intact[8]);
+    verdict("the same rule at the crystal's restart: 104 us of low is not enough even "
+            "just after a run (0.16 ms), 938 us is enough even cold (0.67 ms) - and that "
+            "frame is lost",
+            !woke[9] && woke[10] && !intact[10]);
+    verdict("from IDLE the start-of-frame flag never fires - RXSIF is set only in "
+            "Standby (25.3.4.2) - and the frame is simply received",
+            !woke[11] && intact[11] && !woke[12] && intact[12]);
+    verdict("SFDEN is disarmed again on the way out", !LinkUart::start_of_frame_armed());
+    quiesce();
+}
+#else
 constexpr uint8_t sfd_legs = 11;
 
 void tl_sfd() {
@@ -1862,9 +2427,10 @@ void tl_sfd() {
             "Standby (27.5.5) - and the frame is simply received",
             !woke[10] && intact[10]);
     verdict("SFDEN is disarmed again on the way out, as errata 2.16.2 demands",
-            !U4::start_of_frame_armed());
+            !LinkUart::start_of_frame_armed());
     quiesce();
 }
+#endif
 
 // ---- m a TWI address match wakes the device --------------------------------------
 // This board becomes a client at 0x42 on the shared I2C bus (TWI0
@@ -1900,11 +2466,21 @@ bool twi_tenure(SleepMode m, bool sleeping, uint8_t first, slink::Report& r) {
     // until the match and then STAYS AWAKE while the vector serves the
     // frame to its closing STOP.
     if (sleeping) {
+#if defined(BRIO_BOARD_ea48)
+        // The AVR EA: no wake but the address match (run_leg()'s reason -
+        // a PIT wake just before would time a warm crystal), the watchdog
+        // the escape hatch in both modes.
+        Pit::enable_interrupt(false);
+        token.magic = token_magic;
+        token.stage = 7;
+        (void)Watchdog::arm(WdtTime::s4);
+#else
         if (m == SleepMode::power_down) {
             token.magic = token_magic;
             token.stage = 7;
             (void)Watchdog::arm(WdtTime::s4);
         }
+#endif
         cli();
         const uint16_t a0 = twis_addr;
         const uint16_t s0 = twis_stops;
@@ -1918,17 +2494,88 @@ bool twi_tenure(SleepMode m, bool sleeping, uint8_t first, slink::Report& r) {
         }
         for (uint32_t i = 0; i < 2'000'000u && twis_stops == s0; ++i) {
         }
+#if defined(BRIO_BOARD_ea48)
+        (void)Watchdog::off();
+        token.magic = 0;
+        token.stage = 0;
+        Pit::enable_interrupt(true);
+#else
         if (m == SleepMode::power_down) {
             (void)Watchdog::off();
             token.magic = 0;
             token.stage = 0;
         }
+#endif
     }
     // Awake or not, let the closing STOP land before the numbers are read.
     delay_us(clock, 20'000);
     return peer_report(r, 60);
 }
 
+#if defined(BRIO_BOARD_ea48)
+// The AVR EA: the same three tenures. No HTLLEN to refuse; the client
+// stretches SCL "during the wake-up period until the main clock is
+// available" (DS40002443A 27.3.5), so the power-down tenure carries the
+// crystal's restart.
+void tm_twi_wake() {
+    print(serial, "m a TWI address match wakes this board from standby and from "
+                  "power-down (the peer board is the host on the I2C bus)", crlf);
+    quiesce();
+    if (!ensure_link()) { verdict("the peer board is reachable", false); return; }
+    Pit::period(PitPeriod::cyc8192);
+
+    verdict("the client comes up at 0x42 on TWI0's default pins",
+            Client::init(clock, {.address = client_addr,
+                                 .stop_interrupt = true,
+                                 .data_interrupt = true,
+                                 .address_interrupt = true}));
+
+    slink::Report awake{}, standby{}, pd{};
+    bool ok = twi_tenure(SleepMode::idle, false, 0x10, awake);
+    const uint8_t awake_n = twis_n;
+    const bool awake_ok = twis_rx[0] == 0x10 && twis_rx[1] == 0x11 && twis_rx[2] == 0x12;
+    ok = ok && twi_tenure(SleepMode::standby, true, 0x20, standby);
+    const uint8_t standby_n = twis_n;
+    const bool standby_ok = twis_rx[0] == 0x20 && twis_rx[1] == 0x21 && twis_rx[2] == 0x22;
+    ok = ok && twi_tenure(SleepMode::power_down, true, 0x30, pd);
+    const uint8_t pd_n = twis_n;
+    const bool pd_ok = twis_rx[0] == 0x30 && twis_rx[1] == 0x31 && twis_rx[2] == 0x32;
+
+    verdict("the link carried all three tenures", ok);
+    if (!ok) { Client::release(); quiesce(); return; }
+    print(serial, "    awake      : ", awake_n, " bytes here, peer status ",
+          hex(awake.status), ", tenure ");
+    print_ticks(awake.ticks);
+    print(serial, crlf, "    standby    : ", standby_n, " bytes here, peer status ",
+          hex(standby.status), ", tenure ");
+    print_ticks(standby.ticks);
+    print(serial, crlf, "    power-down : ", pd_n, " bytes here, peer status ",
+          hex(pd.status), ", tenure ");
+    print_ticks(pd.ticks);
+    print(serial, crlf);
+
+    verdict("awake, the three bytes arrive intact and every one is acknowledged",
+            awake_n == 3 && awake_ok && (awake.flags & slink::report_acked));
+    verdict("STANDBY: the address match wakes this board and the frame is served "
+            "in full", standby_n == 3 && standby_ok &&
+                       (standby.flags & slink::report_acked));
+    verdict("POWER-DOWN: it wakes there too, frame intact",
+            pd_n == 3 && pd_ok && (pd.flags & slink::report_acked));
+    verdict("waking from STANDBY with the main clock kept alive costs the bus "
+            "nothing measurable: the tenure is the awake one to within 10 us",
+            standby.ticks > awake.ticks ? standby.ticks - awake.ticks < 240u
+                                        : awake.ticks - standby.ticks < 240u);
+    verdict("waking from POWER-DOWN costs the bus the crystal's restart - more than its "
+            "counted 204.8 us and less than 3 ms (letter k's bounds), held on SCL by the "
+            "client", pd.ticks > awake.ticks && pd.ticks - awake.ticks > 4'915u &&
+                          pd.ticks - awake.ticks < 72'000u);
+    print(serial, "  the stretch over the awake baseline: standby +",
+          static_cast<int32_t>(standby.ticks / 24u) - static_cast<int32_t>(awake.ticks / 24u),
+          " us, power-down +", (pd.ticks - awake.ticks) / 24u, " us", crlf);
+    Client::release();
+    quiesce();
+}
+#else
 void tm_twi_wake() {
     print(serial, "m a TWI address match wakes this board from standby and from "
                   "power-down (the peer board is the host on the I2C bus)", crlf);
@@ -2019,6 +2666,7 @@ void tm_twi_wake() {
             Vreg::high_temp_low_leakage(true));
     (void)Vreg::high_temp_low_leakage(false);
 }
+#endif
 
 // ---- n the CCL as a wake-up source (single board) ---------------------------------
 // ccl.md's parked item. Table 13-4 lists the CCL among standby's wake-up
@@ -2140,11 +2788,13 @@ void tn_ccl_wake() {
 //    source does.
 using TcaU = Tca<0>;
 using AcU = Ac<0>;
+#if !defined(BRIO_BOARD_ea48)
 using AdcU = Adc<0>;
 #ifdef OPAMP
 using OpU = Opamp<0>;
 #endif
 using TcdU = Tcd<0>;
+#endif
 
 constexpr uint32_t tca_per_pit = ticks_per_pit / 64u;      ///< 46875 at CLK_PER/64
 
@@ -2181,6 +2831,7 @@ SleepRun ac_leg(bool run_standby) {
     return r;
 }
 
+#if !defined(BRIO_BOARD_ea48)
 struct AdcLeg {
     uint16_t awake;      ///< a software-started conversion before the sleep
     SleepRun run;
@@ -2258,7 +2909,52 @@ SleepRun tcd_leg(SleepMode m, TcdClock src) {
     (void)TcdU::disable();
     return r;
 }
+#endif
 
+#if defined(BRIO_BOARD_ea48)
+// The AVR EA: TCA0 and AC0 as on the DA/DB. Its ADC is a new block whose
+// engine is not written yet (adc.hpp refuses the EA), it has no op amp
+// and no TCD - those legs are the DA/DB's.
+void to_runstdby() {
+    print(serial, "o RUNSTDBY of the timers and the analog, in a real STANDBY: TCA, AC "
+                  "(the AVR EA: no op amp, no TCD, the ADC's engine not written)", crlf);
+    quiesce();
+
+    // TCA0: the asleep count differs from the awake one only by the wake
+    // path - CLK_PER kept alive by the TCA's own request, no oscillator
+    // restart - and 64 counts (4096 CLK_PER, 205 us at 20 MHz) bound that
+    // tenfold. Without the flag only the 2 ms console drain before the
+    // sleep counts (625 counts at 20 MHz / 64), plus 1/100 of the period.
+    const uint16_t tca_awake = tca_leg(false, true);
+    const uint16_t tca_on = tca_leg(true, false);
+    const uint16_t tca_off = tca_leg(false, false);
+    print(serial, "  TCA0 at CLK_PER/64 over one PIT period: awake ", tca_awake,
+          ", standby with RUNSTDBY ", tca_on, ", without ", tca_off, " (nominal ",
+          tca_per_pit, ")", crlf);
+    verdict("TCA0 with RUNSTDBY counts through STANDBY as it does awake",
+            near_u32(tca_on, tca_awake, 64));
+    verdict("without it TCA0 stops with CLK_PER: only the code outside the sleep counts",
+            tca_off < 750u + tca_per_pit / 100u);
+
+    // AC0 on PD2's 32 Hz square (EVOUTD from the PIT), its CMP interrupt
+    // against the PIT's 125 ms: the standby table (13-1) does not list the
+    // AC among the units RUNSTDBY keeps, the wake-up table (13-3) and the
+    // AC's own chapter (30.3.5) do.
+    const SleepRun ac_on = ac_leg(true);
+    const SleepRun ac_off = ac_leg(false);
+    print(serial, "  AC0 on PD2's 32 Hz square: with RUNSTDBY ", ac_on.units,
+          " CMP interrupt(s), ", ac_on.pits, " PIT; without ", ac_off.units, " / ",
+          ac_off.pits, crlf);
+    verdict("AC0 with RUNSTDBY: its CMP interrupt ends STANDBY, the PIT never fires "
+            "(30.3.5 and table 13-3, against table 13-1's omission)",
+            ac_on.units >= 1 && ac_on.pits == 0);
+    verdict("without it the comparator sleeps and the PIT ends the sleep",
+            ac_off.units == 0 && ac_off.pits == 1);
+    print(serial, "  the ADC's RUNSTDBY: SKIP - the EA's ADC engine is not written; the op "
+                  "amp and the TCD: this die has neither", crlf);
+    quiesce();
+}
+#else
 void to_runstdby() {
     print(serial, "o RUNSTDBY of the analog and the timers, in a real STANDBY: TCA, AC, the "
                   "event-started ADC, the op amp; the TCD stops", crlf);
@@ -2381,11 +3077,257 @@ void to_runstdby() {
     verdict("and in POWER-DOWN", tcd_pd.units == 0 && tcd_pd.pits == 1);
     quiesce();
 }
+#endif
+
+#if defined(BRIO_BOARD_ea48)
+// ---- p every self-driven pin wakes from power-down on ONE edge (the AVR EA) -----------------
+// DS40002443A 18.3.3.1: every pin of the EA senses fully asynchronously,
+// so one edge of ANY pin wakes it from power-down - on the DA/DB only Px2
+// and Px6 do, the rest needing both edges or a level (their 18.3.3.1).
+// Each pad below is driven by the PIT's 32 Hz divider through the event
+// system while every clock but the 32 kHz one is stopped - an EVOUT
+// position, or a LUT's output on an asynchronous path (no filter, no edge
+// detector: table 13-3 note 3) - and senses its own drive: FALLING alone,
+// then RISING alone, one power-down sleep each, a 1 s PIT backstop behind
+// it. PE3 shares PC7's net and senses it too. Five of the eight pads are
+// neither Px2 nor Px6; every power-down is bracketed by the watchdog.
+struct PadWake {
+    uint16_t awake;            ///< the pad's interrupts in 40 ms awake, both edges sensed
+    SleepRun fall, rise;       ///< the two power-down sleeps
+    uint16_t fall_n, rise_n;   ///< the pad's interrupts across each
+};
+
+template <typename Sensed>
+PadWake pad_wake(volatile uint16_t& counter, uint8_t stage) {
+    PadWake w{};
+    Sensed::configure({.sense = PinSense::both});
+    Sensed::clear_flag();
+    console_drain();
+    cli();
+    uint16_t c0 = counter;
+    sei();
+    delay_us(clock, 40'000u);                 // two edges or three of the 32 Hz square
+    cli();
+    w.awake = static_cast<uint16_t>(counter - c0);
+    sei();
+    Sensed::configure({.sense = PinSense::falling});
+    Sensed::clear_flag();
+    cli();
+    c0 = counter;
+    sei();
+    w.fall = power_down_once(stage, false);
+    cli();
+    w.fall_n = static_cast<uint16_t>(counter - c0);
+    sei();
+    Sensed::configure({.sense = PinSense::rising});
+    Sensed::clear_flag();
+    cli();
+    c0 = counter;
+    sei();
+    w.rise = power_down_once(static_cast<uint8_t>(stage + 1), false);
+    cli();
+    w.rise_n = static_cast<uint16_t>(counter - c0);
+    sei();
+    Sensed::configure({});
+    Sensed::clear_flag();
+    return w;
+}
+
+/// A LUT that copies event input A (the PIT divider on ChPin) to its
+/// output pin, on an asynchronous path, with the block's RUNSTDBY.
+template <typename L>
+bool lut_drive(bool alt) {
+    Ccl::disable();
+    const bool ok = L::init({.in0 = LutInput::event_a,
+                             .truth = lut_truth([](bool a, bool, bool) { return a; }),
+                             .output_pin = true,
+                             .alt_pin = alt});
+    L::event_a_on(ChPin{});
+    Ccl::enable(true);
+    return ok;
+}
+
+bool pad_woke(const PadWake& w) {
+    return w.awake >= 1 && w.fall_n >= 1 && w.fall.pits == 0 && w.rise_n >= 1 &&
+           w.rise.pits == 0;
+}
+
+void print_pad(const char* what, const PadWake& w) {
+    print(serial, "    ", what, ": awake ", w.awake, " edge(s) in 40 ms; power-down FALLING ",
+          w.fall_n, " pad / ", w.fall.pits, " PIT, RISING ", w.rise_n, " pad / ", w.rise.pits,
+          " PIT", crlf);
+}
+
+void tp_pin_wake() {
+    print(serial, "p every pin a self-made edge reaches wakes this board from POWER-DOWN on "
+                  "ONE edge (every pin senses asynchronously on this die)", crlf);
+    quiesce();
+    Pit::period(PitPeriod::cyc32768);         // the 1 s backstop
+    Pit::enable_interrupt(true);
+    ChPad::source(EvPitDiv<1024>{});          // 32 Hz: an edge every 15.6 ms
+    ChPin::source(EvPitDiv<1024>{});          // the same divider, the same slot
+
+    constexpr uint8_t n = 8;
+    const char* const what[n] = {
+        "PD2 (EVOUTD, a Px2)         ", "PD7 (EVOUTD ALT1)           ",
+        "PA7 (EVOUTA ALT1, 100 nF)   ", "PC7 (EVOUTC ALT1)           ",
+        "PE3 (PC7's net, PC7 driving)", "PA6 (LUT0 ALT1, a Px6)      ",
+        "PD3 (LUT2)                  ", "PD6 (LUT2 ALT1, a Px6)      ",
+    };
+    PadWake w[n];
+    EvOut<PadPin>::listen(ChPad{});
+    w[0] = pad_wake<PadPin>(pad_irqs, 20);
+    EvOut<PadPin>::unlisten();
+    EvOut<PinD7>::listen(ChPad{});
+    w[1] = pad_wake<PinD7>(pad_irqs, 22);
+    EvOut<PinD7>::unlisten();
+    EvOut<PinA7>::listen(ChPad{});
+    w[2] = pad_wake<PinA7>(porta_irqs, 24);
+    EvOut<PinA7>::unlisten();
+    EchoPin::input();                         // one driver per net: PC7 drives, PE3 listens
+    EvOut<PinC7>::listen(ChPad{});
+    w[3] = pad_wake<PinC7>(portc_irqs, 26);
+    w[4] = pad_wake<EchoPin>(wake_irqs, 28);
+    EvOut<PinC7>::unlisten();
+    EchoPin::clear();
+    EchoPin::output();
+    ChPad::off();
+    const bool l0 = lut_drive<PortaLut>(true);
+    w[5] = pad_wake<PinA6>(porta_irqs, 30);
+    Ccl::disable();
+    (void)PortaLut::init({});                 // PA6 released before the block runs again
+    PortaLut::disable();
+    const bool l1 = lut_drive<PortdLut>(false);
+    w[6] = pad_wake<PinD3>(pad_irqs, 32);
+    const bool l2 = lut_drive<PortdLut>(true);
+    w[7] = pad_wake<PinD6>(pad_irqs, 34);
+    Ccl::disable();
+
+    verdict("the three LUT drivers came up", l0 && l1 && l2);
+    for (uint8_t i = 0; i < n; ++i) print_pad(what[i], w[i]);
+    bool all = true;
+    for (uint8_t i = 0; i < n; ++i) all = all && pad_woke(w[i]);
+    verdict("every pad toggles awake, and ONE falling edge and ONE rising edge each "
+            "woke the device from POWER-DOWN before the 1 s backstop", all);
+    verdict("among them five pins that are neither Px2 nor Px6 (PD7, PA7, PC7, PE3, "
+            "PD3): no DA/DB pin of those positions wakes on a single edge there",
+            pad_woke(w[1]) && pad_woke(w[2]) && pad_woke(w[3]) && pad_woke(w[4]) &&
+                pad_woke(w[6]));
+    verdict("and a LUT's asynchronous output drives its pad through POWER-DOWN (PA6, "
+            "PD3, PD6)", pad_woke(w[5]) && pad_woke(w[6]) && pad_woke(w[7]));
+    quiesce();
+}
+
+// ---- q the partner's edges on more pins (the AVR EA) ----------------------------------------
+// The partner reaches four nets of this board, two pads each (the PC4..PC7
+// jumpers). A start bit on the PE0/PC4 net - the peer's sfd_byte action,
+// 0x00 at 9600, the line low for nine bit times - is ONE falling edge on
+// two pins that are neither Px2 nor Px6, each sensed alone in turn; the
+// stimulus train letter k lands on PE2 is sensed on PC6 instead, its echo
+// raised by the PORTC vector, so the peer times that wake too.
+template <typename Sensed>
+bool start_bit_wake(PinPull pull, volatile uint16_t& counter, uint8_t stage, SleepRun& r,
+                    uint16_t& got) {
+    (void)link_command_mode();
+    slink::Params a{};
+    a.value = 0x00;
+    a.rate = 9'600;
+    a.delay_ms = 60;
+    a.deadline_ms = 200;
+    if (!peer_act(slink::Op::sfd_byte, a)) return false;
+    Sensed::configure({.pull = pull, .sense = PinSense::falling});
+    Sensed::clear_flag();
+    cli();
+    const uint16_t c0 = counter;
+    sei();
+    r = power_down_once(stage, false);
+    cli();
+    got = static_cast<uint16_t>(counter - c0);
+    sei();
+    Sensed::configure({.pull = pull});
+    Sensed::clear_flag();
+    delay_us(clock, 20'000);                  // the byte's tail and the peer's restore
+    (void)link_command_mode();
+    return true;
+}
+
+void tq_peer_pins() {
+    print(serial, "q the partner's edges wake this board from POWER-DOWN on more pins: a "
+                  "start bit on PE0 and on PC4, the stimulus on PC6", crlf);
+    quiesce();
+    if (!ensure_link()) { verdict("the peer board is reachable", false); return; }
+    Pit::period(PitPeriod::cyc32768);         // the 1 s backstop
+
+    SleepRun r_e0{}, r_c4{};
+    uint16_t n_e0 = 0, n_c4 = 0;
+    const bool ok_e0 = start_bit_wake<Pin<'E', 0>>(PinPull::none, wake_irqs, 40, r_e0, n_e0);
+    const bool ok_c4 = start_bit_wake<LinePin>(PinPull::up, portc_irqs, 41, r_c4, n_c4);
+    print(serial, "    PE0 FALLING: ", n_e0, " pad / ", r_e0.pits, " PIT;  PC4 FALLING: ",
+          n_c4, " pad / ", r_c4.pits, " PIT", crlf);
+    verdict("the peer sent both start bits", ok_e0 && ok_c4);
+    verdict("ONE falling edge on PE0 woke the device from POWER-DOWN, before the 1 s "
+            "backstop", ok_e0 && n_e0 >= 1 && r_e0.pits == 0);
+    verdict("and one on PC4", ok_c4 && n_c4 >= 1 && r_c4.pits == 0);
+
+    // PC6: the stimulus net, PE2's sense off - one sensing pad per net.
+    Train t{};
+    bool ok = train_arm(3, 250);
+    WakePin::configure({});
+    Pin<'C', 6>::configure({.sense = PinSense::rising});
+    Pin<'C', 6>::clear_flag();
+    (void)Port<'E'>::take_flags();
+    uint16_t woke = 0;
+    if (ok) {
+        Pit::enable_interrupt(false);         // no wake but the stimulus (run_leg())
+        token.magic = token_magic;
+        token.stage = 42;
+        (void)Watchdog::arm(WdtTime::s8);
+        for (uint8_t i = 0; i < 3; ++i) {
+            cli();
+            const uint16_t c0 = portc_irqs;
+            sei();
+            bool got = false;
+            for (uint8_t k = 0; k < 8 && !got; ++k) {
+                Sleep::enter(SleepMode::power_down);
+                cli();
+                got = portc_irqs != c0;
+                sei();
+            }
+            if (got) ++woke;
+            delay_us(clock, 50);
+            EchoPin::clear();
+        }
+        (void)Watchdog::off();
+        token.magic = 0;
+        token.stage = 0;
+        Pit::enable_interrupt(true);
+    }
+    Pin<'C', 6>::configure({});
+    train_woke = woke;
+    ok = ok && train_collect(t);
+    verdict("the link carried the stimulus train", ok);
+    if (ok) print_train("PC6 from power-down (crystal main clock)", t);
+    verdict("every stimulus on PC6 woke the device from POWER-DOWN and its echo came back",
+            ok && t.woke == 3 && t.hits == 3);
+    quiesce();
+}
+#endif
 
 // ---- the menu -------------------------------------------------------------------------------
 
 using TestFn = void (*)();
 struct Test { char key; TestFn fn; };
+#if defined(BRIO_BOARD_ea48)
+constexpr Test tests[] = {
+    {'a', ta_surface}, {'b', tb_idle}, {'c', tc_standby}, {'d', td_chain},
+    {'e', te_pin_wake}, {'f', tf_power_down}, {'g', tg_wake_ticks}, {'n', tn_ccl_wake},
+    {'o', to_runstdby}, {'p', tp_pin_wake},
+    {'h', th_link}, {'i', ti_idle_latency}, {'j', tj_standby_latency},
+    {'k', tk_power_down_latency}, {'l', tl_sfd}, {'m', tm_twi_wake}, {'q', tq_peer_pins},
+};
+constexpr char all_keys[] = "abcdefgnop";     ///< z: the single-board half
+constexpr char two_board_keys[] = "hijklmq"; ///< y: the two-board half
+#else
 constexpr Test tests[] = {
     {'a', ta_surface}, {'b', tb_idle}, {'c', tc_standby}, {'d', td_chain},
     {'e', te_pin_wake}, {'f', tf_power_down}, {'g', tg_vreg}, {'n', tn_ccl_wake},
@@ -2395,6 +3337,7 @@ constexpr Test tests[] = {
 };
 constexpr char all_keys[] = "abcdefgno";      ///< z: the single-board half
 constexpr char two_board_keys[] = "hijklm";  ///< y: the two-board half
+#endif
 
 void run(TestFn fn) {
     passed = failed = 0;
@@ -2415,6 +3358,21 @@ void run_set(const char* keys) {
     print(serial, "ALL: ", tp, " pass, ", tf, " fail", crlf);
 }
 
+#if defined(BRIO_BOARD_ea48)
+void help() {
+    print(serial, "test_avr_sleep: a the register surface | b idle through enter() | "
+                  "c standby is real | d the RUNSTDBY chain | e a pin wakes from the deep "
+                  "modes | f power-down stops the rest | g the wake-up in 32 kHz ticks | "
+                  "n the CCL as a wake-up source | o RUNSTDBY of TCA and AC | p every "
+                  "self-driven pin wakes from power-down on one edge    -> z = all of those",
+          crlf);
+    print(serial, "  two-board (the peer board = sleep_peer): h the link and the two wires | "
+                  "i the awake baseline and idle | j standby timed from outside | "
+                  "k power-down timed from outside | l start-of-frame | "
+                  "m a TWI address match | q the peer's edges on PE0, PC4, PC6    -> y = all "
+                  "of h..m and q", crlf);
+}
+#else
 void help() {
     print(serial, "test_avr_sleep: a the register surface | b idle through enter() | "
                   "c standby is real | d the RUNSTDBY chain | e a pin wakes from the deep "
@@ -2426,6 +3384,7 @@ void help() {
                   "k power-down timed from outside | l start-of-frame | "
                   "m a TWI address match    -> y = all of h..m", crlf);
 }
+#endif
 
 } // namespace
 
@@ -2457,16 +3416,42 @@ ISR(PORTE_PORT_vect) {
     wake_irqs = wake_irqs + 1;
 }
 
+#if defined(BRIO_BOARD_ea48)
+/// The AVR EA's link is USART1 (ALT1, PC4): its RXC vector carries RXSIF
+/// (DS40002443A 25.3.4.2), and the body is the DA/DB's below.
+ISR(USART1_RXC_vect) {
+    if (LinkUart::rxs_flag()) {
+        LinkUart::clear_rxs();
+        sfd_irqs = sfd_irqs + 1;
+    }
+}
+
+/// Letter p's PA6/PA7.
+ISR(PORTA_PORT_vect) {
+    (void)Port<'A'>::take_flags();
+    porta_irqs = porta_irqs + 1;
+}
+
+/// Letter p's PC7 and letter q's PC4 and PC6. The echo first, as in the
+/// PORTE vector: letter q times PC6's wake through it (PE3 is an input
+/// whenever PC7 is driven, so the store is inert there).
+ISR(PORTC_PORT_vect) {
+    EchoPin::set();
+    (void)Port<'C'>::take_flags();
+    portc_irqs = portc_irqs + 1;
+}
+#else
 /// USART4's RXC vector carries RXSIF too (27.5.6): with SFDEN armed and
 /// RXSIE on, THIS is what a start bit on the shared wire wakes into. It
 /// must not read RXDATA - errata 2.16.2 says a read during a reception
 /// restarts the frame - so it only clears the start flag and counts.
 ISR(USART4_RXC_vect) {
-    if (U4::rxs_flag()) {
-        U4::clear_rxs();
+    if (LinkUart::rxs_flag()) {
+        LinkUart::clear_rxs();
         sfd_irqs = sfd_irqs + 1;
     }
 }
+#endif
 
 /// The TWI client of test m, serviced entirely from its vector: the
 /// address match that wakes the device and every byte of the frame are
@@ -2501,6 +3486,7 @@ ISR(AC0_AC_vect) {
     (void)AcU::cmp();
     unit_irqs = unit_irqs + 1;
 }
+#if !defined(BRIO_BOARD_ea48)
 ISR(ADC0_RESRDY_vect) {
     adc_last = AdcU::resrdy();
     unit_irqs = unit_irqs + 1;
@@ -2509,6 +3495,7 @@ ISR(TCD0_OVF_vect) {
     TcdU::ovf();
     unit_irqs = unit_irqs + 1;
 }
+#endif
 
 ISR(CCL_CCL_vect) {
     (void)Ccl::take_flags();
@@ -2541,9 +3528,18 @@ int main() {
 
     auto board = board_id();
     if (board.empty()) board = "?";
+#if defined(BRIO_BOARD_ea48)
+    print(serial, crlf, "test_avr_sleep - sleep test suite (board ", board,
+          ", clk=", xtal ? "XTAL" : "OSCHF", " ", crystal_hz / 1'000'000u,
+          " MHz, silicon rev ", hex(SYSCFG.REVID), ", RSTFR=", hex(why.raw), ")", crlf);
+    print(serial, "  BOD.CTRLA ", hex(BOD.CTRLA), " (from FUSE.BODCFG; SLEEP, bits 1:0, = 1: "
+                  "the BOD runs continuously in standby and power-down, its current in every "
+                  "sleep here)", crlf);
+#else
     print(serial, crlf, "test_avr_sleep - sleep test suite (board ", board,
           ", clk=", xtal ? (has_xoschf ? "XTAL" : "EXTCLK") : "OSCHF", " 24 MHz, silicon rev ", hex(SYSCFG.REVID),
           ", RSTFR=", hex(why.raw), ")", crlf);
+#endif
     print(serial, "  PD1/PD2 must be free of the bus jumpers: test e drives PD2 from the "
                   "event system and senses its own edge.", crlf);
     print(serial, "  the two-board set y needs the peer board running sleep_peer: PE0 the shared "

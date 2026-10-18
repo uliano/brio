@@ -73,8 +73,8 @@ this one differs from the DA's on the same PCB in what is fitted.
   a joint, a crystal not fitted, or its load. The Ticker runs from
   OSC32K meanwhile (`preferred()`).
 - From the console, at 20 MHz on the quartz: `test_avr_pin` 30 of 30,
-  `test_avr_platform` 109 of 109, `test_avr_power` 53 of 53 (one verdict
-  of its letter b red in two runs of ten - platform.md), `test_avr_clock`
+  `test_avr_platform` 109 of 109, `test_avr_power` 53 of 53 (twelve runs
+  of twelve, letter b's bound derived - platform.md), `test_avr_clock`
   22 of 27 - its five reds are the rulers timed against the 32 kHz
   crystal above ([../avrxt/platform.md](../avrxt/platform.md),
   [../avrxt/port.md](../avrxt/port.md),
@@ -85,6 +85,19 @@ this one differs from the DA's on the same PCB in what is fitted.
   [../avrxt/rtc.md](../avrxt/rtc.md)).
 - `test_avr_nvm` (the EEPROM engine) 103 of 103, ten runs of ten
   ([../avrxt/nvm.md](../avrxt/nvm.md)).
+- `test_avr_sleep` 56 of 56 alone (`z`) and 47 of 47 against the SAM C21
+  board's `sleep_peer` (`y`), ten runs of ten each: the link on USART1
+  ALT1 through the PC4-PE0 jumper, the stimulus and the echo on PE2/PE3,
+  the I2C pair on PA2/PA3. No regulator start-up at any wake; OSCHF
+  restarts in 9.2 us, this board's 20 MHz quartz in 0.61..0.67 ms from
+  cold; one edge of any of twelve pins wakes the chip from power-down
+  ([../avrxt/platform.md](../avrxt/platform.md),
+  [../avrxt/port.md](../avrxt/port.md), [../avrxt/usart.md](../avrxt/usart.md)).
+  The BOD runs continuously asleep by this board's BODCFG, its current in
+  every sleep. Letter p drives PC7 at 32 Hz, which is the echo net into
+  the partner: the partner's first capture after it reads stale (letter
+  h's printed "arming to that edge" figure), every train after it is
+  right.
 - The timer suite's pads on this board: TCA0 on PORTD (PD0, PD2), TCA1
   on PORTB, PORTC (PC4..PC6, the jumpered pins - nothing drives their
   PE partners meanwhile), PORTA (PA4..PA6) and PORTD (PD4..PD6), the CCL

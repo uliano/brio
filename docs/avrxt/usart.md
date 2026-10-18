@@ -787,6 +787,27 @@ OSCHF with the regulator asleep (313 us) and OSCHF with `PMODE = FULL`
     puts the restart above 208 - 52 = 156 us, both 2400 frames surviving
     puts it below 208 us: the start-of-frame path pays 156 to 208 us,
     more than the 131 us a pin edge pays through the same regulator.
+- **On the AVR64EA48** (rev B1, 5 V, the board's 20 MHz quartz; USART1
+  on ALT1 under LBME, its TXD PC4 jumpered onto the PE0 net; ten runs of
+  ten, every leg the same each time) there is no regulator to restart
+  ([platform.md](platform.md)), so the restart times are three: a clock
+  kept alive back 0.5 us after the edge, OSCHF's 9.2 us, the crystal's
+  0.61..0.67 ms from cold. The rule holds at each, and the start-of-frame
+  flag is a STANDBY source only (DS40002443A table 13-3):
+  - with the clock kept alive the start bit wakes the device at 9600, at
+    the link's 115200 and at the console's 460800, and the frame
+    survives at all three - 460800 included, where the DA's arrived a
+    bit late: 0.5 us is inside that rate's 1.09 us half-bit;
+  - OSCHF restarting: at 9600 a start bit alone (104 us of low) wakes it
+    and 0x5A, 0xFF and 0x00 all arrive intact (9.2 us against a 52 us
+    half-bit); at 115200 0xFF (8.7 us of low) does NOT wake it, 0x00 (78
+    us) does and arrives garbled (0x80), and 0x5A (17.4 us of low) wakes
+    it one bit late (0xAD) - the restart outlasts the start bit by half
+    a microsecond and is past its middle;
+  - the crystal restarting: at 9600 0xFF (104 us) does not wake it, 0x00
+    (938 us) does and arrives garbled;
+  - from IDLE `RXSIF` never fires and the frame is received, at 115200
+    and 460800.
 
 ### Two facts about the flags that shape half-duplex code
 
@@ -828,15 +849,18 @@ Driver gaps (not implemented):
 Implemented and compile-checked for all eight DA/DB packages and the
 three AVR64EA packages, but NOT bench-verified:
 
-- **every AVR EA route but the console's** (USART0 ALT2..ALT4, USART1's
-  three) and the console itself on the bench board: its USART2 ALT1
-  measured configured over the debugger (USARTROUTEB 0x01, BAUD 174,
-  RXEN/TXEN) and transmitting, but the board's PF4/PF5 reach nothing on
-  this desk (its page) - `test_avr_serial` on the EA is a later step,
-  with a route-by-route readback letter;
+- **every AVR EA route but the console's and USART1's ALT1** (USART0
+  ALT2..ALT4, USART1 default and ALT2): the console (USART2 ALT1) runs
+  every EA suite, and USART1 ALT1 carries `test_avr_sleep`'s link - its
+  TXD under LBME, transmitting, receiving and waking the device on a
+  start bit - but no other route has been driven; `test_avr_serial` on
+  the EA is a later step, with a route-by-route readback letter;
 - **the ODME and SFDEN workarounds on the AVR EA**: DS80001048D carries
   no twin of the DB's 2.16.1/2.16.2; whether the transmitter still pulls
-  an INPUT pad low there is measured by a one-wire letter on the EA;
+  an INPUT pad low there is measured by a one-wire letter on the EA, and
+  whether an `RXDATA` read with `SFDEN` set in Active restarts a frame
+  there by a leg that reads it so - the verbs keep the DB's discipline
+  meanwhile, which costs nothing;
 
 - **`DBGCTRL.DBGRUN`**;
 - **IRCOM's fixed transmit pulse across the wire** (TXPLCTRL other than

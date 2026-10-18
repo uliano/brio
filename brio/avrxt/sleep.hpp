@@ -93,6 +93,33 @@
  * interrupt is pending (13.3.4): a sleep measured under a debug session
  * is not the sleep the silicon does on its own.
  *
+ * ON THE AVR EA (DS40002443A ch. 13; docs/avrxt/platform.md has the
+ * measurements). CTRLA alone, the same three modes and codes (13.5.1).
+ * STANDBY runs the RTC, CCL, ADC, TCA and TCB with their own RUNSTDBY
+ * (table 13-1), and the AC and DAC with theirs (30.3.5, 32.3.3 - table
+ * 13-1 omits them; the AC's interrupt measured waking the device), the
+ * WDT, the BOD and the EVSYS regardless; POWER-DOWN the PIT, the WDT, the
+ * BOD and the EVSYS. The wake-up sources are table 13-3's: a PORT pin
+ * from every mode - and EVERY pin of the EA senses fully asynchronously,
+ * one edge of any of them waking the device from power-down (18.3.3.1,
+ * measured on twelve pins) where the DA/DB need Px2/Px6 or both
+ * edges -, the TWI address match and the BOD VLM from every mode, the
+ * RTC with RUNSTDBY in standby and its PIT in power-down, the CCL with
+ * RUNSTDBY in standby and on an asynchronous path in power-down, the
+ * USART's start of frame in standby only, the TCA/TCB/ADC/AC left
+ * running in standby. THE WAKE pays six CLK_PER cycles and one
+ * oscillator start-up (table 13-4) and, measured, NOTHING ELSE: there is
+ * no regulator start-up on this die - OSCHF restarts in the same 9.2 us
+ * beside a running crystal and with every other oscillator stopped, out
+ * of standby and out of power-down alike (13.3.2.2's "the time it takes
+ * to start the regulator if it has been switched off" is never met) -
+ * while a stopped crystal costs its build-up plus CSUTHF's count (0.61
+ * to 0.67 ms cold for this board's 20 MHz quartz at 4096 cycles). FUSE.BODCFG's
+ * ACTIVE = ENABLEWAIT halts a wake until the BOD runs (13.3.2.2): the
+ * figures above are with the BOD continuous asleep too, where it has
+ * nothing to wait for; a BOD sampled or off in sleep would add its
+ * start-up (tBOD_ST, 30 us typical, table 35-15), not measured.
+ *
  * DESIGN POSITION. The kernel sleeps by itself in IDLE and only in IDLE
  * - the wake-up list is complete there, so "no events queued" can mean
  * "stop the CPU" with nothing else to know. Standby and power-down gate

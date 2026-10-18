@@ -156,6 +156,20 @@ the slot moved to a quiet PD5 counting none - three of three in ten runs
 of ten. PC6/PC7 drive the jumpered nets to PE2/PE3 with no change to any
 verdict.
 
+**On the AVR EA ONE edge of any pin wakes POWER-DOWN** (`test_avr_sleep`
+p and q on the AVR64EA48, ten runs of ten; DS40002443A 18.3.3.1). Eight
+pads driven by the PIT's 32 Hz divider through the event system while
+every clock but the 32 kHz one is stopped - EVOUT on PD2, PD7, PA7 and
+PC7, a LUT's asynchronous output on PA6, PD3 and PD6 - each sense their
+own drive, and PE3 senses PC7's on the jumpered net: a FALLING sense
+alone and a RISING sense alone each end one power-down sleep with the
+pad's own interrupt, a 1 s PIT backstop never firing. Five of them (PD7,
+PA7, PC7, PE3, PD3) sit where the DA/DB's pins are only partially
+asynchronous. The partner's edges add three: a start bit's single
+falling edge on PE0 and on PC4, and the stimulus on PC6, whose wake out
+of power-down costs the crystal's restart as PE2's does
+([platform.md](platform.md)).
+
 ## Not covered yet
 
 Driver gaps:
@@ -170,9 +184,12 @@ Implemented but not bench-verified:
 - The INLVL thresholds (needs analog levels) and the slew rate's
   electrical effect (needs a scope) - both are configuration
   read-back only today.
-- The fully-async wake of a Px6 position: Px2's is witnessed above
-  (PE2); no wire of this desk reaches a Px6 pad - a peer driving one
-  would measure it the same way.
-- On the AVR EA: the full asynchrony of a pin other than Px2/Px6 (a
-  sub-CLK_PER pulse caught, a FALLING sense waking power-down - a pulse
-  source shorter than CLK_PER, a CCL or a peer).
+- The fully-async wake of a Px6 position on the DA/DB: Px2's is
+  witnessed above (PE2); no wire of the DB's desk reaches a Px6 pad - a
+  peer driving one would measure it the same way.
+- On the AVR EA: the other half of 18.3.3.1, a pulse shorter than one
+  CLK_PER caught (a pulse source shorter than 50 ns at 20 MHz), and the
+  single-edge wake of the pins no self-made or partner edge reaches on
+  the bench board - PA4, PA5, PB0..PB5, PC0, PC1, PC5 and PE1, PD0, PD1,
+  PD4, PD5, and the pins its I2C bus, LED and button hold - which a wire
+  from an EVOUT pad would measure the same way.

@@ -252,6 +252,12 @@ source ENDED each sleep is read off the counts taken inside the sleep.
   that clock is gone and the backstop ends the sleep, with one CCL
   interrupt following once CLK_PER is back and the frozen filter catches
   up.
+- **On the AVR64EA48** (rev B1; letter n ten runs of ten) the three
+  shapes behave as on the DB, the filtered LUT on OSC32K waking from
+  power-down too; and a LUT's asynchronous OUTPUT drives its pad through
+  power-down (letter p): LUT0 on PA6 (ALT1) and LUT2 on PD3 and PD6
+  (ALT1), each copying the PIT divider on its event input, wake the
+  device on a single edge of the pad they drive ([port.md](port.md)).
 
 ## Not covered yet
 

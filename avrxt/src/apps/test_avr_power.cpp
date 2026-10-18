@@ -344,6 +344,46 @@ uint32_t tick_leg(bool stop) {
     return best;
 }
 
+#if defined(BRIO_BOARD_ea48)
+/// tick_leg()'s eight periods kept whole: the shortest and the longest,
+/// so the comparison of two legs can be held to their own spread.
+struct TickRange {
+    uint32_t best;
+    uint32_t worst;
+};
+
+TickRange tick_range(bool stop) {
+    TickRange r{0xFFFFFFFFu, 0};
+    for (uint8_t i = 0; i < 8; ++i) {
+        cli();
+        pit_ran = false;
+        sei();
+        while (!pit_ran) {                       // sync to a tick edge
+        }
+        cli();
+        pit_ran = false;
+        const uint32_t t0 = cycles_now();
+        if (stop) {
+            K::idle_if_empty();                  // sei + SLEEP, then masked again
+        } else {
+            sei();
+        }
+        while (!pit_ran) {
+        }
+        cli();
+        const uint32_t d = pit_stamp - t0;
+        sei();
+        if (d < r.best) {
+            r.best = d;
+        }
+        if (d > r.worst) {
+            r.worst = d;
+        }
+    }
+    return r;
+}
+#endif
+
 void tb_standby() {
     quiesce();
 
@@ -406,6 +446,32 @@ void tb_standby() {
 
     // What stopping and restarting cost, against the same span spun.
     console_drain();
+#if defined(BRIO_BOARD_ea48)
+    // Each leg is the shortest of eight PIT periods, and a period is
+    // OSC32K's: the two shortest differ by the wake's cost PLUS at most
+    // the periods' own spread (the longest of the eight less the
+    // shortest, the larger of the two legs') PLUS OSC32K's wander between
+    // the legs - 400 ppm of a 1024 Hz tick, 8 CLK_PER at 20 MHz (391 ppm
+    // between one second and the next, measured by test_avr_rtc on this
+    // die). The wake itself, beside a clock the stopwatch keeps alive, is
+    // the six CLK_PER cycles of 13.3.2.2: under two microseconds by far.
+    const TickRange slept = tick_range(true);
+    const TickRange spun = tick_range(false);
+    const uint32_t spread_slept = slept.worst - slept.best;
+    const uint32_t spread_spun = spun.worst - spun.best;
+    const uint32_t noise =
+        (spread_slept > spread_spun ? spread_slept : spread_spun) +
+        static_cast<uint32_t>((static_cast<uint64_t>(cycles_per_tick) * 400u) / 1'000'000u);
+    print(serial, "  a whole PIT period from t0 to the wake ISR's own stamp: asleep ",
+          slept.best, "..", slept.worst, " CLK_PER, spinning ", spun.best, "..", spun.worst,
+          " (standby costs ", static_cast<int32_t>(slept.best) - static_cast<int32_t>(spun.best),
+          " cycles beside a clock the stopwatch keeps alive; the legs' noise bound ", noise,
+          ")", crlf);
+    verdict("the standby wake costs under two microseconds, within the two legs' own "
+            "spread and OSC32K's wander",
+            slept.best + noise >= spun.best &&
+                slept.best < spun.best + crystal_hz / 1'000'000u * 2u + noise);
+#else
     const uint32_t slept = tick_leg(true);
     const uint32_t spun = tick_leg(false);
     print(serial, "  a whole PIT period from t0 to the wake ISR's own stamp: asleep ",
@@ -414,6 +480,7 @@ void tb_standby() {
           " cycles beside a clock the stopwatch keeps alive)", crlf);
     verdict("the standby wake costs less than a microsecond here",
             slept >= spun && slept - spun < crystal_hz / 1'000'000u * 2u);
+#endif
 
     // The first event after the wake.
     const uint8_t wakes_before = Probe::wakes;

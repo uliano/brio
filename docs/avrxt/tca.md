@@ -308,6 +308,10 @@ PORTB and its PORTC route. And the EA's own (letter x):
   reads down and CNT is 65492 two milliseconds later (down from the
   restart's 0 through MAX) - the DB A4/A5's and the DA's erratum has no
   twin here.
+- **RUNSTDBY in a real STANDBY** (`test_avr_sleep` o, ten runs of ten):
+  TCA0 at CLK_PER/64 counts 39581..39604 across a 125 ms standby against
+  39581..39609 awake over the same PIT period, and only the 633 of the
+  code around the sleep without the flag.
 
 ## Not covered yet
 

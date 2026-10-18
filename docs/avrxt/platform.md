@@ -137,9 +137,10 @@ the same instruction timings, a two-byte return address, CCP with the
 IOREG key, 7.4) and the same three blocks with three differences. SLPCTRL
 is CTRLA alone (13.4): the same three modes, no VREGCTRL and no
 regulator control anywhere - `Vreg`/`VregPower` do not exist there,
-refused by name; whether the wake pays a regulator bill the data sheet
-does not list (13.3.2.2 against table 13-4) is measured by the sleep
-suite on the EA, a later step. The software-reset bit is called SWRE
+refused by name - and no regulator start-up to pay at the wake either:
+13.3.2.2 still names "the time it takes to start the regulator if it has
+been switched off", table 13-4 lists one oscillator start-up only, and
+the bench sides with the table (below). The software-reset bit is called SWRE
 (the device tables' `software_reset_bm`, the same bit 0 under CCP); and
 UPDIRF is also set by a high-voltage UPDI enable (14.5.1). `.noinit` and
 the stack: `.noinit` lands after `.bss`, `__stack` at 0x7FFF; SRAM is in
@@ -150,6 +151,45 @@ the cycle; only the rate moves (20 MHz on the EA board: 20 cycles a
 microsecond, `delay_mult(20 MHz)` = 20480 exactly), and from a 16 or
 20 MHz source four of a `DynamicClock`'s twelve rates are not whole
 hertz (clkctrl.md).
+
+**The AVR EA's sleep modes** (13.3.2.1, tables 13-1 to 13-4; the
+clarifications of the DB's errata have no EA counterpart):
+
+| | IDLE | STANDBY | POWER-DOWN |
+|---|---|---|---|
+| Runs | everything but the CPU | WDT, BOD, EVSYS always; RTC, CCL, ADC, TCA, TCB only with their own `RUNSTDBY` (table 13-1); the AC and the DAC with theirs (30.3.5, 32.3.3 - table 13-1 omits them, table 13-3 lists the AC's wake) | PIT, WDT, BOD, EVSYS |
+| Main clock | runs | only if something requests it | stopped, whatever an oscillator's `RUNSTDBY` says (12.3.8) |
+| Wakes on | any interrupt | a PORT pin, TWI address match, BOD VLM, RTC and CCL with `RUNSTDBY`, USART start of frame, TCA/TCB/ADC/AC left running | a PORT pin, TWI address match, BOD VLM, the PIT, the CCL on an asynchronous path (`FILTSEL` = 0, `EDGEDET` = 0) |
+| Wake time | 6 CLK_PER cycles | + one oscillator start-up | + one oscillator start-up |
+
+Two rows of that table are wider than the DA/DB's. **Every pin senses
+fully asynchronously** (18.3.3.1, "the pulse width needed to trigger an
+interrupt is less than one CLK_PER cycle"): one edge of ANY pin wakes the
+device from power-down, where on the DA/DB only Px2 and Px6 do and the
+other pins need both edges or a level (their 18.3.3.1) - the device
+tables' `all_pins_fully_async`, and `Pin::fully_async` true on every EA
+pin. And the start-of-frame detector is a STANDBY source only (table
+13-3: neither IDLE nor POWER-DOWN). With `FUSE.BODCFG`'s ACTIVE at
+ENABLEWAIT a wake waits for the BOD (13.3.2.2), which has nothing to
+wait for while the BOD runs continuously asleep too - the bench board's
+fuse, so its current is in every sleep below.
+
+**The silicon's offer, item by item (sleep):**
+
+| Item | Section | In brio |
+|------|---------|---------|
+| SMODE IDLE / STANDBY / PDOWN, SEN | 13.5.1 | used: `SleepMode`, `Sleep`, `AvrSleepSite` (the ladder the identity) |
+| The NOP before a CTRLA store | DS80001048D 2.2.3 | used: in every store (`Sleep`, `AvrPlatform::idle()`), checked in the listings |
+| A peripheral's `RUNSTDBY`: RTC, CCL, ADC, TCA, TCB, AC, DAC | 24.9, 29.3.4, 31.3.6, 22.3.6, 23.3.6, 30.3.5, 32.3.3 | used: each driver's `run_standby` field (`Ccl::enable(true)` for the CCL); the ADC's belongs to the EA's ADC engine, not written ([adc.md](adc.md)) |
+| An oscillator's `RUNSTDBY`: OSCHF, OSC32K, XOSC32K, XOSCHF | 12.3.8 | used: `Oschf::run_standby`, `Osc32k::run_standby`, the start verbs' flag; what it buys is the wake's start-up, in standby only (measured below) |
+| Every pin's asynchronous sense | 18.3.3.1 | used: `Pin::configure({.sense})` on any pin, any edge |
+| The PORT's and the PIT's event slots in sleep | 18.3.4, 24.13.17, 16.3.3 | used: `EvPin<P, slot>`, `EvPitDiv<div, slot>` ([evsys.md](evsys.md)) |
+| The TWI client's address match, SCL held until the clock is back | 27.3.5 | used: `I2cClient` ([twi.md](twi.md)) |
+| The USART's start-of-frame detection | 25.3.4.2 | used: `arm_start_of_frame()` / `disarm_start_of_frame()` ([usart.md](usart.md)) |
+| The CCL's asynchronous path | table 13-3 note 3 | used: `LutConfig` with no filter and no edge detector ([ccl.md](ccl.md)) |
+| The BOD's VLM wake, its sleep mode (CTRLA.SLEEP under CCP), ENABLEWAIT | 19, 13.3.2.2 | declined: no BOD driver ("Not covered yet") |
+| UPDI's CLKREQ (the system clock kept in sleep for a debugger) | 33.3.10 | declined: a debugger's knob, not a program's |
+| Regulator control | - | absent on this die (no VREGCTRL): `Vreg` refused by name |
 
 ## Types and verbs
 
@@ -189,7 +229,8 @@ bounded verb an application usually wants, `enter(mode)` = arm + sleep
 + disarm. The pair exists as separate verbs for the callers that must
 close the lost-wake-up window themselves: arm first, then mask, test
 the condition and put `sei` and `sleep` back to back - which is exactly
-the sequence `AvrPlatform::idle()` emits for IDLE. `Vreg` covers
+the sequence `AvrPlatform::idle()` emits for IDLE. `Vreg` (the DA and
+the DB; not named on the EA, which has no `VREGCTRL`) covers
 `VREGCTRL` through its CCP key: `power(VregPower)` / `power()` for the
 regulator profile, `high_temp_low_leakage(bool)` / `()` for HTLLEN -
 and **enabling HTLLEN returns false, writing nothing, while any TWI
@@ -650,6 +691,34 @@ letter `g` the external clock with OSCHF held up costs nothing over
 awake, with nothing held up 5 ticks (the regulator), and `PMODE = FULL`
 removes them; OSCHF restarting costs 6, FULL removes those too.
 
+On the **AVR64EA48** (rev B1, 5 V, the board's 20 MHz quartz, the BOD
+continuous asleep; `z` ten runs of ten, 56 verdicts, every figure the
+spread of the ten) the same letters measure the same rules, less the
+regulator's - letter `a` checks the surface and the NOP, and the
+regulator verbs do not exist. CLK_PER stops in standby (175 ticks
+counted asleep against 2532756..2534296 awake over the PIT period); the
+peripheral's `RUNSTDBY` keeps a counter running on the crystal and on
+OSCHF whatever the oscillator's own flag, OSCHF reading 0.86..0.93 %
+slow against the quartz; a TCB with a complete chain wakes the CPU by
+itself (39861 ticks of a 40000-tick period); EVOUT on PD2 wakes the
+device from both deep modes, the stopwatch frozen at 174; power-down
+stops the RTC counter (33 ticks, the settle) and keeps its PIT, and CNT
+read at the wake is stale. On the 30.9 us RTC ruler of letter `g` the
+crystal and OSCHF kept alive cost nothing over awake (29 and 30 against
+29), OSCHF restarting costs the same 30 beside a running crystal and with
+nothing else running - no regulator start-up, to the tick - and the
+crystal restarting 49, twenty ticks of 0.62 ms. Letter `o`: TCA0 counts
+39581..39604 through a standby with `RUNSTDBY` against 39581..39609
+awake, 633 without (the code around the sleep), and AC0's CMP interrupt
+ends a standby with its `RUNSTDBY` and never without - table 13-1 leaves
+the AC off its standby list, 30.3.5 and table 13-3 are right. Letter `p`
+wakes the device from power-down on ONE edge of each of eight pads - EVOUT
+on PD2, PD7, PA7 and PC7, a LUT's asynchronous output on PA6, PD3 and
+PD6, and PE3 on PC7's net, each sensing its own drive, a falling sense
+alone and a rising sense alone - five of them pins the DA/DB sense only
+partially asynchronously ([port.md](port.md)); a LUT's output and EVOUT
+both drive their pads through power-down.
+
 ### Wake-up latency, measured from the partner board
 
 A sleeping chip cannot time its own return: the only clock power-down
@@ -768,6 +837,60 @@ suite's "crystal" legs are there the external clock with OSCHF's
 - The start-of-frame detector's rule holds on the DA's restart times
   too, with one new boundary: see usart.md.
 
+**On the AVR64EA48** (rev B1, 5 V, the 20 MHz quartz, the BOD continuous
+asleep; the same SAM C21 and wires, the link on USART1 ALT1 - its TXD
+PC4 jumpered onto the PE0 net, the stimulus and the echo on PE2 and PE3;
+`y` ten runs of ten, 47 verdicts, every figure the spread of the ten
+medians). Every train runs with the PIT's interrupt off and the watchdog
+as its escape hatch, for the reason the crystal gives below:
+
+- Awake 41..43 ticks (1.75 us: the 20 MHz vector and the jumpered net),
+  IDLE 53..54 - 12 more, 500 ns against the six cycles' 300 ns.
+
+  | main clock | held up in standby | ticks | us |
+  |---|---|---|---|
+  | crystal, its `RUNSTDBY` clear | nothing | 14732..14792 | 615 |
+  | crystal, its `RUNSTDBY` set | the crystal | 51 | 2.1 |
+  | OSCHF | the crystal (its `RUNSTDBY`) | 275 | 11.5 |
+  | OSCHF, its `RUNSTDBY` set | OSCHF | 54..55 | 2.3 |
+  | OSCHF | nothing | 275 | 11.5 |
+
+  and out of POWER-DOWN: the crystal 14723..14754 (614 us), OSCHF 275
+  (11.5 us) with its `RUNSTDBY` set or clear - power-down stops it
+  either way (12.3.8).
+- **NO REGULATOR START-UP ON THIS DIE.** OSCHF's restart costs 220..221
+  ticks - 9.2 us - over the kept OSCHF, beside a running crystal or with
+  every other oscillator stopped, out of standby or out of power-down:
+  the same to the tick every time. That is tOSCHF_ST's 10 us typical
+  "from the wake-up event to code execution" (table 35-10) and nothing
+  more; table 13-4's "six clock cycles + one OSC start-up" is the whole
+  bill and 13.3.2.2's regulator clause is never met. The DA/DB's rule -
+  hold an oscillator up or pay the regulator - does not exist here: a
+  wake on OSCHF costs 9 us whatever else stopped, and an oscillator's
+  `RUNSTDBY` buys exactly its own start-up.
+- **A crystal's restart is its build-up plus CSUTHF's count, and its
+  history moves it.** Cold - 100 ms after the crystal last ran, nothing
+  else waking the device - the 20 MHz quartz restarts in 0.61..0.67 ms:
+  the 4096 counted cycles (204.8 us) and about 0.41 ms of build-up, which
+  a start from a running chip does not show ([clkctrl.md](clkctrl.md):
+  203..208 us). The first shot of every train is the slow end
+  (0.65..0.67 ms against 0.61..0.62, unexplained). With the PIT's 250 ms
+  backstop left on, one or two shots of eight - the ones the two
+  periods' beat puts just after a PIT wake, which had restarted the
+  crystal - came back in 0.16..0.39 ms; with it off, none in
+  eighty-eight. A wake timed from outside is a wake from a known
+  history, or it measures the history.
+- **One edge on PE2, PC6, PE0 or PC4 wakes the device from power-down**
+  (letters `k` and `q`): the stimulus on PC6 costs the crystal's restart
+  as on PE2 (14708..14799 ticks), a start bit's single falling edge on
+  PE0 and on PC4 ends a power-down the 1 s backstop never reaches - two
+  more pins neither Px2 nor Px6.
+- **A TWI address match** costs the bus nothing out of standby with the
+  crystal kept (393.4 us awake and asleep) and 596..629 us out of
+  power-down: the crystal's cold restart, held on SCL.
+- The start-of-frame detector's rule holds at the EA's three restart
+  times, 460800 included: see usart.md.
+
 ### The power manager on this target
 
 Established by `test_avr_power` at 5 V with nothing wired.
@@ -849,13 +972,16 @@ breadcrumb across the six resets of letter i, SWRE's software reset
 among them; `test_avr_power` 53 of 53 (a to f: the ladder, a real
 standby round, the deadline guard, the voters, the standing
 restrictions, a power-down round) - the power model over the EA's
-three modes with no regulator verb - in eight runs of ten, and in two
-letter b's "the standby wake costs less than a microsecond" red: the
-standby wake from the PIT measures -3..+17 CLK_PER cycles against the
-same period spun (fifteen captures: 19588..19607 asleep against
-19579..19596 spinning), within the two legs' own spread, and the verdict
-asks `slept >= spun` - a bound not derived for that spread, which the
-DB's larger wake cost never met. In every EA release image each
+three modes with no regulator verb - in twelve runs of twelve. Letter
+b's wake cost is held there to a DERIVED bound: each leg is the shortest
+of eight PIT periods, so the two shortest differ by the wake's cost
+plus at most the legs' own spread (the longer of the two, longest less
+shortest) plus OSC32K's wander between the legs (400 ppm of a tick, 8
+cycles at 20 MHz; [rtc.md](rtc.md)), and the wake beside a clock the
+stopwatch keeps alive measures -3..+12 CLK_PER cycles against a noise
+bound of 19..40 (19567..19591 asleep, 19561..19585 spinning, shortest
+of eight). The DA/DB path keeps its `slept >= spun`, a bound their
+larger wake cost meets but nothing derives (below). In every EA release image each
 SLPCTRL.CTRLA store follows a non-store instruction (the NOP of
 DS80001048D 2.2.3's workaround, or a load between it and the store).
 Letter g fills the kernel queue it then judges and does not drain it,
@@ -878,14 +1004,30 @@ Driver gaps:
   `CTRLA`'s reset value) but writes no fuse: fuse programming is a
   UPDI-time concern, not a runtime one.
 - **The BOD**, and with it the voltage-level monitor that tables 13-4
-  lists as a wake-up source in both deep modes. Chapter 15 has no
-  driver at all yet.
+  lists as a wake-up source in both deep modes. Chapter 15 (the AVR EA's
+  19) has no driver at all yet - so neither the BOD's sleep mode (its
+  CTRLA.SLEEP, under CCP) nor its sampled mode is a verb, and what a
+  wake pays for a BOD started at the wake (tBOD_ST, 30 us typical on the
+  EA, DS40002443A table 35-15, with `FUSE.BODCFG`'s ENABLEWAIT) is
+  unmeasured: the boards' fuses keep it continuous.
+- **The AVR EA's ADC in a real standby**: its `RUNSTDBY` belongs to the
+  EA's ADC engine, which is not written ([adc.md](adc.md)); letter `o`
+  keeps the TCA's and the AC's legs there.
 
 Implemented but not bench-verified:
 
-- **The AVR EA's sleep modes** (the sleep suite on the EA, a later
-  step): the wake costs, whether the wake pays a regulator bill the data
-  sheet does not list, the async pin wake from power-down.
+- **`test_avr_power` b's wake-cost bound on the AVR DA/DB**: still
+  `slept >= spun`, not derived for the two legs' spread; the EA's
+  derivation applied there moves both images, and is to be run on an
+  AVR128DB48 and an AVR128DA48.
+- **The DAC's `RUNSTDBY` in a real standby**, on every die: the field
+  is written and read back; a converter or a comparator reading its
+  output pin across the sleep would measure it.
+- **What makes the AVR64EA48 board's first crystal restart of a train
+  about 40 us slower than the rest** (0.65..0.67 ms against 0.61..0.62,
+  every run): the shot follows the longest run of the oscillator; a
+  sweep of how long the crystal ran before the sleep, and how long it
+  slept, would separate the two.
 - **`break_here()` with the OCD active.** The NOP half is proven; the
   half that halts in the debugger needs a debug session, which no
   console suite can be.

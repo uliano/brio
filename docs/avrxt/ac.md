@@ -129,7 +129,11 @@ on it, 2 ms after each DAC step (twelve runs of twelve).
 PD2 against DACREF, the pad driven by EVOUT from a PIT divider at 32 Hz.
 With `run_standby` the CMP interrupt ends a 125 ms standby at the
 first edge, the PIT backstop never firing; without it the comparator
-sleeps and the PIT ends the sleep - in every run of twelve.
+sleeps and the PIT ends the sleep - in every run of twelve. On the
+**AVR64EA48** (rev B1, ten runs of ten) the same, which settles the
+EA's chapter in favour of 30.3.5 and table 13-3 (the AC runs in standby
+with its RUNSTDBY, its interrupt a wake source) against table 13-1,
+which leaves the AC off its standby list.
 
 ## Not covered yet
 
