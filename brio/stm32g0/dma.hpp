@@ -1,46 +1,90 @@
 /*
  * dma.hpp
  *
- * The DMA controller (RM0444 ch. 10) and the request multiplexer that
- * feeds it (ch. 11), in the two strata every brio driver has:
+ * The STM32G0's DMA controller (RM0444 ch. 10) and the request
+ * multiplexer that feeds it (ch. 11): what a program uses to move data
+ * with no CPU in the path - a serial port's or a bus's blocks, a waveform
+ * played into a converter for ever, a stream captured into two buffers in
+ * turn, a memory copy. Most programs meet it only by naming an engine in
+ * a transport's template (the Uart, SpiHost and I2cHost of this stratum
+ * take DmaTxEngine and DmaRxEngine as optional slots); the engines, the
+ * channel and the multiplexer are here for the rest, in the two layers
+ * every brio driver has:
  *
- *   Dma<n>                  the BLOCK: its bus clock, its reset, the two
+ *   Dma<n>                  the block: its bus clock, its reset, the two
  *                           flag registers every channel reports into,
  *                           and how many channels it has;
- *   DmaChannel<n, ch>       the RESOURCE: one channel's four registers
+ *   DmaChannel<n, ch>       the resource: one channel's four registers
  *                           (CCR/CNDTR/CPAR/CMAR), the enable discipline
  *                           the chapter states, the flag surface and one
  *                           ISR body;
  *   DmaMux / DmaMuxGenerator<x>
- *                           the FABRIC that decides which peripheral's
+ *                           the fabric that decides which peripheral's
  *                           request reaches which channel, with the
  *                           synchronization block and the request
  *                           generator;
  *   DmaTxEngine / DmaRxEngine
- *                           the two TASKS a byte transport wants: drain a
- *                           run into a peripheral, fill a run from one -
- *                           or, the receive engine's second shape, fill a
- *                           RING from one for ever (util/ring.hpp's
- *                           HardwareRing reads it);
- *   DmaLoopEngine           the TASK a waveform wants - one caller-owned
+ *                           the two tasks (a task is the driver class a
+ *                           util service drives) a byte transport wants:
+ *                           drain a run into a peripheral, fill a run
+ *                           from one - or, the receive engine's second
+ *                           shape, fill a ring from one for ever
+ *                           (util/ring.hpp's HardwareRing reads it);
+ *   DmaLoopEngine           the task a waveform wants - one caller-owned
  *                           table played for ever (util/block_stream.hpp's
  *                           BlockPlayer on this silicon);
- *   DmaPingPongEngine       the TASK a sampled stream wants - fill one
+ *   DmaPingPongEngine       the task a sampled stream wants - fill one
  *                           caller-owned buffer while the caller drains
  *                           the other (util/block_stream.hpp's
  *                           BlockSource on this silicon);
- *   DmaCopyEngine           the TASK a framebuffer wants - copy a run of
+ *   DmaCopyEngine           the task a framebuffer wants - copy a run of
  *                           memory, or fill one from a cell, in the
  *                           controller's memory-to-memory mode.
  *
- * EVERY ENGINE HAS TWO MOMENTS: arm() writes everything constant for a
+ * The smallest use, a copy with no peripheral and no request
+ * (docs/stm32g0/dma.md opens with it and says what decides correctness):
+ *
+ *     using Copy = brio::DmaCopyEngine<1, 1>;
+ *     Copy::arm();                                  // the gate, request 0, the word
+ *     (void)Copy::copy(dst_words, src_words, 512);  // 512 words, word beats
+ *     extern "C" void DMA1_Channel1_IRQHandler() {
+ *         const uint8_t f = Copy::service();
+ *         if ((f & Copy::flag_error) != 0u) { (void)Copy::abandon(); }
+ *         else if ((f & Copy::flag_complete) != 0u) { (void)Copy::complete(); }
+ *     }
+ *
+ * Who calls what. An engine's arm() is called once, from main() or from
+ * the owning driver's init(), before the first block: it opens the
+ * controller's clock, so the controller needs no init() of its own. A
+ * block is started (start(), copy(), fill(), the ring's start()) from an
+ * active object's handler - an active object being an object the kernel
+ * serves one event at a time, its handler the dispatch of one event
+ * (kernel/active_object.hpp) - or from the owner's completion handler;
+ * an owner that starts blocks from both contexts takes the claim under
+ * its own guard and launches outside it (DmaTxEngine's claim() and
+ * launch() say how). service() is the channel's interrupt body, called
+ * from the vector the program binds, on a shared vector once per engine
+ * the handler owns; complete(), abandon() and fail() are called from
+ * that handler on the flags service() reports, and only they decide
+ * what a flag means. The readings - take(), remaining(), laps(),
+ * progress(), busy(), ready() - are one register or one word read from
+ * any context. Nothing in this file waits, spins or blocks; interrupts
+ * are masked in two places, DmaChannel::arm()'s read-modify-write of
+ * CCR's enables and DmaPingPongEngine::release(), whose counters the
+ * handler shares. The memory an engine is handed stays the caller's and
+ * must stay put: a run or a cell until complete() (or abandon()) ends
+ * the block, a ring or a table until stop(), the ping-pong's two
+ * buffers for the stream's life, the buffer ready() names until
+ * release() hands it back; nothing is copied.
+ *
+ * Every engine has two moments: arm() writes everything constant for a
  * binding once - the gate, the request, CPAR, and the CCR word, which the
- * ENGINE keeps because the register cannot (its fields are read-only while
+ * engine keeps because the register cannot (its fields are read-only while
  * EN is set) - and a block's start is DmaChannel::restart(): five stores,
  * no read, the beat's width from the caller's element type. The section
- * above the engines says it at length.
+ * "the engines: what they share", above the engines, says it at length.
  *
- * THE LEVEL AN ENGINE ARMS AT IS ITS PERIPHERAL'S (stm32g0/dma_engine.hpp's
+ * The level an engine arms at is its peripheral's (stm32g0/dma_engine.hpp's
  * DmaPriority, docs/design/dma.md). The arbiter grants one single transfer
  * at a time to the highest level asking, the lower channel number between
  * equals (10.4.4), and alternates a memory-to-memory channel with any other
@@ -52,45 +96,45 @@
  * copy at low (no request paces it); a transport names its own level at
  * the call.
  *
- * THE DRIVER OWNS THE FABRIC AND NOT THE REQUEST VOCABULARY. Table 55
+ * The driver owns the fabric and not the request vocabulary. Table 55
  * numbers 77 request lines by peripheral, and no device header of this
  * pack declares one of those numbers (the DMAMUX_REQ_* spellings live in
  * ST's HAL/LL, which this project does not vendor). Reproducing the table
  * here would be a list somebody has to keep, so a peripheral publishes
- * ITS OWN request codes
+ * its own request codes
  * (Usart<n>::dma_rx_request(), Tim<n>::dma_update_request() and their
  * kin) and this file takes a plain `uint8_t` request id. `dma_request_none`
  * is the null the chapter gives DMAREQ_ID = 0.
  *
- * TWO FACTS OF THIS CONTROLLER shape the engines above:
+ * Two facts of this controller shape the engines:
  *
- *  - A REQUEST IS A LEVEL SERVED ON ENABLE, NOT AN EDGE LATCHED ON THE
- *    RISE. 10.4.3 spells the handshake out: the peripheral drives its
+ *  - A request is a level served on enable, not an edge latched on the
+ *    rise. 10.4.3 spells the handshake out: the peripheral drives its
  *    request, the controller acknowledges, the peripheral releases. A
- *    channel enabled while its peripheral's request is ALREADY standing
+ *    channel enabled while its peripheral's request is already standing
  *    therefore serves it at once - there is no software-trigger register
  *    on this controller because there is nothing for one to do, and a
  *    driver here needs no verb to kick a stalled first beat. Measured,
  *    not assumed (docs/stm32g0/dma.md).
  *
- *  - THERE IS A HARDWARE CIRCULAR MODE (CCR.CIRC). At the end of a block
+ *  - There is a hardware circular mode (CCR.CIRC). At the end of a block
  *    CNDTR and both current address registers reload themselves and the
  *    channel keeps serving requests, with no CPU in the path at all. That
  *    is what DmaLoopEngine is built on, and it is why this target's
  *    player has no per-lap re-arm window: the interrupt at the wrap
- *    COUNTS laps, it does not create them. The receive engine's ring is
+ *    counts laps, it does not create them. The receive engine's ring is
  *    the same mode in the other direction: the channel writes a ring's
- *    storage lap after lap and its count register IS the ring's producer
+ *    storage lap after lap and its count register is the ring's producer
  *    index.
  *
- * WHY DmaPingPongEngine IS *NOT* CIRCULAR, which is this file's one real
+ * Why DmaPingPongEngine is not circular, which is this file's one real
  * design position. Circular mode plus the half-transfer flag looks like a
  * ping-pong for free: two halves of one buffer, HT and TC as the two
- * edges. It is not one, because a circular channel NEVER STOPS. The
+ * edges. It is not one, because a circular channel never stops. The
  * BlockSource contract (docs/design/block-stream.md) is that a source
- * which has no free buffer SKIPS the lap rather than write into the block
+ * which has no free buffer skips the lap rather than write into the block
  * the caller is reading - integrity traded for samples, so that everything
- * handed over is untorn. Under CIRC that decision can only be taken AFTER
+ * handed over is untorn. Under CIRC that decision can only be taken after
  * the edge, in the handler, and by then the controller is already writing
  * the next half: the tear happens while the software is deciding not to
  * allow it. That race is measured (docs/stm32g0/dma.md), and the answer
@@ -98,27 +142,27 @@
  * end of every block, and the swap into the other buffer happens in the
  * handler with the channel idle.
  *
- * ERRATA (ES0548 rev 3, silicon revision Z - all five DMA/DMAMUX items
+ * Errata (ES0548 rev 3, silicon revision Z - all five DMA/DMAMUX items
  * apply to this part):
  *  - 2.4.1, DMA disable failure and error flag omission upon simultaneous
  *    transfer error and global flag clear: a CGIFx write landing in the
- *    same cycle as a transfer error loses the automatic disable AND the
- *    TEIFx flag. THIS FILE NEVER WRITES CGIFx AT ALL - clear() masks the
+ *    same cycle as a transfer error loses the automatic disable and the
+ *    TEIFx flag. This file never writes CGIFx at all - clear() masks the
  *    global bit out and clears only CTCIFx/CHTIFx/CTEIFx, which is the
  *    erratum's own workaround made structural (there is no state to get
  *    wrong, and a caller cannot opt into the bug).
  *  - 2.5.4, wrong input DMA request routed upon a DMAMUX_CxCR write
  *    coinciding with a synchronization event: the workaround is that SPOL
- *    must be 00 whenever SE is 0, and must be set non-zero in the SAME
- *    write that sets SE. DmaMux::synchronize() writes one word and
- *    enforces both halves; there is no verb that can leave the illegal
- *    combination behind.
+ *    must be 00 whenever SE is 0, and must be set non-zero in the same
+ *    write that sets SE. DmaMux::request_synchronized() writes one word
+ *    and enforces both halves, and DmaMux::request() leaves SPOL at zero;
+ *    there is no verb that can leave the illegal combination behind.
  *  - 2.5.1 and 2.5.3, SOFx/OFx not asserted when the software writes the
  *    matching clear register: no workaround exists. Stated as an
  *    obligation on the two clear verbs - do not run two synchronized
  *    channels, or two request generators, that can both overrun.
  *  - 2.5.2, OFx not asserted for a trigger event coinciding with the last
- *    generated request (and the next trigger then generating ONE request
+ *    generated request (and the next trigger then generating one request
  *    instead of GNBREQ + 1), for GNBREQ > 1: an obligation on the caller
  *    of DmaMuxGenerator::configure(), since only the application knows its
  *    trigger period.
@@ -198,7 +242,7 @@ enum class DmaDirection : uint8_t {
 /// The four bits one channel owns in DMA_ISR and DMA_IFCR (10.6.1,
 /// 10.6.2). A channel's group sits at 4 * (ch - 1).
 struct DmaFlag {
-    static constexpr uint32_t global = 1u << 0;     ///< GIFx - READ ONLY here, see below
+    static constexpr uint32_t global = 1u << 0;     ///< GIFx - read only here (`all` says why)
     static constexpr uint32_t complete = 1u << 1;   ///< TCIFx
     static constexpr uint32_t half = 1u << 2;       ///< HTIFx
     static constexpr uint32_t error = 1u << 3;      ///< TEIFx
@@ -455,6 +499,10 @@ public:
     }
     static uint16_t count() { return static_cast<uint16_t>(regs().CNDTR); }
 
+    /// CPAR and CMAR, the two ends. Written with the channel disabled -
+    /// the order load() and prepare() keep, and a caller programming the
+    /// registers one by one keeps it too, since a running block reads
+    /// them.
     static void set_peripheral(volatile void* address) {
         regs().CPAR = reinterpret_cast<uint32_t>(address);
     }
@@ -856,11 +904,15 @@ struct DmaMuxGenerator {
         return true;
     }
 
+    /// GE: start or stop generating requests from the configured trigger.
+    /// configure() comes first, with GE clear; a read-modify-write with
+    /// no guard, so one context owns a generator.
     static void enable(bool on) {
         rgcr() = on ? (rgcr() | DMAMUX_RGxCR_GE) : (rgcr() & ~DMAMUX_RGxCR_GE);
     }
     static bool enabled() { return (rgcr() & DMAMUX_RGxCR_GE) != 0u; }
 
+    /// OIE: whether an overrun (OFx) raises the DMAMUX's own interrupt.
     static void overrun_interrupt(bool on) {
         rgcr() = on ? (rgcr() | DMAMUX_RGxCR_OIE) : (rgcr() & ~DMAMUX_RGxCR_OIE);
     }
@@ -872,6 +924,8 @@ struct DmaMuxGenerator {
     /// another generator during this write is lost. No workaround.
     static void clear_overrun() { status().RGCFR = 1u << x; }
 
+    /// The generator off and its register back at zero: no trigger, no
+    /// count, no interrupt.
     static void release() {
         enable(false);
         rgcr() = 0;
@@ -1136,6 +1190,12 @@ public:
     static uint32_t faults() { return faults_; }
     static void clear_faults() { faults_ = 0; }
 
+    /// Stop the channel and forget the block, counted as nothing: flags
+    /// and enables put back, the binding (request, CPAR, the kept word)
+    /// standing for the next start(). The owner's verb when it puts its
+    /// peripheral away (docs/design/dma.md's release contract: the
+    /// peripheral's requests stopped first); called where no completion
+    /// of this engine can run under it.
     static void stop() {
         Channel::stop();
         busy_ = false;
@@ -1420,6 +1480,12 @@ public:
     static uint32_t faults() { return faults_; }
     static void clear_faults() { faults_ = 0; }
 
+    /// Stop the channel - the one-shot run or the ring - and forget it,
+    /// counted as nothing; the binding stands, a ring included, for the
+    /// next start(). The owner's verb when it puts its peripheral away,
+    /// after the peripheral's requests are stopped (10.4.5's order for a
+    /// circular channel); called where no completion of this engine can
+    /// run under it.
     static void stop() {
         Channel::stop();
         capacity_ = 0;
@@ -1486,7 +1552,8 @@ private:
  * two bus cycles: a word copy is bounded by the core's own memcpy floor,
  * a fill cannot reach the core's store-only memset floor - the reason to
  * use this engine is the CPU it gives back, which letter d of the bench
- * app measures.
+ * app measures (a letter is one command key of a test suite's console
+ * and the group of verdicts it runs).
  *
  * Completion: TC's interrupt (complete() from the handler), or, armed
  * with DmaIrq::error_only, poll().
@@ -1589,6 +1656,9 @@ public:
     static uint32_t faults() { return faults_; }
     static void clear_faults() { faults_ = 0; }
 
+    /// Stop a copy in flight and free the engine, counted as nothing; what
+    /// the block had moved is in place, the rest is not. Called where no
+    /// completion of this engine can run under it.
     static void stop() {
         Channel::stop();
         busy_ = false;
@@ -1683,7 +1753,8 @@ public:
     /// into, `request` the peripheral's own DMAMUX request id. The CCR
     /// word - circular, memory to peripheral, the element's width, the
     /// two interrupt enables - is composed here once (the engines' two
-    /// moments, above). `high` by default, the rule's level for a paced
+    /// moments, the section "the engines: what they share"). `high` by
+    /// default, the rule's level for a paced
     /// output (DmaPriority's): a late item leaves a timer's compare
     /// register at its last value a period. THE DAC IS THIS DIE'S
     /// EXCEPTION to "only slows": a trigger that finds its request not

@@ -1,36 +1,40 @@
 /*
  * dma_engine.hpp
  *
- * The "no DMA engine" tag of every optional engine slot in this stratum
- * - stm32g0/usart.hpp's two, stm32g0/spi.hpp's two - and nothing else.
+ * What a driver with an optional DMA engine slot needs in order to name
+ * that slot without the DMA controller: the "no DMA engine" tag,
+ * NoDmaEngine, which every optional slot in this stratum defaults to
+ * (stm32g0/usart.hpp's two, stm32g0/spi.hpp's two), and beside it the
+ * three pieces of vocabulary an owner speaks to its engines - the level
+ * an engine arms at (DmaPriority, which a transport names for each
+ * engine in its slots), which of a channel's events interrupt (DmaIrq,
+ * handed to arm()), and whether a buffer is aligned for a beat of a
+ * given width (dma_beat_aligned, the test an engine's start() makes and
+ * a driver makes first, to choose its pump instead). An application
+ * that wants an engine includes stm32g0/dma.hpp as well and names the
+ * channel; one that does not never sees the controller at all.
  *
- * IT IS A TAG, NOT A BASE CLASS: `present` is the only thing a task asks
- * about, and it asks with `if constexpr`, so every engine branch - the
- * pump, the completion path and the state they need - disappears from a
- * driver that does not name one: an image whose tasks all take the
- * default carries no engine code at all.
+ * Nothing here runs in a context of its own: the tag and the two
+ * enumerations are compile-time vocabulary, and dma_beat_aligned() is a
+ * pure test of an address, callable from anywhere, that waits for
+ * nothing and masks nothing.
  *
- * IT LIVES IN A FILE OF ITS OWN AND NOT IN stm32g0/dma.hpp, and the
- * reason is the whole point of an optional slot: a driver with such a
- * slot must not include dma.hpp, or every program with a console (or a
- * bus) would carry the DMA controller. An application that wants an
- * engine includes both headers and names the channel; one that does not
- * never sees the controller at all - which is also why a task reaches
- * its engines only through THEIR OWN published names (start(),
- * service(), flag_complete, flag_error) and never spells a DmaChannel or
- * a DmaFlag.
+ * Why a tag and not a base class: `present` is the only thing a task
+ * (the driver class a util service drives) asks about, and it asks with
+ * `if constexpr`, so every engine branch - the pump, the completion path
+ * and the state they need - disappears from a driver that does not name
+ * one: an image whose tasks all take the default carries no engine code
+ * at all.
  *
- * And it is a file rather than a member of one of the two drivers
- * because two headers cannot each define the same tag, and neither is
- * the other's natural home.
- *
- * Beside the tag, the three pieces of vocabulary an OWNER speaks to its
- * engines without including the controller: the level an engine arms at
- * (DmaPriority, which a transport names for each engine in its slots),
- * which of a channel's events interrupt (DmaIrq, handed to arm()), and
- * whether a buffer is aligned for a beat of a given width
- * (dma_beat_aligned, the test an engine's start() makes and a driver
- * makes first, to choose its pump instead).
+ * Why a file of its own and not stm32g0/dma.hpp: the whole point of an
+ * optional slot is that a driver with such a slot must not include
+ * dma.hpp, or every program with a console (or a bus) would carry the
+ * DMA controller - which is also why a task reaches its engines only
+ * through their own published names (start(), service(), flag_complete,
+ * flag_error) and never spells a DmaChannel or a DmaFlag. And it is a
+ * file rather than a member of one of the two drivers because two
+ * headers cannot each define the same tag, and neither is the other's
+ * natural home.
  */
 
 #pragma once

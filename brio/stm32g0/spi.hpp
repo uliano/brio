@@ -1,28 +1,75 @@
 /*
  * spi.hpp
  *
- * The SPI / I2S block (RM0444 ch. 35) in the two strata every brio bus
- * driver has (docs/design/spi-bus.md):
+ * The STM32G0's SPI / I2S block (RM0444 ch. 35): what a program uses to
+ * talk to a device on an SPI bus - a display, a flash chip, a converter,
+ * several of them sharing the four wires - or to answer on such a bus as
+ * a client; the same registers become an I2S audio interface when
+ * I2SMOD is set. Three types, in the two layers every brio bus driver
+ * has (docs/design/spi-bus.md):
  *
- *   Spi<n>        the RESOURCE: which instance, where its registers are,
- *                 its APB clock and reset, its NVIC line, its DMAMUX
- *                 request pair, the whole register description of the
- *                 chapter in both of its personalities (SPI Motorola,
- *                 SPI TI, and the I2S the same registers become when
- *                 I2SMOD is set) and the two DISCIPLINES the chapter
- *                 states: configuration only with SPE clear, and the
- *                 disable PROCEDURE of 35.5.9;
- *   SpiHost<...>  the TASK util/spi_bus.hpp drives: the transfer engine
- *                 with the Request shape and the public surface every
- *                 target's SpiHost carries (docs/design/spi-bus.md), so
- *                 a device client compiles here untouched, and the
- *                 placement of its two hot paths (util/placement.hpp);
+ *   Spi<n>        the resource: one instance by number - where its
+ *                 registers are, its APB clock and reset, its NVIC line,
+ *                 its DMAMUX request pair - with one function per
+ *                 register fact of the chapter, in both personalities
+ *                 (SPI Motorola, SPI TI, and the I2S the same registers
+ *                 become when I2SMOD is set), under the two disciplines
+ *                 the chapter states: configuration only with SPE
+ *                 clear, and the disable procedure of 35.5.9;
+ *   SpiHost<...>  the task, the driver class a util service drives:
+ *                 here util/spi_bus.hpp's bus arbiter runs its
+ *                 transactions on it. It is the transfer engine, with
+ *                 the Request shape and the public surface every
+ *                 target's SpiHost carries, so a device client compiles
+ *                 here untouched, and the placement of its two hot paths
+ *                 (util/placement.hpp);
  *   SpiClient<..> the other end of the wire: the hardware NSS input, the
- *                 preload and the one-ahead pump, a polled surface and
- *                 an ISR body. A client is a PROTOCOL and the protocol
- *                 is the application's, so this half decides nothing.
+ *                 preload and the one-ahead pump, polled runs and an ISR
+ *                 body. A client is a protocol and the protocol is the
+ *                 application's, so this half decides nothing.
  *
- * SCOPE. The chapter whole, bar what docs/stm32g0/spi.md declines with a
+ * The smallest use is a device behind the arbiter, the chip select an
+ * ordinary GPIO the engine drives around the transaction
+ * (docs/stm32g0/spi.md opens with it in full):
+ *
+ *     using Bus = brio::SpiHost<1, bus_pins>;  // SCK, MISO, MOSI, each with its AF number
+ *     using Arb = brio::SpiBus<Bus, P, 4>;     // the arbiter, an active object
+ *     (void)Bus::init(clock, 8'000'000);       // after the clock task; an 8 MHz ceiling
+ *     brio::post<Arb>(Bus::Request{.cs = Cs::ref(), .cmd = ..., .rx = ..., .reply = ..., .len = 8});
+ *     extern "C" void SPI1_IRQHandler() {
+ *         if (Bus::isr()) { brio::post<Arb>(brio::TransferDone{Bus::status()}); }
+ *     }
+ *
+ * Who calls what. An active object is an object the kernel serves one
+ * event at a time, and a dispatch is the kernel's call of its handler
+ * for one event (kernel/active_object.hpp). SpiHost::init() is called
+ * from main(), after the clock task's init() and before interrupts are
+ * enabled globally; when the host names DMA engines, init() arms them
+ * itself, and their arm() opens the controller's clock (the controller
+ * has no init() of its own). start() is called by the bus arbiter inside
+ * its dispatch, and a request completes in one of two ways: on the
+ * interrupt, the vector's glue posting TransferDone to the arbiter when
+ * isr() or dma_isr() returns true, or - when the request says `polled`
+ * - inside start() itself, which then blocks that dispatch for the
+ * whole transfer with global interrupts enabled. isr() and dma_isr()
+ * are interrupt bodies the program binds to their vectors. The verbs
+ * that reshape the bus (prime(), bit_order(), the pad classes,
+ * rebase(), recover(), release()) want an idle bus and belong to setup
+ * or to the arbiter's dispatch. Spi<n>'s own verbs are plain register
+ * accesses with no guard of their own, so two contexts configuring one
+ * instance race on CR1 and CR2; the interrupt enables are the one place
+ * this file masks interrupts (a critical section around the
+ * read-modify-write of CR2, which the handler shares). Every wait in
+ * the file is bounded - a bus whose clock never runs must not hang the
+ * kernel - and reports false rather than spinning. A request's buffers
+ * are lent: the client hands them over under Lease::reply
+ * (kernel/borrowed.hpp) and owns them again when its SpiDone arrives;
+ * the Request itself is read through the reference on the polled path
+ * and copied once on the asynchronous one. A client's polled runs block
+ * their caller for the run, bounded by the spins they are given, and
+ * use the caller's spans for the call alone.
+ *
+ * Scope: the chapter whole, bar what docs/stm32g0/spi.md declines with a
  * reason: both roles, all four modes, both bit orders, the eight baud
  * prescalers, data sizes 4..16 with the FRXTH threshold and the
  * byte-versus-half-word access rule, every NSS arrangement (software,
@@ -33,27 +80,27 @@
  * mode with its four standards, its three data lengths, its prescaler
  * and its master clock output.
  *
- * FACTS THAT SHAPE THE CODE
+ * The facts of the silicon that shape the code, each with its reason:
  *
- *  - 35.5.7 is a WITH-SPE-CLEAR procedure: "Configuration of SPI" writes
+ *  - 35.5.7 is a with-SPE-clear procedure: "Configuration of SPI" writes
  *    CR1 and CR2 with the peripheral disabled, and four fields say so in
  *    their own register description as well (CRCEN, CRCL, FRF, NSSP,
  *    plus LDMA_TX/LDMA_RX "has to be written when the SPI is disabled").
  *    Another four are gated by the softer "should not be changed when
  *    communication is ongoing" (BR, MSTR, LSBFIRST, CPOL/CPHA - and
  *    35.5.6's own Note hardens the last pair into "the SPI must be
- *    disabled by resetting the SPE bit"). THIS DRIVER REFUSES ALL OF
- *    THEM WHILE SPE IS SET - one rule instead of two, so that no caller
+ *    disabled by resetting the SPE bit"). This driver refuses all of
+ *    them while SPE is set - one rule instead of two, so that no caller
  *    has to remember which sentence a field got. Which of those the
- *    SILICON really enforces is a different question and the bench asks
+ *    silicon really enforces is a different question and the bench asks
  *    it directly (the bench writes each field with SPE set and reports
- *    what stuck). The verbs that stay open under a running
- *    SPI are the ones that MUST be: SSI (the software select, whose
- *    whole use is to be moved under a live master), CRCNEXT (35.9.1:
- *    "written as soon as the last data is written in SPIx_DR"), the
- *    three interrupt enables, and the data register.
+ *    what stuck). The verbs that stay open under a running SPI are the
+ *    ones that must be: SSI (the software select, whose whole use is to
+ *    be moved under a live master), CRCNEXT (35.9.1: "written as soon
+ *    as the last data is written in SPIx_DR"), the three interrupt
+ *    enables, and the data register.
  *
- *  - THERE IS NO RAW SPE CLEAR IN THIS FILE. disable() is 35.5.9's
+ *  - There is no raw SPE clear in this file. disable() is 35.5.9's
  *    procedure - wait FTLVL = 00, wait BSY = 0, clear SPE, drain the
  *    RXFIFO until FRLVL = 00 - and it is the only verb that turns the
  *    peripheral off. That makes ES0548 2.12.1's workaround structural:
@@ -65,13 +112,11 @@
  *    contract is the erratum's own advice: ignore BSY there.
  *
  *  - ES0548 2.12.2 says BSY may sporadically stay high at the end of a
- *    SLAVE transfer. So nothing on the client side of this file waits on
+ *    slave transfer. So nothing on the client side of this file waits on
  *    BSY: a received frame is RXNE, and the end of a transaction is the
- *    NSS pad going high. Every wait in the file is bounded anyway - a
- *    bus whose clock never runs must not hang the kernel - and reports
- *    false rather than spinning.
+ *    NSS pad going high.
  *
- *  - RXNE DRIVES THE HOST PUMP AND THE FIFO IS ITS WRITE-AHEAD. TXE means
+ *  - RXNE drives the host pump and the FIFO is its write-ahead. TXE means
  *    "the transmit FIFO has room", which is true well before a frame is
  *    on the wire and true again immediately after; RXNE means "a frame
  *    has been shifted in", which on a full-duplex bus is exactly "one
@@ -80,12 +125,12 @@
  *    flight (35.5.9: three byte frames, two half-words), drains what
  *    RXNE announces and refills by that count, so the clock runs
  *    continuously while the software keeps up and the transaction ends
- *    when the LAST frame has come back rather than when the last one
+ *    when the last frame has come back rather than when the last one
  *    was handed to the shifter.
  *
- *  - THE FIFO ACCESS WIDTH IS PART OF THE FRAME SIZE (35.5.9, figure
- *    363): with DS <= 8 a frame is right-aligned in a BYTE and DR must
- *    be accessed a byte at a time, or the silicon PACKS two frames into
+ *  - The FIFO access width is part of the frame size (35.5.9, figure
+ *    363): with DS <= 8 a frame is right-aligned in a byte and DR must
+ *    be accessed a byte at a time, or the silicon packs two frames into
  *    one 16-bit access; with DS > 8 a frame is right-aligned in a
  *    half-word and DR is accessed 16 bits at a time. FRXTH must agree
  *    with the read width (1 = RXNE at a quarter of the FIFO, i.e. one
@@ -93,23 +138,25 @@
  *    verb here therefore comes in a byte flavour and a half-word one,
  *    and data(size, v) picks by the size the caller states.
  *
- *  - THE CHIP SELECT A TRANSACTION IS FRAMED BY IS A GPIO, and the
+ *  - The chip select a transaction is framed by is a GPIO, and the
  *    reason is 35.5.5: hardware NSS output falls
  *    "as soon as the SPI is enabled in master mode (SPE = 1)" and rises
- *    when it is disabled - it frames the peripheral's LIFETIME and not a
- *    transaction - while NSS pulse mode (35.5.12) frames a DATA FRAME,
+ *    when it is disabled - it frames the peripheral's lifetime and not a
+ *    transaction - while NSS pulse mode (35.5.12) frames a data frame,
  *    raising NSS between consecutive frames. Neither is what a device
  *    wants around a command plus its data. Both are resource facts the
  *    bench measures; the task's Request carries a PinRef.
  *
- *  - THE VECTOR IS SHARED where the part has a SPI3: SPI2 and SPI3 sit
- *    on SPI2_3_IRQn (the reserve derives it from SPI3_BASE), so an app
- *    binds BRIO_STM32G0_SPI2_HANDLER and calls both instances' bodies.
+ *  - The vector is shared where the part has a SPI3: SPI2 and SPI3 sit
+ *    on SPI2_3_IRQn (the reserve - stm32g0/device_tables.hpp, the table
+ *    of what each part has, read off the device header - derives it
+ *    from SPI3_BASE), so an app binds BRIO_STM32G0_SPI2_HANDLER and
+ *    calls both instances' bodies.
  *
- *  - THERE IS NO KERNEL-CLOCK MULTIPLEXER FOR SPI. The baud prescaler
+ *  - There is no kernel-clock multiplexer for SPI. The baud prescaler
  *    divides PCLK and nothing else (35.9.1's BR field says fPCLK), which
  *    is why init() takes the app's Clock tag and rebase() is a pure
- *    re-resolution of the ceiling. The I2S half DOES have one - I2S1SEL
+ *    re-resolution of the ceiling. The I2S half does have one - I2S1SEL
  *    / I2S2SEL, in CCIPR on the small parts and CCIPR2 on the G0Bx/G0Cx
  *    - and it is a resource verb of its own (i2s_kernel_clock()).
  */
@@ -235,7 +282,8 @@ constexpr std::optional<SpiDataSize> spi_data_size_of(uint8_t bits) {
 }
 /// Whether a frame of this size occupies a HALF-WORD of the FIFO
 /// (35.5.9's figure 363): 4..8 bits ride in a byte, 9..16 in a
-/// half-word, and the access width must follow - see the file comment.
+/// half-word, and the access width must follow (the opening comment's
+/// fact on the FIFO access width).
 constexpr bool spi_frame_is_halfword(SpiDataSize d) { return spi_data_bits(d) > 8u; }
 /// The mask of the bits a frame of this size really carries, so a
 /// caller (and this file's own loops) can right-align a datum without
@@ -1319,6 +1367,11 @@ struct Spi {
 
     // ---- interrupts ---------------------------------------------------------
 
+    /// Arm (`on`) or drop the enables in `mask` (SpiInterrupt's bits).
+    /// Legal under a running SPI and from any context: the
+    /// read-modify-write of CR2 runs with interrupts masked for its
+    /// duration, because the handler drops its own enable through the
+    /// same register.
     static void interrupts(uint32_t mask, bool on) {
         InterruptGuard guard;   // CR2 is read-modify-write and shared with the handler
         regs().CR2 = on ? (regs().CR2 | mask) : (regs().CR2 & ~mask);
@@ -1670,10 +1723,11 @@ inline constexpr uint8_t spi_dma_fault = bus_engine_status;
  * a RESOURCE fact and not this task's: it needs the caller's own buffer
  * layout, and the bench drives it with raw engines.
  *
- * THE DMA CONTROLLER IS THE APP'S: Dma1::init() (or whatever the app
- * uses) before any engined init(). The engines arm CHANNELS of a
- * controller somebody else owns, and a driver that reset the shared
- * block would stop every other channel in the program.
+ * THE DMA CONTROLLER IS THE APP'S. The engines arm CHANNELS of a
+ * controller somebody else owns (their arm() opens its clock and never
+ * resets it; the controller has no init() of its own), and a driver
+ * that reset the shared block would stop every other channel in the
+ * program.
  *
  * NOTHING KICKS A STALLED FIRST BEAT HERE, and the absence is
  * stm32g0/dma.hpp's own measured fact: 10.4.3's handshake is
@@ -1784,8 +1838,9 @@ public:
 
     /// The data phase from which the engines are cheaper than the pump,
     /// in FRAMES, and its two measured inputs (`bench_stm32` and
-    /// `bench_stm32_ram` letters d and e on the STM32G0B1RE,
-    /// docs/stm32g0/spi.md): what a transaction costs above the wire on
+    /// `bench_stm32_ram` letters d and e on the STM32G0B1RE - a letter is
+    /// one command key of a test suite's console and the group of
+    /// verdicts it runs -, docs/stm32g0/spi.md): what a transaction costs above the wire on
     /// the engines, whatever its length - none of its path placed, so one
     /// figure for both, `bench_stm32`'s (`bench_stm32_ram` reads 24 cycles
     /// less, the bench's shared DMA vector shorter there) - and what the
@@ -1949,8 +2004,9 @@ public:
     ///
     /// A Request's `clock` is a DIVISION of PCLK and scales with it by
     /// itself, so what is recomputed here is the CEILING and the
-    /// cs_setup timing. THE BUS MUST BE IDLE:
-    /// see the class comment.
+    /// cs_setup timing. The bus must be idle: a rate change under a
+    /// frame in flight breaks it (the class comment's paragraph on what
+    /// a clock switch does to a transfer in flight).
     static void rebase(uint32_t hz) {
         pclk_hz_ = hz;
         ceiling_ = ceiling_hz_ ? spi_rate_for(hz, ceiling_hz_) : std::optional<SpiClock>{};
@@ -2192,6 +2248,12 @@ public:
         return ok && cfg;
     }
 
+    /// Give the instance back: the engines stopped, the vector disabled,
+    /// the peripheral disabled by its procedure and reset, its bus clock
+    /// off, SCK, MOSI and MISO returned to analog. For an idle bus, from
+    /// setup or the arbiter's dispatch; the next use is a fresh init().
+    /// The disable procedure's bounded wait is spent and its answer
+    /// dropped: the reset that follows puts the block right either way.
     static void release() {
         if constexpr (has_engines) {
             TxEngine::stop();
@@ -2993,13 +3055,18 @@ public:
         PinSpeed miso_speed = PinSpeed::very_high;
     };
 
-    /// Bring the instance up as a client.
+    /// Bring the instance up as a client: bus clock, reset, configuration,
+    /// pads, the NVIC line. Called from main(), after the clock task's
+    /// init() and before interrupts are enabled globally; `clock` is
+    /// taken for the shape every task's init() shares and is not read -
+    /// a client's clock is the host's SCK.
     ///
-    /// The APB clock is required even though the SHIFT register runs on
+    /// The APB clock is required even though the shift register runs on
     /// the host's SCK: every synchronization in the peripheral crosses
     /// into it, and its registers are dead without it.
     ///
-    /// Returns false when the configuration is refused.
+    /// Returns false when the configuration is refused (nothing is
+    /// written to the pads then); SPE is left clear, enable() raises it.
     template <typename Clock>
     static bool init(Clock clock, const Config& cfg = {}) {
         (void)clock;
@@ -3057,11 +3124,12 @@ public:
     /// from reading this one's leftovers).
     static bool disable() { return S::disable(); }
 
-    /// HOW MANY ANSWERS MUST BE QUEUED AHEAD of the frame the host is
+    /// How many answers must be queued ahead of the frame the host is
     /// about to clock for them to reach the wire in order - the one
-    /// integer that differs between this family's client pump and the
-    /// other strata's. TWO here: the FIFO has already handed the shifter
-    /// its frame by the time a write made in the gap after RXNE lands.
+    /// integer a client pump has to know about this block, and the one
+    /// that changes from family to family. Two here: the FIFO has
+    /// already handed the shifter its frame by the time a write made in
+    /// the gap after RXNE lands.
     static constexpr uint8_t frames_ahead = 2;
 
     /// Load the next frame to shift out. Two of these before the first
@@ -3403,6 +3471,11 @@ public:
     /// width without the caller restating it.
     static SpiDataSize bits() { return bits_; }
 
+    /// Give the instance back: the vector disabled, the peripheral
+    /// disabled by its procedure and reset, its bus clock off, every pad
+    /// named in `pins` returned to analog. For a client no host is
+    /// clocking, from setup or an active object's handler; the next use
+    /// is a fresh init().
     static void release() {
         Nvic::disable(S::irq());
         (void)S::disable();
