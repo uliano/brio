@@ -16,10 +16,21 @@ Only ASCII <= 127 in every file of the repo (code, docs, this file).
 
 ## Where the truth lives
 
-- `README.md` - brio's shopfront: what it is, a snippet, the ideas,
-  the layering and the target table (`supported` / `in bring-up`: the
-  ONE place a platform's maturity is stated). No history, no apps.
-- `docs/README.md` - the map of the documentation and its rules.
+- `README.md` - brio's shopfront: what problem it solves and for whom,
+  the execution model before its C++ form, a snippet from a maintained
+  teaching example, the layering, the target table (`supported` /
+  `in bring-up`: the ONE place a platform's maturity is stated, a row
+  short enough to choose by, the detail in the target's own pages) and
+  the way into `docs/learn/`. No history, no bench apps.
+- `docs/README.md` - the map of the documentation, who it is written
+  for and its rules.
+- `docs/learn/` - the LEARNING ROUTE for an embedded programmer who
+  knows C and may know no C++ and no active objects: the introduction,
+  the first program read in stages over an existing maintained example
+  (`blink`), the VS Code and command-line workflows with every step's
+  verification status, the task guides. It teaches from applications
+  that exist; an example it lacks is a stated gap, never described as
+  available.
 - `docs/design/*.md` - the target-independent design, by intent: WHY
   and contracts. `overview.md` (philosophy, the governing rule, the
   layering, the style, "a driver is written from its chapter", "a
@@ -38,9 +49,11 @@ Only ASCII <= 127 in every file of the repo (code, docs, this file).
   `devices/`). `README.md` is the operational page (toolchain, board,
   probe, debugger and their quirks) and carries the DOCUMENT MAP - the
   state of the driver work is read there; beside it ONE document per
-  peripheral in the shape docs/README.md prescribes (documents of
-  record -> what the silicon does -> types and verbs -> how to use it,
-  one example per use -> bench findings -> "Not covered yet"). No
+  peripheral in the shape docs/README.md prescribes (the reader's
+  orientation: purpose, smallest use, the prerequisite that decides
+  correctness -> documents of record -> what the silicon does -> types
+  and verbs -> how to use it, one example per use -> bench findings ->
+  "Not covered yet"). No
   document carries a banner. "Not covered yet" is TWO LISTS - driver
   gaps, each with its REASON (a wire, a peer board, a meter; born with
   its first user; declined because ...), kept apart from implemented-
@@ -69,10 +82,13 @@ Only ASCII <= 127 in every file of the repo (code, docs, this file).
 Rules (full text in `docs/README.md`): any change that alters a
 documented decision updates the matching doc in the same change; docs
 say today's truth only (no change history, no dates, no renames);
-design/ and the target folders never reference individual apps; never
-duplicate signatures into docs; new decisions go into `docs/design/`,
-not here. This file has no decision log: `docs/design/*` is
-authoritative.
+design/ and the target folders never reference a bench app, and may
+name a MAINTAINED TEACHING EXAMPLE (today `blink`) under docs/README.md's
+rule; every page opens with the reader's orientation and is written in
+ordinary technical English for the reader named there; a workflow step
+is verified, configured or unavailable and says which; never duplicate
+signatures into docs; new decisions go into `docs/design/`, not here.
+This file has no decision log: `docs/design/*` is authoritative.
 
 ## The project
 
@@ -142,9 +158,16 @@ disturb:
   design/kernel.md section 1 and the platform promise in section 11);
 - **util/ services and target drivers** - important, here to stay,
   but expected to change (possibly radically) as targets are added;
-- **apps** - incidental test tools; they will not survive in their
-  current form. Nothing in the foundations or their docs may depend on
-  an app; apps document themselves in their own header comment.
+- **apps** - of two kinds. BENCH APPS (suites, probes, consoles, the
+  experiments' halves) are incidental test tools that will not survive
+  in their current form: nothing in the foundations or their docs may
+  depend on one, and each documents itself in its own header comment.
+  MAINTAINED TEACHING EXAMPLES (`blink`, in every project that builds
+  it) are applications the documentation reads and explains: a stable
+  documented purpose, compiling on every preset of their project, re-read
+  and their pages moved in the same change when an API they use
+  changes. A new teaching example is written and compiled here, on the
+  desk, before any page describes it.
 
 ## Working discipline (read this first, every session)
 
@@ -236,12 +259,29 @@ both, in practice:
 - **Never state what is not enforced**: a fact in a doc or comment
   either has a guard in the code or sits in "Not covered yet".
 - **Docs are a reference for the CURRENT version** (rules:
-  docs/README.md): no history, no dates, no work narrative, no app
-  names (test suites excepted); no banner, "Not covered yet" as two
-  lists with a reason on every item (driver gaps separate from
-  implemented-but-not-bench-verified), nothing listed that the
-  document's own findings cover; doc and code move in the same
-  change.
+  docs/README.md): no history, no dates, no work narrative, no bench
+  app names (test suites as apparatus and maintained teaching examples
+  excepted); no banner, "Not covered yet" as two lists with a reason on
+  every item (driver gaps separate from implemented-but-not-bench-
+  verified), nothing listed that the document's own findings cover;
+  doc and code move in the same change.
+- **Docs and header comments are written for the reader, not the
+  author** (rules: docs/README.md): an embedded programmer who knows C
+  and microcontrollers and may know no C++ and no active objects. Purpose
+  and behaviour before mechanism; every term of the project's own defined
+  where it first appears; no private shorthand, no capitals for emphasis,
+  a link that names its destination; the conceptual rule, the compiler's
+  check, the runtime's check, the programmer's duty and the measurement
+  kept apart. A header's opening comment says what the header is for,
+  when a program uses it and its essential constraints; a public
+  operation's comment says what it does, from which context it may be
+  called, whether it waits, blocks or masks interrupts, who owns the
+  storage and for how long, and which requirement is checked against
+  which stays the caller's. A workflow step is verified, configured or
+  unavailable, and says which. A comments-only edit is proved by
+  `brio gate` (whole, or `--tokens` where no toolchain is at hand), and
+  `// build:` lines and every other comment a tool reads are never
+  touched by an editorial pass.
 - **When every variant of OUR code fails on the bench, consult the
   vendor's reference implementation - as an ORACLE, never as a source.**
   (Its first use is earlier and routine - read before an engine is

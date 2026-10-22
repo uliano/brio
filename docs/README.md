@@ -1,10 +1,25 @@
 # brio documentation
 
-Design documentation for the `brio` framework and the multi-app testbed
-around it. This directory is the reference companion to the code: the
-rationale and the contracts between layers, as they are today.
+Documentation for the `brio` framework and the multi-app testbed around
+it, as they are today. It is written for an embedded programmer who
+knows C and microcontrollers and may know little C++ and nothing about
+active objects; it serves two readings. The LEARNING route (`learn/`)
+takes that reader from the main loop they know to a working brio
+program, one idea at a time, and to the graphical and command-line
+workflows that build, program and debug it. The REFERENCE (`design/`,
+one folder per target and per shared stratum, `boards/`, `probes/`)
+holds the rationale, the contracts between layers and the measured
+facts, and is where the learning route sends a reader who needs more.
 
 ## Map
+
+The learning route, read in order:
+
+| Document | Content |
+|----------|---------|
+| `learn/` | The introduction (what problem brio solves, the execution model before its C++ form), the first program read in stages over an existing maintained example, the VS Code and command-line workflows with the verification status of every step, and the task guides; its own `README.md` is the route's table of contents |
+
+The reference:
 
 The directory mirrors the strata of `brio/`: `design/` is the
 target-independent framework (kernel, services, the models every target
@@ -75,6 +90,46 @@ pages say what is theirs and what a family owes them:
 
 ## Rules of this directory
 
+- **Written for the reader named above, in ordinary technical
+  English.** A page answers, in this order: what problem this solves in
+  an embedded program, what the program does and when, what the
+  programmer must provide or avoid, the smallest useful example, where
+  the exact API and implementation details are. A reference page may be
+  compact but still opens with that orientation; a learning page builds
+  it in full. Direct subjects and verbs; one idea per paragraph; a term
+  of the project's own (active object, run-to-completion, contract,
+  stratum, a CLI verb) is defined where it first appears and then used
+  consistently, and a private shorthand that compresses a meaning only
+  its author knows is replaced by the meaning. Capitals mark nothing;
+  bold marks a consequence the reader must remember, a correctness
+  rule first of all. A link names its destination, never "section 7"
+  or "see above"; where a tool needs a letter or a code, the code
+  stands beside its meaning. A table compares short parallel facts; a
+  causal explanation is prose. Precision is never traded for a
+  simplification the code does not support: the conceptual rule, what
+  the compiler checks, what a runtime check catches, what stays the
+  programmer's duty and what was measured on which hardware are kept
+  apart, and a measured cost names its build, clock and part.
+- **A step is verified, configured or unavailable - and says which.**
+  A workflow page states, for every step, whether it was performed on
+  the named configuration, is configured but awaits an interactive
+  check, exists only on the command line, or is blocked and why. A
+  configuration file is evidence to examine, not proof that a session
+  succeeds; a result obtained on one board is not a claim about another.
+- **Teaching examples are maintained applications; bench apps are
+  disposable.** A MAINTAINED TEACHING EXAMPLE is an application the
+  documentation reads and explains (`blink` today, in every project
+  that builds it): it has a stable documented purpose, keeps compiling
+  on every preset of its project, and is re-read when an API it uses
+  changes - the documentation that quotes it moves in the same change.
+  A BENCH APP (a test suite, a probe, a console, an experiment's half)
+  is disposable and free to change without touching the foundations;
+  a document never depends on one, with the apparatus exception below.
+  A page may name and quote a maintained teaching example and shows the
+  reader where its source is; an example a page would like to have and
+  has not got is stated as a gap in that page's own words, never
+  described as if it were available, and the learning route documents
+  the applications that exist rather than inventing ones that do not.
 - **Keep it true or delete it.** A design doc that lags the code is
   worse than no doc. Whoever changes a documented decision updates the
   doc in the same change (same commit when practical).
@@ -85,10 +140,11 @@ pages say what is theirs and what a family owes them:
   over the headers generates it without touching this directory.
 - **First principles only in design/ and the target folders.** They
   state principles, contracts and tradeoffs - they never describe or
-  reference individual apps (apps are disposable and must be free to
-  change without touching the foundations). Apps document themselves
-  in their own header comment; `brio apps` lists them.
-  THE ONE EXCEPTION IS APPARATUS: a document may name the firmware a
+  reference a bench app (disposable, free to change without touching
+  the foundations); a maintained teaching example may be named and
+  quoted, under the rule above. Apps document themselves in their own
+  header comment; `brio apps` lists them.
+  THE ONE EXCEPTION FOR BENCH APPS IS APPARATUS: a document may name the firmware a
   reader needs in order to reproduce a measurement it reports - a
   reference suite (`test_<target>_<subject>`, which must keep passing)
   and the peer firmware that suite talks to. A probe written to answer
@@ -122,10 +178,14 @@ pages say what is theirs and what a family owes them:
   about; a "gap" the document's own findings already cover is not a
   gap and is deleted; and a document with nothing in either list has
   no such section - that absence is its statement of completeness.
-- **One document per peripheral, in this shape.** First paragraph:
-  the documents of record with their revision (data sheet, errata),
-  the driver header, the reference test suite - no chapter lists, no
-  history. Then: *what the silicon does* (the behaviour and the
+- **One document per peripheral, in this shape.** It opens with the
+  reader's orientation: what the driver is for in a program, the
+  smallest use, and any prerequisite that decides correctness even in
+  that smallest use (a clock to bring up first, a pin to hand over, an
+  ordering in the active-object list). Then the documents of record
+  with their revision (data sheet, errata), the driver header, the
+  reference test suite - no chapter lists, no history. Then: *what
+  the silicon does* (the behaviour and the
   physical facts that matter to code, measured ones marked as such -
   and THE SILICON'S OFFER: every feature that bears on cost, FIFOs and
   their thresholds, DMA requests and circular mode, the edges that end
@@ -142,8 +202,8 @@ pages say what is theirs and what a family owes them:
   COST of each transport or engine: cycles per byte or frame,
   interrupts per byte, cycles masked, beside the wire's or the bus's
   own figure; a measured rate far from that figure is explained there
-  or listed in "Not covered yet" as a gap to explain). Tracks, guiding
-  applications and history live in CLAUDE.md and memory, never here.
+  or listed in "Not covered yet" as a gap to explain). Tracks and
+  history live in CLAUDE.md and memory, never here.
 - **A contract with more than one realization carries a realizations
   table.** In the design page that owns the contract, `### Realizations`
   right after the contract's statement: one sentence for what is
