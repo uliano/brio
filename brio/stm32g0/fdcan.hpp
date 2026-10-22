@@ -1,9 +1,13 @@
 /*
  * fdcan.hpp
  *
- * The STM32G0's FD controller area network (RM0444 ch. 36) - the Bosch
- * M_CAN core ST ships on the G0B1/G0C1 class and nowhere else in this
- * family, in the resource/task split this stratum uses everywhere:
+ * The STM32G0's FD controller area network (RM0444 ch. 36): what a
+ * program uses to be a CAN or CAN FD node - the bit timing computed from
+ * the clock and the rate asked, frames put and read through FIFOs, the
+ * filters, and the loop-back modes that run the whole thing with no
+ * transceiver and no second node. The block is the Bosch M_CAN core ST
+ * ships on the G0B1/G0C1 class and nowhere else in this family, in the
+ * resource/task split this stratum uses everywhere:
  *
  *   Fdcan<1>, Fdcan<2>   the two CAN modules - every register of ch. 36,
  *                        the message RAM they read and write, the
@@ -14,62 +18,90 @@
  *                        machine and the two interrupt lines;
  *   FdcanPad<sel>        one pad handed to FDCANn_RX or FDCANn_TX.
  *
+ * The smallest use, one module in internal loop-back, accepting
+ * everything and sending a frame to itself:
+ *
  *   using Can = brio::Fdcan<1>;
  *   constexpr brio::FdcanConfig cfg{
  *       .nominal = *brio::fdcan_bit_timing_for(64'000'000, 500'000, 875),
  *       .mode = brio::FdcanMode::internal_loop_back,
  *       .standard_filters = 1,
  *   };
- *   Can::enter<cfg>();                       // clock, reset, RAM, timing
+ *   Can::bus_clock(true);
+ *   Can::reset();                            // one reset for both modules
+ *   Can::enter<cfg>();                       // clock, RAM, timing, modes; INIT kept
  *   Can::standard_filter(0, {.type = brio::FdcanFilterType::classic,
  *                            .action = brio::FdcanFilterAction::store_fifo0,
  *                            .id1 = 0x123, .id2 = 0x7FF});
  *   Can::start();                            // INIT cleared, on the bus
  *
- * NO TASK IS BUILT HERE. A CAN bus AO, a frame vocabulary shared with
- * another architecture's controller and the policy that goes with them
- * are a util design question, and this stratum must not open it with one
- * implementation in hand: `FdcanFrame` below is deliberately
- * TARGET-LOCAL and says so: a task is born with its first user.
+ * No task is built here. A CAN bus active object (an object the kernel
+ * serves one event at a time, each handler run to completion from the
+ * main loop), a frame vocabulary shared with another architecture's
+ * controller and the policy that goes with them are a util design
+ * question, and this stratum must not open it with one implementation
+ * in hand: `FdcanFrame` below is deliberately target-local and says so;
+ * a task is born with its first user.
  *
- * SEVEN FACTS THAT SHAPE EVERYTHING BELOW.
+ * Who calls what. Configuration is setup's, in main(): `enter()`,
+ * `start()` and `stop()` go through `init_mode()`, which waits, bounded
+ * (`sync_spins` reads of CCCR), for the INIT bit to cross the clock
+ * domain and reports false when it does not; every other verb returns
+ * at once. Frames move by copy: `tx_put()` writes the caller's
+ * FdcanFrame into the message RAM and the caller's storage is free when
+ * it returns; `rx_read()` copies an element out into the caller's
+ * frame and acknowledges it. The registers are plain APB reads and
+ * writes with no read-modify-write hazard between a handler and the
+ * loop except in CCCR, IE, ILS and the two Tx interrupt-enable
+ * registers, which are read-modify-written here: configure in setup,
+ * and treat IR (rc_w1) and the acknowledge registers as the only
+ * registers a handler touches. The two interrupt bodies, `isr0()` and
+ * `isr1()`, are the vectors' - shared with TIM16 and TIM17 and with the
+ * other module - and each clears exactly the flags it returns; what to
+ * do with a served flag is the program's handler's. Nothing in this
+ * file masks interrupts. Five registers destroy what they report when
+ * read - PSR sets LEC and DLEC to 7 and clears RESI/RBRS/REDL/PXE, ECR
+ * clears CEL - so `status()` and `error_counters()` read each of them
+ * exactly once per call and hand back the whole decoded picture.
  *
- * 1. THE CHAPTER IS ABSENT FROM MOST OF THE FAMILY. Table 1 gives FDCAN1
+ * Seven facts shape everything below.
+ *
+ * 1. The chapter is absent from most of the family. Table 1 gives FDCAN1
  *    and FDCAN2 to the G0B1/G0C1 alone; the G071 and G031 headers
  *    declare no base, no struct and no interrupt enumerator. So the
- *    REGISTER-FACING half of this file is compiled only where the header
+ *    register-facing half of this file is compiled only where the header
  *    declares the block, and `Fdcan<n>` simply does not exist on a part
- *    without one. The pure ARITHMETIC -
- *    the bit-timing chooser, the DLC coding, the element codecs - is
- *    outside that gate and compiles everywhere, because it is a property
- *    of the CAN protocol and not of a peripheral.
+ *    without one. The pure arithmetic - the bit-timing chooser, the DLC
+ *    coding, the element codecs - is outside that gate and compiles
+ *    everywhere, because it is a property of the CAN protocol and not of
+ *    a peripheral.
  *
- * 2. ONE CLOCK, ONE RESET, ONE DIVIDER FOR THE WHOLE SUBSYSTEM. Figure
+ * 2. One clock, one reset, one divider for the whole subsystem. Figure
  *    392 draws the two modules inside one block: RCC_APBENR1.FDCANEN
- *    clocks both, RCC_APBRSTR1.FDCANRST RESETS BOTH (so `reset()` asked
+ *    clocks both, RCC_APBRSTR1.FDCANRST resets both (so `reset()` asked
  *    for through FDCAN2 takes FDCAN1's registers down with it - measured,
  *    and said here rather than discovered), and the one CKDIV register
- *    lives at the CONFIGURATION block's address, is FDCAN1's by
+ *    lives at the configuration block's address, is FDCAN1's by
  *    36.4.37's own note, and divides the kernel clock for both
  *    instances. The kernel clock itself is chosen in RCC_CCIPR2 - a
- *    DIFFERENT register from the CCIPR every other multiplexer of this
+ *    different register from the CCIPR every other multiplexer of this
  *    stratum uses, which is why clock.hpp has a second verb for it.
  *
- * 3. INIT AND CCE ARE THE WHOLE CONFIGURATION GATE (36.3.4). A
+ * 3. INIT and CCE are the whole configuration gate (36.3.4). A
  *    protected register is writable only with CCCR.INIT and CCCR.CCE
- *    both set, so every configuring verb here is a REFUSAL outside that
+ *    both set, so every configuring verb here is a refusal outside that
  *    state - false, and nothing written - the way usart.hpp's UE-
  *    protected verbs are. Three corollaries the chapter states and this
  *    file enforces: CCE can only be set while INIT is set and is cleared
- *    by hardware when INIT is cleared; setting CCE RESETS eight status
+ *    by hardware when INIT is cleared; setting CCE resets eight status
  *    registers and holds both handlers idle; and TXBAR/TXBCR are
- *    writable only with CCE CLEAR, which is why requesting a
+ *    writable only with CCE clear, which is why requesting a
  *    transmission is not a configuring verb. INIT itself crosses a clock
  *    domain: 36.4.6's note says to read it back before writing it again,
  *    so `init_mode()` waits, bounded, and reports.
  *
- * 4. THE MESSAGE RAM IS A FIXED MAP AND ITS CONTENT AT RESET IS
- *    UNDEFINED. Figure 399: 212 words per instance - 28 standard filter
+ * 4. The message RAM is a fixed map and its content at reset is
+ *    undefined. Figure 399: 212 words per instance - 28 standard filter
  *    words, 8 extended filter elements of two words, two Rx FIFOs of
  *    three 18-word elements, a three-element Tx event FIFO of two words
  *    and three 18-word Tx buffers - with FDCAN2's map starting where
@@ -80,43 +112,33 @@
  *    what makes 36.3.7's warning real: reading an element out of turn is
  *    legal, acknowledging it is not.
  *
- * 5. TEST MODE IS THE ONLY BENCH THIS BOARD HAS. With no transceiver on
- *    the desk the loop-back modes are the experiment: EXTERNAL loop-back
+ * 5. Test mode is the only bench this board has. With no transceiver on
+ *    the desk the loop-back modes are the experiment: external loop-back
  *    (TEST.LBCK alone) feeds the transmitter back to the receiver
- *    INTERNALLY, ignores acknowledge errors and STILL DRIVES THE TX PAD -
- *    so a frame is countable on a pin - while INTERNAL loop-back
+ *    internally, ignores acknowledge errors and still drives the TX pad -
+ *    so a frame is countable on a pin - while internal loop-back
  *    (LBCK + CCCR.MON) disconnects the RX pin and holds TX recessive.
- *    TEST.TX = 01 puts the SAMPLE POINT on the TX pad, which turns a
+ *    TEST.TX = 01 puts the sample point on the TX pad, which turns a
  *    GPIO edge counter into a bit-rate meter. Writing FDCAN_TEST at all
  *    needs CCCR.TEST, and clearing CCCR.TEST returns the whole register
  *    to its reset value (36.4.4).
  *
- * 6. THE INTERRUPT LINE SELECT IS SEVEN GROUPS AND NOT THIRTY FLAGS.
- *    On this part FDCAN_ILS carries seven bits, each naming a GROUP of
+ * 6. The interrupt line select is seven groups and not thirty flags.
+ *    On this part FDCAN_ILS carries seven bits, each naming a group of
  *    IR flags (36.4.17) - the classic M_CAN's per-flag ILS is not what
  *    this silicon has - so `interrupt_line()` speaks groups and
  *    `fdcan_group_of()` says which group an IR flag belongs to. Both
- *    lines land on a SHARED VECTOR: table 61 puts fdcan1_intr0_it and
+ *    lines land on a shared vector: table 61 puts fdcan1_intr0_it and
  *    fdcan2_intr0_it on TIM16's line and both intr1_it on TIM17's, so
- *    ONE handler serves two peripherals and two instances. The ISR
- *    BODIES therefore obey the stratum's shared-vector contract - each
- *    returns the mask IT served and clears exactly that - and an app's
+ *    one handler serves two peripherals and two instances. The ISR
+ *    bodies therefore obey the stratum's shared-vector contract - each
+ *    returns the mask it served and clears exactly that - and an app's
  *    handler calls every body that can be on the line.
  *
- * 7. A REFUSAL IS ALWAYS A `false` WITH NOTHING WRITTEN, and every
+ * 7. A refusal is always a `false` with nothing written, and every
  *    configuring verb has a compile-time twin whose static_assert names
  *    the rule that was broken. `fdcan_config_valid()` is the one place
  *    the chapter's configuration rules are written down.
- *
- * CONCURRENCY. The registers are plain APB reads and writes with no
- * read-modify-write hazard between a handler and the loop EXCEPT in
- * CCCR, IE, ILS and the two Tx interrupt-enable registers, which are
- * read-modify-written here; configure in setup, and treat IR (rc_w1) and
- * the acknowledge registers as the only registers a handler touches.
- * FIVE REGISTERS DESTROY WHAT THEY REPORT WHEN READ - PSR sets LEC and
- * DLEC to 7 and clears RESI/RBRS/REDL/PXE, ECR clears CEL - so
- * `status()` and `error_counters()` read each of them EXACTLY ONCE per
- * call and hand back the whole decoded picture.
  */
 
 #pragma once
@@ -565,20 +587,20 @@ constexpr std::optional<FdcanBitTiming> fdcan_data_timing_for(
 /**
  * One CAN frame as this driver speaks it.
  *
- * THE FD SUPERSET, THIS STRATUM'S. The classic frame every controller
+ * The FD superset, this stratum's. The classic frame every controller
  * shares is util/can.hpp's `CanFrame` (docs/design/can.md); this one is
  * what the M_CAN adds to it - sixty-four bytes, the FD flags, the
  * marker, the non-matching flag - and it stays here until a second FD
  * controller exists to write the shared FD frame against.
  *
- * `id` IS THE NATURAL IDENTIFIER, right aligned: 0..0x7FF for a standard
+ * `id` is the natural identifier, right aligned: 0..0x7FF for a standard
  * frame and 0..0x1FFF_FFFF for an extended one. The element's own ID
  * field stores a standard identifier in ID[28:18] (table 215) and the
  * codecs below do that shift, because the filters speak the natural
  * 11-bit number (SFID1[10:0]) and a caller made to shift for one and not
  * the other would get it wrong.
  *
- * `length` IS BYTES AND NOT A DLC. The DLC is the wire's coding of it
+ * `length` is bytes and not a DLC. The DLC is the wire's coding of it
  * and is computed on the way out; a length no DLC codes is refused.
  */
 struct FdcanFrame {
@@ -778,16 +800,16 @@ constexpr uint32_t fdcan_extended_filter_word1(const FdcanExtendedFilter& f) {
  * Everything `Fdcan<n>::enter()` writes between setting INIT + CCE and
  * clearing them again.
  *
- * ASM IS ITS OWN BIT, so `restricted` is its own flag rather than a
+ * ASM is its own bit, so `restricted` is its own flag rather than a
  * value of `mode`: the silicon can be told to hold back its dominant
- * bits on top of normal or bus-monitoring operation, and it ENTERS the
+ * bits on top of normal or bus-monitoring operation, and it enters the
  * mode by itself when the Tx handler cannot read the message RAM in
  * time (36.3.4). `FdcanMode::restricted` is the ordinary way to ask for
  * it alone; the flag is the way to ask for it on top of something else,
  * and 36.3.4's note - "restricted operation mode must not be combined
  * with the loop-back mode" - is what `fdcan_config_valid()` refuses.
  *
- * THE CLOCK DIVIDER IS NOT HERE. CKDIV is the SUBSYSTEM's one register
+ * The clock divider is not here. CKDIV is the subsystem's one register
  * (fact 2), and 36.4.37's note says it "must be modified before
  * configuring the other FDCAN instances" - a program-wide act with a
  * verb of its own, not a per-instance configuration field.
@@ -883,8 +905,9 @@ constexpr bool fdcan_extended_filter_valid(const FdcanExtendedFilter& f) {
 // =============================================================================
 
 /**
- * One pad handed to an FDCAN signal. THE AF IS THE DATASHEET'S: every
- * FDCAN pad of this part is AF3 (DS13560 tables 14, 15, 17 and 18) -
+ * One pad handed to an FDCAN signal, from setup. The AF is the
+ * datasheet's: every FDCAN pad of this part is AF3 (DS13560 tables 14,
+ * 15, 17 and 18) -
  *
  *   FDCAN1_RX  PA11  PB8   PC4  PD0   PD12
  *   FDCAN1_TX  PA12  PB9   PC5  PD1   PD13
@@ -894,7 +917,7 @@ constexpr bool fdcan_extended_filter_valid(const FdcanExtendedFilter& f) {
  * - and no symbol of the device header can check the claim, which is
  * fact 5 of pin.hpp's own header. The bench is the check.
  *
- * THE RX PAD'S PULL IS THE BENCH'S ONLY BUS. A pad under an INPUT
+ * The RX pad's pull is the bench's only bus. A pad under an input
  * alternate function still follows its own PUPDR (measured), so
  * `claim_rx(PinPull::up)` gives the receiver a
  * recessive line and `PinPull::down` a stuck-dominant one - which is how
@@ -1541,8 +1564,9 @@ struct Fdcan {
         return true;
     }
 
-    /// The ordinary read: the element at the GET index, acknowledged.
-    /// False when the FIFO is empty.
+    /// The ordinary read: the element at the get index, copied into
+    /// `out` and acknowledged. False when the FIFO is empty, `out`
+    /// untouched. Does not wait.
     static bool rx_read(uint8_t fifo, FdcanFrame& out) {
         if (fifo > 1u || rx_available(fifo) == 0u) {
             return false;
@@ -1639,7 +1663,10 @@ struct Fdcan {
 
     /// The ordinary transmit: write at the put index and request it.
     /// Empty when the FIFO/queue is full, when the length is not one a
-    /// DLC codes, or when CCE still stands.
+    /// DLC codes, or when CCE still stands. The frame is copied into the
+    /// message RAM, so the caller's storage is free when this returns;
+    /// the buffer number comes back so a Tx event or a cancellation can
+    /// name it. Does not wait.
     static std::optional<uint8_t> tx_put(const FdcanFrame& f) {
         if (tx_full() || configuration()) {
             return std::nullopt;
@@ -1867,11 +1894,13 @@ struct Fdcan {
     }
 
     /**
-     * THE ISR BODY, one per line. The vector is SHARED three ways -
-     * TIM16 (or TIM17), the other FDCAN instance, and this one - so the
-     * body serves only the flags that are ENABLED, on ITS line, and
-     * clears exactly what it returns. An app's handler calls every body
-     * that can be on the line and each answers for its own.
+     * The ISR body, one per line, called from the line's vector. The
+     * vector is shared three ways - TIM16 (or TIM17), the other FDCAN
+     * instance, and this one - so the body serves only the flags that
+     * are enabled, on its line, and clears exactly what it returns (0
+     * means "not mine"). An app's handler calls every body that can be
+     * on the line and each answers for its own; what to do with a served
+     * flag - read a FIFO, note an error - is that handler's.
      */
     [[gnu::always_inline]] static uint32_t isr(uint8_t line) {
         FDCAN_GlobalTypeDef& r = regs();
@@ -1889,8 +1918,11 @@ struct Fdcan {
     /**
      * Clock the subsystem, reset it, zero the message RAM, take the
      * module into INIT + CCE and write every protected register of the
-     * configuration. The module is left IN INIT: filters and Tx buffers
-     * are written next, and `start()` puts it on the bus.
+     * configuration. The module is left in INIT: filters and Tx buffers
+     * are written next, and `start()` puts it on the bus. Setup's verb,
+     * in main(); it waits, bounded, for the INIT handshake
+     * (`init_mode()`) and for nothing else, and `c` is read once and
+     * may go when it returns.
      *
      * NOT `reset()`: this verb does NOT pulse the subsystem reset,
      * because that would take the OTHER instance down with it (fact 2)

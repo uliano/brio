@@ -1,10 +1,14 @@
 /*
  * lptim.hpp
  *
- * The STM32G0's low-power timers (RM0444 ch. 26) in the two strata every
- * brio target uses (docs/design/overview.md, "Target strata"):
+ * The STM32G0's low-power timers (RM0444 ch. 26): what a program uses
+ * for a timer that keeps working while the chip sleeps - a periodic wake
+ * from Stop, a PWM off the 32.768 kHz crystal, a pulse counter that needs
+ * no oscillator at all, a timeout a hardware trigger keeps feeding. The
+ * header has the two strata every brio target uses
+ * (docs/design/overview.md, "Target strata"):
  *
- *  Lptim<n>        the RESOURCE - one LPTIMx block: the kernel-clock
+ *  Lptim<n>        the resource - one LPTIMx block: the kernel-clock
  *                  multiplexer, the prescaler, the counter with its two
  *                  reset mechanisms, the compare and auto-reload with
  *                  their write handshake, the trigger multiplexer, the
@@ -12,16 +16,48 @@
  *                  the flags, the ISR body and the wake line.
  *
  *  LptimPad<sel>   a pad handed to IN1, IN2, ETR or OUT (the AF number
- *                  is the DATASHEET's - the tim.hpp rule again).
+ *                  is the datasheet's - the tim.hpp rule again).
  *
- *  TASKS           LptimPwm (util/pwm_channel.hpp's PwmChannel, its
- *                  FOURTH implementation), LptimPeriodicTick,
- *                  LptimCounter, LptimPulseCounter, LptimTimeout,
- *                  LptimEncoder.
+ *  The tasks       the shapes a program uses over the resource: LptimPwm
+ *                  (util/pwm_channel.hpp's PwmChannel, its fourth
+ *                  implementation), LptimPeriodicTick, LptimCounter,
+ *                  LptimPulseCounter, LptimTimeout, LptimEncoder.
  *
- * SIX FACTS THAT SHAPE THIS FILE.
+ * The smallest use, a periodic interrupt that survives a Stop, on the
+ * crystal:
  *
- * 1. NOTHING HERE EVER CLEARS ENABLE. ES0548 2.8.1 (revision Z): if the
+ *     using Beat = brio::LptimPeriodicTick<brio::Lptim<1>>;
+ *
+ *     brio::Lptim<1>::init();
+ *     brio::Lptim<1>::kernel_clock(brio::LptimClock::lse);
+ *     Beat::setup(brio::LptimPrescaler::div32, 1023);   // 1 Hz off 32768/32
+ *     brio::Lptim<1>::wake_line(true);                  // EXTI 29, or no wake
+ *     brio::Nvic::enable(brio::Lptim<1>::irq());
+ *
+ *     extern "C" void TIM6_DAC_LPTIM1_IRQHandler() { (void)brio::Lptim<1>::isr(); }
+ *
+ * Who calls what. Bringing a timer up - init(), kernel_clock(),
+ * configure(), enable(), the compare and auto-reload stores, the start
+ * verbs, and every task's setup() - is setup's, in main(), or an active
+ * object's (an object the kernel serves one event at a time, each
+ * handler run to completion from the main loop); none of it is an
+ * interrupt handler's. The verbs that wait are named for it and bounded:
+ * wait_cmp_ok() and wait_arr_ok() poll for a write to land
+ * (write_spins), count() retries a double read (read_spins), and the
+ * tasks' setup() verbs and LptimPwm::duty() spend those waits for the
+ * caller; set_cmp() and set_arr() store and return. Nothing in this
+ * file masks interrupts. isr() is the body the program binds to the
+ * instance's vector (a task's own isr() where a task is used:
+ * LptimCounter's carries the lap count, the others forward), and it is
+ * the only place a flag is cleared while an interrupt is
+ * enabled: clear_flags() refuses from thread mode then, and every task
+ * whose flag an interrupt serves leaves the clear to the handler.
+ * disable() and reset() are one RCC reset pulse and forget the
+ * configuration, so a task stopped is a task set up again from scratch.
+ *
+ * Six facts shape this file.
+ *
+ * 1. Nothing here ever clears ENABLE. ES0548 2.8.1 (revision Z): if the
  *    application clears CR.ENABLE "within a small time window around one
  *    LPTIM interrupt occurrence", the wake-up signal that leaves this
  *    block can freeze in its active state - after which the device
@@ -29,91 +65,91 @@
  *    routine for ever. The erratum's own workaround is not a sequence
  *    but a substitution: "do not clear its ENABLE bit... instead, reset
  *    the whole LPTIMx peripheral via the RCC controller". So `disable()`
- *    IS an RCC reset pulse, `reset()` is the same pulse spelled for the
+ *    is an RCC reset pulse, `reset()` is the same pulse spelled for the
  *    init path, and there is no verb in this file that stores a zero
  *    into CR.ENABLE. The cost is that a disable also forgets the
  *    configuration - which is why every task's setup() configures from
  *    scratch.
  *
- * 2. THE FLAG CLEAR IS ORDERED, AND ONLY THE HANDLER MAY DO IT. ES0548
+ * 2. The flag clear is ordered, and only the handler may do it. ES0548
  *    2.8.2 (revision Z): with at least one interrupt enabled in
- *    LPTIM_IER, clearing a flag whose interrupt is DISABLED at the same
+ *    LPTIM_IER, clearing a flag whose interrupt is disabled at the same
  *    instant as a new event is detected leaves the interrupt signal
  *    "permanently stuck high". The workaround has three parts and all
  *    three are code here:
  *      - clear a flag only when its interrupt is enabled, or
- *      - clear the disabled-interrupt flags FIRST, in the same routine;
+ *      - clear the disabled-interrupt flags first, in the same routine;
  *      - and never clear outside the interrupt routine at all.
- *    So `clear_flags()` REFUSES (false, nothing written) when IER is
+ *    So `clear_flags()` refuses (false, nothing written) when IER is
  *    nonzero and the core is not in handler mode - `__get_IPSR() != 0`,
  *    which is one instruction - and `isr()` does the two-step clear
- *    itself: the pending flags whose enable is CLEAR first, then those
- *    whose enable is SET. With IER == 0 the erratum's precondition is
+ *    itself: the pending flags whose enable is clear first, then those
+ *    whose enable is set. With IER == 0 the erratum's precondition is
  *    absent and `clear_flags()` is unrestricted, which is what makes the
  *    polling tasks (LptimPwm's compare handshake) legal.
  *    `clear_flags_raw()` is the unguarded store, named for what it is:
  *    the ISR body's own verb and the bench's staging one.
  *
- * 3. THE TWO SIDES OF THE BLOCK HAVE OPPOSITE ENABLE RULES, and getting
+ * 3. The two sides of the block have opposite enable rules, and getting
  *    them backwards is the chapter's easiest mistake. CFGR, CFGR2 and
- *    IER may be written ONLY WHILE DISABLED (26.7.3, 26.7.4, 26.7.9);
- *    CMP and ARR may be written ONLY WHILE ENABLED (26.7.6, 26.7.7);
+ *    IER may be written only while disabled (26.7.3, 26.7.4, 26.7.9);
+ *    CMP and ARR may be written only while enabled (26.7.6, 26.7.7);
  *    CNTSTRT/SNGSTRT/COUNTRST/RSTARE are discarded while disabled
  *    (26.4.7, 26.7.5). Every verb here checks its own side and returns
  *    false rather than storing into a register the silicon will ignore.
  *
- * 4. A WRITE TO CMP OR ARR IS NOT DONE WHEN THE STORE RETURNS. The APB
+ * 4. A write to CMP or ARR is not done when the store returns. The APB
  *    interface and the kernel logic run on different clocks, so 26.4.11
  *    forbids a second write "before respectively the ARROK flag or the
  *    CMPOK flag be set" and promises "unpredictable results" otherwise.
- *    This driver therefore separates the STORE (set_cmp/set_arr, which
- *    neither clear nor wait) from the OBSERVATION (cmp_ok/arr_ok reads,
+ *    This driver therefore separates the store (set_cmp/set_arr, which
+ *    neither clear nor wait) from the observation (cmp_ok/arr_ok reads,
  *    wait_cmp_ok/wait_arr_ok bounded polls). The handshake is the
  *    caller's to spend, and every task in this file spends it.
  *
- * 5. A COUNTER READ IS TWO READS. 26.7.8: with an asynchronous kernel
+ * 5. A counter read is two reads. 26.7.8: with an asynchronous kernel
  *    clock a single read of CNT "may return unreliable values" and two
  *    consecutive reads must agree. `count()` does that and returns
  *    std::optional - nothing when they never agreed inside the bound.
  *    `count_raw()` is the single read, which exists because 26.4.14 says
- *    the double read is IMPOSSIBLE with RSTARE set (the first read
+ *    the double read is impossible with RSTARE set (the first read
  *    resets the counter), and the two reset mechanisms are exclusive by
  *    the same paragraph's warning.
  *
- * 6. TWO INSTANCES, ONE LPTIM_TypeDef, AND A TABLE. Table 135 gives
+ * 6. Two instances, one LPTIM_TypeDef, and a table. Table 135 gives
  *    encoder mode to LPTIM1 alone, and figure 271's footnote gives
  *    LPTIM2 only one input channel - but the device header declares
  *    CFGR.ENC, ISR.UP/DOWN and CFGR2.IN2SEL once, for the struct both
  *    share, so `LPTIM2->CFGR |= LPTIM_CFGR_ENC` compiles and writes a
- *    Reserved bit. What an instance IS therefore comes from
- *    stm32g0/device_tables.hpp with its citation, every verb that names
- *    a missing feature refuses, and
- *    LptimEncoder static_asserts.
+ *    Reserved bit. What an instance is therefore comes from the reserve
+ *    (stm32g0/device_tables.hpp, the table of what each part has, read
+ *    off the device header) with its citation, every verb that names a
+ *    missing feature refuses, and LptimEncoder static_asserts.
  *
- * THE KERNEL CLOCK. RCC_CCIPR.LPTIMnSEL (5.4.21) offers PCLK, LSI, HSI16
- * and LSE to BOTH instances on every part of this pack. Only LSI and LSE
+ * The kernel clock. RCC_CCIPR.LPTIMnSEL (5.4.21) offers PCLK, LSI, HSI16
+ * and LSE to both instances on every part of this pack. Only LSI and LSE
  * keep counting through Stop 0/1 with no further ceremony (26.5, table
- * 145); HSI16 is a peripheral clock REQUEST (5.3 lists the LPTIMs among
+ * 145); HSI16 is a peripheral clock request (5.3 lists the LPTIMs among
  * the blocks that can ask for HSI16 in Stop), and a request is exactly
  * what ES0548 2.2.4 breaks when RCC_CR.HSIDIV is nonzero - so an LPTIM
  * on HSI16 as a wake source on a divided HSI is a configuration this
  * file names and does not recommend. PCLK stops with the VCORE domain
  * and is a Sleep-mode-only clock.
  *
- * THE WAKE PATH. Table 65 gives LPTIM1 EXTI line 29 and LPTIM2 line 30,
- * both DIRECT: no trigger selection, no pending bit of the EXTI's own -
- * the peripheral's own ISR flag IS the pending state - and the line's
+ * The wake path. Table 65 gives LPTIM1 EXTI line 29 and LPTIM2 line 30,
+ * both direct: no trigger selection, no pending bit of the EXTI's own -
+ * the peripheral's own ISR flag is the pending state - and the line's
  * IMR bit must be set for the interrupt to bring the core out of Stop.
  * `wake_line(true)` is that one bit.
  *
- * THE VECTOR. On the G0B1/G0C1 and the G071 class LPTIM1 shares
+ * The vector. On the G0B1/G0C1 and the G071 class LPTIM1 shares
  * TIM6_DAC_LPTIM1_IRQn with TIM6 and the DAC and LPTIM2 shares
  * TIM7_LPTIM2_IRQn with TIM7; on the G031 class each has a line of its
  * own. `Lptim<n>::irq()` reads that off the reserve; `isr()` returns the
  * mask it served, so a shared handler can tell "not mine" (0) from
  * "mine" - the shared-vector contract of this stratum.
  *
- * THE PAD MAP IS THE DATASHEET'S AND NOTHING CHECKS IT (DS13560 tables
+ * The pad map is the datasheet's and nothing checks it (DS13560 tables
  * 13..24), exactly as for the timers: `LptimPad<sel>` is the caller's
  * claim and the bench is the only check.
  */
@@ -491,8 +527,9 @@ struct LptimPad {
  *   Tick::start_continuous();
  *
  * Every verb that names a feature this instance does not have returns
- * false and writes NOTHING (fact 6 of the file header); every verb on
- * the wrong side of the enable rule does the same (fact 3).
+ * false and writes nothing (fact 6 of the file header); every verb on
+ * the wrong side of the enable rule does the same (fact 3). The verbs
+ * are setup's or an active object's; isr() is the vector's.
  */
 template <uint8_t n>
 class Lptim {
@@ -564,9 +601,11 @@ public:
 
     /**
      * Pulse RCC_APBRSTR1: every register back to the value table 147
-     * prints, and THE ONLY WAY THIS DRIVER TURNS AN LPTIM OFF (fact 1 of
+     * prints, and the only way this driver turns an LPTIM off (fact 1 of
      * the file header, ES0548 2.8.1). The bus clock and the CCIPR
-     * selection are not touched - neither lives in this block.
+     * selection are not touched - neither lives in this block. A pending
+     * interrupt of the block is gone with its flags; the NVIC line is
+     * left as it was.
      */
     static void reset() { Rcc::apb1_reset(lptim_reset_mask(n)); }
 
@@ -598,18 +637,19 @@ public:
     }
 
     /**
-     * CFGR, CFGR2 and IER in one store each, REFUSED while the block is
-     * enabled (fact 3) and for a configuration `config_valid()` rejects.
+     * CFGR, CFGR2 and IER in one store each, refused - nothing written -
+     * while the block is enabled (fact 3) and for a configuration
+     * `config_valid()` rejects. Setup's verb; it does not wait.
      *
-     * CFGR2's IN2SEL half is written only on an instance that HAS a
+     * CFGR2's IN2SEL half is written only on an instance that has a
      * second input; on the other it is left at zero, because 26.7.9's
      * note makes those bits Reserved there.
      *
-     * ONE REFUSAL HERE HAS NO COMPILE-TIME TWIN, and cannot have one:
+     * One refusal here has no compile-time twin, and cannot have one:
      * 26.4.5 says "before activating the digital filters, an internal
      * clock source should first be provided to the LPTIM", and whether
-     * the selected kernel clock is RUNNING is an RCC fact, not a
-     * configuration one. So a nonzero CKFLT or TRGFLT is refused HERE,
+     * the selected kernel clock is running is an RCC fact, not a
+     * configuration one. So a nonzero CKFLT or TRGFLT is refused here,
      * where kernel_clock_running() can be asked, and `lptim_config_valid
      * ()` - which knows nothing of the RCC - lets it through.
      */
@@ -850,11 +890,11 @@ public:
     static uint32_t status() { return regs().ISR; }
 
     /**
-     * Clear flags - AND THIS IS THE ERRATUM AS CODE (fact 2, ES0548
+     * Clear flags - and this is the erratum as code (fact 2, ES0548
      * 2.8.2).
      *
-     * With ANY interrupt enabled in IER, a flag may be cleared only
-     * inside the interrupt routine, so this verb REFUSES (false, nothing
+     * With any interrupt enabled in IER, a flag may be cleared only
+     * inside the interrupt routine, so this verb refuses (false, nothing
      * written) when IER is nonzero and the core is in thread mode. The
      * test is `__get_IPSR() != 0`, one instruction.
      *
@@ -881,12 +921,13 @@ public:
 
     /**
      * The ISR body an application binds to this instance's vector.
-     * Returns the mask it SERVED - 0 when nothing of this block's was
+     * Returns the mask it served - 0 when nothing of this block's was
      * pending, which is how a handler on a shared vector answers only
-     * for itself (the file header's shared-vector contract).
+     * for itself (the file header's shared-vector contract). What to do
+     * with a served flag is the handler's; the clear is done here.
      *
-     * The clear is ES0548 2.8.2's ORDER, not a single store: the pending
-     * flags whose interrupt is DISABLED go first, then those whose
+     * The clear is ES0548 2.8.2's order, not a single store: the pending
+     * flags whose interrupt is disabled go first, then those whose
      * interrupt is enabled. Only the second group is returned, because
      * only that group is what the interrupt was for; the first is swept
      * because the erratum says it must be swept here and nowhere else.
@@ -959,7 +1000,7 @@ public:
  *   Lamp::setup(brio::LptimPrescaler::div1);
  *   Lamp::duty(250);            // a quarter
  *
- * THE ARITHMETIC, MEASURED because 26.4.10 describes the waveform in
+ * The arithmetic, measured because 26.4.10 describes the waveform in
  * words and prints no formula:
  *
  *   period    = ARR + 1 counter ticks (the counter runs 0..ARR);
@@ -972,7 +1013,7 @@ public:
  *               a FLAT LOW and not the one tick the formula would give.
  *
  * So this task maps duty v out of `max` = ARR onto CMP = max - v, and
- * BOTH ENDPOINTS COME OUT EXACT BY TWO DIFFERENT ROUTES: v = max puts
+ * both endpoints come out exact by two different routes: v = max puts
  * CMP at 0 and the output high for the whole period (1000 per mille
  * measured), while v = 0 puts CMP on ARR and lands on the forbidden
  * pair, whose flat low IS zero duty (0 per mille measured). In between
@@ -981,12 +1022,12 @@ public:
  * pad reads 251, 502 and 752, the last per mille being the sampler's
  * own (the bench counts pad levels; it does not count ticks).
  *
- * PRELOAD IS SET. A PwmChannel::duty() that can cut the pulse being
+ * Preload is set. A PwmChannel::duty() that can cut the pulse being
  * produced is not one a generic actuator can use, so 26.4.11's
  * end-of-period update is on and a duty change lands at the
  * next period boundary.
  *
- * NO INTERRUPT IS ENABLED, and that is load-bearing rather than
+ * No interrupt is enabled, and that is load-bearing rather than
  * economical: with IER == 0, ES0548 2.8.2's precondition is absent and
  * duty()'s CMPOK handshake - wait for the previous write, clear the
  * flag, store the next - is legal from thread mode. A caller that arms
@@ -1033,8 +1074,10 @@ struct LptimPwm {
     }
 
     /// The duty, in counts out of `max`. Spends 26.4.11's handshake: the
-    /// PREVIOUS write must have completed before this one is stored, or
-    /// the chapter promises "unpredictable results".
+    /// previous write must have completed before this one is stored, or
+    /// the chapter promises "unpredictable results" - so this waits,
+    /// bounded (write_spins), when the previous duty is still landing,
+    /// and is a setup's or an active object's verb, not a handler's.
     static void duty(uint16_t v) {
         (void)L::wait_cmp_ok();
         (void)L::clear_flags(LptimFlag::cmpok);
@@ -1052,20 +1095,22 @@ static_assert(PwmChannel<LptimPwm<Lptim<1>, 1000>>,
 
 /**
  * LptimPeriodicTick<L>: an ARRM interrupt every `period + 1` counter
- * ticks - and, on LSI or LSE, THE ONE PERIODIC INTERRUPT OF THIS FAMILY
- * THAT SURVIVES A STOP without owning the RTC (26.5, table 145).
+ * ticks - and, on LSI or LSE, the one periodic interrupt of this family
+ * that survives a Stop without owning the RTC (26.5, table 145).
  *
  *   using Beat = brio::LptimPeriodicTick<brio::Lptim<1>>;
  *   brio::Lptim<1>::init();
  *   brio::Lptim<1>::kernel_clock(brio::LptimClock::lse);
  *   Beat::setup(brio::LptimPrescaler::div32, 1023);   // 1 Hz off a crystal
  *
- * `setup()` is a SETUP-TIME verb: it writes ARR before any interrupt is
- * armed... it cannot be, since IER is disabled-only and therefore
- * written by the same configure() - so the ARROK handshake here is the
- * FIRST one after a reset, where the flag starts clear and nothing has
- * to be cleared. A later period change is `set_period()`, which says in
- * its own comment what it can and cannot observe.
+ * `setup()` is a setup-time verb, and it waits, bounded, for its one
+ * ARR write: it writes ARR before any interrupt is armed... it cannot
+ * be, since IER is disabled-only and therefore written by the same
+ * configure() - so the ARROK handshake here is the first one after a
+ * reset, where the flag starts clear and nothing has to be cleared. A
+ * later period change is `set_period()`, which says in its own comment
+ * what it can and cannot observe. The vector is bound to `L::isr()`,
+ * which clears the flag; this task adds no body of its own.
  */
 template <class L>
 struct LptimPeriodicTick {
@@ -1179,8 +1224,8 @@ private:
 };
 
 /**
- * LptimPulseCounter<L>: 26.1's "pulse counter" - the counter clocked BY
- * ITS OWN INPUT, with no oscillator running at all.
+ * LptimPulseCounter<L>: 26.1's "pulse counter" - the counter clocked by
+ * its own input, with no oscillator running at all.
  *
  * Two arrangements, and they are not the same thing:
  *
@@ -1259,10 +1304,10 @@ private:
 /**
  * LptimTimeout<L>: 26.4.9's timeout function - "the first trigger event
  * will start the timer, any successive trigger event will reset the
- * counter and the timer will restart", so a CMPM means NO TRIGGER
+ * counter and the timer will restart", so a CMPM means no trigger
  * arrived within the compare value.
  *
- * THE FEED IS THE TRIGGER, AND ONLY THE TRIGGER. A software start
+ * The feed is the trigger, and only the trigger. A software start
  * (TRIGEN = 00) cannot feed a timeout: 26.4.9's mechanism is the trigger
  * multiplexer's, so `setup()` refuses a software trigger edge and the
  * thing that keeps the timeout alive is whatever table 138/139 row the
