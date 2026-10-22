@@ -1,15 +1,28 @@
 /*
  * afio.hpp
  *
- * The alternate-function block of the CH32X035 (RM 8.2.4, 8.3.2): the
- * remap register, the external-interrupt port multiplexer and the debug
- * port's own field - everything in chapter 8 that is not a pad.
+ * Where a peripheral's signals come out, for a program that wants them
+ * on other pads than the reset ones, and for the drivers, whose pin
+ * tables are the columns stated here: the alternate-function block of
+ * the CH32X035 (RM 8.2.4, 8.3.2) - the remap register, the
+ * external-interrupt port multiplexer and the debug port's own field,
+ * everything in chapter 8 that is not a pad.
  *
- * A REMAP IS A COLUMN, NOT A PIN. AFIO_PCFR1 holds one field per
- * peripheral, and the field's value selects a whole COLUMN of the
+ *     brio::Afio::remap<brio::Remap::tim1, 1>();   // TIM1's C2N and C3N on PB0/PB1
+ *
+ * Who calls what: a driver's init() writes its own column; a program
+ * writes a column itself only for a block without a driver, before that
+ * block is used. Every verb opens the block's clock gate and
+ * read-modify-writes one register with no guard of its own: main
+ * context, or masked against an interrupt handler that writes the same
+ * register. Nothing here waits. The one verb that gives up the debug
+ * port is spelled long on purpose (below).
+ *
+ * A remap is a column, not a pin. AFIO_PCFR1 holds one field per
+ * peripheral, and the field's value selects a whole column of the
  * chapter's descriptions: a USART's five signals move together, TIM2's
- * nine do. The FIELDS of every peripheral are named here (Remap), so the
- * register is decoded whole; the COLUMNS - which pad each code puts each
+ * nine do. The fields of every peripheral are named here (Remap), so the
+ * register is decoded whole; the columns - which pad each code puts each
  * signal on - are stated as constexpr data for the USARTs, I2C1, SPI1 and
  * the two advanced-control timers, the blocks with a driver in this
  * stratum, and arrive with their drivers for TIM3 and the PIOC. A driver
@@ -17,7 +30,7 @@
  * pads from the same source that programs the register - the sibling
  * strata's arrangement.
  *
- * A COLUMN'S CODES ARE THE FIELD'S. USART2's field is three bits and its
+ * A column's codes are the field's. USART2's field is three bits and its
  * four upper codes (1xx) are one column; USART4's are two columns, 1x0
  * and 1x1 (8.3.2.1), and so are I2C1's. Every code of every field is a
  * column the manual describes, so a code is refused only when it does
@@ -25,15 +38,15 @@
  * one pad of the column is bonded by this package, which is a
  * disconnection and not a remap.
  *
- * THE DEBUG PORT IS NOT A REMAP. SW_CFG (PCFR1 26:24) hands PC18 and PC19
+ * The debug port is not a remap. SW_CFG (PCFR1 26:24) hands PC18 and PC19
  * back to GPIO, and a program that does that has lost its probe until the
  * next reset - the two-wire port is how the image got there. The field is
- * READ here by default and written only through a verb spelled long
+ * read here by default and written only through a verb spelled long
  * enough that nobody reaches it by accident. Two USART columns land on
  * those pads - USART3's code 1 and USART4's 1x0 for its RX - and the
  * transport refuses them while the port is the probe's (usart.hpp).
  *
- * THE EXTI MULTIPLEXER. AFIO_EXTICR1 and EXTICR2 say which PORT feeds
+ * The EXTI multiplexer. AFIO_EXTICR1 and EXTICR2 say which port feeds
  * each of the twenty-four pin lines, two bits a line, and the codes are
  * 00 port A, 10 port B, 11 port C - 01 reserved (8.3.2.2). The verbs are
  * here because the register is; the EXTI itself has no driver in this
@@ -41,7 +54,7 @@
  *
  * AFIO_CTLR (8.3.2.4) - the USB and USB PD pads' pull-ups, source
  * voltages and comparators, and four pads' input filters - is read here,
- * and one field pair of it is written: the pull-up MODES of PC16 and PC17
+ * and one field pair of it is written: the pull-up modes of PC16 and PC17
  * (UDM_PUE, UDP_PUE), a strength the GPIO configuration then enables or
  * not (8.3.2.4: "only pull-up mode is set here"), which is a pad's
  * business before it is the USB's. The rest belongs to the USB chapters
@@ -297,7 +310,7 @@ constexpr bool afio_remap_has_code(Remap r, uint8_t code) {
     }
 }
 
-/// The codes of a field that are columns of THIS package, one bit a code
+/// The codes of a field that are columns of this package, one bit a code
 /// (every field is three bits or fewer), for the run-time refusal: a load
 /// and a shift where a walk over the column's pads would be code in every
 /// image that remaps.
@@ -347,8 +360,9 @@ struct Afio {
 
     // ---- the remaps --------------------------------------------------------
 
-    /// Select a column. False - and NOTHING WRITTEN - when this part has no
+    /// Select a column. False - and nothing written - when this part has no
     /// such column (afio_remap_has_code, read from its table afio_codes).
+    /// Writing the reset code is still a write.
     static bool remap(Remap r, uint8_t code) {
         if (code >= 8u || ((afio_codes[static_cast<uint8_t>(r)] >> code) & 1u) == 0u) {
             return false;
@@ -388,7 +402,7 @@ struct Afio {
     static bool debug_port_enabled() { return (debug_config() & 0x4u) == 0u; }
 
     /**
-     * SW_CFG = 100: THE DEBUG PORT OFF, PC18 and PC19 plain pads, until the
+     * SW_CFG = 100: the debug port off, PC18 and PC19 plain pads, until the
      * next reset. A program that calls this has lost its probe until the
      * board reboots - and one that calls it early in every boot has lost
      * it for good unless the boot reads a condition first. Spelled long on
@@ -445,9 +459,9 @@ struct Afio {
     static bool usb_pads_taken() { return (control() & afio_ctlr_usb_ioen) != 0u; }
 
     /**
-     * The pull-up MODES of PC17 (UDP_PUE) and PC16 (UDM_PUE), the two
+     * The pull-up modes of PC17 (UDP_PUE) and PC16 (UDM_PUE), the two
      * fields of AFIO_CTLR this stratum writes - every other bit kept. A
-     * mode is a STRENGTH and not an enable: "pull-up enable or pull-down
+     * mode is a strength and not an enable: "pull-up enable or pull-down
      * enable is controlled by the configuration in the GPIO configuration
      * register" (8.3.2.4), so a pad pulls only where its nibble asks for
      * a pulled input, at the strength chosen here. Reset: the weak mode

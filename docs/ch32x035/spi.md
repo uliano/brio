@@ -1,22 +1,86 @@
 # SPI (CH32X035)
 
-The one SPI of RM ch. 16 - host and client, 8- or 16-bit frames, the four
-clock modes, a software or hardware chip select, hardware CRC, the simplex
-arrangements, two DMA requests - and the host engine util/spi_bus.hpp's
-arbiter drives on this silicon as on every other stratum. Documents of
-record: the CH32X035 reference manual V1.8 (16.1 for the features, 16.2.1
-for the pins and the select, 16.2.2 and 16.2.3 for the two roles, 16.2.4
-for the simplex modes, 16.2.5 for the CRC, 16.2.7 for the errors, 16.3 for
-the registers; table 8-4 for the pads, 8.3.2.1 for SPI1_RM; RM 9.2.3 for
-the DMA requests; table 7-1 for the vector), the CH32X035/X033 datasheet
-V1.7 (table 2-1 for the pads, table 3-19 for the timing, table 3-14 for the
-pads' speed), and WCH's EVT library (`ch32x035_spi.c` and the six SPI
-examples) as the vendor's shape. Driver:
+This document is for a programmer who needs an SPI bus: a display, a
+flash chip or a converter driven from an active object (a component of
+a brio program with its own event queue, served one event at a time by
+the kernel), or this chip as a client another host clocks. It covers
+the one SPI of RM ch. 16, host and client, 8- or 16-bit frames, the
+four clock modes, a software or hardware chip select, hardware CRC, the
+simplex arrangements, two DMA requests; and the host engine `SpiHost`,
+which the bus arbiter of util/spi_bus.hpp drives on this silicon as on
+every other stratum: an active object posts a request, the arbiter
+asserts the request's chip select, runs the command and data phases
+and replies with an event when the last frame is out
+([design/spi-bus.md](../design/spi-bus.md)).
+
+The smallest use, a command and 64 frames of pixels to a display:
+
+```cpp
+using Bus = brio::SpiHost<1>;                         // PA5 SCK, PA7 MOSI, PA6 MISO
+using Spi = brio::SpiBus<Bus, P, 4>;                  // the arbiter AO
+using Cs = brio::Pin<'A', 4>;
+
+Bus::init(clock, 8'000'000);                          // a ceiling for the whole bus
+Cs::output(true);
+
+Bus::Request r{};
+r.cs = Cs::ref();
+r.cmd = brio::lend<brio::Lease::reply>(cmd);  r.cmd_len = 1;
+r.tx = brio::lend<brio::Lease::reply>(pixels); r.len = 64;
+r.clock = brio::SpiClock::div8;                       // 6 MHz at 48
+r.mode = brio::SpiMode::mode0;
+r.reply = brio::reply_to<Display, brio::SpiDone>();
+brio::post<Spi>(r);
+
+extern "C" BRIO_CH32_INTERRUPT void spi1_handler() {
+    if (Bus::isr()) { brio::post<Spi>(brio::TransferDone{Bus::status()}); }
+}
+```
+
+`Bus` is the engine over SPI1 on its default column, the one the QFN20
+bonds; `Spi` the arbiter, an active object listed in the program's
+`Tenuto` with four requests of queue; `Cs` a plain pin the request
+carries as its chip select, driven high before anything else so the
+display stays deselected; `init()` takes the clock task's tag
+([clock.md](clock.md)) and a ceiling for the clock, under which every
+request's rate is clamped; the request lends its two buffers
+(`brio::lend`) until the `SpiDone` event reaches `Display`, so `cmd`
+and `pixels` must stay untouched and in scope until then; the `extern
+"C"` function is the instance's interrupt handler, as in C, under the
+crt's name and with `BRIO_CH32_INTERRUPT` in front
+([platform.md](platform.md)), posting the completion to the arbiter.
+What decides correctness even there: the clock task first (the ceiling
+and the chip-select setup time are computed from the rate the clock
+type claims); the vector bound, since a request that is not marked
+`polled` completes on the interrupt; the select pin driven high before
+the first request is posted, the arbiter asserting it low around a
+transaction and leaving it high after; and the mode and the rate the
+device wants, which travel in every request and are checked by nothing
+but the device.
+
+The rest of this page, in order: the documents of record; what the
+silicon does, with the chapter's offer item by item; the types and
+verbs; how to use it, the engines, the placement in SRAM and the client
+included; the bench findings, this part as the desk's SPI instrument
+and the host's cost above the wire among them; what is not covered.
+
+## Documents of record
+
+The CH32X035 reference manual V1.8 (16.1 for the features, 16.2.1 for
+the pins and the select, 16.2.2 and 16.2.3 for the two roles, 16.2.4
+for the simplex modes, 16.2.5 for the CRC, 16.2.7 for the errors, 16.3
+for the registers; table 8-4 for the pads, 8.3.2.1 for SPI1_RM; RM 9.2.3
+for the DMA requests; table 7-1 for the vector), the CH32X035/X033
+datasheet V1.7 (table 2-1 for the pads, table 3-19 for the timing, table
+3-14 for the pads' speed), and WCH's EVT library (`ch32x035_spi.c` and
+the six SPI examples) as the vendor's shape. Driver:
 [brio/ch32x035/spi.hpp](../../brio/ch32x035/spi.hpp), the columns in
 [brio/ch32x035/afio.hpp](../../brio/ch32x035/afio.hpp); reference suite
-`test_x035_spi` against the desk's CH32V006K8U6 running its `spi_peer`
-([../ch32v00x/spi.md](../ch32v00x/spi.md)); this chip's own `spi_peer`
-is that board's suite's instrument (below).
+`test_x035_spi` (a suite's letter, below, is one command key of its
+console and the group of verdicts it runs; `z` runs the single-board
+set and `y` the two-board set) against the desk's CH32V006K8U6 running
+its `spi_peer` ([../ch32v00x/spi.md](../ch32v00x/spi.md)); this chip's
+own `spi_peer` is that board's suite's instrument (below).
 
 ## What the silicon does
 
@@ -28,26 +92,26 @@ is that board's suite's instrument (below).
   and a frame written then follows the one shifting with no gap ("fill the
   data register with data to maintain the complete data flow", 16.2.2);
   RXNE rises at "the last sample clock edge of the data word". The
-  receive buffer holds ONE frame: a frame that completes while the one
+    receive buffer holds one frame: a frame that completes while the one
   before it stands unread is lost, OVR set (16.2.7), the flag cleared by
   a DATAR read followed by a STATR read.
 - **8 or 16 bits** (DFF), SCK = HCLK / 2^(BR+1), /2 to /256 (16.3.1), up
   to "half of FHCLK" (16.1): 24 MHz at 48, table 3-19's ceiling for both
   roles. Every bus of this series runs at HCLK, so HCLK is the reference.
-- **THE CHAPTER'S TWO MODE NUMBERINGS DISAGREE** and neither is the
+- **The chapter's two mode numberings disagree** and neither is the
   Motorola one. Table 16-1 prints CPOL 0/1/1/1 and CPHA 0/0/0/1 for modes
   0..3, a table no numbering produces; figures 16-2..16-9 number the modes
   CPHA first (mode 1 = CPHA 0, CPOL 1; mode 2 = CPHA 1, CPOL 0). The
   driver's `SpiMode` is the Motorola numbering every stratum speaks, mode =
   CPOL x 2 + CPHA, written into the bits by name - and measured standard
   in all four (letter w, below).
-- **NOTHING IS ENABLE-PROTECTED** (measured): 16.3.1 says DFF and CRCEN
+- **Nothing is enable-protected** (measured): 16.3.1 says DFF and CRCEN
   "can only be written when SPE is 0" and that MSTR, CPOL, CPHA and
   LSBFIRST must not change "during communication", and a raw write to
   each of eight fields lands with SPE set (DFF, CRCEN, CPOL, CPHA,
   LSBFIRST, BR, MSTR, BIDIMODE). The driver's disable/enable pair is the
   only protection there is.
-- **HSRXEN CHANGES THE LADDER** (measured). 16.3.8 makes the bit a read
+- **HSRXEN changes the ladder** (measured). 16.3.8 makes the bit a read
   enable for "CLK greater than or equal to 36MHz", "only valid when the
   clock is divided by 2" and "not readable"; 16.3.1's note on BR says that
   with it set "the SCK frequency is FHCLK/(BR+2)". 16.3.1 is right: with
@@ -57,7 +121,7 @@ is that board's suite's instrument (below).
 - **The select has three arrangements** (16.2.1): software (SSM, the
   level from SSI, the pad free), hardware output (SSOE), hardware input (a
   low level raises MODF and demotes a host). SSOE drives NSS low "when the
-  SPI host sends output" - measured: low from the host's FIRST FRAME and
+  SPI host sends output" - measured: low from the host's first frame and
   not at SPE, held low between frames, high again only when SPE clears.
   MODF from a second chip's pulse clears MSTR and SPE (measured), and
   16.2.7's clearing sequence - a STATR access, then a CTLR1 write - takes
@@ -74,16 +138,16 @@ is that board's suite's instrument (below).
 - **The DMA requests are channels 2 (receive) and 3 (transmit)** (RM
   9.2.3): the channel is the request. DATAR is sixteen bits, so a 16-bit
   frame is one half-word beat, from a half-word boundary only (9.3.6).
-- **THE CLIENT'S RESTRICTIONS, MEASURED.** 16.2.3: "If transmitting in
+- **The client's restrictions, measured.** 16.2.3: "If transmitting in
   slave mode is required, CPOL needs to be set and configured as mode 2 or
   mode 3"; 16.3.1, of LSBFIRST: "LSB is only supported by SPI as host".
-  Under the CH32V006's host this die RECEIVES exact in all four modes and
-  both bit orders, ANSWERS exact in all four modes MSb first - the first
+  Under the CH32V006's host this die receives exact in all four modes and
+  both bit orders, answers exact in all four modes MSb first - the first
   restriction does not hold here - and LSb first its MISO never moves, in
   every mode: the second holds, for what a client sends (letters r and w).
   16-bit frames and the CRC as a client, both ways, measured under the
   CH32V006's host (`spi_peer`, below).
-- **AS A CLIENT, ITS RATE DEPENDS ON ITS OWN MISO PAD** (measured, cause
+- **As a client, its rate depends on its own MISO pad** (measured, cause
   not isolated): under the CH32V006's host every pattern is exact both
   ways to 6 MHz; at 12 and 24 MHz the client loses SCK edges whenever PA6
   stands high - answering 0xFF it heard none of sixteen frames, answering
@@ -149,7 +213,7 @@ is that board's suite's instrument (below).
   `spi_stalled`), `recover()`, `release()` - the block's reset pulse
   before its gate ([../design/dma.md](../design/dma.md)'s release
   contract) -, `claim_nss_pad<arrangement>()`. `hold_off_cycles` is the
-  IMAGE's longest window the host's vector waits behind, 380 by default
+  image's longest window the host's vector waits behind, 380 by default
   (the one safe with every driver in the flash), zero refused.
   `Placement` is util/placement.hpp's `InFlash` (the default) or `InRam`,
   where the pump's entry and the polled loops run from; the cost
@@ -163,7 +227,7 @@ is that board's suite's instrument (below).
   client LSb first (`config_served()`, `spi_client_answers()`), the
   per-frame verbs (`enable()`, `write()`, `writable()`, `poll()`,
   `selected()` read off the NSS pad, `drive_output()` for a dark
-  listener), and the RUNS a transaction is served by - `answer()`,
+  listener), and the runs a transaction is served by - `answer()`,
   `exchange()`, `receive()`, polled on TXE and RXNE with the NSS pad as
   the window, returning how many frames moved and how the run ended -
   with `frames_ahead` = 1.
@@ -232,7 +296,7 @@ spi_link: 39 verdicts. Each was green whole on the final images.
 - **The reset values are table 16-2's** (STATR 0x0002, CRCR 0x0007, the
   rest zero), a control word lands as spelled, and eight of eight CTLR1
   fields take a write under SPE.
-- **THE ENGINES RUN AT THE RATE ASKED**: a frame inside an engined block,
+- **The engines run at the rate asked**: a frame inside an engined block,
   the difference of a 256- and a 32-frame block with the select high, is
   998 to 1012 thousandths of its SCK periods at every code /2 to /256, and
   1000 in 16-bit frames at /4 and /16.
@@ -272,7 +336,7 @@ spi_link: 39 verdicts. Each was green whole on the final images.
 - **The kernel over a second chip** (letter q): four transactions queued
   in one dispatch, one polled among three pumped, in one select window -
   four `spi_ok`, every byte read back by the far chip.
-- **THIS CHIP AS CLIENT** (letter r, the peer's `host_burst` at 1.5 MHz,
+- **This chip as client** (letter r, the peer's `host_burst` at 1.5 MHz,
   20 us between frames): received exact in all eight mode-order
   combinations; answered exact in the four MSb-first ones, and LSb first
   the far host read 0xFF or 0x00 - a line that does not move - in all
@@ -282,8 +346,8 @@ spi_link: 39 verdicts. Each was green whole on the final images.
   MSTR and SPE cleared, four of four; STATR 0x22 before the clearing
   sequence, 0x02 after it, once the pad has been high a millisecond.
 - **The fetch** (letter b): the same bare transmit loop takes 20.8 cycles
-  a frame at /2 from the flash and 16.7 - the wire - from SRAM. FROM THE
-  FLASH A LOOP'S COST IS A FUNCTION OF ITS ADDRESS MODULO FOUR, the
+  a frame at /2 from the flash and 16.7 - the wire - from SRAM. From the
+  flash a loop's cost is a function of its address modulo four, the
   fetch's word, and of no other bit of it: the host's polled functions,
   the same instructions moved through 32 bytes in steps of two, took at
   every offset 0 mod 4 51.9 to 52.0 cycles a frame at /2 and /4 and 152.0
@@ -316,11 +380,11 @@ spi_link: 39 verdicts. Each was green whole on the final images.
 
 `spi_peer` makes the CH32X035F8U6 the desk's SPI client for the
 CH32V006's suite (`test_ch32_spi`, [../ch32v00x/spi.md](../ch32v00x/spi.md)):
-spi_link's command channel in band over SPI1's column 0 with the HARDWARE
+spi_link's command channel in band over SPI1's column 0 with the hardware
 select on PA4 (pulled up), the dark listener, its answer windows in mode
 0, the exchange served on the DMA engines (channels 2 and 3, polled with
 no interrupt, the window read off the NSS pad) or on the client's runs,
-the EXTENDED EXCHANGE whole - 16-bit frames (the engines in half-word
+the extended exchange whole - 16-bit frames (the engines in half-word
 beats, the runs over `uint16_t`), the CRC on a polled run (CRCNEXT set
 the instant the last answer is in the buffer, the host's CRC frame taken
 as one more frame), a receive-only run with MISO undriven -, `sink_slow`,
@@ -355,7 +419,7 @@ boot; PB3 is never touched. What the far chip measured of this client:
 ### The host above the wire
 
 What a transaction costs beyond its frames' time, measured by letter b at
-48 MHz with the select high, in ONE IMAGE for both placements - the
+48 MHz with the select high, in one image for both placements - the
 suite's hosts `InRam`, their twins `InFlash` - each line the best of
 three or five; `fixed` from a 32-frame transaction less 32 frames, the
 suite's wrapper - a request built, the call, the wait on the completion
@@ -419,11 +483,11 @@ the frames within 10 per cent of it and the fixed costs within 30:
   always inline (pin.hpp), where an out-of-line call there had put four
   calls on every transaction's path.
 - **The fault exits, provoked** (letter f, the select high): a polled
-  duplex request of 16 at /16 with SPI1 HELD in reset ends `spi_stalled`
+  duplex request of 16 at /16 with SPI1 held in reset ends `spi_stalled`
   after about 58 500 cycles - the poll budget, some 28 times the wire's
   2048 - and `recover()` puts the next request back to `spi_ok`. TIM1's
   compare request held on DMA channel 2 (its channel 1's row) leaves the
-  receive channel DEAD - the next owner takes one stray item ([dma.md](dma.md))
+  receive channel dead - the next owner takes one stray item ([dma.md](dma.md))
   - and a polled request of 64 on the engines over it ends `spi_dma_fault`,
   but only after `spin_dma()`'s bound, 200 000 spins and 6 000 a frame
   whatever the rate: 9.37 million cycles, 195 ms, against the 8 192 the

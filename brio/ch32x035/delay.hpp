@@ -1,14 +1,22 @@
 /*
  * delay.hpp
  *
- * Microsecond busy-waits on the STK counter: cortexm/delay.hpp's
- * contract on this core - "at least", never early, CAPPED BELOW ONE TICK
- * PERIOD (a wait of a millisecond or more is TimeEvent territory and is
- * REFUSED, false and no time spent, rather than served as a latency
- * bug), no division at wait time. The CH32V203's file
- * (brio/ch32vx03/delay.hpp), on the same counter.
+ * A wait shorter than a tick, for a driver's settling time or a bus's
+ * setup time: a microsecond busy-wait on the STK counter, which spins
+ * the calling context for the time asked and returns.
  *
- * The counter counts UP from zero to the compare and reloads (STRE), so
+ *     (void)brio::delay_us(clock, 200);   // at least 200 us, the clock task's tag
+ *
+ * It is cortexm/delay.hpp's contract on this core - "at least", never
+ * early, capped below one tick period (a wait of a millisecond or more
+ * is TimeEvent territory and is refused, false and no time spent, rather
+ * than served as a latency bug), no division at wait time. The answer is
+ * [[nodiscard]]: a program says it ignores a refusal. Legal from any
+ * context, with interrupts masked or not; it masks nothing itself, and
+ * it needs the ticker running (ch32x035/ticker.hpp), refusing otherwise.
+ * The CH32V203's file (brio/ch32vx03/delay.hpp), on the same counter.
+ *
+ * The counter counts up from zero to the compare and reloads (STRE), so
  * each poll's delta is (now - last) with one period folded in across the
  * reload - the mirror image of SysTick's down-count. It runs at HCLK
  * (STCLK = 1, ticker.hpp) so the counter's low half is the current tick's
@@ -18,7 +26,7 @@
  * period is far below 2^32 cycles, so the high half never moves inside
  * one tick.
  *
- * NO DIVISION AT WAIT TIME. This core has the M extension and could
+ * No division at wait time. This core has the M extension and could
  * divide, but a division per wait is work bought for nothing: the one
  * division lives in delay_rate(), folded to a constant for a
  * compile-time Clock, and the wait runs in 32 bits with the 65536 us gate
@@ -51,9 +59,9 @@ constexpr DelayRate delay_rate(uint32_t hz) {
     return {(hz + 999'999UL) / 1'000'000UL};
 }
 
-/// Busy-wait AT LEAST `us` microseconds on the STK counter.
+/// Busy-wait at least `us` microseconds on the STK counter.
 ///
-/// True when the time was served; false - AND NO TIME IS SPENT - when
+/// True when the time was served; false - and no time is spent - when
 /// STK is not running or when the request is one tick period or more.
 [[nodiscard]] inline bool delay_us(DelayRate rate, uint32_t us) {
     if ((stk()->CTLR & stk_ste) == 0u) {
@@ -79,7 +87,7 @@ constexpr DelayRate delay_rate(uint32_t hz) {
     return true;
 }
 
-/// The per-rate factors of a DYNAMIC clock, expanded at compile time
+/// The per-rate factors of a dynamic clock, expanded at compile time
 /// over its discrete-rate surface (rate_count, rate_hz(i)): one table in
 /// flash, indexed by rate_index() at wait time - which is why no
 /// division ever runs here.
@@ -92,6 +100,9 @@ inline constexpr auto delay_rates = [] {
     return table;
 }();
 
+/// The wait with the clock task's tag: the factor is a constant for a
+/// static clock and a table entry for a dynamic one. Same answer as
+/// above.
 template <typename Clock>
 [[nodiscard]] bool delay_us(Clock clock, uint32_t us) {
     if constexpr (Clock::is_static) {

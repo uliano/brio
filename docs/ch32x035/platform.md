@@ -1,17 +1,86 @@
 # Platform (CH32X035)
 
-The kernel's Platform concept realized on the QingKe V4C of the
-CH32X035 series: the critical section, the idle hook, the STK timebase,
-the microsecond busy-wait, the one spelling of an interrupt handler,
-what the crt writes into the core before main(), and where code runs -
-the flash, or SRAM for a path a program places there, a driver's or its
-own. The failing half
-the sibling strata carry beside it - which reset happened as a type of
-its own, the record a crash leaves, the watchdogs - is not written here
-(the list at the end); the reset flags themselves are RCC's and live in
-[clock.md](clock.md).
+This document is for a programmer putting a brio program on a CH32X035.
+It describes what the kernel stands on here, the platform, and the
+timebase the program's time events run on. A brio kernel asks the chip
+for a handful of things, stated by the kernel's `Platform` concept (a
+concept is a compiler-checked set of requirements on a type;
+[design/kernel.md, "Platform: what the machine provides"](../design/kernel.md#11-platform-what-the-machine-provides-kernelplatformhpp)):
+a way to mask interrupts for a critical section, a way to sleep until
+the next interrupt without losing one that arrives at the wrong moment,
+a source of time, a breakpoint for a panic, and a record a panic leaves
+for the next boot. `Ch32x035Platform<TB>` is this family's answer on the
+QingKe V4C core, and `TB` is its timebase: the `Ticker` on the core's
+own 64-bit system counter (the STK), a 1000 Hz interrupt. The page also
+covers the one spelling of an interrupt handler, what the startup code
+(the crt, the assembly file that runs before `main()`) writes into the
+core, and where code runs: the flash, or SRAM for a path a program
+places there, a driver's or its own.
 
-Documents of record: the CH32X035 reference manual V1.8 (3.2 for the
+The smallest use is the glue every program of this project writes, as
+the console and the test suites spell it:
+
+```cpp
+using P = brio::Ch32x035Platform<>;
+using SysClock = brio::Clock<brio::ClockSource::internal, 48'000'000>;
+constexpr SysClock clock;
+
+extern "C" BRIO_CH32_INTERRUPT void systick_handler() { brio::Ticker::tick(); }
+
+int main() {
+    const auto record = brio::take_panic_record<P>();   // first, and once
+    SysClock::init();
+    brio::Ticker::init(clock);
+    brio::enable_interrupts();
+    brio::Tenuto<P, ...>::run();
+}
+```
+
+Line by line: `P` names the platform with its default timebase, the
+empty angle brackets taking the `Ticker`; `record` is the record of a
+panic that ended the previous run, if any, for the program to report
+before anything else (kernel/panic.hpp), and a program that reports
+nothing may discard it; the `...` of the last line stands for the
+program's active objects in priority order. Four things decide whether
+that works. The clock task must have run
+first (`SysClock::init()`, [clock.md](clock.md)): the ticker computes
+its compare value from the rate the clock type claims, and a ticker
+initialized on a chip still at its 8 MHz reset rate ticks six times too
+slowly. The STK vector must be bound to `Ticker::tick()` by the program,
+as above, under the crt's name for it (`systick_handler`) and with
+`BRIO_CH32_INTERRUPT` in front: the kernel binds no vector, and a
+program that forgets it compiles, runs and never advances time.
+`BRIO_CH32_INTERRUPT` is the one spelling of a handler attribute on
+this target, and it follows the project's `CH32X035_HPE` option, a
+CMake option of the `ch32x035/` project chosen at configure, on by
+default: with it the crt sets INTSYSCR.HWSTKEN and the attribute is
+WCH's fast attribute, the core's hardware prologue saving the registers
+a handler clobbers; without it the attribute is gcc's plain `interrupt`
+and the handler saves them itself. One switch for the whole image,
+because a fast handler in an image whose crt did not set the bit
+corrupts the program it interrupted. Interrupts must be enabled before
+`run()` (`brio::enable_interrupts()`), since the kernel sleeps between
+events and the tick is what brings it back. And a program with a DMA
+channel at work never sleeps: the DMA controller moves nothing in the
+Sleep on this die, so `idle()` returns at once while any channel is
+enabled with items left, and a receive ring, a channel that is always
+working, holds the program awake ([dma.md](dma.md)). There is no
+tickless timebase here: the STK stops with the core, and the kernel's
+optional `idle_until()` hook is not provided.
+
+The rest of this page, in order: the documents of record; what the
+silicon does (the core, the two ways it sleeps, the hardware prologue,
+the STK, the traps, corecfgr, the resets); the types and verbs; how to
+use it; the bench findings, measured to the cycle; "A handler in SRAM",
+the opt-in placement of a driver's or a program's hot path; and what is
+not covered. The failing half the sibling strata carry beside a
+platform, which reset happened as a type of its own, the record a crash
+leaves, the watchdogs, is not written here (the list at the end); the
+reset flags themselves are RCC's and live in [clock.md](clock.md).
+
+## Documents of record
+
+The CH32X035 reference manual V1.8 (3.2 for the
 reset sources, 7.1 and table 7-1 for the PFIC and the vector table,
 7.5.2 for the PFIC's registers with 7.5.2.38 for PFIC_SCTLR, 7.5.3 for
 INTSYSCR and mtvec, 7.5.5 for the STK, 13.4 for TIM3, the suite's rescue
@@ -25,7 +94,9 @@ No errata sheet exists for this series. The headers are
 [pfic.hpp](../../brio/ch32x035/pfic.hpp),
 [ticker.hpp](../../brio/ch32x035/ticker.hpp) and
 [delay.hpp](../../brio/ch32x035/delay.hpp); the reference suite is
-`test_x035_platform`.
+`test_x035_platform` (a suite's letter, below, is one command key of
+its console and the group of verdicts it runs, `z` the key that runs
+every letter of this suite).
 
 ## What the silicon does
 
@@ -52,7 +123,7 @@ question.
   [../ch32v00x/platform.md](../ch32v00x/platform.md)). The core can
   sleep as a WFE instead: PFIC_SCTLR.WFITOWFE turns the next `wfi` into
   a wait-for-event, and SEVONPEND makes every interrupt that turns
-  pending an event, masked or not, LATCHED - "if the WFE instruction is
+  pending an event, masked or not, latched - "if the WFE instruction is
   not executed, the system will be woken up immediately after the next
   execution of the instruction" (RM 7.5.2.38). 6.2 gives a WFE three
   wakes that matter here: an event; an ENABLED interrupt, "and after
@@ -85,8 +156,8 @@ question.
   up (or down, MODE) at HCLK or HCLK/8 towards CMPLR/CMPHR, reload from
   zero with STRE, and raise CNTIF, which the handler clears by writing
   zero. It is interrupt 12 of the vector table, and the interrupt number
-  IS the table index on this core. STK_CTLR also carries SWIE, the
-  software interrupt's other way in. This manual gives the register NO
+  is the table index on this core. STK_CTLR also carries SWIE, the
+  software interrupt's other way in. This manual gives the register no
   INIT bit (its bits 30:5 are reserved), where the QingKe V4 manual's
   chapter on the counter has one at bit 5; nothing here writes it. The
   compare, the reload and the high halves that never move under it are
@@ -100,14 +171,14 @@ question.
   series' reference manual does not name it. WCH's own startup file for
   the series writes 0x1F into it, and so does this crt. On the
   CH32V203's V4B the five bits bought two cycles in 36811 of a timed
-  loop; on the CH32V303's V4F that loop ran slightly SLOWER with them
+  loop; on the CH32V303's V4F that loop ran slightly slower with them
   ([../ch32vx03/platform.md](../ch32vx03/platform.md)); on this core a
-  loop of the platform suite's own runs 7.3 to 7.4 per cent SLOWER with
+  loop of the platform suite's own runs 7.3 to 7.4 per cent slower with
   them than with the register cleared (measured).
 - **A reset request is PFIC_CFGR.SYSRST written with KEY3 (0xBEEF in
   the high half), or PFIC_SCTLR.SYSRST with no key** (RM 3.2.2,
   7.5.2.10, 7.5.2.38). And with PFIC_SCTLR.RSTEN at its reset value of
-  zero the chip has a CORE DEADLOCK RESET, generated - in 3.2.2's words -
+  zero the chip has a core deadlock reset, generated - in 3.2.2's words -
   "when the core addresses an exception or enters an NMI interrupt", and
   never in debug mode; what exactly that sentence covers is not read
   further here, and no verb arms or disarms it.
@@ -136,8 +207,8 @@ because a tick that is merely pending would end the sleep before it
 began, then the same store, unmask and `wfi`, and no consume, a second
 `wfi` with SLEEPDEEP armed being a second entry into that mode. There
 is no
-`idle_until()` (the timebase stops with the core). AND NO SLEEP OVER A
-WORKING DMA CHANNEL: in the Sleep the controller moves nothing (measured,
+`idle_until()` (the timebase stops with the core). And no sleep over a
+working DMA channel: in the Sleep the controller moves nothing (measured,
 [dma.md](dma.md)), so `idle()` first asks `Dma::any_working()` - a
 channel enabled and circular or with items left - and while one is, it
 unmasks and returns at once. The registers are the answer, read in the
@@ -163,7 +234,7 @@ ends in MRET, so the call never returns and the caller's frame stays on
 the stack (measured on the CH32V303VCT6,
 [../ch32vx03/platform.md](../ch32vx03/platform.md)). Interrupt nesting
 is never enabled: the kernel's rule
-([../design/kernel.md](../design/kernel.md), section 1).
+([design/kernel.md, "The model in one page"](../design/kernel.md#1-the-model-in-one-page)).
 
 `stack_untouched()` is the RAM ledger: the crt paints the free RAM
 between the last section the linker placed and the stack top with one
@@ -179,7 +250,7 @@ time, `rebase` for a clock that changed rate), counting HCLK - STCLK set
 never moving. A rate that does not divide 1000 is refused, so `millis()`
 is exact. The busy-wait is [delay.hpp](../../brio/ch32x035/delay.hpp)'s
 `delay_us`: at least, never early, no division at wait time, and
-REFUSED - no time spent, a `[[nodiscard]]` answer - for a request of one
+refused - no time spent, a `[[nodiscard]]` answer - for a request of one
 tick period or more, above the 65536 us gate its 32-bit arithmetic rests
 on, or with the counter stopped; under a `DynamicClock` it dispatches by
 rate index into a table built at compile time, and below 1 MHz of HCLK
@@ -221,7 +292,9 @@ is `panic<P>(code, context)` (kernel/panic.hpp): the breadcrumb written,
 then `break_here()` - with a debugger attached the program stops there,
 and without one the `ebreak` lands in the crt's breakpoint spin, where a
 probe finds it and where the breadcrumb waits for the next boot's
-`take_panic_record<P>()` if a reset comes before the power goes.
+`take_panic_record<P>()` if a reset comes before the power goes - a
+reset something else causes: no verb of this stratum performs one (the
+gap list below).
 
 ## Bench findings
 
@@ -311,8 +384,8 @@ the consume was measured before and after. What it measured:
   96 to 100 - the image built with the hardware prologue
   (`CH32X035_HPE=ON`, the default). In an image built with
   `CH32X035_HPE=OFF` (its `z` green, 51 verdicts, ten runs of the letter):
-  entry 42, body 28, exit 50, the trip 120 to 128 - THE PROLOGUE BUYS 24
-  TO 28 CYCLES on the minimal handler, the sixteen registers saved and
+  entry 42, body 28, exit 50, the trip 120 to 128 - the prologue buys 24
+  to 28 cycles on the minimal handler, the sixteen registers saved and
   restored by gcc's own code instead. The user stack the image never
   touched reads 19004 bytes with it and 18972 without: 32 bytes, the
   deepest handler frame's software saves, which the hardware stack takes
@@ -336,7 +409,7 @@ the consume was measured before and after. What it measured:
   factory calibration and the trim's centre, which the desk's crystal
   measured too ([clock.md](clock.md)); the arrival jitter of the probe's
   bridge is a millisecond or so, some 200 ppm of a 5 s bracket.
-- **corecfgr's 0x1F makes this core SLOWER** (letter `f`). The crt left
+- **corecfgr's 0x1F makes this core slower** (letter `f`). The crt left
   0x1F in the register; 2000 iterations of a loop with a load and a
   data-dependent branch over a 64-byte pseudo-random table took 24204
   and 24224 HCLK cycles with it, and 22548 in both runs with the
@@ -366,7 +439,7 @@ the consume was measured before and after. What it measured:
 wait states (RM 20.3.1), and a taken branch is a fetch the core waits
 for: from it the SPI's bare transmit loop takes 20.8 cycles a frame at
 /2, and the same loop from SRAM 16.7 - the wire's 16 (measured,
-[spi.md](spi.md)). The vector table holds ABSOLUTE addresses (mtvec's
+[spi.md](spi.md)). The vector table holds absolute addresses (mtvec's
 MODE1, RM 7.5.3.2), so a handler placed in SRAM is entered from its
 vector directly, and a call between SRAM and the flash is an `auipc` and
 a `jalr`, which reach 2 GB either side of the caller: no veneer either
@@ -388,7 +461,7 @@ using Link = Uart<4, P, 512, 256, UartFormat{}, DmaTxEngine<1>, DmaRxEngine<8>, 
 Each driver writes its hot body once and runs it through
 `Hot<Placement>::run` ([../../brio/util/placement.hpp](../../brio/util/placement.hpp)):
 under `InFlash` the body is inline where it is called, the vector that
-binds it, as if there were no trampoline; under `InRam` each path is ONE
+binds it, as if there were no trampoline; under `InRam` each path is one
 out-of-line instance in `.fast_text.brio`, flattened, a call from the
 vector. Only the instances an image names exist: an image that opts into
 nothing has no byte of code in SRAM. Compared with the same images built
@@ -409,7 +482,7 @@ A program places a function of its own - the vector it binds, above all
 extern "C" BRIO_CH32_INTERRUPT [[gnu::section(".fast_text")]] void usart4_handler() { (void)Link::isr(); }
 ```
 
-THE NAME IS TWO NAMES. A function defined in a header is emitted in a
+The name is two names. A function defined in a header is emitted in a
 COMDAT group, and GCC refuses one section name for a grouped function
 and a plain one in the same translation unit ("section type conflict",
 WCH's gcc 15.2); a local clone of a grouped function - IPA-SRA's - leaves
@@ -421,13 +494,13 @@ inline or template function goes through `Hot<InRam>::run` rather than
 an attribute. The family fixtures compile a placed vector beside the
 `InRam` instances in one unit (`test/family_ch32x035/spi.cpp`,
 `dma.cpp`, `i2c.cpp`). `.ram_text`, which the scripts keep beside it,
-is the name of code that MUST run from SRAM for correctness - nothing of
+is the name of code that must run from SRAM for correctness - nothing of
 this stratum's.
 
 **Which placement buys what.** A driver's `InRam` moves what only the
 driver can: its private paths (the SPI host's polled loops) and the
 bodies it calls out of the vector, with the vector left in the flash. A
-program that places the VECTOR moves everything inline in it - every
+program that places the vector moves everything inline in it - every
 `InFlash` body it binds - with no call at all. On a path whose body is
 inline in the vector whole (the I2C event pump, a USART's per-byte
 transport), placing the vector is the faster of the two, and placing
@@ -452,9 +525,9 @@ suite with the path in the flash and in SRAM, nothing else moved:
 
 The handler bodies are stamped on the STK between their first and last
 statement; the hardware prologue's entry and exit, 96 to 100 cycles a
-round trip with the vector in the flash (above), are outside them. FROM
-THE FLASH, CODE WITH TAKEN BRANCHES COSTS WHAT ITS ADDRESS MODULO FOUR
-MAKES IT, the fetch's word: the same instructions at every offset through
+round trip with the vector in the flash (above), are outside them. From
+the flash, code with taken branches costs what its address modulo four
+makes it, the fetch's word: the same instructions at every offset through
 32 bytes took one of two costs, by the offset's second bit and by
 nothing else - 52.0 or 72.0 cycles a frame for the SPI receive loop at
 /4, 68 or 72 for a body of four taken forward branches - where
@@ -462,7 +535,7 @@ straight-line code and three-instruction loops did not move and SRAM
 moved by a cycle at most (a scratch sweep, [spi.md](spi.md), "The
 fetch"). gcc aligns a function to two bytes under -Os, so a function
 that keeps a stated flash cost is `aligned(4)` - the SPI host's polled
-loops, and EVERY VECTOR, through `BRIO_CH32_INTERRUPT` (pfic.hpp): a
+loops, and every vector, through `BRIO_CH32_INTERRUPT` (pfic.hpp): a
 vector's own code costs the same wherever the image puts it, two bytes
 of padding at most, while a function it calls in the flash keeps a
 stated cost only if it is aligned itself.
@@ -471,11 +544,11 @@ stated cost only if it is aligned itself.
 the load image stays in the flash beside them. A placed function exists
 only from the crt's copy on, and the crt enters `main()` with interrupts
 masked, so no vector reaches SRAM the copy has not written. A driver's
-`InRam` body is a CALL from a vector in the flash: under the hardware
+`InRam` body is a call from a vector in the flash: under the hardware
 prologue (the default) the call saves no register, and the vector passes
 the closure's address, one instruction; in an image built without it
 the vector saves the caller-saved registers in software around the
-call. THE HOLD-OFF the SPI host draws its write-ahead from is a fact of
+call. The hold-off the SPI host draws its write-ahead from is a fact of
 the image: its default is the one safe with every driver in the flash,
 and a program that places its handlers states its own
 ([spi.md](spi.md)).
@@ -510,6 +583,6 @@ Implemented but not bench-verified, each with what would measure it:
   SLEEPDEEP, so the paused timebase, the unmask before the `wfi` and the
   absent consume are unmeasured; the sleep site born with the power
   chapter is its first user and its suite the measurement.
-- **The idle hook's POWER**: `idle()` proven to sleep once per wake is
+- **The idle hook's power**: `idle()` proven to sleep once per wake is
   not `idle()` proven to sleep cheaply - the current in Sleep is a
   measurement with an ammeter and the probe detached.

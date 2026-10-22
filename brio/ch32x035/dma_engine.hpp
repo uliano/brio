@@ -1,22 +1,31 @@
 /*
  * dma_engine.hpp
  *
- * What a TRANSPORT needs to know about the DMA controller without
- * including it: the "no engine" tag of every optional engine slot in
- * this stratum, the priority the engines in those slots arm at, and THE
- * REQUEST TABLE (RM 9.2.3).
+ * What a transport needs to know about the DMA controller without
+ * including it, and what a program names a channel by: the "no engine"
+ * tag of every optional engine slot in this stratum, the priority the
+ * engines in those slots arm at, and the request table (RM 9.2.3). A
+ * program that would rather name the request than the channel number
+ * writes
  *
- * WHY THEY LIVE TOGETHER. On this series the channel IS the request
+ *     using Rx = brio::DmaRequestOf<brio::DmaRequest::usart4_rx>;   // channel 8
+ *     using Link = brio::Uart<4, P, 512, 256, brio::UartFormat{}, brio::DmaTxEngine<1>,
+ *                             brio::DmaRxEngine<Rx::channel>>;
+ *
+ * Nothing here runs: it is constants and compile-time tables, and every
+ * refusal is a compile error on the line that asked.
+ *
+ * Why they live together. On this series the channel is the request
  * (9.2.3, figure 9-1: each channel ORs the requests of a fixed handful of
  * peripherals, there is no multiplexer), and a transport with an engine
- * slot must REFUSE an engine that names another channel - a wrong channel
+  * slot must refuse an engine that names another channel - a wrong channel
  * waits for a request that never comes, with no error flag. It can only
  * do that if it can read the table, and it must not include
  * ch32x035/dma.hpp for it, or every program with a console would carry
- * the controller. So the table is here, beside the tag, and it is the ONE
+ * the controller. So the table is here, beside the tag, and it is the one
  * place in the stratum where a peripheral's channel number is written.
  *
- * ONE CONTROLLER, EIGHT CHANNELS: a request lands on a channel number and
+ * One controller, eight channels: a request lands on a channel number and
  * nothing else names it. Which peripherals the part in front of you
  * offers is parts/<part>.hpp's business - the 20-pin CH32X035 parts offer
  * no USART1, the CH32X035F7P6 no USART4 - and such a row answers channel
@@ -60,7 +69,7 @@ constexpr uint8_t dma_engine_channel() {
 }
 
 /// Two engines on one transport must not name the same channel: a channel
-/// moves data ONE way. Generic over any engine that says `present` and
+/// moves data one way. Generic over any engine that says `present` and
 /// `channel`.
 template <typename Tx, typename Rx>
 constexpr bool dma_engines_distinct() {
@@ -77,8 +86,8 @@ constexpr bool dma_engines_distinct() {
  * lives here, beside the tag, because a transport names the level of the
  * engines in its slots and must not include the controller to do it.
  *
- * THE LEVEL IS THE PERIPHERAL'S (docs/design/dma.md). An engine whose
- * peripheral OVERRUNS when its channel is starved - a receive ring, an SPI
+ * The level is the peripheral's (docs/design/dma.md). An engine whose
+ * peripheral overruns when its channel is starved - a receive ring, an SPI
  * host's receive, a converter's stream - arms at `very_high`; one whose
  * peripheral only waits or holds its last value - a transmit, a paced
  * output, an I2C host's receive under its stretched clock - at `high`; a
@@ -94,7 +103,7 @@ enum class DmaPriority : uint8_t { low = 0, medium = 1, high = 2, very_high = 3 
 
 /**
  * Every peripheral event the controller answers, named the way figure 9-1
- * and the table under it name them. A timer publishes SEVERAL events and
+ * and the table under it name them. A timer publishes several events and
  * they do not share a channel: an update is not a capture, and a trigger,
  * a commutation and a channel can be three names for one row (they raise
  * the same request). The series has one SPI and one I2C, and TIM3 raises
@@ -116,7 +125,7 @@ enum class DmaRequest : uint8_t {
 inline constexpr uint8_t dma_channel_count = 8;
 
 /**
- * The channel that serves a request on THIS PART, or 0 when the part has
+ * The channel that serves a request on this part, or 0 when the part has
  * not got the peripheral that raises it - figure 9-1 read channel by
  * channel, cross-checked cell by cell against the table printed under it:
  *
@@ -163,11 +172,11 @@ constexpr uint8_t dma_request_channel(DmaRequest r) {
     return 0;
 }
 
-/// Whether THIS PART can raise that request at all.
+/// Whether this part can raise that request at all.
 constexpr bool dma_request_present(DmaRequest r) { return dma_request_channel(r) != 0u; }
 
 /**
- * The channel of a request, as a compile-time constant that REFUSES a
+ * The channel of a request, as a compile-time constant that refuses a
  * peripheral this part has not got:
  *
  *     using Tx = brio::DmaRequestOf<brio::DmaRequest::usart4_tx>;

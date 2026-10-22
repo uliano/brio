@@ -1,15 +1,42 @@
 # PWR (CH32X035)
 
-The power controller of the CH32X035 series, as much of it as a program
-asks today: the programmable voltage detector, the one witness a board
-has of its own supply. The sleep modes and the flash's low-power bits
-are mapped in [device.hpp](../../brio/ch32x035/device.hpp) and driven by
-nothing ([README.md](README.md)'s gap list).
+This document is for a programmer who wants to know whether the
+supply is sound before the program drives a pad into another board, or
+acts on a sagging rail. It covers the power controller of the CH32X035
+series, as much of it as a program asks today: the programmable voltage
+detector (the PVD), a comparator that says whether VDD stands above or
+below one of four thresholds, the one witness a board has of its own
+supply. The sleep modes and the flash's low-power bits are mapped in
+[device.hpp](../../brio/ch32x035/device.hpp) and driven by nothing
+([README.md](README.md)'s gap list).
 
-Documents of record: the CH32X035 reference manual V1.8 (2.2.2 for the
-detector, figure 2-3 for its hysteresis, 2.4.1 and 2.4.2 for PWR_CTLR and
-PWR_CSR) and the CH32X035/X033 datasheet V1.7 (the electrical
-characteristics the manual points to for the thresholds). The header is
+The smallest use, the check an image makes at boot:
+
+```cpp
+brio::Pwr::pvd(brio::PvdLevel::v3_0);
+(void)brio::delay_us(clock, 200);              // the manual gives no settling time
+const bool supply_ok = !brio::Pwr::supply_low();
+```
+
+`pvd()` chooses the threshold (its names are the falling edge's volts),
+`supply_low()` reads the comparator; both open the controller's clock
+gate themselves. What decides correctness even there: the detector has
+no enable bit and no stated settling time, so a reading taken right
+after the threshold moved is trusted only after a wait the program
+chooses (the 200 us above is the suites' choice, not the manual's); and
+the answer is a level and not an event: a crossing while the program
+runs is seen only by a program that reads the flag again.
+
+The rest of this page, in order: the documents of record; what the
+silicon does; the types and verbs; how to use it; the bench findings;
+what is not covered.
+
+## Documents of record
+
+The CH32X035 reference manual V1.8 (2.2.2 for the detector, figure 2-3
+for its hysteresis, 2.4.1 and 2.4.2 for PWR_CTLR and PWR_CSR) and the
+CH32X035/X033 datasheet V1.7 (the electrical characteristics the manual
+points to for the thresholds). The header is
 [brio/ch32x035/pwr.hpp](../../brio/ch32x035/pwr.hpp).
 
 ## What the silicon does
@@ -53,8 +80,8 @@ const bool supply_ok = !brio::Pwr::supply_low();
 
 On the CH32X035F8U6 of WCH's evaluation board, fed from its WCH-LinkE's
 3.3 V: at the boot of `test_x035_usart` and `test_x035_pin` - each drives
-pads wired to the desk's CH32V006K8U6 - the detector at 3.0 V reads NOT
-LOW, and both suites run their letters; each says so on its banner.
+pads wired to the desk's CH32V006K8U6 - the detector at 3.0 V reads not
+low, and both suites run their letters; each says so on its banner.
 
 ## Not covered yet
 

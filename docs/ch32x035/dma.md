@@ -1,23 +1,70 @@
 # DMA (CH32X035)
 
-The DMA controller of RM ch. 9 - eight channels, each the OR of a fixed
-handful of peripheral requests, an arbiter over four software priorities,
-three flags a channel - the engines the transports name in their slots
-(the USART's and the I2C host's), and the copy engine. Documents of record: the
-CH32X035 reference manual V1.8 (9.1 for what the controller has, 9.2.1 for
-the arbitration, a channel's three steps and its three outcomes, 9.2.2 for
-the widths, 9.2.3's figure 9-1 and the table under it for the request map,
-9.3 for the registers; 2.3.2 for the Sleep; table 7-1 for the vectors;
-3.4.5 and 3.4.9 for the gate and the reset lines). Driver:
-[brio/ch32x035/dma.hpp](../../brio/ch32x035/dma.hpp) and
+This document is for a programmer who wants a peripheral served without
+the processor in the loop: a serial port's bytes moved by a channel
+instead of an interrupt a byte, a block of memory copied while the
+program does something else. It covers the DMA controller of RM ch. 9,
+eight channels, each the OR of a fixed handful of peripheral requests,
+an arbiter over four software priorities, three flags a channel; the
+engines a transport names in its template slots (the USART's and the
+I2C host's); and the copy engine. A program rarely drives a channel
+itself: it names an engine in a driver's slot, binds the channel's
+vector to that driver's `dma_isr()`, and the driver does the rest.
+
+The smallest use, the console on both engines - USART2 transmits on
+channel 7 and receives on 6, the channels this part wires to it:
+
+```cpp
+using Serial = brio::Uart<2, P, 64, 128, brio::UartFormat{}, brio::DmaTxEngine<7>, brio::DmaRxEngine<6>>;
+
+extern "C" BRIO_CH32_INTERRUPT void usart2_handler() {
+    if (Serial::isr()) { brio::post<SerialLines>(brio::RxActivity{}); }
+}
+extern "C" BRIO_CH32_INTERRUPT void dma1_channel6_handler() {
+    if (Serial::dma_isr()) { brio::post<SerialLines>(brio::RxActivity{}); }
+}
+extern "C" BRIO_CH32_INTERRUPT void dma1_channel7_handler() { (void)Serial::dma_isr(); }
+```
+
+Three things decide correctness even there. The channel is the request
+on this controller: an engine on any channel but the one figure 9-1
+wires to the peripheral waits for a request that never comes, so the
+transport refuses the wrong channel at compile time (`DmaRequestOf`,
+below, names the request instead of the number). Both channels'
+vectors must be bound by the program, as above, each to the driver's
+`dma_isr()`; a vector left unbound lands in the crt's default handler,
+a spin loop. And a program with a channel at work never sleeps: in the
+Sleep the controller moves nothing, so the platform's `idle()` returns
+at once while any channel is enabled with items left, and a receive
+ring, a channel that runs for ever, holds the program awake
+([platform.md](platform.md)). One more fact a driver author needs: a
+request a peripheral raised and no channel took is held until the
+peripheral's reset line is pulsed, so a driver's `release()` pulses it
+before closing the gate ("A released requester", below).
+
+The rest of this page, in order: the documents of record; what the
+silicon does, with the chapter's offer item by item; the types and
+verbs, with what a block costs; how to use it; the bench findings; the
+release contract measured; what is not covered.
+
+## Documents of record
+
+The CH32X035 reference manual V1.8 (9.1 for what the controller has,
+9.2.1 for the arbitration, a channel's three steps and its three
+outcomes, 9.2.2 for the widths, 9.2.3's figure 9-1 and the table under
+it for the request map, 9.3 for the registers; 2.3.2 for the Sleep;
+table 7-1 for the vectors; 3.4.5 and 3.4.9 for the gate and the reset
+lines). Driver: [brio/ch32x035/dma.hpp](../../brio/ch32x035/dma.hpp) and
 [brio/ch32x035/dma_engine.hpp](../../brio/ch32x035/dma_engine.hpp); the
 guard in [brio/ch32x035/platform.hpp](../../brio/ch32x035/platform.hpp);
-reference suite `test_x035_dma`, the transport's engines across a wire in
+reference suite `test_x035_dma` (a suite's letter, below, is one
+command key of its console and the group of verdicts it runs, `z` the
+key that runs them all), the transport's engines across a wire in
 `test_x035_usart`.
 
 ## What the silicon does
 
-- **The channel IS the request.** There is no multiplexer: figure 9-1 ORs
+- **The channel is the request.** There is no multiplexer: figure 9-1 ORs
   a fixed handful of peripheral events into each channel - 1 the ADC,
   USART4's transmit and TIM2's channel 3; 2 the SPI's receive, USART3's
   transmit, TIM1's channel 1 and TIM2's update; 3 the SPI's transmit,
@@ -41,7 +88,7 @@ reference suite `test_x035_dma`, the transport's engines across a wire in
   PADDR, MADDR, CNTR and CFGR's DIR, CIRC, PINC and MINC writable only
   while EN is clear, and a store into an enabled channel is dropped in
   silence.
-- **EN STAYS SET after a completed block** (measured): CNTR at zero, TCIF,
+- **EN stays set after a completed block** (measured): CNTR at zero, TCIF,
   HTIF and GIF up, the channel enabled and idle; only software clears EN,
   and until it does every configuring store is dropped - PADDR's among
   them (measured, below).
@@ -53,7 +100,7 @@ reference suite `test_x035_dma`, the transport's engines across a wire in
   1) in INTFR, the whole word, read-only, cleared by writing one to the
   same position in INTFCR. Each enable in CFGR sits at its flag's
   position.
-- **The address's low bits are IGNORED for a wide access** (9.3.5, 9.3.6):
+- **The address's low bits are ignored for a wide access** (9.3.5, 9.3.6):
   with a 16-bit width the module drops bit 0, with a 32-bit one bits 1:0 -
   a half-word block pointed at an odd address moves the even address's
   half-words and completes (measured).
@@ -65,11 +112,11 @@ reference suite `test_x035_dma`, the transport's engines across a wire in
   a word from the flash (two wait states at 48 MHz): the controller is a
   master of the bus matrix at HCLK, and an item is a read, a write and the
   arbitration (measured).
-- **IN SLEEP THE CONTROLLER MOVES NOTHING** (measured): RM 2.3.2 says the
+- **In Sleep the controller moves nothing** (measured): RM 2.3.2 says the
   peripherals run in the Sleep, and they do - USART3's transmitter kept
   raising its request - but no item moves until the core wakes. The
   CH32V203's and the CH32V303's answer ([../ch32vx03/dma.md](../ch32vx03/dma.md)).
-- **A raised request is HELD** (measured, "A released requester" below):
+- **A raised request is held** (measured, "A released requester" below):
   the CH32V203's answer again, and the release contract's case.
 - **The block's gate, DMA1EN in RCC_AHBPCENR, is closed at reset**
   (measured; the register's reset value opens the USB blocks and SRAMEN),
@@ -83,17 +130,17 @@ engines do with each:
 
 | item | used | how, or why not |
 |---|---|---|
-| the register file (CFGR, CNTR, PADDR, MADDR) | yes | PADDR and the configuration word at `arm()`, once; a block is FIVE STORES - CFGR with EN clear, CNTR, MADDR, INTFCR, CFGR with EN - and no load; the copy engine's SIX, PADDR the second. The word is kept in the engine, because the enable store needs it and a read-modify-write would read it back from the bus |
+| the register file (CFGR, CNTR, PADDR, MADDR) | yes | PADDR and the configuration word at `arm()`, once; a block is five stores - CFGR with EN clear, CNTR, MADDR, INTFCR, CFGR with EN - and no load; the copy engine's six, PADDR the second. The word is kept in the engine, because the enable store needs it and a read-modify-write would read it back from the bus |
 | the write protection of 9.2.1, and EN standing after a block | yes | the block's first store is the word with EN clear: the disable the note asks for, which EN standing from the last block makes necessary, and the store that changes the beat or the increment in the same access - and every address store comes after it (PADDR stored first was dropped, measured) |
-| the two width fields | yes | the BEAT: PSIZE and MSIZE both follow the element of the run a block is handed (8, 16 or 32 bits); unequal widths (table 9-1's packing and truncation, measured as the table spells it) declined - no transport's register and buffer differ in width; the one-shot channel takes them |
-| the address alignment of 9.3.5/9.3.6 | yes | a run off its beat's boundary is REFUSED, its caller falling back to whatever moves it otherwise |
+| the two width fields | yes | the beat (the width of one item moved): PSIZE and MSIZE both follow the element of the run a block is handed (8, 16 or 32 bits); unequal widths (table 9-1's packing and truncation, measured as the table spells it) declined - no transport's register and buffer differ in width; the one-shot channel takes them |
+| the address alignment of 9.3.5/9.3.6 | yes | a run off its beat's boundary is refused, its caller falling back to whatever moves it otherwise |
 | the increments | yes | MINC per block (a run, or one fixed cell a bus write clocks out or a discard cell a bus read fills); PINC for the copy |
 | memory to memory | yes | `DmaCopyEngine`: no request, the channel runs from its enable |
 | circular mode | the receive engine's circular shape (`arm_ring()`) | a byte transport's receive ring: the channel writes the whole storage lap after lap, its count the producer index of util/ring.hpp's `HardwareRing`, the completion a lap counted by `lap()`; a transmit ring declined - a circular channel cannot be stopped at the producer's head; a circular player waits for its first block-stream user |
 | the half-transfer flag | the receive ring's | the ring's half mark: the edge twice a lap of a stream with no silence; no other engine acts on a midpoint |
 | the completion interrupt | per binding | `arm()` names the flags whose interrupt the binding wants |
-| one flag register for eight channels | yes | a transport serving two channels in one handler body reads INTFR ONCE |
-| the priorities | yes | an argument of `arm()`, and THE LEVEL IS THE PERIPHERAL'S ([../design/dma.md](../design/dma.md)): by default the receive engine at very_high, the transmit engine at high, the copy at low; the USART's ring at very_high (`UartOptions::rx_priority` the knob) and its transmit at high; the I2C host's two at high (it stretches SCL behind a starved channel and loses nothing, [i2c.md](i2c.md)); strict - the level, then the lower number (9.2.1, measured) |
+| one flag register for eight channels | yes | a transport serving two channels in one handler body reads INTFR once |
+| the priorities | yes | an argument of `arm()`, and the level is the peripheral's ([design/dma.md](../design/dma.md)): by default the receive engine at very_high, the transmit engine at high, the copy at low; the USART's ring at very_high (`UartOptions::rx_priority` the knob) and its transmit at high; the I2C host's two at high (it stretches SCL behind a starved channel and loses nothing, [i2c.md](i2c.md)); strict - the level, then the lower number (9.2.1, measured) |
 | the software trigger | yes | MEM2MEM is the only one: there is no trigger register beside it |
 | the gate | yes | opened once, by `arm()` |
 | the transfer error | yes | armed on every engine; it clears EN by itself (9.2.1) and an engine's `abandon()` halts the channel and counts the fault |
@@ -112,7 +159,7 @@ defaults - with eight channels:
   INTFR, and `any_working()` - a channel enabled and circular or with items
   left, the platform's question before it sleeps.
 - `DmaChannel<ch>` is one channel, 1..8, with its whole register surface
-  as ONE-SHOT verbs for a suite or a rare user: `configure(DmaChannelConfig)`,
+  as one-shot verbs for a suite or a rare user: `configure(DmaChannelConfig)`,
   `set_count()`, `set_peripheral()` / `set_memory()`, `prepare()` and
   `load()` over a `DmaTransfer` (both ends, a count, a config - both ends'
   alignment checked against their widths), `enable()`, `count()` live,
@@ -120,19 +167,19 @@ defaults - with eight channels:
   bits), `arm(mask, on)` for the three interrupt enables, `isr()` - the
   ISR body that reads only the ARMED flags that are up, clears exactly
   those with GIF and hands them back -, `progress()` and `stop()`. Every
-  configuring verb REFUSES while the channel is enabled and for the one
+  configuring verb refuses while the channel is enabled and for the one
   config the chapter forbids, and opens the gate first.
-- `DmaTxEngine<ch, Elem>` and `DmaRxEngine<ch, Elem>` are the TRANSFER
-  ENGINES, in the TWO MOMENTS ([../design/dma.md](../design/dma.md)):
+- `DmaTxEngine<ch, Elem>` and `DmaRxEngine<ch, Elem>` are the transfer
+  engines, in the two moments ([design/dma.md](../design/dma.md)):
   `arm(data, interrupts, priority)` binds the channel to its peripheral
   register - the gate, the channel stopped, PADDR, the configuration word
   kept, the PFIC line - and a block writes its five stores. The beat is
   the run's element, `Elem` the widest the binding allows. The transmit
-  engine is BUSY from its `claim()` to `complete()`; `launch(run)`
+  engine is busy from its `claim()` to `complete()`; `launch(run)`
   programs a claimed engine outside the caller's mask; `start(run)` is
   the two together; `start_fixed(cell, n)` sends `n` copies of one
   element. The receive engine's `start(run)`, `start_discard(cell, n)`,
-  `take()`, `full()`, `capacity()`, `idle()`; its CIRCULAR SHAPE,
+  `take()`, `full()`, `capacity()`, `idle()`; its circular shape,
   `arm_ring(data, storage, half_mark, priority)`, binds a caller's whole
   ring storage and starts it for good, and makes the engine util/ring.hpp's
   `RingCounter`: `remaining()` is CNTR, `laps()` the completions `lap()`
@@ -142,13 +189,13 @@ defaults - with eight channels:
   `faults()`, `stop()`.
 - `DmaCopyEngine<ch, Elem>` is memory to memory on any channel:
   `arm(priority, interrupt)` once, low unless named; `copy(dst, src, n)`
-  and `fill(dst, cell, n)` - the cell IN MEMORY, the caller's -, `busy()`
+  and `fill(dst, cell, n)` - the cell in memory, the caller's -, `busy()`
   (polled, it frees the engine at the completion or the error it finds),
   `abandon()`, `isr()`, `faults()`.
 - [brio/ch32x035/dma_engine.hpp](../../brio/ch32x035/dma_engine.hpp) is
   what a transport may know without the controller: the `NoDmaEngine`
   tag, `DmaPriority`, `dma_engine_channel()`, `dma_engines_distinct()`,
-  and THE REQUEST TABLE - `DmaRequest`, `dma_request_channel()` per part,
+  and the request table - `DmaRequest`, `dma_request_channel()` per part,
   `DmaRequestOf<r>` refusing a peripheral the part has not got, and the
   USARTs' channels read out of it, which the `Uart` checks its engines
   against at compile time.
@@ -228,15 +275,15 @@ sleep: `idle()` returns at once while `Dma::any_working()` answers true
 
 ## Bench findings
 
-The reference suite is `test_x035_dma` on the CH32X035F8U6 at 48 MHz, ITS
-OWN CONSOLE ON THE TWO ENGINES (USART2 on channels 7 and 6), 55 verdicts
+The reference suite is `test_x035_dma` on the CH32X035F8U6 at 48 MHz, its
+own console on the two engines (USART2 on channels 7 and 6), 55 verdicts
 in `z`; the paced loads are USART3's transmitter, whose column is handed
 no pad. The transport's engines across a wire are `test_x035_usart`'s
 ([usart.md](usart.md)).
 
 - **Memory to memory, three widths, exact** (letter `b`): 64 bytes, 32
   half-words and 16 words copied, CNTR down to zero, TCIF and HTIF with
-  GIF, the write-one clear taking every flag down, EN STANDING after the
+  GIF, the write-one clear taking every flag down, EN standing after the
   block; a fixed source filling a run with one word; a half-word block
   programmed on an odd address moving the even address's half-words.
 - **Six HCLK cycles an item at every width** (letter `b`, every interrupt
@@ -266,10 +313,10 @@ no pad. The transport's engines across a wire are `test_x035_usart`'s
   at 115200.
 - **`DmaCopyEngine`** (letter `g`): copy and fill at the three beats,
   polled and by its own interrupt, exact; the refusals; `abandon()`
-  stopping a 4096-byte fill with 4090 to 4092 left in CNTR. **A PADDR STORED WITH
-  EN STANDING IS DROPPED**: written before the restart's disable - the
+  stopping a 4096-byte fill with 4090 to 4092 left in CNTR. **A PADDR stored with
+  EN standing is dropped**: written before the restart's disable - the
   order the CH32V006's copy engine uses - a copy after a completed block
-  read the PREVIOUS block's source, and the letter's half-word and word
+  read the previous block's source, and the letter's half-word and word
   copies and its fills came out wrong; the engine stores PADDR after the
   disable (`DmaEngineChannel::restart_from()`), and the letter is green.
 - **Circular mode** (letter `h`): a block of four bytes from the flash
@@ -281,21 +328,21 @@ no pad. The transport's engines across a wire are `test_x035_usart`'s
   at low, first, moved nothing more once channel 8 at very_high came -
   the level decides; at one level channel 8, first, moved nothing once
   channel 1 came, mid-block - the lower number decides; and channel 1,
-  first at one level, kept the bus until its block ended. A CPU POLLING
+  first at one level, kept the bus until its block ended. A CPU polling
   INTFR in a tight loop let the outranked channel through four to eight
   items in 512 - the verdicts read the quiet windows.
-- **IN SLEEP THE CONTROLLER MOVES NOTHING** (letter `k`, the platform's
+- **In Sleep the controller moves nothing** (letter `k`, the platform's
   WFE sequence entered without its guard): a 4096-byte copy started just
   after a tick had 3862 to 4037 items left when the next interrupt woke
   the core 17 000 to 47 000 cycles later, and 256 bytes paced by USART3 at
   1 Mbaud took 49 to 50 times their pace, moving only while the core was
-  awake. THROUGH THE PLATFORM'S `idle()`, which does not sleep over a
+  awake. Through the platform's `idle()`, which does not sleep over a
   working channel, the same copy ended by its own interrupt in 25 256 to
   25 656 cycles - the controller's rate - and the paced block in 998 to
   1000 thousandths of its pace; and a receive ring, a channel that is
   always working, holds the program awake: with the console's ring
   running, twenty ticks took 2766 to 3189 turns of `idle()`.
-- **THE BENCHMARK ROW** (letter `m`, [../design/benchmark.md](../design/benchmark.md)'s
+- **The benchmark row** (letter `m`, [design/benchmark.md](../design/benchmark.md)'s
   grammar, every line to the completion interrupt, the best of eight):
   copy 4096 bytes in 6721 to 6729 cycles, x = 6.56 to 6.57 against one word a cycle - 6.0
   cycles an item; fill from a cell in SRAM 6632 to 6640, x = 6.47 to 6.48 - 6.0; copy from
@@ -306,7 +353,7 @@ no pad. The transport's engines across a wire are `test_x035_usart`'s
 
 ### A released requester
 
-THE RELEASE CONTRACT ([../design/dma.md](../design/dma.md)), measured on
+The release contract ([design/dma.md](../design/dma.md)), measured on
 this die (letter `i`): USART3 opened with DMAT and its transmitter on, its
 TXE request standing on channel 2 with no channel enabled to take it, then
 let go one way, then channel 2 bound by its next owner - a four-byte block
@@ -318,7 +365,7 @@ into a RAM cell, request-paced - and its count read 300 us later:
 | DMAT cleared, the block clocked and enabled | 1 |
 | UE, TE and DMAT cleared, the clock on | 1 |
 | the gate closed with DMAT set | 1 |
-| THE RESET LINE, then the gate | 0 |
+| the reset line, then the gate | 0 |
 
 A raised request outlives every release short of the reset line, and the
 next owner of the channel takes one stray item at its first enable - the
@@ -336,7 +383,7 @@ suites (the letters there):
 | I2C1's RxNE under DMAEN, a read stalled (7) | 4 | 0 | 0 (PE) | 0 |
 
 A timer's request is held like USART3's - the next owner takes one stray
-item and then serves nothing, a DEAD CHANNEL ([i2c.md](i2c.md), letter
+item and then serves nothing, a dead channel ([i2c.md](i2c.md), letter
 p); the software compare event (SWEVGR's CCxG) raised none. SPI1's
 outlives a closed gate while SPE stands and falls with SPE; I2C1's falls
 with its gate. Each block's `release()` pulses its reset line before the
