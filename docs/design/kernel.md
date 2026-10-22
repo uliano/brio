@@ -50,10 +50,12 @@ by the kernel, runs a short piece of code to completion (this is
 called **run-to-completion**), possibly posts events to other active
 objects, arms a timer or changes state, and returns. Between two
 events it holds no local variables and no stack of its own: all its
-data is static. The kernel has no way to suspend an active object and
-resume it later, so an active object cannot wait for anything inside a
-handler; if a handler calls a function that waits for hardware, every
-other active object on that core waits with it.
+data is static. The kernel has no way to make an active object wait
+and resume it when what it waited for arrives, so an active object
+cannot wait for anything inside a handler; if a handler calls a
+function that waits for hardware, every other active object on that
+core waits with it (under Rubato, every object of its own and lower
+priority).
 
 The **kernel** is a loop on the single main stack. Each turn it posts
 the time events that have matured, then serves one event from the
@@ -143,14 +145,14 @@ compiler-checked list of requirements on a type, named `ActiveObject`:
   whose `take_hold()` says whether the object held the slot it was
   just dispatched from, whose `release()` takes a slot's number back,
   and whose `empty()` answers a `bool`;
-- a static `init()`, called once by `Tenuto::init_all()` in list order,
+- a static `init()`, called once by the kernel's `init_all()` (Tenuto's or Rubato's) in list order,
   before the first event is served; an `Fsm`-based object calls
   `start(&initial)` here;
 - a static `dispatch(const Event&)`, which handles one event to
   completion.
 
 That is the **formal half**: names, signatures and return types,
-checked by the compiler where an active object enters `Tenuto<...>`.
+checked by the compiler where an active object enters `Tenuto<...>` or `Rubato<...>`.
 The **informal half** is the set of rules the compiler cannot see and
 that the kernel is written assuming:
 
@@ -917,7 +919,8 @@ program without a power manager pays nothing.
 
 `Rubato<P, Ao1, Ao2, ...>` is the second kernel: the same list, the
 same objects, queues, state machines, delivery primitives, time events,
-loans and panic path, and the same compile-time checks. Its name is the
+loans and panic path, and the same compile-time checks plus one, fewer
+than 255 objects, since a list index is a byte. Its name is the
 musical marking for tempo stolen from one note and given back to
 another. What it adds is one thing: **the dispatch of a higher-priority
 object may start while a lower-priority dispatch is suspended, on the
@@ -926,10 +929,16 @@ returns.** Nothing is ever suspended in the other direction: an object
 of equal or lower priority than the one running waits, as under Tenuto.
 
 The ceiling. The platform keeps one byte, `P::ceiling`: the list index
-of the object being dispatched, 255 at the loop's base. Only an object
-whose index is below the ceiling may start a dispatch. Every `post()`
-compares the receiver's index with the ceiling after the copy and, when
-it is below, asks the platform for the scheduler (`P::pend_schedule()`).
+of the object being dispatched, 255 at the loop's base, and 0 while
+nothing may be dispatched at all (during `init_all()`'s inits and while
+the loop posts the matured time events). "Above the ceiling" in what
+follows means a smaller index, that is a higher priority. Only an
+object whose index is below the ceiling may start a dispatch. Every
+`post()` compares the receiver's index with the ceiling after the copy
+and, when it is below, asks the platform for the scheduler
+(`P::pend_schedule()`); the compare reads the ceiling once, and a
+request that finds its queue already served by a scheduler that ran in
+between serves nothing and costs one pass of the scan.
 The scheduler is `activate()`: it serves the highest non-empty queue
 below the ceiling, one event, with the ceiling raised to that object's
 index for the length of the dispatch and restored after it, and repeats
@@ -952,6 +961,11 @@ Two roads lead to a dispatch that preempts another:
 A post to an object at or below the ceiling, the poster itself
 included, waits as under Tenuto: until no dispatch of its receiver's
 priority or higher is running or suspended, and then in list order.
+`publish` is one post per subscriber in the subscriber list's order,
+each of which may run its receiver's dispatch inside it before the
+next. How the platform tells a handler's call of `pend_schedule()`
+from a dispatch's is its own: the exception mechanics on a Cortex-M,
+a flag the harness raises on the host.
 
 What never changes. A handler is never re-entered, and an object is
 never dispatched while one of its own dispatches is suspended, because
@@ -959,9 +973,11 @@ its index is never below a ceiling raised to it; so an object's own
 statics need no lock and its queue keeps one consumer. A dispatch still
 runs to its end before any object of its own or lower priority runs.
 Nothing blocks, nothing has a stack of its own, nothing is sliced in
-time; the kernel loop at its base is Tenuto's (time events, the
-scheduler, sleep when every queue is empty), and a preempting dispatch
-never sleeps. The two-core model is unchanged: a Rubato per core, the
+time; the kernel loop at its base is Tenuto's turn (the matured time
+events posted with the ceiling held at 0, so that no fire dispatches
+and the scheduler then serves them in priority order; the scheduler;
+sleep when every queue is empty), and a preempting dispatch never
+sleeps. The two-core model is unchanged: a Rubato per core, the
 doorbell's handler an interrupt handler like any other.
 
 The loans ([payloads](#4-payloads-what-travels-inside-the-event-kernelborrowedhpp)).
@@ -998,23 +1014,27 @@ higher priority is served before a lower one resumes, and nothing more;
 no response time, no fairness, no ageing. A long dispatch delays every
 object of its own and lower priority by its length. The stack is one,
 sized by the deepest chain of nested dispatches plus the deepest
-interrupt frame over it, and is measured, not computed.
+interrupt frame over it; it is to be measured on each realization, not
+computed, and no figure exists yet.
 
 What the platform provides is the three members above
 ([the platform](#11-platform-what-the-machine-provides-kernelplatformhpp)).
 `pend_schedule()` runs `activate()` when no interrupt handler is
 running: at once when called from a dispatch, at the handler's exit
-when called from one. On a Cortex-M that is PendSV at the lowest
-exception priority, below every peripheral line; the kernel never
-names the vector, the application binds it as it binds every other.
-The realizations are the platform's table; today the host platform is
-the one that exists (`RubatoHostPlatform`, `host/platform.hpp`), and
-the host suite (`test/test_rubato`) is the specification every target
-realization is judged by: the ceiling over both roads, an object never
-nested in itself, the chain of three, the loans and the lender's trap,
-a hold under preemption, timers armed and disarmed inside a walk of
-the list, idle at the base only, overflow unchanged, the ring's guard
-counted, and Tenuto's traces reproduced when no interrupt ever fires.
+when called from one. On a Cortex-M the design is PendSV at the lowest
+exception priority, below every peripheral line, with the kernel never
+naming the vector and the application binding it as it binds every
+other; that realization is being built and is not in the tree. Today
+the host platform is the one that exists (`RubatoHostPlatform`,
+`host/platform.hpp`), and the host suite (`test/test_rubato`) is the
+specification every target realization is judged by: the ceiling over
+both roads, an object never nested in itself, the chain of three, the
+loans and the lender's trap, a hold under preemption, timers armed and
+disarmed inside a walk of the list and the matured ones served in
+priority order, idle at the base only, overflow unchanged, the ring's
+guard counted, and Tenuto's scenarios giving Tenuto's traces when no
+interrupt ever fires. `Lease::reply` under preemption is reasoned, not
+yet in the suite.
 
 Not Rubato: a blocking kernel (a handler that waits is a different
 kernel's, reserved under the name `Fermata` and not built), a
@@ -1259,14 +1279,16 @@ time event. The members:
   guarded with `if constexpr` on it).
 - `panic_record()`: a reference to a `PanicRecord` in storage that
   survives a reset without being zeroed by the startup code.
-- Optional, and only together, the three members of a preemptive
-  platform, the one Rubato runs on, detected by the `Preemptive`
-  concept: `preemptive` (true), `ceiling` (a byte, the list index of
-  the object being dispatched, 255 at the loop's base) and
-  `pend_schedule()`, the scheduling request ("Rubato" in
-  [the scheduler](#8-scheduler-kerneltenutohpp)). A platform with none
-  of them is Tenuto's, and every header that asks compiles for it what
-  it compiled before the question existed.
+- Optional, as a set, the three members of a preemptive platform, the
+  one Rubato runs on, detected by the `Preemptive` concept:
+  `preemptive` (true), `ceiling` (a byte, the list index of the object
+  being dispatched, 255 at the loop's base) and `pend_schedule()`, the
+  scheduling request ("Rubato" in
+  [the scheduler](#8-scheduler-kerneltenutohpp)). A platform that
+  declares `preemptive` without the other two is not preemptive:
+  Rubato refuses it, and the other headers treat it as Tenuto's. A
+  platform with none of them is Tenuto's, and every header that asks
+  compiles for it what it compiled before the question existed.
 
 And one promise that has no member because it is a fact about the
 whole machine: **an interrupt handler is not interrupted by another
@@ -1475,11 +1497,11 @@ Include graph (arrows mean "is included by"; nothing here includes
 anything outside `kernel/` and the standard freestanding library):
 
     platform.hpp        <- event_queue.hpp, post.hpp, time.hpp, panic.hpp,
-                           time_event.hpp, tenuto.hpp
+                           time_event.hpp, tenuto.hpp, rubato.hpp
     fsm.hpp             <- post.hpp
-    active_object.hpp   <- time_event.hpp, tenuto.hpp
-    post.hpp            <- time_event.hpp, tenuto.hpp
-    time_event.hpp      <- tenuto.hpp
+    active_object.hpp   <- time_event.hpp, tenuto.hpp, rubato.hpp
+    post.hpp            <- time_event.hpp, tenuto.hpp, rubato.hpp
+    time_event.hpp      <- tenuto.hpp, rubato.hpp
     tenuto.hpp          <- rubato.hpp (the Pack and the checks)
     borrowed.hpp        <- event_queue.hpp (and util/ producers of loans)
 

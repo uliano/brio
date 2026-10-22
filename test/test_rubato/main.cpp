@@ -624,14 +624,38 @@ TEST_CASE("a periodic timer far behind posts once per process(), its deadlines k
 
 namespace {
 
+/// One turn of run()'s loop, as run() does it: the matured time events
+/// posted with the ceiling held at 0, then the scheduler, then sleep.
 void turn() {
+    RP::ceiling = 0;
     brio::TimeEvents<RP>::process();
+    RP::ceiling = 255;
     if (!K::activate()) {
         K::idle_if_empty();
     }
 }
 
 } // namespace
+
+TEST_CASE("timers matured in one turn are served in priority order, none inside the walk") {
+    reset();
+    // Low's timer is armed last, so it is first in the armed list: a
+    // fire that could activate would serve Low before High.
+    to_high.arm(5);
+    to_mid.arm(5);
+    periodic_low.arm(5);
+    RP::ticks = 5;
+    const uint32_t before = activations;
+    turn();
+    CHECK(activations == before);              // no fire asked for the scheduler
+    CHECK(RP::requests == 0);
+    REQUIRE(trace.size() >= 6);
+    CHECK(trace[0] == "hi10:c0");
+    CHECK(trace[2] == "mid30:c1");
+    CHECK(trace[4] == "lo20:c2");
+    CHECK(RP::ceiling == 255);
+    periodic_low.disarm();
+}
 
 TEST_CASE("idle is called only from the base, and only when every queue is empty") {
     reset();

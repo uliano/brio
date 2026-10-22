@@ -104,12 +104,16 @@
  *    runs when no interrupt handler is running: at once from a
  *    dispatch, at the handler's exit from an interrupt handler.
  *
- * Optional member of a HOST platform only, detected the same way:
+ * Optional members of a HOST platform only, detected the same way:
  *  - interleave_point(): called by EventQueue's take() and release() at
  *    every boundary between two of their shared accesses - each place
  *    an interrupt could land - so a host suite can push from there and
  *    check every interleaving (test/test_event_queue). No target
- *    platform has it, and no code is compiled for it there.
+ *    platform has it, and no code is compiled for it there;
+ *  - preempt_point(): called by TimeEvents::process() after each fire
+ *    on a preemptive platform, the place a host suite lands a simulated
+ *    interrupt inside the walk (test/test_rubato); a test object's
+ *    handler may call it too. No target platform has it.
  */
 
 #pragma once

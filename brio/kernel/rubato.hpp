@@ -53,7 +53,10 @@
  * runs. Nothing blocks, nothing has a stack of its own, nothing is
  * sliced in time. Before every object's init() has run nothing is
  * dispatched: init_all() holds the ceiling at 0 while the inits run, so
- * an event posted from an init() waits for the loop, as under Tenuto.
+ * an event posted from an init() waits for the loop, as under Tenuto;
+ * and run() holds it at 0 while the matured time events are posted, so
+ * the base turn serves them in priority order, as Tenuto does (run()'s
+ * comment).
  *
  * The loans under preemption (kernel/borrowed.hpp). A Lease::dispatch
  * borrower precedes its lender in the list, so a loan posted from the
@@ -165,11 +168,20 @@ public:
     /// Initialize every active object, then loop forever: time events,
     /// the scheduler, sleep when idle. Call once, with interrupts enabled
     /// and the clock, the timebase and the platform's scheduling request
-    /// set up.
+    /// set up. The time events are posted with the ceiling held at 0,
+    /// as init_all() holds it: a fire is a post, and a post that could
+    /// activate would serve the matured timers in the armed list's order
+    /// instead of the list's; with the ceiling at 0 every fire only
+    /// queues, nothing is dispatched during the walk (a request an
+    /// interrupt handler makes meanwhile waits for the walk's few
+    /// cycles), and activate() then serves in priority order - the base
+    /// turn is Tenuto's.
     [[noreturn]] static void run() {
         init_all();
         for (;;) {
+            P::ceiling = 0;
             TimeEvents<P>::process();
+            P::ceiling = 255;
             if (!activate()) {
                 idle_if_empty();
             }
