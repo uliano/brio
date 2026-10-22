@@ -180,6 +180,16 @@
  * the owner's pushes and takes. The mispost check runs before push()
  * touches anything, and its counter saturates like overflow's.
  *
+ * A preemptive platform's queue
+ *
+ * On a platform that is Preemptive (kernel/platform.hpp), the queue
+ * carries one byte more, its owner's scheduling priority (QueuePriority
+ * below), which post() compares with the platform's ceiling after the
+ * push. Nothing else of the queue changes: a post that activates a
+ * dispatch does so after push() has returned, outside its critical
+ * section, and the consumer is still one, the owner, because an object
+ * is never dispatched while a dispatch of its own is suspended.
+ *
  * A host platform that explores interleavings offers `interleave_point()`
  * (kernel/platform.hpp): take() and release() call it at every boundary
  * between two of their shared accesses, where an interrupt could land,
@@ -216,9 +226,28 @@ struct MispostCounter {
 };
 struct NoMispostCounter {};
 
+/// The scheduling priority of a queue on a preemptive platform
+/// (kernel/platform.hpp's Preemptive): the pack index of the active
+/// object that owns it, 0 the highest, written by Rubato's init_all()
+/// (kernel/rubato.hpp) and compared by post() with the platform's
+/// ceiling. 255 means none - an object in no Rubato pack, never activated
+/// by a post - and is the value before init_all(). It is stored XOR 255,
+/// so that this default is the all-zero state and a static queue stays
+/// in .bss ("Why a static queue is all zero" above). Every other queue
+/// carries NOTHING of it: an empty base, no byte.
+struct QueuePriority {
+    uint8_t priority() const { return static_cast<uint8_t>(inverted_ ^ 0xFFu); }
+    void set_priority(uint8_t index) { inverted_ = static_cast<uint8_t>(index ^ 0xFFu); }
+
+private:
+    uint8_t inverted_{0};   // the priority XOR 255: zero is none
+};
+struct NoQueuePriority {};
+
 template <typename E, uint8_t depth, Platform Plat>
 class EventQueue
-    : private std::conditional_t<CoreAware<Plat>, MispostCounter, NoMispostCounter> {
+    : private std::conditional_t<CoreAware<Plat>, MispostCounter, NoMispostCounter>,
+      public std::conditional_t<Preemptive<Plat>, QueuePriority, NoQueuePriority> {
     static_assert(depth >= 1, "queue depth must be at least 1");
     static_assert(depth <= 254, "slot numbers are 1 to depth + 1 in a byte: at most 255 slots");
     static_assert(std::is_trivially_copyable_v<E>,

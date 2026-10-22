@@ -12,8 +12,19 @@
  * in the queue slot, with interrupts masked for the few instructions of
  * the copy) and returns at once. It never waits: on a full queue the
  * event is dropped and the queue's saturating overflow counter counts
- * it. Nothing of the receiver runs inside post(); the receiver handles
- * the event in its own dispatch, on a later turn of the kernel loop.
+ * it. Under Tenuto nothing of the receiver runs inside post(); the
+ * receiver handles the event in its own dispatch, on a later turn of the
+ * kernel loop.
+ *
+ * Under Rubato, on a preemptive platform (kernel/platform.hpp), post()
+ * does one thing more after the copy: when the receiver's priority is
+ * above the platform's ceiling (the object being dispatched, or none at
+ * the loop's base) it asks for the scheduler, P::pend_schedule(). Called
+ * from a dispatch, the receiver's dispatch then runs inside post(), which
+ * returns after it; called from an interrupt handler, it runs at the
+ * handler's exit (kernel/rubato.hpp). A post to an object at or below the
+ * ceiling, the poster itself included, waits as under Tenuto. On every
+ * other platform the question is not compiled at all.
  *
  * The compiler checks that the receiver accepts the event: an event type
  * that is not among the receiver's alternatives is an error at the call.
@@ -33,14 +44,18 @@
 
 #pragma once
 
+#include <stdint.h>
 #include <concepts>
+#include <type_traits>
 
 #include "kernel/fsm.hpp"
+#include "kernel/platform.hpp"
 
 namespace brio {
 
 /// Copy one event (any alternative of Ao::Event) into Ao's queue. Any
-/// context; never waits; a full queue drops and counts.
+/// context; never waits; a full queue drops and counts. On a preemptive
+/// platform, then ask for the scheduler when Ao is above the ceiling.
 template <typename Ao, typename Ev>
     requires std::constructible_from<typename Ao::Event, Ev>
 void post(const Ev& e) {
@@ -48,6 +63,13 @@ void post(const Ev& e) {
                   "Entry/Exit are reserved for the transition machinery "
                   "and cannot be posted");
     Ao::queue.push(e);
+    using Q = std::remove_cvref_t<decltype(Ao::queue)>;
+    if constexpr (requires { requires Preemptive<typename Q::Platform>; }) {
+        using Plat = typename Q::Platform;
+        if (Ao::queue.priority() < Plat::ceiling) {
+            Plat::pend_schedule();
+        }
+    }
 }
 
 /// A compile-time subscriber list for publish().
