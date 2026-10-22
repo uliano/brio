@@ -3,7 +3,8 @@
 WCH's own evaluation board for the CH32X035 series in the edition that
 carries a CH32X035F8U6 (QFN20, 62 KB of code flash and 20 KB of SRAM,
 the QingKe V4C core, RV32IMAC, at up to 48 MHz on its internal
-oscillator): the bench part of the `ch32x035/` stratum
+oscillator): the bench part of the `ch32x035/` stratum, the directory of
+`brio/` that holds this family's drivers
 ([../ch32x035/README.md](../ch32x035/README.md)). What the board offers
 a brio program is every pad the package bonds on two headers, a USB-C
 connector on the chip's own USB pads, two LEDs reached by jumper wires,
@@ -17,9 +18,10 @@ CH32X035EVT package (the QFN20 edition's sheet, its sources under
 `SCHPCB/CH32X035F8U6-R0`, the PCB `CH32X035F8U-R0-1v1`), with the
 CH32X035/X033 datasheet V1.7 for the pins
 ([../ch32x035/vendor/README.md](../ch32x035/vendor/README.md)). The
-chip's own identity is the platform suite's first letter's: 62 KB of
-code flash, the unique identifier, and the word WCH's library reads as
-the chip identifier, 0x035E0611 on the board's CH32X035F8U6, the
+chip's own identity is what the platform test suite prints at its
+first letter (a letter is one command key of a suite's console): 62 KB
+of code flash, the unique identifier, and the word WCH's library reads
+as the chip identifier, 0x035E0611 on the board's CH32X035F8U6, the
 library's 0x035E06x1 for this part
 ([../ch32x035/platform.md](../ch32x035/platform.md)). The rest of the
 page is the schematic's and the reference's, with what the suites
@@ -59,8 +61,9 @@ below, PC14 reading low under its pull-up against the CC1 line's
   of the header P4. A LED reaches a pad only through a jumper wire, and
   lights with that pad driven low. The apps of the project drive PA0
   (P1 pin 11) as their LED, the pad WCH's own GPIO example toggles, so
-  with LED1 jumpered from P4 pin 1 to P1 pin 11 **an app's `LED ON`
-  darkens it**. The schematic's net LED_G is not on this edition's sheet:
+  with LED1 jumpered from P4 pin 1 to P1 pin 11 **the console app's
+  `LED ON` command darkens it**. The schematic's net LED_G is not on
+  this edition's sheet:
   it belongs to another board of the EVT package, the USB PD one
   (`SCHPCB/CH32X035USBPD_CH211`).
 - **Buttons**: S4 (`Download`) ties PC17 to 3.3 V through 4.7 kOhm
@@ -89,7 +92,7 @@ Two of 7x2, carrying every pad the package bonds:
   as S4 does: a resistor from PC17 to a live rail (an I2C pull-up on
   the pad, I2C1's SDA on its column 2) holds it high at every power-up.
   Such a pull-up therefore hangs from a pad the program drives high only
-  once it runs; the desk hangs its two from PB3.
+  once it runs; the bench hangs its two from PB3.
 - **With no supply on the rail** (neither the USB nor the probe's VCC
   on P1's pin 2) the board still boots, fed through the protection
   diodes of the probe's and the console's pads, and restarts about
@@ -103,11 +106,12 @@ Two of 7x2, carrying every pad the package bonds:
 
 None is required: each suite detects its wire before it judges and says
 "no wire" otherwise. PB11 to PB12 (P2 pin 5 to P2 pin 6) serves the pin
-suite, and LED1 to PA0 lets a hand at the desk see the console's `LED`
-command. A jumper never sits on a pad wired to another board: PA4..PA7,
-PB0, PB1, PB3, PC16 and PC17 carry the desk's links to a CH32V006K8U6
-(SPI1, USART4, I2C1 and its pull-up rail), and the USART suite's
-two-board letters run across PB0/PB1 against that board's peer.
+suite, and LED1 to PA0 lets a hand at the bench see the console app's
+`LED` command. A jumper never sits on a pad wired to another board:
+PA4..PA7, PB0, PB1, PB3, PC16 and PC17 carry the bench's links to a
+CH32V006K8U6 (SPI1, USART4, I2C1 and its pull-up rail), and the USART
+suite's two-board letters run across PB0/PB1 against that board's peer,
+the program on the far end that answers the suite.
 
 ## Flashing
 

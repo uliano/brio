@@ -15,15 +15,19 @@ on its board, with what is excluded and why in "Not covered yet".
 
 A stratum is a directory of `brio/` holding one architectural layer;
 `brio/ch32vx03/` holds everything that knows the register map the
-CH32V203 and the CH32V303 share. The core is WCH's QingKe V4B, a RISC-V
+CH32V203 and the CH32V303 share. A test suite's console takes one
+command key per group of verdicts, which the pages call a letter, `z`
+running a suite's single-board set. The core is WCH's QingKe V4B, a RISC-V
 core with the RV32IMAC instruction set (thirty-two registers, a
 multiplier and a divider, the atomic extension, user mode and a 64-bit
 system counter), on the CH32V203C8T6 of the bench (64 KB of flash,
 20 KB of SRAM, 144 MHz); and the QingKe V4F of the CH32V303, the same
 core with a single-precision floating-point unit (RV32IMAFC), on the
-CH32V303VCT6 (256 KB of zero-wait flash, 64 KB of SRAM, 144 MHz), the
-reference manual's CH32V30x_D8, the third device class of this stratum
-beside the CH32V203's two. The fact this target exists to keep true is
+CH32V303VCT6 (256 KB of zero-wait flash, the part of its 480 KB array
+the core reads with no wait state, the rest being the tail; 64 KB of
+SRAM; 144 MHz), the reference manual's CH32V30x_D8, the third device
+class of this stratum beside the CH32V203's two. The fact this target
+exists to keep true is
 the same as every other's: the kernel (`kernel/`) and the services
 (`util/`) compile here unchanged. There is no maintained teaching
 example in this project: the console and the test suites are its
@@ -95,7 +99,8 @@ project, so every CMake command runs from `ch32vx03/`:
 (cd ch32vx03 && cmake --build --preset ch32v203c8-release --target console-upload)
 (cd ch32vx03 && cmake --build --preset ch32v303vc-release --target console)   # the CH32V303: rv32imafc_xw, ilp32f
 brio flash <board> console    # the same thing through the bench's one command
-brio check ch32vx03 [name]    # family smoke, no hardware
+brio run <board> z            # a suite's single-board set, judged
+brio check ch32vx03 [name]    # the family compile check, no hardware
 ```
 
 One configure targets one part. The part number selects the part
@@ -134,7 +139,10 @@ that board too, its attach rewriting RCC_CFGR0 and setting the debug
 module's low-power bits on a running chip
 ([../probes/wch-link.md](../probes/wch-link.md)). WCH's OpenOCD fork at
 `/sw/wch-openocd` is the only OpenOCD that speaks the probes' SDI
-transport.
+transport. The upload target and `brio flash` run the same thing:
+`openocd -f wch-riscv.cfg -c "program <app>.elf verify" -c "reset
+halt" -c resume -c exit`, the probe named by its USB serial when the
+manifest gives one.
 
 **`reset run` does not start the program.** In that fork the verb
 leaves the hart sitting at the reset vector with every peripheral at
@@ -155,7 +163,9 @@ flash driver and a stop on `main()`; the CH32V303 entry wants the
 `ch32v303vc-debug` preset, built with F and the ilp32f ABI, so gdb shows
 the f-registers and fcsr beside the integer file. Both are configured,
 not verified: neither has been driven from the editor. What the
-bring-up used is the fork's own console over the same probe.
+bring-up used is the fork's own command console (OpenOCD's telnet
+console: `halt`, `reg pc`, `reg mcause`, `mdw`, `resume`) over the same
+probe.
 
 A program that enables a line and binds no handler for it looks dead:
 the crt's weak default handler is a spin loop, with no fault and no
@@ -173,26 +183,31 @@ prints the device path and the speed.
 The chip's own USB carries the console too, as a CDC ACM port with
 pid.codes' test identity 1209:0001: on the WeAct board through the
 device controller on its USB-C ([usb.md](usb.md)), on the evaluation
-board through the host/device controller on P14 ([usbfs.md](usbfs.md)),
-one stack and one class over two controllers, the part table choosing
-which.
+board through the host/device controller on its USB-C connector P14
+([usbfs.md](usbfs.md)), one stack and one class over two controllers,
+the part table choosing which.
 
 ## Family coverage
 
 The stratum is written for the thirteen parts of the two series under
 two ISAs, the V4B's and the V4F's. `brio check ch32vx03` compiles every
-smoke TU under `test/family_ch32vx03/` for all thirteen, both ways the
-hardware prologue can be built, and demands that every `neg/` TU, a
-program that must be refused, fail for the parts its `// mcu:` line
-names; `util_all.cpp` among them is the whole of kernel/ and util/ over
-both ABIs, ilp32 and ilp32f. The check ends with the link guard of
-every app on every release preset, and adds the vector guard
-(`cli/vector_guard.py`): on the F images every naked vector's body is
-walked in the ELF, and a floating-point instruction or an unresolved
-indirect call in one is fatal ("What the silicon taught the stratum",
-the V4F's vectors). The bench proves the CH32V203C8 and the CH32V303VC;
-for the other eleven the sweep and the link guard are the only checks
-there are.
+smoke TU (a translation unit, one source file that includes a driver
+and uses it, written to prove that it compiles) under
+`test/family_ch32vx03/` for all thirteen, both ways the hardware
+prologue can be built (the project's `CH32VX03_HPE` option, on by
+default: with it the crt sets INTSYSCR.HWSTKEN and every handler takes
+WCH's fast attribute, the core saving the caller-saved registers
+itself; off, a handler is a plain `[[gnu::interrupt]]` function), and
+demands that every `neg/` TU, a program that must be refused, fail for
+the parts its `// mcu:` line names; `util_all.cpp` among them is the
+whole of kernel/ and util/ over both ABIs, ilp32 and ilp32f. The check
+ends with the link guard (every app linked on every release preset, a
+failure fatal), and adds the vector guard (`cli/vector_guard.py`): on
+the F images every naked vector's body is walked in the ELF, and a
+floating-point instruction or an unresolved indirect call in one is
+fatal ("What the silicon taught the stratum", the V4F's vectors). The
+bench proves the CH32V203C8 and the CH32V303VC; for the other eleven
+the sweep and the link guard are the only checks there are.
 
 ## What the silicon taught the stratum
 
@@ -220,17 +235,19 @@ there are.
   note 3): under the ilp32f ABI the compiler saves in an
   interrupt-attributed handler's own code the f-registers it clobbers,
   and all twenty of them as soon as it calls a function, whatever the
-  callee. So an image with F binds every vector as a naked trampoline,
-  a call of an ordinary function and MRET, whose body saves only what a
-  callee must, and `brio check ch32vx03` walks every such body in the
-  linked images and fails on a floating-point instruction it reaches; a
-  body that needs float binds with the float trampoline, which saves
-  the twenty and fcsr itself, its body starting from fcsr's reset
-  state; and a leaf, which saves nothing under the attribute, binds as
-  the attributed handler still (`BRIO_CH32_LEAF_VECTOR`), the same
-  check failing a vector bound leaf that is none, failing any binding
-  but the three macros, and reporting a trampoline whose body is one
-  ([platform.md](platform.md)). Measured on the CH32V303VCT6: a posting
+  callee. So an image with F binds every vector as a naked trampoline
+  (`BRIO_CH32_VECTOR`: a handler with no prologue of its own, a call of
+  an ordinary function and MRET, whose body saves only what a callee
+  must), and `brio check ch32vx03` walks every such body in the linked
+  images and fails on a floating-point instruction it reaches; a body
+  that needs float binds with the float trampoline
+  (`BRIO_CH32_VECTOR_FLOAT`), which saves the twenty and fcsr itself,
+  its body starting from fcsr's reset state; and a leaf, a handler that
+  calls no function and so saves nothing under the interrupt attribute,
+  binds as the attributed handler still (`BRIO_CH32_LEAF_VECTOR`), the
+  same check failing a vector bound leaf that is none, failing any
+  binding but the three macros, and reporting a trampoline whose body
+  is one ([platform.md](platform.md)). Measured on the CH32V303VCT6: a posting
   receive vector 65 cycles a byte against 105 as an attributed handler,
   a handler that calls out 65 cycles of round trip against 100, a leaf
   53 to 66 bound leaf against 57 to 70 as a trampoline; and the I2C
@@ -254,9 +271,9 @@ there are.
   the STK and TIM2 pending and enabled, woken only by a debugger's
   halt. The platform sleeps as a WFE with the mask lifted first, and the
   sleep entry swept to the cycle against the tick's edge loses no wake
-  in either order on that die; with the latch the wake leaves consumed
-  after it, none lost and one kernel turn per interrupt on both parts
-  ([platform.md](platform.md)).
+  in either order on that die; with the event latch the wake sets
+  consumed after it, none lost and one kernel turn per interrupt on
+  both parts ([platform.md](platform.md)).
 - **The reference manual's vector table is the union of four
   families.** Its table 9-2 names TIM8 at entries 59..62, which belong
   to the CH32V30x; the CH32V203's tail is USBFS, its wake-up, UART4 and
@@ -297,8 +314,10 @@ there are.
   remap tables for it; the one that starts at PC10/PC11 belongs to the
   bigger classes, and the CH32V203C8 is named explicitly in the other,
   whose default pads are PB0 and PB1. The CH32V303 reads the first, and
-  its UART4 carries the desk pair's serial link on that table's second
-  column, PB0/PB1, its engines on DMA2 ([usart.md](usart.md)).
+  its UART4 carries the board pair's serial link (the two boards are
+  wired to each other, each the far chip of the other's suites) on that
+  table's second column, PB0/PB1, its engines on DMA2
+  ([usart.md](usart.md)).
 - **A pad two peripherals share goes to an enabled transmitter, and a
   timer's forced level waits for a running counter.** With a USART's TX
   pad in alternate-function push-pull and a timer's channel enabled on
@@ -306,7 +325,7 @@ there are.
   low does not reach it, while with TE clear the timer drives it; and
   an output channel's forced level or toggle is evaluated only while
   its counter runs, a counter that never ran holding the output low:
-  the two facts the desk pair's serial instrument hands a pad between a
+  the two facts the board pair's serial instrument hands a pad between a
   port and a timer by ([usart.md](usart.md), [tim.md](tim.md)).
 - **Two AFIO fields the manual gives the whole family are the class's.**
   USART3's remap and TIM2's internal-trigger bit are read-only at zero
@@ -374,8 +393,10 @@ there are.
   with no error at either end, and an enumeration stopped at the
   descriptor reads after SET_ADDRESS. A program that uses USB therefore
   does not sleep, on either part, and it is the platform that enforces
-  it: an attached controller counts itself a bus master and `idle()`
-  does not sleep while the count stands ([sleep.md](sleep.md)).
+  it: an attached controller counts itself a bus master (the platform
+  keeps a count of the DMA channels and USB controllers at work, the
+  bus-master count of [sleep.md](sleep.md)) and `idle()` does not sleep
+  while the count stands.
 - **In Sleep, no bus master but the core gets a cycle.** A
   memory-to-memory DMA started right before a `wfi` on the CH32V203C8T6
   moves nine to twelve bytes, the pipeline between the enable and the
@@ -445,7 +466,8 @@ there are.
   and says so ([rng.md](rng.md)).
 - **The CH32V303VCT6 of the bench behaves as a lot the manual's lot
   notes restrict.** Five registers the CH32V30x_D8's notes give only to
-  lots whose penultimate sixth digit is not zero are absent on it
+  lots whose "penultimate sixth digit" (the notes' words for a digit of
+  the lot number) is not zero are absent on it
   (TIMx_AUX's dual-edge capture, ADCx_AUX's short sampling times,
   ADC_DUTY_SEL, EXTEN_CTR2's high-speed bits and ADC2's DMA request;
   USART_CTLR4's MARK and SPACE parity, CTLR1's M_EXT, STATR's MS_ERR and

@@ -12,7 +12,10 @@ the bench tool `bin/brio` and the build know a board by.
 
 Nothing here is a desk. Which board is plugged into which socket, with
 which probe, is the bench manifest, a file each desk keeps for itself
-(below, "How a board joins the bench").
+(below, "How a board joins the bench"). A page names the stratum a
+board belongs to: a stratum is a directory of `brio/` holding one
+architectural layer, and a target's stratum is its family's driver set
+([../README.md](../README.md)).
 
 | Board | Part | Type | Page |
 |-------|------|------|------|

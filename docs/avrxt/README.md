@@ -24,8 +24,14 @@ reserve: each feature is probed from the symbol that is it
 macro, the errata keyed on the die, so the same headers build for every
 claimed part and a part the stratum does not claim is a compile error.
 The design side (why the ticker is declaredly AVR, the ISR binding
-pattern) is in [../design/](../design/overview.md). The maintained
-example `blink` builds for the AVR128DB48 board.
+pattern) is in [../design/](../design/overview.md), and the kernel's
+own vocabulary (an active object, a time event, a monostate: a class
+whose state is static, with no instances) is the learning route's
+([../learn/introduction.md](../learn/introduction.md)). The maintained
+example `blink` builds for the AVR128DB48 board. A test suite's console
+takes one command key per group of verdicts, which the pages call a
+letter; `z` runs a suite's single-board set and `y` the set that needs
+a partner board.
 
 **On the AVR EA** every chapter the part carries is written from
 DS40002443A and DS80001048D, compiles on the AVR64EA28, 32 and 48, and is
@@ -48,8 +54,9 @@ compiled, not run.
 Three self-built boards, one per part, each with a page of its own
 under [../boards/](../boards/README.md) with its connectors and its
 probe. All three are programmed and debugged with an Atmel-ICE over
-UPDI, at firmware 1.46 or later for the EA (1.41 acknowledges and loses
-every NVM version 3 write).
+UPDI, at firmware 1.46 or later for the EA: 1.41 acknowledges every
+write over UPDI to an AVR64EA (fuses, flash, a chip erase) and loses it
+([../probes/atmel-ice.md](../probes/atmel-ice.md)).
 
 | Board | Part | Memory | Clock | Console | LED |
 |---|---|---|---|---|---|
@@ -90,8 +97,12 @@ project, so every CMake command runs from `avrxt/`:
 (cd avrxt && cmake --build --preset avr128db48-release --target <app>)
 (cd avrxt && cmake --build --preset avr128db48-release --target <app>-upload)   # flash via the Atmel-ICE
 (cd avrxt && cmake --build --preset avr128db48-debug --target <app>)   # the debug build, then F5
-brio check avrxt [name]                                           # family smoke, no hardware
+brio check avrxt [name]                                           # the family compile check, no hardware
+brio run <board> z                                                # a suite's single-board set, judged
 ```
+
+`<app>` is a file of `src/apps/` by its name: `blink` for the
+maintained example.
 
 - **One configure targets one package.** `cmake/avr-mcus.cmake` is the
   table from board type to avr-gcc mcu name (the AVR128DA/DB with 128K
@@ -147,8 +158,8 @@ brio check avrxt [name]                                           # family smoke
   it, any image on a chip whose `BOOTSIZE` fuse is not 0 jumps into
   erased flash on its first interrupt: a reset loop, not a crash.
   Setting it is correct under every geometry, because the BOOT section
-  always starts at 0; the details and the run-time twin are in
-  [nvm.md](nvm.md).
+  always starts at 0; the details, and the run-time check that pairs
+  with it, are in [nvm.md](nvm.md).
 - **The board type reaches every app.** `avr_add_app()` defines
   `BRIO_BOARD_<type>` (the configure's board type, `AVR_BOARD`), and
   `src/apps/avr_board.hpp`, the board file's first draft, maps it to
@@ -265,7 +276,8 @@ groups, so `brio flash <board> test_avr_timer-2` names an image on an EA
 board and the bare name is refused there with the list; `brio run`
 judges each image's own `ALL:` line, and a two-key suite (`z` alone, `y`
 against the partner) answers each key with the letters of that set the
-image carries, an `ALL: 0 pass, 0 fail` where it carries none.
+image carries, an `ALL: 0 pass, 0 fail` where it carries none, which is
+no verdict at all and not a pass.
 
 The suites grouped, each split along a line its letters already draw,
 with every image's margin against the tier read by `brio fit avrxt`:
@@ -278,9 +290,10 @@ with every image's margin against the tier read by `brio fit avrxt`:
 | `test_avr_spi` | `abcdefghij`, `tklmnop`, `qrsuvw` | the single-board set but letter t; t with the first half of the two-board set; its second half |
 | `test_avr_twi` | `abcdefghijuv`, `klmnopqrst` | the single-board set (u and v the EA's own); the two-board set |
 
-Every other suite fits the tier whole; the benchmark skeleton sizes its
-two memcpy buffers from the part's SRAM (2048 bytes each on the EA, its
-letter m's largest run) and stays one image.
+Every other suite fits the tier whole; the benchmark skeleton (the app
+that measures the drivers' costs, [../design/benchmark.md](../design/benchmark.md))
+sizes its two memcpy buffers from the part's SRAM (2048 bytes each on
+the EA, its letter m's largest run) and stays one image.
 
 ## Clock, delay and timebase
 
@@ -459,12 +472,16 @@ PyAvrOCD is launched by cppdbg itself (`debugServerPath` and
 }
 ```
 
-The flags: hardware breakpoints only, no GUI, the GDB server port, let
-PyAvrOCD manage the relevant fuses, the MCU (`pyavrocd -d '?'` lists
-them), UPDI, the probe kind, and the UPDI programming clock in kHz
-(`-P`). With more than one probe attached add `-u <serial>`; for a db28
-or db32 session duplicate the entry with `-d avr128db28` or
-`avr128db32`. The server is launched through `/usr/bin/env` with
+The flags: `--breakpoints hardware` (hardware breakpoints only, below),
+`-s nop` (no GUI), `-p` the GDB server port, `-m all` (let PyAvrOCD
+manage the relevant fuses), `-d` the MCU (`pyavrocd -d '?'` lists
+them), `-i updi`, `-t` the probe kind, and `-P` the UPDI programming
+clock in kHz. With more than one probe attached add `-u <serial>`. The
+entry is the AVR128DB48's: for another board duplicate it with its
+`-d` (`avr128db28`, `avr128db32`, `avr128da48`, `avr64ea48`), and note
+that `avrxt/svd/` holds the AVR128DB48's SVD alone, so on another part
+the Peripheral Viewer has no register map to read. The server is
+launched through `/usr/bin/env` with
 `PYTHONUNBUFFERED=1` because PyAvrOCD's "Listening on port" line is a
 plain print that does not flush under a pipe, and the connection is made
 by hand in `setupCommands` because cppdbg runs them before its own
@@ -571,16 +588,20 @@ is addressed by `/dev/serial/by-path`, the two isolated CH340Bs by
 
 ## Family coverage
 
-`brio check avrxt` compiles every smoke TU in `test/family_avrxt/` for
-all eight AVR128 DA/DB packages (28, 32, 48 and 64 pins, both families)
-and the three AVR64EA packages (28, 32 and 48 pins; a chapter the EA has
-no driver for compiles to nothing there, its refusal a negative), and
-requires every `test/family_avrxt/neg/` TU to fail for the MCUs its
-`// mcu:` line names. Seconds, no hardware; part of every driver's
+`brio check avrxt` compiles every smoke TU (a translation unit, one
+source file that includes a driver and uses it, written to prove that
+it compiles) in `test/family_avrxt/` for all eight AVR128 DA/DB
+packages (28, 32, 48 and 64 pins, both families) and the three AVR64EA
+packages (28, 32 and 48 pins; a chapter the EA has no driver for
+compiles to nothing there, its refusal a negative), and requires every
+`test/family_avrxt/neg/` TU, a negative, a program that must be refused,
+to fail for the MCUs its `// mcu:` line names. Seconds, no hardware;
+the 64-pin packages and the DA's 28 and 32 have no board, so this
+sweep is their only check. Part of every driver's
 definition of done, because the bench chip alone masks the missing
 ports, instances, registers and enum values of the other packages. The
-check ends with the link guard of every app on every release preset of
-the project.
+check ends with the link guard: every app linked on every release
+preset of the project, a failure fatal.
 
 ## The documents
 
