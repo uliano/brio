@@ -22,8 +22,10 @@
  * and each reads the other's index. Which context is which is the
  * caller's choice and nothing here checks it: in a transmit ring the
  * main loop produces and the interrupt handler consumes, in a receive
- * ring the other way round. Two producers (a print from a handler and
- * one from the loop) break the rule silently. When an index is a single
+ * ring the other way round. Two producers break the rule silently: a
+ * print from an interrupt handler beside the main loop's prints, say
+ * (every active object's dispatch runs in the loop, so their prints are
+ * one producer). When an index is a single
  * naturally atomic access for the target (sizeof(index_t) <=
  * P::atomic_width: one byte on an 8-bit core, a word on a 32-bit one)
  * every operation is lock-free: no interrupt masking, no added
@@ -42,7 +44,7 @@
  * The one API is therefore always safe to call from either context, and
  * there are no *_from_isr twins (docs/design/overview.md's style rule:
  * no API doubling). Only clear() is not concurrent: it rewrites both
- * indices and is legal only while the other party is quiescent (at
+ * indices, so one party calls it while the other is quiescent (at
  * init, or after masking its interrupt).
  *
  * Two granularities, one contract. push() and pop() move one element
@@ -55,8 +57,9 @@
  * and the run a side is given is exactly the memory the one-producer
  * one-consumer invariant already made private to it. A span never
  * wraps (it stops at the end of the buffer and the rest comes on the
- * next call), and it stays valid until its own side's next operation
- * on the ring.
+ * next call), and it stays valid until its own side next moves its
+ * index (consume() or pop() for the consumer's run, publish() or push()
+ * for the producer's); a look (count(), empty(), full()) ends nothing.
  *
  * Capacity is size - 1: one slot is sacrificed to distinguish full from
  * empty without a shared counter (a counter would be written by both
@@ -181,13 +184,14 @@ public:
     // the run to a DMA block or a memcpy needs ONE contiguous region,
     // and two calls are cheaper than the alternative of pretending.
     //
-    // A span is valid until its OWN side's next operation on the ring;
-    // the other side cannot invalidate it (it can only make it more
-    // conservative than it needs to be, which is safe).
+    // A span is valid until its OWN side next moves its index; the
+    // other side cannot invalidate it (it can only make it more
+    // conservative than it needs to be, which is safe). Ring's rule:
+    // HardwareRing's producer can write over a held run, said there.
 
     /// The contiguous run of elements ready to be read, starting at the
     /// tail. Empty when the ring is empty. Consumer side only; the run
-    /// stays valid until the consumer's next operation on the ring.
+    /// stays valid until the consumer's next consume() or pop().
     std::span<const T> read_span() const {
         if constexpr (lock_free) {
             return read_span_body();
@@ -211,7 +215,7 @@ public:
 
     /// The contiguous run of free slots the producer may fill, starting
     /// at the head. Empty when the ring is full. Producer side only; the
-    /// run stays valid until the producer's next operation on the ring,
+    /// run stays valid until the producer's next publish() or push(),
     /// and nothing it writes is visible to the consumer before publish().
     std::span<T> write_span() {
         if constexpr (lock_free) {
@@ -248,8 +252,8 @@ public:
     [[gnu::always_inline]] bool empty() const { return count() == 0; }
     [[gnu::always_inline]] bool full() const { return count() == capacity(); }
 
-    /// Reset to empty. Not concurrent: both parties must be quiescent
-    /// (init, or the other party's interrupt masked).
+    /// Reset to empty. Not concurrent: one party calls it while the
+    /// other is quiescent (init, or the other party's interrupt masked).
     void clear() {
         head_ = 0;
         tail_ = 0;
@@ -437,8 +441,11 @@ private:
  * The producer's verbs (push(), write_span() with publish(), lost()) run
  * where the consumer cannot interrupt them (an interrupt body, or a
  * context that has masked the consumer's), which is Ring's model already:
- * one producer. The consumer's verbs never move the producer's state;
- * count(), empty() and full() never skip, so the producer may ask them.
+ * one producer. That is a receive ring's shape, the interrupt handler
+ * producing and the main loop consuming; a ring the main loop produces
+ * is a Ring, not a SkipRing. The consumer's verbs never move the
+ * producer's state; count(), empty() and full() never skip, so the
+ * producer may ask them.
  */
 template <typename T, uint32_t size, Platform P>
 class SkipRing {

@@ -21,9 +21,13 @@
  *  - a client posts the engine's Request to this object from main
  *    context (its own dispatch, or setup after init), with a reply
  *    channel inside (kernel/post.hpp's reply_to). Posting never waits;
- *    the reply comes later, as an event of the client's own;
+ *    the reply comes later, as an event of the client's own, even when
+ *    the arbiter answers it in the very dispatch that received it;
  *  - the program's interrupt glue posts TransferDone{Bus::status()} to
- *    this object when the engine's handler reports a completion;
+ *    this object when the engine's handler reports a completion (post()
+ *    is legal from any context, kernel/post.hpp; how the handler
+ *    reports it is the engine's, `if (Host::isr()) ...` on the families
+ *    that return it);
  *  - the power manager (util/power.hpp) posts PrepareSleep and gets a
  *    SleepVote back;
  *  - this object's dispatch, in main context, calls Bus::start(), reads
@@ -48,12 +52,17 @@
  * handles, one byte each (main context only: no critical sections
  * needed). The request in flight is held the same way until its
  * completion has been answered. A full FIFO means the request is
- * answered immediately with bus_rejected and not held (the kernel
- * releases its slot after the dispatch): never silent, never blocking,
- * while the clients keep at most 2 x pending_depth + 2 requests
- * outstanding at once (the queue's depth below; past that the queue
- * itself drops and queue.overflows() counts). An undersized FIFO shows
- * up in the requester's error handling, not as a lost transfer. The
+ * answered in the dispatch that received it with bus_rejected and not
+ * held (the kernel releases its slot after the dispatch): never
+ * blocking, and never silent while the clients keep at most
+ * 2 x pending_depth + 2 requests outstanding at once, posted and not
+ * yet answered: pending_depth held waiting, one held in flight, and
+ * pending_depth + 1 more queued or being dispatched, each on its way
+ * to bus_rejected (the queue's depth below keeps two slots beyond
+ * those for the control events; past the budget the queue itself
+ * drops the request with no reply and queue.overflows() counts it). An
+ * undersized FIFO shows up in the requester's error handling, not as a
+ * lost transfer. The
  * control events (a TransferDone, a PrepareSleep, a BusTimeout, a
  * BusFlushed) are never held. Every reply is sent from the held slot
  * before the slot is released.
@@ -106,7 +115,8 @@
  * police the host's own clock hold and not a wire a client wedged:
  * measured, and the reason this layer carries a timeout at all. With
  * timeout_ticks != 0 every transfer that goes asynchronous arms a
- * one-shot TimeEvent; if it matures first, the engine is declared dead:
+ * one-shot TimeEvent (per wire transfer, so a retry arms it afresh); if
+ * it matures first, the engine is declared dead:
  * Bus::recover() puts the peripheral back where start() is legal, the
  * requester is answered bus_timeout in its place like every reply, and
  * the queue moves on. The wire stays the application's: whether to

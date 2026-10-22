@@ -939,6 +939,64 @@ lower the same capitals in the two flavour blocks of `ring.hpp`.
   number (the inventory above lists it) and now carries the heading
   text too.
 
+### Reader review (fresh subagents, one round)
+
+Two readers, each given only its files, the audience profile and the
+questions: one on serial_port.hpp and ring.hpp, one on print.hpp and
+bus_master.hpp, with eight and nine scenarios. Supported directly: the
+wrong list order refused at compile time and the loan's end at the
+sink's return; the saved pointer as a contract violation; the sink's
+stall under a long print and who is held; the two-lines-in-flight
+stop and the self-post; the lock-free call from either context and
+the guarded path at a 512-byte ring on an 8-bit core; clear()'s
+condition on all three rings; HardwareRing's count() from an
+interrupt; the print before init; the print from a receive handler
+and why it hangs; the 1000-byte print's wait and its formula; the
+float's default shape and fixed(); the fifth request's rejection; the
+buffer rule until the BusDone; the untimed bus wedged by a lost
+completion and the timed bus's recovery; the sleep vote in flight.
+Residue, all applied: ring.hpp's "a print from a handler and one from
+the loop" read as two active objects' prints (now: an interrupt
+handler's beside the loop's, the objects' prints being one producer);
+two conditions for clear() in one file (now one: one party calls it
+while the other is quiescent); "valid until its own side's next
+operation" leaving count() in doubt (now: until the side next moves
+its index; a look ends nothing) and stated as general where
+HardwareRing's run can be written over (now said at the rule); SkipRing's
+producer rule against "always safe from either context" (now: a
+receive ring's shape, a ring the main loop produces is a Ring);
+serial_port.hpp's "the buffer is reused by the next line" against the
+ping-pong (now: the next dispatch may assemble into it again, the
+buffers alternate), "nothing here waits" against print's wait (now:
+SerialPort itself waits for nothing; print is the one wait), the
+receive ring called lock-free where a wide index is guarded (dropped),
+quiet_ticks as 100 ms where a slow tick makes it one tick (said),
+priority never defined (now: list position), whether print may be
+called from an interrupt handler (now: main context only, print.hpp
+says why), the sink's queue needing room for two LineReceived and a
+dropped one being a lost line (said), a byte dropped under a transport
+that reports no gaps joining two fragments (said); print.hpp's "empty
+tag instance of its all-static class" (now defined), the early print
+stated as a hang whether or not the text fits (now: a print that does
+not fit the room before init spins; a shorter one's bytes are the
+transport's business), "never from an interrupt handler" given one
+reason where there are two (now: the one-producer rule and the drain
+that cannot run), the ten bit times without 8N1 (said), write_byte's
+false unstated (said); bus_master.hpp's three counts of one budget
+(now: the 2 x pending_depth + 2 outstanding requests itemized against
+the queue's depth), "never silent" against the queue's drop past the
+budget (now scoped to the budget), "answered at once" against "the
+reply comes later" (now: sent in the receiving dispatch, delivered as
+an event), post() from the interrupt glue with no word on its context
+(now: legal from any context, kernel/post.hpp), the timeout armed per
+wire transfer and so per retry (said). Noted and kept: the C++
+notation itself (templates, std::optional, std::span, lambdas,
+`static inline`, Fsm, Subscribers, Borrowed's accessor) is the
+learning route's and the kernel headers', which the comments point
+at; the engine's freedom to copy or read the lent request is a stated
+open point of the contract, not a gap of the comment. No second
+round, by the batch's cost rule.
+
 ### Checks
 
 - `bin/brio prose` over the eight files: 8 files, 0 errors, 0 for

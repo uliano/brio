@@ -25,8 +25,8 @@
  *
  * Who calls what, and from where:
  *  - the transport's interrupt handler moves each byte into the receive
- *    ring (an interrupt receiver's ring, lock-free, or a receive
- *    engine's) and returns true when the ring holds bytes the consumer
+ *    ring (an interrupt receiver's ring, or a receive engine's) and
+ *    returns true when the ring holds bytes the consumer
  *    has not been told of; the program's glue posts one RxActivity on
  *    that true (docs/design/serial.md, "The burst edge comes from a
  *    vector"). RxActivity is the one event SerialPort handles;
@@ -38,23 +38,31 @@
  *    characters (max_line is 80 by default) and a NUL, stays in the
  *    assembler's buffer and never travels through a queue;
  *  - LineSink reads or parses the line inside its own dispatch, the one
- *    that handles LineReceived. Nothing here waits, masks interrupts or
- *    runs user code outside those dispatches.
+ *    that handles LineReceived. SerialPort itself waits for nothing and
+ *    masks nothing (a transport's ring may take the platform's critical
+ *    section on its guarded path, util/ring.hpp); the console's one wait
+ *    is print, below.
  *
  * Who owns a line, and for how long. Two LineAssemblers alternate: a
  * completed line stays untouched in its assembler's buffer while the
- * other one assembles the next line. The line is lent to the sink for
- * one dispatch, a Lease::dispatch loan (kernel/borrowed.hpp): the sink
- * may read it and may write it (tokenizing it in place is the point of
- * the loan) while handling LineReceived, and must not keep the pointer
- * for a later event, because the next SerialPort dispatch assembles a
- * new line into that buffer. With both lines in flight SerialPort stops
- * draining (the ring absorbs the bytes; that is its job) and posts
- * RxActivity to itself: there is leftover work, serve me again.
+ * other one assembles the next line, and the line after that is
+ * assembled into the first buffer again. The line is lent to the sink
+ * for one dispatch, a Lease::dispatch loan (kernel/borrowed.hpp): the
+ * sink may read it and may write it (tokenizing it in place is the
+ * point of the loan) while handling LineReceived, and must not keep the
+ * pointer for a later event, because SerialPort's next dispatch may
+ * already be assembling into that buffer again. With both lines in
+ * flight SerialPort stops draining (the ring absorbs the bytes; that is
+ * its job) and posts RxActivity to itself: there is leftover work,
+ * serve me again. Two lines can be in flight, so the sink's queue needs
+ * room for two LineReceived beside its own events; a LineReceived
+ * dropped by a full sink queue is a line lost, counted in the sink's
+ * queue.overflows() (kernel/event_queue.hpp).
  *
  * The order the loan needs: LineSink must come before SerialPort in the
  * list of active objects given to Tenuto. The kernel serves the queues
- * in list order and a dispatch runs to its end, so every LineReceived
+ * in list order (the position in the list is the priority, the first
+ * the highest) and a dispatch runs to its end, so every LineReceived
  * posted is handled before SerialPort runs again; when a SerialPort
  * dispatch starts, every line it posted has been consumed and both
  * buffers are free (in_flight_ goes back to zero). SerialPort declares
@@ -62,16 +70,17 @@
  * program is compiled, a list in which the sink comes after the port.
  *
  * Transmit has no active object. print() (util/print.hpp) goes straight
- * to the transport and waits until the transmit ring has taken every
- * byte: the wait is zero while the message fits the ring's room, and
- * otherwise one byte time for each byte that does not yet fit. A byte
- * is ten bit times, 21.7 us at 460800 baud and 87 us at 115200, so a
- * message that finds the default 256-byte transmit ring full waits
- * about 5.5 ms at 460800 (docs/design/serial.md, "Output policy: wait,
- * do not drop"). A print is atomic between active objects because a
- * dispatch runs to completion, so no other object's text can interleave
- * with it; the design page says when that policy would be revisited (a
- * slow link, a hard latency budget).
+ * to the transport, from main context only (print.hpp says why), and
+ * waits until the transmit ring has taken every byte: the wait is zero
+ * while the message fits the ring's room, and otherwise one byte time
+ * for each byte that does not yet fit. A byte is ten bit times at 8N1,
+ * 21.7 us at 460800 baud and 87 us at 115200, so a message that finds
+ * the default 256-byte transmit ring (255 bytes of room, util/ring.hpp)
+ * full waits about 5.5 ms at 460800 (docs/design/serial.md, "Output
+ * policy: wait, do not drop"). A print is atomic between active objects
+ * because a dispatch runs to completion, so no other object's text can
+ * interleave with it; the design page says when that policy would be
+ * revisited (a slow link, a hard latency budget).
  *
  * The drain takes a run where the transport lends one. A run is a
  * contiguous stretch of bytes the ring already holds. A transport that
@@ -115,12 +124,15 @@
  * what the ring held when the gap was found is skipped with it. A
  * transport whose release can refuse and that does not report its skips
  * is refused at compile time; over a transport without the verb (a test
- * capture, a simulated port) nothing of it is compiled.
+ * capture, a simulated port) nothing of it is compiled, and a byte such
+ * a transport drops joins the bytes around it into one line that
+ * nothing here counts (the transport's own counters say it happened).
  *
  * A silence ends the skip. A gap can take the cut line's own end of
  * line, and then the next end of line is a later, whole line's. So where
  * the drain found the ring empty after the gap and the next run comes
- * quiet_ticks (100 ms) or more after that look, the line is taken to
+ * quiet_ticks (100 ms, or one tick where the tick is longer) or more
+ * after that look, the line is taken to
  * have ended in the silence, and the run is drained as a line's
  * beginning. Still undecidable: the next line close behind a gap that
  * took a line's end (skipped as the cut line's tail), a sender pausing
@@ -157,8 +169,9 @@ struct RxActivity {};
 /// A completed line, NUL-terminated and without its end of line, lent to
 /// the sink for the dispatch that handles this event only. The sink may
 /// write it (tokenizing it in place is the point of the loan) and must
-/// not keep the pointer past that dispatch: the buffer is reused by the
-/// next line SerialPort assembles.
+/// not keep the pointer past that dispatch: SerialPort's next dispatch
+/// may assemble a line into that buffer again (the two buffers
+/// alternate, the header says how).
 struct LineReceived {
     Borrowed<char, Lease::dispatch> line;
 };

@@ -8,8 +8,10 @@
  * serves every family's serial port, a USB serial link and a test
  * capture alike.
  *
- * The smallest use names the transport once, as an empty tag instance
- * of its all-static class, and prints:
+ * The smallest use names the transport once and prints. A transport is
+ * a class whose members are all static, so an instance of it holds no
+ * data: `serial` below exists only to tell print() which transport it
+ * writes to, and costs nothing.
  *
  *   constexpr brio::Uart<2> serial;
  *   brio::print(serial, "[", ts, "] count = ", count, brio::crlf);
@@ -25,23 +27,31 @@
  * a print_one overload for it (in namespace brio or in the type's own
  * namespace, found via ADL, argument-dependent lookup).
  *
- * Delivery policy: print waits until the sink has accepted every byte,
- * and never truncates. It is called from main context, setup or an
- * active object's dispatch, and never from an interrupt handler: the
- * transport's write verbs are the producer's end of its transmit ring,
- * whose other end is the transport's own handler, and no interrupt
- * handler runs while another runs on any brio target (docs/design/
- * kernel.md, "The model in one page"), so a print that fills the ring
- * inside a handler spins on a drain that cannot happen. From main
- * context the drain is the transmit interrupt, which runs while print
- * spins, so the wait always makes progress: zero while the text fits the
- * ring's room, and otherwise one byte time for each byte that does not
- * yet fit, ten bit times a byte (21.7 us at 460800 baud, 87 us at
- * 115200; docs/design/serial.md, "Output policy: wait, do not drop").
- * Two consequences. A dispatch that prints holds every other active
- * object for that wait, since a dispatch runs to completion; and a print
- * before the sink is initialized and interrupts are enabled spins for
- * ever. Where the sink is a BulkSink (util/stream.hpp) a string_view
+ * Delivery policy: print waits until the sink has accepted every byte
+ * (write_byte() returns false, writing nothing, while the transmit ring
+ * has no room, and print spins on it), and never truncates. It is
+ * called from main context, setup or an active object's dispatch, and
+ * never from an interrupt handler, for two reasons. The transmit ring
+ * has one producer (util/ring.hpp), the main context's prints (every
+ * active object's dispatch runs there, so their prints are one
+ * producer), and a print from an interrupt handler would be a second
+ * one, which nothing checks and which corrupts the ring silently. And
+ * the ring's consumer is the transport's own transmit handler, which
+ * cannot run while another handler runs on any brio target
+ * (docs/design/kernel.md, "The model in one page"), so a print that
+ * fills the ring inside a handler spins on a drain that cannot happen.
+ * From main context the drain is the transmit interrupt, which runs
+ * while print spins, so the wait always makes progress: zero while the
+ * text fits the ring's room, and otherwise one byte time for each byte
+ * that does not yet fit, ten bit times a byte at 8N1 (21.7 us at 460800
+ * baud, 87 us at 115200; docs/design/serial.md, "Output policy: wait,
+ * do not drop"). Two consequences. A dispatch that prints holds every
+ * other active object for that wait, since a dispatch runs to
+ * completion; and a print whose text does not fit the ring's room
+ * before the transport is initialized and interrupts are enabled spins
+ * for ever, since nothing drains the ring (what a shorter print does
+ * with its bytes before init is the transport's business). Where the
+ * sink is a BulkSink (util/stream.hpp) a string_view
  * goes to it as one run (a contiguous stretch of bytes), and a C string
  * (every formatted number among them, each formatted into a buffer and
  * printed as a string) as its first byte through write_byte(), so an
