@@ -21,8 +21,8 @@ not empty and hands it to its active object's handler. An interrupt
 handler may do one thing with the kernel, post an event into a queue,
 and returns; the tick interrupt does not even that, it only counts.
 
-**One handler runs to completion before any other active object runs.**
-A higher-priority event that arrives in the meantime waits in its
+**One handler runs to completion before any other active object of the
+same core runs.** A higher-priority event that arrives in the meantime waits in its
 queue; it does not interrupt the handler that is running. On the next
 turn the kernel takes the oldest event of the highest-priority queue
 that is not empty, so priority decides what is served next and nothing
@@ -107,8 +107,8 @@ through this file.
 
 - Active objects share nothing but events. An object's data is touched
   by its own handlers only, a rule of the design the compiler does not
-  check, and handlers never run concurrently, so no handler needs a lock
-  against another. Events are copied into queues by value; a buffer
+  check, and on one core handlers never run concurrently, so no handler
+  needs a lock against another. Events are copied into queues by value; a buffer
   that must not be copied travels as a pointer with its lifetime rule
   written in the type, and following that rule is the program's duty
   ([kernel.md, "Payloads"](docs/design/kernel.md#4-payloads-what-travels-inside-the-event-kernelborrowedhpp)).

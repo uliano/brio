@@ -184,10 +184,12 @@ about it: there is no fairness and no ageing of priorities. The limits
 of this kernel, accepted by design, are these three: no preemption of
 a running handler, no promise about response time (the kernel settles
 an order, "the running handler finishes first", and no duration), no
-fairness between objects. The discipline
-that keeps a program well inside them is short handlers and queues
-sized for their bursts; a program that needs more is a different
-kernel's.
+fairness between objects. The discipline that keeps a program well
+inside them is short handlers, queues sized for their bursts, and
+producers whose sustained rate leaves the earlier queues empty often
+enough for the later ones to be served: a queue absorbs a burst, it
+does not cure a steady overload. A program that needs more is a
+different kernel's.
 
 ## State
 

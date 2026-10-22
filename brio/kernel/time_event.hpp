@@ -51,15 +51,18 @@
  * and counts. Re-arming a running timer restarts it: the next expiry is
  * one delay from the re-arm.
  *
- * Limits of the deadline arithmetic. process() compares with
- * (int32_t)(now - deadline) >= 0, a signed difference that survives the
- * 32-bit counter's wrap (about 49 days at 1000 Hz) as long as every
- * distance it measures stays within half the range, 2^31 included: a
- * delay or a period may be at most 2^31 ticks (about 24 days at
- * 1000 Hz), and a deadline
- * that the loop leaves unserved for 2^31 ticks or more reads as future
- * again. A delay above 2^31 is not refused: it reads as overdue and is
- * posted at once.
+ * Limits of the deadline arithmetic. process(), ticks_to_next() and
+ * next_deadline() all measure a deadline's distance from now() as a
+ * signed 32-bit difference, which survives the counter's wrap (about
+ * 49 days at 1000 Hz) as long as every distance stays strictly within
+ * half the range: a delay or a period must be less than 2^31 ticks
+ * (about 24 days at 1000 Hz), and a deadline that the loop leaves
+ * unserved for 2^31 ticks or more reads as future again. Exactly 2^31
+ * is not a supported distance: process() does not post it yet, while
+ * ticks_to_next() already reports it due and next_deadline() prefers it
+ * to a nearer deadline, because the two queries take the difference the
+ * other way round. A delay above 2^31 is not refused: it reads as
+ * overdue and is posted at once.
  *
  * Storage: a TimeEvent is a static object owned by its active object;
  * arming links it into an intrusive list, so there is no allocation and
@@ -101,7 +104,7 @@ public:
     };
 
     /// Arm: first firing after delay_ticks, then every period_ticks
-    /// (0 = one-shot); both at most 2^31 (the file header's limits).
+    /// (0 = one-shot); both less than 2^31 (the file header's limits).
     /// Re-arming an armed event restarts it.
     static void arm(Base& te, uint32_t delay_ticks, uint32_t period_ticks) {
         disarm(te);

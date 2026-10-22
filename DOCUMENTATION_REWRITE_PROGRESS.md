@@ -274,12 +274,14 @@ run.
   (arm() stores now() + delay, process() posts at now() >= deadline),
   the catch-up paragraph says one post per turn per timer under
   post()'s drop rule, and a "Limits of the deadline arithmetic"
-  paragraph states the half-range: delays and periods below 2^31 ticks,
-  a deadline unserved for 2^31 ticks reads as future, a delay above
-  2^31 is posted at once (verified against process(): for exactly 2^31
-  the signed difference is INT32_MIN, negative, so the timer matures
-  2^31 ticks later; above it the difference is positive). arm()'s and
-  arm_every()'s comments carry the phase and the limit.
+  paragraph states the half-range: delays and periods strictly below
+  2^31 ticks, a deadline unserved for 2^31 ticks reads as future, a
+  delay above 2^31 is posted at once. Exactly 2^31 is excluded from the
+  contract (the second review): process() does not post it, but
+  ticks_to_next() reports it due and next_deadline() prefers it to a
+  nearer deadline, the two queries taking the difference the other way
+  round. arm()'s and arm_every()'s comments carry the phase and the
+  limit.
 - Debugger observations: command-line.md step 5 says cursors and old
   slots are nonzero after events have passed, that `overflows_` is the
   one field that must stay zero, read as a stored field while halted
