@@ -1,226 +1,230 @@
 # brio
 
-A small modern-C++ framework for bare-metal microcontrollers, built
-around a cooperative **active-object kernel**: event queues, flat state
-machines, time events, one loop, one stack, no heap, no virtual
-functions, nothing resolved at run time that the compiler could resolve
-first. Written in C++23 (gnu++23), header-only but for a seven-function
-runtime, in one flat namespace
-`brio` ("con brio" - the musical marking for liveliness).
+brio is a framework for programs that run on a bare microcontroller:
+no operating system, a few kilobytes of RAM, interrupts and a main loop.
+It is for the embedded programmer who has written such programs in C
+and wants a structure that keeps them readable as they grow, without a
+real-time operating system and without giving up control of the
+hardware. It is written in C++, and it does not assume you know C++
+beyond what C gave you: the documentation introduces each construct
+where a program first needs it.
 
-The kernel knows nothing about the silicon it runs on. It runs on an
-8-bit AVR, on ARM Cortex-M cores (M0+, M4 and M33), on RISC-V cores
-(WCH's QingKe and Raspberry Pi's Hazard3) and on the host - the target
-table below names every family and the chip it is measured on. Each
-family after the first compiled the kernel and its services unchanged,
-which was the design's promise.
+The name is the musical marking "con brio", for liveliness.
+
+## How a brio program runs
+
+A brio application is divided into components called active objects.
+Each one owns a queue of events, small structs that record something
+that happened, and a piece of persistent state. The kernel is a loop
+that takes one event at a time from the highest-priority queue that is
+not empty and hands it to its active object's handler. Interrupt
+handlers do one thing with the kernel: they post an event into a queue
+and return.
+
+**One handler runs to completion before any other active object runs.**
+A higher-priority event that arrives in the meantime waits in its queue
+and is served next; it does not interrupt the handler that is running.
+Interrupts still interrupt. Keep handlers short, and when work must
+continue later, arm a timer or post an event instead of waiting inside
+the handler.
+
+Timers are events too: a time event posts its payload to its owner when
+it expires, in the loop, so no user code runs inside the tick interrupt.
+When every queue is empty the kernel sleeps until the next interrupt.
+Everything, active objects, queues and timers, is a static object sized
+when the program is compiled; there is no heap in the kernel and no
+operating-system thread.
+
+This is the cooperative model of active objects described in Miro
+Samek's book, written clean-room from the concepts. The introduction in
+[docs/learn/](docs/learn/README.md) explains it from the main loop you
+already know, and then reads a complete application one mechanism at a
+time.
 
 ## What an application looks like
 
-```cpp
-using P = brio::AvrPlatform;             // the one place the target is named
+An excerpt of the maintained example `blink`
+([stm32g0/src/apps/blink.cpp](stm32g0/src/apps/blink.cpp), the complete
+file): the active object that owns the LED, and the line that starts
+the kernel. A second active object in the same file changes the blink
+period every three seconds by posting a `SetPeriod` event to this one.
 
-struct Toggle {};                        // events are small plain structs
-struct SetPeriod { uint16_t ticks; };
+```cpp
+struct Toggle {};                      // an event: the heartbeat
+struct SetPeriod { uint16_t ticks; };  // an event with data: a new period
 
 struct Blinker : brio::Fsm<Blinker, Toggle, SetPeriod> {
-    static inline brio::EventQueue<Event, 4, P> queue;                 // its own queue
+    static inline brio::EventQueue<Event, 4, P> queue;                 // this object's queue
     static inline brio::TimeEvent<P, Blinker, Toggle> heartbeat{Toggle{}};
 
-    static void init() { Led::output(); start(&running); }
+    static void init() {
+        Led::output();
+        start(&running);
+    }
 
     static Status running(const Event& e) {
         return brio::match(e,
-            [](brio::Entry) { heartbeat.arm_every(brio::ticks_from_ms<P>(500));
-                              return handled(); },
+            [](brio::Entry) { heartbeat.arm_every(brio::ticks_from_ms<P>(500)); return handled(); },
             [](Toggle)      { Led::toggle(); return handled(); },
             [](SetPeriod p) { heartbeat.arm_every(p.ticks); return handled(); },
-            [](auto)        { return unhandled(); });
+            [](auto)        { return unhandled(); }
+        );
     }
 };
 
-int main() {
-    /* clock, timebase, sei() - target glue */
-    brio::Tenuto<P, Blinker, Supervisor>::run();   // priority = pack order
-}
+// in main(), after the clock and the timebase are set up:
+brio::Tenuto<P, Blinker, Supervisor>::run();   // the list is the priority order; never returns
 ```
 
-Somewhere else, `brio::post<Blinker>(SetPeriod{...})` changes the
-cadence - from another active object, from a time event, or from an
-ISR: same call, always safe, never blocking.
+`P` names the platform (the chip) and `Led` the pin, once, in the lines
+of the file that belong to the target. The list given to `Tenuto` is
+the application's active objects in priority order; the compiler
+generates the scheduling code from it. `blink` builds unchanged, bar
+those few target lines, for the AVR, SAM C21, STM32G0, STM32F4 and
+CH32V00x projects.
+[The first program, read in stages](docs/learn/first-program.md) walks
+through this file.
 
-## The ideas
+## The ideas behind it
 
-- **Active objects, run-to-completion.** An AO owns a queue and reacts
-  to one event at a time; it never blocks, waits or polls. The kernel
-  serves the highest-priority non-empty queue, one event per turn, and
-  sleeps when nothing is pending. The only concurrency is ISR vs main
-  loop, and an ISR may do exactly one kernel thing: post an event.
-- **Everything is a type, resolved at compile time.** AOs, drivers and
-  the kernel are monostate classes selected by type; priorities,
-  subscriptions and reply channels are template parameters. No tables
-  walked at run time; RAM is exactly what is declared.
-- **Contracts are concepts.** What the kernel needs from an AO
-  (`ActiveObject`), from the machine (`Platform`), what a text sink
-  must offer (`ByteSink`) - stated as C++20 concepts, checked where a
-  type is used, with errors that name the requirement.
-- **Events are values, per-AO variants.** Each AO declares its own
-  `std::variant` of small trivially-copyable structs; events are copied
-  into queues (a few bytes, one brief critical section). Plain shared
-  structs are the lingua franca between publisher and subscriber; no
-  global signal enum. Handlers dispatch with `match(e, lambdas...)`.
-- **Timers post events; failures leave a breadcrumb.** A time event
-  posts to its owner AO in main context (never runs user code in an
-  ISR); a full queue is a sizing mistake counted, never blocking;
-  `panic()` writes a reset-surviving record before any LED blinks.
+- Active objects share nothing but events. An object's data is touched
+  by its own handler only, so no handler needs a lock against another.
+  Events are copied into queues by value; a buffer that must not be
+  copied travels as a pointer with its lifetime rule written in the type
+  ([kernel.md, "Payloads"](docs/design/kernel.md#4-payloads-what-travels-inside-the-event-kernelborrowedhpp)).
+- Posting never waits. A full queue drops the event and counts it,
+  which is how an undersized queue is found. Library calls can wait:
+  `print` blocks until the serial transport has taken every byte, and
+  says so in its header.
+- Resolved when compiled. Active objects, drivers and the kernel are
+  types; priorities, subscriptions and reply channels are template
+  arguments. RAM is what the source declares, and what the kernel
+  requires of an active object or of a chip is a C++ concept the
+  compiler checks where the type is used, with an error that names the
+  requirement.
+- Failures leave a trace. A queue overflow is counted; `panic()` writes
+  a record that survives a reset before anything else happens.
+- The kernel knows no chip. It runs on an 8-bit AVR, on ARM Cortex-M
+  cores (M0+, M4F, M33), on RISC-V cores (WCH's QingKe, Raspberry Pi's
+  Hazard3) and on the host, where its tests run with a simulated clock.
 
-The full rationale, decision by decision, is in
-[docs/design/](docs/design/) - start with
-[overview.md](docs/design/overview.md) and
+The design, decision by decision: [docs/design/](docs/design/), starting
+with [overview.md](docs/design/overview.md) and
 [kernel.md](docs/design/kernel.md).
 
-## Layering and portability
+## Layering
 
 ![brio strata](docs/design/architecture.svg)
 
-<sub>[open the diagram full size](https://raw.githubusercontent.com/uliano/brio/main/docs/design/architecture.svg) (zoomable in the browser)</sub>
+<sub>[open the diagram full size](https://raw.githubusercontent.com/uliano/brio/main/docs/design/architecture.svg)</sub>
 
-The include prefix makes a file's portability readable at a glance,
-and every stratum under `brio/` is a row here:
+The code is grouped into directories called strata, one per layer, and
+each stratum may include only the strata below it. An include carries
+its stratum's name (`#include "stm32g0/pin.hpp"`), so a file's
+portability is readable from its includes: kernel code includes nothing
+of brio, a service includes the kernel, a target driver includes both,
+and no target include leaves the target strata.
 
-| Stratum | Contains | Depends on |
-|---------|----------|------------|
-| `kernel/` | queues, scheduler, FSM, delivery, time events, panic - pure logic | nothing of brio |
-| `util/` | services on top of the kernel: `SerialPort`, `BusMaster` (SPI/I2C arbiter), `print`, `Ring`, line parsers | `kernel/` |
-| `gfx/` | drawing: the three kinds of surface, the primitives over a write-only base, fonts and opaque text, the pen | nothing of brio - not even the kernel |
-| `avrxt/` | everything that knows `avr/io.h`: clock, pins, UART, SPI, TWI, ticker, `AvrPlatform` | `kernel/`, `util/` |
-| `cortexm/` | what ARM designed into every Cortex-M and the families below share: NVIC + PRIMASK guard, the SysTick ticker, the microsecond busy-wait on SysTick's counter | `util/` (and the including family's device header) |
-| `pl011/`, `pl022/`, `dw_apb_i2c/` | IP strata: a peripheral DESIGN written once and knowing no chip - ARM's PrimeCell UART and SSP, Synopsys's DesignWare I2C - each stating a concept the family's own traits type satisfies | `kernel/`, `util/` |
-| `samc21/` | everything that knows `sam.h` (Cortex-M0+): clock tree, pins, SERCOM UART, `SamPlatform`; its NVIC and ticker are `cortexm/`'s | `kernel/`, `util/`, `cortexm/` |
-| `stm32g0/` | everything that knows `stm32g0xx.h` (Cortex-M0+): RCC/PLL, GPIO, USART, `Stm32g0Platform`; its NVIC and ticker are `cortexm/`'s | `kernel/`, `util/`, `cortexm/` |
-| `stm32f4/` | everything that knows `stm32f4xx.h` (Cortex-M4F, brio's first ARMv7-M): RCC/PLL with the regulator scale and over-drive and the dynamic clock, GPIO, USART, EXTI, the RTC, the DMA, the timers, ADC/DAC, SPI/I2S, I2C and FMPI2C, the USB OTG core, PWR with the sleep sites, the flash engine, CRC/RNG/bxCAN, the FMC with its SDRAM, the LTDC and the DMA2D, the QUADSPI, the DSI host, `Stm32f4Platform`; its NVIC and ticker are `cortexm/`'s | `kernel/`, `util/`, `cortexm/` |
-| `ch32v00x/` | everything that knows the CH32V00x (QingKe V2C, RV32EC - the smallest core brio runs on): its own register map (no vendor header), the clock, the pads and their remaps, USART, SPI, I2C, DMA, the timers, the ADC and the OPA, flash and the two watchdogs, sleep, the PFIC guard, the STK ticker, `Ch32v00xPlatform` | `kernel/`, `util/` |
-| `ch32vx03/` | everything that knows the CH32V203 and the CH32V303 (QingKe V4B, RV32IMAC, and V4F, RV32IMAFC): its own register map again, over the STM32F1's peripheral generation under WCH's names - the clock tree, the pads and AFIO's remap columns, EXTI, the USARTs, SPI with its I2S face, I2C, two DMA controllers, the timers down to the basic ones, the two converters, the DAC and up to four amplifiers, the RNG, the USB device controller and the host/device one in device mode, flash, CRC, the RTC and the backup domain, PWR with its sleep sites, `Ch32vx03Platform` | `kernel/`, `util/` |
-| `ch32x035/` | everything that knows the CH32X035 and the CH32X033 (QingKe V4C, RV32IMAC): its own register map again, over a peripheral generation of WCH's own - the one-root clock, 24-pin ports over three configuration registers and AFIO's remap columns, the four USARTs, the PFIC guard, the 64-bit STK ticker, `Ch32x035Platform` | `kernel/`, `util/` |
-| `rp2040/` | everything that knows the RP2040 (a Cortex-M0+ pair): the clock generators, the pads, the timer, the watchdog and the resets, the DMA, PWM, the ADC, the RTC, the PIO, the QSPI flash, the USB device controller, the two cores and a kernel on each, `Rp2040Platform` | `kernel/`, `util/`, `cortexm/`, `pl011/`, `pl022/`, `dw_apb_i2c/` |
-| `rp2350/` | everything that knows the RP2350 (a Cortex-M33 pair AND a Hazard3 RISC-V pair over one set of peripherals, one of the two running): the clock tree, the pads, the two system timers, the watchdog and the resets, the DMA, PWM, the ADC, the PIO, the SHA-256 and TRNG blocks, the OTP read side, the bootrom's function table, the quad-SPI flash, the USB device controller, the second core, `Rp2350Platform` - with `core.hpp` the one file that asks which processor is in the socket | `kernel/`, `util/`, `cortexm/` (its Arm half), `pl011/`, `pl022/`, `dw_apb_i2c/` |
-| `host/` | `HostPlatform`: the native test "target" (virtual clock, recording idle/break), and the simulated devices the host suites and programs run against | `kernel/` |
+| Stratum | What it holds | Includes |
+|---|---|---|
+| `kernel/` | queues, the scheduler, state machines, delivery, time events, panic: pure logic | nothing of brio |
+| `rt/` | the runtime every 32-bit image compiles: seven functions, one source file ([runtime.md](docs/design/runtime.md)) | nothing of brio |
+| `util/` | services over the kernel: serial port and `print`, the bus arbiter with its SPI, I2C and CAN vocabularies, rings, power, storage in flash, meters, the USB device stack, the two-core bridge | `kernel/` |
+| `gfx/` | drawing: surfaces, primitives, fonts, text ([gfx.md](docs/design/gfx.md)) | nothing of brio |
+| `devices/` | what sits off the chip over a link the chip provides: display controllers and their panel driver | `kernel/`, `util/`, `gfx/` |
+| `cortexm/` | what every Cortex-M shares: the interrupt controller and its guard, the SysTick timebase, the microsecond delay | `util/` and the family's device header |
+| `pl011/`, `pl022/`, `dw_apb_i2c/` | peripheral blocks licensed to more than one vendor (ARM's UART and SSP, Synopsys's I2C), written once over a traits type each family supplies | `kernel/`, `util/` |
+| `avrxt/`, `samc21/`, `stm32g0/`, `stm32f4/`, `ch32v00x/`, `ch32vx03/`, `ch32x035/`, `rp2040/`, `rp2350/` | one stratum per family: the platform type, the clock, the pins and every peripheral driver of that family | `kernel/`, `util/`, and `cortexm/` or an IP stratum where the family carries the block |
+| `host/` | the native target: the host platform, simulated chips and devices, the graphics reference renderer | `kernel/`, `util/`, `gfx/`, `devices/` |
 
-Targets are siblings, never meet in one binary, and are the only place
-where hardware headers, ISR vector names and tick rates live. Nothing
-above them uses `#ifdef` to tell targets apart: where behaviour must
-differ, the target states a fact (`ticks_per_second`, `atomic_width`)
-and generic code chooses with `if constexpr` or a concept.
+What each stratum holds in detail is its own page under
+[docs/](docs/README.md). Two families never meet in one binary; where
+generic code must behave differently per family, the family states a
+fact (its tick rate, its atomic access width) and the generic code
+chooses with `if constexpr` or a concept, never with `#ifdef`.
 
-Two kinds of stratum sit between `util/` and the targets, and both are
-born under the same rule - **at the SECOND family that carries the
-thing, with both copies in hand, and gated by the images**: every
-release image of the family that had it first must be byte-identical
-before and after the extraction. A CORE stratum (`cortexm/`) holds what
-a processor family's designer specified and every vendor ships
-unchanged; an IP stratum (`pl011/`, `pl022/`, `dw_apb_i2c/`) holds a
-peripheral block licensed by more than one vendor and dropped into
-their chips register for register. Neither knows a chip: what a family
-owes an IP stratum is a traits type satisfying the concept that stratum
-states - where the registers are, its reset, its interrupt line, its
-clock, which pads are legal - while the family's own header keeps the
-public names an application writes.
+## Targets
 
-A target is either **supported** - its peripheral chapters are
-implemented and bench-verified, and everything `kernel/` and `util/`
-claim holds there - or **in bring-up**, where the stratum exists, part
-of it is proven on silicon, and the rest is still to be validated. This
-table is the one place that question is answered: no source file carries
-its own list of the targets it was tried on. Where a contract's
-realizations differ - and where they are one interface - is the
-REALIZATIONS TABLES, one per design page, indexed in
-[docs/design/overview.md](docs/design/overview.md) ("One interface
-where it can, its exceptions where a reader looks").
+A target is supported when its peripheral drivers are implemented and
+verified on a board and everything `kernel/` and `util/` claim holds
+there; it is in bring-up when the stratum exists, part of it is proven
+on silicon, and the rest is still to be validated. This table is the
+one place that status is stated; the detail of each family (which
+chapters, which boards, which gaps) is in its guide.
 
-| Target | State | Bench silicon | Notes |
-|--------|-------|---------------|-------|
-| AVR DA/DB/EA (`avrxt/`) | supported | AVR128DB48, AVR128DA48, AVR64EA48 | avr-gcc 16.2; three dies over the AVRxt core they share, their differences read off the device header in one place; on the AVR EA its own chapters behind the same surface - OSCHF at the rate its fuse chose as a claim in the clock type, checked at boot; NVM version 3's EEPROM engine, its flash self-programming declined; the differential ADC with its PGA - every chapter on the bench on the AVR64EA48, its images held to the ATmega4809's 48 KB and 6 KB by the group axis; see [docs/avrxt/README.md](docs/avrxt/README.md) |
-| SAM C21 (`samc21/`) | supported | ATSAMC21J18A | arm-none-eabi-gcc 16.2, SysTick tick at 1000 Hz against the AVR's 1024 - the kernel tick's opacity, exercised for real; see [docs/samc21/README.md](docs/samc21/README.md) |
-| STM32G0 (`stm32g0/`) | supported | STM32G0B1RE, STM32G071RB, STM32G031K8 | arm-none-eabi-gcc 16.2, HSI16 x PLL at 64 MHz, the third clock model (shared bus prescalers + per-peripheral enables) and a tickless timebase option; see [docs/stm32g0/README.md](docs/stm32g0/README.md) |
-| CH32V00x (`ch32v00x/`) | supported | CH32V006K8U6 | WCH's riscv32 gcc 15.2 with its `xw` extension, RV32EC (sixteen registers, 8 KB of RAM - the smallest core brio runs on), HSI x2 at 48 MHz, its own register map with no vendor header, the console on the WCH-Link's own serial; the CH32V003F4P6 (16 KB, 2 KB, no multiplier) is the family's second and last part, supported on the same stratum with its own part table, presets and ISA - every chapter tiered for it, its suites green on the board as group images, the buses on the wire against a peer, the smallest silicon brio runs on; see [docs/ch32v00x/README.md](docs/ch32v00x/README.md) |
-| CH32V203 / CH32V303 (`ch32vx03/`) | supported; the CH32V303 in bring-up | CH32V203C8T6 (a WeAct core board), CH32V303VCT6 (WCH's evaluation board) | WCH's riscv32 gcc 15.2 with its `xw` extension, RV32IMAC on the QingKe V4B and RV32IMAFC on the V4F (the FPU, the hard-float ABI, the part table stating each part's ISA and ABI) - the second WCH family and a bigger core than the CH32V00x's, with the STM32F1's peripheral generation under WCH's names; its own register map with no vendor header, the nine parts of the V203 series and the four of the V303 in one part table under three device classes, the PLL at 144 MHz from the internal RC or from the board's crystal, the console on the WCH-Link's own serial AND on the chip's own USB (util/usb's CDC over the CH32V203's USBD controller, ST's device peripheral under WCH's names, and over the CH32V303's host/device block in device mode, that part having no device controller); every chapter of the reference manual's plan has its document and its suite green on each part that carries the block - on the CH32V303 its own blocks too (a second DMA controller, TIM5 to TIM10 with the basic timers, the DAC read back by the converter on the pads they share, four amplifiers, the RNG, the flash array's non-zero-wait tail) - and the two buses on the wire against a peer board on the CH32V203 and against their sibling instances on the CH32V303's own board; the power model here rests on a finding of this silicon's own, measured on both parts, that in a sleep of any depth no bus master but the core gets a cycle, so a count of active bus masters keeps the idle path awake while a DMA channel or a USB controller is working; the 32 KB tier has a preset of its own as the link guard, and a suite too big for it builds there as one image per group of letters; the CH32V303VCT6 of the bench is a lot its class's notes restrict, so every lot-keyed register is a verb that asks the die; CAN waits for the cross-platform CAN pass, and TKEY, SDIO, the FSMC, I2S against a codec and the CH32V305/307 of the D8C class are declared with their reasons, the host/device block on the CH32V203's pads implemented and unmeasured for want of a connector; see [docs/ch32vx03/README.md](docs/ch32vx03/README.md) |
-| CH32X035 (`ch32x035/`) | in bring-up | CH32X035F8U6 (WCH's evaluation board, QFN20 edition) | WCH's riscv32 gcc 15.2 with its `xw` extension, RV32IMAC on the QingKe V4C - the CH32V203's ISA and ABI; its own register map with no vendor header; the seven parts of one die (62 KB, 20 KB) in one part table, each with the pads its package bonds and the pads it shorts together; ONE clock root, the 48 MHz internal RC, and one divider; the platform, the clock, the pins with AFIO's remaps and the four USARTs written from the reference manual, compiled for every part both ways the hardware prologue can be built, and measured on the CH32X035F8U6 - the four suites green, RMVF found a level and the power controller's reset line refused after a pulse on it cut the part off its debug port; the console on the WCH-Link's own serial through USART2; see [docs/ch32x035/README.md](docs/ch32x035/README.md) |
-| RP2040 (`rp2040/`) | supported | RP2040 (a Raspberry Pi Pico, a WeAct board) | arm-none-eabi-gcc 16.2, the third Cortex-M0+ family on `cortexm/` - two cores, a kernel on each with the inbox bridge between them, or one kernel on core 0; the USB device stack with a CDC console on the chip's own connector; the 12 MHz crystal through the PLL at 125 MHz, the fourth clock model (a generator per clock domain, a separate peripheral clock, no bus prescaler); the pico-sdk's device description vendored, its own crt and boot stage; see [docs/rp2040/README.md](docs/rp2040/README.md) |
-| RP2350 (`rp2350/`) | in bring-up | RP2350 in the QFN-80 package (a WeAct RP2350B core board) | BOTH INSTRUCTION SETS OVER ONE STRATUM: arm-none-eabi-gcc 16.2 on the Cortex-M33 pair and a self-built riscv32-unknown-elf gcc 16.2 on the Hazard3 pair, one set of drivers, one source per suite, and two presets per build type - which pair runs is decided by the IMAGE_DEF block in the image the bootrom finds, with no button, no fuse and no second-stage bootloader; a suite is green when it is green on both halves; the pico-sdk's RP2350 device description vendored in its own include root, the two crts and the linker script the project's own, and the PL011, PL022 and DesignWare blocks reached through the IP strata this chip shares with the RP2040; every chapter of the datasheet's plan has its document and its suite green on both halves - the platform, the clock tree, the pads, the PL011, the timers, the watchdog and the resets, the DMA, the PWM, the SPI, the I2C, the PIO, the ADC, the USB device controller with a CDC console on the chip's own connector, the SHA-256 and TRNG blocks, the OTP read side, the bootrom's table, the external flash with its FlashMedia, the second core with a kernel of its own, and POWMAN with the always-on timer and the sleep sites - and what remains is in the documents' gap lists, the HSTX and the Cortex-M33's coprocessors first among them; see [docs/rp2350/README.md](docs/rp2350/README.md) |
-| STM32F4 (`stm32f4/`) | supported | STM32F429ZI, STM32F446RE, STM32F411CE, STM32F469NI | arm-none-eabi-gcc 16.2 with the hard-float ABI, brio's first ARMv7-M family on the same `cortexm/` core files; the PLL at 180 MHz in over-drive on three boards and 100 MHz on the fourth, the APB prescalers unpinned (a rate per bus); every chapter of the four reference manuals with its document and its suite green on every board it builds for, against the devices the boards carry (a gyroscope, a touch controller, two SDRAMs, a panel on its RGB pads and one behind a DSI host, a serial flash) and the kernel console on two boards' own USB connectors; see [docs/stm32f4/README.md](docs/stm32f4/README.md) |
-| host (`host/`) | supported | - | doctest suites, `cd test && ctest --preset host`, see [docs/host/README.md](docs/host/README.md) |
+| Family | Verified boards | Status | Guide |
+|---|---|---|---|
+| AVR DA, DB and EA (`avrxt/`) | AVR128DB48, AVR128DA48, AVR64EA48 (self-built boards) | supported | [docs/avrxt/](docs/avrxt/README.md) |
+| SAM C21 (`samc21/`) | ATSAMC21J18A (self-built board) | supported | [docs/samc21/](docs/samc21/README.md) |
+| STM32G0 (`stm32g0/`) | Nucleo-G0B1RE, Nucleo-G071RB, Nucleo-G031K8 | supported; the learning route's family | [docs/stm32g0/](docs/stm32g0/README.md) |
+| STM32F4 (`stm32f4/`) | STM32F429I-DISC1, Nucleo-F446RE, STM32F411CE black pill, 32F469IDISCOVERY | supported | [docs/stm32f4/](docs/stm32f4/README.md) |
+| CH32V00x (`ch32v00x/`) | CH32V006K8U6 module, CH32V003F4P6 board | supported; the smallest parts brio runs on (16 KB flash, 2 KB RAM on the CH32V003) | [docs/ch32v00x/](docs/ch32v00x/README.md) |
+| CH32V203 and CH32V303 (`ch32vx03/`) | WeAct CH32V203C8T6, WCH CH32V303 evaluation board | CH32V203 supported; CH32V303 in bring-up; CAN not implemented | [docs/ch32vx03/](docs/ch32vx03/README.md) |
+| CH32X035 (`ch32x035/`) | WCH CH32X035F8U6 evaluation board | in bring-up: platform, clock, pins and USARTs only | [docs/ch32x035/](docs/ch32x035/README.md) |
+| RP2040 (`rp2040/`) | Raspberry Pi Pico, WeAct RP2040 | supported; two cores run two kernels | [docs/rp2040/](docs/rp2040/README.md) |
+| RP2350 (`rp2350/`) | WeAct RP2350B | in bring-up: one source built for the Cortex-M33 pair and for the Hazard3 pair, every chapter green on both; no HSTX, no M33 coprocessors | [docs/rp2350/](docs/rp2350/README.md) |
+| host (`host/`) | the host itself | supported: the test suites and the simulators | [docs/host/](docs/host/README.md) |
+
+Compilers: avr-gcc 16.2 for the AVR, arm-none-eabi-gcc 16.2 for the
+ARM families and the RP2350's Arm half, WCH's riscv32 gcc 15.2 for the
+three CH32V families, an upstream riscv32-unknown-elf gcc 16.2 for the
+RP2350's RISC-V half, and a host g++ 16 for the tests. Each target's
+guide says where its toolchain is expected and how to point the build
+elsewhere. The boards are described one page each in
+[docs/boards/](docs/boards/README.md), the probes in
+[docs/probes/](docs/probes/README.md).
 
 ## Building and testing
 
-The framework in `brio/` is headers, included directly, and one source
-file every 32-bit image compiles: the runtime, `brio/rt/rt.cpp`
-([docs/design/runtime.md](docs/design/runtime.md)). The
-builds are sibling CMake projects, one per target, all peers (the repo
-root is not a CMake project): `avrxt/`, `samc21/`, `stm32g0/`,
-`stm32f4/`, `ch32v00x/`, `ch32vx03/`, `rp2040/`, `rp2350/` and
-`host/` each auto-discover one `main()` per `src/apps/<app>.cpp` at
-configure time - an app may pin build options such as its console baud
-with `// build: monitor_speed = 115200` header lines - and `test/`
-holds the host unit tests (a configure has exactly one compiler).
+The framework is headers under `brio/`, included directly, plus one
+source file every 32-bit image compiles (`brio/rt/rt.cpp`). The builds
+are sibling CMake projects, one per family plus `test/` and `host/`;
+the repository root is not a CMake project. Each project discovers one
+application per `src/apps/<app>.cpp` at configure time and gives it a
+build target and an `-upload` target.
 
 ```bash
-(cd test    && ctest --preset host)                                       # host tests: kernel, queues, FSM, time events, buses, ring...
-(cd avrxt   && cmake --build --preset avr128db48-release --target <app>)  # build one AVR app (release, -Os)
-(cd avrxt   && cmake --build --preset avr128db48-release --target <app>-upload)   # flash it over UPDI
-(cd samc21  && cmake --build --preset samc21j-release --target <app>)     # build one SAM app
-(cd samc21  && cmake --build --preset samc21j-release --target <app>-upload)      # flash it over SWD
-(cd stm32g0 && cmake --build --preset stm32g0b1re-release --target <app>)  # build one STM32G0 app
-(cd stm32g0 && cmake --build --preset stm32g0b1re-release --target <app>-upload)   # flash it over the ST-LINK
-(cd ch32v00x && cmake --build --preset ch32v006k8-release --target <app>-upload)    # flash it through the WCH-Link
-(cd rp2350  && cmake --build --preset rp2350-arm-release --target <app>)    # build one RP2350 app for the Cortex-M33
-(cd rp2350  && cmake --build --preset rp2350-riscv-release --target <app>)  # ... and the same source for the Hazard3
+(cd test    && ctest --preset host)                                                # the host tests, no hardware
+(cd stm32g0 && cmake --preset stm32g0b1re-release)                                 # configure one project for one part
+(cd stm32g0 && cmake --build --preset stm32g0b1re-release --target blink)          # build one application
+(cd stm32g0 && cmake --build --preset stm32g0b1re-release --target blink-upload)   # flash it through the board's probe
 ```
 
-With more than one board on the desk the bench has one command,
-`bin/brio` (put `bin/` on the PATH): `brio list` shows the boards the
-manifest knows and which are plugged in, `brio flash <board> <app>`
-builds for that board's type and flashes it whatever its probe,
-`brio run <board> <letter>` drives a test suite's console and judges
-its summary, `brio check <stratum>` runs the family compile fixtures
-and links every app on every preset of the family, and `brio prose`
-the prose net. `brio --help` lists the rest.
+The step-by-step version, with prerequisites and expected results, is
+[docs/learn/command-line.md](docs/learn/command-line.md); the VS Code
+route is [docs/learn/vscode.md](docs/learn/vscode.md). Every other
+family follows the same shape with its own project directory, presets
+and probe, documented in its guide.
 
-Everything target-specific - toolchain, board, probe, debugger, its
-quirks - is documented per target in each target's folder under [docs/](docs/).
-The apps are the framework's test bench: disposable by design, they
-document themselves in their own header comment (`brio apps` lists
-them), and what a suite needs wired is in that comment. The boards and
-the probes brio is tested with are [docs/boards/](docs/boards/) and
-[docs/probes/](docs/probes/).
+`bin/brio` is the repository's one command for the bench and the checks
+(put `bin/` on the PATH): `brio flash <board> <app>` builds for a board
+and flashes it whatever its probe, `brio run` drives a test suite's
+console and judges its verdict, `brio check <stratum>` compiles the
+family fixtures and links every application on every preset,
+`brio prose` checks the comments and documents, `brio gate` proves that
+a change moved no image. `brio --help` lists the verbs (a verb is the
+action name after `brio`).
 
 ## Status
 
-The kernel and the services above it compile unchanged on every target
-the table above names, and are bench-tested on the families marked
-supported: the kernel
-loop and time events, a serial console over `SerialPort`, an arbitrated
-SPI bus (a display and a touch controller sharing one) and an
-arbitrated I2C bus (a DAC written and read back, an ADC measured
-through SPI), the power model with its sleep sites, the flash storage
-classes, and the analog and metering services. Each target's own
-chapters are covered by the reference suites its documentation names.
+The kernel and the services compile unchanged on every family in the
+table and are bench-tested on the supported ones: the kernel loop and
+time events, a serial console, arbitrated SPI and I2C buses with real
+devices on them, the power model with its sleep modes, the flash
+storage, the analog and metering services. Each family's own drivers
+are covered by the test suites its guide names.
 
-brio is still revised freely: nothing below the kernel contract is
-promised stable, and where a limitation can be removed by rewriting
-what sits below, the rewrite wins (the governing rule in
-[overview.md](docs/design/overview.md)). What has settled is measured
-rather than declared: the kernel and the services above it reached each
-new family unchanged, and the contracts a program can lean on are the
-ones a realizations table shows realized on family after family - the
-AO contract, the bus vocabularies, the power model,
-the storage classes, the analog and metering services, the clock model.
-Clean-room with respect to QP: the
-concepts come from Samek's book, never the QP source.
+brio is revised freely: nothing below the kernel contract is promised
+stable, and when a limitation can be removed by rewriting what sits
+below it, the rewrite wins ([overview.md](docs/design/overview.md),
+"Governing rule"). What has settled is what reached each new family
+unchanged: the active-object contract, the bus vocabularies, the power
+model, the storage classes, the clock model.
 
 ## License
 
-brio is released under the MIT license ([LICENSE](LICENSE)): use it,
-change it, ship it, keep the notice with it. The vendored components
-under [third_party/](third_party/) keep their own licenses - doctest
-(MIT), CMSIS-Core, cmsis-device-g0, cmsis-device-f4 and the SAM C21
-DFP (Apache-2.0), and the pico-sdk subset (BSD-3-Clause).
+brio is released under the MIT license ([LICENSE](LICENSE)). The
+vendored components under [third_party/](third_party/) keep their own
+licenses: doctest (MIT), CMSIS-Core, cmsis-device-g0, cmsis-device-f4
+and the SAM C21 DFP (Apache-2.0), and the pico-sdk subset
+(BSD-3-Clause).

@@ -17,7 +17,12 @@ The learning route, read in order:
 
 | Document | Content |
 |----------|---------|
-| `learn/` | The introduction (what problem brio solves, the execution model before its C++ form), the first program read in stages over an existing maintained example, the VS Code and command-line workflows with the verification status of every step, and the task guides; its own `README.md` is the route's table of contents |
+| [learn/README.md](learn/README.md) | The route's table of contents, where it leads after the last page, and the teaching examples it does not have yet |
+| [learn/introduction.md](learn/introduction.md) | From the main loop to active objects: what problem brio solves, the execution model before its C++ form, the one scheduling rule and what the model costs |
+| [learn/first-program.md](learn/first-program.md) | The maintained example `blink` read in stages: events, the queue, one complete event path, scheduling, state, time, two active objects talking, capacities and overload, the target glue |
+| [learn/cpp-notation.md](learn/cpp-notation.md) | The C++ the example uses, explained through its own lines |
+| [learn/command-line.md](learn/command-line.md) | Build, flash, observe and debug `blink` on the ST Nucleo-G0B1RE from a terminal, and the host tests |
+| [learn/vscode.md](learn/vscode.md) | The same steps in VS Code, each marked verified, configured, terminal-only or blocked |
 
 The reference:
 
