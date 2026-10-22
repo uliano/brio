@@ -29,6 +29,9 @@ priority, MPSC stress with simulated producers, wrap-around deadlines.
 ## Running
 
 ```bash
+cd test
+cmake --preset host                 # configure, once (writes build-cmake/host)
+cmake --build --preset host         # build every suite; the test preset does not
 ctest --preset host                 # all suites
 ctest --preset host -R test_fsm     # one suite
 ```
