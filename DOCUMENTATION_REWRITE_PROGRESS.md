@@ -1242,22 +1242,150 @@ round, by the batch's cost rule.
 - The stm32f4 vendor page's link, one `../` to add, by whoever next
   edits that page.
 
+## Sixth batch: the ch32x035 stratum
+
+Scope, capped: the nine peripheral documents of `docs/ch32x035/` (every
+page but README.md and vendor/README.md) in the brief's additive pass,
+and the comments of all fifteen headers of `brio/ch32x035/` (the seven
+part tables under `parts/` untouched). Base: `docs-rewrite` at
+03902163821e258f2ea9f6ff1febc78c4cdb04e9, the reference of every token
+check. Branch `claude/ch32x035-docs-99jwgr`, four commits (the four
+documents the console's glue touches first; the five others; the nine
+platform, interrupt, timebase, clock, pin and map headers; the six
+driver headers), one pull request against `docs-rewrite`. Not touched:
+every code token (the token check on every header), apps, CMake,
+presets, ld, the crt, `.vscode`, `.clangd`, every other stratum, the
+design pages and the learning route, docs/ch32x035/README.md and
+vendor/README.md, CLAUDE.md, docs/README.md. No `// build:` or `// mcu:`
+line exists in the headers. No build, no host test and no cross
+toolchain in the cloud; the token check lexed with the system g++
+13.3; the clone was shallow and was unshallowed before the first check.
+
+### The documents
+
+Each of the nine opens with: whom the document is for and what the
+driver does in a program; the smallest use, an excerpt of the
+document's own "How to use it" block (platform.md's the glue the
+console and the suites spell; tim.md's the opening of the edge list,
+not the one-pulse prose, which names no channel enable and would have
+been a new example), explained line by line; the prerequisite that
+decides correctness even there; and a reading guide. "Documents of
+record" became a heading on every page, with a suite's letter and the
+all-key defined beside the suite's name. The terms defined where the
+pages use them: a concept, the crt, the hardware prologue and its
+option, an active object, a task, a monostate, a beat, a column, MOE.
+The one reference to kernel.md by section number (platform.md) is a
+link by heading. Capitals used for emphasis lowered across the nine
+pages, acronyms and register names kept. Nothing reordered, no finding,
+figure, register name, bit name, gap item or realization cut.
+
+The prerequisites stated, each checked against the header: the clock
+task first, because a divisor or a compare is computed from the rate
+the type claims (a port or a ticker opened at the 8 MHz reset rate with
+a 48 MHz type runs six times too slowly, nothing refuses it); the
+vector bound by the program under `BRIO_CH32_INTERRUPT`, said the
+operational page's way (the project's `CH32X035_HPE` option, on by
+default, the crt setting INTSYSCR.HWSTKEN and the attribute becoming
+WCH's fast one; one switch for the image); a DMA channel at work
+holding the program awake (`idle()` returns at once over
+`Dma::any_working()`); a pad read after its port is configured and a
+level written before the first configuration going through
+`output(level)` or `input(pull)`; an I2C or SPI buffer lent until the
+reply; a timer pad claimed after the counter's first run.
+
+### The headers
+
+Comments only, every one of the fifteen token-identical to the base.
+Each opening now says first what the component does for a caller and
+the smallest use (written out, or pointed at the task below), which
+context calls what (the setup verbs in main after the clock task; the
+vectors' bodies called from the program's handlers and nowhere else;
+the rings' one producer and one consumer; what waits and its bound;
+what masks: the USART's transmit arming under a receive engine alone,
+the transmit engine's claim; the register verbs with no guard of their
+own), who owns a lent buffer until when, then every fact the old
+comment gave with its citation. The public operations the smallest
+uses call gained the sentence they lacked. Stale claims corrected to
+the code's truth: device.hpp listed "the timers" among the blocks with
+no driver (TIM1 and TIM2 are tim.hpp's; TIM3 is the one without) and
+said no verb writes AFIO_CTLR (afio.hpp's `usb_pad_pull_ups()` writes
+its two pull-up mode fields); the I2C host's class comment named four
+template parameters where the class has five (`Placement`). The
+kernel's rule is cited by section number and heading text in
+platform.hpp, pfic.hpp and spi.hpp (the inventory above lists the
+numbered references; the numbers stand).
+
+### Facts resolved while writing
+
+- platform.hpp's "a 4096-item copy ... had moved 68 items when the
+  tick woke the core 19 000 cycles later" and dma.md's "3862 to 4037
+  items left ... 17 000 to 47 000 cycles later" are one run and a
+  range; the run is inside the range. Both kept.
+- The USART's "one load with the gate closed, two a channel with it
+  open" (platform.hpp, dma.hpp) and platform.md's "four instructions
+  ... six a channel" count loads and instructions respectively; both
+  kept.
+- spi.md's smallest use drives the select high after `init()`; the
+  orientation says the select is driven high before the first request
+  is posted, not before `init()`, which does not claim that pad.
+- pwr.md's 200 us settle is the suites' choice: the manual gives no
+  settling time, and the orientation says so.
+- i2c.hpp's "the Request is the other strata's" was the prose net's
+  one review item on the stratum; now "the same struct on every
+  stratum".
+
+### Checks
+
+- `bin/brio prose brio/ch32x035/*.hpp docs/ch32x035/*.md`: 25 files, 0
+  errors, 0 for review (before the batch: 0 errors, 1 for review,
+  i2c.hpp line 16).
+- `bin/brio gate --tokens --against 0390216 brio/ch32x035/*.hpp`: all
+  fifteen token-identical (lexed with the system g++ 13.3).
+- Links and anchors of the ten pages of docs/ch32x035 and the vendor
+  page, by the script with GitHub's anchor rules: 0 problems; the
+  three hits of the run are README.md's lambda notation, the known
+  false positive outside this batch.
+- `grep -P '[^\x00-\x7F]'` over the touched files: nothing; no
+  `// build:` or `// mcu:` line in any header.
+- `git diff --stat 0390216 -- . ':!docs/ch32x035' ':!brio/ch32x035'`:
+  empty before this record was written; no source outside the stratum,
+  no build or configuration file changed.
+- Not run, no toolchain: any build, `brio check ch32x035`, the host
+  tests, the full `brio gate`.
+
+### Local verification handoff
+
+- The full `brio gate` against 0390216 on a machine with the
+  toolchains confirms every image of the seven presets unmoved
+  (comments only; the token check says so, the gate proves it).
+- `brio check ch32x035`, for the family fixtures' sake (nothing in them
+  changed).
+- The excerpts in the orientations are copies of each document's own
+  "How to use it" block, and the headers' smallest uses copies of those
+  or of the console's glue (`ch32x035/src/apps/console.cpp`); a re-read
+  of each pair after any API change is the maintained-example rule
+  applied to them.
+- The one claim of the batch the desk can settle in a minute: that a
+  port or a ticker initialized before the clock task runs six times too
+  slowly (derived from the divisor arithmetic, not measured).
+
 ## Next batches (not started)
 
-The credit of the cloud sessions ended with this batch. What it did
-not reach, each on the stm32g0 batch's pattern (the documents'
+The credit of the cloud sessions ended with the sixth batch. What it
+did not reach, each on the stm32g0 batch's pattern (the documents'
 additive pass: the reader's orientation, the smallest use, the
 prerequisite, local fixes; the headers' comments under the same brief:
 what the caller gets, which context calls what, then every fact kept
 with its citation, token identity on every file):
 
-1. The peripheral documents and the headers of the eight target
-   strata whose README this batch rewrote: `docs/avrxt/` (20 documents,
-   `brio/avrxt/`), `docs/samc21/` (27, `brio/samc21/`), `docs/stm32f4/`
-   (25, `brio/stm32f4/`), `docs/ch32v00x/` (12, `brio/ch32v00x/`),
-   `docs/ch32vx03/` (19, `brio/ch32vx03/`), `docs/ch32x035/` (9,
-   `brio/ch32x035/`), `docs/rp2040/` (18, `brio/rp2040/`),
-   `docs/rp2350/` (22, `brio/rp2350/`), and the vendor pages' links.
+1. The peripheral documents and the headers of the seven target
+   strata whose README the fifth batch rewrote and whose documents no
+   batch has reached: `docs/avrxt/` (20 documents, `brio/avrxt/`),
+   `docs/samc21/` (27, `brio/samc21/`), `docs/stm32f4/` (25,
+   `brio/stm32f4/`), `docs/ch32v00x/` (12, `brio/ch32v00x/`),
+   `docs/ch32vx03/` (19, `brio/ch32vx03/`), `docs/rp2040/` (18,
+   `brio/rp2040/`), `docs/rp2350/` (22, `brio/rp2350/`), and the vendor
+   pages' links; the `ch32x035` stratum is done (the sixth batch).
 2. The rest of `brio/util/` (the twenty-five other headers: the analog
    converter and sampler, block streams, CAN, the clock and placement
    vocabularies, the NV heap, journal, record and writer, power, the
