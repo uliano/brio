@@ -1,98 +1,136 @@
 /*
  * serial_port.hpp
  *
- * SerialPort: the active object that turns a byte transport into LINE
- * events - bytes at high rate below (ISR + ring, lock-free), events at
- * low rate above. Pure logic over the transport template parameter:
- * host-testable with a fake transport, target-agnostic (layering rule).
+ * SerialPort: the active object that turns the bytes a serial transport
+ * receives into complete lines, each delivered as one event to another
+ * active object of the program, the line sink. Below it bytes arrive at
+ * the wire's rate, into a ring an interrupt handler or a receive engine
+ * fills; above it events arrive at a line's rate. SerialPort is pure
+ * logic over its Transport template parameter: it compiles against any
+ * type that meets util/stream.hpp's ByteSource, so it runs on every
+ * target unchanged and the host suite drives it with a scripted
+ * transport (test/test_serial_port). The stack it belongs to is
+ * docs/design/serial.md, "SerialPort".
  *
- * Reception pipeline:
- *   ISR:      bytes -> RX ring (an interrupt receiver's, lock-free, or a
- *             receive engine's); when the ring holds bytes the consumer
- *             has not been told of, the transport's vector returns true
- *             and the app glue posts RxActivity{} (docs/design/serial.md,
- *             "The burst edge comes from a vector")
- *   SerialPort: drains the ring, feeds a LineAssembler; each completed
- *             line is posted to LineSink as LineReceived{line} - a
- *             REFERENCE, the 80-byte payload never travels in a queue
- *   LineSink: parses/uses the line within its own dispatch
+ * The smallest use is a console. The program names a transport of its
+ * family, a SerialPort over it with the active object that handles the
+ * lines, lists the sink before the port, and posts RxActivity from the
+ * transport's interrupt handler:
  *
- * Line buffer ownership (ping-pong): two LineAssemblers alternate; a
+ *     using Lines = brio::SerialPort<Serial, P, Shell>;   // Shell handles LineReceived
+ *     brio::Tenuto<P, Shell, Lines>::run();              // the sink before the port
+ *
+ *     // in the program's handler for the transport's vector:
+ *     if (Serial::isr()) { brio::post<Lines>(brio::RxActivity{}); }
+ *
+ * Who calls what, and from where:
+ *  - the transport's interrupt handler moves each byte into the receive
+ *    ring (an interrupt receiver's ring, lock-free, or a receive
+ *    engine's) and returns true when the ring holds bytes the consumer
+ *    has not been told of; the program's glue posts one RxActivity on
+ *    that true (docs/design/serial.md, "The burst edge comes from a
+ *    vector"). RxActivity is the one event SerialPort handles;
+ *  - SerialPort runs in the kernel loop, in main context like every
+ *    active object: its dispatch drains the ring into a LineAssembler
+ *    (util/proto/line_parser.hpp) and posts each completed line to
+ *    LineSink as LineReceived{line}. The event carries a pointer to the
+ *    line, never the line itself: the text, up to max_line - 1
+ *    characters (max_line is 80 by default) and a NUL, stays in the
+ *    assembler's buffer and never travels through a queue;
+ *  - LineSink reads or parses the line inside its own dispatch, the one
+ *    that handles LineReceived. Nothing here waits, masks interrupts or
+ *    runs user code outside those dispatches.
+ *
+ * Who owns a line, and for how long. Two LineAssemblers alternate: a
  * completed line stays untouched in its assembler's buffer while the
- * OTHER one assembles the next line. With both lines in flight SerialPort
- * stops draining (the ring absorbs, that is its job) and posts
- * RxActivity to ITSELF: "leftover work, reschedule me".
+ * other one assembles the next line. The line is lent to the sink for
+ * one dispatch, a Lease::dispatch loan (kernel/borrowed.hpp): the sink
+ * may read it and may write it (tokenizing it in place is the point of
+ * the loan) while handling LineReceived, and must not keep the pointer
+ * for a later event, because the next SerialPort dispatch assembles a
+ * new line into that buffer. With both lines in flight SerialPort stops
+ * draining (the ring absorbs the bytes; that is its job) and posts
+ * RxActivity to itself: there is leftover work, serve me again.
  *
- * SCHEDULING CONTRACT - consumer above producer: LineSink MUST precede
- * SerialPort in the Tenuto pack. The kernel then serves every posted
- * LineReceived before SerialPort runs again, so when a SerialPort dispatch
- * starts, all its previously posted lines have been consumed and both
- * buffers are free (in_flight resets). The line is a Lease::dispatch loan
- * (kernel/borrowed.hpp): the sink may read AND mutate it (in-place
- * tokenization) during its dispatch only; keeping the pointer across
- * dispatches is a bug. SerialPort declares `LendsTo = Subscribers<
- * LineSink>` and Tenuto refuses a pack that violates the order.
+ * The order the loan needs: LineSink must come before SerialPort in the
+ * list of active objects given to Tenuto. The kernel serves the queues
+ * in list order and a dispatch runs to its end, so every LineReceived
+ * posted is handled before SerialPort runs again; when a SerialPort
+ * dispatch starts, every line it posted has been consumed and both
+ * buffers are free (in_flight_ goes back to zero). SerialPort declares
+ * `using LendsTo = Subscribers<LineSink>` and Tenuto refuses, when the
+ * program is compiled, a list in which the sink comes after the port.
  *
- * TX has no AO: print() goes straight to the transport's blocking
- * push path - bounded by the wire rate (~2 ms worst case at 460800),
- * naturally atomic between AOs (run-to-completion), revisited only for
- * slow links or hard latency budgets (docs/design/serial.md).
+ * Transmit has no active object. print() (util/print.hpp) goes straight
+ * to the transport and waits until the transmit ring has taken every
+ * byte: the wait is zero while the message fits the ring's room, and
+ * otherwise one byte time for each byte that does not yet fit. A byte
+ * is ten bit times, 21.7 us at 460800 baud and 87 us at 115200, so a
+ * message that finds the default 256-byte transmit ring full waits
+ * about 5.5 ms at 460800 (docs/design/serial.md, "Output policy: wait,
+ * do not drop"). A print is atomic between active objects because a
+ * dispatch runs to completion, so no other object's text can interleave
+ * with it; the design page says when that policy would be revisited (a
+ * slow link, a hard latency budget).
  *
- * THE DRAIN TAKES A RUN WHERE THE TRANSPORT LENDS ONE. A transport that
+ * The drain takes a run where the transport lends one. A run is a
+ * contiguous stretch of bytes the ring already holds. A transport that
  * offers its receive ring's consumer half in place (util/stream.hpp's
  * SpanSource: read_span() and consume(n), the ring's own two verbs) is
- * drained a run at a time - the bytes fed to the assembler where the
- * ring holds them and released with one index store per run; any other
+ * drained a run at a time, the bytes fed to the assembler where the ring
+ * holds them and released with one index store per run; any other
  * ByteSource is drained a byte at a time through read_byte(). Either way
  * the drain stops at the byte that completes the second line in flight
  * and leaves every byte after it queued, so the two paths deliver the
  * same lines in the same dispatches.
  *
- * A LINE IS POSTED ONLY FROM A RUN RELEASED CLEAN. The lines completed
+ * A line is posted only from a run released clean. The lines completed
  * from a run are posted after its consume(), never before: where the
  * ring's producer is the hardware (util/ring.hpp's HardwareRing, behind
  * a DMA receive engine) the run can be written over while it is read,
  * and consume() answers false. Then the lines completed from that run
  * and the line begun when it came are dropped and counted in
- * torn_lines(), and the stream resumes after its next end of line - the
- * bytes before it end a line whose beginning the ring skipped. Over a
+ * torn_lines(), and the stream resumes after its next end of line (the
+ * bytes before it end a line whose beginning the ring skipped). Over a
  * Ring, whose consume() answers nothing, the release cannot refuse and
  * none of that is compiled.
  *
- * A SKIP BETWEEN TWO RUNS IS SEEN. The stream a ring hands out can jump:
- * a HardwareRing skips to its producer whenever a look finds a lap unread
- * - in the drain's own read_span(), or in a count() asked between two
- * drains - and a SkipRing skips to its producer at the look after a
+ * A skip between two runs is seen. The stream a ring hands out can jump:
+ * a HardwareRing skips to its producer whenever a look finds a lap
+ * unread (in the drain's own read_span(), or in a count() asked between
+ * two drains), and a SkipRing skips to its producer at the look after a
  * receive interrupt dropped a byte that found the ring full, or that the
- * receiver flagged as corrupt. The run handed out after such a gap is the
- * stream after it, which the line begun in an assembler would otherwise
- * swallow as its continuation. So a transport reports the gaps in its
- * stream (util/stream.hpp's SkippingSource, rx_skips(), never cleared),
- * the drain compares the epoch at every run - over EVERY transport that
- * has it, whether its release can refuse or not - and a change ends the
- * line begun as torn, counted in torn_lines(), and skips the stream to
- * its next end of line. One load and one compare a run, nothing a byte.
- * Where the ring skips at the look that finds the gap (util/ring.hpp's
- * HardwareRing and SkipRing), no run handed out holds one and the epoch
- * moves between two runs, so no line is ever delivered across a gap: the
- * line begun is torn, and what the ring held when the gap was found is
- * skipped with it. A transport whose release can refuse and that does not
- * report its skips is refused at compile time; over a transport without
- * the verb (a test capture, a simulated port) nothing of it is compiled.
+ * receiver flagged as corrupt. The run handed out after such a gap is
+ * the stream after it, which the line begun in an assembler would
+ * otherwise swallow as its continuation. So a transport reports the gaps
+ * in its stream (util/stream.hpp's SkippingSource: rx_skips(), an epoch
+ * that is never cleared), the drain compares the epoch at every run,
+ * over every transport that has the verb whether its release can refuse
+ * or not, and a change ends the line begun as torn, counted in
+ * torn_lines(), and skips the stream to its next end of line. One load
+ * and one compare a run, nothing a byte. Where the ring skips at the
+ * look that finds the gap (util/ring.hpp's HardwareRing and SkipRing),
+ * no run handed out holds one and the epoch moves between two runs, so
+ * no line is ever delivered across a gap: the line begun is torn, and
+ * what the ring held when the gap was found is skipped with it. A
+ * transport whose release can refuse and that does not report its skips
+ * is refused at compile time; over a transport without the verb (a test
+ * capture, a simulated port) nothing of it is compiled.
  *
- * A SILENCE ENDS THE SKIP. A gap can take the cut line's own end of line,
- * and then the next end of line is a later, whole line's. So where the
- * drain found the ring empty after the gap and the next run comes
- * quiet_ticks (100 ms) or more after that look, the line is taken to have
- * ended in the silence, and the run is drained as a line's beginning.
- * Undecidable still: the next line close behind a gap that took a line's
- * end (skipped as the cut line's tail), a sender pausing mid-line longer
- * than the silence after a gap took its end, and a gap landing on a
- * line's start (that whole line dropped with the fragment expected).
+ * A silence ends the skip. A gap can take the cut line's own end of
+ * line, and then the next end of line is a later, whole line's. So where
+ * the drain found the ring empty after the gap and the next run comes
+ * quiet_ticks (100 ms) or more after that look, the line is taken to
+ * have ended in the silence, and the run is drained as a line's
+ * beginning. Still undecidable: the next line close behind a gap that
+ * took a line's end (skipped as the cut line's tail), a sender pausing
+ * mid-line longer than the silence after a gap took its end, and a gap
+ * landing on a line's start (that whole line dropped with the fragment
+ * expected).
  *
  * The contract assumes a byte stream whose edge is told once until the
- * ring is found empty - the transport's, whichever event of its silicon
- * makes it (docs/design/overview.md, "Authority of util/").
+ * ring is found empty: the transport's edge, whichever event of its
+ * silicon makes it (docs/design/overview.md, "Authority of util/").
  */
 
 #pragma once
@@ -111,11 +149,16 @@
 
 namespace brio {
 
-/// Posted (by ISR glue or by SerialPort itself) when RX bytes are pending.
+/// Bytes are waiting in the receive ring. Posted by the program's
+/// interrupt glue when the transport's handler returns true, and by
+/// SerialPort to itself when it stopped a drain with bytes still queued.
 struct RxActivity {};
 
-/// A completed line, NUL-terminated, lent for the receiving dispatch
-/// only (mutable: in-place tokenization is the point of the loan).
+/// A completed line, NUL-terminated and without its end of line, lent to
+/// the sink for the dispatch that handles this event only. The sink may
+/// write it (tokenizing it in place is the point of the loan) and must
+/// not keep the pointer past that dispatch: the buffer is reused by the
+/// next line SerialPort assembles.
 struct LineReceived {
     Borrowed<char, Lease::dispatch> line;
 };
@@ -130,15 +173,19 @@ public:
     using Event = typename Base::Event;
     using Status = typename Base::Status;
 
-    // Depth 2: one external edge + one self-post is the steady-state
-    // worst case; a dropped extra RxActivity is harmless (the queued
-    // ones already guarantee the drain will happen).
+    // Depth 2: one edge from the interrupt glue plus one self-post is the
+    // steady-state worst case; a further RxActivity dropped by a full
+    // queue is harmless, since the queued ones already guarantee that
+    // the drain will happen.
     static inline EventQueue<Event, 2, P> queue;
 
-    /// LineReceived is a Lease::dispatch loan: Tenuto checks LineSink
-    /// precedes this AO in the pack.
+    /// The line is a Lease::dispatch loan to LineSink: Tenuto refuses at
+    /// compile time a list in which LineSink comes after this object.
     using LendsTo = Subscribers<LineSink>;
 
+    /// Called by the kernel before the first event is served. Over a
+    /// transport that reports its skips, the stream starts here: a gap
+    /// recorded before init() tears nothing.
     static void init() {
         if constexpr (SkippingSource<Transport>) {
             // The stream starts here: a skip before it tears nothing.
@@ -150,7 +197,9 @@ public:
 
     static void dispatch(const Event& e) { Base::dispatch(e); }
 
-    /// Line-assembly overflow count (lines longer than max_line).
+    /// Lines that did not fit an assembler's buffer (max_line - 1
+    /// characters), each dropped up to its end of line and counted; a
+    /// diagnostic, readable from anywhere (one byte).
     static uint8_t line_overflows() {
         return static_cast<uint8_t>(assembler_[0].overflow_count() +
                                     assembler_[1].overflow_count());
@@ -161,7 +210,8 @@ public:
     /// was read, which the transport refused at its release (a
     /// HardwareRing), and the line begun in the assemblers when such a run
     /// came or when the stream had a gap between two runs (rx_skips()
-    /// moved). Always zero over a transport that reports no gaps.
+    /// moved). Always zero over a transport that reports no gaps. A
+    /// diagnostic: read it from main context, where it is written.
     static uint32_t torn_lines() { return torn_lines_; }
 
 private:

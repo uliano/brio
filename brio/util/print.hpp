@@ -1,10 +1,15 @@
 /*
  * print.hpp
  *
- * Text formatting as free variadic functions over any brio::ByteSink: a
- * transport moves bytes, formatting lives here.
+ * print(): text output for a program, as one function that takes a
+ * transport and any number of values and writes them in order, each
+ * formatted as text. A transport moves bytes; the formatting lives here,
+ * over any type that meets util/stream.hpp's ByteSink, so one print()
+ * serves every family's serial port, a USB serial link and a test
+ * capture alike.
  *
- * Usage (sink passed as a zero-cost tag instance):
+ * The smallest use names the transport once, as an empty tag instance
+ * of its all-static class, and prints:
  *
  *   constexpr brio::Uart<2> serial;
  *   brio::print(serial, "[", ts, "] count = ", count, brio::crlf);
@@ -18,33 +23,46 @@
  * Extension point: print() dispatches each argument to an unqualified
  * print_one(sink, value) call, so a new type becomes printable by providing
  * a print_one overload for it (in namespace brio or in the type's own
- * namespace, found via ADL).
+ * namespace, found via ADL, argument-dependent lookup).
  *
- * Delivery policy: print BLOCKS until the sink has accepted every byte,
- * and never truncates. Where the sink is a BulkSink (util/stream.hpp) a
- * string_view goes to it as ONE RUN, and a C string - every formatted
- * number among them, each formatted into a buffer and printed as a
- * string - as its first byte through write_byte(), so an idle
- * transmitter starts before anything is measured, then as runs of up to
- * print_scan_run bytes, measured as they go: write_bulk() is handed the
- * run and asked again for what is left, spinning while nothing fits -
- * one copy into the transport's ring and at most two nudges of its
- * transmitter a run, where a byte at a time pays both per byte. A sink
- * with the byte verb alone is spun on per byte, through write_byte().
- * Either way, with the interrupt-driven Uart this means "wait for the TX
- * ring to drain" when the text is longer than its room.
- * Consequence: only print after the sink is initialized and interrupts
- * are enabled, or the spin never ends.
+ * Delivery policy: print waits until the sink has accepted every byte,
+ * and never truncates. It is called from main context, setup or an
+ * active object's dispatch, and never from an interrupt handler: the
+ * transport's write verbs are the producer's end of its transmit ring,
+ * whose other end is the transport's own handler, and no interrupt
+ * handler runs while another runs on any brio target (docs/design/
+ * kernel.md, "The model in one page"), so a print that fills the ring
+ * inside a handler spins on a drain that cannot happen. From main
+ * context the drain is the transmit interrupt, which runs while print
+ * spins, so the wait always makes progress: zero while the text fits the
+ * ring's room, and otherwise one byte time for each byte that does not
+ * yet fit, ten bit times a byte (21.7 us at 460800 baud, 87 us at
+ * 115200; docs/design/serial.md, "Output policy: wait, do not drop").
+ * Two consequences. A dispatch that prints holds every other active
+ * object for that wait, since a dispatch runs to completion; and a print
+ * before the sink is initialized and interrupts are enabled spins for
+ * ever. Where the sink is a BulkSink (util/stream.hpp) a string_view
+ * goes to it as one run (a contiguous stretch of bytes), and a C string
+ * (every formatted number among them, each formatted into a buffer and
+ * printed as a string) as its first byte through write_byte(), so an
+ * idle transmitter starts before anything is measured, then as runs of
+ * up to print_scan_run bytes, measured as they go: write_bulk() is
+ * handed the run and asked again for what is left, spinning while
+ * nothing fits. That is one copy into the transport's ring and at most
+ * two nudges of its transmitter a run, where a byte at a time pays both
+ * per byte. A sink with the byte verb alone is spun on per byte, through
+ * write_byte(). The caller's text is copied and is free again when
+ * print() returns.
  *
  * Number-to-text conversion goes through functions under avr-libc's
- * names and call shapes - ltoa, ultoa, dtostrf, dtostre and the float
+ * names and call shapes: ltoa, ultoa, dtostrf, dtostre and the float
  * twins ftostrf, ftostre (<charconv> is not part of this freestanding
- * libstdc++). On the AVR they ARE avr-libc's. Everywhere else they are
+ * libstdc++). On the AVR they are avr-libc's. Everywhere else they are
  * this file's own, written in C++ over no library at all, because no
  * 32-bit image links a C library (docs/design/runtime.md): the integers
  * by divmod10() below, the floats by DoubleSplit, an exact binary
  * fixed-point split of the value that needs no floating-point operation
- * either - its range and its rounding are stated where it is defined.
+ * either; its range and its rounding are stated where it is defined.
  * The host test (test/test_print) holds them against the host's own C
  * library.
  */
@@ -726,7 +744,8 @@ inline constexpr uint8_t print_fixed_text = 1 + 39 + 1 + print_fixed_precision_m
 
 // ---- delivery: the run and the byte -----------------------------------------
 
-/// Spin until the sink accepts the byte (see delivery policy in the header).
+/// Spin until the sink accepts the byte: the wait of the delivery policy
+/// in the header, main context only.
 template <ByteSink S>
 inline void write_blocking(S, uint8_t b) {
     while (!S::write_byte(b)) {}
@@ -735,7 +754,8 @@ inline void write_blocking(S, uint8_t b) {
 /// Spin until the sink has taken the whole run. A BulkSink is handed the
 /// run and asked again for the rest whenever it took less, spinning while
 /// nothing fits exactly as the byte path spins on a refused byte; any
-/// other sink takes it a byte at a time.
+/// other sink takes it a byte at a time. The run is copied: the caller's
+/// storage is free when this returns.
 template <ByteSink S>
 inline void write_blocking([[maybe_unused]] S s, std::span<const uint8_t> run) {
     if constexpr (BulkSink<S>) {
@@ -765,13 +785,13 @@ inline void print_one(S s, std::string_view text) {
 /// a BulkSink (below).
 inline constexpr size_t print_scan_run = 64;
 
-/// A BulkSink takes a C string's FIRST BYTE through the byte verb, before
-/// anything is measured, and the rest a STRETCH at a time: up to
+/// A BulkSink takes a C string's first byte through the byte verb, before
+/// anything is measured, and the rest a stretch at a time: up to
 /// print_scan_run bytes measured and handed over as one run, then the
 /// next. An idle transmitter starts on that byte while the first stretch
-/// is scanned and copied behind it - the scan alone, ahead of it, put
+/// is scanned and copied behind it (the scan alone, ahead of it, put
 /// some six hundred cycles in front of a long print's first frame on the
-/// Cortex-M0+ parts - and the length is found as the string goes, never
+/// Cortex-M0+ parts), and the length is found as the string goes, never
 /// all of it first, so every later scan runs while the transmitter
 /// drains the stretch before it (a whole-string strlen() first delays a
 /// 4096-byte print by its scan, measured at 260 us on the CH32V203).
@@ -928,7 +948,9 @@ inline void print_one(S s, const TimeStamp &t) {
 
 // ---- the variadic front end -------------------------------------------------
 
-/// Print every argument in order onto the sink (see print_one overloads).
+/// Print every argument in order onto the sink, each through its
+/// print_one overload. Waits until the sink has taken every byte (the
+/// delivery policy in the header); main context only.
 template <ByteSink S, typename... Args>
 inline void print(S s, const Args &...args) {
     (print_one(s, args), ...);
