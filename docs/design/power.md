@@ -19,14 +19,24 @@ whole application, because every deep mode gates clock domains and
 shortens the list of things able to wake the machine. The model here
 makes that decision explicit, negotiated and target-independent.
 
-The smallest use: a `PowerManager` in Tenuto's list with the voters
-named, a target's sleep site, and something that posts
+The smallest use: a `PowerManager` in the list of active objects the
+application gives Tenuto, the kernel ([kernel.md](kernel.md)), with
+the voters named, a target's sleep site, and something that posts
 `SleepRequested{depth, reply}` when the application knows it is idle.
-The prerequisite that decides correctness: **a wake path that wants
-the manager to know the program is awake, without asking for a new
-depth, posts `SleepRequested{none}`**; on a target whose tick stops in
-the chosen mode, a woken program that idles again without saying so
-re-enters a sleep whose alarm may already be spent.
+The prerequisite that decides correctness: **the wake path that
+resumes the program posts `SleepRequested{none}`**, which tells the
+manager the program is awake without asking for a new depth. The rule
+holds on every target, so a program need not know which: it costs one
+event, it is a no-op where the target does not need it, and on a
+target whose tick stops in the chosen mode a woken program that idles
+again without saying so re-enters a sleep whose alarm may already be
+spent.
+
+In this page a rung is one depth of the ladder below; a timed site is
+a sleep site that, before a sleep in which the kernel's tick stops,
+arms a hardware alarm for the kernel's next deadline; its witness is
+the counter it reads afterwards to resynchronize (advance) the
+kernel's tick count by the span that was slept.
 
 Contracts and services: `util/power.hpp`. The kernel question it
 needs: `TimeEvents<P>::ticks_to_next()` (`kernel/time_event.hpp`).
@@ -232,7 +242,8 @@ same shape: the clock source has to come back, and the supply has to
 reach its working point. Stopping for less than that is a losing
 trade, so a request for `standby` or deeper is refused, not clamped,
 when the nearest armed time event is nearer than
-`PowerConfig::min_deep_ticks`.
+`PowerConfig::min_deep_ticks`: nothing is armed, and the requester is
+told not-ok through the same `SleepVote{false}` a failed round sends.
 
 This is the one thing the model needs from the kernel, and it is a
 question, not a scheduling decision: `TimeEvents<P>::ticks_to_next()`

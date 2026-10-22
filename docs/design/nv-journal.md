@@ -56,8 +56,9 @@ never rewritten. When an append plus the reserve no longer fits, a
 collection copies the latest value of every live id into the freshly
 erased other half and erases the old one.
 
-That is the map pair's atomicity argument one size up, and the same
-three properties fall out of it with no defensive code:
+That is the heap's map-pair argument one size up ([nv-heap.md](nv-heap.md):
+the old copy rules until the new one is entirely written and verified),
+and the same three properties fall out of it with no defensive code:
 
 - **atomicity**: the old half rules until the new data is entirely
   down;
@@ -147,7 +148,10 @@ can leave), plus the one being written, plus the reserve.
 one bounded polled program. That is what makes it legal from a panic
 handler, where interrupts are masked for good, the kernel will never
 run again, and an erase would be an unbounded wait on a supply that
-may be dying.
+may be dying. The reserve is one entry: a second `save_reserved()` in
+the same failure finds no room and returns false, which is honest,
+since after a panic the program writes nothing else either; the next
+boot's ordinary save restores the reserve.
 
 `JournalPanic` is the reporter built on it: `util/persistent_panic.hpp`'s
 shape over flash instead of over an EEPROM record. `report()` writes
@@ -220,7 +224,8 @@ Common to all: `NvJournal<Media, max_ids, max_payload, half_pages>`
 and `JournalPanic` over any `FlashMedia`, the entry format, the two
 halves and the reserve; the header is the same file on every stratum
 that has a journal. What differs is which array lends the two halves,
-and whether the family needs a journal at all.
+and whether the family needs a journal at all. A geometry written
+"256 / 64" is an erase unit of 256 bytes over a write cell of 64.
 
 | stratum | realization | beyond the contract |
 |---|---|---|

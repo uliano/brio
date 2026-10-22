@@ -10,16 +10,20 @@ written for an embedded programmer who wants a console on a board:
 lines typed by a person or a script in, `print` out.
 
 The smallest use is three types and one rule. A `Uart` of the family,
-sized by its two rings; a `SerialPort` over it, which drains the
-receive ring and posts each complete line to an active object of the
-program's, the line sink; and `print(uart, ...)` wherever text goes
-out. The rule that decides correctness: **the line sink must come
-before `SerialPort` in Tenuto's list of active objects**, because the
-line is lent to the sink for one dispatch and `SerialPort` reuses the
-buffer when it next runs; Tenuto refuses a list in the wrong order.
-And one cost to know: `print` waits until the transport has accepted
-every byte, so a long message on a slow port stalls every other active
-object for that time.
+with the sizes of its two rings as template arguments; a `SerialPort`
+over it, an active object (a component with its own event queue,
+[kernel.md](kernel.md)) which drains the receive ring and posts each
+complete line to another active object of the program's, the line
+sink; and `print(uart, ...)` wherever text goes out. The rule that
+decides correctness: **the line sink must come before `SerialPort` in
+the list of active objects the application gives Tenuto, the kernel**,
+because the line is lent to the sink for one dispatch (one call of the
+sink's handler) and `SerialPort` overwrites the buffer with the next
+line it assembles once it runs again; a sink that saved the pointer
+would read that next line. Tenuto refuses a list in the wrong order
+when the program is compiled. And one cost to know: `print` waits
+until the transport has accepted every byte, so a long message on a
+slow port stalls every other active object for that time.
 
 ## The Uart task
 
@@ -100,7 +104,10 @@ The receive side's interrupt bodies (`isr()`, or the AVR's `rxc()`, its
 port having a vector a side, and `dma_isr()` where a receive engine
 has a vector of its own) return `true` when the receive ring holds
 bytes the consumer has not been told of, and the application's
-interrupt glue posts one `RxActivity` on `true`. Told once: the next
+interrupt glue posts one `RxActivity` on `true`. `RxActivity` is the
+one event that tells the consumer (`SerialPort`) that bytes are
+waiting; the interrupt glue posts it on that edge, and `SerialPort`
+posts it to itself when it had to stop a drain early. Told once: the next
 `true` waits until the consumer has found the ring empty, so there is
 no flood of events and no lost wakeup. No owner polls for that edge on
 a timer, with one exception: the tail of a burst under a receive
@@ -306,9 +313,13 @@ capture, a simulated port) nothing of this is compiled.
 **What the transport guarantees, and what it does not.** A line the
 transport delivers is intact: no byte of it was dropped, refused or
 flagged, and no two pieces of the stream were joined to make it. That
-is all: the UART's flags do not see a bit flipped inside a frame whose
-stop bit and parity come out right, and nothing in the receive path
-can. Data that must arrive intact over a long or noisy link carries a
+is all. It can still be a fragment: where a drop took a line's own end
+of line, the bytes after the drop up to the next end of line are
+delivered as a line whose beginning is lost (the undecidable cases
+below), contiguous but not what the sender meant as one line. And the
+UART's flags do not see a bit flipped inside a frame whose stop bit
+and parity come out right, and nothing in the receive path can. Data
+that must arrive intact over a long or noisy link carries a
 CRC in its own protocol; such a protocol need not read `rx_skips()` at
 all, since a skip is one more hole its CRC catches, and pays nothing
 for it.
@@ -354,7 +365,8 @@ outside it; a `SkipRing` dropping bytes between two runs, while a run
 is held, on a full ring with lines queued before the drop, while both
 lines are in flight, and the silence that ends a skip and the burst
 that does not; a random lossy stream of numbered, checked lines in
-which every line delivered is a line sent, whole and in order;
+which every line delivered and passing its check is a line sent,
+whole and in order;
 `test_ring`'s `SkipRing` cases, a random lossy stream among them in
 which every run handed out is consecutive and every jump comes after a
 skip; `test_pl011`'s receive FIFO, the framed entry, the full ring and
@@ -364,8 +376,12 @@ the overrun).
 
 Transmit keeps the waiting `print`: the drain side is an interrupt
 handler, which runs even while the loop spins, so the wait always
-makes progress (a stall, not a deadlock), worst case about 2 ms at
-460800 baud, zero when the ring has room. Where the drain side is a
+makes progress (a stall, not a deadlock). The wait is zero when the
+ring has room for the whole message, and otherwise the wire time of
+the bytes that do not yet fit: a byte is ten bit times, 21.7 us at
+460800 baud and 87 us at 115200, so a message that finds the transmit
+ring (256 bytes by default) full waits one byte time per byte it still
+has to place. Where the drain side is a
 DMA engine, nothing re-arms it once it has stopped (a block abandoned
 on a transfer error leaves it idle with the ring full), so every
 engined transport pumps its engine on a refused `write_byte` or

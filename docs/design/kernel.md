@@ -61,8 +61,9 @@ top. If every queue is empty it sleeps until an interrupt. There is no
 preemption between active objects: while one handler runs, no other
 active object runs on that core. The only concurrency on a core is an
 interrupt handler against the loop, and an interrupt handler may do
-exactly one thing with the kernel: `post()` an event, which copies a
-few bytes inside a brief critical section.
+exactly one thing with the kernel: `post()` an event, which builds a
+copy of a few bytes in the receiver's queue inside a brief critical
+section (a few instructions run with interrupts masked).
 
 The other half of the concurrency model is stated as plainly: **an
 interrupt handler runs to completion too; no interrupt handler
@@ -80,9 +81,9 @@ question. brio buys interrupt latency with short handler bodies and
 DMA instead, the means the smallest core has: nothing that needed
 nesting would run on the AVR, so nothing in brio may need it.
 
-This is the cooperative ("QV") flavour of active objects described in
-Samek's book, written from scratch: the concepts come from the book,
-never from the QP source.
+This is the cooperative flavour of active objects described in
+Samek's book (he names it QV, for the vanilla kernel), written from
+scratch: the concepts come from the book, never from the QP source.
 
 **A chip with two cores runs two of these kernels, not one kernel on
 two cores.** Every guarantee above is a statement about one core's
@@ -106,7 +107,10 @@ initialization-order problem between such variables, because each is
 a plain zero-initialized static. `Fsm() = delete;` on the constructor
 makes "no instances" explicit. Choosing a monostate by type is what
 lets `Tenuto<P, Traffic, Buttons>` visit the active objects with a fold
-expression instead of walking a table of pointers at run time.
+expression (a C++17 construct that repeats an expression over a list
+of types at compile time, shown in
+[delivery](#7-delivery-kernelposthpp)) instead of walking a table of
+pointers at run time.
 
 ## 2. The AO contract (`kernel/active_object.hpp`)
 
@@ -139,12 +143,14 @@ that the kernel is written assuming:
   therefore needs no lock against other active objects, since only
   interrupt handlers are concurrent and they touch nothing of the
   object but its queue, through `post()`;
-- the event a dispatch receives stays in its queue slot, and the slot
-  is the consumer's until it is released: by the loop right after the
-  dispatch, unless the object called the queue's `hold()` inside it,
-  in which case by the object itself, in a later dispatch of its own
-  ([the held slot](#4-payloads-what-travels-inside-the-event-kernelborrowedhpp));
-  a held slot is released once, by its holder;
+- the event a dispatch receives stays in its queue slot (the storage
+  the queue built it in), and the slot is the consumer's until it is
+  released: by the loop right after the dispatch, unless the object
+  called the queue's `hold()` inside it, which keeps the slot past the
+  dispatch so that the object can read the event again later; the
+  object then releases it itself, in a later dispatch of its own
+  ([the held slot](#4-payloads-what-travels-inside-the-event-kernelborrowedhpp)).
+  A held slot is released once, by its holder;
 - `init()` leaves the object in a real state;
 - the queue really is an `EventQueue`.
 
@@ -272,7 +278,10 @@ three lines:
      may reuse the storage the next time it runs, which is safe only
      because the receiver runs first: the receiver must precede the
      sender in Tenuto's list, and Tenuto checks that order when the
-     program is compiled;
+     program is compiled. The sender is an active object in that list
+     (the order has no meaning for anything else); a driver whose
+     interrupt handler fills a buffer lends it through the active
+     object that owns the driver, as `SerialPort` does;
    - `Lease::reply`: valid until the receiver sends back the completion
      event the protocol agrees on; the reply is the return of the loan.
      Until then the sender keeps the storage valid and follows the
@@ -291,7 +300,11 @@ concurrency between active objects, so two of them can never write the
 same buffer at the same time. The only hazard of a loan is aliasing in
 time: the lender reusing storage the borrower still holds. Both leases
 pin that down. For `dispatch`, the list order guarantees that the
-borrower runs before the lender is dispatched again (under a
+borrower runs before the lender is dispatched again: the loop rescans
+the list from the top on every turn
+([the scheduler](#8-scheduler-kerneltenutohpp)), so a borrower that
+precedes the lender has its queue served, and the lent event with it,
+before the loop reaches the lender's queue again (under a
 preemptive kernel the same order would make the borrower preempt the
 lender right at the post, so the rule would survive such a kernel
 unchanged). For `reply`, the boundaries are two explicit events. At
@@ -321,8 +334,9 @@ pointer, because a loan is a view and not a container.
 event carries. The event itself lives in a slot of its receiver's
 queue ([queues](#5-queues-kernelevent_queuehpp)), and the receiver may
 keep that slot past the dispatch: `Lease::hold`, valid from the
-object's `hold()` until the same object's `release()` of it, which it
-issues in a later dispatch of its own. The lender is the object's own
+object's `hold()`, which is legal inside a dispatch and only there,
+until the same object's `release()` of it, which it issues in a later
+dispatch of its own. The lender is the object's own
 queue and the borrower the object, so the rule is one sentence: **a
 held slot is released by its holder, and by nobody else.** Another
 object releasing it would be a second consumer of the queue, and the
@@ -673,9 +687,9 @@ slot at the next take spent 17, 15, 13 and 15. On the AVR that is 23
 cycles more, about a microsecond at 24 MHz, unmasked, beside a
 dispatch of a hundred cycles and up. A hold costs nothing on the path:
 `hold()` reads the slot's number back from the position the take just
-left. RAM: `depth + 2` bytes per queue more than such a ring (the ring
-of numbers and the hold flag), the slots unchanged, all of it in
-`.bss`. These are the figures of a loop that inlines take and release.
+left. RAM: `depth + 2` bytes per queue more than such a ring, the slots
+unchanged, all of it in `.bss`. These are the figures of a loop that
+inlines take and release.
 In an image with a bus arbiter the compiler keeps `release()` out of
 line, because the arbiter releases from several places, so a release
 on that queue is a call more (read on the STM32G0B1RE's SPI suite).
@@ -757,7 +771,8 @@ Three primitives, one rule each:
   alike, and it never waits: a full queue drops the event and counts
   it.
 - `publish(Subscribers<A, B...>{}, ev)`: **facts are published**. One
-  `post` per listed subscriber, in list order. The subscriber list is
+  `post` per listed subscriber, in list order, with `post`'s rules and
+  from any context. The subscriber list is
   a type built where the publisher is declared, so a subscription that
   cannot be received (the subscriber's variant lacks the struct) fails
   to compile at that line.
@@ -775,7 +790,8 @@ All three are one core's primitives. The fourth, `send<Ao>(ev)`, is the
 crossing function of a two-core chip
 ([two cores](#12-two-cores-two-kernels-and-a-bridge-utilinboxhpp)): an
 event to an active object that lives on the other core, through its
-inbox and a doorbell. `send_reply_to<Ao, Payload>()` builds the capsule
+inbox and a doorbell, callable from the loop or an interrupt handler
+of the sending core. `send_reply_to<Ao, Payload>()` builds the capsule
 of a request that crosses, whose reply crosses back the same way.
 
 **C++ note: fold expressions and thunks.** `publish` is one line,
@@ -1086,10 +1102,13 @@ time event. The members:
   sleep entry). **One turn per wake:** it returns once per interrupt
   taken, so a quiet kernel whose only interrupt is the tick turns once
   per tick, not twice (an event latch the wake left behind) and not
-  fewer. The promise is the kernel's own sleep's; on a deeper rung a
-  power site armed ([power.md](power.md)) the wake list is the rung's,
-  and a line off it waits for one on it (the RP2040's and RP2350's
-  dormant state wakes on a GPIO event or the RTC alone).
+  fewer. The promise is the kernel's own sleep's; on a deeper sleep
+  mode a power site armed ([power.md](power.md)) the wake list is that
+  mode's, and a line off it waits for one on it (the RP2040's and
+  RP2350's dormant state wakes on a GPIO event or the RTC alone). One
+  realization states a hole in the first promise: on the CH32V003 an
+  interrupt whose edge lands on the sleep entry's own cycle is served
+  late by up to a tick (the ch32v00x row below).
 - `break_here()`, `now()`, `ticks_per_second` (a positive constant),
   `atomic_width` (the widest single-access load or store in bytes: 1
   on an 8-bit core, 4 on a 32-bit one; `Ring` chooses lock-free or
@@ -1117,9 +1136,10 @@ deadline)`, called instead of `idle()` with interrupts masked and the
 absolute tick of the nearest armed time event (empty means nothing
 armed). Its contract: return with interrupts enabled whether or not it
 slept; it may return without sleeping (a deadline already due, a wake
-it could not place this turn); and it must never sleep past a deadline
-it was given. Waking at or after it is the contract: late is legal,
-early is not, the time contract's own "at least". The loop detects it
+it could not place this turn); and it must wake for every deadline it
+was given, at that deadline or after it and never before it (the time
+contract's own "at least"), so that no sleep runs through a deadline
+to a later wake. The loop detects it
 by `requires` and otherwise compiles `idle()` alone, so the two shapes
 of platform cost each other nothing. The STM32G0 is the one target
 with such a timebase ([the STM32G0 platform page](../stm32g0/platform.md)).
