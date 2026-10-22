@@ -1,24 +1,36 @@
 /*
  * tim.hpp
  *
- * The CH32X035's two ADVANCED-CONTROL timers, TIM1 and TIM2 (RM ch. 12):
- * one block twice, the STM32F1's advanced timer under WCH's register
- * names - sixteen-bit registers at a four-byte stride, the four CHxCVR 32
- * bits wide - with a SPEC register at 0x50 the F1 has not got. TIM3 is
- * chapter 13's general-purpose block, a different one, and has no driver
- * here.
+ * A timer's output for a program - a PWM, a single pulse of a stated
+ * width, a waveform drawn as a list of edges: the CH32X035's two
+ * advanced-control timers, TIM1 and TIM2 (RM ch. 12), one block twice,
+ * the STM32F1's advanced timer under WCH's register names - sixteen-bit
+ * registers at a four-byte stride, the four CHxCVR 32 bits wide - with a
+ * SPEC register at 0x50 the F1 has not got. TIM3 is chapter 13's
+ * general-purpose block, a different one, and has no driver here.
  *
- *  Tim<n>      the RESOURCE, n = 1 or 2: the time base (prescaler,
+ *  Tim<n>      the resource, n = 1 or 2: the time base (prescaler,
  *              counter, auto-reload with its preload, the repetition
  *              counter, the counting modes, one-pulse), the four channels
- *              as OUTPUTS in every OCxM mode with their complementary
+ *              as outputs in every OCxM mode with their complementary
  *              outputs and MOE, the flags, the interrupt and DMA-request
- *              enables, the ISR body, the remap.
+ *              enables, the interrupt body, the remap.
  *  TimPad<pad> a pad handed to a timer signal, the pad named from the
  *              column afio.hpp states (afio_tim1_pads / afio_tim2_pads),
  *              the same source Tim<n>::remap(code) programs.
  *
- * THE SUBSET. What is driven is what a waveform engine needs - output
+ * The smallest use is written out at Tim<n> below: init(), the column,
+ * a channel configured as an output, main_output(true), enable(true),
+ * and only then the pad claimed. Who calls what: every verb of Tim<n> is
+ * a register access, most of them read-modify-writes with no guard of
+ * their own - a timer is driven from one context, main or one interrupt
+ * handler, and a program that touches one from both masks; isr() is the
+ * body of any of the timer's four vectors and the program's handler
+ * calls it; TimPad::claim() and release() are setup verbs, main context.
+ * Nothing here waits, and no verb enables a PFIC line: a program that
+ * binds a timer vector enables its line itself (pfic.hpp).
+ *
+ * The subset. What is driven is what a waveform engine needs - output
  * compare with its toggle and its forced levels, one-pulse mode, the
  * complementary outputs behind MOE (on the QFN20 the only timer outputs
  * that reach PB0 and PB1 are TIM1's C2N and C3N under its code 001), a
@@ -31,21 +43,21 @@
  * in docs/ch32x035/tim.md's gap list. A configuration struct carries no
  * field for them, so nothing here writes their bits.
  *
- * THE OUTPUTS HOLD WHILE THE COUNTER IS STOPPED. Chapter 12 says nothing
+  * The outputs hold while the counter is stopped. Chapter 12 says nothing
  * of what an output does with CEN clear; the CH32X035F8U6 answered
  * (docs/ch32x035/tim.md): every output - a channel's and a complementary
- * one - keeps DRIVING the level it had when the counter stopped, and a
+ * one - keeps driving the level it had when the counter stopped, and a
  * mode written meanwhile, a forced level included, reaches the pad only
  * once the counter runs. A timer that has never run since its reset holds
- * its outputs LOW. So a program that wants a forced level on a pad runs
+ * its outputs low. So a program that wants a forced level on a pad runs
  * the counter first - what the CH32V00x's TIM1 does too, measured there.
  *
- * MOE, THE GATE (12.4.18): set, the enabled outputs carry OCxREF; clear,
- * with OSSI at its reset value, they are LET GO - the pad floats (a level
- * charged onto it stays). That is CTLR1's BIT 13 at work: 12.4.1 calls it
+ * MOE, the gate (12.4.18): set, the enabled outputs carry OCxREF; clear,
+ * with OSSI at its reset value, they are let go - the pad floats (a level
+ * charged onto it stays). That is CTLR1's bit 13 at work: 12.4.1 calls it
  * "Reserved" with a reset value of zero, and on the CH32X035F8U6 it reads
- * ONE out of reset, writable both ways; cleared, an output MOE disables is
- * DRIVEN at its idle level OISx / OISxN instead - the float-or-drive
+ * one out of reset, writable both ways; cleared, an output MOE disables is
+ * driven at its idle level OISx / OISxN instead - the float-or-drive
  * choice the CH32V00x documents as OE_MODE, in the same position, applied
  * here to the MOE-disabled state and not to the stopped counter (the hold
  * above is the same at either value). WCH's library keeps the bit as it
@@ -57,40 +69,40 @@
  * top of CTLR1 (capture features, not driven) and the SPEC register (not
  * driven).
  *
- * A SOFTWARE COMPARE EVENT DOES NOTHING TO AN OUTPUT CHANNEL. 12.4.6 says
+ * A software compare event does nothing to an output channel. 12.4.6 says
  * CCxG on an output channel sets CCxIF and raises its interrupt and DMA
  * request; on the CH32X035F8U6 it raised neither, counter stopped or
  * running (docs/ch32x035/tim.md), while a real match does both. The
  * driver has no verb for it: a compare's request comes from a match.
  *
- * THE COMPLEMENTARY OUTPUT ALONE. CCxNE set with CCxE clear drives OCxN
+ * The complementary output alone. CCxNE set with CCxE clear drives OCxN
  * from OCxREF through the polarity CCxNP and no dead time - the F1's
  * output-control table, which chapter 12 does not print; the CH32X035F8U6
  * answered it: C2NE alone puts a forced-active channel's level, high, on
  * C2N, and a toggle moves it.
  *
- * THE STATUS REGISTER IS WRITE-ZERO-TO-CLEAR (12.4.5's RW0): clearing is
+ * The status register is write-zero-to-clear (12.4.5's RW0): clearing is
  * `INTFR = ~flags`, a plain store, and a flag that arrives between the
  * read and the store survives.
  *
- * THE PRESCALER AND THE AUTO-RELOAD ARE SHADOWED (12.2.3): PSC is taken
+ * The prescaler and the auto-reload are shadowed (12.2.3): PSC is taken
  * at the next update event, ATRLR too under ARPE. configure() ends with
  * SWEVGR.UG - a software update that loads both shadows - and clears the
  * UIF it raised.
  *
- * A COMPARE REGISTER IS PRELOADED BY DEFAULT HERE, a choice: OCxPE is
+ * A compare register is preloaded by default here, a choice: OCxPE is
  * clear out of reset and every output channel this driver configures sets
  * it unless TimChannelConfig::preload says false - which is what a value
  * written by DMA at each match needs (12.3.3's step 4: "keeping OCxPE to
  * 0").
  *
- * THE CLOCK. CK_INT is HCLK - the series has no peripheral-bus prescaler
+ * The clock. CK_INT is HCLK - the series has no peripheral-bus prescaler
  * (RM 3.3) - so `tim_clock_hz(clock)` is the Clock's hz, and a static
  * clock only.
  *
- * THE VECTORS. Four a timer (table 7-1): TIM1 at 34..37 (brake, update,
+ * The vectors. Four a timer (table 7-1): TIM1 at 34..37 (brake, update,
  * trigger/commutation, capture-compare), TIM2 at 38 (update) and 51..53
- * (capture-compare, trigger/commutation, brake). THE DMA REQUESTS are
+ * (capture-compare, trigger/commutation, brake). The DMA requests are
  * dma_engine.hpp's table: TIM1's channels 1..4 on DMA channels 2, 3, 6
  * and 4, its update on 5; TIM2's on 5, 7, 1 and 7, its update on 2.
  */
@@ -281,7 +293,7 @@ constexpr uint32_t tim_clock_hz(Clock) {
  * A pad handed to a timer signal. The pad is named from its column -
  * `TimPad<afio_tim1_pads(1).ch2n>` - so the program states the code it
  * remaps to and the pad that code gives in one place. A pad this package
- * does not bond does not compile; a pad of the debug port is REFUSED at
+ * does not bond does not compile; a pad of the debug port is refused at
  * run time while the port is the probe's (claim() answers false and
  * touches nothing), the USART transport's rule for its columns.
  */
@@ -323,6 +335,9 @@ struct TimPad {
  *   T1::enable(true);                                    // running: the outputs follow
  *   (void)brio::TimPad<brio::afio_tim1_pads(1).ch2n>::claim();
  *
+ * The pad is claimed after enable(true), on purpose: a timer that has
+ * never run holds its outputs low whatever mode is written (the file
+ * header), so a pad claimed first is driven low until the counter runs.
  * Channels are 0-based (channel 1 of the chapter is 0), brio's timer
  * surface; every verb that names a channel checks it and answers false,
  * writing nothing, for one the block has not got.
@@ -377,10 +392,12 @@ public:
     static bool bus_clock() { return Rcc::enabled(bus, gate); }
     /// The RCC reset pulse: every register back to its reset value.
     static void reset() { (void)Rcc::reset(bus, gate); }
+    /// The gate opened and the block reset: the first verb, main context.
     static void init() {
         bus_clock(true);
         reset();
     }
+    /// The counter stopped, the block reset, the gate closed.
     static void release() {
         enable(false);
         reset();
@@ -401,17 +418,17 @@ public:
         return c.period != 0u && c.clock_division != static_cast<TimClockDivision>(3);
     }
 
-    /// Write the time base and leave the counter STOPPED: PSC, ATRLR and
+    /// Write the time base and leave the counter stopped: PSC, ATRLR and
     /// RPTCR written, CTLR1 assembled in one store (the capture and
     /// comparator bits zero, the reserved bit 13 as it reads - the file
     /// header), the slave controller at its reset (SMCFGR zero: a
     /// free-running counter), the counter's start written, then UG loads
-    /// the shadows and the UIF it raised is cleared. UDIS goes in AFTER the
+    /// the shadows and the UIF it raised is cleared. UDIS goes in after the
     /// UG, a second store: with it standing a UG is no update event and
     /// loads no shadow (12.4.1) - measured, a configure() asked for UDIS
     /// and a prescaler left the counter at the previous PSC.
     ///
-    /// THE START IS WRITTEN, not left to the UG: on the CH32X035F8U6 a UG
+    /// The start is written, not left to the UG: on the CH32X035F8U6 a UG
     /// reinitializes the counter only while it runs (to 0 counting up, to
     /// ATRLR counting down, as 12.3.1 says), and with the counter stopped
     /// leaves it where it was while still loading the shadows (measured).
@@ -445,6 +462,9 @@ public:
         return true;
     }
 
+    /// CEN: start or stop the counter. The outputs follow the modes only
+    /// while it runs, and hold their level while it is stopped (the file
+    /// header).
     static void enable(bool on) {
         TimRegs& t = regs();
         t.CTLR1 = static_cast<uint16_t>(on ? (t.CTLR1 | tim_cen) : (t.CTLR1 & ~tim_cen));
@@ -506,8 +526,8 @@ public:
     }
     static uint16_t interrupts() { return regs().DMAINTENR; }
 
-    /// The ISR body, for any of this timer's vectors: the flags that were
-    /// BOTH raised and enabled, cleared - exactly those - and handed back.
+    /// The interrupt body, for any of this timer's vectors: the flags that were
+    /// both raised and enabled, cleared - exactly those - and handed back.
     [[gnu::always_inline]] static uint16_t isr() {
         TimRegs& t = regs();
         const uint16_t enabled_flags = static_cast<uint16_t>(t.DMAINTENR & 0xFFu);
@@ -537,7 +557,7 @@ public:
         return true;
     }
 
-    /// The channel as an OUTPUT, whole: the mode and the preload (CCxS 00),
+    /// The channel as an output, whole: the mode and the preload (CCxS 00),
     /// the compare value, the polarities and the enables. A complementary
     /// enable or polarity on channel 4 is refused.
     static bool output_channel(uint8_t ch, const TimChannelConfig& c) {
@@ -599,9 +619,9 @@ public:
         return ch < complementary_channels && (regs().CCER & (tim_cc1ne << (4u * ch))) != 0u;
     }
 
-    /// MOE (12.4.18): without it no output of this timer is driven - each
-    /// enabled one is let go, floating, under the reset values of OSSI and
-    /// of CTLR1's bit 13 (the file header).
+    /// MOE, the main output enable (12.4.18): without it no output of this
+    /// timer is driven - each enabled one is let go, floating, under the
+    /// reset values of OSSI and of CTLR1's bit 13 (the file header).
     static void main_output(bool on) {
         TimRegs& t = regs();
         t.BDTR = static_cast<uint16_t>(on ? (t.BDTR | tim_moe) : (t.BDTR & ~tim_moe));
