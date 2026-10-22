@@ -91,8 +91,7 @@ target): in VS Code, CMake Tools' setting `cmake.configureSettings` in
 the workspace's or the user's `settings.json` adds cache variables to
 every configure, or a preset of one's own can set them; the launch
 entries carry their paths literally, so `.vscode/launch.json` is edited
-too, and so is clangd's `--query-driver` (below). None of these
-relocations has been performed.
+too, and so is clangd's `--query-driver` (below).
 
 ## clangd
 
@@ -134,15 +133,21 @@ toolchain elsewhere needs that setting edited. To point a fragment at
 another database, edit its `CompilationDatabase` line, a path relative
 to the fragment's own directory; this guide changes no fragment.
 
-Status: configured. The routing above is read from the fragments; no
-editor session on a fresh checkout is on record.
-
 ## Select the project and the preset
 
 CMake Tools shows its controls in the status bar (the setting
 `cmake.options.statusBarVisibility` forces them visible, since recent
-versions hide them by default). Three choices are made there before
-anything is built, and the order matters:
+versions hide them by default).
+
+On a fresh checkout, two configures come first, once, for the editor's
+sake ([clangd](#clangd) above says why): with `stm32g0` as the active
+folder, the preset `STM32G0B1RE (release, -Os)`, and let it configure;
+then with `test` as the active folder, its preset `host`, and let it
+configure. Neither is needed again, and the debug preset is selected
+next.
+
+Then three choices are made in the status bar before anything is
+built, and the order matters:
 
 1. Active folder: `stm32g0`. With several projects in one workspace,
    CMake Tools keeps one active and every other control refers to it.
@@ -154,12 +159,7 @@ anything is built, and the order matters:
    is the one to flash for a measurement, the debug one is what the
    debugger wants. Expected result: CMake Tools configures, and the
    output panel shows the ARM compiler under `/sw/arm-none-eabi` and
-   the build tree `build-cmake/stm32g0b1re-debug`. On a fresh checkout,
-   before this choice, select `STM32G0B1RE (release, -Os)` once and let
-   it configure, then switch to the debug preset: the release configure
-   writes the compile database the editor reads for this project
-   ([clangd](#clangd) above says why, and names the host project's
-   configure that the kernel headers need in the same way).
+   the build tree `build-cmake/stm32g0b1re-debug`.
 3. Build target: `blink`. The target list is the applications the
    configure discovered for this board, each with its `-upload` twin.
    Expected result: the status bar shows the chosen target's name next
@@ -272,13 +272,12 @@ the recommended extensions, and no session with it is on record.
 
 The `test/` project builds the kernel's and the services' test suites
 for the host and registers them with CTest. From VS Code: make `test`
-the active folder, select its one preset (`host`), build (the build
-button or F7: the test preset runs the suites and does not build them),
-then run the tests from CMake Tools' CTest item in the status bar (the
-one the settings keep visible for this purpose; its label is the
-extension's and is confirmed with the rest in the interactive check).
-Expected result: every suite passes, and the status bar item reports
-the count. The equivalent on the command line is
+the active folder and select its one preset (`host`); build first,
+with the build button or F7, because the test preset runs the suites
+and does not build them; then run the tests from CMake Tools' CTest
+item in the status bar, the one the settings keep visible for this
+purpose. Expected result: every suite passes, and the status bar item
+reports the count. The equivalent on the command line is
 [step 6 of the command-line page](command-line.md#step-6-the-host-tests-without-a-board).
 The host compiler is the preset's `/sw/gcc/bin/g++`.
 

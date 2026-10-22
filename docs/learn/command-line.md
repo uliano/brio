@@ -12,12 +12,13 @@ graphical route with the same steps is [Working in VS Code](vscode.md).
 
 Every step describes the mechanism the repository's build and bench
 tools use (`stm32g0/CMakeLists.txt`, `cli/bench/flash.py`,
-[docs/stm32g0/README.md](../stm32g0/README.md)). What has been
-performed, and where:
+[docs/stm32g0/README.md](../stm32g0/README.md)). A step is verified
+when it was performed on the named configuration, configured when the
+files set it up and the check on this board is still owed:
 
 | Step | Status |
 |---|---|
-| 1. Configure | configured: the configure every build of this project runs; not repeated from a fresh checkout for this page |
+| 1. Configure | configured: not performed from a fresh checkout for this page (it is the configure every build of this project runs on the desk) |
 | 2. Build | configured: as step 1; the size figures quoted are from one debug build of this revision |
 | 3. Flash with the `-upload` target | configured: the OpenOCD sequence `brio flash` runs on this board; the target itself not run for this page |
 | The bench tool | verified on this board with the desk's own manifest entry: how every STM32G0 suite reaches the Nucleo-G0B1RE; writing a first manifest entry not walked through |
