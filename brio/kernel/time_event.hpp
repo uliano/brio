@@ -26,15 +26,37 @@
  * the timer. This is what keeps the armed list free of critical
  * sections.
  *
+ * When a timer matures. arm() stores the deadline as P::now() plus the
+ * delay, and P::now() is a whole number of ticks: the fraction of the
+ * current tick already elapsed at the arming instant is not counted.
+ * process() posts the payload on the first turn at which now() has
+ * reached the deadline. So a delay of N ticks matures between N - 1 and
+ * N tick intervals of physical time after arming (a one-tick delay
+ * armed just before the next tick matures almost at once), and the
+ * event is handled when the loop reaches process() after that and then
+ * serves the queue, which can be later still. kernel/time.hpp's
+ * conversion rounds up to whole ticks, which protects the count from
+ * truncation and nothing more; a program that needs a minimum physical
+ * wait arms one tick more.
+ *
  * A periodic timer re-arms from its previous deadline, not from the
  * moment the loop noticed it, so the period does not drift. If the loop
  * falls more than a period behind, process() posts at most one event per
- * turn per timer and the deadline catches up over the following turns;
- * the long-run count of events is preserved. Re-arming a running timer
- * restarts it: the next expiry is one delay from the re-arm.
+ * turn per timer and the deadline advances one period per turn, so each
+ * missed period is posted on a later turn and the sequence of deadlines
+ * is kept. What is delivered is the owner's queue's business: every post
+ * has post()'s rules, and a queue that fills during the catch-up drops
+ * and counts. Re-arming a running timer restarts it: the next expiry is
+ * one delay from the re-arm.
  *
- * Deadline comparison is wrap-safe: (int32_t)(now - deadline) >= 0 holds
- * across the 32-bit counter's wrap (about 49 days at 1000 Hz).
+ * Limits of the deadline arithmetic. process() compares with
+ * (int32_t)(now - deadline) >= 0, a signed difference that survives the
+ * 32-bit counter's wrap (about 49 days at 1000 Hz) as long as every
+ * distance it measures stays below half the range: a delay or a period
+ * must be below 2^31 ticks (about 24 days at 1000 Hz), and a deadline
+ * that the loop leaves unserved for 2^31 ticks or more reads as future
+ * again. A delay above 2^31 is not refused: it reads as overdue and is
+ * posted at once.
  *
  * Storage: a TimeEvent is a static object owned by its active object;
  * arming links it into an intrusive list, so there is no allocation and
@@ -76,7 +98,8 @@ public:
     };
 
     /// Arm: first firing after delay_ticks, then every period_ticks
-    /// (0 = one-shot). Re-arming an armed event restarts it.
+    /// (0 = one-shot); both below 2^31 (the file header's limits).
+    /// Re-arming an armed event restarts it.
     static void arm(Base& te, uint32_t delay_ticks, uint32_t period_ticks) {
         disarm(te);
         te.deadline_ = P::now() + delay_ticks;
@@ -221,14 +244,17 @@ public:
     TimeEvent(const TimeEvent&) = delete;             // list node: no copies
     TimeEvent& operator=(const TimeEvent&) = delete;
 
-    /// One-shot: post the payload once, delay_ticks from now. Re-arming a
-    /// running event restarts it.
+    /// One-shot: post the payload once, delay_ticks from now (between
+    /// delay_ticks - 1 and delay_ticks tick intervals of physical time,
+    /// the file header's "When a timer matures"). Re-arming a running
+    /// event restarts it.
     void arm(uint32_t delay_ticks) {
         TimeEvents<P>::arm(*this, delay_ticks, 0);
     }
 
     /// Periodic: the first post one period from now, then one every
-    /// period, drift-free. Re-arming a running event restarts it.
+    /// period, drift-free; a period of zero is a one-shot. Re-arming a
+    /// running event restarts it.
     void arm_every(uint32_t period_ticks) {
         TimeEvents<P>::arm(*this, period_ticks, period_ticks);
     }

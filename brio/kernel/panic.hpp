@@ -10,8 +10,10 @@
  *  - HaltReporter, the default defined here: report() returns and
  *    panic() spins forever with interrupts masked;
  *  - an LED blinker or a watchdog reset is target or application code,
- *    since the kernel knows no LED (each target's reset header offers a
- *    ResetReporter);
+ *    since the kernel knows no LED. A reporter that resets the chip is a
+ *    `ResetReporter` in the reset header of the target strata that have
+ *    one; the avrxt and ch32x035 strata have none, and a program there
+ *    writes its own;
  *  - "blink then reset" and "reset now, report at next boot" compose
  *    freely, because the breadcrumb is written before any reporter runs
  *    and survives whatever the reporter does.
