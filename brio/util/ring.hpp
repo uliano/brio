@@ -1,70 +1,94 @@
 /*
  * ring.hpp
  *
- * Single-producer / single-consumer FIFO for ISR <-> main-loop traffic,
- * and for anything else that needs a bounded FIFO between exactly two
- * parties: driver byte rings (UART, I2C, SPI), sample buffers, logs.
+ * Ring: a bounded first-in first-out queue of elements between exactly
+ * two parties, one that only writes it (the producer) and one that only
+ * reads it (the consumer), with no interrupt masking on the common path.
+ * It is what carries bytes between an interrupt handler and the main
+ * loop in every serial driver (the UART's two rings, I2C, SPI), and it
+ * serves anything else shaped the same way: sample buffers, logs. A
+ * driver declares one with the element type, a power-of-two size and
+ * the platform whose critical section the guarded path uses:
  *
- * Concurrency model (SPSC): the producer only ever writes head_, the
- * consumer only ever writes tail_, each reads the other's index. When an
- * index is a single naturally-atomic access for the target (sizeof
- * (index_t) <= P::atomic_width - one byte on an 8-bit core, a word on a
- * 32-bit one),
- * every operation is LOCK-FREE: no interrupt masking, no added interrupt
- * latency, both sides may call the same functions from ISR or main
- * context. A stale read of the OTHER side's index only errs on the safe
- * side (the producer underestimates room, the consumer underestimates
- * data). A wider index - a capacity above 256 where the index is a
- * byte - is torn by an interrupt, so
- * every operation is wrapped in P::CriticalSection instead - selected
- * with if constexpr, invisible to the caller. Ordering between the slot
- * copy and the index publish is enforced with std::atomic_signal_fence
- * (a compiler-only fence: correct on single-core targets, free).
+ *     static inline brio::Ring<uint8_t, 256, P> tx;
  *
- * The one API is therefore always safe: there are no *_from_isr twins
- * (docs/design/overview.md's style rule: no API doubling). Only clear()
- * is NOT concurrent: it rewrites both
- * indices and is legal only while the other party is quiescent (init,
- * or after masking its interrupt).
+ * and the producer calls push() or write_span() with publish(), the
+ * consumer pop() or read_span() with consume(). The design, its
+ * realizations per family and its measured cost are
+ * docs/design/ring.md.
  *
- * TWO GRANULARITIES, ONE CONTRACT. push()/pop() move one element and
- * suit an ISR handed one byte at a time; read_span()/consume() and
- * write_span()/publish() hand a party the CONTIGUOUS RUN it already owns
- * so it can move the whole thing at once - a DMA block, a memcpy, a
- * bulk write. The spans change nothing about the concurrency model:
+ * The one rule: one producer and one consumer, each a fixed party. The
+ * producer only ever writes head_, the consumer only ever writes tail_,
+ * and each reads the other's index. Which context is which is the
+ * caller's choice and nothing here checks it: in a transmit ring the
+ * main loop produces and the interrupt handler consumes, in a receive
+ * ring the other way round. Two producers break the rule silently: a
+ * print from an interrupt handler beside the main loop's prints, say
+ * (every active object's dispatch runs in the loop, so their prints are
+ * one producer). When an index is a single
+ * naturally atomic access for the target (sizeof(index_t) <=
+ * P::atomic_width: one byte on an 8-bit core, a word on a 32-bit one)
+ * every operation is lock-free: no interrupt masking, no added
+ * interrupt latency, and both sides call the same functions from an
+ * interrupt handler or from main context alike. A stale read of the
+ * other side's index only errs on the safe side (the producer
+ * underestimates room, the consumer underestimates data). A wider index
+ * (a capacity above 256 where the index is a byte) is torn by an
+ * interrupt, so every operation is wrapped in P::CriticalSection
+ * instead, selected with if constexpr and invisible to the caller.
+ * Ordering between the slot copy and the index publish is enforced with
+ * std::atomic_signal_fence, a compiler-only fence: correct on
+ * single-core targets, where the other side runs on the same core, and
+ * free.
+ *
+ * The one API is therefore always safe to call from either context, and
+ * there are no *_from_isr twins (docs/design/overview.md's style rule:
+ * no API doubling). Only clear() is not concurrent: it rewrites both
+ * indices, so one party calls it while the other is quiescent (at
+ * init, or after masking its interrupt).
+ *
+ * Two granularities, one contract. push() and pop() move one element
+ * and suit an interrupt handler handed one byte at a time; read_span()
+ * with consume() and write_span() with publish() hand a party the
+ * contiguous run it already owns (a run is a stretch of consecutive
+ * slots) so it can move the whole thing at once: a DMA block, a memcpy,
+ * a bulk write. The spans change nothing about the concurrency model:
  * each side still writes only its own index and reads only the other's,
- * and the run a side is given is exactly the memory the SPSC invariant
- * already made private to it. A span never wraps (it stops at the end of
- * the buffer and the rest comes on the next call), and it stays valid
- * until its own side's next operation.
+ * and the run a side is given is exactly the memory the one-producer
+ * one-consumer invariant already made private to it. A span never
+ * wraps (it stops at the end of the buffer and the rest comes on the
+ * next call), and it stays valid until its own side next moves its
+ * index (consume() or pop() for the consumer's run, publish() or push()
+ * for the producer's); a look (count(), empty(), full()) ends nothing.
  *
- * Capacity is (size - 1): one slot is sacrificed to distinguish full from
+ * Capacity is size - 1: one slot is sacrificed to distinguish full from
  * empty without a shared counter (a counter would be written by both
- * sides and break the SPSC rule). No overwrite-oldest push either: the
+ * sides and break the rule). No overwrite-oldest push either: the
  * producer would have to move tail_, again breaking the rule; a full
- * ring reports false and the caller counts or blocks (its policy).
+ * ring reports false, nothing written, and the caller counts or waits
+ * (its policy: print waits, a receiver drops and counts).
  *
- * The lock-free path assumes an index the platform reads/writes
- * atomically (docs/design/overview.md, "Authority of util/"); the
- * strata Ring runs on, and the path each takes, are
- * docs/design/ring.md's realizations table.
+ * The lock-free path assumes an index the platform reads and writes
+ * atomically (docs/design/overview.md, "Authority of util/"); the strata
+ * Ring runs on, and the path each takes, are docs/design/ring.md's
+ * realizations table.
  *
- * A SECOND FLAVOUR, for a producer that stores no index at all.
+ * A second flavour, for a producer that stores no index at all.
  * HardwareRing (below Ring) is the consumer half of a ring whose
- * producer is the hardware - a DMA channel writing the storage lap after
- * lap in circular mode - so its producer index IS the channel's counter,
- * read through a function and never stored by anybody. Same consumer
- * verbs under the same names; what it adds is the one thing a producer
- * that cannot be stopped forces on the consumer: the accounting of the
- * laps it did not keep up with. Its contract carries its own
- * assumptions, stated where it is defined.
+ * producer is the hardware, a DMA channel writing the storage lap after
+ * lap in circular mode, so its producer index is the channel's own
+ * counter, read through a function and never stored by anybody. Same
+ * consumer verbs under the same names; what it adds is the one thing a
+ * producer that cannot be stopped forces on the consumer: the
+ * accounting of the laps it did not keep up with. Its contract carries
+ * its own assumptions, stated where it is defined.
  *
- * AND A RING THAT SKIPS A DROP. SkipRing (between the two) is a Ring
- * whose producer can drop elements - a receive interrupt's byte that
- * finds the ring full, or that the receiver flags as corrupt - and says
+ * And a ring that skips a drop. SkipRing (between the two) is a Ring
+ * whose producer can drop elements (a receive interrupt's byte that
+ * finds the ring full, or that the receiver flags as corrupt) and says
  * so in one byte, so that the consumer's next look skips to the head:
  * the consumer is handed no run that holds a drop and learns of each
- * skip between two runs - the skip epoch HardwareRing has, for a
+ * skip between two runs, the skip epoch HardwareRing has, for a
  * producer that stores its index.
  */
 
@@ -112,7 +136,8 @@ public:
         return static_cast<index_t>(size - 1);
     }
 
-    /// Append one element; false (nothing written) when the ring is full.
+    /// Append one element, copied into its slot; false (nothing written)
+    /// when the ring is full. Producer side only; never waits.
     [[gnu::always_inline]] bool push(const T& value) {
         if constexpr (lock_free) {
             return push_body(value);
@@ -122,7 +147,8 @@ public:
         }
     }
 
-    /// Remove and return the oldest element; nullopt when empty.
+    /// Remove and return the oldest element, by copy; nullopt when empty.
+    /// Consumer side only; never waits.
     [[gnu::always_inline]] std::optional<T> pop() {
         if constexpr (lock_free) {
             return pop_body();
@@ -158,12 +184,14 @@ public:
     // the run to a DMA block or a memcpy needs ONE contiguous region,
     // and two calls are cheaper than the alternative of pretending.
     //
-    // A span is valid until its OWN side's next operation on the ring;
-    // the other side cannot invalidate it (it can only make it more
-    // conservative than it needs to be, which is safe).
+    // A span is valid until its OWN side next moves its index; the
+    // other side cannot invalidate it (it can only make it more
+    // conservative than it needs to be, which is safe). Ring's rule:
+    // HardwareRing's producer can write over a held run, said there.
 
     /// The contiguous run of elements ready to be read, starting at the
-    /// tail. Empty when the ring is empty. Consumer side only.
+    /// tail. Empty when the ring is empty. Consumer side only; the run
+    /// stays valid until the consumer's next consume() or pop().
     std::span<const T> read_span() const {
         if constexpr (lock_free) {
             return read_span_body();
@@ -186,7 +214,9 @@ public:
     }
 
     /// The contiguous run of free slots the producer may fill, starting
-    /// at the head. Empty when the ring is full. Producer side only.
+    /// at the head. Empty when the ring is full. Producer side only; the
+    /// run stays valid until the producer's next publish() or push(),
+    /// and nothing it writes is visible to the consumer before publish().
     std::span<T> write_span() {
         if constexpr (lock_free) {
             return write_span_body();
@@ -222,7 +252,8 @@ public:
     [[gnu::always_inline]] bool empty() const { return count() == 0; }
     [[gnu::always_inline]] bool full() const { return count() == capacity(); }
 
-    /// Reset to empty. NOT concurrent: both parties must be quiescent.
+    /// Reset to empty. Not concurrent: one party calls it while the
+    /// other is quiescent (init, or the other party's interrupt masked).
     void clear() {
         head_ = 0;
         tail_ = 0;
@@ -356,58 +387,65 @@ private:
 // =============================================================================
 
 /**
- * SkipRing<T, size, P> - Ring's SPSC FIFO for a producer that can DROP
- * elements on rare paths - a receive interrupt's byte that finds the ring
- * full, one the receiver flags as corrupt, the frames a hardware overrun
- * swallowed - feeding a consumer that carries state from one element to
- * the next (util/serial_port.hpp's line begun), which must never join the
- * two sides of a drop.
+ * SkipRing<T, size, P>: Ring's one-producer one-consumer FIFO for a
+ * producer that can drop elements on rare paths (a receive interrupt's
+ * byte that finds the ring full, one the receiver flags as corrupt, the
+ * frames a hardware overrun swallowed), feeding a consumer that carries
+ * state from one element to the next (util/serial_port.hpp's line
+ * begun), which must never join the two sides of a drop. The producer
+ * reports a drop with lost(); the consumer's verbs are Ring's, and its
+ * skips() is the epoch a reader compares between two runs.
+ * docs/design/ring.md, "SkipRing: a ring that skips a drop", is the
+ * design and its tests.
  *
- * WHETHER, NOT WHERE. The consumer needs one fact: that the run it is
+ * Whether, not where. The consumer needs one fact: that the run it is
  * handed follows on from the run before. So the ring keeps no place for a
- * loss - only a DROP EPOCH, one byte the producer writes on its rare
+ * loss, only a drop epoch, one byte the producer writes on its rare
  * paths, beside the consumer's own copy, one byte more. A look that finds
- * the two different SKIPS: the tail jumps to the head, everything queued
- * discarded in one store - the drop is necessarily behind the head - and
+ * the two different skips: the tail jumps to the head, everything queued
+ * discarded in one store (the drop is necessarily behind the head), and
  * skips() moves. So a run handed out never holds a drop, and skips() moves
  * between two runs, never inside one: HardwareRing's skip, for a producer
- * that stores its index. What the skip throws away beside the drop - the
- * clean elements queued with it - is lost only while elements are being
+ * that stores its index. What the skip throws away beside the drop, the
+ * clean elements queued with it, is lost only while elements are being
  * lost anyway; under an overload so steady that a drop falls between
  * every two looks, every look skips and nothing is handed out.
  *
- * THE LOOK. read_span() and pop() take Ring's run or element FIRST and
+ * The look. read_span() and pop() take Ring's run or element first and
  * compare the epoch after: a drop marked before the run's head was read
  * is seen by this compare, one marked after it lies beyond that head and
- * is seen by the next look - so an element handed out was never queued
+ * is seen by the next look, so an element handed out was never queued
  * behind a drop the look did not see. A look that finds the epoch moved
  * takes it as seen, and only then reads the head it jumps to: a drop that
  * lands between the compare and that read is behind the head too, and one
  * that lands after the copy is taken moves the epoch past it again. Every
  * look compares, an empty one included, so a drop with nothing after it
- * yet is skipped - and skips() moves - at the next look.
+ * yet is skipped, and skips() moves, at the next look.
  *
- * THE EPOCH CANNOT WRAP INTO SILENCE. lost() does not increment the
- * epoch: it sets it ONE PAST THE CONSUMER'S COPY. Each byte has one
- * writer - the producer the epoch, the consumer its copy - and the two
+ * The epoch cannot wrap into silence. lost() does not increment the
+ * epoch: it sets it one past the consumer's copy. Each byte has one
+ * writer (the producer the epoch, the consumer its copy) and the two
  * differ exactly while a drop not yet skipped stands, however many drops
  * fell since the last look: 256 of them, which an incremented byte would
  * bring back to the copy's value, read as none. The price is the same
- * load, of the copy instead of the epoch. And so skips() - the copy
- * itself - counts the skips, one at each, modulo 2^8: a reader compares
+ * load, of the copy instead of the epoch. And so skips(), the copy
+ * itself, counts the skips, one at each, modulo 2^8: a reader compares
  * it at every look, and one look makes one skip at most.
  *
- * THE COST. push(), write_span() and publish() are Ring's; lost() a load,
+ * The cost. push(), write_span() and publish() are Ring's; lost() a load,
  * an increment and a store, on the producer's rare path. The consumer:
  * one load and a compare of the two bytes at every read_span() and pop(),
- * and the skip itself out of line. consume() is Ring's - a run it
+ * and the skip itself out of line. consume() is Ring's: a run it
  * releases was judged at its read. The memory: two bytes.
  *
- * The producer's verbs - push(), write_span()/publish(), lost() - run
+ * The producer's verbs (push(), write_span() with publish(), lost()) run
  * where the consumer cannot interrupt them (an interrupt body, or a
  * context that has masked the consumer's), which is Ring's model already:
- * one producer. The consumer's verbs never move the producer's state;
- * count(), empty() and full() never skip, so the producer may ask them.
+ * one producer. That is a receive ring's shape, the interrupt handler
+ * producing and the main loop consuming; a ring the main loop produces
+ * is a Ring, not a SkipRing. The consumer's verbs never move the
+ * producer's state; count(), empty() and full() never skip, so the
+ * producer may ask them.
  */
 template <typename T, uint32_t size, Platform P>
 class SkipRing {
@@ -477,13 +515,13 @@ public:
     [[gnu::always_inline]] bool empty() const { return ring_.empty(); }
     [[gnu::always_inline]] bool full() const { return ring_.full(); }
 
-    /// The skips made since the start, NEVER CLEARED, modulo 2^8 - each
+    /// The skips made since the start, never cleared, modulo 2^8: each
     /// one made inside a read_span() or pop() that then handed out nothing,
     /// so a reader comparing it after each look sees it move between the
     /// last run before a drop and the first after it. Consumer side.
     uint32_t skips() const { return seen_; }
 
-    /// Reset to empty and forget a drop not yet skipped. NOT concurrent,
+    /// Reset to empty and forget a drop not yet skipped. Not concurrent,
     /// as Ring's; skips() is kept.
     void clear() {
         ring_.clear();
@@ -537,7 +575,8 @@ private:
 
 /**
  * What a HardwareRing reads its producer through: two static functions,
- * each ONE READ of the producer's state.
+ * each one read of the producer's state, which the engine that owns the
+ * channel provides.
  *
  *  - remaining(): the elements still to be written in the current lap,
  *    in [0, size] - a circular channel's own count register, which the
@@ -560,79 +599,82 @@ concept RingCounter = requires {
 };
 
 /**
- * HardwareRing<storage, Counter> - the CONSUMER HALF of a ring whose
+ * HardwareRing<storage, Counter>: the consumer half of a ring whose
  * producer is the hardware. A DMA channel in circular mode writes
  * `storage` (a caller-owned array: the caller places and aligns it where
  * the channel can reach) lap after lap, and the producer index is not a
  * variable anybody stores: it is the channel's own count, read through
- * Counter, head = size - remaining().
+ * Counter, head = size - remaining(). A receive engine's transport names
+ * one over its storage and the engine's counter and drains it with
+ * read_span() and consume(); docs/design/ring.md, "HardwareRing: the
+ * ring whose producer is the hardware", is the design and its tests.
  *
- * A MONOSTATE, like the engines and transports it sits between: the
- * array named in the type is its identity, so two views of one storage
- * are one view, and with a byte element it is util/stream.hpp's
- * SpanSource itself. The verbs are Ring's consumer half under Ring's
- * names - read_span()/consume(), pop(), count(), empty(), capacity(),
- * clear() - so a transport moving its receive side onto a circular
- * channel changes a type and not its code.
+ * A monostate (a class with no per-instance data), like the engines and
+ * transports it sits between: the array named in the type is its
+ * identity, so two views of one storage are one view, and with a byte
+ * element it is util/stream.hpp's SpanSource itself. The verbs are
+ * Ring's consumer half under Ring's names (read_span() with consume(),
+ * pop(), count(), empty(), capacity(), clear()), so a transport moving
+ * its receive side onto a circular channel changes a type and not its
+ * code.
  *
- * POSITIONS, NOT INDICES. The view keeps two 32-bit positions counted
+ * Positions, not indices. The view keeps two 32-bit positions counted
  * from the producer's start (modulo 2^32): the consumer's tail, and the
  * producer's head as last looked at, head = laps() * size + (size -
- * remaining()) mod size. Laps are read FIRST and the count second, so a
+ * remaining()) mod size. Laps are read first and the count second, so a
  * wrap landing between the two reads, or a completion handler not yet
- * run, makes the head a lap TOO FEW and never a lap too many - and a lap
+ * run, makes the head a lap too few and never a lap too many; a lap
  * too few shows as the head going backwards from the last look, which is
  * impossible, so it is added back. That inference is exact while the
  * consumer looks more often than once a lap.
  *
- * THE OVERRUN. The producer cannot be stopped and is never told where
+ * The overrun. The producer cannot be stopped and is never told where
  * the tail is, so a consumer that falls a lap behind is overwritten, and
  * the lap count is the only witness: head - tail >= size means the oldest
  * unread element is the producer's next write or already written over.
- * Every look that finds it counts one overrun and SKIPS - the tail jumps
- * to the head, everything unread discarded - because what is left within
+ * Every look that finds it counts one overrun and skips (the tail jumps
+ * to the head, everything unread discarded), because what is left within
  * a lap of the producer is racing it: skip rather than tear, the block
  * streams' doctrine (util/block_stream.hpp). The capacity is therefore
  * size - 1, as Ring's: a full lap unread is already an overrun.
  *
- * THE RUN IS JUDGED AT ITS RELEASE. A run handed out can be written over
- * while the consumer still holds it - the consumer is a lap behind and
- * slow, or interrupted. consume() looks again, AFTER the run's reads (a
+ * The run is judged at its release. A run handed out can be written over
+ * while the consumer still holds it (the consumer is a lap behind and
+ * slow, or interrupted). consume() looks again, after the run's reads (a
  * fence keeps them before it): if the slot at the tail was written over
  * (head - tail > size), the run was torn, the overrun is counted, the
- * view skips, and consume() answers false - the one place a consumer can
+ * view skips, and consume() answers false, the one place a consumer can
  * learn that what it just read was overwritten under it. A run released
  * with true was intact when it was read.
  *
- * A SKIP IS AN EPOCH. Whichever look skips - the drain's read_span(), a
- * count() asked between two drains, a release refused - the stream the
+ * A skip is an epoch. Whichever look skips (the drain's read_span(), a
+ * count() asked between two drains, a release refused), the stream the
  * consumer reads jumps there, and a reader that carries state across its
  * runs (util/serial_port.hpp's partial line) must learn of it even when
  * its own calls did not make the jump. skips() counts every skip and is
  * never cleared: the reader compares it across its runs, one load a run.
  * overruns() is the same count since the last clear_overruns().
  *
- * NO CRITICAL SECTION AND NO PLATFORM. The view's state is the consumer's
+ * No critical section and no platform. The view's state is the consumer's
  * alone (one reader); the producer's two numbers arrive through Counter
  * in one read each. Every verb that looks may skip, which moves the
- * tail, so every verb is the consumer's - but one: waiting(), a look that
+ * tail, so every verb is the consumer's, but one: waiting(), a look that
  * writes nothing, is what an interrupt body asks for its edge test; a
  * count() there would move the tail under a run the consumer holds and
  * make its release answer true for bytes it never read. The fences are
  * Ring's: compiler-only, enough on the in-order cores with no data cache
- * between the channel and the core that every family with DMA has today
- * - the assumption this contract carries (docs/design/overview.md,
- * "Authority of util/"). Validated on
- * the host against a scripted counter (test/test_ring), and on the
- * silicon by the circular receive engines of the STM32F4, the STM32G0
- * and the CH32V203, whose transports read their receive ring through
- * it (each family's dma.md).
+ * between the channel and the core that every family with DMA has today,
+ * the assumption this contract carries (docs/design/overview.md,
+ * "Authority of util/"). Validated on the host against a scripted
+ * counter (test/test_ring), and on the silicon by the circular receive
+ * engines of the STM32F4, the STM32G0 and the CH32V203, whose transports
+ * read their receive ring through it (each family's dma.md).
  *
- * WHAT IT CANNOT KNOW. An element landing between the count read and the
+ * What it cannot know. An element landing between the count read and the
  * run's use is not in the run: it is the next call's. A lap missed while
  * the completion that counts it is still pending, by a consumer that has
  * not looked for a whole lap, is counted at the first look after the
- * handler has run - the run handed in between holds the stream's real
+ * handler has run; the run handed in between holds the stream's real
  * elements from after the gap. A completion handler held off for a whole
  * lap loses that lap from the count (one flag latches one wrap), and the
  * view cannot see a lap the count never had. And a consumer that does not
@@ -723,15 +765,15 @@ public:
     static uint32_t overruns() { return skips_ - cleared_at_; }
     static void clear_overruns() { cleared_at_ = skips_; }
 
-    /// Every skip since the program started, NEVER CLEARED (modulo
+    /// Every skip since the program started, never cleared (modulo
     /// 2^32): an epoch a reader compares across its runs to learn that
     /// the stream jumped between two of them, whichever look made the
     /// jump. overruns() is this count less its value at the last
-    /// clear_overruns().
+    /// clear_overruns(). Readable from any context.
     static uint32_t skips() { return skips_; }
 
     /// Both positions back to zero, for a producer (re)started at the
-    /// storage's first element with its lap count at zero. NOT
+    /// storage's first element with its lap count at zero. Not
     /// concurrent: the consumer is quiescent while it runs.
     static void clear() {
         tail_ = 0u;

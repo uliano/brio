@@ -812,17 +812,237 @@ second round: nothing the first found was broken in substance.
   "How to use it" block; a re-read of each pair after any API change is
   the maintained-example rule applied to them.
 
+## Fourth batch: the route's services
+
+Scope: eight headers of `brio/util/`, comments only, the services the
+learning route and the design pages send a reader to:
+`serial_port.hpp`, `print.hpp`, `stream.hpp`, `bench.hpp`, `ring.hpp`,
+`bus_master.hpp`, `spi_bus.hpp`, `i2c_bus.hpp`. Base: `docs-rewrite`
+at 66e5bbcfbeea90b4001007ebd1aa5f42282e0afa, the reference of every
+token check. Branch `claude/util-header-comments-sgjxs0`, one pull
+request against `docs-rewrite`. Not touched: every code token (the
+token check on every file), every other header of `brio/util/`, every
+other stratum, the design pages and the learning route (no link of
+theirs broke: `docs/learn/introduction.md` cites `util/print.hpp`'s
+"Delivery policy" by that phrase and the phrase is kept), CLAUDE.md,
+docs/README.md, apps, CMake, `.vscode`, `.clangd`. No `// build:` or
+other tool-read line exists in these headers.
+
+Environment: no cross toolchain and no `/sw` in the cloud; the token
+check lexed with the system g++ 13.3; the clone was shallow and was
+unshallowed before the first check. No build and no host test was run.
+
+### Each file, and what changed
+
+Each opening now says first what the service does for a caller and
+its smallest use (an excerpt in the shape the apps spell it), then
+which context calls what (what waits, what masks, who owns a buffer
+until when), then every fact the old comment gave with its citation
+(a design page by name and heading, a measurement by its suite
+letter). Capitals used for emphasis are lowered; a term of the
+project's own (run, epoch, monostate, tenure, lease, NACK) is defined
+where the header first uses it. Internal comments were touched only to
+lower the same capitals in the two flavour blocks of `ring.hpp`.
+
+- `serial_port.hpp`: the opening leads with what SerialPort delivers
+  (lines as events), the console as the smallest use (the SerialPort
+  alias, the Tenuto list with the sink first, the interrupt glue
+  posting RxActivity, as `stm32g0/src/apps/console.cpp` spells them),
+  then the three contexts (the transport's handler, SerialPort's
+  dispatch, the sink's dispatch), the loan and its lifetime in plain
+  words (read and write during the LineReceived dispatch, never kept),
+  the list order and why it is enough, then the transmit paragraph
+  with the wait derived (below) and every run, release, skip and
+  silence paragraph kept whole. RxActivity, LineReceived, the queue
+  depth, LendsTo, init(), line_overflows() and torn_lines() say what
+  the caller must know (a line holds up to max_line - 1 characters and
+  a NUL, `util/proto/line_parser.hpp`).
+- `print.hpp`: the opening leads with the one function and the
+  smallest use, keeps the argument types and the extension point
+  (ADL expanded), and rewrites the delivery policy around the
+  contexts: main context only, why a print from an interrupt handler
+  spins for ever (the handler is the ring's consumer and no handler
+  nests over another, kernel.md section 1), the wait derived, the two
+  consequences (every other active object held; a print before init
+  and interrupts spins for ever), then the run mechanics and the
+  conversions as before. write_blocking(), print() and print_scan_run's
+  paragraph carry their context and the copy of the caller's text.
+- `stream.hpp`: the opening says whom the concepts serve (a program
+  through the services, a driver author directly), defines concept
+  and try semantics, states the context rule as the transports state
+  it and that nothing checks it, keeps the run paragraph and cites its
+  measured cost; every concept's comment says whether its verb waits
+  (none does) and who owns the buffer (the caller's run is copied).
+- `bench.hpp`: the opening leads with what the instrument measures and
+  the smallest use as `samc21/src/apps/bench_samc.cpp` spells it
+  (BenchIdle, IsrMeter, Stopwatch, bench_counters, bench_sample,
+  bench_line), the contexts of each (main, the bound vector, the
+  kernel loop), then the line's fields, the ruler, busy, the
+  instrument's cost and the quiescent read as before; Stopwatch,
+  IsrMeter and bench_line() say their context.
+- `ring.hpp`: the opening leads with what Ring is and the smallest use
+  (a transport's transmit ring), states the one rule with which side
+  is which in a transmit and a receive ring and that two producers
+  break it silently (nothing checks it), then the lock-free and guarded
+  paths, the fence, the no-doubling rule, the two granularities, the
+  capacity and the two flavours as before; push(), pop(), read_span(),
+  write_span() and clear() say their side and whether they wait. The
+  SkipRing and HardwareRing blocks keep every sentence with their
+  capitals lowered and gain a link to their ring.md sections.
+- `bus_master.hpp`: the opening leads with what the arbiter does for a
+  client (one request, one reply, transactions in arrival order),
+  points at the two alias headers for the smallest use, lists who
+  calls what (the client, the interrupt glue, the power manager, the
+  arbiter's own dispatch, what waits where), states the buffer rule
+  as a lifetime (untouched from the post to the BusDone, race-free by
+  run-to-completion, checked by nothing), then every paragraph of the
+  old opening (the hold, the engine contract, the policy, the timeout,
+  the race, the envelope, the authority) kept whole with the
+  envelope guideline cited to kernel.md. BusDone, TransferDone,
+  BusTimeout, the class comment (pending_depth defined, its bound of
+  124 from the static assertion), init(), rejected_count() and
+  stale_events() say what the caller must know.
+- `spi_bus.hpp`, `i2c_bus.hpp`: each opening says what the alias is
+  for a program and shows the smallest use (the host, the bus, the
+  post with reply_to, in `stm32g0/spi.hpp`'s and `stm32g0/i2c.hpp`'s
+  spelling), points at bus_master.hpp for the contract and at the
+  design page for the stack; the alias comments define pending_depth
+  and timeout_ticks for a reader who meets them there; NACK and tenure
+  defined in i2c_bus.hpp.
+
+### Facts resolved while writing
+
+- The "~2 ms worst case at 460800" of serial_port.hpp's transmit
+  paragraph: no code, document or measurement in the repository
+  supports it (a grep for the figure finds only unrelated 2 ms
+  findings in the target documents). The header now says what
+  serial.md derives: zero while the message fits the ring, otherwise
+  one byte time per byte that does not yet fit, a byte being ten bit
+  times (21.7 us at 460800, 87 us at 115200), so a full 256-byte ring
+  is about 5.5 ms at 460800. print.hpp carries the same derivation.
+- A line holds up to max_line - 1 characters: `LineAssembler::push`
+  overflows when the max_line-th character arrives (line_parser.hpp),
+  so "lines longer than max_line" was off by one; the header says
+  "did not fit the buffer (max_line - 1 characters)".
+- Whether print() may be called from an interrupt handler was stated
+  nowhere; the headers now say main context only, with the reason
+  (the transport's handler is the ring's consumer; no handler nests
+  over another on any target, kernel.md section 1).
+- serial.md's two masking sentences (lines 37 and 76, found by the
+  third batch): not a contradiction. Line 37 is about the rings (a
+  lock-free ring masks nothing); line 76 is about the STM32G0's
+  transmit arming, which reads, modifies and writes a control
+  register under a guard (stm32g0/usart.hpp's opening says so). The
+  page's line 37 still reads as a claim about `write_byte` whole;
+  outside this batch's files, open for the page's owner.
+- bench.hpp's reference to "design/kernel.md section 1" is kept as a
+  number (the inventory above lists it) and now carries the heading
+  text too.
+
+### Reader review (fresh subagents, one round)
+
+Two readers, each given only its files, the audience profile and the
+questions: one on serial_port.hpp and ring.hpp, one on print.hpp and
+bus_master.hpp, with eight and nine scenarios. Supported directly: the
+wrong list order refused at compile time and the loan's end at the
+sink's return; the saved pointer as a contract violation; the sink's
+stall under a long print and who is held; the two-lines-in-flight
+stop and the self-post; the lock-free call from either context and
+the guarded path at a 512-byte ring on an 8-bit core; clear()'s
+condition on all three rings; HardwareRing's count() from an
+interrupt; the print before init; the print from a receive handler
+and why it hangs; the 1000-byte print's wait and its formula; the
+float's default shape and fixed(); the fifth request's rejection; the
+buffer rule until the BusDone; the untimed bus wedged by a lost
+completion and the timed bus's recovery; the sleep vote in flight.
+Residue, all applied: ring.hpp's "a print from a handler and one from
+the loop" read as two active objects' prints (now: an interrupt
+handler's beside the loop's, the objects' prints being one producer);
+two conditions for clear() in one file (now one: one party calls it
+while the other is quiescent); "valid until its own side's next
+operation" leaving count() in doubt (now: until the side next moves
+its index; a look ends nothing) and stated as general where
+HardwareRing's run can be written over (now said at the rule); SkipRing's
+producer rule against "always safe from either context" (now: a
+receive ring's shape, a ring the main loop produces is a Ring);
+serial_port.hpp's "the buffer is reused by the next line" against the
+ping-pong (now: the next dispatch may assemble into it again, the
+buffers alternate), "nothing here waits" against print's wait (now:
+SerialPort itself waits for nothing; print is the one wait), the
+receive ring called lock-free where a wide index is guarded (dropped),
+quiet_ticks as 100 ms where a slow tick makes it one tick (said),
+priority never defined (now: list position), whether print may be
+called from an interrupt handler (now: main context only, print.hpp
+says why), the sink's queue needing room for two LineReceived and a
+dropped one being a lost line (said), a byte dropped under a transport
+that reports no gaps joining two fragments (said); print.hpp's "empty
+tag instance of its all-static class" (now defined), the early print
+stated as a hang whether or not the text fits (now: a print that does
+not fit the room before init spins; a shorter one's bytes are the
+transport's business), "never from an interrupt handler" given one
+reason where there are two (now: the one-producer rule and the drain
+that cannot run), the ten bit times without 8N1 (said), write_byte's
+false unstated (said); bus_master.hpp's three counts of one budget
+(now: the 2 x pending_depth + 2 outstanding requests itemized against
+the queue's depth), "never silent" against the queue's drop past the
+budget (now scoped to the budget), "answered at once" against "the
+reply comes later" (now: sent in the receiving dispatch, delivered as
+an event), post() from the interrupt glue with no word on its context
+(now: legal from any context, kernel/post.hpp), the timeout armed per
+wire transfer and so per retry (said). Noted and kept: the C++
+notation itself (templates, std::optional, std::span, lambdas,
+`static inline`, Fsm, Subscribers, Borrowed's accessor) is the
+learning route's and the kernel headers', which the comments point
+at; the engine's freedom to copy or read the lent request is a stated
+open point of the contract, not a gap of the comment. No second
+round, by the batch's cost rule.
+
+### Checks
+
+- `bin/brio prose` over the eight files: 8 files, 0 errors, 0 for
+  review (before and after).
+- `bin/brio gate --tokens --against 66e5bbc` over the eight files: all
+  eight token-identical (lexed with the system g++ 13.3).
+- `grep -P '[^\x00-\x7F]'` over the eight files: nothing.
+- The test directories the headers cite (`test/test_serial_port`,
+  `test/test_print`, `test/test_ring`, `test/test_bus_master`) exist;
+  the app files the smallest uses are drawn from
+  (`stm32g0/src/apps/console.cpp`, `samc21/src/apps/bench_samc.cpp`,
+  `stm32g0/src/apps/test_stm32_spi.cpp`, `test_stm32_i2c.cpp`) were
+  read for the spelling.
+- Not run, no toolchain: any build, the host tests, the full
+  `brio gate`.
+
+### Local verification handoff
+
+- The full `brio gate` against 66e5bbc on a machine with the
+  toolchains confirms every image unmoved (comments only; the token
+  check says so, the gate proves it).
+- The host tests, for the suites the headers cite (nothing in them
+  changed).
+- serial.md line 37 ("neither the handlers nor `write_byte` mask
+  interrupts") against the STM32G0's byte path, to be reworded by
+  whoever next edits the page.
+
 ## Next batches (not started)
 
-1. The remaining target strata in groups, on this batch's pattern
-   (README rewritten; the documents' additive pass; the headers'
-   comments under the same brief), each retaining its hardware
+The credit of the cloud sessions ended with this batch. What it did
+not reach, each on the stm32g0 batch's pattern (README rewritten; the
+documents' additive pass; the headers' comments under the same brief:
+what the caller gets, which context calls what, then every fact kept
+with its citation, token identity on every file):
+
+1. The remaining target strata in groups, each retaining its hardware
    differences: samc21 and avrxt first (the other two of the three
    original targets), then stm32f4, the two RP strata, the three WCH
    strata and host.
-2. Remaining services (serial_port.hpp and print.hpp first, with the
-   serial.md masking sentence above), devices, the IP strata, host,
-   boards and probes.
+2. The rest of `brio/util/` (the twenty-five other headers: the analog
+   converter and sampler, block streams, CAN, the clock and placement
+   vocabularies, the NV heap, journal, record and writer, power, the
+   meter sampler, the inbox, the USB stack under `usb/`, the test-bench
+   grammar, the line parser under `proto/`, the smaller services),
+   then devices, the IP strata (pl011, pl022, dw_apb_i2c), host, boards
+   and probes.
 3. Before the public merge: remove DOCUMENTATION_REWRITE_BRIEF.md,
    DOCUMENTATION_REWRITE_PROGRESS.md and the two review files, unless
    the user keeps them.

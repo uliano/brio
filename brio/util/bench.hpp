@@ -1,11 +1,36 @@
 /*
  * bench.hpp
  *
- * The benchmark grammar: what a bench_<family> app prints, one line per
- * operation and size, the same on every family, so that a number read on
- * one chip means what the same number means on another and the vendor's
- * library doing the same operation on the same board prints a line the
- * same eyes read.
+ * The benchmark instrument: how a program measures what one operation
+ * of a driver costs the core (a print, a bus transaction, a block
+ * moved), and the one line it prints for it, the same on every family,
+ * so that a number read on one chip means what the same number means on
+ * another and the vendor's library doing the same operation on the same
+ * board prints a line the same eyes read. The design, the protocol
+ * against the vendor's library and the measured tables are
+ * docs/design/benchmark.md; this header is the grammar and the stamps.
+ * A program that measures nothing never includes it.
+ *
+ * The smallest use is a bench application (bench_<family>) that names a
+ * ruler of its family, wraps its platform, carries a meter on each
+ * interrupt vector it binds, and brackets the operation:
+ *
+ *     using Idle = brio::BenchIdle<Platform, Ruler>;   // the kernel runs on Idle
+ *     brio::IsrMeter<Ruler, Idle> uart_meter;          // enter() first, leave() last in the vector
+ *     ...
+ *     const auto before = brio::bench_counters<Idle>(uart_meter);
+ *     brio::Stopwatch<Ruler> sw;  sw.start();
+ *     ... the operation, run to its completion ...
+ *     const uint32_t wall = sw.elapsed();
+ *     brio::bench_line(serial, "print", n, brio::bench_sample(wall, before,
+ *                      brio::bench_counters<Idle>(uart_meter)), Ruler::hz(), wire_bps);
+ *
+ * Who calls what: Stopwatch, bench_counters(), bench_sample() and
+ * bench_line() from main context, in the bench letter that runs the
+ * operation (bench_line() prints, so it waits as print does);
+ * IsrMeter::enter() and leave() from the bound interrupt handler, as its
+ * first and last statements; BenchIdle::idle() and idle_until() by the
+ * kernel loop alone, as a platform's are. Nothing here masks interrupts.
  *
  *     bench <op> n=<bytes> wall=<cycles> busy=<cycles> irq=<count> isr=<cycles> rate=<B/s> wire=<B/s> x=<wall/wire>
  *
@@ -18,28 +43,30 @@
  *    (one handler per byte, per FIFO level, per block) where busy also
  *    holds the thread's own spin on a blocking print.
  *  - rate: bytes per second achieved, from wall.
- *  - wire: bytes per second the configured medium allows - the app
+ *  - wire: bytes per second the configured medium allows; the app
  *    states it (bits per byte over the line rate for a transport, the
  *    bus for a memory operation) and says why.
  *  - x: wall over the wire's time. The number the documents carried as a
- *    fact and overview.md's rules now call a finding above about 1.5:
- *    the harness prints it so that no measurement is filed unexplained.
+ *    fact and docs/design/overview.md's rules now call a finding above
+ *    about 1.5: the harness prints it so that no measurement is filed
+ *    unexplained.
  *
- * NOT A TEST. The only verdict of a bench letter is that it ran;
- * TestBench still frames the app (the menu, the ALL: line bin/brio waits
- * for), and the bench lines are the payload between the verdicts.
+ * Not a test. The only verdict of a bench letter is that it ran;
+ * TestBench (util/testbench.hpp) still frames the app (the menu, the
+ * ALL: line bin/brio waits for), and the bench lines are the payload
+ * between the verdicts.
  *
- * THE RULER. A CycleRuler is a free-running count of CORE cycles,
+ * The ruler. A CycleRuler is a free-running count of core cycles,
  * wrapping at 2^32, readable from any context, and it states its own
  * rate because the counters differ by core: SysTick's cycles() on the
- * M0+ parts and the M4 kept to its DWT, the system timer counting
- * clk_sys on the RP2350 (one ruler for both of its instruction sets),
- * the STK on the QingKe parts, two cascaded TCBs on the AVR. A
+ * Cortex-M0+ parts and the Cortex-M4 kept to its DWT, the system timer
+ * counting clk_sys on the RP2350 (one ruler for both of its instruction
+ * sets), the STK on the QingKe parts, two cascaded TCBs on the AVR. A
  * difference of two reads is exact under 2^32 cycles, which bounds one
  * measurement at about 90 s at 48 MHz and 24 s at 180 MHz.
  *
- * BUSY. The core is busy when it is not idle, and the kernel's idle path
- * is one call the platform owns - so BenchIdle<P, R> is a platform that
+ * Busy. The core is busy when it is not idle, and the kernel's idle path
+ * is one call the platform owns, so BenchIdle<P, R> is a platform that
  * forwards everything to P and stamps the ruler around P::idle(), the
  * kernel being templated on the platform and compiling nothing new. An
  * idle window measured that way holds the interrupt that ended it: its
@@ -51,25 +78,25 @@
  *
  *     busy = wall - idle_windows + handler_cycles_inside_them
  *
- * THE COST OF THE INSTRUMENT. A stamp pair is two ruler reads and the
+ * The cost of the instrument. A stamp pair is two ruler reads and the
  * arithmetic (SysTick's cycles() is five register reads and a compose,
- * some 35 Thumb instructions - 60 to 75 cycles on an M0+ fetching from a
- * flash behind two wait states, measured), and an idle window costs the
- * same:
- * the bench app's letter r measures both and prints them once per run,
- * and every bench line carries RAW numbers. Two seams are stated rather
- * than closed: the latency of entering and leaving the handler (a few
- * cycles either side of the stamps) is counted as idle, and an
- * interrupt that lands between P::idle()'s return and the window's close
- * is counted in both - a window of a few cycles once per idle turn.
+ * some 35 Thumb instructions: 60 to 75 cycles on a Cortex-M0+ fetching
+ * from a flash behind two wait states, measured), and an idle window
+ * costs the same: the bench app's letter r measures both and prints them
+ * once per run, and every bench line carries raw numbers. Two seams are
+ * stated rather than closed: the latency of entering and leaving the
+ * handler (a few cycles either side of the stamps) is counted as idle,
+ * and an interrupt that lands between P::idle()'s return and the
+ * window's close is counted in both, a window of a few cycles once per
+ * idle turn.
  *
- * THE COUNTERS ARE READ QUIESCENT. bench_counters() reads the idle
+ * The counters are read quiescent. bench_counters() reads the idle
  * adapter's and the meters' accumulators with no guard: a bench app
  * reads them before the operation starts and after it has completed,
  * when nothing of the operation is still in flight. On a core whose
  * atomic_width is below 4 the app takes the counters under its
- * platform's CriticalSection, as it would any 32-bit value an ISR
- * writes.
+ * platform's CriticalSection, as it would any 32-bit value an interrupt
+ * handler writes.
  */
 #pragma once
 #include <stdint.h>
@@ -124,12 +151,14 @@ struct BenchIdleHook<P> {
 
 } // namespace bench_detail
 
-/// Elapsed cycles since start(), exact under 2^32 (the unsigned wrap).
-/// Both verbs are forced inline: a Stopwatch line measures the ruler's
-/// read and nothing else, not a call and a return -Os would add. Both
-/// are ORDERING POINTS: the barrier keeps the measured code between the
-/// two reads, where the compiler would otherwise move a load above the
-/// first or a store below the second (measured on the M33 and Hazard3).
+/// A wall clock in ruler cycles: start() reads the ruler, elapsed() is
+/// the cycles since, exact under 2^32 (the unsigned wrap). Main
+/// context, around the operation measured. Both verbs are forced
+/// inline: a Stopwatch line measures the ruler's read and nothing else,
+/// not a call and a return -Os would add. Both are ordering points: the
+/// barrier keeps the measured code between the two reads, where the
+/// compiler would otherwise move a load above the first or a store
+/// below the second (measured on the Cortex-M33 and Hazard3).
 template <CycleRuler R>
 class Stopwatch {
 public:
@@ -211,10 +240,12 @@ private:
     static inline uint32_t idle_turns_ = 0;
 };
 
-/// The stamp pair a bound vector carries: enter() first, leave() last.
-/// A handler body runs to completion and no interrupt nests over another
-/// on any target (design/kernel.md section 1), so one start stamp serves
-/// every vector that shares the meter.
+/// The stamp pair a bound vector carries: enter() as the handler's first
+/// statement, leave() as its last; the sums are read from main context
+/// through bench_counters(). A handler body runs to completion and no
+/// interrupt nests over another on any target (design/kernel.md section
+/// 1, "The model in one page"), so one start stamp serves every vector
+/// that shares the meter.
 template <CycleRuler R, IdleWindow I = NoIdleWindow>
 class IsrMeter {
 public:
@@ -283,8 +314,9 @@ constexpr BenchSample bench_sample(uint32_t wall, const BenchCounters& before,
             after.isr_cycles - before.isr_cycles};
 }
 
-/// The line. `hz` is the ruler's rate, `wire_bps` the medium's limit in
-/// bytes per second; rate and x are computed here and nowhere else.
+/// The line, printed on `s` (it waits as print() does). `hz` is the
+/// ruler's rate, `wire_bps` the medium's limit in bytes per second; rate
+/// and x are computed here and nowhere else.
 template <ByteSink S>
 void bench_line(S s, const char* op, uint32_t bytes, const BenchSample& m, uint32_t hz,
                 uint32_t wire_bps) {
