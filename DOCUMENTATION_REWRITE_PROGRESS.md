@@ -200,8 +200,147 @@ exercised through CMake Tools.
   every row marked "configured" to be performed once and the matrix
   updated to "verified" or amended; the command-palette labels checked
   against the installed CMake Tools.
-- Host tests: `(cd test && ctest --preset host)` unchanged by this
-  batch; confirms nothing (no code moved) but is the route's own step.
+- Host tests: `(cd test && cmake --preset host && cmake --build
+  --preset host && ctest --preset host)` unchanged by this batch;
+  confirms nothing (no code moved) but is the route's own step, and the
+  bare `ctest` on a fresh tree should report every suite not run, as
+  command-line.md now says.
+- After the revision, on a FRESH checkout (no build-cmake/): the clangd
+  procedure of vscode.md (the two configures, then a header under
+  brio/stm32g0/ and one under brio/kernel/ opened with no include
+  errors); the full VS Code sequence on the Nucleo-G0B1RE as written;
+  the full `brio gate` against 4d20f8f for the ten headers' images.
+
+## Revision of the first batch
+
+The independent review (DOCUMENTATION_REVIEW_BATCH1.md) applied to the
+first batch's pages and headers, in a cloud session on a branch made
+from `docs-rewrite`; one pull request against `docs-rewrite`. Scope:
+the batch's files only. Not touched: the scheduler and the timers
+(documented as they work), every code token (`brio gate --tokens`
+identical on all ten headers), `// build:` lines, CMake, `.clangd`,
+`.vscode`, docs/design/*.md, blink.cpp.
+
+Environment: no cross toolchain, no `/sw/gcc`; the token check lexed
+with the system g++ 13.3 (`cli/gate.py` calls `g++` from the PATH), so
+it ran. The clone was shallow and was unshallowed before the check
+(4d20f8f is an ancestor of the branch). No build and no host test was
+run.
+
+### Corrections needed in this batch
+
+- clangd on a fresh checkout: vscode.md's clangd section now says the
+  fragments name databases by path and not by the active preset, with
+  a table of the four fragments the route reads (`stm32g0/.clangd` and
+  `brio/stm32g0/.clangd` -> `build-cmake/stm32g0b1re-release/
+  compile_commands.json`; `brio/.clangd` and `test/.clangd` ->
+  `build-cmake/host/compile_commands.json`), the two configures a
+  fresh checkout runs once (release preset, host project), in the
+  terminal and in the status bar, and that the debug preset is selected
+  afterwards while the editor keeps reading the release database. The
+  matrix row says "two databases to create once". No fragment changed.
+- The host-test build step: command-line.md step 6 configures, builds,
+  runs, and says the test preset does not build; README.md's one-liner
+  carries the three commands and a sentence on the bare `ctest`;
+  docs/host/README.md's "Running" block carries the configure and the
+  build (the one exception the review allows).
+- Priority vs response time: README.md's model paragraph,
+  introduction.md (the execution rule, the "Keep handlers short"
+  bullet, the priority section after the diagram, which now says the
+  diagram's "served next" is a fact of the scenario and states the
+  three accepted limits: no preemption, no response-time promise, no
+  fairness), first-program.md (stage 4 and the latency paragraph, which
+  lists what an event waits for and marks the microsecond figure as
+  read from the code, not measured) and tenuto.hpp (the rule paragraph
+  and a new one on the scan order as a selection precedence).
+- Absolute claims: introduction.md's active-object section replaces
+  "never blocks" with the absence of a suspension mechanism and the
+  application's duty to know which calls wait; the communication
+  section replaces "no deadlock and no ordering puzzle" with what
+  posting promises (the poster does not wait) and what it does not
+  (a protocol can still stall; a completion event can be dropped), and
+  links the payload rules; private state stated as the design rule.
+  README.md's "ideas" bullet qualified the same way.
+- Alignment: first-program.md stage 1 and cpp-notation.md say the
+  slot is the largest alternative, the tag and the padding, give
+  sizeof(SetPeriod) 2 and sizeof(Event) 4 under arm-none-eabi-gcc 16.2
+  for the Cortex-M0+ (the author's local measurement), and point at
+  `sizeof(Event)`.
+- Tick conversion vs physical time: first-program.md stage 6 (the
+  beginner wording: between N - 1 and N tick intervals, then the loop);
+  introduction.md's time section points there; time.hpp's header and
+  ticks_from_ms's comment say the rounding protects the count and
+  nothing more; time_event.hpp's header gains "When a timer matures"
+  (arm() stores now() + delay, process() posts at now() >= deadline),
+  the catch-up paragraph says one post per turn per timer under
+  post()'s drop rule, and a "Limits of the deadline arithmetic"
+  paragraph states the half-range: delays and periods below 2^31 ticks,
+  a deadline unserved for 2^31 ticks reads as future, a delay above
+  2^31 is posted at once (verified against process(): for exactly 2^31
+  the signed difference is INT32_MIN, negative, so the timer matures
+  2^31 ticks later; above it the difference is positive). arm()'s and
+  arm_every()'s comments carry the phase and the limit.
+- Debugger observations: command-line.md step 5 says cursors and old
+  slots are nonzero after events have passed, that `overflows_` is the
+  one field that must stay zero, read as a stored field while halted
+  rather than through the accessor; the WFI caveat says halt before any
+  read since blink sleeps in WFI, and DBG_STOP is told apart as the Stop
+  modes' matter. vscode.md's debug section carries the same two facts
+  in one paragraph.
+- GUI coverage: vscode.md's last section says what the configuration
+  covers and that the bench operations are documented through the
+  command line today, without deciding their future.
+
+### Editorial refinements
+
+- VS Code as a route: docs/learn/README.md separates the ideas (in
+  order) from the two routes (alternatives), cpp-notation.md as a
+  companion; first-program.md links both routes at its top; docs/
+  README.md's learn rows say the same.
+- Verification notes: command-line.md has one status table at the top
+  (every step's status, the docs/README.md rule kept) and no status
+  paragraph in the steps; the DBG_STOP explanation is one short
+  paragraph with a link in step 3 and a sentence in step 5. vscode.md
+  keeps the matrix, folds the recorded/expected split of the debug step
+  into one sentence, and reduces the DBG_STOP text to a note and a link
+  in the flash and debug sections.
+- A readable internal comment: event_queue.hpp's implementation block
+  rewritten (ordinary headings; slot, position and cursor defined
+  before use; depth stated once; the runs, the cursor ownership, the
+  fence ordering, the release rule and the one-core assumption kept;
+  the queue diagram cited). borrowed.hpp drops the planned epoch check
+  from the API description; post.hpp defines "thunk" where ReplyTo
+  uses it.
+- Navigation summaries: docs/README.md's map rows shortened to one
+  purpose each, every link kept, the rules section untouched;
+  README.md's RP2350 row says "every driver's test suite passing on
+  both" instead of "every chapter green on both".
+
+### The author's local findings
+
+- README.md's excerpt is two blocks copied from blink.cpp as it stands
+  (every line of every excerpt in README.md and first-program.md
+  checked by a script against stm32g0/src/apps/blink.cpp: all present).
+- panic.hpp: a ResetReporter is in the reset header of the strata that
+  have one; the avrxt and ch32x035 strata have none (grep: samc21,
+  stm32g0, stm32f4, ch32v00x, ch32vx03, rp2040, rp2350).
+- command-line.md step 2 explains the three sections and gives one
+  debug build's figures (.text 6244, .data 48, .bss 76) as that build's.
+- The variant slot: 4 bytes, sizeof(SetPeriod) 2, as above.
+
+### Checks
+
+- `bin/brio prose README.md docs/README.md docs/learn/*.md
+  docs/host/README.md brio/kernel/*.hpp`: 19 files, 0 errors, 0 for
+  review (before and after).
+- `bin/brio gate --tokens --against 4d20f8f brio/kernel/*.hpp`: all ten
+  headers token-identical (lexed with the system g++ 13.3).
+- Links and anchors of the touched pages checked by a script: every
+  relative link and heading anchor resolves; the only hits are lambda
+  notation (`[](Toggle)`) read as links, the parser false positive the
+  review noted.
+- Not run, no toolchain: any build, the host tests, the full
+  `brio gate`.
 
 ## Next batches (not started)
 
