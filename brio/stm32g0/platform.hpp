@@ -1,38 +1,61 @@
 /*
  * platform.hpp
  *
- * STM32G0 (Cortex-M0+) implementation of the brio Platform concept - the
- * one header of this stratum the kernel templates are instantiated with.
- * Apps select it by including it and passing Stm32g0Platform<> along.
+ * What the brio kernel stands on when it runs on an STM32G0: the
+ * STM32G0 (Cortex-M0+) realization of the kernel's Platform concept,
+ * the compiler-checked set of requirements kernel/platform.hpp states.
+ * A program names it once, as the first argument of its Tenuto, and
+ * every kernel template is instantiated with it:
  *
- * ONE CLASS, TWO TIMEBASES. The template parameter is the kernel
+ *     using P = brio::Stm32g0Platform<>;
+ *     brio::Tenuto<P, Blinker, Supervisor>::run();
+ *
+ * It gives the kernel a critical section (interrupts masked for a
+ * scope), an idle that sleeps until the next interrupt without losing
+ * one that arrives at the wrong moment, the program's source of time, a
+ * breakpoint for a panic and the storage a panic record survives a reset
+ * in. Who calls what: the kernel loop calls idle() and idle_until() in
+ * main-loop context, with interrupts already masked, and nothing else
+ * should; now() and ticks_per_second may be read from any context;
+ * CriticalSection may be opened from any context and nests;
+ * break_here() is the panic path's and panic_record() the panic path's
+ * and the next boot's. A program binds the timebase's interrupt vector
+ * itself (SysTick_Handler to Ticker::tick(), or the LPTIM's vector to
+ * LptimTicker::isr()); the kernel binds no vector, and a program that
+ * forgets it never advances time.
+ *
+ * One class, two timebases. The template parameter is the kernel
  * timebase, and the default is the SysTick BasicTicker of
  * stm32g0/ticker.hpp (`Ticker`, 1000 Hz). SysTick rides HCLK, and HCLK
- * stops in the Stop modes - so on that
- * timebase KERNEL TIME STANDS STILL across a Stop, and stm32g0/sleep.hpp
- * keeps two timed sites that repair it afterwards from an RTC or LPTIM
- * witness. The other argument is stm32g0/lptim_ticker.hpp's
- * `LptimTicker`: kernel time counted on a low-power timer clocked from
- * the LSE crystal, which keeps counting through Stop 0 and Stop 1. That
- * timebase is TICKLESS - there is no periodic interrupt at all, and this
- * platform then provides the kernel's OPTIONAL idle_until() hook
- * (kernel/platform.hpp): the loop hands it the nearest armed deadline,
- * the timebase places its wake there, and one WFI covers the whole wait
- * whatever depth a sleep site armed. The plain sleep site is the only
- * site such a program takes (the timed ones refuse it at compile time:
- * nothing stands still, nothing needs repairing), and SysTick keeps
- * running interrupt-less as cortexm/delay.hpp's cycle counter. The
- * price: one LPTIM, its vector bound by the app to the ticker's isr().
+ * stops in the Stop modes, so on that timebase kernel time stands still
+ * across a Stop, and stm32g0/sleep.hpp keeps two timed sites that repair
+ * it afterwards from an RTC or LPTIM witness. The other argument is
+ * stm32g0/lptim_ticker.hpp's `LptimTicker`: kernel time counted on a
+ * low-power timer clocked from the LSE crystal, which keeps counting
+ * through Stop 0 and Stop 1. That timebase is tickless: there is no
+ * periodic interrupt at all, and this platform then provides the
+ * kernel's optional idle_until() hook (kernel/platform.hpp): the loop
+ * hands it the nearest armed deadline, the timebase places its wake
+ * there, and one WFI covers the whole wait whatever depth a sleep site
+ * armed. The plain sleep site is the only site such a program takes (the
+ * timed ones refuse it at compile time: nothing stands still, nothing
+ * needs repairing), and SysTick keeps running interrupt-less as
+ * cortexm/delay.hpp's cycle counter. The price: one LPTIM, its vector
+ * bound by the app to the ticker's isr().
  *
- * CriticalSection is stm32g0/nvic.hpp's InterruptGuard: save PRIMASK,
- * cpsid i, restore on scope exit. Nesting-correct, and the CMSIS
+ * Why the idle sleeps first and unmasks after: on Cortex-M a pending
+ * interrupt wakes a WFI even under PRIMASK, so an interrupt that lands
+ * between the kernel's empty check and the WFI does not put the core to
+ * sleep, and no wake is lost; idle() below says it in full. Why the
+ * masking is all-or-nothing: ARMv6-M has no BASEPRI, so CriticalSection
+ * is stm32g0/nvic.hpp's InterruptGuard, which saves PRIMASK, executes
+ * cpsid i and restores on scope exit; it nests correctly, and the CMSIS
  * intrinsics behind it carry the "memory" clobbers the concept asks for.
- * ARMv6-M has no BASEPRI, so this is all-or-nothing masking.
  *
  * The other halves live next door: which reset happened and how to cause
- * one is stm32g0/reset.hpp, and the STOPPING half - PWR's
+ * one is stm32g0/reset.hpp, and the stopping half (PWR's
  * Sleep/Stop/Standby/Shutdown ladder and the util/power.hpp sites over
- * it - is stm32g0/pwr.hpp plus stm32g0/sleep.hpp. This silicon selects
+ * it) is stm32g0/pwr.hpp plus stm32g0/sleep.hpp. This silicon selects
  * the sleep depth in SCB->SCR.SLEEPDEEP and PWR_CR1.LPMS, and neither
  * idle hook here writes either, so a WFI here takes whatever somebody
  * else armed. This header provides the storage the panic record lives
@@ -82,27 +105,28 @@ struct Stm32g0Platform {
     /// has a periodic interrupt to pause (stm32g0/sleep.hpp).
     using Timebase = TB;
 
-    /// Entered with interrupts MASKED and nothing to do: sleep until the
-    /// next interrupt.
+    /// The kernel's idle: entered by the loop, in main-loop context, with
+    /// interrupts masked and nothing to do; sleeps until the next
+    /// interrupt and returns with interrupts enabled. Not for a program
+    /// to call.
     ///
-    /// WFI FIRST, UNMASK AFTER. On Cortex-M a pending interrupt wakes
+    /// WFI first, unmask after. On Cortex-M a pending interrupt wakes
     /// WFI even with PRIMASK set - the handler simply does not run until
     /// PRIMASK clears. So sleeping before unmasking closes the
     /// lost-wakeup window by construction: an interrupt that becomes
     /// pending between the caller's queue check and the WFI does not put
     /// the core to sleep at all.
     ///
-    /// WHATEVER IS ARMED. This family selects the deeper modes with
+    /// Whatever is armed. This family selects the deeper modes with
     /// SCR.SLEEPDEEP plus PWR_CR1.LPMS (RM0444 4.3), and this hook never
     /// writes either: out of reset SLEEPDEEP is 0, so a WFI here is
     /// Sleep - the CPU clock stops, HCLK, SysTick and every peripheral
     /// keep running (5.3) - and with stm32g0/sleep.hpp's site having
     /// armed a Stop, the same WFI is that Stop. The site arms above this
     /// hook and the hook takes what it finds. On the SysTick timebase
-    /// KERNEL TIME STOPS
-    /// in a Stop (SysTick rides HCLK), which is what the timed sites
-    /// exist to repair; on a Tickless timebase it does not, and the loop
-    /// calls idle_until() below instead of this.
+    /// kernel time stops in a Stop (SysTick rides HCLK), which is what
+    /// the timed sites exist to repair; on a Tickless timebase it does
+    /// not, and the loop calls idle_until() below instead of this.
     ///
     /// The DSB is the ARM recommendation for WFI: it retires the posted
     /// writes before the core stops.
@@ -142,9 +166,10 @@ struct Stm32g0Platform {
     /// PRIMASK readback: the one bit CriticalSection saves and restores.
     static bool interrupts_enabled() { return brio::interrupts_enabled(); }
 
-    /// Halt in the debugger.
+    /// Halt in the debugger: the panic path's breakpoint
+    /// (kernel/panic.hpp), callable from any context.
     ///
-    /// CAVEAT, ARMv6-M. The core cannot ask whether a debugger is
+    /// Caveat, ARMv6-M. The core cannot ask whether a debugger is
     /// attached (DHCSR is debugger-access-only), so BKPT cannot be made
     /// conditional: with no debugger halted on it, this escalates to
     /// HardFault_Handler, which the crt provides as a distinct spin loop
@@ -153,6 +178,8 @@ struct Stm32g0Platform {
     /// is why bin/brio clears DHCSR after every flash.
     static void break_here() { __BKPT(0); }
 
+    /// The kernel's clock: the timebase's tick count, readable from any
+    /// context (what kernel/time_event.hpp arms deadlines against).
     static uint32_t now() { return TB::ticks(); }
 
     /// Tick rate of the timebase: 1000 Hz on SysTick (stm32g0/ticker.hpp),
@@ -177,12 +204,13 @@ struct Stm32g0Platform {
 
     /// Panic breadcrumb in .noinit: the linker script marks the section
     /// NOLOAD and the crt neither loads nor zeroes it, so the record
-    /// survives a warm reset and can be reported at the next boot.
-    /// SRAM content is promised NOWHERE across a reset (RM0444 2.3 says
+    /// survives a warm reset and can be reported at the next boot
+    /// (written by the panic path, read by take_panic_record() at boot).
+    /// SRAM content is promised nowhere across a reset (RM0444 2.3 says
     /// only that the SRAM is not retained through Shutdown); the magic
     /// word take_panic_record() checks is what makes a cold word
     /// harmless. One more thing this family can do to a never-written
-    /// word: with the SRAM PARITY CHECK enabled by option byte
+    /// word: with the SRAM parity check enabled by option byte
     /// (FLASH_OPTR.RAM_PARITY_CHECK = 0; the factory default is 1,
     /// disabled) a read of uninitialized SRAM raises an NMI - the
     /// breadcrumb's first read after a power-on would. Nothing here
