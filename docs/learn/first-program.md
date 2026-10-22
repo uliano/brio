@@ -206,7 +206,9 @@ list is code you can open.
 3. The loop's first action is `TimeEvents<P>::process()`
    (`brio/kernel/time_event.hpp`): it compares the current tick count
    with every armed deadline. When `heartbeat`'s deadline has passed,
-   it re-arms it one period later and posts the payload: `Toggle{}` is
+   it sets the next deadline one period after the one that just passed
+   (not after this moment: the "Time" stage says why) and posts the
+   payload: `Toggle{}` is
    copied into `Blinker::queue` by `post<Blinker>()`
    (`brio/kernel/post.hpp`). The copy happens with interrupts masked
    for a few instructions: the mask is against the other producers,
@@ -330,7 +332,8 @@ delay, and is the one a program uses in place of a one-shot delay loop.
 
 A count of ticks is not a promise of physical time. The timer is
 scheduled against the platform's tick counter, which changes once per
-tick interval (a millisecond on this target), and arming can happen
+tick interval (a millisecond on this target, 1/1024 of a second on the
+AVR), and arming can happen
 anywhere between two changes; so a delay of N ticks matures between
 N - 1 and N tick intervals of wall time later, and the event is
 handled when the loop gets to it after that. For a 500 ms heartbeat the
@@ -412,8 +415,8 @@ and used by the services in `brio/util/`.
 
 ## Capacities, overload, and how to see a failure
 
-`Blinker`'s queue holds four waiting events, `Supervisor`'s two. The
-depth counts the events that can wait while one is being handled: the
+`Blinker`'s queue is declared with a depth of four, `Supervisor`'s of
+two. The depth counts the events that can wait while one is being handled: the
 event being dispatched keeps its slot until its handler returns, and
 the queue has one slot more than its depth for that reason, so four
 posts can land during a `Blinker` handler and the fifth is the one
@@ -440,8 +443,9 @@ record that survives a reset and halts
 `blink` never calls it.
 
 Latency in this model is the time an event waits in its queue, and the
-kernel bounds only one part of it: the handler running when the event
-arrives finishes first. The rest is the interrupt handlers that run in
+kernel settles only the order, not the time: the handler running when
+the event arrives finishes first, however long it takes. The rest is
+the interrupt handlers that run in
 the meantime, the timer check at the start of the turn, and every event
 served before it, older ones in the same queue and any in a
 higher-priority queue, those posted while it waits included. There is

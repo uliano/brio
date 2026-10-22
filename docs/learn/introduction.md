@@ -182,8 +182,9 @@ the processor. An active object whose higher-priority peers always
 have an event waiting is never served, and the kernel does nothing
 about it: there is no fairness and no ageing of priorities. The limits
 of this kernel, accepted by design, are these three: no preemption of
-a running handler, no promise about response time beyond "the running
-handler finishes first", no fairness between objects. The discipline
+a running handler, no promise about response time (the kernel settles
+an order, "the running handler finishes first", and no duration), no
+fairness between objects. The discipline
 that keeps a program well inside them is short handlers and queues
 sized for their bursts; a program that needs more is a different
 kernel's.

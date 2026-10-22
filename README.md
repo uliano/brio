@@ -17,9 +17,9 @@ A brio application is divided into components called active objects.
 Each one owns a queue of events, small structs that record something
 that happened, and a piece of persistent state. The kernel is a loop
 that takes one event at a time from the highest-priority queue that is
-not empty and hands it to its active object's handler. Interrupt
-handlers do one thing with the kernel: they post an event into a queue
-and return.
+not empty and hands it to its active object's handler. An interrupt
+handler may do one thing with the kernel, post an event into a queue,
+and returns; the tick interrupt does not even that, it only counts.
 
 **One handler runs to completion before any other active object runs.**
 A higher-priority event that arrives in the meantime waits in its
