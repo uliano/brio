@@ -1,14 +1,54 @@
 # Infrared interface, IRTIM (STM32G0)
 
-Documents of record: RM0444 Rev 6 - IRTIM ch. 27 (figure 278, the
+This document is for a programmer who wants to drive an infrared LED
+with a modulated carrier, the physical layer of a remote control, with
+no CPU in the loop. The block is an AND gate with a multiplexer in front
+of it: TIM17's first channel is always the carrier, a timer channel or a
+USART's transmit line is the envelope, and the product leaves the chip
+on one pad. `Irtim` is the block, `IrtimPad<PinSel>` the pad.
+
+The smallest use, a 38 kHz carrier under a timer's envelope:
+
+```cpp
+using Carrier  = brio::TimPwm<brio::Tim<17>, 0>;   // no pad: internal
+using Envelope = brio::TimPwm<brio::Tim<16>, 0>;   // no pad: internal
+constexpr brio::PinSel ir_out{'B', 9, brio::PinFunction::af0};
+
+brio::Tim<17>::init();
+brio::Tim<16>::init();
+// ... 38 kHz 50 % on TIM17 CH1, the data envelope on TIM16 CH1 ...
+
+brio::Irtim::init();
+(void)brio::Irtim::envelope(brio::IrtimEnvelope::tim16);
+brio::Irtim::polarity(false);          // the pad rests LOW: no light at rest
+brio::Irtim::pb9_high_sink(true);      // PB9 only
+brio::IrtimPad<ir_out>::claim();
+```
+
+What decides correctness even there: the two timers are brought up and
+configured first ([tim.md](tim.md)) and the pad is claimed once the
+gate is configured, the order the example keeps; the polarity bit decides
+the resting level of the pad, and with it whether the LED is lit between
+frames; and the two envelopes are of opposite sense (TIM16's is active
+high, a USART's active low, a finding below), so a USART envelope that
+idles leaves the gate shut, which is the right way round for an infrared
+transmitter. PB9's high-sink bit is the same SYSCFG bit as that pad's
+I2C fast-mode-plus drive ([port.md](port.md)): one program cannot have
+both.
+
+## Documents of record
+
+RM0444 Rev 6 - IRTIM ch. 27 (figure 278, the
 envelope multiplexer's per-part note, the high-sink paragraph) and
 SYSCFG 6.1.3 (IR_MOD, IR_POL, I2C_PB9_FMP); DS13560 Rev 5 tables 13 and
-15 for the IR_OUT pads. Errata ES0548 Rev 3: NO ITEM TOUCHES IRTIM - a
+15 for the IR_OUT pads. Errata ES0548 Rev 3: no item touches IRTIM - a
 statement about the document, not a claim about the silicon. Driver:
-`stm32g0/irtim.hpp` (`Irtim` monostate + `IrtimPad<PinSel>`); the
-per-part envelope instance comes from `stm32g0/device_tables.hpp`
-(`irtim_second_usart()`). Bench suite: `test_stm32_serial` letter o
-(7 verdicts, wireless). Family fixture `test/family_stm32g0/irtim.cpp`
+`stm32g0/irtim.hpp` (`Irtim`, a monostate - a class with static state
+and no instances, since the part has one block - and
+`IrtimPad<PinSel>`); the per-part envelope instance comes from
+`stm32g0/device_tables.hpp` (`irtim_second_usart()`; the reserve: the table of what each part has, read off the device header).
+Bench suite: `test_stm32_serial` letter o (7 verdicts, wireless;
+a letter is one command key of the suite's console and the group of verdicts it runs). Family fixture `test/family_stm32g0/irtim.cpp`
 plus one negative under `brio check stm32g0`.
 
 ## What the silicon does

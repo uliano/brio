@@ -1,15 +1,54 @@
 # Comparators (STM32G0)
 
-Documents of record: RM0444 Rev 6 ch. 18, with the EXTI line table
+This document is for a programmer who needs to know when a voltage
+crosses a threshold without sampling it: the comparator's output raises
+an EXTI line, triggers a timer or a low-power timer, or is read as one
+bit. `Comp<n>` is one comparator; the G0B1/G0C1 class has three, the
+G071 class two, the G031 class and the value line none, and the type
+does not exist where the header declares no block.
+
+The smallest use, a pad against the DAC's first channel, with an
+interrupt on either crossing:
+
+```cpp
+constexpr brio::CompConfig cfg{
+    .positive = brio::CompPositive::input2,          // COMP1_INP2 = PA1
+    .negative = brio::CompNegative::dac_channel1,    // no pad at all
+    .hysteresis = brio::CompHysteresis::medium,
+};
+brio::Comp<1>::init();                 // the SYSCFG gate
+brio::Comp<1>::claim_inputs(cfg);
+brio::Comp<1>::configure(cfg);
+brio::Exti::sense(brio::Comp<1>::exti_line, brio::ExtiSense::both);
+brio::Exti::interrupt(brio::Comp<1>::exti_line, true);
+brio::Nvic::enable(brio::Comp<1>::irq());
+brio::Comp<1>::enable(true);
+```
+
+What decides correctness even there: `init()` opens SYSCFG's clock,
+without which the comparator's one register is not even readable; the
+inputs are asymmetric, the inverting one reaching the internal
+references and both DAC channels with no pad while the non-inverting
+one is a pad and nothing else, and a pad handed over in analog mode
+loses its own pull, so a signal costs a pin where a threshold is free;
+and `enable(true)` comes last, after the EXTI line is armed, which is
+the chapter's own order. A configuration the part cannot realize (a DAC
+threshold where there is no DAC, a pad the package does not bond, a
+window with no partner) is refused before anything is written.
+
+## Documents of record
+
+RM0444 Rev 6 ch. 18, with the EXTI line table
 13.5.1, the vector table 12.3 (table 61) and TIM1_TISEL / TIM1_AF1
 (21.4.27, 21.4.28); DS13560 Rev 5 table 12 (the input pads) and table 68
 (offset, hysteresis, propagation delay); errata ES0548 Rev 3, which has
 **no item touching the comparators**. Driver: `stm32g0/comp.hpp`; the
 per-part presence and the EXTI line numbers come from
-`stm32g0/device_tables.hpp`. Bench suite: `test_stm32_analog` letters i
-(15 verdicts), m (7 - the analog questions) and n (8 - the other two
-comparators, the output on a pad, the blanking sources), shared with the
-ADC, the DAC and the reference buffer.
+`stm32g0/device_tables.hpp` (the reserve: the table of what each part has, read off the device header). Bench suite:
+`test_stm32_analog` letters i (15 verdicts), m (7 - the analog
+questions) and n (8 - the other two comparators, the output on a pad,
+the blanking sources), shared with the ADC, the DAC and the reference
+buffer; a letter is one command key of the suite's console and the group of verdicts it runs.
 Family fixture `test/family_stm32g0/comp.cpp` plus three negatives under
 `brio check stm32g0`.
 

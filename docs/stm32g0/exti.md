@@ -1,6 +1,48 @@
 # EXTI (STM32G0)
 
-Documents of record: RM0444 Rev 6, EXTI ch. 13; the vector table is
+This document is for a programmer who needs an interrupt from a pin: a
+button press, an edge from a sensor, a wake from sleep on a line. On
+this family the GPIO block has no interrupt of its own; the edges of a
+pad are the EXTI's (the extended interrupt and event controller), from
+its port multiplexer to one of three shared vectors. `ExtInt<Pin>` is
+the line of a pin as a type, `Exti` the block itself.
+
+The smallest use, the Nucleo-64's user button:
+
+```cpp
+using Button = brio::Pin<'C', 13>;
+using ButtonInt = brio::ExtInt<Button>;          // line 13, port C
+static_assert(brio::exti_lines_distinct<ButtonInt>());
+
+ButtonInt::claim(brio::PinPull::up);             // input + pull + EXTICR
+ButtonInt::configure(brio::ExtiSense::falling);
+ButtonInt::arm(true);                            // EXTI_IMR - without it
+                                                 // there is no flag at all
+brio::Nvic::enable(ButtonInt::irq());            // EXTI4_15
+
+extern "C" void EXTI4_15_IRQHandler() {
+    const brio::ExtiPending p =
+        brio::Exti::isr(brio::Exti::vector_lines(EXTI4_15_IRQn));
+    if (p.falling & ButtonInt::mask) {
+        brio::post<Ui>(Pressed{});               // post() is ISR-safe
+    }
+}
+```
+
+What decides correctness even there. A line's number is the pin's
+number and its port is the one choice, so PA3 and PB3 cannot both raise
+interrupts: the last port selected takes the line and nothing in the
+silicon warns, which is why a program states its own set of lines in
+`exti_lines_distinct` and lets the compiler refuse a clash. A pending
+bit exists only for a line whose interrupt mask is armed, so a line
+cannot be polled without `arm(true)`. And every vector serves several
+lines, so the handler is a dispatcher: it calls `Exti::isr()` with the
+lines its own vector answers for and tests the mask of the line it
+wants, posting an event to the active object that handles it.
+
+## Documents of record
+
+RM0444 Rev 6, EXTI ch. 13; the vector table is
 table 61 (12.3), the low-power modes chapter 4, the GPIO chapter 7
 (where the pads come from). Errata ES0548 Rev 3 on silicon revision Z:
 **no item touches the EXTI**; the adjacent one is 2.3.1, GPIO
@@ -19,7 +61,7 @@ edge sense, no interrupt and no flag: a pad's edges are the EXTI's from
 the multiplexer to the vector - the SAM C21's EIC situation, and the
 opposite of the AVR's, where every pin carries its own `PINnCTRL.ISC`.
 
-**The line number IS the pin number, and the port is the choice.** PA3,
+**The line number is the pin number, and the port is the choice.** PA3,
 PB3, PC3, PD3, PE3 and PF3 all reach line 3, and `EXTI_EXTICR1`'s third
 8-bit field (codes 0..5 for ports A..F, 13.5.11) says which one does.
 So there is no pad-to-line table to read - and no per-package gate
@@ -31,18 +73,18 @@ A, PA0's edge is the line's and PB0's edge is invisible; pointing it at
 port B swaps the two answers exactly, while the line's sense, mask and
 pending bits are untouched by the move.
 
-**The lines are EDGE triggered, and nothing else.** There is no level
+**The lines are edge triggered, and nothing else.** There is no level
 sense (13.5.1's own note). Rising and falling are two independent bits
 in two registers, and setting both is how a both-edges line is spelled.
 
-**Rising and falling have SEPARATE pending bits**, `EXTI_RPR1` and
+**Rising and falling have separate pending bits**, `EXTI_RPR1` and
 `EXTI_FPR1` (13.5.4, 13.5.5), both write-1-to-clear. A both-edges line
 therefore tells a handler WHICH edge arrived without reading the pad -
 something neither the AVR's nor the SAM's single flag per line can do.
 Measured on 8 up and 8 down edges: a rising line flags 8/0, a falling
 line 0/8, a both line 8/8, a line with no trigger 0/0.
 
-**The pending bit is only set for an UNMASKED interrupt.** 13.3.1 says
+**The pending bit is only set for an unmasked interrupt.** 13.3.1 says
 it in those words and 13.4 repeats it, and the bench confirms it: with
 `EXTI_IMR` clear, eight edges on an enabled trigger leave `RPR1` and
 `FPR1` at zero, and unmasking afterwards does not resurrect them. **So
@@ -90,7 +132,7 @@ opposite of GPIO, whose port clock every configuring verb in
 `pin.hpp` must open first. The edge detection itself is asynchronous
 (13.3.1), which is what makes an EXTI line a wake-up source.
 
-**Configurable and DIRECT lines are two different things** (13.3,
+**Configurable and direct lines are two different things** (13.3,
 table 64). A configurable line has a trigger selection, a software
 trigger and a pending bit; a **direct** line has none of the three -
 its flag lives in the peripheral, its interrupt reaches the CPU through
@@ -116,10 +158,12 @@ zero.
 `EXTI_IMR2_IM_Msk` is its twin for 32..36 and does not exist where
 there is no second group. The configurable set comes from the RTSR
 masks the same way (0x0001FFFF, 0x0007FFFF and 0x0017FFFF respectively,
-plus line 34 on the G0B1). The second register group is a STRUCT MEMBER
+plus line 34 on the G0B1). The second register group is a struct-member
 question - `RTSR2`/`FTSR2`/`SWIER2`/`RPR2`/`FPR2` are members on the
 G0B1/G0C1 only, `IMR2`/`EMR2` from the G071 class up - so the reserve
-exports them as pointers, null where the register does not exist, and
+(`stm32g0/device_tables.hpp`, the table of what each part has, read off
+the device header) exports them as pointers, null where the register
+does not exist, and
 the driver names no register a smaller part has not got.
 
 **Table 65 for the bench part, as documentation and not as vocabulary**
@@ -139,7 +183,7 @@ of Stop ([lptim.md](lptim.md), [pwr.md](pwr.md)).
 
 ## Types and verbs
 
-The driver owns the FABRIC and not the vocabulary of what is wired to a
+The driver owns the fabric and not the vocabulary of what is wired to a
 line above 15: a peripheral that owns a wake-up publishes its own line
 number, and `exti_line_implemented()` / `exti_line_configurable()` are
 how such a number is checked against the device header. What lives here
@@ -202,7 +246,9 @@ afterwards.
 
 ## Bench findings
 
-`test_stm32_exti`, 10 letters, 95 verdicts, WIRELESS. Pads PA0/PB0 (line
+`test_stm32_exti`, 10 letters, 95 verdicts, wireless (a letter is one
+command key of the suite's console and the group of verdicts it runs).
+Pads PA0/PB0 (line
 0), PB3 (line 3), PD4 (line 4), PB7 (line 7), PA8 (line 8), PC13 (the
 user button, read only); the console (PA2/PA3), LD4 (PA5), SWD (PA13/PA14), the LSE
 pads (PC14/PC15) and the HSE pads (PF0/PF1) are all avoided.

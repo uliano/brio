@@ -1,6 +1,61 @@
 # SPI / I2S (STM32G0)
 
-Documents of record: RM0444 Rev 6 - SPI/I2S ch. 35 (35.4's table 205 is
+This document is for a programmer who needs a device on an SPI bus: a
+display, a flash chip, a converter, several of them sharing the four
+wires through the bus arbiter ([design/spi-bus.md](../design/spi-bus.md)
+is the model), or this chip answering as a client; the same block is an
+I2S audio interface. `Spi<n>` is the instance, one function per register
+fact; `SpiHost<n, pins, ...>` the host engine `util/spi_bus.hpp` drives,
+whose Request is the other targets' verbatim; `SpiClient<n, pins>` the
+client role.
+
+The smallest use, a device on a bus through the arbiter, the chip
+select a GPIO the engine owns for the transaction:
+
+```cpp
+constexpr brio::SpiPins bus_pins{
+    .sck  = {'B', 3, brio::PinFunction::af0},   // SPI1_SCK  (DS13560 table 15)
+    .miso = {'B', 4, brio::PinFunction::af0},   // SPI1_MISO
+    .mosi = {'B', 5, brio::PinFunction::af0},   // SPI1_MOSI
+    .nss  = {},                                 // software: the select is a GPIO
+};
+using Bus = brio::SpiHost<1, bus_pins>;
+using Arb = brio::SpiBus<Bus, P, 4>;
+using Cs  = brio::Pin<'A', 15>;
+
+Cs::output(true);                 // deasserted
+(void)Bus::init(clock, 8'000'000);   // 8 MHz ceiling for the whole bus
+
+brio::post<Arb>(Bus::Request{
+    .cs = Cs::ref(),
+    .cmd = brio::lend<brio::Lease::reply>(cmd),
+    .tx = {}, .rx = brio::lend<brio::Lease::reply>(rx),
+    .reply = brio::reply_to<Device, brio::SpiDone>(),
+    .len = 8, .cmd_len = 2,
+    .clock = brio::SpiClock::div8, .mode = brio::SpiMode::mode0,
+});
+
+extern "C" void SPI1_IRQHandler() {
+    if (Bus::isr()) { brio::post<Arb>(brio::TransferDone{Bus::status()}); }
+}
+```
+
+What decides correctness even there: the three pads named with the
+alternate-function numbers the datasheet gives for that instance, which
+nothing in the code can check; the chip select as a GPIO (the block's
+hardware select frames the peripheral's lifetime and not a transaction,
+a finding below); `init()` after the clock task's; and the instance's
+vector bound to `isr()`, with the completion posted to the bus active
+object. The request's buffers are lent until `SpiDone` arrives
+([design/kernel.md](../design/kernel.md), the loans). On long or
+jumpered wires the slew class of the driven pads is a correctness
+parameter, set once in the configuration `init()` takes. And this
+silicon enforces none of the chapter's configuration rule, so the
+driver's refusals are the only protection there is.
+
+## Documents of record
+
+RM0444 Rev 6 - SPI/I2S ch. 35 (35.4's table 205 is
 the implementation table, 35.5 the SPI functional description with the
 configuration, enable and disable procedures of 35.5.7..35.5.9, the
 status and error flags of 35.5.10/35.5.11, NSS pulse mode 35.5.12, TI
@@ -15,9 +70,9 @@ bus vocabulary above it is `util/spi_bus.hpp` over
 `util/bus_master.hpp` ([../design/spi-bus.md](../design/spi-bus.md)).
 The per-instance presence, APB register, vector, I2S capability, I2S
 clock selector and DMAMUX facts come from `stm32g0/device_tables.hpp`.
-Bench suite: `test_stm32_spi`, and it carries TWO INSTRUMENTS on one set
+Bench suite: `test_stm32_spi`, and it carries two instruments on one set
 of pads because a desk carries either (the suite probes for the wire at
-boot; its header comment is the map):
+boot; its header comment is the map; a letter is one command key of the suite's console and the group of verdicts it runs):
 letters `a`..`m` (89 verdicts) run on the Nucleo's own SPI1-to-SPI2
 self-link, letter `s` (18 verdicts) on no wire at all - the host's two
 loops in every shape, judged by what the block holds after each, the
@@ -46,7 +101,9 @@ each of which is an SPI **or** an I2S depending on one bit
 frames, a hardware CRC and the enhanced NSSP and TI modes. Table 205 is
 the roster and it has exactly two entries that move across the family:
 **SPI3 exists only on the G0B1/G0C1, and SPI2 carries an I2S only
-there** - one condition, so the reserve derives both from `SPI3_BASE`
+there** - one condition, so the reserve (`stm32g0/device_tables.hpp`,
+the table of what each part has, read off the device header) derives
+both from `SPI3_BASE`
 and the device header's own `IS_I2S_ALL_INSTANCE` is the second opinion
 the bench compares it against.
 

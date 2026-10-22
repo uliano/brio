@@ -1,17 +1,49 @@
 # I2C (STM32G0)
 
-The chapter is built whole and measured on the Nucleo's own self-link
-and, on the same bus, against the desk partner, an STM32F446RE - and on
-the two smaller parts against a second STM32G0; what is not covered is
-listed at the end, with the reason in each case.
-
-`brio/stm32g0/i2c.hpp` is RM0444 chapter 32 in the two strata every brio
-bus driver has: `I2c<n>`, the resource; `I2cHost<n, pins, TxEngine,
-RxEngine>`, the transfer engine `util/i2c_bus.hpp` drives; and
-`I2cClient<n, pins>`, the target role. `I2cHost`'s Request is
-`avrxt/twi.hpp`'s and `samc21/i2c.hpp`'s **verbatim**, so
+This document is for a programmer who needs a device on an I2C bus: a
+sensor read, a register written, several devices sharing two wires
+through the bus arbiter ([design/i2c-bus.md](../design/i2c-bus.md) is
+the model), or this chip answering as a target. `brio/stm32g0/i2c.hpp`
+is RM0444 chapter 32 in the two layers every brio bus driver has:
+`I2c<n>`, the instance; `I2cHost<n, pins, TxEngine, RxEngine>`, the
+transfer engine `util/i2c_bus.hpp` drives; and `I2cClient<n, pins>`,
+the target role. `I2cHost`'s Request is the other targets' verbatim, so
 `util/i2c_bus.hpp` and `util/bus_master.hpp` drive this engine exactly
 as they are written.
+
+The smallest use, a bus of sensors behind the arbiter:
+
+```cpp
+constexpr brio::I2cPins bus_pins{
+    .scl = {'B', 8, brio::PinFunction::af6},
+    .sda = {'B', 9, brio::PinFunction::af6},
+};
+using I2cHw = brio::I2cHost<1, bus_pins>;
+using Sensors = brio::I2cBus<I2cHw, P, 4, brio::BusPassThrough,
+                             brio::ticks_from_ms<P>(20)>;
+
+I2cHw::init(clock, brio::I2cClock::hsi16);   // independent of the core rate
+
+extern "C" void I2C1_IRQHandler() {
+    if (I2cHw::isr()) { brio::post<Sensors>(brio::TransferDone{I2cHw::status()}); }
+}
+```
+
+What decides correctness even there: pull-up resistors on both wires,
+which are the board's and not the chip's; the two pads named with the
+alternate-function numbers the datasheet gives for that instance, which
+nothing in the code can check; `init()` after the clock task's, with a
+kernel clock chosen (HSI16 keeps the bus rate whatever the core does);
+and the instance's vector bound to `isr()`, with the completion posted
+to the bus active object as above. A request's buffers are lent until
+the reply event arrives ([design/kernel.md](../design/kernel.md), the
+loans), and the per-bus timeout given to the arbiter is what ends a
+tenure a wedged device holds, because on this silicon a held data line
+is a wait and not an error. The chapter is built whole and measured on
+the Nucleo's own self-link and, on the same bus, against the desk
+partner, an STM32F446RE, and on the two smaller parts against a second
+STM32G0; what is not covered is listed at the end, with the reason in
+each case.
 
 ## Documents of record
 
@@ -35,9 +67,10 @@ always, to I2C2 only on the G0B1/G0C1 class, and to I2C3 nowhere. The
 device header cannot be asked: all twelve headers of the pack declare
 the same 253 `I2C_*` macros with the same values, so `WUPEN`, `SMBHEN`
 and the whole of `TIMEOUTR` are there on the G030 as on the G0C1. What
-the header DOES distinguish is `RCC_CCIPR_I2C2SEL_Pos`, which exists on
+the header does distinguish is `RCC_CCIPR_I2C2SEL_Pos`, which exists on
 exactly the parts whose I2C2 has the independent clock - so the reserve
-derives all three rows from that one probe, and the silicon is asked as
+(`stm32g0/device_tables.hpp`, the table of what each part has, read off
+the device header) derives all three rows from that one probe, and the silicon is asked as
 a second opinion (below).
 
 **TIMINGR is the chapter.** Five fields set the SCL period, the data
@@ -238,7 +271,9 @@ the reason is in the findings.
 ## Bench findings
 
 Measured by `test_stm32_i2c` on the Nucleo-G0B1RE's desk, 190 verdicts
-in two sets, green ten times running in one boot. The findings down to
+in two sets, green ten times running in one boot (the letters named
+below are the suite's console keys, each the group of verdicts it
+runs). The findings down to
 "ES0548 2.10.2 did not fire once" are the SELF-LINK's (I2C1 host
 PB8/PB9, I2C2 client PA11/PA12, both AF6, 2.2 kOhm pull-ups): `z`,
 letters `a`..`m`, **155 verdicts**. The ones under "The peer bus" are a

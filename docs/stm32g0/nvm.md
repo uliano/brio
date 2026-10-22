@@ -1,6 +1,43 @@
 # FLASH - embedded flash memory and the storage over it (STM32G0)
 
-Documents of record: RM0444 Rev 6 ch. 3 (3.3.1 organization, 3.3.2 dual
+This document is for a programmer whose program must keep something
+across power cycles, and for one who must erase or program the flash
+directly. The storage a program wants is the two util services, the
+block heap `NvHeap` ([design/nv-heap.md](../design/nv-heap.md)) and the
+value journal `NvJournal` ([design/nv-journal.md](../design/nv-journal.md)),
+which run here over the second flash bank through `MainFlash` and
+`MainFlashJournalZone`; under them `Flash` is the program/erase engine,
+and `FlashOptions` reads (and never writes) the option bytes.
+
+The smallest use, a heap of blocks and a journal of values, both in
+bank 2:
+
+```cpp
+brio::NvHeap<brio::MainFlash, 8, 2> heap;             // blocks
+brio::NvJournal<brio::MainFlashJournalZone, 6, 32, 1> journal;  // values
+
+heap.mount();       // read-only: no erase, no program at boot
+journal.mount();
+if (auto w = heap.alloc(0x1234, 300)) { w->append(table); w->seal(); }
+journal.save<Calibration>(1, cal);
+```
+
+What decides correctness even there. The storage exists on the
+dual-bank parts only (the STM32G0B1RE on this desk): the linker keeps
+the image in bank 1 and gives bank 2 to the storage, so a program may
+save from its main loop while its code keeps running, which a
+single-bank part cannot offer. A flash cell is written once between
+erases, in units of a double word, and the engine refuses anything
+else before the flash is touched. For a program that drives the engine
+itself: a wrong unlock sequence locks the engine until the next reset
+and is a HardFault, so use `Flash::unlock()` and nothing else; a row
+programmed in one high-voltage ramp (`fast_program_row`) is the caller's
+to protect with a critical section, because the driver never masks
+interrupts behind the application's back.
+
+## Documents of record
+
+RM0444 Rev 6 ch. 3 (3.3.1 organization, 3.3.2 dual
 bank and table 12, 3.3.3 ECC, 3.3.6..3.3.9 program/erase/RWW, 3.4 option
 bytes, 3.5 protections, 3.6 interrupts, 3.7 registers), datasheet
 DS13560 Rev 5 tables 48 and 49 for the timings and the endurance, and
@@ -109,7 +146,9 @@ SWD, the way fuses do on the other two targets. On the x0 value line the
 option register is SHORTER - no programmable BOR (`has_programmable_bor`),
 no nRST_SHDW (`has_shutdown_reset_option`), no NRST_MODE and IRHEN
 (`has_nrst_mode`), no PCROP registers and no SECR (the reserve's
-`flash_pcrop_capable` / `flash_securable_capable`), and no RDERR /
+`flash_pcrop_capable` / `flash_securable_capable` - the reserve being
+`stm32g0/device_tables.hpp`, the table of what each part has, read off
+the device header), and no RDERR /
 RDERRIE, there being no PCROP to violate, nor a DBG_SWEN gate
 (`Flash::has_debug_gate`) - and the verbs answer "off", level 0, an
 empty area, false, on such a part, each flag saying whether the

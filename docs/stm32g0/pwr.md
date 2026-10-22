@@ -1,6 +1,50 @@
 # Power control and the sleep sites - the stopping half (STM32G0)
 
-Documents of record: RM0444 Rev 6 ch. 4 (PWR) with 5.3 (what the RCC
+This document is for a programmer who wants the chip to sleep deeper
+than the kernel's own idle, which is a plain WFI: the Stop modes, under
+the power manager of `util/power.hpp` ([design/power.md](../design/power.md)
+is the model, with its depth ladder and its votes), with the kernel's
+time kept right across them. `Pwr` is chapter 4 whole; the three sleep
+sites are what the power manager drives: the plain site, the timed site
+that places an RTC alarm and resynchronizes the tick after the Stop, and
+the timed site over a low-power timer.
+
+The smallest use, the timed site under the manager, in outline (the
+whole program is under "How to use it"):
+
+```cpp
+using Site = brio::Stm32g0TimedSleepSite<
+    brio::Stm32g0Platform<>, SysClock,
+    brio::TimedSleepConfig{.rtcclk_hz = 32800,
+                           .source = brio::RtcClockSource::lse}>;
+using Manager = brio::PowerManager<brio::Stm32g0Platform<>, Site,
+                                   brio::PowerConfig{}, Blinker>;
+
+extern "C" void RTC_TAMP_IRQHandler() { Site::isr(); }
+
+Site::init();                       // owns the RTC, whole
+brio::Tenuto<brio::Stm32g0Platform<>, Blinker, Manager>::run();
+```
+
+What decides correctness even there. On the SysTick timebase the
+kernel's time stands still inside a Stop, so under the plain site a
+program must not take a Stop while a time event is armed (a restriction
+stated, not checked), and the timed site lifts it by resynchronizing
+the tick from the RTC, which it owns whole. After any wake, every active object that voted speaks to the
+manager again, a path with nothing to say with `SleepRequested{none}`:
+without it the manager never learns the machine came back, the clock
+stays at 16 MHz and the tick stays paused. Under a tickless platform
+([platform.md](platform.md)) only the plain site compiles and the
+restriction is gone, kernel time running through the Stop. Two things
+end a program rather than pause it: Standby and Shutdown return through
+the reset vector and are off the ladder on purpose. And a probe leaves a
+bit behind, DBG_STOP, that keeps the clocks running inside a Stop
+([README.md](README.md), "Upload"): a Stop measured right after a flash
+or a debug session is not a Stop.
+
+## Documents of record
+
+RM0444 Rev 6 ch. 4 (PWR) with 5.3 (what the RCC
 does to a low-power mode) and table 27 (what each peripheral does in
 one), DS13560 Rev 5 table 37 (the wake-up times), and errata ES0548
 Rev 3 - **2.2.2 and 2.2.4 are live on this silicon**, 2.2.7 and 2.3.1
@@ -12,9 +56,9 @@ Drivers: `stm32g0/pwr.hpp` (`Pwr`, the whole chapter) and
 `brio check stm32g0` (two of them refuse a timed site on a
 tickless platform). Bench suites: `test_stm32_sleep` for the first two
 sites, `test_stm32_lptim` letter h for the third, `test_stm32_tickless`
-letter f for the plain site on the tickless platform. The waking half
-of the platform is [platform.md](platform.md) - which has TWO
-timebases, and the sites read differently under each (below); the RTC
+letter f for the plain site on the tickless platform (a letter is one command key of the suite's console and the group of verdicts it runs).
+The waking half of the platform is [platform.md](platform.md) - which
+has two timebases, and the sites read differently under each (below); the RTC
 that wakes a deep sleep at the second site is [rtc.md](rtc.md) and the
 low-power timer that wakes it at the third is [lptim.md](lptim.md).
 

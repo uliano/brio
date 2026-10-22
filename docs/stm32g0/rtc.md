@@ -1,6 +1,52 @@
 # RTC and the backup registers - the clock that outlives everything else (STM32G0)
 
-Documents of record: RM0444 Rev 6 ch. 30 (RTC), ch. 31 (TAMP), 5.2.5 /
+This document is for a programmer who needs a calendar, an alarm or a
+periodic wake that survives a reset and keeps running through every
+sleep mode, or the five backup registers that survive with it. The RTC
+lives in a power domain of its own, which a system reset does not reach
+and Stop, Standby and Shutdown do not stop. `RtcDomain` is that domain
+and its locks, `Rtc` the clock itself, `Tamp` the tamper block that
+shares the domain and the interrupt vector.
+
+The smallest use, the calendar on the crystal:
+
+```cpp
+// The domain is locked at every reset, and RTCSEL is one-way: a board
+// whose domain came up on another source must be wiped first, which
+// costs the calendar and the backup registers.
+if (brio::RtcDomain::selected() != brio::RtcClockSource::lse) {
+    brio::RtcDomain::reset();
+}
+brio::RtcDomain::lse_enable(true);
+if (!brio::RtcDomain::lse_wait_ready()) { /* no crystal on this board */ }
+brio::RtcDomain::open(brio::RtcClockSource::lse);
+
+brio::Rtc::bypass_shadow(true);        // no RSF dance after a Stop
+brio::Rtc::init(brio::rtc_prescalers_for(32768),
+                {.hour = 12, .day = 1, .month = 6, .year = 24, .weekday = 6});
+
+brio::RtcReading now{};
+if (brio::Rtc::read(now)) { /* now.time, now.subsecond */ }
+```
+
+What decides correctness even there. Two independent locks guard the
+domain on the way in: the power controller's, over the whole domain,
+cleared at every system reset (`open()` takes it), and the RTC's own key
+over most of its registers; the backup registers are behind the first
+and not the second. The clock source is a one-way choice until the
+domain is reset, and the reset costs the calendar, the alarms and the
+five backup words; the bench boards' domain comes up on the internal
+low-speed oscillator, so a program that wants the crystal wipes the
+domain once. And a domain reset arms four internal tamper detectors,
+every one of which erases the backup registers:
+`Tamp::erase_source_armed()` is the question to ask before trusting
+them. The one vector, `RTC_TAMP_IRQHandler`, serves both blocks, and a
+late acknowledgement of the wake-up timer's interrupt deletes the next
+interval (a finding below).
+
+## Documents of record
+
+RM0444 Rev 6 ch. 30 (RTC), ch. 31 (TAMP), 5.2.5 /
 5.2.6 / 5.2.12 / 5.4.23 (the RCC's side of the domain) and 4.1.2 (the
 PWR's), plus errata ES0548 Rev 3 - **2.9.1 is live on this silicon and
 is coded**, 2.2.1 and 2.2.11 are live and are reasons to prefer the
@@ -19,7 +65,7 @@ follows from that: two locks on the way in, one-way choices once made,
 and a counter that is still counting when the program that set it has
 been reset three times.
 
-**There are TWO locks, not one, and they have different scopes.**
+**There are two locks, not one, and they have different scopes.**
 `PWR_CR1.DBP` gates the whole domain - RCC_BDCR, every RTC register and
 every backup register - and is CLEAR after every system reset. On top of
 it most RTC registers carry a second lock that only the key sequence
@@ -248,7 +294,7 @@ while (brio::Rtc::shift_pending()) { }
 ## Bench findings
 
 The reference suite is `test_stm32_rtc` (fourteen letters in `z`, 126
-verdicts; letter `v` outside it reboots the board once, and letter `w`
+verdicts - a letter is one command key of the suite's console and the group of verdicts it runs, `z` the key that runs them all; letter `v` outside it reboots the board once, and letter `w`
 outside it spends the five backup registers and the calendar's value on
 the erase and the calendar overflow). Nothing is wired: TIM16's input
 multiplexer reaches LSI, LSE and the RTC's own wake-up signal (25.6.18),

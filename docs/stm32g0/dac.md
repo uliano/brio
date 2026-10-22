@@ -1,6 +1,37 @@
 # DAC (STM32G0)
 
-Documents of record: RM0444 Rev 6 ch. 16, with the DMAMUX request table
+This document is for a programmer who needs an analog output: a voltage
+on PA4 or PA5, a waveform played from a table by a DMA channel, a
+threshold for a comparator with no pad spent. `Dac` is the two-channel
+converter, a monostate (a class with static state and no instances,
+there being one DAC wherever there is one); it does not exist on the
+G031/G041 and the value-line parts, whose headers declare no DAC.
+
+The smallest use, a voltage on PA4:
+
+```cpp
+brio::Dac::init();
+brio::Dac::claim_pad<brio::Pin<'A', 4>>();          // DAC1_OUT1, analog mode
+brio::Dac::configure(0, {.mode = brio::DacMode::pin_and_internal_buffered});
+brio::Dac::enable(0, true);
+brio::Dac::write(0, brio::dac_code(1650, brio::Dac::steps, vdda_mv));
+```
+
+What decides correctness even there: the mode and the trigger are
+written with the channel disabled, which `configure()` does; the code
+written is not the output (the holding
+register and the output register are two, `code()` and `output()` two
+verbs for that reason), and a hardware trigger is an edge whose datum
+must precede it; and the output buffer cannot reach the rails, by an
+amount measured below, so a program that needs the last few tens of
+millivolts turns it off. On this part the DAC reaches the ADC through
+the pad and nothing else, which makes PA4, at once DAC1_OUT1 and
+ADC_IN4, a zero-length wire and the shape of every wireless analog
+experiment here.
+
+## Documents of record
+
+RM0444 Rev 6 ch. 16, with the DMAMUX request table
 55 and the vector table 12.3 (table 61); DS13560 Rev 5 table 12 (the
 pads) and table 64 (the DAC's electrical characteristics); errata
 ES0548 Rev 3, which has **no item touching the DAC** on either silicon
@@ -17,7 +48,7 @@ value-line part - there are none at all.** 16.3's own table says so and
 the device headers agree by declaring no `DAC1_BASE` there, so `Dac`
 does not exist on those parts (the driver compiles its register-facing
 half only where the header declares the block; the trigger, mode and
-wave vocabulary is every part's) and is a MONOSTATE on the others
+wave vocabulary is every part's) and is a monostate on the others
 (there is one DAC wherever there is one).
 DAC1_OUT1 is PA4 and DAC1_OUT2 is PA5 - which on a Nucleo-64 is LD4.
 
@@ -94,7 +125,9 @@ brio::Dac::write(0, brio::dac_code(1650, brio::Dac::steps, vdda_mv));
 ## Bench findings
 
 Measured by `test_stm32_analog` on an STM32G0B1RE at 3.3 V (VDDA
-3310 mV, measured through VREFINT), silicon revision Z.
+3310 mV, measured through VREFINT), silicon revision Z; the letters
+named below are the suite's console keys, each the group of verdicts it
+runs.
 
 **The zero-length wire is straight.** DAC codes 0..4095 read back
 through ADC_IN4 on the same pad:
