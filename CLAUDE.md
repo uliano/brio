@@ -235,8 +235,15 @@ both, in practice:
   cycles per byte or frame, interrupts per byte, cycles masked - counted
   in the release disassembly, measured by a suite letter and stated in
   the document beside the wire's or the bus's figure, a rate far from
-  that figure explained or listed as a gap. The bench chip alone
-  masks half the family (SWEVENTB, TCA1, PORTB proved it).
+  that figure explained or listed as a gap; (8) THE WRITING judged by
+  someone who did not write it: a cold reader (an agent given the pages
+  alone) answers what the thing is, how it is used, where the trap is
+  and what it could not establish, and a fact check reads every claim
+  against the code, the configuration or the measurement it rests on -
+  a reader finding a sentence proves only that the page says it, and
+  the defect every editorial pass has produced is a claim with no
+  source or an absolute the page's own findings contradict. The bench
+  chip alone masks half the family (SWEVENTB, TCA1, PORTB proved it).
 - **Definition of done for a test letter**: (1) every verdict's bound is
   DERIVED, its arithmetic written beside it (the instrument's
   resolution, the clocks' error and wander, the quantization) - a bound
@@ -281,7 +288,13 @@ both, in practice:
   unavailable, and says which. A comments-only edit is proved by
   `brio gate` (whole, or `--tokens` where no toolchain is at hand), and
   `// build:` lines and every other comment a tool reads are never
-  touched by an editorial pass.
+  touched by an editorial pass. THE MODELS, read before writing: a
+  page of the learning route (`docs/learn/introduction.md`), a design
+  page (`docs/design/kernel.md`), a target's operational page and a
+  peripheral document (`docs/stm32g0/README.md`, `docs/stm32g0/usart.md`),
+  a header's opening comment (`brio/stm32g0/usart.hpp`,
+  `brio/kernel/tenuto.hpp`) and an internal comment made readable
+  (`brio/kernel/event_queue.hpp`).
 - **When every variant of OUR code fails on the bench, consult the
   vendor's reference implementation - as an ORACLE, never as a source.**
   (Its first use is earlier and routine - read before an engine is
