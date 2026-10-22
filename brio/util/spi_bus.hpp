@@ -1,21 +1,31 @@
 /*
  * spi_bus.hpp
  *
- * The SPI vocabulary over util/bus_master.hpp: SpiBus IS BusMaster, the
- * SPI reply is a BusDone, spi_ok/spi_rejected are the arbiter's codes.
- * Zero-cost aliases, kept so that a display client reads "SpiDone" and
- * not "BusDone" - the names say which wire the bytes took. Everything
- * about arbitration, the pending FIFO, replies and the engine contract
- * is documented once, in bus_master.hpp; the SPI engine descriptor and
- * its two completion styles live in each target's SpiHost and in
+ * The SPI names of the shared bus arbiter: what a program names when
+ * several active objects share one SPI bus. SpiBus is util/
+ * bus_master.hpp's BusMaster, the reply is a BusDone and spi_ok and
+ * spi_rejected are the arbiter's codes, all zero-cost aliases, kept so
+ * that a display client reads "SpiDone" and not "BusDone": the names
+ * say which wire the bytes took. A program names one arbiter per bus
+ * over the family's SpiHost and posts the host's Request to it with a
+ * reply channel inside (kernel/post.hpp's reply_to):
+ *
+ *     using Host = brio::SpiHost<1, host_pins>;   // the family's engine (stm32g0/spi.hpp's spelling)
+ *     using Bus = brio::SpiBus<Host, P>;
+ *     brio::post<Bus>(Host::Request{..., .reply = brio::reply_to<MyAo, brio::SpiDone>()});
+ *
+ * Everything about arbitration, the pending FIFO, replies, who owns the
+ * request's buffers until when and the engine contract is documented
+ * once, in bus_master.hpp; the SPI engine descriptor and its two
+ * completion styles live in each target's SpiHost and in
  * docs/design/spi-bus.md.
  *
- * SPI has no wire-level failure the engine can detect (no ACK, no
- * arbitration): what a host can report is its own - a frame it lost,
- * a wait it gave up on, a DMA block it could not finish - so the codes
- * below the arbiter's are the host's, and the two every host can
- * answer are spelled here once (spi_overrun, spi_stalled) while the
- * engines' spi_dma_fault stays with the host that has engines.
+ * SPI has no wire-level failure the engine can detect (no acknowledge,
+ * no arbitration): what a host can report is its own (a frame it lost,
+ * a wait it gave up on, a DMA block it could not finish), so the codes
+ * below the arbiter's are the host's, and the two every host can answer
+ * are spelled here once (spi_overrun, spi_stalled) while the engines'
+ * spi_dma_fault stays with the host that has engines.
  */
 
 #pragma once
@@ -65,9 +75,13 @@ inline constexpr uint8_t spi_overrun = bus_engine_status + 1u;
 /// the arbiter's recover() as the way back) is the family's.
 inline constexpr uint8_t spi_stalled = bus_engine_status + 2u;
 
-/// `timeout_ticks` is PER BUS; size it to the longest legal transaction
-/// (a polled request completes inside start() and never arms it - only
-/// ISR-style completions are on this clock). ticks_from_ms<P>() converts.
+/// The arbiter under SPI's name. `pending_depth` is how many requests
+/// may wait while one is in flight (a further one is answered
+/// spi_rejected at once); `timeout_ticks` is per bus and in kernel
+/// ticks: size it to the longest legal transaction (a polled request
+/// completes inside start() and never arms it; only interrupt-style
+/// completions are on this clock), 0 for no timeout at all.
+/// ticks_from_ms<P>() (kernel/time.hpp) converts.
 template <typename Bus, Platform P, uint8_t pending_depth = 4,
           typename Policy = BusPassThrough, uint32_t timeout_ticks = 0>
 using SpiBus = BusMaster<Bus, P, pending_depth, Policy, timeout_ticks>;

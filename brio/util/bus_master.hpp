@@ -1,120 +1,146 @@
 /*
  * bus_master.hpp
  *
- * BusMaster: the bus-owner active object for any master-side serial
- * bus (SPI, I2C/TWI, ...). Generic over the Bus engine (the target-side
- * driver that moves the bytes under interrupts): this layer only owns
- * ARBITRATION and the REPLY channel, which is exactly what makes a
- * shared bus safe - clients post requests, the AO serializes them, the
- * requester gets its BusDone back through the ReplyTo capsule inside
- * the request. The arbiter never looks at a byte, so nothing here is
- * specific to one bus: util/spi_bus.hpp and util/i2c_bus.hpp keep the
- * per-bus vocabulary (SpiDone, I2cDone, status codes) as zero-cost
- * aliases so client code reads as what it is.
+ * BusMaster: the active object that owns one master-side serial bus
+ * (SPI, I2C/TWI, ...) on behalf of every other active object that uses
+ * it. A client posts a request describing one whole transaction and
+ * gets one reply, a BusDone with a status, when it is over; the arbiter
+ * runs the transactions one at a time, in the order they arrived, on
+ * the family's engine. It is generic over that engine (the Bus template
+ * parameter: the target-side driver that moves the bytes under
+ * interrupts) and never looks at a byte, so nothing here is specific to
+ * one bus: util/spi_bus.hpp and util/i2c_bus.hpp keep the per-bus
+ * vocabulary (SpiDone, I2cDone, the status codes) as zero-cost aliases
+ * so client code reads as what it is. A program names it through those
+ * aliases (their headers show the smallest use); the design and its
+ * realizations per family are docs/design/spi-bus.md and
+ * docs/design/i2c-bus.md, and the host suite (test/test_bus_master)
+ * drives it over a scripted engine.
  *
- * Why the event queue alone is not the arbiter: a transaction OUTLIVES
+ * Who calls what, and from where:
+ *  - a client posts the engine's Request to this object from main
+ *    context (its own dispatch, or setup after init), with a reply
+ *    channel inside (kernel/post.hpp's reply_to). Posting never waits;
+ *    the reply comes later, as an event of the client's own;
+ *  - the program's interrupt glue posts TransferDone{Bus::status()} to
+ *    this object when the engine's handler reports a completion;
+ *  - the power manager (util/power.hpp) posts PrepareSleep and gets a
+ *    SleepVote back;
+ *  - this object's dispatch, in main context, calls Bus::start(), reads
+ *    Bus::status(), sends every reply, and on a timed bus calls
+ *    Bus::recover(). Nothing here waits or masks interrupts; a
+ *    synchronous engine's start() may wait, and that wait is inside
+ *    this object's dispatch.
+ *
+ * Who owns the request's buffers, until when: the request carries spans
+ * into the client's memory, and the client must not touch them (read
+ * or write) from the post until its BusDone arrives, whatever the
+ * status. Since a dispatch runs to completion and the reply is an event
+ * in the client's queue, the client cannot run while the engine still
+ * uses the buffers, so the rule is race-free; nothing checks it.
+ *
+ * Why the event queue alone is not the arbiter: a transaction outlives
  * the dispatch that starts it (it runs on interrupts and completes
- * later), so while busy the kernel may well deliver the next request -
- * it needs to wait, and it waits WHERE post() BUILT IT: the arbiter
- * HOLDS the request's queue slot (kernel/event_queue.hpp's hold(),
+ * later), so while busy the kernel may well deliver the next request.
+ * It needs to wait, and it waits where post() built it: the arbiter
+ * holds the request's queue slot (kernel/event_queue.hpp's hold(),
  * Lease::hold) and keeps the slot's number in a small pending FIFO of
- * handles, one byte each (main-context only: no critical sections
+ * handles, one byte each (main context only: no critical sections
  * needed). The request in flight is held the same way until its
- * completion has been answered. Full FIFO = the request is answered
- * IMMEDIATELY with bus_rejected and NOT held (the kernel releases its
- * slot after the dispatch): never silent, never blocking - while the
- * clients keep at most 2 x pending_depth + 2 requests outstanding at
- * once (the queue's depth below; past that the queue itself drops and
- * queue.overflows() counts); an undersized
- * FIFO shows up in the requester's error handling, not as a lost
- * transfer. The control events - a TransferDone, a PrepareSleep, a
- * BusTimeout, a BusFlushed - are never held. Every reply is sent from
- * the held slot BEFORE the slot is released.
+ * completion has been answered. A full FIFO means the request is
+ * answered immediately with bus_rejected and not held (the kernel
+ * releases its slot after the dispatch): never silent, never blocking,
+ * while the clients keep at most 2 x pending_depth + 2 requests
+ * outstanding at once (the queue's depth below; past that the queue
+ * itself drops and queue.overflows() counts). An undersized FIFO shows
+ * up in the requester's error handling, not as a lost transfer. The
+ * control events (a TransferDone, a PrepareSleep, a BusTimeout, a
+ * BusFlushed) are never held. Every reply is sent from the held slot
+ * before the slot is released.
  *
- * Contract with the Bus engine (each target's SpiHost/I2cHost; a fake
- * in host tests):
+ * Contract with the Bus engine (each target's SpiHost or I2cHost; a
+ * fake in host tests):
  *  - Bus::Request: the transaction descriptor. Must be trivially
  *    copyable and carry a `ReplyTo<BusDone> reply` member. Buffer
- *    ownership travels with it: the requester must not touch the spans
- *    until its BusDone arrives (RTC makes this race-free).
- *  - Bus::start(req) -> bool: begin the transfer. The request is LENT
- *    for the call: it lies in a slot of this AO's queue - the event
- *    being dispatched, or a held one - and what the engine still needs
+ *    ownership travels with it, as above.
+ *  - Bus::start(req) -> bool: begin the transfer. The request is lent
+ *    for the call: it lies in a slot of this object's queue (the event
+ *    being dispatched, or a held one) and what the engine still needs
  *    after start() returns, it copies. (The slot of a transfer that
  *    goes asynchronous does stay held until its completion has been
  *    answered or recovered; whether an engine may read the request
  *    there instead of keeping a copy is not part of this contract yet.)
- *    FALSE = the engine runs on its ISR and the
- *    app's ISR glue posts TransferDone{status} to this AO when it ends
- *    (same pattern as the uart RxActivity edge). TRUE = the
- *    transaction COMPLETED SYNCHRONOUSLY inside
- *    start() - polled bulk transfers, degenerate empty requests, and a
- *    request the engine REFUSES without moving a byte: the reply is
- *    sent right away with whatever Bus::status() reports (bus_ok as a
- *    rule; the engine's own code when the synchronous path failed - a
- *    polled DMA block that never completed, a bus speed the clock in
- *    force cannot produce) and no TransferDone must follow for it.
- *    Both styles interleave freely on one bus.
+ *    False means the engine runs on its interrupt handler and the
+ *    program's glue posts TransferDone{status} to this object when it
+ *    ends (the same pattern as the UART's RxActivity edge). True means
+ *    the transaction completed synchronously inside start(): polled
+ *    bulk transfers, degenerate empty requests, and a request the
+ *    engine refuses without moving a byte. The reply is then sent right
+ *    away with whatever Bus::status() reports (bus_ok as a rule; the
+ *    engine's own code when the synchronous path failed: a polled DMA
+ *    block that never completed, a bus speed the clock in force cannot
+ *    produce) and no TransferDone must follow for it. Both styles
+ *    interleave freely on one bus.
  *  - Bus::status() -> uint8_t: the last completion's code, the one the
- *    app's ISR glue puts in TransferDone and the one this AO reads
+ *    program's glue puts in TransferDone and the one this object reads
  *    right after a synchronous start().
  *  - Status codes: bus_ok and bus_rejected are the arbiter's; every
  *    value >= bus_engine_status belongs to the engine's vocabulary
  *    (see i2c_bus.hpp) and travels untouched from TransferDone to the
  *    requester's BusDone.
  *
- * WHAT HAPPENS ON A FAILURE is a POLICY, and it is the `Policy`
- * template argument's - see BusPassThrough below. The arbiter is the
- * only object that knows a transfer failed AND still holds the request
- * that failed, so it is the only place a retry can be decided without
- * every client writing one; but WHICH failures are worth retrying, and
- * how often, is knowledge about the devices on the wire that no generic
- * arbiter has. The default answers "none", at compile time and for
- * free: the images of every existing bus are byte-identical with the
- * hook in place.
+ * What happens on a failure is a policy, the `Policy` template
+ * argument's (see BusPassThrough below). The arbiter is the only object
+ * that knows a transfer failed and still holds the request that failed,
+ * so it is the only place a retry can be decided without every client
+ * writing one; but which failures are worth retrying, and how often, is
+ * knowledge about the devices on the wire that no generic arbiter has.
+ * The default answers "none", at compile time and for free: the images
+ * of every existing bus are byte-identical with the hook in place.
  *
- * WHAT HAPPENS ON A TRANSFER THAT NEVER ANSWERS is the `timeout_ticks`
+ * What happens on a transfer that never answers is the `timeout_ticks`
  * template argument's, and the arbiter is again the only honest home:
- * it is the one object that knows a completion is OWED, and it lives in
- * a kernel that has TimeEvents - the engine is interrupt-driven and
- * owns no clock, and the silicon's own time-outs (where they exist at
- * all) police the HOST'S OWN clock hold and not a wire a client
- * wedged - measured, and the reason this layer carries a timeout at
- * all. With
+ * it is the one object that knows a completion is owed, and it lives in
+ * a kernel that has TimeEvents. The engine is interrupt-driven and owns
+ * no clock, and the silicon's own time-outs (where they exist at all)
+ * police the host's own clock hold and not a wire a client wedged:
+ * measured, and the reason this layer carries a timeout at all. With
  * timeout_ticks != 0 every transfer that goes asynchronous arms a
  * one-shot TimeEvent; if it matures first, the engine is declared dead:
- * Bus::recover() puts the PERIPHERAL back where start() is legal, the
- * requester is answered bus_timeout IN ITS PLACE like every reply, and
- * the queue moves on. THE WIRE STAYS THE APPLICATION'S: whether to
+ * Bus::recover() puts the peripheral back where start() is legal, the
+ * requester is answered bus_timeout in its place like every reply, and
+ * the queue moves on. The wire stays the application's: whether to
  * unstick(), power-cycle a client, or re-probe the whole bus is a
- * recovery ladder no arbiter can own; what the timeout guarantees is only that the bus AO and its queue survive to
- * be asked. A timeout is NOT a completion: the retry policy is not
- * consulted (the engine never spoke), and stretching below the limit
- * is legal flow control, so the value must be generous - a whole
- * transaction's worth at the slowest device, not a byte's.
+ * recovery ladder no arbiter can own; what the timeout guarantees is
+ * only that the bus object and its queue survive to be asked. A timeout
+ * is not a completion: the retry policy is not consulted (the engine
+ * never spoke), and stretching below the limit is legal flow control,
+ * so the value must be generous: a whole transaction's worth at the
+ * slowest device, not a byte's.
  *
- * THE RACE WITH THE REAL COMPLETION is closed by construction, both
- * ways. A TransferDone already QUEUED when the timeout event is served
+ * The race with the real completion is closed by construction, both
+ * ways. A TransferDone already queued when the timeout event is served
  * is detected by a per-transfer sequence number the timeout carries
- * (stale = dropped, counted); a TransferDone posted DURING the timeout
- * dispatch (the engine finishing in the very window recover() closes)
- * necessarily enters the queue BEFORE the BusFlushed marker the
- * handler posts after recover() returns - recover() silences the
- * engine, so nothing can post later - and is therefore drained in the
- * one state that expects it, before the next request starts. With
- * timeout_ticks == 0 (the default) none of this exists: no extra
- * variant alternatives, no timer, no states - byte-identical images,
- * the never_retries discipline again.
+ * (stale, so dropped and counted); a TransferDone posted during the
+ * timeout dispatch (the engine finishing in the very window recover()
+ * closes) necessarily enters the queue before the BusFlushed marker the
+ * handler posts after recover() returns (recover() silences the engine,
+ * so nothing can post later) and is therefore drained in the one state
+ * that expects it, before the next request starts. With timeout_ticks
+ * == 0 (the default) none of this exists: no extra variant
+ * alternatives, no timer, no states, byte-identical images, the
+ * never_retries discipline again.
  *
- * The request event exceeds the 8-byte envelope guideline - two spans,
- * a select, the bus's settings and the reply capsule: a recorded, legal
- * deviation, because the request IS the arbitration token, and
+ * The request event exceeds the guideline of about 8 bytes for an event
+ * (docs/design/kernel.md, "The model in one page"): two spans, a
+ * select, the bus's settings and the reply capsule. A recorded, legal
+ * deviation, because the request is the arbitration token, and
  * splitting it into a reference to the client's memory would hand every
- * client an ownership protocol. What its size costs is paid per COPY,
+ * client an ownership protocol. What its size costs is paid per copy,
  * and the arbiter makes none of its own. Every request is built by
- * post() in this AO's queue slot (the kernel's copy, under the
+ * post() in this object's queue slot (the kernel's copy, under the
  * producers' mask) and handed to Bus::start() in that slot, where the
- * engine takes whatever copy it keeps - whether it found the bus idle
+ * engine takes whatever copy it keeps, whether it found the bus idle
  * (started from the slot being dispatched) or busy (held, and started
  * from its held slot when its turn comes). A retry starts the held
  * request again from the same slot: a retrying policy costs no copy and
@@ -122,9 +148,9 @@
  *
  * The contract assumes a transaction that runs on interrupts and
  * completes later with a status only (buffers travel in the request);
- * a DMA engine or a peripheral with hardware chip-select/queues may
+ * a DMA engine or a peripheral with hardware chip-select or queues may
  * change it (docs/design/overview.md, "Authority of util/"). Which
- * targets this is validated on is a property of the TARGET, stated
+ * targets this is validated on is a property of the target, stated
  * once in README.md's table, not a list that ages here.
  */
 
@@ -144,7 +170,9 @@
 
 namespace brio {
 
-/// Reply payload of every bus transaction.
+/// The reply of every bus transaction, delivered to the requester as an
+/// event of its own once the transaction is over; from then on the
+/// request's buffers are the requester's again.
 struct BusDone {
     uint8_t status;   ///< bus_ok, bus_rejected, bus_timeout, or an engine code
 };
@@ -154,19 +182,20 @@ inline constexpr uint8_t bus_rejected = 1;      ///< pending FIFO was full
 inline constexpr uint8_t bus_engine_status = 2; ///< first engine-defined code
 /// The transfer never answered inside the arbiter's timeout_ticks: the
 /// engine was recover()ed and this reply stands in for the completion
-/// that never came. TOP OF THE RANGE, deliberately: engine vocabularies
-/// grow UP from bus_engine_status (i2c_bus.hpp holds four already) and
+/// that never came. Top of the range, deliberately: engine vocabularies
+/// grow up from bus_engine_status (i2c_bus.hpp holds four already) and
 /// must never collide with an arbiter code.
 inline constexpr uint8_t bus_timeout = 255;
 
-/// Posted by the app's ISR glue when the engine finishes a transfer.
+/// Posted by the program's interrupt glue when the engine finishes a
+/// transfer, with Bus::status() as the payload.
 struct TransferDone {
     uint8_t status;
 };
 
-/// Posted to a TIMED arbiter by its own TimeEvent: the transfer whose
-/// sequence number this carries never completed. Exists in a bus AO's
-/// event set only when timeout_ticks != 0.
+/// Posted to a timed arbiter by its own TimeEvent: the transfer whose
+/// sequence number this carries never completed. Exists in a bus
+/// object's event set only when timeout_ticks != 0.
 struct BusTimeout {
     uint8_t seq;
 };
@@ -201,27 +230,28 @@ enum class BusAction : uint8_t {
 };
 
 /**
- * The default: every completion goes straight back to the requester.
+ * The default policy: every completion goes straight back to the
+ * requester.
  *
- * `never_retries` is the opt-out that makes this hook FREE. A policy
+ * `never_retries` is the opt-out that makes this hook free. A policy
  * that declares it is answering `pass` at compile time, so the arbiter
  * neither calls on_done() nor keeps the attempt count a retry needs.
  * Any other policy is assumed to retry and pays for the count and the
  * call; the request a retry starts again is the held one, already
  * there.
  *
- * A policy that DOES retry writes on_done(status, attempt) -> BusAction:
+ * A policy that does retry writes on_done(status, attempt) -> BusAction:
  * `status` is the engine's, `attempt` counts the retries already spent
  * on this request (0 at its first completion) and resets with each new
  * request. It is called in the arbiter's dispatch, main context, and
- * must be a pure decision - the place for a recovery ladder's ACTIONS
+ * must be a pure decision: the place for a recovery ladder's actions
  * (a bus reset, a clock pulse train) is the engine, not here.
  *
- * The hook judges ASYNCHRONOUS completions only. A failure the engine
+ * The hook judges asynchronous completions only. A failure the engine
  * reports inside start() (Bus::status() after a synchronous return)
  * goes to the requester as it is: a retry there would run inside the
  * same dispatch, compounding the blocking a polled request's client
- * bounded on purpose - and the one synchronous refusal on I2C, a speed
+ * bounded on purpose, and the one synchronous refusal on I2C, a speed
  * the clock cannot produce, is a fact no retry changes. Whether to try
  * again is that requester's decision, made with its reply in hand.
  */
@@ -243,8 +273,8 @@ constexpr bool bus_policy_may_retry() {
 }
 
 /**
- * The arbiter, and - because it is the one object that knows whether the
- * wire is quiet - a power-management VOTER (util/power.hpp): it answers
+ * The arbiter, and, because it is the one object that knows whether the
+ * wire is quiet, a power-management voter (util/power.hpp): it answers
  * a PrepareSleep with ok only when nothing is in flight and nothing is
  * waiting. A transfer runs on interrupts the deep modes may gate, and it
  * outlives the dispatch that started it, so it is precisely the kind of
@@ -252,17 +282,20 @@ constexpr bool bus_policy_may_retry() {
  * alternative three bytes wide, which no bus request comes close to, and
  * two lambdas.
  *
- * A RETRYING MASTER IS BUSY. When the policy asks for a retry the
+ * A retrying master is busy. When the policy asks for a retry the
  * arbiter stays in its busy state, which is also the state that votes
- * NOT-OK on a PrepareSleep: a request whose completion is still owed is
+ * not-ok on a PrepareSleep: a request whose completion is still owed is
  * exactly the fact a sleep must not be taken against, and it stays true
- * across as many attempts as the policy spends. A DRAINING master (the
+ * across as many attempts as the policy spends. A draining master (the
  * dispatch after a timeout recovery) is busy in the same sense.
  *
- * `timeout_ticks` is PER BUS and in KERNEL TICKS (ticks_from_ms<P>()
- * converts): one wedged device on a shared bus starves every other
- * client of that bus, so the limit is a property of the wire, not of a
- * request. 0 = no timeout, and no timeout code.
+ * `pending_depth` is how many requests may wait their turn while one is
+ * in flight; the next one is answered bus_rejected at once. At most
+ * 124, since the queue's slots are numbered in a byte (the static
+ * assertion below). `timeout_ticks` is per bus and in kernel ticks
+ * (ticks_from_ms<P>() converts): one wedged device on a shared bus
+ * starves every other client of that bus, so the limit is a property of
+ * the wire, not of a request. 0 means no timeout, and no timeout code.
  */
 template <typename Bus, Platform P, uint8_t pending_depth = 4,
           typename Policy = BusPassThrough, uint32_t timeout_ticks = 0>
@@ -334,13 +367,15 @@ public:
     // can coexist with the next transfer's) and the BusFlushed marker.
     static inline EventQueue<Event, 2 * pending_depth + (timed ? 6 : 3), P> queue;
 
-    /// Full reset, like every other AO's init(): the slots a previous
-    /// life still holds - the request in flight, the waiting ones - go
-    /// back to the queue unanswered, and the pending FIFO, the rejection
-    /// tally and the retry counter go back to power-on state, so a
-    /// re-init can neither replay a stale request nor leak a slot (found
-    /// by the host suite; PowerManager and AnalogSampler already followed
-    /// this rule). At boot nothing is held and nothing is given back.
+    /// Called by the kernel before the first event is served. A full
+    /// reset, like every other active object's init(): the slots a
+    /// previous life still holds (the request in flight, the waiting
+    /// ones) go back to the queue unanswered, and the pending FIFO, the
+    /// rejection tally and the retry counter go back to power-on state,
+    /// so a re-init can neither replay a stale request nor leak a slot
+    /// (found by the host suite; PowerManager and AnalogSampler already
+    /// followed this rule). At boot nothing is held and nothing is given
+    /// back.
     static void init() {
         if (Base::current() == &busy) {
             queue.release(in_flight_);
@@ -360,17 +395,18 @@ public:
     }
     static void dispatch(const Event& e) { Base::dispatch(e); }
 
-    /// Requests answered with bus_rejected because the FIFO was full.
+    /// Requests answered with bus_rejected because the FIFO was full
+    /// (saturating). A diagnostic, read from main context.
     static uint8_t rejected_count() { return rejected_; }
 
     /// Retries the policy has spent on the request in flight (0 when it
     /// has not asked for any, and after every completion that passed).
     static uint8_t attempt() { return attempt_; }
 
-    /// Timed buses only: events dropped as stale - a BusTimeout that
+    /// Timed buses only: events dropped as stale (a BusTimeout that
     /// lost the race with its own transfer's completion, or the dead
-    /// transfer's TransferDone drained after a recovery. A diagnostic,
-    /// not an error: each one is a race CLOSED correctly.
+    /// transfer's TransferDone drained after a recovery), saturating. A
+    /// diagnostic, not an error: each one is a race closed correctly.
     static uint8_t stale_events() {
         if constexpr (timed) {
             return TState::stale;
