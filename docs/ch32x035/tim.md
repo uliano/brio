@@ -1,22 +1,67 @@
 # TIM1 and TIM2 (CH32X035)
 
-The two advanced-control timers of RM ch. 12 - one block twice, the
-STM32F1's advanced timer under WCH's register names - in the subset a
-waveform engine needs: the time base, the four channels as outputs in
-every compare mode with the complementary outputs behind MOE, one-pulse
-mode, a compare's and the update's DMA request, the remap. Documents of
-record: the CH32X035 reference manual V1.8 (12.1 for what the block has,
-12.2.3 for the shadowed prescaler, 12.3.3, 12.3.4, 12.3.6, 12.3.7 and
-12.3.9 for the compare modes, the complementary outputs and one pulse,
-12.4 for the registers, tables 12-3 and 12-4 for the maps; 8.3.2.1 for
-TIM1_RM and TIM2_RM; 9.2.3's figure 9-1 for the requests; table 7-1 for
-the vectors). Driver: [brio/ch32x035/tim.hpp](../../brio/ch32x035/tim.hpp),
-the columns in [brio/ch32x035/afio.hpp](../../brio/ch32x035/afio.hpp);
-reference suite `test_x035_tim`, and the engine across a wire in the
-CH32X035's `usart_peer`.
+This document is for a programmer who needs a timer's output: a PWM, a
+single pulse of a stated width, a waveform drawn as a list of edges. It
+covers the two advanced-control timers of RM ch. 12, one block twice,
+the STM32F1's advanced timer under WCH's register names, in the subset
+a waveform engine needs: the time base, the four channels as outputs in
+every compare mode with the complementary outputs behind MOE (the main
+output enable, the one bit without which no output of the timer is
+driven), one-pulse mode, a compare's and the update's DMA request, the
+remap. The driver is the register block as functions, `Tim<n>`, and a
+pad handed to a timer signal, `TimPad`; there is no task over them.
 
-TIM3 (chapter 13's general-purpose block) is another block and has no
-driver here.
+The smallest use, a forced level on a complementary output's pad, the
+opening of the edge list under "How to use it":
+
+```cpp
+using T1 = brio::Tim<1>;
+T1::init();
+(void)T1::remap(1);                                    // C2N on PB0, C3N on PB1
+(void)T1::output_channel(1, {.mode = brio::TimOutputMode::force_active, .preload = false,
+                             .enable = false, .complementary_enable = true});
+T1::main_output(true);
+T1::enable(true);                                      // the counter runs: the level reaches the pad
+(void)brio::TimPad<brio::afio_tim1_pads(1).ch2n>::claim();
+```
+
+`init()` opens the block's clock gate and pulses its reset line;
+`remap(1)` selects the column that puts the complementary outputs on
+PB0 and PB1; `output_channel(1, ...)` configures the chapter's channel
+2 (the driver counts channels from 0) as an output with the
+complementary half enabled; `main_output(true)` is MOE; `enable(true)`
+starts the counter; and `TimPad<...>::claim()` hands the pad to the
+timer, named from the same column table the remap wrote, so the code
+and the pad are one statement. Three things decide correctness even
+there. The order of the last two lines: on this die a timer that has
+never run holds its outputs low whatever mode is written, and a stopped
+one holds the level it had, so a pad claimed before the first
+`enable(true)` is driven low until the counter runs ("What the silicon
+does", below). The counter counts HCLK, with no bus prescaler in
+between, so every period, prescaler and compare value is in cycles of
+the clock type's rate, and the timers take a static clock only. And a
+pad of the debug port (PC18, PC19, which some columns of both timers
+reach) is refused by `claim()` while the probe owns the port.
+
+The rest of this page, in order: the documents of record; what the
+silicon does, with the chapter's offer item by item; the types and
+verbs; how to use it, the edge list streamed by DMA among the uses; the
+bench findings; what is not covered. TIM3 (chapter 13's general-purpose
+block) is another block and has no driver here.
+
+## Documents of record
+
+The CH32X035 reference manual V1.8 (12.1 for what the block has, 12.2.3
+for the shadowed prescaler, 12.3.3, 12.3.4, 12.3.6, 12.3.7 and 12.3.9
+for the compare modes, the complementary outputs and one pulse, 12.4 for
+the registers, tables 12-3 and 12-4 for the maps; 8.3.2.1 for TIM1_RM
+and TIM2_RM; 9.2.3's figure 9-1 for the requests; table 7-1 for the
+vectors). Driver: [brio/ch32x035/tim.hpp](../../brio/ch32x035/tim.hpp),
+the columns in [brio/ch32x035/afio.hpp](../../brio/ch32x035/afio.hpp);
+reference suite `test_x035_tim` (a suite's letter, below, is one command
+key of its console and the group of verdicts it runs, `z` the key that
+runs them all), and the engine across a wire in the CH32X035's
+`usart_peer`.
 
 ## What the silicon does
 
@@ -45,25 +90,25 @@ driver here.
 - **INTFR is write-zero-to-clear** (12.4.5's RW0): a store of ones keeps
   every flag (measured).
 - **CTLR1 resets to 0x2000** (measured, both timers): bit 13, "Reserved"
-  with a reset value of zero in 12.4.1, reads ONE, and is writable both
+    with a reset value of zero in 12.4.1, reads one, and is writable both
   ways. It is the CH32V00x's OE_MODE position, and it does here what that
   bit's name says for the state MOE leaves an output in: set, an output
-  MOE disables FLOATS; clear, it is DRIVEN at its idle level OISx / OISxN
+  MOE disables floats; clear, it is driven at its idle level OISx / OISxN
   (measured, below). WCH's library keeps it as it reads
   (`TIM_TimeBaseInit` is a read-modify-write of CTLR1).
 - **DMAADR reads CTLR1** out of reset: it is the DMA burst's window onto
   the register DBA names (12.4.19, 12.4.20), and DBA resets to zero.
-- **THE OUTPUTS HOLD WHILE THE COUNTER IS STOPPED** (measured): with CEN
+- **The outputs hold while the counter is stopped** (measured): with CEN
   clear every output - a channel's and a complementary one - keeps
   driving the level it had when the counter stopped, through 500 us and
   through a forced level written meanwhile; the running counter then
   takes the mode written. A timer that never ran since its reset holds
-  its outputs LOW: a pad pre-charged high read low once handed to a
+  its outputs low: a pad pre-charged high read low once handed to a
   forced-active channel. Chapter 12 says nothing of either; bit 13 changes
   neither.
 - **MOE, the gate** (12.4.18, measured): set, the enabled outputs carry
   OCxREF; cleared with OSSI at its reset value and bit 13 at its own, an
-  output is LET GO - a level charged onto the pad stays there, either way.
+  output is let go - a level charged onto the pad stays there, either way.
   Bit 13 cleared, MOE clear drives the idle level OIS2N against a charge
   of the other level, both ways.
 - **The complementary output alone is OCxREF** (measured): CCxNE with
@@ -172,7 +217,7 @@ lateness, which letter `f` measures in its own image (a turn of 108 to
 - **The shadow**: 47.87 to 48.10 HCLK cycles a count at PSC 47 over the
   runs (a 100 us window and its own reads), the same after PSC 0 was
   written with no update, 1.00 after UG.
-- **The levels**: a never-run timer's C2N read LOW with the pad
+- **The levels**: a never-run timer's C2N read low with the pad
   pre-charged high; on a running counter, forced active high and forced
   inactive low; stopped high, still high 500 us later and after a forced
   inactive written; CC2NP inverting; CH3 and C3N complementary at both
@@ -186,7 +231,7 @@ lateness, which letter `f` measures in its own image (a turn of 108 to
   request, the intervals 600 to 6000 cycles - each on the pad within 6
   to 14 cycles of the counts asked over the runs, the sampler's grain 19;
   the same on C3N through channel 6.
-- **THE ENGINE'S EDGE**: lists of eight values at PSC 0 with every
+- **The engine's edge**: lists of eight values at PSC 0 with every
   interval the same - every value taken down to intervals of 10 HCLK
   cycles, one value of eight at 8, 6 and 4. A DMA item costs six cycles
   on this controller ([dma.md](dma.md)) and the request rides the match:

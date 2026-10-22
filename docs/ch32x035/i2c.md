@@ -1,24 +1,86 @@
 # I2C (CH32X035)
 
-The one I2C of RM ch. 15 - host and client, 7- and 10-bit addresses, dual
-addressing and the general call, two speeds with fast mode's two duty
-shapes, clock stretching, PEC, two DMA requests - and the host engine
-util/i2c_bus.hpp's arbiter drives on this silicon as on every other
-stratum. Documents of record: the CH32X035 reference manual V1.8 (15.3 for
-the host's event sequences and figures 15-3 and 15-4, 15.4 for the
-target's, 15.5 for the errors, 15.6 for the clock stretch, 15.9 for the
-registers; 8.2.8 and table 8-5 for the pads, 8.3.2.1 for I2C1_RM, 8.3.2.4
-for the USB pads' pulls; figure 9-1 for the DMA requests; table 7-1 for
-the vectors), the CH32X035/X033 datasheet V1.7 (table 2-1 with its notes 3
-to 7, 1.4.16), and WCH's EVT library (`ch32x035_i2c.c` and the two I2C
-examples) as the vendor's shape. Driver:
+This document is for a programmer who needs an I2C bus: a sensor or a
+memory read and written from an active object (a component of a brio
+program with its own event queue, served one event at a time by the
+kernel), or this chip as a target another controller addresses. It
+covers the one I2C of RM ch. 15, host and client, 7- and 10-bit
+addresses, dual addressing and the general call, two speeds with fast
+mode's two duty shapes, clock stretching, PEC, two DMA requests; and
+the host engine `I2cHost`, which the bus arbiter of util/i2c_bus.hpp
+drives on this silicon as on every other stratum: an active object
+posts a request, the arbiter runs it as one bus tenure (a START, the
+address, the bytes, a STOP) and replies with an event when the wire is
+done ([design/i2c-bus.md](../design/i2c-bus.md)).
+
+The smallest use, a register read from a sensor at address 0x48:
+
+```cpp
+using Bus = brio::I2cHost<1>;   // the part's first column: PC16 SCL, PC17 SDA on the F8
+using I2c = brio::I2cBus<Bus, P, 4, brio::BusPassThrough, brio::ticks_from_ms<P>(20)>;
+
+Bus::init(clock);                // both speeds solved at 48 MHz; false: no block, no column
+
+Bus::Request r{};
+r.addr = 0x48;
+r.tx = brio::lend<brio::Lease::reply>(reg); r.tx_len = 1;
+r.rx = brio::lend<brio::Lease::reply>(value); r.rx_len = 2;   // write-then-read
+r.speed = brio::I2cSpeed::fast_400k;
+r.reply = brio::reply_to<Sensor, brio::I2cDone>();
+brio::post<I2c>(r);
+
+extern "C" BRIO_CH32_INTERRUPT void i2c1_ev_handler() {
+    if (Bus::isr()) { brio::post<I2c>(brio::TransferDone{Bus::status()}); }
+}
+extern "C" BRIO_CH32_INTERRUPT void i2c1_er_handler() {
+    if (Bus::error_isr()) { brio::post<I2c>(brio::TransferDone{Bus::status()}); }
+}
+```
+
+`Bus` is the engine over I2C1 on the part's default column; `I2c` is
+the arbiter, an active object listed in the program's `Tenuto` with
+four requests of queue and a 20 ms timeout; `init()` takes the clock
+task's tag ([clock.md](clock.md)) and answers false when there is no
+column free or no block behind the address (below); the request lends
+its two buffers (`brio::lend`) until the reply arrives, so `reg` and
+`value` must stay untouched and in scope from the post to the
+`I2cDone` event `Sensor` receives; the two `extern "C"` functions are
+the block's two interrupt handlers, as in C, under the crt's names and
+with `BRIO_CH32_INTERRUPT` in front ([platform.md](platform.md)), each
+posting the completion to the arbiter when the engine says the tenure
+ended. What decides correctness even there: the clock task first
+(`init()` solves the bus timing from the rate the clock type claims);
+the two vectors bound; the bus pulled up by resistors of its own, since
+a pad under the I2C's alternate function is open drain and the chip's
+USB pull-up modes do not act under it (below); and `init()`'s answer
+read, because on this series the block may be absent from a die (the
+lot note, the first fact below), and a program that ignores a false
+posts its requests to a bus that never came up.
+
+The rest of this page, in order: the documents of record; what the
+silicon does, with the chapter's offer item by item; the types and
+verbs; how to use it; the bench findings, this part as the desk's I2C
+instrument and the host's cost among them; what is not covered.
+
+## Documents of record
+
+The CH32X035 reference manual V1.8 (15.3 for the host's event sequences
+and figures 15-3 and 15-4, 15.4 for the target's, 15.5 for the errors,
+15.6 for the clock stretch, 15.9 for the registers; 8.2.8 and table 8-5
+for the pads, 8.3.2.1 for I2C1_RM, 8.3.2.4 for the USB pads' pulls;
+figure 9-1 for the DMA requests; table 7-1 for the vectors), the
+CH32X035/X033 datasheet V1.7 (table 2-1 with its notes 3 to 7, 1.4.16),
+and WCH's EVT library (`ch32x035_i2c.c` and the two I2C examples) as the
+vendor's shape. Driver:
 [brio/ch32x035/i2c.hpp](../../brio/ch32x035/i2c.hpp), the columns in
 [brio/ch32x035/afio.hpp](../../brio/ch32x035/afio.hpp); reference suite
-`test_x035_i2c` against the desk's CH32V006K8U6 running its `twi_peer`.
+`test_x035_i2c` (a suite's letter, below, is one command key of its
+console and the group of verdicts it runs, `z` the key that runs them
+all) against the desk's CH32V006K8U6 running its `twi_peer`.
 
 ## What the silicon does
 
-- **THE BLOCK MAY NOT BE THERE.** The datasheet withdraws the I2C - and
+- **The block may not be there.** The datasheet withdraws the I2C - and
   the ADC's channels 3, 7, 11 and 15 - from every lot "with a 0 in the
   penultimate 5 digits of the lot number" (table 2-1's note 3, 1.4.16's
   note), and no register names a die's lot. The driver asks the block:
@@ -32,7 +94,7 @@ examples) as the vendor's shape. Driver:
   sequences stretches SCL until it runs (EVT5: read STAR1, write the
   address; EVT6: read STAR1 then STAR2; the one-, two- and N-byte
   receive procedures with their ACK and POS choreography).
-- **NO RISE-TIME REGISTER.** Table 15-1 ends at CKCFGR (0x1C) and so does
+- **No rise-time register.** Table 15-1 ends at CKCFGR (0x1C) and so does
   the chapter's prose; the word after it holds nothing written to it
   (measured). The SCL timing is CTLR2.FREQ and CKCFGR: FREQ "must be set
   between 000100b and 111100b", 4 to 60 MHz (15.9.2), and every bus of
@@ -78,7 +140,7 @@ examples) as the vendor's shape. Driver:
   bit (measured): the engine's reply is `i2c_arb_lost` at once, the
   CH32V006's word - which there came as ARLO on the START itself - through
   another path. The same START set by a block brought up over the line
-  already held stays PENDING: no SB and no ARLO in 50 ms, START standing
+    already held stays pending: no SB and no ARLO in 50 ms, START standing
   in CTLR1, BUSY up - the case the per-bus timeout answers (measured).
 - **The host's own STOP stands in CTLR1 for about a bit** after the
   completion edge - 440 to 448 cycles at 100 kHz, 112 to 116 at 400 kHz,
@@ -151,8 +213,8 @@ default, or `InRam`);
   speed the clock cannot produce is answered `i2c_rejected` inside
   `start()`. `start()` waits, bounded, for the last tenure's STOP to leave
   CTLR1 (5 ms, a clock held past it parks the tenure for the per-bus
-  timeout) and for BUSY (100 us), then - BUSY still up and BOTH LINES
-  HIGH - takes SWRST and counts it (`unwedges()`). `unstick()` clocks a
+  timeout) and for BUSY (100 us), then - BUSY still up and both lines
+  high - takes SWRST and counts it (`unwedges()`). `unstick()` clocks a
   stuck client free by hand - a line pulled low as a push-pull output over
   a clear bit and released as a floating input, never driven high - and
   `recover()` puts the block back (SWRST, the timing rewritten).
@@ -162,7 +224,7 @@ default, or `InRam`);
   `DmaTxEngine<6>` and `DmaRxEngine<7>`, both or neither, at `high` (the
   host stretches SCL behind a starved channel and loses nothing, 15.6).
 - `I2cClient<1, pins>`: `init(clock, addresses, I2cClientOptions)` - a
-  POLLED client with `.interrupts = false` -, the polled surface
+  polled client with `.interrupts = false` -, the polled surface
   (`addressed()`, `answer_address()` returning the direction,
   `take()`/`give()`, `stop_seen()`, `host_nacked()`), `flush()` (the PE
   cycle that drops a byte the host never clocked), and two ISR bodies,
@@ -230,17 +292,17 @@ channel, the stuck BUSY, the vectors' client, the cost): `z` is 55 and
   four receive procedures, each closed at the right byte; the general
   call; `i2c_nack_addr` from a deaf peer and `i2c_nack_data` at a
   commanded byte.
-- **THE RATE ASKED, on the wire** (a tenure timed from `start()` to its
+- **The rate asked, on the wire** (a tenure timed from `start()` to its
   completion, nine SCL periods a byte with the address's; the bracket:
   never above the rate asked by more than 2 %, within a quarter below
   it): an 8-byte write on the pump at about 94 kHz for 100 and 336 kHz for
   400, on the engines a 16-byte write and read at 97 kHz and a 16-byte
-  read at 363 kHz. PAST THE CHAPTER, CKCFGR's fast-mode CCR at 16 (1 MHz
+  read at 363 kHz. Past the chapter, CKCFGR's fast-mode CCR at 16 (1 MHz
   asked) carried an 8-byte write and read byte-exact at about 700 kHz -
   measured, and no speed of the engine's: 15.1 names two.
 - **The engines**: a 16-byte write and read, a write-then-read, a
   two-byte read under LAST and a 16-byte read at 400 kHz byte-exact, the
-  peer accounting all 59 bytes, no transfer fault; NO DMA interrupt for a
+  peer accounting all 59 bytes, no transfer fault; no DMA interrupt for a
   write and one per engined read; a write three event entries (SB, ADDR,
   BTF), a read two.
 - **The kernel**: four tenures through `I2cBus` answered in order with
@@ -255,7 +317,7 @@ channel, the stuck BUSY, the vectors' client, the cost): `z` is 55 and
   `i2c_arb_lost`; aimed at 0x11 it kept the bus (`i2c_nack_addr`, nobody
   there) and the peer reported the loss. **As the peer's client**, polled,
   this board answered its own address in a write tenure and took six bytes
-  byte-exact, ending on the STOP; READ twice six bytes back to back by the
+  byte-exact, ending on the STOP; read twice six bytes back to back by the
   peer's controller (twi_link's `host_read`), it served each run
   byte-exact as a transmitter, one byte standing in DATAR at each closing
   NACK, and `flush()` dropped both - the second read opened on its own
@@ -288,12 +350,12 @@ channel, the stuck BUSY, the vectors' client, the cost): `z` is 55 and
   ever on the wire - left BUSY up with both lines high; `start()`'s
   100 us wait ran out, `unwedge_busy()` took SWRST (`unwedges()` one
   more) and the tenure behind it completed `i2c_ok`, BUSY down after. A
-  STOP made with the block's GATE CLOSED leaves nothing: BUSY read 0 at
+  STOP made with the block's gate closed leaves nothing: BUSY read 0 at
   the reopening - the flag follows the wire.
-- **THE DEAD CHANNEL** (letter p): a timer's compare request raised by a
+- **The dead channel** (letter p): a timer's compare request raised by a
   match with no channel enabled, the timer's gate then closed with no
   reset - TIM1's channel 3 on DMA channel 6, TIM2's channel 2 on channel
-  7 (figure 9-1) - is HELD: the next owner of the channel takes one stray
+  7 (figure 9-1) - is held: the next owner of the channel takes one stray
   item and serves nothing after it. (The software compare event, SWEVGR's
   CCxG, left the next owner nothing: the match is the request.) A write
   of 32 on the engines over the dead channel 6 ends `i2c_dma_fault` - BTF
@@ -328,7 +390,7 @@ twi_link protocol, kind 0x07, on column 010 - SCL PC16, SDA PC17, the
 desk's I2C wires to the CH32V006's column 3. It drives PB3 high, the
 bus's pull-ups, from the supply check at boot (the voltage detector at
 3.0 V; below it PB3 and the pads stay floating) to the end of its run,
-command mode and every action included. Its target is POLLED
+command mode and every action included. Its target is polled
 (`I2cClientOptions`) and drops the byte it was asked beyond a closing NACK
 with `flush()`; its host action is the instance's role switch, writing
 (`arb`) or reading (`host_read`); `hold_sda` pulls the line down with a
@@ -379,7 +441,7 @@ completion edge, `wire` = (bytes + the address) x 9 x the period, `rest`
 and exit (the vector's own entry and exit, about a hundred cycles with
 the hardware prologue, [platform.md](platform.md), outside them; inside
 them the suite's storm budget and its switch over three hosts). The
-pump in BOTH PLACEMENTS: the default, its body inline in the vector in
+pump in both placements: the default, its body inline in the vector in
 the flash, and a twin host with its event pump in SRAM (`InRam`) behind
 the same vector:
 
@@ -411,11 +473,11 @@ the same vector:
   cycles, the suite's stamps and owner switch included - the family's
   longest handler with every driver in the flash, which the SPI host's
   default hold-off is drawn from ([spi.md](spi.md)).
-- **THE PUMP IN SRAM, TWO WAYS, AND ONLY IF THE PROGRAM WANTS THE CORE**:
+- **The pump in SRAM, two ways, and only if the program wants the core**:
   the host's `InRam` places the event body (`.fast_text.brio`, 968 bytes
   for a plain host, flattened, a leaf): 140 to 141 cycles an entry over
   the 255-byte write and 157 to 159 over the 16-byte read, the longest
-  195 to 207, behind the suite's vector in the flash. A program that places the VECTOR
+  195 to 207, behind the suite's vector in the flash. A program that places the vector
   (`.fast_text`, [platform.md](platform.md), "A handler in SRAM") carries
   the default host's inline body with it: measured in a variant of the
   suite, 79 and 94 cycles - a fourteenth of the core at 400 kHz - and an
