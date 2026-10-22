@@ -46,7 +46,7 @@ part class, keyed in `stm32f4/device_tables.hpp`.
 | 32F469IDISCOVERY user manual | UM1932 Rev 5 | symlink to `.../STM32F469I-DISCO/um1932-*.pdf` | + the MB1189 schematics B-07/B-08/C-01 (the MCU sheet is where the SDRAM's pads come from) and the display board's MB1166 A-08/A-09/A-10 beside it |
 
 The black pill's own documents (WeAct's schematic) are the board
-page's business ([../boards/blackpill-f411ce.md](../boards/blackpill-f411ce.md)).
+page's business ([../../boards/blackpill-f411ce.md](../../boards/blackpill-f411ce.md)).
 
 Canonical URLs (redirect to the current revision):
 `https://www.st.com/resource/en/reference_manual/rm0090-stm32f405415-stm32f407417-stm32f427437-and-stm32f429439-advanced-armbased-32bit-mcus-stmicroelectronics.pdf`,

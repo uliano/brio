@@ -60,7 +60,7 @@ write over UPDI to an AVR64EA (fuses, flash, a chip erase) and loses it
 
 | Board | Part | Memory | Clock | Console | LED |
 |---|---|---|---|---|---|
-| [an AVR128DB48 board](../boards/avr128db48.md), the bench board | AVR128DB48, 48 pins | 128 KB flash, 16 KB SRAM | a 24 MHz crystal on PA0/PA1, no 32 kHz crystal | USART2 ALT1, PF4/PF5, a CH340 at 460800 | none wired by the board |
+| [an AVR128DB48 board](../boards/avr128db48.md), the bench board | AVR128DB48, 48 pins | 128 KB flash, 16 KB SRAM | a 24 MHz crystal on PA0/PA1, no 32 kHz crystal | USART2 ALT1, PF4/PF5, a CH340 at 460800 | PF2 through a solder jumper, bridged on this board |
 | [an AVR128DA48 board](../boards/avr128da48.md) | AVR128DA48, the same memories, no crystal oscillator and no MVIO | 128 KB flash, 16 KB SRAM | a 24 MHz external clock into PA0, a 32.768 kHz crystal on PF0/PF1 | the same pads, an isolated CH340B | PF2, a button on PF3 |
 | [an AVR64EA48 board](../boards/avr64ea48.md) | AVR64EA48: OSCHF at the rate its OSCCFG fuse chooses, no PLL, no TCD, no OPAMP, NVM version 3, a differential ADC | 64 KB flash, 6 KB SRAM, 512 B EEPROM | a 20 MHz crystal on PA0/PA1, a 32.768 kHz crystal that does not start | the same pads, an isolated CH340B | PF2, a button on PF3 |
 
@@ -596,8 +596,8 @@ packages (28, 32 and 48 pins; a chapter the EA has no driver for
 compiles to nothing there, its refusal a negative), and requires every
 `test/family_avrxt/neg/` TU, a negative, a program that must be refused,
 to fail for the MCUs its `// mcu:` line names. Seconds, no hardware;
-the 64-pin packages and the DA's 28 and 32 have no board, so this
-sweep is their only check. Part of every driver's
+the packages without a board (every 64-pin one, and the 28- and
+32-pin DA, DB and EA) have this sweep as their only check. Part of every driver's
 definition of done, because the bench chip alone masks the missing
 ports, instances, registers and enum values of the other packages. The
 check ends with the link guard: every app linked on every release

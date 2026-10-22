@@ -86,7 +86,8 @@ a plain Python dict naming each board on the desk by an entry name, its
 type, the label the chip is expected to carry, its console and its
 programmer. The file in the repository,
 `cli/bench/bench_boards.py`, is an example with entries for ten of the
-board types, one or more for each kind of probe the tool drives; the
+board types over four of the programmer kinds the tool drives (the
+others appear in its comments); the
 desk that is really there is `private/bench_boards.py`, which
 `bin/brio` loads first when it exists and which is never published.
 

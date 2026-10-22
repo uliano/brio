@@ -9,9 +9,10 @@ on, how the toolchain, the build, the upload, the debugger and the
 console work and where each has a trap, what the silicon taught the
 stratum across the chapters, what is not covered yet, and it ends with
 the map of the stratum's own documents: one line per peripheral
-driver, which is where the state of the driver work is read. The
-CH32V203 is supported; the CH32V303 is in bring-up, every chapter green
-on its board, with what is excluded and why in "Not covered yet".
+driver, which is where the state of the driver work is read. Each
+part's maturity is stated in one place, the target table of the root
+README; every chapter is green on both boards, with what is excluded
+and why in "Not covered yet".
 
 A stratum is a directory of `brio/` holding one architectural layer;
 `brio/ch32vx03/` holds everything that knows the register map the
@@ -114,7 +115,9 @@ is a statement about the family. Every part has a release preset
 a debug one each, `ch32v203c8-debug` and `ch32v303vc-debug` (CMake Tools
 shows them as `CH32V203C8 (release, -Os)` and `CH32V203C8 (debug,
 -Og)`). The board types an app's `// build: boards =` line names are
-`v203c8` and `v303vc` ([../boards/README.md](../boards/README.md)).
+`v203c8` and `v303vc`, the two the bench manifest knows, and `v203c6`
+and `v203rb` for the parts without a board (the C6 preset is the 32 KB
+tier's link guard) ([../boards/README.md](../boards/README.md)).
 
 The four 32 KB parts split a suite too big for them: a suite that
 declares its groups of letters (`// build: groups = abc,de`) builds

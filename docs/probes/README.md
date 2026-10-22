@@ -23,7 +23,7 @@ bench").
 On the RP2350 the board type, not the programmer kind, selects the
 flash mechanism (`rp2350_openocd` in `cli/bench/common.py`'s
 `BOARD_TYPES`): the same `openocd_cmsisdap` entry as an RP2040's, run
-by Raspberry Pi's OpenOCD fork as two sessions, a rescue over the debug
+by Raspberry Pi's OpenOCD fork (SWD, ADIv6) as two sessions, a rescue over the debug
 port alone and then the programming
 ([raspberry-pi-debug-probe.md](raspberry-pi-debug-probe.md)).
 

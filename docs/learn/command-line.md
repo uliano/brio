@@ -18,12 +18,12 @@ files set it up and the check on this board is still owed:
 
 | Step | Status |
 |---|---|
-| 1. Configure | configured: not performed from a fresh checkout for this page (it is the configure every build of this project runs on the desk) |
-| 2. Build | configured: as step 1; the size figures quoted are from one debug build of this revision |
-| 3. Flash with the `-upload` target | configured: the OpenOCD sequence `brio flash` runs on this board; the target itself not run for this page |
+| 1. Configure | verified on the Nucleo-G0B1RE as written, with `-DSTM32G0_PROBE_SERIAL` because two ST-LINKs were attached; not from a fresh checkout |
+| 2. Build | verified on the Nucleo-G0B1RE as written; the size figures quoted are from one debug build, another build of the same code measured `.text` 6252 |
+| 3. Flash with the `-upload` target | verified on the Nucleo-G0B1RE as written: the probe's firmware version, the part, the programming and the verification printed, the LED changing state at once |
 | The bench tool | verified on this board with the desk's own manifest entry: how every STM32G0 suite reaches the Nucleo-G0B1RE; writing a first manifest entry not walked through |
-| 4. Observe | configured: the nine-second cycle is read from the source, not from a run of this revision |
-| 5. Debug from a terminal | verified on the Nucleo-G071RB with the same OpenOCD, target script and gdb (load, reset-halt, a breakpoint at `main`, source lines stepped); not performed on the G0B1RE |
+| 4. Observe | verified on the Nucleo-G0B1RE: the nine-second cycle seen on LD4 as the source says |
+| 5. Debug from a terminal | verified on the Nucleo-G0B1RE as written: load, reset-halt, the breakpoint at `main`, the breakpoint at `Blinker::running` hit within half a second, `Supervisor::index` and `overflows_` read, `monitor reset run` leaving the board running; also on the Nucleo-G071RB earlier |
 | 6. Host tests | verified on the host, no board |
 
 "Expected" paragraphs below describe what the tools print by design,

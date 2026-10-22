@@ -8,10 +8,11 @@ and part it is proven on, how the toolchain, the build, the upload and
 the console work and where each has a trap, what the documents and the
 silicon taught the stratum, what is not covered yet, and it ends with
 the map of the stratum's own documents: one line per peripheral driver,
-which is where the state of the driver work is read. The target is in
-bring-up: the platform, the clock, the pins, the USARTs, the I2C, the
-SPI, two timers and the DMA have their documents and their suites, and
-the rest is "Not covered yet" at the end.
+which is where the state of the driver work is read. The platform, the
+clock, the pins, the USARTs, the I2C, the SPI, two timers and the DMA
+have their documents and their suites, and the rest is "Not covered
+yet" at the end; the target's maturity is stated in the root README's
+table alone.
 
 A stratum is a directory of `brio/` holding one architectural layer;
 `brio/ch32x035/` holds everything that knows WCH's CH32X035 register

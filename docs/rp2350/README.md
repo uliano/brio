@@ -26,9 +26,9 @@ The kernel (`kernel/`), the services (`util/`) and the drawing library
 (`test/family_rp2350/util_all.cpp` is the whole of them over the
 platform, and the family check builds it four times). The maintained
 example `blink` builds for both architectures, and "First light,
-measured" below is what it showed. The target is in bring-up: every
-driver's suite passes on both halves, and what is still owed is "Not
-covered yet" at the end.
+measured" below is what it showed. Every driver's suite passes on both
+halves; the target's maturity is stated in the root README's table
+alone, and what is still owed is "Not covered yet" at the end.
 
 The documents of record (the datasheet by build, the hardware design
 guide, the vendored pico-sdk subset and the SVD), the bench chip's
