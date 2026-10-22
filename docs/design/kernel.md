@@ -13,8 +13,9 @@ the exact rule. The headers under `brio/kernel/` are the reference for
 every type and function; this page holds the reasons and the
 contracts, and names the header at each heading.
 
-Everything in `brio/kernel/` is pure logic, templated on a `Platform`
-type and never on a specific chip: it includes nothing of a target and
+Everything in `brio/kernel/` (one stratum, that is one directory that
+is one layer of the framework, [overview.md](overview.md)) is pure
+logic, templated on a `Platform` type and never on a specific chip: it includes nothing of a target and
 runs on the host, where its tests are. Where a concrete number appears
 below it is a measurement on one platform, marked as such, never an
 assumption of the kernel.
@@ -54,14 +55,18 @@ resume it later, so an active object cannot wait for anything inside a
 handler; if a handler calls a function that waits for hardware, every
 other active object on that core waits with it.
 
-The **kernel** is a loop on the single main stack. Each turn it posts
+The **kernel** (its type is `Tenuto`,
+[the scheduler](#8-scheduler-kerneltenutohpp)) is a loop on the single
+main stack. Each turn it posts
 the time events that have matured, then serves one event from the
 highest-priority queue that is not empty, then starts again from the
 top. If every queue is empty it sleeps until an interrupt. There is no
 preemption between active objects: while one handler runs, no other
 active object runs on that core. The only concurrency on a core is an
 interrupt handler against the loop, and an interrupt handler may do
-exactly one thing with the kernel: `post()` an event, which builds a
+exactly one thing with the kernel: post an event (`post()`, or on a
+two-core chip `send()` to the other core, which ends in a `post()`
+there), which builds a
 copy of a few bytes in the receiver's queue inside a brief critical
 section (a few instructions run with interrupts masked).
 
@@ -281,7 +286,10 @@ three lines:
      program is compiled. The sender is an active object in that list
      (the order has no meaning for anything else); a driver whose
      interrupt handler fills a buffer lends it through the active
-     object that owns the driver, as `SerialPort` does;
+     object that owns the driver, as `SerialPort` does: the interrupt
+     handler writes the driver's ring, and the active object fills the
+     buffer it lends in its own dispatch, so nothing writes a lent
+     buffer while the borrower reads it;
    - `Lease::reply`: valid until the receiver sends back the completion
      event the protocol agrees on; the reply is the return of the loan.
      Until then the sender keeps the storage valid and follows the
@@ -772,7 +780,8 @@ Three primitives, one rule each:
   it.
 - `publish(Subscribers<A, B...>{}, ev)`: **facts are published**. One
   `post` per listed subscriber, in list order, with `post`'s rules and
-  from any context. The subscriber list is
+  from any context of the core the subscribers live on. The subscriber
+  list is
   a type built where the publisher is declared, so a subscription that
   cannot be received (the subscriber's variant lacks the struct) fails
   to compile at that line.
@@ -842,7 +851,10 @@ The loop (`run()`), one turn:
 3. If `step()` found nothing, `idle_if_empty()`: re-check every queue
    with interrupts masked and, if still empty, call `P::idle()`, which
    re-enables interrupts and sleeps in a way that leaves no window for
-   a lost wake-up. How that is done is the platform's business: the
+   a lost wake-up (a promise every platform's suite measures, with the
+   one measured exception stated with the platform's promises in
+   [the platform](#11-platform-what-the-machine-provides-kernelplatformhpp)).
+   How that is done is the platform's business: the
    classic sequence is "enable, then sleep" on a core where the enable
    takes effect only after the following instruction; a core whose
    wait-for-interrupt instruction wakes on a pending interrupt even
@@ -1185,7 +1197,12 @@ re-arm, scan priority, many producers against one consumer.
 Common to all: the concept above, member for member, the critical
 section, `idle()`, `now()`, `ticks_per_second`, `atomic_width`,
 `panic_record()`, `break_here()`. What differs is what each member
-costs or does on its core.
+costs or does on its core. In the rows, a sleep site is the target's
+object that arms a sleep mode for the power model
+([power.md](power.md)), a rung one depth of that model's ladder, an
+event latch the core's record of a wake event that a wait instruction
+consumes, and a `Tickless` timebase one that keeps counting while the
+core sleeps.
 
 | stratum | realization | beyond the contract |
 |---|---|---|

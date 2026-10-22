@@ -434,11 +434,197 @@ where the other cursors go through store_shared (it publishes nothing
 to a producer), the AO terms assumed by the header (the kernel pages
 define them).
 
+## Second batch: the design pages
+
+Scope: every page of `docs/design/` (twenty Markdown files; the two
+SVGs untouched), rewritten for the reader the brief names, in the
+voice of the first batch, every decision, contract and measurement
+kept. Base: `docs-rewrite` at
+8ba6ab5dc4af50110483f830b6cee7b85c90f2f9, the reference of every token
+check. Branch `claude/docs-design-batch-2-i1j28h`, one pull request
+against `docs-rewrite`. Not touched: every source file, `// build:`
+lines, CMake, `.clangd`, `.vscode`, CLAUDE.md, docs/README.md, the
+learning pages, the target folders. No build and no host test was run
+(no cross toolchain and no `/sw` in the cloud); the token check lexed
+with the system g++ 13.3.
+
+### Each page, and what changed
+
+Every page now opens with what it decides and for whom, states its
+smallest use and the prerequisite that decides correctness, defines
+the project's terms where it first uses them (active object,
+run-to-completion, contract, lease, monostate, stratum, dispatch), and
+uses no capitals for emphasis; every link names its destination;
+every "section N" cross-reference inside the batch became a link by
+heading text. The realizations tables are kept whole (two blank lines
+had cut each of eleven tables in two, so the rows after the cut
+rendered as plain text) and their rows follow the fixed order
+overview.md now states: avrxt, samc21, stm32g0, stm32f4, ch32v00x,
+ch32vx03, ch32x035, rp2040, rp2350, host.
+
+- overview.md: the stale opening (one testbed, the next target
+  decided) replaced by today's truth; the strata table lists every
+  stratum of `brio/`; the stability hierarchy stated; the realizations
+  index links kernel.md by heading; the pins and PWM tables whole.
+- kernel.md: the thirteen numbered headings kept word for word (every
+  anchor and every "section N" reference inside and outside the batch
+  still resolves); the reading guide names its parts; the overflow
+  knob corrected (below); the timer limits aligned with
+  time_event.hpp; the two-core section names both RP realizations.
+- runtime.md, serial.md, spi-bus.md, i2c-bus.md, power.md, nv-heap.md,
+  nv-journal.md, gfx.md (the pages the learning route links): the
+  orientation added, the prose rewritten, the realization accounts of
+  power.md turned from bold paragraphs into prose under the table; the
+  bus pages' stale pointer to "the top-level README bench map" now
+  names the board pages and the app's header comment; the "not
+  bench-verified" items of the NV pages say what would measure them.
+- clock.md, ring.md, dma.md, can.md, analog.md, meters.md, usb.md,
+  block-stream.md, simulation.md, benchmark.md: the same pass;
+  clock.md's reference table lists the util entities and the
+  families' headers instead of four families; benchmark.md's tables
+  are untouched measurements, its parenthesized figures explained
+  once as the image before an engine's rework, and the names of
+  review rounds dropped from its prose.
+
+### kernel.md's references
+
+The numbering is kept, so nothing outside the batch had to move. Inside
+the batch the references that said "section N" (overview.md's index
+rows, power.md, runtime.md, serial.md, spi-bus.md, ring.md) are links
+by heading text. The seventeen Markdown pages and nineteen sources of
+the inventory above still point at valid numbers; the sources were not
+edited, and `bin/brio gate --tokens --against 8ba6ab5` on the kernel
+headers, util/bench.hpp and rp2350/multicore.hpp reports every one
+token-identical (trivially: no source changed).
+
+### Facts resolved while writing
+
+- kernel.md claimed a kernel-level overflow knob (`count` in release,
+  `panic` in debug). event_queue.hpp leaves that to the layer above
+  and no such knob exists; `PanicCode::queue_overflow` is a code a
+  program may use. The page now says what the code does.
+- kernel.md said `ticks_from_ms` has "at least this long" semantics
+  (a timeout never fires early); the page now carries the maturity
+  window of time_event.hpp and the strict half-range limit.
+- kernel.md said `interleave_point()` is called by "the queue's
+  consumer verbs"; it is called by `take()` and `release()`.
+- overview.md's `EventSystem<Route...>` is "not built" per
+  avrxt/evsys.hpp (planned as sugar); said so.
+- power.md's deadline-guard default was "measured on the first
+  target (a crystal's 1.77 ms restart)"; the prose net refuses an
+  ordinal silicon, docs/avrxt/platform.md gives about 1.5 ms for the
+  crystal's restart on the AVR128DB48 board, and neither figure is in
+  power.hpp. The page names the board and says "under 2 ms" with a
+  link to the AVR page. The 1.77 figure's origin is open.
+- serial.md's "worst case about 2 ms at 460800 baud" for a print's
+  wait is underivable from the stated defaults (a full 256-byte
+  transmit ring is 5.5 ms at that rate); replaced by the derivation
+  (one byte time per byte that does not yet fit).
+- kernel.md's queue cost paragraph explained a "`depth + 2` bytes
+  more" RAM figure as "the ring of numbers and the hold flag"; the
+  ring alone is `depth + 2` positions, so the parenthesis cannot be
+  right as written and was dropped; the figure itself is kept as the
+  author's and is open.
+- gfx.md's smallest use names `clear`, `line`, `fill_rect` and
+  `text_field` as the headers spell them.
+
+### Reader review (fresh subagents)
+
+Round 1, three readers, each given only its files and the questions
+(the brief's four, the reviews' scenarios, and a per-page list). Every
+scenario was answered "supported directly" on overview.md (the
+governing rule, the run as the contract's unit, the chapter rule, the
+realizations tables, the hot-path rules, the traps), on kernel.md (the
+interrupt posting to a high-priority object during a low-priority
+dispatch, with the older event and the still-higher queue ahead of it
+and starvation possible; the three leases and who enforces each; the
+depth-4 queue's counts, the overflow with no panic, the double
+release; the one-tick timer's window and the 2^31 bound; the two idle
+promises and no nesting; two kernels on two cores) and on serial.md,
+power.md and nv-journal.md (the sink's place and lifetime, print's
+wait, the line guarantee; who sleeps and what the manager does, the
+three request outcomes; the panic reserve, mount, the current value
+and a cut mid-collection). Residue, all applied: overview.md's active
+object and cooperative undefined, "the two loans" and "the loan made
+physical" unexplained, "binding" in two senses, "pending wave", the
+cortexm row's include direction, test letter and verdict prose
+undefined, the families named only as "the two ARMv6-M strata" and
+"the sister family"; kernel.md's critical section and fold expression
+undefined at first use, QV unexpanded, slot and hold used in the
+contract before their section, the dispatch loan's sender unnamed, the
+order check's "why" not joined to the scan rule, the contexts of
+publish, send and hold() unstated, the idle_until sentences reading as
+contradictory, the CH32V003's late edge not carved out of the no-lost-
+wake promise, the RAM parenthesis above; serial.md's saved-pointer
+consequence and compile-time refusal unstated, the 2 ms bound
+underived, RxActivity used from two senders before being defined, a
+fragment delivered as a line against "every line delivered is a line
+sent"; power.md's SleepRequested{none} rule decided per target, rung,
+witness and resync undefined before the table, the guard refusal's
+reply unstated; nv-journal.md's "map pair's atomicity argument"
+pointing off-page, a second save_reserved() unsaid, the geometry
+notation undefined. Noted and kept: the realization tables remain
+dense for a first-time reader (they are the cross-target reference
+the rules prescribe), and `Tenuto`, `Lease` and `Borrowed` are
+defined on kernel.md, which every page links.
+
+Round 2 (two fresh readers on the revised overview.md and kernel.md,
+the same questions plus the first round's scenarios). Every scenario
+"supported directly": the cooperative definition, the two loans, the
+cortexm include order, the hot-path rule's per-operation writes, the
+suite-size rule, rt/ on the AVR; the three-way order of service, the
+dispatch loan's sender and the why of the order check, the contexts
+of post, publish, send, hold and arm, the depth-4 counts, idle_until's
+contract, the timer bounds, QV. Residue, applied: overview.md's "a
+handler" in the cooperative definition, the two loans only a
+parenthesis, "reads CMSIS-Core symbols only" against "may include
+util/", the per-operation "address", test letter and bench chip used
+before defined, engine, concept, traits type and preset undefined, the
+count "ten targets" against nine families and the host; kernel.md's
+Tenuto named only in its own section, whether an interrupt handler
+writes a lent buffer (it writes the driver's ring; the active object
+fills the lent buffer in its own dispatch), publish's "any context"
+scoped to the core, the idle promise absolute in the scheduler and
+holed in the platform (now cross-referenced), stratum, rung, sleep
+site, event latch and Tickless undefined. Left as is: the project
+objects the examples cite (SerialPort, the bus arbiter, MeterLatch),
+defined on their own pages; the realization tables' density; the
+index entries (CoreAware, through) with no body text, which name
+header entities the index exists to map.
+
+### Checks
+
+- `bin/brio prose docs/design/*.md`: 20 files, 0 errors, 1 for review
+  (clock.md: "not built yet", the power-manager active object that
+  asks the bus objects before a rate change, a true claim of absence).
+- Links and anchors of every page of docs/design, docs/learn and the
+  two READMEs, checked by a script with GitHub's anchor rules: every
+  relative link and heading anchor resolves (0 problems).
+- `git diff --stat 8ba6ab5 -- . ':!docs/design'`: empty; no source,
+  build or configuration file changed.
+- Not run, no toolchain: any build, the host tests, the full
+  `brio gate`.
+
+### Local verification handoff
+
+- The full `brio gate` against 8ba6ab5 confirms every image unmoved
+  (no source changed, so it should report every preset identical).
+- Two figures to settle on the desk: the deadline guard's default
+  (power.md: the AVR128DB48 crystal restart, 1.77 ms in the old page
+  against about 1.5 ms on the AVR platform page) and the queue's
+  "`depth + 2` bytes more" RAM accounting (kernel.md's cost
+  paragraph), to be read off an image's map.
+- The realizations tables carry hardware findings this pass could only
+  lowercase and link, not re-measure; a re-read of each row against
+  its family's page by the desk is the check this batch cannot make.
+
 ## Next batches (not started)
 
-1. docs/design/*.md, kernel.md first, with the reference inventory above.
-2. One representative target stratum (stm32g0: README, selected
+1. One representative target stratum (stm32g0: README, selected
    peripheral pages, header comments).
-3. The remaining target strata in groups.
-4. Remaining services (serial_port.hpp and print.hpp first), devices,
+2. The remaining target strata in groups.
+3. Remaining services (serial_port.hpp and print.hpp first), devices,
    host, boards and probes.
+4. Before the public merge: remove DOCUMENTATION_REWRITE_BRIEF.md,
+   DOCUMENTATION_REWRITE_PROGRESS.md and the two review files, unless
+   the user keeps them.
