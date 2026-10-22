@@ -1,17 +1,21 @@
 /*
  * pin.hpp
  *
- * The STM32G0 I/O pins (GPIO, RM0444 ch. 7), register-level, in the two
- * faces every target's pin header offers:
+ * The STM32G0's I/O pins (GPIO, RM0444 ch. 7): what a program uses to
+ * drive an LED, read a button, or hand a pad to a peripheral. A pin is a
+ * type, `Pin<'A', 5>` for PA5, with the letter and the number fixed when
+ * the program is compiled; its functions configure the pin and drive or
+ * read it. The header has the two faces every target's pin header
+ * offers:
  *
- *  Port<'A'>       the port RESOURCE - one GPIOx block: 16-bit mask
+ *  Port<'A'>       the port as a resource - one GPIOx block: 16-bit mask
  *                  operations on ODR/IDR through the atomic BSRR/BRR
  *                  set/reset registers, the bus clock that gates the
  *                  block, and the per-pin mode/type/speed/pull/AF fields
- *                  written for a MASK of pins at once;
- *  Pin<'A', 5>     the per-pin face: direction and value, one-store-ish
- *                  configure(), the alternate-function handoff, a
- *                  PwmChannel (max 1) and a PinRef factory.
+ *                  written for a mask of pins at once;
+ *  Pin<'A', 5>     the per-pin face: direction and value, the
+ *                  configuring functions, the alternate-function
+ *                  handoff, a PwmChannel (max 1) and a PinRef factory.
  *
  *   using Led = brio::Pin<'A', 5>;    // PA5, LD4 on the Nucleo-64
  *   Led::output();
@@ -19,46 +23,54 @@
  *   Button::input(brio::PinPull::up);
  *   Tx::function(brio::PinFunction::af1);   // USART2_TX
  *
- * THREE FACTS OF THIS SILICON shape everything below.
+ * Which context may call what. The value functions (set, clear, toggle,
+ * read) are single BSRR/BRR stores or IDR loads, atomic by the silicon,
+ * and are safe from any context: an interrupt handler may toggle a pin
+ * while the main loop drives another of the same port, which is what
+ * PinRef's set()/clear() inside a bus active object's request depend
+ * on (an active object is a component of a brio program with its own
+ * event queue, served one event at a time by the kernel,
+ * kernel/active_object.hpp). The configuring functions (output, input, analog, function,
+ * release, pull, configure_mask) are read-modify-write sequences on
+ * MODER/OTYPER/OSPEEDR/PUPDR/AFR, registers with no set/clear twins, so
+ * two of them racing on one port from two contexts (a handler and the
+ * loop) can lose a field: call them from setup and from an active
+ * object's handler, never from an interrupt handler that may interrupt
+ * another configuring call. None of them waits beyond the port clock's
+ * two-cycle enable readback, and none masks interrupts.
  *
- * 1. THE PORT HAS A CLOCK, AND IT IS OFF AT RESET. RCC_IOPENR.GPIOxEN
+ * Three facts of this silicon shape everything below.
+ *
+ * 1. The port has a clock, and it is off at reset. RCC_IOPENR.GPIOxEN
  *    gates the whole block (5.2.17): with it clear every register of the
  *    port reads as zero and ignores writes, silently. So every
- *    CONFIGURING verb here switches the port's clock on first (an
+ *    configuring function here switches the port's clock on first (an
  *    idempotent read-modify-write of one RCC bit plus the readback that
- *    covers the two-cycle enable delay); the value verbs (set/clear/
+ *    covers the two-cycle enable delay); the value functions (set/clear/
  *    toggle/read) do not, because a pin one has configured has a clocked
- *    port by construction. Nothing here ever turns a port clock OFF - a
+ *    port by construction. Nothing here ever turns a port clock off - a
  *    second pin of the same port would lose its block; releasing a port
  *    is a program-wide decision (Port<L>::clock(false) exists for it).
- * 2. THE INPUT BUFFER IS ALWAYS ON in input, output and AF modes and OFF
+ * 2. The input buffer is always on in input, output and AF modes and off
  *    in analog mode (7.3.1). No enable bit to remember: read() reads
  *    the pad whenever the pin is not analog. Analog mode is the reset
  *    state of every pin except PA13/PA14 (SWD) and is also the
  *    low-power parking state.
- * 3. THERE IS NO PIN INTERRUPT IN GPIO. Edge and level senses are the
+ * 3. There is no pin interrupt in GPIO. Edge and level senses are the
  *    EXTI's (ch. 13), reached through its own multiplexer, and
  *    stm32g0/exti.hpp is what owns them. Alternate functions are a
- *    PER-PIN 4-bit number (AFRL/AFRH), and which peripheral signal AFn
- *    means on a given pad is a table of the DATASHEET (DS13560 tables
+ *    per-pin 4-bit number (AFRL/AFRH), and which peripheral signal AFn
+ *    means on a given pad is a table of the datasheet (DS13560 tables
  *    13..24), not of the reference manual: a peripheral driver's pin
  *    claim names the AF and the app's static_asserts cannot check it
  *    against a header symbol, because the device header does not carry
  *    the pin table at all. The bench is the check.
  *
- * THE PACKAGE FACT is a port-level one, read off the device header in
+ * The package fact is a port-level one, read off the device header in
  * stm32g0/device_tables.hpp: ports A, B, C, D and F exist on every part,
- * E only on the G0B1/G0C1 class. Which PINS of a present port a package
+ * E only on the G0B1/G0C1 class. Which pins of a present port a package
  * bonds is finer than that and stays open (a Pin on an unbonded pad
  * configures a register nobody wired).
- *
- * CONCURRENCY. MODER/OTYPER/OSPEEDR/PUPDR/AFR are read-modify-write
- * fields with no set/clear twins, so configuring two pins of one port
- * from two contexts (a handler and the loop) can lose a field; the
- * configuring verbs are meant for setup and for FSM entry/exit actions
- * in kernel time. The VALUE verbs are BSRR/BRR stores - atomic by the
- * silicon - and are safe from any context, which is what PinRef's
- * set()/clear() in a bus AO's request depend on.
  */
 
 #pragma once
@@ -261,6 +273,10 @@ struct Pin {
     static void duty(uint16_t v) { if (v) set(); else clear(); }
 
     // ---- values (BSRR/BRR: atomic, any context) ----------------------------------
+    /// Drive the pad high / low / the other way, or read it: one store or
+    /// one load, atomic, from any context. The port must have been
+    /// configured first (its clock is then open); a store into an
+    /// unclocked port is dropped in silence.
     static void set()    { port().BSRR = mask; }
     static void clear()  { port().BRR = mask; }
     static void toggle() { P::out_toggle(mask); }
@@ -272,9 +288,13 @@ struct Pin {
 
     // ---- configuration (setup / kernel time) ------------------------------------
     /// Push-pull output, low speed, no pull, driving whatever ODR holds.
+    /// Opens the port's clock; a read-modify-write of the port's
+    /// registers, so setup or an active object's handler, not an
+    /// interrupt handler racing another configuring call (the header
+    /// comment says why).
     static void output(const PinConfig& cfg = {}) { P::configure_mask(mask, PinMode::output, cfg); }
-    /// Output that starts at a KNOWN level: the port's clock is opened
-    /// FIRST (a BSRR/BRR store into an unclocked port is dropped in
+    /// Output that starts at a known level: the port's clock is opened
+    /// first (a BSRR/BRR store into an unclocked port is dropped in
     /// silence, 5.2.17 - fact 1 above), then the value is written before
     /// the mode switches, so the pad never glitches through the old ODR.
     /// The second clock(true) inside output(cfg) is idempotent.
@@ -289,7 +309,10 @@ struct Pin {
     /// Analog mode: input buffer off, the reset and lowest-power state.
     static void analog() { P::configure_mask(mask, PinMode::analog, {}); }
     /// Hand the pad to a peripheral: AF `fn`, with the driver options in
-    /// `cfg` (an open-drain I2C line, a fast SPI clock).
+    /// `cfg` (an open-drain I2C line, a fast SPI clock). The number is
+    /// the datasheet's for that signal on that pad and nothing here can
+    /// check it; a peripheral's input reads a pad that is not in this
+    /// mode as low, whatever its level (docs/stm32g0/port.md).
     static void function(PinFunction fn, const PinConfig& cfg = {}) {
         P::configure_mask(mask, PinMode::alternate, cfg, fn);
     }
@@ -304,7 +327,7 @@ struct Pin {
 };
 
 /**
- * THE DEAD-BATTERY PULL-DOWNS, and why a GPIO header carries them.
+ * The dead-battery pull-downs, and why a GPIO header carries them.
  *
  * 7.3.16 and 5.x's SYSCFG_CFGR1: "Upon power on, internal pull-down
  * resistors on UCPD1 CC1 and CC2 pins are enabled (connected)", and the
@@ -327,7 +350,7 @@ struct Pin {
  */
 inline bool ucpd_dead_battery(uint8_t instance, bool on) {
     if (on || instance < 1u || instance > 2u) {
-        return false;   // the strobe only ever RELEASES; see 5.x's CFGR1
+        return false;   // the strobe only ever releases; see 5.x's CFGR1
     }
     uint32_t bit = 0;
 #if defined(SYSCFG_CFGR1_UCPD1_STROBE)

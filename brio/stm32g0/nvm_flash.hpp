@@ -1,47 +1,75 @@
 /*
  * nvm_flash.hpp
  *
- * The STM32G0's main flash as a FlashMedia (util/nv_heap.hpp): the
- * backends that let the target-independent block allocator and the
- * target-independent value journal run on this silicon, where the
- * storage and the running image share one array.
+ * The STM32G0's main flash as the storage behind the two util services
+ * a program keeps data in across power cycles: `MainFlash` is the media
+ * the block heap mounts (util/nv_heap.hpp's NvHeap, for records of
+ * some size), `MainFlashJournalZone` the media the value journal mounts
+ * (util/nv_journal.hpp's NvJournal, for small values saved often), and
+ * `MainFlashPartition` is where the line between them is drawn. A
+ * program names a media once, as the first argument of its service,
+ * and never calls this header's verbs itself:
  *
- * THE STORAGE ATTIC IS BANK 2, and that choice is the whole design.
+ *     brio::NvHeap<brio::MainFlash, 8, 2> heap;
+ *     brio::NvJournal<brio::MainFlashJournalZone, 6, 32, 1> journal;
+ *     heap.mount();        // reads only; refuses on the wrong silicon
+ *     journal.mount();
  *
- * This part has 512 Kbytes of flash in TWO BANKS of 256 (RM0444 table
+ * Both media live in the part's second flash bank, and they exist on
+ * the dual-bank parts alone: `geometry_matches_silicon()` asks the size
+ * register and the linker's own end symbol at run time, and on any
+ * other part or link both mounts refuse with bad_geometry, having
+ * written nothing.
+ *
+ * Which context does what. The services call program() and erase()
+ * from the context they are driven from - setup in main() or an active
+ * object's handler (an active object is a brio task the kernel serves
+ * one event at a time), one context at a time, which is the services'
+ * own rule. Each call blocks for the flash's work (a page erase is
+ * 22..40 ms) while the code, which the link holds in the other bank,
+ * keeps executing; interrupts stay enabled throughout, so a handler
+ * that fires during an erase runs at once. The flash engine is unlocked
+ * for the one call and locked again on the way out. A buffer handed to
+ * program() or read() is the caller's and is used during the call only.
+ * The services never program a cell twice between erases, which is the
+ * one promise the silicon asks of them.
+ *
+ * The storage attic is bank 2, and that choice is the whole design.
+ *
+ * This part has 512 Kbytes of flash in two banks of 256 (RM0444 table
  * 11), and three of the chapter's facts point the same way:
  *
- *  - READ-WHILE-WRITE (3.3.9): programming or erasing one bank leaves
- *    reads of the OTHER bank running. Inside one bank a read stalls the
+ *  - Read-while-write (3.3.9): programming or erasing one bank leaves
+ *    reads of the other bank running. Inside one bank a read stalls the
  *    bus until the operation ends (3.3.6) - which, for code executing
  *    from that bank, means the CPU stops for the whole 22..40 ms of a
  *    page erase. So a program that stores a record while it runs must
  *    store it in the bank it does not execute from. That is what makes
  *    an ordinary NvJournal::save() legal from the main loop here.
  *
- *  - ERRATUM ES0548 2.2.10 (LIVE, no workaround): the prefetch may fail
- *    when the CPU BRANCHES ACROSS BANKS. The erratum's own note then
+ *  - Erratum ES0548 2.2.10 (live, no workaround): the prefetch may fail
+ *    when the CPU branches across banks. The erratum's own note then
  *    lists what stays safe, first item: "EEPROM emulation or other data
  *    storage in bank 2". Code must not straddle the banks; data in the
  *    far bank is the vendor's own sanctioned use of the feature.
  *
- *  - A CONSTANT ZONE. stm32g0/../ld/stm32g0b1re.ld gives the linker BANK
- *    1 ONLY (256 K of rom), so nothing the compiler emits can land in
+ *  - A constant zone. stm32g0/ld/stm32g0b1re.ld gives the linker bank
+ *    1 only (256 K of rom), so nothing the compiler emits can land in
  *    bank 2. The heap's floor and the journal's home are therefore
- *    CONSTANTS and not linker symbols that move with every build. The
+ *    constants and not linker symbols that move with every build. The
  *    linker script's own `__brio_rom_end` is
  *    read back here as the proof, so a script edited back to 512 K
  *    closes the storage instead of letting an image grow into it.
  *
- * ADDRESSES HERE ARE OFFSETS FROM 0x0800 0000, not absolute, and that is
+ * Addresses here are offsets from 0x0800 0000, not absolute, and that is
  * a decision with a reason. util/nv_heap.hpp numbers erase units in a
  * uint16_t (NvBlockEntry::first_page), so a media whose addresses are
  * absolute must sit below page 65536 - which this part's bank 2 at
- * 0x0804 0000 does NOT: 0x08040000 / 2048 is 65664, one page past the
+ * 0x0804 0000 does not: 0x08040000 / 2048 is 65664, one page past the
  * field. Numbering the media from zero is the contract's other allowed
  * convention, and it costs one addition per access.
  *
- * THE ARRAY IS PARTITIONED, because this target has two storage classes
+ * The array is partitioned, because this target has two storage classes
  * and one array to put them in:
  *
  *   pages 0..125 of bank 2   MainFlash             252 K  blocks
@@ -52,19 +80,19 @@
  *                                                         (util/nv_journal.hpp),
  *                                                         two 2 K halves
  *
- * The journal's two halves are ONE PAGE each, which is the smallest a
+ * The journal's two halves are one page each, which is the smallest a
  * half may be (erasing one must not take the other down) and is already
  * 256 write cells - the geometry assertion in util/nv_journal.hpp,
  * (max_ids + 2) x max_entry_cells <= half_cells, is then satisfied by
  * anything up to 40 ids of 32-byte payloads (a 32-byte value costs
- * ceil((12 + 32) / 8) = 6 cells). Both bounds are anchored to the TOP of
+ * ceil((12 + 32) / 8) = 6 cells). Both bounds are anchored to the top of
  * the part so each user's home is anchored to the silicon in turn.
  *
- * THE GRANULARITIES ARE FAR APART: an erase takes down a PAGE of 2048
- * bytes and a program writes a DOUBLE WORD of 8. Code that says "page"
+ * The granularities are far apart: an erase takes down a page of 2048
+ * bytes and a program writes a double word of 8. Code that says "page"
  * for both is code that is wrong.
  *
- * ERRATUM ES0548 2.2.3 IS UNREACHABLE BY CONSTRUCTION here, and it is
+ * Erratum ES0548 2.2.3 is unreachable by construction here, and it is
  * worth saying which construction. 3.3.8 makes one exception to the
  * write-once rule - a location may be overwritten if the value is all
  * zeros - and the erratum says that exception does not work on this
@@ -74,11 +102,11 @@
  * special-case zeros either, and a caller that tries gets the silicon's
  * PROGERR back unedited.
  *
- * THE BUILD ID is a link-time constant:
+ * The build id is a link-time constant:
  * stm32g0/CMakeLists.txt passes -Wl,--defsym,__nvheap_build_id=<newest
  * source mtime> to every image, so an unchanged tree relinks to the same
- * bytes. A pointer is 32 bits here, so the symbol's ADDRESS is the value.
- * It is recorded in every map version and NOTHING decides on it - a
+ * bytes. A pointer is 32 bits here, so the symbol's address is the value.
+ * It is recorded in every map version and nothing decides on it - a
  * block's validity is its checksum's business.
  */
 
@@ -142,7 +170,7 @@ struct MainFlashPartition {
      * is drawn for: 512 Kbytes in two banks, with everything the linker
      * placed stopping at the bank boundary.
      *
-     * A RUNTIME question, and it has to be. The device-select define is
+     * A run-time question, and it has to be. The device-select define is
      * STM32G0B1xx for the 128, 256 and 512 Kbyte members alike, so the
      * flash size is only knowable from the size register; and whether
      * the image was linked into one bank is only knowable from the
@@ -176,12 +204,14 @@ struct MainFlashOps {
      * would otherwise be able to program the running image, and the
      * silicon would carry it out.
      *
-     * THE UNLOCK WINDOW IS THIS CALL. FLASH_CR is unlocked here and
+     * The unlock window is this call. FLASH_CR is unlocked here and
      * locked again on the way out, so the register spends the program's
      * own microseconds writable and the rest of the program's life shut
      * - the cheapest form of the discipline the chapter asks for, and
      * the one that makes a wild store into FLASH_CR a no-op rather than
-     * an erase.
+     * an erase. Blocks until the last double word is programmed; false
+     * means out of bounds, an engine that would not unlock, or an error
+     * flag the engine raised.
      */
     static bool program(uint32_t offset, std::span<const uint8_t> src,
                         uint32_t floor, uint32_t ceiling) {
@@ -203,7 +233,7 @@ struct MainFlashOps {
         return err == 0u;
     }
 
-    /// One page. Same bounds, same window.
+    /// One page. Same bounds, same window; blocks for the erase, 22..40 ms.
     static bool erase(uint32_t offset, uint32_t floor, uint32_t ceiling) {
         if (offset < floor || offset >= ceiling ||
             (offset % Flash::page_size) != 0u) {
@@ -236,7 +266,9 @@ struct MainFlashOps {
 
 /**
  * The heap's share of bank 2 behind the FlashMedia contract. All static:
- * there is one flash, and it is a piece of hardware.
+ * there is one flash, and it is a piece of hardware. The verbs are the
+ * contract's, called by NvHeap and not by the program; their context,
+ * blocking and ownership are the file header's.
  */
 struct MainFlash {
     MainFlash() = delete;

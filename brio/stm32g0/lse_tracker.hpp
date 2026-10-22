@@ -1,29 +1,55 @@
 /*
  * lse_tracker.hpp
  *
- * THE CORE MEASURED AGAINST THE LSE CRYSTAL, ALL THE TIME, BY HARDWARE -
- * the frequency measurement RM0444 5.2 draws for TIM16 (figure 13: TI1
- * taken from LSI, LSE, the RTC wake-up or MCO2 by TIM16_TISEL), turned
- * from a one-shot measurement into a running one.
+ * The core clock's real rate, for a program that needs to know it:
+ * `LseTracker<dma, channel, entries>` measures the timer clock against
+ * the LSE crystal all the time, by hardware, and answers in hertz or in
+ * ppm over any recent stretch - what a program that times something
+ * against the core (a receiver's frames, a run's duration) reads its
+ * stretch with. It is the frequency measurement RM0444 5.2 draws for
+ * TIM16 (figure 13: TI1 taken from LSI, LSE, the RTC wake-up or MCO2 by
+ * TIM16_TISEL), turned from a one-shot measurement into a running one.
  *
- * WHY A RUNNING ONE. This family's boards run the core on HSI16 through
+ *   using Tracker = brio::LseTracker<1, 2>;     // DMA1 channel 2, 1024 entries
+ *   Tracker::start(clock);                      // after the LSE is ready
+ *   ...                                         // a quarter second later
+ *   const auto hz = Tracker::hz_over(counts);   // the core over that span
+ *
+ * Who calls what. start() and stop() are main-context verbs - setup, or
+ * the handler of an active object (a brio object with an event queue the
+ * kernel serves one event at a time); start() refuses until the crystal
+ * is ready and waits for nothing. Between them nothing runs on the CPU:
+ * the timer captures and the DMA channel copies, with no interrupt. The
+ * readings - hz(), hz_over(), ppm_over(), filled() - are main-context
+ * reads too: a reading walks the ring the channel is writing, masks
+ * nothing (it keeps a guard of entries clear of the write head instead)
+ * and takes some 1.3 ms for a whole 4096 ring at 64 MHz, too long for an
+ * interrupt handler. The ring is the tracker's own static array; nothing
+ * the caller passes is kept.
+ *
+ * What it does not do: start the crystal. The LSE is the RTC domain's
+ * (RtcDomain::lse_enable(), behind PWR's DBP gate), so start() refuses
+ * until RtcDomain::lse_ready(). It owns Tim<16> and the DMA channel it is
+ * given from start() to stop().
+ *
+ * Why a running one. This family's boards run the core on HSI16 through
  * the PLL (a Nucleo-64's HSE is not fitted), and the HSI16 does not just
- * sit off nominal by its trim - it WANDERS, hundreds of ppm over seconds
+ * sit off nominal by its trim - it wanders, hundreds of ppm over seconds
  * (docs/stm32g0/clock.md, "The core against the LSE, tracked"). A rate
  * measured once is no time base a minute later; a rate measured over the
  * stretch that matters - the span a receiver timed, the window a run
  * took - is.
  *
- * THE ENGINE, from the chapter's parts:
+ * The engine, from the chapter's parts:
  *  - TIM16 channel 1 capturing TI1 = LSE (TISEL code 2,
- *    RtcDomain::lse_tim16_ti1_code), every EIGHTH rising edge (ICPSC
+ *    RtcDomain::lse_tim16_ti1_code), every eighth rising edge (ICPSC
  *    /8, the largest capture prescaler: 4096 captures a second instead
  *    of 32768), through the input filter (ICF 8: six samples at
  *    fDTS / 8 - an unfiltered capture of an internal clock line
  *    over-captures, docs/stm32g0/rtc.md), the counter free-running over
  *    16 bits at TIMPCLK with no prescaler;
  *  - a DMA channel on TIM16_CH1's request (DMAMUX, RM0444 table 55)
- *    copying each capture, CIRCULAR, into a ring of `entries` half-words
+ *    copying each capture, circular, into a ring of `entries` half-words
  *    - no CPU and no interrupt per capture, ever;
  *  - the rate over the last k captures is then the sum of k 16-bit
  *    differences (each interval is 8 x TIMPCLK / 32768 counts - 15625 at
@@ -35,8 +61,8 @@
  * DMA request does); a capture every edge (eight times the bus traffic
  * for a resolution the averaging already gives).
  *
- * THE WALK IS THE READ, AND IT RACES THE CHANNEL. A capture lands every
- * 244 us and overwrites the OLDEST entry, so hz() walks back from the
+ * The walk is the read, and it races the channel. A capture lands every
+ * 244 us and overwrites the oldest entry, so hz() walks back from the
  * channel's write position, one subtraction and one add an entry, no
  * division inside (a modulo a step, a library call on this core, was
  * measured costing several capture periods and reading a torn ring), and
@@ -44,17 +70,7 @@
  * instructions an entry in the release listing, some 1.3 ms for the
  * whole of a 4096 ring at 64 MHz, the one 64-bit division after the
  * loop. Its result is the timer clock's rate over the k x 244 us that
- * ENDED when it began.
- *
- * WHAT IT DOES NOT DO: start the crystal. The LSE is the RTC domain's
- * (RtcDomain::lse_enable(), behind PWR's DBP gate), so start() refuses
- * until RtcDomain::lse_ready(). It owns Tim<16> and the DMA channel it is
- * given from start() to stop().
- *
- *   using Tracker = brio::LseTracker<1, 2>;     // DMA1 channel 2, 1024 entries
- *   Tracker::start(clock);                      // after the LSE is ready
- *   ...                                         // a quarter second later
- *   const auto hz = Tracker::hz_over(counts);   // the core over that span
+ * ended when it began.
  */
 
 #pragma once
@@ -101,8 +117,9 @@ public:
      * timer clock the reading is checked against (TIMPCLK, tim_clock_hz):
      * a reading more than five per cent from it is not believed - no ring
      * of captures yet, or not this crystal. False while the LSE is not
-     * ready, or when a verb refuses. The first full walk is a quarter
-     * second away at the default size (filled()).
+     * ready, or when a verb refuses; a tracker already running is stopped
+     * first either way. A main-context verb that does not wait. The first
+     * full walk is a quarter second away at the default size (filled()).
      */
     template <typename Clock>
     static bool start(const Clock& clock) {
@@ -170,8 +187,11 @@ public:
 
     /**
      * The timer clock's rate over the last `k` capture intervals (k x
-     * 244 us), in hertz; nothing when the ring does not hold k of them
-     * or the reading is not believable. `k` beyond the ring is clipped.
+     * 244 us), in hertz; nothing when the ring holds no complete interval
+     * yet or the reading is not believable. `k` beyond what filled()
+     * allows is clipped to it, so the stretch may be shorter than asked.
+     * A main-context read of the ring the channel writes (the opening
+     * comment); no mask, no wait.
      */
     static std::optional<uint32_t> hz(uint16_t k) {
         const uint16_t have = filled();

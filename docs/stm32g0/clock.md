@@ -1,6 +1,47 @@
 # Clock - RCC, PWR (STM32G0)
 
-Documents of record: RM0444 Rev 6 - RCC ch. 5 (the tree 5.2, the
+This document is for a programmer who needs the STM32G0 running at a
+chosen rate, and for one whose program changes rate while it runs. The
+clock task brings the chip from its reset state (HSI16, the 16 MHz
+internal oscillator, undivided) to the rate the program names, in the
+order the silicon requires (flash wait states raised before a rise and
+lowered after a fall, the regulator range, the PLL configured only
+while stopped), and it is the one place the rate is stated: every
+driver takes the clock as an argument and derives its divisors from
+`Clock::hz` ([design/clock.md](../design/clock.md) is the model). A
+static clock is a type; a dynamic one, `DynamicClock`, is a pack of
+such types the program switches between, with every driver on the bus
+clock listed so that it is told of each change.
+
+The smallest use is the 64 MHz rate every kernel app runs, first thing
+in `main()`:
+
+```cpp
+using SysClock = brio::Clock<brio::ClockSource::pll, 64'000'000>;
+constexpr SysClock clock;
+const bool ok = SysClock::init();   // first thing in main(); the prefetch on
+```
+
+What decides correctness even there: `init()` runs before any driver's
+own `init(clock, ...)`, because a driver's divisor is computed from the
+rate the clock claims, and a baud rate set at 16 MHz is wrong at 64; and
+the answer is read, since `false` means a root did not report ready or
+a switch did not take, and the program is then not at the rate its type
+says. On a dynamic clock the prerequisite is the list of users: a driver
+on the bus clock that is not listed does not compile, the timers refuse
+a dynamic clock altogether, and a console that must keep talking across
+a switch runs on HSI16 or LSE, kernel clocks that do not move with the
+system clock.
+
+The page continues with the documents of record, what the silicon does,
+the types and verbs, how to use it (the static rates and the dynamic
+ladder), the bench findings, what the two smaller parts change,
+`LseTracker` (the core measured against the crystal) and what is not
+covered.
+
+## Documents of record
+
+RM0444 Rev 6 - RCC ch. 5 (the tree 5.2, the
 registers 5.4, the clock output 5.2.16), FLASH 3.3.4 (the latency table
 13 and the ordering rule), PWR 4.1.4 (voltage scaling) and 4.3.2
 (low-power run) - and errata ES0548 Rev 3 item 2.2.4, a stated caveat.
@@ -12,7 +53,7 @@ table is indexed by the voltage range, and the range and low-power-run
 setters a rate's own `apply()` sequences - and `stm32g0/lse_tracker.hpp`
 (`LseTracker<dma, channel, entries>`), 5.2's frequency measurement with
 TIM16 turned into a running one ("The core against the LSE, tracked"
-below). ONE CHAPTER, ONE OWNER: chapter
+below). One chapter, one owner: chapter
 4 lives in [pwr.md](pwr.md) and RCC_BDCR - LSE, RTCSEL, RTCEN, BDRST -
 lives in [rtc.md](rtc.md), because that register is unreachable without
 the RTC domain's own write gate and its choices are one-way. The family
@@ -143,9 +184,11 @@ serial port really divides.** USARTnSEL picks PCLK / SYSCLK / HSI16 /
 LSE for USART1..3 and for both LPUARTs (5.4.21), and a port on HSI16 or
 LSE does not move when SYSCLK does - which is what makes `rebase()` a
 no-op for it, on purpose. `kernel_clock(pos, code)` is the one verb, and
-each peripheral publishes its own field position from the reserve.
+each peripheral publishes its own field position from the reserve
+(`stm32g0/device_tables.hpp`, the table of what each part has, read off
+the device header).
 
-**WHO FOLLOWS A SYSCLK CHANGE, and who refuses one** - the inventory
+**Who follows a SYSCLK change, and who refuses one** - the inventory
 the build enforces through `clock_follows` (a driver initialized with a
 dynamic clock must be among its users, or it does not compile): the
 `Uart` FOLLOWS (a `ClockUser` whose `rebase` drains and reloads BRR,
@@ -179,7 +222,7 @@ which is how a Stop is told from a Sleep and how the tickless timebase
 priced its lap wakes ([tim.md](tim.md) for the timer half,
 [platform.md](platform.md) for the lap).
 
-**RCC_CCIPR2 IS A SECOND REGISTER AND IT NEEDED A SECOND VERB.** The
+**RCC_CCIPR2 is a second register and it needed a second verb.** The
 I2S, USB and FDCAN selects live there (5.4.22) and not in the CCIPR, and
 the register is a STRUCT MEMBER only the G0B1/G0C1 header declares - so
 the reserve hands back a pointer to it (`rcc_ccipr2()`, null elsewhere,
@@ -190,8 +233,8 @@ FDCAN's own select is driven from `fdcan.hpp` ([fdcan.md](fdcan.md)).
 Its other two codes - PLLQCLK and HSE - are refused by that driver,
 because nothing here builds either.
 
-**RCC_CR.HSIKERON is NOT the same mechanism as a peripheral's clock
-REQUEST**, and the difference matters wherever Stop does. 33.5.21: a
+**RCC_CR.HSIKERON is not the same mechanism as a peripheral's clock
+request**, and the difference matters wherever Stop does. 33.5.21: a
 USART whose kernel clock is gated in Stop asks for it back on the
 falling edge of its RX line and releases it again if the wake-up event
 is not verified - the oscillator starts ON DEMAND and only for as long
@@ -378,7 +421,8 @@ phase.
 and write bank 2 while the code runs from bank 1, are green on it.
 
 **The dynamic clock on silicon** (`test_stm32_clock`, ten letters, 42
-verdicts, on the tickless platform with the console on HSI16 and USART1
+verdicts - a letter is one command key of the suite's console and the
+group of verdicts it runs - on the tickless platform with the console on HSI16 and USART1
 as a single-wire loop on PCLK as the rebased user; TIM2 on MCO =
 HSI16/64 as the wall, weighed at 250 kHz within HSI16's 1 % of the
 crystal):

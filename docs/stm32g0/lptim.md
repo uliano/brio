@@ -1,6 +1,50 @@
 # Low-power timers (STM32G0)
 
-Documents of record: RM0444 Rev 6 - LPTIM ch. 26, the kernel-clock
+This document is for a programmer who needs a timer that keeps working
+while the chip sleeps: a periodic wake from Stop, a PWM that runs off
+the 32.768 kHz crystal, a pulse counter that needs no oscillator at all,
+a timeout that a hardware trigger keeps feeding. `Lptim<n>` (n = 1, 2)
+is the instance, one function per register fact, and the tasks over it
+are the shapes a program uses: `LptimPeriodicTick`, `LptimPwm`,
+`LptimCounter`, `LptimPulseCounter`, `LptimTimeout`, `LptimEncoder`.
+Over the same timer two other headers build the kernel's tickless
+timebase (`LptimTicker`, [platform.md](platform.md)) and a sleep site
+([pwr.md](pwr.md)).
+
+The smallest use, a periodic interrupt that survives a Stop, on the
+crystal:
+
+```cpp
+using Beat = brio::LptimPeriodicTick<brio::Lptim<1>>;
+
+brio::Lptim<1>::init();
+brio::Lptim<1>::kernel_clock(brio::LptimClock::lse);
+Beat::setup(brio::LptimPrescaler::div32, 1023);   // 1 Hz off 32768/32
+brio::Lptim<1>::wake_line(true);                  // EXTI 29, or no wake
+brio::Nvic::enable(brio::Lptim<1>::irq());
+
+extern "C" void TIM6_DAC_LPTIM1_IRQHandler() { (void)brio::Lptim<1>::isr(); }
+```
+
+What decides correctness even there. The counter's clock is chosen
+before the configuration, and a clock the program names must be running
+(the LSE belongs to the RTC domain, [rtc.md](rtc.md)). The timer's two
+register halves have opposite rules, which the driver checks on every
+call: the configuration registers may be written only while the timer
+is disabled, the compare and the auto-reload only while it is enabled,
+and a write to those two is not finished when the store returns. Two
+errata shape the driver: `disable()` is a peripheral reset and forgets
+the configuration, because the erratum forbids clearing the enable bit;
+and flags are cleared only inside the interrupt handler (`clear_flags()`
+refuses from thread mode while any interrupt is enabled), so a handler
+on the shared vector calls `isr()`, which clears them in the order the
+erratum requires. The vector's name differs between parts; a program
+for more than one board binds `BRIO_STM32G0_LPTIM1_HANDLER`
+([README.md](README.md), "Vector names across the boards").
+
+## Documents of record
+
+RM0444 Rev 6 - LPTIM ch. 26, the kernel-clock
 multiplexer 5.4.21 (RCC_CCIPR), the bus enable and reset 5.4.19/5.4.11,
 the low-power modes 5.3 and 26.5, the EXTI line map table 65, the
 interrupt table 12.3 (table 61), the DMAMUX trigger inputs table 56;
@@ -11,8 +55,11 @@ column. Driver: `stm32g0/lptim.hpp`; the third sleep site over it is
 [pwr.md](pwr.md); the tickless kernel timebase over it is
 `LptimTicker` in `stm32g0/lptim_ticker.hpp` and is documented in
 [platform.md](platform.md). The per-instance presence, vector, EXTI and
-DMAMUX facts come from `stm32g0/device_tables.hpp`. Bench suites:
-`test_stm32_lptim` (10 letters, 85 verdicts, wireless) and
+DMAMUX facts come from `stm32g0/device_tables.hpp` (the reserve: the
+table of what each part has, read off the device header). Bench suites:
+`test_stm32_lptim` (10 letters, 85 verdicts, wireless; a letter is one
+command key of the suite's console and the group of verdicts it runs)
+and
 `test_stm32_tickless` (the timebase). Family fixtures
 `test/family_stm32g0/lptim.cpp` and `lptim_ticker.cpp` plus their
 negatives under `brio check stm32g0` (the third sleep site's own
@@ -21,8 +68,8 @@ two live with `test/family_stm32g0/sleep.cpp` - see [pwr.md](pwr.md)).
 ## What the silicon does
 
 A 16-bit up-counter with a 3-bit power-of-two prescaler, one compare and
-one auto-reload, whose point is that IT DOES NOT NEED THE REST OF THE
-CHIP. Two things follow from that and shape everything else:
+one auto-reload, whose point is that it does not need the rest of the
+chip. Two things follow from that and shape everything else:
 
 **The counter's clock is chosen twice.** `RCC_CCIPR.LPTIMnSEL` picks the
 KERNEL clock - PCLK, LSI, HSI16 or LSE, the same four for both instances
@@ -37,7 +84,7 @@ needs the kernel clock to be faster than the input and the prescaler at
 /1 (26.4.12).
 
 **The APB side and the kernel side are different clock domains, and the
-enable rules are OPPOSITE on the two halves.** This is the chapter's
+enable rules are opposite on the two halves.** This is the chapter's
 easiest mistake and every verb in the driver checks its own side:
 
 | register | may be written | citation |
@@ -78,7 +125,7 @@ clearing `CR.ENABLE` near an interrupt can freeze the wake-up signal in
 its active state, after which the device cannot enter Stop at all; the
 workaround is not a sequence but a SUBSTITUTION - "do not clear its
 ENABLE bit... instead, reset the whole LPTIMx peripheral via the RCC
-controller". So NO VERB IN THIS DRIVER WRITES ENABLE = 0: `disable()`
+controller". So no verb in this driver writes ENABLE = 0: `disable()`
 and `reset()` are both an `RCC_APBRSTR1` pulse, and the price is that a
 disable forgets the configuration. ES0548 2.8.2: with at least one
 interrupt enabled, clearing a flag whose interrupt is DISABLED at the
@@ -123,13 +170,13 @@ it, with an external clock or with a prescaler other than /1 (table 135,
 this instance and this part; and the UP/DOWN interrupt enables where
 encoder mode is absent (26.7.3's notes).
 
-ONE REFUSAL HAS NO COMPILE-TIME TWIN AND CANNOT HAVE ONE: 26.4.5 wants
+One refusal has no compile-time twin and cannot have one: 26.4.5 wants
 an internal clock present before a glitch filter is switched on, and
 whether the selected kernel clock is RUNNING is an RCC fact. So a
 nonzero CKFLT or TRGFLT is refused by `configure()`, where
 `kernel_clock_running()` can be asked, and not by the constexpr checker.
 
-`clear_flags()` IS ES0548 2.8.2 AS CODE: it refuses (false, nothing
+`clear_flags()` is ES0548 2.8.2 as code: it refuses (false, nothing
 written) when IER is nonzero and the core is in thread mode
 (`__get_IPSR() == 0`), and `isr()` does the erratum's ORDER itself - the
 pending flags whose interrupt is DISABLED first, then the enabled ones,
@@ -139,7 +186,7 @@ register is an ordinary write-one-to-clear again, which is what makes
 the polling tasks legal rather than lucky.
 
 `LptimPad<sel>` hands a pad to IN1, IN2, ETR or OUT. The AF number is
-the DATASHEET'S and no symbol of the device header can check it - the
+the datasheet's and no symbol of the device header can check it - the
 bench is the only check there is.
 
 The tasks are thin: `LptimPwm<L, top>` (a `PwmChannel`),
@@ -213,9 +260,10 @@ Watch::setup(brio::LptimTrigger::rtc_alarm_a,
 
 Every number below is `test_stm32_lptim`'s, measured against the RTC's
 sub-second counter on the LSE crystal (PREDIV_A 0: a 30.5 us stopwatch)
-or against SysTick's cycle count at 64 MHz. The suite is WIRELESS: all
+or against SysTick's cycle count at 64 MHz. The suite is wireless: all
 four LPTIM1 signals are on port B at AF5 and LPTIM2's three are PC0, PC3
-and PD6 at AF2, and each pad is walked by its own internal pull - which
+and PD6 at AF2, and each pad is walked by its own internal pull (read
+under its pull-up, then under its pull-down: a pull-walk) - which
 letter a proves for the first four and letter j for the last three
 before anything rests on them.
 

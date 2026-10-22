@@ -1,6 +1,57 @@
 # Platform - what the kernel stands on (STM32G0)
 
-Documents of record: RM0444 Rev 6 - the Cortex-M0+ summary ch. 12
+This document is for a programmer putting a brio program on an STM32G0.
+It describes what the kernel stands on here, the platform, and the two
+timebases a program can run its time events on. A brio kernel asks the
+chip for a handful of things, stated by the kernel's `Platform` concept
+(a concept is a compiler-checked set of requirements on a type;
+[design/kernel.md, "Platform: what the machine provides"](../design/kernel.md#11-platform-what-the-machine-provides-kernelplatformhpp)):
+a way to mask interrupts for a critical section, a way to sleep until
+the next interrupt without losing one that arrives at the wrong moment,
+a source of time, a breakpoint for a panic, and a record a panic leaves
+for the next boot. `Stm32g0Platform<TB>` is this family's answer, and
+`TB` is its timebase: the SysTick `Ticker`, a 1000 Hz interrupt that
+stops when the chip enters a Stop mode, or `LptimTicker`, the low-power
+timer on the 32.768 kHz crystal, which keeps counting through a Stop and
+lets the kernel sleep straight to its next deadline with no periodic
+interrupt at all (a tickless program).
+
+The smallest use is the SysTick timebase: the lines of `blink`'s target
+glue that concern the platform, quoted from the file
+([the first program](../learn/first-program.md)):
+
+```cpp
+using P = brio::Stm32g0Platform<>;
+extern "C" void SysTick_Handler() { brio::Ticker::tick(); }  // tick + idle wakeup
+...
+    SysClock::init();             // HSI16 -> PLL -> SYSCLK = 64 MHz
+    brio::Ticker::init(clock);    // SysTick timebase (runs through WFI sleep)
+    brio::enable_interrupts();
+    brio::Tenuto<P, Blinker, Supervisor>::run();  // never returns
+```
+
+Three things decide whether that works. The clock task must have run
+first (`SysClock::init()`, [clock.md](clock.md)): the ticker computes
+its reload from the clock's rate. The SysTick vector must be bound to
+`Ticker::tick()` by the program, as above; the kernel binds no vector,
+and a program that forgets it compiles, runs and never advances time.
+And interrupts must be enabled before `run()`
+(`brio::enable_interrupts()`), since the kernel sleeps between events
+and the tick is what brings it back. On the tickless timebase the
+crystal must be running: `LptimTicker::init()` returns false when it is
+not, and a program that ignores that answer has a kernel with no time.
+
+The rest of this page, in order: the documents of record; what the
+silicon does (the interrupt masking, the vector table and its shared
+lines, the idle hook, the two timebases, the SRAM parity option, the
+breakpoint); the types and verbs; how to use it, with the tickless
+variant; the bench findings, measured to the cycle; "Code in SRAM", an
+opt-in placement of two drivers' hot paths; what the two smaller parts
+change; and what is not covered.
+
+## Documents of record
+
+RM0444 Rev 6 - the Cortex-M0+ summary ch. 12
 (NVIC) with ARM's ARMv6-M ARM behind it, and PWR ch. 4 for what a WFI
 here really enters ([pwr.md](pwr.md) owns that chapter) - and errata
 ES0548 Rev 3
@@ -31,7 +82,7 @@ NVIC orders PREEMPTION between handlers with two priority bits (four
 levels, 0 most urgent); it never limits the reach of a critical
 section. Core exceptions (SysTick among them) have no NVIC enable bit.
 
-**The vector table is 16 + 32 entries and SHARED LINES ARE THE RULE.**
+**The vector table is 16 + 32 entries and shared lines are the rule.**
 RM0444 table 61 gives 32 positions to more peripherals than that:
 USART2 shares position 28 with LPUART2, USART3/4/5/6 share 29 with
 LPUART1, TIM3 with TIM4, TIM6 with DAC and LPTIM1, and so on. A
@@ -51,7 +102,7 @@ interrupt. Both are measured to the cycle (letters `w` and `k`, below). What the
 0 out of reset and this file never writes it, so a bare WFI is Sleep -
 HCLK, SysTick and every peripheral keep running (5.3) - and with
 `stm32g0/sleep.hpp`'s site having armed a Stop, the same WFI is that
-Stop. **THE IDLE HOOK KNOWS NOTHING OF THE DEPTH**, and that is worth
+Stop. **The idle hook knows nothing of the depth**, and that is worth
 stating beside the other two targets: the AVR's `idle()` must honour a
 standing SEN bit and the SAM C21's carries an erratum guard, while this
 hook writes neither SCR.SLEEPDEEP nor PWR_CR1.LPMS - this silicon
@@ -62,9 +113,9 @@ alone.
 (63999 at 64 MHz, read back over SWD); in Stop the core clocks stop and
 so does the kernel's time - the samc21 standby situation, and it has the
 same two answers here: `Stm32g0SleepSite` keeps the honest restriction and
-`Stm32g0TimedSleepSite` LIFTS it, resynchronizing from the RTC through
-`advance()` ([pwr.md](pwr.md)). THE TICK ITSELF DOES NOT DEFEAT A DEEP
-SLEEP, though a debugger can make it look so: 4.3.3 makes a WFI a no-op
+`Stm32g0TimedSleepSite` lifts it, resynchronizing from the RTC through
+`advance()` ([pwr.md](pwr.md)). The tick itself does not defeat a deep
+sleep, though a debugger can make it look so: 4.3.3 makes a WFI a no-op
 with an interrupt pending, but a Stop once taken stops HCLK and SysTick
 with it, and a 250 ms Stop asked for with a 1 kHz SysTick armed lasts
 its 250 ms (measured). What cuts it to 1 ms is `DBGMCU_CR.DBG_STOP`,
@@ -80,12 +131,12 @@ Ticker>`, and the other argument is `LptimTicker<>`: LPTIM1 clocked
 from the 32768 Hz LSE undivided, which keeps counting through Stop 0
 and Stop 1 (26.5), with the kernel tick its count shifted right by
 five - 1024 ticks a second, a power of two, so `millis()` is shifts
-and exact. A program on it is TICKLESS: no periodic interrupt at all,
+and exact. A program on it is tickless: no periodic interrupt at all,
 the kernel's optional `idle_until(deadline)` hook
-([../design/kernel.md](../design/kernel.md) section 11) places the
-loop's next deadline in the LPTIM's compare and one WFI covers the
-whole wait at whatever depth a sleep site armed, kernel time RUNS
-through the Stop, and the plain sleep site is the only site it takes
+([design/kernel.md, "Platform: what the machine provides"](../design/kernel.md#11-platform-what-the-machine-provides-kernelplatformhpp))
+places the loop's next deadline in the LPTIM's compare and one WFI
+covers the whole wait at whatever depth a sleep site armed, kernel time
+runs through the Stop, and the plain sleep site is the only site it takes
 (the timed ones refuse it at compile time: nothing stands still). What
 it gives up: one LPTIM and its vector, bound by the app to the ticker's
 `isr()`; SysTick keeps counting interrupt-less as `delay_us`'s cycle
@@ -98,7 +149,7 @@ CMPOK - and the four rules that follow are in `lptim_ticker.hpp`'s
 header and measured below.
 
 **SRAM survival across a reset is promised nowhere**, and the SRAM has
-a PARITY CHECK the factory option byte leaves DISABLED
+a parity check the factory option byte leaves disabled
 (FLASH_OPTR.RAM_PARITY_CHECK = 1): with it enabled, the first read of
 a never-written word - the panic breadcrumb's, after a power-on -
 would raise an NMI. The breadcrumb's magic word is what makes the
@@ -228,7 +279,9 @@ int main() {
 
 The reference suite is `test_stm32_platform` (ten letters in `z`, 71
 verdicts; letters `i` and `j` outside it reboot the board six times
-each - [reset.md](reset.md) carries the reset and watchdog half).
+each - [reset.md](reset.md) carries the reset and watchdog half). A
+letter is one command key of the suite's console and the group of
+verdicts it runs; `z` is the key that runs them all.
 What it measures of THIS chapter:
 
 - **PRIMASK nesting is nesting**: leaving an INNER critical section does

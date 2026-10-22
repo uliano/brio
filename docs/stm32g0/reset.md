@@ -1,6 +1,49 @@
 # Reset and the two watchdogs - why the program is running, and how to end it (STM32G0)
 
-Documents of record: RM0444 Rev 6 - 5.1 (the three kinds of reset),
+This document is for a programmer who wants to know at boot why the
+chip reset (a watchdog, the reset pin, a power loss, a software
+request), who wants a watchdog that reboots a program that stops
+serving its loop, or who needs to end a program on purpose. It covers
+the reset flags (`Reset`), the independent watchdog on its own
+low-speed oscillator (`Iwdg`), the window watchdog on the bus clock
+(`Wwdg`), the HardFault handler body that records a fault for the next
+boot (`hard_fault_reset`) and the panic reporter that resets
+(`ResetReporter`); the kernel's panic record itself is
+[design/kernel.md](../design/kernel.md)'s.
+
+The smallest use: read why the program is running, once at boot, and
+keep a watchdog with about a second of rope:
+
+```cpp
+const uint32_t why = brio::Reset::take_flags();   // once, at boot
+if (why & brio::ResetFlag::watchdog) { /* a recovery boot */ }
+
+(void)brio::Iwdg::arm(brio::IwdgConfig{
+    .prescaler = brio::IwdgPrescaler::div8,
+    .reload = 0x0EEE,
+});
+for (;;) {
+    brio::Iwdg::refresh();
+    // ... the loop that must keep running
+}
+```
+
+What decides correctness even there. The reset flags accumulate until
+software clears them, so the register is a history and not a cause:
+`take_flags()` reads and clears in one step, and a boot that reads
+without clearing sees every reset since the last clear. The
+independent watchdog's registers do not take a new value until the
+start key has clocked the block, which is why `arm()` starts the
+watchdog before it configures it, and why a window that no refresh
+could ever satisfy is refused before anything is written. And a
+watchdog reset stops the watchdog: the next boot does not inherit one it
+must feed (measured, against the family lore). A program that binds
+`HardFault_Handler` to `hard_fault_reset` gets a record of the fault on
+the next boot; nothing binds it for the program.
+
+## Documents of record
+
+RM0444 Rev 6 - 5.1 (the three kinds of reset),
 5.4.24 (RCC_CSR), ch. 28 (IWDG), ch. 29 (WWDG), 5.2.14 (the watchdog
 clock), 40.10.3 (the debug freeze register) - with DS13560 Rev 5 table
 46 (the LSI's 29.5..34 kHz) and table 73 (the IWDG's time-out grid)
@@ -22,7 +65,7 @@ Driver: `stm32g0/reset.hpp` (`ResetFlag`, `Reset`, `Iwdg`, `Wwdg`,
 reset flags are set by hardware and "cleared by setting the RMVF bit" -
 nothing else takes them down, and 5.4.24 adds that the register is
 "reset upon system reset, except for reset flags that are only reset
-upon power reset". This register is a HISTORY: the AVR's RSTFR habit,
+upon power reset". This register is a history: the AVR's RSTFR habit,
 not the SAM's exclusive RCAUSE, so the boot verb is read-and-clear
 (`take_flags()`) and what a boot sees is the delta since the last clear.
 And **PINRSTF is a catch-all**: 5.4.24 sets it "when a reset from the
@@ -40,7 +83,7 @@ on either side is a read-modify-write that preserves the other's bits.
 can.** It counts LSI, its registers sit in the VDD domain, and 28.3.1
 says "Once running, the IWDG cannot be stopped" - a sentence the Stop
 and Standby summaries (5.3) finish with the four words that matter,
-"except upon a reset". MEASURED, and worth stating because the family
+"except upon a reset". Measured, and worth stating because the family
 lore and both other brio targets teach the opposite: the boot after an
 IWDG reset outlives its own time-out several times over with nothing
 refreshing anything. A program does NOT inherit a watchdog it must feed
@@ -161,7 +204,9 @@ int main() {
 
 ## Bench findings
 
-`test_stm32_platform` on the Nucleo-G0B1RE at 64 MHz, nothing wired.
+`test_stm32_platform` on the Nucleo-G0B1RE at 64 MHz, nothing wired. A
+letter is one command key of the suite's console and the group of
+verdicts it runs; `z` is the key that runs them all.
 Six letters in `z` (53 verdicts) and letters `i` (26 verdicts) and `j`
 (20) outside it, each of which reboots the board six times and resumes
 from a `.noinit` token.

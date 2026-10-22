@@ -1,21 +1,28 @@
 /*
  * usart.hpp
  *
- * The USART (RM0444 ch. 33) in the two strata every brio serial driver
- * has (docs/design/serial.md):
+ * The STM32G0's USART (RM0444 ch. 33) as a serial port for a program:
+ * the console a program prints to, a line-oriented link, a byte
+ * transport to another chip, or one of the protocol shapes the
+ * peripheral offers (RS-485, LIN, smartcard, IrDA, a synchronous
+ * master). The header has the two strata every brio serial driver has
+ * (docs/design/serial.md is the stack above them):
  *
- *  Usart<n>              the RESOURCE: which instance, where its registers
+ *  Usart<n>              the resource: which instance, where its registers
  *                        are, its bus clock, its kernel-clock multiplexer
  *                        where it has one, its NVIC line, its EXTI wake
  *                        line, the enable discipline, the whole register
  *                        description of chapter 33 and the flag surface
- *                        in BOTH register views;
- *  UartTask<...>         the TASK: the asynchronous byte transport with
- *                        ring buffers and one ISR body - every console's
+ *                        in both register views - one function per
+ *                        register fact, for a program that drives the
+ *                        block by hand;
+ *  UartTask<...>         the task: the asynchronous byte transport with
+ *                        a transmit ring and a receive ring, both served
+ *                        by one interrupt body - every console's
  *                        personality, a ByteTransport for print() and
  *                        SerialPort. `Uart<n, pins, ...>` names it over a
  *                        Usart<n> and stm32g0/lpuart.hpp's `LpUart<n,
- *                        pins, ...>` names the SAME task over an
+ *                        pins, ...>` names the same task over an
  *                        Lpuart<n>: one implementation, two peripherals,
  *                        because chapter 34 is chapter 33 with a
  *                        different baud generator. Its public surface
@@ -23,43 +30,83 @@
  *                        lets util/serial_port.hpp and print() compile
  *                        here untouched.
  *
- * SCOPE. The chapter, whole, bar what is declined with a reason in
+ * The smallest use, the console on the Nucleo's virtual COM port, is
+ * written out at UartTask below: the two pads named with the alternate
+ * function the datasheet gives them, `using Serial = brio::Uart<2,
+ * console_pins>`, the instance's interrupt vector bound to
+ * Serial::isr() by the program, `Serial::init(clock, 115200)` after the
+ * clock task, then print(). Rs485 is a Uart with the driver enable
+ * filled in; four polled personalities over the same resource close the
+ * file - SyncHost (the synchronous master), IrdaLink, AutoBaud and
+ * Smartcard - each a few characters at a time, with no ring.
+ *
+ * Who calls what, and from where. init() and release() are setup verbs:
+ * main(), after the clock task and before interrupts are enabled
+ * globally; init() waits for nothing beyond the port clocks' enable
+ * readback. isr() is the interrupt body: the program's handler for the
+ * instance's vector calls it and nothing else does; it runs to
+ * completion like every interrupt handler in brio, and what it masks
+ * is the few instructions of the resource's read-modify-write verbs it
+ * calls. The transmit verbs (write_byte(), write_bulk(), and print()
+ * over them) and the receive verbs (read_byte(), read_bulk(),
+ * read_span() with consume()) belong to the main context - setup, or
+ * the handler of an active object, a brio object with an event queue
+ * the kernel serves one event at a time - and never to an interrupt
+ * handler: each ring has one producer and one consumer, and the
+ * interrupt body is the other end of both. Arming a transmit interrupt
+ * masks interrupts for a few instructions (the resource's
+ * interrupt-enable verbs read, modify and write a register the handler
+ * also writes, under stm32g0/nvic.hpp's InterruptGuard). Nothing in the
+ * task waits, except rebase() and set_baud(), main-context verbs that
+ * spin until the queued bytes have left the wire, each wait bounded so
+ * a wedged line cannot hang them. Storage: the rings are the task's own
+ * static arrays; write_bulk() copies the caller's span, which is free
+ * again when it returns; read_span() hands out the ring's own bytes,
+ * valid until consume() releases them. The resource's configuring verbs
+ * are setup verbs with no guard of their own and refuse while the
+ * instance is enabled; its flag and data verbs are single loads and
+ * stores, legal from any context.
+ *
+ * Scope: the chapter, whole, bar what is declined with a reason in
  * docs/stm32g0/usart.md: every frame format, both oversamplings, the
  * prescaler, all four kernel clocks, the FIFOs and their thresholds,
  * single-wire half-duplex, LIN, IrDA, smartcard, synchronous master,
  * hardware flow control and driver enable, mute mode, character match,
  * the receiver time-out and Modbus, auto-baud, the swap/invert options,
  * the request register and the wake from Stop. DMA rides the task's two
- * OPTIONAL engine slots (stm32g0/dma.hpp, NoDmaEngine).
+ * optional engine slots (stm32g0/dma.hpp, NoDmaEngine).
  *
- * THE INSTANCE SPLIT IS THE FIRST FACT OF THE CHAPTER (tables 183/184):
- * an instance is FULL, BASIC or LP, and a BASIC one has no FIFO, no
- * prescaler, no kernel-clock multiplexer, no wake from Stop, no
+ * The instance split is the first fact of the chapter (tables 183/184):
+ * an instance is full, basic or low-power, and a basic one has no FIFO,
+ * no prescaler, no kernel-clock multiplexer, no wake from Stop, no
  * synchronous mode, no smartcard, no IrDA, no LIN, no auto-baud, no
- * receiver time-out and no Modbus. `usart_is_full(n)` in the reserve is
- * the compile-time answer (a stated table: the device header expresses
- * the split as POINTER-COMPARISON macros, which are not constant
- * expressions) and the `has_*()` verbs below are the RUNTIME reads of
- * those very macros - so a suite can compare the table, the header and
- * the silicon against each other, which is what the bench does. Every
- * feature verb a BASIC instance lacks REFUSES on one (false, nothing
- * written).
+ * receiver time-out and no Modbus. `usart_is_full(n)` in the reserve
+ * (stm32g0/device_tables.hpp: the table of what each part has, read off
+ * the device header) is the compile-time answer - a stated table,
+ * because the device header expresses the split as pointer-comparison
+ * macros, which are not constant expressions - and the `has_*()` verbs
+ * below are the run-time reads of those very macros, so a suite can
+ * compare the table, the header and the silicon against each other,
+ * which is what the bench does. Every feature verb a basic instance
+ * lacks refuses on one (false, nothing written).
  *
- * Facts that shape the code (RM0444 33.5, 33.8; ES0548 rev Z):
+ * The facts of the silicon that shape the code, and what each one
+ * decided (RM0444 33.5, 33.8; ES0548 Rev 3, read on silicon revision Z):
  *  - BRR, CR1's frame fields, CR2, CR3's mode fields, GTPR and PRESC are
  *    written only with UE = 0 (33.8.x "can only be written when the USART
  *    is disabled" - for CR3 bit by bit, 33.8.4, and DMAT and DMAR carry
- *    no such clause); the task disables around every configuration, including
- *    rebase(), and every resource verb below that touches such a field
- *    REFUSES while the instance is enabled rather than storing into a
- *    register the silicon ignores;
+ *    no such clause); the task disables around every configuration,
+ *    including rebase(), and every resource verb below that touches such
+ *    a field refuses while the instance is enabled rather than storing
+ *    into a register the silicon ignores - "enable-protected", or
+ *    "UE-protected", in the comments below;
  *  - the baud generator (33.5.7): USARTDIV = usart_ker_ck_pres / baud
  *    with OVER8 = 0 and 2 x that with OVER8 = 1, USARTDIV >= 16 in both
- *    - and under OVER8 the register is NOT the divisor: BRR[15:4] =
+ *    - and under OVER8 the register is not the divisor: BRR[15:4] =
  *    USARTDIV[15:4], BRR[2:0] = USARTDIV[3:0] >> 1, BRR[3] = 0. The
- *    kernel clock is what the divisor divides, and it is
- *    usart_ker_ck AFTER the PRESC prescaler, not PCLK by assumption;
- *  - TXE is a CONDITION (transmit data register empty), so its interrupt
+ *    kernel clock is what the divisor divides, and it is usart_ker_ck
+ *    after the PRESC prescaler, not PCLK by assumption;
+ *  - TXE is a condition (transmit data register empty), so its interrupt
  *    is armed only while the ring holds something and disarmed from the
  *    handler when it runs dry - and so are TXFNF and TXFT, the FIFO
  *    view's two, of which the task rides TXFT by default: an instance
@@ -67,29 +114,30 @@
  *    unless the program says otherwise, one interrupt refilling the
  *    whole transmit FIFO and the receiver nine characters deep;
  *  - ORE raises the interrupt whenever RXNEIE is set (33.8.9), and it is
- *    cleared ONLY through ICR.ORECF - a handler that reads RDR and
- *    leaves ORE standing re-enters for ever. Every error flag has its
- *    ICR twin and the handler clears what it counts;
- *  - RDR holds the LAST GOOD byte when ORE is set (the lost one is the
+ *    cleared only through ICR.ORECF - a handler that reads RDR and
+ *    leaves ORE standing re-enters for ever (the ORE storm, as the
+ *    comments below call it). Every error flag has its ICR twin and the
+ *    handler clears what it counts;
+ *  - RDR holds the last good byte when ORE is set (the lost one is the
  *    next); FE/NE/PE flags belong to the byte in RDR, so a framed or
  *    parity-failed byte is dropped precisely - and in FIFO mode 33.5.4
- *    stores those three flags WITH EACH ENTRY, so a draining handler
- *    reads ISR BEFORE each RDR or the attribution slides by one;
+ *    stores those three flags with each entry, so a draining handler
+ *    reads ISR before each RDR or the attribution slides by one;
  *  - TE set sends an idle frame first (33.5.5), which is why the pads
- *    are handed to the peripheral BEFORE UE/TE are raised;
+ *    are handed to the peripheral before UE/TE are raised;
  *  - single-wire half-duplex (33.5.15) internally connects TX and RX,
- *    stops using the RX pin and RELEASES the TX pin whenever it is not
- *    transmitting - so the pad must be alternate-function OPEN DRAIN
+ *    stops using the RX pin and releases the TX pin whenever it is not
+ *    transmitting - so the pad must be alternate-function open drain
  *    with a pull-up, and the instance then hears every byte it sends.
  *    That is this family's loop-back (there is no LBME here) and it is
  *    the instrument the whole bench suite is built on;
  *  - ES0548 2.11.1: a glitch to zero shorter than half a bit inside the
- *    SECOND half of a stop bit corrupts the received byte, no
+ *    second half of a stop bit corrupts the received byte, no
  *    workaround - the noise flag NE is what such a line shows first, and
  *    the task counts it separately for that reason;
  *  - ES0548 2.11.2 is a documentation erratum about exactly the
  *    per-instance prescaler split above; usart_is_full() carries it;
- *  - the vector is SHARED on this family (device_tables.hpp): the app's
+ *  - the vector is shared on this family (device_tables.hpp): the app's
  *    handler for USART2_LPUART2_IRQHandler calls this instance's isr()
  *    and, if it uses LPUART2, that one's too.
  */
@@ -474,12 +522,17 @@ struct UsartInterrupt {
 };
 
 /**
- * Usart<n>: the instance. Every verb is one register fact; the ORDER
- * (configure disabled, pads before enable) is the task's.
+ * Usart<n>: the instance. Every verb is one register fact; the order
+ * (configure disabled, pads before enable) is the task's. The
+ * configuring verbs are setup verbs, called from the main context with
+ * the instance disabled and masking nothing; the flag and data verbs
+ * near the end are single loads and stores, legal from any context; the
+ * interrupt-enable verbs mask interrupts for their read-modify-write,
+ * since the handler writes the same registers.
  *
- * THE ENABLE RULE, everywhere: a field 33.8.x calls "can only be written
+ * The enable rule, everywhere: a field 33.8.x calls "can only be written
  * when the USART is disabled" is written by a verb that returns false
- * and STORES NOTHING while UE stands. The silicon's own behaviour is not
+ * and stores nothing while UE stands. The silicon's own behaviour is not
  * uniform enough to trust (elsewhere in this stratum a forbidden write
  * has been measured landing anyway), so the refusal is the driver's.
  */
@@ -535,13 +588,13 @@ struct Usart {
     static constexpr IRQn_Type irq() { return usart_irq(n); }
 
     /**
-     * THE HEADER'S OWN ANSWER to the same question, at run time.
+     * The header's own answer to the same question, at run time.
      *
      * IS_UART_FIFO_INSTANCE(x) and its nine siblings are pointer
      * comparisons - `((x) == USART1) || ...` - so they are perfectly
      * good expressions and perfectly useless as constant ones. Folded
      * against a constant `&regs()` they cost nothing, and they are the
-     * SECOND opinion the bench compares the reserve's stated table and
+     * second opinion the bench compares the reserve's stated table and
      * the silicon against. Where the header has no macro - the
      * prescaler, synchronous mode, the receiver time-out - the constants
      * above are the only claim, and the bench asks the silicon directly.
@@ -594,6 +647,9 @@ struct Usart {
         }
     }
 
+    /// CR1.UE: whether the instance is on, and switching it. enable(false)
+    /// is what the configuring verbs below need first; a read-modify-write
+    /// with no guard, a main-context verb.
     static bool enabled() { return (regs().CR1 & USART_CR1_UE) != 0u; }
     static void enable(bool on) {
         regs().CR1 = on ? (regs().CR1 | USART_CR1_UE) : (regs().CR1 & ~USART_CR1_UE);
@@ -638,6 +694,9 @@ struct Usart {
         return true;
     }
 
+    /// BRR as it stands, and a raw write of it. set_brr() checks nothing:
+    /// BRR is UE-protected, and clearing UE around the write is the
+    /// caller's (the task's rebase() and set_baud() do).
     static uint16_t brr() { return static_cast<uint16_t>(regs().BRR); }
     static void set_brr(uint16_t v) { regs().BRR = v; }
 
@@ -1156,6 +1215,12 @@ struct Usart {
     /// ones; without it, one break character of the frame's own length.
     static void send_break() { request(UsartRequest::send_break); }
 
+    /// The flag and data registers as they are, from any context: status()
+    /// is one ISR load and flag() its test against a UsartFlag mask;
+    /// clear_flags() writes a UsartClear mask into ICR; read_data() takes
+    /// the character at the FIFO's head (or frees RDR, without the FIFO);
+    /// write_data() stores into TDR with no check that there is room -
+    /// TXE, or TXFNF in FIFO mode, is the caller's to look at first.
     static uint32_t status() { return regs().ISR; }
     static bool flag(uint32_t mask) { return (regs().ISR & mask) != 0u; }
     static void clear_flags(uint32_t icr_mask) { regs().ICR = icr_mask; }
@@ -1165,7 +1230,7 @@ struct Usart {
     static void write_data(uint8_t b) { regs().TDR = b; }
     static void write_word(uint16_t v) { regs().TDR = v & 0x1FFu; }
 
-    /// Where a DMA channel reads from and writes to. TWO REGISTERS, not
+    /// Where a DMA channel reads from and writes to. Two registers, not
     /// one: a receive engine points at RDR and a transmit engine at TDR,
     /// and neither can be mistaken for the other.
     static volatile void* tx_data_address() { return &regs().TDR; }
@@ -1173,19 +1238,20 @@ struct Usart {
 
     /**
      * CR3.DMAT / CR3.DMAR (33.8.4): whether the peripheral raises a DMA
-     * REQUEST for the condition, instead of - or as well as - the
+     * request for the condition, instead of - or as well as - the
      * interrupt. With the bit set, TXE (or RXNE) drives the request line
      * and the channel clears the condition by writing (or reading) the
-     * data register, so the matching interrupt must NOT also be armed:
+     * data register, so the matching interrupt must not also be armed:
      * both would serve the same byte.
      *
-     * NOT UE-PROTECTED: 33.8.4 gives the "only when UE = 0" clause bit by
+     * Not UE-protected: 33.8.4 gives the "only when UE = 0" clause bit by
      * bit, and DMAT and DMAR carry none, so either is written with the
      * instance running. Not part of configure() all the same - an engine
      * turns its bit on once the frame is settled, and an application
      * without one never touches them. CR3 is read-modify-written here
      * and by the receive engine's vector (rx_request_restart()), hence the
-     * guard.
+     * guard: interrupts masked for the read-modify-write
+     * (stm32g0/nvic.hpp's InterruptGuard), from any context.
      */
     static void dma_transmit(bool on) {
         InterruptGuard guard;
@@ -1197,7 +1263,7 @@ struct Usart {
     }
 
     /**
-     * DMAR dropped and raised again: THE RECEIVE REQUEST PRESENTED ANEW.
+     * DMAR dropped and raised again: the receive request presented anew.
      * The cure for this silicon's FIFO wedge (docs/stm32g0/usart.md, "The
      * receive FIFO under a starved channel"): after a starvation of a
      * little over a character time, a receive FIFO holding entries can
@@ -1216,10 +1282,10 @@ struct Usart {
     }
 
     /**
-     * THE DMAMUX REQUEST LINES THIS INSTANCE PUBLISHES (RM0444 table 55).
+     * The DMAMUX request lines this instance publishes (RM0444 table 55).
      *
-     * They live here and not in stm32g0/device_tables.hpp because NO
-     * DEVICE HEADER OF THIS PACK DECLARES THEM - the DMAMUX_REQ_*
+     * They live here and not in stm32g0/device_tables.hpp because no
+     * device header of this pack declares them - the DMAMUX_REQ_*
      * spellings are ST's HAL/LL, which this project does not vendor - and
      * because a fabric driver owns the fabric while a peripheral owns
      * its own vocabulary. stm32g0/dma.hpp therefore takes a plain
@@ -1250,6 +1316,10 @@ struct Usart {
     }
 
     // ---- interrupt enables ---------------------------------------------------------
+    //
+    // Each masks interrupts for its read-modify-write (InterruptGuard):
+    // CR1 and CR3 are written by the handler too. Callable from any
+    // context, with the instance enabled or not; none waits.
 
     static void rxne_interrupt(bool on) {
         InterruptGuard guard;   // CR1 is read-modify-write and shared with the handler
@@ -1290,7 +1360,8 @@ struct Usart {
     }
 
     /// Software reset of the block through RCC (APBRSTR1/2): every
-    /// register back to its reset value.
+    /// register back to its reset value. A setup verb; the task's init()
+    /// and release() both call it.
     static void reset() {
         constexpr UsartBusClock bc = usart_bus_clock(n);
         if constexpr (bc.apb2) {
@@ -1330,13 +1401,13 @@ constexpr bool uart_engines_distinct() {
 }
 
 /**
- * UartOptions::fifo - CR1.FIFOEN as the task's option, in THREE states:
+ * UartOptions::fifo - CR1.FIFOEN as the task's option, in three states:
  * stated on (`.fifo = true`, refused at compile time on an instance with
- * no FIFO), stated off (`.fifo = false`), and UNSTATED, the default, in
+ * no FIFO), stated off (`.fifo = false`), and unstated, the default, in
  * which the task decides from the instance (UartTask::fifo_mode says
  * how). A bool cannot tell "off" from "not said", and std::optional<bool>
  * is not a structural type, which a template argument must be - so this
- * is a struct a bool converts to IMPLICITLY, on purpose: every program
+ * is a struct a bool converts to implicitly, on purpose: every program
  * that wrote `.fifo = true` or `.fifo = false` still means what it meant.
  */
 struct UartFifo {
@@ -1347,27 +1418,29 @@ struct UartFifo {
 };
 
 /**
- * EVERYTHING THE CHAPTER OFFERS A BYTE TRANSPORT, as one constexpr
- * struct the task takes as its LAST template argument - and every member
- * of it is `if constexpr`-ed below, so a feature nobody names costs
- * nothing.
+ * Everything the chapter offers a byte transport, as one constexpr
+ * struct the task takes as its options template argument, after the two
+ * engine slots - and every member of it is `if constexpr`-ed below, so a
+ * feature nobody names costs nothing. A program states it once, as a
+ * constexpr value, and names it in the Uart's template arguments.
  *
- * THE DEFAULT IS NOT THE ONE-REGISTER SHAPE: with `fifo` unstated the
+ * The default is not the one-register shape: with `fifo` unstated the
  * task turns the FIFO on wherever the instance has one and paces the
- * transmitter on the FIFO running EMPTY, one interrupt refilling eight
+ * transmitter on the FIFO running empty, one interrupt refilling eight
  * characters, because that is the better transport on this silicon
  * (docs/stm32g0/usart.md has the numbers). A program that wants one
  * character per interrupt says `.fifo = false`.
  *
- * WHY AN OPTIONS STRUCT AND NOT TEN TEMPLATE PARAMETERS: the surface of
- * Uart is a SHARED one (util/serial_port.hpp and print() compile
+ * Why an options struct and not ten template parameters: the surface of
+ * Uart is a shared one (util/serial_port.hpp and print() compile
  * against every target's), so its parameter list cannot grow a
- * target-specific tail. One trailing NTTP with a default is the whole
- * change, and a caller who names nothing sees nothing.
+ * target-specific tail. One trailing non-type template parameter with a
+ * default is the whole change, and a caller who names nothing sees
+ * nothing.
  */
 struct UartOptions {
     /// CCIPR: which clock feeds the baud generator. A kernel clock of
-    /// hsi16 or lse DOES NOT MOVE WITH SYSCLK, so rebase() rewrites
+    /// hsi16 or lse does not move with SYSCLK, so rebase() rewrites
     /// nothing for one - which is the point of having one.
     UsartClock kernel_clock = UsartClock::pclk;
     UsartPrescaler prescaler = UsartPrescaler::div1;
@@ -1377,7 +1450,7 @@ struct UartOptions {
     /// UartTask::fifo_mode). The thresholds are written when the FIFO is
     /// on and they are not `none`.
     ///
-    /// THE TRANSMITTER RIDES TXFT, by default at code 101, "TXFIFO
+    /// The transmitter rides TXFT, by default at code 101, "TXFIFO
     /// becomes empty" (33.8.4): the flag rises as the shift register
     /// takes the last entry, so the handler refills all eight places
     /// while that character still has a whole frame to go - one
@@ -1389,13 +1462,13 @@ struct UartOptions {
     /// never leaves a tail behind: the FIFO drains on its own, so the
     /// condition always comes.
     ///
-    /// THE RECEIVER RIDES RXFT, by default at code 010, half the FIFO
+    /// The receiver rides RXFT, by default at code 010, half the FIFO
     /// (33.8.4): one entry drains four characters or more, and a handler
     /// late by five frames still loses nothing (four places and the shift
     /// register). A threshold alone would strand the tail below it, so
     /// the line's own end-of-burst condition serves the tail - the
-    /// RECEIVER TIME-OUT where the instance has one (33.5.16: RTOF after
-    /// `rx_timeout` bit times of silence past the last stop bit, a FULL
+    /// receiver time-out where the instance has one (33.5.16: RTOF after
+    /// `rx_timeout` bit times of silence past the last stop bit, a full
     /// USART's), the IDLE flag where it has not (an LPUART: one idle
     /// frame, set once a burst - 33.8.10's note keeps it from rising
     /// again before a character has). One entry per level plus one a
@@ -1403,10 +1476,10 @@ struct UartOptions {
     /// every character its own entry, the shape for a receiver that
     /// must answer each byte at once.
     ///
-    /// UNDER A RECEIVE ENGINE THE RECEIVE THRESHOLD IS THE TASK'S: seven
-    /// eighths, the FIFO wedge's watch (UartTask, "THE FIFO STAYS ON UNDER
-    /// A RECEIVE ENGINE"), and `rx_threshold` left at its default - a
-    /// value named there is refused, since nothing would read it.
+    /// Under a receive engine the receive threshold is the task's: seven
+    /// eighths, the FIFO wedge's watch (UartTask, "The FIFO stays on
+    /// under a receive engine"), and `rx_threshold` left at its default -
+    /// a value named there is refused, since nothing would read it.
     UartFifo fifo{};
     UartFifoThreshold rx_threshold = UartFifoThreshold::half;
     UartFifoThreshold tx_threshold = UartFifoThreshold::full_or_empty;
@@ -1426,14 +1499,14 @@ struct UartOptions {
     bool msb_first = false;
 
     /// 33.5.15: one wire on the TX pad, open drain with a pull-up. The
-    /// RX pad of `pins` is then NOT claimed, and every byte transmitted
+    /// RX pad of `pins` is then not claimed, and every byte transmitted
     /// comes back through the receiver.
     bool half_duplex = false;
 
     /// The output driver's slew class on the TX pad (OSPEEDR, 7.4.3): low
     /// serves the console rates; a multi-megabaud link asks for more.
     PinSpeed tx_speed = PinSpeed::low;
-    /// In half duplex, drive the pad PUSH-PULL while a frame goes out, the
+    /// In half duplex, drive the pad push-pull while a frame goes out, the
     /// pull-up holding the line the transmitter releases between frames
     /// (33.5.15: "the TX pin is always released when no data is
     /// transmitted"). For a line with no other driver - the loop of a port
@@ -1502,7 +1575,7 @@ constexpr UartOptions uart_half_duplex(UartOptions base = {}) {
 /**
  * The receive ring a transport keeps, chosen by whether its receive has
  * an engine: Ring, which the handler pushes into, where it has none, and
- * where it has one the CONSUMER HALF of a ring the channel itself writes
+ * where it has one the consumer half of a ring the channel itself writes
  * - util/ring.hpp's HardwareRing over a storage array the transport owns
  * (keyed by the transport's type), the receive engine its RingCounter.
  * A partial specialization and not std::conditional_t, because naming
@@ -1520,8 +1593,10 @@ struct UartRxRing<true, Owner, size, Engine> {
 };
 
 /**
- * UartTask<Resource, pins, rx_size, tx_size, TxEngine, RxEngine, opts>:
- * the interrupt-driven byte transport, over a USART or an LPUART.
+ * UartTask<Resource, pins, rx_size, tx_size, TxEngine, RxEngine, opts,
+ * Placement>: the interrupt-driven byte transport, over a USART or an
+ * LPUART. The smallest use, the console with its received bytes
+ * announced to an active object:
  *
  *   constexpr brio::UartPins console_pins{
  *       .tx = {'A', 2, brio::PinFunction::af1},   // USART2_TX (DS13560 table 13)
@@ -1535,28 +1610,31 @@ struct UartRxRing<true, Owner, size, Engine> {
  *
  * The shared Uart surface - same verbs, same return contracts:
  * init/rebase/isr/write_byte/write_bulk/read_byte/read_bulk/read_span/
- * consume, the error counters, release().
+ * consume, the error counters, release(). isr() answers true on the
+ * receive edge - the moment the receive ring holds bytes the consumer
+ * has not been told of - and the program's handler posts an event on
+ * it, as above; the consumer then drains the ring from its own context.
  *
- * ONE IMPLEMENTATION, TWO PERIPHERALS. `Uart<n, ...>` names it over
+ * One implementation, two peripherals. `Uart<n, ...>` names it over
  * `Usart<n>` and `LpUart<n, ...>` (stm32g0/lpuart.hpp) over `Lpuart<n>`;
  * everything that differs - the baud arithmetic, which features exist,
  * where the kernel-clock field sits, which vector and which EXTI line -
- * the RESOURCE answers. Chapter 34 is chapter 33 with a different
+ * the resource answers. Chapter 34 is chapter 33 with a different
  * divisor, and a second copy of this file would have been a second place
  * for the ORE storm to be got wrong.
  *
- * THE TWO OPTIONAL ENGINE SLOTS: name a stm32g0/dma.hpp DmaTxEngine
+ * The two optional engine slots: name a stm32g0/dma.hpp DmaTxEngine
  * and/or DmaRxEngine and the bytes move without the CPU; name neither
  * (the default) and every engine branch below disappears - `if
  * constexpr` throughout, so an engineless image carries no DMA code at
  * all (docs/stm32g0/dma.md records the md5 gate).
  *
- * WHICHEVER DIRECTION HAS AN ENGINE DOES NOT ARM ITS INTERRUPT: the DMA
- * request and the interrupt are the SAME condition (TXE, RXNE), so arming
+ * Whichever direction has an engine does not arm its interrupt: the DMA
+ * request and the interrupt are the same condition (TXE, RXNE), so arming
  * both would have the channel and the handler each serve one byte.
  *
- * THE RX ENGINE RUNS A RING, NOT RUNS. The receive engine is armed in
- * its CIRCULAR shape over the whole receive ring's storage
+ * The receive engine runs a ring, not runs. The receive engine is armed
+ * in its circular shape over the whole receive ring's storage
  * (stm32g0/dma.hpp's DmaRxEngine): the channel writes the storage lap
  * after lap and is never re-armed, the ring's producer index is the
  * channel's own count, and the receive ring is the consumer half of that
@@ -1566,7 +1644,7 @@ struct UartRxRing<true, Owner, size, Engine> {
  * the consumer did not keep up with - a lap written over its unread bytes
  * - is counted and skipped by the ring, and rx_overruns() reports it.
  *
- * THE RECEIVE EDGE COMES FROM A VECTOR, never from a poll. Without an
+ * The receive edge comes from a vector, never from a poll. Without an
  * engine the receiver rides RXFT with the line's end-of-burst flag for
  * the tail (UartOptions), and isr() reports the ring's empty -> non-empty
  * transition. With one, the line's IDLE enters isr() and the ring's half
@@ -1574,24 +1652,24 @@ struct UartRxRing<true, Owner, size, Engine> {
  * edge - so a burst is told within an idle frame of its last stop bit,
  * and a stream that never pauses twice a lap.
  *
- * WHAT AN RX ENGINE TRADES AWAY, and it cannot be given back: per-byte
- * error attribution. With the interrupt receiver ISR is read for EACH
- * character before its RDR and a framed or parity-failed byte is dropped
- * precisely. With a channel consuming RXNE instead, each error enters the
- * vector on its own (EIE, PEIE) and is counted there; the character it
- * belongs to is not transferred (DDRE clear, 33.8.4), and no flag is ever
- * cleared by a read of RDR - every one has its ICR bit - so the channel
- * loses nothing to a clear.
+ * What a receive engine trades away, and it cannot be given back:
+ * per-byte error attribution. With the interrupt receiver ISR is read for
+ * each character before its RDR and a framed or parity-failed byte is
+ * dropped precisely. With a channel consuming RXNE instead, each error
+ * enters the vector on its own (EIE, PEIE) and is counted there; the
+ * character it belongs to is not transferred (DDRE clear, 33.8.4), and
+ * no flag is ever cleared by a read of RDR - every one has its ICR bit -
+ * so the channel loses nothing to a clear.
  *
- * THE RECEIVE ENGINE ARMS AT `rx_priority`, very_high by default, and the
- * transmit engine at high (docs/design/dma.md): a starved receive
+ * The receive engine arms at `rx_priority`, very_high by default, and
+ * the transmit engine at high (docs/design/dma.md): a starved receive
  * overruns, a starved transmit leaves the line idle a while.
  *
- * THE FIFO STAYS ON UNDER A RECEIVE ENGINE, WITH A KICK. On this silicon a
- * channel starved for a little over a character time - two entries queued
- * - can leave the receive FIFO WEDGED: entries standing, DMAR set, the
- * channel enabled with its count frozen, and nothing moving until the
- * request is seen to fall; the FIFO then fills and overruns, and the
+ * The FIFO stays on under a receive engine, with a kick. On this silicon
+ * a channel starved for a little over a character time - two entries
+ * queued - can leave the receive FIFO wedged: entries standing, DMAR set,
+ * the channel enabled with its count frozen, and nothing moving until
+ * the request is seen to fall; the FIFO then fills and overruns, and the
  * receiver is dead. ST's own HAL wedges the same way on the same board
  * (docs/stm32g0/usart.md has the measurement and what does and does not
  * release it). So isr() watches for it: an entry for the line's IDLE, a
@@ -1604,8 +1682,8 @@ struct UartRxRing<true, Owner, size, Engine> {
  * starvation above one character loses frames. A healthy stream never
  * kicks; rx_kicks() counts the kicks.
  *
- * WHERE THE HOT PATHS RUN FROM: the task's placement, its last template
- * parameter (util/placement.hpp). Both interrupt bodies take it, each ONE
+ * Where the hot paths run from: the task's placement, its last template
+ * parameter (util/placement.hpp). Both interrupt bodies take it, each one
  * function of it: isr() - the receiver, the transmitter's FIFO refill or
  * per-byte TXE, the errors - and dma_isr(), the transmit engine's
  * completion with the next block's launch and the receive engine's marks.
@@ -1782,18 +1860,18 @@ public:
     static constexpr bool has_rx_engine = RxEngine::present;
     static constexpr UartOptions options = opts;
 
-    /// FIFO MODE AS THIS INSTANTIATION RESOLVED IT - what `options.fifo`
+    /// FIFO mode as this instantiation resolved it - what `options.fifo`
     /// alone no longer says. Stated, the option decides (and "on" is
     /// refused above where the instance has no FIFO). Unstated, the task
-    /// decides: ON where the instance has the FIFO - table 184 gives it
-    /// to the FULL USARTs and to every LPUART, `has_fifo_mode` - EXCEPT
+    /// decides: on where the instance has the FIFO - table 184 gives it
+    /// to the full USARTs and to every LPUART, `has_fifo_mode` - except
     /// under a wake on an address match, because 33.5.21 says "when the
     /// FIFO is enabled, waking up from low-power mode on address match
     /// is only possible when mute mode is enabled", and mute mode is the
     /// resource's and not this task's. Without the FIFO, WUF rises on the
     /// match with mute mode off - but the task's own RXNEIE is a wake-up
     /// source of its own (33.5.21's first bullet), so the first frame of
-    /// ANY address ends a Stop; a program that wants its address alone to
+    /// any address ends a Stop; a program that wants its address alone to
     /// wake it sets mute mode on the resource (both measured against a far
     /// sender, docs/stm32g0/usart.md).
     static constexpr bool fifo_mode =
@@ -1804,7 +1882,7 @@ public:
                   "brio Uart: the default FIFO decision must follow the instance's "
                   "presence (RM0444 table 184): FIFOEN does not stick on a BASIC USART");
 
-    /// THE RECEIVER'S PACE as this instantiation resolved it: on RXFT at
+    /// The receiver's pace as this instantiation resolved it: on RXFT at
     /// `rx_threshold` with the line's end-of-burst flag for the tail
     /// (UartOptions says why), where the FIFO is on, no engine owns the
     /// receive and a threshold is named; otherwise RXFNE, a character an
@@ -1812,10 +1890,10 @@ public:
     static constexpr bool rx_paced =
         !RxEngine::present && fifo_mode && opts.rx_threshold != UartFifoThreshold::none;
 
-    /// THE RECEIVE ENGINE'S KICK, where it applies: an engine over the
+    /// The receive engine's kick, where it applies: an engine over the
     /// FIFO. Its watch is RXFT at seven eighths beside IDLE and the
-    /// receive errors (the class comment's "THE FIFO STAYS ON UNDER A
-    /// RECEIVE ENGINE"); without the FIFO there is no second entry to
+    /// receive errors (the class comment's "The FIFO stays on under a
+    /// receive engine"); without the FIFO there is no second entry to
     /// wedge behind, and nothing to watch.
     static constexpr bool rx_kick = RxEngine::present && fifo_mode;
 
@@ -1824,10 +1902,10 @@ public:
     static constexpr UartFifoThreshold rx_threshold_in_force =
         RxEngine::present ? UartFifoThreshold::seven_eighths : opts.rx_threshold;
 
-    /// THE END OF A BURST, the flag that delivers the tail and the
+    /// The end of a burst, the flag that delivers the tail and the
     /// engine's edge: the receiver time-out (33.5.16) for the paced
     /// receiver of an instance that has one, IDLE otherwise - an LPUART,
-    /// and every receive engine, because a channel can sit on a BASIC
+    /// and every receive engine, because a channel can sit on a basic
     /// USART or an LPUART and IDLE is the flag table 184 gives every
     /// instance. ISR and ICR carry each at the same position.
     static constexpr uint32_t rx_tail =
@@ -1845,13 +1923,16 @@ public:
     /// Bring the instance up: bus clock, kernel clock, frame, baud,
     /// the chapter options, pads, the receive interrupt and its NVIC line.
     ///
-    /// Call AFTER the main clock is set up and before interrupts are
+    /// Call after the main clock is set up and before interrupts are
     /// enabled globally; `clock` is the app's brio::Clock tag, and the
-    /// divisor comes from THE KERNEL CLOCK THE OPTIONS NAME - never from
+    /// divisor comes from the kernel clock the options name - never from
     /// a second statement of the rate, and never from PCLK by assumption.
-    /// False when the rate cannot be produced at that clock: the caller
-    /// then knows the transport is NOT up, rather than printing into a
-    /// ring nothing will drain.
+    /// False when the rate cannot be produced at that clock, or when the
+    /// resource refuses the kernel clock or the frame: the caller then
+    /// knows the transport is not up, rather than printing into a ring
+    /// nothing will drain. Waits for nothing beyond the port clocks'
+    /// enable readback; keeps nothing of the caller's (`format` is read
+    /// here and the rings are the task's own statics, cleared here).
     template <typename Clock>
     static bool init(Clock clock, uint32_t baud, const UartFormat& format = {}) {
         static_assert(clock_follows<Clock, UartTask>(),
@@ -2029,15 +2110,16 @@ public:
     ///         if (Serial::dma_isr()) { brio::post<SerialLines>(brio::RxActivity{}); }
     ///     }
     ///
-    /// Each engine's channel reads ONLY its own flags (there is no
+    /// Each engine's channel reads only its own flags (there is no
     /// "which channel interrupted" register on this controller), so this is
     /// safe to call from a shared vector that also serves other people's
-    /// channels.
+    /// channels. Interrupt context, like isr(); it masks interrupts only
+    /// for the claim of the transmit engine (pump_tx()).
     ///
     /// On the transmit channel a completion means the block has left the
     /// ring, so exactly that many bytes are released and the next
-    /// contiguous run started. On the receive channel the HALF and the
-    /// FULL marks of the ring's lap arrive here (stm32g0/dma.hpp's
+    /// contiguous run started. On the receive channel the half and the
+    /// full marks of the ring's lap arrive here (stm32g0/dma.hpp's
     /// circular arm): the full one is a lap, counted - the channel reloaded
     /// itself and nothing is re-armed - and either one hands the edge to
     /// harvest(), so a stream that never pauses for the line's IDLE still
@@ -2087,7 +2169,7 @@ public:
     /// The receive engine's housekeeping and its edge, the body both of
     /// this transport's vectors run on a receive event: isr() on the
     /// line's IDLE and on a receive error, dma_isr() on the ring's half
-    /// and full marks. A public verb still, and IDEMPOTENT: an owner that
+    /// and full marks. A public verb still, and idempotent: an owner that
     /// calls it as well is told nothing twice.
     ///
     /// What it does: the receive error flags read and cleared through ICR
@@ -2098,20 +2180,20 @@ public:
     /// lap, which dma_faults() counted; and the edge.
     ///
     /// Returns true when the ring holds bytes and the consumer has looked
-    /// and found it EMPTY since the last true - the same edge contract
+    /// and found it empty since the last true - the same edge contract
     /// isr() has: every byte that lands after the consumer's last look at
     /// an empty ring is reported by the next vector, and a consumer that
     /// has not drained yet is not told twice. The look is the ring's
     /// waiting(), which writes nothing, so a vector asks it while the
     /// consumer holds a run. False, and free, without an engine.
     ///
-    /// ONE RACE IS NAMED AND LEFT: the restart after a transfer error
+    /// One race is named and left: the restart after a transfer error
     /// clears the ring's view, which is not concurrent - a consumer holding
     /// a run across it releases into the restarted ring. A transfer error
     /// is a bus error on an address the binding fixed (10.4.7), never a
     /// receive condition, and dma_faults() reports the lap it cost.
     ///
-    /// OUT OF LINE: once a burst or half a lap, not once a byte, and from
+    /// Out of line: once a burst or half a lap, not once a byte, and from
     /// both vectors, so the placement's flatten copies it into neither -
     /// nor, under InRam, into SRAM (the class comment).
     [[gnu::noinline]] static bool harvest() {
@@ -2159,13 +2241,17 @@ public:
     }
 
     /// The core clock changed (DynamicClock fan-out): keep the
-    /// same bit rate at the new rate. Called BEFORE the clock changes,
+    /// same bit rate at the new rate. Called before the clock changes,
     /// so the drain runs at the rate the queued bytes were meant for;
     /// TC answers "the shifter is empty" exactly. BRR is UE-protected,
-    /// so the instance is stopped around the write. Main context only.
+    /// so the instance is stopped around the write. Main context only,
+    /// and it waits: first for the transmit ring to empty, then for TC,
+    /// each wait a bounded spin (tail_spins) so a wedged line gives up
+    /// rather than hanging the clock change; a rate unreachable at the
+    /// new clock leaves BRR as it was.
     ///
-    /// A KERNEL CLOCK THAT IS NOT PCLK OR SYSCLK DOES NOT FOLLOW, and
-    /// this verb then rewrites NOTHING - which is exactly what an
+    /// A kernel clock that is not PCLK or SYSCLK does not follow, and
+    /// this verb then rewrites nothing - which is exactly what an
     /// application asks for when it puts a console on HSI16 or LSE.
     static void rebase(uint32_t hz) {
         if constexpr (!follows_sysclk) {
@@ -2189,17 +2275,18 @@ public:
         }
     }
 
-    /// Move the LINK to a different bit rate, the clock staying put
+    /// Move the link to a different bit rate, the clock staying put
     /// - the mirror of rebase(), which moves the clock and keeps the rate.
     ///
     /// `hz` is the SYSCLK/PCLK rate, the same argument rebase() takes;
     /// what the divisor divides is derived from it through the options'
     /// kernel clock and prescaler, so a caller never has to know which.
     ///
-    /// The queued bytes are drained at the OLD rate first (they were meant
-    /// for it), then BRR is written with the instance stopped, since it is
-    /// UE-protected like every other frame field. False, and nothing
-    /// written, when the new rate is unreachable at this clock.
+    /// The queued bytes are drained at the old rate first (they were meant
+    /// for it) - a wait, bounded by spin counts like rebase()'s - then BRR
+    /// is written with the instance stopped, since it is UE-protected like
+    /// every other frame field. False, and nothing written, when the new
+    /// rate is unreachable at this clock.
     ///
     /// Main context only, and the caller owns the agreement with whatever
     /// is on the other end: a receiver still at the old rate reads noise.
@@ -2223,6 +2310,11 @@ public:
         return true;
     }
 
+    /// The baud arithmetic of this instantiation, for a program that asks
+    /// before it calls init() or set_baud(): the lowest kernel clock that
+    /// reaches `baud`; whether `baud` is reachable with SYSCLK/PCLK at
+    /// `hz`; and the rate BRR produces now, at `hz`. Pure arithmetic
+    /// (actual_baud() reads BRR), from any context.
     static constexpr uint32_t min_hz_for(uint32_t baud) {
         if constexpr (opts.over8) {
             return S::min_hz_for_over8(baud);
@@ -2249,8 +2341,11 @@ public:
         }
     }
 
-    /// The instance's ONE interrupt body - call from the vector
-    /// the device gives this instance (shared with others on this family).
+    /// The instance's one interrupt body - call from the vector
+    /// the device gives this instance (shared with others on this family),
+    /// and from nowhere else: it is the handler's end of both rings. It
+    /// runs to completion, masking interrupts only inside the resource
+    /// verbs it calls (the transmit disarm, the receive request's kick).
     ///
     /// Returns true when the RX ring holds bytes the consumer has not
     /// been told of: the edge signal for kernel glue ("post RxActivity on
@@ -2402,9 +2497,13 @@ private:
 
 public:
     /**
-     * Queue one byte; false when the ring is full (print() retries).
+     * Queue one byte; false when the ring is full (print() retries). The
+     * byte is copied into the ring. Main context - setup or an active
+     * object's handler, the ring's one producer - never an interrupt
+     * handler; it does not wait, and arming the transmit interrupt masks
+     * interrupts for a few instructions.
      *
-     * WITH AN ENGINE, A REFUSED BYTE STILL NUDGES. print() answers a
+     * With an engine, a refused byte still nudges. print() answers a
      * false by trying again for ever, so a path that can leave the
      * transport unpoked stops the program - and the ring is full
      * precisely when nothing is draining it. The plain transport does not
@@ -2432,7 +2531,8 @@ public:
 
     /// Fetch one received byte; false when nothing is pending - or, with
     /// a receive engine, when the byte was written over while it was
-    /// being read (the ring counts it in rx_overruns()).
+    /// being read (the ring counts it in rx_overruns()). Main context, the
+    /// receive ring's one consumer; never waits.
     static bool read_byte(uint8_t& b) {
         if constexpr (has_rx_engine) {
             m_rx_drained = true;   // before the look (m_rx_drained says why)
@@ -2449,9 +2549,12 @@ public:
     }
 
     /// Queue a run of bytes through the ring's contiguous span
-    /// (util/stream.hpp's BulkSink). Returns the number queued.
+    /// (util/stream.hpp's BulkSink). Returns the number queued, fewer
+    /// than asked when the ring fills - the rest stays the caller's to
+    /// offer again. The bytes are copied; `src` is free when this
+    /// returns. Main context, like write_byte(), and no wait.
     ///
-    /// THE FIRST BYTE GOES BEFORE THE COPY, on the plain transport: it is
+    /// The first byte goes before the copy, on the plain transport: it is
     /// pushed and the transmit interrupt armed exactly as write_byte()
     /// does, so an idle transmitter starts on it while the rest is
     /// copied. The handler disarms when it finds the ring empty - in the
@@ -2459,7 +2562,7 @@ public:
     /// after it without the FIFO - and the first byte was the whole ring,
     /// so the rest, once published, is armed again: the same masked arm,
     /// idempotent, two a run at most. A run that finds the ring full is
-    /// write_byte()'s refusal. WITH AN ENGINE the run is copied whole and
+    /// write_byte()'s refusal. With an engine the run is copied whole and
     /// the engine pumped once, a block being what it starts on.
     static uint32_t write_bulk(std::span<const uint8_t> src) {
         uint32_t queued = 0;
@@ -2501,10 +2604,11 @@ public:
         return queued;
     }
 
-    /// Drain received bytes into `dst`; returns the number copied. With a
-    /// receive engine a run written over while it was being copied is
-    /// not counted - its bytes are not the stream - and the copy goes on
-    /// from where the ring skipped to.
+    /// Drain received bytes into `dst`; returns the number copied, up to
+    /// what was queued. With a receive engine a run written over while it
+    /// was being copied is not counted - its bytes are not the stream -
+    /// and the copy goes on from where the ring skipped to. Main context;
+    /// never waits.
     static uint32_t read_bulk(std::span<uint8_t> dst) {
         uint32_t got = 0;
         while (got < dst.size()) {
@@ -2536,12 +2640,15 @@ public:
         return got;
     }
 
-    /// The received bytes IN PLACE: the contiguous run ready to be read,
+    /// The received bytes in place: the contiguous run ready to be read,
     /// never wrapping - the receive ring's consumer half under the ring's
     /// own names. With consume() it is util/stream.hpp's SpanSource,
-    /// which SerialPort drains a run at a time with no copy at all.
+    /// which SerialPort drains a run at a time with no copy at all. The
+    /// span is the ring's own storage: valid until consume() releases it,
+    /// and without an engine the handler appends behind it and never
+    /// writes over it. Main context.
     ///
-    /// With a receive engine the run is the CHANNEL'S ring, read where it
+    /// With a receive engine the run is the channel's ring, read where it
     /// writes: the bytes in it are the stream as long as the consumer is
     /// less than a lap behind, and consume() says whether they were.
     static std::span<const uint8_t> read_span() {
@@ -2570,24 +2677,26 @@ public:
         }
     }
 
+    /// Bytes waiting in the receive ring now; one load, any context.
     static auto rx_pending() { return m_rx.count(); }
 
-    /// THE SKIP EPOCH: it moves whenever the line carried something the
-    /// receive ring will not deliver, since the program started, NEVER
-    /// CLEARED (modulo 2^32) - util/stream.hpp's SkippingSource, the epoch
+    /// The skip epoch: it moves whenever the line carried something the
+    /// receive ring will not deliver, since the program started, never
+    /// cleared (modulo 2^32) - util/stream.hpp's SkippingSource, the epoch
     /// util/serial_port.hpp compares at every run. Without an engine: the
     /// SkipRing's skips, one at the consumer's look after a character a
     /// full ring refused or FE/PE dropped, or an overrun - the ring
     /// discarding what it held. With one: the ring's skips (a lap missed,
-    /// a held run refused - a character apiece) plus m_rx_lost - ONE for
+    /// a held run refused - a character apiece) plus m_rx_lost - one for
     /// each ORE, FE or PE the channel never took and each restart after a
     /// transfer error, counted when the vector sees them, so the line torn
     /// is the one begun when the consumer next looks, which is the one the
     /// error cut when the consumer keeps up with its edges. An overrun
     /// counts one however many characters it cost - the receiver cannot
-    /// tell (measured, test_stm32_serial letter 6: 60916 frames lost at
-    /// 6.4 Mbaud under a starved ring, the epoch moved 20016 times, never
-    /// fewer than the gaps).
+    /// tell (measured by letter 6 of test_stm32_serial, a letter being one
+    /// command key of the suite's console and the verdicts it runs: 60916
+    /// frames lost at 6.4 Mbaud under a starved ring, the epoch moved
+    /// 20016 times, never fewer than the gaps).
     static uint32_t rx_skips() {
         if constexpr (has_rx_engine) {
             return m_rx.skips() + m_rx_lost;
@@ -2596,7 +2705,7 @@ public:
         }
     }
 
-    /// THE WIRE IS IDLE: nothing queued, no block in flight, and TC - the
+    /// The wire is idle: nothing queued, no block in flight, and TC - the
     /// last frame's stop bit off the pad, the TXFIFO empty with it in FIFO
     /// mode (33.5.5, step 8). TC cannot answer from a frame before the
     /// current one: the handler's TDR store clears it (33.8.10), and a
@@ -2630,8 +2739,9 @@ public:
     static uint8_t hw_overruns() { return m_hw_overruns; }
 
     /// How many times the receive engine's vector presented the receive
-    /// request anew - the FIFO wedge's cure fired (isr(), "THE FIFO STAYS
-    /// ON UNDER A RECEIVE ENGINE"). A healthy stream never moves it; a
+    /// request anew - the FIFO wedge's cure fired (isr(), and the class
+    /// comment's "The FIFO stays on under a receive engine"). A healthy
+    /// stream never moves it; a
     /// channel starved past a character time may. Always 0, and free,
     /// without a receive engine or without the FIFO.
     static uint8_t rx_kicks() {
@@ -2665,6 +2775,8 @@ public:
         }
     }
 
+    /// Every counter above back to zero. Main context; a handler that runs
+    /// between two of the stores may bump one, which is then kept.
     static void clear_errors() {
         if constexpr (has_rx_engine) {
             m_rx.clear_overruns();
@@ -2684,9 +2796,11 @@ public:
     }
 
     /// Put everything back: interrupts off, instance disabled and reset,
-    /// pads to analog, bus clock off. The rings are dropped.
+    /// pads to analog, bus clock off. The rings are dropped, the bytes
+    /// still queued with them: a program that wants them on the wire
+    /// waits for tx_idle() first. Main context; no wait.
     ///
-    /// THE INSTANCE STOPS BEFORE ITS CHANNELS: a receive ring never ends,
+    /// The instance stops before its channels: a receive ring never ends,
     /// and 10.4.5 stops a circular channel by stopping the peripheral's
     /// requests first and disabling the channel after.
     static void release() {
@@ -2978,24 +3092,26 @@ using Rs485 = UartTask<Usart<n>, pins, rx_size, tx_size, NoDmaEngine, NoDmaEngin
 
 // ---- the chapter's other personalities -----------------------------------------
 //
-// Each of these is a POLLED task over the resource, with no ring and no
+// Each of these is a polled task over the resource, with no ring and no
 // interrupt of its own: they are protocol shapes, not byte transports,
-// and every one of them is used a few characters at a time. A ring-fed
-// version of any of them is a Uart with the right options plus that
-// shape's own configure() call, which is what the bench suite does where
-// it wants both.
+// and every one of them is used a few characters at a time. Their verbs
+// are the main context's; a send() or drain() waits, polling a flag,
+// and gives up after `spins` turns rather than hanging the caller. A
+// ring-fed version of any of them is a Uart with the right options plus
+// that shape's own configure() call, which is what the bench suite does
+// where it wants both.
 
 /**
  * SyncHost<n, pins, ck>: the synchronous master of 33.5.14 - the
  * asynchronous transmitter with a CK output beside it, so the data on TX
  * is clocked.
  *
- * WHAT IS BUILT AND WHAT IS NOT. The master's CK generation, its
+ * What is built and what is not. The master's CK generation, its
  * polarity, its phase and LBCL (the clock pulse on the last data bit)
  * are all here and are all observable on the CK pad with no peer at all.
- * THE DATA PATH IS DECLINED and says so: a synchronous link needs
+ * The data path is declined and says so: a synchronous link needs
  * something at the other end to clock, and this desk has one board. The
- * SLAVE half (CR2.SLVEN, DIS_NSS and the underrun flag UDR) is the same
+ * slave half (CR2.SLVEN, DIS_NSS and the underrun flag UDR) is the same
  * story one step further - the register verbs exist on the resource, the
  * task does not, and neither is claimed to work.
  */
@@ -3011,6 +3127,9 @@ struct SyncHost {
     SyncHost() = delete;
     using Resource = S;
 
+    /// Up at `baud` with the clock output `sync` describes, on PCLK; the
+    /// three pads claimed. False when the rate has no divisor or the
+    /// resource refuses a write. A setup verb, after the clock task.
     template <typename Clock>
     static bool init(Clock clock, uint32_t baud, const SyncConfig& sync,
                      const UartFormat& format = {}) {
@@ -3037,7 +3156,8 @@ struct SyncHost {
         return true;
     }
 
-    /// One character out, polled. The CK pulses come with it.
+    /// One character out, polled: waits for TXE up to `spins` turns, false
+    /// when it never came. The CK pulses come with it.
     static bool send(uint8_t b, uint32_t spins = 200'000u) {
         while ((S::status() & UsartFlag::txe) == 0u) {
             if (spins-- == 0u) {
@@ -3047,7 +3167,8 @@ struct SyncHost {
         S::write_data(b);
         return true;
     }
-    /// Wait for the transmission to be complete on the wire.
+    /// Wait for the transmission to be complete on the wire (TC), up to
+    /// `spins` turns.
     static bool drain(uint32_t spins = 400'000u) {
         while ((S::status() & UsartFlag::tc) == 0u) {
             if (spins-- == 0u) {
@@ -3071,19 +3192,19 @@ struct SyncHost {
  * IrdaLink<n, pins>: the SIR ENDEC of 33.5.18 - a 3/16-of-a-bit pulse
  * for every zero on the way out and an RZI decoder on the way in.
  *
- * The prescaler is BOTH the low-power divisor and the receive glitch
+ * The prescaler is both the low-power divisor and the receive glitch
  * filter, and it may not be zero (the chapter says the encoder/decoder
  * "doesn't work when PSC = 0"); the stop bits must be one, and the
  * chapter's exclusions - LINEN, CLKEN, SCEN, HDSEL - are refused by the
  * resource rather than written over.
  *
- * IT IS HALF DUPLEX BY PHYSICS and the chapter says so: while the
+ * It is half duplex by physics and the chapter says so: while the
  * encoder is busy the decoder ignores the line. The pads stay two -
  * IrDA_OUT is the TX pad and IrDA_IN the RX pad - because the ENDEC sits
  * between the USART and the transceiver, not between the USART and the
  * pin.
  *
- * THE LINE INVERSIONS ARE init()'S, and so is the moment the TX pad joins
+ * The line inversions are init()'s, and so is the moment the TX pad joins
  * the block. "The transmit encoder output has the opposite polarity to
  * the decoder input" (33.5.18), so two ST ENDECs facing each other need
  * one inversion each way, and TXINV/RXINV act on the SIR side (measured,
@@ -3152,6 +3273,7 @@ struct IrdaLink {
         return true;
     }
 
+    /// One character out, polled: waits for TXE up to `spins` turns.
     static bool send(uint8_t b, uint32_t spins = 200'000u) {
         while ((S::status() & UsartFlag::txe) == 0u) {
             if (spins-- == 0u) {
@@ -3161,6 +3283,7 @@ struct IrdaLink {
         S::write_data(b);
         return true;
     }
+    /// Wait for TC, the last pulse out, up to `spins` turns.
     static bool drain(uint32_t spins = 400'000u) {
         while ((S::status() & UsartFlag::tc) == 0u) {
             if (spins-- == 0u) {
@@ -3169,8 +3292,9 @@ struct IrdaLink {
         }
         return true;
     }
-    /// One character in, if one has arrived. The error flags travel with
-    /// it, exactly as in the non-FIFO view of the plain receiver.
+    /// One character in, if one has arrived; never waits. The error flags
+    /// travel with it in `flags` (UsartFlag's receive_errors), exactly as
+    /// in the non-FIFO view of the plain receiver, and are cleared here.
     static std::optional<uint8_t> receive(uint32_t& flags) {
         const uint32_t st = S::status();
         if ((st & UsartFlag::rxne) == 0u) {
@@ -3198,13 +3322,14 @@ struct IrdaLink {
  * - state a non-zero BRR, arm a pattern, wait for ABRF and then read
  * what the silicon put in BRR.
  *
- * IT IS A VIEW AND NOT A TRANSPORT: it configures nothing about the
+ * It is a view and not a transport: it configures nothing about the
  * frame and claims no pad, because the whole point is to run it on a
  * receiver that is already up. The caller arms it, feeds the line a
- * character of the right shape, and asks.
+ * character of the right shape, and asks. Main-context verbs; only
+ * wait() waits, and it is bounded.
  *
- * UNDER LIN IT IS ARMED ON THE BREAK, NOT BEFORE IT. Armed first, the
- * break IS its first character: its start bit is all thirteen zero
+ * Under LIN it is armed on the break, not before it. Armed first, the
+ * break is its first character: its start bit is all thirteen zero
  * bits, LBDF never rises and the detector ends in ABRE (measured from a
  * foreign master, docs/stm32g0/usart.md). A LIN
  * slave therefore keeps its nominal rate, takes LBDF, and arms inside
@@ -3221,9 +3346,9 @@ struct AutoBaud {
     AutoBaud() = delete;
     using Resource = S;
 
-    /// Arm a mode. The instance must be DISABLED (CR2 is UE-protected)
+    /// Arm a mode. The instance must be disabled (CR2 is UE-protected)
     /// and BRR already non-zero - 33.5.9's own precondition, which the
-    /// resource enforces.
+    /// resource enforces (false, nothing written, otherwise).
     static bool arm(AutoBaudMode m) { return S::auto_baud(m); }
     static bool disarm() { return S::auto_baud_off(); }
 
@@ -3255,16 +3380,16 @@ struct AutoBaud {
 
 /**
  * Smartcard<n, pad>: the ISO 7816-3 personality of 33.5.17 - 8 bits plus
- * parity, 1.5 stop bits, ONE WIRE on the TX pad, a guard time counted in
+ * parity, 1.5 stop bits, one wire on the TX pad, a guard time counted in
  * baud periods after the stop bit, an automatic NACK on a parity error
  * and up to seven retries.
  *
- * THE PAD IS OPEN DRAIN WITH A PULL-UP, exactly as the half-duplex mode
+ * The pad is open drain with a pull-up, exactly as the half-duplex mode
  * asks, and for the same reason: the card drives the same wire. The
- * optional CK output is a SECOND pad and a separate claim, because a
+ * optional CK output is a second pad and a separate claim, because a
  * card that supplies its own clock does not want one.
  *
- * WHAT A BENCH WITHOUT A CARD CAN STILL SEE, and what this task is
+ * What a bench without a card can still see, and what this task is
  * shaped to let it see: the frame on the wire (the loop-back through the
  * driver's own receiver), the guard time as a delay of TC, the CK
  * frequency on its pad, and the NACK - which is a caller pulling the
@@ -3281,6 +3406,9 @@ struct Smartcard {
     Smartcard() = delete;
     using Resource = S;
 
+    /// Up at `baud` as `cfg` says, on PCLK, the wire (and the CK pad, if
+    /// named) claimed. False when the rate has no divisor or the resource
+    /// refuses a write. A setup verb, after the clock task.
     template <typename Clock>
     static bool init(Clock clock, uint32_t baud, const SmartcardConfig& cfg) {
         static_assert(clock_follows<Clock, Smartcard>(),
@@ -3313,6 +3441,7 @@ struct Smartcard {
         return true;
     }
 
+    /// One character out, polled: waits for TXE up to `spins` turns.
     static bool send(uint8_t b, uint32_t spins = 200'000u) {
         while ((S::status() & UsartFlag::txe) == 0u) {
             if (spins-- == 0u) {
@@ -3322,7 +3451,8 @@ struct Smartcard {
         S::write_data(b);
         return true;
     }
-    /// TC, which in this mode rises only AFTER the guard time (33.5.17).
+    /// Wait for TC, which in this mode rises only after the guard time
+    /// (33.5.17), up to `spins` turns.
     static bool drain(uint32_t spins = 4'000'000u) {
         while ((S::status() & UsartFlag::tc) == 0u) {
             if (spins-- == 0u) {
@@ -3331,12 +3461,14 @@ struct Smartcard {
         }
         return true;
     }
-    /// TCBGT - "transmission complete BEFORE guard time", which is the
+    /// TCBGT - "transmission complete before guard time", which is the
     /// flag that says the frame left and no NACK came back, without
     /// waiting for the guard time TC waits for.
     static bool complete_before_guard_time() {
         return (S::status() & UsartFlag::tcbgt) != 0u;
     }
+    /// One character in, if one has arrived; never waits. The error flags
+    /// come back in `flags` and are cleared here.
     static std::optional<uint8_t> receive(uint32_t& flags) {
         const uint32_t st = S::status();
         if ((st & UsartFlag::rxne) == 0u) {

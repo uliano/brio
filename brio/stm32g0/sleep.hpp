@@ -1,17 +1,55 @@
 /*
  * sleep.hpp
  *
- * util/power.hpp's depth ladder on STM32G0 silicon: `Stm32g0SleepSite`,
- * which arms one of this family's modes, and `Stm32g0TimedSleepSite`,
- * which additionally keeps KERNEL TIME HONEST across a Stop by putting
- * the RTC's wake-up timer where the deadline is and handing the frozen
- * span back to the SysTick ticker (a third site does the same with an
- * LPTIM; and a program on the TICKLESS timebase needs neither - see
- * "Under a tickless platform" below).
+ * The STM32G0's sleep sites: what lets a brio program sleep deeper than
+ * the kernel's own idle, which is a plain WFI. util/power.hpp's power
+ * manager (an active object - a task the kernel serves one event at a
+ * time - that collects the program's votes on how deep it may sleep)
+ * drives a sleep site, the target's half: `arm(depth)` before the
+ * kernel idles, `disarm()` on the first event after the wake, `armed()`
+ * to read back what the machine will really do. Three sites are here:
  *
- * The MECHANISM - which modes exist, what they gate, what wakes them -
- * is stm32g0/pwr.hpp's. The POLICY - when a program may stop - is
- * util/power.hpp's. What is HERE is the mapping between them, and the
+ *  Stm32g0SleepSite           arms one of this family's modes and puts
+ *                             the clock back after a Stop;
+ *  Stm32g0TimedSleepSite      the same, and keeps kernel time (the tick
+ *                             count the kernel's time events are
+ *                             measured in) honest across a Stop: it
+ *                             places the RTC's wake-up timer on the
+ *                             nearest deadline and hands the frozen span
+ *                             back to the SysTick ticker afterwards;
+ *  Stm32g0LptimTimedSleepSite the same lift with a low-power timer as
+ *                             both alarm and witness, leaving the RTC to
+ *                             the application.
+ *
+ *     using Site = brio::Stm32g0TimedSleepSite<Platform, SysClock>;
+ *     using Manager = brio::PowerManager<Platform, Site, brio::PowerConfig{},
+ *                                        Blinker>;
+ *     extern "C" void RTC_TAMP_IRQHandler() { Site::isr(); }
+ *     Site::init();                                   // owns the RTC, whole
+ *
+ * A program on the tickless timebase needs no timed site at all - see
+ * "Under a tickless platform" below. docs/stm32g0/pwr.md carries the
+ * whole program and the findings.
+ *
+ * Which context calls what. `init()` is setup's, once, after the clock
+ * task and before the manager's first round; it waits, bounded, for the
+ * oscillator it turns on and for the RTC's or LPTIM's own
+ * synchronizations, and false means the site works as the plain one,
+ * minus every timed property - the caller must look at the answer.
+ * `arm()`, `disarm()` and `armed()` are the manager's, called from its
+ * handler; arm() does not block (the LPTIM site's place_alarm() spins,
+ * bounded, for the compare write to land before it lets the loop reach
+ * its WFI). `isr()` is the body the app binds to the RTC's or the
+ * LPTIM's vector, and it runs as the wake itself. `resync()` is shared
+ * by isr() and disarm(), whichever gets there first, and takes the
+ * platform's critical section (interrupts masked) for the few
+ * instructions that consume the baseline; nothing else here masks. A
+ * timed site owns its instrument whole (the RTC, or one LPTIM and the
+ * oscillator it runs on) for the life of the program.
+ *
+ * The mechanism - which modes exist, what they gate, what wakes them -
+ * is stm32g0/pwr.hpp's. The policy - when a program may stop - is
+ * util/power.hpp's. What is here is the mapping between them, and the
  * mapping is this target's own decision.
  *
  * ## The ladder, and why it is not the identity
@@ -26,25 +64,25 @@
  *                         low-power regulator - deeper and slower to
  *                         leave
  *
- * THREE THINGS TO READ BEFORE USING IT.
+ * Four things to read before using it.
  *
- * 1. `light` AND `none` ARE ONE CODE, and that is the honest answer
+ * 1. `light` and `none` are one code, and that is the honest answer
  *    rather than a shortcut. util/power.hpp's rule is that a target
  *    "maps what it does not have to the nearest SHALLOWER mode - never
  *    deeper than asked". Between Sleep and Stop 0 this family has
- *    exactly one thing, Low-power SLEEP, and it is not a rung a sleep
- *    site may take: 4.3.5 reaches it only from Low-power RUN, which
+ *    exactly one thing, Low-power sleep, and it is not a rung a sleep
+ *    site may take: 4.3.5 reaches it only from Low-power run, which
  *    means the regulator in low-power mode and the system clock at or
  *    below 2 MHz - a whole-program decision that an application makes,
  *    not something to do behind its back for the duration of one idle.
- *    So `light` maps to Sleep, and `armed()` - which is a PURE READ of
+ *    So `light` maps to Sleep, and `armed()` - which is a pure read of
  *    the silicon - answers `none` for it,
  *    because that is what the machine will really do. The manager's
  *    WakeReport then carries `none`, which is the truth.
  *
- * 2. STANDBY AND SHUTDOWN ARE OFF THE LADDER ON PURPOSE: a mode the
+ * 2. Standby and Shutdown are off the ladder on purpose: a mode the
  *    silicon has, deliberately not a rung.
- *    util/power.hpp's model is built on the program RESUMING:
+ *    util/power.hpp's model is built on the program resuming:
  *    "the manager's next dispatch - of ANY event - first disarms the
  *    site and publishes a WakeReport". After this family's Standby or
  *    Shutdown there is no next dispatch - 4.3.8: "program execution
@@ -56,14 +94,14 @@
  *    deliberate one-shot, whose resumption is the application's boot
  *    path reading PWR_SR1.SBF and the TAMP backup registers.
  *
- * 3. A STOP ENTERED WITH THE KERNEL'S TICK ARMED LASTS - ON A BOARD NO
- *    DEBUGGER HAS TOUCHED. 4.3.3: entering a low-power mode through WFI
+ * 3. A Stop entered with the kernel's tick armed lasts - on a board no
+ *    debugger has touched. 4.3.3: entering a low-power mode through WFI
  *    "is executed only if no interrupt is pending", and a 1 kHz SysTick
  *    raises one every millisecond; but once the WFI is taken HCLK stops
  *    and SysTick with it, so that window is one instruction wide and
- *    not a coin toss. MEASURED: a 250 ms Stop 1 asked for with the tick
- *    armed lasts 250 ms to the RTC's own tick - UNLESS
- *    DBGMCU_CR.DBG_STOP IS SET, in which case the debug
+ *    not a coin toss. Measured: a 250 ms Stop 1 asked for with the tick
+ *    armed lasts 250 ms to the RTC's own tick - unless
+ *    DBGMCU_CR.DBG_STOP is set, in which case the debug
  *    logic keeps HCLK and SysTick running inside the Stop and the same
  *    sleep lasts 1 ms (measured both ways, the bit written and cleared
  *    over SWD under one image). That bit survives every reset but a
@@ -71,64 +109,64 @@
  *    connection whose examine finds RCC_APBENR1.DBGEN open, so a Stop
  *    that looks like it lasts a millisecond is a debugged board and
  *    not a silicon fact. `arm()` pauses the ticker for the deep rungs
- *    and `disarm()` resumes it all the same: it costs NOTHING (a Stop
+ *    and `disarm()` resumes it all the same: it costs nothing (a Stop
  *    stops SysTick anyway and kernel time was going to stand still for
  *    the whole sleep either way), it closes
  *    4.3.3's pending-tick window by construction, and it makes a Stop
  *    last whatever a probe left in DBGMCU_CR. `Pwr::debug_in_stop()`
  *    reads that bit; bin/brio clears it after every flash. On a
- *    TICKLESS program (below) there is no tick to pause: SysTick carries
+ *    tickless program (below) there is no tick to pause: SysTick carries
  *    no interrupt there, and the site touches it only where the
  *    timebase has the verbs.
  *
- * 4. WHAT COMES BACK FROM A STOP IS NOT WHAT WENT IN. 4.3.6 and 5.3:
+ * 4. What comes back from a Stop is not what went in. 4.3.6 and 5.3:
  *    the system clock on exit is HSISYS and the PLL is off, so a
  *    program running at 64 MHz resumes at 16 MHz with a SysTick reload
  *    and a USART divisor meant for four times that. The site is
- *    therefore TEMPLATED ON THE CLOCK TASK and restores it - and the
+ *    therefore templated on the clock task and restores it - and the
  *    place it does so is the model's own hook, not a new one: arm() is
- *    called before the machine stops and disarm() on the FIRST EVENT
- *    AFTER THE WAKE, which is exactly "put the clock back". A program
+ *    called before the machine stops and disarm() on the first event
+ *    after the wake, which is exactly "put the clock back". A program
  *    on `ClockSource::internal` pays nothing at all: HSIDIV survives a
  *    Stop, so SWS already reads what the task asked for and
  *    `resume_clock()` finds nothing to do.
  *
  * ## The timed site
  *
- * The plain site keeps an HONEST RESTRICTION: with kernel time frozen
+ * The plain site keeps an honest restriction: with kernel time frozen
  * for the whole Stop, a program with armed time events must not take
- * one. `Stm32g0TimedSleepSite` LIFTS it, inside arm() and disarm()
+ * one. `Stm32g0TimedSleepSite` lifts it, inside arm() and disarm()
  * alone, with the RTC in both roles:
  *
- *  - the ALARM is the periodic wake-up timer (30.3.7), placed on
- *    TimeEvents<P>::ticks_to_next() rounded UP. 4.3.10 calls this the
+ *  - the alarm is the periodic wake-up timer (30.3.7), placed on
+ *    TimeEvents<P>::ticks_to_next() rounded up. 4.3.10 calls this the
  *    device's auto-wake-up and it is the one counter on this family
  *    that runs with every VCORE clock stopped;
- *  - the WITNESS is the calendar plus the sub-second counter, read
+ *  - the witness is the calendar plus the sub-second counter, read
  *    through `Rtc::time_of_hour_ms()`; the difference between the
  *    reading at arm() and the reading at disarm() is how long the world
  *    moved, and subtracting what SysTick itself counted leaves the
- *    FROZEN span, which goes to `Ticker::advance()`.
+ *    frozen span, which goes to `Ticker::advance()`.
  *
- * THE RATE RULE IS DIRECTIONAL, and on this target BOTH halves want the
- * same direction: state an RTCCLK rate NOT BELOW the true one.
+ * The rate rule is directional, and on this target both halves want the
+ * same direction: state an RTCCLK rate not below the true one.
  * Over-estimating it makes the prescalers divide too hard, so ck_spre
- * runs slow, so the witness UNDER-reports the span and the resync
- * UNDER-advances; and it makes the alarm arithmetic ask for more
- * counts than needed, so the wake lands LATE. Both errors land on the
+ * runs slow, so the witness under-reports the span and the resync
+ * under-advances; and it makes the alarm arithmetic ask for more
+ * counts than needed, so the wake lands late. Both errors land on the
  * side the kernel's time contract allows: at least, never early. The
  * default over-estimates LSI, which this family specifies at 32 kHz
  * nominal and DS13560 bounds at 29.5..34 kHz; a board that has measured
  * its own says so in the config, and gets the slack back.
  *
- * THE ISR HAS FOUR ACTS, and every one of them is load-bearing:
- *   0. RESTORE THE CLOCK - fact 4 above. First, so that everything
+ * The ISR has four acts, and every one of them is load-bearing:
+ *   0. restore the clock - fact 4 above. First, so that everything
  *      after it (and every handler that runs later) is at full speed
  *      and the console's divisor is right again.
- *   1. ACKNOWLEDGE - the wake-up flag, or the interrupt re-enters.
- *   2. RESYNC - hand the frozen span to the ticker.
- *   3. HAND THE MACHINE BACK TO A TICKING SLEEP. The never-early bias
- *      GUARANTEES that kernel time is still a shade short of the
+ *   1. acknowledge - the wake-up flag, or the interrupt re-enters.
+ *   2. resync - hand the frozen span to the ticker.
+ *   3. hand the machine back to a ticking sleep. The never-early bias
+ *      guarantees that kernel time is still a shade short of the
  *      deadline when the alarm lands, and an RTC wake posts nothing to
  *      any queue, so a loop that idled again into the still-armed Stop
  *      with the alarm now spent would never come back. Downgrading to
@@ -136,19 +174,19 @@
  *      within milliseconds and TimeEvents::process() posts the deadline
  *      on its own clock.
  *
- * A FOREIGN wake - any other interrupt - does not run this body. Its
+ * A foreign wake - any other interrupt - does not run this body. Its
  * progress is its own event, the resync happens in disarm() instead,
- * and the Stop stays armed WITH the alarm still standing. That is why
+ * and the Stop stays armed with the alarm still standing. That is why
  * util/power.hpp's convention (a wake path with nothing to say sends
- * SleepRequested{none}) is LOAD-BEARING with this site.
+ * SleepRequested{none}) is load-bearing with this site.
  *
  * ## The third site: the same lift, without the RTC
  *
  * `Stm32g0LptimTimedSleepSite` is the timed site again with a different
- * counter under it, and it exists because the one above OWNS THE WHOLE
- * RTC (see the next section). Its own instrument is an LPTIM on LSE or
- * LSI, which 26.5 says keeps counting through Stop 0 and Stop 1 and
- * which wakes through its own EXTI line - so one peripheral is BOTH the
+ * counter under it, and it exists because the one above owns the whole
+ * RTC (see "What the site owns"). Its own instrument is an LPTIM on LSE
+ * or LSI, which 26.5 says keeps counting through Stop 0 and Stop 1 and
+ * which wakes through its own EXTI line - so one peripheral is both the
  * alarm and the witness, and the calendar, its prescaler split and both
  * its alarms stay the application's. Its header comment, below, is where
  * the differences live.
@@ -162,7 +200,7 @@
  * needs repairing, and no site may own a second alarm: the plain
  * `Stm32g0SleepSite` is the only site such a program takes - it still
  * arms the depth and still puts the clock back (fact 4), and it pauses
- * nothing - while both timed sites REFUSE a tickless platform at
+ * nothing - while both timed sites refuse a tickless platform at
  * compile time (their static_assert names the reason). The restriction
  * the plain site carries on the SysTick timebase - no Stop with an
  * armed time event - is simply gone there, and gone for every program,
@@ -170,7 +208,7 @@
  *
  * ## What the site owns
  *
- * THE RTC, WHOLE: the domain gate, the clock select, the prescalers,
+ * The RTC, whole: the domain gate, the clock select, the prescalers,
  * the calendar and the wake-up timer. An application using this site
  * must not drive stm32g0/rtc.hpp elsewhere, and must bind the vector:
  *
@@ -269,13 +307,15 @@ struct Stm32g0SleepSite {
     }
 
     /**
-     * Arm a rung. For the two deep ones this ALSO pauses the kernel's
+     * Arm a rung. For the two deep ones this also pauses the kernel's
      * tick where there is one - fact 3 in this file's header: it closes
      * 4.3.3's pending-interrupt window by construction and makes the
      * Stop last even under a debugger's DBG_STOP, and it costs nothing
      * because a Stop stops SysTick anyway. `disarm()` puts it back. A
      * tickless timebase has nothing to pause, and its wake is placed by
-     * the platform's idle_until(), not here.
+     * the platform's idle_until(), not here. Called by the manager from
+     * its handler; writes the two mode registers and returns at once,
+     * false only for a mode Pwr refuses.
      */
     static bool arm(SleepDepth d) {
         switch (d) {
@@ -420,15 +460,15 @@ struct Stm32g0TimedSleepSite {
 
     using Plain = Stm32g0SleepSite<C, typename P::Timebase>;
 
-    /// THE OTHER PRESCALER SPLIT, and the choice is the site's whole
+    /// The other prescaler split, and the choice is the site's whole
     /// resolution. 30.3.4's advice - a high asynchronous factor, to save
     /// current - is right for a calendar and wrong here: PREDIV_S is how
     /// finely the sub-second counter divides a second, and that counter
-    /// is this site's ONLY way of measuring a span the kernel's tick did
+    /// is this site's only way of measuring a span the kernel's tick did
     /// not count. Taking the chapter's default at 32.8 kHz would give
-    /// 328 steps a second - THREE MILLISECONDS a step, three times the
+    /// 328 steps a second - three milliseconds a step, three times the
     /// kernel tick - and a resync quantized that coarsely can advance a
-    /// tick too many and mature an event EARLY, which is the one thing
+    /// tick too many and mature an event early, which is the one thing
     /// brio's time contract forbids. (Measured, and it did: a 150 ms
     /// deadline came back at 149 before this line was what it is.)
     static constexpr RtcPrescalers prescalers =
@@ -448,8 +488,10 @@ struct Stm32g0TimedSleepSite {
 
     /**
      * Route the RTC, start the counter, set the calendar going, bypass
-     * the shadow registers and enable the NVIC line. Call once, after
-     * the clock init, before the manager's first round.
+     * the shadow registers and enable the NVIC line. Call once, from
+     * setup, after the clock init, before the manager's first round;
+     * it waits, bounded, for the oscillator and for the RTC's own
+     * synchronizations, interrupts enabled.
      *
      * False = the domain or the RTC refused (a clock select already
      * taken by something else and `wipe_domain` not given, an oscillator
@@ -458,7 +500,7 @@ struct Stm32g0TimedSleepSite {
      * every timed property - which is why the caller must look at the
      * answer.
      *
-     * WHY BYPSHAD: after a Stop the shadow registers are not updated and
+     * Why BYPSHAD: after a Stop the shadow registers are not updated and
      * RSF has to be cleared and awaited before a shadow read means
      * anything (30.3.5). Reading the counters directly deletes that step
      * from the wake path, at the price of the double-read this driver's
@@ -518,9 +560,11 @@ struct Stm32g0TimedSleepSite {
      * because the arithmetic is worth being able to check without
      * arming a sleep; arm() calls it.
      *
-     * The FAST clock is used while the deadline fits its 16-bit reload,
+     * The fast clock is used while the deadline fits its 16-bit reload,
      * and ck_spre (one second per count) beyond that. Both conversions
-     * round UP. False = the RTC refused the programming.
+     * round up. False = the RTC refused the programming. Waits for the
+     * wake-up timer's own write synchronization inside Rtc::set_wakeup(),
+     * bounded there.
      */
     static bool place_alarm(uint32_t ticks) {
         if (ticks <= fast_span_ticks) {
@@ -539,6 +583,9 @@ struct Stm32g0TimedSleepSite {
         return Rtc::set_wakeup(RtcWakeupClock::ck_spre, last_reload_);
     }
 
+    /// The plain arm, then - for a deep rung on a site whose init()
+    /// succeeded - the witness stamped and the alarm placed on the
+    /// nearest time event, if any. The manager's, from its handler.
     static bool arm(SleepDepth d) {
         if (!Plain::arm(d)) {
             return false;
@@ -556,6 +603,9 @@ struct Stm32g0TimedSleepSite {
         return true;
     }
 
+    /// The plain disarm, the alarm withdrawn, and the resync if isr()
+    /// has not already made it. The manager's, on the first event after
+    /// the wake.
     static void disarm() {
         Plain::disarm();
         if (alarm_armed_) {
@@ -568,12 +618,13 @@ struct Stm32g0TimedSleepSite {
     static SleepDepth armed() { return Plain::armed(); }
 
     /**
-     * Catch kernel time up by the FROZEN span: the RTC's own elapsed
+     * Catch kernel time up by the frozen span: the RTC's own elapsed
      * milliseconds minus what SysTick itself counted since arm(). The
      * subtraction is what makes several naps inside one armed round, and
      * rounds that never slept at all, come out right with no special
-     * case. The baseline is consumed EXACTLY ONCE, under the platform's
-     * critical section, whichever of isr() and disarm() gets there first.
+     * case. The baseline is consumed exactly once, under the platform's
+     * critical section (interrupts masked for these few instructions),
+     * whichever of isr() and disarm() gets there first.
      */
     static void resync() {
         typename P::CriticalSection cs;
@@ -631,29 +682,29 @@ private:
 /**
  * Stm32g0LptimTimedSleepSite's knobs.
  *
- * `source` is the LPTIM's kernel clock and it must be one that RUNS IN
- * STOP: 26.5's table 145 says "no effect when LPTIM is clocked by LSE or
+ * `source` is the LPTIM's kernel clock and it must be one that runs in
+ * Stop: 26.5's table 145 says "no effect when LPTIM is clocked by LSE or
  * LSI", and PCLK stops with the VCORE domain while HSI16 is a clock
- * REQUEST that ES0548 2.2.4 breaks on a divided HSI. Both are refused at
+ * request that ES0548 2.2.4 breaks on a divided HSI. Both are refused at
  * compile time.
  *
- * `rate_hz` STATES what that clock is worth AND THE RULE IS DIRECTIONAL,
- * exactly as for the RTC site: give a value NOT BELOW the true rate. It
+ * `rate_hz` states what that clock is worth and the rule is directional,
+ * exactly as for the RTC site: give a value not below the true rate. It
  * enters twice and both errors land late:
- *   - the ALARM asks for `ticks * counter_hz / tps` counts, so an
+ *   - the alarm asks for `ticks * counter_hz / tps` counts, so an
  *     over-estimated rate asks for more counts than needed and the wake
- *     is LATE;
- *   - the RESYNC converts elapsed counts back with the same number, so
- *     an over-estimated rate UNDER-reports the span, kernel time lags,
+ *     is late;
+ *   - the resync converts elapsed counts back with the same number, so
+ *     an over-estimated rate under-reports the span, kernel time lags,
  *     and the event matures late again.
  * Zero means "take the source's own safe default", which is the
- * crystal's exact 32768 for LSE and DS13560's UPPER BOUND for LSI - a
+ * crystal's exact 32768 for LSE and DS13560's upper bound for LSI - a
  * board that has measured its own LSI says so here and gets the slack
  * back.
  *
- * `prescaler` is the resolution. The counter must tick FINER than the
+ * `prescaler` is the resolution. The counter must tick finer than the
  * kernel's tick or a resync quantized more coarsely than a millisecond
- * can advance a tick too many and mature an event EARLY, which is the
+ * can advance a tick too many and mature an event early, which is the
  * one thing brio's time contract forbids - so the static_assert below
  * demands counter_hz >= P::ticks_per_second. The default /32 puts a
  * 32768 Hz crystal at 1024 counts a second: just over a kernel tick, and
@@ -693,13 +744,15 @@ constexpr bool lptim_timed_sleep_config_valid(const LptimTimedSleepConfig& c,
 }
 
 /**
- * THE THIRD SLEEP SITE: kernel time honest across a Stop, AND THE RTC
- * LEFT ALONE.
+ * The third sleep site: kernel time honest across a Stop, and the RTC
+ * left alone. Same verbs, same callers and same contexts as the RTC
+ * site (the file header's "Which context calls what"), with one more
+ * wait: arm() spins, bounded, for the compare write to land.
  *
  * ## Why it exists
  *
  * `Stm32g0TimedSleepSite` owns the whole RTC and cannot share it: its
- * resolution IS the prescaler split (PREDIV_S at least 1000, against the
+ * resolution is the prescaler split (PREDIV_S at least 1000, against the
  * chapter's own low-power advice of PREDIV_A 127), its wake path is
  * BYPSHAD, and its alarm is the wake-up timer. An application that wants
  * a real calendar at the chapter's split, or either RTC alarm for
@@ -708,35 +761,35 @@ constexpr bool lptim_timed_sleep_config_valid(const LptimTimedSleepConfig& c,
  *
  * The LPTIM lifts the same restriction with a peripheral almost nothing
  * else wants. 26.5: an LPTIM on LSE or LSI is unaffected by Stop 0 and
- * Stop 1 and its interrupts bring the device out of them - so ONE BLOCK
- * IS BOTH THE ALARM AND THE WITNESS, and the price is one LPTIM instead
+ * Stop 1 and its interrupts bring the device out of them - so one block
+ * is both the alarm and the witness, and the price is one LPTIM instead
  * of one RTC.
  *
- * It is a SIBLING of the RTC site and not a replacement: same two verbs,
- * same four ISR acts, same directional rate rule, and NOT ONE LINE of
- * util/power.hpp, of kernel/, or of the two sites above changed. That is
- * the third site over the same unchanged model.
+ * It is a sibling of the RTC site and not a replacement: same two verbs,
+ * same four ISR acts, same directional rate rule, and nothing in
+ * util/power.hpp, in kernel/, or in the two sites above is different
+ * for it. That is the third site over the same unchanged model.
  *
  * ## The mechanism
  *
- *  - the COUNTER is free-running at ARR = 0xFFFF with ARRM armed
+ *  - the counter is free-running at ARR = 0xFFFF with ARRM armed
  *    (`LptimCounter`), so a 32-bit count is available whatever the sleep
  *    did to the CPU. `arm()` stamps it, `resync()` differences it;
- *  - the ALARM is the compare register, placed at `now + counts` MODULO
- *    THE LAP - a match after the wrap is fine, because the counter is
+ *  - the alarm is the compare register, placed at `now + counts` modulo
+ *    the lap - a match after the wrap is fine, because the counter is
  *    monotonic modulo 65536 and CMPM fires once per lap at equality;
- *  - the COMPLETION of that compare write is observed through the ISR:
+ *  - the completion of that compare write is observed through the ISR:
  *    26.4.11 makes a second write before CMPOK "unpredictable", and
  *    ES0548 2.8.2 forbids clearing the flag outside the handler once an
  *    interrupt is enabled - so CMPOKIE is armed, `isr()` clears CMPOK
  *    and bumps a counter, and `arm()` waits (bounded) for that counter
- *    to move before it lets the loop reach its WFI. The alarm is IN
- *    PLACE before the machine stops, or arm() says the round is
+ *    to move before it lets the loop reach its WFI. The alarm is in
+ *    place before the machine stops, or arm() says the round is
  *    untimed.
  *
- * ## Three consequences a reader must know
+ * ## Four consequences a reader must know
  *
- * 1. THE ALARM IS NEVER CLEARED, because nothing here may clear
+ * 1. The alarm is never cleared, because nothing here may clear
  *    CR.ENABLE (ES0548 2.8.1) and LPTIM_IER is a disabled-only register
  *    (26.7.3) - so CMPMIE stands for the life of the site and the last
  *    compare value stays where it was. A round that places NO alarm (no
@@ -747,13 +800,13 @@ constexpr bool lptim_timed_sleep_config_valid(const LptimTimedSleepConfig& c,
  *    the default rate. It is stated rather than hidden because there is
  *    no register in this block that would remove it.
  *
- * 2. AN ARRM IS A LEGAL EARLY WAKE TOO. The lap interrupt is what keeps
+ * 2. An ARRM is a legal early wake too. The lap interrupt is what keeps
  *    the high word, so it must be armed; during a Stop it wakes the
  *    core. `isr()` then accumulates, restores the clock and returns
  *    WITHOUT downgrading the armed mode, so the kernel's loop idles
  *    straight back into the same Stop with the alarm still standing.
  *
- * 3. A MINIMUM DISTANCE IS ENFORCED. A compare write takes a few kernel
+ * 3. A minimum distance is enforced. A compare write takes a few kernel
  *    clocks to cross into the counter's domain, and a compare placed
  *    behind a counter that has already passed it would not match until
  *    the next lap. `min_alarm_counts` is that floor; a deadline nearer
@@ -765,10 +818,10 @@ constexpr bool lptim_timed_sleep_config_valid(const LptimTimedSleepConfig& c,
  *    magnitude and exists for the deadline that is nearer than the write
  *    itself, not for the ordinary one.)
  *
- * 4. THE COUNT IS A WHOLE NUMBER AND TIME IS NOT, AND THAT ONE COUNT IS
- *    WHERE AN EARLY MATURITY WOULD COME FROM. `count32()` is read at an
- *    unknown phase inside a counter period, so the INTEGER difference
- *    between two readings OVER-STATES the real interval by up to one
+ * 4. The count is a whole number and time is not, and that one count is
+ *    where an early maturity would come from. `count32()` is read at an
+ *    unknown phase inside a counter period, so the integer difference
+ *    between two readings over-states the real interval by up to one
  *    count - and one count at the default 1024 Hz is very nearly one
  *    kernel tick. Handed to Ticker::advance() unmodified it would push
  *    kernel time PAST the wall by that much and mature an event EARLY,
@@ -787,10 +840,10 @@ constexpr bool lptim_timed_sleep_config_valid(const LptimTimedSleepConfig& c,
  *
  * ## What the site owns
  *
- * ONE LPTIM, WHOLE - its configuration, its counter, its compare and its
+ * One LPTIM, whole - its configuration, its counter, its compare and its
  * EXTI wake line - plus LSEON or LSION in the RCC (which it turns on and
  * never off). The RTC, both its alarms, its wake-up timer and its
- * prescaler split are NOT touched. The application binds the instance's
+ * prescaler split are not touched. The application binds the instance's
  * vector:
  *
  *     extern "C" void TIM6_DAC_LPTIM1_IRQHandler() { Site::isr(); }
@@ -858,8 +911,10 @@ struct Stm32g0LptimTimedSleepSite {
 
     /**
      * Bring the LPTIM up as the free-running counter, open its wake line
-     * and its NVIC line. Call once, after the clock init, before the
-     * manager's first round.
+     * and its NVIC line. Call once, from setup, after the clock init,
+     * before the manager's first round; it waits, bounded, for the
+     * oscillator and for each of the LPTIM's own write completions,
+     * interrupts enabled.
      *
      * False = the oscillator never reported ready, or a step of the
      * chapter's own order was refused. The site still works as a plain
@@ -939,15 +994,17 @@ struct Stm32g0LptimTimedSleepSite {
      * because the arithmetic is worth being able to check without arming
      * a sleep; arm() calls it.
      *
-     * The conversion rounds UP, GAINS ONE COUNT (consequence 4 of the
+     * The conversion rounds up, gains one count (consequence 4 of the
      * header: `now` is read at an unknown phase inside a counter period,
      * so a match `counts` readings away happens between counts - 1 and
      * counts periods from now, and the extra one is what keeps the wake
      * from landing before the deadline's own tick), is clamped to
      * `max_alarm_counts` above and to `min_alarm_counts` below, and the
-     * compare is placed at `count + counts` MODULO the lap. False = the
+     * compare is placed at `count + counts` modulo the lap. False = the
      * counter could not be read coherently, the store was refused, or
-     * the write never completed inside the bound.
+     * the write never completed inside the bound - the one wait of this
+     * site's arm path, a bounded spin with interrupts enabled (the
+     * completion arrives through isr()).
      */
     static bool place_alarm(uint32_t ticks) {
         const std::optional<uint16_t> now = L::count();
@@ -984,6 +1041,9 @@ struct Stm32g0LptimTimedSleepSite {
         return cmp_completions_ != seen;
     }
 
+    /// The plain arm, then - for a deep rung on a site whose init()
+    /// succeeded - the counter stamped and the alarm placed on the
+    /// nearest time event, if any. The manager's, from its handler.
     static bool arm(SleepDepth d) {
         if (!Plain::arm(d)) {
             return false;
@@ -1014,15 +1074,16 @@ struct Stm32g0LptimTimedSleepSite {
     static SleepDepth armed() { return Plain::armed(); }
 
     /**
-     * Catch kernel time up by the FROZEN span: the counts the LPTIM made
-     * since arm(), converted with the STATED rate, minus what SysTick
+     * Catch kernel time up by the frozen span: the counts the LPTIM made
+     * since arm(), converted with the stated rate, minus what SysTick
      * itself counted. The subtraction is what makes several naps inside
      * one armed round, and rounds that never slept at all, come out
-     * right with no special case. The baseline is consumed EXACTLY ONCE,
-     * under the platform's critical section, whichever of isr() and
-     * disarm() gets there first.
+     * right with no special case. The baseline is consumed exactly once,
+     * under the platform's critical section (interrupts masked for these
+     * few instructions), whichever of isr() and disarm() gets there
+     * first.
      *
-     * The conversion rounds DOWN and SPENDS ONE COUNT before it rounds
+     * The conversion rounds down and spends one count before it rounds
      * (consequence 4 of the header): the integer difference of two
      * readings taken at unknown phases over-states the real interval by
      * up to one count, and one count is nearly one kernel tick at the

@@ -1,19 +1,60 @@
 # Timers (STM32G0)
 
-Documents of record: RM0444 Rev 6 - TIM1 ch. 21, TIM2/TIM3/TIM4 ch. 22,
+This document is for a programmer who needs a timer for something other
+than the kernel's time: a PWM output, a capture, a pulse or event
+counter, a periodic interrupt at a rate of its own, a one-shot pulse.
+(The kernel's time events run on the platform's timebase, SysTick or
+the low-power timer, [platform.md](platform.md); the low-power timers
+have a document of their own, [lptim.md](lptim.md).) `Tim<n>` is the
+timer instance, one function per register fact; the tasks over it
+(`TimPwm`, `TimPairPwm`, `TimPeriodMeter`, `TimIntervalMeter`,
+`TimEventCounter`, `TimGatedCounter`, `TimPeriodicTick`, `TimOnePulse`)
+are the shapes a program uses, and two of them meet the util contracts
+every target shares, `PwmChannel` and `MeterSampler`.
+
+The smallest use, a PWM on the Nucleo-64's LED:
+
+```cpp
+constexpr brio::PinSel led{'A', 5, brio::PinFunction::af2};   // TIM2_CH1
+using LedOut = brio::TimPad<led>;
+using LedPwm = brio::TimPwm<brio::Tim<2>, 0, 999>;            // max = 999
+
+brio::Tim<2>::init();
+LedOut::claim();
+LedPwm::setup(63);          // 64 MHz / 64 / 1000 = 1 kHz
+LedPwm::duty(250);          // a quarter
+```
+
+What decides correctness even there: `init()` first, which opens the
+timer's bus clock; the pad claimed with the alternate-function number
+the datasheet gives for that timer's channel, which nothing in the code
+can check; and a static clock, since a timer's periods and prescalers
+are counted in bus-clock cycles and the timers refuse a dynamic clock at
+compile time. Ten timers share one register struct and are not alike (a
+table below says which has what); a function that names a feature the
+instance lacks returns false and writes nothing. A handler on a shared
+vector calls the `isr()` of each timer on the line, and each answers for
+its own flags alone.
+
+## Documents of record
+
+RM0444 Rev 6 - TIM1 ch. 21, TIM2/TIM3/TIM4 ch. 22,
 TIM6/TIM7 ch. 23, TIM14 ch. 24, TIM15/TIM16/TIM17 ch. 25, the timer
 clock 5.2.13, the interrupt table 12.3 (table 61); DS13560 Rev 5 table 7
 (the timer feature comparison) and tables 13..24 (the AF numbers of the
 channel pads); errata ES0548 Rev 3 items 2.7.1..2.7.3, read on the bench
 chip's revision Z column. Driver: `stm32g0/tim.hpp`; the per-instance
-presence and vector facts come from `stm32g0/device_tables.hpp`. Bench
-suite: `test_stm32_tim` (13 letters, 128 verdicts, wireless). Family
+presence and vector facts come from `stm32g0/device_tables.hpp` (the
+reserve: the table of what each part has, read off the device header).
+Bench suite: `test_stm32_tim` (13 letters, 128 verdicts, wireless; a
+letter is one command key of the suite's console and the group of
+verdicts it runs). Family
 fixture `test/family_stm32g0/tim.cpp` plus seven negatives under
 `brio check stm32g0`.
 
 ## What the silicon does
 
-**There is ONE `TIM_TypeDef` and TEN DIFFERENT TIMERS.** The device
+**There is one `TIM_TypeDef` and ten different timers.** The device
 header declares every register - SMCR, BDTR, RCR, CCMR2, TISEL - as a
 member of one struct, so `TIM14->SMCR` compiles and writes a hole in the
 address map. Nothing in the header says which timer has what. So the
@@ -60,7 +101,7 @@ ARR is too when `CR1.ARPE` is set and is taken at once when it is clear
 which is why `configure()` ends with `EGR.UG` - a software update that
 loads both shadows - and then clears the UIF that update raised.
 
-**A compare register is PRELOADED by this driver, and that is a
+**A compare register is preloaded by this driver, and that is a
 choice.** `CCyPE` is clear out of reset, so a write to CCRy acts at once
 and can produce a runt pulse; every output channel `output_channel()`
 configures sets it, because a `PwmChannel::duty()` that can glitch is
@@ -99,8 +140,8 @@ signal, and half of these have no driver in this stratum yet.
 
 **The pad map is the datasheet's and nothing checks it.** Which AF
 number carries TIM2_CH1 on PA5 is DS13560 table 13 (AF2), and the device
-header has no symbol for it - `stm32g0/port.md` states that once for the
-whole stratum. A timer pad is therefore a `PinSel` the caller writes and
+header has no symbol for it - [port.md](port.md) states that once for
+the whole stratum. A timer pad is therefore a `PinSel` the caller writes and
 the bench is the only check there is; three of those claims are measured
 in `test_stm32_tim` (PA5 = TIM2_CH1 AF2, PA6 = TIM3_CH1 AF1 and
 TIM1_BKIN AF2, PA7/PA8 = TIM1_CH1N/CH1 AF2).

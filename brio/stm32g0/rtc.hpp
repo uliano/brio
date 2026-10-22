@@ -2,9 +2,13 @@
  * rtc.hpp
  *
  * The real-time clock and the tamper/backup block (RM0444 ch. 30 and
- * ch. 31) - a calendar, two alarms, a periodic wake-up timer, a smooth
- * calibrator and five words of memory that outlive a reset, all of it
- * living in a POWER DOMAIN OF ITS OWN.
+ * ch. 31): what a program uses for a calendar, an alarm or a periodic
+ * wake that survives a reset and keeps running through every sleep
+ * mode, and for five words of memory that survive with them. All of it
+ * lives in a power domain of its own, which a system reset does not
+ * reach. Three types, each a monostate (a type with static members
+ * only, nothing to instantiate: there is one RTC on every part of the
+ * family and one domain for it to live in):
  *
  *  RtcDomain  the gate and the clock: PWR_CR1.DBP, RCC_APBENR1.RTCAPBEN
  *             and the whole of RCC_BDCR - LSE with its drive level,
@@ -14,17 +18,43 @@
  *  Rtc        the peripheral: the write-protection keys, initialization
  *             mode, the two prescalers, the BCD calendar, both alarms,
  *             the wake-up timer, smooth calibration, the timestamp, the
- *             flags and the ISR body.
- *  Tamp       ch. 31, and only the half this stratum can honestly own:
- *             the five backup registers, and the tamper configuration
- *             DECODED READ-ONLY.
+ *             flags and the interrupt body isr().
+ *  Tamp       ch. 31: the five backup registers, the tamper detection
+ *             (three external inputs, the four internal sources where
+ *             the part declares them, the erase of the backup registers
+ *             and the mask that suppresses it) and its interrupt body.
  *
- * SEVEN FACTS OF THIS SILICON shape everything below.
+ * The smallest use - the domain opened on the crystal, the calendar set
+ * and read - is docs/stm32g0/rtc.md's first listing: RtcDomain::reset()
+ * if another source stands, lse_enable() and lse_wait_ready(),
+ * RtcDomain::open(RtcClockSource::lse), then Rtc::init(prescalers,
+ * time) and Rtc::read(reading).
  *
- * 1. THE DOMAIN IS LOCKED AT EVERY RESET, AND THERE ARE TWO LOCKS, not
+ * Which context may call what. Every configuring verb of the three
+ * types is a read-modify-write of a shared register (RCC_BDCR,
+ * PWR_CR1, RTC_CR, RTC_ICSR, TAMP_CR1/CR2) and many of them wait: the
+ * domain's lse_wait_ready() and the RTC's enter_init(), exit_init(),
+ * wait_sync(), set_alarm(), set_wakeup() and calibrate() spin on a
+ * flag of the silicon up to a bound (ready_spins, sync_spins) and
+ * answer false when it never came - tens of milliseconds at most,
+ * calibrate() up to three seconds when a recalibration is pending. So
+ * they are called from setup in main() or from an active object's
+ * handler (an active object is an object the kernel serves one event
+ * at a time, so its handlers never overlap), never from an interrupt
+ * handler. None of them masks interrupts, and none keeps a buffer: a
+ * reading is copied into the caller's RtcReading before the verb
+ * returns. What an interrupt handler may call is isr() of either
+ * block, flag(), clear_flags(), subsecond(), read() (loads only, no
+ * wait: it reports an incoherent reading as false) and timestamp();
+ * Tamp::backup() is one word access either way and legal from any
+ * context once the domain is unlocked.
+ *
+ * Seven facts of this silicon shape everything below.
+ *
+ * 1. The domain is locked at every reset, and there are two locks, not
  *    one. PWR_CR1.DBP (4.1.2) gates the whole domain - RCC_BDCR, every
  *    RTC register and every backup register - and is clear after a
- *    system reset. On top of it, most RTC registers carry a SECOND lock
+ *    system reset. On top of it, most RTC registers carry a second lock
  *    that only the key sequence 0xCA then 0x53 into RTC_WPR opens
  *    (30.3.8), and "writing a wrong key reactivates the write
  *    protection". The two are independent: DBP is the domain's, WPR is
@@ -34,68 +64,68 @@
  *    leave the peripheral open by forgetting; unlock() and lock() are
  *    public anyway, because a suite has to be able to prove the lock.
  *
- * 2. RTCSEL IS ONE-WAY, AND THE WAY BACK IS A DOMAIN RESET. 5.4.23:
+ * 2. RTCSEL is one-way, and the way back is a domain reset. 5.4.23:
  *    "Once the RTC clock source is selected, it cannot be changed
  *    anymore unless the RTC domain is reset". So `select()` returns
  *    false rather than pretending, and `RtcDomain::reset()` - BDRST -
  *    is a deliberate, separately spelled verb: it stops the RTC, wipes
  *    the calendar, the alarms, the prescalers, the backup registers and
- *    the clock choice. THIS BOARD NEEDS IT. Measured on the bench and
- *    recorded in docs/stm32g0/reset.md long before this file existed:
- *    RCC_BDCR comes up reading 0x8200 - RTCEN set, RTCSEL = LSI - after
- *    EVERY system reset, because the domain is not in the system reset's
- *    scope, so a program that wants LSE must reset the domain first.
- *    reset() follows ES0548 2.2.11's own spelling (write 0x0001_0000,
- *    READ IT BACK to make the pulse long enough, write 0).
+ *    the clock choice. This board needs it. Measured on the bench and
+ *    recorded in docs/stm32g0/reset.md: RCC_BDCR comes up reading
+ *    0x8200 - RTCEN set, RTCSEL = LSI - after every system reset,
+ *    because the domain is not in the system reset's scope, so a
+ *    program that wants LSE must reset the domain first. reset()
+ *    follows ES0548 2.2.11's own spelling (write 0x0001_0000, read it
+ *    back to make the pulse long enough, write 0).
  *
- * 3. THE RTC KEEPS RUNNING UNDER SYSTEM RESET, and that is the point of
+ * 3. The RTC keeps running under system reset, and that is the point of
  *    it. 5.2.12 and 30.3.10: with LSE or LSI as RTCCLK the counter is
  *    not reset by anything but a domain reset - what a system reset does
- *    clear is the SHADOW registers and three bits of RTC_ICSR. Hence
+ *    clear is the shadow registers and three bits of RTC_ICSR. Hence
  *    INITS, the flag that says whether the calendar was ever set, and
  *    hence the backup registers as a legitimate place to leave a note.
  *
- * 4. THE CALENDAR IS READ THROUGH SHADOWS, OR NOT AT ALL. With
+ * 4. The calendar is read through shadows, or not at all. With
  *    BYPSHAD = 0 the three readable registers are copies refreshed every
  *    two RTCCLK cycles, RSF says a copy has landed, and reading SSR or
- *    TR LOCKS the higher-order ones until DR is read (30.3.9) - so a
+ *    TR locks the higher-order ones until DR is read (30.3.9) - so a
  *    coherent reading is always three reads ending in DR. With
  *    BYPSHAD = 1 there is no copy and no waiting, which is what a
  *    low-power program wants, at the price stated by the chapter: the
  *    values may disagree if an RTCCLK edge lands between two reads, so
  *    "the software must read all the registers twice". read() below does
  *    exactly that, per mode, and is the only calendar reader this file
- *    offers.
- *    AND THE SHADOW IS NOT UPDATED IN STOP OR STANDBY: after such a
- *    sleep RSF must be cleared and awaited again before a shadow read
- *    means anything (30.3.5, 30.3.9). BYPSHAD = 1 deletes that problem,
- *    which is why the timed sleep site (stm32g0/sleep.hpp) sets it.
+ *    offers. And the shadow is not updated in Stop or Standby: after
+ *    such a sleep RSF must be cleared and awaited again before a shadow
+ *    read means anything (30.3.5, 30.3.9). BYPSHAD = 1 deletes that
+ *    problem, which is why the timed sleep site (stm32g0/sleep.hpp)
+ *    sets it.
  *
- * 5. INITIALIZATION MODE IS A STOPPED CALENDAR, AND ENTERING IT TWICE IN
- *    A ROW IS AN ERRATUM. ES0548 2.9.1 (LIVE on both silicon revisions):
+ * 5. Initialization mode is a stopped calendar, and entering it twice in
+ *    a row is an erratum. ES0548 2.9.1 (live on both silicon revisions):
  *    INIT set between one and two RTCCLK cycles after being cleared sets
  *    INITF immediately instead of waiting for the synchronization, and
  *    "a write occurring during this critical period might result in the
  *    corruption of one or more calendar registers". The workaround is
  *    the chapter's own reading discipline, and this file applies it
- *    UNCONDITIONALLY on the way OUT: exit_init() clears INIT, then
+ *    unconditionally on the way out: exit_init() clears INIT, then
  *    clears BYPSHAD if it was set, waits for RSF to rise, and restores
  *    BYPSHAD - so a second enter_init() is safe by construction and no
  *    caller has to remember. The cost is one RTCCLK period (about 30 us
  *    at 32 kHz) per exit, paid once per configuration.
  *
- * 6. EVERY ARMED THING HAS A WRITE WINDOW, AND THE WINDOW IS A FLAG.
+ * 6. Every armed thing has a write window, and the window is a flag.
  *    The wake-up timer's reload and clock select may be written only
  *    with WUTE clear and WUTWF set; alarm A's registers only with ALRAE
  *    clear and ALRAWF set; and both flags take "around 2 RTCCLK clock
  *    cycles" to appear. Every configuring verb below therefore disables,
- *    waits for its own flag with a BOUND, writes, and re-enables - and
+ *    waits for its own flag with a bound, writes, and re-enables - and
  *    returns false if the flag never came, which on a stopped RTCCLK is
  *    what happens.
  *
- * 7. THE INTERRUPT IS ONE VECTOR AND THE EXTI IS ALREADY OPEN. Table 61
+ * 7. The interrupt is one vector and the EXTI is already open. Table 61
  *    gives RTC and TAMP one line (RTC_TAMP_IRQn), and table 65 makes
- *    EXTI 19 (RTC) and 21 (TAMP) DIRECT lines: no trigger selection, no
+ *    EXTI 19 (RTC) and 21 (TAMP) direct lines: no trigger selection, no
  *    pending bit, nothing to clear in the EXTI, and EXTI_IMR1 comes out
  *    of reset at 0xFFF8_0000 with both of them already unmasked
  *    (13.5.12). So 4.3.10's instruction to "configure the EXTI Line 19
@@ -105,42 +135,42 @@
  *    there. `wake_line_open()` is the one-bit assertion of that, and it
  *    is idempotent.
  *
- * WHY RCC_BDCR LIVES HERE AND NOT IN clock.hpp. One register, one
+ * Why RCC_BDCR lives here and not in clock.hpp. One register, one
  * owner - and the owner is this chapter, for three reasons: RCC_BDCR is
- * unreachable
- * without PWR_CR1.DBP, so its access discipline is the RTC DOMAIN's and
- * not the clock tree's; RTCSEL is one-way, and a clock verb whose
- * consequence can only be undone by wiping a calendar belongs beside the
- * calendar; and the register also carries RTCEN, LSE and BDRST, which
- * are this chapter's subject matter and not chapter 5's. clock.hpp's
- * `Rcc` therefore never names BDCR, and `RtcDomain` owns all of it. The
- * day ClockSource::lse is built, the clock task will ASK this type for a
- * running LSE rather than start one behind its back.
+ * unreachable without PWR_CR1.DBP, so its access discipline is the RTC
+ * domain's and not the clock tree's; RTCSEL is one-way, and a clock
+ * verb whose consequence can only be undone by wiping a calendar
+ * belongs beside the calendar; and the register also carries RTCEN,
+ * LSE and BDRST, which are this chapter's subject matter and not
+ * chapter 5's. clock.hpp's `Rcc` therefore never names BDCR, and
+ * `RtcDomain` owns all of it. The day ClockSource::lse is built, the
+ * clock task will ask this type for a running LSE rather than start one
+ * behind its back.
  *
- * ERRATA, ES0548 Rev 3 on the bench chip's revision Z column:
- *  - 2.9.1 (calendar init on consecutive INIT entries) is LIVE and is
- *    coded, see fact 5;
- *  - 2.2.1 (unstable LSI when it clocks the RTC) is LIVE, has no fix in
- *    this file, and is a REASON TO PREFER LSE where a board has the
+ * Errata, ES0548 Rev 3 on the bench chip's revision Z column:
+ *  - 2.9.1 (calendar init on consecutive INIT entries) is live and is
+ *    coded, fact 5;
+ *  - 2.2.1 (unstable LSI when it clocks the RTC) is live, has no fix in
+ *    this file, and is a reason to prefer LSE where a board has the
  *    crystal: its own workaround is to reset the RTC domain on every VDD
  *    power-up, which reset() spells and which docs/stm32g0/rtc.md tells
  *    an application to do from PWRRSTF;
- *  - 2.2.11 (a missed domain reset after a supply dip) is LIVE, and its
+ *  - 2.2.11 (a missed domain reset after a supply dip) is live, and its
  *    workaround is the same reset() from the same flag;
- *  - 2.2.6 (PC13 transitions disturb LSE) is LIVE and unfixable in
+ *  - 2.2.6 (PC13 transitions disturb LSE) is live and unfixable in
  *    software: PC13 is the RTC_OUT1/TAMP_IN1 pad, so a program using LSE
  *    should leave it alone. Stated, not coded - there is nothing to
  *    code.
  *
- * NOT BUILT (docs/stm32g0/rtc.md carries the list): the tamper
- * DETECTION half of ch. 31 (the pads, the filters, the active tampers,
- * the erase-on-tamper of the backup registers) - decoded read-only here
- * because arming a tamper wipes the very registers this stratum uses as
- * a breadcrumb, and because nothing on the bench can drive TAMP_IN;
- * RTC_REFIN reference-clock detection (a mains input this board has
- * not got); the RTC_OUT1/OUT2 output pads and the calibration output
- * (they want PC13, which erratum 2.2.6 makes hostile to LSE); and
- * RTCSEL = HSE/32, which needs an HSE root this stratum does not build.
+ * Not built (docs/stm32g0/rtc.md carries the list with its reasons):
+ * the RTC_OUT1/OUT2 output pads, the calibration output and TAMPALRM
+ * (they want PC13, which erratum 2.2.6 makes hostile to LSE); RTCSEL =
+ * HSE/32, which needs an HSE root this stratum does not build; and the
+ * active tampers of ch. 31, which this part declares none of. What is
+ * built and not bench-verified is the document's second list, which is
+ * the record; RTC_REFIN (reference_clock()) and the filtered tamper
+ * detector are measured there, the reference a core-paced pad and the
+ * tamper a pad the board holds.
  */
 
 #pragma once
@@ -170,7 +200,7 @@ enum class RtcClockSource : uint8_t {
 };
 
 /// RCC_BDCR.LSEDRV: how hard the oscillator drives the crystal (5.2.5).
-/// It may be LOWERED under a running LSE and never raised, which is the
+/// It may be lowered under a running LSE and never raised, which is the
 /// asymmetry `lse_drive()` refuses on.
 enum class LseDrive : uint8_t {
     low = 0,
@@ -183,10 +213,12 @@ enum class LseDrive : uint8_t {
  * The RTC domain's gate and clock tree - the whole of RCC_BDCR, plus the
  * two enable bits outside it that a program must open first.
  *
- * ORDER, AND IT IS 4.1.2's: open the PWR bus clock, set DBP, choose
+ * The order is 4.1.2's: open the PWR bus clock, set DBP, choose
  * RTCSEL, set RTCEN. `open()` is those four in one call; the individual
  * verbs exist because a boot that has to reset the domain first does
- * them in a different order.
+ * them in a different order. Every verb here is a read-modify-write of
+ * RCC_BDCR, PWR_CR1 or RCC_APBENR1, from setup or an active object's
+ * handler; only lse_wait_ready() waits, and it says for how long.
  */
 struct RtcDomain {
     RtcDomain() = delete;
@@ -214,7 +246,7 @@ struct RtcDomain {
         return (RCC->APBENR1 & RCC_APBENR1_PWREN) != 0u;
     }
 
-    /// RCC_APBENR1.RTCAPBEN - the APB INTERFACE to the RTC and TAMP
+    /// RCC_APBENR1.RTCAPBEN - the APB interface to the RTC and TAMP
     /// register banks. Distinct from RTCEN, which is the RTC's own
     /// clock: the counter can run with this bit clear (that is the whole
     /// point of a domain that survives), but nothing can read it.
@@ -242,16 +274,16 @@ struct RtcDomain {
      * Reset the whole RTC domain - BDRST, the way back from every
      * one-way bit in this register.
      *
-     * WHAT IT COSTS: the calendar, the prescalers, both alarms, the
-     * wake-up timer, the calibration, the timestamp, the FIVE BACKUP
-     * REGISTERS and the clock choice. Everything in the domain except
-     * LSCOSEL, LSCOEN and BDRST itself, which only a domain POWER-ON
+     * What it costs: the calendar, the prescalers, both alarms, the
+     * wake-up timer, the calibration, the timestamp, the five backup
+     * registers and the clock choice. Everything in the domain except
+     * LSCOSEL, LSCOEN and BDRST itself, which only a domain power-on
      * reset clears (5.4.23).
      *
      * The sequence is ES0548 2.2.11's own: write the whole register with
      * BDRST alone (which also clears the bits "that might not be
-     * reset"), READ IT BACK so the pulse is long enough, then write
-     * zero. Needs DBP.
+     * reset"), read it back so the pulse is long enough, then write
+     * zero. Needs DBP; returns at once.
      */
     static void reset() {
         RCC->BDCR = RCC_BDCR_BDRST;
@@ -262,6 +294,8 @@ struct RtcDomain {
 
     // ---- LSE ----------------------------------------------------------------
 
+    /// LSEON: start or stop the 32 kHz oscillator. Returns at once;
+    /// lse_ready() or lse_wait_ready() says when it runs.
     static void lse_enable(bool on) {
         RCC->BDCR = on ? (RCC->BDCR | RCC_BDCR_LSEON)
                        : (RCC->BDCR & ~RCC_BDCR_LSEON);
@@ -269,8 +303,9 @@ struct RtcDomain {
     static bool lse_enabled() { return (RCC->BDCR & RCC_BDCR_LSEON) != 0u; }
     static bool lse_ready() { return (RCC->BDCR & RCC_BDCR_LSERDY) != 0u; }
 
-    /// Bounded wait for LSERDY. False = the crystal did not start in
-    /// `spins` turns, which is a FACT about the board (no crystal
+    /// Bounded wait for LSERDY: the one verb of this type that blocks,
+    /// polling with interrupts on. False = the crystal did not start in
+    /// `spins` turns, which is a fact about the board (no crystal
     /// fitted, or a bad one) and not an error to be swallowed.
     static bool lse_wait_ready(uint32_t spins = ready_spins) {
         for (uint32_t i = 0; i < spins; ++i) {
@@ -285,7 +320,7 @@ struct RtcDomain {
      * LSEDRV. 5.2.5: the drive "can be decreased to the lower drive
      * capability when the LSE is ON", but "once LSEDRV is selected, the
      * drive capability can not be increased if LSEON=1" - so an increase
-     * under a running oscillator is REFUSED here rather than written
+     * under a running oscillator is refused here rather than written
      * into a register that ignores it.
      */
     static bool lse_drive(LseDrive d) {
@@ -318,7 +353,7 @@ struct RtcDomain {
     static bool lse_bypass() { return (RCC->BDCR & RCC_BDCR_LSEBYP) != 0u; }
 
     /**
-     * The clock security system on LSE. ONE-WAY: 5.4.23 says it "cannot
+     * The clock security system on LSE. One-way: 5.4.23 says it "cannot
      * be disabled, except after a LSE failure detection", and its
      * detection flag holds the oscillator under reset until a domain
      * reset. Its own preconditions are the chapter's and are enforced:
@@ -344,7 +379,7 @@ struct RtcDomain {
     }
 
     /// The EXTI line the LSE clock-security system raises (table 65:
-    /// line 31, DIRECT). Published here per the stratum's rule that a
+    /// line 31, direct). Published here per the stratum's rule that a
     /// peripheral owns its own line number.
     static constexpr uint8_t css_exti_line = 31;
 
@@ -363,7 +398,7 @@ struct RtcDomain {
     }
 
     /**
-     * Choose RTCCLK. ONE-WAY (5.4.23): false when a DIFFERENT source is
+     * Choose RTCCLK. One-way (5.4.23): false when a different source is
      * already selected - the caller's way out is reset(), and saying so
      * is the whole reason this returns a bool. Re-selecting what is
      * already in force is a no-op and true.
@@ -382,6 +417,7 @@ struct RtcDomain {
         return selected() == s;
     }
 
+    /// RTCEN: the RTC's own clock, on or off; RTCSEL must stand first.
     static void enable(bool on) {
         RCC->BDCR = on ? (RCC->BDCR | RCC_BDCR_RTCEN)
                        : (RCC->BDCR & ~RCC_BDCR_RTCEN);
@@ -394,6 +430,8 @@ struct RtcDomain {
     // family - the console's TX on this board - so this is offered and
     // never used by anything here.
 
+    /// LSCOEN and LSCOSEL in one store: LSI (the default) or LSE on the
+    /// pad. Needs DBP like every write to this register.
     static void lsco(bool on, bool from_lse = false) {
         uint32_t v = RCC->BDCR & ~(RCC_BDCR_LSCOEN | RCC_BDCR_LSCOSEL);
         if (on) {
@@ -416,7 +454,7 @@ struct RtcDomain {
      * what a program wanting LSE has to do on a board whose domain came
      * up on LSI (fact 2).
      *
-     * Does NOT start LSE: which oscillator to run and how long to wait
+     * Does not start LSE: which oscillator to run and how long to wait
      * for it is the application's, and lse_enable()/lse_wait_ready() are
      * right there.
      */
@@ -442,7 +480,7 @@ struct RtcDomain {
 // The prescalers (30.3.4, 30.6.5)
 // =============================================================================
 
-/// The two register FIELDS, not the divisors: PREDIV_A and PREDIV_S,
+/// The two register fields, not the divisors: PREDIV_A and PREDIV_S,
 /// each one less than the ratio it makes.
 struct RtcPrescalers {
     uint8_t async = 127;    ///< PREDIV_A, 7 bits: ck_apre = RTCCLK/(async+1)
@@ -454,8 +492,8 @@ constexpr bool rtc_prescalers_valid(const RtcPrescalers& p) {
 }
 
 /// ck_spre in hertz for a stated RTCCLK - the calendar's own tick, and
-/// also the wake-up timer's slowest clock. The RATE IS THE CALLER'S
-/// ARGUMENT and not a constant of this file, exactly as the IWDG's
+/// also the wake-up timer's slowest clock. The rate is the caller's
+/// argument and not a constant of this file, exactly as the IWDG's
 /// nominal time-out takes an LSI rate: LSE is 32768 Hz by construction
 /// and LSI is an uncalibrated RC, and a driver that pretended to know
 /// which one is running would be lying.
@@ -470,11 +508,12 @@ constexpr uint32_t rtc_ck_apre_hz(const RtcPrescalers& p, uint32_t rtcclk_hz) {
     return rtcclk_hz / (static_cast<uint32_t>(p.async) + 1UL);
 }
 
-/// The EXACT pair that makes ck_spre 1 Hz from `rtcclk_hz`, with the
-/// asynchronous factor as HIGH as possible (30.3.4's own recommendation:
+/// The exact pair that makes ck_spre 1 Hz from `rtcclk_hz`, with the
+/// asynchronous factor as high as possible (30.3.4's own recommendation:
 /// "configure the asynchronous prescaler to a high value to minimize
 /// consumption"). `async` comes back 0xFF - a value the 7-bit field
-/// cannot hold - when no exact pair exists, the hsidiv_for() convention.
+/// cannot hold - when no exact pair exists (stm32g0/clock.hpp's
+/// hsidiv_for() answers an impossible request the same way).
 ///
 /// 32768 gives 127/255, the reset value and the chapter's example.
 constexpr RtcPrescalers rtc_prescalers_for(uint32_t rtcclk_hz) {
@@ -491,14 +530,14 @@ constexpr RtcPrescalers rtc_prescalers_for(uint32_t rtcclk_hz) {
     return RtcPrescalers{0xFFu, 0u};
 }
 
-/// The exact 1 Hz pair with the SMALLEST asynchronous factor - i.e. the
-/// LARGEST PREDIV_S, which is what a caller who wants the sub-second
-/// counter as a STOPWATCH asks for.
+/// The exact 1 Hz pair with the smallest asynchronous factor - i.e. the
+/// largest PREDIV_S, which is what a caller who wants the sub-second
+/// counter as a stopwatch asks for.
 ///
 /// It is the deliberate opposite of rtc_prescalers_for()'s choice.
 /// 30.3.4 recommends a high asynchronous factor "to minimize
 /// consumption", and that is the right default for a calendar; but
-/// PREDIV_S is the RESOLUTION of every sub-second reading and every
+/// PREDIV_S is the resolution of every sub-second reading and every
 /// sub-second alarm (30.3.11 says so in as many words: "the resolution
 /// can be improved by increasing the synchronous prescaler value"), so
 /// a timebase that has to measure a frozen span to better than a
@@ -518,7 +557,7 @@ constexpr RtcPrescalers rtc_prescalers_for_resolution(uint32_t rtcclk_hz) {
 }
 
 /// The fraction of a second a sub-second reading means, in
-/// MILLISECONDS: 30.6.3's own formula (PREDIV_S - SS) / (PREDIV_S + 1),
+/// milliseconds: 30.6.3's own formula (PREDIV_S - SS) / (PREDIV_S + 1),
 /// scaled. SS can exceed PREDIV_S after a shift operation, which the
 /// chapter says means "one second less"; here that clamps to zero and
 /// the caller is told by read()'s own coherence check, not by a silent
@@ -535,7 +574,7 @@ constexpr uint16_t rtc_subsecond_ms(uint16_t ss, uint16_t prediv_s) {
 // The calendar (30.3.5, 30.6.1, 30.6.2)
 // =============================================================================
 
-/// A whole calendar reading or setting, in ORDINARY NUMBERS. The
+/// A whole calendar reading or setting, in ordinary numbers. The
 /// registers are BCD and this struct is not: the conversion is
 /// constexpr, checked both ways by the family fixture, and is the only
 /// place a nibble is shifted.
@@ -556,8 +595,8 @@ constexpr uint8_t rtc_from_bcd(uint8_t v) {
     return static_cast<uint8_t>(((v >> 4) & 0x0Fu) * 10u + (v & 0x0Fu));
 }
 
-/// Days in a month for a two-digit year. THE LEAP RULE IS THE
-/// SILICON'S: this calendar spans one century, so "divisible by four" is
+/// Days in a month for a two-digit year. The leap rule is the
+/// silicon's: this calendar spans one century, so "divisible by four" is
 /// the whole of it - there is no year 00 exception to apply, the field
 /// having no century in it.
 constexpr uint8_t rtc_days_in_month(uint8_t month, uint8_t year) {
@@ -618,7 +657,7 @@ constexpr RtcDateTime rtc_decode(uint32_t tr, uint32_t dr) {
 /// One coherent look at the calendar: the three registers as one value.
 struct RtcReading {
     RtcDateTime time{};
-    uint16_t subsecond = 0;   ///< RTC_SSR, counting DOWN from PREDIV_S
+    uint16_t subsecond = 0;   ///< RTC_SSR, counting down from PREDIV_S
 };
 
 // =============================================================================
@@ -629,7 +668,7 @@ enum class RtcAlarmId : uint8_t { a = 0, b = 1 };
 
 /**
  * One alarm. Every field is compared unless its mask says otherwise, so
- * the DEFAULT here - everything masked but the sub-second field, which
+ * the default here - everything masked but the sub-second field, which
  * is masked by its own separate rule - is "every second", and a caller
  * builds up from there.
  *
@@ -837,11 +876,14 @@ struct RtcFlag {
 /**
  * The RTC.
  *
- * MONOSTATE, like every other single-instance driver in this stratum
- * (there is one RTC on every part of the family, and one domain for it
- * to live in).
+ * A monostate (static members only), like every other single-instance
+ * driver in this stratum: there is one RTC on every part of the
+ * family, and one domain for it to live in. Every verb below that
+ * writes a register brackets the write with the WPR keys and returns
+ * false, writing nothing, when the silicon's own precondition is not
+ * met; the ones that wait say so and are bounded by sync_spins.
  *
- * WHAT IT DOES NOT DO: it never writes RCC_BDCR - that is RtcDomain's
+ * What it does not do: it never writes RCC_BDCR - that is RtcDomain's
  * register, whole - and it never enables the NVIC line for you. It does
  * assert the EXTI mask bit (fact 7), because that is one idempotent bit
  * without which no interrupt of this peripheral ever leaves the block,
@@ -857,7 +899,7 @@ struct Rtc {
     /// A bound on every synchronization wait. Sized for the slowest
     /// thing here - "around 2 RTCCLK cycles" at 32 kHz is 61 us, and
     /// exit_init()'s RSF wait is a whole RTCCLK period - with room to
-    /// spare, and small enough that a STOPPED RTCCLK is reported as
+    /// spare, and small enough that a stopped RTCCLK is reported as
     /// false in a few milliseconds rather than hanging.
     static constexpr uint32_t sync_spins = 1'000'000UL;
 
@@ -874,6 +916,9 @@ struct Rtc {
 
     // ---- write protection (30.3.8) -----------------------------------------
 
+    /// The key sequence into RTC_WPR, and any wrong key to re-lock. Every
+    /// configuring verb below does both around its own stores; a program
+    /// calls them itself only to prove the lock.
     static void unlock() {
         RTC->WPR = key_unlock1;
         RTC->WPR = key_unlock2;
@@ -924,14 +969,15 @@ struct Rtc {
     }
 
     /**
-     * Leave initialization mode, ES0548 2.9.1's WORKAROUND INCLUDED.
+     * Leave initialization mode, ES0548 2.9.1's workaround included:
+     * waits up to one RTCCLK period for RSF, bounded by sync_spins.
      *
      * The erratum is that a second INIT entry within one to two RTCCLK
      * cycles of the first exit sets INITF immediately, and calendar
      * writes made in that window may be dropped or corrupted; the
      * workaround is to "clear the BYPSHAD bit (if set) then wait for RSF
      * to rise, before entering the initialization mode again". Doing it
-     * HERE rather than at the next entry is what makes it unconditional:
+     * here rather than at the next entry is what makes it unconditional:
      * a caller cannot forget, and cannot get it wrong by entering
      * initialization from a different code path.
      *
@@ -961,11 +1007,11 @@ struct Rtc {
     }
 
     /**
-     * Leave initialization mode WITHOUT the erratum workaround - the
+     * Leave initialization mode without the erratum workaround - the
      * chapter's bare sequence, and nothing else.
      *
      * It exists for two reasons and neither is convenience: ES0548
-     * 2.9.1 cannot be STAGED at a bench without a path that does not
+     * 2.9.1 cannot be staged at a bench without a path that does not
      * dodge it (and an app may not poke a register itself), and a caller
      * that is about to do the RSF wait for its own reasons should not
      * pay for it twice. Anything else should call exit_init().
@@ -977,9 +1023,10 @@ struct Rtc {
     }
 
     /// Clear RSF and wait for the next shadow copy - what 30.3.9 asks
-    /// for after a system reset, an initialization, a shift, and AFTER
-    /// EVERY STOP OR STANDBY. A no-op that answers true when the shadow
-    /// registers are bypassed, there being nothing to synchronize.
+    /// for after a system reset, an initialization, a shift, and after
+    /// every Stop or Standby. Waits up to sync_spins for the copy. A
+    /// no-op that answers true when the shadow registers are bypassed,
+    /// there being nothing to synchronize.
     static bool wait_sync() {
         if (bypass_shadow()) {
             return true;
@@ -1031,31 +1078,34 @@ struct Rtc {
 
     // ---- reference clock detection (30.3.12) --------------------------------
     //
-    // REFCKON does NOT clock the calendar - the LSE still does. What it
-    // buys is a RELOAD of the asynchronous prescaler whenever an edge of
+    // REFCKON does not clock the calendar - the LSE still does. What it
+    // buys is a reload of the asynchronous prescaler whenever an edge of
     // RTC_REFIN is seen inside the detection window around a calendar
     // update, which drags the 1 Hz edge onto the reference's and makes
     // the calendar as accurate as the reference instead of as accurate
-    // as the crystal. The correction is therefore quantized at ONE
+    // as the crystal. The correction is therefore quantized at one
     // ck_apre period per second - the prescaler is reloaded, not
     // trimmed - and the window is 7 ck_apre periods hunting for the
     // first edge and 3 once locked.
     //
-    // TWO RULES, and both are refusals here rather than notes:
+    // Two rules, and both are refusals here rather than notes:
     //  - REFCKON is bit 4 of RTC_CR, which 30.6.3's own note says may be
-    //    written in INITIALIZATION MODE ONLY;
+    //    written in initialization mode only;
     //  - the prescalers must be the default pair (PREDIV_A = 0x7F,
     //    PREDIV_S = 0xFF), because the detection is built on a 256 Hz
     //    ck_apre. Enabling it under any other pair is 30.3.12's own
     //    "must", and a driver that let it through would be shipping a
     //    calendar that is silently wrong.
     //
-    // And one INTERLOCK the chapter states from the other side: a shift
+    // And one interlock the chapter states from the other side: a shift
     // operation must not be issued while this is on (30.3.11's caution),
     // which shift() below enforces.
 
     static bool reference_clock() { return (RTC->CR & RTC_CR_REFCKON) != 0u; }
 
+    /// REFCKON on or off, under the two rules above: false, with nothing
+    /// written, outside initialization mode or under any other prescaler
+    /// pair than the default.
     static bool reference_clock(bool on) {
         if (!in_init()) {
             return false;
@@ -1074,7 +1124,7 @@ struct Rtc {
 
     /**
      * Write the calendar - TR and DR - and pin the 24-hour format.
-     * Legal ONLY in initialization mode (30.6.1 and 30.6.2 both say
+     * Legal only in initialization mode (30.6.1 and 30.6.2 both say
      * "must be written in initialization mode only"), which is the
      * refusal; init() below is this verb plus the mode and the
      * prescalers, and a caller doing its own initialization sequence
@@ -1099,6 +1149,9 @@ struct Rtc {
      * caller wanting to keep a calendar that survived a reset passes the
      * one it just read; there is no way to set the prescalers without
      * stopping the counter, so there is no verb that pretends otherwise.
+     * Waits twice, bounded (INITF on the way in, RSF on the way out):
+     * from setup, not from a handler. False when a value is out of
+     * range or a flag never came, the calendar then not in force.
      */
     static bool init(const RtcPrescalers& p, const RtcDateTime& time) {
         if (!rtc_prescalers_valid(p) || !rtc_datetime_valid(time)) {
@@ -1121,11 +1174,11 @@ struct Rtc {
     // ---- reading the calendar (30.3.9) --------------------------------------
 
     /**
-     * ONE COHERENT LOOK at sub-second, time and date.
+     * One coherent look at sub-second, time and date, copied into `out`.
      *
      * Two modes, two disciplines, both the chapter's:
      *  - shadow (BYPSHAD = 0): read SSR, then TR, then DR. The first read
-     *    LOCKS the higher-order shadows and the DR read releases them, so
+     *    locks the higher-order shadows and the DR read releases them, so
      *    the three belong to one instant by construction. RSF is checked
      *    first - an unsynchronized shadow is a reset's default value, not
      *    a time.
@@ -1169,29 +1222,15 @@ struct Rtc {
     }
 
     /**
-     * The wall clock this stratum's sleep site measures a frozen span
-     * with: milliseconds since the top of the hour, 0..3599999.
-     *
-     * WHY THE HOUR AND NOT THE DAY. A span is a difference taken modulo
-     * the wrap, and every extra field costs a BCD decode on a path that
-     * runs inside a wake. One hour is longer than any sleep a kernel
-     * timebase can usefully be resynchronized across (the tick counter
-     * itself is 49.7 days, but a program that slept an hour has other
-     * problems), and the modulus is a round number a caller can reason
-     * about. Longer spans want read() and a calendar of their own.
-     *
-     * 0xFFFFFFFF when the calendar could not be read coherently.
-     */
-    /**
-     * RTC_SSR alone - the synchronous prescaler's counter, counting DOWN
+     * RTC_SSR alone - the synchronous prescaler's counter, counting down
      * from PREDIV_S and reloading at every calendar update.
      *
-     * read() gives the calendar; this gives the PHASE, in one load where
+     * read() gives the calendar; this gives the phase, in one load where
      * read() costs three plus a coherence retry. It is what 30.3.11's
      * synchronization procedure actually needs (the offset to a remote
      * clock is computed from SS and nothing else), it is shift()'s own
      * precondition, and it is the only reading fine enough to catch the
-     * 1 Hz edge AS IT HAPPENS: a value that has RISEN since the previous
+     * 1 Hz edge as it happens: a value that has risen since the previous
      * read is a reload, located to whatever the caller's loop costs
      * rather than to the 1/(PREDIV_S+1) second the value itself
      * resolves. With BYPSHAD clear it is a shadow reading like any
@@ -1201,6 +1240,21 @@ struct Rtc {
         return static_cast<uint16_t>(RTC->SSR & RTC_SSR_SS_Msk);
     }
 
+    /**
+     * The wall clock this stratum's sleep site measures a frozen span
+     * with: milliseconds since the top of the hour, 0..3599999, from one
+     * read() and the prescaler in force.
+     *
+     * Why the hour and not the day. A span is a difference taken modulo
+     * the wrap, and every extra field costs a BCD decode on a path that
+     * runs inside a wake. One hour is longer than any sleep a kernel
+     * timebase can usefully be resynchronized across (the tick counter
+     * itself is 49.7 days, but a program that slept an hour has other
+     * problems), and the modulus is a round number a caller can reason
+     * about. Longer spans want read() and a calendar of their own.
+     *
+     * 0xFFFFFFFF when the calendar could not be read coherently.
+     */
     static uint32_t time_of_hour_ms() {
         RtcReading r{};
         if (!read(r)) {
@@ -1245,14 +1299,14 @@ struct Rtc {
     /**
      * Shift the calendar by a fraction of a second - RTC_SHIFTR.
      *
-     * `subfs` is ADDED to the synchronous prescaler counter, which
-     * counts DOWN, so it DELAYS the clock by subfs / (PREDIV_S + 1)
+     * `subfs` is added to the synchronous prescaler counter, which
+     * counts down, so it delays the clock by subfs / (PREDIV_S + 1)
      * seconds. With `add1s` the whole second is added first, so the pair
-     * ADVANCES the clock by 1 - subfs / (PREDIV_S + 1) seconds in one
+     * advances the clock by 1 - subfs / (PREDIV_S + 1) seconds in one
      * atomic operation. That asymmetry is the register's, not this
      * verb's: there is no "subtract a second" bit.
      *
-     * FOUR REFUSALS, every one of them a sentence of 30.3.11 or 30.6.10:
+     * Four refusals, every one of them a sentence of 30.3.11 or 30.6.10:
      *  - `subfs` past the 15-bit field;
      *  - a shift already pending (SHPF), where the register says a write
      *    "has no effect" - a silent loss this verb turns into a false;
@@ -1262,7 +1316,7 @@ struct Rtc {
      *    because an earlier shift put it there, and shifting again from
      *    that state is what the chapter tells the caller to avoid.
      *
-     * It INITIATES and returns: the operation takes up to a second of
+     * It initiates and returns: the operation takes up to a second of
      * RTCCLK to land and `shift_pending()` is the completion, exactly as
      * the flag's own description has it. Writing SUBFS also clears RSF,
      * so a caller reading through the shadow registers waits for
@@ -1310,11 +1364,12 @@ struct Rtc {
      * for in between (fact 6), the flag cleared, and the interrupt
      * enable set or left alone as asked.
      *
-     * THE CAUTION IS ENFORCED. 30.3.6: "if the seconds field is selected
+     * The caution is enforced. 30.3.6: "if the seconds field is selected
      * (MSK1 reset), the synchronous prescaler division factor set in the
      * RTC_PRER register must be at least 3" - so an alarm comparing
      * seconds under a PREDIV_S below 2 is refused rather than armed into
-     * an undefined comparison.
+     * an undefined comparison. Waits for the write flag up to
+     * sync_spins; false when it never came, the alarm then left off.
      */
     static bool set_alarm(RtcAlarmId id, const RtcAlarm& a, bool interrupt = true) {
         if (!rtc_alarm_valid(a)) {
@@ -1368,7 +1423,8 @@ struct Rtc {
 
     /**
      * Program the periodic wake-up timer: 30.3.8's sequence exactly -
-     * clear WUTE, POLL WUTWF, write WUT and WUCKSEL, set WUTE.
+     * clear WUTE, poll WUTWF (bounded by sync_spins), write WUT and
+     * WUCKSEL, set WUTE.
      *
      * `reload` is the register value: the flag comes every reload + 1
      * ticks of ck_wut, which is what rtc_wakeup_clock_hz() prices. False
@@ -1425,11 +1481,11 @@ struct Rtc {
      * Write RTC_CALR. RECALPF is waited out first: 30.6.4 says the
      * register "is blocked" while it stands, and the chapter's
      * re-calibration-on-the-fly section makes that up to three ck_spre
-     * periods - three SECONDS at the usual rate, which is why the bound
+     * periods - three seconds at the usual rate, which is why the bound
      * here is generous and why this verb is not something to call in a
      * loop.
      *
-     * REFUSED FOR CALP WHILE PREDIV_A IS UNDER 3: 30.3.13's "Calibration
+     * Refused for CALP while PREDIV_A is under 3: 30.3.13's "Calibration
      * when PREDIV_A < 3" - the bit "can not be set to 1" then, and the
      * store drops it in silence (measured on the STM32F446's twin block,
      * docs/stm32f4/rtc.md, and refused here on the same sentence). The
@@ -1466,11 +1522,11 @@ struct Rtc {
     }
 
     /**
-     * Store into RTC_CALR WITHOUT opening the key window - the one verb
+     * Store into RTC_CALR without opening the key window - the one verb
      * in this file that deliberately does not bracket itself.
      *
-     * It exists so that the write protection can be PROVEN rather than
-     * asserted: a lock is only evidenced by a store that does NOT land,
+     * It exists so that the write protection can be proven rather than
+     * asserted: a lock is only evidenced by a store that does not land,
      * and an application may not reach a register itself (the stratum's
      * standing rule). CALR is the register chosen for it because the
      * worst a wrong value there can do is move the calendar by a few
@@ -1496,6 +1552,9 @@ struct Rtc {
     // this bench drives neither, so what is offered is the whole
     // register surface and nothing that pretends to have been measured.
 
+    /// TSE and TSEDGE: time-stamp the chosen edge of the RTC_TS pad into
+    /// TSTR/TSDR/TSSSR, TSF announcing it. TSE is cleared before the
+    /// edge is changed, as the register requires.
     static void timestamp_enable(bool on, bool falling_edge = false) {
         unlock();
         uint32_t v = RTC->CR & ~(RTC_CR_TSE | RTC_CR_TSEDGE);
@@ -1511,7 +1570,7 @@ struct Rtc {
     static bool timestamp_enabled() { return (RTC->CR & RTC_CR_TSE) != 0u; }
 
     /**
-     * TAMPTS - a TAMPER event fills the timestamp registers.
+     * TAMPTS - a tamper event fills the timestamp registers.
      *
      * It is the timestamp source that needs no RTC_TS pad, and on this
      * board it is the only one that can be staged at all: RTC_TS is
@@ -1526,7 +1585,7 @@ struct Rtc {
     }
     static bool timestamp_on_tamper() { return (RTC->CR & RTC_CR_TAMPTS) != 0u; }
 
-    /// ITSE - the INTERNAL timestamp, whose one event is the switch to
+    /// ITSE - the internal timestamp, whose one event is the switch to
     /// the VBAT supply (30.3.14). Offered because it is one bit of the
     /// same register and a program that keeps a timestamp wants to know
     /// which source filled it; ITSF in RTC_SR is how the two are told
@@ -1549,22 +1608,26 @@ struct Rtc {
 
     // ---- flags and the interrupt --------------------------------------------
 
+    /// RTC_SR read and RTC_SCR written: one access each, from any
+    /// context; a cleared flag reads as standing for a few APB cycles
+    /// (30.6.18), which isr() below waits out and this verb does not.
     static bool flag(uint32_t mask) { return (RTC->SR & mask) != 0u; }
     static void clear_flags(uint32_t mask) { RTC->SCR = mask & RtcFlag::all; }
 
     /// Unmask this peripheral's EXTI line (fact 7). Idempotent, and a
     /// single-bit read-modify-write, because IMR1 comes out of reset
-    /// with every DIRECT line unmasked and a whole-register write would
+    /// with every direct line unmasked and a whole-register write would
     /// silently close somebody else's wake-up.
     static bool wake_line_open() { return Exti::interrupt(exti_line, true); }
 
     /**
-     * The ISR body an app's RTC_TAMP_IRQHandler calls. Returns the
-     * MASKED flags that were standing - so a handler dispatches on what
+     * The ISR body an app's RTC_TAMP_IRQHandler calls, in interrupt
+     * context, nothing masked and no key needed (SR and SCR are outside
+     * the WPR lock). Returns the masked flags that were standing - so a handler dispatches on what
      * was really enabled, not on what merely happened - and clears
      * exactly those.
      *
-     * NOTHING TO CLEAR IN THE EXTI: line 19 is direct and has no pending
+     * Nothing to clear in the EXTI: line 19 is direct and has no pending
      * bit (fact 7). The peripheral's own flag is the whole
      * acknowledgement, and 30.6.18's note - "after clearing the flag,
      * read it until it is read at 0 before leaving the interrupt
@@ -1604,17 +1667,17 @@ struct Rtc {
 // =============================================================================
 
 /**
- * TAMPFLT (31.6.3) - the block's detection MODE, not an input's.
+ * TAMPFLT (31.6.3) - the block's detection mode, not an input's.
  *
  * `edge` is the register's 0x0 and it is a different peripheral from the
  * other three: no filter, no sampling clock, no internal pull-up on the
  * pads and no latency between the pad and the flag. The three sample
- * counts are the LEVEL detector, which precharges each pad through the
+ * counts are the level detector, which precharges each pad through the
  * internal pull-up, samples it at TAMPFREQ and fires after N
  * consecutive samples at the active level.
  *
  * One FLTCR serves every TAMP_INx, which is why the filter, the
- * sampling rate and the precharge are a BLOCK config here and only the
+ * sampling rate and the precharge are a block config here and only the
  * trigger polarity is per input.
  */
 enum class TamperFilter : uint8_t {
@@ -1626,7 +1689,7 @@ enum class TamperFilter : uint8_t {
 
 /// TAMPFREQ - how often a filtered input is sampled, as RTCCLK divided
 /// by a power of two from 32768 down to 256 (1 Hz to 128 Hz on a 32768
-/// Hz RTCCLK). It is the detection LATENCY's other factor and, through
+/// Hz RTCCLK). It is the detection latency's other factor and, through
 /// the precharge, the pull-up's duty cycle: 31.3.4 calls the choice the
 /// trade-off between latency and the current the pull-up costs.
 enum class TamperSampling : uint8_t {
@@ -1644,7 +1707,7 @@ constexpr uint32_t tamper_sampling_divider(TamperSampling s) {
     return 32768UL >> static_cast<uint32_t>(s);
 }
 
-/// The sampling rate in hertz for a STATED RTCCLK - the rate is the
+/// The sampling rate in hertz for a stated RTCCLK - the rate is the
 /// caller's argument, the rtc_ck_spre_hz() convention, because LSE and
 /// LSI are not the same number and this file must not pretend to know
 /// which one the domain took.
@@ -1665,12 +1728,12 @@ enum class TamperPrecharge : uint8_t {
 };
 
 /**
- * TAMPxTRG - and THE BIT MEANS OPPOSITE SENSES IN THE TWO MODES, which
+ * TAMPxTRG - and the bit means opposite senses in the two modes, which
  * is why neither value is called "active low" here.
  *
  * 31.6.2 spells it out per bit: with TAMPFLT != 00 a zero means "input
- * staying LOW triggers", and with TAMPFLT == 00 the same zero means
- * "RISING edge and high level triggers". So the one register bit selects
+ * staying low triggers", and with TAMPFLT == 00 the same zero means
+ * "rising edge and high level triggers". So the one register bit selects
  * a low level in the filtered detector and a rise in the edge detector -
  * an application that switches its filter on and keeps its trigger
  * constant has just inverted its own polarity. The names carry both
@@ -1694,15 +1757,15 @@ struct TamperInput {
     uint8_t index = 1;
     TamperTrigger trigger = TamperTrigger::low_level_or_rising_edge;
 
-    /// TAMPxNOERASE inverted. The DEFAULT ERASES THE BACKUP REGISTERS,
+    /// TAMPxNOERASE inverted. The default erases the backup registers,
     /// which is the register's own reset state and the whole point of
     /// the block, and is stated here rather than hidden behind a
     /// friendlier default.
     bool erase_backups = true;
 
     /// TAMPxMSK: the flag is masked and cleared by hardware, the backup
-    /// registers are NOT erased, and what survives is the trigger to the
-    /// low-power timers. 31.3.4 restricts it to the FILTERED detector,
+    /// registers are not erased, and what survives is the trigger to the
+    /// low-power timers. 31.3.4 restricts it to the filtered detector,
     /// and 31.6.2 forbids the interrupt with it - both are refusals in
     /// tamper_input_valid().
     bool masked = false;
@@ -1730,7 +1793,7 @@ constexpr bool tamper_input_valid(const TamperInput& t, TamperFilter f) {
 struct TampFlag {
     static constexpr uint32_t tamper1 = TAMP_SR_TAMP1F;
     static constexpr uint32_t tamper2 = TAMP_SR_TAMP2F;
-    /// THE THIRD INPUT IS THE G0B1'S ALONE - the G071's and the G031's
+    /// The third input is the G0B1's alone - the G071's and the G031's
     /// headers declare TAMP1F and TAMP2F and stop, which is why
     /// tamp_external_inputs() is a probe and not a constant. Its mask is
     /// zero where the part has none, so every expression over these
@@ -1783,30 +1846,33 @@ constexpr uint32_t internal_tamper_flag(uint8_t y) {
 /**
  * The tamper and backup block.
  *
- * WHAT IS BUILT: the five backup registers, which are ordinary 32-bit
+ * What is built: the five backup registers, which are ordinary 32-bit
  * words in the RTC domain - they survive every system reset, every
  * Standby and every Shutdown, and they are lost only to a domain reset
  * or a loss of both VDD and VBAT. That makes them this target's third
  * kind of surviving storage, beside the .noinit breadcrumb (a system
  * reset only) and the flash journal (everything).
  *
- * AND THE TAMPER DETECTION, which is the rest of the chapter: three
+ * And the tamper detection, which is the rest of the chapter: three
  * external inputs with an edge detector and a filtered level detector,
  * four internal sources on the parts that declare them, the erase of the
  * backup registers, the mask that suppresses it, the timestamp
  * (RTC_CR.TAMPTS, over in Rtc) and the interrupt.
  *
- * WHAT ARMING ONE COSTS, said once and not hidden behind a default: a
- * detected tamper ERASES the five backup registers unless TAMPxNOERASE
+ * What arming one costs, said once and not hidden behind a default: a
+ * detected tamper erases the five backup registers unless TAMPxNOERASE
  * or TAMPxMSK says otherwise, and those five words are the third kind of
  * surviving storage this stratum has. `any_armed()` stays exactly what
  * it was - the one question a program keeping something there needs
  * answered about the state it inherited.
  *
  * The domain gate is RtcDomain's: DBP for the write access, RTCAPBEN for
- * the register bank. The RTC's WPR key does NOT cover this block -
+ * the register bank. The RTC's WPR key does not cover this block -
  * 30.3.8's list is the RTC's own registers - which the bench suite
- * checks rather than assumes.
+ * checks rather than assumes. No verb here waits or masks interrupts;
+ * the arming verbs are read-modify-writes of TAMP_CR1/CR2 and TAMP_IER
+ * (setup or an active object's handler), the backup accesses single
+ * words.
  */
 struct Tamp {
     Tamp() = delete;
@@ -1843,22 +1909,22 @@ struct Tamp {
     static uint32_t status() { return TAMP->SR; }
     static uint32_t masked_status() { return TAMP->MISR; }
 
-    /// Is any EXTERNAL tamper input armed? The low half of TAMP_CR1.
+    /// Is any external tamper input armed? The low half of TAMP_CR1.
     static bool any_armed() { return (TAMP->CR1 & 0xFFFFu) != 0u; }
 
-    /// Is any INTERNAL tamper armed? IT IS NOT A RHETORICAL QUESTION:
+    /// Is any internal tamper armed? It is not a rhetorical question:
     /// 31.6.1 gives TAMP_CR1 the RTC domain reset value 0xFFFF0000, and
     /// bits 18..21 of that are ITAMP3E..ITAMP6E - so a part that has
     /// never been told anything about tampering comes out of a domain
     /// reset with LSE monitoring, HSE monitoring, the calendar overflow
-    /// and the ST manufacturer readout ALL ARMED, measured on this
+    /// and the ST manufacturer readout all armed, measured on this
     /// silicon. None of them has a NOERASE bit.
     static bool any_internal_armed() {
         return (TAMP->CR1 & TampFlag::internal) != 0u;
     }
 
-    /// THE QUESTION A PROGRAM KEEPING SOMETHING IN THE BACKUP REGISTERS
-    /// ACTUALLY NEEDS ANSWERED: is anything at all armed that would
+    /// The question a program keeping something in the backup registers
+    /// actually needs answered: is anything at all armed that would
     /// erase them? Both halves, because the reset value arms the
     /// internal one and an application asking only about the pads would
     /// be told "no" by a chip that is one calendar overflow away from
@@ -1880,7 +1946,7 @@ struct Tamp {
     /**
      * The block's detection mode - TAMP_FLTCR.
      *
-     * REFUSED WHILE ANY INPUT IS ARMED, and that is 31.6.1's own
+     * Refused while any input is armed, and that is 31.6.1's own
      * footnote: the mode "must be configured before enabling the tamper
      * detection". Nothing in the silicon enforces it, so a store into a
      * live block would land and change what a running detector means
@@ -1911,8 +1977,8 @@ struct Tamp {
     /**
      * Arm one external tamper input.
      *
-     * The ORDER is the chapter's: the trigger, the erase policy, the
-     * mask and the interrupt all land BEFORE TAMPxE, because the same
+     * The order is the chapter's: the trigger, the erase policy, the
+     * mask and the interrupt all land before TAMPxE, because the same
      * footnote that governs filter_config() governs TAMP_CR2. Re-arming
      * an already-armed input is refused for the same reason - the caller
      * disarms first, which is also 31.3.4's own advice after a detection
@@ -1954,12 +2020,12 @@ struct Tamp {
     }
 
     /**
-     * One INTERNAL tamper, by the manual's own index (ITAMP3 = LSE
+     * One internal tamper, by the manual's own index (ITAMP3 = LSE
      * monitoring, 4 = HSE monitoring, 5 = the calendar overflow, 6 = the
      * ST manufacturer readout).
      *
      * They are the parts of this chapter that need no pad at all, and
-     * they ERASE THE BACKUP REGISTERS TOO: 31.3.4's erase is driven by
+     * they erase the backup registers too: 31.3.4's erase is driven by
      * ITAMPyF exactly as it is by TAMPxF, and there is no NOERASE bit
      * for an internal source. False where the part declares none.
      */
@@ -1976,14 +2042,15 @@ struct Tamp {
 
     static bool flag(uint32_t mask) { return (TAMP->SR & mask) != 0u; }
 
-    /// Unmask this block's EXTI line (table 65's DIRECT line 21). The
+    /// Unmask this block's EXTI line (table 65's direct line 21). The
     /// RTC's own wake_line_open() is the twin, and the two lines share
     /// one vector.
     static bool wake_line_open() { return Exti::interrupt(exti_line, true); }
 
     /**
-     * The ISR body an app's RTC_TAMP_IRQHandler calls for this half.
-     * Returns the MASKED flags it served and clears exactly those, the
+     * The ISR body an app's RTC_TAMP_IRQHandler calls for this half, in
+     * interrupt context, one load and one store.
+     * Returns the masked flags it served and clears exactly those, the
      * Rtc::isr() convention - so one handler can call both bodies and
      * dispatch on the union.
      */

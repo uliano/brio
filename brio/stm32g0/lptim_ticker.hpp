@@ -1,43 +1,60 @@
 /*
  * lptim_ticker.hpp
  *
- * The TICKLESS kernel timebase of this family: kernel time counted on a
+ * The tickless kernel timebase of this family: kernel time counted on a
  * low-power timer clocked from the 32768 Hz LSE crystal, which keeps
  * counting through Stop 0 and Stop 1 (RM0444 26.5) - so kernel time
  * never stands still, nothing ever needs a resync, and the loop's next
  * deadline is placed in the timer's compare register instead of being
  * counted out in ticks. `LptimTicker<cfg>` is what stm32g0/platform.hpp's
  * `Stm32g0Platform<TB>` takes as its argument to become tickless: it is
- * `Tickless` (ticks, ticks_per_second, arm_wake), and the platform's
- * idle_until() is what calls arm_wake(). There is NO periodic interrupt
- * in such a program: the LPTIM raises one at the deadline (CMPM), one
- * per lap of its 16-bit counter to carry the high word (ARRM, every two
- * seconds), and nothing else.
+ * `Tickless` (ticks, ticks_per_second, arm_wake, park), and the
+ * platform's idle_until() is what calls arm_wake() and park(). There is
+ * no periodic interrupt in such a program: the LPTIM raises one at the
+ * deadline (CMPM), one per lap of its 16-bit counter to carry the high
+ * word (ARRM, every two seconds), and nothing else. What a program gives
+ * up is one LPTIM and its vector:
  *
- * It is stm32g0/sleep.hpp's Stm32g0LptimTimedSleepSite promoted: that
- * site uses the same counter as an ALARM and a WITNESS beside a SysTick
- * ticker that stops in Stop; here the counter IS the timebase and the
- * two-clock arithmetic (elapsed-1, alarm+1, the phase of two readings)
- * disappears with the second clock. What a program gives up is one
- * LPTIM and its vector, bound by the app to this file's isr():
- *
+ *     using Tb = brio::LptimTicker<>;                  // LPTIM1 on LSE, 1024 Hz
+ *     using P = brio::Stm32g0Platform<Tb>;
+ *     ...
+ *     Tb::init(clock);                                 // false: no crystal
  *     extern "C" void TIM6_DAC_LPTIM1_IRQHandler() { Tb::isr(); }
  *
  * (the G0B1's LPTIM1 shares its line with TIM6 and the DAC; isr()
  * returns the mask it served so a shared handler can tell "not mine").
  *
+ * Who calls what. init() runs once in main(), after the clock task's
+ * init() and before interrupts are enabled; it waits, bounded, for the
+ * crystal and for the timer's own write handshakes and returns false
+ * when a program has no timebase. ticks(), millis(), secs() and now()
+ * may be read from any context, inside a masked window too, under the
+ * one-second rule stated at the end of this comment. arm_wake() and
+ * park() are the platform's alone: the kernel loop calls them through
+ * idle_until() with interrupts masked, and nothing in them waits - every
+ * "not yet" is a declined turn, taken with interrupts back on. isr() is
+ * the vector's body, bound by the program as above. The counters at the
+ * bottom (deferrals, stores, ...) are readbacks for a bench and a
+ * curious app. No storage changes hands.
+ *
+ * It is stm32g0/sleep.hpp's Stm32g0LptimTimedSleepSite promoted: that
+ * site uses the same counter as an alarm and a witness beside a SysTick
+ * ticker that stops in Stop; here the counter is the timebase and the
+ * two-clock arithmetic (elapsed-1, alarm+1, the phase of two readings)
+ * disappears with the second clock.
+ *
  * ## The counter runs at the crystal's rate; the tick is a shift
  *
- * The LPTIM counts the crystal UNDIVIDED, 32768 counts a second, and
+ * The LPTIM counts the crystal undivided, 32768 counts a second, and
  * the kernel tick is that count shifted right: `shift` 5 gives 1024
  * ticks a second - just over the 1000 a SysTick program on this family
- * runs at, and a POWER OF TWO by construction, which is what makes
+ * runs at, and a power of two by construction, which is what makes
  * millis() two shifts and a multiply instead of a division the M0+ has
  * not got, and exact: 1000 ms per 1024 ticks, floor at every reading.
- * WHY NOT THE PRESCALER: every latency of this block scales with the
- * clock the COUNTER runs on, not the kernel clock. Measured: a CMP
+ * Why not the prescaler: every latency of this block scales with the
+ * clock the counter runs on, not the kernel clock. Measured: a CMP
  * write lands in 2..3 counts whatever the prescaler, 72..93 us at /1 and 2.0..2.8 ms at
- * /32, and a CMPM fires at the count edge AFTER equality. At /32 a
+ * /32, and a CMPM fires at the count edge after equality. At /32 a
  * compare could not be placed closer than four milliseconds and a
  * masked wait for a completion cost three, which no console would
  * survive; at /1 every one of those numbers is a few tens of
@@ -45,17 +62,17 @@
  * of two seconds instead of sixty-four - one ARRM interrupt every two
  * seconds, which a 32 kHz counter's own consumption dwarfs - and a
  * masked window that must stay under one second (below).
- * THE CRYSTAL BY DEFAULT, LSI FOR A BOARD WITHOUT ONE. On LSE the rate
+ * The crystal by default, LSI for a board without one. On LSE the rate
  * is a power of two and every conversion is a shift. LSI - "32 kHz
  * nominal, 29.5..34 actual" across parts and temperature (DS13560
  * table 46), 32586 Hz measured on the bench die - has no rate a header
  * can know, so `LptimTickerConfig::source = lsi` takes the rate the
- * PROGRAM STATES in `lsi_hz`, and the DIRECTIONAL RULE decides what to
- * state: kernel time is exact by COUNT (a tick is a tick), what the
+ * program states in `lsi_hz`, and the directional rule decides what to
+ * state: kernel time is exact by count (a tick is a tick), what the
  * stated rate governs is the conversion of milliseconds into ticks, and
- * N ticks of a clock FASTER than stated are fewer real milliseconds
- * than asked - EARLY, which brio's time contract forbids. So a stated
- * rate must not sit BELOW the true one, the default is table 46's
+ * N ticks of a clock faster than stated are fewer real milliseconds
+ * than asked - early, which brio's time contract forbids. So a stated
+ * rate must not sit below the true one, the default is table 46's
  * ceiling (34000: never early on any part, up to 15 % late on a slow
  * one), and a program that measures its LSI (the rtc suite's TIM16
  * capture) states a tighter number. millis()/secs()/now() then divide
@@ -64,11 +81,11 @@
  * ticks). Everything else - the lap, the compare rules, the floor - is
  * the same: they are properties of the counter, not of its clock.
  *
- * SYSTICK STAYS ON, INTERRUPT-LESS. cortexm/delay.hpp counts cycles on
+ * SysTick stays on, interrupt-less. cortexm/delay.hpp counts cycles on
  * SysTick's VAL and never needs its interrupt, so init() starts it as
  * cortexm/ticker.hpp's SysTickCounter (same reload rule, no TICKINT):
  * delay_us works by construction and a program on this timebase binds
- * NOTHING to SysTick_Handler. The Stop modes stop SysTick with HCLK as
+ * nothing to SysTick_Handler. The Stop modes stop SysTick with HCLK as
  * before; a busy-wait is awake by definition.
  *
  * ## The compare, and the rules its arming follows
@@ -76,7 +93,7 @@
  * The wake is CMP: CMPM fires at the count edge where CNT becomes
  * CMP + 1 (measured: exactly one count after equality at every
  * distance tried), on the same LSE edge ticks() reads - so a
- * compare at (the deadline's first count - 1) wakes AT the deadline,
+ * compare at (the deadline's first count - 1) wakes at the deadline,
  * never early, with no phase conversion and no second clock. What
  * makes the arming delicate is the register's own discipline, and two
  * errata rule out the obvious handshakes: 26.4.11 forbids a second CMP
@@ -84,16 +101,16 @@
  * ES0548 2.8.2 says "Flags must not be cleared outside the interrupt
  * subroutine" (a flag of a disabled interrupt cleared at the instant a
  * new event lands can leave the interrupt signal stuck high). A CMPOK
- * INTERRUPT would be the textbook handshake and is ruled out too: it
+ * interrupt would be the textbook handshake and is ruled out too: it
  * would wake every WFI a hundred microseconds after each arm - a Stop
  * exit per deadline. So:
  *
- *  1. A STORE IS ISSUED ONLY WHILE CMPOK IS CLEAR AND NO WRITE IS IN
- *     FLIGHT. The flag is the one fresh witness of a completed write:
- *     READ from thread mode (legal), CLEARED only by the handler -
+ *  1. A store is issued only while CMPOK is clear and no write is in
+ *     flight. The flag is the one fresh witness of a completed write:
+ *     read from thread mode (legal), cleared only by the handler -
  *     Lptim::isr() sweeps it as an unarmed flag, first, as 2.8.2's
  *     workaround orders. If the flag stands at arm time (a write landed
- *     and no LPTIM interrupt has run since), arm_wake() PENDS the LPTIM
+ *     and no LPTIM interrupt has run since), arm_wake() pends the LPTIM
  *     vector once and answers false: the platform returns without
  *     sleeping, the handler runs the moment interrupts are back and
  *     sweeps the flag, and the loop turns until the clear has crossed
@@ -109,18 +126,18 @@
  *     the APB side the moment the handler's ICR store returns
  *     (measured: 0 us), so the crossing guard never fires; it stays as the cheap
  *     insurance it is.
- *  2. THE LANDING RACE IS CLOSED BY A FLOOR: a compare must reach the
+ *  2. The landing race is closed by a floor: a compare must reach the
  *     register before the counter reaches it, and the write lands 2..3
  *     counts after the store whatever the phase of the count it was
- *     stored in - so the first count of a deadline must be at least SIX
+ *     stored in - so the first count of a deadline must be at least six
  *     counts past the count `now` was read in (183 us at 32768 Hz). A
- *     deadline nearer than that is NOT slept for: arm_wake() answers
+ *     deadline nearer than that is not slept for: arm_wake() answers
  *     false and the loop spins the few counts through process(), which
  *     fires it on time. Never early, never late by more than the loop's
  *     own turn; the alternative - placing it later - would be legal and
  *     worse.
- *  3. BEFORE A STOP THE STORE MUST HAVE LANDED - AND IT IS NOT WAITED
- *     FOR MASKED. Whether an APB-to-kernel transfer still in flight
+ *  3. Before a Stop the store must have landed - and it is not waited
+ *     for masked. Whether an APB-to-kernel transfer still in flight
  *     completes with PCLK stopped is written nowhere in chapter 26, so
  *     with SLEEPDEEP set a store in flight is rule 1's other answer:
  *     arm_wake() declines, the platform unmasks and returns, and the
@@ -129,24 +146,24 @@
  *     compare in place, the flag left standing for the wake's handler to
  *     sweep like any completion. In Sleep the APB keeps running and the
  *     store is left to land on its own. The price is the store's
- *     72..93 us awake, spent with interrupts ENABLED: masked, it was
+ *     72..93 us awake, spent with interrupts enabled: masked, it was
  *     eight characters of a 921600 console with no FIFO. A store not
  *     landed `write_landing_counts` counts after it was issued (2..3
  *     measured) is counted in write_timeouts() and slept on regardless.
- *     Measured: a store followed by the Stop 1 with NO wait lands all
+ *     Measured: a store followed by the Stop 1 with no wait lands all
  *     the same - the compare fires at its 292 ms on the RTC's wall,
  *     three runs of three - so the transfer completes on the kernel
  *     clock alone and this rule is insurance the silicon does not need;
  *     kept, because the chapter promises nothing.
- *  4. A DEADLINE A LAP OR MORE AWAY IS NOT ARMED, AND THE COMPARE IS
- *     PARKED ON THE LAP: the ARRM two seconds out re-evaluates, and a
- *     low half-word would match a lap early. The register is MIRRORED:
+ *  4. A deadline a lap or more away is not armed, and the compare is
+ *     parked on the lap: the ARRM two seconds out re-evaluates, and a
+ *     low half-word would match a lap early. The register is mirrored:
  *     a deadline whose compare is already in the register stores
- *     nothing. Where the compare sits when nothing is armed MATTERS,
+ *     nothing. Where the compare sits when nothing is armed matters,
  *     because it matches once per lap wherever it is: parked at 0xFFFF
  *     - equal to ARR, which does match (measured) - its CMPM is raised
  *     at the counter's own wrap and served by the ARRM's interrupt, so
- *     a deadline-less Stop costs ONE wake per lap. Parked anywhere
+ *     a deadline-less Stop costs one wake per lap. Parked anywhere
  *     else its match is a second wake every lap: measured, a
  *     ten-second Stop costs five wakes with the compare on the lap and
  *     ten with it half a lap out. The parking is done by arm_wake() for a far deadline and by park(),
@@ -157,17 +174,17 @@
  * The count is the high word (laps_, carried by the ARRM handler) over
  * the 16-bit CNT, read the classic way with one twist for the masked
  * case: with PRIMASK set the wrap happens but the handler does not
- * run, and ISR.ARRM standing with a LOW count says exactly that - one
+ * run, and ISR.ARRM standing with a low count says exactly that - one
  * lap more than laps_ knows. The read is bracketed (laps, ARRM, CNT,
  * ARRM, laps; retried unless both pairs agree) because the flag and
  * the counter reach the APB reader by different paths. Precondition,
- * stated: no masked window longer than half a lap (ONE SECOND), or a
- * high count under a standing ARRM reads as the previous lap. And CNT
- * itself is two agreeing reads (26.7.8, the asynchronous kernel clock)
- * - retried without bound here, since a timebase that answers
- * "nothing" is no timebase. The tick is the 32-bit count shifted, and
- * it wraps where the SysTick ticker's does: 2^32 ticks, 48 days at
- * 1024 Hz.
+ * stated and the program's to keep: no masked window longer than half
+ * a lap (one second), or a high count under a standing ARRM reads as
+ * the previous lap. And CNT itself is two agreeing reads (26.7.8, the
+ * asynchronous kernel clock) - retried without bound here, since a
+ * timebase that answers "nothing" is no timebase. The tick is the
+ * 32-bit count shifted, and it wraps where the SysTick ticker's does:
+ * 2^32 ticks, 48 days at 1024 Hz.
  */
 
 #pragma once
@@ -282,13 +299,15 @@ public:
 
     /**
      * Bring the timebase up: the LSE (through the RTC domain's gate and
-     * DBP, and NOTHING ELSE of that domain - RTCSEL, the calendar and
+     * DBP, and nothing else of that domain - RTCSEL, the calendar and
      * the backup registers are not touched), the LPTIM on it undivided
      * as a free-running counter with ARRM and CMPM armed, the compare
      * parked, the wake line and the NVIC line open, the counter
      * started - and SysTick as the interrupt-less cycle counter delay_us
      * reads, from the same clock task the SysTick ticker would take.
-     * Call once, after the clock init, before interrupts are enabled.
+     * Call once, from main(), after the clock init, before interrupts
+     * are enabled; it waits, bounded, for the oscillator's ready flag
+     * and for the two register writes to land.
      *
      * False = the crystal never reported ready, or a step of the
      * chapter's own order was refused; a program then has no timebase
@@ -413,8 +432,9 @@ public:
     /**
      * Place the wake for `deadline` (absolute tick, strictly after
      * `now`, this timebase's own reading a moment ago), following the
-     * rules of the header. Called with interrupts MASKED by
-     * Stm32g0Platform::idle_until(). True: sleep. False: do not sleep
+     * rules of the header. Called with interrupts masked by
+     * Stm32g0Platform::idle_until(), and by nothing else; it never
+     * waits. True: sleep. False: do not sleep
      * this turn - the deadline is too near to place (the loop spins it
      * through), a write is in flight, or a completion stands and the
      * vector has been pended to sweep it; the next turn asks again.
@@ -444,11 +464,12 @@ public:
     }
 
     /**
-     * Nothing armed at all: the compare PARKED where its match is the
+     * Nothing armed at all: the compare parked where its match is the
      * lap's own edge (rule 4), so that a sleep with no deadline costs
      * one interrupt per lap and not two. Same answer as arm_wake's:
      * true = sleep, false = the loop turns once (a completion being
-     * swept). The platform's idle_until(nullopt) calls it.
+     * swept). The platform's idle_until(nullopt) calls it, with
+     * interrupts masked; nothing else does.
      */
     static bool park() { return store(parked_cmp); }
 
@@ -512,11 +533,14 @@ private:
 
 public:
     /**
-     * The ISR body: the resource's ordered clear (unarmed flags first -
-     * CMPOK among them, which is why it is read BEFORE the sweep), the
-     * lap carry, and the notes rule 1 lives on. Returns what the
-     * resource served (0 for a software-pended sweep, which a shared
-     * handler reads as "not mine").
+     * The ISR body, bound by the program to the LPTIM's vector: the
+     * resource's ordered clear (unarmed flags first - CMPOK among them,
+     * which is why it is read before the sweep), the lap carry, and the
+     * notes rule 1 lives on. Returns what the resource served (0 for a
+     * software-pended sweep, which a shared handler reads as "not
+     * mine"). A program need do nothing with the answer: the kernel's
+     * deadline is served by the loop's next turn, which the wake itself
+     * causes.
      */
     [[gnu::always_inline]] static uint32_t isr() {
         const uint32_t pending = L::status();

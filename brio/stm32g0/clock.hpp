@@ -1,14 +1,60 @@
 /*
  * clock.hpp
  *
- * The STM32G0 clock tree (RCC, RM0444 ch. 5) in the two strata every
- * brio target uses (docs/design/clock.md):
+ * The STM32G0's clock tree (RCC, RM0444 ch. 5): what a program uses to
+ * bring the chip from its reset state (HSI16, the 16 MHz internal
+ * oscillator, undivided) to the rate it wants, and the one place that
+ * rate is stated - `Clock::hz`, the constexpr truth every driver takes
+ * its divisors from (there is no F_CPU in this build). The smallest use
+ * is the first thing a kernel program's main() does:
  *
- *  RESOURCES - monostates, thin typed views with the discipline built in:
+ *     using SysClock = brio::Clock<brio::ClockSource::pll, 64'000'000>;
+ *     constexpr SysClock clock;
+ *     const bool ok = SysClock::init();   // the root, the wait states, the prefetch
+ *     Serial::init(clock, 115200);        // every driver takes the tag
+ *
+ * A program that changes rate while it runs names a pack of such rates
+ * instead, `DynamicClock<Rates<Fast, Mid, Slow>, Users...>`, and
+ * switches between them with set(); the drivers on the bus clock are
+ * listed as Users so that each is told of the change
+ * (docs/design/clock.md is the model, docs/stm32g0/clock.md the chapter).
+ *
+ * Which context calls what. Clock::init() and DynamicClock::init() run
+ * once, first in main(), before any driver's init(clock, ...): a
+ * driver's divisor is computed from the rate the clock type claims and
+ * not read from the hardware, so a driver initialized before the clock
+ * task is wrong by the ratio of the two rates, and nothing refuses it.
+ * Read the answer: false means a root did not report ready, a switch
+ * did not take or the wait states did not land, and the program is
+ * then not at the rate its type says. A DynamicClock's set() is called
+ * from an active object's handler (an active object is a component of
+ * a brio program with its own event queue, served one event at a time
+ * by the kernel) or from main(), never from an interrupt handler, and
+ * never from two contexts at once: it rewrites every listed user's
+ * divisors and runs the rate's sequence, which spins, bounded, on the
+ * oscillator's and the regulator's ready flags (`Rcc::ready_spins`) and
+ * on the flash latency's readback; a switch measures 48..384 us on the
+ * bench (docs/stm32g0/clock.md). restore() is the one verb legal from
+ * an interrupt handler, the wake's own: it finds the current rate in
+ * force and does nothing, or re-runs its sequence with no fan-out, and
+ * it does nothing while a set() is in progress. The `Rcc` verbs are
+ * plain register accesses with no guard: the enable verbs are
+ * read-modify-writes of a register every driver's init() shares, so
+ * they belong to setup and to an active object's handler, not to an
+ * interrupt handler racing one; each reads the register back, the
+ * stall that covers the two-cycle enable delay. Nothing in this file
+ * masks interrupts. No storage changes hands: a clock is a type with
+ * static state, and the tag object `clock` is empty.
+ *
+ * The header has the two layers every brio target's clock header has:
+ *
+ *  Resources - monostates (a class with static state and no instances,
+ *  since the chip has one of each block), thin typed views with the
+ *  discipline built in:
  *    Rcc      the reset and clock control block: the HSI16 root and its
  *             HSISYS divider, the PLL (configure, start, lock), the
  *             SYSCLK switch with its status readback, the AHB/APB
- *             prescalers, the PERIPHERAL CLOCK ENABLES (one bit per
+ *             prescalers, the peripheral clock enables (one bit per
  *             peripheral in IOPENR/AHBENR/APBENR1/APBENR2) and the
  *             per-peripheral kernel-clock multiplexers (CCIPR)
  *    (`Pwr`, the whole of chapter 4, lives in stm32g0/pwr.hpp: the
@@ -16,17 +62,18 @@
  *    table is indexed by the voltage range, and opens the PWR block's
  *    bus clock on the way. One chapter, one owner.)
  *
- *  TASKS - what an application names:
- *    Clock<source, hz, regime>   the static main clock: ONE constexpr
- *             truth `hz` every driver derives from (there is no F_CPU
- *             in this build); init() composes the resources, reports
- *             whether the requested root runs and turns the flash
- *             prefetch on; apply() is the same rate without that one
- *             store, the verb a switch and a Stop's restore run.
- *             `regime` is the VOLTAGE SIDE of the rate - the VCORE range
- *             and the regulator (PowerRegime below) - Range 1 by
- *             default, which is the only range a 64 MHz rate can run in.
- *    DynamicClock<Rates<...>, Users...>   the runtime regime: a PACK of
+ *  Tasks - what an application names (a task is the driver class over a
+ *  resource that a program or a util service calls):
+ *    Clock<source, hz, regime>   the static main clock: one constexpr
+ *             truth `hz` every driver derives from; init() composes the
+ *             resources, reports whether the requested root runs and
+ *             turns the flash prefetch on; apply() is the same rate
+ *             without that one store, the verb a switch and a Stop's
+ *             restore run. `regime` is the voltage side of the rate -
+ *             the VCORE range and the regulator (PowerRegime below) -
+ *             Range 1 by default, which is the only range a 64 MHz rate
+ *             can run in.
+ *    DynamicClock<Rates<...>, Users...>   the runtime regime: a pack of
  *             static Clock tasks the program may run at, the first the
  *             boot rate, set<hz>() / set(hz) / set_index() switching
  *             between them under the running program after fanning the
@@ -34,14 +81,14 @@
  *             contract) - and restore(), the verb the sleep site calls
  *             when a Stop has dropped SYSCLK to HSISYS.
  *
- * THE CLOCK MODEL, and what crosses the util contract. This family has
- * SHARED PRESCALERS (HPRE for AHB, PPRE for APB) below one SYSCLK,
- * an ENABLE BIT per peripheral that gates its
+ * The clock model, and what crosses the util contract. This family has
+ * shared prescalers (HPRE for AHB, PPRE for APB) below one SYSCLK,
+ * an enable bit per peripheral that gates its
  * bus clock (a peripheral whose bit is clear does not even answer
- * register reads - 5.2.17), and a KERNEL-CLOCK multiplexer for the few
+ * register reads - 5.2.17), and a kernel-clock multiplexer for the few
  * peripherals that may run off something other than their bus (USART1..3,
  * I2C1, ADC, LPTIM, RTC). What crosses the contract is unchanged:
- * `clock_hz(clock)` is SYSCLK = HCLK, and this file PINS HPRE and
+ * `clock_hz(clock)` is SYSCLK = HCLK, and this file pins HPRE and
  * PPRE at 1 so that PCLK == HCLK == hz and one number serves every
  * driver - stated as `Clock::pclk_hz` beside `hz`, so that a driver on
  * APB asks for the rate that is really its own and the day the
@@ -49,35 +96,35 @@
  * the buses is a legitimate future member of this file, not a change to
  * util/.
  *
- * SCOPE. Two roots are built: `internal` = HSI16 through the HSISYS
+ * Scope. Two roots are built: `internal` = HSI16 through the HSISYS
  * divider (16, 8, 4, 2, 1, 0.5, 0.25, 0.125 MHz) and `pll` = HSI16
  * through the PLL's R output, which is how the part reaches its 64 MHz
  * ceiling (an exact ratio is searched at compile time; an unreachable
  * rate is a compile error naming the rule). HSE (crystal or bypass),
- * LSI, LSE, HSI48 and the P/Q outputs are DECLARED in the enum and
+ * LSI, LSE, HSI48 and the P/Q outputs are declared in the enum and
  * refused.
  *
- * THE DYNAMIC CLOCK, AND WHY A RATE IS A TUPLE HERE (docs/design/
+ * The dynamic clock, and why a rate is a tuple here (docs/design/
  * clock.md). A rate on this family is (the SYSCLK root and its rate,
  * the VCORE range, the regulator) - 64 MHz on the PLL in Range 1, 16 MHz
  * on HSISYS, 2 MHz on HSISYS/8 in Range 2 on the low-power regulator -
  * and the reachable rates come from two disjoint families with no single
- * prescaler to index. So the discrete set is an EXPLICIT PACK the program
+ * prescaler to index. So the discrete set is an explicit pack the program
  * names, each member a static Clock task with its regime, and the switch
- * is DIRECTION-AWARE around the flash latency and the regulator:
- *   rising:  leave low-power run (REGLPF clear), the range UP (VOSF
+ * is direction-aware around the flash latency and the regulator:
+ *   rising:  leave low-power run (REGLPF clear), the range up (VOSF
  *            clear), the fan-out, then the rate's own apply() - wait
  *            states up, then the root;
  *   falling: the fan-out, the rate's apply() - the root, then wait states
- *            down - the range DOWN, and low-power run LAST, because 4.3.2
+ *            down - the range down, and low-power run last, because 4.3.2
  *            wants SYSCLK at or below 2 MHz before it.
  * A rate in Range 2 takes its wait states from table 13's Range 2 column
  * inside its own apply(), which is why the range is safe to lower after
  * it: the stricter column is already in force. What a Stop leaves behind
  * (HSISYS, the PLL off, HSIDIV and LPR kept) is put back by restore() -
- * the CURRENT rate, no fan-out, the sleep site's verb.
+ * the current rate, no fan-out, the sleep site's verb.
  *
- * THE FLASH PREFETCH IS ON BY DEFAULT, set ONCE by the boot verbs
+ * The flash prefetch is on by default, set once by the boot verbs
  * (Clock::init(), DynamicClock::init()) and by nothing else: a rate's
  * apply() - every switch, every restore after a Stop - touches FLASH_ACR
  * only through FlashWaitStates::set(), a read-modify-write of LATENCY
@@ -85,7 +132,7 @@
  * and why the erratum that forbids it on a dual-bank part cannot bite:
  * Clock::init().
  *
- * THE FAN-OUT IS SMALL BY CONSTRUCTION: RCC_CCIPR takes a peripheral OFF
+ * The fan-out is small by construction: RCC_CCIPR takes a peripheral off
  * SYSCLK (a USART on HSI16 or LSE, the LPTIM on the crystal, the ADC on
  * HSI16, the RTC and the IWDG never on it), and a tickless program's
  * kernel timebase is off it too. What follows SYSCLK and says so with a
@@ -93,14 +140,14 @@
  * PCLK mode (a divider that keeps its clock in range), and SysTick as
  * BasicTicker or SysTickCounter (a new reload). The timers take a static
  * clock only (tim.hpp says why), the FDCAN and the WWDG take the bus
- * rate as a NUMBER.
+ * rate as a number.
  *
- * Facts that shape the code (RM0444 5.2, 5.4, 3.3.4, 4.1.4; ES0548 on
- * silicon rev Z, DBGMCU_IDCODE 0x10016467):
+ * Facts that shape the code (RM0444 5.2, 5.4, 3.3.4, 4.1.4; ES0548 Rev 3
+ * read on silicon revision Z, DBGMCU_IDCODE 0x10016467):
  *  - out of reset the device runs HSI16 undivided as HSISYS = SYSCLK =
  *    HCLK = PCLK at 16 MHz, VCORE Range 1, FLASH_ACR.LATENCY 0;
  *  - table 13 ties the wait states to HCLK per voltage range, and 3.3.4
- *    orders them BEFORE a rise (with a readback) and AFTER a fall;
+ *    orders them before a rise (with a readback) and after a fall;
  *  - 4.1.4: Range 2 serves up to 16 MHz; going up is VOS then VOSF then
  *    the wait states then the frequency, going down is the reverse;
  *    4.3.2: low-power run wants SYSCLK <= 2 MHz first and REGLPF clear
@@ -216,8 +263,11 @@ constexpr uint8_t hsidiv_for(uint32_t hz) {
 /**
  * The RCC block. Every verb is a register-level fact of chapter 5; the
  * ordering rules (latency first, PLL stopped before reconfiguring, wait
- * for READY, wait for SWS) are the TASK's job below, so that a resource
- * verb never does two things.
+ * for READY, wait for SWS) are the task's job below, so that a resource
+ * verb never does two things. The verbs are unguarded read-modify-writes
+ * and plain reads: setup's and an active object's handler's, not an
+ * interrupt handler's (the opening comment); the `*_wait_*` verbs spin
+ * for at most `ready_spins` turns and answer false, nothing else waits.
  */
 struct Rcc {
     Rcc() = delete;
@@ -831,14 +881,18 @@ struct DynamicClock<Rates<Rs...>, Users...> {
     }
 
     /// Switch to a rate known at compile time (checked: a rate the pack
-    /// does not name does not compile).
+    /// does not name does not compile). From main() or an active
+    /// object's handler, one caller at a time; the listed users are
+    /// rebased first, then the rate's sequence runs with its bounded
+    /// waits (the opening comment); false means the rate did not take
+    /// and the mirror names what was asked.
     template <uint32_t hz>
     static bool set() {
         static_assert(can_run_at(hz), "brio DynamicClock: this rate is not in the Rates pack");
         return enter(index_of(hz), true);
     }
     /// Switch to a rate chosen at run time; false (nothing changed) when
-    /// the pack has no such rate.
+    /// the pack has no such rate, otherwise as set<hz>().
     static bool set(uint32_t hz) {
         const uint8_t i = index_of(hz);
         if (i >= rate_count) {

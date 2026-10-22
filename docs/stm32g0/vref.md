@@ -1,12 +1,34 @@
 # Voltage reference (STM32G0)
 
-Documents of record: RM0444 Rev 6 ch. 17; DS13560 Rev 5 section 4
+This document is for a programmer choosing what the converters measure
+against. The ADC, the DAC and the comparators of this family share one
+reference rail, VREF+, which a board either ties to the analog supply
+or leaves free for the chip's own buffer at 2.048 or 2.5 V; so this
+target's `brio::Ref` and `ref_mv()`, the vocabulary every converter
+takes, live here, and `Vref` is the buffer.
+
+The smallest use leaves the buffer off and measures the rail instead:
+the reference is `brio::Ref::external`, and `Adc::vdda_mv()` gives its
+value in millivolts from the internal bandgap ([adc.md](adc.md)). That
+is what every bench board of this stratum runs.
+
+What decides correctness, and it is a board fact and not a register
+one: on a board that ties VREF+ to VDDA the buffer must never drive the
+pin, and nothing inside the chip can tell such a board from one whose
+pin is free. `Vref::enable()` therefore refuses unless the caller states
+in its configuration, by name, that the board leaves the pin free, and
+`Vref::init()` must open SYSCFG's clock first, because the block sits
+behind that gate and answers a wrong value through it (a finding below).
+
+## Documents of record
+
+RM0444 Rev 6 ch. 17; DS13560 Rev 5 section 4
 (the LQFP64 pinout, where VREF+ is pin 7 in its own right), section 3.16
 and table 67 (the buffer's electrical characteristics); errata ES0548
 Rev 3, which has **no item touching VREFBUF**. Driver:
 `stm32g0/vref.hpp`, which also carries this target's `brio::Ref` and
-`ref_mv()`. Bench suite: `test_stm32_analog` letter a. Family coverage
-is in `test/family_stm32g0/adc.cpp`.
+`ref_mv()`. Bench suite: `test_stm32_analog` letter a (a letter is one command key of the suite's console and the group of verdicts it runs).
+Family coverage is in `test/family_stm32g0/adc.cpp`.
 
 ## Why `Ref` lives here
 
@@ -41,7 +63,7 @@ VDDA reads the same either way, and this project has verified every
 board fact it states at the bench rather than from a schematic it does
 not have.
 
-So `Vref::enable()` REFUSES unless the caller states, in the config and
+So `Vref::enable()` refuses unless the caller states, in the config and
 by name, that the board leaves the pin free
 (`VrefBufConfig::board_vref_pin_is_free`), and the suite never sets it.
 What the suite does instead is read the block, which is a real

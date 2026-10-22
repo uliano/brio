@@ -1,174 +1,341 @@
 # Target: STM32G0 (`stm32g0/`)
 
-The operational page for brio's STM32G0 target: an ARM Cortex-M0+
-(STM32G0B1RE on the bench, on an ST Nucleo-64), an ARMv6-M family that
-shares the `cortexm/` core stratum with the SAM C21. `kernel/` and
-`util/` run here as written: time events pacing a pin, and the full
-console over the board's own virtual COM port.
+The operational page of brio's STM32G0 target, for a programmer who has
+a Nucleo board on the desk and wants to build, flash and debug a brio
+program on it, and then find the document of the peripheral the program
+needs. It says what the stratum is, which boards and parts it is proven
+on, how the build, the upload, the debugger and the console work and
+where each has a trap, and it ends with the map of the stratum's own
+documents: one line per peripheral driver, which is where the state of
+the driver work is read.
 
-Peripheral documents live next to this page, one per chapter - the
-map below; the documents of record are in [vendor/README.md](vendor/README.md)
-together with the errata pass and the bench chip's identity (silicon
-revision Z, DBGMCU_IDCODE read over SWD).
+A stratum is a directory of `brio/` holding one architectural layer;
+`brio/stm32g0/` holds everything that includes ST's device header
+`stm32g0xx.h`. The STM32G0 is an ARM Cortex-M0+ family (the ARMv6-M
+architecture), and what is the core's rather than ST's lives one layer
+below, in the `cortexm/` stratum the SAM C21 shares
+([../cortexm/README.md](../cortexm/README.md)). The kernel (`kernel/`)
+and the services (`util/`) run here as written: time events pacing a
+pin, and the full console over the board's own virtual COM port. The
+bench chip is the STM32G0B1RE on an ST Nucleo-64, with the Nucleo-G071RB
+and the Nucleo-G031K8 beside it; the rest of the family is covered by a
+compile check over every device header ST ships ("Family coverage"
+below).
 
-## The documents
+If you are here from the learning route: the step-by-step build, flash
+and debug of the maintained example `blink` is
+[docs/learn/command-line.md](../learn/command-line.md) and
+[docs/learn/vscode.md](../learn/vscode.md). This page is their
+reference: the same tools, with every board, every caveat and the
+whole family.
 
-One document per peripheral driver, in the shape
-[../README.md](../README.md) prescribes; the vendor page carries the
-documents of record.
+The documents of record (reference manual, datasheet, errata, by
+revision), the errata pass item by item and the identity of each bench
+die (the silicon revision, read from DBGMCU_IDCODE over SWD) are in
+[vendor/README.md](vendor/README.md).
 
-| Document | Content |
-|----------|---------|
-| [platform.md](platform.md) | Platform (STM32G0): `Stm32g0Platform<TB>` templated on its TIMEBASE - PRIMASK critical section, WFI idle in Sleep mode, the 16 + 32 vector table with its shared lines, the crt, the SRAM parity option - with TWO timebases: the SysTick `Ticker` (1000 Hz, stops in Stop) and `LptimTicker` (the LPTIM on the LSE crystal undivided, the kernel tick its count shifted to 1024 Hz), which makes a program TICKLESS: no periodic interrupt at all, the kernel's optional `idle_until()` placing every deadline in the compare, kernel time running through a Stop with the plain sleep site and no resync. Measured: the idle contract to the cycle on the SysTick timebase - no edge position of 400 loses its wake, the tick's or an NVIC line's (letter `w`), one kernel turn per tick (letter `k`), a wake from Sleep 36 cycles to the handler against 31 awake; a CMP write lands in 2..3 counts of WHATEVER clock the counter runs on (74..88 us undivided, 2.0..2.8 ms at /32 - the finding that put the counter at /1 with a shifted tick), CMPM fires at the count edge AFTER equality, a compare at ARR matches, a store immediately before a Stop 1 lands with PCLK stopped; three periodics at 7/30/250 ticks fire exactly on their ticks for three seconds with one LPTIM wake per deadline and NOT ONE EARLY; a 500-tick deadline through Stop 1 under the manager matures at 488 ms of RTC wall with 500 ticks elapsed. HOT CODE IN SRAM, OPT-IN PER DRIVER: the three linker scripts collect `.fast_text` and the platform says `places_fast_text`, so `SpiHost` and the `Uart` task take util/placement.hpp's `InRam` - measured behind a vector left in the flash, the prefetch and the cache hiding a fifth of the flash's cost: the SPI pump's entry 397 cycles against 347, its receive loop at PCLK/2 6470 against 6189, the USART receiver 355 against 316, for 84 to 1644 bytes of SRAM a path; the I2C host declined, measured no shorter. The NVIC's priorities measured (the order of two pending lines, a more urgent one preempting a handler). Not covered: VTOR relocation, NVIC priorities as a scheme (nothing assigns one), a per-package pin-bonding table, the flash-to-SRAM veneer (util's choice) |
-| [reset.md](reset.md) | Reset + IWDG + WWDG (STM32G0): RCC_CSR's reset flags as the ACCUMULATING history they are, with PINRSTF the catch-all that names the pin only alone; the independent watchdog whose keyed registers do not update until the START key gives the block its clock, and which the reset it causes really does stop (measured, against the family lore); the window watchdog whose counter free-runs and whose EWIF rises with the activation bit clear, though the interrupt does not; and the panic breadcrumb proven across six real resets including a HardFault; six more for the deliberate resets (`Iwdg::force_reset()` on a running and a stopped watchdog, `Wwdg::force_reset()`), a short reload counted from arm()'s own reload and not from the start, the IWDG's live window served, re-timed on the run and violated, and the WWDG's early warning as a recovery; not covered: the option bytes behind both watchdogs, the NRST pin's modes, the PWR side of PWRRSTF |
-| [clock.md](clock.md) | Clock (STM32G0): the THIRD clock model - one SYSCLK, shared bus prescalers, per-peripheral enable bits, kernel-clock multiplexers, the MCO clock output; HSI16 and the PLL to 64 MHz, the flash latency sequence, the three voltage regimes (Range 1, Range 2 with its own latency column, low-power run) as static rates; `LseTracker`, the core tracked against the LSE by TIM16's capture into a DMA ring, no CPU (the far crystal against this board's LSE +6..+10 ppm, its spread within 7 derived, over 0.4 s windows); THE DYNAMIC CLOCK over a pack of rate tuples - measured: every rung as the type claims and the CPU at the claimed rate on the crystal's scale, a switch 48..384 us, the four once-unbenched steps closed, the rebased USART and ADC exact through 72 switches, a Stop at each end of the ladder (the part wakes IN low-power run with HSIDIV kept), HSIDIV never left behind a PLL rate |
-| [port.md](port.md) | GPIO (STM32G0): a port has a clock and it is off at reset, analog is the reset state, AF numbers are the datasheet's, BSRR/BRR atomic values - and FOUR PADS ARE NOT ORDINARY GPIOs OUT OF A POWER-ON, PA8/PB15 and PD0/PD2 carrying the UCPD Type-C dead-battery pull-downs until the SYSCFG strobe releases them (measured: the pad does not follow its own pull-up until it does; UCPD itself - G071/G081/G0B1/G0C1 only - is not implemented, deferred to a board with the connector) |
-| [exti.md](exti.md) | EXTI (STM32G0): where this family keeps its PIN INTERRUPTS - sixteen GPIO lines whose NUMBER IS THE PIN NUMBER and whose PORT is the one choice (so PA3 and PB3 are one line and cannot both be armed), edges only and no level, rising and falling in SEPARATE pending registers, a software trigger that needs no pad, three shared vectors and the ISR body that confines a handler to its own lines; the pending bit is only set for an UNMASKED interrupt (13.3.1, measured - a line cannot be polled without arming it), IMR1's reset value follows 13.5.12's RULE and not its printed number, and an EXTI EVENT returns the core from WFE with nothing to acknowledge; the driver owns the fabric and not the vocabulary of the direct lines; not covered: wake-up from Stop/Standby (no PWR driver), the direct lines' peripherals, the non-GPIO configurable lines; port D through the multiplexer measured on PD4 |
-| [nvm.md](nvm.md) | FLASH (STM32G0): the program/erase engine of RM0444 ch. 3 - page 2048, row 256, double word 8, a cell written once between erases - with the option bytes as a READ-ONLY decode (nothing here can brick a board), the ECC status and the one interrupt; the storage design that gives BANK 2 to util/nv_heap.hpp and util/nv_journal.hpp while the linker keeps the image in bank 1, so read-while-write makes a save legal from the loop and ES0548 2.2.10's own note blesses the arrangement; EOP proven not to rise without EOPIE (3.7.4 against 3.3.8's step 7), fast programming measured at a third of its datasheet typical, and a malformed program found to WEDGE CFGBSY until the next reset rather than merely raise a flag; not covered: writing any option byte, WRP/PCROP/securable/RDP, the OTP write, a RAM-resident erase path |
-| [tim.md](tim.md) | Timers (STM32G0): TEN timers behind ONE `TIM_TypeDef`, so what a timer IS - width, channels, complementary outputs, slave controller, break unit, centre-aligned counting - is the DOCUMENTS' table and every verb naming a feature an instance lacks refuses; the status register that is `rc_w0` and not write-one-to-clear (the one register of this stratum where the reflex is wrong); the shadowed prescaler and auto-reload; MOE clear out of reset; shared vectors with TIM1 alone on two; TISEL, the input multiplexer that makes a CAPTURE MEASURABLE WITH NO PAD (LSI into TIM16, cross-checking the watchdog's own LSI figure); a centre-aligned period measured to be 2 x ARR and not 2 x (ARR + 1); a dead time asked for in tDTS and delivered to the nanosecond, with the pair never both high; and the two util contracts running here unchanged - PwmChannel through TimPwm/TimPairPwm and MeterSampler through a capture ISR, plus the DMA REQUESTS each instance publishes (table 55's numbers, TIM14 having none at all) and the DMA BURST engine whose register map HAS HOLES; ALL TEN INSTANCES have now counted here, the six that never had - TIM4, TIM6, TIM7, TIM14, TIM15, TIM17 - each against SysTick, each on the vector the reserve derives from what shares it, and each with channels driving a pad, where a complementary pair's dead time comes off BOTH halves exactly; not covered: encoder and hall-sensor modes, the commutation event, the ETR sources other than MCO, LPTIM/IRTIM; TimPeriodicTick and TimOnePulse on silicon - the one-pulse task found one count too wide and HIGH from its setup on (a preloaded compare written after the update), both fixed - capture on both edges, UIFREMAP, OSSI/OSSR and BDTR.LOCK's three levels measured |
-| [dma.md](dma.md) | DMA + DMAMUX (STM32G0): two controllers (seven channels and five on the G0B1, one controller elsewhere) behind ONE request multiplexer, three vectors for twelve channels, and a request vocabulary NO HEADER OF THIS PACK DECLARES - so the driver owns the fabric and each peripheral publishes its own table-55 codes. A REQUEST IS A LEVEL SERVED ON ENABLE, NOT AN EDGE LATCHED ON THE RISE (measured on a USART with no pads claimed and a control with the request bit clear), which is why this driver has no kick(); suspend-and-resume is unsupported by the silicon and only abort-and-restart is offered; a transfer error disables the channel in HARDWARE and gates the re-enable behind its own flag; ES0548 2.4.1 and 2.5.4 are answered STRUCTURALLY (CGIFx is unwritable here, and SE can only be set with SPOL in the same word). THE FIXED POINT: util/block_stream.hpp's two concepts, written before this implementation, are met UNCHANGED - BlockPlayer fits the hardware CIRCULAR mode exactly and gains by it (a player runs with its interrupt disarmed, where a controller without the mode re-arms once a lap), and BlockSource does NOT, because a circular channel never stops and the 'skip rather than tear' rule can only be decided after the edge: measured, six elements had already landed in the half a caller was holding at a 2 MHz request rate, so the ping-pong engine uses a non-circular channel. Also measured: two memory-to-memory channels ALTERNATE and the software priority does not enter into it (10.4.4's own clause), the lower channel index winning every time; 49.7 MB/s of memory-to-memory; table 51's widening and truncation as printed; a request generator turning TIM14_OC into batches of GNBREQ + 1; one channel pacing another through EGE with nothing in between; and the ST-LINK VCP's own ceiling, byte-exact to 921600 in both directions and broken at 2 Mbaud. DMA2 is FIVE channels and not one (every width on every one of them), 10.4.5's peripheral-to-peripheral runs (TIM6's update moving TIM3's CCR1 into TIM4's), and THE SLEEP STORY has two halves with opposite answers for one reason - the controller is on HCLK: a block runs to the end with the CPU in WFI and its own completion wakes the core, while a paced stream is FROZEN by a Stop and picks up exactly where it stopped. THE ENGINES HAVE TWO MOMENTS: `arm()` writes everything constant for a binding once - the gate, the request, CPAR and the CCR word, which the engine keeps because the register cannot - and a block's start is five stores with no read (ST's `HAL_DMA_Start_IT()` spends fourteen), the beat taken from the caller's span; the transport masks the CLAIM alone; `DmaCopyEngine` copies and fills in memory-to-memory mode at 5.00 cycles a word and some 480 of fixed cost a block (`bench_stm32` letter d), and a timer-paced block lands its last word on the same cycle every run. THE RECEIVE ENGINE HAS A SECOND SHAPE, the CIRCULAR one: a ring's whole storage written lap after lap, its count register the producer index of `util/ring.hpp`'s `HardwareRing` - the `Uart`'s receive, never re-armed, so a burst landing with the consumer away is read back whole (60 of 60 where a one-shot run delivered 22) and a consumer a lap behind is told (an overrun counted, the lap skipped). THE LEVELS ARE THE RULE'S (docs/design/dma.md) and measured: one copy never starves a ring (10.4.4's alternation), two copies alternating with each other do, and the receive ring at its default very_high beside them lost nothing; A RELEASED REQUESTER HOLDS NOTHING HERE - a gated clock or a cleared DMA enable withdraws a raised request, USART1, SPI1 and TIM3 measured with no wire - while an enable left set raises it again when the clock returns, which the reset in every release() takes away. The engines' lines TIMED against the wire at the rate asked: the console's kilobyte and USART1's engined single wire in their wire time to the thousandth, and letter n starts the LSE its Stop alarm counts on. Not covered: linked lists (there are none), the line's IDLE edge ending a burst (the UART round's), RCC_AHBSMENR's sleep-mode enables (no verb in clock.hpp) |
-| [usart.md](usart.md) | USART (STM32G0): RM0444 ch. 33 WHOLE - every field of both register views - and almost all of it measured on ONE BOARD WITH NO WIRES, because CR3.HDSEL turns any instance into its own loop-back (there is no LBME here) and a pad under the RX alternate function is an INPUT whose internal pull the CPU moves in under a microsecond, which makes software a transmitter at 2400 baud. The instances are not copies of each other and THREE AUTHORITIES are compared on every one: the reserve's stated table 183, the device header's pointer-comparison macros and the silicon. ONE ROW OF TABLE 184 IS NOT THE FULL/BASIC SPLIT - synchronous mode belongs to every USART and to no LPUART, CR2.CLKEN sticking on all six here and on neither LPUART. And the PRESCALER IS WORSE THAN ABSENT ON A BASIC INSTANCE: the field takes the value and reads it back, and the transmitter then emits nothing at all, which is why the verb refuses instead of trusting. Measured: all thirteen frame formats byte-exact; both of 33.5.7's baud examples in BOTH oversamplings, with OVER8's register proven not to be the divisor; the twelve prescaler codes; the console MOVED UNDER ITSELF to HSI16 and to SYSCLK while its own verdict lines came out at 115200; USART1 run off the 32768 Hz crystal at 2048 baud; the FIFOs' depth, thresholds, overrun order and OVRDIS bypass - with the honest finding that A LOOP CANNOT SHOW WHAT A FIFO IS FOR (one interrupt a byte either way, because a single wire is its own pacer) - and THE FIFO AS THE TRANSPORT'S DEFAULT wherever the instance has one, the transmitter refilling an EMPTY FIFO as a run in one entry: a 4096-byte print through the console takes 515 USART interrupts where the one-register transport took 4098 and 37.1 cycles a character where it took 109 (34.5 with the task's interrupt bodies in SRAM under `InRam`, the receiver's entry a ninth shorter there and the transmit engine's completion a tenth), while the FIFO paced on TXFNF measures dearer than no FIFO at all; the noise flag proven to be a MAJORITY-VOTE DISAGREEMENT and nothing else; the tolerance of tables 188/189 walked from both sides in all four arrangements and MEETING every row; all four auto-baud patterns learning a rate nobody was told to one part in a thousand; the LIN break at thirteen bits and its detector counting to exactly LBDL; mute mode, a 22-bit receiver time-out and the character match, with CR2.ADD proven to be ONE field with two jobs; smartcard 8E1.5 with its guard time in BAUD periods, its CK at kernel/(2 x PSC) and its NACK retries counted on the pad; IrDA's 3/16 pulse, its low-power width that no longer moves with the baud rate, an RZI frame decoded, and a glitch filter one PSC period wide; SWAP, the three inversions, MSBFIRST as an exact bit reversal, DE in SAMPLE times, RTS and CTS; and the synchronous master's CK counted with no CPU. Errata: 2.11.1 REPRODUCED WITH ITS CONTROL (8 of 8 frames silently corrupted by a quarter-bit glitch in the second half of a stop bit, 0 of 8 in the first) - and across the wire from 2400 baud to 1 Mbaud, at both oversamplings, in the FIRST stop bit of two - 2.11.2 measured, and 2.2.4 REPRODUCED ON A USART WAKE where it does not reach an RTC one - with HSIKERON proven NOT to be the way round it and A USART ON THE LSE proven to be (woken by a far chip on a divided HSI). THE RECEIVE FIFO WEDGES BEHIND A STARVED DMA CHANNEL - a starvation of a little over a character leaves entries standing under a request the channel no longer takes, the receiver dead; ST's HAL wedges the same way and neither errata sheet lists it - and the receive engine's vector cures it with a KICK (DMAR dropped and raised at IDLE, an error or RXFT at seven eighths): a ring ranked low under two copies lost nothing within the FIFO's nine characters and counted every gap past them, on the G0B1RE and the G071RB. AND EVERY TRANSMITTING LETTER TIMED AGAINST THE WIRE AT THE RATE ASKED (a single wire shares one divisor at both ends and cannot tell a wrong one): every format, every PRESC code, both oversamplings to their ceilings of 4 and 8 Mbaud, the kernel clocks, the FIFO, LIN, smartcard, IrDA, the synchronous master and both transports - all inside a thousandth or the divisor's own rounding. AGAINST A FAR BOARD - the desk's STM32F446RE running `usart_peer` on the crossed USART1 pair, under the second all-key `t`, its crystal timing THIS HSI16 and this board's own LSE timing the same window (the far crystal against this board's LSE +6..+10 ppm, the spread within 7 derived): every rate of the common ladder to 6.4 Mbaud on the wire within 40 ppm of its divisor and the HSI, the far blast whole through the polled receiver, the interrupt receiver and the engine, the frame matrix with the far end's refusals skipped, and the receiver's errors from a foreign sender - which found the FIFO's per-entry flags LOST ON EVERY OTHER ENTRY when cleared after the RDR read (the task now clears first); the far engine's start threshold and operational range, THE FIFO'S KICK UNDER A FOREIGN STREAM TO 6.4 MBAUD losing nothing it does not report, five minutes of 200-frame bursts over the wire with no frame lost (finding 4: the device ruled out, the bridge clean the same session), one open-drain wire between two chips, IDLE from a sender 3 % fast; all four auto-baud patterns learning four foreign rates within a derived tolerance (two cycles and the HSI16's measured wander, 900 ppm of the bit; at most two cycles off measured), ABRE in modes 2 and 3 and at the range's edge; LIN's break detected at LBDL's two lengths (and NOT with LIN off), sent and timed by the far receiver, and a LIN header from a master 10 % off taken as a slave takes it - THE DETECTOR ARMED ON THE BREAK, since armed before it the break is its first character and LBDF never rises; RS-485 through the `Rs485` task, DEAT and DEDT in SAMPLE times at both oversamplings while the far chip received every frame; IrDA SIR both ways between two ST ENDECs on a bare wire, TXINV and RXINV proven to act on the SIR side and BOTH needed (an ENDEC is half duplex); mute mode's two wakes from a foreign sender, the address in four, seven and (on a 9-bit word) eight bits, the woken address's PE kept; the wake from Stop by the far chip's frames on USART1, on HSI16 and on the LSE; and ONE IDLE FRAME FROM A FASTER SENDER NOT TOLD - ES0298 2.13.1's own case, which the F446 reads entry for entry the same. OVER8 ADDS NO RESOLUTION here (BRR drops USARTDIV's last bit), which is what shapes that ladder. The stratum's own `usart_peer` is the instrument a far board drives, its HSI TRACKED against the LSE by the stratum's `LseTracker` because the oscillator wanders hundreds of ppm. Not covered: the synchronous DATA path and the SLAVE half (a second board), smartcard block mode (a real card), a LIN network |
-| [lpuart.md](lpuart.md) | LPUART (STM32G0): RM0444 ch. 34, which is ch. 33 minus synchronous/smartcard/IrDA/LIN/Modbus/receiver-timeout/auto-baud/OVER8 and PLUS a baud generator of its own - 256 x fck / LPUARTDIV, twenty bits, a floor of 0x300, and 34.4.7's two rules proven to be ONE (256 x 3 IS 0x300). `LpUart` is `usart.hpp`'s OWN `UartTask` named over an `Lpuart<n>`: one implementation, two peripherals, because a second copy would have been a second place to get the ORE storm wrong. Measured on both instances' own single wires: all six rows of table 198 in BRR (three of them nearer the truth than the manual's own truncation), 9600 proven to be the LSE's ceiling by refusal, all four kernel clocks byte-exact, the FIFO and the prescaler, and the shared vectors - LPUART1 on USART3..6's line and LPUART2 on the console's. AND THE REASON THE PERIPHERAL EXISTS: a WHOLE CONSOLE moved onto LPUART1 through the console's own pads on AF6 - the same task, the same verbs - took the host's stream byte-exact on the 32768 Hz crystal at 9600 and on HSI16 at 115200, and came back; then, with the console down, an LPUART on the crystal brought the part out of STOP 1 on a start bit and the character that woke it survived. Every rate TIMED against the wire at the rate asked, the ladder to 8 Mbaud included. Not covered: the features shared with ch. 33 that are measured on a USART instead, the DMA engine slots (compile-only here), LPUART2 as a wake source; the DMA receive ring on LPUART1's single wire, letter o's legs, byte-exact |
-| [irtim.md](irtim.md) | Infrared interface (STM32G0): RM0444 ch. 27 - two pages, three bits of SYSCFG_CFGR1 and one pad, and an AND gate that is the whole physical layer of an infrared remote with no CPU in it. TIM17 channel 1 is always the carrier and IR_MOD chooses the envelope among TIM16, USART1 and one more USART whose INSTANCE IS A PER-PART FACT (USART4 wherever the part has one, USART2 otherwise - derived in the reserve from USART4_BASE). NEITHER TIMER NEEDS A PAD: figure 278's connections are internal, so an infrared output costs exactly one pin. Measured: a 38 kHz carrier under a 1 kHz 50 % envelope gives 1901 rising edges on PB9 in 100 ms against a product of 1900, counted by a DMA channel with no CPU; IR_POL inverts the resting level; and THE FINDING CHAPTER 27 DOES NOT CARRY - the USART envelope is ACTIVE LOW where TIM16's is active high, so an idle transmit line shuts the gate completely (0 edges a millisecond) and a 0x00 character opens it for exactly nine tenths of its frame, which is the right way round for infrared. The high-sink LED driver is SYSCFG_CFGR1.I2C_PB9_FMP - one bit with two names, PB9's alone. Not covered: what the high-sink bit is worth in milliamps, the second USART envelope on the pad, and the PA13 IR_OUT pad, which is SWDIO on every Nucleo |
-| [adc.md](adc.md) | ADC (STM32G0): the one 12-bit SAR converter of RM0444 ch. 15 - a MONOSTATE, because every part has exactly one - with the two things it has instead of a factory trim (an internal regulator with a start-up time and an ADCAL self calibration, both procedures `init()` spends real microseconds on) and the three factory MEASUREMENTS it reads instead (VREFINT_CAL and TS_CAL1/2 at the datasheet's addresses, ADC results taken at 3.0 V and never written back anywhere). THE SEQUENCER HAS TWO FACES AND A HANDSHAKE - a bitmap scanned in numeric order or eight ordered slots, and neither is in force until ISR.CCRDY rises, with an ADSTART before that IGNORED - and there is NO current-channel register at all, so `selected()` is the driver's own memory and is exact precisely because the util sampler selects one channel at a time. Measured: VDDA 3310 mV with no meter and the junction temperature 32.6 C once the raw reading is rescaled from the supply it was taken at to the 3.0 V the calibration assumes (the step 15.9's formula leaves out); CONVERSION TIME EXACT TO THE CPU CYCLE in six configurations, the DMA counting 256 conversions so no reader is in the loop; the oversampler's full scale as table 79 draws it, with the noise floor measured FIRST (4 and 7 counts) and the reduction claimed only against it; and A FORBIDDEN WRITE IS NOT ONE THING ON THIS CONVERTER - CFGR1 takes an AWD1 bit with ADEN set (the door ES0548 2.6.2 comes through) while AWD2CR ignores the identical write in complete silence, which is how the watchdogs became disabled-state verbs; the THRESHOLDS alone stay live (15.7.4). Errata: 2.6.2 answered structurally and staged, 2.6.3 reproduced with a control, 2.6.4 measured at one cycle, 2.6.1 a timing obligation no driver can enforce, 2.6.5 revision A only. WAIT and AUTOFF are measured (a converter nobody reads OVERRUNS, one with WAIT stalls on its result; AUTOFF costs 700..900 ns of start-up a conversion), all eight triggers fire once each - TIM1's TRGO2 needing no new verb because MMS2 resets to the UPDATE event, TIM1_CC4 being a COMPARE and not an EGR strobe - and the external inputs are a MAP measured on twelve free pads, each following its own pad and not its neighbour's. Not covered: a known VOLTAGE on any pad but PA4, because a precharged pad cannot be one (an ADC's sample-and-hold is a capacitor of the pad's own order and SHARES its charge, where a comparator's input takes none), PLLPCLK as the async root, VREF+ as anything but the supply |
-| [dac.md](dac.md) | DAC (STM32G0): the two 12-bit channels of RM0444 ch. 16 - absent entirely on the G031/G041, which the header says by declaring no DAC1_BASE - with the fact neither chapter states: THE DAC REACHES THE ADC THROUGH THE PAD AND NOTHING ELSE, because the ADC's own connectivity figure lists no DAC among its nineteen inputs while DAC_MCR's internal path goes to the COMPARATORS. So PA4, which is DAC1_OUT1 and ADC_IN4 at once, is a zero-length wire and the shape of every wireless analog experiment on this part. Also: DHR is not DOR (16.4.5, and `code()`/`output()` are two verbs for that reason), a trigger is an EDGE whose first datum must precede it (16.4.8, which is why a DMA stream's launch block is one entry out of phase - measured), and a wave generator without a trigger is refused because 16.7.1 says the bits are only used with TENx set. Measured: the transfer curve monotonic and straight to 2 counts of 4096 END TO END THROUGH THE ADC, reported as the pair's nonlinearity and not apportioned; THE BUFFER CANNOT REACH THE RAILS and turning it off says by how much (46/3276 mV buffered against 3/3308 unbuffered on a 3312 mV supply); the three data formats proven to be PLACEMENTS of one datum; and LD4 measured NOT to be a load the DAC's buffer can feel, the two channels agreeing to 5 mV at every code, which contradicts the obvious guess about how that lamp is wired. All nine triggers are run one event at a time (every TIMx_TRGO, both LPTIM outputs, and EXTI 9 through a pull-walked pad), and THE DMA UNDERRUN is caught: a converter asking for a DMA with no channel armed raises DMAUDR on the trigger after the first and carries it to the shared vector, once per unserved trigger - a flag that has to be read with the interrupt OFF, since a handler that serves it clears it. Not covered: the wave generators from a HARDWARE trigger (they run one software step at a time), what sample-and-hold costs, the dual holding registers as a stream |
-| [vref.md](vref.md) | Voltage reference (STM32G0): chapter 17's buffer, implemented whole and NEVER ENABLED. This target's `brio::Ref` and `ref_mv()` live here rather than in the ADC, because unlike the SAM C21 this family really does have ONE shared rail - the ADC, the DAC and the comparators' scaler all work against VREF+ - so the enum sits in the chapter that owns it. THE BUFFER STAYS OFF because 17.1 forbids driving VREF+ where a board ties it to VDDA and NOTHING INSIDE THE CHIP CAN TELL THE TWO APART: `enable()` refuses unless the caller states, in the config and by name, that the pin is free, and table 91's other off mode (VREF+ pulled down to VSSA) is not offered at all, being a path from the supply to ground on such a board. Measured: THE BLOCK IS BEHIND SYSCFG'S CLOCK GATE, which chapter 17 never mentions and only the address map reveals (VREFBUF_BASE = SYSCFG_BASE + 0x30) - and read through the closed gate VREFBUF_CSR answers 0x0, which is not its reset value but the pulled-down mode, so 5.2.17 bites here in the one place where its answer is not merely absent but WRONG; with the gate open the register reads 0x2, the safe external-reference default, and the factory trim is loaded (36). Not covered: the buffer itself at either scale, hold mode, and every converter against a reference that is not the supply - all of which need the board's schematic, not code |
-| [comp.md](comp.md) | Comparators (STM32G0): three on the G0B1 class, two on the G071, none on the G031, each one CSR living inside the SYSCFG block so RCC_APBENR2.SYSCFGEN is what makes it readable at all - which settles 18.3.3's two contradictory sentences by the address map. THE ASYMMETRY THAT SHAPES THE BENCH: the inverting input reaches VREFINT, its three taps and BOTH DAC channels with no pad, while the non-inverting one is a pad and nothing else (tables 93/95/97 carry no internal signal), and 7.3.13 disconnects a pad's own pull the moment it goes analog - so a threshold is free and a SIGNAL is not, and the SAM's pull-walked analog stimulus has no twin here (measured: 960 and 1056 counts for a pull-up and a pull-down). What replaces it is A PRECHARGED PAD, driven to a rail by GPIO and then handed over, whose node holds past the 100 ms cap the letter puts on it. Also found: WINMODE's partner is NOT n + 1 (COMP1 borrows COMP2's input, COMP2 borrows COMP1's, COMP3 borrows COMP2's - 18.6.1 one register at a time); THE BLANKING WINDOW IS A REAL GATE measured with no wire (TIM1's OC4 forced active drives VALUE low and releasing it gives the answer back, once the source rises AT a live comparator and the timer's MOE is up); a WINDOW COMPARATOR WITH ONE PAD through WINMODE; and the output counted twice over, 5 EXTI interrupts on line 17 and 5 TIM1 captures through TIM1_TISEL, from six rail changes. ONE HONEST DECLINE: WINOUT did nothing measurable - not to CSR.VALUE, not to the EXTI line - with the bit written and standing and the pair made to disagree by inverting the partner's polarity; recorded, not explained, and the wire that would settle it is named. Not covered: the offset and the hysteresis levels (declined with the reason: a released pad on this board holds a third of the supply), WINOUT, TIM1_OC5 as a blanking source, COMP3's PE7, LOCK (offered, never set), the low-power modes |
-| [rtc.md](rtc.md) | RTC + backup registers (STM32G0): the clock that outlives everything else - a power domain of its own that a system reset does not reach, that Stop, Standby and Shutdown do not stop, and that TWO INDEPENDENT LOCKS guard on the way in (PWR_CR1.DBP over the whole domain, the RTC's own 0xCA/0x53 key over most of its registers, and the two have different reach - the backup registers are behind the first and not the second, measured). RTCSEL is ONE-WAY until BDRST, and BDRST costs the calendar, the alarms and the five backup words - which this board needs, because its domain comes up on LSI. Errata as code: ES0548 2.9.1's workaround is applied unconditionally on the way OUT of initialization mode, so a second entry is safe by construction. THE NUCLEO'S X2 CRYSTAL IS FITTED AND RUNS (32703 Hz against the core, the core's own 1 % trim and not the crystal's), and LSI weighs 32586 Hz - confirming from a period capture what reset.md derived from an IWDG time-out. Findings no chapter carries: what TISEL calls "RTC wake-up" is the masked interrupt LINE and not a pulse, so a late acknowledgement DELETES the next interval; an unfiltered capture of an internal clock line is not a measurement at all; and THE SMOOTH CALIBRATION DOES NOT REACH THE DIVIDED RTCCLK WAKE-UP CLOCKS - 1022 ppm of swing on ck_spre where 30.3.13 promises 975, and exactly ZERO on RTCCLK/16. An alarm lands AT its match (the SAM's counter compare does not), the calendar's every boundary is exact in one second each, and the five backup registers plus the calendar survive a real reset. RTC_REFIN drags the calendar onto an outside reference built by the CORE on a pad (a second measured at 64131086 core ticks on the crystal and 64006056 against a 50 Hz reference whose fifty periods ARE 64000000), with a HALTED reference giving the crystal's second back - so the correction is an edge and not a mode - and it is quantized at one ck_apre period. RTC_SHIFTR is timed as a LENGTH (a delay of 64/256 makes one second exactly a quarter longer; SHPF stands for 47 ms). TAMPER DETECTION is built and run, and two facts shaped it: TAMP_CR1 comes out of a domain reset with FOUR INTERNAL TAMPERS ARMED (0xFFFF0000, none with a NOERASE bit), and ARMING A TAMPER INPUT TAKES THE PAD, pulls and all - so no program on this board can put an EDGE on one, and the filtered detector is measured over a pad the BOARD holds, where the latency from the ARMING is the filter's own N/f. Not covered: the output pads, RTCSEL = HSE/32, a tamper on a controlled edge (measured impossible here), the LSE CSS armed (its enable reads one-way); CALP refused while PREDIV_A is under 3 (the silicon drops it in silence) |
-| [pwr.md](pwr.md) | PWR + the three sleep sites (STM32G0): the STOPPING half of the platform - chapter 4 whole, and `util/power.hpp`'s depth ladder realized here with the model UNCHANGED. The sleep mode is TWO REGISTERS IN TWO PLACES (the Cortex's SLEEPDEEP and PWR_CR1.LPMS), which is why `Stm32g0Platform::idle()` needed no change at all - the one target of the three whose idle hook was already right. THE LADDER IS NOT THE IDENTITY AND SAYS SO: `light` maps to Sleep because the only thing between Sleep and Stop is Low-power sleep, which needs the whole program at 2 MHz; and STANDBY AND SHUTDOWN ARE OFF THE LADDER ON PURPOSE, because the power model is built on the program RESUMING and those two come back through the reset vector. Measured: a Stop entered with the kernel's 1 kHz tick armed LASTS on a bare board (250 ms of 250) and is cut to 1 ms by a debugger's DBGMCU_CR.DBG_STOP - a bit OpenOCD sets at every connection and that survives every reset but a power-on, which is how it was first recorded as a silicon fact (the site pauses the ticker for the deep rungs anyway, which costs nothing and makes the Stop last in both states); a Stop drops SYSCLK to HSISYS and the site's `resume_clock()` puts it back; kernel time stands still for the whole sleep; a 500 ms deadline matures at 723 ms of wall with the plain site and at 501 ms with the TIMED one, six repeats of 150 ms all landing at 150..151 and NOT ONE EARLY; ES0548 2.2.4 proven NOT to reach an RTC wake (250 ms of Stop with HSIDIV at /4); and Standby and Shutdown both indistinguishable afterwards - PWR_SR1 reads 0x8100 for both and RCC_CSR names NO reset source at all. Under the TICKLESS platform the plain site is the only site and meets a 500-tick deadline through a Stop 1 with time running (488 ms of wall, 500 ticks), the two timed sites refused at compile time. The per-rung wake latency is DECLINED with the reason: every counter fine enough to resolve it stops in Stop, and the RTC's own tick is 30 us against a datasheet 5.6. Not covered: the VBAT charger, the BOR levels (option bytes), SLEEPONEXIT, Low-power run as a rung - and sleep CURRENT, which needs a meter |
-| [lptim.md](lptim.md) | Low-power timers (STM32G0): RM0444 ch. 26 whole, on the two instances that are NOT copies of each other - table 135 gives encoder mode to LPTIM1 alone and figure 271's footnote gives LPTIM2 one input channel, while the device header declares ENC, UP/DOWN and IN2SEL once for the struct both share, so what an instance IS comes from the manual with its citation. THE ENABLE RULES ARE OPPOSITE ON THE TWO HALVES of the block (CFGR/CFGR2/IER disabled-only, CMP/ARR enabled-only, the start bits discarded by hardware when disabled) and a write to CMP or ARR is not finished when the store returns, so the STORE and the OBSERVATION are separate verbs. Both errata are answered by construction: 2.8.1 means NO VERB EVER CLEARS ENABLE (`disable()` is an RCC reset pulse), and 2.8.2 means `clear_flags()` refuses from thread mode while any interrupt is enabled while `isr()` clears the disabled-interrupt flags first. Measured, wireless, with all four LPTIM1 signals on pads walked by their own internal pulls: A PAD HANDED TO AN INPUT ALTERNATE FUNCTION STILL FOLLOWS ITS PULL; A FORBIDDEN CFGR WRITE LANDS ANYWAY (the register takes it - what the chapter forbids is what the counter then does with it, so the refusal has to be the driver's) while a start written to a disabled timer really is discarded; CFGR2 KEEPS EIGHT BITS, settling 26.7.9's two-bit drawing against the header's four-bit fields; the waveform arithmetic 26.4.10 never prints (period ARR + 1, high time ARR - CMP + 1, and a FLAT LOW at the forbidden CMP >= ARR); 26.4.12's lost edges are EXACTLY FIVE; the output rate ceiling of kernel/2 counted by a DMAMUX request generator with no pad, no peripheral and no CPU; all three encoder sub-modes exactly as table 144 says; and THROUGH A STOP only LSE and LSI keep counting - HSI16 STOPS, because a counter that merely counts makes none of the clock REQUESTS 5.3 lists it among. A compare match is a PER-LAP event, not a one-shot. The tickless kernel timebase over it, `LptimTicker`, is platform.md's; its letter x found that THE WRITE LATENCY SCALES WITH THE PRESCALER (2..3 prescaled counts, not kernel clocks) and that CMPM fires at CMP + 1. LPTIM2 IS MEASURED ON ITS OWN THREE PADS (PC0, PC3 and PD6 at AF2): its own CCIPR field on all four clocks, its waveform, both counting arrangements, table 56's other trigger input, the two tables' asymmetries as refusals both ways, TRGFLT as a threshold in its own right - and ONE VECTOR WITH TWO OWNERS, LPTIM2's ARRM and TIM7's update served on the same line in the same window. Not covered: the TAMP trigger rows (arming one erases the backup registers), set-once's discarded triggers, debug_freeze; all three comparators as triggers, and a later trigger NOT discarded by set-once, against 26.4.8 |
-| [crc.md](crc.md) | CRC calculation unit (STM32G0): RM0444 ch. 14 whole and every field of it bench-verified - a MONOSTATE, one per part, with no interrupt, no request line and NO ERRATUM. One data register takes words, right-aligned half-words and right-aligned bytes and returns the running result; the polynomial is programmable at four widths with two rules 14.3.3 states and no register enforces (an even polynomial, and one wider than the size it declares), both refused before a register is touched. `configure()` ENDS IN A RESET because 14.3.3 forbids changing the polynomial mid-calculation, and `feed(span)` assembles words BIG-ENDIAN - a 32-bit write is processed most significant byte first - falling back to byte-by-byte under the two reversals that cross a byte boundary, so the verb means one thing whatever is configured. Measured: all three of 14.3.3's REV_IN examples are exactly what the silicon does, verified against a checksum the unit really computed; a polynomial changed mid-calculation gives the checksum of nothing, but UNRELIABLE DOES NOT MEAN RANDOM (the same illegal sequence twice gives the same number); the four catalogue check values over "123456789" at all four widths; `crc_ccitt_false_config` IS util/crc.hpp's CRC-16 bit for bit over 4 KB, by two mechanisms sharing only their definition; 2056 cycles per 1000 bytes through the word path against the bitwise loop's 109216, a factor of 53; and 16 KB of the program's own flash checksummed three ways - CPU-fed, DMA-fed with no CPU in the loop (about seven cycles a beat at any width, word, half-word or byte; a tight polling loop's literal loads from the flash cost the word channel one more), and a software reference - to one number; a closed gate keeps a running calculation and `release()` ends one. util/crc.hpp is NOT hooked to it: that is a util design question this stratum must not open |
-| [i2c.md](i2c.md) | I2C (STM32G0): RM0444 ch. 32 whole, both roles, in ONE image on ONE board over the Nucleo's own self-link (I2C1 host PB8/PB9 to I2C2 client PA11/PA12, two wires and their pull-ups) - and `I2cHost`'s Request is the other two targets' VERBATIM, so `util/i2c_bus.hpp` and `util/bus_master.hpp` run here exactly as written. The host's event pump takes NO PLACEMENT: as a util/placement.hpp `InRam` instance behind a vector in the flash it measured no shorter, so a program places the vector instead. THE TIMING REGISTER IS THE CHAPTER and its arithmetic goes both ways: a chooser that solves 32.4.5's inequalities and a readback that prices a register value, the second pinned against every cell of tables 172..174. THE ENABLE PROTECTION IS REAL HERE - a raw write with PE set lands on NONE of the four PE-gated fields - which is the exact opposite of what the same manual's SPI chapter does. Measured: the silicon NAMES ITS OWN COLUMN of table 165 (an instance without SMBus forces TIMEOUTR to zero, so a write that reads back is the peripheral saying which column it is in: I2C1 yes, I2C2 yes, I2C3 no); a REPEATED START MUST BE ONE CR2 STORE with START in it, because raising AUTOEND first is read as a request to end the transfer that TC has just finished and puts a STOP on the wire where the restart belonged; RXNE MUST BE SERVED BEFORE STOPF (they stand together and RXNE clears only by reading RXDR, so the other order loses the last byte AND storms the vector); a NACK branch must RETURN, or the general sweep below it clears the STOPF the tenure is waiting for; a held SDA is a PARK and not an error, with BUSY standing and no ARLO - every silicon of this project answers that way, and the reason the per-bus timeout is the arbiter's; ES0548 2.10.1's 4/10/20 MHz floors beat the datasheet's own table 74 in every mode, so AT A 2 MHz CORE NO SPEED IS LEGAL ON PCLK and the same bus runs byte-exact with the instance's kernel on HSI16 - which is what the independent clock is for; and the wake from Stop and Fm+ are MUTUALLY EXCLUSIVE, the wake accepting HSI16 alone while Fm+ needs 20 MHz. A REQUESTED RATE IS A CEILING: the chooser charges the floor under tSYNC (two kernel periods, tAF(min) and the digital filter an edge) unless told the wire's measured one, because the manual's 1000 / 750 / 500 ns and ST's own timing utility both charge more than a short wire takes (this wire's own tSYNC is 406..438 ns) and run it FAST - ST's words at 64 MHz up to 478 kHz for 400. Also: the three speeds bracketed between that ceiling and the standard's worst-case edges, clock stretching linear and free of the data, NOSTRETCH's underrun sending 0xFF, RELOAD past 255 in one tenure, the PEC pinned against a bitwise CRC-8, WHOSE hold each of the three SMBus time-outs polices (with a control on each side: its own, never a peer's - the samc21 answers the same way), 10-bit addressing with ADDCODE proven to be the HEADER, OA2's mask as a real range, and `I2cBus` with its per-bus timeout answering a wedged tenure at exactly 20 ms with SDA still low; every SCL rate a letter sets judged against the rate asked - never above it by more than 2 %, within a quarter below - and the 2 MHz core's rung, which the stopwatch cannot time, carried by the 16 MHz rung's identical TIMINGR. Against the desk partner's `twi_peer` on the same bus: every tenure shape, the vocabulary, the rate asked at 950 and 859 thousandths of 100 and 400 kHz, the WAKE FROM STOP by the other chip's address (I2C2 in Stop 1, the RTC reading the sleep at the peer's lead-in), and two held STARTs released by one STOP that SERIALIZE - while a request at a NEW RATE cycles PE, which clears BUSY and sends the START into the other controller's tenure; not covered: the target half of the PEC, the SMBus alert, a live arbitration race (no START here is committed early enough to meet the other's), the rate change on a busy bus (posed) |
-| [spi.md](spi.md) | SPI / I2S (STM32G0): RM0444 ch. 35 whole, both roles, in ONE image on ONE board over the Nucleo's own self-link (SPI1 host to SPI2 client, four wires) - and `SpiHost`'s Request is the other two targets' VERBATIM, so `util/spi_bus.hpp` and `util/bus_master.hpp` run here exactly as written. THE SILICON ENFORCES NONE OF 35.5.7's CONFIGURATION RULE: a raw write with SPE set lands on all seventeen CR1/CR2 fields, the four whose register description says "only when the SPI is disabled" included, so the driver's refusals are the only protection there is - and 35.9.2's "Not used" data sizes really are FORCED to 8-bit rather than ignored. The disable is 35.5.9's PROCEDURE and the only way this driver turns the peripheral off, which makes ES0548 2.12.1 (REPRODUCED: a raw SPE clear with three frames in the FIFO leaves BSY standing) a workaround by construction. Measured: all eight BR codes byte-exact to PCLK/2 = 32 MHz when the host PACES the bus, and a burst loop whose frame period FLOORS at ~320 CPU cycles - this core cannot make a continuous SPI clock out of software, so the ceiling is found only with both ends on DMA (monotone, byte-exact to PCLK/4 = 16 MHz); a polled burst loop ERASES THE EVIDENCE OF ITS OWN OVERRUN, its poll being 35.5.11's clear sequence; A PAD THAT IS NOT AN ALTERNATE FUNCTION READS LOW AT THE NSS INPUT, so clearing SSM on a master whose NSS is a GPIO raises MODF at once; the host's pump entry and polled transaction in SRAM under `InRam` (an eighth off the entry, `dma_min_frames` 9 against 8, the pump's cost following the tag); hardware NSS output falls 77 cycles after the SPE store and frames the PERIPHERAL'S LIFETIME while NSSP frames a DATA FRAME (eight pulses for eight frames, counted on EXTI 12) - between them the reason the engine's chip select is a GPIO; the CRC bit-exact against a bitwise reference in both lengths and both directions, with the checksum frame the one NEITHER SIDE WRITES; the LDMA odd-count rule (six frames with the bit clear, five with it set); the data phase on half-word DMA engines carrying a frame of EITHER width with its own beat and ONE interrupt a transaction, every frame after the first at the wire's own time (`bench_stm32` letter d, MISO floating); THE HOST ABOVE THE WIRE (letter e): a polled request read through the arbiter's loan and copied nowhere, the write shape the chapter's transmit-only loop (frames in on TXE, two byte frames an access, the unread echoes' overrun cleared at the tail) wire-bound from PCLK/4 where the frame-by-frame loop ran at 237 cycles a frame, the receive shape packed above six frames, the pump draining what RXNE holds and refilling the TXFIFO's three - one interrupt per three frames instead of one per frame - and a 3-byte command at 399 cycles above the wire instead of 998, four to five times the vendor's own polled loop at PCLK/4; two facts of the silicon found on the way: RXNE must be armed AFTER the frames that prime the FIFO (armed before, the handler ran between the second write and the count's store at PCLK/4 and overran the FIFO), and FRLVL cannot count three byte frames (01, 10, 11 read one, two-or-three, four); and I2S1 master to I2S2 slave on three of the same wires, four standards, three data lengths, CHSIDE, the prescaler arithmetic timed and UDR on a slave transmitter - whose flag a poll loop clears by asking; and THE RATE ON THE WIRE timed with no wire, a frame inside a block against its SCK periods at every BR code on the engines and on the polled transmit-only loop, which holds PCLK/2 continuous; and `SpiClient`'s polled RUNS (`answer`, `exchange`, `receive`): the TXFIFO filled before the select, two 8-bit frames to an access on TXE and back under FRXTH's two thresholds, the NSS pad the window - exact to the F446 host's 22.5 MHz, as is the `spi_peer`'s DMA serve (its 16-bit answers to that host's back-to-back streams judged to 11.25 MHz, the answer line's budget), measured from that board's suite against this one's peer; and the pads' slew classes as CONFIGURATION (a `Config` field per driven pad, written once by `init()`), each a correctness parameter on jumper wires; and through spi_link's EXTENDED EXCHANGE against the F446 both ways - 16-bit frames on the polled loop, the pump and the half-word engines at the wire's own time, the transmit-only shapes witnessed by a client that only listens, `receive()` and odd counts, both CRC units against each other (the DMA's own CRC management on the client) with a corrupted CRC frame caught, and THE CRCNEXT WINDOW: a store some twenty core cycles before the last data frame's RXNE corrupts both calculators, so the host writes its last two frames as one burst and CRCNEXT after them; and the SIMPLEX LINES against the F446 - a client with no select pad deaf with SSI high and exact with it low, the host's single line out and its receive-only clock, the client's single line out on MISO and its receive-only run - and `prime()` staged by its absence over every pair of modes: a CPOL flip inside an open window slips the F446's client one bit exactly where the new mode has CPHA = 0 |
-| [fdcan.md](fdcan.md) | FDCAN (STM32G0): the Bosch M_CAN of RM0444 ch. 36, whole - and the FIRST chapter of this stratum a part can be MISSING ENTIRELY, so `Fdcan<n>` does not exist on a G071 or a G031 while the protocol arithmetic still compiles there. ONE enable, ONE reset and ONE clock divider serve BOTH modules (a reset through FDCAN2 takes FDCAN1's registers down with it, measured), the kernel clock is chosen in RCC_CCIPR2 rather than the CCIPR every other multiplexer of this stratum uses, and the message RAM is a fixed 212-word map whose content at reset is UNDEFINED. Measured on a board with NO TRANSCEIVER, NO WIRE AND NO SECOND NODE, because the chapter supplies its own instruments: internal loop-back needs not one pad, external loop-back puts the frame on the pin, TEST.TX = 01 is a bit-rate meter a DMAMUX request generator counts with no CPU, the RX pad's own pull IS the bus, and the internal timestamp counter counts bit times whether or not anything is on the wire. THE 0xCC PARAGRAPH DOES NOT DESCRIBE THIS PART: 64 distinct bytes make the round trip byte-exact where 36.3.4 promises the tail padded and discarded. Also found: the registers ANSWER through a closed APB clock gate with their true reset values while a WRITE through it lands nowhere; IR.TC is gated by TXBTIE and 36.4.15 does not say so; 36.3.6's own safe read of an overwriting FIFO costs one more message than the overwrite did; the bus-off recovery measures 1421 bit times, which is 36.4.13's note (129 x 11) and not figure 398's (128 x 11); a restricted node sends NOTHING, settling 36.3.4 against 36.4.6; a stuck-dominant line is a wait and not an error; and TEST.TX = 01 is a STROBE and not a level. Errata: 2.13.1 staged in both arms and not reproduced, 2.13.2 unreachable by construction with TXBC as the evidence. Not covered: everything that needs a peer - arbitration, a real acknowledge, a foreign frame - plus the RAM watchdog's fault, MRAF, ARA, the protocol exception and the PLLQ/HSE kernel clocks |
-| [vendor/README.md](vendor/README.md) | RM0444, DS13560, ES0548 (with ES0418 and ES0487 for the STM32G071RB and the STM32G031K8) by revision, the vendored cmsis-device-g0 headers and SVD, the bench chip's IDCODE, the errata pass |
+## The boards
+
+Three Nucleo boards, one per part; the part selects the board in the
+build (below), and each board has a page of its own under
+[../boards/](../boards/README.md) with its connectors and its probe.
+
+| Board | Part | Memory | LED | Console | Die |
+|---|---|---|---|---|---|
+| [Nucleo-G0B1RE](../boards/nucleo-g0b1re.md) (MB1360), the bench board | STM32G0B1RE, LQFP64 | 512 KB dual-bank flash, 144 KB SRAM | LD4 on PA5 | USART2 PA2 (TX) / PA3 (RX), AF1 | DEV_ID 0x467, REV_ID 0x1001: silicon revision Z |
+| [Nucleo-G071RB](../boards/nucleo-g071rb.md) | STM32G071RB, LQFP64 | 128 KB single-bank flash, 36 KB SRAM | LD4 on PA5 | the same | DEV_ID 0x460, REV_ID 0x2000: ES0418's revision B |
+| [Nucleo-G031K8](../boards/nucleo-g031k8.md) (a Nucleo-32) | STM32G031K8, LQFP32 | 64 KB single-bank flash, 8 KB SRAM | LD3 on PC6 | the same | DEV_ID 0x466, REV_ID 0x1003 |
+
+Every bench suite prints that DEV_ID and REV_ID pair at boot, through
+`DeviceIdcode::read()` ([platform.md](platform.md)), because a
+measurement that differs between two boards is only a finding once the
+die it was taken on is on the record. The maintained example `blink`
+builds for all three and drives the LED the table names on each.
+
+The bench board runs at 3.3 V. The following facts of it were each
+verified at the bench by an experiment of their own, not taken from the
+user manual: LD4 on PA5 (driven over SWD), the ST-LINK virtual COM port
+on USART2 PA2 (TX) / PA3 (RX) at AF1 (the console answers through it),
+the CPU on HSI16 through the PLL at 64 MHz, and the LSE 32.768 kHz
+crystal fitted and running (X2 is populated on this board: LSERDY rises
+and the period measures 32703 Hz against the core, which is the core's
+own 1 % trim and not the crystal's, [rtc.md](rtc.md)). Not yet verified:
+the user button B1 on PC13, and the absence of an HSE crystal (X3 is not
+fitted by default, and the ST-LINK's 8 MHz MCO reaches HSE only through
+solder bridges; the HSE root is unbuilt anyway).
+
+The Nucleo-G071RB has the same board layout as the G0B1RE's and is tied
+to it by the six-wire bus link the two bus suites' header comments
+describe. The Nucleo-G031K8 carries the same six bus wires to the
+Nucleo-G0B1RE. What each of the two smaller parts has and has not got,
+and what the suites measure on them, is in "The Nucleo-G071RB" and "The
+Nucleo-G031K8" below.
 
 ## Toolchain
 
-Self-built **arm-none-eabi-gcc 16.2** at `/sw/arm-none-eabi` - the
-same compiler, flags and linker discipline as the samc21 project
-(`stm32g0/cmake/toolchain-arm.cmake` is that file verbatim:
-`CMAKE_SYSTEM_NAME Generic`, `STATIC_LIBRARY` try-compile,
-the link that takes brio's runtime and libgcc and no C library,
-so an accidental `printf` or `malloc` fails it -
-[../design/runtime.md](../design/runtime.md)). What is ARMv6-M and not
-ST lives in the `cortexm/` core stratum, so `nvic.hpp`, `ticker.hpp` and
-`delay.hpp` here are the device header plus that core file plus this
-family's own facts.
+The compiler is a self-built arm-none-eabi-gcc 16.2 at
+`/sw/arm-none-eabi`, the same compiler, flags and linker discipline as
+the samc21 project: `stm32g0/cmake/toolchain-arm.cmake` is that
+project's file verbatim (`CMAKE_SYSTEM_NAME Generic`, a `STATIC_LIBRARY`
+try-compile, and a link that takes brio's runtime and libgcc and no C
+library, so an accidental `printf` or `malloc` fails the link,
+[../design/runtime.md](../design/runtime.md)). A toolchain installed
+elsewhere is named at configure time with the cache variable
+`ARM_TOOLCHAIN_DIR`, the root that contains `bin/`
+([the command-line page](../learn/command-line.md) shows the form).
 
-The device headers are vendored: `third_party/cmsis-device-g0/`
-(ST's cmsis-device-g0 v1.4.5, every G0 part) and the shared
-`third_party/cmsis-core/`. The device is selected ST's way, by a plain
-`-DSTM32G0B1xx` define that the umbrella `stm32g0xx.h` dispatches on -
-no device-specs machinery, so clangd needs no macro-delta feed.
+The device headers are vendored: `third_party/cmsis-device-g0/` holds
+ST's cmsis-device-g0 v1.4.5 (every G0 part) and `third_party/cmsis-core/`
+the CMSIS-Core headers it includes. The device is selected ST's way, by
+a plain `-DSTM32G0B1xx` define that the umbrella header `stm32g0xx.h`
+dispatches on; there is no device-specs machinery, so clangd needs no
+macro feed of its own. What is ARMv6-M and not ST lives in the
+`cortexm/` core stratum: `nvic.hpp`, `ticker.hpp` and `delay.hpp` here
+are the device header plus that core file plus this family's own facts.
 
-## Board and build
-
-The bench board is an **ST Nucleo-G0B1RE** (MB1360): STM32G0B1RE
-(LQFP64, 512 KB dual-bank flash, 144 KB SRAM), silicon revision Z,
-running at **3.3 V**. Verified at the bench, each by its own experiment
-and not by the user manual: LD4 on **PA5** (driven over SWD), the
-ST-LINK virtual COM port on **USART2 PA2 (TX) / PA3 (RX), AF1** (the
-console answers through it), the CPU on **HSI16 through the PLL at
-64 MHz**, and the **LSE 32.768 kHz crystal fitted and running** (X2 is
-populated on this board: LSERDY rises and the period measures 32703 Hz
-against the core, which is the core's own 1 % trim and not the
-crystal's - [rtc.md](rtc.md)). NOT yet verified: the user button B1 on
-PC13, and the absence of an HSE crystal (X3 is not fitted by default
-and the ST-LINK's 8 MHz MCO reaches HSE only through solder bridges -
-the HSE root is unbuilt anyway).
+## Build
 
 `stm32g0/` is its own CMake project, a sibling and peer of `avrxt/`,
-`samc21/` and `test/`. Apps are auto-discovered from
-`stm32g0/src/apps/*.cpp` - plus `experiments/*/stm32g0/*.cpp` - by
-their `// build:` header comment, the other two projects' grammar with
-this family's board names (`boards = g0b1re`, the default; an app that
-also runs on the other two Nucleos lists `g071rb` and `g031k8`) and
-its groups of letters where the G031K8 cannot hold it whole (`groups =
-abcdefghij,klmnopqvwy`: one image per group on that part, `<app>-1`,
-`<app>-2`, ...; design/overview.md, "A suite's image fits the family's
-smallest chip"). One
-configure targets one part (`STM32G0_MCU`, full part number: it decides
-the device define `STM32G0B1xx`, the linker script `ld/<part>.ld`, the
-crt `src/glue/startup_<header>.cpp` and the board name, the part's last
-six characters - one Nucleo per part on this desk, so the part IS the
-board); three parts have presets - the G0B1RE, and the two other Nucleos
-below. Every other part of the family is compile-checked by
-`brio check stm32g0`, which sweeps every positive TU in
-`test/family_stm32g0/` across ALL TWELVE device headers the CMSIS pack
-ships and requires every `neg/` TU to fail for the variants its
-`// mcu:` line names - see "Family coverage" below.
+`samc21/` and `test/`; the repository root is not a CMake project, so
+every CMake command runs from `stm32g0/` (or in a subshell that enters
+it, as the examples below do):
+
+```bash
+(cd stm32g0 && cmake --preset stm32g0b1re-release)                      # configure (once, or after adding an app)
+(cd stm32g0 && cmake --build --preset stm32g0b1re-release --target <app>)
+(cd stm32g0 && cmake --build --preset stm32g0b1re-release --target <app>-upload)
+(cd stm32g0 && cmake --preset stm32g071rb-release)                      # the Nucleo-G071RB; stm32g031k8-release the Nucleo-32
+brio check stm32g0 [name]                                          # family smoke, no hardware
+```
+
+One configure targets one part. The cache variable `STM32G0_MCU` holds
+the full part number (`stm32g0b1re`), and from it the project derives
+the device define (`STM32G0B1xx`), the linker script `ld/<part>.ld`, the
+start-up code `src/glue/startup_<header>.cpp` and the board name, the
+part's last six characters (`g0b1re`): one Nucleo carries one part on
+this desk, so the part is the board. Six presets name the three parts
+twice each: `stm32g0b1re-release` and `stm32g0b1re-debug`, and the
+`stm32g071rb-*` and `stm32g031k8-*` pairs (CMake Tools shows them by
+their display names, `STM32G0B1RE (release, -Os)` and
+`STM32G0B1RE (debug, -Og)`). The commands above take any of the six in
+place of `stm32g0b1re-release`: for the Nucleo-G031K8, `cmake --preset
+stm32g031k8-release`, then `cmake --build --preset stm32g031k8-release
+--target blink` and `--target blink-upload`. A release build is `-Os`,
+the one to flash for a measurement; a debug build is `-Og -g3
+-fno-inline`, the one a debugger wants.
+
+Applications are discovered at every configure from
+`stm32g0/src/apps/*.cpp`, plus `experiments/*/stm32g0/*.cpp`, by the
+`// build:` lines in each file's header comment, the same grammar as the
+other projects with this family's board names:
+
+- `// build: boards = g0b1re,g071rb,g031k8` lists the boards an app
+  builds for; `g0b1re` is the default when the line is absent. A
+  configure creates a target only for the apps that list its board.
+- `// build: groups = abcdefghij,klmnopqvwy` splits a test suite into
+  one image per group of letters on a board whose part cannot hold it
+  whole (the G031K8 here): `<app>-1`, `<app>-2` and so on
+  ([design/overview.md](../design/overview.md), "A suite's image fits
+  the family's smallest chip").
+
+Build outputs land in `build-cmake/<preset>/` at the repository root
+(`build-cmake/stm32g0b1re-release`, `build-cmake/stm32g031k8-debug` and
+so on): `<app>.elf`, `.bin` and `.hex`, `firmware-<app>.map` and
+`<app>.lst`, the source-interleaved disassembly. A configure also
+writes this project's app roster, `build-cmake/apps_stm32g0.json`, which
+`bin/brio` reads.
+
+`bin/brio` is the repository's one command for boards and builds; a
+verb is the action word after `brio`. `brio flash <board> <app>`
+configures, builds and flashes in one step; `<board>` is a position in
+the bench manifest (`cli/bench/bench_boards.py` holds an example entry
+per board type, the real manifest is each desk's own,
+[docs/boards/README.md](../boards/README.md)), and the entry's board
+type, `g0b1re`, `g071rb` or `g031k8`, is what tells the tool to build in
+this project with that part's preset and to flash through OpenOCD's
+ST-LINK interface. `brio run` speaks the bench
+suites' single-letter grammar (one key per command, no line terminator);
+the line-oriented `console` app is driven with any serial monitor, or
+pyserial, at 115200 8N1.
+
+All three boards have their presets, linker scripts, start-up files and
+`bin/brio` board types, and `blink`, `console` and `probe` build for all
+three.
+
+## Upload (OpenOCD, ST-LINK)
+
+Flashing goes through OpenOCD driving the Nucleo's on-board
+ST-LINK/V2.1 ([../probes/st-link.md](../probes/st-link.md)):
+`interface/stlink.cfg` plus `target/stm32g0x.cfg` (the stm32l4x flash
+driver underneath), `program <app>.elf verify`, then `reset run`, then a
+write of DHCSR that clears C_DEBUGEN. That last write matters: a core
+left with halting debug enabled halts on a BKPT instruction instead of
+faulting, and every `panic()` ends in one, so without it a panic would
+stop the board in silence. OpenOCD is the 0.12.0 release, built from its
+tarball into `/sw/openocd-0.12.0` and reached as `/sw/openocd`
+([the SAM page](../samc21/README.md) describes the build); another path
+is named with the cache variable `STM32G0_OPENOCD`. It drives the
+ST-LINK (firmware V2J46M31) without incident. The probe carries a real
+USB serial number, so `adapter serial` names one probe among several
+(`-DSTM32G0_PROBE_SERIAL=<serial>` at configure time), and the same
+serial names the console under `/dev/serial/by-id`. The probe serves one
+client at a time: close the debug session before flashing.
+
+Two caveats of this probe and this family are worth knowing before
+reading a register through the debugger.
+
+**Memory reads through the ST-LINK while the core sleeps in WFI are
+unreliable.** A running console (WFI between events) answered
+`0xffffffb7` for FLASH_ACR and zeros for RCC_CR, values those registers
+cannot hold, while the same reads after `halt` were exact. Halt first,
+read, then resume; the CMSIS-DAP probe on the SAM C21 board does not do
+this. (The transport is OpenOCD's HLA, the high-level adapter interface
+the ST-LINK speaks.)
+
+**A debugger leaves DBG_STOP set, and it reads as a silicon fact until
+it is found.** `target/stm32g0x.cfg`'s examine-end hook writes
+`DBGMCU_CR.DBG_STOP | DBG_STANDBY` ("enable debug during low power
+modes"), and OpenOCD re-examines the target after every reset it issues,
+so the bits are back on the reset a `program` ends with, whatever was
+cleared before it (measured: cleared to 0 while halted, read 6 again
+right after `reset run`). The register survives every reset but a
+power-on. With DBG_STOP set the debug logic keeps HCLK, and SysTick with
+it, running inside a Stop, which cuts a Stop entered with the kernel
+tick armed from its full 250 ms to one tick (a millisecond on the
+SysTick timebase). `bin/brio` therefore ends
+every G0 flash with `reset halt`, a clear of DBGMCU_CR through its clock
+gate (the gate put back to its reset value) and a `resume`, so a board
+leaves the bench as a power-on would leave it. A cortex-debug session
+sets the bits again, and `Pwr::debug_in_stop()` ([pwr.md](pwr.md)) is
+how firmware tells. Both states are measured in `test_stm32_sleep`
+letter c. For a program that never uses the Stop modes, `blink` among
+them, the bit is of no consequence.
+
+## Debugging (cortex-debug + OpenOCD)
+
+`.vscode/launch.json` has one launch configuration per part: "Debug
+STM32G0B1RE (OpenOCD, Nucleo-G0B1RE)" and its G071RB and G031K8
+siblings, each the SAM entry's shape with the two ST config files above
+and the part's own SVD from `stm32g0/svd/` for the Peripheral Viewer. No
+probe is named, so the one ST-LINK attached is taken; with several,
+`adapter serial` goes through `openOCDPreConfigLaunchCommands`. Three
+choices in CMake Tools must agree before a session starts: the Active
+Folder `stm32g0/`, the configure preset the part's `-debug` one, and the
+launch target the app to debug. The sequence is verified on the
+Nucleo-G071RB, from VS Code and from the command line with the same
+OpenOCD and gdb: load, reset-halt, a breakpoint at `main` hit, source
+lines stepped; the step-by-step procedure, with each step's
+verification status, is [docs/learn/vscode.md](../learn/vscode.md). A
+session leaves DBGMCU_CR.DBG_STOP set (the target script's doing, above)
+until a power-on or a `brio flash`, which clears it; a Stop measured
+right after a debug session does not stop the clocks.
+
+## Editor (clangd)
+
+`brio/stm32g0/.clangd` and `stm32g0/.clangd` route the stratum's headers
+and the project's sources to the compile database of the release preset,
+`build-cmake/stm32g0b1re-release`, which one configure of that preset
+creates; `test/family_stm32g0/.clangd` lets the family check's TUs, which
+no CMake project compiles, borrow flags from the same database. The
+repository root's `.clangd` rules apply unchanged.
+
+## Serial console
+
+The ST-LINK's virtual COM port enumerates with the probe's own USB
+serial number, so the console is addressed by `/dev/serial/by-id` and
+never moves with the socket (the CH340-based boards of other targets
+need `/dev/serial/by-path` instead). Console apps run at 115200 8N1.
+Measured: BRR 556 at 64 MHz gives 115107 baud (the arithmetic to the
+hertz), 300 lines of 50 bytes exchanged with zero errors of any kind, and
+the kernel tick +0.24 % against the PC's clock (inside HSI16's 1 %
+calibration).
 
 ## Family coverage
 
 The stratum is written for the whole STM32G0 family, both lines:
 
-- the **x1 line** - G031/G041, G051/G061, G071/G081, G0B1/G0C1 - which
-  is what the bench chip belongs to (the G0B1 is its superset), and
-- the **x0 value line** - G030, G050, G070, G0B0 - each of whose
-  headers is a strict subset of its x1 twin: the same IP under the same
-  register names, minus a list of peripherals (no LPUART, no LPTIM, no
-  DAC, no comparator, no VREFBUF, no TIM2, no PVD/PVM, no programmable
-  BOR, no PCROP or securable memory, no CEC/CRS/UCPD/FDCAN).
+- the x1 line: G031/G041, G051/G061, G071/G081, G0B1/G0C1, which is
+  what the bench chip belongs to (the G0B1 is its superset), and
+- the x0 value line: G030, G050, G070, G0B0, each of whose headers is a
+  strict subset of its x1 twin: the same IP under the same register
+  names, minus a list of peripherals (no LPUART, no LPTIM, no DAC, no
+  comparator, no VREFBUF, no TIM2, no PVD/PVM, no programmable BOR, no
+  PCROP or securable memory, no CEC/CRS/UCPD/FDCAN).
 
-What differs is read off the DEVICE HEADER and never off a device
-name: `brio/stm32g0/device_tables.hpp` (the reserve) probes the
-header's own base-address and bit-mask macros and exports what it
-finds as constexpr data. In particular THE VECTORS ARE DERIVED FROM
-PRESENCE: an interrupt line's enumerator NAME lists what shares it
+What differs between parts is read off the device header and never off
+a device name. The header is the authority, and
+`brio/stm32g0/device_tables.hpp` is the table of what each part has: it
+probes the header's own base-address and bit-mask macros and exports
+what it finds as constexpr data. The stratum's documents call that
+header "the reserve", a name worth knowing because every peripheral
+document uses it: the reserve is where a per-part fact lives when no
+register of the peripheral states it.
+
+In particular, the interrupt vectors are derived from presence. An
+interrupt line's enumerator name in the header lists what shares it
 (`USART2_LPUART2_IRQn`, `TIM6_DAC_LPTIM1_IRQn`, `ADC1_COMP_IRQn`,
-`DMA1_Ch4_7_DMA2_Ch1_5_DMAMUX1_OVR_IRQn`...), a header declares the
-shared spelling exactly when it declares the sharer, and IRQn values
-are enumerators the preprocessor cannot probe - so each vector verb
-asks for the sharer's base macro and names the enumerator that
-follows. A header whose naming did not follow the rule would fail to
-compile, never bind a wrong line in silence.
+`DMA1_Ch4_7_DMA2_Ch1_5_DMAMUX1_OVR_IRQn`, and so on), a header declares
+the shared spelling exactly when it declares the sharer, and IRQn values
+are enumerators the preprocessor cannot probe. So each vector verb asks
+for the sharer's base macro and names the enumerator that follows. A
+header whose naming did not follow the rule would fail to compile, never
+bind a wrong line in silence.
 
-An absence is spelled one of two ways, and the docs say which:
+An absence is spelled one of two ways, and each peripheral document says
+which applies to it:
 
-- a peripheral the part has not got is a driver that DOES NOT EXIST
-  there - `Dac`, `Comp<n>`, `Vref`, `Lptim<n>` and its sleep site,
-  `Lpuart<n>`, `Fdcan<n>` compile their register-facing half only where
-  the header declares the block, while their vocabulary (enums, config
-  structs, validity and arithmetic) is every part's; spelling the
-  driver on such a part is a compile error naming the reason, and
-  `Tim<2>` on a value-line part is the "no such timer" refusal;
-- a REGISTER or BIT a present block has not got is a verb that REFUSES
+- a peripheral the part has not got is a driver that does not exist
+  there: `Dac`, `Comp<n>`, `Vref`, `Lptim<n>` and its sleep site,
+  `Lpuart<n>` and `Fdcan<n>` compile their register-facing half only
+  where the header declares the block, while their vocabulary (enums,
+  config structs, validity checks and arithmetic) is every part's;
+  spelling the driver on such a part is a compile error naming the
+  reason, and `Tim<2>` on a value-line part is the "no such timer"
+  refusal;
+- a register or bit a present block has not got is a verb that refuses
   at run time and a constexpr flag that says so at compile time:
   `Pwr::has_pvd` / `has_sram_retention` / `has_sampled_supply_monitor` /
   `has_dac_supply_monitor`, `Flash::has_debug_gate`,
   `FlashOptions::has_programmable_bor` / `has_shutdown_reset_option` /
-  `has_nrst_mode`; the reserve's `flash_pcrop_capable` and
+  `has_nrst_mode`, and the reserve's `flash_pcrop_capable` and
   `flash_securable_capable`.
 
-The sweep proves it on every header the pack ships (22 positive TUs x
-12 headers, and every negative refused on each variant it names); the
-bench proves two of them.
+`brio check stm32g0` proves it on every header the CMSIS pack ships,
+without hardware: every positive translation unit in
+`test/family_stm32g0/` compiles for all twelve device headers (the x1
+line and the x0 line), and every `neg/` TU, a program that must be
+refused, fails to compile for each variant its `// mcu:` line names.
+The bench proves two of the twelve beyond the G0B1 (`brio check stm32g0
+[name]` filters by name; the check ends with the link guard of every app
+on every release preset). For the nine headers no board here carries,
+the sweep is the only check there is.
 
 ## The Nucleo-G071RB
 
-The **Nucleo-G071RB** (STM32G071RB, LQFP64, 128 KB single-bank flash,
-36 KB SRAM, the same board layout as the G0B1RE's - LD4 on PA5, the VCP
-on USART2 PA2/PA3) is tied to the G0B1RE by the six-wire bus link the
-two bus suites' header comments describe. Its die reports
-**DEV_ID 0x460, REV_ID 0x2000** - ES0418 silicon revision B - and every
-bench suite prints that pair at boot through `DeviceIdcode::read()`
-([platform.md](platform.md)), because a measurement that differs between
-two boards is only a finding once the die it was taken on is on the
-record.
+The STM32G071RB is the bench board's smaller sibling, an LQFP64 with the
+same board layout. Fourteen of the seventeen test suites build for it
+(the three that do not, `test_stm32_nvm`, `test_stm32_journal` and
+`test_stm32_fdcan`, need a second flash bank or an FDCAN the part has
+not got), and the same fourteen build for the Nucleo-G031K8 below. An
+app that builds for more than one board says so in its
+`// build: boards = g0b1re,g071rb,g031k8` line. What a suite cannot do
+on a board it skips by name, printing the reserve's own fact and
+claiming no verdict, so a smaller count is a shorter list of claims and
+never a weaker one.
 
-**FOURTEEN OF THE SEVENTEEN SUITES RUN ON IT**, and the same fourteen
-on the Nucleo-G031K8 below. An app that builds for more than one board says so
-in its `// build: boards = g0b1re,g071rb,g031k8` line; what a suite
-cannot do on a board it SKIPS BY NAME, printing the reserve's own fact
-and claiming no verdict, so a smaller count is a shorter list of claims
-and never a weaker one.
+In the tables below a suite's figure is its count of verdicts (the
+"pass" lines its console reports); a letter is one command key of a
+suite's console, the group of verdicts it runs, and `z` is the all-key
+that runs every letter in turn; a figure in parentheses is a letter
+outside `z`. A self-link is the board's own wiring of one instance of a
+peripheral to another of the same board (SPI1 to SPI2, I2C1 to I2C2),
+and a peer is a second board on the other end of a link.
 
 | Suite | G0B1RE | G071RB | What skips there, and why |
 |---|---|---|---|
 | `test_stm32_crc` | 33 | **27** | nothing - the one driver that needs no fact from the reserve |
 | `test_stm32_platform` | 71 (+ `i` 26, `j` 20) | **53** (+ `i` 26) | nothing; letters `w` and `k` (the idle contract) are measured on the G0B1RE alone ([platform.md](platform.md)) |
-| `test_stm32_sleep` | 50 | **50** | nothing in `z`; letter `u` measures a DIFFERENT Shutdown wake ([pwr.md](pwr.md)) |
+| `test_stm32_sleep` | 50 | **50** | nothing in `z`; letter `u` measures a different Shutdown wake ([pwr.md](pwr.md)) |
 | `test_stm32_exti` | 95 | **89** | nothing; IMR1's reset value differs ([exti.md](exti.md)) |
 | `test_stm32_rtc` | 126 | **125** | nothing in `z`; two tamper inputs instead of three, and arming one does not take its pad ([rtc.md](rtc.md)) |
 | `test_stm32_lptim` | 85 | **82** | nothing |
@@ -184,50 +351,49 @@ and never a weaker one.
 | `test_stm32_journal` | 52 | - | the same |
 | `test_stm32_fdcan` | 96 | - | no FDCAN on this part ([fdcan.md](fdcan.md)) |
 
-The I2C suite's figures on this part were measured with the OTHER
-board as its peer, roles exchanged, in one set (the peer letters have
-since moved to their own all-key, `w`); the SPI and I2C suites'
-G0B1RE figures are against the STM32F446RE it is paired with on the
-desk.
+The I2C suite's figures on this part were measured with the other board
+as its peer, roles exchanged, in one set (the peer letters have since
+moved to their own all-key, `w`); the SPI and I2C suites' G0B1RE figures
+are against the STM32F446RE it is paired with on the desk.
 
-WHAT THE PART HAS NOT GOT, all of it read off the header by the reserve:
-TIM4, USART5, USART6, LPUART2, I2C3, SPI3 (and with it SPI2's I2S), DMA2
-(DMA1 keeps seven channels and the DMAMUX seven), COMP3, FDCAN, USB, CRS,
-GPIOE, the second flash bank, the EXTI's second-group TRIGGER registers,
-WKUP3, TAMP_IN3, PWR's PUCRE/PDCRE, and `RCC_CCIPR_I2C2SEL` - which is
-what takes I2C2's independent clock, its SMBus and its wake with it. Its
-USART3 is BASIC where the G0B1's is FULL, so it has one wake line fewer;
-its MCOSEL and MCOPRE are three bits rather than four. The ETRSEL list
-is a per-part fact of its own in the reserve, `tim_etrsel_has_mco()`,
-because RM0444 22.4.25 gives codes 0100, 0101 and 0110 to the G0B1/G0C1
-sales types alone and no TIM register says so ([tim.md](tim.md)).
-
-All three boards have their presets (`stm32g0b1re-*`, `stm32g071rb-*`,
-`stm32g031k8-*`), linker scripts, crts and `bin/brio` board types,
-and `blink`, `console` and `probe` build for all three.
+What the part has not got, all of it read off the header by the
+reserve: TIM4, USART5, USART6, LPUART2, I2C3, SPI3 (and with it SPI2's
+I2S), DMA2 (DMA1 keeps seven channels and the DMAMUX seven), COMP3,
+FDCAN, USB, CRS, GPIOE, the second flash bank, the EXTI's second-group
+trigger registers, WKUP3, TAMP_IN3, PWR's PUCRE/PDCRE, and
+`RCC_CCIPR_I2C2SEL`, which is what takes I2C2's independent clock, its
+SMBus and its wake with it. Its USART3 is a basic instance where the
+G0B1's is a full one (the two classes of USART, [usart.md](usart.md)), so
+it has one wake line fewer; its MCOSEL and MCOPRE are three bits rather
+than four. The ETRSEL list is a per-part fact of its own in the reserve,
+`tim_etrsel_has_mco()`, because RM0444 22.4.25 gives codes 0100, 0101
+and 0110 to the G0B1/G0C1 sales types alone and no TIM register says so
+([tim.md](tim.md)).
 
 ## The Nucleo-G031K8
 
-The **Nucleo-G031K8** (STM32G031K8, a Nucleo-32: **LQFP32, 64 KB
-single-bank flash, 8 KB SRAM**, LD3 on PC6, the VCP on USART2 PA2/PA3)
-carries the six bus wires to the Nucleo-G0B1RE. Its die reports
-**DEV_ID 0x466, REV_ID 0x1003**.
-Its **LSE crystal runs** (LSERDY in about 900 ms at the lowest drive,
-32719..32753 Hz against the core) with the oscillator bridges at
-UM2591's default, so the RTC, the tickless timebase, the timed sleep
-sites and every wall run on the crystal exactly as on the Nucleo-64s
-and the six suites those touch are configured identically for all three
-boards; its **LSI** weighs 31403..31496 Hz on a TIM16 capture and 31400
-by the watchdog, the slowest of the three dies. Two board facts shape
-suites on it: **PA0 and PA4 lean HIGH when left floating** (the
-Nucleo-64s' free pads drift down), which costs the tamper letter its
-TAMPPUDIS contrast; and **its debug port can go silent** - a state of
-the board's ST-LINK half that only unplugging the board clears - in
-which case the ST-LINK's own mass-storage flasher is the way in
-(`bin/brio`'s `stlink_msd` programmer kind) and nothing can be
-halted or read over SWD until the replug ([../probes/st-link.md](../probes/st-link.md)).
+The STM32G031K8 is the smallest part on the desk, and its 64 KB of flash
+and 8 KB of SRAM are part of the design: every suite's image on that
+board fits, with the cuts named in its own suite. Its LSE crystal runs
+(LSERDY in about 900 ms at the lowest drive, 32719..32753 Hz against the
+core) with the oscillator bridges at UM2591's default, so the RTC, the
+tickless timebase, the timed sleep sites and every wall run on the
+crystal exactly as on the Nucleo-64s and the six suites those touch are
+configured identically for all three boards; its LSI weighs
+31403..31496 Hz on a TIM16 capture and 31400 by the watchdog, the
+slowest of the three dies. Two board facts shape suites on it: PA0 and
+PA4 lean high when left floating (the Nucleo-64s' free pads drift down),
+which costs the tamper letter its TAMPPUDIS contrast; and its debug port
+can go silent (OpenOCD then reports "no device connected" against a
+live board), a state of the board's ST-LINK half that only unplugging
+the board clears, in which case the ST-LINK's own mass-storage flasher
+is the way in (`bin/brio`'s `stlink_msd` programmer kind, a `.bin`
+dropped on the drive the probe presents) and nothing can be halted or
+read over SWD until the replug
+([../probes/st-link.md](../probes/st-link.md)).
 
-**FOURTEEN OF THE SEVENTEEN SUITES RUN ON IT.**
+Fourteen of the seventeen suites build for it, the same fourteen as for
+the G071RB:
 
 | Suite | G0B1RE | G071RB | G031K8 | What skips on the G031K8, and why |
 |---|---|---|---|---|
@@ -242,143 +408,89 @@ halted or read over SWD until the replug ([../probes/st-link.md](../probes/st-li
 | `test_stm32_tim` | 128 | 114 | **108** | TIM4, TIM6, TIM7 and TIM15 - four instances the part has not got - and PB13..PB15, which the package does not bond |
 | `test_stm32_dma` | 85 | 76 | **62** (+ `u` 3, `w` 0) | DMA2, the console's DMA-fed rate (five channels, and the letters own all five) and the peripheral-to-peripheral leg; letters `o` (6) and `r` (4) are built and not run here, nor letter `h`'s rate verdict on the interrupt console, and `p` and `q` skip by name (no console engines) |
 | `test_stm32_analog` | 139 | 136 | **67** | the DAC's letters and the comparators' - this part has neither block, so eight of the eighteen letters are compiled out ([adc.md](adc.md)) |
-| `test_stm32_serial` | 118 (+ y/w/v) | 112 | **79** (+ `y` 1, `v` 2, `w` 0), counted on the one image it was before it outgrew the part and before its letters timed the wire | USART2 is BASIC here (no kernel-clock multiplexer, no wake), LPUART1's only bonded pads are the console's, and there is no LPUART2 |
-| `test_stm32_spi` | 86 (the STM32F446RE as peer) | - | - | the eleven self-link letters, COMPILED OUT: SPI2's four pads are bonded to no pin of the LQFP32, so that instrument cannot exist here at any wiring; the peer letters want a paired board, and none is |
-| `test_stm32_i2c` | 155 (+ `w` 35) | 54 (peer) | **54** (peer) | the eleven self-link letters, skipped on the PROBE's answer like everywhere else - this package does bond I2C2's PA11/PA12, so what rules them out is the desk and not the plastic |
+| `test_stm32_serial` | 118 (+ y/w/v) | 112 | **79** (+ `y` 1, `v` 2, `w` 0), counted on the one image it was before it outgrew the part and before its letters timed the wire | USART2 is a basic instance here (no kernel-clock multiplexer, no wake), LPUART1's only bonded pads are the console's, and there is no LPUART2 |
+| `test_stm32_spi` | 86 (the STM32F446RE as peer) | - | - | the eleven self-link letters, compiled out: SPI2's four pads are bonded to no pin of the LQFP32, so that instrument cannot exist here at any wiring; the peer letters want a paired board, and none is |
+| `test_stm32_i2c` | 155 (+ `w` 35) | 54 (peer) | **54** (peer) | the eleven self-link letters, skipped on the probe's answer like everywhere else - this package does bond I2C2's PA11/PA12, so what rules them out is the desk and not the plastic |
 | `test_stm32_nvm`, `test_stm32_journal` | 85, 52 | - | - | one flash bank: no storage attic |
 | `test_stm32_fdcan` | 96 | - | - | no FDCAN |
 
-**64 KB AND 8 KB ARE PART OF THE DESIGN HERE.** Every suite's image on
-that board fits with the cuts named in its own suite - `brio check
-stm32g0` links each, `brio fit stm32g0` lists what each takes - and one
-suite does not fit whole: `test_stm32_serial`, so the G031K8 builds it
-as five group images (its groups line) - 47.4, 40.4, 20.0, 45.1 and
-39.2 KB, the tightest with 26 % left - and the G071RB as two (93.6 and
-69.5 KB of its 128). The hungriest in RAM is `test_stm32_dma`, at about 6.4 KB of
-the 8, which leaves the stack some 1.7 KB (the DMA suite's
-deepest letter's frame is 120 bytes, by `-fstack-usage`). One suite
-makes a real cut rather than losing letters: `test_stm32_dma` gives its three memory-to-memory
-buffers 256 words there instead of 512 (every claim restated for the
-length that fits) and gives the console's two DMA channels back to the
-letters. `test_stm32_spi` compiles its eleven self-link letters out - a
-package fact, not a budget one - and, the peer half grown past 95 % of
-the part, builds as two group images (its groups line: 42.4 and 37.2
-KB); `test_stm32_i2c` keeps every letter it has anywhere.
+How the images fit: `brio check stm32g0` links each, `brio fit stm32g0`
+lists what each takes, and one suite does not fit whole.
+`test_stm32_serial` is built as five group images on the G031K8 (its
+groups line): 47.4, 40.4, 20.0, 45.1 and 39.2 KB, the tightest with 26 %
+left; on the G071RB as two (93.6 and 69.5 KB of its 128). The hungriest
+in RAM is `test_stm32_dma`, at about 6.4 KB of the 8, which leaves the
+stack some 1.7 KB (the DMA suite's deepest letter's frame is 120 bytes,
+by `-fstack-usage`). One suite makes a real cut rather than losing
+letters: `test_stm32_dma` gives its three memory-to-memory buffers 256
+words there instead of 512 (every claim restated for the length that
+fits) and gives the console's two DMA channels back to the letters.
+`test_stm32_spi` compiles its eleven self-link letters out (a package
+fact, not a budget one) and, the peer half grown past 95 % of the part,
+builds as two group images (its groups line: 42.4 and 37.2 KB);
+`test_stm32_i2c` keeps every letter it has anywhere.
 
-**WHAT THE PART HAS NOT GOT**, all of it read off the header by the
+What the part has not got, all of it read off the header by the
 reserve: TIM4, TIM6, TIM7, TIM15, USART3..6, LPUART2, I2C3, SPI3, DMA2
-(DMA1 keeps five channels and the DMAMUX five with four generators),
-**the DAC and every comparator**, FDCAN, USB, CRS, UCPD (so PA8 and PB15
-carry no dead-battery Rd), GPIOE, the second flash bank, the EXTI's
-entire second register group, WKUP3 and WKUP5, `RCC_CCIPR_I2C2SEL` and
-`RCC_CCIPR_USART2SEL` - the last of which is what takes USART2's kernel
-clock, its FIFO and its wake with it. And what the PACKAGE does not bond
-is a separate list the SUITES own, never the reserve: PB10..PB15,
-PC0..PC5, PC7, PC13, PD0..PD3, PF0 and PF1 (GPIOD is declared by the
-header and reaches no pin at all). One per-part fact in the reserve
-covers that difference: `ucpd_present(n)`, probed on SYSCFG's own
-dead-battery strobe bit, so a pad that will not follow its pull can be
-told from one that never had an Rd on it.
+(DMA1 keeps five channels and the DMAMUX five with four generators), the
+DAC and every comparator, FDCAN, USB, CRS, UCPD (so PA8 and PB15 carry no
+dead-battery Rd), GPIOE, the second flash bank, the EXTI's entire second
+register group, WKUP3 and WKUP5, `RCC_CCIPR_I2C2SEL` and
+`RCC_CCIPR_USART2SEL`, the last of which is what takes USART2's kernel
+clock, its FIFO and its wake with it. What the package does not bond is
+a separate list the suites own, never the reserve: PB10..PB15, PC0..PC5,
+PC7, PC13, PD0..PD3, PF0 and PF1 (GPIOD is declared by the header and
+reaches no pin at all). One per-part fact in the reserve covers that
+difference: `ucpd_present(n)`, probed on SYSCFG's own dead-battery strobe
+bit, so a pad that will not follow its pull can be told from one that
+never had an Rd on it.
 
-**Vector names across the boards.** The crt spells ST's own handler
-names, and a SHARED line's name changes with what shares it - USART2's
-is `USART2_LPUART2_IRQHandler` on the G0B1 and `USART2_IRQHandler` on
-the G071/G031. An app for one board binds the bare name; an app for
-more than one binds the name the reserve derives from the header's
-presence macros, `BRIO_STM32G0_USART2_HANDLER` and its siblings (TIM3,
-TIM6, TIM7, TIM16, TIM17, LPTIM1, LPTIM2, USART3, LPUART1, the DMA's
-upper line, the ADC) - `test/family_stm32g0/handlers.cpp` proves every
-one expands on every header and names the line the reserve's verb
-answers. A name outside that set on the wrong board lands in
-`Default_Handler`'s silent spin.
+**Vector names across the boards.** The start-up code spells ST's own
+handler names, and a shared line's name changes with what shares it:
+USART2's is `USART2_LPUART2_IRQHandler` on the G0B1 and
+`USART2_IRQHandler` on the G071/G031. An app for one board binds the
+bare name; an app for more than one binds the name the reserve derives
+from the header's presence macros, `BRIO_STM32G0_USART2_HANDLER` and its
+siblings (TIM3, TIM6, TIM7, TIM16, TIM17, LPTIM1, LPTIM2, USART3,
+LPUART1, the DMA's upper line, the ADC); `test/family_stm32g0/handlers.cpp`
+proves every one expands on every header and names the line the
+reserve's verb answers. A name outside that set on the wrong board lands
+in `Default_Handler`'s silent spin.
 
-```bash
-(cd stm32g0 && cmake --preset stm32g0b1re-release)                      # configure (once, or after adding an app)
-(cd stm32g0 && cmake --build --preset stm32g0b1re-release --target <app>)
-(cd stm32g0 && cmake --build --preset stm32g0b1re-release --target <app>-upload)
-(cd stm32g0 && cmake --preset stm32g071rb-release)                      # the Nucleo-G071RB; stm32g031k8-release the Nucleo-32
-brio check stm32g0 [name]                                          # family smoke, no hardware
-```
+## The documents
 
-Build outputs land in `build-cmake/stm32g0b1re-{release,debug}` at the
-repo root: `<app>.elf/.bin/.hex`, `firmware-<app>.map`, `<app>.lst`. A
-configure also writes this project's app roster,
-`build-cmake/apps_stm32g0.json`, which `bin/brio` reads: the
-board TYPE `g0b1re` is what tells that tool to build here and to flash
-through OpenOCD's ST-LINK interface (`brio flash <board> <app>`). NB
-`brio run` speaks the bench SUITES' single-letter grammar (no
-line terminator): the line-oriented `console` app is driven with any
-serial monitor, or pyserial, at 115200 8N1.
+One document per peripheral driver, in the shape
+[../README.md](../README.md) prescribes: the reader's orientation
+(purpose, the smallest use, the prerequisite that decides correctness),
+the documents of record, what the silicon does, the types and verbs, how
+to use it, the bench findings and, where the driver has gaps, "Not
+covered yet" as two lists. The line beside each names what the document
+is about and the finding or two most worth knowing before using the
+driver; the findings themselves, with their figures and conditions, are
+in the document.
 
-## Upload (OpenOCD, ST-LINK)
-
-Flashing goes through OpenOCD driving the Nucleo's on-board
-ST-LINK/V2.1: `interface/stlink.cfg` + `target/stm32g0x.cfg` (the
-stm32l4x flash driver underneath) + `program <app>.elf verify`, then
-`reset run` and a write of DHCSR that clears C_DEBUGEN: a core left with
-halting debug enabled HALTS on a BKPT instead of faulting, and every
-`panic()` ends in one. OpenOCD - the 0.12.0 release built from its
-tarball into `/sw/openocd-0.12.0` (`/sw/openocd`), see
-[the SAM page](../samc21/README.md) - drives the ST-LINK (firmware
-V2J46M31) without incident; the probe carries a REAL USB
-serial, so `adapter serial` names it and the same serial names the
-console under `/dev/serial/by-id`. Single-client: close the debug
-session before flashing.
-
-ONE SWD CAVEAT worth knowing: memory reads THROUGH THE HLA TRANSPORT
-WHILE THE CORE SLEEPS IN WFI ARE UNRELIABLE - a running console
-(WFI between events) answered `0xffffffb7` for FLASH_ACR and zeros
-for RCC_CR, values those registers cannot hold, while the same reads
-after `halt` were exact. Halt first, read, resume; the CMSIS-DAP probe
-on the SAM C21 board does not do this.
-
-A SECOND SWD CAVEAT, and one that reads as a silicon fact until it is
-found: `target/stm32g0x.cfg`'s examine-end hook writes
-`DBGMCU_CR.DBG_STOP | DBG_STANDBY` ("enable debug during low power
-modes"), and OpenOCD re-examines the target after every reset it
-issues, so the bits are back on the reset a `program` ends with
-whatever was cleared before it (measured: cleared to 0 while halted,
-read 6 again right after `reset run`). The register survives every
-reset but a power-on, and with DBG_STOP set the debug logic keeps
-HCLK - and SysTick - running inside a Stop, which cuts a Stop entered
-with the kernel tick armed from its full 250 ms to one tick.
-`bin/brio` therefore ends every G0 flash with `reset halt`, a
-clear of DBGMCU_CR through its clock gate (the gate put back to its
-reset value) and a `resume`, so a board leaves the bench as a power-on
-would leave it; a cortex-debug session sets the bits again, and
-`Pwr::debug_in_stop()` ([pwr.md](pwr.md)) is how firmware tells. Both
-states are measured in `test_stm32_sleep` letter c.
-
-## Debugging (cortex-debug + OpenOCD)
-
-One launch config per part in `.vscode/launch.json` ("Debug STM32G0B1RE
-(OpenOCD, Nucleo-G0B1RE)" and its G071RB and G031K8 siblings): the SAM
-entry's shape with the two ST config files and the part's own SVD from
-`stm32g0/svd/` for the Peripheral Viewer; no probe named, so the one
-ST-LINK attached is taken (with several, `adapter serial` goes through
-`openOCDPreConfigLaunchCommands`). CMake Tools' Active Folder must be
-`stm32g0/`, its configure preset the part's `-debug` one and its
-launch target the app to debug. Verified on the Nucleo-G071RB, from
-VS Code and from the command line with the same OpenOCD and gdb: load,
-reset-halt, a breakpoint at `main` hit, source lines stepped. A session leaves
-DBGMCU_CR.DBG_STOP set (the target script's doing) until a power-on or
-a `brio flash`, which clears it - a Stop measured right after a debug
-session does not stop the clocks.
-
-## Editor (clangd)
-
-`brio/stm32g0/.clangd` and `stm32g0/.clangd` route the stratum and the
-project to `build-cmake/stm32g0b1re-release`;
-`test/family_stm32g0/.clangd` lets the script-compiled family TUs
-borrow flags from the same database. The repo-root `.clangd` rules
-apply unchanged.
-
-## Serial console
-
-The ST-LINK's virtual COM port enumerates with the probe's own USB
-serial, so the console is addressed by `/dev/serial/by-id` and never
-moves with the socket - the first console on this desk that does not
-need the by-path dance. Console apps run 115200 8N1. Measured: BRR 556
-at 64 MHz gives 115107 baud (the arithmetic to the hertz), 300 lines
-of 50 bytes exchanged with zero errors of any kind, and the kernel
-tick +0.24 % against the PC's clock (inside HSI16's 1 % calibration).
+| Document | Content |
+|----------|---------|
+| [platform.md](platform.md) | What the kernel stands on: `Stm32g0Platform<TB>` (TB the timebase), the PRIMASK critical section, WFI idle, the vector table with its shared lines, the start-up code, and its two timebases - the SysTick `Ticker` (1000 Hz, stops in Stop) and `LptimTicker` (the LPTIM on the LSE crystal, 1024 Hz), which makes a program tickless: no periodic interrupt, every deadline placed in the compare, kernel time running through a Stop. Measured to the cycle: the idle contract (no edge position of 400 loses its wake, one kernel turn per tick, a wake from Sleep 36 cycles to the handler) and the LPTIM compare's latency, the finding that put the counter undivided. "Code in SRAM": the opt-in `InRam` placement of the SPI host's and the UART task's hot paths, with its gain and its cost per path |
+| [reset.md](reset.md) | The reset flags of RCC_CSR as the accumulating history they are, the independent and the window watchdog with their traps (keyed registers that do not update until the start key clocks the block; a window counter that free-runs), the deliberate resets, and the panic breadcrumb proven across six real resets including a HardFault |
+| [clock.md](clock.md) | One SYSCLK, shared bus prescalers, per-peripheral enable bits, the kernel-clock multiplexers and the MCO clock output; HSI16 and the PLL to 64 MHz, the flash latency sequence, the three voltage regimes as static rates; the dynamic clock over a pack of rates, every rung measured and a switch 48..384 us; `LseTracker`, the core tracked against the LSE crystal with no CPU |
+| [port.md](port.md) | GPIO: a port has a clock and it is off at reset, analog is the reset state, the AF numbers are the datasheet's, BSRR/BRR are atomic, and four pads (PA8/PB15, PD0/PD2) are not ordinary GPIOs out of a power-on until SYSCFG's strobe releases the UCPD dead-battery pull-downs |
+| [exti.md](exti.md) | Where this family keeps its pin interrupts: sixteen lines whose number is the pin number and whose port is the one choice (PA3 and PB3 cannot both be armed), edges only, rising and falling in separate pending registers, three shared vectors; a pending bit is set only for an unmasked interrupt, so a line cannot be polled without arming it |
+| [nvm.md](nvm.md) | The flash program/erase engine (page 2048, row 256, double word 8), the option bytes as a read-only decode, the ECC status; the storage design that gives bank 2 to the NV heap and journal while the image stays in bank 1; a malformed program found to wedge CFGBSY until the next reset |
+| [tim.md](tim.md) | Ten timers behind one register struct, so what a timer is comes from the documents' table and every verb naming a feature an instance lacks refuses; the `rc_w0` status register (the one register of this stratum where the write-one-to-clear reflex is wrong); the input multiplexer that makes a capture measurable with no pad; PWM, complementary pairs with dead time, the util contracts `PwmChannel` and `MeterSampler`, the DMA requests and the burst engine |
+| [dma.md](dma.md) | DMA and DMAMUX: two controllers behind one request multiplexer, three vectors for twelve channels, the request vocabulary each peripheral publishes; a request is a level served on enable, not an edge; the engines' two moments (`arm()` once, five stores per block) and the circular receive ring; the priority rule measured; what a Stop does to a running channel |
+| [usart.md](usart.md) | RM0444 chapter 33 whole, almost all of it measured on one board with no wires through the single-wire loop-back; full and basic instances compared on three authorities; the FIFO as the transport's default (a 4096-byte print in 515 interrupts where the one-register transport took 4098); every frame format, both oversamplings, the prescaler, auto-baud, LIN, smartcard, IrDA, RS-485, the wake from Stop; the receive FIFO's wedge behind a starved DMA channel and the kick that cures it; every rate timed against the wire; the errata reproduced with their controls; the far-board measurements |
+| [lpuart.md](lpuart.md) | Chapter 34, which is chapter 33 minus several modes plus a baud generator of its own; `LpUart` is the USART's own task over the other resource; a whole console moved onto LPUART1 at 9600 on the 32768 Hz crystal, and an LPUART on the crystal bringing the part out of Stop 1 on a start bit |
+| [irtim.md](irtim.md) | The infrared interface: one pad and an AND gate, TIM17 as the carrier and a timer or a USART as the envelope, neither needing a pad; the USART envelope is active low where TIM16's is active high |
+| [adc.md](adc.md) | The one 12-bit converter, a monostate (a class with static state and no instances, the part having one): the regulator start-up and the self-calibration `init()` spends, the three factory measurements it reads; the sequencer's two faces and its CCRDY handshake; VDDA and the junction temperature with no meter; conversion time exact to the cycle; the oversampler against a measured noise floor; the watchdogs as disabled-state verbs because a forbidden write is not one thing on this converter |
+| [dac.md](dac.md) | The two 12-bit channels, absent on the G031/G041; the DAC reaches the ADC through the pad and nothing else, so PA4 is a zero-length wire and the shape of every wireless analog experiment; DHR is not DOR, a trigger is an edge, the buffer cannot reach the rails, the DMA underrun caught |
+| [vref.md](vref.md) | The voltage reference buffer, implemented whole and never enabled: driving VREF+ on a board that ties it to VDDA is forbidden and nothing inside the chip can tell, so `enable()` refuses unless the caller states the pin is free; the block sits behind SYSCFG's clock gate and reads wrong through it |
+| [comp.md](comp.md) | The comparators (three on the G0B1 class, two on the G071, none on the G031), each living inside SYSCFG's block; the inverting input reaches internal references with no pad while the non-inverting one is a pad and nothing else; the precharged pad as the wireless stimulus; the blanking window and the window mode measured |
+| [rtc.md](rtc.md) | The clock that outlives everything else: its own power domain behind two independent locks with different reach, RTCSEL one-way until a domain reset; the Nucleo's crystal fitted and running; the calendar, alarms, wake-up timer, smooth calibration, RTC_REFIN, the shift register and tamper detection measured, with the findings no chapter carries |
+| [pwr.md](pwr.md) | The stopping half of the platform: chapter 4 and `util/power.hpp`'s depth ladder realized here unchanged; the sleep mode as two registers in two places; Standby and Shutdown off the ladder on purpose; a Stop's length on a bare board and under a debugger, the timed sleep site's resync from the RTC, the tickless platform's plain site through a Stop 1 |
+| [lptim.md](lptim.md) | The two low-power timers, which are not copies of each other; the opposite enable rules of the two register halves; both errata answered by construction (no verb ever clears ENABLE; flags cleared only where the erratum allows); the waveform arithmetic the chapter never prints; through a Stop only LSE and LSI keep counting |
+| [crc.md](crc.md) | The CRC unit, chapter 14 whole: words, half-words and bytes through one register, the programmable polynomial with the two rules the register does not enforce, big-endian feeding; 2056 cycles per 1000 bytes against the bitwise loop's 109216, and the DMA feeding it with no CPU |
+| [i2c.md](i2c.md) | Chapter 32 whole, both roles, over the Nucleo's own self-link; the `I2cHost` request the other targets share verbatim; the timing register's arithmetic both ways; a repeated START as one CR2 store, RXNE before STOPF, a held SDA as a park and not an error; the errata's floors against a 2 MHz core; the far-board tenures and the wake from Stop by the other chip's address |
+| [spi.md](spi.md) | Chapter 35 whole, both roles, over the self-link; the silicon enforces none of the configuration rule, so the driver's refusals are the only protection; the disable procedure as the erratum's workaround; every baud code to PCLK/2 with the host pacing and PCLK/4 with both ends on DMA; hardware NSS against a GPIO chip select; the CRC and its window; I2S; the client's polled runs; the extended exchange against the F446 |
+| [fdcan.md](fdcan.md) | The Bosch M_CAN, the first chapter of this stratum a part can be missing entirely; one enable, reset and divider for both modules; measured with no transceiver, no wire and no second node through the chapter's own loop-backs; the 0xCC padding paragraph that does not describe this part; bus-off recovery timed |
+| [vendor/README.md](vendor/README.md) | RM0444, DS13560, ES0548 (with ES0418 and ES0487 for the STM32G071RB and the STM32G031K8) by revision, the vendored cmsis-device-g0 headers and SVD, the bench chips' IDCODEs, the errata pass |

@@ -1,82 +1,127 @@
 /*
  * flash.hpp
  *
- * The embedded flash memory and its interface (RM0444 ch. 3): the read
- * access latency the clock task must set before it raises HCLK, the two
- * CPU-side accelerators, the program/erase engine, the option bytes as
- * a READ-ONLY decode, the ECC status and the one interrupt.
+ * The STM32G0's embedded flash memory and its interface (RM0444 ch. 3),
+ * for a program that must erase or program the flash itself, or read
+ * what the part is. A program that only wants to keep data across power
+ * cycles does not drive this header: it takes the block heap or the
+ * value journal over stm32g0/nvm_flash.hpp, which are built on it. What
+ * is here:
  *
- * WHY THE WAIT STATES LIVE HERE AND NOT IN clock.hpp: they are the
+ *  Flash            the program/erase engine: unlock, erase a page,
+ *                   program double words or a whole row, the status
+ *                   flags, the ECC status and the interrupt body;
+ *  FlashWaitStates  the read latency the clock task sets before it
+ *                   raises HCLK; FlashAccel the two CPU-side
+ *                   accelerators (prefetch, instruction cache);
+ *  FlashOptions     the option bytes, decoded and never written;
+ *  DeviceUid, DeviceIdcode, flash_size_kb()
+ *                   what this part is: its 96-bit identifier, its die
+ *                   and revision, its flash size.
+ *
+ *     if (brio::Flash::unlock()) {
+ *         err = brio::Flash::erase_page(page);          // 0 = success
+ *         err |= brio::Flash::program(page, bytes);     // whole double words
+ *         (void)brio::Flash::lock();
+ *     }
+ *
+ * Every operation returns a mask of FlashFlag bits, zero meaning
+ * success; FlashFlag::refused means the driver stopped before the flash
+ * was touched (an unaligned address, a locked engine, a wait that timed
+ * out), the other bits are the silicon's own error flags.
+ *
+ * Which context calls what. The engine is driven from setup in main()
+ * or from an active object's handler (an active object is a brio task
+ * the kernel serves one event at a time), one context at a time: the
+ * operations share their bookkeeping (last_status(), last_wait_turns())
+ * with no lock, and that is the caller's duty, not checked here. Every
+ * operation blocks for the duration of the flash's work - up to 40 ms
+ * for a page erase - spinning on the status register; the spin is
+ * bounded, never a while(1), so a sick chip gives the caller a false
+ * and not a mute board. None of them masks interrupts, and
+ * fast_program_row() tells the caller to: its row must be written in
+ * one go, and a driver that masked interrupts behind the application's
+ * back would be deciding the system's latency. A read of the bank being
+ * erased or programmed stalls the bus, code fetches included, until the
+ * operation ends; a read of the other bank of a dual-bank part does
+ * not (3.3.9), which is what stm32g0/nvm_flash.hpp is built on. A
+ * buffer handed to program() or read() is the caller's and is used
+ * during the call only. The one interrupt body, Flash::isr(), is what
+ * an interrupt handler calls here; the app binds FLASH_IRQHandler to
+ * it. The ECC double-error is an NMI, not that line (3.3.3).
+ *
+ * Why the wait states live here and not in clock.hpp: they are the
  * flash interface's register. The clock task calls in; this file owns
  * the register.
  *
- * WHAT THE CHAPTER IS, in the shape the code takes:
+ * What the chapter is, in the shape the code takes:
  *
- *  - ONE ARRAY, TWO BANKS, THREE GRANULARITIES. A page is 2 Kbytes and
- *    is the erase unit; a row is 256 bytes and is the FAST programming
- *    unit; a DOUBLE WORD of 8 bytes is the ordinary program unit and the
+ *  - One array, two banks, three granularities. A page is 2 Kbytes and
+ *    is the erase unit; a row is 256 bytes and is the fast programming
+ *    unit; a double word of 8 bytes is the ordinary program unit and the
  *    ECC unit (64 data bits plus 8 ECC bits, 3.3.1). Nothing smaller can
  *    be written at all: a byte or half-word store raises SIZERR, and a
  *    double word that is not double-word aligned raises PGAERR (3.3.8).
  *
- *  - A CELL IS WRITTEN ONCE BETWEEN ERASES. 3.3.8: "Programming a
+ *  - A cell is written once between erases. 3.3.8: "Programming a
  *    previously programmed address with a non-zero data is not allowed"
  *    and sets PROGERR. That is exactly util/nv_heap.hpp's write_cell
  *    contract, which is why the two fit with nothing in between.
  *
- *  - THE UNLOCK IS A KEYED SEQUENCE AND A WRONG ONE IS FATAL UNTIL THE
- *    NEXT RESET. 3.3.6: KEY1 then KEY2 into FLASH_KEYR; "any wrong
+ *  - The unlock is a keyed sequence and a wrong one is fatal until the
+ *    next reset. 3.3.6: KEY1 then KEY2 into FLASH_KEYR; "any wrong
  *    sequence locks the FLASH_CR register until the next system reset",
  *    and the wrong write is itself a bus error, i.e. a HardFault. So
  *    unlock() writes the pair only when LOCK really stands, and there is
  *    no verb anywhere in this file that can produce a half sequence.
  *
- *  - FLASH_CR MUST NOT BE WRITTEN WHILE CFGBSY STANDS: 3.7.4 says such a
+ *  - FLASH_CR must not be written while CFGBSY stands: 3.7.4 says such a
  *    write "causes HardFault". Every verb here waits first, and the wait
- *    is BOUNDED - a spin count, not a while(1) - because the alternative
+ *    is bounded - a spin count, not a while(1) - because the alternative
  *    on a sick chip is a mute board.
  *
- *  - EOP IS NOT A COMPLETION WITNESS. 3.7.4 bit 0: "This bit is set only
+ *  - EOP is not a completion witness. 3.7.4 bit 0: "This bit is set only
  *    if the end of operation interrupts are enabled (EOPIE=1)", which
  *    contradicts 3.3.8's own step 7 telling the programmer to check it.
  *    This file therefore judges an operation by CFGBSY falling and by
- *    the ERROR bits, and EOP is reported but never required. (The bench
+ *    the error bits, and EOP is reported but never required. (The bench
  *    settles which document is right - docs/stm32g0/nvm.md.)
  *
- *  - HSI16 IS TURNED ON BY THE ENGINE ITSELF when PG, FSTPG or STRT is
+ *  - HSI16 is turned on by the engine itself when PG, FSTPG or STRT is
  *    set, and turned off again unless RCC_CR.HSION was already set
  *    (3.3.7, 3.3.8). Nothing here manages it: on a brio board the PLL
  *    already runs from HSI16, and on one that does not the engine's own
  *    request is the documented behaviour.
  *
- *  - READ-WHILE-WRITE (3.3.9): on a dual-bank part, a program or erase
- *    in one bank leaves reads of the OTHER bank running. In the same
+ *  - Read-while-write (3.3.9): on a dual-bank part, a program or erase
+ *    in one bank leaves reads of the other bank running. In the same
  *    bank the read stalls the bus (3.3.6). That single sentence is what
  *    makes stm32g0/nvm_flash.hpp put all storage in bank 2 and all code
- *    in bank 1, and it is the property the bench letter measures.
+ *    in bank 1, and it is the property the bench letter measures (a
+ *    letter is one command key of a test suite's console).
  *
- *  - THE OPTION BYTES ARE READ AND NEVER WRITTEN. There is no
+ *  - The option bytes are read and never written. There is no
  *    OPTKEYR verb, no OPTSTRT verb and no OBL_LAUNCH verb in this file,
  *    on purpose: RDP Level 2 is irreversible, and ES0548 2.2.9 says an
- *    option-byte MISMATCH can leave the device with BOOT_LOCK set and
+ *    option-byte mismatch can leave the device with BOOT_LOCK set and
  *    the debug interface gone - a brick, from one interrupted write.
  *    Provisioning belongs to a tool over SWD. FlashOptions decodes what
  *    is there.
  *
- *  - THE OTP AREA (3.3.1) is 1 Kbyte of double words that can be written
- *    ONCE and never erased - not even back to zero. It is memory-mapped
- *    and readable like any other flash; this file exposes the READ and
+ *  - The OTP area (3.3.1) is 1 Kbyte of double words that can be written
+ *    once and never erased - not even back to zero. It is memory-mapped
+ *    and readable like any other flash; this file exposes the read and
  *    deliberately no write.
  *
- * ERRATA that touch this chapter, ES0548 Rev 3, silicon revision Z:
- *  - 2.2.3, LIVE: a location holding all ones cannot be re-programmed to
+ * Errata that touch this chapter, ES0548 Rev 3, silicon revision Z:
+ *  - 2.2.3, live: a location holding all ones cannot be re-programmed to
  *    all zeros - the one exception 3.3.8 grants to the write-once rule
- *    does not work. No workaround. It is UNREACHABLE BY CONSTRUCTION for
+ *    does not work. No workaround. It is unreachable by construction for
  *    everything built on top of this file, because util/nv_heap.hpp and
  *    util/nv_journal.hpp never program a cell twice between erases; a
  *    caller that wants that exception is told here that it does not
  *    exist.
- *  - 2.2.10, LIVE: prefetch may fail on a branch across banks, with no
+ *  - 2.2.10, live: prefetch may fail on a branch across banks, with no
  *    workaround, and the erratum's own note blesses "EEPROM emulation or
  *    other data storage in bank 2" as the safe use of dual bank. That is
  *    precisely nvm_flash.hpp's design, and with the code held in bank 1
@@ -90,18 +135,18 @@
  *    0 wait states, <= 48 needs 1, <= 64 needs 2; Range 2 halves the
  *    ceilings (8 / 16 MHz) and forbids 2 WS. Out of reset HCLK is
  *    16 MHz at 0 WS.
- *  - the ORDER: wait states go UP before a frequency rise and DOWN
+ *  - the order: wait states go up before a frequency rise and down
  *    after a fall, and a new LATENCY value is in force only when it
- *    READS BACK - 3.7.1 says so in one sentence, and a rise taken
+ *    reads back - 3.7.1 says so in one sentence, and a rise taken
  *    before the readback runs the core off a flash that cannot keep up.
  *  - ICEN (instruction cache) is set at reset and left so; PRFTEN
- *    (prefetch) is clear at reset and the clock task SETS it at boot
+ *    (prefetch) is clear at reset and the clock task sets it at boot
  *    (stm32g0/clock.hpp, Clock::init() and DynamicClock::init()). The
  *    decision is taken on a measurement - on the STM32G0B1RE at 64 MHz
  *    and two wait states, the handler bodies 12 to 20 per cent faster
  *    with it, an idle second's busy cycles 19, a copy 14 to 25, the two
  *    NV suites green (docs/design/benchmark.md) - and erratum 2.2.10's
- *    condition is the LINK's: stm32g0/ld/stm32g0b1re.ld gives the image
+ *    condition is the link's: stm32g0/ld/stm32g0b1re.ld gives the image
  *    bank 1 alone, and the G071's and G031's scripts describe
  *    single-bank parts. FlashAccel::prefetch(false) is the verb for a
  *    program that wants it off - one linked across both banks.
@@ -119,7 +164,10 @@
 namespace brio {
 
 /// FLASH_ACR.LATENCY - the read wait states, and the rule that picks
-/// them. Monostate: one flash interface per device.
+/// them. A monostate (a type of static members only, nothing to
+/// instantiate): one flash interface per device. The clock task calls
+/// it from setup and from its rate changes; set() spins until the value
+/// reads back and masks nothing.
 struct FlashWaitStates {
     FlashWaitStates() = delete;
 
@@ -260,12 +308,14 @@ struct DeviceUid {
  * device identifier, and nothing in brio branches on this read: it is
  * evidence for a human, printed and not compared.
  *
- * THE DBGMCU ANSWERS ONLY WITH RCC_APBENR1.DBGEN SET (5.2.17), which is
- * CLEAR at reset, so read() opens the gate for the access and puts it
+ * The DBGMCU answers only with RCC_APBENR1.DBGEN set (5.2.17), which is
+ * clear at reset, so read() opens the gate for the access and puts it
  * back as it found it - pwr.hpp's debug_in_stop() is the same dance for
  * the same reason. The gate is written through the CMSIS pointer with
- * 5.2.17's readback because clock.hpp includes THIS file, so `Rcc` is
- * not reachable from here.
+ * 5.2.17's readback because clock.hpp includes this file, so `Rcc` is
+ * not reachable from here. That write is a read-modify-write of a
+ * register the clock task also writes, so read() is for setup or an
+ * active object's handler, not for an interrupt handler.
  */
 struct DeviceIdcode {
     uint16_t dev_id;
@@ -366,9 +416,12 @@ struct FlashEccStatus {
  * Every verb that touches FLASH_CR waits for CFGBSY first, because
  * 3.7.5 says writing that register while CFGBSY stands "causes a
  * HardFault exception" - so on this target a missing wait is not a lost
- * store but a dead board.
+ * store but a dead board. The waits are bounded spins (wait_spins) and
+ * every operation blocks until the flash has finished; the engine is
+ * driven from one context at a time (the file header says why), and
+ * nothing here masks interrupts.
  *
- * THE RETURN VALUE IS A MASK, zero meaning success (FlashFlag). The mask
+ * The return value is a mask, zero meaning success (FlashFlag). The mask
  * is also cleared out of FLASH_SR on the way out, so a later operation
  * cannot trip over an old error - 3.3.7 and 3.3.8 both begin with "check
  * and clear all error flags due to a previous programming. If not,
@@ -576,11 +629,14 @@ struct Flash {
     // ---- erase -------------------------------------------------------------
 
     /**
-     * Erase the 2 Kbyte page containing `addr` (3.3.7). `addr` must BE
+     * Erase the 2 Kbyte page containing `addr` (3.3.7). `addr` must be
      * the page's first byte: rounding it here would let a caller erase a
-     * neighbour by a typo.
+     * neighbour by a typo. Needs unlock() first - a locked engine is
+     * refused - and blocks until the erase ends, up to 40 ms (DS13560
+     * table 48); zero means the page is erased, any other value is the
+     * FlashFlag mask of what went wrong.
      *
-     * ON A DUAL-BANK PART THIS DOES NOT STALL A READ OF THE OTHER BANK
+     * On a dual-bank part this does not stall a read of the other bank
      * (3.3.9), which is the property stm32g0/nvm_flash.hpp is built on.
      * Erasing the bank the CODE runs from stalls every instruction fetch
      * until it finishes (3.3.6) - legal only from RAM, and nothing in
@@ -612,9 +668,10 @@ struct Flash {
 
     /**
      * Erase a whole bank (3.3.7's "mass erase", which on a dual-bank part
-     * is per bank: MER1 and MER2 are separate bits).
+     * is per bank: MER1 and MER2 are separate bits). Unlock, blocking and
+     * result as for erase_page(); a bank the part has not got is refused.
      *
-     * EXPOSED AND NEVER CALLED IN THIS TREE. Bank 1 holds the running
+     * Exposed and never called in this tree. Bank 1 holds the running
      * image, so a mass erase of it ends the program; bank 2 is the
      * storage attic and erasing it wholesale is slower than erasing the
      * pages that are actually used. It is here because the chapter has
@@ -646,7 +703,9 @@ struct Flash {
 
     /**
      * Standard programming (3.3.8): whole double words, one high-voltage
-     * pulse each.
+     * pulse each. Needs unlock() first; blocks for each double word in
+     * turn and stops at the first error; `src` is the caller's and is
+     * read during the call only. Zero means every cell is programmed.
      *
      * `addr` and `src.size()` are multiples of cell_size and the target
      * cells have been erased since they were last written - the same
@@ -702,11 +761,13 @@ struct Flash {
     }
 
     /**
-     * Fast programming (3.3.8): one whole ROW of 32 double words under a
+     * Fast programming (3.3.8): one whole row of 32 double words under a
      * single high-voltage ramp, which is what makes it faster than 32
-     * ordinary programs.
+     * ordinary programs. Needs unlock() first; `src` is exactly row_size
+     * bytes, the caller's, read during the call only; blocks until the
+     * row is done and returns the FlashFlag mask, zero on success.
      *
-     * THREE OBLIGATIONS THE SILICON PUTS ON THE CALLER, all stated
+     * Three obligations the silicon puts on the caller, all stated
      * because none of them can be enforced from in here:
      *  - the row must have been erased since it was last written (3.3.8
      *    step 1, else PGSERR);
@@ -877,7 +938,9 @@ struct Flash {
      * bit is set, so these are not merely interrupt masks - they decide
      * whether the flag exists at all. That is why this file never waits
      * on EOP. A read-protect enable asked for on a part with no PCROP
-     * (the value line, where the bit does not exist) is refused.
+     * (the value line, where the bit does not exist) is refused. Waits,
+     * bounded, for the engine to be idle before it writes FLASH_CR, and
+     * false also means that wait ran out.
      */
     static bool interrupts(bool end_of_operation, bool error, bool read_protect) {
         if (read_protect && flash_cr_read_error_interrupt == 0u) {
@@ -1049,10 +1112,11 @@ struct FlashPcropArea {
 };
 
 /**
- * FLASH_OPTR and the protection registers, DECODED AND NEVER WRITTEN.
+ * FLASH_OPTR and the protection registers, decoded and never written.
  *
  * Everything here is a plain read of an option register the option
- * loader filled at power-on reset. There is no setter anywhere, and that
+ * loader filled at power-on reset, callable from any context, waiting
+ * for nothing. There is no setter anywhere, and that
  * is the design: RDP Level 2 is one-way, ES0548 2.2.9 turns an
  * interrupted option write into a device with no debug port, and this
  * class of change belongs to a TOOL over the programming interface

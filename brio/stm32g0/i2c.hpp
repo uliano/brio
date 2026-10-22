@@ -1,10 +1,13 @@
 /*
  * i2c.hpp
  *
- * The I2C block (RM0444 ch. 32) in the two strata every brio bus driver
- * has (docs/design/i2c-bus.md):
+ * The STM32G0's I2C block (RM0444 ch. 32): what a program uses to read
+ * a sensor, write a device's register, share two wires among several
+ * devices through the bus arbiter, or answer on the bus as a target
+ * itself. The header has the two layers every brio bus driver has
+ * (docs/design/i2c-bus.md), and the target role beside them:
  *
- *   I2c<n>          the RESOURCE: which instance, where its registers
+ *   I2c<n>          the resource: which instance, where its registers
  *                   are, its APB clock and reset, its NVIC line, its
  *                   kernel-clock multiplexer, its DMAMUX request pair,
  *                   its EXTI wake line - and the whole register
@@ -12,64 +15,112 @@
  *                   the timing arithmetic that is this chapter's hardest
  *                   part and the SMBus half that only some instances
  *                   have;
- *   I2cHost<...>    the TASK util/i2c_bus.hpp drives: one Request is one
- *                   BUS TENURE, with the descriptor shape every
- *                   target's I2cHost carries (docs/design/i2c-bus.md),
- *                   so a device client compiles here untouched;
+ *   I2cHost<...>    the transfer engine util/i2c_bus.hpp drives: one
+ *                   Request is one bus tenure (the wire held from a
+ *                   START to the STOP that ends it), with the descriptor
+ *                   shape every target's I2cHost carries
+ *                   (docs/design/i2c-bus.md), so a device client
+ *                   compiles here untouched;
  *   I2cClient<...>  the target role: address matching, the stretching
- *                   pump, the wake from Stop. A client is a PROTOCOL and
+ *                   pump, the wake from Stop. A client is a protocol and
  *                   the protocol is the application's, so this half
  *                   decides nothing (the SpiClient position).
  *
- * SCOPE. The chapter whole, bar what docs/stm32g0/i2c.md declines with a
+ * The smallest use, a bus of sensors behind the arbiter:
+ *
+ *     constexpr brio::I2cPins bus_pins{
+ *         .scl = {'B', 8, brio::PinFunction::af6},
+ *         .sda = {'B', 9, brio::PinFunction::af6},
+ *     };
+ *     using I2cHw = brio::I2cHost<1, bus_pins>;
+ *     using Sensors = brio::I2cBus<I2cHw, P, 4, brio::BusPassThrough,
+ *                                  brio::ticks_from_ms<P>(20)>;
+ *
+ *     I2cHw::init(clock, brio::I2cClock::hsi16);   // the bus rate independent of the core's
+ *
+ *     extern "C" void I2C1_IRQHandler() {
+ *         if (I2cHw::isr()) { brio::post<Sensors>(brio::TransferDone{I2cHw::status()}); }
+ *     }
+ *
+ * Who calls what. init() runs in main(), after the clock task's; no
+ * controller init precedes it when DMA engines are named, since an
+ * engine's arm() opens the DMA controller's clock itself
+ * (stm32g0/dma.hpp). It waits for nothing and returns false when the
+ * configuration is refused. start() belongs
+ * to the bus active object (I2cBus, util/i2c_bus.hpp; an active object
+ * is an object the kernel serves one event at a time, each handler run
+ * to completion from the main loop): it is called from that object's
+ * handler, never from an interrupt, writes the first byte and the START
+ * and returns at once, and the tenure then runs entirely on the
+ * instance's interrupt. isr() is the body of that interrupt, bound by
+ * the program to the vector as above; it returns true on the edge that
+ * ends the tenure, and the glue posts TransferDone{status()} to the bus
+ * active object there. A Request's tx and rx buffers are loans with
+ * Lease::reply (kernel/borrowed.hpp): the client that posted the
+ * request keeps them valid and unchanged until the reply event lands,
+ * and the engine reads and writes them from the interrupt until then.
+ * rebase() is the clock fan-out's and wants an idle bus. recover() and
+ * unstick() are the recovery ladder's - a timed I2cBus calls recover()
+ * itself - and unstick() is the one verb that spins: about 5 us per
+ * half bit, nine pulses and a STOP at most. No verb here masks
+ * interrupts; recover(), unstick() and release() disable the instance's
+ * own NVIC line while they work, and disable() waits, bounded, for PE
+ * to read back clear. I2c<n>'s own verbs are register accesses a
+ * program makes from setup or from the active object that owns the
+ * instance, never from two contexts at once. I2cClient's polled surface
+ * is the application's protocol to run, from its handler or from the
+ * vector's glue; its isr() hands the glue the masked status.
+ *
+ * Scope. The chapter whole, bar what docs/stm32g0/i2c.md declines with a
  * reason: both roles, 7- and 10-bit addressing on both sides, the second
  * own address with its seven mask codes, the general call, all three
- * speeds with the timing arithmetic BOTH WAYS, both filters, the
+ * speeds with the timing arithmetic both ways, both filters, the
  * controller's transfer engine with RELOAD/TCR past 255 bytes and
  * AUTOEND against a software STOP, target byte control (SBC), the flags
  * and their W1C clears, every interrupt, the two DMA enables, the wake
  * from Stop with its EXTI line, and the SMBus half - the two device
  * addresses, the alert, the PEC engine and the three time-outs.
  *
- * FACTS THAT SHAPE THE CODE
+ * Why the code is shaped as it is: the facts of this silicon.
  *
- *  - THE INSTANCES ARE NOT COPIES OF EACH OTHER (table 165): the
- *    INDEPENDENT CLOCK, the WAKE FROM STOP and the SMBus half belong to
+ *  - The instances are not copies of each other (table 165): the
+ *    independent clock, the wake from Stop and the SMBus half belong to
  *    I2C1 always, to I2C2 only on the G0B1/G0C1 class, and to I2C3
- *    nowhere. The reserve derives all three from ONE header probe
- *    (RCC_CCIPR_I2C2SEL_Pos) and says why; the register description
- *    cannot be asked, because every header of the pack declares the same
- *    253 I2C_* macros for the one I2C_TypeDef every instance is mapped
- *    through. The SILICON can be asked, though, and this file gives the
- *    bench the verb: 32.9.6 makes I2C_TIMEOUTR and I2C_PECR "reserved,
- *    and their bits are forced by hardware to 0" on an instance without
- *    SMBus, so smbus_probe() writes and reads back.
+ *    nowhere. The reserve (stm32g0/device_tables.hpp, the table of what
+ *    each part has, read off the device header) derives all three from
+ *    one header probe (RCC_CCIPR_I2C2SEL_Pos) and says why; the register
+ *    description cannot be asked, because every header of the pack
+ *    declares the same 253 I2C_* macros for the one I2C_TypeDef every
+ *    instance is mapped through. The silicon can be asked, though, and
+ *    this file gives the bench the verb: 32.9.6 makes I2C_TIMEOUTR and
+ *    I2C_PECR "reserved, and their bits are forced by hardware to 0" on
+ *    an instance without SMBus, so smbus_probe() writes and reads back.
  *
- *  - THE TIMING REGISTER IS THE CHAPTER. TIMINGR is five fields that
+ *  - The timing register is the chapter. TIMINGR is five fields that
  *    together set the SCL period, the data hold time and the data setup
  *    time, and 32.4.5 gives each of them an inequality against the I2C
- *    standard's own numbers and the BUS's own edges. So the arithmetic
- *    goes both ways here: i2c_timing_for() SOLVES 32.4.5's conditions
- *    for a register value and i2c_scl_hz() PRICES one, and both are
+ *    standard's own numbers and the bus's own edges. So the arithmetic
+ *    goes both ways here: i2c_timing_for() solves 32.4.5's conditions
+ *    for a register value and i2c_scl_hz() prices one, and both are
  *    pinned at the bottom of this file against every cell of tables 172,
  *    173 and 174. Three things about it are worth knowing before reading
  *    the code:
- *      * tSCL IS NOT tSCLL + tSCLH. 32.4.9's own formula adds tSYNC1 +
+ *      * tSCL is not tSCLL + tSCLH. 32.4.9's own formula adds tSYNC1 +
  *        tSYNC2 - the SCL edge slopes, the filters and two to three
  *        kernel periods of synchronization - and the manual's example
- *        tables charge 250..1000 ns of it. Its slopes are a BUS fact,
- *        not a chip one, so the measured value is an ARGUMENT
+ *        tables charge 250..1000 ns of it. Its slopes are a bus fact,
+ *        not a chip one, so the measured value is an argument
  *        (I2cBusTiming::sync_ns) beside the rise and fall times; left
- *        unmeasured, the chooser charges the chip's own FLOOR under it
+ *        unmeasured, the chooser charges the chip's own floor under it
  *        (the filters and two kernel periods an edge, no slope), so a
- *        requested rate is a CEILING no wire exceeds - where the
+ *        requested rate is a ceiling no wire exceeds - where the
  *        manual's budgets and ST's own timing utility, charging more
- *        than a short wire takes, run such a wire FASTER than asked.
- *      * SDADEL HAS NO +1 AND THE OTHER THREE DO: tSDADEL = SDADEL x
+ *        than a short wire takes, run such a wire faster than asked.
+ *      * SDADEL has no +1 and the other three do: tSDADEL = SDADEL x
  *        tPRESC while tSCLDEL, tSCLL and tSCLH are all (field + 1) x
  *        tPRESC (32.9.5). One helper for all four would be wrong for
  *        exactly one of them.
- *      * THE KERNEL CLOCK HAS THREE FLOORS AND ALL THREE BIND: 32.4.3's
+ *      * The kernel clock has three floors and all three bind: 32.4.3's
  *        tI2CCLK < (tLOW - tfilters)/4 and tI2CCLK < tHIGH; DS13560
  *        table 74's 2 / 9 / 18 MHz; and ES0548 2.10.1's 4 / 10 / 20 MHz,
  *        which is the strictest of the three in every mode. The chooser
@@ -77,47 +128,47 @@
  *        and states the datasheet's as a constant so a bench can compare
  *        them.
  *
- *  - ES0548 2.10.2 IS LIVE AND IT COSTS THE VOCABULARY A CODE. In master
+ *  - ES0548 2.10.2 is live and it costs the vocabulary a code. In master
  *    mode a BERR can be raised spuriously, "detection of bus error has no
  *    effect on the I2C-bus transfer ... and any such transfer continues
  *    normally", and the workaround is to clear the flag and go on. So the
- *    host engine CLEARS BERR AND COUNTS IT (spurious_bus_errors()) and
- *    NEVER reports i2c_bus_error from it: on this silicon a master's BERR
+ *    host engine clears BERR and counts it (spurious_bus_errors()) and
+ *    never reports i2c_bus_error from it: on this silicon a master's BERR
  *    is not evidence. What the engine does report as i2c_bus_error is its
  *    own bounded wait running out - a tenure the peripheral never
- *    started. A CLIENT's BERR is untouched by the erratum and is
+ *    started. A client's BERR is untouched by the erratum and is
  *    reported.
  *
- *  - THE ONE VERB THAT DISABLES IS 32.4.6's PROCEDURE. Clearing PE
+ *  - The one verb that disables is 32.4.6's procedure. Clearing PE
  *    releases both lines, resets the state machines, CR2's START, STOP,
- *    PECBYTE and NACK and every ISR flag - and KEEPS every configuration
+ *    PECBYTE and NACK and every ISR flag - and keeps every configuration
  *    register (CR1's other bits, OAR1, OAR2, TIMINGR, TIMEOUTR and the
  *    rest of CR2). The chapter demands PE stay low for at least three APB
  *    cycles and prescribes the sequence write-0 / read-0 / write-1, so
  *    disable() is that sequence and there is no raw PE clear in the file.
- *    It is also the chapter's OWN deadlock escape (32.4.9: "restores the
+ *    It is also the chapter's own deadlock escape (32.4.9: "restores the
  *    normal operation ... by toggling the PE bit"), which is why
  *    recover() is built on it.
  *
- *  - EVERY FIELD THE REGISTER DESCRIPTION GATES IS A VERB THAT REFUSES.
+ *  - Every field the register description gates is a verb that refuses.
  *    The gates are not one rule but four: PE = 0 for TIMINGR (whole
  *    register), NOSTRETCH, ANFOFF, DNF and PECEN; START = 0 for CR2's
  *    SADD, RD_WRN, ADD10, HEAD10R and NBYTES; OA1EN = 0 for OAR1's own
  *    fields and OA2EN = 0 for OAR2's; TIMOUTEN = 0 for TIMEOUTA and TIDLE
- *    and TEXTEN = 0 for TIMEOUTB. Each verb checks ITS OWN gate rather
+ *    and TEXTEN = 0 for TIMEOUTB. Each verb checks its own gate rather
  *    than one blanket rule, because here - unlike the SPI's - the gates
- *    really differ. Whether the SILICON enforces any of them is a
+ *    really differ. Whether the silicon enforces any of them is a
  *    different question, and the bench asks it directly.
  *
- *  - THE VECTOR IS SHARED where the part has an I2C3: I2C2 and I2C3 sit
+ *  - The vector is shared where the part has an I2C3: I2C2 and I2C3 sit
  *    on I2C2_3_IRQn (the reserve derives it from I2C3_BASE), so an app
  *    binds BRIO_STM32G0_I2C2_HANDLER and calls both instances' bodies.
  *    I2C1's line is its own everywhere - and it is also EXTI line 23, the
  *    wake, which is why arming the wake needs the EXTI's mask and not
  *    just WUPEN.
  *
- *  - THE WAKE FROM STOP IS TRIPLE-GATED AND THE HARDWARE ENFORCES ONE OF
- *    THE THREE: HSI16 must be the kernel clock (32.4.16), NOSTRETCH must
+ *  - The wake from Stop is triple-gated and the hardware enforces one of
+ *    the three: HSI16 must be the kernel clock (32.4.16), NOSTRETCH must
  *    be clear, and DNF must be 0000 - the last one is a real interlock on
  *    WUPEN and not just a caution. ES0548 2.2.4 adds a fourth from
  *    outside the chapter: a peripheral with clock-request capability does
@@ -1355,14 +1406,14 @@ struct I2c {
     }
 
     /**
-     * THE SAME WORD WITH START IN IT, IN ONE STORE - and this is not a
-     * convenience but the only correct way to issue a REPEATED START.
+     * The same word with START in it, in one store - and this is not a
+     * convenience but the only correct way to issue a repeated START.
      *
      * 32.9.2 gives START two meanings ("if the I2C is already in
      * controller mode with AUTOEND = 0, setting this bit generates a
      * repeated START condition ... after the end of the NBYTES
-     * transfer") and says nothing about the ORDER of the two writes it
-     * takes to get there. THE ORDER DECIDES, and the bench measured it:
+     * transfer") and says nothing about the order of the two writes it
+     * takes to get there. The order decides, and the bench measured it:
      * at TC the previous transfer is finished but UNTERMINATED, so a CR2
      * store that raises AUTOEND before START is read as a request to end
      * THAT transfer - the peripheral sends the STOP at once and START,
@@ -1371,10 +1422,12 @@ struct I2c {
      * with no second address match at the client, where a repeated START
      * owes two.
      *
-     * So the engine uses THIS verb and transfer() is for a caller that
+     * So the engine uses this verb and transfer() is for a caller that
      * means to prepare CR2 and launch later - legal exactly when the bus
      * is idle and there is no unterminated transfer for AUTOEND to act
-     * on.
+     * on. Neither verb waits: false means nothing was written (START
+     * still standing, an address that does not fit its mode, or RELOAD
+     * with AUTOEND), and the transfer's progress is read from the flags.
      */
     [[gnu::always_inline]] static bool transfer_now(
         uint16_t addr, bool read, uint8_t nbytes, bool auto_end, bool reload = false,
@@ -1594,7 +1647,7 @@ struct I2c {
     static uint32_t timeouts() { return regs().TIMEOUTR; }
 
     /**
-     * THE SILICON'S OWN ANSWER to table 165's SMBus column, and the
+     * The silicon's own answer to table 165's SMBus column, and the
      * reason it can be asked at all: 32.9.6 says that on an instance
      * without SMBus "this register is reserved, and its bits are forced
      * by hardware to 0". So a value written into TIMEOUTR either reads
@@ -1620,13 +1673,14 @@ struct I2c {
      *     not start upon receiving START condition";
      *   - DNF must be 0000 (a hardware interlock on WUPEN itself) and
      *     NOSTRETCH must be clear.
-     * WHAT IT CANNOT CHECK is ES0548 2.2.4's condition from outside the
+     * What it cannot check is ES0548 2.2.4's condition from outside the
      * chapter: a peripheral with clock-request capability does not wake
      * the device at all while RCC's HSIDIV is anything but 000. The
-     * caller owes that one, and the doc says so.
+     * caller owes that one, and the doc says so. False means nothing
+     * was written.
      *
-     * The EXTI line is DIRECT (table 65): no trigger selection, no
-     * pending bit of its own - the peripheral's ADDR match IS the
+     * The EXTI line is direct (table 65): no trigger selection, no
+     * pending bit of its own - the peripheral's ADDR match is the
      * pending state - so all this does is unmask it.
      */
     static bool wake_from_stop(bool on) {
@@ -1705,11 +1759,14 @@ struct I2c {
     /// makes the shared I2C2/I2C3 vector safe.
     [[gnu::always_inline]] static uint32_t isr() { return pending(); }
 
-    /// The interrupt line off, the block disabled and RESET, the clock
-    /// gated. THE RESET LINE BEFORE THE GATE is the release contract
+    /// The interrupt line off, the block disabled and reset, the clock
+    /// gated. The reset line before the gate is the release contract
     /// (docs/design/dma.md): a DMA request the block raised - TXIS or
     /// RXNE behind TXDMAEN or RXDMAEN, which an abandoned tenure leaves -
-    /// is not left standing for the next owner of its request line.
+    /// is not left standing for the next owner of its request line. For
+    /// setup or the owning active object, with no tenure in flight; the
+    /// pads are not touched here (the tasks' release() verbs give them
+    /// back).
     static void release() {
         Nvic::disable(irq());
         (void)disable();
@@ -1859,8 +1916,10 @@ inline constexpr uint8_t i2c_dma_fault = bus_engine_status + 4;
  * that proof, or on a count run to zero, and abandons it - counted, an
  * untransmitted tail - otherwise.
  *
- * THE DMA CONTROLLER IS THE APP'S: Dma1::init() before any engined
- * init(). The engines arm CHANNELS of a controller somebody else owns.
+ * The DMA controller needs no init() of its own: an engine's arm()
+ * opens the controller's clock (stm32g0/dma.hpp's bind()), so an
+ * engined init() stands alone. The engines arm channels of a
+ * controller the program shares with its other DMA users.
  *
  * WHAT A CLOCK SWITCH DOES: TIMINGR is solved against the KERNEL clock,
  * so a port on PCLK or SYSCLK must be re-solved when the rate moves and
@@ -1912,13 +1971,19 @@ public:
     static constexpr I2cPins pin_pads = pins;
     static constexpr bool has_engines = TxEngine::present;
 
+    /// One bus tenure, in the shape every target's I2cHost takes
+    /// (docs/design/i2c-bus.md). The two buffers are loans
+    /// (kernel/borrowed.hpp): the client that posts the request keeps
+    /// them valid, and the tx bytes unchanged, until the reply event
+    /// lands; the engine reads and writes them from the interrupt until
+    /// then.
     struct Request {
         uint8_t addr;          ///< 7-bit client address (unshifted)
-        /// Bytes written after START, LENT until the reply lands (may be
+        /// Bytes written after START, lent until the reply lands (may be
         /// null if tx_len == 0).
         Borrowed<const uint8_t, Lease::reply> tx;
         uint8_t tx_len;
-        /// Where the bytes read after the (repeated) START+R land; LENT
+        /// Where the bytes read after the (repeated) START+R land; lent
         /// until the reply lands.
         Borrowed<uint8_t, Lease::reply> rx;
         uint8_t rx_len;
@@ -1929,10 +1994,14 @@ public:
 
     // ---- lifecycle ----------------------------------------------------------
 
-    /// Bring the instance up as a bus host.
+    /// Bring the instance up as a bus host. Called from main(), after
+    /// the clock task's init(); with DMA engines named it needs no
+    /// controller init first, since arm() opens the controller's clock
+    /// (stm32g0/dma.hpp). It waits for nothing and leaves the instance's
+    /// interrupt line enabled with ERRIE alone armed.
     ///
     /// `clock` is the app's brio::Clock tag; the timing arithmetic is
-    /// solved against the KERNEL clock, which is `select`ed here and may
+    /// solved against the kernel clock, which is selected here and may
     /// be PCLK, SYSCLK or HSI16 on an instance that has the multiplexer
     /// (I2C1 always, I2C2 on the G0B1/G0C1). HSI16 is worth choosing for
     /// two reasons and the bench uses both: it is the only kernel clock a
@@ -1940,7 +2009,7 @@ public:
     /// ES0548 2.10.1 would otherwise refuse - at a 2 MHz core NO speed of
     /// the vocabulary is legal on PCLK, and all three are on HSI16.
     ///
-    /// `bus` is the BUS'S own edges and its measured SCL detection delay
+    /// `bus` is the bus's own edges and its measured SCL detection delay
     /// (I2cBusTiming). Nullopt (the default) means the standard's own
     /// edge limits for each mode and no measured tSYNC, so each speed
     /// asked is a ceiling the wire stays at or under; a bus that states
@@ -2008,20 +2077,22 @@ public:
         return true;
     }
 
-    /// The core clock changed (DynamicClock fan-out): re-solve the
-    /// three speeds' TIMINGR values against the new KERNEL rate.
+    /// The core clock changed (the DynamicClock fan-out, in main
+    /// context): re-solve the three speeds' TIMINGR values against the
+    /// new kernel rate.
     ///
-    /// A port on HSI16 FOLDS TO NOTHING - its kernel clock did not move -
+    /// A port on HSI16 folds to nothing - its kernel clock did not move -
     /// which is the whole reason a bus can outlive a rate change that
     /// would otherwise refuse it. A speed this kernel clock cannot
     /// produce is marked unreachable, not an error: speed_ok() answers,
     /// and only a request naming it is refused.
     ///
-    /// THE BUS MUST BE IDLE: TIMINGR is PE-gated, so applying a new value
-    /// costs a PE cycle, and a PE cycle mid-tenure releases both lines.
+    /// The bus must be idle, and that is the caller's duty: TIMINGR is
+    /// PE-gated, so applying a new value costs a PE cycle, and a PE cycle
+    /// mid-tenure releases both lines.
     ///
-    /// VOID, because util/clock.hpp's ClockUser concept says so - the
-    /// fan-out has no caller to report to. What a rate change can COST is
+    /// Void, because util/clock.hpp's ClockUser concept says so - the
+    /// fan-out has no caller to report to. What a rate change can cost is
     /// asked afterwards, and speed_ok() is the verb: at 2 MHz on PCLK it
     /// answers false for all three speeds, which is the whole finding of
     /// this driver's ladder.
@@ -2086,14 +2157,17 @@ public:
 
     // ---- the transfer -------------------------------------------------------
 
-    /// Begin one bus tenure (called by I2cBus from main context).
+    /// Begin one bus tenure (called by I2cBus from main context, one
+    /// tenure at a time - the arbiter serializes). It does not wait.
     /// Returns false whenever the wire moves - the tenure runs on the
     /// ISR and a TransferDone{status()} follows - and true for the two
     /// failures that move nothing, answered through status(): a speed
     /// this kernel clock cannot produce (i2c_rejected), and a START
     /// still standing from a tenure the peripheral never closed
     /// (i2c_bus_error). That is the I2cHost contract
-    /// (docs/design/i2c-bus.md).
+    /// (docs/design/i2c-bus.md). The Request's buffers stay the client's
+    /// loans until the reply; the engine keeps its own copy of the other
+    /// fields, so the Request itself may go once this returns.
     static bool start(const Request& r) {
         // What the tenure's entries read, and nothing else of the Request:
         // the reply and the speed are the arbiter's and start()'s.
@@ -2334,14 +2408,17 @@ public:
 
     /// The classic bus unstick: nine SCL pulses and a STOP, by
     /// hand, open-drain, with the pads reclaimed from the peripheral for
-    /// the duration. RECOVER() FIXES THE PERIPHERAL, THIS FIXES THE
-    /// WIRE.
+    /// the duration. recover() fixes the peripheral, this fixes the
+    /// wire. Main context, with no tenure in flight: it spins (about
+    /// 5 us a half bit, at most nine pulses and a STOP) and keeps the
+    /// instance's interrupt line off until it returns; interrupts are
+    /// not masked.
     ///
     /// Returns the number of pulses it took a stuck client to release SDA
     /// (0 = the wire was never stuck), or 0xFF when nine pulses and a
     /// STOP left SDA still low - a short, not a client.
     ///
-    /// A HEALTHY WIRE IS LEFT ALONE: SDA already high means nothing is
+    /// A healthy wire is left alone: SDA already high means nothing is
     /// stuck, and zero pulses is both the answer and the action. Pulsing
     /// first and asking after would report "released at pulse 1" on a
     /// clean bus and put nine spurious clocks on it.
@@ -2392,9 +2469,12 @@ public:
         return released_at == 0xFF ? 0u : released_at;
     }
 
-    /// Put the ENGINE back where start() is legal - the verb a
+    /// Put the engine back where start() is legal - the verb a
     /// timed I2cBus calls on a tenure that never answered
-    /// (util/bus_master.hpp).
+    /// (util/bus_master.hpp). Main context; the instance's interrupt
+    /// line is off while it runs, the tenure in flight is dropped
+    /// without a TransferDone (the arbiter's time-out is its reply), and
+    /// a DMA engine carrying a half is abandoned or stopped.
     ///
     /// It is 32.4.6's PE cycle and nothing more, because 32.4.6 is
     /// exactly what the chapter offers for this: "restores the normal
@@ -2404,7 +2484,7 @@ public:
     /// register, so the timings, the filters and the pads survive it and
     /// nothing is reconfigured.
     ///
-    /// THE WIRE IS NOT ITS JOB: a client still holding SDA makes the next
+    /// The wire is not its job: a client still holding SDA makes the next
     /// tenure report, and unstick() is the wire's verb.
     ///
     /// Returns false when PE would not read back clear.
@@ -2425,6 +2505,10 @@ public:
         return ok;
     }
 
+    /// Everything given back: the interrupt line, the engines, the
+    /// block (reset, its clock gated - I2c<n>::release()) and the two
+    /// pads to their reset state. Main context, with no tenure in
+    /// flight; init() brings it up again.
     static void release() {
         Nvic::disable(S::irq());
         if constexpr (has_engines) {
@@ -2577,7 +2661,8 @@ private:
     /// The shortest half an engine carries. A one-byte half costs the
     /// pump no data interrupt - the write's byte is preloaded, the read's
     /// is taken at the STOP - so a channel programmed for it would be
-    /// cost with nothing saved (measured: bench_stm32's letter i, the
+    /// cost with nothing saved (measured by the suite's letter i - a
+    /// letter is one command key of a test suite's console - the
     /// one-byte write and read through both, docs/stm32g0/i2c.md).
     static constexpr uint8_t dma_min_bytes = 2;
 
@@ -2655,15 +2740,21 @@ public:
     using Resource = S;
     static constexpr I2cPins pin_pads = pins;
 
-    /// Bring the instance up as a bus target.
+    /// Bring the instance up as a bus target. Called from main(), after
+    /// the clock task's init(); it waits for nothing, and false means
+    /// the instance has no multiplexer for that kernel clock, the speed
+    /// cannot be produced at it, or the configuration or the addresses
+    /// are refused. On success the pads are the peripheral's and the
+    /// interrupt line is enabled with nothing armed: the program arms
+    /// what its protocol needs with interrupt().
     ///
-    /// A CLIENT NEEDS TIMINGR TOO, and that surprises people: SDADEL and
-    /// SCLDEL are the data hold and setup delays a TARGET applies, and
+    /// A client needs TIMINGR too, and that surprises people: SDADEL and
+    /// SCLDEL are the data hold and setup delays a target applies, and
     /// 32.4.8 makes the minimum stretch after every falling edge
     /// [(SDADEL + SCLDEL + 1) x (PRESC + 1) + 1] kernel periods. SCLL and
     /// SCLH are the controller's alone and are ignored here. So `speed`
     /// names the row of the standard the delays are solved against - the
-    /// FASTEST bus this target expects to sit on - and not a rate it
+    /// fastest bus this target expects to sit on - and not a rate it
     /// generates.
     template <typename Clock>
     static bool init(Clock clock, const I2cAddressConfig& addr,
@@ -2727,14 +2818,14 @@ public:
     static uint8_t matched_address() { return S::matched_address(); }
 
     /**
-     * Answer the match - and RELEASE THE CLOCK, which is the part that
+     * Answer the match - and release the clock, which is the part that
      * matters: with stretching on, SCL is low from the match until this
      * call.
      *
-     * A TARGET CANNOT NACK ITS OWN ADDRESS on this peripheral: the
+     * A target cannot NACK its own address on this peripheral: the
      * address has already been acknowledged by the time ADDR rises, and
      * the flag is a report rather than a decision point with an ACK bit
-     * of its own. Refusing a tenure is therefore a DATA-phase act - NACK
+     * of its own. Refusing a tenure is therefore a data-phase act - NACK
      * the first byte - and this verb's only job is to let the wire go.
      */
     static void answer_address() { S::clear(I2cClear::addr); }
@@ -2801,8 +2892,14 @@ public:
     /// it - a client's protocol is the application's.
     [[gnu::always_inline]] static uint32_t isr() { return S::isr(); }
 
+    /// Arm or disarm interrupt enables (I2cInterrupt bits) for the
+    /// protocol the application runs; legal at any time, PE does not
+    /// gate them.
     static void interrupt(uint32_t mask, bool on) { S::interrupt(mask, on); }
 
+    /// Everything given back: the interrupt line, the block (reset, its
+    /// clock gated) and the two pads to their reset state. Main context;
+    /// a controller addressing this target afterwards gets no answer.
     static void release() {
         Nvic::disable(S::irq());
         S::release();

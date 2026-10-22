@@ -1,73 +1,96 @@
 /*
  * crc.hpp
  *
- * The STM32G0's CRC calculation unit (RM0444 ch. 14): one AHB peripheral
- * with five registers and no interrupt, no DMA request and no errata -
- * the smallest complete chapter in this stratum.
+ * The STM32G0's CRC calculation unit (RM0444 ch. 14): what a program
+ * uses for a checksum computed by the hardware - of a buffer, of a
+ * packet, of the program's own flash - and, with a DMA channel feeding
+ * it, with no CPU in the loop. One AHB peripheral with five registers
+ * and no interrupt, no DMA request and no errata - the smallest complete
+ * chapter in this stratum.
  *
- *  Crc     the RESOURCE, and there is no task above it: a checksum has
- *          no ordering rule of its own to hide. It is a MONOSTATE:
- *          every part of this family has exactly one, so an instance
- *          number would be a lie with a template parameter attached.
+ *  Crc     the resource, and there is no task (the driver class a util
+ *          service drives) above it: a checksum has no ordering rule of
+ *          its own to hide. It is a monostate - a class with static
+ *          state and no instances - because every part of this family
+ *          has exactly one, so an instance number would be a lie with a
+ *          template parameter attached.
  *
- * FIVE FACTS THAT SHAPE THIS FILE.
+ * The smallest use, the CCITT-16 of a buffer:
  *
- * 1. THE DATA REGISTER IS THE ONLY ONE WITH NARROW ACCESSES. 14.4: "the
+ *     brio::Crc::init();
+ *     brio::Crc::configure(brio::crc_ccitt_false_config);
+ *     brio::Crc::feed(std::span{payload});
+ *     const uint16_t sum = static_cast<uint16_t>(brio::Crc::value_masked());
+ *
+ * Who calls what. init() is called once, from main(), and opens the
+ * unit's bus clock. A checksum is a sequence - configure() or restart(),
+ * the feeds, the read - and the unit holds one calculation at a time, so
+ * a sequence belongs to one context from start to end: setup, or the
+ * handler of the one active object (an object the kernel serves one
+ * event at a time, kernel/active_object.hpp) that owns the unit for it;
+ * a second context feeding between another's feeds corrupts both sums,
+ * and nothing in this file guards against that. No verb spins, blocks
+ * or masks interrupts: a feed is one store and a read one load (what the
+ * datapath's cycles cost a back-to-back write is said at feed()).
+ * feed(span) reads the caller's span for the call alone; the memory a
+ * DMA channel reads into data_address() stays the caller's until that
+ * channel's block completes, by the engine's own rule (stm32g0/dma.hpp).
+ *
+ * Five facts shape this file.
+ *
+ * 1. The data register is the only one with narrow accesses. 14.4: "the
  *    CRC_DR register can be accessed by words, right-aligned half-words
  *    and right-aligned bytes. For the other registers only 32-bit
  *    accesses are allowed" - so feed(), feed16() and feed8() reach the
- *    SAME address through three differently-typed volatile pointers, and
+ *    same address through three differently-typed volatile pointers, and
  *    every other verb in this file is a word store.
  *
- * 2. WHAT A WRITE FEEDS DEPENDS ON REV_IN, AND SO THE BYTE ORDER OF A
- *    WORD IS A CALLER'S QUESTION. A 32-bit write is processed most
- *    significant BYTE first; REV_IN reverses bits by byte, by half-word
+ * 2. What a write feeds depends on REV_IN, and so the byte order of a
+ *    word is a caller's question. A 32-bit write is processed most
+ *    significant byte first; REV_IN reverses bits by byte, by half-word
  *    or across the whole word before that happens (14.3.3's own
- *    0x1A2B3C4D example). So a byte STREAM fed as words is only the same
+ *    0x1A2B3C4D example). So a byte stream fed as words is only the same
  *    computation as the same stream fed byte by byte when the assembly
- *    matches the reversal: BIG-ENDIAN assembly under REV_IN none or
+ *    matches the reversal: big-endian assembly under REV_IN none or
  *    byte, little-endian assembly under REV_IN word. `feed(span)`
- *    assembles big-endian and FALLS BACK to byte-by-byte under the two
+ *    assembles big-endian and falls back to byte-by-byte under the two
  *    reversals that cross a byte boundary, so the verb means one thing
  *    whatever is configured. The equivalence is measured in all four
  *    settings rather than asserted.
  *
- * 3. THE POLYNOMIAL MAY NOT CHANGE MID-CALCULATION. 14.3.3: "if a CRC
+ * 3. The polynomial may not change mid-calculation. 14.3.3: "if a CRC
  *    calculation is ongoing, the application must either reset it or
  *    perform a CRC_DR read before changing the polynomial" - so
- *    configure() ENDS with CR.RESET, which is also what makes a
+ *    configure() ends with CR.RESET, which is also what makes a
  *    configuration a fresh start rather than a modifier of whatever was
  *    in DR. Writing CRC_INIT alone would do half of it: 14.3.3 says
  *    "the CRC_DR register is automatically initialized upon CRC_INIT
  *    register write access", which is one of the two things RESET does.
  *
- * 4. EVEN POLYNOMIALS DO NOT EXIST. 14.3.3 says so in four words and
+ * 4. Even polynomials do not exist. 14.3.3 says so in four words and
  *    the silicon enforces nothing, so `crc_config_valid()` refuses a
  *    polynomial with bit 0 clear - and refuses one that does not fit
  *    the width it declares, which the register cannot notice either
  *    (14.4.5: "if the polynomial size is less than 32 bits, the least
  *    significant bits have to be used").
  *
- * 5. CRC_IDR IS NOT A CRC REGISTER. 14.4.2: four bytes of general
+ * 5. CRC_IDR is not a CRC register. 14.4.2: four bytes of general
  *    storage "not affected by CRC resets generated by the RESET bit" -
  *    scratch() is offered because the chapter offers it, and it is the
  *    one register here whose value means nothing to this peripheral.
  *
- * ## util/crc.hpp is NOT replaced and NOT hooked
- *
- * util/crc.hpp's bitwise CRC-16/CCITT-FALSE is portable, constexpr and
- * the nonvolatile stores' judge. This block computes the same checksum
- * with `crc_ccitt_false_config` - measured bit for bit over 4 KB - but
+ * util/crc.hpp is not replaced and not hooked. util/crc.hpp's bitwise
+ * CRC-16/CCITT-FALSE is portable, constexpr and the nonvolatile stores'
+ * judge. This block computes the same checksum with
+ * `crc_ccitt_false_config` - measured bit for bit over 4 KB - but
  * nothing in util/ is pointed at it: a hardware hook for a util service
  * is a design question about the util level (a concept, a fallback, what
  * a constexpr context does with a peripheral), and it is not this
  * stratum's to open.
  *
- * ## Errata
- *
- * ES0548 Rev 3, read on the bench chip's revision Z column: NO ITEM
- * TOUCHES THE CRC. That is a statement about the document, not a claim
- * about the silicon.
+ * Errata: ES0548 Rev 3, read on the bench chip's revision Z column, has
+ * no item that touches the CRC. That is a statement about the document,
+ * not a claim about the silicon.
  */
 
 #pragma once
@@ -242,14 +265,17 @@ public:
         (void)RCC->AHBRSTR;
     }
 
-    /// Clock on, then reset: the whole of "bring the CRC up".
+    /// Clock on, then reset: the whole of "bring the CRC up". Called once,
+    /// from main(); the unit then holds the reset configuration of 14.4.6
+    /// until configure().
     static void init() {
         bus_clock(true);
         reset();
     }
 
     /// Block reset and its clock closed. Nothing else is claimed - the
-    /// CRC has no pad, no interrupt and no request line.
+    /// CRC has no pad, no interrupt and no request line. Not while a DMA
+    /// channel is feeding the unit: that channel is stopped first.
     static void release() {
         reset();
         bus_clock(false);
@@ -350,7 +376,7 @@ public:
      * Under REV_IN halfword or word the reversal crosses byte
      * boundaries, so no assembly makes the two paths agree and this verb
      * FEEDS BYTE BY BYTE instead. The branch is one read of CR. Fact 2
-     * of the file header; all four settings are measured rather than
+     * of the opening comment; all four settings are measured rather than
      * trusted to this comment.
      */
     static void feed(std::span<const uint8_t> data) {

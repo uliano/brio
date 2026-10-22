@@ -1,22 +1,66 @@
 # ADC (STM32G0)
 
-Documents of record: RM0444 Rev 6 ch. 15, with 5.4.13 (RCC_CCIPR.ADCSEL)
+This document is for a programmer who needs to measure a voltage: a
+pad, the supply itself (VDDA, with no meter on the desk), the die's
+temperature. `Adc` is the one converter every STM32G0 has, a monostate
+(a class with static state and no instances, because the part has
+exactly one); `AnalogIn<Pin, channel>` is a pad on a channel; and the
+util sampler ([design/analog.md](../design/analog.md)) runs over it as
+on every target.
+
+The smallest use, a pad read in millivolts against a supply the
+converter has measured itself:
+
+```cpp
+using Sense = brio::AnalogIn<brio::Pin<'A', 4>, 4>;   // DS13560: PA4 is ADC_IN4
+
+constexpr brio::AdcConfig cfg{
+    .clock_mode = brio::AdcClockMode::pclk_div2,       // 32 MHz from a 64 MHz bus
+    .sample1 = brio::AdcSampleTime::cycles160_5,       // slow source, long window
+};
+
+brio::Adc::init(clock, cfg);
+brio::Adc::vrefint(true);
+Sense::claim();
+
+const uint16_t vref = (brio::Adc::select(brio::AdcInput::vrefint), brio::Adc::read());
+const uint16_t vdda = brio::Adc::vdda_mv(vref);        // millivolts, with no meter
+const uint16_t mv   = brio::adc_mv((brio::Adc::select(Sense{}), brio::Adc::read()),
+                                   brio::Adc::result_steps(), vdda);
+```
+
+What decides correctness even there. `init()` spends real microseconds,
+once, on the internal regulator's start-up and on the self-calibration
+the part has instead of a factory trim. A configuration can change only
+while the converter is disabled, and `configure()` refuses otherwise
+(the structural answer to an erratum). A new channel selection is in
+force only when the converter acknowledges it, and a start before that
+is ignored: `select()` waits for the handshake, bounded, and
+`select_sync()` is the same with an answer. The channel number beside
+the pin is the datasheet's and nothing in the code checks it. And a
+reading taken against the supply is only in volts once the supply is
+known: `vdda_mv()` measures it through the internal reference, which is
+why the example reads VREFINT first.
+
+## Documents of record
+
+RM0444 Rev 6 ch. 15, with 5.4.13 (RCC_CCIPR.ADCSEL)
 and the vector table 12.3 (table 61); DS13560 Rev 5 tables 5, 6, 12, 27,
 62, 63, 65 and 66 (the factory calibration values and their addresses,
 the pad-to-channel map, fADC and the sampling-time minima); errata
 ES0548 Rev 3 items 2.6.1..2.6.5, read on the bench chip's revision Z
 column. Driver: `stm32g0/adc.hpp`; the reference vocabulary is
 `stm32g0/vref.hpp`'s (see [vref.md](vref.md)), the per-part facts come
-from `stm32g0/device_tables.hpp`. Bench suite: `test_stm32_analog`
-(18 letters, 139 verdicts, wireless), shared with the DAC, the reference
-buffer and the comparators. Family fixture
+from `stm32g0/device_tables.hpp` (the reserve: the table of what each part has, read off the device header). Bench suite:
+`test_stm32_analog` (18 letters, 139 verdicts, wireless; a letter is one command key of the suite's console and the group of verdicts it runs),
+shared with the DAC, the reference buffer and the comparators. Family fixture
 `test/family_stm32g0/adc.cpp` plus four negatives under
 `brio check stm32g0`.
 
 ## What the silicon does
 
 **One converter, nineteen channels, and no instance question at all.**
-Every STM32G0 carries exactly one ADC (15.1), so `Adc` is a MONOSTATE and
+Every STM32G0 carries exactly one ADC (15.1), so `Adc` is a monostate and
 not an `Adc<n>`. Sixteen of the nineteen channels are pads and three are
 internal: the temperature sensor on 12, VREFINT on 13 and VBAT/3 on 14
 (15.3.8), each woken by its own bit of ADC_CCR. That register is NOT part

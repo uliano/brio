@@ -1,18 +1,61 @@
 # LPUART (STM32G0)
 
-Documents of record: RM0444 Rev 6 - LPUART ch. 34 (the implementation
+This document is for a programmer who needs a serial port that costs
+little: one that runs off the 32.768 kHz crystal with every other
+oscillator stopped, or one that brings the chip out of Stop on an
+incoming character. `Lpuart<n>` is the instance; `LpUart<n, pins, ...>`
+is the USART's own task ([usart.md](usart.md)) named over it, so
+everything that document says about the task (its rings, its options,
+`print`, the serial stack above it) holds here, and this page carries
+only what chapter 34 changes: the baud generator, the modes the block
+lacks, its clocks and its wake.
+
+The smallest use, a port on the crystal at 9600 baud:
+
+```cpp
+constexpr brio::UartPins lp_pins{
+    .tx = {'C', 1, brio::PinFunction::af1},   // LPUART1_TX, DS13560 table 17
+    .rx = {'C', 0, brio::PinFunction::af1},   // LPUART1_RX
+};
+constexpr brio::UartOptions lse_opts{.kernel_clock = brio::UsartClock::lse};
+using Low = brio::LpUart<1, lp_pins, 64, 128, brio::NoDmaEngine,
+                         brio::NoDmaEngine, lse_opts>;
+
+extern "C" void USART3_4_5_6_LPUART1_IRQHandler() { (void)Low::isr(); }
+
+brio::RtcDomain::lse_enable(true);            // the kernel clock has to run
+(void)brio::RtcDomain::lse_wait_ready(4'000'000UL);
+Low::init(clock, 9600);                       // 9600 is the LSE's ceiling
+```
+
+What decides correctness even there: the kernel clock the port is told
+to use must be running before `init()`, and the crystal belongs to the
+RTC domain ([rtc.md](rtc.md)), so the program starts it there and waits
+for it; the rate must sit inside the generator's window (the clock
+between 3 and 4096 times the baud rate, so 9600 is the crystal's
+ceiling, and `init()` refuses a rate outside it); and the vector is a
+shared line whose name changes with the part (`USART3_4_5_6_LPUART1_IRQHandler`
+on the G0B1; a program for more than one board binds
+`BRIO_STM32G0_LPUART1_HANDLER`, [README.md](README.md), "Vector names
+across the boards"). A wake from Stop adds obligations the task cannot
+enforce, listed under "How to use it".
+
+## Documents of record
+
+RM0444 Rev 6 - LPUART ch. 34 (the implementation
 tables 183/184 it shares with the USART, the baud generator 34.4.7 with
 its tables 198 and 199, the low-power management 34.4.14, the registers
 34.7), RCC 5.4.21 (LPUART1SEL at bit 10 and LPUART2SEL at bit 8 of
 RCC_CCIPR) and the EXTI's table 65 (lines 28 and 35). Errata ES0548
-Rev 3: NO ITEM NAMES THE LPUART; 2.2.4 reaches it in the same way it
+Rev 3: no item names the LPUART; 2.2.4 reaches it in the same way it
 reaches the USART, because both are clock-request peripherals (see
 "Bench findings"). Driver: `stm32g0/lpuart.hpp` (`Lpuart<n>` resource +
-`LpUart<n, pins, ...>`, which is `stm32g0/usart.hpp`'s OWN `UartTask`
+`LpUart<n, pins, ...>`, which is `stm32g0/usart.hpp`'s own `UartTask`
 named over this resource). The base, presence, bus clock, clock-select
 position, vector and EXTI line come from
-`stm32g0/device_tables.hpp`. Bench suite: `test_stm32_serial` letters n
-(in `z`) and v (host-assisted, outside `z`). Family fixture
+`stm32g0/device_tables.hpp` (the reserve: the table of what each part has, read off the device header). Bench suite:
+`test_stm32_serial` letters n (in `z`) and v (host-assisted, outside
+`z`); a letter is one command key of the suite's console and the group of verdicts it runs, and `z` is the key that runs them all. Family fixture
 `test/family_stm32g0/lpuart.cpp` plus four negatives under
 `brio check stm32g0`.
 

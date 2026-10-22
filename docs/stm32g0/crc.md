@@ -1,11 +1,40 @@
 # CRC calculation unit (STM32G0)
 
-Documents of record: RM0444 Rev 6 - CRC ch. 14, the AHB enable and reset
-5.4.8/5.4.4, the DMA request table 55 (which has NO CRC row). Errata
-ES0548 Rev 3: NO ITEM TOUCHES THE CRC - a statement about the document,
+This document is for a programmer who needs a checksum: of a buffer, of
+a packet, of the program's own flash, computed by the hardware and, with
+a DMA channel feeding it, with no CPU in the loop. `Crc` is the unit, a
+monostate (a class with static state and no instances, since every part
+has exactly one).
+
+The smallest use, the CCITT-16 of a buffer, the same checksum
+`util/crc.hpp` computes in software:
+
+```cpp
+brio::Crc::init();
+brio::Crc::configure(brio::crc_ccitt_false_config);
+brio::Crc::feed(std::span<const uint8_t>{payload, len});
+const uint16_t sum = static_cast<uint16_t>(brio::Crc::value_masked());
+```
+
+What decides correctness even there: `init()` opens the unit's bus
+clock; `configure()` ends in a reset of the running calculation, because
+the chapter forbids changing the polynomial mid-way, so a configuration
+comes before the first `feed()` and never between two; `feed()`
+assembles words most significant byte first, as the unit consumes them,
+so the verb means one thing whatever the input and output reversals
+say; and a polynomial the register would accept and the chapter forbids
+(an even one, or one wider than the size it declares) is refused before
+a register is touched.
+
+## Documents of record
+
+RM0444 Rev 6 - CRC ch. 14, the AHB enable and reset
+5.4.8/5.4.4, the DMA request table 55 (which has no CRC row). Errata
+ES0548 Rev 3: no item touches the CRC - a statement about the document,
 not a claim about the silicon. Driver: `stm32g0/crc.hpp`; the presence
-and mask facts come from `stm32g0/device_tables.hpp`. Bench suite:
-`test_stm32_crc` (6 letters, 33 verdicts, wireless). Family fixture
+and mask facts come from `stm32g0/device_tables.hpp` (the reserve: the table of what each part has, read off the device header).
+Bench suite: `test_stm32_crc` (6 letters, 33 verdicts, wireless;
+a letter is one command key of the suite's console and the group of verdicts it runs). Family fixture
 `test/family_stm32g0/crc.cpp` plus two negatives under
 `brio check stm32g0`.
 
@@ -14,7 +43,7 @@ and mask facts come from `stm32g0/device_tables.hpp`. Bench suite:
 A hardware polynomial divider on the AHB with five registers, no
 interrupt, no request line and no errata - the smallest complete chapter
 in this stratum. Every part of the family has exactly one, so `Crc` is a
-MONOSTATE and not a template.
+monostate and not a template.
 
 **One data register does everything.** A write to `CRC_DR` combines the
 new datum with what is already there; a read of the same address returns

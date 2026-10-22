@@ -1,51 +1,73 @@
 /*
  * lpuart.hpp
  *
- * The LOW-POWER UART (RM0444 ch. 34), in this stratum's two strata:
+ * The STM32G0's low-power UART (RM0444 ch. 34) as a serial port that
+ * costs little: one that runs off the 32.768 kHz LSE crystal with every
+ * other oscillator stopped, or one that brings the chip out of Stop on
+ * an incoming character. The header has this stratum's two strata:
  *
- *  Lpuart<n>              the RESOURCE - LPUART1 on every G0, LPUART2 on
+ *  Lpuart<n>              the resource - LPUART1 on every G0, LPUART2 on
  *                         the G0B1/G0C1 class;
- *  LpUart<n, pins, ...>   the TASK, which is stm32g0/usart.hpp's OWN
+ *  LpUart<n, pins, ...>   the task, which is stm32g0/usart.hpp's own
  *                         `UartTask` named over this resource. One
  *                         implementation, two peripherals.
  *
- * WHY THIS IS A SEPARATE HEADER AND NOT A TEMPLATE ARGUMENT OF THE
- * USART'S. Chapter 34 is chapter 33 with three differences, and only one
+ * The smallest use is the USART's console with two changes: the task is
+ * `brio::LpUart<1, pins, 64, 128, brio::NoDmaEngine, brio::NoDmaEngine,
+ * opts>` with `opts.kernel_clock = brio::UsartClock::lse`, and the
+ * crystal is started first - it belongs to the RTC domain
+ * (RtcDomain::lse_enable(), stm32g0/rtc.hpp) and the kernel clock has to
+ * be running before init() (docs/stm32g0/lpuart.md writes it out; 9600
+ * baud is the crystal's ceiling). Everything the task does - its rings,
+ * its options, print() and SerialPort over it, which context calls what
+ * and what waits - is stm32g0/usart.hpp's opening comment, and holds
+ * here unchanged: init() and release() from setup, isr() from the
+ * program's handler for the shared vector, the transmit and receive
+ * verbs from the main context. The resource below keeps the USART's
+ * contexts too: its configuring verbs are setup verbs that refuse while
+ * UE stands (false, nothing written), its interrupt enables mask
+ * interrupts for their read-modify-write, its flag and data verbs are
+ * single loads and stores from any context.
+ *
+ * Why this is a separate header and not a template argument of the
+ * USART's. Chapter 34 is chapter 33 with three differences, and only one
  * of them is small:
  *
- *  1. THE BAUD GENERATOR IS ANOTHER ARITHMETIC ALTOGETHER (34.4.7):
- *     baud = 256 x lpuart_ker_ck_pres / LPUARTDIV, LPUARTDIV a TWENTY-bit
- *     number in LPUART_BRR, values below 0x300 FORBIDDEN, and fck must
+ *  1. The baud generator is another arithmetic altogether (34.4.7):
+ *     baud = 256 x lpuart_ker_ck_pres / LPUARTDIV, LPUARTDIV a twenty-bit
+ *     number in LPUART_BRR, values below 0x300 forbidden, and fck must
  *     sit between 3 x and 4096 x the baud rate. That is not "the USART's
  *     divisor with a factor": it is a fixed-point divisor with a
  *     legal window, and getting it wrong is a link that does not run.
- *  2. THE FEATURE SET IS THE `LP` COLUMN of table 184: no synchronous
+ *  2. The feature set is the `LP` column of table 184: no synchronous
  *     mode, no smartcard, no IrDA, no LIN, no auto-baud, no receiver
- *     time-out, no Modbus - and NO OVER8, because with 256 sub-steps
- *     there is nothing for it to do. What IS there, and is the point of
+ *     time-out, no Modbus - and no OVER8, because with 256 sub-steps
+ *     there is nothing for it to do. What is there, and is the point of
  *     the peripheral: the FIFOs, the prescaler, the four kernel clocks
  *     and the wake from Stop 0/1 on LSE or HSI16 - a serial port that
  *     keeps working while the rest of the chip is stopped.
  *  3. Every LPUART has a kernel-clock multiplexer (RCC_CCIPR's
  *     LPUART1SEL at bit 10 and LPUART2SEL at bit 8), where among the
- *     USARTs only the FULL ones do.
+ *     USARTs only the full ones do.
  *
  * Everything else - the register layout (the device header gives both
  * peripherals a USART_TypeDef), the enable rule, the flags in both
- * views, the ICR twins, the ORE storm, the FIFO's per-entry error flags,
- * single-wire half-duplex, mute mode, character match, driver enable and
- * flow control - is the USART's, and is REUSED rather than copied: this
- * file includes stm32g0/usart.hpp for the vocabulary and the task, and
- * the resource below answers the same questions the other one does.
+ * views, the ICR twins, the ORE storm (the handler that re-enters for
+ * ever on an overrun it did not clear), the FIFO's per-entry error
+ * flags, single-wire half-duplex, mute mode, character match, driver
+ * enable and flow control - is the USART's, and is reused rather than
+ * copied: this file includes stm32g0/usart.hpp for the vocabulary and
+ * the task, and the resource below answers the same questions the other
+ * one does.
  *
- * THE VECTOR IS SHARED (device_tables.hpp): on the G0B1 class LPUART1
+ * The vector is shared (device_tables.hpp): on the G0B1 class LPUART1
  * arrives on USART3_4_5_6_LPUART1_IRQn and LPUART2 on
  * USART2_LPUART2_IRQn - the console's own line - so an application that
- * puts a console on USART2 and a second link on LPUART2 writes ONE
+ * puts a console on USART2 and a second link on LPUART2 writes one
  * handler and calls both isr() bodies from it.
  *
- * THE WAKE LINES are EXTI 28 (LPUART1) and 35 (LPUART2), both DIRECT
- * (table 65). Line 35 lives in the EXTI's SECOND register group, which
+ * The wake lines are EXTI 28 (LPUART1) and 35 (LPUART2), both direct
+ * (table 65). Line 35 lives in the EXTI's second register group, which
  * only the G0B1 class has - and which stm32g0/exti.hpp already handles.
  */
 
@@ -121,7 +143,12 @@ constexpr uint32_t lpuart_max_hz(uint32_t baud) { return baud * 4096u; }
 
 /**
  * Lpuart<n>: the instance. The same surface Usart<n> offers - the task
- * above both of them asks nothing else - with this chapter's answers.
+ * above both of them asks nothing else - with this chapter's answers,
+ * and under the same rules: a configuring verb is a setup verb, refused
+ * (false, nothing written) while the instance is enabled; an interrupt
+ * enable masks interrupts for its read-modify-write; a flag or data verb
+ * is one load or store, from any context. A verb for a feature the LP
+ * column has not got accepts only the value that means "off".
  */
 template <uint8_t n>
 struct Lpuart {
@@ -132,15 +159,15 @@ struct Lpuart {
     Lpuart() = delete;
 
     static constexpr uint8_t index = n;
-    /// EVERY LPUART has one (5.4.21), unlike the USARTs.
+    /// Every LPUART has one (5.4.21), unlike the USARTs.
     static constexpr bool has_clock_select = lpuart_clock_select_pos(n) != 0xFF;
 
     /// Table 184's `LP` column, as the flags the shared task asks for.
-    static constexpr bool is_full = false;        ///< it is LP, not FULL
+    static constexpr bool is_full = false;        ///< it is LP, not full
     static constexpr bool has_prescaler = true;   ///< PRESC exists here
     static constexpr bool has_fifo_mode = true;   ///< and so do the 8-deep FIFOs
-    /// The one row of table 184 the FULL/BASIC reading gets wrong the
-    /// other way: synchronous mode is a USART's, FULL or BASIC, and NO
+    /// The one row of table 184 the full/basic reading gets wrong the
+    /// other way: synchronous mode is a USART's, full or basic, and no
     /// LPUART has a CK output at all.
     static constexpr bool has_synchronous_mode = false;
     static constexpr bool has_receiver_timeout = false;
@@ -162,7 +189,7 @@ struct Lpuart {
     static bool has_wake_from_stop() {
         return IS_UART_WAKEUP_FROMSTOP_INSTANCE(&regs()) != 0;
     }
-    /// And the four the LP column has NOT got, so a caller reading the
+    /// And the four the LP column has not got, so a caller reading the
     /// resource sees the whole answer in one place.
     static bool has_autobaud() { return false; }
     static bool has_lin() { return false; }
@@ -170,7 +197,8 @@ struct Lpuart {
     static bool has_irda() { return false; }
     static bool has_smartcard() { return false; }
 
-    /// BOTH LPUARTs sit on APBENR1 (LPUART1 at bit 20, LPUART2 at bit 7).
+    /// Both LPUARTs sit on APBENR1 (LPUART1 at bit 20, LPUART2 at bit 7).
+    /// A setup verb: dead registers without it.
     static void bus_clock(bool on) {
         constexpr UsartBusClock bc = lpuart_bus_clock(n);
         if constexpr (bc.apb2) {
@@ -193,10 +221,11 @@ struct Lpuart {
         regs().CR1 = on ? (regs().CR1 | USART_CR1_UE) : (regs().CR1 & ~USART_CR1_UE);
     }
 
-    /// The frame and the divisor, written with UE clear. BRR is TWENTY
-    /// bits here, so it is not a uint16_t - which is why brr() and
-    /// set_brr() below are wider than the USART's and why the shared
-    /// task stores what brr_for() hands it without narrowing.
+    /// The frame and the divisor, written with UE clear (false, nothing
+    /// written, otherwise). BRR is twenty bits here, so it is not a
+    /// uint16_t - which is why brr() and set_brr() below are wider than
+    /// the USART's and why the shared task stores what brr_for() hands it
+    /// without narrowing.
     static bool configure(const UartFormat& f, uint32_t brr) {
         if (enabled() || !uart_format_valid(f)) {
             return false;
@@ -331,7 +360,7 @@ struct Lpuart {
     }
     static bool half_duplex() { return (regs().CR3 & USART_CR3_HDSEL) != 0u; }
 
-    /// 34.4.6: the LPUART's receiver samples ONCE per bit by
+    /// 34.4.6: the LPUART's receiver samples once per bit by
     /// construction - there is no three-sample majority and so no
     /// ONEBIT bit and no noise flag to lose. The verb exists so the
     /// shared task compiles; it accepts only the truth.
@@ -471,8 +500,8 @@ struct Lpuart {
 
     /// The DMAMUX rows of table 55, published by the peripheral that
     /// owns them (no header of this pack spells them).
-    /// LPUART1's rows are the ones the TABLE CALLS `LPUART_RX`
-    /// and `LPUART_TX` WITHOUT AN INDEX - 14 and 15, low down among the
+    /// LPUART1's rows are the ones the table calls `LPUART_RX`
+    /// and `LPUART_TX` without an index - 14 and 15, low down among the
     /// I2Cs and the SPIs and nowhere near the USARTs' block - while
     /// LPUART2 sits at 64 and 65 with the rest of the G0B1 class's
     /// additions. Reading the table by shape rather than by name puts

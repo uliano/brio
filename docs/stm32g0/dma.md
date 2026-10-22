@@ -1,15 +1,63 @@
 # DMA + DMAMUX (STM32G0)
 
-Documents of record: RM0444 Rev 6 - the DMA ch. 10, the DMAMUX ch. 11,
+This document is for a programmer who wants bytes moved with no CPU in
+the path: a serial port or a bus whose blocks a channel carries, a
+waveform played into a converter for ever, a stream captured into two
+buffers in turn, a memory copy. Most programs meet the DMA only by
+naming an engine in a transport's template (`Uart`, `SpiHost` and
+`I2cHost` take `DmaTxEngine` and `DmaRxEngine` as optional slots); the
+engines and the raw channel are here for the rest. `Dma<n>` is a
+controller, `DmaChannel<n, ch>` one channel, `DmaMux` the request
+multiplexer that routes a peripheral's request to a channel, and the
+five engines over them are the shapes a program uses.
+
+The smallest use, a memory-to-memory copy with no peripheral and no
+request:
+
+```cpp
+using Copy = brio::DmaCopyEngine<1, 1>;
+Copy::arm();                                  // the gate, request 0, the word
+(void)Copy::copy(dst_words, src_words, 512);  // 512 words, word beats
+extern "C" void DMA1_Channel1_IRQHandler() {
+    const uint8_t f = Copy::service();
+    if ((f & Copy::flag_error) != 0u) { (void)Copy::abandon(); }
+    else if ((f & Copy::flag_complete) != 0u) { (void)Copy::complete(); }
+}
+```
+
+What decides correctness even there. A channel belongs to one engine
+(a transport handed two engines on one channel is refused at compile
+time; two engines a program names itself are its own to keep apart),
+and `arm()`
+runs once before the first block: it opens the clock, routes the
+request and keeps the channel's control word, which the register
+cannot hold between blocks. The channel's vector is the program's to
+bind, and the handler calls the engine's `service()` and then
+`complete()` or `abandon()`: a transfer error disables the channel in
+hardware and nothing re-enables it until the error flag is cleared,
+which `abandon()` does. The element type of the buffers is the beat
+(the width of each access), so a span wider than the engine's element
+does not compile and a misaligned run is refused at run time. And the
+priority an engine arms at follows a rule ([design/dma.md](../design/dma.md)):
+a receive engine runs at `very_high` because its peripheral overruns
+when starved, and two memory copies alternating with each other can
+starve anything below them.
+
+## Documents of record
+
+RM0444 Rev 6 - the DMA ch. 10, the DMAMUX ch. 11,
 the RCC's AHB enable and reset bits 5.4.9 / 5.4.5, the interrupt table
 12.3 (table 61); errata ES0548 Rev 3 items 2.4.1 and 2.5.1..2.5.4, read
 on the bench chip's revision Z column, where all five apply. Driver:
 `stm32g0/dma.hpp`; the per-part instance, channel and vector facts come
-from `stm32g0/device_tables.hpp`, and the REQUEST IDS from the
+from `stm32g0/device_tables.hpp` (the reserve: the table of what each
+part has, read off the device header), and the request ids from the
 peripherals that publish them (`Usart<n>::dma_tx_request()`,
 `Tim<n>::dma_update_request()` and their kin). Bench suite:
-`test_stm32_dma` (17 letters in `z`, 85 verdicts, wireless; letters `p`,
-`q`, `u` and `w` outside `z` need `brio stress`); the engines' cost is
+`test_stm32_dma` (17 letters in `z`, 85 verdicts, wireless - a letter is
+one command key of the suite's console and the group of verdicts it
+runs, `z` the key that runs them all; letters `p`, `q`, `u` and `w`
+outside `z` need `brio stress`); the engines' cost is
 `bench_stm32`'s letter `d`. Family fixture
 `test/family_stm32g0/dma.cpp` plus ten negatives under
 `brio check stm32g0`.
@@ -36,7 +84,7 @@ increments, the two access widths, the priority and the three interrupt
 enables; CNDTR the number of data items; CPAR and CMAR the two ends.
 Everything in CCR but the interrupt enables is READ-ONLY while EN is set
 (10.6.3), and CNDTR "must not be written when the channel is enabled"
-(10.6.4) - so `configure()` and `set_count()` REFUSE rather than store
+(10.6.4) - so `configure()` and `set_count()` refuse rather than store
 into a register the silicon ignores.
 
 **Suspend and resume is not a thing.** 10.4.5 is explicit: disabling an
@@ -52,7 +100,7 @@ cannot be set again until TEIFx is cleared. That is the one place a
 driver did.
 
 **DIR does not say "peripheral" or "memory": it says which side is the
-SOURCE.** With DIR = 0 the CPAR side is read and the CMAR side written;
+source.** With DIR = 0 the CPAR side is read and the CMAR side written;
 with DIR = 1 it is the other way round, and in memory-to-memory mode the
 register names mean nothing at all. `DmaDirection`'s enumerators are
 therefore spelled from the source.
@@ -60,7 +108,7 @@ therefore spelled from the source.
 **The request vocabulary is not in any header of this pack.** Table 55
 numbers 77 request lines by peripheral, and the `DMAMUX_REQ_*` spellings
 live in ST's HAL/LL, which this project does not vendor. So `dma.hpp`
-owns the FABRIC and takes a plain request id, and each peripheral
+owns the fabric and takes a plain request id, and each peripheral
 publishes its own codes. The family fixture is where the two publishing
 drivers are held to one table.
 
@@ -121,7 +169,7 @@ handed in at `arm()`:
   `busy()`, `complete()` from the handler or `poll()`, `abandon()`. This
   surface is every family's.
 
-THE LEVEL AN ENGINE ARMS AT IS ITS PERIPHERAL'S (docs/design/dma.md):
+The level an engine arms at is its peripheral's ([design/dma.md](../design/dma.md)):
 `DmaPriority` lives in `stm32g0/dma_engine.hpp`, so a transport names a
 level without including the controller, and each engine's `arm()`
 defaults to the rule's level for its direction - the receive engine and
@@ -141,7 +189,7 @@ restarted (16.4.8) - the player stays at `high`, and a program that plays
 one beside copies on higher channels ranks it at the call. The raw
 channel's `DmaChannelConfig` keeps CCR.PL's reset value, `low`.
 
-`Elem` IS THE WIDEST BEAT the binding allows - the peripheral register's
+`Elem` is the widest beat the binding allows - the peripheral register's
 width - and one `sizeof` decides PSIZE, MSIZE and the address arithmetic
 together, so they cannot disagree; a type that is not 1, 2 or 4 bytes
 wide is a compile error at the engine that named it. The transfer
@@ -186,7 +234,7 @@ The controller's offer, item by item:
 | memory to memory (MEM2MEM, 10.4.5) | `DmaCopyEngine` |
 | the request sources: table 55 through the DMAMUX, its synchronization and request generators (11.4.4, 11.4.5) | the request is the peripheral's, handed to `arm()`; a timer's update paces `bench_stm32`'s `paced` |
 
-**ONE INTERRUPT PER TRANSACTION.** An owner that holds another edge
+**One interrupt per transaction.** An owner that holds another edge
 arms an engine for its errors alone (`DmaIrq::error_only`). The SPI host
 does it to its transmit engine - the receive block's completion is
 strictly after the transmit block's last beat, since every frame that
@@ -194,7 +242,7 @@ came back was clocked out first - and the I2C host to both of its, the
 tenure's STOP after NBYTES proving both blocks; the owner completes the
 engine on that proof (`complete()`).
 
-**THE MASK COVERS THE CLAIM.** A transport starts blocks from two
+**The mask covers the claim.** A transport starts blocks from two
 contexts, its thread and its completion handler, so `DmaTxEngine` has
 the claim as a verb of its own: `claim()` (a test-and-set of `busy()`),
 `launch(span)` (the five stores on a claimed engine), `unclaim()`;

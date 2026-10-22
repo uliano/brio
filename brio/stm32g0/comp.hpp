@@ -1,41 +1,63 @@
 /*
  * comp.hpp
  *
- * The STM32G0's analog comparators (RM0444 ch. 18): `Comp<n>`, one per
- * instance, where n = 1..3 - and how many exist is the DEVICE HEADER's
- * answer, not a list here (stm32g0/device_tables.hpp): the G0B1/G0C1
- * carry three, the G071 class two, and the G031 class none at all, so
- * `Comp<3>` is a compile error on a G071 and `Comp<1>` is one on a G031.
+ * The STM32G0's analog comparators (RM0444 ch. 18): what a program uses
+ * to know when a voltage crosses a threshold without sampling it - the
+ * output raises an EXTI line, triggers a timer, or is read as one bit.
+ * `Comp<n>` is one comparator, n = 1..3, and how many exist is the
+ * device header's answer, not a list here (stm32g0/device_tables.hpp):
+ * the G0B1/G0C1 carry three, the G071 class two, and the G031 class
+ * none at all, so `Comp<3>` is a compile error on a G071 and `Comp<1>`
+ * is one on a G031.
  *
- * WHAT A COMPARATOR IS HERE. One CSR and nothing else - a rail-to-rail
- * comparator whose PLUS input is one of three pads (or nothing), whose
- * MINUS input is one of three pads, one of the two DAC channels, or
+ * The smallest use - a pad against the DAC's first channel with an
+ * interrupt on either crossing - is docs/stm32g0/comp.md's first
+ * listing, in the chapter's own order: init() opens the SYSCFG gate,
+ * claim_inputs(cfg) puts the pads in analog mode, configure(cfg) writes
+ * the register, the EXTI line (exti_line) is given its sense and armed
+ * through stm32g0/exti.hpp and the NVIC, and enable(true) comes last.
+ *
+ * Which context may call what. No verb here waits or masks interrupts,
+ * and none keeps storage: configure() is one store of the whole CSR,
+ * enable(), lock() and release() a read-modify-write of it, and
+ * claim_inputs() a read-modify-write of the port's registers - so the
+ * configuring verbs belong to setup in main() or to an active object's
+ * handler (an active object is an object the kernel serves one event at
+ * a time, so its handlers never overlap), never to an interrupt handler
+ * racing another of them. value() and the other readbacks are one load
+ * each, legal from any context. There is no interrupt body in this
+ * file: the output's interrupt is the EXTI line's (fact 4), served by
+ * stm32g0/exti.hpp's handler body.
+ *
+ * What a comparator is here. One CSR and nothing else - a rail-to-rail
+ * comparator whose plus input is one of three pads (or nothing), whose
+ * minus input is one of three pads, one of the two DAC channels, or
  * VREFINT and its quarter, half and three-quarter taps, with
  * programmable hysteresis, two speeds, an inverting polarity, a blanking
  * window taken from a timer's compare output, and an output that goes to
  * a pad, to a timer input and to an EXTI line all at once.
  *
- * FOUR FACTS THAT SHAPE THIS FILE.
+ * Four facts of this silicon shape the file.
  *
- * 1. THE ONLY ANALOG SOURCE INSIDE THE CHIP REACHES THE MINUS INPUT.
- *    Tables 93, 95 and 97 give the plus input three PADS and "open" -
+ * 1. The only analog source inside the chip reaches the minus input.
+ *    Tables 93, 95 and 97 give the plus input three pads and "open" -
  *    there is no internal signal among them - while tables 94, 96 and 98
  *    give the minus input the DAC's two channels and four VREFINT taps.
- *    So a threshold can be produced with no wire and a SIGNAL cannot: a
+ *    So a threshold can be produced with no wire and a signal cannot: a
  *    comparator measurement on a board with nothing attached to a plus
  *    pad can exercise every multiplexer, polarity, blanking and event
  *    path, and cannot walk a threshold. That is a fact about the
  *    silicon, and it is stated here so no suite pretends otherwise.
  *
- * 2. THE INPUT TABLES ARE PER INSTANCE AND THE PADS ARE NOT A PATTERN.
+ * 2. The input tables are per instance and the pads are not a pattern.
  *    COMP1's plus inputs are PC5/PB2/PA1, COMP2's PB4/PB6/PA3, COMP3's
  *    PB0/PC1/PE7 - and PE7/PE8 exist only on a part that bonds port E.
- *    `positive_pin()` / `negative_pin()` publish the tables as DATA and
+ *    `positive_pin()` / `negative_pin()` publish the tables as data and
  *    `config_valid()` refuses a selection whose pad this device has not
  *    got, which is this stratum's per-package gate with no hand-kept
  *    list behind it.
  *
- * 3. LOCK IS ONE-WAY UNTIL A RESET. 18.3.4: setting it makes the WHOLE
+ * 3. Lock is one-way until a reset. 18.3.4: setting it makes the whole
  *    register read-only including the lock bit itself, and only an MCU
  *    reset clears it. The verb is offered because functional-safety
  *    applications are what the bit is for, and it is spelled `lock()` so
@@ -43,20 +65,19 @@
  *    while it stands rather than storing into a register the silicon
  *    ignores.
  *
- * 4. THERE IS NO INTERRUPT OF ITS OWN. 18.5: the output goes to an EXTI
- *    line - 17, 18 and 20, all three CONFIGURABLE - and the vector is
+ * 4. There is no interrupt of its own. 18.5: the output goes to an EXTI
+ *    line - 17, 18 and 20, all three configurable - and the vector is
  *    the ADC's, shared by all three comparators (table 61). This driver
- *    PUBLISHES its line number and does not include stm32g0/exti.hpp:
+ *    publishes its line number and does not include stm32g0/exti.hpp:
  *    the fabric driver owns the fabric and the peripheral owns its own
- *    vocabulary. The chapter's own
- *    sequence is to configure the EXTI line FIRST and enable the
- *    comparator last, so the enable's own transient does not arrive on
- *    an unconfigured line.
+ *    vocabulary. The chapter's own sequence is to configure the EXTI
+ *    line first and enable the comparator last, so the enable's own
+ *    transient does not arrive on an unconfigured line.
  *
- * THE CLOCK. 18.3.3 says two things that read as contradictory - "there
+ * The clock. 18.3.3 says two things that read as contradictory - "there
  * is no clock enable control bit provided in the RCC controller" and
  * "reset and clock enable bits are common for COMP and SYSCFG" - and the
- * address map settles it: COMPn_CSR lives INSIDE the SYSCFG block
+ * address map settles it: COMPn_CSR lives inside the SYSCFG block
  * (COMP1_BASE = SYSCFG_BASE + 0x200), so RCC_APBENR2.SYSCFGEN is what
  * makes the register accessible at all, while the comparator's own
  * polarity and output logic keep working without it (18.3.3's
@@ -64,7 +85,7 @@
  * mode). `init()` opens that gate and `release()` does not close it -
  * SYSCFG is shared.
  *
- * ERRATA: ES0548 Rev 3 has NO item touching the comparators on either
+ * Errata: ES0548 Rev 3 has no item touching the comparators on either
  * silicon revision.
  */
 
@@ -90,7 +111,7 @@ namespace brio {
 enum class CompPositive : uint8_t { input0 = 0, input1 = 1, input2 = 2, open = 3 };
 
 /// COMPx_CSR.INMSEL - the minus input (tables 94, 96, 98). The three
-/// pad codes are named for the code and not for the pad, because WHICH
+/// pad codes are named for the code and not for the pad, because which
 /// pad they are differs per instance; `Comp<n>::negative_pin()` is what
 /// says.
 enum class CompNegative : uint8_t {
@@ -112,7 +133,7 @@ enum class CompHysteresis : uint8_t { none = 0, low = 1, medium = 2, high = 3 };
 /// COMPx_CSR.PWRMODE (18.3.8). The two other codes are Reserved.
 enum class CompPower : uint8_t { high_speed = 0, medium_speed = 1 };
 
-/// COMPx_CSR.BLANKSEL, which is a MASK and not a selector: 18.6.1 lists
+/// COMPx_CSR.BLANKSEL, which is a mask and not a selector: 18.6.1 lists
 /// one bit per source and a caller may OR them. The blanking window is
 /// the complement of the chosen signal ANDed with the output (18.3.7).
 struct CompBlank {
@@ -168,7 +189,7 @@ constexpr CompPad comp_positive_pin(uint8_t n, CompPositive sel) {
     return gpio_port_present(p.port) ? p : CompPad{};
 }
 
-/// Table 94 / 96 / 98: the minus input's three PAD codes, by instance.
+/// Table 94 / 96 / 98: the minus input's three pad codes, by instance.
 /// Every other code is an internal source and answers `valid` false.
 constexpr CompPad comp_negative_pin(uint8_t n, CompNegative sel) {
     CompPad p{};
@@ -204,7 +225,7 @@ constexpr CompPad comp_negative_pin(uint8_t n, CompNegative sel) {
 
 /**
  * Whose plus input COMPn borrows when WINMODE is set - and the answer is
- * NOT "the next one up". 18.6.1's three register descriptions say it
+ * not "the next one up". 18.6.1's three register descriptions say it
  * one instance at a time: COMP1 takes COMP2_INP, COMP2 takes COMP1_INP,
  * COMP3 takes COMP2_INP. So the two pairs 18.3.5 names (COMP1+COMP2 and
  * COMP2+COMP3) are reached from opposite directions, and a driver that
@@ -222,11 +243,11 @@ struct CompConfig {
     CompNegative negative = CompNegative::vrefint_half;
     CompHysteresis hysteresis = CompHysteresis::none;
     CompPower power = CompPower::high_speed;
-    /// POLARITY: the output (and VALUE, and the EXTI line) inverted.
+    /// POLARITY: the output (and the VALUE bit, and the EXTI line) inverted.
     bool inverted = false;
-    /// WINMODE: take the PARTNER's plus input instead of this instance's
+    /// WINMODE: take the partner's plus input instead of this instance's
     /// own, which is how a window comparator shares one pad (18.3.5).
-    /// WHICH partner is not a pattern - see comp_window_partner().
+    /// Which partner is not a pattern - comp_window_partner() says.
     bool window_input = false;
     /// WINOUT: report VALUE xor the neighbour's VALUE - the window's own
     /// "inside or outside" answer (18.6.1).
@@ -269,7 +290,7 @@ constexpr bool comp_config_valid(uint8_t n, const CompConfig& c) {
     if ((c.blanking & ~static_cast<uint8_t>(CompBlank::all)) != 0u) {
         return false;
     }
-    // WINMODE borrows a PARTICULAR instance's plus input, and which one
+    // WINMODE borrows a particular instance's plus input, and which one
     // is per instance (comp_window_partner): a device without that
     // partner cannot spell the window.
     if (c.window_input && comp_window_partner(n) == 0u) {
@@ -302,7 +323,7 @@ public:
 
     static constexpr uint8_t index = n;
 
-    /// The EXTI line this comparator's output raises - a CONFIGURABLE
+    /// The EXTI line this comparator's output raises - a configurable
     /// line, so a sense must be chosen before anything is pending
     /// (stm32g0/exti.hpp). Published, not used: this file includes no
     /// EXTI driver.
@@ -326,7 +347,8 @@ public:
     /**
      * Open the gate the registers live behind: COMPn_CSR sits inside the
      * SYSCFG block, so RCC_APBENR2.SYSCFGEN is what makes it readable and
-     * writable (this file's header). Nothing is closed again by
+     * writable (the opening comment, "The clock"). Idempotent, from
+     * setup, before any other verb. Nothing is closed again by
      * `release()` - SYSCFG is shared with the EXTI's own multiplexer and
      * with everything else in that corner.
      */
@@ -339,11 +361,13 @@ public:
     // ---- configuration --------------------------------------------------------
 
     /**
-     * Write the whole CSR from `c`, leaving the comparator DISABLED.
+     * Write the whole CSR from `c`, one store, leaving the comparator
+     * disabled.
      *
-     * REFUSES while LOCK stands (18.3.4 makes the register read-only,
+     * Refuses while LOCK stands (18.3.4 makes the register read-only,
      * and a store that lands nowhere is worse than a false), and refuses
-     * a configuration this device cannot have.
+     * a configuration this device cannot have; false then, with nothing
+     * written.
      */
     static bool configure(const CompConfig& c) {
         if (locked() || !comp_config_valid(n, c)) {
@@ -356,10 +380,12 @@ public:
     /// Put the input pads this configuration names into analog mode -
     /// 18.3.2's requirement, and the pads' own reset state.
     ///
-    /// It is a RUNTIME loop over a port letter because the input tables
+    /// It is a runtime loop over a port letter because the input tables
     /// are runtime data (a `Pin<'A',1>` cannot be formed from a value),
     /// which is why this verb reaches GPIO's registers here instead of
-    /// through stm32g0/pin.hpp's per-pin face.
+    /// through stm32g0/pin.hpp's per-pin face. A read-modify-write of the
+    /// port, from setup or an active object's handler. False, with no
+    /// pad touched, for a configuration this device cannot have.
     static bool claim_inputs(const CompConfig& c) {
         if (!comp_config_valid(n, c)) {
             return false;
@@ -369,8 +395,9 @@ public:
         return true;
     }
 
-    /// EN. 18.5's sequence puts this LAST, after the EXTI line is
-    /// configured and armed. Refuses while locked.
+    /// EN. 18.5's sequence puts this last, after the EXTI line is
+    /// configured and armed. Refuses while locked; returns at once, the
+    /// comparator's own start-up being the caller's to spend.
     static bool enable(bool on) {
         if (locked()) {
             return false;
@@ -382,7 +409,7 @@ public:
     static bool enabled() { return (regs().CSR & COMP_CSR_EN) != 0u; }
 
     /**
-     * VALUE: the output AFTER the polarity selector and the blanking
+     * VALUE: the output after the polarity selector and the blanking
      * (18.6.1's own wording and figure 68), which is the whole reason
      * this is not "is the plus input above the minus one".
      */
@@ -417,7 +444,7 @@ public:
     static bool locked() { return (regs().CSR & COMP_CSR_LOCK) != 0u; }
 
     /**
-     * Make the whole register read-only until the next MCU RESET - the
+     * Make the whole register read-only until the next MCU reset - the
      * lock bit included. There is no unlock and there is no undo: this is
      * offered because 18.3.4's safety case is real, and it is a separate
      * verb from `configure()` for exactly that reason.

@@ -1,6 +1,53 @@
 # FD controller area network (STM32G0)
 
-Documents of record: RM0444 Rev 6 - FDCAN ch. 36 whole, the subsystem's
+This document is for a programmer who needs a CAN or CAN FD node, on
+the G0B1/G0C1 class alone: the part's two Bosch M_CAN modules, the bit
+timing computed from the clock and the rate asked, frames put and read
+through FIFOs, the filters, and the loop-back modes that let the whole
+thing run with no transceiver and no second node. `Fdcan<n>` is a
+module, and does not exist on a part whose header declares none; the
+protocol arithmetic (bit timing, the length coding, the frame codecs)
+is every part's ([design/can.md](../design/can.md) is the vocabulary
+shared with the other CAN controllers).
+
+The smallest use, one module in internal loop-back, accepting
+everything and sending a frame to itself:
+
+```cpp
+using Can = brio::Fdcan<1>;
+constexpr brio::FdcanConfig cfg{
+    .nominal = *brio::fdcan_bit_timing_for(64'000'000, 500'000, 875),
+    .mode = brio::FdcanMode::internal_loop_back,
+    .standard_filters = 1,
+};
+
+Can::bus_clock(true);
+Can::reset();                        // ONE reset for BOTH instances
+Can::enter<cfg>();                   // clock, RAM, timing, modes; INIT kept
+Can::standard_filter(0, {brio::FdcanFilterType::classic,
+                         brio::FdcanFilterAction::store_fifo0, 0, 0});
+Can::start();                        // INIT cleared, on the bus
+
+brio::FdcanFrame out{.id = 0x123, .length = 2, .marker = 0x77};
+out.data[0] = 0xDE;
+out.data[1] = 0xAD;
+Can::tx_put(out);
+```
+
+What decides correctness even there: one enable, one reset and one clock
+divider serve both modules, so a reset through either takes the other's
+registers down with it; the message RAM's content at reset is undefined
+and `enter()` lays it out before anything is read from it; the module
+stays in its initialization state until `start()`, and the configuration
+is written there; and on a real bus a transceiver and the two pads at
+AF3 (`FdcanPad`, under "How to use it") come first, with
+`FdcanMode::normal`. The interrupt lines are shared with TIM16, TIM17
+and the other module, so a handler calls every body that can be on the
+line.
+
+## Documents of record
+
+RM0444 Rev 6 - FDCAN ch. 36 whole, the subsystem's
 enable and reset 5.4.15/5.4.16 (`APBENR1.FDCANEN`, `APBRSTR1.FDCANRST`),
 the kernel-clock multiplexer 5.4.22 (`CCIPR2.FDCANSEL` - a DIFFERENT
 register from the CCIPR every other multiplexer of this stratum lives
@@ -10,9 +57,10 @@ in), the vector table 61, the memory map (FDCAN1 0x4000 6400, FDCAN2
 the pads (every FDCAN signal of this part is **AF3**). Errata ES0548
 Rev 3: 2.13.1 and 2.13.2, both below. Driver: `stm32g0/fdcan.hpp`; the
 presence, base, mask, clock-select and vector facts come from
-`stm32g0/device_tables.hpp`, and `Rcc::kernel_clock2()` in
-`stm32g0/clock.hpp` is the CCIPR2 verb this chapter needed. Bench suite:
-`test_stm32_fdcan` (12 letters, 96 verdicts, wireless). Family fixture
+`stm32g0/device_tables.hpp` (the reserve: the table of what each part has, read off the device header), and
+`Rcc::kernel_clock2()` in `stm32g0/clock.hpp` is the CCIPR2 verb this
+chapter needed. Bench suite: `test_stm32_fdcan` (12 letters, 96
+verdicts, wireless; a letter is one command key of the suite's console and the group of verdicts it runs). Family fixture
 `test/family_stm32g0/fdcan.cpp` plus twelve negatives under
 `brio check stm32g0`.
 

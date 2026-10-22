@@ -1,17 +1,58 @@
 /*
  * device_tables.hpp
  *
- * THE RESERVE of the stm32g0 stratum - the one file where the
- * preprocessor is allowed to ask the device header what exists. The
- * standing rule (docs/design/overview.md, "Generalization rule"): a probe
- * that yields a VALUE lives here and is exported as constexpr data; a
- * driver keeps `#ifdef` only to select per-instance CODE, never to learn
- * a fact. Nothing here is a copied table - every entry is the device
- * header's own symbol, so a variant the pack adds tomorrow is described
- * by its header and not by a list someone has to keep.
+ * The reserve of the stm32g0 stratum: the table of what each STM32G0
+ * part has, read off the device header and exported as constexpr data.
+ * The stratum's documents call this header "the reserve", and this is
+ * what the word means: when a driver needs a fact about the part that
+ * no register of its own peripheral states - does this part have a
+ * USART3, which interrupt line does SPI2 share, does FLASH_CR carry a
+ * bank-select bit, is EXTI line 22 implemented - it asks a function or
+ * a constant of this file. A program asks the same way when it wants to
+ * know what it was built for:
  *
- * WHAT DIFFERS ACROSS THE STM32G0 FAMILY, as far as the strata reach
- * (cmsis-device-g0 v1.4.5, ALL TWELVE headers of the pack - g030/g031/
+ *     static_assert(brio::usart_present(3), "no USART3 on this part");
+ *     constexpr IRQn_Type line = brio::spi_irq(2);   // SPI2's vector
+ *     if constexpr (brio::exti_line_configurable(22)) { ... }
+ *
+ * Everything here is answered at compile time: the functions are
+ * constexpr and read no register, so they may be called from any
+ * context - setup in main(), an active object's handler (an active
+ * object is a component of a brio program with its own event queue,
+ * served one event at a time by the kernel), an interrupt handler - and
+ * inside a static_assert. The few that return
+ * a pointer to a register some parts have not got (flash_ecc2r(), the
+ * EXTI's second register group, the PWR pull registers) are plain
+ * inline functions handing back the register's address, or null where
+ * the part has no such register; they read nothing either. Nothing in
+ * this file waits or masks interrupts.
+ *
+ * Why the preprocessor lives in this one file. The standing rule
+ * (docs/design/overview.md, "Generalization rule"): a probe that yields
+ * a value lives here and is exported as constexpr data; a driver keeps
+ * `#ifdef` only to select per-instance code, never to learn a fact.
+ * Nothing here is a copied table - every entry is the device header's
+ * own symbol, so a variant the pack adds tomorrow is described by its
+ * header and not by a list someone has to keep. No device name is
+ * spelled in this stratum. Where the header has no symbol for a fact
+ * (a timer's channel count, the EXTI line a peripheral's wake-up
+ * raises, a DMAMUX request number) the entry states the manual's
+ * number with its citation and says so.
+ *
+ * Why the interrupt vectors are derived from presence. A vector's name
+ * says what shares it (USART2_LPUART2, TIM6_DAC_LPTIM1, ADC1_COMP,
+ * DMA1_Ch4_7_DMA2_Ch1_5_DMAMUX1_OVR...), and which name a header
+ * declares follows from which peripherals that header declares. IRQn
+ * values are enumerators, which the preprocessor cannot probe, but the
+ * peripherals' base-address macros can be - so every vector verb here
+ * derives the enumerator from the presence of the sharer (LPUART2_BASE
+ * makes USART2's line USART2_LPUART2_IRQn, COMP1_BASE makes the ADC's
+ * ADC1_COMP_IRQn, and so on), and a header whose naming did not follow
+ * the rule would fail to compile rather than bind a wrong line in
+ * silence.
+ *
+ * What differs across the STM32G0 family, as far as the strata reach
+ * (cmsis-device-g0 v1.4.5, all twelve headers of the pack - g030/g031/
  * g041/g050/g051/g061/g070/g071/g081/g0b0/g0b1/g0c1; the x0 value line
  * is the x1 line minus a list of peripherals, the same IP under the
  * same register names, and every x0 header is a strict subset of its
@@ -21,17 +62,6 @@
  *  - USART instances: 1..2 on the G03x/G04x/G05x/G06x, 1..4 on the
  *    G07x/G08x, 1..6 on the G0Bx/G0C1; LPUART1 on every x1 and on no
  *    x0, LPUART2 on the G0B1/G0C1.
- *  - Interrupt lines: a vector's NAME says what shares it (USART2_
- *    LPUART2, TIM6_DAC_LPTIM1, ADC1_COMP, DMA1_Ch4_7_DMA2_Ch1_5_
- *    DMAMUX1_OVR...), and which name a header declares follows from
- *    WHICH PERIPHERALS THAT HEADER DECLARES. IRQn values are
- *    ENUMERATORS, which the preprocessor cannot probe, but the
- *    peripherals' base-address macros can be - so every vector verb
- *    here derives the enumerator from PRESENCE (LPUART2_BASE makes
- *    USART2's line USART2_LPUART2_IRQn, COMP1_BASE makes the ADC's
- *    ADC1_COMP_IRQn, and so on), and a header whose naming did not
- *    follow the rule would fail to COMPILE rather than bind a wrong
- *    line in silence. No device name is spelled in this stratum.
  *  - The USART kernel-clock multiplexer (RCC_CCIPR.USARTnSEL) exists for
  *    USART1 everywhere, for USART2 on the G071 class and up, for USART3
  *    on the G0B1 class; the other instances run on PCLK with no choice.
@@ -41,7 +71,7 @@
  *    member of that part's FLASH_TypeDef.
  *  - The analog block: every part has the one ADC with its nineteen
  *    channels, but the DAC is absent on the G031/G041 (16.3) and the
- *    COMPARATORS are absent there too, while the third of them is the
+ *    comparators are absent there too, while the third of them is the
  *    G0B1/G0C1's alone (18.1) - and the ADC's own vector is shared with
  *    all three comparators where they exist and is the ADC's alone where
  *    they do not.
@@ -50,6 +80,10 @@
  *    configurable rather than direct - is per part, and so is the
  *    second register group (RTSR2 and its four neighbours are members
  *    on the G0B1/G0C1 only, IMR2/EMR2 from the G071 class up).
+ *  - Chapter 4's own fields (the wake-up pins, the Standby pull
+ *    registers, VDDIO2), the timers' shapes, the DMA channel counts and
+ *    the FDCAN: each section below opens with what the header can
+ *    answer there and what the manual must.
  */
 
 #pragma once
@@ -255,8 +289,8 @@ constexpr IRQn_Type usart_irq(uint8_t n) {
 /// receiver time-out and Modbus. A BASIC instance has none of them and
 /// the rest of the chapter alike.
 ///
-/// THIS IS A STATED TABLE AND NOT A HEADER PROBE, and the reason is that
-/// the device header expresses the split as POINTER-COMPARISON macros -
+/// This is a stated table and not a header probe, and the reason is that
+/// the device header expresses the split as pointer-comparison macros -
 /// IS_UART_FIFO_INSTANCE(x), IS_UART_AUTOBAUDRATE_DETECTION_INSTANCE(x)
 /// and their kin, each of them `((x) == USART1)` and none of them a
 /// constant expression. What CAN be probed is the instance count, and
@@ -344,7 +378,7 @@ constexpr UsartBusClock lpuart_bus_clock(uint8_t n) {
 
 /// Position of LPUARTn's kernel-clock select field in RCC_CCIPR
 /// (LPUART1SEL at bit 10, LPUART2SEL at bit 8), or 0xFF when absent.
-/// EVERY LPUART HAS ONE - unlike the USARTs, where only the FULL
+/// Every LPUART has one - unlike the USARTs, where only the full
 /// instances do.
 constexpr uint8_t lpuart_clock_select_pos(uint8_t n) {
     switch (n) {
@@ -474,7 +508,7 @@ constexpr IRQn_Type spi_irq(uint8_t n) {
 /// Whether SPIn can also be an I2S (table 205's "I2S support" row): SPI1
 /// everywhere, SPI2 only on the G0Bx/G0Cx, SPI3 nowhere.
 ///
-/// THE SPI3 PROBE IS THE RULE, and it is the reserve's usual presence
+/// The SPI3 probe is the rule, and it is the reserve's usual presence
 /// derivation rather than a copied list: table 205's footnote 1 marks
 /// I2S2 and SPI3 with the SAME condition ("applies to STM32G0B1xx and
 /// STM32G0C1xx only"), so the part that has a third SPI is exactly the
@@ -570,7 +604,7 @@ constexpr uint8_t spi_dma_tx_request(uint8_t n) {
 /// Register block base of I2Cn (n = 1..3), 0 when the device has not got
 /// it. I2C1 and I2C2 sit on every G0 of the pack; I2C3 is the
 /// G0Bx/G0Cx's alone (table 165's footnote 2), and the header says so
-/// with I2C3_BASE. NOTE THE ADDRESS IS NOT CONTIGUOUS with the other
+/// with I2C3_BASE. Note the address is not contiguous with the other
 /// two (0x8800 against 0x5400/0x5800), so this is a switch and not
 /// arithmetic - the SPI3 story again.
 constexpr uint32_t i2c_base(uint8_t n) {
@@ -632,7 +666,7 @@ constexpr IRQn_Type i2c_irq(uint8_t n) {
 /// kernel and the registers (32.4.1: "the instances not supporting the
 /// independent clock function use PCLK for clocking both").
 ///
-/// THIS ONE THE HEADER REALLY ANSWERS, and it answers it with a name and
+/// This one the header really answers, and it answers it with a name and
 /// not a base: RCC_CCIPR_I2C2SEL_Pos exists on exactly the headers whose
 /// I2C2 has the feature. The manual calls that field I2C2I2S1SEL because
 /// bits 15:14 select I2C2's clock on the big parts and I2S1's on the
@@ -680,7 +714,7 @@ constexpr uint8_t i2c_clock_select_pos(uint8_t n) {
 /// 165 puts BOTH in the same column-group as the independent clock, with
 /// the same footnote, so they are one answer here.
 ///
-/// AND THE HEADER CANNOT BE ASKED, which is why they are derived from the
+/// And the header cannot be asked, which is why they are derived from the
 /// clock probe above rather than probed on their own: all twelve headers
 /// of the pack declare EXACTLY the same 253 I2C_* macros with the same
 /// values - I2C_CR1_WUPEN, SMBHEN, SMBDEN, ALERTEN, PECEN and the whole
@@ -702,7 +736,7 @@ constexpr bool i2c_wakes_from_stop(uint8_t n) { return i2c_has_independent_clock
 /// I2C2 below the G0B1. The NUMBERS are the MANUAL'S, like
 /// usart_exti_line()'s and lptim_exti_line()'s.
 ///
-/// THE DEVICE HEADER'S OWN COMMENT DISAGREES and table 65 wins: CMSIS
+/// The device header's own comment disagrees and table 65 wins: CMSIS
 /// annotates the shared vector as "I2C2, I2C3 Interrupt (combined with
 /// EXTI 24 and EXTI 22)", but line 24 is USART3's wake in table 65 (and
 /// usart_exti_line(3) returns it), and table 165 gives I2C3 no wake at
@@ -1244,7 +1278,8 @@ constexpr uint8_t exti_port_code(char letter) {
 }
 
 /// The second register group as pointers, null where the register is
-/// not a member of this part's EXTI_TypeDef (see the note above).
+/// not a member of this part's EXTI_TypeDef (the struct-member question
+/// the note at the head of this EXTI section describes).
 inline volatile uint32_t* exti_rtsr2() {
 #if defined(EXTI_RTSR2_RT34_Msk)
     return &EXTI->RTSR2;
@@ -2328,7 +2363,7 @@ constexpr bool vrefbuf_present() { return vrefbuf_base() != 0u; }
 /// DEAD-BATTERY pull-down 7.3.16 connects to that instance's CC pads out
 /// of a power-on and holds there until SYSCFG's strobe releases it.
 ///
-/// THE PROBE IS SYSCFG'S STROBE BIT and not a UCPD_BASE, because this is
+/// The probe is SYSCFG's strobe bit and not a UCPD_BASE, because this is
 /// the fact a program with no UCPD driver has to know: the pad's reset
 /// state and the register that lets go of it travel together, and a
 /// header that declares no strobe describes a part with no Rd to
