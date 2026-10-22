@@ -14,7 +14,13 @@ brio takes its name from the musical marking "con brio"; the name is
 tied to no silicon on purpose. It is a C++ framework for bare-metal
 microcontrollers built around a cooperative active-object kernel, the
 model described in Miro Samek's book, written clean-room: the concepts
-come from the book, never from the QP source. It runs today on ten
+come from the book, never from the QP source. An active object is a
+component of the application with its own queue of events and its own
+state, which the kernel serves one event at a time; cooperative means
+that a handler runs to completion before any other active object runs
+on that core, and that interrupt handlers, not the kernel, are the
+only thing that preempts it ([kernel.md](kernel.md) states the model
+and its contracts). It runs today on ten
 targets, from an 8-bit AVR to dual-core ARM and RISC-V chips, and on
 the host, where its tests run ([the target table](../../README.md)).
 
@@ -37,10 +43,14 @@ at the layer being added.
 
 Within that rule, three levels of stability say how much a change may
 disturb. The kernel's ideas are fairly stable: the active-object
-contract, events by value, the two loans, post, publish and reply,
-priority as list order, timers that post events, the panic record, the
-platform concept, and the rule that there are two execution contexts
-and one boundary between them. The services of `util/` and the target
+contract, events by value, the two loans (a pointer inside an event,
+valid for one dispatch or until a reply event), the three ways of
+delivering an event (post to one object, publish to a list, reply to
+whoever asked), priority as list order, timers that post events, the
+panic record a failure leaves for the next boot, the platform concept
+(what the kernel requires of a chip), and the rule that there are two
+execution contexts and one boundary between them; each is stated in
+[kernel.md](kernel.md). The services of `util/` and the target
 drivers are here to stay but are expected to change, possibly
 radically, as targets are added. Bench applications (test suites,
 probes, consoles) are disposable: nothing in the foundations depends on
@@ -170,11 +180,11 @@ from its includes.
 | Stratum | May include | Content |
 |---------|-------------|---------|
 | `kernel/` | nothing of brio | pure logic: queues, the scheduler, state machines, time events, panic, delivery ([kernel.md](kernel.md)) |
-| `rt/` | nothing of brio | the runtime every 32-bit image compiles: the seven functions the compiler and libstdc++ expect of a freestanding program, in the framework's one source file ([runtime.md](runtime.md)) |
+| `rt/` | nothing of brio | the runtime every 32-bit image compiles: the seven functions the compiler and libstdc++ expect of a freestanding program, in the framework's one source file; the AVR keeps avr-libc instead ([runtime.md](runtime.md)) |
 | `util/` | `kernel/` | services over the kernel: streams and `print`, the benchmark instrument, rings, the bus arbiter with the SPI, I2C and CAN vocabularies, the serial port, the flash heap and journal, power, meters, block streams, the two-core inbox, the USB device stack, the test-bench grammar |
 | `gfx/` | nothing of brio | drawing: the surface contract, the primitives, fonts and text ([gfx.md](gfx.md)) |
 | `devices/` | `kernel/`, `util/`, `gfx/` | what sits off the chip and is reached over a link the chip provides: the DCS vocabulary, a traits type per display controller, the panel driver over a link concept ([gfx.md](gfx.md), "The command tier") |
-| `cortexm/` | `util/` and the family's device header | what every Cortex-M family shares whatever the vendor: the interrupt controller and its guard, the SysTick ticker, the microsecond delay, the cycle counter |
+| `cortexm/` | `util/`, and the CMSIS-Core symbols a family's device header brings (the family includes that header first) | what every Cortex-M family shares whatever the vendor: the interrupt controller and its guard, the SysTick ticker, the microsecond delay, the cycle counter |
 | `pl011/`, `pl022/`, `dw_apb_i2c/` | `kernel/`, `util/` | peripheral blocks licensed to more than one vendor (ARM's PrimeCell UART and SSP, Synopsys's DesignWare I2C), written once over a traits type each family supplies |
 | `avrxt/`, `samc21/`, `stm32g0/`, `stm32f4/`, `ch32v00x/`, `ch32vx03/`, `ch32x035/`, `rp2040/`, `rp2350/` | `kernel/`, `util/`, and `cortexm/` or an IP stratum where the family carries the block | one stratum per family: everything that knows the family's device header, the platform type, the clock, the pins and every peripheral driver |
 | `host/` | `kernel/`, `util/`, `gfx/`, `devices/` | the native target: the host platform, the chips made of RAM, the shared-memory display, the graphics reference renderer |
@@ -250,7 +260,8 @@ layers above, not what the peripheral is.
   crosses between them. A DMA channel does the handler's byte-moving
   without the CPU and raises the edge itself. It plugs in inside an
   engine: `start(request)` programs the channel with the request's
-  spans (the `Lease::reply` loan made physical), and the completion
+  buffers (lent by the requester until the completion event, so the
+  channel may read and write them meanwhile), and the completion
   interrupt posts `TransferDone`. Nothing above the engine changes; the
   DMA channel is a resource like a timer, and a receive stream fed by
   DMA is a ring whose producer index is the hardware's counter
@@ -359,7 +370,8 @@ layers above, not what the peripheral is.
   port, and which USART sits on which pins per route, are facts of the
   device: on the AVR, tables inside `tca.hpp` and `usart.hpp` over the
   stratum's device tables (`avrxt/device_tables.hpp`); on the two
-  ARMv6-M strata, the device-tables header itself
+  Cortex-M0+ strata (the SAM C21 and the STM32G0), the device-tables
+  header itself
   (`samc21/device_tables.hpp`, `stm32g0/device_tables.hpp`), the one
   file where the preprocessor may probe a vendor macro and export what
   it finds as `constexpr` data. Which timer drives which LEDs, which
@@ -421,10 +433,11 @@ layers above, not what the peripheral is.
   functions inline, the request's fields are read once outside the
   loop, the loop is specialized on the request's shape (no data out, no
   data in, the frame width), and the disassembly is where this is
-  checked. Two: what is constant for the life of a binding (widths,
-  direction, the peripheral's address, the validation of all of it) is
-  written when the binding is made (`init`, `arm`) or checked when the
-  program is compiled; an operation writes only what changes (an
+  checked. Two: what is constant for as long as a driver stays
+  configured (widths, direction, the peripheral's address, the
+  validation of all of it) is written when it is configured (`init`,
+  `arm`) or checked when the program is compiled; an operation writes
+  only what changes (an
   address, a count, an enable). Three: a critical section covers a
   decision (a claim, a test-and-set), never a sequence of register
   stores, a copy or a spin; a masked window longer than a few tens of
@@ -453,10 +466,13 @@ layers above, not what the peripheral is.
   to widen; a rate the instrument cannot time is said so, with what
   would time it.
 - **A suite's image fits the family's smallest chip.** A bench suite is
-  a menu of test letters over the console, and its image is a sum: the
-  base every image carries (the startup code, the transport, the test
-  bench, `print`), the driver under test, the letters, and the verdict
-  prose, which weighs as much as the code it judges. The unit of that
+  a test program that offers its tests as a menu over the console, one
+  letter per test, and prints a verdict for each; its image is a sum:
+  the base every image carries (the startup code, the transport, the
+  test bench, `print`), the driver under test, the letters, and the
+  verdict prose (the text each test prints to say what it measured and
+  whether it passed), which weighs as much as the code it judges. The
+  unit of that
   sum is the group of letters an image carries, and the size of a
   group is bounded by the smallest chip of the family, flash and RAM
   alike. Letters that exercise what every part has are grouped so that
@@ -535,8 +551,8 @@ stratum's.
 | CAN | [can.md](can.md) | the frame's reach (classic against the FD superset), the timing's units and the search's rule, the error state as three flags or as one observable |
 | the power model | [power.md](power.md) | each family's ladder mapping; where the tick stops and which site resyncs it |
 | the USB device stack | [usb.md](usb.md) | each family's endpoint controller behind the packet contract, and what its RAM or FIFO adds |
-| flash storage | [nv-heap.md](nv-heap.md), [nv-journal.md](nv-journal.md) | the geometries; the AVR keeps its small values in the EEPROM; a family may have the medium and mount nothing on it, by the NV review's decision |
-| DMA engines | [dma.md](dma.md) | the levels and the release are the WCH strata's, the STM32G0's and the STM32F4's today and every other family's pending wave; four levels or one bit, the arbiter's own tie rule |
+| flash storage | [nv-heap.md](nv-heap.md), [nv-journal.md](nv-journal.md) | the geometries; the AVR keeps its small values in the EEPROM; a family may have the medium and mount nothing on it, by a decision those pages record |
+| DMA engines | [dma.md](dma.md) | the levels and the release are the WCH strata's, the STM32G0's, the STM32F4's, the SAM C21's and the two RP families' (the RP2040 and the RP2350), the AVR having no controller; four levels or one bit, the arbiter's own tie rule |
 | block streams | [block-stream.md](block-stream.md) | the engine names identical wherever block engines exist, and several strata's transfer engines waiting for a block user; the circular mode serves a player and not a source |
 | meters | [meters.md](meters.md) | `TimIntervalMeter` is not a pulse-width meter; a family with no capture unit has no meter at all |
 | analog | [analog.md](analog.md) | `Ref` is several vocabularies because a reference is several different things, one of them the rail alone; `set`/`write` on the DAC |
@@ -553,7 +569,7 @@ carries its pull in a register of its own; the QingKe families put the
 pull in the output register and have neither. A `PinConfig` carries
 whatever else a pad can be told, as a `configure(...)` function on the
 AVR, the SAM and the two ST families, and as an argument to every
-configuring function on the two RP ones, where the pad register is
+configuring function on the two RP families (the RP2040 and the RP2350), where the pad register is
 written whole. What differs is what a pad can be told to do, and how
 it is handed to a peripheral.
 
@@ -564,8 +580,8 @@ it is handed to a peripheral.
 | stm32g0 | `Pin` in `stm32g0/pin.hpp` | `function(PinFunction)` with the AF number, and `release()` = `analog()`, the reset state: the same name as the SAM's with a different landing; `output(level)` before the mode (the port-clock rule); `analog()` is a mode, not the input buffer alone; `read_out()`; speed and open drain in `PinConfig`; `PinSet` |
 | stm32f4 | `Pin` in `stm32f4/pin.hpp` | the STM32G0's block register for register, with three differences a caller can see: no BRR, so `clear()` is a store into the upper half of BSRR, still one store; the port clock is on AHB1 and every configuring function opens it; and the reset state is input floating, so `release()` = `analog()` parks a pad in a state that is not the one it was born in, said in the header, because the G0's equation of the two does not hold here either; `function(PinFunction)` with the AF number, whose meaning on a pad is the datasheet's table and not a header symbol; `output(level)`, `read_out()`, `pull(PinPull)`, `is_output`, `has_function`; speed and open drain in `PinConfig`; `PinSet` |
 | ch32v00x | `Pin` in `ch32v00x/pin.hpp` | `function(PinDrive)` takes no selector: a pad has one default alternate function on this family and the remaps that move it are AFIO's (`ch32v00x/afio.hpp`, a function of the resource that owns the pad); `release()` is the reset state, a floating input, and `analog()` a separate landing, so the G0's equation of the two does not hold here; `input(PinPull)` pulls through the output register (the one-bit mode of this family); no `pull()`, `is_output` or `PinConfig` |
-| ch32vx03 | `Pin` in `ch32vx03/pin.hpp` | `function(PinDrive, PinSpeed)` takes no selector, as on the sister family: which peripheral a pad carries is the remap register's (`ch32vx03/afio.hpp`); the MODE field is the speed, so every output function takes one (50 MHz by default); `input(PinPull)` pulls through the output register; `release()` is the reset state, a floating input, and `analog()` a separate landing; `nibble()` reads a pin's four bits back; the whole-port `out_write` and `configure_pins(mask, nibble)`; the configuration lock no other stratum has (`lock<Mask>()` / `lock(mask)` / `locked()` / `locked_pins()`, one way until a reset); `PinRef` with `read`/`write`/`toggle` beside `set`/`clear`; no `pull()`, `is_output` or `PinConfig` |
-| ch32x035 | `Pin` in `ch32x035/pin.hpp` | `function()` takes no argument: MODE carries no speed on this series and there is no open-drain output, so neither the sister family's drive nor its speed exists, and which peripheral a pad carries is the remap register's (`ch32x035/afio.hpp`); `input(PinPull)` pulls through the output register and answers, false for a pull-down on a pad that has none (all but PA0..PA15, PC16, PC17), `input<PinPull>()` refusing it at compile time; `output()` and `function()` refused at compile time on a pad sharing its package pin with another (the datasheet's notes 4 to 7); `release()` the floating input and `analog()` a separate landing; `nibble()`, the whole-port `out_write` and `configure_pins(mask, nibble)`, the one-way lock; ports of up to twenty-four pins, so `out_set` is two stores across the halves (BSHR and BSXR), and CFGHR is written only from a RAM copy and never read to configure (`Port::cfghr_copy()`) |
+| ch32vx03 | `Pin` in `ch32vx03/pin.hpp` | `function(PinDrive, PinSpeed)` takes no selector, as on the CH32V00x: which peripheral a pad carries is the remap register's (`ch32vx03/afio.hpp`); the MODE field is the speed, so every output function takes one (50 MHz by default); `input(PinPull)` pulls through the output register; `release()` is the reset state, a floating input, and `analog()` a separate landing; `nibble()` reads a pin's four bits back; the whole-port `out_write` and `configure_pins(mask, nibble)`; the configuration lock no other stratum has (`lock<Mask>()` / `lock(mask)` / `locked()` / `locked_pins()`, one way until a reset); `PinRef` with `read`/`write`/`toggle` beside `set`/`clear`; no `pull()`, `is_output` or `PinConfig` |
+| ch32x035 | `Pin` in `ch32x035/pin.hpp` | `function()` takes no argument: MODE carries no speed on this series and there is no open-drain output, so neither the CH32V203's drive nor its speed exists, and which peripheral a pad carries is the remap register's (`ch32x035/afio.hpp`); `input(PinPull)` pulls through the output register and answers, false for a pull-down on a pad that has none (all but PA0..PA15, PC16, PC17), `input<PinPull>()` refusing it at compile time; `output()` and `function()` refused at compile time on a pad sharing its package pin with another (the datasheet's notes 4 to 7); `release()` the floating input and `analog()` a separate landing; `nibble()`, the whole-port `out_write` and `configure_pins(mask, nibble)`, the one-way lock; ports of up to twenty-four pins, so `out_set` is two stores across the halves (BSHR and BSXR), and CFGHR is written only from a RAM copy and never read to configure (`Port::cfghr_copy()`) |
 | rp2040 | `Pin` in `rp2040/pin.hpp` | there is no port letter: the bank is one flat numbering, `Pin<25>`, and `Gpio` beside it offers the word-wide functions SIO gives the whole bank at once; `function(PinFunction)` hands the pad to a peripheral by the function column the pad table names and `release()` takes it back to SIO, `analog()` is a landing of its own (the digital input buffer off, the output driver off) for an ADC pad, `pull(PinPull)`, `input(PinPull)`, `is_output`; every configuring function releases the two pad blocks from reset first, because on this chip they come up held there; no `PinSet` |
 | rp2350 | `Pin` in `rp2350/pin.hpp` | the RP2040's flat numbering over a bank that may be 48 pins wide, so `Gpio`'s word-wide functions speak two words; `PinConfig` carries the pad whole and every configuring function writes it, and the isolation latch is what makes that necessary: the pad comes up isolated (datasheet 9.7), the latch freezing the output enable, the level and the pulls, so a pad configured the RP2040's way would do nothing at all, and "writing the pad is taking it out of isolation" is this file's rule; `isolate(bool)` / `isolated()` are the latch as a function, and `input_enable(bool)` with `read_pulsed()` are the floating-pad erratum as a pair, the input buffer kept off and enabled for the length of one read, because a pad nothing drives leaks high against its own pull-down on this stepping |
 | host | none | - |
@@ -577,7 +593,7 @@ timer, and an application picks one in its board file:
 
 | stratum | realizations | beyond the contract |
 |---|---|---|
-| avrxt | `TcaPwm<n, port>::Channel<ch>` (six 8-bit channels of a split TCA), `TcaPwm16`, `TcaPwmCentered` (dual slope, OVF at the centre), `Pwm8<Tcb>`, `TcdPwm<route>` (the complementary pair with dead time, on the TCD, which the AVR EA has not got) | the TCA and TCB channels are ratiometric on purpose and not `ClockUser`s (a duty survives a clock change, the frequency moves with it); `TcdPwm` is one when the TCD runs on CLK_PER and was asked for a rate in hertz, and follows nothing otherwise |
+| avrxt | `TcaPwm<n, port>::Channel<ch>` (six 8-bit channels of a split TCA), `TcaPwm16`, `TcaPwmCentered` (dual slope, OVF at the centre), `Pwm8<Tcb>`, `TcdPwm<route>` (the complementary pair with dead time, on the TCD, which the AVR EA has not got) | the TCA and TCB channels are ratiometric on purpose (the duty is a fraction of the period, so it survives a clock change while the frequency moves with it) and not `ClockUser`s, the types a dynamic clock notifies ([clock.md](clock.md)); `TcdPwm` is one when the TCD runs on CLK_PER and was asked for a rate in hertz, and follows nothing otherwise |
 | samc21 | `TcPwm`, `TcPwm8`, `TccPwm` (a caller-chosen max), `TccPairPwm` (the complementary pair with dead time) | - |
 | stm32g0 | `TimPwm`, `TimPairPwm` (the complementary pair, on the timers with a break and dead-time unit), `LptimPwm` (on a timer that keeps counting in Stop) | the timers refuse a dynamic clock: their periods are PCLK cycles and no rebase can keep them |
 | stm32f4 | `TimPwm<Tim, ch, top>`, `TimPairPwm<Tim, ch, top>` (the complementary pair with dead time, on TIM1 and TIM8 alone) (`stm32f4/tim.hpp`) | the G0's two names on this family's timers; the dead time is counted in tDTS, the timer clock divided by CR1.CKD and not by the counter's prescaler, so a pair holds the same absolute dead time at every PWM frequency; the timers take a static clock alone, as on the G0, and what they count is HCLK or twice their APB clock (RCC_DCKCFGR's TIMPRE), never the bus rate |
