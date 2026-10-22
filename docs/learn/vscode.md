@@ -23,10 +23,12 @@ Every step below is marked with one of four words:
 The evidence behind the marks is the configuration itself and
 [docs/stm32g0/README.md](../stm32g0/README.md), whose "Debugging"
 section records a debug session on the Nucleo-G071RB from VS Code with
-this launch configuration's sibling. A configuration file is not proof
-of a working session, so nothing on this page about the G0B1RE is
-marked verified until the sequence has been run there; the pull request
-that introduced this page lists that check.
+this launch configuration's sibling (load, reset-halt, a breakpoint at
+`main` hit, source lines stepped). A configuration file is not proof of
+a working session, so nothing on this page about the G0B1RE is marked
+verified until the sequence has been run there. Every "Expected result"
+below describes what the configuration asks the tools to do; where it
+goes beyond what the G071RB session recorded, it says so.
 
 ## The matrix
 
@@ -49,12 +51,13 @@ The rest of the page is the procedure, step by step.
 
 ## Open the right folder
 
-Open the repository root as the workspace folder (File > Open Folder).
-The root is not a CMake project on purpose: it holds eleven sibling
-CMake projects, one per target plus `test/` and `host/`, and
-`.vscode/settings.json` lists them all in `cmake.sourceDirectory`.
-Opening a subdirectory such as `stm32g0/` alone loses the workspace
-settings and the launch configurations.
+Open the repository root as the workspace folder (File > Open Folder;
+a plain folder, there is no `.code-workspace` file). The root is not a
+CMake project on purpose: it holds eleven sibling CMake projects, one
+per target plus `test/` and `host/`, and `.vscode/settings.json` lists
+them all in `cmake.sourceDirectory`. Opening a subdirectory such as
+`stm32g0/` alone loses the workspace settings and the launch
+configurations.
 
 ## Extensions
 
@@ -82,10 +85,15 @@ is configured with absolute paths to OpenOCD (`/sw/openocd/bin/openocd`)
 and to the toolchain's gdb and objdump (`/sw/arm-none-eabi/bin/`); CMake
 Tools uses the toolchain file the project names, which expects the
 compiler under `/sw/arm-none-eabi`. The [command-line
-page](command-line.md) lists what to install and how to point the
-project at another location; the launch entries carry the paths
-literally, so a toolchain elsewhere means editing those paths in
-`.vscode/launch.json` too.
+page](command-line.md) lists what to install. A toolchain elsewhere is
+told to the build the way the command line does it, through the cache
+variable `ARM_TOOLCHAIN_DIR` (and `STM32G0_OPENOCD` for the flash
+target): in VS Code, CMake Tools' setting `cmake.configureSettings` in
+the workspace's or the user's `settings.json` adds cache variables to
+every configure, or a preset of one's own can set them; the launch
+entries carry their paths literally, so `.vscode/launch.json` is edited
+too, and so is clangd's `--query-driver` (below). None of these
+relocations has been performed for this page.
 
 ## clangd
 
@@ -119,6 +127,8 @@ anything is built, and the order matters:
    the build tree `build-cmake/stm32g0b1re-debug`.
 3. Build target: `blink`. The target list is the applications the
    configure discovered for this board, each with its `-upload` twin.
+   Expected result: the status bar shows the chosen target's name next
+   to the build button.
 
 The wrong active folder is the most common cause of a confusing
 failure: a build target list with AVR or host names in it, or a debug
@@ -145,13 +155,20 @@ Select `blink-upload` as the build target and build: OpenOCD programs
 and verifies the image through the board's ST-LINK, resets it and
 exits, and the LED starts blinking. Then select `blink` again as the
 build target, or leave `blink-upload`, which rebuilds `blink` when its
-sources changed.
+sources changed. Like the command-line `-upload`, this leaves the
+DBG_STOP bit set in the chip (OpenOCD's target script sets it at every
+examination, and the reset that ends the programming is followed by
+one); it changes nothing for `blink` and matters for a program that
+measures the Stop modes ([the command-line page](command-line.md),
+step 3).
 
 What to check when nothing happens: the output panel shows OpenOCD's
-messages; "no device connected" means the probe is not reachable
-(USB permission, cable, or the ST-LINK half of the board gone silent,
-which a replug clears, [docs/probes/st-link.md](../probes/st-link.md)).
-A debug session and a flash cannot share the probe: stop the session
+messages. "open failed" or a permission error means the probe could not
+be reached (USB permission, cable); "no device connected" means the
+probe answered but sees no target, which on a Nucleo is the ST-LINK
+half of the board gone silent: replug the board as a whole before any
+other diagnosis ([docs/probes/st-link.md](../probes/st-link.md)). A
+debug session and a flash cannot share the probe: stop the session
 first.
 
 ## Debug
@@ -167,38 +184,46 @@ in three different places:
   is this choice and not the build target. The two usually coincide;
   after flashing with `blink-upload` as the build target, the launch
   target is still `blink`. The command palette entry is "CMake: Set
-  Launch/Debug Target";
+  Launch/Debug Target"; expected result: the status bar shows the
+  launch target's name;
 - the launch configuration, in the Run and Debug view: "Debug
   STM32G0B1RE (OpenOCD, Nucleo-G0B1RE)". It is a Cortex-Debug entry:
   it starts OpenOCD with the ST-LINK interface and the `stm32g0x`
-  target script, loads the ELF, resets, and runs to `main`
-  (`runToEntryPoint`). The G071RB and G031K8 entries differ only in the
-  SVD file; with one Nucleo attached, any of the three reaches it, but
-  the Peripheral Viewer then shows another part's registers.
+  target script, loads the ELF, resets, and runs to `main` (its
+  `runToEntryPoint` setting, which names the function the session
+  stops at after loading). The G071RB and G031K8 entries differ only in
+  the SVD file; with one Nucleo attached, any of the three reaches it,
+  but the Peripheral Viewer then shows another part's registers.
 
-Start the session (F5). Expected result: the Debug Console shows
-OpenOCD connecting to the ST-LINK and the part, the program is loaded,
-and the editor stops at the first line of `main` in `blink.cpp` with
-the call stack showing `main`. A breakpoint on `Led::toggle()` inside
-`Blinker::running` is then hit within half a second of continuing. The
-Peripheral Viewer, in the Run and Debug side bar, shows the STM32G0B1's
-registers from `stm32g0/svd/STM32G0B1.svd`; GPIOA's ODR bit 5 follows
-the LED.
+Start the session (F5). Expected result, as recorded on the G071RB: the
+Debug Console shows OpenOCD connecting to the ST-LINK and the part, then
+the ELF being loaded, and the editor stops at the first line of `main`
+in `blink.cpp` with the call stack showing `main`. The Debug Console's
+first lines also print the path of the ELF being loaded: a path under
+`build-cmake/stm32g0b1re-debug/` is the right one, and any other build
+tree in that path means the wrong active folder or launch target. Beyond
+what was recorded, what the configuration should then allow: a
+breakpoint on the `Led::toggle()` line inside `Blinker::running`, hit
+within half a second of continuing; the Peripheral Viewer, in the Run
+and Debug side bar, showing the STM32G0B1's registers from
+`stm32g0/svd/STM32G0B1.svd`, with GPIOA's ODR bit 5 following the LED.
 
 If the session loads an executable from another family, or fails to
 find the ELF: check the active folder and the launch target before
 suspecting the probe. If OpenOCD cannot open the probe, a `blink-upload`
 from the same workspace fails the same way, which separates a probe
 problem from a configuration one. With several ST-LINKs attached, the
-entry takes the first one; the launch entry's comment says how to name
-a serial.
+entry takes the first one; the comment above the entry in
+`.vscode/launch.json` says how to name a serial
+(`openOCDPreConfigLaunchCommands` with `adapter serial`).
 
 What a session leaves behind: OpenOCD's target script sets the
-DBG_STOP bit in DBGMCU_CR, which keeps the clocks running in the deeper
-Stop modes until a power-on or a `brio flash` clears it. `blink` sleeps
-in plain Sleep, where the bit changes nothing; a program measuring Stop
-right after a debug session does not measure Stop
-([docs/stm32g0/README.md](../stm32g0/README.md), "Upload").
+DBG_STOP bit in DBGMCU_CR (as a flash does, above), which keeps the
+clocks running in the deeper Stop modes until a power-on or a `brio
+flash` clears it. `blink` sleeps in plain Sleep, where the bit changes
+nothing; a program measuring Stop right after a debug session or a flash
+does not measure Stop ([docs/stm32g0/README.md](../stm32g0/README.md),
+"Upload").
 
 ## Serial output
 
@@ -216,9 +241,10 @@ the recommended extensions, and no session with it is on record.
 The `test/` project builds the kernel's and the services' test suites
 for the host and registers them with CTest. From VS Code: make `test`
 the active folder, select its one preset (`host`), build, and run the
-tests from CMake Tools' CTest control in the status bar, which the
-settings keep visible for this purpose. Expected result: every suite
-passes. The equivalent on the command line is in the [command-line
+tests from CMake Tools' CTest item in the status bar (the one the
+settings keep visible for this purpose; its label is the extension's
+and is confirmed with the rest in the interactive check). Expected
+result: every suite passes, and the status bar item reports the count. The equivalent on the command line is in the [command-line
 page](command-line.md). The host compiler is the preset's
 `/sw/gcc/bin/g++`.
 

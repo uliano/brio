@@ -24,9 +24,10 @@ and return.
 **One handler runs to completion before any other active object runs.**
 A higher-priority event that arrives in the meantime waits in its queue
 and is served next; it does not interrupt the handler that is running.
-Interrupts still interrupt. Keep handlers short, and when work must
-continue later, arm a timer or post an event instead of waiting inside
-the handler.
+Interrupts still interrupt a handler, and one interrupt handler never
+interrupts another on any platform brio runs on. Keep handlers short,
+and when work must continue later, arm a timer or post an event instead
+of waiting inside the handler.
 
 Timers are events too: a time event posts its payload to its owner when
 it expires, in the loop, so no user code runs inside the tick interrupt.

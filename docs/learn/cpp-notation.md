@@ -57,7 +57,27 @@ letter and number are fixed. The pin's level is a run-time value that
 waiting is a run-time value.
 
 `Stm32g0Platform<>` with empty brackets takes every argument at its
-default (here, the SysTick timebase).
+default. This platform has one argument, the kernel timebase, and its
+default is the SysTick ticker at 1000 ticks per second; the alternative
+is a low-power timer that keeps counting through the chip's Stop modes
+(`brio/stm32g0/platform.hpp`).
+
+## Braces after a type: building a value
+
+```cpp
+Toggle{}
+SetPeriod{periods[index]}
+heartbeat{Toggle{}}
+```
+
+`Type{...}` builds a value of that type from the values in the braces,
+field by field in declaration order: `SetPeriod{250}` is a `SetPeriod`
+whose `ticks` is 250, `Toggle{}` a `Toggle` with nothing in it. It plays
+the role of C99's compound literal `(SetPeriod){250}`. After a variable's
+name, the braces initialize that variable: `heartbeat{Toggle{}}` creates
+the timer with `Toggle{}` as its payload. A C++ class may define what
+its braces mean (`TimeEvent` takes the payload); for a plain struct
+like the events here they fill the fields in order.
 
 ## Structs with functions, inheritance
 
@@ -67,11 +87,28 @@ struct Blinker : brio::Fsm<Blinker, Toggle, SetPeriod> { ... };
 
 A C++ `struct` can contain functions and can be built on another type.
 `Blinker : brio::Fsm<...>` says that `Blinker` has everything
-`Fsm<...>` defines (the `Event` type, `dispatch`, `start`, `handled`,
-`unhandled`, `transition`) and adds its own members. In this program
-inheritance is used as a way to pull in a ready-made set of members,
-not as a way to override behaviour: there is no virtual function
-anywhere in brio's kernel.
+`Fsm<...>` defines (the `Event` type, the `Status` a handler returns,
+`dispatch`, `start`, `handled`, `unhandled`, `transition`) and adds its
+own members. That is why `running` can name `Status`, `handled()` and
+`unhandled()` without a prefix: they are its own members, inherited.
+In this program inheritance is used as a way to pull in a ready-made
+set of members, not as a way to override behaviour: there is no
+virtual function anywhere in brio's kernel. `Fsm` stands for finite
+state machine.
+
+## `const Event& e`: a reference parameter
+
+```cpp
+static Status running(const Event& e)
+```
+
+In a declaration, `&` after a type does not take an address: it
+declares a reference, a second name for the caller's object. Inside the
+function `e` is used like the object itself (`e.field`, never `*e` or
+`e->field`), and no copy is made. `const` promises the function only
+reads it. The effect is what a C programmer gets from `const Event*`
+with the pointer syntax removed; it is also how `match` receives the
+variant below.
 
 ## The derived type as template argument
 
@@ -97,8 +134,9 @@ static inline uint8_t index = 0;
 
 A `static` data member belongs to the type, not to any instance; there
 is exactly one `Blinker::queue` in the program. brio's active objects
-have no instances at all (`Fsm` deletes the constructor), so "the type"
-is the object and every member is static. `inline` on a static member
+have no instances at all (`Fsm` declares that no object of the type may
+be created, so `Blinker b;` does not compile), so "the type" is the
+object and every member is static. `inline` on a static member
 (C++17) lets its storage be defined right here, in a header or in the
 class body, instead of in a separate source file; the linker keeps one
 copy. The state is static in the C sense of "allocated for the

@@ -86,7 +86,14 @@ The kernel is the loop. On each turn it does three things:
    hands that event to its active object's handler and lets the handler
    run to completion.
 3. If every queue was empty, it puts the processor to sleep until the
-   next interrupt.
+   next interrupt. The check and the sleep are arranged so that an
+   interrupt arriving between them is not lost: the kernel checks the
+   queues with interrupts masked, and the platform's sleep code is
+   written so that a pending interrupt still ends the sleep (on a
+   Cortex-M the wait-for-interrupt instruction wakes on a pending
+   interrupt even while masked, and interrupts are unmasked right after
+   it; each platform's header says how its core does it). You write
+   none of this; it is the kernel's and the platform's.
 
 Step 2 is the heart of the model, and its rule is the one rule to
 remember:
@@ -109,7 +116,17 @@ The consequences for the programmer follow directly:
   the hardware. An interrupt handler can run in the middle of an event
   handler. What an interrupt handler may do with the kernel is exactly
   one thing: post an event. It must not touch an active object's data
-  directly.
+  directly, because the handler it interrupted may be in the middle of
+  changing that data.
+- One interrupt handler does not interrupt another. brio requires this
+  of every platform it runs on (each keeps the promise its own way: the
+  AVR by its architecture, the Cortex-M families by giving every
+  interrupt line the same priority). So there are exactly two contexts,
+  interrupt and loop, and one boundary between them, and posting an
+  event is the one operation built for that boundary: two interrupt
+  handlers that post to the same queue never run at the same time.
+  The full statement is
+  [kernel.md, "The model in one page"](../design/kernel.md#1-the-model-in-one-page).
 
 ## Priority
 

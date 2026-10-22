@@ -116,7 +116,55 @@ number.
 
 ## Reader review (fresh subagents)
 
-Round 1: see the PR body for the findings and what changed.
+Two fresh readers per round, one on README + introduction +
+first-program + cpp-notation, one on command-line + vscode. Each
+received the audience profile, the file list and the brief's questions
+only.
+
+Round 1, concept route. Supported directly: the purpose, the costs, the
+six-step Toggle path, the scheduling scenario (an interrupt posting to a
+high-priority object while a low-priority handler runs), the CRTP
+explanation, the compile-time checks, the full-queue behaviour.
+Substantive gaps: `const Event& e` (the reference `&`) never explained;
+brace initialization (`Toggle{}`, `heartbeat{Toggle{}}`) never
+explained; `Fsm` never expanded and `Status`'s origin not said; whether
+one interrupt handler can interrupt another not stated (so the safety
+of two handlers posting to one queue could not be judged); how the
+kernel sleeps with interrupts masked without losing a wake not
+explained; "guarded by the platform P" used before P was defined; the
+verification-status sentence pointing at a pull request the reader
+cannot see; "no useful space" for empty events ambiguous; whether the
+event being dispatched occupies a slot. All addressed in the pages
+(introduction: the no-nesting promise and the sleep mechanism;
+first-program: Fsm expanded, Status inherited, the reference
+parameter, braces, P defined at first use, depth rule stated,
+verification sentence rewritten; cpp-notation: two new sections,
+references and braces; README: the no-nesting rule in the model
+paragraph).
+
+Round 1, workflow guides. Supported directly: the prerequisites with
+their locations and overrides, the terminal and VS Code sequences with
+expected results, the three-way distinction build target / upload
+target / debug executable, the wrong-folder symptoms, the status of
+every VS Code row. Two factual errors found: the pages told the reader
+to check USB permission first on "no device connected", where the probe
+page says to replug the board first and distinguishes that status from
+an open failure; and the pages attributed the DBG_STOP leftover to a
+debug session alone, where docs/stm32g0/README.md says the reset that
+ends a `program` re-examines the chip, so a plain `-upload` leaves the
+bit set too. Both corrected in both pages, and C_DEBUGEN (DHCSR) is
+told apart from DBG_STOP (DBGMCU_CR). Other gaps addressed: no per-step
+status in command-line.md (added to every step); "the pull request that
+introduced this page" (removed); how a cache variable combines with
+`--preset`, and how CMake Tools takes one (added); the udev rules file
+by name (added); the size table described; `cd` back to the root before
+gdb; what `print Blinker::queue` prints; expected results of the build-
+and launch-target selections; the Debug "Expected result" separated into
+what the G071RB session recorded and what the configuration should
+allow beyond it; the launch.json comment located; a `.code-workspace`
+file said absent.
+
+Round 2: see below once run.
 
 ## Local verification handoff (after the batch)
 
