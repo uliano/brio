@@ -22,12 +22,16 @@ handlers do one thing with the kernel: they post an event into a queue
 and return.
 
 **One handler runs to completion before any other active object runs.**
-A higher-priority event that arrives in the meantime waits in its queue
-and is served next; it does not interrupt the handler that is running.
-Interrupts still interrupt a handler, and one interrupt handler never
-interrupts another on any platform brio runs on. Keep handlers short,
-and when work must continue later, arm a timer or post an event instead
-of waiting inside the handler.
+A higher-priority event that arrives in the meantime waits in its
+queue; it does not interrupt the handler that is running. On the next
+turn the kernel takes the oldest event of the highest-priority queue
+that is not empty, so priority decides what is served next and nothing
+more: a long handler delays every other active object, and an object
+whose higher-priority peers are always busy is never served. Interrupts
+still interrupt a handler, and one interrupt handler never interrupts
+another on any platform brio runs on. Keep handlers short, and when
+work must continue later, arm a timer or post an event instead of
+waiting inside the handler.
 
 Timers are events too: a time event posts its payload to its owner when
 it expires, in the loop, so no user code runs inside the tick interrupt.
@@ -44,18 +48,20 @@ time.
 
 ## What an application looks like
 
-An excerpt of the maintained example `blink`
+Two excerpts of the maintained example `blink`
 ([stm32g0/src/apps/blink.cpp](stm32g0/src/apps/blink.cpp), the complete
-file): the active object that owns the LED, and the line that starts
-the kernel. A second active object in the same file changes the blink
-period every three seconds by posting a `SetPeriod` event to this one.
+file), copied as they stand: two of its three event types and the
+active object that owns the LED, then the line in `main()` that starts
+the kernel. A second active object in the same file, `Supervisor`,
+changes the blink period every three seconds by posting a `SetPeriod`
+event to this one.
 
 ```cpp
-struct Toggle {};                      // an event: the heartbeat
-struct SetPeriod { uint16_t ticks; };  // an event with data: a new period
+struct Toggle {};                      // Blinker's own heartbeat
+struct SetPeriod { uint16_t ticks; };  // command: change the blink period
 
 struct Blinker : brio::Fsm<Blinker, Toggle, SetPeriod> {
-    static inline brio::EventQueue<Event, 4, P> queue;                 // this object's queue
+    static inline brio::EventQueue<Event, 4, P> queue;
     static inline brio::TimeEvent<P, Blinker, Toggle> heartbeat{Toggle{}};
 
     static void init() {
@@ -65,33 +71,46 @@ struct Blinker : brio::Fsm<Blinker, Toggle, SetPeriod> {
 
     static Status running(const Event& e) {
         return brio::match(e,
-            [](brio::Entry) { heartbeat.arm_every(brio::ticks_from_ms<P>(500)); return handled(); },
-            [](Toggle)      { Led::toggle(); return handled(); },
-            [](SetPeriod p) { heartbeat.arm_every(p.ticks); return handled(); },
-            [](auto)        { return unhandled(); }
+            [](brio::Entry) {
+                heartbeat.arm_every(brio::ticks_from_ms<P>(500));
+                return handled();
+            },
+            [](Toggle) {
+                Led::toggle();
+                return handled();
+            },
+            [](SetPeriod p) {
+                heartbeat.arm_every(p.ticks);  // restart with the new cadence
+                return handled();
+            },
+            [](auto) { return unhandled(); }
         );
     }
 };
+```
 
-// in main(), after the clock and the timebase are set up:
-brio::Tenuto<P, Blinker, Supervisor>::run();   // the list is the priority order; never returns
+```cpp
+    brio::Tenuto<P, Blinker, Supervisor>::run();  // never returns
 ```
 
 `P` names the platform (the chip) and `Led` the pin, once, in the lines
-of the file that belong to the target. The list given to `Tenuto` is
-the application's active objects in priority order; the compiler
-generates the scheduling code from it. `blink` builds unchanged, bar
-those few target lines, for the AVR, SAM C21, STM32G0, STM32F4 and
-CH32V00x projects.
+of the file that belong to the target; the kernel is started after the
+clock and the timebase are set up. The list given to `Tenuto` is the
+application's active objects in priority order; the compiler generates
+the scheduling code from it. `blink` builds unchanged, bar those few
+target lines, for the AVR, SAM C21, STM32G0, STM32F4 and CH32V00x
+projects.
 [The first program, read in stages](docs/learn/first-program.md) walks
 through this file.
 
 ## The ideas behind it
 
 - Active objects share nothing but events. An object's data is touched
-  by its own handler only, so no handler needs a lock against another.
-  Events are copied into queues by value; a buffer that must not be
-  copied travels as a pointer with its lifetime rule written in the type
+  by its own handlers only, a rule of the design the compiler does not
+  check, and handlers never run concurrently, so no handler needs a lock
+  against another. Events are copied into queues by value; a buffer
+  that must not be copied travels as a pointer with its lifetime rule
+  written in the type, and following that rule is the program's duty
   ([kernel.md, "Payloads"](docs/design/kernel.md#4-payloads-what-travels-inside-the-event-kernelborrowedhpp)).
 - Posting never waits. A full queue drops the event and counts it,
   which is how an undersized queue is found. Library calls can wait:
@@ -163,7 +182,7 @@ chapters, which boards, which gaps) is in its guide.
 | CH32V203 and CH32V303 (`ch32vx03/`) | WeAct CH32V203C8T6, WCH CH32V303 evaluation board | CH32V203 supported; CH32V303 in bring-up; CAN not implemented | [docs/ch32vx03/](docs/ch32vx03/README.md) |
 | CH32X035 (`ch32x035/`) | WCH CH32X035F8U6 evaluation board | in bring-up: platform, clock, pins and USARTs only | [docs/ch32x035/](docs/ch32x035/README.md) |
 | RP2040 (`rp2040/`) | Raspberry Pi Pico, WeAct RP2040 | supported; two cores run two kernels | [docs/rp2040/](docs/rp2040/README.md) |
-| RP2350 (`rp2350/`) | WeAct RP2350B | in bring-up: one source built for the Cortex-M33 pair and for the Hazard3 pair, every chapter green on both; no HSTX, no M33 coprocessors | [docs/rp2350/](docs/rp2350/README.md) |
+| RP2350 (`rp2350/`) | WeAct RP2350B | in bring-up: one source built for the Cortex-M33 pair and for the Hazard3 pair, every driver's test suite passing on both; no HSTX, no M33 coprocessors | [docs/rp2350/](docs/rp2350/README.md) |
 | host (`host/`) | the host itself | supported: the test suites and the simulators | [docs/host/](docs/host/README.md) |
 
 Compilers: avr-gcc 16.2 for the AVR, arm-none-eabi-gcc 16.2 for the
@@ -185,11 +204,14 @@ application per `src/apps/<app>.cpp` at configure time and gives it a
 build target and an `-upload` target.
 
 ```bash
-(cd test    && ctest --preset host)                                                # the host tests, no hardware
+(cd test    && cmake --preset host && cmake --build --preset host && ctest --preset host)   # the host tests, no hardware: configure, build, run
 (cd stm32g0 && cmake --preset stm32g0b1re-release)                                 # configure one project for one part
 (cd stm32g0 && cmake --build --preset stm32g0b1re-release --target blink)          # build one application
 (cd stm32g0 && cmake --build --preset stm32g0b1re-release --target blink-upload)   # flash it through the board's probe
 ```
+
+The test preset runs the suites and does not build them: `ctest
+--preset host` alone is for a test tree already configured and built.
 
 The step-by-step version, with prerequisites and expected results, is
 [docs/learn/command-line.md](docs/learn/command-line.md); the VS Code

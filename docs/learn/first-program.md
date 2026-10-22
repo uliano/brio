@@ -15,6 +15,10 @@ The notation that may be new to a C programmer (angle brackets, `using`,
 appears, with a link to [the C++ in blink](cpp-notation.md) for the
 longer version.
 
+To see the program run before reading it, build and flash it unchanged
+from [the command line](command-line.md) or
+[from VS Code](vscode.md), then come back here with the LED blinking.
+
 ## What the program does
 
 The board's user LED changes state at a steady rate. Every three
@@ -34,9 +38,7 @@ Verification status: `blink` is one of the applications the STM32G0
 project builds on every preset and the bench flashes
 ([docs/stm32g0/README.md](../stm32g0/README.md), "The Nucleo-G071RB").
 The excerpts below are copied from the file as it stands in the same
-revision as this page; the file itself was not modified or recompiled
-when the page was written, so the source is the authority where the two
-differ.
+revision as this page; where the two differ, the file is the authority.
 
 ## Two active objects
 
@@ -65,10 +67,15 @@ An event is a plain struct. `Toggle` and `Cycle` carry no data: their
 arrival is the whole message. `SetPeriod` carries the new period, in
 kernel ticks (one millisecond each on this target; the "Time" stage
 explains the unit). These are ordinary C structs, except that C++
-allows an empty one. A queue slot is as large as the largest event the
-object accepts plus a tag byte saying which one it holds, so an empty
-event adds nothing to the slot's size; `Blinker`'s slots are sized by
-`SetPeriod`'s two bytes.
+allows an empty one. A queue slot holds one `Event`, the variant built
+from these types (next stage): it stores the largest alternative, a
+tag saying which alternative is live, and whatever padding the
+compiler's alignment rules add. For `Blinker` with the compiler the
+STM32G0 project uses (arm-none-eabi-gcc 16.2, Cortex-M0+),
+`sizeof(SetPeriod)` is 2 and `sizeof(Event)` is 4. The empty events
+add nothing here, but that is a fact about this variant, not a formula
+for others; when the size matters, read `sizeof(Event)` in the program
+itself.
 
 `Toggle{}` is how C++ writes a value of type `Toggle` with nothing in
 it, and `SetPeriod{250}` a `SetPeriod` whose field is 250: braces after
@@ -203,8 +210,8 @@ list is code you can open.
    no mask of its own: the producers and the consumer write different
    one-byte cursors, and a byte is one uninterruptible access on every
    core brio runs on, so a post landing in the middle of a take leaves
-   both consistent (`brio/kernel/event_queue.hpp`, "The consumer never
-   masks").
+   both consistent (`brio/kernel/event_queue.hpp`, "The consumer's
+   side, which never masks").
 4. The loop's second action is to scan the queues in priority order.
    `Blinker` is first and its queue holds one event, so the kernel
    takes it and calls `Blinker::dispatch(e)`, a function `Fsm` provides.
@@ -245,13 +252,20 @@ tick, then resumes and finishes. On the next turn the loop posts
 served before `Supervisor`'s, whatever `Supervisor` still has waiting.
 **Priority chooses the next event to serve. It never interrupts the
 handler that is running.** A handler that takes long delays every
-other active object by that long. And one interrupt handler never
-interrupts another on any brio platform, so the tick handler above runs
-whole, whatever else is armed.
+other active object by that long, and that is the only promise the
+kernel makes about response time. How long an event waits also depends
+on the interrupt handlers that run, on the timer check at the start of
+the turn, and on the events ahead of it: older ones in the same queue,
+and any in a higher-priority queue, including ones posted while it
+waits. An object whose higher-priority peers always have something
+waiting is never served, and nothing in the kernel prevents that. One
+interrupt handler never interrupts another on any brio platform, so
+the tick handler above runs whole, whatever else is armed.
 
-In `blink` both handlers take microseconds, so the question is
-academic. It stops being academic the first time a handler is given a
-loop that waits for a peripheral.
+In `blink` both handlers take microseconds and no queue ever holds
+more than one event, so the question is academic. It stops being
+academic the first time a handler is given a loop that waits for a
+peripheral, or a producer posts faster than its consumer is served.
 
 ## Stage 5: state
 
@@ -294,11 +308,23 @@ heartbeat.arm_every(brio::ticks_from_ms<P>(500));
 Kernel time is counted in ticks. The tick rate is a constant of the
 platform: 1000 per second on this target (SysTick at 1 kHz,
 `brio/stm32g0/ticker.hpp`), 1024 on the AVR. `ticks_from_ms<P>(500)`
-converts milliseconds to that platform's ticks, rounding up so that a
-delay is never shorter than asked; with a constant argument the compiler
-does the arithmetic and the result is a literal in the binary
-(`brio/kernel/time.hpp`). `arm_every` arms the timer periodically: the
-first `Toggle` 500 ticks from now, then one every 500 ticks.
+converts milliseconds to that platform's ticks, rounding up to whole
+ticks so that the count is never shortened by truncation; with a
+constant argument the compiler does the arithmetic and the result is a
+literal in the binary (`brio/kernel/time.hpp`). `arm_every` arms the
+timer periodically: the first `Toggle` 500 ticks from now, then one
+every 500 ticks.
+
+A count of ticks is not a promise of physical time. The timer is
+scheduled against the platform's tick counter, which on this target
+changes once a millisecond, and arming can happen anywhere between two
+changes; so a delay of N ticks matures between N - 1 and N milliseconds
+of wall time later, and the event is handled when the loop gets to it
+after that. For a 500 ms heartbeat the difference is invisible; for a
+one-tick delay it means "almost at once". The exact rules (the arming
+phase, the wrap of the 32-bit counter, the catch-up when the loop falls
+behind a periodic timer) are in the opening comment of
+`brio/kernel/time_event.hpp`.
 
 Where the timer is checked, and where the user code runs, is the point
 of the mechanism: the tick interrupt counts; the kernel loop compares
@@ -394,11 +420,17 @@ record that survives a reset and halts
 ([kernel.md, "Failures: overflow and panic"](../design/kernel.md#10-failures-overflow-and-panic-kernelpanichpp));
 `blink` never calls it.
 
-Latency in this model is the time an event waits in its queue: at most
-the longest handler in the program plus the handlers of
-higher-priority events that were also waiting. `blink`'s handlers are a
-few dozen instructions, so a `Toggle` is served within microseconds of
-its tick.
+Latency in this model is the time an event waits in its queue, and the
+kernel bounds only one part of it: the handler running when the event
+arrives finishes first. The rest is the interrupt handlers that run in
+the meantime, the timer check at the start of the turn, and every event
+served before it, older ones in the same queue and any in a
+higher-priority queue, those posted while it waits included. There is
+no formula; the bound is whatever the program's own handlers and
+traffic make it. In `blink` the handlers are a few dozen instructions
+and no queue ever holds more than one event, so a `Toggle` is expected
+to be served within microseconds of its tick; that is read from the
+code, not measured.
 
 ## The target glue
 
