@@ -1,47 +1,61 @@
 /*
  * tenuto.hpp
  *
- * Tenuto, the brio cooperative kernel ("QV-style"): active objects
- * known at compile time, priority = position in the pack (first =
- * highest), one event per iteration always rescanning from the top,
- * run-to-completion dispatch, IDLE sleep when nothing is pending.
+ * Tenuto, the brio kernel: the loop that serves the active objects of a
+ * program, one event at a time, in priority order.
  *
- * The name is the musical marking for a note held for its full value,
- * which is run-to-completion said in one word: every dispatch runs to
- * its end, one after another, and nothing preempts an active object.
+ * An application starts it once, at the end of main(), with the platform
+ * and its active objects listed from the highest priority to the lowest:
  *
- * The loop, in words: process matured time events; take ONE event from
- * the highest-priority non-empty queue, dispatch it IN ITS SLOT and
- * release the slot unless the AO held it (serve_one(), kernel/
- * active_object.hpp; the queue hands over the slot's number and the
- * slot stays out of the producers' reach until released - kernel/
- * event_queue.hpp); if every queue
- * was empty, re-check under the critical section and go idle - the
- * platform's idle() re-enables interrupts immediately followed by the
- * sleep instruction, so no wakeup can slip between the check and the
- * sleep (the lost-wakeup race is closed by the silicon).
+ *     brio::Tenuto<P, Blinker, Supervisor>::run();   // never returns
  *
+ * The list is the priority order; there is no separate priority table.
+ * The compiler generates the scan over the list, so an object not in it
+ * never runs, and an object that does not meet the ActiveObject contract
+ * (kernel/active_object.hpp) is refused at this line with the name of
+ * the requirement.
+ *
+ * One turn of the loop:
+ *  1. post the time events that have matured (kernel/time_event.hpp);
+ *  2. take ONE event from the highest-priority non-empty queue and
+ *     dispatch it, to completion, on the main stack; then release its
+ *     queue slot unless the object held it (serve_one() in
+ *     kernel/active_object.hpp);
+ *  3. if every queue was empty, check again with interrupts masked and,
+ *     if still empty, sleep until the next interrupt.
+ *
+ * The rule the whole model rests on: a dispatch runs to its end before
+ * any other active object runs. A higher-priority event that arrives
+ * during a dispatch waits in its queue and is served on the next turn,
+ * which rescans from the top. Interrupt handlers do interrupt a
+ * dispatch; what they may do with the kernel is post() an event. The
+ * name is the musical marking for a note held for its full value, which
+ * is run-to-completion said in one word.
+ *
+ * Priority is fixed, so a low-priority object starved by busy
+ * higher-priority ones is a sizing or design error, made visible by the
+ * per-queue overflow counters; the kernel does not age priorities.
+ *
+ * Sleeping without losing a wake-up: the platform's idle() is entered
+ * with interrupts masked and must sleep in a way that an interrupt
+ * arriving between the empty check and the sleep instruction still wakes
+ * the core (kernel/platform.hpp says how each core keeps that promise).
  * A platform whose timebase keeps counting while the core sleeps may
- * offer the OPTIONAL idle_until(deadline) instead (kernel/platform.hpp):
- * the loop then hands it the absolute tick of the nearest armed time
- * event - TimeEvents::next_deadline(), empty when nothing is armed - so
- * the platform can place its wake there and sleep through the whole
- * wait in one breath, no periodic tick needed. Detected by requires, so
- * a platform without it is compiled with the plain idle() path alone.
+ * offer idle_until(deadline) instead: the loop then hands it the absolute
+ * tick of the nearest armed time event (TimeEvents::next_deadline(),
+ * empty when nothing is armed), so the platform can place its wake there
+ * and sleep through the whole wait with no periodic tick. The hook is
+ * detected with a requires expression; a platform without it compiles
+ * the plain idle() path alone.
  *
- * Starvation of low-priority AOs under fixed priority is by definition
- * a sizing/design error; the per-queue overflow counters make it
- * visible. All AOs run on the single main stack, one at a time.
+ * The list also carries one ordering fact the payload rules need
+ * (kernel/borrowed.hpp): an object that lends Lease::dispatch payloads
+ * declares its borrowers with `using LendsTo = Subscribers<...>`, and
+ * this header checks at compile time that every borrower precedes the
+ * lender in the list.
  *
- * What an AO must provide to sit in the pack is the ActiveObject
- * contract (kernel/active_object.hpp); what the machine must provide is
- * the Platform contract (kernel/platform.hpp). Because priority IS the
- * pack order, the pack also carries the one ordering fact the payload
- * rule needs: an AO lending Lease::dispatch payloads (kernel/
- * borrowed.hpp) declares `using LendsTo = Subscribers<...>` and Tenuto
- * static_asserts that every borrower precedes it.
- *
- * Host tests drive init_all()/step() directly (run() never returns).
+ * Host tests drive init_all() and step() directly, since run() never
+ * returns.
  */
 
 #pragma once
@@ -70,8 +84,8 @@ struct Pack {
         return found;
     }
 
-    /// True when every listed borrower precedes Lender in the pack - the
-    /// condition that makes a Lease::dispatch loan correct by construction.
+    /// True when every listed borrower precedes Lender in the pack: the
+    /// ordering a Lease::dispatch loan relies on (kernel/borrowed.hpp).
     template <typename Lender, typename... Borrowers>
     static constexpr bool borrowers_precede(Subscribers<Borrowers...>) {
         return ((index<Borrowers>() < index<Lender>()) && ...);
@@ -104,23 +118,27 @@ class Tenuto {
 public:
     Tenuto() = delete;
 
-    /// Start every AO (in pack order) before the first event is served.
+    /// Call every active object's init(), in list order, before the first
+    /// event is served. run() does this; a host test calls it by hand.
     static void init_all() {
         (Aos::init(), ...);
     }
 
-    /// Serve at most ONE event: highest-priority non-empty queue wins.
-    /// Returns false when every queue was empty at the moment it looked.
+    /// Serve at most one event: the oldest in the highest-priority
+    /// non-empty queue. Returns false when every queue was empty at the
+    /// moment it looked. Main-loop context; a host test's turn of the crank.
     static bool step() {
         return (try_one<Aos>() || ...);
     }
 
-    /// Sleep if - re-checked with interrupts masked - nothing is pending.
-    /// A platform with idle_until() is told how far it may sleep: the
-    /// nearest armed deadline, read here under the same mask (the armed
-    /// list is main-loop state, and a masked read of now() is the
-    /// timebase's contract). Without it, plain idle(): the other branch
-    /// is not compiled at all.
+    /// Sleep if, re-checked with interrupts masked, nothing is pending.
+    /// Returns after the next interrupt (the platform's idle() unmasks
+    /// and sleeps without a lost-wakeup window). A platform with
+    /// idle_until() is told how far it may sleep: the nearest armed
+    /// deadline, read here under the same mask (the armed list is
+    /// main-loop state, and a masked read of now() is the timebase's
+    /// contract). Without it, plain idle(): the other branch is not
+    /// compiled at all.
     static void idle_if_empty() {
         typename P::CriticalSection cs;
         if ((Aos::queue.empty() && ...)) {
@@ -134,6 +152,9 @@ public:
         }
     }
 
+    /// Initialize every active object, then loop forever: time events,
+    /// one dispatch, sleep when idle. Call once, with interrupts enabled
+    /// and the clock and timebase set up.
     [[noreturn]] static void run() {
         init_all();
         for (;;) {

@@ -1,49 +1,49 @@
 /*
  * active_object.hpp
  *
- * The ActiveObject concept: the contract between the kernel and the
- * things it schedules. This is the FORMAL half of the contract - what
- * the compiler can check; the informal half (run-to-completion, who may
- * push, scheduling order) is written below and in docs/design/kernel.md.
+ * What the kernel requires of an active object: the ActiveObject
+ * concept, and serve_one(), the kernel's step for one object.
  *
- * An active object (AO) is a monostate class - no instances, everything
- * static, exactly like the brio drivers - that owns:
+ * An active object is a class with no instances and only static members
+ * (the type is the object), that provides:
  *  - `Event`: its own event type, a std::variant of small trivially
- *    copyable structs (usually built by Fsm<Derived, Alts...>, which
- *    prepends the reserved Entry/Exit alternatives);
- *  - `queue`: a static EventQueue<Event, depth, P> - the ONE place where
- *    events for this AO wait. Depth is the AO's own sizing decision,
- *    which is why the base class cannot declare it for you;
- *  - `init()`: called once by Tenuto::init_all() in pack order, before
- *    the first event is served. An Fsm-based AO calls start(&initial)
- *    here, so its first state is entered before anything can be posted;
- *  - `dispatch(const Event&)`: run ONE event to completion. Called from
- *    the kernel loop only, interrupts enabled, never re-entered: while a
- *    dispatch runs no other AO runs (single stack, cooperative), so the
- *    AO's static data needs no locking against other AOs - only ISRs
- *    are concurrent, and they touch nothing but the queue (through
- *    post(), inside a critical section). The Event it receives is the
- *    one in the queue's slot, and the slot is the AO's until it is
- *    RELEASED: by the kernel right after the dispatch, or - when the AO
- *    called the queue's hold() inside it - by the AO itself, with the
- *    Held handle hold() returned, in a later dispatch of its own
- *    (Lease::hold, kernel/borrowed.hpp). Never being re-entered is also
- *    what keeps a slot from being taken twice, and the AO being the
- *    queue's one consumer is what lets it release without a mask.
+ *    copyable structs. Fsm<Derived, Alts...> (kernel/fsm.hpp) builds it
+ *    for an object that derives from it, with the reserved Entry and
+ *    Exit alternatives in front;
+ *  - `queue`: a static EventQueue<Event, depth, P>, the one place where
+ *    events for this object wait. The depth is the object's own sizing
+ *    decision, which is why no base class declares the queue for it;
+ *  - `init()`: called once by Tenuto::init_all(), in list order, before
+ *    the first event is served. An Fsm-based object calls start(&initial)
+ *    here, so its first state is entered before anything is posted;
+ *  - `dispatch(const Event&)`: handle one event to completion. Fsm
+ *    provides it; an object with a plain switch over its own variant
+ *    writes it by hand and is a legal citizen too, which is why this
+ *    header knows nothing of fsm.hpp.
  *
- * The concept checks only what the compiler can see: the names, the
- * signatures - that take() hands over a slot's number, at() the Event
- * in it, take_hold() whether the AO held it, release() takes the number
- * back, empty() a bool, and the queue names its `none`. It does NOT
- * check that dispatch is run-to-completion, that init() calls start(),
- * that a held slot is released once and by its owner, or that the queue
- * is really an EventQueue: those are the rules of the model, and
- * Tenuto/Fsm/post are written assuming them.
+ * The rules the compiler cannot see, and that the kernel is written
+ * assuming:
+ *  - dispatch() is called from the kernel loop only, with interrupts
+ *    enabled, and is never re-entered: while it runs no other active
+ *    object runs, so the object's static data needs no lock against
+ *    other objects. Interrupt handlers are the only concurrent code, and
+ *    they touch nothing of the object but its queue, through post();
+ *  - the event a dispatch receives lives in the queue's slot, and the
+ *    slot is the object's until it is released: by the kernel right
+ *    after the dispatch, or, when the object called the queue's hold()
+ *    inside it, by the object itself in a later dispatch of its own, with
+ *    the Held handle hold() returned (Lease::hold, kernel/borrowed.hpp).
+ *    A held slot is released once, by its holder;
+ *  - the object is its queue's one consumer, which is what lets the
+ *    consumer side run without masking interrupts.
  *
- * Fsm is one way to satisfy the contract (Event + dispatch for free),
- * not the contract itself: an AO with a plain switch and its own Event
- * variant is a legal citizen too. This header therefore knows nothing
- * of fsm.hpp.
+ * The concept below checks the names and signatures alone: that take()
+ * hands over a slot's number, at() the Event in it, take_hold() whether
+ * the object held it, release() takes the number back, empty() answers a
+ * bool, and the queue names its `none`. It does not check that
+ * dispatch() runs to completion, that init() calls start(), that a held
+ * slot is released once, or that the queue is an EventQueue. The full
+ * contract, both halves, is docs/design/kernel.md's.
  */
 
 #pragma once
@@ -67,12 +67,13 @@ concept ActiveObject = requires(const typename A::Event& e, uint8_t h) {
     { std::remove_cvref_t<decltype(A::queue)>::none } -> std::convertible_to<uint8_t>;
 };
 
-/// Serve at most ONE event of one AO: take the oldest waiting slot,
-/// dispatch the event IN it, release the slot unless the AO held it.
-/// False when nothing waits. The kernel loop's step for each AO
-/// (kernel/tenuto.hpp), and the verb a program uses to pump an AO by
-/// hand outside a kernel - the one that keeps a hold meaningful, where
-/// a dispatch of the copy pop() returns has no slot to hold.
+/// Serve at most one event of one active object: take the oldest waiting
+/// slot, dispatch the event in it, release the slot unless the object
+/// held it. False when nothing waits. This is the kernel loop's step for
+/// each object (kernel/tenuto.hpp), and the function a program calls to
+/// pump an object by hand outside a kernel: the one that keeps a hold
+/// meaningful, where dispatching the copy pop() returns has no slot to
+/// hold. Main-loop context only.
 template <ActiveObject Ao>
 bool serve_one() {
     const uint8_t h = Ao::queue.take();      // no copy, no critical section

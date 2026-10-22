@@ -1,23 +1,32 @@
 /*
  * panic.hpp
  *
- * The kernel's unrecoverable-failure facility: ONE hook, pluggable
- * reporters. panic() masks interrupts for good, writes the breadcrumb
- * into the platform's reset-surviving storage, executes break_here()
- * (halts right on the culprit when a debugger is attached, free NOP
- * otherwise - it does not consume the hardware breakpoint slots), and
- * hands over to the app-chosen Reporter for the manifestation:
+ * panic(): what a program calls when it cannot continue. It never
+ * returns. In order, it masks interrupts for good, writes a breadcrumb
+ * (the code and a byte of context) into storage the platform keeps
+ * across a reset, executes the platform's break_here(), and hands over
+ * to a Reporter the application chooses:
  *
- *  - HaltReporter (here): the minimal default - fall into cli+loop;
- *  - LED blinkers / watchdog resetters are TARGET code, provided by the
- *    target strata or by the app (the kernel knows no LED);
- *  - "blink then reset", "reset now and report at next boot" compose
- *    freely: the breadcrumb is written BEFORE any reporter runs, so the
- *    information is safe whatever the manifestation does.
+ *  - HaltReporter, the default defined here: report() returns and
+ *    panic() spins forever with interrupts masked;
+ *  - an LED blinker or a watchdog reset is target or application code,
+ *    since the kernel knows no LED (each target's reset header offers a
+ *    ResetReporter);
+ *  - "blink then reset" and "reset now, report at next boot" compose
+ *    freely, because the breadcrumb is written before any reporter runs
+ *    and survives whatever the reporter does.
  *
- * At boot the app calls take_panic_record<P>(): a valid record (magic
- * match) is returned once and cleared - cross-check the reset-cause
- * register on the target for the full story.
+ * What break_here() does with no debugger attached is the core's
+ * business, not promised here (kernel/platform.hpp): a no-op on the AVR,
+ * a HardFault on the Cortex-M families, a breakpoint exception on the
+ * QingKe cores. A reporter that must run without a debugger is reached
+ * only where the instruction returns; where it faults, the fault handler
+ * is the path that runs, and the target's reset header says what it does
+ * with the breadcrumb.
+ *
+ * At boot the application calls take_panic_record<P>(): a valid record
+ * is returned once and cleared. The target's reset-cause register tells
+ * the rest of the story.
  */
 
 #pragma once
@@ -45,8 +54,9 @@ struct HaltReporter {
     static void report(PanicCode, uint8_t) {}
 };
 
-/// Unrecoverable failure: breadcrumb -> debugger hook -> reporter.
-/// Never returns; interrupts stay masked from here on.
+/// Unrecoverable failure: breadcrumb, then break_here(), then the
+/// reporter. Never returns; interrupts stay masked from here on. Any
+/// context.
 template <Platform P, typename Reporter = HaltReporter>
 [[noreturn]] void panic(PanicCode code, uint8_t context = 0) {
     typename P::CriticalSection cs;  // masked for good: never destroyed
@@ -58,7 +68,8 @@ template <Platform P, typename Reporter = HaltReporter>
     }
 }
 
-/// Boot-side: fetch-and-clear the breadcrumb of a previous panic, if any.
+/// At boot: the breadcrumb of a previous panic, if any, returned once
+/// and cleared. Empty when the stored record carries no valid magic.
 template <Platform P>
 std::optional<PanicRecord> take_panic_record() {
     PanicRecord& r = P::panic_record();

@@ -1,50 +1,59 @@
 /*
  * fsm.hpp
  *
- * The state-machine contract of brio active objects. HSM-READY, FLAT
- * IMPLEMENTATION: the contract is fixed so that hierarchy can arrive
- * later as an additive extension (unhandled IS the future
- * bubble-to-parent hook), but today a state is one flat handler.
+ * The state machine of a brio active object, and `match`, the function
+ * a handler dispatches an event with.
  *
- * Model:
- *  - a state is a function `Status handler(const Event&)`; the current
- *    state of the machine IS a pointer to it (two bytes on an 8-bit
- *    core);
- *  - Event is the AO's own std::variant, with the kernel's reserved
- *    alternatives Entry and Exit prepended by this template: the handler
- *    receives them through the same visit as ordinary events. They are
- *    empty structs, so they do not enlarge the queue slots; they are
- *    delivered synchronously by the transition machinery, each from one
- *    constant Event, and are never meant to be posted (the kernel post
- *    layer excludes them);
- *  - a handler returns handled(), unhandled() (today: ignore; tomorrow:
- *    ask the parent - the HSM hook), or transition(&next_state);
- *  - a transition delivers Exit to the old state, switches, delivers
- *    Entry to the new one. Entry may itself return transition() - the
- *    machinery follows the chain, giving pass-through states for free.
- *    The result of Exit is deliberately ignored: exit is an action, not
- *    a decision point. An entry chain that never settles is a
- *    programming error (it spins forever - keep entries simple);
- *  - start(initial) arms the machine and delivers the first Entry, so
- *    no state ever runs half-initialized. The kernel calls it for every
- *    AO before the event loop (the "kernel-delivered init" decision).
+ * An active object derives from Fsm<Derived, Alts...>, naming itself and
+ * the events it accepts:
  *
- * Monostate like everything in brio: the current-state pointer is a
- * static inline per (Derived, alternatives...) instantiation - Derived
- * exists exactly so two AOs with the same event alternatives get
- * distinct machines. Trivial AOs may legally ignore transition() and
- * keep a plain switch inside one everlasting state.
+ *     struct Blinker : brio::Fsm<Blinker, Toggle, SetPeriod> { ... };
  *
- * Handlers dispatch on the Event variant with match(e, lambdas...)
- * (defined below): subject first, then one lambda per alternative, a
- * [](auto) catch-all for the rest - the Rust/ML shape, and the shape of
- * the pattern matching proposed for C++ (P2688, not adopted for C++26:
- * this is a four-line library stand-in, the code already reads right).
- * Overloaded is the classic C++17 building block underneath, public for
- * whoever prefers the bare std::visit idiom.
+ * From that the template defines the object's `Event` type (a
+ * std::variant of the listed events, with the two reserved events Entry
+ * and Exit in front), its `dispatch()`, and the vocabulary of a state
+ * handler: handled(), unhandled(), transition(&next), start(&initial).
+ * Why Derived names itself: the current-state pointer is a static member
+ * of this template, so two objects accepting the same events get two
+ * distinct state machines only because their types differ. The base
+ * never calls anything on Derived.
+ *
+ * The model, flat:
+ *  - a state is a function `Status handler(const Event&)`, and the
+ *    current state of the machine is a pointer to it (one function
+ *    pointer of RAM, two bytes on an 8-bit core);
+ *  - a handler returns handled() (done), unhandled() (not for this
+ *    state; ignored today) or transition(&next_state);
+ *  - a transition delivers Exit to the old state, switches the pointer,
+ *    and delivers Entry to the new one. Entry may itself return
+ *    transition(): the machinery follows the chain, so a pass-through
+ *    state costs nothing. Exit's return value is ignored: exit is an
+ *    action, not a decision. An entry chain that never settles spins
+ *    forever - keep entries simple;
+ *  - start(&initial) arms the machine and delivers the first Entry, so
+ *    no state ever runs half-initialized. An active object calls it from
+ *    its init(), which the kernel runs before the first event is served.
+ *  - Entry and Exit are empty structs, so they do not enlarge the queue
+ *    slots. They are delivered by the transition machinery, never
+ *    through a queue: post() refuses them at compile time.
+ *
+ * Context: start(), dispatch() and every handler run in the kernel loop,
+ * never in an interrupt handler. A dispatch is never re-entered. An
+ * object whose behaviour does not depend on history keeps one state for
+ * its whole life, and may use a plain switch inside it.
+ *
+ * The contract is written so that a hierarchical extension (parent
+ * states, unhandled() bubbling to the parent) can be added without
+ * changing it; none is built, and nothing below depends on one.
+ *
+ * Handlers dispatch with match(e, lambdas...), defined below: the event
+ * first, then one lambda per alternative, and a [](auto) catch-all for
+ * the rest. It is a four-line wrapper over std::visit; `Overloaded` is
+ * the standard building block underneath, public for whoever prefers
+ * the bare std::visit idiom.
  *
  * Pure kernel code: includes nothing of brio, no hardware, host-testable
- * (see test/test_fsm).
+ * (test/test_fsm).
  */
 
 #pragma once
@@ -63,10 +72,10 @@ struct Overloaded : Ts... {
     using Ts::operator()...;
 };
 
-/// match(variant, lambdas...): visit the variant with the lambda whose
-/// parameter type matches the active alternative. All lambdas must return
-/// the same type; a trailing [](auto) catches unlisted alternatives
-/// (variant dispatch is exhaustive - without it the code does not compile).
+/// match(variant, lambdas...): call the lambda whose parameter type is
+/// the alternative the variant holds now. Every alternative must be
+/// covered or the call does not compile; a trailing [](auto) is the
+/// catch-all for the ones not named. All lambdas return the same type.
 /// Compiles to the same switch as the bare std::visit(Overloaded{...}, v).
 template <class Variant, class... Handlers>
 constexpr decltype(auto) match(Variant&& v, Handlers&&... hs) {
@@ -88,14 +97,14 @@ public:
     struct Status;
     using Handler = Status (*)(const Event&);
 
-    /// Outcome of a state handler; build via handled()/unhandled()/transition().
-    /// ONE HANDLER POINTER WIDE, so every handler returns it in a register:
-    /// null is handled, the address of a private marker is unhandled, any
-    /// other address is the next state of a transition. A kind stored
-    /// beside the pointer made it two words, which Arm's calling convention
-    /// returns through memory - on the Cortex-M0+ cleared by a call to
-    /// memset at every return. A transition to a null state is therefore
-    /// read as handled, where it used to crash on the next event.
+    /// Outcome of a state handler; build it with handled(), unhandled()
+    /// or transition(&next). Stored in one handler pointer: null means
+    /// handled, the address of a private marker means unhandled, any other
+    /// address names the next state. Keeping Status pointer-sized lets
+    /// every handler return it in a register; a kind stored beside the
+    /// pointer would make it two words, which the Arm calling convention
+    /// returns through memory (measured on the Cortex-M0+ as a memset at
+    /// every return). A consequence: transition(nullptr) reads as handled.
     struct Status {
         enum class Kind : uint8_t { handled, unhandled, transition };
         Handler target;
@@ -123,13 +132,17 @@ public:
         return {next};
     }
 
-    /// Arm the machine on its initial state and deliver the first Entry.
+    /// Make `initial` the current state and deliver Entry to it (following
+    /// any transition chain Entry returns). Called from the object's init(),
+    /// in the kernel loop before the first event is served.
     static void start(Handler initial) {
         state_ = initial;
         follow(state_(entry_event));
     }
 
-    /// Deliver one event to the current state, run-to-completion.
+    /// Deliver one event to the current state and follow the transition it
+    /// returns, if any. Runs to completion in the kernel loop; the kernel
+    /// calls it, an application does not.
     static void dispatch(const Event& e) {
         follow(state_(e));
     }

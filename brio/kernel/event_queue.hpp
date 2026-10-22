@@ -1,9 +1,54 @@
 /*
  * event_queue.hpp
  *
- * The per-AO event queue of the brio kernel: multi-producer (any ISR and
- * any main-loop code may push), single-consumer (the AO's dispatch
- * context: the kernel loop, and the AO itself when it holds).
+ * The event queue of one active object: where its events wait between
+ * being posted and being handled.
+ *
+ * An active object declares one, sized by itself:
+ *
+ *     static inline brio::EventQueue<Event, 4, P> queue;
+ *
+ * E is the object's Event type, `depth` how many events may be waiting
+ * (or held) at once while one is being dispatched, P the platform whose
+ * critical section guards the producers' side. An application touches
+ * the queue through post() (kernel/post.hpp) and, rarely, through
+ * overflows(); the kernel loop drives the consumer side.
+ *
+ * Who may call what:
+ *  - push() (what post() calls): any context, an interrupt handler or
+ *    main-loop code alike, at any time. It copies the event into a free
+ *    slot with interrupts masked for the few instructions of the copy,
+ *    and never waits: on a full queue the event is dropped and a
+ *    saturating counter, overflows(), is incremented. A full queue is a
+ *    sizing mistake, and the counter names the queue;
+ *  - take(), at(), hold(), take_hold(), release(), pop(): the consumer's,
+ *    which is the kernel loop dispatching this object (and the object
+ *    itself, inside its dispatch, for hold()). Main-loop context only,
+ *    never from an interrupt handler, never from another object; they
+ *    take no critical section;
+ *  - empty(), size(): readable from anywhere, as a snapshot.
+ *
+ * Depth, in one rule: a push is refused when every slot is occupied,
+ * waiting or outstanding (the one being dispatched, and any the object
+ * holds). The queue has depth + 1 slots, so a producer finds `depth`
+ * places while a dispatch is in progress and nothing is held; an idle
+ * queue accepts depth + 1. Each hold takes one of the depth for as long
+ * as it lasts, so an object sizes its depth as a count: the events it
+ * holds at once plus the waiting peak. Depth is any number from 1 to
+ * 254; there is no power-of-two rule, because slots are a few bytes to
+ * a few words and rounding a depth of 5 up to 8 would spend real RAM to
+ * speed up a wrap that is already two instructions.
+ *
+ * The queue belongs to one core, the platform's: its critical section
+ * masks that core's interrupts and nothing else. On a chip with two
+ * cores, events cross between them through util/inbox.hpp, never
+ * through push() from the other core; where the platform can tell
+ * which core is running (`on_own_core()`, kernel/platform.hpp), push()
+ * refuses and counts a copy from the wrong core (misposts()). A
+ * single-core platform compiles no such check.
+ *
+ * The rest of this comment is the structure, for whoever reads or
+ * changes the implementation.
  *
  * THE STRUCTURE - an INDEX CAROUSEL. Two things are kept apart:
  *  - the SLOTS, depth + 1 of them: an event is BUILT in a slot by push()
@@ -36,11 +81,11 @@
  * THE PRODUCERS. push() runs inside Platform::CriticalSection. Under the
  * cooperative kernel the only real concurrency is ISR vs main loop, and
  * a small core may offer no CAS at all: the brief interrupts-off section
- * IS the honest primitive. The event is BUILT IN ITS SLOT - a variant's
+ * is the honest primitive. The event is BUILT IN ITS SLOT - a variant's
  * alternative is emplaced there, never first assembled on the caller's
  * stack - so the one copy a post makes is the one the mask covers. The
  * producers write one cursor, alloc_, and read the free end. There are
- * deliberately NO *_from_isr variants: one API, always safe - the saved
+ * deliberately no *_from_isr variants: one API, always safe - the saved
  * cycles would not pay for the doubled surface and the risk of calling
  * the wrong one. Revisit only with measurements.
  *
@@ -66,16 +111,13 @@
  * own. Release order is free: a hold costs exactly its own slot for as
  * long as it lasts, never the slots behind it.
  *
- * DEPTH IS THE NUMBER OF EVENTS THAT CAN BE WAITING OR HELD AT ONCE,
- * the event being dispatched aside: the queue holds depth + 1 slots, so
- * a producer finds depth places while a dispatch is in progress and the
- * AO holds nothing. The overflow moment, in one rule: a push is refused
- * when EVERY slot is occupied, waiting or outstanding (taken and not
- * released: the one being dispatched and the held ones). With nothing
- * being dispatched the spare slot takes a waiting event too, so an idle
- * queue that holds nothing accepts depth + 1. Each hold takes one of the
- * depth for as long as it lasts; an AO sizes its depth as a COUNT - the
- * events it holds at once plus the waiting peak.
+ * DEPTH, restated in the structure's terms: the queue holds depth + 1
+ * slots, so a producer finds depth places while a dispatch is in
+ * progress and the AO holds nothing; a push is refused when every slot
+ * is occupied, waiting or outstanding (taken and not released: the one
+ * being dispatched and the held ones); with nothing being dispatched the
+ * spare slot takes a waiting event too, so an idle queue that holds
+ * nothing accepts depth + 1.
  *
  * A STATIC QUEUE IS ALL ZERO and lands in .bss, like every kernel
  * static - whenever the event's value-initialised state is all zero, as
@@ -98,28 +140,17 @@
  *    where it does not (the AVR's, the Cortex-M0+'s).
  *
  * Overflow: push() never blocks and never fails from the caller's point
- * of view. On a full queue the event is dropped and a saturating
- * overflow counter is incremented: a full queue is a SIZING mistake, and
- * the counter names the culprit (from gdb on target, from asserts in
- * host tests). The count-vs-panic reaction knob belongs to the kernel
- * layer above, not here.
+ * of view; the overflow counter is read by gdb on a target and by
+ * asserts in the host tests. Whether a program counts or panics on an
+ * overflow is the layer above's decision, not this header's. The depth
+ * limit of 254 is the handle's: slot numbers 1 to depth + 1 are bytes
+ * and 0 is `none`.
  *
- * Depth is arbitrary (no power-of-two rule): event slots are a few bytes
- * to a few words, so rounding a depth of 5 up to 8 would waste real RAM
- * to speed up a wrap that is already two instructions. It is at most
- * 254: the slot numbers 1 to depth + 1 are bytes and 0 is `none`.
- *
- * THE QUEUE BELONGS TO ONE CORE: the platform's. Its critical section
- * masks the interrupts of the core that takes it and nothing else, and
- * its fences order nothing between cores, so a push from another core
- * would race the owner's pushes and takes - which is why events cross
- * cores through util/inbox.hpp and never through push(). A platform that
- * can tell which core is running offers `on_own_core()`
- * (kernel/platform.hpp), and push() then REFUSES a copy from the wrong
- * core before it touches anything: the event is dropped and a saturating
- * counter, `misposts()`, names the mistake - the same economy as
- * overflow. A single-core platform has no such member and compiles no
- * such check.
+ * ONE CORE, in the structure's terms: the critical section masks the
+ * interrupts of the core that takes it and nothing else, and the fences
+ * below order nothing between cores, so a push from another core would
+ * race the owner's pushes and takes. The mispost check runs before
+ * push() touches anything, and its counter saturates like overflow's.
  *
  * A host platform that explores interleavings offers `interleave_point()`
  * (kernel/platform.hpp): the consumer's verbs call it at every boundary

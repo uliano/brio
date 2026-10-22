@@ -1,14 +1,22 @@
 /*
  * platform.hpp
  *
- * The Platform concept: the complete list of what the brio kernel needs
- * from the machine underneath. Kernel code is templated on a Platform and
- * NEVER includes a hardware header; each target implements the concept in
- * its own <stratum>/platform.hpp (avrxt/, samc21/, stm32g0/, and host/
- * for the native test build) and the app names its platform once. No
- * #ifdef: the door to the next target stays open by construction.
+ * The Platform concept: everything the kernel needs from the chip it
+ * runs on, as a list of requirements on one type.
  *
- * Contract:
+ * An application names its platform once, as a type alias, and passes it
+ * to the kernel, to every queue and to every time event:
+ *
+ *     using P = brio::Stm32g0Platform<>;
+ *
+ * Each target stratum provides that type in its own platform.hpp
+ * (avrxt/, samc21/, stm32g0/, stm32f4/, ch32v00x/, ch32vx03/, ch32x035/,
+ * rp2040/, rp2350/, and host/ for the native test build). Kernel code is
+ * templated on the platform and never includes a hardware header; a
+ * type that does not meet the concept is refused where it is used, with
+ * the requirement named. There is no default platform and no #ifdef.
+ *
+ * The contract, member by member:
  *  - CriticalSection: RAII guard. The constructor masks interrupts, the
  *    destructor restores the PREVIOUS state (so guards nest). Entering
  *    and leaving must also act as compiler memory barriers: data shared
@@ -17,10 +25,18 @@
  *    a half the compiler outlines puts a call and a return inside the
  *    window it opens.
  *  - idle(): called with interrupts MASKED when there is no work. Must
- *    re-enable interrupts and suspend until the next interrupt with no
- *    lost-wakeup window (where a core defers an interrupt enable by one
- *    instruction, that means the enable immediately followed by the
- *    sleep instruction).
+ *    suspend until the next interrupt and return with interrupts
+ *    enabled, with no lost-wakeup window: an interrupt that becomes
+ *    pending between the kernel's empty check and the sleep must still
+ *    end the sleep. How is the core's business (an enable whose effect
+ *    is deferred by one instruction followed by the sleep instruction on
+ *    the AVR; a wait-for-interrupt that a pending interrupt ends even
+ *    while masked on the Cortex-M, unmasked afterwards), and each
+ *    platform header says which.
+ *    One more promise the kernel relies on and no member states: an
+ *    interrupt handler is not interrupted by another interrupt handler
+ *    (docs/design/kernel.md, "The model in one page"). Each platform
+ *    keeps it its own way, and says how.
  *  - break_here(): a debug trap. With a debugger halted on it, the
  *    program stops there. What the instruction does with NO debugger
  *    attached is the core's business and is not promised here: some

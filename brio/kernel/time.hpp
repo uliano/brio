@@ -1,20 +1,26 @@
 /*
  * time.hpp
  *
- * Kernel time units and conversions. The kernel's unit is the platform
- * TICK - an opaque quantum whose rate is Platform::ticks_per_second, a
- * compile-time constant of the target (commonly 1000 or 1024). Nothing
- * here assumes a power of two or a millisecond tick.
+ * Converting milliseconds and seconds to kernel ticks.
  *
- * Conversion semantics is CEIL - "at least this long": a timeout of 5 ms
- * must never fire early just because the tick rate does not divide
- * milliseconds. With ticks_per_second == 1000 the conversions fold to the
- * identity at compile time.
+ * The kernel counts time in ticks. A tick's rate is a constant of the
+ * platform, Platform::ticks_per_second (1000 on the Cortex-M families,
+ * 1024 on the AVR); nothing in the kernel assumes a power of two or a
+ * millisecond tick. An application writes its delays and periods in
+ * milliseconds or seconds and converts them with the two functions
+ * below:
  *
- * These functions are constexpr and meant for compile-time constants
- * (deadlines, periods declared next to their AO). They work at runtime
- * too, but the 64-bit intermediate is expensive on 8-bit targets - prefer
- * precomputing.
+ *     heartbeat.arm_every(brio::ticks_from_ms<P>(500));
+ *
+ * The conversion rounds up, "at least this long": a timeout of 5 ms
+ * never fires early because the tick rate does not divide milliseconds.
+ * With ticks_per_second == 1000 the conversion folds to the identity.
+ *
+ * Both functions are constexpr. With a constant argument the compiler
+ * computes the result and the 64-bit intermediate costs nothing at run
+ * time. They work with a run-time argument too, where the 64-bit
+ * arithmetic is real and expensive on an 8-bit core: precompute where a
+ * value is known.
  */
 
 #pragma once

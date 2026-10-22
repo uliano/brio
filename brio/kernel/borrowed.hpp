@@ -1,68 +1,74 @@
 /*
  * borrowed.hpp
  *
- * The vocabulary of payloads that travel BY REFERENCE inside an event.
+ * Pointers inside events, and how long what they point at stays valid.
  *
- * Events are copied by value; a payload that must not be copied (a line
- * buffer, a DMA-sized transfer buffer) travels as a pointer, and a
- * pointer inside a copied event is a LOAN: someone still owns the
- * storage and will reuse it. brio admits exactly three loans - two for
- * payloads, the payload rule of docs/design/kernel.md, "borrow only what
- * must be shared, and every borrow is one of two", and one for the event
- * itself, the queue slot an AO holds:
+ * Events are copied by value. A buffer that must not be copied (a line
+ * of received text, a transfer buffer a DMA channel fills) travels as a
+ * pointer inside the event, and the event then carries a loan: the
+ * sender still owns the storage and will reuse it. Borrowed<T, Lease>
+ * is that pointer with the lifetime rule, the lease, written in its
+ * type, so the rule is read at the field that declares the loan.
  *
- *  - Lease::dispatch: valid only during the receiving AO's dispatch of
- *    that event. The lender may reuse the storage as soon as it runs
- *    again. Correct by construction when the borrower PRECEDES the
- *    lender in the Tenuto pack (the kernel then serves the borrower
- *    before the lender is dispatched again - under a preemptive kernel
- *    the same ordering makes the borrower preempt the lender right at
- *    the post). The lender declares its borrowers with
- *    `using LendsTo = Subscribers<...>` and Tenuto static_asserts the
- *    order (tenuto.hpp).
- *  - Lease::reply: valid until the borrower sends back the completion
- *    event agreed by the protocol (BusDone for bus buffers). The lender
- *    keeps the storage alive and untouched until then. Ordering-
- *    independent; the reply IS the return of the loan.
- *  - Lease::hold: a queue slot an AO keeps past the dispatch of the event
- *    in it (kernel/event_queue.hpp's hold()), valid from that hold()
- *    until the SAME AO's release() of it, which it issues in a later
- *    dispatch of its own. The lender is the AO's own queue and the
- *    borrower the AO: a held slot is released by its owner and by nobody
- *    else - another AO releasing it would be a second consumer of the
- *    queue. `Held<E>` is the slot's number with this lease in its type
- *    - it pins the event type, not the owner, which is the rule's to
- *    keep. A holder that lends onward from the slot (an engine reading a
- *    request for a whole tenure) would do it as a
- *    `Borrowed<..., Lease::hold>`; no engine does today - each keeps
- *    its own copy, its family's choice to revisit.
+ * The practical rules, one per lease:
  *
- * Borrowed<T, L> is a plain pointer with the lease written in its type:
- * zero cost, trivially copyable (it lives inside events), and it makes
- * the contract readable at the field where the loan is declared. It
- * cannot stop a receiver from stashing the raw pointer past its window
- * (C++ has no borrow checker); what it CAN do is name the rule at the
- * point of use, and host a debug-build epoch check the day a test needs
- * one (planned, not built: an 8-bit lender epoch compared on access,
- * panic on a stale loan).
+ *  - Lease::dispatch: the pointer is valid only while the receiving
+ *    object's handler for that event runs. The receiver must not keep
+ *    the pointer for a later event. The sender may reuse the storage the
+ *    next time it runs, and that is safe only because the receiver runs
+ *    first: the receiver must precede the sender in Tenuto's list of
+ *    active objects. The sender declares its receivers with
+ *    `using LendsTo = Subscribers<...>`, and Tenuto refuses at compile
+ *    time a list in which a receiver follows the sender
+ *    (kernel/tenuto.hpp). Under a preemptive kernel the same ordering
+ *    would make the receiver preempt the sender right at the post.
+ *  - Lease::reply: the pointer is valid until the receiver sends back
+ *    the completion event the protocol agrees on (BusDone for a bus
+ *    transfer). Until then the sender keeps the storage valid and follows
+ *    the protocol's access rules (it must not write a buffer the bus is
+ *    reading); after the completion event it may reuse the buffer. No
+ *    ordering in the list is involved: the completion event is the
+ *    return of the loan.
+ *  - Lease::hold: not a payload but the event itself. A queue slot an
+ *    object keeps past the dispatch of the event in it
+ *    (kernel/event_queue.hpp's hold()), valid from that hold() until the
+ *    same object's release() of it, in a later dispatch of its own. The
+ *    lender is the object's own queue; a held slot is released by its
+ *    holder and by nobody else, since another object releasing it would
+ *    be a second consumer of the queue. `Held<E>` is the slot's number
+ *    with this lease in its type (it pins the event type, not the
+ *    holder; the rule keeps the holder). A holder that lends onward from
+ *    the slot would do it as a `Borrowed<..., Lease::hold>`; no engine
+ *    does, each keeping its own copy of the request.
  *
- * A request descriptor names its loans in its FIELDS: the tx/rx/cmd
- * buffers of a bus transfer and the source bytes of a nonvolatile write
- * are all `Borrowed<..., Lease::reply>`, so the rule ("valid until the
- * reply lands") is read off the type instead of a comment. The engine
+ * What the type does and does not enforce. Borrowed<T, L> is a plain
+ * pointer: zero cost, trivially copyable, legal inside an event. The
+ * compiler checks the dispatch ordering (above) and the type of what is
+ * lent. It cannot stop a receiver from saving the raw pointer `.get()`
+ * returns and using it after the lease ended; C++ has no borrow
+ * checker, and staying inside the lease is the receiver's duty. The
+ * type is also where a debug-build check would live (a lender epoch
+ * compared on access); none is built.
+ *
+ * In use: a request descriptor names its loans in its fields. The tx,
+ * rx and command buffers of a bus transfer and the source bytes of a
+ * nonvolatile write are `Borrowed<..., Lease::reply>`, so "valid until
+ * the reply lands" is read off the type instead of a comment. The engine
  * that walks such a buffer calls `.get()` once and indexes the raw
- * pointer: Borrowed is a view, not a container.
+ * pointer: Borrowed is a view, not a container. The payload rule itself
+ * (copy what is read once, borrow only what must be shared) is
+ * docs/design/kernel.md's, "Payloads".
  *
- * `lend<L>(p)` is the maker, deliberately spelled like `reply_to<Ao, P>()`
- * - the lease is the explicit template argument, the pointee type is
- * deduced:
+ * `lend<L>(p)` names a loan at the call site, spelled like
+ * `reply_to<Ao, P>()`: the lease is the explicit template argument, the
+ * pointee type is deduced:
  *
  *     post<Bus>(Bus::Request{..., .tx = lend<Lease::reply>(buf), ...});
  *
  * A null loan is a default-constructed Borrowed: `{}` in a positional
- * list, or simply the field left out of a designated one. Lending a
- * writable buffer to a read-only field needs no ceremony either - a loan
- * converts to the same loan over a more qualified pointee.
+ * list, or the field left out of a designated one. Lending a writable
+ * buffer to a read-only field needs no ceremony: a loan converts to the
+ * same loan over a more qualified pointee.
  */
 
 #pragma once
@@ -72,14 +78,16 @@
 
 namespace brio {
 
-/// How long a borrowed payload stays valid.
+/// How long a borrowed payload stays valid (the file header has the
+/// rules).
 enum class Lease : unsigned char {
     dispatch,  ///< during the receiving dispatch only
     reply,     ///< until the borrower posts the agreed completion event
     hold,      ///< until the holding AO releases the queue slot it holds
 };
 
-/// A pointer payload with its lease in the type. See the header comment.
+/// A pointer payload with its lease in the type. get() hands out the raw
+/// pointer; using it past the lease is the caller's error, unchecked.
 template <typename T, Lease L>
 class Borrowed {
 public:
