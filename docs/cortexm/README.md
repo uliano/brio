@@ -1,97 +1,119 @@
 # Core stratum: Cortex-M (`cortexm/`)
 
-One of the directories under `brio/` that is neither target-independent
-nor a target: what ARM designed into every Cortex-M - the M0/M0+ of
-three families, the M4 of a fourth and the M33 half of a fifth, one
-programmer's model over ARMv6-M, ARMv7-M and ARMv8-M
-- and every vendor ships unchanged - the NVIC and PRIMASK (`cortexm/nvic.hpp`:
-`InterruptGuard`, the global enable/disable/readback verbs, `Nvic`,
-`irq_priority_levels`), the SysTick timebase (`cortexm/ticker.hpp`:
-`BasicTicker`, with `cycles()` - five reads in `util/cycle_count.hpp`'s
-order (the tick count, the exception's pending bit, VAL, the pending bit
-and the tick count again), judged by its `ticker_consistent()` and
-composed by its `ticker_compose()`, the pending bit covering the window
-between the reload and the handler; with LOAD read for the period, some
-thirty Thumb instructions on an M0+ and no call - and `SysTickCounter` - SysTick as a bare cycle counter
-with no interrupt, for a program whose kernel timebase is elsewhere,
-such as the STM32G0's tickless LPTIM one; both are `ClockUser`s whose
-`rebase(hz)` reprograms the reload for a dynamic clock - a new LOAD and
-a restarted period, CTRL untouched by either, so the ticker loses the
-phase of the tick in progress, under a tick, late and never early;
-both measured at every rung of the STM32G0's ladder, the ticker holding
-1000 Hz against the crystal at 64, 16 and 2 MHz)
-and the microsecond busy-wait on SysTick's own counter
-(`cortexm/delay.hpp`: `delay_us`, `delay_rate`, `DelayRate` - "at
-least", never early, capped below one SysTick period of one
-millisecond, no division at wait time: folded for a static clock,
-and for a dynamic one selected by its rate index out of `delay_rates`,
-a per-rate table built at compile time over the clock's discrete-rate
-surface; it needs the counter running, never the interrupt, so it
-serves both writers alike) - and, for the cores that have it, the DWT's
-cycle counter (`cortexm/dwt.hpp`: `CycleCounter` - CYCCNT, the
-free-running count of processor cycles ARMv7-M and ARMv8-M main define
-and ARMv6-M has not, enabled by TRCENA then CYCCNTENA and only where
-each reads clear, because a probe may have set them and nothing
-promises it leaves them; never a write of the count; `now()` one load;
-refused by `static_assert` below the M3; on the STM32F4, measured, it
-counts through a WFI whatever DBG_SLEEP holds - `stm32f4/dwt.hpp`). It exists because brio's naming rule says a core stratum is
-factored at the SECOND ARM family: `samc21/` and `stm32g0/` carried
-these files as twins line for line - the first two until the STM32G0's
-bring-up, the third until the STM32G0's fillers were done - and every
-extraction was gated by the images: every SAM C21 and STM32G0 release
-image byte-identical before and after.
+`brio/cortexm/` is one of the directories under `brio/` that is neither
+target-independent nor a target: what ARM designed into every Cortex-M
+and every vendor ships unchanged, written once and included by each
+Cortex-M family after its own device header. This page is for a reader
+of a family's headers who meets an include from `cortexm/` and wants to
+know what it holds, what stays per family, which cores it has been
+proven on and the one rule for including it. The stratum has four
+files; nothing in them knows a vendor, and a program never includes them
+directly.
+
+The cores it covers are the M0/M0+ of three families (the SAM C21, the
+STM32G0 and the RP2040), the M4 of the STM32F4 and the M33 half of the
+RP2350: one programmer's model over the ARMv6-M, ARMv7-M and ARMv8-M
+architectures.
+
+## The four files
+
+- **`cortexm/nvic.hpp`**: the NVIC and PRIMASK. `InterruptGuard` (the
+  critical section every brio platform on these cores rides on), the
+  global enable, disable and readback verbs, `Nvic` and
+  `irq_priority_levels`.
+- **`cortexm/ticker.hpp`**: the SysTick timebase. `BasicTicker`, the
+  kernel's ticker, whose `cycles()` composes a cycle count from five
+  reads in `util/cycle_count.hpp`'s order (the tick count, the
+  exception's pending bit, VAL, the pending bit and the tick count
+  again), judged by its `ticker_consistent()` and composed by its
+  `ticker_compose()`, the pending bit covering the window between the
+  reload and the handler; with LOAD read for the period, some thirty
+  Thumb instructions on an M0+ and no call. And `SysTickCounter`,
+  SysTick as a bare cycle counter with no interrupt, for a program whose
+  kernel timebase is elsewhere, such as the STM32G0's tickless LPTIM
+  one. Both are `ClockUser`s whose `rebase(hz)` reprograms the reload
+  for a dynamic clock, a new LOAD and a restarted period with CTRL
+  untouched by either, so the ticker loses the phase of the tick in
+  progress: under a tick, late and never early. Both were measured at
+  every rung of the STM32G0's ladder, the ticker holding 1000 Hz against
+  the crystal at 64, 16 and 2 MHz.
+- **`cortexm/delay.hpp`**: the microsecond busy-wait on SysTick's own
+  counter. `delay_us`, `delay_rate` and `DelayRate` wait "at least" and
+  never early, are capped below one SysTick period of one millisecond,
+  and divide nothing at wait time: the arithmetic is folded for a
+  static clock, and for a dynamic one selected by its rate index out of
+  `delay_rates`, a per-rate table built at compile time over the clock's
+  discrete-rate surface. It needs the counter running, never the
+  interrupt, so it serves both writers of SysTick alike.
+- **`cortexm/dwt.hpp`**, for the cores that have it: the DWT's cycle
+  counter, `CycleCounter`. CYCCNT is the free-running count of processor
+  cycles that ARMv7-M and ARMv8-M main define and ARMv6-M has not; it is
+  enabled by TRCENA and then CYCCNTENA, and only where each reads clear,
+  because a probe may have set them and nothing promises it leaves
+  them; the count is never written; `now()` is one load; the file is
+  refused by `static_assert` below the M3. On the STM32F4, measured, it
+  counts through a WFI whatever DBG_SLEEP holds (`stm32f4/dwt.hpp`).
+
+## Why the stratum exists
+
+brio's naming rule factors a core stratum at the second ARM family,
+never earlier. `samc21/` and `stm32g0/` carried these files as twins,
+line for line: the first two until the STM32G0's bring-up, the third
+until the STM32G0's fillers were done. Every extraction was gated by the
+images: every SAM C21 and STM32G0 release image was byte-identical
+before and after.
 
 ## What lives here, and what does not
 
-- Here: code that reads only CMSIS-Core symbols (`__get_PRIMASK`,
-  `NVIC_*`, `SysTick`, `IRQn_Type`, `__NVIC_PRIO_BITS`) and nothing of
-  any vendor header. Each family's `delay.hpp` keeps what was MEASURED
-  on its silicon (the division's cost, the counter's resolution, which
-  sleep stops it) beside the include.
-- Not here, by design: the Platform (`SamPlatform`, `Stm32g0Platform`
-  stay per family - their idle hooks differ where the families' sleep
-  controllers differ, and the STM32G0's takes its timebase as a
-  template parameter), the clock, the pins, every peripheral, the crt
-  (vector NAMES are the vendor's), the errata (SAM erratum 1.8.13's
-  `SysTickInterruptGuard` stays in `samc21/ticker.hpp`), and the
-  project-wide `Ticker` alias (each family's ticker.hpp states its
-  rate).
+Here: code that reads only CMSIS-Core symbols (`__get_PRIMASK`,
+`NVIC_*`, `SysTick`, `IRQn_Type`, `__NVIC_PRIO_BITS`) and nothing of any
+vendor header. Each family's `delay.hpp` keeps what was measured on its
+silicon (the division's cost, the counter's resolution, which sleep
+stops it) beside the include.
+
+Not here, by design: the platform type (`SamPlatform`, `Stm32g0Platform`
+and the others stay per family, because their idle hooks differ where
+the families' sleep controllers differ, and the STM32G0's takes its
+timebase as a template parameter), the clock, the pins, every
+peripheral, the crt (vector names are the vendor's), the errata (SAM
+erratum 1.8.13's `SysTickInterruptGuard` stays in `samc21/ticker.hpp`),
+and the project-wide `Ticker` alias (each family's `ticker.hpp` states
+its rate).
 
 ## Three architectures, one stratum
 
-The STM32F4 stratum (Cortex-M4, ARMv7-M) includes the first three
-files unchanged: SysTick, the NVIC's enable/pend/priority registers and
-PRIMASK have the same programmer's model on ARMv7-M, and the files
-read nothing else - which is why the stratum is named for the CORE
-family and not for an architecture. What ARMv7-M adds - BASEPRI, the
-sixteen priority levels, the FPU, the configurable faults - stays in
-`stm32f4/`, unused by the cooperative kernel, until another ARMv7-M
-family proves what is shared (the rule by which this stratum was born
-at the second Cortex-M0+ family): an `armv7m/` would sit BESIDE this
-one, holding what v7-M adds, as an `armv8m/` would for the M33s. The
-fourth file is the one exception, and it is here on the same rule read
-the other way: the DWT's cycle counter is what the M3, the M4, the M7
-and the M33 SHARE - one unit, one programmer's model, in ARMv7-M and
-ARMv8-M main alike - so it is a file of the core family that two of its
-profiles carry and the third refuses at compile time, not a thing one
-architecture adds. The STM32F4 takes it through `stm32f4/dwt.hpp`,
-which states the family's facts (the counter runs on HCLK, a Stop stops
-it); no M33 family includes it yet.
+The STM32F4 stratum (Cortex-M4, ARMv7-M) includes the first three files
+unchanged: SysTick, the NVIC's enable, pend and priority registers and
+PRIMASK have the same programmer's model on ARMv7-M, and the files read
+nothing else, which is why the stratum is named for the core family and
+not for an architecture. What ARMv7-M adds (BASEPRI, the sixteen
+priority levels, the FPU, the configurable faults) stays in `stm32f4/`,
+unused by the cooperative kernel, until another ARMv7-M family proves
+what is shared, by the rule this stratum was born under at the second
+Cortex-M0+ family: an `armv7m/` would sit beside this one, holding what
+ARMv7-M adds, as an `armv8m/` would for the M33s. The fourth file is the
+one exception, and it is here on the same rule read the other way: the
+DWT's cycle counter is what the M3, the M4, the M7 and the M33 share,
+one unit and one programmer's model in ARMv7-M and ARMv8-M main alike,
+so it is a file of the core family that two of its profiles carry and
+the third refuses at compile time, not a thing one architecture adds.
+The STM32F4 takes it through `stm32f4/dwt.hpp`, which states the
+family's facts (the counter runs on HCLK, a Stop stops it); no M33
+family includes it yet.
 
-The RP2350's Arm half (Cortex-M33, ARMv8-M) reaches the same two of
-them under a condition worth stating, because that chip is the one
-target here with TWO processor architectures over one set of
-peripherals: `brio/rp2350/core_m33.hpp` - the Arm branch of that
-stratum's single architecture question - is the device header plus
-`cortexm/nvic.hpp`, exactly as `samc21/nvic.hpp` and `stm32f4/nvic.hpp`
-are, and `brio/rp2350/ticker.hpp` takes `cortexm/ticker.hpp`'s
-`BasicTicker` on that half alone, writing the same surface over a
-different counter on the other. What that family does NOT take is
-`cortexm/delay.hpp`: its microsecond wait must be one implementation
-for both instruction sets, so its ruler is a timer neither core owns.
-The M33's own extensions - the MPU, the SAU and TrustZone, MSPLIM, the
-coprocessor ports, BASEPRI - are untouched there for the reason
-BASEPRI is untouched on the M4.
+The RP2350's Arm half (Cortex-M33, ARMv8-M) reaches two of the files
+under a condition worth stating, because that chip is the one target
+here with two processor architectures over one set of peripherals.
+`brio/rp2350/core_m33.hpp`, the Arm branch of that stratum's single
+architecture question, is the device header plus `cortexm/nvic.hpp`,
+exactly as `samc21/nvic.hpp` and `stm32f4/nvic.hpp` are, and
+`brio/rp2350/ticker.hpp` takes `cortexm/ticker.hpp`'s `BasicTicker` on
+that half alone, writing the same surface over a different counter on
+the other. What that family does not take is `cortexm/delay.hpp`: its
+microsecond wait must be one implementation for both instruction sets,
+so its ruler is a timer neither core owns. The M33's own extensions (the
+MPU, the SAU and TrustZone, MSPLIM, the coprocessor ports, BASEPRI) are
+untouched there for the reason BASEPRI is untouched on the M4.
 
 The guards of `nvic.hpp` and `ticker.hpp` accept the M0, M0+, M4 and
 M33 core headers; `delay.hpp`'s accepts the first three, which are its
@@ -99,13 +121,13 @@ users.
 
 ## The include-order contract
 
-An cortexm header does not include a device header - it cannot know
-which - and it refuses to be included before one (`#error`): the CMSIS
-core header it is written against is brought in BY the device header,
+A cortexm header does not include a device header, since it cannot know
+which, and it refuses to be included before one (`#error`): the CMSIS
+core header it is written against is brought in by the device header,
 after the device has declared its IRQn enumerators and priority width.
-Each family's `nvic.hpp` / `ticker.hpp` is exactly that: the device
+Each family's `nvic.hpp` and `ticker.hpp` is exactly that: the device
 include, then the core file, then what is the family's own. Apps and
-family drivers keep including the FAMILY's headers, never these
+family drivers keep including the family's headers, never these
 directly.
 
 ## Editor
