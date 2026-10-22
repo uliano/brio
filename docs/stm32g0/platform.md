@@ -16,16 +16,18 @@ timer on the 32.768 kHz crystal, which keeps counting through a Stop and
 lets the kernel sleep straight to its next deadline with no periodic
 interrupt at all (a tickless program).
 
-The smallest use is the SysTick timebase, four lines of a program's
-target glue, the ones `blink` has
+The smallest use is the SysTick timebase: the lines of `blink`'s target
+glue that concern the platform, quoted from the file
 ([the first program](../learn/first-program.md)):
 
 ```cpp
-using P = brio::Stm32g0Platform<>;                       // the SysTick timebase
-extern "C" void SysTick_Handler() { brio::Ticker::tick(); }
+using P = brio::Stm32g0Platform<>;
+extern "C" void SysTick_Handler() { brio::Ticker::tick(); }  // tick + idle wakeup
 ...
-brio::Ticker::init(clock);                               // after SysClock::init()
-brio::Tenuto<P, Blinker, Supervisor>::run();
+    SysClock::init();             // HSI16 -> PLL -> SYSCLK = 64 MHz
+    brio::Ticker::init(clock);    // SysTick timebase (runs through WFI sleep)
+    brio::enable_interrupts();
+    brio::Tenuto<P, Blinker, Supervisor>::run();  // never returns
 ```
 
 Three things decide whether that works. The clock task must have run
