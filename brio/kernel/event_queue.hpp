@@ -47,110 +47,123 @@
  * refuses and counts a copy from the wrong core (misposts()). A
  * single-core platform compiles no such check.
  *
- * The rest of this comment is the structure, for whoever reads or
- * changes the implementation.
+ * The rest of this comment is the implementation, for whoever reads or
+ * changes it. Three words are used throughout. A SLOT is the storage
+ * for one event; the queue has depth + 1 slots, numbered from 1. A
+ * POSITION is one byte of a ring that holds a slot's number; the ring
+ * has depth + 2 positions. A CURSOR is an index into the ring that one
+ * side of the queue advances; there are three. docs/design/event-queue.svg
+ * draws one state of all of this.
  *
- * THE STRUCTURE - an INDEX CAROUSEL. Two things are kept apart:
- *  - the SLOTS, depth + 1 of them: an event is BUILT in a slot by push()
- *    and stays there, read in place, until the slot is RELEASED - right
- *    after its dispatch, or later when the AO holds it;
- *  - the RING, depth + 2 positions of one byte each, holding slot
- *    NUMBERS and nothing else. No event is ever in the ring and nothing
- *    is ever copied between positions.
- * Three cursors cut the ring into three runs, in ring order:
+ * Slots, and the ring of slot numbers
  *
- *     [take_, alloc_)         PENDING      numbers of built events, oldest first
- *     [alloc_, free end)      FREE         numbers a producer may build in
- *     [free end, take_)       OUTSTANDING  positions of slots taken and not yet
- *                                          released; what they contain is
- *                                          stale, read by nobody
+ * An event is built in a slot by push() and stays there, read in place,
+ * until the slot is released: right after its dispatch, or later when
+ * the object holds it. No event is ever moved. What moves is slot
+ * numbers, in the ring: the ring records which slots are free, which
+ * hold a waiting event, and in what order. The three cursors cut the
+ * ring into three runs, in ring order:
+ *
+ *     [take_, alloc_)         PENDING      the numbers of built events, oldest first
+ *     [alloc_, free end)      FREE         the numbers a producer may build in
+ *     [free end, take_)       OUTSTANDING  positions whose slots are taken and not
+ *                                          yet released; their contents are stale
+ *                                          and nobody reads them
  *
  * A producer builds its event in the slot whose number sits at alloc_
- * and publishes it by advancing alloc_ - the advance moves that number
- * from the free run into the pending run, so allocation order IS push
+ * and publishes it by advancing alloc_: the advance moves that number
+ * from the free run into the pending run, so allocation order is push
  * order and the free run doubles as the order of the pending one. The
- * consumer takes the number at take_ (the event is dispatched in its
- * slot); a release writes the slot's number at the free run's end and
- * advances it - whatever order the slots come back in, each costs one
- * byte written. The ring has one position more than there are slots, so
- * the outstanding run is never empty while anything is outstanding (one
- * position is always spare there): an empty pending run is take_ ==
- * alloc_, an empty free run is alloc_ meeting the free end, and no count
- * is shared.
+ * consumer takes the number at take_ and dispatches the event in its
+ * slot. A release writes the slot's number at the free run's end and
+ * advances that end; slots may come back in any order, and each costs
+ * one byte written. The ring has one position more than there are
+ * slots, so the outstanding run is never empty while anything is
+ * outstanding (one position is always spare there). An empty pending
+ * run is take_ == alloc_, an empty free run is alloc_ meeting the free
+ * end, and no count is shared between the two sides.
  *
- * THE PRODUCERS. push() runs inside Platform::CriticalSection. Under the
- * cooperative kernel the only real concurrency is ISR vs main loop, and
- * a small core may offer no CAS at all: the brief interrupts-off section
- * is the honest primitive. The event is BUILT IN ITS SLOT - a variant's
- * alternative is emplaced there, never first assembled on the caller's
- * stack - so the one copy a post makes is the one the mask covers. The
- * producers write one cursor, alloc_, and read the free end. There are
- * deliberately no *_from_isr variants: one API, always safe - the saved
- * cycles would not pay for the doubled surface and the risk of calling
- * the wrong one. Revisit only with measurements.
+ * The producers' side
  *
- * THE CONSUMER NEVER MASKS. It writes take_ and the free end and reads
- * alloc_; every cursor is one byte with ONE writer, and a byte is one
- * access on every platform (kernel/platform.hpp's atomic_width). A
+ * push() runs inside Platform::CriticalSection. Under the cooperative
+ * kernel the only concurrency is an interrupt handler against the main
+ * loop, and a small core may offer no compare-and-swap instruction at
+ * all, so the brief interrupts-off window is the primitive. The event
+ * is built in its slot, a variant's alternative emplaced there and never
+ * first assembled on the caller's stack, so the one copy a post makes
+ * is the one the mask covers. The producers write one cursor, alloc_,
+ * and read the free end. There is no separate variant of push() for
+ * interrupt context: one function, safe from any context; the cycles a
+ * split would save would not pay for the doubled surface and the risk
+ * of calling the wrong one.
+ *
+ * The consumer's side, which never masks
+ *
+ * The consumer writes take_ and the free end and reads alloc_. Every
+ * cursor is one byte with one writer, and a byte is one access on every
+ * platform (kernel/platform.hpp's atomic_width), so neither side can
+ * see a cursor half written. The runs keep the two sides apart: a
  * producer reads only the free run, which the consumer filled before it
  * moved the free end; the consumer reads only the pending run, whose
- * positions nobody touched since a producer read them; the consumer
- * writes only the outstanding run, which no producer reads. The ordering
- * between a slot or a ring position and the cursor that publishes it is
- * std::atomic_signal_fence, util/ring.hpp's idiom: a compiler-only fence,
- * correct because the queue belongs to one core (below).
+ * positions nobody touched since a producer wrote them; the consumer
+ * writes only the outstanding run, which no producer reads. What
+ * remains is ordering: a slot or a ring position must be complete
+ * before the cursor that publishes it moves. That ordering is a
+ * compiler-only fence, std::atomic_signal_fence (util/ring.hpp uses the
+ * same idiom), and a compiler-only fence is enough because the queue
+ * belongs to one core (below).
  *
- * THE HANDLE. take() returns the slot's NUMBER (a Handle, 1 to depth +
- * 1; `none`, zero, when nothing waits) and at() the event in that slot.
- * The number is fixed from push() to release(); positions are the
- * queue's own bookkeeping and nobody outside keeps one. The kernel
- * releases the slot after the dispatch unless the AO called hold()
- * inside it: hold() returns a Held<E> (kernel/borrowed.hpp,
- * Lease::hold), and the slot stays the AO's - its event intact, read
- * with at() - until the AO's own release() in a later dispatch of its
- * own. Release order is free: a hold costs exactly its own slot for as
- * long as it lasts, never the slots behind it.
+ * The handle, and holding a slot
  *
- * DEPTH, restated in the structure's terms: the queue holds depth + 1
- * slots, so a producer finds depth places while a dispatch is in
- * progress and the AO holds nothing; a push is refused when every slot
- * is occupied, waiting or outstanding (taken and not released: the one
- * being dispatched and the held ones); with nothing being dispatched the
- * spare slot takes a waiting event too, so an idle queue that holds
- * nothing accepts depth + 1.
+ * take() returns the slot's number as a Handle (1 to depth + 1; `none`,
+ * zero, when nothing waits), and at() the event in that slot. The
+ * number is fixed from push() to release(); positions are the queue's
+ * own bookkeeping and nobody outside keeps one. The kernel releases the
+ * slot after the dispatch unless the object called hold() inside it:
+ * hold() returns a Held<E> (kernel/borrowed.hpp, Lease::hold) and the
+ * slot stays the object's, its event intact and read with at(), until
+ * the object's own release() in a later dispatch of its own. Release
+ * order is free, so a hold costs exactly its own slot for as long as it
+ * lasts, never the slots behind it.
  *
- * A STATIC QUEUE IS ALL ZERO and lands in .bss, like every kernel
- * static - whenever the event's value-initialised state is all zero, as
- * every Fsm event's is (Entry, its first alternative, has no field); an
- * event type with non-zero defaults makes the queue a .data image - through
- * three choices that cost the masked window one XOR:
- *  - the free end is stored as the FENCE, the position after it (zero at
- *    the start, when the free run is every slot): push() computes
- *    next(alloc_) anyway to publish, and full is that value meeting the
- *    fence;
- *  - each position is stored ONE PLACE AHEAD in the array (position p in
- *    ring_[next(p)]), so the place a release writes is the fence itself
- *    and the place a take reads is the next(take_) it computes anyway,
- *    with no step back anywhere;
- *  - each number is stored XOR its place in the array, and the slots are
- *    numbered from 1 - so the first state, slot i at place i, reads zero,
- *    and the spare position decodes to 0, which is `none`. The slot's
- *    address takes the one off: folded into the base or an offset where
- *    the core's addressing allows (the Cortex-M4's), one subtraction
- *    where it does not (the AVR's, the Cortex-M0+'s).
+ * Why a static queue is all zero
  *
- * Overflow: push() never blocks and never fails from the caller's point
- * of view; the overflow counter is read by gdb on a target and by
- * asserts in the host tests. Whether a program counts or panics on an
- * overflow is the layer above's decision, not this header's. The depth
- * limit of 254 is the handle's: slot numbers 1 to depth + 1 are bytes
- * and 0 is `none`.
+ * A static EventQueue lands in .bss, like every kernel static, whenever
+ * the event type's value-initialised state is all zero, as every Fsm
+ * event's is (Entry, the first alternative, has no field); an event type
+ * with non-zero defaults makes the queue a .data image instead. Three
+ * encoding choices make the initial bookkeeping zero, and together they
+ * cost the masked window one XOR:
+ *  - the free run's end is stored as the position after it, the fence
+ *    (fence_), which is zero at the start, when the free run is every
+ *    slot. push() computes next(alloc_) anyway to publish, and the
+ *    queue is full when that value meets the fence;
+ *  - each position is stored one place ahead in the array (position p
+ *    in ring_[next(p)]), so the place a release writes is the fence
+ *    itself and the place a take reads is the next(take_) it computes
+ *    anyway, with no step back anywhere;
+ *  - each number is stored XOR its place in the array, and the slots
+ *    are numbered from 1, so the first state, slot i at place i, reads
+ *    zero, and the spare position decodes to 0, which is `none`. The
+ *    slot's address takes the one off: folded into the base or an
+ *    offset where the core's addressing allows (the Cortex-M4's), one
+ *    subtraction where it does not (the AVR's, the Cortex-M0+'s).
  *
- * ONE CORE, in the structure's terms: the critical section masks the
- * interrupts of the core that takes it and nothing else, and the fences
- * below order nothing between cores, so a push from another core would
- * race the owner's pushes and takes. The mispost check runs before
- * push() touches anything, and its counter saturates like overflow's.
+ * Overflow
+ *
+ * push() never blocks and never fails from the caller's point of view;
+ * the overflow counter is read by gdb on a target and by asserts in the
+ * host tests. Whether a program counts or panics on an overflow is the
+ * layer above's decision, not this header's. The depth limit of 254 is
+ * the handle's: slot numbers 1 to depth + 1 are bytes and 0 is `none`.
+ *
+ * One core
+ *
+ * The critical section masks the interrupts of the core that takes it
+ * and nothing else, and the fences above order nothing between cores,
+ * so a push from another core would race the owner's pushes and takes.
+ * The mispost check runs before push() touches anything, and its
+ * counter saturates like overflow's.
  *
  * A host platform that explores interleavings offers `interleave_point()`
  * (kernel/platform.hpp): the consumer's verbs call it at every boundary
