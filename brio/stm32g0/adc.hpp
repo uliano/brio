@@ -1,51 +1,81 @@
 /*
  * adc.hpp
  *
- * The STM32G0's analog-to-digital converter (RM0444 ch. 15) in this
- * stratum's two faces:
+ * The STM32G0's analog-to-digital converter (RM0444 ch. 15): what a
+ * program uses to measure a voltage - a pad, the supply itself through
+ * the internal reference, the die's temperature - and what
+ * util/analog_sampler.hpp's sampler runs over on this target. Two
+ * types, in this stratum's two faces:
  *
- *   Adc              the RESOURCE - one 12-bit SAR converter, and there
+ *   Adc              the resource - one 12-bit SAR converter, and there
  *                    is exactly one on every part of the family, so it
- *                    is a MONOSTATE and not an Adc<n>.
- *   AnalogIn<Pin,ch> a pad handed to a channel. The channel NUMBER is
+ *                    is a monostate (static members only, nothing to
+ *                    instantiate) and not an Adc<n>.
+ *   AnalogIn<Pin,ch> a pad handed to a channel. The channel number is
  *                    the datasheet's (DS13560 table 12's "additional
  *                    functions" column) and no device header of this
- *                    pack carries it, so the CALLER states it - exactly
+ *                    pack carries it, so the caller states it - exactly
  *                    as stm32g0/tim.hpp's TimPad takes the AF number.
  *
- * FIVE FACTS THAT SHAPE THIS FILE.
+ * The smallest use - a pad read in millivolts against a supply the
+ * converter has measured itself - is docs/stm32g0/adc.md's first
+ * listing: Adc::init(clock, cfg), Adc::vrefint(true), the pad's
+ * claim(), then select() and read() on AdcInput::vrefint for vdda_mv()
+ * and on the pad for adc_mv().
  *
- * 1. IT HAS A REGULATOR AND A CALIBRATION, AND BOTH ARE PROCEDURES.
+ * Which context may call what. init() is a setup verb: it spends real
+ * microseconds (the regulator's start-up, the calibration, the enable
+ * handshake, each bounded) and is called once from main() before the
+ * sampler runs. The configuring verbs - configure(), the watchdogs'
+ * channel selections, rebase() - want the converter disabled and refuse
+ * otherwise; disable() and stop() wait for the silicon, bounded. The
+ * channel verbs select(), select_sync(), sequence() and
+ * sequence_ordered() wait, bounded, for the CCRDY handshake (fact 3).
+ * read() starts a conversion and polls for it. All of these belong to
+ * setup or to one active object's handler (an active object is an
+ * object the kernel serves one event at a time, so its handlers never
+ * overlap): the driver keeps the configuration and the selected channel
+ * in static state that two contexts must not write at once. None of
+ * them masks interrupts. What costs one access and is safe from an
+ * interrupt handler: start(), result() (which clears EOC, so it is the
+ * acknowledgement too), flags(), clear_flags(), the thresholds verb and
+ * isr(), the body of the shared vector. A result is a value returned,
+ * never a buffer the driver keeps; with the DMA engine armed the
+ * buffer is the engine's caller's.
+ *
+ * Five facts of this silicon shape the file.
+ *
+ * 1. It has a regulator and a calibration, and both are procedures.
  *    ADVREGEN must be raised and tADCVREG_STUP (DS13560 table 62: 20 us)
  *    spent before anything else (15.3.2); ADCAL then runs a self
  *    calibration that removes an offset which varies part to part
- *    (15.3.3) and costs 82 ADC cycles. So `init()` takes the CLOCK - it
+ *    (15.3.3) and costs 82 ADC cycles. So `init()` takes the clock - it
  *    has real microseconds to spend - and calibration is not optional
- *    here: the errata's own 2.6.5 is about what is left AFTER it.
- *    Neither is a factory value copied into a register, which is where
- *    this converter differs from both earlier targets.
+ *    here: the errata's own 2.6.5 is about what is left after it.
+ *    Neither is a factory value copied into a register, the shape other
+ *    converters have.
  *
- * 2. THE FACTORY VALUES ARE ELSEWHERE, AND THEY ARE MEASUREMENTS, NOT
- *    TRIMS. VREFINT_CAL at 0x1FFF75AA and TS_CAL1/TS_CAL2 at 0x1FFF75A8
- *    / 0x1FFF75CA (DS13560 tables 5 and 6) are ADC RESULTS taken at
+ * 2. The factory values are elsewhere, and they are measurements, not
+ *    trims. VREFINT_CAL at 0x1FFF75AA and TS_CAL1/TS_CAL2 at 0x1FFF75A8
+ *    / 0x1FFF75CA (DS13560 tables 5 and 6) are ADC results taken at
  *    VDDA = VREF+ = 3.0 V - the first at 30 C, the last two at 30 C and
  *    130 C. Nothing is written back anywhere: they are the arithmetic's
- *    input, which is why `vdda_mv()` and `temperature_c()` live here and
- *    `AdcFactory` is a read-only view.
+ *    input, which is why `vdda_mv()` and `temperature_centi_c()` live
+ *    here and `AdcFactory` is a read-only view.
  *
- * 3. THE SEQUENCER HAS TWO FACES AND A HANDSHAKE. CHSELR is a bitmap of
+ * 3. The sequencer has two faces and a handshake. CHSELR is a bitmap of
  *    nineteen channels scanned in numeric order (CHSELRMOD = 0), or
  *    eight 4-bit slots scanned in the order written, channels 0..14 only
- *    (CHSELRMOD = 1) - 15.3.8. EITHER WAY the write is not in force
+ *    (CHSELRMOD = 1) - 15.3.8. Either way the write is not in force
  *    until ISR.CCRDY rises, and 15.12.5's own note says an ADSTART
- *    written before that is IGNORED. So every channel-selection verb in
+ *    written before that is ignored. So every channel-selection verb in
  *    this file clears CCRDY, writes, and waits - `select()` bounded and
  *    silent (util/analog_sampler.hpp's contract wants a void), and
  *    `select_sync()` with an answer.
  *
- * 4. THE CLOCK IS TWO CHOICES, NOT ONE. CKMODE picks between the APB
+ * 4. The clock is two choices, not one. CKMODE picks between the APB
  *    clock divided by 1, 2 or 4 - deterministic trigger latency,
- *    15.3.5's table 74 - and an ASYNCHRONOUS root selected in
+ *    15.3.5's table 74 - and an asynchronous root selected in
  *    RCC_CCIPR.ADCSEL and then divided by ADC_CCR.PRESC, which reaches
  *    the top rate whatever the bus is doing but adds jitter to a
  *    hardware trigger. The 45..55 % duty rule of 15.3.5 makes PCLK/1
@@ -55,25 +85,25 @@
  *    know it, so `init()` - which does know the clock - is where the
  *    rate is judged.
  *
- * 5. THE OVERSAMPLER CHANGES THE FULL SCALE, AND THE FULL SCALE IS
+ * 5. The oversampler changes the full scale, and the full scale is
  *    util/analog.hpp's `steps`. Up to 256 accumulated conversions shift
  *    right by up to 8 and are truncated to 16 bits (15.8's table 79), so
  *    `result_steps()` is what adc_mv() must be given, and it is computed
- *    from the config rather than assumed. Alignment is IGNORED while
+ *    from the config rather than assumed. Alignment is ignored while
  *    oversampling (15.8.1's note) and the watchdogs then compare the top
  *    12 bits of the 16 (15.8.2) - both stated on the verbs that care.
  *
- * THE REFERENCE is stm32g0/vref.hpp's `Ref`, not this file's: on this
+ * The reference is stm32g0/vref.hpp's `Ref`, not this file's: on this
  * family VREF+ is one rail shared by the ADC, the DAC and the
- * comparators, so the enum lives with the rail (that file's header says
- * why).
+ * comparators, so the enum lives with the rail (that file's opening
+ * comment says why).
  *
- * ERRATA, ES0548 Rev 3 on the bench chip's revision Z column:
+ * Errata, ES0548 Rev 3 on the bench chip's revision Z column:
  *  - 2.6.1 OVR may stay low when an EOC clear coincides with a
- *    conversion end. Its workaround is a TIMING obligation on the
- *    reader, which no driver can enforce; stated on `overrun()`.
+ *    conversion end. Its workaround is a timing obligation on the
+ *    reader, which no driver can enforce; stated on `result()`.
  *  - 2.6.2 a write to ADC_CFGR1 with ADEN set resets RES to 12 bits.
- *    ANSWERED STRUCTURALLY: `configure()` is a disabled-state verb (the
+ *    Answered structurally: `configure()` is a disabled-state verb (the
  *    chapter's own 15.3.7 rule) and there is no other writer of CFGR1
  *    here, so the combination cannot be spelled.
  *  - 2.6.3 AWD1 in single-channel mode misses a channel that is not the
@@ -81,8 +111,8 @@
  *    cannot enforce it (it does not own the sequence).
  *  - 2.6.4 a 1.5 or 3.5 cycle sampling time takes one cycle longer on a
  *    single conversion or the first of a sequence. No workaround; the
- *    prediction in `conversion_cycles()` is DELIBERATELY the chapter's,
- *    with the extra cycle named where it is measured.
+ *    prediction in `adc_conversion_half_cycles()` is deliberately the
+ *    chapter's, with the extra cycle named where it is measured.
  *  - 2.6.5 is revision A only and does not apply to this silicon.
  */
 
@@ -147,7 +177,7 @@ constexpr uint16_t adc_presc_divisor(AdcPresc p) {
     }
 }
 
-/// ADC_CFGR1.RES (15.4.2). The DATA is always 12 bits wide with the
+/// ADC_CFGR1.RES (15.4.2). The data is always 12 bits wide with the
 /// unused low bits read as zero; what changes is tSAR and the number of
 /// distinct results.
 enum class AdcRes : uint8_t { bits12 = 0, bits10 = 1, bits8 = 2, bits6 = 3 };
@@ -164,7 +194,7 @@ constexpr uint32_t adc_sample_steps(AdcRes r) {
     }
 }
 
-/// tSAR in HALF ADC cycles (table 76: 12.5, 10.5, 8.5, 6.5), kept in
+/// tSAR in half ADC cycles (table 76: 12.5, 10.5, 8.5, 6.5), kept in
 /// halves so the arithmetic below never rounds a half away.
 constexpr uint16_t adc_sar_half_cycles(AdcRes r) {
     switch (r) {
@@ -184,7 +214,7 @@ enum class AdcSampleTime : uint8_t {
     cycles19_5 = 4, cycles39_5 = 5, cycles79_5 = 6, cycles160_5 = 7,
 };
 
-/// tSMPL in HALF ADC cycles.
+/// tSMPL in half ADC cycles.
 constexpr uint16_t adc_sample_half_cycles(AdcSampleTime s) {
     switch (s) {
         case AdcSampleTime::cycles1_5: return 3;
@@ -200,7 +230,7 @@ constexpr uint16_t adc_sample_half_cycles(AdcSampleTime s) {
 }
 
 /// ADC_CFGR1.EXTSEL - table 73's eight hardware triggers. Every one of
-/// them but the last is a TIMER's TRGO or capture/compare output, which
+/// them but the last is a timer's TRGO or capture/compare output, which
 /// is what makes a no-CPU conversion chain on this family a timer
 /// question and not an event-system one.
 enum class AdcTrigger : uint8_t {
@@ -264,7 +294,7 @@ struct AdcConfig {
     AdcPresc prescaler = AdcPresc::div1;
 
     AdcRes resolution = AdcRes::bits12;
-    /// ADC_CFGR1.ALIGN. IGNORED by the silicon while oversampling
+    /// ADC_CFGR1.ALIGN. Ignored by the silicon while oversampling
     /// (15.8.1's note), and `adc_config_valid()` refuses the pair rather
     /// than letting a caller believe in it.
     bool left_aligned = false;
@@ -354,10 +384,10 @@ constexpr AdcSampleTime adc_sample_time_of(const AdcConfig& c, uint8_t ch) {
     return ((c.sample2_channels >> ch) & 1u) != 0u ? c.sample2 : c.sample1;
 }
 
-/// tCONV in HALF ADC cycles for one conversion of channel `ch`
-/// (15.3.9: tSMPL + tSAR). ES0548 2.6.4 adds ONE WHOLE CYCLE to a single
+/// tCONV in half ADC cycles for one conversion of channel `ch`
+/// (15.3.9: tSMPL + tSAR). ES0548 2.6.4 adds one whole cycle to a single
 /// conversion, or to the first of a sequence, when the sampling time is
-/// 1.5 or 3.5 cycles - deliberately NOT folded in, because the chapter's
+/// 1.5 or 3.5 cycles - deliberately not folded in, because the chapter's
 /// number is what a caller is predicting against and the erratum is
 /// measured beside it.
 constexpr uint32_t adc_conversion_half_cycles(const AdcConfig& c, uint8_t ch) {
@@ -381,7 +411,7 @@ constexpr uint32_t adc_clock_hz(uint32_t pclk_hz, uint32_t async_hz, const AdcCo
 }
 
 /// DS13560 table 62's ceiling, voltage range 1. Range 2's is 16 MHz
-/// and holds BY CONSTRUCTION under stm32g0/clock.hpp's rates: a Range 2
+/// and holds by construction under stm32g0/clock.hpp's rates: a Range 2
 /// rate has SYSCLK = PCLK <= 16 MHz (so every PCLK mode is under it),
 /// the asynchronous root is HSI16 or SYSCLK (the PLL is off in Range
 /// 2), and PLLP is refused there by init()'s dead-branch check.
@@ -412,11 +442,12 @@ constexpr AdcClockMode adc_effective_clock_mode(AdcClockMode m, uint32_t pclk_hz
 
 /**
  * The three numbers ST measured on this die and left in the system
- * memory. They are ADC RESULTS at VDDA = VREF+ = 3.0 V, not register
+ * memory. They are ADC results at VDDA = VREF+ = 3.0 V, not register
  * trims: nothing is written back anywhere, and `Adc::vdda_mv()` /
- * `Adc::temperature_c()` are the whole of their purpose.
+ * `Adc::temperature_centi_c()` are the whole of their purpose. Plain
+ * loads from system memory, legal from any context.
  *
- * The addresses are the DATASHEET'S and no header of this pack declares
+ * The addresses are the datasheet's and no header of this pack declares
  * them, which is why they are spelled here - the peripheral that uses a
  * number owns it, the same rule that keeps the DMAMUX request ids in
  * their peripherals.
@@ -454,16 +485,20 @@ private:
 /**
  * AnalogIn<Pin, channel>: the claim that this pad is that ADC channel.
  *
- * WHICH channel a pad is comes from DS13560 table 12 and NOTHING CHECKS
- * IT - the device header carries no analog pin table (stm32g0/pin.hpp
+ * Which channel a pad is comes from DS13560 table 12 and nothing checks
+ * it - the device header carries no analog pin table (stm32g0/pin.hpp
  * states that once for the stratum, and stm32g0/tim.hpp's TimPad has the
  * same shape for AF numbers). So the caller writes the number, the bench
  * is the check, and a wrong one reads a different pad rather than
  * failing to compile.
  *
  * `claim()` is analog mode, which is also the pad's reset state and the
- * one mode where 7.3.1 turns the input buffer OFF - so a claimed analog
- * pad reads zero on IDR, and that is not a fault.
+ * one mode where 7.3.1 turns the input buffer off - so a claimed analog
+ * pad reads zero on IDR, and that is not a fault. Both verbs are a
+ * read-modify-write of the port's mode register (stm32g0/pin.hpp):
+ * from setup or an active object's handler, not from an interrupt
+ * handler; release() is the same analog mode, there being nothing
+ * lower to go to.
  */
 template <class P, uint8_t channel_>
 struct AnalogIn {
@@ -492,14 +527,14 @@ public:
     static constexpr uint8_t vrefint_channel = adc_vrefint_channel();
     static constexpr uint8_t vbat_channel = adc_vbat_channel();
 
-    /// The NVIC line, SHARED WITH THE COMPARATORS where they exist
+    /// The NVIC line, shared with the comparators where they exist
     /// (table 61) - so a handler bound here is a dispatcher.
     static constexpr IRQn_Type irq() { return adc_irq(); }
 
     static ADC_TypeDef& regs() { return *reinterpret_cast<ADC_TypeDef*>(adc_base()); }
 
     /// ADC_CCR - the asynchronous prescaler and the three internal-source
-    /// enables. The device header puts it in its OWN structure at its own
+    /// enables. The device header puts it in its own structure at its own
     /// base (ADC_Common_TypeDef), because the block is shared with
     /// converters this family does not have.
     static ADC_Common_TypeDef& common() {
@@ -509,13 +544,14 @@ public:
     /**
      * The DMAMUX request id of the converter (table 55 row 5), for a
      * stm32g0/dma.hpp engine's arm(). It lives here and not in the
-     * reserve for the reason this stratum settled with the timers: no
+     * reserve (stm32g0/device_tables.hpp, the table of what each part
+     * has) for the reason this stratum settled with the timers: no
      * device header of this pack declares one of these numbers, and a
      * fabric driver owns the fabric while a peripheral owns its own
      * vocabulary.
      *
-     * CFGR1.DMAEN is what makes the converter ASSERT it; this is what
-     * makes a channel listen. 15.5.5: DMAEN must be set AFTER the
+     * CFGR1.DMAEN is what makes the converter assert it; this is what
+     * makes a channel listen. 15.5.5: DMAEN must be set after the
      * calibration, which is why `configure()` is a post-`calibrate()`
      * verb in `init()`'s own order.
      */
@@ -526,6 +562,8 @@ public:
 
     // ---- the bus clock and the kernel clock ----------------------------------
 
+    /// RCC_APBENR2.ADCEN, and the block's reset line: what init() opens
+    /// and pulses first, and release() closes last.
     static void bus_clock(bool on) { Rcc::apb2_clock(adc_clock_mask(), on); }
     static bool bus_clock() { return Rcc::apb2_clock(adc_clock_mask()); }
 
@@ -554,8 +592,9 @@ public:
 
     /**
      * Raise ADVREGEN and spend tADCVREG_STUP (DS13560 table 62 gives
-     * 20 us max; 25 is spent). 15.3.2: nothing - not the calibration,
-     * not ADEN - is legal before this.
+     * 20 us max; 25 is spent, a blocking delay with interrupts on).
+     * 15.3.2: nothing - not the calibration, not ADEN - is legal before
+     * this. False only when the delay could not be timed.
      */
     template <typename Clock>
     static bool regulator_on(Clock clock) {
@@ -576,6 +615,7 @@ public:
      * converter in an undefined state.
      *
      * False when the preconditions were not met or ADCAL never cleared.
+     * Waits for the sweep, bounded by `spins`.
      */
     static bool calibrate(uint32_t spins = 0x100000UL) {
         if (enabled() || (regs().CFGR1 & (ADC_CFGR1_AUTOFF | ADC_CFGR1_DMAEN)) != 0u ||
@@ -598,6 +638,8 @@ public:
     static uint8_t calibration() {
         return static_cast<uint8_t>(regs().CALFACT & ADC_CALFACT_CALFACT);
     }
+    /// Write the factor back. False, with nothing written, unless the
+    /// converter is enabled and no conversion is running.
     static bool set_calibration(uint8_t factor) {
         if (!enabled() || converting()) {
             return false;
@@ -610,8 +652,9 @@ public:
 
     /**
      * 15.3.4's enable procedure, verbatim: clear ADRDY, set ADEN, wait
-     * for ADRDY. In AUTOFF mode ADRDY is never set (the chapter's note),
-     * so the wait is skipped there and the answer is true.
+     * for ADRDY, bounded by `spins`. In AUTOFF mode ADRDY is never set
+     * (the chapter's note), so the wait is skipped there and the answer
+     * is true.
      */
     static bool enable(uint32_t spins = 0x100000UL) {
         if (enabled()) {
@@ -631,7 +674,8 @@ public:
     }
 
     /// 15.3.4's disable procedure: stop anything running, then ADDIS,
-    /// then wait for ADEN to clear by itself.
+    /// then wait for ADEN to clear by itself; false when either wait ran
+    /// out.
     static bool disable(uint32_t spins = 0x100000UL) {
         if (!enabled()) {
             return true;
@@ -649,23 +693,24 @@ public:
         return false;
     }
 
-    // ---- configuration (a DISABLED-state verb, 15.3.7) -----------------------
+    // ---- configuration (a disabled-state verb, 15.3.7) -----------------------
 
     static constexpr bool config_valid(const AdcConfig& c) { return adc_config_valid(c); }
 
     /**
      * Write CFGR1, CFGR2, SMPR and CCR's prescaler from `c`.
      *
-     * REFUSES while the converter is enabled - which is 15.3.7's rule and
-     * ALSO the structural answer to ES0548 2.6.2 (a CFGR1 write with ADEN
+     * Refuses while the converter is enabled or calibrating - which is
+     * 15.3.7's rule and also the structural answer to ES0548 2.6.2 (a
+     * CFGR1 write with ADEN
      * set silently resets RES to 12 bits): with no path to that write,
      * the erratum has nothing to act on. `configure_while_enabled()`
      * exists so a suite can stage the erratum deliberately; nothing else
      * should call it.
      *
-     * THE SAME ANSWER COVERS THE G071's OWN PAIR, ES0418 2.6.2 and 2.6.4:
+     * The same answer covers the G071's own pair, ES0418 2.6.2 and 2.6.4:
      * the second says a CFGR2 write with ADEN set resets CKMODE, and
-     * EVERY CFGR2 store in this file is under a cleared ADEN - this one
+     * every CFGR2 store in this file is under a cleared ADEN - this one
      * behind the refusal above, and `rebase()`'s behind a `disable()`
      * whose failure aborts the rebase. There is no third.
      */
@@ -702,12 +747,16 @@ public:
      * asynchronous
      * clock; with a PCLK mode the clock is the one `clock` names.
      *
-     * REFUSES when the resulting fADC would exceed DS13560 table 62's
+     * Refuses when the resulting fADC would exceed DS13560 table 62's
      * ceiling, when PCLK/1 is asked for with the bus prescalers divided
      * (15.3.5's duty-cycle caution), and when the asynchronous root is
      * PLLPCLK with the PLL's P output not enabled - this stratum's
      * Clock<> drives R only, and a converter clocked from a dead branch
      * would simply never convert.
+     *
+     * From setup, once: it blocks for the regulator's 25 us and polls,
+     * bounded, for the calibration and the enable. False leaves the
+     * converter wherever the failing step left it.
      */
     template <typename Clock>
     static bool init(Clock clock, const AdcConfig& c, uint32_t async_hz = 16'000'000UL) {
@@ -757,12 +806,12 @@ public:
      * that does - adc_effective_clock_mode(), a pure function of the
      * config and the rate, so a ladder walked down and back up lands on
      * the mode it started with - written the only way CKMODE can be:
-     * with the converter DISABLED (15.12.5), a conversion in flight
+     * with the converter disabled (15.12.5), a conversion in flight
      * stopped first, the enable put back if it was on. The chapter ties
      * the calibration factor to the supply and the temperature, not to
      * the clock, so none is redone here (the bench weighs VREFINT across
      * the ladder: docs/stm32g0/clock.md). What a rebase costs the caller
-     * is one disable/enable round; what it does NOT keep is the
+     * is one disable/enable round; what it does not keep is the
      * conversion time in seconds, which follows the clock - that is what
      * "follows" means.
      */
@@ -841,10 +890,10 @@ public:
     static constexpr uint8_t input_code(AdcInput in) { return static_cast<uint8_t>(in); }
 
     /**
-     * Select ONE channel - the bitmap face of the sequencer with a
-     * single bit set.
+     * Select one channel - the bitmap face of the sequencer with a
+     * single bit set. Refused while a conversion is running.
      *
-     * VOID AND BOUNDED, because util/analog_sampler.hpp's AnalogConverter
+     * Void and bounded, because util/analog_sampler.hpp's AnalogConverter
      * concept asks for a void select() and this silicon needs a
      * handshake: CCRDY is cleared, CHSELR written, CCRDY waited for.
      * `select_sync()` is the same thing with an answer, and is what a
@@ -871,7 +920,9 @@ public:
 
     /**
      * The whole bitmap at once (CHSELRMOD = 0): the channels are scanned
-     * in numeric order, forward or backward as CFGR1.SCANDIR says.
+     * in numeric order, forward or backward as CFGR1.SCANDIR says. False
+     * under the ordered face, for an empty or out-of-range mask, while
+     * converting, or when CCRDY never rose within `spins`.
      */
     static bool sequence(uint32_t mask, uint32_t spins = 0x10000UL) {
         if (cfg_.ordered_sequence || (mask >> channels) != 0u || mask == 0u) {
@@ -881,9 +932,10 @@ public:
     }
 
     /**
-     * The ORDERED sequence (CHSELRMOD = 1): up to eight slots scanned in
+     * The ordered sequence (CHSELRMOD = 1): up to eight slots scanned in
      * the order given, channels 0..14 only, terminated by 0xF (15.3.8).
-     * A shorter list is terminated here; a full eight needs none.
+     * A shorter list is terminated here; a full eight needs none. The
+     * list is read during the call and not kept.
      */
     static bool sequence_ordered(const uint8_t* order, uint8_t count,
                                  uint32_t spins = 0x10000UL) {
@@ -904,15 +956,15 @@ public:
     static uint32_t selection() { return regs().CHSELR; }
 
     /**
-     * The channel the LAST result was taken on, which is what
+     * The channel the last result was taken on, which is what
      * util/analog_sampler.hpp labels a sample with.
      *
-     * THE SILICON DOES NOT REPORT IT. There is no "current channel"
+     * The silicon does not report it. There is no "current channel"
      * register on this converter: the sequencer walks a list the driver
      * wrote, so the driver is what
      * knows where it is. With a single-channel selection - the sampler's
      * whole usage - that is exact; inside a multi-channel sequence it is
-     * the sequence's FIRST channel, and a caller walking a sequence
+     * the sequence's first channel, and a caller walking a sequence
      * labels its own results by position.
      */
     static uint8_t selected() { return selected_; }
@@ -921,16 +973,16 @@ public:
 
     static bool converting() { return (regs().CR & ADC_CR_ADSTART) != 0u; }
 
-    /// ADSTART. With EXTEN != none this ARMS the hardware trigger rather
-    /// than converting at once (15.4); with EXTEN none it is the software
-    /// trigger. Void, because util/analog_sampler.hpp asks for a void
-    /// start().
+    /// ADSTART, one store. With EXTEN != none this arms the hardware
+    /// trigger rather than converting at once (15.4); with EXTEN none it
+    /// is the software trigger. Void, because util/analog_sampler.hpp
+    /// asks for a void start().
     static void start() {
         regs().CR = (regs().CR & keepable_cr) | ADC_CR_ADSTART;
     }
 
     /// ADSTP (15.3.14): abort, discard the partial result, reset the
-    /// sequence. Waits for both bits to clear.
+    /// sequence. Waits for both bits to clear, bounded by `spins`.
     static bool stop(uint32_t spins = 0x100000UL) {
         if (!converting()) {
             return true;
@@ -948,7 +1000,7 @@ public:
     static bool sequence_done() { return (regs().ISR & AdcFlag::sequence_done) != 0u; }
 
     /**
-     * ADC_DR. READING IT CLEARS EOC (15.4.3), which is the
+     * ADC_DR, one load. Reading it clears EOC (15.4.3), which is the
      * acknowledgement the converter counts, so a caller that wants the
      * flag left standing must read `flags()` and not this.
      *
@@ -959,8 +1011,9 @@ public:
      */
     static uint16_t result() { return static_cast<uint16_t>(regs().DR); }
 
-    /// One conversion, polled: start, wait, read. Returns false rather
-    /// than hanging if the result never arrives.
+    /// One conversion, polled: start, wait, read - the whole conversion
+    /// time spent in the call. Returns false rather than hanging if the
+    /// result never arrives; the overload without `out` then answers 0.
     static bool read(uint16_t& out, uint32_t spins = 0x100000UL) {
         start();
         for (uint32_t i = 0; i < spins; ++i) {
@@ -1000,11 +1053,12 @@ public:
     }
 
     /**
-     * VREF+ in millivolts, MEASURED: 15.9's own formula,
+     * VREF+ in millivolts, measured: 15.9's own formula,
      * VREF+ = 3.0 V x VREFINT_CAL / VREFINT_DATA. On a board that ties
      * VREF+ to VDDA - which is every board this stratum has met - that
      * is the analog supply, which is why the verb is spelled for what it
-     * is used for.
+     * is used for. Pure arithmetic over the factory values; 0 when the
+     * reading is zero or the factory values are blank.
      *
      * The caller supplies the VREFINT reading, because taking one here
      * would mean this verb owning the channel selection and the sequence
@@ -1020,7 +1074,7 @@ public:
     }
 
     /**
-     * The junction temperature in HUNDREDTHS of a degree Celsius, from
+     * The junction temperature in hundredths of a degree Celsius, from
      * 15.9's two-point formula. Centi-degrees because this stratum has
      * no floating point in a driver and one degree is a coarse answer
      * for a sensor whose own linearity is +/- 2 C.
@@ -1051,24 +1105,24 @@ public:
     /**
      * AWD1: one channel, or all of them (table 78).
      *
-     * A DISABLED-STATE VERB, and the bench is why. The channel selection
+     * A disabled-state verb, and the bench is why. The channel selection
      * lives in CFGR1, which 15.3.7 makes writable only with ADEN clear;
-     * a forbidden write there DOES land on this silicon (measured: this
+     * a forbidden write there does land on this silicon (measured: this
      * watchdog configured with the converter running works), but the
-     * SAME forbidden
+     * same forbidden
      * write is also what ES0548 2.6.2 turns into a silent reset of the
      * resolution - so the rule is kept and the verb refuses. Its two
      * siblings below refuse for a stronger reason still: their register
      * simply ignores the write.
      *
-     * The thresholds are compared against the RAW LEFT-ALIGNED 12-bit
+     * The thresholds are compared against the raw left-aligned 12-bit
      * data whatever the resolution is (table 77), so a caller at 10 bits
      * keeps the two low bits of both thresholds clear - and while
      * oversampling the comparison is on the top 12 bits of the 16
      * (15.8.2).
      *
      * ES0548 2.6.3: in single-channel mode this watchdog misses a
-     * channel that is not the FIRST of the sequence. The obligation is
+     * channel that is not the first of the sequence. The obligation is
      * the caller's - this verb does not own the sequence - and it is
      * stated rather than pretended away.
      */
@@ -1088,6 +1142,8 @@ public:
         return true;
     }
 
+    /// AWD1EN and AWD1SGL cleared, under the same disabled-state rule:
+    /// false, with nothing written, while the converter is enabled.
     static bool watchdog1_off() {
         if (enabled()) {
             return false;
@@ -1097,15 +1153,15 @@ public:
     }
 
     /**
-     * AWD2 and AWD3: a MASK of channels each, and the mask is also the
+     * AWD2 and AWD3: a mask of channels each, and the mask is also the
      * enable - "the corresponding watchdog is enabled when any AWDxCHy
      * bit is set" (15.7.2), so `watchdog2(0, ...)` is how one is turned
      * off and there is no separate bit to forget.
      *
-     * ALSO A DISABLED-STATE VERB, and here the silicon is unforgiving:
+     * Also a disabled-state verb, and here the silicon is unforgiving:
      * 15.12.13's own note says "the software is allowed to write this bit
-     * only when ADEN = 0", and MEASURED, a write with the converter
-     * enabled takes no effect AT ALL - in silence, and unlike CFGR1's
+     * only when ADEN = 0", and measured, a write with the converter
+     * enabled takes no effect at all - in silence, and unlike CFGR1's
      * AWD1 bits, which land. Same sentence in the manual, two
      * behaviours in the silicon (both measured).
      */
@@ -1120,12 +1176,14 @@ public:
     static uint32_t watchdog3_channels() { return regs().AWD3CR; }
 
     /**
-     * The THRESHOLDS alone, which are the one part of a watchdog that
+     * The thresholds alone, which are the one part of a watchdog that
      * really is live: 15.7.4 says LTx and HTx "can be changed during an
      * analog-to-digital conversion", with the comparison masked for the
      * conversion that was in flight and the new window in force from the
      * next one. So a control loop moves its limits without stopping the
-     * converter, and only the CHANNEL SELECTION costs an enable cycle.
+     * converter, and only the channel selection costs an enable cycle.
+     * One store, any context; false for a watchdog number outside 1..3
+     * or a threshold past 12 bits.
      */
     static bool watchdog_thresholds(uint8_t watchdog, uint16_t low, uint16_t high) {
         if (low > 0xFFFu || high > 0xFFFu) {
@@ -1150,18 +1208,22 @@ public:
 
     static bool overrun() { return (regs().ISR & AdcFlag::overrun) != 0u; }
 
+    /// ADC_IER: a read-modify-write, so one context at a time (the
+    /// opening comment); the masks are AdcFlag's.
     static void interrupts(uint32_t mask, bool on) {
         regs().IER = on ? (regs().IER | mask) : (regs().IER & ~mask);
     }
     static uint32_t interrupts() { return regs().IER; }
 
     /**
-     * The ISR BODY: read the flags this converter has ARMED, clear
-     * exactly those, hand them back. The vector is shared with the
-     * comparators where they exist, so a handler answers for its own
-     * sources and this returns 0 when none of them spoke.
+     * The ISR body, called from the handler the program binds to the
+     * vector: read the flags this converter has armed, clear exactly
+     * those, hand them back - two loads and one store, nothing masked.
+     * The vector is shared with the comparators where they exist, so a
+     * handler answers for its own sources and this returns 0 when none
+     * of them spoke.
      *
-     * IT DOES NOT READ ADC_DR - the result is the handler's to take, and
+     * It does not read ADC_DR - the result is the handler's to take, and
      * reading it here would clear EOC behind the handler's back.
      */
     [[gnu::always_inline]] static uint32_t isr() {
@@ -1173,7 +1235,7 @@ public:
     }
 
 private:
-    /// The bits of ADC_CR a read-modify-write must NOT carry back: every
+    /// The bits of ADC_CR a read-modify-write must not carry back: every
     /// command bit is set-only and writing a stale one re-issues it
     /// (15.12.3's own notes), so a command store keeps the regulator and
     /// nothing else.

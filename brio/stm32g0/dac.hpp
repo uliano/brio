@@ -1,54 +1,78 @@
 /*
  * dac.hpp
  *
- * The STM32G0's digital-to-analog converter (RM0444 ch. 16): `Dac`, a
- * MONOSTATE resource, because there is exactly one DAC on every part
- * that has one at all (16.3's own table - the G031/G041 have none, and
- * their device header declares no DAC1_BASE, which is what
- * stm32g0/device_tables.hpp reads).
+ * The STM32G0's digital-to-analog converter (RM0444 ch. 16): what a
+ * program uses for an analog output - a voltage on PA4 or PA5, a
+ * waveform played from a table by a DMA channel, a threshold for a
+ * comparator with no pad spent. `Dac` is the converter, a monostate
+ * resource (static members only, nothing to instantiate), because there
+ * is exactly one DAC on every part that has one at all (16.3's own
+ * table - the G031/G041 have none, and their device header declares no
+ * DAC1_BASE, which is what stm32g0/device_tables.hpp reads).
  *
- * WHAT THIS CONVERTER IS. Two 12-bit channels, DAC1_OUT1 on PA4 and
+ * The smallest use, a voltage on PA4:
+ *
+ *   brio::Dac::init();
+ *   brio::Dac::claim_pad<brio::Pin<'A', 4>>();   // DAC1_OUT1, analog mode
+ *   brio::Dac::configure(0, {.mode = brio::DacMode::pin_and_internal_buffered});
+ *   brio::Dac::enable(0, true);
+ *   brio::Dac::write(0, code);                    // 0..4095, see util/analog.hpp
+ *
+ * Which context may call what. No verb here waits or masks interrupts.
+ * The configuring verbs - configure(), enable(), sample_hold_times(),
+ * set_trim(), calibration_mode(), claim_pad() - are read-modify-writes
+ * of DAC_CR, DAC_MCR, DAC_CCR or the port, and configure() keeps the
+ * channel's configuration in static state, so they belong to setup in
+ * main() or to one active object's handler (an active object is an
+ * object the kernel serves one event at a time, so its handlers never
+ * overlap), never to an interrupt handler racing another of them. The
+ * data verbs write(), write_left(), write8(), write_dual() and
+ * trigger() are one store each and the readbacks one load, legal from
+ * any context; a DMA-fed stream owns its own table for as long as the
+ * engine is armed. isr() is the body of the shared vector, for the
+ * interrupt handler the program binds.
+ *
+ * What this converter is. Two 12-bit channels, DAC1_OUT1 on PA4 and
  * DAC1_OUT2 on PA5 (16.3), each with its own trigger, its own DMA
  * request and its own output buffer - and each able to leave the pad
- * ALONE and reach only the on-chip peripherals (DAC_MCR.MODEx, 16.7.16).
- * On this family "on-chip peripherals" means THE COMPARATORS: figure 36
+ * alone and reach only the on-chip peripherals (DAC_MCR.MODEx, 16.7.16).
+ * On this family "on-chip peripherals" means the comparators: figure 36
  * of the ADC chapter shows no DAC among the ADC's nineteen inputs, so
- * the DAC reaches the ADC through the PAD and nothing else, while it
+ * the DAC reaches the ADC through the pad and nothing else, while it
  * reaches a comparator's inverting input with no pad at all. That
  * asymmetry is the shape of every wireless experiment on this silicon
  * and it is stated here because neither chapter says it.
  *
- * FOUR FACTS THAT SHAPE THIS FILE.
+ * Four facts of this silicon shape the file.
  *
- * 1. CHANNELS ARE 0-BASED HERE AND 1-BASED IN THE MANUAL. `ch = 0` is
+ * 1. Channels are 0-based here and 1-based in the manual. `ch = 0` is
  *    DAC_CH1 / DAC1_OUT1 / PA4 and `ch = 1` is DAC_CH2 / DAC1_OUT2 /
  *    PA5. Every channel verb of this stratum counts from zero
  *    (stm32g0/tim.hpp says so for the timers) and one file counting
  *    differently would be worse than one offset stated loudly.
  *
- * 2. THE DATA REGISTER IS NOT THE OUTPUT REGISTER. A write lands in
+ * 2. The data register is not the output register. A write lands in
  *    DAC_DHRx and reaches DAC_DORx one dac_pclk cycle later with no
- *    trigger, or THREE cycles after the trigger with one (16.4.5). So
+ *    trigger, or three cycles after the trigger with one (16.4.5). So
  *    `output(ch)` reads DOR and `code(ch)` reads back what was asked
  *    for: a caller that confuses them measures its own write.
  *
- * 3. A TRIGGER IS AN EDGE AND THE FIRST DATUM MUST PRECEDE IT. 16.4.8:
+ * 3. A trigger is an edge and the first datum must precede it. 16.4.8:
  *    "the very first data has to be written to the DAC_DHRx before the
  *    first trigger event occurs" - which is why a DMA-fed stream on this
  *    converter starts by filling the holding register, and why the
- *    underrun flag exists at all. DMAUDRx is
- *    write-1-to-clear and 16.4.8 says recovering from it means
- *    re-initializing the DMA channel and the converter both: `underrun()`
- *    reports, and the owner decides.
+ *    underrun flag exists at all. DMAUDRx is write-1-to-clear and 16.4.8
+ *    says recovering from it means re-initializing the DMA channel and
+ *    the converter both: `underrun()` reports, and the owner decides.
  *
- * 4. THE WAVE GENERATORS NEED A TRIGGER. WAVEx is "only used if TENx = 1"
+ * 4. The wave generators need a trigger. WAVEx is "only used if TENx = 1"
  *    (16.7.1), so noise and triangle are refused without one rather than
  *    quietly doing nothing.
  *
  * The reference is stm32g0/vref.hpp's `Ref`: 16.4.6's transfer function
  * is VREF+ x DOR / 4096, the same rail the ADC measures against.
  *
- * ERRATA: ES0548 Rev 3 has NO item touching the DAC on either silicon
+ * Errata: ES0548 Rev 3 has no item touching the DAC on either silicon
  * revision.
  */
 
@@ -107,7 +131,7 @@ constexpr bool dac_trigger_valid(DacTrigger t) {
 /**
  * DAC_MCR.MODEx (16.7.16): where the channel's output goes and whether
  * the buffer drives it. The three questions the field answers are the
- * PAD, the ON-CHIP path, and the BUFFER, and the eight codes are their
+ * pad, the on-chip path, and the buffer, and the eight codes are their
  * combinations plus sample-and-hold.
  *
  * A buffered output cannot reach the rails (DS13560's buffer output
@@ -179,7 +203,6 @@ constexpr bool dac_channel_config_valid(const DacChannelConfig& c) {
     return true;
 }
 
-/// DAC_SR's per-channel bits (16.7.14), by channel index.
 // The register-facing half is compiled only where the device header
 // declares the block: the G031/G041 and every
 // x0 value-line part have no DAC, no DAC_TypeDef and none of the DAC_CR
@@ -188,6 +211,7 @@ constexpr bool dac_channel_config_valid(const DacChannelConfig& c) {
 // config and its validity - is every part's.
 #if defined(DAC1_BASE)
 
+/// DAC_SR's per-channel bits (16.7.14), by channel index.
 struct DacFlag {
     static constexpr uint32_t underrun(uint8_t ch) {
         return ch == 0 ? DAC_SR_DMAUDR1 : DAC_SR_DMAUDR2;
@@ -216,8 +240,8 @@ public:
 
     static constexpr uint8_t channels = dac_channels();
 
-    /// The NVIC line - the underrun interrupt's only route, SHARED WITH
-    /// TIM6 AND LPTIM1 (table 61), so a handler bound here is a
+    /// The NVIC line - the underrun interrupt's only route, shared with
+    /// TIM6 and LPTIM1 (table 61), so a handler bound here is a
     /// dispatcher.
     static constexpr IRQn_Type irq() { return dac_irq(); }
 
@@ -226,7 +250,8 @@ public:
     /**
      * The DMAMUX request ids of the two channels (table 55 rows 8 and 9),
      * to be handed to a stm32g0/dma.hpp engine's arm(). They live here
-     * rather than in the reserve for the reason this stratum settled with
+     * rather than in the reserve (stm32g0/device_tables.hpp, the table
+     * of what each part has) for the reason this stratum settled with
      * the timers: no device header of this pack declares one, and a
      * peripheral owns its own vocabulary.
      */
@@ -235,8 +260,8 @@ public:
     }
 
     /**
-     * Where a DMA channel writes a sample. THE FORMAT IS THE CALLER'S
-     * CHOICE and it decides the beat width: DHR12Rx wants a halfword,
+     * Where a DMA channel writes a sample. The format is the caller's
+     * choice and it decides the beat width: DHR12Rx wants a halfword,
      * DHR8Rx a byte, and a stream whose element type disagrees with the
      * register it was pointed at writes a number the converter never
      * meant.
@@ -253,7 +278,7 @@ public:
         return ch == 0u ? static_cast<volatile void*>(&regs().DHR8R1)
                         : static_cast<volatile void*>(&regs().DHR8R2);
     }
-    /// The DUAL holding register: one 32-bit write carries both channels,
+    /// The dual holding register: one 32-bit write carries both channels,
     /// which is what makes a two-channel stream one DMA channel (16.4.14).
     static volatile void* data_address_dual_12r() { return &regs().DHR12RD; }
 
@@ -263,15 +288,18 @@ public:
     static bool bus_clock() { return Rcc::apb1_clock(dac_clock_mask()); }
     static void reset() { Rcc::apb1_reset(dac_reset_mask()); }
 
-    /// Bus clock on, block reset, both channels off. The pads are NOT
-    /// touched: which of them this program wants in analog mode is the
-    /// caller's, and a channel in an internal-only mode wants none.
+    /// Bus clock on, block reset, both channels off: the first call on
+    /// the block, from setup. The pads are not touched: which of them
+    /// this program wants in analog mode is the caller's, and a channel
+    /// in an internal-only mode wants none.
     static void init() {
         bus_clock(true);
         reset();
         bus_clock(true);
     }
 
+    /// Both channels off, the block reset and its bus clock closed; the
+    /// pads stay as they are (release_pad() is theirs).
     static void release() {
         regs().CR = 0;
         reset();
@@ -280,7 +308,9 @@ public:
 
     /// The pad a channel drives, in the mode 16.4.2 and 7.3.1 both want:
     /// analog, which is also its reset state. Spelled as a verb so an
-    /// application never names PA4 or PA5 itself.
+    /// application never names PA4 or PA5 itself. A read-modify-write of
+    /// the port's registers (stm32g0/pin.hpp): setup or an active
+    /// object's handler, not an interrupt handler.
     template <class P>
     static void claim_pad() { P::analog(); }
     template <class P>
@@ -291,20 +321,22 @@ public:
     static constexpr bool channel_valid(uint8_t ch) { return ch < channels; }
 
     /**
-     * Configure one channel and leave it DISABLED.
+     * Configure one channel and leave it disabled. False, with nothing
+     * written, for a channel this part has not or a configuration
+     * dac_channel_config_valid() refuses.
      *
      * 16.7.16: MODEx is writable only with ENx and CENx both clear, and
      * 16.7.1 says the same of TSELx - so this verb disables the channel
      * first, writes MCR, then CR. A caller that wants the channel running
      * calls `enable(ch, true)` after.
      *
-     * A CALLER'S OBLIGATION ON THE G071/G081, and this file cannot
+     * A caller's obligation on the G071/G081, and this file cannot
      * discharge it: ES0418 2.7.1 (revisions Y and B alike) says that with
-     * the channel disabled, writing a MODE other than 000 BEFORE any data
-     * has been written leaves that channel's analog output INVALID, and
-     * the workaround is one write to any data register FIRST, then the
+     * the channel disabled, writing a MODE other than 000 before any data
+     * has been written leaves that channel's analog output invalid, and
+     * the workaround is one write to any data register first, then the
      * MODE. Every mode this driver offers but `internal_unbuffered` is a
-     * non-zero MODE, so the sequence a caller wants is `set(ch, code)`
+     * non-zero MODE, so the sequence a caller wants is `write(ch, code)`
      * (which stores DHR12Rx unconditionally, with or without a
      * configuration) and only then `configure(ch, ...)`. Putting the data
      * write inside this verb would change what every image already built
@@ -340,9 +372,11 @@ public:
 
     static const DacChannelConfig& config(uint8_t ch) { return cfg_[ch < channels ? ch : 0]; }
 
-    /// ENx. 16.4.3: the channel is usable after tWAKEUP; the DIGITAL
-    /// interface works with the bit clear, which is what lets a holding
-    /// register be primed before the analog part is on.
+    /// ENx. 16.4.3: the channel is usable after tWAKEUP, which the caller
+    /// spends (this verb returns at once); the digital interface works
+    /// with the bit clear, which is what lets a holding register be
+    /// primed before the analog part is on. False for a channel this
+    /// part has not.
     static bool enable(uint8_t ch, bool on) {
         if (!channel_valid(ch)) {
             return false;
@@ -358,7 +392,9 @@ public:
 
     // ---- data ----------------------------------------------------------------
 
-    /// 12-bit right-aligned (DAC_DHR12Rx), the natural format.
+    /// 12-bit right-aligned (DAC_DHR12Rx), the natural format: one store,
+    /// the code masked to twelve bits; false for a channel this part has
+    /// not. The same holds for the three formats below.
     static bool write(uint8_t ch, uint16_t code) {
         if (!channel_valid(ch)) {
             return false;
@@ -372,7 +408,7 @@ public:
         return true;
     }
 
-    /// 12-bit LEFT-aligned (DAC_DHR12Lx): the datum sits in bits 15:4,
+    /// 12-bit left-aligned (DAC_DHR12Lx): the datum sits in bits 15:4,
     /// which is what a 16-bit sample stream already looks like.
     static bool write_left(uint8_t ch, uint16_t value) {
         if (!channel_valid(ch)) {
@@ -401,7 +437,7 @@ public:
         return true;
     }
 
-    /// Both channels in ONE store (DAC_DHR12RD, 16.4.14) - the register
+    /// Both channels in one store (DAC_DHR12RD, 16.4.14) - the register
     /// that makes a two-channel waveform one DMA request.
     static bool write_dual(uint16_t code0, uint16_t code1) {
         if (channels < 2u) {
@@ -411,7 +447,7 @@ public:
         return true;
     }
 
-    /// What was ASKED for: the holding register, before any trigger.
+    /// What was asked for: the holding register, before any trigger.
     static uint16_t code(uint8_t ch) {
         if (!channel_valid(ch)) {
             return 0;
@@ -419,7 +455,7 @@ public:
         return static_cast<uint16_t>((ch == 0u ? regs().DHR12R1 : regs().DHR12R2) & 0x0FFFu);
     }
 
-    /// What the converter is PRODUCING: DAC_DORx, which the holding
+    /// What the converter is producing: DAC_DORx, which the holding
     /// register reaches one dac_pclk cycle later untriggered and three
     /// after a trigger (16.4.5). Not writable - 16.4.5's first sentence.
     static uint16_t output(uint8_t ch) {
@@ -451,21 +487,22 @@ public:
 
     /**
      * The three times of sample-and-hold mode, in cycles of dac_hold_ck -
-     * which is LSI, selected in the RCC (table 85) and NOT this driver's
+     * which is LSI, selected in the RCC (table 85) and not this driver's
      * to turn on.
      *
-     * AND WITH LSI STOPPED NOTHING SAYS SO. Measured with LSIRDY read
+     * And with LSI stopped nothing says so. Measured with LSIRDY read
      * clear: the channel does not stop sampling - the pad carries the
      * value to within a count, exactly as the plain buffered mode does,
      * the times land, and BWST never stands. So the mode degrades to
-     * plain buffered IN SILENCE
-     * and there is no bit an application can read to tell the two apart.
+     * plain buffered in silence and there is no bit an application can
+     * read to tell the two apart.
      * Whoever selects a sample-and-hold mode owns the LSI.
      *
      * Sample and hold are 10-bit fields, refresh is 8. The write crosses
      * into the low-power domain, so `busy(ch)` can stand until it lands
      * (16.7.14's BWSTx) - though on this silicon it was never observed
-     * to, at either state of the clock.
+     * to, at either state of the clock. False for a channel this part
+     * has not or a time past its field; the write is not awaited.
      */
     static bool sample_hold_times(uint8_t ch, uint16_t sample, uint16_t hold,
                                   uint8_t refresh) {
@@ -505,6 +542,8 @@ public:
                                     0x1Fu);
     }
 
+    /// Write OTRIMx. False for a channel this part has not or a value
+    /// past five bits.
     static bool set_trim(uint8_t ch, uint8_t value) {
         if (!channel_valid(ch) || value > 31u) {
             return false;
@@ -516,7 +555,7 @@ public:
 
     /**
      * CENx - calibration mode. 16.4.12: legal only with ENx clear and
-     * only in a BUFFERED mode (in an unbuffered one it has no effect at
+     * only in a buffered mode (in an unbuffered one it has no effect at
      * all, which is a silent nothing this verb refuses instead).
      */
     static bool calibration_mode(uint8_t ch, bool on) {
@@ -534,7 +573,7 @@ public:
     /// CAL_FLAGx: the buffer, acting as a comparator against VREF+/2,
     /// says the trim has crossed. Only meaningful in calibration mode,
     /// and only after the tTRIM delay 16.4.12 demands between the write
-    /// and this read - which the CALLER spends, because only it knows
+    /// and this read - which the caller spends, because only it knows
     /// what its clock is worth.
     static bool calibration_flag(uint8_t ch) {
         return channel_valid(ch) && (regs().SR & DacFlag::calibration(ch)) != 0u;
@@ -548,7 +587,7 @@ public:
 
     /**
      * DMAUDRx. 16.4.8: a trigger that arrives before the previous
-     * request was served is LOST and the channel keeps converting the old
+     * request was served is lost and the channel keeps converting the old
      * datum - so this is the count of samples a stream did not deliver,
      * and the chapter's own recovery is to clear the flag, stop the DMA
      * and re-initialize both. This driver reports; the owner decides,
@@ -566,9 +605,11 @@ public:
     }
 
     /**
-     * The ISR BODY: the underrun flags this converter has ARMED, cleared
-     * and handed back. The vector is TIM6's and LPTIM1's too, so it
-     * answers 0 when the DAC did not speak.
+     * The ISR body, called from the handler the program binds to the
+     * vector: the underrun flags this converter has armed, cleared and
+     * handed back - two loads and one store, nothing masked. The vector
+     * is TIM6's and LPTIM1's too, so it answers 0 when the DAC did not
+     * speak.
      *
      * DMAUDRIEx sits in CR and the flag in SR, so the arming has to be
      * looked up rather than masked in one register - which is why this

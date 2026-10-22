@@ -1,51 +1,74 @@
 /*
  * vref.hpp
  *
- * The STM32G0's ANALOG REFERENCE: the VREF+ rail every converter of this
+ * The STM32G0's analog reference: the VREF+ rail every converter of this
  * family measures against, and the on-chip buffer that can drive it
- * (VREFBUF, RM0444 ch. 17).
+ * (VREFBUF, RM0444 ch. 17). A program choosing what its ADC, DAC or
+ * comparator measures against takes two things from here: `Ref` and
+ * `ref_mv()`, the reference vocabulary util/analog.hpp leaves to each
+ * target under the same name, and `Vref`, the buffer, a monostate
+ * (static members only, nothing to instantiate).
  *
- * WHY THIS FILE EXISTS AT ALL, and why `brio::Ref` lives HERE rather than
- * in stm32g0/adc.hpp: on this family there IS one shared reference block.
- * The ADC (15.3.1), the DAC (16.4.6) and the comparators' VREFINT scaler
- * all work against the SAME VREF+ pin, and the buffer of chapter 17 is
- * the one thing that can change what that pin is worth. One enum
- * therefore serves all three converters, and it sits in the chapter that
- * owns the rail. util/analog.hpp's contract is the usual one: `Ref` and
- * `ref_mv()` are each target's, under the same name.
+ * The smallest use leaves the buffer off and measures the rail instead:
+ * the reference is `Ref::external`, and stm32g0/adc.hpp's `vdda_mv()`
+ * gives its value in millivolts through VREFINT and its factory value.
+ * A board whose VREF+ pin is free can instead run
  *
- * THE RULE THAT SHAPES THE DRIVER. 17.1: "When the VREF+ pin is
+ *   brio::Vref::init();                 // the SYSCFG gate
+ *   brio::Vref::enable({.scale = brio::VrefScale::v2_048,
+ *                       .board_vref_pin_is_free = true});
+ *
+ * and measure against `Ref::buffer_2v048`.
+ *
+ * Which context may call what. Everything here is a setup verb: init()
+ * and the readbacks are one access each, hold() and disable() one
+ * read-modify-write of VREFBUF_CSR, and enable() the same followed by a
+ * bounded poll for VRR (the buffer's start-up) with interrupts on - so
+ * it is called from main() or an active
+ * object's handler (an active object is an object the kernel serves one
+ * event at a time, so its handlers never overlap), not from an
+ * interrupt handler. Nothing masks interrupts and nothing keeps storage.
+ *
+ * Why this file exists at all, and why `brio::Ref` lives here rather
+ * than in stm32g0/adc.hpp: on this family there is one shared reference
+ * block. The ADC (15.3.1), the DAC (16.4.6) and the comparators' VREFINT
+ * scaler all work against the same VREF+ pin, and the buffer of chapter
+ * 17 is the one thing that can change what that pin is worth. One enum
+ * therefore serves all three converters, and it sits in the chapter
+ * that owns the rail. util/analog.hpp's contract is the usual one: `Ref`
+ * and `ref_mv()` are each target's, under the same name.
+ *
+ * The rule that shapes the driver. 17.1: "When the VREF+ pin is
  * double-bonded with VDDA pin in a package, the voltage reference buffer
- * is not available and must be kept disabled." Even where the pin IS
+ * is not available and must be kept disabled." Even where the pin is
  * bonded on its own - and it is on the LQFP64 this stratum's bench chip
- * wears (DS13560 table 12: VREF+ is pin 7) - a BOARD may still tie it to
+ * wears (DS13560 table 12: VREF+ is pin 7) - a board may still tie it to
  * VDDA, and then enabling the buffer means an internal 2.048 V source
- * driving into a 3.3 V regulator. NOTHING INSIDE THE CHIP CAN TELL THE
- * TWO APART: a VREF+ at VDDA reads the same either way. So `enable()`
- * REFUSES unless the caller states, in the config and by name, that the
+ * driving into a 3.3 V regulator. Nothing inside the chip can tell the
+ * two apart: a VREF+ at VDDA reads the same either way. So `enable()`
+ * refuses unless the caller states, in the config and by name, that the
  * board leaves the pin free - the one thing only the schematic knows.
  * The reset state (ENVR = 0, HIZ = 1, "external voltage reference mode",
  * table 91) is the safe one and this file never leaves it on its own.
  *
- * The one mode this driver does NOT offer is table 91's ENVR = 0 +
+ * The one mode this driver does not offer is table 91's ENVR = 0 +
  * HIZ = 0, "VREF+ pin pulled-down to VSSA": on a board that ties VREF+ to
  * VDDA that is a short across the supply, and it buys nothing a disabled
  * buffer does not already give. `disable()` therefore always leaves
  * HIZ set. Hold mode (ENVR = 1, HIZ = 1) is reachable, because it drives
  * nothing.
  *
- * THE BLOCK IS BEHIND SYSCFG'S CLOCK GATE, which chapter 17 names
+ * The block is behind SYSCFG's clock gate, which chapter 17 names
  * nowhere: the device header's own address map is what says it.
- * VREFBUF_BASE is SYSCFG_BASE + 0x30, the
- * same block COMP1..COMP3 live in - so RCC_APBENR2.SYSCFGEN gates it,
- * and 5.2.17's rule applies. WITH THE GATE CLOSED VREFBUF_CSR READS
- * ZERO, and zero is not the reset value: it is table 91's OTHER off mode,
- * the one that pulls VREF+ down to VSSA. An application that read this
- * register before opening the gate would conclude the pin was being
- * grounded. `init()` opens the gate and every verb below assumes it has
- * been called.
+ * VREFBUF_BASE is SYSCFG_BASE + 0x30, the same block COMP1..COMP3 live
+ * in - so RCC_APBENR2.SYSCFGEN gates it, and 5.2.17's rule applies. With
+ * the gate closed VREFBUF_CSR reads zero, and zero is not the reset
+ * value: it is table 91's other off mode, the one that pulls VREF+ down
+ * to VSSA. An application that read this register before opening the
+ * gate would conclude the pin was being grounded. `init()` opens the
+ * gate and every verb below assumes it has been called.
  *
- * ERRATA: ES0548 Rev 3 has NO item touching VREFBUF on either silicon
+ * Errata: ES0548 Rev 3 has no item touching VREFBUF on either silicon
  * revision.
  */
 
@@ -69,7 +92,7 @@ namespace brio {
 /// `external` is the reset arrangement and the one every board that ties
 /// VREF+ to VDDA is stuck with: the chip does not know the number, so
 /// `ref_mv()` wants it - and stm32g0/adc.hpp's `vdda_mv()` is how it is
-/// MEASURED rather than assumed, through VREFINT and its factory value.
+/// measured rather than assumed, through VREFINT and its factory value.
 enum class Ref : uint8_t {
     external = 0,      ///< VREF+ as the board supplies it (VDDA, or a source)
     buffer_2v048 = 1,  ///< VREFBUF driving VREF+, VRS = 0 (17.2)
@@ -106,7 +129,8 @@ constexpr uint16_t ref_mv(Ref r, uint16_t known_mv = 0) {
 // =============================================================================
 //
 // The register-facing half is compiled only where the device header
-// declares the block (the fdcan.hpp precedent): the x0 value line has no
+// declares the block (stm32g0/fdcan.hpp has the same shape): the x0
+// value line has no
 // VREFBUF, no VREFBUF_TypeDef and none of the CSR bit names, and a Vref
 // spelled there is a compile error naming the reason rather than a
 // monostate over an address that does not exist. The vocabulary above
@@ -140,9 +164,10 @@ struct Vref {
         return *reinterpret_cast<VREFBUF_TypeDef*>(vrefbuf_base());
     }
 
-    /// Open the SYSCFG clock gate the block's registers live behind (see
-    /// this file's header). Idempotent, and nothing here ever closes it -
-    /// SYSCFG is shared with the comparators and the EXTI multiplexer.
+    /// Open the SYSCFG clock gate the block's registers live behind (the
+    /// opening comment's last paragraph). Idempotent, from setup before
+    /// any other verb, and nothing here ever closes it - SYSCFG is shared
+    /// with the comparators and the EXTI multiplexer.
     static void init() { Rcc::apb2_clock(RCC_APBENR2_SYSCFGEN, true); }
 
     static bool bus_clock() { return Rcc::apb2_clock(RCC_APBENR2_SYSCFGEN); }
@@ -191,8 +216,8 @@ struct Vref {
      * "internal voltage reference mode": ENVR = 1, HIZ = 0), then wait
      * for VRR.
      *
-     * REFUSES, writing nothing, when `cfg.board_vref_pin_is_free` is
-     * false - see this file's header. Also returns false if VRR never
+     * Refuses, writing nothing, when `cfg.board_vref_pin_is_free` is
+     * false - the opening comment's rule. Also returns false if VRR never
      * rises within `spins`, leaving the block in the state it reached, so
      * a caller that gets false can call `disable()` and go on.
      */
@@ -216,7 +241,7 @@ struct Vref {
     /**
      * Hold mode (17.2's ENVR = 1 + HIZ = 1): the reference runs, the
      * output buffer does not, and VREF+ keeps whatever an external
-     * capacitor holds. It drives NOTHING, so unlike `enable()` it needs
+     * capacitor holds. It drives nothing, so unlike `enable()` it needs
      * no acknowledgement - and unlike `enable()` it makes `ready()`
      * meaningless.
      */
@@ -225,13 +250,14 @@ struct Vref {
     }
 
     /// Back to the reset arrangement: buffer off, VREF+ an input pin.
-    /// HIZ is left SET on purpose - table 91's other off mode pulls the
+    /// HIZ is left set on purpose - table 91's other off mode pulls the
     /// pin down to VSSA, which on a board that ties VREF+ to VDDA is a
-    /// short (this file's header).
+    /// short (the opening comment).
     static void disable() {
         regs().CSR = (regs().CSR & ~VREFBUF_CSR_ENVR) | VREFBUF_CSR_HIZ;
     }
 
+    /// The same as disable(): the reset arrangement is the released one.
     static void release() { disable(); }
 };
 
