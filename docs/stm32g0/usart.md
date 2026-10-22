@@ -1,28 +1,89 @@
 # USART (STM32G0)
 
-Documents of record: RM0444 Rev 6 - USART ch. 33 (the implementation
+This document is for a programmer who needs a serial port: the console
+a program prints to, a line-oriented link, a byte transport to another
+chip, or one of the protocol shapes the peripheral offers (RS-485, LIN,
+smartcard, IrDA, a synchronous master). `Usart<n>` is the instance, one
+function per register fact. `Uart<n, pins, ...>` is the task over it: a
+byte transport with a transmit ring and a receive ring, both served from
+the interrupt, with the same public surface as the other targets' tasks,
+which is what lets `util/serial_port.hpp` and `print()` run here
+unchanged ([design/serial.md](../design/serial.md) is the stack above
+it). The LPUARTs run the same task over their own resource
+([lpuart.md](lpuart.md)).
+
+The smallest use, the console on the Nucleo's virtual COM port:
+
+```cpp
+constexpr brio::UartPins console_pins{
+    .tx = {'A', 2, brio::PinFunction::af1},   // USART2_TX, DS13560 table 13
+    .rx = {'A', 3, brio::PinFunction::af1},   // USART2_RX
+};
+using Serial = brio::Uart<2, console_pins>;
+constexpr Serial serial;
+
+extern "C" void USART2_LPUART2_IRQHandler() { (void)Serial::isr(); }
+
+Serial::init(clock, 115200);                      // after SysClock::init()
+brio::print(serial, "hello", brio::crlf);
+```
+
+What decides correctness even there: `init()` after the clock task's,
+since the baud divisor is computed from the clock's rate; the two pads
+named with the alternate-function numbers the datasheet gives for that
+instance, which nothing in the code can check; and the instance's
+interrupt vector bound to `isr()` by the program, under the shared
+line's name (`USART2_LPUART2_IRQHandler` on the G0B1,
+`USART2_IRQHandler` on the G071 and G031; a program for more than one
+board binds `BRIO_STM32G0_USART2_HANDLER`, [README.md](README.md),
+"Vector names across the boards"). A port whose vector is left unbound
+raises its first transmit interrupt into `Default_Handler`'s spin and
+the program stops there. Two more things to know before the first
+`print`: `print` waits until the ring has taken every byte, so a long
+message printed from a handler stalls every other active object for
+that long ([design/serial.md](../design/serial.md)); and the instances
+are not alike (a full instance has FIFOs, a prescaler and a kernel
+clock of its own, a basic one has not, "What the silicon does" below),
+so the same `Uart<2, ...>` is a FIFO transport on the G0B1 and a
+one-register transport on the G031. "How to use it" has the console
+with its receive activity posted to an active object, and the other
+shapes.
+
+The page is long because the chapter is. In order: the documents of
+record; what the silicon does; the types and verbs; how to use it; what
+the default buys and an option costs; the receive side; the two DMA
+engine slots; the bench findings, most of the page; what the two
+smaller parts change; the peer firmware a far board's suite drives; what
+is not covered.
+
+## Documents of record
+
+RM0444 Rev 6 - USART ch. 33 (the implementation
 tables 183/184, the baud generator 33.5.7, the tolerance tables 188/189,
 auto-baud 33.5.9, mute mode 33.5.10, the character match 33.5.11, LIN
 33.5.13, synchronous 33.5.14, single-wire 33.5.15, the receiver time-out
 33.5.16, smartcard 33.5.17, IrDA 33.5.18, flow control and driver enable
 33.5.20, low-power 33.5.21, the registers 33.8), RCC 5.4.21 (the CCIPR
 multiplexers) and 5.4.1 (HSIKERON), the EXTI's table 65 (lines 24, 25,
-26), the DMAMUX's table 55. Errata ES0548 Rev 3: 2.11.1 STAGED AND
-REPRODUCED from 2400 baud to 1 Mbaud, 2.11.2 applied, 2.2.4 STAGED AND
-REPRODUCED on a USART wake from the host and from a far chip (see "Bench
+26), the DMAMUX's table 55. Errata ES0548 Rev 3: 2.11.1 staged and
+reproduced from 2400 baud to 1 Mbaud, 2.11.2 applied, 2.2.4 staged and
+reproduced on a USART wake from the host and from a far chip (see "Bench
 findings"). Driver: `stm32g0/usart.hpp` (`Usart<n>` resource
 + `UartTask` and its names `Uart<n, pins, ...>`, `Rs485`, plus
 `SyncHost`, `IrdaLink`, `AutoBaud`, `Smartcard`); the instance, vector,
 bus-clock, capability and EXTI facts come from
-`stm32g0/device_tables.hpp`. The LPUARTs are
-[lpuart.md](lpuart.md) - the SAME task over a different resource. Bench
-suite: `test_stm32_serial` (17 letters in `z`, 120 verdicts, wireless;
+`stm32g0/device_tables.hpp` (the reserve: the table of what each part
+has, read off the device header). The LPUARTs are
+[lpuart.md](lpuart.md) - the same task over a different resource. Bench
+suite: `test_stm32_serial` (17 letters in `z`, 120 verdicts, wireless -
+a letter is one command key of the suite's console and the group of
+verdicts it runs, `z` the key that runs them all;
 four more outside `z` through `brio stress`; thirteen under the second
 all-key `t`, 171 verdicts, against the desk's STM32F446RE running
 `usart_peer` - "Against a far board" below - and letter `W` beside
 them, outside both all-keys). The instrument for a far
 board's suite is this stratum's `usart_peer` ("The peer" below). Family
-fixture `test/family_stm32g0/usart.cpp` plus SIXTEEN negatives under
+fixture `test/family_stm32g0/usart.cpp` plus sixteen negatives under
 `brio check stm32g0` (an instance nowhere, an instance off a part on
 two parts, a pad used twice, two engines on one channel, FIFO mode on a
 BASIC instance, a Reserved prescaler code, a Reserved threshold code, a
@@ -48,7 +109,7 @@ select macro with table 183 cited, the `has_*()` verbs are the header's
 own answer at run time, and the bench asks the silicon. Three
 authorities, and letter a of the suite prints all three side by side.
 
-**ONE ROW OF TABLE 184 IS NOT THE FULL/BASIC SPLIT.** "Synchronous mode
+**One row of table 184 is not the full/basic split.** "Synchronous mode
 (Master/Slave)" is given to the FULL column AND the BASIC one and taken
 from the LP one; 33.8.3's note on CR2.CLKEN says the same thing
 backwards ("if neither synchronous mode nor smartcard mode is supported,
@@ -59,8 +120,8 @@ reading of `is_full`, and the silicon settles it (below).
 
 **Configuration is written with UE clear.** BRR, CR1's frame fields,
 CR2, CR3, GTPR and PRESC are all "can only be written when the USART is
-disabled". Every resource verb that touches such a field RETURNS FALSE
-AND STORES NOTHING while UE stands rather than trusting the silicon to
+disabled". Every resource verb that touches such a field returns false
+and stores nothing while UE stands rather than trusting the silicon to
 ignore it - on this family's LPTIM a forbidden write lands anyway
 ([lptim.md](lptim.md)), so the refusal is the driver's.
 
@@ -89,9 +150,9 @@ NOTHING for it, which is the whole point of naming one.
 **TXE is a condition and ORE is a storm.** TXE reads 1 whenever the data
 register is empty, so its interrupt is armed only while the ring holds
 something and disarmed from the handler when it runs dry. ORE raises the
-interrupt whenever RXNEIE is set (33.8.9) and is cleared ONLY through
+interrupt whenever RXNEIE is set (33.8.9) and is cleared only through
 ICR.ORECF: a handler that reads RDR and leaves ORE standing re-enters
-for ever. **WUF IS THE SAME SHAPE ONE FLAG ALONG**: with UESM and WUFIE
+for ever. **WUF is the same shape one flag along**: with UESM and WUFIE
 set, a WUF nobody clears makes the vector re-enter until the watchdog
 reboots the board (IPSR 44 with ISR bit 20 standing). Every error flag
 has its ICR twin and every handler here clears what it can see.
@@ -260,7 +321,7 @@ a compile-time refusal in the task.
   33.5.15 is a bit, so single-wire is `Uart` with
   `uart_half_duplex()`, where the AVR stratum spells a task.
 - `SyncHost<n, pins, ck>`, `IrdaLink<n, pins>`, `AutoBaud<n>`,
-  `Smartcard<n, pad, ck>` - POLLED tasks over the resource, with no ring
+  `Smartcard<n, pad, ck>` - polled tasks over the resource, with no ring
   and no interrupt of their own: they are protocol shapes used a few
   characters at a time, not byte transports. A ring-fed version of any
   of them is a `Uart` with that shape's own `configure()` call.
@@ -345,9 +406,10 @@ constexpr brio::UartOptions waker{
 
 ## What the default buys, and what an option costs
 
-`UartOptions` is ONE trailing NTTP with a default, and every member of it
-is `if constexpr`-ed, so a feature a program does not name compiles to
-nothing.
+`UartOptions` is one trailing template argument with a default (a
+non-type template parameter, a constexpr struct), and every member of it
+is tested with `if constexpr`, so a feature a program does not name
+compiles to nothing.
 
 **The default is the FIFO, where the instance has one.** With `fifo`
 unstated the task turns it on (`fifo_mode`), the receiver rides RXFT

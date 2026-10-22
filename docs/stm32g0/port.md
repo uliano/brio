@@ -1,6 +1,37 @@
 # GPIO (STM32G0)
 
-Documents of record: RM0444 Rev 6, GPIO ch. 7 (the EXTI is ch. 13 and
+This document is for a programmer who needs a pin: an LED, a button, a
+pad handed to a peripheral. `Pin<'A', 5>` names pin PA5 as a type (the
+letter and the number are template arguments, fixed when the program
+is compiled), and its functions configure the pin and drive or read it;
+`Port<'A'>` works on a whole port at once, and `PinRef` is a small
+run-time handle for a request that must travel by value.
+
+The smallest use, the LED of the Nucleo-64 boards:
+
+```cpp
+using Led = brio::Pin<'A', 5>;          // LD4
+Led::output();                          // opens GPIOA's clock, push-pull, low speed
+Led::toggle();
+```
+
+Two facts decide correctness even there. A port has a clock and it is
+off at reset: a store into an unclocked port is dropped in silence, so
+every configuring function opens the port's clock before any store it
+makes, the level store included, and the value functions (`set`,
+`clear`, `toggle`, `read`) rely on that and do not. And the configuring
+functions are read-modify-write sequences on registers the whole port
+shares: call them from setup or from an active object's handler, never
+from two contexts at once, while `set`, `clear` and `toggle` are single
+atomic stores usable from any context. A pad handed to a peripheral is
+handed with its alternate-function number, which is the datasheet's and
+which nothing in the code can check: the bench is the check, and a pad
+at the wrong number, or left in output mode, is read by the peripheral
+as low whatever its level ("Bench findings" below).
+
+## Documents of record
+
+RM0444 Rev 6, GPIO ch. 7 (the EXTI is ch. 13 and
 has its own driver and document; the AF-number-to-signal tables are the
 DATASHEET's,
 DS13560 tables 13..24), errata ES0548 Rev 3 item 2.3.1 (GPIO after a
@@ -67,7 +98,7 @@ INPUT, which stays live in input, output and alternate modes alike
 peripheral owns - measured. Only ANALOG mode, with the input buffer
 off, hides a pad from its line.
 
-**FOUR PADS ARE NOT ORDINARY GPIOs OUT OF A POWER-ON.** 7.3.16 and
+**Four pads are not ordinary GPIOs out of a power-on.** 7.3.16 and
 SYSCFG_CFGR1's strobe bits: "upon power on, internal pull-down resistors
 on UCPD1 CC1 and CC2 pins are enabled (connected)". On this family that
 is PA8 and PB15 for UCPD1 and PD0 and PD2 for UCPD2 - a USB Type-C
@@ -78,7 +109,7 @@ pull-down resistor Rd at startup through the strobe bits in SYSCFG
 registers". The strobe only ever RELEASES, and `ucpd_dead_battery()` is
 that verb. It lives in this file because its subject is a PAD and this
 stratum has no UCPD driver to own it: UCPD - the Type-C and Power
-Delivery controller, chapter 39 - IS NOT IMPLEMENTED, deferred to a
+Delivery controller, chapter 39 - is not implemented, deferred to a
 board with a Type-C connector (the Nucleo has none); it exists, two
 instances, on the G071, G081, G0B1 and G0C1 alone, so the four pads and
 their pull-downs are those parts' and no other's (the G030/031/041/050/
@@ -134,10 +165,12 @@ in PUPDR, and the console answers through them (usart.md). Port A's
 reset values read as the chapter states them (MODER 0xEBFFFFFF,
 OSPEEDR 0x0C000000, PUPDR 0x24000000).
 
-An input pad with nothing attached FOLLOWS ITS OWN PULL, which is what
-makes a wireless bench possible on this board: PA0, PB0, PB3, PB7 and
-PA8 each read high under an internal pull-up and low under a pull-down
-(`test_stm32_exti` letter b), and a pad driven in OUTPUT mode is
+An input pad with nothing attached follows its own pull, which is what
+makes a wireless bench possible on this board (the suites call reading a
+pad under its own pull-up and then its pull-down a pull-walk): PA0, PB0,
+PB3, PB7 and PA8 each read high under an internal pull-up and low under
+a pull-down (`test_stm32_exti` letter b - a letter is one command key of
+a suite's console and the group of verdicts it runs), and a pad driven in OUTPUT mode is
 readable by another peripheral through the same input path (7.3.1),
 where analog mode turns that path off. PC13 (the user button B1) is the
 one pad of the survey that does NOT follow: the board holds it high
