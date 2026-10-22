@@ -46,9 +46,8 @@
  * compiler checks the dispatch ordering (above) and the type of what is
  * lent. It cannot stop a receiver from saving the raw pointer `.get()`
  * returns and using it after the lease ended; C++ has no borrow
- * checker, and staying inside the lease is the receiver's duty. The
- * type is also where a debug-build check would live (a lender epoch
- * compared on access); none is built.
+ * checker, and staying inside the lease is the receiver's duty. No
+ * run-time check of a loan exists in any build.
  *
  * In use: a request descriptor names its loans in its fields. The tx,
  * rx and command buffers of a bus transfer and the source bytes of a

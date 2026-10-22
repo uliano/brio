@@ -25,16 +25,25 @@
  *     if still empty, sleep until the next interrupt.
  *
  * The rule the whole model rests on: a dispatch runs to its end before
- * any other active object runs. A higher-priority event that arrives
- * during a dispatch waits in its queue and is served on the next turn,
- * which rescans from the top. Interrupt handlers do interrupt a
- * dispatch; what they may do with the kernel is post() an event. The
- * name is the musical marking for a note held for its full value, which
- * is run-to-completion said in one word.
+ * any other active object runs. Priority decides what is served next,
+ * never whether the running dispatch is interrupted: on the next turn
+ * the loop rescans the list from the top and takes the oldest event of
+ * the first non-empty queue. An event posted during a dispatch therefore
+ * waits at least until that dispatch returns, and longer when an older
+ * event is ahead of it in the same queue or a queue of higher priority
+ * is not empty. Interrupt handlers do interrupt a dispatch; what they
+ * may do with the kernel is post() an event. The name is the musical
+ * marking for a note held for its full value, which is run-to-completion
+ * said in one word.
  *
- * Priority is fixed, so a low-priority object starved by busy
- * higher-priority ones is a sizing or design error, made visible by the
- * per-queue overflow counters; the kernel does not age priorities.
+ * The scan order is a selection precedence, not a share of the
+ * processor. The kernel promises no response time beyond "the running
+ * dispatch finishes first" and no fairness: a long dispatch delays every
+ * other object by its length, and an object whose higher-priority peers
+ * always have an event waiting is never served. The kernel does not age
+ * priorities; such a design shows in the per-queue overflow counters,
+ * and keeping every dispatch short is the application's side of the
+ * model.
  *
  * Sleeping without losing a wake-up: the platform's idle() is entered
  * with interrupts masked and must sleep in a way that an interrupt

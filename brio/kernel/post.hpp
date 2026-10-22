@@ -68,9 +68,15 @@ void publish(Subscribers<Aos...>, const Ev& e) {
  * it with reply_to<RequesterAo, Payload>() and puts it inside the
  * request event; the service that completes the request calls
  * `reply.send(result)`, which posts the result to the requester without
- * the service knowing who asked. One function pointer wide, trivially
- * copyable, so it travels inside the event like any other field. A
- * default-constructed capsule is null and send() does nothing, which is
+ * the service knowing who asked.
+ *
+ * Inside, a ReplyTo is one function pointer. The function it points at
+ * is generated per requester and does one thing, post<Requester>(payload);
+ * a function that exists only to forward a call to a destination fixed
+ * when it was generated is called a thunk, and that is the word the code
+ * below uses. So the capsule is one pointer wide and trivially copyable,
+ * and travels inside the event like any other field. A default-
+ * constructed capsule points at no thunk: send() does nothing, which is
  * how a fire-and-forget request is written.
  *
  *   struct SpiDone { SpiStatus status; };
@@ -82,9 +88,9 @@ void publish(Subscribers<Aos...>, const Ev& e) {
  *
  * send() has post()'s rules: any context, never waits, a full queue
  * drops and counts. A requester whose Event variant cannot hold Payload
- * fails to compile at the reply_to<>() call. The destination is baked
- * into a static function instantiated per requester (the same device
- * TimeEvent and the state machine use instead of a virtual call).
+ * fails to compile at the reply_to<>() call. A static function generated
+ * per requester is the same device TimeEvent and the state machine use
+ * where another design would use a virtual call.
  */
 template <typename Payload>
 class ReplyTo {
@@ -106,9 +112,10 @@ public:
         return ReplyTo{&thunk_for<Ao>};
     }
 
-    /// A capsule around a thunk of the caller's own: the road a reply
-    /// takes when post<Ao> is not it - util/inbox.hpp's send_reply_to
-    /// builds the capsule that crosses to the requester's core.
+    /// A capsule around a forwarding function of the caller's own, for a
+    /// reply that does not travel by post<Ao>(): util/inbox.hpp's
+    /// send_reply_to builds the capsule that crosses to the requester's
+    /// core.
     template <void (*fn)(const Payload&)>
     static constexpr ReplyTo through() {
         return ReplyTo{fn};

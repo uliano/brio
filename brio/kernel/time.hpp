@@ -12,9 +12,20 @@
  *
  *     heartbeat.arm_every(brio::ticks_from_ms<P>(500));
  *
- * The conversion rounds up, "at least this long": a timeout of 5 ms
- * never fires early because the tick rate does not divide milliseconds.
- * With ticks_per_second == 1000 the conversion folds to the identity.
+ * The conversion rounds up: the result is the smallest whole number of
+ * ticks that covers at least the requested time, so a count is never
+ * shortened by truncation when the tick rate does not divide
+ * milliseconds. With ticks_per_second == 1000 the conversion folds to
+ * the identity.
+ *
+ * What a count of ticks is worth in physical time is the timebase's
+ * business, not this header's. A timer armed with N ticks matures when
+ * the tick counter has advanced by N from the count read at arming, and
+ * the arming instant can fall anywhere inside a tick interval, so the
+ * physical wait before maturity lies between N - 1 and N tick intervals,
+ * plus whatever the kernel loop adds before it notices (the "When a
+ * timer matures" paragraph of kernel/time_event.hpp). A delay of one
+ * tick can mature almost at once.
  *
  * Both functions are constexpr. With a constant argument the compiler
  * computes the result and the 64-bit intermediate costs nothing at run
@@ -31,7 +42,9 @@
 
 namespace brio {
 
-/// Ticks covering AT LEAST the given milliseconds (ceil, never early).
+/// The smallest whole number of ticks covering at least the given
+/// milliseconds (the conversion rounds up; what a tick is worth in
+/// physical time is the file header's).
 template <Platform P>
 constexpr uint32_t ticks_from_ms(uint32_t ms) {
     return static_cast<uint32_t>(

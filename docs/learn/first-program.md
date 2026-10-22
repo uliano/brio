@@ -15,6 +15,10 @@ The notation that may be new to a C programmer (angle brackets, `using`,
 appears, with a link to [the C++ in blink](cpp-notation.md) for the
 longer version.
 
+To see the program run before reading it, build and flash it unchanged
+from [the command line](command-line.md) or
+[from VS Code](vscode.md), then come back here with the LED blinking.
+
 ## What the program does
 
 The board's user LED changes state at a steady rate. Every three
@@ -31,12 +35,13 @@ the Nucleo-G031K8 (LD3 on PC6); the pin is chosen by the part, as the
 "target glue" stage shows.
 
 Verification status: `blink` is one of the applications the STM32G0
-project builds on every preset and the bench flashes
-([docs/stm32g0/README.md](../stm32g0/README.md), "The Nucleo-G071RB").
+project builds on every preset, and the bench has flashed it on the
+Nucleo-G071RB ([docs/stm32g0/README.md](../stm32g0/README.md), "The
+Nucleo-G071RB"); whether this revision of the file has run on the
+Nucleo-G0B1RE is not on record, as [the command-line
+page](command-line.md) states step by step.
 The excerpts below are copied from the file as it stands in the same
-revision as this page; the file itself was not modified or recompiled
-when the page was written, so the source is the authority where the two
-differ.
+revision as this page; where the two differ, the file is the authority.
 
 ## Two active objects
 
@@ -65,10 +70,15 @@ An event is a plain struct. `Toggle` and `Cycle` carry no data: their
 arrival is the whole message. `SetPeriod` carries the new period, in
 kernel ticks (one millisecond each on this target; the "Time" stage
 explains the unit). These are ordinary C structs, except that C++
-allows an empty one. A queue slot is as large as the largest event the
-object accepts plus a tag byte saying which one it holds, so an empty
-event adds nothing to the slot's size; `Blinker`'s slots are sized by
-`SetPeriod`'s two bytes.
+allows an empty one. A queue slot holds one `Event`, the variant built
+from these types (next stage): it stores the largest alternative, a
+tag saying which alternative is live, and whatever padding the
+compiler's alignment rules add. For `Blinker` with the compiler the
+STM32G0 project uses (arm-none-eabi-gcc 16.2, Cortex-M0+),
+`sizeof(SetPeriod)` is 2 and `sizeof(Event)` is 4. The empty events
+add nothing here, but that is a fact about this variant, not a formula
+for others; when the size matters, read `sizeof(Event)` in the program
+itself.
 
 `Toggle{}` is how C++ writes a value of type `Toggle` with nothing in
 it, and `SetPeriod{250}` a `SetPeriod` whose field is 250: braces after
@@ -172,7 +182,12 @@ lambda is a small function written where it is passed; `[](Toggle) {
 ... }` reads "a function taking a `Toggle` and doing this". The last
 lambda, `[](auto)`, takes anything else; the variant dispatch must cover
 every alternative, and this catch-all does. Without it the file does not
-compile. More in
+compile, because `Entry` and `Exit` are alternatives too and `running`
+names only `Entry`. The other side of the catch-all: a listed event
+that a handler forgets to name goes to it and is ignored, with no
+error at compile time or at run time. The compiler's check is that
+every alternative reaches some lambda, not that each has one of its
+own. More in
 [lambdas](cpp-notation.md#lambdas-a-function-written-where-it-is-used)
 and [match](cpp-notation.md#match-choose-the-lambda-by-the-event-type).
 
@@ -191,10 +206,14 @@ list is code you can open.
 3. The loop's first action is `TimeEvents<P>::process()`
    (`brio/kernel/time_event.hpp`): it compares the current tick count
    with every armed deadline. When `heartbeat`'s deadline has passed,
-   it re-arms it one period later and posts the payload: `Toggle{}` is
+   it sets the next deadline one period after the one that just passed
+   (not after this moment: the "Time" stage says why) and posts the
+   payload: `Toggle{}` is
    copied into `Blinker::queue` by `post<Blinker>()`
    (`brio/kernel/post.hpp`). The copy happens with interrupts masked
-   for a few instructions. Note where this `post` runs: in the loop,
+   for a few instructions: the mask is against the other producers,
+   since a post from the loop and a post from an interrupt handler
+   share the producer's cursor. Note where this `post` runs: in the loop,
    because a timer's expiry is detected by the loop. An interrupt
    handler that detects something itself (a byte received, a pin edge)
    calls the same `post` from the interrupt handler: the event lands in
@@ -203,8 +222,8 @@ list is code you can open.
    no mask of its own: the producers and the consumer write different
    one-byte cursors, and a byte is one uninterruptible access on every
    core brio runs on, so a post landing in the middle of a take leaves
-   both consistent (`brio/kernel/event_queue.hpp`, "The consumer never
-   masks").
+   both consistent (`brio/kernel/event_queue.hpp`, "The consumer's
+   side, which never masks").
 4. The loop's second action is to scan the queues in priority order.
    `Blinker` is first and its queue holds one event, so the kernel
    takes it and calls `Blinker::dispatch(e)`, a function `Fsm` provides.
@@ -238,20 +257,29 @@ this list never runs. `run()` calls every object's `init()` in list
 order, then loops forever.
 
 What priority means here, in one scenario. Suppose `Supervisor`'s
-handler is running and the tick interrupt fires. The handler is
-interrupted by the interrupt handler for the time it takes to count one
-tick, then resumes and finishes. On the next turn the loop posts
+handler is running and the tick interrupt fires, and suppose this tick
+is the one `heartbeat`'s deadline falls on (most ticks are not: the
+loop posts a `Toggle` once per period, not once per tick). The handler
+is interrupted by the interrupt handler for the time it takes to count
+one tick, then resumes and finishes. On the next turn the loop posts
 `Toggle` to `Blinker` and scans from the top: `Blinker`'s queue is
 served before `Supervisor`'s, whatever `Supervisor` still has waiting.
 **Priority chooses the next event to serve. It never interrupts the
 handler that is running.** A handler that takes long delays every
-other active object by that long. And one interrupt handler never
-interrupts another on any brio platform, so the tick handler above runs
-whole, whatever else is armed.
+other active object by that long, and that is the only promise the
+kernel makes about response time. How long an event waits also depends
+on the interrupt handlers that run, on the timer check at the start of
+the turn, and on the events ahead of it: older ones in the same queue,
+and any in a higher-priority queue, including ones posted while it
+waits. An object whose higher-priority peers always have something
+waiting is never served, and nothing in the kernel prevents that. One
+interrupt handler never interrupts another on any brio platform, so
+the tick handler above runs whole, whatever else is armed.
 
-In `blink` both handlers take microseconds, so the question is
-academic. It stops being academic the first time a handler is given a
-loop that waits for a peripheral.
+In `blink` both handlers take microseconds and no queue ever holds
+more than one event, so the question is academic. It stops being
+academic the first time a handler is given a loop that waits for a
+peripheral, or a producer posts faster than its consumer is served.
 
 ## Stage 5: state
 
@@ -294,22 +322,39 @@ heartbeat.arm_every(brio::ticks_from_ms<P>(500));
 Kernel time is counted in ticks. The tick rate is a constant of the
 platform: 1000 per second on this target (SysTick at 1 kHz,
 `brio/stm32g0/ticker.hpp`), 1024 on the AVR. `ticks_from_ms<P>(500)`
-converts milliseconds to that platform's ticks, rounding up so that a
-delay is never shorter than asked; with a constant argument the compiler
-does the arithmetic and the result is a literal in the binary
-(`brio/kernel/time.hpp`). `arm_every` arms the timer periodically: the
-first `Toggle` 500 ticks from now, then one every 500 ticks.
+converts milliseconds to that platform's ticks, rounding up to whole
+ticks so that the count is never shortened by truncation; with a
+constant argument the compiler does the arithmetic and the result is a
+literal in the binary (`brio/kernel/time.hpp`). `arm_every` arms the
+timer periodically: the first `Toggle` 500 ticks from now, then one
+every 500 ticks. Its sibling `arm` posts the payload once, after a
+delay, and is the one a program uses in place of a one-shot delay loop.
+
+A count of ticks is not a promise of physical time. The timer is
+scheduled against the platform's tick counter, which changes once per
+tick interval (a millisecond on this target, 1/1024 of a second on the
+AVR), and arming can happen
+anywhere between two changes; so a delay of N ticks matures between
+N - 1 and N tick intervals of wall time later, and the event is
+handled when the loop gets to it after that. For a 500 ms heartbeat the
+difference is invisible; for a one-tick delay it means "almost at
+once". The exact rules (the arming phase, the wrap of the 32-bit
+counter, the catch-up when the loop falls behind a periodic timer) are
+in the opening comment of `brio/kernel/time_event.hpp`.
 
 Where the timer is checked, and where the user code runs, is the point
 of the mechanism: the tick interrupt counts; the kernel loop compares
 counts with deadlines at the start of every turn and posts the payload;
-the handler runs when the event is served. A periodic timer is re-armed
-from its previous deadline, not from the moment it was noticed, so the
-period does not drift when the loop is late.
+the handler runs when the event is served. When a periodic timer
+matures, the kernel sets its next deadline one period after the
+previous deadline, not one period after the moment it was noticed, so
+the period does not drift when the loop is late.
 
-`SetPeriod` re-arms the same timer with a new period. Re-arming a
-running timer restarts it: the next `Toggle` comes one new period after
-the `SetPeriod` was handled.
+`SetPeriod` calls `arm_every` again on the same timer with a new
+period. That is a different thing from the kernel's own re-scheduling
+above: a program's `arm` or `arm_every` on a running timer restarts it
+from now, so the next `Toggle` comes one new period after the
+`SetPeriod` was handled, whatever was left of the old period.
 
 ## Stage 7: two active objects talking
 
@@ -370,23 +415,26 @@ and used by the services in `brio/util/`.
 
 ## Capacities, overload, and how to see a failure
 
-`Blinker`'s queue holds four waiting events, `Supervisor`'s two. The
-depth counts the events that can wait while one is being handled: the
+`Blinker`'s queue is declared with a depth of four, `Supervisor`'s of
+two. The depth counts the events that can wait while one is being handled: the
 event being dispatched keeps its slot until its handler returns, and
 the queue has one slot more than its depth for that reason, so four
 posts can land during a `Blinker` handler and the fifth is the one
 dropped; while no handler of `Blinker` is running the spare slot takes
 a waiting event too, and five fit (`brio/kernel/event_queue.hpp` states
-the rule). In this
-program the queues never hold more than one event: each timer posts one
-event per period and the handler is served within the same turn. The
-depth is still a decision the programmer makes, so it is worth knowing
-what happens when it is wrong.
+the rule). Size by the depth: a sender cannot know whether the
+receiver's handler is running, so the fifth slot is not to be counted
+on. In this program the queues never hold more than one event: each
+timer posts one event per period and the handler is served within the
+same turn. The depth is still a decision the programmer makes, so it is
+worth knowing what happens when it is wrong.
 
 A post into a full queue drops the event and increments a saturating
-counter in that queue. Nothing blocks and nothing panics. The counter
-is `Blinker::queue.overflows()`; a debugger can read it by name, and a
-program with a console can print it. A persistent overflow means a
+counter in that queue. Nothing blocks and nothing panics, and `post`
+returns nothing: the sender is not told, and the drop is visible only
+in the counter. The counter is `Blinker::queue.overflows()`; a
+debugger can read it by name, and a program with a console can print
+it. A persistent overflow means a
 producer outruns a consumer: a queue too small for a burst, or a
 handler too slow for the rate. The kernel's own failure path for
 errors a program cannot recover from is `panic()`, which writes a
@@ -394,11 +442,18 @@ record that survives a reset and halts
 ([kernel.md, "Failures: overflow and panic"](../design/kernel.md#10-failures-overflow-and-panic-kernelpanichpp));
 `blink` never calls it.
 
-Latency in this model is the time an event waits in its queue: at most
-the longest handler in the program plus the handlers of
-higher-priority events that were also waiting. `blink`'s handlers are a
-few dozen instructions, so a `Toggle` is served within microseconds of
-its tick.
+Latency in this model is the time an event waits in its queue, and the
+kernel settles only the order, not the time: the handler running when
+the event arrives finishes first, however long it takes. The rest is
+the interrupt handlers that run in
+the meantime, the timer check at the start of the turn, and every event
+served before it, older ones in the same queue and any in a
+higher-priority queue, those posted while it waits included. There is
+no formula; the bound is whatever the program's own handlers and
+traffic make it. In `blink` the handlers are a few dozen instructions
+and no queue ever holds more than one event, so a `Toggle` is expected
+to be served within microseconds of its tick; that is read from the
+code, not measured.
 
 ## The target glue
 

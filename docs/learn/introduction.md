@@ -68,12 +68,19 @@ piece of code, the event handler, which may change the object's data,
 post events to other active objects, arm a timer, or change the
 object's state. Then the handler returns.
 
-An active object is not a thread. It has no stack of its own, it never
-blocks, and the kernel does not switch between active objects in the
-middle of their handlers. All active objects run on the one main stack,
-one handler at a time. Between two events an active object holds no
-local variables; everything it needs to remember is in its persistent
-data.
+An active object is not a thread. It has no stack of its own, and the
+kernel has no way to suspend it and resume it later: a handler runs
+from its first instruction to its return, and the kernel does not
+switch between active objects in the middle of a handler. All active
+objects run on the one main stack, one handler at a time. Between two
+events an active object holds no local variables; everything it needs
+to remember is in its persistent data. The other side of that coin: a
+function that waits for hardware, called from a handler, keeps every
+other active object waiting with it. The kernel has no mechanism to
+block an object, so the application has to know which of its calls
+wait; the ones brio provides say so in their headers
+([what the model costs](#what-the-model-costs-and-what-it-does-not-promise)
+names the one every program meets).
 
 ## The kernel: a loop that serves queues
 
@@ -100,14 +107,21 @@ remember:
 
 **A handler runs to completion. Nothing else in the application runs
 until it returns.** A higher-priority event that arrives in the
-meantime does not interrupt the handler; it waits in its queue and is
-served on the very next turn, before anything of lower priority.
+meantime does not interrupt the handler; it waits in its queue. On the
+next turn the kernel chooses the highest-priority queue that is not
+empty and takes its oldest event, so the new event is served before
+anything of lower priority, and after whatever is ahead of it: older
+events in the same queue, and the queues of still higher priority.
 
 The consequences for the programmer follow directly:
 
 - Keep handlers short. A handler that spins for 50 ms stalls every
-  other active object for 50 ms. When work must continue later, arm a
-  timer or post an event instead of waiting inside the handler.
+  other active object for 50 ms. Short handlers keep that delay small,
+  but they do not bound how long an event waits: it also waits for the
+  interrupt handlers that run, for the timer check at the start of each
+  turn, and for every event served before it. When work must continue
+  later, arm a timer or post an event instead of waiting inside the
+  handler.
 - A handler never needs a lock against another handler. Two handlers
   never run at the same time, so an active object's data is touched by
   one handler at a time.
@@ -157,10 +171,23 @@ High's handler:                                              |== E1 ==|
 ```
 
 E1 waits until `Low`'s handler returns. It is then served before any
-other waiting event of lower priority, because the kernel rescans from
-the top on every turn. The latency of a high-priority event is bounded
-by the longest handler in the program, which is why handlers are kept
-short.
+waiting event of lower priority, because the kernel rescans from the
+top on every turn. In this scenario it is served next because nothing
+else is waiting; that is a fact of the scenario, not a rule. In
+general an older event already in `High`'s queue is served before E1,
+and a queue of higher priority than `High` is served before `High`'s.
+
+What priority buys is a place in the selection order, not a share of
+the processor. An active object whose higher-priority peers always
+have an event waiting is never served, and the kernel does nothing
+about it: there is no fairness and no ageing of priorities. The limits
+of this kernel, accepted by design, are these three: no preemption of
+a running handler, no promise about response time (the kernel settles
+an order, "the running handler finishes first", and no duration), no
+fairness between objects. The discipline
+that keeps a program well inside them is short handlers and queues
+sized for their bursts; a program that needs more is a different
+kernel's.
 
 ## State
 
@@ -187,15 +214,26 @@ time event, with a payload and a delay or a period. When the time
 expires, the kernel posts the payload to the owning active object's
 queue, in the loop, like any other event. The tick interrupt only counts;
 no user code runs in it. The handler that reacts to the timer runs in
-the loop, with interrupts enabled, like every other handler.
+the loop, with interrupts enabled, like every other handler. A delay is
+a number of ticks, and a tick is the resolution of the whole mechanism:
+the first program's time stage says what a count of ticks is worth in
+physical time.
 
 ## Talking between active objects
 
-Active objects share no variables. One active object tells another
-something by posting an event into its queue. The receiver reacts in its
-own handler, in its own turn. Because the sender does not wait for the
-receiver, there is no deadlock and no ordering puzzle: the sender's
-handler returns, and the receiver's runs on a later turn.
+Each active object manages its own data; nothing in the compiler or
+the kernel enforces this, it is the design rule the model rests on. To
+ask another object for something, an active object posts an event into
+that object's queue and returns without waiting for it. The receiver
+reacts in its own handler, on a later turn. Posting itself cannot
+deadlock, because nobody waits for anybody. A protocol between two
+objects can still stop making progress, for instance when each waits
+for an event the other will never send, or when a completion event is
+dropped by a full queue; that is the application's to design. When an
+event carries a pointer to a buffer rather than a copy, the program
+must also follow the buffer's ownership and lifetime rules, which brio
+writes in the type of the field that carries the pointer
+([kernel.md, "Payloads"](../design/kernel.md#4-payloads-what-travels-inside-the-event-kernelborrowedhpp)).
 
 Three delivery forms exist. The first program uses the first one; the
 other two are introduced where a program needs them:

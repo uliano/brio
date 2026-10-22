@@ -175,8 +175,11 @@ programmer would write a tagged union: a `union` of the alternatives
 plus an enum saying which member is live. The variant is that, with the
 tag maintained by the language: it is set when a value is stored, and
 code that reads the wrong alternative does not compile or fails loudly
-instead of reading garbage. The size is the largest alternative plus
-the tag.
+instead of reading garbage. The size is the largest alternative, the
+tag, and any padding the alignment rules add: 4 bytes for `Blinker`'s
+`Event` with the ARM compiler the STM32G0 project uses (where
+`sizeof(SetPeriod)` is 2). `sizeof(Event)` is the figure to read when
+the size matters.
 
 The distinction worth keeping: an `Event` variable holds one
 alternative at a time (the event that arrived), while the `Event` type
@@ -221,8 +224,11 @@ variant's tag. Two rules follow from how it is built:
 
 - Every alternative must be covered, or the program does not compile.
   The `[](auto)` catch-all is how a handler says "everything else".
-  Without it, forgetting one alternative is a compile error, which is
-  the point.
+  Without it, forgetting one alternative is a compile error; with it,
+  a forgotten alternative goes to the catch-all silently. The check is
+  that nothing falls through, not that each event has a case of its
+  own, and a state handler needs the catch-all because `Exit` is an
+  alternative it rarely names.
 - All the lambdas return the same type. In a state handler that type is
   `Status`, built by `handled()`, `unhandled()` or `transition(&next)`.
 

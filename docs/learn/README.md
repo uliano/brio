@@ -2,14 +2,24 @@
 
 The route into brio for an embedded programmer who knows C and
 microcontrollers and may know little C++ and nothing about active
-objects. Read the pages in order; each one assumes the previous.
+objects. It has two parts: the ideas, read in order, and the running of
+the example, by whichever of two routes suits you.
+
+The ideas, in order; each page assumes the previous:
 
 | Page | What you get from it |
 |---|---|
 | [From the main loop to active objects](introduction.md) | What problem brio solves and how its program runs: events, queues, active objects, the one scheduling rule, priority, state, time, and what the model costs |
 | [The first program, read in stages](first-program.md) | The maintained example `blink`, two active objects and an LED, read mechanism by mechanism in its real source; one complete event path from the interrupt to the LED |
-| [The C++ in blink](cpp-notation.md) | The notation the example uses, explained through its own lines: aliases, templates, static members, variants, lambdas, `match` |
-| [Build, flash and debug from the command line](command-line.md) | The terminal route on the ST Nucleo-G0B1RE: prerequisites, configure, build, flash, observe, gdb, the host tests |
+| [The C++ in blink](cpp-notation.md) | A companion to the first program: the notation the example uses, explained through its own lines (aliases, templates, static members, variants, lambdas, `match`); read it from the links in the tutorial, or straight through afterwards |
+
+Running `blink` on the ST Nucleo-G0B1RE, one route or the other; both
+cover the same steps, and the first program links to them for readers
+who want the LED blinking before they read:
+
+| Route | What you get from it |
+|---|---|
+| [Build, flash and debug from the command line](command-line.md) | The terminal route: prerequisites, configure, build, flash, observe, gdb, the host tests, with what has been verified stated once at the top |
 | [Working in VS Code](vscode.md) | The graphical route with the same steps, and for each step whether it is verified, configured, terminal-only or blocked |
 
 The documented board is the ST Nucleo-G0B1RE, chosen because `blink`
