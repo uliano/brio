@@ -1,38 +1,45 @@
 /*
  * device.hpp
  *
- * The silicon's own register map, in this stratum's words. Like the two
- * other WCH families here, this target compiles with NO VENDOR HEADER:
- * WCH ships its register definitions inside the EVT package, whose
- * licence is written for software running on WCH parts, so the map lives
- * here, read off the documents of record (the CH32X035 reference manual
- * V1.8, the CH32X035/X033 datasheet V1.7 and the QingKe V4 microprocessor
- * manual V1.1) and answerable to them. The EVT's own header was read
- * beside the manual as a cross-check and nothing else;
+ * The silicon's own register map, in this stratum's words: what every
+ * driver of the stratum includes to reach its block, and what a program
+ * includes for the part's facts (`device::part_name`, the pads a package
+ * bonds, the interrupt numbers of `Irq`). A program reaches no register
+ * through it - the drivers do - and nothing here runs: it is constants,
+ * register structs and the one `#if` that selects the part's table.
+ *
+ * Like the two other WCH families here, this target compiles with no
+ * vendor header: WCH ships its register definitions inside the EVT
+ * package, whose licence is written for software running on WCH parts,
+ * so the map lives here, read off the documents of record (the CH32X035
+ * reference manual V1.8, the CH32X035/X033 datasheet V1.7 and the QingKe
+ * V4 microprocessor manual V1.1) and answerable to them. The EVT's own
+ * header was read beside the manual as a cross-check and nothing else;
  * docs/ch32x035/README.md lists where the two disagree.
  *
- * WHAT THAT COSTS. There is no device header to ask which pads a package
- * bonds, so per-part variability has to be STATED: the build names the
+ * What that costs. There is no device header to ask which pads a package
+ * bonds, so per-part variability has to be stated: the build names the
  * part (cmake/ch32x035-parts.cmake in the ch32x035 project), this file
- * asks that definition ONCE and includes the part's own table from
+ * asks that definition once and includes the part's own table from
  * parts/, and every driver reads the facts as `device::` constexpr
  * values. Seven parts are the series: six CH32X035 and the CH32X033F8P6,
  * one die, one memory size, seven packages.
  *
- * WHAT THIS FILE MAPS. The blocks the stratum's drivers reach - RCC, GPIO
+ * What this file maps. The blocks the stratum's drivers reach - RCC, GPIO
  * and AFIO, the USART, the core's STK and PFIC, PWR's two registers for
  * the voltage detector (pwr.hpp) - and two it only describes: the EXTI's
  * six registers, and FLASH with its
- * option bytes and the electronic signature, decoded READ-ONLY (no verb
+ * option bytes and the electronic signature, decoded read-only (no verb
  * of this stratum programs, erases or unlocks anything). The DMA
  * controller's registers are its own header's (ch32x035/dma.hpp), which
  * a program without an engine never includes, and so are the I2C's
- * (ch32x035/i2c.hpp) and the SPI's (ch32x035/spi.hpp). A block this
- * stratum has no driver for (ADC, the timers, USBFS, USBPD, PIOC, OPA,
- * AWU, the watchdogs) is not mapped at all; the gap list of
- * docs/ch32x035/README.md names each with its reason.
+ * (ch32x035/i2c.hpp), the SPI's (ch32x035/spi.hpp) and the two
+ * advanced-control timers' (ch32x035/tim.hpp). A block this stratum has
+ * no driver for (ADC, TIM3, USBFS, USBPD, PIOC, OPA, AWU, the watchdogs)
+ * is not mapped at all; the gap list of docs/ch32x035/README.md names
+ * each with its reason.
  *
- * Register STRUCTS mirror the chapter's own field names and order, so a
+ * Register structs mirror the chapter's own field names and order, so a
  * reader can hold the manual beside the code. They are the only place in
  * the stratum where an address appears as a number.
  */
@@ -80,7 +87,7 @@ enum class Package : uint8_t { lqfp64m, lqfp48, qfn28, qsop28, qfn20, tssop20 };
 namespace brio {
 
 // ---- RCC (RM ch. 3) -------------------------------------------------------
-// ONE root and no switch: the 48 MHz HSI is SYSCLK, and HCLK is SYSCLK
+// One root and no switch: the 48 MHz HSI is SYSCLK, and HCLK is SYSCLK
 // through HPRE. So the block is small - no PLL, no HSE, no LSI (the
 // watchdog's and the auto-wakeup's clock is the HSI divided by 1024), no
 // clock-interrupt register at 0x08, no backup domain at 0x20.
@@ -135,8 +142,8 @@ inline constexpr uint32_t rcc_pb1_i2c1   = 1UL << 21;
 inline constexpr uint32_t rcc_pb1_pwr    = 1UL << 28;
 
 /// RCC_AHBPCENR (3.4.5). Its reset value is 0x00021004: the USBPD's and
-/// the USBFS's clocks are ON out of reset, and so is SRAMEN, which is the
-/// SRAM's clock IN SLEEP MODE (1: on) and not the SRAM's clock as such.
+/// the USBFS's clocks are on out of reset, and so is SRAMEN, which is the
+/// SRAM's clock in Sleep mode (1: on) and not the SRAM's clock as such.
 inline constexpr uint32_t rcc_hb_dma1  = 1UL << 0;
 inline constexpr uint32_t rcc_hb_sram  = 1UL << 2;
 inline constexpr uint32_t rcc_hb_usbfs = 1UL << 12;
@@ -150,8 +157,8 @@ inline constexpr uint32_t rcc_hbrst_usbpd = 1UL << 17;
 
 /// RCC_RSTSCKR (3.4.8): the reset flags, which accumulate until RMVF is
 /// written, and nothing else - the register the sibling families share
-/// with the LSI holds no oscillator here. THE MANUAL GIVES TWO RESET
-/// VALUES: table 3-1 says 0x0C000000, PORRSTF and PINRSTF both set by a
+/// with the LSI holds no oscillator here. The manual gives two reset
+/// values: table 3-1 says 0x0C000000, PORRSTF and PINRSTF both set by a
 /// power-on, and 3.4.8's own bit table gives PINRSTF a reset value of 0.
 /// Nothing here depends on which; what a power-on leaves is a reading.
 inline constexpr uint32_t rcc_rmvf     = 1UL << 24;
@@ -169,7 +176,7 @@ inline constexpr uint32_t rcc_reset_flags = 0xFE000000UL;
 inline constexpr uint32_t hsi_hz = 48'000'000UL;
 
 // ---- GPIO (RM 8.3.1) ------------------------------------------------------
-// The F1's nibble shape with THREE configuration registers, because a port
+// The F1's nibble shape with three configuration registers, because a port
 // here runs to 24 pins: CFGLR for 0..7, CFGHR for 8..15, CFGXR for 16..23.
 // BSHR sets and resets pins 0..15 only, and BSXR does the same for 16..23
 // in its two bytes; BCR resets all 24 at once. All of them must be
@@ -201,7 +208,7 @@ inline constexpr uint32_t gpio_clock_for(char port) {
            port == 'C' ? rcc_pb2_gpioc : 0;
 }
 
-/// The pads that exist on the DIE, per port (RM figure 1-1 and the
+/// The pads that exist on the die, per port (RM figure 1-1 and the
 /// datasheet's pin tables): PA0..PA23, PB0..PB21, PC0..PC7, PC10, PC11
 /// and PC14..PC19. PC10 and PC11 have no package pin of their own: every
 /// package that brings them out puts them on PC17's and PC16's pins
@@ -212,7 +219,7 @@ inline constexpr uint32_t gpio_die_pads(char port) {
            port == 'C' ? 0x000FCCFFUL : 0UL;
 }
 
-/// The pads with a switchable PULL-DOWN (8, 8.2; the datasheet's 1.4.19):
+/// The pads with a switchable pull-down (8, 8.2; the datasheet's 1.4.19):
 /// PA0..PA15, PC16 and PC17. Every pad has the pull-up.
 inline constexpr uint32_t gpio_pull_down_pads(char port) {
     return port == 'A' ? 0x0000FFFFUL :
@@ -228,7 +235,7 @@ inline constexpr char debug_swclk_port = 'C';
 inline constexpr uint8_t debug_swclk_pin = 19;
 
 // ---- AFIO (RM 8.3.2) ------------------------------------------------------
-// Four registers: the remaps (PCFR1), the EXTI port multiplexer in TWO
+// Four registers: the remaps (PCFR1), the EXTI port multiplexer in two
 // registers of two bits a line (EXTICR1 for lines 0..15, EXTICR2 for
 // 16..23), and CTLR - the USB and USB PD pads' pull-up modes, their
 // source voltages and comparators, and four pads' input filters. There
@@ -244,7 +251,7 @@ struct AfioRegs {
 inline AfioRegs* afio() { return reinterpret_cast<AfioRegs*>(pb2_base + 0x0000); }
 
 /// AFIO_EXTICRx's two-bit port codes (8.3.2.2): 00 port A, 10 port B, 11
-/// port C - and 01 reserved, which is NOT the sibling families' order.
+/// port C - and 01 reserved, which is not the sibling families' order.
 inline constexpr uint8_t afio_exti_port_a = 0x0;
 inline constexpr uint8_t afio_exti_port_b = 0x2;
 inline constexpr uint8_t afio_exti_port_c = 0x3;
@@ -253,7 +260,9 @@ inline constexpr uint8_t afio_exti_port_c = 0x3;
 /// (UDP_PUE, UDM_PUE, reset 01), USB_PHY_V33 (reset 1), USB_IOEN, the PD
 /// transceiver's USBPD_PHY_V33 and USBPD_IN_HVT, the BC protocol's source
 /// voltages and comparator outputs, and the input filters of PA3, PA4,
-/// PB5 and PB6. No verb of this stratum writes it.
+/// PB5 and PB6. The one verb of this stratum that writes it is afio.hpp's
+/// usb_pad_pull_ups(), the two pull-up mode fields; nothing writes the
+/// rest.
 inline constexpr uint32_t afio_ctlr_udm_pue_mask  = 0x3UL << 0;
 inline constexpr uint32_t afio_ctlr_udp_pue_mask  = 0x3UL << 2;
 inline constexpr uint32_t afio_ctlr_usb_phy_v33   = 1UL << 6;
@@ -263,7 +272,7 @@ inline constexpr uint32_t afio_ctlr_usbpd_in_hvt  = 1UL << 9;
 
 // ---- EXTI (RM 7.4, 7.5.1) -------------------------------------------------
 // Thirty lines: 0..23 the pads (one port per line, AFIO_EXTICRx), 24 and
-// 25 the debug port's two pads, 26 the PVD, 27 the AUTO-WAKEUP, 28 the
+// 25 the debug port's two pads, 26 the PVD, 27 the auto-wakeup, 28 the
 // USB's wake-up and 29 the USB PD's (table 7-2). Mapped for the reader;
 // the external interrupts have no driver in this stratum.
 struct ExtiRegs {
@@ -376,8 +385,8 @@ struct PwrRegs {
 
 inline PwrRegs* pwr() { return reinterpret_cast<PwrRegs*>(pb1_base + 0x7000); }
 
-// ---- FLASH (RM ch. 20), decoded READ-ONLY -----------------------------------
-// The interface's registers, of which this stratum WRITES one: ACTLR's
+// ---- FLASH (RM ch. 20), decoded read-only -----------------------------------
+// The interface's registers, of which this stratum writes one: ACTLR's
 // wait states, which the clock owns. The keys, the program and erase
 // verbs and the option-byte writes are mapped and never used here.
 struct FlashRegs {
@@ -449,7 +458,7 @@ constexpr FlashOptionBits flash_option_bits(uint32_t obr) {
 
 inline FlashOptionBits flash_options() { return flash_option_bits(flash_ctl()->OBR); }
 
-/// FLASH_WPR (20.3.8): one bit per 2 KB unit, 1 = NOT protected.
+/// FLASH_WPR (20.3.8): one bit per 2 KB unit, 1 = not protected.
 inline uint32_t flash_write_protection() { return flash_ctl()->WPR; }
 
 /// The code flash as the core reads it: the array answers at its own
@@ -472,13 +481,13 @@ inline uint32_t esig_uid_word(int n) {
 /// peripheral library reads it as the chip identifier (DBGMCU_GetCHIPID,
 /// whose comment lists one value per part, 0x035E06x1 for the
 /// CH32X035F8U6) and keys a GPIO workaround on bits 7:4 of it (pin.hpp).
-/// Read here so a program can PRINT it; nothing branches on it.
+/// Read here so a program can print it; nothing branches on it.
 inline uint32_t chip_id_word() {
     return *reinterpret_cast<volatile const uint32_t*>(0x1FFFF704UL);
 }
 
 // ---- the core's own two blocks (RM 7.5.2, 7.5.5; QingKe V4 manual 3, 5) ------
-/// The system timer, SIXTY-FOUR bits wide in two register pairs. The
+/// The system timer, sixty-four bits wide in two register pairs. The
 /// manual's STK_CTLR has no INIT bit on this series ([30:5] reserved),
 /// where the CH32V203's manual gives bit 5 one; nothing here uses it.
 struct StkRegs {
@@ -501,7 +510,7 @@ inline constexpr uint32_t stk_swie  = 1UL << 31;  ///< raise the software interr
 inline constexpr uint32_t stk_cntif = 1UL << 0;   ///< in SR, write 0 to clear
 
 /// The interrupt controller (RM 7.5.2). Mind the names: the manual's ISR
-/// is the ENABLE status and its IPR the PENDING status - the opposite of
+/// is the enable status and its IPR the pending status - the opposite of
 /// what the letters suggest. The manual gives four words to each bank
 /// (lines 0..103) and a byte of priority to each of 256 lines.
 struct PficRegs {
@@ -547,7 +556,7 @@ inline constexpr uint32_t sctlr_setevent    = 1UL << 5;   ///< write-one: latch 
 inline constexpr uint32_t sctlr_rsten       = 1UL << 6;   ///< 1: the core deadlock reset OFF
 inline constexpr uint32_t sctlr_sysrst      = 1UL << 31;  ///< write-one: a system reset
 
-/// Interrupt numbers, which on this core ARE the vector table's word
+/// Interrupt numbers, which on this core are the vector table's word
 /// indices (RM table 7-1): the word at address 0 is an instruction, the
 /// words after it are handler addresses. One table for the whole series
 /// (ch32x035/src/glue/startup_ch32x035.S states the same fifty-five

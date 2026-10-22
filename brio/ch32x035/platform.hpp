@@ -1,30 +1,53 @@
 /*
  * platform.hpp
  *
- * CH32X035 (QingKe V4C, RV32IMAC) implementation of the brio Platform
- * concept - the one header of this stratum the kernel templates are
- * instantiated with. An app selects it by including it and passing
- * Ch32x035Platform along.
+ * What the brio kernel stands on when it runs on a CH32X035: the
+ * CH32X035 (QingKe V4C, RV32IMAC) realization of the kernel's Platform
+ * concept, the compiler-checked set of requirements kernel/platform.hpp
+ * states. A program names it once, as the first argument of its Tenuto,
+ * and every kernel template is instantiated with it:
  *
- * THE QINGKE V4C, THE CH32V203's CORE GENERATION: the V4C is the V4B
+ *     using P = brio::Ch32x035Platform<>;
+ *     extern "C" BRIO_CH32_INTERRUPT void systick_handler() { brio::Ticker::tick(); }
+ *     ...
+ *     SysClock::init();
+ *     brio::Ticker::init(clock);
+ *     brio::enable_interrupts();
+ *     brio::Tenuto<P, ...>::run();                       // the program's active objects
+ *
+ * It gives the kernel a critical section (interrupts masked for a
+ * scope), an idle that sleeps until the next interrupt without losing
+ * one that arrives at the wrong moment, the program's source of time, a
+ * breakpoint for a panic and the storage a panic record survives a reset
+ * in. Who calls what: the kernel loop calls idle() in main-loop context,
+ * with interrupts already masked, and nothing else should; now() and
+ * ticks_per_second may be read from any context; CriticalSection may be
+ * opened from any context and nests; break_here() is the panic path's
+ * and panic_record() the panic path's and the next boot's;
+ * stack_untouched() is a main-context read of memory. A program binds the
+ * timebase's interrupt vector itself (systick_handler to Ticker::tick(),
+ * under the attribute BRIO_CH32_INTERRUPT, pfic.hpp); the kernel binds no
+ * vector, and a program that forgets it never advances time.
+ *
+ * The QingKe V4C, the CH32V203's core generation: the V4C is the V4B
  * with a faster divider and the physical memory protection unit (the
  * reference manual's core table) - thirty-two registers, the atomic
  * extension, user mode, a 64-bit system counter - at a ceiling of 48 MHz.
- * What does NOT change is the contract above it: the kernel and util
+ * What does not change is the contract above it: the kernel and util
  * strata compile here untouched.
  *
  * CriticalSection is ch32x035/pfic.hpp's InterruptGuard: read-and-clear
  * mstatus.MIE in one instruction, restore what was there on scope exit.
- * All-or-nothing masking. This core DOES have a priority threshold and
- * two levels of interrupt nesting, and brio uses neither: an ISR body
- * runs to completion here as everywhere (docs/design/kernel.md section
- * 1).
+ * All-or-nothing masking. This core does have a priority threshold and
+ * two levels of interrupt nesting, and brio uses neither: an interrupt
+ * handler's body runs to completion here as everywhere
+ * (docs/design/kernel.md section 1, "The model in one page").
  *
- * WHAT IS NOT HERE, and is deliberate rather than forgotten: no
+ * What is not here, and is deliberate rather than forgotten: no
  * idle_until() - this platform is not tickless, its timebase is the core
  * counter and stops with the core.
  *
- * NO SLEEP OVER A WORKING DMA CHANNEL. In the Sleep of RM 2.3.2 the DMA
+ * No sleep over a working DMA channel. In the Sleep of RM 2.3.2 the DMA
  * controller moves nothing - measured on the CH32X035F8U6
  * (docs/ch32x035/dma.md): a 4096-item copy started before a sleep had
  * moved 68 items when the tick woke the core 19 000 cycles later, and a
@@ -68,10 +91,13 @@ struct Ch32x035Platform {
     };
 
     /**
-     * Entered with interrupts MASKED and nothing to do: unmask, then sleep
-     * until the next interrupt, and return with interrupts enabled.
+     * The kernel's idle: entered by the loop, in main-loop context, with
+     * interrupts masked and nothing to do; unmasks, then sleeps until the
+     * next interrupt, and returns with interrupts enabled. Not for a
+     * program to call. With a DMA channel at work it does not sleep at
+     * all (the file header): it unmasks and returns at once.
      *
-     * NOT A PLAIN WFI. The RISC-V privileged specification lets WFI resume
+     * Not a plain WFI. The RISC-V privileged specification lets WFI resume
      * when an interrupt is pending whatever mstatus.MIE says, and the
      * Cortex-M targets lean on the same property to sleep first and unmask
      * after. The QingKe V4 manual (6.2) wakes a WFI on "the interrupt
@@ -79,9 +105,9 @@ struct Ch32x035Platform {
      * promise it, and a bare WFI is not what this hook executes, so the
      * question is left unasked here.
      *
-     * The instruction is the core's WFE, executed with MIE SET.
-     * PFIC_SCTLR.WFITOWFE makes `wfi` a wait-for-EVENT and SEVONPEND makes
-     * every interrupt entering the pending state an event, LATCHED: "if
+     * The instruction is the core's WFE, executed with MIE set.
+     * PFIC_SCTLR.WFITOWFE makes `wfi` a wait-for-event and SEVONPEND makes
+     * every interrupt entering the pending state an event, latched: "if
      * the WFE instruction is not executed, the system will be woken up
      * immediately after the next execution of the instruction" (RM
      * 7.5.2.38). The order is store, unmask, `wfi`, and each interleaving
@@ -92,7 +118,7 @@ struct Ch32x035Platform {
      *    the same way - the WFE returns and the caller's loop finds what
      *    the handler posted;
      *  - pending while asleep, or on the cycle the WFE goes to sleep: an
-     *    ENABLED interrupt with MIE set wakes a WFE by V4 manual 6.2's
+     *    enabled interrupt with MIE set wakes a WFE by V4 manual 6.2's
      *    second item, "woken up when an interrupt is generated, and after
      *    waking up, the microprocessor executes the interrupt function
      *    first" - a level, whatever the edge's timing.
@@ -107,26 +133,26 @@ struct Ch32x035Platform {
      * the caller's loop would not see what the handler posted. Nothing in
      * brio sets it; the idle path does not rely on that.
      *
-     * ONE TURN PER WAKE: THE LATCH IS CONSUMED AFTER IT. The edge that wakes
+     * One turn per wake: the latch is consumed after it. The edge that wakes
      * the WFE is an interrupt entering the pending state, so SEVONPEND
-     * latches it too, and left there it ends the NEXT idle() at once: the
+     * latches it too, and left there it ends the next idle() at once: the
      * caller's loop turns twice per interrupt, the second turn finding
      * nothing (measured on the CH32X035F8U6: 200 kernel turns over 100
      * quiet ticks, docs/ch32x035/platform.md). So after the wake the hook
      * writes SETEVENT - "set the event to wake up the WFE case" (RM
      * 7.5.2.38) - and executes one more `wfi`, which that event ends at
-     * once and which leaves the latch clear whatever it held. MIE is SET
+     * once and which leaves the latch clear whatever it held. MIE is set
      * by then, so an enabled interrupt pending around the consume is taken
      * by its level (6.2's second item) and its handler runs before the
      * caller's next masked check; what the consume can eat is a latch whose
      * interrupt has been or is being taken, or the edge of a line the PFIC
      * does not enable, which wakes nothing the kernel waits for. It comes
-     * AFTER the sleep, where WCH's `__WFE()` puts its SETEVENT and first
-     * `wfi` BEFORE it: with the unmask first, an interrupt taken between
+     * after the sleep, where WCH's `__WFE()` puts its SETEVENT and first
+     * `wfi` before it: with the unmask first, an interrupt taken between
      * the unmask and a consume placed before the sleep would have its
      * latch eaten and its post found only at the next interrupt.
      *
-     * WHAT DEPTH. SLEEPDEEP as found: out of reset it is clear, so this is
+     * What depth. SLEEPDEEP as found: out of reset it is clear, so this is
      * the plain Sleep of RM 2.3.2 - the core clock stopped, every
      * peripheral clock running. No verb of this stratum sets SLEEPDEEP; a
      * program that does has armed a Stop or a Standby (RM 2.3.3, 2.3.4),
@@ -158,10 +184,11 @@ struct Ch32x035Platform {
     static bool interrupts_enabled() { return brio::interrupts_enabled(); }
 
     /**
-     * Halt in the debugger.
+     * Halt in the debugger: the panic path's breakpoint
+     * (kernel/panic.hpp), callable from any context.
      *
-     * CAVEAT. With a debugger halted on it, the program stops here. With
-     * NO debugger attached, `ebreak` raises the breakpoint exception,
+     * Caveat. With a debugger halted on it, the program stops here. With
+     * no debugger attached, `ebreak` raises the breakpoint exception,
      * which the CH32V203's core takes to the vector table's own
      * breakpoint entry (measured there); the crt of this project gives
      * that entry a weak spin loop of its own, apart from the exception
@@ -171,6 +198,8 @@ struct Ch32x035Platform {
      */
     static void break_here() { __asm__ volatile("ebreak"); }
 
+    /// The kernel's clock: the timebase's tick count, readable from any
+    /// context (what kernel/time_event.hpp arms deadlines against).
     static uint32_t now() { return TB::ticks(); }
 
     /// Tick rate of the timebase: 1000 Hz on the core counter.
@@ -191,7 +220,8 @@ struct Ch32x035Platform {
     /**
      * Panic breadcrumb in .noinit: the linker script places the section
      * and the crt neither loads nor zeroes it, so a record written just
-     * before a reset can be reported at the next boot.
+     * before a reset can be reported at the next boot (written by the
+     * panic path, read by take_panic_record() at boot).
      *
      * What survives a reset on this silicon is not promised anywhere -
      * the magic word take_panic_record() checks is what makes a cold,

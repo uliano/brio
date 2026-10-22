@@ -1,28 +1,40 @@
 /*
  * pwr.hpp
  *
- * The power controller of the CH32X035 (RM ch. 2), as much of it as a
- * program asks today: the PROGRAMMABLE VOLTAGE DETECTOR (2.2.2), the one
- * witness a board has of its own supply. PWR_CTLR's PLS[1:0] (2.4.1)
- * chooses one of four thresholds and PWR_CSR's PVD0 (2.4.2) says whether
- * VDD stands below it - "1: VDD is below the PVD threshold set by
- * PLS[1:0]". There is NO ENABLE BIT: the register description has none
- * (bits 4:2 of PWR_CTLR are reserved where the STM32F1 keeps PVDE), so the
- * detector is read as it stands, a threshold being chosen.
+ * A program's one witness of its own supply: the programmable voltage
+ * detector (the PVD, RM 2.2.2) of the CH32X035's power controller (RM
+ * ch. 2), as much of that controller as a program asks today. A threshold
+ * is chosen and the comparator read:
  *
- * THE FOUR THRESHOLDS (2.4.1), each with its two edges and "approx. 20
+ *     brio::Pwr::pvd(brio::PvdLevel::v3_0);
+ *     (void)brio::delay_us(clock, 200);      // the manual gives no settling time
+ *     const bool supply_ok = !brio::Pwr::supply_low();
+ *
+ * Every verb is a register access with the controller's clock gate
+ * opened first, main context (a boot check, or a program that reads the
+ * flag again later); nothing here waits or masks, and the answer is a
+ * level, not an event.
+ *
+ * PWR_CTLR's PLS[1:0] (2.4.1) chooses one of four thresholds and
+ * PWR_CSR's PVD0 (2.4.2) says whether VDD stands below it - "1: VDD is
+ * below the PVD threshold set by PLS[1:0]". There is no enable bit: the
+ * register description has none (bits 4:2 of PWR_CTLR are reserved where
+ * the STM32F1 keeps PVDE), so the detector is read as it stands, a
+ * threshold being chosen.
+ *
+ * The four thresholds (2.4.1), each with its two edges and "approx. 20
  * mV" of hysteresis (figure 2-3): 2.12 V rising / 2.1 V falling, 2.32 /
- * 2.3, 3.02 / 3.0, 4.02 / 4.0. A 3.3 V board reads NOT LOW at the third,
+ * 2.3, 3.02 / 3.0, 4.02 / 4.0. A 3.3 V board reads not low at the third,
  * which is the level a program that drives a pad into another board's
  * asks at boot: a supply that has sagged under 3.0 V is one that the
  * other board's pads may be feeding through their protection diodes.
  *
- * THE GATE. PWR's registers answer only with the controller's clock open
+ * The gate. PWR's registers answer only with the controller's clock open
  * (RCC_APB1PCENR's PWREN); every verb here opens it, idempotent. Its
- * RESET line is clock.hpp's to refuse (docs/ch32x035/clock.md), and
+ * reset line is clock.hpp's to refuse (docs/ch32x035/clock.md), and
  * nothing here pulses it.
  *
- * WHAT IS NOT HERE: the low-power modes (PDDS, the flash's LP bits) and
+ * What is not here: the low-power modes (PDDS, the flash's LP bits) and
  * the PVD's EXTI line 26 - their chapter is not written in this stratum.
  */
 
@@ -85,7 +97,8 @@ struct Pwr {
         return static_cast<PvdLevel>((pwr()->CTLR & pwr_pls_mask) >> pwr_pls_shift);
     }
 
-    /// PVD0: VDD below the chosen threshold.
+    /// PVD0: VDD below the chosen threshold, as the comparator stands
+    /// at the read.
     static bool supply_low() {
         open();
         return (pwr()->CSR & pwr_pvd0) != 0u;
