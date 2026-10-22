@@ -28,7 +28,9 @@
  * and are safe from any context: an interrupt handler may toggle a pin
  * while the main loop drives another of the same port, which is what
  * PinRef's set()/clear() inside a bus active object's request depend
- * on. The configuring functions (output, input, analog, function,
+ * on (an active object is a component of a brio program with its own
+ * event queue, served one event at a time by the kernel,
+ * kernel/active_object.hpp). The configuring functions (output, input, analog, function,
  * release, pull, configure_mask) are read-modify-write sequences on
  * MODER/OTYPER/OSPEEDR/PUPDR/AFR, registers with no set/clear twins, so
  * two of them racing on one port from two contexts (a handler and the

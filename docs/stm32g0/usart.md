@@ -4,9 +4,14 @@ This document is for a programmer who needs a serial port: the console
 a program prints to, a line-oriented link, a byte transport to another
 chip, or one of the protocol shapes the peripheral offers (RS-485, LIN,
 smartcard, IrDA, a synchronous master). `Usart<n>` is the instance, one
-function per register fact. `Uart<n, pins, ...>` is the task over it: a
-byte transport with a transmit ring and a receive ring, both served from
-the interrupt, with the same public surface as the other targets' tasks,
+function per register fact. `Uart<n, pins, ...>` is the task over it (a
+task, in brio, is a driver layer with state of its own, served from its
+peripheral's interrupt, that an active object or `print` calls; an
+active object is a component of a brio program with its own event
+queue, served one event at a time by the kernel,
+[docs/learn/introduction.md](../learn/introduction.md)): a byte
+transport with a transmit ring and a receive ring, both served from the
+interrupt, with the same public surface as the other targets' tasks,
 which is what lets `util/serial_port.hpp` and `print()` run here
 unchanged ([design/serial.md](../design/serial.md) is the stack above
 it). The LPUARTs run the same task over their own resource
@@ -28,26 +33,44 @@ Serial::init(clock, 115200);                      // after SysClock::init()
 brio::print(serial, "hello", brio::crlf);
 ```
 
+Line by line: `console_pins` names the two pads with the
+alternate-function numbers the datasheet gives for USART2 on them,
+which nothing in the code can check; `Serial` names the transport type
+(`2` the instance, the pads, and every other template argument at its
+default: the ring sizes, no DMA engines, the default options); `serial`
+is an empty tag object of that type, the argument `print` takes to pick
+the port, since the type's functions are all static and it has no
+object of its own; the `extern "C"` function is the interrupt handler,
+as in C, under ST's name for the vector; `init()` takes the clock
+task's tag (`constexpr SysClock clock;`, [clock.md](clock.md)) and the
+baud rate; `brio::crlf` is the line ending.
+
 What decides correctness even there: `init()` after the clock task's,
-since the baud divisor is computed from the clock's rate; the two pads
-named with the alternate-function numbers the datasheet gives for that
-instance, which nothing in the code can check; and the instance's
-interrupt vector bound to `isr()` by the program, under the shared
-line's name (`USART2_LPUART2_IRQHandler` on the G0B1,
+since the baud divisor is computed from the rate the clock type claims
+and not read from the hardware, so a port initialized on a chip still at
+its 16 MHz reset rate with a 64 MHz clock type speaks at a quarter of
+the rate asked, and nothing refuses it; the two pads' numbers; and the
+instance's interrupt vector bound to `isr()` by the program, under the
+shared line's name (`USART2_LPUART2_IRQHandler` on the G0B1,
 `USART2_IRQHandler` on the G071 and G031; a program for more than one
-board binds `BRIO_STM32G0_USART2_HANDLER`, [README.md](README.md),
-"Vector names across the boards"). A port whose vector is left unbound
-raises its first transmit interrupt into `Default_Handler`'s spin and
-the program stops there. Two more things to know before the first
-`print`: `print` waits until the ring has taken every byte, so a long
-message printed from a handler stalls every other active object for
-that long ([design/serial.md](../design/serial.md)); and the instances
+board writes `BRIO_STM32G0_USART2_HANDLER` in place of the bare name,
+[README.md](README.md), "Vector names across the boards"). A port whose
+vector is left unbound raises its first transmit interrupt into
+`Default_Handler`'s spin and the program stops there. `isr()` returns
+true when a received byte made the receive ring non-empty, the edge an
+active object is told of: the smallest use discards it, and the console
+under "How to use it" posts it to the active object that assembles
+lines. Three more things to know before the first `print`: `print`
+waits until the ring has taken every byte, so a long message printed
+from a handler stalls every other active object for that long
+([design/serial.md](../design/serial.md)); the transmit ring has one
+producer, so `write_byte` and `write_bulk` are called from active
+objects and from `main`, never from an interrupt handler, and both copy,
+the caller's buffer being free when the call returns; and the instances
 are not alike (a full instance has FIFOs, a prescaler and a kernel
 clock of its own, a basic one has not, "What the silicon does" below),
 so the same `Uart<2, ...>` is a FIFO transport on the G0B1 and a
-one-register transport on the G031. "How to use it" has the console
-with its receive activity posted to an active object, and the other
-shapes.
+one-register transport on the G031.
 
 The page is long because the chapter is. In order: the documents of
 record; what the silicon does; the types and verbs; how to use it; what

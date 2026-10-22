@@ -21,13 +21,17 @@ every configuring function opens the port's clock before any store it
 makes, the level store included, and the value functions (`set`,
 `clear`, `toggle`, `read`) rely on that and do not. And the configuring
 functions are read-modify-write sequences on registers the whole port
-shares: call them from setup or from an active object's handler, never
-from two contexts at once, while `set`, `clear` and `toggle` are single
-atomic stores usable from any context. A pad handed to a peripheral is
-handed with its alternate-function number, which is the datasheet's and
-which nothing in the code can check: the bench is the check, and a pad
-at the wrong number, or left in output mode, is read by the peripheral
-as low whatever its level ("Bench findings" below).
+shares: call them from setup or from an active object's handler (an
+active object is a component of a brio program with its own event
+queue, served one event at a time by the kernel,
+[docs/learn/introduction.md](../learn/introduction.md)), never from two
+contexts at once, while `set`, `clear` and `toggle` are single atomic
+stores usable from any context. A pad handed to a peripheral is handed
+with its alternate-function number, which is the datasheet's and which
+nothing in the code can check: the bench is the check, and a pad at the
+wrong number, or never handed over at all and left as a plain output,
+is read by the peripheral as low whatever its level ("Bench findings"
+below).
 
 ## Documents of record
 
@@ -86,7 +90,7 @@ use them, and a mask toggle is one BSRR store carrying both halves.
 MODER/OTYPER/OSPEEDR/PUPDR/AFR are read-modify-write fields with no
 set/clear twins: configuring two pins of one port from two contexts
 can lose a field, which is why the configuring verbs are for setup and
-kernel-time FSM actions.
+for an active object's handler.
 
 **There is no pin interrupt in GPIO** - edges are the EXTI's
 ([exti.md](exti.md)), reached through THE EXTI'S OWN port multiplexer

@@ -49,7 +49,8 @@ build (below), and each board has a page of its own under
 Every bench suite prints that DEV_ID and REV_ID pair at boot, through
 `DeviceIdcode::read()` ([platform.md](platform.md)), because a
 measurement that differs between two boards is only a finding once the
-die it was taken on is on the record.
+die it was taken on is on the record. The maintained example `blink`
+builds for all three and drives the LED the table names on each.
 
 The bench board runs at 3.3 V. The following facts of it were each
 verified at the bench by an experiment of their own, not taken from the
@@ -116,9 +117,12 @@ this desk, so the part is the board. Six presets name the three parts
 twice each: `stm32g0b1re-release` and `stm32g0b1re-debug`, and the
 `stm32g071rb-*` and `stm32g031k8-*` pairs (CMake Tools shows them by
 their display names, `STM32G0B1RE (release, -Os)` and
-`STM32G0B1RE (debug, -Og)`). A release build is `-Os`, the one to flash
-for a measurement; a debug build is `-Og -g3 -fno-inline`, the one a
-debugger wants.
+`STM32G0B1RE (debug, -Og)`). The commands above take any of the six in
+place of `stm32g0b1re-release`: for the Nucleo-G031K8, `cmake --preset
+stm32g031k8-release`, then `cmake --build --preset stm32g031k8-release
+--target blink` and `--target blink-upload`. A release build is `-Os`,
+the one to flash for a measurement; a debug build is `-Og -g3
+-fno-inline`, the one a debugger wants.
 
 Applications are discovered at every configure from
 `stm32g0/src/apps/*.cpp`, plus `experiments/*/stm32g0/*.cpp`, by the
@@ -134,17 +138,22 @@ other projects with this family's board names:
   ([design/overview.md](../design/overview.md), "A suite's image fits
   the family's smallest chip").
 
-Build outputs land in `build-cmake/stm32g0b1re-{release,debug}` at the
-repository root: `<app>.elf`, `.bin` and `.hex`, `firmware-<app>.map`
-and `<app>.lst`, the source-interleaved disassembly. A configure also
+Build outputs land in `build-cmake/<preset>/` at the repository root
+(`build-cmake/stm32g0b1re-release`, `build-cmake/stm32g031k8-debug` and
+so on): `<app>.elf`, `.bin` and `.hex`, `firmware-<app>.map` and
+`<app>.lst`, the source-interleaved disassembly. A configure also
 writes this project's app roster, `build-cmake/apps_stm32g0.json`, which
 `bin/brio` reads.
 
 `bin/brio` is the repository's one command for boards and builds; a
 verb is the action word after `brio`. `brio flash <board> <app>`
-configures, builds and flashes in one step, and the board type `g0b1re`
-in the bench manifest is what tells it to build in this project and to
-flash through OpenOCD's ST-LINK interface. `brio run` speaks the bench
+configures, builds and flashes in one step; `<board>` is a position in
+the bench manifest (`cli/bench/bench_boards.py` holds an example entry
+per board type, the real manifest is each desk's own,
+[docs/boards/README.md](../boards/README.md)), and the entry's board
+type, `g0b1re`, `g071rb` or `g031k8`, is what tells the tool to build in
+this project with that part's preset and to flash through OpenOCD's
+ST-LINK interface. `brio run` speaks the bench
 suites' single-letter grammar (one key per command, no line terminator);
 the line-oriented `console` app is driven with any serial monitor, or
 pyserial, at 115200 8N1.
@@ -192,7 +201,8 @@ cleared before it (measured: cleared to 0 while halted, read 6 again
 right after `reset run`). The register survives every reset but a
 power-on. With DBG_STOP set the debug logic keeps HCLK, and SysTick with
 it, running inside a Stop, which cuts a Stop entered with the kernel
-tick armed from its full 250 ms to one tick. `bin/brio` therefore ends
+tick armed from its full 250 ms to one tick (a millisecond on the
+SysTick timebase). `bin/brio` therefore ends
 every G0 flash with `reset halt`, a clear of DBGMCU_CR through its clock
 gate (the gate put back to its reset value) and a `resume`, so a board
 leaves the bench as a power-on would leave it. A cortex-debug session
@@ -317,7 +327,9 @@ In the tables below a suite's figure is its count of verdicts (the
 "pass" lines its console reports); a letter is one command key of a
 suite's console, the group of verdicts it runs, and `z` is the all-key
 that runs every letter in turn; a figure in parentheses is a letter
-outside `z`.
+outside `z`. A self-link is the board's own wiring of one instance of a
+peripheral to another of the same board (SPI1 to SPI2, I2C1 to I2C2),
+and a peer is a second board on the other end of a link.
 
 | Suite | G0B1RE | G071RB | What skips there, and why |
 |---|---|---|---|
@@ -372,10 +384,12 @@ configured identically for all three boards; its LSI weighs
 slowest of the three dies. Two board facts shape suites on it: PA0 and
 PA4 lean high when left floating (the Nucleo-64s' free pads drift down),
 which costs the tamper letter its TAMPPUDIS contrast; and its debug port
-can go silent, a state of the board's ST-LINK half that only unplugging
+can go silent (OpenOCD then reports "no device connected" against a
+live board), a state of the board's ST-LINK half that only unplugging
 the board clears, in which case the ST-LINK's own mass-storage flasher
-is the way in (`bin/brio`'s `stlink_msd` programmer kind) and nothing
-can be halted or read over SWD until the replug
+is the way in (`bin/brio`'s `stlink_msd` programmer kind, a `.bin`
+dropped on the drive the probe presents) and nothing can be halted or
+read over SWD until the replug
 ([../probes/st-link.md](../probes/st-link.md)).
 
 Fourteen of the seventeen suites build for it, the same fourteen as for
@@ -457,7 +471,7 @@ in the document.
 
 | Document | Content |
 |----------|---------|
-| [platform.md](platform.md) | What the kernel stands on: `Stm32g0Platform<TB>`, the PRIMASK critical section, WFI idle, the vector table with its shared lines, the start-up code, and its two timebases - the SysTick `Ticker` (1000 Hz, stops in Stop) and `LptimTicker` (the LPTIM on the LSE crystal, 1024 Hz), which makes a program tickless: no periodic interrupt, every deadline placed in the compare, kernel time running through a Stop. Measured to the cycle: the idle contract (no edge position of 400 loses its wake, one kernel turn per tick, a wake from Sleep 36 cycles to the handler) and the LPTIM compare's latency, the finding that put the counter undivided. "Code in SRAM": the opt-in `InRam` placement of the SPI host's and the UART task's hot paths, with its gain and its cost per path |
+| [platform.md](platform.md) | What the kernel stands on: `Stm32g0Platform<TB>` (TB the timebase), the PRIMASK critical section, WFI idle, the vector table with its shared lines, the start-up code, and its two timebases - the SysTick `Ticker` (1000 Hz, stops in Stop) and `LptimTicker` (the LPTIM on the LSE crystal, 1024 Hz), which makes a program tickless: no periodic interrupt, every deadline placed in the compare, kernel time running through a Stop. Measured to the cycle: the idle contract (no edge position of 400 loses its wake, one kernel turn per tick, a wake from Sleep 36 cycles to the handler) and the LPTIM compare's latency, the finding that put the counter undivided. "Code in SRAM": the opt-in `InRam` placement of the SPI host's and the UART task's hot paths, with its gain and its cost per path |
 | [reset.md](reset.md) | The reset flags of RCC_CSR as the accumulating history they are, the independent and the window watchdog with their traps (keyed registers that do not update until the start key clocks the block; a window counter that free-runs), the deliberate resets, and the panic breadcrumb proven across six real resets including a HardFault |
 | [clock.md](clock.md) | One SYSCLK, shared bus prescalers, per-peripheral enable bits, the kernel-clock multiplexers and the MCO clock output; HSI16 and the PLL to 64 MHz, the flash latency sequence, the three voltage regimes as static rates; the dynamic clock over a pack of rates, every rung measured and a switch 48..384 us; `LseTracker`, the core tracked against the LSE crystal with no CPU |
 | [port.md](port.md) | GPIO: a port has a clock and it is off at reset, analog is the reset state, the AF numbers are the datasheet's, BSRR/BRR are atomic, and four pads (PA8/PB15, PD0/PD2) are not ordinary GPIOs out of a power-on until SYSCFG's strobe releases the UCPD dead-battery pull-downs |
@@ -468,7 +482,7 @@ in the document.
 | [usart.md](usart.md) | RM0444 chapter 33 whole, almost all of it measured on one board with no wires through the single-wire loop-back; full and basic instances compared on three authorities; the FIFO as the transport's default (a 4096-byte print in 515 interrupts where the one-register transport took 4098); every frame format, both oversamplings, the prescaler, auto-baud, LIN, smartcard, IrDA, RS-485, the wake from Stop; the receive FIFO's wedge behind a starved DMA channel and the kick that cures it; every rate timed against the wire; the errata reproduced with their controls; the far-board measurements |
 | [lpuart.md](lpuart.md) | Chapter 34, which is chapter 33 minus several modes plus a baud generator of its own; `LpUart` is the USART's own task over the other resource; a whole console moved onto LPUART1 at 9600 on the 32768 Hz crystal, and an LPUART on the crystal bringing the part out of Stop 1 on a start bit |
 | [irtim.md](irtim.md) | The infrared interface: one pad and an AND gate, TIM17 as the carrier and a timer or a USART as the envelope, neither needing a pad; the USART envelope is active low where TIM16's is active high |
-| [adc.md](adc.md) | The one 12-bit converter, a monostate: the regulator start-up and the self-calibration `init()` spends, the three factory measurements it reads; the sequencer's two faces and its CCRDY handshake; VDDA and the junction temperature with no meter; conversion time exact to the cycle; the oversampler against a measured noise floor; the watchdogs as disabled-state verbs because a forbidden write is not one thing on this converter |
+| [adc.md](adc.md) | The one 12-bit converter, a monostate (a class with static state and no instances, the part having one): the regulator start-up and the self-calibration `init()` spends, the three factory measurements it reads; the sequencer's two faces and its CCRDY handshake; VDDA and the junction temperature with no meter; conversion time exact to the cycle; the oversampler against a measured noise floor; the watchdogs as disabled-state verbs because a forbidden write is not one thing on this converter |
 | [dac.md](dac.md) | The two 12-bit channels, absent on the G031/G041; the DAC reaches the ADC through the pad and nothing else, so PA4 is a zero-length wire and the shape of every wireless analog experiment; DHR is not DOR, a trigger is an edge, the buffer cannot reach the rails, the DMA underrun caught |
 | [vref.md](vref.md) | The voltage reference buffer, implemented whole and never enabled: driving VREF+ on a board that ties it to VDDA is forbidden and nothing inside the chip can tell, so `enable()` refuses unless the caller states the pin is free; the block sits behind SYSCFG's clock gate and reads wrong through it |
 | [comp.md](comp.md) | The comparators (three on the G0B1 class, two on the G071, none on the G031), each living inside SYSCFG's block; the inverting input reaches internal references with no pad while the non-inverting one is a pad and nothing else; the precharged pad as the wireless stimulus; the blanking window and the window mode measured |
