@@ -155,11 +155,18 @@ caller's object without a copy, used like the object itself (`e`, not
 It configures the LED pin as an output and starts the state machine in
 the `running` state. `start` delivers the `Entry` event to `running`
 immediately, so the first thing `running` does is arm the heartbeat at
-500 ms.
+500 ms. In `start(&running)` the `&` is the C one, address-of: the
+argument is a pointer to the handler function, exactly as in C, and the
+current state is that pointer.
 
 `running` is the event handler, and the only state this object ever has.
 It receives the event, decides by type what to do, and returns a
-`Status`: `handled()` means done. `match` is the dispatch: it calls the
+`Status`: `handled()` means done; `unhandled()`, returned by the
+catch-all, means "not for this state", and in the flat model the state
+machine ignores it (nothing is logged and nothing panics; it is the hook
+a hierarchical extension would use to ask a parent state). `Entry` and
+`Exit` are brio's own types, hence the `brio::` prefix, where `Event`
+and `Status` are `Blinker`'s inherited members. `match` is the dispatch: it calls the
 one lambda whose parameter type matches the event currently stored. A
 lambda is a small function written where it is passed; `[](Toggle) {
 ... }` reads "a function taking a `Toggle` and doing this". The last
@@ -190,8 +197,14 @@ list is code you can open.
    for a few instructions. Note where this `post` runs: in the loop,
    because a timer's expiry is detected by the loop. An interrupt
    handler that detects something itself (a byte received, a pin edge)
-   calls the same `post` from the interrupt handler; `blink` has no
-   such interrupt.
+   calls the same `post` from the interrupt handler: the event lands in
+   the queue before the handler returns, and the loop's next scan (step
+   4) serves it. `blink` has no such interrupt. The taking side needs
+   no mask of its own: the producers and the consumer write different
+   one-byte cursors, and a byte is one uninterruptible access on every
+   core brio runs on, so a post landing in the middle of a take leaves
+   both consistent (`brio/kernel/event_queue.hpp`, "The consumer never
+   masks").
 4. The loop's second action is to scan the queues in priority order.
    `Blinker` is first and its queue holds one event, so the kernel
    takes it and calls `Blinker::dispatch(e)`, a function `Fsm` provides.
@@ -362,7 +375,9 @@ depth counts the events that can wait while one is being handled: the
 event being dispatched keeps its slot until its handler returns, and
 the queue has one slot more than its depth for that reason, so four
 posts can land during a `Blinker` handler and the fifth is the one
-dropped (`brio/kernel/event_queue.hpp` states the rule). In this
+dropped; while no handler of `Blinker` is running the spare slot takes
+a waiting event too, and five fit (`brio/kernel/event_queue.hpp` states
+the rule). In this
 program the queues never hold more than one event: each timer posts one
 event per period and the handler is served within the same turn. The
 depth is still a decision the programmer makes, so it is worth knowing

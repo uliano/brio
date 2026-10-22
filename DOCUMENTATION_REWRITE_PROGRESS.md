@@ -164,7 +164,28 @@ what the G071RB session recorded and what the configuration should
 allow beyond it; the launch.json comment located; a `.code-workspace`
 file said absent.
 
-Round 2: see below once run.
+Round 2 (fresh readers, after the revisions). Concept route: every
+round-1 gap answered "supported directly" (two handlers posting to one
+queue, the sleep window, the reference parameter, the braces, Status's
+origin, P, the depth rule). New, smaller gaps: the consumer side's
+freedom from masking not explained; `start(&running)` is address-of
+three lines after `&` was said not to be; what the machine does with
+`unhandled()`; why `Entry` carries `brio::`; whether five posts fit in
+an idle queue; the AVR's idle sequence (left to the platform header,
+the route being the G0's). All but the last addressed in
+first-program.md and introduction.md. Workflow guides: the two factual
+errors confirmed fixed; the three status labels were not used literally
+(now they are, on every step and on the bench-tool section); the
+"observe" step named no board (now cites the target page's opening
+record and says what is read from the source); whether
+ARM_TOOLCHAIN_DIR takes the root or bin/ (now says the root, with an
+example); "status 5" unexplained (dropped); the debug paragraph filed
+Console details under "recorded" (now split: recorded on the G071RB =
+load, reset-halt, breakpoint at main, stepping; everything else
+expected). Known residue the pages state rather than hide: no VS Code
+label is confirmed against the installed extension; no step is
+performed on the G0B1RE as written; a relocated toolchain has not been
+exercised through CMake Tools.
 
 ## Local verification handoff (after the batch)
 

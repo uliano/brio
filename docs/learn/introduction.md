@@ -169,9 +169,9 @@ before: a connection is open or closed, a motor is stopped, running or
 braking. brio lets an active object name those situations as states.
 A state is a handler function; the current state of the object is a
 pointer to the handler that will receive the next event. Changing state
-means changing that pointer, and the kernel delivers an `Exit` event to
-the old state and an `Entry` event to the new one on the way, so that
-each state can set up and tear down what it needs.
+means changing that pointer, and the state machine delivers an `Exit`
+event to the old state and an `Entry` event to the new one on the way,
+so that each state can set up and tear down what it needs.
 
 The model is flat: a state is one handler, with no parent states. An
 active object whose behaviour does not depend on history keeps one

@@ -12,7 +12,10 @@ configuration or only configured.
 
 Every step below is marked with one of four words:
 
-- verified: performed interactively on the named configuration;
+- verified: performed interactively on the named configuration. A
+  result obtained on a sibling board with a sibling launch entry is
+  reported beside the mark as what it is, and never counted as
+  verified for this board;
 - configured: the files set it up, and nothing on the desk has
   contradicted it, but the interactive check on this board is still
   owed;
@@ -42,7 +45,7 @@ goes beyond what the G071RB session recorded, it says so.
 | Configure and build `blink` | configured | CMake Tools status bar |
 | Flash (`blink-upload` as the build target) | configured | the same build button, another target |
 | Select the executable to debug | configured | CMake Tools launch target |
-| Start a debug session, stop at `main` | configured on the G0B1RE; verified on the Nucleo-G071RB with the sibling entry | Run and Debug, "Debug STM32G0B1RE (OpenOCD, Nucleo-G0B1RE)" |
+| Start a debug session, stop at `main` | configured (the same sequence was performed on the Nucleo-G071RB with its own entry) | Run and Debug, "Debug STM32G0B1RE (OpenOCD, Nucleo-G0B1RE)" |
 | Peripheral registers in the debugger | configured | the Peripheral Viewer, `svdPath` in the launch entry |
 | Serial output | terminal for brio's console apps; not applicable to `blink` | any serial terminal; the Serial Monitor extension is not among the recommendations |
 | Host tests | configured | CTest from the status bar with `test/` as the active folder |
@@ -195,18 +198,20 @@ in three different places:
   the SVD file; with one Nucleo attached, any of the three reaches it,
   but the Peripheral Viewer then shows another part's registers.
 
-Start the session (F5). Expected result, as recorded on the G071RB: the
-Debug Console shows OpenOCD connecting to the ST-LINK and the part, then
-the ELF being loaded, and the editor stops at the first line of `main`
-in `blink.cpp` with the call stack showing `main`. The Debug Console's
-first lines also print the path of the ELF being loaded: a path under
-`build-cmake/stm32g0b1re-debug/` is the right one, and any other build
-tree in that path means the wrong active folder or launch target. Beyond
-what was recorded, what the configuration should then allow: a
-breakpoint on the `Led::toggle()` line inside `Blinker::running`, hit
-within half a second of continuing; the Peripheral Viewer, in the Run
-and Debug side bar, showing the STM32G0B1's registers from
-`stm32g0/svd/STM32G0B1.svd`, with GPIOA's ODR bit 5 following the LED.
+Start the session (F5). What was recorded, on the Nucleo-G071RB with
+its own entry: the program loaded, the chip reset and halted, a
+breakpoint at `main` hit, source lines stepped. What the configuration
+asks for and this page therefore expects, none of it recorded: the
+Debug Console showing OpenOCD connecting to the ST-LINK and the part,
+then the ELF being loaded, with the ELF's path in those first lines (a
+path under `build-cmake/stm32g0b1re-debug/` is the right one, and any
+other build tree there means the wrong active folder or launch target);
+the editor stopping at the first line of `main` in `blink.cpp` with the
+call stack showing `main`; a breakpoint on the `Led::toggle()` line
+inside `Blinker::running` hit within half a second of continuing; the
+Peripheral Viewer, in the Run and Debug side bar, showing the
+STM32G0B1's registers from `stm32g0/svd/STM32G0B1.svd`, with GPIOA's ODR
+bit 5 following the LED.
 
 If the session loads an executable from another family, or fails to
 find the ELF: check the active folder and the launch target before

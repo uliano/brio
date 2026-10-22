@@ -10,11 +10,12 @@ the same shape with their own project directory, preset and probe
 Every step of this page describes the mechanism the repository's build
 and bench tools use (`stm32g0/CMakeLists.txt`, `cli/bench/flash.py`,
 [docs/stm32g0/README.md](../stm32g0/README.md)), and each step ends
-with its status: whether its sequence has been performed on the
-Nucleo-G0B1RE as written here, performed on a sibling board, or is the
-documented mechanism not yet walked through on this board. The page was
-written without a board at hand, so the "Expected" paragraphs describe
-what the tools print by design, not a transcript.
+with its status, one of three: "performed on this board as written",
+"performed on a sibling board", or "documented mechanism, not walked
+through on this board as written". The page was written without a
+board at hand, so no step carries the first status yet, and the
+"Expected" paragraphs describe what the tools print by design, not a
+transcript.
 
 ## What you need
 
@@ -23,9 +24,12 @@ what the tools print by design, not a transcript.
   port; `blink` uses only the programmer.
 - The cross compiler: arm-none-eabi-gcc, version 16.2 as the project
   is built with. The toolchain file `stm32g0/cmake/toolchain-arm.cmake`
-  expects it under `/sw/arm-none-eabi`; a toolchain elsewhere is named
-  when configuring, by adding the cache variable to the preset command:
-  `cmake --preset stm32g0b1re-debug -DARM_TOOLCHAIN_DIR=/path/to/toolchain`.
+  expects it under `/sw/arm-none-eabi`, the root that contains `bin/`;
+  a toolchain elsewhere is named when configuring, by adding the cache
+  variable to the preset command:
+  `cmake --preset stm32g0b1re-debug -DARM_TOOLCHAIN_DIR=/opt/arm` for a
+  compiler at `/opt/arm/bin/arm-none-eabi-g++`. The debugging step
+  below spells the `/sw` paths; substitute yours.
   An older compiler may refuse the C++23 the code uses. The toolchains
   are self-built ([docs/stm32g0/README.md](../stm32g0/README.md),
   "Toolchain"); no package manager installs this exact one.
@@ -74,9 +78,10 @@ directory, so `cd stm32g0` first (or run the whole command in a
 subshell, `(cd stm32g0 && cmake --preset stm32g0b1re-debug)`, as the
 README's examples do).
 
-Status: the mechanism every build of this project uses, on this board
-among others (every STM32G0 test suite was built this way); not walked
-through as a first-time setup for this page.
+Status: documented mechanism, not walked through on this board as
+written (it is the configure every build of this project runs, this
+board's test suites included; the first-time setup was not repeated for
+this page).
 
 ## Step 2: build blink
 
@@ -136,7 +141,7 @@ tool below clears the bit; this target does not.
 If it fails. Two messages look alike and mean different things. "open
 failed" (or a libusb permission error) means OpenOCD could not reach the
 probe: check the USB permission, then the cable. "no device connected"
-(the probe's status 5) means the probe answered but sees no target: on
+(a status the probe itself reports) means the probe answered but sees no target: on
 a Nucleo this is the ST-LINK half of the board gone silent, and the
 first thing to do is to replug the board as a whole, before any other
 diagnosis ([docs/probes/st-link.md](../probes/st-link.md)). A
@@ -144,8 +149,9 @@ verification error after a successful program is rare and points at a
 flash protection option; the board page and the target's flash document
 say what the part's option bytes mean.
 
-Status: the mechanism `brio flash` and the bench use on this board; the
-exact command above not walked through for this page.
+Status: documented mechanism, not walked through on this board as
+written (the OpenOCD sequence is the one `brio flash` runs on this
+board; the `-upload` target itself was not run for this page).
 
 ## The bench tool, as an alternative
 
@@ -161,6 +167,10 @@ bench"). The `flash` verb is the action name after `brio`; `brio
 --help` lists the others. The first-time route above does not need it;
 a measurement of the Stop modes does.
 
+Status: performed on this board (it is how every STM32G0 suite reaches
+the Nucleo-G0B1RE), with the desk's own manifest entry; writing a first
+manifest entry was not walked through for this page.
+
 ## Step 4: observe
 
 For `blink` the observation is the LED, LD4 next to the user button.
@@ -170,9 +180,13 @@ A debugger adds a second way to observe, without stopping the program
 for long: the queue overflow counters and `Supervisor::index` are
 static variables readable by name.
 
-Status: the LED's behaviour is the program's as written; it has been
-seen on the bench boards this application was run on, not re-observed
-for this page.
+Status: documented mechanism, not walked through on this board as
+written. A time event pacing this board's LED is the first thing the
+target's page records as running on the Nucleo-G0B1RE
+([docs/stm32g0/README.md](../stm32g0/README.md), opening paragraph);
+whether that run was this file at its present revision is not on
+record, and the nine-second cycle described above is read from the
+source.
 
 ## Step 5: debug from a terminal
 
@@ -213,9 +227,10 @@ sleeps in plain Sleep, where neither matters, but a program that uses
 the Stop modes will measure differently right after a debug session or
 a flash, until a power-on or a `brio flash`.
 
-Status: debugging from a terminal with these exact tools (OpenOCD, this
-target script, this gdb: load, reset-halt, a breakpoint at `main`,
-source lines stepped) was performed on the Nucleo-G071RB
+Status: performed on a sibling board. Debugging from a terminal with
+these exact tools (OpenOCD, this target script, this gdb: load,
+reset-halt, a breakpoint at `main`, source lines stepped) was performed
+on the Nucleo-G071RB
 ([docs/stm32g0/README.md](../stm32g0/README.md), "Debugging"). The
 Nucleo-G0B1RE uses the same probe, script and gdb and has not been
 walked through this page's sequence; the gdb commands beyond `break
@@ -245,5 +260,5 @@ program uses, with a simulated clock the test advances by hand; they
 are the place to read how the kernel behaves in cases a board makes hard
 to provoke (a full queue, a late timer).
 
-Status: the suites run on every change to the kernel and the services;
-nothing here depends on a board.
+Status: performed as written, on the host; no board is involved. The
+suites run on every change to the kernel and the services.
