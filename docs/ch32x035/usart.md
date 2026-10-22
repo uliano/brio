@@ -195,7 +195,7 @@ the key that runs the single-board set and `y` the two-board set), and
   time in bit times (GPR.GT), the card's clock on CK through the low
   five bits of GPR.PSC; LIN, half duplex and IrDA off, the clock kept.
 - **The synchronous clock** (14.4, CLKEN): CK driven for each data bit,
-    CPOL and CPHA, and LBCL - which this manual describes as "1: the clock
+  CPOL and CPHA, and LBCL - which this manual describes as "1: the clock
   pulse for the last bit of data is not output" (14.10.5), where WCH's
   own library names the same bit `USART_LastBit_Enable`. CPOL, CPHA and
   LBCL cannot change once the transmitter is enabled; the smartcard,

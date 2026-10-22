@@ -1450,7 +1450,7 @@ public:
     /// Stop the port and park its pads: the vector off, the engines'
     /// channels stopped, UE clear, the block's reset pulsed, the bus clock
     /// closed, the pins released. A setup verb, main context; what the
-    /// rings held is lost.
+    /// rings held no longer goes out, and is cleared by the next init().
     ///
     /// The reset line before the gate (docs/design/dma.md, the release
     /// contract). A channel of this controller is an OR of the requests

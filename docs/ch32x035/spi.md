@@ -92,7 +92,7 @@ own `spi_peer` is that board's suite's instrument (below).
   and a frame written then follows the one shifting with no gap ("fill the
   data register with data to maintain the complete data flow", 16.2.2);
   RXNE rises at "the last sample clock edge of the data word". The
-    receive buffer holds one frame: a frame that completes while the one
+  receive buffer holds one frame: a frame that completes while the one
   before it stands unread is lost, OVR set (16.2.7), the flag cleared by
   a DATAR read followed by a STATR read.
 - **8 or 16 bits** (DFF), SCK = HCLK / 2^(BR+1), /2 to /256 (16.3.1), up

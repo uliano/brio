@@ -90,7 +90,7 @@ runs them all), and the engine across a wire in the CH32X035's
 - **INTFR is write-zero-to-clear** (12.4.5's RW0): a store of ones keeps
   every flag (measured).
 - **CTLR1 resets to 0x2000** (measured, both timers): bit 13, "Reserved"
-    with a reset value of zero in 12.4.1, reads one, and is writable both
+  with a reset value of zero in 12.4.1, reads one, and is writable both
   ways. It is the CH32V00x's OE_MODE position, and it does here what that
   bit's name says for the state MOE leaves an output in: set, an output
   MOE disables floats; clear, it is driven at its idle level OISx / OISxN

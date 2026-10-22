@@ -40,8 +40,9 @@ extern "C" BRIO_CH32_INTERRUPT void i2c1_er_handler() {
 `Bus` is the engine over I2C1 on the part's default column; `I2c` is
 the arbiter, an active object listed in the program's `Tenuto` with
 four requests of queue and a 20 ms timeout; `init()` takes the clock
-task's tag ([clock.md](clock.md)) and answers false when there is no
-column free or no block behind the address (below); the request lends
+task's tag ([clock.md](clock.md)) and answers false for an HCLK under
+4 MHz, a column the probe or the USB transceiver owns, or a block that
+does not hold its timing (below); the request lends
 its two buffers (`brio::lend`) until the reply arrives, so `reg` and
 `value` must stay untouched and in scope from the post to the
 `I2cDone` event `Sensor` receives; the two `extern "C"` functions are
@@ -140,7 +141,7 @@ all) against the desk's CH32V006K8U6 running its `twi_peer`.
   bit (measured): the engine's reply is `i2c_arb_lost` at once, the
   CH32V006's word - which there came as ARLO on the START itself - through
   another path. The same START set by a block brought up over the line
-    already held stays pending: no SB and no ARLO in 50 ms, START standing
+  already held stays pending: no SB and no ARLO in 50 ms, START standing
   in CTLR1, BUSY up - the case the per-bus timeout answers (measured).
 - **The host's own STOP stands in CTLR1 for about a bit** after the
   completion edge - 440 to 448 cycles at 100 kHz, 112 to 116 at 400 kHz,
@@ -532,3 +533,11 @@ Implemented but not bench-verified, each with what would measure it:
 - **The USB_IOEN refusal**: nothing in the stratum sets the bit; the USB
   controller's driver, when it is born, is what would set it and see
   `init()` refuse.
+- **The last two bytes of a read when the wait for RxNE runs out**: the
+  host waits for the last byte with a bound of 100 000 polls and, when it
+  runs out, reads DATAR regardless and reports `i2c_ok` with what it
+  holds (`brio/ch32x035/i2c.hpp`). No measured case reaches it; what
+  would is a clock stopped under the block between the two bytes (a
+  client holding SCL past the bound), and what the verdict should then
+  be - a timeout rather than a success - is the driver owner's open
+  question.
