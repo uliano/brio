@@ -29,7 +29,9 @@
  *    an interrupt handler, never from another object; they take no
  *    critical section;
  *  - empty(), size(): readable from anywhere, as a snapshot;
- *    overflows(): readable from anywhere, under the critical section.
+ *    overflows(): readable from anywhere, under the critical section,
+ *    because the counter is sixteen bits and two accesses on an 8-bit
+ *    core.
  *
  * Depth, in one rule: a push is refused when every slot is occupied,
  * waiting or outstanding (the one being dispatched, and any the object
@@ -74,7 +76,8 @@
  *                                          one, which hold() reads back (below)
  *
  * The free end is the third cursor, fence_, stored as the position after
- * the run ("Why a static queue is all zero" says why).
+ * the run: the array place the next released number is written at ("Why
+ * a static queue is all zero" says why).
  *
  * A producer builds its event in the slot whose number sits at alloc_
  * and publishes it by advancing alloc_: the advance moves that number
@@ -181,8 +184,8 @@
  * (kernel/platform.hpp): take() and release() call it at every boundary
  * between two of their shared accesses, where an interrupt could land,
  * and the host suite pushes from there (pop() has no such points of its
- * own; its release() does). No target has it, and nothing is compiled
- * for it.
+ * own, its release() does; hold() touches the consumer's own data only
+ * and has none). No target has it, and nothing is compiled for it.
  */
 
 #pragma once
@@ -305,7 +308,10 @@ public:
     /// hand out the number of the slot pop() already released. (serve_one()
     /// is kernel/active_object.hpp's step for one object.) A hold()
     /// outside a dispatch also leaves the flag set, so the NEXT dispatch's
-    /// slot is never released - kept for ever, one slot the less.
+    /// slot is never released - kept for ever, one slot the less - and
+    /// the handle it returns names the previous dispatch's slot, already
+    /// released and possibly reused: releasing that handle is the double
+    /// release release() calls fatal.
     Held<E> hold() {
         held_ = 1;
         const uint8_t t = take_;              // position prev(take_) lives at take_

@@ -54,8 +54,9 @@
  * Limits of the deadline arithmetic. process() compares with
  * (int32_t)(now - deadline) >= 0, a signed difference that survives the
  * 32-bit counter's wrap (about 49 days at 1000 Hz) as long as every
- * distance it measures stays within half the range: a delay or a period
- * may be at most 2^31 ticks (about 24 days at 1000 Hz), and a deadline
+ * distance it measures stays within half the range, 2^31 included: a
+ * delay or a period may be at most 2^31 ticks (about 24 days at
+ * 1000 Hz), and a deadline
  * that the loop leaves unserved for 2^31 ticks or more reads as future
  * again. A delay above 2^31 is not refused: it reads as overdue and is
  * posted at once.

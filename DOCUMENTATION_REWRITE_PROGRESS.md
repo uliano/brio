@@ -400,6 +400,38 @@ stated); `held` and serve_one() before their definitions; exactly
 also appears on push()'s and capacity()'s own comments (function
 comments, not the model).
 
+Round 2 (fresh readers on the revised pages, the review's scenarios
+again). Concept route: all nine scenarios "supported directly" (the
+older event first, the higher queue and starvation, the burst of five
+against a depth of four with the sizing rule and the silent sender,
+the three-tick timer's bounds in tick intervals, the two re-arms, the
+forgotten alternative, no response-time promise, a waiting handler, the
+stage-4 tick); what it could not establish is what the pages defer to
+time_event.hpp by name (the catch-up, the exact phase). Residue fixed:
+stage 3's "re-arms it one period later" (now "one period after the one
+that passed"); "holds four waiting events" before the rule (now "a
+depth of four"); "bounds"/"promise" for what is an order and no
+duration (reworded in both pages); README's "interrupt handlers do one
+thing: post", which primed a Toggle per tick (now "may do", and the
+tick only counts); the AVR's tick interval named. Workflow guides: all
+seven scenarios "supported directly"; residue fixed: the release
+configure was appended after the debug instruction it must precede and
+the host configure was outside the procedure (both now stated before
+the numbered steps); the host-test parenthesis read as if the build
+button ran the suites (reworded); "configured" defined differently on
+the two pages (defined once on the command-line page as on the VS Code
+page); the VS Code page's caveats repeated after the table (three
+removed). The queue comment: no contradiction with the code left; the
+eight answers "supported directly" but the exact-2^31 boundary ("within
+half the range" read as exclusive; now "2^31 included"), hold()'s
+absence from the interleave-point sentence (added), a misplaced hold()'s
+handle being the double release release() warns of (connected), and
+why overflows() takes the critical section (said: sixteen bits, two
+accesses on an 8-bit core). Noted and kept: `take_` written plainly
+where the other cursors go through store_shared (it publishes nothing
+to a producer), the AO terms assumed by the header (the kernel pages
+define them).
+
 ## Next batches (not started)
 
 1. docs/design/*.md, kernel.md first, with the reference inventory above.
