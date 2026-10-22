@@ -36,7 +36,13 @@ int main() {
 }
 ```
 
-Four things decide whether that works. The clock task must have run
+Line by line: `P` names the platform with its default timebase, the
+empty angle brackets taking the `Ticker`; `record` is the record of a
+panic that ended the previous run, if any, for the program to report
+before anything else (kernel/panic.hpp), and a program that reports
+nothing may discard it; the `...` of the last line stands for the
+program's active objects in priority order. Four things decide whether
+that works. The clock task must have run
 first (`SysClock::init()`, [clock.md](clock.md)): the ticker computes
 its compare value from the rate the clock type claims, and a ticker
 initialized on a chip still at its 8 MHz reset rate ticks six times too
@@ -45,7 +51,8 @@ as above, under the crt's name for it (`systick_handler`) and with
 `BRIO_CH32_INTERRUPT` in front: the kernel binds no vector, and a
 program that forgets it compiles, runs and never advances time.
 `BRIO_CH32_INTERRUPT` is the one spelling of a handler attribute on
-this target, and it follows the project's `CH32X035_HPE` option, on by
+this target, and it follows the project's `CH32X035_HPE` option, a
+CMake option of the `ch32x035/` project chosen at configure, on by
 default: with it the crt sets INTSYSCR.HWSTKEN and the attribute is
 WCH's fast attribute, the core's hardware prologue saving the registers
 a handler clobbers; without it the attribute is gcc's plain `interrupt`
@@ -89,7 +96,7 @@ No errata sheet exists for this series. The headers are
 [delay.hpp](../../brio/ch32x035/delay.hpp); the reference suite is
 `test_x035_platform` (a suite's letter, below, is one command key of
 its console and the group of verdicts it runs, `z` the key that runs
-them all).
+every letter of this suite).
 
 ## What the silicon does
 
@@ -285,7 +292,9 @@ is `panic<P>(code, context)` (kernel/panic.hpp): the breadcrumb written,
 then `break_here()` - with a debugger attached the program stops there,
 and without one the `ebreak` lands in the crt's breakpoint spin, where a
 probe finds it and where the breadcrumb waits for the next boot's
-`take_panic_record<P>()` if a reset comes before the power goes.
+`take_panic_record<P>()` if a reset comes before the power goes - a
+reset something else causes: no verb of this stratum performs one (the
+gap list below).
 
 ## Bench findings
 

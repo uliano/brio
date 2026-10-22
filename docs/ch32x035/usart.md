@@ -38,7 +38,8 @@ brio::print(serial, "hello", brio::crlf);
 ```
 
 Line by line: `P` is the platform ([platform.md](platform.md)), which
-the rings ask whether an index can be shared with a handler bare;
+the rings ask whether a ring index can be read and written without
+masking interrupts (the platform's `atomic_width`);
 `Serial` names the transport type, `2` the instance and every other
 template argument at its default (the ring sizes, 8N1, no DMA engines,
 the reset column, the default options, the flash placement); `serial`
@@ -51,16 +52,21 @@ on this target, [platform.md](platform.md)); `isr()` is the port's
 whole interrupt body and returns true when a received byte made the
 receive ring non-empty, the edge the program posts as `RxActivity` to
 the active object that assembles lines (`SerialLines`, a `SerialPort`
-of `util/serial_port.hpp`; a program with no such object discards the
-answer); `init()` takes the clock task's tag (`constexpr SysClock
-clock;`, [clock.md](clock.md)) and the baud rate; `brio::crlf` is the
-line ending.
+of `util/serial_port.hpp`, declared as
+[design/serial.md](../design/serial.md) shows; a program with no such
+object writes `(void)Serial::isr();` instead); `init()` takes the clock
+task's tag (`constexpr SysClock clock;`, declared as in
+[clock.md](clock.md)'s smallest use) and the baud rate; `brio::crlf` is
+the line ending. The two calls go in `main()`, after `SysClock::init()`
+and before the kernel's `run()`; `print` may also be called later, from
+an active object's event handler.
 
 What decides correctness even there: `init()` after the clock task's,
 since the baud divisor is computed from the rate the clock type claims
 and not read from the hardware, so a port initialized on a chip still
 at its 8 MHz reset rate with a 48 MHz clock type speaks at a sixth of
-the rate asked, and nothing refuses it; the instance must be one the
+the rate asked until the clock task runs, the same divisor giving the
+rate asked once it has, and nothing refuses it; the instance must be one the
 part offers (the 20-pin CH32X035 parts have no USART1 column with both
 pads, so `Uart<1, P>` does not compile there, "What the silicon does"
 below); and the instance's vector must be bound to `isr()` by the
@@ -68,8 +74,9 @@ program, as above - a port whose vector is left unbound raises its first
 transmit interrupt into the crt's default handler, a spin loop, and the
 program stops there. Three more things to know before the first
 `print`: `print` waits until the transmit ring has taken every byte, so
-a long message printed from a handler stalls every other active object
-for that long ([design/serial.md](../design/serial.md)); the transmit
+a long message printed from an active object's event handler stalls
+every other active object for that long
+([design/serial.md](../design/serial.md)); the transmit
 ring has one producer, so `write_byte` and `write_bulk` are called from
 active objects and from `main`, never from an interrupt handler, and
 both copy, the caller's buffer being free when the call returns; and a
