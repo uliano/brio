@@ -6,28 +6,54 @@
  * family carries - the independent one on its own oscillator (ch. 28)
  * and the system window watchdog on the bus clock (ch. 29) - and the
  * fault handler body that turns a crash into a message the next boot
- * can read.
+ * can read. `Reset` reads and clears the flags and requests a reset;
+ * `Iwdg` and `Wwdg` are the two watchdogs; `hard_fault_reset<P>()` and
+ * `ResetReporter` are the fault's and the panic's way out.
+ *
+ *     const uint32_t why = brio::Reset::take_flags();   // once, at boot
+ *     if (why & brio::ResetFlag::watchdog) { ... }       // a recovery boot
+ *     (void)brio::Iwdg::arm(brio::IwdgConfig{.prescaler = brio::IwdgPrescaler::div8,
+ *                                            .reload = 0x0EEE});
+ *     for (;;) { brio::Iwdg::refresh(); ... }            // about a second of rope
+ *
+ * Which context calls what. `take_flags()`, the two `configure()`s and
+ * the two `arm()`/`start()`s are setup's, in main(): each is a
+ * read-modify-write or a keyed sequence that a second caller could
+ * tear. `Iwdg::refresh()` and `Wwdg::refresh()` are single stores and
+ * may be made from any context - an active object's handler (an active
+ * object is a brio task the kernel serves one event at a time) or an
+ * interrupt handler - but a refresh outside the window is a reset, so
+ * the caller times it. `Iwdg::configure()` and `arm()` spin, bounded,
+ * for the watchdog's own clock domain to take each value (about 0.6 s
+ * at 64 MHz before they give up on a stopped watchdog); nothing here
+ * masks interrupts. `Wwdg::isr()` is the body the app binds to
+ * WWDG_IRQHandler; `hard_fault_reset<P>()` is the body it binds to
+ * HardFault_Handler, and runs in the fault. `Reset::software()` never
+ * returns; the two watchdogs' `force_reset()` do, for the few
+ * milliseconds the silicon takes, and a caller that means to end there
+ * spins.
  *
  * This is the other half of the panic breadcrumb. The kernel writes a
  * PanicRecord into reset-surviving storage (kernel/panic.hpp,
- * Stm32g0Platform::panic_record) and hands over to a Reporter whose job
- * may be "reset now and report at the next boot"; panic.hpp's contract
- * then says to cross-check the target's reset-cause register for the
- * full story. `Reset::take_flags()` IS that cross-check,
- * `Reset::software()` is one way of causing the reset, `Iwdg` and
- * `Wwdg` are two more, and `hard_fault_reset<P>()` is the body an app
- * binds to HardFault_Handler so a fault leaves a note instead of a
- * spin.
+ * Stm32g0Platform::panic_record) and hands over to a Reporter - the
+ * type a program gives panic() to say what happens once the record is
+ * written - whose job may be "reset now and report at the next boot";
+ * panic.hpp's contract then says to cross-check the target's
+ * reset-cause register for the full story. `Reset::take_flags()` is
+ * that cross-check, `Reset::software()` is one way of causing the
+ * reset, `Iwdg` and `Wwdg` are two more, and `hard_fault_reset<P>()` is
+ * the body an app binds to HardFault_Handler so a fault leaves a note
+ * instead of a spin.
  *
- * SIX FACTS OF THIS SILICON shape everything below.
+ * Six facts of this silicon shape everything below.
  *
- * 1. THE FLAGS ACCUMULATE, AND THERE IS NO "THE CAUSE". RCC_CSR's seven
+ * 1. The flags accumulate, and there is no "the cause". RCC_CSR's seven
  *    reset flags are set by hardware and "cleared by setting the RMVF
  *    bit" - nothing else clears them, and 5.4.24 says the register is
  *    "reset upon system reset, except for reset flags that are only
  *    reset upon power reset". So this register is a HISTORY and not a
  *    single cause, and the verb is read-and-clear: `take_flags()`.
- *    Worse than a history: PINRSTF is a CATCH-ALL - 5.4.24 bit 26 sets
+ *    Worse than a history: PINRSTF is a catch-all - 5.4.24 bit 26 sets
  *    it "when a reset from the PF2-NRST pin occurs OR when a system
  *    reset is triggered by any other source" - so a lone PINRSTF is the
  *    only reading that means "the pin", and every other source raises
@@ -38,39 +64,39 @@
  *    application clears the flags when it has read them, and what it
  *    sees at the next boot is the delta.
  *
- * 2. RCC_CSR IS A SHARED REGISTER, and the two halves have two owners.
+ * 2. RCC_CSR is a shared register, and the two halves have two owners.
  *    Bits 31..23 are this chapter's (the flags and RMVF); bits 1..0 are
  *    the clock tree's (LSION/LSIRDY) and belong to stm32g0/clock.hpp's
  *    `Rcc`, which is where the LSI verbs live. Every write here is a
  *    read-modify-write that preserves the other owner's bits.
  *
- * 3. THE IWDG IS ON ANOTHER CLOCK, AND SOFTWARE CANNOT STOP IT - BUT A
- *    RESET CAN. It counts LSI (about 32 kHz, min 29.5 / max 34 kHz over
+ * 3. The IWDG is on another clock, and software cannot stop it - but a
+ *    reset can. It counts LSI (about 32 kHz, min 29.5 / max 34 kHz over
  *    the full range - DS13560 table 46, so a watchdog margin here is a
  *    real margin, and the bench measured 32.5 kHz on this die), and
  *    28.3.1's "Once running, the IWDG cannot be stopped" is followed
  *    elsewhere in the manual by the four words that matter: "except
- *    upon a reset" (5.3's Stop and Standby summaries). MEASURED, and
+ *    upon a reset" (5.3's Stop and Standby summaries). Measured, and
  *    against the family lore: a boot that follows an IWDG reset
  *    outlives its own time-out several times over with nothing
  *    refreshing anything, so the reset really does stop it and a
- *    program does NOT inherit a watchdog it must feed for ever. There
+ *    program does not inherit a watchdog it must feed for ever. There
  *    is still no register bit that says whether it runs - and LSIRDY
- *    standing with LSION clear is NOT that bit, whatever 5.4.24's list
+ *    standing with LSION clear is not that bit, whatever 5.4.24's list
  *    of requestors invites: on
  *    the bench board the RTC domain survives every system reset with
  *    RTCEN set and RTCSEL = LSI, so the oscillator is forced by
  *    something that is not a watchdog.
  *
- * 4. THE IWDG'S KEYED REGISTERS DO NOT UPDATE UNTIL IT IS STARTED, and
+ * 4. The IWDG's keyed registers do not update until it is started, and
  *    this is the finding this chapter never states. PR, RLR and WINR
  *    are writable only after the key 0x5555 (28.3.4), and any other key
  *    value - the 0xAAAA refresh included - locks them again. Each of
- *    the three has a bit in IWDG_SR that hardware raises AT THE STORE
+ *    the three has a bit in IWDG_SR that hardware raises at the store
  *    (measured: the read right after it already sees the bit) and drops
  *    when the value has crossed into the VDD domain, and a register
- *    read while its bit stands returns the OLD value (28.4.2/3/5 say so
- *    three times). WITH THE WATCHDOG STOPPED THE BIT NEVER DROPS,
+ *    read while its bit stands returns the old value (28.4.2/3/5 say so
+ *    three times). With the watchdog stopped the bit never drops,
  *    LSION or no LSION - 5.2.14 is where the reason hides: "if the IWDG
  *    is started ... after the LSI oscillator temporization, the clock
  *    is provided to the IWDG", so the logic that performs the update
@@ -79,24 +105,24 @@
  *    before it configures; configure() on a stopped watchdog is bounded
  *    and answers false rather than hanging.
  *
- * 5. THE WWDG IS THE OPPOSITE PERIPHERAL IN EVERY WAY. It counts PCLK
+ * 5. The WWDG is the opposite peripheral in every way. It counts PCLK
  *    through a fixed /4096 and a programmable /2^WDGTB, it has a bus
- *    clock enable that is CLEAR AT RESET (a peripheral with no clock
+ *    clock enable that is clear at reset (a peripheral with no clock
  *    does not answer register reads), and its activation bit WDGA is
  *    "set by software and only cleared by hardware after a reset"
  *    (29.5.1) - one-way in software, put away by the reset, exactly
  *    like the IWDG once fact 3 is read to the end. Its down-counter is
- *    FREE-RUNNING "even if the watchdog is disabled" (29.3.3) and EWIF
+ *    free-running "even if the watchdog is disabled" (29.3.3) and EWIF
  *    "is also set if the interrupt is not enabled" (29.5.3), which
- *    together make the whole TIMING path measurable with WDGA never
+ *    together make the whole timing path measurable with WDGA never
  *    set - the way this stratum's bench suite measures it, and the
  *    reason `configure()` and `refresh()` are separate verbs from
- *    `start()`. What is NOT reachable that way is the interrupt: with
- *    WDGA clear the flag rises and NO REQUEST IS MADE (measured), so
+ *    `start()`. What is not reachable that way is the interrupt: with
+ *    WDGA clear the flag rises and no request is made (measured), so
  *    29.2's "triggered (if enabled and the watchdog activated)" is the
  *    exact sentence and 29.5.2's bit description is the loose one.
  *
- * 6. A WINDOW THAT CANNOT BE SERVED IS REFUSED, on both. The IWDG
+ * 6. A window that cannot be served is refused, on both. The IWDG
  *    resets if a refresh happens while the counter is above WIN, so
  *    WIN = 0 is a configuration in which no refresh is ever legal; the
  *    WWDG's refresh is legal only while the counter is at or below W
@@ -104,17 +130,17 @@
  *    refused by the config_valid() predicates rather than armed (a
  *    caller that asked for a serviceable watchdog must not silently
  *    get an unserviceable one). Provoking a
- *    reset ON PURPOSE has its own spelling on each: Iwdg::force_reset()
+ *    reset on purpose has its own spelling on each: Iwdg::force_reset()
  *    refreshes into a closed window, Wwdg::force_reset() clears T6 with
  *    WDGA set (29.3.3's own note).
  *
- * ERRATA: ES0548 Rev 3 has NO item for the IWDG, the WWDG or the reset
+ * Errata: ES0548 Rev 3 has no item for the IWDG, the WWDG or the reset
  * flags on either revision - the errata's only LSI item, 2.2.1, is
  * conditioned on "LSI clocks the RTC, or it clocks the clock security
  * system on LSE", neither of which this file can bring about (and its
  * own workaround is keyed on PWRRSTF, a flag this file reads).
  *
- * NOT BUILT (docs/stm32g0/reset.md carries the list): the option bytes
+ * Not built (docs/stm32g0/reset.md carries the list): the option bytes
  * that decide the watchdogs' hardware/software mode and their behaviour
  * in Stop and Standby (IWDG_SW, IWDG_STOP, IWDG_STDBY, WWDG_SW,
  * nRST_STOP/STDBY/SHDW behind LPWRRSTF) - read-only facts here, because
@@ -197,9 +223,10 @@ struct Reset {
         RCC->CSR = RCC->CSR & ~RCC_CSR_RMVF;
     }
 
-    /// Read-and-clear: the boot verb. What comes back is the history
-    /// since the last clear, and the register is empty afterwards, so
-    /// the NEXT boot reports only what happened in between.
+    /// Read-and-clear: the boot verb, called once from setup. What comes
+    /// back is the history since the last clear, and the register is
+    /// empty afterwards, so the next boot reports only what happened in
+    /// between.
     static uint32_t take_flags() {
         const uint32_t f = flags();
         clear_flags();
@@ -215,7 +242,8 @@ struct Reset {
 
     /**
      * Reset the device now, through the Cortex's SYSRESETREQ. Shows up
-     * as SFTRSTF (beside PINRSTF) at the next boot.
+     * as SFTRSTF (beside PINRSTF) at the next boot. Callable from any
+     * context, a fault handler included; it does not return.
      *
      * The mechanism is the core's, not the RCC's - which is why the
      * verb lives here but the code is CMSIS's. It carries the DSBs the
@@ -286,7 +314,7 @@ constexpr bool iwdg_config_valid(const IwdgConfig& c) {
  * The independent watchdog: one 12-bit down-counter on LSI, four
  * registers, and no way back once it is started.
  *
- * ORDER, AND WHY IT IS THE CHAPTER'S. 28.3.2 gives two sequences -
+ * Order, and why it is the chapter's. 28.3.2 gives two sequences -
  * start, unlock, PR, RLR, wait for SR, then either WINR (window) or a
  * refresh (no window) - and `arm()` is exactly that. `configure()` is
  * the same body WITHOUT the start, which is legal (the key protecting
@@ -295,7 +323,7 @@ constexpr bool iwdg_config_valid(const IwdgConfig& c) {
  * of one that is already running - the boot path of any program that
  * has ever started this thing (fact 3).
  *
- * IT NEEDS TO BE STARTED TO CONFIGURE, not merely clocked (fact 4):
+ * It needs to be started to configure, not merely clocked (fact 4):
  * the update bits drop only once the start key has given the block its
  * clock, so configure() on a stopped watchdog writes the registers,
  * watches the bits stand, and answers false in bounded time. That is
@@ -317,11 +345,11 @@ struct Iwdg {
 
     // ---- the keys ---------------------------------------------------------
 
-    /// Reload the counter from RLR. Also RE-LOCKS PR/RLR/WINR, which is
+    /// Reload the counter from RLR. Also re-locks PR/RLR/WINR, which is
     /// 28.3.4's own sentence and the reason configure() unlocks each
-    /// time.
+    /// time. One store, from any context.
     ///
-    /// A refresh made while the counter is ABOVE the window value is a
+    /// A refresh made while the counter is above the window value is a
     /// reset (28.3.2), so this verb is only safe when the window is
     /// disabled or the caller knows where the counter is.
     [[gnu::always_inline]] static void refresh() { IWDG->KR = key_refresh; }
@@ -329,7 +357,7 @@ struct Iwdg {
     /// Open the write window on PR, RLR and WINR.
     static void unlock() { IWDG->KR = key_unlock; }
 
-    /// Start the watchdog. ONE WAY IN SOFTWARE: nothing this program
+    /// Start the watchdog. One way in software: nothing this program
     /// can write will stop it again (28.3.1). A RESET does - measured,
     /// and the four words "except upon a reset" are the manual's own
     /// (fact 3) - so what a caller commits to is this run of the
@@ -339,13 +367,13 @@ struct Iwdg {
     /**
      * Reset the device by refreshing into a closed window.
      *
-     * NOT INSTANTANEOUS and not [[noreturn]]: the window and the refresh
-     * cross into the LSI domain, counted in PRESCALED cycles (28.4.4),
+     * Not instantaneous and not [[noreturn]]: the window and the refresh
+     * cross into the LSI domain, counted in prescaled cycles (28.4.4),
      * so the CPU runs on for about four of them at the prescaler in
      * force - 31 ms at /256 (measured), about a millisecond at /4. A
      * caller that means to end here says so with a spin of its own.
      *
-     * IT STARTS THE WATCHDOG FIRST. On a stopped one the window's write
+     * It starts the watchdog first. On a stopped one the window's write
      * never crosses (fact 4) and the refresh has no counter to compare,
      * so the bare sequence is a silent no-op there (measured: nothing in
      * two seconds); the start key gives the block its clock, and on a
@@ -411,21 +439,23 @@ struct Iwdg {
     // ---- configuration -----------------------------------------------------
 
     /**
-     * Write the timing, WITHOUT starting the watchdog.
+     * Write the timing, without starting the watchdog. Setup's: a keyed
+     * sequence with bounded waits in it (sync_spin_limit), interrupts
+     * enabled throughout.
      *
      * False - and possibly a half-written configuration - when the
      * setting is impossible or when an update never crossed, which on a
-     * STOPPED watchdog is always (fact 4: the block has no clock until
+     * stopped watchdog is always (fact 4: the block has no clock until
      * the start key). The order is 28.3.2's: unlock, prescaler, reload,
      * wait for both, then the window, whose own write performs a
      * reload.
      *
-     * THE WINDOW IS WRITTEN LAST AND ON PURPOSE. Writing WINR reloads
+     * The window is written last and on purpose. Writing WINR reloads
      * the counter (28.3.2), so it is also the refresh that makes the
      * new timing take effect - and doing it in the other order would
      * leave a counter reloaded against the old window.
      *
-     * PR AND RLR BACK TO BACK ARE SAFE HERE (measured, after a reset
+     * PR and RLR back to back are safe here (measured, after a reset
      * and with LSI off at the start): the new reload counts from that
      * WINR reload, never from the start key's count. What a short
      * reload does meet is the crossing itself: the WINR reload lands
@@ -467,7 +497,7 @@ struct Iwdg {
      * Start the watchdog and give it this timing - the chapter's own
      * sequence, start first (28.3.2).
      *
-     * ONE WAY UNTIL THE NEXT RESET. After this the device reboots unless
+     * One way until the next reset. After this the device reboots unless
      * something refreshes inside the window; the reset that follows is
      * what puts the watchdog away again (fact 3).
      *
@@ -498,9 +528,9 @@ struct Iwdg {
     /// reset - the counter keeps running, which is what makes a
     /// single-stepped program reboot under a debugger.
     ///
-    /// TWO THINGS THIS REGISTER NEEDS, both measured. It answers a
-    /// store only with RCC_APBENR1.DBGEN set, and that bit is CLEAR AT
-    /// RESET (5.2.17: a peripheral without its bus clock does not take
+    /// Two things this register needs, both measured. It answers a
+    /// store only with RCC_APBENR1.DBGEN set, and that bit is clear at
+    /// reset (5.2.17: a peripheral without its bus clock does not take
     /// one) - so a caller opens that gate first, exactly as it would
     /// for any other APB peripheral. And 40.10.3 says the register is
     /// "not reset by system reset": whatever set it last - a debugger,
@@ -542,7 +572,7 @@ constexpr uint32_t wwdg_step_cycles(WwdgPrescaler p) {
  * - 29.3.4's formula with T[5:0] + 1 spelled as t - 0x3F, which is what
  * it means for the T6-set values (0x40..0x7F) the register may hold.
  *
- * KEPT IN 32 BITS AND IT NEED NOT COST ANYTHING: the whole cycle count
+ * Kept in 32 bits and it need not cost anything: the whole cycle count
  * is formed first and divided by the megahertz last, and the widest it
  * can be is 4096 x 128 x 64 = 33554432 cycles, which fits. A 64-bit
  * intermediate would be a libcall on this core; the only inexactness
@@ -586,7 +616,7 @@ constexpr bool wwdg_config_valid(const WwdgConfig& c) {
  * activation bit that only a reset clears, and an interrupt one step
  * before the end.
  *
- * WHAT MAKES IT MEASURABLE WITHOUT RISK: the counter free-runs whether
+ * What makes it measurable without risk: the counter free-runs whether
  * or not WDGA is set, and EWIF is raised at 0x40 whether or not the
  * interrupt is enabled (fact 5). So configure(), refresh(), counter()
  * and the flag are all usable on a DISARMED block - the whole timing
@@ -596,10 +626,11 @@ constexpr bool wwdg_config_valid(const WwdgConfig& c) {
 struct Wwdg {
     Wwdg() = delete;
 
-    /// RCC_APBENR1.WWDGEN, and it is CLEAR AT RESET: until this is on,
+    /// RCC_APBENR1.WWDGEN, and it is clear at reset: until this is on,
     /// the registers below read as nothing (5.2.17). The hardware
     /// option WWDG_SW = 0 sets the same bit in hardware, which is how a
     /// hardware watchdog runs before any software has said anything.
+    /// A read-modify-write of a register the clock task shares: setup's.
     static void bus_clock(bool on) { Rcc::apb1_clock(RCC_APBENR1_WWDGEN, on); }
     static bool bus_clock() { return (RCC->APBENR1 & RCC_APBENR1_WWDGEN) != 0u; }
 
@@ -633,8 +664,9 @@ struct Wwdg {
     /**
      * Write CFR: prescaler, window, and the early-wakeup enable.
      *
-     * Legal at any time - CFR is not enable-protected and this chapter
-     * has no synchronization at all, both registers being on PCLK. EWI
+     * Legal at any time, a single store that waits for nothing - CFR is
+     * not enable-protected and this chapter has no synchronization at
+     * all, both registers being on PCLK. EWI
      * is a set-only bit, so a configuration that clears it does not
      * disarm an interrupt already enabled; that is 29.5.2's silicon and
      * not this driver's choice, and it is why `early_wakeup` reads back
@@ -668,9 +700,10 @@ struct Wwdg {
      * through this verb.
      *
      * WDGA is a set-only bit, so this write cannot disarm a running
-     * watchdog and does not need to read CR first.
+     * watchdog and does not need to read CR first: one store, from any
+     * context.
      *
-     * A refresh made while the counter is ABOVE the window is a reset,
+     * A refresh made while the counter is above the window is a reset,
      * which is the whole point of the peripheral: the caller times it.
      */
     [[gnu::always_inline]] static void refresh(uint8_t counter_value = 0x7Fu) {
@@ -678,8 +711,10 @@ struct Wwdg {
     }
 
     /**
-     * Start the watchdog with the counter at `counter_value`. ONE WAY:
-     * 29.3.2, "it cannot be disabled again, except by a reset".
+     * Start the watchdog with the counter at `counter_value`. One way:
+     * 29.3.2, "it cannot be disabled again, except by a reset". One
+     * store; the refresh that must follow is the caller's, inside the
+     * window it configured.
      */
     static void start(uint8_t counter_value = 0x7Fu) {
         WWDG->CR = WWDG_CR_WDGA | static_cast<uint32_t>(counter_value) | WWDG_CR_T_6;
@@ -713,7 +748,7 @@ struct Wwdg {
     /// can tell that from a shared line (this line is not shared here,
     /// but the shape is the stratum's).
     ///
-    /// IT DOES NOT REFRESH. Whether the warning is a "recover and carry
+    /// It does not refresh. Whether the warning is a "recover and carry
     /// on" or a "log and let it reset" is 29.4's own alternative, and
     /// therefore the application's policy.
     [[gnu::always_inline]] static bool isr() {
@@ -756,7 +791,9 @@ struct ResetReporter {
 };
 
 /**
- * The HardFault handler BODY: record the wreck and reset.
+ * The HardFault handler body: record the wreck and reset. It runs in
+ * the fault, with whatever the fault left; it reads nothing but the
+ * record's storage and never returns.
  *
  * An app binds it, the driver never names a vector:
  *
@@ -764,12 +801,12 @@ struct ResetReporter {
  *         brio::hard_fault_reset<brio::Stm32g0Platform>();
  *     }
  *
- * IT DOES NOT GO THROUGH panic(), and the reason is specific to this
+ * It does not go through panic(), and the reason is specific to this
  * core. panic() calls P::break_here(), which is BKPT, and on ARMv6-M a
  * BKPT with no debugger attached escalates to HardFault - taken from
- * INSIDE HardFault that is a LOCKUP, and a locked-up core does not
+ * inside HardFault that is a lockup, and a locked-up core does not
  * reach the reset. So this writes the same record panic() would, by
- * hand, and resets immediately. A debugger that IS attached halts on
+ * hand, and resets immediately. A debugger that is attached halts on
  * the fault itself long before this runs.
  *
  * The record survives because .noinit is NOLOAD and the crt neither
@@ -779,7 +816,7 @@ struct ResetReporter {
  * family can additionally be told by option byte to raise an NMI on the
  * first read of a never-written word (stm32g0/platform.hpp says where).
  *
- * AN EXISTING RECORD IS NOT OVERWRITTEN, and that is what makes this
+ * An existing record is not overwritten, and that is what makes this
  * compose with panic(). With no debugger attached, panic()'s closing
  * BKPT escalates into exactly this handler; clobbering the record here
  * would turn every panic into a kernel_fault and throw away the code

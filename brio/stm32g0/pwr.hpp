@@ -4,24 +4,48 @@
  * Power control (RM0444 ch. 4): the voltage regulator's two ranges, the
  * supply supervisor, the RTC domain's write gate, the six wake-up pins,
  * the Standby pull configuration, and - the reason the chapter exists -
- * WHICH LOW-POWER MODE THE NEXT `wfi` TAKES.
+ * which low-power mode the next `wfi` takes.
  *
  *  Pwr        the block, whole. Every register of 4.4, every field this
  *             part implements, and nothing that pretends to be a policy.
  *
- * THE SLEEP MODE IS TWO REGISTERS IN TWO PLACES, and that is the first
+ * A brio program rarely drives it directly: the kernel's idle is a WFI
+ * that takes whatever is armed, and what arms a deeper mode is the
+ * sleep site of stm32g0/sleep.hpp under util/power.hpp's power manager.
+ * The two verbs a program does call are the one-shot that ends it and
+ * the readback of what is armed:
+ *
+ *     brio::Pwr::bus_clock(true);
+ *     brio::Pwr::enter(brio::PwrMode::standby);   // back through reset
+ *     brio::PwrMode armed = brio::Pwr::mode();    // what a WFI would take
+ *
+ * Which context calls what. Every verb is a read-modify-write of a
+ * register with no set/clear twin (PWR_CR1, CR3, CR4, SCB->SCR), so two
+ * contexts writing the block at once can lose a bit: the block has one
+ * owner at a time - setup in main(), then the power manager and its
+ * site in an active object's handler (an active object is a brio task
+ * the kernel serves one event at a time), and the site's wake interrupt
+ * body; keeping those two from writing one register at the same moment
+ * is the site's arrangement, not a check here. Two verbs wait: range() spins
+ * until the regulator settles and low_power_run(false) until REGLPF
+ * clears, both bounded by ready_spins; enter() blocks in the WFI until
+ * a wake, or for ever when the mode returns through the reset vector.
+ * None masks interrupts; the readbacks are plain loads, legal from any
+ * context once the bus clock is on.
+ *
+ * The sleep mode is two registers in two places, and that is the first
  * thing to know about this family. The Cortex-M0+ has one bit, SCR.
  * SLEEPDEEP, which says "the next WFI is a deep sleep"; PWR_CR1.LPMS
- * says WHICH deep sleep. Neither is the other's, and both must agree
- * before a WFI does anything but Sleep. `Pwr` owns them BOTH - SLEEPDEEP
+ * says which deep sleep. Neither is the other's, and both must agree
+ * before a WFI does anything but Sleep. `Pwr` owns them both - SLEEPDEEP
  * is written here and nowhere else in this stratum, so that "what is
  * armed" is one question with one answer (`Pwr::mode()`), and so that
  * stm32g0/platform.hpp's idle() can stay what it is: a DSB, a WFI
  * and an unmask that take whatever somebody else armed.
  *
- * SEVEN FACTS OF THIS CHAPTER.
+ * Seven facts of this chapter.
  *
- * 1. THE BLOCK HAS A BUS-CLOCK GATE AND IT IS CLEAR AT RESET.
+ * 1. The block has a bus-clock gate and it is clear at reset.
  *    RCC_APBENR1.PWREN, like every APB peripheral of this family, and
  *    5.2.17 says a peripheral without its bus clock does not answer
  *    register reads. `bus_clock(true)` is therefore the first call in
@@ -29,95 +53,96 @@
  *    makes it (it needs PWR_CR1.VOS for the flash latency table) and
  *    leaves it open.
  *
- * 2. SEVEN MODES, AND ONLY FOUR OF THEM ARE A LADDER A PROGRAM CAN
- *    RESUME FROM. Run, Low-power run, Sleep, Low-power sleep, Stop 0,
+ * 2. Seven modes, and only four of them are a ladder a program can
+ *    resume from. Run, Low-power run, Sleep, Low-power sleep, Stop 0,
  *    Stop 1, Standby, Shutdown (4.3). Of the ones a WFI reaches: Sleep
  *    keeps every clock but the CPU's; Stop 0 and Stop 1 stop everything
- *    in the VCORE domain but KEEP SRAM AND REGISTERS, differing only in
+ *    in the VCORE domain but keep SRAM and registers, differing only in
  *    which regulator supplies VCORE; Standby and Shutdown power the
- *    VCORE domain OFF and come back through the reset vector. That last
- *    sentence is why `PwrMode` has all six codes and why
- *    stm32g0/sleep.hpp's SleepSite maps only four of them - see its
- *    header.
+ *    VCORE domain off and come back through the reset vector. That last
+ *    sentence is why `PwrMode` has all six codes and why the sleep site
+ *    of stm32g0/sleep.hpp maps only four of them - its header says why.
  *
- * 3. LOW-POWER RUN IS A WHOLE-PROGRAM DECISION, not a sleep. LPR
+ * 3. Low-power run is a whole-program decision, not a sleep. LPR
  *    switches VCORE to the low-power regulator and 4.3.2 requires the
- *    system clock to be at or below 2 MHz FIRST; leaving it means
- *    clearing LPR, WAITING FOR REGLPF, and only then raising the clock.
- *    The verbs are here because the register is; no SLEEP SITE calls
+ *    system clock to be at or below 2 MHz first; leaving it means
+ *    clearing LPR, waiting for REGLPF, and only then raising the clock.
+ *    The verbs are here because the register is; no sleep site calls
  *    them, because putting a whole program at 2 MHz is not something a
- *    site may do behind an application's back - it is a RATE the
+ *    site may do behind an application's back - it is a rate the
  *    application names (stm32g0/clock.hpp's PowerRegime::low_power_run
  *    on a Clock<>, whose init() sequences the entry and the exit), and
  *    the dynamic clock moves a program in and out of it in that order.
  *
- * 4. WHAT COMES BACK AFTER A STOP IS HSISYS, WHATEVER WAS RUNNING
- *    BEFORE. 4.3.6 and 5.3: "the system clock, when exiting Stop 0 or
+ * 4. What comes back after a Stop is HSISYS, whatever was running
+ *    before. 4.3.6 and 5.3: "the system clock, when exiting Stop 0 or
  *    Stop 1 mode, is the HSISYS clock", and the PLL is off. A program
  *    running at 64 MHz on the PLL therefore resumes at 16 MHz with a
  *    SysTick reload and a USART baud rate meant for four times that -
  *    which is a fact of the chapter and not a defect, and which
  *    stm32g0/sleep.hpp's site answers by re-running the clock task in
- *    the first thing that executes after the wake. HSIDIV is NOT
+ *    the first thing that executes after the wake. HSIDIV is not
  *    changed by a Stop, so a program on a divided HSISYS comes back on
  *    exactly the clock it left.
  *
- * 5. A STOP IS ONLY ENTERED IF NOTHING IS PENDING. Table 31's own note:
+ * 5. A Stop is only entered if nothing is pending. Table 31's own note:
  *    every EXTI pending bit and "the peripheral flags generating wake-up
  *    interrupts must be cleared. Otherwise, the Stop mode entry
  *    procedure is ignored and program execution continues" - and the
  *    Cortex's WFI is itself a no-op with an interrupt pending. So a
- *    Stop that does not happen is NOT an error condition anywhere in
+ *    Stop that does not happen is not an error condition anywhere in
  *    the silicon: the instruction simply falls through. Everything that
- *    judges a sleep in this stratum therefore judges it by TIME ELAPSED
+ *    judges a sleep in this stratum therefore judges it by time elapsed
  *    and never by a flag.
  *
- * 6. STANDBY AND SHUTDOWN NEED THEIR OWN FLAGS CLEAR TO BE ENTERED AT
- *    ALL (tables 33 and 34): the WUFx wake-up flags in PWR_SR1, and the
+ * 6. Standby and Shutdown need their own flags clear to be entered at
+ *    all (tables 33 and 34): the WUFx wake-up flags in PWR_SR1, and the
  *    RTC flag matching whichever RTC event is meant to end the sleep. A
  *    stale flag from a previous life is an entry that silently does not
  *    happen - fact 5 again, with a second cause. `clear_wakeup_flags()`
  *    is the sweep, and `enter()` performs it.
  *
- * 7. THE I/O PULLS FOR STANDBY ARE A SEPARATE SET OF REGISTERS FROM THE
- *    GPIO'S. In Standby and Shutdown the GPIO block is unpowered, so a
+ * 7. The I/O pulls for Standby are a separate set of registers from the
+ *    GPIO's. In Standby and Shutdown the GPIO block is unpowered, so a
  *    pad's state comes from PWR_PUCRx / PWR_PDCRx, applied only while
- *    PWR_CR3.APC is set (4.3.8). They are NOT reset by a wake from
+ *    PWR_CR3.APC is set (4.3.8). They are not reset by a wake from
  *    Standby, which makes them one more piece of state a program
  *    inherits.
  *
- * PER-PART VARIABILITY, all of it in stm32g0/device_tables.hpp: the six
- * wake-up pins are a SPARSE set (the G031 bonds 1, 2, 4 and 6, the G071
- * adds 5, only the G0B1/G0C1 has all six), the pull registers follow the
- * GPIO bonding (port E is the G0B1/G0C1's alone), and the VDDIO2 monitor
- * exists only where the second I/O supply does. Every verb below that
- * takes a pin number or a port letter checks the reserve and returns
- * false rather than writing a bit that is not there.
+ * Per-part variability, all of it in stm32g0/device_tables.hpp (the
+ * reserve: the table of what each part has, read off the device header
+ * and exported as constexpr data): the six wake-up pins are a sparse
+ * set (the G031 bonds 1, 2, 4 and 6, the G071 adds 5, only the
+ * G0B1/G0C1 has all six), the pull registers follow the GPIO bonding
+ * (port E is the G0B1/G0C1's alone), and the VDDIO2 monitor exists only
+ * where the second I/O supply does. Every verb below that takes a pin
+ * number or a port letter checks the reserve and returns false rather
+ * than writing a bit that is not there.
  *
- * ERRATA, ES0548 Rev 3 read on the bench chip's REVISION Z column:
+ * Errata, ES0548 Rev 3 read on the bench chip's revision Z column:
  *  - 2.2.2 (a wake-up flag wrongly set while a WKUPx pin is being
- *    configured) is LIVE, and its workaround is one line: clear WUFx
+ *    configured) is live, and its workaround is one line: clear WUFx
  *    after configuring the pin. `wakeup_pin()` does exactly that, so
  *    the erratum cannot reach a caller of this file.
  *  - 2.2.4 (with HSIDIV != 0 a peripheral with clock-request capability
- *    fails to wake the device from Stop) is LIVE and has NO workaround.
+ *    fails to wake the device from Stop) is live and has no workaround.
  *    It is not refusable here: it does not touch the RTC, the EXTI or
  *    the wake-up pins, only the peripherals that ask for HSI16 while
  *    stopped (the USARTs, the LPUARTs, I2C1). `stop_hsidiv_hazard()` is
- *    the readable predicate an application asserts on, and the doc says
- *    what it covers.
- *  - 2.2.7 (SRAM corrupted on Standby entry) is REVISION A ONLY - "-"
+ *    the readable predicate an application asserts on, and
+ *    docs/stm32g0/pwr.md says what it covers.
+ *  - 2.2.7 (SRAM corrupted on Standby entry) is revision A only - "-"
  *    in the Z column - which is what makes Standby usable on this board
  *    at all.
  *  - 2.3.1 (a wake-up-capable GPIO not configurable after a Standby
- *    wake) is REVISION A ONLY as well.
- *  - 2.2.11 (a missed RTC domain reset after a supply dip) is LIVE, and
+ *    wake) is revision A only as well.
+ *  - 2.2.11 (a missed RTC domain reset after a supply dip) is live, and
  *    belongs to the domain rather than to this chapter: its workaround
  *    is stm32g0/rtc.hpp's RtcDomain::reset(), keyed on PWRRSTF.
  *
- * NOT BUILT (docs/stm32g0/pwr.md carries the list): the VBAT charging
+ * Not built (docs/stm32g0/pwr.md carries the list): the VBAT charging
  * switch (PWR_CR4.VBE/VBRS - it drives current into a battery this desk
- * has not got); the BOR levels, which are OPTION BYTES and belong to the
+ * has not got); the BOR levels, which are option bytes and belong to the
  * flash chapter's provisioning verb, not to a register here; and
  * SLEEPONEXIT / SEVONPEND, two Cortex bits whose use is a kernel design
  * decision (brio's loop returns to the idle path rather than staying in
@@ -203,8 +228,9 @@ constexpr bool pvd_config_valid(const PvdConfig& c) {
 /**
  * The PWR block.
  *
- * MONOSTATE: one instance on every part, one set of registers, no
- * handle. The verbs are register-level facts of chapter 4; the ORDERING
+ * A monostate (a type of static members only, nothing to instantiate):
+ * one instance on every part, one set of registers, no
+ * handle. The verbs are register-level facts of chapter 4; the ordering
  * rules that involve other blocks (the flash latency before a range
  * change, the clock below 2 MHz before LPR, the re-init of the clock
  * after a Stop) belong to their tasks, so that a verb here never does
@@ -220,6 +246,10 @@ struct Pwr {
 
     // ---- the bus clock (fact 1) --------------------------------------------
 
+    /// RCC_APBENR1.PWREN, with 5.2.17's readback. The first call of a
+    /// program that drives this block (the clock task has already made
+    /// it); a read-modify-write of a register the clock task shares, for
+    /// setup or a handler and not for an interrupt handler.
     static void bus_clock(bool on) {
         RCC->APBENR1 = on ? (RCC->APBENR1 | RCC_APBENR1_PWREN)
                           : (RCC->APBENR1 & ~RCC_APBENR1_PWREN);
@@ -256,14 +286,15 @@ struct Pwr {
     static bool range_changing() { return (PWR->SR2 & PWR_SR2_VOSF) != 0u; }
 
     /**
-     * Write VOS. THE ORDER AROUND IT IS THE CALLER'S, and 4.1.4 gives
+     * Write VOS. The order around it is the caller's, and 4.1.4 gives
      * two different ones: down is frequency, then wait states, then this;
      * up is this, then VOSF, then wait states, then frequency. A verb
      * that guessed which direction the caller meant would be a task, and
      * the task for it is stm32g0/clock.hpp's.
      *
      * False for a code the hardware forbids, or when the regulator did
-     * not report ready within the bound.
+     * not report ready within the bound. Spins until VOSF clears (tens
+     * of microseconds), interrupts enabled.
      */
     static bool range(uint8_t r) {
         if (r != 1u && r != 2u) {
@@ -363,7 +394,7 @@ struct Pwr {
      * Arm the mode the next WFI will take: SLEEPDEEP and LPMS together,
      * which is the only pair that means anything (fact 2).
      *
-     * ARMING IS NOT SLEEPING. Nothing stops here; the CPU stops when
+     * Arming is not sleeping. Nothing stops here; the CPU stops when
      * something executes a WFI, which in a brio program is the kernel's
      * idle path. That split is what lets util/power.hpp's model exist
      * with no new kernel hook, and it is why this verb is named for what
@@ -481,7 +512,7 @@ struct Pwr {
      * SCR) all share bit n-1, which is why one probe answers for all of
      * them.
      *
-     * ES0548 2.2.2 IS APPLIED HERE: configuring a wake-up pin can set
+     * ES0548 2.2.2 is applied here: configuring a wake-up pin can set
      * its own flag, and a standing WUFx blocks the very Standby entry
      * the pin was configured for (fact 6), so the flag is cleared after
      * the configuration and the erratum cannot reach a caller.
@@ -580,7 +611,7 @@ struct Pwr {
 
     // ---- the programmable voltage detector (4.2.2) ---------------------------
     //
-    // THE VALUE LINE HAS NO DETECTOR AND NO PWR_CR2 - the register is not
+    // The value line has no detector and no PWR_CR2 - the register is not
     // a member of its PWR_TypeDef - so the verbs that write it exist in
     // two bodies, selected on the header's own symbol (the one `#ifdef`
     // a driver may keep: a register-struct reference that some parts
@@ -681,14 +712,15 @@ struct Pwr {
      * back through the reset vector) and for a program with no kernel
      * under it.
      *
-     * WHAT IT DOES BEYOND arm(): the flag sweep tables 33 and 34 demand
+     * What it does beyond arm(): the flag sweep tables 33 and 34 demand
      * (fact 6), a DSB so the posted writes retire, and the WFI. It does
-     * NOT clear the EXTI pending bits or the peripheral flags that also
+     * not clear the EXTI pending bits or the peripheral flags that also
      * block a Stop entry (fact 5) - those belong to whoever set them,
      * and a Stop that silently does not happen is measured by time and
-     * not by a flag.
+     * not by a flag. Blocks in the WFI with interrupts as the caller
+     * left them: a wake needs an interrupt that is enabled, or an event.
      *
-     * NOT [[noreturn]] even for Standby: a Standby whose entry
+     * Not [[noreturn]] even for Standby: a Standby whose entry
      * conditions were not met falls through, and a caller that means to
      * end here says so with a spin of its own.
      */

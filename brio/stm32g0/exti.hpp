@@ -2,9 +2,13 @@
  * exti.hpp
  *
  * The STM32G0's Extended interrupt and event controller (RM0444 ch. 13):
- * the peripheral where THIS family keeps its pin interrupts. There are
+ * the peripheral where this family keeps its pin interrupts. There are
  * none in GPIO - stm32g0/pin.hpp says so and stops there - so every
- * edge sense, every pending bit and every wake-up line lives here.
+ * edge sense, every pending bit and every wake-up line lives here. For
+ * a program that wants an interrupt from a pin - a button, an edge from
+ * a sensor, a wake on a line - `ExtInt<Pin>` is the line of that pin as
+ * a type, and its comment below carries the smallest use; `Exti` is the
+ * block itself, for a program that drives a line by number.
  *
  *  Exti           the block: the trigger selection, the software
  *                 trigger, the two pending registers, the interrupt and
@@ -12,98 +16,115 @@
  *                 body the three shared vectors call.
  *
  *  ExtInt<Pin>    one GPIO line reached through the pad that carries
- *                 it: the line number IS the pin number, and the port
+ *                 it: the line number is the pin number, and the port
  *                 is what the multiplexer has to be told.
  *
- * SIX FACTS THAT SHAPE THE FILE.
+ * Which context calls what. The configuring verbs - sense(), select(),
+ * interrupt(), event(), release() and ExtInt's claim(), configure(),
+ * arm() - are read-modify-writes of registers with no set/clear twins
+ * (RTSR, FTSR, IMR, EMR, EXTICR), so two of them racing from two
+ * contexts can lose a bit: call them from setup in main() or from an
+ * active object's handler (an active object is a brio task the kernel
+ * serves one event at a time), never from an interrupt handler that
+ * may interrupt another configuring call. The pending clears and the
+ * software trigger are single write-one stores, and the readbacks
+ * single loads, legal from any context. `Exti::isr(lines)` is the body
+ * an interrupt handler calls, for the lines of its own vector; the app
+ * binds the vector and posts whatever event the line means. Nothing
+ * here waits, and nothing masks interrupts.
  *
- * 1. THE LINE NUMBER IS THE PIN NUMBER, AND THE PORT IS A CHOICE. PA3,
+ * Six facts that shape the file.
+ *
+ * 1. The line number is the pin number, and the port is a choice. PA3,
  *    PB3, PC3, PD3, PE3 and PF3 all reach line 3 and EXTI_EXTICR1's
  *    third field says which one of them does (13.3.3, figure 29). So
- *    there is no pad-to-line table to read - and THE SIXTEEN LINES ARE
- *    A SCARCE RESOURCE SHARED ACROSS SIX PORTS: PA3 and PB3 cannot both
+ *    there is no pad-to-line table to read - and the sixteen lines are
+ *    a scarce resource shared across six ports: PA3 and PB3 cannot both
  *    raise interrupts, ever. The last write to EXTICR wins and nothing
  *    in the silicon warns; `exti_lines_distinct<...>()` is the
- *    compile-time check an application can put on ITS OWN set of lines,
+ *    compile-time check an application can put on its own set of lines,
  *    and `selected()` is the run-time readback of who owns one now.
  *
- * 2. THERE IS NO LEVEL SENSE. The configurable lines are EDGE triggered
+ * 2. There is no level sense. The configurable lines are edge triggered
  *    and nothing else (13.5.1's own note: "the configurable lines are
  *    edge triggered, no glitch must be generated on these inputs"), so
  *    `ExtiSense` has four values and none of them is a level. A
  *    level-triggered input is the application's to build - sense both
  *    edges and read the pad.
  *
- * 3. RISING AND FALLING ARE TWO SEPARATE PENDING BITS, in two separate
- *    registers (EXTI_RPR1 and EXTI_FPR1, 13.5.4/13.5.5), both W1C. A
- *    both-edges line therefore says WHICH edge arrived without reading
- *    the pad, which is why the ISR body returns a PAIR of masks.
+ * 3. Rising and falling are two separate pending bits, in two separate
+ *    registers (EXTI_RPR1 and EXTI_FPR1, 13.5.4/13.5.5), both
+ *    write-one-to-clear. A both-edges line therefore says which edge
+ *    arrived without reading the pad, which is why the ISR body returns
+ *    a pair of masks.
  *
- * 4. THE PENDING BIT IS ONLY SET FOR AN UNMASKED INTERRUPT. 13.3.1 says
+ * 4. The pending bit is only set for an unmasked interrupt. 13.3.1 says
  *    it in those words and 13.4 repeats it: with EXTI_IMR clear, an
  *    edge on an enabled trigger leaves no trace in RPR/FPR at all - the
  *    flag cannot stand while its interrupt is masked, and a line cannot
  *    be polled without being armed. Measured, and it is exactly what
  *    the chapter says (docs/stm32g0/exti.md).
  *
- * 5. THREE VECTORS FOR SIXTEEN LINES: EXTI0_1 serves lines 0 and 1,
+ * 5. Three vectors for sixteen lines: EXTI0_1 serves lines 0 and 1,
  *    EXTI2_3 lines 2 and 3, EXTI4_15 the other twelve (table 61). A
  *    handler is therefore always a dispatcher, and `Exti::isr(lines)`
  *    takes the mask of lines its vector answers for - which
  *    `exti_vector_lines()` gives - so a handler cannot accidentally
  *    consume another vector's pending bits.
  *
- * 6. THE BLOCK HAS NO CLOCK GATE AND NO RESET. It sits on the AHB and
+ * 6. The block has no clock gate and no reset. It sits on the AHB and
  *    runs on hclk; there is no RCC_AHBENR.EXTIEN and no EXTIRST in any
  *    device header of the family, so nothing here has to be turned on
  *    before it is used - the opposite of GPIO, whose port clock every
  *    configuring verb in pin.hpp must open first. The edge detection
- *    itself is ASYNCHRONOUS (13.3.1), which is why it works with the
+ *    itself is asynchronous (13.3.1), which is why it works with the
  *    clock stopped and is what makes an EXTI line a wake-up source.
  *
- * WHAT THIS DRIVER OWNS, AND WHAT IT DOES NOT. It owns the FABRIC -
+ * What this driver owns, and what it does not. It owns the fabric -
  * lines, triggers, pending bits, masks, the port multiplexer, the
- * vectors - and NOT the vocabulary of what is wired to a line above 15.
+ * vectors - and not the vocabulary of what is wired to a line above 15.
  * Table 65 lists the PVD on 16, the comparators on 17/18/20, the RTC on
- * 19, sixteen peripheral wake-ups on 21..36 - and that list is PER
- * PART: the G031 implements neither 20 nor 22 nor 24, the G071 neither
+ * 19, sixteen peripheral wake-ups on 21..36 - and that list is per
+ * part: the G031 implements neither 20 nor 22 nor 24, the G071 neither
  * 20 nor 22, and a line number that means "USART3 wake-up" on one part
  * means nothing on another. So a peripheral driver that owns a wake-up
- * publishes ITS OWN line number, the way this stratum's peripherals
+ * publishes its own line number, the way this stratum's peripherals
  * publish their DMAMUX requests; `exti_line_implemented()` and
- * `exti_line_configurable()` are
- * how such a number is checked against the device header. What lives
- * here is what is uniform: the sixteen GPIO lines, which are lines
- * 0..15 on every part of the family.
+ * `exti_line_configurable()`, in stm32g0/device_tables.hpp (the
+ * reserve: the table of what each part has, read off the device
+ * header), are how such a number is checked against the device header.
+ * What lives here is what is uniform: the sixteen GPIO lines, which are
+ * lines 0..15 on every part of the family.
  *
- * DIRECT LINES, for the record (13.3.2, table 64): a direct line has no
- * trigger selection, no software trigger and NO PENDING BIT IN THE EXTI
+ * Direct lines, for the record (13.3.2, table 64): a direct line has no
+ * trigger selection, no software trigger and no pending bit in the EXTI
  * at all - the flag to clear is the peripheral's own, the interrupt
  * that reaches the CPU is the peripheral's own, and all the EXTI does
  * is wake the system up. IMR/EMR are the only registers of this file
  * that touch one, which is why every mask verb here is a
- * read-modify-write of ONE bit: EXTI_IMR1 comes out of reset at
+ * read-modify-write of one bit: EXTI_IMR1 comes out of reset at
  * 0xFFF80000 with every direct line's interrupt already unmasked
  * (13.5.12), and a driver that wrote the whole register would silently
  * turn off a wake-up somebody else is relying on.
  *
- * WAKE-UP is stated here and NOT built: an EXTI line with its IMR or
- * EMR bit set wakes the CPU sub-system and, through PWR, the system
+ * Wake-up is stated here and built elsewhere: an EXTI line with its IMR
+ * or EMR bit set wakes the CPU sub-system and, through PWR, the system
  * clocks (13.2.1, 13.3.1). What that costs and how the clocks come back
- * is chapter 4's, and there is no PWR driver or SleepSite in this
- * stratum yet - so the only sleep this file has anything to say about
+ * is chapter 4's, stm32g0/pwr.hpp's and the sleep sites' of
+ * stm32g0/sleep.hpp, and the peripherals that wake a Stop open their
+ * own direct lines through this block's mask verbs (the RTC's line 19,
+ * the LPTIMs' 29 and 30). What this file itself has to say about sleep
  * is the one the core can enter unaided: WFE, which returns on an EXTI
- * CPU EVENT (an EMR bit set, no interrupt, no pending bit, nothing to
+ * CPU event (an EMR bit set, no interrupt, no pending bit, nothing to
  * clear - 4.2.2's "Configuring a EXTI line in event mode"). That half
- * is measured; Stop and Standby wait for the power pass.
+ * is measured here; Stop and Standby are docs/stm32g0/pwr.md's.
  *
- * ERRATA, ES0548 Rev 3 read on the bench chip's REVISION Z column:
+ * Errata, ES0548 Rev 3 read on the bench chip's revision Z column:
  * nothing in the sheet touches the EXTI itself. The one item this
  * driver's users must know is 2.3.1, GPIO after a Standby wake-up (a
  * pad configured before Standby may not be restored as expected), and
- * it is unreachable here because nothing in this stratum enters
- * Standby - stated in docs/stm32g0/exti.md rather than coded, since
- * there is nothing to code against.
+ * it is revision A only; Standby itself is stm32g0/pwr.hpp's, and
+ * docs/stm32g0/exti.md states the item rather than coding against it.
  */
 
 #pragma once
@@ -128,7 +149,7 @@ namespace brio {
  * note says so explicitly - "rising edge trigger can be set for a line
  * with falling edge trigger enabled").
  *
- * THERE IS NO LEVEL HERE: this controller detects edges and nothing
+ * There is no level here: this controller detects edges and nothing
  * else. `none`
  * disables the line's detection altogether, which is also its reset
  * state.
@@ -279,8 +300,8 @@ public:
 
     // ---- the two masks (13.5.12 .. 13.5.15) --------------------------------
     //
-    // ONE BIT AT A TIME, ALWAYS. IMR1 comes out of reset at 0xFFF80000:
-    // every DIRECT line's interrupt is already unmasked there, because
+    // One bit at a time, always. IMR1 comes out of reset at 0xFFF80000:
+    // every direct line's interrupt is already unmasked there, because
     // that is how a peripheral's own interrupt reaches the CPU at all.
     // A verb that wrote the whole register would turn those off behind
     // the owner's back, so nothing in this file ever does.
@@ -301,10 +322,11 @@ public:
     // ---- the GPIO multiplexer (13.3.3, 13.5.11) ----------------------------
 
     /**
-     * Point line `line` at port `port` - the ONE choice the sixteen GPIO
+     * Point line `line` at port `port` - the one choice the sixteen GPIO
      * lines offer, and the reason two pads with the same pin number
      * cannot both raise interrupts. Refuses a line that is not a GPIO
-     * line and a port this device does not bond.
+     * line and a port this device does not bond. A read-modify-write of
+     * EXTICR: setup's or a handler's, like every configuring verb here.
      *
      * There is no arbitration in the silicon and none here: the last
      * writer owns the line. `selected()` reads back who that is.
@@ -338,10 +360,11 @@ public:
     // ---- the ISR body ------------------------------------------------------
 
     /**
-     * The body of one of the three EXTI vectors. `lines` is the mask of
-     * lines THIS vector answers for - `exti_vector_lines(EXTI2_3_IRQn)`
-     * and friends - so a handler can neither consume nor be confused by
-     * another vector's pending bits.
+     * The body of one of the three EXTI vectors, called from the
+     * interrupt handler the app binds. `lines` is the mask of lines this
+     * vector answers for - `exti_vector_lines(EXTI2_3_IRQn)` and friends
+     * - so a handler can neither consume nor be confused by another
+     * vector's pending bits.
      *
      * Read-and-clear, both registers, and the two halves come back
      * apart: on a both-edges line the returned pair says which edge it
@@ -439,13 +462,15 @@ private:
  *   ButtonInt::arm(true);
  *   brio::Nvic::enable(ButtonInt::irq());        // EXTI4_15
  *
- * THE PAD KEEPS ITS GPIO MODE. This is not a peripheral multiplexer:
- * the EXTI watches the port's INPUT, which GPIO leaves live in input,
+ * The pad keeps its GPIO mode. This is not a peripheral multiplexer:
+ * the EXTI watches the port's input, which GPIO leaves live in input,
  * output and alternate modes alike (7.3.1), so a line can watch a pad
  * that an application is driving or that a peripheral owns - measured,
  * and the reason `claim()` and `select()` are separate verbs. Only
- * ANALOG mode, where the input buffer is off, hides a pad from its
- * line.
+ * analog mode, where the input buffer is off, hides a pad from its
+ * line. The verbs are Exti's for this one line, with the same contexts
+ * (the file header): configuring from setup or a handler, pending reads
+ * and clears from anywhere.
  */
 template <class P>
 struct ExtInt {
@@ -507,7 +532,7 @@ struct ExtInt {
 };
 
 /**
- * THE ONE-PIN-PER-LINE RULE AS A COMPILE-TIME CHECK. Sixteen lines are
+ * The one-pin-per-line rule as a compile-time check. Sixteen lines are
  * shared by six ports, so an application that arms PA3 and PB3 has
  * written a bug the silicon will not report: the second EXTICR write
  * simply takes the line, and the first pad goes quiet.
