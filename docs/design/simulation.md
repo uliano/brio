@@ -137,7 +137,7 @@ compilation anywhere: on the host, `now()` reads a variable.
 
 | policy | who advances `now()` | what it is for |
 |---|---|---|
-| stepped | the harness, tick by tick | suites, golden images, reproducibility |
+| stepped | the harness, tick by tick | suites, goldens, reproducibility |
 | jumping | the platform, to the next deadline, through the kernel's optional `idle_until()` | long scenarios: nothing can happen between two deadlines, so the empty time is skipped |
 | paced | a real clock | the interactive case, and the only one another process may join |
 

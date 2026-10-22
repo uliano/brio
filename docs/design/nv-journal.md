@@ -212,7 +212,7 @@ a run of one.
 | stratum | the store | the run |
 |---|---|---|
 | avrxt, the AVR EA | `EepromStore` over NVM version 3 (`avrxt/nvm.hpp`) | offered: the page of 8 bytes, `write_run` the engine's store run (only the differing bytes loaded, the cheapest of the three operations); the panic record one operation of 2.73 ms where the byte path takes eight (21.4 ms), measured ([the AVR NVM page](../avrxt/nvm.md)) |
-| avrxt, the AVR DA/DB | `EepromStore` over NVM version 2 | not offered: the EEPROM writes a byte per operation there, so the room would be one |
+| avrxt, the AVR DA/DB | `EepromStore` over NVM version 2 | not offered: the EEPROM writes a byte per operation there, so the room would be one; adopted in its family's phase (its document's gap list) |
 | host | the suites' simulated stores | one without the refinement and one with it at any write unit: the run path proven equal to the byte path, run by run inside its room, with a power cut between any two runs |
 
 The other families keep their small values in flash through the

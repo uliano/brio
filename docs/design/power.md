@@ -253,8 +253,9 @@ program has to do", 0 if something is already due, nothing at all if
 nothing is armed. Calling it changes no state.
 
 The default, two ticks, is the worst wake-up bill measured on the
-AVR128DB48 bench board (a crystal main clock's restart, under 2 ms,
-[the AVR platform page](../avrxt/platform.md)) expressed in the
+AVR128DB48 bench board (a crystal main clock's restart: 1.77 ms as
+`util/power.hpp` records it; [the AVR platform page](../avrxt/platform.md)
+gives about 1.5 ms for the same restart on that board) expressed in the
 coarsest timebase brio runs on (1024 Hz). An application with a faster tick, a
 cheaper wake or a different tolerance sets its own; the knob is a
 compile-time configuration struct, so the comparison folds.

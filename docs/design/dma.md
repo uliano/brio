@@ -17,9 +17,9 @@ The smallest use is none: a transport that takes an engine in its slot
 transport's `release()` resets its block. The one knob is
 `UartOptions::rx_priority` where a program ranks something above its
 serial receive ring. The prerequisite that decides correctness: **a
-receive ring armed below a memory-to-memory copy loses bytes** on
-every controller measured, so the knob is turned down only with that
-measurement in hand.
+receive ring armed below a memory-to-memory copy can lose bytes**;
+the findings below say on which controllers, and under what copy, it
+did, so the knob is turned down only with that measurement in hand.
 
 ## The priority rule
 

@@ -1136,8 +1136,9 @@ by architecture (the I flag falls on entry and no handler restores it
 early), the Cortex-M families by leaving every NVIC line at the same
 priority (equal priorities never preempt one another;
 `Nvic::priority()` in `cortexm/nvic.hpp` is the one door, and no
-driver opens it), the QingKe families by leaving nesting disabled in
-the startup code. A driver whose two vectors share one state machine
+driver opens it), the QingKe families by leaving `INTSYSCR.INESTEN`
+at its reset value in the startup code (each crt says so in its
+opening comment). A driver whose two vectors share one state machine
 (a UART with its DMA channels) counts on this promise, and a target
 that broke it would have to give such drivers guards of their own.
 

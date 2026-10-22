@@ -150,10 +150,6 @@ The bus operations (a bus request polled, pumped and engined; a
 receive run; an I2C tenure) join the application as the driver they
 measure is reworked, each with its own document carrying the numbers.
 
-A figure in parentheses after a cell, where a table has one, is the
-same measurement on the image before the driver's engine was reworked,
-on the same board; it is kept so that a change's size can be read.
-
 ## The skeleton's numbers
 
 Measured on the bench boards, the console at 115200 8N1 on every
@@ -275,14 +271,14 @@ named are SCK.
 
 | family | copy 4096 x (the DMA's rate) | fill 4096 x | copy fixed cost | paced x | spi.dma x, irq | spi fixed cost per transaction |
 |---|---|---|---|---|---|---|
-| STM32G0B1RE | 2.73 (5 cycles a word) | 2.73 | ~487 cycles (the instrument inside) | 1.00 | 1.06 at 8 MHz, 1.26 at 32 MHz; 16-bit frames 1.03, 1 | 1083 cycles (1291) |
-| STM32F446RE | 3.62 (slower than the runtime's memcpy: the engine saves CPU, not time) | 5.11 | 72 cycles (1027) | 1.00 | 1.04 at 22.5 MHz; 16-bit frames 1.01, 1 | 652 to 664 cycles = 3.7 us (13.7 us, two interrupts) |
+| STM32G0B1RE | 2.73 (5 cycles a word) | 2.73 | ~487 cycles (the instrument inside) | 1.00 | 1.06 at 8 MHz, 1.26 at 32 MHz; 16-bit frames 1.03, 1 | 1083 cycles (was 1291) |
+| STM32F446RE | 3.62 (slower than the runtime's memcpy: the engine saves CPU, not time) | 5.11 | 72 cycles (was 1027) | 1.00 | 1.04 at 22.5 MHz; 16-bit frames 1.01, 1 | 652 to 664 cycles = 3.7 us (was 13.7 us, two interrupts) |
 | CH32V006K8U6 | 6.82 at 2048 (6 cycles an item from SRAM, 8 from the flash) | 8.42 (8 cycles an item) | ~500 cycles (the instrument inside) | 1.00 | 1.10 at 12 MHz (32.0 cycles a byte, the wire's), 1.02 at 3 MHz; 16-bit frames 1.05, 1 | 864 cycles (871 in 16-bit frames) |
-| CH32V203C8T6 | 6.23 (6 cycles an item, the silicon's) | 6.23 | 245 cycles (360) | 1.00 | 1.06 at 36 MHz; 16-bit frames 1.03, 1 | 514 cycles (1087, two interrupts): 332 the launch |
+| CH32V203C8T6 | 6.23 (6 cycles an item, the silicon's) | 6.23 | 245 cycles (was 360) | 1.00 | 1.06 at 36 MHz; 16-bit frames 1.03, 1 | 514 cycles (was 1087, two interrupts): 332 the launch |
 | CH32V303VCT6 | 6.28 (6 cycles an item) | 6.25 | 298 cycles | 1.00 | 1.07 at 36 MHz; 16-bit frames 1.03, 1 | 595 cycles: 397 the launch |
 | CH32X035F8U6 (48 MHz HSI, 2 WS) | 6.56 (6 cycles an item from SRAM, 11.6 from the flash) | 6.48 | ~890 cycles (the instrument inside, the core held awake by the console's ring) | 1.00 (1024 bytes paced by a USART's transmitter at 1 Mbaud: the stratum has no timer driver) | - (not measured in this grammar: the host's costs are in [the CH32X035 SPI page](../ch32x035/spi.md)) | - |
 | RP2040 | 1.38 (the bus's rate; the completion's interrupt in the wall) | 1.63 | ~460 cycles to the completion's interrupt (the instrument inside) | 1.04 | 1.30 at 31.25 MHz (38 cycles a byte: the block's mode-0 gap); 16-bit frames 1.15, 1 | 1021 cycles = 8.2 us |
-| RP2350, Cortex-M33 | 1.04 | 1.30 (the cell in one SRAM bank, the destination striped over four) | 49 cycles (163) | 1.00 | 1.32 at 75 MHz (19 cycles a byte: the mode-0 gap); 16-bit frames 1.16, 1 | 562 cycles over the wire and its gap = 3.7 us (5.2, two interrupts) |
+| RP2350, Cortex-M33 | 1.04 | 1.30 (the cell in one SRAM bank, the destination striped over four) | 49 cycles (was 163) | 1.00 | 1.32 at 75 MHz (19 cycles a byte: the mode-0 gap); 16-bit frames 1.16, 1 | 562 cycles over the wire and its gap = 3.7 us (was 5.2, two interrupts) |
 | RP2350, Hazard3 | 1.04 | 1.29 | 47 cycles | 1.00 | 1.30 at 75 MHz; 16-bit frames 1.15, 1 | 494 cycles over the wire and its gap = 3.3 us |
 
 What the rows say:
@@ -302,7 +298,8 @@ What the rows say:
   CPU time there, never wall time. The RP2040's and the RP2350's
   controllers copy at the bus's rate.
 - A 16-bit frame rides the engines on every family that has them (the
-  unit of a transfer is the frame), one interrupt per transaction
+  beat, the unit a transfer moves, is the frame), one interrupt per
+  transaction
   where the receive block's completion proves the transmit's.
 - The paced transfers hold their rate to the ruler's resolution; on
   the RP2350 a block started right after its binding begins 700 to

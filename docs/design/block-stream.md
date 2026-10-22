@@ -58,7 +58,8 @@ can satisfy them from an interrupt handler filling the same buffers.
 Common to all: the two concepts, `BlockRelay`, and the engine names;
 every stratum that has block engines spells all four identically
 (`DmaTxEngine`, `DmaRxEngine`, `DmaLoopEngine`, `DmaPingPongEngine`),
-with the element type as the unit of a transfer and the same
+with the element type as the beat (the unit one transfer moves, the
+engines' word) and the same
 `kick`/`abandon`/`faults`/`harvest` hardening. What differs is what
 the controller under them can do.
 
