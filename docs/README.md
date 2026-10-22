@@ -13,84 +13,79 @@ facts, and is where the learning route sends a reader who needs more.
 
 ## Map
 
-The learning route, read in order:
+The learning route: the ideas in order, then the running of the
+example by the route you prefer.
 
 | Document | Content |
 |----------|---------|
-| [learn/README.md](learn/README.md) | The route's table of contents, where it leads after the last page, and the teaching examples it does not have yet |
-| [learn/introduction.md](learn/introduction.md) | From the main loop to active objects: what problem brio solves, the execution model before its C++ form, the one scheduling rule and what the model costs |
-| [learn/first-program.md](learn/first-program.md) | The maintained example `blink` read in stages: events, the queue, one complete event path, scheduling, state, time, two active objects talking, capacities and overload, the target glue |
-| [learn/cpp-notation.md](learn/cpp-notation.md) | The C++ the example uses, explained through its own lines |
+| [learn/README.md](learn/README.md) | The route's table of contents, where it leads afterwards, and the teaching examples it does not have yet |
+| [learn/introduction.md](learn/introduction.md) | What problem brio solves and how its program runs, before any C++: events, queues, active objects, the one scheduling rule, what the model costs |
+| [learn/first-program.md](learn/first-program.md) | The maintained example `blink` read in stages, from the events to the target glue |
+| [learn/cpp-notation.md](learn/cpp-notation.md) | The C++ the example uses, explained through its own lines; a companion to the first program |
 | [learn/command-line.md](learn/command-line.md) | Build, flash, observe and debug `blink` on the ST Nucleo-G0B1RE from a terminal, and the host tests |
 | [learn/vscode.md](learn/vscode.md) | The same steps in VS Code, each marked verified, configured, terminal-only or blocked |
 
-The reference:
-
-The directory mirrors the strata of `brio/`: `design/` is the
-target-independent framework (kernel, services, the models every target
-realizes); one folder per target (`avrxt/`, `samc21/`, `stm32g0/`,
-`stm32f4/`, `ch32v00x/`, `ch32vx03/`, `ch32x035/`, `rp2040/`, `rp2350/`,
-`host/`) holds that target's operational page (`README.md`), one
-document per peripheral driver, and its vendor documents; and one folder
-per stratum that is not a target - those that sit between `util/` and
-the targets, the core stratum `cortexm/` and the IP strata `pl011/`,
-`pl022/`, `dw_apb_i2c/`, and `devices/` for the parts that sit OFF the
-chip - each with a page of its own. Within each, ordered by stability -
+The reference mirrors the strata of `brio/`: `design/` is the
+target-independent framework; one folder per target (`avrxt/`,
+`samc21/`, `stm32g0/`, `stm32f4/`, `ch32v00x/`, `ch32vx03/`,
+`ch32x035/`, `rp2040/`, `rp2350/`, `host/`) holds that target's
+operational page (`README.md`), one document per peripheral driver and
+its vendor documents; and one folder per stratum that is not a target
+(the core stratum `cortexm/`, the IP strata `pl011/`, `pl022/`,
+`dw_apb_i2c/`, and `devices/` for what sits off the chip). Within each,
 the kernel's ideas are settled enough to build on, the services and
-drivers are here to stay but will change as targets are added, the bench
-is disposable.
+drivers are here to stay but will change as targets are added, and
+the bench is disposable.
 
-Target-independent design:
+Target-independent design, one page per decision:
 
 | Document | Content |
 |----------|---------|
-| [design/overview.md](design/overview.md) | Philosophy, governing rules, layering, naming and style |
-| [design/kernel.md](design/kernel.md) | The active-object kernel, by intent: model, AO contract, events and payloads, queues, FSM, delivery, scheduler, time, panic, platform - with C++ notes |
-| [design/runtime.md](design/runtime.md) | The runtime: the seven functions the compiler and libstdc++ expect of a freestanding image (memcpy, memmove, memset, memcmp, strlen, memchr, abort) written once in the framework's one source file, the link line every 32-bit project shares (no C library, no syscall layer, libgcc named by hand), the word path and why events need no alignment of their own, and why the AVR stays on avr-libc, with its heap and stdio refused at the link |
-| [design/benchmark.md](design/benchmark.md) | The benchmark: the one line every family prints per operation and size (wall, busy, interrupts, handler cycles, the rate, the wire's rate and their ratio printed by the harness so no measurement is filed unexplained), the ruler each core has, busy as wall minus the idle windows plus the handlers inside them, the instrument's own cost measured and printed, and the protocol - the sizes, the vendor's library beside brio's on the same board from pinned sources in a scratch tree, the fetch and the clock as columns of their own |
-| [design/clock.md](design/clock.md) | The clock model: one rate truth, static and dynamic regimes, the synchronous rebase fan-out and its two compile-time checks; the SAM's position (no dynamic clock, measured) and the STM32G0's dynamic clock as built: a rate as a TUPLE (root, VCORE range, regulator) in an explicit pack, the direction-aware switch around the regulator, the small fan-out CCIPR buys, the Stop restored to the current rate, the SysTick ticker's rebase and why a rescaling program is a tickless one |
-| [design/serial.md](design/serial.md) | The serial stack: Uart driver below, SerialPort line events above; the run as the unit of a transport (BulkSink and SpanSource), the per-byte costs counted per family, the first byte before the copy, and the rule for a line built from a run the hardware wrote over |
-| [design/spi-bus.md](design/spi-bus.md) | The shared SPI bus: engine descriptor, AO arbitration, multi-device rules |
-| [design/i2c-bus.md](design/i2c-bus.md) | The I2C bus: BusMaster generalized, the TWI engine descriptor, status vocabulary |
-| [design/can.md](design/can.md) | The CAN vocabulary: the classic frame, the bit timing in human units with a controller's limits as a value and the exact search, the error codes and the error state as one observable - and why there is no bus AO |
-| [design/nv-heap.md](design/nv-heap.md) | NvHeap: runtime-allocated blocks of flash that outlive the program - the FlashMedia contract, the ping-pong map pair and its atomicity, survival-aware mount, the placement rule, the wear accounting |
-| [design/nv-journal.md](design/nv-journal.md) | NvJournal: a handful of small values kept in FLASH on a part with no EEPROM - two halves that ping-pong wholesale, sequence numbers deciding and CRCs judging, a read-only mount, and the panic reserve an ordinary save always leaves behind so a panic handler can write one bounded entry with no erase |
-| [design/usb.md](design/usb.md) | USB, the device side: the contract drawn at the PACKET (an endpoint controller offers one packet per endpoint and direction, reports completions, the setup packet and the reset), the control-endpoint machine and chapter 9's requests written once above it, the class contract, and CDC ACM as a byte transport with USB's own NAK as its flow control; proven on the host against a scripted controller before silicon; no host side, ever |
-| [design/power.md](design/power.md) | The power model: the sleep-depth ladder, the site that only arms (so the kernel loop's own idle path does the sleeping), the round of votes among stakeholders, standing restrictions for the ones that live in interrupts, the deadline guard, and the first-event-after-wake contract |
-| [design/dma.md](design/dma.md) | DMA engines, what a program is owed whatever the controller: the level an engine arms at decided by what its peripheral does when starved (an overrunning receive highest, a transmit or paced output next, a memory-to-memory copy lowest, the silicon's tie rule within a level) with the measurement that set it, the receive ring's level as the one knob a program has (`UartOptions::rx_priority`, where the level is more than one bit), and the release contract - a peripheral done with a channel is reset, because a raised request is held |
-| [design/ring.md](design/ring.md) | Ring: the SPSC FIFO, lock-free where the platform allows, guarded elsewhere; and HardwareRing, the reading side of a ring a DMA channel fills - the producer's position read from the channel's own counter, the three rules that make a lossy producer honest (laps before the count, a full lap unread is an overrun, a run judged at its release) |
-| [design/analog.md](design/analog.md) | Analog in the kernel: the AnalogSampler usage type (converter concept, attribution by reported code, two paces, owner's duties) and the counts <-> mV arithmetic |
-| [design/meters.md](design/meters.md) | Meters in the kernel: the MeterLatch that bridges a capture interrupt to the loop (last value wins, overwrites counted) and the MeterSampler that paces PUBLICATION instead of capture - a stale source publishes nothing |
-| [design/block-stream.md](design/block-stream.md) | Block streams: the BlockSource/BlockPlayer concepts (caller-owned buffers, the accounting IS the API, blocks not DMA) and the BlockRelay AO that lends filled blocks for one dispatch - built BEFORE the second implementation on purpose, as the fixed point the next platform is measured against |
-| [design/gfx.md](design/gfx.md) | Graphics: the three kinds of surface, told apart by where the truth about a pixel lives (nowhere the program can reach, inside the panel, in the program's own memory); the write-only base every surface satisfies and the library draws through whatever lies beneath; the two verbs panels are good at (a filled rectangle, a window fed a run) with a single pixel as the degenerate case and not the foundation; the conventions that are free before a primitive exists and are one-pixel errors after; monospaced opaque text as a consequence of write-only erasing; no compositing; and the three planes of truth - a reference renderer derived from the definition for the primitives, a differential oracle for the pipeline, the bench for the silicon |
-| [design/simulation.md](design/simulation.md) | Simulation: the model of the world a program runs against when the machine under it is the host - the world never speaks to the program, so every device's seam is a level and not a gesture; the channel table in both directions, whose columns are either stimulated or COMPUTED (six rules that make a computed one deterministic, and what separates a model from an empty stub); the world as a type with two verbs; the three time policies and who may join each; the scenario file, where outcomes are stimuli and the degrees of freedom are declared; goldens against invariants; and what the host does not tell you |
+| [design/overview.md](design/overview.md) | The philosophy, the governing rule, the layering, naming and style: what every other page is written under |
+| [design/kernel.md](design/kernel.md) | The active-object kernel by intent: the contract an active object meets, events and payloads, the queue, the state machine, delivery, the scheduler, time, panic, the platform |
+| [design/runtime.md](design/runtime.md) | What a freestanding 32-bit image needs of a runtime and why brio writes those seven functions itself, with no C library; why the AVR stays on avr-libc |
+| [design/benchmark.md](design/benchmark.md) | The instrument every driver's cost is measured with: the one line per operation, the rulers, the protocol against the vendor's library |
+| [design/clock.md](design/clock.md) | The clock model: one rate truth, static and dynamic regimes, and how a rate change reaches every driver |
+| [design/serial.md](design/serial.md) | The serial stack: the UART driver below, line events and `print` above, and the run as the unit of a transport |
+| [design/spi-bus.md](design/spi-bus.md) | The shared SPI bus: the engine descriptor, arbitration between active objects, the rules for several devices on one bus |
+| [design/i2c-bus.md](design/i2c-bus.md) | The I2C bus over the same arbiter: the engine descriptor and the status vocabulary |
+| [design/can.md](design/can.md) | The CAN vocabulary: the frame, the bit timing in human units, the error state, and why there is no bus active object |
+| [design/nv-heap.md](design/nv-heap.md) | NvHeap: blocks of flash allocated at run time that outlive the program, and how a power cut during a write is survived |
+| [design/nv-journal.md](design/nv-journal.md) | NvJournal: a handful of small values kept in flash on a part with no EEPROM, with a reserve a panic handler can still write |
+| [design/usb.md](design/usb.md) | USB, the device side: the contract at the packet, the control endpoint and the standard requests written once, CDC ACM as a byte transport |
+| [design/power.md](design/power.md) | The power model: the sleep-depth ladder, the votes among stakeholders, and what a program may assume on the first event after a wake |
+| [design/dma.md](design/dma.md) | What a program is owed of a DMA engine whatever the controller: the priority levels and the release contract |
+| [design/ring.md](design/ring.md) | Ring: the single-producer single-consumer FIFO, and the reading side of a ring a DMA channel fills |
+| [design/analog.md](design/analog.md) | Analog sampling in the kernel: the converter concept, attribution of results, the counts-to-millivolts arithmetic |
+| [design/meters.md](design/meters.md) | Meters: bridging a capture interrupt to the loop, and pacing publication rather than capture |
+| [design/block-stream.md](design/block-stream.md) | Block streams: caller-owned buffers moved in blocks, and the relay that lends filled blocks for one dispatch |
+| [design/gfx.md](design/gfx.md) | Graphics: the three kinds of surface, the write-only base every surface satisfies, the two verbs panels are good at, and how a renderer is checked |
+| [design/simulation.md](design/simulation.md) | Simulation: the model of the world a program runs against on the host, and what the host does not tell you |
 | [design/architecture.svg](design/architecture.svg) | The strata diagram |
-| [design/event-queue.svg](design/event-queue.svg) | The event queue: the slots, the ring of slot numbers, its three runs and three cursors, in one state of kernel.md's example |
+| [design/event-queue.svg](design/event-queue.svg) | The event queue in one state: the slots, the ring of slot numbers, its three runs and three cursors |
 
-The targets, each with its front page - the operational side
-(toolchain, board, probe, debugger and their quirks) and the map of
-that target's own documents, one per peripheral driver - and among
-them the strata that sit between `util/` and the families, whose
-pages say what is theirs and what a family owes them:
+The targets, each with its front page (toolchain, board, probe,
+debugger and their quirks, then the map of that target's own
+documents), and the strata that sit between `util/` and the families:
 
 | Target | Front page |
 |--------|------------|
-| AVR DA, DB and EA (`brio/avrxt/`) | [avrxt/README.md](avrxt/README.md) - Toolchain, board, Atmel-ICE upload, PyAvrOCD debugging and its quirks, clock/timebase; then its documents |
-| SAM C21 (`brio/samc21/`) | [samc21/README.md](samc21/README.md) - Toolchain (vendored DFP/CMSIS, no device headers in arm-none-eabi-gcc), board, OpenOCD upload over SWD, cortex-debug, the clangd routing, the family smoke check; then its documents |
-| STM32G0 (`brio/stm32g0/`) | [stm32g0/README.md](stm32g0/README.md) - Toolchain, the three Nucleo boards, ST-LINK upload and debug, the SWD-under-WFI caveat, and FAMILY COVERAGE: both the x1 line and the x0 value line, the stratum compiling on all twelve headers of the pack with every vector derived from peripheral presence; then its documents |
-| CH32V00x (`brio/ch32v00x/`) | [ch32v00x/README.md](ch32v00x/README.md) - Toolchain (WCH's gcc 15 with its xw extension, each part's full ISA), the two boards and the part table the build states, the WCH-Link and WCH's OpenOCD fork, the console on the probe's own serial, and what the QingKe V2 core taught the stratum (a WFI that wakes only for an interrupt it can take, the MIE not cleared on entry); then its documents - one per chapter of the reference manual, each with what the CH32V006K8 measured with no wire and what waits for a jumper or a peer |
-| CH32V203 / CH32V303 (`brio/ch32vx03/`) | [ch32vx03/README.md](ch32vx03/README.md) - Toolchain (WCH's gcc 15 again, the full register file, the ilp32 ABI on the V4B parts and ilp32f on the V4F ones), the WeAct core board and WCH's CH32V303 evaluation board, the thirteen parts of the two series in one table the build states under three device classes, the two-wire debug port of this family and the reset verb that does NOT start the program, the console on the probe's own serial and on the chip's own USB, and what the silicon taught the stratum - the clock task parking on the HSI, the PLL divider that lives in another block, the USB pads that are still GPIO pads, the bus matrix that serves the core alone in a sleep of any depth, the CH32V303 with no USB device controller of its own - its console on the host/device block - and a floating-point unit an interrupt pays for, the lot-keyed registers the bench's CH32V303 has not got; then its documents - one per chapter of the reference manual, each with what the CH32V203C8 and the CH32V303VC measured on their boards and what waits for a wire, a peer board, another part or another lot - and what the reference manual's V2.5 changes, beside the silicon |
-| CH32X035 (`brio/ch32x035/`) | [ch32x035/README.md](ch32x035/README.md) - Toolchain (WCH's gcc 15 with its xw extension, the CH32V203's ISA and ABI on the QingKe V4C), WCH's evaluation board in its QFN20 edition, the seven parts of the series - one die in seven packages - in one part table the build states, the two-wire debug port on PC18/PC19 through a WCH-LinkE and WCH's OpenOCD fork, the console on the probe's own serial through USART2, what the documents say that shapes the stratum (one root and no bus prescaler, 24-pin ports over three configuration registers with no speed and no open drain, the pads a package shorts together, the vendor library's RAM copy of CFGHR) and what the silicon taught it (RMVF a level, a reset pulse on the power controller's line that cuts the part off its debug port, a port read through its shut gate answering with the last word the bus carried, the vendor's CFGHR caution not this die's, corecfgr's 0x1F slowing the core); then its documents - the platform, the clock, the pins and the USARTs, each measured on the CH32X035F8U6 by its suite |
-| RP2040 (`brio/rp2040/`) | [rp2040/README.md](rp2040/README.md) - Toolchain (the pico-sdk's CMSIS header and register definitions vendored, no SDK runtime, the boot stage checked in as bytes), the WeAct board, the Debug Probe and which OpenOCD the flash chip demands, and the two cores with a kernel on each; then its documents |
-| RP2350 (`brio/rp2350/`) | [rp2350/README.md](rp2350/README.md) - TWO PROCESSOR ARCHITECTURES OVER ONE SET OF PERIPHERALS and what that costs a build: the two toolchains (arm-none-eabi for the Cortex-M33 pair, an upstream riscv32-unknown-elf for the Hazard3 one), the four presets, the IMAGE_DEF block in the image as the only thing that decides which pair runs, the WeAct core board, the Debug Probe and the third OpenOCD - Raspberry Pi's fork, the only build that examines all four cores - the state-independent flash verb built on the rescue reset, and the four facts of this silicon that shape every chapter (a processor reset that leaves the clock tree standing, pads that come up isolated, bit maps that are not the RP2040's, erratum RP2350-E9); then its documents |
-| STM32F4 (`brio/stm32f4/`) | [stm32f4/README.md](stm32f4/README.md) - Toolchain (the hard-float ABI, the FPU enabled by the crt), the four boards (an STM32F429I-DISC1, a Nucleo-F446RE, an STM32F411CE black pill on a standalone STLINK-V3, a 32F469IDISCOVERY), ST-LINK upload, the HLA caveat, and FAMILY COVERAGE: twenty-three headers, the frequency ladders keyed on the part class and refused where no manual was read; then its documents |
-| the Cortex-M core stratum (`brio/cortexm/`) | [cortexm/README.md](cortexm/README.md) - what the Cortex-M families share whatever the vendor: NVIC + PRIMASK, the SysTick ticker and the microsecond busy-wait on SysTick's counter, the include-order contract, what stays per family and which families take which of the three files |
-| the PL011 IP stratum (`brio/pl011/`) | [pl011/README.md](pl011/README.md) - ARM's PrimeCell UART written once for every family that carries it: what is ARM's (the frame, the divisor arithmetic, the registers, the resource and the transport) and what a family owes it (the `Pl011Chip` traits - registers, reset, interrupt line, clock, pads), and the rule that births an IP stratum |
-| the PL022 IP stratum (`brio/pl022/`) | [pl022/README.md](pl022/README.md) - ARM's PrimeCell SSP the same way: the host engine `util/spi_bus.hpp` drives, the client, the framings and the prescaler pair, with the chip's half behind a concept |
-| the DesignWare I2C IP stratum (`brio/dw_apb_i2c/`) | [dw_apb_i2c/README.md](dw_apb_i2c/README.md) - Synopsys's DW_apb_i2c the same way: the command FIFO whose entries carry the bus conditions, the host engine, the client, and what a family states about pads, requests and its reset controller |
-| the off-chip devices (`brio/devices/`) | [devices/README.md](devices/README.md) - the stratum for what sits OFF the chip and is reached over a link the chip provides: the DCS vocabulary every command panel shares, a traits type per controller, and how a driver here is judged twice - against a host simulator and against the bench |
-| host (`brio/host/`) | [host/README.md](host/README.md) - The native test target: HostPlatform, doctest suites, what a simulation is allowed (the whole standard library, heap included), and the simulator's own page - [host/simulator.md](host/simulator.md), the contract between a host program and a viewer watching it: one shared region in each direction, why input is a snapshot and not a socket, and the three rules that keep it portable |
-| the boards | [boards/README.md](boards/README.md) - how a board joins the bench (build by type, the manifest, `bin/brio`), then one page per board brio is tested on |
+| AVR DA, DB and EA (`brio/avrxt/`) | [avrxt/README.md](avrxt/README.md) - the self-built boards, the Atmel-ICE, PyAvrOCD debugging, the clock fixture |
+| SAM C21 (`brio/samc21/`) | [samc21/README.md](samc21/README.md) - the vendored device pack, the self-built board, OpenOCD over SWD, the family smoke check |
+| STM32G0 (`brio/stm32g0/`) | [stm32g0/README.md](stm32g0/README.md) - the three Nucleo boards, ST-LINK upload and debug and their caveats, the family coverage over the x1 and x0 lines |
+| CH32V00x (`brio/ch32v00x/`) | [ch32v00x/README.md](ch32v00x/README.md) - WCH's compiler, the two boards and the part table, the WCH-Link, the console on the probe's own serial, what the QingKe V2 core taught the stratum |
+| CH32V203 / CH32V303 (`brio/ch32vx03/`) | [ch32vx03/README.md](ch32vx03/README.md) - the two series under two ABIs, the thirteen parts the build states, the two-wire debug port and its reset verb, what the silicon taught the stratum |
+| CH32X035 (`brio/ch32x035/`) | [ch32x035/README.md](ch32x035/README.md) - one die in seven packages, WCH's evaluation board, the debug port on PC18/PC19, what the documents and the silicon taught the stratum |
+| RP2040 (`brio/rp2040/`) | [rp2040/README.md](rp2040/README.md) - the vendored device description, the boot stage, the Debug Probe and which OpenOCD the flash chip demands, two cores with a kernel each |
+| RP2350 (`brio/rp2350/`) | [rp2350/README.md](rp2350/README.md) - two processor architectures over one set of peripherals: the two toolchains, the four presets, the image block that decides which pair runs, the one OpenOCD that examines all four cores |
+| STM32F4 (`brio/stm32f4/`) | [stm32f4/README.md](stm32f4/README.md) - the hard-float ABI, the four boards, ST-LINK upload, the family coverage over twenty-three headers |
+| the Cortex-M core stratum (`brio/cortexm/`) | [cortexm/README.md](cortexm/README.md) - what the Cortex-M families share whatever the vendor, and what stays per family |
+| the PL011 IP stratum (`brio/pl011/`) | [pl011/README.md](pl011/README.md) - ARM's PrimeCell UART written once: what is ARM's, what a family owes it, and the rule that births an IP stratum |
+| the PL022 IP stratum (`brio/pl022/`) | [pl022/README.md](pl022/README.md) - ARM's PrimeCell SSP the same way: the SPI host engine, the client, the framings |
+| the DesignWare I2C IP stratum (`brio/dw_apb_i2c/`) | [dw_apb_i2c/README.md](dw_apb_i2c/README.md) - Synopsys's DW_apb_i2c the same way: the command FIFO, the host engine, the client |
+| the off-chip devices (`brio/devices/`) | [devices/README.md](devices/README.md) - what sits off the chip over a link the chip provides: the DCS vocabulary, a traits type per display controller, a driver judged against a simulator and against the bench |
+| host (`brio/host/`) | [host/README.md](host/README.md) - the native test target: HostPlatform, the doctest suites, what a simulation is allowed; and [host/simulator.md](host/simulator.md), the contract between a host program and a viewer watching it |
+| the boards | [boards/README.md](boards/README.md) - how a board joins the bench, then one page per board brio is tested on |
 | the probes | [probes/README.md](probes/README.md) - the flash mechanisms `bin/brio` knows, then one page per probe |
 
 ## Rules of this directory
