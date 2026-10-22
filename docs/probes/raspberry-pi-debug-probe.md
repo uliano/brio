@@ -1,115 +1,143 @@
 # Raspberry Pi Debug Probe
 
 Raspberry Pi's own probe: an RP2040 running the `debugprobe` firmware
-(CMSIS-DAP v2, FW 2.0.0 on the ones here) in a case, with a UART
-bridge - probe and console in ONE USB device with a real serial, so
-the bench manifest addresses both by it: the console as
+(CMSIS-DAP v2, FW 2.0.0 on the ones here) in a case, with a UART bridge.
+Probe and console are one USB device with a real serial, so the bench
+manifest addresses both by it: the console as
 `/dev/serial/by-id/usb-Raspberry_Pi_Debug_Probe__CMSIS-DAP__<serial>-if01`,
-the probe as `adapter serial <serial>`. The same firmware runs on
-any RP2040 board (SWD on GP2/GP3, the UART on GP4/GP5).
+the probe as `adapter serial <serial>`. The same firmware runs on any
+RP2040 board (SWD on GP2/GP3, the UART on GP4/GP5). It is the probe of
+the RP2040 and RP2350 boards, which have no probe of their own; this
+page says how it is wired, how `bin/brio` drives it on each chip, which
+OpenOCD build each chip needs, and the traps: an unpowered target that
+looks like a broken wire, a flash chip the release does not know, a
+second core a default session halts, and a bus that only the rescue
+port can reset.
 
-- **Two JST-SH ports and one cable colour code**, read from the
-  probe's side: port **D** carries SWD - orange SWCLK (out of the
-  probe), black GND, yellow SWDIO; port **U** carries the UART -
-  orange TX (out of the probe), black GND, yellow RX (into the probe).
-  So onto a target: D's yellow on SWDIO, orange on SWCLK; U's orange
-  on the target's RX, yellow on the target's TX - the one crossing.
-  A JST-JST cable fits a Pico H's debug connector straight; the
-  JST-to-three-dupont cable fits any header.
-- **3.3 V fixed, no VTref, no target-power sense**: it never goes on
-  a target above 3.3 V (an RP2040's pins are not 5 V tolerant - the
-  SAM C21 board jumpered at 5 V is out), and an unpowered target
-  looks exactly like a broken wire ("cannot read the DP"): check the
-  target's own USB first.
-- `brio flash <board> <app>` runs OpenOCD with `interface/cmsis-dap.cfg`
-  + `cmsis_dap_backend usb_bulk` (the probe has no HID interface;
-  the Atmel-ICE's `hid` is the manifest's default, this probe's entry
-  says `"backend": "usb_bulk"`) + the board type's target script +
-  `program <app>.elf verify`, `reset run` and the DHCSR write that
-  clears C_DEBUGEN.
-- **Multidrop SWD** (an RP2040's two debug ports) needs the probe's
-  DAP_SWD_Sequence command (CMSIS-DAP 1.20 / 2.00): this firmware has
-  it; an older CMSIS-DAP probe fails the select with "CMSIS-DAP
-  command SWD_Sequence failed".
-- **The flash chip decides the OpenOCD**: the 0.12.0 release's rp2040
-  flash driver programs a Pico's Winbond W25Q16JV (measured) and
-  refuses a WeAct board's Zetta ZD25Q16 ("Unknown flash device (ID
-  0x001560ba)"); a build from OpenOCD's git identifies both - so a
-  programmer entry may name its own `"openocd"` and the shared one
-  stays the release ([../rp2040/README.md](../rp2040/README.md)).
-- **And on the RP2350 the ARCHITECTURE decides it.** That chip carries
-  a Cortex-M33 pair and a Hazard3 RISC-V pair, and the same probe
-  reaches both - but only through Raspberry Pi's own OpenOCD fork, the
-  third build on this bench. The 0.12.0 release does not know the chip
-  at all; the git build attaches to its Arm cores and cannot debug
-  Hazard3, because its RISC-V target driver takes no `-dap` and this
-  chip's debug module is reached through one. The fork examines all
-  four cores, serves gdb on either architecture and flashes from either
-  side ([../rp2350/README.md](../rp2350/README.md) carries the table and
-  the core selection).
-- **The rescue before an RP2040 is programmed**: `brio flash` first
-  runs the target script's `RESCUE` path, which restarts the chip's
-  power-on state machine through the rescue debug port and leaves the
-  bootrom halted, then programs and runs core 0 in a second session -
-  so the new image meets core 1 in the bootrom's wait loop and every
-  block in reset, as after a power-on. An SWD reset alone is core 0's
-  SYSRESETREQ, which touches neither core 1 nor any peripheral: core 1
-  went on running the previous image out of the flash being rewritten,
-  and a UART1 the previous image had enabled stayed driving its pad. The
-  `-upload` target and the debug launch do not rescue.
-- **The state-independent flash verb**, the RP2350's: `brio flash` runs
-  TWO sessions there. The first is a DAP
-  with NO TARGET behind it, which sets and clears the rescue-restart
-  bit in the RP-AP's control register - the one reset that works with
-  the clocks stopped and the core power domain down, and the reason it
-  cannot be the target script's own rescue path is that the script
-  examines a core first, which is exactly what a rescue is for. The
-  second programs as core 0 of the Arm pair - after the rescue that is
-  what is running, whatever the image in the flash named - and ends in
-  a reset that hands the chip back to the bootrom and so to the new
-  image's own architecture. So a board is recoverable from any state a
-  program can put it in, with no button and no replug, and an image of
-  the other architecture is no obstacle: neither could be halted first.
-  The sequences are `cli/bench/flash.py`'s and are not repeated here.
-- **The probe's firmware is old enough to be nagged about**: the fork
-  reports it and falls back to a "low-performance workaround". That is
-  cosmetic, and no probe is updated for it.
+## Wiring
+
+- **Two JST-SH ports and one cable colour code**, read from the probe's
+  side: port D carries SWD, orange SWCLK (out of the probe), black GND,
+  yellow SWDIO; port U carries the UART, orange TX (out of the probe),
+  black GND, yellow RX (into the probe). So onto a target: D's yellow on
+  SWDIO, orange on SWCLK; U's orange on the target's RX, yellow on the
+  target's TX, the one crossing. A JST-JST cable fits a Pico H's debug
+  connector straight; the JST-to-three-dupont cable fits any header.
+- **3.3 V fixed, no VTref, no target-power sense.** It never goes on a
+  target above 3.3 V (an RP2040's pins are not 5 V tolerant; the SAM
+  C21 board jumpered at 5 V is out), and an unpowered target looks
+  exactly like a broken wire ("cannot read the DP"): check the target's
+  own USB first.
 - **udev**: no rule for the Raspberry Pi vendor id (2e8a) ships with
   OpenOCD's contrib rules or probe-rs's; one line by vendor id
   (`SUBSYSTEM=="usb", ATTRS{idVendor}=="2e8a", MODE="0660",
-  GROUP="plugdev", TAG+="uaccess"`, and the tty world-readable) is
-  what makes the probe and its console usable without root.
-- **The UART bridge carries 3 Mbaud byte-exact**, host to board
-  (measured with `brio stress` against the RP2040 serial suite: 115200
-  to 3 Mbaud, 142 KB at the top rung with no error and no overrun on
-  the board), so `brio stress` sets no ceiling on this port and every
-  rung is pumped. **It sends 8N1 whatever parity the host asks for**:
-  a leg announced at 8E1 arrives as clean 8N1 frames (every byte
-  accepted, no frame error on the board), so a parity- or
-  frame-error test through this bridge measures the probe and not
-  the target - such legs belong on a wire between two boards.
-- **Core 0 alone, always** (`set USE_CORE 0` before the target
-  script, in `brio flash`, the `-upload` target and the debug launch):
-  OpenOCD's rp2040 script takes both cores as an SMP pair by default,
-  halts both to program, resets core 1 a second time and leaves it
-  debug-enabled - which halts a two-kernel program's core 1 on its
-  first BKPT and freezes the chip's timer under core 0
-  ([../rp2040/multicore.md](../rp2040/multicore.md)). A core 1 that
-  such a session left halted (DHCSR reads 0x00030003) is released
-  once with both cores configured: `reset run`, then `mww 0xE000EDF0
-  0xA05F0000` on `rp2040.core1` and on `rp2040.core0`.
-- **A chip whose bus is wedged answers the DP and not the AP** - "Could
-  not find MEM-AP to control the core" with DPIDR read fine, the
-  console mute - after a fault on a bus that never completes (a read
-  of a peripheral whose clock is stopped did it). No SWD reset reaches
-  it and the probe carries no RUN line; what does is the RP2040's
-  RESCUE DEBUG PORT (datasheet 2.3.4.2), DP instance 0xf, whose
-  CDBGPWRUPREQ resets the chip: the OpenOCD built from git runs it
-  with `-c "set RESCUE 1"` before `target/rp2040.cfg` (the 0.12.0
-  release's script has no rescue branch), after which an ordinary
-  `brio flash` programs the board again. Measured on a Pico.
-- **Debugging**: cortex-debug over the same OpenOCD; not yet exercised
-  on this desk.
+  GROUP="plugdev", TAG+="uaccess"`, and the tty world-readable) is what
+  makes the probe and its console usable without root.
+
+## How brio drives it
+
+`brio flash <board> <app>` runs OpenOCD with `interface/cmsis-dap.cfg`
+and `cmsis_dap_backend usb_bulk` (the probe has no HID interface; the
+Atmel-ICE's `hid` is the manifest's default, this probe's entry says
+`"backend": "usb_bulk"`), the board type's target script, `program
+<app>.elf verify`, `reset run` and the DHCSR write that clears
+C_DEBUGEN.
+
+**Multidrop SWD** (an RP2040's two debug ports) needs the probe's
+DAP_SWD_Sequence command (CMSIS-DAP 1.20 / 2.00): this firmware has it;
+an older CMSIS-DAP probe fails the select with "CMSIS-DAP command
+SWD_Sequence failed".
+
+**The flash chip decides the OpenOCD on the RP2040.** The 0.12.0
+release's rp2040 flash driver programs a Pico's Winbond W25Q16JV
+(measured) and refuses a WeAct board's Zetta ZD25Q16 ("Unknown flash
+device (ID 0x001560ba)"); a build from OpenOCD's git identifies both. So
+a programmer entry may name its own `"openocd"` and the shared one stays
+the release ([../rp2040/README.md](../rp2040/README.md)).
+
+**On the RP2350 the architecture decides it.** That chip carries a
+Cortex-M33 pair and a Hazard3 RISC-V pair, and the same probe reaches
+both, but only through Raspberry Pi's own OpenOCD fork, the third build
+on this bench. The 0.12.0 release does not know the chip at all; the git
+build attaches to its Arm cores and cannot debug Hazard3, because its
+RISC-V target driver takes no `-dap` and this chip's debug module is
+reached through one. The fork examines all four cores, serves gdb on
+either architecture and flashes from either side
+([../rp2350/README.md](../rp2350/README.md) carries the table and the
+core selection).
+
+**The probe's firmware is old enough to be nagged about**: the fork
+reports it and falls back to a "low-performance workaround". That is
+cosmetic, and no probe is updated for it.
+
+## The rescue before an RP2040 is programmed
+
+`brio flash` first runs the target script's `RESCUE` path, which
+restarts the chip's power-on state machine through the rescue debug
+port and leaves the bootrom halted, then programs and runs core 0 in a
+second session. So the new image meets core 1 in the bootrom's wait
+loop and every block in reset, as after a power-on. An SWD reset alone
+is core 0's SYSRESETREQ, which touches neither core 1 nor any
+peripheral: core 1 went on running the previous image out of the flash
+being rewritten, and a UART1 the previous image had enabled stayed
+driving its pad. The `-upload` target and the debug launch do not
+rescue.
+
+## The state-independent flash verb of the RP2350
+
+On the RP2350 `brio flash` runs two sessions. The first is a DAP with no
+target behind it, which sets and clears the rescue-restart bit in the
+RP-AP's control register: the one reset that works with the clocks
+stopped and the core power domain down, and the reason it cannot be the
+target script's own rescue path, which examines a core first, which is
+exactly what a rescue is for. The second programs as core 0 of the Arm
+pair, which after the rescue is what is running whatever the image in
+the flash named, and ends in a reset that hands the chip back to the
+bootrom and so to the new image's own architecture. So a board is
+recoverable from any state a program can put it in, with no button and
+no replug, and an image of the other architecture is no obstacle:
+neither could be halted first. The sequences are `cli/bench/flash.py`'s
+and are not repeated here.
+
+## Core 0 alone, always
+
+`set USE_CORE 0` goes before the target script in `brio flash`, the
+`-upload` target and the debug launch. OpenOCD's rp2040 script takes
+both cores as an SMP pair by default, halts both to program, resets core
+1 a second time and leaves it debug-enabled, which halts a two-kernel
+program's core 1 on its first BKPT and freezes the chip's timer under
+core 0 ([../rp2040/multicore.md](../rp2040/multicore.md)). A core 1 that
+such a session left halted (DHCSR reads 0x00030003) is released once
+with both cores configured: `reset run`, then `mww 0xE000EDF0
+0xA05F0000` on `rp2040.core1` and on `rp2040.core0`.
+
+## A chip whose bus is wedged
+
+Such a chip answers the DP and not the AP ("Could not find MEM-AP to
+control the core" with DPIDR read fine, the console mute) after a fault
+on a bus that never completes; a read of a peripheral whose clock is
+stopped did it. No SWD reset reaches it and the probe carries no RUN
+line; what does is the RP2040's rescue debug port (datasheet 2.3.4.2),
+DP instance 0xf, whose CDBGPWRUPREQ resets the chip: the OpenOCD built
+from git runs it with `-c "set RESCUE 1"` before `target/rp2040.cfg`
+(the 0.12.0 release's script has no rescue branch), after which an
+ordinary `brio flash` programs the board again. Measured on a Pico.
+
+## The UART bridge
+
+It carries 3 Mbaud byte-exact, host to board (measured with
+`brio stress` against the RP2040 serial suite: 115200 to 3 Mbaud,
+142 KB at the top rung with no error and no overrun on the board), so
+`brio stress` sets no ceiling on this port and every rung is pumped. **It
+sends 8N1 whatever parity the host asks for**: a leg announced at 8E1
+arrives as clean 8N1 frames (every byte accepted, no frame error on the
+board), so a parity- or frame-error test through this bridge measures
+the probe and not the target; such legs belong on a wire between two
+boards.
+
+## Debugging
+
+cortex-debug over the same OpenOCD; not yet exercised on this desk.
 
 Not yet driven by brio through this probe: any target but the RP2040
 and the RP2350 (it would drive the SAM C21 at 3.3 V and the STM32G0
