@@ -17,12 +17,12 @@ model described in Miro Samek's book, written clean-room: the concepts
 come from the book, never from the QP source. An active object is a
 component of the application with its own queue of events and its own
 state, which the kernel serves one event at a time; cooperative means
-that a handler runs to completion before any other active object runs
-on that core, and that interrupt handlers, not the kernel, are the
-only thing that preempts it ([kernel.md](kernel.md) states the model
-and its contracts). It runs today on ten
-targets, from an 8-bit AVR to dual-core ARM and RISC-V chips, and on
-the host, where its tests run ([the target table](../../README.md)).
+that an active object's event handler runs to completion before any
+other active object runs on that core, and that interrupt handlers,
+not the kernel, are the only thing that preempts it ([kernel.md](kernel.md) states the model
+and its contracts). It runs today on nine
+families of microcontroller, from an 8-bit AVR to dual-core ARM and
+RISC-V chips, and on the host, where its tests run ([the target table](../../README.md)).
 
 ![brio strata](architecture.svg)
 
@@ -43,8 +43,10 @@ at the layer being added.
 
 Within that rule, three levels of stability say how much a change may
 disturb. The kernel's ideas are fairly stable: the active-object
-contract, events by value, the two loans (a pointer inside an event,
-valid for one dispatch or until a reply event), the three ways of
+contract, events by value, the two loans (a buffer lent through a
+pointer inside an event, either for the one dispatch that delivers
+the event, that is one call of the receiver's handler, or until a
+reply event returns it), the three ways of
 delivering an event (post to one object, publish to a list, reply to
 whoever asked), priority as list order, timers that post events, the
 panic record a failure leaves for the next boot, the platform concept
@@ -131,7 +133,8 @@ code that differs per instance, a register-struct reference or an
 else is C++.
 
 **Authority of util/.** A `util/` type is target-independent by
-contract: it includes no target, it is parametrized on a concept, and
+contract: it includes no target, it is parametrized on a concept (a
+compiler-checked list of requirements on a type), and
 it runs on the host against a simulated chip. Its concept, however,
 was written looking at the targets that exist, and the authority to
 call the type general is exactly the list of those targets. Every
@@ -249,7 +252,8 @@ layers above, not what the peripheral is.
 - **Interrupts condense; DMA is an interrupt handler made of silicon.**
   An interrupt handler body (exposed by the driver, bound by the
   application) lives in hardware time. It does the minimum bookkeeping
-  (a byte into a ring, one step of an engine), plus whatever has a
+  (a byte into a ring, one step of an engine, the part of a driver that
+  moves the bytes of one transfer), plus whatever has a
   deadline measured in cycles (a counter snapshot-and-reset that must
   land within one heartbeat period, for instance 64 CPU cycles at
   375 kHz), and, on an edge only (a complete line, a transaction done,
@@ -260,8 +264,9 @@ layers above, not what the peripheral is.
   crosses between them. A DMA channel does the handler's byte-moving
   without the CPU and raises the edge itself. It plugs in inside an
   engine: `start(request)` programs the channel with the request's
-  buffers (lent by the requester until the completion event, so the
-  channel may read and write them meanwhile), and the completion
+  buffers (lent by the requester under the second of the two loans,
+  until the completion event, so the channel may read and write them
+  meanwhile), and the completion
   interrupt posts `TransferDone`. Nothing above the engine changes; the
   DMA channel is a resource like a timer, and a receive stream fed by
   DMA is a ring whose producer index is the hardware's counter
@@ -334,8 +339,8 @@ layers above, not what the peripheral is.
 - **A core stratum sits between util/ and the families that share a
   core.** `cortexm/` holds what ARM designed and every Cortex-M vendor
   ships unchanged (the NVIC and the PRIMASK guard, the SysTick ticker)
-  and nothing of any vendor: it reads CMSIS-Core symbols only and
-  refuses to be included before a family's device header, which is
+  and nothing of any vendor: of hardware it reads CMSIS-Core symbols
+  only, and it refuses to be included before a family's device header, which is
   what brings those symbols. It was factored at the second ARM family,
   with both copies in hand and every image of both families
   byte-identical before and after; the platform, the clock, the pins,
@@ -359,7 +364,7 @@ layers above, not what the peripheral is.
   names, say) does not qualify and stays one file per family. An IP
   file knows no chip and includes nothing of a family. What a family
   owes it is stated as a concept and satisfied by a traits type of the
-  family's own: where the registers are, the reset, the interrupt line
+  family's own (a small type whose members state the family's facts): where the registers are, the reset, the interrupt line
   and its controller, the critical section, which pads are legal,
   which rate clocks it, which DMA requests it raises. The family's own
   header keeps the public names an application writes. The claim "this
@@ -380,7 +385,8 @@ layers above, not what the peripheral is.
   list the resources an application claims and reject a double use
   when the program is compiled; that unit is born with the first
   portable example application, a stated gap of the learning route.
-- **A driver covers its family, not its bench chip.** brio is a
+- **A driver covers its family, not its bench chip.** The bench chip
+  is the one part of a family on the desk. brio is a
   framework: the target is the whole device range, every instance,
   every mode, every routing option of the chapter's register
   description and every family's errata, not the subset today's
@@ -437,8 +443,8 @@ layers above, not what the peripheral is.
   configured (widths, direction, the peripheral's address, the
   validation of all of it) is written when it is configured (`init`,
   `arm`) or checked when the program is compiled; an operation writes
-  only what changes (an
-  address, a count, an enable). Three: a critical section covers a
+  only what changes (a
+  buffer address, a count, an enable). Three: a critical section covers a
   decision (a claim, a test-and-set), never a sequence of register
   stores, a copy or a spin; a masked window longer than a few tens of
   cycles states its count in its comment.
@@ -452,7 +458,8 @@ layers above, not what the peripheral is.
 - **A loop proves the bytes, never the rate.** A suite's loop (a
   loop-back, a single wire, a jumper, a crossed pair, a self-link)
   shares one divisor at both ends, so a wrong divisor is a slower or a
-  faster loop and every byte still comes back. Every test letter that
+  faster loop and every byte still comes back. Every test letter (one
+  test of a bench suite, selected by a letter on its console) that
   loops or sets a rate therefore times a run of frames against the
   wire's time at the rate asked, never at the rate the divisor
   produced, and judges the reading in thousandths: a UART run within
@@ -493,8 +500,8 @@ layers above, not what the peripheral is.
   per cent of that part's memory too. A suite is regrouped when an
   image has under about five per cent of its flash or its RAM left,
   the RAM's margin being the stack's room. The guard is a link, not a
-  fixture: `brio check` builds every application on every preset of
-  its family, the smallest part's among them, and fails on an image
+  fixture: `brio check` builds every application on every preset (one
+  configured build of a project, one per bench chip) of its family, the smallest part's among them, and fails on an image
   that does not compile or fit; `brio fit` is the census of every
   image's margins. On the CH32V00x, whose smallest part has 16 KB of
   flash and 2 KB of RAM, this rule decides the shape of every suite; on
