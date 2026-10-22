@@ -1,45 +1,86 @@
 # Clock (CH32X035)
 
-The main clock of the CH32X035 series, where brio's clock model
-([../design/clock.md](../design/clock.md)) meets its simplest silicon:
-ONE root, the 48 MHz internal RC, and ONE divider between it and every
-block on the chip. A static `Clock<internal, hz>` names a rate the root
-divides into exactly and is the one truth every driver derives from; a
-`DynamicClock` moves the divider at run time with its users rebased
-first. `Rcc` beside them is the block itself - the root and its trim,
-the divider as it stands, the clock output, the peripheral gates and
-resets, and the reset flags.
+This document is for a programmer bringing a CH32X035 to the rate the
+program wants, and for one who needs the clock block itself: the
+peripheral gates, the reset flags, the clock output pad. The main clock
+of this series is where brio's clock model
+([design/clock.md](../design/clock.md)) meets its simplest silicon: one
+root, the 48 MHz internal RC oscillator (the HSI), and one divider
+(HPRE) between it and every block on the chip. A static
+`Clock<ClockSource::internal, hz>` names a rate the root divides into
+exactly and is the one truth every driver derives from: a driver asks
+the clock type for its rate and computes its own divisors from it,
+nothing is read from the hardware. A `DynamicClock` moves the divider at
+run time with its users rebased first. `Rcc` beside them is the block
+itself: the root and its trim, the divider as it stands, the clock
+output, the peripheral gates and resets, and the reset flags.
 
-Documents of record: the CH32X035 reference manual V1.8 (3.2 for the
+The smallest use, which is most programs:
+
+```cpp
+using SysClock = brio::Clock<brio::ClockSource::internal, 48'000'000>;
+constexpr SysClock clock;
+
+int main() {
+    SysClock::init();                     // first: 48 MHz, two wait states
+    Serial::init(clock, 115200);          // drivers ask the tag
+    brio::Ticker::init(clock);
+}
+```
+
+`SysClock` is the type, `clock` an empty tag object of it, the argument
+every driver's `init` takes to learn the rate; `init()` moves the
+divider from its reset value (/6, 8 MHz) to the rate the type names,
+with the flash's wait states set around the move. Three things decide
+whether that works. `init()` runs before any driver's: a driver computes
+its divisor from the rate the type claims, so a port or a ticker
+initialized on a chip still at its 8 MHz reset rate with a 48 MHz
+clock type runs six times too slowly, and nothing refuses it. The rate
+must be 48 MHz divided exactly by one of HPRE's dividers (1 to 8, then
+16, 32, 64, 128, 256): any other rate is a compile error, never a
+rounded one. And `init()` answers false when the oscillator never
+reports ready, leaving the tree untouched; the program decides what to
+say about a boot that stayed at the reset rate.
+
+The rest of this page, in order: the documents of record; what the
+silicon does; the types and verbs; how to use it, the moving clock and
+the clock output included; the bench findings, the whole ladder of rates
+among them; and what is not covered.
+
+## Documents of record
+
+The CH32X035 reference manual V1.8 (3.2 for the
 reset sources, 3.3 and figure 3-2 for the tree, 3.3.2 for the HSI,
 3.3.3.4 for the clock output, 3.4.1 to 3.4.9 for the registers, 20.3.1
 for the flash's wait states) and the CH32X035/X033 datasheet V1.7
 (table 3-9 for the HSI's accuracy and start-up, table 2-1 for the pad
 the clock output needs). The header is
 [brio/ch32x035/clock.hpp](../../brio/ch32x035/clock.hpp); the reference
-suite is `test_x035_clock`.
+suite is `test_x035_clock` (a suite's letter, below, is one command key
+of its console and the group of verdicts it runs, `z` the key that runs
+them all).
 
 ## What the silicon does
 
-- **ONE ROOT.** The HSI, a 48 MHz RC oscillator, is on out of reset and
+- **One root.** The HSI, a 48 MHz RC oscillator, is on out of reset and
   ready (HSION and HSIRDY both 1), and the manual recommends not turning
-  it off (3.3.2); SYSCLK IS the HSI - there is no PLL, no crystal
+  it off (3.3.2); SYSCLK is the HSI - there is no PLL, no crystal
   oscillator, no low-speed RC and no clock switch (3.3.1, 3.3.3.1). Its
   accuracy after the factory calibration is -1.7 to +1.6 per cent over 0
   to 70 C and -2.6 to +2.2 over -40 to 85 C, and it starts in 1.5 to 3.5
   us (datasheet table 3-9).
-- **THE CALIBRATION AND THE TRIM.** HSICAL[7:0] is the factory's value,
-  loaded at reset and read-only; HSITRIM[4:0] is the user's, SUPERIMPOSED
+- **The calibration and the trim.** HSICAL[7:0] is the factory's value,
+  loaded at reset and read-only; HSITRIM[4:0] is the user's, superimposed
   on it, 16 at reset - "48MHz +-1%" - at "about 110KHz per step"
   (3.4.1). HSICAL reads 0x53 on the CH32X035F8U6, and the trim takes a
   step each way (measured).
-- **ONE DIVIDER.** HCLK is SYSCLK through HPRE[3:0]: codes 0 to 7 divide
+- **One divider.** HCLK is SYSCLK through HPRE[3:0]: codes 0 to 7 divide
   by 1 to 8, codes 8 to 15 by 2, 4, 8, 16, 32, 64, 128 and 256 - the two
   halves overlapping on 2, 4 and 8 - and the reset value is 0101, /6, so
   the chip wakes at **8 MHz** (3.4.2). Every rate the chip can run at is
   48 MHz divided by one of those. The dividers /1 to /6, /8 and /16 are
   measured, each through the low code where two divide alike.
-- **NO BUS PRESCALER.** Everything below HB runs at HCLK - the USARTs'
+- **No bus prescaler.** Everything below HB runs at HCLK - the USARTs'
   divisors count HCLK (14.3), the timers and the rest the same - so a
   peripheral's rate is the clock's and nothing else, and `pclk_hz` is
   `hz` - a USART's divisor measured as HCLK / baud at every rung of the
@@ -48,41 +89,41 @@ suite is `test_x035_clock`.
   independent watchdog - whose start forces the HSI on for good
   (3.3.3.3) - the ADC's own divider, the USB clock, and SYSCLK/6 for the
   flash's programming interface.
-- **THE FLASH'S WAIT STATES FOLLOW HCLK** (20.3.1): 0 up to 12 MHz, 1
+- **The flash's wait states follow HCLK** (20.3.1): 0 up to 12 MHz, 1
   up to 24 MHz, 2 up to 48 MHz, the fourth code invalid - FLASH_ACTLR
   holds that field and nothing else. The three codes read back as the
   ladder below moves (measured).
-- **A NOTE WITH NO BIT.** 3.4.2 closes HPRE's description with "when the
+- **A note with no bit.** 3.4.2 closes HPRE's description with "when the
   prescaler factor of the HB clock source is greater than 1, the
   prefetch buffer must be turned on", and no register of the manual has
   a prefetch-buffer bit; WCH's own clock setup divides HCLK and touches
   nothing else. The driver does the same, and on the CH32X035F8U6 every
   divided rung, /2 to /16, ran that way (measured).
-- **THE CLOCK OUTPUT** carries SYSCLK or the HSI (CFGR0.MCO = 100 or
+- **The clock output** carries SYSCLK or the HSI (CFGR0.MCO = 100 or
   101; every other code, nothing) on **PB9** as an alternate push-pull
   output (3.3.3.4; the datasheet's pin table). PB9 is bonded on the
   LQFP64M, the LQFP48 and the two 28-pin packages, and on neither
   20-pin one.
-- **THE GATES.** Three enable registers, one bit a block (3.4.5 to
-  3.4.7): RCC_AHBPCENR for the DMA, SRAMEN (the SRAM's clock IN SLEEP,
+- **The gates.** Three enable registers, one bit a block (3.4.5 to
+  3.4.7): RCC_AHBPCENR for the DMA, SRAMEN (the SRAM's clock in Sleep,
   not the SRAM's clock), the USB host/device controller and the USB PD
-  controller - its reset value 0x00021004, those last three ON
+  controller - its reset value 0x00021004, those last three on
   (measured); the PB2 register for AFIO, the three ports, the ADC, TIM1,
   SPI1 and USART1; the PB1 register for TIM2, TIM3, the window watchdog,
   USART2 to USART4, I2C1 and PWR. The reset registers mirror them
   (3.4.3, 3.4.4), and the HB one holds three lines alone - the USB
   host/device controller's, the PIOC's and the USB PD's (3.4.9): the DMA
   and the SRAM have none.
-- **THE RESET FLAGS ACCUMULATE** in RCC_RSTSCKR until RMVF is written
+- **The reset flags accumulate** in RCC_RSTSCKR until RMVF is written
   (3.4.8): LPWRRSTF, WWDGRSTF, IWDGRSTF, SFTRSTF, PORRSTF, PINRSTF and
-  OPARSTF. On this silicon RMVF is a LEVEL, not a pulse: written 1 it
+  OPARSTF. On this silicon RMVF is a level, not a pulse: written 1 it
   reads back 1 (measured on a CH32X035F8U6, where the CH32V203's clears
   itself), so `clear_reset_flags()` writes it and then clears it,
   leaving nothing standing. The system reset has more sources than flags
   (3.2.2): a core deadlock, an OPA output going high, a USB PD hard reset
   (whose flag, the manual says, is the software reset's) and an ADC
   watchdog reset among them.
-  THE MANUAL GIVES TWO RESET VALUES for the register: its register table
+  The manual gives two reset values for the register: its register table
   (table 3-1) says 0x0C000000, PORRSTF and PINRSTF, and 3.4.8's own bit
   table gives PINRSTF a reset value of 0. On the QFN20 there is no reset
   pin at all, and there 3.4.8's value is the silicon's (measured).
@@ -96,12 +137,13 @@ does), `Bus` (`hb`, `pb2`, `pb1` - where a gate and a reset line sit),
 `McoSource` (`none`, `sysclk`, `hsi`), `clock_timeout_turns` (every
 wait for HSIRDY is bounded).
 
-`Rcc`, the block, monostate:
+`Rcc`, the block, monostate (a type with no instances, every verb a
+static function over the one block):
 
 | verbs | what they do |
 |---|---|
 | `enable(bus, mask)`, `disable(bus, mask)`, `enabled(bus, mask)` | a peripheral's gate, by the `rcc_*` masks of device.hpp |
-| `reset(bus, mask)` | a peripheral's reset line pulsed, its gate left alone, true when pulsed; on `hb` the mask is RCC_AHBRSTR's; the power controller's line REFUSED, false and nothing written (bench findings) |
+| `reset(bus, mask)` | a peripheral's reset line pulsed, its gate left alone, true when pulsed; on `hb` the mask is RCC_AHBRSTR's; the power controller's line refused, false and nothing written (bench findings) |
 | `hsi_on()`, `hsi_ready()`, `hsi_start()` | the root read, and asked for with a bounded wait (it is on out of reset; a program that stopped it gets it back) |
 | `hsi_trim(t)`, `hsi_trim()`, `hsi_calibration()` | the user trim written and read, the factory value read |
 | `hpre_code()`, `hpre(code)`, `hclk_hz()` | the divider as it stands, a raw store, and the rate the registers say |
@@ -110,13 +152,13 @@ wait for HSIRDY is bounded).
 
 `Mco`, the clock output as a task: `has_pad` (PB9 bonded or not, from
 the part table), `init(src)` - the pad claimed and the multiplexer set
-in one verb, FALSE and nothing done on a package without the pad -
+in one verb, false and nothing done on a package without the pad -
 `off()` and `source()`.
 
 `Clock<ClockSource::internal, hz>`, the static clock: `hz` (HCLK),
 `pclk_hz` (the same), `sysclk_hz` (48 MHz), `hpre_code`, `is_static`.
 A rate that is not 48 MHz divided exactly by an HPRE divider is a
-COMPILE error, never a rounded one. `init()` asks for the HSI, raises
+compile error, never a rounded one. `init()` asks for the HSI, raises
 the wait states to what the faster of the current and the new rate
 needs, moves HPRE, then sets the new rate's own wait states - false,
 the tree untouched, if the HSI never reports ready; `restore()` is
@@ -125,16 +167,19 @@ the tree.
 
 `DynamicClock<Boot, Users...>`, the runtime regime - the CH32V00x's
 shape: `Boot` names the root undivided (`Clock<internal, 48'000'000>`,
-enforced), `set<hz>()` and `set(hz)` name the NEW RATE - a rate no
+enforced), `set<hz>()` and `set(hz)` name the new rate - a rate no
 divider reaches is a compile error or a false - and fan it out to the
-`Users` (each a `ClockUser`, checked where the list is written) in list
-order, synchronously, BEFORE the divider moves, so a user can drain
-what it has in flight at the old rate; the wait states are raised
-before a rise and lowered after a fall. `hz()`, `pclk_hz()`,
-`can_run_at(hz)`, `rebases<U>`, and the discrete-rate surface a delay
-table is indexed by: `rate_count` (16), `rate_hz(i)`, `rate_index()`.
-`restore()` puts the CURRENT rate back after a sleep that stopped the
-tree, telling the users nothing - their rate never changed.
+`Users` (each a `ClockUser`, a driver with a `rebase(hz)` verb, checked
+where the list is written) in list order, synchronously, before the
+divider moves, so a user can drain what it has in flight at the old
+rate; the wait states are raised before a rise and lowered after a
+fall. A driver that derives a rate from the clock and is not in the
+list is refused where it is initialized with the dynamic clock's tag.
+`hz()`, `pclk_hz()`, `can_run_at(hz)`, `rebases<U>`, and the
+discrete-rate surface a delay table is indexed by: `rate_count` (16),
+`rate_hz(i)`, `rate_index()`. `restore()` puts the current rate back
+after a sleep that stopped the tree, telling the users nothing - their
+rate never changed.
 
 ## How to use it
 
@@ -223,7 +268,7 @@ letter `a`. What they measured:
 - **The trim takes a step each way** (letter `c`): 16 to 17 and then to
   15, each read back and the centre restored after, with a console line
   read clean at each of the two trims.
-- **THE HSI AGAINST A CRYSTAL, and the trim's step in hertz**
+- **The HSI against a crystal, and the trim's step in hertz**
   (`test_x035_usart` letter `j`, the desk's CH32V006K8U6 on its 24 MHz
   crystal timing a gapless run of 4000 frames at 1 Mbaud - a divisor of
   48, so the oscillator's error alone - on its own clock): -2480 to -2701
@@ -258,7 +303,7 @@ letter `a`. What they measured:
   0 counting the same HCLK over 200 ticks): 9599992 for 9600000 at 48
   MHz down to 599996 for 600000 at 3 MHz - the poll's grain, no rung's
   period a cycle off. So the rungs' brackets disagree because the
-  OSCILLATOR does, not the tick.
+  oscillator does, not the tick.
 - **The HSI runs faster with the core asleep** (letter `d`'s last four
   brackets, four runs, each pair a few seconds apart): at 48 MHz, the
   core sleeping between ticks in `idle()` shortened the bracket by 385

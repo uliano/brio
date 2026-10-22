@@ -1,13 +1,54 @@
 # Pins (CH32X035)
 
-GPIO and the alternate-function block of the CH32X035 series: pins as
-types over ports of up to twenty-four pins, the pad's four bits in three
-configuration registers, the pulls, the bonding and the pads a package
-shorts together, the one-way lock - and AFIO, where a peripheral's
-signals move as a COLUMN, the debug port's two pads are given up, and
-each external-interrupt line is told its port.
+This document is for a programmer who needs a pin: an LED, a button, an
+analog input, or a pad handed to a peripheral, and for one who moves a
+peripheral's signals to other pads or gives up the debug port. It covers
+the GPIO and the alternate-function block (AFIO) of the CH32X035
+series: a pin as a type (`Pin<'A', 5>` names pin PA5 when the program
+is compiled; the letter and the number in the angle brackets are fixed
+choices that form the type, and a `using` alias gives it a name), a
+port as a type over up to twenty-four pins, the pad's four
+configuration bits in three registers, the pulls, which pads a package
+bonds and which it shorts together, the one-way lock; and AFIO, where a
+peripheral's signals move as a column (one code moves all of a
+peripheral's pads together), the debug port's two pads are given up,
+and each external-interrupt line is told its port.
 
-Documents of record: the CH32X035 reference manual V1.8 (the opening of
+The smallest use, an LED, a button with the pull-up, and an analog
+input:
+
+```cpp
+using Led = brio::Pin<'A', 0>;
+using Button = brio::Pin<'B', 3>;       // no pull-down here, a pull-up is fine
+using Level = brio::Pin<'A', 7>;
+
+Led::output(true);                      // high before it drives: an LED from 3.3 V stays dark
+Button::input<brio::PinPull::up>();
+Level::analog();
+```
+
+The three `using` lines name the pins and configure nothing; the three
+calls after them do, each opening its port's clock gate first, so a
+configured pin works with no separate step. What decides correctness
+even there: the pad must be one this part's package bonds, or the type
+does not compile; an output on a pad that shares its package pin with
+another pad does not compile either, the datasheet forbidding it; a
+pull-down exists on PA0..PA15, PC16 and PC17 alone, and is refused
+elsewhere (a compile error with the constant form above, a false with
+the run-time one); and a pin is read after its port is configured, since
+a read through a port whose clock gate is still shut answers with the
+last word the bus carried and not with the pad. A level written before
+the port's first configuration goes through `output(level)` or
+`input(pull)`, which open the gate first: a bare `set()` on a port never
+configured lands nowhere (measured, below).
+
+The rest of this page, in order: the documents of record; what the
+silicon does, the pad and then AFIO; the types and verbs; how to use
+it; the bench findings; and what is not covered.
+
+## Documents of record
+
+The CH32X035 reference manual V1.8 (the opening of
 ch. 8 for the pulls, 8.2 for the functions and the lock, 8.3.1 for the
 GPIO registers, 8.3.2 for AFIO) and the CH32X035/X033 datasheet V1.7
 (the pinout figures of 2.1 and table 2-1 per package, with its notes 4
@@ -16,7 +57,9 @@ columns). WCH's EVT peripheral library is the source of the CFGHR copy
 below, read and not copied. The headers are
 [brio/ch32x035/pin.hpp](../../brio/ch32x035/pin.hpp) and
 [brio/ch32x035/afio.hpp](../../brio/ch32x035/afio.hpp); the reference
-suite is `test_x035_pin`.
+suite is `test_x035_pin` (a suite's letter, below, is one command key
+of its console and the group of verdicts it runs, `z` the key that runs
+them all).
 
 ## What the silicon does
 
@@ -26,7 +69,7 @@ suite is `test_x035_pin`.
   an input, and 01, 10 and 11 are all "output mode"; CNF under an input
   is 00 analog, 01 floating, 10 pulled (11 reserved), and under an
   output 00 push-pull and 10 alternate push-pull - "I2C automatic open
-  drain". There is NO open-drain output code: a pin drives push-pull or
+  drain". There is no open-drain output code: a pin drives push-pull or
   hands itself to a peripheral, and an I2C pad turns open-drain by
   itself. Every configuration register resets to 0x44444444, eight
   floating inputs.
@@ -41,19 +84,19 @@ suite is `test_x035_pin`.
 - **WCH's library does not read CFGHR on some dies.** On a die whose
   chip-identifier word at 0x1FFFF704 has zero in bits 7:4, its GPIO
   initialization keeps a copy of each port's CFGHR in RAM, starting from
-  the reset value, and writes the register WHOLE from the copy - never a
+  the reset value, and writes the register whole from the copy - never a
   read-modify-write. The reference manual says nothing of it. The
   CH32X035F8U6 has 1 there, and its CFGHR reads back what is written
   (measured).
 - **The pull is the output register's.** An input with CNF 10 is
   pulled, and that pin's OUTDR bit says which way: 1 up, 0 down. Every
-  pad has the pull-up; ONLY PA0..PA15, PC16 and PC17 have the pull-down
+  pad has the pull-up; only PA0..PA15, PC16 and PC17 have the pull-down
   (the opening of ch. 8). PC14..PC17 have more pull-up strengths, set in
   the USB PD and USB blocks' own registers - AFIO_CTLR for PC16 and PC17
   (8.3.2.4).
 - **An analog input reads zero** in INDR (8.2.9), its Schmitt trigger
   off. PA0..PA7, PB0, PB1 and PC0..PC3 carry the ADC's channels 0 to 13.
-- **A package bonds some pads, and on six parts SHORTS some together.**
+- **A package bonds some pads, and on six parts shorts some together.**
   Table 2-1's notes 4 to 7: on every part but the CH32X035F8U6, PC16
   and PC11 share a package pin and so do PC17 and PC10; on the two
   28-pin parts PB1 and PB5; on the QSOP28 PA12 and PC14, PA13 and PC15;
@@ -105,12 +148,12 @@ suite is `test_x035_pin`.
 - **The EXTI multiplexer** (8.3.2.2, 8.3.2.3): two bits a line in
   AFIO_EXTICR1 (lines 0..15) and AFIO_EXTICR2 (16..23) say which port's
   pin of the same number feeds the line - 00 port A, 10 port B, 11 port
-  C, 01 reserved, which is NOT the sibling families' order; the three
+  C, 01 reserved, which is not the sibling families' order; the three
   codes are measured, read back on lines 5 and 19.
 - **AFIO_CTLR** (8.3.2.4) is the USB and USB PD pads' register - their
   pull-up modes, the PHYs' 3.3 V selection, the BC protocol's sources
   and comparators - with four pads' 10 us input filters (PA3, PA4, PB5,
-  PB6). The two USB pads' pull-up MODES are a strength and not an
+  PB6). The two USB pads' pull-up modes are a strength and not an
   enable - "only pull-up mode is set here", the pad's configuration
   deciding - and the measured answer is that a pulled input takes them
   and the I2C's alternate function does not ([i2c.md](i2c.md)).
@@ -121,18 +164,19 @@ suite is `test_x035_pin`.
 
 ## Types and verbs
 
-`Pin<'A', 5>` (pin.hpp) is one pin as a type. It refuses at COMPILE time
+`Pin<'A', 5>` (pin.hpp) is one pin as a type. It refuses at compile time
 a pin number past 23, and a pad the part's package does not bond (the
 part table's `port_pins`). Levels: `set`, `clear`, `toggle` (one store
-per register half, so a handler on another pin of the same port is never
-caught between a read and a write), `read` (INDR), `read_out` (OUTDR).
-Configuration - each verb opens the port's clock first:
+per register half, so an interrupt handler on another pin of the same
+port is never caught between a read and a write), `read` (INDR),
+`read_out` (OUTDR); the level verbs open no gate and may be called from
+any context. Configuration - each verb opens the port's clock first:
 
 | verb | the nibble | refused |
 |---|---|---|
-| `output()`, `output(level)` | push-pull output (0x1); the second drives the level BEFORE the mode | at compile time on a pad that shares its package pin |
+| `output()`, `output(level)` | push-pull output (0x1); the second drives the level before the mode | at compile time on a pad that shares its package pin |
 | `function()` | alternate push-pull (0x9), the pad handed to whatever peripheral the remap register gives it | the same |
-| `input(PinPull)` | floating (0x4) or pulled (0x8), the direction written into OUTDR first | answers FALSE, writing nothing, for `down` on a pad with no pull-down |
+| `input(PinPull)` | floating (0x4) or pulled (0x8), the direction written into OUTDR first | answers false, writing nothing, for `down` on a pad with no pull-down |
 | `input<PinPull>()` | the same where the pull is a constant | a pull-down on a pad without one is a compile error |
 | `analog()` | analog (0x0) | - |
 | `release()` | floating input, the reset state | - |
@@ -147,7 +191,7 @@ and `has_pull_down` state the part's facts about the pad as constants.
 `out()`, `out_write(v)` (the whole port in one store), `out_set(mask)`
 (BSHR for 0..15, BSXR for 16..23), `out_clear(mask)` (BCR, one store),
 `out_toggle(mask)`; `configure(pin, nibble)` for one pin and
-`configure_pins(mask, nibble)` for many - ONE store per configuration
+`configure_pins(mask, nibble)` for many - one store per configuration
 register, false and nothing written when the mask names a pad the
 package does not bond or asks a driving nibble of a shorted pad;
 `lock(mask)` and `lock<Mask>()` (a pad the part has not got is a compile
@@ -156,14 +200,19 @@ alone by every configuring verb. **CFGHR is written only from its RAM
 copy, and never read to configure**, on every die, as WCH's library does
 on some: `cfghr_copy()` is what the stratum last stored and
 `cfghr_register()` what a read of the register answers - the pair a
-suite compares - which makes every store to CFGHR this file's.
+suite compares - which makes every store to CFGHR this file's. The
+configuring verbs are read-modify-writes of a port's registers with no
+guard of their own: a program configures a port from one context, or
+masks interrupts around a configuration an interrupt handler could
+interleave with.
 
 `Pad` names a pad at compile time (`{'B', 11}`), with `pad_bonded`,
 `pad_twinned`, `pad_can_drive` and `pad_has_pull_down` over the part
 table - the vocabulary a driver's pin tables are written in.
 
-`Afio` (afio.hpp), monostate, every verb opening the block's gate:
-`remap(Remap, code)` - false and NOTHING WRITTEN for a code the field
+`Afio` (afio.hpp), monostate (a type with no instances, every verb a
+static function over the one block), every verb opening the block's
+gate: `remap(Remap, code)` - false and nothing written for a code the field
 has not got or, for a USART, I2C1, SPI1, TIM1 or TIM2, a column not one
 of whose pads this package bonds (a mask a field, `afio_codes`, computed
 at compile time) - and `remap<R, Code>()` refusing the same at compile
