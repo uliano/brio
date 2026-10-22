@@ -1249,10 +1249,11 @@ page but README.md and vendor/README.md) in the brief's additive pass,
 and the comments of all fifteen headers of `brio/ch32x035/` (the seven
 part tables under `parts/` untouched). Base: `docs-rewrite` at
 03902163821e258f2ea9f6ff1febc78c4cdb04e9, the reference of every token
-check. Branch `claude/ch32x035-docs-99jwgr`, four commits (the four
+check. Branch `claude/ch32x035-docs-99jwgr`, seven commits (the four
 documents the console's glue touches first; the five others; the nine
 platform, interrupt, timebase, clock, pin and map headers; the six
-driver headers), one pull request against `docs-rewrite`. Not touched:
+driver headers; this record; the two readers' residue), one pull
+request against `docs-rewrite`. Not touched:
 every code token (the token check on every header), apps, CMake,
 presets, ld, the crt, `.vscode`, `.clangd`, every other stratum, the
 design pages and the learning route, docs/ch32x035/README.md and
@@ -1333,6 +1334,67 @@ numbered references; the numbers stand).
 - i2c.hpp's "the Request is the other strata's" was the prose net's
   one review item on the stratum; now "the same struct on every
   stratum".
+- pin.hpp said a configuring verb races an interrupt handler "that
+  configures the same port"; `Port::clock_on()` is a read-modify-write
+  of RCC_APB2PCENR, which the three ports' gate bits share, so two
+  ports race on the gate too. The comment now says any port.
+- i2c.hpp called the read's last-byte wait for RxNE "bounded";
+  `receive_step()` discards `wait_until()`'s answer and reports i2c_ok
+  with what DATAR holds when the bound runs out. The comment says so;
+  whether the code should report something else is the driver owner's
+  call (open).
+- "the four i2c_bus.hpp holds" counts the engine's own codes; the
+  arbiter's three (i2c_ok, i2c_rejected, i2c_timeout) sit beside them.
+  The comment now lists them.
+- A port opened before the clock task speaks at a sixth of the rate
+  asked until the clock moves, and at the rate asked after: BRR is a
+  divisor of HCLK, written once. Derived from the register arithmetic,
+  not measured.
+
+### Reader review (fresh subagents, one round)
+
+Two readers, each given only its files, the audience profile and the
+brief's questions with scenarios: one on platform.md and usart.md (nine
+scenarios), one on the comments of pin.hpp and i2c.hpp (eleven). Every
+scenario was answered "supported directly" (a port opened before the
+clock task; the vector left unbound; what decides `BRIO_CH32_INTERRUPT`
+and why one spelling per image; the kernel never sleeping over a
+receive ring; a 4000-byte print from a handler; the interrupt
+transport's ceiling by placement; `Uart<1, P>` on the QFN20; the
+suite's letter; a store through a shut gate; an output on a shorted
+pad; a pull-down refused; a toggle beside a configure; the I2C init()'s
+refusals; the lent buffer's lifetime; a START into a held SDA and its
+vector; start()'s context and bounds; the repeated START's timing; the
+channel being the request), except the panic with no debugger
+(platform.md's own gap: whether an `ebreak` with no debugger spins or
+raises the core deadlock reset is unmeasured and stays listed) and the
+ring size behind the interrupt transport's measured ceilings (open,
+below). Residue, applied: platform.md's `<>` as the default timebase,
+the `...` of the Tenuto list, what `take_panic_record<P>()` returns is
+for, where `CH32X035_HPE` is chosen, a panic's record surviving a reset
+something else causes, `z` as this suite's all-key where usart.md's
+differ; usart.md's "an index shared with a handler bare" (now the
+platform's `atomic_width`), how a program with no line sink writes the
+handler, where `init()` and `print` sit relative to `main()` and
+`run()`, the reset-rate port's rate once the clock moves, "handler"
+told apart from an interrupt handler; pin.hpp's pad, pin and package
+pin defined, the cross-port gate race, the STM32F1 expanded, the lock's
+silent refusal on `output()`, a port's reset line and the CFGHR copy;
+i2c.hpp's active object, arbiter, tenure and lending defined at first
+use, the five I2cBus arguments, the DMA vectors' names, the status
+codes, the two blocks sharing channels 6 and 7, the unbounded last-byte
+read. Left as is, with the reason: the C++ notation itself (`using`,
+templates, `constexpr`, `static_assert`, an enum's spelling, the digit
+separator) is the learning route's, which the pages link; the `#include`
+lines and a program's skeleton are not carried by a reference page (the
+first batch's rule); how `print` formats numbers is util/print.hpp's;
+how a console key is sent is the operational page's. No second round,
+by the batch's cost rule.
+
+Open: the receive ring size of the suite's interrupt-transport port
+behind usart.md's "whole to 2 Mbaud" (the page states the ceiling
+without the ring that bounded it); whether the I2C host's last-byte
+read should report a code of its own when its wait runs out.
 
 ### Checks
 

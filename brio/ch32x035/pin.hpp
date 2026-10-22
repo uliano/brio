@@ -11,16 +11,23 @@
  *     Led::output(true);               // high before it drives
  *     Led::toggle();
  *
+ * Three words are kept apart below: a pad is one of the die's I/O
+ * cells (PA2), a pin is its number in its port (the 2), and a package
+ * pin is the lead a package bonds a pad to - some leads carry two pads.
+ *
  * Who calls what: the configuring verbs (output(), input(), analog(),
  * function(), release(), Port::configure_pins()) open the port's clock
  * gate and read-modify-write its configuration registers with no guard
- * of their own - main context, or masked against an interrupt handler
- * that configures the same port; the level verbs (set(), clear(),
- * toggle(), read()) are one store or one load each, legal from any
- * context, and open no gate: a pad is driven and read after its port is
- * configured. Nothing here waits.
+ * of their own - main context, or masked (pfic.hpp's InterruptGuard)
+ * against an interrupt handler that configures any port: the three
+ * ports' gate bits share one RCC register, so even two ports race on
+ * the gate; the level verbs (set(), clear(), toggle(), read()) are one
+ * store or one load each, legal from any context, and open no gate: a
+ * pad is driven and read after its port is configured. Nothing here
+ * waits. A pin the configuration lock holds (below) is left as it is by
+ * every configuring verb, silently.
  *
- * The encoding is the F1's nibble, cut down (RM 8.3.1.1). Four bits per
+ * The encoding is the STM32F1's nibble, cut down (RM 8.3.1.1). Four bits per
  * pin, CNF above MODE, and MODE is two bits - but on this series they
  * carry no speed: 00 is input and 01, 10 and 11 are all "output mode".
  * CNF under an input is 00 analog, 01 floating, 10 pulled; under an
@@ -46,7 +53,10 @@
  * register reads back: pins 8..15 are configured through a copy
  * (`Port::cfghr_copy()`), and `Port::cfghr_register()` is the raw read a
  * suite compares against it. The contract that follows: every store to
- * CFGHR goes through this file.
+ * CFGHR goes through this file. Nothing in this stratum pulses a port's
+ * reset line; a program that does puts the register back to its reset
+ * value and the copy is not told, so the next configure of a pin 8..15
+ * writes the whole register from a stale copy.
  *
  * Pulls have no register. An input with CNF = 10 is pulled, and the
  * direction comes from that pin's bit in OUTDR: 1 pulls up, 0 pulls down.
@@ -458,7 +468,8 @@ struct Pin {
     // ---- configuration ----------------------------------------------------
     /// A push-pull output - the one output stage this series has. The
     /// port's gate opened first; the pad drives whatever OUTDR holds for
-    /// it, so a level that must not glitch goes through output(level).
+    /// it, so a level that must not glitch goes through output(level). A
+    /// pin the lock holds is left as it is (Port::configure).
     static void output() {
         static_assert(can_drive,
                       "brio Pin: this pad shares its package pin with another, and the "

@@ -2,9 +2,16 @@
  * i2c.hpp
  *
  * The I2C of the CH32X035 (RM V1.8 ch. 15) as a bus for a program: a
- * sensor or a memory read and written from an active object through
- * the arbiter of util/i2c_bus.hpp, or this chip as a target another
- * controller addresses. One instance, host and client, 7- and 10-bit
+ * sensor or a memory read and written from an active object (a
+ * component of a brio program with its own event queue, served one
+ * event at a time by the kernel, docs/design/kernel.md) through the
+ * arbiter of util/i2c_bus.hpp (the active object that runs the posted
+ * requests one after another and replies to each with an event), or
+ * this chip as a target another controller addresses. A tenure is one
+ * use of the bus, from the START to the STOP; a request's buffers are
+ * lent, which is to say the sender keeps them untouched and in scope
+ * until the reply arrives (kernel/borrowed.hpp). One instance, host and
+ * client, 7- and 10-bit
  * addresses, dual addressing and the general call, two speeds with fast
  * mode's two duty shapes, clock stretching, PEC, two DMA requests - the
  * STM32F1's I2C under WCH's register names, an event machine (SB, ADDR,
@@ -41,7 +48,10 @@
  * dma_isr() are the three vectors' bodies: the program's handlers call
  * them and nothing else does; each runs to completion, masks nothing,
  * and the first ends a tenure with a bounded poll of TxE (a few STAR1
- * reads) and, on the last two bytes of a read, a bounded wait for RxNE.
+ * reads) and, on the last two bytes of a read, a bounded wait for RxNE
+ * - a bound that runs out (a clock stopped under the block between the
+ * two bytes) reads DATAR regardless and reports i2c_ok with what it
+ * holds; no measured case reaches it.
  * The Request's two buffers are lent from the post to the I2cDone the
  * arbiter replies with: untouched and in scope until then, which nothing
  * checks. The client's polled verbs are the loop's, its service() and
@@ -126,7 +136,9 @@
  * (ch32x035/dma_engine.hpp's table): the channel is the request, so an
  * engine slot on any other channel is refused at compile time. Channel 6
  * is also USART2's receive request and channel 7 its transmit - an OR of
- * the two peripherals' requests on each - which is why release() pulses
+ * the two peripherals' requests on each, so an image gives those two
+ * channels to one block or the other and the compiler checks nothing
+ * between them - which is why release() pulses
  * the block's reset line (docs/design/dma.md's release contract). With
  * engines a plain write of three bytes or more runs on the transmit
  * engine (two ride EVT8_1's entry) and ends on BTF, which the event line
@@ -686,7 +698,9 @@ inline bool i2c_column_free() {
 
 /// A DMA block the engines could not finish: the engine's own code, in
 /// the range util/bus_master.hpp leaves to engines and above the four
-/// i2c_bus.hpp holds.
+/// engine codes i2c_bus.hpp holds (i2c_nack_addr, i2c_nack_data,
+/// i2c_arb_lost, i2c_bus_error; i2c_ok, i2c_rejected and i2c_timeout
+/// are the arbiter's).
 inline constexpr uint8_t i2c_dma_fault = bus_engine_status + 4;
 
 /**
@@ -703,6 +717,13 @@ inline constexpr uint8_t i2c_dma_fault = bus_engine_status + 4;
  *   using Bus = brio::I2cHost<1>;   // the part's first column
  *   using I2c = brio::I2cBus<Bus, P, 4, brio::BusPassThrough, brio::ticks_from_ms<P>(20)>;
  *   Bus::init(clock);               // after the clock task; false: no block, no column
+ *
+ * I2cBus's arguments: the engine, the platform, how many requests may
+ * wait their turn (the next is answered i2c_rejected), the completion
+ * policy, and the per-bus timeout in kernel ticks - the one that answers
+ * a parked tenure with i2c_timeout (util/bus_master.hpp). `clock` is the
+ * clock task's tag object (ch32x035/clock.hpp). With the engines named,
+ * dma1_channel6_handler and dma1_channel7_handler call dma_isr() too.
  *
  *   Bus::Request r{};
  *   r.addr = 0x48;
