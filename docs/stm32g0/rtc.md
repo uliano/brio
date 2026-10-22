@@ -35,9 +35,11 @@ cleared at every system reset (`open()` takes it), and the RTC's own key
 over most of its registers; the backup registers are behind the first
 and not the second. The clock source is a one-way choice until the
 domain is reset, and the reset costs the calendar, the alarms and the
-five backup words; the bench boards' domain comes up on the internal
-low-speed oscillator, so a program that wants the crystal wipes the
-domain once. And a domain reset arms four internal tamper detectors,
+five backup words; on the Nucleo-G0B1RE the domain comes up on the
+internal low-speed oscillator with the RTC already enabled, so a
+program that wants the crystal wipes the domain once, while on the
+Nucleo-G071RB it comes up empty and needs no wipe ("Bench findings"
+below). And a domain reset arms four internal tamper detectors,
 every one of which erases the backup registers:
 `Tamp::erase_source_armed()` is the question to ask before trusting
 them. The one vector, `RTC_TAMP_IRQHandler`, serves both blocks, and a

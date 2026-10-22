@@ -19,7 +19,8 @@
  *
  * Which context may call what. No verb here waits or masks interrupts,
  * and none keeps storage: configure() is one store of the whole CSR,
- * enable(), lock() and release() a read-modify-write of it, and
+ * enable() and lock() a read-modify-write of it, release() one store
+ * of zero after a read of the lock bit, and
  * claim_inputs() a read-modify-write of the port's registers - so the
  * configuring verbs belong to setup in main() or to an active object's
  * handler (an active object is an object the kernel serves one event at

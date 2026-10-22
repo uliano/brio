@@ -1916,7 +1916,7 @@ struct Fdcan {
     // ---- the whole sequence -------------------------------------------------
 
     /**
-     * Clock the subsystem, reset it, zero the message RAM, take the
+     * Clock the subsystem, zero the message RAM, take the
      * module into INIT + CCE and write every protected register of the
      * configuration. The module is left in INIT: filters and Tx buffers
      * are written next, and `start()` puts it on the bus. Setup's verb,

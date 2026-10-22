@@ -29,9 +29,10 @@
  * masks interrupts. `Wwdg::isr()` is the body the app binds to
  * WWDG_IRQHandler; `hard_fault_reset<P>()` is the body it binds to
  * HardFault_Handler, and runs in the fault. `Reset::software()` never
- * returns; the two watchdogs' `force_reset()` do, for the few
- * milliseconds the silicon takes, and a caller that means to end there
- * spins.
+ * returns; the two watchdogs' `force_reset()` do, for the time the
+ * watchdog takes to fire (the IWDG's 31 ms at /256, measured, about a
+ * millisecond at /4: its force_reset() says so), and a caller that
+ * means to end there spins.
  *
  * This is the other half of the panic breadcrumb. The kernel writes a
  * PanicRecord into reset-surviving storage (kernel/panic.hpp,

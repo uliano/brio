@@ -240,8 +240,9 @@ struct Pwr {
     Pwr() = delete;
 
     /// A bound on every status wait here. The longest of them is the
-    /// regulator's range change, tens of microseconds; at 64 MHz this is
-    /// milliseconds, and it turns a dead flag into a false.
+    /// regulator's range change (VOSF), whose duration this file does
+    /// not state; at 64 MHz the bound is milliseconds, and it turns a
+    /// dead flag into a false.
     static constexpr uint32_t ready_spins = 1'000'000UL;
 
     // ---- the bus clock (fact 1) --------------------------------------------

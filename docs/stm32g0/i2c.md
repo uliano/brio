@@ -7,7 +7,8 @@ the model), or this chip answering as a target. `brio/stm32g0/i2c.hpp`
 is RM0444 chapter 32 in the two layers every brio bus driver has:
 `I2c<n>`, the instance; `I2cHost<n, pins, TxEngine, RxEngine>`, the
 transfer engine `util/i2c_bus.hpp` drives; and `I2cClient<n, pins>`,
-the target role. `I2cHost`'s Request is the other targets' verbatim, so
+the target role. `I2cHost`'s Request is `avrxt/twi.hpp`'s and
+`samc21/i2c.hpp`'s verbatim, so
 `util/i2c_bus.hpp` and `util/bus_master.hpp` drive this engine exactly
 as they are written.
 

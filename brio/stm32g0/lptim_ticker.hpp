@@ -27,8 +27,8 @@
  * Who calls what. init() runs once in main(), after the clock task's
  * init() and before interrupts are enabled; it waits, bounded, for the
  * crystal and for the timer's own write handshakes and returns false
- * when a program has no timebase. ticks(), millis(), secs() and now()
- * may be read from any context, inside a masked window too, under the
+ * when a program has no timebase. ticks(), millis() and secs() may be
+ * read from any context, inside a masked window too, under the
  * one-second rule stated at the end of this comment. arm_wake() and
  * park() are the platform's alone: the kernel loop calls them through
  * idle_until() with interrupts masked, and nothing in them waits - every

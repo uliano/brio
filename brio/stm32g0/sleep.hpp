@@ -37,10 +37,12 @@
  * synchronizations, and false means the site works as the plain one,
  * minus every timed property - the caller must look at the answer.
  * `arm()`, `disarm()` and `armed()` are the manager's, called from its
- * handler; arm() does not block (the LPTIM site's place_alarm() spins,
- * bounded, for the compare write to land before it lets the loop reach
- * its WFI). `isr()` is the body the app binds to the RTC's or the
- * LPTIM's vector, and it runs as the wake itself. `resync()` is shared
+ * handler; arm() spins, bounded, in either timed site's place_alarm()
+ * (the LPTIM site for its compare write to land, the RTC site for the
+ * wake-up timer's write synchronization inside Rtc::set_wakeup())
+ * before it lets the loop reach its WFI. `isr()` is the body the app
+ * binds to the RTC's or the LPTIM's vector, and it runs as the wake
+ * itself. `resync()` is shared
  * by isr() and disarm(), whichever gets there first, and takes the
  * platform's critical section (interrupts masked) for the few
  * instructions that consume the baseline; nothing else here masks. A

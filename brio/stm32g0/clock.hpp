@@ -882,10 +882,11 @@ struct DynamicClock<Rates<Rs...>, Users...> {
 
     /// Switch to a rate known at compile time (checked: a rate the pack
     /// does not name does not compile). From main() or an active
-    /// object's handler, one caller at a time; the listed users are
-    /// rebased first, then the rate's sequence runs with its bounded
-    /// waits (the opening comment); false means the rate did not take
-    /// and the mirror names what was asked.
+    /// object's handler, one caller at a time; the rate's sequence runs
+    /// with its bounded waits and the listed users are rebased at the
+    /// point in it the opening comment gives (on a rise the regulator
+    /// first, on a fall last); false means the rate did not take and
+    /// the mirror names what was asked.
     template <uint32_t hz>
     static bool set() {
         static_assert(can_run_at(hz), "brio DynamicClock: this rate is not in the Rates pack");

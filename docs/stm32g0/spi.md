@@ -6,7 +6,9 @@ wires through the bus arbiter ([design/spi-bus.md](../design/spi-bus.md)
 is the model), or this chip answering as a client; the same block is an
 I2S audio interface. `Spi<n>` is the instance, one function per register
 fact; `SpiHost<n, pins, ...>` the host engine `util/spi_bus.hpp` drives,
-whose Request is the other targets' verbatim; `SpiClient<n, pins>` the
+whose Request carries the other targets' fields by name, the rate, the
+mode and the frame size as this family's types and in this family's
+order ("Types and verbs" below); `SpiClient<n, pins>` the
 client role.
 
 The smallest use, a device on a bus through the arbiter, the chip

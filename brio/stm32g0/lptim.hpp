@@ -603,9 +603,9 @@ public:
      * Pulse RCC_APBRSTR1: every register back to the value table 147
      * prints, and the only way this driver turns an LPTIM off (fact 1 of
      * the file header, ES0548 2.8.1). The bus clock and the CCIPR
-     * selection are not touched - neither lives in this block. A pending
-     * interrupt of the block is gone with its flags; the NVIC line is
-     * left as it was.
+     * selection are not touched - neither lives in this block. The
+     * block's own flags are gone with it; a request the NVIC has already
+     * latched is not, and the line is left as it was.
      */
     static void reset() { Rcc::apb1_reset(lptim_reset_mask(n)); }
 

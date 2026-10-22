@@ -28,10 +28,11 @@ queue, served one event at a time by the kernel,
 contexts at once, while `set`, `clear` and `toggle` are single atomic
 stores usable from any context. A pad handed to a peripheral is handed
 with its alternate-function number, which is the datasheet's and which
-nothing in the code can check: the bench is the check, and a pad at the
-wrong number, or never handed over at all and left as a plain output,
-is read by the peripheral as low whatever its level ("Bench findings"
-below).
+nothing in the code can check: the bench is the check. A pad never
+handed over at all and left as a plain output is read by the peripheral
+as low whatever its level ("Bench findings" below); a pad at the wrong
+number is not caught either, and what the peripheral reads then was
+not measured.
 
 ## Documents of record
 

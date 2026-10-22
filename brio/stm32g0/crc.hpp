@@ -274,8 +274,9 @@ public:
     }
 
     /// Block reset and its clock closed. Nothing else is claimed - the
-    /// CRC has no pad, no interrupt and no request line. Not while a DMA
-    /// channel is feeding the unit: that channel is stopped first.
+    /// CRC has no pad, no interrupt and no request line. A DMA channel
+    /// still feeding the unit would be writing into a block in reset;
+    /// nothing here checks for one, its owner stops it first.
     static void release() {
         reset();
         bus_clock(false);

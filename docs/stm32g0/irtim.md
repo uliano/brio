@@ -32,9 +32,10 @@ the resting level of the pad, and with it whether the LED is lit between
 frames; and the two envelopes are of opposite sense (TIM16's is active
 high, a USART's active low, a finding below), so a USART envelope that
 idles leaves the gate shut, which is the right way round for an infrared
-transmitter. PB9's high-sink bit is the same SYSCFG bit as that pad's
-I2C fast-mode-plus drive ([port.md](port.md)): one program cannot have
-both.
+transmitter. PB9's high-sink drive is the same SYSCFG bit as that pad's
+I2C fast-mode-plus drive ([port.md](port.md)): one bit under two
+names, and its effect on an infrared LED is not measured ("Not covered
+yet" below).
 
 ## Documents of record
 
@@ -85,8 +86,8 @@ Reserved and is refused.
 27's last paragraph: it "can be activated through the I2C_PB9_FMP bit in
 the SYSCFG_CFGR1 register and used to sink the high current needed to
 directly control an infrared LED". One bit, two jobs - that is the
-silicon's spelling and not brio's, and a program that wants PB9 for I2C
-fast-mode-plus and for an infrared LED cannot have it both ways.
+silicon's spelling and not brio's; the pad carries one function at a
+time, so the bit serves whichever the program has routed to it.
 
 ## Types and verbs
 
