@@ -618,13 +618,211 @@ header entities the index exists to map.
   lowercase and link, not re-measure; a re-read of each row against
   its family's page by the desk is the check this batch cannot make.
 
+## Third batch: the stm32g0 stratum
+
+Scope: the model target stratum, as the pattern the other target
+strata will follow: `docs/stm32g0/README.md` rewritten; the
+twenty-two peripheral documents of `docs/stm32g0/` in the brief's
+additive pass (the reader's orientation added, local fixes only); the
+comments of all thirty-one headers of `brio/stm32g0/` (openings and
+public operations, token identity on every one). Base: `docs-rewrite`
+at 240c14e4f76e43ee62d463c2d526b71d2cb83af2, the reference of every
+token check. Branch `claude/stm32g0-stratum-docs-m008or`, eleven
+commits (the README; the route's six documents; the other sixteen;
+blink's lines quoted; the readers' residue; the headers in five
+groups plus the two pattern headers), one pull request against
+`docs-rewrite`. Not touched: every code token, `// build:` and
+`// mcu:` lines (none exist in the headers), apps, CMake, presets, ld,
+svd, `.vscode`, `.clangd`, the other target strata, the design pages
+and the learning route (no link of theirs broke: the README kept the
+section names they cite, "Toolchain", "Upload", "Debugging", and
+nothing links it by anchor), CLAUDE.md and docs/README.md.
+
+Environment: no cross toolchain and no `/sw` in the cloud; the token
+check lexed with the system g++ 13.3; the clone was shallow and was
+unshallowed before the first check. No build and no host test was run.
+`docs/stm32g0/vendor/README.md` is unchanged in content (the prose net
+ran over it; it needed nothing).
+
+### docs/stm32g0/README.md
+
+Rewritten whole: the orientation (what the stratum is, for whom, the
+learning route pointed at rather than repeated), the three boards in
+one table (part, memory, LED, console, die identity) with the
+bench-verified facts of the G0B1RE kept word for word, the toolchain,
+the build (the six presets and the G031K8's commands, the build lines,
+the outputs per preset, the bench tool with its three board types),
+the upload with the two probe caveats (the WFI read and DBG_STOP, with
+"HLA" expanded and one tick spelled as a millisecond), the debugger,
+the editor, the console, the family coverage (the reserve defined for
+a reader meeting the word, the two spellings of an absence, the sweep
+without the stale count), the two smaller parts with their suite
+tables whole (self-link, peer, letter and all-key defined before
+them), and the document map at one line per document. Before a map
+cell was shortened, every number and every backticked identifier of
+the old cell was checked for presence in its document by a script; the
+exceptions are listed under the open facts.
+
+### The peripheral documents
+
+Each of the twenty-two opens with: whom the document is for and what
+the driver does in a program; the smallest use, an excerpt of the
+document's own "How to use it" block (platform.md's quoted from
+blink.cpp as it stands); the prerequisite that decides correctness even
+there; and, on the long pages, a reading guide. "Documents of record"
+became a heading. Local fixes: the reserve, a suite's letter and the
+all-key `z`, a monostate, a pull-walk, an active object and a task
+defined at first use in each document that uses the word; kernel.md
+linked by heading instead of "section 11"; a path in prose turned into
+a link; insistence capitals lowered in the sections the reader meets
+first. Nothing reordered, no finding, figure, gap list or realization
+cut; the bench findings are untouched. Four orientation sentences
+that overstated what the code enforces were corrected against the
+headers before the commit (the DAC's data order, one engine per DMA
+channel as a transport's check, the IRTIM claim order, the plain sleep
+site's restriction as stated and not checked).
+
+### The headers
+
+Comments only, every one of the thirty-one token-identical to the base
+(`bin/brio gate --tokens --against 240c14e brio/stm32g0/*.hpp`).
+platform.hpp and pin.hpp were rewritten first, as the pattern; the
+other twenty-nine were done by five fresh agents under one written
+brief (keep every fact, token identity, the opening's order: what the
+caller gets, which context calls what, then the why), each reporting
+what it changed and what it could not establish; their diffs were
+spot-read (spi.hpp, crc.hpp, lptim_ticker.hpp, device_tables.hpp) and
+their reports checked. Each opening now says first what the component
+does for a caller, which context calls what (what waits, what masks,
+who owns a buffer until when), then the facts the old comment gave;
+the public operations the documents' smallest uses call gained the
+sentence they lacked. Stale claims corrected to the code's truth: a
+controller `Dma<n>::init()` that does not exist (spi.hpp and i2c.hpp:
+an engine's `arm()` opens the clock); a `DmaMux::synchronize()` that
+does not exist (dma.hpp: the two request verbs named); verbs named by
+a spelling they do not have (adc.hpp's `temperature_c`,
+`conversion_cycles`; dac.hpp's `set(ch, code)`); an erratum's
+statement located on `result()` where it is; rtc.hpp's tamper block
+described as read-only and RTC_REFIN as unmeasured where the code arms
+tampers and docs/stm32g0/rtc.md measures both; exti.hpp's two claims
+of absence (no PWR driver, nothing enters Standby) against
+stm32g0/pwr.hpp and sleep.hpp; usart.hpp's UartOptions as the "last"
+template argument (Placement follows it) and "ES0548 rev Z" (Rev 3 is
+the document's revision, Z the silicon's); lse_tracker.hpp's `hz()`
+described as the code has it. Two detached doc comments in rtc.hpp and
+dac.hpp moved onto the declarations they describe. clock.hpp fell
+between the five groups and was done last, by hand: its opening now
+leads with the smallest use and the contexts (init first in main and
+why a driver initialized before it is wrong by the ratio of the rates;
+set() from a handler or main with its bounded waits, restore() the one
+verb legal from an interrupt handler, the Rcc verbs unguarded), the
+rest kept with capitals lowered; set<hz>() and set(hz) say their
+context and what false means.
+
+### Facts resolved while writing
+
+- The README's "22 positive TUs x 12 headers": `test/family_stm32g0/`
+  holds 28 positive files today; the page states the rule and no count.
+- "Fourteen of the seventeen suites run" on the G071RB and the G031K8:
+  seventeen `test_stm32_*` apps exist; the build lines give `nvm`,
+  `journal` and `fdcan` to the G0B1RE alone and `spi` to all three, so
+  the page says fourteen build for each; the SPI row's "-" on those
+  boards is a count not recorded (its peer letters want a paired
+  board), not a suite that does not build.
+- The old spi.md cell's "a 3-byte command at 399 cycles above the wire
+  instead of 998": spi.md's own table reads 413 (`InFlash`) and 381
+  (`InRam`) against 998; the 399 is in no document and its origin is
+  open; the table stands.
+- The old i2c.md cell's readback "pinned against every cell of tables
+  172..174": i2c.md names tables 171 and 176 only; the claim is open.
+  Its "478 kHz" is the document's 477.6 kHz.
+- `test_stm32_serial` on the G0B1RE is 120 verdicts in one README table
+  and 118 in the other, and usart.md's `t` count is 171 where the table
+  says 174; `test_stm32_tim` is 128 in the tables where tim.md's own
+  text says "the G0B1RE's 118". Kept as the desk's figures; open.
+- The plain sleep site's "no Stop with an armed time event" is a stated
+  restriction (sleep.hpp), not a check; pwr.md's orientation says so.
+- `Adc::select()` waits for the CCRDY handshake, bounded;
+  `select_sync()` is the same with an answer (adc.hpp).
+- serial.md says `write_byte` does not mask interrupts in one place and,
+  of the STM32G0, that its byte path masks around the register write in
+  another (lines 37 and 76): found by a reader, outside this batch's
+  files, open for the services batch.
+
+### Reader review (fresh subagents, one round)
+
+Two readers, each given only its files and the questions: one on the
+README, port.md and pin.hpp with a Nucleo-G031K8 scenario; one on
+usart.md, platform.hpp and the README's Upload and Debugging sections.
+Every scenario was answered "supported directly": the G031K8's LED
+fragment and what the angle brackets mean, the four GPIO traps (a
+toggle from an interrupt beside a configuring call, PA8 under its
+pull-up after a power-on, a pad not handed over, a first store to an
+unclocked port), the 1 ms Stop after a flash, the console line by line,
+the unbound vector, the multi-board handler, a 4000-byte print in a
+handler, the receive slack on the G0B1RE against the G031K8, the
+platform's contract and the pending interrupt between the empty check
+and the WFI, the WFI read and C_DEBUGEN against DBG_STOP. Residue, all
+applied: the README lacked the G031K8's preset in the commands, the
+output directory per preset, the bench tool's three board types, the
+literal "no device connected", and self-link and peer before the suite
+tables; port.md and pin.hpp named the active object without defining
+it and port.md said "left in output mode" for a pad never handed over;
+usart.md's orientation left the tag object, `extern "C"`, `clock`,
+`crlf` and "task" unexplained, did not spell how the multi-board
+handler name is written, what a port initialized before the clock task
+does (a quarter of the rate, nothing refuses it), what `isr()` returns,
+or that the transmit ring has one producer and both write verbs copy.
+Left as is, with the reason: the C++ notation itself (`using`,
+`constexpr`, templates) is the learning route's and the reference pages
+point there; a complete minimal program is first-program.md's. No
+second round: nothing the first found was broken in substance.
+
+### Checks
+
+- `bin/brio prose brio/stm32g0/*.hpp docs/stm32g0/*.md
+  docs/stm32g0/vendor/README.md`: 55 files, 0 errors, 0 for review
+  (before the batch: 0 errors, 1 for review on exti.hpp, a claim of
+  absence that was false and is gone).
+- `bin/brio gate --tokens --against 240c14e brio/stm32g0/*.hpp`: all
+  thirty-one token-identical (lexed with the system g++ 13.3).
+- Links and anchors of every page of docs/stm32g0, the learning pages
+  and the two READMEs, by the script with GitHub's anchor rules: 0
+  problems on the batch's pages; the three hits are the learning
+  pages' lambda notation read as links, the known false positive.
+- `grep -P '[^\x00-\x7F]'` over the touched files: nothing; no
+  `// build:` or `// mcu:` line in any header.
+- `git diff --stat 240c14e -- . ':!docs/stm32g0' ':!brio/stm32g0'`:
+  empty; no source outside the stratum, no build or configuration file
+  changed.
+- Not run, no toolchain: any build, `brio check stm32g0`, the host
+  tests, the full `brio gate`.
+
+### Local verification handoff
+
+- The full `brio gate` against 240c14e on a machine with the toolchains
+  confirms every image unmoved (comments only; the token check says
+  so, the gate proves it).
+- `brio check stm32g0`, for the family fixtures' sake (nothing in them
+  changed).
+- The open figures above, to settle from the desk's records: the SPI
+  request's 399 against the table's 413/381, the I2C readback's table
+  numbers, the serial and tim suite counts.
+- The excerpts in the orientations are copies of each document's own
+  "How to use it" block; a re-read of each pair after any API change is
+  the maintained-example rule applied to them.
+
 ## Next batches (not started)
 
-1. One representative target stratum (stm32g0: README, selected
-   peripheral pages, header comments).
-2. The remaining target strata in groups.
-3. Remaining services (serial_port.hpp and print.hpp first), devices,
-   host, boards and probes.
-4. Before the public merge: remove DOCUMENTATION_REWRITE_BRIEF.md,
+1. The remaining target strata in groups, on this batch's pattern
+   (README rewritten; the documents' additive pass; the headers'
+   comments under the same brief), each retaining its hardware
+   differences: samc21 and avrxt first (the other two of the three
+   original targets), then stm32f4, the two RP strata, the three WCH
+   strata and host.
+2. Remaining services (serial_port.hpp and print.hpp first, with the
+   serial.md masking sentence above), devices, the IP strata, host,
+   boards and probes.
+3. Before the public merge: remove DOCUMENTATION_REWRITE_BRIEF.md,
    DOCUMENTATION_REWRITE_PROGRESS.md and the two review files, unless
    the user keeps them.
