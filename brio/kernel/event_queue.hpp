@@ -9,7 +9,8 @@
  *     static inline brio::EventQueue<Event, 4, P> queue;
  *
  * E is the object's Event type, `depth` how many events may be waiting
- * (or held) at once while one is being dispatched, P the platform whose
+ * (or held: kept by the object past the dispatch of the event, hold()
+ * below) at once while one is being dispatched, P the platform whose
  * critical section guards the producers' side. An application touches
  * the queue through post() (kernel/post.hpp) and, rarely, through
  * overflows(); the kernel loop drives the consumer side.
@@ -23,10 +24,12 @@
  *    sizing mistake, and the counter names the queue;
  *  - take(), at(), hold(), take_hold(), release(), pop(): the consumer's,
  *    which is the kernel loop dispatching this object (and the object
- *    itself, inside its dispatch, for hold()). Main-loop context only,
- *    never from an interrupt handler, never from another object; they
- *    take no critical section;
- *  - empty(), size(): readable from anywhere, as a snapshot.
+ *    itself, inside a dispatch of its own, for hold() and for the
+ *    release() of a slot it held). Main-loop context only, never from
+ *    an interrupt handler, never from another object; they take no
+ *    critical section;
+ *  - empty(), size(): readable from anywhere, as a snapshot;
+ *    overflows(): readable from anywhere, under the critical section.
  *
  * Depth, in one rule: a push is refused when every slot is occupied,
  * waiting or outstanding (the one being dispatched, and any the object
@@ -67,8 +70,11 @@
  *     [take_, alloc_)         PENDING      the numbers of built events, oldest first
  *     [alloc_, free end)      FREE         the numbers a producer may build in
  *     [free end, take_)       OUTSTANDING  positions whose slots are taken and not
- *                                          yet released; their contents are stale
- *                                          and nobody reads them
+ *                                          yet released; stale, except the last
+ *                                          one, which hold() reads back (below)
+ *
+ * The free end is the third cursor, fence_, stored as the position after
+ * the run ("Why a static queue is all zero" says why).
  *
  * A producer builds its event in the slot whose number sits at alloc_
  * and publishes it by advancing alloc_: the advance moves that number
@@ -85,14 +91,17 @@
  *
  * The producers' side
  *
- * push() runs inside Platform::CriticalSection. Under the cooperative
- * kernel the only concurrency is an interrupt handler against the main
- * loop, and a small core may offer no compare-and-swap instruction at
- * all, so the brief interrupts-off window is the primitive. The event
- * is built in its slot, a variant's alternative emplaced there and never
- * first assembled on the caller's stack, so the one copy a post makes
- * is the one the mask covers. The producers write one cursor, alloc_,
- * and read the free end. There is no separate variant of push() for
+ * push() runs inside Platform::CriticalSection, and the critical section
+ * is there for the producers against each other: a post from the main
+ * loop and a post from an interrupt handler both write alloc_, and the
+ * second can land in the middle of the first. Under the cooperative
+ * kernel that is the only concurrency there is, and a small core may
+ * offer no compare-and-swap instruction at all, so the brief
+ * interrupts-off window is the primitive. The event is built in its
+ * slot (for a variant, the alternative is constructed there directly,
+ * never first assembled on the caller's stack), so the one copy a post
+ * makes is the one the mask covers. The producers write one cursor,
+ * alloc_, and read the free end. There is no separate variant of push() for
  * interrupt context: one function, safe from any context; the cycles a
  * split would save would not pay for the doubled surface and the risk
  * of calling the wrong one.
@@ -100,9 +109,9 @@
  * The consumer's side, which never masks
  *
  * The consumer writes take_ and the free end and reads alloc_. Every
- * cursor is one byte with one writer, and a byte is one access on every
- * platform (kernel/platform.hpp's atomic_width), so neither side can
- * see a cursor half written. The runs keep the two sides apart: a
+ * cursor is one byte written by one side only, and a byte is one access
+ * on every platform (kernel/platform.hpp's atomic_width), so neither
+ * side can see a cursor half written. The runs keep the two sides apart: a
  * producer reads only the free run, which the consumer filled before it
  * moved the free end; the consumer reads only the pending run, whose
  * positions nobody touched since a producer wrote them; the consumer
@@ -110,8 +119,12 @@
  * remains is ordering: a slot or a ring position must be complete
  * before the cursor that publishes it moves. That ordering is a
  * compiler-only fence, std::atomic_signal_fence (util/ring.hpp uses the
- * same idiom), and a compiler-only fence is enough because the queue
- * belongs to one core (below).
+ * same idiom): it stops the compiler from moving the cursor's store
+ * ahead of the stores it publishes, and nothing more is needed because
+ * the other side runs on the same core, as an interrupt handler of the
+ * code it interrupts or as the code an interrupt handler returns to,
+ * and a core sees its own stores in program order. A second core would
+ * not ("One core", below).
  *
  * The handle, and holding a slot
  *
@@ -159,17 +172,17 @@
  *
  * One core
  *
- * The critical section masks the interrupts of the core that takes it
- * and nothing else, and the fences above order nothing between cores,
- * so a push from another core would race the owner's pushes and takes.
- * The mispost check runs before push() touches anything, and its
- * counter saturates like overflow's.
+ * The fences above order nothing between cores and the critical section
+ * masks one core's interrupts, so a push from another core would race
+ * the owner's pushes and takes. The mispost check runs before push()
+ * touches anything, and its counter saturates like overflow's.
  *
  * A host platform that explores interleavings offers `interleave_point()`
- * (kernel/platform.hpp): the consumer's verbs call it at every boundary
+ * (kernel/platform.hpp): take() and release() call it at every boundary
  * between two of their shared accesses, where an interrupt could land,
- * and the host suite pushes from there. No target has it, and nothing is
- * compiled for it.
+ * and the host suite pushes from there (pop() has no such points of its
+ * own; its release() does). No target has it, and nothing is compiled
+ * for it.
  */
 
 #pragma once
@@ -289,7 +302,8 @@ public:
     /// a take records nothing for it. An AO that holds is served through
     /// take() (the kernel, or serve_one()), never by dispatching the copy
     /// pop() returns: that copy has no slot, and a hold() there would
-    /// hand out the number of the slot pop() already released. A hold()
+    /// hand out the number of the slot pop() already released. (serve_one()
+    /// is kernel/active_object.hpp's step for one object.) A hold()
     /// outside a dispatch also leaves the flag set, so the NEXT dispatch's
     /// slot is never released - kept for ever, one slot the less.
     Held<E> hold() {

@@ -114,7 +114,7 @@ through this file.
   ([kernel.md, "Payloads"](docs/design/kernel.md#4-payloads-what-travels-inside-the-event-kernelborrowedhpp)).
 - Posting never waits. A full queue drops the event and counts it,
   which is how an undersized queue is found. Library calls can wait:
-  `print` blocks until the serial transport has taken every byte, and
+  `print` waits until the serial transport has accepted every byte, and
   says so in its header.
 - Resolved when compiled. Active objects, drivers and the kernel are
   types; priorities, subscriptions and reply channels are template

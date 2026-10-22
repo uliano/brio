@@ -107,6 +107,9 @@ editor reads that database whatever the active preset is:
 | `brio/.clangd` | every stratum without a fragment of its own: the kernel, util, gfx, devices, the IP strata, host | `build-cmake/host/compile_commands.json` |
 | `test/.clangd` | the host test suites | the same |
 
+The root `.clangd` names no database; it adds diagnostic rules that
+apply everywhere, under whichever fragment routes a file.
+
 A configure writes `compile_commands.json` into its own build tree
 (`CMAKE_EXPORT_COMPILE_COMMANDS` is on), so configuring the debug
 preset creates `build-cmake/stm32g0b1re-debug/` and not the database
@@ -151,7 +154,12 @@ anything is built, and the order matters:
    is the one to flash for a measurement, the debug one is what the
    debugger wants. Expected result: CMake Tools configures, and the
    output panel shows the ARM compiler under `/sw/arm-none-eabi` and
-   the build tree `build-cmake/stm32g0b1re-debug`.
+   the build tree `build-cmake/stm32g0b1re-debug`. On a fresh checkout,
+   before this choice, select `STM32G0B1RE (release, -Os)` once and let
+   it configure, then switch to the debug preset: the release configure
+   writes the compile database the editor reads for this project
+   ([clangd](#clangd) above says why, and names the host project's
+   configure that the kernel headers need in the same way).
 3. Build target: `blink`. The target list is the applications the
    configure discovered for this board, each with its `-upload` twin.
    Expected result: the status bar shows the chosen target's name next
@@ -177,8 +185,9 @@ debug buttons on purpose, since neither knows how to program a board).
 Select `blink-upload` as the build target and build: OpenOCD programs
 and verifies the image through the board's ST-LINK, resets it and
 exits, and the LED starts blinking. Then select `blink` again as the
-build target, or leave `blink-upload`, which rebuilds `blink` when its
-sources changed.
+build target; leaving `blink-upload` selected means that every later
+build, F7 included, rebuilds `blink` if its sources changed and then
+flashes the board again.
 
 What to check when nothing happens: the output panel shows OpenOCD's
 messages. "open failed" or a permission error means the probe could not
@@ -190,8 +199,7 @@ debug session and a flash cannot share the probe: stop the session
 first.
 
 Like the command-line `-upload`, a flash leaves the chip's DBG_STOP bit
-set until a power-on; it changes nothing for `blink` and matters for a
-program that measures the Stop modes
+set until a power-on, of no consequence for `blink`
 ([the command-line page, step 3](command-line.md#step-3-flash-it)).
 
 ## Debug

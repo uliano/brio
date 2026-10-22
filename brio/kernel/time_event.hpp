@@ -16,9 +16,11 @@
  * handled in Blinker's dispatch like any other event. No user code runs
  * when the tick interrupt fires: the interrupt only advances the tick
  * counter (and wakes the core from idle). Expiry is detected in the
- * kernel loop, by TimeEvents<P>::process(), which Tenuto calls once per
- * turn: it compares P::now() with every armed deadline and posts the
- * matured payloads, in main context.
+ * kernel loop, by TimeEvents<P>::process(), which Tenuto (the kernel,
+ * kernel/tenuto.hpp) calls once per turn of its loop: it compares
+ * P::now() with every armed deadline and posts the matured payloads, in
+ * main context. The conversion from milliseconds in the example is
+ * kernel/time.hpp's.
  *
  * Context: arm(), arm_every(), disarm() and process() run in the kernel
  * loop only, never in an interrupt handler. An interrupt handler that
@@ -52,8 +54,8 @@
  * Limits of the deadline arithmetic. process() compares with
  * (int32_t)(now - deadline) >= 0, a signed difference that survives the
  * 32-bit counter's wrap (about 49 days at 1000 Hz) as long as every
- * distance it measures stays below half the range: a delay or a period
- * must be below 2^31 ticks (about 24 days at 1000 Hz), and a deadline
+ * distance it measures stays within half the range: a delay or a period
+ * may be at most 2^31 ticks (about 24 days at 1000 Hz), and a deadline
  * that the loop leaves unserved for 2^31 ticks or more reads as future
  * again. A delay above 2^31 is not refused: it reads as overdue and is
  * posted at once.
@@ -98,7 +100,7 @@ public:
     };
 
     /// Arm: first firing after delay_ticks, then every period_ticks
-    /// (0 = one-shot); both below 2^31 (the file header's limits).
+    /// (0 = one-shot); both at most 2^31 (the file header's limits).
     /// Re-arming an armed event restarts it.
     static void arm(Base& te, uint32_t delay_ticks, uint32_t period_ticks) {
         disarm(te);

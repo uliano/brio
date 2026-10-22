@@ -56,7 +56,7 @@ not a transcript.
   copied to `/etc/udev/rules.d/` and loaded (`sudo udevadm control
   --reload-rules && sudo udevadm trigger`, or a replug of the board), it
   gives the `plugdev` group access to every probe OpenOCD knows, the
-  ST-LINK included.
+  ST-LINK included; your user must be a member of that group.
 - For debugging from a terminal: arm-none-eabi-gdb from the same
   toolchain.
 
@@ -145,13 +145,11 @@ enumerates; name the right one with
 `-DSTM32G0_PROBE_SERIAL=<serial>` at configure time (the `-upload`
 target then passes `adapter serial`).
 
-What this leaves behind: OpenOCD's target script sets a bit in the
-chip's debug configuration register, DBG_STOP, at every examination of
-the chip, and the reset that ends the programming is followed by one,
-so the bit stays set until a power-on. It changes nothing for `blink`,
-which never enters a Stop mode; what it does to a program that measures
-Stop, and how `brio flash` clears it, is in
-[docs/stm32g0/README.md, "Upload"](../stm32g0/README.md).
+One thing this leaves behind, of no consequence for `blink`: the
+chip's DBG_STOP bit stays set until a power-on, which matters only to
+a program that measures the Stop modes
+([docs/stm32g0/README.md, "Upload"](../stm32g0/README.md) says what it
+does and how `brio flash` clears it).
 
 If it fails. Two messages look alike and mean different things. "open
 failed" (or a libusb permission error) means OpenOCD could not reach the
@@ -216,6 +214,13 @@ From there, `break Blinker::running` and `continue` stop at the next
 event the Blinker handles, within half a second; `print
 Supervisor::index` prints the current period's index, 0 to 2; `monitor
 reset run` and `quit` leave the board running.
+
+If it fails: OpenOCD refusing to open the probe is step 3's failure,
+with the same two messages and the same first moves; gdb's "Connection
+refused" on the `target` command means OpenOCD is not running or
+exited (read its terminal); a `load` that fails after a successful
+connection is the same flash problem as a failed `-upload`. A debug
+session and an `-upload` cannot share the probe: one at a time.
 
 What the queue looks like. `print Blinker::queue` prints the queue
 object field by field: its slots (each a variant, printed with the

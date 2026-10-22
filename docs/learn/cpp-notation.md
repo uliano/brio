@@ -224,8 +224,11 @@ variant's tag. Two rules follow from how it is built:
 
 - Every alternative must be covered, or the program does not compile.
   The `[](auto)` catch-all is how a handler says "everything else".
-  Without it, forgetting one alternative is a compile error, which is
-  the point.
+  Without it, forgetting one alternative is a compile error; with it,
+  a forgotten alternative goes to the catch-all silently. The check is
+  that nothing falls through, not that each event has a case of its
+  own, and a state handler needs the catch-all because `Exit` is an
+  alternative it rarely names.
 - All the lambdas return the same type. In a state handler that type is
   `Status`, built by `handled()`, `unhandled()` or `transition(&next)`.
 
