@@ -1,52 +1,63 @@
 # Analog in the kernel
 
-Two target-independent pieces sit between an analog converter driver
-and the active objects that want its numbers: the arithmetic
-(`util/analog.hpp`: counts <-> millivolts, DAC codes - pure,
-host-tested) and the **AnalogSampler** (`util/analog_sampler.hpp`): the
-active object that owns one converter, walks a fixed list of inputs
-and publishes every result as a value event. The converter itself, its
-configuration knobs and its reference levels are each target's.
+This page decides how analog readings reach active objects: the
+arithmetic that turns converter counts into millivolts and back
+(`util/analog.hpp`, pure and host-tested), and `AnalogSampler`
+(`util/analog_sampler.hpp`), the active object that owns one
+converter, walks a fixed list of inputs and publishes every result as
+a value event, with each result attributed by the input code the
+converter reported and never by timing. It is written for an embedded
+programmer who has read an ADC in a loop and wants the readings to
+arrive as events, labelled, without a conversion ever being
+mislabelled. The converter itself, its configuration knobs and its
+reference levels are each target's.
+
+The smallest use is the excerpt below: a sampler type naming the
+converter, the platform, the subscribers and the inputs, and one
+vector binding that posts the result. The prerequisite that decides
+correctness: **the application configures the converter (reference,
+resolution, accumulation) before the sampler's `init()` and never
+selects an input behind the sampler's back**; the subscribers must
+know the meaning of the counts they get.
 
 ### Realizations
 
 Common to all: `adc_mv`/`dac_code` and their kin, `AnalogSampler` and
-the two concepts it asks of a converter - `start()`, `selected()`,
-`select(in)`, `input_code(in)` - which every converter below satisfies
-with those spellings, and `Ref` + `ref_mv()` as NAMES. What differs is
-what a reference IS on each family (which is why `Ref`'s enumerators
-are several vocabularies and not one: a voltage the silicon makes, a
-source of the converter's own selector, what a shared rail carries, or
-nothing but the analog supply), how an input pad is named, and
-the DAC's shape.
+the two concepts it asks of a converter (`start()`, `selected()`,
+`select(in)`, `input_code(in)`), which every converter below satisfies
+with those spellings, and `Ref` and `ref_mv()` as names. What differs
+is what a reference is on each family (which is why `Ref`'s
+enumerators are several vocabularies and not one: a voltage the
+silicon makes, a source of the converter's own selector, what a shared
+rail carries, or nothing but the analog supply), how an input pad is
+named, and the DAC's shape.
 
 | stratum | realization | beyond the contract |
 |---|---|---|
-| avrxt | `Adc<0>` and `AnalogIn<Pin>` (`avrxt/adc.hpp`); `Dac<0>` with `set(code)`/`set_mv()` (`avrxt/dac.hpp`); `Ref` in `avrxt/vref.hpp` | `Ref` names a VOLTAGE (`v1024`, `v2048`, `v2500`, `v4096`, `vdd`, `vrefa`) - the VREF block selects one for each consumer on the AVR DA/DB, and the AVR EA's ADC selects the same six in a register of its own; the ADC is one instance spelled with its number, TWO ENGINES behind one surface: the DA/DB's SAR converter, and the EA's differential converter with a PGA, whose differential pair is an input VALUE (`AdcDiff<pos, neg>`, `selected()` folding DIFF into bit 7), whose accumulation reaches a 32-bit sum (`sum()`), whose `claim()` takes a pad once, whose `AdcConfigured<0, cfg>` makes the configuration a type with a `sample_bits` the sampler checks, and whose input mux is NOT buffered (below) |
-| samc21 | `Adc<n>` for two converters in a host/client pair and `AnalogIn<Pin>` (`samc21/adc.hpp`); `Dac` (a monostate) with `set(value)` returning `bool` (`samc21/dac.hpp`); `Ref` in `samc21/adc.hpp` | there is no shared reference block, so `Ref` names a SOURCE of the ADC's own REFSEL (`intref`, `vddana_div1p6`, `vddana_div2`, `vrefa`, `dac`, `vddana`) and the DAC and the SDADC carry enums of their own (`DacRef`, `SdadcRef`); a synchronized write waits before storing, hence the `bool`; the SDADC and the TSENS are converters of their own shape, not `AnalogConverter`s |
-| stm32g0 | `Adc` (a monostate) and `AnalogIn<Pin, channel>` (`stm32g0/adc.hpp`); `Dac` with `write(channel, code)` (`stm32g0/dac.hpp`); `Ref` in `stm32g0/vref.hpp` | ONE rail, VREF+, shared by the ADC, the DAC and the comparators, so `Ref` names what that pin carries (`external`, `buffer_2v048`, `buffer_2v5`); an input states its CHANNEL beside its pin, no header table mapping one to the other; the DAC has two channels, so its verb takes one and is spelled `write` |
-| ch32v00x | `Adc` (a monostate) and `AnalogIn<Pin>` deriving the channel from the pad (`ch32v00x/adc.hpp`); no DAC on this family; `Ref` in `ch32v00x/adc.hpp` | the converter has NO reference input, so `Ref` is one word, `vdd`: the rail is the scale, and the 1.2 V VREFINT is an INPUT (`AdcInput::vrefint`) from which `supply_mv()` derives what the rail is; the OPA's output is another input (`AdcInput::opa`, channel 9); three analog watchdogs that can reset the chip, one per rank under the watchdog scan; `recover()` for the converter that stops under a hardware-triggered, DMA-served group ([the target's document](../ch32v00x/adc.md)) |
-| ch32vx03 | `Adc<n>` for the two converters and `AnalogIn<Pin>` deriving the channel from the pad (`ch32vx03/adc.hpp`); on the CH32V303 `Dac` with `DacOut<ch>` (`ch32vx03/dac.hpp`); `Ref` in `ch32vx03/adc.hpp` | no CH32V203 and no CH32V303 below the LQFP100 brings out a VREF+ pad, so `Ref` is `vdda` there - the analog supply IS the scale - and `vref_pad` on the CH32V303VC, whose board ties it to VDDA; and `ref_mv()` takes the board's millivolts as on the RP2040, with `Adc<1>::vdda_mv()` measuring it from VREFINT and no factory word to sharpen it (the electronic signature holds the flash size and the unique id alone); the two internal sources are TAGS on their channel numbers and ONE bit wakes both, written AFTER the calibration because it forces the input buffer on for good; an INJECTED group of four preempts the regular one with a signed offset, as on the STM32F4; the input buffer carries a PROGRAMMABLE GAIN of 1, 4, 16 or 64, WCH's own addition to the F1's chapter; and the DUAL modes put two converters in lockstep with the follower's datum in the upper half of the master's register - a capability no other stratum here has, so it stays this driver's verb and earns no util shape; the CH32V303's lot-keyed additions (short sampling times, ADC2's DMA request, and the converter clock's 75 % duty in the clock tree's own verb) are verbs that ASK THE DIE, and the die measured has none of them; and the CH32V303's DAC - a monostate whose only route out is a PAD shared with an ADC input, no status register, no underrun - is the converter's source with no wire ([the target's document](../ch32vx03/adc.md), [the DAC's document](../ch32vx03/dac.md)) |
+| avrxt | `Adc<0>` and `AnalogIn<Pin>` (`avrxt/adc.hpp`); `Dac<0>` with `set(code)`/`set_mv()` (`avrxt/dac.hpp`); `Ref` in `avrxt/vref.hpp` | `Ref` names a voltage (`v1024`, `v2048`, `v2500`, `v4096`, `vdd`, `vrefa`): the VREF block selects one for each consumer on the AVR DA/DB, and the AVR EA's ADC selects the same six in a register of its own; the ADC is one instance spelled with its number, two engines behind one surface: the DA/DB's SAR converter, and the EA's differential converter with a PGA, whose differential pair is an input value (`AdcDiff<pos, neg>`, `selected()` folding DIFF into bit 7), whose accumulation reaches a 32-bit sum (`sum()`), whose `claim()` takes a pad once, whose `AdcConfigured<0, cfg>` makes the configuration a type with a `sample_bits` the sampler checks, and whose input mux is not buffered (below) |
+| samc21 | `Adc<n>` for two converters in a host/client pair and `AnalogIn<Pin>` (`samc21/adc.hpp`); `Dac` (a monostate) with `set(value)` returning `bool` (`samc21/dac.hpp`); `Ref` in `samc21/adc.hpp` | there is no shared reference block, so `Ref` names a source of the ADC's own REFSEL (`intref`, `vddana_div1p6`, `vddana_div2`, `vrefa`, `dac`, `vddana`) and the DAC and the SDADC carry enums of their own (`DacRef`, `SdadcRef`); a synchronized write waits before storing, hence the `bool`; the SDADC and the TSENS are converters of their own shape, not `AnalogConverter`s |
+| stm32g0 | `Adc` (a monostate) and `AnalogIn<Pin, channel>` (`stm32g0/adc.hpp`); `Dac` with `write(channel, code)` (`stm32g0/dac.hpp`); `Ref` in `stm32g0/vref.hpp` | one rail, VREF+, shared by the ADC, the DAC and the comparators, so `Ref` names what that pin carries (`external`, `buffer_2v048`, `buffer_2v5`); an input states its channel beside its pin, no header table mapping one to the other; the DAC has two channels, so its function takes one and is spelled `write` |
+| stm32f4 | `Adc<n>` for up to three converters with `AdcCommon` for the block they share, and `AnalogIn<Pin, channel>` whose channel defaults to the family's own ADC1/ADC2 pad map (`stm32f4/adc.hpp`); `Dac` (a monostate) with `write(channel, code)` (`stm32f4/dac.hpp`); `Ref` in `stm32f4/adc.hpp` | VREF+ is a pad with no buffer and no selector, so `Ref` has one enumerator (`vref_pin`) and `ref_mv()` takes the board's millivolts, `vdda_mv()` measuring it instead of assuming it; the three internal sources are tags (`AdcInput`) and not channel numbers, because the temperature sensor's channel differs across the family; a second conversion group, the injected one, preempts the regular one and carries a signed offset; and the DAC reaches this ADC only through the bond pad they share, having no internal route at all ([the STM32F4 ADC page](../stm32f4/adc.md)) |
+| ch32v00x | `Adc` (a monostate) and `AnalogIn<Pin>` deriving the channel from the pad (`ch32v00x/adc.hpp`); no DAC on this family; `Ref` in `ch32v00x/adc.hpp` | the converter has no reference input, so `Ref` is one word, `vdd`: the rail is the scale, and the 1.2 V VREFINT is an input (`AdcInput::vrefint`) from which `supply_mv()` derives what the rail is; the OPA's output is another input (`AdcInput::opa`, channel 9); three analog watchdogs that can reset the chip, one per rank under the watchdog scan; `recover()` for the converter that stops under a hardware-triggered, DMA-served group ([the CH32V00x ADC page](../ch32v00x/adc.md)) |
+| ch32vx03 | `Adc<n>` for the two converters and `AnalogIn<Pin>` deriving the channel from the pad (`ch32vx03/adc.hpp`); on the CH32V303 `Dac` with `DacOut<ch>` (`ch32vx03/dac.hpp`); `Ref` in `ch32vx03/adc.hpp` | no CH32V203 and no CH32V303 below the LQFP100 brings out a VREF+ pad, so `Ref` is `vdda` there (the analog supply is the scale) and `vref_pad` on the CH32V303VC, whose board ties it to VDDA; `ref_mv()` takes the board's millivolts as on the RP2040, with `Adc<1>::vdda_mv()` measuring it from VREFINT and no factory word to sharpen it (the electronic signature holds the flash size and the unique id alone); the two internal sources are tags on their channel numbers and one bit wakes both, written after the calibration because it forces the input buffer on for good; an injected group of four preempts the regular one with a signed offset, as on the STM32F4; the input buffer carries a programmable gain of 1, 4, 16 or 64, WCH's own addition to the F1's chapter; and the dual modes put two converters in lockstep with the follower's datum in the upper half of the master's register, a capability no other stratum here has, so it stays this driver's and earns no `util/` shape; the CH32V303's lot-keyed additions (short sampling times, ADC2's DMA request, and the converter clock's 75 % duty in the clock tree's own function) are functions that ask the die, and the die measured has none of them; and the CH32V303's DAC, a monostate whose only route out is a pad shared with an ADC input, no status register, no underrun, is the converter's source with no wire ([the CH32V203/CH32V303 ADC page](../ch32vx03/adc.md), [its DAC page](../ch32vx03/dac.md)) |
 | ch32x035 | none | the ADC (RM ch. 10), the touch keys that are its mode (ch. 11) and the amplifiers and comparators (ch. 17) are not written in this stratum; a part carries up to fourteen external channels and no DAC |
-  
-| rp2040 | `Adc` (a monostate) and `AnalogIn<Pin>` deriving the channel from the pad (`rp2040/adc.hpp`); no DAC on this family; `Ref` in `rp2040/adc.hpp` | the converter has NO reference input and no rail of its own to name, so `Ref` is one word, `vref_pin`, and `ref_mv()` takes the board's millivolts - what that pin carries is the application's to state, there being no internal source to measure it against; the temperature sensor is an ordinary input at the end of the map (`AdcInput`), not a tag; the converter has A CLOCK OF ITS OWN (clk_adc, out of the USB PLL or the crystal), so its rate is not derived from the system clock at all, and the free run is paced by a fractional divider under the conversion's own 96-cycle floor; an eight-entry FIFO is both the interrupt and the DMA request, and an optional shift to eight bits makes a byte buffer ([the target's document](../rp2040/adc.md)) |
-| rp2350 | `Adc` (a monostate) and `AnalogIn<Pin>` (`rp2350/adc.hpp`); no DAC on this family; `Ref` in `rp2350/adc.hpp` | the RP2040's converter with the RP2040's `Ref` under another name - `avdd_pin`, because THERE IS NO ADC_VREF PIN HERE AT ALL: the converter's own supply is the full scale, and `ref_mv()` takes the board's millivolts as before. What is this chip's own is that THE PACKAGE DECIDES THE INPUT MAP - four pads or eight, with the temperature sensor's number moving with them, so the input select is four bits wide against three and the round-robin nine against five, and `init()` refuses when the silicon's own package register disagrees with the build; and a claim must DROP THE PAD'S ISOLATION LATCH, which on this silicon is what makes a pull reach the pad at all - which is also the one configuration the chip's floating-pad erratum does not bite ([the target's document](../rp2350/adc.md)) |
-| stm32f4 | `Adc<n>` for up to three converters with `AdcCommon` for the block they share, and `AnalogIn<Pin, channel>` whose channel DEFAULTS to the family's own ADC1/ADC2 pad map (`stm32f4/adc.hpp`); `Dac` (a monostate) with `write(channel, code)` (`stm32f4/dac.hpp`); `Ref` in `stm32f4/adc.hpp` | VREF+ is a PAD with no buffer and no selector, so `Ref` has one enumerator (`vref_pin`) and `ref_mv()` takes the board's millivolts - `vdda_mv()` measures it instead of assuming it; the three internal sources are TAGS (`AdcInput`) and not channel numbers, because the temperature sensor's channel differs across the family; a SECOND conversion group, the injected one, preempts the regular one and carries a signed offset; and the DAC reaches this ADC only through the BOND PAD they share, having no internal route at all ([the target's document](../stm32f4/adc.md)) |
+| rp2040 | `Adc` (a monostate) and `AnalogIn<Pin>` deriving the channel from the pad (`rp2040/adc.hpp`); no DAC on this family; `Ref` in `rp2040/adc.hpp` | the converter has no reference input and no rail of its own to name, so `Ref` is one word, `vref_pin`, and `ref_mv()` takes the board's millivolts: what that pin carries is the application's to state, there being no internal source to measure it against; the temperature sensor is an ordinary input at the end of the map (`AdcInput`), not a tag; the converter has a clock of its own (clk_adc, out of the USB PLL or the crystal), so its rate is not derived from the system clock at all, and the free run is paced by a fractional divider under the conversion's own 96-cycle floor; an eight-entry FIFO is both the interrupt and the DMA request, and an optional shift to eight bits makes a byte buffer ([the RP2040 ADC page](../rp2040/adc.md)) |
+| rp2350 | `Adc` (a monostate) and `AnalogIn<Pin>` (`rp2350/adc.hpp`); no DAC on this family; `Ref` in `rp2350/adc.hpp` | the RP2040's converter with the RP2040's `Ref` under another name, `avdd_pin`, because there is no ADC_VREF pin here at all: the converter's own supply is the full scale, and `ref_mv()` takes the board's millivolts as before. What is this chip's own is that the package decides the input map (four pads or eight, with the temperature sensor's number moving with them, so the input select is four bits wide against three and the round-robin nine against five), and `init()` refuses when the silicon's own package register disagrees with the build; and a claim must drop the pad's isolation latch, which on this silicon is what makes a pull reach the pad at all, which is also the one configuration the chip's floating-pad erratum does not bite ([the RP2350 ADC page](../rp2350/adc.md)) |
 | host | none | the arithmetic is host-tested (`test_analog`), the sampler against a scripted converter (`test_analog_sampler`) |
 
-The DAC's verb is one spelling apart (`set` where the converter has one
-output, `write` where the signature carries a channel) and is recorded
-as such. Where a row says there is no DAC, that is the silicon's own
-absence and not a gap.
+The DAC's function is one spelling apart (`set` where the converter
+has one output, `write` where the signature carries a channel) and is
+recorded as such. Where a row says there is no DAC, that is the
+silicon's own absence and not a gap.
 
 ## The sampler is a usage type, not an application
 
-What it knows: "a list of inputs, a pace, samples out". What it does
-not know: what the samples mean (the subscribers scale them with
-`adc_mv` and their reference), where the pace comes from, which
-silicon converts. It is the analog sibling of `SerialPort<Transport>`
-and `BusMaster<Bus>`: a util AO template over a concept the target
-driver satisfies.
+What it knows: a list of inputs, a pace, samples out. What it does not
+know: what the samples mean (the subscribers scale them with `adc_mv`
+and their reference), where the pace comes from, which silicon
+converts. It is the analog sibling of `SerialPort<Transport>` and
+`BusMaster<Bus>`: a `util/` active-object template over a concept the
+target driver satisfies.
 
 ```cpp
 using Sampler = AnalogSampler<Adc<0>, P, Subscribers<Monitor, Alarm>,
@@ -54,93 +65,94 @@ using Sampler = AnalogSampler<Adc<0>, P, Subscribers<Monitor, Alarm>,
 ISR(ADC0_RESRDY_vect) { post<Sampler>(Sampled{Adc<0>::resrdy(), Adc<0>::selected()}); }
 ```
 
-- **Converter contract** (`AnalogConverter` + `SamplerInput` per
-  input): `start()`, `selected()` (the input code in effect),
-  `select(input)` and a constexpr `input_code(input)` for each input
+- **The converter contract** (`AnalogConverter`, plus `SamplerInput`
+  per input): `start()`, `selected()` (the input code in effect),
+  `select(input)` and a `constexpr` `input_code(input)` for each input
   of the list. The inputs are values of the driver's own vocabulary
-  given as template arguments - pin tags, internal sources, a
-  differential pair - so selection is an overload resolved at compile
-  time and an input the converter cannot take is a compile error.
-  Two verbs are optional and used where the converter has them:
+  given as template arguments (pin tags, internal sources, a
+  differential pair), so selection is an overload resolved at compile
+  time and an input the converter cannot take is a compile error. Two
+  functions are optional and used where the converter has them:
   `claim(input)`, called once per input at the sampler's `init()` (a
   pad's digital input buffer off, so that a select is the mux store
   alone), and a constant `sample_bits`, the width of what the
-  converter delivers as configured - `Sampled.value` is 16 bits, and a
+  converter delivers as configured: `Sampled.value` is 16 bits, and a
   converter declaring more (an unscaled sum of many samples) is
   refused at compile time.
-- **Result path** = the kernel's ISR contract: the driver's
-  result-ready ISR body returns the value, the app's vector binding
-  posts `Sampled{value, input}`; the sampler publishes
-  `AnalogSample{index, value}` (index = position in the list) to the
-  subscribers, by value, and selects the next input.
+- **The result path** is the kernel's interrupt contract: the driver's
+  result-ready handler body returns the value, the application's
+  vector binding posts `Sampled{value, input}`; the sampler publishes
+  `AnalogSample{index, value}` (the index is the position in the list)
+  to the subscribers, by value, and selects the next input.
 - **Attribution by the reported code, never by timing.** `Sampled`
   carries the input code the converter had selected for that
-  conversion, read in the ISR with the value. A late dispatch, a pace
-  faster than the dispatch, a queue overflow can delay or lose
-  samples - they cannot mislabel them. A code outside the list is
-  dropped and counted. Where the input mux is NOT buffered (a select
-  landing on a conversion in flight corrupts it, or - when the result
-  is already in its output stage - lets it land under the new label),
-  the promise is the driver's: its select under a hardware pace aborts
-  the conversion in flight, waits the output latency, moves the mux
-  and re-arms the pace - one lost trigger at worst. On the AVR EA a
-  sweep of the select's lag over the whole pace period measured no
-  mislabel of 4000 with the driver's select and 32 of 4000 with a bare
-  mux store, in each of fifteen runs ([the target's document](../avrxt/adc.md)).
+  conversion, read in the interrupt handler with the value. A late
+  dispatch, a pace faster than the dispatch, a queue overflow can delay
+  or lose samples; they cannot mislabel them. A code outside the list
+  is dropped and counted. Where the input mux is not buffered (a
+  select landing on a conversion in flight corrupts it, or, when the
+  result is already in its output stage, lets it land under the new
+  label), the promise is the driver's: its select under a hardware
+  pace aborts the conversion in flight, waits the output latency,
+  moves the mux and re-arms the pace, one lost trigger at worst. On the
+  AVR EA a sweep of the select's lag over the whole pace period
+  measured no mislabel of 4000 with the driver's select and 32 of 4000
+  with a bare mux store, in each of fifteen runs
+  ([the AVR ADC page](../avrxt/adc.md)).
 - **Two paces, one sampler.** Software: `start_every(ticks)` (a
-  TimeEvent of the sampler; kernel-tick granularity). Hardware: the
-  application routes ANY event generator - a PIT divider, a timer
-  overflow, a pin - to the converter's start input and never calls
-  `start_every`; the sampler only receives results. Which generator
-  is the app's choice, made where the hardware is wired: the sampler
-  does not name the timer.
+  `TimeEvent` of the sampler, at the kernel tick's granularity).
+  Hardware: the application routes any event generator (a PIT divider,
+  a timer overflow, a pin) to the converter's start input and never
+  calls `start_every`; the sampler only receives results. Which
+  generator is the application's choice, made where the hardware is
+  wired: the sampler does not name the timer.
 - **The owner's duties** stay with the application: configuring the
-  converter before the sampler's `init()` (reference, resolution,
-  accumulation - the sampler does not reconfigure, and the
-  subscribers must know the meaning of what they get), pausing a
+  converter before the sampler's `init()` (the reference, the
+  resolution, the accumulation; the sampler does not reconfigure, and
+  the subscribers must know the meaning of what they get), pausing a
   hardware pace across a dynamic clock change ([clock.md](clock.md)),
   never selecting an input behind the sampler's back.
-- **The queue is the ammortizer, and says when it is too small.**
-  Results arrive from the ISR at the pace; a long dispatch elsewhere
-  queues a few; the queue's saturating overflow counter is the
-  measurement (bench: 512 samples/s, two subscribers, no drops on AVR
-  DA/DB at 24 MHz).
+- **The queue absorbs the bursts, and says when it is too small.**
+  Results arrive from the interrupt handler at the pace; a long
+  dispatch elsewhere queues a few; the queue's saturating overflow
+  counter is the measurement (measured: 512 samples a second, two
+  subscribers, no drops on the AVR DA/DB at 24 MHz).
 
 Validated on the AVR DA/DB and the AVR EA: the contract carries that
 silicon's shape (one result per interrupt, the selected input
-readable). A
-sequencer/DMA converter delivers blocks and counts its own position;
-the pace-by-hardware-event idea holds everywhere, the delivery shape
-may not (overview.md, "Authority of util/").
+readable). A sequencer or DMA converter delivers blocks and counts its
+own position; the pace-by-hardware-event idea holds everywhere, the
+delivery shape may not
+([overview.md, "Authority of util/"](overview.md#generalization-rule)).
 
 ## What is deliberately not here
 
 - A multi-consumer arbiter (requests `{input, ReplyTo<...>}` served
   one conversion at a time): the shape of `BusMaster`, with the
   difference that the reply must carry the value. Built when an
-  application has two AOs wanting channels with DIFFERENT converter
-  configurations; until then one owner AO and `publish` cover the
-  need. Note that an arbiter and a hardware pace exclude each other.
+  application has two active objects wanting channels with different
+  converter configurations; until then one owner and `publish` cover
+  the need. An arbiter and a hardware pace exclude each other.
 - A threshold watcher (the converter's window comparator posting an
-  alarm with no sample traffic, the CPU asleep): a second usage
-  type, separate from the sampler - the window is agnostic of the
-  selected input, so it does not belong inside a walk.
-- A sequencer in util: on silicon with a hardware scan (a sequencer
-  and DMA) the walk moves behind the concept, the interface - list,
-  pace, samples - does not change. Until that target exists, the walk
+  alarm with no sample traffic, the CPU asleep): a second usage type,
+  separate from the sampler, since the window is agnostic of the
+  selected input and so does not belong inside a walk.
+- A sequencer in `util/`: on silicon with a hardware scan (a sequencer
+  and DMA) the walk moves behind the concept, and the interface (list,
+  pace, samples) does not change. Until that target exists, the walk
   is the sampler's and nothing pretends otherwise.
 
 ## Reference
 
 | Entity | Header | Role |
 |--------|--------|------|
-| `adc_mv`, `adc_mv_signed`, `dac_code`, `dac_mv` | `util/analog.hpp` | counts <-> millivolts for any converter, exact for every 16-bit result |
+| `adc_mv`, `adc_mv_signed`, `dac_code`, `dac_mv` | `util/analog.hpp` | counts to millivolts and back for any converter, exact for every 16-bit result |
 | `adc_sum_mv`, `adc_sum_mv_signed` | `util/analog.hpp` | the same for a sum of any width (a 64-bit product: a cold path) |
 | `AnalogConverter`, `SamplerInput` (concepts) | `util/analog_sampler.hpp` | what the sampler needs of a converter and of each input |
 | `converter_sample_bits<C>()` | `util/analog_sampler.hpp` | the width a converter declares (16 where it declares none) |
-| `AnalogSampler<C, P, Subscribers<...>, inputs...>` | `util/analog_sampler.hpp` | the owner AO: `init`, `start_every(ticks)`, `stop`, `unknown_inputs()`, `queue` |
-| `Sampled{value, input}` | `util/analog_sampler.hpp` | posted by the ISR glue |
+| `AnalogSampler<C, P, Subscribers<...>, inputs...>` | `util/analog_sampler.hpp` | the owner active object: `init`, `start_every(ticks)`, `stop`, `unknown_inputs()`, `queue` |
+| `Sampled{value, input}` | `util/analog_sampler.hpp` | posted by the interrupt glue |
 | `AnalogSample{index, value}` | `util/analog_sampler.hpp` | published to the subscribers |
-| `Ref`, `ref_mv` | each target's vref header | this silicon's reference levels |
+| `Ref`, `ref_mv` | each target's reference header | this silicon's reference levels |
 
-Target pages: [../avrxt/adc.md](../avrxt/adc.md), [../avrxt/vref.md](../avrxt/vref.md), [../avrxt/dac.md](../avrxt/dac.md); [../samc21/adc.md](../samc21/adc.md), [../samc21/dac.md](../samc21/dac.md), [../samc21/sdadc.md](../samc21/sdadc.md), [../samc21/tsens.md](../samc21/tsens.md); [../stm32g0/adc.md](../stm32g0/adc.md), [../stm32g0/vref.md](../stm32g0/vref.md), [../stm32g0/dac.md](../stm32g0/dac.md).
+Target pages: [the AVR ADC page](../avrxt/adc.md), [the AVR reference page](../avrxt/vref.md), [the AVR DAC page](../avrxt/dac.md); [the SAM C21 ADC page](../samc21/adc.md), [the SAM C21 DAC page](../samc21/dac.md), [the SAM C21 SDADC page](../samc21/sdadc.md), [the SAM C21 temperature sensor page](../samc21/tsens.md); [the STM32G0 ADC page](../stm32g0/adc.md), [the STM32G0 reference page](../stm32g0/vref.md), [the STM32G0 DAC page](../stm32g0/dac.md).
