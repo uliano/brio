@@ -1,115 +1,90 @@
 # Target: RP2040 (`rp2040/`)
 
-The operational page for brio's RP2040 target: Raspberry Pi's chip
-with two ARM Cortex-M0+ cores, an ARMv6-M family that shares the
-`cortexm/` core stratum with the SAM C21 and the STM32G0. A
-single-core program runs on core 0 - one kernel, one SysTick, the
-other core asleep in the bootrom - and the second core, the design
-point the stratum was opened for, runs a kernel of its own
-(design/kernel.md section 12, [multicore.md](multicore.md)): two
-kernels, one per core, the inbox bridge between them, a console for
-each when a second bridge is wired. `kernel/` and `util/` compile here as
-written (`test/family_rp2040/util_all.cpp` is the whole of both over
-the platform).
+The operational page of brio's RP2040 target, for a programmer who has
+a Pico or a WeAct RP2040 board on the desk and wants to build, flash
+and debug a brio program on it, and then find the document of the
+peripheral the program needs. It says what the stratum is, which boards
+it is proven on, how the build, the upload, the debugger and the
+console work and where each has a trap, and it ends with the map of the
+stratum's own documents: one line per peripheral driver, which is where
+the state of the driver work is read.
 
-Peripheral documents live next to this page, one per chapter - the
-map below; the documents of record are in [vendor/README.md](vendor/README.md)
-together with the errata pass and the bench chip's identity (B2
-silicon, SYSINFO.CHIP_ID read over SWD).
+A stratum is a directory of `brio/` holding one architectural layer;
+`brio/rp2040/` holds everything that includes the chip's vendored
+device description. The RP2040 is Raspberry Pi's chip with two ARM
+Cortex-M0+ cores, an ARMv6-M family that shares the `cortexm/` core
+stratum with the SAM C21 and the STM32G0
+([../cortexm/README.md](../cortexm/README.md)). A single-core program
+runs on core 0, one kernel and one SysTick with the other core asleep
+in the bootrom; the second core, the design point the stratum was
+opened for, runs a kernel of its own
+([../design/kernel.md](../design/kernel.md), "Two cores: two kernels and
+a bridge"; [multicore.md](multicore.md)): two kernels, one per core, the
+inbox bridge between them, a console for each when a second bridge is
+wired. The kernel (`kernel/`) and the services (`util/`) compile here as
+written (`test/family_rp2040/util_all.cpp` is the whole of both over the
+platform). There is no maintained teaching example in this project: the
+console and the test suites are its applications, and `blink` here is a
+stated gap.
 
-## The documents
+The documents of record (the datasheets by build, the vendored pico-sdk
+subset and the SVD), the errata pass and the bench chip's identity (B2
+silicon, SYSINFO.CHIP_ID read over SWD) are in
+[vendor/README.md](vendor/README.md).
 
-One document per peripheral driver, in the shape
-[../README.md](../README.md) prescribes; the vendor page carries the
-documents of record.
+## The boards
 
-| Document | Content |
-|----------|---------|
-| [platform.md](platform.md) | Platform (RP2040): `Rp2040Platform<TB>` on the SysTick `Ticker` (1000 Hz), the PRIMASK critical section that is PER CORE, WFI idle; the boot chain (bootrom, the 256-byte second stage, the vector table at flash offset 0x100 the stage vectors into), the crt with the pico-sdk's handler names and THE MACRO TRAP behind them, the two unstriped SRAM banks as the two cores' stacks; the reset controller that gates every peripheral; SYSINFO's chip id; the suite's measures (the tick to 5 ppm, the cold XIP cost of a first call, .noinit through every reset); A HANDLER IN SRAM: `.fast_text` collected by the script and `places_fast_text`, the program placing the vectors it binds or giving SpiHost, Uart and I2cHost util/placement.hpp's InRam - measured warm and cold, the placement buying the cold path and costing the warm one its veneer |
-| [reset.md](reset.md) | Reset (RP2040): three kinds of reset with three signatures - chip-level (HAD_POR, HAD_RUN, HAD_PSM_RESTART, standing for the life of the supply), watchdog (REASON, the last event), the core's own (SYSRESETREQ: ONE CORE through the bootrom, no mark) - so the causes word is a history read by comparison, and the chip's reboot is the watchdog's trigger; `Reset::software()` (the chip), `Reset::core()`, `ResetReporter`, `fault_reset<P>()` |
-| [dma.md](dma.md) | DMA (RP2040): twelve channels with their trigger aliases, the request as a FIELD any channel takes (table 119, credit-based), two interrupt lines (one per core by convention), chaining, address wrapping, pacing timers, the checksum sniffer, the abort with erratum E13's workaround, progress from TRANS_COUNT (E12); the transfer engines - bound once, two stores a block, the beat per block from the run's type, the claim a transport masks alone, a transmit engine that reports errors only for the SPI host's one interrupt a transaction - in the UART's, SPI's and I2C's slots (the suite's console prints through one), the copy engine, and the two traps of a receive engine; the level as one bit, a receive engine HIGH by default, measured never to decide correctness here; what a released requester leaves the next owner |
-| [i2c.md](i2c.md) | I2C (RP2040): the Synopsys DW_apb_i2c behind `DwApbI2c<n>` - a COMMAND FIFO whose entries carry the RESTART and STOP bits, an empty FIFO with no STOP holding SCL, one TX_ABRT with the reason decoded, the SCL counts with the cycles the block adds subtracted so the asked rate is the measured one -, the `I2cHost` engine with the other strata's Request (the probe as a one-byte read: no address-only entry exists), the engines serving a read phase (the request a level the DMA spends in bursts), `I2cClient` on RD_REQ (the stretch is the block's own, a transmitter's only); measured on the wire against the desk partner as the peer - the general call both ways, arbitration between two hosts, the STOP_DET every STOP raises |
-| [adc.md](adc.md) | ADC (RP2040): one 12-bit converter behind `Adc` over four pads and the temperature sensor - its own 48 MHz clock from the USB PLL (or the crystal, a conversion of 96 of its cycles either way), the one-shot start, the free run paced by a 16.8 divider whose period must exceed the conversion (DIV 95 halves the rate, measured), the round-robin, the eight-entry FIFO as one interrupt and one DMA request, the eight-bit shift, the error flag per entry -, `AnalogIn<Pin>` on GPIO 26..29, util/analog_sampler.hpp over it; measured wireless: the sensor, the pads through their pulls (the keeper is no keeper on an analog pad), 2.003 us a conversion, the FIFO overflowing 16 us after a block ends unless the converter is stopped from the completion |
-| [flash.md](flash.md) | Flash (RP2040): the external quad-SPI chip the core executes out of, erased and programmed through THE BOOTROM'S OWN FUNCTIONS behind `Flash` - every operation a window with the flash disconnected, run from `.ram_text` with interrupts masked and closed by re-entering the second stage's copy in SRAM -, `command()` for the chip's ids (9Fh, 4Bh, 05h), `Xip` the cache with its counters; `QspiFlashPartition` the constant top 64 KB the linker never reaches, `QspiFlash` and `QspiFlashJournalZone` the two FlashMedia (4096 / 256) for the heap and the journal; measured: the stage returns to a caller, a page takes a second program, a 5 ms window costs the ticker its ticks but one |
-| [usb.md](usb.md) | USB (RP2040): the chip's own device controller behind `Usb`, the endpoint controller of the device stack - the dual-port RAM's endpoint and buffer control words, the two-step offer the clock ratio demands, the bulk OUT double buffered (a NAK costs a frame behind a hub), the PIDs kept per endpoint, clk_usb at 48 MHz from the USB PLL; the CDC ACM port as a console on the chip's own connector; measured: enumeration in 550 ms, 559 KB/s out and 907 KB/s in, 2.5 MB echoed byte-exact |
-| [pio.md](pio.md) | PIO (RP2040): two blocks of four state machines behind `Pio<n>` and `PioSm<n, sm>`, the nine instructions as constexpr encoders with the side-set and delay folded in, a program relocated at load, the FIFOs as interrupt sources and DMA requests, the eight flags and the two lines; the chapter's own programs as tasks (a serial port on any pin, a square wave, a PWM that is a PwmChannel); measured on two wires between the chip's own pads (by name, the pair desk carrying none): 64 bytes at 3 Mbaud, a 31.25 MHz wave, the PWM's duties, a one-instruction sampler as a logic analyser |
-| [pwm.md](pwm.md) | PWM (RP2040): eight slices behind `PwmSlice<n>` - a 16-bit counter with a wrap value and two levels, the 8.4 divider, phase-correct mode, the B pin as the counter's gate or clock (a duty or a frequency measured with no capture unit), the wrap as one interrupt bit and one DMA request, the global enable for lockstep, the phase nudges -, `configure()` from scratch because a slice reconfigured while running keeps its counter (measured: half a millisecond of silence, an output stuck); the tasks `PwmOutput` (a PwmChannel, max = TOP + 1), `PwmPair` (a dead time by arithmetic), the edge and level counters, `PwmPeriodicTick`; measured on two wires between the chip's own slices (by name, the pair desk carrying none) |
-| [rtc.md](rtc.md) | RTC (RP2040): a calendar of seven binary fields behind `Rtc` - clk_rtc from the crystal over 256 with CLKDIV_M1 for the second, a leap year of "divisible by four" with the bit for the century years, one alarm on any subset of the fields (a level: the ISR body masks the line and disarms), the day of the week the silicon does not compute -, `RtcDateTime` and the calendar arithmetic; measured: the enable's own tick (a set value reads one second on unless loaded after it, which set() does), the 1.000 s second, eight boundaries including 2100, the alarm's 37 us latency |
-| [spi.md](spi.md) | SPI (RP2040): the ARM PL022 behind `Pl022<n>`, the `SpiHost` engine with the other strata's Request (a GPIO select held for the tenure, the pump keeping eight frames in flight through the FIFOs, the engines on any two channels, the loop-back as the instrument) and `SpiClient` framing on its select pad; measured: the polled loop's Cortex-M0+ floor (37 cycles a received frame, 21 a written one at clk_peri / 2), the engines at the wire with the block's gap, the host's hot path where the program places it (a cold request 11363 cycles from the flash, 2942 InRam, 791 warm); on the pair's wire against the partner's PIO client: every mode, width and serve under one held select, exact to clk_peri / 10, and this chip's client under the partner's PL022 host whose select is its own frame signal; the client's answer pad driven deselected and under SOD (nSSPOE reaches no pad) |
-| [sleep.md](sleep.md) | Sleep (RP2040): the SLEEP state - reached on a plain WFI with core 1 in the bootrom (measured, SLEEPDEEP or not), the top-level gates pruned to SLEEP_ENx, SysTick counting through it - and DORMANT on either oscillator (the keyword, a GPIO event or the RTC the way back, the ring oscillator dormant with the crystal keeping the calendar as the dormant with a deadline), behind `Rp2040SleepSite` and `Rp2040TimedSleepSite` (the timer as alarm and witness, the calendar for a dormant) and the platform's `sleep_hook`; `DormantWake`, the gate sets; measured: a two-second dormant the timer never saw, the manager's rounds through the kernel's own idle |
-| [multicore.md](multicore.md) | Multicore (RP2040): two kernels on two cores - `Rp2040Platform<core>` and `CoreTicker<core>`, the SIO FIFO doorbell behind `util/inbox.hpp`'s bridge, the bootrom's launch protocol and the power-on state machine's reset of core 1 (`Core1`), the mispost check on the queues; measured: a crossing and back in 10 us, fifty thousand a second each way lossless, the accounts balancing under saturation, the probe trap that halts core 1 and freezes the timer |
-| [watchdog.md](watchdog.md) | Watchdog (RP2040): the tick generator the system timer counts too, the 24-bit countdown that decrements TWICE per tick (erratum E1, 8.3 s of reach), the PSM selection that makes a time-out a reboot through the bootrom, ENABLE that clears, `Scratch<0..3>` surviving every reset but the chip-level one (the upper four are the bootrom's, refused) |
-| [timer.md](timer.md) | Timer (RP2040): the 64-bit microsecond counter on the watchdog tick, the raw-pair read for any context and the latching pair for one, four alarms on the low word each with its own line, DBGPAUSE set at reset; `Timer::now()`, `alarm_in`, the ruler of every timing verdict on this target |
-| [clock.md](clock.md) | Clock (RP2040): the FOURTH clock model - no bus prescaler and no enable bit per peripheral, but a generator per clock domain with an aux multiplexer and a divider, a glitchless mux in front of the two that must never stop, and a separate clk_peri so the UARTs keep their rates (`PeriSource::crystal`, measured); the boot on the ring oscillator, the crystal's startup delay, the system PLL's exact-ratio search at compile time (125 MHz = 1500 MHz / 6 / 2), `init()` as the rate switch (~200 us), the switching sequences of 2.15.3.2 as code; the frequency counter as the measure, the GPIO clock outputs and inputs, the ring oscillator's start and stop |
-| [pin.md](pin.md) | GPIO (RP2040): thirty pins of one bank owned by THREE blocks - IO_BANK0's function select, PADS_BANK0's electrical setup with the bus-keeper mode, SIO's single-cycle word-wide path - both blocks in reset at power-up and released by every configuring verb; the pad's reset state (input enabled, pull-down); `Pin<n>` with no port letter |
-| [uart.md](uart.md) | UART (RP2040): the ARM PL011 behind `Pl011<n>` and the `Uart` task - 32-deep FIFOs storing the error flags with each byte (the overrun read from UARTRSR, a live bit in the entries), a transmit interrupt that is an EDGE latched until a write above the level or UARTICR clears it (so the task writes an idle FIFO directly and arms the interrupt only behind a full one), the receive timeout against the level (measured: 371 us for a lone byte, the sixteenth frame for a burst), the 16-bit + 6-bit divisor off clk_peri from 120 baud to 7.8125 Mbaud, the loop-back as the instrument (chosen at the bring-up), pins fixed per instance by table 279; on the pair's wires against the RP2350B's `uart_peer`, an echo of 512 bytes in the two crystals' common time and the error attribution of 7E1 under 8N1 |
-| [vendor/README.md](vendor/README.md) | The RP2040 datasheet by build, the Pico datasheet and the hardware design guide, the vendored pico-sdk subset and the SVD, the bench chip's identity, the errata pass |
+Two boards, one chip, each with a page of its own under
+[../boards/](../boards/README.md) with its connectors and its probe.
+
+| Board | Flash | Clock | Console | LED |
+|---|---|---|---|---|
+| [Raspberry Pi Pico](../boards/pico.md), the reference board | a 2 MB Winbond W25Q16JV, the chip the SDK's second stage was written for | the recommended 12 MHz crystal, the PLL at 125 MHz | the Debug Probe's UART bridge on UART0 GP0/GP1 | GP25 |
+| [a WeAct RP2040 board](../boards/weact-rp2040.md) | a 2 MB Zetta ZD25Q16, which OpenOCD's release does not know | a 12 MHz crystal, the PLL at 125 MHz | the same | GP25, a user button on GP23 |
+
+Both run at 3.3 V. Verified at the bench: the chip id and both debug
+ports over SWD, the image booting through the second-stage bootloader
+into the vector table at flash offset 0x100, the crystal and the PLL
+locked at 125 MHz, the pin-check wave on GP2..GP29 read back through
+SIO, the console over the probe's UART bridge in both directions (the
+kernel console answers HELP, LED, UPTIME and ERR at 115200 with every
+error counter at zero), the LED on GP25 under the console's `LED`
+command, and every suite of the document map green on both boards
+(their documents' findings; the clock link between the two boards
+counts one crystal against the other, and the pair's UART wires carry
+the serial suite's letters on the wire against the WeAct RP2350B's
+`uart_peer`, and that board's suite against this one's,
+[../boards/weact-rp2040.md](../boards/weact-rp2040.md)). Not yet
+verified: the user button on GP23.
 
 ## Toolchain
 
-Self-built **arm-none-eabi-gcc 16.2** at `/sw/arm-none-eabi` - the
-same compiler, flags and linker discipline as the samc21 and stm32g0
-projects (`rp2040/cmake/toolchain-arm.cmake` is that file verbatim:
-`CMAKE_SYSTEM_NAME Generic`, `STATIC_LIBRARY` try-compile,
-the link that takes brio's runtime and libgcc and no C library,
-so an accidental `printf` or `malloc` fails it -
+The compiler is a self-built arm-none-eabi-gcc 16.2 at
+`/sw/arm-none-eabi`, the same compiler, flags and linker discipline as
+the samc21 and stm32g0 projects: `rp2040/cmake/toolchain-arm.cmake` is
+that file verbatim (`CMAKE_SYSTEM_NAME Generic`, a `STATIC_LIBRARY`
+try-compile, and a link that takes brio's runtime and libgcc and no C
+library, so an accidental `printf` or `malloc` fails it,
 [../design/runtime.md](../design/runtime.md)). What is ARMv6-M and not
 Raspberry Pi's lives in the `cortexm/` core stratum, so `nvic.hpp`,
 `ticker.hpp` and `delay.hpp` here are the device header plus that core
 file plus this family's own facts.
 
-The device description is vendored, from the pico-sdk at tag 2.3.1
+The device description is vendored from the pico-sdk at tag 2.3.1
 (`third_party/pico-sdk/`, BSD-3-Clause): the CMSIS device header
 `RP2040.h` generated from the chip's SVD (the register blocks, the
 instance pointers, the IRQn enumerators, `core_cm0plus.h` from the
 shared `third_party/cmsis-core/`) and the `hardware/regs/*.h` bit-field
-headers generated from the same SVD - the two halves of one map,
-because the CMSIS header names no field. Nothing of the SDK's runtime
-is built: brio has its own crt, linker script and drivers, and the
-SDK is read as a reference and cited. One chip, one package, no
-device-select define: `brio check rp2040` compiles every positive TU
-of `test/family_rp2040/` once and requires every `neg/` TU to fail.
+headers generated from the same SVD, the two halves of one map, because
+the CMSIS header names no field. Nothing of the SDK's runtime is built:
+brio has its own crt, linker script and drivers, and the SDK is read as
+a reference and cited.
 
-## Board and build
-
-Two boards are on the bench: a **Raspberry Pi Pico** ([../boards/pico.md](../boards/pico.md)),
-the reference board - the Winbond W25Q16JV flash the SDK's second
-stage was written for, the recommended crystal, the documented power
-path - and a **WeAct RP2040 board** ([../boards/weact-rp2040.md](../boards/weact-rp2040.md)):
-an RP2040 B2 behind a 2 MB Zetta ZD25Q16 quad-SPI flash, a 12 MHz
-crystal, USB-C, BOOTSEL and NRST buttons, a user LED on **GP25**, a
-user button on **GP23**, every user GPIO on its headers and a 4-pin
-SWD header, running at **3.3 V**. Verified at the bench: the chip id
-and both debug ports over SWD, the image booting through the
-second-stage bootloader into the vector table at flash offset 0x100,
-the crystal and the PLL locked at 125 MHz, the pin-check wave on
-GP2..GP29 read back through SIO, the console over the probe's UART
-bridge in both directions (the kernel console answers HELP, LED,
-UPTIME and ERR at 115200 with every error counter at zero), the LED
-on GP25 under the console's `LED` command, and every suite of the
-document map green on both boards (their documents'
-findings; the clock link between the two boards counts one crystal
-against the other, the pair's UART wires carry the serial suite's
-letters on the wire against the WeAct RP2350B's `uart_peer`, and that
-board's suite against this one's, [../boards/weact-rp2040.md](../boards/weact-rp2040.md)). NOT yet verified: the user button on GP23.
+## Build
 
 `rp2040/` is its own CMake project, a sibling and peer of the other
-five. Apps are auto-discovered from `rp2040/src/apps/*.cpp` - plus
-`experiments/*/rp2040/*.cpp` - by their `// build:` header comment.
-WHAT A CONFIGURE TARGETS IS A FLASH, not a part: the chip executes in
-place out of an external quad-SPI flash whose size (`RP2040_FLASH_KB`,
-the linker script) and read protocol (`RP2040_BOOT2`, the second stage
-in `src/glue/`) are the board's, so a preset serves every board type
-with that geometry - `rp2040-release` serves `pico` (a Raspberry Pi
-Pico / Pico H), `picow` (a Pico W: the same flash, four pins the
-radio's) and `weact2040` (the 2 MB WeAct board), and an app is built
-when its `// build: boards =` line names any of them (default:
-`pico`). Every image begins with the 256-byte stage
-(`boot2_w25q080.S` for the Winbond-class chips the Pico and the WeAct
-board carry, `boot2_generic_03h.S` the slow universal fallback), the
-SDK's `boot_stage2` source assembled, padded and CRC'd once and
-checked in as bytes with its provenance in its header - no generation
-step.
+cross projects and of `test/`; the repository root is not a CMake
+project, so every CMake command runs from `rp2040/`:
 
 ```bash
 (cd rp2040 && cmake --preset rp2040-release)                      # configure (once, or after adding an app)
@@ -118,17 +93,36 @@ step.
 brio check rp2040 [name]                                     # family smoke, no hardware
 ```
 
-Build outputs land in `build-cmake/rp2040-{release,debug}` at the
-repo root: `<app>.elf/.bin/.hex`, `firmware-<app>.map`, `<app>.lst`. A
-configure also writes this project's app roster,
-`build-cmake/apps_rp2040.json`, which `bin/brio` reads: the board
-types `pico`, `picow` and `weact2040` are what tell that tool to build here and
-to flash through OpenOCD's CMSIS-DAP interface (`brio flash <board>
-<app>`).
+**What a configure targets is a flash, not a part.** The chip executes
+in place out of an external quad-SPI flash whose size
+(`RP2040_FLASH_KB`, the linker script) and read protocol
+(`RP2040_BOOT2`, the second stage in `src/glue/`) are the board's, so a
+preset serves every board type with that geometry: `rp2040-release`
+(and `rp2040-debug`; CMake Tools shows them as `RP2040, 2 MB flash
+(release, -Os)` and `(debug, -Og)`) serves `pico` (a Raspberry Pi Pico
+or Pico H), `picow` (a Pico W: the same flash, four pins the radio's)
+and `weact2040` (the 2 MB WeAct board), and an app is built when its
+`// build: boards =` line names any of them (default: `pico`). Every
+image begins with the 256-byte stage (`boot2_w25q080.S` for the
+Winbond-class chips the Pico and the WeAct board carry,
+`boot2_generic_03h.S` the slow universal fallback), the SDK's
+`boot_stage2` source assembled, padded and CRC'd once and checked in as
+bytes with its provenance in its header; there is no generation step.
+
+Applications are discovered at every configure from
+`rp2040/src/apps/*.cpp`, plus `experiments/*/rp2040/*.cpp`, by the
+`// build:` lines in each file's header comment. Build outputs land in
+`build-cmake/rp2040-{release,debug}` at the repository root:
+`<app>.elf`, `.bin` and `.hex`, `firmware-<app>.map` and `<app>.lst`,
+the source-interleaved disassembly. A configure also writes this
+project's app roster, `build-cmake/apps_rp2040.json`, which `bin/brio`
+reads: the board types `pico`, `picow` and `weact2040` are what tell the
+tool to build here and to flash through OpenOCD's CMSIS-DAP interface
+(`brio flash <board> <app>`, [../boards/README.md](../boards/README.md)).
 
 ## Upload (OpenOCD, the Raspberry Pi Debug Probe)
 
-Flashing goes through OpenOCD driving a **Raspberry Pi Debug Probe**
+Flashing goes through OpenOCD driving a Raspberry Pi Debug Probe
 ([../probes/raspberry-pi-debug-probe.md](../probes/raspberry-pi-debug-probe.md)),
 a CMSIS-DAP v2 device on the USB bulk backend (`cmsis_dap_backend
 usb_bulk`; it has no HID interface), through `target/rp2040.cfg`: the
@@ -136,68 +130,111 @@ multidrop SWD that reaches both cores as two targets, the `rp2xxx`
 flash driver that identifies the QSPI chip through the bootrom's
 functions, then `program <app>.elf verify`, `reset run` and a write of
 DHCSR that clears C_DEBUGEN (a core left with halting debug enabled
-HALTS on a BKPT instead of faulting, and every `panic()` ends in one).
+halts on a BKPT instead of faulting, and every `panic()` ends in one).
 
-WHICH OPENOCD IS A FACT OF THE FLASH CHIP. The 0.12.0 release
+**Which OpenOCD is a fact of the flash chip.** The 0.12.0 release
 (`/sw/openocd`) carries the rp2040 target script and drives the probe,
-but its flash driver refuses the WeAct board's Zetta chip - "Unknown
-flash device (ID 0x001560ba)" - while a build from OpenOCD's git
+but its flash driver refuses the WeAct board's Zetta chip ("Unknown
+flash device (ID 0x001560ba)"), while a build from OpenOCD's git
 (`/sw/openocd-git-bedefa2`, `/sw/src/build-openocd-git.sh`, master at
 commit bedefa238) identifies it by name and programs it. The release
 build identifies and programs a Pico's Winbond W25Q16JV (measured:
-`brio flash` runs the Pico on it with no override). So the bench manifest names the
-OpenOCD per PROGRAMMER (`"openocd"` in the entry, `bin/brio`'s
-`flash.py`) and nothing else on the desk moves; the project's
-`RP2040_OPENOCD` cache variable defaults to the release build. The
-git tree also brings `rp2040.cfg`'s RESCUE mode (a debug port that
+`brio flash` runs the Pico on it with no override). So the bench
+manifest names the OpenOCD per programmer (`"openocd"` in the entry,
+`bin/brio`'s `flash.py`) and nothing else on the desk moves; the
+project's `RP2040_OPENOCD` cache variable defaults to the release build.
+The git tree also brings `rp2040.cfg`'s RESCUE mode (a debug port that
 resets the power-on state machine and halts in the bootrom, for a
 firmware that killed SWD) and the SMP mode (`USE_CORE=SMP`, one GDB
-seeing both cores as threads). `brio flash` and the `-upload` target
-set `USE_CORE 0`: OpenOCD then knows core 0 alone, and never leaves
-core 1 debug-enabled, halted or reset a second time - what the
-default SMP pair did to a two-kernel program is in
-[multicore.md](multicore.md).
+seeing both cores as threads). `brio flash` and the `-upload` target set
+`USE_CORE 0`: OpenOCD then knows core 0 alone, and never leaves core 1
+debug-enabled, halted or reset a second time; what the default SMP pair
+did to a two-kernel program is in [multicore.md](multicore.md). `brio
+flash` also rescues the chip before programming it, so a new image
+starts from the power-on state (the probe page says why).
 
-Recovery needs no probe at all: BOOTSEL held at power-up (or a
-blank flash, which the bootrom treats the same) puts the bootrom's
-USB mass-storage loader up as a drive named RPI-RP2, and a UF2
-dropped on it is programmed and run - a board cannot be bricked by
-an image. Measured: the pin-check image's `.bin`, wrapped into a UF2
-(512-byte blocks of 256 payload bytes at their flash addresses,
-family id 0xE48BFF56), booted the Pico with no probe attached; a
-`brio flash` mechanism for that path is a matter of writing it.
+Recovery needs no probe at all: BOOTSEL held at power-up (or a blank
+flash, which the bootrom treats the same) puts the bootrom's USB
+mass-storage loader up as a drive named RPI-RP2, and a UF2 dropped on
+it is programmed and run, so a board cannot be bricked by an image.
+Measured: the pin-check image's `.bin`, wrapped into a UF2 (512-byte
+blocks of 256 payload bytes at their flash addresses, family id
+0xE48BFF56), booted the Pico with no probe attached; a `brio flash`
+mechanism for that path is a matter of writing it.
 
 ## Debugging (cortex-debug + OpenOCD)
 
-Not yet exercised on this target: the same OpenOCD serves cortex-debug
-with the two cores as two targets (or as SMP threads), the SVD in
-`rp2040/svd/` for the Peripheral Viewer; the launch entry and the
-first session are still owed.
+Not yet exercised on this target, and `.vscode/launch.json` has no
+entry for it: the same OpenOCD would serve cortex-debug with the two
+cores as two targets (or as SMP threads), with the SVD in `rp2040/svd/`
+for the Peripheral Viewer; the launch entry and the first session are
+still owed.
 
 ## Editor (clangd)
 
 `brio/rp2040/.clangd` and `rp2040/.clangd` route the stratum and the
-project to `build-cmake/rp2040-release`. The repo-root `.clangd`
-rules apply unchanged.
+project to `build-cmake/rp2040-release`, which one configure of that
+preset creates. The repository root's `.clangd` rules apply unchanged.
 
 ## Serial console
 
-The Debug Probe's UART bridge is the console: its port U, crossed
-onto GP0 (TX) / GP1 (RX) = UART0 under function 2, enumerates as a
-CDC port under the probe's own USB serial, so the console is
-addressed by `/dev/serial/by-id` and never moves with the socket.
-A second bridge crossed onto GP4 (TX) / GP5 (RX) = UART1 is the
-console of a kernel on core 1, the same way. Console apps run 115200
-8N1. Measured: the divisor at 125 MHz is
-67 + 52/64 (the datasheet's own example, 115207 baud), the console's
-banner, echo and command replies pass in both directions with the
-frame, parity, break and overrun counters at zero, and the kernel's
-uptime advances with the host's clock over the seconds a session
-lasts.
+The Debug Probe's UART bridge is the console: its port U, crossed onto
+GP0 (TX) / GP1 (RX), which is UART0 under function 2, enumerates as a
+CDC port under the probe's own USB serial, so the console is addressed
+by `/dev/serial/by-id` and never moves with the socket. A second bridge
+crossed onto GP4 (TX) / GP5 (RX), UART1, is the console of a kernel on
+core 1, the same way. Console apps run 115200 8N1. Measured: the divisor
+at 125 MHz is 67 + 52/64 (the datasheet's own example, 115207 baud),
+the console's banner, echo and command replies pass in both directions
+with the frame, parity, break and overrun counters at zero, and the
+kernel's uptime advances with the host's clock over the seconds a
+session lasts.
 
-The chip's own connector is a console too: a program with the CDC
-ACM class of the device stack ([usb.md](usb.md)) shows up on the host
-as a serial port (`/dev/ttyACM*` on Linux, no driver to install) and
-the same console runs over it, the USB console app being the proof;
-the probe's bridge stays the console of the suites, whose letters
-need the connector free for the host end.
+The chip's own connector is a console too: a program with the CDC ACM
+class of the device stack ([usb.md](usb.md)) shows up on the host as a
+serial port (`/dev/ttyACM*` on Linux, no driver to install) and the
+same console runs over it, the USB console app being the proof; the
+probe's bridge stays the console of the suites, whose letters need the
+connector free for the host end.
+
+## Family coverage
+
+One chip, one package, no device-select define: `brio check rp2040`
+compiles every positive translation unit of `test/family_rp2040/` once
+and requires every `neg/` TU, a program that must be refused, to fail;
+`util_all.cpp` among them includes every kernel and util header and
+instantiates each service over this platform. The check ends with the
+link guard of every app on the project's release preset.
+
+## The documents
+
+One document per peripheral driver, in the shape
+[../README.md](../README.md) prescribes: the reader's orientation, the
+documents of record, what the silicon does, the types and verbs, how to
+use it, the bench findings and, where the driver has gaps, "Not covered
+yet" as two lists. The line beside each names what the document is
+about and the finding or two most worth knowing before using the
+driver; the findings themselves, with their figures and conditions, are
+in the document.
+
+| Document | Content |
+|----------|---------|
+| [platform.md](platform.md) | What the kernel stands on: `Rp2040Platform<TB>` on the SysTick `Ticker` (1000 Hz), the PRIMASK critical section that is per core, WFI idle; the boot chain (the bootrom, the 256-byte second stage, the vector table at flash offset 0x100 the stage vectors into), the crt with the pico-sdk's handler names and the macro trap behind them, the two unstriped SRAM banks as the two cores' stacks; the reset controller that gates every peripheral; SYSINFO's chip id; the suite's measures (the tick to 5 ppm, the cold XIP cost of a first call, .noinit through every reset); a handler in SRAM: `.fast_text` collected by the script and `places_fast_text`, the program placing the vectors it binds or giving SpiHost, Uart and I2cHost util/placement.hpp's InRam, measured warm and cold, the placement buying the cold path and costing the warm one its veneer |
+| [reset.md](reset.md) | Reset: three kinds of reset with three signatures (chip-level: HAD_POR, HAD_RUN, HAD_PSM_RESTART, standing for the life of the supply; watchdog: REASON, the last event; the core's own: SYSRESETREQ, one core through the bootrom, no mark), so the causes word is a history read by comparison, and the chip's reboot is the watchdog's trigger; `Reset::software()` (the chip), `Reset::core()`, `ResetReporter`, `fault_reset<P>()` |
+| [dma.md](dma.md) | DMA: twelve channels with their trigger aliases, the request as a field any channel takes (table 119, credit-based), two interrupt lines (one per core by convention), chaining, address wrapping, pacing timers, the checksum sniffer, the abort with erratum E13's workaround, progress from TRANS_COUNT (E12); the transfer engines (bound once, two stores a block, the beat per block from the run's type, the claim a transport masks alone, a transmit engine that reports errors only for the SPI host's one interrupt a transaction) in the UART's, SPI's and I2C's slots (the suite's console prints through one), the copy engine, and the two traps of a receive engine; the level as one bit, a receive engine HIGH by default, measured never to decide correctness here; what a released requester leaves the next owner |
+| [i2c.md](i2c.md) | I2C: the Synopsys DW_apb_i2c behind `DwApbI2c<n>`, a command FIFO whose entries carry the RESTART and STOP bits, an empty FIFO with no STOP holding SCL, one TX_ABRT with the reason decoded, the SCL counts with the cycles the block adds subtracted so the asked rate is the measured one; the `I2cHost` engine with the other strata's Request (the probe as a one-byte read: no address-only entry exists), the engines serving a read phase (the request a level the DMA spends in bursts), `I2cClient` on RD_REQ (the stretch is the block's own, a transmitter's only); measured on the wire against the desk partner as the peer: the general call both ways, arbitration between two hosts, the STOP_DET every STOP raises |
+| [adc.md](adc.md) | ADC: one 12-bit converter behind `Adc` over four pads and the temperature sensor, its own 48 MHz clock from the USB PLL (or the crystal, a conversion of 96 of its cycles either way), the one-shot start, the free run paced by a 16.8 divider whose period must exceed the conversion (DIV 95 halves the rate, measured), the round-robin, the eight-entry FIFO as one interrupt and one DMA request, the eight-bit shift, the error flag per entry; `AnalogIn<Pin>` on GPIO 26..29, util/analog_sampler.hpp over it; measured wireless: the sensor, the pads through their pulls (the keeper is no keeper on an analog pad), 2.003 us a conversion, the FIFO overflowing 16 us after a block ends unless the converter is stopped from the completion |
+| [flash.md](flash.md) | Flash: the external quad-SPI chip the core executes out of, erased and programmed through the bootrom's own functions behind `Flash`, every operation a window with the flash disconnected, run from `.ram_text` with interrupts masked and closed by re-entering the second stage's copy in SRAM; `command()` for the chip's ids (9Fh, 4Bh, 05h), `Xip` the cache with its counters; `QspiFlashPartition` the constant top 64 KB the linker never reaches, `QspiFlash` and `QspiFlashJournalZone` the two FlashMedia (4096 / 256) for the heap and the journal; measured: the stage returns to a caller, a page takes a second program, a 5 ms window costs the ticker its ticks but one |
+| [usb.md](usb.md) | USB: the chip's own device controller behind `Usb`, the endpoint controller of the device stack: the dual-port RAM's endpoint and buffer control words, the two-step offer the clock ratio demands, the bulk OUT double buffered (a NAK costs a frame behind a hub), the PIDs kept per endpoint, clk_usb at 48 MHz from the USB PLL; the CDC ACM port as a console on the chip's own connector; measured: enumeration in 550 ms, 559 KB/s out and 907 KB/s in, 2.5 MB echoed byte-exact |
+| [pio.md](pio.md) | PIO: two blocks of four state machines behind `Pio<n>` and `PioSm<n, sm>`, the nine instructions as constexpr encoders with the side-set and delay folded in, a program relocated at load, the FIFOs as interrupt sources and DMA requests, the eight flags and the two lines; the chapter's own programs as tasks (a serial port on any pin, a square wave, a PWM that is a PwmChannel); measured on two wires between the chip's own pads (by name, the pair desk carrying none): 64 bytes at 3 Mbaud, a 31.25 MHz wave, the PWM's duties, a one-instruction sampler as a logic analyser |
+| [pwm.md](pwm.md) | PWM: eight slices behind `PwmSlice<n>`, a 16-bit counter with a wrap value and two levels, the 8.4 divider, phase-correct mode, the B pin as the counter's gate or clock (a duty or a frequency measured with no capture unit), the wrap as one interrupt bit and one DMA request, the global enable for lockstep, the phase nudges; `configure()` from scratch because a slice reconfigured while running keeps its counter (measured: half a millisecond of silence, an output stuck); the tasks `PwmOutput` (a PwmChannel, max = TOP + 1), `PwmPair` (a dead time by arithmetic), the edge and level counters, `PwmPeriodicTick`; measured on two wires between the chip's own slices (by name, the pair desk carrying none) |
+| [rtc.md](rtc.md) | RTC: a calendar of seven binary fields behind `Rtc`, clk_rtc from the crystal over 256 with CLKDIV_M1 for the second, a leap year of "divisible by four" with the bit for the century years, one alarm on any subset of the fields (a level: the ISR body masks the line and disarms), the day of the week the silicon does not compute; `RtcDateTime` and the calendar arithmetic; measured: the enable's own tick (a set value reads one second on unless loaded after it, which set() does), the 1.000 s second, eight boundaries including 2100, the alarm's 37 us latency |
+| [spi.md](spi.md) | SPI: the ARM PL022 behind `Pl022<n>`, the `SpiHost` engine with the other strata's Request (a GPIO select held for the tenure, the pump keeping eight frames in flight through the FIFOs, the engines on any two channels, the loop-back as the instrument) and `SpiClient` framing on its select pad; measured: the polled loop's Cortex-M0+ floor (37 cycles a received frame, 21 a written one at clk_peri / 2), the engines at the wire with the block's gap, the host's hot path where the program places it (a cold request 11363 cycles from the flash, 2942 InRam, 791 warm); on the pair's wire against the partner's PIO client every mode, width and serve under one held select, exact to clk_peri / 10, and this chip's client under the partner's PL022 host whose select is its own frame signal; the client's answer pad driven deselected and under SOD (nSSPOE reaches no pad) |
+| [sleep.md](sleep.md) | Sleep: the SLEEP state, reached on a plain WFI with core 1 in the bootrom (measured, SLEEPDEEP or not), the top-level gates pruned to SLEEP_ENx, SysTick counting through it, and DORMANT on either oscillator (the keyword, a GPIO event or the RTC the way back, the ring oscillator dormant with the crystal keeping the calendar as the dormant with a deadline), behind `Rp2040SleepSite` and `Rp2040TimedSleepSite` (the timer as alarm and witness, the calendar for a dormant) and the platform's `sleep_hook`; `DormantWake`, the gate sets; measured: a two-second dormant the timer never saw, the manager's rounds through the kernel's own idle |
+| [multicore.md](multicore.md) | Multicore: two kernels on two cores, `Rp2040Platform<core>` and `CoreTicker<core>`, the SIO FIFO doorbell behind `util/inbox.hpp`'s bridge, the bootrom's launch protocol and the power-on state machine's reset of core 1 (`Core1`), the mispost check on the queues; measured: a crossing and back in 10 us, fifty thousand a second each way lossless, the accounts balancing under saturation, the probe trap that halts core 1 and freezes the timer |
+| [watchdog.md](watchdog.md) | Watchdog: the tick generator the system timer counts too, the 24-bit countdown that decrements twice per tick (erratum E1, 8.3 s of reach), the PSM selection that makes a time-out a reboot through the bootrom, ENABLE that clears, `Scratch<0..3>` surviving every reset but the chip-level one (the upper four are the bootrom's, refused) |
+| [timer.md](timer.md) | Timer: the 64-bit microsecond counter on the watchdog tick, the raw-pair read for any context and the latching pair for one, four alarms on the low word each with its own line, DBGPAUSE set at reset; `Timer::now()`, `alarm_in`, the ruler of every timing verdict on this target |
+| [clock.md](clock.md) | Clock: a clock model of its own, with no bus prescaler and no enable bit per peripheral but a generator per clock domain with an aux multiplexer and a divider, a glitchless mux in front of the two that must never stop, and a separate clk_peri so the UARTs keep their rates (`PeriSource::crystal`, measured); the boot on the ring oscillator, the crystal's startup delay, the system PLL's exact-ratio search at compile time (125 MHz = 1500 MHz / 6 / 2), `init()` as the rate switch (about 200 us), the switching sequences of 2.15.3.2 as code; the frequency counter as the measure, the GPIO clock outputs and inputs, the ring oscillator's start and stop |
+| [pin.md](pin.md) | GPIO: thirty pins of one bank owned by three blocks (IO_BANK0's function select, PADS_BANK0's electrical setup with the bus-keeper mode, SIO's single-cycle word-wide path), both blocks in reset at power-up and released by every configuring verb; the pad's reset state (input enabled, pull-down); `Pin<n>` with no port letter |
+| [uart.md](uart.md) | UART: the ARM PL011 behind `Pl011<n>` and the `Uart` task, 32-deep FIFOs storing the error flags with each byte (the overrun read from UARTRSR, a live bit in the entries), a transmit interrupt that is an edge latched until a write above the level or UARTICR clears it (so the task writes an idle FIFO directly and arms the interrupt only behind a full one), the receive timeout against the level (measured: 371 us for a lone byte, the sixteenth frame for a burst), the 16-bit + 6-bit divisor off clk_peri from 120 baud to 7.8125 Mbaud, the loop-back as the instrument, pins fixed per instance by table 279; on the pair's wires against the RP2350B's `uart_peer`, an echo of 512 bytes in the two crystals' common time and the error attribution of 7E1 under 8N1 |
+| [vendor/README.md](vendor/README.md) | The RP2040 datasheet by build, the Pico datasheet and the hardware design guide, the vendored pico-sdk subset and the SVD, the bench chip's identity, the errata pass |
