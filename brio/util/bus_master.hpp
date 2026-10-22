@@ -18,8 +18,10 @@
  * drives it over a scripted engine.
  *
  * Who calls what, and from where:
- *  - a client posts the engine's Request to this object from main
- *    context (its own dispatch, or setup after init), with a reply
+ *  - a client, an active object, posts the engine's Request to this
+ *    object from its own dispatch (post() itself may be called from an
+ *    interrupt handler; the buffer-ownership argument below assumes the
+ *    client is an active object), with a reply
  *    channel inside (kernel/post.hpp's reply_to). Posting never waits;
  *    the reply comes later, as an event of the client's own, even when
  *    the arbiter answers it in the very dispatch that received it;
@@ -142,7 +144,7 @@
  * never_retries discipline again.
  *
  * The request event exceeds the guideline of about 8 bytes for an event
- * (docs/design/kernel.md, "The model in one page"): two spans, a
+ * (docs/design/kernel.md, "Events: value semantics"): two spans, a
  * select, the bus's settings and the reply capsule. A recorded, legal
  * deviation, because the request is the arbitration token, and
  * splitting it into a reference to the client's memory would hand every

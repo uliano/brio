@@ -380,8 +380,10 @@ makes progress (a stall, not a deadlock). The wait is zero when the
 ring has room for the whole message, and otherwise the wire time of
 the bytes that do not yet fit: a byte is ten bit times, 21.7 us at
 460800 baud and 87 us at 115200, so a message that finds the transmit
-ring (256 bytes by default) full waits one byte time per byte it still
-has to place. Where the drain side is a
+ring full waits one byte time per byte it still has to place: the
+ring's room over again at worst, about 5.5 ms at 460800 where the
+default ring is 256 bytes (the AVR, the STM32 and the RP families) and
+about 1.4 ms where it is 64 (the three WCH families). Where the drain side is a
 DMA engine, nothing re-arms it once it has stopped (a block abandoned
 on a transfer error leaves it idle with the ring full), so every
 engined transport pumps its engine on a refused `write_byte` or

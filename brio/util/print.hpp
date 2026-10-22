@@ -47,10 +47,11 @@
  * baud, 87 us at 115200; docs/design/serial.md, "Output policy: wait,
  * do not drop"). Two consequences. A dispatch that prints holds every
  * other active object for that wait, since a dispatch runs to
- * completion; and a print whose text does not fit the ring's room
- * before the transport is initialized and interrupts are enabled spins
- * for ever, since nothing drains the ring (what a shorter print does
- * with its bytes before init is the transport's business). Where the
+ * completion; and a print before the transport is initialized and
+ * interrupts are enabled is a mistake: nothing drains the ring, so a
+ * text that does not fit its room spins for ever, and what a shorter
+ * one does to a transport not yet set up is not promised by any family.
+ * Print only after init and with interrupts enabled. Where the
  * sink is a BulkSink (util/stream.hpp) a string_view
  * goes to it as one run (a contiguous stretch of bytes), and a C string
  * (every formatted number among them, each formatted into a buffer and

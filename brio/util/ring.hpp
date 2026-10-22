@@ -769,7 +769,10 @@ public:
     /// 2^32): an epoch a reader compares across its runs to learn that
     /// the stream jumped between two of them, whichever look made the
     /// jump. overruns() is this count less its value at the last
-    /// clear_overruns(). Readable from any context.
+    /// clear_overruns(). A 32-bit word the consumer writes; read it from
+    /// main context, where the consumer runs (a read elsewhere is one
+    /// access on the 32-bit cores that have a DMA controller, and this
+    /// ring names no platform to promise more).
     static uint32_t skips() { return skips_; }
 
     /// Both positions back to zero, for a producer (re)started at the

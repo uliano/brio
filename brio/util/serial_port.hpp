@@ -75,9 +75,11 @@
  * while the message fits the ring's room, and otherwise one byte time
  * for each byte that does not yet fit. A byte is ten bit times at 8N1,
  * 21.7 us at 460800 baud and 87 us at 115200, so a message that finds
- * the default 256-byte transmit ring (255 bytes of room, util/ring.hpp)
- * full waits about 5.5 ms at 460800 (docs/design/serial.md, "Output
- * policy: wait, do not drop"). A print is atomic between active objects
+ * the transmit ring full waits the ring's room over again: about 5.5 ms
+ * at 460800 where the default ring is 256 bytes (255 of room,
+ * util/ring.hpp: the AVR, the STM32 and the RP families), about 1.4 ms
+ * where it is 64 (the three WCH families) (docs/design/serial.md,
+ * "Output policy: wait, do not drop"). A print is atomic between active objects
  * because a dispatch runs to completion, so no other object's text can
  * interleave with it; the design page says when that policy would be
  * revisited (a slow link, a hard latency budget).
