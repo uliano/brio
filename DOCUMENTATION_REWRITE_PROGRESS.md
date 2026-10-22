@@ -1024,25 +1024,249 @@ round, by the batch's cost rule.
   interrupts") against the STM32G0's byte path, to be reworded by
   whoever next edits the page.
 
+## Fifth batch: the entry pages
+
+Scope, capped: every page of `docs/boards/` and `docs/probes/` (their
+README files included), `docs/host/README.md`,
+`docs/cortexm/README.md`, and the operational README of each remaining
+target stratum (`docs/avrxt/`, `docs/samc21/`, `docs/stm32f4/`,
+`docs/ch32v00x/`, `docs/ch32vx03/`, `docs/ch32x035/`, `docs/rp2040/`,
+`docs/rp2350/`): thirty-five Markdown files, nothing else. Base:
+`docs-rewrite` at acfb48515662b239196f5d26ae11a3b2da745d60. Branch
+`claude/docs-rewrite-batch-5-fhw1ie`, five commits (boards and probes;
+host and cortexm; the READMEs in three groups), one pull request
+against `docs-rewrite`. Not touched: every header, every peripheral
+document, the vendor pages, the design pages, the learning route and
+the stm32g0 pages (no link of theirs broke: the only heading they cite
+by name in this batch's files, "How a board joins the bench" of
+docs/boards/README.md, is kept), code, CMake, `.vscode`, `.clangd`,
+CLAUDE.md, docs/README.md. No build and no host test was run (no cross
+toolchain in the cloud, and no header changed, so no token check
+applies); `git diff --stat acfb485 -- . ':!docs'` is empty.
+
+### The boards and the probes
+
+Each board page now opens with what the board is (the part, its
+memories, the manual), what it offers a brio program and which stratum
+it belongs to, then "The board" (the clock, the supply, the LED and the
+button, the console, the probe, the identity), the wires to its peer
+where it has one, "What a program meets on this board" (the traps),
+"Flashing" (the board type and the mechanism) and the documents; the
+pages with bench records (the AVR64EA48 board) keep their findings
+whole. Each probe page opens with what the probe is and which targets
+it reaches, then how `bin/brio` drives it and the traps, under
+ordinary headings. The boards README defines the board type and the
+three concerns of the bench (the build, the manifest, the tool) in
+prose, with a table of types by project and flash mechanism; the probes
+README's table is by programmer kind, with the RP2350's two-session
+mechanism told apart as the board type's. Every fact, figure, pin,
+part number and quirk of the previous text was kept and checked token
+by token (every number, backticked identifier and register-like word
+of the old page present in the new, the exceptions listed under the
+facts below). The two pages the learning route links,
+docs/boards/nucleo-g0b1re.md and docs/probes/st-link.md, keep every
+fact and the LED, the pin and the "no device connected" rule the route
+cites.
+
+### host and cortexm
+
+docs/host/README.md opens with whom the host target serves (the
+suites' user, a driver author against a chip made of RAM, a host
+program with a viewer), defines the Platform concept where it names
+it, keeps the `HostPlatform` facts, the running commands as the first
+batch set them, the simulations' licence, the two simulators' seams and
+the simulator page, and adds one line on the `host/` project of
+programs that run. docs/cortexm/README.md names its four files one by
+one with every measured figure, then why the stratum exists, what
+stays per family, the three architectures, the include-order contract
+and the editor fragment.
+
+### The eight READMEs
+
+Each on the stm32g0 README's pattern: the orientation (what the
+stratum is and for whom, the bench parts, what the kernel and util do
+there, whether the maintained example `blink` builds there), the
+boards as a table with the board pages linked, the toolchain, the
+build (the presets by name as `CMakePresets.json` spells them, the
+commands, the `// build:` lines, the outputs, the roster, the bench
+tool), the upload with its caveats, the debugger with what is verified
+and what only configured, the editor, the console, the family coverage
+(the check script's sweep and the link guard), the stratum's own
+sections (what the silicon taught, not covered yet) and the document
+map at one line per document. Every document stays listed; the maps of
+`docs/stm32f4/` and `docs/ch32v00x/` gain the vendor row the model has.
+Every map cell was shortened under a script check: each number,
+backticked identifier and register-like word of the old cell is in the
+new cell or in the document the row links, and none is missing on any
+of the eight (the two figures the regular expression flagged on the SAM
+page, 1.024/2.048/4.096 V and the prescaler ratios 1000/1249/2000/5999,
+are in supc.md and sdadc.md in other spellings).
+
+### Facts resolved while writing
+
+- docs/avrxt/README.md quoted a launch entry that `.vscode/launch.json`
+  does not contain (`debugServerPath` at `~/.local/bin/pyavrocd`, a
+  `-u <probe serial>` flag, three setup commands): the file launches
+  PyAvrOCD through `/usr/bin/env` with `PYTHONUNBUFFERED=1`, names no
+  serial, sets `stopAtEntry` and connects by hand in five setup
+  commands. The page now quotes the entry as the file has it and says
+  why (the file's own comment records both findings).
+- docs/boards/README.md said the example manifest holds "one entry per
+  board type"; `cli/bench/bench_boards.py` holds entries for ten of the
+  twenty-three types (one or more per kind of probe the tool drives).
+  The page says so. docs/stm32g0/README.md makes the same claim and is
+  out of scope: open for its owner.
+- docs/probes/README.md listed `rp2350_openocd` as a programmer
+  mechanism; it is a `BOARD_TYPES` flash mechanism in
+  `cli/bench/common.py`, and the RP2350's programmer entry is an
+  `openocd_cmsisdap`. The table is by programmer kind and says so.
+- docs/probes/README.md said the 0.12.0 release serves "every SWD path
+  of the older targets"; the AVR has no SWD path. Now: the SAM C21 and
+  STM32 targets and the Pico.
+- `.vscode/launch.json` has no entry for the RP2040, the RP2350 and the
+  CH32X035 (the RP2040 page said so; the other two now do), and its
+  CH32V203 and CH32V303 entries are marked untested from the editor in
+  the file itself: the ch32vx03 page says configured, not verified.
+- `brio/ch32vx03/` and `ch32vx03/` have no `.clangd` fragment; the page
+  had no editor section and still has none (nothing stated either way).
+- `avrxt/src/apps/blink.cpp` has no `// build: boards` line, so it
+  builds for the AVR128DB48 alone; the AVR page says so. The RP2040,
+  CH32V203/CH32V303 and CH32X035 projects have no `blink`: each page
+  states the gap, as docs/README.md's rule asks.
+- Bench tools that are neither a test suite nor a peer are no longer
+  named on a board page (`pin_check`, `family_probe`, `serial_speed`,
+  `wire_check`, `console_usb`, `bench_ch32`; `bench_avr` stays as a row
+  of the AVR64EA48 board's results table, a record of a run); the
+  finding each carried is kept and attributed to "the pin-check tool",
+  "a wiring check", "the benchmark skeleton", "measured".
+- Ordinals dropped from the public voice: "the second-silicon board"
+  (Nucleo-F446RE), "the fourth board" (32F469IDISCOVERY), "brio's first
+  ARMv7-M family"; the desk positions in the CH32V00x page's commands
+  (`brio flash I console`) replaced by `<board>`.
+- The three READMEs that cited docs/design/kernel.md by section number
+  (avrxt: 1; rp2040: 12; ch32x035: 1) now cite the heading text ("The
+  model in one page", "Two cores: two kernels and a bridge"); the
+  dependency map of the first batch loses those three entries, and the
+  headers' numbered references are untouched.
+- "a sibling and peer of the other five" (stm32f4, rp2040) and "the
+  RISC-V twin of the other three scripts" (ch32v00x) were counts that
+  had aged; now "the other cross projects" and the script by name.
+- The LED of the AVR128DB48 board: no page names one, and
+  `avr_board.hpp` gives that board no LED fact; the AVR boards table
+  says "none wired by the board". Open: whether the board has one.
+- Pre-existing and out of scope: `docs/stm32f4/vendor/README.md` links
+  `../boards/blackpill-f411ce.md`, which resolves to a path under
+  `docs/stm32f4/` that does not exist (one `../` short); and the
+  comment of `cli/bench/bench_boards.py` lists the STM32F4 board types
+  without `f469ni`.
+
+### Reader review (fresh subagents, one round)
+
+Two readers, each given only its files, the audience profile and the
+brief's questions, with scenarios: one on three board pages
+(weact-rp2040, ch32x035-evt-f8u6, nucleo-g031k8) and the WCH-Link
+page, five scenarios; one on the AVR and the CH32V203/CH32V303
+READMEs, eight scenarios. Every scenario was answered "supported
+directly" (the SPI pads, the side the pull-ups hang from and why, and
+what the other board runs; the PC17 pull-up selecting the boot loader
+and the bench's answer; "no device connected" and the mass-storage
+fallback, reached through the link the Nucleo page supplies; the
+2.16 LinkE's dropped runs above 115200 and the rate that carries whole;
+the firmware check before the pins; the EA's group images and the tier
+guard; BOOTSIZE 0 and the fuse command, reached through the board
+page's link; the folded ISRs and `no_icf`; the DWARF caveat's cause and
+fix; `reset run` and the dead-looking board; USB under the kernel's
+idle and the bus-master count; the trampoline, the leaf and the vector
+guard; the two parts run and what stands in for the eleven). Residue,
+all applied: on the board pages "dark image", "function 2", "port D",
+"the pin-check wave", "the letters that judged one run by name only",
+the 47 Ohm without its reason, no `brio flash` form on the RP2040 page,
+"the platform suite's first letter's", "the desk", "the console's LED
+command", AF1/AF6, "a basic instance", "the oscillator bridges",
+"stratum" undefined on the boards README; on the probe page "the fork",
+"the hart", "the ModeS key", "letter w", "the hands-free replug", a
+suite's "letter"; on the AVR README "smoke TU", "a negative", "the link
+guard", "letters" and `z`/`y`, "the benchmark skeleton", `-s nop` and
+the other flags named by their switch, which boards the launch entry
+serves and that only the AVR128DB48's SVD is committed, the firmware
+1.41 sentence scoped to writes over UPDI, `<app>` as a file name,
+`brio run` in the commands, the `ALL: 0 pass, 0 fail` line said to be
+no verdict, "the run-time twin", the packages that have no board; on
+the CH32V203/CH32V303 README "both ways the hardware prologue can be
+built" (the `CH32VX03_HPE` option explained), the three vector macros
+named (`BRIO_CH32_VECTOR_FLOAT` was the unnamed one), "the bus-master
+count", "the desk pair", "the fork's own console", P14, "the latch",
+"zero-wait window" and "the tail", the upload's exact command, `brio
+run`, the lot note's digit. Left as is, with the reason: the
+peripheral documents' vocabulary in the map cells (the host demotion,
+pin-level bonding, the data-space window, the mask's shadow) belongs
+to the documents the cells link and is defined there; the exact
+spelling of an `ISR()` with `no_icf` on the AVR is not written anywhere
+(no image carries one) and the page states the rule without inventing
+the spelling; how a panic shows itself is platform.md's. No second
+round, by the batch's cost rule.
+
+### Checks
+
+- `bin/brio prose` over the thirty-five files: 0 errors, 0 for review
+  (before the batch: 0 errors, 2 for review, the two true claims of
+  absence on the 32F469IDISCOVERY page, now worded without the
+  pattern).
+- Links and anchors of every page under docs/, README.md and CLAUDE.md
+  by the script with GitHub's anchor rules: 0 problems on the batch's
+  files; the eight hits of the whole tree are the seven lambda
+  notations of kernel.md and the learning pages (the known false
+  positive) and the stm32f4 vendor page's pre-existing link above.
+- The token check of the batch (every number, backticked identifier
+  and register-like word of each old page present in the new): the
+  only absences are the dropped bench-tool names, the desk letters, the
+  stale launch snippet and command forms re-spelled, each listed
+  above; the map check of the eight READMEs reports no figure missing.
+- `grep -P '[^\x00-\x7F]'` over the files: nothing.
+- `git diff --stat acfb485 -- . ':!docs'`: empty.
+- Not run, no toolchain: any build, the host tests, the full
+  `brio gate` (no source changed, so it should report every preset
+  identical).
+
+### Local verification handoff
+
+- The full `brio gate` against acfb485 on a machine with the
+  toolchains, for the record (docs only; every image should be
+  identical).
+- The AVR launch entry as quoted: one F5 on the AVR128DB48 board
+  confirms the quoted `debugServerArgs` and setup commands still land
+  on `main()` as the file's comment records.
+- The two claims of the batch that the desk can settle in a minute:
+  whether the AVR128DB48 board has a LED (the page says none wired),
+  and the stm32g0 README's "example entry per board type".
+- The stm32f4 vendor page's link, one `../` to add, by whoever next
+  edits that page.
+
 ## Next batches (not started)
 
 The credit of the cloud sessions ended with this batch. What it did
-not reach, each on the stm32g0 batch's pattern (README rewritten; the
-documents' additive pass; the headers' comments under the same brief:
+not reach, each on the stm32g0 batch's pattern (the documents'
+additive pass: the reader's orientation, the smallest use, the
+prerequisite, local fixes; the headers' comments under the same brief:
 what the caller gets, which context calls what, then every fact kept
 with its citation, token identity on every file):
 
-1. The remaining target strata in groups, each retaining its hardware
-   differences: samc21 and avrxt first (the other two of the three
-   original targets), then stm32f4, the two RP strata, the three WCH
-   strata and host.
+1. The peripheral documents and the headers of the eight target
+   strata whose README this batch rewrote: `docs/avrxt/` (20 documents,
+   `brio/avrxt/`), `docs/samc21/` (27, `brio/samc21/`), `docs/stm32f4/`
+   (25, `brio/stm32f4/`), `docs/ch32v00x/` (12, `brio/ch32v00x/`),
+   `docs/ch32vx03/` (19, `brio/ch32vx03/`), `docs/ch32x035/` (9,
+   `brio/ch32x035/`), `docs/rp2040/` (18, `brio/rp2040/`),
+   `docs/rp2350/` (22, `brio/rp2350/`), and the vendor pages' links.
 2. The rest of `brio/util/` (the twenty-five other headers: the analog
    converter and sampler, block streams, CAN, the clock and placement
    vocabularies, the NV heap, journal, record and writer, power, the
    meter sampler, the inbox, the USB stack under `usb/`, the test-bench
-   grammar, the line parser under `proto/`, the smaller services),
-   then devices, the IP strata (pl011, pl022, dw_apb_i2c), host, boards
-   and probes.
+   grammar, the line parser under `proto/`, the smaller services), then
+   `gfx/`, `devices/` (its README and four documents), the headers of
+   `brio/host/` and `docs/host/simulator.md`, and the IP strata's
+   documents (`docs/pl011/`, `docs/pl022/`, `docs/dw_apb_i2c/`) with
+   their headers.
 3. Before the public merge: remove DOCUMENTATION_REWRITE_BRIEF.md,
    DOCUMENTATION_REWRITE_PROGRESS.md and the two review files, unless
    the user keeps them.
