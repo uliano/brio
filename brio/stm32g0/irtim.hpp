@@ -1,45 +1,65 @@
 /*
  * irtim.hpp
  *
- * The INFRARED INTERFACE (RM0444 ch. 27) - two pages of manual and one
+ * The infrared interface (RM0444 ch. 27), for a program that drives an
+ * infrared LED with a modulated carrier - the physical layer of a remote
+ * control - with no CPU in the loop. Two pages of manual and one
  * register field, but a real peripheral: it ANDs a carrier with an
- * envelope in hardware and puts the product on one pad, which is the
- * whole of an infrared remote's physical layer with no CPU in it.
+ * envelope in hardware and puts the product on one pad. `Irtim` is the
+ * block, `IrtimPad<PinSel>` the pad.
  *
  *   TIM17_CH1  ---> carrier   \
  *                              AND --(IR_POL)--> IR_OUT pad
  *   TIM16_CH1 / USART1 / USARTx --> envelope
  *
- * WHAT THE CHAPTER SAYS AND THIS FILE ENCODES:
- *  - TIM17 channel 1 is ALWAYS the carrier; the envelope is chosen by
+ * The smallest use, a carrier under a timer's envelope: the two timers
+ * brought up and configured first (stm32g0/tim.hpp's TimPwm on Tim<17>
+ * channel 1 for the carrier and on Tim<16> channel 1 for the envelope),
+ * then Irtim::init(), Irtim::envelope(IrtimEnvelope::tim16),
+ * Irtim::polarity(false), Irtim::pb9_high_sink(true) where the pad is
+ * PB9, and last IrtimPad<ir_out>::claim() - the pad joins the gate once
+ * the gate is configured (docs/stm32g0/irtim.md writes it out).
+ *
+ * Who calls what: every verb here is a setup verb - main(), or the
+ * handler of an active object (a brio object with an event queue the
+ * kernel serves one event at a time). Each is a read-modify-write of
+ * SYSCFG_CFGR1 with no guard, and that register is shared with the I2C
+ * fast-mode-plus drive bits, so two of these writes from two contexts
+ * (a handler and the loop) could lose a field: not from an interrupt
+ * handler. Nothing waits and nothing masks. The state is the register's
+ * own: the block has no registers of its own, everything below is
+ * SYSCFG's, which is why `Irtim` is a monostate - a class with static
+ * state and no instances, since the part has one block.
+ *
+ * What the chapter says and this file encodes:
+ *  - TIM17 channel 1 is always the carrier; the envelope is chosen by
  *    SYSCFG_CFGR1.IR_MOD - 00 TIM16_CH1, 01 USART1, 10 the family's
- *    SECOND USART, 11 Reserved. Which instance code 10 means is a
- *    PER-PART fact (USART4 on the G071/G0B1 class, USART2 on the G031
- *    class), so it lives in the reserve as irtim_second_usart() and this
- *    driver publishes it rather than restating it;
+ *    second USART, 11 Reserved. Which instance code 10 means is a
+ *    per-part fact (USART4 on the G071/G0B1 class, USART2 on the G031
+ *    class), so it lives in the reserve (stm32g0/device_tables.hpp, the
+ *    table of what each part has, read off the device header) as
+ *    irtim_second_usart() and this driver publishes it rather than
+ *    restating it;
  *  - SYSCFG_CFGR1.IR_POL inverts the output, which is what an active-low
  *    LED driver wants;
- *  - the high-sink LED driver is available ON PB9 ALONE and is turned on
- *    through SYSCFG_CFGR1.I2C_PB9_FMP - a bit whose NAME belongs to I2C
+ *  - the high-sink LED driver is available on PB9 alone and is turned on
+ *    through SYSCFG_CFGR1.I2C_PB9_FMP - a bit whose name belongs to I2C
  *    and whose second job is this. It is the last paragraph of ch. 27 and
  *    it is the only reason this driver has a verb with "I2C" behind it;
  *  - the function reaches a pad through the GPIO alternate function, and
- *    the pads are the DATASHEET's: PB9 AF0 and PA13 AF1 (DS13560 tables
- *    15 and 13). PA13 IS SWDIO on every Nucleo, so `IrtimPad` will claim
+ *    the pads are the datasheet's: PB9 AF0 and PA13 AF1 (DS13560 tables
+ *    15 and 13). PA13 is SWDIO on every Nucleo, so `IrtimPad` will claim
  *    it if asked and this file says, in as many words, never to.
  *
- * THE BLOCK HAS NO REGISTERS OF ITS OWN. Everything above is SYSCFG's,
- * which is why `Irtim` is a monostate and why init() opens
- * RCC_APBENR2.SYSCFGEN - the same gate stm32g0/comp.hpp and
- * stm32g0/vref.hpp open, and share (the comparators live inside the
- * SYSCFG block and the EXTI's port multiplexer is there too), so
- * release() does NOT close it.
+ * Why init() opens RCC_APBENR2.SYSCFGEN and release() does not close it:
+ * the gate is the same one stm32g0/comp.hpp and stm32g0/vref.hpp open,
+ * and shared (the comparators live inside the SYSCFG block and the
+ * EXTI's port multiplexer is there too).
  *
- * WHAT THE TIMERS DO IS THE TIMERS' BUSINESS: stm32g0/tim.hpp's TimPwm
- * on Tim<17> channel 1 makes the carrier and on Tim<16> channel 1 the
- * envelope, and NEITHER NEEDS ITS OWN PAD - figure 278's connections are
- * internal. That is the fact that makes an infrared output cost exactly
- * one pin.
+ * What the timers do is the timers' business: the carrier and the
+ * envelope are TimPwm's, and neither needs its own pad - figure 278's
+ * connections are internal. That is the fact that makes an infrared
+ * output cost exactly one pin.
  */
 
 #pragma once
@@ -78,7 +98,9 @@ struct IrtimPad {
     IrtimPad() = delete;
 
     /// Hand the pad to the interface. `open_drain` is what an LED pulled
-    /// to the supply wants; push-pull is the default.
+    /// to the supply wants; push-pull is the default. A setup verb, called
+    /// once the gate is configured so the pad never carries a half-set
+    /// output; release() gives the pad back to analog.
     static void claim(PinSpeed speed = PinSpeed::low, bool open_drain = false) {
         pin::function(sel.function, {.open_drain = open_drain, .speed = speed});
     }
@@ -87,12 +109,14 @@ struct IrtimPad {
 
 /**
  * Irtim: the infrared interface, a monostate over three bits of
- * SYSCFG_CFGR1.
+ * SYSCFG_CFGR1. Setup verbs, one context at a time (the opening
+ * comment); init() first, since the block's registers are dead without
+ * the SYSCFG clock.
  */
 struct Irtim {
     Irtim() = delete;
 
-    /// Which USART instance IR_MOD code 10 selects on THIS part (ch. 27:
+    /// Which USART instance IR_MOD code 10 selects on this part (ch. 27:
     /// USART4 on the G071/G081/G0B1/G0C1, USART2 on the G031/G041/G051/
     /// G061). Published here so an application names a timer and a USART
     /// and never a device.
@@ -128,7 +152,7 @@ struct Irtim {
     static bool polarity() { return (SYSCFG->CFGR1 & SYSCFG_CFGR1_IR_POL) != 0u; }
 
     /**
-     * SYSCFG_CFGR1.I2C_PB9_FMP - the HIGH SINK LED DRIVER, available on
+     * SYSCFG_CFGR1.I2C_PB9_FMP - the high-sink LED driver, available on
      * PB9 and nowhere else (ch. 27's last paragraph). The bit is named
      * for its other job (I2C fast-mode-plus drive on that pad), and that
      * is not a brio spelling but the silicon's: one bit, two uses, and a
