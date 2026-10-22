@@ -342,6 +342,64 @@ run.
 - Not run, no toolchain: any build, the host tests, the full
   `brio gate`.
 
+### Reader review of the revision (fresh subagents, two rounds)
+
+Three readers per round, each given only its files and the questions:
+the concept route (README, introduction, first-program, cpp-notation)
+with the brief's questions plus the review's scenarios; the two
+workflow guides with the fresh-checkout scenarios; and a maintainer
+profile on event_queue.hpp's and time_event.hpp's comments.
+
+Round 1, concept route. Every scenario answered "supported directly":
+the older event in the same queue first; a still-higher queue served
+first and starvation possible; the full queue (dropped, counted,
+nothing blocks); the one-tick timer maturing in under a tick; no
+response-time promise; two interrupt handlers posting to one queue
+safe under the no-nesting rule. The pointer-payload reuse scenario was
+answerable only through the kernel.md link, as intended. Residue
+fixed: the timer bound was stated in milliseconds although the same
+stage names the AVR's 1024 Hz tick (now tick intervals); the kernel's
+re-scheduling of a periodic timer and a program's `arm_every` on a
+running one read as the same "re-arm" with opposite reference points
+(now told apart); the catch-all was praised for exhaustiveness while
+silently taking a forgotten listed event (now stated in first-program
+and cpp-notation); the stage-4 scenario implied a Toggle per tick (now
+says its tick is the heartbeat's); `post` returning nothing on a drop,
+`arm` beside `arm_every`, the mask in post being against the other
+producers, sizing by the depth and not the spare slot, and the
+verification sentence naming the G071RB where the route is the G0B1RE
+(now says what the record says). Left as is: the includes and the file
+skeleton of a new app (the page points at the full file), `print`'s
+exact stall (the header's).
+
+Round 1, workflow guides. Every scenario "supported directly" (the
+clangd databases, the host-test sequence on an unbuilt tree, the wrong
+folder's symptoms, the queue's nonzero cursors, the WFI read). Residue
+fixed: the two once-only configures lived in the clangd section while
+the numbered procedure said "debug preset" alone (now inside step 2 of
+the procedure as well); leaving `blink-upload` selected reflashes at
+every build (now said); the root `.clangd` was not named (now is, as
+rules without a database); `plugdev` membership; no recovery for step
+5 (added); the DBG_STOP paragraph still long (now two lines and a
+link). Observed and kept: the exact CMake Tools labels remain to be
+confirmed, no step is on record from a fresh checkout.
+
+Round 1, the queue comment. All eight answers "supported directly",
+two with an inference the comment did not spell: why a compiler-only
+fence suffices (now stated: the other side is on the same core and a
+core sees its own stores in program order), and the counts and the
+`fence_` name (now tied to "the free end" in the run table). One real
+contradiction found and fixed: the outstanding run was "read by
+nobody" while hold() reads its last position. Also fixed: "the
+consumer's verbs" carry interleave points where only take() and
+release() do (platform.hpp's pointer corrected too); "one writer" per
+cursor where alloc_ has one side and two contexts (now "one side",
+with the critical section's purpose, producer against producer,
+stated); `held` and serve_one() before their definitions; exactly
+2^31 uncovered (now "at most 2^31"). Noted and kept: the depth rule
+also appears on push()'s and capacity()'s own comments (function
+comments, not the model).
+
 ## Next batches (not started)
 
 1. docs/design/*.md, kernel.md first, with the reference inventory above.
