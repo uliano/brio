@@ -23,11 +23,14 @@
  *
  * The rules the compiler cannot see, and that the kernel is written
  * assuming:
- *  - dispatch() is called from the kernel loop only, with interrupts
- *    enabled, and is never re-entered: while it runs no other active
- *    object runs, so the object's static data needs no lock against
- *    other objects. Interrupt handlers are the only concurrent code, and
- *    they touch nothing of the object but its queue, through post();
+ *  - dispatch() is called by the kernel only - from its loop or, under
+ *    Rubato (kernel/rubato.hpp), from inside a lower-priority object's
+ *    dispatch -, with interrupts enabled, and is never re-entered:
+ *    under Tenuto no other active object runs while it runs, under
+ *    Rubato a higher one may run inside it, and in both the object's
+ *    static data needs no lock against other objects, which touch
+ *    nothing of it but its queue, through post(), as interrupt
+ *    handlers do;
  *  - the event a dispatch receives lives in the queue's slot, and the
  *    slot is the object's until it is released: by the kernel right
  *    after the dispatch, or, when the object called the queue's hold()

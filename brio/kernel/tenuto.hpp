@@ -1,8 +1,11 @@
 /*
  * tenuto.hpp
  *
- * Tenuto, the brio kernel: the loop that serves the active objects of a
- * program, one event at a time, in priority order.
+ * Tenuto, the cooperative brio kernel: the loop that serves the active
+ * objects of a program, one event at a time, in priority order, no
+ * object ever running inside another's dispatch (kernel/rubato.hpp is
+ * the preemptive kernel over the same list, under which a higher one
+ * may).
  *
  * An application starts it once, at the end of main(), with the platform
  * and its active objects listed from the highest priority to the lowest:

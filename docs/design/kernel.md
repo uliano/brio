@@ -55,15 +55,21 @@ resume it later, so an active object cannot wait for anything inside a
 handler; if a handler calls a function that waits for hardware, every
 other active object on that core waits with it.
 
-The **kernel** (its type is `Tenuto`,
-[the scheduler](#8-scheduler-kerneltenutohpp)) is a loop on the single
-main stack. Each turn it posts
+The **kernel** is a loop on the single main stack. Each turn it posts
 the time events that have matured, then serves one event from the
 highest-priority queue that is not empty, then starts again from the
-top. If every queue is empty it sleeps until an interrupt. There is no
-preemption between active objects: while one handler runs, no other
-active object runs on that core. The only concurrency on a core is an
-interrupt handler against the loop, and an interrupt handler may do
+top. If every queue is empty it sleeps until an interrupt. brio has
+two kernels over this one model ([the scheduler](#8-scheduler-kerneltenutohpp)):
+`Tenuto`, the cooperative one, under which no other active object runs
+while a handler runs on that core; and `Rubato`, the preemptive one,
+under which a handler of higher priority may run inside a handler of
+lower priority, on the same stack, the lower resuming when the higher
+returns. Under both a handler is never re-entered and an object's data
+is touched by its own handlers only; what Rubato changes is that the
+time a handler takes may contain other objects' handlers, the way it
+already contains interrupt handlers. The other concurrency on a core
+is an interrupt handler against the dispatches, and an interrupt
+handler may do
 exactly one thing with the kernel: post an event (`post()`, or on a
 two-core chip `send()` to the other core, which ends in a `post()`
 there), which builds a
@@ -84,7 +90,12 @@ another interrupt would be a third kind of context, and every driver
 whose two vectors share a state machine would become a design
 question. brio buys interrupt latency with short handler bodies and
 DMA instead, the means the smallest core has: nothing that needed
-nesting would run on the AVR, so nothing in brio may need it.
+nesting would run on the AVR, so nothing in brio may need it. Rubato
+adds no third context for a driver: peripheral handlers still never
+nest, and the exception its scheduler runs in sits below them all.
+What it adds is a boundary between two objects' dispatches, closed by
+the rule that objects share nothing but events ("Rubato" in
+[the scheduler](#8-scheduler-kerneltenutohpp)).
 
 This is the cooperative flavour of active objects described in
 Samek's book (he names it QV, for the vanilla kernel), written from
@@ -143,11 +154,12 @@ checked by the compiler where an active object enters `Tenuto<...>`.
 The **informal half** is the set of rules the compiler cannot see and
 that the kernel is written assuming:
 
-- `dispatch` runs to completion, is called from the loop only, with
-  interrupts enabled, and is never re-entered; the object's static data
-  therefore needs no lock against other active objects, since only
-  interrupt handlers are concurrent and they touch nothing of the
-  object but its queue, through `post()`;
+- `dispatch` runs to completion, is called by the kernel only (from
+  its loop or, under Rubato, from inside another object's dispatch),
+  with interrupts enabled, and is never re-entered; the object's static
+  data therefore needs no lock against other active objects, which
+  touch nothing of it but its queue, through `post()`, as interrupt
+  handlers do;
 - the event a dispatch receives stays in its queue slot (the storage
   the queue built it in), and the slot is the consumer's until it is
   released: by the loop right after the dispatch, unless the object
@@ -303,19 +315,21 @@ The case-by-case then reduces to one question per field: is this data
 read once by one receiver, or written by someone else while it is in
 flight? The first has one answer, the second has two.
 
-**Why the distinction is safe under this kernel.** There is no
-concurrency between active objects, so two of them can never write the
-same buffer at the same time. The only hazard of a loan is aliasing in
-time: the lender reusing storage the borrower still holds. Both leases
-pin that down. For `dispatch`, the list order guarantees that the
-borrower runs before the lender is dispatched again: the loop rescans
-the list from the top on every turn
-([the scheduler](#8-scheduler-kerneltenutohpp)), so a borrower that
-precedes the lender has its queue served, and the lent event with it,
-before the loop reaches the lender's queue again (under a
-preemptive kernel the same order would make the borrower preempt the
-lender right at the post, so the rule would survive such a kernel
-unchanged). For `reply`, the boundaries are two explicit events. At
+**Why the distinction is safe under either kernel.** Under Tenuto
+there is no concurrency between active objects; under Rubato two
+objects' dispatches nest but never run at the same time, so two of
+them can never write the same buffer at the same instant. The only
+hazard of a loan is aliasing in time: the lender reusing storage the
+borrower still holds. Both leases pin that down. For `dispatch`, the
+list order guarantees that the borrower runs before the lender is
+dispatched again: under Tenuto the loop rescans the list from the top
+on every turn ([the scheduler](#8-scheduler-kerneltenutohpp)), so a
+borrower that precedes the lender has its queue served, and the lent
+event with it, before the loop reaches the lender's queue again; under
+Rubato the same order makes the borrower's dispatch run inside the
+lender's `post()`, so the loan is consumed when the post returns, and
+what the lender reads in the storage afterwards is what the borrower
+left ("Rubato" there). For `reply`, the boundaries are two explicit events. At
 every instant exactly one party has the right to write: ownership
 moves, it is never shared.
 
@@ -383,9 +397,11 @@ queue.
 **One more discipline, kept for the future.** Active objects share
 nothing but events. An object's own statics are safe because its
 dispatch is never re-entered, but a global touched by two objects
-outside events is safe only because this kernel is cooperative; under
-a preemptive one it would be a race. The rule costs nothing today and
-keeps the door to such a kernel open.
+outside events is safe only under Tenuto; under Rubato it is a race,
+and a service two objects call directly has one owner object or
+guards its producers ("Rubato" in
+[the scheduler](#8-scheduler-kerneltenutohpp)). The rule costs nothing
+under Tenuto and is what makes a program ready for Rubato.
 
 ## 5. Queues (`kernel/event_queue.hpp`)
 
@@ -897,6 +913,115 @@ above the kernel by the power model ([power.md](power.md)), which arms
 a mode and lets this same hook take it, so the loop is unchanged and a
 program without a power manager pays nothing.
 
+### Rubato, the preemptive kernel (`kernel/rubato.hpp`)
+
+`Rubato<P, Ao1, Ao2, ...>` is the second kernel: the same list, the
+same objects, queues, state machines, delivery primitives, time events,
+loans and panic path, and the same compile-time checks. Its name is the
+musical marking for tempo stolen from one note and given back to
+another. What it adds is one thing: **the dispatch of a higher-priority
+object may start while a lower-priority dispatch is suspended, on the
+same stack, and the suspended one resumes when the higher one
+returns.** Nothing is ever suspended in the other direction: an object
+of equal or lower priority than the one running waits, as under Tenuto.
+
+The ceiling. The platform keeps one byte, `P::ceiling`: the list index
+of the object being dispatched, 255 at the loop's base. Only an object
+whose index is below the ceiling may start a dispatch. Every `post()`
+compares the receiver's index with the ceiling after the copy and, when
+it is below, asks the platform for the scheduler (`P::pend_schedule()`).
+The scheduler is `activate()`: it serves the highest non-empty queue
+below the ceiling, one event, with the ceiling raised to that object's
+index for the length of the dispatch and restored after it, and repeats
+from the top of the list until no queue below the ceiling holds
+anything. Each queue knows its index because `init_all()` writes it
+(the pack index, kept in the queue on a preemptive platform only),
+and `init_all()` holds the ceiling at 0 while the inits run, so nothing
+is dispatched before the last `init()` has returned.
+
+Two roads lead to a dispatch that preempts another:
+
+1. An interrupt handler posts to an object above the ceiling. The
+   request waits for the handler to end; at its exit the platform runs
+   `activate()`, so the higher object's dispatches run to their end
+   over the code the interrupt suspended, which resumes after them.
+2. A dispatch posts to an object above it. The platform runs
+   `activate()` at once, inside `post()`, which returns after the
+   receiver's dispatches have run to their end.
+
+A post to an object at or below the ceiling, the poster itself
+included, waits as under Tenuto: until no dispatch of its receiver's
+priority or higher is running or suspended, and then in list order.
+
+What never changes. A handler is never re-entered, and an object is
+never dispatched while one of its own dispatches is suspended, because
+its index is never below a ceiling raised to it; so an object's own
+statics need no lock and its queue keeps one consumer. A dispatch still
+runs to its end before any object of its own or lower priority runs.
+Nothing blocks, nothing has a stack of its own, nothing is sliced in
+time; the kernel loop at its base is Tenuto's (time events, the
+scheduler, sleep when every queue is empty), and a preempting dispatch
+never sleeps. The two-core model is unchanged: a Rubato per core, the
+doorbell's handler an interrupt handler like any other.
+
+The loans ([payloads](#4-payloads-what-travels-inside-the-event-kernelborrowedhpp)).
+A `Lease::dispatch` borrower precedes its lender in the list, so a loan
+posted from the lender's dispatch starts the borrower's dispatch inside
+the post: the borrower reads the storage, and may write it, before
+`post()` returns, and its lease ends there. The lender may reuse the
+storage from then on, within the same dispatch; what it may not do is
+read the lent storage after the post expecting what it put there,
+which under Tenuto it would have read only at its next dispatch.
+`Lease::reply` and `Lease::hold` are unchanged.
+
+What two objects may touch outside events. Under Tenuto a structure
+two objects call directly is safe because their dispatches never
+overlap; under Rubato two objects of different priority run one inside
+the other, so **a service called directly by two objects has one owner
+object, or guards its producers.** Two structures guard themselves on
+a preemptive platform: the armed time events
+([time](#9-time-kerneltimehpp-kerneltime_eventhpp)) and the producer
+verbs of a `Ring` ([ring.md](ring.md)); the guard covers each verb, not
+a run a producer fills between `write_span()` and `publish()`, so a
+transmit ring two objects write is corrupted inside a run, and the one
+owner is the rule there. For a UART that is one direct writer per
+instance, in one of two forms, independent and never stacked on one
+instance: a bookable transport object (a `Request` with a run lent
+`Lease::reply`, a `Done`, the bus arbiter's shape) for heterogeneous
+clients, or a high-level object that owns the port's meaning (a logger
+taking message events and formatting them itself). A UART used by one
+object needs neither, and under Tenuto nothing changes.
+
+The accepted limits are Tenuto's with preemption in place of "the
+running dispatch finishes first": the kernel promises that an object of
+higher priority is served before a lower one resumes, and nothing more;
+no response time, no fairness, no ageing. A long dispatch delays every
+object of its own and lower priority by its length. The stack is one,
+sized by the deepest chain of nested dispatches plus the deepest
+interrupt frame over it, and is measured, not computed.
+
+What the platform provides is the three members above
+([the platform](#11-platform-what-the-machine-provides-kernelplatformhpp)).
+`pend_schedule()` runs `activate()` when no interrupt handler is
+running: at once when called from a dispatch, at the handler's exit
+when called from one. On a Cortex-M that is PendSV at the lowest
+exception priority, below every peripheral line; the kernel never
+names the vector, the application binds it as it binds every other.
+The realizations are the platform's table; today the host platform is
+the one that exists (`RubatoHostPlatform`, `host/platform.hpp`), and
+the host suite (`test/test_rubato`) is the specification every target
+realization is judged by: the ceiling over both roads, an object never
+nested in itself, the chain of three, the loans and the lender's trap,
+a hold under preemption, timers armed and disarmed inside a walk of
+the list, idle at the base only, overflow unchanged, the ring's guard
+counted, and Tenuto's traces reproduced when no interrupt ever fires.
+
+Not Rubato: a blocking kernel (a handler that waits is a different
+kernel's, reserved under the name `Fermata` and not built), a
+zero-latency interrupt tier above the critical section (BASEPRI on the
+Cortex-M that has it is a later decision), the AVR (it stays on Tenuto
+by decision).
+
 ## 9. Time (`kernel/time.hpp`, `kernel/time_event.hpp`)
 
 **Timers post events; expiry runs in the loop, never in the interrupt
@@ -912,8 +1037,15 @@ timers is the opposite of a short handler, and it would buy no
 precision, since a posted event waits for the current dispatch anyway.
 
 - Armed events form an intrusive singly-linked list: no allocation,
-  and the RAM is what is declared. `arm`, `disarm` and `process` run in
-  the loop only, so the list needs no critical section. An interrupt
+  and the RAM is what is declared. Under Tenuto `arm`, `disarm` and
+  `process` run in the loop only, so the list needs no critical
+  section. Under Rubato a dispatch may arm or disarm while another
+  dispatch's `process()` walks the list, so on a preemptive platform
+  the list operations take the critical section, `process()` fires
+  each matured event with the guard dropped (a fire is a post, and a
+  post can run a dispatch to its end), and after the fire it reads its
+  place in the list afresh (the header says how a walk survives a
+  disarm or a re-arm from inside a fire). An interrupt
   handler that wants a delay posts an event to an active object, whose
   handler arms the timer.
 - One-shot (`arm(delay)`) or periodic (`arm_every(period)`). A
@@ -1127,6 +1259,14 @@ time event. The members:
   guarded with `if constexpr` on it).
 - `panic_record()`: a reference to a `PanicRecord` in storage that
   survives a reset without being zeroed by the startup code.
+- Optional, and only together, the three members of a preemptive
+  platform, the one Rubato runs on, detected by the `Preemptive`
+  concept: `preemptive` (true), `ceiling` (a byte, the list index of
+  the object being dispatched, 255 at the loop's base) and
+  `pend_schedule()`, the scheduling request ("Rubato" in
+  [the scheduler](#8-scheduler-kerneltenutohpp)). A platform with none
+  of them is Tenuto's, and every header that asks compiles for it what
+  it compiled before the question existed.
 
 And one promise that has no member because it is a fact about the
 whole machine: **an interrupt handler is not interrupted by another
@@ -1138,7 +1278,10 @@ priority (equal priorities never preempt one another;
 `Nvic::priority()` in `cortexm/nvic.hpp` is the one door, and no
 driver opens it), the QingKe families by leaving `INTSYSCR.INESTEN`
 at its reset value in the startup code (each crt says so in its
-opening comment). A driver whose two vectors share one state machine
+opening comment). Rubato keeps it: the exception its scheduler runs in
+(PendSV on a Cortex-M) sits below every peripheral line, is taken at a
+handler's exit, and is interrupted by peripheral handlers, which still
+never nest among themselves. A driver whose two vectors share one state machine
 (a UART with its DMA channels) counts on this promise, and a target
 that broke it would have to give such drivers guards of their own.
 
@@ -1317,12 +1460,13 @@ balancing. The host proves the protocol deterministically
 | Entity | Header | Role |
 |--------|--------|------|
 | `ActiveObject` (concept), `queue_on<Ao, P>`, `serve_one<Ao>` | `active_object.hpp` | what Tenuto requires of an active object; whether an object's queue is P's (its core); one event served in its slot, released unless held |
-| `Platform` (concept), `PanicRecord` | `platform.hpp` | what the kernel requires of the machine (plus the optional `idle_until`, `on_own_core`, `Doorbell`, and the host's `interleave_point`) |
-| `EventQueue<E, depth, P>`, `CoreAware` | `event_queue.hpp` | the per-object queue (many producers, one consumer): the event built in its slot, `take()` handing over the slot's number, `at()` the event, `hold()`/`release()` keeping and returning a slot in any order, `depth` the events waiting or held at once; the overflow counter, the mispost check of a core-aware platform |
+| `Platform`, `Preemptive` (concepts), `PanicRecord` | `platform.hpp` | what the kernel requires of the machine (plus the optional `idle_until`, `on_own_core`, `Doorbell`, the host's `interleave_point`, and the three members of a preemptive platform: `preemptive`, `ceiling`, `pend_schedule`) |
+| `EventQueue<E, depth, P>`, `CoreAware`, `QueuePriority` | `event_queue.hpp` | the per-object queue (many producers, one consumer): the event built in its slot, `take()` handing over the slot's number, `at()` the event, `hold()`/`release()` keeping and returning a slot in any order, `depth` the events waiting or held at once; the overflow counter, the mispost check of a core-aware platform, the owner's list index on a preemptive one |
 | `Overloaded`, `match`, `Entry`, `Exit`, `Fsm<Derived, Alts...>` | `fsm.hpp` | variant dispatch helpers, the state machine base, `Event`, `Status` |
 | `post`, `Subscribers`, `publish`, `ReplyTo` (incl. `through`), `reply_to` | `post.hpp` | delivery primitives (the crossing `send` is `util/inbox.hpp`'s, [two cores](#12-two-cores-two-kernels-and-a-bridge-utilinboxhpp)) |
 | `Borrowed<T, Lease>`, `Lease`, `lend`, `Held<E>` | `borrowed.hpp` | pointer payloads with their lease in the type; a held queue slot's number with `Lease::hold` in its type |
-| `Pack<Aos...>`, `Tenuto<P, Aos...>` | `tenuto.hpp` | list ordering questions (`index`, `lends_ok`); the loop: `init_all`/`step`/`idle_if_empty`/`run` |
+| `Pack<Aos...>`, `Tenuto<P, Aos...>` | `tenuto.hpp` | list ordering questions (`index`, `lends_ok`); the cooperative loop: `init_all`/`step`/`idle_if_empty`/`run` |
+| `Rubato<P, Aos...>` | `rubato.hpp` | the preemptive kernel over the same list: `init_all` (the queues' indices, the ceiling held at 0), `activate` (the scheduler, re-entrant), `idle_if_empty`, `run` |
 | `TimeEvents<P>` (incl. `ticks_to_next`, `next_deadline`), `TimeEvent<P, Ao, Ev>` | `time_event.hpp` | the armed list and the owned time events |
 | `ticks_from_ms`, `ticks_from_secs` | `time.hpp` | `constexpr` tick conversions |
 | `PanicCode`, `panic_magic`, `HaltReporter`, `panic`, `take_panic_record` | `panic.hpp` | unrecoverable failures |
@@ -1330,13 +1474,15 @@ balancing. The host proves the protocol deterministically
 Include graph (arrows mean "is included by"; nothing here includes
 anything outside `kernel/` and the standard freestanding library):
 
-    platform.hpp        <- event_queue.hpp, time.hpp, panic.hpp,
+    platform.hpp        <- event_queue.hpp, post.hpp, time.hpp, panic.hpp,
                            time_event.hpp, tenuto.hpp
     fsm.hpp             <- post.hpp
     active_object.hpp   <- time_event.hpp, tenuto.hpp
     post.hpp            <- time_event.hpp, tenuto.hpp
     time_event.hpp      <- tenuto.hpp
+    tenuto.hpp          <- rubato.hpp (the Pack and the checks)
     borrowed.hpp        <- event_queue.hpp (and util/ producers of loans)
 
 An application that only posts includes `kernel/post.hpp`; one that
-runs includes `kernel/tenuto.hpp` and gets the contract with it.
+runs includes `kernel/tenuto.hpp` or `kernel/rubato.hpp` and gets the
+contract with it.
