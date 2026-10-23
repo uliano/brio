@@ -48,8 +48,12 @@ the rest: each is LINKED into an image for the CH32V303VC with the
 hardware prologue - the one build whose vectors are naked trampolines
 (`brio/ch32vx03/pfic.hpp`) - and `cli/vector_guard.py` is run over it.
 The TU's `// guard:` line says what the guard must answer: `pass`, or
-`fail <text>` with `<text>` in its report. One TU passes (a float
-trampoline's body, a jump table and a call chain under a plain one) and
-two must be refused by name (float work reached through a call, a call
-through a pointer): the proof that the check the project's own images
-pass is one that can fail.
+`fail <text>` with `<text>` in its report, or `pass <text>` with a leaf
+candidate the report must name. The TUs that pass hold the shapes the
+guard admits (a float trampoline's body, a jump table and a call chain
+under a plain one, the leaf forms, the preemptive kernel's two
+scheduler vectors); the ones refused by name hold what it must catch
+(float work reached through a call, a call through a pointer, a leaf
+that calls out, a scheduler vector that calls out, an attributed
+handler without its mark): the proof that the check the project's own
+images pass is one that can fail.

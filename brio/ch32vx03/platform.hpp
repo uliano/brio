@@ -16,8 +16,12 @@
  * CriticalSection is ch32vx03/pfic.hpp's InterruptGuard: read-and-clear
  * mstatus.MIE in one instruction, restore what was there on scope exit.
  * All-or-nothing masking. This core DOES have a priority threshold and
- * interrupt nesting, and brio uses neither: an ISR body runs to
- * completion here as everywhere (docs/design/kernel.md section 1).
+ * interrupt nesting, and this platform uses neither: an ISR body runs to
+ * completion here as everywhere (docs/design/kernel.md section 1). The
+ * preemptive kernel's platform below turns nesting on for one purpose
+ * alone - its scheduling request one level below every peripheral line,
+ * which still share one level and never nest among themselves
+ * (ch32vx03/schedule.hpp).
  *
  * IDLE() ON THIS FAMILY ASKS THE BUS FIRST, and that is this target's
  * one departure from the others. In a sleep of any depth here no bus
@@ -42,6 +46,7 @@
 #include "ch32vx03/bus_activity.hpp"
 #include "ch32vx03/device.hpp"
 #include "ch32vx03/pfic.hpp"
+#include "ch32vx03/schedule.hpp"
 #include "ch32vx03/ticker.hpp"
 #include "kernel/platform.hpp"
 
@@ -293,5 +298,55 @@ inline uint32_t stack_untouched() {
 }
 
 static_assert(Platform<Ch32vx03Platform<>>);
+
+/**
+ * Ch32vx03RubatoPlatform<TB>: the platform a Rubato kernel runs on
+ * (kernel/rubato.hpp), the preemptive one. It is Ch32vx03Platform<TB>
+ * whole - the same critical section, idle, timebase, breakpoint and panic
+ * storage - plus the three members kernel/platform.hpp's Preemptive
+ * concept asks for:
+ *
+ *     using P = brio::Ch32vx03RubatoPlatform<>;
+ *     using K = brio::Rubato<P, Sensor, Logger>;
+ *     BRIO_CH32_SCHEDULER_VECTOR(software_handler) { brio::scheduler_trap<K>(); }
+ *     BRIO_CH32_SCHEDULER_VECTOR(ecall_m_handler) { brio::scheduler_return(); }
+ *     int main() { ...; brio::scheduler_init(); brio::enable_interrupts(); K::run(); }
+ *
+ *  - `preemptive`, true;
+ *  - `ceiling`, the byte the kernel keeps: the pack index of the object
+ *    being dispatched, 255 at the loop's base. A static of the platform,
+ *    so of the program: one kernel per platform type, which on this
+ *    single-core family is one kernel;
+ *  - `pend_schedule()`, the request for the scheduler: ch32vx03/
+ *    schedule.hpp's software interrupt, below every other line, with
+ *    interrupt nesting turned on so that the peripheral handlers, at one
+ *    level among themselves, interrupt it. The software interrupt
+ *    returns into the scheduler in thread mode, and the scheduler leaves
+ *    through the machine-mode environment call; that file says how, with
+ *    the block each level of preemption leaves on the stack.
+ *
+ * The CriticalSection is still mstatus.MIE alone, and the promise that an
+ * interrupt handler is not interrupted by another keeps its meaning for
+ * the peripheral handlers, which share one preemption level and never
+ * nest among themselves; the scheduler's interrupt sits below them all,
+ * and they do interrupt it. A program on this platform binds two vectors
+ * more than a Tenuto program, the software interrupt's and the
+ * machine-mode environment call's, both naked, executes no `ecall` of
+ * its own, and calls scheduler_init() before it enables interrupts.
+ */
+template <class TB = Ticker>
+struct Ch32vx03RubatoPlatform : Ch32vx03Platform<TB> {
+    static constexpr bool preemptive = true;
+
+    /// The index of the object being dispatched; 255 at the loop's base.
+    static inline uint8_t ceiling = 255;
+
+    /// The request for the scheduler (ch32vx03/schedule.hpp).
+    [[gnu::always_inline]] static void pend_schedule() { request_scheduler(); }
+};
+
+static_assert(Platform<Ch32vx03RubatoPlatform<>>);
+static_assert(Preemptive<Ch32vx03RubatoPlatform<>>);
+static_assert(!Preemptive<Ch32vx03Platform<>>);
 
 } // namespace brio

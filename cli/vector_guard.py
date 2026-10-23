@@ -44,8 +44,10 @@ left alone; an entry with a `<name>_body` beside it that is neither
 shape FAILS (a trampoline the guard does not recognize is one it has not
 checked).
 
-An entry bound LEAF (BRIO_CH32_LEAF_VECTOR, the attributed handler,
-marked in the image by the absolute symbol `__brio_leaf_<name>`) is
+An entry bound LEAF (BRIO_CH32_LEAF_VECTOR, the attributed handler, or
+BRIO_CH32_SCHEDULER_VECTOR, the preemptive kernel's two naked vectors
+of brio/ch32vx03/schedule.hpp - both marked in the image by the
+absolute symbol `__brio_leaf_<name>`) is
 checked the other way: the handler itself must be a leaf - no call, no
 jump or branch out of it (a tail call), no indirect transfer but a jump
 table into itself, no floating-point instruction or CSR - and FAILS

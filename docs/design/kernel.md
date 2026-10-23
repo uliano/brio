@@ -94,7 +94,7 @@ question. brio buys interrupt latency with short handler bodies and
 DMA instead, the means the smallest core has: nothing that needed
 nesting would run on the AVR, so nothing in brio may need it. Rubato
 adds no third context for a driver: peripheral handlers still never
-nest, and the exception its scheduler runs in sits below them all.
+nest, and the exception that starts its scheduler sits below them all.
 What it adds is a boundary between two objects' dispatches, closed by
 the rule that objects share nothing but events ("Rubato" in
 [the scheduler](#8-scheduler-kerneltenutohpp)).
@@ -972,7 +972,8 @@ priority or higher is running or suspended, and then in list order.
 each of which may run its receiver's dispatch inside it before the
 next. How the platform tells a handler's call of `pend_schedule()`
 from a dispatch's is its own: the exception mechanics on a Cortex-M,
-a flag the harness raises on the host.
+the interrupt controller's preemption levels on a QingKe V4, a flag the
+harness raises on the host.
 
 What never changes. A handler is never re-entered, and an object is
 never dispatched while one of its own dispatches is suspended, because
@@ -1034,7 +1035,10 @@ interrupt frame over it; it is to be measured on each realization, not
 computed (664 bytes of high-water on the STM32F446RE for the bench
 suite's deepest chain, [the STM32F4 platform page](../stm32f4/platform.md);
 520 on the STM32G0B1RE, whose frames carry no FPU words,
-[the STM32G0 platform page](../stm32g0/platform.md)).
+[the STM32G0 platform page](../stm32g0/platform.md); 1000 on the
+CH32V203C8T6 and 1156 on the CH32V303VCT6, whose levels carry the
+entry's registers on the stack where a Cortex-M's carry an exception
+frame, [the CH32V203/CH32V303 platform page](../ch32vx03/platform.md)).
 
 What the platform provides is the three members above
 ([the platform](#11-platform-what-the-machine-provides-kernelplatformhpp)).
@@ -1047,16 +1051,27 @@ second exception frame, so that PendSV is not active while the
 dispatches run and an interrupt's post preempts a dispatch at any
 depth; the scheduler leaves through SVC (`cortexm/schedule.hpp`, the
 frames and the FPU's part in its header). The kernel never names the
-vectors; the application binds the two as it binds every other. Three
-realizations exist: the host's (`RubatoHostPlatform`,
+vectors; the application binds the two as it binds every other.
+On a QingKe V4 it is the software interrupt, alone one preemption level
+below every peripheral line with the nesting the platform turns on at
+run time, which does not run the scheduler either but returns into it
+in thread mode with the trap's mepc and mstatus in a block on the
+stack, the scheduler leaving through the machine-mode environment call
+(`ch32vx03/schedule.hpp`, the frame and the f-registers' save in its
+header). Four realizations exist: the host's (`RubatoHostPlatform`,
 `host/platform.hpp`), the STM32F4's (`Stm32f4RubatoPlatform`,
 measured on the Nucleo-F446RE: an interrupt's post to the first
 instruction of the preempting dispatch in 145 cycles, a post that asks
 nothing 79, a post that runs the receiver's empty dispatch inside it
-403, [the STM32F4 platform page](../stm32f4/platform.md)) and the
+403, [the STM32F4 platform page](../stm32f4/platform.md)), the
 STM32G0's on the Cortex-M0+ (`Stm32g0RubatoPlatform`, measured on the
 Nucleo-G0B1RE: 194, 95 and 531 cycles, [the STM32G0 platform
-page](../stm32g0/platform.md)); the host
+page](../stm32g0/platform.md)) and the CH32V203's and CH32V303's on the
+QingKe V4 (`Ch32vx03RubatoPlatform`, measured on the CH32V203C8T6:
+131, 55 and 337 cycles; 137, 54 and 337 on the CH32V303VCT6, whose
+entry saves the f-registers and fcsr in 31 to 32 cycles where the
+preempted code's are live, [the CH32V203/CH32V303 platform
+page](../ch32vx03/platform.md)); the host
 suite (`test/test_rubato`) is the specification every target
 realization is judged by: the ceiling over
 both roads, an object never nested in itself, the chain of three, the
@@ -1338,10 +1353,13 @@ priority (equal priorities never preempt one another;
 `Nvic::priority()` in `cortexm/nvic.hpp` is the one door, and no
 driver opens it), the QingKe families by leaving `INTSYSCR.INESTEN`
 at its reset value in the startup code (each crt says so in its
-opening comment). Rubato keeps it: the exception its scheduler runs in
-(PendSV on a Cortex-M) sits below every peripheral line, is taken at a
-handler's exit, and is interrupted by peripheral handlers, which still
-never nest among themselves. A driver whose two vectors share one state machine
+opening comment). Rubato keeps it: the exception that starts its
+scheduler (PendSV on a Cortex-M; on a QingKe V4 the software interrupt,
+with the nesting the Rubato platform turns on at run time, every
+peripheral line at one preemption level above it) sits below every
+peripheral line, is taken at a handler's exit, and is interrupted by
+peripheral handlers, which still never nest among themselves. A driver
+whose two vectors share one state machine
 (a UART with its DMA channels) counts on this promise, and a target
 that broke it would have to give such drivers guards of their own.
 
@@ -1415,7 +1433,7 @@ core sleeps.
 | stm32g0 | `Stm32g0Platform<TB>` (`stm32g0/platform.hpp`) | templated on its timebase; `idle()` is WFI = Sleep, both idle promises measured on the STM32G0B1RE, the WFI waking on an interrupt PRIMASK holds pending and leaving no latch; the sites arm the deeper Stops; `idle_until()` exists exactly when `TB` satisfies `Tickless` (the LPTIM timebase), its path not walked by the measurement; `atomic_width` 4; BKPT as the SAM's; `Stm32g0RubatoPlatform<TB>` adds the three preemptive members over `cortexm/schedule.hpp` (PendSV at the fourth of the M0+'s four levels returning into the scheduler in thread mode, SVC the way back, every frame basic), measured on the STM32G0B1RE by `test_stm32_rubato`: road 1 in 194 cycles from the handler's last statement to the dispatch's first, a quiet post 95, a road-2 post 531 with the receiver's empty dispatch inside, a four-queue scan 165, one `arm()` 93 with its masked window, a post under PRIMASK served when the section ends (223 cycles from its last statement), 520 bytes of stack for the suite's deepest chain ([the STM32G0 platform page](../stm32g0/platform.md)) |
 | stm32f4 | `Stm32f4Platform<TB>` (`stm32f4/platform.hpp`) | templated on its timebase like the G0's, with no `Tickless` timebase on this family yet, so no `idle_until()`; `idle()` is WFI = Sleep, SLEEPDEEP never written, both idle promises measured on the STM32F446RE; the critical section is PRIMASK on a core that has BASEPRI and does not use it, the promise kept by one priority for every line, as the SAM does; `atomic_width` 4; BKPT as the SAM's, on a core that could read DHCSR and does not; `Stm32f4RubatoPlatform<TB>` adds the three preemptive members over `cortexm/schedule.hpp` (PendSV at the sixteenth level returning into the scheduler in thread mode, SVC the way back), measured on the STM32F446RE by `test_stm32f4_rubato`: road 1 in 145 cycles from the handler's last statement to the dispatch's first, a quiet post 79, a road-2 post 403 with the receiver's empty dispatch inside, a four-queue scan 117, one `arm()` 82 with its masked window, 664 bytes of stack for the suite's deepest chain, the FPU's registers bit-exact across a preemption ([the STM32F4 platform page](../stm32f4/platform.md)) |
 | ch32v00x | `Ch32v00xPlatform<TB>` (`ch32v00x/platform.hpp`) | templated on its timebase like the G0's; `atomic_width` 4; the critical section is a `csrrci` on mstatus.MIE; `idle()` is not a WFI but a WFE (PFIC_SCTLR.WFITOWFE + SEVONPEND) entered with MIE set, because this core's WFI wakes only for an interrupt it can take and would sleep past a pending one with MIE clear, while a WFE with MIE clear wakes on a pending edge alone and loses one arriving on the cycle it goes to sleep (measured); the unmask comes first and the latched event closes the window between it and the sleep, and after the wake a SETEVENT and a second `wfi` consume the latch the waking edge left, so the loop turns once per interrupt, both idle promises measured on the CH32V006K8. On the CH32V003's QingKe V2A that entry wedges the core for good (an edge within a four-cycle window at the `wfi` leaves it beyond any interrupt and any debug halt, measured), so there `idle()` takes the vendor's shape: the latch emptied first and the PFIC asked for an enabled line pending, the `wfi` run masked from SRAM with a spin after it, and no sleep while the tick's match is within 96 cycles or a DMA channel works (the V2A's Sleep stops the controller); the tick keeps both promises there (none lost or late in 1600 tries, 100 turns over 100 ticks), another line's edge landing on the entry cycle itself is late by up to a tick (the masked order's hole, inferred), and a V2A Sleep lasts at least 66 us at 48 MHz once entered ([the CH32V00x platform page](../ch32v00x/platform.md)); `break_here()` is `ebreak`, escalating to the fault vector with no debugger ([the CH32V00x page](../ch32v00x/README.md)) |
-| ch32vx03 | `Ch32vx03Platform<TB>` (`ch32vx03/platform.hpp`) | templated on its timebase like the G0's; `atomic_width` 4; the critical section is a `csrrci` on mstatus.MIE, which has no shadow, measured on the CH32V303VC: an interrupt not yet taken when it retires is never taken after it, a `fence.i` changing nothing; on the CH32V203C8 one arriving on its cycle is taken at the boundary after it, the mask already in force and no masked instruction run. `idle()` is the same WFE as the sister family's, entered with MIE set for the same reason (a `wfi` with MIE clear measured to sleep past every pending interrupt on the CH32V203C8) and followed by the same SETEVENT and second `wfi` that consume the latch the wake left; both idle promises measured on the CH32V203C8, 200 turns over 100 ticks without the consume and 101 with it, and on the CH32V303VC's V4F, no f-register touched on the path, the deep path not consuming. Two guards no other target needs, because in a sleep of any depth this bus matrix serves the core alone (measured on the CH32V203C8 and the CH32V303VC): the idle path does not sleep at all while a bus master is working (`bus_masters_active()`, a DMA channel or a USB controller), and it pauses the timebase across a deep rung, a merely pending tick being an event that would end a WFE at once. `break_here()` is `ebreak`, landing on the breakpoint vector with no debugger. On the CH32V303's V4F the same type, over an FPU the startup code switches on for an image built with F: the hardware prologue saves integer registers only, so there every vector is a naked trampoline to an ordinary function, whose body the stratum's check keeps free of f-registers in the linked image, but a leaf, which saves nothing and stays the attributed handler, the same check holding it to being one ([the CH32V203/CH32V303 platform page](../ch32vx03/platform.md)) |
+| ch32vx03 | `Ch32vx03Platform<TB>` (`ch32vx03/platform.hpp`) | templated on its timebase like the G0's; `atomic_width` 4; the critical section is a `csrrci` on mstatus.MIE, which has no shadow, measured on the CH32V303VC: an interrupt not yet taken when it retires is never taken after it, a `fence.i` changing nothing; on the CH32V203C8 one arriving on its cycle is taken at the boundary after it, the mask already in force and no masked instruction run. `idle()` is the same WFE as the sister family's, entered with MIE set for the same reason (a `wfi` with MIE clear measured to sleep past every pending interrupt on the CH32V203C8) and followed by the same SETEVENT and second `wfi` that consume the latch the wake left; both idle promises measured on the CH32V203C8, 200 turns over 100 ticks without the consume and 101 with it, and on the CH32V303VC's V4F, no f-register touched on the path, the deep path not consuming. Two guards no other target needs, because in a sleep of any depth this bus matrix serves the core alone (measured on the CH32V203C8 and the CH32V303VC): the idle path does not sleep at all while a bus master is working (`bus_masters_active()`, a DMA channel or a USB controller), and it pauses the timebase across a deep rung, a merely pending tick being an event that would end a WFE at once. `break_here()` is `ebreak`, landing on the breakpoint vector with no debugger. On the CH32V303's V4F the same type, over an FPU the startup code switches on for an image built with F: the hardware prologue saves integer registers only, so there every vector is a naked trampoline to an ordinary function, whose body the stratum's check keeps free of f-registers in the linked image, but a leaf, which saves nothing and stays the attributed handler, the same check holding it to being one; `Ch32vx03RubatoPlatform<TB>` adds the three preemptive members over `ch32vx03/schedule.hpp` (the software interrupt one preemption level below every peripheral line, nesting turned on at run time, returning into the scheduler in thread mode with the trap's mepc and mstatus in a block on the stack, the machine-mode `ecall` the way back, the f-registers and fcsr saved by the entry where FS is Dirty), measured by `test_vx03_rubato`: road 1 in 131 cycles from the handler's last statement to the dispatch's first on the CH32V203C8T6 and 137 on the CH32V303VCT6, a quiet post 55, a road-2 post 337 with the receiver's empty dispatch inside, a four-queue scan 120, one `arm()` 51 to 61 with its masked window, a post under the mask served when the section ends (150 cycles from its last statement), 1000 bytes of stack for the suite's deepest chain, the FPU's registers and fcsr bit-exact across a preemption ([the CH32V203/CH32V303 platform page](../ch32vx03/platform.md)) |
 | ch32x035 | `Ch32x035Platform<TB>` (`ch32x035/platform.hpp`) | the CH32V203's file on the QingKe V4C, kept close enough that a `qingke/` core stratum is a diff of facts: templated on its timebase, `atomic_width` 4, the critical section a `csrrci` on mstatus.MIE, `idle()` a WFE as the sister strata's (the QingKe V4 manual's WFI wording being the same, a bare WFI unmeasured on this core, the WFE measured to wake on the tick on the CH32X035F8U6) entered with MIE set and followed by the SETEVENT and second `wfi` that consume the latch the wake left; both idle promises measured on the CH32X035F8U6 at 8 and 48 MHz, 200 turns over 100 ticks before the consume and 101 with it; the deep path out of line in `idle_deep()`, with a pause of the timebase when SLEEPDEEP is found set; no count of bus masters, because no driver of this stratum starts one, and no `idle_until()`; `break_here()` is `ebreak` ([the CH32X035 platform page](../ch32x035/platform.md)) |
 | rp2040 | `Rp2040Platform<core, TB>` (`rp2040/platform.hpp`) | one type per core, templated on the core and its timebase (the core's own SysTick ticker); the critical section is PRIMASK, per core; `idle()` is WFI, both idle promises measured on core 0 in the light rung and with SLEEPDEEP set, core 1 the same type unmeasured; `atomic_width` 4; BKPT as the SAM's; `on_own_core()` reads SIO's CPUID and `Doorbell` is the SIO FIFO towards the core ([the RP2040 multicore page](../rp2040/multicore.md)) |
 | rp2350 | `Rp2350Platform<core, TB>` (`rp2350/platform.hpp`) | one platform type per core as on the RP2040, and one for both processor architectures: everything target-specific is a name `rp2350/core.hpp` exports, so the critical section is PRIMASK on one half and `mstatus.MIE` on the other, per core in both spellings, while `idle()` is a wait-for-interrupt instruction on both, and no member of the concept is written twice. The lost-wakeup window is absent on both halves for two different reasons: PRIMASK does not stop a pending interrupt from waking the core on one, and this RISC-V core's `wfi` ignores `mstatus.MIE` on the other, which is not the QingKe cores' behaviour; both idle promises measured on core 0 of each half, light and standby, neither sleep instruction leaving a latch; `atomic_width` 4; `break_here()` is BKPT or `ebreak`; a `.noinit` breadcrumb per core; `on_own_core()` and `Doorbell` as on the RP2040, the doorbell here being a register of its own and not the mailbox FIFO; no `idle_until()`, and `sleep_hook` for a low-power state that is not a sleep instruction ([the RP2350 platform page](../rp2350/platform.md)) |
