@@ -345,9 +345,8 @@ A contact is a button under the pointer: **left click presses it**, and
 releasing the mouse releases it.
 
 A shaft is a knob: **the wheel over it turns it, one detent a notch of
-120 wheel units** - a finer wheel's events (a touchpad's) are floored to
-whole notches by the viewer, so small steps forward turn nothing and
-small steps backward a whole detent, a defect of the viewer's -
+120 wheel units** - a finer wheel's events (a touchpad's) are added up
+and a notch taken out, either way round, each time a whole one is in -
 and it needs no selecting first - the wheel goes to the widget
 under the pointer, which is Qt's own behaviour and is also how a hand
 reaches for a knob on a real panel. The control under the pointer is

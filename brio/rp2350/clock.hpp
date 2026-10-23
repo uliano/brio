@@ -627,11 +627,11 @@ struct Lposc {
 
     /// A write to a protected register that carried the wrong password:
     /// write-to-clear, and the proof that a password is a password.
-    /// clear_bad_password() stores the bit WITHOUT the password, a store
-    /// docs/rp2350/powman.md measures to be dropped and to raise the
-    /// flag; Powman::clear_bad_password() carries it.
+    /// clear_bad_password() stores the bit WITH the password, as every
+    /// write to POWMAN must (docs/rp2350/powman.md measures a store
+    /// without it to be dropped and to raise this very flag).
     static bool bad_password() { return (POWMAN->BADPASSWD & POWMAN_BADPASSWD_BITS) != 0u; }
-    static void clear_bad_password() { POWMAN->BADPASSWD = POWMAN_BADPASSWD_BITS; }
+    static void clear_bad_password() { POWMAN->BADPASSWD = password | POWMAN_BADPASSWD_BITS; }
 
 private:
     static constexpr uint32_t password = 0x5AFEu << 16;

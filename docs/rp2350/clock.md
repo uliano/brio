@@ -207,9 +207,9 @@ that stopped.
 - `Lposc` - the low-power oscillator, in the always-on domain: `trim`
   (0..63), `mode`, `freq_khz_int` / `freq_khz_frac` / `freq_khz` (what
   the always-on timer is told the rate is) and `declared_hz`,
-  `bad_password` / `clear_bad_password` (the clear carries no password,
-  so by the measurement in [powman.md](powman.md) it raises the flag
-  instead: `Powman::clear_bad_password()` is the one that clears it).
+  `bad_password` / `clear_bad_password` (the clear carries the password,
+  as every write to POWMAN must: [powman.md](powman.md) measures what a
+  store without it meets).
 - `PllSys` and `PllUsb` (one `PllBlock` at two addresses): `init` with a
   `PllConfig`, `locked`, `unlocked`, `config` read back, `bypass` /
   `bypassed`, `stop` / `stopped`, and the lock-loss side this chip adds -

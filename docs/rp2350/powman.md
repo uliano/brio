@@ -180,12 +180,11 @@ is the answer.
   - the password - `bad_password`, `clear_bad_password`, and
     `probe_password()`, a write to a protected register that carries no
     password on purpose, aimed at BADPASSWD's own bit so that the answer
-    costs nothing either way. It is one of two such writes in the tree:
-    the other, `Lposc::clear_bad_password()` in `brio/rp2350/clock.hpp`,
-    stores the same bit with no password, and by the measurement under
-    "Bench findings" ("the password is a password") that store is
-    dropped and raises the flag it is named to clear - use
-    `Powman::clear_bad_password()`, which carries the password;
+    costs nothing either way. It is the one such write in the tree: every
+    other write to POWMAN carries the password, `Lposc::clear_bad_password()`
+    in `brio/rp2350/clock.hpp` among them (the measurement under "Bench
+    findings", "the password is a password", is what a store without it
+    would meet: dropped, the flag raised);
   - the interrupts - `Powman::Interrupt`'s four bits, `raw_interrupts`,
     `clear_raw`, `interrupt`, `interrupts`, `force`, `forced`, `pending`,
     and the two lines `irq_pow()` / `irq_timer()` (`isr_powman_pow` and

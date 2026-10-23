@@ -62,11 +62,9 @@
  * in this file goes through a private `write_protected` verb (Powman's,
  * and AonTimer's own copy of it), bar `probe_password()`, whose point is
  * to carry none. Outside this file, rp2350/clock.hpp's
- * low-power-oscillator verbs on its trim and its frequency registers
- * write POWMAN with the password too; its Lposc::clear_bad_password()
- * does not - it stores BADPASSWD's bit bare, which docs/rp2350/powman.md
- * measures to be dropped and to raise the flag, so the verb to clear it
- * is Powman::clear_bad_password(). The atomic aliases of 2.1.3 are
+ * low-power-oscillator verbs on its trim, its frequency registers and
+ * BADPASSWD write POWMAN with the password too. The atomic aliases of
+ * 2.1.3 are
  * unusable on the protected registers for the same reason: they carry
  * bits, not a password. Only the scratch registers, the four boot vector
  * words and the three interrupt registers are unprotected.

@@ -429,13 +429,22 @@ def main(argv):
             self.push_index = push_index
             self.per_detent = link.shaft_detent(index)
             self.pending = 0
+            self.wheel_rest = 0   # wheel units short of a notch, carried to the next event
             self.setFixedSize(92, 92)
             self.walker = QTimer(self)
             self.walker.timeout.connect(self.walk)
             self.walker.start(WALK_MS)
 
         def wheelEvent(self, e):
-            notches = e.angleDelta().y() // 120
+            # A mouse wheel sends 120 units a notch; a fine wheel or a
+            # touchpad sends a few units at a time, so the units are
+            # accumulated and a notch is taken out, towards zero, each time
+            # a whole one is in - either way round. Floor division would
+            # turn a small step forward into nothing and a small step
+            # backward into a whole detent.
+            self.wheel_rest += e.angleDelta().y()
+            notches = int(self.wheel_rest / 120)
+            self.wheel_rest -= notches * 120
             if notches:
                 # A NOTCH IS A DETENT, and a detent is several quadrature
                 # counts - so it is queued and WALKED, one count per
