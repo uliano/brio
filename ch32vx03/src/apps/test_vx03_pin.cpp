@@ -236,6 +236,18 @@ void ta_nibble() {
     bench.verdict("a configuring verb opens the port's clock gate (GPIOC closed, then PC13 "
                   "configured)",
                   closed && opened);
+    // A level asked as a port's first configuration: the gate closed by
+    // hand again, then output(true) on the same pad - the verb opens the
+    // gate BEFORE it stores the level, because a store behind a shut gate
+    // is lost (measured: OUTDR's bit 0 and the pad low when the store came
+    // first, pin.hpp's header), so OUTDR's bit and the pad must read 1.
+    Rcc::disable(Bus::pb2, rcc_pb2_gpioc);
+    LockPad::output(true);
+    const bool level_landed = (Port<'C'>::out() & (1UL << 13)) != 0u && LockPad::read();
+    LockPad::input();
+    bench.verdict("a level asked as a port's first configuration lands (the gate opened before "
+                  "the store: OUTDR's bit and PC13 high)",
+                  level_landed);
 
     // The reset state, on the one port this suite may reset: GPIOA
     // carries the console and the debug port, GPIOB the LED.

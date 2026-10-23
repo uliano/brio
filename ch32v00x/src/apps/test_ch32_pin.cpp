@@ -136,6 +136,17 @@ void ta_ports() {
     const bool opened = (rcc()->PB2PCENR & rcc_pb2_gpiob) != 0u;
     bench.verdict("a configuring verb opens the port's clock gate (GPIOB, closed, then PB0 configured)",
                   closed && opened);
+    // A level asked as a port's first configuration: the gate closed by
+    // hand again, then output(true) - the verb opens the gate BEFORE the
+    // level's store, a store behind a shut gate being lost (measured,
+    // pin.hpp's header), so OUTDR's bit and the pad read 1.
+    rcc()->PB2PCENR &= ~rcc_pb2_gpiob;
+    Pin<'B', 0>::output(true);
+    const bool level_landed = (Port<'B'>::out() & (1UL << 0)) != 0u && Pin<'B', 0>::read();
+    Pin<'B', 0>::input();
+    bench.verdict("a level asked as a port's first configuration lands (the gate opened before the store: "
+                  "OUTDR's bit and PB0 high)",
+                  level_landed);
     // The reset nibble is 0x4 (floating input) on every pin of a reset port.
     rcc()->PB2PRSTR |= rcc_pb2_gpiob;
     rcc()->PB2PRSTR &= ~rcc_pb2_gpiob;
@@ -151,6 +162,13 @@ void ta_ports() {
     const bool opened = (rcc()->PB2PCENR & rcc_pb2_gpioc) != 0u;
     bench.verdict("a configuring verb opens the port's clock gate (GPIOC, closed, then PC3 configured)",
                   closed && opened);
+    rcc()->PB2PCENR &= ~rcc_pb2_gpioc;
+    Pin<'C', 3>::output(true);
+    const bool level_landed = (Port<'C'>::out() & (1UL << 3)) != 0u && Pin<'C', 3>::read();
+    Pin<'C', 3>::input();
+    bench.verdict("a level asked as a port's first configuration lands (the gate opened before the store: "
+                  "OUTDR's bit and PC3 high)",
+                  level_landed);
     rcc()->PB2PRSTR |= rcc_pb2_gpioc;
     rcc()->PB2PRSTR &= ~rcc_pb2_gpioc;
     print(serial, "  GPIOC after its reset pulse: CFGLR=", hex(Port<'C'>::regs().CFGLR), " OUTDR=",

@@ -39,13 +39,14 @@
  * keeps its nibble through every configuring verb, silently.
  *
  * The level verbs open no gate: a pad is driven and read after its port
- * has been configured. output(level), and input(pull) with a pull, store
- * the level or the pull's direction through set() or clear() before the
- * configure() that opens the gate, so on a port nothing has opened yet
- * that store meets a shut gate. What the GPIO does with a store behind a
- * shut gate is not measured on this family (the CRC drops one in silence,
- * crc.hpp); a program that needs the level or the pull from a port's first
- * configuration calls Port<L>::clock_on() first.
+ * has been configured. A STORE INTO A PORT WHOSE GATE IS SHUT IS LOST -
+ * measured on the CH32V203C8T6: OUTDR's bit stays 0 and the pad stays low
+ * after a set() made before the port's first configuration, and lands
+ * after Port<L>::clock_on() (the CRC behind its shut gate drops a store
+ * the same way, crc.hpp). So output(level), and input(pull) with a pull,
+ * open the gate themselves before they store the level or the pull's
+ * direction through set() or clear(), and then configure: a pin's first
+ * configuration gives it the level asked, from the first instant.
  *
  * The block is the same on the three device classes (CH32V20x_D6,
  * CH32V20x_D8, CH32V30x_D8); what differs is how many ports a package
@@ -422,11 +423,12 @@ struct Pin {
     }
 
     /// Drive the level BEFORE the pin becomes an output, so the pad
-    /// never shows the other one for the width of two stores. The level's
-    /// store comes before the configure() that opens the gate: on a port
-    /// nothing has opened yet it meets a shut gate (the file header).
+    /// never shows the other one for the width of two stores - and the
+    /// port's gate before the level, because a store behind a shut gate
+    /// is lost (measured, the file header).
     static void output(bool level, PinDrive drive = PinDrive::push_pull,
                        PinSpeed speed = PinSpeed::fast) {
+        P::clock_on();   // a store into a port whose gate is shut is lost (measured, the file header)
         if (level) { set(); } else { clear(); }
         output(drive, speed);
     }
@@ -441,7 +443,9 @@ struct Pin {
             return;
         }
         // The pull direction IS the output data bit (see file header):
-        // write it first, then let the configuration take effect.
+        // the gate open, the bit written, then the configuration takes
+        // effect.
+        P::clock_on();
         if (pull == PinPull::up) { set(); } else { clear(); }
         P::configure(N, 0x8u);   // CNF 10, MODE 00: pulled input
     }

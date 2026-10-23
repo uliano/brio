@@ -59,14 +59,15 @@ of the output register and one store, each atomic against a handler
 that touches another pin of the port. A pad must be one the part has:
 port B exists on the CH32V006 alone (seven pins there, PB0 to PB6), and
 a `Pin` on it that a program uses does not compile for the CH32V003.
-And the level a pad starts at: `output(level)` writes the level and
-only then makes the pad an output, and `input(pull)` writes the pull's
-direction (its output-register bit) before the configuration, but in
-both the port's clock is opened by the configuring step, after that
-first store. On a port no earlier call has configured, whether a store
-into the still-gated port lands is not measured, so a program that
-needs the level or the pull from the first instant opens the port's
-gate first, `brio::Port<'D'>::clock_on()`.
+And the level a pad starts at: `output(level)` opens the port's clock,
+writes the level and only then makes the pad an output, and
+`input(pull)` opens the clock, writes the pull's direction (its
+output-register bit) and then configures, because a store into a port
+whose clock is still gated is lost - measured on the CH32V006K8U6 with
+PC3: a `set()` made before the port's first configuration leaves OUTDR's
+bit 0 and the pad low, the same store after `Port<'C'>::clock_on()`
+lands. The level verbs alone (`set()`, `clear()`, `toggle()`, `read()`)
+open no clock and are for a configured port.
 
 The rest of this page, in order: the documents of record; what the
 silicon does, the two parts' remap registers and MODE fields among it;
@@ -197,9 +198,14 @@ CH32V003F4P6's PC6/PC7), and a probe reading the echo would take it
 for the wire:
 
 - **The gate, the nibbles, the atomics**: a configuring verb opens the
-  port's clock; a reset port reads 0x4 in every nibble it has; the six
-  nibbles land as spelled; BSHR's two halves and BCR do what the
-  chapter says, `toggle()` flips.
+  port's clock, and a level asked as a port's first configuration lands
+  (the gate closed by hand, `output(true)` on PB0, OUTDR's bit and the
+  pad read 1: the verb opens the gate before the store, a store behind a
+  shut gate being lost - measured on the CH32V006K8U6; the CH32V003's
+  branch of the same letter, on PC3, is compiled and not run); a reset
+  port reads 0x4 in every nibble it has; the six nibbles land as
+  spelled; BSHR's two halves and BCR do what the chapter says,
+  `toggle()` flips.
 - **The pulls**: four pads read high pulled up and low pulled down,
   and the direction is OUTDR's bit under nibble 0x8.
 - **The software trigger** raises the flag of a line in INTENR, none

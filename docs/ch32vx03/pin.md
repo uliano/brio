@@ -75,19 +75,17 @@ What decides whether that works:
   register, is masked (pfic.hpp's `InterruptGuard`). `Port::out_write()`
   is one store, but of OUTDR whole: it takes every pin of the port with
   it.
-- **The gate, and a level asked before the first configuration.** The
-  level verbs open no gate: a pad is driven and read after its port
-  has been configured. `output(level)`, and `input(pull)` with a pull,
-  store the level or the pull's direction through `set()` or `clear()`
-  before the `configure()` that opens the gate (pin.hpp), so on a port
-  nothing has configured yet that first store meets a shut gate.
-  What the GPIO does with it is not measured on this family; the CRC
-  behind its shut gate drops a store in silence ([crc.md](crc.md),
-  measured), and a pull whose OUTDR bit never landed pulls the way that
-  bit already stood. A program that needs the level, or the pull, right
-  from a port's first configuration opens the gate first, with
-  `Port<'A'>::clock_on()` or any configuring verb of another pin of that
-  port.
+- **The gate, and a level asked before the first configuration.** A
+  store into a port whose gate is shut is lost: measured on the
+  CH32V203C8T6 with PB5, a `set()` made before the port's first
+  configuration leaves OUTDR's bit 0 and the pad low, while the same
+  store after `Port<'B'>::clock_on()` lands (the CRC behind its shut
+  gate drops a store the same way, [crc.md](crc.md)). So the level verbs
+  `set()`, `clear()`, `toggle()` and `read()` are for a configured port,
+  and `output(level)` and `input(pull)` with a pull open the gate
+  themselves before they store the level or the pull's direction and
+  configure the pin: a pin's first configuration gives the level asked
+  from the first instant, and a pull whose bit is written lands.
 - **The lock is silent.** A pin frozen by the configuration lock keeps
   its nibble through every configuring verb, which writes and is
   ignored (measured, below), and stays frozen until the next reset.
@@ -177,7 +175,11 @@ registered, `e` last because it locks PC13 until the next reset).
 - **A port's clock gate is closed out of reset** and every configuring
   verb opens it - port E's gate, IOPEEN, the LQFP100's alone, like the
   other four. Measured on ports C, D and E: the gate closed by hand,
-  then the pads configured, then the gate reads open.
+  then the pads configured, then the gate reads open. And a level asked
+  as a port's first configuration lands: the gate closed by hand again,
+  `output(true)` on PC13, OUTDR's bit and the pad read 1 (the verb opens
+  the gate before the store; a store behind a shut gate is lost, measured
+  on the CH32V203C8T6 as "What the silicon does" says).
 - **The unbonded pins of a port do not read the manual's reset value.**
   Measured on the CH32V203C8T6's LQFP48, whose port C brings out three
   pins: after a peripheral reset pulse GPIOC reads CFGLR = 0x00000000
@@ -612,13 +614,3 @@ Implemented but not bench-verified, each with what would measure it:
 - **The configuration lock on a whole mask**, and what a peripheral
   reset pulse does to a standing lock: the suite locks one pin of one
   port, which is all it can afford when the lock stands until a reset.
-- **A level or a pull asked as a port's first configuration.**
-  `output(level)` and `input(pull)` store the level, or the pull's
-  direction, through `set()` or `clear()` before the `configure()` that
-  opens the port's clock gate ([pin.hpp](../../brio/ch32vx03/pin.hpp)),
-  so on a port nothing has configured yet that first store meets a shut
-  gate. Whether the GPIO drops a store behind its shut gate, as the CRC
-  does behind its own ([crc.md](crc.md)), is not measured; what would
-  measure it is a fresh boot whose first configuration of a port is
-  `output(true)` or `input(PinPull::up)`, with OUTDR and the pad read
-  after it.

@@ -324,9 +324,16 @@ public:
     using Status = typename Base::Status;
 
     /// sizeof...(Voters) + 3 events deep (kernel/event_queue.hpp's
-    /// depth: places while a dispatch runs). One request, every voter's
-    /// answer and one request re-posted by the wake path come to
-    /// sizeof...(Voters) + 2; the depth is one place more than that count.
+    /// depth: the events that can WAIT while one is being dispatched).
+    /// What can wait during a round while a vote is dispatched: the other
+    /// voters' answers (sizeof...(Voters) - 1), the request the wake path
+    /// re-posts, and a second requester's request (refused when served,
+    /// collecting() below, but a queued event until then): that is
+    /// sizeof...(Voters) + 1, and the request that opened the round is no
+    /// longer in the queue. The depth keeps two places of margin, one for
+    /// each further hand on the manager that nothing here forbids (a third
+    /// requester, a lock's event); a program that counts its requesters
+    /// could shrink it, and no suite has needed the margin.
     static inline EventQueue<Event, sizeof...(Voters) + 3, P> queue;
 
     /// Disarms the site and starts between rounds, every lock count

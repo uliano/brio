@@ -51,10 +51,11 @@
  * The port clock is opened by every configuring verb: a Pin that is
  * configured works with no separate clock step to remember - with
  * one order to know: output(level) and input(pull) store the level or
- * the pull's direction before the configuring step opens the clock, so
- * on a port no earlier call has configured that first store meets a
- * gated port, and whether it lands is not measured; a program that
- * needs it from the first instant calls Port<L>::clock_on() first.
+ * the pull's direction, and open the port's clock BEFORE that store: a
+ * store into a port whose clock is still gated is lost (measured on the
+ * CH32V006K8U6: OUTDR's bit 0 and the pad low after a set() made before
+ * the port's first configuration, both 1 after Port<L>::clock_on()), so
+ * the gate comes first and the level asked holds from the first instant.
  * Nothing here turns a clock back off - that would be a decision about
  * the whole port, and this file only speaks about pins.
  *
@@ -259,11 +260,11 @@ struct Pin {
 
     /// Drive the level before the pin becomes an output, so the pad
     /// never shows the other one for the width of two stores. The level's
-    /// store comes before output() opens the port's clock: on a port no
-    /// earlier call has configured, it is a store into a gated block,
-    /// and whether it lands is not measured - Port<L>::clock_on() first
-    /// makes it a store into an open one.
+    /// store comes after the port's clock is opened and before output()
+    /// configures the pin: a store into a gated block is lost (measured,
+    /// the file header), so the gate comes first.
     static void output(bool level, PinDrive drive = PinDrive::push_pull) {
+        P::clock_on();   // a store into a port whose gate is shut is lost (measured, the file header)
         if (level) { set(); } else { clear(); }
         output(drive);
     }
@@ -279,7 +280,9 @@ struct Pin {
             return;
         }
         // The pull direction is the output data bit (the file header):
-        // write it first, then let the configuration take effect.
+        // the gate open, the bit written, then the configuration takes
+        // effect.
+        P::clock_on();
         if (pull == PinPull::up) { set(); } else { clear(); }
         P::configure(N, 0x8u);   // CNF 10, MODE 0: pulled input
     }
