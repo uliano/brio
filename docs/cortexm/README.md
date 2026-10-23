@@ -15,7 +15,7 @@ STM32G0 and the RP2040), the M4 of the STM32F4 and the M33 half of the
 RP2350: one programmer's model over the ARMv6-M, ARMv7-M and ARMv8-M
 architectures.
 
-## The four files
+## The five files
 
 - **`cortexm/nvic.hpp`**: the NVIC and PRIMASK. `InterruptGuard` (the
   critical section every brio platform on these cores rides on), the
@@ -53,6 +53,25 @@ architectures.
   them; the count is never written; `now()` is one load; the file is
   refused by `static_assert` below the M3. On the STM32F4, measured, it
   counts through a WFI whatever DBG_SLEEP holds (`stm32f4/dwt.hpp`).
+- **`cortexm/schedule.hpp`**: the scheduling request of the preemptive
+  kernel, Rubato ([design/kernel.md](../design/kernel.md), "Rubato"),
+  and the place its scheduler runs. `request_scheduler()` pends PendSV
+  (PENDSVSET, then DSB and ISB, so a request from thread mode is taken
+  before the next instruction and one from a handler at the handler's
+  exit); `scheduler_init()` puts PendSV at the lowest priority the core
+  implements, below every peripheral line; `scheduler_exception<K>()`,
+  the naked body a program binds to `PendSV_Handler`, builds a second
+  exception frame and returns through it into `scheduler_thread<K>()`,
+  which runs the kernel's `activate()` in thread mode with PendSV no
+  longer active, so an interrupt's post preempts a dispatch at any
+  depth; `scheduler_return()`, the body bound to `SVC_Handler`, steps
+  over the SVC's frame and returns into the real one. The frames, the
+  FPU's lazy context and EXC_RETURN's bits are the header's account.
+  The assembly is the ARMv6-M subset, so one source serves the M0+, the
+  M4 and the M33: run on the STM32F4 (`stm32f4/platform.hpp`'s
+  `Stm32f4RubatoPlatform`, measured on the Nucleo-F446RE), compiled by
+  the family fixtures of the SAM C21, the STM32G0, the RP2040 and the
+  RP2350's Arm half and not yet run there.
 
 ## Why the stratum exists
 

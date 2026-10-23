@@ -19,8 +19,11 @@
  * NESTS OVER ANOTHER, and this family keeps it the way the SAM C21
  * does: every NVIC line at the same priority (the reset value, 0),
  * PRIMASK the one mask, `Nvic::priority()` the one door and no driver
- * opens it. BASEPRI is what a preemptive kernel would build on; that
- * kernel is another type and another day.
+ * opens it. The preemptive kernel, Rubato, does not build on BASEPRI
+ * either: its scheduler rides PendSV at the lowest priority
+ * (cortexm/schedule.hpp, stm32f4/platform.hpp's Stm32f4RubatoPlatform),
+ * below every peripheral line, and the critical section stays PRIMASK;
+ * a zero-latency tier above the kernel on BASEPRI is a later decision.
  *
  * It sits at the BOTTOM of the stm32f4/ stratum: ticker.hpp and
  * platform.hpp both need the guard, and the platform includes the
