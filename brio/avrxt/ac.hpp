@@ -2,12 +2,59 @@
  * ac.hpp
  *
  * The analog comparators (AC) of the AVR DA/DB (DS40002247B ch. 32) and
- * the AVR EA (DS40002443A ch. 30) as brio sees them - one IP, the EA's
- * with two instances, a fifth positive and a fourth negative pin, two
- * power profiles and the window pairing ACn+1 only - see
- * docs/avrxt/ac.md:
+ * the AVR EA (DS40002443A ch. 30): what a program uses to learn that an
+ * analog input crossed a level, or on which side of a band it sits,
+ * without running a conversion, and to hand that level to a pin, an
+ * event channel or the CCL. One IP on the three dies; the EA's has two
+ * instances, a fifth positive and a fourth negative pin, two power
+ * profiles and the window pairing ACn+1 only. docs/avrxt/ac.md is the
+ * document.
  *
- *  RESOURCE - Ac<n>, n = 0..2 (0..1 on the EA): a config struct owns the
+ * The smallest use, a threshold at 1.000 V on PD6 (AINP3 of every
+ * comparator) reported to an active object (a component of the program
+ * with its own event queue, served one event at a time by the kernel);
+ * Monitor, its event Crossed and the platform P are the program's own:
+ *
+ *     using SysClock = brio::Clock<brio::ClockSource::crystal, 24'000'000>;
+ *     using Level = brio::Threshold<brio::Ac<0>>;
+ *     ISR(AC0_AC_vect) { brio::post<Monitor>(Crossed{Level::crossed()}); }
+ *
+ *     int main() {
+ *         SysClock::init();
+ *         Level::init(brio::AcPos::ainp3, 1000, brio::Ref::v2048);
+ *         sei();
+ *         brio::Tenuto<P, Monitor>::run();
+ *     }
+ *
+ * Threshold::init() writes the shared reference VREF.ACREF, the DACREF
+ * code for 1000 mV, the medium hysteresis, the sense of both edges and
+ * the CMP interrupt enable; it returns false, writing no register, for
+ * a reference whose millivolts it does not know, a level above the
+ * reference or an input pin this package does not bond. The comparator
+ * itself needs no rate from the clock task.
+ *
+ * Who calls what, and from where. init<cfg>(), init(cfg),
+ * Threshold::init(), Window::init(), window<partner>() and window_off()
+ * are setup verbs: main() before sei(), or an active object's handler
+ * that reconfigures; the init verbs read-modify-write PINCTRL and
+ * PORTMUX.ACROUTEA, which other drivers share, with no guard, so none
+ * of them is for an interrupt handler. cmp(), Threshold::crossed() and
+ * Window::changed() are interrupt bodies, called from the program's
+ * ISR() for the comparator's vector (Window's: Lower's) and from
+ * nowhere else; each clears the CMP flag and reads the state, and an
+ * interrupt body runs to completion, no other handler interrupting it.
+ * The interrupt bodies write STATUS alone, so enable(), disable(),
+ * sense() and enable_interrupt() - unguarded read-modify-writes of
+ * CTRLA and INTCTRL - are safe from main and from an active object's
+ * handler. state(), flag(), window_state(), Threshold::above(),
+ * Window::state() (one load) and dacref(), threshold_mv(),
+ * Threshold::set_mv(), clear_flag() (one store) may be called from any
+ * context. Nothing here waits, nothing masks interrupts, and no buffer
+ * is lent: a new input, reference or DACREF code settles on its own
+ * time (below), and a state read before that may be stale.
+ *
+ *  The resource - Ac<n>, n = 0..2 (0..1 on the EA), a monostate (a
+ *  class whose state is static, with no instances): a config struct owns the
  *  inputs (one of four positive pins - five on the EA - one of three
  *  negative pins - four on the EA - or DACREF), the DACREF
  *  code, hysteresis, power profile, inversion, initial value, output
@@ -16,9 +63,11 @@
  *  state(), dacref(code) / threshold_mv(mv), the interrupt enable and
  *  the ISR body cmp(), the OUT event generator, the window pairing.
  *  The reference of DACREF is the comparators' shared VREF.ACREF: the
- *  config names it (`Ref`, vref.hpp) like the DAC's config does.
+ *  config names it (`Ref`, vref.hpp) like the DAC's config does, and an
+ *  init() with DACREF as its negative input rewrites it for every
+ *  comparator.
  *
- *  TASKS - what an application names:
+ *  The tasks - what an application names:
  *    Threshold<Ac>     "the input crossed V": DACREF from millivolts,
  *                      an interrupt per crossing direction
  *    Window<Ac, Ac>    "the input is above / inside / below": two
@@ -34,7 +83,7 @@
  *    hysteresis 0 / 10 / 20 / 30 mV, response 50 ns rising and 150 ns
  *    falling at profile 0 on the EA; the AC and (if internal) the reference take their
  *    start-up after enable, a new input pin or reference wants settling
- *    - INITVAL holds the output meanwhile;
+ *    - INITVAL holds the output meanwhile, and init() does not wait;
  *  - inputs on the 48-pin part: AINP0 PD2 (all), AINP1 PE0/PD3/PD4,
  *    AINP2 PE2/PD4/PE1, AINP3 PD6 (all: the DAC pin), AINN0 PD3/PD5/PD7,
  *    AINN1 PD0 (all), AINN2 PD7 (all) for AC0/AC1/AC2; on the EA also
@@ -48,12 +97,15 @@
  *    sense both / falling / rising;
  *  - window mode: ACn pairs with ACn+1 or ACn+2 (WINSEL; ACn+1 only on
  *    the EA, which has no UPSEL2), both MUXPOS on
- *    the same pin, the partner holds the UPPER limit on its negative
+ *    the same pin, the partner holds the upper limit on its negative
  *    input and ACn the lower; WINSTATE reads above/inside/below and
  *    INTMODE picks which state (above/inside/below/outside) raises the
  *    interrupt and the event (CMPSTATE then means "matches");
  *  - RUNSTDBY keeps it alive in standby, pin, event and interrupt
- *    included, without CLK_PER.
+ *    included, without CLK_PER (32.3.5; the CTRLA field description,
+ *    32.5.1, says interrupts and status flags are not updated with the
+ *    clock stopped - the bench measured the interrupt waking a standby,
+ *    docs/avrxt/ac.md).
  */
 
 #pragma once
@@ -309,6 +361,12 @@ template <typename A>
 struct Threshold {
     Threshold() = delete;
 
+    /// Configure A as a threshold on `pin` at `mv` millivolts of `ref`
+    /// (`ref_known_mv` gives the millivolts of Ref::vdd or Ref::vrefa),
+    /// DACREF as the negative input, then enable the CMP interrupt when
+    /// `interrupt`. False, writing no register, when the reference's
+    /// millivolts are unknown, `mv` is above them, or A::init() refuses
+    /// the configuration. A setup verb (main or an active object).
     static bool init(AcPos pin, uint16_t mv, Ref ref = Ref::v1024, uint16_t ref_known_mv = 0,
                      AcHysteresis hyst = AcHysteresis::medium, AcSense sense = AcSense::both,
                      bool interrupt = true) {
@@ -324,6 +382,8 @@ struct Threshold {
     static void set_mv(uint16_t mv) { A::threshold_mv(mv, ref_mv_); }
     static uint16_t mv() { return ac_dacref_mv(A::regs().DACREF, ref_mv_); }
     static bool above() { return A::state(); }
+    /// Interrupt body for A's vector: clears the CMP flag and returns the
+    /// state, true = above the threshold.
     [[gnu::always_inline]] static bool crossed() { return A::cmp(); }
 
 private:
@@ -340,6 +400,14 @@ struct Window {
     static_assert(Upper::index == Lower::index + 1 || Upper::index == Lower::index + 2,
                   "Window: the upper comparator is ACn+1 or ACn+2 of the lower");
 
+    /// Configure Upper at `high_mv` and Lower at `low_mv` on the same
+    /// `pin`, pair them, and enable Lower's interrupt when `interrupt`.
+    /// False, writing no register, when the reference's millivolts are
+    /// unknown, `high_mv` is above them or `low_mv` above `high_mv`. The
+    /// two comparators' own init() answers are not checked: for an input
+    /// pin this package does not bond each writes nothing, the window
+    /// and interrupt bits are written all the same, and the answer is
+    /// true. A setup verb.
     static bool init(AcPos pin, uint16_t low_mv, uint16_t high_mv, AcWindowSense when,
                      Ref ref = Ref::v1024, uint16_t ref_known_mv = 0,
                      AcHysteresis hyst = AcHysteresis::medium, bool interrupt = true) {

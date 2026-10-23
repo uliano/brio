@@ -1,12 +1,99 @@
 # SERCOM SPI (SAM C21)
 
-Documents of record: SAM C20/C21 data sheet DS60001479M ch. 32 (over the
+This document is for a programmer who needs an SPI bus on the SAM C21:
+a host talking to one or more devices (a sensor, a flash chip, a
+display) through the bus arbiter, or this chip answering as a client
+to another board's host. `samc21/spi.hpp` is the SERCOM's SPI mode in
+three parts. `Spi<n>` is the resource, one function per register fact
+of one SERCOM instance. `SpiHost<n, pads, ...>` is the transfer engine
+`util/spi_bus.hpp` drives, a task (in brio, a driver layer with state
+of its own, served from its peripheral's interrupt) whose Request
+carries the same field names on every target, so a device client reads
+unchanged on any of them. `SpiClient<n, pads>` is the client role. The
+arbiter, `SpiBus` ([design/spi-bus.md](../design/spi-bus.md) is the
+model), is an active object (a component of a brio program with its own
+event queue, served one event at a time by the kernel,
+[docs/learn/introduction.md](../learn/introduction.md)) that owns the
+bus on behalf of every other active object: a client posts one Request
+describing one whole transaction and gets one `SpiDone` reply when it
+is over, and the arbiter runs the transactions one at a time, in the
+order they arrived.
+
+The smallest use, a device client on the arbitrated bus, is the first
+block of "How to use" below:
+
+```cpp
+using SpiHw = brio::SpiHost<1, my_pads>;
+using SpiBus = brio::SpiBus<SpiHw, P>;
+// in main: SpiHw::init(clock); kernel.init_all(); ...
+// ISR glue:
+extern "C" void SERCOM1_Handler() {
+    if (SpiHw::isr()) { brio::post<SpiBus>(brio::TransferDone{brio::spi_ok}); }
+}
+// from an AO: fill a Request (cs, buffers as lend<Lease::reply>(...),
+// baud = *SpiHw::baud_for(6'000'000), mode), post it to SpiBus, and
+// consume the SpiDone reply.
+```
+
+Line by line: `SpiHw` names the engine over SERCOM1 with the pads
+`my_pads` (an `SpiPads` constant naming the four SERCOM pads and the
+pins they are bonded to, "Types and verbs" below), every other template
+argument at its default - generator 0, the SERCOM's core clock at the
+CPU rate, and `InFlash`, no path placed in SRAM; `SpiBus` is the arbiter
+over that engine on the platform `P` ([platform.md](platform.md)), with
+`util/spi_bus.hpp`'s defaults of four pending requests and no timeout;
+`SpiHw::init(clock)` takes the clock task's tag ([clock.md](clock.md))
+and brings the instance up as a host, and the rest of `main()` starts
+the kernel with `SpiBus` in its list of active objects (`run()` calls
+every active object's `init()`, which is what `init_all()` names); the
+`extern "C"` function is the SERCOM1 interrupt handler, as in C, under
+the name the crt's vector table gives it, and `SpiHw::isr()` answers
+true when an interrupt-driven transaction has just completed, the edge
+on which the handler posts `TransferDone` to the arbiter; and an active
+object (AO) fills a `Request` - the chip select as a `PinRef`, the
+buffers lent with `lend<Lease::reply>(...)`, the BAUD register value
+`baud_for()` computes for the device's 6 MHz, the mode - posts it to
+`SpiBus` and receives `SpiDone` with the status (`spi_ok`, or
+`spi_stalled` when a polled request's spin budget ran out).
+
+What decides correctness even there. `init()` comes after the clock
+task's, as its comment asks: the BAUD values `baud_for()` answers, the
+optional SCK ceiling and the chip-select delay are computed from the
+rate the clock type claims, not read from the hardware. `init()` answers
+false when a stated ceiling cannot be produced at this clock or a
+synchronization of the peripheral did not complete. The request's
+buffers are lent: the client leaves them untouched and in scope from the
+post until its `SpiDone` arrives, whatever the status, and nothing
+checks it. The chip select is an ordinary GPIO the device client owns:
+`init()` hands DO, SCK and (when the pads name one) DI to the SERCOM and
+nothing else, so the client configures its select pin as an output,
+high, before its first request (the engine drives it low around each
+transaction). A request with `polled = false` (the default) runs on the
+interrupt, so the SERCOM's vector must be bound to `isr()` as above; an
+unbound vector is a weak alias of the crt's silent spin, where the
+program stops at the first character. A polled request completes inside
+`start()`, silences the SERCOM's own interrupt and holds the arbiter's
+dispatch, and with it every other active object, for the whole transfer,
+bounded by one spin budget; global interrupts stay enabled.
+
+The page is long because the chapter is. In order: the documents of
+record; what the silicon does (the one register set, the DOPO triple,
+enable protection, two characters in flight, a client's three-SCK-cycle
+rule, a mode change as a CPOL flip, TXC, hardware SS, the timing table
+against the bench, the absent event surface, the errata); the types and
+verbs; how to use, one example per use; the bench findings, most of the
+page; and what is not covered.
+
+## Documents of record
+
+SAM C20/C21 data sheet DS60001479M ch. 32 (over the
 shared SERCOM ch. 30) and errata DS80000740S 1.17.x. Driver:
 `samc21/spi.hpp` over `Sercom<n>`'s instance facts ([sercom.md](sercom.md)
 owns the address ladder, the clocks and the NVIC line - one table,
 shared by every personality). Family fixture
 `test/family_samc21/spi.cpp` + nine negatives; bench suite `test_samc_spi`
-(9 letters, two-board: the peer board runs `spi_peer` on an AVR64EA48,
+(9 letters - a letter is one command key of the suite's console and the
+group of verdicts it runs - two-board: the peer board runs `spi_peer` on an AVR64EA48,
 an AVR DA/DB or a second SAM C21, the suite asks ident and does not care -
 commanded in band over the bus under test with the `spi_link.hpp` wire
 format, one source file serving both architectures - except letters h
@@ -24,7 +111,7 @@ pack that ever separated them fails the build.
 
 **DOPO is a triple, not a pad.** CTRLA.DOPO's four codes each fix a
 whole (DO, SCK, SS) assignment (32.8.1); the three signals cannot be
-placed independently. And which signal is which depends on the ROLE
+placed independently. And which signal is which depends on the role
 (table 32-2): DO is MOSI on a host and MISO on a client, so one fixed
 four-wire harness is a host on one row and a client on another - two
 different DOPO codes, not one code with directions flipped. The bench
@@ -33,16 +120,16 @@ SCK PAD[3]) and a client on row 0x1 (DO PAD[2], SCK PAD[3]), the two
 rows whose SCK pad is the XCK pad of a USART with TxD on PAD[2] (TXPO
 0x1, 31.8.1) - so the same wires serve this SERCOM's USART against an
 AVR's, TxD on the MISO wire and XCK on the SCK one. The header's enumerator
-naming trap: `DOPO_PAD1_Val` names CODE 0x1, which puts DO on PAD[2] -
+naming trap: `DOPO_PAD1_Val` names code 0x1, which puts DO on PAD[2] -
 the same trap TXPO has.
 
 **Enable protection and the three SYNCBUSY bits.** CTRLA, CTRLB, BAUD
 and ADDR are enable-protected (32.6.2.1): a store while the instance
-runs is DISCARDED in silence - measured (a DIPO flip and a BAUD store
+runs is discarded in silence - measured (a DIPO flip and a BAUD store
 under a running host change nothing). SYNCBUSY has SWRST, ENABLE and
 CTRLB (32.8.8); a CTRLB write while SYNCBUSY.CTRLB stands is an APB
-error, so every CTRLB write in the driver waits first. ENABLING THE
-PERIPHERAL ITSELF RAISES SYNCBUSY.CTRLB (32.8.2's RXEN note): the
+error, so every CTRLB write in the driver waits first. Enabling the
+peripheral itself raises SYNCBUSY.CTRLB (32.8.2's RXEN note): the
 receiver is really up only once that second synchronization clears,
 which is why `Spi<n>::enable()` waits out both.
 
@@ -61,11 +148,11 @@ written to DATA moves to the shift register and DRE rises once it has -
 three CLK_SERCOM_APB cycles after DATA empties (32.6.2.6.2's last
 sentence) - and RXC rises in the clock cycle its last bit is shifted in
 (32.6.2.6.1). So a host that writes k + 1 on DRE and reads k on RXC
-keeps the bus busy between characters, and keeps exactly TWO characters
+keeps the bus busy between characters, and keeps exactly two characters
 in flight - which is the receive buffer's depth: a reader held off for
 longer than a character (the polled loop by any handler of the image,
 the pump's handler by a late entry) lets k complete into the buffer and
-then k + 1, and then the bus STOPS for want of a k + 2 nobody wrote.
+then k + 1, and then the bus stops for want of a k + 2 nobody wrote.
 Nothing can overflow the receiver that way, at any rate - measured:
 STATUS.BUFOVF read after every polled and every pumped run of the
 bench's letter e, at 12 and 3 MHz, under the console's and the tick's
@@ -74,16 +161,16 @@ reading k leaves the bus idle for the whole turnaround: a fifth slower
 at 3 MHz and twice as slow at 12 (the bare loops, below).
 
 **A client's DATA write needs three SCK cycles to reach the shifter**
-(32.6.2.6.2), and those cycles ELAPSE ONLY WHILE SCK RUNS. So an answer
+(32.6.2.6.2), and those cycles elapse only while SCK runs. So an answer
 written in the inter-character gap - where a poll loop reacting to RXC
-lands - matures mid-character and reaches the wire ONE CHARACTER LATE.
+lands - matures mid-character and reaches the wire one character late.
 Measured: the host reads the preloaded first answer exactly, then the
 whole stream slips by one (11 of 12 mismatched). The working client pump
-is ONE AHEAD: preload b0 (CTRLB.PLOADEN puts a write made while SS is
+is one ahead: preload b0 (CTRLB.PLOADEN puts a write made while SS is
 high straight into the shifter, 32.6.3.2), park b1 in DATA at once, and
 on every character boundary write the next-plus-one. So driven, the peer
 read this client's 12-character answer stream byte-exact from the first
-character. AND THE BOUNDARY IS A WINDOW, NOT A GAP: DRE rises when the
+character. And the boundary is a window, not a gap: DRE rises when the
 character before has moved to the shifter, three CLK_SERCOM_APB cycles
 after the boundary (32.6.2.6.2's last sentence), and the next answer must
 be in DATA with three SCK cycles of the current character left - so it
@@ -95,15 +182,15 @@ client run is written to (below).
 **A mode change is a CPOL flip on the wire.** Reprogramming a host from
 mode 0/1 to mode 2/3 moves SCK's idle level, and that transition is one
 extra edge: landed inside an open select window, a selected client
-counts it into the character - measured as an exact ONE-BIT SLIP in both
+counts it into the character - measured as an exact one-bit slip in both
 directions, on modes 2 and 3 only. The engine's own `start()` applies
-the request's mode BEFORE asserting the request's cs, so an
+the request's mode before asserting the request's cs, so an
 engine-owned window never sees it; a caller framing CS by hand must call
 `SpiHost::prime()` first.
 
-**TXC closes the LAST frame.** "In Host mode, this flag is set when the
+**TXC closes the last frame.** "In Host mode, this flag is set when the
 data have been shifted out and there are no new data in DATA" (32.8.6) -
-measured to mean the END of the last frame and not its start: a
+measured to mean the end of the last frame and not its start: a
 write-only block of n frames fed back to back by a DMA channel (a
 measurement of the silicon, not a path of this driver), timed from the
 channel's enable to TXC in core cycles, takes n frames and a constant at
@@ -129,23 +216,23 @@ DO drives (32.6.3.4): a host then reads its own transmit line back -
 32 of 32 bytes identical on the bench, and nine-bit characters
 (CTRLB.CHSIZE = 9) loop 0x1FF and 0x100 back whole.
 
-**Table 45-59 agrees with the bench, and it is the STRICTER of the
+**Table 45-59 agrees with the bench, and it is the stricter of the
 two.** The SPI timing table (simulation values, note 1: not covered by
 production test) prices the four directions at VDD > 4.5 V: host
-TRANSMISSION tSCK >= 2 x (tMOV 17.1 ns + the device's input setup) -
+transmission tSCK >= 2 x (tMOV 17.1 ns + the device's input setup) -
 about 29 MHz against an ideal device, so the 24 MHz TX stream a
-client received byte-exact is in spec; host RECEPTION tSCK >= 2 x (tMIS
-50.7 ns + the device's output delay) - about 9.9 MHz against an IDEAL
+client received byte-exact is in spec; host reception tSCK >= 2 x (tMIS
+50.7 ns + the device's output delay) - about 9.9 MHz against an ideal
 device and 6..7 MHz against a real one, so the loop-back's measured
-12 MHz exact EXCEEDS the paper (bench-true on this die at room
+12 MHz exact exceeds the paper (bench-true on this die at room
 temperature, not a design number) and the 24 MHz loop-back failure is
 attributed: 101 ns of receiver requirement against a 41 ns period is
-the RECEIVER, by the datasheet's own arithmetic. (The 24 MHz stream
+the receiver, by the datasheet's own arithmetic. (The 24 MHz stream
 and the 12 and 24 MHz loop-back rungs were measured with a DMA-fed data
 phase, back to back: facts of the silicon, not paths of this driver.)
-A CLIENT's response
-path carries tSOSS (~41 ns) plus the far end's setup plus TWO APB
-PERIODS (41.7 ns at 48 MHz), which lands the paper ceiling for client
+A client's response
+path carries tSOSS (~41 ns) plus the far end's setup plus two APB
+periods (41.7 ns at 48 MHz), which lands the paper ceiling for client
 transmission at a few MHz; measured against an AVR64EA48 host it holds
 at 10 MHz, the fastest that host clocks, and the client's polled runs
 reach it back to back (bench findings). Design guidance, then: writes to
@@ -174,9 +261,9 @@ exactly as 32.6.2.2 promises; configure() still writes DBGCTRL last, which is
 correct under either answer. 1.17.3 (a preloaded client's first
 character is a dummy unless the host holds SS low for the whole
 transmission) and 1.17.20 (a preloaded character costs standby current)
-are LIVE, cannot be fixed on this side of the wire, and are stated on
+are live, cannot be fixed on this side of the wire, and are stated on
 `SpiConfig::preload`. 1.17.1 (spurious SSL at enable with SSDE + RXEN)
-is REVISION B ONLY - named in the driver precisely because it is the one
+is revision B only - named in the driver precisely because it is the one
 item a reader would apply without checking the row.
 
 ## Types and verbs
@@ -189,10 +276,10 @@ item a reader would apply without checking the row.
   the flags, STATUS, DATA. The baud arithmetic is pure and pinned by
   static_asserts: BAUD = f_ref/(2 f_SCK) - 1, eight bits, rounded so the
   produced rate is never above the request.
-- **`SpiPads`** - the four pads AND the four pins (the `UartPads`
+- **`SpiPads`** - the four pads and the four pins (the `UartPads`
   shape: the pad side is checked exactly - `spi_dopo_for()` answers
   with the one DOPO row or nothing - and the pin side as far as a header
-  can). Role legality is checked IN THE ROLE (`spi_role_probe`), because
+  can). Role legality is checked in the role (`spi_role_probe`), because
   the same harness is legal as a host and illegal as a client on the
   same row.
 - **`SpiHost<n, pads, generator, Placement>`** - the engine
@@ -203,32 +290,32 @@ item a reader would apply without checking the row.
   microseconds between the CS assertion and the first clock, spent
   spinning in start() in main context on samc21/delay.hpp's rate, which
   `rebase()` keeps current so it follows a clock change; measured
-  spending 100 asked as 101..103). THE REQUEST IS FORTY BYTES AND NO
-  PADDING on this family - the two pin references, the three spans, the
+  spending 100 asked as 101..103). The Request is forty bytes and no
+  padding on this family - the two pin references, the three spans, the
   lengths and the settings packed, the reply capsule last; the field
-  names are every target's, the order this family's - and it is LENT
-  FOR THE CALL (util/bus_master.hpp): a POLLED request is read through
+  names are every target's, the order this family's - and it is lent
+  for the call (util/bus_master.hpp): a polled request is read through
   the reference and copied nowhere, an asynchronous one is copied once
   into the engine right before its first character goes out, forty bytes
   of inline load-multiple/store-multiple (the compiler expands a struct
   assignment of that size inline where it called memcpy for forty-eight,
   and calls memcpy for a built-in copy of thirty-two: the size is pinned
   by a static_assert for that reason). `apply()` compares the mode and
-  the rate as ONE half-word against the applied one and reaches the
+  the rate as one half-word against the applied one and reaches the
   disable/enable pair only on a change, so a run of requests to one
   device costs no register write at all; the SCK ceiling clamps the
   rate as one byte compare. `start()`/`isr()` per the bus_master
   contract, `baud_for()`/`sck_hz()` and the optional bus-wide SCK ceiling
   that `rebase()` re-resolves, `prime()` for callers that frame CS by
-  hand. THE POLLED LOOP is the chapter's host sequence a character
-  AHEAD: the command phase and any data phase with an rx write k + 1 on
+  hand. The polled loop is the chapter's host sequence a character
+  ahead: the command phase and any data phase with an rx write k + 1 on
   DRE and read k on RXC (two in flight, the receive buffer's depth - the
   silicon fact above, so no rate threshold and no hazard under the
   image's interrupts); a transmit-only data phase (a null rx: a
   display's pixels) paces on DRE alone, never reads the answers, ends on
-  TXC - which closes the LAST character (below) - and drains the receive
+  TXC - which closes the last character (below) - and drains the receive
   side at its tail. One budget bounds the whole transaction's spins,
-  counted down in a register. THE PUMP arms RXC and writes k + 2 from the
+  counted down in a register. The pump arms RXC and writes k + 2 from the
   handler that reads k, so two are in flight there too; the first data
   character waits for the last command one to be back (the D/C must
   change on the wire between them), one in flight across that boundary
@@ -238,11 +325,11 @@ item a reader would apply without checking the row.
   Nothing is flushed at start(): every character the pump or a receive
   shape writes is read back by it, and the one shape that overflows the
   receiver - the polled transmit-only phase - drains it at its own tail.
-  THERE IS NO DMA DATA PHASE: the polled loop and the pump are the two
+  There is no DMA data phase: the polled loop and the pump are the two
   shapes (dmac.md, erratum 1.10.4). `status()` is the completion's word
   - `spi_ok`, or `spi_stalled` (`util/spi_bus.hpp`'s code, one value on
   every family) when a polled transaction's one spin budget ran out with
-  a flag never raised. `recover()` is the verb a TIMED SpiBus calls on a
+  a flag never raised. `recover()` is the verb a timed SpiBus calls on a
   transaction that never answered (util/bus_master.hpp): CS deasserted
   first, the SERCOM reset and reconfigured to the applied state - the
   wedge it targets is an ISR-style completion that never posts (a lost
@@ -251,10 +338,10 @@ item a reader would apply without checking the row.
   preload, SSDE, address recognition (FORM = 0x2 with AMODE/ADDR),
   `drive_output()` for a dark listener on a shared harness,
   `selected()` as a live pad read (there is no status bit for SS),
-  `frames_ahead` (TWO: how many answers a pump must keep queued ahead
+  `frames_ahead` (two: how many answers a pump must keep queued ahead
   of the host's clock, the three-SCK-cycle rule's own number - the one
   integer that differs between this family's client pump and the
-  other strata's), and THE POLLED RUNS - the client's unit, a
+  other strata's), and the polled runs - the client's unit, a
   transaction served in one call, the per-character verbs its
   degenerate case: `answer(out, spins)` loads a run of answers on DRE
   alone and reads nothing, `exchange(out, in, spins)` answers and keeps
@@ -266,7 +353,7 @@ item a reader would apply without checking the row.
   program places the function that calls them in `.fast_text` - its call,
   as for a handler.
 - **The host's placement** - util/placement.hpp's `InFlash` (the default)
-  or `InRam`, the host's last parameter: two paths, each ONE function of
+  or `InRam`, the host's last parameter: two paths, each one function of
   it - the polled transaction (both phases, the D/C flip, whichever loop
   the spans pick), which start() calls once a request, and the pump's
   entry, which the vector calls. Under `InRam` each is one flattened

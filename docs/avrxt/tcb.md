@@ -1,6 +1,95 @@
 # TCB - the 16-bit timer/counter type B (AVR DA, DB and EA)
 
-Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B (TCB
+This document is for a programmer who needs to measure, count or time
+one signal: the period, the width or the duty of a pulse train, a count
+of edges (16 bits on one TCB, 32 on two), a single pulse of a set width
+started by an event, an interrupt at a rate of its own, or a watch that
+fires when the next edge comes too late. `Tcb<n>` is the resource, the
+typed view of one instance, one function per register fact. Over it sit
+the tasks (a task, in brio, is a driver layer with state of its own
+over a resource, served from its peripheral's interrupt or called by an
+active object; an active object is a component of a brio program with
+its own event queue, served one event at a time by the kernel,
+[learn/introduction.md](../learn/introduction.md)): `PeriodicTick`,
+`Timeout`, `OneShotPulse`, `PulseCounter`, `CascadedCounter`, the three
+meters `FrequencyMeter`, `PulseWidthMeter` and `DutyMeter`, and `Pwm8`,
+one 8-bit PWM channel. Each takes the application's units (a clock tag
+and microseconds or hertz) at `init()` and hands ticks to the interrupt
+handler, and each is a monostate (a class whose state is static, with
+no instances): the program names the type and calls its functions. The
+signals reach a TCB through the event system ([evsys.md](evsys.md)): a
+pin's level is an event, so a meter needs no wire beyond the pin
+itself.
+
+The smallest use, a frequency meter on a pin, from "How to use it"
+below:
+
+```cpp
+#include "avrxt/evsys.hpp"
+#include "avrxt/tcb.hpp"
+using Meter = brio::FrequencyMeter<brio::Tcb<0>>;
+using In = brio::EventChannel<2>;               // PORTC/PORTD pins: channels 2-3
+
+In::source(brio::EvPin<brio::Pin<'D', 0>>{});
+Meter::init(clock, In{});                       // FRQ mode, CLK_PER, CAPT interrupt on
+ISR(TCB0_INT_vect) { post<Display>(Period{Meter::period_ticks()}); }   // the read clears CAPT
+```
+
+Line by line: the two includes bring in the event system and the
+driver; `Meter` names the frequency meter over TCB0; `In` names event
+channel 2; `In::source(...)` makes the level of the pin PD0 the
+channel's event; `Meter::init(clock, In{})` takes the clock task's tag
+(`constexpr SysClock clock;`, [clkctrl.md](clkctrl.md)), puts TCB0 in
+FRQ mode clocked by CLK_PER, connects its capture input to channel 2
+and enables the CAPT interrupt, so the counter restarts at every rising
+edge of PD0 and its count at that edge is the period in CLK_PER ticks;
+the handler, bound to TCB0's one vector with `ISR()`, reads the period
+with `period_ticks()` and posts it to an active object (`brio::post`,
+`Display` and `Period` standing for the program's own active object and
+event type), where `Meter::hz(ticks)` converts it to hertz.
+
+What decides correctness even there:
+
+- **The clock task first.** `init()` reads the rate from the clock tag,
+  and `hz()`, `us()` and `tick_hz()` convert with that number: a meter
+  initialized before `SysClock::init()` converts with the rate the clock
+  type claims while the counter runs at another. A `DynamicClock` that
+  does not list the meter is a compile error at `init()`.
+- **The vector, and the read inside it.** `init()` enables the CAPT
+  interrupt, so the program binds `TCBn_INT_vect` (one vector per
+  instance, CAPT and OVF share it); avr-libc's start-up code sends an
+  unbound vector to the reset address, and the program restarts with
+  CPUINT's LVL0EX still set, deaf to every level-0 interrupt until a
+  real reset ([platform.md](platform.md)). The
+  handler must read the capture: that read is what clears CAPT, and a
+  handler that leaves it standing is entered again as soon as it
+  returns.
+- **The channel's legality is checked at compile time.** On the AVR DA
+  and DB a pin's event reaches only the two channels of its port pair
+  (PORTC and PORTD on channels 2 and 3), and `source()` refuses any
+  other; on the AVR EA every pin event goes on any channel. The pin
+  itself is read as it stands: nothing here configures PD0, an input out
+  of reset.
+- **The capture register goes through TEMP.** `period_ticks()` in the
+  handler and a read of the same TCB's CNT or CCMP in the main context
+  share the instance's one TEMP register, so such a main-context read
+  belongs in a critical section ("What the silicon does").
+- **The first capture after arming may be false.** A capture input
+  armed while the channel is already high detects a rising edge that
+  never happened ("What the silicon does"): discard the first period, or
+  arm while the pin is low.
+- **The range is 65535 ticks.** A signal slower than that (366 Hz at
+  24 MHz CLK_PER) wraps the counter, and `overflowed()` says so.
+
+The rest of this page, in order: the documents of record; what the
+silicon does (the eight modes, the facts that matter to code, the
+events, what the TCB is not); the types and verbs; how to use it, four
+examples; the bench findings on the AVR64EA48, then the AVR128DB48 and
+the AVR128DA48; and what is not covered.
+
+## Documents of record
+
+AVR128DB28/32/48/64 data sheet DS40002247B (TCB
 chapter 24, PORTMUX 17.3.8, EVSYS 16 generators 0xA0-0xA9 / users
 0x1E-0x27), errata DS80000915F (2.13.1, 2.13.2) and, for the DA parts,
 DS80000882C (2.12.1); for the AVR EA, AVR64EA28/32/48 data sheet
@@ -10,17 +99,21 @@ DS80001048D (no TCB item). Complements: TB3214
 "Getting Started with TCB" and the Microchip examples
 `avr128da48-getting-started-with-tcb`,
 `avr128da48-tcb-frequency-dutycycle-measurement` (see
-[vendor/README.md](vendor/README.md)). Driver: `avrxt/tcb.hpp` (the
-`Tcb<n>` resource and the tasks), the TCB event vocabulary in
-`avrxt/evsys.hpp`. Reference test: `test_avr_timer`.
+[vendor/README.md](vendor/README.md)). Driver:
+[`avrxt/tcb.hpp`](../../brio/avrxt/tcb.hpp) (the `Tcb<n>` resource and
+the tasks), the TCB event vocabulary in `avrxt/evsys.hpp`. Reference
+test: `test_avr_timer` (a letter is one command key of the suite's
+console and the group of verdicts it runs; this suite's `a` runs every
+letter its image carries, and on the AVR64EA48 the suite is two images,
+[README.md](README.md), "The group axis").
 
 ## What the silicon does
 
 Five instances on the family, TCB0..TCB3 on the 48-pin parts (TCB4
 only on 64 pins), TCB0..TCB3 on every AVR EA package (TCB3's default
 PB5 and TCB2's ALT1 PB4 bonded on its 48-pin part only: `has_default_
-pin` / `has_alt_pin` say so, the driver unchanged). Each is a 16-bit counter with ONE capture/compare
-register (`CCMP`), ONE waveform output (`WO`), two flags (`CAPT`,
+pin` / `has_alt_pin` say so, the driver unchanged). Each is a 16-bit counter with one capture/compare
+register (`CCMP`), one waveform output (`WO`), two flags (`CAPT`,
 `OVF`) that are interrupt sources and event generators alike, and a
 mode field that turns the same counter into eight different tools:
 
@@ -58,7 +151,7 @@ Facts that matter to code:
   (bench, A5): CAPT fires when CNT reaches TOP - exactly TOP tick
   periods after the synchronized start edge (measured: TOP + a
   constant 2-tick event-path offset, identical to single-shot's) -
-  and if the stop edge has not arrived the counter FREE-RUNS past
+  and if the stop edge has not arrived the counter free-runs past
   TOP, wraps, and CAPT fires again at every pass through TOP (every
   65536 ticks): a watch on a long-silent signal keeps shouting, once
   per wrap.
@@ -67,9 +160,9 @@ Facts that matter to code:
   from zero, so enabling CAPTEI while the event level is 1 detects an
   edge that never happened on the wire. Arm while the channel is low
   (or discard the first capture).
-- **Reading a capture clears `CAPT`** (on the LOW byte of CCMP):
+- **Reading a capture clears `CAPT`** (on the low byte of CCMP):
   read CCMP in the ISR and the flag is gone; in FRQPW read CNT
-  (period) BEFORE CCMP (width), since reading CCMP re-arms the
+  (period) before CCMP (width), since reading CCMP re-arms the
   sequence. The 16-bit registers go through `TEMP` (low byte first,
   on read and on write - 8.10.3) - the compiler's 16-bit access does
   this, but an ISR that reads CNT and CCMP shares the one TEMP with
@@ -86,13 +179,13 @@ Facts that matter to code:
   define one (not PWM8, not SINGLE). Routes (PORTMUX `TCBROUTEA`, one
   bit per instance): TCB0 PA2 / PF4, TCB1 PA3 / PF5, TCB2 PC0 / PB4,
   TCB3 PB5 / PC1, TCB4 PG3 / PC6 (the TCB4 ALT1 is dead on every
-  silicon revision, errata 2.13.2). TCB2's default PC0 collides with
+  silicon revision, errata DB 2.13.2). TCB2's default PC0 collides with
   TCA0's PORTC WO0 route; which of the two a board uses is the
   application's to decide, pad by pad.
 - **32-bit capture**: two TCBs, the LSB one clocked from the source
   with `CASCADE = 0`, the MSB one clocked from the LSB's `OVF` event
   (`COUNT` user) with `CASCADE = 1` (delays its CAPT input by one
-  CLK_PER to absorb the carry), both in the SAME capture mode, the
+  CLK_PER to absorb the carry), both in the same capture mode, the
   same CAPT event routed to both; the value is MSB.CCMP:LSB.CCMP.
   Any pair works (the datasheet example is TCB0/TCB1); it costs two
   event channels.
@@ -101,7 +194,7 @@ Facts that matter to code:
   Periodic interrupt with TOP lowered below CNT: the counter goes on
   to MAX, OVF fires, restarts - an OVF ISR is the safety net when TOP
   is changed on the fly.
-- `RUNSTDBY` keeps it counting in standby, and that ONE bit is the
+- `RUNSTDBY` keeps it counting in standby, and that one bit is the
   whole chain: the request it makes keeps CLK_PER - and the oscillator
   behind it - running through the sleep, whatever the oscillator's own
   `RUNSTDBY` says, and a TCB interrupt then wakes the CPU by itself.
@@ -124,7 +217,7 @@ As event generator: `TCBn CAPT` (0xA0 + 2n) and `TCBn OVF` (0xA1 +
 `TCBn CAPT` (0x1E + 2n, edge; synchronous - asynchronous too only in
 single-shot, 24.3.4) and `TCBn COUNT` (0x1F + 2n, sync).
 
-What TCB is NOT: there is one compare register, so no PWM with an
+What the TCB is not: there is one compare register, so no PWM with an
 independent period and duty beyond 8 bits, no dual-slope, no
 direction control, no period buffering (writing CCMP takes effect at
 once) - that is TCA's job ([tca.md](tca.md)). TCB is the precise

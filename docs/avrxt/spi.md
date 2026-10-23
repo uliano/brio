@@ -1,15 +1,111 @@
 # SPI - the serial peripheral interface (AVR DA, DB and EA)
 
-Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B (SPI
+This document is for a programmer who needs an SPI bus: a display, an
+ADC, a touch controller or a memory driven by this chip as the host, or
+this chip answering another host as a client. `Spi<n>` is the resource,
+one function per register fact of instance `n`; the class is a
+monostate (its state is static and it has no instances). Over it sit
+two tasks (a task, in brio, is a driver layer with state of its own
+over a resource, served from its peripheral's interrupt or called by an
+active object). `SpiHost<n, route>` is the transfer engine: it moves one
+transaction - an optional command phase, then a data phase, inside one
+chip-select window - either polled or under the SPI interrupt.
+`SpiClient<n, route>` serves a host's transaction as one polled run (a
+run is the unit a transport moves: a buffer and a length, a single byte
+its degenerate case). A program reaches the engine through the arbiter
+`SpiBus` ([design/spi-bus.md](../design/spi-bus.md)), an active object
+(a component of a brio program with its own event queue, served one
+event at a time by the kernel,
+[learn/introduction.md](../learn/introduction.md)) that runs the
+transactions the other active objects post to it, one at a time, and
+answers each with an `SpiDone`.
+
+The smallest use, a command byte and its data sent to a device on
+SPI0's DEFAULT route through the arbiter, as "How to use it" below
+writes it:
+
+```cpp
+using SpiHw = brio::SpiHost<0>;                 // DEFAULT route
+using Bus = brio::SpiBus<SpiHw, P>;
+ISR(SPI0_INT_vect) { if (SpiHw::isr()) brio::post<Bus>(brio::TransferDone{SpiHw::status()}); }
+SpiHw::init(clock);                             // optionally: init(clock, max_sck_hz)
+brio::post<Bus>(SpiHw::Request{
+    Cs::ref(), Dc::ref(),
+    brio::lend<brio::Lease::reply>(cmd), 1,
+    brio::lend<brio::Lease::reply>(data), {}, len,
+    brio::reply_to<Me, brio::SpiDone>(),
+    brio::SpiClock::div4, brio::SpiMode::mode0, /*polled=*/true});
+```
+
+Line by line: `SpiHw` names the engine over SPI0 on its DEFAULT route
+(PA4 MOSI, PA5 MISO, PA6 SCK; the SS position, PA7, stays a GPIO,
+because the engine sets SSD and the chip selects are its own); `Bus`
+names the arbiter over that engine, `P` being the platform type
+(`brio::AvrPlatform`); the `ISR()` line binds SPI0's vector to the
+engine's interrupt body, which returns true on the interrupt in which a
+pumped transaction ended, and posts the arbiter that completion with
+the engine's status (`spi_ok` always, on this engine); `init()` makes
+the instance a host in buffer mode with SSD set, and takes the clock
+task's tag (`constexpr SysClock clock;`, [clkctrl.md](clkctrl.md)) and,
+optionally, a ceiling for SCK in hertz; the `Request` names the select
+and the D/C pin as `PinRef`s, lends the one-byte command and the `len`
+data bytes until the reply (`lend<Lease::reply>`), leaves the receive
+buffer null (`{}`: the received bytes are discarded), names the active
+object `Me` and the event `SpiDone` the reply goes to, the division of
+CLK_PER (here CLK_PER/4), the transfer mode, and the completion style:
+polled, so the whole transaction runs inside the arbiter's dispatch and
+the reply follows at once.
+
+What decides correctness even there:
+
+- **`init()` comes after the clock task's `init()` and before `sei()`.**
+  The SCK rate is a division of the CLK_PER in force, but the
+  microseconds of a request's `cs_setup_us` and the division a ceiling
+  resolves to are computed from the rate the clock type claims, not read
+  from the hardware. The code checks only that a `DynamicClock` lists
+  the engine among its users (a compile error otherwise). `init()`
+  returns false when the package does not bond the route's SCK, or when
+  even CLK_PER/128 is faster than the ceiling.
+- **The vector must be bound for every pumped request** (`polled` false,
+  the default): the pump arms RXCIE and TXCIE at launch, and an
+  interrupt with no `ISR()` bound lands in avr-libc's `__bad_interrupt`,
+  a jump to address 0 (read in the release listing), which starts the
+  program over without a reset. A polled request never arms the SPI's
+  interrupt.
+- **The select and the D/C pin are the program's to configure**: driven
+  high and made outputs before the first request. `init()` does not
+  touch them; the engine only clears and sets them around each
+  transaction.
+- **The buffers are lent**: the requester does not read or write `cmd`,
+  `data` or a receive buffer from the post until its `SpiDone` arrives.
+  Nothing checks it ([util/bus_master.hpp](../../brio/util/bus_master.hpp)).
+- The arbiter and every active object that posts to it are listed in
+  the kernel's run list (`brio::Tenuto<P, ..., Bus>::run()`, after
+  `sei()`), and a polled request holds the arbiter's dispatch for the
+  whole transfer, global interrupts enabled; the pump lets the kernel
+  run between its interrupts, at the cost "Bench findings" measures.
+
+The rest of this page, in order: the documents of record; what the
+silicon does; the types and verbs; how to use it, one example per use;
+the bench findings, most of the page - the bit rates, the buffer mode,
+the read the silicon does not take, the engine's cost (counted in the
+listing and measured by the benchmark skeleton, the app that measures
+the drivers' costs, [design/benchmark.md](../design/benchmark.md)), the
+client's runs, the AVR64EA48's own figures and the two-board facts; and
+what is not covered.
+
+## Documents of record
+
+AVR128DB28/32/48/64 data sheet DS40002247B (SPI
 chapter 28, PORTMUX chapter 17, electricals 39.15), errata DS80000915F
 (2.11.1 and clarifications 3.5.1, 3.5.2, 3.7.3) and, for the DA parts,
 DS80000882C (2.10.1); for the AVR64EA28/32/48 DS40002443A (SPI chapter
 26 - the DB's chapter word for word - PORTMUX 17.3.5) and DS80001048D
 (clarifications 3.1, 3.2, 3.7 = the DB's 3.5.1, 3.5.2, 3.7.3). Three
-items shape the code:
+items shape the code, and a fourth is a warning:
 
 - **DB 2.11.1, SPI1 ALT2 on 48-pin devices**: the position is
-  NON-FUNCTIONAL there (rev. A4/A5; fixed in B0). The 48-pin device
+  non-functional there (rev. A4/A5; fixed in B0). The 48-pin device
   headers still list it, with MOSI on PB4 and MISO on PB5 and no SCK or
   SS position at all - so the driver refuses it on every 48-pin part of
   both families, at compile time and at run time. Here an erratum beats
@@ -34,7 +130,9 @@ pins), code 2 reserved, ALT3 MOSI PA0 / MISO PA1 / SCK PC0 / SS PC1,
 ALT4 PD4-PD7, ALT5 PC0-PC3, ALT6 MOSI PC1 / MISO PC2 / SCK PC3 / SS
 PF7, NONE = 7. brio names routes, never codes: `SpiRoute::alt3..alt6`
 exist only where the layout has them and `alt2` only where it does not
-(the DA/DB), every code is the device tables' `spi_route_codes`, and
+(the DA/DB), every code is the device tables' `spi_route_codes`
+([avrxt/device_tables.hpp](../../brio/avrxt/device_tables.hpp), the
+reserve: the table of what each part has, read off the device header), and
 `routed()` maps the code back. Two routes are refused at compile time on
 the EA, each by name: **ALT6**, whose SS is PF7 - the UPDI pin, a GPIO
 only with FUSE.SYSCFG0.UPDIPINCFG = 0, which leaves the part unreachable
@@ -47,9 +145,12 @@ a pinless host whose SSD is cleared by hand keeps Host mode and transfers
 (measured; the header's "SS set to 1" for NONE, no data-sheet text) -
 `init()` still refuses the configuration, for want of a use.
 
-Driver: `avrxt/spi.hpp`. The arbiter above it:
+Driver: [avrxt/spi.hpp](../../brio/avrxt/spi.hpp). The arbiter above it:
 [spi-bus.md](../design/spi-bus.md) (`util/bus_master.hpp`,
-`util/spi_bus.hpp`). Reference test: `test_avr_spi`.
+`util/spi_bus.hpp`). Reference test: `test_avr_spi` - a letter is one
+command key of the suite's console and the group of verdicts it runs;
+`z` runs the single-board set (letters a to j and t) and `y` the set
+that needs a partner board running `spi_peer` (k to s, u, v and w).
 
 ## What the silicon does
 
@@ -60,24 +161,24 @@ generator used only in host mode, and two roles:
   MOSI and (if it wants to) SS, and reads MISO;
 - **client** - SS, SCK and MOSI are inputs and the host sets the pace;
   MISO is driven only while SS is low, the pad tri-stating itself when
-  the client is deselected, and the SS pin's rising edge RESETS the
+  the client is deselected, and the SS pin's rising edge resets the
   client's state machine (a partial byte is lost).
 
 Both roles run in one of two buffering regimes, chosen by CTRLB.BUFEN,
-and the regime decides which of the TWO INTFLAGS layouts the same
+and the regime decides which of the two INTFLAGS layouts the same
 register address carries:
 
 | | normal mode | buffer mode |
 |---|---|---|
-| transmit | single-buffered: a write during a transfer is IGNORED and sets WRCOL | double: DATA + a transmit buffer, DREIF says there is room |
+| transmit | single-buffered: a write during a transfer is ignored and sets WRCOL | double: DATA + a transmit buffer, DREIF says there is room |
 | receive | double-buffered: read before the next transfer ends or lose it | a two-deep FIFO plus the shifter; BUFOVF marks the loss |
 | flags | IF, WRCOL | RXCIF, TXCIF, DREIF, SSIF, BUFOVF |
-| clearing | IF: write one to it, or read INTFLAGS then access DATA. WRCOL: ONLY that read-then-DATA sequence | TXCIF/SSIF/BUFOVF: write one. RXCIF and BUFOVF also clear by reading DATA; DREIF clears by WRITING DATA and by nothing else |
+| clearing | IF: write one to it, or read INTFLAGS then access DATA. WRCOL: only that read-then-DATA sequence | TXCIF/SSIF/BUFOVF: write one. RXCIF and BUFOVF also clear by reading DATA; DREIF clears by writing DATA and by nothing else |
 
-A host with CTRLB.SSD = 0 watches its SS pin: an SS INPUT driven low by
+A host with CTRLB.SSD = 0 watches its SS pin: an SS input driven low by
 somebody else clears CTRLA.MASTER, the instance becomes a client, and IF
 (normal) or SSIF (buffer) is raised. Nothing but the application puts it
-back. An SS pin configured as an OUTPUT is not watched at all (table
+back. An SS pin configured as an output is not watched at all (table
 28-2), and with SSD = 1 the pin is free for any other use - which is
 what a bus with software chip selects wants.
 
@@ -86,9 +187,10 @@ halves that. CLK_PER/64 is reachable twice (PRESC DIV64 alone, PRESC
 DIV128 doubled); `SpiClock` names the seven distinct divisions and
 `spi_presc_bits` picks the canonical encoding.
 
-The routes are PORTMUX.SPIROUTEA, two bits per instance. Both instances
-exist on every package of the family; what varies is how many positions
-a package bonds:
+On the AVR DA and DB the routes are PORTMUX.SPIROUTEA, two bits per
+instance. Both instances exist on every package of the two families;
+what varies is how many positions a package bonds (the AVR EA's table,
+SPI0 alone, is under "Documents of record" above):
 
 | | 28/32 pins | 48 pins | 64 pins |
 |---|---|---|---|
@@ -137,10 +239,12 @@ application should touch a shared bus (see
 ```cpp
 using SpiHw = brio::SpiHost<0>;                 // DEFAULT route
 using Bus = brio::SpiBus<SpiHw, P>;
-ISR(SPI0_INT_vect) { if (SpiHw::isr()) brio::post<Bus>(brio::TransferDone{brio::spi_ok}); }
+ISR(SPI0_INT_vect) { if (SpiHw::isr()) brio::post<Bus>(brio::TransferDone{SpiHw::status()}); }
 SpiHw::init(clock);                             // optionally: init(clock, max_sck_hz)
 brio::post<Bus>(SpiHw::Request{
-    Cs::ref(), Dc::ref(), cmd, 1, data, nullptr, len,
+    Cs::ref(), Dc::ref(),
+    brio::lend<brio::Lease::reply>(cmd), 1,
+    brio::lend<brio::Lease::reply>(data), {}, len,
     brio::reply_to<Me, brio::SpiDone>(),
     brio::SpiClock::div4, brio::SpiMode::mode0, /*polled=*/true});
 ```
@@ -150,8 +254,8 @@ brio::post<Bus>(SpiHw::Request{
 ```cpp
 using S = brio::Spi<0>;
 S::init<brio::SpiConfig{.route = brio::SpiRoute::alt1,
-                        .clock = brio::SpiClock::div16,
-                        .mode = brio::SpiMode::mode3}>();
+                        .mode = brio::SpiMode::mode3,
+                        .clock = brio::SpiClock::div16}>();
 const auto in = S::transfer(0x9F);              // one polled byte
 ```
 

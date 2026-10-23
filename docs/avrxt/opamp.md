@@ -1,16 +1,103 @@
 # OPAMP - analog signal conditioning (AVR DB only)
 
-Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B (OPAMP
+This document is for a programmer on an AVR DB who wants to condition
+an analog signal inside the chip: buffer a pad or the DAC, amplify by
+one of the resistor ladder's exact gains, invert about VDD/2, take a
+difference with the three-op-amp instrumentation amplifier, or start
+and stop an op amp from the event system. The peripheral exists on the
+AVR DB only; the AVR DA and the AVR EA have none, and there the header
+compiles to nothing. `OpampSystem` is the block every op amp shares
+(its one enable, and the TIMEBASE register that makes a settle time
+mean microseconds); `Opamp<n>` is one op amp, described by an
+`OpampConfig` and driven by one function per register fact. Both are
+monostates, classes whose state is static, with no instances: a
+program names the type and never makes an object of it.
+`OpampFollower`, `OpampPga`, `OpampInvertingPga` and
+`InstrumentationAmp` are the tasks over them, ready-made circuits that
+fill the configuration in (a task, in brio, is a driver layer over a
+resource, called by an active object or from `main`; an active object
+is a component of a brio program with its own event queue, served one
+event at a time by the kernel,
+[../learn/introduction.md](../learn/introduction.md)). The peripheral
+has no interrupt: a program learns that an output can be trusted by
+polling `settled()` or by routing the READY event.
+
+The smallest use, a unity-gain buffer from PD1 to PD2, from "How to
+use it" below:
+
+```cpp
+#include "avrxt/opamp.hpp"
+using Buf = brio::OpampFollower<brio::Opamp<0>>;
+brio::OpampSystem::init(clock);        // TIMEBASE, then the block's ENABLE
+Buf::init();                           // MUXPOS = INP, MUXNEG = OUT, ladder off
+Buf::wait_settled();
+```
+
+Line by line: `Buf` names the follower task over OP0, which every DB
+package has. `OpampSystem::init()` takes the clock task's tag
+(`constexpr SysClock clock;`, [clkctrl.md](clkctrl.md)): it turns the
+block off, writes TIMEBASE for the rate the clock type claims (23 at
+24 MHz), clears DBGCTRL and PWRCTRL.IRSEL (its two defaults: no
+debug run, the rail-to-rail input range) and sets the block's ENABLE.
+`Buf::init()` with every default takes the INP pad PD1 as the positive
+input and the op amp's own output as the negative, leaves the ladder
+off, drives the OUT pad PD2, selects the `software` regime (ALWAYSON)
+and a settle time of 127 microseconds; it turns PD1 and PD2 into
+analog inputs (digital input buffer off) and writes CTRLA last, which
+starts the op amp and its settle timer. It returns false, writing no
+register, for a configuration this instance or this package cannot
+make; this one any DB makes, and the excerpt ignores the answer.
+`wait_settled()` spins until OPnSTATUS.SETTLED rises: the warm-up
+plus the settle time ("Bench findings" measured a warm-up of 365
+CLK_PER ticks, 15.2 us, and 142 us from an ENABLE event to READY for
+a settle time of 127 us).
+
+What decides correctness even there. The clock task first: TIMEBASE
+is computed from the rate the clock type claims and not read from the
+hardware, so a clock type that claims a rate the chip is not running
+makes every settle time a different number of microseconds, and
+nothing refuses it; a rate that is not a whole number of MHz makes one
+TIMEBASE tick longer than a microsecond (`opamp_timebase_ns()`). With
+a `DynamicClock`, the clock must list `OpampSystem` among the users it
+rebases, which `init()`'s static_assert checks. `wait_settled()` has
+no bound: it never returns while the op amp is not running - disabled,
+in the `event` regime before its first ENABLE event, or with the
+block's ENABLE off - and while it spins it holds the caller, so a wait
+in an active object's handler stalls every other active object for as
+long. A source on the DAC needs the DAC's buffered output on
+(`DAC.CTRLA.OUTEN`, 34.3.2.3), which the driver does not check. And
+while its driver is on the OUT pad is the op amp's: no other
+peripheral can drive it (and a running op amp holds the pad even with
+its driver off, "Bench findings").
+
+The rest of this page, in order: the documents of record; what the
+silicon does (the pads, the two input multiplexers, the resistor
+ladder and its gains, the output driver, the internal timer, the
+three enable regimes, the event users, the offset calibration, power
+and range); the types and verbs, with what the configuration check
+refuses; how to use it, one example per circuit; the bench findings;
+and what is not covered.
+
+## Documents of record
+
+AVR128DB28/32/48/64 data sheet DS40002247B (OPAMP
 chapter 35, electricals 39.20 and typical characteristics 40.11, EVSYS
 16 - generators 0x34-0x36 and users 0x2A-0x35, I/O multiplexing chapter
 3), errata DS80000915F (items 2.8.1 and 2.8.2, both rev. A4 only). The
 DA family has no OPAMP peripheral and its errata document has no such
-section. Driver: `avrxt/opamp.hpp` (`OpampSystem`, `Opamp<n>`,
+section; the AVR EA has none either (its data sheet DS40002443A has no
+such chapter and its device headers no OPAMP block). Driver: `avrxt/opamp.hpp` (`OpampSystem`, `Opamp<n>`,
 `OpampFollower`, `OpampPga`, `OpampInvertingPga`, `InstrumentationAmp`);
 the event vocabulary is `EvOpampReady` and `EvOpampCtl` in
 `avrxt/evsys.hpp` ([evsys.md](evsys.md)); the DAC entries mean the
-BUFFERED DAC output ([dac.md](dac.md)). Reference test:
-`test_avr_opamp`.
+buffered DAC output ([dac.md](dac.md)). Reference test:
+`test_avr_opamp`. A letter is one command key of a suite's console and
+the group of verdicts it runs: in `test_avr_opamp`, `a` the block, the
+registers and IRSEL, `b` the voltage follower, `c` the non-inverting
+gain table, `d` the inverting gain table, `e` the internal sources and
+the op-to-op links, `f` the instrumentation amplifier, `g` the internal
+timer, READY and a rebase, `h` the offset calibration and `i` the four
+event users; `z` runs them all (the suite has no partner-board set).
 
 ## What the silicon does
 
@@ -20,7 +107,7 @@ family of conditioning circuits needs no external component at all.
 **The peripheral is DB-only**, and OP2 exists on the 48- and 64-pin
 packages only - the device header is the authority (`opamp_count`
 reads the presence of the OP2 registers in `OPAMP_t`, and is 0 on the
-DA family, where the whole driver compiles to nothing).
+DA and the EA, where the whole driver compiles to nothing).
 
 Each op amp has three dedicated pads, one global block serves all
 three:
@@ -76,13 +163,13 @@ pad belongs to the op amp and no other peripheral can drive it.
 **The internal timer.** `OPAMP.TIMEBASE` is one less than the number
 of CLK_PER cycles that reach one microsecond (35.5.3), so one timebase
 tick is a microsecond and `OPnSETTLE` counts 0..127 of them. When an
-op amp starts, the timer waits the WARM-UP (the op amp's own
+op amp starts, the timer waits the warm-up (the op amp's own
 circuitry) and then the programmed settle time, and only then does
 `OPnSTATUS.SETTLED` rise and the READYn event go out. **Any write to
 OPnCTRLA, OPnINMUX or OPnRESMUX restarts the timer** - which is why
 `init()` writes CTRLA last and why `restart()` exists as a verb.
 Because TIMEBASE is a CLK_PER divider, `OpampSystem` is the chapter's
-ClockUser: a `DynamicClock` that carries op amps lists it ONCE (there
+ClockUser: a `DynamicClock` that carries op amps lists it once (there
 is one TIMEBASE register, not three) and `rebase()` rewrites it, so a
 settle time keeps meaning the microseconds it says.
 
@@ -93,9 +180,9 @@ READYn is issued), `software_with_events` (both - on by software,
 DUMPn and DRIVEn heard, ENABLEn/DISABLEn ignored), plus `off`.
 
 **Four event users and one generator.** READYn is a generator (0x34 +
-n, a one-CLK_PER pulse). ENABLEn and DISABLEn are EDGE-detected users,
-DUMPn and DRIVEn are LEVELS (table 35-2) - a channel driving a dump or
-a drive must HOLD its level, and a software pulse does nothing there.
+n, a one-CLK_PER pulse). ENABLEn and DISABLEn are edge-detected users,
+DUMPn and DRIVEn are levels (table 35-2) - a channel driving a dump or
+a drive must hold its level, and a software pulse does nothing there.
 DUMPn closes a switch from VOUT to VINN (the integrator's reset,
 figure 35-6); DRIVEn raises the output driver whatever OUTMODE says.
 **The peripheral has no interrupt at all** (35.3.4).
@@ -114,7 +201,7 @@ near a rail. Both are rev. A4 items and neither has a register face a
 driver could work around, so the driver reports rather than promises:
 `reduced_input_range(bool)` returns what the silicon actually took.
 
-`DBGCTRL.DBGRUN` keeps the DIGITAL interface running while the CPU is
+`DBGCTRL.DBGRUN` keeps the digital interface running while the CPU is
 halted; the analog half runs regardless (35.3.6). `RUNSTBY` (the data
 sheet spells it RUNSTDBY, the header does not) keeps an op amp alive
 in standby sleep, with its enable behaviour unchanged.

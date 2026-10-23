@@ -2,27 +2,53 @@
  * eic.hpp
  *
  * The SAM C21 External Interrupt Controller (DS60001479M ch. 26): the
- * peripheral where this family keeps its PIN INTERRUPTS. There are none
+ * peripheral where this family keeps its pin interrupts. There are none
  * in PORT - samc21/pin.hpp says so and stops there - so every edge and
  * level sense lives here, one register field per line, behind a
  * peripheral of its own with its own clock, its own enable and its own
- * event outputs.
+ * event outputs. What a program uses it for: an interrupt or an event
+ * from a pad. The smallest use, a button on a line (docs/samc21/eic.md,
+ * "How to use it"):
  *
- *  Eic              the block: APB clock, the clock CHOICE (GCLK_EIC or
+ *   using ButtonInt = brio::ExtInt<brio::Pin<'B', 22>>;   // EXTINT6
+ *   Eic::init();                          // bus clock, reset, left disabled
+ *   Eic::clock_select(EicClock::ulp32k);
+ *   ButtonInt::claim(brio::PinPull::up);
+ *   Eic::configure_line(ButtonInt::line, {.sense = EicSense::falling});
+ *   Eic::enable(true);                    // false: the block is not running
+ *   ButtonInt::arm(true);
+ *   Nvic::enable(Eic::irq());
+ *
+ * and the program's EIC_Handler calling Eic::isr().
+ *
+ * Who calls what. init(), release(), clock_select(), configure_line(),
+ * release_line() and nmi_configure() are setup verbs, with no guard of
+ * their own (read-modify-write of the block's registers): main, or one
+ * active object's handler (an active object is a brio component with its
+ * own event queue, served one event at a time by the kernel). The
+ * enable-protected ones answer false and write nothing while the block
+ * is enabled. init(), reset() and enable() wait for the block's
+ * synchronization, bounded (0xFFFF polls), and answer false when it did
+ * not complete. isr() is the body the program's EIC_Handler calls for
+ * all sixteen lines, take_nmi() the body of NonMaskableInt_Handler; a
+ * vector left undefined is the crt's silent spin. The flag and arming
+ * verbs are single loads and stores. Nothing here masks interrupts.
+ *
+ *  Eic              the block: APB clock, the clock choice (GCLK_EIC or
  *                   CLK_ULP32K), reset and enable with their
  *                   synchronization, the per-line sense/filter/async
  *                   configuration, INTFLAG/INTENSET, the event outputs,
  *                   the NMI, and the ISR body.
  *
- *  ExtInt<Pin>      one line reached through the PAD that carries it:
+ *  ExtInt<Pin>      one line reached through the pad that carries it:
  *                   the pad's EXTINT number comes from the device
  *                   header (`PIN_PxyA_EIC_EXTINT_NUM`), never from a
  *                   formula, and a pad the header does not bond refuses
  *                   to compile.
  *
- * THREE FACTS THAT SHAPE THE FILE.
+ * Three facts that shape the file.
  *
- * 1. THE PAD-TO-LINE MAP IS NOT A FORMULA. PA16 is line 0, PA24 is line
+ * 1. The pad-to-line map is not a formula. PA16 is line 0, PA24 is line
  *    12, PA27 is line 15, PB30 is line 14: any "pin number modulo 16"
  *    rule is wrong on this family. The device header carries one
  *    `PIN_P<pad>A_EIC_EXTINT_NUM` per bonded pad and that is the whole
@@ -32,7 +58,7 @@
  *    no entry and `ExtInt<>` on it fails to compile with a message
  *    that says why.
  *
- * 2. ONE NVIC VECTOR FOR ALL SIXTEEN LINES. 26.6.6 says "The EIC has
+ * 2. One NVIC vector for all sixteen lines. 26.6.6 says "The EIC has
  *    one interrupt request line for each external interrupt (EXTINTx)",
  *    but the device header gives this part a single `EIC_IRQn` - the
  *    same shape the SERCOM has here, and the same discipline: the ISR
@@ -40,26 +66,26 @@
  *    NMI is the exception and is genuinely separate: it has its own
  *    exception vector, is always enabled, and cannot be masked.
  *
- * 3. THE CLOCK IS OPTIONAL AND KNOWING WHEN IS THE WHOLE TRICK
+ * 3. The clock is optional and knowing when is the whole trick
  *    (26.5.3, 26.6.3). Level detection with no filter is done
- *    ASYNCHRONOUSLY and needs no clock at all; so does edge detection
+ *    asynchronously and needs no clock at all; so does edge detection
  *    with ASYNCH set. Filtering, and synchronous edge detection, need
- *    GCLK_EIC or CLK_ULP32K - and in those modes the pin is SAMPLED, so
+ *    GCLK_EIC or CLK_ULP32K - and in those modes the pin is sampled, so
  *    "pulses with duration lower than two EIC clock periods may not be
  *    properly detected". `needs_clock()` answers the question from a
  *    configuration, so an application never has to re-derive it.
  *
- *    AND THE CONSEQUENCE THE CHAPTER NEVER DRAWS, measured here
+ *    And the consequence the chapter never draws, measured here
  *    (docs/samc21/eic.md carries it): 26.6.3 says the EIC "automatically
  *    requests GCLK_EIC or CLK_ULP32K to operate" in the sampled modes,
- *    and CTRLA.ENABLE is write-synchronized AGAINST THAT REQUESTED
- *    CLOCK. So WHETHER THE BLOCK CAN BE ENABLED AT ALL DEPENDS ON WHAT
- *    ITS LINES ASKED FOR. With GCLK_EIC disconnected, a block whose
+ *    and CTRLA.ENABLE is write-synchronized against that requested
+ *    clock. So whether the block can be enabled at all depends on what
+ *    its lines asked for. With GCLK_EIC disconnected, a block whose
  *    lines are all clockless (level, or asynchronous edge) enables,
- *    detects and disables perfectly; the moment ONE line asks to be
+ *    detects and disables perfectly; the moment one line asks to be
  *    sampled, `enable(true)` writes the bit - which reads back at once,
  *    as 26.8.1 promises - and SYNCBUSY.ENABLE stands forever, with
- *    nothing detected at all. The write is PENDING rather than lost:
+ *    nothing detected at all. The write is pending rather than lost:
  *    connect the clock and that same enable completes with no second
  *    write. `enable()` returning false is the only warning there is,
  *    which is why it returns one. The cheap way out is CLK_ULP32K,
@@ -71,22 +97,22 @@
  *      edge, no filter     4 EIC clocks + 5 CLK_EIC_APB
  *      edge + filter       6 EIC clocks + 5 CLK_EIC_APB
  *
- * ENABLE-PROTECTION IS THE STRUCTURAL RULE HERE. CONFIGn, ASYNCH,
+ * Enable-protection is the structural rule here. CONFIGn, ASYNCH,
  * EVCTRL (and CTRLA.CKSEL) are writable only while CTRLA.ENABLE is zero
- * (26.6.2.1). Every verb that touches one of them therefore REFUSES
+ * (26.6.2.1). Every verb that touches one of them therefore refuses
  * while the block is enabled rather than storing into a register the
  * silicon will not take - which is why they return bool.
  *
- * ERRATA, DS80000740S, read on the E/G/J ROW at revision F - and the
- * row matters more here than in any chapter so far, because FIVE of the
- * six EIC items look alarming and only ONE of them is this silicon:
+ * Errata, DS80000740S, read on the E/G/J row at revision F - and the
+ * row matters more here than in any chapter so far, because five of the
+ * six EIC items look alarming and only one of them is this silicon:
  *
  *  - 1.11.1 NMI Exception (an NMI fires as soon as the config is
  *    written, with a pull-up and a rising-edge sense): revision B only.
  *  - 1.11.2 ASYNCH is not write-protected: revision B only.
  *  - 1.11.3 Spurious Flag (a flag appears at CTRLA.ENABLE for a
  *    low/rising/both line with the filter on): revisions B..E. Not this
- *    chip, so `enable()` does NOT quietly clear INTFLAG behind the
+ *    chip, so `enable()` does not quietly clear INTFLAG behind the
  *    caller's back - on an affected part the caller clears INTFLAG
  *    after enabling and before arming, which is the erratum's own
  *    workaround.
@@ -94,12 +120,12 @@
  *    revisions B..E. `nmi_configure()` therefore does not clear
  *    NMIFLAG for you either; it says so.
  *  - 1.11.5 Edge Detection (SYNCBUSY.ENABLE released three EIC clocks
- *    before edge detection actually works): the N FAMILY ONLY. This is
+ *    before edge detection actually works): the N family only. This is
  *    the item most likely to be applied by mistake on this part.
- *  - 1.11.6 Edge Detection in Standby: the matrix marks EVERY REVISION
+ *  - 1.11.6 Edge Detection in Standby: the matrix marks every revision
  *    of E/G/J ("only the first edge will be detected"), and the bench
- *    REFUTED it at rev F (measured): an
- *    asynchronous line detected 100 edges of 100 offered inside ONE
+ *    refuted it at rev F (measured): an
+ *    asynchronous line detected 100 edges of 100 offered inside one
  *    standby - counted by its own event generator into a RUNSTDBY
  *    timer, with the interrupt disarmed so the window really was one
  *    sleep - and with the interrupt armed all 100 woke the device.
@@ -109,7 +135,7 @@
  *    `EicLineConfig::asynchronous` for silicon where the item does
  *    bite. docs/samc21/eic.md carries the numbers.
  *
- * NOT BUILT (docs/samc21/eic.md carries the list): the debouncer
+ * Not built (docs/samc21/eic.md carries the list): the debouncer
  * (DEBOUNCEN/DPRESCALER/PINSTATE - SAM C20/C21 N variants only, and the
  * device header for this family does not even declare the registers, so
  * there is nothing to gate); and a kernel event out of a pin - `isr()`

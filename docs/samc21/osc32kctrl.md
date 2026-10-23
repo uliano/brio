@@ -1,6 +1,51 @@
 # OSC32KCTRL - the 32.768 kHz oscillators (SAM C21)
 
-Documents of record: SAM C20/C21 data sheet DS60001479M ch. 21, with the
+This document is for a programmer who needs a slow clock: a 32 kHz
+source for a generic clock generator, the RTC's clock, a timebase that
+runs through standby, or the 32 kHz crystal where the board carries
+one. The block has three roots - OSCULP32K, the ultra-low-power RC that
+always runs; OSC32K, the accurate internal RC, off out of reset; and
+XOSC32K, the crystal oscillator - and the register that chooses the
+RTC's clock. `Osculp32k`, `Osc32k` and `Xosc32k` are the three roots,
+`Osc32kctrl` the block, each a monostate (a class whose state and
+functions are all static, with no instance to create).
+
+The smallest use, the first block of "How to use it" below - OSC32K
+started with its production trim and given to a generator:
+
+```cpp
+Osc32k::init(Osc32kConfig{
+    .calib = Osc32k::factory_calib(),   // 21.5.9 - not optional
+    .enable_32k = true,                 // or nothing can reach it
+});
+Gclk<5>::configure(GclkConfig{.source = GclkSource::osc32k});
+```
+
+Line by line: `factory_calib()` reads the production trim out of the
+NVM software calibration area ([nvm.md](nvm.md)); `init()` writes the
+oscillator's whole register with that trim and the 32 kHz output
+enabled, starts it and waits for its ready flag, bounded (2 000 000
+polls); and `Gclk<5>::configure()` sources generator 5 from it
+([clock.md](clock.md)).
+
+What decides correctness even there. The trim is the caller's to pass:
+an OSC32K started without it runs untrimmed, measured 44 % fast below.
+At least one output must be enabled, or the oscillator is a clock
+nothing can reach - `init()` refuses that configuration, a field that
+overflows and a locked oscillator, answering false and writing
+nothing; a false after the write means the ready flag never rose, and
+the trim is only committed once it does. A generator still pointed at
+an oscillator when it stops can never be moved again, so a generator
+is moved first and the oscillator stopped after (the third block
+below). The block's bus clock is on out of reset (the device header's
+MCLK_APBAMASK reset value) and nothing here touches it; every verb is
+a setup verb with no guard of its own and no masking, and `isr()` is
+the body the program's SYSTEM_Handler calls beside the four other
+blocks that share IRQ 0.
+
+## Documents of record
+
+SAM C20/C21 data sheet DS60001479M ch. 21, with the
 calibration area in 9.4 - and errata DS80000740S, where **neither item
 touching this chapter applies to this silicon**: 1.1.1 (the CFD's
 automatic switch fails when XOSC32K is requested by the GCLK) is marked
@@ -10,16 +55,18 @@ row**. Both are the shape of trap `dmac.md` already records: read the
 row, not the column. Driver: `samc21/osc32kctrl.hpp`. Family fixture
 `test/family_samc21/osc32kctrl.cpp` plus one negative under
 `brio check samc21`; the bench suite is `test_samc_osc32k`, which
-measures with `samc21/freqm.hpp`.
+measures with `samc21/freqm.hpp` (a suite's letter, cited below, is
+one command key of its console and the group of verdicts that key
+runs).
 
 ## What the silicon does
 
 **Three slow roots, and only one of them is free.** OSCULP32K is enabled
 by a power-on reset and runs until the next one - there is nothing to
-start and nothing to wait for. OSC32K is OFF at reset and must be
+start and nothing to wait for. OSC32K is off at reset and must be
 enabled, trimmed and waited for. XOSC32K needs a crystal on the board.
 
-**OSC32K IS NOT CALIBRATED UNTIL SOFTWARE CALIBRATES IT**, and this is
+**OSC32K is not calibrated until software calibrates it**, and this is
 the fact worth carrying away. 21.5.9 is blunt: the production value
 "must be loaded from the NVM Software Calibration Area into the OSC32K
 register (OSC32K.CALIB) by software to achieve specified accuracy". An
@@ -55,7 +102,8 @@ verb checks the lock and refuses rather than writing into it.
 **The RTC's clock is chosen here**, in RTCCTRL.RTCSEL, among all six
 oscillator outputs - even though the RTC is another chapter. 21.6.7 asks
 for the RTC to be disabled before the selection changes; this driver owns
-the register and the ordering belongs to the RTC driver when it exists.
+the register, and the RTC driver states that ordering as its caller's
+obligation ([rtc.md](rtc.md)).
 
 **The watchdog's clock is not chosen at all**: the WDT takes OSCULP32K's
 1.024 kHz output, always, internally requested (21.6.6). So trimming
@@ -69,7 +117,7 @@ OSCULP32K moves every watchdog timeout with it.
 **`Osc32kctrl`** - the block: `status` and the decoded `osc32k_ready`,
 `xosc32k_ready`, `clock_failing` (STATUS.CLKFAIL), `clock_switched`
 (STATUS.CLKSW); `flags`/`armed`/`clear_flags`/`arm`/`disarm`/`isr`; and
-`rtc_clock()` both ways. Note the interrupt line is SHARED - IRQ 0
+`rtc_clock()` both ways. Note the interrupt line is shared - IRQ 0
 carries MCLK, OSCCTRL, OSC32KCTRL, PAC and SUPC together - so a handler
 must ask each block in turn and `isr()` answers only for this one.
 

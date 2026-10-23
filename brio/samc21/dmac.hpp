@@ -2,23 +2,45 @@
  * dmac.hpp
  *
  * The SAM C21 Direct Memory Access Controller (DS60001479M ch. 25), driven
- * for ONE use and refused for every other: a single channel draining a
+ * for one use and refused for every other: a single channel draining a
  * SERCOM's transmit ring - `DmaTxEngine`, the engine samc21/sercom.hpp's
- * Uart takes in its one optional slot.
+ * Uart takes in its one optional slot. A program does not call the engine:
+ * it names it in the Uart and binds the DMAC's vector to the Uart's
+ * completion body, and the transmitter then moves the ring in blocks with
+ * no interrupt per byte (docs/samc21/sercom.md, "How to use it"):
+ *
+ *     #include "samc21/dmac.hpp"
+ *     using Serial = brio::Uart<5, console_pads, 64, 256, brio::DmaTxEngine>;
+ *     extern "C" void DMAC_Handler() { Serial::dma_isr(); }
+ *
+ * Who calls what. The Uart's init() calls arm() (main context, a setup
+ * verb), which claims the engine, resets and
+ * configures the block and the channel with bounded waits, and opens the
+ * DMAC's NVIC line; the Uart's release() calls release(). Blocks are
+ * started from the Uart's producer verbs in main context and from its
+ * completion in the DMAC handler: the claim between the two, reserve(),
+ * is a test-and-set taken under the platform's critical section, and the
+ * channel's programming, launch(), runs unmasked. take_interrupt(),
+ * complete() and abandon() are the completion body's, reached through the
+ * Uart's dma_isr() in the program's DMAC_Handler and nowhere else; a
+ * DMAC_Handler left unbound is the crt's weak alias of its silent spin,
+ * where the program stops at the first block's end. The run a block
+ * carries is the ring's own storage, lent to the channel until its
+ * completion consumes it.
  *
  *  Dmac         the block's one public face: its NVIC line. The rest of
  *               the block (the AHB clock, the reset, the two descriptor
  *               sections, the arbitration) is DmaTxEngine's to configure.
  *
  *  DmaTxEngine  channel 0, byte beats, one trigger a beat, one block a
- *               run, its completion the end of the run - claimed by ONE
+ *               run, its completion the end of the run - claimed by one
  *               owner at a time.
  *
- * WHY ONE. Erratum 1.10.4 (DS80000740S, "Concurrent channels triggers",
+ * Why one. Erratum 1.10.4 (DS80000740S, "Concurrent channels triggers",
  * E/G/J at revisions E, F and H - this silicon): "When using concurrent
  * channels triggers, the DMAC write-back descriptors may get corrupted."
  * The write-back section is not a report: for an ongoing block the
- * descriptor is FETCHED from it (25.6.2.6), so a corrupted write-back is a
+ * descriptor is fetched from it (25.6.2.6), so a corrupted write-back is a
  * corrupted transfer - measured here as a transmit channel running another
  * channel's descriptor into the SERCOM's own registers, an SPI pair that
  * hangs or completes with its bytes missing beside any third active
@@ -30,37 +52,37 @@
  * engine, no trigger vocabulary, no register reachable from outside this
  * file but the NVIC line.
  *
- * THE ONE-USER RULE, AND HOW IT IS ENFORCED. Structurally first: there is
+ * The one-user rule, and how it is enforced. Structurally first: there is
  * one channel (channel 0) and this file is the only code that touches the
  * controller, so two channels cannot run at once in any image. A program
- * may still name the engine in two Uarts - two owners of ONE channel,
- * which would reprogram each other's live block - so the engine is CLAIMED
+ * may still name the engine in two Uarts - two owners of one channel,
+ * which would reprogram each other's live block - so the engine is claimed
  * at arm() by its owner (the Uart's SERCOM number) and a second owner's
- * arm() while the first holds the claim is refused with a PANIC, the
+ * arm() while the first holds the claim is refused with a panic, the
  * breadcrumb written (PanicCode::assert_failed, context
  * dma_claim_refused_context(owner)): deterministically, at the init that
  * would make the second user, never silently. A claim is given back by
- * release(), so two transports that take the engine IN TURN (a suite
+ * release(), so two transports that take the engine in turn (a suite
  * moving its engine from one SERCOM to another) are legal: one user at a
  * time. A build-time refusal was the preferred form and is not built: the
- * image is one translation unit, but "two DIFFERENT instantiations name
+ * image is one translation unit, but "two different instantiations name
  * this type" is nothing C++ can count without stateful metaprogramming,
  * and it would also refuse the legal in-turn shape.
  *
- * THE LEVEL IS THE RULE'S FOR A TRANSMIT: the NEXT of the arbiter's four
+ * The level is the rule's for a transmit: the next of the arbiter's four
  * (docs/design/dma.md, "The priority rule"). Each channel takes one of
  * four levels (CHCTRLB.LVL), a higher number winning while every level is
  * enabled, and a level is enabled by CTRL.LVLENx (25.6.2.4) - a channel
  * at a level not enabled is invisible to the arbiter (25.8.1, measured).
  * A starved transmit only leaves its line idle a while, so the engine
- * arms at level 2, the one below an overrunning receive's 3; with ONE
+ * arms at level 2, the one below an overrunning receive's 3; with one
  * channel in the image the level ranks it against nothing, and it is
  * stated rather than left at the reset value so the day the controller
  * admits a second user its order is already the rule's. The bus's own
  * QOSCTRL (25.8.7, the DMAC as a host of the SRAM, 10.4.3) is another
  * knob and stays at its reset value.
  *
- * TWO MOMENTS. arm() configures the binding ONCE - the block reset and
+ * Two moments. arm() configures the binding once - the block reset and
  * enabled with its descriptor sections registered, the channel reset and
  * configured (the trigger, TRIGACT beat, the level), TCMPL and TERR
  * armed, the NVIC line opened, and the slot's constant half written: the
@@ -69,25 +91,25 @@
  * SRCADDR, three stores into SRAM - and enables the channel with one
  * store.
  *
- * CHID IS WRITTEN ONCE. The channel registers sit behind a selector
+ * CHID is written once. The channel registers sit behind a selector
  * (25.8.17: CHCTRLA, CHCTRLB, CHINTEN*, CHINTFLAG and CHSTATUS talk to
  * whichever channel CHID names), which is a select-then-use pair with an
  * interrupt between - unless the selector never moves. With one channel
  * it never does: the block's reset leaves CHID at 0, arm() writes 0, and
- * nothing else writes it, so every channel access below is ONE access and
+ * nothing else writes it, so every channel access below is one access and
  * needs no critical section.
  *
- * THE END ADDRESS. For an incrementing side SRCADDR holds the address one
- * beat PAST the last one - start plus the run's length in bytes
+ * The end address. For an incrementing side SRCADDR holds the address one
+ * beat past the last one - start plus the run's length in bytes
  * (25.6.2.7; the register descriptions 25.10.3/25.10.4 print a stray
  * "+ 1" that their own definition of BEATSIZE makes meaningless, and the
  * bench decided it by moving bytes, docs/samc21/dmac.md). The engine
  * computes it; a caller hands in a run.
  *
- * DISABLING IS NOT INSTANTANEOUS, and the edges behind it are silent: a
+ * Disabling is not instantaneous, and the edges behind it are silent: a
  * '0' written to CHCTRLA.ENABLE does not clear until the internal buffer
  * drains (25.8.18, 25.6.3.6), and until it does CHCTRLB is still
- * enable-protected and CHCTRLA.SWRST is IGNORED - the bit never reads back
+ * enable-protected and CHCTRLA.SWRST is ignored - the bit never reads back
  * set, so a wait for it to clear succeeds having reset nothing. Every
  * disable here waits, bounded, and the channel reset refuses when it did
  * not complete.
@@ -103,20 +125,20 @@
  * first beat of its next block (measured, dmac.md) - which no run from a
  * ring in SRAM provokes.
  *
- * THE STANDING REQUEST. A SERCOM's transmit request is a level - "set
+ * The standing request. A SERCOM's transmit request is a level - "set
  * when the transmit buffer is empty", "cleared when DATA is written"
  * (31.6.4.1) - and the channel takes it as it finds it: a request that
  * stands at the channel's enable, or when its trigger is selected onto
  * it, is served at once, so the enable of a block fires its first beat by
  * itself and nothing kicks - a software trigger after that beat started
- * is a SECOND beat into a full DATA (measured, docs/samc21/sercom.md).
+ * is a second beat into a full DATA (measured, docs/samc21/sercom.md).
  * What the channel does not do is keep a request across its own disable
  * (25.6.2.4: a disabled channel leaves the queue of pending ones, PEND
  * cleared, 25.8.23): a DRE that rose and fell again while the channel was
  * disabled fires nothing at the next enable (measured,
  * docs/samc21/dmac.md, "A released requester").
  *
- * A RELEASE LEAVES THE NEXT OWNER NOTHING. The channel keeps no request
+ * A release leaves the next owner nothing. The channel keeps no request
  * (above), and arm() resets the block (CTRL.SWRST, "all registers in the
  * DMAC except DBGCTRL", 25.6.2.2) and the channel before it selects the
  * next owner's trigger. The requester's own line is its owner's to
@@ -130,7 +152,7 @@
  * F: read the row, not the column) are not this silicon; the CRC engine
  * and linked descriptors are not built.
  *
- * ZERO WHEN ABSENT. The descriptor sections are static members, present
+ * Zero when absent. The descriptor sections are static members, present
  * only in an image that reaches them (-fdata-sections, --gc-sections):
  * a Uart that names no engine never includes this header at all.
  */
@@ -169,14 +191,14 @@ struct Dmac {
  * DmaTxEngine - the one DMA user this stratum admits: drain a run of bytes
  * into a peripheral's DATA register on channel 0, one beat per trigger.
  *
- * THE CLAIM AND THE PROGRAMMING ARE TWO STEPS (reserve(), launch()), so an
+ * The claim and the programming are two steps (reserve(), launch()), so an
  * owner that starts blocks from two contexts - the Uart's producer in main
  * context and its completion in the handler - masks the claim alone, a
  * test-and-set of busy_, and programs a reserved channel unmasked: no
  * completion can land under the programming, because no block is in
  * flight. start() is both, for an owner that starts from one context.
  *
- * NO WRITE-BACK IS EVER READ. The engine knows the run it programmed and
+ * No write-back is ever read. The engine knows the run it programmed and
  * learns of its end from TCMPL; there is no third fact to want.
  */
 class DmaTxEngine {
@@ -213,9 +235,10 @@ public:
     /**
      * Claim for `owner` and configure the binding: `data` the address of
      * the peripheral's transmit data register, `trigger` its TX trigger
-     * code (Sercom<n>::dma_tx_trigger()).
+     * code (Sercom<n>::dma_tx_trigger()). A setup verb, main context: the
+     * Uart's init() is its caller.
      *
-     * A CLAIM HELD BY ANOTHER OWNER IS A PANIC - the one-user rule
+     * A claim held by another owner is a panic - the one-user rule
      * (the file header): the breadcrumb is written with PanicCode::
      * assert_failed and dma_claim_refused_context(owner), and the program
      * stops there. False, with the claim given back, when the block or the
@@ -252,8 +275,11 @@ public:
     }
 
     /**
-     * THE CLAIM ON THE CHANNEL: false when a block is already in flight,
-     * otherwise the engine is the caller's until launch() or cancel().
+     * The claim on the channel: false when a block is already in flight,
+     * otherwise the engine is the caller's until launch() or cancel(). An
+     * owner that starts blocks from two contexts calls it under the
+     * platform's critical section (it is a test-and-set of busy_ and
+     * masks nothing itself).
      */
     [[gnu::always_inline]] static bool reserve() {
         if (busy_) {
@@ -267,7 +293,7 @@ public:
     static void cancel() { busy_ = false; }
 
     /**
-     * Send one contiguous run on a RESERVED engine: three stores into the
+     * Send one contiguous run on a reserved engine: three stores into the
      * slot and the enable. False - and the reservation given back - when
      * the run is empty or longer than BTCNT counts (65535 beats); the
      * caller keeps the bytes and offers them again.
@@ -287,7 +313,7 @@ public:
     }
 
     /// reserve() and launch() in one call, for an owner that starts blocks
-    /// from ONE context. False when a block is in flight or the run is
+    /// from one context. False when a block is in flight or the run is
     /// refused.
     static bool start(std::span<const uint8_t> run) { return reserve() && launch(run); }
 
@@ -295,9 +321,9 @@ public:
     static uint16_t in_flight() { return busy_ ? in_flight_ : 0u; }
     static bool busy() { return busy_; }
 
-    /// The channel is ENABLED with no trigger pending and no beat moving
+    /// The channel is enabled with no trigger pending and no beat moving
     /// (CHCTRLA.ENABLE set, CHSTATUS.PEND and BUSY clear). Beside a
-    /// trigger that STANDS - the owner's proof - a channel that cannot
+    /// trigger that stands - the owner's proof - a channel that cannot
     /// move: samc21/sercom.hpp's dead-block predicate asks it.
     static bool waiting() {
         return (regs().DMAC_CHCTRLA & DMAC_CHCTRLA_ENABLE_Msk) != 0u &&
@@ -349,11 +375,11 @@ public:
     /**
      * Throw away a block the silicon is not finishing, and hand the
      * channel back ready for the next one: reset, reconfigured, re-armed.
-     * THE CALLER DECIDES the block is dead - only the peripheral's owner
+     * The caller decides the block is dead - only the peripheral's owner
      * can read the flags that make it a fact - or a bus error did (TERR,
      * the channel disabled by the silicon). What is lost is an unknown
      * tail of the block; every abandonment is counted in faults().
-     * True when a block was abandoned. OUT OF LINE AND COLD: the rare
+     * True when a block was abandoned. Out of line and cold: the rare
      * path, so an owner's completion flattened into its vector, or placed
      * in SRAM (samc21/sercom.hpp's dma_isr()), carries none of it.
      */

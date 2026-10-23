@@ -2,23 +2,34 @@
  * dma.hpp
  *
  * The DMA controllers of the STM32F4 (RM0090 ch. 10, RM0390 ch. 9,
- * RM0383 ch. 9 - one chapter, three manuals, the same IP), in the two
- * strata every brio driver has:
+ * RM0383 ch. 9 - one chapter, three manuals, the same IP), for a program
+ * that wants data moved without the CPU: a block of memory copied or
+ * filled, a peripheral register fed from a run or drained into one, a
+ * serial line landing in a ring. Most programs meet this file only as the
+ * engine template arguments of a transport (stm32f4/usart.hpp's Uart, the
+ * SPI and I2C hosts); the smallest use of its own is a copy:
  *
- *   Dma<n>                the BLOCK: its AHB1 gate, its reset, the two
+ *     using Copier = brio::DmaCopyEngine<2, 4>;   // any DMA2 stream
+ *     Copier::arm(brio::DmaPriority::high);
+ *     (void)Copier::copy(frame_out, frame_in, 1024);   // 1024 uint32_t
+ *     while (Copier::busy()) { }
+ *
+ * It holds four layers, in the two strata every brio driver has:
+ *
+ *   Dma<n>                the block: its AHB1 gate, its reset, the two
  *                         interrupt-status registers every stream reports
  *                         into and the two write-one-to-clear registers
  *                         beside them, and the one thing that separates
  *                         the two controllers - only DMA2 can move memory
  *                         to memory;
- *   DmaStream<n, s>       the RESOURCE: one stream's six registers
+ *   DmaStream<n, s>       the resource: one stream's six registers
  *                         (SxCR/SxNDTR/SxPAR/SxM0AR/SxM1AR/SxFCR), the
  *                         enable discipline of 10.3.17, the FIFO with the
  *                         burst rules of table 49, the double buffer with
  *                         its current-target readback, the flow
  *                         controller, all five flags and one ISR body;
  *   DmaTxEngine / DmaRxEngine
- *                         the two TASKS a transport wants: drain a run
+ *                         the two tasks a transport wants: drain a run
  *                         into a peripheral, fill a run from one - the
  *                         slots stm32f4/usart.hpp's Uart and the bus
  *                         hosts declare, bound once and started with four
@@ -26,25 +37,50 @@
  *                         and the receive engine's second shape, a ring
  *                         filled lap after lap in circular mode, whose
  *                         producer index is SxNDTR itself;
- *   DmaCopyEngine         the TASK memory wants: copy and fill, memory to
+ *   DmaCopyEngine         the task memory wants: copy and fill, memory to
  *                         memory on a DMA2 stream, the beat and the bursts
  *                         chosen per block from its alignment.
  *
- * A STREAM IS NOT A CHANNEL, and the difference is the whole shape of
+ * (An engine is a driver layer that owns one stream and moves a run - a
+ * buffer and its length - per block; a task, in brio, is a driver layer
+ * with state of its own that a program or a transport calls.)
+ *
+ * Who calls what. The bindings - an engine's arm(), DmaStream's
+ * configure(), prepare() and load(), Dma<n>'s init() and reset() - are
+ * setup verbs, for main or the owner's setup, and the stream verbs that
+ * reconfigure refuse while EN stands. What waits: abort(), stop() and the
+ * engines' abandon() and stop() wait for EN to come down, at most 200 000
+ * reads (abort()'s `spins`); a bare stream's load() waits the same way,
+ * since its prepare() aborts what runs before it writes; an engine's
+ * block start never polls, and refuses instead while the stream still
+ * runs. What
+ * masks: DmaStream::arm() alone, a read-modify-write of SxCR and SxFCR
+ * under InterruptGuard; an engine's claim() is the test-and-set a
+ * transport with two racing contexts masks itself. The ISR bodies
+ * (DmaStream::isr(), the engines' service() and service_ring()) are
+ * called by the program's handler for the stream's vector and nowhere
+ * else. A run handed to a start, and the cell of a fill or a fixed start,
+ * is the caller's and is lent to the stream until the block ends - the
+ * engine's complete() or busy() answering false, a receive engine's
+ * take() for what has arrived - and nothing checks it; a buffer the
+ * stream writes is read back by the program through a volatile access
+ * (docs/stm32f4/dma.md, the compiler finding).
+ *
+ * A stream is not a channel, and the difference is the whole shape of
  * this controller. On the STM32G0 a channel is the unit and a
  * multiplexer points it at any request line. Here the unit is the
- * STREAM - eight per controller, each with its own FIFO, its own
- * priority and its OWN VECTOR - and a stream chooses between exactly
- * EIGHT request lines with CHSEL (10.3.3). Which peripheral sits on
+ * stream - eight per controller, each with its own FIFO, its own
+ * priority and its own vector - and a stream chooses between exactly
+ * eight request lines with CHSEL (10.3.3). Which peripheral sits on
  * which (stream, channel) cell is a fixed wiring table per part class,
  * so a peripheral cannot be served by any stream: it can be served by
  * the one or two the table gives it. That is why the engines here name
- * a stream AND a channel where the G0's name a channel and a request
- * id, and why the check that the pair really carries the peripheral is
+ * a stream and a channel (where the G0's name a channel and a request
+ * id), and why the check that the pair really carries the peripheral is
  * a compile-time one (stm32f4/usart.hpp's static_assert over
  * usart_dma_placement_valid()).
  *
- * THE LEVEL AN ENGINE ARMS AT IS ITS PERIPHERAL'S (stm32f4/dma_engine.hpp's
+ * The level an engine arms at is its peripheral's (stm32f4/dma_engine.hpp's
  * DmaPriority, docs/design/dma.md). Each controller arbitrates its streams
  * by level, the lower stream number between equals, separately for each
  * of its two ports (10.3.4); measured, one or two copies outranking a
@@ -55,56 +91,56 @@
  * names its own level at the call. The raw stream's DmaStreamConfig keeps
  * SxCR.PL's reset value, low.
  *
- * THE DRIVER OWNS THE FABRIC AND NOT THE REQUEST VOCABULARY - the same
- * division the STM32G0 stratum draws, and for the same reason. This
- * file takes a plain channel number and knows nothing about USARTs; a
+ * The driver owns the fabric and not the request vocabulary (the
+ * division the STM32G0 stratum draws too). This file takes a plain
+ * channel number and knows nothing about USARTs; a
  * peripheral publishes its own cells of tables 43 and 44 (RM0390's 28
  * and 29, RM0383's 27 and 28) and the reserve keys them on the
  * device-select define, because no device header of this pack carries a
  * request mapping and the tables differ by part. The serial slice is in
  * stm32f4/device_tables.hpp; the next chapter's slice joins it there.
  *
- * FOUR FACTS OF THIS CONTROLLER shape everything below.
+ * Four facts of this controller shape everything below.
  *
- *  - EN IS NOT A SWITCH, IT IS A REQUEST. 10.3.17 step 1 and 10.3.14:
+ *  - EN is not a switch, it is a request. 10.3.17 step 1 and 10.3.14:
  *    a write of 0 to EN takes effect only when the current transfer has
- *    finished AND, on a peripheral-to-memory or memory-to-memory stream,
+ *    finished and, on a peripheral-to-memory or memory-to-memory stream,
  *    when the FIFO has been flushed into the destination - so EN reads
  *    back 1 until then, and reconfiguring a stream before that read
  *    comes down writes into registers the silicon ignores. abort() is
  *    that wait, spelled once; every configuring verb refuses while EN
- *    reads 1 rather than store into a protected field. And the SET side
+ *    reads 1 rather than store into a protected field. And the set side
  *    has a slack of its own, measured rather than documented anywhere:
  *    EN reads back 0 in the load that follows its store and 1 in the
  *    next one - and on the STM32F446 and the STM32F411 that load can
  *    wedge the stream - so nothing in this file reads SxCR after an EN
  *    store: enable() and the engines' starts store and move on.
  *
- *  - THE FIFO IS A CONFIGURATION, NOT A BUFFER THE CALLER SEES. Four
+ *  - The FIFO is a configuration, not a buffer the caller sees. Four
  *    words per stream, a threshold, and table 49's list of which
  *    (memory burst, threshold, memory width) triples the silicon
- *    accepts - the rest raise FEIF AT THE ENABLE and disable the stream
+ *    accepts - the rest raise FEIF at the enable and disable the stream
  *    (10.3.18). dma_stream_config_valid() is table 49 as arithmetic
  *    (the threshold in bytes must be a whole number of memory bursts,
  *    and a burst must fit the FIFO), so the forbidden triples are
  *    refused before the enable rather than reported after it.
  *
- *  - MEMORY-TO-MEMORY IS DMA2's ALONE, and no register says so. DMA1's
+ *  - Memory-to-memory is DMA2's alone, and no register says so. DMA1's
  *    AHB peripheral port is not connected to the bus matrix (figures 33
- *    and 34, note 1), so a DMA1 stream cannot READ a memory through the
+ *    and 34, note 1), so a DMA1 stream cannot read a memory through the
  *    port that would be its source. Refused at compile time where the
  *    controller is a template argument and at run time where the config
  *    is a value.
  *
- *  - A REQUEST IS A LEVEL SERVED ON ENABLE. 10.3.2's handshake is the
- *    G0's: the peripheral drives its request, the controller
+ *  - A request is a level served on enable. 10.3.2's handshake is
+ *    level-driven, as the G0's is: the peripheral drives its request, the controller
  *    acknowledges, the peripheral releases. A stream enabled while its
  *    peripheral's request already stands is served at once, so there is
  *    no software-trigger register on this controller and no verb here
  *    to kick a stalled first beat - measured, because a wrong answer is
  *    a transmitter that never starts.
  *
- * ERRATA. Neither ES0206 (F427/F437/F429/F439) nor ES0298 (F446) has a
+ * Errata. Neither ES0206 (F427/F437/F429/F439) nor ES0298 (F446) has a
  * DMA section: their "DMA" items are the DAC's request behaviour, that
  * chapter's business. Two items do reach this file:
  *  - ES0206 2.2.7 / ES0298 2.2.7, delay after an RCC peripheral clock
@@ -113,9 +149,9 @@
  *    does exactly that for every caller.
  *  - ES0287 2.2.11 (the F411 alone), DMA2 data corruption when AHB and
  *    APB2 requests are concurrent: a transfer that reaches QUADSPI, the
- *    FSMC or a GPIO register THROUGH THE PERIPHERAL PORT can be
+ *    FSMC or a GPIO register through the peripheral port can be
  *    performed several times. The workaround is to put such a
- *    destination on the MEMORY port instead - which this driver can
+ *    destination on the memory port instead - which this driver can
  *    express, because DIR names which side is the source and the two
  *    ends are separate arguments, but cannot choose: only the
  *    application knows what its addresses are. Stated as an obligation
@@ -821,8 +857,10 @@ public:
     }
 
     /// prepare() and then the enable - the sequence that leaves the
-    /// stream RUNNING. False when anything in the transfer was refused or
-    /// when EN did not stay up.
+    /// stream running. False when anything in the transfer was refused
+    /// (nothing is enabled then); enable() reads nothing back and answers
+    /// true, so a stream that dies after its enable says so in its flags
+    /// (TEIF), not here.
     static bool load(const DmaTransfer& t) { return prepare(t) && enable(); }
 
     /// Start a stream that has been prepared. A separate verb because on
@@ -915,7 +953,7 @@ public:
      *
      * One vector per stream on this family, so a body never has to ask
      * "was it me" - but only armed flags are reported and cleared, for
-     * the G0's reason: HTIF is set by hardware whether or not HTIE is on,
+     * this reason: HTIF is set by hardware whether or not HTIE is on,
      * and a body that swallowed it would consume a flag its owner polls
      * for.
      */
@@ -1074,9 +1112,11 @@ public:
         return static_cast<uint8_t>(pending);
     }
 
-    /// THE BINDING: `data` is the register the runs are poured into,
+    /// The binding: `data` is the register the runs are poured into,
     /// `irqs` what the stream interrupts for. Opens the controller's gate,
-    /// stops the stream, writes everything a block does not change.
+    /// stops the stream (abort()'s bounded wait), writes everything a block
+    /// does not change, and enables or disables the stream's NVIC line by
+    /// `irqs`. A setup verb, called once by the engine's owner.
     /// `high` by default: a peripheral a transmit stream feeds waits for
     /// it and loses nothing (DmaPriority's rule). THE DAC IS THIS
     /// FAMILY'S EXCEPTION to "only slows": a trigger that finds its request
@@ -1102,9 +1142,9 @@ public:
         }
     }
 
-    /// THE CLAIM: take the stream for one block, or answer false because a
+    /// The claim: take the stream for one block, or answer false because a
     /// block holds it. A test-and-set and nothing else - the one step a
-    /// caller with two racing contexts masks.
+    /// caller with two racing contexts masks; it masks nothing itself.
     [[gnu::always_inline]] static bool claim() {
         if (st_.busy) {
             return false;
@@ -1666,9 +1706,10 @@ public:
     static constexpr uint8_t controller = n;
     static constexpr uint8_t stream = s;
 
-    /// THE BINDING: the gate, the stream stopped, the FIFO at a full
-    /// threshold, the configuration word kept. The completion is polled
-    /// (busy()), so the stream's interrupt stays off. `low` by default: no
+    /// The binding: the gate, the stream stopped (abort()'s bounded
+    /// wait), the FIFO at a full threshold, the configuration word kept. A
+    /// setup verb, called once. The completion is polled (busy()), so the
+    /// stream's interrupt stays off. `low` by default: no
     /// request paces a copy, it asks for a port at every burst of its
     /// block, and three of them outranking a receive stream starve it for
     /// as long as they run (DmaPriority's rule).
@@ -1686,7 +1727,9 @@ public:
     }
 
     /// `count` elements from `src` to `dst`, memcpy's shape (no overlap),
-    /// the element the beat. False, and nothing started, while a block runs,
+    /// the element the beat. Returns once the block is started, without
+    /// waiting for it: both arrays are lent to the stream until busy()
+    /// answers false. False, and nothing started, while a block runs,
     /// for an empty block or one past SxNDTR's 65535, or for an address
     /// not aligned on its element.
     template <typename T>
@@ -1706,7 +1749,8 @@ public:
 
     /// True while the last block runs. Reads the stream's flags (one load
     /// of LISR/HISR) and retires the block when they say it ended; a
-    /// transfer error is counted in faults().
+    /// transfer error is counted in faults(). Waits for nothing: a poll
+    /// loop is the caller's.
     static bool busy() {
         if (!st_.busy) {
             return false;

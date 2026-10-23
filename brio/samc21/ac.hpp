@@ -1,31 +1,61 @@
 /*
  * ac.hpp
  *
- * The SAM C21 Analog Comparators (DS60001479M ch. 40), in three faces:
+ * The SAM C21 Analog Comparators (DS60001479M ch. 40): whether a
+ * voltage is above or below a threshold, with no conversion - a pad
+ * against a fraction of VDD or against another pad, a signal inside or
+ * outside a window - read by the program, raised as an interrupt, or
+ * sent on the event system. The smallest use, shortened from
+ * docs/samc21/ac.md's "How to use it" (which also routes the output to
+ * the CMP0 pad):
  *
- *  Ac              the BLOCK: APB clock, the one GCLK channel
- *                  (GCLK_AC clocks ALL the digital - sampling, filter,
+ *     brio::Ac::init(1);                        // GCLK_AC from generator 1
+ *     using Comp = brio::AcComparator<0>;
+ *     Comp::configure({.positive = brio::AcPositive::pin0,
+ *                      .negative = brio::AcNegative::vscale});
+ *     Comp::scaler(31);                         // threshold VDD/2
+ *     Comp::enable(true);
+ *     while (!Comp::ready()) { }
+ *     bool above = Comp::state();
+ *
+ * Who calls what. init(), release(), configure(), enable(),
+ * event_config() and the window's configure() are setup verbs, for
+ * main() or an active object's handler (an active object is a brio
+ * component with its own event queue, served one event at a time by the
+ * kernel): each waits on SYNCBUSY with a bound (0xFFFF polls by default)
+ * and answers false when the wait runs out, and none masks interrupts.
+ * The generator init() is given must already run - it clocks every
+ * digital stage of the block. scaler(), start(), ready(), state() and
+ * the flag and arming verbs are single loads or stores, legal from any
+ * context. take_flags() is the interrupt body: the program's AC_Handler
+ * calls it (the crt's default for an unbound vector is a silent spin);
+ * init() leaves the NVIC line disabled and the program enables it.
+ *
+ * Three faces:
+ *
+ *  Ac              the block: APB clock, the one GCLK channel
+ *                  (GCLK_AC clocks all the digital - sampling, filter,
  *                  edge detection, the SYNC output; the comparators
  *                  themselves are analog and free-running), reset and
  *                  enable with their SYNCBUSY waits, INTFLAG.
  *
  *  AcComparator<n> one of the four comparators: configuration written
- *                  only while ITS enable is low (every COMPCTRL field
+ *                  only while its enable is low (every COMPCTRL field
  *                  is enable-protected, 40.8.13), the per-comparator
  *                  VDD scaler, single-shot start, READY/STATE, flag
  *                  and arming verbs.
  *
- *  AcWindow<w>     the comparator PAIR as a window: WSTATE, the four
+ *  AcWindow<w>     the comparator pair as a window: WSTATE, the four
  *                  WINTSEL conditions, and the two consistency rules
  *                  the registers do not enforce (below).
  *
- * WHAT THE CHAPTER SAYS ABOUT TIME, collected here because the bench
+ * What the chapter says about time, collected here because the bench
  * question lives exactly in the gaps between these clauses:
  *  - every figure of 40.6.2.4 draws a "Sampled Comparator Output" and
- *    the filter section states the sampling rate IS GCLK_AC;
+ *    the filter section states the sampling rate is GCLK_AC;
  *  - COMPCTRLn.OUT routes either "the asynchronous output" or "the
  *    synchronous output (including filtering)" to the CMPn pad - with
- *    NO cycle count given for the synchronous path anywhere;
+ *    no cycle count given for the synchronous path anywhere;
  *  - the only counted delay is the ENABLE/START command propagation
  *    ("2-3 cycles" in figures 40-3/40-4, before t_STARTUP) and the
  *    filter's own "N-1 sampling cycles";
@@ -47,30 +77,30 @@
  * CMP2 = PA24 or PB30, CMP3 = PA25 or PB31 - on the bench board
  * PB30/PB31 are the console.
  *
- * WINDOW MODE (40.6.4) is the second face of every comparator PAIR:
+ * Window mode (40.6.4) is the second face of every comparator pair:
  * COMP0/COMP1 form window 0 and COMP2/COMP3 window 1. The pair shares
  * one positive input and its two negative inputs are the window's
  * limits, in either order; WSTATE says above / inside / below and
  * WINTSEL chooses which of those four conditions raises the window's
  * own interrupt flag. The chapter asks for two things the registers do
  * not enforce - both comparators of the pair in the same measurement
- * mode (COMPCTRLn.SINGLE) and the SAME I/O pin as positive input - so
+ * mode (COMPCTRLn.SINGLE) and the same I/O pin as positive input - so
  * `AcWindow<w>::pair_consistent()` asks the silicon whether they hold.
  *
- * THE EVENT SURFACE (40.6.13) runs both ways and this header publishes
+ * The event surface (40.6.13) runs both ways and this header publishes
  * both vocabularies, evsys.hpp owning only the fabric:
- *  - OUT: `comparator_generator(n)` (a copy of the comparator status)
+ *  - Out: `comparator_generator(n)` (a copy of the comparator status)
  *    and `window_generator(w)` (a copy of the inside/outside status),
  *    enabled by EVCTRL.COMPEOx / WINEOx;
- *  - IN: `start_user(n)`, the SOCn user that starts a comparison,
+ *  - In: `start_user(n)`, the SOCn user that starts a comparison,
  *    enabled by EVCTRL.COMPEIx and optionally inverted by INVEIx. Table
- *    29-3 marks all four SOC users ASYNCHRONOUS PATH ONLY, which is a
+ *    29-3 marks all four SOC users asynchronous path only, which is a
  *    fact about the fabric a caller has to honour when it connects the
  *    channel.
- * EVCTRL is ENABLE-PROTECTED (block level), so `event_config()` refuses
+ * EVCTRL is enable-protected (block level), so `event_config()` refuses
  * while the block is enabled rather than storing into a dead register.
  *
- * PER-PACKAGE INPUT LEGALITY: the pair, not the comparator, owns the
+ * Per-package input legality: the pair, not the comparator, owns the
  * pads - COMP0/1 take AIN[0..3] and COMP2/3 take AIN[4..7] - and 40.1
  * says the E and G variants bond only AIN[5:4] for COMP2/3. The device
  * header says the same thing in symbols (PIN_PB05B_AC_AIN6 and
@@ -78,8 +108,8 @@
  * here: `ac_config_valid()` refuses a pin input the package does not
  * bond, and `AcComparator<n>::configure()` returns false on it.
  *
- * ERRATA, DS80000740S, read on the E/G/J ROW at revision F. Of six AC
- * items plus one device-level one, TWO are this silicon and neither can
+ * Errata, DS80000740S, read on the E/G/J row at revision F. Of six AC
+ * items plus one device-level one, two are this silicon and neither can
  * be fixed in a register:
  *  - 1.5.3 Analog Pins (all revisions): the AC and the PTC share pads,
  *    which can cost the PTC accuracy. The workaround is to give the AC
@@ -88,21 +118,21 @@
  *    coordinate with.
  *  - 1.5.6 Spurious COMP Interrupt (all revisions): enabling with
  *    MUXNEG = bandgap can raise a spurious COMPn flag. Microchip's
- *    workaround is to use the VDD scaler instead. This driver does NOT
+ *    workaround is to use the VDD scaler instead. This driver does not
  *    refuse the bandgap - it is a real and useful input - so the
  *    obligation is the caller's: after enabling a comparator whose
  *    negative input is the bandgap, clear its flag before arming.
  *    `AcNegative::bandgap` carries the note.
- *  - NOT this silicon: 1.5.1 and 1.5.4 (hysteresis, revisions B..E and
- *    B), 1.5.2 (low-power mode WITH hysteresis, B..E - the pairing is
+ *  - Not this silicon: 1.5.1 and 1.5.4 (hysteresis, revisions B..E and
+ *    B), 1.5.2 (low-power mode with hysteresis, B..E - the pairing is
  *    legal here), 1.5.5 (power consumption figures, B..E), and the
  *    device-level 1.8.2, which says GCLK_AC is not functional and the
- *    AC must borrow GCLK_ADC1's channel - REVISION B ONLY, so `clock()`
+ *    AC must borrow GCLK_ADC1's channel - revision B only, so `clock()`
  *    uses AC_GCLK_ID as the header declares.
  *
- * SLEEP IS MEASURED, not built here: the 40.6.14 sequences both ran
+ * Sleep is measured, not built here: the 40.6.14 sequences both ran
  * (measured - a continuous comparator with RUNSTDBY wakes the device on
- * its own edge, and COMPCTRL.RUNSTDBY gates the COMPARATOR, not merely
+ * its own edge, and COMPCTRL.RUNSTDBY gates the comparator, not merely
  * its clock; docs/samc21/ac.md carries the numbers). What remains not
  * covered is in ac.md's own list.
  */
@@ -408,6 +438,9 @@ public:
     static bool enabled() { return (regs().AC_CTRLA & AC_CTRLA_ENABLE_Msk) != 0u; }
 
     /// Clock, reset, enable: the block up with no comparator running.
+    /// A setup verb; `gclk_generator` must already run (its rate is the
+    /// sampling rate of everything digital here). False when a channel
+    /// or synchronization wait ran out; the NVIC line is left disabled.
     static bool init(uint8_t gclk_generator, uint32_t spins = 0xFFFFu) {
         Nvic::disable(irq());
         bus_clock(true);

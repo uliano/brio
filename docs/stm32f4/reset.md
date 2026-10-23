@@ -1,13 +1,90 @@
 # Reset, the two watchdogs and the fault vectors - why the program is running, and how to end it (STM32F4)
 
-Documents of record: RM0090 Rev 22 - 7.1 (the three kinds of reset),
+This document is for a programmer who needs to know why the program is
+running - a power-on, the reset pin, a software reset, a watchdog - or
+wants to end it on purpose and find out at the next boot what ended it.
+`stm32f4/reset.hpp` reads and clears the RCC's reset flags (`Reset`),
+drives the two watchdogs this family carries (`Iwdg`, the independent
+one on its own low-speed RC oscillator, the LSI; `Wwdg`, the window
+watchdog on the APB1 clock), switches the Cortex-M4's three configurable
+fault vectors on and reads what they recorded (`Faults`), and gives a
+program the body to bind to a fault vector so that a crash leaves a note
+the next boot can read instead of a silent spin (`hard_fault_reset<P>()`).
+
+The smallest use, from the "How to use it" block below:
+
+```cpp
+extern "C" void HardFault_Handler() {
+    brio::hard_fault_reset<brio::Stm32f4Platform<>>();
+}
+
+int main() {
+    const uint32_t why = brio::Reset::take_flags();   // once, at boot
+    if (why & brio::ResetFlag::watchdog) { /* a recovery boot */ }
+
+    // A watchdog with about a second of rope. arm() starts it first,
+    // because the registers do not update before that.
+    (void)brio::Iwdg::arm(brio::IwdgConfig{
+        .prescaler = brio::IwdgPrescaler::div8,
+        .reload = 0x0EEE,
+    });
+    for (;;) {
+        brio::Iwdg::refresh();
+        // ... the loop that must keep running
+    }
+}
+```
+
+Line by line: the `extern "C"` function is the HardFault interrupt
+handler, as in C, under the name the crt gives the vector, and its body
+writes the kernel's panic record (code `kernel_fault`) unless one already
+stands, then resets the chip; `take_flags()` reads the flags and clears
+them, so what it returns is everything that happened since the last
+clear, as a mask (`ResetFlag::watchdog` is the two watchdogs' bits
+together); `arm()` starts the independent watchdog and then gives it its
+timing, here the LSI divided by 8 and a reload of 0x0EEE, 955 ms at the
+32 kHz the tables assume; `refresh()` reloads the counter, and a program
+that stops calling it is reset at the end of the time-out.
+
+What decides correctness even there. `take_flags()` is the boot's one
+read: the register accumulates every source until it is cleared, so a
+second call reports only what came after the first, and no single bit is
+"the cause" (PINRSTF in particular is raised by the internal sources
+too). Once started, the independent watchdog cannot be stopped by
+software: only a reset stops it, so every path of the program after
+`arm()` must refresh inside the time-out, and a debugger halt freezes the
+counter only because the debugger set the freeze bits. `arm()` answers
+false in two cases that leave the part in two states: before anything
+is written, when the setting itself is invalid, and the watchdog is
+then not running; or after the start, when an update never crossed to
+the watchdog's own clock domain, and the watchdog is running then all
+the same, with whatever timing it had - the example discards that
+answer, and a program that cares reads it. The LSI is an uncalibrated RC
+oscillator (17..47 kHz by the datasheet; 33.5 and 31.4 kHz on two bench
+boards, below), so a time-out is the nominal one only to that accuracy.
+The fault body runs only where the program binds it: an unbound
+HardFault vector is the crt's own spin, and the three configurable
+faults reach their own vectors only after `Faults::enable()`, escalating
+to HardFault until then. The record it leaves is read at the next boot
+with the kernel's `take_panic_record<P>()` (`kernel/panic.hpp`).
+
+The rest of this page, in order: the documents of record; what the
+silicon does (the flags and their two owners, the IWDG and the update
+bits its keyed registers wait on, the WWDG and its arithmetic, the fault
+vectors, the debug freeze bits); the types and verbs; how to use it,
+with the window watchdog and a fault banked by the program; the bench
+findings, every one taken across real resets; and what is not covered.
+
+## Documents of record
+
+RM0090 Rev 22 - 7.1 (the three kinds of reset),
 7.3.21 (RCC_CSR), 7.2.9 (the watchdog clock), ch. 21 (IWDG), ch. 22
 (WWDG), 38.16 (the debug freeze bits) - with its twins RM0390 Rev 6
 (6.3.21, ch. 20, ch. 21) and RM0383 Rev 4 (6.3.21, ch. 15, ch. 16),
 PM0214 Rev 10 4.3 (SHCSR, CCR, CFSR, HFSR, MMFAR, BFAR and AIRCR's
 SYSRESETREQ) for the core half, and the LSI's 17..47 kHz from each
 part's datasheet (the F429's is DocID024030 Rev 10 table 42). The
-errata carry ONE item of this chapter, and all four carry it on every
+errata carry one item of this chapter, and all four carry it on every
 silicon revision: **ES0206 Rev 24 2.8.1..2.8.4** (ES0298 Rev 8
 2.9.1..2.9.4, ES0287 Rev 6 2.7.1..2.7.4, ES0321 Rev 14 2.10.1..2.10.4) -
 the IWDG's RVU and PVU flags
@@ -30,12 +107,12 @@ stm32f4`; the bench suite is `test_stm32f4_reset`.
 reset flags are set by hardware and every one of them is "cleared by
 writing to the RMVF bit" - nothing else takes them down, and 7.3.21 adds
 that the register is "reset by system reset, except reset flags by power
-reset only". This register is a HISTORY: the boot verb is read-and-clear
+reset only". This register is a history: the boot verb is read-and-clear
 (`take_flags()`) and what a boot sees is the delta since the last clear.
 **PINRSTF is raised by a software reset too** (measured): 7.3.21
 describes it as the NRST pin's alone, but the pad is driven low by the
 internal reset sources, so the bit names the pin only when it stands
-ALONE - which is what `pin_only()` asks. Between the two facts the cause
+alone - which is what `pin_only()` asks. Between the two facts the cause
 is not a function of the register's value, which is why this driver
 offers masks and no `cause()` enum. The family's own two supply bits,
 PORRSTF and BORRSTF, are not exclusive either: 7.3.21 sets BORRSTF "when
@@ -59,11 +136,11 @@ zero) and not as a refresh into a closed window.
 **The IWDG's keyed registers do not update until it is started**, and no
 part of chapter 21 says so. PR and RLR are writable only after the key
 0x5555 (21.3.2) and any other key value - the 0xAAAA refresh included -
-locks them again. Each has a bit in IWDG_SR that hardware raises AT THE
-STORE (measured: the read right after it already sees the bit) and drops
+locks them again. Each has a bit in IWDG_SR that hardware raises at the
+store (measured: the read right after it already sees the bit) and drops
 when the value has crossed into the VDD domain, and a register read
-while its bit stands returns the OLD value (21.4.2 and 21.4.3 say so
-twice). With the watchdog STOPPED the bit never drops, LSION or no
+while its bit stands returns the old value (21.4.2 and 21.4.3 say so
+twice). With the watchdog stopped the bit never drops, LSION or no
 LSION: 7.2.9 is where the reason hides - "if the independent watchdog is
 started ... after the LSI oscillator temporization, the clock is
 provided to the IWDG" - so the logic that performs the update has no
@@ -75,7 +152,7 @@ bounded time instead of hanging.
 last four words measured. 21.3 starts it with 0xCCCC and 5.3.4 finishes
 the sentence with "Once started it cannot be stopped except by a Reset";
 the bench sits still for three time-outs after an IWDG reset with
-nothing refreshing anything and lives, so a program does NOT inherit a
+nothing refreshing anything and lives, so a program does not inherit a
 watchdog it must feed for ever. There is no bit that says whether it
 runs. The one witness the silicon offers is the LSI the start forces on:
 `Iwdg::running()` reads LSIRDY standing with LSION clear, measured in
@@ -86,13 +163,13 @@ family a backup domain holding RTCEN with RTCSEL naming the LSI leaves
 LSIRDY clear (measured).
 
 **The WWDG is the opposite peripheral in every way.** It counts PCLK1
-through a fixed /4096 and a programmable /2^WDGTB - TWO bits here, four
+through a fixed /4096 and a programmable /2^WDGTB - two bits here, four
 codes, /1 to /8, the width read off the header
-(`wwdg_prescaler_codes()`) - its bus clock enable is CLEAR AT RESET, and
+(`wwdg_prescaler_codes()`) - its bus clock enable is clear at reset, and
 WDGA is "set by software and only cleared by hardware after a reset"
-(22.6.1). Its down-counter is FREE-RUNNING "even if the watchdog is
+(22.6.1). Its down-counter is free-running "even if the watchdog is
 disabled" (22.3) and EWIF "is also set if the interrupt is not enabled"
-(22.6.3) - so the whole TIMING path is measurable with WDGA never
+(22.6.3) - so the whole timing path is measurable with WDGA never
 written, which is what keeps a one-way switch out of the bench suite's
 `z`. What is not reachable that way is the interrupt: with WDGA clear
 the flag rises and no request is made (measured), so 22.2's "triggered
@@ -115,9 +192,9 @@ and the table, the formula and the bench agree against it.
 **A Cortex-M4 has four fault vectors and three of them are disabled at
 reset.** MemManage, BusFault and UsageFault are configurable exceptions
 (PM0214 4.3.10: SHCSR's MEMFAULTENA, BUSFAULTENA, USGFAULTENA, all clear
-out of reset, measured), and while they are off every fault ESCALATES to
-HardFault with HFSR.FORCED set - which is what a brio program saw until
-this chapter. Two conditions are not faults at all unless CCR asks for
+out of reset, measured), and while they are off every fault escalates to
+HardFault with HFSR.FORCED set - which is what a program that never calls
+`Faults::enable()` sees. Two conditions are not faults at all unless CCR asks for
 them: a divide by zero (DIV_0_TRP) and an unaligned access
 (UNALIGN_TRP). `Faults` is the switch and the status; the record it
 reads is twelve bytes and the driver owns no storage for it, because
@@ -126,14 +203,14 @@ as the kernel's PanicRecord is the platform's.
 
 **The debug freeze bits are the debugger's.** DBGMCU_APB1_FZ's
 DBG_IWDG_STOP and DBG_WWDG_STOP freeze the two counters while the core
-is HALTED, and OpenOCD's `stm32f4x.cfg` sets both at every attach; the
+is halted, and OpenOCD's `stm32f4x.cfg` sets both at every attach; the
 register is reset by a power-on reset only (38.16), so they stand across
 every warm boot (measured: APB1FZ reads 0x1800 on a board that has been
-flashed). The driver exposes them READ ONLY - a program that fought them
+flashed). The driver exposes them read only - a program that fought them
 would hide the behaviour a measurement is after - and they cost nothing
 to read: DBGMCU sits at 0xE0042000, in the core's private peripheral
 space, with no bus-clock gate in front of it (measured: its IDCODE
-answers with no enable opened). Frozen UNDER HALT is not frozen while
+answers with no enable opened). Frozen under halt is not frozen while
 running, which is why a suite that measures a time-out measures the real
 one.
 

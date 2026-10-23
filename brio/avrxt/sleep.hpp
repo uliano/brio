@@ -1,18 +1,51 @@
 /*
  * sleep.hpp
  *
- * SLPCTRL (DS40002247B ch. 13) - the three sleep modes and the voltage
- * regulator's power profile. The AVR EA's SLPCTRL (DS40002443A ch. 13) is
- * CTRLA alone, the same three modes: no VREGCTRL and no regulator control
- * anywhere, so Vreg and VregPower do not exist there (device tables'
- * has_vreg). What follows is the AVR DB's chapter unless it names the EA. The MECHANISM only: which mode is armed,
- * what a SLEEP instruction then does, and what the regulator is told to
- * do while the CPU is stopped. The POLICY - when a program may stop its
- * clocks - is not here and is not the kernel's either (see the design
- * note at the end of this comment).
+ * The sleep controller of the AVR DA, DB and EA (SLPCTRL, DS40002247B
+ * ch. 13, DS40002443A ch. 13): what a program uses to stop the chip
+ * deeper than the kernel does by itself. The kernel's idle hook already
+ * sleeps in IDLE whenever every queue is empty (AvrPlatform::idle(),
+ * avrxt/platform.hpp), so a program that only wants "nothing to do right
+ * now" needs nothing from this header. STANDBY and POWER-DOWN stop
+ * clocks and shorten the list of what can wake the chip, and this header
+ * is the mechanism for them, in two shapes. Code that owns the moment
+ * enters a mode itself, its wake source configured and enabled first
+ * (the shape docs/avrxt/platform.md, "How to use it", spells out):
+ *
+ *     brio::Pit::init(brio::PitPeriod::cyc4096);        // 125 ms, interrupt on
+ *     brio::Sleep::enter(brio::SleepMode::standby);     // interrupts on, wake armed
+ *
+ * and an active-object program names AvrSleepSite, at the end of this
+ * file, in its power manager (util/power.hpp), which arms a mode after
+ * every stakeholder agreed and leaves the SLEEP instruction to the
+ * kernel loop's idle().
+ *
+ * Who calls what. Sleep::arm() and disarm() are one store of
+ * SLPCTRL.CTRLA each, preceded by the erratum's NOP (below); armed() and
+ * armed_mode() one load: none masks or waits. Sleep::sleep() and enter()
+ * stop the CPU until an enabled interrupt the armed mode keeps comes,
+ * and touch SREG not at all: global interrupts must already be on, and
+ * with no wake source that reaches the armed mode only a reset or a
+ * debugger comes back (13.3.1). They are for main context: a program's
+ * own code before the kernel runs, or code that owns the moment - under
+ * a kernel the loop's idle() executes the instruction. Vreg's verbs are
+ * setup verbs: a read and a CCP-protected write of VREGCTRL each, and
+ * high_temp_low_leakage(true) refuses (false, nothing written) while a
+ * TWI client or the CCL is enabled. AvrSleepSite's arm() and disarm()
+ * are the power manager's, called from its handler.
+ *
+ * VREGCTRL and the regulator control exist on the DA and the DB alone.
+ * The AVR EA's SLPCTRL (DS40002443A ch. 13) is CTRLA alone, the same
+ * three modes: no VREGCTRL and no regulator control anywhere, so Vreg
+ * and VregPower do not exist there (device tables' has_vreg). What
+ * follows is the AVR DB's chapter unless it names the EA. The mechanism
+ * only: which mode is armed, what a SLEEP instruction then does, and
+ * what the regulator is told to do while the CPU is stopped. The policy
+ * - when a program may stop its clocks - is not here and is not the
+ * kernel's either (see the design note at the end of this comment).
  *
  * Tables 13-2 (activity), 13-3 (clocks) and 13-4 (wake-up sources) are
- * REWRITTEN by errata DS80000915F clarification 3.4.1; what follows is
+ * rewritten by errata DS80000915F clarification 3.4.1; what follows is
  * the clarified version, which is the one the code and docs/avrxt/
  * platform.md follow.
  *
@@ -27,25 +60,25 @@
  * their own RUNSTDBY set; WDT, BOD, EVSYS and NVM run regardless;
  * everything else is stopped - the TCD's clock never runs in standby at
  * all. The main clock source runs only if something requests it, and the
- * PERIPHERAL'S flag alone is that request (measured): a TCB with
+ * peripheral's flag alone is that request (measured): a TCB with
  * RUNSTDBY set counts through standby with the oscillator's own
  * RUNSTDBY on or off, and with it clear the whole chain stops whatever
  * the oscillator's flag says. An oscillator's RUNSTDBY (Oschf::
  * run_standby(), Osc32k::run_standby()) buys something else entirely:
- * the source stays alive UNREQUESTED, so the wake-up pays no start-up
+ * the source stays alive unrequested, so the wake-up pays no start-up
  * time - and, because the regulator watches the same thing, it buys a
- * fast wake-up for the OTHER source too (see WAKE TIME below). Wake-up
+ * fast wake-up for the other source too (see "Wake time" below). Wake-up
  * sources: a PORT pin (in an asynchronously sensing configuration), BOD
  * VLM, MVIO, the RTC (counter functions with RUNSTDBY), a TWI address
  * match, the CCL with RUNSTDBY, USART start-of-frame detection, and
  * TCA/TCB/ADC/AC interrupts from the instances left running. A TWI
- * client's ADDRESS MATCH is the only wake-up its peripheral offers: the
+ * client's address match is the only wake-up its peripheral offers: the
  * data interrupts that carry the rest of the frame are not on this
  * list, so a program that sleeps again after the match stalls the
  * tenure with the host holding SCL.
  *
  * POWER-DOWN. Only the PIT, the WDT, a sampled BOD and the EVSYS remain
- * - the RTC's COUNTER stops even with RUNSTDBY, the PIT half does not.
+ * - the RTC's counter stops even with RUNSTDBY, the PIT half does not.
  * Wake-up sources: a PORT pin, BOD VLM, MVIO, the PIT, a TWI address
  * match, and the CCL only when its path is fully asynchronous
  * (FILTSEL = 0 and EDGEDET = 0) - more exactly, whenever the LUT's own
@@ -53,24 +86,24 @@
  * wakes, the same LUT clocked from CLK_PER does not (measured). With
  * VREGCTRL.HTLLEN set the list shrinks to the PORT pin, BOD VLM, MVIO
  * and the PIT: no TWI match, no CCL - which is why
- * high_temp_low_leakage(true) REFUSES while a TWI client or the CCL is
+ * high_temp_low_leakage(true) refuses while a TWI client or the CCL is
  * enabled instead of silently making their wake-up unpredictable (the
  * chapter's own warning).
  *
- * WAKE TIME. Six CLK_PER cycles from IDLE. From standby or power-down
+ * Wake time. Six CLK_PER cycles from IDLE. From standby or power-down
  * the same six cycles plus whatever the main clock source needs to come
  * back and the regulator to reach its normal drive - and those are two
  * separate bills, measured apart (platform.md carries the table):
  *
- *   the OSCILLATOR - OSCHF comes back in 24 us, a 24 MHz crystal in
+ *   the oscillator - OSCHF comes back in 24 us, a 24 MHz crystal in
  *   1.77 ms, and an oscillator kept alive by its own RUNSTDBY in no
  *   time at all (43 CLK_PER ticks of a 24 MHz counter, wake included);
  *
- *   the REGULATOR - 290 us more, but ONLY when the device really let
+ *   the regulator - 290 us more, but only when the device really let
  *   go. VREGCTRL's AUTO profile drops to low power in standby and
  *   power-down "and whenever OSC32K is the only clock running"
  *   (13.3.5): an oscillator left running by its own RUNSTDBY keeps the
- *   regulator at full drive EVEN WHEN IT IS NOT THE MAIN CLOCK SOURCE,
+ *   regulator at full drive even when it is not the main clock source,
  *   so beside a running crystal an OSCHF restart out of standby costs
  *   its bare 24 us and PMODE changes nothing. Power-down stops every
  *   oscillator whatever RUNSTDBY says, so there the regulator is always
@@ -80,7 +113,7 @@
  * A crystal's own start-up buries both: it costs the same 1.77 ms in
  * standby and in power-down, and no profile touches it.
  *
- * TWO REGISTER FACTS. SLPCTRL.CTRLA is NOT under CCP; VREGCTRL is the
+ * Two register facts. SLPCTRL.CTRLA is not under CCP; VREGCTRL is the
  * one CCP-protected register of the block (13.3.5, table 13-6). And
  * errata DS80000915F 2.2.4 (all revisions): a store to an address >= 64
  * immediately followed by a write to SLPCTRL.CTRLA loses that write, so
@@ -89,26 +122,26 @@
  * record predates the item and carries no twin; the NOP costs one cycle
  * and is emitted on every family.
  *
- * A DEBUGGER BREAK WAKES THE DEVICE to Active mode whether or not an
+ * A debugger break wakes the device to Active mode whether or not an
  * interrupt is pending (13.3.4): a sleep measured under a debug session
  * is not the sleep the silicon does on its own.
  *
- * ON THE AVR EA (DS40002443A ch. 13; docs/avrxt/platform.md has the
+ * On the AVR EA (DS40002443A ch. 13; docs/avrxt/platform.md has the
  * measurements). CTRLA alone, the same three modes and codes (13.5.1).
  * STANDBY runs the RTC, CCL, ADC, TCA and TCB with their own RUNSTDBY
  * (table 13-1), and the AC and DAC with theirs (30.3.5, 32.3.3 - table
  * 13-1 omits them; the AC's interrupt measured waking the device), the
  * WDT, the BOD and the EVSYS regardless; POWER-DOWN the PIT, the WDT, the
  * BOD and the EVSYS. The wake-up sources are table 13-3's: a PORT pin
- * from every mode - and EVERY pin of the EA senses fully asynchronously,
+ * from every mode - and every pin of the EA senses fully asynchronously,
  * one edge of any of them waking the device from power-down (18.3.3.1,
  * measured on twelve pins) where the DA/DB need Px2/Px6 or both
  * edges -, the TWI address match and the BOD VLM from every mode, the
  * RTC with RUNSTDBY in standby and its PIT in power-down, the CCL with
  * RUNSTDBY in standby and on an asynchronous path in power-down, the
  * USART's start of frame in standby only, the TCA/TCB/ADC/AC left
- * running in standby. THE WAKE pays six CLK_PER cycles and one
- * oscillator start-up (table 13-4) and, measured, NOTHING ELSE: there is
+ * running in standby. The wake pays six CLK_PER cycles and one
+ * oscillator start-up (table 13-4) and, measured, nothing else: there is
  * no regulator start-up on this die - OSCHF restarts in the same 9.2 us
  * beside a running crystal and with every other oscillator stopped, out
  * of standby and out of power-down alike (13.3.2.2's "the time it takes
@@ -120,7 +153,7 @@
  * nothing to wait for; a BOD sampled or off in sleep would add its
  * start-up (tBOD_ST, 30 us typical, table 35-15), not measured.
  *
- * DESIGN POSITION. The kernel sleeps by itself in IDLE and only in IDLE
+ * Design position. The kernel sleeps by itself in IDLE and only in IDLE
  * - the wake-up list is complete there, so "no events queued" can mean
  * "stop the CPU" with nothing else to know. Standby and power-down gate
  * clock domains and shorten the wake-up list, so entering them is a
@@ -142,7 +175,7 @@
 
 namespace brio {
 
-/// SLPCTRL.CTRLA.SMODE (13.5.1). The values ARE the register codes (the
+/// SLPCTRL.CTRLA.SMODE (13.5.1). The values are the register codes (the
 /// device header spells standby STDBY; the names here are the modes as
 /// chapter 13 calls them).
 enum class SleepMode : uint8_t {
@@ -156,7 +189,7 @@ enum class SleepMode : uint8_t {
 struct Sleep {
     Sleep() = delete;
 
-    /// Arm `m`: ONE store of SMODE + SEN, preceded by the erratum's NOP
+    /// Arm `m`: one store of SMODE + SEN, preceded by the erratum's NOP
     /// (2.2.4, see the file header). Arming alone does nothing - "the
     /// SLEEP instruction must be executed to make the device go to
     /// sleep" (13.3.1).
@@ -181,8 +214,8 @@ struct Sleep {
 
     /// The SLEEP instruction itself.
     ///
-    /// WARNING (13.3.1): the wake-up sources must be configured and
-    /// ENABLED, and global interrupts on, BEFORE this runs. With no
+    /// Warning (13.3.1): the wake-up sources must be configured and
+    /// enabled, and global interrupts on, before this runs. With no
     /// enabled interrupt that can reach the armed mode, only a reset
     /// (or a debugger) ever comes back. This verb does not touch SREG:
     /// keeping I set is the caller's business, and so is closing the
@@ -240,7 +273,7 @@ struct Vreg {
     /// junction temperatures, and shortens that mode's wake-up list to
     /// the PORT pin, BOD VLM, MVIO and the PIT.
     ///
-    /// ENABLING IS REFUSED while a TWI client or the CCL is enabled:
+    /// Enabling is refused while a TWI client or the CCL is enabled:
     /// chapter 13 requires the TWI address-match and CCL wake-up
     /// sources to be disabled when HTLLEN is active "to avoid
     /// unpredictable behavior", and a rule stated in a comment but not
@@ -262,7 +295,7 @@ struct Vreg {
     }
 
 private:
-    /// Any TWI instance THIS package has, with its client half enabled
+    /// Any TWI instance this package has, with its client half enabled
     /// (SCTRLA.ENABLE) - the address match that HTLLEN must not race.
     /// Read through avr/io.h rather than avrxt/twi.hpp: the interlock is
     /// a fact about two registers, not a reason for this header to
@@ -292,12 +325,12 @@ private:
  * armed() reads back exactly what was asked. A target with fewer modes
  * is where that rule earns its keep.
  *
- * IT ONLY ARMS. The SLEEP instruction is still the kernel loop's:
+ * It only arms. The SLEEP instruction is still the kernel loop's:
  * AvrPlatform::idle() leaves an already-armed deeper mode standing and
  * takes it instead of imposing IDLE, which is what makes a power manager
  * possible with no new kernel hook. Everything the chapter warns about
  * therefore still applies to the caller - above all that the wake-up
- * source must be configured, enabled and REACHABLE IN THE ARMED MODE
+ * source must be configured, enabled and reachable in the armed mode
  * before the round is accepted: standby and power-down have short
  * wake-up lists (see the file header), and arming a mode nothing on the
  * list can leave is how a program stops for good.

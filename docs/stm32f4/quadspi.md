@@ -1,6 +1,85 @@
 # Quad-SPI memory interface (STM32F4)
 
-Documents of record: RM0386 Rev 6 ch. 13 (the F469/F479's, the chapter
+This document is for a programmer whose board carries a serial flash on
+the Quad-SPI pads, as the 32F469IDISCOVERY carries its 16 MB Micron
+MT25QL128: to read its identity, erase and program it, and read it back,
+either a command at a time or as plain memory at 0x9000 0000. `Quadspi`
+is the block, a monostate (an all-static type with no instances: a part
+carries one interface or none), present on the F412, F413/F423, F446 and
+F469/F479 and not declared on the rest. It speaks the chapter's language
+- a command of up to five phases, each on one, two or four lines - and
+nothing of any device: the opcodes are the flash datasheet's, spelled as
+`QspiCommand` values by the program that talks to the flash.
+
+The smallest use, from the "How to use it" block below: the
+configuration, two of the device's commands, and a page written:
+
+```cpp
+constexpr QspiConfig cfg{
+    .prescaler = qspi_prescaler_for(SysClock::hz, 133'000'000u),   // 90 MHz at 180
+    .fifo_threshold = 4,
+    .address_bits = qspi_address_bits(16u * 1024u * 1024u),        // 24
+    .cs_high_cycles = qspi_cs_high_cycles_for(90'000'000u, 50u)};  // 5
+
+constexpr QspiCommand write_enable{.instruction = 0x06};
+constexpr QspiCommand page_program{.instruction = 0x02, .address_lines = QspiLines::one,
+                                   .data_lines = QspiLines::one};
+
+// the six pads in their alternate functions first (the board's), then:
+Quadspi::init<cfg>();
+(void)Quadspi::command(write_enable);
+(void)Quadspi::write(page_program, 0x1000, data, 256);
+```
+
+Line by line: `cfg` is the block's configuration, computed when the
+program is compiled - the clock divisor that keeps the flash's 133 MHz
+ceiling at the core's rate (`SysClock::hz`, [clock.md](clock.md)), the
+FIFO threshold, the flash's size as a number of address bits, and the
+chip-select high time the device wants (50 ns) as cycles of the clock in
+force; `write_enable` is the device's WRITE ENABLE, an instruction alone
+on one line, and `page_program` its PAGE PROGRAM, with a one-line
+address and one-line data; `init<cfg>()` opens the block's clock, writes
+the configuration and enables it (a configuration outside the fields
+does not compile); `command()` sends a command with no data phase and
+waits for it; `write()` sends one with 256 bytes from `data` and waits
+until the last has left. Each verb answers a `QspiStatus`: `ok`,
+`refused` with nothing written, `error` for a transfer error, `timeout`
+for a wait that ran out, the failed command aborted so the block is at
+rest. A verb called before `init()` is refused, the block being
+disabled.
+
+What decides correctness even there. The pads are the program's: `init()`
+hands no pad to the block, so the six of the board's wiring are put in
+their alternate function first ([port.md](port.md)); nothing checks
+that they are. The configuration states the device: `address_bits` is
+the flash's size, and an access past it raises a transfer error (a load
+past it from the window is a bus error). The prescaler is a number fixed
+when the program is compiled, and the block divides whatever HCLK runs
+by it, so the device's ceiling holds only at the rate it was computed
+for - `SysClock::hz`, the rate the program really runs at once the clock
+task's `init()` has run. Every verb waits, with a bound
+(`Quadspi::default_spins`, 40 million polls, generous because a status
+poll for an erase is the device's hundreds of milliseconds); none masks
+interrupts, and the caller's buffer is read or written inside the call
+and is the caller's again when it returns. The device's own sequence is
+the program's too: the block knows nothing of WRITE ENABLE, and a
+write's completion here is the block's, not the flash's - the device's
+busy bit is what `poll()` waits for afterwards (the "How to use it"
+block). And
+a program that arms the block's interrupt does not also wait on the
+flags the handler clears: the blocking verbs complete on BUSY falling for
+that reason ("What the silicon does" below).
+
+The rest of this page, in order: the documents of record; what the
+silicon does (the three modes, the command that starts on its last
+register, the clock, the size, BUSY, the five errata, the flag a poller
+must not share with a handler); the types and verbs; how to use it, with
+the status poll and the memory-mapped window; the bench findings against
+the MT25QL128; and what is not covered.
+
+## Documents of record
+
+RM0386 Rev 6 ch. 13 (the F469/F479's, the chapter
 this driver was written from) and its twin RM0390 Rev 6 ch. 12 (the
 F446's: one register file under one name, and the same two facts the
 header does not carry - the window's address and the DMA cell - stated
@@ -28,13 +107,13 @@ bytes, one to four alternate bytes, a run of up to 31 dummy cycles, and
 the data - and each phase goes out on one, two or four lines or is
 skipped, so that one block speaks single-SPI to a status register and
 quad-SPI to the array in the same breath (13.3.3, 13.3.4). What differs
-between the three FUNCTIONAL MODES (13.3.11) is who moves the data: in
-INDIRECT mode the program writes the registers and pumps a 32-byte FIFO
+between the three functional modes (13.3.11) is who moves the data: in
+indirect mode the program writes the registers and pumps a 32-byte FIFO
 through the data register, a byte, a halfword or a word at a time; in
-AUTOMATIC STATUS-POLLING mode the block repeats a read of up to four
+automatic status-polling mode the block repeats a read of up to four
 bytes every N clocks on its own, masks the answer and raises SMF when
 the masked bits match, ANDed or ORed, stopping there if APMS is set; in
-MEMORY-MAPPED mode every load from the window at 0x9000 0000 becomes the
+memory-mapped mode every load from the window at 0x9000 0000 becomes the
 programmed read command, the FIFO turns into a prefetch buffer, and the
 flash is memory to the Cortex and to a DMA alike - reads only, and a bus
 error for a load outside the flash's size or with the block disabled.
@@ -47,7 +126,7 @@ has no address and no data to give, the write to AR starts one that has
 an address and nothing to send, the first write to DR starts one that
 has data to send. ABR never starts anything, so the alternate bytes go
 in first; DLR is the length and goes in before CCR. A consequence the
-bench found the hard way: WRITING AR IS NOT AN IDLE STORE. Under an
+bench found the hard way: writing AR is not an idle store. Under an
 indirect read command a write to AR is a read at that address, and
 while BUSY stands a write to AR is ignored (13.5.7) - which is why the
 errata's "clear AR before memory-mapped mode" is done here behind an
@@ -74,21 +153,21 @@ empty in indirect mode; up between the periodic reads of status polling
 until a match with APMS or an abort; up from the first memory-mapped
 access, prefetching with NCS low, until an abort or a timeout. ABORT is
 the one way down that works everywhere, and it flushes the FIFO and sets
-TCF. The FIFO, in indirect read mode, fills to 32 and then THE BLOCK
-STOPS THE CLOCK until the program reads (13.3.5) - measured: a 64-byte
+TCF. The FIFO, in indirect read mode, fills to 32 and then the block
+stops the clock until the program reads (13.3.5) - measured: a 64-byte
 read left alone parks at FLEVEL 32 with BUSY up and TCF down, and reading
 32 bytes lets the other 32 in.
 
 **Five errata, the same on both sheets read, four of them code.**
 - *2.4.2, first nibble of data not written after dummy phase*: an
-  indirect WRITE with dummy cycles loses its first nibble. `write()`
+  indirect write with dummy cycles loses its first nibble. `write()`
   refuses a command with dummy cycles; a device that wants latency
   before the data of a write gets it as alternate bytes, the sheet's own
   workaround.
 - *2.4.3, wrong data from memory-mapped read after an indirect mode
   operation* when AR's two low bits are set on entry. `map()` clears AR
   and aborts before it writes the memory-mapped command - and aborts
-  BEFORE the clear too, because the sheet's recipe assumes an idle block
+  before the clear too, because the sheet's recipe assumes an idle block
   and a write to AR is ignored while BUSY stands: staged with AR = 3 and
   a read still stalled in the FIFO, the plain recipe left AR at 3, the
   guarded one leaves it at 0.
@@ -100,7 +179,7 @@ read left alone parks at FLEVEL 32 with BUSY up and TCF down, and reading
   the transfer and discards it, which costs nothing on the transfers the
   item does not touch.
 - *2.4.5, memory-mapped access in indirect mode clearing QUADSPI_AR*: a
-  load a PROGRAM makes from the window while the block is in indirect
+  load a program makes from the window while the block is in indirect
   mode; no code covers it, `window()` is handed out by `map()`, and the
   verbs write AR right before every command they start.
 

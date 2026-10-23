@@ -1,31 +1,50 @@
 /*
  * reset.hpp
  *
- * RSTCTRL (chapter 14) and the WDT (chapter 22) of the AVR DA/DB, and
- * the same two blocks of the AVR EA (DS40002443A ch. 14 and 21: the same
- * bits, SWRR's one bit named SWRE): why the program is running, and how
- * to end it on purpose.
+ * The reset controller and the watchdog of the AVR DA, DB and EA
+ * (RSTCTRL and WDT: DS40002247B ch. 14 and 22 on the DA/DB, DS40002443A
+ * ch. 14 and 21 on the AVR EA, the same bits, SWRR's one bit named
+ * SWRE): why the program is running, and how to end it on purpose. A
+ * program reads the cause once at boot, and may arm the watchdog so that
+ * a hang ends in a reset; the smallest use (docs/avrxt/platform.md, "How
+ * to use it"):
+ *
+ *     const brio::ResetFlags why = brio::Reset::take_flags();      // read + clear
+ *     brio::Watchdog::arm(brio::WdtTime::ms250);   // then WDR from the main loop
+ *     brio::Watchdog::clear();
+ *
+ * Who calls what. Reset::take_flags() is main's, once, first thing at
+ * boot (below); flags() and clear_flags() are one load and one store.
+ * Reset::software() is legal from any context, a panic reporter's
+ * included, and never returns. Watchdog::clear() is the WDR instruction,
+ * legal from any context; where the program calls it from is what the
+ * watchdog then judges. Watchdog::arm() and off() wait for an earlier CTRLA write's
+ * synchronization before they write (wait_sync(), bounded at 2 000 000
+ * polls so a stopped OSC32K cannot hang the caller, false when it runs
+ * out) and not after it; sync() is that wait on its own. None of these
+ * masks interrupts: the CCP-protected writes are the avr-libc
+ * _PROTECTED_WRITE sequence.
  *
  * These two blocks are the other half of the panic breadcrumb. The
  * kernel writes a PanicRecord into reset-surviving storage
  * (kernel/panic.hpp, AvrPlatform::panic_record) and hands over to a
  * reporter whose job may be "reset now and report at the next boot";
  * panic.hpp's own contract then says to "cross-check the reset-cause
- * register on the target for the full story". `Reset::take_flags()` IS
+ * register on the target for the full story". `Reset::take_flags()` is
  * that cross-check, `Reset::software()` is one way of performing the
  * reset, and `Watchdog` is the other - all three in the target stratum,
  * so no app has to reach for a register.
  *
  * Two facts of this silicon shape everything here:
  *
- *  - RSTFR ACCUMULATES. A flag is set by its reset source and cleared
+ *  - RSTFR accumulates. A flag is set by its reset source and cleared
  *    only by writing a one to it (14.5.1) - except that a power-on
  *    reset clears every flag but PORF and a brown-out reset clears
  *    every flag but PORF and BORF. Software that never clears the
  *    register therefore reads the whole history since power-up, not
  *    the last reset. take_flags() reads and clears in one verb: call
  *    it once, first thing at boot, and keep the answer.
- *  - SRAM is NOT promised across a reset. The data sheet states that
+ *  - SRAM is not promised across a reset. The data sheet states that
  *    RAM is kept in sleep (13.2) and lists the logic domains each
  *    reset clears (table 14-1, corrected by DS80000915F 3.3.1) - SRAM
  *    is in neither list, for any source including power-on. A .noinit
@@ -35,7 +54,7 @@
  * The WDT runs from the 1.024 kHz output of OSC32K, asynchronously to
  * CLK_PER, and keeps counting in every sleep mode and through a main
  * clock failure (22.2). Its period and its optional closed window use
- * the SAME encoding, 8 ms to 8 s. CTRLA and the LOCK bit are CCP
+ * the same encoding, 8 ms to 8 s. CTRLA and the LOCK bit are CCP
  * protected (22.3.7), CTRLA must not be written while SYNCBUSY is set
  * (22.3.6), and a lock is one-way: only a debugger (or a reset) takes
  * it off again, so a locked watchdog cannot be disabled from software.
@@ -81,7 +100,7 @@ struct Reset {
 
     /// Read RSTFR and clear exactly the bits that were set (write-one-
     /// to-clear, 14.5.1). The verb to call once at boot: what it
-    /// returns is the reset that started THIS run, and the register is
+    /// returns is the reset that started this run, and the register is
     /// left clean for the next one.
     static ResetFlags take_flags() {
         const uint8_t f = RSTCTRL.RSTFR;
@@ -117,7 +136,7 @@ private:
 // =============================================================================
 
 /// PERIOD and WINDOW share one encoding (22.5.1); the names are the
-/// data sheet's nominal times, the values ARE the register codes.
+/// data sheet's nominal times, the values are the register codes.
 /// `off` in PERIOD disables the watchdog, `off` in WINDOW disables
 /// window mode.
 enum class WdtTime : uint8_t {
@@ -153,11 +172,11 @@ struct Watchdog {
     Watchdog() = delete;
 
     /// Restart the time-out period: the WDR instruction (22.2). In
-    /// window mode this is also the instruction that must land INSIDE
+    /// window mode this is also the instruction that must land inside
     /// the open window - too early resets the device just as too late
-    /// does. Two details the code around it has to respect: the FIRST
+    /// does. Two details the code around it has to respect: the first
     /// WDR after window mode is enabled (or after leaving Debug mode)
-    /// is what ACTIVATES the window and is never judged (22.3.3.2), and
+    /// is what activates the window and is never judged (22.3.3.2), and
     /// a WDR needs two to three WDT cycles to synchronize, so two of
     /// them back to back are one event, not two.
     [[gnu::always_inline]] static void clear() { __asm__ __volatile__("wdr"); }
@@ -181,13 +200,13 @@ struct Watchdog {
     static bool enabled() { return period() != WdtTime::off; }
 
     /// Bounded wait for STATUS.SYNCBUSY. The configuration a CTRLA
-    /// write asks for is IN FORCE only once this returns: the register
+    /// write asks for is in force only once this returns: the register
     /// lives in CLK_PER's domain and the counter in the 1.024 kHz one,
     /// so an arm() is followed by two to three WDT cycles (~3 ms) in
-    /// which the OLD configuration is still the one running. That is
+    /// which the old configuration is still the one running. That is
     /// invisible in Normal mode (the period is milliseconds anyway) and
     /// decisive in Window mode, where a WDR issued during those cycles
-    /// is judged by the configuration being replaced. arm() does NOT
+    /// is judged by the configuration being replaced. arm() does not
     /// wait afterwards on purpose - a panic reporter arming the
     /// watchdog on its way out must not block for three milliseconds.
     /// False when the wait ran out (a stopped OSC32K).

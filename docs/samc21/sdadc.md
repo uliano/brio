@@ -1,28 +1,101 @@
 # SDADC - Sigma-Delta Analog-to-Digital Converter (SAM C21)
 
-Documents of record: SAM C20/C21 data sheet DS60001479M ch. 39, the SDADC
+This document is for a programmer who needs a slow, fine voltage
+reading: a differential pair of pads read to sixteen specified bits
+and more, once or free-running, with hardware offset, gain and window
+post-processing. The SDADC is the C21's third converter, beside the two
+SARs of [adc.md](adc.md), and is nothing like them: a sigma-delta
+modulator behind a decimation filter, always differential, its result
+signed. `Sdadc` is the one instance, a monostate resource (a class
+whose state and functions are all static, with no instance to create)
+- a thin typed view of the registers with their synchronization built
+in; `SdadcRef` is its own reference vocabulary.
+
+The smallest use, a single differential reading against the supply, the
+first block of "One example per use" below:
+
+```cpp
+using namespace brio;
+Sdadc::init(0, SdadcConfig{
+    .reference = SdadcRef::vddana,
+    .prescaler = 3,                 // 48 MHz / 8 = 6 MHz
+    .osr = SdadcOsr::osr256,
+    .chopper = true}, 48'000'000);
+(void)Sdadc::select<0>();           // the PA06/PA07 pair
+int16_t counts = 0;
+if (Sdadc::read(counts)) {
+    const int16_t mv = Sdadc::to_mv(counts, vdd_mv);   // signed
+}
+```
+
+Line by line: `init()` takes the generic clock generator that feeds the
+converter (0, the main clock, [clock.md](clock.md)), the configuration
+- the supply VDDANA as the reference, the generator divided by
+2 x (3 + 1) = 8 for a 6 MHz CLK_SDADC, an over-sampling ratio of 256,
+the chopper on against offset - and the generator's rate, which is
+there only to refuse a prescaler that leaves the 1 MHz .. 6 MHz the
+converter accepts; it opens the bus clock, connects the clock channel,
+resets the block, writes every register and enables the converter.
+`select<0>()` picks differential pair 0, AINN0 on PA06 and AINP0 on
+PA07 (a pair this package does not bond does not compile).
+`read(counts)` starts one conversion, waits for its result and stores
+the signed 16-bit datum, -32768 .. +32767 for -VREF .. +VREF; `to_mv()`
+converts it given VDDANA in millivolts (`vdd_mv`, the supply measured
+by the program; the driver cannot know it).
+
+What decides correctness even there. `init()` answers false for a
+configuration `sdadc_config_valid()` refuses ("The refusals" below), a
+prescaler out of range for the rate given, or a synchronization that
+never settled; the rate passed is a claim the clock task makes true by
+running first ([clock.md](clock.md)). Every synchronized write waits
+before it stores, because on this chapter a write into a busy register
+is threatened with a bus error, and every wait is bounded - 0xFFFF
+polls for a synchronization, 0xFFFFFF for a conversion in `read()` -
+with false as the answer when it runs out, `counts` then left as it
+was. A single conversion is SKPCNT + 1 decimation windows long, so a
+reading takes several windows of OSR sampling periods ("The clock, in
+three stages" below). Nothing here masks interrupts; an
+interrupt-driven program binds `SDADC_Handler` itself. And a
+full-scale differential against VDDANA is outside specification:
+table 45-26 limits the range to +/-0.7 x VREF when VREF is within
+0.3 V of VDDANA ("Errata" below).
+
+The page is long because the chapter is. In order: the documents of
+record; what the silicon does (the clock, the four register
+disciplines, the 24-bit datapath, the post-processing, what the device
+header has that the chapter does not); the types and verbs, the
+refusals, the pads per package and one example per use; the errata;
+the bench findings; the flush, the window event and the three
+interrupts; what is not covered.
+
+## Documents of record
+
+SAM C20/C21 data sheet DS60001479M ch. 39, the SDADC
 characteristics of tables 45-26, 45-27, 45-28 and 45-29, and the event
 tables of ch. 29 - and errata DS80000740S, read on the **E/G/J row at
-revision F**, where exactly ONE item applies: the device-level 1.8.10
+revision F**, where exactly one item applies: the device-level 1.8.10
 (the DAC as this converter's reference). Driver: `samc21/sdadc.hpp`, over
 the reserve's SDADC entries in `samc21/device_tables.hpp`. The family
 fixture is `test/family_samc21/sdadc.cpp` plus ten negatives under
 `brio check samc21`; the bench suites are `test_samc_sdadc` and, for
 the flush, the window event and the interrupts, `test_samc_analog`
-(letter k).
+(letter k; a suite's letter is one command key of its console and the
+group of verdicts that key runs). The reserve is
+`samc21/device_tables.hpp`, the table of what each variant has, read
+off the device header.
 
 ## What the silicon does
 
-**One 16-bit sigma-delta converter over three DIFFERENTIAL pad pairs**,
+**One 16-bit sigma-delta converter over three differential pad pairs**,
 up to 1.5 Msps divided by the over-sampling ratio. A first-order-class
 modulator feeds a **third-order SINC decimation filter** (39.6.3), and
 the filter - not a successive approximation - is what makes the result.
 Everything that surprises about this chapter follows from that.
 
-**The input is always differential.** `INPUTCTRL.MUXSEL` names a PAIR of
+**The input is always differential.** `INPUTCTRL.MUXSEL` names a pair of
 pads (AINN*k*, AINP*k*), never a single one, and there are three pairs.
 "Single-ended mode" in the electrical tables is the same thing with the
-negative pad grounded EXTERNALLY (table 45-26 note 3): it costs a bit of
+negative pad grounded externally (table 45-26 note 3): it costs a bit of
 resolution and is not a register setting.
 
 **The result is signed** and spans -VREF .. +VREF. The chapter
@@ -36,7 +109,7 @@ is the only thing trading rate against noise. 39.8.3 adds that "the OSR
 must never be changed while the SDADC is running".
 
 **SKPCNT is a warm-up, not an average.** A sigma-delta's filter has to
-fill before its output means anything, so a SINGLE conversion runs
+fill before its output means anything, so a single conversion runs
 SKPCNT + 1 decimation windows and returns the last. The reset value is 2,
 which is 39.6.2.3's "the first valid sample starts from the third sample
 onward" written as a register - and it is also erratum 1.18.3's own
@@ -55,7 +128,7 @@ Table 45-26 bounds CLK_SDADC at **1 MHz .. 6 MHz**, so at a 48 MHz
 generator PRESCALER must be 3..23; `init()` refuses a prescaler that
 leaves the range when it is told the generator's rate.
 
-**PRESCALER is eight bits and LINEAR**, and this is where the device
+**PRESCALER is eight bits and linear**, and this is where the device
 header lies: it declares DIV2, DIV4, DIV8 ... DIV256 for codes 0..7,
 which is the SAM D21's power-of-two prescaler. A power-of-two reading
 cannot reach 39.5.3's own /512 from an eight-bit field at all. Measured
@@ -75,18 +148,18 @@ generic clock channel, so a main-clock change does not move CLK_SDADC
    it. The driver writes all five only while the converter is disabled -
    correct under either reading - and the runtime verbs refuse while it
    is enabled.
-2. **Write-synchronized, AND THIS CHAPTER THREATENS A BUS ERROR.**
+2. **Write-synchronized, and this chapter threatens a bus error.**
    39.6.8: "If an operation that require synchronization is executed
    while its busy bit is on, the operation is discarded **and a bus error
    is generated**." The ADC's and the DAC's chapters promise a silent
    discard; here the threatened penalty is a HardFault. So every
-   synchronized write in `sdadc.hpp` **waits BEFORE writing**, not after,
+   synchronized write in `sdadc.hpp` **waits before writing**, not after,
    and returns false rather than storing into a busy register - which is
    why `select()` is a `bool` where `samc21/adc.hpp`'s is a void store.
    The bits that exist: SWRST, ENABLE, CTRLC, INPUTCTRL (SYNCBUSY calls
    it MUXCTRL), WINCTRL, WINLT, WINUT, OFFSETCORR, GAINCORR, SHIFTCORR,
    SWTRIG, ANACTRL.
-   **REFCTRL is in 39.6.8's prose list and has NO SYNCBUSY BIT** (the
+   **REFCTRL is in 39.6.8's prose list and has no SYNCBUSY bit** (the
    register is twelve bits wide and every one is accounted for). One of
    the two statements has to be wrong; the driver treats REFCTRL as
    enable-protected only, as its own property line does.
@@ -109,7 +182,7 @@ bit-exact. So the driver has three result verbs:
 
 | verb | what it is |
 |------|------------|
-| `result()` | the SPECIFIED 16-bit signed datum, the top 16 bits - what `half_steps` (32768) scales and what table 45-26's "Res 16 bits" means |
+| `result()` | the specified 16-bit signed datum, the top 16 bits - what `half_steps` (32768) scales and what table 45-26's "Res 16 bits" means |
 | `result24()` | the whole signed 24-bit value the datapath carries |
 | `result_raw()` | the register, unsigned |
 
@@ -117,7 +190,7 @@ bit-exact. So the driver has three result verbs:
 is the unit OFFSETCORR speaks.
 
 **A reading of RESULT is a word read.** RESULT is a 32-bit register
-holding a 24-bit datum whose TOP sixteen bits are the specified
+holding a 24-bit datum whose top sixteen bits are the specified
 conversion, so a halfword access carries RESULT[15:0]: the eight bits
 below the specified datum plus half of it - not a narrower reading but
 a different number. A rail differential reads 8388607 raw, which does
@@ -132,11 +205,11 @@ with OFFSETCORR signed 24 bits, GAINCORR unsigned 14, SHIFTCORR four
 (39.6.3.4, and each register's own description prints the formula
 again). Two things follow that no caller should have to discover:
 
-- **GAINCORR's reset value is ONE, not zero**, and a GAINCORR of zero
+- **GAINCORR's reset value is one, not zero**, and a GAINCORR of zero
   multiplies every result to nothing. `sdadc_config_valid()` refuses it.
-  Erratum 1.18.3 is exactly that on revision B, where the reset value WAS
+  Erratum 1.18.3 is exactly that on revision B, where the reset value was
   zero - so this revision's printed reset values (GAINCORR 0x0001 and
-  CTRLB.SKPCNT 2) ARE that item's workaround baked into the silicon.
+  CTRLB.SKPCNT 2) are that item's workaround baked into the silicon.
 - **The gain is an integer over a power of two**, not the SAR's
   fixed-point fraction: a gain of 1.5 is GAINCORR 3 with SHIFTCORR 1.
   `sdadc_gain_permille()` and `sdadc_corrected()` do that arithmetic
@@ -149,9 +222,9 @@ mode ON", and table 45-27's DC figures are all taken with it on.
 ### What the header has and the chapter does not
 
 `REFCTRL.REFRANGE`, two bits at 5:4, present in the device header's
-register mask (0xB3) and in NO part of chapter 39 - not the bit table,
+register mask (0xB3) and in no part of chapter 39 - not the bit table,
 not the register summary, not the prose. It is exposed because the house
-rule is that the header decides what EXISTS, and it is documented as
+rule is that the header decides what exists, and it is documented as
 unknown because nothing in the documents of record says what it selects.
 It is a real field (measured: it stays written).
 
@@ -165,11 +238,11 @@ here can say what it does.
 
 `brio/samc21/sdadc.hpp` is the reference. In outline:
 
-- `Sdadc` - a **MONOSTATE**, not `Sdadc<n>`: one instance on every C21
+- `Sdadc` - a **monostate**, not `Sdadc<n>`: one instance on every C21
   variant, so an index would be a parameter with a single legal value -
   as `Rtc` and `Dac` are. `sdadc_count()` in the reserve is what makes
   "and none on a C20" a compile-time fact.
-- `SdadcRef` - this converter's OWN reference vocabulary (INTREF, VREFB,
+- `SdadcRef` - this converter's own reference vocabulary (INTREF, VREFB,
   DAC, VDDANA). Deliberately not `brio::Ref` (the ADC's six codes) nor
   `DacRef` (the DAC's three): this family has no shared reference block,
   so one enum would be a type no register accepts. **Four codes and none

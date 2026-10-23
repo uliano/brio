@@ -1,16 +1,51 @@
 /*
  * sleep.hpp
  *
- * util/power.hpp's depth ladder on STM32F4 silicon: `Stm32f4SleepSite`,
- * which arms one of this family's modes and puts the clock tree back
- * afterwards, and `Stm32f4TimedSleepSite`, which additionally keeps
- * KERNEL TIME HONEST across a Stop by putting the RTC's wake-up timer
- * where the deadline is and handing the frozen span back to the SysTick
- * ticker.
+ * util/power.hpp's depth ladder on STM32F4 silicon: the sleep sites a
+ * program hands to its PowerManager so that the kernel's idle WFI can be
+ * a Stop and not only a Sleep. A sleep site is the target's half of the
+ * power model (docs/design/power.md): it arms a depth just before the
+ * kernel's idle path executes its WFI, and puts the machine back after
+ * the wake. `Stm32f4SleepSite` arms one of this family's modes and puts
+ * the clock tree back afterwards; `Stm32f4TimedSleepSite` additionally
+ * keeps kernel time honest across a Stop by putting the RTC's wake-up
+ * timer where the deadline is and handing the frozen span back to the
+ * SysTick ticker. The smallest use names the plain site over the
+ * program's clock task and gives it to the manager:
  *
- * The MECHANISM - which modes exist, what they gate, what wakes them - is
- * stm32f4/pwr.hpp's. The POLICY - when a program may stop - is
- * util/power.hpp's. What is HERE is the mapping between them, and the
+ *     using Site = brio::Stm32f4SleepSite<SysClock>;
+ *     using Pm = brio::PowerManager<P, Site, brio::PowerConfig{}, Engine>;
+ *
+ * and a program whose time events must survive a Stop takes the timed
+ * site instead, calls its init() and binds its vector:
+ *
+ *     using Site = brio::Stm32f4TimedSleepSite<P, SysClock>;
+ *     extern "C" void RTC_WKUP_IRQHandler() { Site::isr(); }
+ *
+ * Who calls what. arm(), disarm() and armed() are the manager's, called
+ * from its handler in main context: arm() just before the kernel's idle
+ * path, disarm() at the manager's next dispatch after the wake. The plain
+ * site's arm() writes registers and waits for nothing; its disarm()
+ * re-runs the clock task when a Stop took the PLL away, which waits on
+ * the oscillators' and the PLL's ready flags, each wait bounded by
+ * Rcc::ready_spins (stm32f4/clock.hpp). Until that disarm(), code runs on
+ * the 16 MHz HSI with dividers computed for the task's rate - the
+ * interrupt handler that woke the chip among it. The timed site's init()
+ * is main()'s, once, after the clock init and before the manager's first
+ * round: it waits, bounded, for the LSE crystal's start
+ * (RtcDomain::lse_ready_spins, seconds at most) and for the RTC's
+ * synchronizations, and answers false when any of them refuses. Its
+ * arm() also reads the RTC (Rtc::read(), at most four tries) and places
+ * the alarm through Rtc::set_wakeup(), which polls WUTWF up to
+ * Rtc::sync_spins; its isr() is the body of the RTC's wake-up vector,
+ * and nothing else calls it - it runs the clock restore inside the
+ * interrupt, first. resync(), shared by isr() and disarm(), holds the
+ * platform's critical section (interrupts masked) for the RTC read and
+ * the arithmetic that consume the baseline; nothing else here masks.
+ *
+ * The mechanism - which modes exist, what they gate, what wakes them - is
+ * stm32f4/pwr.hpp's. The policy - when a program may stop - is
+ * util/power.hpp's. What is here is the mapping between them, and the
  * mapping is this target's own decision.
  *
  * ## The ladder, and why it is not the identity
@@ -26,33 +61,33 @@
  *                         the flash in power-down: cheaper to hold, and
  *                         the datasheet prices the difference in the wake
  *
- * FIVE THINGS TO READ BEFORE USING IT.
+ * Five things to read before using it.
  *
- * 1. `light` AND `none` ARE ONE CODE, and that is the honest answer rather
+ * 1. `light` and `none` are one code, and that is the honest answer rather
  *    than a shortcut. util/power.hpp's rule is that a target "maps what it
  *    does not have to the nearest SHALLOWER mode - never deeper than
- *    asked". Between Sleep and Stop this family has NOTHING: 5.3 lists
+ *    asked". Between Sleep and Stop this family has nothing: 5.3 lists
  *    three modes and no low-power run. So `light` maps to Sleep, and
- *    `armed()` - which is a PURE READ of the silicon - answers `none` for
+ *    `armed()` - which is a pure read of the silicon - answers `none` for
  *    it, because that is what the machine will really do. The manager's
  *    WakeReport then carries `none`, which is the truth.
  *
- * 2. THE TWO DEEP RUNGS ARE ONE MODE WITH TWO PRICES. This family's Stop
+ * 2. The two deep rungs are one mode with two prices. This family's Stop
  *    is a single mode (SLEEPDEEP with PDDS clear) whose cost is set by
  *    LPDS, FPDS and the low-voltage pair - so the ladder's two deep rungs
  *    are two `StopConfig`s and not two modes, and `armed()` cannot tell
- *    them apart from the registers alone. It reports the depth THIS SITE
+ *    them apart from the registers alone. It reports the depth this site
  *    last armed for a Stop, and `deep` for a Stop somebody else armed
  *    through `Pwr` (whatever else such a Stop is, it is not shallower).
  *    The two configurations are the site's template argument, so a program
  *    that wants under-drive on the parts that have it, or a plain
  *    main-regulator Stop for both rungs, says so where it names the site.
  *
- * 3. STANDBY IS OFF THE LADDER ON PURPOSE, AND THE SITE ENFORCES IT: every
+ * 3. Standby is off the ladder on purpose, and the site enforces it: every
  *    `arm()` here goes through `Pwr::arm(PwrMode::stop, ...)`, which
- *    CLEARS PDDS - so no rung can reach Standby and a PDDS left standing
+ *    clears PDDS - so no rung can reach Standby and a PDDS left standing
  *    by anything else is taken down at the next round.
- *    util/power.hpp's model is built on the program RESUMING: "the
+ *    util/power.hpp's model is built on the program resuming: "the
  *    manager's next dispatch - of ANY event - first disarms the site and
  *    publishes a WakeReport". After this family's Standby there is no next
  *    dispatch - 5.3.6: "SRAM and register contents are lost except for
@@ -63,19 +98,19 @@
  *    one-shot whose resumption is the application's boot path reading
  *    PWR_CSR.SBF and the RTC's backup registers.
  *
- * 4. A STOP ENTERED WITH THE KERNEL'S TICK ARMED LASTS - ON A BOARD NO
- *    DEBUGGER HAS TOUCHED. 5.3.3: a low-power mode entered through WFI is
+ * 4. A Stop entered with the kernel's tick armed lasts - on a board no
+ *    debugger has touched. 5.3.3: a low-power mode entered through WFI is
  *    entered only if no interrupt is pending, and a 1 kHz SysTick raises
  *    one every millisecond; but once the WFI is taken HCLK stops and
  *    SysTick with it, so that window is one instruction wide and not a
- *    coin toss. UNLESS DBGMCU_CR.DBG_STOP IS SET, in which case the debug
+ *    coin toss. Unless DBGMCU_CR.DBG_STOP is set, in which case the debug
  *    logic feeds FCLK and HCLK from the internal RC through the Stop and
  *    ES0298 2.2.1 is live: "if the SysTick timer interrupt is enabled
  *    during the Stop mode debug ..., it wakes up the system from Stop
  *    mode". That bit survives every reset but a power-on and OpenOCD's own
- *    stm32f4x.cfg writes it at every connection. `arm()` therefore PAUSES
- *    THE TICKER for the deep rungs and `disarm()` resumes it: it costs
- *    NOTHING (a Stop stops SysTick anyway and kernel time was going to
+ *    stm32f4x.cfg writes it at every connection. `arm()` therefore pauses
+ *    the ticker for the deep rungs and `disarm()` resumes it: it costs
+ *    nothing (a Stop stops SysTick anyway and kernel time was going to
  *    stand still for the whole sleep either way), it closes 5.3.3's
  *    pending-tick window by construction, and it is ES0298 2.2.1's
  *    workaround - "to debug the Stop mode, disable the SysTick timer
@@ -83,83 +118,87 @@
  *    `Pwr::debug_in_stop()` reads the bit for a program that wants to say
  *    what it found.
  *
- * 5. WHAT COMES BACK FROM A STOP IS NOT WHAT WENT IN. 5.3.5: SYSCLK on
+ * 5. What comes back from a Stop is not what went in. 5.3.5: SYSCLK on
  *    exit is the HSI, the PLL and the HSE are off, the regulator is back
  *    at scale 3 and over-drive is disabled - so a program running at
  *    180 MHz resumes at 16 MHz with a SysTick reload and a USART divisor
- *    meant for eleven times that. The site is therefore TEMPLATED ON THE
- *    CLOCK TASK and restores it - and the place it does so is the model's
+ *    meant for eleven times that. The site is therefore templated on the
+ *    clock task and restores it - and the place it does so is the model's
  *    own hook, not a new one: arm() is called before the machine stops and
- *    disarm() on the FIRST EVENT AFTER THE WAKE, which is exactly "put the
+ *    disarm() on the first event after the wake, which is exactly "put the
  *    clock back". A program on `ClockSource::hsi` pays nothing at all: SWS
  *    already reads what the task asked for and `resume_clock()` finds
  *    nothing to do.
  *
  * ## The timed site
  *
- * The plain site keeps an HONEST RESTRICTION: with kernel time frozen for
- * the whole Stop, a program with armed time events must not take one.
- * `Stm32f4TimedSleepSite` LIFTS it, inside arm() and disarm() alone, with
+ * The plain site keeps an honest restriction: with kernel time frozen for
+ * the whole Stop, a program with armed time events must not take one
+ * (nothing refuses it; the events mature late by the Stop's length).
+ * `Stm32f4TimedSleepSite` lifts it, inside arm() and disarm() alone, with
  * the RTC in both roles:
  *
- *  - the ALARM is the periodic wake-up timer (17.3.5), placed on
- *    TimeEvents<P>::ticks_to_next() rounded UP. 5.3.7 calls this the
+ *  - the alarm is the periodic wake-up timer (17.3.5), placed on
+ *    TimeEvents<P>::ticks_to_next() rounded up. 5.3.7 calls this the
  *    device's auto-wake-up and it is the one counter on this family that
  *    runs with every 1.2 V clock stopped;
- *  - the WITNESS is the calendar plus the sub-second counter, read through
+ *  - the witness is the calendar plus the sub-second counter, read through
  *    this file's `time_of_hour_ms()`; the difference between the reading
  *    at arm() and the reading at disarm() is how long the world moved, and
- *    subtracting what SysTick itself counted leaves the FROZEN span, which
+ *    subtracting what SysTick itself counted leaves the frozen span, which
  *    goes to `Ticker::advance()`.
  *
- * THE RATE RULE IS DIRECTIONAL, and both halves want the same direction:
- * state an RTCCLK rate NOT BELOW the true one. Over-estimating it makes
+ * The rate rule is directional, and both halves want the same direction:
+ * state an RTCCLK rate not below the true one. Over-estimating it makes
  * the prescalers divide too hard, so ck_spre runs slow, so the witness
- * UNDER-reports the span and the resync UNDER-advances; and it makes the
+ * under-reports the span and the resync under-advances; and it makes the
  * alarm arithmetic ask for more counts than needed, so the wake lands
- * LATE. Both errors land on the side the kernel's time contract allows: at
+ * late. Both errors land on the side the kernel's time contract allows: at
  * least, never early. The default is LSE's exact 32768; a board on the LSI
  * says so in the config and states a rate above DS10693's upper bound.
  *
- * THE OTHER PRESCALER SPLIT. 17.3.1 advises a HIGH asynchronous factor to
+ * The other prescaler split. 17.3.1 advises a high asynchronous factor to
  * save current; that is right for a calendar and wrong here, because
  * PREDIV_S is how finely the sub-second counter divides a second and that
- * counter is this site's ONLY way of measuring a span the kernel's tick
+ * counter is this site's only way of measuring a span the kernel's tick
  * did not count. `rtc_prescalers_for_resolution()` is the deliberate
  * opposite choice - 0/32767 at 32768 Hz, 30.5 us a step - and the config
  * predicate refuses a split that divides the second fewer than a thousand
  * ways, because a resync quantized more coarsely than the kernel tick it
- * repairs can advance a tick too many and mature an event EARLY.
+ * repairs can advance a tick too many and mature an event early.
  *
- * THE ISR HAS FOUR ACTS, and every one of them is load-bearing:
- *   0. RESTORE THE CLOCK - fact 5 above. First, so that everything after
+ * The ISR has four acts, and every one of them is load-bearing:
+ *   0. Restore the clock - fact 5 above. First, so that everything after
  *      it (and every handler that runs later) is at full speed and the
  *      console's divisor is right again.
- *   1. ACKNOWLEDGE - the EXTI line's pending bit and the RTC's own flag,
+ *   1. Acknowledge - the EXTI line's pending bit and the RTC's own flag,
  *      or the vector re-enters for ever (`Rtc::wakeup_isr()` does both,
  *      with ES0287 2.8.3's loop inside it).
- *   2. RESYNC - hand the frozen span to the ticker.
- *   3. HAND THE MACHINE BACK TO A TICKING SLEEP. The never-early bias
- *      GUARANTEES that kernel time is still a shade short of the deadline
+ *   2. Resync - hand the frozen span to the ticker.
+ *   3. Hand the machine back to a ticking sleep. The never-early bias
+ *      guarantees that kernel time is still a shade short of the deadline
  *      when the alarm lands, and an RTC wake posts nothing to any queue,
  *      so a loop that idled again into the still-armed Stop with the alarm
  *      now spent would never come back. Downgrading to Sleep here is the
  *      escape: the residual ticks mature on SysTick within milliseconds
  *      and TimeEvents::process() posts the deadline on its own clock.
  *
- * A FOREIGN wake - any other interrupt - does not run this body. Its
+ * A foreign wake - any other interrupt - does not run this body. Its
  * progress is its own event, the resync happens in disarm() instead, and
- * the Stop stays armed WITH the alarm still standing. That is why
+ * the Stop stays armed with the alarm still standing. That is why
  * util/power.hpp's convention (a wake path with nothing to say sends
- * SleepRequested{none}) is LOAD-BEARING with this site.
+ * SleepRequested{none}) is load-bearing with this site.
  *
  * ## What the site owns
  *
- * THE RTC, WHOLE: the domain gate, the clock select, the prescalers, the
+ * The RTC, whole: the domain gate, the clock select, the prescalers, the
  * calendar and the wake-up timer. An application using this site must not
  * drive stm32f4/rtc.hpp elsewhere, and must bind the vector:
  *
  *     extern "C" void RTC_WKUP_IRQHandler() { Site::isr(); }
+ *
+ * init() enables that vector's NVIC line itself; without the line a Stop
+ * is never left (docs/stm32f4/pwr.md, measured).
  *
  * ## Errata
  *
@@ -268,7 +307,12 @@ struct Stm32f4SleepSite {
     }
 
     /**
-     * Arm a rung. For the two deep ones this ALSO pauses the kernel's tick
+     * Arm a rung - the manager's verb, from its handler, just before the
+     * kernel's idle path; it writes registers and waits for nothing. False
+     * only for a Stop configuration Pwr refuses, nothing written to the
+     * silicon then (the site's own record of its rung is left as it
+     * was). For
+     * the two deep ones this also pauses the kernel's tick
      * where there is one - fact 4: it closes 5.3.3's pending-interrupt
      * window by construction and makes the Stop last even under a
      * debugger's DBG_STOP, and it costs nothing because a Stop stops
@@ -299,7 +343,8 @@ struct Stm32f4SleepSite {
         return false;
     }
 
-    /// Back to the kernel's own idle behaviour: the tick running again
+    /// The manager's verb at its next dispatch after the wake. Back to the
+    /// kernel's own idle behaviour: the tick running again
     /// (where there is one), the shallow mode armed, and the clock the
     /// program was promised - because the first thing that reaches the
     /// manager after a Stop is the first thing that can put any of the
@@ -432,8 +477,10 @@ struct Stm32f4TimedSleepSite {
 
     /**
      * Route the RTC, start the counter, set the calendar going, bypass the
-     * shadow registers and enable the NVIC line. Call once, after the
-     * clock init, before the manager's first round.
+     * shadow registers and enable the NVIC line. Call once, from main(),
+     * after the clock init, before the manager's first round. It waits,
+     * bounded, for the LSE (or the LSI) to report ready and for the RTC's
+     * own synchronizations.
      *
      * False = the domain or the RTC refused (a clock select already taken
      * by something else and `wipe_domain` not given, an oscillator that
@@ -611,8 +658,10 @@ struct Stm32f4TimedSleepSite {
         }
     }
 
-    /// The four-act ISR body an app's RTC_WKUP_IRQHandler binds. See the
-    /// file header for why each act is there.
+    /// The four-act ISR body an app's RTC_WKUP_IRQHandler binds, and
+    /// nothing else calls. Act 0 re-runs the clock task in the interrupt,
+    /// with its bounded waits. See the file header for why each act is
+    /// there.
     [[gnu::always_inline]] static void isr() {
         (void)Plain::resume_clock();   // act 0
         (void)Rtc::wakeup_isr();       // act 1: the EXTI line and the flag

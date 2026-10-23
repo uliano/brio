@@ -1,11 +1,14 @@
 /*
  * adc.hpp
  *
- * The SAM C21's two 12-bit SAR converters (DS60001479M ch. 38) as one
- * resource template, `Adc<n>` - ADC0 and ADC1 are the SAME peripheral at
- * two addresses, so there is one type and the instance number carries
- * every difference the silicon has (which pads, which GCLK channel,
- * which EVSYS codes, which half of the host/client pair).
+ * A voltage read on the SAM C21: a pad, the supply, the bandgap or the
+ * DAC's output, once or paced, averaged or oversampled, watched against
+ * a window. The chip's two 12-bit SAR converters (DS60001479M ch. 38)
+ * are one resource template, `Adc<n>` - ADC0 and ADC1 are the same
+ * peripheral at two addresses, so there is one type and the instance
+ * number carries every difference the silicon has (which pads, which
+ * GCLK channel, which EVSYS codes, which half of the host/client pair).
+ * The smallest use, a single reading:
  *
  *   using Meter = brio::Adc<0>;
  *   Meter::init(gclk_generator, brio::AdcConfig{
@@ -16,41 +19,57 @@
  *   const uint16_t raw = Meter::read();
  *   const uint16_t mv  = brio::adc_mv(raw, Meter::result_steps(), 5100);
  *
- * ONE TYPE WITH KNOBS, because every use - a single reading, a paced
+ * Who calls what. init() and release() are setup calls in main(), after
+ * the clock task's init() (the generator's rate passed to init() is a
+ * claim the prescaler check trusts); init() answers false for a
+ * configuration the chapter forbids, a prescaler out of range for the
+ * rate given, or a synchronization that never settled. Every wait is
+ * bounded: a synchronization 0xFFFF polls, a conversion in read() and
+ * discard() 0xFFFFF. read(), select_sync() and the configuring verbs are
+ * main-context calls (setup, or an active object's handler - an active
+ * object being a brio component with its own event queue, served one
+ * event at a time by the kernel); select(), start() and flush() are
+ * single stores that wait for nothing. isr() and resrdy() are the bodies
+ * the program's ADCn_Handler calls, and nothing else does. Nothing here
+ * masks interrupts and nothing keeps a caller's storage. The pad is not
+ * touched by select(): claim_pad() is 38.5.1's analog configuration for
+ * a program that wants it.
+ *
+ * One type with knobs, because every use - a single reading, a paced
  * stream, an oversampled reading, a window watch, a supply monitor - is
  * the same sequence (select, trigger, wait RESRDY, read RESULT) with
  * different knobs and different consumers of the same two flags.
  *
  * ---------------------------------------------------------------------
- * THE FOUR REGISTER DISCIPLINES, spelled per register because this
+ * The four register disciplines, spelled per register because this
  * chapter mixes all four and the mixture is where the traps are.
  *
- * 1. ENABLE-PROTECTED (38.6.2.1) - writable only with CTRLA.ENABLE = 0,
- *    and NOT synchronized: CTRLB (the prescaler), REFCTRL, EVCTRL,
- *    CALIB. Every verb here that touches one of them REFUSES while the
+ * 1. Enable-protected (38.6.2.1) - writable only with CTRLA.ENABLE = 0,
+ *    and not synchronized: CTRLB (the prescaler), REFCTRL, EVCTRL,
+ *    CALIB. Every verb here that touches one of them refuses while the
  *    converter is enabled rather than storing into a register the
  *    silicon ignores.
- * 2. WRITE-SYNCHRONIZED (38.6.8) - CTRLA.SWRST, CTRLA.ENABLE,
+ * 2. Write-synchronized (38.6.8) - CTRLA.SWRST, CTRLA.ENABLE,
  *    INPUTCTRL, CTRLC, AVGCTRL, SAMPCTRL, WINLT, WINUT, GAINCORR,
  *    OFFSETCORR, SWTRIG. Every wait in this file is bounded and
  *    reported, like every wait in this stratum.
- * 3. DOUBLE-BUFFERED (38.6.3.3) - and this is the one that surprises:
+ * 3. Double-buffered (38.6.3.3) - and this is the one that surprises:
  *    INPUTCTRL, CTRLC, AVGCTRL, SAMPCTRL, WINLT, WINUT, GAINCORR and
- *    OFFSETCORR are ALSO buffered, so a write made during a conversion
- *    is held until the next RESULT and its SYNCBUSY bit STAYS SET for
+ *    OFFSETCORR are also buffered, so a write made during a conversion
+ *    is held until the next RESULT and its SYNCBUSY bit stays set for
  *    the whole conversion. A caller that spins on SYNCBUSY after
  *    changing the input mid-stream is waiting for the conversion, not
  *    for a bus. That is why `select()` is a plain void store with no
  *    wait (it is exactly what a buffered register wants) and
  *    `select_sync()` is the separate verb for a caller who needs the
  *    change to be in force before it returns.
- * 4. NEITHER - DBGCTRL, which is also NOT reset by CTRLA.SWRST
+ * 4. Neither - DBGCTRL, which is also not reset by CTRLA.SWRST
  *    (38.8.18), and SEQCTRL.
  *
  * ---------------------------------------------------------------------
- * THE RESSEL / AVGCTRL INTERPLAY, the chapter's classic trap.
+ * The RESSEL / AVGCTRL interplay, the chapter's classic trap.
  *
- * Accumulating or averaging more than one sample REQUIRES
+ * Accumulating or averaging more than one sample requires
  * CTRLC.RESSEL = 16BIT (38.6.2.9 and 38.6.2.10 both say so in a Note,
  * and 38.8.11 repeats it). A configuration that asks for
  * AVGCTRL.SAMPLENUM > 1 sample at 12-, 10- or 8-bit resolution is
@@ -58,9 +77,9 @@
  *
  * What the two AVGCTRL fields do together:
  *  - SAMPLENUM picks N = 1..1024 samples summed into one RESULT;
- *  - above 16 samples the hardware ALREADY right-shifts the sum to keep
+ *  - above 16 samples the hardware already right-shifts the sum to keep
  *    it inside the 16-bit RESULT register (table 38-1);
- *  - ADJRES is an ADDITIONAL right shift the software asks for, and it
+ *  - ADJRES is an additional right shift the software asks for, and it
  *    is what turns an accumulation into an average (table 38-2) or into
  *    an oversampled higher-resolution reading (table 38-3).
  * So the full scale of a RESULT is (base << log2(N)) >> (auto + ADJRES),
@@ -71,7 +90,7 @@
  * two tables so a caller never copies them by hand.
  *
  * ---------------------------------------------------------------------
- * CALIBRATION IS NOT OPTIONAL. 38.5.10: "The BIAS and LINEARITY
+ * Calibration is not optional. 38.5.10: "The BIAS and LINEARITY
  * calibration values from the production test MUST be loaded from the
  * NVM Software Calibration Area into the ADC Calibration register
  * (CALIB) by software to achieve specified accuracy." The device header
@@ -83,42 +102,42 @@
  * and not to change it.
  *
  * ---------------------------------------------------------------------
- * THE CLOCK. CLK_ADCn = GCLK_ADCn / 2^(1 + CTRLB.PRESCALER), minimum
+ * The clock. CLK_ADCn = GCLK_ADCn / 2^(1 + CTRLB.PRESCALER), minimum
  * divider 2 (38.6.2.4). Table 45-22 bounds f_adc at 160 kHz .. 16 MHz,
- * so at a 48 MHz generator DIV2 is ILLEGAL (24 MHz) and DIV4 is the
+ * so at a 48 MHz generator DIV2 is illegal (24 MHz) and DIV4 is the
  * fastest legal setting - `adc_clock_in_range()` says so and `init()`
  * refuses a prescaler that leaves the range. There is no `rebase()` and
- * no ClockUser here: on this family the converter has its OWN generic
+ * no ClockUser here: on this family the converter has its own generic
  * clock channel, so a main-clock change does not move CLK_ADC at all
  * and there is nothing to fan out to (docs/samc21/clock.md).
  *
- * INTREF NEEDS A LONG SAMPLE. 38.8.9's MUXPOS description: "If the
+ * INTREF needs a long sample. 38.8.9's MUXPOS description: "If the
  * internal INTREF voltage input channel is selected, then the Sampling
  * Time Length bit group in the Sampling Control register must be written
  * with a corresponding value", and table 45-22 puts that value at
- * 10 us MINIMUM. `adc_samplen_for_ns()` turns a wanted sampling time
+ * 10 us minimum. `adc_samplen_for_ns()` turns a wanted sampling time
  * into a SAMPLEN at a given CLK_ADC, and `adc_intref_sampling_ns` is
  * the 10 us the table demands. Nothing enforces it - the driver does not
  * know CLK_ADC at the moment `select()` is called - so it is stated
  * here and measured in the suite.
  *
  * ---------------------------------------------------------------------
- * ERRATA, DS80000740S, read on the E/G/J ROW at revision F. Ten ADC
- * items; FIVE are this silicon.
+ * Errata, DS80000740S, read on the E/G/J row at revision F. Ten ADC
+ * items; five are this silicon.
  *
- *  - 1.4.4 Synchronized Event (all revisions): a SYNCHRONIZED event
- *    arriving during a conversion is never acknowledged and STALLS THE
- *    EVENT CHANNEL. The workaround is "only the asynchronous path from
+ *  - 1.4.4 Synchronized Event (all revisions): a synchronized event
+ *    arriving during a conversion is never acknowledged and stalls the
+ *    event channel. The workaround is "only the asynchronous path from
  *    the Event System must be used" - which table 29-3 independently
- *    requires for both ADC users anyway. This is CODE here:
+ *    requires for both ADC users anyway. This is code here:
  *    `start_on()` and `flush_on()` refuse a channel configuration whose
  *    path is not asynchronous.
  *  - 1.4.5 Software Trigger Sync Busy (all revisions):
- *    SYNCBUSY.SWTRIG becomes STUCK AT ONE after a wake from standby, and
+ *    SYNCBUSY.SWTRIG becomes stuck at one after a wake from standby, and
  *    the errata's own instruction is to ignore it - "The ADC result can
  *    be read after INTFLAG.RESRDY is set. To start the next conversion,
  *    write a '1' to SWTRIG.START." So `start()` and `flush()` are plain
- *    stores that WAIT FOR NOTHING, and `ready()`/`result()` are the only
+ *    stores that wait for nothing, and `ready()`/`result()` are the only
  *    progress the rest of this file believes.
  *  - 1.4.6 Reference Buffer Offset Compensation (all revisions): with
  *    REFCTRL.REFCOMP = 1 and any reference other than VDDANA, the TUE of
@@ -127,15 +146,18 @@
  *    them - `discard(5)` - exactly when that combination is configured,
  *    and `warm_up_conversions()` reports how many it decided to spend.
  *  - 1.4.9 Sequence State (all revisions): SEQSTATUS is not updated for
- *    the first conversion of a sequence that EXITS STANDBY. Stated on
+ *    the first conversion of a sequence that exits standby. Stated on
  *    `sequence_state()`; there is nothing to write.
  *  - 1.4.10 Syncbusy Enable (all revisions): enabling ADC1 while ADC0 is
  *    disabled can leave ADC0.SYNCBUSY.ENABLE stuck at one. The
  *    workaround is "enable ADC0 before ADC1, or disregard the bit", and
- *    it is stated on `enable()`: each instance waits on ITS OWN
- *    SYNCBUSY, which the erratum does not touch, so nothing here hangs -
- *    but a caller reading ADC0's must know.
- *  - NOT this silicon: 1.4.1 (SWTRIG.START never clears), 1.4.2 (the LSB
+ *    it is stated on `enable()`: each instance waits on its own
+ *    SYNCBUSY, with a bound, so nothing here hangs - but ADC0's own bit
+ *    is the one the erratum sticks, and on the bench the state, once
+ *    entered, makes `Adc<0>::enable()` and `init()` answer false and a
+ *    software reset does not clear it (docs/samc21/adc.md, "Bench
+ *    findings"); the order the converters come up in is the caller's.
+ *  - Not this silicon: 1.4.1 (SWTRIG.START never clears), 1.4.2 (the LSB
  *    stuck at zero at 8 and 10 bits) and 1.4.3 (the window monitor
  *    keeping GCLK alive) are revision B only; 1.4.7 (differential and
  *    single-ended electrical characteristics) and 1.4.8 (power
@@ -146,14 +168,14 @@
  *    revisions) is live and measured - see `AdcInput::dac`.
  *
  * ---------------------------------------------------------------------
- * THE HOST/CLIENT PAIR (38.6.3.1) is real and typed: ADC1 is the only
+ * The host/client pair (38.6.3.1) is real and typed: ADC1 is the only
  * instance whose CTRLA.SLAVEEN exists (`ADC1_MASTER_SLAVE_MODE` = 2 in
  * the device header), ADC0 the only one whose CTRLC.DUALSEL means
  * anything (`ADC0_MASTER_SLAVE_MODE` = 1). Asking for either on the
  * wrong instance is refused, at compile time in the `init<cfg>()` form.
  *
- * NOT BUILT (docs/samc21/adc.md carries the list): the converter as a
- * WAKE source - table 38-4 is measured, but RESRDY, WINMON and OVERRUN
+ * Not built (docs/samc21/adc.md carries the list): the converter as a
+ * wake source - table 38-4 is measured, but RESRDY, WINMON and OVERRUN
  * have never driven the NVIC at all; VREFA (needs a pin this board does
  * not drive); and the temperature sensor, which is the separate TSENS
  * peripheral (ch. 43) on this family and not an ADC channel
@@ -809,10 +831,12 @@ public:
     /**
      * CTRLA.ENABLE, preserving the other CTRLA bits.
      *
-     * ERRATUM 1.4.10 (all revisions): enabling ADC1 while ADC0 is
-     * DISABLED can leave ADC0.SYNCBUSY.ENABLE stuck at one. This waits
-     * on its OWN instance's bit, which the erratum does not touch, so
-     * nothing here hangs - but a caller that reads ADC0's SYNCBUSY after
+     * Erratum 1.4.10 (all revisions): enabling ADC1 while ADC0 is
+     * disabled can leave ADC0.SYNCBUSY.ENABLE stuck at one. This waits
+     * on its own instance's bit, bounded by `spins`, so nothing here
+     * hangs - but on ADC0 that bit is the one the erratum sticks, and
+     * then this answers false with the converter not enabled (measured,
+     * docs/samc21/adc.md). A caller that reads ADC0's SYNCBUSY after
      * bringing ADC1 up alone must disregard it, or enable ADC0 first.
      */
     static bool enable(bool on, uint32_t spins = 0xFFFFu) {
@@ -1147,7 +1171,8 @@ public:
         }
         return false;
     }
-    /// The convenience form, for a converter known to be running.
+    /// The convenience form, for a converter known to be running: 0 when
+    /// no result came within the bound. Main context; it spins.
     static uint16_t read(uint32_t spins = 0xFFFFFu) {
         uint16_t v = 0;
         (void)read(v, spins);

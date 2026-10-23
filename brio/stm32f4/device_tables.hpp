@@ -1,17 +1,34 @@
 /*
  * device_tables.hpp
  *
- * THE RESERVE of the stm32f4 stratum - the one file where the
- * preprocessor is allowed to ask the device header what exists. The
- * standing rule (docs/design/overview.md, "Generalization rule"): a probe
- * that yields a VALUE lives here and is exported as constexpr data; a
- * driver keeps `#ifdef` only to select per-instance CODE, never to learn
- * a fact. Nothing here is a copied table - every entry is the device
- * header's own symbol, so a variant the pack adds tomorrow is described
- * by its header and not by a list someone has to keep - with ONE class
- * of exception, stated where it is made: the frequency ladders.
+ * The reserve of the stm32f4 stratum: the table of what each part of the
+ * family has, read off its device header, and the one file where the
+ * preprocessor is allowed to ask the device header what exists. A driver
+ * of this stratum asks it instead of the header - whether a port is
+ * bonded, which serial instances exist and on which bus, where a DMA
+ * request sits, how fast a part may run - and a program meets it through
+ * the drivers' compile-time refusals, or asks it directly:
  *
- * WHAT DIFFERS ACROSS THE STM32F4 FAMILY, as far as the strata reach
+ *     static_assert(brio::gpio_port_present('G'), "this program needs port G");
+ *     constexpr bool on_apb2 = brio::usart_on_apb2(6);   // the bus USART6's divisor divides
+ *
+ * Every entry is constexpr data or a constexpr function, read when the
+ * program is compiled: nothing here touches a register, waits or masks,
+ * so the question of a calling context does not arise.
+ *
+ * The standing rule (docs/design/overview.md, "Generalization rule"): a
+ * probe that yields a value lives here and is exported as constexpr
+ * data; a driver keeps `#ifdef` only to select per-instance code, never
+ * to learn a fact. Nothing here is a copied table - every entry is the
+ * device header's own symbol, so a variant the pack adds tomorrow is
+ * described by its header and not by a list someone has to keep - with
+ * one class of exception, stated where each is made: the facts of the
+ * reference manual that no header carries. The frequency ladders are the
+ * first (below); the DMA request mapping, which instance wears the I2S
+ * face and the ADC's internal channel numbers are others, each keyed on
+ * the device-select define in its own section.
+ *
+ * What differs across the STM32F4 family, as far as the strata reach
  * (cmsis-device-f4 v2.6.9, all twenty-three headers of the pack, one
  * umbrella stm32f4xx.h dispatching on the device-select define):
  *  - GPIO ports: A, B, C and H on every part; D from the 64-pin
@@ -27,12 +44,12 @@
  *    F413/F423 alone. USART1 and USART6 sit on APB2, every other
  *    instance on APB1 - which decides the bus rate a baud divisor
  *    divides.
- *  - Which instances are FULL. RM0090 table 148 (and its RM0390 and
+ *  - Which instances are full. RM0090 table 148 (and its RM0390 and
  *    RM0383 twins): UART4, UART5, UART7 and UART8 have no synchronous
  *    mode, no smartcard and no hardware flow control. That is not in
- *    the header - the U(S)ART distinction in the NAME is what carries
+ *    the header - the U(S)ART distinction in the name is what carries
  *    it, and usart_is_full() reads the name.
- *  - Interrupt lines: on this family a vector is mostly ONE
+ *  - Interrupt lines: on this family a vector is mostly one
  *    peripheral's, and the sharing the table does show (TIM1_BRK_TIM9,
  *    TIM8_UP_TIM13, TIM6_DAC, the EXTI groups, the I2C's EV/ER pair) is
  *    the same on every header that has both parties. IRQn values are
@@ -40,21 +57,23 @@
  *    here is guarded by the instance's base-address macro and a header
  *    without the instance has no verb for it.
  *  - The regulator: two VOS bits on every part but the F405/F407/F415/
- *    F417, whose PWR_CR carries ONE (PWR_CR_VOS_1 is what the header
+ *    F417, whose PWR_CR carries one (PWR_CR_VOS_1 is what the header
  *    declares or not); the over-drive pair ODEN/ODSWEN on the F42x/F43x,
  *    the F446 and the F469/F479 alone (PWR_CR_ODEN).
  *  - The flash interface's LATENCY field: four bits where the ladder
  *    reaches 180 MHz, three where it does not (FLASH_ACR_LATENCY_Msk).
  *  - The PLL's R output (PLLCFGR.PLLR, the F446's and F469's), and the
  *    second PLL's names (PLLI2S everywhere, PLLSAI where an LTDC or a
- *    SAI needs it) - none of them this stratum's business yet.
+ *    SAI needs it): what stm32f4/clock.hpp's audio-PLL and PLLSAI verbs
+ *    need of them is asked here (plli2s_has_m(), pllsai_has_r()), with
+ *    the I2S clock selector a part has (i2s_clock_select()).
  *
- * THE FREQUENCY LADDERS ARE THE EXCEPTION. How fast a part may run at
+ * The frequency ladders are the exception. How fast a part may run at
  * each regulator scale, with and without over-drive, how many flash
  * wait states a HCLK needs and how fast each APB may go are facts of
- * the REFERENCE MANUAL, not of the header, and they differ per part
+ * the reference manual, not of the header, and they differ per part
  * class. They are keyed here on the device-select macro - the one
- * thing about the part the preprocessor can know - and stated ONLY for
+ * thing about the part the preprocessor can know - and stated only for
  * the classes whose manual was read for them (RM0090 for the F405/F407
  * and F42x/F43x classes, RM0390 for the F446, RM0383 for the F411,
  * RM0386 for the F469/F479). A

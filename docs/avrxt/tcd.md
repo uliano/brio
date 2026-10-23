@@ -1,19 +1,106 @@
 # TCD - the 12-bit timer/counter type D (AVR DA/DB)
 
-Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B (TCD
+This document is for a programmer who drives a power stage or needs a
+timer faster than the main clock: a complementary pair of outputs with
+a dead time between them for a half bridge, a waveform with fault
+inputs that act on the pins with no CPU in the path, a counter clocked
+by the PLL above CLK_MAIN's 24 MHz. The TCD is the AVR DA's and DB's
+alone: the AVR EA has none (DS40002443A has no TCD chapter), and on it
+the driver's header names nothing. `Tcd<0>` is the resource, the typed
+view of the one instance, one function per register fact. Over it sits
+one task (a task, in brio, is a driver layer with state of its own over
+a resource, served from its peripheral's interrupt or called by an
+active object; an active object is a component of a brio program with
+its own event queue, served one event at a time by the kernel,
+[learn/introduction.md](../learn/introduction.md)): `TcdPwm<route>`,
+the complementary pair. Both are monostates (a class whose state is
+static, with no instances): the program names the type and calls its
+functions.
+
+The smallest use, the pair on the default route, from "How to use it"
+below:
+
+```cpp
+#include "avrxt/tcd.hpp"
+using Pwm = brio::TcdPwm<brio::TcdRoute::def>;          // WOA on PA4, WOB on PA5
+Pwm::init(clock, {.clock = brio::TcdClock::clkper,
+                  .hz = 20'000, .dead_time_ticks = 60, .auto_update = true});
+Pwm::duty(Pwm::max() / 4);        // with auto_update, it lands at the end of the cycle
+```
+
+Line by line: the include brings in the driver; `Pwm` names the task on
+the default route, WOA on PA4 and WOB on PA5; `init()` takes the clock
+task's tag (`constexpr SysClock clock;`, [clkctrl.md](clkctrl.md)) and
+the request: the counter clocked from CLK_PER with both prescalers at
+their default `div1`, a cycle of 20 kHz, 60 counter ticks of dead time
+asked on both edges, and the end-of-cycle update path (AUPDATE) on. At
+24 MHz that is a cycle of 1200 ticks, of which `max()`, the largest
+on-time WOA can take, is 1080; `init()` starts the pair at half of that,
+claims PA4 and PA5 as outputs and enables the TCD. `duty(Pwm::max() /
+4)` asks for an on-time of 270 ticks on WOA, WOB taking the rest of the
+cycle minus the two dead times; with AUPDATE the new pair of compares
+lands together at the end of the cycle.
+
+What decides correctness even there:
+
+- **The part has a TCD.** On the AVR EA the code above does not
+  compile: the whole header is gated on the device header's `TCD0`.
+- **The clock task first, and the source's rate is a claim.** With
+  `TcdClock::clkper` the counter rate is read from the clock tag, so
+  `SysClock::init()` comes first, and a `DynamicClock` that does not list
+  `TcdPwm` is a compile error at `init()`. With another source the
+  program states its rate in `source_hz` and nothing checks it; the PLL
+  must be started first (OSCHF at 16 to 24 MHz, then `Pll::start`), the
+  second example under "How to use it".
+- **`init()` and `duty()` answer with a bool, and the answer matters.**
+  `init()` returns false for a geometry that does not fit (a cycle under
+  4 or over 4096 counter ticks, or a dead time longer than (cycle - 2)
+  / 2 ticks), for a configuration the resource refuses, and when the
+  ENRDY window does not open within `tcd_sync_spins` (65535) polls of
+  STATUS, which a clock source that is not running causes; that last
+  case can come after the registers are written, with the TCD left off.
+  `duty()` returns false for an on-time over `max()` and when a CMDRDY
+  wait runs out; it waits up to 65535 polls before each of its compare
+  writes, masks nothing, and belongs to one context at a time.
+- **The pins.** `init()` makes PA4 and PA5 outputs; nothing checks that
+  another driver uses them, and `release()` hands them back to PORT as
+  inputs. On an alternate route the DB A4/A5's and every DA's erratum
+  (DB 2.14.2 / DA 2.13.2: CMPAEN gates all four outputs) does not bite
+  this task, which always enables WOA.
+
+`TcdPwm` enables no interrupt and needs no vector; a program that wants
+`TCD0_OVF_vect` or `TCD0_TRIG_vect` enables it on the resource and
+binds it with `ISR()` ("How to use it"), since avr-libc's start-up code
+sends an unbound vector to the reset address and the program restarts.
+
+The rest of this page, in order: the documents of record; what the
+silicon does (the clock, the four waveform modes, the three
+synchronization disciplines, double buffering and AUPDATE, the inputs,
+the delay block, dithering, the outputs, the routes, the events, and
+the errata with what the driver does about each); the types and verbs;
+how to use it; the bench findings on the AVR128DB48, then the
+AVR128DA48; and what is not covered.
+
+## Documents of record
+
+AVR128DB28/32/48/64 data sheet DS40002247B (TCD
 chapter 25, PORTMUX 17.5, EVSYS 16 generators 0xB0-0xB3 / users, CLKCTRL
-12.3.5, electricals 39.10.5), errata DS80000915F (2.14.1-2.14.3, 2.5.3,
-2.5.4) and DS80000882C (2.13.1-2.13.3, 2.4.1). Driver: `avrxt/tcd.hpp`
+12.3.5, electricals 39.10.5), errata DS80000915F (the DB's: 2.14.1-2.14.3,
+2.5.3, 2.5.4) and DS80000882C (the DA's: 2.13.1-2.13.3, 2.4.1). Driver:
+[`avrxt/tcd.hpp`](../../brio/avrxt/tcd.hpp)
 (`Tcd<0>`, `TcdPwm<route>`; the whole header is gated on the device
 header's `TCD0`, so on a part without the TCD it is includable and
 names nothing), the TCD event vocabulary in `avrxt/evsys.hpp`, the PLL
 in `avrxt/clock.hpp` (gated likewise on its status bit). Reference
-test: `test_avr_tcd`.
+test: `test_avr_tcd` (a letter is one command key of the suite's
+console and the group of verdicts it runs; this suite's `z` runs its
+letters `a` to `l`).
 
 ## What the silicon does
 
-One instance, TCD0, on every package of both families. A 12-bit
-counter in a clock domain ASYNCHRONOUS to CLK_PER, two compare/capture
+One instance, TCD0, on every package of both families, the AVR DA
+and the AVR DB. A 12-bit
+counter in a clock domain asynchronous to CLK_PER, two compare/capture
 units each with a waveform output (WOA, WOB), two more outputs that
 copy one of them (WOC, WOD), two event inputs with ten fault-handling
 modes, two capture registers, a fractional-frequency (dither)
@@ -22,8 +109,8 @@ the only consumer of the PLL on this silicon, and therefore the only
 way to run a timer above CLK_MAIN's 24 MHz ceiling.
 
 **The clock.** CLK_TCD comes from OSCHF, the PLL, EXTCLK or CLK_PER,
-then through SYNCPRES (1/2/4/8) into the SYNCHRONIZER clock and
-through CNTPRES (1/4/32) into the COUNTER clock, so the counter runs
+then through SYNCPRES (1/2/4/8) into the synchronizer clock and
+through CNTPRES (1/4/32) into the counter clock, so the counter runs
 at `source / (SYNCPRES x CNTPRES)`. The synchronizer clock is what the
 input processing logic and the delay block run on; a third prescaler
 (DLYPRESC) divides it again for blanking and the programmable output
@@ -44,15 +131,15 @@ four compare values marking the boundaries:
 | Dual slope | CMPBCLR down to 0 and up | 2 x (CMPBCLR + 1) | 2 x CMPASET | 2 x (CMPBCLR - CMPBSET + 1) |
 
 Every one of those columns is measured, to the tick, by the reference
-test. The dual-slope row is the one place where the bench CORRECTS the
+test. The dual-slope row is the one place where the bench corrects the
 chapter: 25.3.3.2.4 prints `T = (2 x CMPBCLR + 1) / f`; the silicon
 runs `2 x (CMPBCLR + 1)` counter ticks at every geometry tried - the
 ramp down and the ramp up are each CMPBCLR + 1 ticks long, like every
 other mode's ramp. `tcd_cycle_ticks()` returns the measured number.
 
-Ordering facts of One Ramp mode: a match with CMPBCLR clears EVERY
+Ordering facts of One Ramp mode: a match with CMPBCLR clears every
 output, so a compare bigger than CMPBCLR never has its effect (WOA
-then runs to the end of the cycle); a CMPACLR SMALLER than CMPASET has
+then runs to the end of the cycle); a CMPACLR smaller than CMPASET has
 no effect at all (same result); and CMPBSET below CMPASET makes the two
 on-times overlap, which is exactly what the complementary pair must
 avoid. In Dual Slope mode CMPACLR is unused - it can be written, it
@@ -74,13 +161,13 @@ whole shape of the driver:
    be written while the TCD is enabled.
 
 FAULTCTRL is additionally under Configuration Change Protection (IOREG
-key). The two CAPTURE registers are read LOW BYTE FIRST, and the read
-of the HIGH byte is what releases the buffer for the next capture.
+key). The two CAPTURE registers are read low byte first, and the read
+of the high byte is what releases the buffer for the next capture.
 
 **Double buffering and AUPDATE.** The four compares reach the TCD
 domain on a SYNC strobe, at the end of the next cycle on SYNCEOC, or -
 with CTRLC.AUPDATE set - automatically at the end of the cycle the
-moment CMPBCLR's HIGH byte is written. That last one is the PWM
+moment CMPBCLR's high byte is written. That last one is the PWM
 update path: write the new duty compares, then write CMPBCLR (even
 unchanged) and the whole set lands together on a cycle boundary.
 CTRLC.FIFTY mirrors a write to either SET register into both, and
@@ -97,12 +184,12 @@ mode does not have; Dual Slope mode keeps only 0, 4 and 7, and errata
 
 **Input blanking and the programmable output event** share DLYCTRL -
 one trigger (a compare match), one prescaler of the synchronizer
-clock, one 8-bit value - so they are ONE choice, not two features. The
+clock, one 8-bit value - so they are one choice, not two features. The
 driver makes that a single enum field, which is the refusal.
 
 **Dithering** adds DITHER/16 of a counter tick to a chosen part of the
 cycle at every accumulator overflow. Where table 25-7 says the
-addition to the CYCLE is 0 (one/two-ramp with a dead-time selection)
+addition to the cycle is 0 (one/two-ramp with a dead-time selection)
 the compensation is taken out of the following output state instead:
 the cycle length does not move, the duty does. Not supported at all in
 Dual Slope mode.
@@ -139,11 +226,11 @@ B. Two interrupt vectors: TCD0_OVF (once per TCD cycle) and TCD0_TRIG
 
 | Item (DB / DA) | What it says | Here |
 |----------------|--------------|------|
-| 2.14.1 / 2.13.1 | ASYNC input events are missed when CNTPRES != DIV1 (DB A4/A5, fixed on B0; DA every revision) | NOT refused (it is fixed on B0): documented in the header, the workaround named - divide with SYNCPRES instead. NOT REPRODUCED on this die, see below |
-| 2.14.2 / 2.13.2 | on ANY alternate route CMPAEN gates ALL FOUR outputs, no workaround (DB A4/A5, fixed on B0; DA every revision) | NOT refused (rev-dependent): stated loudly in the route table and here. MEASURED: on ALT2 a WOB-only configuration drives nothing at all |
-| 2.14.3 / 2.13.3 | input mode 7 (WAITSW) does not work with CMPASET = 0 or in Dual Slope mode - EVERY revision of both families | REFUSED, at compile time by `init<cfg>()` and at run time by `init(cfg)`. Neither half could be provoked on this die, see below |
-| CLKCTRL 2.5.3 / 2.4.1 | PLLS never sets with RUNSTDBY = 1 and no requester | MEASURED (see [clkctrl.md](clkctrl.md)) |
-| CLKCTRL 2.5.4 (DB only) | the PLL will not run from an XOSCHF CRYSTAL, only from an external clock | `Pll::start` REFUSES that combination and writes nothing |
+| 2.14.1 / 2.13.1 | ASYNC input events are missed when CNTPRES != DIV1 (DB A4/A5, fixed on B0; DA every revision) | not refused (it is fixed on B0): documented in the header, the workaround named - divide with SYNCPRES instead. Not reproduced on this die, see below |
+| 2.14.2 / 2.13.2 | on any alternate route CMPAEN gates all four outputs, no workaround (DB A4/A5, fixed on B0; DA every revision) | not refused (rev-dependent): stated in the header's opening and here. Measured: on ALT2 a WOB-only configuration drives nothing at all |
+| 2.14.3 / 2.13.3 | input mode 7 (WAITSW) does not work with CMPASET = 0 or in Dual Slope mode - every revision of both families | refused, at compile time by `init<cfg>()` and at run time by `init(cfg)`. Neither half could be provoked on this die, see below |
+| CLKCTRL 2.5.3 / 2.4.1 | PLLS never sets with RUNSTDBY = 1 and no requester | measured (see [clkctrl.md](clkctrl.md)) |
+| CLKCTRL 2.5.4 (DB only) | the PLL will not run from an XOSCHF crystal, only from an external clock | `Pll::start` refuses that combination and writes nothing |
 
 ## Types and verbs
 

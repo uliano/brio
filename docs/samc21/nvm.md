@@ -1,6 +1,65 @@
 # NVMCTRL - Non-Volatile Memory Controller (SAM C21)
 
-Documents of record: SAM C20/C21 data sheet DS60001479M ch. 27, with the
+This document is for a programmer who needs to keep data across a
+power cycle - a calibration, a counter, a record of the last crash -
+or to read what the factory wrote into the chip: the calibration
+values, the fuse row, the serial number. `Nvm` is the flash controller,
+a monostate (a class whose state and functions are all static, with no
+instance to create: there is one controller), that erases and programs
+both of the chip's programmable arrays; `FlashWaitStates` is the
+wait-state setting the clock code changes around a rate change;
+`RwweeFlash` and `RwweeJournalZone` (`samc21/nvm_flash.hpp`) put
+`util/nv_heap.hpp`'s block allocator and `util/nv_journal.hpp`'s value
+journal on the read-while-write array, which is where a program stores
+its records without stopping.
+
+The smallest use that stores something, the second block of "How to
+use it" below - a record in the RWWEE array, with the CPU running
+throughout:
+
+```cpp
+uint8_t page[Nvm::page_size] = { /* ... */ };
+if (Nvm::erase_row(NvmArray::rwwee, Nvm::rwwee_base) == NvmError::none) {
+    (void)Nvm::program_page(NvmArray::rwwee, Nvm::rwwee_base, page);
+}
+```
+
+Line by line: `page` is one page of data, 64 bytes; `erase_row()` sets
+the 256-byte row at the start of the RWWEE array to all ones and
+answers `NvmError::none` when the command finished clean;
+`program_page()` loads the page buffer with 32-bit stores and writes
+the page into the erased row. Both wait for the command, bounded
+(`command_spin_limit` polls), and answer `timed_out` when it never
+finished.
+
+What decides correctness even there. A row is erased before its pages
+are written: programming can only clear bits, so a page written into a
+dirty row silently ANDs with what was there, and nothing checks it. The
+address must be row-aligned for an erase and page-aligned for a
+program, inside the array named (`bad_address` otherwise), and at most
+8 consecutive writes are allowed per row before the next erase. The
+command interface and its one page buffer are shared by both arrays
+and by every user of this driver, the heap and the journal included,
+with no guard: one caller at a time. Only the RWWEE array leaves the
+CPU running; a command on the main array stalls every read of the
+main array until it ends, instruction fetches and the vector table at
+address 0 included. No clock has to be
+opened first: the controller's bus clocks are on out of reset (the
+device header's MCLK_AHBMASK and MCLK_APBBMASK reset values carry its
+bits). And the user row, this family's fuses, is read here and never
+written: writing it is the bench tool's job.
+
+The page, in order: the documents of record; what the silicon does
+(the two arrays and who stalls, rows and pages, the page buffer's
+traps, ADDR, commands, locks, the factory areas); the types and verbs,
+the partition of the RWWEE array between the heap and the journal
+among them; how to use it (wait states, a raw record, a heap, a
+journal, the factory values, the fuses); the bench findings; what is
+not covered.
+
+## Documents of record
+
+SAM C20/C21 data sheet DS60001479M ch. 27, with the
 memory map and the factory areas in ch. 9 (9.3 user row, 9.4 and 9.5
 calibration, 9.6 serial number) and the timing and endurance numbers in
 tables 45-41..45-44 - and errata DS80000740S, where **NVMCTRL has no
@@ -15,7 +74,9 @@ workaround around RWWEE access; it is not needed here. Drivers:
 `util/nv_journal.hpp` one). Family fixtures `test/family_samc21/nvm.cpp`
 and `test/family_samc21/journal.cpp` plus their negatives under
 `brio check samc21`; the bench suites are `test_samc_nvm` and
-`test_samc_journal`.
+`test_samc_journal` (a letter is one command key of a suite's console
+and the group of verdicts that key runs; `z` is the all-key that runs
+the ordinary set, and a letter that spends endurance sits outside it).
 
 ## What the silicon does
 
@@ -28,7 +89,7 @@ is programmed or erased stalls the AHB until the operation ends - and
 since instruction fetch is a main-array read, that means the CPU. The
 main array can be read freely while the RWWEE array is written (27.6.4.1,
 27.6.4.2). Measured: through a row erase the CPU completes about 3950
-turns of a polling loop on RWWEE and exactly ONE on the main array.
+turns of a polling loop on RWWEE and exactly one on the main array.
 
 The RWWEE array is also the more durable of the two - 100k cycles against
 the main array's 25k (45-43, 45-44) - and in exchange it is not cached,
@@ -79,7 +140,7 @@ The three error bits (NVME, LOCKE, PROGE) accumulate until written back.
 **Sixteen lock regions, and two different kinds of lock.** The main array
 is divided into 16 equal regions (16 KB each at 256 KB) with one LOCK bit
 apiece, zero meaning locked. The Lock Region and Unlock Region commands
-change that state ONLY UNTIL THE NEXT RESET; the state a reset restores
+change that state only until the next reset; the state a reset restores
 lives in the user row. The RWWEE array has no regions - its rows are
 writable regardless of the main array's locks.
 
@@ -103,7 +164,7 @@ all 128 bits are used.
 **The user row is written by the bench tool and not from firmware, on
 purpose.** The commands exist - Erase Auxiliary Row (EAR) and Write
 Auxiliary Page (WAP) - and this driver deliberately exposes neither. The
-row IS the fuses: it survives a chip erase, and it carries the watchdog's
+row is the fuses: it survives a chip erase, and it carries the watchdog's
 power-on ALWAYSON bit, the brown-out level and BOOTPROT, so a wrong word
 is not undone by reflashing and an application has no business writing
 one. Provisioning belongs to the programmer: `brio fuses` over
@@ -116,7 +177,7 @@ driver nor the tool reaches the security bit
 ([../probes/atmel-ice.md](../probes/atmel-ice.md)).
 
 Note that the device header's `NVMCTRL_USER_PAGE_OFFSET` is 0x00800000,
-the base of the whole auxiliary space, and NOT the user row: the two
+the base of the whole auxiliary space, and not the user row: the two
 differ by 0x4000, and confusing them reads calibration data as fuses.
 
 ## Types and verbs
@@ -174,7 +235,7 @@ verb; `none` is the only success.
 **`FlashWaitStates`** - `get`, `set`, `for_hz`. The register is
 NVMCTRL's, the question is the clock's: nothing may raise the CPU
 frequency without setting these first, and 27.5.2 orders them adapted
-BEFORE a rise and after a fall. `samc21/clock.hpp` is the caller.
+before a rise and after a fall. `samc21/clock.hpp` is the caller.
 
 **The factory views** - `NvmUserRow`, `NvmCalibration`,
 `NvmTemperatureCalibration`, `DeviceSerial`. Each has a static `read()`
@@ -193,7 +254,7 @@ split as
 Both bounds are constants rather than linker symbols, because nothing the
 linker places can reach into the RWWEE array - that is the property the
 RWWEE array buys, and the partition does not spend it. The split is
-anchored at the TOP of the array so that each user's own home is in turn
+anchored at the top of the array so that each user's own home is in turn
 anchored to the silicon: the heap's map pair at the top of the heap's
 share, the journal's halves at the top of the part.
 

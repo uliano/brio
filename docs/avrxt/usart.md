@@ -1,6 +1,116 @@
 # USART - the serial port (AVR DA, DB and EA)
 
-Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B (USART
+This document is for a programmer who needs a serial port on an AVR DA,
+DB or EA: the console a program prints to and reads lines from, a byte
+transport to another chip, or one of the other shapes the peripheral
+offers (a one-wire half-duplex line, RS-485 with its driver enable, a
+synchronous link, a host SPI, IrDA, auto-baud). `Usart<n>` is the
+resource: the typed view of one instance, configured from one struct,
+one function per register fact. Over it sit the tasks (a task, in brio,
+is a driver layer with state of its own over a resource, served from its
+peripheral's interrupt or called by an active object; an active object
+is a component of a brio program with its own event queue, served one
+event at a time by the kernel,
+[learn/introduction.md](../learn/introduction.md)). `Uart<n, route>` is
+the one most programs use: an interrupt-driven byte transport with a
+receive ring and a transmit ring, both served from the instance's two
+interrupts, which satisfies the transport concepts `util/serial_port.hpp`
+and `print()` are written against (`ByteTransport`, `BulkSink`,
+`SkippingSource`, checked by a static_assert in the header;
+[design/serial.md](../design/serial.md) is the stack above it). The other
+tasks (`OneWire`, `Rs485`, `SyncHost`, `SyncClient`, `MspiHost`,
+`IrdaLink`, `AutoBaud`) are polled, with bounded spins.
+
+The smallest use is the console, copied from "How to use it" below:
+
+```cpp
+using Serial = brio::Uart<2, brio::Route::alt1>;
+constexpr Serial serial;
+ISR(USART2_RXC_vect, ISR_FLATTEN) { if (Serial::rxc()) brio::post<Lines>(brio::RxActivity{}); }
+ISR(USART2_DRE_vect) { Serial::dre(); }
+...
+Serial::init(clock, 460800);
+brio::print(serial, "hello ", 42, brio::crlf);
+```
+
+Line by line: `Serial` names the transport type, USART2 on its ALT1
+route with the ring sizes at their defaults (64 bytes received, 256 to
+transmit). ALT1 puts TXD on PF4 and RXD on PF5 on every package of the
+three dies that has the route, which are the console's pads on every
+board of the stratum ([README.md](README.md), "Serial console"); a route
+the package has not got (USART2's ALT1 on a 28-pin part) is a compile
+error. The pads come with the route: `init()` writes PORTMUX and sets
+the pins' directions itself, and the program hands over nothing, but
+uses those pins for nothing else. `serial` is an empty tag object of
+that type, the argument `print` takes to pick the port: the type's
+functions and state are all static, so the object carries nothing. The
+two `ISR()` lines, avr-libc's macro, bind the instance's two vectors to
+the task's interrupt bodies. `rxc()` takes every frame the receive
+buffer holds into the ring and returns true when the ring went from
+empty to non-empty, the edge on which this console posts `RxActivity`
+to `Lines`, the active object that assembles lines (`util/serial_port.hpp`'s
+`SerialPort`); a program that reads nothing discards the answer
+(`ISR(USART2_RXC_vect) { Serial::rxc(); }`, the header's own example),
+and `ISR_FLATTEN` inlines the post into this vector alone, for the
+reason "What a byte costs `Uart`" below gives. `dre()` moves the next
+byte of the transmit ring into the data register and turns its own
+interrupt off when the ring is empty. `init()` takes the clock task's
+tag (`constexpr SysClock clock;`, [clkctrl.md](clkctrl.md)) and the baud
+rate; it configures 8N1, empties the rings and the error counters,
+enables the receive interrupt and holds TXD idle for 10 ms. `print`
+formats its arguments into the transmit ring, handing the transport
+runs (a run is the unit a transport moves: a buffer and a length, a
+single byte its degenerate case); `brio::crlf` is the line ending.
+
+What decides correctness even there:
+
+- **`Serial::init()` comes after `SysClock::init()`.** BAUD is computed
+  from `Clock::hz`, the rate the clock type claims, and not read from
+  the hardware: a port initialized while the chip still runs on its
+  reset clock (OSCHF at 4 MHz on the DA and the DB, the OSCCFG fuse's
+  rate over 6 on the AVR EA, [clkctrl.md](clkctrl.md)) speaks at the
+  ratio of the two rates - a sixth of the rate asked under a 24 MHz
+  clock type - until the clock task brings CLK_PER to `hz`, and nothing
+  refuses it. BAUD is written once, for `hz`, so the rate is right from
+  then on (on the AVR EA, once the clock's `init()` found the OSCCFG
+  fuse it claims; on a mismatch CLK_PER never reaches `hz`); what was
+  sent before is garbled.
+- **`init()` does not check the rate.** It writes
+  `usart_baud_reg(clock_hz(clock), baud)`, which is 0 for a rate the
+  register cannot express (BAUD outside 64..65535: below 1465 baud or
+  above 1.5 Mbaud at a 24 MHz CLK_PER), and that 0 goes into BAUD.
+  `can_baud(hz, baud)` is the check, a constexpr function a program can
+  put in a static_assert.
+- **Both vectors are bound by the program**, under the device header's
+  names (`USART2_RXC_vect`, `USART2_DRE_vect`); the driver binds none.
+  An unbound vector is avr-libc's `__bad_interrupt`, a `jmp 0` in the
+  release listings: the first byte received, or the first byte queued
+  (which enables the DRE interrupt), restarts the program from its first
+  instruction, without a hardware reset.
+- **Print only after `init()` and with interrupts enabled (`sei()`).**
+  `print` waits until the ring has taken every byte, and only `dre()`
+  drains the ring, so with interrupts still off a text longer than the
+  ring's free room spins for ever; `util/print.hpp` ("Delivery
+  policy") makes the rule unconditional, a shorter text included, since
+  what a text that fits does to a transport not yet set up is promised
+  by no family. Once they are on, a print from an active object's handler
+  waits one byte time for each byte that does not fit, and every other
+  active object waits with it. The transmit ring has one producer, the
+  main context: `print`, `write_byte` and `write_bulk` are never called
+  from an interrupt handler, and nothing checks it.
+
+The rest of this page, in order: the documents of record; what the
+silicon does, with the receive side's offer and what `Uart` takes of
+it; the types and verbs, with what the driver refuses and what a byte
+costs `Uart`; how to use it, one example per task; the bench findings,
+most of the page (the transport's cost and its two contracts with the
+AVR64EA48's figures, the two boards, the facts measured on the wire,
+start-of-frame detection out of a real standby, two facts about the
+flags that shape half-duplex code); what is not covered.
+
+## Documents of record
+
+AVR128DB28/32/48/64 data sheet DS40002247B (USART
 chapter 27, PORTMUX chapter 17, electricals 39.14), errata
 DS80000915F 2.16.1-2.16.3 and, for the DA parts, DS80000882C
 2.15.1-2.15.2; for the AVR64EA28/32/48 DS40002443A (USART chapter 25 -
@@ -13,7 +123,7 @@ items shape the code:
 
 - **2.16.1 / 2.15.1, open drain**: with the TXD pin configured as an
   output it drives high whether ODME is set or not. The work around is
-  to leave TXD's direction at INPUT and let the pull-up hold the line -
+  to leave TXD's direction at input and let the pull-up hold the line -
   which contradicts 27.3.1's "the TXD pin is automatically set to
   output by hardware", and is what a one-wire `init()` does.
 - **2.16.2 / 2.15.2, start-of-frame**: SFDEN set in Active mode makes a
@@ -24,10 +134,15 @@ items shape the code:
   clearing the flag does not revive it - RXEN must be written 0 then 1.
   Every auto-baud path goes through that.
 
-Driver: `avrxt/usart.hpp`. The line service above it:
-[serial.md](../design/serial.md) (`util/serial_port.hpp`). Reference
-test: `test_avr_serial`; every other suite's console exercises the
-`Uart` task by existing.
+Driver: `avrxt/usart.hpp`; the instance counts, the route fields and
+codes and the die-keyed facts it reads come from
+`avrxt/device_tables.hpp` (the reserve: the table of what each part has,
+read off the device header). The line service above it:
+[design/serial.md](../design/serial.md) (`util/serial_port.hpp`).
+Reference test: `test_avr_serial` (a letter is one command key of its
+console and the group of verdicts it runs; `z` runs its single-board
+set and `y` the set that needs a partner board running `usart_peer`);
+every other suite's console exercises the `Uart` task by existing.
 
 ## What the silicon does
 
@@ -45,11 +160,11 @@ Facts that matter to code:
   `S x f_baud` of peripheral clock. In the synchronous modes only
   BAUD[15:6] is the divisor and the six low bits must be zero.
 - **Routes, including no route at all.** PORTMUX.USARTROUTEA/B gives
-  each instance two bits: DEFAULT, ALT1 and NONE. NONE disconnects
+  each instance two bits on the AVR DA/DB: DEFAULT, ALT1 and NONE. NONE disconnects
   every pin and the peripheral still runs - the generator, the
   transmitter and its flags all work - but the internal loop-back and
-  open-drain do not, because both act on the TXD PAD (measured).
-- **The AVR EA's route table has another SHAPE** (DS40002443A 17.3.3-4,
+  open-drain do not, because both act on the TXD pad (measured).
+- **The AVR EA's route table has another shape** (DS40002443A 17.3.3-4,
   table 3-1): three USARTs on every package; USART0's field three bits
   wide with routes DEFAULT PA0-PA3, ALT1 PA4-PA7, ALT2 PA2/PA3
   (TXD/RXD only), ALT3 PD4-PD7, ALT4 PC1-PC3 (no XDIR) and NONE = 5;
@@ -71,12 +186,12 @@ Facts that matter to code:
   has no XCK position on any package.
 - **The read and write order is the character size's business.** The
   status of a received frame (FERR, PERR, BUFOVF and the ninth data
-  bit) lives in RXDATAH, and reading ONE of the two data registers
+  bit) lives in RXDATAH, and reading one of the two data registers
   shifts the FIFO: RXDATAH first, then RXDATAL - except in 9-bit
   low-byte-first (9BITL), where RXDATAH is the shifting read and
   RXDATAL must come first. Transmission mirrors it.
 - **STATUS is a mix.** RXCIF and DREIF are conditions; TXCIF, RXSIF,
-  ISFIF and BDF are write-one-to-clear and WFB is WRITE-ONLY (there is
+  ISFIF and BDF are write-one-to-clear and WFB is write-only (there is
   no reading back whether an arming stands). The W1C bits are cleared
   with a plain store of that one bit - an RMW would read every pending
   flag back as one and clear them all.
@@ -94,7 +209,7 @@ Facts that matter to code:
 - **Disabling the two directions is not symmetric.** The receiver stops
   at once and its buffer is flushed; the transmitter finishes what is
   in flight and then stops overriding TXD, which PORT gets back as an
-  INPUT.
+  input.
 - **Auto-baud** measures eight bit times of a 0x55 sync field after a
   break and writes the result into BAUD. GENAUTO accepts a break of any
   length once WFB is armed; LINAUTO wants a real LIN break and insists
@@ -110,7 +225,7 @@ The chapter offers the receive path these, each used or declined:
 - **The edge: RXCIF, used.** It is the only receive edge in Active mode:
   no idle flag, no receiver time-out, no FIFO threshold exist in chapter
   27. `rxc()` returns the ring's empty -> non-empty transition, so the
-  consumer hears the burst's FIRST byte, and a console ends a line at its
+  consumer hears the burst's first byte, and a console ends a line at its
   terminator, not at a silence.
 - **The start-of-frame detector (RXSIF, SFDEN), declined as an edge.**
   It fires in Standby only (27.5.5, measured below: from Idle never),
@@ -135,14 +250,18 @@ The chapter offers the receive path these, each used or declined:
   ABEIE) are the resource's to arm; an entry they make finds RXCIF clear
   and takes nothing.
 - **The loop-back (LBME), used for the measurements.** It listens to the
-  TXD PAD, so with the transmitter off it hears whatever PORT or a timer's
-  waveform output drives there - which is how `bench_avr`'s letter u feeds
-  the receiver from TCA0 with no CPU in the sender.
+  TXD pad, so with the transmitter off it hears whatever PORT or a timer's
+  waveform output drives there - which is how the benchmark skeleton's
+  letter u (the app that measures the drivers' costs,
+  [design/benchmark.md](../design/benchmark.md)) feeds the receiver
+  from TCA0 with no CPU in the sender.
 
 ## Types and verbs
 
 The resource owns the registers and speaks BAUD register values; the
-tasks speak hertz and are `ClockUser`s.
+tasks speak hertz and are `ClockUser`s (a type a `DynamicClock` tells
+of a rate change through its static `rebase(hz)`,
+[clkctrl.md](clkctrl.md)).
 
 | Entity | Verbs |
 |--------|-------|

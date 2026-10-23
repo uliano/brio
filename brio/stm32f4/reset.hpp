@@ -5,27 +5,57 @@
  * the RCC's reset flags (RM0090 7.1, 7.3.21 - RM0390 6.3.21, RM0383
  * 6.3.21), the two watchdogs this family carries - the independent one
  * on its own oscillator (RM0090 ch. 21) and the system window watchdog
- * on the APB1 clock (ch. 22) - the FOUR FAULT VECTORS a Cortex-M4 has
+ * on the APB1 clock (ch. 22) - the four fault vectors a Cortex-M4 has
  * where an M0+ has one (PM0214 4.3.10..4.3.15), and the handler body
  * that turns a crash into a message the next boot can read.
+ *
+ * The smallest use (docs/stm32f4/reset.md carries it whole): the fault
+ * body bound to the HardFault vector, the flags read once at boot, and
+ * an independent watchdog armed and fed by the loop:
+ *
+ *     extern "C" void HardFault_Handler() {
+ *         brio::hard_fault_reset<brio::Stm32f4Platform<>>();
+ *     }
+ *     const uint32_t why = brio::Reset::take_flags();   // once, at boot
+ *     (void)brio::Iwdg::arm(brio::IwdgConfig{
+ *         .prescaler = brio::IwdgPrescaler::div8, .reload = 0x0EEE});
+ *     for (;;) { brio::Iwdg::refresh(); ... }
+ *
+ * Who calls what, and from where. take_flags() and clear_flags() are the
+ * boot's, in main() before anything else clears the register; flags() is
+ * one load, legal anywhere. The configuring verbs - Iwdg::arm(),
+ * Iwdg::configure(), Wwdg::configure(), Wwdg::start(), Faults::enable()
+ * and the two traps - are setup verbs for main(): each is a store or a
+ * read-modify-write with no guard of its own, and nothing in this file
+ * masks interrupts. Iwdg::arm() and Iwdg::configure() wait, bounded, for
+ * each update to cross into the IWDG's clock domain (sync(): a poll
+ * count, not a time; on a stopped watchdog the wait runs out, measured
+ * at 355 ms, and the answer is false). The two refresh() verbs are one
+ * store each, legal from any context. Wwdg::isr() is the body the
+ * program's WWDG_IRQHandler calls. hard_fault_reset<P>() is the body the
+ * program's fault handlers call; it never returns. Faults::read() and
+ * take() are for a fault handler, before it hands over to that body.
+ * This file owns no storage: the panic record is the platform's
+ * (Stm32f4Platform::panic_record()), and a FaultRecord a handler banks
+ * goes in storage of the program's own.
  *
  * This is the other half of the panic breadcrumb. The kernel writes a
  * PanicRecord into reset-surviving storage (kernel/panic.hpp,
  * Stm32f4Platform::panic_record) and hands over to a Reporter whose job
  * may be "reset now and report at the next boot"; panic.hpp's contract
  * then says to cross-check the target's reset-cause register for the
- * full story. `Reset::take_flags()` IS that cross-check,
+ * full story. `Reset::take_flags()` is that cross-check,
  * `Reset::software()` is one way of causing the reset, `Iwdg` and `Wwdg`
  * are two more, and `hard_fault_reset<P>()` is the body an app binds to
  * a fault vector so a fault leaves a note instead of a spin.
  *
- * SEVEN FACTS OF THIS SILICON shape everything below.
+ * Seven facts of this silicon shape everything below.
  *
- * 1. THE FLAGS ACCUMULATE, AND THERE IS NO "THE CAUSE". RCC_CSR's seven
+ * 1. The flags accumulate, and there is no "the cause". RCC_CSR's seven
  *    reset flags are set by hardware and every one of them is "cleared
  *    by writing to the RMVF bit" - nothing else clears them, and 7.3.21
  *    says the register is "reset by system reset, except reset flags by
- *    power reset only". So this register is a HISTORY and not a single
+ *    power reset only". So this register is a history and not a single
  *    cause, and the boot verb is read-and-clear: `take_flags()`. What a
  *    boot sees is the delta since the last clear. PINRSTF is described
  *    here as the pin's alone ("set by hardware when a reset from the
@@ -36,7 +66,7 @@
  *    with an accumulating register and a bit every source raises, the
  *    cause is not a function of the register's value.
  *
- * 2. RCC_CSR IS A SHARED REGISTER, and the two halves have two owners.
+ * 2. RCC_CSR is a shared register, and the two halves have two owners.
  *    Bits 31..24 are this chapter's (the seven flags and RMVF); bits
  *    1..0 are the clock tree's (LSION/LSIRDY) and belong to
  *    stm32f4/clock.hpp's `Rcc`, which is where the LSI verbs live -
@@ -45,7 +75,7 @@
  *    bits, which is safe in both directions because RMVF reads as zero
  *    and writing zero to it has no effect.
  *
- * 3. THE IWDG OF THIS FAMILY HAS NO WINDOW. Four registers - KR, PR,
+ * 3. The IWDG of this family has no window. Four registers - KR, PR,
  *    RLR, SR - and that is the whole chapter: no WINR, no WVU, and so
  *    no early-refresh reset (the reserve's `iwdg_has_window()` asks the
  *    device header and answers false on all twenty-three). A deliberate
@@ -53,10 +83,10 @@
  *    window; `force_reset()` programs the shortest reload instead and
  *    refreshes into it.
  *
- * 4. THE IWDG IS ONE WAY IN SOFTWARE - AND A RESET DOES STOP IT. 21.3
+ * 4. The IWDG is one way in software - and a reset does stop it. 21.3
  *    starts it with 0xCCCC in the key register, and the Stop/Standby
  *    summaries (RM0090 5.3.4) finish the sentence: "Once started it
- *    cannot be stopped except by a Reset". MEASURED, and worth stating
+ *    cannot be stopped except by a Reset". Measured, and worth stating
  *    because the family lore teaches the opposite: a boot that follows
  *    an IWDG reset outlives three of its own time-outs with nothing
  *    refreshing anything, so a program does NOT inherit a watchdog it
@@ -65,16 +95,16 @@
  *    the only witness the silicon offers - the LSI a start forces on -
  *    and it is a witness and not a proof.
  *
- * 5. THE KEYED REGISTERS DO NOT UPDATE UNTIL THE WATCHDOG IS STARTED,
+ * 5. The keyed registers do not update until the watchdog is started,
  *    and this is the finding chapter 21 never states. PR and RLR are
  *    writable only after the key 0x5555 (21.3.2), and any other key
  *    value - the 0xAAAA refresh included - locks them again. Each has a
- *    bit in IWDG_SR that hardware raises AT THE STORE (measured: the
+ *    bit in IWDG_SR that hardware raises at the store (measured: the
  *    read right after it already sees the bit) and drops "when the
  *    update operation is completed in the VDD voltage domain (takes up
  *    to 5 RC 40 kHz cycles)", and a register read while its bit stands
- *    returns the OLD value (21.4.2 and 21.4.3 both say so). WITH THE
- *    WATCHDOG STOPPED THE BIT NEVER DROPS, LSION or no LSION - 7.2.9 is
+ *    returns the old value (21.4.2 and 21.4.3 both say so). With the
+ *    watchdog stopped the bit never drops, LSION or no LSION - 7.2.9 is
  *    where the reason hides: "if the independent watchdog is started ...
  *    after the LSI oscillator temporization, the clock is provided to
  *    the IWDG", so the logic that performs the update has no clock until
@@ -83,15 +113,15 @@
  *    and answers false rather than hanging - which is also the shape the
  *    errata want.
  *
- * 6. THE WWDG IS THE OPPOSITE PERIPHERAL IN EVERY WAY. It counts PCLK1
+ * 6. The WWDG is the opposite peripheral in every way. It counts PCLK1
  *    through a fixed /4096 and a programmable /2^WDGTB - TWO bits here,
- *    four codes, /1 to /8 - it has a bus clock enable that is CLEAR AT
+ *    four codes, /1 to /8 - it has a bus clock enable that is clear at
  *    RESET (a peripheral with no clock does not answer register reads),
  *    and its activation bit WDGA is "set by software and only cleared by
- *    hardware after a reset" (22.6.1). Its down-counter is FREE-RUNNING
+ *    hardware after a reset" (22.6.1). Its down-counter is free-running
  *    "even if the watchdog is disabled" (22.3) and EWIF "is also set if
  *    the interrupt is not enabled" (22.6.3), which together make the
- *    whole TIMING path measurable with WDGA never set - the way this
+ *    whole timing path measurable with WDGA never set - the way this
  *    stratum's bench suite measures it, and the reason `configure()` and
  *    `refresh()` are separate verbs from `start()`. A window below 0x40
  *    can never be served (a refresh is legal only while the counter is
@@ -100,23 +130,24 @@
  *    how a caller asks for the reset deliberately - WDGA with T6 clear,
  *    22.3's own note.
  *
- * 7. FOUR FAULT VECTORS, THREE OF THEM DISABLED AT RESET. MemManage,
+ * 7. Four fault vectors, three of them disabled at reset. MemManage,
  *    BusFault and UsageFault are configurable exceptions (PM0214 4.3.10:
  *    SHCSR's MEMFAULTENA, BUSFAULTENA, USGFAULTENA, all clear out of
- *    reset) that ESCALATE to HardFault while they are off - which is why
+ *    reset) that escalate to HardFault while they are off - which is why
  *    a program that never touches SHCSR sees every fault at one vector,
  *    with HFSR.FORCED set. `Faults` is the switch and the status:
  *    enable() opens the three, the CCR traps turn a divide by zero and
  *    an unaligned access into UsageFaults that would otherwise be
  *    silent, and `read()` gathers CFSR / HFSR / MMFAR / BFAR into a
- *    twelve-byte `FaultRecord` a handler can bank. NO STORAGE IS OWNED
- *    HERE: where the record goes across the reset is the application's
+ *    twelve-byte `FaultRecord` a handler can bank. No storage is owned
+ *    here: where the record goes across the reset is the application's
  *    (its own .noinit), exactly as the kernel's PanicRecord is the
  *    platform's.
  *
- * ERRATA: the IWDG's update bits are the one item all three sheets carry
+ * Errata: the IWDG's update bits are the one item all four sheets carry
  * - ES0206 Rev 24 2.8.1..2.8.4, ES0298 Rev 8 2.9.1..2.9.4, ES0287 Rev 6
- * 2.7.1..2.7.4, on every silicon revision of every part: RVU and PVU are
+ * 2.7.1..2.7.4, ES0321 Rev 14 2.10.1..2.10.4, on every silicon revision
+ * of every part: RVU and PVU are
  * never cleared if the device enters Stop while one stands, or if the
  * APB clock is below twice the IWDG clock. Neither can bite here - the
  * bounded `sync()` reports instead of hanging, the APB is megahertz
@@ -124,12 +155,12 @@
  * inherits the standing advice: leave no update in flight when arming a
  * sleep. No sheet has an item for the WWDG or for the reset flags.
  *
- * NOT BUILT (docs/stm32f4/reset.md carries the list): the OPTION BYTES
+ * Not built (docs/stm32f4/reset.md carries the list): the option bytes
  * behind this chapter - WDG_SW (a hardware IWDG started before any
  * software runs), nRST_STOP and nRST_STDBY (what LPWRRSTF reports on)
  * and the BOR level behind BORRSTF - which are FLASH_OPTCR's and belong
  * to the flash chapter, because writing that register with a wrong value
- * bricks a board; and the debug freeze bits, which are READ ONLY here
+ * bricks a board; and the debug freeze bits, which are read only here
  * because they are the debugger's - a program that fights them hides the
  * behaviour a suite is trying to measure.
  */
@@ -332,7 +363,7 @@ struct Iwdg {
     // ---- the keys ---------------------------------------------------------
 
     /// Reload the counter from RLR - the verb a program calls in its
-    /// loop. Also RE-LOCKS PR and RLR, which is 21.3.2's own sentence
+    /// loop: one store, legal from any context. Also re-locks PR and RLR, which is 21.3.2's own sentence
     /// ("a write access to this register with a different value breaks
     /// the sequence ... This implies that it is the case of the reload
     /// operation") and the reason configure() unlocks each time.
@@ -467,10 +498,16 @@ struct Iwdg {
      * Start the watchdog and give it this timing - the chapter's own
      * order, start first (21.3, and ST's own initialization sequence).
      *
-     * ONE WAY UNTIL THE NEXT RESET. After this the device reboots unless
+     * One way until the next reset. After this the device reboots unless
      * something refreshes inside the time-out. The closing refresh loads
      * the new reload into the counter, which is safe on this family
      * because there is no window to be above (fact 3).
+     *
+     * A setup verb for main(); it waits, bounded, inside configure().
+     * False before anything is written when the setting is invalid;
+     * false after the start when an update never crossed, and then the
+     * watchdog is running with whatever timing it had, so the program
+     * refreshes it all the same.
      */
     static bool arm(const IwdgConfig& cfg) {
         if (!iwdg_config_valid(cfg)) {
@@ -803,7 +840,8 @@ struct FaultRecord {
  * a divide by zero and an unaligned access.
  *
  * NOTHING HERE IS AUTOMATIC. The kernel promise is that no interrupt
- * nests over another (docs/design/kernel.md section 11) and a fault is
+ * nests over another (docs/design/kernel.md section 11, "Platform: what
+ * the machine provides") and a fault is
  * not an interrupt: it is synchronous with the instruction that caused
  * it, so enabling these vectors changes no priority and no masking.
  */

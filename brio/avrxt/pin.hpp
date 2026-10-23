@@ -5,27 +5,67 @@
 #include "avrxt/device_tables.hpp"
 #include "util/pwm_channel.hpp"
 
-// The AVR DA/DB I/O pins (PORT, DS40002247B ch. 18), register-level:
-//
-//  Port<'C'>       the port RESOURCE - what a pin does not possess:
-//                  the shared interrupt's flags (one vector per port,
-//                  take_flags() is the ISR body), the port-wide slew
-//                  limit, the multi-pin configuration engine, native
-//                  mask operations;
-//  Pin<'A', 5>     the per-pin face: direction/value on VPORT (SBI/
-//                  CBI), configure(PinConfig) as ONE PINnCTRL store
-//                  (invert, pull, input level, sense), the single-
-//                  field RMW verbs, flag()/clear_flag(); a PwmChannel
-//                  (max 1) and a PinRef factory;
-//  PinSet<...>     up to 8 pins on any ports as one bit mask; its
-//                  configure() groups by port at compile time and
-//                  rides the multi-pin engine.
+// The I/O pins of the AVR DA, DB and EA (PORT, DS40002247B ch. 18,
+// DS40002443A ch. 18): what a program uses for an LED, a button, a row
+// of keys, a pad an analog input reads, a select line a request carries.
+// A pin is a type: Pin<'A', 5> names PA5 when the program is compiled
+// (the letter and the number are template arguments), and its static
+// functions drive it; there is no object to construct. The smallest use:
 //
 //   using Led = brio::Pin<'A', 5>;   // PA5
 //   Led::output();                 // PORTA.DIRSET = PIN5_bm
 //   Led::toggle();                 // PORTA.OUTTGL = PIN5_bm
 //   Led::configure({.pull = brio::PinPull::up, .sense = brio::PinSense::falling});
 //   ISR(PORTA_PORT_vect) { const uint8_t who = brio::Port<'A'>::take_flags(); ... }
+//
+// output() and toggle() are one store each; configure() writes the pin's
+// whole control byte PINnCTRL (here: the pull-up and an interrupt on the
+// falling edge) in one store; ISR(PORTA_PORT_vect) is avr-libc's spelling
+// of the handler of port A's one vector, which the program binds (the
+// driver binds none), and take_flags() is its body: which pins raised it,
+// those flags cleared. A flag the handler leaves set keeps the request
+// active (18.3.3), so the handler is entered again at once, for ever.
+//
+// Who calls what, and from where. set() and clear() are one SBI or CBI on
+// the pin's VPORT alias (a constant address in the bit-accessible I/O
+// space; read in the release listings), read() and flag() one load of it;
+// toggle(), output(), Port's mask verbs, clear_flag() and take_flags()'s
+// clearing store are single stores into the PORT's set/clear/toggle and
+// flag registers: all of them are legal from any context, an interrupt
+// handler included, and none masks interrupts. configure() is one store
+// too. The single-field verbs - input() (its pull half), pull(),
+// invert(), sense(), input_enable() - read, modify and write the pin's
+// PINnCTRL, so two contexts configuring the same pin at once can lose a
+// field: call them from setup or from an active object's handler (an
+// active object is a component of a brio program with its own event
+// queue, served one event at a time by the kernel). Nothing here waits.
+//
+// The parts, register-level:
+//
+//  Port<'C'>       the port resource - what a pin does not possess:
+//                  the shared interrupt's flags (one vector per port,
+//                  take_flags() is the ISR body), the port-wide slew
+//                  limit, the multi-pin configuration engine, native
+//                  mask operations, and on the AVR EA the pin event
+//                  slots' read-back;
+//  Pin<'A', 5>     the per-pin face: direction/value on VPORT (SBI/
+//                  CBI), configure(PinConfig) as one PINnCTRL store
+//                  (invert, pull, input level, sense), the single-
+//                  field RMW verbs, flag()/clear_flag(); a PwmChannel
+//                  (max 1) and a PinRef factory;
+//  PinSet<...>     up to 8 pins on any ports as one bit mask; its
+//                  configure() groups by port at compile time and
+//                  rides the multi-pin engine;
+//  PinRef          a pin as a run-time value (3 bytes) that can travel
+//                  inside a request event.
+//
+// Which ports exist depends on the package (no PORTB or PORTE on the 28-
+// and 32-pin parts, PORTG on the 64-pin ones alone): a pin on a port the
+// package has not got is a compile error (Port's static_assert over
+// port_exists(), avrxt/device_tables.hpp, the reserve: the table of what
+// each part has, read off the device header). Which pins of an existing
+// port a package bonds is not checked (docs/avrxt/port.md, "Not covered
+// yet").
 
 namespace brio {
 
@@ -35,7 +75,7 @@ namespace brio {
 /// means "no such pin": set/clear are no-ops, so optional pins cost one
 /// branch. Build one with Pin<...>::ref().
 ///
-/// It holds the PORT, not the VPORT: an edge is ONE store into OUTSET
+/// It holds the PORT, not the VPORT: an edge is one store into OUTSET
 /// or OUTCLR (18.5.6/18.5.7). Through a pointer the compiler cannot
 /// emit SBI/CBI, so the VPORT alias would cost a read-modify-write of
 /// OUT - a window in which an ISR's edge on another pin of the same
@@ -71,14 +111,14 @@ struct PinRef {
     constexpr bool valid() const { return port != nullptr; }
 };
 
-/// Named in a branch only an ABSENT port letter reaches: a call that
+/// Named in a branch only an absent port letter reaches: a call that
 /// survives the optimizer is a compile error (see port_by_letter).
 [[gnu::error("port_by_letter: this port does not exist on this package")]]
 void port_by_letter_absent();
 
-/// The PORT of a letter chosen at RUN time (for drivers whose pin is a
+/// The PORT of a letter chosen at run time (for drivers whose pin is a
 /// configuration value: a route's port, a comparator's input). Folds
-/// to one address when the letter is a constant. A CONSTANT letter
+/// to one address when the letter is a constant. A constant letter
 /// naming a port this package has not got is a compile error - the
 /// call to port_by_letter_absent() survives exactly then (a letter the
 /// compiler cannot see is a run-time value the caller has validated:
@@ -114,7 +154,7 @@ inline volatile uint8_t& pinctrl_of(char p, uint8_t n) {
 /// (the reset state); the edge/level senses raise the PORT's one
 /// interrupt (vector PORTx_PORT_vect, flags by pin in INTFLAGS);
 /// `level_low` re-fires for as long as the pin reads low;
-/// `input_disable` turns the digital input buffer OFF - IN freezes,
+/// `input_disable` turns the digital input buffer off - IN freezes,
 /// interrupts and events from the pin die, the pad keeps feeding the
 /// analog mux (what ADC/AC inputs want: no mid-rail current, no
 /// digital noise).
@@ -136,12 +176,12 @@ enum class PinSense : uint8_t {
 enum class PinLevel : uint8_t { schmitt = 0, ttl = PORT_INLVL_bm };
 #endif
 
-/// The whole PINnCTRL as one value, written in ONE store by
+/// The whole PINnCTRL as one value, written in one store by
 /// `Pin::configure` / the multi-pin paths: the datasheet warns that
 /// INVEN toggled in the same cycle as an ISC change does not raise
 /// the inversion edge's interrupt - for configuration that is exactly
 /// the desired quietness (and single fields keep their RMW verbs).
-/// The internal pull: ONE direction on this family (PORT has PULLUPEN
+/// The internal pull: one direction on this family (PORT has PULLUPEN
 /// and nothing else), so the enum has no `down` - a request for one is
 /// a name that does not exist rather than a bit that does nothing. The
 /// same vocabulary the other strata spell, less the direction this
@@ -169,9 +209,9 @@ constexpr uint8_t pin_ctrl_byte(const PinConfig& c) {
 
 // ---- the port resource ------------------------------------------------------
 
-/// Port<'C'>: the typed view of ONE port's own registers - what a pin
+/// Port<'C'>: the typed view of one port's own registers - what a pin
 /// does not possess: the interrupt flags of the shared PORTx_PORT_vect
-/// (several pins can fire together: the ISR reads the MASK), the
+/// (several pins can fire together: the ISR reads the mask), the
 /// port-wide slew-rate limit, the multi-pin configuration engine and
 /// the native mask operations. Pin<letter, n> stays the per-pin face
 /// and delegates its register access here.
@@ -222,7 +262,7 @@ struct Port {
     static void out_clear(uint8_t m) { regs().OUTCLR = m; }
     static void out_toggle(uint8_t m) { regs().OUTTGL = m; }
 
-    // Interrupt flags: write-1-to-clear - ALWAYS plain stores (an RMW
+    // Interrupt flags: write-1-to-clear - always plain stores (an RMW
     // or an SBI would read every pending flag back as 1 and clear the
     // lot).
     static uint8_t flags() { return vregs().INTFLAGS; }
@@ -234,7 +274,7 @@ struct Port {
         return f;
     }
 
-    /// PORTCTRL.SRL: slew-rate limitation for EVERY pin of this port.
+    /// PORTCTRL.SRL: slew-rate limitation for every pin of this port.
     static void slew_limit(bool on) { regs().PORTCTRL = on ? PORT_SRL_bm : 0; }
     static bool slew_limit() { return (regs().PORTCTRL & PORT_SRL_bm) != 0; }
 
@@ -247,7 +287,7 @@ struct Port {
     }
 
 #if defined(PORT_EVGEN0SEL_gm)
-    /// The pin an event SLOT of this port carries (PORTx.EVGENCTRLA,
+    /// The pin an event slot of this port carries (PORTx.EVGENCTRLA,
     /// DS40002443A 18.5.17; the AVR EA). The slots are selected by the
     /// event routes (EvPin<P, slot>, evsys.hpp); this reads one back.
     static uint8_t event_selection(uint8_t slot) {
@@ -268,16 +308,16 @@ struct Pin {
     static constexpr uint8_t mask = (1 << PinNum);
 
     // Regular PORT for atomic set/clear/toggle registers.
-    // NOTE: which ports exist depends on the package (e.g. no PORTB/PORTE on
-    // 28/32-pin parts, PORTG only on 64-pin), hence the #ifdef guards.
-    // Requesting a port the package lacks is a compile error (C++23
-    // static_assert(false) fires only in the instantiated branch).
+    // Which ports exist depends on the package (e.g. no PORTB/PORTE on
+    // 28/32-pin parts, PORTG only on 64-pin), hence the #ifdef guards in
+    // Port<L>::regs(). Requesting a port the package lacks is a compile
+    // error: Port<L>'s static_assert on port_exists(L).
     static constexpr volatile PORT_t& port() { return Port<PortLetter>::regs(); }
 
     // Virtual PORT for single-cycle bit access (SBI/CBI)
     static constexpr volatile VPORT_t& vport() { return Port<PortLetter>::vregs(); }
 
-    /// Whether this pin senses FULLY asynchronously: it wakes from every
+    /// Whether this pin senses fully asynchronously: it wakes from every
     /// sleep mode on every sense, catches sub-CLK_PER pulses and has no
     /// three-cycle dead-time. On the AVR DA/DB only Px2 and Px6 do (I/O
     /// mux note 2, DS40002247B 18.3.3.1); the other pins need CLK_PER (or
@@ -299,7 +339,11 @@ struct Pin {
     static constexpr uint16_t max = 1;
     static void duty(uint16_t v) { if (v) set(); else clear(); }
 
-    // Basic I/O
+    // Basic I/O. toggle() and output() are one store each into the
+    // PORT's OUTTGL and DIRSET, set() and clear() an SBI and a CBI on the
+    // VPORT's OUT: legal from any context. output() drives the level OUT
+    // already holds (0 out of reset), so a pin that must come up high is
+    // set() first.
     static void toggle() { port().OUTTGL = mask; }
     static void set()    { vport().OUT |= mask; }
     static void clear()  { vport().OUT &= ~mask; }
@@ -315,7 +359,7 @@ struct Pin {
     /// the position (a route's teardown is checked with it).
     static bool is_output() { return vport().DIR & mask; }
 
-    /// The whole PINnCTRL in ONE store (invert + pull + input level
+    /// The whole PINnCTRL in one store (invert + pull + input level
     /// + sense): the way to (re)configure - no intermediate states,
     /// no INVEN/ISC same-cycle surprises. The single-field verbs
     /// below RMW the same register: main-vs-ISR discipline is the
@@ -350,8 +394,8 @@ struct Pin {
     }
 
     /// The digital input buffer: off saves power on a pad used as analog
-    /// (and freezes IN at its last value), on is the reset state. ON
-    /// THIS FAMILY the buffer's switch is a code of the ISC field, the
+    /// (and freezes IN at its last value), on is the reset state. On
+    /// this family the buffer's switch is a code of the ISC field, the
     /// same field the interrupt sense lives in: `input_enable(true)`
     /// leaves the field at INTDISABLE, so a sense armed with `sense()`
     /// is gone afterwards - re-arm it, or configure both in one store
@@ -389,7 +433,7 @@ struct PinSet {
     static void output() { (Pins::output(), ...); }
 
     /// One PinConfig into every pin's PINnCTRL through the multi-pin
-    /// engine (18.3.2.4): the pins are grouped BY PORT at compile
+    /// engine (18.3.2.4): the pins are grouped by port at compile
     /// time, PINCONFIG is written once (mirrored across ports) and
     /// each involved port gets one PINCTRLUPD mask - the set behaves
     /// like a single register even when its pins span ports, and the

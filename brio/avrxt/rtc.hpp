@@ -1,19 +1,70 @@
 /*
  * rtc.hpp
  *
- * The real-time counter and periodic interrupt timer (RTC) of the AVR
- * DA/DB (DS40002247B ch. 26) and of the AVR EA (DS40002443A ch. 24, the
+ * The RTC peripheral of the AVR DA, DB and EA: a 16-bit counter on the
+ * RTC's own slow clock, counting in idle sleep and, when asked, in
+ * standby - for a periodic interrupt or event at a rate of the
+ * program's own (a second, a sampling epoch), an alarm inside that
+ * period, a trimmed crystal - and the periodic interrupt timer (PIT),
+ * alive in every sleep mode, whose interrupt is the kernel's tick and
+ * whose divided clocks are event-system signals. In a brio program the PIT
+ * belongs to the timebase, avrxt/ticker.hpp's BasicTicker, which a
+ * program binds and starts and never configures through this header; a
+ * program comes here for the counter, the PIT's event signals or a trim.
+ * The header holds three resources (a resource, in brio, is one function
+ * per register fact, for a program that drives the block by hand), as
+ * docs/avrxt/rtc.md describes them; the RTC chapter is DS40002247B
+ * ch. 26 on the AVR DA/DB and DS40002443A ch. 24 on the AVR EA, the
  * same chapter but for one register: RTC.PITEVGENCTRLA, the PIT's two
- * event slots, 24.13.17) as three resources - see docs/avrxt/rtc.md:
+ * event slots, 24.13.17.
  *
  *   RtcClock - the CLK_RTC selector (CLKSEL), shared by both functions;
  *   Rtc      - the 16-bit counter: prescaler, CNT/PER/CMP, OVF and CMP
  *              flags/interrupts/events, crystal error correction;
  *   Pit      - the periodic interrupt timer: PERIOD, PITEN, PI.
  *
- * ONE BLOCK, ONE CLOCK. The RTC peripheral has a single clock select
+ * The smallest use, a counter that overflows once a second, its
+ * interrupt bound by the program (`seconds` is the program's own
+ * counter, `SysClock` its clock alias as avrxt/ticker.hpp spells it):
+ *
+ *     ISR(RTC_CNT_vect) { if (brio::Rtc::take_flags().ovf) ++seconds; }
+ *
+ *     int main() {
+ *         SysClock::init();
+ *         brio::RtcClock::select(brio::RtcSource::osc32k);   // if no Ticker owns it
+ *         brio::Rtc::init<brio::RtcConfig{.prescaler = brio::RtcPrescaler::div1,
+ *                                         .period = 32767}>();   // one second
+ *         brio::Rtc::enable_ovf_interrupt(true);
+ *         sei();
+ *         ...
+ *     }
+ *
+ * A program with a Ticker leaves out the select(): Ticker::init() has
+ * made it. The first overflow lands anywhere inside the first period
+ * (the first fact below); every one after it, a period apart.
+ *
+ * Who calls what, and from where. RtcClock::select() is setup, once,
+ * before either function is enabled. Rtc::init() and Pit::init() are
+ * setup too (main(), or an active object's handler); Rtc::init() leaves
+ * the counter's interrupts off for the caller to enable. take_flags()
+ * and Pit::take_flag() are interrupt bodies, called from the program's
+ * ISR(RTC_CNT_vect) and ISR(RTC_PIT_vect) and from nowhere else. The flag
+ * reads and clears and Pit::enable_interrupt() are one load or one store,
+ * legal from any context. The other writing verbs (the setters, the
+ * enables, prescaler(), calibrate(), the interrupt enables of the
+ * counter, Pit::event_divider<slot>()) are read-modify-write sequences
+ * or synchronized writes: call them from main() or an active object's
+ * handler, never from two contexts at once. What waits: every write to
+ * CTRLA, CNT, PER, CMP or PITCTRLA first polls its busy flag, at most
+ * 0xFFFF times and a last read (rtc_wait, rtc_pit_wait); the flags clear
+ * in about 2.8 CLK_RTC periods, measured (docs/avrxt/rtc.md), and of
+ * the verbs only sync() returns whether the wait ran out. Nothing here masks
+ * interrupts: a 16-bit access racing an ISR's is the caller's to guard
+ * (the TEMP fact below).
+ *
+ * One block, one clock. The RTC peripheral has a single clock select
  * and a single prescaler chain serving both functions (26.4.1.1). The
- * OWNER of CLKSEL in a brio program is the timebase - `BasicTicker`
+ * owner of CLKSEL in a brio program is the timebase - `BasicTicker`
  * (ticker.hpp) selects it in init(); `Rtc` never writes it. An
  * application that runs the counter without a Ticker calls
  * RtcClock::select() itself, once, before either function is enabled.
@@ -23,7 +74,7 @@
  * Facts that shape the code (26.3 - 26.11; no errata document lists an
  * RTC item - DB DS80000915F, DA DS80000882C, EA DS80001048D):
  *  - the two functions share the prescaler's internal counter and it
- *    RUNS as soon as EITHER is enabled: the first PIT interrupt and the
+ *    runs as soon as either is enabled: the first PIT interrupt and the
  *    first RTC count tick fall anywhere inside one full period
  *    (26.5.2.2). Nothing can pin that phase down - a period boundary is
  *    the only instant an application may rely on;
@@ -33,17 +84,17 @@
  *  - every write crosses into CLK_RTC: CTRLA, CNT, PER and CMP each
  *    have a busy flag in STATUS and PITCTRLA one in PITSTATUS (26.10).
  *    The verbs below wait for the flag of the register they are about
- *    to write; the wait is BOUNDED, so a CLK_RTC that no peripheral
+ *    to write; the wait is bounded, so a CLK_RTC that no peripheral
  *    requests (no oscillator running) cannot hang the caller - the
  *    write simply lands when the clock returns;
  *  - CLK_PER must be at least four times CLK_RTC to read CNT (26.3);
  *  - the 16-bit registers go through the peripheral's one TEMP
  *    register: a CNT/PER/CMP access from the main context while an ISR
  *    touches them too wants a critical section;
- *  - crystal error correction is a TRIM, not a cure: CALIB carries a
+ *  - crystal error correction is a trim, not a cure: CALIB carries a
  *    sign and 7 bits of ppm, so +-127 ppm, spread over a million
  *    CLK_RTC cycles (30.5 s at 32.768 kHz - a window shorter than that
- *    sees the correction quantized). A NEGATIVE correction requires
+ *    sees the correction quantized). A negative correction requires
  *    the prescaler to be DIV2 or slower (26.6): the config and
  *    calibrate() refuse the illegal combination instead of programming
  *    a silently wrong trim;
@@ -73,7 +124,7 @@ namespace brio {
 
 // ---- the shared clock (26.13.8) ----------------------------------------------
 
-/// CLKSEL: the source of CLK_RTC for BOTH functions.
+/// CLKSEL: the source of CLK_RTC for both functions.
 enum class RtcSource : uint8_t {
     osc32k = RTC_CLKSEL_OSC32K_gc,    ///< 32.768 kHz from the internal OSC32K
     osc1k = RTC_CLKSEL_OSC1K_gc,      ///< 1.024 kHz: the same OSC32K divided by 32
@@ -108,7 +159,7 @@ struct RtcClock {
     /// 32.768 kHz crystal if one was started and is running, the internal
     /// OSC32K otherwise. "Running" is XOSC32KS, which a crystal nothing
     /// requests yet sets only when it was started forced on
-    /// (clock.hpp's Xosc32k) - AND the oscillator still enabled: the
+    /// (clock.hpp's Xosc32k) - and the oscillator still enabled: the
     /// status outlives a stop by up to a millisecond (measured on an
     /// AVR128DA48, rtc.md), and a timebase started in that window would
     /// land on a stopped crystal and never tick again.
@@ -204,6 +255,8 @@ public:
     // ---- configuration ----------------------------------------------------
 
     /// Compile-time form: an illegal correction is a compile error.
+    /// Setup (main() or an active object's handler), after CLKSEL is
+    /// selected; the run-time form below does the work.
     template <RtcConfig cfg>
     static void init() {
         static_assert(rtc_correction_valid(cfg.correction_ppm, cfg.prescaler),
@@ -278,7 +331,7 @@ public:
 
     /// Trim CLK_RTC by `ppm`: positive slows the prescaler down (the
     /// crystal runs fast), negative speeds it up. 0 disables CORREN.
-    /// False - and NOTHING written - outside +-127 ppm, or for a
+    /// False - and nothing written - outside +-127 ppm, or for a
     /// negative correction while the prescaler is at DIV1.
     static bool calibrate(int8_t ppm) {
         if (!rtc_correction_valid(ppm, prescaler())) return false;
@@ -304,6 +357,8 @@ public:
     static void clear_ovf() { RTC.INTFLAGS = RTC_OVF_bm; }
     static void clear_cmp() { RTC.INTFLAGS = RTC_CMP_bm; }
 
+    /// The OVF and CMP interrupt enables (INTCTRL, a read-modify-write):
+    /// both reach the program through RTC_CNT_vect and take_flags().
     static void enable_ovf_interrupt(bool on) { irq(RTC_OVF_bm, on); }
     static void enable_cmp_interrupt(bool on) { irq(RTC_CMP_bm, on); }
 
@@ -413,7 +468,7 @@ public:
     Pit() = delete;
 
     /// Program the period and enable, with the periodic interrupt on by
-    /// default. The FIRST interrupt lands anywhere inside one period
+    /// default. The first interrupt lands anywhere inside one period
     /// (26.5.2.2): the phase is not knowable, only the rate is.
     static void init(PitPeriod p, bool interrupt = true) {
         rtc_pit_wait();

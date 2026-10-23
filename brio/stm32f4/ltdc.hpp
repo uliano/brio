@@ -4,7 +4,10 @@
  * The STM32F4's LCD-TFT display controller (RM0090 ch. 16) - the
  * peripheral that turns a rectangle of memory into a parallel RGB panel
  * signal, and the one peripheral of this family whose output is a
- * PICTURE:
+ * picture. A program brings it up once (the pixel clock, the panel's
+ * timings, a layer over a frame buffer, a reload, the enable) and from
+ * then on draws by writing the frame buffer; the controller fetches it
+ * every frame with no CPU work.
  *
  *  LtdcTiming        a panel's synchronous timings in the panel's own
  *                    words (four horizontal numbers, four vertical,
@@ -14,7 +17,7 @@
  *                    all three clock domains back, the timing
  *                    registers, the background colour, the dithering,
  *                    the shadow-reload discipline, the four events over
- *                    TWO vectors, and the position counter that is the
+ *                    two vectors, and the position counter that is the
  *                    only thing a program can watch a frame with;
  *  LtdcLayer<1|2>    one layer: the window inside the active area, the
  *                    pixel format, the framebuffer address, length and
@@ -23,16 +26,37 @@
  *                    the CLUT;
  *  LtdcFramebuffer<Pixel>
  *                    a rectangle of memory as a typed surface - the
- *                    pixel type IS the beat, and the CPU writes it and
+ *                    pixel type is the beat, and the CPU writes it and
  *                    does not read it.
  *
+ * The smallest use (docs/stm32f4/ltdc.md has the STM32F429I-DISC1's
+ * panel line by line):
+ *
  *   using Panel = brio::Ltdc;
+ *   Panel::pixel_clock(pll);                   // PLLSAI, solved at compile time
  *   Panel::timing(qvga);                       // SSCR/BPCR/AWCR/TWCR
- *   brio::LtdcLayer<1>::configure(layer);      // window, format, buffer
+ *   brio::LtdcLayer<1>::configure(layer, qvga);   // window, format, buffer
+ *   brio::LtdcLayer<1>::enable();
  *   Panel::reload(brio::LtdcReload::immediate);
  *   Panel::enable();
  *
- * THE CLOCK IS A PLL OF ITS OWN. LCD_CLK comes off PLLSAI's R output
+ * with the pads handed over and the frame buffer's memory up before it
+ * (stm32f4/fmc.hpp's initialize() for an SDRAM).
+ *
+ * Who calls what, and from where. The configuring verbs - pixel_clock(),
+ * timing(), background(), dither(), the layer's configure() and its
+ * field verbs - are setup verbs, main() or an active object's handler,
+ * one context at a time. pixel_clock() waits for PLLSAI to stop and to
+ * lock, each wait Rcc::ready_spins polls at most, and answers false
+ * rather than hanging; wait_reload() spins, bounded, for a pending
+ * reload. Nothing here masks interrupts. isr() is the body of the
+ * program's handler for each of the two vectors, given the mask of the
+ * events that vector serves. A layer's frame buffer belongs to the
+ * controller for as long as the layer is enabled: it is fetched every
+ * frame, so the memory must stay valid and in place until the layer is
+ * disabled and a reload has taken that.
+ *
+ * The clock is a PLL of its own. LCD_CLK comes off PLLSAI's R output
  * through RCC_DCKCFGR's PLLSAIDIVR (16.3.2), and nothing else in this
  * family uses it: `Rcc`'s pllsai verbs and `lcd_clock_config_for()`
  * (stm32f4/clock.hpp) are the arithmetic, `Ltdc::pixel_clock()` runs it.
@@ -40,44 +64,46 @@
  * rate follows from it and the timings - `ltdc_frame_rate_mhz()` and
  * `ltdc_frame_pixels()` are that division, done once at compile time.
  *
- * THREE CLOCK DOMAINS, AND THE BUS STALLS. 16.3.2: the layer's address
+ * Three clock domains, and the bus stalls. 16.3.2: the layer's address
  * and length registers are on HCLK, the interrupt and reload registers
  * on PCLK2, and everything else on LCD_CLK - and an access to a
  * register of the pixel-clock domain stalls the APB2 bus for six or
- * seven PCLK2 periods PLUS five LCD_CLK periods. At a 6 MHz pixel clock
- * and a 90 MHz APB2 that is some 80 core cycles a read, which is why
- * nothing here polls a register of that domain in a loop without saying
- * so, and why `position()` costs what the bench findings say it costs.
+ * seven PCLK2 periods plus five LCD_CLK periods. At a 6 MHz pixel clock
+ * and a 90 MHz APB2 that is some 165 core cycles a read by that
+ * arithmetic, and 216 to 219 measured (docs/stm32f4/ltdc.md), which is
+ * why nothing here polls a register of that domain in a loop without
+ * saying so, and why `position()` costs what the bench findings say it
+ * costs.
  *
- * THE SHADOW REGISTERS ARE THE MODEL. Every layer register but the CLUT
+ * The shadow registers are the model. Every layer register but the CLUT
  * is shadowed (16.4.1): a write goes into a shadow that the active
  * register takes either at once (SRCR.IMR) or at the next vertical
- * blanking (SRCR.VBR), and until then a READ RETURNS THE ACTIVE VALUE
- * AND NOT WHAT WAS WRITTEN. So a read-modify-write of a layer register
+ * blanking (SRCR.VBR), and until then a read returns the active value
+ * and not what was written. So a read-modify-write of a layer register
  * with a reload pending loses the pending write, and `configure()`
  * writes each register whole for that reason. Both reload bits are set
- * by software and cleared by HARDWARE, which is what `reload_pending()`
- * watches - and a read issued straight after the reload STORE races the
+ * by software and cleared by hardware, which is what `reload_pending()`
+ * watches - and a read issued straight after the reload store races the
  * reload across the clock domains, which is why `reload()` spends one
  * access of the pixel-clock domain on its caller's behalf.
  *
- * WHAT THE PADS ARE IS NOT IN THIS FILE. Twenty-eight signals at most -
+ * What the pads are is not in this file. Twenty-eight signals at most -
  * eight bits per channel plus HSYNC, VSYNC, DE and CLK - and which pad
- * carries which, and how many bits of each channel a BOARD really
+ * carries which, and how many bits of each channel a board really
  * wires, is a datasheet table and a schematic (DS10693 table 12, where
  * every LTDC signal is AF14 except four pads that carry one on AF9). A
- * panel narrower than 24 bits takes the MOST SIGNIFICANT bits of each
+ * panel narrower than 24 bits takes the most significant bits of each
  * channel (16.3.3), so an 18-bit panel is wired to R[7:2], G[7:2] and
  * B[7:2] and the controller is still programmed in 24 bits: the layer's
- * pixel format says what is in MEMORY, never what is on the wire.
+ * pixel format says what is in memory, never what is on the wire.
  *
- * WHAT THIS FILE DOES NOT DO IS DRIVE A PANEL'S OWN CONTROLLER. A TFT
+ * What this file does not do is drive a panel's own controller. A TFT
  * module usually has a controller of its own that must be told to take
  * an RGB interface at all, and that conversation happens over some
  * other bus - SPI or I2C - before a single pixel is fetched. That is
  * the board's business and the application's, not this driver's.
  *
- * CONCURRENCY. Every configuring verb here is a read-modify-write of a
+ * Concurrency. Every configuring verb here is a read-modify-write of a
  * register with no set/clear twin and is meant for setup; the layer
  * ones additionally interact with the reload discipline above. The
  * event verbs (`flags`, `clear`, `isr`) are single stores of write-one
@@ -575,9 +601,10 @@ public:
 
     // ---- the pixel clock (6.3.24, 6.3.25) ------------------------------------------
 
-    /// Bring LCD_CLK up at `lcd_hz` off the root the MAIN PLL is using,
+    /// Bring LCD_CLK up at `lcd_hz` off the root the main PLL is using,
     /// through PLLSAI's R output and RCC_DCKCFGR's divider: the PLL
-    /// stopped, the triple written, the PLL started and waited for.
+    /// stopped, the triple written, the PLL started and waited for (each
+    /// wait Rcc::ready_spins polls at most). A setup verb, main context.
     /// False - with the PLL left off - when the rate is not exactly
     /// reachable, when the part's PLL has no R output, or when the PLL
     /// does not lock.
@@ -710,8 +737,9 @@ public:
 
     // ---- the global control register (16.7.5) --------------------------------------
 
-    /// GCR.LTDCEN. Everything else is configured first; this is what
-    /// starts the timing generator.
+    /// GCR.LTDCEN. Everything else is configured first - the pixel
+    /// clock, the timings, the layers and their reload; this is what
+    /// starts the timing generator. A setup verb; it does not wait.
     static void enable() {
         clock(true);
         regs().GCR |= LTDC_GCR_LTDCEN;
@@ -1131,7 +1159,7 @@ public:
     // ---- the whole layer at once ---------------------------------------------------
 
     /// Every register of the layer from one description, in 16.6's
-    /// order, WITH THE LAYER LEFT DISABLED and no reload asked for: the
+    /// order, with the layer left disabled and no reload asked for: the
     /// caller enables it and reloads when the whole picture is ready,
     /// which is what makes a two-layer change atomic.
     ///

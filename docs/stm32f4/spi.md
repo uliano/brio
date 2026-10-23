@@ -1,6 +1,102 @@
 # SPI and I2S - one block, two faces (STM32F4)
 
-Documents of record: RM0090 Rev 22 ch. 28 (RM0390 Rev 6 ch. 26 and
+This document is for a programmer who needs an SPI bus on an STM32F4: a
+sensor, a display controller, a memory or another chip on three or four
+wires, with this chip as the host that drives the clock or as the client
+that answers it - or, on the instances that have it, an I2S audio
+stream. `Spi<n>` is the instance in its SPI face, one function per
+register fact, and `I2s<n>` the same block in its audio face.
+`SpiHost<n, pins, ...>` is the engine over it: it runs one transaction
+at a time - a chip select, an optional command phase, a data phase -
+either polled inside the call or frame by frame from the instance's
+interrupt, and it is what the shared SPI bus of
+[design/spi-bus.md](../design/spi-bus.md) drives. That bus is an
+arbiter: an active object (AO: a component of a brio program with its
+own event queue, served one event at a time by the kernel,
+[docs/learn/introduction.md](../learn/introduction.md)) that takes the
+requests of the active objects sharing the wire, runs them one after
+another on the engine and replies to each when its transaction is done.
+`SpiClient<n, pins>` is the other end of the wire, a polled surface.
+
+The smallest use, the first block of "How to use it" below: a bus with
+one device on it, no arbiter, polled (the STM32F429I-DISC1's SPI5):
+
+```cpp
+constexpr brio::SpiPins spi5{.sck  = {'F', 7, brio::PinFunction::af5},
+                             .miso = {'F', 8, brio::PinFunction::af5},
+                             .mosi = {'F', 9, brio::PinFunction::af5}};
+using Bus = brio::SpiHost<5, spi5>;
+Bus::init(clock);                       // no ceiling: every rate legal
+
+const uint8_t cmd[1] = {0x8F};          // read, register 0x0F
+uint8_t who = 0;
+Bus::Request r{};
+r.cs      = brio::Pin<'C', 1>::ref();
+r.cmd     = brio::lend<brio::Lease::reply>(cmd);
+r.cmd_len = 1;
+r.rx      = brio::lend<brio::Lease::reply>(&who);
+r.len     = 1;
+r.mode    = brio::SpiMode::mode3;
+r.clock   = brio::SpiClock::div16;
+r.polled  = true;
+(void)Bus::start(r);                    // true: it is done, `who` is filled
+```
+
+Line by line: `spi5` names the three pads with the alternate function
+the datasheet gives SPI5 on them (AF5), which nothing in the code can
+check; `Bus` is the engine over SPI5 on those pads, every other template
+argument at its default (no DMA engines, the default hold-off, below);
+`init()` takes the clock task's tag (`constexpr SysClock clock;`,
+[clock.md](clock.md)) and, with no ceiling named, accepts every rate.
+The `Request` describes the transaction: `cs` the select pad as a
+`PinRef` (a port and a mask the engine drives low around the
+transaction), `cmd` and `cmd_len` the command phase, `rx` and `len` the
+data phase's input buffer and its length in frames (no `tx`: the data
+phase clocks out 0xFF), `mode` the SPI mode, `clock` the rate as a
+division of the instance's own APB clock (`div16`: SPI5 is on APB2, so
+90 MHz over 16 at a 180 MHz core) and `polled` the completion style.
+`brio::lend<brio::Lease::reply>` marks each buffer as lent to the
+engine until the transaction ends ([design/kernel.md, "Payloads: what
+travels inside the event"](../design/kernel.md#4-payloads-what-travels-inside-the-event-kernelborrowedhpp)).
+A polled request runs inside `start()`, which returns true because the
+transaction has ended when it returns.
+
+What decides correctness even there. The select pad must already be an
+output parked high (`brio::Pin<'C', 1>::output(true)` in the program's
+setup): `start()` drives it only through BSRR stores, so a pad still in
+its reset state, an input, never selects the device. `init()` after
+the clock task's: it reads the bus rate from the clock type and not
+from the hardware, and the ceiling, the select's setup time and the
+threshold that decides how many frames the pump keeps in flight are
+computed from that rate. And "it is done" is not "it succeeded":
+`start()` returns true on a polled request that stalled too (a flag
+the loop waited for never rose within its budget), with the block reset
+and `status()` answering `spi_stalled` instead of `spi_ok`, so a
+program that must trust `who` reads `status()`; a polled request that
+finds the DMA slots busy waits on the DMA's completion instead, under
+its own budget, and a stall there answers `spi_dma_fault`. The polled path never
+arms the instance's interrupt and its loop waits with interrupts
+enabled; the buffers are read and written inside `start()` and are the
+caller's again when it returns. Through the arbiter, a request is
+posted instead (the block "The same bus shared, through the arbiter"
+below): its buffers are then lent from
+the post until the `SpiDone` reply arrives, untouched and in scope
+until then, which nothing checks, and the instance's vector must be
+bound by the program to `Bus::isr()`, whose true answer is the edge the
+glue posts `TransferDone` on.
+
+The page is long because the block has two faces and two ends. In
+order: the documents of record; what the silicon does; the types and
+verbs; the host above the wire (what a transaction costs beyond its
+frames, the pump's frames in flight and the image's hold-off); the
+client run; the pads and their slew classes; how to use it, one example
+per use; the bench findings, most of the page, on the STM32F429I-DISC1
+and against a second chip on the Nucleo-F446RE; and what is not
+covered.
+
+## Documents of record
+
+RM0090 Rev 22 ch. 28 (RM0390 Rev 6 ch. 26 and
 RM0383 Rev 4 ch. 20 are its twins: one register description, three
 manuals, and the memory maps differ on which instances wear the audio
 face), the datasheets' alternate-function tables for the pads, RM0090
@@ -17,7 +113,10 @@ bus engine, `SpiClient<n, pins>` the other end, the vocabulary
 `SpiConfig`, `SpiMode`, `SpiClock`, `SpiDataSize`, `SpiNss`,
 `SpiDirection`, `SpiFrameFormat`, `SpiFlag`, `SpiPins`, `I2sConfig`,
 `I2sPins`, and the two arithmetics), over the reserve's instance,
-audio and request-mapping facts (`stm32f4/device_tables.hpp`), with
+audio and request-mapping facts (`stm32f4/device_tables.hpp`, the
+reserve: the table of what each part has, read off the device header
+where the header can say it and keyed on the part class where only the
+manual can), with
 the audio PLL and the I2S clock selector on `Rcc`
 ([clock.md](clock.md)) and the streams from [dma.md](dma.md). The
 family fixture is `test/family_stm32f4/spi.cpp` with the negatives
@@ -35,7 +134,10 @@ desk (that board's `spi_peer`); the stm32f4 `spi_peer` on the same SPI2
 is the G0B1RE suite's client; on the Nucleo-F446RE's SPI1 with MISO
 floating, the engined request's cost (letter d of `bench_stm32f4`) and
 the host's own loops against the wire and against the vendor's (letter
-e).
+e). A letter is one command key of a suite's console (or of the
+benchmark's) and the group of verdicts it runs; `z` is the key that
+runs a suite's whole set, and a letter outside `z` is run by its own
+key.
 
 ## What the silicon does
 
@@ -57,7 +159,7 @@ every part but the F410 line; SPI4 on the F401, F411, F412, F413,
 F42x/F43x, F446 and F469; SPI5 on the F410's larger packages, the F411,
 F412, F413, F42x/F43x and F469; SPI6 on the F42x/F43x and F469 classes
 alone. SPI1, SPI4, SPI5 and SPI6 sit
-on APB2 and SPI2 and SPI3 on APB1, so BR[2:0] divides ITS bus's clock
+on APB2 and SPI2 and SPI3 on APB1, so BR[2:0] divides its bus's clock
 and not SYSCLK - 90 against 45 MHz at 180 MHz of core
 ([clock.md](clock.md)). Every instance has a vector of its own, shared
 with nothing.
@@ -72,13 +174,13 @@ a three-wire turnaround possible at all.
 
 **Three chip-select arrangements** (28.3.1). SSM with SSI is the
 software one, and it leaves the NSS pad free - which is what a bus AO's
-GPIO select needs; a host under it must hold SSI HIGH, because a low
-SSI on a master IS the mode fault. SSOE drives the pad low while SPE is
+GPIO select needs; a host under it must hold SSI high, because a low
+SSI on a master is the mode fault. SSOE drives the pad low while SPE is
 set and gives up multi-master. The hardware input is the multi-master
 arrangement, where another master pulling NSS low demotes this one.
 
 **The flags are cleared by sequences, not by a clear register**
-(28.3.10): the overrun by reading DR and THEN SR - the DR read alone
+(28.3.10): the overrun by reading DR and then SR - the DR read alone
 does not do it; the mode fault by an SR access while MODF stands and
 then a CR1 write; the CRC error by writing a zero into it, the one
 rc_w0 bit of the register; the TI framing error and the I2S
@@ -88,22 +190,22 @@ desynchronization by reading SR; the I2S underrun by reading SR.
 three of them are answered as code:
 - *BSY may stay high when the SPI is disabled* (2.12.1). The disable
   procedure waits for TXE and then for BSY in the transmitting
-  configurations, and in MASTER RECEIVE-ONLY - RXONLY, or bidirectional
+  configurations, and in master receive-only - RXONLY, or bidirectional
   with the output off - it does not look at BSY at all: the errata's own
   instruction, and 28.3.7 already says the flag is kept low there.
 - *Anticipated communication upon a transit from slave receiver to
   master* (2.12.2): the clock starts on the MSTR write even with SPE
-  clear. `configure()` pulses the RCC reset line before writing a HOST
+  clear. `configure()` pulses the RCC reset line before writing a host
   configuration over a client receive-only one - the errata's first
   workaround, free on the ordinary path.
 - *A wrong CRC when the polynomial is even* (2.12.3): an even
   polynomial is refused, so the unit is never armed with a divisor that
   computes nonsense. The reset value 0x0007 is odd.
 - *The last received bit may be wrong when the SCK feedback is slow*
-  (2.12.4). The internal loop back from the SCK PAD must return inside
+  (2.12.4). The internal loop back from the SCK pad must return inside
   two APB periods, and the errata's table gives the ceiling per pad
   class at a 30 pF load: 84 MHz of APB at `high` or `very_high`, 75 at
-  `medium`, 25 at `low` - halved for I2S. It is a PAD fact and not a
+  `medium`, 25 at `low` - halved for I2S. It is a pad fact and not a
   rate fact: the SPI's own bit rate does not enter it. Every pad this
   driver hands over goes out at `very_high` unless the task's `Config`
   names another class ("The pads").
@@ -114,17 +216,17 @@ the pack declares I2SCFGR and I2SPR, on instances the manual gives no
 I2S at all. It is SPI2 and SPI3 on the F405 class and the F42x/F43x
 class; SPI1, SPI2 and SPI3 on the F446 (RM0390 table 165 - SPI4 has
 none); every instance from SPI1 to SPI5 on the F411. Full duplex
-is a SECOND BLOCK on the classes that have one (I2S2ext, I2S3ext -
+is a second block on the classes that have one (I2S2ext, I2S3ext -
 always slaves, on the instance's own clock and word select) and two
 whole instances paired on the F446, which has none.
 
 **The I2S kernel clock is not the APB's**: the audio PLL's R output, an
 external clock on the I2S_CKIN pad, and on the parts with the
-RCC_DCKCFGR pair the main PLL's R or the root itself. THE PAIR IS
-NUMBERED BY BUS AND NOT BY INSTANCE - I2S1SRC is the APB1 instances'
+RCC_DCKCFGR pair the main PLL's R or the root itself. The pair is
+numbered by bus and not by instance - I2S1SRC is the APB1 instances'
 and I2S2SRC the APB2 ones' (RM0390 6.3.24) - a trap the names invite.
 On the F42x/F43x class the audio PLL has no input divider of its own
-and shares the MAIN PLL's M, so its VCO input is whatever the system
+and shares the main PLL's M, so its VCO input is whatever the system
 clock already fixed.
 
 **The clock generator's arithmetic** (28.4.4): the whole divisor is
@@ -200,10 +302,12 @@ The arithmetic: `i2s_frame_factor`, `i2s_fs_hz`, `i2s_prescaler_for`,
 `i2s_i2spr_of`.
 
 `SpiHost<n, pins, TxEngine, RxEngine, hold_off_cycles>` - the engine
-[the shared SPI bus](../design/spi-bus.md) drives, with the other
-strata's `Request` field for field: `cs`, `dc`, `cmd`, `tx`, `rx`,
-`len`, `cmd_len`, `bits`, `polled`, `cs_setup_us`, `clock`, `mode`,
-`reply` - in THAT order, 40 bytes with no padding, the first nine words
+[the shared SPI bus](../design/spi-bus.md) drives, with the fields of
+the shared `Request` by name (that page's "Realizations") and the rate
+and frame size in this family's types, in this family's order: `cs`,
+`dc`, `cmd`, `tx`, `rx`, `len`, `cmd_len`, `bits`, `polled`,
+`cs_setup_us`, `clock`, `mode`, `reply` - in that order (a designated
+initializer follows it), 40 bytes with no padding, the first nine words
 being what the asynchronous path keeps for its tenure. `init(clock,
 max_sck_hz)` (the shared surface) and `init(clock, Config)` - `Config`
 being `max_sck_hz`, `sck_speed` and `mosi_speed`, the classes of the two

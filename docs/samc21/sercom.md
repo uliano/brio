@@ -1,6 +1,118 @@
 # SERCOM - USART mode (SAM C21)
 
-Documents of record: SAM C20/C21 data sheet DS60001479M - SERCOM
+This document is for a programmer who needs a serial port on the SAM
+C21: the console a program prints to, a line-oriented link, a byte
+transport to another chip, or one of the shapes the USART offers
+(RS-485, LIN, IrDA, a synchronous host or client, a one-wire bus with
+collision detection). `Sercom<n>` is the resource, one SERCOM instance
+in USART mode with one function per register fact. `Uart<n, pads, ...>`
+is the task over it (a task, in brio, is a driver layer with state of
+its own, served from its peripheral's interrupt, that an active object
+or `print` calls; an active object is a component of a brio program
+with its own event queue, served one event at a time by the kernel,
+[docs/learn/introduction.md](../learn/introduction.md)): a byte
+transport with a transmit ring and a receive ring, both served from the
+instance's one interrupt, with the same public surface as the other
+targets' tasks, which is what lets `util/serial_port.hpp` and `print()`
+run here unchanged ([design/serial.md](../design/serial.md) is the
+stack above it). The SERCOM's SPI and I2C modes have their own
+documents, [spi.md](spi.md) and [i2c.md](i2c.md).
+
+The smallest use, the console on the board's CH340 bridge, is the first
+block of "How to use it" below:
+
+```cpp
+constexpr brio::UartPads console_pads{
+    .tx = brio::SercomPad::pad0,          // PB30 - the silicon's choice
+    .rx = brio::SercomPad::pad1,          // PB31
+    .tx_pin = {'B', 30, brio::PinFunction::d},
+    .rx_pin = {'B', 31, brio::PinFunction::d},
+};
+using Serial = brio::Uart<5, console_pads>;
+constexpr Serial serial;
+
+extern "C" void SERCOM5_Handler() {
+    if (Serial::isr()) { brio::post<SerialLines>(brio::RxActivity{}); }
+}
+
+int main() {
+    SysClock::init();
+    Serial::init(clock, 115200);
+    brio::enable_interrupts();
+    brio::print(serial, "hello", brio::crlf);
+}
+```
+
+Line by line: `console_pads` names which SERCOM pad carries each
+direction (TxD on PAD[0], one of the only two pads TxD can use; RxD on
+PAD[1]) and the pins those pads come out on with their PMUX function,
+PB30 and PB31 under function D; the pad side is checked when the
+program is compiled (`uart_pads_valid`), the pin side is the package's
+I/O table and the program's to get right. `Serial` names the transport
+type: `5` the instance, the pads, and every other template argument at
+its default (a 64-byte receive ring, a 256-byte transmit ring, no DMA
+engine, the flash placement). `serial` is an empty tag object of that
+type, the argument `print` takes to pick the port, since the type's
+functions are all static and it has no object of its own. The
+`extern "C"` function is the instance's one interrupt handler, as in C,
+under the name the crt's vector table gives it; it calls `isr()`, which
+returns true when a received byte made the receive ring non-empty, and
+then posts `RxActivity` to `SerialLines`, the program's line-assembling
+active object (a `SerialPort` of `util/serial_port.hpp`, declared
+elsewhere in the program). `SysClock::init()` is the clock task's
+([clock.md](clock.md)); `Serial::init()` takes that task's tag
+(`constexpr SysClock clock;`) and the baud rate, the frame at its
+default (eight bits, no parity, one stop bit, LSB first), and opens the
+instance's NVIC line itself; `brio::crlf` is the line ending. The block
+shows the console's own lines only: a real program's `main()` goes on
+to the kernel's `run()` over its active objects, `SerialLines` among
+them ([platform.md](platform.md)).
+
+What decides correctness even there. `init()` comes after the clock
+task's and before interrupts are enabled: the BAUD register is computed
+from the rate the clock type claims for generator 0 and not read from
+the hardware, so a port initialized while the CPU still runs at its
+4 MHz reset rate under a 48 MHz type speaks at a twelfth of the rate
+asked until the clock moves, and at the rate asked after (BAUD is
+written once), and nothing refuses it (derived from the generator's
+arithmetic, not measured). `init()` answers false when the rate cannot
+be produced at that clock or one of the instance's synchronizations
+did not complete, and the transport is then not up; the smallest use
+discards the answer. The vector is the program's to bind, under the crt's name for it
+(`extern "C"` keeps that plain C name; a misspelled or C++-decorated
+name binds nothing and draws no error): `init()` arms
+the receive interrupt and the first write arms the transmit one, and a
+`SERCOM5_Handler` left undefined is a weak alias of the crt's silent
+spin, so the program stops there at its first print or its first
+received byte. A SERCOM input pad can only pull down (31.5.1): an idle
+RxD line is held high by whatever drives it, and `init()` leaves the
+pad bare. And three facts to know before the first `print`: `print`
+waits until the ring has taken every byte, so a long message printed
+from an active object's handler stalls every other active object for
+that long, and `print` is never called from an interrupt handler (the
+handler is the ring's other end)
+([design/serial.md](../design/serial.md)); the transmit ring has one
+producer, so `write_byte` and `write_bulk` are called from active
+objects and from `main`, never from an interrupt handler, and both
+copy, the caller's buffer being free when the call returns -
+`write_byte` answers false when the ring is full, `write_bulk` the
+number of bytes the ring took, so a caller that writes directly
+handles the rest itself, where `print` waits for it; and on the
+transport without an engine nothing masks interrupts (the transmit
+interrupt is armed by a plain INTENSET store), where the engined one
+masks the engine's claim alone ("The optional transmit engine" below).
+
+The page is long because the chapter is. In order: the documents of
+record; what the silicon does, ending with the transmit and the receive
+side item by item; the types and verbs; the optional transmit engine;
+how to use it, one example per shape (the console, the engined
+transmitter, its placement, a synchronous host, an asynchronous rate on
+either generator, RS485, LIN, collision detection, the loop with no
+wire); the bench findings, most of the page; and what is not covered.
+
+## Documents of record
+
+SAM C20/C21 data sheet DS60001479M - SERCOM
 common ch. 30 (the baud generators, 30.6.2.3 table 30-2), USART
 ch. 31 (clock generation and the synchronous clock 31.6.2.3, transmission
 and reception 31.6.2.5-31.6.2.6 with the operational range 31.6.2.6.4,
@@ -17,14 +129,17 @@ missing stop bit, answered by the die's revision), all encoded in code
 `Uart<n, pads, rx, tx, TxEngine, Placement>` task, the one engine slot - the
 transmit one - optional, and where its completion runs from). The family fixture is `test/family_samc21/sercom.cpp` plus
 its negatives under `brio check samc21`; the bench suite is
-`test_samc_uart`, driven from the host by `brio stress`.
+`test_samc_uart`, driven from the host by `brio stress` (a letter,
+cited below for this suite and for the `bench_samc` cost instrument,
+is one command key of that program's console and the group of verdicts
+or measurements the key runs).
 
 ## What the silicon does
 
 **One interrupt vector for the whole instance.** DRE, TXC, RXC, RXS,
 CTSIC, RXBRK and ERROR all share the instance's single NVIC line,
 where the AVR DA/DB's USART has two vectors and two ISR bodies. And
-DRE is a CONDITION, not an event: it reads 1 whenever the transmit
+DRE is a condition, not an event: it reads 1 whenever the transmit
 buffer is empty, which is most of the time, so a handler acting on raw
 INTFLAG would run the transmit path on every receive interrupt. The
 mask that matters is INTFLAG AND INTENSET.
@@ -40,7 +155,7 @@ others share 18).
 RxD may be any pad. A two-wire link therefore cannot swap its pads
 when a board turns out crossed - "the other way round" is a different
 pad pair, not a configuration. The device header adds a naming trap:
-its enumerator `TXPO_PAD1_Val` names the CODE 0x1, and that code
+its enumerator `TXPO_PAD1_Val` names the code 0x1, and that code
 routes TxD to PAD[2].
 
 **The frame is LSB-first on the wire - but the register's reset is
@@ -54,12 +169,12 @@ regressing.
 
 **Enable-protection and synchronization are both real.** CTRLA,
 CTRLB and BAUD accept writes only while the instance is disabled -
-an enabled-time write is DISCARDED (31.6.2.1). SWRST, ENABLE and
+an enabled-time write is discarded (31.6.2.1). SWRST, ENABLE and
 CTRLB cross into the peripheral clock domain: 31.8.10 promises an
 APB error for a CTRLB write while the previous one is in flight, and
-enabling the instance CLEARS CTRLB.TXEN/RXEN, raising SYNCBUSY.CTRLB
+enabling the instance clears CTRLB.TXEN/RXEN, raising SYNCBUSY.CTRLB
 until each direction is really up - verified verbatim in 31.8.2, and
-the reason the driver's enable waits BOTH sync bits. Two errata
+the reason the driver's enable waits both sync bits. Two errata
 complete the picture: SWRST does nothing while ENABLE = 0 (1.17.16 -
 so a reset from the disabled state must enable first), and the ERROR
 interrupt does not wake the device (1.17.15 - so it is never enabled
@@ -67,17 +182,17 @@ at all; errors are taken on the RXC path, where STATUS must be read
 before DATA anyway, 31.8.11).
 
 **Two baud generators, three sample counts** (table 30-2, CTRLA.SAMPR):
-the ARITHMETIC one, `BAUD = 65536 x (1 - S x f_baud / f_ref)`, a 16-bit
+the arithmetic one, `BAUD = 65536 x (1 - S x f_baud / f_ref)`, a 16-bit
 register whose step is 1/65536 of the reference averaged over a frame;
-the FRACTIONAL one, `f_baud = f_ref / (S x (BAUD + FP/8))`, a 13-bit
+the fractional one, `f_baud = f_ref / (S x (BAUD + FP/8))`, a 13-bit
 integer part of at least 1 under a 3-bit fraction in BAUD's top bits
-(31.8.4) - an eighth of a sample, coarse at the top rates and EXACT
+(31.8.4) - an eighth of a sample, coarse at the top rates and exact
 wherever S x f_baud divides 8 x f_ref. f_ref is the instance's GCLK core
 clock, S is 16, 8 or 3 (SAMPR 0x0..0x4: 16x and 8x on either generator,
 3x arithmetic only, 0x5-0x7 reserved), and f_baud <= f_ref / S. Neither
 generator is better everywhere: on a 24 MHz reference 921 600 baud is
 -0.001 % on the arithmetic one and +0.16 % on the fractional, 3750 baud
-+0.1 % and exact. BAUD = 0 is a LEGAL arithmetic value - the fastest
++0.1 % and exact. BAUD = 0 is a legal arithmetic value - the fastest
 rate - which is why the arithmetic returns an optional rather than
 overloading zero. SAMPA (31.6.3.10) moves the three voting samples later,
 two samples a step at 16x. TXC is exact: cleared by every DATA write and
@@ -86,8 +201,8 @@ is on the wire", no timing guesswork.
 
 **The synchronous mode is two bits, not one** (31.6.2.3): CTRLA.CMODE
 chooses synchronous framing and CTRLA.MODE the clock - the internal
-generator (the HOST: XCK an output at f_ref / (2 x (BAUD + 1)), the
-EIGHT low bits of BAUD) or the XCK pad (the CLIENT: the shift registers
+generator (the host: XCK an output at f_ref / (2 x (BAUD + 1)), the
+eight low bits of BAUD) or the XCK pad (the client: the shift registers
 run on XCK itself, "up to the system frequency", BAUD ignored). XCK
 lands on the pad TXPO puts beside TxD - PAD[1] next to PAD[0], PAD[3]
 next to PAD[2] - so RxD cannot be there. CTRLA.CPOL swaps the edges:
@@ -98,8 +213,8 @@ external clock takes XCK as the baud generator's reference.
 **The IrDA coder** (31.6.3.3, CTRLB.ENC) works asynchronous at 16x on
 the arithmetic generator (the section's "16x sample rate
 (CTRLA.SAMPR[0]=0)" read as the one code both halves of it admit). It
-TRANSMITS a 0 bit as a HIGH pulse of 3/16 of a bit and nothing else -
-there is no programmable transmit pulse - and receives a LOW pulse of at
+transmits a 0 bit as a high pulse of 3/16 of a bit and nothing else -
+there is no programmable transmit pulse - and receives a low pulse of at
 least RXPL + 2 core clocks (31.8.5) as a 0: "the polarity of the
 transmitter and receiver are opposite".
 
@@ -108,15 +223,15 @@ are the CTRLB bits that are not enable-protected, and they are
 write-synchronized like the rest of CTRLB. Disabling the transmitter
 "will not become effective until ongoing and pending transmissions are
 completed"; disabling the receiver flushes the two-level buffer and
-clears FERR, PERR and BUFOVF. A DISABLED TRANSMITTER STILL DRIVES ITS
-PAD at the idle level (measured, Bench findings) - the one release the
+clears FERR, PERR and BUFOVF. A disabled transmitter still drives its
+pad at the idle level (measured, Bench findings) - the one release the
 chapter describes, TxD tri-stated, is 31.6.3.7's after a collision - so
 a pad that must carry no driver is taken from the SERCOM or the instance
 disabled.
 
 **Four pinouts beside TxD** (CTRLA.TXPO, 31.8.1; `UartPinout`): codes
 0x0 and 0x1 put TxD on PAD[0] or PAD[2] with XCK beside it; 0x2 puts TxD
-on PAD[0], RTS on PAD[2] and CTS on PAD[3] - HARDWARE HANDSHAKING
+on PAD[0], RTS on PAD[2] and CTS on PAD[3] - hardware handshaking
 (31.6.3.2), asynchronous on the internal clock only: the receiver drives
 RTS high while it is disabled or its buffer full, and a character starts
 only while CTS reads 0 -; 0x3 puts TxD on PAD[0], XCK on PAD[1] and TE on
@@ -127,13 +242,13 @@ output pad, nor CTS's.
 
 **Three frame families** (CTRLA.FORM; `UartForm`), both LIN ones
 asynchronous at 16x on the FRACTIONAL generator (31.6.3.4, 31.6.3.5):
-the USART frame (0x0, 0x1 with parity); the LIN HOST (0x2, no parity
+the USART frame (0x0, 0x1 with parity); the LIN host (0x2, no parity
 code), whose transmitter makes the header on CTRLB.LINCMD's strobe - 0x1
 a break of CTRLC.BRKLEN bit times (13, 17, 21, 26) on the next DATA write,
 the sync and identifier then the caller's writes; 0x2 the whole header,
 break, the delay CTRLC.HDRDLY names, 0x55, a second delay and the
-identifier written to DATA - and STATUS.TXE once it is out; and BREAK
-DETECTION WITH AUTO-BAUD (0x4, 0x5): a low of more than 11 nominal bit
+identifier written to DATA - and STATUS.TXE once it is out; and break
+detection with auto-baud (0x4, 0x5): a low of more than 11 nominal bit
 times raises INTFLAG.RXBRK, the 0x55 sync field after it is timed and the
 measured rate written into BAUD and FP, a sync that is not 0x55 raises
 STATUS.ISF with ERROR and leaves BAUD alone. Erratum 1.17.2: on revisions
@@ -157,7 +272,7 @@ core's source wakes the device from standby; 31.8.2's table names which
 interrupt wakes it (RXS, RXC or both) and reserves SFDE with neither -
 `UartStartOfFrame`'s three rows, the reserved one unwritable.
 
-**A SERCOM input pin can only pull DOWN** (31.5.1, verified
+**A SERCOM input pin can only pull down** (31.5.1, verified
 verbatim): PULLEN still works under the peripheral function, but the
 pull-up is not available - an idle RxD line must be held high by
 whatever drives it.
@@ -174,49 +289,49 @@ USART1, PA18 meets that board's RxD, an input.
 **The transmit side, item by item** - what the chapter offers that bears
 on a run's cost:
 
-- THE TRANSMIT BUFFER, DATA ahead of the shift register (31.6.2.5): USED -
+- The transmit buffer, DATA ahead of the shift register (31.6.2.5): used -
   one frame queued behind the one on the wire, so a writer that keeps
   DRE served puts frames back to back.
-- DRE AS A DMA REQUEST (31.6.4.1): USED by the optional transmit engine,
+- DRE as a DMA request (31.6.4.1): used by the optional transmit engine,
   the stratum's one DMA user (below).
-- TXC (31.8.8): USED, `tx_idle()`'s last clause.
-- THE BAUD GENERATORS: every regime offered at the resource
+- TXC (31.8.8): used, `tx_idle()`'s last clause.
+- The baud generators: every regime offered at the resource
   (`UartSampling`, `sercom_closest_baud()` asking both at one S); the
   task stays on 16x arithmetic, generator 0, which is the console's.
-- 8x SAMPLING: OFFERED - twice the rate on one reference (the ceiling
+- 8x sampling: offered - twice the rate on one reference (the ceiling
   f_ref / 8) for a receiver with half the samples to vote on; 3x the same
   again (f_ref / 3) with three.
-- THE SYNCHRONOUS MODE: OFFERED at the resource - a bit in two reference
+- The synchronous mode: offered at the resource - a bit in two reference
   clocks as the host, no oversampling at all.
 - TE (RS-485, TXPO 0x3, GTIME), RTS/CTS (TXPO 0x2), LIN's header
   generation (LINCMD, BRKLEN, HDRDLY), collision detection (COLDEN):
-  OFFERED at the resource (`SercomUartConfig`, `lin_command()`); the task
+  offered at the resource (`SercomUartConfig`, `lin_command()`); the task
   carries none of them - a console has no second driver on its wire.
 
 **The receive side, item by item** - what the chapter offers for
 taking a burst, and what this driver does with each:
 
-- THE TWO-LEVEL RECEIVE BUFFER (31.6.2.6): USED, every level an entry -
+- The two-level receive buffer (31.6.2.6): used, every level an entry -
   the handler reads RXC again after each character and leaves when it
   reads clear, so one entry serves the two characters a late entry
   finds, and the receiver keeps a 3 Mbaud stream (letter t).
-- RXC AS A DMA REQUEST (31.6.4.1, cleared by the channel's read of
-  DATA): DECLINED - this stratum drives the DMAC for one user, and that
+- RXC as a DMA request (31.6.4.1, cleared by the channel's read of
+  DATA): declined - this stratum drives the DMAC for one user, and that
   user is the transmitter ([dmac.md](dmac.md): the transport's own
   transmit and receive pair was measured writing this SERCOM's
   registers under erratum 1.10.4).
-- AN IDLE-LINE FLAG, A RECEIVER TIME-OUT: NOT IN THIS SILICON - the
+- An idle-line flag, a receiver time-out: not in this silicon - the
   receiver's interrupts are RXC, RXS, RXBRK and ERROR (31.6.4.2), and no
   counter of bit times after the last stop bit exists. The interrupt
   receiver needs neither: it has an edge on every character.
-- START-OF-FRAME DETECTION (31.6.3.9, CTRLB.SFDE, the RXS interrupt):
-  OFFERED at the resource (`UartStartOfFrame`), DECLINED by the task for
+- Start-of-frame detection (31.6.3.9, CTRLB.SFDE, the RXS interrupt):
+  offered at the resource (`UartStartOfFrame`), declined by the task for
   the edge - it says a character is beginning, not that a run has ended;
   its use is the wake from standby, a power chapter's.
-- RXBRK and the auto-baud measurement (31.6.3.4): OFFERED at the resource
+- RXBRK and the auto-baud measurement (31.6.3.4): offered at the resource
   (`UartForm::auto_baud`, the learned rate read back with `baud_reg()`).
-- THE ERRORS: STATUS's PERR, FERR and BUFOVF clear by being written
-  (31.6.2.6.2, 31.8.9) - NO READ OF DATA, so a clear never takes a byte
+- The errors: STATUS's PERR, FERR and BUFOVF clear by being written
+  (31.6.2.6.2, 31.8.9) - no read of DATA, so a clear never takes a byte
   a channel was owed. The interrupt receiver reads STATUS before each
   character (31.8.11) and drops the hit ones. The ERROR interrupt is not armed (erratum 1.17.15).
 - IBON (31.6.2.6.2): BUFOVF raised at once instead of travelling with
@@ -298,7 +413,7 @@ taking a burst, and what this driver does with each:
   task: two SPSC rings (lock-free at any size here - `atomic_width` 4
   - so 64/256 are console-class defaults, not a ceiling),
   `init(clock, baud, format)` speaking hertz off the clock tag,
-  `isr()` as the ONE handler body honouring the edge-return contract
+  `isr()` as the one handler body honouring the edge-return contract
   (true on the RX ring's empty-to-non-empty transition - the kernel
   wakeup), taking every level of the receive buffer an entry and
   calling nothing on a clean character's path (the body, the ring's
@@ -312,10 +427,10 @@ taking a burst, and what this driver does with each:
   copied and armed again behind it, or with the engine the run queued
   whole and the engine pumped once - the verb `print` hands every
   string and number), `read_byte`, `read_bulk` and `read_span`/`consume` (the
-  receive run in place), `tx_idle()` - THE WIRE IDLE: nothing queued, no
+  receive run in place), `tx_idle()` - the wire idle: nothing queued, no
   block in flight and TXC, the last stop bit gone (a port that has sent
   nothing since `init()` is idle too: TXC is clear out of reset) -, error
-  counters, `rx_skips()` (THE SKIP EPOCH, util/stream.hpp's
+  counters, `rx_skips()` (the skip epoch, util/stream.hpp's
   `SkippingSource`: never cleared - neither by `clear_errors()` nor by
   `init()` -, it moves whenever the line carried a character the ring
   will not deliver clean, between the run before and the run after: the
@@ -332,12 +447,12 @@ taking a burst, and what this driver does with each:
   holds its transmit request and hands the next channel bound to its
   trigger a stray beat, [dmac.md](dmac.md)). Init
   order is deliberate: clocks, reset, configure,
-  enable, and only THEN the pads to the SERCOM - the transmitter
+  enable, and only then the pads to the SERCOM - the transmitter
   idles high before the pad leaves PORT, so no glitch start bit
   reaches the wire. `ByteTransport` and `ClockUser` are
   static_asserted. The engine slot defaults to `NoDmaEngine` - see "The
   optional transmit engine" below.
-- **THE COPY into the transmit ring and out of the receive one**
+- **The copy into the transmit ring and out of the receive one**
   (`write_bulk`, `read_bulk`): an inline byte loop, six instructions a
   byte - about ten cycles behind the flash's two wait states -, or the
   runtime's `memcpy` for a run of `uart_copy_crossover` bytes (20) or
@@ -364,27 +479,27 @@ using Serial = brio::Uart<5, console_pads, 64, 256, brio::DmaTxEngine>;
 extern "C" void DMAC_Handler() { Serial::dma_isr(); }
 ```
 
-The engine is a POLICY, not a feature of the task:
+The engine is a policy, not a feature of the task:
 
 - **Zero when absent.** `NoDmaEngine` (the default) is a tag with
   `present = false`; every engine branch sits behind `if constexpr`, so
   a Uart that names no engine carries no test, no state and no code.
   sercom.hpp never includes dmac.hpp, so a program with a serial port
   does not carry the controller.
-- **The trigger replaces the interrupt.** DRE is the SAME condition as
+- **The trigger replaces the interrupt.** DRE is the same condition as
   the DMA trigger, so the engined transmitter does not arm DRE - both
   armed would serve every byte twice.
-- **ONE ENGINE, ONE CHANNEL, ONE OWNER AT A TIME.** The DMAC is this
+- **One engine, one channel, one owner at a time.** The DMAC is this
   stratum's for the Uart's transmitter alone (erratum 1.10.4,
   [dmac.md](dmac.md)): there is no receive slot - naming one is a
   compile error (`neg/uart_receive_engine_slot.cpp`) - and the engine
   is channel 0. Two Uarts naming it are two owners of one channel, so
   `init()` claims it with the SERCOM's number and an `init()` that finds
-  it held by another transport PANICS (the breadcrumb's context names
+  it held by another transport panics (the breadcrumb's context names
   the refused SERCOM, dmac.md); `release()` gives the claim back, so
   transports may take the engine in turn. The engine brings the DMAC
   block up itself at `init()`: nothing else in the program owns it.
-- **TX drains the ring in blocks of HALF THE RING at most.**
+- **TX drains the ring in blocks of half the ring at most.**
   `write_byte`, `write_bulk` and `print` are unchanged; the engine is
   handed the ring's contiguous run (`read_span`, design/ring.md), cut at
   half the ring, and its completion interrupt consumes exactly the block
@@ -394,7 +509,7 @@ The engine is a POLICY, not a feature of the task:
   the whole ring left the producer nothing to refill until the wire had
   gone idle - measured, 4096 bytes through a 2048-byte ring at 3 Mbaud
   ran at x 1.06, the second copy in the gap; cut at half, x 1.00
-  (letter u, below). THE MASK COVERS THE CLAIM: a block start (from
+  (letter u, below). The mask covers the claim: a block start (from
   `write_byte`/`write_bulk` in main context or from the completion in
   the handler) takes the engine's reservation - a test-and-set of its
   busy flag under PRIMASK - and reads the run and programs the channel
@@ -405,19 +520,19 @@ The engine is a POLICY, not a feature of the task:
   sixteen bits (refused at compile time). A bus error on a block (TERR,
   the channel disabled by the silicon, 25.6.2.8) is a block lost:
   abandoned, counted in `dma_faults()`, the next run started.
-- **THE STANDING REQUEST, AND WHY NOTHING KICKS.** DRE is a LEVEL -
+- **The standing request, and why nothing kicks.** DRE is a level -
   "my transmit buffer is free" (31.6.4.1) - and the channel serves it as
   it finds it: standing when the channel is enabled, or when the claim
   selects the trigger onto it, it fires the block's first beat at once.
   So the enable fires the first beat by itself, and a software kick on
-  top of it is a SECOND beat when the first has started (PEND clears as
+  top of it is a second beat when the first has started (PEND clears as
   a beat starts, 25.8.23) - measured: a transmit kick doubled a byte
   into a full DATA (Bench findings). The channel keeps nothing across
   its own disable: a DRE that rose and fell while it was disabled fires
   no beat at the next enable ([dmac.md](dmac.md), "A released
   requester").
-- **THE DEAD-BLOCK PREDICATE, ON THE REFUSED-BYTE PATH.** A channel
-  that waits ENABLED with no trigger pending and no beat moving while
+- **The dead-block predicate, on the refused-byte path.** A channel
+  that waits enabled with no trigger pending and no beat moving while
   DRE - its trigger - and TXC both stand cannot be running, so the
   block is abandoned and counted in `dma_faults()`. What killed blocks
   that way, measured, was erratum 1.10.4's corruption by a concurrently
@@ -427,13 +542,13 @@ The engine is a POLICY, not a feature of the task:
   block's last beat until its completion is heard and is true again for
   a block the handler has just started: with main context preempted for
   a character time across a completion, that test abandoned live blocks
-  at 2 Mbaud with ONE channel in the image (Bench findings). The three
+  at 2 Mbaud with one channel in the image (Bench findings). The three
   readings are taken under the mask.
-- **A REFUSED BYTE STILL NUDGES.** `write_byte()` returning false is
+- **A refused byte still nudges.** `write_byte()` returning false is
   the state in which nothing is draining the ring, and `print()`
   answers that false by trying again for ever - so the refusal path
   arms DRE (or pumps the engine) instead of returning silently, and
-  `write_bulk()` does the same when nothing fitted. An EMPTY run
+  `write_bulk()` does the same when nothing fitted. An empty run
   through `write_bulk()` is a legal call for exactly this: it queues
   nothing and takes the same path, which is how a loop waiting for the
   ring to drain still gives the transport its push.

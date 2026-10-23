@@ -1,6 +1,65 @@
 # RTC / PIT - the real-time counter and periodic interrupt timer (AVR DA, DB and EA)
 
-Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B (RTC
+This document is for a programmer whose program needs time on an AVR
+DA, DB or EA, which is every brio program: the RTC peripheral's
+periodic interrupt timer (PIT) is the kernel's timebase. It is also for
+one who needs the RTC directly: a 16-bit counter on the slow RTC clock
+with a period and a compare, counting in idle sleep and, with RUNSTDBY,
+in standby, for a periodic interrupt or event at a rate of its own, an
+alarm inside the period or a trimmed crystal; or the PIT's divided
+clocks as event-system signals.
+`avrxt/rtc.hpp` holds three resources (a resource, in brio, is one
+function per register fact, for a program that drives the block by
+hand): `RtcClock`, the clock select both functions share; `Rtc`, the
+counter; `Pit`, the periodic timer. `avrxt/ticker.hpp` holds
+`BasicTicker`, the timebase over the PIT, and `Ticker`, its 1024 Hz
+instance, which the kernel reads its time from (`AvrPlatform::now()` is
+`Ticker::ticks()`).
+
+The smallest use, the kernel's timebase, from "How to use it" below:
+
+```cpp
+ISR(RTC_PIT_vect) { brio::Ticker::pit(); }
+...
+brio::Ticker::init();        // after clock init, before sei()
+```
+
+Line by line: `ISR(RTC_PIT_vect)` is avr-libc's spelling of the PIT's
+interrupt handler, and its body is the Ticker's interrupt body
+`pit()`, which clears the PIT's flag and advances the tick, millisecond
+and second counters; `Ticker::init()` selects the RTC clock (the
+32.768 kHz crystal if one was started and still runs, the internal
+OSC32K otherwise), resets the counters, programs the PIT for 1024
+interrupts a second and enables its interrupt. `Ticker` is a monostate
+(a class whose state is static, with no instances), so neither line
+names an object.
+
+What decides correctness even there. The vector binding is the
+program's: `init()` enables the PIT interrupt and nothing checks that a
+handler calls `pit()`, and without it kernel time never advances; a
+vector left unbound is avr-libc's `__bad_interrupt`, a `jmp 0`, so the
+first tick restarts the program from its first instruction, without a
+hardware reset. The
+order is the clock's `SysClock::init()` first ([clkctrl.md](clkctrl.md)),
+then `Ticker::init()`, then `sei()`; `init()` waits for the RTC's busy flags a bounded time and does
+not report a wait that ran out. The Ticker owns the RTC's one clock
+select, which the counter shares: a program that uses `Rtc` without a
+Ticker selects the clock itself, once, before enabling either function.
+The tick is as accurate as the clock it counts: the internal OSC32K
+measured about 0.9 % fast on an AVR128DB48, 0.15 % fast on an
+AVR128DA48 and about 1.3 % slow on an AVR64EA48 ("Bench findings"
+below), and kernel time inherits that.
+And the first tick after an enable falls anywhere inside one period
+("What the silicon does").
+
+The rest of this page, in order: the documents of record; what the
+silicon does; the types and verbs; how to use it, one example per use;
+the bench findings on the AVR128DB48, the AVR128DA48 and the AVR64EA48;
+what is not covered.
+
+## Documents of record
+
+AVR128DB28/32/48/64 data sheet DS40002247B (RTC
 chapter 26), errata DS80000915F and, for the DA parts, DS80000882C -
 neither lists an RTC item; for the AVR EA, AVR64EA28/32/48 data sheet
 DS40002443A (RTC chapter 24, the same chapter but for one register,
@@ -10,8 +69,10 @@ to hold an external 32 kHz source alive through sleep, so a
 standby-running RTC on the crystal needs another user of that clock.
 Drivers: `avrxt/rtc.hpp` (`RtcClock`, `Rtc`, `Pit`) and
 `avrxt/ticker.hpp` (`BasicTicker`, `Ticker`). Reference test:
-`test_avr_rtc`; the PIT dividers as event generators are also
-exercised by `test_avr_timer`, and both halves in sleep by
+`test_avr_rtc` (a letter is one command key of the suite's console and
+the group of verdicts it runs: `1` to `9` and `p` here, `a` running
+every letter the image carries); the PIT dividers as event generators
+are also exercised by `test_avr_timer`, and both halves in sleep by
 `test_avr_sleep`.
 
 ## What the silicon does
@@ -36,7 +97,7 @@ Facts that matter to code:
   CLK_RTC cycles and does not see it (measured: PIT_DIV64 unchanged
   when the prescaler goes from DIV1 to DIV32).
 - **The first tick is unknowable.** The prescaler's internal counter is
-  stopped only while BOTH functions are disabled, and it starts when
+  stopped only while both functions are disabled, and it starts when
   either is enabled, so the first PIT interrupt and the first RTC count
   fall anywhere inside one full period (26.5.2.2). A period boundary is
   the only instant an application may build on - never the enable.
@@ -59,16 +120,16 @@ Facts that matter to code:
 - **Crystal error correction is a trim, not a cure.** CALIB carries a
   sign and seven bits of ppm, so the whole range is +-127 ppm, applied
   by adding or removing whole CLK_RTC cycles spread over a million-cycle
-  interval (30.5 s at 32.768 kHz). A NEGATIVE correction requires the
+  interval (30.5 s at 32.768 kHz). A negative correction requires the
   prescaler at DIV2 or slower (26.6) - the driver refuses the illegal
   pair instead of programming a wrong trim, at compile time in the
   config form and with a `false` at run time.
 - **Sleep**: the counter runs in idle, and in standby only with
   RUNSTDBY; the PIT runs in every sleep mode, power-down included
   (26.9). Both halves are bench-proven there, and so is the asymmetry:
-  in POWER-DOWN the counter stops even with RUNSTDBY set while its PIT
+  in power-down the counter stops even with RUNSTDBY set while its PIT
   goes on interrupting. One trap comes with it - CNT read at the
-  INSTANT of a wake still carries the value it had at the SLEEP
+  instant of a wake still carries the value it had at the SLEEP
   instruction, because the read is synchronized into CLK_PER (26.10)
   and that path needs the clock back plus a CLK_RTC edge; a millisecond
   later it is right. Under a halted CPU each half keeps running only
@@ -79,7 +140,7 @@ Facts that matter to code:
   (PIT_DIV64..DIV8192) are free-running levels off the same chain. Both
   families live in [evsys.md](evsys.md) as `EvRtcOvf` / `EvRtcCmp` /
   `EvPitDiv<n>`. On the AVR EA the PIT's dividers reach the event system
-  through two SLOTS (PITEVGENCTRLA, 24.13.17): each carries OFF or
+  through two slots (PITEVGENCTRLA, 24.13.17): each carries OFF or
   CLK_RTC / 4 .. / 32768, chosen by the event route
   (`EvPitDiv<div, slot>`) or from the RTC's side
   (`Pit::event_divider<slot>`); a slot carries its divider only while
@@ -119,7 +180,10 @@ ISR(RTC_PIT_vect) { brio::Ticker::pit(); }
 brio::Ticker::init();        // after clock init, before sei()
 brio::TimeStamp ts; brio::Ticker::now(ts); brio::print(serial, ts);   // "12.045s"
 ```
-Waiting in an AO is a `TimeEvent`, never a busy loop. `init(source)`
+Waiting in an active object (a component of a brio program with its own
+event queue, served one event at a time by the kernel,
+[../learn/introduction.md](../learn/introduction.md)) is a `TimeEvent`,
+never a busy loop. `init(source)`
 names the clock instead of letting the Ticker guess (`RtcSource::osc1k`
 divides every tick rate by 32).
 

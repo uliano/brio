@@ -1,6 +1,79 @@
 # RTC and the backup domain (STM32F4)
 
-Documents of record: RM0383 Rev 4 ch. 17 (the RTC), 5.1.2 and 5.4.1
+This document is for a programmer who needs a calendar that keeps time
+across resets, an alarm or a periodic wake-up a sleeping chip can be
+woken by, a timestamp or tamper input, or a few words of memory that
+outlive the program. `RtcDomain` is the gate and the clock of the backup
+domain the RTC lives in (PWR_CR.DBP and RCC_BDCR: the LSE crystal, the
+one-way clock select, the domain reset); `Rtc` is the peripheral, whole.
+Both are monostates (classes with static members only, never
+instantiated), and both are setup and main-context verbs with no guard
+of their own, while three ISR bodies (`alarm_isr()`, `wakeup_isr()`,
+`tamper_stamp_isr()`) are what the program's handlers call. A program
+that uses `stm32f4/sleep.hpp`'s timed sleep site hands the RTC to it
+whole and drives none of this ([pwr.md](pwr.md)).
+
+The smallest use, the first block of "How to use it" below - the domain
+up on the crystal, and a calendar set if none survived:
+
+```cpp
+#include "stm32f4/rtc.hpp"
+
+brio::RtcDomain::pwr_bus_clock(true);
+brio::RtcDomain::unlock(true);
+if (brio::RtcDomain::selected() != brio::RtcClockSource::lse) {
+    brio::RtcDomain::reset();          // RTCSEL is one-way; this is the way back
+}
+brio::RtcDomain::lse_enable(true);
+if (!brio::RtcDomain::lse_wait_ready()) { /* no crystal on this board */ }
+brio::RtcDomain::open(brio::RtcClockSource::lse);
+
+if (!brio::Rtc::calendar_set()) {      // INITS: nothing has ever been set
+    brio::Rtc::init(brio::RtcPrescalers{}, brio::RtcDateTime{12, 0, 0, 1, 6, 24, 6});
+}
+brio::Rtc::wait_sync();
+```
+
+Line by line: `pwr_bus_clock(true)` opens the PWR block's bus clock,
+without which its registers do not answer; `unlock(true)` sets
+PWR_CR.DBP, the write gate of the whole domain, which every system reset
+closes again; a domain whose clock source is already something other
+than the crystal can only be changed by `reset()`, which wipes the
+calendar and the twenty backup registers with it; `lse_enable` starts
+the crystal and `lse_wait_ready` waits for it, bounded (`lse_ready_spins`,
+sized for four times the 0.4 s start-up measured on the bench board, at
+100 MHz),
+and answers false when there is none; `open()` selects the crystal as
+RTCCLK and enables the RTC; `calendar_set()` reads INITS, which says
+whether anything ever set the calendar this domain kept; `init()` stops
+the calendar, writes the prescalers (the defaults, 127 and 255, make
+1 Hz from 32768 Hz) and the date and time (`RtcDateTime` is hour,
+minute, second, day, month, year, weekday: 12:00:00 on 1 June of year 24, a
+Saturday, weekday 1 being Monday and the century the caller's), and starts it again; `wait_sync()` waits for the first shadow
+copy, so a read after it means something.
+
+What decides correctness even there. The domain keeps running through
+every system reset, so a program that calls `init()` unconditionally
+restarts a calendar that was right; `calendar_set()` is the question to
+ask first. The clock select is one-way and the reset that undoes it
+costs every backup register, so a program that keeps a note there
+decides before it resets. Every configuring verb waits for a flag of the
+RTC's own with a bound and answers false if it never came, which is what
+a stopped RTCCLK (no crystal, nothing selected) looks like - the answers
+are the program's to read. And an interrupt of this block reaches the
+NVIC through the EXTI: the configuring verb opens the EXTI line itself,
+the NVIC line is the program's to enable (`Nvic::enable(Rtc::alarm_irq())`
+and its two siblings, "How to use it"), and the handler calls the ISR
+body, which clears the EXTI's pending bit - a handler that does not
+re-enters for ever.
+
+The rest of this page, in order: the documents of record; what the
+silicon does; the types and verbs; how to use it, one block per use; the
+bench findings; and what is not covered.
+
+## Documents of record
+
+RM0383 Rev 4 ch. 17 (the RTC), 5.1.2 and 5.4.1
 (the backup domain's access and PWR_CR.DBP), 6.2.8 and 6.3.17 (RTCCLK,
 RCC_BDCR), 6.3.3 (RCC_CFGR's RTCPRE), 6.3.18 (the LSI in RCC_CSR),
 8.3.15 and its table 25 (what RTC_AF1 does), 10.2.5 and 17.5 (the three
@@ -10,14 +83,17 @@ F446 - the same peripheral with a second tamper input and a second pad.
 Errata: ES0287 Rev 6 items 2.8.1 to 2.8.5, 2.2.10 and 2.2.12 (with the
 ES0206 2.9.x / 2.2.x and ES0298 2.9.x / 2.2.x twins). Driver:
 `brio/stm32f4/rtc.hpp` (`RtcDomain`, `Rtc`, and the constexpr arithmetic
-around them); the reserve's RTC facts are at the end of
+around them); the reserve's RTC facts (the reserve being the table of what each part
+has, read off the device header) are at the end of
 `brio/stm32f4/device_tables.hpp`. The family fixture is
 `test/family_stm32f4/rtc.cpp` with six negatives that refuse a
 sub-second mask past MASKSS's four bits, a wake-up reload past its
 sixteen, RTCCLK/2 with a reload of zero, a prescaler past its field, a
 calibration value the window's stuck bits would round, and a
 twenty-first backup register. The reference suite is
-`test_stm32f4_rtc`.
+`test_stm32f4_rtc`; a letter of a suite is one command key of its
+console and the group of verdicts it runs, and `z` is the key that runs
+them all.
 
 ## What the silicon does
 
@@ -25,7 +101,7 @@ twenty-first backup register. The reference suite is
 weekday, date, month and year in BCD, plus a binary sub-second counter;
 two alarms; a periodic wake-up timer; two calibrators; a timestamp; one
 or two tamper inputs; and twenty 32-bit backup registers. All of it
-runs from RTCCLK - LSE, LSI or the HSE divided by RTCPRE - and NONE of
+runs from RTCCLK - LSE, LSI or the HSE divided by RTCPRE - and none of
 it is in a system reset's scope (17.3.7): a reset clears the three
 shadow registers and three bits of RTC_ISR, and nothing else. That is
 the whole point of the block, and it is why INITS exists: the one flag
@@ -55,13 +131,13 @@ out is a domain reset from a power-on reset flag.
 alone keeps the calendar through a loss of VDD; LSI is an RC oscillator
 of 32 kHz nominal and 17..47 kHz over the range, outside the domain;
 HSE/RTCPRE divides the board's high-speed crystal by 2..31, which 6.2.8
-wants set to 1 MHz. THE VALUE OF RTCPRE IS THE DIVIDER, with 0 and 1
+wants set to 1 MHz. The value of RTCPRE is the divider, with 0 and 1
 both meaning "no clock", so a 25 MHz crystal reaches 1 MHz exactly at
 /25 and an 8 MHz one at /8; a crystal above 31 MHz, or one that is not a
 whole multiple of the wanted rate, reaches it at none, and
 `rtc_hse_divider_for()` answers 0 there. Because LSE is 32768 Hz by
 construction, LSI is uncalibrated and the HSE branch is whatever a board
-carries, EVERY RATE THIS DRIVER COMPUTES TAKES RTCCLK AS AN ARGUMENT: no
+carries, every rate this driver computes takes RTCCLK as an argument: no
 verb pretends to know which root is running.
 
 **The prescalers make the second.** RTCCLK / (PREDIV_A + 1) is ck_apre,
@@ -80,8 +156,8 @@ can be missed, and its workaround is either BYPSHAD = 1 or a second SSR
 read to confirm. With BYPSHAD = 1 there is no copy and no waiting - what
 a low-power program wants, and what a program measuring the 1 Hz edge
 needs - at the price the chapter states: an RTCCLK edge between two
-reads makes them disagree, so everything must be read twice. THAT PRICE
-IS REAL AND NOT RARE: a loop polling RTC_SSR continuously catches about
+reads makes them disagree, so everything must be read twice. That price
+is real and not rare: a loop polling RTC_SSR continuously catches about
 nine torn values a second (measured), each of which reads as a reload to
 anyone watching for one. `read()` applies the right discipline per mode
 and `subsecond()` confirms its own load, so no caller has to remember.
@@ -95,7 +171,7 @@ written. Entering it twice in a row is ES0287 2.8.4: INIT set one to two
 RTCCLK cycles after being cleared sets INITF immediately instead of
 waiting for the synchronization, and a calendar write in that window may
 be dropped. The workaround - clear BYPSHAD if set, wait for RSF, restore
-it - is applied unconditionally on the way OUT, so a second entry is
+it - is applied unconditionally on the way out, so a second entry is
 safe by construction; `exit_init_raw()` is the bare sequence, kept so
 the erratum can be staged.
 
@@ -117,15 +193,15 @@ reasons") adds two ck_apre cycles a minute or removes one, for the first
 +126 ppm, initialization mode only, and refused below PREDIV_A = 6.
 17.3.10 says the application must choose one, so each verb here refuses
 while the other is armed. A CALR write raises RECALPF and blocks the
-register until the setting takes - AND RECALPF DOES NOT FALL WHILE THE
-CALENDAR IS STOPPED (measured, letter `j`): it is cleared on ck_apre,
+register until the setting takes - and RECALPF does not fall while the
+calendar is stopped (measured, letter `j`): it is cleared on ck_apre,
 which initialization mode stops, so a second smooth setting inside that
 mode is refused until the calendar runs again.
 
 **The sub-second shift** adds SUBFS to the synchronous prescaler's
-counter, which counts down - so it DELAYS the clock by
+counter, which counts down - so it delays the clock by
 SUBFS / (PREDIV_S + 1) seconds; with ADD1S the whole second is added at
-the same time, which ADVANCES it by the complement. The asymmetry is the
+the same time, which advances it by the complement. The asymmetry is the
 register's: there is no "subtract a second" bit. The chapter's four
 refusals - a field overflow, a shift already pending, REFCKON set, SS[15]
 standing - are all coded.
@@ -133,7 +209,7 @@ standing - are all coded.
 **Three interrupts, three vectors, and the EXTI in between.** Alarms A
 and B share EXTI line 17 and RTC_Alarm; the wake-up timer has line 22
 and RTC_WKUP; tamper and timestamp share line 21 and TAMP_STAMP. These
-are CONFIGURABLE EXTI lines and not the STM32G0's direct ones: the
+are configurable EXTI lines and not the STM32G0's direct ones: the
 rising edge must be selected, the mask opened, and the pending bit
 cleared in the handler or the vector re-enters for ever. And a shared
 line can swallow an event - ES0287 2.8.3: one source's flag rising after
@@ -146,7 +222,7 @@ flags until none stands.
 every part whose manual was read: the tamper input, the timestamp input,
 the calibration output and the alarm output are all that one pin, and
 table 25 gives their priority - RTC_ALARM over RTC_CALIB over the
-inputs. TWO CONSEQUENCES, both measured (letters `m` and `n`): with an
+inputs. Two consequences, both measured (letters `m` and `n`): with an
 input function enabled the RTC takes the pad and the core cannot drive
 it any more, and RTC_CR is not in a system reset's scope, so an output
 left on the pad is still there at the next boot. ES0287 2.2.10 adds that
@@ -157,8 +233,8 @@ packages, which no software can fix.
 reset by a system reset, kept through Standby, powered from VBAT when
 VDD goes away - and lost to a domain reset or a tamper detection. They
 are this target's second kind of surviving storage, beside the .noinit
-breadcrumb, which only a system reset spares. A TAMPER DETECTION ERASES
-ALL TWENTY: this block has no per-input NOERASE bit and no mask, so
+breadcrumb, which only a system reset spares. A tamper detection erases
+all twenty: this block has no per-input NOERASE bit and no mask, so
 there is no way to arm a tamper input and keep a breadcrumb.
 
 ## Types and verbs
@@ -493,10 +569,14 @@ Driver gaps:
 - **Waking from Stop or Standby on an alarm, a wake-up or a tamper.**
   The interrupts are built and the EXTI lines are open; what enters a
   low-power mode is the power chapter's, and so is the RSF discipline
-  after such a sleep.
+  after such a sleep. The wake-up timer's wake is measured there, from a
+  Stop through the timed sleep site and from a Standby
+  ([pwr.md](pwr.md)); an alarm's and a tamper's wake are not.
 - **A kernel timebase on this block.** The STM32G0 has an LPTIM ticker
-  that counts through Stop; the RTC could be the F4's equivalent
-  witness, and the sleep site that would use it is not built.
+  that counts through Stop; the RTC could be the F4's equivalent. The
+  RTC is already the timed sleep site's alarm and witness, repairing the
+  SysTick timebase after a Stop ([pwr.md](pwr.md)); a timebase that
+  counts on it through the Stop, with no repair, is not built.
 - **The other tamper combinations.** Only the filtered detector at two
   samples and 128 Hz is exercised, because every detection spends the
   twenty backup registers: the edge detector, four and eight samples,

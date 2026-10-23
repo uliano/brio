@@ -1,97 +1,132 @@
 /*
  * clock.hpp
  *
- * The STM32F4 clock tree (RCC, RM0090 ch. 6/7, RM0390 ch. 6, RM0383
- * ch. 6) in the two strata every brio target uses (docs/design/clock.md):
+ * The STM32F4's clock for a program: the one place the system clock's
+ * rate is stated, and the task that brings the chip from its 16 MHz
+ * reset state to that rate. A program names its rate as a type and
+ * calls init() first thing in main():
  *
- *  RESOURCES - monostates, thin typed views with the discipline built in:
+ *     using SysClock = brio::Clock<brio::ClockSource::pll_hse, 180'000'000,
+ *                                  8'000'000>;      // the PLL on an 8 MHz crystal
+ *     constexpr SysClock clock;
+ *     const bool clock_ok = SysClock::init();      // false: a root did not come up
+ *
+ * Every driver then takes `clock` (an empty tag object of the type) in
+ * its own init and derives its divisors from the rates the type states -
+ * `hz`, `pclk1_hz`, `pclk2_hz`, through `apb_hz(clock, on_apb2)` - and
+ * never from the hardware, which is why init() comes first: a driver set
+ * up while the chip still runs at 16 MHz is wrong by the ratio of the
+ * rates, and nothing refuses it. The model is docs/design/clock.md, the
+ * reference docs/stm32f4/clock.md.
+ *
+ * Who calls what. Clock::init() and DynamicClock's init(), set() and
+ * set_index() are main-context verbs: they mask no interrupt, and each
+ * of their waits on a ready flag or on SWS is bounded by
+ * Rcc::ready_spins (a million polls, hundreds of milliseconds at the
+ * reset rate - a hardware fault, not a slow start) and turns into a
+ * false answer. A set() also calls every listed user's rebase(), in list
+ * order, before anything moves. DynamicClock::restore() is the one verb
+ * also legal from an interrupt handler (a sleep site's wake). The Rcc
+ * verbs are register accessors with no guard of their own: setup verbs,
+ * and a read-modify-write of a register another context also writes is
+ * the caller's to serialize.
+ *
+ * The header is the STM32F4 clock tree (RCC, RM0090 ch. 6/7, RM0390
+ * ch. 6, RM0383 ch. 6) in the two layers every brio target uses
+ * (docs/design/clock.md):
+ *
+ *  Resources - monostates (all-static types with no instances), thin
+ *  typed views with the discipline built in:
  *    Rcc      the reset and clock control block: the HSI root, the HSE
  *             root (crystal or bypass), the main PLL (configure, start,
  *             lock), the SYSCLK switch with its status readback, the
- *             AHB/APB prescalers, the PERIPHERAL CLOCK ENABLES (one bit
+ *             AHB/APB prescalers, the peripheral clock enables (one bit
  *             per peripheral in AHB1ENR/AHB2ENR/AHB3ENR/APB1ENR/APB2ENR)
- *             and resets, the two MCO outputs, and the AUDIO PLL with the
+ *             and resets, the two MCO outputs, and the audio PLL with the
  *             I2S clock selector that is the I2S chapter's kernel clock
  *    (`Pwr` - the regulator scale and the over-drive pair the task
  *    below sequences - lives in stm32f4/pwr.hpp; the flash latency in
  *    stm32f4/flash.hpp. One chapter, one owner.)
  *
- *  TASKS - what an application names:
- *    Clock<source, hz, hse_hz, hse_mode>   the static main clock: ONE
+ *  Tasks - what an application names:
+ *    Clock<source, hz, hse_hz, hse_mode>   the static main clock: one
  *             constexpr truth `hz` every driver derives from (there is
  *             no F_CPU in this build); init() composes the resources
  *             and reports whether the requested root runs.
  *    Rates<R0, R1, ...> + DynamicClock<Rates<...>, Users...>   the
- *             runtime regime: a PACK of static Clock tasks, R0 the boot
+ *             runtime regime: a pack of static Clock tasks, R0 the boot
  *             rate, `set<hz>()`/`set(hz)` fanning the new rate out to the
  *             listed ClockUsers and then switching, `restore()` after a
  *             Stop. Its own header comment carries the ordering rules.
  *
- * THE CLOCK MODEL: THE STM32G0'S, WITH THE PRESCALERS NO LONGER PINNED.
- * This family has one SYSCLK, SHARED PRESCALERS below it (HPRE for AHB,
- * PPRE1 and PPRE2 for the two APBs) and an ENABLE BIT per peripheral
+ * The clock model: the STM32G0's, with the prescalers no longer pinned.
+ * This family has one SYSCLK, shared prescalers below it (HPRE for AHB,
+ * PPRE1 and PPRE2 for the two APBs) and an enable bit per peripheral
  * that gates its bus clock - the STM32G0's model. What the G0 stratum
  * could do and this one cannot is pin every prescaler at 1: the APBs
- * have CEILINGS (45 and 90 MHz on the F42x/F43x and F446, 42 and 84 on
- * the F405 class, 50 and 100 on the F411 - the reserve's ladder) and a
- * core at 180 MHz cannot feed them undivided. So `hz` is SYSCLK = HCLK
- * (HPRE stays 1), and beside it the task states `pclk1_hz` and
- * `pclk2_hz`, each the largest power-of-two division of HCLK under its
- * bus's ceiling - and a driver on an APB asks `apb_hz(clock, on_apb2)`
- * for the rate that is really its own (the USART's divisor divides its
- * bus clock, not SYSCLK). What crosses the util contract is unchanged:
- * `clock_hz(clock)` is SYSCLK = HCLK. The timers' kernel clock (twice
- * the APB clock when the APB is divided, RM0090 7.3.3's TIMPRE rule)
- * is the timer chapter's to state.
+ * have ceilings (45 and 90 MHz on the F42x/F43x and F446, 42 and 84 on
+ * the F405 class, 50 and 100 on the F411 - the reserve's ladder, the
+ * reserve being stm32f4/device_tables.hpp, the table of what each part
+ * has) and a core at 180 MHz cannot feed them undivided. So `hz` is
+ * SYSCLK = HCLK (HPRE stays 1), and beside it the task states
+ * `pclk1_hz` and `pclk2_hz`, each the largest power-of-two division of
+ * HCLK under its bus's ceiling - and a driver on an APB asks
+ * `apb_hz(clock, on_apb2)` for the rate that is really its own (the
+ * USART's divisor divides its bus clock, not SYSCLK). What crosses the
+ * util contract is unchanged: `clock_hz(clock)` is SYSCLK = HCLK. The
+ * timers' kernel clock (twice the APB clock when the APB is divided,
+ * RM0090 7.3.3's TIMPRE rule) is the timer chapter's to state.
  *
- * THREE THINGS ON THE WAY UP, IN THE CHAPTER'S ORDER. Raising this
+ * Three things on the way up, in the chapter's order. Raising this
  * family above its 16 MHz reset rate is a sequence the manuals spell
  * out and this task follows literally (RM0090 5.1.4, 3.5.1, 7.3.3):
- *   1. the REGULATOR SCALE (PWR_CR.VOS) for the target rate, written
+ *   1. the regulator scale (PWR_CR.VOS) for the target rate, written
  *      while the PLL is off and SYSCLK is HSI or HSE - the reset state;
- *   2. the PLL configured and started; where the rate needs OVER-DRIVE
+ *   2. the PLL configured and started; where the rate needs over-drive
  *      (above 168 MHz on the parts that have it, or above 144 at scale 2)
  *      the over-drive pair is sequenced now, between the PLL's start and
  *      the switch to it, with no peripheral clock yet enabled;
- *   3. the FLASH LATENCY for the target HCLK, read back; the ART
+ *   3. the flash latency for the target HCLK, read back; the ART
  *      accelerator on; the APB prescalers for the target rate; the PLL
  *      waited for; the switch, and SWS read back.
  * `Clock::init()` itself sequences no fall: it runs once from the reset
- * state, and every rate a program names is a rise from 16 MHz. THE FALL
- * IS `DynamicClock`'S, and on this family it is one move and not a
+ * state, and every rate a program names is a rise from 16 MHz. The fall
+ * is `DynamicClock`'s, and on this family it is one move and not a
  * mirror image - a switch parks SYSCLK on the HSI first, because neither
  * the PLL nor the regulator scale nor the over-drive bits may be written
  * with the PLL running; after the park every rate is a rise. Its own
  * header comment says the rest.
  *
- * THE PLL RATIO IS SEARCHED AT COMPILE TIME under the chapter's limits
+ * The PLL ratio is searched at compile time under the chapter's limits
  * (RM0090 7.3.2): the input divided by M must land in 1..2 MHz (2 MHz
  * "to limit PLL jitter" - the search takes the smallest M, which is the
  * largest input the window allows), the VCO in 100..432 MHz, N in
- * 50..432, P in {2, 4, 6, 8}; an EXACT ratio or a compile error naming
+ * 50..432, P in {2, 4, 6, 8}; an exact ratio or a compile error naming
  * the rule. Q, the 48 MHz output for USB OTG FS, SDIO and the RNG, is
  * the smallest divider that keeps VCO / Q at or below 48 MHz, and
  * `usb_hz` says what came out: 48 MHz exactly at 168 or 96 MHz, 45 MHz
  * at 180 (a USB program picks 168; the chapter's own choice).
  *
- * WHAT IS BUILT: `hsi` (HSI undivided, 16 MHz - the reset state, the
+ * What is built: `hsi` (HSI undivided, 16 MHz - the reset state, the
  * one rate every header runs at with no ladder read), `hse` (the
  * crystal or the bypassed clock undivided), `pll_hsi` and `pll_hse` (the
- * PLL from either root). LSI, LSE, the SAI PLL and the AHB prescaler are
- * DECLARED and refused.
+ * PLL from either root). LSI, LSE and the SAI PLL are not roots this
+ * task offers (ClockSource names none of them), and the AHB prescaler is
+ * declared and refused: a divided `hsi` does not compile.
  *
- * NEITHER OF THE OTHER TWO PLLS IS A SYSCLK ROOT, and neither is
+ * Neither of the other two PLLs is a SYSCLK root, and neither is
  * therefore a Clock task's business. PLLI2S feeds the I2S kernel clock
  * alone and PLLSAI the display controller's pixel clock (and the audio
  * interface's), both off the same root and the same PLLM the main PLL
  * uses, so their verbs sit on `Rcc` - the block that owns PLLI2SCFGR,
- * PLLSAICFGR and the two selectors in RCC_DCKCFGR - and stm32f4/spi.hpp
- * and stm32f4/ltdc.hpp are what call them. Where the header declares no
- * PLLI2SON or no PLLSAION that PLL is not there and every one of its
- * verbs answers false; and PLLSAI's R output, the pixel clock's, exists
- * only where a display does.
+ * PLLSAICFGR and the two selectors in RCC_DCKCFGR. stm32f4/ltdc.hpp
+ * calls PLLSAI's; the audio PLL's are called by the program that uses
+ * stm32f4/spi.hpp's I2s, which names them (docs/stm32f4/spi.md shows the
+ * calls). Where the header declares no PLLI2SON or no PLLSAION that PLL
+ * is not there and every one of its verbs answers false; and PLLSAI's R
+ * output, the pixel clock's, exists only where a display does.
  *
- * BOARD FACTS the apps of this project state: 8 MHz from the ST-LINK's
+ * Board facts the apps of this project state: 8 MHz from the ST-LINK's
  * MCO into HSE in bypass on the Nucleo-F446RE (UM1724 7.9.1, board
  * revision C-02 and up), an 8 MHz crystal on HSE on the STM32F429I-DISC1
  * (UM1670 7.12.1: X3 fitted, the MCO route's SB18 open - a bypass there
@@ -488,8 +523,8 @@ struct Rcc {
     // A SECOND PLL off the SAME root as the main one (PLLCFGR.PLLSRC picks
     // HSI or HSE for both), whose R output is what an I2S divides. It is
     // the I2S chapter's clock and nothing else's here, so the verbs sit
-    // with the block that owns the registers and stm32f4/spi.hpp calls
-    // them. Absent on the parts whose header declares no PLLI2SON, where
+    // with the block that owns the registers, and a program using
+    // stm32f4/spi.hpp's I2s calls them. Absent on the parts whose header declares no PLLI2SON, where
     // every verb below answers false and writes nothing.
     static void plli2s_enable(bool on) {
 #if defined(RCC_CR_PLLI2SON)
@@ -1025,7 +1060,10 @@ struct Clock {
 
     /// Bring the tree to the named rate, from the reset state. False, and
     /// the tree left where it stopped, when a root does not come up or a
-    /// readback does not agree.
+    /// readback does not agree - the program is then not at the rate this
+    /// type states, so the answer is read. Main context, once, first thing
+    /// in main() and before any driver's init(clock); it masks nothing,
+    /// and every wait is bounded by Rcc::ready_spins.
     static bool init() {
         if constexpr (uses_hse) {
             Rcc::hse_enable(true, hse_mode == HseMode::bypass);

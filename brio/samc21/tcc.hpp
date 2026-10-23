@@ -7,22 +7,48 @@
  * compare/capture channels, seven waveform modes, ramp operation,
  * dithering, and a waveform-extension stage (output matrix, dead-time
  * insertion, swap, pattern generation) behind a two-level fault system.
+ * What a program uses for a PWM of any period, a complementary pair with
+ * dead time, or outputs a fault clamps in hardware. The smallest use, a
+ * PWM channel on PA08 (docs/samc21/tcc.md, "How to use it"):
  *
- *  Tcc<n>            the RESOURCE: the whole chapter's register surface.
+ *   using OutWave = brio::TccWo<brio::Pin<'A', 8>, brio::PinFunction::e>;
+ *   using Pwm = brio::TccPwm<brio::Tcc<0>, 0, 1999>;   // TCC0 / WO0
+ *   brio::Tcc<0>::init(0);                             // generator 0
+ *   OutWave::claim();
+ *   Pwm::setup(brio::TccPrescaler::div256);
+ *   Pwm::duty(500);
+ *
+ * Which context calls what. init(), release(), the configuring verbs and
+ * the tasks' setup() are setup verbs, from main() or an active object's
+ * handler (an active object is a brio component with its own event
+ * queue, served one event at a time by the kernel); the value verbs
+ * belong to one such context at a time. The direct setters and the
+ * commands are a store followed by a bounded wait on SYNCBUSY (0xFFFF
+ * polls by default) that answers false when it runs out; the buffered
+ * setters never wait and answer false when the previous buffered value
+ * has not been taken yet (fact 8), so a second TccPwm::duty() inside one
+ * period is dropped. Nothing here has a guard of its own or masks
+ * interrupts. init() leaves the timer and its NVIC line disabled; isr()
+ * is the interrupt body the program's TCCn_Handler calls, once the
+ * program has armed the flags and enabled the line. The counter counts
+ * its generic clock generator, not Clock::hz, and the generator is the
+ * caller's to name.
+ *
+ *  Tcc<n>            the resource: the whole chapter's register surface.
  *
  *  TccWo<Pin, fn>    one waveform output reached through the pad that
- *                    carries it - and the FUNCTION is part of the key,
+ *                    carries it - and the function is part of the key,
  *                    see fact 2 below.
  *
  *  TccPwm<T,ch,top>  tasks over the resource: a single-slope PWM channel
  *  TccPairPwm<...>   satisfying util/pwm_channel.hpp's PwmChannel, and
  *                    the complementary pair with dead-time insertion.
  *
- * NINE FACTS THAT SHAPE THE FILE - the last two of which are not in the
+ * Nine facts that shape the file - the last two of which are not in the
  * chapter at all, and were measured (docs/samc21/tcc.md carries the
  * numbers).
  *
- * 1. THE THREE INSTANCES ARE NOT COPIES OF EACH OTHER, which is the
+ * 1. The three instances are not copies of each other, which is the
  *    first thing that separates this chapter from the TC's. TCC0 is a
  *    24-bit counter with four channels, eight outputs and all five
  *    extension units; TCC1 is 24-bit with two channels, four outputs and
@@ -30,10 +56,10 @@
  *    with two channels, two outputs and no extension at all. Every one
  *    of those numbers is a `TCCn_*` constant of the device header, read
  *    through samc21/device_tables.hpp, and a configuration that asks an
- *    instance for a unit it does not have is REFUSED AT COMPILE TIME
+ *    instance for a unit it does not have is refused at compile time
  *    rather than written into a reserved bit.
  *
- * 2. THE PAD MAP IS KEYED BY PAD **AND FUNCTION**. A TC waveform output
+ * 2. The pad map is keyed by pad **and function**. A TC waveform output
  *    lives on exactly one peripheral function, so `TcWo<Pin>` needs no
  *    more than the pad. A TCC output does not: PA08 is TCC0/WO0 under
  *    function E and TCC1/WO2 under function F, PA16 is TCC2/WO0 under E
@@ -42,45 +68,48 @@
  *    the function, and the device header's own
  *    `PIN_P<pad><fn>_TCC<n>_WO<k>` says whether that pair exists.
  *
- * 3. ENABLE-PROTECTION AND WRITE-SYNCHRONIZATION SPLIT DIFFERENTLY HERE
- *    THAN IN THE TC, and the difference is useful rather than pedantic.
+ * 3. Enable-protection and write-synchronization split differently here
+ *    than in the TC, and the difference is useful rather than pedantic.
  *    Enable-protected (36.6.2.1): CTRLA except RUNSTDBY/ENABLE/SWRST,
  *    FCTRLA, FCTRLB, WEXCTRL, DRVCTRL, EVCTRL - `configure()`,
  *    `fault()`, `wave_extension()`, `drive()` and `event_config()`
- *    refuse while the TCC is enabled. Write-synchronized and NOT
+ *    refuse while the TCC is enabled. Write-synchronized and not
  *    enable-protected: CTRLB, STATUS, COUNT, PATT, **WAVE**, PER and
  *    CC/CCBUF. So the waveform mode, the polarity, the swap and the
- *    circular-buffer bits can all be changed UNDER A RUNNING TIMER,
+ *    circular-buffer bits can all be changed under a running timer,
  *    where the TC's WAVE cannot.
  *
- * 4. READING COUNT IS A COMMAND. COUNT is read-synchronized "on demand
+ * 4. Reading COUNT is a command. COUNT is read-synchronized "on demand
  *    through the READSYNC command" (36.6.7), exactly as in the TC:
  *    write CTRLBSET.CMD = READSYNC, wait out SYNCBUSY.CTRLB and
- *    SYNCBUSY.COUNT, then read. `count()` does it; `count_raw()` skips
+ *    SYNCBUSY.COUNT, then read - and, as in the TC, the command is
+ *    issued twice, because the COUNT shadow lands after SYNCBUSY clears
+ *    with no bit advertising it (samc21/tc.hpp's read_sync() comment
+ *    carries the measurement). `count()` does it; `count_raw()` skips
  *    it and says so in its name.
  *
- * 5. THE FAULT INPUTS ARE THE EVENT INPUTS. Recoverable Fault A and B
+ * 5. The fault inputs are the event inputs. Recoverable Fault A and B
  *    are the channel event inputs MCE0 and MCE1 (36.6.3.5); the two
  *    non-recoverable faults are the counter event inputs TCE0 and TCE1,
  *    selected by EVACT0/EVACT1 = FAULT (36.6.3.6). Both must be carried
- *    on ASYNCHRONOUS event channels - the chapter says so for the fault
+ *    on asynchronous event channels - the chapter says so for the fault
  *    use, and erratum 1.21.9 says so for every use. That is a
- *    CALLER OBLIGATION this header states and cannot enforce: evsys.hpp
+ *    caller obligation this header states and cannot enforce: evsys.hpp
  *    owns the fabric, this file owns only the codes it publishes.
  *
  *    The same obligation, in the other direction: a recoverable fault
- *    needs its channel's incoming event ENABLED (EVCTRL.MCEIx), because
+ *    needs its channel's incoming event enabled (EVCTRL.MCEIx), because
  *    the fault input is that event input. `tcc_fault_input_bit()` names
  *    the bit; docs/samc21/tcc.md carries what the bench measured happens
  *    without it.
  *
- * 6. THE PERIOD REGISTER IS ALWAYS THERE, unlike the TC's, and PER is
+ * 6. The period register is always there, unlike the TC's, and PER is
  *    TOP in every waveform mode but MFRQ - where CC0 is (36.6.2.5.1,
  *    table 36-2). So a TCC PWM channel has an arbitrary period at any
  *    counter width, which is what makes `TccPwm<T, ch, top>` a
  *    PwmChannel with a `max` the caller chose.
  *
- * 7. DITHERING SHARES THE LOW BITS OF COUNT, PER AND CCx. With
+ * 7. Dithering shares the low bits of COUNT, PER and CCx. With
  *    CTRLA.RESOLUTION = DITH4/5/6 the low 4, 5 or 6 bits of those
  *    registers stop being part of the value and become the number of
  *    extra clock cycles to spread over a frame of 16, 32 or 64 PWM
@@ -88,13 +117,13 @@
  *    without it while a dithering resolution is selected is off by a
  *    factor of 16, 32 or 64, silently.
  *
- * 8. A BUFFERED WRITE'S SYNCBUSY BIT DOES NOT CLEAR UNTIL THE UPDATE
- *    CONSUMES THE BUFFER - measured, and nowhere in the chapter.
+ * 8. A buffered write's SYNCBUSY bit does not clear until the update
+ *    consumes the buffer - measured, and nowhere in the chapter.
  *    SYNCBUSY.CCx is shared between CCx and CCBUFx, and after a write to
  *    CCBUFx it stands for the rest of the waveform period (up to 1299 us
- *    of a 1333 us period, measured) and FOREVER while CTRLB.LUPD is set.
- *    A second write into that window is DISCARDED by the silicon - also
- *    measured. So every buffered setter here REFUSES instead of waiting:
+ *    of a 1333 us period, measured) and for ever while CTRLB.LUPD is set.
+ *    A second write into that window is discarded by the silicon - also
+ *    measured. So every buffered setter here refuses instead of waiting:
  *    `set_cc_buffer()`, `set_period_buffer()` and `pattern_buffer()`
  *    return false when the previous value has not been taken yet, and
  *    return at once in every case. Waiting would put a whole PWM period
@@ -104,43 +133,43 @@
  *    same SYNCBUSY bit, so a direct write issued while a buffered one is
  *    outstanding waits for the update too.
  *
- *    Its twin, from the same measurement: A READ OF CCx WHILE A BUFFERED
- *    WRITE IS PENDING RETURNS THE BUFFERED VALUE, not the one the
+ *    Its twin, from the same measurement: a read of CCx while a buffered
+ *    write is pending returns the buffered value, not the one the
  *    waveform generator is using. The pad and the register disagree, and
  *    the pad is right. Read `cc_buffer_valid()` to know which you are
  *    looking at.
  *
- * 9. THE TWO CTRLB REGISTERS ARE NOT A SET/CLEAR PAIR FOR THE COMMAND
- *    FIELDS. DIR, LUPD and ONESHOT behave as one expects - a '1' to
+ * 9. The two CTRLB registers are not a set/clear pair for the command
+ *    fields. DIR, LUPD and ONESHOT behave as one expects - a '1' to
  *    CTRLBSET sets, a '1' to CTRLBCLR clears - but CMD and IDXCMD are
- *    written as a VALUE, and "writing zero to this bit group has no
- *    effect" on BOTH halves (36.8.2, 36.8.3). So a command is issued
- *    through CTRLBSET and CANCELLED through CTRLBCLR, and a driver that
+ *    written as a value, and "writing zero to this bit group has no
+ *    effect" on both halves (36.8.2, 36.8.3). So a command is issued
+ *    through CTRLBSET and cancelled through CTRLBCLR, and a driver that
  *    cancels by writing zero to CTRLBSET cancels nothing at all.
  *    Measured with a RAMP2 index held forever; `command()` and
  *    `ramp_index_command()` route their `none`/`off` through CTRLBCLR.
  *
- * ERRATA, DS80000740S, read on the E/G/J ROW at revision F. This chapter
- * has ELEVEN items and SEVEN of them are live here.
+ * Errata, DS80000740S, read on the E/G/J row at revision F. This chapter
+ * has eleven items and seven of them are live here.
  *
- *  LIVE:
+ *  Live:
  *  - 1.21.5 Advance Capture Mode: CAPTMIN/CAPTMAX/LOCMIN/LOCMAX/DERIV0
- *    do not work unless every UPPER channel is also in one of those
+ *    do not work unless every upper channel is also in one of those
  *    modes. A caller obligation - "basic capture mode must be set in
  *    lower channel and advance capture mode in upper channel" - stated
  *    at `TccFaultCapture` and in docs/samc21/tcc.md, since it is a
  *    property of the whole channel set and not of one register write.
  *  - 1.21.6 SYNCBUSY: clearing a STATUS.xxBUFV flag releases SYNCBUSY
  *    before the register behind it is restored. `clear_buffer_valid()`
- *    clears TWICE, which is the whole workaround (and the exact twin of
+ *    clears twice, which is the whole workaround (and the exact twin of
  *    the TC's 1.20.3).
  *  - 1.21.7 Dithering Mode: dithering plus external RETRIGGER events
  *    stretches or shrinks pulses. Caller obligation: do not retrigger a
  *    dithering TCC. Stated here and in the doc; not refusable, because
  *    the retrigger may come from an event channel this file cannot see.
- *  - 1.21.8 PERBUF: in DOWN-COUNTING mode CTRLB.LUPD is said not to
+ *  - 1.21.8 PERBUF: in down-counting mode CTRLB.LUPD is said not to
  *    protect PER from being updated out of PERBUF, with no workaround.
- *    IT DID NOT REPRODUCE HERE: with the WAVEFORM as the witness - the
+ *    It did not reproduce here: with the waveform as the witness - the
  *    overflow rate, since a register read cannot be one, see fact 8 -
  *    the lock held in NPWM up, NPWM down and NFRQ down alike. What DOES
  *    happen in all three is fact 8's register read: PER reads back the
@@ -154,23 +183,24 @@
  *    asynchronous.
  *  - 1.21.10 ALOCK: the auto-lock feature is simply not functional, and
  *    there is no workaround. `TccConfig::auto_lock` is therefore
- *    REFUSED by `tcc_config_valid()` - the one erratum in this chapter
+ *    refused by `tcc_config_valid()` - the one erratum in this chapter
  *    that can be turned into a compile error, and it is.
  *  - 1.21.11 Overflow DMA trigger: the OVF DMA trigger in DMAOS mode is
- *    broken FOR RAMP2C AND RAMP2CS ONLY. Those ramp modes are variant-L
+ *    broken for RAMP2C and RAMP2CS only. Those ramp modes are variant-L
  *    (36.8.17) and this family does not have them - see
  *    `TccRamp::ramp2_critical`, which this driver refuses - and this
  *    stratum drives no DMA from a timer (samc21/dmac.hpp), so the item
  *    cannot be reached here twice over.
  *
- *  NOT THIS SILICON (revision B only - do not code around them):
+ *  Not this silicon (revision B only - do not code around them):
  *  1.21.1 Circular Buffer in standby, 1.21.2 RAMP2 double restart,
  *  1.21.3 CAPTMARK, 1.21.4 Capture Overflow within 3+3 clocks.
  *
- * NOT BUILT (docs/samc21/tcc.md carries the list): the debug-fault state
+ * Not built (docs/samc21/tcc.md carries the list): the debug-fault state
  * as an exercised path (FDDBD is exposed, a halted debugger is not
- * something a bench suite can stage), and sleep, which samc21/sleep.hpp
- * owns together with RUNSTDBY.
+ * something a bench suite can stage). CTRLA.RUNSTDBY, the bit that keeps
+ * a TCC counting through a standby, is `TccConfig::run_standby` here;
+ * the fault inputs in a standby are implemented and not bench-verified.
  */
 
 #pragma once
@@ -917,9 +947,11 @@ public:
         return (regs().TCC_CTRLA & TCC_CTRLA_ENABLE_Msk) != 0u;
     }
 
-    /// APB clock, generic clock, software reset; left DISABLED, because
+    /// APB clock, generic clock, software reset; left disabled, because
     /// six of this chapter's registers are enable-protected and the
-    /// caller has them all to write.
+    /// caller has them all to write, and with its NVIC line disabled. A
+    /// setup verb; false when the channel connection or the reset's
+    /// bounded wait did not complete.
     static bool init(uint8_t generator, uint32_t spins = 0xFFFFu) {
         Nvic::disable(irq());
         bus_clock(true);
@@ -929,6 +961,9 @@ public:
         return reset(spins);
     }
 
+    /// Hand everything back: the line, a reset, the generic clock
+    /// channel and the bus clock. TCC0 and TCC1 share one channel (the
+    /// header's TCCn_GCLK_ID), so the disconnect stops the sibling too.
     static void release(uint32_t spins = 0xFFFFu) {
         Nvic::disable(irq());
         (void)reset(spins);
@@ -1582,7 +1617,9 @@ struct TccPwm {
     static constexpr uint16_t max = static_cast<uint16_t>(top);
 
     /// Bring the timer up as a single-slope PWM generator. The caller
-    /// has already called T::init() and claimed the pad.
+    /// has already called T::init() and claimed the pad. False when a
+    /// configuration is refused (the timer already enabled) or a bounded
+    /// wait runs out.
     static bool setup(TccPrescaler prescaler = TccPrescaler::div1,
                       uint32_t spins = 0xFFFFu) {
         if (!T::configure(TccConfig{.prescaler = prescaler}, spins)) {
@@ -1595,6 +1632,9 @@ struct TccPwm {
                T::enable(true, spins);
     }
 
+    /// The buffered duty, clamped to `max`. Never waits: a value written
+    /// while the previous one has not been taken yet is refused by
+    /// set_cc_buffer() (fact 8), and that refusal is discarded here.
     static void duty(uint16_t v) {
         (void)T::set_cc_buffer(ch, v > max ? max : v);
     }

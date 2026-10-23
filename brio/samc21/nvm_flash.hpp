@@ -3,23 +3,37 @@
  *
  * The SAM C21 flash as a FlashMedia (util/nv_heap.hpp): the backends that
  * let the target-independent block allocator and the target-independent
- * value journal run on this silicon.
+ * value journal run on this silicon. A program names one as the media of
+ * its heap or journal (docs/samc21/nvm.md, "How to use it"):
  *
- * IT LIVES IN THE RWWEE ARRAY, and that choice is the whole design.
+ *     NvHeap<RwweeFlash, 8, 2> heap;                  // blocks
+ *     NvJournal<RwweeJournalZone, 6, 32> journal;     // small values
+ *
+ * and calls their mount() first; it never calls these types itself.
+ *
+ * Who calls what. read() is a copy out of memory-mapped flash; program()
+ * and erase() go through samc21/nvm.hpp's command verbs, each command
+ * waited for with that header's bound, and answer false for a misaligned
+ * address or length or a command that did not end clean. They inherit
+ * that header's rule: one caller of the controller at a time, nothing
+ * masked, and on the RWWEE array the CPU keeps running through every
+ * write. The caller's span is read during the call and not kept.
+ *
+ * It lives in the RWWEE array, and that choice is the whole design.
  *
  * This family has two programmable arrays: the 256 KB main array the CPU
  * executes from, and a dedicated 8 KB Read-While-Write EEPROM array at
- * 0x00400000. Writing or erasing the MAIN array stalls the AHB - every
+ * 0x00400000. Writing or erasing the main array stalls the AHB - every
  * instruction fetch with it - until the operation ends. Writing the RWWEE
- * array stalls NOTHING: the main array can be read throughout (27.6.4.1),
+ * array stalls nothing: the main array can be read throughout (27.6.4.1),
  * so a program that stores a record keeps running while it is stored.
  *
  * That difference also removes the hardest problem a backend inside the
- * LINKED IMAGE has: its free flash is bands whose inner edges are
+ * linked image has: its free flash is bands whose inner edges are
  * linker symbols moving with every build, so an image that grows
  * silently lands on stored blocks. The RWWEE array is not part of the
  * link at all: nothing the compiler emits can ever land in it, so the
- * zone is a CONSTANT - the whole array - and no linker symbol is read
+ * zone is a constant - the whole array - and no linker symbol is read
  * here.
  *
  * The price is size and speed: 8 KB rather than the tens of kilobytes a
@@ -28,7 +42,7 @@
  * counters and panic records, that is the right trade; a main-array
  * backend is deliberately not built (docs/samc21/nvm.md says why).
  *
- * THE ARRAY IS PARTITIONED, because this family has two storage classes
+ * The array is partitioned, because this family has two storage classes
  * and only one nonvolatile array to put them in. The 32 rows split as
  *
  *   rows 0..27   RwweeFlash        7 KB   blocks (util/nv_heap.hpp),
@@ -37,34 +51,34 @@
  *                                         (util/nv_journal.hpp), two
  *                                         512-byte halves
  *
- * Both bounds stay CONSTANTS - that is the property the RWWEE choice
+ * Both bounds stay constants - that is the property the RWWEE choice
  * bought and the partition must not spend. Nothing the linker places can
  * reach either region, so the split is a decision made here once and not
- * a build-dependent edge. It is anchored at the TOP of the array so that
+ * a build-dependent edge. It is anchored at the top of the array so that
  * each user's own home is anchored to the silicon in turn: the heap's map
  * pair sits at the top of the heap's share, the journal's halves at the
  * top of the part.
  *
- * THE GRANULARITIES ARE NOT THE SAME NUMBER, which is what the concept's
- * erase_size / write_cell split is for: here an erase takes down a ROW of
- * 256 bytes and a program writes a PAGE of 64, so on THIS silicon "page"
- * is the SMALL unit. Other targets spell the two words the other way
+ * The granularities are not the same number, which is what the concept's
+ * erase_size / write_cell split is for: here an erase takes down a row of
+ * 256 bytes and a program writes a page of 64, so on this silicon "page"
+ * is the small unit. Other targets spell the two words the other way
  * round, which is why the concept names its units erase_size and
  * write_cell and never "page": code that says "page" for both is code
  * that is wrong on one target or another.
  *
- * ADDRESSES ARE ABSOLUTE. NvHeap works in flat byte addresses and derives
+ * Addresses are absolute. NvHeap works in flat byte addresses and derives
  * an erase-unit index from them, so the heap's `first_page` numbers here
  * start at 0x00400000 / 256 = 16384 rather than at 0 - which is exactly
  * why the index is a page number and not an offset.
  *
- * THE BUILD ID is a link-time constant: samc21/CMakeLists.txt passes
+ * The build id is a link-time constant: samc21/CMakeLists.txt passes
  * -Wl,--defsym,__nvheap_build_id=<newest source mtime> to every image. A
  * wall-clock id would make every relink a different image; the newest
  * source timestamp keeps an unchanged tree relinking to the same bytes.
  * Reading it needs no assembly: a pointer is 32 bits here, so the
- * symbol's address IS the value. It is recorded in every map version and
- * NOTHING decides on it - a block's validity is its checksum's business.
+ * symbol's address is the value. It is recorded in every map version and
+ * nothing decides on it - a block's validity is its checksum's business.
  */
 
 #pragma once

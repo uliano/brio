@@ -1,13 +1,58 @@
 # DAC - the 10-bit digital-to-analog converter (AVR DA/DB, AVR EA)
 
-Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B
+This document is for a programmer who needs a voltage out of the chip:
+a bias, a test level, a slow waveform, or a level fed inside the chip
+to the ADC or a comparator. The driver is `Dac<0>`, a monostate (a
+class whose state is static, with no instances): `init()` takes a
+`DacConfig` (the reference, whether the buffered output drives its
+pin, standby, and on the AVR EA the buffer's range) and `set()` writes
+a 10-bit code that the output follows. There is no interrupt, no event
+and no task: the converter holds the last code written until the next.
+
+The smallest use, from "How to use it" below:
+
+```cpp
+using Out = Dac<0>;
+
+Out::init({.reference = Ref::v2048});     // buffered output on PD6, reference 2.048 V
+Out::set(512);                            // ~1.024 V (code 0..1023)
+```
+
+Line by line: `Out` names the one instance, DAC0; `init()` selects the
+2.048 V reference in VREF.DAC0REF ([vref.md](vref.md)), turns PD6's
+digital input buffer off, writes code 0 and enables the converter with
+its buffered output on PD6 (`output_pin` defaults to true); `set(512)`
+writes the code, clamped to 1023, and the pin moves to 512/1024 of the
+reference.
+
+What decides correctness even there. The reference needs its headroom
+on the supply (2.048 V wants VDD of at least 2.5 V on the DA/DB, 2.55 V
+on the EA, [vref.md](vref.md)), and nothing checks it. `init()` takes
+no clock and waits for nothing: the reference starts when the enabled
+converter asks for it (10 to 200 us on the DA/DB, 130 us typical and
+180 maximum on the EA) and the buffer settles after each `set()`, so
+an output read at once is not yet the code's voltage. With `output_pin` on, PD6 is the DAC's and
+no longer a GPIO, and on the DA/DB it stays so for the life of the
+program: `disable()` turns the converter off and leaves the buffer on,
+because of the errata item below. On the AVR DB the buffered output
+sinks about 1 uA, so a falling step on a bare pin is slow and a load
+that needs fast falling edges needs a resistor to ground ("What the
+silicon does").
+
+## Documents of record
+
+AVR128DB28/32/48/64 data sheet DS40002247B
 (DAC chapter, electricals 39.19), errata DS80000915F (2.6.1) and, for
 the DA parts, DS80000882C (2.5.1); AVR64EA28/32/48 data sheet
 DS40002443A (chapter 32, table 35-22), errata DS80001048D (no DAC
 item; its 3.4 gives the current). One IP on the three dies. Driver:
 `avrxt/dac.hpp`; `Ref` from `avrxt/vref.hpp`, arithmetic in
 `util/analog.hpp`. Reference test: `test_avr_analog` (on the DA/DB
-tests 1-4, 6, 11, 14; on the EA letters n, 1-4, 6, v).
+tests 1-4, 6, 11, 14; on the EA letters n, 1-4, 6, v). A letter is one
+command key of the suite's console and the group of verdicts it runs,
+`a` the key that runs them all on either half; the DA/DB half numbers
+its tests 1 to 15 and types the tenth to the fifteenth as `0`, `w`,
+`e`, `i`, `v` and `x`, so its tests 11 and 14 are keys `w` and `v`.
 
 ## What the silicon does
 
@@ -17,11 +62,12 @@ voltage between GND and the selected reference (`Ref`, see
 
 - the **buffered** output on pin PD6 (`output_pin`): sources 1 mA,
   sinks only ~1 uA, 0.1 V .. VDD-0.1 V, settles in ~10 us full scale
-  when rising;
+  when rising (DS40002247B 39.19; the AVR EA's table 35-22 gives no
+  drive figure, and its buffer, measured below, sinks milliamperes);
 - the **unbuffered** internal output, always available to the ADC
   (input `AdcInput::dac0`) and, on the DA/DB, the comparators, also
   with the pin output off (then PD6 stays a GPIO). The op amps are the
-  exception: they tap the DAC at the OUTPUT BUFFER (34.3.2.3, 35.3.2),
+  exception: they tap the DAC at the output buffer (34.3.2.3, 35.3.2),
   so an op amp fed by the DAC needs `output_pin` on - and PD6 is then
   not free. On the EA the unbuffered output feeds the ADC alone
   (32.3.2.3): its comparators reach the DAC through PD6 (their AINP3),
@@ -38,7 +84,8 @@ drive figure.
 
 There are no events, no interrupts, no modes: the only way to change
 the output is to write `DATA`, and the output follows. `run_standby`
-keeps it running in standby sleep. Accuracy (ref 3.0 V): INL +-2.3,
+keeps it running in standby sleep. Accuracy in the DB data sheet
+(DS40002247B 39.19, ref 3.0 V): INL +-2.3,
 DNL +-0.7, offset +-5, gain -3.3..+1.3 LSb, specified for codes
 0x030..0x3D0.
 
@@ -56,7 +103,7 @@ bench; the AVR EA's are under its findings):
 
 Errata DB 2.6.1 (silicon A4/A5) / DA 2.5.1 (every DA revision): the
 buffer's offset drifts over the device's lifetime if the part is
-powered with the buffer OFF. The driver therefore keeps the buffer on
+powered with the buffer off. The driver therefore keeps the buffer on
 once enabled on the DA/DB (`disable()` turns the converter off, not the
 buffer; the device tables' `erratum_dac_outen_drift`); an application
 that wants the pin free says `output_pin = false` explicitly and owns

@@ -1,6 +1,70 @@
 # PORT - the I/O pins (AVR DA, DB and EA)
 
-Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B
+This document is for a programmer who needs a pin: an LED, a button, a
+row of keys, a pad an analog input reads. `Pin<'A', 2>` names pin PA2 as
+a type (the letter and the number are template arguments, fixed when
+the program is compiled), and its functions set the direction, drive
+and read the level and configure the pin's input stage: the pull-up,
+the inversion, the input threshold and the interrupt sense.
+`Port<'A'>` works on a whole port at once, among other things the one
+interrupt vector every pin of the port shares; `PinSet` handles up to
+eight pins on any ports as one bit mask; and `PinRef` is a small
+run-time handle for a pin that must travel inside an event.
+
+The smallest use, a button with an interrupt, the first example under
+"How to use it":
+
+```cpp
+using Button = brio::Pin<'A', 2>;                 // PA2: fully async - wakes from standby
+Button::input();
+Button::configure({.pull = brio::PinPull::up, .sense = brio::PinSense::falling});
+ISR(PORTA_PORT_vect) {
+    const uint8_t who = brio::Port<'A'>::take_flags();
+    if (who & Button::mask) post<Ui>(Pressed{});
+}
+```
+
+Line by line: `Button` names the pin (this line configures nothing);
+`input()` makes it an input, with no pull; `configure()` writes the
+pin's whole control byte, `PINnCTRL`, in one store - the pull-up on and
+an interrupt on each falling edge; `ISR(PORTA_PORT_vect)` is avr-libc's
+way of writing the interrupt handler of port A's one vector;
+`take_flags()` reads which pins of port A raised it and clears exactly
+those; and the handler posts an event, `Pressed`, to an active object
+`Ui` (`brio::post`; an active object is a component of a brio program
+with its own event queue, served one event at a time by the kernel,
+[the learning route's introduction](../learn/introduction.md)). The
+excerpt is a fragment: `Ui` and `Pressed` are the program's own.
+
+What decides correctness even there:
+
+- **The handler clears the flags it serves.** A pin's flag stays set
+  until software writes a one to it, and the interrupt request stays
+  active as long as it is set (DS40002247B 18.3.3, 18.5.10): a handler
+  that leaves it standing is entered again at once, for ever.
+  `take_flags()` clears what it read with a plain store; a
+  read-modify-write of `INTFLAGS` (or an `SBI` on it) would read every
+  pending flag back as 1 and clear flags the handler never looked at.
+- **Every sensed pin of a port raises the same vector.** Several pins
+  can fire together, so the handler tests the mask; the program binds
+  the vector itself, and the driver binds none.
+- **Not every pin wakes the chip from every sleep on every edge.** On
+  the AVR DA/DB only Px2 and Px6 are fully asynchronous: a falling edge
+  on another pin does not wake STANDBY or POWER-DOWN, where both edges
+  or a level held through the wake-up do ("Bench findings" below); on
+  the AVR EA every pin is. `Pin::fully_async` says which.
+- **The configuring functions are read-modify-write sequences**, except
+  `configure()`: `input()`, `pull()`, `invert()`, `sense()` and
+  `input_enable()` read the pin's `PINnCTRL`, change one field and write
+  it back, so two contexts configuring the same pin at once can lose a
+  field. Call them from setup or from an active object's handler.
+  `set()`, `clear()`, `toggle()`, `output()` and `read()` are single
+  instructions (an `SBI` or a `CBI` on the VPORT alias, read in the
+  release listings, or one store or load), safe from any context.
+
+## Documents of record
+
+AVR128DB28/32/48/64 data sheet DS40002247B
 (PORT chapter 18, I/O multiplexing chapter 3), errata DS80000915F
 (2.9.1 PD0 floating input on 28/32-pin; 2.2.4 VPORT stores after a
 store to >= 64 - Pin uses SBI/CBI and PinRef stores into the PORT's
@@ -10,7 +74,9 @@ loses its digital input - the ADC and AC drivers disable it themselves,
 so nothing reads it digitally meanwhile); for the AVR64EA28/32/48
 DS40002443A (PORT chapter 18, I/O multiplexing chapter 3) and
 DS80001048D (2.2.3, the twin of the DB's 2.2.4; 3.5, the INLVL
-levels). Driver: `avrxt/pin.hpp`. Reference test: `test_avr_pin`.
+levels). Driver: `avrxt/pin.hpp`. Reference test: `test_avr_pin` (a
+letter, below, is one command key of a suite's console and the group of
+verdicts it runs; this suite's all-key is `a`).
 
 ## What the silicon does
 

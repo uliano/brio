@@ -1,13 +1,65 @@
 # PAC - Peripheral Access Controller (SAM C21)
 
-Documents of record: SAM C20/C21 data sheet DS60001479M ch. 11 - and
+This document is for a programmer who wants a peripheral's registers
+locked against a stray write, or who needs to know whether a write was
+refused - a protected register, a register that does not exist, a
+write during a synchronization. `Pac` is the access controller, a
+monostate (a class whose state and functions are all static, with no
+instance to create: there is one PAC). It is mechanism only: it sets,
+clears and locks one peripheral's write protection by the identifier
+that peripheral publishes, and reads and clears the error flags.
+Nothing in brio turns protection on, so a program that never names
+`Pac` runs with every peripheral unprotected but the DSU.
+
+The smallest use, the first block of "How to use it" below - protect a
+peripheral and put it back:
+
+```cpp
+Pac::protect(Tsens::pac_id);
+...
+Pac::unprotect(Tsens::pac_id);       // never twice - see the balance rule
+```
+
+Line by line: `protect()` writes WRCTRL with the TSENS identifier and
+the set key, and from then on a write to the TSENS's registers is
+refused (flagged as a rule, though erratum 1.19.1 drops a write to its
+CTRLB in silence); `...` is the code that must not
+change them; `unprotect()` writes the clear key. Each is one word-wise
+store, and each answers false, writing nothing, only for an identifier
+this device has no bridge for: whether the request took is read back
+with `is_protected()` and `flagged()`.
+
+What decides correctness even there. The requests must balance:
+protecting a peripheral that is already protected is itself an error,
+and so is clearing it twice, so a protect is always followed by one
+unprotect and nested scopes need a count of their own. A `lock()`
+cannot be undone until the next reset. A raised flag is evidence, an
+absent one is not: several errata let a write past a protected
+peripheral, or drop one with no flag ("What the silicon does" and the
+bench findings below). Every verb is a plain store or load with no
+guard and nothing masked, and the PAC's interrupt arrives on line 0,
+the system blocks' shared line ("One interrupt, on the shared line"
+below): the
+program's `SYSTEM_Handler` calls `Pac::isr()` beside the other blocks'
+bodies, and left undefined that vector is the crt's silent spin.
+
+The page, in order: the documents of record; what the silicon does;
+the design position, why there is no guard type; the types and verbs;
+how to use it; the bench findings, the measured map of which
+peripherals flag; what is not covered.
+
+## Documents of record
+
+SAM C20/C21 data sheet DS60001479M ch. 11 - and
 errata DS80000740S, which has **no PAC section at all**: not one of items
 1.1..1.25 names this chapter. What exists instead is a set of items in
-OTHER chapters, five of them live at revision F, each saying the PAC does
+other chapters, five of them live at revision F, each saying the PAC does
 not behave as ch. 11 promises for one particular peripheral. Driver:
 `samc21/pac.hpp`. Family fixture `test/family_samc21/pac.cpp` plus two
 negatives under `brio check samc21`; the bench suite is
-`test_samc_debug`.
+`test_samc_debug` (a letter is one command key of its console and the
+group of verdicts that key runs; `z` is the all-key that runs the
+ordinary set, and a letter that reboots the board sits outside it).
 
 The block can write-protect any peripheral on any APB bridge and reports
 every access violation: a protected write, a write to an unimplemented
@@ -18,7 +70,7 @@ address no client answers.
 
 **WRCTRL is a keyed, word-wise store.** One 32-bit write carries the
 peripheral identifier in the low sixteen bits and the operation in KEY:
-1 = clear, 2 = set, 3 = set-and-lock. 11.5.2.6 is explicit that ONLY a
+1 = clear, 2 = set, 3 = set-and-lock. 11.5.2.6 is explicit that only a
 word-wise write takes effect and that any other access is itself an
 error, flagged in INTFLAGA.PAC. There is no read-back of a request:
 STATUSn is where the outcome is read.
@@ -142,11 +194,11 @@ Ask whether a write was refused, right after making it:
 
 Lock a peripheral's configuration for the rest of this power-on:
 
-    Pac::lock(Nvm::pac_id);              // cleared by the next reset
+    Pac::lock(ID_NVMCTRL);               // cleared by the next reset
 
-Handle the shared interrupt:
+Handle the shared interrupt, line 0, whose vector is `SYSTEM_Handler`:
 
-    extern "C" void PAC_Handler() {
+    extern "C" void SYSTEM_Handler() {
         const auto r = Pac::isr();       // reads and clears all four banks
         if (r.any()) { ... }
     }

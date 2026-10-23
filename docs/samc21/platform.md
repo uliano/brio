@@ -1,6 +1,93 @@
 # Platform - what the kernel stands on (SAM C21)
 
-Documents of record: SAM C20/C21 data sheet DS60001479M - the
+This document is for a programmer putting a brio program on the SAM
+C21. It describes what the kernel stands on here, the platform, and the
+stopping half that lets a program sleep deeper than the default. A brio
+kernel asks the chip for a handful of things, stated by the kernel's
+`Platform` concept (a concept is a compiler-checked set of requirements
+on a type;
+[design/kernel.md, "Platform: what the machine provides"](../design/kernel.md#11-platform-what-the-machine-provides-kernelplatformhpp)):
+a way to mask interrupts for a critical section, a way to sleep until
+the next interrupt without losing one that arrives at the wrong moment,
+a source of time, a breakpoint for a panic, and a record a panic leaves
+for the next boot. `SamPlatform` is this family's answer, and its
+timebase is `Ticker`, a 1000 Hz interrupt from the core's SysTick
+timer. How deep the kernel's sleep goes is not the platform's choice:
+the power manager (PM) holds the depth, and `util/power.hpp`'s manager
+arms it through this stratum's sleep sites (`SamSleepSite`,
+`SamTimedSleepSite`).
+
+The smallest use is the platform surface every program touches, the
+first block of "How to use it" below (the maintained example `blink`
+spells the same lines, [the first program](../learn/first-program.md)):
+
+```cpp
+using P = brio::SamPlatform;
+using SysClock = brio::Clock<brio::ClockSource::internal, 48'000'000>;
+constexpr SysClock clock;
+
+extern "C" void SysTick_Handler() { brio::Ticker::tick(); }
+
+int main() {
+    SysClock::init();
+    brio::Ticker::init(clock);
+    brio::enable_interrupts();
+    brio::Tenuto<P, /* AOs */>::run();
+}
+```
+
+Line by line: `P` names the platform, the type every kernel template is
+instantiated with; `SysClock` is the clock task's type, the internal
+OSC48M oscillator undivided at 48 MHz ([clock.md](clock.md)), and
+`clock` an empty tag object of that type, the argument the drivers'
+`init()` functions take to learn the rate; the `extern "C"` function is
+the interrupt handler of the SysTick exception, under the name the
+crt's vector table gives it (`extern "C"` keeps that plain C name, where
+a C++ function's name would be decorated and miss the table), and
+defining it is what binds the vector; `SysClock::init()` moves the CPU from its reset rate to
+48 MHz; `Ticker::init(clock)` programs SysTick's reload from the rate
+the clock type claims (47999 at 48 MHz) and starts its interrupt;
+`enable_interrupts()` clears PRIMASK; and `Tenuto<P, ...>::run()` is
+the kernel loop over the program's active objects (AOs: an active
+object is a component of a brio program with its own event queue,
+served one event at a time by the kernel,
+[docs/learn/introduction.md](../learn/introduction.md)), where
+`/* AOs */` stands for the program's list of them in priority order.
+`run()` never returns.
+
+What decides correctness even there. The clock task runs first: the
+ticker computes its reload from the rate the clock type claims, not
+from the hardware, so a ticker initialized while the CPU still runs at
+its 4 MHz reset rate under a 48 MHz type ticks twelve times too slowly
+until the clock task moves the CPU to 48 MHz, and at the right rate
+after (the reload is a count of CPU cycles), and nothing refuses it
+(derived from the reload arithmetic, not measured). `Ticker::init()` answers false and starts nothing when the
+reload does not fit SysTick's 24 bits. The SysTick vector is the
+program's to bind: the kernel binds no vector, and every vector the
+program does not define is a weak alias of the crt's silent spin, so a
+program that forgets the handler - or misspells its name, or drops the
+`extern "C"` - stops in that spin at its first tick, with no error at
+build time.
+And interrupts are enabled before `run()`, since the kernel sleeps
+between events and the tick is what wakes it. The stopping half adds
+one rule of its own, stated where it is used: **on the plain sleep site
+kernel time stops in standby**, so a program asks for standby only when
+no time event is armed ("How to use it" and "The timebase that survives
+standby" below).
+
+The page is long because it is one story told across several headers.
+In order: the documents of record; what the silicon does (the masking,
+the WFI, SysTick, the reset survival of SRAM, the PM's three sleep
+modes and the errata that touch them); the types and verbs; how to use
+it, with the stopping half; the bench findings; the idle path measured
+to the cycle; sleep peripheral by peripheral, what the rest of the die
+does while the core is stopped; the timebase that survives standby
+(`SamTimedSleepSite`); a handler in SRAM, an opt-in placement of hot
+paths; and what is not covered.
+
+## Documents of record
+
+SAM C20/C21 data sheet DS60001479M - the
 Cortex-M0+ processor summary ch. 4 with ARM's ARMv6-M ARM behind it,
 PM (power manager) ch. 19 - and errata DS80000740S (1.8.13, 1.8.14,
 1.8.7 and 1.8.5 all touch this chapter; see "What the silicon does").
@@ -17,7 +104,9 @@ target-independent power model above the last of these is
 startup_samc21.cpp` + `samc21/ld/samc21j18a.ld` in the build project.
 The bench suites are `test_samc_platform` (the idle hook and the
 kernel's turn, the waking half and `delay_us`), `test_samc_sleep` (the
-stopping half) and `test_samc_timebase` (the standby-surviving site).
+stopping half) and `test_samc_timebase` (the standby-surviving site);
+a suite's letter, cited below (letter w, letter k), is one command key
+of its console and the group of verdicts that key runs.
 
 These are one story - how a program on this silicon runs one event at
 a time, waits, keeps time and stops - told across one stratum header
@@ -27,7 +116,7 @@ each and the two crt files every image links.
 
 **Interrupt masking is PRIMASK, and nothing finer.** ARMv6-M has no
 BASEPRI: masking is all-or-nothing, one bit, saved and restored like
-the AVR's SREG. The NVIC orders PREEMPTION between handlers with
+the AVR's SREG. The NVIC orders preemption between handlers with
 `__NVIC_PRIO_BITS` = 2 high bits of priority (four levels, 0 most
 urgent); it never limits the reach of a critical section. Core
 exceptions (SysTick among them) have no NVIC enable bit - the
@@ -35,7 +124,7 @@ peripheral's own interrupt enable is the gate.
 
 **WFI wakes on a pending interrupt even under PRIMASK.** The handler
 does not run until PRIMASK clears, but the core wakes - which is what
-lets the idle hook sleep FIRST and unmask AFTER, closing the
+lets the idle hook sleep first and unmask after, closing the
 lost-wakeup window by construction (an interrupt that lands between
 the kernel's queue check and the WFI simply makes the WFI fall
 through). This is simpler than the AVR idiom, where `sei` takes
@@ -61,7 +150,7 @@ it survives in practice is measured in [reset.md](reset.md), which
 also owns the reset causes themselves.
 
 **The breadcrumb has a sibling on this target, and it is not part of
-it.** The kernel's PanicRecord says WHAT died - a code and a context
+it.** The kernel's PanicRecord says what died - a code and a context
 byte; `samc21/postmortem.hpp` puts the last branches before the disaster
 in `.noinit` beside it, checksummed, by freezing the Micro Trace Buffer
 in the fault body and copying its tail. It is a separate samc21 type and
@@ -84,7 +173,7 @@ no interrupt, no event, no DMA connection and cannot be reset; its APB
 clock can be turned off but **only a system reset turns it back on**
 (19.5.2).
 
-**The mode register lands LATE.** 19.6.3.3 warns of "a small latency
+**The mode register lands late.** 19.6.3.3 warns of "a small latency
 between the store instruction and actual writing of the SLEEPCFG
 register due to bridges" and requires software to read the register
 back before issuing WFI. The latency is measured at about five
@@ -95,12 +184,12 @@ readback on every arming.
 SleepWalking: a peripheral running in standby requests its clock, and
 that request wakes the GCLK generator and the clock source behind it.
 Measured on this silicon, the peripheral's own `CTRLA.RUNSTDBY` is the
-ONLY bit an application has to set - the generator's `GENCTRL.RUNSTDBY`
+only bit an application has to set - the generator's `GENCTRL.RUNSTDBY`
 and the source's own are both unnecessary, and OSCULP32K, whose
 register carries no such bit at all, serves a generator through standby
 just the same.
 
-**The kernel tick STOPS in standby.** Kernel time stands still for
+**The kernel tick stops in standby.** Kernel time stands still for
 exactly as long as the sleep lasts and every armed time event matures
 late by that amount, because every WFI this stratum issues at STANDBY
 holds the SysTick interrupt off (erratum 1.8.13's guard, below) - and
@@ -125,7 +214,7 @@ while sleepwalking may not land on RTC.COUNT, the TC/TCC control and
 count registers, or ADC/SDADC SWTRIG) is live and unreachable: the one
 DMA channel this stratum drives writes a SERCOM's DATA and is never
 configured to run in standby ([dmac.md](dmac.md)); **1.8.5** (higher
-standby current, no workaround) is a number, not a behaviour. NOT this
+standby current, no workaround) is a number, not a behaviour. Not this
 silicon, revision B only: 1.8.1, 1.8.11, 1.8.6.
 
 **A debugger changes what standby is.** 19.5.6: with the CPU halted in
@@ -154,7 +243,9 @@ ticker; `ticks_per_second` = 1000; `atomic_width` = 4 (an aligned
 word moves in one access - what lets `util/ring.hpp` take its
 lock-free path here); `panic_record()` lives in `.noinit`.
 
-**`BasicTicker<tps>`** (ticker.hpp): monostate over SysTick. The rate
+**`BasicTicker<tps>`** (ticker.hpp): monostate over SysTick (a class
+whose state and functions are all static, with no instance to create:
+there is one SysTick, so there is one timebase). The rate
 must divide 1000 exactly - `millis()` is then EXACT, ticks times a
 constant, with none of the AVR's skip-correction - and `Ticker` is
 the 1000 Hz alias. `init(clock)` computes the reload from the clock
@@ -272,8 +363,8 @@ using Pm = brio::PowerManager<P, brio::SamSleepSite, brio::PowerConfig{},
                               /* voters */>;
 using K = brio::Tenuto<P, /* AOs */, Pm>;
 
-// Somewhere that decides the program has nothing to do. THE RULE OF
-// THIS TARGET: kernel time stops in standby, so ask for it only when
+// Somewhere that decides the program has nothing to do. The rule of
+// this target: kernel time stops in standby, so ask for it only when
 // nothing is waiting on the tick.
 const auto next = brio::TimeEvents<P>::ticks_to_next();
 brio::post<Pm>(brio::SleepRequested{
@@ -281,11 +372,16 @@ brio::post<Pm>(brio::SleepRequested{
     brio::reply_to<MyAo, brio::SleepVote>()});
 ```
 
-The manager arms the site; the kernel loop finds every queue empty and
-calls `SamPlatform::idle()`; THAT is the sleep. Before asking for
+`Pm` in that block names the manager, util/power.hpp's active object,
+listed in the kernel's list (last, in that block); the PM register driver of sleep.hpp
+is `brio::Pm`. `ticks_to_next()` answers an optional count of ticks to
+the nearest armed time event, empty when none is armed, so the request
+is `standby` only with no time event waiting. The manager arms the
+site; the kernel loop finds every queue empty and calls
+`SamPlatform::idle()`; that is the sleep. Before asking for
 standby the application owes itself the rest of what chapter 19
-requires: the wake source must be configured, enabled and REACHABLE IN
-THAT MODE (an asynchronous interrupt, or a peripheral with its own
+requires: the wake source must be configured, enabled and reachable in
+that mode (an asynchronous interrupt, or a peripheral with its own
 `RUNSTDBY` set - the RTC and the watchdog on OSCULP32K are the two
 this stratum has), and any peripheral that must keep running through
 the sleep needs that same bit of its own.
@@ -553,7 +649,9 @@ Every sleepwalking chain in this stratum depends on that bit.
 
 **A PAD CAN BE MOVED WHILE THE CPU IS STOPPED, and only one way.** The
 pull-walking that makes this stratum's pin tests wireless
-([eic.md](eic.md)) is a CPU store and is therefore unavailable in a
+([eic.md](eic.md): a free pad walked between the rails through its own
+pull resistor by writing the PORT OUT bit that sets the pull's
+direction) is a CPU store and is therefore unavailable in a
 standby, and the DMAC cannot stand in for it: the one channel this
 stratum drives is the Uart's transmitter, never configured to run in
 standby (CHCTRLA.RUNSTDBY clear, 25.6.7).

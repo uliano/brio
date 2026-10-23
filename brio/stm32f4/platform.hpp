@@ -1,36 +1,55 @@
 /*
  * platform.hpp
  *
- * STM32F4 (Cortex-M4F) implementation of the brio Platform concept - the
- * one header of this stratum the kernel templates are instantiated with.
- * Apps select it by including it and passing Stm32f4Platform<> along.
+ * What the brio kernel stands on when it runs on an STM32F4: the
+ * STM32F4 (Cortex-M4F) realization of the kernel's Platform concept,
+ * the compiler-checked set of requirements kernel/platform.hpp states.
+ * A program names it once, as the first argument of its Tenuto, and
+ * every kernel template is instantiated with it:
  *
- * ONE CLASS, ITS TIMEBASE A PARAMETER. The template parameter is the
+ *     using P = brio::Stm32f4Platform<>;
+ *     brio::Tenuto<P, Blinker, Supervisor>::run();
+ *
+ * It gives the kernel a critical section (interrupts masked for a
+ * scope), an idle that sleeps until the next interrupt without losing
+ * one that arrives at the wrong moment, the program's source of time, a
+ * breakpoint for a panic and the storage a panic record survives a reset
+ * in. Who calls what: the kernel loop calls idle() in main-loop context,
+ * with interrupts already masked, and nothing else should; now() and
+ * ticks_per_second may be read from any context; CriticalSection may be
+ * opened from any context and nests; break_here() is the panic path's
+ * and panic_record() the panic path's and the next boot's. A program
+ * binds the timebase's interrupt vector itself (SysTick_Handler to
+ * Ticker::tick()); the kernel binds no vector, and the crt's
+ * SysTick_Handler is a weak alias of its Default_Handler spin, so a
+ * program that forgets the binding stops at its first tick.
+ *
+ * One class, its timebase a parameter. The template parameter is the
  * kernel timebase, and the default is the SysTick BasicTicker of
  * stm32f4/ticker.hpp (`Ticker`, 1000 Hz). SysTick rides HCLK, and HCLK
- * stops in Stop mode - so on that timebase KERNEL TIME STANDS STILL
- * across a Stop; the sleep sites that repair it from an RTC witness are
- * the power chapter's. The parameter is kept for the day a timebase
- * that counts through Stop exists on this family (the STM32G0's LPTIM
- * shape); today there is no Tickless timebase here and the kernel's
- * optional idle_until() hook is not offered.
+ * stops in Stop mode, so on that timebase kernel time stands still
+ * across a Stop; stm32f4/sleep.hpp's timed site repairs it afterwards
+ * from the RTC's wake-up timer. The parameter is there for a timebase
+ * that counts through Stop; this family has none today, so there is no
+ * Tickless timebase here and the kernel's optional idle_until() hook is
+ * not offered.
  *
  * CriticalSection is stm32f4/nvic.hpp's InterruptGuard: save PRIMASK,
  * cpsid i, restore on scope exit. Nesting-correct, and the CMSIS
  * intrinsics behind it carry the "memory" clobbers the concept asks for.
- * This core HAS BASEPRI, and this platform does not use it: the kernel
+ * This core has BASEPRI, and this platform does not use it: the kernel
  * promise that no interrupt nests over another is kept by every line
  * sitting at one priority and PRIMASK being the one mask
  * (stm32f4/nvic.hpp).
  *
  * The other halves live next door: which reset happened and how to
- * cause one is the reset chapter's, the STOPPING half - PWR's
+ * cause one is stm32f4/reset.hpp, and the stopping half - PWR's
  * Sleep/Stop/Standby ladder and the util/power.hpp sites over it - is
- * stm32f4/pwr.hpp's to grow. This silicon selects the sleep depth in
- * SCB->SCR.SLEEPDEEP and PWR_CR's PDDS/LPDS, and the idle hook here
- * writes none of them, so a WFI here takes whatever somebody else
- * armed. This header provides the storage the panic record lives in,
- * and the linker script the .noinit section it needs.
+ * stm32f4/pwr.hpp plus stm32f4/sleep.hpp. This silicon selects the
+ * sleep depth in SCB->SCR.SLEEPDEEP and PWR_CR's PDDS/LPDS, and the idle
+ * hook here writes none of them, so a WFI here takes whatever somebody
+ * else armed. This header provides the storage the panic record lives
+ * in, and the linker script the .noinit section it needs.
  */
 #pragma once
 
@@ -52,17 +71,19 @@ struct Stm32f4Platform {
     /// where the tick rate comes from.
     using Timebase = TB;
 
-    /// Entered with interrupts MASKED and nothing to do: sleep until the
-    /// next interrupt.
+    /// The kernel's idle: entered by the loop, in main-loop context, with
+    /// interrupts masked and nothing to do; sleeps until the next
+    /// interrupt and returns with interrupts enabled. Not for a program
+    /// to call.
     ///
-    /// WFI FIRST, UNMASK AFTER. On Cortex-M a pending interrupt wakes
+    /// WFI first, unmask after. On Cortex-M a pending interrupt wakes
     /// WFI even with PRIMASK set - the handler simply does not run until
     /// PRIMASK clears. So sleeping before unmasking closes the
     /// lost-wakeup window by construction: an interrupt that becomes
     /// pending between the caller's queue check and the WFI does not put
     /// the core to sleep at all.
     ///
-    /// WHATEVER IS ARMED. This family selects the deeper modes with
+    /// Whatever is armed. This family selects the deeper modes with
     /// SCR.SLEEPDEEP plus PWR_CR (RM0090 5.3), and this hook never
     /// writes either: out of reset SLEEPDEEP is 0, so a WFI here is
     /// Sleep - the CPU clock stops, HCLK, SysTick and every peripheral

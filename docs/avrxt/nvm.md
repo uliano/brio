@@ -1,6 +1,109 @@
 # NVMCTRL - the nonvolatile memories (AVR DA, DB and EA)
 
-Documents of record: data sheet **DS40002247B** chapter 11 (NVMCTRL),
+This document is for a programmer who needs data to outlive a reset, a
+power cut or a reflash on an AVR DA, DB or EA: a setting kept in the
+EEPROM, a panic record the next boot can read, a table in flash that
+a page-selective reflash leaves in place, or the board's label in the
+User Row.
+`Nvm` is the driver over NVMCTRL, the controller that erases and writes
+those memories: a monostate (a class whose state is static, with no
+instances), one function per operation, each erase or write checking
+its address before it touches the controller (the reads, plain loads,
+check none). Most programs reach it through the
+target-independent services above it. `EepromStore` presents the
+EEPROM to `util/nv_record.hpp`, where `NvRecord` keeps one typed value
+with a checksum at a fixed offset; `NvWriter` is an active object (an
+AO: a component of a brio program with its own event queue, served one
+event at a time by the kernel,
+[learn/introduction.md](../learn/introduction.md)) that writes the EEPROM one operation per interrupt, so the rest of the
+program keeps running while the memory works; `PersistentPanic` saves a
+panic record in the EEPROM. On the DA/DB, `NvmFlash`
+([`avrxt/nvm_flash.hpp`](../../brio/avrxt/nvm_flash.hpp)) presents the
+flash to the block allocator `NvHeap`.
+
+The page covers two generations of the controller, and each fact
+belongs to its die. The AVR DA and DB carry NVM version 2: the CPU
+writes the flash a word at a time, and the EEPROM and the User Row a
+byte at a time. The AVR EA carries NVM version 3, and brio uses its EEPROM
+alone, written by page in runs (a run is the unit a transfer moves, a
+buffer and a length with a single byte its degenerate case; here 1 to 8
+consecutive bytes inside one page, what one operation writes); the
+EA's flash and User Row self-programming are declined. The part's
+device header decides which half of `avrxt/nvm.hpp` compiles
+(STATUS.FLBUSY, `NVMCTRL_FLBUSY_bm`, is version 3's own bit), and the
+EEPROM services' surface is the same on both.
+
+The smallest use, a setting that survives a power cycle, quoted from
+"Storing a setting that survives a power cycle" below; the same lines
+build and run on the DA, the DB and the EA:
+
+```c++
+struct Settings { uint16_t rate; uint8_t mode; uint8_t flags; };
+using Record = brio::NvRecord<Settings, brio::EepromStore, 16>;
+
+const std::optional<Settings> s = Record::load();       // nothing = never stored
+Record::store(Settings{9600, 4, 0x0F});                 // writes only what changed
+```
+
+Line by line: `Settings` is the value to keep, a plain struct stored
+byte for byte (`NvRecord` refuses at compile time a type that is not
+trivially copyable); `Record` names the record - the payload type, the
+store it lives in (`EepromStore`, the EEPROM) and the byte offset where
+it starts, 16 - and the record takes four header bytes (a magic byte,
+the version, a CRC-16) plus the payload, eight bytes here, 16 to 23;
+`load()` returns the stored value, or nothing when the EEPROM holds no
+valid record of this version at that offset (erased, an older layout, a
+write torn by a power loss); `store()` writes only the bytes that differ
+from what is stored and returns how many it wrote, zero when the value
+is already there.
+
+What decides correctness even there:
+
+- **Where the record sits is the programmer's choice and nothing
+  checks it against the other users of the EEPROM** (another record,
+  the panic record, a writer's request). A record that runs past the
+  end of the EEPROM is caught at run time only: `load()` returns nothing
+  and `store()` writes nothing.
+- **`store()` blocks.** It polls the EEPROM through each operation, with
+  a bounded wait, and returns when the last one is over. On the DA/DB
+  every differing byte is an erase-and-write of about 10 ms (10087 us
+  measured on an AVR128DB48, below); on the EA the differing bytes of
+  one 8-byte page are one operation of about 2.6 ms, or 5.2 ms when it
+  must erase and write. Called from an active object's handler, that
+  time is taken from every other active object; the writer that does
+  not block is `NvWriter` ("Writing the EEPROM without stalling"
+  below), and it needs the NVMCTRL vector bound by the program with
+  `ISR(NVMCTRL_EE_vect)` on the DA/DB and `ISR(NVMCTRL_EEREADY_vect)` on
+  the EA.
+- **On the AVR EA's rev B1 the supply decides whether a write holds**
+  (DS80001048D 2.2.1, "The errata as code" in the EA's section): no
+  write checks it; `Nvm::supply_guarded()` answers at boot, and is true
+  on rev B1 once the BODCFG fuse holds 0x4D (`brio fuses <board>
+  bodcfg=0x4D`). A program that keeps settings on that part asserts it
+  at boot.
+- **A setting survives a chip erase only with the EESAVE fuse set**:
+  a chip erase with EESAVE clear wipes the EEPROM to 0xFF (the findings
+  below, "EESAVE and the chip erase").
+
+Writing the flash, on the DA/DB alone, adds two more: the fuses must
+give the image a section above BOOT to write into (under the shipping
+`BOOTSIZE = 0` no software can write any flash), and a flash erase or
+write halts the CPU for its whole duration, interrupts included ("Who
+stalls whom" below).
+
+The rest of this page, in order: the documents of record; the AVR
+DA/DB's NVM version 2 - what the silicon does, the types and verbs, how
+to use it (the flash, a setting, the writer, the persistent panic, the
+User Row, `NvmFlash` as a block store), the build invariants every image
+carries, and the bench findings on the AVR128DB48 and the AVR128DA48
+with the declared wear budget; then the AVR EA's section - what the
+silicon does, the silicon's offer used or declined, the types and verbs,
+the errata as code, how to use it, the bench findings on the AVR64EA48
+and its wear budget; and what is not covered.
+
+## Documents of record
+
+Data sheet **DS40002247B** chapter 11 (NVMCTRL),
 chapter 15 (CPUINT, for the vector-table bit) and section 39.8 (the
 memory programming times); errata **DS80000915F** 2.7.1 / 2.7.2 (AVR
 DB) and **DS80000882C** 2.7.1 / 2.7.2 / 2.17.1 (AVR DA). For the AVR EA
@@ -14,7 +117,12 @@ the target-independent services over it in
 [`util/nv_writer.hpp`](../../brio/util/nv_writer.hpp),
 [`util/persistent_panic.hpp`](../../brio/util/persistent_panic.hpp)
 and [`util/crc.hpp`](../../brio/util/crc.hpp). Reference test
-suites: `test_avr_nvm` on the bench, `test_nv_record` on the host.
+suites: `test_avr_nvm` on the bench, `test_nv_record` on the host. A
+letter, below, is one command key of a suite's console and the group of
+verdicts it runs: `test_avr_nvm`'s `z` runs its single-board set,
+letters a to f, and the suite has no set that needs a partner board;
+letters u, g and m stay outside `z` for the wear or the fuse change
+each costs ("The declared wear budget" below).
 
 Everything from here to the AVR EA's own section is the AVR DA/DB's
 NVM version 2.
@@ -30,7 +138,7 @@ NVM version 2.
 | User Row | 32 B | the whole row / byte | Flash class | always |
 | Signature Row | 64 B | read only | - | always |
 
-The Flash figure deserves a second look: 1000 cycles is NOT the 10k
+The Flash figure deserves a second look: 1000 cycles is not the 10k
 of the older AVR families - the DB datasheet lowered it to 1k "based
 on validation data" (table 39-7; no typical value is published). A
 chip erase spends one of those cycles on every page at once, which is
@@ -63,7 +171,7 @@ Two consequences follow, and neither is optional:
 - With the shipping default `BOOTSIZE = 0` the whole Flash is BOOT and
   **no software can write any Flash at all**. Writing Flash at run time
   starts with a fuse.
-- The default vector-table location is the start of the APPLICATION
+- The default vector-table location is the start of the application
   section, not address 0 (15.5.1 IVSEL, and 11.3.1.1 note 1). The
   moment `BOOTSIZE` stops being 0 the hardware looks for vectors in
   empty Flash and the first interrupt of any kind jumps into 0xFFFF -
@@ -74,13 +182,13 @@ Two consequences follow, and neither is optional:
 Two further bits in `NVMCTRL.CTRLB` are one-way until a reset:
 `APPCODEWP` and `APPDATAWP` refuse all further writes to their section,
 and `BOOTRP` makes BOOT unreadable and unexecutable from outside it -
-that bit can only be WRITTEN from BOOT code and takes effect only when
+that bit can only be written from BOOT code and takes effect only when
 execution leaves the BOOT section.
 
 ### The two ways to reach the Flash, and the one this driver uses
 
 The Flash is visible twice: as code space through LPM/SPM with a 24-bit
-`RAMPZ:Z` address, and as a 32 KB WINDOW in data space whose position
+`RAMPZ:Z` address, and as a 32 KB window in data space whose position
 `NVMCTRL.CTRLB.FLMAP` selects in blocks of 32 KB (11.3.2). This driver
 uses **code space only** - ELPM to read, SPM to write. That is a
 deliberate, load-bearing choice:
@@ -89,21 +197,21 @@ deliberate, load-bearing choice:
   protection check ignores FLMAP, mirroring BOOT into every mapped
   section, so a write through the window with `FLMAP != 0` can land
   somewhere else entirely. The errata's own work-around is "use only
-  SPM to write and LPM to read". Following it by construction removes
-  the item rather than leaving it to be remembered.
+  SPM to write and LPM to read". With no verb writing through the
+  window, the item is removed rather than left to be remembered.
 - Every verb takes a `uint32_t`, so the classic way of losing the top
   half of a 128 KB part - a 16-bit `&symbol` - cannot happen.
 
 FLMAP is still exposed (`flmap`, `set_flmap`, `flmap_locked`,
-`lock_flmap`), because an app may want the window for its own READS,
+`lock_flmap`), because an app may want the window for its own reads,
 which is the half of the erratum that is explicitly fine, and because
 the C runtime already uses it: gcc places `.rodata` in a Flash section
 and writes FLMAP in `.init`.
 
 ### The command model
 
-Every write and erase is two steps (11.3.2.3): a command is SELECTED in
-`NVMCTRL.CTRLA` under CCP with the SPM key, and then CARRIED OUT by an
+Every write and erase is two steps (11.3.2.3): a command is selected in
+`NVMCTRL.CTRLA` under CCP with the SPM key, and then carried out by an
 ordinary store into the memory array - SPM for the Flash array, an ST
 to the mapped address for EEPROM and the User Row. Changing from one
 command to another must pass through NOCMD or NOOP, or the controller
@@ -116,7 +224,7 @@ ERROR field cleared by writing it to zero.
 
 ### Who stalls whom
 
-A **Flash** erase or write HALTS THE CPU for its whole duration - about
+A **Flash** erase or write halts the CPU for its whole duration - about
 10 ms for an erase, tens of microseconds for a word. Nothing runs,
 interrupts included. An **EEPROM** write does not halt the CPU; the CPU
 is halted only if it starts a second NVM access while one is running.
@@ -127,9 +235,11 @@ an interrupt-paced Flash writer is not.
 
 ### Geometry and layout
 
-`flash_size`, `flash_page_size`, `flash_section_block`, `eeprom_size`,
-`eeprom_base`, `userrow_size`, `userrow_base` are constants taken from
-the device header, never copied. `FlashSection` names the three
+`flash_size`, `flash_page_size`, `eeprom_size`, `eeprom_base`,
+`userrow_size`, `userrow_base` are constants taken from the device
+header, never copied; `flash_section_block`, the 512-byte block the
+BOOTSIZE and CODESIZE fuses count in (11.3.1.1), is the one the driver
+states itself. `FlashSection` names the three
 sections; `FlashRange` is a half-open byte range with `size`, `empty`
 and `contains`.
 
@@ -159,7 +269,8 @@ Static verbs, one instance: the same shape as `Reset` and `Watchdog`
 - **Geometry from the fuses**: `boot_end`, `appcode_end`,
   `section_of`, and `writable(begin, end)` - the one that answers "may
   code in BOOT write every byte of this range, right now".
-- **Flash**: `flash_read` (byte, word and block, all through ELPM),
+- **Flash**: `flash_read` (byte and block) and `flash_read_word`, all
+  through ELPM,
   `flash_blank`, `erase(addr, FlashErase)`, `write_word`,
   `write_block`, and `erase_ignoring_protection` (below).
 - **EEPROM**: `eeprom_read` (byte and block), `eeprom_write` (EEWR, no
@@ -578,8 +689,8 @@ CMDCOLLISION, 4 WRONGSECTION, no 1), CTRLB grows EEWP (bit 3, one-way
 until a reset), and the one NVMREADY vector (#33) carries EEREADY and
 the flash's FLREADY.
 
-**The command model, as the silicon runs it** (rev B1, `test_avr_nvm`
-b). The chapter states it two ways - "fill the page buffer, then write
+**The command model, as the silicon runs it** (rev B1, `test_avr_nvm`'s
+letter b). The chapter states it two ways - "fill the page buffer, then write
 the command" (11.3.2.3, 11.3.2.4.2) and "commands are enabled by CTRLA
 and must be followed by writes using ST" (11.3.2.4, 11.5.1) - and the
 silicon runs the first, the way Microchip's own avr-libc

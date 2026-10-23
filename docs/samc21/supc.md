@@ -1,13 +1,62 @@
 # SUPC - Supply Controller (SAM C21)
 
-Documents of record: SAM C20/C21 data sheet DS60001479M ch. 22, the
+This document is for a programmer who needs to know about the supply:
+whether VDD has fallen below a threshold, what the brown-out detector
+does when it has (a reset, an interrupt, or nothing but a status bit),
+which regulator feeds the core in standby, and the bandgap reference
+the analog blocks take. `BodVdd` is the VDD brown-out detector,
+`BodCore` the core detector (read-only here), `Vreg` the core
+regulator, `Vref` the bandgap, and `Supc` the block they share.
+
+The smallest use, the second block of "How to use it" below - the
+supply watched against a threshold with no consequence:
+
+```cpp
+// ACTION = none still sets STATUS.BODVDDDET - a threshold to read,
+// not a reset to suffer.
+brio::BodVdd::configure({.level = 40, .action = brio::BodAction::none});
+const bool below = brio::BodVdd::detected();
+```
+
+Line by line: `configure()` stops the detector, writes level field 40
+with the action `none`, and starts it again, waiting for the detector's
+synchronization between each store; `detected()` reads
+STATUS.BODVDDDET, true while the supply is below the threshold.
+
+What decides correctness even there. The level is a register field and
+not a voltage: table 45-18 gives three anchors (level 8 is 2.80 V,
+level 9 is 2.85 V, level 44 is 4.51 V) and the bench measured a step of
+48.7 mV on this die, so the threshold of field 40 is a measurement and
+not a constant. `action` defaults to `reset` in `BodVddConfig`, so a
+configuration that leaves it out resets the device whenever the supply
+is below the level. The detector's configuration out of reset is not
+the program's: it is loaded from the NVM user row at every power-on or
+user reset (22.6.3.2), which writes over what a program configured.
+`configure()` answers false, leaving the detector disabled, for a level
+past the six-bit field or for a synchronization wait that runs out
+(each bounded, 0xFFFF polls); nothing here masks interrupts. A sampled
+detector never reports ready, so a wait on `ready()` means something
+only for a continuous one. The block's interrupt arrives on IRQ 0,
+which MCLK, OSCCTRL, OSC32KCTRL, PAC and SUPC share: the program's
+`SYSTEM_Handler` asks each block, `Supc::isr()` answering for this one.
+
+In order: the documents of record; what the silicon does (the fuse
+values, the enable protection with synchronization, the level, the
+detector's modes, BODCORE, the regulator, VREF); the types and verbs;
+how to use it; the bench findings; what is not covered.
+
+## Documents of record
+
+SAM C20/C21 data sheet DS60001479M ch. 22, the
 NVM user row mapping of table 9-4, and the BODVDD and regulator
 characteristics of tables 45-18 and 45-20 - and errata DS80000740S
 item 1.8.14, live on this silicon and named in the code, with 1.8.11
 read and declared revision B only. Driver: `samc21/supc.hpp`. The family
 fixture is `test/family_samc21/supc.cpp` plus
 `neg/supc_vref_reserved_level.cpp` under `brio check samc21`; the
-bench suite is `test_samc_supc`.
+bench suite is `test_samc_supc` (a letter of it is one command key of
+its console and the group of verdicts that key runs, and `z` the key
+that runs them all).
 
 ## What the silicon does
 
@@ -46,7 +95,7 @@ sampling clock is OSCULP32K's 1.024 kHz output divided by 2^(PSEL+1).
 
 **BODCORE is not yours.** 22.6.3.4 says it is calibrated in production
 and "this configuration must not be changed"; table 9-4 marks its
-user-row bits DO NOT CHANGE. The driver exposes it READ-ONLY and
+user-row bits DO NOT CHANGE. The driver exposes it read-only and
 offers no setter at all - the shape is the safety. **Note that the
 register exists only on the device header's authority:** chapter 22's
 register summary marks offset 0x14 Reserved, and the header also
@@ -63,8 +112,8 @@ itself is the power pass's business.
 **VREF is the bandgap every analog block eventually asks for.** SEL
 picks 1.024 V, 2.048 V or 4.096 V - three codes out of sixteen, the
 rest Reserved and refused. VREFOE means exactly what 22.8.7 says: it
-routes the reference to an ADC INPUT CHANNEL, and that path alone is
-dead without it. The blocks that take the bandgap as a REFERENCE reach
+routes the reference to an ADC input channel, and that path alone is
+dead without it. The blocks that take the bandgap as a reference reach
 it internally and do not need the bit - measured with it clear and set,
 the analog comparator's bandgap negative input and the DAC's reference
 behave identically ([ac.md](ac.md), [dac.md](dac.md)).

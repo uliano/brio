@@ -1,25 +1,91 @@
 # Timers (STM32F4)
 
-Documents of record: RM0090 Rev 22 - ch. 17 the advanced-control TIM1 and
+This document is for a programmer who needs a hardware timer: a PWM
+output (a lamp, a motor bridge with its dead time), a measurement of a
+period, a pulse width or an oscillator, an event counter, a periodic
+interrupt, a one-shot pulse, or a quadrature encoder. `stm32f4/tim.hpp`
+has the resource, `Tim<n>`, one function per register fact of one TIMx
+block; `TimPad<sel>`, the claim of a pad by a timer channel; and nine
+tasks over the resource, one per way of using a timer (a task, in brio,
+is a driver layer with state and a purpose of its own that a program
+calls; `TimPwm` is the PWM output, `TimIntervalMeter` the capture of an
+interval, and so on, "Types and verbs" below). The family has fourteen
+timers that share one register layout and differ in what each
+implements, and the driver refuses, at compile time in the tasks and
+with a false at run time in the resource, what an instance has not got.
+
+The smallest use, a 10 kHz PWM on PA6, from the "How to use it" block
+below:
+
+```cpp
+constexpr brio::PinSel wave{'A', 6, brio::PinFunction::af2};   // TIM3_CH1
+using Wave = brio::Tim<3>;
+using Lamp = brio::TimPwm<Wave, 0, 999>;                       // 1000 steps
+
+brio::TimPad<wave>::claim();
+Wave::init();
+Lamp::setup(Wave::clock_hz(clock) / 1000u / 10'000u - 1u);     // 10 kHz
+Lamp::duty(250);                                               // a quarter
+```
+
+Line by line: `wave` names the pad and the alternate-function number
+the datasheet gives TIM3's channel 1 on it; `Wave` is TIM3; `Lamp` is
+the PWM task on that timer's first channel (channels count from 0) with
+a period of 1000 counts, 0..999; `claim()` hands the pad to the timer;
+`init()` opens the timer's bus clock and pulses its reset; `setup()`
+takes the prescaler, computed here from the timer's counting rate so
+that 1000 counts make 10 kHz, writes the time base, configures the
+channel as PWM and starts the counter; `duty(250)` sets a quarter of the
+period high. `clock` is the clock task's empty tag object
+([clock.md](clock.md)), which `clock_hz()` reads the rate from.
+
+What decides correctness even there. The timer's counting rate is not
+its bus clock: on a divided APB the timer counts twice the bus rate
+(and four times with RCC_DCKCFGR's TIMPRE), which `clock_hz()` derives
+from the clock type; a prescaler computed from `pclk1_hz` instead is
+wrong by that factor. That rate is the one the clock type claims, so
+the clock task must have run first (`SysClock::init()`): a timer started
+while the chip still runs at its 16 MHz reset rate counts slower than
+the prescaler assumes by the ratio of the two rates, and nothing refuses
+it (derived from the arithmetic, not measured). The alternate-function
+number of the pad is the datasheet's and nothing in the code checks it:
+a wrong one is not caught, and what the pad does then was not measured. `setup()` answers false and starts
+nothing when the configuration does not fit the instance; the example
+does not read that answer. And `TimPwm`'s compare register is preloaded,
+so a `duty()` takes effect at the next update event, the end of the
+period in progress, not at once.
+
+The rest of this page, in order: the documents of record; what the
+silicon does (the fourteen timers' geometry, which instances exist, the
+counting clock, the status register, the shadowed registers, the
+vectors, the internal triggers and the option registers that make the
+chapter measurable with nothing attached, the four errata); the types
+and verbs, the tasks among them; how to use it, one example per task
+family; the bench findings; and what is not covered.
+
+## Documents of record
+
+RM0090 Rev 22 - ch. 17 the advanced-control TIM1 and
 TIM8, ch. 18 the general-purpose TIM2..TIM5, ch. 19 TIM9..TIM14, ch. 20 the
 basic TIM6 and TIM7 - with their twins RM0390 Rev 6 (ch. 15..18) and
 RM0383 Rev 4 (ch. 12..14, which has no TIM8 and no basic timer). The
 alternate-function numbers are the datasheets': DS10314 Rev 8 table 9,
 DS10693 Rev 11 table 11, DocID024030 Rev 10 table 12. Errata: ES0287 Rev 6
-2.6, ES0206 Rev 24 2.7 and ES0298 Rev 8 2.6 carry the SAME four items, so
+2.6, ES0206 Rev 24 2.7 and ES0298 Rev 8 2.6 carry the same four items, so
 they are the family's and are quoted under "what the silicon does".
 Driver: `stm32f4/tim.hpp`; the per-instance geometry and the vector names
 come from `stm32f4/device_tables.hpp`, and RCC_DCKCFGR's TIMPRE from
 `stm32f4/clock.hpp`. Bench suite: `test_stm32f4_tim`. Family fixture
 `test/family_stm32f4/tim.cpp` plus nine negatives under `brio check
-stm32f4`.
+stm32f4`. A letter of the suite is one command key of its console and the
+group of verdicts it runs; `z` is the key that runs them all.
 
 ## What the silicon does
 
 **One register block, fourteen different timers.** The device header
-declares ONE `TIM_TypeDef` and every instance is that struct, so
+declares one `TIM_TypeDef` and every instance is that struct, so
 `TIM11->SMCR` compiles and writes a hole in the address map. What a timer
-actually IS is the reference manual's, keyed by instance:
+actually is belongs to the reference manual, keyed by instance:
 
 | | counter | channels | complementary | slave | encoder | master TRGO | BDTR | RCR | ETR | DMA | option reg |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -30,12 +96,12 @@ actually IS is the reference manual's, keyed by instance:
 | TIM10, TIM11, TIM13, TIM14 | 16 | 1 | - | **no** | no | no | - | - | no | none | TIM11 |
 | TIM6, TIM7 | 16 | **0** | - | no | no | yes | - | - | no | request only | - |
 
-Two of those columns are easy to get wrong. TIM9 and TIM12 HAVE a slave
+Two of those columns are easy to get wrong. TIM9 and TIM12 have a slave
 controller and no quadrature interface: SMS codes 001..011 are Reserved
 there (RM0383 14.4.2), and so is TS = 111, the external trigger. And
 TIM9..TIM14 have **no CR2 at all** - their register map goes straight from
 CR1 to SMCR - so they publish nothing on TRGO, which is why the entries
-that reach them in another timer's trigger table are their channel OUTPUTS
+that reach them in another timer's trigger table are their channel outputs
 and not a TRGO.
 
 **Which instances exist is the header's**, three ways over (`TIMn_BASE`,
@@ -47,20 +113,23 @@ returns false and writes nothing, and the tasks static_assert instead.
 
 **The counter's clock is not the bus clock.** RM0383 6.2 and RM0090 7.2:
 with a timer's APB prescaler at 1 the timer counts HCLK; with the bus
-DIVIDED it counts **twice** its APB clock. And on every part but the
+divided it counts **twice** its APB clock. And on every part but the
 F405/F407/F415/F417 a bit of RCC_DCKCFGR, TIMPRE, changes that rule to
 "HCLK at a prescaler of 1 or 2, four times PCLK beyond". So a timer on a
-divided APB1 runs FASTER than the bus that carries it, and a period
+divided APB1 runs faster than the bus that carries it, and a period
 computed from `pclk1_hz` is wrong by a factor of two. `tim_clock_hz()` and
 `Tim<n>::clock_hz(clock)` do that arithmetic from the clock task's own
 constexpr dividers; `clock_hz_now(hclk)` reads it back out of RCC_CFGR and
 RCC_DCKCFGR, which is the witness a constexpr cannot be.
 
 **The status register is rc_w0.** A flag of TIMx_SR is cleared by writing
-ZERO to it and a write of one has no effect (17.4.5), so clearing is `SR =
+zero to it and a write of one has no effect (17.4.5), so clearing is `SR =
 ~flags` - one store, no read-modify-write, and a flag that arrives between
-a read and the store SURVIVES. Every other flag register in this stratum
-is cleared by writing ones, so this is the one place the reflex is wrong.
+a read and the store survives. The stratum's write-one-to-clear registers
+(the EXTI's PR among them) take a one instead, and several other flag
+registers are rc_w0 like this one (the ADC's, the RNG's, the RTC's ISR,
+the WWDG's EWIF), so the reflex learned on one register is wrong on the
+next.
 Measured: a word of `0xFFFFFFFF` written over a standing UIF leaves it
 exactly where it was.
 
@@ -80,13 +149,13 @@ configuration is in force is to have generated an update. `configure()`
 therefore ends with EGR.UG and clears the UIF that raised. A compare
 register is preloaded too, and **that is where a one-pulse timer bites**: it
 sees no update between its configuration and its trigger, so the pulse
-would be made against the ACTIVE compare's old value (measured: the whole
+would be made against the active compare's old value (measured: the whole
 period wide). `TimOnePulse::setup()` therefore writes its compare
-UNBUFFERED - once, with the counter stopped, where no runt can come of it -
+unbuffered - once, with the counter stopped, where no runt can come of it -
 and an update after the channel would not do as well: it leaves the pad
 driven by a shadow of 0, PWM mode 2 active, for the stores in between.
 
-**CCyS is writable only while the channel is OFF** (17.4.7: "CCyE = 0").
+**CCyS is writable only while the channel is off** (17.4.7: "CCyE = 0").
 A channel switched from input to output with its enable still up keeps the
 old direction and the write is dropped in silence - the timer goes on
 capturing a pad the program believes it is driving. Both `capture_channel()`
@@ -95,19 +164,19 @@ CCMR, which costs an output a few cycles of release at reconfiguration time
 and is the price of the rule.
 
 **The vectors: four lines for two timers, one line for everyone else.**
-TIM1 and TIM8 split their events over FOUR NVIC lines - break, update,
-trigger/commutation, capture/compare - and three of the four are SHARED
+TIM1 and TIM8 split their events over four NVIC lines - break, update,
+trigger/commutation, capture/compare - and three of the four are shared
 with a small general-purpose timer: TIM1_BRK_TIM9, TIM1_UP_TIM10,
 TIM1_TRG_COM_TIM11 and the TIM8 twins with TIM12, TIM13 and TIM14. TIM6
 shares with the DAC where the part has one (the F412 has TIM6 and no DAC,
-and its header spells `TIM6_IRQn` for it). The reserve derives every name
-from PRESENCE - `TIM1_UP_TIM10_IRQn` where the part has a TIM10 and
+and its header spells `TIM6_IRQn` for it). The reserve (`stm32f4/device_tables.hpp`, the table of what each part
+has, read off the device header) derives every name from presence - `TIM1_UP_TIM10_IRQn` where the part has a TIM10 and
 `TIM1_UP_IRQn` where it has not - and never from a device name.
 
 **The internal triggers are the wireless instrument of this chapter.**
 Every four-channel timer publishes TRGO and every slave-capable one listens
 on ITR0..ITR3; RM0090 tables 94, 98 and 101 say which timer each ITRx IS,
-and the three manuals' tables are ONE table whose only differences are the
+and the three manuals' tables are one table whose only differences are the
 three entries naming TIM8 - printed Reserved on the parts that have no
 TIM8. `tim_internal_trigger()` is that table with the presence probe over
 it, and `tim_trigger_index_for(slave, master)` reads it the way a caller
@@ -126,12 +195,12 @@ start-of-frame. RM0383 6.2.11 names the first two as the intended way to
 weigh an oscillator against the core clock, and that is what the suite does
 with them.
 
-**A GPIO in output mode does NOT reach a timer's input** - measured, and
+**A GPIO in output mode does not reach a timer's input** - measured, and
 the opposite of what the EXTI does with the same pad (see
 [exti.md](exti.md)). The alternate-function input multiplexer is opened by
 MODER, not by the AF nibble alone: sixteen edges written on a pad in output
-mode whose AFR already names the timer produced zero captures. What DOES
-work is the pad in ALTERNATE mode with the timer's own output stage driving
+mode whose AFR already names the timer produced zero captures. What does
+work is the pad in alternate mode with the timer's own output stage driving
 it - the chapter's **forced output mode** (17.3.7), where OCyREF follows
 CCMRx and not the counter. The program writes a level into OCyM, the pad
 follows, and TI1/TI2 see it, because the timer's input path is live for a
@@ -143,10 +212,10 @@ quadrature interface are exercised on a board with no wire.
 
 - *PWM re-enabled in automatic output enable mode despite of system break*
   (ES0287 2.6.1). With BDTR.AOE set the outputs come back at the next
-  update, and a SYSTEM break - the clock security system's - is not
+  update, and a system break - the clock security system's - is not
   latched, so it comes back too. The workaround is the item's own: leave
   AOE clear and use OCyCE for cycle-by-cycle control. `TimBreakDeadTime`
-  defaults `automatic_output_enable` FALSE for that reason and the verb
+  defaults `automatic_output_enable` false for that reason and the verb
   says so.
 - *TRGO and TRGO2 trigger output failure* (2.6.2), which the sheet itself
   calls a documentation issue: the slave's clock must be enabled before the
@@ -561,8 +630,11 @@ Implemented, not bench-verified:
 
 - **TIM8, TIM6/TIM7 and TIM12..TIM14 on the STM32F429 and the STM32F469**,
   and the chapter on STM32F429 silicon at all: letter `p` measures the six
-  on the F446; the F469's pads are not chosen (the letter's pad legs run on
-  the Nucleo-F446RE alone) and neither board is on the desk.
+  on the F446; the 32F469IDISCOVERY runs `z` (above) but the letter's pads
+  are not chosen there (its pad legs run on the Nucleo-F446RE alone), and
+  no run of the suite on the STM32F429I-DISC1 is recorded. What would
+  measure them is `p` with pads chosen on each board, and `z` on the
+  DISC1.
 - **The external trigger input** (ETR, external clock mode 2, ETPS, ETF)
   and the ocref_clr path that shares it: every code is written and read
   back, but ETR is a PAD on this family with no internal source to select -

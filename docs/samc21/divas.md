@@ -1,9 +1,48 @@
 # DIVAS - Divide and Square Root Accelerator (SAM C21)
 
-Documents of record: SAM C20/C21 data sheet DS60001479M ch. 14 - and
+This document is for a programmer whose hot path divides, or takes a
+square root, on a core that has no divide instruction: the Cortex-M0+
+otherwise calls a libgcc routine for every `a / b`. `Divas` is the
+hardware divider and square-root engine, a monostate (a class whose
+state and functions are all static, with no instance to create: there
+is one engine). It is a driver a program calls by name; the compiler's
+own division does not use it ("Not covered yet").
+
+The smallest use, the first block of "How to use it" below - an
+unsigned division with its remainder:
+
+```cpp
+Divas::bus_clock(true);
+Divas::configure(false);
+const auto r = Divas::divide_unsigned(numerator, denominator);
+// r.result, r.remainder
+```
+
+Line by line: `bus_clock(true)` opens the engine's AHB clock, which is
+on out of reset anyway; `configure(false)` writes CTRLA once, unsigned
+and with the leading-zero optimization on; `divide_unsigned()` writes
+the dividend, then the divisor - the divisor's write starts the
+division - and reads the quotient and the remainder back, the read on
+the default bus waiting for the engine with no poll.
+
+What decides correctness even there. The engine has one set of operand
+registers and nothing here guards them: a division started from an
+interrupt handler between the two operand writes of another corrupts
+both, so one context divides at a time, and nothing here masks
+interrupts. CTRLA is the truth: `divide_unsigned()` on an engine left
+in signed mode divides signed. A divide by zero does not trap: the
+quotient comes back zero, the remainder equal to the dividend, and
+STATUS.DBZ latches until cleared. The IOBUS path polls STATUS.BUSY
+with no bound before it reads. And the engine does not run in any
+sleep mode.
+
+## Documents of record
+
+SAM C20/C21 data sheet DS60001479M ch. 14 - and
 errata DS80000740S, which has **no DIVAS section**. Driver:
 `samc21/divas.hpp`. Family fixture `test/family_samc21/divas.cpp`; the bench
-suite is `test_samc_debug`.
+suite is `test_samc_debug` (a letter is one command key of its console
+and the group of verdicts that key runs).
 
 A 32-bit signed/unsigned integer divider and a 32-bit unsigned square
 root engine, on the bus matrix because the Cortex-M0+ core has neither.
@@ -21,7 +60,7 @@ and not a convention.
 **Two buses, and the difference is a real choice.** The block answers at
 0x48000000 on the high-speed bus and at 0x60000200 on the CPU's local
 single-cycle IOBUS. On the AHB path a read of RESULT while the engine is
-busy INSERTS WAIT STATES and returns the finished answer, so no polling
+busy inserts wait states and returns the finished answer, so no polling
 is needed; the IOBUS cannot wait, so a caller there must poll
 STATUS.BUSY first or read a stale result (14.5.10).
 
@@ -87,7 +126,7 @@ costs a store most callers do not need, and a write while busy is an
 error. `divide_unsigned()` on a block left in signed mode divides signed
 - the register is the truth and this header does not paper over it.
 
-The operation verbs do NOT poll before writing their operands. The
+The operation verbs do not poll before writing their operands. The
 chapter's own flow does not, and a poll would cost more than the division
 - a CPU cannot issue two stores faster than the engine finishes.
 `wait_idle()` is there for a caller who wants the guarantee anyway, for

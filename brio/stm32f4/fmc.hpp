@@ -3,8 +3,10 @@
  *
  * The STM32F4's flexible memory controller (RM0090 ch. 37, RM0390
  * ch. 11) - the one peripheral of this family that does not talk to a
- * wire but ADDS ADDRESS SPACE: memory soldered outside the die, mapped
- * into the Cortex's own map and reached by a plain load or store.
+ * wire but adds address space: memory soldered outside the die, mapped
+ * into the Cortex's own map and reached by a plain load or store. A
+ * program uses it to bring up an SDRAM (a frame buffer's home) or a
+ * static memory once, at boot, and then treats the window as memory.
  *
  *  Fmc                the block: the AHB3 gate and reset line, the one
  *                     vector every half shares, the six memory windows
@@ -22,72 +24,96 @@
  *  FmcNor<n>          NOR flash, each pinning the memory type and
  *                     leaving only what that device needs.
  *
+ * The smallest use, an SDRAM on bank 2 (docs/stm32f4/fmc.md has it line
+ * by line, with the geometry and the timing of the STM32F429I-DISC1's
+ * device):
+ *
  *   using Sdram = brio::FmcSdram<2>;                  // SDNE1/SDCKE1
  *   Sdram::initialize(clock, geometry, timing, boot);
  *   volatile uint16_t* pixels = Sdram::at<uint16_t>(0);
  *
- * TWO BLOCKS WEAR THIS CHAPTER, AND THEY ARE NOT THE SAME PERIPHERAL.
+ * with the pads handed to the block on AF12 before initialize(), and
+ * nothing touching the window until initialize() has answered true.
+ *
+ * Who calls what, and from where. initialize(), configure(), timing(),
+ * memory_clock() and the static banks' init()/configure() are setup
+ * verbs: main(), after the clock task (the refresh count and the
+ * power-up delay are computed from the rates the clock type claims).
+ * initialize() runs before SysTick and the kernel if the program wants
+ * its memory first: its power-up delay is spun on a cycle count
+ * (Fmc::spin_at_least()), not slept. command() and every verb built on
+ * it - initialize(), self_refresh(), power_down(), normal(),
+ * memory_clock() - wait for SDSR.BUSY with a bounded spin (busy_spins,
+ * 100 000 polls) and answer false on a time-out rather than hanging.
+ * Nothing here masks interrupts. refresh_isr() is the body of the
+ * program's handler for Fmc::irq_line and nothing else calls it. The
+ * memory itself, once a bank is initialized, is ordinary storage
+ * reached through the volatile pointers at<T>() returns, from any
+ * context - subject to erratum 2.3.5 below for a CPU read.
+ *
+ * Two blocks wear this chapter, and they are not the same peripheral.
  * The F405 class, the F412 and the F413/F423 carry the FSMC: the static
  * half alone, under register names of its own and with no SDRAM
  * controller anywhere. The F42x/F43x, the F446 and the F469/F479 carry
  * the FMC: that register set plus the SDRAM banks and a few fields the
  * FSMC has not. This file is the FMC's, and on an FSMC part nothing in
- * it exists at all: `fsmc_present()` in stm32f4/device_tables.hpp is
- * what a program asks to learn which block the part really has, so that
- * an absent FMC never reads as "no external memory". The rest of the
- * pack - the F401, the F410, the F411 and the 48-pin F412 - has
+ * it exists at all: `fsmc_present()` in stm32f4/device_tables.hpp (the
+ * reserve: the table of what each part has, read off the device header)
+ * is what a program asks to learn which block the part really has, so
+ * that an absent FMC never reads as "no external memory". The rest of
+ * the pack - the F401, the F410, the F411 and the 48-pin F412 - has
  * neither.
  *
- * WHAT AN EXTERNAL MEMORY COSTS THAT AN INTERNAL ONE DOES NOT. Three
+ * What an external memory costs that an internal one does not. Three
  * things shape every verb below:
  *
- * 1. THE WINDOW IS LIVE BEFORE THE MEMORY IS. The address decoder
+ * 1. The window is live before the memory is. The address decoder
  *    answers as soon as the bank is enabled, and the AHB has no way to
  *    say "there is nothing there". A read of an SDRAM bank whose
- *    controller has not run its initialization sequence HANGS THE
- *    SYSTEM WITH NO FAULT (ES0206 2.3.3) - not a bus error, not a hard
+ *    controller has not run its initialization sequence hangs the
+ *    system with no fault (ES0206 2.3.3) - not a bus error, not a hard
  *    fault, a stopped machine. That is why initialize() is one verb
  *    that either completes the whole of 37.7.3 or returns false, and
  *    why nothing here hands out a pointer before it.
- * 2. THE CONTROLLER IS SHARED AND SERIAL. One access at a time, one set
+ * 2. The controller is shared and serial. One access at a time, one set
  *    of address and data pads for every bank; and on this silicon the
  *    dynamic and static halves cannot even be used in turn without
  *    care (ES0206 2.3.7: put the SDRAM in self refresh before touching
  *    a static bank, and issue a Normal command on the way back).
- * 3. THE CPU IS NOT THE ONLY MASTER, AND THE ERRATA KNOW IT. ES0206
+ * 3. The CPU is not the only master, and the errata know it. ES0206
  *    2.3.5: with the FMC holding stack, heap or variable data, an
  *    interrupt taken during a CPU read may corrupt the data or fault;
  *    reads by a DMA are not affected. 2.3.4 and 2.3.15 are the two
- *    faces of the read FIFO - one says ENABLE RBURST (a 16- or 8-bit
+ *    faces of the read FIFO - one says enable RBURST (a 16- or 8-bit
  *    burst read crossing a row boundary reads the next row wrong with
- *    the FIFO off), the other says the FIFO ON can serve a stale line
+ *    the FIFO off), the other says the FIFO on can serve a stale line
  *    when a burst read of one internal bank is interrupted by a read of
  *    another. They do not contradict each other so much as bracket the
  *    same race, and the driver's answer is the manual's default: the
- *    FIFO ON (SdramConfig::read_burst), because 2.3.4 has no other
+ *    FIFO on (SdramConfig::read_burst), because 2.3.4 has no other
  *    workaround while 2.3.15 has three.
  *
- * THE SDRAM CLOCK IS NOT A CLOCK OF THE RCC. It is HCLK divided by two
+ * The SDRAM clock is not a clock of the RCC. It is HCLK divided by two
  * or three inside this block (SDCR1.SDCLK), so a program that changes
  * HCLK changes the memory's clock and every timing programmed in
- * cycles under it. This driver is deliberately NOT a ClockUser: the
- * refresh rate and the seven SDTR fields are the DEVICE's nanoseconds
+ * cycles under it. This driver is deliberately not a ClockUser: the
+ * refresh rate and the seven SDTR fields are the device's nanoseconds
  * expressed in cycles, and rebasing them on a rate change would mean
  * re-running the initialization sequence, which is a program-wide
  * decision and not a fan-out. sdram_clock_hz() and
  * sdram_refresh_count() are the arithmetic a program does once, at the
  * rate it has chosen to stay at.
  *
- * WHAT THE PADS ARE IS NOT IN THIS FILE. Every FMC signal is AF12 on
+ * What the pads are is not in this file. Every FMC signal is AF12 on
  * this family, and which pad carries which line - and which of them a
- * BOARD actually wires - is a datasheet table and a schematic, not a
+ * board actually wires - is a datasheet table and a schematic, not a
  * register fact: a program hands the pads over with stm32f4/pin.hpp
  * before it calls initialize(), the way it does for every other
  * peripheral, and the pin list belongs beside the board it describes.
  *
- * CONCURRENCY. configure(), timing() and the command verbs are
+ * Concurrency. configure(), timing() and the command verbs are
  * read-modify-writes of registers with no set/clear twins and are meant
- * for setup. command() and initialize() BUSY-WAIT on SDSR.BUSY with a
+ * for setup. command() and initialize() busy-wait on SDSR.BUSY with a
  * bounded spin and answer false on a time-out rather than hanging.
  * Once a bank is initialized the memory itself is ordinary storage: a
  * load or a store, from any context, at the cost the bench findings
@@ -689,7 +715,7 @@ public:
     /// type is the ACCESS width, not the device's: the controller splits
     /// or masks whatever the AHB asks for (37.3.1), so a byte store into
     /// a 16-bit device drives one NBL and a word load takes two memory
-    /// cycles. NOTHING HERE CHECKS THAT THE BANK IS INITIALIZED - the
+    /// cycles. Nothing here checks that the bank is initialized - the
     /// caller does, because a read of an uninitialized bank hangs the
     /// machine with no fault (ES0206 2.3.3).
     template <typename T>
@@ -878,8 +904,8 @@ public:
     /// store of 0 into COUNT reads back as 40 and the timer keeps
     /// running at that rate (measured; docs/stm32f4/fmc.md). Anything
     /// below 41 is refused here so that no program can be built on the
-    /// sentence, and memory_clock(off) is what really leaves a device
-    /// unrefreshed.
+    /// sentence; neither this nor memory_clock(off) leaves a device
+    /// unrefreshed - only Fmc::reset() does (memory_clock() below).
     static bool refresh_rate(uint32_t count) {
         if (!sdram_refresh_count_valid(count)) {
             return false;
@@ -981,7 +1007,9 @@ public:
     /// `clock` is the CORE clock, used for the power-up delay alone; the
     /// memory clock is HCLK over SdramConfig::clock and nothing here
     /// needs to know it. The delay is spun, not slept, so this runs
-    /// before SysTick and before the kernel.
+    /// before SysTick and before the kernel. A setup verb, main context;
+    /// it masks nothing, and each command's wait is wait_ready()'s
+    /// bounded spin. The pads must already be the block's (AF12).
     template <typename Clock>
     static bool initialize(Clock clock, const SdramConfig& c, const SdramTiming& t,
                            const SdramInit& init) {

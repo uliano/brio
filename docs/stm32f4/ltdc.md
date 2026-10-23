@@ -1,18 +1,90 @@
 # LTDC, the LCD-TFT display controller (STM32F4)
 
-Documents of record: RM0090 Rev 22 ch. 16, whose first line is "this
+This document is for a programmer driving a parallel RGB panel from an
+STM32F4 that has a display interface (the F429/F439 and the F469/F479
+classes): the controller reads a rectangle of memory, the frame buffer,
+over and over and turns it into the panel's pixel clock, sync signals
+and data lines, with no CPU work per frame. `Ltdc` is the block (the
+pixel clock, the panel's timings, the enable, the reload of the layer
+registers, the events); `LtdcLayer<1|2>` is one of its two layers, a
+window onto a frame buffer; `LtdcFramebuffer<Pixel>` is that memory as
+a typed surface the program draws into.
+
+The smallest use, the first block of "How to use it" below: the
+240x320 panel of the STM32F429I-DISC1, its pixel clock and its timings:
+
+```cpp
+using Panel = brio::Ltdc;
+constexpr brio::LtdcTiming timing{.hsync = 10, .hbp = 20, .width = 240, .hfp = 10,
+                                  .vsync = 2, .vbp = 2, .height = 320, .vfp = 4};
+constexpr auto pll = brio::lcd_clock_config_for(8'000'000u, 6'000'000u, SysClock::pll.m);
+static_assert(pll.pll.n != 0, "this root cannot make that pixel clock exactly");
+
+board_claim_ltdc_pads();                        // AF14, and AF9 on four of them
+(void)Panel::pixel_clock(pll);
+(void)Panel::timing(timing);
+Panel::background(0, 0, 0);
+```
+
+Line by line: `timing` is the panel's data sheet - the synchronisation
+width, back porch, active size and front porch of a line and of a
+frame, none of them accumulated - and the driver does the arithmetic the
+registers want; `pll` is the pixel clock's PLL solved at compile time,
+6 MHz from the 8 MHz crystal through the main PLL's input divider
+(`SysClock` is the clock task, [clock.md](clock.md)), and the
+`static_assert` turns "no exact setting exists" into a compile error;
+`board_claim_ltdc_pads()` stands for the program's own function that
+hands the board's display pads to the block ([port.md](port.md)), since
+which pads a board wires is its schematic; `pixel_clock()` stops,
+programs and restarts that PLL and waits for its lock; `timing()` writes
+the four timing registers and the polarities; `background()` is the
+colour shown where no layer covers the screen. The second block below
+then describes a layer over a frame buffer, enables it, reloads and
+enables the controller.
+
+What decides correctness even there. The frame buffer's memory must be
+up before a layer points at it: on these boards that is the SDRAM, and
+[fmc.md](fmc.md)'s `initialize()` comes first. The pixel clock shares
+the main PLL's root and input divider, so it is solved against the
+system clock the clock task set, and `pixel_clock()` answers false, the
+PLL left off, when the rate is not exactly reachable or the PLL does not
+lock within `Rcc::ready_spins` (a million polls). A layer written by
+`LtdcLayer::configure()` is left disabled and nothing it wrote is in
+force until `reload()`: every layer register but the colour table is a
+shadow, and a read before the reload answers the old value ("What the
+silicon does" below). The panel's own controller, if it has one, must
+be told to take an RGB interface over its own bus first, and that is
+the program's, not this driver's. And the CPU writes the frame buffer
+and does not read it back (ES0206 2.3.5, [fmc.md](fmc.md)). Nothing
+here masks interrupts; `wait_reload()` spins, bounded at two million
+polls, and a register of the pixel-clock domain costs some 216 core
+cycles a read at this panel's 6 MHz (bench findings below).
+
+The rest of this page, in order: the documents of record; what the
+silicon does (the pixel clock's PLL, the three clock domains, the shadow
+registers and the reload race, the events and their two vectors, the
+timings and the layer window's arithmetic, blending, dithering, the
+pads); the types and verbs; how to use it, from the panel's bring-up to
+an indexed layer; the bench findings against the DISC1's panel,
+bandwidth included; and what is not covered.
+
+## Documents of record
+
+RM0090 Rev 22 ch. 16, whose first line is "this
 section applies only to" the parts with a display interface - RM0390
 Rev 6 and RM0383 Rev 4 have no such chapter, because the F446 and the
 F411 have no such peripheral. The pixel clock's PLL is RM0090 6.3.24
 (RCC_PLLSAICFGR) and 6.3.25 (RCC_DCKCFGR's PLLSAIDIVR). Errata: ES0206
-Rev 24 has SIXTEEN sections and NOT ONE of them is this peripheral's -
+Rev 24 has sixteen sections and not one of them is this peripheral's -
 the display controller and the accelerator beside it are the only two
 chapters of this stratum with no erratum at all. Datasheet DS10693
 table 12 is where the alternate function of each signal is stated (AF14
 for every one of them except four pads that carry theirs on AF9) and
 DS10693 table 107 is where the pixel clock's ceiling is: 83 MHz.
 Driver: `stm32f4/ltdc.hpp`; the presence facts are in
-`stm32f4/device_tables.hpp` and the PLL's verbs in `stm32f4/clock.hpp`.
+`stm32f4/device_tables.hpp` (the reserve: the table of what each part
+has, read off the device header) and the PLL's verbs in
+`stm32f4/clock.hpp`.
 Bench suite: `test_stm32f4_ltdc`, against the 240x320 panel the
 STM32F429I-DISC1 carries. Family fixture `test/family_stm32f4/ltdc.cpp`
 plus four negatives under `brio check stm32f4`.
@@ -27,7 +99,7 @@ a colour table per layer, per-pixel or constant alpha blending, colour
 keying and a pseudo-random dithering stage. Nothing of it exists on
 the parts without a display interface, and the reserve's
 `ltdc_present()` is what a program asks; the accelerator beside it
-(`stm32f4/dma2d.hpp`) is a WIDER fact, present on two parts of the
+(`stm32f4/dma2d.hpp`) is a wider fact, present on two parts of the
 same class that have no panel interface at all.
 
 **The pixel clock is a PLL of its own.** LCD_CLK comes off PLLSAI's R
@@ -47,12 +119,12 @@ the layer's address and length registers on HCLK, the reload and
 interrupt registers on PCLK2, and everything else - the timings, the
 global control, the background, the position counter and most of each
 layer - on LCD_CLK. An access to a register of the pixel-clock domain
-stalls the APB for six or seven PCLK2 periods PLUS five LCD_CLK ones,
+stalls the APB for six or seven PCLK2 periods plus five LCD_CLK ones,
 which at a slow pixel clock is most of the cost (measured below: 216
 core cycles a read at 6 MHz). And the domains are visible from the bus
 in a way the chapter does not say: **with the block clocked by the APB
 alone and no pixel clock at all, every register of the pixel-clock
-domain reads ZERO whatever its reset value is** (measured), while the
+domain reads zero whatever its reset value is** (measured), while the
 PCLK2 and HCLK ones read theirs. The read answers rather than hanging
 on a stall that cannot end.
 
@@ -60,8 +132,8 @@ on a stall that cannot end.
 `LTDC_LxCR` included: a write goes into a shadow that the active
 register takes either at once (SRCR.IMR) or at the beginning of the
 first line after the active display area (SRCR.VBR), and until then a
-READ RETURNS THE ACTIVE VALUE AND NOT WHAT WAS WRITTEN. Both reload
-bits are set by software and cleared by HARDWARE, and neither can be
+read returns the active value and not what was written. Both reload
+bits are set by software and cleared by hardware, and neither can be
 withdrawn. That is what makes a whole new picture - two layers, their
 windows, their formats and their buffers - install on one frame
 boundary; it is also why a read-modify-write of a layer register with a
@@ -71,7 +143,7 @@ each register whole.
 **And a read issued straight after a reload store races the reload**
 (measured, below). The reload crosses from the store's own domain into
 the pixel-clock one, and a read that starts before the crossing lands
-still answers the pre-reload value; a read of ANY register of that
+still answers the pre-reload value; a read of any register of that
 domain in front of it covers the crossing, since one such access is
 five LCD_CLK periods of stall by 16.3.2. `reload()` and `wait_reload()`
 spend that access themselves, with one read of GCR, so that a caller's
@@ -81,13 +153,13 @@ own read back is the reloaded value.
 describes LTDC_ISR as four status bits and says nothing about IER, but
 a FIFO underrun that really happened leaves ISR clear when FUIE is
 clear - the same rule this family's EXTI has for its pending bit
-([exti.md](exti.md)). So a program that WATCHES a status instead of
+([exti.md](exti.md)). So a program that watches a status instead of
 taking an interrupt still has to set the enable; only the vector is
 optional.
 
-**Four events over TWO vectors** (16.5, figure 85): the line and the
+**Four events over two vectors** (16.5, figure 85): the line and the
 register reload come out of the global one, the FIFO underrun and the
-transfer error out of the error one. The four flags share ONE register,
+transfer error out of the error one. The four flags share one register,
 so an ISR body that cleared everything standing would clear the other
 vector's event - and would clear an underrun out from under a program
 watching the flag. `Ltdc::isr()` takes a mask of what this vector
@@ -119,25 +191,25 @@ more is fetched and discarded.
 
 **Blending is always on, even for a disabled layer** (16.4.2). Layer 1
 is blended with the background, then layer 2 with that result; a
-disabled layer contributes its DEFAULT COLOUR, which is why both the
+disabled layer contributes its default colour, which is why both the
 default colour (transparent black) and the blending factors are left at
 their reset value on a layer nobody is using. Only two of the eight
 codes are legal in each of the two factor fields, and the pair the
 reset value names is "pixel alpha times constant alpha" against "one
 minus it".
 
-**Dithering is two bits a channel and the width is READ-ONLY.** GCR's
+**Dithering is two bits a channel and the width is read-only.** GCR's
 DRW, DGW and DBW return what the block does (16.7.5) and cannot be set;
 DEN is the switch, and it may be thrown while the controller runs.
 
 **What the pads are is not the driver's.** Twenty-eight signals at
 most, and how many bits of each channel a board wires is a schematic:
-a panel narrower than 24 bits takes the MOST SIGNIFICANT bits of each
+a panel narrower than 24 bits takes the most significant bits of each
 channel (16.3.3), so an 18-bit panel is wired to R[7:2], G[7:2] and
 B[7:2] and the controller is still programmed in 24 bits. **The layer's
-pixel format says what is in MEMORY, never what is on the wire.**
+pixel format says what is in memory, never what is on the wire.**
 
-**What is NOT this driver's at all** is the panel's own controller. A
+**What is not this driver's at all** is the panel's own controller. A
 TFT module usually carries one that has to be told to take an RGB
 interface before a pixel is fetched, and that conversation happens over
 some other bus. It is the board's business and the application's.
@@ -495,7 +567,9 @@ Implemented but not bench-verified:
   never shown: RGB565, ARGB8888 and L8 are what the suite displays. A
   format is a memory layout, so what would measure the rest is the same
   eyes as above.
-- **Pixel clocks other than 6 MHz** - one panel, one rate. The
+- **Pixel clocks other than 6 MHz** - one panel, one rate on this
+  suite's board (the 32F469IDISCOVERY's 26.4 MHz, below, is the DSI
+  suite's and drives no pad). The
   arithmetic is exact and compile-time checked over the whole
   (N, R, divider) space, and DS10693 table 107's ceiling of 83 MHz is
   stated and not enforced: what a second panel would measure is whether

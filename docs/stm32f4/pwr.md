@@ -1,6 +1,83 @@
 # Power control and the sleep sites - the stopping half (STM32F4)
 
-Documents of record: RM0390 Rev 6 ch. 5 (the power controller of the
+This document is for a programmer whose STM32F4 program should sleep
+deeper than the kernel's own idle, or end in a Standby on purpose. The
+kernel's idle hook only executes a WFI ([platform.md](platform.md)), and
+out of reset that WFI is the shallow Sleep mode; what makes the same WFI
+a Stop is something armed beforehand. `Pwr` is the power controller as a
+monostate (a class with static members only, never instantiated): the
+regulator scale the clock task uses, the bits that arm a mode, the
+wake-up pins, the voltage detector, the backup regulator and the
+debugger's low-power bits. The two sleep sites of `stm32f4/sleep.hpp`
+are this family's half of `util/power.hpp`'s model
+([design/power.md](../design/power.md)): a sleep site is the object that
+arms a depth just before the kernel's idle WFI and puts the machine back
+after the wake, and `PowerManager`, an active object (a component of a
+brio program with its own event queue, served one event at a time by
+the kernel, [docs/learn/introduction.md](../learn/introduction.md)),
+decides when to ask it. The depths it asks for are the ladder's four
+rungs, `none`, `light`, `standby` and `deep` ("The ladder" below).
+`Stm32f4SleepSite` arms them; `Stm32f4TimedSleepSite` does the same and
+also keeps kernel time honest across a Stop, with the RTC as the alarm
+and as the witness, the reading that measures how long the world moved
+while the core clock stood still.
+
+The smallest use, the first block of "How to use it" below - a program
+that wants the ladder and a clock that survives a Stop:
+
+```cpp
+#include "stm32f4/sleep.hpp"
+
+using SysClock = brio::Clock<brio::ClockSource::pll_hse, 180'000'000,
+                             8'000'000, brio::HseMode::bypass>;
+using Site = brio::Stm32f4SleepSite<SysClock>;
+
+// The manager arms; the kernel's idle path is what stops.
+using Pm = brio::PowerManager<P, Site, brio::PowerConfig{}, Engine>;
+```
+
+Line by line: `SysClock` is the program's clock task, the PLL at
+180 MHz from the Nucleo-F446RE's 8 MHz in bypass ([clock.md](clock.md));
+`Site` is the plain sleep site, templated on that clock because a Stop
+leaves SYSCLK on the 16 MHz HSI and the site re-runs the clock task when
+it disarms; `Pm` is the power manager over the program's platform `P`
+and the site, at the default `PowerConfig`, with `Engine` standing for
+the program's voters, the active objects the manager asks before it arms
+a deep rung. `Pm` goes into the program's `Tenuto` list beside the other
+active objects.
+
+What decides correctness even there. On the plain site kernel time
+stands still for the whole Stop, because SysTick stops with HCLK: a time
+event armed across a deep rung matures late by the time the Stop lasted,
+and nothing refuses it (measured below: a 500 ms event matured after
+727 ms of wall). The manager's own guard is a deadline nearer than
+`min_deep_ticks`, which refuses a deep round; a farther deadline is
+slept across, and a program whose time events must hold through a Stop
+takes the timed site. Until the site's `disarm()` re-runs the clock
+task, at the manager's next dispatch after the wake, code runs on the
+16 MHz HSI with dividers computed for 180 MHz - the interrupt handler
+that woke the chip among it - which is why the timed site's `isr()`
+restores the clock first. The timed site's `init()` answers false when
+the RTC domain refuses (another clock source already selected, an
+oscillator that never started), and the site then works as the plain
+one, so the caller looks at the answer; its vector `RTC_WKUP_IRQHandler`
+is the program's to bind to `Site::isr()`, and `init()` enables that
+NVIC line itself, without which a Stop is never left. Two board facts
+decide a measurement: OpenOCD sets the debugger's low-power bits at
+every connection and they survive every reset but a power-on, so a
+program that weighs a sleep clears them at boot
+(`Pwr::debug_low_power(false)`); and a Stop taken while the console's
+last byte is still in the shift register truncates it, so a program
+waits for the transport's `tx_idle()` before the sleep.
+
+The rest of this page, in order: the documents of record; what the
+silicon does; the ladder and why it is not the identity; the timed site;
+the types and verbs; how to use it, with the timed site, another price
+of Stop and Standby; the bench findings; and what is not covered.
+
+## Documents of record
+
+RM0390 Rev 6 ch. 5 (the power controller of the
 F446) and 33.16 (the debug support for low-power modes); RM0090 Rev 22
 ch. 5, whose 5.4 is the F405 class's register description and whose 5.5
 is the F42x/F43x's; RM0383 Rev 4 ch. 5 for the F411; DS10693 Rev 11
@@ -19,13 +96,15 @@ tree is `stm32f4/clock.hpp`'s `DynamicClock`
 in the low-voltage mode on a part without the pair, under-drive without
 the low-voltage mode it modifies, and a timed site whose RTC cannot
 divide a second finely enough. The reference suite is
-`test_stm32f4_power`.
+`test_stm32f4_power`; a letter of a suite is one command key of its
+console and the group of verdicts it runs, and `z` is the key that runs
+them all.
 
 ## What the silicon does
 
 **The mode is two registers in two places.** The Cortex-M4 has one bit,
 SCB->SCR.SLEEPDEEP, which says "the next WFI is a deep sleep";
-PWR_CR.PDDS says WHICH deep sleep (Stop or Standby), and PWR_CR's LPDS,
+PWR_CR.PDDS says which deep sleep (Stop or Standby), and PWR_CR's LPDS,
 FPDS, MRLVDS/LPLVDS and UDEN say what a Stop costs to leave. Neither
 register is the other's and both must agree before a WFI does anything
 but Sleep, so `Pwr` owns them both: SLEEPDEEP is written in that file
@@ -36,7 +115,7 @@ unmask that take whatever somebody else armed.
 **Three modes, and only two of them are a ladder a program can resume
 from** (5.3). Sleep stops the CPU clock and nothing else. Stop stops
 every clock in the 1.2 V domain, disables the PLLs, the HSI and the HSE,
-and KEEPS SRAM and every register. Standby powers the 1.2 V domain off:
+and keeps SRAM and every register. Standby powers the 1.2 V domain off:
 "SRAM and register contents are lost except for registers in the backup
 domain ... and Standby circuitry" (5.3.6), and the wake is a reset.
 
@@ -46,7 +125,7 @@ oscillator is selected as system clock"; the PLL and the HSE are off,
 over-drive is disabled ("entering Stop mode disables the Over-drive
 mode, as well as the PLL") and the regulator's active scale is 3
 ("when the microcontroller enters in Stop mode, the voltage scale 3 is
-automatically selected"). Everything OUTSIDE the clock tree survives:
+automatically selected"). Everything outside the clock tree survives:
 the flash latency, the APB prescalers, every peripheral's registers and
 the whole of SRAM. A program running at 180 MHz therefore resumes at
 16 MHz with a SysTick reload and a USART divisor meant for eleven times
@@ -56,11 +135,11 @@ wake.
 
 **The VOS field is not what a Stop changes.** Measured: after a Stop the
 PWR_CR.VOS field still holds the value the program wrote (scale 1 on
-this board) while PWR_CSR.VOSRDY is DOWN. 5.1.3's sentence is about the
-regulator's ACTIVE output, which follows the field only "when the PLL is
+this board) while PWR_CSR.VOSRDY is down. 5.1.3's sentence is about the
+regulator's active output, which follows the field only "when the PLL is
 ON" - so a Stop does not reset the register, it merely makes the
 programmed scale inactive until the PLL comes back. ODEN and ODSWEN, by
-contrast, ARE cleared by hardware (5.4.1: "cleared automatically by
+contrast, are cleared by hardware (5.4.1: "cleared automatically by
 hardware after exiting from Stop mode"), which was also measured.
 
 **A Stop is only entered if nothing is pending.** Table 18's note: "all
@@ -70,10 +149,10 @@ be reset. Otherwise, the Stop mode entry procedure is ignored and
 program execution continues" - and the Cortex's WFI is itself a no-op
 with an interrupt pending. A Stop that does not happen is not an error
 condition anywhere in the silicon: the instruction falls through. So
-everything that judges a sleep in this stratum judges it by TIME ELAPSED
+everything that judges a sleep in this stratum judges it by time elapsed
 and never by a flag.
 
-**And it is only LEFT through the NVIC.** 5.3.5's exit table: a
+**And it is only left through the NVIC.** 5.3.5's exit table: a
 WFI-entered Stop is left by "all EXTI lines configured in Interrupt mode
 (the corresponding EXTI Interrupt vector must be enabled in the NVIC)".
 Measured, and it costs a reboot when forgotten: a Stop entered with the
@@ -81,9 +160,9 @@ RTC's wake-up line configured but its NVIC channel disabled never comes
 back, and the watchdog is what ends it.
 
 **One wake-up flag for every source.** Unlike the STM32G0's per-pin
-WUFx, this family has a single PWR_CSR.WUF raised by any WKUP pin OR any
-of the RTC's five events (5.4.2), so it says THAT the device was woken
-and never BY WHAT. SBF beside it says the device was in Standby and is
+WUFx, this family has a single PWR_CSR.WUF raised by any WKUP pin or any
+of the RTC's five events (5.4.2), so it says that the device was woken
+and never by what. SBF beside it says the device was in Standby and is
 cleared only by a power-on reset or by CSBF, which is what lets the boot
 after a Standby tell itself apart from the boot after a reset.
 
@@ -98,7 +177,7 @@ workaround is the erratum's own four steps and `prepare_standby()` is
 them: disable every wake-up source, clear the flags, re-enable, enter.
 
 **The wake-up pins have no polarity to choose.** 5.4.2: an enabled WKUPn
-pin is "forced in input pull down configuration" and a RISING edge is
+pin is "forced in input pull down configuration" and a rising edge is
 the wake, so a program does not configure the pad at all and must not
 drive it. The note that costs a sleep: "an additional wakeup event is
 detected if the WKUP pin is enabled ... when the WKUP pin level is
@@ -117,7 +196,7 @@ debug ..., it wakes up the system from Stop mode". A Stop that looks
 like it lasts a millisecond is a debugged board and not a silicon fact.
 
 **What is offered and never set.** PWR_CR's FISSR and FMSSR stop the
-flash interface, or the flash itself, WHILE THE SYSTEM RUNS - and 5.4.1
+flash interface, or the flash itself, while the system runs - and 5.4.1
 says "this bit could not be set while executing with the Flash itself.
 It should be done with a specific routine executed from RAM". Nothing in
 brio runs from RAM on this family, so the two verbs exist and no code
@@ -126,7 +205,9 @@ here calls them. ADCDC1 is AN4073's and is the same kind of offer.
 **What is elsewhere.** PWR_CR.DBP, the backup domain's write gate, is
 `RtcDomain::unlock()` in `stm32f4/rtc.hpp`: one register bit, one owner,
 and the owner is the chapter whose registers it unlocks. The BOR levels
-are option bytes and belong to the flash chapter's provisioning verb.
+are option bytes: the flash chapter reads them (`FlashOptions::bor_level`)
+and writes none, provisioning being a tool's over the debug port
+([flash.md](flash.md)).
 
 ## The ladder, and why it is not the identity
 

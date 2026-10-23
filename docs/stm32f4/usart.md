@@ -1,6 +1,112 @@
 # USART - the serial ports (STM32F4)
 
-Documents of record: RM0090 Rev 22 ch. 30 (RM0390 Rev 6 ch. 25 and
+This document is for a programmer who needs a serial port on an STM32F4:
+the console a program prints to, a line-oriented link, a byte transport
+to another chip, or one of the protocol shapes the peripheral offers
+(LIN, IrDA, smartcard, a synchronous master, mute mode). `Usart<n>` is
+the instance, one function per register fact, for a program that drives
+the block by hand. `Uart<n, pins, ...>` is the task over it (a task, in
+brio, is a driver layer with state of its own, served from its
+peripheral's interrupt, that an active object or `print` calls; an
+active object is a component of a brio program with its own event
+queue, served one event at a time by the kernel,
+[docs/learn/introduction.md](../learn/introduction.md)): a byte
+transport with a transmit ring and a receive ring, both served from the
+instance's interrupt, with the surface `util/serial_port.hpp` and
+`print()` are written against (`util/stream.hpp`'s `ByteTransport`), so
+both run here unchanged ([design/serial.md](../design/serial.md) is the
+stack above it). Two optional DMA engines move the bytes without the
+CPU ([dma.md](dma.md)).
+
+The smallest use, the console on USART1's PA9/PA10 (the STM32F429I-DISC1
+and the black pill), the opening of "How to use it" below:
+
+```cpp
+constexpr brio::UartPins console_pins{
+    .tx = {'A', 9, brio::PinFunction::af7},    // USART1_TX (the datasheet's AF table)
+    .rx = {'A', 10, brio::PinFunction::af7},   // USART1_RX
+};
+using Serial = brio::Uart<1, console_pins>;
+constexpr Serial serial;
+
+extern "C" void USART1_IRQHandler() {
+    if (Serial::isr()) { brio::post<SerialLines>(brio::RxActivity{}); }
+}
+
+Serial::init(clock, 115200);                       // false: the rate is unreachable
+brio::print(serial, "hello", brio::crlf);
+```
+
+Line by line: `console_pins` names the two pads with the
+alternate-function number the datasheet gives USART1 on them (AF7 for
+USART1..3, AF8 for the rest), which nothing in the code can check;
+`Serial` names the transport type (`1` the instance, the pads, and every
+other template argument at its default: a 64-byte receive ring, a
+256-byte transmit ring, no DMA engines, the default options); `serial`
+is an empty tag object of that type, the argument `print` takes to pick
+the port, since the type's functions are all static and it has no
+object of its own; the `extern "C"` function is the interrupt handler,
+as in C, under the vector's name in ST's startup code; `isr()` returns
+true when a received byte made the receive ring non-empty (one true per
+empty-to-non-empty transition, not one per byte; under a receive engine
+the same edge is gated once per idle-to-busy transition of the consumer,
+"Types and verbs" below), the edge on which the handler posts
+`RxActivity` to `SerialLines`, which stands for the program's
+`SerialPort` active object, the one that assembles lines
+(`util/serial_port.hpp`; how it is declared, and that the active object
+receiving its lines comes before it in the `Tenuto` list, is
+[design/serial.md](../design/serial.md)'s); `init()` takes the clock
+task's tag (`constexpr SysClock clock;`, [clock.md](clock.md)) and the
+baud rate, enables the instance's receive interrupt and its NVIC line,
+and answers false when that rate cannot be produced from the instance's
+bus clock, when the format asks for nine bits, or when the resource
+refuses the frame; `brio::crlf` is the line ending. The excerpt is not a
+program: `Serial::init()` runs in `main()` after `SysClock::init()` and
+before `brio::enable_interrupts()`, and the `print` belongs to an active
+object's handler or to `main()` once interrupts are on.
+
+What decides correctness even there: `init()` after the clock task's
+(`SysClock::init()`, [clock.md](clock.md)). The divisor is computed from the rate of the instance's own APB clock
+(PCLK2 for USART1 and USART6, PCLK1 for the rest) as the clock type
+claims it, not from the hardware, so a port initialized while the chip
+still runs every bus at its 16 MHz reset rate, under a 180 MHz clock
+type whose PCLK2 is 90 MHz, divides 16 MHz by the divisor meant for
+90 MHz and speaks at 16/90 of the rate asked - about 20 kbaud for
+115200 - until the clock task raises the bus (derived from the divisor
+arithmetic; the platform page's bench notes record the same wrong baud
+when the clock task failed, [platform.md](platform.md)); nothing
+refuses it. Then the two pads' numbers; and the instance's interrupt
+vector, bound to `isr()` by the program: every instance has a vector of
+its own on this family, and a vector left unbound is the crt's weak
+alias of `Default_Handler`, a silent spin, where the port's first
+receive or transmit interrupt stops the program. Three more things to
+know before the first `print`: `print` waits until the ring has taken
+every byte, so a long message printed from an active object's handler
+stalls every other active object for that long
+([design/serial.md](../design/serial.md)), and a `print` that does not
+fit the ring's room waits for ever where nothing drains the ring -
+before `init()` and `enable_interrupts()`, or inside an interrupt
+handler, which the transmit interrupt cannot interrupt
+(`util/print.hpp`, "Delivery policy"); the transmit ring has one
+producer, the main context (`main()` and every active object's handler
+run there, one at a time, so together they are one producer), so
+`write_byte`, `write_bulk` and `print` are called from active objects
+and from `main`, never from an interrupt handler, and both write
+functions copy, the caller's buffer being free when the call returns;
+and the instances
+are not alike (UART4, UART5, UART7 and UART8 have no synchronous mode,
+smartcard, flow control or half stop bits, and which instances a part
+has is a per-part fact, "What the silicon does" below).
+
+The page is long because the chapter is. In order: the documents of
+record; what the silicon does; the types and verbs, with the receive
+engine's rules; how to use it; the bench findings, most of the page,
+with the measurements against a far board and the rendezvous's bound;
+the peer firmware a far board's suite drives; what is not covered.
+
+## Documents of record
+
+RM0090 Rev 22 ch. 30 (RM0390 Rev 6 ch. 25 and
 RM0383 Rev 4 ch. 19 are its twins: one register description, three
 manuals), the datasheets' alternate-function tables for the pads, and
 the errata's USART items - ES0206 2.11.x, ES0298 2.13.x, ES0287 2.10.x:
@@ -8,7 +114,7 @@ the errata's USART items - ES0206 2.11.x, ES0298 2.13.x, ES0287 2.10.x:
 "break frame is transmitted regardless of CTS", "guard time not
 respected when data are sent on TXE events", "RTS is active while RE
 or UE = 0", and their siblings. Two reach the transport: the first,
-because the receive engine's burst edge IS the line's IDLE (below) and
+because the receive engine's burst edge is the line's IDLE (below) and
 the erratum has no workaround, and on the F446 ES0298 2.13.2 (PE
 cleared by a write of DR in full duplex), because the task counts
 parity errors while it may be transmitting - both staged from a foreign
@@ -17,7 +123,7 @@ one idle frame from a faster sender, and read entry for entry the same
 on the far STM32G0, whose sheet lists no such item; the second
 reproduced in the erratum's order and absent from the task). ES0298
 2.13.3 (no PE for an address with a parity error that ends mute mode)
-is staged too, and reproduces after a SOFTWARE mute alone. The rest
+is staged too, and reproduces after a software mute alone. The rest
 shape nothing in it (no break, no smartcard and no flow control in the
 transport), each of which the mode's future user meets. Driver:
 `stm32f4/usart.hpp` (`Usart<n>` the resource, `Uart<n, pins, rx_size,
@@ -25,7 +131,8 @@ tx_size, TxEngine, RxEngine, opts>` the task, the vocabulary
 `UartFormat`, `UartOptions`, `UartPins`, `MuteConfig`, `LinConfig`,
 `IrdaConfig`, `SmartcardConfig`, `UsartSyncConfig`, `UsartFlag`, the
 divisor arithmetic), over the reserve's instance facts
-(`stm32f4/device_tables.hpp`), with the engine slots filled from
+(`stm32f4/device_tables.hpp`, the table of what each part has, read
+off the device header), with the engine slots filled from
 [dma.md](dma.md) (`stm32f4/dma_engine.hpp` the empty slot's tag). The
 family fixture is `test/family_stm32f4/usart.cpp` with the negatives
 that refuse an absent instance, flow control on a UART, an engine off
@@ -35,8 +142,10 @@ stream's count, a receive level on a port with no receive engine, and
 one pad twice. Bench: the console apps
 and the platform suite on the four boards, the engined console in
 `test_stm32f4_dma`, the transport on USART6's single-wire loop in
-`test_stm32f4_serial` (the Nucleo-F446RE) - and, under its second
-all-key `t`, USART1 against the desk's STM32G0B1RE running `usart_peer`
+`test_stm32f4_serial` (the Nucleo-F446RE; a letter of a suite is one
+command key of its console and the group of verdicts it runs, `z` the
+key that runs them all) - and, under its second all-key `t`, USART1
+against the desk's STM32G0B1RE running `usart_peer`
 ("Against a far board" below) - its cost in `bench_stm32f4` letter u.
 The instrument for a far board's suite is this stratum's `usart_peer`
 ("The peer" below).
@@ -44,8 +153,8 @@ The instrument for a far board's suite is this stratum's `usart_peer`
 ## What the silicon does
 
 **The classic STM32 USART**: SR/DR/BRR/CR1/CR2/CR3/GTPR - the block the
-CH32V00x stratum drives under WCH's names, and NOT the STM32G0's. The
-flags are cleared by READ SEQUENCES and not by a clear register (30.6.1):
+CH32V00x stratum drives under WCH's names, and not the STM32G0's. The
+flags are cleared by read sequences and not by a clear register (30.6.1):
 PE, FE, NE, ORE and IDLE by reading SR then DR; TC by reading SR then
 writing DR, or by writing 0; RXNE by reading DR; LBD and CTS by writing
 0 to SR. The interrupt receiver's handler is written around those
@@ -57,7 +166,7 @@ DR.
 only for what that status read saw. Measured on the F446 with the
 receive stream running and no read of DR by the CPU, the facts behind
 `test_stm32f4_serial`'s letters d and f: a break's FE, seen by a read of SR, is gone
-after the stream reads the next frame; a FE raised AFTER a status read
+after the stream reads the next frame; a FE raised after a status read
 survives the stream's read of its own frame; a FE seen by a status read
 and raised again by the next frame is cleared by that frame's read - the
 same bit; and an IDLE cleared this way also forgets the idle the clearing
@@ -82,21 +191,21 @@ from those four measurements.
 | the bit-band alias of CR1 (RM0390 2.2.5, PM0214 2.2.5) | the single-bit interrupt enables | one store, atomic against a handler that rewrites CR1's other bits - the engine's vector does |
 | TC, written 0 to clear (25.4.13 step 6) | at every transmit block's start | the stream's writes of DR do not run TC's software sequence; tx_idle() must not answer from the frame before the block |
 
-**Ten instances at most, and the NAME says what an instance has.**
+**Ten instances at most, and the name says what an instance has.**
 USART1, USART2 and USART6 on every part but the F410Tx (no USART6),
 USART3 and UART4/5 from the F405 class, UART7/8 on the F42x/F43x, F413
 and F469 classes, UART9/10 on the F413 alone. Table 148 (RM0090 30.5):
 UART4, UART5, UART7, UART8 have no synchronous mode, no smartcard, no
 hardware flow control - and 30.6.5 adds that the 0.5 and 1.5 stop bits
 are not theirs. USART1, USART6 and the F413's UART9/10 sit on APB2,
-every other instance on APB1: the divisor divides ITS bus's clock, and
+every other instance on APB1: the divisor divides its bus's clock, and
 on this family the two buses differ from HCLK at every rate above their
 ceilings ([clock.md](clock.md)) - 45 vs 90 MHz at 180.
 
 **The baud divisor** (30.3.4): USARTDIV = fCK / (8 x (2 - OVER8) x
 baud), a 12-bit mantissa and a 4-bit fraction in BRR. At OVER8 = 0 the
 register value is fCK / baud in sixteenths with no field arithmetic; at
-OVER8 = 1 fCK / baud is USARTDIV in EIGHTHS, the fraction three bits and
+OVER8 = 1 fCK / baud is USARTDIV in eighths, the fraction three bits and
 bit 3 clear (30.6.3), for twice the reachable rate at half the
 receiver's tolerance - the manual's own example, 8 MHz and 9600 baud,
 is BRR 0x681, pinned in the family fixture. A USARTDIV below 1 - 16
@@ -107,7 +216,7 @@ and so on - no sharing to sort out in a handler.
 
 **The frame**: M selects 8 or 9 bits with the parity bit counted in,
 so seven data bits exist only with parity and nine only without; STOP
-gives 1, 0.5, 2 and 1.5 stop bits, the halves the FULL instances'.
+gives 1, 0.5, 2 and 1.5 stop bits, the halves the full instances'.
 
 **The modes exclude each other** the way 30.3.8 .. 30.3.11 say: LIN
 wants CLKEN, STOP, SCEN, HDSEL and IREN clear; IrDA wants one stop bit
@@ -300,7 +409,9 @@ extern "C" void DMA2_Stream1_IRQHandler() {
     if (Link::dma_isr()) { brio::post<LinkLines>(brio::RxActivity{}); }   // the lap's marks
 }
 extern "C" void DMA2_Stream6_IRQHandler() { (void)Link::dma_isr(); }      // transmit blocks
-``` A mode beyond the
+```
+
+A mode beyond the
 transport - a LIN break, a muted receiver - through `brio::Usart<1>`'s
 verbs on the same instance.
 

@@ -2,55 +2,83 @@
  * nvm_flash.hpp
  *
  * The AVR DA/DB flash as a FlashMedia (util/nv_heap.hpp): the backend
- * that lets the target-independent block allocator run on this silicon.
+ * that lets the target-independent block allocator, NvHeap, keep blocks
+ * of flash that survive a reset and a page-selective reflash - a
+ * calibration table, a font - in the flash the image does not occupy.
+ * NvmFlash is a monostate (static functions, no instances: there is one
+ * flash); a program names it as the heap's medium and calls the heap,
+ * never these verbs. On the AVR EA this header compiles to a refusal
+ * (below).
  *
- * THE GRANULARITIES ARE NOT THE SAME NUMBER. An erase takes down a
- * 512-byte page; a program writes ONE 16-BIT WORD, and a word may only
+ * The smallest use, a table found again or stored once (util/nv_heap.hpp
+ * has the verbs; docs/avrxt/nvm.md, "NvmFlash - this flash as a block
+ * store", has the whole example):
+ *
+ *     brio::NvHeap<brio::NvmFlash> heap;     // RAM only until it is mounted
+ *     const auto& r = heap.mount();          // read-only: no cycle spent
+ *     if (!r.mounted()) { ... }              // the image has grown over the map home
+ *     if (const auto block = heap.find(cal_id)) {
+ *         block->read(0, std::span<uint8_t>(table, block->length));
+ *     }
+ *
+ * What it needs and what it costs. The fuses must give the image a
+ * section above BOOT to write into: under the shipping BOOTSIZE = 0 the
+ * whole flash is BOOT, no software can write any of it, and the middle
+ * zone below is empty. program() and erase() halt the CPU for the whole
+ * operation, interrupts included - about 83 us a word and about 10 ms a
+ * page erase, measured (docs/avrxt/nvm.md) - so they belong to setup in
+ * main() or to an active object's handler that accepts that stall,
+ * never to an interrupt handler; read() and zones() are reads, legal
+ * from any context. Every verb returns when its operation is over, and
+ * none keeps the caller's buffer.
+ *
+ * The granularities are not the same number. An erase takes down a
+ * 512-byte page; a program writes one 16-bit word, and a word may only
  * be written once between erases. That is why the concept keeps the two
  * apart - on this part they are 512 and 2, elsewhere they are 2048 and
  * 8, and code that says "page" for both is code that will be wrong on
  * the next silicon.
  *
- * ADDRESSES ARE 24-BIT AND GO THROUGH ELPM/SPM, never through the
+ * Addresses are 24-bit and go through ELPM/SPM, never through the
  * data-space FLMAP window - the discipline avrxt/nvm.hpp is built on and
- * the reason the DA's FLMAP-vs-protection erratum is inapplicable here
- * by construction. Every verb below is one call into that driver, which
- * keeps its own validation (alignment, device bounds, the section
- * geometry from the fuses, the protection bits, the whole-range check
- * the multi-page-erase erratum makes necessary).
+ * the reason the DA's FLMAP-vs-protection erratum (DS80000882C 2.7.1)
+ * is inapplicable here: no verb writes through the window. Every verb
+ * below is one call into that driver, which keeps its own validation
+ * (alignment, device bounds, the section geometry from the fuses, the
+ * protection bits, the whole-range check the multi-page-erase erratum
+ * makes necessary).
  *
- * THE ZONES, AND WHERE THEIR BOUNDS COME FROM. gcc puts the code and the
+ * The zones, and where their bounds come from. gcc puts the code and the
  * .data initializers low and .rodata in a 32 KB flash section reached
  * through the window (96 KB in on a 128 KB part), so the free flash of a
- * linked image is not one remainder at the top but TWO bands, and both
+ * linked image is not one remainder at the top but two bands, and both
  * of their inner edges are linker symbols that move with every build:
  *
  *   MIDDLE  ceiling  __rodata_load_start, rounded down to a page
- *           floor    __data_load_end rounded up to a page, RAISED TO THE
- *                    BOOT BOUNDARY - SPM cannot write inside BOOT
+ *           floor    __data_load_end rounded up to a page, raised to the
+ *                    BOOT boundary - SPM cannot write inside BOOT
  *                    whatever the fuses say, and with the bench geometry
  *                    (BOOTSIZE = 128) all the code is in BOOT anyway
  *   TAIL    ceiling  the end of the flash (the heap carves its map home
  *                    out of the top of this zone by itself)
  *           floor    __rodata_load_end, rounded up to a page
  *
- * The symbols are the LOAD addresses, which on this toolchain are real
- * flash addresses; the RUN-time twins of the same data (__rodata_start
+ * The symbols are the load addresses, which on this toolchain are real
+ * flash addresses; the run-time twins of the same data (__rodata_start
  * and friends) are data-space aliases based at 0x800000 and would be
  * nonsense here. Only the *_load_* ones are read, and always through
  * pgm_get_far_address, because a plain &symbol is 16 bits wide on this
  * part and would silently lose the top of the memory.
  *
- * THE BUILD ID is a link-time constant, not a compile-time one:
+ * The build id is a link-time constant, not a compile-time one:
  * CMakeLists.txt's avr_add_app() passes -Wl,--defsym,__nvheap_build_id=<newest
  * source mtime> to every image, the same way it locks FLMAP (a
  * wall-clock id would make every relink a different image and defeat
- * reflashing an unchanged one). It is read as a 32-bit
- * IMMEDIATE (the four relocation bytes of the symbol's value), because
- * the value is a number and not an address - taking &symbol would
- * truncate it to the 16 bits a pointer has here. It is recorded in every
- * map version and NOTHING decides on it: a block's validity is its
- * checksum's business.
+ * reflashing an unchanged one). It is read as a 32-bit immediate (the
+ * four relocation bytes of the symbol's value), because the value is a
+ * number and not an address - taking &symbol would truncate it to the
+ * 16 bits a pointer has here. It is recorded in every map version and
+ * nothing decides on it: a block's validity is its checksum's business.
  */
 
 #pragma once
@@ -75,9 +103,10 @@ static_assert(!brio::has_nvm_page_buffer,
 #include "util/nv_heap.hpp"
 
 extern "C" {
-/// The epoch of the link, injected by CMakeLists.txt's avr_add_app(). Declared as an
-/// array so that no code can be tempted to dereference it: it is a
-/// VALUE, and only its relocation bytes are ever read.
+/// The build id, the newest source timestamp as an epoch, injected by
+/// CMakeLists.txt's avr_add_app(). Declared as an array so that no code
+/// can be tempted to dereference it: it is a value, and only its
+/// relocation bytes are ever read.
 extern const char __nvheap_build_id[];
 }
 
@@ -131,7 +160,8 @@ struct NvmFlash {
     /// CPU is halted for the full ~10 ms.
     static bool erase(uint32_t addr) { return Nvm::erase(addr, FlashErase::page); }
 
-    /// The epoch of the link, as four relocation bytes. Diagnostic only.
+    /// The build id (the newest source timestamp, not the time of the
+    /// link), as four relocation bytes. Diagnostic only.
     static uint32_t build_id() {
         uint32_t v;
         __asm__("ldi %A0, lo8(__nvheap_build_id)\n\t"

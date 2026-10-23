@@ -1,6 +1,58 @@
 # DAC (STM32F4)
 
-Documents of record: RM0090 Rev 22 ch. 14 and RM0390 Rev 6 ch. 14 - the
+This document is for a programmer who needs a voltage out of a pad: a DC
+level, a value held until a trigger, a triangle or noise wave, or a
+table played by a timer through the DMA. `Dac` is the converter, one
+block with two 12-bit channels whose outputs are PA4 and PA5, one
+function per register fact; channels are counted from 0 (channel 0 is
+the manual's DAC_CH1 on PA4). The F401, F411 and F412 have no DAC, and
+on them `Dac` does not compile.
+
+The smallest use, a DC level on a pad, the first block of "How to use
+it" below:
+
+```cpp
+using Pa4 = brio::Pin<'A', 4>;                   // DAC_OUT1 on every part
+brio::Dac::init();
+brio::Dac::claim_pad<Pa4>();
+brio::Dac::configure(0, brio::DacChannelConfig{});   // buffered, untriggered
+brio::Dac::enable(0, true);
+brio::delay_us(clock, 20);                       // tWAKEUP
+brio::Dac::write(0, brio::dac_code(1650, brio::Dac::steps, 3300));
+```
+
+Line by line: `Pa4` names the pad channel 0 drives; `init()` opens the
+DAC's bus clock and resets the block, both channels off, and touches no
+pad; `claim_pad<Pa4>()` puts PA4 in analog mode; `configure()` writes
+channel 0's options - the default `DacChannelConfig{}` is the output
+buffer on, no trigger, no wave, no DMA - and leaves the channel
+disabled; `enable()` switches the channel on, and the 20 us wait covers
+tWAKEUP, the time the datasheet gives the output to come up; `write()`
+puts a 12-bit right-aligned code in the holding register, which reaches
+the pad one APB1 cycle later because no trigger is selected, and
+`dac_code()` (`util/analog.hpp`) turns 1650 mV against a 3300 mV
+reference into that code.
+
+What decides correctness even there. The pad goes to analog mode before
+the channel is enabled: the output is connected to the pin as soon as
+the channel is on, and a pad still in this family's reset state (input
+floating, its input buffer live) sits across a driven analog node; nothing
+in `init()`, `configure()` or `enable()` claims the pad for the caller.
+`configure()` leaves the channel disabled, so a configuration change
+takes an `enable()` after it. The reference is the board's VREF+ pad,
+the ADC's ([adc.md](adc.md)): the 3300 in `dac_code()` is the board's
+figure, not a measured one. And the buffer that is on by default drives
+a load but cannot reach either rail (`buffered = false` reaches them and
+drives nothing), so a code near 0 or 4095 is not the voltage it names.
+
+The rest of this page, in order: the documents of record; what the
+silicon does, with the two errata and how they are answered; the types
+and verbs; how to use it, one example per use; the bench findings; what
+is not covered.
+
+## Documents of record
+
+RM0090 Rev 22 ch. 14 and RM0390 Rev 6 ch. 14 - the
 same converter under one chapter number, and RM0383 Rev 4 has no chapter
 for it at all because the F411 has no DAC. The electrical numbers (the
 output swing, the settling time, the buffer's headroom) are the
@@ -9,28 +61,31 @@ Errata: ES0206 Rev 24 2.6.1 and 2.6.2, ES0298 Rev 8 2.7.1 and 2.7.2, on
 every silicon revision - two items about the DMA, both quoted below;
 ES0287 files the same two though the part it describes has no DAC.
 Driver: `stm32f4/dac.hpp`, with the per-part facts in
-`stm32f4/device_tables.hpp`. Bench suite: `test_stm32f4_analog` (one
-suite with the ADC: the pad they share is the only route between them).
+`stm32f4/device_tables.hpp` (the reserve: the table of what each part
+has, read off the device header). Bench suite: `test_stm32f4_analog`
+(one suite with the ADC: the pad they share is the only route between
+them); a letter is one command key of the suite's console and the group
+of verdicts it runs.
 Family fixture `test/family_stm32f4/analog.cpp` plus a negative under
 `brio check stm32f4`.
 
 ## What the silicon does
 
-**Two 12-bit channels, and their outputs go to a PAD and nowhere else.**
+**Two 12-bit channels, and their outputs go to a pad and nowhere else.**
 DAC_OUT1 is PA4 and DAC_OUT2 is PA5 on every part of the family. This
 DAC has no MCR and no internal route - 14.3's note connects the pin to
 the converter as soon as the channel is enabled, and there is no code
 that keeps it off. So the only path from this converter to the ADC is the
 bond pad the two share (PA4 is ADC12_IN4, PA5 is ADC12_IN5), which is
 what makes a wireless DAC-into-ADC experiment possible on this family at
-all - and what makes "configure the pad to analog FIRST" a real
+all - and what makes "configure the pad to analog first" a real
 obligation rather than hygiene: a pad still in its reset state (input
 floating, its input buffer live) sits across a driven analog node.
 
 **Which parts have one.** The F401, F411 and F412 have no DAC and their
 device header declares no `DAC_BASE`, so the resource does not exist
 there rather than answering false. How many channels the parts that do
-have it really have is the MANUAL's number and not the header's - ST
+have it really have is the manual's number and not the header's - ST
 declares both channels' bits everywhere, the F410's header included,
 where RM0401 gives that part one output - so the count is keyed on the
 part class like the RTC's tamper inputs, and a class whose manual is not
@@ -42,7 +97,7 @@ trigger, three cycles after a hardware trigger, and one with the software
 trigger (14.3.4, 14.3.6's note). DOR is read-only. So a caller that
 confuses the two measures its own write.
 
-**The buffer is disabled by a ONE.** BOFFx is an output buffer DISABLE
+**The buffer is disabled by a one.** BOFFx is an output buffer disable
 (14.5.1), the opposite polarity of everything around it. A buffered
 output drives a load and cannot reach either rail; an unbuffered one
 reaches them and cannot drive anything - including, measurably, an LED's
@@ -54,12 +109,12 @@ and MAMPx cannot be changed once the channel is enabled (14.3.9's note),
 which is why configuring drops the enable first and does not put it back.
 Table 94's eight triggers are TIM6, TIM8, TIM7, TIM5, TIM2 and TIM4's
 TRGO, EXTI line 9, and the software bit - and which of the six timer
-codes carry anything is a per-part question the TIMERS answer (the F410
+codes carry anything is a per-part question the timers answer (the F410
 has four timers out of eight).
 
 **The DMA request comes from a hardware trigger and from nothing else** -
 14.3.7's own parenthesis, "an external trigger (but not a software
-trigger)". And it is NOT QUEUED: a second trigger arriving before the
+trigger)". And it is not queued: a second trigger arriving before the
 first request was acknowledged is lost, the channel keeps converting the
 old datum, and DMAUDRx says so. Its cell in the fabric is DAC1 on DMA1's
 stream 5 and DAC2 on stream 6, channel 7 both.
@@ -77,7 +132,7 @@ transfer function is VREF+ x DOR / 4096, and `Ref` lives in
   2.6.1, ES0298 2.7.1, ES0321 2.7.1): a request already asserted is not withdrawn by
   clearing DMAENx or by closing the DAC's clock, and it will be served
   the moment the converter is enabled again. The workaround is a sequence
-  over TWO peripherals; `stop_dma()` is the DAC's half of it (the flag
+  over two peripherals; `stop_dma()` is the DAC's half of it (the flag
   cleared, DMAENx and the channel enable dropped) and says in its own
   comment that the stream's half - disabled and re-initialized before
   anything is enabled again - is still the caller's.
@@ -116,7 +171,8 @@ transfer function is VREF+ x DOR / 4096, and `Ref` lives in
 
 ### The resource: `Dac`
 
-A monostate - a part has one DAC block or none.
+A monostate (a class used through its type alone, all its members
+static, never instantiated) - a part has one DAC block or none.
 
 - **The block**: `bus_clock()`, `reset()`, `init()` (clock, reset, clock),
   `release()` (the block reset before the gate - the release contract,

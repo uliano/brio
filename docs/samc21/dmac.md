@@ -1,23 +1,77 @@
 # DMAC (SAM C21)
 
-Documents of record: SAM C20/C21 data sheet DS60001479M ch. 25, and
+This document is for a programmer who wants a serial port's transmitter
+off the CPU, and for one who wonders why nothing else on this family
+uses DMA. The driver serves exactly one use: `DmaTxEngine`, a single
+channel that moves a Uart's transmit ring into its SERCOM's DATA
+register in blocks, so the console's bytes leave with no interrupt per
+byte. Every other use of the controller is declined, because erratum
+1.10.4 corrupts the transfers of channels triggered concurrently,
+measured below.
+
+The smallest use is the engined console of [sercom.md](sercom.md)'s
+"How to use it", the transmitter on the engine and the receiver on its
+interrupt:
+
+```cpp
+using Serial = brio::Uart<5, console_pads, 64, 256, brio::DmaTxEngine>;
+
+extern "C" void SERCOM5_Handler() {     // the receiver
+    if (Serial::isr()) { brio::post<SerialLines>(brio::RxActivity{}); }
+}
+extern "C" void DMAC_Handler() { Serial::dma_isr(); }   // the transmit blocks
+```
+
+Line by line: `Serial` is the console's Uart (instance 5, the pads of
+sercom.md's console, a 64-byte receive ring and a 256-byte transmit
+ring) with `brio::DmaTxEngine` in its one engine slot, which the program
+reaches by including `samc21/dmac.hpp` beside `samc21/sercom.hpp`; the
+SERCOM's handler stays the receiver's, posting `RxActivity` to the
+program's line-assembling active object (an active object is a
+component of a brio program with its own event queue, served one event
+at a time by the kernel,
+[docs/learn/introduction.md](../learn/introduction.md)); and the DMAC's
+handler calls `dma_isr()`, the body that hears a block's end, releases
+its bytes from the ring and starts the next run. The program calls the
+engine nowhere else: `Serial::init()` arms it and `print` feeds it
+through the ring.
+
+What decides correctness even there. Both vectors are the program's to
+bind: the engine arms its completion interrupt and opens the DMAC's
+NVIC line at `init()`, and a `DMAC_Handler` left undefined is a weak
+alias of the crt's silent spin, where the program stops at the end of
+its first block. One engined transport at a time: the engine is
+claimed at `init()` by its Uart's SERCOM number, and a second Uart's
+`init()` while the first holds it panics (below) - `release()` gives the
+claim back, so transports may take the engine in turn. `init()` answers
+false when the block or the channel would not reset within its bounded
+wait. The run a block carries is the transmit ring's own storage, the
+channel's until the block's completion releases it; the ring is still
+filled by `write_byte`, `write_bulk` and `print` from main context, as
+on the transport without the engine. And a standby entered with a block
+in flight is outside what this stratum has run ("Not covered yet").
+
+## Documents of record
+
+SAM C20/C21 data sheet DS60001479M ch. 25, and
 errata DS80000740S items 1.10.1..1.10.4, whose matrix is read below for
 this chip (E/G/J family, silicon rev F). Driver: `samc21/dmac.hpp` -
-ONE user, the Uart's transmit engine `DmaTxEngine` ([sercom.md](sercom.md)),
-on ONE channel. Every other use of the controller is declined: the
+one user, the Uart's transmit engine `DmaTxEngine` ([sercom.md](sercom.md)),
+on one channel. Every other use of the controller is declined: the
 reasons are erratum 1.10.4 and the measurements below. Family fixture
 `test/family_samc21/sercom.cpp` and the negatives
 `dmac_one_channel.cpp` and `uart_receive_engine_slot.cpp` under
 `brio check samc21`; the engine's bench letters are `test_samc_uart`'s
-(sercom.md) - letter d reads its level back, letter w measures what a
-release leaves the next owner.
+(sercom.md; a letter is one command key of the suite's console and the
+group of verdicts that key runs) - letter d reads its level back, letter
+w measures what a release leaves the next owner.
 
 ## What the silicon does
 
 **Twelve channels behind one register set.** CHCTRLA, CHCTRLB, the
 interrupt registers and CHSTATUS talk to whichever channel CHID names
 (25.8.17), and every descriptor lives in SRAM: a first-descriptor section
-at BASEADDR and a WRITE-BACK section at WRBADDR, one 16-byte entry per
+at BASEADDR and a write-back section at WRBADDR, one 16-byte entry per
 channel (25.6.2.3). One vector serves all twelve; INTPEND names the
 lowest channel with a pending interrupt and its flags, and a write of
 {flags, id} clears them (25.8.10).
@@ -39,7 +93,7 @@ round robin does (PRICTRL0.RRLVLENx); a level is enabled by CTRL.LVLENx,
 and a channel at a level not enabled is invisible to the arbiter
 (25.6.2.4; measured). The DMAC is also a host of the SRAM with a
 quality of service of its own (QOSCTRL, 25.8.7; 10.4.3), a separate knob
-from the channel's level. THE ENGINE ARMS AT LEVEL 2, the rule's next
+from the channel's level. The engine arms at level 2, the rule's next
 for a transmit ([../design/dma.md](../design/dma.md)): a starved
 transmit only leaves its line idle a while. With one channel in the
 image the level ranks it against nothing, and it is the rule's so that

@@ -6,20 +6,33 @@
  * register block and one clock gate:
  *
  *  Syscfg   the memory seen at address 0, the GPIO multiplexer that feeds
- *           the EXTI's sixteen pin lines, the I/O compensation cell, and
- *           the Ethernet PHY interface select.
+ *           the EXTI's sixteen pin lines, the I/O compensation cell, the
+ *           Ethernet PHY interface select and the FMPI2C1's Fm+ pad drive.
  *
- * WHY IT IS ITS OWN FILE AND NOT PART OF exti.hpp. On the STM32G0 the pin
+ * A program rarely calls it by name: stm32f4/exti.hpp's Exti::select()
+ * is what points a pin line at a port, and stm32f4/fmpi2c.hpp's
+ * fast_plus_drive() what sets the Fm+ bits. The one verb a program uses
+ * directly is the compensation cell's, once its pads run at the 50 or
+ * 100 MHz speed class:
+ *
+ *     brio::Syscfg::compensation_cell(true);   // compensation_ready() then
+ *                                              // says when it has settled
+ *
+ * Who calls what: every verb is a setup verb for main context (a
+ * configuring read-modify-write, below); none waits, none masks
+ * interrupts, and each opens the block's clock gate itself.
+ *
+ * Why it is its own file and not part of exti.hpp. On the STM32G0 the pin
  * multiplexer is a register of the EXTI itself; here it is four registers
- * of ANOTHER peripheral, in another chapter, behind another clock gate -
- * and the three switches beside it have nothing to do with interrupts.
+ * of another peripheral, in another chapter, behind another clock gate -
+ * and the switches beside it have nothing to do with interrupts.
  * stm32f4/exti.hpp includes this file and calls exti_source() through it;
  * a program that only wants the compensation cell never mentions the EXTI.
  *
- * THE GATE IS THE ONE THING TO KNOW. SYSCFG sits on APB2 behind
- * RCC_APB2ENR.SYSCFGEN, which is CLEAR out of reset (RM0090 7.3.14): with
+ * The gate is the one thing to know. SYSCFG sits on APB2 behind
+ * RCC_APB2ENR.SYSCFGEN, which is clear out of reset (RM0090 7.3.14): with
  * it clear every register of the block reads back zero and every write is
- * dropped in silence - the same trap as an unclocked GPIO port. So EVERY
+ * dropped in silence - the same trap as an unclocked GPIO port. So every
  * verb here opens the gate first (an idempotent read-modify-write of one
  * RCC bit, plus the readback that is the dummy access ES0206 2.2.7 asks
  * for) rather than only the configuring ones: a read of MEMRMP is just as
@@ -27,16 +40,16 @@
  * Nothing here ever closes it - a second user of SYSCFG would lose its
  * block; that is a program-wide decision and clock(false) exists for it.
  *
- * WHAT THIS FILE DOES NOT CARRY. SYSCFG_PMC's ADCxDC2 bits are struct
- * members and bit masks that exist on some headers and not others, and
- * they belong to a peripheral chapter that has no driver in this stratum
- * yet; they will be born with their first user. SYSCFG_CFGR - the FMPI2C1
- * Fm+ pad drive - was such a case until stm32f4/fmpi2c.hpp arrived, and is
- * here now. MEMRMP is READ ONLY here on purpose: moving
- * what lives at address 0 under a running program is not a verb, it is a
- * boot decision the BOOT pins already made.
+ * What this file does not carry. SYSCFG_PMC's ADCxDC2 bits are struct
+ * members and bit masks that exist on some headers and not others; they
+ * bear on the ADC, whose driver (stm32f4/adc.hpp) does not use them, and
+ * they will be born with their first user. SYSCFG_CFGR - the FMPI2C1 Fm+
+ * pad drive - is here, with stm32f4/fmpi2c.hpp as its user. MEMRMP is
+ * read only here on purpose: moving what lives at address 0 under a
+ * running program is not a verb, it is a boot decision the BOOT pins
+ * already made.
  *
- * CONCURRENCY. Every verb is a read-modify-write of one field of one
+ * Concurrency. Every verb is a read-modify-write of one field of one
  * register with no set/clear twin, so two contexts configuring SYSCFG at
  * once can lose a field - the same contract as stm32f4/pin.hpp's
  * configuring verbs, and the same intended use: setup and kernel time.

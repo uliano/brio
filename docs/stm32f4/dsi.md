@@ -1,6 +1,109 @@
 # DSI Host (STM32F4)
 
-Documents of record: RM0386 Rev 6 ch. 18 (the F469/F479's, the only
+This document is for a programmer driving a display over MIPI DSI from
+an STM32F469 or STM32F479, the one class of the family that has the
+block - the 32F469IDISCOVERY's 800x480 panel is the case it was measured
+on. `Dsi` is the block, a monostate (an all-static type with no
+instances: a part carries one host or none): it powers and clocks the
+link's physical layer, turns the LTDC's frame into packets for the
+panel, and carries the panel's own commands and reads. The panel
+decides how the frame travels - as a stream of pixel packets (video
+mode) or as memory writes the wrapper sends once per refresh (the
+adapted command mode) - and the 32F469IDISCOVERY's takes only the
+second ("What the silicon does" below). The LTDC behind it is
+[ltdc.md](ltdc.md)'s, and the frame buffer usually sits in the SDRAM of
+[fmc.md](fmc.md).
+
+The smallest use, from the "How to use it" block below: the link's
+configuration, the host brought up in the adapted command mode, the
+panel woken and identified, then the clock lane into high speed:
+
+```cpp
+constexpr DsiConfig link = [] {                                   // off the 8 MHz crystal
+    DsiConfig c = dsi_config_for(8'000'000u, 496'000'000u);
+    c.host.long_writes_low_power = false;                         // the frame in high speed
+    c.phy.clock_lane_hs = false;                                  // low power until the panel is up
+    return c;
+}();
+
+// the memory and the LTDC first (fmc.md, ltdc.md): the pixel clock, the
+// timing, a layer over a frame buffer, the controller enabled - the
+// wrapper holds it until a refresh
+Dsi::init<link, 8'000'000u>();             // regulator, PLL, D-PHY, host
+Dsi::colour(DsiColor::rgb888, panel);      // the LTDC interface
+Dsi::command_mode(800);                    // a line per memory write
+Dsi::te_source(true);                      // the tearing effect from the pin
+Dsi::adapted_refresh(false, false);        // manual refreshes, the LTDC halted on VSYNC's fall
+Dsi::enable();
+
+// the panel, in its own words - a reset on the board's pad, then DCS
+Dsi::dcs_write(0x11);                      // SLPOUT
+...
+uint8_t id[3];
+Dsi::dcs_read(0xDA, &id[0], 1);            // RDID1: the controller answers
+(void)Dsi::errors0();                      // the first turnaround's report, read once
+Dsi::clock_lane(true);                     // THEN the clock lane into high speed
+```
+
+Line by line: `link` is the whole configuration, computed when the
+program is compiled - `dsi_config_for()` solves the PLL for a 496 Mbit/s
+lane off the board's 8 MHz HSE and derives the lanes' transition times
+and the escape clock's divider from that rate, and the two lines after it
+choose high-speed signalling for the frame's memory writes and keep the
+clock lane in low power for now; `init<link, 8'000'000u>()` starts the
+regulator, locks the PLL and writes the D-PHY's and the host's timings
+(its second argument is the HSE's rate, and a configuration outside the
+PLL's ranges does not compile); `colour()` takes the pixel format and the
+LTDC's timing (`panel`, an `LtdcTiming` of [ltdc.md](ltdc.md)),
+`command_mode(800)` selects the adapted command mode with one line of
+800 pixels per memory write, `te_source(true)` takes the tearing effect
+from its dedicated pin, `adapted_refresh(false, false)` leaves each
+refresh to the program, and `enable()` starts the D-PHY, the host and
+the wrapper. `dcs_write()` sends a panel command (DCS, the Display
+Command Set, the standard command vocabulary a DSI panel speaks; 0x11 is
+SLPOUT), `dcs_read()` asks the panel a question and waits for the
+answer, `errors0()` reads, and so clears, the error register the panel's
+answer may have set, and `clock_lane(true)` moves the clock lane to high
+speed. The block's frame is then sent by `ltdc_flow(true)`, one LTDC
+frame per refresh, the wrapper's end-of-refresh flag saying when it is
+done.
+
+What decides correctness even there. The order is the block's: every
+configuring verb (`colour`, `command_mode`, `video`, `te_source`,
+`adapted_refresh`, the PHY's and the host's timings) is refused while
+the host is enabled and writes nothing then, so they come before
+`enable()` - the excerpt discards their answers, and a reordered program
+compiles and configures nothing - while the generic interface
+(`dcs_write`, `dcs_read` and the generic packets) works only while
+enabled and is refused before. The PLL's input is the HSE and nothing
+else: the clock task must have the HSE running, and the second template
+argument states its rate, which nothing reads back (a PLL that does not
+lock makes `init()` answer false, after a bounded wait). The clock lane
+goes to high speed only after the panel's reset and its low-power
+bring-up: measured, a panel reset under a clock lane already in high
+speed takes no high-speed packet afterwards, frames lost and no error
+counted on either side - and `DsiPhyConfig::clock_lane_hs` is true by
+default, which is why the excerpt sets it false. In video mode a read waits for the stream: it is
+answered only once the LTDC runs. And the error registers clear on the
+read that shows them, the panel's acknowledge reports arriving at the
+next turnaround, so a program that wants them keeps the value it read.
+Every wait is bounded (`Dsi::default_spins`, two million polls) and ends
+in a `DsiStatus::timeout` or a false; nothing here masks interrupts; a
+command's parameters are copied into the block's FIFO before the verb
+returns, and a read's buffer is written inside the call.
+
+The rest of this page, in order: the documents of record; what the
+silicon does (the wrapper, the host and the D-PHY, the panel's choice of
+way, a refresh, the clock lane's entry into high speed, the PLL's two
+statements of its ranges, the unit interval, the lane byte clocks,
+configuration with the host disabled, the generic interface in video
+mode, a read, the error registers, the errata); the types and verbs; how
+to use it; the bench findings against the 32F469IDISCOVERY's panel; and
+what is not covered.
+
+## Documents of record
+
+RM0386 Rev 6 ch. 18 (the F469/F479's, the only
 class of the family with the block - 18.4 the host, 18.6 the adapted
 command mode, 18.11 the pattern generator, 18.12 the D-PHY, its PLL and
 its regulator, 18.13 the interrupts and the error table, 18.14 the
@@ -37,16 +140,16 @@ a part with no block and a PLL triple outside the ranges. Bench:
 ## What the silicon does
 
 **Three things under one register file and one vector.** The DSI
-WRAPPER (18.16) holds the 1.2 V regulator that powers the D-PHY, the
+wrapper (18.16) holds the 1.2 V regulator that powers the D-PHY, the
 PLL that clocks it, the LTDC's pixel stream turned into the host's
-input and the tearing effect line; the DSI HOST (18.15) is the packet
+input and the tearing effect line; the DSI host (18.15) is the packet
 handler, the video mode state machine, the APB generic interface a
 program writes packets through and the error registers; the D-PHY is
 one clock lane and two data lanes on dedicated pads, each in high-speed
 differential signalling or low-power single-ended signalling. Two ways
-to a panel: VIDEO MODE, where the LTDC's frame is packed into pixel
-packets and streamed at the panel's timing; and the ADAPTED COMMAND
-MODE (18.6), where each LTDC frame becomes DCS memory writes - a
+to a panel: video mode, where the LTDC's frame is packed into pixel
+packets and streamed at the panel's timing; and the adapted command
+mode (18.6), where each LTDC frame becomes DCS memory writes - a
 write_memory_start then write_memory_continue packets of LCCR.CMDSIZE
 pixels each - that a panel with a frame memory takes at its own pace.
 The generic interface works beside either: a DCS command goes out in
@@ -62,7 +165,7 @@ shows nothing of video mode: measured, a second of video-mode frames and
 the pattern generator's bars leave its frame memory untouched (a pixel
 read back before and after is the same) while its power mode and its
 error count stay clean, and one refresh of the adapted command mode puts
-the frame there. What the panel then holds can be READ over the same
+the frame there. What the panel then holds can be read over the same
 link: RAMRD answers three bytes a pixel in the 24-bit format, the pixel
 first with no leading byte, at the column and row CASET and RASET
 point to - which is what makes the picture a measurement.
@@ -96,7 +199,7 @@ turnaround.
 solver keeps to the intersection, 8..25 MHz. Off the board's 8 MHz
 crystal that makes 496 Mbit/s exact (IDF 1, NDIV 62, ODF 1, the VCO at
 992 MHz) and 500 not (it would want IDF 2 and a 4 MHz PFD); a 25 MHz
-crystal reaches 500 with NDIV 20. The output IS the bit rate of one
+crystal reaches 500 with NDIV 20. The output is the bit rate of one
 lane: the RCC's figure 17 draws the 500 MHz "high speed clock" whose
 eighth is the lane byte clock the host counts in, and DS11189 table 45's
 unit interval of 2..12.5 ns is the same range, 80..500 Mbit/s. CLKIN is
@@ -104,13 +207,13 @@ HSE and nothing else.
 
 **The unit interval is the one D-PHY field there is no default for**
 (18.14.2): WPCR0.UIX4, the bit period in quarter nanoseconds, rounded
-DOWN - 8 at 496 Mbit/s, the manual's own example 6 at 600. Every other
+down - 8 at 496 Mbit/s, the manual's own example 6 at 600. Every other
 D-PHY timing the wrapper lets a program override (WPCR1 .. WPCR4) is
 derived from it inside the PHY and left at its default.
 
 **The host counts in lane byte clocks.** HSA, HBP and the line
 (DSI_VHSACR, VHBPCR, VLCR) are the LTDC's pixel counts at the ratio of
-the lane byte clock to the pixel clock, ROUNDED (18.14.6) - at 62 MHz
+the lane byte clock to the pixel clock, rounded (18.14.6) - at 62 MHz
 over 26.4 MHz, 2 pixels of sync are 5 cycles, 20 of porch 47, the 842 of
 a line 1977. The rounding accumulates line after line unless the host
 returns to low power once a line and resynchronises on the next sync
@@ -152,7 +255,7 @@ collected - a read that ran out and was answered later - would be handed
 to the next read, so `read()` drains the FIFO before it starts.
 
 **The host's error registers clear on the read that shows them**
-(18.13.2), and the acknowledge-with-error bits are the PANEL'S report,
+(18.13.2), and the acknowledge-with-error bits are the panel's report,
 delivered at the next bus turnaround - so a read is what makes them
 appear, and they describe what happened since the previous read.
 Measured on the NT35510: the first turnaround after the host's disable
@@ -174,7 +277,7 @@ re-enables the host reads the registers once after its first exchange.
   in one write may race. `shadow_update()` writes 0 then 0x101 and
   checks UR auto-cleared, repeating while it has not.
 - *2.8.1, tearing effect parasitic detection*: the tearing effect over
-  the LINK raises TEIF on every acknowledge trigger. Not code:
+  the link raises TEIF on every acknowledge trigger. Not code:
   `te_source()` offers the dedicated pin, and the suite measures the
   wrapper's flag from PJ2 pulse for pulse against the EXTI's count of the
   same edges, and the automatic refresh paced by it.
@@ -182,7 +285,7 @@ re-enables the host reads the registers once after its first exchange.
 **Three small facts the registers taught**, none of them a workaround:
 DSI_PSR wakes as 0x1400 and not the manual's 0x1528 (its defined bits
 all clear with the regulator off, two reserved ones set); clearing
-WRPCR.PLLEN drops PLLLS and raises NO PLLUIF, the unlock flag being a
+WRPCR.PLLEN drops PLLLS and raises no PLLUIF, the unlock flag being a
 lost lock's and not a software stop's; and a store into DSI_FIR shows in
 DSI_ISR a moment later, not on the read straight after it.
 

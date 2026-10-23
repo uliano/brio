@@ -1,22 +1,111 @@
 # TCA - the 16-bit timer/counter type A (AVR DA, DB and EA)
 
-Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B (TCA
+This document is for a programmer who needs a waveform from a timer:
+PWM on up to six pins, a square wave of a chosen frequency, a period
+with pulses at fixed points inside it, or a 16-bit count of events.
+`Tca<n>` is the resource, the typed view of one instance (TCA0, and
+TCA1 where the part has it), one function per register fact. Over it
+sit the tasks (a task, in brio, is a driver layer with state of its own
+over a resource, served from its peripheral's interrupt or called by an
+active object; an active object is a component of a brio program with
+its own event queue, served one event at a time by the kernel,
+[learn/introduction.md](../learn/introduction.md)): `TcaPwm`, six 8-bit
+PWM channels in split mode; `TcaPwm16` and `TcaPwmCentered`, three
+16-bit channels of one period, edge- or centre-aligned;
+`FrequencyGenerator`, a square wave on WO0; `Heartbeat`, a period with
+an overflow interrupt and up to three pulses; and `EventCounter`, a
+16-bit count of events. Each is a monostate (a class whose state is
+static, with no instances): the program names the type and calls its
+functions.
+
+The smallest use, six LED channels in split mode, from "How to use it"
+below:
+
+```cpp
+#include "avrxt/tca.hpp"
+using PwmC = brio::TcaPwm<0, 'C'>;           // TCA0 -> PC0..PC5
+PwmC::init();                                // split mode, div16 (~5.9 kHz), all dark
+PwmC::duty<2>(64);                           // PC2 at 25 %
+```
+
+Line by line: the include brings in the driver; `PwmC` names the task
+over TCA0 with its six waveform outputs routed to port C, pins 0 to 5;
+`init()` resets the instance, writes TCA0's field of
+PORTMUX.TCAROUTEA, puts the timer in split mode with both 8-bit
+periods at 255 and the prescaler at its default `TcaClock::div16`,
+makes PC0..PC5 outputs driven low and starts the counter, so the PWM
+runs at CLK_PER / 16 / 256 (5859 Hz at 24 MHz); `duty<2>(64)` sets
+channel 2, the pin PC2, high for 64 of every 256 counts. A duty of 0 or
+255 turns the channel's waveform off and drives the pin low or high
+from PORT, because split mode has no clean endpoints ("What the silicon
+does").
+
+What decides correctness even there:
+
+- **The route is checked at compile time, the pins inside it are
+  not.** `TcaPwm` static_asserts that TCA n has a six-channel route to
+  that port on the package being compiled: TCA1's three-channel routes
+  and a port the package does not have are compile errors. A port that
+  exists but bonds fewer than six of the route's pins (TCA0 to PORTE on
+  48-pin parts, PORTC on 28/32-pin parts, PORTF on 28-pin parts)
+  compiles, and the missing channels drive nothing ("Types and verbs").
+- **`init()` takes no clock.** The PWM frequency is whatever CLK_PER is
+  divided by 16 and by 256, so the clock task runs first
+  (`SysClock::init()`, [clkctrl.md](clkctrl.md)) for the rate in the
+  comment, and every later change of CLK_PER moves the frequency:
+  `TcaPwm` is not a ClockUser, a type a `DynamicClock` tells of a rate
+  change through its `rebase()` ([design/clock.md](../design/clock.md)).
+- **`init()` takes the six pins and the instance.** It makes them
+  outputs and moves TCA0's route; nothing checks that another driver
+  uses those pins, or that another task already runs on TCA0 (a second
+  task's `init()` resets the instance under the first).
+- **`duty()` is a read-modify-write of CTRLB and a store into PORT,
+  with no masking**, so one instance's channels are driven from one
+  context: two contexts racing on CTRLB can lose a channel's enable
+  bit.
+
+`TcaPwm` enables no interrupt and needs no vector. The tasks that do
+are the other prerequisite to know: `FrequencyGenerator` and
+`Heartbeat` take the clock task's tag (`constexpr SysClock clock;`) and
+compute their divisors from the rate the clock type claims, so their
+`init()` comes after `SysClock::init()`; `Heartbeat::init()` enables
+the overflow interrupt unless told not to, and the program must then
+bind `TCAn_OVF_vect` with `ISR()` to its body `beat()` - an unbound
+vector is avr-libc's `__bad_interrupt`, a `jmp 0`, and the program
+restarts from its first instruction, without a hardware reset. The loads are active-high; an active-low one inverts
+its pin with `Pin::invert(true)`.
+
+The rest of this page, in order: the documents of record; what the
+silicon does (the modes, the facts that matter to code, the AVR EA's
+offer, what the TCA is not); the types and verbs with the route table;
+how to use it, one example per task and one on the resource; the bench
+findings on the AVR128DB48, the AVR128DA48 and the AVR64EA48; and what
+is not covered.
+
+## Documents of record
+
+AVR128DB28/32/48/64 data sheet DS40002247B (TCA
 chapter 23, PORTMUX 17.3.7, EVSYS 16 generators 0x80-0x8E / users
 0x1A-0x1D), errata DS80000915F (2.12.1) and, for the DA parts,
 DS80000882C (2.11.1, 2.11.2); for the AVR EA, AVR64EA28/32/48 data
 sheet DS40002443A (TCA chapter 22, PORTMUX 17.3.7) and errata
 DS80001048D (no TCA item). Complements: TB3217 "Getting
 Started with TCA", AN2434 (quadrature decoding with CCL + TCA + TCB) -
-see [vendor/README.md](vendor/README.md). Driver: `avrxt/tca.hpp` (the
+see [vendor/README.md](vendor/README.md). Driver:
+[`avrxt/tca.hpp`](../../brio/avrxt/tca.hpp) (the
 `Tca<n>` resource and the tasks), the TCA event vocabulary in
-`avrxt/evsys.hpp`. Reference test: `test_avr_timer`.
+`avrxt/evsys.hpp`. Reference test: `test_avr_timer` (a letter is one
+command key of the suite's console and the group of verdicts it runs;
+this suite's `a` runs every letter its image carries, and on the
+AVR64EA48 the suite is two images, [README.md](README.md), "The group
+axis").
 
 ## What the silicon does
 
 Two instances, TCA0 and TCA1 (TCA1 on the 48/64-pin AVR DA/DB and on
 every AVR EA package). One 16-bit counter
 with a period register (`PER`), three compare channels (`CMP0..2`)
-each with its waveform output (`WO0..2`), ALL double-buffered
+each with its waveform output (`WO0..2`), all double-buffered
 (`PERBUF`, `CMPnBUF` with buffer-valid flags in `CTRLF`, copied at the
 UPDATE condition unless `LUPD` locks it), direction control (`DIR`),
 and a split mode that makes it two 8-bit timers with three compare
@@ -60,13 +149,13 @@ Facts that matter to code:
   ignores LUPD), RESTART (CNT = 0 and all WO low - restarts the
   period), RESET (all registers to reset, only when disabled).
   Errata DB 2.12.1 (A4/A5) / DA 2.11.2 (every revision): a RESTART
-  command or restart EVENT in NORMAL/FRQ mode resets DIR to up - a
+  command or restart event in NORMAL/FRQ mode resets DIR to up - a
   down-counting FRQ user must rewrite DIR after every restart. The AVR
   EA keeps DIR (measured, below).
 - **Output**: `CMPnEN` makes WOn override PORT.OUT in any waveform
   mode (pin must be an output; PORT `INVEN` inverts it); the endpoints
   of single-slope (0 = low, > TOP = high) are clean in normal mode -
-  in split mode CMP > TOP is LOW, which is why the split-mode driver
+  in split mode CMP > TOP is low, which is why the split-mode driver
   drives the endpoints from PORT. Routes (PORTMUX `TCAROUTEA`, 3 bits
   per instance, the whole group moves): TCA0 to PORTA/B/C/D/E/F/G
   pins 0..5; TCA1 to PORTB pins 0..5 (full), PORTC PC4..PC6 and PORTE
@@ -79,7 +168,7 @@ Facts that matter to code:
   there (PORTE and PORTG on the 64-pin DA/DB: the same number, another
   meaning, never written because the codes are taken by name).
 - **CTRLC parks the waveform pins**: the CMPnOV bits (split:
-  LCMPnOV/HCMPnOV) read the WO level any time and WRITE it while the
+  LCMPnOV/HCMPnOV) read the WO level any time and write it while the
   timer is disabled - the one handle on a parked pin between runs.
   Toward the CCL the output bypasses CMPnEN: a parked value feeds a
   LUT too.
@@ -111,7 +200,7 @@ used or declined:
 | CLK_PER at most 20 MHz, its supply grades the reader's (clkctrl.md) | a fact of the arithmetic: the tasks take the clock's rate, so every frequency and width is derived, not assumed |
 | the rest - buffering, ALUPD, LUPD, split mode, the event actions, CLK_TCA to the TCBs, CTRLC parking, one TEMP per instance | used as on the DA/DB, the same code and the same costs: `init(cfg)` is one write per register, a buffered duty one 16-bit store, `TcaPwm::duty` one byte |
 
-What TCA is NOT: no input capture of any kind (a TCB captures,
+What the TCA is not: no input capture of any kind (a TCB captures,
 optionally clocked by `CLK_TCA` and restarted with the TCA via
 SYNCUPD, which is how a TCA period and a TCB capture stay in phase);
 no fault/blanking inputs (TCD). TCA is the waveform and period

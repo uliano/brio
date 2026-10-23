@@ -1,73 +1,93 @@
 /*
  * tsens.hpp
  *
- * The SAM C21's on-die temperature sensor (DS60001479M ch. 43), a whole
- * small chapter in one monostate resource - `Tsens`, not `Tsens<n>`:
- * this family has exactly ONE instance on every variant, so an index
- * would be a parameter with a single legal value (the `Rtc` / `Dac` /
- * `Sdadc` shape in this stratum).
+ * The SAM C21's on-die temperature sensor (DS60001479M ch. 43): the
+ * die's temperature in hundredths of a degree Celsius, measured once,
+ * averaged, watched by the window monitor, or paced by an event. A whole
+ * small chapter in one monostate resource (a class whose state and
+ * functions are all static) - `Tsens`, not `Tsens<n>`: this family has
+ * exactly one instance on every variant, so an index would be a
+ * parameter with a single legal value (the `Rtc` / `Dac` / `Sdadc` shape
+ * in this stratum). The smallest use:
  *
  *   brio::Tsens::init(generator, brio::TsensConfig{
  *       .calibration = brio::TsensCalibration::factory()});
  *   const auto centi = brio::Tsens::measure_average(10);   // 43.6.2.3
  *
- * ---------------------------------------------------------------------
- * THIS IS NOT AN ADC CHANNEL - not a voltage into a converter with a
- * correction applied - AND EVERYTHING ELSE FOLLOWS FROM THAT.
+ * with `generator` running OSC48M undivided (generator 0 under a 48 MHz
+ * internal main clock), the one rate the factory calibration holds for.
  *
- * IT IS A CLOCK RATIO. A temperature-dependent oscillator (TOSC) is run
+ * Who calls what. init(), release(), calibration(), window(),
+ * event_config() and start_on() are setup verbs, for main() or an active
+ * object's handler (an active object is a brio component with its own
+ * event queue, served one event at a time by the kernel); their waits on
+ * SYNCBUSY are bounded (0xFFFF polls) and a false answer means one ran
+ * out or the configuration was refused. read(), measure() and
+ * measure_average() spin the caller until a result is ready, each wait
+ * bounded at 2 000 000 polls, and answer nothing on a timeout or an
+ * overflow: one measurement is about 3.7 ms at 48 MHz, so the average of
+ * ten holds its caller about 37 ms. start(), value() and the flag verbs
+ * are single loads or stores. isr() is the interrupt body the program's
+ * TSENS_Handler calls; init() leaves the NVIC line disabled. Nothing
+ * here masks interrupts.
+ *
+ * ---------------------------------------------------------------------
+ * This is not an ADC channel - not a voltage into a converter with a
+ * correction applied - and everything else follows from that.
+ *
+ * It is a clock ratio. A temperature-dependent oscillator (TOSC) is run
  * twice - once in its "min" configuration and once in its "max" - and the
- * DIFFERENCE of the two periods, amplified over GAIN periods of
+ * difference of the two periods, amplified over GAIN periods of
  * GCLK_TSENS, is counted by a counter clocked by GCLK_TSENS itself: up
  * during the first phase, down during the second (43.6.1). What lands in
  * VALUE is
  *
  *     VALUE = OFFSET + GAIN x (f_TOSCMIN - f_TOSCMAX) / f_GCLK
  *
- * so THE GENERIC CLOCK IS THE MEASUREMENT'S RULER, not merely its pace.
+ * so the generic clock is the measurement's ruler, not merely its pace.
  * Three consequences the chapter states only in a note, and this driver
  * takes seriously:
  *
- * 1. THE FACTORY GAIN AND OFFSET ARE CALIBRATED FOR ONE CLOCK - "the
+ * 1. The factory GAIN and OFFSET are calibrated for one clock - "the
  *    undivided internal 48MHz oscillator (OSC48M)". Under that clock,
- *    and only under it, VALUE is a temperature in HUNDREDTHS OF A DEGREE
- *    CELSIUS: 43.8.10's own example gives 2500 for 25 C and -2500 for
+ *    and only under it, VALUE is a temperature in hundredths of a degree
+ *    Celsius: 43.8.10's own example gives 2500 for 25 C and -2500 for
  *    -25 C. That is the unit this whole header speaks, and it is why
  *    nothing here uses a float: a signed 24-bit register already carries
  *    +-83886 C at a centi-degree a step.
  *
- * 2. ANY OTHER GCLK_TSENS RATE RESCALES THE ANSWER, by exactly
+ * 2. Any other GCLK_TSENS rate rescales the answer, by exactly
  *    f_actual / 48 MHz on the GAIN term. Two ways out, and both are
- *    offered as constexpr arithmetic that takes the rate AS A CALLER
- *    ARGUMENT (the samc21/freqm.hpp `reference_hz` pattern - a ratio
+ *    offered as constexpr arithmetic that takes the rate as a caller
+ *    argument (the samc21/freqm.hpp `reference_hz` pattern - a ratio
  *    meter cannot know what its own reference is worth):
  *      - `tsens_gain_for(factory_gain, f)` scales the GAIN register, so
  *        VALUE keeps arriving in centi-degrees;
- *      - `tsens_rescale(value, offset, f)` scales the READING, for a
+ *      - `tsens_rescale(value, offset, f)` scales the reading, for a
  *        caller who would rather leave the factory number alone.
  *
- * 3. AND THE REFERENCE'S OWN ERROR IS IN THE ANSWER. OSC48M on the bench
+ * 3. And the reference's own error is in the answer. OSC48M on the bench
  *    die measures 47.755 MHz against the board's crystal - 5100 ppm slow,
  *    well inside table 45-57 and not a fault - so a reading taken on the
  *    factory clock is scaled by 48/47.755 in its GAIN term. It is a
- *    small error on a temperature and a large one on the SPAN from
+ *    small error on a temperature and a large one on the span from
  *    OFFSET, which is where it is actually applied; docs/samc21/tsens.md
  *    carries the two-reference measurement.
  *
  * ---------------------------------------------------------------------
- * CALIBRATION IS THE CHAPTER'S HEART (43.5.9). Four factory values live
+ * Calibration is the chapter's heart (43.5.9). Four factory values live
  * in the NVM Temperature Calibration Area at 0x00806030 (table 9-6) and
- * MUST be copied in by software: GAIN and OFFSET into their own
+ * must be copied in by software: GAIN and OFFSET into their own
  * registers, TCAL and FCAL into CAL. `samc21/nvm.hpp`'s
  * `NvmTemperatureCalibration` types all four and
  * `TsensCalibration::factory()` copies them in - the same shape
  * `Adc::load_calibration()` has for the SAR.
  *
- * WITHOUT THEM THE PERIPHERAL IS NOT MERELY INACCURATE, AND ITS RESET
- * VALUE IS A TRAP. GAIN reads zero out of reset, and a zero GAIN is not
+ * Without them the peripheral is not merely inaccurate, and its reset
+ * value is a trap. GAIN reads zero out of reset, and a zero GAIN is not
  * "no gain": 43.8.13 makes GAIN "the number of GCLK_TSENS periods that
  * will be used for a measurement cycle" and the field is 24 bits wide, so
- * the value that reads as 0 behaves as 2^24. MEASURED, twice over
+ * the value that reads as 0 behaves as 2^24. Measured, twice over
  * (docs/samc21/tsens.md): the conversion takes 699 ms instead of 3.7 ms -
  * 2 x 2^24 periods at 48 MHz to the millisecond - and the result is the
  * gain term multiplied by 2^24 / GAIN, about two hundredfold, which
@@ -76,39 +96,39 @@
  * wait most of a second for that.
  *
  * ---------------------------------------------------------------------
- * THE REGISTER DISCIPLINES, spelled per register the way this stratum's
+ * The register disciplines, spelled per register the way this stratum's
  * other converters spell theirs.
  *
- * 1. ENABLE-PROTECTED (43.6.2.1): CTRLC, EVCTRL, WINLT, WINUT, GAIN,
- *    OFFSET, CAL - and CTRLA.RUNSTDBY, which is a BIT and not a
+ * 1. Enable-protected (43.6.2.1): CTRLC, EVCTRL, WINLT, WINUT, GAIN,
+ *    OFFSET, CAL - and CTRLA.RUNSTDBY, which is a bit and not a
  *    register. Everything on that list is written by `init()` between
  *    the reset and the enable; the individual verbs that touch them
  *    (`window()`, `event_config()`, `calibration()`) refuse while the
  *    block is enabled rather than storing into a register that would
  *    drop the write.
- * 2. WRITE-SYNCHRONIZED (43.6.7): CTRLA.SWRST and CTRLA.ENABLE, and
- *    NOTHING ELSE - SYNCBUSY has exactly two bits and the device header
- *    masks it 0x3. THE WAIT IS ON THE NEAR SIDE OF EVERY STORE, and
+ * 2. Write-synchronized (43.6.7): CTRLA.SWRST and CTRLA.ENABLE, and
+ *    nothing else - SYNCBUSY has exactly two bits and the device header
+ *    masks it 0x3. The wait is on the near side of every store, and
  *    every such verb returns bool, because 43.6.7 says an operation
  *    requiring synchronization issued while its busy bit stands "is
  *    discarded and a bus error is generated" - and a bus error on a
  *    Cortex-M0+ is a HardFault. That is the samc21/sdadc.hpp position,
  *    taken for the same sentence in 39.6.8.
- * 3. NOT PAC-PROTECTED (43.5.8): CTRLB and INTFLAG - the pair an ISR
- *    needs. SEE THE ERRATUM BELOW: this is exactly the
+ * 3. Not PAC-protected (43.5.8): CTRLB and INTFLAG - the pair an ISR
+ *    needs. See the erratum below: this is exactly the
  *    sentence the silicon does not honour.
- * 4. NOT RESET BY A SOFTWARE RESET (43.8.1): GAIN, OFFSET, CAL and
+ * 4. Not reset by a software reset (43.8.1): GAIN, OFFSET, CAL and
  *    DBGCTRL. So a `reset()` keeps the calibration - which is what makes
  *    reconfiguring a running sensor cheap, and is asserted at the bench.
- * 5. WRITE-ONLY: CTRLB is `__O` in the device header and drawn with W
+ * 5. Write-only: CTRLB is `__O` in the device header and drawn with W
  *    access in 43.8.2. `start()` is a plain store; there is no way to
  *    ask whether a start was taken, and BUSY does not exist in this
  *    block - INTFLAG.RESRDY is the only evidence a measurement finished.
  *
  * ---------------------------------------------------------------------
- * HOW WIDE IS VALUE? The chapter says both. 43.6.4 introduces
+ * How wide is VALUE? The chapter says both. 43.6.4 introduces
  * INTFLAG.OVF as "the result required more than 16 bits and overflowed
- * the VALUE register"; 43.8.7's own bit description says TWENTY-FOUR,
+ * the VALUE register"; 43.8.7's own bit description says twenty-four,
  * and the register summary, the bit table and `TSENS_VALUE_Msk` all draw
  * VALUE[23:0]. This header follows the register description - the datum
  * is a signed 24-bit two's-complement number, `tsens_signed()` sign-
@@ -116,27 +136,27 @@
  * carries the measurement that convicts the other sentence.
  *
  * ---------------------------------------------------------------------
- * THE WINDOW MONITOR (43.6.2.4) compares VALUE against WINLT and WINUT,
- * both signed 24-bit. Six modes plus a Reserved seventh. ONE OF THEM IS
- * DESCRIBED TWICE AND DIFFERENTLY: 43.8.3's table prints OUTSIDE as
+ * The window monitor (43.6.2.4) compares VALUE against WINLT and WINUT,
+ * both signed 24-bit. Six modes plus a Reserved seventh. One of them is
+ * described twice and differently: 43.8.3's table prints OUTSIDE as
  * "WINUT < VALUE < WINLT" while the device header's own enumerator
  * comment says "VALUE less than WINLT or VALUE greater than WINUT" -
  * which are not the same condition, and do not even want the thresholds
  * in the same order. `tsens_config_valid()` therefore refuses a crossed
  * pair for INSIDE and for the two hysteresis modes (where both documents
- * agree) and refuses NOTHING for OUTSIDE; the bench says which reading
+ * agree) and refuses nothing for OUTSIDE; the bench says which reading
  * is the silicon's.
  *
  * ---------------------------------------------------------------------
- * ERRATA, DS80000740S, read on the E/G/J ROW at revision F.
+ * Errata, DS80000740S, read on the E/G/J row at revision F.
  *
- *  - 1.19.1 PAC Write-protection, LIVE ON EVERY REVISION: "when PAC
+ *  - 1.19.1 PAC Write-protection, live on every revision: "when PAC
  *    Write-Protection is enabled for TSENS, writes to TSENS.CTRLB are
  *    not functional", i.e. a START written under protection does
  *    nothing. It contradicts 43.5.8, which lists CTRLB among the
- *    registers PAC protection does not cover. THE OBLIGATION IS THE
- *    CALLER'S and this header states it rather than coding around it:
- *    PAC write protection is OFF
+ *    registers PAC protection does not cover. The obligation is the
+ *    caller's and this header states it rather than coding around it:
+ *    PAC write protection is off
  *    out of reset (11.5.2.2) and nothing in this framework turns it on,
  *    so the item is inapplicable by construction until a program turns
  *    it on. `Tsens::pac_id` is the identifier samc21/pac.hpp takes for
@@ -147,7 +167,7 @@
  *  - There is no other TSENS item in the document, on any row.
  *
  * ---------------------------------------------------------------------
- * NOT BUILT (docs/samc21/tsens.md carries the list): the block as a WAKE
+ * Not built (docs/samc21/tsens.md carries the list): the block as a wake
  * source - table 43-1's rows are measured through an event witness, and
  * RESRDY, WINMON, OVERRUN and OVF have never driven the NVIC out of a
  * sleep; a MeterSource or sampler adapter, which util/analog_sampler.hpp's

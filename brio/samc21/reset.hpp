@@ -4,20 +4,45 @@
  * RSTC (DS60001479M ch. 18) and the WDT (ch. 23) of the SAM C21: why the
  * program is running, and how to end it on purpose - plus the fault
  * handler body that turns a crash into a message the next boot can read.
+ * The smallest use asks, once at boot (docs/samc21/reset.md):
+ *
+ *     switch (Reset::cause()) { case ResetCause::watchdog: ...; }
+ *     if (auto record = take_panic_record<SamPlatform>()) { ... }
+ *
+ * and a program that wants a fault to leave that record binds
+ *
+ *     extern "C" void HardFault_Handler() {
+ *         brio::hard_fault_reset<brio::SamPlatform>();
+ *     }
+ *
+ * Who calls what. Reset's readers are single loads of a read-only
+ * register, legal from any context and at any time. The Watchdog's
+ * arm(), disable() and write_config() are setup verbs (main, or one
+ * active object's handler - an active object being a brio component with
+ * its own event queue, served one event at a time by the kernel), with
+ * no guard of their own; each waits for the 1.024 kHz domain's
+ * synchronization, bounded (sync_spin_limit, a million polls), and
+ * answers false when it did not complete. clear() is one posted store
+ * and may be called from any context; force_reset() is one store too,
+ * and returns before the reset lands. isr() is the body the program's
+ * WDT_Handler calls; hard_fault_reset() is the body of
+ * HardFault_Handler, run in the fault, and Reset::software() never
+ * returns. Nothing here masks interrupts. Left unbound, HardFault_Handler
+ * is the crt's weak spin of its own and WDT_Handler the default spin.
  *
  * This is the other half of the panic breadcrumb. The kernel writes a
  * PanicRecord into reset-surviving storage (kernel/panic.hpp,
  * SamPlatform::panic_record) and hands over to a Reporter whose job may
  * be "reset now and report at the next boot"; panic.hpp's own contract
  * then says to cross-check the reset-cause register on the target for
- * the full story. `Reset::cause()` IS that cross-check,
+ * the full story. `Reset::cause()` is that cross-check,
  * `Reset::software()` is one way of causing the reset, `Watchdog` is
  * another, and `hard_fault_reset<P>()` is the body an app binds to
  * HardFault_Handler so that a fault leaves a note instead of a spin.
  *
- * FOUR FACTS OF THIS SILICON shape everything below.
+ * Four facts of this silicon shape everything below.
  *
- * 1. RCAUSE IS EXCLUSIVE, NOT CUMULATIVE. "When a Reset occurs, the bit
+ * 1. RCAUSE is exclusive, not cumulative. "When a Reset occurs, the bit
  *    corresponding to the Reset source is set to '1' and all other bits
  *    are written to '0'" (18.8.1). It is read-only, there is nothing to
  *    clear, and it always describes exactly one reset - the last one.
@@ -25,21 +50,21 @@
  *    at boot; here that would be writing to a read-only register and
  *    reading a history that does not exist.
  *
- * 2. NOT EVERY RESET RESETS EVERYTHING (table 18-1). Only a power-supply
+ * 2. Not every reset resets everything (table 18-1). Only a power-supply
  *    reset (POR, BODVDD, BODCORE) clears the whole device. An external
  *    reset spares the RTC, OSC32KCTRL, RSTC itself and a WRTLOCK'd GCLK;
- *    a WDT reset or a system reset request spares those AND the debug
+ *    a WDT reset or a system reset request spares those and the debug
  *    logic. So a watchdog reset leaves a running RTC running - which is
  *    a feature when something must keep time across a recovery, and a
  *    trap for code that assumes a reset is a clean slate.
  *
- *    SRAM APPEARS IN NO ROW OF THAT TABLE, for any source including
+ *    SRAM appears in no row of that table, for any source including
  *    power-on. Nothing promises the breadcrumb survives; the magic word
  *    take_panic_record() checks is therefore necessary and not merely
  *    prudent, and the linker script's NOLOAD .noinit is what keeps the
  *    crt from zeroing it.
  *
- * 3. THE WDT RUNS ON ITS OWN OSCILLATOR AND ITS RESET VALUES ARE FUSES.
+ * 3. The WDT runs on its own oscillator and its reset values are fuses.
  *    The counter is clocked at 1.024 kHz from OSCULP32K, deliberately
  *    inaccurate ("the exact time-out period may vary from device-to-
  *    device", 23.5.3) - a watchdog margin here is a real margin, not a
@@ -50,7 +75,7 @@
  *    that intent from. The two must agree, and the bench suite checks
  *    that they do.
  *
- * 4. THE CLEAR REGISTER IS A LOADED GUN. Writing 0xA5 restarts the
+ * 4. The CLEAR register is a loaded gun. Writing 0xA5 restarts the
  *    period; "writing any other value than 0xA5 to CLEAR will issue an
  *    immediate system reset" (23.6.2.4). That makes a wrong key a second
  *    way to reset on purpose - and, unlike `Reset::software()`, one the
@@ -58,20 +83,20 @@
  *    and `Watchdog::force_reset()` are the two halves of that, spelled
  *    apart so neither can happen by accident.
  *
- * ERRATA: neither RSTC nor the WDT has an item in DS80000740S - there is
+ * Errata: neither RSTC nor the WDT has an item in DS80000740S - there is
  * no section for either. The watchdog does appear inside someone else's
  * workaround: 1.22.1 (XOSC/XOSC32K clock-failure detection cannot switch
  * to the safe clock when the input is stuck high) tells the application
  * to run the WDT and switch clocks in firmware after the WDT reset. That
  * matters wherever XOSC's failure detector is used (samc21/clock.hpp).
  *
- * REGISTER ACCESS PROTECTION: RCAUSE and every writable WDT register but
+ * Register access protection: RCAUSE and every writable WDT register but
  * INTFLAG are PAC write-protected (18.5.8, 23.5.8). PAC protection is off
  * out of reset and no brio driver enables it, so nothing here unlocks
  * anything; a program that turns it on through samc21/pac.hpp must.
  *
- * NOT BUILT (docs/samc21/platform.md carries the list): the SUPC side of
- * the story - BODVDD and BODCORE are reset SOURCES named here and
+ * Not built (docs/samc21/reset.md carries the list): the SUPC side of
+ * the story - BODVDD and BODCORE are reset sources named here and
  * configured in samc21/supc.hpp - and the vector table relocation (VTOR),
  * which a bootloader would want and nothing else does.
  */

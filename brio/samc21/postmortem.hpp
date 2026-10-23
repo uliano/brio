@@ -1,51 +1,66 @@
 /*
  * postmortem.hpp
  *
- * WHERE THE PROGRAM DIED, not just what killed it.
+ * Where the program died, not just what killed it: the last branches
+ * before a fault or a panic, kept across the reset and read at the next
+ * boot, with no debugger attached. The smallest use is the two entry
+ * paths below plus the boot side (docs/samc21/mtb.md, "How to use it"):
+ * `Trace::arm()` once in main(), the HardFault body bound to
+ * hard_fault_trace_reset<P, Trace>(), and at boot take_panic_record<P>()
+ * and Trace::take() read side by side.
  *
- * The breadcrumb this stratum already has answers WHAT: kernel/panic.hpp
+ * Who calls what. arm() and disarm() are setup verbs in main(), with no
+ * guard of their own. capture() is the fault path's and the panic
+ * reporter's: bounded by `keep_packets`, no allocation, nothing touched
+ * but the MTB's registers and the store's own memory, legal with
+ * interrupts dead. pending(), packets(), take(), clear() and raw() are
+ * the boot side's, plain reads and stores in main context. Nothing here
+ * waits or masks. The span take() hands back points into the .noinit
+ * record and stays readable until the next capture().
+ *
+ * The breadcrumb this stratum already has answers what: kernel/panic.hpp
  * writes a PanicRecord - a code and a context byte - into the .noinit
  * storage samc21/platform.hpp hosts, samc21/reset.hpp's `ResetReporter`
  * and `hard_fault_reset<P>()` end the program with a reset, and the next
- * boot reads the record back. What it cannot say is WHERE FROM: which
+ * boot reads the record back. What it cannot say is where from: which
  * calls led into the wreck.
  *
  * The Cortex-M0+ answers that in hardware and for free. samc21/mtb.hpp's
  * Micro Trace Buffer records every non-sequential change of the program
  * counter into ordinary SRAM with no CPU cycles spent, so at the moment
- * of the disaster the last N branches ARE in memory - they simply do not
+ * of the disaster the last N branches are in memory - they simply do not
  * survive, because the buffer is not checksummed, the trace keeps
  * running while the handler reads it, and nobody validates a word of it
  * at the next boot. This file is the glue that closes those three gaps:
  *
- *   1. FREEZE FIRST. `capture()` stops the trace before it does anything
+ *   1. Freeze first. `capture()` stops the trace before it does anything
  *      else - before the validity test, before the copy. The MTB traces
  *      the processor reading it, so a handler that decides, tests and
  *      prints first reads back its own branches and nothing else
  *      (measured).
- *   2. COPY, CHECKSUM, AND KEEP. The last `keep_packets` packets are
- *      copied out of the rolling buffer into a SEPARATE .noinit record
+ *   2. Copy, checksum, and keep. The last `keep_packets` packets are
+ *      copied out of the rolling buffer into a separate .noinit record
  *      with a magic word and a CRC-16 (util/crc.hpp) - so what survives
- *      the reset is a bounded, VALIDATED object, not a buffer somebody
+ *      the reset is a bounded, validated object, not a buffer somebody
  *      hopes was not touched. Table 18-1 promises nothing about SRAM
  *      through any reset, which is the same reason the PanicRecord
  *      carries a magic word.
- *   3. READ AND INVALIDATE. `take()` hands the packets over once and
+ *   3. Read and invalidate. `take()` hands the packets over once and
  *      clears the record, so one crash is reported once.
  *
- * IT IS A SIBLING OF THE PANIC RECORD, NOT AN EXTENSION OF IT. The
+ * It is a sibling of the panic record, not an extension of it. The
  * kernel's PanicRecord is the kernel's; a trace is silicon this stratum
  * happens to have and another target may answer differently or not at
  * all. So the record lives here, in a samc21 type, and the two are read
  * side by side at boot.
  *
- * THE SAME RULE AS THE FAULT HANDLER'S: AN EXISTING RECORD IS NOT
- * OVERWRITTEN. samc21/reset.hpp's hard_fault_reset() refuses to clobber a
- * PanicRecord because a fault after a panic is a CONSEQUENCE of
+ * The same rule as the fault handler's: an existing record is not
+ * overwritten. samc21/reset.hpp's hard_fault_reset() refuses to clobber a
+ * PanicRecord because a fault after a panic is a consequence of
  * something already diagnosed; a second trace would bury the first for
  * exactly the same reason, and `capture()` returns false instead.
  *
- * THE TWO ENTRY PATHS, and which one really runs.
+ * The two entry paths, and which one really runs.
  *
  *     // orderly panic: capture, then whatever the next reporter does
  *     using Trace = brio::MtbPostMortem<256, 16>;
@@ -57,17 +72,17 @@
  *         brio::hard_fault_trace_reset<brio::SamPlatform, Trace>();
  *     }
  *
- * ON A BOARD WITH DHCSR.C_DEBUGEN CLEARED - which is what
- * `bin/brio` leaves after every SAM flash - THE SECOND PATH IS THE
- * ONE THAT RUNS EVEN FOR AN ORDERLY PANIC: panic() calls
- * P::break_here() BEFORE any reporter, break_here() is a BKPT, and a
+ * On a board with DHCSR.C_DEBUGEN cleared - which is what
+ * `bin/brio` leaves after every SAM flash - the second path is the
+ * one that runs even for an orderly panic: panic() calls
+ * P::break_here() before any reporter, break_here() is a BKPT, and a
  * BKPT with nothing halted on it escalates to HardFault. The
  * PanicRecord is already written by then (panic() writes it first), so
  * nothing is lost - but the `source` byte of the trace record says which
  * body wrote it, because on this core that is a property of the debug
  * state and not of the program. Bind both.
  *
- * COSTS NOTHING IT IS NOT ASKED FOR. The trace buffer is ordinary .bss
+ * Costs nothing it is not asked for. The trace buffer is ordinary .bss
  * and the record ordinary .noinit; a program that never names the type
  * pays neither. `arm()` is a line of the app's own, so a program that
  * wants the trace only around one suspect region arms it there.

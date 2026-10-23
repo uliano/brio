@@ -1,22 +1,28 @@
 /*
  * usart.hpp
  *
- * The AVR DA/DB USART (DS40002247B ch. 27) in two strata, as
- * docs/avrxt/usart.md describes:
+ * The USART of the AVR DA/DB (DS40002247B ch. 27) and of the AVR EA
+ * (DS40002443A ch. 25, the DB's chapter register for register under a
+ * route table of another shape) as a serial port for a program: the
+ * console a program prints to and reads lines from, a byte transport to
+ * another chip, or one of the other shapes the peripheral offers (a
+ * one-wire half-duplex line, RS-485, a synchronous link, a host SPI,
+ * IrDA, auto-baud). docs/avrxt/usart.md is the document. The header has
+ * two strata:
  *
- *  RESOURCE - Usart<n>: the typed view of one instance. A config struct
- *  owns the whole configuration (route, communication mode, frame
+ *  the resource - Usart<n>: the typed view of one instance. A config
+ *  struct owns the whole configuration (route, communication mode, frame
  *  format, receiver mode, baud register, the half-duplex bits, the
  *  IRCOM pulse lengths); init<cfg>() folds it and refuses at compile
  *  time what this package cannot bond, init(cfg) computes it at run
  *  time and returns false instead. Then the verbs the modes share:
  *  enable/disable of each direction, the frame format, the baud
  *  register and its readback, the status flags with their write-one-
- *  to-clear discipline, the interrupt enables, the ISR bodies
+ *  to-clear discipline, the interrupt enables, the interrupt bodies
  *  (receive / clear_txc), and release() - route back to NONE with the
  *  pins handed to PORT.
  *
- *  TASKS - what an application names, each a mode with its knobs in
+ *  the tasks - what an application names, each a mode with its knobs in
  *  the application's units (a clock and a baud rate; the resource
  *  speaks BAUD register values):
  *    Uart<n, route>        interrupt-driven full-duplex byte transport
@@ -31,53 +37,128 @@
  *  A task owns its instance; two tasks on one Usart<n> is the app's bug.
  *  MPCM is not a task: it is a receiver filter on the resource
  *  (multiprocessor(bool)), and start-of-frame detection is a verb, not
- *  a configuration field - see the errata below.
+ *  a configuration field - the errata below say why.
  *
- * Facts that shape the code (27.3, 27.5, errata DS80000915F 2.16.x and
- * DS80000882C 2.15.x):
+ * The smallest use, the console on USART2's ALT1 route (TXD PF4, RXD
+ * PF5), in the shape the apps spell it:
+ *
+ *   using SysClock = brio::Clock<brio::ClockSource::crystal, 24'000'000>;
+ *   constexpr SysClock clock;
+ *   using Serial = brio::Uart<2, brio::Route::alt1>;
+ *   constexpr Serial serial;                 // the tag print() takes
+ *
+ *   ISR(USART2_RXC_vect) { Serial::rxc(); }
+ *   ISR(USART2_DRE_vect) { Serial::dre(); }
+ *
+ *   int main() {
+ *       SysClock::init();
+ *       Serial::init(clock, 460800);
+ *       sei();
+ *       brio::print(serial, "hello", brio::crlf);
+ *   }
+ *
+ * The route brings its pads: init() writes PORTMUX and the pins'
+ * directions itself. The baud divisor is computed from Clock::hz, the
+ * rate the clock type claims, so init() runs after the clock's; and it
+ * is not checked there - a rate the register cannot express writes
+ * BAUD 0, and can_baud() is the check. Both vectors are the program's
+ * to bind: an unbound one is avr-libc's __bad_interrupt, a jump to
+ * address 0. A console that assembles lines posts on rxc()'s answer
+ * (docs/avrxt/usart.md, "How to use it").
+ *
+ * Which context calls what.
+ *  - Setup, in main() after the clock's init() and before sei(): every
+ *    init() and release(), of the resource and of the tasks. Uart::init()
+ *    busy-waits 10 ms (delay_us) holding TXD idle; the resource's init()
+ *    waits for nothing.
+ *  - Interrupt bodies, called from the program's ISR() for the vector
+ *    and from nowhere else: Uart::rxc() (USARTn_RXC_vect) and Uart::dre()
+ *    (USARTn_DRE_vect). The resource names receive_as() and clear_txc()
+ *    as the bodies of its RXC and TXC vectors for a program that drives
+ *    it from interrupts; the polled verbs read the same registers from
+ *    main context where no vector is bound to them. A handler runs to
+ *    completion, no other handler interrupting it (avrxt/platform.hpp).
+ *  - Main context - setup, or the handler of an active object (a
+ *    component of a brio program with its own event queue, served one
+ *    event at a time by the kernel) - and never an interrupt handler:
+ *    Uart's write_byte(), write_bulk() and print() over them, read_byte(),
+ *    read_span() with consume(), rx_pending(), tx_idle(), rx_skips(),
+ *    rebase() and set_baud(). Each ring has one producer and one
+ *    consumer, and the interrupt body is the other end of both; nothing
+ *    checks for a second one. The error counters are single bytes,
+ *    readable from any context.
+ *  - What waits: Uart's transmit and receive verbs never do (print()
+ *    spins on a full ring, util/print.hpp). Uart::rebase() and
+ *    Uart::set_baud() spin, with no bound, until tx_idle(): the ring is
+ *    drained by dre(), so they are called with interrupts enabled once
+ *    anything was queued. The resource's send(), wait(), wait_line_idle()
+ *    and the polled tasks' verbs over them spin a bounded count (500'000
+ *    turns by default) and answer false or an empty optional when it
+ *    runs out.
+ *  - What masks: with ring sizes of at most 256 (the defaults) the rings
+ *    take no critical section on this core (the comment at Uart's ring
+ *    defaults). write_byte() and write_bulk() set DREIE with a
+ *    read-modify-write of CTRLA that dre() may interrupt; DREIE is the
+ *    only bit either side changes there and the main side's store sets
+ *    it, so an interleaving costs one DRE entry that finds the ring
+ *    empty and clears it again. The resource's knob verbs are
+ *    read-modify-writes of CTRLA/CTRLB with no guard: setup verbs, one
+ *    context at a time.
+ *  - Buffers: the rings are the task's own static arrays. write_bulk()
+ *    copies the caller's span, free again when it returns; read_span()
+ *    hands out the ring's own bytes, valid until consume() releases them.
+ *
+ * Facts that shape the code (DS40002247B 27.3, 27.5; errata DS80000915F
+ * 2.16.x for the DB, DS80000882C 2.15.x for the DA, DS80001048D 2.5.1
+ * for the EA):
  *  - the fractional baud generator wants the divisor left-shifted by
  *    six: BAUD = 64 x f_CLK_PER / (S x f_baud) with S = 16 (normal),
  *    8 (double speed) or 2 (synchronous and Host SPI); the register's
  *    valid range is 64..65535, and in the synchronous modes only
  *    BAUD[15:6] counts - the six low bits must be zero;
  *  - RXDATAH carries the status of the frame at the head of the RX
- *    FIFO and the read of ONE of the two data registers shifts the
+ *    FIFO and the read of one of the two data registers shifts the
  *    FIFO: RXDATAH first, then RXDATAL - except in 9-bit low-byte-
  *    first (9BITL), where RXDATAH is the shifting read and RXDATAL
  *    must be read first. The transmit side mirrors it: TXDATAL before
  *    TXDATAH in 9BITL, TXDATAH before TXDATAL in 9BITH;
  *  - STATUS is a mix: RXCIF/DREIF are read-only conditions, while
  *    TXCIF/RXSIF/ISFIF/BDF are write-one-to-clear - cleared with a
- *    PLAIN store of just that bit (an RMW would read every pending
+ *    plain store of just that bit (an RMW would read every pending
  *    flag back as one and clear the lot), the pin.hpp discipline;
  *  - the RX buffer is two frames deep plus the shift register; BUFOVF
  *    is set when a new start bit arrives with all three full, and it
  *    travels with its frame through the FIFO;
  *  - disabling the transmitter waits for what is in flight and then
- *    hands TXD back to PORT as an INPUT; disabling the receiver is
+ *    hands TXD back to PORT as an input; disabling the receiver is
  *    immediate and flushes the buffer;
  *  - errata 2.16.1 / 2.15.1 (open drain): with the TXD pin configured
  *    as an output the pin drives high whether ODME is set or not. The
  *    documented work around - and what init() does for a one-wire
- *    config - is to leave TXD's direction at INPUT and let the pull-up
+ *    config - is to leave TXD's direction at input and let the pull-up
  *    hold the line, which contradicts 27.3.1's "the TXD pin is
- *    automatically set to output by hardware";
+ *    automatically set to output by hardware". DS80001048D has no twin
+ *    of it; the work around is applied on every part;
  *  - errata 2.16.2 / 2.15.2 (start-of-frame): SFDEN set while the
  *    device is in Active mode makes a read of RXDATA re-trigger the
  *    detector and corrupt the frame being received. SFDEN is therefore
  *    not a configuration field here but a pair of verbs,
  *    arm_start_of_frame() / disarm_start_of_frame(), to be used around
- *    the transition to standby;
- *  - errata 2.16.3 (auto-baud): once ISFIF is set the receiver is dead
- *    and clearing the flag does not revive it - RXEN must be written 0
- *    then 1. Every auto-baud path here goes through recover_from_isf();
- *  - the routes are PORTMUX.USARTROUTEA/B, two bits per instance, with
- *    a NONE code that disconnects every pin: an instance still runs
- *    pinless (the baud generator, the transmitter's flags and its
- *    timing are all live) but LBME and ODME are not available there -
- *    both act on the TXD PAD, and a pinless loop-back receives nothing
- *    (bench). Which positions a package bonds is the device header's
- *    route enums - the table below is those enums, package by package.
+ *    the transition to standby. DS80001048D has no twin of it either;
+ *    the verb pair stands on every part;
+ *  - errata 2.16.3 (auto-baud; DS80001048D 2.5.1 on the EA, word for
+ *    word): once ISFIF is set the receiver is dead and clearing the
+ *    flag does not revive it - RXEN must be written 0 then 1. Every
+ *    auto-baud path here goes through recover_from_isf();
+ *  - the routes are PORTMUX.USARTROUTEA/B, a field per instance - two
+ *    bits on the AVR DA/DB, three for the EA's USART0 (DS40002443A
+ *    17.3.3-4) - with a NONE code that disconnects every pin: an
+ *    instance still runs pinless (the baud generator, the transmitter's
+ *    flags and its timing are all live) but LBME and ODME are not
+ *    available there - both act on the TXD pad, and a pinless loop-back
+ *    receives nothing (bench). Which positions a package bonds is the
+ *    device header's route enums - the tables below are those enums,
+ *    package by package, and the EA's route table of its data sheet.
  */
 
 #pragma once
@@ -987,7 +1068,7 @@ private:
  * on: 8N1 by default, SPSC rings on both sides, ByteSink + ByteSource.
  *
  *  - all state is `static inline` (one per instantiation, .bss, no ctor
- *    running before main): hardware is touched ONLY by the explicit
+ *    running before main): hardware is touched only by the explicit
  *    init(), called after the clock is up;
  *  - byte transport only - text formatting lives in print.hpp;
  *  - RX hardware error flags (frame / parity / buffer overflow) are
@@ -999,7 +1080,7 @@ private:
  *    skips, never cleared: SerialPort compares it at every run and tears
  *    the line a loss cut.
  *
- * The empty default constructor is intentionally AVAILABLE: an instance
+ * The empty default constructor is intentionally available: an instance
  * carries no state and acts as a zero-cost tag so call sites can read
  * naturally, e.g.
  *
@@ -1018,14 +1099,15 @@ private:
  *       brio::print(serial, "hello", brio::crlf);
  *   }
  *
- * TX policy: write_byte() has TRY semantics (false when the TX ring is
+ * TX policy: write_byte() has try semantics (false when the TX ring is
  * full, nothing counted - the caller decides whether to retry, drop or
- * block; print.hpp blocks), and write_bulk() is the same for a RUN: as
+ * block; print.hpp blocks), and write_bulk() is the same for a run (a
+ * buffer and a length, the unit a transport moves): as
  * many as fit, the first byte pushed and DREIE set before the rest is
  * copied, the rest published in parts of at most copy_part bytes with
- * DREIE set behind each. tx_idle() is the WIRE's: nothing queued and the
+ * DREIE set behind each. tx_idle() is the wire's: nothing queued and the
  * last stop bit out (TXCIF, which this task owns). RX overflow (ring
- * full, byte lost) IS counted, as are the hardware error flags.
+ * full, byte lost) is counted, as are the hardware error flags.
  */
 // Ring defaults sized for console-class traffic AND for lock-free rings:
 // both <= 256 keeps Ring's index_t at 8 bits, which on AVR (atomic_width
@@ -1075,13 +1157,19 @@ public:
     // ---- lifecycle -------------------------------------------------------
 
     /**
-     * Configure pins, PORTMUX, baud rate and enable the USART.
+     * Configure pins, PORTMUX, baud rate and enable the USART: 8N1 on
+     * `route`, both directions on, the rings and the error counters
+     * emptied, then TXD held idle for 10 ms (a busy-wait) before the
+     * first frame can start.
      *
-     * Call AFTER the main clock is set up and before sei(); `clock` is
+     * Call after the main clock is set up and before sei(); `clock` is
      * the app's brio::Clock tag (avrxt/clock.hpp): the baud divisor is
      * derived from Clock::hz, never from F_CPU. With a constant baud the
-     * divisor folds to a constant. The RXC interrupt is enabled here; the
-     * DRE interrupt is enabled on demand by write_byte().
+     * divisor folds to a constant. The rate is not checked: one the
+     * register cannot express makes usart_baud_reg() 0, and that 0 is
+     * written into BAUD - can_baud() is the check. The RXC interrupt is
+     * enabled here; the DRE interrupt is enabled on demand by
+     * write_byte() and write_bulk().
      */
     template <typename Clock>
     static void init(Clock clock, uint32_t baud) {
@@ -1120,8 +1208,9 @@ public:
      *
      * Waits for the TX side to go idle first (ring drained by the DRE
      * ISR, shifter empty: TXCIF), so nothing already queued is sent at
-     * a half-changed rate; a byte being RECEIVED during the switch may
-     * be garbled - the caller picks a quiet moment. Main context only.
+     * a half-changed rate; a byte being received during the switch may
+     * be garbled - the caller picks a quiet moment. Main context only, and
+     * the wait has no bound: dre() drains the ring, so interrupts are on.
      */
     static void rebase(uint32_t hz) {
         // Called BEFORE the clock actually changes (DynamicClock::set
@@ -1183,7 +1272,9 @@ public:
     /**
      * RX Complete interrupt body - call from ISR(USARTn_RXC_vect).
      *
-     * ONE ENTRY TAKES EVERY FRAME THE BUFFER HOLDS. The receive buffer is
+     * Called from the program's ISR for the vector and nowhere else.
+     *
+     * One entry takes every frame the buffer holds. The receive buffer is
      * two frames deep with the shift register behind it (27.3.2.4) and
      * RXCIF is a level - set while unread data remain (27.5.5) - so an
      * entry that finds a second frame waiting takes it instead of
@@ -1196,12 +1287,12 @@ public:
      * generator makes (CLK_PER / 8 a bit in double speed, seven bits for
      * 5N1: 56 cycles), so it drains faster than frames arrive.
      *
-     * NOTHING IS CLEARED BESIDE THE FRAME: the error flags travel with
+     * Nothing is cleared beside the frame: the error flags travel with
      * their frame and go with its read, and this transport arms neither
      * the start-of-frame nor the auto-baud flags that share the vector.
      * A frame with FERR or PERR is counted and dropped; BUFOVF marks the
      * frame that arrived while the buffer was full - the frames lost are
-     * before it, and it is delivered. EVERY LOSS IS REPORTED TO THE RING -
+     * before it, and it is delivered. Every loss is reported to the ring -
      * a frame the full ring refuses or the flags drop, a buffer overflow -
      * by its lost() (util/ring.hpp's SkipRing), on the rare paths alone;
      * the consumer's next look skips everything queued, so where in the
@@ -1212,7 +1303,10 @@ public:
      * reports true and the consumer only empties the ring by draining it,
      * so no wakeup is ever lost. This silicon has no idle flag and no
      * receiver time-out (usart.md's inventory): the edge is the burst's
-     * FIRST byte, and a line's end is the console's terminator.
+     * first byte, and a line's end is the console's terminator. A program
+     * that reads no input binds the vector to rxc() and discards the
+     * answer; one that does posts on it to the active object that
+     * assembles lines (util/serial_port.hpp's SerialPort).
      */
     // always_inline: single call site (the ISR binding) - see ticker.hpp
     // pit() for the register-set rationale. The registers are read here
@@ -1280,14 +1374,16 @@ public:
      * Data Register Empty interrupt body - call from
      * ISR(USARTn_DRE_vect).
      *
+     * Called from the program's ISR for the vector and nowhere else.
+     *
      * Feeds the next byte from the TX ring; disables itself when the ring
-     * drains (write_byte() re-enables it). The run's LAST byte also
-     * clears TXCIF, written after the byte is in TXDATA: the flag rises
+     * drains (write_byte() and write_bulk() re-enable it). The run's last
+     * byte also clears TXCIF, written after the byte is in TXDATA: the flag rises
      * only "when the entire frame in the transmit shift register has been
      * shifted out" with nothing behind it (27.3.2.3), a write to TXDATA
      * does not clear it, and one left set by an earlier idle moment
      * would make tx_idle() answer while this run is still on the wire.
-     * Clearing it BEFORE the write would race the previous frame's end
+     * Clearing it before the write would race the previous frame's end
      * (its TXCIF rising between the clear and the write); after it the
      * frame just written is at least 56 CLK_PER from its stop bit.
      */
@@ -1346,9 +1442,9 @@ public:
     /// cost four registers a step - and widened only for the contract's
     /// return.
     ///
-    /// THE FIRST BYTE GOES BEFORE THE COPY: it is pushed and DREIE set
+    /// The first byte goes before the copy: it is pushed and DREIE set
     /// exactly as write_byte() does, so an idle transmitter starts on it
-    /// while the rest is copied. THE REST GOES IN PARTS of at most
+    /// while the rest is copied. The rest goes in parts of at most
     /// `copy_part` bytes, each published as soon as it is copied and
     /// DREIE set behind it - dre() clears DREIE when it pops the ring's
     /// last byte, so a part published after the ring ran dry needs it
@@ -1404,7 +1500,7 @@ public:
         return static_cast<uint32_t>(queued);
     }
 
-    /// The received bytes IN PLACE: the contiguous run ready to be read,
+    /// The received bytes in place: the contiguous run ready to be read,
     /// never wrapping - the receive ring's consumer half under the ring's
     /// own names. With consume() it is util/stream.hpp's SpanSource,
     /// which SerialPort drains a run at a time.
@@ -1420,7 +1516,7 @@ public:
     // ---- introspection ---------------------------------------------------
 
     static auto rx_pending() { return m_rx.count(); }
-    /// The WIRE is idle: nothing queued, and the last byte's stop bit
+    /// The wire is idle: nothing queued, and the last byte's stop bit
     /// is off the pad - TXCIF, which dre() cleared behind the run's last
     /// byte (27.3.2.3), so it answers for this run and never for an
     /// earlier one. Before the first run since init() nothing has been
@@ -1443,7 +1539,7 @@ public:
     static uint8_t hw_overruns() { return m_hw_overruns; }
 
     /// The skips the receive ring has made since the program started,
-    /// NEVER CLEARED (modulo 2^8): util/stream.hpp's SkippingSource, the
+    /// never cleared (modulo 2^8): util/stream.hpp's SkippingSource, the
     /// epoch SerialPort compares at every run. One moves at the consumer's
     /// look after a byte dropped on a full ring, discarded for FERR or
     /// PERR, or lost to a buffer overflow - the look that discards what

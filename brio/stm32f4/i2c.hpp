@@ -2,108 +2,161 @@
  * i2c.hpp
  *
  * The I2C of the STM32F4 (RM0090 ch. 27, RM0390 ch. 24, RM0383 ch. 18 -
- * one chapter, three manuals, the same registers): up to three instances
- * of the F1 lineage's EVENT MACHINE, in the layers every brio bus driver
- * has (docs/design/i2c-bus.md):
+ * one chapter, three manuals, the same registers) as a bus for a
+ * program: a sensor, a touch controller or a converter on two wires,
+ * this chip the controller, or this chip answering as a target. Up to
+ * three instances of the F1 lineage's event machine, in the layers
+ * every brio bus driver has (docs/design/i2c-bus.md):
  *
- *  I2c<n>                the RESOURCE: the register block, its APB1 gate
- *                        and its reset, its TWO vectors, and the whole
+ *  I2c<n>                the resource: the register block, its APB1 gate
+ *                        and its reset, its two vectors, and the whole
  *                        register description as verbs - the clock
  *                        arithmetic (FREQ, CCR under F/S and DUTY, TRISE),
  *                        the noise filters, 7- and 10-bit own addresses
  *                        with the dual address and the general call, the
  *                        control bits (START, STOP, ACK, POS), every flag
- *                        with the SEQUENCE that clears it, SMBus and PEC,
+ *                        with the sequence that clears it, SMBus and PEC,
  *                        the DMA requests with LAST. It decides nothing.
- *  I2cHost<n, pins, ...> the ENGINE util/i2c_bus.hpp's I2cBus drives: the
- *                        Request is the other strata's VERBATIM, so an
- *                        application written over I2cBus on a Nucleo or a
- *                        Pico runs here unchanged.
+ *  I2cHost<n, pins, ...> the engine util/i2c_bus.hpp's I2cBus drives (the
+ *                        arbiter, an active object that takes one request
+ *                        at a time and replies with an event): one Request
+ *                        is one tenure, the time the controller holds the
+ *                        bus from START to STOP. The Request is
+ *                        {addr, tx, tx_len, rx, rx_len, reply, speed}, the
+ *                        tenure shape util/i2c_bus.hpp describes, the
+ *                        speed an I2cSpeed of this block's two rows
+ *                        (standard_100k, fast_400k; no Fast-mode Plus): a
+ *                        program written over I2cBus compiles against this
+ *                        engine unchanged as long as it names no speed
+ *                        this block lacks.
  *  I2cClient<n, pins>    the target side, a thin polled surface with two
  *                        ISR bodies: a client is a protocol and which one
  *                        is the application's.
  *
- * THE MACHINE THIS CHAPTER PRESCRIBES is a set of software sequences,
+ * The smallest use, a bus with one device driven from the loop
+ * (docs/stm32f4/i2c.md, "How to use it", on the STM32F429I-DISC1):
+ *
+ *     constexpr brio::I2cPins pins{.scl = {'A', 8, brio::PinFunction::af4},
+ *                                  .sda = {'C', 9, brio::PinFunction::af4}};
+ *     using Bus = brio::I2cHost<3, pins>;
+ *     Bus::init(clock);   // after the clock task: both rows solved for PCLK1
+ *     extern "C" void I2C3_EV_IRQHandler() { if (Bus::isr()) { done = true; } }
+ *     extern "C" void I2C3_ER_IRQHandler() { if (Bus::error_isr()) { done = true; } }
+ *     ...
+ *     Bus::start(r);      // r: one Request, its buffers lent until done
+ *
+ * and under the arbiter the vectors post the completion instead:
+ * `if (Bus::isr()) { post<Arb>(TransferDone{Bus::status()}); }`.
+ *
+ * Who calls what, and from where. init(), rebase(), unstick(), recover()
+ * and release() are main-context verbs: init(), unstick() and recover()
+ * take the instance's two NVIC lines down while they work and enable them
+ * again, release() leaves them down, rebase() touches neither, and none
+ * of them masks interrupts globally. init()
+ * computes the timing from the APB1 rate the clock type claims, so it
+ * runs after the clock task's init(); it answers false when not even
+ * standard mode can be solved for that rate. start() is the arbiter's,
+ * from its dispatch (main context), one tenure at a time - it does not
+ * check that the previous tenure has completed, I2cBus is what
+ * serializes. It waits in its caller, bounded: about stop_drain_us
+ * (5 ms) for the last tenure's STOP to leave the wire and about
+ * bus_free_us (100 us) for BUSY to fall; a STOP still standing past the
+ * first bound parks the tenure, no START and no vector, for the per-bus
+ * timeout to answer. isr(), error_isr() and dma_isr() are the bodies the
+ * program's handlers for the event vector, the error vector and the two
+ * DMA streams call, and nothing else calls them; each runs to completion
+ * like every interrupt handler in brio. The one wait inside them: on the
+ * last byte of a read of three or more, isr() polls RxNE up to 400 000
+ * times and, if that bound runs out, reads DR regardless and reports
+ * i2c_ok with what it holds (receive_step(); docs/stm32f4/i2c.md lists
+ * it as open). The Request's two buffers are lent from the post (or from
+ * start()) to the completion: untouched and in scope until then, which
+ * the Borrowed type records and nothing checks. The resource's verbs
+ * have no guard of their own: a program that drives I2c<n> by hand owns
+ * the sequencing.
+ *
+ * The machine this chapter prescribes is a set of software sequences,
  * each stretching SCL low until it completes (27.3.2 and 27.3.3): EV5 (SB
  * up: read SR1, write the address into DR), EV6 (ADDR up: read SR1 then
  * SR2), EV8 (TxE: write DR), EV8_2 (TxE and BTF: the last byte is out,
- * STOP or repeated START), EV7 (RxNE: read DR) - and a RECEIVE PROCEDURE
- * THAT DEPENDS ON THE COUNT: one byte wants ACK cleared BEFORE ADDR is
+ * STOP or repeated START), EV7 (RxNE: read DR) - and a receive procedure
+ * that depends on the count: one byte wants ACK cleared before ADDR is
  * cleared and STOP set right after; two bytes want POS set with ACK, ACK
  * cleared after ADDR, and the pair read after one BTF; three or more run
  * on RxNE until three remain, then wait for BTF twice - the first clears
  * ACK and reads N-2, the second sets STOP and reads N-1 and N. All of it
  * is in `isr()`, phase by phase, and it is the reason ITBUFEN is switched
- * on and off DURING a tenure: TxE and RxNE interrupt only while the byte
+ * on and off during a tenure: TxE and RxNE interrupt only while the byte
  * pump needs them, BTF (under ITEVTEN alone) carries the rest. ITEVTEN
  * itself is on from start() to the completion and off between tenures,
- * because the flags that END a tenure are levels that outlive it - BTF
+ * because the flags that end a tenure are levels that outlive it - BTF
  * stands until the STOP requested on it is on the wire - and a vector left
  * on re-enters for all that time (isr() says what was measured).
  *
- * WHAT THE ENGINE TAKES FROM THE CHAPTER beyond the sequences, each
+ * What the engine takes from the chapter beyond the sequences, each
  * measured on the STM32F429I-DISC1 (docs/stm32f4/i2c.md has the
  * inventory and the numbers): the entry that clears ADDR loads the first
- * TWO bytes itself (the data register and the shifter, TxE rising within
+ * two bytes itself (the data register and the shifter, TxE rising within
  * twenty cycles of each store), so a write of one or two bytes and a
  * register index take no per-byte interrupt at all; the repeated START
  * of a write-then-read is requested while the last written byte shifts
  * (27.3.3's note), with a dummy store into DR that keeps BTF down until
  * the Sr; CR2's enables move in one store each time (control2()).
  *
- * A REFUSED LAST BYTE IS CLOSED FROM THE Sr, NOT AT THE NACK. The NACK of
+ * A refused last byte is closed from the Sr, not at the NACK. The NACK of
  * the byte behind which the repeated START was requested arrives with
  * START standing, and 27.6.1 forbids any CR1 access until the hardware
  * clears that bit ("a risk of setting a second STOP, START or PEC
  * request"), while 27.3.4 lets a NACKed controller answer with a repeated
  * START. So the engine writes nothing at the NACK: the controller sends
- * the Sr, and its SB is answered with the address and the WRITE bit and a
+ * the Sr, and its SB is answered with the address and the write bit and a
  * STOP behind it - a void write - the tenure reporting i2c_nack_data once
  * that address is acknowledged or refused. A CR1 store that withdrew the
  * START and requested the STOP at the NACK left the event vector
  * re-entering for ever with SB standing, the core at 48 MHz and the bus at
  * 400 kHz (measured on the Nucleo-F446RE's self-link, docs/stm32f4/i2c.md).
  *
- * THE RATE IS THE INSTANCE'S OWN APB1 CLOCK, never SYSCLK, and this
- * chapter needs it stated THREE times over: FREQ carries it in whole
+ * The rate is the instance's own APB1 clock, never SYSCLK, and this
+ * chapter needs it stated three times over: FREQ carries it in whole
  * megahertz (2 to 50 - 27.6.2; below 2 MHz no speed is legal and below
- * 4 MHz Fm mode is not, and init() refuses both), CCR divides it into the
+ * 4 MHz Fm mode is not: init() refuses the first and marks the fast row
+ * unreachable for the second, speed_ok()), CCR divides it into the
  * SCL period, and TRISE bounds the SCL feedback loop. The CCR arithmetic
  * is the F1 lineage's: standard mode divides by 2 x CCR, fast mode by
- * 3 x CCR at DUTY 2 and by 25 x CCR at DUTY 16/9, ROUNDED UP here so a bus
- * never runs faster than asked. TRISE IS AN ARGUMENT AND NOT AN
- * ASSUMPTION, as the bus edges are on the AVR's TWI: it is the wire's
+ * 3 x CCR at DUTY 2 and by 25 x CCR at DUTY 16/9, rounded up here so a bus
+ * never runs faster than asked. TRISE is an argument and not an
+ * assumption, as the bus edges are on the AVR's TWI: it is the wire's
  * maximum rise time in nanoseconds - the specification's own 1000 ns in Sm
  * and 300 ns in Fm by default - converted to APB periods and incremented
  * by one, which is what 27.6.9 asks for.
  *
- * THE NOISE FILTERS ARE NOT ON EVERY PART. I2C_FLTR - the analog filter's
+ * The noise filters are not on every part. I2C_FLTR - the analog filter's
  * off switch and the digital filter's length in APB periods - exists on
- * every part of the pack but the F405 class, and the reserve asks the
- * header for it (stm32f4/device_tables.hpp's `i2c_has_filter()`); the
- * verb refuses where the register is not there. Table 122's ceiling on
- * the digital filter is published as `i2c_digital_filter_max()` and is
- * ADVICE, not a refusal: it is the bound that keeps the data hold time
- * inside the bus specification with the analog filter off, and the
- * chapter itself allows higher values to a system that can take the
- * violation.
+ * every part of the pack but the F405 class, and the reserve (the table
+ * of what each part has, read off the device header) asks the header for
+ * it (stm32f4/device_tables.hpp's `i2c_has_filter()`); the verb refuses
+ * where the register is not there. Table 122's ceiling on the digital
+ * filter is published as `i2c_digital_filter_max()` and is advice, not a
+ * refusal: it is the bound that keeps the data hold time inside the bus
+ * specification with the analog filter off, and the chapter itself allows
+ * higher values to a system that can take the violation.
  *
- * THREE ERRATA OF THIS CHAPTER SHAPE THE CODE (ES0206 2.10, ES0298 2.11,
+ * Three errata of this chapter shape the code (ES0206 2.10, ES0298 2.11,
  * ES0287 2.9 - the same six items on all three parts):
- *  - A BUS ERROR CAN BE DETECTED SPURIOUSLY IN CONTROLLER MODE, and
+ *  - A bus error can be detected spuriously in controller mode, and
  *    "detection of bus error has no effect on the I2C-bus transfer in
- *    controller mode". The manual says as much of a REAL one (27.3.4: in
+ *    controller mode". The manual says as much of a real one (27.3.4: in
  *    controller mode the lines are not released and the transfer is
  *    unaffected), so BERR is never a reason to abort a tenure here: the
- *    error body clears it, COUNTS it - `spurious_bus_errors()` - and lets
+ *    error body clears it, counts it - `spurious_bus_errors()` - and lets
  *    the transfer run on. This is where this family's engine differs from
  *    the CH32V00x's, whose chapter has no such erratum.
- *  - A START CANNOT BE GENERATED AFTER A MISPLACED STOP, and the
+ *  - A START cannot be generated after a misplaced STOP, and the
  *    workaround is SWRST. That is exactly what `recover()` does, so a
  *    tenure that never answers and is timed out by the arbiter comes back
  *    through the errata's own escape.
- *  - THE REPEATED START'S SETUP TIME CAN BE VIOLATED in standard mode
- *    between 88 and 100 kHz. A write-then-read Request IS a repeated
+ *  - The repeated START's setup time can be violated in standard mode
+ *    between 88 and 100 kHz. A write-then-read Request is a repeated
  *    start, so the fact is published rather than hidden -
  *    `repeated_start_setup_at_risk(speed)` - and the workaround (Fm, or a
  *    slower Sm) is the application's to take.
@@ -111,7 +164,7 @@
  * 2.0 is not fully supported, a target transmitter with NOSTRETCH can
  * violate the data valid time, and a 5 V bus violates the rise times.
  *
- * TWO OPTIONAL DMA ENGINE SLOTS, the shape every brio bus task has: name
+ * Two optional DMA engine slots, the shape every brio bus task has: name
  * a stm32f4/dma.hpp DmaTxEngine and/or DmaRxEngine and the data phases
  * move without the CPU; name neither (the default) and every engine
  * branch disappears. A stream and a channel are not free - the request
@@ -120,16 +173,16 @@
  * against the reserve's I2C slice of those tables at compile time, and
  * refused on a part class whose manual was not read.
  *
- * THE PADS ARE THE APPLICATION'S, as `SpiPins` has them: SCL, SDA and the
+ * The pads are the application's, as `SpiPins` has them: SCL, SDA and the
  * optional SMBus alert as `PinSel`s, each with the alternate function the
- * DATASHEET gives that signal on that pad - AF4 for I2C1, I2C2 and I2C3,
+ * datasheet gives that signal on that pad - AF4 for I2C1, I2C2 and I2C3,
  * with AF9 on the handful of pads (PB3, PB4, PB8, PB9 on some parts) that
  * only the datasheet's table can settle. The device header carries no pin
  * table at all, so nothing here can check an AF: the bench is the check.
- * Both lines go out OPEN DRAIN - that IS the bus - and the pull-ups are
+ * Both lines go out open drain - that is the bus - and the pull-ups are
  * external.
  *
- * NOT COVERED YET is at the end of docs/stm32f4/i2c.md.
+ * Not covered yet is at the end of docs/stm32f4/i2c.md.
  */
 
 #pragma once
@@ -891,6 +944,12 @@ public:
     /// moves nothing - a speed the clock cannot produce, answered
     /// i2c_rejected through status() - the I2cHost contract
     /// (docs/design/i2c-bus.md).
+    ///
+    /// One tenure at a time: nothing here checks that the previous one has
+    /// completed, the arbiter serializes. The Request's buffers stay lent
+    /// until the completion. Waits in the caller, bounded (the STOP drain
+    /// and the BUSY wait below); a drain that runs out parks the tenure
+    /// with no START and no vector, and returns false.
     static bool start(const Request& r) {
         if (!speed_ok(r.speed)) {
             t_.status = i2c_rejected;
@@ -1564,6 +1623,9 @@ private:
         // Two left: N-1 in DR, N in the shifter.
         S::stop();
         *t_.rx++ = S::data();
+        // Bounded (wait_until's 400 000 polls) and its answer discarded: a
+        // bound that runs out reads DR regardless and the tenure reports
+        // i2c_ok (docs/stm32f4/i2c.md lists it as open).
         (void)wait_until([] { return S::flag(I2cFlag::rx_not_empty); });
         *t_.rx = S::data();
         return finish(i2c_ok);

@@ -1,12 +1,16 @@
 /*
  * quadspi.hpp
  *
- * The STM32F4's Quad-SPI memory interface (RM0386 ch. 13, RM0390 ch. 12 -
- * one register file under one name on the F412, the F413/F423, the F446
- * and the F469/F479, which the device header says with QSPI_R_BASE; the
- * rest of the pack has no block and nothing register-facing in this file
- * exists there): `Quadspi`, a MONOSTATE resource, because a part carries
- * one interface or none.
+ * The STM32F4's Quad-SPI memory interface (RM0386 ch. 13, RM0390 ch. 12)
+ * for a program whose board carries a serial flash on those pads: read
+ * its identity, erase and program it a command at a time, and read it
+ * back either through the FIFO or as plain memory in the window at
+ * 0x9000 0000. One register file under one name on the F412, the
+ * F413/F423, the F446 and the F469/F479, which the device header says
+ * with QSPI_R_BASE; the rest of the pack has no block and nothing
+ * register-facing in this file exists there: `Quadspi`, a monostate
+ * resource (an all-static type with no instances), because a part
+ * carries one interface or none.
  *
  *   using namespace brio;
  *   constexpr QspiConfig cfg{.prescaler = 1, .fifo_threshold = 4,
@@ -18,59 +22,91 @@
  *   Quadspi::map(fast_read_quad);                  // then plain loads
  *   const uint8_t b = Quadspi::window()[0x1000];
  *
- * WHAT THE BLOCK IS. A command engine in front of a serial flash: every
+ * (`fast_read_quad` is the program's read command; docs/stm32f4/
+ * quadspi.md writes out a whole sequence for the MT25QL128: write
+ * enable, page program, the status poll, the window.) The pads are the
+ * program's: init() hands none of them to the block, so the board's six
+ * are put in their alternate function first. The prescaler is applied
+ * to whatever HCLK runs, so a device's ceiling holds at the rate the
+ * divisor was computed for.
+ *
+ * Who calls what. Every verb is the main context's - setup, or an
+ * active object's handler (an active object is a component of a brio
+ * program with its own event queue, served one event at a time by the
+ * kernel) - and one context at a time: the block holds one command. Every
+ * verb waits, with a bound (`default_spins` polls, generous for a
+ * device's erase), and answers what happened: init() false and nothing
+ * written for a configuration outside the fields; command(), write(),
+ * read() and poll() a QspiStatus (`refused` with nothing written, which
+ * a block still BUSY when the verb's entry wait runs out answers too;
+ * `error` for TEF; `timeout` for the wait after the command that ran
+ * out, a failed command aborted so the block is at rest); a verb before
+ * init() is refused.
+ * Nothing here masks interrupts. A caller's buffer is read or written
+ * inside the call and is the caller's again when it returns. isr() is
+ * the body of the program's handler for QUADSPI_IRQHandler and is called
+ * from nowhere else; a program that arms the interrupt does not also
+ * rely on the flags it clears (fact 7 below), which is why the blocking
+ * verbs complete on BUSY.
+ *
+ * What the block is. A command engine in front of a serial flash: every
  * command is up to five phases - an instruction, an address of one to
  * four bytes, one to four alternate bytes, a run of dummy cycles and the
  * data - each phase on one, two or four lines or skipped (13.3.3), and
- * the whole thing in one of three functional modes: INDIRECT, where the
- * program writes the registers and pumps a 32-byte FIFO; AUTOMATIC
- * STATUS-POLLING, where the block repeats a read on its own and raises a
- * flag when the masked answer matches; and MEMORY-MAPPED, where a load
+ * the whole thing in one of three functional modes: indirect, where the
+ * program writes the registers and pumps a 32-byte FIFO; automatic
+ * status-polling, where the block repeats a read on its own and raises a
+ * flag when the masked answer matches; and memory-mapped, where a load
  * from the window at 0x9000 0000 becomes the programmed read command and
  * the flash is seen as memory (13.3.5, 13.3.6, 13.3.7). Only reads go
  * through the window; a write is always indirect.
  *
- * THE FACTS THAT SHAPE THE FILE.
+ * The facts that shape the file.
  *
- * 1. A COMMAND STARTS ON THE LAST REGISTER IT NEEDS (13.3.5): on the CCR
+ * 1. A command starts on the last register it needs (13.3.5): on the CCR
  *    write when there is no address and no data to give, on the AR write
  *    when an address is needed and nothing is to be sent, on the first DR
  *    write when data is. The verbs below write the registers in exactly
  *    that order, ABR before CCR because the alternate bytes never start
  *    anything and must be there first, and DLR before CCR because the
  *    length is part of what the command is.
- * 2. THE CLOCK IS HCLK DIVIDED, NOT A CLOCK OF THE RCC: PRESCALER makes
+ * 2. The clock is HCLK divided, not a clock of the RCC: PRESCALER makes
  *    CLK = HCLK / (PRESCALER + 1) (13.5.1), so a device's ceiling is met by
  *    a divisor a program chooses knowing HCLK - qspi_prescaler_for() is
  *    that arithmetic. An odd divisor gives a clock that is low one cycle
  *    longer than high.
- * 3. THE FLASH'S SIZE IS PART OF THE CONTRACT. FSIZE + 1 is the number of
+ * 3. The flash's size is part of the contract. FSIZE + 1 is the number of
  *    address bits (13.3.8), and an indirect access whose address or whose
  *    address plus length passes the size raises TEF (13.3.13); in
- *    memory-mapped mode the same mistake is a BUS ERROR to the master
+ *    memory-mapped mode the same mistake is a bus error to the master
  *    that made it. `QspiConfig::address_bits` is that field in the
  *    manual's own unit.
- * 4. NCS'S HIGH TIME IS A DEVICE PARAMETER. CSHT + 1 cycles between two
+ * 4. NCS's high time is a device parameter. CSHT + 1 cycles between two
  *    commands (13.3.8); a flash wants a deselect time in nanoseconds after
  *    a command, and qspi_cs_high_cycles_for() turns it into the field at
  *    the clock in force - refused when eight cycles are not enough.
- * 5. THE MEMORY-MAPPED WINDOW IS THE MANUAL'S AND NOT THE HEADER'S. No
+ * 5. The memory-mapped window is the manual's and not the header's. No
  *    header of the pack declares it; the reserve states 0x9000 0000 for
- *    the two classes whose manuals are on the desk and `map()` REFUSES on
+ *    the two classes whose manuals are on the desk and `map()` refuses on
  *    the others rather than guess (device_tables.hpp's quadspi_window).
- * 6. BUSY MEANS DIFFERENT THINGS PER MODE (13.3.14): in indirect mode it
+ * 6. BUSY means different things per mode (13.3.14): in indirect mode it
  *    falls when the command is done and the FIFO empty; in status-polling
  *    mode it stays up between the periodic reads until a match with APMS
  *    or an abort; in memory-mapped mode it stays up from the first access,
  *    prefetching, until an abort. `abort()` is the one way down that works
  *    in every mode, and it flushes the FIFO.
  *
- * THE ERRATA ARE THE SAME FIVE ON BOTH SHEETS READ - ES0321 Rev 14
+ * 7. The poller and the handler must not want the same flag. TCF is what
+ *    isr() reports and clears; a blocking verb that waited for TCF would
+ *    be robbed by that handler and time out (measured, finish() below),
+ *    so the blocking verbs complete on BUSY falling.
+ *
+ * The errata are the same five on both sheets read - ES0321 Rev 14
  * 2.4.1..2.4.5 (the F469/F479) and ES0298 Rev 8 2.4.1..2.4.5 (the F446) -
  * and four of them are code here:
  *  - 2.4.2, "first nibble of data not written after dummy phase": an
- *    indirect WRITE with dummy cycles loses its first nibble. write()
- *    REFUSES a command with dummy cycles; a device that wants latency
+ *    indirect write with dummy cycles loses its first nibble. write()
+ *    refuses a command with dummy cycles; a device that wants latency
  *    before the data of a write gets it as alternate bytes, the sheet's
  *    own workaround.
  *  - 2.4.3, "wrong data from memory-mapped read after an indirect mode
@@ -85,12 +121,12 @@
  *    still holds after the transfer completes and discards it, which
  *    costs nothing on the transfers the item does not touch.
  *  - 2.4.5, "memory-mapped access in indirect mode clearing QUADSPI_AR":
- *    no code can cover a load a PROGRAM makes from the window while the
+ *    no code can cover a load a program makes from the window while the
  *    block is in indirect mode; window() is handed out by map() and the
  *    verbs write AR right before every command they start, so a program
  *    that keeps to the verbs never meets it.
  *
- * NOT HERE, BY DESIGN: the flash's own command set. This file speaks the
+ * Not here, by design: the flash's own command set. This file speaks the
  * chapter's language - phases, lines, sizes - and a device's opcodes,
  * dummy counts and registers are the device's datasheet's, spelled as
  * `QspiCommand` values where the device is (the bench suite for the
@@ -276,7 +312,9 @@ struct Quadspi {
     /// an operation in flight aborted, the block disabled, CR (prescaler,
     /// sample shift, FIFO threshold) and DCR (size, chip-select high time,
     /// clock mode) written, the block enabled. False and nothing written
-    /// when the configuration breaks qspi_config_ok().
+    /// when the configuration breaks qspi_config_ok(). A setup verb, main
+    /// context; it waits only for an abort of a command in flight, bounded,
+    /// and hands no pad over (the pads are the program's).
     template <QspiConfig cfg>
     static bool init() {
         static_assert(qspi_config_ok(cfg),
@@ -422,7 +460,9 @@ struct Quadspi {
      * address, a reset - started and waited for. The address phase is
      * present when the command's `address_lines` say so; `address` is
      * ignored otherwise. Refused (nothing written) when the command breaks
-     * the chapter's rules or names a data phase.
+     * the chapter's rules or names a data phase, or the block is not
+     * enabled. Main context; it waits, bounded by `spins`, for the block
+     * to be idle and then for the command to end.
      */
     static QspiStatus command(const QspiCommand& c, uint32_t address = 0,
                               uint32_t spins = default_spins) {
@@ -443,7 +483,10 @@ struct Quadspi {
      * pumped through the FIFO. Refused with dummy cycles (ES0321 2.4.2 /
      * ES0298 2.4.2: the first nibble is lost - alternate bytes are the
      * latency a write may have), with no data phase, with a zero length, or
-     * with the block busy.
+     * with the block busy. Main context; it returns when the block has
+     * sent the last byte (BUSY down), not when the device has written
+     * them - that is the device's status, poll()'s to wait for. `data` is
+     * read inside the call and is the caller's again on return.
      */
     static QspiStatus write(const QspiCommand& c, uint32_t address, const uint8_t* data,
                             uint32_t len, uint32_t spins = default_spins) {
@@ -482,6 +525,8 @@ struct Quadspi {
      * lines needs a dummy cycle for the turn-around (13.3.3) and is refused
      * without one. Whatever the FIFO still holds after the transfer is
      * drained and discarded (ES0321 2.4.1's extra byte, when it comes).
+     * Main context; it waits, bounded, and `data` is written inside the
+     * call only.
      */
     static QspiStatus read(const QspiCommand& c, uint32_t address, uint8_t* data, uint32_t len,
                            uint32_t spins = default_spins) {
@@ -634,8 +679,10 @@ struct Quadspi {
     static bool unmap(uint32_t spins = default_spins) { return abort(spins); }
 
     /// The flash as memory - valid after map() answered true and until
-    /// unmap(); a load through it before that is the bus error 13.3.13
-    /// describes. Null where the window is not known.
+    /// unmap(); a load through it with the block disabled is the bus
+    /// error 13.3.13 describes, and one with the block in indirect mode is
+    /// erratum 2.4.5's case (the opening comment). Null where the window
+    /// is not known.
     static const volatile uint8_t* window() {
         return window_facts.known ? reinterpret_cast<const volatile uint8_t*>(window_facts.base)
                                   : nullptr;

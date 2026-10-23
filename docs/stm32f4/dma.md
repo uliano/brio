@@ -1,8 +1,78 @@
 # DMA (STM32F4)
 
-Documents of record: RM0090 Rev 22 ch. 10, and its twins RM0390 Rev 6 ch. 9
+This document is for a programmer who wants data moved without the CPU:
+a block of memory copied or filled, a peripheral's register fed from a
+buffer or drained into one, a serial line's bytes landing in a ring. The
+STM32F4 has two DMA controllers of eight streams each, and
+`stm32f4/dma.hpp` holds them in four layers: `Dma<n>`, one controller
+(its clock, its reset, its flag registers); `DmaStream<n, s>`, one
+stream's registers under the chapter's enable discipline, for a program
+that drives a stream by hand; `DmaTxEngine` and `DmaRxEngine`, the
+engines a transport's slots are filled with (an engine, in brio, is a
+driver layer that owns one stream and moves a run - a buffer and its
+length - into or out of a peripheral's register; the `Uart` task has two
+optional engine slots, the SPI and I2C hosts a pair each); and
+`DmaCopyEngine`, copy and fill from memory to memory on DMA2. Most
+programs meet the engines only as template arguments of a transport
+([usart.md](usart.md), [spi.md](spi.md)); this page is where their
+rules and their cost are.
+
+The smallest use, the first block of "How to use it" below, a copy and a
+fill with no peripheral involved:
+
+```cpp
+using Copier = brio::DmaCopyEngine<2, 4>;   // any DMA2 stream: no request is involved
+Copier::arm(brio::DmaPriority::high);
+(void)Copier::copy(frame_out, frame_in, 1024);          // 1024 uint32_t: word beats
+while (Copier::busy()) { }
+static uint16_t background = 0x001F;                     // the fill's cell: in memory, kept until done
+(void)Copier::fill(pixels, &background, 320 * 40);      // half-word beats
+while (Copier::busy()) { }
+```
+
+Line by line: `Copier` names a copy engine on DMA2's stream 4 - a copy
+answers no peripheral's request, so any DMA2 stream serves, and a DMA1
+stream does not compile; `arm()` is the binding, done once: it opens the
+controller's clock, stops the stream, sets its FIFO up and keeps the
+stream's configuration word, at the priority given; `copy()` starts a
+block of 1024 elements of the arrays' own type (`uint32_t` here, so each
+bus access moves a word) and returns at once, false and nothing started
+while a block runs, for an empty block or one past 65535 elements, or
+for an address not aligned on its element; `busy()` reads the stream's
+flags and stays true until the block has ended; `fill()` writes 320 x 40
+copies of the half-word `background` holds into `pixels`, reading that
+cell at every beat.
+
+What decides correctness even there. The buffers are lent to the
+stream: `frame_in`, `frame_out`, `pixels` and the fill's cell stay in
+place and untouched from the start until `busy()` answers false, and
+nothing checks it. A buffer the stream writes must be `volatile` where
+the program reads it back, because the compiler sees only an address
+handed to a register and may keep the old bytes in a register of its own
+("Bench findings" below). An address no DMA master reaches - the
+core-coupled memory at 0x1000 0000 - ends the block with a transfer
+error, which `busy()` counts in `faults()`. The engine's state is not
+guarded by a mask, so one context owns an engine. And the level is a
+choice with a cost: a copy arms at `low` by default because three copies
+ranked above a receive ring on the same controller starve it (measured
+below), so an excerpt that arms one at `high`, as this one does, is a
+program's decision to weigh.
+
+The rest of this page, in order: the documents of record; what the
+silicon does (streams and their request cells, memory to memory, the
+FIFO and direct mode, the enable, the count register, suspend, circular
+mode and the double buffer, the flow controller, the flags, the arbiter,
+the errors, the F411's erratum); the types and verbs; the engines
+against the chapter, with the table of what the controller offers and
+what the engines take of it; how to use it, one example per shape; the
+bench findings, most of the page, with a block start's cost and what a
+copy can starve; and what is not covered.
+
+## Documents of record
+
+RM0090 Rev 22 ch. 10, and its twins RM0390 Rev 6 ch. 9
 and RM0383 Rev 4 ch. 9 - one IP, three manuals, identical register by
-register. What differs between them is the REQUEST MAPPING: RM0090's
+register. What differs between them is the request mapping: RM0090's
 tables 43 and 44, RM0390's 28 and 29, RM0383's 27 and 28 are three
 different tables. Errata: neither ES0206 Rev 24 nor ES0298 Rev 8 has a DMA
 section at all (their items with "DMA" in the title are the DAC's request
@@ -10,9 +80,13 @@ behaviour, that chapter's business); ES0287 Rev 6 has one item about this
 controller, 2.2.11, quoted below. ES0206 2.2.7 / ES0298 2.2.7, the delay
 after an RCC clock enable, reaches every peripheral and is answered in
 `stm32f4/clock.hpp`. Driver: `stm32f4/dma.hpp`; the per-part request cells
-and the presence facts are in `stm32f4/device_tables.hpp`. Bench suite:
+and the presence facts are in `stm32f4/device_tables.hpp` (the reserve:
+the table of what each part has, read off the device header, with the
+facts no header carries keyed on the device-select define). Bench suite:
 `test_stm32f4_dma`, and `test_stm32f4_serial` letter g for a receive
-ring against copies on its own controller. Family fixture
+ring against copies on its own controller (a letter is one command key
+of the suite's console and the group of verdicts it runs, `z` the key
+that runs them all). Family fixture
 `test/family_stm32f4/dma.cpp` plus six negatives under `brio check
 stm32f4`.
 
@@ -20,7 +94,7 @@ stm32f4`.
 
 **A stream is the unit, and a channel is only a multiplexer input.** Two
 controllers, eight streams each; a stream owns a FIFO, a priority, a pair
-of memory pointers, a counter and A VECTOR OF ITS OWN, and it selects ONE
+of memory pointers, a counter and a vector of its own, and it selects one
 of eight request lines with `SxCR.CHSEL` (10.3.3). That is the opposite
 economy of the STM32G0's controller, where a channel is the unit and a
 multiplexer points it at any of 77 request lines: here **a peripheral can
@@ -41,7 +115,7 @@ not bond has no cells whatever its class's table says about the number.
 **Only DMA2 can move memory to memory, and no register says so.** DMA1's
 AHB peripheral port is not connected to the bus matrix (figures 33 and 34,
 note 1 under each), so the port that would be a memory-to-memory transfer's
-SOURCE cannot reach a memory at all. Nothing in DMA1's registers refuses
+source cannot reach a memory at all. Nothing in DMA1's registers refuses
 the mode - the stream would simply take a bus error - so the refusal is the
 driver's, at compile time where the controller is a template argument and
 at run time where the configuration is a value.
@@ -55,7 +129,7 @@ table is arithmetic - the threshold in bytes must be a whole number of
 memory bursts, and a burst must fit in the four-word FIFO - and the driver
 carries the arithmetic rather than the table, which is what lets the family
 fixture assert all forty-eight cells against it. The note under the table
-is the second half: with a PERIPHERAL burst that fills the whole FIFO
+is the second half: with a peripheral burst that fills the whole FIFO
 (`PBURST x PSIZE` = 16 bytes), a three-quarter threshold underruns for
 ever, and it is refused too.
 
@@ -81,15 +155,15 @@ after an abort sees a completion that is really an abort. A write of 1 is
 not visible to the load that follows it either (measured; see the findings
 below).
 
-**SxNDTR counts PERIPHERAL-side items** (10.3.10) whichever side the
+**SxNDTR counts peripheral-side items** (10.3.10) whichever side the
 peripheral port is on, and it is a live register readable at any time. That
 is what makes a receive engine's "how much has arrived" one register read
 and a subtraction, with nothing suspended - and, on a circular stream, what
-makes the count register a ring's PRODUCER INDEX: it decrements after the
+makes the count register a ring's producer index: it decrements after the
 datum is stored (10.3.2's three operations, the post-decrement last), and
 in direct mode a datum is "immediately drained and stored into the
 destination" (10.3.6), so a count read says only what memory holds. Where
-the two ports have different widths the controller PACKS, and table 48 is
+the two ports have different widths the controller packs, and table 48 is
 the price: with PSIZE below MSIZE the last memory access would be
 incomplete unless NDT divides by MSIZE/PSIZE.
 
@@ -101,9 +175,9 @@ the caller knows how its addresses advance.
 
 **Circular mode reloads SxNDTR and both addresses in hardware** (10.3.8),
 and the double buffer (10.3.9) is circular mode with two memory pointers
-that the hardware SWAPS at every end of transaction - `SxCR.CT` says which
+that the hardware swaps at every end of transaction - `SxCR.CT` says which
 is current, and setting DBM forces CIRC whatever CIRC says. The one write
-into an address register a RUNNING stream allows is the half it is not
+into an address register a running stream allows is the half it is not
 using: with CT = 0 only M1AR, with CT = 1 only M0AR, and **the wrong one
 sets TEIF and disables the stream**. Circular mode is forbidden with
 memory-to-memory and with the peripheral flow controller; a circular block
@@ -144,9 +218,9 @@ peripheral-to-memory with MINC clear), leave the stream running, because no
 data is lost when they happen.
 
 **ES0287 2.2.11, the F411's alone**: DMA2 managing concurrent AHB and APB2
-requests can perform a transfer over its PERIPHERAL port several times,
+requests can perform a transfer over its peripheral port several times,
 corrupting what a QUADSPI, an FSMC or a GPIO register receives. The
-workaround is to put such a destination on the MEMORY port instead. This
+workaround is to put such a destination on the memory port instead. This
 driver can express that - DIR names which side is the source and the two
 ends are separate arguments - but cannot choose it: only the application
 knows what its addresses are. Stated as an obligation on the caller.
@@ -307,7 +381,7 @@ shape's owners pay nothing for a count they have no use for.
 | the interrupt enables | chosen once (`DmaInterrupts`) | the SPI's transmit stream needs only its errors - the receive block's end proves the transmit block's |
 | memory to memory (DMA2) | `DmaCopyEngine` | copy and fill, the beat the element, the bursts from the addresses |
 | a timer's request through CHSEL | the paced transfer (bench letter d) | TIM1_UP on DMA2 stream 5, channel 6 - a cell of every manual's table |
-| the peripheral flow controller (10.3.15) | declined | the SDIO is the one peripheral that can drive it, and there is no SDIO driver |
+| the peripheral flow controller (10.3.15) | declined | the SDIO is the one peripheral that can drive it, and this stratum has no SDIO driver |
 
 **The controller's gate is opened by the stream's configuring verbs**, the
 way `stm32f4/pin.hpp`'s port clock is: a caller cannot forget it, and a
@@ -351,7 +425,7 @@ if (Copy::load(t)) {
 ```
 
 **A console whose bytes leave and arrive without the CPU** - the two
-engine slots the `Uart` task has always declared, filled with the cells
+engine slots the `Uart` task declares, filled with the cells
 USART1's requests are wired to; the receive engine runs circular over the
 transport's whole receive ring ([usart.md](usart.md)):
 
@@ -754,7 +828,7 @@ Driver gaps, each with its reason:
   belongs with its first user, not before it.
 - **The peripheral flow controller is configurable and untested**: the SDIO
   is the one peripheral of this family that can signal an end of transfer
-  (10.3.15), and there is no SDIO driver in this stratum. The verbs and
+  (10.3.15), and this stratum has no SDIO driver. The verbs and
   `dma_flow_control_count` are there, and the family fixture prepares such
   a stream; nothing on the bench can make one run.
 - **PINCOS with a peripheral burst, and the packing table's exotic rows.**

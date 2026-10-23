@@ -1,13 +1,40 @@
 /*
  * sleep.hpp
  *
- * PM, the Power Manager (DS60001479M ch. 19) - the whole of it, which is
- * two registers - plus `SamSleepSite`, the adapter that puts
- * `util/power.hpp`'s depth ladder on this silicon.
+ * How deep a brio program on the SAM C21 sleeps: PM, the Power Manager
+ * (DS60001479M ch. 19) - the whole of it, which is two registers - plus
+ * `SamSleepSite`, the adapter that puts `util/power.hpp`'s depth ladder
+ * on this silicon, and `SamTimedSleepSite`, the site that keeps kernel
+ * time across a standby. A program that never sleeps deeper than the
+ * default needs none of it: the kernel's idle WFI takes IDLE0, the
+ * reset mode. A program that wants standby lists util/power.hpp's
+ * manager over a site in its Tenuto (docs/samc21/platform.md, "How to
+ * use it"):
  *
- * The MECHANISM only: which sleep mode the next WFI will take, what the
+ *     using Pm = brio::PowerManager<P, brio::SamSleepSite, brio::PowerConfig{},
+ *                                   Voters...>;
+ *     using K = brio::Tenuto<P, AOs..., Pm>;
+ *
+ * (Voters... and AOs... standing for the program's own lists) and asks the manager for a depth with a SleepRequested event; the
+ * manager arms the site, and the kernel loop's next idle() is the sleep.
+ *
+ * Who calls what. A site's arm(), disarm() and armed() are the
+ * manager's, called from its handler; arm() spins on the SLEEPCFG
+ * readback, bounded (0xFFFF reads), and answers false when the mode did
+ * not land. Pm::sleep() and Pm::enter() are for a caller that sleeps
+ * outside the kernel loop, in main context. SamTimedSleepSite::init() is
+ * a setup call in main(), after the clock task's init() and before the
+ * manager's first round; its isr() is the body the program's RTC_Handler
+ * calls and nothing else does; its resync() takes the platform's
+ * critical section (interrupts masked) for the few instructions that
+ * consume the baseline, and nothing else here masks. The rule the plain
+ * site leaves to the caller: kernel time stops in standby, so a program
+ * on SamSleepSite asks for standby only when no time event is armed
+ * (below).
+ *
+ * The mechanism only: which sleep mode the next WFI will take, what the
  * regulator and the RAM do while the CPU is stopped, and the one
- * erratum that makes standby entry a hazard. The POLICY - when a program
+ * erratum that makes standby entry a hazard. The policy - when a program
  * may stop its clocks - is util/power.hpp's, and the design note at the
  * end of this comment says why the two are separate files.
  *
@@ -16,14 +43,14 @@
  * SLEEPCFG.SLEEPMODE has three implemented codes (19.8.1); 0x1, 0x3 and
  * 0x5..0x7 are Reserved and `sleep_mode_valid()` refuses them.
  *
- * IDLE0 (0x0) - the RESET value, so it is also what a machine that has
+ * IDLE0 (0x0) - the reset value, so it is also what a machine that has
  * never touched this register takes on a bare WFI. The CPU stops; MCLK,
  * GCLK generator 0 and the clock source feeding it stay alive; every
  * AHB/APB clock a peripheral asks for keeps running; the CAN is clocked
  * and can wake the system. The regulator and the RAM stay in normal
  * mode. Waking costs a handful of cycles.
  *
- * IDLE2 (0x2) - IDLE0 except that the CAN is NOT clocked and therefore
+ * IDLE2 (0x2) - IDLE0 except that the CAN is not clocked and therefore
  * cannot wake the system (19.6.3.3.1). That single difference is the
  * whole of it: there is no IDLE1 on this family.
  *
@@ -38,23 +65,23 @@
  * external clock or an external event - plus the synchronous interrupts
  * of the peripherals configured to run in standby (table 19-1).
  *
- * ## THE TICK STANDS STILL IN STANDBY
+ * ## The tick stands still in standby
  *
  * This is the fact that shapes how a brio program on this target may
  * sleep. The timebase is SysTick, SysTick is clocked from the CPU clock
  * (samc21/ticker.hpp), and in standby the CPU clock stops. So:
  *
- *   KERNEL TIME STOPS FOR EXACTLY AS LONG AS THE STANDBY LASTS, and
- *   every armed time event matures LATE by that amount.
+ *   kernel time stops for exactly as long as the standby lasts, and
+ *   every armed time event matures late by that amount.
  *
- * TWO SITES ANSWER IT, and the choice is the application's:
+ * Two sites answer it, and the choice is the application's:
  *
  *  - `SamSleepSite` keeps the honest restriction: standby is
- *    legitimate when the kernel has NO armed time event
+ *    legitimate when the kernel has no armed time event
  *    (`TimeEvents<P>::ticks_to_next()` empty - nothing waiting,
  *    nothing late), and a deadline-less standby still under-reports
  *    millis() by the slept span.
- *  - `SamTimedSleepSite` (end of this file) LIFTS it: the RTC on an
+ *  - `SamTimedSleepSite` (end of this file) lifts it: the RTC on an
  *    always-on 32 kHz clock is the alarm and the witness - a COMP0
  *    wake placed on the next deadline, and the frozen span handed to
  *    `Ticker::advance()` at the first event after the wake - so a
@@ -70,15 +97,15 @@
  * "When the systick interrupt is enabled and the standby back-bias
  * option is set (STDBYCFG.BBIAS = 1), a hard fault can occur upon
  * standby entry in the rare occasion when the systick interrupt
- * coincides exactly with the standby entry." LIVE on every silicon
+ * coincides exactly with the standby entry." Live on every silicon
  * revision of the E/G/J family, this one included, and its two
- * preconditions are the DEFAULT state of a brio program: BBIASHS reads
+ * preconditions are the default state of a brio program: BBIASHS reads
  * 1 out of reset (19.8.2, reset value 0x0400) and the SysTick interrupt
- * IS the kernel tick.
+ * is the kernel tick.
  *
  * The workaround the errata gives is "disable the systick interrupt
  * before entering standby and re-enable it after", and it costs
- * NOTHING here because of the paragraph above: kernel time stands still
+ * nothing here because of the paragraph above: kernel time stands still
  * across a standby, and the guard is what holds it there whatever the
  * SysTick counter does (measured running through a standby with the
  * debug probe attached: samc21/ticker.hpp). So the discipline is
@@ -105,9 +132,9 @@
  * the low-power one always and 19-4's note limits it to a sleepwalking
  * task on a 32 kHz GCLK. 0x3 is Reserved.
  *
- * ERRATUM 1.8.14, live on this silicon: entering standby with
+ * Erratum 1.8.14, live on this silicon: entering standby with
  * VREGSMOD = PERFORMANCE wrongly switches to the low-power regulator
- * AND keeps requesting GCLK0 - i.e. the setting achieves the opposite
+ * and keeps requesting GCLK0 - i.e. the setting achieves the opposite
  * of its name and costs the main clock's current on top. The workaround
  * is SUPC.VREG.RUNSTDBY = 1 (`Vreg::run_standby(true)`, samc21/supc.hpp),
  * which forces the main regulator from the other end. This header does
@@ -115,13 +142,13 @@
  * an application may want it with VREGSMOD = AUTO as well, and a driver
  * that silently wrote another driver's register would be the kind of
  * hidden coupling this codebase refuses. `standby_config_valid()`
- * therefore ACCEPTS performance mode and the comment on the enumerator
+ * therefore accepts performance mode and the comment on the enumerator
  * carries the obligation.
  *
  * BBIASHS (19.6.4.1, table 19-3) back-biases the RAM in standby, which
  * is the low-power state and the reset default. Two consequences worth
- * knowing before clearing or keeping it: with the RAM back-biased THE
- * DMAC CANNOT ACCESS IT (19.6.4.1's own note - a sleepwalking DMA
+ * knowing before clearing or keeping it: with the RAM back-biased the
+ * DMAC cannot access it (19.6.4.1's own note - a sleepwalking DMA
  * transfer into SRAM needs BBIASHS = 0), and with it set erratum 1.8.13
  * above applies.
  *
@@ -138,29 +165,29 @@
  *
  * ## The rest of the chapter's own answers
  *
- * The PM has NO interrupt, NO event, NO DMA connection and NO software
- * reset (19.5.4 is about the interrupt CONTROLLER, 19.6.6 and 19.6.7 say
+ * The PM has no interrupt, no event, no DMA connection and no software
+ * reset (19.5.4 is about the interrupt controller, 19.6.6 and 19.6.7 say
  * "Not applicable", 19.6.3.2 says "always enabled and can not be reset").
  * Its registers are optionally PAC write-protected (19.5.7);
  * samc21/pac.hpp exists (mechanism only) and nothing here writes it - the
  * protection is left as reset leaves it, off.
  *
- * ITS BUS CLOCK IS ONE-WAY. 19.5.2: "If this clock is disabled, it can
+ * Its bus clock is one-way. 19.5.2: "If this clock is disabled, it can
  * only be re-enabled by a system reset." `bus_clock(false)` is
  * therefore a verb that leaves the device unable to sleep until the
  * next reset; it is exposed, with this sentence, rather than hidden.
  *
- * DEBUG CHANGES WHAT STANDBY IS. 19.5.6: with the CPU halted in debug
+ * Debug changes what standby is. 19.5.6: with the CPU halted in debug
  * mode the PM keeps operating, and a standby requested while a debugger
- * is attached does NOT turn the power domains off. A sleep measured with
+ * is attached does not turn the power domains off. A sleep measured with
  * a debugger attached is not the sleep the silicon does on its own, and
  * bin/brio clears DHCSR.C_DEBUGEN at the end of every flash for
  * this reason among others.
  *
  * ## Errata that touch this chapter, at silicon revision F
  *
- * LIVE: 1.8.13 (above, coded), 1.8.14 (above, the obligation stated),
- * 1.8.7 (a DMA WRITE performed while sleepwalking may not land on some
+ * Live: 1.8.13 (above, coded), 1.8.14 (above, the obligation stated),
+ * 1.8.7 (a DMA write performed while sleepwalking may not land on some
  * peripheral registers - RTC.COUNT, TC/TCC control and count registers,
  * ADC/SDADC SWTRIG - with "use Idle instead of Standby" as the only
  * workaround; unreachable in this stratum, whose one DMA channel writes
@@ -168,7 +195,7 @@
  * samc21/dmac.hpp), 1.8.5 (increased power consumption in standby, no
  * workaround - a number, not a behaviour).
  *
- * NOT this silicon (revision B only - the read-the-row trap the whole
+ * Not this silicon (revision B only - the read-the-row trap the whole
  * samc21 stratum has been bitten by): 1.8.1 (Idle does not stop the
  * AHB/APB clocks while the FDPLL runs as a GCLK source), 1.8.11
  * (VREGSMOD has no effect at all), 1.8.6 (the SysTick calibration
@@ -294,7 +321,7 @@ struct Pm {
     }
 
     /**
-     * Arm `m`, and DO NOT RETURN UNTIL THE REGISTER SAYS SO.
+     * Arm `m`, and do not return until the register says so.
      *
      * 19.6.3.3: the store crosses a bridge and lands late, and software
      * "must ensure that the SLEEPCFG register reads the desired value
@@ -372,8 +399,8 @@ struct Pm {
      * standby either way) and why it is at the WFI rather than at the
      * arming.
      *
-     * WARNING (19.6.3.3): the wake-up source must be configured,
-     * ENABLED, and REACHABLE IN THE ARMED MODE before this runs.
+     * Warning (19.6.3.3): the wake-up source must be configured,
+     * enabled, and reachable in the armed mode before this runs.
      * Standby's wake-up list is short - the asynchronous interrupts,
      * plus the synchronous ones of peripherals with RUNSTDBY - and
      * arming a mode nothing on that list can leave is how a program
@@ -394,7 +421,7 @@ struct Pm {
     }
 
     /// Arm and sleep: the bounded verb, for a caller that has already
-    /// established its wake condition. False - and NO sleep - when the
+    /// established its wake condition. False - and no sleep - when the
     /// mode could not be armed (see set_sleep_mode()). The mode is left
     /// as it was armed; `set_sleep_mode(SleepMode::idle0)` puts the
     /// register back where reset left it.
@@ -420,16 +447,16 @@ struct Pm {
  *   standby -> STANDBY
  *   deep    -> STANDBY   there is nothing deeper on this family
  *
- * TWO THINGS TO READ BEFORE USING IT.
+ * Two things to read before using it.
  *
- * THE NEVER-DEEPER RULE EARNS ITS KEEP HERE, because the ladder's rungs
+ * The never-deeper rule earns its keep here, because the ladder's rungs
  * do not match this family's modes one for one. Its deepest
  * stop is STANDBY, so `deep` maps to it and `armed()` reports
  * `standby` - what the target really took, which is what the manager
  * records. An application asking for `deep` gets the deepest stop this
  * silicon offers and never one that loses more than it agreed to lose.
  *
- * THE REGISTER IS THE STATE, and that is why `light` is IDLE2 rather
+ * The register is the state, and that is why `light` is IDLE2 rather
  * than IDLE0. There is no SEN bit here: IDLE0 is both a sleep mode and
  * the reset value, so a site that armed `light` as IDLE0 could not tell
  * "armed at light" from "nothing armed" without a variable shadowing
@@ -440,12 +467,12 @@ struct Pm {
  * driver; an application that grows one and wants a CAN wake from a
  * light sleep should arm IDLE0 through `Pm::enter()` directly.
  *
- * IT ONLY ARMS. The WFI is still the kernel loop's: SamPlatform::idle()
+ * It only arms. The WFI is still the kernel loop's: SamPlatform::idle()
  * takes whatever SLEEPCFG holds instead of imposing its own, which is
  * what makes a power manager possible with no new kernel hook. So
  * everything chapter 19 warns about still applies to the caller - above
  * all that the wake-up source must be reachable in the armed mode, and
- * (this target's own addition) that KERNEL TIME STOPS across a standby,
+ * (this target's own addition) that kernel time stops across a standby,
  * so no armed time event may be waiting on it. See the file header.
  */
 struct SamSleepSite {

@@ -4,53 +4,68 @@
  * The SAM C21 Device Service Unit (DS60001479M ch. 13): the block a
  * debug probe talks to before the CPU is even running, and the one
  * peripheral on this device that answers the question "what chip is
- * this?".
+ * this?". The smallest use, a checksum of the image (docs/samc21/dsu.md,
+ * "How to use it"):
  *
- * WHAT IT IS FOR HERE. Three of its services are useful to code running
- * ON the device rather than to a probe attached to it, and those are
+ *     Dsu::init();                  // clears the reset-time PAC protection
+ *     if (const auto crc = Dsu::crc32(0x0000, image_words)) { ... }
+ *     Dsu::release();               // protected again, as reset left it
+ *
+ * Who calls what. Every verb is main context with no guard of its own:
+ * ADDR, LENGTH and DATA are one interface for CRC32 and MBIST, and a
+ * command issued while another runs is discarded, so one caller at a
+ * time. crc32(), crc32_raw() and mbist() spin the caller until
+ * STATUSA.DONE, bounded (20 000 000 polls by default); the optional comes
+ * back empty, or the result says not done, when the bound ran out.
+ * mbist() writes over the caller's range, which the caller owns and
+ * gives up for good. Nothing here masks interrupts, and the block has
+ * no interrupt and no event to bind.
+ *
+ * What it is for here. Three of its services are useful to code running
+ * on the device rather than to a probe attached to it, and those are
  * what this header builds:
  *
- *  1. DEVICE IDENTIFICATION. DID decodes into processor, family,
+ *  1. Device identification. DID decodes into processor, family,
  *     series, die, revision and device-select - the number every errata
  *     row is indexed by. Board identity on this family comes free: this
  *     register plus the factory 128-bit serial samc21/nvm.hpp already
  *     reads (`DeviceSerial`) is a label no chip erase can remove, so a
  *     board on this family needs no identity written into it by hand.
- *  2. A HARDWARE CRC32 OVER ANY MEMORY THE BUS MATRIX REACHES. The
+ *  2. A hardware CRC32 over any memory the bus matrix reaches. The
  *     engine walks flash or SRAM with no CPU in the loop and no code
  *     size spent on a table; the polynomial is the industry-standard
  *     reflected 0xEDB88320, so the answer matches any host-side tool
  *     once complemented.
  *  3. MBIST, the March LR memory self-test, which exists here because
- *     IEC 60730 Class B asks for one. IT DESTROYS WHAT IT TESTS - the
+ *     IEC 60730 Class B asks for one. It destroys what it tests - the
  *     algorithm's first phase writes the whole range to zero - so the
  *     only honest way to run it from firmware is over a buffer the
  *     caller owns and has finished with. That is what `mbist()`
  *     documents and what the bench suite does.
  *
- * WHAT IS DELIBERATELY NOT HERE: CHIP ERASE. CTRL.CE erases the whole
+ * What is deliberately not here: chip erase. CTRL.CE erases the whole
  * flash array including the EEPROM emulation area and clears the security
  * bit; a firmware-callable verb for it would be a verb for destroying the
  * running program. The bit is named in docs/samc21/dsu.md and not
  * exposed.
  *
- * THE PROTECTION SURPRISE. PAC.STATUSB's RESET VALUE IS 0x00000002
+ * The protection surprise. PAC.STATUSB's reset value is 0x00000002
  * (11.7.11): the DSU
- * comes out of reset ALREADY WRITE-PROTECTED, alone among the
+ * comes out of reset already write-protected, alone among the
  * peripherals of this device, and table 12-3's "Prot at Reset" column
  * says Y for this row and N for every other. So a bare store to
  * DSU.ADDR does nothing at all and raises PAC.INTFLAGB.DSU instead;
  * `init()` therefore clears the protection through samc21/pac.hpp, and
  * `release()` puts it back exactly as reset left it.
  *
- * THE INTERNAL AND EXTERNAL ADDRESS RANGES. 13.9: the first 0x100 bytes
+ * The internal and external address ranges. 13.9: the first 0x100 bytes
  * of the register map are mirrored at 0x100, so the silicon can tell a
  * CPU access from a debugger one and restrict the latter when the device
  * is protected by the NVM security bit. Everything here uses the
- * INTERNAL range (the device header's `DSU_REGS`), which 13.12.2.3 is
+ * internal range (the device header's `DSU_REGS`), which 13.12.2.3 is
  * explicit is the right choice for code running on the CPU.
  *
- * TWO REGISTERS THE CHAPTER DOES NOT DESCRIBE. The device header
+ * Two registers the chapter does not describe. The device header
  * declares `DSU_STATUSC` at offset 0x03 (a three-bit STATE field) and
  * `DSU_DCFG[2]` at 0xF0, neither of which appears in the register
  * summary of 13.13 - offset 0x03 is printed as "Reserved" there. They
@@ -59,13 +74,13 @@
  * datasheet is the authority on what it does - and here the datasheet
  * says nothing.
  *
- * NO ERRATA. DS80000740S has no DSU section at all. The one item that
+ * No errata. DS80000740S has no DSU section at all. The one item that
  * touches this chapter's subject matter is 1.8.15 (Device): the Program
- * and Debug Interface Disable lock of 13.10 is NOT AVAILABLE on E/G/J
+ * and Debug Interface Disable lock of 13.10 is not available on E/G/J
  * silicon up to and including revision F - which is a feature this
  * header does not build in any case.
  *
- * NOT BUILT (docs/samc21/dsu.md carries the list): chip erase, the DAP
+ * Not built (docs/samc21/dsu.md carries the list): chip erase, the DAP
  * security filter and everything else that is a debugger's business
  * rather than the CPU's; the DMA connection of the two debug
  * communication channels; and the CoreSight ROM beyond reading its

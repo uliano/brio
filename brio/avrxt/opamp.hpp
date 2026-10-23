@@ -2,13 +2,54 @@
  * opamp.hpp
  *
  * The AVR DB analog signal conditioning block (OPAMP, DS40002247B
- * ch. 35) as brio sees it - see docs/avrxt/opamp.md. DB ONLY: the DA
- * family has no such peripheral, so this whole header is gated on the
- * device header's `OPAMP` symbol and `opamp_count`
- * (avrxt/device_tables.hpp) is 0 there. Include it anywhere; use it
- * inside `#ifdef OPAMP`.
+ * ch. 35): what a program uses to buffer a pad or the DAC, amplify by
+ * one of the resistor ladder's exact gains, invert about VDD/2, take a
+ * difference with the three-op-amp instrumentation amplifier, or start
+ * and stop an op amp from the event system. docs/avrxt/opamp.md is the
+ * document. The AVR DB only: the DA and the EA have no such peripheral,
+ * so this whole header is gated on the device header's `OPAMP` symbol
+ * and `opamp_count` (avrxt/device_tables.hpp) is 0 there. Include it
+ * anywhere; use it inside `#ifdef OPAMP`.
  *
- *  RESOURCES - OpampSystem: the block every op amp shares (the one
+ * The smallest use, a unity-gain buffer from PD1 to PD2:
+ *
+ *     using SysClock = brio::Clock<brio::ClockSource::crystal, 24'000'000>;
+ *     constexpr SysClock clock;
+ *     using Buf = brio::OpampFollower<brio::Opamp<0>>;
+ *
+ *     int main() {
+ *         SysClock::init();
+ *         brio::OpampSystem::init(clock);   // TIMEBASE for 24 MHz, then the block's ENABLE
+ *         Buf::init();                      // PD1 in, PD2 out, ALWAYSON
+ *         Buf::wait_settled();              // warm-up + 127 us of settle time
+ *         ...
+ *     }
+ *
+ * OpampSystem::init() computes TIMEBASE from the rate the clock type
+ * claims, not from the hardware, so it comes after the clock task's
+ * init(); a DynamicClock must list OpampSystem among its users, which
+ * its static_assert checks. Buf::init() returns false, writing no
+ * register, for a configuration this instance or package cannot make.
+ *
+ * Who calls what, and from where. OpampSystem::init(), the Opamp<n>
+ * init forms, release() and the tasks' init() and release() are setup
+ * verbs: main(), after the clock task, or an active object's handler
+ * (a component of the program with its own event queue, served one
+ * event at a time by the kernel) that reconfigures. The peripheral has
+ * no interrupt, so nothing here is an interrupt body. OpampSystem's
+ * rebase() is the DynamicClock's to call, from its set(), before the
+ * rate changes. The run-time verbs (enable(), mode(), restart(),
+ * events(), output(), positive(), wiper(), set(), the *_on() event
+ * bindings) are unguarded read-modify-writes of one op amp's registers,
+ * for main and active objects; settled(), cal() and the register
+ * readers are single loads, legal from any context. wait_settled() is
+ * the one wait: it spins on STATUS.SETTLED with no bound, never
+ * returning while the op amp is not running (disabled, in the event
+ * regime before its ENABLE event, or the block's ENABLE off), and an
+ * active object that calls it holds the kernel for the warm-up plus the
+ * settle time. Nothing masks interrupts and no buffer is lent.
+ *
+ *  The resources - OpampSystem: the block every op amp shares (the one
  *  ENABLE, the TIMEBASE that turns CLK_PER into microseconds for the
  *  settle timers, PWRCTRL.IRSEL, DBGCTRL). It is the ClockUser of the
  *  chapter: rebase() rewrites TIMEBASE so a settle time keeps meaning
@@ -18,10 +59,11 @@
  *  driver mode, the enable/disable regime (the chapter's three), the
  *  settle time and RUNSTBY; init<cfg>() / init(cfg) write it. Verbs:
  *  settled(), the four event users (enable / disable / dump / drive),
- *  the READY event generator, the offset calibration byte.
+ *  the READY event generator, the offset calibration byte. Both are
+ *  monostates: classes whose state is static, with no instances.
  *
- *  TASKS - what an application names (each takes the Opamp<n> it runs
- *  on: OpampPga<Opamp<0>>):
+ *  The tasks - what an application names (each takes the Opamp<n> it
+ *  runs on: OpampPga<Opamp<0>>):
  *    OpampFollower<Op>      unity-gain buffer of any positive source
  *    OpampPga<Op>           non-inverting PGA, gain 1 + R2/R1
  *    OpampInvertingPga<Op>  inverting PGA about VDD/2, gain -R2/R1
@@ -30,7 +72,7 @@
  *  The eight gains the ladder makes are exact rationals (OpampGain) and
  *  the tasks keep them so: for_gain() picks the wiper for a gain the
  *  ladder really makes and returns nothing for one it does not.
- *  The INTEGRATOR (figure 35-6) is deliberately NOT a task: it needs an
+ *  The integrator (figure 35-6) is deliberately not a task: it needs an
  *  external R and C and a DUMP policy, and it is born with its first
  *  user. Its mechanism is all here - MUXNEG = inn with the ladder off,
  *  and dump_on(channel).
@@ -51,29 +93,33 @@
  *    15+1, 14+2, 12+4, 8+8, 6+10, 4+12, 2+14, 1+15. MUXBOT's LINKOUT
  *    is OP[n-1]'s output - and for OP0 that is OP2's (35.5.7 note 1),
  *    so it is refused on a package without OP2;
- *  - the DAC entries mean the BUFFERED DAC output: the DAC's OUTEN must
- *    be on (34.3.2.3) and PD6 is then the DAC's;
+ *  - the DAC entries mean the buffered DAC output: the DAC's OUTEN must
+ *    be on (34.3.2.3) and PD6 is then the DAC's; nothing here checks it;
  *  - the internal timer: TIMEBASE is one less than the number of
  *    CLK_PER cycles that reach 1 us (35.5.3), OPnSETTLE is that many
  *    microseconds, and SETTLED rises when warm-up + settle are done.
- *    The settle timer RESTARTS on every write to OPnCTRLA, OPnINMUX or
+ *    The settle timer restarts on every write to OPnCTRLA, OPnINMUX or
  *    OPnRESMUX, which is why init() writes CTRLA last;
  *  - three enable regimes (35.3.2.7): ALWAYSON alone (software, deaf to
  *    events), EVENTEN alone (the ENABLE/DISABLE events own it), both
  *    (software enable, DUMP and DRIVE still listened to). READY is
- *    generated whenever EVENTEN is set;
+ *    generated in the EVENTEN-alone regime only: with both bits set the
+ *    bench saw SETTLED rise and no READY event (35.3.2.6;
+ *    docs/avrxt/opamp.md, "Bench findings");
  *  - the four event users are OPAMP's own (evsys.hpp): ENABLEn and
- *    DISABLEn are EDGE-detected, DUMPn and DRIVEn are LEVELS - a DUMP
- *    or DRIVE channel must HOLD its level, a pulse does nothing;
+ *    DISABLEn are edge-detected, DUMPn and DRIVEn are levels - a DUMP
+ *    or DRIVE channel must hold its level, a pulse does nothing;
  *  - OUTMODE OFF still lets the DRIVEn event raise the driver; when a
  *    driver is on, the OUT pad belongs to the op amp and no other
  *    peripheral can drive it;
  *  - OPnCAL comes out of reset with the production value from fuses;
  *    0x00 is the most negative offset trim, 0x80 none, 0xFF the most
- *    positive, one step = 0.5 mV (39-27);
+ *    positive, one step = 0.5 mV (39-27) - on the bench die one step
+ *    measured 594 uV and a rising CAL moved the output down
+ *    (docs/avrxt/opamp.md, "Bench findings");
  *  - PWRCTRL.IRSEL trades the rail-to-rail input range (VICM -0.3 V ..
  *    VDD + 0.3 V) for VDD - 0.7 V and less current. Errata DS80000915F
- *    2.8.2 makes that bit READ-ONLY on silicon A4 - the verb therefore
+ *    2.8.2 makes that bit read-only on silicon A4 - the verb therefore
  *    returns what the silicon actually took, and promises nothing else.
  *    2.8.1 (A4 too) is a current figure with no work-around and no
  *    register face: it is recorded in the doc, not in code;
@@ -162,7 +208,7 @@ enum class OpampMode : uint8_t {
     off,                    ///< ALWAYSON = 0, EVENTEN = 0: dead, deaf, silent
     software,               ///< ALWAYSON = 1, EVENTEN = 0: on, no events either way
     event,                  ///< ALWAYSON = 0, EVENTEN = 1: ENABLEn/DISABLEn own it
-    software_with_events,   ///< ALWAYSON = 1, EVENTEN = 1: on, DUMPn/DRIVEn heard, READYn issued
+    software_with_events,   ///< ALWAYSON = 1, EVENTEN = 1: on, DUMPn/DRIVEn heard, no READYn (measured)
 };
 
 struct OpampConfig {
@@ -329,8 +375,10 @@ constexpr uint32_t opamp_timebase_ns(uint32_t clk_per_hz) {
 struct OpampSystem {
     OpampSystem() = delete;
 
-    /// Write TIMEBASE for this clock, the debug and power bits, and
-    /// enable the block. Configure the op amps first (35.3.1) or right
+    /// Write TIMEBASE for the rate the clock type claims, the debug and
+    /// power bits, and enable the block: a setup verb, after the clock
+    /// task's init(). A DynamicClock must list OpampSystem (the
+    /// static_assert below). Configure the op amps first (35.3.1) or right
     /// after - a per-op CTRLA write restarts its settle timer either way.
     template <typename Clock>
     static void init(Clock clock, bool reduced_range = false, bool debug_run = false) {
@@ -549,8 +597,9 @@ public:
     /// STATUS.SETTLED: warm-up and settle time are over. Cleared while
     /// the op amp waits, including after any configuration write.
     static bool settled() { return (status() & OPAMP_SETTLED_bm) != 0; }
-    /// Blocking wait. Never returns while the op amp is disabled - the
-    /// timer only runs when it is on, which is the caller's business.
+    /// Blocking wait, with no bound: spins on SETTLED. Never returns while
+    /// the op amp is disabled - the timer only runs when it is on, which
+    /// is the caller's business.
     static void wait_settled() { while (!settled()) {} }
 
     // ---- offset calibration (35.3.2.8) --------------------------------------------
@@ -649,6 +698,10 @@ template <typename Op>
 struct OpampFollower {
     OpampFollower() = delete;
 
+    /// Configure Op as a follower of `source` (MUXNEG = OUT, the ladder
+    /// off), `mode` its enable regime. False, writing no register, for a
+    /// source this instance cannot take or a pad this package does not
+    /// bond (Op::init). A setup verb.
     static bool init(OpampPos source = OpampPos::inp, uint8_t settle_us = 127,
                      OpampOutput out = OpampOutput::normal,
                      OpampMode mode = OpampMode::software) {
@@ -785,8 +838,9 @@ constexpr OpampWiper instrumentation_wiper_op2(InstrumentationGain g) {
 /// MUXPOS source works for either (VDD/2 and the DAC are the wireless
 /// ones): `init(gain, v2_source, v1_source)`.
 ///
-/// Only on packages with OP2 - the type does not exist otherwise, so a
-/// 28/32-pin build fails to compile rather than half-working.
+/// Only on packages with OP2 - using the type on a package without it
+/// fails the static_assert below, so a 28/32-pin build fails to compile
+/// rather than half-working.
 template <typename Op0 = Opamp<0>, typename Op1 = Opamp<1>, typename Op2 = Opamp<2>>
 struct InstrumentationAmp {
     InstrumentationAmp() = delete;

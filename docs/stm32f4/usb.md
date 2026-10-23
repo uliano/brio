@@ -1,6 +1,83 @@
 # USB OTG, device mode (STM32F4)
 
-Documents of record: **RM0383** ch. 22 (the STM32F411's OTG_FS: 22.3 the
+This document is for a programmer who wants an STM32F4 to be a USB
+device: most often a virtual serial port (CDC ACM) that a host sees as a
+COM port and a brio program prints to as it prints to a UART. The
+driver, `UsbOtg<core>` (spelled `UsbFs` and `UsbHs` for the two cores a
+part may carry), is the endpoint controller the device stack of
+[design/usb.md](../design/usb.md) runs on: it moves packets in and out
+of the core's FIFOs and reports the bus's events, while the stack
+(`util/usb/device.hpp`) answers the host's standard requests and the
+class (`util/usb/cdc.hpp`) turns two endpoints into a byte transport.
+It is measured on the WeAct STM32F411CE black pill's own connector.
+
+The smallest use, the "How to use it" block below: a CDC ACM port on the
+full-speed core:
+
+```cpp
+using SysClock = brio::Clock<brio::ClockSource::pll_hse, 96'000'000, 25'000'000>;
+static_assert(SysClock::usb_hz == brio::otg_clock_hz);      // the driver asserts it too
+
+using Usb = brio::UsbFs;
+using Port = brio::UsbCdcAcm<Usb, P>;                       // interface 0, endpoints 1 and 2
+struct Descriptors {
+    static constexpr auto device = brio::usb_device_descriptor(
+        {.vendor_id = 0x1209, .product_id = 0x0001, .device_class = 2});
+    static constexpr auto configuration = brio::usb_concat(
+        brio::usb_configuration_head(9 + Port::descriptor_bytes, Port::interface_count),
+        Port::descriptors);
+    static std::span<const uint8_t> string(uint8_t index);  // 0 the languages, then the strings
+};
+using Device = brio::UsbDevice<Usb, Descriptors, Port>;
+
+Usb::init(clock);
+Device::start();                                            // the pull-up: the host enumerates
+extern "C" void OTG_FS_IRQHandler() { Device::isr(); }
+brio::print(Port{}, "hello", brio::crlf);                   // once the host has configured it
+```
+
+Line by line: `SysClock` is the clock task's type ([clock.md](clock.md)),
+96 MHz from the black pill's 25 MHz crystal, a rate whose PLL gives the
+core its 48 MHz, and the `static_assert` checks that when the program is
+compiled; `Usb` is the full-speed core; `Port` is the CDC ACM class over
+it with the platform `P` ([platform.md](platform.md)), from interface 0
+(the class takes two, 0 and 1) with endpoints 1 and 2; `Descriptors` is what the device tells the host
+about itself - the device descriptor (the pid.codes test pair 1209:0001,
+class 2, communications), the configuration built from the class's own
+descriptors, and a string function the program writes; `Device` is the
+stack over the core, the descriptors and the one class. `Usb::init()`
+brings the core up with the pull-up still down, `Device::start()`
+raises it, which is when the host starts enumerating, the `extern "C"`
+function is the core's interrupt handler under ST's vector name with
+the stack's body in it, and `print` writes to the port as to any byte
+transport.
+
+What decides correctness even there. The clock: the core needs exactly
+48 MHz from the PLL's Q output, and `Usb::init()` refuses at compile time
+a clock type that does not give it (`Clock::usb_hz`; 180 MHz gives 45),
+an AHB under 14.2 MHz, and a core the part has not got; the PLL that
+makes those 48 MHz runs only once the clock task's `init()` has, so
+`Usb::init()` comes after it. The vector must be bound by the program,
+as above: `init()` unmasks the core's interrupts at the block and at the
+NVIC, and the crt's weak `OTG_FS_IRQHandler` is an alias of
+`Default_Handler`'s silent spin. `Usb::init()` is a setup verb that
+waits: at least 25 ms the chapter asks for after device mode is forced,
+plus the core's bounded resets, and false means a step did not answer.
+And the port carries nothing until the host has configured it:
+`write_byte()` and `write_bulk()` refuse until then, so a `print` before
+it waits - in a program with no host attached, for ever (derived from
+`util/usb/cdc.hpp` and `util/print.hpp`'s retry); a program that must not
+wait asks `Port::configured()` first.
+
+The rest of this page, in order: the documents of record; what the
+silicon does (the FIFOs, the RAM budget, the clock, the VBUS and ID
+pads, the errata); the types and verbs, with the two things the driver
+does beyond the contract; how to use it, with the VBUS option; the bench
+findings on the black pill; and what is not covered.
+
+## Documents of record
+
+**RM0383** ch. 22 (the STM32F411's OTG_FS: 22.3 the
 core and its PHY, 22.5 the peripheral's states and endpoints, 22.8 the
 low-power modes, 22.10..22.14 the FIFOs and their RAM, 22.15 the
 interrupt hierarchy, 22.16 the registers, 22.17 the programming model),
@@ -21,30 +98,30 @@ kernel console over the same port.
 
 A Synopsys DWC2 core with ST's glue, up to two of them: OTG_FS, whose
 full-speed PHY is on chip and bonded to PA11 and PA12 at AF10, and
-OTG_HS, which drives a ULPI transceiver at high speed and ALSO has a
+OTG_HS, which drives a ULPI transceiver at high speed and also has a
 full-speed PHY of its own on PB14 and PB15 at AF12. Seen from device
 mode at full speed the two are one programmer's model at two base
 addresses, which is why the driver is one template over the core and
 not two drivers; the F410 has neither, the F401/F411/F412/F413 have the
 full-speed core alone, the rest have both.
 
-THE INTERFACE IS FIFOS AND NOTHING ELSE. Where the RP2040's controller
+**The interface is FIFOs and nothing else.** Where the RP2040's controller
 offers a dual-port RAM the program addresses, this core offers a block
-of dedicated RAM reached only through PUSH AND POP REGISTERS, one 32-bit
-window per FIFO, and the packet's LENGTH travels beside the data in a
+of dedicated RAM reached only through push and pop registers, one 32-bit
+window per FIFO, and the packet's length travels beside the data in a
 transfer-size register:
 
-- ONE SHARED RECEIVE FIFO for every OUT endpoint. Each packet is stacked
-  behind the last with a STATUS ENTRY on top of it, and the application
+- One shared receive FIFO for every OUT endpoint. Each packet is stacked
+  behind the last with a status entry on top of it, and the application
   pops the status (GRXSTSP says which endpoint, how many bytes and what
   kind of entry) and then the bytes. A SETUP packet arrives as two
   entries - the eight bytes, then a "setup stage done" - and the
   endpoint's own SETUP interrupt follows the second.
-- ONE TRANSMIT FIFO PER IN ENDPOINT, each a slice of the same RAM the
+- One transmit FIFO per IN endpoint, each a slice of the same RAM the
   application maps by hand, as a start address and a depth in 32-bit
   words. Nothing checks the map: two FIFOs at one address is a
   configuration the silicon accepts in silence.
-- A TRANSFER, not a packet, is what an endpoint register describes: a
+- A transfer, not a packet, is what an endpoint register describes: a
   packet count and a byte count the core walks down, with one interrupt
   at the end of the whole thing.
 
@@ -63,7 +140,7 @@ the older parts, VBDEN with a session-valid override in GOTGCTL on the
 newer ones, and neither where there is no core.
 
 Two errata are live in device mode, and both are answered in code: a
-transmit-FIFO write sequence INTERRUPTED by an access to an endpoint
+transmit-FIFO write sequence interrupted by an access to an endpoint
 register corrupts the next data written (ES0287 2.12.1), and DCFG's
 address field does not read back correctly just after it is written
 (2.12.6). The other four are host mode's. Separately, ES0206 2.2.14

@@ -1,6 +1,55 @@
 # EVSYS - the event system (AVR DA, DB and EA)
 
-Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B (EVSYS
+This document is for a programmer who wants one peripheral to act on
+another's signal in hardware, with no CPU and in sleep: a pin's level
+into a timer's capture input, the divided clock of the PIT (the RTC's
+periodic interrupt timer) starting the ADC,
+a LUT fed by a timer, any internal signal mirrored on a pin. "Event" on
+this page is the hardware event of the data sheet - a signal on an
+internal wire - not the kernel's queued value; the bridge between the
+two is always an interrupt body that posts. `avrxt/evsys.hpp` names
+each signal source as a generator type (`EvPitDiv<64>`,
+`EvPin<Pin<'A', 2>>`, `EvRtcOvf`, ...), each listener as a user type
+(`EvOut<Pin<'D', 2>>`, `EvAdc0Start`, `EvTcbCaptIn<0>`, ...), and each
+channel as `EventChannel<n>`; a route is one call that sources a channel
+and one call per user that listens to it.
+
+The smallest use, the PIT's 512 Hz on channel 1 and on pin PD2, from
+"How to use it" below:
+
+```cpp
+brio::EventChannel<1>::source(brio::EvPitDiv<64>{});     // odd channel: 512 Hz
+brio::EvOut<brio::Pin<'D', 2>>::listen(brio::EventChannel<1>{});
+```
+
+Line by line: `source()` writes the generator's code into the channel's
+`CHANNEL1` register, and the compiler refuses a generator the channel
+cannot carry (on the AVR DA/DB the PIT's divide-by-64 is an odd-channel
+generator); `EvOut<...>::listen()` selects PD2's EVOUT position in
+PORTMUX, makes PD2 an output and connects the user to channel 1, so the
+square wave appears on the pin. Both functions are static: the empty
+`EventChannel<1>{}` names the channel and carries no state.
+
+What decides correctness even there. A PIT divider carries a signal only
+while the RTC's prescaler chain runs, and nothing in this driver starts
+it: in a kernel program the Ticker's `init()` has enabled the PIT
+([rtc.md](rtc.md)), and on the AVR EA a PIT slot needs the PIT enabled
+itself ("Bench findings" below). The compiler checks legality (this
+generator on this channel, this pin as an EVOUT); it does not check that
+two parts of the program do not rewire the same channel, which is the
+program's to keep to one owner - setup in `main()` or the one active
+object that owns the route (an active object is a component of a brio
+program with its own event queue, served one event at a time by the
+kernel, [../learn/introduction.md](../learn/introduction.md)). A source,
+an `off()`, a `pulse()` and a plain user's `listen()` are one register
+store each and wait for nothing; the AVR EA's slotted generators and
+`EvOut`'s PORTMUX field add a read-modify-write of a register other
+routes share. A pin generator reads zero while the pin's input driver is
+disabled.
+
+## Documents of record
+
+AVR128DB28/32/48/64 data sheet DS40002247B (EVSYS
 chapter 16, PORTMUX 17.5.1), errata DS80000915F (no EVSYS items); for
 the AVR64EA28/32/48 DS40002443A (EVSYS chapter 16, PORT.EVGENCTRLA
 18.5.17, RTC.PITEVGENCTRLA 24.13.17, EVSYSROUTEA 17.5) and DS80001048D
@@ -10,17 +59,16 @@ connected to the event system, as generators or as EVOUT - pins a DA
 bonds on 64 pins only; `EvPin` and `EvOut` refuse them there, the
 negative tests `evsys_no_pe4_event_on_da` and `evsys_no_evoutb_alt_on_da`).
 Driver: `avrxt/evsys.hpp`. Reference test: `test_avr_timer` (TCB capture
-and count by event, CCL LUT routing, AC OUT as generator).
-
-"Event" on this page is the HARDWARE event of the data sheet - a
-signal on an internal wire - not the kernel's queued value; the bridge
-between the two is always an ISR body that posts.
+and count by event, CCL LUT routing, AC OUT as generator; a letter is
+one command key of the suite's console and the group of verdicts it
+runs, `e` and `t` among them, `a` running every letter the image
+carries), and `test_avr_rtc` letter `p` for the AVR EA's PIT slots.
 
 ## What the silicon does
 
 Hardware routing between peripherals: a change in one peripheral (the
 generator) travels on a channel to any number of users, without the
-CPU, in every sleep mode. Each channel is driven by ONE generator
+CPU, in every sleep mode. Each channel is driven by one generator
 (`CHANNELn` = a code from 16.5.2, `0x00` = off) and listened to by any
 number of users (`USERxxx` = n + 1, `0` = disconnected, 16.5.3). Both
 are ordinary registers, rewritable at any time: a channel can be
@@ -37,11 +85,11 @@ EVSYS picks it by itself (16.3.2.5).
 per generator:
 
 - RTC: `OVF`, `CMP` (pulses, CLK_RTC); `PIT_DIV8192/4096/2048/1024` on
-  EVEN channels only, `PIT_DIV512/256/128/64` on ODD channels only.
+  even channels only, `PIT_DIV512/256/128/64` on odd channels only.
   The two families share codes 0x08-0x0B: the parity of the channel
   picks the family. These are levels - the prescaled RTC clock
   divided, a free square wave with no CPU;
-- PORT pins: the pin LEVEL (not an edge; the user's edge detection
+- PORT pins: the pin level (not an edge; the user's edge detection
   makes the edge), zero if the pin's input driver is disabled.
   PORTA/PORTB only on channels 0-1, PORTC/PORTD on 2-3, PORTE/PORTF
   on 4-5, PORTG on 6-7 (64-pin parts). The two ports of a pair share
@@ -54,11 +102,11 @@ per generator:
   and on the DB family only `MVIO VDDIO2OK` (async) and `OPAMPn
   READY` (sync). The codes shared by DA and DB are identical;
 - software: writing bit n of `SWEVENTA` (`SWEVENTB` for channels 8-9)
-  INVERTS the channel's signal for one CLK_PER cycle (16.3.2.6) - a
+  inverts the channel's signal for one CLK_PER cycle (16.3.2.6) - a
   high pulse on an idle channel, a low pulse on a channel a level
   generator holds high. Needs CLK_PER: not in standby.
 
-**Users** (16.5.3, table 16-4). What a user DOES with the event is
+**Users** (16.5.3, table 16-4). What a user does with the event is
 configured in the user's own peripheral (TCB CAPT means capture,
 restart, single-shot... per its mode; TCA CNTA counts on edge or
 level or takes direction from the level): the EVSYS only connects.
@@ -75,9 +123,9 @@ exists; EVOUTF has no ALT1 on any package. Any generator becomes a
 signal on a pin: the test instrument of this peripheral.
 
 **The AVR EA's model** (DS40002443A 16.4, 16.5.2). Six channels
-(`CHANNEL0..5`, one `SWEVENTA`) on every package, and EVERY generator
+(`CHANNEL0..5`, one `SWEVENTA`) on every package, and every generator
 legal on every channel: no parity, no port pair. Pins and PIT dividers
-reach the channels through SLOTS - two per port, `PORTx.EVGENCTRLA`
+reach the channels through slots - two per port, `PORTx.EVGENCTRLA`
 picking which pin each carries (18.5.17, reset PIN0), and two in the RTC,
 `RTC.PITEVGENCTRLA` picking which divider each carries, DIV4 .. DIV32768
 (code log2(div) - 1, 24.13.17; the divider chain runs only while RTCEN or
@@ -95,7 +143,8 @@ channel legality as constexpr facts; a USER is a type that knows its
 `USERxxx` register; a CHANNEL is a resource handle. The compiler
 checks LEGALITY (this generator on this channel, this pin as an
 EVOUT); it does not check EXCLUSIVITY of a channel several states
-rewire - that is ownership, the business of one AO's FSM. A generator
+rewire - that is ownership, the business of one active object's state
+machine. A generator
 or user missing from the vocabulary is added here, three lines, never
 worked around with a raw register write.
 

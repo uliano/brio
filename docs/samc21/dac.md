@@ -1,6 +1,58 @@
 # DAC - Digital-to-Analog Converter (SAM C21)
 
-Documents of record: SAM C20/C21 data sheet DS60001479M ch. 41, the DAC
+This document is for a programmer who needs a voltage made: a level on
+a pad, a threshold for the comparator or the ADC with no pad taken, or
+a waveform paced by a timer's events. `Dac` is the one 10-bit converter
+of the family, a monostate resource (a class whose state and functions
+are all static, with no instance to create: the chip has one DAC) - a
+thin typed view of the registers with their synchronization built in;
+`DacRef` is its own reference vocabulary.
+
+The smallest use, a voltage on the pad, the first block of "One example
+per use" below:
+
+```
+using Out = brio::Dac;
+Out::init(0, brio::DacConfig{.reference = brio::DacRef::vddana,
+                             .external_output = true});
+Out::set(512);              // about VDDANA / 2
+Out::set_mv(2500, vdd_mv);  // or in millivolts
+```
+
+Line by line: `init()` takes the generic clock generator that feeds the
+converter (0, the main clock, [clock.md](clock.md)) and the
+configuration - the supply VDDANA as the reference, the output buffer
+driving the VOUT pad, PA02 - and opens the bus clock, connects the
+clock channel, resets the block, writes the registers, enables the
+converter and waits for its startup; the converter comes up at code 0.
+`set(512)` writes a 10-bit code, which starts the conversion at once:
+VOUT = code / 0x3FF x the reference. `set_mv()` does the same from
+millivolts through `util/analog.hpp`'s arithmetic, given what the
+reference really is (`vdd_mv`, the supply measured by the program; the
+driver cannot know it).
+
+What decides correctness even there. `init()` answers false for a
+configuration the chapter forbids or a wait that never ended, each wait
+bounded (0xFFFF polls), and the example does not look at the answer.
+There is no conversion-done flag: the output settles in the time the
+data sheet gives, and nothing reports it. `set()` answers false when
+its write was discarded, which happens while a value written with
+`buffer()` stands unconsumed - a DAC with no start event configured
+keeps that value for ever and refuses every later write
+(`buffer_pending()` asks first). The pad needs no PORT configuration
+for the output to reach it (measured, "Bench findings"). Nothing here
+masks interrupts; an event-paced program binds `DAC_Handler` itself
+(third block below).
+
+In order: the documents of record; what the silicon does (the four
+register disciplines, the reference and the device header's stale
+name, where the data sits, the event-paced shape); the types and verbs
+with one example per use; the errata; the bench findings; dithering,
+LEFTADJ and the two interrupts; what is not covered.
+
+## Documents of record
+
+SAM C20/C21 data sheet DS60001479M ch. 41, the DAC
 characteristics of tables 45-30, 45-31 and 45-32, and the event tables
 of ch. 29 - and errata DS80000740S, read on the **E/G/J row at revision
 F**: the device-level items 1.8.9 (the DAC output as the ADC's positive
@@ -11,7 +63,10 @@ own 1.9.2 (the EMPTY flag across a standby) are live, while 1.9.1
 `samc21/device_tables.hpp`. The family fixture is
 `test/family_samc21/dac.cpp` plus five negatives under
 `brio check samc21`; the bench suites are `test_samc_dac` and, for
-dithering and the interrupts, `test_samc_analog` (letters e and f).
+dithering and the interrupts, `test_samc_analog` (letters e and f; a
+suite's letter is one command key of its console and the group of
+verdicts that key runs). The reserve is `samc21/device_tables.hpp`, the
+table of what each variant has, read off the device header.
 
 ## What the silicon does
 
@@ -95,12 +150,12 @@ whatever answers EMPTY only refills DATABUF behind it. Without a start
 event the first DATABUF write stands for ever (`SYNCBUSY.DATABUF`, see
 "Bench findings") and nothing moves at all.
 
-**INTFLAG.EMPTY is an EVENT, not a state, and the flag and the request
+**INTFLAG.EMPTY is an event, not a state, and the flag and the request
 differ.** 41.8.6 sets the flag "when data is transferred from DATABUF to
 DATA" and clears it on a write of DATABUF or of the flag; measured, on a
 converter just enabled whose DATABUF has never been written, EMPTY reads
 **clear** even though the buffer is empty - the flag marks the buffer
-BECOMING empty. The DMA request of the same name is the other way round
+becoming empty. The DMA request of the same name is the other way round
 by 41.6.3's own sentence: "As DATABUF is initially empty, a DMA request
 is generated whenever the DAC is enabled." So a feed driven by the
 interrupt is started by its owner, who writes the first value itself: a

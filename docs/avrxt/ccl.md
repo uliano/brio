@@ -1,6 +1,67 @@
 # CCL - the configurable custom logic (AVR DA, DB and EA)
 
-Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B (CCL
+This document is for a programmer who wants logic done in hardware,
+with no CPU: glue logic between pins, a timer's event divided by two, a
+one-clock pulse on an edge, a filtered input that wakes the device from
+sleep. The CCL is a set of look-up tables (LUTs), each a logic function
+of three inputs - pins, event channels, other peripherals' outputs -
+driving a pin, an event channel or the CCL's interrupt. `Ccl` is the
+block and `Lut<n>` one table, both resources (one function per register
+fact); a `LutConfig` describes a whole table and `Lut<n>::init()` writes
+it. `ToggleFlipFlop<pair>` is a task over a pair of LUTs (a task, in
+brio, is a ready-made shape over a resource that a program names and
+runs): a flip-flop toggled by one event.
+
+The smallest use, from "How to use it" below - PB3 = PB0 AND PB1 on a
+48/64-pin AVR DA/DB, whose LUT4 sits on PORTB:
+
+```cpp
+using And = brio::Lut<4>;
+brio::Ccl::disable();
+And::init<brio::LutConfig{.in0 = brio::LutInput::pin, .in1 = brio::LutInput::pin,
+                          .truth = brio::lut_truth([](bool a, bool b, bool) { return a && b; }),
+                          .output_pin = true}>();
+brio::Ccl::enable();
+```
+
+Line by line: `And` names LUT4 as a type; `Ccl::disable()` stops the
+whole block, the state every configuration starts from; `init<...>()`
+takes the configuration as a compile-time value, so an illegal one (an
+edge detector with no filter, an output pin on a port the package does
+not have, LUT3's missing ALT1) is a compile error - it makes inputs 0
+and 1 the LUT's own pins (PB0, PB1), input 2 left at `mask` (low),
+writes the truth table that `lut_truth()` computes from the lambda (bit
+k is the output for input pattern k), and with `output_pin` makes PB3
+an output carrying the result; `Ccl::enable()` starts the block.
+
+What decides correctness even there. On the AVR DB's silicon A4 and A5
+a LUT may be reconfigured only with the whole block disabled (errata
+2.4.1, "What the silicon does" below), which is why the configuration
+is bracketed by `disable()` and `enable()`; the AVR DA has no such
+erratum, and on the AVR EA one LUT re-initialised under a running block
+leaves the others undisturbed (measured on an AVR64EA48). A pair's sequencer is set
+before its even LUT's `init()`, or the silicon ignores it. The driver
+configures the output pin and nothing else of the port: the input pins
+are read as PORT leaves them. LUT4 exists on the 48/64-pin AVR DA/DB
+alone; on the other parts a lower LUT does the same on its own port
+("Pins" under "What the silicon does"). The calls wait for nothing and mask nothing;
+several of them read, modify and write registers the LUTs share, so the
+wiring is made in setup or by the one active object that owns it (an
+active object is a component of a brio program with its own event
+queue, served one event at a time by the kernel,
+[../learn/introduction.md](../learn/introduction.md)). An interrupt
+sense other than `none` needs the program's `ISR(CCL_CCL_vect)` calling
+`Ccl::take_flags()`.
+
+The rest of this page, in order: the documents of record; what the
+silicon does, the input menu and the facts that matter to code; the
+types and verbs and the configuration protocol; how to use it; the
+bench findings, the AVR64EA48's and the CCL as a wake-up source among
+them; what is not covered.
+
+## Documents of record
+
+AVR128DB28/32/48/64 data sheet DS40002247B (CCL
 chapter 31, PORTMUX 17.3.2, EVSYS 16 generators 0x10-0x15 / users
 0x00-0x0B, I/O multiplexing chapter 3), errata DS80000915F (2.4.1,
 2.4.2) and, for the DA parts, DS80000882C (2.3.1); for the AVR EA,
@@ -9,7 +70,10 @@ AVR64EA28/32/48 data sheet DS40002443A (CCL chapter 29, PORTMUX
 Microchip example `avr128db48-blink-led-ccl` (see
 [vendor/README.md](vendor/README.md)). Driver: `avrxt/ccl.hpp` (`Ccl`,
 `Lut<n>`, `ToggleFlipFlop<pair>`), the LUT event vocabulary in
-`avrxt/evsys.hpp`. Reference test: `test_avr_timer` (test c).
+`avrxt/evsys.hpp`. Reference test: `test_avr_timer` (test c; a letter
+is one command key of the suite's console and the group of verdicts it
+runs - `c`, `l`, `i`, `k` and the AVR EA's `x` are the CCL's, `a` runs
+every letter the image carries).
 
 ## What the silicon does
 
@@ -36,7 +100,7 @@ input 0/1/2), `ZCDn`, `USARTn TXD` (host modes only), `SPI0` (MOSI on
 input 0 and 1, SCK on input 2; host mode only), `TCA0`/`TCA1` (WO0/
 WO1/WO2 on input 0/1/2), `TCBn` (TCB0/1/2 WO on input 0/1/2), `TCD0`
 (WOA/WOB/WOC). So "which timer output can feed which LUT input" is a
-fixed table: TCB3 and TCA WO3..5 are NOT reachable except through an
+fixed table: TCB3 and TCA WO3..5 are not reachable except through an
 event channel, and AC2 only on input 2.
 
 The AVR EA's menu (DS40002443A 29.2.2.1) is the same IP's with its
@@ -58,7 +122,7 @@ Facts that matter to code:
   `SEQCTRL` written after the even LUT is enabled is silently ignored
   (measured: the JK never engages, the LUT outputs the bare truth
   table). On top of that, **errata 2.4.1 (DB rev A4/A5; fixed on B0;
-  the DA has no such erratum)**: reconfiguring ONE
+  the DA has no such erratum)**: reconfiguring one
   LUT requires the whole CCL disabled (`CTRLA.ENABLE = 0`), which
   drops every other LUT meanwhile - a driver must build the complete
   configuration first and enable once; a runtime change of one LUT is
@@ -67,9 +131,9 @@ Facts that matter to code:
   LUT's own (the even LUT's for a sequencer, DS40002443A 29.3.1.1), and
   one LUT re-initialised under a running block takes its new table at
   once with the others undisturbed (measured, below). The errata document's sleep clarification adds that the CCL
-  interrupt wakes the device from POWER-DOWN only when the LUT path is
+  interrupt wakes the device from power-down only when the LUT path is
   fully asynchronous (no filter, no edge detector); the bench refines
-  that into a statement about the LUT's CLOCK - see the findings.
+  that into a statement about the LUT's clock - see the findings.
 - **Clock (`CLKSRC`)** per LUT, used by the filter, the edge detector
   and (from the even LUT) the sequencer: CLK_PER, the LUT's own
   TRUTHSEL[2] input (then input 2 is seen as low in the truth table),
@@ -78,12 +142,12 @@ Facts that matter to code:
   outputs 0 in standby (the bare truth table keeps working in idle).
 - **Filter (`FILTSEL`)**: SYNCH = two clock delay, FILTER = an input
   must hold for more than two clocks, four clocks delay. The edge
-  detector REQUIRES a filter option. Disabling a LUT clears its
+  detector requires a filter option. Disabling a LUT clears its
   filter/edge logic one clock later.
 - **Sequencer (`SEQSEL`)** per pair, clocked with the even LUT: D
-  flip-flop (D = even, EN = odd, CLOCKED by the even LUT's clock),
+  flip-flop (D = even, EN = odd, clocked by the even LUT's clock),
   JK (J = even, K = odd, toggles on 1/1), D latch (D = even, G =
-  odd: the TRANSPARENT one), RS latch (S = even, R = odd, 1/1
+  odd: the transparent one), RS latch (S = even, R = odd, 1/1
   forbidden). Disabling the even LUT clears the
   flip-flop asynchronously (reset held one clock). The sequencer
   output is what FEEDBACK returns and what the pair's output carries.
@@ -123,8 +187,8 @@ init - `sequencer` disables that LUT itself), every `Lut<n>::init(...)`,
 re-enables that LUT alone), and the others keep running.
 `lut_input_ac(input)` names the comparator an input's AC code selects
 (AC2 on input 2 of the DA/DB, AC1 on the EA's). A CCL application is a fixed wiring: the
-EventSystem static allocation of [evsys.md](evsys.md) is its natural
-companion.
+EventSystem static allocation would be its natural companion, which
+[evsys.md](evsys.md) lists as a driver gap, not built.
 
 ## How to use it
 

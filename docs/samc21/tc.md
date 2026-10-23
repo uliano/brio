@@ -1,11 +1,82 @@
 # TC - Timer/Counter (SAM C21)
 
-Documents of record: SAM C20/C21 data sheet DS60001479M ch. 35 - and
+This document is for a programmer who needs a timer: a PWM output on a
+pad, a counter that measures an interval, or a capture that times the
+period and the pulse width of an input signal. `Tc<n>` is one of the
+five timer/counters, one function per register fact; `TcWo<Pin>` is
+one of its waveform outputs, named by the pad that carries it; and the
+tasks over them (a task, in brio, is the layer a program names, built
+over the register-level resource) are `TcPwm` and `TcPwm8`, two PWM
+channels, and `TcPeriodMeter` and `TcPulseWidthMeter`, the capture
+meters (a meter is a capture shape whose readings
+`util/meter_sampler.hpp`'s `MeterSource` is fed from, so an active
+object can publish them at its own pace).
+
+The smallest use, a PWM channel on the board's LED, the first block of
+"How to use it" below:
+
+```cpp
+using LedPin = brio::Pin<'B', 23>;
+using LedWave = brio::TcWo<LedPin>;          // TC3, WO1 - from the header
+using LedPwm = brio::TcPwm8<brio::Tc<3>, 1, 199>;   // TOP 199, so max = 199
+
+brio::Tc<3>::init(/* generator */ 0);
+LedWave::claim();
+LedPwm::setup(brio::TcPrescaler::div256);    // 48 MHz / 256 / 200 = 937.5 Hz
+LedPwm::duty(100);                           // buffered: taken at the next UPDATE
+```
+
+Line by line: `LedPin` names PB23 ([port.md](port.md)); `LedWave` is
+the waveform output that pad carries, TC3's WO1, found in the device
+header's pad symbols (a pad that carries none does not compile);
+`LedPwm` is channel 1 of TC3 as an 8-bit PWM whose period register
+holds 199, so the counter counts 200 steps and `duty()` takes 0..199; `Tc<3>::init(0)` opens the timer's bus clock, connects its
+generic clock channel to generator 0 and resets it, leaving it
+disabled; `claim()` hands the pad to the timer (peripheral function E,
+input buffer on); `setup()` writes the mode, the prescaler and the
+period and enables the counter; `duty(100)` writes the channel's buffer
+register, which the counter takes at its next UPDATE condition
+(35.6.2.7), so a running output changes without a glitch.
+
+What decides correctness even there. The timer counts its generic
+clock generator, not `Clock::hz`: the 937.5 Hz of the comment is true
+because generator 0 runs at the CPU's 48 MHz once the clock task's
+`init()` has run ([clock.md](clock.md)), and nothing here computes or
+checks it. TC2 and TC3 share one generic clock channel, as TC0 and TC1
+do, so `Tc<3>::init()` routes TC2's clock too, and `Tc<3>::release()`
+disconnects it and stops a running TC2 in silence. `init()` and
+`setup()` answer false when a bounded wait (0xFFFF polls) runs out or
+when the configuration is refused - `configure()` refuses while the
+timer is enabled, since its registers are enable-protected - and the
+excerpt discards both answers. `duty()` clamps to `max` and discards
+its own wait's answer. The verbs here are setup verbs and an active
+object's (an active object, AO, is a component of a brio program with
+its own event queue, served one event at a time by the kernel,
+[docs/learn/introduction.md](../learn/introduction.md)): each is a
+store or a read-modify-write followed by a bounded wait, with no guard
+of its own and no interrupt masked. A capture meter needs its
+interrupt armed and its NVIC line enabled by the program (`init()`
+leaves the line disabled), and from then on the program defines
+`TCn_Handler`, since an unbound vector is the crt's silent spin; its
+handler reads CCx, because the read is what lets the next capture in.
+
+In order: the documents of record; what the silicon does (the
+geometry, the pad map, the synchronized read, the three register
+views, the period register, the two kinds of protection, capture and
+events); the errata; the types and verbs; how to use it (PWM, a capture
+meter fed by a pin); the bench findings, then those of the advanced
+modes; what is not covered.
+
+## Documents of record
+
+SAM C20/C21 data sheet DS60001479M ch. 35 - and
 errata DS80000740S items 1.20.1 to 1.20.3, of which **one is this
 silicon**. Driver: `samc21/tc.hpp`. Family fixture
 `test/family_samc21/tc.cpp` plus four negatives under
 `brio check samc21`; the bench suites are `test_samc_tc` and - for
-the advanced modes - `test_samc_timer_modes`.
+the advanced modes - `test_samc_timer_modes` (a suite's letter, cited
+below, is one command key of its console and the group of verdicts
+that key runs).
 
 ## What the silicon does
 
@@ -21,9 +92,9 @@ are worth reading before writing any code.
 - **TC0 and TC1 share generic clock channel 30; TC2 and TC3 share 31;
   TC4 has 32 to itself.** 35.5.3 warns that two instances sharing a
   channel "cannot be set to different clock frequencies", and
-  `Tc<n>::gclk_id` is what says which do. THE SHARP EDGE OF THE SHARING
+  `Tc<n>::gclk_id` is what says which do. The sharp edge of the sharing
   is `release()`: it disconnects the shared channel, so releasing one
-  half of a pair SILENTLY STOPS THE OTHER. A caller keeping the sibling
+  half of a pair silently stops the other. A caller keeping the sibling
   alive tears down by hand - reset plus bus_clock - and leaves the
   channel connected; the verb's own comment says so.
 - **`TCn_MASTER_SLAVE_MODE` is 1 for a pair master, 2 for a client and 0

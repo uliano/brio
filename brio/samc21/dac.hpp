@@ -1,11 +1,14 @@
 /*
  * dac.hpp
  *
- * The SAM C21's 10-bit digital-to-analog converter (DS60001479M ch. 41),
- * a whole small chapter in one monostate resource - `Dac`, not `Dac<n>`:
- * this family has exactly ONE instance on every variant, so an index
+ * A voltage made on the SAM C21: a level on the VOUT pad, a threshold
+ * the comparator, the ADC or the SDADC reads internally, or a waveform
+ * paced by events. The 10-bit digital-to-analog converter (DS60001479M
+ * ch. 41) is a whole small chapter in one monostate resource (a class
+ * whose state and functions are all static) - `Dac`, not `Dac<n>`:
+ * this family has exactly one instance on every variant, so an index
  * would be a parameter with a single legal value (the `Rtc` shape in this
- * stratum, against `Adc<n>`'s two real instances).
+ * stratum, against `Adc<n>`'s two real instances). The smallest use:
  *
  *   brio::Dac::init(generator, brio::DacConfig{
  *       .reference = brio::DacRef::vddana,
@@ -13,32 +16,44 @@
  *   brio::Dac::set(512);                    // about VDDANA / 2
  *   brio::Dac::set_mv(2500, vdd_mv);        // or in millivolts
  *
+ * Who calls what. init() and release() are setup calls in main(), after
+ * the clock task's init(); init() answers false for a configuration
+ * dac_config_valid() refuses or a wait that never ended. Every wait is
+ * bounded (0xFFFF polls by default): set() and set_mv() wait for DATA's
+ * synchronization and answer false when the write was discarded (a
+ * value standing in DATABUF, below); buffer() waits for nothing. The
+ * configuring verbs (control_b, external_output, event_config,
+ * start_on) refuse while the converter is enabled. isr() is the body
+ * the program's DAC_Handler calls, and an EMPTY handler feeding the
+ * converter writes with buffer(). Nothing here masks interrupts and
+ * nothing keeps a caller's storage.
+ *
  * ---------------------------------------------------------------------
- * WHAT THE SILICON DOES. One channel, 10 bits, up to 350 ksps
+ * What the silicon does. One channel, 10 bits, up to 350 ksps
  * (table 45-31), converting DATA into a voltage between GND and the
  * selected reference - VOUT = DATA / 0x3FF x VREF (41.6.2.4). Two ways
  * to start a conversion (41.6.1): write DATA, or let a START event copy
  * DATABUF into DATA. Two outputs, independently enabled and usable at
  * once (41.6.8.1): the high-drive buffer on the VOUT pad
  * (CTRLB.EOEN) and the internal path to the AC, the ADC and the SDADC
- * (CTRLB.IOEN). There is NO conversion-done flag - "as there is no
+ * (CTRLB.IOEN). There is no conversion-done flag - "as there is no
  * automatic indication that a conversion is done, the sampling period
  * must be greater than or equal to the specified conversion time"
- * (41.6.2.4) - so STATUS.READY is about the STARTUP time (3 us,
+ * (41.6.2.4) - so STATUS.READY is about the startup time (3 us,
  * table 45-31) and nothing else.
  *
- * THE FOUR REGISTER DISCIPLINES, spelled per register the way
+ * The four register disciplines, spelled per register the way
  * samc21/adc.hpp spells its chapter's:
  *
- * 1. ENABLE-PROTECTED - CTRLB, and 41.6.2.1 also names EVCTRL while
- *    41.8.3's own property line does NOT ("PAC Write-Protection" alone).
- *    THE TWO STATEMENTS DISAGREE; `event_config()` refuses while the
+ * 1. Enable-protected - CTRLB, and 41.6.2.1 also names EVCTRL while
+ *    41.8.3's own property line does not ("PAC Write-Protection" alone).
+ *    The two statements disagree; `event_config()` refuses while the
  *    converter is enabled, which is correct under either reading, and
  *    docs/samc21/dac.md carries what the silicon actually does.
- * 2. WRITE-SYNCHRONIZED - CTRLA.SWRST, CTRLA.ENABLE, DATA, DATABUF
- *    (41.6.7). Nothing needs synchronization when READ. But DATA and
+ * 2. Write-synchronized - CTRLA.SWRST, CTRLA.ENABLE, DATA, DATABUF
+ *    (41.6.7). Nothing needs synchronization when read. But DATA and
  *    DATABUF are not ordinary bus crossings and the chapter does not
- *    say so: SYNCBUSY.DATABUF stands until a START EVENT CONSUMES the
+ *    say so: SYNCBUSY.DATABUF stands until a start event consumes the
  *    value, and SYNCBUSY.DATA stands with it, so a DAC with no start
  *    event configured is left with both bits set by a single DATABUF
  *    write - and every later write to either register is discarded.
@@ -46,30 +61,30 @@
  *    the separate verb, exactly as samc21/adc.hpp's `select()` is (the
  *    two chapters have the same double-buffer shape and neither
  *    describes it).
- * 3. NEITHER - EVCTRL, INTENSET/CLR, INTFLAG, STATUS, and DBGCTRL,
+ * 3. Neither - EVCTRL, INTENSET/CLR, INTFLAG, STATUS, and DBGCTRL,
  *    which 41.8.11 also says is not reset by a software reset.
- * 4. WRITE-ONLY - DATA and DATABUF are `__O` in the device header and
- *    drawn with W access in 41.8.8/41.8.9. THERE IS NO CODE READBACK,
- *    so `code()` reports what this driver last WROTE and says so.
+ * 4. Write-only - DATA and DATABUF are `__O` in the device header and
+ *    drawn with W access in 41.8.8/41.8.9. There is no code readback,
+ *    so `code()` reports what this driver last wrote and says so.
  *
- * NOT PAC-PROTECTED (41.5.8): INTFLAG and DATABUF, the pair an EMPTY
+ * Not PAC-protected (41.5.8): INTFLAG and DATABUF, the pair an EMPTY
  * handler feeding the converter writes.
  *
  * ---------------------------------------------------------------------
- * THE REFERENCE, and a NAME THAT LIES IN THE DEVICE HEADER.
+ * The reference, and a name that lies in the device header.
  *
  * CTRLB.REFSEL has three codes. 41.8.2 calls them INTREF ("supplied by
  * the bandgap, refer to SUPC.VREF.SEL for voltage level information"),
  * VDDANA and VREFA. The device header names the same three values
  * INT1V, AVCC and VREFP - INT1V being the SAM D21's fixed 1.0 V
- * internal reference, which THIS family does not have: here the
+ * internal reference, which this family does not have: here the
  * internal reference is the SUPC bandgap and its level is chosen in
- * another peripheral's register. `DacRef` follows the DATASHEET for
+ * another peripheral's register. `DacRef` follows the datasheet for
  * meaning and the header for symbols, and the enumerators carry the
  * disagreement; docs/samc21/dac.md carries the measurement that settles
  * it.
  *
- * `DacRef` is this converter's OWN vocabulary and deliberately not
+ * `DacRef` is this converter's own vocabulary and deliberately not
  * `brio::Ref`, which samc21/adc.hpp owns for REFCTRL.REFSEL: on this
  * family there is no shared reference block at all - the ADC's
  * multiplexer has six codes, this one has three, the SDADC's are
@@ -77,7 +92,7 @@
  * accepts.
  *
  * ---------------------------------------------------------------------
- * WHERE THE DATA SITS IN THE REGISTER is decided by two bits together
+ * Where the data sits in the register is decided by two bits together
  * (table 41-1), which is why `dac_data_word()` exists and no caller
  * shifts by hand:
  *
@@ -88,14 +103,14 @@
  *      1       1      DATA[15:6]                DATA[5:2]
  *
  * DITHERING (41.6.8.4) makes 16 sub-conversions of DATA[13:4] or
- * DATA[13:4] + 1 so the average carries 14 bits, and it is NOT a mode a
+ * DATA[13:4] + 1 so the average carries 14 bits, and it is not a mode a
  * CPU-driven converter can use: the chapter requires a periodic START
  * event (EVCTRL.STARTEI = 1) generating sixteen events per value, with
  * DATABUF reloaded every sixteen. `dac_config_valid()` refuses dither
  * without the start event input for exactly that reason.
  *
  * ---------------------------------------------------------------------
- * MILLIVOLTS. `set_mv()` is a thin wrapper over util/analog.hpp's
+ * Millivolts. `set_mv()` is a thin wrapper over util/analog.hpp's
  * `dac_code(mv, steps, ref_mv)` with `steps` = 1024: the arithmetic is
  * target-independent and stays
  * there. NOTE the half-truth in that: 41.6.2.4's own formula divides by
@@ -106,41 +121,42 @@
  * a 5 mV LSB at a 5 V reference), which is why the bench declines to
  * decide between them and this comment says so instead.
  *
- * THE LINEAR RANGE IS NOT THE WHOLE RANGE. Table 45-30 gives it as
+ * The linear range is not the whole range. Table 45-30 gives it as
  * 0.05 V .. VDDANA - 0.05 V, so at a 5.1 V reference roughly the bottom
  * ten and the top ten codes are outside specification, and any straight
  * line fitted through them is fitted through a clipped end.
  *
  * ---------------------------------------------------------------------
- * ERRATA, DS80000740S, read on the E/G/J ROW at revision F.
+ * Errata, DS80000740S, read on the E/G/J row at revision F.
  *
- *  - 1.8.9 DAC Output (device level, ALL REVISIONS): selecting the DAC
- *    output as the ADC's positive multiplexer input makes BOTH the DAC
+ *  - 1.8.9 DAC Output (device level, all revisions): selecting the DAC
+ *    output as the ADC's positive multiplexer input makes both the DAC
  *    output and the reading noisy, and the workaround is to "wire the
  *    DAC VOUT pin externally to an ADC AINx pin input" and select that
- *    pad instead. ON THIS SILICON THAT WIRE HAS ZERO LENGTH: PA02 is
+ *    pad instead. On this silicon that wire has zero length: PA02 is
  *    DAC/VOUT and ADC0/AIN0 at once, so enabling CTRLB.EOEN and
- *    selecting `AnalogIn<Pin<'A',2>>` on ADC0 IS the workaround.
- *    `Dac::adc_input_pad_hint` names that pad and the bench measures
+ *    selecting `AnalogIn<Pin<'A',2>>` on ADC0 is the workaround.
+ *    `Dac::adc_input_pad_port` and `adc_input_pad_pin` name that pad
+ *    and the bench measures
  *    what the internal channel costs.
- *  - 1.9.2 Standby Sleep Mode (ALL REVISIONS): with CTRLA.RUNSTDBY = 0
+ *  - 1.9.2 Standby Sleep Mode (all revisions): with CTRLA.RUNSTDBY = 0
  *    and DATABUF written but not yet consumed, entering standby sets
  *    INTFLAG.EMPTY on the way out. The workaround is the caller's -
  *    ignore and clear EMPTY after a standby wake - and `clear_flags()`
  *    is how; a driver cannot know that a wake happened.
  *  - 1.8.10 (the DAC as the SDADC's reference) is live on this row too,
- *    and is answered from the OTHER side: its workaround is
+ *    and is answered from the other side: its workaround is
  *    REFCTRL.ONREFBUF = 1, which samc21/sdadc.hpp requires for both of
  *    its internal references.
- *  - NOT this silicon: 1.9.1 (dithering with right-adjusted data giving
- *    16 LSB of INL) is REVISION B ONLY - the E/G/J row carries one X
+ *  - Not this silicon: 1.9.1 (dithering with right-adjusted data giving
+ *    16 LSB of INL) is revision B only - the E/G/J row carries one X
  *    and it is under B - so `left_adjust` is not forced here, and the
  *    row is the trap the errata document sets over and over.
  *
  * ---------------------------------------------------------------------
- * NOT BUILT (docs/samc21/dac.md carries the list): VREFA, which needs a
+ * Not built (docs/samc21/dac.md carries the list): VREFA, which needs a
  * wire this board has not got; the voltage pump, which this supply
- * never switches on; and the DAC as a WAKE source - EMPTY and UNDERRUN
+ * never switches on; and the DAC as a wake source - EMPTY and UNDERRUN
  * have never driven the NVIC out of a sleep.
  */
 

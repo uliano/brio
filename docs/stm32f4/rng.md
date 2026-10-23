@@ -1,6 +1,59 @@
 # Random number generator (STM32F4)
 
-Documents of record: RM0090 Rev 22 ch. 24, whose first line says the
+This document is for a programmer who needs random numbers from the
+hardware - a nonce, a key, a seed for a software generator, a jitter -
+rather than a sequence a program could reproduce. The STM32F4's RNG is
+a true generator: analog noise feeding a shift register, with two
+monitors that say when its output is not to be trusted, and it hands
+over 32 bits at a time. `Rng` is the driver, a monostate (a class with
+only static members and no objects, standing for the one generator the
+chip has) that exists only on the parts that carry the block; its
+`read()` runs the whole protocol the chapter asks for, the error checks
+and the comparison with the previous word, and answers a word or
+nothing with the reason kept beside it.
+
+The smallest use, the first block of "How to use it" below:
+
+```cpp
+if (!brio::Rng::init(clock)) {                 // gate, enable, discard the first
+    // the domain is not running
+}
+if (const auto v = brio::Rng::read()) {
+    use(*v);
+} else if (brio::Rng::last_error() == brio::RngError::seed_error) {
+    (void)brio::Rng::recover();
+}
+```
+
+Line by line: `init()` takes the clock task's tag object (`clock`,
+[clock.md](clock.md)), opens the generator's clock gate, enables it and
+throws its first word away as FIPS PUB 140-2 asks, waiting a bounded
+number of status reads for that word, and answers false when it never
+came; `read()` answers a word, or nothing (an empty `std::optional`)
+when the generator has no new word yet, reports an error, or produced
+the same word twice; `last_error()` says which of those it was, and a
+seed error is the one that needs `recover()`, the chapter's restart
+sequence. `read()` itself does not wait: a caller that wants to is
+given `read_blocking()`, a bounded loop over it.
+
+What decides correctness even there. The part must have the block: the
+F401, the F411 and the F446 have none, and on them `Rng` is not
+declared, so a program naming it does not compile. The generator runs
+on the main PLL's Q output, the 48 MHz domain: the clock task must have
+run before `init()`, and for a static clock type `init()` refuses at
+compile time a rate with no PLL or a Q output under f(HCLK)/16, the
+chapter's one rule ("What the silicon does" below); a `DynamicClock`'s
+rate is not checked there. A program that calls `init()` before the
+clock task finds the generator with no clock, and `init()` answers false
+(derived from its wait: it gives up on an error status or on a word that
+never comes). And a word handed out is never the first after an enable
+and never a repeat of the one before, but only while every word is taken
+through `read()`: `value()` reads the register raw, for a handler that
+has done its own checking.
+
+## Documents of record
+
+RM0090 Rev 22 ch. 24, whose first line says the
 chapter "applies to the whole STM32F4xx family" - as far as the family
 has the block at all: RM0390 Rev 6 never mentions it, because the F446
 has none. No item of ES0206 Rev 24, ES0298 Rev 8 or ES0287 Rev 6 is
@@ -10,12 +63,14 @@ filed against it. Driver: `stm32f4/rng.hpp` (`Rng`, `RngError`,
 (`stm32f4/device_tables.hpp`). The family fixture is
 `test/family_stm32f4/rng.cpp` with the negatives that refuse the type on
 a part with no generator and refuse a clock with no PLL. Bench:
-`test_stm32f4_misc`, letter `b`, run on the STM32F429 (the one part of
-the three on the desk that carries the block).
+`test_stm32f4_misc`, letter `b` (a letter is one command key of the
+suite's console and the group of verdicts it runs), run on the
+STM32F429 and the STM32F469, the two bench parts that carry the block
+("Bench findings" below).
 
 ## What the silicon does
 
-**It is a TRUE generator, not a sequence.** Several ring oscillators
+**It is a true generator, not a sequence.** Several ring oscillators
 whose outputs are XORed produce a seed; the seed is shifted into a
 linear feedback register; the register is handed over 32 bits at a time
 when "a significant number of seeds have been introduced" (24.3). Beside
@@ -35,12 +90,12 @@ from.** The LFSR is clocked by RNG_CLK "at a constant frequency, so that
 the quality of the random number is independent of the HCLK frequency"
 (24.3), and on this family that clock is the main PLL's Q output - the
 domain the USB OTG FS and the SDIO share, which `Clock::usb_hz` reports.
-THE MANUAL'S ONLY STATED CONSTRAINT ON IT IS A RATIO, NOT A RATE: the
+The manual's only stated constraint on it is a ratio, not a rate: the
 clock monitor raises CECS when f(RNG_CLK) < f(HCLK)/16 (24.4.2). 48 MHz
 is what the clock tree is designed to put there and what every ST
 example uses; a SYSCLK of 180 MHz gives 45 MHz there, which the ratio
 still admits by a factor of four. So `Rng::init()` refuses a rate with
-no PLL at all and refuses one that would trip CECS, and does NOT insist
+no PLL at all and refuses one that would trip CECS, and does not insist
 on 48 MHz - a number the chapter does not make a condition. (Every rate
 this family's PLL can produce clears the bar comfortably: the Q search
 never leaves the output below 24 MHz, and 24 x 16 is well above the
@@ -48,7 +103,7 @@ never leaves the output below 24 MHz, and 24 x 16 is well above the
 
 **The clock gate is on a different bus on one part.** RNGEN is bit 6 of
 RCC_AHB2ENR on every part with the generator except the F410, which has
-no AHB2 at all and puts the enable at the TOP of RCC_AHB1ENR, bit 31.
+no AHB2 at all and puts the enable at the top of RCC_AHB1ENR, bit 31.
 Neither the register nor the bit is the same, so the driver selects the
 store with the header's own symbol and the reserve states the fact.
 
@@ -70,14 +125,14 @@ subsequent number be compared with the one before, the test failing on a
 repeat (24.3.1). `init()` performs the discard; `read()` performs the
 comparison and refuses a repeated word rather than handing it out.
 
-**The two errors are not the same kind.** A CLOCK error (CECS) means the
+**The two errors are not the same kind.** A clock error (CECS) means the
 generator has stopped producing, but "has no impact on the previously
 generated random numbers, and the RNG_DR register contents can be used":
-fix the clock tree, clear CEIS, carry on. A SEED error (SECS) means the
+fix the clock tree, clear CEIS, carry on. A seed error (SECS) means the
 analog part produced a faulty sequence - more than 64 consecutive bits
 at one value, or more than 32 alternations - and then "if a number is
 available in the RNG_DR register, it must not be used because it may not
-have enough entropy": clear SEIS, then clear AND SET RNGEN to
+have enough entropy": clear SEIS, then clear and set RNGEN to
 reinitialize (24.3.2). `recover()` is that sequence.
 
 **The two latched flags are rc_w0, not rc_w1.** SEIS and CEIS are

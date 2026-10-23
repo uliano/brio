@@ -1,30 +1,76 @@
 /*
  * ccl.hpp
  *
- * The configurable custom logic (CCL) of the AVR DA/DB (DS40002247B
- * ch. 31: six LUTs and three sequencers on 48/64 pins, four and two on
- * 28/32) and of the AVR EA (DS40002443A ch. 29: four LUTs and two
- * sequencers on every package, the same IP but for the input menu) in
- * two strata, as docs/avrxt/ccl.md describes:
+ * The configurable custom logic (CCL) of the AVR DA, DB and EA: small
+ * look-up tables (LUTs) that compute a logic function of three inputs -
+ * pins, event channels, other peripherals' outputs - and drive a pin, an
+ * event channel or an interrupt with it, with no CPU, and in sleep as
+ * far as the LUT's clock runs there (docs/avrxt/ccl.md): glue logic on
+ * pins, a divide-by-two of a timer's event, a one-clock pulse
+ * on an edge, a filtered input that wakes the device. The chapter is
+ * DS40002247B ch. 31 on the AVR DA/DB (six LUTs and three sequencers on
+ * 48/64 pins, four and two on 28/32) and DS40002443A ch. 29 on the AVR
+ * EA (four LUTs and two sequencers on every package, the same IP but for
+ * the input menu). The header has two strata, as docs/avrxt/ccl.md
+ * describes:
  *
- *  RESOURCES - Ccl: the block (enable/disable, RUNSTDBY, the three
+ *  the resources - Ccl: the block (enable/disable, RUNSTDBY, the three
  *  sequencers, the one interrupt vector with its per-LUT flags); Lut<n>:
  *  one look-up table - a config struct owns its three inputs, the truth
  *  table, filter, edge detector, clock, output pin, interrupt sense;
  *  init<cfg>() / init(cfg) write it, the EVENTA/EVENTB users and the
- *  LUTn output generator are its event vocabulary (evsys.hpp).
+ *  LUTn output generator are its event vocabulary (evsys.hpp);
  *
- *  TASK - ToggleFlipFlop<pair>: a JK flip-flop on a LUT pair toggled
+ *  the task - ToggleFlipFlop<pair>: a JK flip-flop on a LUT pair toggled
  *  by one event (a divide-by-two / a latch a timer sets and resets
  *  with its own events, no CPU); more tasks come with their users.
+ *
+ * The smallest use, PB3 = PB0 AND PB1 on a 48/64-pin AVR DA/DB (LUT4's
+ * port is PORTB):
+ *
+ *   using And = brio::Lut<4>;
+ *   brio::Ccl::disable();
+ *   And::init<brio::LutConfig{.in0 = brio::LutInput::pin, .in1 = brio::LutInput::pin,
+ *                             .truth = brio::lut_truth([](bool a, bool b, bool) { return a && b; }),
+ *                             .output_pin = true}>();
+ *   brio::Ccl::enable();
+ *
+ * Ccl::disable() stops the whole block, the state a configuration starts
+ * from; init<cfg>() checks the configuration at compile time, takes the
+ * LUT's own pins 0 and 1 as inputs 0 and 1, writes the truth table
+ * lut_truth() computes from the lambda (input 2 is `mask`, low) and,
+ * with output_pin, makes pin 3 an output carrying the result;
+ * Ccl::enable() starts the block. LUT4 exists on the 48/64-pin AVR
+ * DA/DB alone; elsewhere a lower LUT does the same on its own port
+ * (lut_port()). What decides correctness even there: on the AVR DB's
+ * silicon A4/A5 a LUT is reconfigured only with the whole block
+ * disabled (errata 2.4.1, below), which the disable/enable bracket does;
+ * the driver configures the output pin and nothing else of the port, so
+ * the input pins are read as PORT leaves them; and an interrupt sense
+ * other than none needs the program's ISR(CCL_CCL_vect) calling
+ * Ccl::take_flags().
+ *
+ * Who calls what, and from where. Nothing here waits or masks
+ * interrupts. Ccl::enable() and disable() are one store each; flag()
+ * and clear_flag() one load or one store, legal from any context.
+ * Ccl::sequencer(), Lut<n>::init(), sense(), enable() and disable() of
+ * one LUT, and ToggleFlipFlop::init() read, modify and write registers
+ * shared between LUTs (INTCTRL, PORTMUX.CCLROUTEA) or the pins' port,
+ * and a Lut keeps a note of the pin it owns: they are setup, in main()
+ * or in the handler of the one active object that owns the wiring (an
+ * active object is a component of a brio program with its own event
+ * queue, served one event at a time by the kernel,
+ * docs/learn/introduction.md). Ccl::take_flags() is the interrupt body,
+ * called from the program's ISR(CCL_CCL_vect) and from nowhere else.
  *
  * Facts that shape the code (31.3, errata DS80000915F 2.4.1):
  *  - every LUT register but ENABLE is enable-protected: written while
  *    the LUT is disabled, or together with ENABLE = 1 in the same write
- *    (init does the latter: CTRLB, CTRLC, TRUTH first, then CTRLA with
- *    ENABLE). On silicon A4/A5 (2.4.1) reconfiguring ANY LUT wants the
+ *    (init does both: CTRLA = 0 first, then CTRLB, CTRLC, TRUTH while
+ *    the LUT is disabled, then CTRLA's own fields together with
+ *    ENABLE). On silicon A4/A5 (2.4.1) reconfiguring any LUT wants the
  *    whole CCL disabled, which drops every other LUT meanwhile - so the
- *    protocol is: Ccl::disable(); Ccl::sequencer<pair>(...) (BEFORE the
+ *    protocol is: Ccl::disable(); Ccl::sequencer<pair>(...) (before the
  *    even LUT's init: SEQSEL is protected by that LUT's ENABLE and a
  *    write after it is silently ignored, measured); Lut<..>::init(...)
  *    for each; Ccl::enable(). A LUT reconfigured under a running block
@@ -37,7 +83,7 @@
  *    (measured, docs/avrxt/ccl.md) - there the block's disable is a
  *    choice, not the protocol;
  *  - inputs: the same menu for the three inputs, but the peripheral
- *    entries select the INSTANCE by input index - input 0/1/2 of a LUT
+ *    entries select the instance by input index - input 0/1/2 of a LUT
  *    sees AC0/1/2 (AC0/1/1 on the AVR EA, which has no AC2), TCB0/1/2
  *    WO, TCA WO0/1/2, USART0/1/2 TXD, ZCD0/1/2, SPI0 MOSI/MOSI/SCK,
  *    TCD0 WOA/WOB/WOC (no ZCD and no TCD on the AVR EA: those inputs are
@@ -51,10 +97,10 @@
  *  - the filter/edge/sequencer clock is CLK_PER by default, or the
  *    LUT's own input 2 (then input 2 reads 0 in the truth table), OSCHF,
  *    OSC32K, OSC1K; SYNCH delays two clocks, FILTER needs the input
- *    stable over two clocks and delays four; the edge detector REQUIRES
+ *    stable over two clocks and delays four; the edge detector requires
  *    a filter option and yields a one-clock pulse on a rising edge;
- *  - the sequencer of a pair is clocked by the EVEN LUT's clock, takes
- *    the even LUT as D/J/D/S and the odd as G/K/G/R, and its output IS
+ *  - the sequencer of a pair is clocked by the even LUT's clock, takes
+ *    the even LUT as D/J/D/S and the odd as G/K/G/R, and its output is
  *    the even LUT's output (and FEEDBACK for both); the odd LUT's own
  *    output stays available; disabling the even LUT clears it;
  *  - pins (PORTMUX.CCLROUTEA moves only OUT): IN0/1/2 = pins 0/1/2 and
@@ -79,7 +125,7 @@ namespace brio {
 // ---- the knobs (31.5) -------------------------------------------------------------
 
 /// INSELx: one of the three inputs of a LUT. The instance the
-/// peripheral entries mean depends on WHICH input (0/1/2) they sit on.
+/// peripheral entries mean depends on which input (0/1/2) they sit on.
 /// The codes are the device header's INSEL0 enumerators, and the static
 /// assertions below check that the same code means the same kind on
 /// INSEL1 and INSEL2 (on the AVR EA, whose AC code means AC1 on input 2,
@@ -174,7 +220,7 @@ enum class LutSense : uint8_t { none = 0, rising = 1, falling = 2, both = 3 };
 
 enum class Sequencer : uint8_t {
     none = CCL_SEQSEL_DISABLE_gc,
-    d_flip_flop = CCL_SEQSEL_DFF_gc,    ///< D = even LUT, EN = odd, CLOCKED by the even LUT's clock
+    d_flip_flop = CCL_SEQSEL_DFF_gc,    ///< D = even LUT, EN = odd, clocked by the even LUT's clock
     jk_flip_flop = CCL_SEQSEL_JK_gc,    ///< J = even, K = odd (1/1 toggles)
     d_latch = CCL_SEQSEL_LATCH_gc,      ///< D = even, G = odd
     rs_latch = CCL_SEQSEL_RS_gc,        ///< S = even, R = odd (1/1 forbidden)
@@ -215,7 +261,8 @@ constexpr char lut_port(uint8_t n) {
 struct Ccl {
     Ccl() = delete;
 
-    /// Enable the block (after every LUT and sequencer is configured).
+    /// Enable the block (after every LUT and sequencer is configured):
+    /// one store to CTRLA, RUNSTDBY with it when asked.
     static void enable(bool run_standby = false) {
         CCL.CTRLA = static_cast<uint8_t>(CCL_ENABLE_bm | (run_standby ? CCL_RUNSTDBY_bm : 0));
     }
@@ -225,7 +272,7 @@ struct Ccl {
     static bool enabled() { return (CCL.CTRLA & CCL_ENABLE_bm) != 0; }
 
     /// The sequencer of pair p (LUT 2p / 2p+1). Enable-protected by the
-    /// even LUT: written while LUT 2p is disabled, BEFORE its init()
+    /// even LUT: written while LUT 2p is disabled, before its init()
     /// (written after, it is silently ignored - measured). Disables the
     /// even LUT first, to be safe.
     template <uint8_t pair>
@@ -279,7 +326,8 @@ public:
     using EventA = EvLutIn<n, 'A'>;       ///< users: the two event inputs
     using EventB = EvLutIn<n, 'B'>;
 
-    /// Compile-time form.
+    /// Compile-time form: lut_config_valid()'s refusals become compile
+    /// errors, then the run-time form below does the writes. Setup.
     template <LutConfig cfg>
     static void init() {
         static_assert(lut_config_valid(n, cfg),
@@ -289,7 +337,7 @@ public:
         init(cfg);
     }
 
-    /// Run-time form. Call with the block DISABLED (Ccl::disable(); on the
+    /// Run-time form. Call with the block disabled (Ccl::disable(); on the
     /// AVR EA a running block takes it too, the file header):
     /// writes inputs, truth, route, output pin, interrupt sense, then
     /// CTRLA with ENABLE = 1 (the enable-protected fields land together
@@ -338,7 +386,7 @@ public:
     static void event_b_on(EventChannel<ch> c) { EventB::listen(c); }
 
     /// Drive (and release) the output pin per the config. The branches
-    /// for a port this package lacks are compiled OUT (a runtime `if`
+    /// for a port this package lacks are compiled out (a runtime `if`
     /// would instantiate the missing Pin and kill the whole LUT -
     /// LUT5's port is PORTG); lut_config_valid has already refused a
     /// config asking for them. A position taken by a previous init and

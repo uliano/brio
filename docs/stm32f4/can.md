@@ -1,10 +1,94 @@
 # bxCAN - the controller area network (STM32F4)
 
-Documents of record: RM0390 Rev 6 ch. 30 (RM0090 Rev 22 ch. 32 is the
+This document is for a programmer who puts an STM32F4 on a CAN bus, or
+tests one with no bus at all in loopback. `Can<1|2|3>` is the
+controller, one function per register fact: the clock gates, the three
+modes, the bit time, the three transmit mailboxes, the two receive FIFOs,
+the filter banks, the error counters and the bodies of its four
+interrupt vectors. The frame, the bit timing and the error codes are the
+CAN vocabulary every controller in brio shares (`util/can.hpp`,
+[design/can.md](../design/can.md)). There is no active object over it
+(an active object is a component of a brio program with its own event
+queue, served one event at a time by the kernel,
+[docs/learn/introduction.md](../learn/introduction.md)): a program
+transmits and receives through the controller's own functions, from its
+own active object or its own interrupt handlers. The F401, F410 and
+F411 have no CAN, and on them `Can<n>` does not compile.
+
+The smallest use, a node on a real bus at 500 kbit/s, the first block of
+"How to use it" below:
+
+```cpp
+using Bus = brio::Can<1>;
+constexpr brio::CanPins pads{.rx = {'A', 11, brio::PinFunction::af9},
+                             .tx = {'A', 12, brio::PinFunction::af9}};
+constexpr auto timing = brio::can_timing_for(brio::apb_hz(clock, false), 500'000);
+static_assert(brio::can_timing_valid(timing), "no exact 500 kbit/s from this PCLK1");
+
+Bus::clock(true);
+Bus::filter_clock(true);
+Bus::claim_pads<pads>();
+(void)Bus::init_mode(true);
+(void)Bus::options({.auto_bus_off = true});
+(void)Bus::timing(timing);
+(void)Bus::filter_init(true);
+(void)Bus::filter(brio::can_filter_accept_all(0));
+(void)Bus::filter_init(false);
+if (!Bus::start()) {
+    // eleven recessive bits never came: nothing is driving the bus
+}
+```
+
+Line by line: `Bus` names CAN1; `pads` names PA11 and PA12 with
+alternate function 9, the number the datasheet gives CAN1 on them;
+`can_timing_for()` searches, when the program is compiled, for a bit
+time that gives exactly 500 kbit/s from the APB1 rate the clock task's
+type claims (`apb_hz(clock, false)`, [clock.md](clock.md)), and the
+`static_assert` stops the build when there is none; `clock(true)` opens
+CAN1's bus clock and `filter_clock(true)` the clock of the block that
+holds its filter banks (CAN1's own here, and CAN1's for CAN2 too);
+`claim_pads<pads>()` hands both pads to the controller; `init_mode(true)`
+asks for initialization mode and waits for the controller to
+acknowledge it, since the bit time, the options and the test modes are
+written only there; `options()` sets the behaviour bits, here the
+automatic recovery from bus-off; `timing()` writes the bit time;
+`filter_init(true)` opens the filter block for configuration,
+`filter()` makes bank 0 accept every frame into FIFO 0, and
+`filter_init(false)` closes it again, because reception is off while it
+stands; `start()` leaves initialization and joins the bus.
+
+What decides correctness even there. The bit time is computed from the
+rate the clock type claims and not from the hardware, so the clock task
+must have run (`SysClock::init()`) before `start()`: derived from the
+arithmetic, a controller started at the 16 MHz reset rate under a clock
+type that claims a faster PCLK1 sends at a fraction of 500 kbit/s, and
+nothing refuses it. `start()` costs a synchronization of eleven
+recessive bits on the receive pad, and with no transceiver and no other
+node driving the bus that never comes: every wait here (`init_mode`,
+`start`, `sleep`) is bounded at 200 000 reads of the status register and
+answers false when it runs out, which is why the example tests `start()`
+and the loopback self-test under "How to use it" claims its receive pad
+with a pull-up. A filter write with the filter block's clock shut is
+dropped in silence, which is the trap of CAN2, whose banks are CAN1's.
+And on the F42x/F43x, the F446 and the F469/F479, `options()` refuses a
+configuration that asks for time-triggered mode and writes nothing (the
+erratum below). The functions themselves take no lock: the configuring
+ones are setup calls, and the three interrupt bodies (`tx_isr()`,
+`rx_isr()`, `sce_isr()`) are called from the program's own handlers for
+the vectors `tx_irq()`, `rx_irq(fifo)` and `sce_irq()` name.
+
+The rest of this page, in order: the documents of record; the shared
+vocabulary and why there is no active object; what the silicon does,
+ending with the one live erratum; the types and verbs; how to use it,
+one example per use; the bench findings; what is not covered.
+
+## Documents of record
+
+RM0390 Rev 6 ch. 30 (RM0090 Rev 22 ch. 32 is the
 same chapter for the F42x/F43x class), the datasheets' alternate-function
 tables for the pads (DS10693 Rev 11 table 11 for the F446, DocID024030
-Rev 10 table 12 for the F429 - CAN1 and CAN2 are AF9 on both), and ONE
-LIVE ERRATUM: ES0298 2.15.1 and ES0206 2.13.1, "bxCAN time-triggered
+Rev 10 table 12 for the F429 - CAN1 and CAN2 are AF9 on both), and one
+live erratum: ES0298 2.15.1 and ES0206 2.13.1, "bxCAN time-triggered
 communication mode not supported", every revision of the F446 and of the
 F427/F437/F429/F439, with no workaround. Driver: `stm32f4/can.hpp`
 (`Can<1|2|3>`, `CanFrame`, `CanTiming`, `CanFilter`, `CanPins`,
@@ -12,10 +96,12 @@ F427/F437/F429/F439, with no workaround. Driver: `stm32f4/can.hpp`
 `can_base`/`can_present`/`can_clock_mask`/`can_reset_mask`/
 `can_filter_master`/`can_filter_banks`/`can_dual`/`can_tx_irq`/
 `can_rx_irq`/`can_sce_irq`/`can_ttcm_erratum`
-(`stm32f4/device_tables.hpp`). The family fixture is
+(`stm32f4/device_tables.hpp`, the reserve: the table of what each part
+has, read off the device header). The family fixture is
 `test/family_stm32f4/can.cpp` with five negatives. Bench:
 `test_stm32f4_misc`, letters `c` to `k`, on an STM32F446 with no
-transceiver and no peer.
+transceiver and no peer (a letter is one command key of the suite's
+console and the group of verdicts it runs).
 
 ## The shared vocabulary, and the AO that is not there
 
@@ -32,47 +118,47 @@ completion is not a reply, and reception is routing.
 ## What the silicon does
 
 **Three instances at most, and one filter block for two of them.** CAN1
-and CAN2 come as a PAIR on every part that has CAN at all (the F405
+and CAN2 come as a pair on every part that has CAN at all (the F405
 class and up, less the F401, F410 and F411, which have none); the
-F413/F423 add a third. CAN1 is the MASTER: the filter registers are its,
+F413/F423 add a third. CAN1 is the master: the filter registers are its,
 and CAN2's filters are banks of CAN1's block above CAN_FMR.CAN2SB - so
-filtering on CAN2 means writing CAN1's registers and needing CAN1'S
-CLOCK ON. CAN3, where it exists, is a master with a block of its own.
+filtering on CAN2 means writing CAN1's registers and needing CAN1's
+clock on. CAN3, where it exists, is a master with a block of its own.
 Every instance sits on APB1, so the bit time is counted in PCLK1
 periods.
 
 **Three modes, each a request with an acknowledge.** INRQ and SLEEP are
 asked for in CAN_MCR; INAK and SLAK in CAN_MSR are the silicon saying it
-has arrived (30.4). THE RESET STATE IS SLEEP, not normal: a block whose
+has arrived (30.4). The reset state is sleep, not normal: a block whose
 clock was just turned on transmits nothing until it is woken. Leaving
-initialization or sleep also costs a SYNCHRONIZATION - eleven
+initialization or sleep also costs a synchronization - eleven
 consecutive recessive bits on the receiver's input.
 
 **Loopback and silent are the wireless instruments - and loopback still
 wants its receive pad.** In loop back mode the node receives its own
 transmissions through an internal feedback from Tx to Rx, ignores
 acknowledge errors and, says 30.5.2, disregards "the actual value of the
-CANRX input pin". Measured (letter `c`): that is true of the DATA and
-NOT of the SYNCHRONIZATION - a node in loopback whose receive pad is
-held DOMINANT never leaves initialization mode, and the same node with
+CANRX input pin". Measured (letter `c`): that is true of the data and
+not of the synchronization - a node in loopback whose receive pad is
+held dominant never leaves initialization mode, and the same node with
 the pad claimed and pulled up leaves it at once. In silent mode the node
-listens without ever driving a dominant bit and CANNOT START A
-TRANSMISSION AT ALL (30.5.1). The two together are the "hot self-test"
+listens without ever driving a dominant bit and cannot start a
+transmission at all (30.5.1). The two together are the "hot self-test"
 of 30.5.3.
 
 **The bit time is the APB clock divided twice.** tq = (BRP + 1) x
 tPCLK, the bit is 1 + TS1 + TS2 quanta (3..25 of them), and the sample
-point sits after the first 1 + TS1 (30.7.7). CAN_BTR is writable ONLY in
+point sits after the first 1 + TS1 (30.7.7). CAN_BTR is writable only in
 initialization mode (30.9.1), and so are the two test-mode bits that
-share it. `can_timing_for()` searches the whole space at COMPILE time
-for an EXACT bit rate - a CAN bus with a rounded bit rate is a bus that
+share it. `can_timing_for()` searches the whole space at compile time
+for an exact bit rate - a CAN bus with a rounded bit rate is a bus that
 works until the third node joins - and reports the sample point it
 reached; a rate the APB clock cannot divide into exactly comes back as
 an empty timing, not a near miss.
 
 **Three transmit mailboxes and two orders.** With more than one pending,
-the scheduler picks by IDENTIFIER (lowest wins, ties by mailbox number)
-or by REQUEST ORDER when MCR.TXFP is set (30.7.1). A mailbox is
+the scheduler picks by identifier (lowest wins, ties by mailbox number)
+or by request order when MCR.TXFP is set (30.7.1). A mailbox is
 write-protected unless it is empty (TME), and RQCP is the completion
 flag whose clear also clears TXOK, ALST and TERR for that mailbox.
 
@@ -86,19 +172,19 @@ released with RFOM, and until it is the next message is unreachable.
 **Twenty-eight filter banks in four shapes.** Each bank is one 32-bit
 filter or two 16-bit ones (FS1R), in mask or in list mode (FM1R),
 assigned to FIFO 0 or FIFO 1 (FFA1R) and active or not (FA1R). The
-FILTER MATCH INDEX a received frame carries is a number over the ACTIVE
+filter match index a received frame carries is a number over the active
 filters of that FIFO in the chapter's priority order (32-bit before
-16-bit, list before mask, low bank before high) and NOT the bank number.
+16-bit, list before mask, low bank before high) and not the bank number.
 Configuration is legal only with FINIT set or the bank deactivated
-(30.9.1), and FINIT DEACTIVATES RECEPTION while it stands (30.4.1).
+(30.9.1), and FINIT deactivates reception while it stands (30.4.1).
 
 **The error counters are the fault confinement, and they are readable.**
 TEC and REC in CAN_ESR, with EWGF at 96, EPVF past 127 and BOFF past 255
-- and CAN_ESR carries only the LOW BYTE of a nine-bit transmit counter.
+- and CAN_ESR carries only the low byte of a nine-bit transmit counter.
 Leaving bus-off costs 128 occurrences of 11 recessive bits either way;
 ABOM decides whether the hardware does it alone or waits for software to
 set and clear INRQ. LEC names the last error the core saw, and its
-seventh code is the one SOFTWARE writes to tell a later read that
+seventh code is the one software writes to tell a later read that
 nothing has happened since.
 
 **Four vectors per instance**: transmit (the three mailboxes together),
@@ -107,11 +193,11 @@ flags, the wake-up and the sleep acknowledge behind ERRI, WKUI and
 SLAKI, which are rc_w1 (30.9.2). No header of this family shares any of
 them with another peripheral.
 
-**THE ONE ERRATUM, AND IT IS LIVE.** Time-triggered communication mode
+**The one erratum, and it is live.** Time-triggered communication mode
 "is not supported", no time stamp is available, and CAN_MCR.TTCM "must
 be kept cleared" - every revision of the F446, of the F427/F437/
 F429/F439 and of the F469/F479 (ES0298 2.15.1, ES0206 2.13.1, ES0321
-2.15.1), no workaround. `Can<n>::options()` REFUSES a configuration
+2.15.1), no workaround. `Can<n>::options()` refuses a configuration
 that asks for TTCM on those part classes and writes nothing;
 `time_triggered_supported()` says whether it would. The TIME field a
 received frame carries is left in `CanFrame` and is meaningless without

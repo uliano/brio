@@ -1,42 +1,61 @@
 /*
  * delay.hpp
  *
- * delay_us(clock, us): busy-wait for AT LEAST `us` microseconds, the
- * AVR implementation of the short-wait role. Reads the rate from the
- * Clock type (avrxt/clock.hpp), never from F_CPU.
+ * A short busy-wait for a driver or for a program's setup code:
+ * delay_us(clock, us) spins for at least `us` microseconds at the rate
+ * the program's clock type states (avrxt/clock.hpp), never at F_CPU -
+ * the AVR implementation of the short-wait role. The smallest use, with
+ * the clock tag every driver's init takes:
+ *
+ *     using SysClock = brio::Clock<brio::ClockSource::crystal, 24'000'000>;
+ *     constexpr SysClock clock;
+ *     ...
+ *     brio::delay_us(clock, 10);     // at least 10 us; folded to an exact cycle loop
  *
  * What it is for: hardware setup times inside drivers and bit-banged
  * bench code (a CS setup, a reset pulse, a bus turnaround) - single or
- * double-digit microseconds. What it is NOT for: waiting in an active
- * object. Anything long enough to be measured in milliseconds is a time
- * event (kernel/time_event.hpp): the loop keeps serving other AOs and
- * the CPU may sleep. Only pre-kernel init code (before Tenuto::run) may
- * legitimately wait milliseconds here.
+ * double-digit microseconds. What it is not for: waiting in an active
+ * object (a component of a brio program with its own event queue, served
+ * one event at a time by the kernel). Anything long enough to be
+ * measured in milliseconds is a time event (kernel/time_event.hpp): the
+ * loop keeps serving the other active objects and the CPU may sleep.
+ * Only pre-kernel init code (before Tenuto::run) may legitimately wait
+ * milliseconds here.
  *
- * NO DIVISION EVER RUNS AT WAIT TIME. The rate is compile-time
+ * Who may call it: any context. Every verb here touches no register,
+ * masks nothing and owns nothing; it reads the clock type's constant, or
+ * a DynamicClock's current rate index once at the call. An interrupt
+ * taken during the wait lengthens it, and "at least" still holds. A wait
+ * inside an interrupt handler holds every other handler off for its
+ * whole length, since a handler runs to completion with no other handler
+ * interrupting it. The wait is SysClock::hz's: called before
+ * SysClock::init() has brought CLK_PER there, it lasts what the reset
+ * clock makes of the count.
+ *
+ * No division ever runs at wait time. The rate is compile-time
  * knowledge in every regime: a static Clock carries it in the type, and
  * a DynamicClock can only run at source_hz over one of the twelve main
- * prescalers, so its whole rate SET is in the type too and the one
- * runtime fact is WHICH rate is current - an index byte. delay_us
+ * prescalers, so its whole rate set is in the type too and the one
+ * runtime fact is which rate is current - an index byte. delay_us
  * dispatches on that index into branches expanded per rate at compile
  * time (clock_divs / rate_index in avrxt/clock.hpp):
  *
  *  - `us` known at compile time: the branch folds the exact cycle count
  *    and __builtin_avr_delay_cycles emits the tightest loop - the only
  *    cost of the dynamic regime is the index dispatch;
- *  - `us` a runtime value: the branch selects a per-rate FIXED-POINT
+ *  - `us` a runtime value: the branch selects a per-rate fixed-point
  *    factor (ceil(rate / 4 MHz in Q4.12), a compile-time constant) and
  *    one shared tail does a 16x16 multiply, a shift and the 4-cycle
- *    loop. The factor is rounded UP at compile time and the product is
+ *    loop. The factor is rounded up at compile time and the product is
  *    rounded up again, so the wait can only land on or past the mark:
- *    "at least" holds by construction, not by a measured constant.
+ *    "at least" holds by the two roundings, not by a measured constant.
  *
  * The fixed-point path also serves a static clock with a runtime `us`,
- * which makes the microsecond arithmetic EXACT at every rate the
+ * which makes the microsecond arithmetic exact at every rate the
  * divisors can produce - including the sub-MHz ones, where a
  * whole-cycles-per-us rounding overshoots by up to 30x. What no
  * implementation can fix at those rates is granularity and overhead in
- * TIME: one loop turn is 4 cycles, so at 32.768 kHz it is 122 us and
+ * time: one loop turn is 4 cycles, so at 32.768 kHz it is 122 us and
  * even a handful of dispatch cycles is a whole tick - below roughly
  * 1 MHz a microsecond-denominated busy-wait is out of its domain, and
  * the honest tools are the folded path (exact in cycles) and
@@ -46,7 +65,7 @@
  *
  * Why a cycle loop here and not elsewhere: the AVR core executes one
  * instruction per known number of cycles from flash with no prefetch,
- * cache or wait states, so counting cycles IS timing. On a Cortex-M or
+ * cache or wait states, so counting cycles is timing. On a Cortex-M or
  * a RISC-V core the same role reads a hardware counter (DWT CYCCNT,
  * SysTick, mcycle) - same name, same "at least" semantics, its own
  * file in its own target stratum. There is no generic delay algorithm.
@@ -85,7 +104,7 @@ inline void delay_loops(uint32_t loops) {
 }
 
 /// Loop turns per microsecond of a rate, in Q4.12: ceil(rate_hz / 4e6 *
-/// 2^12). The compile-time half of the fixed-point path; rounded UP so
+/// 2^12). The compile-time half of the fixed-point path; rounded up so
 /// a wait computed with it can only be long, never short.
 inline constexpr uint8_t delay_fixed_shift = 12;
 constexpr uint16_t delay_mult(uint32_t rate_hz) {
@@ -99,7 +118,7 @@ constexpr uint16_t delay_mult(uint32_t rate_hz) {
 /// compiler emits the 16x16 helper, not the 32x32 one; the rounding is
 /// one extra loop turn per slice instead of an exact ceil - at most 4
 /// cycles long, never short, cheaper than the wide add the ceil needs.
-/// always_inline on purpose: with a COMPILE-TIME mult (a static clock's
+/// always_inline on purpose: with a compile-time mult (a static clock's
 /// rate) the multiply strength-reduces and the prologue disappears.
 [[gnu::always_inline]] inline void delay_us_fixed_body(uint16_t mult, uint32_t us) {
     while (us != 0) {
@@ -111,7 +130,7 @@ constexpr uint16_t delay_mult(uint32_t rate_hz) {
     }
 }
 
-/// The same wait as ONE shared out-of-line function: what the dynamic
+/// The same wait as one shared out-of-line function: what the dynamic
 /// dispatch branches and the stored-byte path call, so twelve branches
 /// cost twelve short calls and not twelve copies of the math.
 [[gnu::noinline]] inline void delay_us_fixed(uint16_t mult, uint32_t us) {
@@ -125,17 +144,23 @@ constexpr uint16_t delay_mult(uint32_t rate_hz) {
 ///
 ///  - `us` under 256 (every setup time a driver stores in a byte): the
 ///    cycle count is one 8 x 8 -> 16 multiply (MUL: 2 cycles), the loop
-///    turns are its quarter rounded UP, and the wait is _delay_loop_2's
+///    turns are its quarter rounded up, and the wait is _delay_loop_2's
 ///    4-cycle turn over them (SBIW 2 cycles, BRNE 2 when taken - the
 ///    instruction set manual's counts); "at least" holds by the
-///    ceiling, and the whole path is some 35 cycles for 1 us at 24 MHz
-///    where the fixed-point tail below costs 171 (counted in the
-///    listing: docs/avrxt/platform.md). The test on `us` folds away
-///    where the caller hands a byte, as the SPI host does.
+///    ceiling, and the whole path is 39 cycles for 1 us at 24 MHz,
+///    counted in the SPI host's listing (38 measured), where the
+///    fixed-point paths measure 122 cycles over the nominal at a static
+///    rate and 157..160 under a dynamic clock (docs/avrxt/platform.md,
+///    "Bench findings"; the tail as this function reaches it, its
+///    factor computed at run time, is not measured there). The test on
+///    `us` folds away where the caller hands a byte, as the SPI host
+///    does.
 ///  - longer: the fixed-point tail the dynamic dispatch shares (cpu
 ///    cycles/us = cpu/4 loops/us = cpu << 10 in Q4.12). A cpu of 64 or
-///    more would overflow that factor; it saturates instead (a LONGER
-///    wait - the safe side), and no AVR Dx clock gets there.
+///    more would overflow that factor; it saturates instead (a longer
+///    wait - the safe side), and no AVR DA, DB or EA clock gets there.
+///
+/// Any context: no register, no mask, no state.
 inline void delay_us_runtime(uint8_t cpu, uint32_t us) {
     if (us < 256u) {
         // At most 255 x 255 = 65025 cycles, 16257 turns: both half-words.
@@ -162,10 +187,10 @@ inline void delay_cycles(uint32_t cycles) {
     delay_loops((cycles + 3u) / 4u);
 }
 
-/// Busy-wait at least `us` microseconds at a COMPILE-TIME rate: the
+/// Busy-wait at least `us` microseconds at a compile-time rate: the
 /// per-branch worker of delay_us. Folds completely when `us` is a
 /// constant; otherwise the rate's Q4.12 factor is the only thing the
-/// branch contributes - into the SHARED out-of-line tail when the call
+/// branch contributes - into the shared out-of-line tail when the call
 /// comes from the dynamic dispatch (twelve branches must not carry
 /// twelve copies of the math), inlined and strength-reduced when the
 /// rate is a static clock's only one.
@@ -197,10 +222,10 @@ template <uint32_t rate_hz, bool from_dispatch = false>
 }
 
 /// The index dispatch: a compare-and-return chain over the clock's
-/// discrete rate set, each branch a delay_us_at of ITS compile-time
+/// discrete rate set, each branch a delay_us_at of its own compile-time
 /// rate. Recursion instead of a fold so every branch is a plain nested
 /// always_inline call (the shape __builtin_constant_p folds through -
-/// proven by the static path) and a hit RETURNS: the current rate's
+/// proven by the static path) and a hit returns: the current rate's
 /// index costs its position in clock_divs, and index 0 (div1, the boot
 /// rate) costs one compare.
 template <typename Clock, uint8_t I = 0>
@@ -216,10 +241,12 @@ template <typename Clock, uint8_t I = 0>
 
 /// Busy-wait at least `us` microseconds at Clock's rate. Static clock:
 /// straight to its one rate. Dynamic clock: dispatch on the current
-/// rate INDEX into per-rate branches expanded from the clock's discrete
+/// rate index into per-rate branches expanded from the clock's discrete
 /// set (rate_count / rate_hz / rate_index) - a compare chain on a byte,
 /// never an arithmetic derivation of the rate. A dynamic clock type
 /// without the discrete surface falls back to the stored-byte path.
+/// `clock` is the program's empty tag object; any context (the opening
+/// comment), the wait lengthened by every interrupt taken during it.
 template <typename Clock>
 [[gnu::always_inline]] inline void delay_us(Clock clock, uint32_t us) {
     if constexpr (Clock::is_static) {

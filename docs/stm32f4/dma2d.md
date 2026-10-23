@@ -1,12 +1,64 @@
 # DMA2D, the Chrom-Art accelerator (STM32F4)
 
-Documents of record: RM0090 Rev 22 ch. 11 - RM0390 Rev 6 and RM0383
+This document is for a programmer who draws into a frame buffer and
+wants the rectangles drawn by hardware: a fill in one colour, a copy, a
+copy that converts between pixel formats, a blend of two images into a
+third. `Dma2d` is the block, with the four operations as four functions
+and the colour tables, events and bus throttle beside them;
+`Dma2dSource`, `Dma2dOutput` and `Dma2dArea` describe an input, the
+destination and the rectangle. It works beside the display controller
+([ltdc.md](ltdc.md)) and is present on a few parts that have none.
+
+The smallest use, the first block of "How to use it" below: a 240x320
+frame buffer of 16-bit pixels filled with red:
+
+```cpp
+brio::Dma2d::init();
+const brio::Dma2dOutput frame{.address = fb.address(), .line_offset = 0,
+                              .format = brio::Dma2dOutputColor::rgb565};
+(void)brio::Dma2d::fill(frame, brio::argb8888(255, 0, 0, 255), {.pixels = 240, .lines = 320});
+(void)brio::Dma2d::wait();
+```
+
+Line by line: `init()` opens the block's clock gate and clears every
+flag, once before the first transfer; `frame` is the destination - the
+address of the top left pixel (`fb` is an `LtdcFramebuffer`, whose
+`address()` is its base), the number of pixels to skip at the end of
+each line (none: the rectangle is the whole buffer) and the format the
+pixels are stored in; `fill()` takes the colour in ARGB8888, packs it
+into that format itself and starts the engine on a rectangle of 240
+pixels by 320 lines; `wait()` spins until the engine is idle again.
+
+What decides correctness even there. `fill()` returns as soon as the
+engine has started, not when it is done: the destination belongs to the
+engine until `wait()` answers true (or the transfer-complete event
+arrives), and a CPU access before that races it. `fill()` answers false,
+writing nothing, when the output or the rectangle is refused or a
+transfer is still running; `wait()` answers false after 20 000 000 polls,
+a stopped block. A buffer this engine writes must be `volatile` to the
+CPU, because its address reaches the engine as an integer the compiler
+cannot see dereferenced (the trap in the bench findings). And the
+destination's memory must be working first: an SDRAM frame buffer is
+[fmc.md](fmc.md)'s `initialize()` before anything points at it. Nothing
+here masks interrupts.
+
+The rest of this page, in order: the documents of record; what the
+silicon does (the four modes, offsets and alignment, the configuration
+check, one transfer at a time, the colour tables, the blend's rounding,
+the alpha modes, the bus throttle); the types and verbs; how to use it;
+the bench findings, the bandwidth beside a running display included;
+and what is not covered.
+
+## Documents of record
+
+RM0090 Rev 22 ch. 11 - RM0390 Rev 6 and RM0383
 Rev 4 have no such chapter, because the F446 and the F411 have no such
 peripheral. Errata: ES0206 Rev 24's sixteen sections do not include
 this one; the accelerator and the display controller beside it are the
 only two chapters of this stratum with no erratum at all. Driver:
 `stm32f4/dma2d.hpp`; the presence facts are in
-`stm32f4/device_tables.hpp`. Bench suite: `test_stm32f4_ltdc`, which
+`stm32f4/device_tables.hpp` (the reserve: the table of what each part
+has, read off the device header). Bench suite: `test_stm32f4_ltdc`, which
 measures the accelerator beside the display controller because they
 share the memory that makes either of them interesting. Family fixture
 `test/family_stm32f4/dma2d.cpp` plus two negatives under `brio check
@@ -24,7 +76,7 @@ matters: reads it makes are not the CPU's, and on this family that is
 the difference between a safe read of external memory and ES0206
 2.3.5's unsafe one.
 
-**Its presence is a WIDER fact than the display controller's.** Every
+**Its presence is a wider fact than the display controller's.** Every
 part with a panel interface has the accelerator; two parts of the same
 class have the accelerator and no panel interface, because filling and
 converting memory is useful with no display attached. `dma2d_present()`
@@ -34,21 +86,21 @@ separately.
 **The four modes are one engine with parts switched off** (11.3.11).
 Register-to-memory writes one colour and fetches nothing.
 Memory-to-memory fetches through the foreground FIFO as a plain buffer
-with NO conversion - the format field says only how wide a pixel is,
+with no conversion - the format field says only how wide a pixel is,
 and the output's format is not consulted at all, which is why the
 driver refuses a pair whose widths differ rather than writing a
 rectangle of nonsense. Memory-to-memory with the pixel format converter
 runs the foreground through its converter. The blending mode fetches
 both sources, converts each and mixes them.
 
-**The offsets are in PIXELS and the addresses are BYTES.** FGOR, BGOR
+**The offsets are in pixels and the addresses are bytes.** FGOR, BGOR
 and OOR count pixels of their own format (11.5.5), added at the end of
 every line; FGMAR, BGMAR and OMAR are byte addresses that must be
 aligned to the format's own width - four bytes for a 32-bit format, two
 for a 16-bit one, one for the rest, which is 11.5.4's sentence with the
 24-bit format (three bytes, no wider alignment than one) filled in.
 
-**The silicon checks the configuration and answers with a FLAG, not a
+**The silicon checks the configuration and answers with a flag, not a
 refusal.** 11.3.11 lists a dozen ways to be wrong - a misaligned
 address, a colour mode that is not one of the codes, an odd pixel count
 or an odd line offset with a 4-bit format, a zero in either field of
@@ -63,7 +115,7 @@ cleared by hardware at the end, on an abort, on an error and on a
 configuration error; FGPFCCR.START and BGPFCCR.START are the same bit
 for the two automatic colour-table loads, and 11.3.11 says a table load
 cannot run beside a data transfer. An abort stops the transfer and does
-NOT raise the transfer-complete flag; a suspend stops it where it is
+not raise the transfer-complete flag; a suspend stops it where it is
 and either resumes or is abandoned.
 
 **The colour tables are two 256-word memories, filled two ways.** The
@@ -321,5 +373,9 @@ Implemented but not bench-verified:
   ARGB8888 tables only.
 - **The parts with the accelerator other than the one on this desk** -
   the family fixture compiles the whole driver on each of them; the
-  32F469IDISCOVERY carries one, and the suite that exercises it is the
-  display suite, bound to the DISC1's panel and its memory.
+  32F469IDISCOVERY carries one, and the suite that exercises it here is
+  the display suite, bound to the DISC1's panel and its memory. On the
+  32F469IDISCOVERY the accelerator's fills paint the bars of
+  `test_stm32f4_dsi`, read back out of the panel's memory
+  ([dsi.md](dsi.md)); the letters above (the four modes, the alpha
+  modes, the colour tables, the bandwidth) run on the DISC1 alone.

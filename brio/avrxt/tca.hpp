@@ -3,23 +3,32 @@
  *
  * The 16-bit timer/counter type A (TCA) of the AVR DA/DB (DS40002247B
  * ch. 23) and of the AVR EA (DS40002443A ch. 22, the same IP word for
- * word; its route table differs) in two strata, as docs/avrxt/tca.md
+ * word; its route table differs): what a program uses for PWM on up to
+ * six pins, a square wave of a chosen frequency, a period with pulses at
+ * fixed points inside it, or a 16-bit count of events. The header has
+ * the two strata of every brio peripheral header, as docs/avrxt/tca.md
  * describes:
  *
- *  RESOURCE - Tca<n>: the typed view of one instance in NORMAL mode
+ *  the resource - Tca<n>: the typed view of one instance in normal mode
  *  (16-bit counter, PER, three buffered compare channels, the waveform
  *  modes, the two event inputs, the commands) - a config struct owns
  *  the configuration, init<cfg>() folds it, init(cfg) computes it; the
  *  verbs: count/period/compare (direct and buffered), the flags, the
- *  interrupt enables, the ISR bodies (one vector PER flag: ovf(),
+ *  interrupt enables, the interrupt bodies (one vector per flag: ovf(),
  *  cmp<ch>()), restart/update/reset, direction, the event hooks
  *  event_a_on / event_b_on over evsys.hpp. The split view (two 8-bit
  *  timers) is reached through split(): the TcaPwm task lives there.
  *
- *  TASKS - what an application names:
+ *  the tasks - what an application names (a task is a driver layer with
+ *  state of its own over the resource; the tasks, like the resource, are
+ *  monostates: classes whose state is static, with no instances):
  *    TcaPwm<n, port>              split mode: six 8-bit PWM channels
  *    TcaPwm16<n, port, steps>     single-slope: three 16-bit PWM channels
  *                                 (buffered, clean endpoints), one period
+ *    TcaPwmCentered<n, port, steps>
+ *                                 dual-slope: three 16-bit centre-aligned
+ *                                 PWM channels of one period, the OVF
+ *                                 event at a chosen instant of it
  *    FrequencyGenerator<n, port>  FRQ: a square wave of a frequency on WO0
  *                                 (ClockUser)
  *    Heartbeat<n, port>           a period at a rate: OVF interrupt/event
@@ -28,7 +37,65 @@
  *                                 (ClockUser)
  *    EventCounter<n>              count events on input A (16 bits), with
  *                                 direction from input B if wanted
- *  A task owns its instance.
+ *  A task owns its instance: nothing checks that two tasks are not
+ *  started on one Tca<n>, and the second init() resets the instance
+ *  under the first.
+ *
+ * The smallest use, six LED channels on PC0..PC5:
+ *
+ *   using SysClock = brio::Clock<brio::ClockSource::crystal, 24'000'000>;
+ *   using Bar = brio::TcaPwm<0, 'C'>;      // TCA0 -> PC0..PC5
+ *
+ *   int main() {
+ *       SysClock::init();                  // CLK_PER = 24 MHz
+ *       Bar::init();                       // split mode, div16: 5859 Hz, all six dark
+ *       Bar::duty<2>(64);                  // PC2 high for 64 counts of every 256
+ *       ...
+ *   }
+ *
+ * TcaPwm::init() takes no clock: its frequency is CLK_PER / 16 / 256 at
+ * whatever rate CLK_PER runs, so the clock task comes first, and it
+ * enables no interrupt. The tasks that take the clock tag (`constexpr
+ * SysClock clock;`) - FrequencyGenerator and Heartbeat - compute their
+ * divisors from the rate the clock type claims, and a DynamicClock that
+ * does not list them is a compile error at their init(). A task that
+ * enables an interrupt (Heartbeat, by default) needs its vector bound by
+ * the program: `ISR(TCA0_OVF_vect) { Beat::beat(); }` for a
+ * `using Beat = brio::Heartbeat<0, 'D'>;`.
+ *
+ * Which context may call what. Nothing here waits, nothing masks
+ * interrupts, nothing holds a caller's buffer.
+ *  - The configuring verbs - init(), init<cfg>(), the tasks' init(),
+ *    reset(), route(), clock(), enable()/disable(), output<ch>(),
+ *    output_value<ch>(), the interrupt enables, event_a_on/event_b_on,
+ *    EventCounter::direction_on() - are setup verbs: main(), after the
+ *    clock task and before sei(), or an active object's handler (an
+ *    active object is a component of a brio program with its own event
+ *    queue, served one event at a time by the kernel, so its handlers
+ *    never overlap). Most of them read-modify-write a register with no
+ *    set/clear twin (CTRLA, CTRLB, CTRLC, INTCTRL, EVCTRL, and
+ *    PORTMUX.TCAROUTEA, which holds both instances' fields), so two
+ *    contexts racing on one of them can lose a field: never call them
+ *    from an interrupt handler that may interrupt another such call.
+ *  - The interrupt bodies - ovf(), cmp<ch>(), lunf(), hunf(), lcmp<ch>(),
+ *    Heartbeat::beat(), EventCounter::ovf() - are called from the
+ *    program's ISR() for that vector and nowhere else; each is one store
+ *    that clears its flag.
+ *  - The flag verbs, the commands through CTRLESET/CTRLECLR (restart(),
+ *    update(), direction_down(), lock_update()) and the 8-bit reads are
+ *    single loads or stores, legal from any context. The 16-bit accesses
+ *    - count(), period(), compare<ch>(), their buffered writes, and
+ *    through them TcaPwm16::duty(), TcaPwmCentered::duty(),
+ *    FrequencyGenerator::set_hz(), Heartbeat::pulse_us() - pass through
+ *    the instance's one TEMP register (23.5.13): a main-context access
+ *    racing an interrupt handler's 16-bit access of the same instance
+ *    corrupts both, so such an access belongs in a critical section
+ *    (AvrPlatform::CriticalSection, avrxt/platform.hpp) or in the
+ *    handler alone. TcaPwm::duty() and TcaPwmCentered::duty() also
+ *    read-modify-write CTRLB, and FrequencyGenerator::set_hz() CTRLA:
+ *    one context per instance.
+ *  - rebase() is called by the DynamicClock that lists the task, from
+ *    its set().
  *
  * Facts that shape the code (23.3, 23.5, errata DS80000915F 2.12.1 and,
  * for the DA parts, DS80000882C 2.11.1/2.11.2):
@@ -42,7 +109,7 @@
  *    is written - a multi-register change lands in one period;
  *  - single-slope: WOn set at BOTTOM, cleared at the match; CMP = 0 is a
  *    static low, CMP > PER a static high (clean endpoints in NORMAL mode
- *    - in split mode CMP > TOP is LOW, hence TcaPwm's PORT endpoints);
+ *    - in split mode CMP > TOP is low, hence TcaPwm's PORT endpoints);
  *    dual-slope: up then down, OVF at TOP / both / BOTTOM by mode;
  *    FRQ: WOn toggles at each CMPn match, period in CMP0: f = CLK_PER
  *    / (2 N (CMP0 + 1)), at most CLK_PER / 2;
@@ -66,8 +133,10 @@
  *    exactly this package's codes and tca_route() mirrors it - less
  *    TCA1's PORTE and PORTG on a DA, whose header defines them but whose
  *    silicon does not route them on any revision (DS80000882C 2.11.1,
- *    no workaround: refused here). WOn drives the pin only if CMPnEN and
- *    the pin is an output (PORT INVEN inverts it).
+ *    no workaround: refused here), and less TCA1's PORTB on the 28/32-pin
+ *    AVR EA, whose header keeps that code as "not connected to any pins".
+ *    WOn drives the pin only if CMPnEN and the pin is an output (PORT
+ *    INVEN inverts it).
  */
 
 #pragma once
@@ -157,7 +226,7 @@ struct TcaConfig {
 };
 
 /// PORTMUX code for "TCA n to port p", or route_absent (0xFF) when that
-/// route does not exist on THIS package - the device header is the
+/// route does not exist on this package - the device header is the
 /// authority (it defines exactly the codes each package routes: TCA0 ->
 /// PORTG and TCA1 -> PORTE/PORTG on 64-pin parts only, no PORTB/PORTE
 /// codes at all on 28/32-pin parts, TCA1 -> PORTA/PORTD on the AVR EA
@@ -224,7 +293,7 @@ constexpr uint8_t tca_route_code(uint8_t n, char p) {
 /// on TCA1's three-channel routes, WO0..2 on pins 4..6 - PORTC and PORTE
 /// on the AVR DA/DB, PORTA, PORTC and PORTD on the AVR EA (DS40002443A
 /// 17.3.7). Every other route carries six channels on pins 0..5. The
-/// route's SHAPE is this one expression (written out here rather than
+/// route's shape is this one expression (written out here rather than
 /// through a helper: it sits on Tca::init's run-time path, where a call
 /// layer changes what the compiler inlines); meaningful for a route that
 /// exists (tca_route_code).
@@ -234,7 +303,7 @@ constexpr uint8_t tca_wo_pin(uint8_t n, char p, uint8_t wo) {
                ? static_cast<uint8_t>(4 + wo) : wo;
 }
 
-/// One TCA route on THIS package, read whole from the table above
+/// One TCA route on this package, read whole from the table above
 /// (tca_route_code, tca_wo_pin): its code (route_absent where the package
 /// has not got it), the pin WO0 sits on, and how many waveform outputs it
 /// carries (0 for an absent route) - what the tasks' compile-time checks
@@ -347,11 +416,13 @@ public:
         t.CTRLA = static_cast<uint8_t>((t.CTRLA & ~TCA_SINGLE_CLKSEL_gm) | static_cast<uint8_t>(c));
     }
 
-    /// PORTMUX: move the WO group to port p (no check: init() checks).
+    /// Split view's INTCTRL: set or clear the interrupt-enable bits in
+    /// `bit` (a read-modify-write; the enable_lunf/hunf/lcmp verbs below).
     static void split_irq(uint8_t bit, bool on) {
         if (on) split().INTCTRL |= bit; else split().INTCTRL &= static_cast<uint8_t>(~bit);
     }
 
+    /// PORTMUX: move the WO group to port p (no check: init() checks).
     static void route(char p) {
         constexpr uint8_t mask = tca_route_gm(n);
         PORTMUX.TCAROUTEA = static_cast<uint8_t>(
@@ -359,7 +430,7 @@ public:
     }
 
     /// Disable + hard reset: the way into split mode (TcaPwm) or back.
-    /// The command goes through the SPLIT view with CMDEN = both: in
+    /// The command goes through the split view with CMDEN = both: in
     /// split mode a RESET without CMDEN is silently ignored (23.7.6),
     /// and the CMDEN bits are don't-care in normal mode - one write
     /// works from either side.
@@ -395,7 +466,7 @@ public:
         if (on) single().CTRLB |= bit; else single().CTRLB &= static_cast<uint8_t>(~bit);
     }
 
-    /// CTRLC: WOn's output VALUE - readable any time, writable only
+    /// CTRLC: WOn's output value - readable any time, writable only
     /// while the timer is disabled (23.5.3): the one handle to park a
     /// waveform pin high or low between runs. Toward the CCL the
     /// output bypasses CMPnEN: a parked value feeds a LUT too. The
@@ -414,8 +485,9 @@ public:
 
     // ---- commands, direction ----------------------------------------------
 
-    /// CNT = 0, all WO low, the period restarts (2.12.1: DIR back to up on
-    /// the DB's A4/A5 and every DA; kept on the AVR EA).
+    /// CNT = 0, all WO low, the period restarts (DIR back to up on the
+    /// DB's A4/A5, DS80000915F 2.12.1, and on every DA, DS80000882C
+    /// 2.11.2; kept on the AVR EA).
     static void restart() { single().CTRLESET = TCA_SINGLE_CMD_RESTART_gc; }
     /// Force the buffer copy now (ignores LUPD).
     static void update() { single().CTRLESET = TCA_SINGLE_CMD_UPDATE_gc; }
@@ -487,7 +559,7 @@ public:
 
     // ---- events -----------------------------------------------------------
 
-    /// Event input A / B from channel ch; the ACTION is in the config.
+    /// Event input A / B from channel ch; the action is in the config.
     template <uint8_t ch>
     static void event_a_on(EventChannel<ch> c) { EventA::listen(c); }
     template <uint8_t ch>
@@ -562,7 +634,7 @@ constexpr uint64_t tca_period_ticks(uint32_t clk_per_hz, uint32_t hz) {
     return hz ? (static_cast<uint64_t>(clk_per_hz) + hz / 2) / hz : 0;
 }
 
-/// TcaPwm<n, port>: TCA n in SPLIT mode as six independent 8-bit PWM
+/// TcaPwm<n, port>: TCA n in split mode as six independent 8-bit PWM
 /// channels, WO0..WO5 on pins 0..5 of one port. Both halves in single-
 /// slope PWM with PER = 255, one shared prescaler: f = CLK_PER / N / 256
 /// (24 MHz, div16 -> ~5.9 kHz: no flicker, no whine). The compare
@@ -571,13 +643,13 @@ constexpr uint64_t tca_period_ticks(uint32_t clk_per_hz, uint32_t hz) {
 /// 255 disable the channel's waveform and drive the pin from PORT.OUT -
 /// DxCore's policy. Active-high (common-cathode LED); Pin::invert(true)
 /// for active-low loads. Six channels or nothing: the partial routes
-/// (TCA1 on PORTC) are not offered. Not a ClockUser: the frequency
-/// follows CLK_PER and a LED does not care - an app that does can call
-/// clock() itself. Channel<ch> is the PwmChannel type (max 255) that
-/// generic actuators (RgbLamp) take.
+/// (TCA1's three-channel ones, on PORTC among others) are not offered.
+/// Not a ClockUser: the frequency follows CLK_PER and a LED does not
+/// care - an app that does can call clock() itself. Channel<ch> is the
+/// PwmChannel type (max 255) that generic actuators (RgbLamp) take.
 ///
 ///   using Bar = brio::TcaPwm<0, 'C'>;   // TCA0 -> PC0..PC5
-///   Bar::init();                       // split mode, div16, all six on
+///   Bar::init();                       // split mode, div16, all six dark
 ///   Bar::duty<2>(64);                  // PC2 at 25 %
 template <uint8_t n, char PortLetter>
 class TcaPwm {
@@ -594,8 +666,10 @@ public:
     static constexpr uint8_t channels = 6;
 
     /// Route the timer to the port, enter split mode with PER = 255 on
-    /// both halves, all six compare outputs enabled at duty 0, pins as
-    /// outputs driven low, counter running from the chosen prescaler.
+    /// both halves, all six channels at duty 0 (compare outputs off,
+    /// CTRLB = 0, so PORT drives the pins), pins as outputs driven low,
+    /// counter running from the chosen prescaler. Setup context; no
+    /// interrupt enabled.
     static void init(TcaClock clock = TcaClock::div16) {
         R::reset();                                     // known state (also clears CTRLD)
         R::route(PortLetter);
@@ -618,6 +692,8 @@ public:
 
     /// Set channel ch (WO0..WO5 = pin 0..5) to value/256 duty.
     /// 0 and 255 leave the waveform and drive the pin from PORT.OUT.
+    /// A read-modify-write of CTRLB and one store: one context per
+    /// instance.
     template <uint8_t ch>
     static void duty(uint8_t value) {
         static_assert(ch < channels, "TCA split mode has six channels, WO0..WO5");
@@ -662,7 +738,7 @@ private:
 /// TcaPwm16<n, port, steps>: three 16-bit PWM channels (WO0..2) of a
 /// shared period of `steps` ticks (PER = steps - 1, f = CLK_PER / N /
 /// steps, resolution log2(steps) bits) in single-slope mode, duty
-/// written BUFFERED (lands at BOTTOM: glitch-free) with the hardware's
+/// written buffered (lands at BOTTOM: glitch-free) with the hardware's
 /// clean endpoints: 0 = static low, steps = static high (CMP > TOP).
 /// Channel<ch> is a PwmChannel with max = steps. Not a ClockUser (as
 /// TcaPwm). A servo at 50 Hz: steps 60000 at div8 from 24 MHz.
@@ -699,7 +775,7 @@ public:
     static_assert(PwmChannel<Channel<0>>);
 };
 
-/// TcaPwmCentered<n, port, steps>: three 16-bit CENTER-ALIGNED PWM
+/// TcaPwmCentered<n, port, steps>: three 16-bit center-aligned PWM
 /// channels (WO0..2) in dual-slope mode. The counter runs 0 -> steps
 /// -> 0; WOn is set at the match while counting down and cleared at
 /// the match while counting up, so the pulse is symmetric around
@@ -711,10 +787,10 @@ public:
 /// quiet instants, made to pace an ADC with no CPU (EvTcaOvf ->
 /// EvAdc0Start: the AnalogSampler's hardware pace measuring a
 /// PWM-driven load away from its switching edges). Duty writes are
-/// BUFFERED (land at BOTTOM, glitch-free); the endpoints leave the
+/// buffered (land at BOTTOM, glitch-free); the endpoints leave the
 /// waveform and drive the pin from PORT, like TcaPwm. Only channels
 /// in init's `outputs` mask have their pins driven. Ratiometric -
-/// NOT a ClockUser: the duty survives a clock change, the frequency
+/// not a ClockUser: the duty survives a clock change, the frequency
 /// follows CLK_PER. Works on TCA1's three-channel routes too (WO0..2
 /// on pins 4..6).
 template <uint8_t n, char PortLetter, uint16_t steps = 0xFFFF>
@@ -841,8 +917,8 @@ private:
 
 /// Heartbeat<n, port>: a period at a rate with an OVF interrupt/event at
 /// each start, plus up to three pulses (WO0..2, single-slope: high
-/// from BOTTOM for pulse<ch>(ticks) ticks) that mark moments inside
-/// the period - the shape of a synchronized sequence (fire a one-shot
+/// from BOTTOM for the width pulse_us<ch>(us) sets) that mark moments
+/// inside the period - the shape of a synchronized sequence (fire a one-shot
 /// here, sample there, the OVF event clocks the rest). A ClockUser:
 /// rebase() keeps the rate; the pulses are re-derived from their
 /// microseconds. ISR body: beat() clears OVF.
@@ -912,7 +988,8 @@ private:
 /// EventCounter<n>: the TCA counting events on input A - positive
 /// edges by default (any edge, or the clock while high, as options) -
 /// 16 bits, 0..65535 then OVF (overflowed() reads and clears it). With
-/// direction_on(channel) input B's LEVEL sets the direction (down while
+/// direction_on(channel) input B's level sets the direction (down while
+
 /// high): an up/down counter, the shape of a quadrature decode with a
 /// CCL deriving direction (AN2434). ISR body: ovf() on wrap.
 template <uint8_t n>

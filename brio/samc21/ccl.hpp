@@ -4,10 +4,38 @@
  * The SAM C21 Configurable Custom Logic (DS60001479M ch. 37): four
  * three-input look-up tables, each with an optional synchronizer or
  * filter and an optional edge detector, and two sequential sub-modules
- * that turn a LUT PAIR into a flip-flop or a latch. Glue logic with no
+ * that turn a LUT pair into a flip-flop or a latch. Glue logic with no
  * CPU in it, and - unlike almost everything else in this stratum -
- * with NO INTERRUPT AND NO DMA (37.5.4 and 37.5.5 are both "Not
- * applicable"), so the only ways out are a pad and an event.
+ * with no interrupt and no DMA (37.5.4 and 37.5.5 are both "Not
+ * applicable"), so the only ways out are a pad and an event. The
+ * smallest use, an exclusive OR of two pads on a third
+ * (docs/samc21/ccl.md, "How to use it"):
+ *
+ *     using A = brio::CclIn<brio::Pin<'A', 16>>;    // CCL0/IN[0]
+ *     using B = brio::CclIn<brio::Pin<'A', 17>>;    // CCL0/IN[1]
+ *     using Y = brio::CclOut<brio::Pin<'A', 19>>;   // CCL0/OUT[0]
+ *     brio::Ccl::init();                            // no generic clock needed
+ *     A::claim(); B::claim(); Y::claim();
+ *     brio::Lut<0>::configure({.in0 = brio::LutInput::io,
+ *                              .in1 = brio::LutInput::io,
+ *                              .truth = brio::lut_truth(
+ *                                  [](bool a, bool b, bool) { return a != b; })});
+ *     brio::Ccl::enable(true);
+ *
+ * Who calls what. The verbs here are setup verbs, for main() or an
+ * active object's handler (an active object is a brio component with
+ * its own event queue, served one event at a time by the kernel), bar
+ * the readbacks (CclOut::read(), config(), enabled()), which are single
+ * loads; none masks interrupts. init() waits only for the generic clock
+ * channel, bounded (0xFFFF polls), and answers false when that runs
+ * out; the configuring verbs (configure(), truth(), the sequencer
+ * selector, run_standby()) answer false and write nothing while the
+ * block is enabled (below), so the program configures first and enables
+ * last; Lut<n>::enable() alone works on a running block. There is no
+ * interrupt body: the block has no vector.
+ * A filter, a synchronizer, an edge detector, an event input or a
+ * sequencer needs init(generator) with a generator that runs; a purely
+ * combinational LUT needs none.
  *
  * The file has three faces:
  *
@@ -20,25 +48,25 @@
  *   CclIn<Pin> / CclOut<Pin>
  *              the pads, from the reserve's own map.
  *
- * FOUR SHAPES OF THIS BLOCK THAT ARE EASY TO GUESS WRONG:
- *  - there is ONE generic clock for the whole block, not a per-LUT
+ * Four shapes of this block that are easy to guess wrong:
+ *  - there is one generic clock for the whole block, not a per-LUT
  *    clock selector: slowing a filter down slows every filter down;
- *  - a LUT has ONE event input line (LUTEI + INSEL = EVENT), and the
+ *  - a LUT has one event input line (LUTEI + INSEL = EVENT), and the
  *    CCL's own edge detector turns that event into a one-GCLK strobe;
- *  - the input menu is per-LUT and not per-INPUT: the whole LUT n sees
+ *  - the input menu is per-LUT and not per-input: the whole LUT n sees
  *    instance n (AC gives CMP[n], TC gives TC[n], TCC gives TCC[n % 3],
- *    SERCOM gives SERCOM[n]) with the ONE exception that TCC hands
+ *    SERCOM gives SERCOM[n]) with the one exception that TCC hands
  *    WO[0], WO[1] and WO[2] to inputs 0, 1 and 2;
  *  - there is no interrupt at all.
  *
- * THE ENABLE-PROTECTION STORY, WHICH IS WHY EVERY CONFIGURING VERB HERE
- * REFUSES WHILE THE BLOCK IS ENABLED. Three documents give three
+ * The enable-protection story, which is why every configuring verb here
+ * refuses while the block is enabled. Three documents give three
  * answers:
- *   37.6.2.1  SEQCTRLx.SEQSEL is protected by the EVEN LUT's ENABLE,
+ *   37.6.2.1  SEQCTRLx.SEQSEL is protected by the even LUT's ENABLE,
  *             and LUTCTRLx (bar its own ENABLE bit) by that LUT's;
  *   37.8.2    "SEQCTRL register is Enable Protected when
  *             CCL.CTRL.ENABLE = 1";
- *   errata 1.7.3, EVERY REVISION OF E/G/J: "the SEQCTRLx and LUCTRLx
+ *   errata 1.7.3, every revision of E/G/J: "the SEQCTRLx and LUCTRLx
  *             registers are enable-protected by the CTRL.ENABLE bit,
  *             whereas they must be enable-protected by the
  *             LUTCTRLx.ENABLE bits."
@@ -54,26 +82,26 @@
  * Reconfiguring one LUT therefore drops every other LUT's output for
  * the duration. That is the silicon's design, not this driver's.
  *
- * ERRATA, silicon rev F (E/G/J row - never the N row):
+ * Errata, silicon rev F (E/G/J row - never the N row):
  *  - 1.7.1 RS Latch Reset (the latch clears only by disabling the LUT):
- *    REVISION B ONLY. Not coded around, and the bench checks that the
+ *    revision B only. Not coded around, and the bench checks that the
  *    reset really works here.
- *  - 1.7.2 Sequential Logic, EVERY REVISION: after an even LUT has been
+ *  - 1.7.2 Sequential Logic, every revision: after an even LUT has been
  *    disabled to clear its flip-flop and enabled again, the sequential
- *    logic STAYS UNDER RESET until CTRL.ENABLE is written again. The
- *    workaround is code here: Lut<n>::enable(true) on an EVEN LUT
+ *    logic stays under reset until CTRL.ENABLE is written again. The
+ *    workaround is code here: Lut<n>::enable(true) on an even LUT
  *    re-states CTRL.ENABLE, and `Ccl::restate_enable()` is the verb by
  *    name for a caller that drove the bit itself.
- *  - 1.7.3 Enable Protected Registers, EVERY REVISION: see above.
- *  - 1.7.4 PAC Protection Error, EVERY REVISION: writing CTRL.SWRST is
+ *  - 1.7.3 Enable Protected Registers, every revision: see above.
+ *  - 1.7.4 PAC Protection Error, every revision: writing CTRL.SWRST is
  *    said to trigger a PAC protection error. There is no workaround and
  *    no alternative to a software reset, so `reset()` writes it anyway
  *    and says so; `Ccl::pac_id` is the number samc21/pac.hpp needs.
  *  - 1.8.3 TC Selection (the default TC input is TC4 and not TC0):
- *    REVISION B ONLY, and the bench confirms the documented mapping on
+ *    revision B only, and the bench confirms the documented mapping on
  *    this one rather than trusting the row.
  *
- * NOT ON THIS FAMILY (37.8.3): INSEL's ALT2TC (0xA) and ASYNCEVENT
+ * Not on this family (37.8.3): INSEL's ALT2TC (0xA) and ASYNCEVENT
  * (0xB) exist only on the C20/C21 N variants. The enum carries them so
  * the vocabulary is the chapter's whole option space, and
  * `ccl_lut_config_valid()` refuses them wherever the device header does
@@ -407,6 +435,8 @@ public:
     /// event, a filter, an edge detector or a sequencer is in use.
     static constexpr uint8_t no_clock = 0xFFu;
 
+    /// A setup verb; false only when the generic clock channel did not
+    /// go quiet within `spins` (GclkChannel::connect()).
     static bool init(uint8_t generator = no_clock, uint32_t spins = 0xFFFFu) {
         bus_clock(true);
         if (generator != no_clock && !clock(generator, spins)) {

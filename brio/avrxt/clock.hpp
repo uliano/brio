@@ -1,14 +1,44 @@
 /*
  * clock.hpp
  *
- * The clock controller (CLKCTRL) of the AVR DA/DB (DS40002247B ch. 12)
- * and of the AVR EA (DS40002443A ch. 12) in two strata, as
- * docs/avrxt/clkctrl.md describes:
+ * The clock of a program on an AVR DA, DB or EA: what sets the rate the
+ * CPU and the peripherals run at (CLK_PER, the same rate as CLK_CPU on
+ * these parts), and the one number every clocked driver of this stratum
+ * computes its divisors from. A program names its clock once, as a type;
+ * calls that type's init() as the first line of main(); and hands the
+ * type's empty tag object to every driver's init, which reads the rate
+ * from the type - never from the hardware, never from F_CPU:
  *
- *  RESOURCES - one monostate per block of the controller, each a thin
- *  typed view of its registers (CCP-protected writes, status bits):
+ *     using SysClock = brio::Clock<brio::ClockSource::crystal, 24'000'000>;
+ *     constexpr SysClock clock;          // the tag a driver's init(clock) takes
+ *
+ *     int main() {
+ *         SysClock::init();              // first: CLK_PER = 24 MHz, the PA0/PA1 crystal
+ *         ...                            // each driver's init(clock), then sei()
+ *     }
+ *
+ * SysClock::hz is the constant 24'000'000 whether or not init() has run;
+ * init() is what makes it true. It returns true when the requested
+ * source runs, and false when that source did not start and the
+ * fallback runs instead: OSCHF at the same CLK_PER for a high-frequency
+ * source, so hz stays true to OSCHF's accuracy; OSC32K for the 32 kHz
+ * crystal. For ClockSource::osc32k, false means the switch to OSC32K did
+ * not complete in its bounded wait. On the AVR EA a false can also mean that the OSCCFG fuse does
+ * not run OSCHF at the rate the type claims; then init() writes nothing,
+ * the part stays at its reset clock and hz is not true (Clock::init
+ * below).
+ *
+ * The chapter is the clock controller, CLKCTRL, of the AVR DB
+ * (DS40002247B ch. 12), the AVR DA (DS40002183A ch. 11) and the AVR EA
+ * (DS40002443A ch. 12), in two strata (docs/avrxt/clkctrl.md is the
+ * document, docs/design/clock.md the model of one rate truth):
+ *
+ *  the resources - one monostate (a class whose state is static, with no
+ *  instances) per block of the controller, each a thin typed view of its
+ *  registers (the control registers written through CCP, the status
+ *  bits read):
  *    Oschf        internal HF oscillator: on the DA/DB 1/2/3/4/8/12/16/
- *                 20/24 MHz by FRQSEL, on the EA ONE rate the OSCCFG fuse
+ *                 20/24 MHz by FRQSEL, on the EA one rate the OSCCFG fuse
  *                 chose (16 or 20 MHz, no register field); RUNSTDBY,
  *                 manual tune (-32..+31 steps of ~0.4 % on the DB, 0.2 %
  *                 typical on the EA), auto-tune against a 32.768 kHz crystal
@@ -27,29 +57,65 @@
  *    ClockTimebase  MCLKTIMEBASE, CLK_PER cycles per microsecond rounded
  *                 up (EA): the time base the ADC and the TWI's bus
  *                 time-out count in, owned by the clock and written by
- *                 every Clock init and every DynamicClock switch
+ *                 every Clock init that passes the fuse check and every
+ *                 DynamicClock switch
  *    ClockFailure the clock failure detector: source, interrupt (normal
  *                 or NMI), test bit, flag, ISR body (DB and EA)
  *
- *  TASKS - what an application names:
- *    Clock<source, source_hz, div>   the static main clock: ONE constexpr
- *                 truth `hz` every driver derives from; init() composes the
- *                 resources and reports whether the requested source runs
+ *  the tasks - what an application names:
+ *    Clock<source, source_hz, div, oschf_hz>   the static main clock: one
+ *                 constexpr truth `hz` every driver derives from; init()
+ *                 composes the resources and reports whether the
+ *                 requested source runs
  *    DynamicClock<Boot, Users...>    the runtime regime: set<hz>()/set(hz)
  *                 move the prescaler and rebase the listed users first
  *                 (docs/design/clock.md)
+ *
+ * Who calls what, and from where.
+ *  - Clock::init() (and DynamicClock::init(), which runs Boot's) is
+ *    setup: the first line of main(), before every driver's init(clock)
+ *    and before sei(). Nothing checks that order: a driver initialized
+ *    first computes its divisors for hz while the part still runs at its
+ *    reset clock (OSCHF at 4 MHz on the DA/DB, the fuse's rate over 6 on
+ *    the EA), so it runs at the ratio of the two rates until init()
+ *    brings CLK_PER to hz, and at the right rate from then on (its
+ *    divisor was computed for hz). init() masks nothing itself; each protected write holds
+ *    interrupts off for the four instructions after the CCP key, which
+ *    the hardware does (DS40002247B 7.4.6, DS40002443A 7.4.6). Its waits
+ *    are bounded polls: OSCHF's status and each source switch (0xFFFF
+ *    polls), XOSCHF's start-up for a crystal or a clock
+ *    (Xoschf::wait_stable(), 0xFFFF polls), on the DA the external clock
+ *    asked of TCD0 (extclk_seen() below), and for the 32 kHz crystal
+ *    Xosc32k::wait_stable()'s 0x00FFFFFF polls. None hangs; an external
+ *    source's wait that runs out is the false above, while the answer of
+ *    the wait for OSCHF itself is not looked at.
+ *  - DynamicClock::set<hz>() and set(hz) belong to the main context -
+ *    main(), or the handler of an active object (a component of a brio
+ *    program with its own event queue, served one event at a time by the
+ *    kernel) - never to an interrupt handler: each listed user's
+ *    rebase() runs first and may wait (a Uart's waits, with no bound,
+ *    until its transmit side is idle, avrxt/usart.hpp).
+ *  - hz, hz(), rate_index() and matches_fuse() read a constant, a
+ *    variable or a fuse: any context.
+ *  - The resources' verbs are setup verbs with no guard of their own;
+ *    several read, modify and write a register (Oschf::run_standby(),
+ *    autotune(), Xosc32k::force_on(), MainClock::select(), clkout(),
+ *    ClockFailure::test()), so they belong to one context at a time.
+ *    ClockFailure::cfd() is an interrupt body: the program's
+ *    ISR(CLKCTRL_CFD_vect) (or its NMI handler) calls it and nothing else
+ *    does. Nothing here owns a buffer.
  *
  * Facts that shape the code on the DA/DB (12.3, 39.10, errata
  * DS80000915F 2.5.x):
  *  - after any reset the device runs from OSCHF at 4 MHz (or OSC32K,
  *    per the OSCCFG fuse); every CTRL register is CCP-protected
  *    (_PROTECTED_WRITE); CLK_MAIN max 24 MHz at any VDD (1.8-5.5 V);
- *  - internal sources start when requested; crystals must be ENABLED
+ *  - internal sources start when requested; crystals must be enabled
  *    and take their start-up time (XOSCHF 256/1k/4k cycles, XOSC32K 1k..
  *    64k cycles = 300 ms typ., 1 s in low-power mode); an external
  *    source that never toggles leaves a pending switch that only a
  *    reset clears - so the source is started and its status waited for
- *    BEFORE it is selected;
+ *    before it is selected;
  *  - RUNSTDBY keeps an oscillator running in standby (and removes its
  *    start-up time from a later request); on rev A4 it does not work
  *    for external sources (2.5.2) and EXTS is not set for EXTCLK +
@@ -61,21 +127,22 @@
  *    temperature, 1-3 MHz +-6..10 %; OSC32K +-10 %. The manual tune is
  *    not 0.4 %/step across its range (bench, A5, at 16 MHz: -32 steps =
  *    -8.8 %, +31 steps = +12.4 %: ~0.28 %/step down, 0.4 %/step up);
- *  - MCLKSTATUS follows the REQUEST: OSCHFS reads 0 while OSCHF is not
+ *  - MCLKSTATUS follows the request: OSCHFS reads 0 while OSCHF is not
  *    the main clock and nobody asks for it, RUNSTDBY notwithstanding
  *    (bench); a CFD fallback really resets OSCHF to 4 MHz (FRQSEL 0x3)
  *    and its interrupt re-fires every 10 OSC32K cycles (305 us, bench).
  *
  * And on the EA (DS40002443A 12.3, 8.8.2.3, 35.10; DS80001048D has no
  * CLKCTRL item):
- *  - after any reset CLK_MAIN is OSCHF at the FUSE's rate behind the
+ *  - after any reset CLK_MAIN is OSCHF at the fuse's rate behind the
  *    prescaler at /6 (12.3.3; MCLKCTRLB resets to 0x11): 3.33 MHz from a
  *    20 MHz fuse. The CPU reads FUSE.OSCCFG and cannot write it; the
  *    Clock type names the rate as a claim and init() checks it against
  *    the fuse with one read (matches_fuse());
  *  - CLK_MAIN max 20 MHz, and only from VDD 4.5 V (35.10.5): the type
  *    asserts the 20 MHz, the supply rows are the reader's (clkctrl.md);
- *  - OSCHFCTRLA resets to 0x0C with bits 3:2 undocumented (12.5.8): it is
+ *  - OSCHFCTRLA resets to 0x0C with bits 3:2 undocumented (12.5.8; the
+ *    bench AVR64EA48 reads 0x00 at reset, docs/avrxt/clkctrl.md): it is
  *    only ever read-modify-written here, never written whole;
  *  - MCLKTIMEBASE (12.3.6, 12.5.7, not under CCP) must cover at least one
  *    microsecond of CLK_PER - too small makes the ADC's and the TWI's
@@ -84,7 +151,10 @@
  *
  * The RTC's own clock (CLK_RTC: OSC32K or XOSC32K) is selected by the
  * RTC driver (Ticker); CLKCTRL only provides the oscillators - start
- * Xosc32k here before Ticker::init() when a 32k crystal is fitted.
+ * Xosc32k here before Ticker::init() when a 32k crystal is fitted,
+ * forced on (start_crystal()'s run_standby true) and past
+ * Xosc32k::wait_stable(): a crystal nothing requests reads as not
+ * running otherwise, and Ticker::init() takes OSC32K in its place.
  */
 
 #pragma once
@@ -114,7 +184,7 @@ inline bool clkctrl_wait(uint8_t mask, uint32_t spins) {
 
 #if !defined(CLKCTRL_XOSCHFCTRLA)
 /// DA: whether a clock arrives on PA0 (EXTCLK), asked without committing
-/// the main clock. EXTS is set only while EXTCLK is REQUESTED (DS40002183A
+/// the main clock. EXTS is set only while EXTCLK is requested (DS40002183A
 /// 11.3.3.2.2: the pin becomes EXTCLK "if any peripheral requests this
 /// clock"; measured on an AVR128DA48: unrequested, EXTS stays clear with a
 /// clock on the pin; requested, it is set within three spins). The main
@@ -197,7 +267,7 @@ struct Oschf {
     /// (Xosc32k must be started and stable). Locks the manual tune.
     ///
     /// Clearing it copies the auto-tune's last value into TUNE (11.5.6),
-    /// and the copy lands AFTER the protected write: measured on an
+    /// and the copy lands after the protected write: measured on an
     /// AVR128DA48, a read in the next instructions still returns the old
     /// TUNE and one 3 us later the new one - a tune() written in between
     /// was overwritten. The auto-tune runs on OSCHF's internal 1 MHz
@@ -259,11 +329,11 @@ enum class Xosc32kStartup : uint8_t { cycles1k = 0, cycles16k = 1, cycles32k = 2
 /// The 32.768 kHz crystal oscillator on PF0/PF1, or an external 32 kHz
 /// clock on PF0. Start-up ~300 ms typ. (1 s in low-power mode).
 ///
-/// ENABLE ALONE DOES NOT RUN IT. With RUNSTDBY clear the oscillator runs
-/// only while something REQUESTS it - the RTC, the main clock, the PLL -
+/// Enable alone does not run it. With RUNSTDBY clear the oscillator runs
+/// only while something requests it - the RTC, the main clock, the PLL -
 /// and XOSC32KS stays clear until then (measured on an AVR128DA48: a
 /// fitted crystal, enabled, never stable; forced on, stable within about
-/// a second). So a program that wants to KNOW the crystal runs before
+/// a second). So a program that wants to know the crystal runs before
 /// anything uses it starts it with run_standby = true - the bit forces
 /// the oscillator on in Active and every sleep mode - and may clear the
 /// force with force_on(false) once a user requests it.
@@ -384,15 +454,15 @@ enum class PllMultiplier : uint8_t {
 /// never sets with RUNSTDBY and no requester: errata 2.5.3 A4/A5, DA
 /// 2.4.1 every revision).
 ///
-/// ERRATA 2.5.4 AS CODE (DB A4/A5): with SOURCE = XOSCHF the PLL runs
-/// only if XOSCHF is configured for an external CLOCK (SELHF = 1) - it
+/// Errata 2.5.4 as code (DB A4/A5): with SOURCE = XOSCHF the PLL runs
+/// only if XOSCHF is configured for an external clock (SELHF = 1) - it
 /// does not work with a crystal, and there is no workaround. start()
-/// therefore REFUSES that combination and writes nothing: a bench
+/// therefore refuses that combination and writes nothing: a bench
 /// crystal on PA0/PA1 cannot feed the PLL, and a driver that pretended
 /// otherwise would leave the TCD without a clock and its ENRDY closed
 /// forever. The DA errata has no twin item and needs none: the DA has
 /// no XOSCHF crystal oscillator at all (no CLKCTRL.XOSCHFCTRLA in its
-/// header), so SOURCE = 1 there IS the external clock and the check
+/// header), so SOURCE = 1 there is the external clock and the check
 /// compiles out.
 struct Pll {
     Pll() = delete;
@@ -486,9 +556,9 @@ constexpr uint32_t clock_divisor(ClockDiv d) {
 }
 
 /// Every main prescaler, in one canonical order. This array is the
-/// DISCRETE SET behind the runtime regime: a DynamicClock can only ever
+/// discrete set behind the runtime regime: a DynamicClock can only ever
 /// run at source_hz divided by one of these, so its current rate is an
-/// INDEX into this list - which is what lets avrxt/delay.hpp expand
+/// index into this list - which is what lets avrxt/delay.hpp expand
 /// per-rate arithmetic at compile time and dispatch on the index
 /// (division-free delays at every reachable rate).
 inline constexpr ClockDiv clock_divs[] = {
@@ -526,7 +596,7 @@ enum class MainSource : uint8_t {
 };
 
 /// The main clock mux, prescaler, CLKOUT and switching status. The
-/// source must be running (and an external one stable) BEFORE it is
+/// source must be running (and an external one stable) before it is
 /// selected: a selected source that never toggles is a pending switch
 /// only a reset clears (12.3.2).
 struct MainClock {
@@ -565,7 +635,7 @@ struct MainClock {
 // ---- the time base (EA) --------------------------------------------------------
 
 /// MCLKTIMEBASE for a CLK_PER rate: the count of CLK_PER cycles that is
-/// one microsecond or more, rounded UP (DS40002443A 12.3.6, 12.5.7: a
+/// one microsecond or more, rounded up (DS40002443A 12.3.6, 12.5.7: a
 /// value too small makes the delays timed in it short - the unsafe side;
 /// the data sheet's own example, 20 MHz / 6 = 3333333 Hz, gives 4). Five
 /// bits: 31 covers 31 MHz, above any CLK_PER the part reaches.
@@ -578,7 +648,7 @@ constexpr uint8_t clock_timebase_for(uint32_t hz) {
 /// CLKCTRL.MCLKTIMEBASE: the time base the ADC's and the PGA's internal
 /// timings and the TWI's bus time-out count in (DS40002443A 31.3.2,
 /// 31.3.3.4, 27.3.3.1). It is a CLKCTRL register and a pure function of
-/// CLK_PER, so the CLOCK owns it: every Clock init writes it, every
+/// CLK_PER, so the clock owns it: every Clock init writes it, every
 /// DynamicClock switch rewrites it, and no driver writes it. Not under
 /// CCP: one STS.
 struct ClockTimebase {
@@ -602,7 +672,7 @@ enum class CfdSource : uint8_t {
 
 /// The clock failure detector (DS40002247B 12.3.7, DS40002443A 12.3.5):
 /// watches one source for edges; on silence it raises the CFD flag,
-/// optionally an interrupt (regular or NMI), and - when the MAIN clock is
+/// optionally an interrupt (regular or NMI), and - when the main clock is
 /// watched - forces CLKSEL back to the start-up source "at its reset
 /// frequency" (OSCHF at 4 MHz on the DB; on the EA OSCHF at the fuse's
 /// rate); CLKOUT disabled. Once enabled with the NMI interrupt, its registers are
@@ -612,7 +682,7 @@ enum class CfdSource : uint8_t {
 ///
 /// ISR body: `cfd()` clears the flag and returns the source in effect
 /// - the app binds CLKCTRL_CFD_vect (or NMI_vect) and decides what to
-/// do: a brio app posts to a supervisor AO; the kernel keeps running
+/// do: a brio app posts to a supervising active object; the kernel keeps running
 /// from the start-up clock, with every driver now off-rate until a
 /// rebase/re-init.
 struct ClockFailure {
@@ -669,7 +739,7 @@ enum class ClockSource : uint8_t {
 ///  - on a part whose OSCHF rate is a register field (FRQSEL, the DA/DB)
 ///    it is src_hz and nothing else: init() sets OSCHF to it;
 ///  - on a part whose OSCHF rate the OSCCFG fuse chooses (the EA) it is a
-///    CLAIM about the fuse - 16 or 20 MHz - which the type cannot check
+///    claim about the fuse - 16 or 20 MHz - which the type cannot check
 ///    and init() does (matches_fuse(), one read of FUSE.OSCCFG). For an
 ///    internal source it is the rate itself; for a crystal or an external
 ///    clock it defaults to src_hz, and a source at another rate names the
@@ -747,9 +817,11 @@ struct Clock {
     /// and the fallback is running instead: OSCHF at the same CLK_PER for
     /// the high-frequency sources, OSC32K for xosc32k. On a part whose
     /// OSCHF rate is a fuse's, false too when the fuse does not match the
-    /// claim - and then NOTHING is written: the part keeps its reset clock
+    /// claim - and then nothing is written: the part keeps its reset clock
     /// (the fuse's rate over /6) and Clock::hz is not true. Call first in
-    /// main().
+    /// main(), before any driver's init(clock) and before sei(): a setup
+    /// verb that masks nothing and waits in bounded polls only (the
+    /// opening comment lists them).
     static bool init() {
 #if defined(CLKCTRL_FRQSEL_gm)
         if constexpr (hf) {
@@ -885,18 +957,19 @@ private:
 
 /**
  * The runtime regime. Boot is a static Clock<...> naming the source and
- * its rate; set<hz>() / set(hz) name the NEW RATE (the app speaks Hz -
+ * its rate; set<hz>() / set(hz) name the new rate (the app speaks Hz -
  * the prescaler that produces it is this silicon's detail, resolved by
  * div_for; a rate no prescaler reaches is a compile error / a false),
  * fan it out to Users (each a ClockUser: `static void rebase(uint32_t
  * hz)`, checked by the concept where the list is written) in list
- * order, synchronously, and THEN reprogram the main prescaler - so a
+ * order, synchronously, and then reprogram the main prescaler - so a
  * user can drain what it has in flight at the old rate before adopting
- * the new one. Call set() only when nothing that depends on the rate
- * is mid-transfer (a driver's rebase() may wait for its own hardware
- * to go idle; a bus transaction in flight is the caller's problem - in
- * an AO system, ask the bus AOs before switching). F_CPU must not be
- * defined for this type: no rate is fixed any more.
+ * the new one. Call set() from the main context, and only when nothing
+ * that depends on the rate is mid-transfer (a driver's rebase() may
+ * wait for its own hardware to go idle; a bus transaction in flight is
+ * the caller's problem - in a program of active objects, ask the
+ * active objects that own the buses before switching). F_CPU must not
+ * be defined for this type: no rate is fixed any more.
  *
  *   using Boot = brio::Clock<brio::ClockSource::crystal, 24'000'000>;
  *   using SysClock = brio::DynamicClock<Boot, Serial, Twi0>;
@@ -919,11 +992,11 @@ struct DynamicClock {
 
     static uint32_t hz() { return hz_; }
 
-    /// The DISCRETE-RATE surface (what avrxt/delay.hpp dispatches on).
+    /// The discrete-rate surface (what avrxt/delay.hpp dispatches on).
     /// A dynamic clock only ever runs at source_hz / clock_divs[i]: the
-    /// whole set is known from the TYPE, so per-rate arithmetic can be
+    /// whole set is known from the type, so per-rate arithmetic can be
     /// expanded and folded per index at compile time, and the one
-    /// runtime fact is WHICH index is current - a byte, not a division.
+    /// runtime fact is which index is current - a byte, not a division.
     static constexpr uint8_t rate_count = clock_div_count;
     static constexpr uint32_t rate_hz(uint8_t i) {
         return source_hz / clock_divisor(clock_divs[i]);
@@ -970,7 +1043,7 @@ struct DynamicClock {
 
 private:
     /// Rebase every user for the new rate (each may first drain what
-    /// it has in flight at the OLD rate), then switch the prescaler.
+    /// it has in flight at the old rate), then switch the prescaler.
     /// Where the clock owns MCLKTIMEBASE it moves on the side of the
     /// switch that keeps it covering a microsecond throughout: before the
     /// prescaler when the rate rises, after it when the rate falls. One

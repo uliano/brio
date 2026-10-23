@@ -1,9 +1,28 @@
 /*
  * ticker.hpp
  *
- * The kernel timebase of this target, on the Cortex-M0+ SysTick.
+ * The kernel timebase of this target, on the Cortex-M0+ SysTick: the
+ * `Ticker` a program's SamPlatform reads its time from (samc21/
+ * platform.hpp), counting 1000 ticks a second, and the guard that keeps
+ * the SysTick interrupt off across a standby entry. The smallest use is
+ * the Usage block at the end of this comment: the program binds
+ * SysTick_Handler to Ticker::tick(), then calls Ticker::init(clock) in
+ * main() after the clock task's init() and before interrupts are
+ * enabled.
  *
- * THE TICKER ITSELF IS THE CORE STRATUM'S: `BasicTicker` lives in
+ * Who calls what. init() is a setup call in main(), and it answers
+ * false, starting nothing, when the reload the clock's rate gives does
+ * not fit SysTick's 24 bits; it computes that reload from the rate the
+ * clock type claims, so an init() before the clock task's runs the tick
+ * at the wrong rate and nothing refuses it. tick() is the interrupt
+ * body: the program's SysTick_Handler calls it and nothing else does.
+ * The getters may be read from any context (the Concurrency note
+ * below); now() masks interrupts for the two reads it makes. advance()
+ * is the timed sleep site's (samc21/sleep.hpp), pause() and resume()
+ * the escape hatch the class's own comment describes.
+ * SysTickInterruptGuard is the platform's idle() and Pm::sleep()'s.
+ *
+ * The ticker itself is the core stratum's: `BasicTicker` lives in
  * cortexm/ticker.hpp. What is SAM about this file is what stays in it -
  * the `Ticker` alias that fixes the project-wide rate, the erratum guard
  * below, and this comment's account of what standby does to a
@@ -11,14 +30,15 @@
  * 1000, the volatile reads, advance/pause/resume) is documented where the
  * class is.
  *
- * WHY SYSTICK AND NOT A TC. SysTick is core-private: no application can
+ * Why SysTick and not a TC. SysTick is core-private: no application can
  * use it for PWM, capture or anything else, so claiming it costs the app
  * nothing - every TC, TCC and the RTC stay free.
  *
- * Monostate: every member is a static inline, there is one timebase per
- * program because there is one SysTick, and the ISR body reaches its
- * counters with no pointer indirection. State lives in .bss, zeroed
- * before main().
+ * Monostate (a class whose state and functions are all static, with no
+ * instance to create): every member is a static inline, there is one
+ * timebase per program because there is one SysTick, and the ISR body
+ * reaches its counters with no pointer indirection. State lives in
+ * .bss, zeroed before main().
  *
  * ## Time representations
  *  - ticks():  raw 32-bit tick counter (wraps: 49.7 days @ 1000 Hz).
@@ -38,8 +58,8 @@
  * ## Concurrency
  * tick() runs in the SysTick handler. The counters are 32-bit and this
  * core loads an aligned word in one uninterruptible access
- * (atomic_width 4), so no getter masks interrupts for a SINGLE counter.
- * But atomicity is not visibility: the getters read through a VOLATILE
+ * (atomic_width 4), so no getter masks interrupts for a single counter.
+ * But atomicity is not visibility: the getters read through a volatile
  * access (read_shared below) so every call performs a real load - in a
  * header-only build a polling loop over an inlined getter would
  * otherwise fold to one hoisted read that never sees the handler's
@@ -55,12 +75,12 @@
  * move to the RTC. init()'s clock_follows assertion below is what will
  * refuse to compile on that day, which is the point.
  *
- * ## The same caveat, in its second half: STANDBY STOPS KERNEL TIME
+ * ## The same caveat, in its second half: standby stops kernel time
  * Being clocked from the CPU clock has a consequence beyond rebasing:
- * in the PM's STANDBY sleep mode KERNEL TIME STANDS STILL for exactly as
+ * in the PM's STANDBY sleep mode kernel time stands still for exactly as
  * long as the sleep lasts - the tick's interrupt held off across it by
  * the erratum guard below, whatever the counter does (on the bench, with
- * the debug probe attached, it was measured RUNNING through a standby:
+ * the debug probe attached, it was measured running through a standby:
  * docs/samc21/platform.md).
  * Time events do not fire late by a little - they fire late by the
  * whole slept duration, and `millis()` under-reports the wall clock by
@@ -70,8 +90,9 @@
  * The two answers are stated in samc21/sleep.hpp and enforced nowhere in
  * this file: `SamSleepSite` keeps the restriction (standby only with
  * no armed time event), and `SamTimedSleepSite` lifts it by
- * resynchronizing this counter from the RTC after every wake - the
- * `advance()` verb below is that resync's landing point.
+ * resynchronizing this counter from the RTC after every wake -
+ * BasicTicker's `advance()` (cortexm/ticker.hpp) is that resync's
+ * landing point.
  *
  * ## Usage
  * ```cpp
@@ -99,16 +120,16 @@
 namespace brio {
 
 /**
- * Hold the SysTick INTERRUPT off for a scope, and put it back exactly as
+ * Hold the SysTick interrupt off for a scope, and put it back exactly as
  * it was found.
  *
- * This exists for one reason: ERRATUM 1.8.13 (DS80000740S, live on every
+ * This exists for one reason: erratum 1.8.13 (DS80000740S, live on every
  * E/G/J revision including this one). With the standby back-bias option
- * set - STDBYCFG.BBIASHS, whose RESET value is 1 - a SysTick interrupt
+ * set - STDBYCFG.BBIASHS, whose reset value is 1 - a SysTick interrupt
  * that coincides exactly with a standby entry can raise a hard fault,
  * and the workaround is to disable that interrupt before entering
  * standby and re-enable it after. Both preconditions are the default
- * state of a brio program, since the SysTick interrupt IS the kernel
+ * state of a brio program, since the SysTick interrupt is the kernel
  * tick.
  *
  * It lives here rather than in samc21/sleep.hpp because this file owns the

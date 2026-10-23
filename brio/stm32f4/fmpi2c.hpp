@@ -1,121 +1,163 @@
 /*
  * fmpi2c.hpp
  *
- * The FAST-MODE PLUS I2C of the STM32F4 (RM0390 ch. 23) - the second and
- * entirely different I2C block some parts of this family carry beside the
- * three of stm32f4/i2c.hpp, in the two layers every brio bus driver has
+ * The Fast-mode Plus I2C of the STM32F4 (RM0390 ch. 23) as a bus for a
+ * program: a second and entirely different I2C block some parts of this
+ * family (the F410, F412, F413/F423 and F446) carry beside the three of
+ * stm32f4/i2c.hpp, the one to choose for a 1 MHz bus or for a rate that
+ * survives a change of the core's clock (it has a kernel clock of its
+ * own). It comes in the two layers every brio bus driver has
  * (docs/design/i2c-bus.md):
  *
- *   FmpI2c<n>                  the RESOURCE: the register block, its APB1
- *                              gate and reset, its KERNEL CLOCK
- *                              MULTIPLEXER, its TWO vectors, its DMA
+ *   FmpI2c<n>                  the resource: the register block, its APB1
+ *                              gate and reset, its kernel clock
+ *                              multiplexer, its two vectors, its DMA
  *                              request pair - and the whole register
  *                              description of the chapter in both roles,
  *                              including the timing arithmetic that is
  *                              this chapter's hardest part and the SMBus
  *                              half with its two time-outs.
- *   FmpI2cHost<n, pins, ...>   the TASK util/i2c_bus.hpp's arbiter drives,
- *                              carrying THE SAME Request as this stratum's
- *                              I2cHost: a program moves from one block to
- *                              the other by changing one type.
+ *   FmpI2cHost<n, pins, ...>   the task util/i2c_bus.hpp's arbiter drives
+ *                              (I2cBus, an active object that takes one
+ *                              request at a time and replies with an
+ *                              event), carrying the same Request fields as
+ *                              this stratum's I2cHost, the speed an
+ *                              FmpI2cSpeed: a program moves from one block
+ *                              to the other by changing the host type, the
+ *                              pads' type and any speed it names.
  *   FmpI2cClient<n, pins>      the target role, a thin polled surface with
  *                              two ISR bodies - a client is a protocol and
  *                              the protocol is the application's.
  *
- * IT IS THE STM32G0'S I2C UNDER ANOTHER NAME. CR1/CR2 with SADD, NBYTES,
+ * The smallest use, a bus host under the arbiter (docs/stm32f4/fmpi2c.md,
+ * "How to use it", on the Nucleo-F446RE):
+ *
+ *     constexpr FmpI2cPins pins{.scl = {'C', 6, PinFunction::af4},
+ *                               .sda = {'C', 7, PinFunction::af4}};
+ *     using Bus = FmpI2cHost<1, pins>;
+ *     using BusAo = I2cBus<Bus, P, 4>;   // an active object in the Tenuto
+ *     Bus::init(clock);                  // after the clock task
+ *     extern "C" void FMPI2C1_EV_IRQHandler() {
+ *         if (Bus::isr()) { post<BusAo>(TransferDone{Bus::status()}); }
+ *     }
+ *     extern "C" void FMPI2C1_ER_IRQHandler() {
+ *         if (Bus::error_isr()) { post<BusAo>(TransferDone{Bus::status()}); }
+ *     }
+ *
+ * Who calls what, and from where. init(), rebase(), unstick(), recover()
+ * and release() are main-context verbs; init(), unstick() and recover()
+ * take the instance's two NVIC lines down while they work and enable them
+ * again, release() leaves them down, and none of them masks interrupts
+ * globally. init() solves TIMINGR from the kernel clock, which on the APB
+ * or SYSCLK choice is the rate the clock type claims, so it runs after the
+ * clock task's init(). start() is the arbiter's, from its dispatch (main
+ * context), one tenure at a time - the arbiter serializes; the one wait
+ * in this file on its path is a speed change's PE cycle (disable(): CR1
+ * read back up to a thousand times). isr(), error_isr() and dma_isr() are the bodies the
+ * program's handlers for the event vector, the error vector and the two
+ * DMA streams call, and nothing else calls them. The Request's two
+ * buffers are lent from the post to the I2cDone the arbiter replies with:
+ * untouched and in scope until then, which the Borrowed type records and
+ * nothing checks. The Fm+ pad drive is the program's to turn on
+ * (fast_plus_drive()); nothing turns it on by itself. The resource's
+ * configuring verbs refuse behind their own write gates (below) and have
+ * no lock of their own.
+ *
+ * It is the STM32G0's I2C under another name. CR1/CR2 with SADD, NBYTES,
  * RELOAD and AUTOEND, one TIMINGR word, OAR1/OAR2 with the second
  * address's mask, ISR and ICR, PECR, TIMEOUTR, separate RXDR and TXDR -
  * register for register and bit for bit the block brio/stm32g0/i2c.hpp
- * drives. So this file IS that file, with the same verb names and the same
+ * drives. So this file is that file, with the same verb names and the same
  * shapes, and every place it differs says why. What differs is this
- * family's own: TWO vectors instead of one (RM0390 table 142 splits the
+ * family's own: two vectors instead of one (RM0390 table 142 splits the
  * events from the errors, as every other peripheral of this stratum does),
  * a kernel-clock multiplexer in RCC_DCKCFGR2 instead of RCC_CCIPR, the
- * Fm+ pad drive in SYSCFG_CFGR instead of SYSCFG_CFGR1, DMA STREAMS
- * instead of channels - and NO WAKE FROM STOP (below).
+ * Fm+ pad drive in SYSCFG_CFGR instead of SYSCFG_CFGR1, DMA streams
+ * instead of channels - and no wake from Stop (below).
  *
- * WHY EVERY NAME HERE CARRIES THE Fmp PREFIX. This stratum already has an
+ * Why every name here carries the Fmp prefix. This stratum already has an
  * `I2cSpeed`, an `I2cTiming`, an `I2cPins` and the rest, and they belong
- * to the OTHER block: the F446 carries both, a program may use both at
+ * to the other block: the F446 carries both, a program may use both at
  * once, and one namespace cannot hold two spellings of one word. The
  * prefix is the price of that, and it is why `FmpI2cHost`'s Request is
- * still the arbiter's own - the descriptor's FIELDS are the contract, and
+ * still the arbiter's own - the descriptor's fields are the contract, and
  * only the speed enum that one of them names is spelled anew.
  *
- * ONE INSTANCE, AND THE INDEX IS THERE FOR THE SECOND. Every part of this
+ * One instance, and the index is there for the second. Every part of this
  * family that has this block has exactly one (FMPI2C1), so the reserve
- * publishes its facts without an index and `FmpI2c<n>` static_asserts
- * n == 1. The index exists so the day a part arrives with two, no user of
- * this file is renamed - and so that the host task's parameter list is
- * this stratum's I2cHost's, position for position.
+ * (stm32f4/device_tables.hpp: the table of what each part has, read off
+ * the device header) publishes its facts without an index and
+ * `FmpI2c<n>` static_asserts n == 1. The index exists so the day a part
+ * arrives with two, no user of this file is renamed - and so that the host
+ * task's parameter list is this stratum's I2cHost's, position for position.
  *
- * THE NAME IS TWO NAMES. ES0298 2.12.10 records it as a documentation
+ * The name is two names. ES0298 2.12.10 records it as a documentation
  * erratum: "I2C4 and FMPI2C1 refer to the same peripheral instance", which
  * is why RM0390 6.3.27 calls the kernel-clock selector "I2C4 kernel clock
  * source selection" while every other page of the chapter says FMPI2C1.
  * This file uses the header's name throughout.
  *
- * WHAT TABLE 127 GIVES THIS PART AND WHAT IT WITHHOLDS. The F446's
+ * What table 127 gives this part and what it withholds. The F446's
  * implementation row has 7- and 10-bit addressing, all three speeds, the
- * independent clock and SMBus/PMBus - and a dash against WAKEUP FROM STOP
- * MODE. The device header agrees in the only way it can: there is no
+ * independent clock and SMBus/PMBus - and a dash against wakeup from Stop
+ * mode. The device header agrees in the only way it can: there is no
  * FMPI2C_CR1_WUPEN on any header of the pack, and RM0390 23.7.1 makes bit
  * 18 of CR1 reserved. So `wakes_from_stop` is false, `wake_from_stop()`
  * refuses, and the G0's whole triple-gated wake - HSI16, NOSTRETCH, DNF -
- * has nothing to gate here. It is the ONE feature of that chapter this
+ * has nothing to gate here. It is the one feature of that chapter this
  * silicon does not have.
  *
- * THE TIMING REGISTER IS THE CHAPTER, and the arithmetic goes both ways:
- * fmpi2c_timing_for() SOLVES 23.4.5's conditions for a register value and
- * fmpi2c_scl_hz() PRICES one, both pinned at the bottom of this file
+ * The timing register is the chapter, and the arithmetic goes both ways:
+ * fmpi2c_timing_for() solves 23.4.5's conditions for a register value and
+ * fmpi2c_scl_hz() prices one, both pinned at the bottom of this file
  * against every cell of tables 134 and 135. Three things about it:
- *   - tSCL IS NOT tSCLL + tSCLH. 23.4.9's own formula adds tSYNC1 + tSYNC2
+ *   - tSCL is not tSCLL + tSCLH. 23.4.9's own formula adds tSYNC1 + tSYNC2
  *     - the SCL slopes, the filters and two to three kernel periods of
  *     synchronization each - and the manual's example tables charge
- *     500..1000 ns of it. Its slopes are a BUS fact and not a chip one, so
+ *     500..1000 ns of it. Its slopes are a bus fact and not a chip one, so
  *     the measured value is an argument (FmpI2cBusTiming::sync_ns) beside
  *     the rise and fall times; left unmeasured, the chooser charges the
- *     chip's own FLOOR under it (the filters and two kernel periods an
- *     edge, no slope), so a requested rate is a CEILING no wire exceeds -
+ *     chip's own floor under it (the filters and two kernel periods an
+ *     edge, no slope), so a requested rate is a ceiling no wire exceeds -
  *     where the manual's budgets and ST's own timing utility, charging
- *     more than a short wire takes, run such a wire FASTER than asked.
- *   - SDADEL HAS NO +1 AND THE OTHER THREE DO - and here the manual
+ *     more than a short wire takes, run such a wire faster than asked.
+ *   - SDADEL has no +1 and the other three do - and here the manual
  *     disagrees with itself: 23.7.5's field description gives tSDADEL =
  *     SDADEL x tPRESC while 23.4.5's prose gives SDADEL x tPRESC +
  *     tI2CCLK. Tables 134 and 135 print "2 x 250 ns = 500 ns" for SDADEL
- *     0x2 at PRESC 1 and 8 MHz, which is the REGISTER DESCRIPTION's
+ *     0x2 at PRESC 1 and 8 MHz, which is the register description's
  *     formula; this file follows the register description and the tables.
- *   - THE KERNEL CLOCK HAS A FLOOR AND IT IS AN ERRATUM'S. ES0298 2.12.2
+ *   - The kernel clock has a floor and it is an erratum's. ES0298 2.12.2
  *     (the F412's, F413's and F410's errata carry the same item) names
  *     4 / 10 / 20 MHz for Sm / Fm / Fm+, because below them the block
- *     samples the PREVIOUS SDA value; there is no register workaround, so
- *     the chooser REFUSES. 23.4.3's own two conditions are checked beside
+ *     samples the previous SDA value; there is no register workaround, so
+ *     the chooser refuses. 23.4.3's own two conditions are checked beside
  *     it and refuse independently.
  *
- * FOUR MORE ERRATA SHAPE THE CODE (ES0298 2.12, ten items in all):
- *  - 2.12.3, SPURIOUS BUS ERROR IN CONTROLLER MODE: "Detection of bus
+ * Four more errata shape the code (ES0298 2.12, ten items in all):
+ *  - 2.12.3, spurious bus error in controller mode: "Detection of bus
  *    error has no effect on the I2C-bus transfer in controller mode and
- *    any such transfer continues normally." So the host CLEARS BERR,
- *    COUNTS it (spurious_bus_errors()) and never reports i2c_bus_error
+ *    any such transfer continues normally." So the host clears BERR,
+ *    counts it (spurious_bus_errors()) and never reports i2c_bus_error
  *    from it - on this silicon a controller's BERR is not evidence. A
- *    CLIENT's BERR is untouched by the erratum and is reported.
- *  - 2.12.8, TRANSMISSION STALLED AFTER THE FIRST BYTE: when the first
+ *    client's BERR is untouched by the erratum and is reported.
+ *  - 2.12.8, transmission stalled after the first byte: when the first
  *    byte is not already in TXDR, the second is written within two kernel
- *    cycles of its request, AND the ratio between the APB clock and the
+ *    cycles of its request, and the ratio between the APB clock and the
  *    kernel clock is between 1.5 and 3, the peripheral stalls until PE is
- *    cycled. The ratio is arithmetic this file can do, so it is PUBLISHED
+ *    cycled. The ratio is arithmetic this file can do, so it is published
  *    rather than hidden - fmpi2c_transmit_stall_risk() and the host's
  *    transmit_stall_risk() - and the choice of kernel clock, which is the
  *    manual's own second workaround, is the application's. The DMA path
- *    takes the FIRST workaround by construction: the engines are started
+ *    takes the first workaround by construction: the engines are started
  *    before the START bit, so TXDR is already loaded when the address goes
  *    out (23.4.16 asks for that order anyway).
- *  - 2.12.4, LAST-RECEIVED BYTE LOSS IN RELOAD MODE: with RELOAD set and
+ *  - 2.12.4, last-received byte loss in reload mode: with RELOAD set and
  *    NBYTES > 1 a receiver can lose the last byte. The host engine never
  *    sets RELOAD - a Request's spans are eight-bit lengths, so one tenure
  *    is at most 255 bytes and NBYTES alone carries it - and the resource's
  *    reload() verb carries the caution.
- *  - 2.12.1, A 10-BIT ADDRESS WHOSE FIRST BYTE IS NACKED wedges the
+ *  - 2.12.1, a 10-bit address whose first byte is NACKed wedges the
  *    controller with NACKF and START both standing. The Request is 7-bit,
  *    so the host cannot reach it; the resource publishes the state
  *    (ten_bit_nack_stuck()) and the escape is 23.4.6's PE cycle, which is
@@ -123,29 +165,29 @@
  * The remaining five are the application's and live in
  * docs/stm32f4/fmpi2c.md.
  *
- * THE ONE VERB THAT DISABLES IS 23.4.6's PROCEDURE. Clearing PE releases
+ * The one verb that disables is 23.4.6's procedure. Clearing PE releases
  * both lines, resets the state machines, CR2's START, STOP, NACK and
- * PECBYTE and every status flag - and KEEPS every configuration register.
+ * PECBYTE and every status flag - and keeps every configuration register.
  * The chapter demands PE stay low for at least three APB cycles and
  * prescribes write-0 / check-0 / write-1, so disable() is its first two
  * steps and there is no raw PE clear in this file.
  *
- * EVERY FIELD THE REGISTER DESCRIPTION GATES IS A VERB THAT REFUSES, and
+ * Every field the register description gates is a verb that refuses, and
  * the gates are four and not one: PE = 0 for TIMINGR, NOSTRETCH, ANFOFF
  * and DNF; START = 0 for CR2's SADD, RD_WRN, ADD10, HEAD10R and NBYTES;
  * OA1EN = 0 for OAR1's own fields and OA2EN = 0 for OAR2's; TIMOUTEN = 0
  * for TIMEOUTA and TIDLE and TEXTEN = 0 for TIMEOUTB.
  *
- * THE PADS ARE THE APPLICATION'S, as every bus task of this stratum has
+ * The pads are the application's, as every bus task of this stratum has
  * them: SCL, SDA and the optional SMBus alert as PinSels, each with the
- * alternate function the DATASHEET gives that signal on that pad - AF4 on
+ * alternate function the datasheet gives that signal on that pad - AF4 on
  * every FMPI2C1 pad of the F446 (DS10693 table 11: SCL on PC6, PD12, PD14
  * and PF14; SDA on PC7, PD13, PD15 and PF15; SMBA on PD11 and PF13). No
  * device header carries a pin table, so nothing here can check an AF: the
- * bench is the check. Both lines go out OPEN DRAIN - that IS the bus - and
+ * bench is the check. Both lines go out open drain - that is the bus - and
  * the pull-ups are the board's.
  *
- * NOT COVERED YET is at the end of docs/stm32f4/fmpi2c.md.
+ * Not covered yet is at the end of docs/stm32f4/fmpi2c.md.
  */
 
 #pragma once
@@ -1760,19 +1802,24 @@ inline constexpr uint8_t fmpi2c_dma_fault = bus_engine_status + 4;
  * the address phase, the repeated START of a write-then-read, the byte pump
  * and the status vocabulary.
  *
- * THE TRANSACTION DESCRIPTOR IS EVERY TARGET'S -
- * {addr, tx span, tx_len, rx span, rx_len, reply, speed} - and the
- * PARAMETER LIST IS THIS STRATUM'S I2cHost'S, position for position, so a
- * program moves from the F1-lineage block to this one by changing one type
- * name. One request is ONE BUS TENURE in the four shapes I2C devices use:
+ * The transaction descriptor is the tenure shape util/i2c_bus.hpp
+ * describes - {addr, tx span, tx_len, rx span, rx_len, reply, speed}, the
+ * speed an FmpI2cSpeed - and the parameter list is this stratum's
+ * I2cHost's, position for position, so a program moves from the
+ * F1-lineage block to this one by changing the host type (and the pads'
+ * type and any speed it names). One request is one bus tenure in the four
+ * shapes I2C devices use:
  *
  *   write            tx set, rx_len 0    S addr+W data... P
  *   read             tx_len 0, rx set    S addr+R data... P
  *   write-then-read  both                S addr+W tx... Sr addr+R rx... P
  *   probe            both empty          S addr+W P
  *
- * ALWAYS ASYNCHRONOUS: start() returns false and a TransferDone follows
- * from the ISR - even the probe, whose address phase IS the transaction.
+ * Asynchronous whenever the wire moves: start() returns false and a
+ * TransferDone follows from the ISR - even the probe, whose address phase
+ * is the transaction. The two refusals that move nothing (a speed the
+ * kernel clock cannot produce, a START still standing) are answered at
+ * once, start() returning true (its comment below).
  *
  * THE STATE MACHINE IS 23.4.9's, and the flags do most of it. A write half
  * runs with AUTOEND = 0 when a read half follows, so that TC fires with SCL
@@ -1789,15 +1836,19 @@ inline constexpr uint8_t fmpi2c_dma_fault = bus_engine_status + 4;
  *   i2c_arb_lost     ARLO - another controller won; the silicon has already
  *                    released the bus and switched to target mode, so no
  *                    STOP is ours to send
- *   i2c_rejected     a speed this kernel clock cannot produce - the one
+ *   i2c_rejected     a speed this kernel clock cannot produce - a
  *                    synchronous answer, no byte moved
+ *   i2c_bus_error    a START still standing at start(), the other
+ *                    synchronous answer (below)
  *   fmpi2c_dma_fault a DMA stream reported an error mid-tenure
  *
- * AND THERE IS NO i2c_bus_error HERE, WHICH IS THE ERRATUM'S DOING. ES0298
- * 2.12.3: in controller mode a BERR can be raised spuriously and "any such
- * transfer continues normally"; the workaround is to clear it and go on. So
- * this engine clears BERR, COUNTS it (spurious_bus_errors()) and does not
- * let it decide anything. A tenure that never answers is the ARBITER's to
+ * And no BERR ends a tenure in i2c_bus_error here, which is the
+ * erratum's doing. ES0298 2.12.3: in controller mode a BERR can be raised
+ * spuriously and "any such transfer continues normally"; the workaround is
+ * to clear it and go on. So this engine clears BERR, counts it
+ * (spurious_bus_errors()) and does not let it decide anything; the one
+ * i2c_bus_error this engine reports is start()'s synchronous answer for a
+ * START still standing from a tenure the peripheral never closed. A tenure that never answers is the ARBITER's to
  * time out (i2c_timeout), and recover() is what it calls.
  *
  * THE TWO OPTIONAL DMA ENGINE SLOTS (the Uart's and the SpiHost's shape,

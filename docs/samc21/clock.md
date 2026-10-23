@@ -1,13 +1,77 @@
 # Clock - OSCCTRL, GCLK, MCLK (SAM C21)
 
-Documents of record: SAM C20/C21 data sheet DS60001479M - GCLK ch. 16,
+This document is for a programmer who needs to know what rate the CPU
+and the peripherals run at, and to change it: the main clock every
+driver computes its dividers from, and the clock tree under it - the
+internal 48 MHz oscillator, the external crystal, the fractional DPLL,
+the nine generic clock generators and the peripheral channels they
+feed. `Clock<ClockSource::internal, hz>` is the clock task (a task, in
+brio, is the layer a program names, built over the resources: thin
+typed views of the registers with their synchronization built in), and
+`hz` is the one compile-time statement of the CPU's rate in a program.
+`Xosc`, `Fdpll`, `Gclk<n>`, `GclkChannel` and `Mclk` are those
+resources, for a program that runs a peripheral from a generator of its
+own or from a crystal.
+
+The smallest use, the first block of "How to use it" below:
+
+```cpp
+using SysClock = brio::Clock<brio::ClockSource::internal, 48'000'000>;
+constexpr SysClock clock;
+
+int main() {
+    const bool ok = SysClock::init();   // false = the rate is NOT hz
+    // a peripheral's driver wires its own core clock:
+    //   Sercom<5>::core_clock(0);      // channel from ITS header constant
+}
+```
+
+Line by line: `SysClock` names the main clock, OSC48M at 48 MHz, a rate
+fixed when the program is compiled (an OSC48M ratio that does not
+divide 48 MHz exactly, or any other `ClockSource`, does not compile);
+`clock` is an empty tag object of that type, the argument the drivers'
+`init()` functions take to learn the rate; `SysClock::init()` brings
+the CPU to `hz` - the flash wait states set on the correct side of the
+change, OSC48M's divider written, generator 0 and the CPU divider
+re-stated - and answers false when the oscillator did not report ready
+or a synchronization did not complete, each wait bounded; the comment
+lines show the other half, a peripheral's driver connecting its own
+generic clock channel to a generator, which the driver's own `init()`
+does.
+
+What decides correctness even there: `SysClock::init()` runs first in
+`main()`, before any driver's `init()`. The drivers compute their
+dividers from the rate the clock type claims and not from the
+hardware, and out of reset the CPU runs at 4 MHz, so a driver set up
+before the clock task runs twelve times too slowly under a 48 MHz type
+until the clock moves, and nothing refuses it (derived from the
+divider arithmetic, not measured). A false answer means the rate is
+not the one `hz` states, and every driver then runs on a wrong
+assumption. Past the smallest use, one trap matters more than the
+rest: **a generator pointed at a stopped oscillator can never be moved
+again**, so a program that stops the crystal or the DPLL moves every
+generator off it first (the second block below, and "What the silicon
+does").
+
+In order: the documents of record; what the silicon does (the tree,
+the wait states, the synchronization, the crystal and its failure
+detector, the DPLL, the errata); the types and verbs; how to use it
+(the main clock, a generator on the crystal, the DPLL locked to it);
+the bench findings; what each root does in standby; what is not
+covered.
+
+## Documents of record
+
+SAM C20/C21 data sheet DS60001479M - GCLK ch. 16,
 MCLK ch. 17, OSCCTRL ch. 20, the DPLL and RC characteristics of tables
 45-52 and 45-57, the flash wait-state table 45-41 - and errata
 DS80000740S items 1.2.2, 1.2.3, 1.3.3, 1.3.4 and 1.25.1, all encoded
 in code, with 1.22.1 and 1.25.2 read and declared inapplicable or out
 of scope below. Driver: `samc21/clock.hpp`. The family fixture is
 `test/family_samc21/clock.cpp` (plus four negatives under `neg/`) under
-`brio check samc21`; the bench suite is `test_samc_clock`.
+`brio check samc21`; the bench suite is `test_samc_clock` (a suite's
+letter, cited below, is one command key of its console and the group
+of verdicts that key runs).
 
 ## What the silicon does
 
@@ -20,30 +84,30 @@ own channel (PCHCTRL), indexed by a per-instance constant from the
 device header. Out of reset the device already runs: OSC48M divided
 by 12 (4 MHz), generator 0 sourced from it and enabled, CPUDIV = 1.
 That reset state is why reaching 48 MHz is one divider write - and
-why this driver's init is mostly confirmation: it RE-STATES generator
+why this driver's init is mostly confirmation: it re-states generator
 0 and CPUDIV rather than trusting whatever a debugger or bootloader
 left behind.
 
 **Flash wait states bound the frequency** (table 45-41, the
 conservative VDD > 2.7 V column): 19 MHz at 0 WS, 38 at 1, 64 at 2 -
-and NVMCTRL 27.5.2 orders them adapted BEFORE a rise and after a
+and NVMCTRL 27.5.2 orders them adapted before a rise and after a
 fall. The register is NVMCTRL's and so is the verb - `FlashWaitStates`
-lives in `samc21/nvm.hpp` ([nvm.md](nvm.md)) - but the QUESTION is this
+lives in `samc21/nvm.hpp` ([nvm.md](nvm.md)) - but the question is this
 driver's, because nothing may raise the frequency without answering it
 first. `init()` and `set()` call it on the correct side of the change.
 
 **Synchronization is per-register and real.** The OSC48M divider
 write crosses clock domains (OSC48MSYNCBUSY), each generator's
 GENCTRL write has its SYNCBUSY bit, and a peripheral channel must be
-DISABLED before its generator changes (PCHCTRL has no
-synchronization of its own). Every wait in the driver is BOUNDED and
+disabled before its generator changes (PCHCTRL has no
+synchronization of its own). Every wait in the driver is bounded and
 reported - a clock that never becomes ready is a false return, not a
 hang.
 
 **The crystal oscillator is one register.** XTALEN chooses between a
 crystal amplifier across XIN/XOUT and a digital input on XIN alone;
-GAIN is MANDATORY in crystal mode (20.8.5 says so twice, once under
-AMPGC), and it names a recommended MAXIMUM crystal frequency rather
+GAIN is mandatory in crystal mode (20.8.5 says so twice, once under
+AMPGC), and it names a recommended maximum crystal frequency rather
 than a range - AMPGC's automatic amplitude control does not replace
 it. STARTUP masks the output for 2^n OSCULP32K cycles plus three XOSC
 cycles; the table's microseconds assume a nominal OSCULP32K, which
@@ -52,12 +116,12 @@ it by its field.
 
 **The clock failure detector watches the XOSC against a safe clock**
 derived from OSC48M by a power-of-two prescaler, which 20.6.3
-requires to be running FIRST and to be no faster than the crystal it
+requires to be running first and to be no faster than the crystal it
 stands in for. In each window of four safe clocks the XOSC must show
 at least one rising and one falling edge; otherwise STATUS.XOSCFAIL
 (the chapter's CLKFAIL) is asserted, INTFLAG latches, the XOSC output
 is replaced by the safe clock and STATUS.XOSCCKSW (CLKSW) says so.
-STATUS TRACKS, INTFLAG LATCHES. SWBEN asks to go back once the
+Status tracks, INTFLAG latches. SWBEN asks to go back once the
 crystal recovers and is cleared by the hardware when the switch
 happens.
 
@@ -73,7 +137,7 @@ CLKRDY, not LOCK, is the bit that says a consumer will receive a
 clock.
 
 **The two OSC48M errata, as code.** 1.2.2: writing OSC48MDIV while the
-oscillator runs UNREQUESTED wedges its sync bit - so init clears
+oscillator runs unrequested wedges its sync bit - so init clears
 ONDEMAND first. 1.2.3: a rare no-start on parts produced before
 2025-01 - mitigated by exactly the same setting, ENABLE = 1 with
 ONDEMAND = 0, which init writes and leaves.
@@ -83,21 +147,21 @@ clear the source is divided by DIV, and 0 and 1 both mean undivided
 (16.6.2.7). With DIVSEL set it is divided by **2^(DIV+1)**. That
 second sentence is worth stating flatly because 16.8.3 words it as
 "2^(N+1), where N is the Division Factor Bits for the selected
-generator", which reads as a FIXED divisor per generator - 512 on the
+generator", which reads as a fixed divisor per generator - 512 on the
 eight-bit ones, 131072 on generator 1 - with DIV ignored. It is not:
 `test_samc_clock` letter f counts generator 5 against generator 0
-with both fed by OSC48M, so the count IS the divisor and no reference
+with both fed by OSC48M, so the count is the divisor and no reference
 error can enter, and gets **2, 16 and 512 for DIV = 0, 3 and 8**;
 generator 1, the sixteen-bit one, gives **512 for the same DIV = 8**.
-The field's WIDTH decides only which bits are kept (table 16-3:
+The field's width decides only which bits are kept (table 16-3:
 sixteen on generator 1, eight everywhere else) - bits written past
 the range are ignored, so a linear divisor above 255 means something
 on generator 1 alone.
 
-**And in the DIVSEL regime the width is also a CEILING**, measured by
+**And in the DIVSEL regime the width is also a ceiling**, measured by
 `test_samc_timer_modes` letter e, which counts generator 7 against the
-SysTick wall clock: **DIV = 8 and DIV = 9 give the SAME divisor of 512
-= 2^9** on that eight-bit field. So the rule is 2^(DIV+1) SATURATED at
+SysTick wall clock: **DIV = 8 and DIV = 9 give the same divisor of 512
+= 2^9** on that eight-bit field. So the rule is 2^(DIV+1) saturated at
 2^(width+1), and a DIV past the field's width buys nothing. The two
 measurements agree where they overlap - both put DIV = 8 at 512 - and
 part company only past the field's width.
@@ -105,8 +169,8 @@ part company only past the field's width.
 **A generator source change is glitch-free on the fly** (16.6.2.6):
 the old source is released only once the new one is ready - which is
 what lets init re-state generator 0 while executing from it, and what
-makes the TEARDOWN ORDER the one trap of this file. A generator still
-pointed at a STOPPED oscillator can never be moved again, because the
+makes the teardown order the one trap of this file. A generator still
+pointed at a stopped oscillator can never be moved again, because the
 new source becoming ready is what releases the old one and the old
 one is gone. **Point every generator at something running before
 stopping an oscillator**, which is what `Xosc::stop()` and
@@ -114,10 +178,10 @@ stopping an oscillator**, which is what `Xosc::stop()` and
 tests on every path.
 
 **Three DPLL errata are live on this silicon and all three are
-code.** 1.25.1: below 25 C the loop reports SPURIOUS unlocks, and
+code.** 1.25.1: below 25 C the loop reports spurious unlocks, and
 since the lock signal gates the output, everything clocked from the
 DPLL stops for the duration - so `FdpllConfig::lock_bypass` defaults
-TRUE (the erratum's own workaround) and a caller wanting the gate
+true (the erratum's own workaround) and a caller wanting the gate
 back has to ask. 1.3.3: an on-the-fly ratio change does not set
 STATUS.DPLLLDRTO although INTFLAG.DPLLLDRTO rises, so
 `ratio_updated()` reads the flag and nothing reads that status bit.
@@ -125,7 +189,7 @@ STATUS.DPLLLDRTO although INTFLAG.DPLLLDRTO rises, so
 `lock_timer_clock()` and can only be a stated caller obligation.
 1.25.2 (ONDEMAND non-functional in standby) is live too and is why
 `init()` clears ONDEMAND; standby itself is out of this driver's
-scope. **1.22.1 does NOT apply**: the CFD's failure to switch with a
+scope. **1.22.1 does not apply**: the CFD's failure to switch with a
 stuck-high input is marked in the N-family row only - reading the
 column instead of the row is the trap this errata document sets over
 and over.

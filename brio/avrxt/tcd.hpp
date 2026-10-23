@@ -1,32 +1,97 @@
 /*
  * tcd.hpp
  *
- * The AVR DA/DB 12-bit timer/counter type D (TCD, DS40002247B ch. 25)
- * in two strata, as docs/avrxt/tcd.md describes:
+ * The AVR DA/DB 12-bit timer/counter type D (TCD, DS40002247B ch. 25):
+ * what a program uses to drive a power stage - a complementary pair of
+ * outputs with a dead time between them, fault inputs that act on the
+ * pins with no CPU in the path - or to run a counter from the PLL, above
+ * CLK_MAIN's 24 MHz. The AVR EA has no TCD: the whole header is gated on
+ * the device header's TCD0 (below), so it is includable on every part
+ * and names nothing there. It has the two strata of every brio
+ * peripheral header, as docs/avrxt/tcd.md describes:
  *
- *  RESOURCE - Tcd<0>: the typed view of the one instance. A config
+ *  the resource - Tcd<0>: the typed view of the one instance. A config
  *  struct owns the whole configuration (route, clock and the two
  *  prescalers, waveform mode, the four compare values, the output
  *  override, the two event inputs with their modes, the fault outputs,
  *  the delay block, the dither); init<cfg>() folds it and refuses at
  *  compile time what this package or the errata cannot do, init(cfg)
  *  computes it at run time and returns false instead. Then the verbs:
- *  the THREE SYNCHRONIZATION DISCIPLINES of this peripheral (below),
+ *  the three synchronization disciplines of this peripheral (below),
  *  the double-buffered compares, the two 12-bit captures with their
- *  read-L-then-H rule, the strobes, the flags, the two ISR bodies and
- *  release() - every claimed pin handed back to PORT.
+ *  read-L-then-H rule, the strobes, the flags, the two interrupt bodies
+ *  and release() - every claimed pin handed back to PORT.
  *
- *  TASK - TcdPwm<route>: the complementary output pair with dead time,
- *  the reason this peripheral exists. One ramp mode, WOA and WOB (and
- *  optionally WOC/WOD mirroring either), a symmetric dead time on both
- *  edges, duty updates through the double buffers. The other usage
+ *  the task - TcdPwm<route>: the complementary output pair with dead
+ *  time, the reason this peripheral exists (a task is a driver layer
+ *  with state of its own over the resource). One ramp mode, WOA and WOB
+ *  (and optionally WOC/WOD mirroring either), a symmetric dead time on
+ *  both edges, duty updates through the double buffers. The other usage
  *  types this timer can serve (the four-ramp bridge drive, the dual
  *  slope resonant converter, the capture instruments) are deliberately
- *  NOT built: they belong with their first real user.
+ *  not built: they belong with their first real user.
+ *
+ *  Both are monostates (classes whose state is static, with no
+ *  instances).
+ *
+ * The smallest use, the pair on the default route at 20 kHz:
+ *
+ *   using SysClock = brio::Clock<brio::ClockSource::crystal, 24'000'000>;
+ *   constexpr SysClock clock;
+ *   using Pwm = brio::TcdPwm<brio::TcdRoute::def>;   // WOA on PA4, WOB on PA5
+ *
+ *   int main() {
+ *       SysClock::init();
+ *       const bool ok = Pwm::init(clock, {.clock = brio::TcdClock::clkper,
+ *                                         .hz = 20'000, .dead_time_ticks = 60,
+ *                                         .auto_update = true});
+ *       if (ok) Pwm::duty(Pwm::max() / 4);   // lands at the end of the cycle
+ *       ...
+ *   }
+ *
+ * With TcdClock::clkper the counter rate comes from the clock tag, so
+ * the clock task runs first, and a DynamicClock that does not list
+ * TcdPwm is a compile error at init(); with another source the program
+ * states the rate in source_hz and nothing checks it (the PLL is started
+ * first, avrxt/clock.hpp). TcdPwm::init() claims PA4 and PA5 as outputs
+ * and enables no interrupt; a program that enables TCD0_OVF or TCD0_TRIG
+ * on the resource binds the vector with ISR() to ovf() or
+ * take_triggers().
+ *
+ * Which context may call what. Nothing here masks interrupts and
+ * nothing holds a caller's buffer.
+ *  - The configuring verbs - init(), init<cfg>(), release(), the
+ *    discipline-3 setters, fault_control(), the interrupt enables,
+ *    input_a_on/input_b_on and their _off twins, and TcdPwm's init(),
+ *    start(), stop(), stop_at_end() and release() - are setup verbs:
+ *    main(), after the clock task and before sei(), or an active
+ *    object's handler (an active object is a component of a brio
+ *    program with its own event queue, served one event at a time by
+ *    the kernel). INTCTRL, CTRLA and PORTMUX.TCDROUTEA are
+ *    read-modify-written with no guard: never from an interrupt handler
+ *    that may interrupt another such call.
+ *  - The verbs of disciplines 1 and 2 wait: each polls STATUS.ENRDY or
+ *    STATUS.CMDRDY at most `spins` times (tcd_sync_spins, 65535, by
+ *    default) and returns false when the window never opened, a CLK_TCD
+ *    source that is not running being the usual cause. On CLK_PER both
+ *    windows reopen within one further read (measured,
+ *    docs/avrxt/tcd.md); on a slow CLK_TCD the wait is that clock's.
+ *    The compare and dither setters, TcdPwm::duty(), sync() and
+ *    sync_at_end() are among them; a sequence of them (TcdPwm::duty()
+ *    writes two or three compares) is not atomic against another caller,
+ *    so one context drives an instance's compares.
+ *  - The interrupt bodies - ovf() for TCD0_OVF_vect, take_triggers() for
+ *    TCD0_TRIG_vect - are called from the program's ISR() for that
+ *    vector and nowhere else; each clears its flags with one store.
+ *  - The flag verbs and the 8-bit read-backs are single loads or
+ *    stores, take_pwm_activity() a load and a store, all legal from any
+ *    context. The 12-bit read-backs read a low byte then a high byte,
+ *    and capture_a() and capture_b() do the same with the high read
+ *    releasing the buffer, so each capture register has one reader.
  *
  * The three synchronization disciplines (25.3.3.1) - the whole shape of
  * this driver follows from them, because the TCD core runs on a clock
- * ASYNCHRONOUS to CLK_PER:
+ * asynchronous to CLK_PER:
  *  1. ENABLE (CTRLA bit 0) may only be written while STATUS.ENRDY is
  *     '1'. Every verb that touches it waits, bounded, and returns false
  *     rather than write into a closed window.
@@ -35,9 +100,9 @@
  *     '1'; the same bounded wait guards them, and the double-buffered
  *     registers (CMPxSET/CLR, DLYCTRL/DLYVAL, DITCTRL/DITVAL, DBGCTRL)
  *     are written under it too.
- *  3. The STATIC registers (CTRLB, CTRLC, CTRLD, EVCTRLA/B, INPUTCTRLA/
+ *  3. The static registers (CTRLB, CTRLC, CTRLD, EVCTRLA/B, INPUTCTRLA/
  *     B, FAULTCTRL and every CTRLA bit except ENABLE) cannot be written
- *     while the TCD is enabled. The setters ENFORCE it: they return
+ *     while the TCD is enabled. The setters enforce it: they return
  *     false and write nothing when ENABLE reads '1'.
  * FAULTCTRL is also under Configuration Change Protection (IOREG key):
  *  it goes out through _PROTECTED_WRITE.
@@ -45,55 +110,57 @@
  * Facts that shape the code (25.3, 25.5, errata DS80000915F 2.14.x and
  * DS80000882C 2.13.x, plus the CLKCTRL PLL items 2.5.3/2.5.4 and 2.4.1):
  *  - the counter is 12 bits: every compare and capture is masked to
- *    0x0FFF. CAPTUREA/B are read LOW BYTE FIRST, and the read of the
- *    HIGH byte is what releases the buffer for the next capture - the
+ *    0x0FFF. CAPTUREA/B are read low byte first, and the read of the
+ *    high byte is what releases the buffer for the next capture - the
  *    resource performs the pair, so no caller can leak the discipline;
  *  - CLK_TCD comes from OSCHF, the PLL, EXTCLK or CLK_PER, then through
  *    SYNCPRES (1/2/4/8) and CNTPRES (1/4/32): the counter runs at
  *    src / (SYNCPRES * CNTPRES), the synchronizer at src / SYNCPRES;
  *  - the PLL is the only consumer-visible reason the PLL exists on this
- *    silicon: 16-24 MHz in, 32-48 MHz out, and it runs ONLY while a
+ *    silicon: 16-24 MHz in, 32-48 MHz out, and it runs only while a
  *    peripheral requests it - the TCD is that peripheral;
- *  - INPUT MODE VALIDITY (table 25-5) is a real constraint, not advice:
+ *  - input mode validity (table 25-5) is a real constraint, not advice:
  *    modes 2/3/5/6 need two- or four-ramp; dual slope takes only 0 and
  *    4 once errata 2.14.3 has taken mode 7 away. tcd_input_mode_valid()
  *    is the table, checked at compile time by init<cfg>() and at run
  *    time by init(cfg);
- *  - dithering is NOT supported in dual slope (25.3.3.5): refused;
+ *  - dithering is not supported in dual slope (25.3.3.5): refused;
  *  - input blanking and the programmable output event share DLYCTRL, so
  *    they are one field here (TcdDelaySelect) - asking for both is not
  *    expressible;
- *  - ERRATA 2.14.1 / 2.13.1 (DB A4/A5, DA every revision): asynchronous
- *    input events (CFG = ASYNC) MISS EVENTS when CNTPRES is not DIV1.
- *    It is fixed in DB rev. B0, so it is NOT refused here - it is
+ *  - errata 2.14.1 / 2.13.1 (DB A4/A5, DA every revision): asynchronous
+ *    input events (CFG = ASYNC) miss events when CNTPRES is not DIV1.
+ *    It is fixed in DB rev. B0, so it is not refused here - it is
  *    stated, and the workaround is to divide with SYNCPRES instead;
- *  - ERRATA 2.14.2 / 2.13.2 (DB A4/A5, DA every revision): on ANY
- *    alternate route, CMPAEN in FAULTCTRL gates ALL FOUR outputs - a
+ *  - errata 2.14.2 / 2.13.2 (DB A4/A5, DA every revision): on any
+ *    alternate route, CMPAEN in FAULTCTRL gates all four outputs - a
  *    WOB-only configuration on ALT1/2/3 drives nothing. No workaround
- *    but "also set CMPAEN". Rev-dependent again, so the route table
- *    below states it and does not refuse it;
- *  - ERRATA 2.14.3 / 2.13.3 (EVERY revision of both families): input
+ *    but "also set CMPAEN". Rev-dependent again, so it is stated here
+ *    and in docs/avrxt/tcd.md and not refused (TcdPwm always enables
+ *    WOA);
+ *  - errata 2.14.3 / 2.13.3 (every revision of both families): input
  *    mode 7 (WAITSW, halt and wait for a software RESTART) does not
- *    work with CMPASET = 0 or in dual slope. Both are REFUSED here, at
+ *    work with CMPASET = 0 or in dual slope. Both are refused here, at
  *    compile time and at run time - no silicon revision escapes it;
  *  - routes (PORTMUX.TCDROUTEA), exactly the device headers' own enums,
  *    with the pin-level bonding facts they carry in their comments:
  *      DEFAULT  PA4 PA5 PA6 PA7   every package
- *      ALT1     PB4 PB5 -   -     48-pin (WOC/WOD PINLESS)
+ *      ALT1     PB4 PB5 -   -     48-pin (WOC/WOD pinless)
  *               PB4 PB5 PB6 PB7   64-pin
- *      ALT2     PF0 PF1 -   -     28-pin (WOC/WOD PINLESS)
+ *      ALT2     PF0 PF1 -   -     28-pin (WOC/WOD pinless)
  *               PF0 PF1 PF2 PF3   32/48/64-pin
  *      ALT3     PG4 PG5 PG6 PG7   64-pin only
  *    A pinless position keeps the route usable: the missing branch is
  *    compiled out (port_exists + if constexpr), a config that enables
  *    an output with no pin is refused;
- *  - the TCD has TWO interrupt vectors, TCD0_OVF and TCD0_TRIG, and
+ *  - the TCD has two interrupt vectors, TCD0_OVF and TCD0_TRIG, and
  *    four event generators (CMPBCLR, CMPASET, CMPBSET, PROGEV) plus two
  *    event users (input A and input B) - all in evsys.hpp;
- *  - STATUS.PWMACTA/B are toggle DETECTORS: hardware sets them on every
+ *  - STATUS.PWMACTA/B are toggle detectors: hardware sets them on every
  *    edge of WOA/WOB and software clears them by writing a one. They
  *    are the only way to ask "is this output still moving?" without a
- *    pin.
+ *    pin - and what they watch is the waveform generator behind the
+ *    fault override, not the pad (measured, take_pwm_activity() below).
  */
 
 #pragma once
@@ -116,7 +183,7 @@ namespace brio {
 
 // ---- routes and pins (17.5.x, 25.2.2) ---------------------------------------
 
-/// TCD pin routing (PORTMUX.TCDROUTEA). The values ARE the device
+/// TCD pin routing (PORTMUX.TCDROUTEA). The values are the device
 /// header's own group values. There is no pinless code here: unlike the
 /// serial peripherals, the TCD's route field has no NONE - an instance
 /// with no output enabled in FAULTCTRL is the pinless configuration.
@@ -138,7 +205,7 @@ static_assert(static_cast<uint8_t>(TcdRoute::def) == PORTMUX_TCD0_DEFAULT_gv &&
 /// them, selected by CTRLC.CMPCSEL/CMPDSEL.
 enum class TcdOutput : uint8_t { woa = 0, wob = 1, woc = 2, wod = 3 };
 
-/// Where one output of one route sits, and whether THIS package bonds
+/// Where one output of one route sits, and whether this package bonds
 /// it out. `bonded == false` means the silicon has the function but no
 /// pin for it here (48-pin ALT1 WOC/WOD, 28-pin ALT2 WOC/WOD).
 struct TcdPin {
@@ -176,7 +243,7 @@ constexpr bool tcd_route_exists(TcdRoute r) {
     return false;
 }
 
-/// The position of one output of one route on THIS package, with the
+/// The position of one output of one route on this package, with the
 /// pin-level bonding facts the headers' comments carry: 48-pin ALT1
 /// stops at PB5 and 28-pin ALT2 stops at PF1, in both families.
 constexpr TcdPin tcd_pin(TcdRoute r, TcdOutput o) {
@@ -192,7 +259,7 @@ constexpr TcdPin tcd_pin(TcdRoute r, TcdOutput o) {
 
 // ---- the knobs (25.5.1 - 25.5.18) -------------------------------------------
 
-/// CTRLA.CLKSEL: what CLK_TCD is. The values ARE the header's codes.
+/// CTRLA.CLKSEL: what CLK_TCD is. The values are the header's codes.
 enum class TcdClock : uint8_t {
     oschf = TCD_CLKSEL_OSCHF_gc,     ///< the internal high-frequency oscillator
     pll = TCD_CLKSEL_PLL_gc,         ///< the PLL (its only consumer on this silicon)
@@ -200,7 +267,7 @@ enum class TcdClock : uint8_t {
     clkper = TCD_CLKSEL_CLKPER_gc,   ///< the main clock after its prescaler
 };
 
-/// CTRLA.SYNCPRES: divides CLK_TCD into the SYNCHRONIZER clock, which
+/// CTRLA.SYNCPRES: divides CLK_TCD into the synchronizer clock, which
 /// the delay block and the input processing logic run on.
 enum class TcdSyncPrescaler : uint8_t {
     div1 = TCD_SYNCPRES_DIV1_gc,
@@ -209,9 +276,10 @@ enum class TcdSyncPrescaler : uint8_t {
     div8 = TCD_SYNCPRES_DIV8_gc,
 };
 
-/// CTRLA.CNTPRES: divides the synchronizer clock into the COUNTER
-/// clock. Errata 2.14.1: anything but DIV1 loses asynchronous input
-/// events on the affected revisions - divide with SYNCPRES instead.
+/// CTRLA.CNTPRES: divides the synchronizer clock into the counter
+/// clock. Errata DB 2.14.1 / DA 2.13.1: anything but DIV1 loses
+/// asynchronous input events on the affected revisions (DB A4/A5, every
+/// DA) - divide with SYNCPRES instead.
 enum class TcdCountPrescaler : uint8_t {
     div1 = TCD_CNTPRES_DIV1_gc,
     div4 = TCD_CNTPRES_DIV4_gc,
@@ -253,7 +321,7 @@ enum class TcdWaveform : uint8_t {
 };
 
 /// INPUTCTRLA/B.INPUTMODE: what an input event does (25.3.3.4.5). The
-/// values ARE the header's codes.
+/// values are the header's codes.
 enum class TcdInputMode : uint8_t {
     none = TCD_INPUTMODE_NONE_gc,                  ///< 0: no action (captures still work)
     jump_wait = TCD_INPUTMODE_JMPWAIT_gc,          ///< 1: stop, jump to the opposite cycle, wait
@@ -276,13 +344,13 @@ enum class TcdEventConfig : uint8_t {
     async = TCD_CFG_ASYNC_gc,       ///< the event overrides the output instantly
 };
 
-/// EVCTRLx.ACTION: a fault only, or a fault AND a counter capture.
+/// EVCTRLx.ACTION: a fault only, or a fault and a counter capture.
 enum class TcdEventAction : uint8_t {
     fault = TCD_ACTION_FAULT_gc,
     capture = TCD_ACTION_CAPTURE_gc,
 };
 
-/// DLYCTRL.DLYSEL: the ONE function the delay block serves. Input
+/// DLYCTRL.DLYSEL: the one function the delay block serves. Input
 /// blanking and the programmable output event share the trigger, the
 /// prescaler and the value (25.3.4.1), so asking for both is not
 /// expressible - which is the refusal.
@@ -333,9 +401,9 @@ enum class TcdWaveformSelect : uint8_t { pwm_a = 0, pwm_b = 1 };
 /// The counter, the compares and the captures are 12 bits wide.
 inline constexpr uint16_t tcd_compare_max = 0x0FFF;
 
-/// Extra TCD clock cycles added to the CYCLE when the dither
+/// Extra TCD clock cycles added to the cycle when the dither
 /// accumulator overflows (table 25-7). Where this is 0 the compensation
-/// is taken out of the FOLLOWING output state instead, so the cycle
+/// is taken out of the following output state instead, so the cycle
 /// length does not move - only the duty does.
 constexpr uint8_t tcd_dither_cycle_cost(TcdWaveform w, TcdDitherSelect d) {
     const bool on_time = d == TcdDitherSelect::on_time_b || d == TcdDitherSelect::on_time_ab;
@@ -377,7 +445,7 @@ constexpr uint32_t tcd_cycle_ticks(TcdWaveform w, uint16_t a_set, uint16_t a_clr
 /// Table 25-5, with errata 2.14.3 folded in: the input modes that need
 /// a counter which resets more than once per cycle are refused in one
 /// ramp, dual slope takes almost nothing, and mode 7 is refused in dual
-/// slope on EVERY silicon revision of both families.
+/// slope on every silicon revision of both families.
 constexpr bool tcd_input_mode_valid(TcdWaveform w, TcdInputMode m) {
     const uint8_t code = static_cast<uint8_t>(m);
     if (code > 10) return false;
@@ -469,13 +537,13 @@ struct TcdConfig {
 
 /// Is this configuration legal on this package and this silicon?
 ///  - the route must exist here;
-///  - every ENABLED output must have a bonded pin on that route;
+///  - every enabled output must have a bonded pin on that route;
 ///  - both input modes must be valid for the waveform mode (table 25-5
 ///    with errata 2.14.3 folded in);
 ///  - input mode 7 needs CMPASET != 0 (errata 2.14.3, every revision);
 ///  - dithering is not supported in dual slope (25.3.3.5);
 ///  - no compare may exceed 12 bits.
-/// Deliberately NOT refused: errata 2.14.1 (async events with a counter
+/// Deliberately not refused: errata 2.14.1 (async events with a counter
 /// prescaler) and 2.14.2 (CMPAEN gating every output on an alternate
 /// route) are fixed in DB rev. B0, so refusing them would make the
 /// driver useless on the silicon that works. They are documented in
@@ -574,7 +642,10 @@ public:
     /// rejects; then disables under ENRDY, writes every static register
     /// with the peripheral down, loads the double buffers, claims the
     /// enabled output pins and enables under ENRDY again. Interrupts
-    /// stay off: the task or the app enables them.
+    /// stay off: the task or the app enables them. False also when the
+    /// disable's ENRDY window never opens (nothing written) and when the
+    /// final enable's does not (everything written, the TCD left off);
+    /// with cfg.enable false, true once written. Setup context.
     static bool init(const TcdConfig& cfg) {
         if (!tcd_config_valid(cfg)) return false;
         if (!disable()) return false;
@@ -631,8 +702,9 @@ public:
 
     /// Hand everything back: the peripheral disabled, every output
     /// released in FAULTCTRL, the claimed pins back to PORT inputs, the
-    /// route back to DEFAULT. The "Entry routes, Exit disconnects"
-    /// idiom leaves no trace.
+    /// route back to DEFAULT, so nothing init() set up is left behind.
+    /// Setup context; false when disable() did not complete (one of its
+    /// ENRDY waits ran out), the rest done anyway.
     static bool release() {
         const bool down = disable();
         fault_control(false, false, false, false, false, false, false, false);
@@ -702,9 +774,9 @@ public:
     // ---- the double-buffered compares -------------------------------------
     //
     // Written low byte first. With CTRLC.AUPDATE set, the write of
-    // CMPBCLR's HIGH byte is itself the end-of-cycle synchronization
+    // CMPBCLR's high byte is itself the end-of-cycle synchronization
     // request (25.5.3), which is why compare_b_clear() is the verb an
-    // auto-updating application calls LAST.
+    // auto-updating application calls last.
 
     static bool compare_a_set(uint16_t v, uint16_t spins = tcd_sync_spins) {
         if (!wait_command_ready(spins)) return false;
@@ -743,7 +815,7 @@ public:
 
     // ---- the captures (25.5.19, 25.5.20) ----------------------------------
     //
-    // Read LOW byte then HIGH byte: the read of the high byte is what
+    // Read low byte then high byte: the read of the high byte is what
     // releases the capture buffer for the next capture. The pair is
     // performed here, so no caller can half-read one.
 
@@ -752,7 +824,7 @@ public:
 
     // ---- discipline 3: the static registers, only while disabled -----------
     //
-    // Each of these returns false and writes NOTHING while the TCD is
+    // Each of these returns false and writes nothing while the TCD is
     // enabled (25.3.3.1: "Static registers cannot be updated while the
     // TCD is enabled").
 
@@ -815,7 +887,7 @@ public:
     }
     /// FAULTCTRL, under CCP: which outputs are enabled on their pins and
     /// what level each takes while a fault is active. Enabled outputs
-    /// are ALSO driven as PORT outputs by claim_pins()/init().
+    /// are also driven as PORT outputs by claim_pins()/init().
     static void fault_control(bool en_a, bool en_b, bool en_c, bool en_d,
                               bool val_a, bool val_b, bool val_c, bool val_d) {
         const uint8_t v = static_cast<uint8_t>(
@@ -861,16 +933,17 @@ public:
     // ---- status, flags, interrupts ----------------------------------------
 
     /// STATUS.PWMACTA/B: toggle detectors, cleared by writing a one.
-    /// Read AND clear in one verb, so "did this waveform move since I
+    /// Read and clear in one verb, so "did this waveform move since I
     /// last asked?" is one call. A plain store of the two bits: an RMW
     /// would write back CMDRDY/ENRDY too.
     ///
-    /// MEASURED: the chapter says "each time the WOx output toggles",
-    /// and the pad is NOT what it watches. With an input mode holding
+    /// Measured: the chapter says "each time the WOx output toggles",
+    /// and the pad is not what it watches. With an input mode holding
     /// the outputs off (mode 4, mode 10) the pins provably stand still
-    /// and PWMACT keeps setting - it follows the WAVEFORM GENERATOR
-    /// behind the fault override. The W1C clear itself is sound (with the TCD
-    /// disabled the bits stay down). To ask about the PAD, read the pin.
+    /// and PWMACT keeps setting - it follows the waveform generator
+    /// behind the fault override. The W1C clear itself is sound (with
+    /// the TCD disabled the bits stay down). To ask about the pad, read
+    /// the pin.
     static TcdActivity take_pwm_activity() {
         const uint8_t s = regs().STATUS;
         regs().STATUS = static_cast<uint8_t>(TCD_PWMACTA_bm | TCD_PWMACTB_bm);
@@ -921,7 +994,7 @@ public:
     static uint8_t claimed_outputs() { return outputs_; }
 
     /// Drive the pins of the enabled outputs. The branch for a position
-    /// this package lacks is compiled OUT (a runtime `if` would
+    /// this package lacks is compiled out (a runtime `if` would
     /// instantiate a Pin on a missing port and kill the whole instance);
     /// tcd_config_valid() has already refused such a configuration.
     static void claim_pins(const TcdConfig& cfg) {
@@ -1011,7 +1084,7 @@ struct TcdPwmConfig {
     TcdSyncPrescaler sync_prescaler = TcdSyncPrescaler::div1;
     TcdCountPrescaler count_prescaler = TcdCountPrescaler::div1;
 
-    /// The rate of the SELECTED clock source, before the prescalers.
+    /// The rate of the selected clock source, before the prescalers.
     /// Ignored (and taken from the clock object) when clock == clkper.
     uint32_t source_hz = 0;
 
@@ -1020,7 +1093,7 @@ struct TcdPwmConfig {
     /// The cycle length in counter ticks, when hz is 0.
     uint16_t period_ticks = 0;
 
-    /// The dead time inserted on BOTH edges, in counter ticks.
+    /// The dead time inserted on both edges, in counter ticks.
     uint16_t dead_time_ticks = 0;
 
     /// The initial on-time of WOA, in counter ticks (0 = half of what
@@ -1057,7 +1130,7 @@ struct TcdPwmConfig {
  * CMPBSET through the double buffers, which is why the two dead times
  * stay exactly what they were asked to be at every duty.
  *
- * NOT a PwmChannel: `max` here is a run-time value (period minus the two
+ * Not a PwmChannel: `max` here is a run-time value (period minus the two
  * dead times), and the concept wants a compile-time one. A half-bridge
  * driver is not a dimmable LED.
  *
@@ -1083,7 +1156,9 @@ struct TcdPwm {
 
     /// Configure and start. False when the geometry does not fit 12
     /// bits, when the requested rate is not reachable, or when the
-    /// resource refuses the configuration.
+    /// resource refuses the configuration - Tcd<0>::init(), whose false
+    /// includes an ENRDY window that never opened. Setup context, after
+    /// the clock task; it claims WOA, WOB and the asked WOC/WOD pins.
     template <typename Clock>
     static bool init(Clock clock_obj, const TcdPwmConfig& cfg) {
         static_assert(clock_follows<Clock, TcdPwm>(),
@@ -1114,7 +1189,11 @@ struct TcdPwm {
     /// minus the two dead times. Goes through the double buffers, so it
     /// lands at the next synchronization: at the end of the cycle by
     /// itself with auto_update, otherwise at the caller's sync() /
-    /// sync_at_end(). False when v exceeds max().
+    /// sync_at_end(). False when v exceeds max() or when a CMDRDY wait
+    /// (tcd_sync_spins polls before each of the two or three compare
+    /// writes) runs out. The writes are not atomic against another
+    /// caller: one context drives the duty.
+
     static bool duty(uint16_t v) {
         if (period_ == 0 || v > max_) return false;
         const uint16_t a_clr = static_cast<uint16_t>(a_set_ + v);
@@ -1123,7 +1202,7 @@ struct TcdPwm {
         if (!T::compare_a_clear(a_clr)) return false;
         if (!T::compare_b_set(b_set)) return false;
         duty_ = v;
-        // With AUPDATE the write of CMPBCLR's high byte IS the request,
+        // With AUPDATE the write of CMPBCLR's high byte is the request,
         // so rewriting the (unchanged) period is what schedules the
         // update - and it costs nothing else.
         if (cfg_.auto_update) return T::compare_b_clear(static_cast<uint16_t>(period_ - 1u));

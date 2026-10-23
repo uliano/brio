@@ -1,12 +1,15 @@
 /*
  * sdadc.hpp
  *
- * The SAM C21's 16-bit SIGMA-DELTA converter (DS60001479M ch. 39), this
- * family's third and strangest converter. A MONOSTATE `Sdadc`, not
- * `Sdadc<n>`: there is
- * exactly one instance on every C21 variant, so an index would be a
- * parameter with a single legal value (the `Rtc` and `Dac` shape in
- * this stratum, against `Adc<n>`'s two real instances).
+ * A slow, fine voltage reading on the SAM C21: a differential pair of
+ * pads read to sixteen specified bits and more, once or free-running,
+ * with hardware offset, gain and window post-processing. The 16-bit
+ * sigma-delta converter (DS60001479M ch. 39) is this family's third and
+ * strangest converter. A monostate `Sdadc` (a class whose state and
+ * functions are all static), not `Sdadc<n>`: there is exactly one
+ * instance on every C21 variant, so an index would be a parameter with
+ * a single legal value (the `Rtc` and `Dac` shape in this stratum,
+ * against `Adc<n>`'s two real instances). The smallest use:
  *
  *   brio::Sdadc::init(generator, brio::SdadcConfig{
  *       .reference = brio::SdadcRef::vddana,
@@ -14,58 +17,75 @@
  *       .osr = brio::SdadcOsr::osr256});
  *   (void)brio::Sdadc::select(0);             // the AINN0/AINP0 pair
  *   int16_t v = 0;
- *   if (brio::Sdadc::read(v)) { ... }         // SIGNED, -VREF .. +VREF
+ *   if (brio::Sdadc::read(v)) { ... }         // signed, -VREF .. +VREF
+ *
+ * Who calls what. init() and release() are setup calls in main(), after
+ * the clock task's init() (the generator's rate passed to init() is a
+ * claim the prescaler check trusts); init() answers false for a
+ * configuration sdadc_config_valid() refuses, a prescaler out of range
+ * for the rate given, or a synchronization that never settled. Every
+ * synchronized write here waits before it stores (the bus error below),
+ * and every wait is bounded - 0xFFFF polls for a synchronization,
+ * 0xFFFFFF for a conversion in read(), next() and discard(); read() and
+ * next() answer false when theirs runs out, with nothing stored. Those
+ * three spin for whole conversions, SKPCNT + 1 decimation windows each
+ * for a single one, and belong to main context (setup, or an active
+ * object's handler - an active object being a brio component with its
+ * own event queue, served one event at a time by the kernel). isr() and
+ * resrdy() are the bodies the program's SDADC_Handler calls, and
+ * nothing else does. Nothing here masks interrupts and nothing keeps a
+ * caller's storage.
  *
  * ---------------------------------------------------------------------
- * WHAT THE SILICON DOES, and how little of it is like the SAR.
+ * What the silicon does, and how little of it is like the SAR.
  *
- * A sigma-delta modulator running at CLK_SDADC_FS feeds a THIRD-ORDER
- * SINC DECIMATION FILTER (39.6.3), and the filter - not a successive
+ * A sigma-delta modulator running at CLK_SDADC_FS feeds a third-order
+ * SINC decimation filter (39.6.3), and the filter - not a successive
  * approximation - is what makes the result. (The chapter states the
- * FILTER's order and never the modulator's, so neither does this file.)
+ * filter's order and never the modulator's, so neither does this file.)
  * So:
  *
- *  - THE INPUT IS ALWAYS DIFFERENTIAL. MUXSEL names a PAIR of pads
+ *  - The input is always differential. MUXSEL names a pair of pads
  *    (AINN<k>, AINP<k>), never a single one, and there are three pairs.
  *    "Single-ended mode" in the electrical tables is the same thing with
- *    the negative pad grounded EXTERNALLY (table 45-26 note 3), which
+ *    the negative pad grounded externally (table 45-26 note 3), which
  *    costs a bit of resolution and is not a register setting.
- *  - THE RESULT IS SIGNED, spanning -VREF .. +VREF. 39.1 and 39.8.19
- *    say signed; 39.6.1, 39.6.3.1 and 39.6.3.4 all say UNSIGNED, and
- *    39.6.3.4 even saturates to [0 : 2^16-1]. THE CHAPTER CONTRADICTS
- *    ITSELF FOUR TIMES; the bench settles it - a rail-to-rail
+ *  - The result is signed, spanning -VREF .. +VREF. 39.1 and 39.8.19
+ *    say signed; 39.6.1, 39.6.3.1 and 39.6.3.4 all say unsigned, and
+ *    39.6.3.4 even saturates to [0 : 2^16-1]. The chapter contradicts
+ *    itself four times; the bench settles it - a rail-to-rail
  *    differential reads 0x7FFFFF one way round and 0x800000 the other.
- *  - AND THE DATAPATH IS TWENTY-FOUR BITS WIDE, WHICH THE CHAPTER NEVER
- *    SAYS. 39.8.19 calls RESULT "a signed integer value with 24-bit
+ *  - And the datapath is twenty-four bits wide, which the chapter never
+ *    says. 39.8.19 calls RESULT "a signed integer value with 24-bit
  *    size" and adds that the conversion result is "left-adjusted" in it,
  *    which reads like eight bits of padding. It is not padding: the
- *    register SATURATES at +/-2^23 (0x7FFFFF and 0x800000, not 0x7FFF00
- *    and 0x800000), the corrections of 39.6.3.4 act in RAW 24-BIT UNITS -
- *    an OFFSETCORR of 25600 moves the reading by EXACTLY 100 of the
+ *    register saturates at +/-2^23 (0x7FFFFF and 0x800000, not 0x7FFF00
+ *    and 0x800000), the corrections of 39.6.3.4 act in raw 24-bit units -
+ *    an OFFSETCORR of 25600 moves the reading by exactly 100 of the
  *    16-bit datum's counts, i.e. by 25600/256 - and the low bits carry
- *    real filter output. So this file has THREE result verbs: `result()` is the
+ *    real filter output. So this file has three result verbs: `result()` is the
  *    16-bit datum the chapter specifies (the top 16 bits, which is what
  *    `half_steps` scales), `result24()` is the whole signed 24-bit value,
- *    and `result_raw()` is the register. Anything about the CORRECTIONS
+ *    and `result_raw()` is the register. Anything about the corrections
  *    is in 24-bit units.
- *  - THERE IS NO SAMPLE LENGTH AND NO RESOLUTION KNOB. The output rate
+ *  - There is no sample length and no resolution knob. The output rate
  *    is CLK_SDADC_FS / OSR, the specified resolution is always 16 bits,
  *    and OSR is the only thing trading rate against noise. 39.8.3: "The
  *    OSR must never be changed while the SDADC is running."
- *  - SKPCNT is a WARM-UP, not an average. A sigma-delta's filter has to
- *    fill before its output means anything, so a SINGLE conversion
+ *  - SKPCNT is a warm-up, not an average. A sigma-delta's filter has to
+ *    fill before its output means anything, so a single conversion
  *    actually runs SKPCNT+1 decimation windows and returns the last -
  *    measured, each skipped window costing exactly one window's time.
  *    The reset value is 2, which is 39.6.2.3's "the first valid sample
  *    starts from the third sample onward" expressed as a register, and
  *    it is also erratum 1.18.3's own workaround ("Write CTRLB.SKPCNT to
  *    2 before running single conversions"). `sdadc_config_valid()`
- *    REFUSES a single-conversion configuration with fewer than two
+ *    refuses a single-conversion configuration with fewer than two
  *    skipped windows, because the chapter, the reset value and the
  *    errata all say the same thing: that data is invalid.
  *
  * ---------------------------------------------------------------------
- * THE CLOCK, which has THREE stages and is easy to get wrong by a factor
+ * The clock, which has three stages and is easy to get wrong by a factor
  * of four:
  *
  *      CLK_SDADC     = GCLK_SDADC / (2 x (PRESCALER + 1))   (39.5.3)
@@ -73,14 +93,14 @@
  *      output rate   = CLK_SDADC_FS / OSR                   (free running)
  *                    = CLK_SDADC_FS / (OSR x (SKPCNT + 1))  (single)
  *
- * PRESCALER IS EIGHT BITS AND LINEAR, and this is where the device
+ * PRESCALER is eight bits and linear, and this is where the device
  * header lies: it declares eight enumerators DIV2, DIV4, DIV8 ... DIV256
  * for codes 0..7, which is the SAM D21's power-of-two prescaler. This
  * silicon's is a 7-bit-plus-one linear divider - 39.5.3 and 39.8.3 both
  * say "between GCLK_SDADC/2 (PRESCAL 0) and GCLK_SDADC/512 (PRESCAL
  * 255)", and figure 39-2 draws DIV2, DIV4, DIV6, DIV8, DIV10 ... DIV510,
  * DIV512. A power-of-two reading cannot reach 512 from an 8-bit field at
- * all. MEASURED, crystal-ruled: PRESCALER 3/4/7/23 give conversion
+ * all. Measured, crystal-ruled: PRESCALER 3/4/7/23 give conversion
  * periods in the ratios 1000/1250/2001/6005 where 2 x (P + 1) predicts
  * 1000/1250/2000/6000 and the header's enumerators predict
  * 1000/2000/16000. `sdadc_prescaler_divisor()` follows the datasheet and
@@ -95,110 +115,110 @@
  * (docs/samc21/clock.md).
  *
  * ---------------------------------------------------------------------
- * THE FOUR REGISTER DISCIPLINES, spelled per register - and this chapter
- * disagrees with ITSELF about three of them, so each disagreement is
+ * The four register disciplines, spelled per register - and this chapter
+ * disagrees with itself about three of them, so each disagreement is
  * named where it lives and measured in the suite.
  *
- * 1. ENABLE-PROTECTED. 39.6.2.1's list is CTRLA.ONDEMAND/RUNSTDBY,
+ * 1. Enable-protected. 39.6.2.1's list is CTRLA.ONDEMAND/RUNSTDBY,
  *    CTRLB, CTRLC, EVCTRL, ANACTRL. The individual property lines say
  *    Enable-Protected for REFCTRL, CTRLB and EVCTRL only - so REFCTRL is
  *    protected by its own description and missing from the list, while
  *    CTRLC and ANACTRL are in the list and say only Write-Synchronized.
- *    MEASURED, by writing each raw under a running converter: REFCTRL,
- *    CTRLB and EVCTRL DISCARD the write and CTRLC and ANACTRL TAKE it -
+ *    Measured, by writing each raw under a running converter: REFCTRL,
+ *    CTRLB and EVCTRL discard the write and CTRLC and ANACTRL take it -
  *    so the individual property lines are right and 39.6.2.1's list is
  *    two entries too long. Everything here still writes all five only
- *    while the converter is DISABLED, which is correct under either
+ *    while the converter is disabled, which is correct under either
  *    reading and is what makes CTRLC's and ANACTRL's synchronization
  *    honest; the runtime verbs refuse while it is enabled.
- * 2. WRITE-SYNCHRONIZED, and THE BUS ERROR THAT MAKES THIS CHAPTER
- *    DIFFERENT. 39.6.8: "If an operation that require synchronization is
+ * 2. Write-synchronized, and the bus error that makes this chapter
+ *    different. 39.6.8: "If an operation that require synchronization is
  *    executed while its busy bit is on, the operation is discarded AND A
  *    BUS ERROR IS GENERATED." The ADC's and the DAC's chapters promise a
  *    silent discard; here the threatened penalty is a HardFault. So
- *    EVERY synchronized write in this file WAITS BEFORE WRITING, not
+ *    every synchronized write in this file waits before writing, not
  *    after, and returns false rather than storing into a busy register -
  *    which is why `select()` is a bool and not the void store
  *    samc21/adc.hpp's is. The bits that exist: SWRST, ENABLE, CTRLC,
  *    INPUTCTRL (SYNCBUSY calls it MUXCTRL), WINCTRL, WINLT, WINUT,
  *    OFFSETCORR, GAINCORR, SHIFTCORR, SWTRIG, ANACTRL.
- *    NOTE REFCTRL: 39.6.8's prose lists it among the registers needing
- *    write synchronization, and SYNCBUSY HAS NO BIT FOR IT. One of the
+ *    Note REFCTRL: 39.6.8's prose lists it among the registers needing
+ *    write synchronization, and SYNCBUSY has no bit for it. One of the
  *    two statements has to be wrong; this driver treats REFCTRL as
  *    enable-protected only, as its own property line does.
- * 3. WRITE-ONLY. SWTRIG's two bits are `W` in 39.8.17 and self-clearing;
+ * 3. Write-only. SWTRIG's two bits are `W` in 39.8.17 and self-clearing;
  *    there is nothing to read back, and `start()`/`flush()` say so.
- * 4. NEITHER. EVCTRL, INTENSET/CLR, INTFLAG, SEQSTATUS, SEQCTRL, and
+ * 4. Neither. EVCTRL, INTENSET/CLR, INTFLAG, SEQSTATUS, SEQCTRL, and
  *    DBGCTRL - which 39.8.22 also says is not reset by a software reset.
  *
- * NOT PAC-PROTECTED (39.5.8): INTFLAG, and nothing else.
+ * Not PAC-protected (39.5.8): INTFLAG, and nothing else.
  *
  * ---------------------------------------------------------------------
- * THE POST-PROCESSING, which is the reason a Multislope wants this part.
+ * The post-processing, which is the reason a Multislope wants this part.
  *
  *      Data = (Data0 + OFFSETCORR) x GAINCORR / 2^SHIFTCORR
  *
  * with OFFSETCORR a signed 24-bit value, GAINCORR an unsigned 14-bit one
  * and SHIFTCORR four bits (39.6.3.4 and each register's own description,
- * which print the formula three more times). IT RUNS IN 24-BIT UNITS,
+ * which print the formula three more times). It runs in 24-bit units,
  * measured: `Data0` is the 24-bit filter output, not the 16-bit datum
  * the chapter's "unsigned integer defined on 16 bits" claims, so an
- * OFFSETCORR of 1 moves the reading by ONE 256th of a 16-bit count.
+ * OFFSETCORR of 1 moves the reading by one 256th of a 16-bit count.
  * `sdadc_corrected()` is that formula, in those units. Two more things
  * follow that no caller should have to discover:
  *
- *  - GAINCORR'S RESET VALUE IS ONE, NOT ZERO, and a GAINCORR of zero
+ *  - GAINCORR's reset value is one, not zero, and a GAINCORR of zero
  *    multiplies every result to nothing. `sdadc_config_valid()` refuses
  *    it. (Erratum 1.18.3 is exactly this on revision B silicon, where
- *    the reset value WAS zero; the reset values printed in this revision
- *    of the chapter - GAINCORR 0x0001 and CTRLB.SKPCNT 2 - ARE that
+ *    the reset value was zero; the reset values printed in this revision
+ *    of the chapter - GAINCORR 0x0001 and CTRLB.SKPCNT 2 - are that
  *    item's workaround, baked into the register descriptions.)
- *  - THE GAIN IS AN INTEGER OVER A POWER OF TWO, not a fixed-point
+ *  - The gain is an integer over a power of two, not a fixed-point
  *    fraction like the SAR's GAINCORR: a gain of 1.5 is GAINCORR 3 with
- *    SHIFTCORR 1. `sdadc_gain_of()` and `sdadc_shift_for_gain()` do that
- *    arithmetic once.
+ *    SHIFTCORR 1. `sdadc_gain_permille()` and `sdadc_corrected()` do
+ *    that arithmetic once.
  *
- * CHOPPING (ANACTRL.ONCHOP) is the analog half of the same idea: 39.6.3.4
+ * Chopping (ANACTRL.ONCHOP) is the analog half of the same idea: 39.6.3.4
  * says offset error "can be compensated by setting the Chopper mode ON",
  * and table 45-27's DC figures are all taken with it on.
  *
  * ---------------------------------------------------------------------
- * WHAT THE HEADER HAS AND THE CHAPTER DOES NOT: `REFCTRL.REFRANGE`, two
- * bits at 5:4, present in the header's register mask (0xB3) and in NO
+ * What the header has and the chapter does not: `REFCTRL.REFRANGE`, two
+ * bits at 5:4, present in the header's register mask (0xB3) and in no
  * part of chapter 39 - not the bit table, not the register summary, not
  * the prose. It is exposed here because the house rule is that the
- * header wins on what EXISTS, and it is documented as unknown because
+ * header wins on what exists, and it is documented as unknown because
  * nothing in the documents of record says what it does.
  *
  * ---------------------------------------------------------------------
- * ERRATA, DS80000740S, read on the E/G/J ROW at revision F. Four SDADC
- * items and one device-level item; ONE is this silicon.
+ * Errata, DS80000740S, read on the E/G/J row at revision F. Four SDADC
+ * items and one device-level item; one is this silicon.
  *
- *  - 1.8.10 DAC Output Reference Selection (device level, ALL
- *    REVISIONS): with REFCTRL.REFSEL = DAC, starting a conversion makes
- *    THE DAC'S OUTPUT VOLTAGE noisy. The workaround is
- *    REFCTRL.ONREFBUF = 1, which `sdadc_config_valid()` REQUIRES for the
+ *  - 1.8.10 DAC Output Reference Selection (device level, all
+ *    revisions): with REFCTRL.REFSEL = DAC, starting a conversion makes
+ *    the DAC's output voltage noisy. The workaround is
+ *    REFCTRL.ONREFBUF = 1, which `sdadc_config_valid()` requires for the
  *    DAC reference - and for INTREF too, because 39.8.2's own Note asks
  *    for the buffer on both internal references. Measured in the suite.
- *  - 1.8.7 DMA Write Access in standby (ALL REVISIONS) names
+ *  - 1.8.7 DMA Write Access in standby (all revisions) names
  *    `SDADC: SWTRIG` among the registers a SleepWalking DMA write may
  *    fail to reach. Unreachable here: this stratum's one DMA channel
  *    writes a SERCOM's DATA, never in standby (samc21/dmac.hpp).
- *  - NOT this silicon, and each is a read-the-row trap: 1.18.1 (the APB
+ *  - Not this silicon, and each is a read-the-row trap: 1.18.1 (the APB
  *    clock having to be at least twice GCLK_SDADC or the first
- *    conversion of a sequence is invalid) is REVISION B ONLY; 1.18.3
- *    (GAINCORR and SKPCNT resetting to zero) is REVISION B ONLY, and
+ *    conversion of a sequence is invalid) is revision B only; 1.18.3
+ *    (GAINCORR and SKPCNT resetting to zero) is revision B only, and
  *    this revision's reset values are its workaround; 1.18.2 (poor INL
  *    near VREF, workaround "limit the range to +/- 0.7 x VREF") and
- *    1.18.4 (power consumption) are revisions B..E. NOTE that table
- *    45-26 has ABSORBED half of 1.18.2 as a specification: for
- *    VREF >= VDDANA - 0.3 V the input conversion range IS +/-0.7 x VREF
+ *    1.18.4 (power consumption) are revisions B..E. Note that table
+ *    45-26 has absorbed half of 1.18.2 as a specification: for
+ *    VREF >= VDDANA - 0.3 V the input conversion range is +/-0.7 x VREF
  *    on every revision, so a full-scale differential against VDDANA is
  *    outside specification here whatever the errata say.
  *
  * ---------------------------------------------------------------------
- * NOT BUILT (docs/samc21/sdadc.md carries the list): the converter as a
- * WAKE source; ANACTRL's CTLSDADC and
+ * Not built (docs/samc21/sdadc.md carries the list): the converter as a
+ * wake source; ANACTRL's CTLSDADC and
  * BUFTEST, which 39.8.21 describes too thinly to measure against
  * anything; REFCTRL.REFRANGE, a real field no document of record
  * explains; and the C20 half of the family, which has no SDADC at all.
@@ -1052,7 +1072,8 @@ public:
         }
         return false;
     }
-    /// The convenience form, for a converter known to be running.
+    /// The convenience form, for a converter known to be running: 0 when
+    /// no result came within the bound. Main context; it spins.
     static int16_t read(uint32_t spins = 0xFFFFFFu) {
         int16_t v = 0;
         (void)read(v, spins);

@@ -2,18 +2,56 @@
  * spi.hpp
  *
  * The SAM C21 SERCOM in SPI mode (DS60001479M ch. 32, over the baud
- * generator and the pad matrix of the shared ch. 30), in the two strata
- * the rest of this target uses:
+ * generator and the pad matrix of the shared ch. 30), for a program that
+ * talks to SPI devices through the bus arbiter, or answers another
+ * board's host as a client. The smallest use, a device client on the
+ * arbitrated bus (docs/samc21/spi.md, "How to use"):
  *
- *  Spi<n>      the RESOURCE - a typed view of one instance's SPI
+ *     using SpiHw = brio::SpiHost<1, my_pads>;
+ *     using SpiBus = brio::SpiBus<SpiHw, P>;     // an active object
+ *     extern "C" void SERCOM1_Handler() {
+ *         if (SpiHw::isr()) { brio::post<SpiBus>(brio::TransferDone{brio::spi_ok}); }
+ *     }
+ *     SpiHw::init(clock);                        // in main(), after the clock task
+ *
+ * then an active object posts a Request (the chip select, the buffers as
+ * lend<Lease::reply>(...), baud = *SpiHw::baud_for(hz), the mode) to
+ * SpiBus and gets an SpiDone back.
+ *
+ * Who calls what, and from where. init() is a setup call in main(),
+ * after the clock task's init() and before interrupts are enabled
+ * globally; it waits, bounded, for the peripheral's synchronizations and
+ * answers false when one did not complete or a stated SCK ceiling cannot
+ * be produced. start() is the arbiter's, from its dispatch in main
+ * context: a polled request runs whole inside it, with only the SERCOM's
+ * own interrupt silenced and global interrupts enabled, bounded by one
+ * spin budget, and the request's cs_setup_us is spent spinning there for
+ * both completion styles; an interrupt-driven one returns once its
+ * first characters are written. A change of mode or rate costs start()
+ * a disable/enable pair and its bounded synchronization waits first.
+ * isr() is the interrupt body: the program's handler for the instance's
+ * vector calls it and nothing else does, and it answers true on the
+ * completion edge, when the handler posts TransferDone; a vector left
+ * unbound is the crt's weak spin, where an interrupt-driven request
+ * stops the program at its first character. The Request's three buffers
+ * are lent from the post until the SpiDone the arbiter replies with:
+ * untouched and in scope until then, which nothing checks. The chip
+ * select is a GPIO the device client configures (init() claims DO, SCK
+ * and, when the pads name one, DI, and nothing else). SpiClient's polled runs belong to the context that
+ * calls them and spin, bounded by the caller's budget, until the run
+ * completes, the host raises the select, or the budget runs out. The
+ * resource's configuring verbs are setup calls with no guard of their
+ * own. The parts:
+ *
+ *  Spi<n>      the resource - a typed view of one instance's SPI
  *              register set: both roles, every field of CTRLA and
  *              CTRLB, the synchronous baud arithmetic, the flags and
- *              the ONE combined interrupt question this core's single
+ *              the one combined interrupt question this core's single
  *              vector has to ask.
  *
  *  SpiHost<n, pads, generator, Placement>
- *              the TASK util/spi_bus.hpp (= util/bus_master.hpp) drives:
- *              the transfer ENGINE. A Request is a two-phase transaction
+ *              the task util/spi_bus.hpp (= util/bus_master.hpp) drives:
+ *              the transfer engine. A Request is a two-phase transaction
  *              in one chip-select window, the buffers travel with it as
  *              Lease::reply loans, and the completion is the bus AO's
  *              TransferDone. It is the descriptor shape every target's
@@ -27,33 +65,33 @@
  *              select-low detection (CTRLB.SSDE) and address recognition
  *              (CTRLA.FORM = 0x2 with CTRLB.AMODE and ADDR).
  *
- * ONE INSTANCE, ONE ADDRESS, ONE SET OF FACTS. Everything that belongs
- * to the SERCOM INSTANCE rather than to a mode - the APB mask, the GCLK
+ * One instance, one address, one set of facts. Everything that belongs
+ * to the SERCOM instance rather than to a mode - the APB mask, the GCLK
  * channel, the NVIC line - is Sercom<n>'s
- * and is used from here; only the REGISTER VIEW differs, and that comes
+ * and is used from here; only the register view differs, and that comes
  * from Sercom<n>::spi_regs(). There is no second table of which channel
  * SERCOM5 sits on, and there cannot be one.
  *
- * THE HEADER'S TWO SPI VIEWS ARE THE SAME REGISTERS. sercom.h declares
+ * The header's two SPI views are the same registers. sercom.h declares
  * `sercom_spim_registers_t` and `sercom_spis_registers_t` with identical
  * offsets and identical field positions under two name prefixes, so this
- * file uses ONE (SPIM) for both roles and the role is CTRLA.MODE and
+ * file uses one (SPIM) for both roles and the role is CTRLA.MODE and
  * nothing else. That is asserted at the bottom of this file against the
  * header's own SPIS macros rather than believed.
  *
- * PADS ARE NOT PINS, AND DOPO IS A TRIPLE. CTRLA.DIPO names the pad the
- * data INPUT is read from and takes any of the four. CTRLA.DOPO does
- * NOT name a pad: its four codes each fix a whole (DO, SCK, SS) triple
+ * Pads are not pins, and DOPO is a triple. CTRLA.DIPO names the pad the
+ * data input is read from and takes any of the four. CTRLA.DOPO does
+ * not name a pad: its four codes each fix a whole (DO, SCK, SS) triple
  * (32.8.1's table), so the three cannot be chosen independently and
  * "swap SCK and SS" is not a configuration the silicon offers. A caller
  * states the triple it has wired and spi_dopo_for() answers with the one
  * code that produces it, or with nothing - which is a compile error at
- * the task. NOTE the device header's naming trap, the same one TXPO has
+ * the task. Note the device header's naming trap, the same one TXPO has
  * in sercom.hpp: it calls DOPO = 0x1 `DOPO_PAD1_Val` while that code
- * puts DO on PAD[2]; the enumerator names the CODE, not the pad.
- * Everything below is named after the pad a SIGNAL lands on.
+ * puts DO on PAD[2]; the enumerator names the code, not the pad.
+ * Everything below is named after the pad a signal lands on.
  *
- * WHICH SIGNAL IS WHICH DEPENDS ON THE ROLE (32.8.1, table 32-2):
+ * Which signal is which depends on the role (32.8.1, table 32-2):
  *
  *              host            client
  *   DO         MOSI (out)      MISO (out)
@@ -61,61 +99,67 @@
  *   SCK        out             in
  *   SS         out, MSSEN=1    in, always
  *
- * so on ONE fixed four-wire harness the two roles are two DIFFERENT
+ * so on one fixed four-wire harness the two roles are two different
  * DOPO rows, not one row with the directions flipped. The bench proves
  * exactly that: the same four wires carry a host on row 0x3 and a
  * client on row 0x1.
  *
  * Facts that shape the code (DS60001479M 32.5.x, 32.6.x, 32.8.x, and
  * errata DS80000740S, silicon rev F on the bench chip):
- *  - CTRLA, CTRLB, BAUD and ADDR are ENABLE-PROTECTED (32.6.2.1): a
- *    write while the peripheral is enabled is DISCARDED, not refused.
+ *  - CTRLA, CTRLB, BAUD and ADDR are enable-protected (32.6.2.1): a
+ *    write while the peripheral is enabled is discarded, not refused.
  *    Everything that changes them here disables first. The exceptions
  *    the chapter names are CTRLA.ENABLE, CTRLA.SWRST and CTRLB.RXEN;
  *  - SYNCBUSY has exactly three bits (32.8.8): SWRST, ENABLE, CTRLB.
- *    Writing CTRLB while SYNCBUSY.CTRLB stands is an APB ERROR, so
+ *    Writing CTRLB while SYNCBUSY.CTRLB stands is an APB error, so
  *    every CTRLB write here is followed by a bounded wait;
- *  - ENABLING THE PERIPHERAL CLEARS CTRLB.RXEN (32.8.2) and raises
+ *  - enabling the peripheral clears CTRLB.RXEN (32.8.2) and raises
  *    SYNCBUSY.CTRLB until the receiver is really up - the same trap
  *    sercom.hpp's enable() documents for the USART, and the reason
- *    enable() here waits out BOTH synchronizations;
- *  - a client's DATA write needs THREE SCK CYCLES to reach the shift
+ *    enable() here waits out both synchronizations;
+ *  - a client's DATA write needs three SCK cycles to reach the shift
  *    register (32.6.2.6.2), so the FIRST character of a transaction is
  *    never the one just written unless preloading is on. That is not a
  *    driver bug to hide, it is the reason CTRLB.PLOADEN exists;
- *  - RXC is set when a character has been fully shifted IN, and reading
+ *  - RXC is set when a character has been fully shifted in, and reading
  *    DATA is what clears it. It is therefore the exact "one character
  *    has moved, both ways" edge, which is why the host engine arms RXC
  *    and never DRE: one interrupt per byte, with the received byte in
  *    hand at the moment the next one is written;
- *  - STATUS carries ONE error bit, BUFOVF (32.6.2.7), and CTRLA.IBON
+ *  - STATUS carries one error bit, BUFOVF (32.6.2.7), and CTRLA.IBON
  *    decides whether it is raised at the overflow or travels with the
  *    data through the two-level receive buffer;
- *  - THERE IS NO EVENT SURFACE AT ALL: 32.5.6 and 32.6.4.3 are both
+ *  - there is no event surface at all: 32.5.6 and 32.6.4.3 are both
  *    "Not applicable". Under samc21/evsys.hpp's division of labour a
  *    peripheral publishes its own generator and user codes; this one
  *    has none to publish, and the absence is
  *    stated rather than left to be noticed;
- *  - erratum 1.17.16: CTRLA.SWRST does NOTHING while CTRLA.ENABLE = 0.
- *    reset() therefore enables the instance first when it finds it
- *    disabled - in SPI HOST mode, because the enable synchronizes
+ *  - erratum 1.17.16: CTRLA.SWRST does nothing while CTRLA.ENABLE = 0,
+ *    on every revision by the sheet; not reproduced in SPI mode on this
+ *    silicon (measured: SWRST from the disabled state resets the block,
+ *    its synchronization completing; reset()'s comment). reset() keeps
+ *    the discipline and enables the instance first when it finds it
+ *    disabled - in SPI host mode, because the enable synchronizes
  *    against GCLK_SERCOMx_CORE and a CLIENT is clocked by an external
  *    SCK that may not be running at all;
- *  - erratum 1.17.3 (LIVE on every revision): with CTRLB.PLOADEN set,
+ *  - erratum 1.17.3 (live on every revision): with CTRLB.PLOADEN set,
  *    the first character a client sends is a dummy unless the host
- *    holds SS low for the WHOLE transmission. The driver cannot enforce
+ *    holds SS low for the whole transmission. The driver cannot enforce
  *    what the other end of the wire does, so the obligation is stated on
  *    SpiConfig::preload and nowhere pretended away;
- *  - erratum 1.17.19 (LIVE): DBGCTRL is reset by CTRLA.SWRST although
- *    32.6.2.2 promises it is the one register a reset spares. configure()
- *    writes DBGCTRL AFTER any reset for that reason;
- *  - erratum 1.17.20 (LIVE): a client left with a preloaded character on
+ *  - erratum 1.17.19 (live on the sheet): DBGCTRL is reset by
+ *    CTRLA.SWRST although 32.6.2.2 promises it is the one register a
+ *    reset spares. Not reproduced on this silicon (measured: DBGCTRL
+ *    reads 0x1 across SWRST from both states, docs/samc21/spi.md);
+ *    configure() writes DBGCTRL after any reset, correct under either
+ *    answer;
+ *  - erratum 1.17.20 (live): a client left with a preloaded character on
  *    the way into standby consumes extra power. A sleep-current fact,
  *    named on the field;
- *  - erratum 1.17.1 is REVISION B ONLY on the E/G/J row (the spurious
+ *  - erratum 1.17.1 is revision B only on the E/G/J row (the spurious
  *    INTFLAG.SSL when a client is enabled with SSDE and RXEN together).
  *    It is named here because it is the one item a reader would apply
- *    without checking the row, and it does NOT apply to this silicon.
+ *    without checking the row, and it does not apply to this silicon.
  */
 
 #pragma once
@@ -1101,12 +1145,16 @@ public:
     // ---- lifecycle -----------------------------------------------------------
 
     /// Bring the instance up as a host: clocks, configuration,
-    /// pads, pins, the NVIC line.
+    /// pads, pins, the NVIC line. Setup's call, main context; it waits,
+    /// bounded, for the peripheral's synchronizations.
     ///
-    /// Call AFTER the main clock is set up and before interrupts are
+    /// Call after the main clock is set up and before interrupts are
     /// enabled globally; `clock` is the app's brio::Clock tag, so the
     /// baud arithmetic comes from Clock::hz and never from a second
-    /// statement of the rate.
+    /// statement of the rate. The pads handed over are DO, SCK and DI
+    /// (when the pads name one); the chip selects are each device
+    /// client's own GPIO outputs, which it configures (high) before its
+    /// first request.
     ///
     /// `max_sck_hz` is an optional CEILING for the whole bus: with it set
     /// the engine slows any request that would exceed it, and re-resolves
@@ -1146,8 +1194,6 @@ public:
             return false;
         }
         status_ = spi_ok;
-
-        // The pads go        status_ = spi_ok;
 
         // The pads go to the SERCOM only now, with the peripheral
         // already enabled and SCK sitting at its configured idle level:

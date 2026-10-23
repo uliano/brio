@@ -1,12 +1,55 @@
 # VREF - the voltage reference selector (AVR DA/DB, AVR EA)
 
-Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B,
+This document is for a programmer who reads the ADC in volts, sets the
+DAC to a voltage or gives a comparator a threshold, and so has to say
+what full scale is. The VREF block picks, for each analog consumer, the
+voltage its full scale stands for. The driver is a vocabulary rather
+than a device: `Ref` names this silicon's six references, `ref_mv()`
+gives their millivolts to whoever converts counts, and `Vref` is a
+class of three setters with no instances (`dac0()`, `ac()`, and on the
+DA/DB `adc0()`). A program rarely calls the setters: it names its
+reference in the ADC's, the DAC's or the comparator's configuration,
+and that driver's `init()` writes it.
+
+The smallest use, a DAC on the 2.048 V reference set to 1.5 V, taken
+from "How to use it" below:
+
+```cpp
+Dac<0>::init({.reference = Ref::v2048});                         // sets VREF.DAC0REF
+Dac<0>::set(dac_code(1500, Dac<0>::steps, ref_mv(Ref::v2048)));  // 1.500 V
+```
+
+Line by line: `init()` configures the DAC ([dac.md](dac.md)) and, as
+its first act, writes VREF.DAC0REF with the 2.048 V selection;
+`ref_mv(Ref::v2048)` is 2048, the millivolts of that reference;
+`dac_code()` (`util/analog.hpp`) turns 1500 mV into the code for a
+1024-step converter on that reference; `set()` writes it.
+
+What decides correctness even there. The reference named in the
+configuration and the one handed to `ref_mv()` are two arguments, and
+nothing ties them: the arithmetic is right only when they are the same
+(`Dac<0>::reference()` and `Adc<0>::reference()` return what `init()`
+chose). An internal reference needs headroom on the supply, the table
+below, and nothing in the code checks VDD. For `Ref::vdd` and
+`Ref::vrefa` the level is whatever the board supplies: `ref_mv()`
+returns the millivolts the caller passes, 0 when it passes none, and
+every conversion through 0 yields 0. On the AVR EA the ADC does not
+select its reference here at all but in its own CTRLC, with another
+encoding (`adc_refsel()` in `avrxt/adc.hpp`).
+
+## Documents of record
+
+AVR128DB28/32/48/64 data sheet DS40002247B,
 errata DS80000915F (no VREF items); AVR64EA28/32/48 data sheet
 DS40002443A (chapter 20, the ADC's own selection in 31.5.3, table
 35-17), errata DS80001048D (no VREF item). Driver: `avrxt/vref.hpp`
 (the `Ref` vocabulary is defined there; the counts <-> mV arithmetic
 is in `util/analog.hpp`). Reference test: `test_avr_analog` (on the
-DA/DB test 1, 14; on the EA letters 1, v).
+DA/DB test 1, 14; on the EA letters 1, v). A letter is one command key
+of the suite's console and the group of verdicts it runs, `a` the key
+that runs them all on either half; the DA/DB half numbers its tests 1
+to 15 and types the tenth to the fifteenth as `0`, `w`, `e`, `i`, `v`
+and `x`, so its test 14 is key `v`.
 
 ## What the silicon does
 
@@ -18,8 +61,6 @@ CTRLC with another encoding (VDD 0, VREFA 2, 1.024 V 4, 2.048 V 5,
 4.096 V 6, 2.5 V 7: `adc.hpp`'s `adc_refsel()`; `Vref::adc0()` does not
 exist there). Each selects one of:
 
-| `Ref` | Level | Needs VDD |
-|-------|-------|-----------|
 | `Ref` | Level | Needs VDD (DA/DB) | Needs VDD (EA) |
 |-------|-------|-----------|-----------|
 | `v1024` | 1.024 V internal | - | 1.8 V |
@@ -45,7 +86,7 @@ crystal: Table 39-17 keys on MCLKCTRLA.CLKSEL; 2 us to change level);
 waits. VREFA loads the external source with ~50 kOhm (the ADC's
 ladder). There is no other behaviour: VREF is a selector.
 
-What it means for code: the reference is part of the MEANING of every
+What it means for code: the reference is part of the meaning of every
 conversion (counts <-> volts); the ADC and the DAC may use different
 ones; a DAC -> ADC loop is exact only when both are known.
 
@@ -64,6 +105,12 @@ Adc<0>::init(clock, AdcConfig{.reference = Ref::v2048});         // sets VREF.AD
 Ac<0>::init({.negative = AcNeg::dacref, .reference = Ref::v2048}); // sets VREF.ACREF (DACREF)
 ```
 
+On the AVR EA the `Adc<0>::init()` line above returns false as written:
+with an internal reference and no PGA that converter wants
+`sample_duration` of at least 4 us x fCLK_ADC (8 at 2 MHz, its default
+prescaler's rate on a 20 MHz clock) and refuses less, the default being
+2 ([adc.md](adc.md), "The AVR EA's converter").
+
 Converting counts to millivolts: `ref_mv()` gives the level, the
 target-independent arithmetic of `util/analog.hpp` does the rest.
 (`Ref` is this silicon's: another target's vref header defines its
@@ -78,7 +125,7 @@ Dac<0>::set(dac_code(1500, Dac<0>::steps, ref_mv(Ref::v2048)));  // 1.500 V
 
 For `vdd` and `vrefa` the level is whatever it is: pass the known
 millivolts (`ref_mv(Ref::vdd, 3300)`) or measure VDD first (VDDDIV10
-against an internal reference - see the ADC document).
+against an internal reference - [adc.md](adc.md)).
 
 Direct use, to keep a reference always on:
 

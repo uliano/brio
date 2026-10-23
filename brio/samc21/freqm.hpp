@@ -6,28 +6,51 @@
  * the loop. It earns its place here because everything this stratum's
  * clock drivers have to characterize (the 32 kHz oscillators, the FDPLL,
  * a crystal against the internal RC) is exactly a ratio between two
- * generators.
+ * generators. The smallest use measures the main clock against a
+ * generator on OSCULP32K (docs/samc21/freqm.md, "How to use it"):
  *
- * WHAT THE SILICON DOES, in one formula and three constraints.
+ *   const uint8_t refnum = Freqm::refnum_for(48'000'000 / 32768);
+ *   Freqm::init(FreqmConfig{.measured_generator = 0,
+ *                           .reference_generator = 5, .refnum = refnum});
+ *   if (auto count = Freqm::measure()) {
+ *       const uint32_t hz = Freqm::to_hz(*count, 32768, refnum);
+ *   }
+ *   Freqm::release();
+ *
+ * Who calls what. init() and release() are setup verbs; init() opens the
+ * bus clock, connects both generic clock channels, resets and enables,
+ * each synchronization bounded (0xFFFF polls), and answers false for a
+ * configuration config_valid() refuses or a synchronization that never
+ * completed. measure() holds its caller for the whole window - REFNUM
+ * reference periods - bounded in polls (20 000 000 by default), and
+ * answers nothing for a disabled block, an overflow or a wait that ran
+ * out; it belongs to main or to one active object's handler (an active
+ * object is a brio component with its own event queue, served one event
+ * at a time by the kernel), which it holds for that long. start(),
+ * value() and the flag verbs are single stores and loads; isr() is the
+ * body the program's FREQM_Handler calls. Nothing here masks
+ * interrupts.
+ *
+ * What the silicon does, in one formula and three constraints.
  *
  *   f_msr = VALUE / REFNUM x f_ref
  *
- * The block counts periods of the MEASURED clock for REFNUM periods of
- * the REFERENCE clock and leaves the count in VALUE (44.6.1). Both
+ * The block counts periods of the measured clock for REFNUM periods of
+ * the reference clock and leaves the count in VALUE (44.6.1). Both
  * clocks are generic clock channels of their own - GCLK_FREQM_MSR is
  * channel 3, GCLK_FREQM_REF channel 4 - so choosing what to measure and
  * what to measure it against is a GCLK routing question, not a FREQM
  * one, and this header takes generator numbers rather than sources.
  *
- * 1. THE REFERENCE MUST BE SLOWER THAN THE MEASURED CLOCK. The chapter
+ * 1. The reference must be slower than the measured clock. The chapter
  *    says so in a call-out box (44.6.2.1) and the arithmetic says why:
  *    VALUE counts measured periods per reference period, so a reference
  *    faster than the measurand counts zero. Nothing in the hardware
- *    refuses it; `measure()` returns nothing rather than a wrong number,
- *    because a VALUE of zero and a genuinely stopped clock are the same
- *    reading.
+ *    refuses it, and nothing here either: `measure()` hands the zero
+ *    back as a count, and a VALUE of zero and a genuinely stopped clock
+ *    are the same reading, so the caller reads a zero as no answer.
  *
- * 2. VALUE IS 24 BITS, AND THE OVERFLOW IS THE CALLER'S TO AVOID.
+ * 2. VALUE is 24 bits, and the overflow is the caller's to avoid.
  *    REFNUM x (f_msr/f_ref) must stay under 2^24, and STATUS.OVF says
  *    when it did not. Longer measurements are more precise and closer to
  *    overflowing, which is the whole trade: `refnum_for()` picks the
@@ -37,30 +60,30 @@
  *    bought another eightfold; see `Freqm::cfga_divref` for what was
  *    measured and why a configuration asking for it is refused.
  *
- * 3. ERRATUM 1.24.1, LIVE ON EVERY SILICON REVISION INCLUDING THIS ONE,
- *    with no workaround offered: READING CTRLB RAISES A PAC PROTECTION
- *    ERROR. So CTRLB is never read here - not in a read-modify-write,
+ * 3. Erratum 1.24.1, live on every silicon revision including this one,
+ *    with no workaround offered: reading CTRLB raises a PAC protection
+ *    error. So CTRLB is never read here - not in a read-modify-write,
  *    not to check whether a measurement was started, not at all. START
  *    is a plain store of a single bit, which is all it ever needed to
  *    be, and the device header agrees: it declares CTRLB `__O`. The
- *    consequence worth stating is that there is NO WAY TO ASK the block
+ *    consequence worth stating is that there is no way to ask the block
  *    whether a start was accepted; STATUS.BUSY and INTFLAG.DONE are the
  *    only honest evidence a measurement is running or finished.
  *
- * PRECISION, since a frequency meter that does not say how well it
+ * Precision, since a frequency meter that does not say how well it
  * measures is decoration. The count is a whole number of measured
  * periods over a whole number of reference periods, so the answer is
  * granular to about f_msr/VALUE - one part in VALUE. Measuring 48 MHz
  * against a 1 kHz reference with REFNUM = 1 gives VALUE around 48000 and
  * therefore about 20 ppm of granularity; REFNUM = 255 would give one
- * part in 12 million and overflow long before. The reference's OWN
+ * part in 12 million and overflow long before. The reference's own
  * accuracy is a separate matter and is not improved by counting longer:
- * this block measures a RATIO, and the absolute number it is turned into
+ * this block measures a ratio, and the absolute number it is turned into
  * is only ever as good as f_ref.
  *
- * NOT BUILT (docs/samc21/freqm.md carries the list): the GCLK_IO pins as
+ * Not built (docs/samc21/freqm.md carries the list): the GCLK_IO pins as
  * measurement sources (44.5.1), which need a clock on a pad and a pin
- * claim this header does not make. The DONE interrupt IS built - flags,
+ * claim this header does not make. The DONE interrupt is built - flags,
  * `isr()`, `irq()` - and `measure()` polls only because the measurements
  * it serves are short; a program that would rather sleep through one
  * arms DONE and wakes on it (measured: a standby ended by this block's

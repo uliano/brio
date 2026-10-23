@@ -2,37 +2,58 @@
  * pwr.hpp
  *
  * The power controller (RM0090 ch. 5, RM0390 ch. 5, RM0383 ch. 5), whole:
- * the block's bus clock, the main regulator's VOLTAGE SCALE and the
- * OVER-DRIVE pair - the part the CLOCK TASK needs, and the reason this
+ * the block's bus clock, the main regulator's voltage scale and the
+ * over-drive pair - the part the clock task needs, and the reason this
  * file was opened - and then the Sleep/Stop/Standby ladder with the
  * regulator variants that price a Stop, the wake-up pins, the
  * programmable voltage detector, the backup regulator, and the three
  * DBGMCU bits that decide whether a low-power mode happens at all under
- * a probe. One chapter, one owner; util/power.hpp's SITES over it are
+ * a probe. One chapter, one owner; util/power.hpp's sites over it are
  * stm32f4/sleep.hpp's.
  *
- * THE MODE IS TWO REGISTERS IN TWO PLACES, and that is the first thing to
+ * What a program uses it for. Most programs never call it directly: the
+ * clock task calls the regulator half, and a program that sleeps deeper
+ * than Sleep names one of stm32f4/sleep.hpp's sites, which arms the mode
+ * through `Pwr`. What a program calls by hand is the one-shot Standby and
+ * the debugger's bits:
+ *
+ *     brio::Pwr::debug_low_power(false);           // at boot, before a sleep is weighed
+ *     brio::Pwr::enter(brio::PwrMode::standby);    // prepare_standby() is inside
+ *
+ * Who calls what. `Pwr` is a monostate (static members only, never
+ * instantiated) and every verb is a setup or main-context call: the
+ * read-modify-writes of PWR_CR and SCB->SCR carry no guard of their own,
+ * so one context owns them - the clock task at its init and restore, the
+ * sleep site in the power manager's handler. Nothing here masks
+ * interrupts. Three verbs wait, each for a ready flag and each bounded by
+ * `ready_spins` (a million polls), answering false when the flag never
+ * moved: over_drive_enter(), over_drive_exit() and backup_regulator().
+ * arm() arms and does not sleep; enter() arms and executes the WFI (or
+ * WFE) itself, and comes back only from a mode a program resumes from or
+ * from a Standby whose entry conditions were not met.
+ *
+ * The mode is two registers in two places, and that is the first thing to
  * know. The Cortex-M4 has one bit, SCB->SCR.SLEEPDEEP, which says "the
- * next WFI is a deep sleep"; PWR_CR.PDDS says WHICH deep sleep (Stop or
+ * next WFI is a deep sleep"; PWR_CR.PDDS says which deep sleep (Stop or
  * Standby) and PWR_CR's LPDS, FPDS, MRLVDS/LPLVDS and UDEN say what a
  * Stop costs to leave. Neither register is the other's, and both must
- * agree before a WFI does anything but Sleep. `Pwr` owns them BOTH -
+ * agree before a WFI does anything but Sleep. `Pwr` owns them both -
  * SLEEPDEEP is written here and nowhere else in this stratum, so that
  * "what is armed" is one question with one answer (`Pwr::mode()`), and so
  * that stm32f4/platform.hpp's idle() can stay what it is: a DSB, a WFI
  * and an unmask that take whatever somebody else armed.
  *
- * SIX FACTS OF THIS CHAPTER, besides the regulator's own below.
+ * Six facts of this chapter, besides the regulator's own below.
  *
- * 1. THREE MODES, AND ONLY TWO OF THEM ARE A LADDER A PROGRAM CAN RESUME
- *    FROM (5.3). Sleep stops the CPU clock and nothing else; Stop stops
+ * 1. Three modes, and only two of them are a ladder a program can resume
+ *    from (5.3). Sleep stops the CPU clock and nothing else; Stop stops
  *    every clock in the 1.2 V domain, disables the PLLs, the HSI and the
- *    HSE, and KEEPS SRAM AND REGISTERS; Standby powers the 1.2 V domain
- *    off and comes back THROUGH THE RESET VECTOR with everything but the
+ *    HSE, and keeps SRAM and registers; Standby powers the 1.2 V domain
+ *    off and comes back through the reset vector with everything but the
  *    backup domain and PWR_CSR lost. That last sentence is why
  *    stm32f4/sleep.hpp's site maps no rung to Standby - see its header.
  *
- * 2. WHAT COMES BACK FROM A STOP IS NOT WHAT WENT IN. 5.3.5: "When
+ * 2. What comes back from a Stop is not what went in. 5.3.5: "When
  *    exiting Stop mode by issuing an interrupt or a wakeup event, the HSI
  *    RC oscillator is selected as system clock"; the PLL and the HSE are
  *    off, the regulator is back at scale 3 ("when the microcontroller
@@ -43,25 +64,27 @@
  *    and a USART divisor meant for eleven times that - a fact of the
  *    chapter and not a defect, and what stm32f4/sleep.hpp's site answers
  *    by re-running the clock task in the first thing that executes after
- *    the wake. Everything OUTSIDE the clock tree survives: the flash
+ *    the wake. Everything outside the clock tree survives: the flash
  *    latency, the APB prescalers, every peripheral's registers and the
- *    whole of SRAM.
+ *    whole of SRAM. (Measured, docs/stm32f4/pwr.md: the VOS field itself
+ *    still reads the scale the program wrote, VOSRDY down - what scale 3
+ *    names is the regulator's active output, not the register.)
  *
- * 3. A STOP IS ONLY ENTERED IF NOTHING IS PENDING. Table 18's own note:
+ * 3. A Stop is only entered if nothing is pending. Table 18's own note:
  *    "all EXTI Line pending bits ..., all peripheral interrupts pending
  *    bits, the RTC Alarms ..., RTC wakeup, RTC tamper, and RTC time stamp
  *    flags, must be reset. Otherwise, the Stop mode entry procedure is
  *    ignored and program execution continues" - and the Cortex's WFI is
  *    itself a no-op with an interrupt pending. So a Stop that does not
- *    happen is NOT an error condition anywhere in the silicon: the
+ *    happen is not an error condition anywhere in the silicon: the
  *    instruction simply falls through. Everything that judges a sleep in
- *    this stratum therefore judges it by TIME ELAPSED and never by a flag.
+ *    this stratum therefore judges it by time elapsed and never by a flag.
  *
- * 4. STANDBY NEEDS ITS OWN FLAG CLEAR TO BE ENTERED AT ALL (table 19):
+ * 4. Standby needs its own flag clear to be entered at all (table 19):
  *    WUF in PWR_CSR, and the RTC flag matching whichever RTC event is
  *    meant to end the sleep. A stale flag from a previous life is an
  *    entry that silently does not happen - fact 3 again, with a second
- *    cause. AND THERE IS AN ERRATUM ON TOP OF IT: ES0298 2.2.4 (ES0206
+ *    cause. And there is an erratum on top of it: ES0298 2.2.4 (ES0206
  *    2.2.4, ES0287 2.2.4), "the various wake-up sources are logically
  *    OR-ed in front of the rising-edge detector"; a source held high while
  *    CWUF clears the flag "may mask further wake-up events on the input of
@@ -69,15 +92,15 @@
  *    is the erratum's own four steps and `prepare_standby()` is them:
  *    disable every wake-up source, clear the flags, re-enable, enter.
  *
- * 5. THERE IS ONE WAKE-UP FLAG FOR EVERY SOURCE. Unlike the STM32G0's
+ * 5. There is one wake-up flag for every source. Unlike the STM32G0's
  *    per-pin WUFx, this family has a single WUF raised by any WKUP pin
- *    OR any of the RTC's five events (5.4.2), so it says THAT the device
- *    was woken and never BY WHAT. SBF, beside it, says the device was in
+ *    or any of the RTC's five events (5.4.2), so it says that the device
+ *    was woken and never by what. SBF, beside it, says the device was in
  *    Standby and is cleared only by a power-on reset or by CSBF - which
  *    is what lets the boot after a Standby tell itself apart from the
  *    boot after a reset.
  *
- * 6. THE DEBUG BITS DECIDE WHETHER A LOW-POWER MODE HAPPENS. DBGMCU_CR's
+ * 6. The debug bits decide whether a low-power mode happens. DBGMCU_CR's
  *    DBG_SLEEP, DBG_STOP and DBG_STANDBY (33.16.1) keep FCLK and HCLK
  *    alive through the mode so a probe can still reach the core; the
  *    register "is asynchronously reset by the PORESET (and not the system
@@ -91,38 +114,40 @@
  *    silicon fact. The three verbs below read and clear the bits, no gate
  *    needed - DBGMCU is on the external private peripheral bus.
  *
- * WHAT IS NOT HERE. PWR_CR.DBP, the backup domain's write gate, is
+ * What is not here. PWR_CR.DBP, the backup domain's write gate, is
  * stm32f4/rtc.hpp's `RtcDomain::unlock()`: one register bit, one owner,
  * and the owner is the chapter whose registers it unlocks. The BOR
- * levels are option bytes and belong to the flash chapter's provisioning
- * verb, not to a register here.
+ * levels are option bytes: stm32f4/flash.hpp's FlashOptions reads them
+ * and writes none (provisioning is a tool's, over the debug port), so
+ * they are not a register here.
  *
- * WHY THE SCALE IS A CLOCK QUESTION. RM0090 5.1.4: the regulator's
+ * Why the scale is a clock question. RM0090 5.1.4: the regulator's
  * output "can be scaled by software to different voltage values (scale
  * 1, scale 2, and scale 3 ...). The scale can be modified only when
  * the PLL is OFF and the HSI or HSE clock source is selected as system
  * clock source. The new value programmed is active only when the PLL is
  * ON." Each scale carries a HCLK ceiling (stm32f4/device_tables.hpp's
  * ladder), and the top of the ladder - 168 or 180 MHz on the parts
- * that reach it - is reached only in OVER-DRIVE, entered by a sequence
+ * that reach it - is reached only in over-drive, entered by a sequence
  * that belongs between the PLL's start and the switch to it (5.1.4,
  * "Entering Over-drive mode"): ODEN then wait ODRDY, ODSWEN then wait
  * ODSWRDY - the system is stalled during the switch. Entering Stop
  * disables the over-drive mode and the PLL; whoever brings the part
  * back does both again.
  *
- * ONE VOS BIT OR TWO. The F405/F407 class has a single VOS bit (scale 2
+ * One VOS bit or two. The F405/F407 class has a single VOS bit (scale 2
  * and scale 1, PWR_CR bit 14); every later part has two (scales 3, 2
- * and 1). The reserve says which (pwr_vos_two_bits()), and the code
- * for the scale is written once against that fact.
+ * and 1). The reserve (stm32f4/device_tables.hpp: the table of what each
+ * part has, read off the device header) says which (pwr_vos_two_bits()),
+ * and the code for the scale is written once against that fact.
  *
- * THE OVER-DRIVE VERBS ARE PREPROCESSOR-GUARDED, not if-constexpr'd:
+ * The over-drive verbs are preprocessor-guarded, not if-constexpr'd:
  * `Pwr` is a plain struct and a discarded branch of a non-template is
  * still checked, so a header without ODEN would not compile the name.
  * The one fact the guards ask - is PWR_CR_ODEN declared? - is the
  * reserve's own probe, so the two can never disagree.
  *
- * THE BLOCK IS BEHIND A GATE. PWR sits on APB1 behind RCC_APB1ENR.PWREN,
+ * The block is behind a gate. PWR sits on APB1 behind RCC_APB1ENR.PWREN,
  * clear at reset; a register read through the closed gate answers zero
  * and a write is dropped in silence. Every verb here that touches a
  * register opens the gate first (bus_clock(true), idempotent), the
@@ -441,7 +466,7 @@ struct Pwr {
      * Arm the mode the next WFI will take: SLEEPDEEP and PDDS together,
      * which is the only pair that means anything (the file header).
      *
-     * ARMING IS NOT SLEEPING. Nothing stops here; the CPU stops when
+     * Arming is not sleeping. Nothing stops here; the CPU stops when
      * something executes a WFI, which in a brio program is the kernel's
      * idle path. That split is what lets util/power.hpp's model exist with
      * no new kernel hook, and it is why this verb is named for what it
@@ -493,9 +518,10 @@ struct Pwr {
     }
 
     /**
-     * Arm `m` and stop, here and now - the deliberate one-shot for the
-     * mode a SleepSite will not touch (Standby, which comes back through
-     * the reset vector) and for a program with no kernel under it.
+     * Arm `m` and stop, here and now, in main context - the deliberate
+     * one-shot for the mode a SleepSite will not touch (Standby, which
+     * comes back through the reset vector) and for a program with no
+     * kernel under it.
      *
      * WHAT IT DOES BEYOND arm(): for Standby, the flag sweep table 19
      * demands and the erratum's re-arming around it (`prepare_standby()`,

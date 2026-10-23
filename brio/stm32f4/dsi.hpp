@@ -1,12 +1,14 @@
 /*
  * dsi.hpp
  *
- * The STM32F4's DSI Host (RM0386 ch. 18) - the MIPI Display Serial
- * Interface in front of the LTDC, on the F469/F479 class alone (the
+ * The STM32F4's DSI Host (RM0386 ch. 18) for a program that drives a
+ * display over MIPI DSI: the link's physical layer powered and clocked,
+ * the LTDC's frame turned into packets for the panel, and the panel's own
+ * commands and reads carried beside it. On the F469/F479 class alone (the
  * device header says so with DSI_BASE; the other twenty-one headers of
  * the pack declare no block and nothing register-facing in this file
- * exists there): `Dsi`, a MONOSTATE resource, because a part carries
- * one host or none.
+ * exists there): `Dsi`, a monostate resource (an all-static type with no
+ * instances), because a part carries one host or none.
  *
  *   using namespace brio;
  *   constexpr DsiConfig cfg{.pll = dsi_pll_for(8'000'000u, 496'000'000u),
@@ -20,43 +22,68 @@
  *   Dsi::dcs_read(0xDA, &id, 1);                   // RDID1, the panel's answer
  *   Ltdc::enable();                                // and the pixels stream
  *
- * WHAT THE BLOCK IS. Three things under one register file and one
- * vector: the DSI WRAPPER (the regulator and the PLL that make the D-PHY
+ * That is the video-mode shape; a panel with a frame memory, such as the
+ * 32F469IDISCOVERY's, takes the adapted command mode instead
+ * (command_mode() in place of video(), a refresh launched by
+ * ltdc_flow(true)), and docs/stm32f4/dsi.md writes that bring-up out
+ * line by line. The order is the block's: the configuring verbs are
+ * refused while the host is enabled (fact 4), so they come before
+ * enable(), and the generic interface works only after it. The PLL's
+ * input is the HSE (fact 1): the clock task has it running, and init()'s
+ * second template argument states its rate, which nothing reads back. The
+ * clock lane goes to high speed only after the panel's reset (fact 11),
+ * and `DsiPhyConfig::clock_lane_hs` is true by default.
+ *
+ * Who calls what. Every verb but isr() is the main context's - setup, or
+ * an active object's handler (an active object is a component of a brio
+ * program with its own event queue, served one event at a time by the
+ * kernel) - and the generic interface's verbs are for one context at a
+ * time. Every wait is bounded (`default_spins`, two million polls: the
+ * regulator's and the PLL's start, a FIFO flag, a read's answer) and ends
+ * in false or `DsiStatus::timeout`; nothing here masks interrupts. A
+ * write's parameters are copied into the block's FIFO before the verb
+ * returns (dcs_write() and generic_write() answer `ok` when the packet is
+ * queued, not when the panel has it), and a read's buffer is written
+ * inside the call. isr() is the body of the program's DSI_IRQHandler and
+ * reads, so clears, both error registers.
+ *
+ * What the block is. Three things under one register file and one
+ * vector: the DSI wrapper (the regulator and the PLL that make the D-PHY
  * run, the LTDC's pixel stream turned into the host's input, the tearing
- * effect line), the DSI HOST (Synopsys' MIPI DSI controller: the packet
+ * effect line), the DSI host (Synopsys' MIPI DSI controller: the packet
  * handler, the video mode state machine, the APB generic interface a
  * program writes DCS and generic packets through, the error registers)
  * and the D-PHY itself (one clock lane, two data lanes, each in
  * high-speed differential or low-power single-ended signalling). Two
- * ways to a panel: VIDEO MODE, where the LTDC's frame is packed into
+ * ways to a panel: video mode, where the LTDC's frame is packed into
  * pixel packets and streamed with the panel's timing and the wrapper
- * has nothing to do but pass it on; and ADAPTED COMMAND MODE, where each
+ * has nothing to do but pass it on; and adapted command mode, where each
  * LTDC frame becomes DCS memory-write packets a panel with a frame
  * memory takes at its own pace, refreshed on a tearing-effect event.
  * The APB generic interface works beside either: a DCS command goes
  * out in low-power signalling during a blanking period, a read turns
  * the bus around and the answer arrives on data lane 0.
  *
- * THE FACTS THAT SHAPE THE FILE.
+ * The facts that shape the file.
  *
- * 1. THE PLL AND THE PHY HAVE RANGES THAT TWO DOCUMENTS STATE
- *    DIFFERENTLY. RM0386 18.12.5 gives the PLL's input after IDF as
+ * 1. The PLL and the PHY have ranges that two documents state
+ *    differently. RM0386 18.12.5 gives the PLL's input after IDF as
  *    8..50 MHz; DS11189 table 47 gives the same PFD input as 4..25 MHz.
- *    `dsi_pll_for()` keeps to the INTERSECTION, 8..25 MHz, and the rest
+ *    `dsi_pll_for()` keeps to the intersection, 8..25 MHz, and the rest
  *    where the two agree: CLKIN 4..100 MHz, the VCO 500..1000 MHz, the
  *    output 31.25..500 MHz, NDIV 10..125, IDF 1..7, ODF 1/2/4/8. The
- *    output IS the bit rate of one lane (the RCC's figure 17 draws the
+ *    output is the bit rate of one lane (the RCC's figure 17 draws the
  *    500 MHz "high speed clock" whose eighth is the lane byte clock), and
  *    DS11189 table 45's unit interval of 2..12.5 ns is that rate's other
  *    face, 80..500 Mbit/s. The PLL's CLKIN is HSE and nothing else.
- * 2. THE UNIT INTERVAL IS THE ONE FIELD THE D-PHY CANNOT DO WITHOUT
+ * 2. The unit interval is the one field the D-PHY cannot do without
  *    (18.14.2): WPCR0.UIX4, the bit period in quarter nanoseconds,
- *    rounded DOWN - `dsi_uix4()`. Every D-PHY timing the wrapper lets a
+ *    rounded down - `dsi_uix4()`. Every D-PHY timing the wrapper lets a
  *    program override (WPCR1..4) is derived from it and left at its
  *    default here.
- * 3. THE HOST COUNTS IN LANE BYTE CLOCKS. HSA, HBP and the line in
+ * 3. The host counts in lane byte clocks. HSA, HBP and the line in
  *    DSI_VHSACR/VHBPCR/VLCR are the LTDC's pixel counts converted at the
- *    ratio of the lane byte clock to the pixel clock and ROUNDED
+ *    ratio of the lane byte clock to the pixel clock and rounded
  *    (18.14.6), and the rounding accumulates line after line unless the
  *    host returns to low power once a line and resynchronises on the
  *    next sync event - which is why `DsiVideoConfig` enables the
@@ -64,22 +91,22 @@
  *    conversion; the LP/HS transition times of the lanes in DSI_CLTCR
  *    and DSI_DLTCR are lane byte clocks too, computed from DS11189 table
  *    46's maxima by `dsi_phy_timing_for()`.
- * 4. CONFIGURATION HAPPENS WITH THE HOST DISABLED. DSI_CR.EN = 0 holds
+ * 4. Configuration happens with the host disabled. DSI_CR.EN = 0 holds
  *    the host "under reset" (18.15.2) and the wrapper's WCFGR fields and
  *    WPCR1..4 are documented as writable only with both DSI_CR.EN and
  *    DSI_WCR.DSIEN clear; the programming procedure of 18.14.1 writes
  *    everything first and enables last. Every configuring verb here
- *    REFUSES while `enabled()`, and `disable()` is the way back. What the
+ *    refuses while `enabled()`, and `disable()` is the way back. What the
  *    generic interface needs (a wait on the command FIFO, a header
  *    write, the payload) works only while enabled.
- * 5. THE HOST'S ERROR REGISTERS CLEAR ON READ (18.13.2): DSI_ISR0 and
+ * 5. The host's error registers clear on read (18.13.2): DSI_ISR0 and
  *    DSI_ISR1 are cleared by the read that returns them and the line
  *    falls when every register that raised it has been read. So
  *    `errors0()`/`errors1()` are read-and-clear by the silicon's design,
  *    `isr()` reads both, and a program that wants to keep them keeps the
  *    values. The wrapper's five flags are the other kind, cleared through
  *    DSI_WIFCR.
- * 6. A READ IS A WRITE OF TWO PACKETS AND A TURN-AROUND. The host has no
+ * 6. A read is a write of two packets and a turn-around. The host has no
  *    read verb: a program sets the maximum return packet size (the DSI
  *    data type 0x37, its two bytes the size), sends the read request
  *    (a DCS read or a generic read of zero to two parameters), and the
@@ -88,14 +115,14 @@
  *    response is in the payload read FIFO, and the payload comes out of
  *    DSI_GPDR a word at a time, the header and its checks stripped by
  *    the packet analyser. `read()` is that sequence with a bounded wait.
- * 7. THE DATA TYPE CODES ARE THE MIPI DSI SPECIFICATION'S, NOT THE
- *    MANUAL'S: 18.14 assumes them and prints none, and the two panel
+ * 7. The data type codes are the MIPI DSI specification's, not the
+ *    manual's: 18.14 assumes them and prints none, and the two panel
  *    datasheets on the desk draw their table as a picture. `DsiDataType`
  *    spells the ones every DSI peripheral shares (DSI 1.1 table 16 -
  *    the processor-to-peripheral types), and a program never needs to
  *    know them for a DCS command: `dcs_write()` and `dcs_read()` choose
  *    the short or long form from the parameter count.
- * 8. TWO WAYS TO A PANEL, AND THE PANEL DECIDES. Video mode streams
+ * 8. Two ways to a panel, and the panel decides. Video mode streams
  *    pixel packets; the adapted command mode (18.6) turns each LTDC
  *    frame into DCS memory writes - write_memory_start then
  *    write_memory_continue, LCCR.CMDSIZE pixels a packet - launched by
@@ -109,7 +136,7 @@
  *    back pixel for pixel through RAMRD. The memory writes of a refresh
  *    are DCS long writes and want high speed, so `DsiHostConfig` keeps
  *    the long writes' CMCR bits apart from the short commands'.
- * 9. IN VIDEO MODE THE GENERIC INTERFACE LIVES INSIDE THE STREAM. The
+ * 9. In video mode the generic interface lives inside the stream. The
  *    manual's procedure (18.14.1) lists the DCS commands before the
  *    LTDC's enable; measured, a read issued in video mode with the LTDC
  *    stopped never completes - the request leaves the command FIFO,
@@ -117,10 +144,10 @@
  *    the LTDC starts. In command mode the same read is answered with
  *    nothing else on the link. Nothing in this file can hide that: the
  *    mode is the program's.
- * 10. WHAT THE PANEL REPORTS IS THE PANEL'S. The acknowledge-with-error
+ * 10. What the panel reports is the panel's. The acknowledge-with-error
  *    bits of DSI_ISR0 are a panel's opinion of the packets it received,
  *    delivered at the next bus turnaround - so a read is what makes them
- *    appear, and they describe what happened SINCE the previous read.
+ *    appear, and they describe what happened since the previous read.
  *    Measured on the NT35510: the first turnaround after the host's
  *    disable and enable carries AE6 (a false control error: the lanes
  *    moved while its receiver watched) in command mode and with a video
@@ -130,8 +157,8 @@
  *    not. One report each, nothing follows, and the registers clear on
  *    the read that shows them: a program that re-enables the host reads
  *    them once after its first exchange.
- * 11. THE PANEL'S RECEIVER LOCKS ONTO THE CLOCK LANE'S ENTRY INTO HIGH
- *    SPEED. Measured: a panel reset with the clock lane already running
+ * 11. The panel's receiver locks onto the clock lane's entry into high
+ *    speed. Measured: a panel reset with the clock lane already running
  *    in high speed took no high-speed packet afterwards - every frame
  *    refreshed into it was lost, every low-power command and read went
  *    through, and neither side counted an error - until the host was
@@ -140,29 +167,29 @@
  *    after the panel's reset and its low-power bring-up, or keeps
  *    `DsiPhyConfig::clock_lane_hs` false until then.
  *
- * THE ERRATA (ES0321 Rev 14, 2.8.1 .. 2.8.3), two of them code here:
+ * The errata (ES0321 Rev 14, 2.8.1 .. 2.8.3), two of them code here:
  *  - 2.8.2, "incorrect calculation of the time to activate the clock
  *    between HS transmissions": with the automatic clock lane control
  *    the host uses twice HS2LP_TIME instead of HS2LP + LP2HS. `phy()`
- *    writes BOTH clock-lane fields with the larger of the two values,
+ *    writes both clock-lane fields with the larger of the two values,
  *    the sheet's workaround, whether or not ACR is on.
  *  - 2.8.3, "the immediate update procedure may fail": setting VSCR.UR
  *    and VSCR.EN in one write may race. `shadow_update()` writes 0 then
  *    0x101 and checks UR auto-cleared, repeating while it has not.
  *  - 2.8.1, "tearing effect parasitic detection": the tearing effect
- *    over the LINK raises TEIF on every acknowledge trigger. Not code:
+ *    over the link raises TEIF on every acknowledge trigger. Not code:
  *    `te_source()` offers the dedicated pin (WCFGR.TESRC = 1), the
  *    sheet's workaround, and a program that chooses the link is told in
  *    the document what not to arm.
  *
- * THREE SMALL FACTS THE REGISTERS TAUGHT, none of them a workaround:
+ * Three small facts the registers taught, none of them a workaround:
  * DSI_PSR wakes as 0x1400 and not the manual's 0x1528 (its defined bits
  * all clear with the regulator off, two reserved ones set); clearing
- * WRPCR.PLLEN drops PLLLS and raises NO PLLUIF - the unlock flag is a
+ * WRPCR.PLLEN drops PLLLS and raises no PLLUIF - the unlock flag is a
  * lost lock's, not a software stop's; and a store into DSI_FIR shows in
  * DSI_ISR a moment later, not on the read straight after it.
  *
- * NOT HERE, BY DESIGN: the panel's own command set beyond the DCS
+ * Not here, by design: the panel's own command set beyond the DCS
  * spelling of a write and a read. Which command wakes a panel, sets its
  * pixel format, its write window or its backlight is the panel
  * datasheet's business, spelled where the panel is (the bench suite for
@@ -170,7 +197,7 @@
  * timing, the layers - is stm32f4/ltdc.hpp's, and this file only reads
  * `LtdcTiming` to convert it.
  *
- * CONCURRENCY. Every configuring verb is a plain store into a register
+ * Concurrency. Every configuring verb is a plain store into a register
  * with no set/clear twin and is meant for setup with the host disabled.
  * The generic interface's verbs poll the FIFO flags and are for one
  * context at a time. `isr()` is legal from a handler: the wrapper's
@@ -978,8 +1005,10 @@ struct Dsi {
     /// waited for, the PLL configured and locked, the D-PHY and the host
     /// timings written. The LTDC interface, the mode and the enable are
     /// the caller's next three verbs, because they need the panel's own
-    /// numbers. False and nothing further when a step fails; a
-    /// configuration outside the rules is refused at compile time.
+    /// numbers. False and nothing further when a step fails (the
+    /// regulator's or the PLL's wait running out, a timing refused); a
+    /// configuration outside the rules is refused at compile time. A
+    /// setup verb, main context, with the HSE already running.
     template <DsiConfig cfg, uint32_t clkin_hz>
     static bool init() {
         static_assert(dsi_config_ok(clkin_hz, cfg),
@@ -1006,7 +1035,9 @@ struct Dsi {
     }
 
     /// Steps 12 .. 15 of 18.14.1: the D-PHY's digital section and its
-    /// clock lane module enabled, then the host, then the wrapper.
+    /// clock lane module enabled, then the host, then the wrapper. After
+    /// it every configuring verb refuses and the generic interface works;
+    /// it waits for nothing.
     static void enable() {
         regs().PCTLR = DSI_PCTLR_DEN;
         regs().PCTLR = DSI_PCTLR_DEN | DSI_PCTLR_CKE;
@@ -1149,7 +1180,9 @@ struct Dsi {
     /// DCS, the spelling a panel understands: a command alone (the short
     /// packet with no parameter), with one parameter (the short packet
     /// with one), with more (the long packet, the command its first
-    /// byte).
+    /// byte). `ok` means queued in the command FIFO, the parameters
+    /// copied; `refused` before enable() or past 255 parameters, `timeout`
+    /// when the FIFO did not free in time.
     static DsiStatus dcs_write(uint8_t command) {
         return short_write(DsiDataType::dcs_short_write_0, command, 0u);
     }

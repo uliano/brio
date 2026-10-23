@@ -4,32 +4,53 @@
  * The Cortex-M0+ Micro Trace Buffer (DS60001479M 10.3): a CoreSight
  * MTB-M0+ that records every non-sequential change of the program
  * counter as a pair of 32-bit words in SRAM, with no CPU cycles spent
- * and with write priority over the processor.
+ * and with write priority over the processor. What a program uses it
+ * for: a trace window over a suspect piece of code, or (through
+ * samc21/postmortem.hpp) the last branches before a fault, read at the
+ * next boot. The smallest use (docs/samc21/mtb.md, "How to use it"):
  *
- * THE INTERESTING CASE IS THE ONE WITH NO DEBUGGER. Every vendor
+ *     alignas(1024) uint32_t trace[256];          // 1024 bytes, 128 packets
+ *     Mtb::configure(trace, sizeof(trace));       // false: not a trace buffer
+ *     Mtb::enable(true);
+ *     suspect();
+ *     Mtb::enable(false);
+ *     const uint32_t n = Mtb::packets_written(trace, sizeof(trace));
+ *     // Mtb::packet(trace, i) for i < n
+ *
+ * Who calls what. Every verb here is a few loads and stores of the
+ * block's registers or of the caller's buffer: nothing waits, nothing
+ * masks, and there is no clock to enable. configure(), enable() and
+ * release() write MASTER and FLOW with no guard of their own, so one
+ * context owns the block at a time; freeze() and snapshot() are legal
+ * with interrupts dead and from a fault handler. The buffer is the
+ * caller's storage: the block writes into it from enable(true) until
+ * the trace stops, and a reader stops it first (freeze() or
+ * enable(false)), or reads its own branches.
+ *
+ * The interesting case is the one with no debugger. Every vendor
  * description of this block assumes a probe reading the buffer out
- * through the Debug Access Port. But the buffer is ORDINARY SRAM chosen
+ * through the Debug Access Port. But the buffer is ordinary SRAM chosen
  * by software, so a program can point the MTB at a buffer of its own,
- * run, stop it, and READ ITS OWN TRACE - a hardware backtrace of the
+ * run, stop it, and read its own trace - a hardware backtrace of the
  * last N branches, available after a fault, with no probe attached. That
  * is the shape this header builds and the bench suite proves.
  *
- * WHAT THE SILICON DOES.
+ * What the silicon does.
  *
- * FOUR REGISTERS, AND THE DATA SHEET DESCRIBES NONE OF THEM. 10.3.2
+ * Four registers, and the data sheet describes none of them. 10.3.2
  * names POSITION, MASTER, FLOW and BASE and then defers to the CoreSight
  * MTB-M0+ Technical Reference Manual, which is not among this project's
- * documents of record. The DEVICE HEADER is therefore the only local
+ * documents of record. The device header is therefore the only local
  * authority on the bit layout and it is where every field below comes
  * from; anything the header does not name is measured or left alone.
  *
- * THE BUFFER IS A POWER OF TWO, ALIGNED TO ITSELF. MASTER.MASK holds
+ * The buffer is a power of two, aligned to itself. MASTER.MASK holds
  * log2(bytes) - 4, so the smallest buffer is 16 bytes (two packets) and
  * the pointer wraps within a naturally aligned region of that size. A
- * buffer that is not aligned to its own size does not fail: it TRACES
- * SOMEWHERE ELSE, which is why `configure()` refuses one.
+ * buffer that is not aligned to its own size does not fail: it traces
+ * somewhere else, which is why `configure()` refuses one.
  *
- * POSITION AND FLOW HOLD OFFSETS FROM BASE, NOT ADDRESSES. BASE is a
+ * POSITION and FLOW hold offsets from BASE, not addresses. BASE is a
  * read-only register giving where the SRAM the MTB writes to starts
  * (0x20000000 here); POSITION.POINTER and FLOW.WATERMARK are byte
  * offsets from it, with their low three bits implied zero because a
@@ -37,50 +58,50 @@
  * offset 0x1000, and this header does that subtraction rather than
  * making every caller remember it.
  *
- * A PACKET IS TWO WORDS: a source address and a destination address,
- * both with bit 0 carrying a flag whose NAMES belong to the TRM. This
+ * A packet is two words: a source address and a destination address,
+ * both with bit 0 carrying a flag whose names belong to the TRM. This
  * header exposes the addresses with bit 0 masked off and the two flags
  * as unnamed bits, because inventing names for them would be stating
  * what is not enforced. What the bench establishes instead is what the
- * flags DO on this silicon - see docs/samc21/mtb.md.
+ * flags do on this silicon - see docs/samc21/mtb.md.
  *
- * WHAT NEEDS A DEBUGGER AND WHAT DOES NOT. MASTER.EN, MASTER.MASK,
+ * What needs a debugger and what does not. MASTER.EN, MASTER.MASK,
  * FLOW.AUTOSTOP and the watermark are pure hardware and work with
  * nothing attached. MASTER.HALTREQ and FLOW.AUTOHALT ask the core to
- * HALT, which on ARMv6-M requires DHCSR.C_DEBUGEN - a bit
- * `bin/brio` deliberately CLEARS after every SAM flash, precisely
+ * halt, which on ARMv6-M requires DHCSR.C_DEBUGEN - a bit
+ * `bin/brio` deliberately clears after every SAM flash, precisely
  * so a stray BKPT cannot stop an unattended board. They are exposed and
  * named; what they do here is measured rather than assumed.
  *
- * TWO EVENT USERS, AND THE TWO DOCUMENTS DISAGREE ABOUT THEIR NUMBERS.
+ * Two event users, and the two documents disagree about their numbers.
  * MASTER.TSTARTEN and TSTOPEN gate the block's hardware trace-start and
  * trace-stop inputs, which on this family are wired to the event system.
  * Table 12-3 numbers those users 44 and 45; the device header's
  * EVENT_ID_USER_MTB_START / _STOP say 45 and 46. The constants below are
- * the HEADER's, per the house rule, and the bench settles which is
+ * the header's, per the house rule, and the bench settles which is
  * really connected.
  *
- * NO CLOCK OF ITS OWN. The MTB has no bit in any MCLK mask and no row
+ * No clock of its own. The MTB has no bit in any MCLK mask and no row
  * in table 12-3's clock columns: it is clocked with the processor and
  * there is nothing to enable.
  *
  * PAC. The MTB is write-protectable (`Pac::protect(Mtb::pac_id)`), and
- * ITS IDENTIFIER IS ONE THE DATA SHEET NEVER PRINTS: table 12-3's PAC
+ * its identifier is one the data sheet never prints: table 12-3's PAC
  * Index column is blank for this row while PAC.STATUSB and INTFLAGB both
  * carry an MTB bit and the header gives ID_MTB. See device_tables.hpp.
  *
- * NO ERRATA. DS80000740S has no MTB section.
+ * No errata. DS80000740S has no MTB section.
  *
- * READING THE TAIL BACK IS A RACE AGAINST THE READER ITSELF. The MTB
+ * Reading the tail back is a race against the reader itself. The MTB
  * traces the CPU that is reading it, so every branch the reading code
  * takes is another packet over the oldest thing still in the buffer.
- * `freeze()` is therefore the FIRST verb of any post-mortem path - not
+ * `freeze()` is therefore the first verb of any post-mortem path - not
  * an optimization but the difference between a trace and a picture of
  * the trace reader - and `snapshot()` is the bounded, allocation-free
  * copy of the last N packets a frozen buffer holds. Both are legal with
  * interrupts dead, which is what makes samc21/postmortem.hpp possible.
  *
- * NOT BUILT (docs/samc21/mtb.md carries the list): any decoder above the
+ * Not built (docs/samc21/mtb.md carries the list): any decoder above the
  * packet pair - reconstructing a call chain wants the image's symbols
  * and belongs on the host; and the CoreSight management registers at
  * 0xF00 and above (claim tags, lock access, the authentication status),
@@ -217,10 +238,12 @@ struct Mtb {
     // ---- configuration -------------------------------------------------------
 
     /**
-     * Point the block at a buffer and write MASTER and FLOW - WITHOUT
-     * enabling it. `enable(true)` is a separate verb so that the moment
-     * tracing starts is a line of the caller's own, which is what makes
-     * a trace window mean anything.
+     * Point the block at a buffer and write MASTER and FLOW - without
+     * enabling it. False, and nothing written, for a buffer that is not
+     * a trace buffer (buffer_valid()) or a watermark past its end.
+     * `enable(true)` is a separate verb so that the moment tracing
+     * starts is a line of the caller's own, which is what makes a trace
+     * window mean anything.
      *
      * The write pointer is reset to the start of the buffer and the WRAP
      * bit cleared, so a configure() is also the way to re-arm for a

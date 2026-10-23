@@ -1,85 +1,152 @@
 /*
  * i2c.hpp
  *
- * The SAM C21 SERCOM in I2C mode (DS60001479M ch. 33), in the strata
- * the rest of this target uses:
+ * The SAM C21 SERCOM in I2C mode (DS60001479M ch. 33), for a program
+ * that reads and writes I2C devices through the bus arbiter, or answers
+ * another host as a client. The smallest use, a device client on the
+ * arbitrated bus (docs/samc21/i2c.md, "How to use"):
  *
- *  I2cm<n>     the HOST resource - a typed view of one instance's I2C
+ *     using I2cHw = brio::I2cHost<3, my_pads>;   // generator 0 on a clean wire
+ *     using I2c = brio::I2cBus<I2cHw, P>;        // an active object
+ *     extern "C" void SERCOM3_Handler() {
+ *         if (I2cHw::isr()) { brio::post<I2c>(brio::TransferDone{I2cHw::status()}); }
+ *     }
+ *     I2cHw::init(clock, measured_rise_ns);      // in main(), after the clock task
+ *
+ * then an active object posts a Request ({addr, tx, tx_len, rx, rx_len,
+ * reply, speed}, the buffers as lend<Lease::reply>(...)) to I2c and gets
+ * an I2cDone back with i2c_ok or the wire's answer (i2c_rejected for a
+ * speed the core cannot make, i2c_bus_error, a NACK code).
+ *
+ * The words. An active object (AO) is a brio component with its own
+ * event queue, served one event at a time by the kernel; `P` is the
+ * program's platform type (samc21/platform.hpp's SamPlatform). The
+ * arbiter is I2cBus, the active object that owns the bus on behalf of
+ * every other one and runs their requests one at a time; a timed
+ * arbiter is one whose timeout_ticks is not zero (util/i2c_bus.hpp),
+ * the one that calls recover() when a tenure outlives it. A tenure is
+ * one ownership of the bus from START to STOP. Lending a buffer
+ * (lend<Lease::reply>, kernel/borrowed.hpp) passes its address in the
+ * event, not a copy: the lender, the posting active object, keeps it
+ * untouched until the reply. "Generator 0 on a clean wire" is the
+ * template's default generator, the CPU's own rate: init()'s comment
+ * says when a wire run in a bundle with other signals, whose crosstalk
+ * this unfiltered input reads as false Starts, wants a slower one.
+ * measured_rise_ns is the bus's SCL rise time in nanoseconds as the
+ * bench measures it, 300 when left out; it enters the baud arithmetic.
+ * SYSOP is the host's SYNCBUSY bit that a store to CTRLB.CMD,
+ * STATUS.BUSSTATE, ADDR or DATA raises while enabled (the facts below). The task is the I2cHost engine, the driver layer the
+ * arbiter drives.
+ *
+ * Who calls what, and from where. init() is a setup call in main(),
+ * after the clock task's init() and before interrupts are enabled
+ * globally; it waits, bounded, for the peripheral's synchronizations and
+ * the forcing of the bus state to IDLE, and answers false when one did
+ * not complete or when not even standard_100k can be produced at the
+ * core rate; it hands the pads to the SERCOM with no internal pull (the
+ * bus's pull-ups are the board's) and enables the instance's NVIC line
+ * itself. start() is the arbiter's, from its dispatch in main
+ * context, and waits, bounded, only for synchronizations (the
+ * disable/enable pair and the forcing to IDLE a change of speed costs,
+ * the SYSOP wait before its ADDR store): every tenure that moves the
+ * wire runs on the byte pump (the engine's interrupt-driven byte
+ * loop), and start() returns false, meaning "still running, the
+ * completion comes on the interrupt"; it returns true - "already over" -
+ * only for a speed the core cannot produce (i2c_rejected) or a SYSOP
+ * that never settled (i2c_bus_error), with nothing moved, and the
+ * arbiter then replies with that status. isr() is the interrupt body: the
+ * program's handler for the instance's vector calls it and nothing else
+ * does, and it answers true on the completion edge, when the handler
+ * posts TransferDone{status()}; a vector left unbound is the crt's weak
+ * spin (the start-up code's default handler, a silent loop the program's
+ * own definition replaces), where the program stops at the first byte.
+ * The Request's two buffers are lent from the moment the Request is
+ * posted until the I2cDone the arbiter replies with: untouched and in scope until then, which nothing checks.
+ * recover() is the timed arbiter's, from its dispatch; unstick() is the
+ * application's, main context, and spins for its nine pulses and a Stop
+ * with the SERCOM's interrupt line disabled. I2cClient's polled verbs
+ * belong to the context that calls them, its isr() to the program's
+ * handler. The resources' configuring verbs are setup calls with no
+ * guard of their own. The parts:
+ *
+ *  I2cm<n>     the host resource - a typed view of one instance's I2C
  *              host register set: the bus state machine, the baud
  *              generator with the chapter's own rise-time arithmetic,
  *              MB/SB/ERROR, the command strobes, the SYSOP
  *              synchronization discipline.
  *
- *  I2cs<n>     the CLIENT resource - the OTHER register set (unlike the
+ *  I2cs<n>     the client resource - the other register set (unlike the
  *              SPI's two views these really differ: no BAUD, no bus
  *              state, AMATCH/DRDY/PREC instead of MB/SB): address
  *              matching in its three modes, the general call, the
  *              stretch-and-command surface.
  *
- *  I2cHost<n, pads>
- *              the TASK util/i2c_bus.hpp (= util/bus_master.hpp) drives:
- *              the transfer ENGINE. A Request is one BUS TENURE - write,
+ *  I2cHost<n, pads, generator>
+ *              the task util/i2c_bus.hpp (= util/bus_master.hpp) drives:
+ *              the transfer engine. A Request is one bus tenure - write,
  *              read, or write-then-read joined by a repeated START - the
  *              descriptor shape every target's I2cHost carries, buffers
  *              as Lease::reply loans, completion as the bus AO's
  *              TransferDone with the i2c_* status vocabulary.
  *
- *  I2cClient<n, pads>
+ *  I2cClient<n, pads, generator>
  *              the polled surface plus the ISR body for the other end of
  *              the wire; a client is a protocol and the protocol is the
  *              application's (the SpiClient position).
  *
- * PADS ARE FIXED BY THE CHAPTER: SDA is PAD[0] and SCL is PAD[1] (33.4),
- * so I2cPads carries only the two pins - there is no DOPO here. WHICH
- * PINS MAY CARRY I2C AT ALL is table 6-7's per-package list (on the
+ * Pads are fixed by the chapter: SDA is PAD[0] and SCL is PAD[1] (33.4),
+ * so I2cPads carries only the two pins - there is no DOPO here. Which
+ * pins may carry I2C at all is table 6-7's per-package list (on the
  * 64-pin J: PA08/09, PA12/13, PA16/17, PA22/23, PB12/13, PB16/17,
- * PB30/31) and NO device-header symbol encodes it, so it stays a stated
+ * PB30/31) and no device-header symbol encodes it, so it stays a stated
  * obligation on the pad pins - the one legality question this header
  * cannot ask the header.
  *
  * Facts that shape the code (33.5.x, 33.6.x, 33.8.x, 33.10.x, and
  * errata DS80000740S at silicon rev F):
  *  - CTRLA (but ENABLE/SWRST), CTRLB (but ACKACT/CMD), BAUD and the
- *    client's ADDR are ENABLE-PROTECTED (33.6.2.1): a write while
- *    enabled is DISCARDED. Everything here configures disabled;
- *  - the host's SYNCBUSY has a THIRD bit beside SWRST/ENABLE: SYSOP,
+ *    client's ADDR are enable-protected (33.6.2.1): a write while
+ *    enabled is discarded. Everything here configures disabled;
+ *  - the host's SYNCBUSY has a third bit beside SWRST/ENABLE: SYSOP,
  *    raised by writing CTRLB.CMD, STATUS.BUSSTATE, ADDR or DATA while
- *    enabled (33.6.6). Every such store here WAITS FIRST (the sdadc
+ *    enabled (33.6.6). Every such store here waits first (the sdadc
  *    discipline - wait before storing, never after);
  *  - the bus state machine (33.6.2.3) boots UNKNOWN and leaves it only
  *    by seeing a Stop, by an INACTOUT time-out, or by software forcing
  *    IDLE - so a host on a quiet bus that never forces IDLE never
  *    starts. force_idle() is therefore part of the host's init;
- *  - MB and SB hold SCL LOW (STATUS.CLKHOLD) until software answers
+ *  - MB and SB hold SCL low (STATUS.CLKHOLD) until software answers
  *    with DATA, ADDR, a command, or a flag clear (33.10.6) - an
  *    unlimited-time-to-respond design;
  *  - writing ADDR.ADDR clears BUSERR, ARBLOST, LENERR and the time-out
- *    flags AUTOMATICALLY (33.10.7), which is why the engine starts a
+ *    flags automatically (33.10.7), which is why the engine starts a
  *    tenure with no clear ceremony at all;
- *  - ERRATUM 1.17.8 (LIVE): STATUS.CLKHOLD is documented read-only and
- *    IS WRITABLE, and writing it corrupts the clock-hold state. Every
- *    STATUS store in this file is a MASK THAT EXCLUDES BIT 7 by
+ *  - erratum 1.17.8 (live): STATUS.CLKHOLD is documented read-only and
+ *    is writable, and writing it corrupts the clock-hold state. Every
+ *    STATUS store in this file is a mask that excludes bit 7 by
  *    construction (i2cm_status_w1c / i2cs_status_w1c);
- *  - ERRATUM 1.17.10 (LIVE): 10-bit addressing in CLIENT mode is not
+ *  - erratum 1.17.10 (live): 10-bit addressing in CLIENT mode is not
  *    functional, no workaround. I2csConfig has no ten-bit knob and the
  *    resource refuses ADDR.TENBITEN by construction (host-side 10-bit
  *    exists at the RESOURCE level; the engine speaks 7-bit, which is
  *    what the shared Request shape carries);
- *  - ERRATUM 1.17.11 (LIVE): the client's error status bits are NOT
+ *  - erratum 1.17.11 (live): the client's error status bits are not
  *    cleared when INTFLAG.AMATCH is cleared, against 33.8.6. The
  *    workaround is code: I2cs<n>::clear_errors() writes them by hand
  *    and the client task spends it on every address match;
- *  - ERRATUM 1.17.13 (LIVE): Quick Command with SCLSM = 1 raises a bus
+ *  - erratum 1.17.13 (live): Quick Command with SCLSM = 1 raises a bus
  *    error on a repeated start. i2cm_config_valid() refuses the pair;
- *  - ERRATUM 1.17.16: SWRST claimed non-functional while ENABLE = 0 on
- *    every revision. NOT REPRODUCED in SPI mode on this silicon
- *    (samc21/spi.hpp); the enable-first discipline is kept here too
- *    and the I2C-mode disposition is unmeasured;
- *  - ERRATUM 1.17.21 (LIVE): automatic address acknowledge (AACKEN)
+ *  - erratum 1.17.16: SWRST claimed non-functional while ENABLE = 0 on
+ *    every revision. Not reproduced in SPI mode on this silicon
+ *    (samc21/spi.hpp) nor in I2C mode (measured: SWRST from the
+ *    disabled state reset the block with its synchronization
+ *    completing, docs/samc21/i2c.md); the enable-first discipline is
+ *    kept here too, the sheet marking every revision;
+ *  - erratum 1.17.21 (live): automatic address acknowledge (AACKEN)
  *    breaks on a repeated start, workaround "do not use the AACKEN
- *    feature". This driver has NO AACKEN knob at all - an AMATCH
+ *    feature". This driver has no AACKEN knob at all - an AMATCH
  *    handler is the shape, and the workaround says so;
- *  - ERRATUM 1.17.22 (LIVE): the client's STATUS.RXNACK is INVALID at
+ *  - erratum 1.17.22 (live): the client's STATUS.RXNACK is invalid at
  *    the first DRDY of a tenure. The workaround is a software flag
  *    armed at AMATCH; I2cClient carries it (first_drdy()) so the app
  *    does not have to rediscover the rule;
@@ -91,7 +158,7 @@
  *    and this desk's 1.5k breadboard bus is no HS bus anyway - a
  *    deliberate, stated non-feature;
  *  - the three SMBus time-outs count GCLK_SERCOM_SLOW, which must run
- *    at 32.768 kHz (33.6.3.1) and is SHARED by SERCOM0..4 (one
+ *    at 32.768 kHz (33.6.3.1) and is shared by SERCOM0..4 (one
  *    channel, 18). Enabling a time-out without routing that channel
  *    hangs nothing but times nothing either; the config states it.
  */
@@ -870,12 +937,14 @@ public:
 /*
  * I2cHost<n, pads, generator>
  *
- * The transfer engine, driven by util/bus_master.hpp: a Request is ONE
- * BUS TENURE - write, read, or write-then-read joined by a repeated START
+ * The transfer engine, driven by util/bus_master.hpp: a Request is one
+ * bus tenure - write, read, or write-then-read joined by a repeated START
  * (the register-access idiom) - and the empty request is an address
- * probe. ALWAYS asynchronous: start() returns false and a
- * TransferDone{status()} follows from the ISR, which is the engine
- * contract every target's I2cHost keeps.
+ * probe. Asynchronous whenever the wire moves: start() returns false and
+ * a TransferDone{status()} follows from the ISR, which is the engine
+ * contract every target's I2cHost keeps; the two failures that move
+ * nothing (a speed the core cannot produce, a SYSOP that never settled)
+ * complete inside start() (start()'s comment).
  *
  * WHAT THIS SERCOM OFFERS, AND WHAT THE ENGINE TAKES (33.6.2.4, 33.6.3.2,
  * 33.6.4.1.2, 33.10.9; the measurements are docs/samc21/i2c.md's):
@@ -1474,6 +1543,10 @@ public:
 
     using Config = I2csConfig;
 
+    /// Bring the instance up as a client: clocks, reset, configuration,
+    /// pads, the NVIC line. Setup's call, main context, waits bounded;
+    /// false when the resource refuses the configuration or a
+    /// synchronization did not complete.
     template <typename Clock>
     static bool init(Clock clock, const Config& cfg) {
         (void)clock;

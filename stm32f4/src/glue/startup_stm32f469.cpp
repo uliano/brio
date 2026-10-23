@@ -50,7 +50,8 @@
 // distinct symbol makes the wreck legible in a backtrace. The three
 // configurable faults (MemManage, BusFault, UsageFault) are DISABLED at
 // reset (SHCSR) and escalate to HardFault too; they are weak aliases
-// of Default_Handler until the fault-handling pass gives them a body.
+// of Default_Handler; the reset chapter (stm32f4/reset.hpp's Faults and
+// hard_fault_reset) is what a program binds in their place.
 
 #include <stdint.h>
 

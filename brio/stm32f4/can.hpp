@@ -2,10 +2,48 @@
  * can.hpp
  *
  * The STM32F4's Basic Extended CAN controller (RM0090 ch. 32, RM0390
- * ch. 30): `Can<1|2|3>`, the RESOURCE over the whole chapter, with
- * `CanFrame`, `CanTiming` and `CanFilter` as its vocabulary.
+ * ch. 30): what a program uses to put a node on a CAN bus, or to test
+ * one with no bus at all in loopback. `Can<1|2|3>` is the resource over
+ * the whole chapter, with `CanFrame`, `CanTiming` and `CanFilter` as its
+ * vocabulary. The smallest use, a node at 500 kbit/s
+ * (docs/stm32f4/can.md has it with every other use):
  *
- * THE VOCABULARY IS SHARED, THE BUS AO IS NOT. `CanFrame`, `CanTiming`
+ *     using Bus = brio::Can<1>;
+ *     constexpr brio::CanPins pads{.rx = {'A', 11, brio::PinFunction::af9},
+ *                                  .tx = {'A', 12, brio::PinFunction::af9}};
+ *     constexpr auto timing = brio::can_timing_for(brio::apb_hz(clock, false), 500'000);
+ *     static_assert(brio::can_timing_valid(timing), "no exact 500 kbit/s from this PCLK1");
+ *
+ *     Bus::clock(true);
+ *     Bus::filter_clock(true);
+ *     Bus::claim_pads<pads>();
+ *     (void)Bus::init_mode(true);
+ *     (void)Bus::options({.auto_bus_off = true});
+ *     (void)Bus::timing(timing);
+ *     (void)Bus::filter_init(true);
+ *     (void)Bus::filter(brio::can_filter_accept_all(0));
+ *     (void)Bus::filter_init(false);
+ *     if (!Bus::start()) {
+ *         // eleven recessive bits never came: nothing is driving the bus
+ *     }
+ *
+ * Who calls what, and from where. Every verb is a register verb with no
+ * guard of its own, and nothing here masks interrupts: the configuring
+ * ones are setup calls or an active object's, never two contexts at once
+ * on one instance. What waits: init_mode(), start() and sleep() wait for
+ * the controller's acknowledge, bounded at `ack_spins` reads of CAN_MSR,
+ * and answer false when the bound runs out - leaving initialization or
+ * sleep needs eleven recessive bits on the receive pad, which a bus with
+ * no transceiver and no other node never gives. transmit() and receive()
+ * never wait: transmit() answers nothing when no mailbox is free and
+ * copies the frame into the mailbox, so the caller's frame is free when
+ * it returns; receive() copies the output mailbox and releases it.
+ * tx_isr(), rx_isr(fifo) and sce_isr() are the bodies of the program's
+ * handlers for the vectors tx_irq(), rx_irq(fifo) and sce_irq() name,
+ * and nothing else calls them. The bit time is computed from the APB1
+ * rate the clock type claims, so the clock task runs first.
+ *
+ * The vocabulary is shared, the bus active object is not. `CanFrame`, `CanTiming`
  * and `CanError` are util/can.hpp's, written against this block, the
  * CH32V203's twin of it and the STM32G0's M_CAN (docs/design/can.md);
  * this file binds CAN_BTR's field widths into the shared search and
@@ -14,63 +52,63 @@
  * and no concept, for the reasons that page gives: a transmission's
  * completion is not a reply, and reception is routing.
  *
- * THREE INSTANCES, ONE FILTER BLOCK. CAN1 and CAN2 come as a pair on every
+ * Three instances, one filter block. CAN1 and CAN2 come as a pair on every
  * part that has CAN at all except the F413/F423, which add a third; the
- * F401, F410 and F411 have none. CAN1 is the MASTER: the filter registers
+ * F401, F410 and F411 have none. CAN1 is the master: the filter registers
  * are its, and CAN2's filters are banks of CAN1's block above
  * CAN_FMR.CAN2SB - so filtering on CAN2 writes CAN1's registers and needs
- * CAN1'S CLOCK ON, which `filter_clock()` is for. CAN3, where it exists,
+ * CAN1's clock on, which `filter_clock()` is for. CAN3, where it exists,
  * is a master with a block of its own; how many banks that block has is a
  * fact of RM0430, which is not on the desk, so every filter verb on
  * `Can<3>` refuses rather than write a bank that may not be there
  * (`can_filter_banks()` in the reserve).
  *
- * SEVEN FACTS THAT SHAPE THE FILE.
+ * Seven facts that shape the file.
  *
- * 1. THREE MODES, AND EACH IS A REQUEST WITH AN ACKNOWLEDGE. INRQ and
+ * 1. Three modes, and each is a request with an acknowledge. INRQ and
  *    SLEEP are asked for in CAN_MCR; INAK and SLAK in CAN_MSR are the
  *    silicon saying it has arrived (30.4). Leaving initialization or sleep
- *    also costs a SYNCHRONIZATION - eleven consecutive recessive bits on
+ *    also costs a synchronization - eleven consecutive recessive bits on
  *    CANRX - so `start()` can take a whole frame time to answer and every
- *    wait here is bounded and reports rather than hangs. THE RESET STATE
- *    IS SLEEP, not normal: a block whose clock was just turned on
+ *    wait here is bounded and reports rather than hangs. The reset state
+ *    is sleep, not normal: a block whose clock was just turned on
  *    transmits nothing until it is woken.
  *
- * 2. THE BIT TIME IS COUNTED IN PCLK1 PERIODS. tq = (BRP + 1) x tPCLK, the
+ * 2. The bit time is counted in PCLK1 periods. tq = (BRP + 1) x tPCLK, the
  *    bit is 1 + TS1 + TS2 quanta, and the sample point sits after the
  *    first 1 + TS1 of them (30.7.7). `can_timing_for()` searches that at
- *    COMPILE time for an EXACT bit rate - a CAN bus with a rounded bit
+ *    compile time for an exact bit rate - a CAN bus with a rounded bit
  *    rate is a bus that works until the third node joins - and reports the
  *    sample point it reached; a rate the APB clock cannot divide into
  *    exactly is an empty timing and a static_assert away from the
- *    application. CAN_BTR is writable ONLY in initialization mode
+ *    application. CAN_BTR is writable only in initialization mode
  *    (30.9.1), and so are the two test-mode bits that live in it.
  *
- * 3. LOOPBACK AND SILENT ARE THE WIRELESS INSTRUMENTS - AND LOOPBACK STILL
- *    WANTS ITS RECEIVE PAD. In loop back mode (LBKM) the node receives its
+ * 3. Loopback and silent are the wireless instruments - and loopback still
+ *    wants its receive pad. In loop back mode (LBKM) the node receives its
  *    own transmissions through an internal feedback from Tx to Rx, ignores
  *    acknowledge errors and, says 30.5.2, disregards "the actual value of
- *    the CANRX input pin" - which is true of the DATA and NOT of the
- *    SYNCHRONIZATION: measured, a node in loopback whose receive pad is
- *    held DOMINANT never leaves initialization mode, because leaving it
+ *    the CANRX input pin" - which is true of the data and not of the
+ *    synchronization: measured, a node in loopback whose receive pad is
+ *    held dominant never leaves initialization mode, because leaving it
  *    costs eleven recessive bits and the counter watches the pad. So a
  *    loopback self-test needs no transceiver and no peer, but it does need
  *    CAN_RX claimed and held recessive - the pad's own pull-up will do,
  *    and CAN_TX can stay unclaimed so that the chip drives nothing.
  *    In silent mode (SILM) the node listens without ever driving a
- *    dominant bit and CANNOT START A TRANSMISSION AT ALL (30.5.1) - a
+ *    dominant bit and cannot start a transmission at all (30.5.1) - a
  *    transmit request there stays in its mailbox until it is aborted. The
  *    two together are the "hot self-test" of 30.5.3.
  *
- * 4. THREE TRANSMIT MAILBOXES AND TWO ORDERS. With more than one pending,
- *    the scheduler picks by IDENTIFIER (lowest wins, ties by mailbox
- *    number) or by REQUEST ORDER when MCR.TXFP is set (30.7.1). A mailbox
+ * 4. Three transmit mailboxes and two orders. With more than one pending,
+ *    the scheduler picks by identifier (lowest wins, ties by mailbox
+ *    number) or by request order when MCR.TXFP is set (30.7.1). A mailbox
  *    is write-protected unless it is empty (TME), which is why
  *    `transmit()` takes the frame whole and refuses when there is no room,
  *    and RQCP is the completion flag whose clear also clears TXOK, ALST
  *    and TERR for that mailbox.
  *
- * 5. TWO RECEIVE FIFOS OF THREE, AND THE OVERRUN POLICY IS A CHOICE. FMP
+ * 5. Two receive FIFOs of three, and the overrun policy is a choice. FMP
  *    counts what is pending, FULL says three are, FOVR says a fourth
  *    arrived - and MCR.RFLM decides which message is lost: with the lock
  *    clear the newest overwrites the last stored one, with it set the
@@ -78,27 +116,28 @@
  *    mailbox is released with RFOM, and until it is the next message is
  *    not reachable.
  *
- * 6. THE FILTER BANKS ARE A SCARCE SHARED RESOURCE WITH FOUR SHAPES. Each
+ * 6. The filter banks are a scarce shared resource with four shapes. Each
  *    of the 28 banks is one 32-bit filter or two 16-bit ones (FS1R), in
  *    mask or in list mode (FM1R), assigned to FIFO 0 or FIFO 1 (FFA1R) and
- *    active or not (FA1R) - and the FILTER MATCH INDEX the receiver
- *    reports is a number over the ACTIVE filters of that FIFO in the
+ *    active or not (FA1R) - and the filter match index the receiver
+ *    reports is a number over the active filters of that FIFO in the
  *    manual's priority order (32-bit before 16-bit, list before mask, low
  *    bank before high), not the bank number. Configuration is legal only
  *    with FINIT set or the bank deactivated (30.9.1), and FINIT
- *    DEACTIVATES RECEPTION while it stands (30.4.1).
+ *    deactivates reception while it stands (30.4.1).
  *
- * 7. FOUR VECTORS PER INSTANCE. Transmit (the three mailboxes together),
+ * 7. Four vectors per instance. Transmit (the three mailboxes together),
  *    FIFO 0, FIFO 1, and status-change-and-error - the last one carrying
  *    the error flags, the wake-up and the sleep acknowledge, all behind
  *    ERRI/WKUI/SLAKI, which are rc_w1 (30.9.2). The three ISR bodies below
  *    read and clear at the top, as every ISR body in this stratum does.
  *
- * THE ONE ERRATUM, AND IT IS LIVE. ES0206 2.13.1 and ES0298 2.15.1, every
- * revision of the F427/F437/F429/F439 and of the F446: "bxCAN
+ * The one erratum, and it is live. ES0206 2.13.1, ES0298 2.15.1 and ES0321
+ * 2.15.1, every revision of the F427/F437/F429/F439, of the F446 and of
+ * the F469/F479 (the reserve's can_ttcm_erratum()): "bxCAN
  * time-triggered communication mode not supported ... timestamp values are
  * not available ... TTCM must be kept cleared", no workaround. So
- * `options()` REFUSES a configuration that asks for TTCM on those part
+ * `options()` refuses a configuration that asks for TTCM on those part
  * classes, `time_triggered_supported()` says whether it would, and the
  * TIME field a received frame carries is left in `CanFrame` but is
  * meaningless without the mode. On the part classes whose errata sheet was
@@ -348,7 +387,7 @@ struct Can {
 
     /// A bounded wait's budget. Leaving initialization or sleep costs
     /// eleven recessive bit times - 88 us at the family's slowest sensible
-    /// rate - so a hundred thousand register reads is a fault and not a
+    /// rate - so two hundred thousand register reads is a fault and not a
     /// slow bus.
     static constexpr uint32_t ack_spins = 200'000u;
 
@@ -994,7 +1033,8 @@ struct Can {
     // ---- teardown -------------------------------------------------------------------
 
     /// This instance's own registers back to their reset values (CAN_MCR's
-    /// RESET bit, which also puts it in sleep) and its clock off. The
+    /// RESET bit, which also puts it in sleep - the transmit status
+    /// excepted, master_reset() says why) and its clock off. The
     /// FILTER block is not touched: on CAN2 it is not this instance's, and
     /// on CAN1 it is shared.
     static void release_instance() {

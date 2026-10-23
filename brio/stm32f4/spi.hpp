@@ -2,38 +2,97 @@
  * spi.hpp
  *
  * The SPI and the I2S of the STM32F4 (RM0090 ch. 28, RM0390 ch. 26,
- * RM0383 ch. 20 - one chapter, three manuals, the same registers): up to
- * six instances of one block that wears TWO FACES, chosen by one bit of
- * I2SCFGR, in the layers every brio bus driver has
- * (docs/design/spi-bus.md):
+ * RM0383 ch. 20 - one chapter, three manuals, the same registers) as a
+ * program uses them: a device on three or four wires with this chip as
+ * the host that drives the clock, the same wires with this chip as the
+ * client that answers, or an I2S audio stream. Up to six instances of
+ * one block that wears two faces, chosen by one bit of I2SCFGR, in the
+ * layers every brio bus driver has (docs/design/spi-bus.md):
  *
- *  Spi<n>                the RESOURCE in its SPI face: the register
+ *  Spi<n>                the resource in its SPI face: the register
  *                        block, its bus, its gate and its reset, its one
  *                        vector, and the whole register description as
  *                        verbs - both roles, the four modes, 8- or
  *                        16-bit frames, the eight baud rates off the
- *                        instance's OWN APB clock, the three NSS
+ *                        instance's own APB clock, the three NSS
  *                        arrangements, the simplex and bidirectional
  *                        line modes, the hardware CRC with CRCNEXT, the
  *                        TI frame format, every flag with its clearing
  *                        sequence, the interrupt enables, the two DMA
  *                        requests, and one ISR body. It decides nothing.
- *  I2s<n> / I2sExt<n>    the RESOURCE in its I2S face: I2SMOD, the four
+ *  I2s<n> / I2sExt<n>    the resource in its I2S face: I2SMOD, the four
  *                        standards with PCM's two frame lengths, the
  *                        data and channel lengths, the master clock
  *                        output, and the I2SDIV/ODD arithmetic against
  *                        the audio PLL (stm32f4/clock.hpp's `Rcc`).
  *                        `I2sExt<n>` is the full-duplex extension block
  *                        the classes that have one give SPI2 and SPI3.
- *  SpiHost<n, pins, ...> the ENGINE util/spi_bus.hpp's SpiBus drives:
- *                        the Request is the other strata's VERBATIM, so
- *                        an application written over SpiBus on a Nucleo
- *                        or a Pico runs here unchanged.
+ *  SpiHost<n, pins, ...> the engine util/spi_bus.hpp's SpiBus drives:
+ *                        one transaction at a time (a select, a command
+ *                        phase, a data phase), polled or on the
+ *                        instance's interrupt. Its Request has the
+ *                        shared Request's fields by name
+ *                        (docs/design/spi-bus.md, "Realizations"), the
+ *                        rate and the frame size in this family's types
+ *                        and in this family's declaration order, so code
+ *                        that sets the fields by name over SpiBus needs
+ *                        no change here.
  *  SpiClient<n, pins>    the other end of the wire, a thin polled
  *                        surface with an ISR body: a client is a
  *                        protocol and which one is the application's.
  *
- * THE F1 LINEAGE, LIKE THE USART OF THIS FAMILY. There is no FIFO and no
+ * The smallest use, a device that owns its bus, polled, is written out
+ * in docs/stm32f4/spi.md: the pads named with the alternate function the
+ * datasheet gives them (`SpiPins`), `using Bus = brio::SpiHost<5,
+ * spi5>`, `Bus::init(clock)` after the clock task (`clock` is the
+ * program's tag object of its stm32f4/clock.hpp Clock type, the rates
+ * init() reads), the select pad an output parked high, then a
+ * `Bus::Request` with `polled = true` handed to `Bus::start()`. A bus
+ * several active objects share is a SpiBus over the same host: the
+ * client posts the Request with a reply channel and gets a SpiDone back,
+ * and the program binds the instance's vector to `Bus::isr()` and posts
+ * TransferDone to the SpiBus active object when it answers true.
+ * "Engine" names two things here: SpiHost is the bus's engine, the task
+ * SpiBus hands one transaction at a time; its two optional DMA engines
+ * (the TxEngine and RxEngine slots, stm32f4/dma.hpp) move its frames
+ * without the CPU.
+ *
+ * Who calls what, and from where. init(), release(), rebase(),
+ * bit_order(), sck_speed() and mosi_speed() are setup verbs of the main
+ * context, the last four on an idle bus. start() is called from main
+ * context (setup, or an active object's dispatch, which run there) - by
+ * SpiBus's dispatch, or by a program driving the engine alone. A polled request completes inside it: it spins with interrupts
+ * enabled under one budget for the whole transaction (400 000 polls
+ * plus 4096 a frame), the instance's interrupt never armed, and a
+ * Request's `cs_setup_us` is spent there too; on a stall it resets the
+ * block, sets `spi_stalled` and still returns true, so status() is the
+ * answer. A polled request that finds the engines' slots busy takes the
+ * other polled path, a wait on the DMA's own completion under its own
+ * budget (200 000 polls plus 6000 a byte), whose stall is reported as
+ * `spi_dma_fault`. An asynchronous request returns false at once and its frames
+ * are served by isr() (and, with engines, dma_isr()), the bodies the
+ * program's handlers for the instance's vector and the two streams'
+ * vectors call and nothing else does; each runs to completion like every
+ * interrupt handler in brio. The pump's waits are bounded spins: at most
+ * 64 polls for TXE behind a frame in flight in isr(), 1000 when it
+ * primes two frames (start() and isr()), and 400 000 for the shifter to
+ * drain after an overrun. This header takes no critical section of its
+ * own; the engines' arming is stm32f4/dma.hpp's. The Request's three
+ * buffers are lent (Lease::reply: each field is a Borrowed pointer,
+ * made with brio::lend<brio::Lease::reply>(buf), kernel/borrowed.hpp): a
+ * polled request's are the caller's again when start() returns; an
+ * asynchronous one's stay untouched and in scope from the post to the
+ * SpiDone reply, a lending nothing checks. The Request object itself is
+ * read through the reference, and the asynchronous path copies the
+ * fields its tenure (the time the transaction holds the bus) needs, so
+ * a program driving the engine alone has its Request back when start()
+ * returns; a posted one lies in the arbiter's slot until the dispatch
+ * ends (util/bus_master.hpp). The resource's
+ * verbs carry no guard of their own: setup verbs refuse what
+ * spi_config_valid() refuses, and the flag and data verbs are single
+ * register accesses.
+ *
+ * The F1 lineage, like the USART of this family. There is no FIFO and no
  * frame size beyond eight or sixteen bits: one transmit buffer, one
  * receive buffer, one shift register (26.3.9), so TXE means "the buffer
  * moved into the shifter" - at the first bit of the frame, which is what
@@ -46,53 +105,54 @@
  * written only when SPE is 0" (28.5.1), which is what makes a request
  * that changes the frame size pay a disable/enable pair.
  *
- * THE RATE IS THE INSTANCE'S OWN APB CLOCK OVER A POWER OF TWO, /2 to
+ * The rate is the instance's own APB clock over a power of two, /2 to
  * /256 - and on this family the two APBs differ from HCLK at every rate
  * above their ceilings, so a host asks `apb_hz(clock, on_apb2)`
  * (stm32f4/clock.hpp) and never SYSCLK. SPI1, SPI4, SPI5 and SPI6 are
  * APB2's; SPI2 and SPI3 are APB1's.
  *
- * FOUR ERRATA OF THIS CHAPTER ARE LIVE ON EVERY PART WITH A MANUAL ON
- * THE DESK (ES0206 2.12, ES0287 2.11, ES0298 2.14), and three of them
+ * Four errata of this chapter are live on every part with a manual on
+ * the desk (ES0206 2.12, ES0287 2.11, ES0298 2.14), and three of them
  * are answered as code:
- *  - BSY MAY STAY HIGH WHEN THE SPI IS DISABLED. `disable()` waits for
+ *  - BSY may stay high when the SPI is disabled. `disable()` waits for
  *    TXE and then for BSY in the transmitting configurations, as the
- *    workaround says, and in MASTER RECEIVE-ONLY (RXONLY, or
+ *    workaround says, and in master receive-only (RXONLY, or
  *    bidirectional with the output off) it does not look at BSY at all -
  *    the errata's own instruction, and the manual's 28.3.7 already warns
  *    the flag is kept low there.
- *  - ANTICIPATED COMMUNICATION UPON A TRANSIT FROM SLAVE RECEIVER TO
- *    MASTER: the clock starts on the MSTR write even with SPE clear.
+ *  - Anticipated communication upon a transit from slave receiver to
+ *    master: the clock starts on the MSTR write even with SPE clear.
  *    `configure()` therefore pulses the RCC reset line before it writes
- *    a HOST configuration over a client receive-only one - the first of
+ *    a host configuration over a client receive-only one - the first of
  *    the two workarounds, and the one that needs no ordering trick.
- *  - A WRONG CRC WHEN THE POLYNOMIAL IS EVEN: `spi_config_valid()`
+ *  - A wrong CRC when the polynomial is even: `spi_config_valid()`
  *    refuses an even polynomial, so the CRC unit is never armed with a
  *    divisor that computes nonsense. (The reset value 0x0007 is odd.)
- *  - THE LAST RECEIVED BIT MAY BE WRONG WHEN THE SCK FEEDBACK IS SLOW.
- *    The internal loop back from the SCK PAD must return inside two APB
+ *  - The last received bit may be wrong when the SCK feedback is slow.
+ *    The internal loop back from the SCK pad must return inside two APB
  *    periods, and the errata's table gives the ceiling per pad speed
  *    at a 30 pF load: 84 MHz of APB at `high` or `very_high`, 75 at
- *    `medium`, 25 at `low`. It is a PAD fact and not a rate fact - the
+ *    `medium`, 25 at `low`. It is a pad fact and not a rate fact - the
  *    SPI's own bit rate does not enter it - so every pad this driver
  *    hands over goes out at `very_high` unless the task's Config names
  *    another class, `sck_speed()` is the verb that moves it and
  *    `spi_errata_apb_ceiling_hz()` the table. A part run
- *    at 90 MHz of PCLK2 is ABOVE the ceiling at every pad speed, and
+ *    at 90 MHz of PCLK2 is above the ceiling at every pad speed, and
  *    what that costs is a bench measurement and not a promise.
  *
- * TWO OPTIONAL DMA ENGINE SLOTS, the shape every brio bus task has: name
+ * Two optional DMA engine slots, the shape every brio bus task has: name
  * a stm32f4/dma.hpp DmaTxEngine and/or DmaRxEngine and the data phase
  * moves without the CPU; name neither (the default) and every engine
  * branch disappears. A stream and a channel are not free here - the
  * request mapping gives an instance one, two or three (controller,
  * stream, channel) cells and no others - so a slot is checked against
- * the reserve's SPI slice of those tables at compile time, and refused
- * on a part class whose manual was not read.
+ * the reserve's SPI slice of those tables at compile time (the reserve:
+ * stm32f4/device_tables.hpp, the table of what each part has), and
+ * refused on a part class whose manual was not read.
  *
- * THE PADS ARE THE APPLICATION'S, as `UartPins` has them: SCK, MISO,
+ * The pads are the application's, as `UartPins` has them: SCK, MISO,
  * MOSI and NSS as `PinSel`s, each with the alternate function the
- * DATASHEET gives that signal on that pad - AF5 for SPI1, SPI2, SPI4,
+ * datasheet gives that signal on that pad - AF5 for SPI1, SPI2, SPI4,
  * SPI5 and SPI6, AF6 for SPI3 and for the I2S signals that share a pad
  * with it, with a handful of AF5/AF6 exceptions per pad that only the
  * datasheet's table 12 can settle. The device header carries no pin
@@ -1065,7 +1125,8 @@ inline constexpr uint32_t spi_isr_entry_cycles = 12;
 inline constexpr uint32_t spi_isr_to_read_cycles = 15;
 /// The DEFAULT of SpiHost's `hold_off_cycles`: the longest the bench
 /// images keep the host's vector from running, at 180 MHz. No interrupt
-/// nests over another (design/kernel.md section 1), so a handler that
+/// nests over another (design/kernel.md section 1, "The model in one
+/// page"), so a handler that
 /// started just before RXNE rose holds the vector for its whole body, and
 /// a masked window holds it as long. In bench_stm32f4.lst the longest
 /// handler is the DMA completion vector of an engined request (letter d:
@@ -1126,8 +1187,10 @@ static_assert(spi_write_ahead_code(300u, SpiDataSize::bits16, 1) ==
 /**
  * SpiHost<n, pins, TxEngine, RxEngine, hold_off_cycles>
  *
- * The engine SpiBus (util/spi_bus.hpp = BusMaster) drives. Its Request is
- * the other strata's, field for field: the bus AO asserts the request's
+ * The engine SpiBus (util/spi_bus.hpp = BusMaster) drives. Its Request
+ * has the shared Request's fields by name (docs/design/spi-bus.md,
+ * "Realizations"), the rate and frame size in this family's types and in
+ * this family's declaration order: the engine asserts the request's
  * own chip select around the transaction, a COMMAND phase goes out with
  * D/C low and a DATA phase with it high, the data phase has an optional
  * out buffer (null = 0xFF dummies) and an optional in buffer (null = the
@@ -1214,7 +1277,7 @@ static_assert(spi_write_ahead_code(300u, SpiDataSize::bits16, 1) ==
  * the receive block's completion proves the transmit block's.
  *
  * FRAMES IN A BYTE BUFFER: one byte per 8-bit frame, two bytes low-first
- * per 16-bit frame - the other strata's rule.
+ * per 16-bit frame, as frame() and store() below read and write it.
  *
  * THE PADS GO OUT AT THE CLASSES THE Config NAMES, `very_high` by
  * default, and the default is ES0206 2.12.4 speaking, not a taste: the
@@ -1284,7 +1347,8 @@ public:
     /// copy is nine loads and nine stores with no padding between; the
     /// rest is spent inside start().
     struct Request {
-        PinRef cs;   ///< asserted low around the transaction
+        PinRef cs;   ///< asserted low around the transaction: an output
+                     ///< the program parks high before the first request
         PinRef dc;   ///< display D/C line; null = no such pin
         /// Phase 1, sent with DC low; LENT until the reply lands.
         Borrowed<const uint8_t, Lease::reply> cmd;
@@ -1390,7 +1454,9 @@ public:
 
     /**
      * Bring the instance up as a host: gate, reset, configuration, pads,
-     * the NVIC line. `clock` is the app's Clock tag and the rate the BR
+     * the NVIC line. A setup verb: main context, after the clock task's
+     * init (the rates below are read from the Clock type, not from the
+     * hardware) and before the first request. `clock` is the app's Clock tag and the rate the BR
      * field divides is THE INSTANCE'S OWN APB CLOCK, never SYSCLK.
      * `cfg.max_sck_hz` is an optional CEILING for the whole bus,
      * re-resolved on rebase(); the two pads go out at the classes `cfg`
@@ -1536,6 +1602,9 @@ public:
     /// when it runs on the ISR and a TransferDone follows - exactly
     /// util/bus_master.hpp's engine contract. The request is read through
     /// the reference; the asynchronous path copies its tenure's fields.
+    /// True is "ended", not "succeeded": a polled request whose budget ran
+    /// out returns true with the block reset and status() = spi_stalled,
+    /// so a caller driving the engine without the arbiter reads status().
     static bool start(const Request& r) {
         State& s = st_;
         s.status = spi_ok;

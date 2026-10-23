@@ -2,10 +2,12 @@
  * tim.hpp
  *
  * The STM32F4's timers (RM0090 ch. 17..20, RM0390 ch. 15..18, RM0383
- * ch. 12..14) in the two strata every brio target uses
+ * ch. 12..14) for a program that needs a PWM output, a measured period
+ * or interval, an event counter, a periodic interrupt, a one-shot pulse
+ * or a quadrature encoder - in the two strata every brio target uses
  * (docs/design/overview.md, "Target strata"):
  *
- *  Tim<n>          the RESOURCE - one TIMx block: the time base
+ *  Tim<n>          the resource - one TIMx block: the time base
  *                  (prescaler, counter, auto-reload with its preload),
  *                  the counting modes, the capture/compare channels in
  *                  both their faces, the slave controller and the master
@@ -14,9 +16,9 @@
  *                  and the ISR bodies.
  *
  *  TimPad<sel>     a pad handed to a timer channel (the AF number is the
- *                  DATASHEET's - see below).
+ *                  datasheet's - see below).
  *
- *  TASKS           TimPwm / TimPairPwm (util/pwm_channel.hpp's
+ *  Tasks           TimPwm / TimPairPwm (util/pwm_channel.hpp's
  *                  PwmChannel, one output and a complementary pair),
  *                  TimPeriodMeter / TimIntervalMeter (what
  *                  util/meter_sampler.hpp's MeterLatch is fed from),
@@ -24,108 +26,140 @@
  *                  measuring another with no wire and no CPU),
  *                  TimPeriodicTick, TimOnePulse, TimEncoder.
  *
- * SIX FACTS THAT SHAPE THIS FILE.
+ * The smallest use, a 10 kHz PWM on PA6 (docs/stm32f4/tim.md, "How to
+ * use it", has one example per task):
  *
- * 1. THERE IS ONE TIM_TypeDef AND FOURTEEN DIFFERENT TIMERS. The device
+ *   constexpr brio::PinSel wave{'A', 6, brio::PinFunction::af2};  // TIM3_CH1
+ *   using Wave = brio::Tim<3>;
+ *   using Lamp = brio::TimPwm<Wave, 0, 999>;                      // 1000 steps
+ *   brio::TimPad<wave>::claim();
+ *   Wave::init();                                                 // clock on, reset
+ *   Lamp::setup(Wave::clock_hz(clock) / 1000u / 10'000u - 1u);    // 10 kHz
+ *   Lamp::duty(250);                                              // a quarter
+ *
+ * clock_hz() is the counting rate the clock type claims (fact 5), so the
+ * clock task runs first: a timer counting at the 16 MHz reset rate under
+ * a faster clock type runs slow by the ratio of the rates, and nothing
+ * here can see it.
+ *
+ * Who calls what, and from where. init(), release(), configure(), the
+ * channel, slave, master, break and option verbs, and every task's
+ * setup(), are setup verbs: main(), or an active object's handler,
+ * never an interrupt handler. They are read-modify-writes of the block's
+ * registers, and init()/release() of the RCC's shared enable and reset
+ * registers, with no guard of their own; nothing in this file masks
+ * interrupts and nothing waits. isr(mask) is the interrupt body: the
+ * program's handler for a timer vector calls it, with vector_flags() of
+ * that vector on a timer that has four, and it reads and clears in three
+ * accesses (SR and DIER loaded, SR stored). set_compare() - and so a task's duty() - set_count(),
+ * flags(), flag() and clear_flags() are single loads or stores, legal
+ * from any context; interrupts(mask, on) is a read-modify-write of DIER,
+ * so a handler and the loop that both change enables race on it.
+ *
+ * Six facts that shape this file.
+ *
+ * 1. There is one TIM_TypeDef and fourteen different timers. The device
  *    header declares every register as a member of one struct, so
  *    `TIM11->SMCR` compiles and writes a hole in the address map: the
  *    silicon's TIM10/11/13/14 have no slave controller and no CR2 at all
  *    (RM0383 14.5), TIM9/12 have a slave controller but no encoder mode
- *    and no ETR (14.4.2), TIM6/7 have no channel (RM0090 20.4). NOTHING
- *    IN THE HEADER SAYS SO. What a timer IS - counter width, channels,
+ *    and no ETR (14.4.2), TIM6/7 have no channel (RM0090 20.4). Nothing
+ *    in the header says so. What a timer is - counter width, channels,
  *    complementary outputs, slave controller, master mode, BDTR, RCR,
  *    centre-aligned counting, ETR, DMA, an option register - therefore
  *    comes from stm32f4/device_tables.hpp, where those facts are named
- *    as what they are: the MANUALS', keyed by instance, and reached only
+ *    as what they are: the manuals', keyed by instance, and reached only
  *    for an instance the header says exists. Every verb that touches a
- *    register an instance does not implement REFUSES - returns false and
+ *    register an instance does not implement refuses - returns false and
  *    writes nothing - rather than storing into a hole, and the tasks that
  *    need a feature static_assert on it, which is what makes a dead-time
  *    request on a TIM3 a compile error instead of a silent nothing.
  *
- * 2. THE STATUS REGISTER IS rc_w0, NOT W1C. A flag of TIMx_SR is cleared
- *    by writing ZERO to it and a write of one has no effect (17.4.5), so
+ * 2. The status register is rc_w0, not W1C. A flag of TIMx_SR is cleared
+ *    by writing zero to it and a write of one has no effect (17.4.5), so
  *    clearing is `SR = ~flags` - a plain store, no read-modify-write, and
- *    a flag that arrives between the read and the store SURVIVES. Every
- *    other flag register in this stratum - the EXTI's PR, the RTC's ISR -
- *    is cleared by writing ONES or ZEROES into a read-modify-write, so
- *    this is the one place where that reflex is wrong.
+ *    a flag that arrives between the read and the store survives. The
+ *    stratum's flag registers are cleared more than one way - the EXTI's
+ *    PR is rc_w1, a one in a plain store; RTC_ISR is rc_w0 but carries
+ *    its read-write INIT bit over in the value written - so the reflex
+ *    learned on one of them is wrong here.
  *
- * 3. THE PRESCALER AND THE AUTO-RELOAD ARE SHADOWED. PSC is copied into
- *    the working register at the next UPDATE event and never before
+ * 3. The prescaler and the auto-reload are shadowed. PSC is copied into
+ *    the working register at the next update event and never before
  *    (17.4.11); ARR is too when CR1.ARPE is set, and is taken at once
  *    when it is clear. So a configuration is only in force after an
  *    update, which is why configure() ends with EGR.UG - a software
  *    update that loads both shadows - and then clears the UIF that
- *    update raised. A caller that changes the period of a RUNNING timer
+ *    update raised. A caller that changes the period of a running timer
  *    and wants it now uses the same verb; one that wants the change at
  *    the end of the current period sets ARPE and writes ARR.
  *
- * 4. A COMPARE REGISTER IS PRELOADED BY DEFAULT HERE, AND THAT IS A
- *    CHOICE. CCyPE is clear out of reset (a write to CCRy acts at once,
+ * 4. A compare register is preloaded by default here, and that is a
+ *    choice. CCyPE is clear out of reset (a write to CCRy acts at once,
  *    which can produce a runt pulse if it lands past the current count);
  *    every output channel this driver configures sets it, because a
  *    PwmChannel::duty() that can glitch is not one an actuator above can
  *    use. 17.3.9's "PWM mode" recipe asks for it too. The unbuffered
  *    behaviour is still reachable - TimChannelConfig::preload = false.
  *
- * 5. THE COUNTER'S CLOCK IS NOT THE BUS CLOCK. RM0383 6.2 and RM0090
+ * 5. The counter's clock is not the bus clock. RM0383 6.2 and RM0090
  *    7.2's own rule: with the APB prescaler at 1 a timer counts HCLK;
- *    with it divided the timer counts TWICE its APB clock - and on every
+ *    with it divided the timer counts twice its APB clock - and on every
  *    part but the F405 class a bit of RCC_DCKCFGR, TIMPRE, moves that to
  *    "HCLK at a prescaler of 1 or 2, four times PCLK otherwise". So
- *    `Tim<n>::clock_hz(clock)` derives the rate from the CLOCK TASK's own
+ *    `Tim<n>::clock_hz(clock)` derives the rate from the clock task's own
  *    dividers (they are constexpr, so every period and prescaler folds),
  *    and `clock_hz_now(hclk)` reads the same number back out of the
  *    silicon - which is what stops this file from lying if a future
  *    dynamic clock moves a prescaler. TIMPRE itself is RCC's:
  *    stm32f4/clock.hpp's `Rcc::timpre()`.
  *
- * 6. THE PAD MAP IS THE DATASHEET'S AND NOTHING CHECKS IT. Which AF
+ * 6. The pad map is the datasheet's and nothing checks it. Which AF
  *    number carries TIM3_CH1 on PA6 is DS10314 table 9 (AF2), and the
  *    device header has no symbol for it - stm32f4/pin.hpp states that
- *    once for the whole stratum. So a timer pad is a `PinSel` the CALLER
+ *    once for the whole stratum. So a timer pad is a `PinSel` the caller
  *    writes, `TimPad<sel>` is the claim, and the bench is the only check
  *    there is.
  *
- * MEASURING WITH NO WIRE. Three of this chapter's own features make a
+ * Measuring with no wire. Three of this chapter's own features make a
  * timer observable with nothing attached, and they are why the reference
  * suite needs no jumper:
- *  - THE INTERNAL TRIGGERS. Every four-channel timer publishes TRGO and
+ *  - The internal triggers. Every four-channel timer publishes TRGO and
  *    every slave-capable one listens on ITR0..ITR3; which timer each ITRx
- *    IS is `tim_internal_trigger()` below (RM0090 tables 94, 98 and 101).
+ *    is: `tim_internal_trigger()` below (RM0090 tables 94, 98 and 101).
  *    A master on "update" and a slave in external clock mode 1 count each
  *    other exactly.
- *  - THE OPTION REGISTERS. TIM5_OR routes the LSI, the LSE or the RTC
+ *  - The option registers. TIM5_OR routes the LSI, the LSE or the RTC
  *    wake-up into TIM5's channel 4 and TIM11_OR routes HSE_RTC into
  *    TIM11's channel 1 (RM0383 6.2.11 calls this out as the intended use):
  *    a capture channel weighs an oscillator against the core clock with no
  *    pad at all.
- *  - A PAD THE TIMER ITSELF DRIVES. The chapter's FORCED OUTPUT MODE
+ *  - A pad the timer itself drives. The chapter's forced output mode
  *    (17.3.7) puts OCyREF under CCMRx instead of under the counter, so
  *    the CPU writes a level onto the pin through the timer's own output
  *    stage - `output_mode(ch, force_active/force_inactive)` - and TI1 and
  *    TI2 see it, because a channel's input path is live whatever CCyS
  *    says. That is what stimulates a capture or a quadrature interface
- *    here. A GPIO in OUTPUT mode does NOT do it: the alternate-function
+ *    here. A GPIO in output mode does not do it: the alternate-function
  *    input multiplexer is opened by MODER and not by the AF nibble alone
  *    (measured - and the opposite of what the EXTI does with the same
  *    pad, which reads the input data path directly).
  *
- * ERRATA - ES0287 2.6, ES0206 2.7 and ES0298 2.6 carry the SAME four
- * items, so they are the family's:
+ * Errata - ES0287 2.6, ES0206 2.7 and ES0298 2.6 carry the same four
+ * items, so they are the family's (ES0321's 2.9.1..2.9.4 for the
+ * F469/F479, in the same order):
  *  - "PWM re-enabled in automatic output enable mode despite of system
  *    break": with BDTR.AOE set a system break does not latch. Its own
  *    workaround is to leave AOE clear and use OCxCE for cycle-by-cycle
- *    control, so TimBreakDeadTime::automatic_output_enable DEFAULTS FALSE
+ *    control, so TimBreakDeadTime::automatic_output_enable defaults false
  *    and the verb says what setting it costs.
- *  - "TRGO and TRGO2 trigger output failure": the SLAVE's clock must
+ *  - "TRGO and TRGO2 trigger output failure": the slave's clock must
  *    already be running before the master sends, and must not be changed
  *    while it does. Stated on master() and obeyed by every task here that
  *    cascades - the slave is configured and enabled first.
  *  - "Consecutive compare event missed in specific conditions": two
- *    matches in adjacent counter cycles lose the second. No workaround;
- *    it is staged at the bench rather than described.
+ *    matches in adjacent counter cycles lose the second. No workaround,
+ *    and not staged at the bench (docs/stm32f4/tim.md).
  *  - "Output compare clear not working with external counter reset":
  *    OCxCE together with a slave reset/combined mode. This driver exposes
  *    both, so the combination is reachable and the obligation is stated
@@ -875,7 +909,7 @@ public:
      * The flags vector `v` answers for on THIS instance - what a handler
      * hands isr() so that one of four vectors cannot consume another's
      * event. On a timer with one line every group is that one line's, so
-     * this is `all_flags` for any of its four enumerators; on TIM1 and
+     * this is `interrupt_flags` for any of its four enumerators; on TIM1 and
      * TIM8 it is the split RM0090 table 61 makes.
      *
      * Zero for a vector that is not this timer's at all - which is what a
@@ -1521,6 +1555,10 @@ struct TimPwm {
     /// channel. On an advanced-control timer MOE is raised too, without
     /// which nothing reaches the pad at all (17.4.18) - the trap that
     /// makes a first TIM1 PWM look dead.
+    ///
+    /// A setup verb, after init() and after the clock task; waits for
+    /// nothing. False, with the counter not started by this call, when
+    /// the time base or the channel does not fit this instance.
     static bool setup(uint16_t prescaler = 0, TimOutputMode mode = TimOutputMode::pwm1,
                       bool active_low = false) {
         if (!T::configure({.prescaler = prescaler,
@@ -1538,9 +1576,10 @@ struct TimPwm {
         return true;
     }
 
-    /// The duty, in counts out of `max`. A plain store into a PRELOADED
-    /// compare register: it is taken at the next update, so a change
-    /// never cuts the pulse that is being produced.
+    /// The duty, in counts out of `max` (a larger value is clamped to
+    /// it). A plain store into a preloaded compare register, legal from
+    /// any context: it is taken at the next update, so a change never
+    /// cuts the pulse that is being produced.
     static void duty(uint16_t v) { (void)T::set_compare(ch, v > max ? max : v); }
     static uint16_t duty() { return static_cast<uint16_t>(T::compare(ch)); }
 };

@@ -2,24 +2,63 @@
  * sercom.hpp
  *
  * The SAM C21 SERCOM in USART mode (DS60001479M ch. 31, with the baud
- * generator and the pad matrix of the shared ch. 30), in the two strata
- * the rest of this target uses:
+ * generator and the pad matrix of the shared ch. 30) as a serial port for
+ * a program: the console a program prints to, a line-oriented link, a
+ * byte transport to another chip, or one of the shapes the USART offers
+ * (RS-485, LIN, IrDA, a synchronous host or client, collision detection).
  *
- *  Sercom<n>   the RESOURCE - a typed view of one instance's USART_INT
+ * The smallest use, the console on SERCOM5's PB30/PB31 (written out in
+ * docs/samc21/sercom.md, "How to use it"): the two pads named with the
+ * pins and PMUX function they come out on in a UartPads value,
+ * `using Serial = brio::Uart<5, console_pads>`, the instance's vector
+ * bound by the program to Serial::isr() (below), `Serial::init(clock,
+ * 115200)` in main() after the clock task's init(), then print().
+ *
+ * Who calls what, and from where. init() and release() are setup verbs:
+ * main(), after the clock task and before interrupts are enabled
+ * globally; init() waits, bounded, for the instance's reset, enable and
+ * CTRLB synchronizations and answers false when one did not complete, the
+ * rate cannot be made at the clock's rate, or (with the engine) the DMAC
+ * block or channel would not reset. isr() is the interrupt
+ * body: the program's handler for the instance's one vector calls it and
+ * nothing else does, and it runs to completion like every interrupt
+ * handler in brio; dma_isr() is the DMAC vector's body, for the transport
+ * that holds the transmit engine. The transmit verbs (write_byte(),
+ * write_bulk(), and print() over them) and the receive verbs (read_byte(),
+ * read_bulk(), read_span() with consume()) belong to the main context -
+ * setup, or the handler of an active object, a brio object with an event
+ * queue the kernel serves one event at a time - and never to an interrupt
+ * handler: each ring has one producer and one consumer, and the interrupt
+ * body is the other end of both. Without an engine nothing here masks
+ * interrupts (the transmit interrupt is armed by a plain INTENSET store,
+ * which cannot race the handler's INTENCLR); with the engine, the
+ * engine's claim is taken under the platform's critical section and the
+ * channel programmed unmasked (pump_tx()). Nothing in the task waits
+ * except init() above and rebase() and set_baud(), main-context verbs
+ * that spin, bounded, until the queued bytes have left the wire.
+ * Storage: the rings are the task's own static arrays; write_bulk()
+ * copies the caller's span, which is free again when it returns;
+ * read_span() hands out the ring's own bytes, valid until consume()
+ * releases them. The resource's configuring verbs are setup verbs with
+ * no guard of their own.
+ *
+ * The header has the two strata the rest of this target uses:
+ *
+ *  Sercom<n>   the resource - a typed view of one instance's USART_INT
  *              register set: the bus and core clocks it needs before it
  *              answers at all, the reset/enable discipline with its
  *              SYNCBUSY waits, the whole configuration in one struct,
- *              the flag verbs, and the ONE combined interrupt question
+ *              the flag verbs, and the one combined interrupt question
  *              this core's single vector has to ask.
  *
  *  Uart<n, pads, rx_size, tx_size, TxEngine, Placement>
- *              the TASK - the interrupt-driven full-duplex byte
+ *              the task - the interrupt-driven full-duplex byte
  *              transport every console sits on: two SPSC rings
  *              (util/ring.hpp, lock-free here: atomic_width is 4),
- *              error counters, an init() that speaks HERTZ, and the
+ *              error counters, an init() that speaks hertz, and the
  *              ByteSink/ByteSource surface print.hpp writes to.
  *
- * SCOPE, honestly. USART mode only. The RESOURCE speaks the chapter's
+ * Scope. USART mode only. The resource speaks the chapter's
  * whole option space: every CTRLA.SAMPR regime (16x, 8x and 3x
  * arithmetic, 16x and 8x fractional, table 30-2), the sample adjustment,
  * the synchronous mode with an internal or an external XCK and either
@@ -31,7 +70,7 @@
  * detection with auto-baud (31.6.3.4) -, collision detection (31.6.3.7,
  * COLDEN, its erratum's clock rule enforced), start-of-frame detection
  * (31.6.3.9, SFDE with the interrupt it wakes on), and the two
- * directions switched at run time (CTRLB.TXEN/RXEN, 31.8.2). The TASK
+ * directions switched at run time (CTRLB.TXEN/RXEN, 31.8.2). The task
  * above it is the console's: asynchronous, internal clock, 16x
  * arithmetic on generator 0. The SERCOM's other personalities are whole
  * chapters of their own and get their own headers - SPI host/client is
@@ -41,28 +80,30 @@
  * What the task does not carry is listed with its reasons in
  * docs/samc21/sercom.md.
  *
- * ONE INTERRUPT VECTOR, NOT TWO, whatever a two-vector transport would
- * lead one to expect. A SERCOM has exactly ONE line in the NVIC
+ * One interrupt vector, not two, whatever a two-vector transport would
+ * lead one to expect. A SERCOM has exactly one line in the NVIC
  * (SERCOM5_IRQn = 14 here) shared by DRE, TXC, RXC, RXS, CTSIC, RXBRK and
- * ERROR - so the task offers ONE ISR body, Uart::isr(), which reads
+ * ERROR - so the task offers one ISR body, Uart::isr(), which reads
  * INTFLAG, masks it with INTENSET (a raised flag nobody asked for must
  * not be acted on - DRE in particular reads 1 whenever the transmit
  * buffer is empty, which is most of the time) and serves whatever is
- * genuinely pending. The app binds exactly one vector:
+ * genuinely pending. The app binds exactly one vector (a vector left
+ * unbound is the crt's weak alias of its silent spin, where the program
+ * stops at the first received byte or the first armed transmit):
  *
  *   extern "C" void SERCOM5_Handler() {
  *       if (Serial::isr()) { brio::post<SerialLines>(brio::RxActivity{}); }
  *   }
  *
- * SYNCHRONIZATION IS REAL HERE. SWRST, ENABLE and CTRLB cross into the
- * peripheral's own clock domain, and 31.8.10 promises an APB ERROR for
+ * Synchronization is real here. SWRST, ENABLE and CTRLB cross into the
+ * peripheral's own clock domain, and 31.8.10 promises an APB error for
  * a CTRLB write issued while the previous one is still in flight. Every
- * such write in this file is followed by a BOUNDED wait (clock.hpp's
+ * such write in this file is followed by a bounded wait (clock.hpp's
  * clock_wait, the same helper and the same discipline the clock tree
  * uses - it waits on a synchronization bit, whichever peripheral owns
- * it). A wait that times out is REPORTED, never hung on.
+ * it). A wait that times out is reported, never hung on.
  *
- * PADS ARE NOT PINS. The SERCOM knows four pads and nothing else: which
+ * Pads are not pins. The SERCOM knows four pads and nothing else: which
  * pad carries TxD is CTRLA.TXPO, which one carries RxD is CTRLA.RXPO,
  * and those two fields are all this resource has to say about routing.
  * Which PIN a pad is bonded to, and through which PMUX function, is a
@@ -74,30 +115,30 @@
  * for pin bonding, and it is equally not built here: naming the pin is
  * the application's, because only the board knows.
  *
- * TxD CANNOT GO ANYWHERE. CTRLA.TXPO (31.8.1) offers TxD on SERCOM
+ * TxD cannot go anywhere. CTRLA.TXPO (31.8.1) offers TxD on SERCOM
  * PAD[0] or PAD[2] and on no other pad, while RxD may be any of the
  * four. So a two-wire link is never free to swap its two pads: with the
- * console's PAD[0]/PAD[1] pair, PAD[0] IS the transmitter and PAD[1] the
+ * console's PAD[0]/PAD[1] pair, PAD[0] is the transmitter and PAD[1] the
  * receiver, and "the other way round" is not a configuration the silicon
  * offers - it is a different pad pair. uart_pads_valid() refuses the
  * impossible one at compile time instead of letting it fail on the wire.
- * NOTE the device header's own naming trap: it calls TXPO = 0x1
+ * Note the device header's own naming trap: it calls TXPO = 0x1
  * `TXPO_PAD1_Val`, but that code puts TxD on SERCOM PAD[2] - the
- * enumerator names the CODE, not the pad. Everything below is named
- * after the pad the SIGNAL lands on.
+ * enumerator names the code, not the pad. Everything below is named
+ * after the pad the signal lands on.
  *
  * Facts that shape the code (DS60001479M 30.6.2.3, 31.5.1, 31.6.2.1,
  * 31.8.x, and errata DS80000740S, silicon rev F on the bench chip):
- *  - CTRLA, CTRLB and BAUD are ENABLE-PROTECTED (31.6.2.1): a write
- *    while the peripheral is enabled is DISCARDED. Everything that
+ *  - CTRLA, CTRLB and BAUD are enable-protected (31.6.2.1): a write
+ *    while the peripheral is enabled is discarded. Everything that
  *    changes them here disables first;
- *  - the input pull of a SERCOM input pin can only be a pull-DOWN
+ *  - the input pull of a SERCOM input pin can only be a pull-down
  *    (31.5.1): an idle RxD line has to be held high by whatever drives
  *    it, there is no internal pull-up to lean on;
- *  - STATUS carries the error bits OF THE CHARACTER AT THE HEAD of the
- *    two-deep receive FIFO and must be read BEFORE DATA (31.8.11);
+ *  - STATUS carries the error bits of the character at the head of the
+ *    two-deep receive FIFO and must be read before DATA (31.8.11);
  *    reading DATA is also what clears INTFLAG.RXC;
- *  - INTFLAG.TXC is cleared by WRITING DATA and set when the shifter
+ *  - INTFLAG.TXC is cleared by writing DATA and set when the shifter
  *    has emptied with nothing new queued (31.8.8) - which makes it an
  *    exact "the last byte is on the wire" answer, and is why rebase()
  *    needs no timing guesswork;
@@ -105,7 +146,7 @@
  *    the documented work-around is to take the errors on RXC and read
  *    STATUS - which is what this driver does, so the ERROR interrupt is
  *    never enabled at all;
- *  - erratum 1.17.16: CTRLA.SWRST does NOTHING while CTRLA.ENABLE = 0.
+ *  - erratum 1.17.16: CTRLA.SWRST does nothing while CTRLA.ENABLE = 0.
  *    reset() therefore enables the instance first when it finds it
  *    disabled - see the comment there;
  *  - erratum 1.17.4: DBGCTRL.DBGSTOP does not actually halt transmission
@@ -123,17 +164,17 @@
  *    and J parts - sercom_autobaud_checks_stop() answers it from the
  *    die's DID.REVISION;
  *  - erratum 1.10.4 (the DMAC's, concurrent channel triggers corrupting
- *    the write-back): the Uart has ONE optional engine slot, the
- *    TRANSMIT one, filled by samc21/dmac.hpp's DmaTxEngine - the one DMA
+ *    the write-back): the Uart has one optional engine slot, the
+ *    transmit one, filled by samc21/dmac.hpp's DmaTxEngine - the one DMA
  *    user this stratum admits, on one channel, claimed by one owner at a
  *    time. The receiver is the interrupt receiver, always.
  *
- * WHERE THE HOT PATHS RUN FROM. The flash runs behind two wait states at
+ * Where the hot paths run from. The flash runs behind two wait states at
  * 48 MHz (DS60001479M table 45-41), and both interrupt bodies are inline
- * in the vector that binds them, so a program that places that VECTOR in
+ * in the vector that binds them, so a program that places that vector in
  * `.fast_text` runs them from SRAM whole, with no call (docs/samc21/
  * platform.md, "A handler in SRAM"). The Uart's placement, its last
- * template parameter (util/placement.hpp), moves ONE path for a program
+ * template parameter (util/placement.hpp), moves one path for a program
  * that keeps the vector in the flash: dma_isr(), the transmit engine's
  * completion with the next block's launch, one flattened instance in
  * SRAM under InRam (`.fast_text.brio`, copied with .data) - a call
@@ -1731,9 +1772,12 @@ public:
     // ---- lifecycle --------------------------------------------------------
 
     /// Bring the instance up: clocks, configuration, pads, pins,
-    /// the receive interrupt and its NVIC line.
+    /// the receive interrupt and its NVIC line. A setup verb, main
+    /// context; it waits, bounded, for the instance's synchronizations,
+    /// and it starts the transport afresh (the rings and the error
+    /// counters cleared, the skip epoch kept).
     ///
-    /// Call AFTER the main clock is set up and before interrupts are
+    /// Call after the main clock is set up and before interrupts are
     /// enabled globally; `clock` is the app's brio::Clock tag
     /// (samc21/clock.hpp), so the baud divisor comes from Clock::hz and
     /// never from a second statement of the rate. The divisor is computed
@@ -1742,7 +1786,7 @@ public:
     ///
     /// False when the rate cannot be produced at this clock, or when one
     /// of the peripheral's synchronizations did not complete - the caller
-    /// then knows the transport is NOT up, rather than printing into a
+    /// then knows the transport is not up, rather than printing into a
     /// ring nothing will drain.
     template <typename Clock>
     static bool init(Clock clock, uint32_t baud, const UartFormat& format = {}) {
@@ -1883,7 +1927,9 @@ public:
 
     // ---- the ISR body -----------------------------------------------------
 
-    /// The instance's ONE interrupt body - call from SERCOMn_Handler().
+    /// The instance's one interrupt body - call from SERCOMn_Handler(),
+    /// the program's handler for the instance's vector, and from nowhere
+    /// else.
     ///
     /// Every source of this peripheral shares the vector, so the body
     /// starts by asking which of them is both raised AND enabled, then
@@ -1960,8 +2006,9 @@ public:
     // ---- byte transport (satisfies ByteSink / ByteSource) -----------------
 
     /// Try to queue one byte for transmission; false when the TX ring is
-    /// full. Without an engine, arming DRE is a plain store to INTENSET,
-    /// so it cannot race the handler's INTENCLR; with one, the DRE
+    /// full. Main context only (the ring's one producer), never from an
+    /// interrupt handler; it never waits. Without an engine, arming DRE
+    /// is a plain store to INTENSET, so it cannot race the handler's INTENCLR; with one, the DRE
     /// interrupt stays off for good and the engine is nudged instead.
     /// The public behaviour is identical either way - print() still
     /// blocks on a full ring and returns when the bytes are queued.
@@ -1984,7 +2031,8 @@ public:
         return true;
     }
 
-    /// Fetch one received byte; false when nothing is pending.
+    /// Fetch one received byte; false when nothing is pending. Main
+    /// context only (the receive ring's one consumer); it never waits.
     static bool read_byte(uint8_t& b) {
         const auto v = m_rx.pop();
         if (!v) {
@@ -1998,7 +2046,9 @@ public:
      * Queue a run of bytes in BULK: copy straight into the ring's own
      * free run and nudge the transport once a run - twice at most, the
      * first byte's own below - instead of once per byte. Returns how
-     * many were queued (short of `src.size()` when the ring filled).
+     * many were queued (short of `src.size()` when the ring filled). Main
+     * context only, never from an interrupt handler; it never waits, and
+     * the caller's span is free again when it returns.
      *
      * WHY THIS EXISTS, measured rather than assumed. write_byte() ends
      * in a nudge - arming DRE on the plain transport, pump_tx() on the
@@ -2128,10 +2178,12 @@ public:
     static uint8_t rx_overruns() { return m_rx_overruns; }
 
     /**
-     * THE SKIP EPOCH (util/stream.hpp's SkippingSource, docs/design/
-     * serial.md): a count, modulo 2^32 and NEVER cleared - neither by
-     * clear_errors() nor by init() -, of the characters the line carried
-     * that the receive ring does not deliver clean. A reader that
+     * The skip epoch (util/stream.hpp's SkippingSource, docs/design/
+     * serial.md): a count, modulo 2^8 (the SkipRing's own byte, returned
+     * widened) and never cleared - neither by clear_errors() nor by
+     * init() -, that moves by one at each skip of the characters the line
+     * carried and the receive ring does not deliver clean: a step an
+     * event, not a character. A reader that
      * compares it at every run knows a run is not contiguous with the one
      * before.
      *

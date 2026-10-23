@@ -1,20 +1,76 @@
 # PORT (SAM C21)
 
-Documents of record: SAM C20/C21 data sheet DS60001479M, PORT ch. 28
+This document is for a programmer who needs a pin: an LED, a button, a
+pad handed to a peripheral, or a pad an event moves with no CPU in the
+loop. `Pin<'B', 23>` names pin PB23 as a type (the letter and the
+number are template arguments, fixed when the program is compiled),
+and its functions configure the pin and drive or read it; `Port<'B'>`
+works on a whole group of 32 pins at once, through mask stores and the
+multi-pin configuration register; `PinRef` is a small run-time handle
+for a pin that must travel inside a request.
+
+The smallest use, from "How to use it" below - the LED and the button
+of the board:
+
+```cpp
+using Led = brio::Pin<'B', 23>;
+Led::output();
+Led::toggle();
+
+using Button = brio::Pin<'B', 22>;
+Button::input(brio::PinPull::up);
+```
+
+Line by line: `Led` names PB23, where the board's LED is
+([../boards/samc21j.md](../boards/samc21j.md)), and the alias
+configures nothing; `output()` turns the pin's input buffer on, so
+`read()` reports the pad, and makes it an output; `toggle()` flips its
+level; `input(PinPull::up)` makes PB22, the board's button, an input
+with its internal pull-up and its buffer on.
+
+What decides correctness even there. The input buffer is off out of
+reset, and a pin whose buffer is off reads 0 whatever its level:
+`input()` and `output()` turn it on, `configure()` and `function()`
+leave it to the `PinConfig` the caller passes. The pull's direction is
+the pin's OUT bit, so `input(PinPull::up)` leaves OUT at 1, and
+`output()`, which does not touch OUT, drives the level OUT holds - 0
+out of reset, 1 on a pin that was an input with its pull-up. `set`,
+`clear`, `toggle` and `read` are single stores (OUTSET, OUTCLR,
+OUTTGL) or a single load (IN), usable from any context; the
+configuring functions write the pin's PINCFG byte (`configure()` and
+`function()` store it whole, `input_enable()`, `pull()` and
+`strong_drive()` read, modify and write it) and `function()` the PMUX
+byte two pins share, so they belong to setup
+or to one active object's handler (an active object is a component of
+a brio program with its own event queue, served one event at a time
+by the kernel, [docs/learn/introduction.md](../learn/introduction.md)),
+never to two contexts at once. A pad handed to a peripheral is handed
+with its PMUX function letter, which is the package's I/O multiplexing
+table and which nothing here checks, and a peripheral input needs
+`input_enable` in the same call. No clock is needed first: the PORT's
+bus clock is on out of reset (the device header's MCLK_APBBMASK reset
+value has the PORT bit set) and nothing in this driver touches it. A
+group other than A and B does not compile.
+
+## Documents of record
+
+SAM C20/C21 data sheet DS60001479M, PORT ch. 28
 (the EIC, for contrast, is ch. 26). Driver: `samc21/pin.hpp`. The
 family fixture is `test/family_samc21/pin.cpp` plus the two port-C
-negatives under `brio check samc21`.
+negatives under `brio check samc21`. Where a finding below names a
+suite and a letter (`test_samc_eic` h), the letter is one command key
+of the suite's console and the group of verdicts that key runs.
 
 ## What the silicon does
 
 **Two groups, everywhere.** The PORT peripheral has exactly two
-32-pin groups (A and B) on EVERY variant of this family - the device
+32-pin groups (A and B) on every variant of this family - the device
 header's `PORT_GROUPS` says 2 with no per-variant override - so a
 group-C request is refused on all of them, not on small packages.
-Which PINS of an existing group are bonded on a given package is a
+Which pins of an existing group are bonded on a given package is a
 finer, per-package question this driver leaves open.
 
-**The input buffer is OFF by default.** `PINCFG.INEN` gates it, and
+**The input buffer is off by default.** `PINCFG.INEN` gates it, and
 `IN` reads 0 for a pin whose buffer is disabled - including a pin
 this program is driving. The driver therefore raises INEN in both
 `input()` and `output()`, so `read()` means the same thing here as on
@@ -46,9 +102,9 @@ the EIC's (ch. 26), reached through PMUX function A - a different
 peripheral with its own clocking and its own driver, `samc21/eic.hpp`
 ([eic.md](eic.md)).
 
-**But the PORT is an event USER** (EVCTRL, 28.6.4): four event inputs
+**But the PORT is an event user** (EVCTRL, 28.6.4): four event inputs
 per group, each naming one pin of that group and one of four actions -
-SET, CLR and TGL act on the pin's OUT REGISTER, while OUT makes "the
+SET, CLR and TGL act on the pin's OUT register, while OUT makes "the
 output pin follow the event input signal, INDEPENDENTLY OF THE OUT
 REGISTER VALUE" (28.6.5). Those are two different places and the
 difference is everything: under PMUXEN the OUT register is still the
@@ -63,7 +119,9 @@ the pad, while PINCFG.PULLEN and the OUT bit that gives the pull its
 direction keep working. 28.6.1's
 "override the connection between the PORT and that I/O pin" reaches the
 driver and not the pull - which is what makes a pad-driven bench test
-possible with no wire at all (see [eic.md](eic.md)).
+possible with no wire at all (see [eic.md](eic.md)): the pull-walk, a
+free pad moved between the rails by writing the OUT bit that gives its
+pull a direction.
 
 ## Types and verbs
 
@@ -79,8 +137,8 @@ possible with no wire at all (see [eic.md](eic.md)).
   a `PinRef` factory - the runtime descriptor whose set/clear are
   OUTSET/OUTCLR stores, safe from any context.
 - **`PinConfig`** - input_enable, `PinPull` {none, up, down},
-  strong_drive. Deliberately NOT here: PMUXEN, which is decided by
-  WHICH verb runs, never by a flag that could contradict it.
+  strong_drive. Deliberately not here: PMUXEN, which is decided by
+  which verb runs, never by a flag that could contradict it.
 - **`PinFunction`** - the PMUX codes A..I. Which function a given pad
   offers is the package's I/O multiplexing table - the device
   header's `MUX_P<pin><fn>_<peripheral>` constants let an application
@@ -93,7 +151,7 @@ possible with no wire at all (see [eic.md](eic.md)).
   decided by which group's EVCTRL enables it), `configure_event(m,
   PortEventConfig)` with its compile-time twin, `event_config(m)`,
   `evctrl()` and `release_events()`. Table 29-3 marks all four users
-  ASYNCHRONOUS PATH ONLY; that is an obligation on the caller's
+  asynchronous path only; that is an obligation on the caller's
   `EventChannelConfig`, which this file does not see.
 - **`PortEventConfig`** - the pin the input addresses (PIDm), the
   `PortEventAction` it takes (EVACTm: `out`, `set`, `clear`, `toggle`)
@@ -166,7 +224,8 @@ brio::Pin<'B', 31>::function(brio::PinFunction::d, {.input_enable = true});
 Driver gaps (not built):
 - A `PinSet` analog (a cross-port mask type has no user here yet; born
   with its first) and a port-level bonding table - which pads a package
-  bonds at all. The reserve (`samc21/device_tables.hpp`) carries the
+  bonds at all. The reserve (`samc21/device_tables.hpp`, the table of
+  what each variant has, read off the device header) carries the
   per-PERIPHERAL pad maps the drivers need and no general one; a
   general one is born with its first user.
 - **CTRL's continuous input sampling** (28.8.1), which 28.6.5 requires

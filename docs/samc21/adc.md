@@ -1,6 +1,71 @@
 # ADC - Analog-to-Digital Converter (SAM C21)
 
-Documents of record: SAM C20/C21 data sheet DS60001479M ch. 38, the ADC
+This document is for a programmer who needs a voltage read: a pad, the
+supply, the bandgap or the DAC's output, once or as a paced stream,
+averaged or oversampled, watched against a window. `Adc<0>` and
+`Adc<1>` are the two 12-bit converters, one resource each - a thin
+typed view of the registers with their synchronization built in - and
+`Ref` with `ref_mv()` is this target's half of `util/analog.hpp`'s
+counts-to-millivolts arithmetic. `util/analog_sampler.hpp` runs over
+this driver unchanged for a program that wants its readings as events.
+
+The smallest use, a single reading in millivolts, the first block of
+"One example per use" below:
+
+```
+using Meter = brio::Adc<0>;
+Meter::init(0, brio::AdcConfig{.reference = brio::Ref::vddana,
+                               .prescaler = brio::AdcPresc::div32,
+                               .sample_length = 5},
+            48'000'000);
+Meter::select(brio::AnalogIn<brio::Pin<'A', 8>>{});
+const uint16_t mv = Meter::to_mv(Meter::read(), 5100);
+```
+
+Line by line: `Meter` names ADC0; `init()` takes the generic clock
+generator that feeds the converter (0, the main clock, [clock.md](clock.md)),
+the configuration - the supply VDDANA as the reference, the generator
+divided by 32 (1.5 MHz at 48 MHz), a sampling time of SAMPLEN 5 - and
+the generator's rate, which is there only to refuse a prescaler that
+leaves the 160 kHz .. 16 MHz the converter accepts; `init()` opens the
+bus clock, connects the clock channel, resets the block, copies the
+factory calibration, writes every register and enables the converter.
+`select()` points the positive input at PA08, which is ADC0's AIN8 - a
+pad this converter does not reach on this package does not compile -
+and touches neither the pad nor its PORT configuration. `read()` starts
+one conversion, waits for its result and returns it; `to_mv()` converts
+the counts against the reference, given VDDANA in millivolts (5100,
+this board's supply, [supc.md](supc.md)), which the driver cannot know.
+
+What decides correctness even there. `init()` answers false, having
+written nothing past the failing step, for a configuration the chapter
+forbids, a prescaler out of range for the rate given, or a
+synchronization that never settled, and a reading taken after a false
+reads nothing meaningful; the example does not look at the answer. The
+rate passed is a claim and not a measurement: the clock task runs first
+([clock.md](clock.md)), or the converter runs at a twelfth of the rate
+the check was made for (derived, not measured). Every wait is bounded -
+the synchronizations 0xFFFF polls, `read()` 0xFFFFF - and `read()` in
+the form above answers 0 when no result came; the form with an output
+argument says so with false. Nothing here masks interrupts, and an
+interrupt-driven program binds `ADC0_Handler` itself and reads RESULT
+in it (third block below). And a program that uses both converters
+reads erratum 1.4.10 first ("Errata" and "Bench findings" below): **once
+its state is entered ADC0 will not enable at all, `Adc<0>::init()`
+answers false, and a software reset does not clear it**; the order the
+two converters are brought up in is the application's to keep.
+
+The page is long because the chapter is. In order: the documents of
+record; what the silicon does (the two converters and their pad maps,
+the four register disciplines, accumulation, the calibration, the
+clock, the INTREF sample, the result and its flags); the types and
+verbs with one example per use; the errata; the bench findings; the
+host/client pair, the sequence and differential mode; what is not
+covered.
+
+## Documents of record
+
+SAM C20/C21 data sheet DS60001479M ch. 38, the ADC
 characteristics of table 45-22, the NVM software calibration area of
 table 9-5, and the event tables of ch. 29 - and errata DS80000740S
 section 1.4, read on the **E/G/J row at revision F**: items 1.4.4,
@@ -11,7 +76,10 @@ in `samc21/device_tables.hpp`. The family fixture is
 `test/family_samc21/adc.cpp` plus nine negatives under
 `brio check samc21`; the bench suites are `test_samc_adc` and, for
 what needs the DAC as a swept mid-scale source, `test_samc_analog`
-(letters a to d).
+(letters a to d; a suite's letter is one command key of its console and
+the group of verdicts that key runs). The reserve is
+`samc21/device_tables.hpp`, the table of what each variant has, read
+off the device header.
 
 ## What the silicon does
 
@@ -23,9 +91,9 @@ working `CTRLA.SLAVEEN`, only ADC0's `CTRLC.DUALSEL` means anything.
 Each has its own generic clock channel, its own DMA request and its own
 interrupt vector.
 
-**The two pad maps OVERLAP but are different maps.** PA08 is ADC0/AIN8
+**The two pad maps overlap but are different maps.** PA08 is ADC0/AIN8
 *and* ADC1/AIN10; PB08 is ADC0/AIN2 *and* ADC1/AIN4. That is why the
-reserve's ADC lookup takes the INSTANCE as a key, the way the TCC's
+reserve's ADC lookup takes the instance as a key, the way the TCC's
 takes the peripheral function, and why `AnalogIn<Pin>` carries no code:
 the code is `Adc<n>::input_code(in)`, resolved by the converter. Package
 variation is severe here - **the E bonds no PORT B pad to either

@@ -2,9 +2,36 @@
  * rtc.hpp
  *
  * The SAM C21 Real-Time Counter (DS60001479M ch. 24): one 32-bit counter
- * behind a 10-bit prescaler, wearing three different faces.
+ * behind a 10-bit prescaler, wearing three different faces - what a
+ * program uses for time that keeps counting through every sleep, a
+ * calendar with an alarm that wakes the device, or a periodic event with
+ * no CPU in its path. The smallest use, a 32-bit tick counter
+ * (docs/samc21/rtc.md, "How to use it"):
  *
- *   Rtc              the RESOURCE and the whole chapter: the three modes
+ *   brio::Rtc::init();                                     // disabled first
+ *   brio::Osc32kctrl::rtc_clock(brio::RtcClock::ulp_32k);  // the source
+ *   brio::Rtc::init();                                     // reset on it
+ *   brio::Rtc::configure({.mode = brio::RtcMode::count32,
+ *                         .prescaler = brio::RtcPrescaler::div1});
+ *   brio::Rtc::enable(true);
+ *   const uint32_t ticks = brio::Rtc::count32();
+ *
+ * Which context calls what. init(), release(), configure() and
+ * event_config() are setup verbs, from main() or an active object's
+ * handler (an active object is a brio component with its own event
+ * queue, served one event at a time by the kernel); the counter, compare
+ * and calendar verbs belong to one such context at a time. Each write is
+ * a store followed by a bounded wait on SYNCBUSY (0xFFFF polls by
+ * default) into the RTC's own clock domain, answering false when it runs
+ * out; the synchronized reads wait the same way and load the register
+ * whether or not the wait completed. Nothing here has a guard of its own
+ * or masks interrupts. init() leaves the RTC disabled and its NVIC line
+ * off; isr() is the interrupt body the program's RTC_Handler calls, once
+ * the program has armed the flags it wants and enabled the line.
+ * samc21/sleep.hpp's SamTimedSleepSite drives this same counter as its
+ * alarm and witness.
+ *
+ *   Rtc              the resource and the whole chapter: the three modes
  *                    with their overlaid register views, the prescaler,
  *                    the compares and the calendar alarm, the read
  *                    synchronization, the frequency correction, both
@@ -14,31 +41,31 @@
  *   RtcClockValue    mode 2's date and time as a struct rather than a
  *                    packed word, with the chapter's own leap-year rule.
  *
- * There are no TASKS here on purpose. An alarm clock, a slow periodic
+ * There are no tasks here on purpose. An alarm clock, a slow periodic
  * source, a low-power timebase: each of those is a policy. They get born
  * with their first user.
  *
- * SEVEN FACTS THAT SHAPE THE FILE.
+ * Seven facts that shape the file.
  *
- * 1. THE CLOCK IS NOT THIS DRIVER'S TO CHOOSE, and that is not an
+ * 1. The clock is not this driver's to choose, and that is not an
  *    omission. The RTC has no generic clock channel; its source is
  *    picked by OSC32KCTRL.RTCCTRL.RTCSEL, one register in another
  *    chapter, and `samc21/osc32kctrl.hpp` owns it (`Osc32kctrl::
  *    rtc_clock()`). Nothing here writes it. What this header does is
  *    state the obligation 21.6.7 makes - "it is highly recommended to
  *    disable the RTC module first, before the RTC clock source
- *    selection is changed" - and take the chosen RATE as an argument
+ *    selection is changed" - and take the chosen rate as an argument
  *    wherever arithmetic needs one. The order a caller keeps is:
  *    select the clock, then `init()`.
  *
  *    The corollary is sharper than it looks: SWRST and ENABLE are
- *    synchronized INTO that clock's domain, so resetting the RTC with
+ *    synchronized into that clock's domain, so resetting the RTC with
  *    no source running leaves SYNCBUSY standing forever. The reset
  *    default (RTCSEL = ULP1K) is always available because OSCULP32K
  *    never stops - which is why this is a caveat and not a hazard, and
  *    why every wait here is bounded and reports.
  *
- * 2. THE REGISTER MAP IS THREE OVERLAID VIEWS, exactly as the TC's is,
+ * 2. The register map is three overlaid views, exactly as the TC's is,
  *    and it is handled the same way (samc21/tc.hpp, fact 4). CTRLA,
  *    EVCTRL, INTENSET/CLR, INTFLAG, DBGCTRL, SYNCBUSY and FREQCORR sit
  *    at the same offsets in all three; only what follows differs -
@@ -48,80 +75,80 @@
  *    (`count32`/`count16`/`clock_value`, `comp32`/`comp16`). Nothing
  *    dispatches at run time on a mode the caller chose at compile time.
  *
- * 3. ERRATUM 1.16.3 IS LIVE ON EVERY REVISION OF THIS FAMILY, THIS ONE
- *    INCLUDED: "an 8-bit or 16-bit write access for a 32-bit register,
+ * 3. Erratum 1.16.3 is live on every revision of this family, this one
+ *    included: "an 8-bit or 16-bit write access for a 32-bit register,
  *    or an 8-bit write access for a 16-bit register can fail" - for
  *    COUNT in either counter mode and for CLOCK. The workaround is to
  *    write each register at its full width, and the workaround here is
- *    STRUCTURAL: there is no verb that writes a byte or a half of any
+ *    structural: there is no verb that writes a byte or a half of any
  *    of them. Every write goes through the device header's own
  *    `uint32_t` or `uint16_t` member, and no caller is offered a way to
  *    get it wrong.
  *
- * 4. READING THE COUNTER IS NOT FREE, AND THE BIT THAT MAKES IT
- *    POSSIBLE IS NOT ON AT RESET. COUNT (and CLOCK) are
- *    READ-synchronized, gated by CTRLA.COUNTSYNC / CTRLA.CLOCKSYNC:
+ * 4. Reading the counter is not free, and the bit that makes it
+ *    possible is not on at reset. COUNT (and CLOCK) are
+ *    read-synchronized, gated by CTRLA.COUNTSYNC / CTRLA.CLOCKSYNC:
  *    with the bit clear, 24.8.1 says plainly that "disabling the
  *    synchronization will prevent reading valid values". So
- *    `RtcConfig::read_sync` defaults TRUE, and `count32()` and friends
+ *    `RtcConfig::read_sync` defaults true, and `count32()` and friends
  *    wait SYNCBUSY.COUNT before loading. The raw accessors exist,
  *    spelled `*_raw()`, and say what they are. What the synchronization
- *    COSTS, and what a read without it actually shows, is measured -
+ *    costs, and what a read without it actually shows, is measured -
  *    see docs/samc21/rtc.md.
  *
- *    Two errata sit on this bit and NEITHER applies to this silicon,
+ *    Two errata sit on this bit and neither applies to this silicon,
  *    both being read-the-row traps: 1.16.1 ("COUNTSYNC/CLOCKSYNC has no
  *    effect, read synchronization is always enabled") is E/G/J revision
- *    B ONLY, and 1.16.2 (the first COUNT read after enabling COUNTSYNC
+ *    B only, and 1.16.2 (the first COUNT read after enabling COUNTSYNC
  *    is wrong) is E/G/J revisions B..E - the marks under F and H on
- *    that item belong to the N-FAMILY ROW. The bench suite looks for
+ *    that item belong to the N-family row. The bench suite looks for
  *    1.16.2's symptom anyway, because "not this silicon" is worth
  *    confirming with behaviour and not only with a matrix.
  *
- * 5. ENABLE-PROTECTION AND WRITE-SYNCHRONIZATION ARE DIFFERENT THINGS,
+ * 5. Enable-protection and write-synchronization are different things,
  *    and CTRLA carries both. MODE, PRESCALER, MATCHCLR and CLKREP are
- *    ENABLE-protected and NOT synchronized; ENABLE and SWRST are
+ *    enable-protected and not synchronized; ENABLE and SWRST are
  *    synchronized and not protected; COUNTSYNC/CLOCKSYNC is
- *    synchronized and explicitly NOT enable-protected (24.8.1), which
+ *    synchronized and explicitly not enable-protected (24.8.1), which
  *    is why `read_sync(bool)` exists as a live verb beside the
  *    configuration field. EVCTRL is enable-protected as a whole.
  *    `configure()` and `event_config()` refuse while the RTC is
  *    enabled rather than writing where the write would land nowhere.
  *
- * 6. THE PRESCALER IS NOT ONLY A DIVIDER - IT IS THE PERIODIC EVENT
- *    SOURCE, AND TURNING IT OFF TURNS THOSE OFF TOO. PEREO[7:0] tap
+ * 6. The prescaler is not only a divider - it is the periodic event
+ *    source, and turning it off turns those off too. PEREO[7:0] tap
  *    prescaler bits 2..9, giving f_source / 2^(n+3), and they are
  *    "independent of the prescaler setting used by the RTC counter,
  *    except if CTRLA.PRESCALER is zero" (24.6.8.1) - PRESCALER = OFF
  *    silently kills all eight. `event_config()` refuses that
- *    combination; the same is true of the periodic INTERRUPTS and the
+ *    combination; the same is true of the periodic interrupts and the
  *    interrupt verbs say so.
  *
- *    THE ARITHMETIC CONSEQUENCE WORTH KNOWING BEFORE ANY CALENDAR
- *    CODE: mode 2 needs a 1 Hz counter clock, and the prescaler stops
- *    at /1024, so a 32.768 kHz source CANNOT REACH 1 Hz. The
+ *    The arithmetic consequence worth knowing before any calendar
+ *    code: mode 2 needs a 1 Hz counter clock, and the prescaler stops
+ *    at /1024, so a 32.768 kHz source cannot reach 1 Hz. The
  *    clock/calendar has to run off one of the 1.024 kHz oscillator
  *    outputs (ULP1K / OSC1K / XOSC1K) with PRESCALER = DIV1024. That
  *    is nowhere in chapter 24; `rtc_prescaler_for_hz()` is where it
  *    lives here, and it returns nothing for a source it cannot divide.
  *
- * 7. FREQCORR NEEDS A PRESCALER. "Frequency correction requires that
+ * 7. FREQCORR needs a prescaler. "Frequency correction requires that
  *    CTRLA.PRESCALER is greater than 1" (24.6.8.2) - greater than the
- *    FIELD VALUE 1, i.e. DIV2 or slower, since both OFF and DIV1 pass
+ *    field value 1, i.e. DIV2 or slower, since both OFF and DIV1 pass
  *    the source straight through and there is no prescaler count to
  *    add or skip. `set_frequency_correction()` reads the field and
  *    refuses. The correction itself adds or skips one prescaler count
  *    once every 4096 source cycles, VALUE times over 240 such periods:
  *    VALUE / 983040, i.e. 1.017 ppm a step and +-129 ppm at the ends.
  *
- * NOT BUILT (docs/samc21/rtc.md carries the list): tasks of any kind (see
- * above); erratum 1.8.7's caveat that a DMA WRITE to RTC.COUNT during
+ * Not built (docs/samc21/rtc.md carries the list): tasks of any kind (see
+ * above); erratum 1.8.7's caveat that a DMA write to RTC.COUNT during
  * standby SleepWalking may not land, unreachable here (this stratum's one
  * DMA channel writes a SERCOM's DATA, never in standby,
  * samc21/dmac.hpp); and the RTC as the kernel
  * timebase, which stays SysTick's job (samc21/ticker.hpp says why -
- * samc21/sleep.hpp's SamTimedSleepSite uses this counter as an ALARM and
- * a WITNESS beside it instead).
+ * samc21/sleep.hpp's SamTimedSleepSite uses this counter as an alarm and
+ * a witness beside it instead).
  */
 
 #pragma once
@@ -562,10 +589,11 @@ struct Rtc {
 
     /**
      * APB clock on, interrupt off, software reset. The RTC is left
-     * DISABLED and unconfigured, because CTRLA's fields and EVCTRL are
-     * enable-protected and the caller has them to write.
+     * disabled and unconfigured, because CTRLA's fields and EVCTRL are
+     * enable-protected and the caller has them to write. A setup verb;
+     * false when the reset's bounded waits did not complete.
      *
-     * THE CLOCK MUST ALREADY BE CHOSEN AND RUNNING: this driver never
+     * The clock must already be chosen and running: this driver never
      * writes OSC32KCTRL.RTCCTRL (see the header essay, fact 1), and the
      * reset below synchronizes into whatever that register selected.
      * The reset default, ULP1K off the always-running OSCULP32K, is

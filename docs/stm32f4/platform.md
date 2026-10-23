@@ -1,13 +1,94 @@
 # Platform - what the kernel stands on (STM32F4)
 
-Documents of record: PM0214 Rev 10 (the Cortex-M4 core: PRIMASK and
+This document is for a programmer putting a brio program on an STM32F4.
+It describes what the kernel stands on here, the platform, and the
+timebase a program runs its time events on. A brio kernel asks the chip
+for a handful of things, stated by the kernel's `Platform` concept (a
+concept is a compiler-checked set of requirements on a type;
+[design/kernel.md, "Platform: what the machine provides"](../design/kernel.md#11-platform-what-the-machine-provides-kernelplatformhpp)):
+a way to mask interrupts for a critical section, a way to sleep until
+the next interrupt without losing one that arrives at the wrong moment,
+a source of time, a breakpoint for a panic, and a record a panic leaves
+for the next boot. `Stm32f4Platform<TB>` is this family's answer, and
+`TB` is its timebase: the SysTick `Ticker`, a 1000 Hz interrupt from the
+core's own timer, which stops when the chip enters Stop mode. The kernel
+never enters Stop by itself (its idle writes no sleep depth, so a bare
+idle is Sleep, where the tick runs); a Stop is armed by a sleep site, the
+object a program's power policy uses to choose a deeper mode, and the
+timed sleep site of [pwr.md](pwr.md) repairs kernel time afterwards. The Cortex-M4
+has BASEPRI and sixteen interrupt priority levels, and this platform uses
+neither: every interrupt line stays at one priority, so no interrupt
+handler runs inside another, which is what the kernel is written against
+([design/kernel.md, "The model in one page"](../design/kernel.md#1-the-model-in-one-page)).
+
+The smallest use, the "How to use it" block below without its includes
+(the maintained example `blink`, `stm32f4/src/apps/blink.cpp`, has the
+same glue with its two active objects and each board's clock):
+
+```cpp
+using P = brio::Stm32f4Platform<>;
+using SysClock = brio::Clock<brio::ClockSource::pll_hse, 180'000'000, 8'000'000>;
+constexpr SysClock clock;
+
+extern "C" void SysTick_Handler() { brio::Ticker::tick(); }
+
+int main() {
+    SysClock::init();
+    brio::Ticker::init(clock);
+    brio::enable_interrupts();
+    brio::Tenuto<P, MyAo>::run();   // WFI between events, woken by the tick
+}
+```
+
+Line by line: `P` names the platform with its default timebase, the
+SysTick `Ticker`; `SysClock` is the clock task, the PLL at 180 MHz from
+an 8 MHz HSE, a crystal by the type's default fourth argument (a board
+whose HSE is a driven clock names `HseMode::bypass`, [clock.md](clock.md)),
+and `clock` an empty tag object of
+that type, which the drivers take to read the rate; the `extern "C"`
+function is the SysTick interrupt handler, as in C, under the name ST's
+startup code gives the vector, and its body is the ticker's; `main()`
+brings the clock up, programs SysTick from the clock's rate, enables
+interrupts and hands the core to the kernel. `Tenuto` takes the platform
+first and the program's active objects after it, from the highest
+priority to the lowest (`MyAo` here stands for them: an active object is
+a component of a brio program with its own event queue, served one
+event at a time by the kernel,
+[docs/learn/introduction.md](../learn/introduction.md)); `run()` never
+returns. A short wait inside a handler is `delay_us()`, which answers
+false and waits nothing for a millisecond or more ("How to use it"
+below).
+
+Three things decide whether that works. The clock task must have run
+first: `Ticker::init()` computes SysTick's reload from the rate the
+clock type claims and not from the hardware, so a ticker initialized
+while the chip still runs at its 16 MHz reset rate under a 180 MHz clock
+type ticks about eleven times too slowly, and nothing refuses it. The
+SysTick vector must be bound to `Ticker::tick()` by the program, as
+above: the kernel binds no vector, and the crt's `SysTick_Handler` is a
+weak alias of `Default_Handler`, a silent spin, so a program that
+forgets the binding links and stops in that spin at its first tick. And
+interrupts must be enabled before `run()` (`brio::enable_interrupts()`),
+since the kernel sleeps between events and the tick is what brings it
+back.
+
+The rest of this page, in order: the documents of record; what the
+silicon does (the interrupt masking, the vector table, the FPU's enable
+in the crt, the fault vectors, the idle hook, where a pending interrupt
+is taken, SysTick, `delay_us`); the types and verbs; how to use it; the
+bench findings, measured to the cycle, with the case against running
+code from SRAM on this family; and what is not covered.
+
+## Documents of record
+
+PM0214 Rev 10 (the Cortex-M4 core: PRIMASK and
 BASEPRI, the NVIC, SysTick, the FPU's CPACR and lazy stacking, the
 ISB, the sleep's entry and wake-up), ARM's ARMv7-M ARM (DDI 0403E.e:
 the WFI's wake-up events, SysTick's reload) and the Cortex-M4 TRM (DDI
 0439B: the exception entry's and return's cycles), RM0090 Rev 22 / RM0390 Rev 6 / RM0383 Rev 4 for the vector
 tables (RM0090 table 62 and its twins) and for what a WFI here enters
-(PWR ch. 5, which [clock.md](clock.md)'s regulator half touches today
-and the power chapter will own), and the three errata sheets ES0206
+(PWR ch. 5, which [clock.md](clock.md)'s regulator half touches and
+[pwr.md](pwr.md) owns), and the three errata sheets ES0206
 Rev 24, ES0298 Rev 8, ES0287 Rev 6 - the core items 2.1.1 (interrupted
 loads to SP), 2.1.2 (VDIV/VSQRT under very short ISRs) and 2.1.3
 (store immediate overlapping an exception return) are the Cortex-M4
@@ -24,14 +105,17 @@ include of the core stratum's `cortexm/ticker.hpp` - `BasicTicker`,
 in the build project. The family fixture is
 `test/family_stm32f4/platform.cpp` under `brio check stm32f4`. The
 reference suite is `test_stm32f4_platform` (letters a..e, g, w, k, t),
-run on the four boards.
+run on the four boards; a letter is one command key of the suite's
+console and the group of verdicts it runs, and `z` is the key that runs
+them all.
 
 ## What the silicon does
 
 **Interrupt masking is PRIMASK here, though the core has more.**
 ARMv7-M adds BASEPRI - "mask everything at or below priority N" - and
 sixteen NVIC priority levels (four bits) where the M0+ had four. brio
-uses neither: the kernel promise (design/kernel.md section 11) is that
+uses neither: the kernel promise
+([design/kernel.md, "Platform: what the machine provides"](../design/kernel.md#11-platform-what-the-machine-provides-kernelplatformhpp)) is that
 no interrupt nests over another, and this family keeps it the way the
 SAM C21 does - every NVIC line at the same priority (the reset value,
 0), PRIMASK the one mask, `Nvic::priority()` the one door and no driver
@@ -40,13 +124,13 @@ Core exceptions (SysTick among them) have no NVIC enable bit.
 
 **The vector table is 16 + 91 entries on the F429, 97 on the F446, 86
 on the F411, 93 on the F469 (QUADSPI and the DSI host after the DMA2D),
-and on this family a line is mostly ONE peripheral's.**
+and on this family a line is mostly one peripheral's.**
 The sharing the table shows is the advanced timers' (TIM1_BRK_TIM9,
 TIM1_UP_TIM10, TIM1_TRG_COM_TIM11, TIM8's with TIM12/13/14), TIM6 with
 the DAC, the EXTI lines 5..9 and 10..15 grouped, the I2C's two vectors
 per instance; every serial instance has a line of its own. The device
 header gives the line's IRQn and ST's startup template the handler's
-spelling (`USART1_IRQHandler`) - the header declares NO handler names,
+spelling (`USART1_IRQHandler`) - the header declares no handler names,
 so the crt cites the template for that one thing. The table has holes
 where another part of the family has a peripheral this one has not
 (the F446's positions 61-62, 79-80, 82-83, 85-86, 88-90), filled with
@@ -68,9 +152,10 @@ pays nothing.
 **The three configurable faults are disabled at reset** (SHCSR's
 MEMFAULTENA, BUSFAULTENA, USGFAULTENA clear) and escalate to HardFault,
 which the crt gives its own spin so a BKPT with no debugger - what
-every `panic()` ends in - is legible in a backtrace. The fault-handling
-pass (the reset chapter) gives them bodies; until then their weak
-aliases spin in Default_Handler.
+every `panic()` ends in - is legible in a backtrace. `stm32f4/reset.hpp`
+has their switch (`Faults`) and a body a program may bind to them
+(`hard_fault_reset<P>()`, [reset.md](reset.md)); a fault vector the
+program leaves unbound is a weak alias that spins in Default_Handler.
 
 **WFI wakes on a pending interrupt even under PRIMASK**, so the idle
 hook sleeps first and unmasks after, closing the lost-wakeup window by
@@ -78,26 +163,27 @@ construction: the processor "ignores the value of PRIMASK in
 determining whether an asynchronous exception is a WFI wakeup event"
 (ARMv7-M ARM B1.5.19, PM0214 2.5.2), and a WFI is not WFE - no event
 latch is left standing by a wake, so the loop turns once per interrupt.
-Both are measured to the cycle (letters `w` and `k`, below). What the WFI enters is WHATEVER IS ARMED: SCR.SLEEPDEEP is
+Both are measured to the cycle (letters `w` and `k`, below). What the
+WFI enters is whatever is armed: SCR.SLEEPDEEP is
 0 out of reset and this file never writes it, so a bare WFI is Sleep -
 HCLK, SysTick and every peripheral keep running (RM0090 5.3.4) - and
 with a sleep site having armed a Stop, the same WFI is that Stop.
 
-**A pending interrupt is taken AFTER the instruction that lifts the
+**A pending interrupt is taken after the instruction that lifts the
 mask, not inside it** (measured, letter b): a SysTick tick left pending
 under a 5-period critical section is delivered exactly once, and a read
 of the tick count in the instruction after the guard's `msr PRIMASK`
-sees it NOT YET delivered - 0 ticks advanced - while the same read
+sees it not yet delivered - 0 ticks advanced - while the same read
 after an ISB sees 1. PM0214 2.1.3's rule ("an ISB ... ensures that the
 effect of the change is seen by the following instructions"); on the
 M0+ families the same suites read the count after a ruler read, which
-took the cycles an ISB takes here. A masked window LOSES ticks: the
+took the cycles an ISB takes here. A masked window loses ticks: the
 pending bit is one bit, five periods under it are one interrupt.
 
 **SysTick rides HCLK.** The reload is `Clock::hz / 1000 - 1` (179999 at
 180 MHz, 99999 at 100 MHz, read back by the suite), well inside the
-24-bit field; in Stop the core clocks stop and KERNEL TIME STANDS STILL
-for the sleep's duration - the sleep sites of the power chapter are
+24-bit field; in Stop the core clocks stop and kernel time stands still
+for the sleep's duration - the sleep sites of [pwr.md](pwr.md) are
 where that gets repaired.
 
 **`delay_us` reads SysTick's VAL** (`cortexm/delay.hpp`: at least, never
@@ -302,9 +388,12 @@ Driver gaps (this chapter's option space the stratum does not touch):
   level above the loop, and a priority scheme is the preemptive
   kernel's question ([design/kernel.md](../design/kernel.md)).
 - The three configurable faults' enables and bodies, the MPU, the FPU's
-  exception flags: the reset chapter's, born with `reset.hpp`.
+  exception flags: the reset chapter's. `reset.hpp` has the enables
+  (`Faults`) and a body (`hard_fault_reset<P>()`); the MPU and the FPU's
+  own fault sources are [reset.md](reset.md)'s gaps, with their reasons.
 - The reset causes, the watchdogs and the breadcrumb across a real
-  reset: the reset chapter's suite.
+  reset: the reset chapter's suite, `test_stm32f4_reset`
+  ([reset.md](reset.md)).
 - A per-package pin-bonding table - [port.md](port.md) says why not.
 - Code run from SRAM aliased at address 0 (SYSCFG_MEMRMP), which the
   core would fetch over ICode rather than the System interface the
@@ -314,8 +403,10 @@ Driver gaps (this chapter's option space the stratum does not touch):
 Implemented, not bench-verified: letters `w` and `k` on the F429ZI, the
 F411CE and the F469NI (the same image, run there, is the measurement);
 `Nvic::priority` (nothing assigns one,
-above); `abort()`'s and `HardFault_Handler`'s spins (no suite has
-faulted the part yet); the cortex-debug launch entries
+above); `abort()`'s and `HardFault_Handler`'s spins (the fault vectors
+are taken by `test_stm32f4_reset` with `hard_fault_reset` bound,
+[reset.md](reset.md); the crt's spins, what runs where no body is bound,
+no suite has run); the cortex-debug launch entries
 ([README.md](README.md)), not driven end to end - halt-and-dump through
 OpenOCD's own console is what the findings were taken with;
 `delay_us` against an INDEPENDENT ruler (the suite judges it on

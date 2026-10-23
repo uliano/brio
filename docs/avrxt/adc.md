@@ -1,12 +1,101 @@
 # ADC - the 12-bit analog-to-digital converters (AVR DA/DB, AVR EA)
 
+This document is for a programmer who measures voltages: a sensor on a
+pin, a differential pair, the supply, the die's temperature, or a
+stream of samples paced by a timer. The driver is `Adc<0>`, one task
+with knobs (a task, in brio, is a driver layer with state of its own
+over a resource, served from its peripheral's interrupt or called by
+an active object; an active object is a component of a brio program
+with its own event queue, served one event at a time by the kernel,
+[../learn/introduction.md](../learn/introduction.md)). It is a
+monostate (a class whose state is static, with no instances): one
+`AdcConfig` holds the whole configuration, an input is a type
+(`AnalogIn<Pin<'D', 1>>`) or an enumerator (`AdcInput::temp`), the
+interrupt bodies return the result for the program's vector to post,
+and the event system can start conversions with no CPU between them.
+
 Two converters, two engines, one surface (`avrxt/adc.hpp`, whose
 part's header decides which half compiles): the AVR DA/DB's 12-bit SAR
 ADC, this page's first half, and the AVR EA's 12-bit differential ADC
 with a programmable gain amplifier, its second ([The AVR EA's
-converter](#the-avr-eas-converter)).
+converter](#the-avr-eas-converter)). The verbs a program calls are
+spelled alike on both; the knobs, the limits and every figure below
+belong to the die their half names.
 
-Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B (ADC
+The smallest use on the DA/DB, a single blocking reading of PD1 in
+millivolts, from that half's "How to use it":
+
+```cpp
+using A = Adc<0>;
+A::init<AdcConfig{.reference = Ref::v2048, .prescaler = AdcPresc::div16}>(clock);
+A::select(AnalogIn<Pin<'D', 1>>{});          // AIN1 - a pin is a type, the table is checked
+const uint16_t counts = A::read();           // start, wait for the result, read
+const uint16_t mv = adc_mv(counts, A::steps(), ref_mv(Ref::v2048));
+```
+
+Line by line: `A` names the one converter, ADC0. `init<...>(clock)`
+takes the configuration as a template argument, so the knobs are
+checked at compile time, and with a static clock type the CLK_ADC
+range too (24 MHz / 16 = 1.5 MHz, inside 125 kHz .. 2 MHz); it writes
+every register with the input on GND before enabling (erratum 2.3.2,
+below), enables, waits 10 us of warm-up and returns true. `select()`
+turns PD1's digital input buffer off and writes MUXPOS = AIN1.
+`read()` starts a conversion, waits for RESRDY and returns the 12-bit
+result. `adc_mv()` (`util/analog.hpp`) scales the counts by the 4096
+steps and the 2048 mV of the reference.
+
+The smallest use on the AVR EA, from its half's "How to use it":
+
+```cpp
+using A = Adc<0>;
+using Wire = AnalogIn<Pin<'D', 1>>;
+
+// single-ended, 2.048 V: SAMPDUR >= 4 us x 2 MHz = 8 with an internal reference
+A::init<AdcConfig{.reference = Ref::v2048, .prescaler = AdcPresc::div10, .sample_duration = 8}>(clock);
+A::claim(Wire{});
+A::select(Wire{});
+const uint16_t counts = A::read();
+```
+
+Line by line: `init<...>(clock)` checks every rule of the
+configuration at compile time, among them the sampling floor an
+internal reference sets (`sample_duration` 8 at 2 MHz: the default 2 is
+refused), writes the registers and returns at once, the hardware timing
+the modules' initialization at the first conversion; `claim()` turns
+PD1's digital input buffer off, once; `select()` is then the MUXPOS
+store alone; `read()` triggers, waits for RESRDY and returns
+RESULT[15:0].
+
+What decides correctness even there. `init()` comes after the clock
+task's (`SysClock::init()`, [clkctrl.md](clkctrl.md)): the prescaler's
+range and, on the DA/DB, the warm-up wait are computed from the rate
+the clock type claims, not read from the hardware. The run-time form
+`init(clock, cfg)` returns false for what the template form refuses at
+compile time, and with a `DynamicClock` that does not list the
+converter among its users `init` does not compile. An internal
+reference needs headroom on the supply ([vref.md](vref.md)), and
+nothing checks VDD. `read()` waits for RESRDY with no time-out: the
+wait is a conversion on a converter `init()` has enabled (on the EA
+plus the initialization table 31-5 times, up to 60 us with LOWLAT off),
+and a disabled converter never raises RESRDY; it belongs before the
+kernel runs or in a bench tool, and inside an active object results
+come as events through the RESRDY interrupt body, whose vector the
+program binds with `ISR(ADC0_RESRDY_vect)` (nothing in the driver binds
+one). And one converter has one owner: the window match a result read
+captures, the input in effect and, on the EA, the TEMP registers its
+16- and 32-bit registers share are state for one context at a time.
+
+The rest of this page, in order: the documents of record; the AVR
+DA/DB's converter (what the silicon does, the types and verbs, how to
+use it, its bench findings); the AVR EA's converter (what the silicon
+does with its offer inventoried, the types and verbs with the select
+engine and the cost counted in the release listing, how to use it, its
+bench findings with the conversion rates measured against tables 31-7
+and 31-8); and what is not covered.
+
+## Documents of record
+
+AVR128DB28/32/48/64 data sheet DS40002247B (ADC
 chapter, electricals 39.18), errata DS80000915F (2.3.1, 2.3.2);
 AVR64EA28/32/48 data sheet DS40002443A (chapter 31, electricals 35.17,
 the 16- and 32-bit register access of 8.10), errata DS80001048D (no ADC
@@ -16,7 +105,11 @@ TIMEBASE sat in ADC.CTRLC: the EA moved it to CLKCTRL). Driver:
 `avrxt/adc.hpp`; `Ref` from `avrxt/vref.hpp`, counts <-> mV arithmetic
 in `util/analog.hpp` (host-tested in `test_analog`); event start
 through `avrxt/evsys.hpp`. Reference test: `test_avr_analog`, one half
-per engine.
+per engine. The findings below name its letters: a letter is one
+command key of the suite's console and the group of verdicts it runs,
+`a` the key that runs them all on either half; the DA/DB half numbers
+its tests 1 to 15 and types the tenth to the fifteenth as `0`, `w`,
+`e`, `i`, `v` and `x`.
 
 ## The AVR DA/DB's converter
 
@@ -46,7 +139,7 @@ use of the converter is that sequence with different knobs:
   reference settle. Conversion time = 2/fPER + n x (13.5 + 2 +
   sample_delay + sample_length)/fADC + 2/fPER (12-bit);
 - **accumulation**: 1, 2, 4 .. 128 samples summed in hardware into one
-  result (`RES` is the SUM); above 16 samples the sum does not fit 16
+  result (`RES` is the sum); above 16 samples the sum does not fit 16
   bits and the hardware drops LSBs (32: 1 bit, 64: 2, 128: 3). So 16
   samples give 16 bits of oversampled resolution; 32/64/128 only
   average further - less noise, no more bits. Sum and truncation are
@@ -68,7 +161,7 @@ the mode, resolution, prescaler and accumulation must not change
 during a conversion (in free-running: stop, wait, change, restart -
 `reconfigure()` does); the converter needs ~6 us of warm-up after
 enabling before its first conversion is valid (`init()` waits); with
-`init_delay != 0`, an input or accumulation change made AFTER enabling
+`init_delay != 0`, an input or accumulation change made after enabling
 takes effect only after one conversion (errata 2.3.2 - `flush()`
 throws one away; `init()` writes the mux before enabling); rev A4
 silicon has a -3 mV single-ended offset (2.3.1). Accuracy (12-bit,
@@ -116,7 +209,7 @@ The verbs, by purpose:
 | window comparator | `window(Window::below/above/inside/outside, low, high)` (single-ended format), `window_signed(mode, low, high)` (the differential two's-complement format, 33.5.16), `window_off()`, `window_hit()` (about the last result read), `window_flag()` / `clear_window_flag()` (the live flag) |
 | interrupts | `enable_resrdy_interrupt(bool)`, `enable_wcmp_interrupt(bool)`; ISR bodies `resrdy()`, `wcmp()` (return the result; the app binds the vectors and posts); `selected()` (the MUXPOS code in effect, to label a result in the glue), `input_code(input)` constexpr |
 | events | `start_on(EventChannel<n>{})` (a conversion per rising edge of the channel), `start_on_events(bool)`; generator `EvAdc0Ready`, user `EvAdc0Start` (evsys.hpp) |
-| clock | `rebase(hz)` - the `ClockUser` hook a `DynamicClock` calls: keeps the CLK_ADC chosen at init, within range; `clock_ok()` says whether the last rebase FOUND an in-range prescaler (rebase itself stays void and best-effort by the ClockUser contract) |
+| clock | `rebase(hz)` - the `ClockUser` hook a `DynamicClock` calls: re-picks the prescaler for the CLK_ADC in effect before the switch (init's on the first rebase, the last rebase's after: a gap in "Not covered yet"), within range; `clock_ok()` says whether the last rebase FOUND an in-range prescaler (rebase itself stays void and best-effort by the ClockUser contract) |
 
 Arithmetic: `ref_mv(Ref, known_mv)` (`avrxt/vref.hpp`), `adc_mv(counts,
 steps, ref_mv)`, `adc_mv_signed(...)` (`util/analog.hpp`, pure),
@@ -272,8 +365,11 @@ CLK_PER, and a prescaler valid at one rate can be out of range at
 another. `Adc<0>` is a `ClockUser`: listed among the clock's users
 (`DynamicClock<Boot, Serial, Adc<0>>` - a dynamic clock that does not
 list it fails the `init` of the ADC), its `rebase(hz)` re-picks the
-prescaler to keep the CLK_ADC chosen at init as close as possible and
-within range: it stops, waits for the converter to be idle, rewrites,
+prescaler to keep the CLK_ADC in effect before the switch as close as
+possible and within range (the one chosen at init on the first
+rebase; each rebase then aims at the last one's, so a round trip of
+the clock can leave it slower, a gap listed under "Not covered yet"):
+it stops, waits for the converter to be idle, rewrites,
 and resumes free-running if it was on. Sample and init delays are in
 CLK_ADC cycles, so they scale with it. What the owner must do: pause
 event-started conversions (`start_on_events(false)`) before
@@ -342,7 +438,7 @@ at 2000 mV from the 2.048 V reference against VDD as the reference:
 
 One instance, ADC0 (DS40002443A ch. 31), the tinyAVR 2's design: a
 12-bit SAR converter behind a programmable gain amplifier, single-ended
-or differential on EVERY conversion, with two output registers and an
+or differential on every conversion, with two output registers and an
 accumulator.
 
 - **A conversion is one COMMAND write** (31.5.11): DIFF (single-ended or
@@ -351,7 +447,7 @@ accumulator.
   MUXPOS_WRITE, MUXNEG_WRITE, EVENT_TRIGGER) in one byte.
 - **Inputs** (3.1, 31.5.13/14): AIN0-7 = PD0-7, AIN8-11 = PE0-3,
   AIN16-21 = PF0-5, AIN22-27 = PA2-7, AIN28-31 = PC0-3, every one a
-  positive AND a negative input; internal positives GND, VDDDIV10,
+  positive and a negative input; internal positives GND, VDDDIV10,
   TEMPSENSE, DAC0 (the DAC's unbuffered output); internal negatives
   GND, DAC0 and the two comparators' DACREF0/1 (negative only).
   `(VINP - VINN) x gain / VREF x 2048` differential, `VINP x gain /
@@ -362,8 +458,9 @@ accumulator.
   the PGA for a fixed 3 / 5 / 6 / 12 us by bias (4 us at 100 % with an
   internal reference, table 31-6).
 - **Two outputs** (31.3.3.3, tables 31-2..31-4): SAMPLE (16 bits, every
-  conversion) and RESULT (32 bits: a single conversion, or the SUM of
-  an accumulation - 4095 x 1024 is 22 bits, signed 23 in DIFF; SCALING
+  conversion) and RESULT (32 bits: a single conversion, or the sum of
+  an accumulation - 4095 x 1024 is 22 bits, and a differential sum,
+  -2048 x 1024 at its lowest, a signed 22; SCALING
   right-shifts it by SAMPNUM - 4, left below 16 samples, so a scaled
   result's full scale is 65536). LEFTADJ exists for a 12-bit single
   conversion and a scaled sum.
@@ -385,14 +482,14 @@ accumulator.
   uses (table 31-5: the ADC 10 us, the PGA 20, an internal reference
   60, TEMPSENSE and the DAC input 35), counted in CLKCTRL.MCLKTIMEBASE;
   LOWLAT keeps the modules on and removes it.
-- **The input mux is NOT buffered** (31.3.3.5): a change during a
+- **The input mux is not buffered** (31.3.3.5): a change during a
   conversion corrupts it - where the DB buffers and locks both mux
   fields.
 - **Triggers and aborts** (31.3.3.2): a trigger during a conversion is
   ignored and sets TRIGOVR; STOP, a REFSEL write, or selecting DAC0,
   TEMPSENSE or VDDDIV10 aborts one; FREERUN repeats single conversions
   and bursts (not series).
-- **The window** (31.3.3.8, 31.5.4): below, above, inside (STRICT:
+- **The window** (31.3.3.8, 31.5.4): below, above, inside (strict:
   WINLT < x < WINHT), outside, on RESULT[15:0] or on SAMPLE (WINSRC);
   its flag rides the RESRDY or the SAMPRDY vector and is cleared only by
   writing 1 (31.5.6).
@@ -403,15 +500,15 @@ accumulator.
   TEMP registers (31.5.17): one owner, one context at a time.
 - **The temperature** (31.3.3.7): at 1.024 V with SAMPDUR >= 32 us x
   fCLK_ADC, T = (RESULT + TEMPSENSE1) x TEMPSENSE0 / 4096, both factors
-  SIGNED (the DB: (TEMPSENSE1 - RES) x TEMPSENSE0 / 4096 at 2.048 V -
+  signed (the DB: (TEMPSENSE1 - RES) x TEMPSENSE0 / 4096 at 2.048 V -
   same names, other meaning).
 
 What it offers that bears on cost, each item used or declined:
 
 | offer | in the driver |
 |---|---|
-| DIFF, MODE and START in one COMMAND byte | used: the driver keeps the DIFF / MODE image and a start ORs IMMEDIATE into it - one load, one store |
-| DIFF per conversion | used: an input VALUE (`AdcDiff<pos, neg>`), so a walk mixes single-ended and differential inputs at no extra store |
+| DIFF, MODE and START in one COMMAND byte | used: the driver keeps the DIFF / MODE image and a start ORs IMMEDIATE into it - one load and one store to COMMAND, beside the store that notes the start mode in RAM |
+| DIFF per conversion | used: an input value (`AdcDiff<pos, neg>`), so a walk mixes single-ended and differential inputs at no extra store |
 | MUXPOS_WRITE start | used: `start_on_select()`, a walk whose select is the start (one store an input) |
 | MUXNEG_WRITE start | declined: a pair writes MUXNEG first and MUXPOS last, so MUXPOS_WRITE serves both |
 | EVENT_TRIGGER start | used: `start_on()`, no CPU between conversions, async (Idle, and Standby with RUNSTDBY) |
@@ -421,7 +518,7 @@ What it offers that bears on cost, each item used or declined:
 | SAMPRDY as a per-sample stream | declined: at 312 ksps the budget is 64 CPU cycles a sample - an ISR and a ring push do not fit; a block engine is born with its first user |
 | the PGA, its four biases | used: `.pga`, `.gain`, `.pga_bias`, PGACTRL written whole, the bias checked against CLK_ADC |
 | CHOPPING | used: `.chopping`, refused in single mode |
-| LOWLAT | used: `.low_latency`, OFF by default - the modules' current when idle against 10..60 us per software-started trigger (free-running and bursts pay nothing: measured below) |
+| LOWLAT | used: `.low_latency`, off by default - the modules' current when idle against 10..60 us per software-started trigger (free-running and bursts pay nothing: measured below) |
 | the window on RESULT or SAMPLE | used: `.window`, `.window_source`, `window()`; refused on RESULT where RESULT is wider than 16 bits |
 | TRIGOVR / SAMPOVR / RESOVR | used: `error()` (an ISR body and a polled verb) - the hardware's own count of a too-fast pace and a too-slow reader |
 | ADCBUSY | used: `busy()` |

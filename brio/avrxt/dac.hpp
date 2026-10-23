@@ -1,15 +1,30 @@
 /*
  * dac.hpp
  *
- * Dac<n>: the 10-bit DAC of the AVR DA/DB (DS40002247B ch. 34) and of
- * the AVR EA (DS40002443A ch. 32) - one IP - as a brio actuator - rank
- * of Pin: synchronous, set-and-forget, no events. One instance (DAC0);
- * the template parameter is there for the symmetry every other driver
- * has and for targets with several.
+ * Dac<n>: a voltage out of the chip - a bias, a test level, a slow
+ * waveform, or a level fed inside the chip to the ADC or a comparator.
+ * The 10-bit DAC of the AVR DA/DB (DS40002247B ch. 34) and of the AVR
+ * EA (DS40002443A ch. 32) - one IP - as a brio actuator of the rank of
+ * Pin: synchronous, set-and-forget, no events, no interrupt. One
+ * instance (DAC0); the template parameter is there for the symmetry
+ * every other driver has and for targets with several. init() selects
+ * the reference and configures the output, set() writes a code and the
+ * output follows:
  *
  *   using Out = brio::Dac<0>;
  *   Out::init({.reference = brio::Ref::v2048});   // buffered out on PD6
  *   Out::set(512);                                // ~1.024 V
+ *
+ * Which context calls what. init(), disable() and enable() are setup
+ * verbs of the one owner (main(), or the active object that owns the
+ * converter): register writes that return at once - init() writes
+ * VREF.DAC0REF, PD6's pin control, DATA and CTRLA, disable() and
+ * enable() rewrite CTRLA (a read-modify-write on the DA/DB) - and none
+ * takes the clock, waits or masks interrupts. set() is one 16-bit store
+ * and code() one 16-bit load, from the owner's context. Nothing waits
+ * for the reference's start-up or the buffer's settling: they follow in
+ * the analog domain, and nothing checks that VDD has the headroom the
+ * reference needs (docs/avrxt/vref.md).
  *
  * What the silicon does: DATA[9:0] left-adjusted (DATA[9:2] in DATAH,
  * [1:0] in DATAL bits 7:6, output updated when DATAH is written - the
@@ -17,7 +32,9 @@
  * (VREF.DAC0REF); the buffered output on the DAC pin (PD6, `OUTEN`;
  * the pin's digital input must be disabled in PORT) sources 1 mA, sinks
  * ~1 uA (add a resistor to ground if it must sink), settles in ~7-10 us
- * full scale; the UNBUFFERED output feeds the ADC (MUXPOS DAC0) and
+ * full scale - the DB data sheet's figures (39.19); the EA's table 35-22
+ * gives no drive figure and its buffer was measured sinking milliamperes
+ * (docs/avrxt/dac.md); the unbuffered output feeds the ADC (MUXPOS DAC0) and
  * the ACs internally with OUTEN off, leaving PD6 free - the OPAMPs
  * instead tap the buffered output (34.3.2.3): feeding them needs
  * OUTEN on, and PD6 is then taken. On the EA the unbuffered output
@@ -27,8 +44,9 @@
  * the two by DATA's MSb - `range`.
  * RUNSTDBY keeps it running in standby sleep.
  *
- * Bench facts (A5 silicon, bare pin): the buffered output RISES to a
- * new code within ~10-20 us but FALLS at the sink limit - about 1 uA
+ * Bench facts (the AVR DB's A5 silicon, bare pin; the AVR DA's and the
+ * AVR EA's are in docs/avrxt/dac.md): the buffered output rises to a
+ * new code within ~10-20 us but falls at the sink limit - about 1 uA
  * into the pin capacitance, i.e. ~20 kV/s: from 2 V to 0 V takes
  * ~100 us or more, and the last tens of mV much longer. A falling step
  * that must be fast needs the datasheet's resistor to ground (10 kOhm
@@ -95,8 +113,11 @@ public:
     using OutPin = Pin<'D', 6>;               ///< DAC0 OUT on this family
 
     /// Select the reference, configure the output, enable. The initial
-    /// output is code 0. Call after clock init; the reference start-up
-    /// (10-200 us) and the buffer settling follow the first set().
+    /// output is code 0. A setup verb that takes no clock and reads none;
+    /// it returns at once, and the reference start-up (10-200 us on the
+    /// DA/DB, 130 us typ. and 180 max on the EA) and the buffer settling
+    /// follow in the analog domain. With `output_pin`, PD6's digital
+    /// input buffer is turned off and the pad is the DAC's.
     static void init(DacConfig cfg) {
         Vref::dac0(cfg.reference, cfg.reference_always_on);
         ref_ = cfg.reference;
@@ -116,11 +137,11 @@ public:
         }
     }
 
-    /// Output code 0..1023 (clamped). One 16-bit write, DATAL then
-    /// DATAH: the output updates on the high byte.
     /// The code currently in DATA (what set() last wrote).
     static uint16_t code() { return static_cast<uint16_t>(regs().DATA >> 6); }
 
+    /// Output code 0..1023 (clamped). One 16-bit write, DATAL then
+    /// DATAH: the output updates on the high byte.
     static void set(uint16_t code) {
         if (code > steps - 1) {
             code = steps - 1;

@@ -1,23 +1,28 @@
 /*
  * evsys.hpp
  *
- * The event system (EVSYS) of the AVR DA/DB (DS40002247B ch. 16) and of
- * the AVR EA (DS40002443A ch. 16) as brio sees it - see
- * docs/avrxt/evsys.md for the analysis and the model:
+ * The event system (EVSYS) of the AVR DA, DB and EA: hardware wiring
+ * between peripherals, with no CPU and in every sleep mode - a pin's
+ * level into a timer's capture input, the PIT's divided clock starting
+ * the ADC, any internal signal mirrored on a pin. An event here is the
+ * data sheet's hardware event, a signal on an internal wire, not a
+ * kernel event; the bridge between the two is an interrupt body that
+ * posts. The chapter is DS40002247B ch. 16 on the AVR DA/DB and
+ * DS40002443A ch. 16 on the AVR EA; docs/avrxt/evsys.md holds the
+ * analysis and the model:
  *
- *  - a GENERATOR is a type: its CHANNELn code and the channels it may
+ *  - a generator is a type: its CHANNELn code and the channels it may
  *    legally drive are constexpr facts (EvPitDiv<64>, EvPin<Pin<'A',2>>,
  *    EvRtcOvf...); the concept EventGenerator names the contract. A
- *    generator that is a SLOT of another peripheral (the AVR EA's pin
+ *    generator that is a slot of another peripheral (the AVR EA's pin
  *    and PIT generators) carries the slot in its type and a prepare()
  *    that selects what the slot carries; source() calls it first;
- *  - a USER is a type that knows its USERxxx register (EvOut<Pin<'D',2>>,
+ *  - a user is a type that knows its USERxxx register (EvOut<Pin<'D',2>>,
  *    EvAdc0Start, EvTcbCaptIn<0>...); the concept EventUser;
- *  - a CHANNEL is a resource handle, EventChannel<n>.
+ *  - a channel is a resource handle, EventChannel<n>.
  *
- * Run-time primitives - the layer that IS the peripheral, one register
- * write each, callable from any handler (a rewire is an action of a
- * state: Entry routes, Exit disconnects):
+ * The smallest use, the PIT's 512 Hz on channel 1 and mirrored on PD2
+ * (EVOUTD), then torn down:
  *
  *   EventChannel<1>::source(EvPitDiv<64>{});   // static_assert: odd channel
  *   EvOut<Pin<'D', 2>>::listen(EventChannel<1>{});
@@ -26,20 +31,44 @@
  *   EventChannel<1>::off();
  *   EventChannel<1>::pulse();                  // software event, one CLK_PER
  *
- * The compiler checks LEGALITY (this generator on this channel, this
- * pin as an EVOUT); it does not check EXCLUSIVITY of a channel that
- * several states rewire - that is ownership, the business of one AO's
- * FSM. The tables below hold what the current steps need (RTC/PIT
- * generators, port pins, EVOUT users) and grow on demand: a missing
+ * source() writes the generator's code into CHANNEL1; listen() selects
+ * the EVOUT position in PORTMUX.EVSYSROUTEA, makes PD2 an output and
+ * writes the channel into the user's register; unlisten() undoes all
+ * three; off() idles the channel; pulse() inverts the channel's signal
+ * for one CLK_PER cycle. What decides correctness even there: a PIT
+ * divider carries a signal only while the RTC's prescaler chain runs,
+ * which in a kernel program the Ticker's init() has seen to by enabling
+ * the PIT (and on the AVR EA a PIT slot needs PITEN itself, measured,
+ * docs/avrxt/evsys.md); nothing here starts the RTC. A pin generator
+ * reads zero while the pin's input driver is disabled.
+ *
+ * Who calls what, and from where. These run-time primitives are the
+ * layer that is the peripheral, and none of them waits or masks
+ * interrupts. source() of an ordinary generator, off(), pulse() and a
+ * plain user's listen() and unlisten() are one register store each,
+ * legal from any context. source() of a slotted generator (the AVR EA's
+ * EvPin and EvPitDiv) first reads, modifies and writes the slot's
+ * register, and EvOut's listen() and unlisten() read, modify and write
+ * PORTMUX.EVSYSROUTEA, a register every port's EVOUT shares: those
+ * belong to one owner - setup in main(), or the handler of the active
+ * object that owns the route (an active object being a component of a
+ * brio program with its own event queue, served one event at a time by
+ * the kernel, docs/learn/introduction.md). A rewire is an action of a
+ * state: Entry routes, Exit disconnects.
+ *
+ * The compiler checks legality (this generator on this channel, this
+ * pin as an EVOUT); it does not check exclusivity of a channel that
+ * several states rewire - that is ownership, the business of one active
+ * object's state machine. The tables below grow on demand: a missing
  * generator or user is added here, three lines, never worked around
  * with a raw register write. A static allocator (EventSystem<Route...>)
- * is planned as sugar over these primitives when an app has more than
- * a couple of fixed routes.
+ * is not built: sugar over these primitives, docs/avrxt/evsys.md lists
+ * it among its driver gaps.
  *
- * THE TWO MODELS. On the AVR DA/DB every pin and eight fixed PIT
+ * The two models. On the AVR DA/DB every pin and eight fixed PIT
  * dividers are generators of their own, confined to channel pairs and
- * parities (16.5.2). On the AVR EA (16.4, 16.5.2) six channels take EVERY
- * generator, but pins and PIT dividers reach them through SLOTS: two per
+ * parities (16.5.2). On the AVR EA (16.4, 16.5.2) six channels take every
+ * generator, but pins and PIT dividers reach them through slots: two per
  * port (PORTx.EVGENCTRLA picks which pin each carries, 18.5.17) and two
  * in the RTC (RTC.PITEVGENCTRLA picks which divider, DIV4..DIV32768,
  * 24.13.17) - a resource the app names as it names a channel:
@@ -49,7 +78,7 @@
  * took different slots is ownership, like a channel's. On the DA/DB the
  * slot is 0 and nothing else (no slot register exists there).
  *
- * Facts worth remembering (16.3.2): a pin generator is the pin LEVEL
+ * Facts worth remembering (16.3.2): a pin generator is the pin level
  * (the user's edge detection makes the edge; the pin's input driver
  * must be enabled); PIT_DIVn are levels - a free square wave off the
  * RTC's prescaler chain, n cycles of CLK_RTC per period (32768 / n Hz
@@ -62,7 +91,8 @@
  * avrxt/device_tables.hpp's erratum_da_evsys_pins), which bonds them on
  * 64 pins. DS80001048D (the AVR EA) has no EVSYS, PORT or RTC item. The
  * channel and instance counts the types below assert against are the
- * device tables' too.
+ * device tables' too (avrxt/device_tables.hpp, the reserve: the table of
+ * what each part has, read off the device header).
  */
 
 #pragma once
@@ -91,7 +121,7 @@ concept EventGenerator = requires(uint8_t ch) {
 };
 
 /// A generator that is a slot of its peripheral: prepare() selects what
-/// the slot carries, and EventChannel::source() calls it BEFORE writing
+/// the slot carries, and EventChannel::source() calls it before writing
 /// CHANNELn, so a channel already listened to never carries the slot's
 /// previous selection after the route is made.
 template <typename G>
@@ -112,7 +142,7 @@ concept EventUser = requires {
 // SWEVENTA/SWEVENTB on 48/64-pin DA/DB, 8 channels and SWEVENTA only on
 // 28/32-pin parts.
 
-/// Software event on a channel chosen at RUN time (for drivers that
+/// Software event on a channel chosen at run time (for drivers that
 /// store their channel as a value: a one-shot's trigger, a cascade's
 /// snapshot). The compile-time form is EventChannel<n>::pulse().
 inline void evsys_pulse(uint8_t ch) {
@@ -132,6 +162,8 @@ struct EventChannel {
     static constexpr uint8_t index = n;
 
     /// Drive the channel from generator G. Legality checked at compile time.
+    /// One store into CHANNELn, preceded for a slotted generator by its
+    /// prepare() (a read-modify-write of the slot's register: one owner).
     template <EventGenerator G>
     static void source(G) {
         static_assert(G::legal_on(n),
@@ -169,12 +201,12 @@ private:
 /// The PIT's divided RTC clock as an event (a level: a free square wave
 /// off the RTC's prescaler chain, div cycles of CLK_RTC per period).
 ///
-/// AVR DA/DB: eight fixed generators, 8192/4096/2048/1024 on EVEN channels
-/// only, 512/256/128/64 on ODD channels only (the two families share
+/// AVR DA/DB: eight fixed generators, 8192/4096/2048/1024 on even channels
+/// only, 512/256/128/64 on odd channels only (the two families share
 /// codes 0x08..0x0B - the parity of the channel picks the family); the
 /// slot must be 0.
 ///
-/// AVR EA: two SLOTS in the RTC, each carrying one divider 4..32768
+/// AVR EA: two slots in the RTC, each carrying one divider 4..32768
 /// chosen in RTC.PITEVGENCTRLA (code log2(div) - 1, DS40002443A
 /// 24.13.17), on any channel; the channel code names the slot (0x08 +
 /// slot). A slot carries its divider only while the PIT is enabled
@@ -273,7 +305,7 @@ struct EvMvioOk {
 #endif
 
 #ifdef ZCD0
-/// ZCD n zero-cross output LEVEL (async). All channels. 0x30 + n.
+/// ZCD n zero-cross output level (async). All channels. 0x30 + n.
 template <uint8_t n>
 struct EvZcdOut {
     static_assert(n < zcd_count, "no such ZCD on this package (ZCD0 on 28/32 pins; "
@@ -301,7 +333,7 @@ struct EvOpampReady {
 // How many USART instances this package has is device_tables.hpp's
 // usart_count: 3 on 28/32-pin, 5 on 48, 6 on 64.
 
-/// USART n XCK LEVEL (sync host mode). All channels. 0x60 + n.
+/// USART n XCK level (sync host mode). All channels. 0x60 + n.
 template <uint8_t n>
 struct EvUsartXck {
     static_assert(n < usart_count, "no such USART on this package");
@@ -309,7 +341,7 @@ struct EvUsartXck {
     static constexpr bool legal_on(uint8_t) { return true; }
 };
 
-/// SPI n SCK LEVEL (host mode). All channels. 0x68 + n.
+/// SPI n SCK level (host mode). All channels. 0x68 + n.
 template <uint8_t n>
 struct EvSpiSck {
     static_assert(n < spi_count, "no such SPI on this part");
@@ -376,7 +408,7 @@ struct EvTcbOvf {
 // How many CCL LUTs this package has is device_tables.hpp's
 // lut_count: the LUT4 register macros exist on 48/64-pin parts only.
 
-/// CCL LUT n output LEVEL (async). 0x10 + n.
+/// CCL LUT n output level (async). 0x10 + n.
 template <uint8_t n>
 struct EvLut {
     static_assert(n < lut_count, "no such CCL LUT on this package");
@@ -384,7 +416,7 @@ struct EvLut {
     static constexpr bool legal_on(uint8_t) { return true; }
 };
 
-/// Analog comparator n output LEVEL (async). 0x20 + n.
+/// Analog comparator n output level (async). 0x20 + n.
 template <uint8_t n>
 struct EvAcOut {
     static_assert(n < ac_count, "no such analog comparator on this part");
@@ -392,7 +424,7 @@ struct EvAcOut {
     static constexpr bool legal_on(uint8_t) { return true; }
 };
 
-/// A port pin's LEVEL as an event (async; zero if the input driver is
+/// A port pin's level as an event (async; zero if the input driver is
 /// disabled).
 ///
 /// AVR DA/DB: every pin is a generator of its own, confined to a channel
@@ -400,8 +432,8 @@ struct EvAcOut {
 /// the two ports of a pair share the code space (0x40 + n for the first,
 /// 0x48 + n for the second). The slot must be 0.
 ///
-/// AVR EA: a port has two event SLOTS (PORTx.EVGENCTRLA, DS40002443A
-/// 18.5.17), each carrying ONE of its pins, on any channel; the channel
+/// AVR EA: a port has two event slots (PORTx.EVGENCTRLA, DS40002443A
+/// 18.5.17), each carrying one of its pins, on any channel; the channel
 /// code names the port and the slot (0x40 + 2 x port + slot, 16.5.2).
 template <typename P, uint8_t slot = 0>
 struct EvPin {
@@ -457,9 +489,13 @@ struct EventUserBase {
 };
 
 /// EVOUT: the channel's signal on a pin. Pins with an EVOUT function
-/// (PORTMUX.EVSYSROUTEA): PA2 (alt PA7), PB2, PC2 (alt PC7), PD2 (alt
-/// PD7), PE2, PF2. listen() selects the pin position, drives the pin
-/// as output, connects. Any generator becomes a signal on a pin: the
+/// (PORTMUX.EVSYSROUTEA): Px2 in the default position on every port
+/// present (PA2, PB2, PC2, PD2, PE2, PF2, PG2); Px7 (ALT1) on every
+/// port but PORTF on the AVR DA/DB (PA7, PB7, PC7, PD7, PE7, PG7), on
+/// PORTA, PORTC and PORTD on the AVR EA (PA7, PC7, PD7; its PF7 refused
+/// below), and on an AVR DA not PB7 or PE7 (DS80000882C 2.6.1) - the
+/// static assertions enforce exactly that. listen() selects the pin
+/// position, drives the pin as output, connects. Any generator becomes a signal on a pin: the
 /// test instrument of this peripheral.
 template <typename P>
 struct EvOut : EventUserBase<EvOut<P>> {
@@ -513,7 +549,7 @@ struct EvOut : EventUserBase<EvOut<P>> {
         EventUserBase<EvOut<P>>::listen(ch);
     }
 
-    /// Disconnect AND tear down what listen() set up: the pin back to
+    /// Disconnect and tear down what listen() set up: the pin back to
     /// an input, the PORTMUX position back to default (the "Entry
     /// routes, Exit disconnects" idiom leaves no trace).
     static void unlisten() {
@@ -597,8 +633,8 @@ struct EvTcdInputB : EventUserBase<EvTcdInputB> {
 #ifdef OPAMP
 /// OPAMP n event-driven controls (DB only): enable, disable, dump the
 /// integrator, drive the output. Four users per instance, contiguous.
-/// ENABLEn and DISABLEn are EDGE-detected, DUMPn and DRIVEn are LEVELS
-/// (table 35-2): a channel driving a dump or a drive must HOLD its
+/// ENABLEn and DISABLEn are edge-detected, DUMPn and DRIVEn are levels
+/// (table 35-2): a channel driving a dump or a drive must hold its
 /// level, a software pulse does nothing there.
 enum class OpampAction : uint8_t { enable = 0, disable = 1, dump = 2, drive = 3 };
 template <uint8_t n, OpampAction a>

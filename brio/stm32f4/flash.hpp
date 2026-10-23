@@ -2,41 +2,69 @@
  * flash.hpp
  *
  * The embedded flash memory interface (RM0090 ch. 3, RM0390 ch. 3,
- * RM0383 ch. 3): the read side the CLOCK TASK needs - the access
- * LATENCY and the ART accelerator's three switches - and the write
+ * RM0383 ch. 3): the read side the clock task needs - the access
+ * latency and the ART accelerator's three switches - and the write
  * side, the program and erase engine with the option bytes above it.
  * One chapter, one file.
  *
- * WHY THE WAIT STATES LIVE HERE AND NOT IN clock.hpp: they are the
+ * What a program uses it for: the read side only through the clock task,
+ * which programs the wait states and the accelerator itself; the write
+ * side to erase a sector and program a block into it, to read or
+ * write-protect through the option bytes, and to read the device's
+ * identity (DeviceIdcode, DeviceUid). The smallest write, the round trip
+ * docs/stm32f4/flash.md explains line by line:
+ *
+ *     const std::optional<FlashSector> s = Flash::sector_of(0x08060000UL);
+ *     if (s && Flash::unlock()) {
+ *         if (Flash::erase_sector(s->number) == 0u) {
+ *             FlashAccel::flush_caches();
+ *             Flash::program(s->base, std::span<const uint8_t>{data, sizeof(data)});
+ *             FlashAccel::flush_caches();   // now a read-back is the array's
+ *         }
+ *         Flash::lock();
+ *     }
+ *
+ * Who calls what. Flash, FlashOptions, FlashAccel and FlashWaitStates are
+ * monostates (static members only, never instantiated) and every verb of
+ * theirs a main-context call with no guard of its own; nothing here masks interrupts. Every wait is bounded by a
+ * count of poll turns, not by a time (Flash::wait_spins says why), and a
+ * bound that runs out is a false or FlashFlag::refused. An erase or a
+ * program on a single-bank part freezes the core for its whole duration,
+ * interrupts included (below), so the caller picks a moment when nothing
+ * has to be served. The bytes program() writes are the caller's span,
+ * read during the call and free again when it returns. isr() is the body
+ * of the program's FLASH_IRQHandler and nothing else calls it.
+ *
+ * Why the wait states live here and not in clock.hpp: they are the
  * flash interface's register. The clock task calls in; this file owns
  * the register.
  *
- * WHAT THIS FILE IS NOT: a FlashMedia. There is no storage backend on
+ * What this file is not: a FlashMedia. There is no storage backend on
  * this family and no partition in any linker script, because the
- * geometry pushes back - the small sectors are at the BOTTOM of the
+ * geometry pushes back - the small sectors are at the bottom of the
  * bank, under the vector table, and everything above 128 Kbytes is one
  * 128 Kbyte sector - and because the question that raises is prior to
  * the answer (CLAUDE.md, "The NV stack reviewed as a whole"). What is
  * here is the engine; who stores what in it is not decided.
  *
- * THE CHAPTER, in the shape the code takes:
+ * The chapter, in the shape the code takes:
  *
- *  - ONE ARRAY, UNEVEN SECTORS, ONE ERASE GRAIN. A bank's sectors are
+ *  - One array, uneven sectors, one erase grain. A bank's sectors are
  *    four of 16 Kbytes, then one of 64, then 128 Kbytes to the end of
  *    the bank - the same rule in all four chapters read, which is why
- *    the map below is COMPUTED from the flash size register and not
+ *    the map below is computed from the flash size register and not
  *    tabulated. The sector is the only erase unit there is; there is no
  *    page and no row erase.
  *
- *  - THE PROGRAM UNIT IS THE ACCESS WIDTH, and it is declared twice: in
- *    FLASH_CR.PSIZE and in the STORE INSTRUCTION, which must agree or
+ *  - The program unit is the access width, and it is declared twice: in
+ *    FLASH_CR.PSIZE and in the store instruction, which must agree or
  *    the silicon raises PGPERR (3.5.4). That is why the parallelism is a
- *    TEMPLATE parameter here - it decides which instruction the compiler
+ *    template parameter here - it decides which instruction the compiler
  *    emits - and not a runtime argument that would need a switch over
  *    four widths inside the loop.
  *
- *  - PSIZE IS A CLAIM ABOUT THE SUPPLY (table 6 / table 13): x8 down to
- *    1.7 V, x16 from 2.1, x32 from 2.7, and x64 ONLY with an external
+ *  - PSIZE is a claim about the supply (table 6 / table 13): x8 down to
+ *    1.7 V, x16 from 2.1, x32 from 2.7, and x64 only with an external
  *    8..9 V supply on the VPP pad. `x64` is refused at compile time:
  *    no board of this bench has that pad wired, the datasheet warns
  *    that VPP must not stay applied for more than an hour, and "any
@@ -44,9 +72,9 @@
  *    /voltage settings may lead to unpredicted results. Even if a
  *    subsequent read indicates that the logical value was effectively
  *    written, this value may not be retained." The other three widths
- *    are the caller's word about ITS board, which no register can check.
+ *    are the caller's word about its board, which no register can check.
  *
- *  - A CELL IS NOT WRITTEN ONCE. 3.5.4: "Successive write operations are
+ *  - A cell is not written once. 3.5.4: "Successive write operations are
  *    possible without the need of an erase operation when changing bits
  *    from 1 to 0. Writing 1 requires a flash memory erase operation."
  *    So a second program to a programmed word ANDs into it and raises no
@@ -54,49 +82,52 @@
  *    util/nv_heap.hpp's write-once cell contract assumes. Measured, and
  *    the number is in docs/stm32f4/flash.md.
  *
- *  - THE CORE IS FROZEN WHILE THE FLASH WORKS. 3.5: "Any attempt to read
+ *  - The core is frozen while the flash works. 3.5: "Any attempt to read
  *    the flash memory while it is being written or erased causes the bus
- *    to stall" - and on a single-bank part the code IS in the flash, so
+ *    to stall" - and on a single-bank part the code is in the flash, so
  *    the instruction fetches stop with it: no interrupt is taken, the
  *    kernel tick loses every millisecond of a 128 Kbyte erase. The
- *    F42x/F43x class is the exception: two banks, and a read of one runs
- *    while the other is erased (3.6.5). `last_wait_turns()` is what
+ *    F42x/F43x class is the exception, and so is the F469/F479 class
+ *    (RM0386 3.3.1, the same organization; the reserve's flash_facts()
+ *    gives both two banks): a read of one bank runs while the other is
+ *    erased (3.6.5), measured on the STM32F469NI. `last_wait_turns()` is what
  *    measures which of the two a part is doing - the count of poll
  *    iterations the CPU completed while the engine was busy.
  *
- *  - THE UNLOCK IS A KEYED SEQUENCE AND A WRONG ONE IS FATAL UNTIL THE
- *    NEXT RESET. 3.5.1: KEY1 then KEY2 into FLASH_KEYR; "any wrong
+ *  - The unlock is a keyed sequence and a wrong one is fatal until the
+ *    next reset. 3.5.1: KEY1 then KEY2 into FLASH_KEYR; "any wrong
  *    sequence returns a bus error and lock up the FLASH_CR register
  *    until the next reset". So unlock() writes the pair only when LOCK
  *    really stands, and no verb in this file can produce half a
- *    sequence.
+ *    sequence (provoke_wrong_key() stages a wrong one on purpose, for a
+ *    suite).
  *
- *  - EOP EXISTS ONLY IF ITS INTERRUPT IS ENABLED. 3.8.4 bit 0: EOP "is
+ *  - EOP exists only if its interrupt is enabled. 3.8.4 bit 0: EOP "is
  *    set only if the end of operation interrupts are enabled (EOPIE=1)",
  *    and bit 1 says the same of OPERR and ERRIE - which the erase and
  *    program procedures of 3.5.3 and 3.5.4 do not mention, telling the
  *    programmer to wait on BSY instead. This file judges an operation by
  *    BSY falling and by the error flags; EOP is reported, never required.
  *
- *  - THE OPTION BYTES ARE A SECOND ENGINE with its own key, its own lock
- *    and its own start bit, and writing them ERASES AND REPROGRAMS the
- *    whole user configuration sector (3.6.2's note). RDP IS READ HERE
- *    AND NEVER WRITTEN BY ANY VERB: level 2 is irreversible and takes
+ *  - The option bytes are a second engine with its own key, its own lock
+ *    and its own start bit, and writing them erases and reprograms the
+ *    whole user configuration sector (3.6.2's note). RDP is read here
+ *    and never written by any verb: level 2 is irreversible and takes
  *    the debug port with it, and a level 1 that came from a slip costs a
  *    mass erase to undo. The one verb that does write an option -
- *    FlashOptions::protect() - reaches the register through HALF-WORD
+ *    FlashOptions::protect() - reaches the register through half-word
  *    stores to its upper half, so the RDP byte is not in the data path
  *    at all, and it refuses unless RDP reads 0xAA and PCROP is off,
  *    which is the state figure 4 makes reversible.
  *
- *  - THE OTP AREA (3.7) is 512 bytes in sixteen blocks with a lock byte
- *    each, writable once and NEVER erasable. It is memory-mapped and
+ *  - The OTP area (3.7) is 512 bytes in sixteen blocks with a lock byte
+ *    each, writable once and never erasable. It is memory-mapped and
  *    readable like any other flash; this file exposes the read and, on
  *    purpose, no write: one wrong store is permanent.
  *
- * ERRATA. Nothing in ES0206 Rev 24, ES0298 Rev 8 or ES0287 Rev 6 is
+ * Errata. Nothing in ES0206 Rev 24, ES0298 Rev 8 or ES0287 Rev 6 is
  * filed against the program/erase engine or the option bytes. Two items
- * touch the chapter from outside and both are DUAL-BANK ONLY, so
+ * touch the chapter from outside and both are dual-bank only, so
  * neither is live on a single-bank part: ES0206 2.2.15 and ES0298 2.2.12
  * (the data cache may be corrupted when a read of one bank meets a write
  * of the other - the workaround is to drop DCEN around the write and
@@ -113,22 +144,22 @@
  *    column (0 WS up to 30 MHz, one more per 30 MHz band, 5 WS at
  *    180 MHz on the F42x/F43x and F446; the F411's bands are 30, 64,
  *    90 and 100 MHz). Out of reset HCLK is 16 MHz at 0 WS;
- *  - the ORDER: to increase the frequency, program the new latency,
+ *  - the order: to increase the frequency, program the new latency,
  *    "check that the new number of wait states is taken into account
  *    by reading the FLASH_ACR register", then change the clock; to
  *    decrease it, change the clock first and the latency after (3.5.1's
  *    two sequences). set() below does the readback;
- *  - the ART ACCELERATOR (3.5.2): an instruction prefetch buffer
+ *  - the ART accelerator (3.5.2): an instruction prefetch buffer
  *    (PRFTEN), a 64-line instruction cache (ICEN) and an 8-line data
- *    cache (DCEN), all three CLEAR at reset. With them off a 5-wait-
+ *    cache (DCEN), all three clear at reset. With them off a 5-wait-
  *    state core loses most of its speed to the flash; the clock task
- *    turns all three on when it raises the rate. A cache may be RESET
+ *    turns all three on when it raises the rate. A cache may be reset
  *    (ICRST, DCRST) only while it is disabled (3.9.1);
  *  - the LATENCY field is four bits on the parts whose ladder reaches
  *    180 MHz and three on the others (FLASH_ACR_LATENCY_Msk says which;
  *    max_latency below reads it).
  *
- * The errata sheets of the three bench parts carry no item against the
+ * The three errata sheets named above carry no item against the
  * accelerator or the latency; the prefetch is therefore ON by default
  * here where the STM32G0's stratum leaves it off (that family's erratum
  * has no twin on this one).
@@ -710,7 +741,11 @@ struct Flash {
 
     /**
      * Erase the sector the manual calls `number` (3.5.3): SER, SNB, then
-     * STRT, then BSY.
+     * STRT, then BSY. Main context, the engine unlocked first; the answer
+     * is a FlashFlag mask, zero for success, and `refused` when the
+     * driver stopped before the flash was touched (no such sector on a
+     * known map, the lock standing) or when BSY never fell within
+     * wait_spins.
      *
      * THE ADDRESS IS NOT AN ARGUMENT, on purpose. The sectors of this
      * family are uneven and their numbers are not contiguous across a

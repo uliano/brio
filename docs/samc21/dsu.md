@@ -1,13 +1,60 @@
 # DSU - Device Service Unit (SAM C21)
 
-Documents of record: SAM C20/C21 data sheet DS60001479M ch. 13 - and
+This document is for a programmer who wants the chip to say what it
+is (the die, the revision the errata are keyed by), to checksum its own
+flash or any other memory in hardware, or to run a destructive memory
+self-test on a buffer it has finished with. `Dsu` is the Device Service
+Unit, a monostate (a class whose state and functions are all static,
+with no instance to create: there is one DSU) over the three services
+of the block a debug probe talks to that are also useful to the CPU.
+
+The smallest use, the second block of "How to use it" below - a
+checksum of the application image:
+
+```cpp
+Dsu::init();
+if (const auto crc = Dsu::crc32(0x0000, image_words)) { ... }
+Dsu::release();
+```
+
+Line by line: `init()` makes the block writable - its clocks, on out of
+reset anyway, and the PAC write protection it alone comes out of reset
+with, cleared - and answers false if that protection is locked;
+`crc32()` runs the engine over `image_words` 32-bit words from address
+0, waits for it, and returns the complemented result, the number a
+host-side CRC-32 of the same bytes gives, or nothing; `release()` puts
+the protection back as reset left it.
+
+What decides correctness even there. Without `init()` the block is
+write-protected and a store to its registers does nothing but raise a
+PAC flag. `crc32()` returns nothing for a range that is empty or not
+word-aligned, for a wait that ran out (bounded at 20 000 000 polls),
+and for a bus error, an address the bus matrix would not serve: a
+checksum over a bus error is not a checksum. The command interface is
+one for the CRC and MBIST and a command issued while another runs is
+discarded, so one caller at a time; the verbs spin the caller until
+the command is done and mask nothing. And `mbist()` destroys the range
+it tests, whatever the outcome, so it runs only over memory the caller
+owns and no longer needs.
+
+The page, in order: the documents of record; what the silicon does
+(the reset-time protection, the shared interface, the CRC, MBIST, the
+two address ranges, DID, the CoreSight ROM, the debug channels); the
+types and verbs; how to use it (identify, checksum, chain, test); the
+bench findings; what is not covered.
+
+## Documents of record
+
+SAM C20/C21 data sheet DS60001479M ch. 13 - and
 errata DS80000740S, which has **no DSU section**. The one item touching
 this chapter's subject matter is **1.8.15 (Device)**: the Program and
 Debug Interface Disable lock of 13.10 is not available on E/G/J silicon
 up to and including revision F, a feature this driver does not build in
 any case. Driver: `samc21/dsu.hpp`. Family fixture
 `test/family_samc21/dsu.cpp` plus two negatives under
-`brio check samc21`; the bench suite is `test_samc_debug`.
+`brio check samc21`; the bench suite is `test_samc_debug` (a letter is
+one command key of its console and the group of verdicts that key
+runs; `z` is the all-key that runs the ordinary set).
 
 The DSU is the block a debug probe talks to before the CPU is running.
 Three of its services are useful to the CPU itself, and those are what
@@ -26,7 +73,7 @@ instead. `init()` clears the protection through `samc21/pac.hpp` and
 
 **One shared command interface.** ADDR, LENGTH and DATA are shared by
 CRC32 and MBIST (13.12.1): configure them, then issue a command by one
-write to CTRL. While a command runs, further commands are DISCARDED, so
+write to CTRL. While a command runs, further commands are discarded, so
 every caller must wait for STATUSA.DONE - which the verbs do rather than
 leaving it to the caller. CTRL.SWRST is the only way to cancel one.
 
@@ -40,7 +87,7 @@ not a latched configuration (see "Bench findings").
 
 **CRC32 is the industry-standard reflected 0xEDB88320.** Seed DATA with
 0xFFFFFFFF and complement the result to match any host-side tool; pass a
-previous NON-complemented result as the seed to chain ranges. 13.12.3.2
+previous non-complemented result as the seed to chain ranges. 13.12.3.2
 requires STATUSA.BERR to be checked afterwards, and a checksum taken over
 a bus error is not a checksum.
 
@@ -54,7 +101,7 @@ instead of exiting.
 **Two address ranges.** 13.9: the first 0x100 bytes of the register map
 are mirrored at 0x100, so the silicon can tell a CPU access from a
 debugger one and restrict the latter when the device is protected by the
-NVM security bit. This driver uses the INTERNAL range throughout, which
+NVM security bit. This driver uses the internal range throughout, which
 13.12.2.3 is explicit is right for code on the CPU.
 
 **DID identifies the die**, in the fields every errata row and every

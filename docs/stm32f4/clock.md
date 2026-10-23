@@ -1,6 +1,77 @@
 # Clock - RCC, the regulator scale and the flash latency (STM32F4)
 
-Documents of record: RM0090 Rev 22 ch. 7 (RCC for the F42x/F43x; ch. 6
+This document is for a programmer who needs an STM32F4 running at a
+chosen rate, and for one whose program changes rate while it runs. The
+clock task (a task, in brio, is a driver layer with state of its own
+that a program names; this one is the type that states the rate) brings
+the chip from its reset state (HSI, the 16 MHz internal oscillator,
+undivided) to the rate the program names, in the order the manuals
+require: the regulator scale, the PLL and, where the rate needs it, the
+over-drive, the flash wait states read back, the bus prescalers, the
+switch. It is the one place the rate is stated: every driver takes the
+clock as an argument and derives its divisors from `Clock::hz` and the
+two bus rates beside it, `pclk1_hz` and `pclk2_hz`
+([design/clock.md](../design/clock.md) is the model). A static clock is
+a type; a dynamic one, `DynamicClock`, is a pack of such types the
+program switches between, with the drivers that depend on the rate
+listed so that each is told of a change.
+
+The smallest use, from the "How to use it" block below - the
+STM32F429I-DISC1's line, then the tag and `init()` first thing in
+`main()`:
+
+```cpp
+// The STM32F429I-DISC1: its 8 MHz crystal X3.
+using SysClock = brio::Clock<brio::ClockSource::pll_hse, 180'000'000, 8'000'000>;
+
+constexpr SysClock clock;
+const bool clock_ok = SysClock::init();   // false: a root did not come up - see the CLK verb
+```
+
+Line by line: `SysClock` names the rate as a type - the PLL fed by the
+HSE (`pll_hse`), 180 MHz out of it, the HSE an 8 MHz root, and the
+fourth argument at its default, a crystal (`HseMode::bypass` for a
+clock driven into OSC_IN, as the Nucleo-F446RE's line says); the PLL's
+ratio, the regulator scale, the over-drive, the wait states and the two
+APB dividers are all computed from those arguments when the program is
+compiled. `clock` is an empty tag object of that type, the argument
+every driver's `init(clock, ...)` takes to read the rate. `init()`
+performs the sequence and answers whether it took; `CLK` in the comment
+is the console's command that prints the tree as the registers hold it.
+
+What decides correctness even there. `init()` runs before any driver's
+own initialization: a driver's divisor is computed from the rate the
+clock type claims and not read from the hardware, so a driver
+initialized while the chip is still at its 16 MHz reset rate is wrong by
+the ratio of the two rates, and nothing refuses it. The answer is read:
+`false` means a root did not report ready or a readback did not agree,
+the tree is left where it stopped, and the program is not at the rate
+its type says - measured on the STM32F429I-DISC1, where a bypass line
+never sees HSERDY and a program that ignores the `false` runs on the
+HSI with a console divisor meant for 90 MHz ("Bench findings" below).
+The arguments must say what the board really has: the HSE's rate and
+whether it is a crystal or a bypassed clock are board facts the compiler
+cannot check, while a rate outside the datasheets' windows, a PLL ratio
+with no exact solution, a rate above the part's ceiling and any rate
+above 16 MHz on a part whose ladder was not read are compile errors.
+`init()` is written for the reset state and called once; it waits for
+each ready flag with a bound (`Rcc::ready_spins`, a million polls) and
+never masks interrupts. A USB program needs a rate whose PLL gives
+48 MHz on its Q output (`usb_hz`), which 180 MHz does not. On a dynamic
+clock the prerequisite is the list of users: a driver on a moving clock
+that is not listed does not compile, and a timer refuses a dynamic
+clock altogether ([tim.md](tim.md)).
+
+The rest of this page, in order: the documents of record; what the
+silicon does (the clock model with its bus ceilings, the way up, the
+ladders, the PLL's constraints, the enables' readback, the reset state,
+the way down as a park); the types and verbs; how to use it, static and
+dynamic; the bench findings, with the dynamic clock walked and the ART
+accelerator's switches timed; and what is not covered.
+
+## Documents of record
+
+RM0090 Rev 22 ch. 7 (RCC for the F42x/F43x; ch. 6
 is the F405 class's twin), 5.1.4 (the regulator's scales and
 over-drive) and 3.5.1 (the wait states, table 12); RM0390 Rev 6 ch. 6,
 5.1.4 and 3.4.1 (table 5) for the F446; RM0383 Rev 4 ch. 6, 5.1.4 and
@@ -27,11 +98,11 @@ static clock and `test_stm32f4_power` letter f for the dynamic one.
 **The STM32G0's model, with the prescalers no longer pinned.** One
 SYSCLK from HSI (16 MHz), HSE (a crystal of 4..26 MHz or a bypassed
 clock of 1..50 MHz) or the main PLL; shared prescalers below it - HPRE
-for AHB, PPRE1 and PPRE2 for the two APBs - and an ENABLE BIT per
+for AHB, PPRE1 and PPRE2 for the two APBs - and an enable bit per
 peripheral in AHB1ENR/AHB2ENR/AHB3ENR/APB1ENR/APB2ENR that gates its
 bus clock (a peripheral whose bit is clear does not answer). What the
 G0 stratum could do and this one cannot is run every bus at SYSCLK: the
-APBs have CEILINGS - 45 and 90 MHz on the F42x/F43x and F446, 42 and 84
+APBs have ceilings - 45 and 90 MHz on the F42x/F43x and F446, 42 and 84
 on the F405 class, 50 and 100 on the F411 (RM0090 7.3.3's cautions and
 their twins) - and a core at 180 MHz cannot feed them undivided. So
 `Clock::hz` is SYSCLK = HCLK (HPRE stays 1), and beside it the task
@@ -43,24 +114,25 @@ USART's divisor divides its bus clock, not SYSCLK - and what crosses
 the util contract is unchanged: `clock_hz(clock)` is HCLK.
 
 **The way up is a sequence the manuals spell out**, and the task
-follows it literally (RM0090 5.1.4, 3.5.1, 7.3.3): the REGULATOR SCALE
+follows it literally (RM0090 5.1.4, 3.5.1, 7.3.3): the regulator scale
 (PWR_CR.VOS) for the target rate is written while the PLL is off and
 SYSCLK is HSI - the reset state - and takes effect when the PLL turns
-on; the PLL is configured and started; where the rate needs OVER-DRIVE
+on; the PLL is configured and started; where the rate needs over-drive
 (above 168 MHz on the parts that have it) the pair is sequenced
 between the PLL's start and the switch to it - ODEN then ODRDY, ODSWEN
 then ODSWRDY, the system stalled during the switch, no peripheral clock
-yet enabled; the FLASH LATENCY for the target HCLK is written and READ
-BACK (3.5.1: "check that the new number of wait states is taken into
+yet enabled; the flash latency for the target HCLK is written and read
+back (3.5.1: "check that the new number of wait states is taken into
 account"), the ART accelerator turned on; the APB prescalers written;
 the PLL waited for; the switch, and SWS read back. Entering Stop
-disables both the PLL and the over-drive - the power chapter's to
-restore.
+disables both the PLL and the over-drive, and the sleep sites of
+[pwr.md](pwr.md) put the rate back after the wake (a static `Clock`'s
+`init()` run again, or `DynamicClock::restore()`).
 
 **The ladders are the part class's.** Scale 3 up to 120 MHz, scale 2 up
 to 144 (168 in over-drive), scale 1 up to 168 (180 in over-drive) on
 the F42x/F43x and the F446; scale 2 up to 144, scale 1 up to 168 with
-ONE VOS bit and no over-drive on the F405 class; scale 3 up to 64,
+one VOS bit and no over-drive on the F405 class; scale 3 up to 64,
 scale 2 up to 84, scale 1 up to 100 and no over-drive on the F411. The
 wait states at 2.7..3.6 V: one per 30 MHz band up to 5 at 150..180 on
 the 180 MHz parts (RM0090 table 12), the F411's bands 30, 64, 90 and
@@ -73,7 +145,7 @@ columns are declared and not carried: the boards run at 3.3 V.
 **The PLL's constraints** (7.3.2): the input divided by M in 1..2 MHz
 (2 MHz "to limit PLL jitter"), the VCO in 100..432 MHz, N in 50..432, P
 in {2, 4, 6, 8}, Q in 2..15 for the 48 MHz domain (USB OTG FS, SDIO,
-the RNG). The task searches an EXACT ratio at compile time - smallest
+the RNG). The task searches an exact ratio at compile time - smallest
 M first, the largest legal input - and Q as the smallest divider
 keeping VCO / Q at or below 48 MHz: 8 MHz x 180 / 4 / 2 = 180 MHz with
 Q 8 (45 MHz - a USB program takes 168 MHz, whose VCO of 336 gives
@@ -94,7 +166,7 @@ reset values differ by class). A rate at or below 16 MHz needs none of
 the ladder: `Clock<hsi, 16 MHz>` compiles on every header and writes
 nothing but the accelerator's enables.
 
-**And the way DOWN is not the way up backwards - it is a park.** The
+**And the way down is not the way up backwards - it is a park.** The
 manuals give two orderings (3.5.1: the flash latency first on the way
 up, last on the way down; 5.1.4: the scale up before the rate and down
 after it), and on this family they collapse into one, because three
@@ -103,10 +175,10 @@ only when the PLL is disabled" (7.3.2), the regulator scale "can be
 modified only when the PLL is OFF and the HSI or HSE clock source is
 selected as system clock source" (5.1.4), and ODEN and ODSWEN are
 writable only "when the HSI or HSE is selected as system clock". So a
-switch between any two PLL rates HAS to pass through a root - the
+switch between any two PLL rates has to pass through a root - the
 `DynamicClock` below parks on the HSI, stops the PLL and leaves
 over-drive - and after the park the machine is at 16 MHz, so everything
-that follows is a RISE and the rising order is the only one needed. The
+that follows is a rise and the rising order is the only one needed. The
 park is what a switch costs, and it is measured.
 
 ## Types and verbs
@@ -125,6 +197,21 @@ park is what a switch costs, and it is measured.
   exists), `apb1_clock`, `apb2_clock`, each with its readback, and the
   reset pulses `ahb1_reset`, `ahb2_reset`, `ahb3_reset`, `apb1_reset`,
   `apb2_reset`. `ready_spins` bounds every wait.
+- `Rcc`'s verbs for what is not a SYSCLK root, which other chapters
+  call: the LSI (`lsi_enable`/`lsi_enabled`/`lsi_ready`/
+  `lsi_wait_ready`, in RCC_CSR beside the reset flags - the watchdog's
+  and the RTC's oscillator); the audio PLL (`plli2s_enable`/
+  `plli2s_ready`/`plli2s_wait`, `plli2s_configure(PllI2sConfig)`,
+  `plli2s_config`, `pll_m`, `i2s_source(I2sSource, on_apb2)`, with
+  `plli2s_config_for`; [spi.md](spi.md)'s I2S face); the third PLL and
+  the pixel clock (`pllsai_enable`/`pllsai_ready`/`pllsai_wait`,
+  `pllsai_configure(PllSaiConfig)`, `pllsai_config`,
+  `lcd_clock_divider(LcdClockDivider)`, with `lcd_clock_config_for`;
+  [ltdc.md](ltdc.md)); FMPI2C1's kernel-clock select
+  (`fmpi2c_kernel_clock(code)`, [fmpi2c.md](fmpi2c.md)); RCC_DCKCFGR's
+  TIMPRE (`timpre(on)`/`timpre()`, whose meaning for an instance is
+  [tim.md](tim.md)'s `tim_clock_hz()`). Each answers false, or writes
+  nothing, on a part whose header declares no such field.
 - `PllConfig{m, n, p, q, from_hse}`; `pll_config_for(src_hz, out_hz,
   from_hse)` (m == 0 for none); `apb_divider_for(hclk, ceiling)`,
   `ppre_code(div)`; `RateRegime{known, scale, over_drive}` and
@@ -308,9 +395,11 @@ ten runs of ten.
 
 Driver gaps:
 - The AHB prescaler (HPRE other than 1), LSI and LSE as roots or as
-  anything (the RTC chapter's), the I2S and SAI PLLs (PLLI2S, PLLSAI -
-  the audio and LTDC chapters'), the F446's PLLR output, DCKCFGR's
-  timer prescaler rule (the timer chapter states `TIMPRE`), the RTC
+  anything (the RTC chapter's; the LSI's verbs are `Rcc`'s, above, and
+  the LSE's are [rtc.md](rtc.md)'s), the I2S and SAI PLLs (PLLI2S,
+  PLLSAI - the audio and LTDC chapters', whose verbs are `Rcc`'s,
+  above), the F446's PLLR output, DCKCFGR's timer prescaler rule (the
+  timer chapter states `TIMPRE`; `Rcc::timpre()` writes the bit), the RTC
   prescaler in CFGR, MCO on a pad (the verbs write CFGR; the pads are
   the caller's and nothing measures the output), the CSS interrupt,
   the RCC interrupt register, the sleep-mode enables (AHBxLPENR,
@@ -320,12 +409,16 @@ Driver gaps:
   reserve) and the five part classes whose manuals are not on the desk
   ([README.md](README.md)).
 - HSI trimming (RCC_CR.HSITRIM): born with a ruler to trim against.
-- The Q output on a wire: `usb_hz` is arithmetic until the USB
-  chapter's controller enumerates on it.
+- The Q output on a wire: `usb_hz` is arithmetic here; the USB
+  chapter's controller enumerates on it at 168 MHz, which is its
+  measurement ([usb.md](usb.md)).
 
 Implemented, not bench-verified: `Rcc::css`, `mco1`/`mco2` (no pad
 driven, no counter on the other end), `ahb2_clock`/`ahb3_clock` and the
-reset pulses (no driver on those buses yet), the one-bit VOS path of
+reset pulses (no letter of this chapter judges them; the drivers on
+those buses - [rng.md](rng.md), [fmc.md](fmc.md),
+[quadspi.md](quadspi.md) - call them under their own suites), the
+one-bit VOS path of
 the F405 class (compiled on its headers, no board), and `Clock<hse>`
 undivided at run time (compiled everywhere, never flashed - the boards
 run the PLL or the HSI). Scale 2 and the PLL from the HSI are measured

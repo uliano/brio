@@ -1,6 +1,45 @@
 # CRC calculation unit (STM32F4)
 
-Documents of record: RM0390 Rev 6 ch. 4 (RM0090 Rev 22 ch. 4 and RM0383
+This document is for a programmer who needs a 32-bit checksum over a
+block of memory - a firmware image, a record before it is stored, a
+frame before it is sent - computed by the hardware instead of a software
+loop. The STM32F4's CRC unit computes one function only, the CRC-32
+with the Ethernet polynomial in the form catalogued as CRC-32/MPEG-2,
+a 32-bit word at a time. `Crc` is the driver: a monostate (a class with
+only static members and no objects, standing for the one unit the chip
+has) with one verb per thing the unit does, and the same function in
+software sits beside it in `util/crc.hpp`, to compute a constant at
+compile time or to judge the silicon.
+
+The smallest use, the first block of "How to use it" below:
+
+```cpp
+brio::Crc::init();                                  // the gate, then a reset
+const uint32_t sum = brio::Crc::compute(words, count);
+```
+
+Line by line: `init()` opens the unit's clock gate on AHB1 and puts the
+calculator at its initial value, once before the first checksum;
+`compute()` resets the calculator, feeds it `count` 32-bit words from
+`words` in order and returns the result. Nothing waits but the reset
+(below), nothing is masked, and the words are read during the call
+only.
+
+What decides correctness even there. The unit takes words, not bytes:
+a byte stream is packed four bytes to a word by the caller, most
+significant first (`word_be`, `feed_bytes`) for the result to be the
+stream's CRC-32/MPEG-2, and a length that is not a multiple of four is
+the caller's to pad. The unit's reset lands one read late, so a word
+fed straight after it would be lost; `reset()`, which `compute()` and
+`init()` call, waits for it (a bounded wait, "What the silicon does"
+below). And there is one unit holding one running result, with no
+guard: a program that checksums from an interrupt handler and from the
+loop at once corrupts both answers, with no flag to show it ("Types and
+verbs" below).
+
+## Documents of record
+
+RM0390 Rev 6 ch. 4 (RM0090 Rev 22 ch. 4 and RM0383
 Rev 4 ch. 3 are the same three registers under the same names); no item
 of ES0206 Rev 24, ES0298 Rev 8 or ES0287 Rev 6 is filed against this
 block. Driver: `stm32f4/crc.hpp` (`Crc`, and `word_be`, the packing
@@ -25,7 +64,7 @@ no reflection, no final inversion. `crc32_ethernet()` (`util/crc.hpp`)
 is that function in constexpr C++ and the bench letter is the two
 agreeing.
 
-**The data register IS the operation.** A write to CRC_DR feeds a 32-bit
+**The data register is the operation.** A write to CRC_DR feeds a 32-bit
 word into the calculator; a read returns the running result. There is no
 start bit and no ready flag, because "the write operation is stalled
 until the end of the CRC computation" (4.3) - back-to-back writes, and a
@@ -37,18 +76,18 @@ middle, and continued.
 explicit that the computation "is done on the whole 32-bit data word, and
 not byte per byte", and 4.4 that the registers "have to be accessed by
 words (32 bits)" - this version of the block has no byte or half-word
-access to CRC_DR. So a BYTE STREAM has no direct answer here: the caller
+access to CRC_DR. So a byte stream has no direct answer here: the caller
 packs four bytes into a word, and packing them most-significant-first
 (`word_be`) is what makes the unit's result equal CRC-32/MPEG-2 over
 those bytes in that order. A stream whose length is not a multiple of
 four is the caller's to pad, and the padding is part of what the
 checksum means.
 
-**THE RESET IS NOT INSTANT, and the chapter does not say so.** CRC_CR
+**The reset is not instant, and the chapter does not say so.** CRC_CR
 has one bit, RESET, write-only and self-clearing, which puts CRC_DR back
 to 0xFFFFFFFF (4.4.3). Measured (letter `a`): a read of CRC_DR in the
-instruction after the store still returns the OLD running value, and a
-word FED in the instruction after the store is SWALLOWED - the write
+instruction after the store still returns the old running value, and a
+word fed in the instruction after the store is swallowed - the write
 goes nowhere and no flag says so. 4.3's stall covers a computation and
 not this. `Crc::reset()` therefore waits for the initial value to appear
 before it returns, and returns how many extra reads that took.
@@ -63,7 +102,7 @@ header wins in code, and the bench measures that the byte store sticks.
 **No interrupt, no DMA request, no event.** The chapter has no enable
 register, no part of the family has a CRC vector and no DMA request line
 is mapped to this block. A bulk checksum is a loop of stores. What a DMA
-stream CAN do is memory-to-memory into CRC_DR with the destination
+stream can do is memory-to-memory into CRC_DR with the destination
 address not incremented - that is the DMA chapter's arrangement and
 needs nothing from this file.
 

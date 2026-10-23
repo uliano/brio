@@ -3,21 +3,40 @@
  *
  * The SAM C21 32.768 kHz oscillators controller (DS60001479M ch. 21):
  * the three slow clock roots, the one register that chooses the RTC's
- * clock, and the crystal's failure detector.
+ * clock, and the crystal's failure detector - what a program uses for a
+ * slow clock that a generator, the RTC or a standby can run on. The
+ * smallest use starts OSC32K with its production trim and gives it to a
+ * generator (docs/samc21/osc32kctrl.md, "How to use it"):
  *
- *   Osc32kctrl   the BLOCK - status, the three interrupt sources, and
+ *   Osc32k::init(Osc32kConfig{.calib = Osc32k::factory_calib(),
+ *                             .enable_32k = true});
+ *   Gclk<5>::configure(GclkConfig{.source = GclkSource::osc32k});
+ *
+ * Who calls what. Every verb is a setup verb with no guard of its own,
+ * for main or one active object's handler (an active object is a brio
+ * component with its own event queue, served one event at a time by
+ * the kernel); nothing here masks interrupts. The two init()s and
+ * retrim() wait for the oscillator's ready flag, bounded (2 000 000
+ * polls for OSC32K, 40 000 000 for a crystal), and answer false when it
+ * never rose; they and Osculp32k::calib(value) answer false and write
+ * nothing for an impossible configuration or a locked oscillator. isr() is the
+ * body the program's SYSTEM_Handler calls beside the other blocks on
+ * IRQ 0. The block's bus clock is on out of reset and nothing here
+ * touches it.
+ *
+ *   Osc32kctrl   the block - status, the three interrupt sources, and
  *                RTCCTRL, which is where the RTC's clock is chosen even
  *                though the RTC lives in another chapter.
  *   Osculp32k    the ultra-low-power RC: always running, never
  *                configured, only trimmed.
- *   Osc32k       the accurate internal RC: OFF at reset, and it must be
+ *   Osc32k       the accurate internal RC: off at reset, and it must be
  *                given its factory trim by hand before it means
  *                anything.
  *   Xosc32k      the external crystal, with the clock-failure detector
  *                that can switch away from it on its own.
  *
- * THE FACT THAT MOST NEEDS SAYING: OSC32K IS NOT CALIBRATED UNTIL
- * SOFTWARE CALIBRATES IT. 21.5.9 is blunt - "the OSC32K calibration
+ * The fact that most needs saying: OSC32K is not calibrated until
+ * software calibrates it. 21.5.9 is blunt - "the OSC32K calibration
  * value from the production test MUST be loaded from the NVM Software
  * Calibration Area into the OSC32K register (OSC32K.CALIB) by software
  * to achieve specified accuracy" - so an OSC32K enabled straight out of
@@ -26,45 +45,49 @@
  * below exists rather than leaving each caller to remember. The bench
  * suite measures both settings, and the difference is not small.
  *
- * FOUR MORE RULES OF THIS CHAPTER, each with code behind it.
+ * Four more rules of this chapter, each with code behind it.
  *
- * 1. AN OSCILLATOR'S OUTPUT IS SEPARATE FROM THE OSCILLATOR. EN32K and
+ * 1. An oscillator's output is separate from the oscillator. EN32K and
  *    EN1K gate the two outputs, and 21.6.4 requires the one a consumer
- *    wants to be enabled BEFORE the GCLK or the RTC is pointed at it.
+ *    wants to be enabled before the GCLK or the RTC is pointed at it.
  *    An enabled oscillator with both outputs off is a clock nobody can
  *    reach - a silent failure this driver refuses to let happen by
  *    accident.
  *
- * 2. CALIB IS COMMITTED ON READY. "When writing the calibration bits,
+ * 2. CALIB is committed on ready. "When writing the calibration bits,
  *    the user must wait for the STATUS.OSC32KRDY bit to go high before
  *    the new value is committed to the oscillator" (21.6.4), so writing
- *    the trim and immediately measuring reads the OLD frequency.
+ *    the trim and immediately measuring reads the old frequency.
  *
- * 3. WRTLOCK IS ONE-WAY UNTIL A POWER-ON RESET, on both internal
+ * 3. WRTLOCK is one-way until a power-on reset, on both internal
  *    oscillators. Not a watchdog-style hazard - the worst it does is
  *    freeze a working configuration - but a locked oscillator cannot be
  *    reconfigured by anything short of unplugging the board, so every
  *    configuring verb here checks first and refuses rather than writing
  *    into a lock.
  *
- * 4. THE RTC'S CLOCK IS CHOSEN HERE, NOT IN THE RTC. RTCCTRL.RTCSEL
+ * 4. The RTC's clock is chosen here, not in the RTC. RTCCTRL.RTCSEL
  *    picks among all six oscillator outputs, and 21.6.7 asks for the RTC
  *    to be disabled before the selection changes. This header owns the
- *    register; the ordering is samc21/rtc.hpp's to keep.
+ *    register; samc21/rtc.hpp states the ordering as its caller's
+ *    obligation.
  *
- * ERRATA: NEITHER ITEM TOUCHING THIS CHAPTER APPLIES TO THIS SILICON,
+ * Errata: neither item touching this chapter applies to this silicon,
  * and both are the kind that a careless read of the matrix would apply
  * anyway. 1.1.1 (the CFD's automatic switch does not work when XOSC32K
- * is requested by the GCLK) is marked for E/G/J revision B ONLY, and
+ * is requested by the GCLK) is marked for E/G/J revision B only, and
  * this chip is rev F. 1.22.1 (the CFD cannot switch to the safe clock
  * when the input is stuck high) is marked only in the N-family row -
  * the same trap dmac.md records for the DMAC items: read the row, not
  * the column.
  *
- * NOT BUILT (docs/samc21/osc32kctrl.md carries the list): the CFD's event
- * output (EVCTRL.CFDEO); and XOSC32K itself is written and
- * family-compiled and has not run on silicon - it wants a board with a
- * 32 kHz crystal.
+ * Not built (docs/samc21/osc32kctrl.md carries the list): the CFD's event
+ * output (EVCTRL.CFDEO). XOSC32K's start and its frequency have run on a
+ * board that carries the 32 kHz crystal, and its absence is a false
+ * return on one that does not (docs/samc21/osc32kctrl.md, "Bench
+ * findings"); the rest of it - the startup codes other than 0, the
+ * external-clock mode, the failure detector - is written and
+ * family-compiled and has not run on silicon.
  */
 
 #pragma once
@@ -272,8 +295,9 @@ struct Osc32k {
      * committed to the oscillator when STATUS.OSC32KRDY goes high, so a
      * caller that measures before this returns measures the old trim.
      *
-     * False - and nothing written - for an impossible configuration, a
-     * locked oscillator, or a ready flag that never came.
+     * False - and nothing written - for an impossible configuration or a
+     * locked oscillator; false after the write for a ready flag that
+     * never came.
      */
     static bool init(const Osc32kConfig& cfg, uint32_t spins = 2'000'000UL) {
         if (!config_valid(cfg) || locked()) {

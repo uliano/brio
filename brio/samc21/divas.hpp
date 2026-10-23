@@ -4,85 +4,98 @@
  * The SAM C21 Divide and Square Root Accelerator (DS60001479M ch. 14):
  * a 32-bit signed/unsigned integer divider and a 32-bit unsigned square
  * root engine, sitting on the bus matrix because the Cortex-M0+ core has
- * neither.
+ * neither. The smallest use (docs/samc21/divas.md, "How to use it"):
  *
- * WHY IT IS INTERESTING AND WHY IT IS ONLY A DRIVER. Every `a / b` in
+ *     Divas::configure(false);                       // once: unsigned
+ *     const auto r = Divas::divide_unsigned(n, d);   // r.result, r.remainder
+ *
+ * Who calls what. Every verb is a few stores and loads with no guard and
+ * nothing masked. The engine has one set of operand registers, so one
+ * context divides at a time: a division started in an interrupt handler
+ * between another's two operand writes corrupts both. On the default AHB
+ * path the RESULT read waits for the engine in hardware; on the IOBUS
+ * path the operation verbs poll STATUS.BUSY with no bound, and
+ * wait_idle() is the bounded poll (0xFFFF reads). The bus clock is on out
+ * of reset, so nothing needs opening first.
+ *
+ * Why it is interesting and why it is only a driver. Every `a / b` in
  * C++ on this core is a call to `__aeabi_uidiv` or `__aeabi_idiv` - a
  * software routine in libgcc - and this block does the same work in 2 to
  * 16 cycles with no code. The tempting next step is to make the
- * TOOLCHAIN use it (gcc lets `__aeabi_uidiv` be overridden), and THAT
- * STEP IS DELIBERATELY NOT TAKEN HERE. It is a whole-image decision with
+ * toolchain use it (gcc lets `__aeabi_uidiv` be overridden), and that
+ * step is deliberately not taken here. It is a whole-image decision with
  * consequences this header cannot own: the routines would have to be
- * re-entrant against interrupts (the block has ONE set of operand
+ * re-entrant against interrupts (the block has one set of operand
  * registers), the block would have to be clocked and idle at every point
  * a division can happen including before main(), and the win has to be
- * real. So this driver EXPOSES and MEASURES; docs/samc21/divas.md carries
+ * real. So this driver exposes and measures; docs/samc21/divas.md carries
  * the measured cycle counts as the input to that decision and names it
  * as open.
  *
- * WHAT THE SILICON DOES.
+ * What the silicon does.
  *
- * THE OPERATION STARTS ON THE OPERAND WRITE. Writing DIVIDEND does
+ * The operation starts on the operand write. Writing DIVIDEND does
  * nothing; writing DIVISOR starts a division, writing SQRNUM starts a
  * square root (14.6.2.2). There is no start bit and no command register
  * - which is also why the order of the two operand writes is not a
  * convention but a requirement.
  *
- * TWO BUSES, AND THE DIFFERENCE MATTERS. The block answers at
- * 0x48000000 on the high-speed bus AND at 0x60000200 on the CPU's local
+ * Two buses, and the difference matters. The block answers at
+ * 0x48000000 on the high-speed bus and at 0x60000200 on the CPU's local
  * single-cycle IOBUS. On the AHB path a read of RESULT while the engine
- * is busy INSERTS WAIT STATES and returns the right answer, so no
- * polling is needed; the IOBUS cannot wait, so a caller there MUST poll
+ * is busy inserts wait states and returns the right answer, so no
+ * polling is needed; the IOBUS cannot wait, so a caller there must poll
  * STATUS.BUSY first or read a stale result (14.5.10). Both are built,
  * `DivasBus` selects, and the AHB is the default because it is the one
  * that cannot be got wrong.
  *
- * THE IOBUS ADDRESS COMES FROM THE DATA SHEET, NOT THE HEADER. The device
+ * The IOBUS address comes from the data sheet, not the header. The device
  * header defines DIVAS at 0x48000000 and says nothing about the IOBUS
  * alias; the memory map (9.2, table 9-1) and the product mapping (figure
  * 8-3) both put the IOBUS region at 0x60000000 with PORT at its base and
  * DIVAS at +0x200. This is the CCL's `LutInput::tcc` situation again and
- * it takes the same rule: THE HEADER WINS WHERE BOTH DOCUMENTS SPEAK, and
- * where the header is SILENT the datasheet is spelled out and the bench
+ * it takes the same rule: the header wins where both documents speak, and
+ * where the header is silent the datasheet is spelled out and the bench
  * arbitrates. It does - measured, the same quotients come back through
  * both paths.
  *
- * WRITING AN OPERAND WHILE BUSY IS AN ERROR. 14.5.8 write-protects
+ * Writing an operand while busy is an error. 14.5.8 write-protects
  * CTRLA, DIVIDEND, DIVISOR and SQRNUM for the duration of an operation
  * and says an access "will result in an error" without saying where the
  * error appears; the PAC's INTFLAGAHB has a DIVAS bit (11.7.5) and that
- * is the only candidate. The verbs here DO NOT poll before writing,
+ * is the only candidate. The verbs here do not poll before writing,
  * because the chapter's own flow does not and because a poll would cost
  * more than the division: a CPU cannot issue two stores faster than the
  * engine finishes. `wait_idle()` exists for a caller who wants the
  * guarantee, and the bench measures whether a back-to-back sequence
  * raises the flag.
  *
- * DIVIDE BY ZERO IS NOT A FAULT. 14.6.2.5: the quotient comes back zero,
+ * Divide by zero is not a fault. 14.6.2.5: the quotient comes back zero,
  * the remainder comes back equal to the dividend, and STATUS.DBZ is set
- * and stays set until written back. Nothing traps. `divide()` therefore
- * returns a result like any other and the caller reads `divide_by_zero()`
- * - the same shape the silicon has, rather than an optional that would
- * hide the remainder the chapter promises.
+ * and stays set until written back. Nothing traps. `divide_unsigned()`
+ * and `divide_signed()` therefore return a result like any other and
+ * the caller reads `divide_by_zero()` - the same shape the silicon has,
+ * rather than an optional that would hide the remainder the chapter
+ * promises.
  *
- * THE SIGNED OVERFLOW HAS NO INDICATION EITHER. 14.6.2.4: the most
+ * The signed overflow has no indication either. 14.6.2.4: the most
  * negative number divided by minus one overflows the signed range and
  * "will return the maximum negative number with no indication of the
  * overflow". Stated here because it cannot be enforced.
  *
- * LEADING-ZERO OPTIMIZATION IS ON BY DEFAULT AND COSTS DETERMINISM.
+ * Leading-zero optimization is on by default and costs determinism.
  * CTRLA.DLZ = 0 lets the engine skip leading zeros of the dividend, so a
  * division takes 2 to 16 cycles depending on the operands; DLZ = 1
  * forces every 32-bit division to 16. Which one a program wants is a
  * real choice and both are exposed.
  *
- * NO INTERRUPT, NO EVENTS, NO DMA, AND NO SLEEP. 14.5.4/5/6 are all
+ * No interrupt, no events, no DMA, and no sleep. 14.5.4/5/6 are all
  * "Not applicable", and 14.5.2 is blunter than any other chapter in this
  * family: "The DIVAS will not operate in any sleep mode."
  *
- * NO ERRATA. DS80000740S has no DIVAS section.
+ * No errata. DS80000740S has no DIVAS section.
  *
- * NOT BUILT (docs/samc21/divas.md carries the list): adopting the block as
+ * Not built (docs/samc21/divas.md carries the list): adopting the block as
  * the toolchain's division, for the reasons above; and 16-bit operation,
  * which the chapter mentions in its cycle counts (14.6.2.6) without ever
  * giving it a register - the operands are one 32-bit width and the

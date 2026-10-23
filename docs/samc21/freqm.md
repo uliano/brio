@@ -1,11 +1,64 @@
 # FREQM - Frequency Meter (SAM C21)
 
-Documents of record: SAM C20/C21 data sheet DS60001479M ch. 44 - and
+This document is for a programmer who needs to know how fast a clock
+really runs: an internal RC against a crystal, a 32 kHz oscillator, the
+DPLL's output. The frequency meter counts the periods of one generic
+clock during a number of periods of another, in hardware, so the answer
+is a ratio of two generators. `Freqm` is the block, a monostate (a
+class whose state and functions are all static, with no instance to
+create: there is one meter).
+
+The smallest use, the first block of "How to use it" below - the main
+clock measured against OSCULP32K:
+
+```cpp
+Gclk<5>::configure(GclkConfig{.source = GclkSource::osculp32k});
+
+const uint8_t refnum = Freqm::refnum_for(48'000'000 / 32768);
+Freqm::init(FreqmConfig{.measured_generator = 0,
+                        .reference_generator = 5,
+                        .refnum = refnum});
+if (auto count = Freqm::measure()) {
+    const uint32_t hz = Freqm::to_hz(*count, 32768, refnum);
+}
+Freqm::release();
+```
+
+Line by line: generator 5 is sourced from OSCULP32K
+([clock.md](clock.md)), the slow clock the measurement is timed
+against; `refnum_for()` picks the longest window - the number of
+reference periods, 1..255 - whose count still fits the 24-bit result
+for the expected ratio; `init()` opens the block's bus clock, points
+its two generic clock channels at generator 0 (the CPU's) and
+generator 5, resets the block, writes the window and enables it;
+`measure()` starts one measurement, waits for it, bounded (20 000 000
+polls), and returns the count, or nothing on an overflow or a wait
+that never ended; `to_hz()` turns the count into hertz against the
+reference rate the caller names; `release()` hands everything back.
+
+What decides correctness even there. The reference is the slower of
+the two clocks: with a faster one the count is zero, which reads the
+same as a stopped clock, and nothing refuses it. The answer is a
+ratio, only as good as the reference rate the caller passes - 32768 Hz
+nominal here, where OSCULP32K measures some per mille off it (below).
+`init()` answers false for a configuration it refuses (a zero window,
+a generator that does not exist, one generator as both clocks, the
+reference divider the silicon does not have) or a synchronization that
+never completed. Every verb is a setup verb for main or one active
+object's handler (an active object is a component of a brio program
+with its own event queue, served one event at a time by the kernel),
+and `measure()` holds its caller for the whole window: REFNUM
+reference periods, about 7.8 ms at 255 periods of 32 kHz.
+
+## Documents of record
+
+SAM C20/C21 data sheet DS60001479M ch. 44 - and
 errata DS80000740S item **1.24.1, live on every silicon revision
 including this one, with no workaround offered**. Driver:
 `samc21/freqm.hpp`. Family fixture `test/family_samc21/freqm.cpp` plus one
 negative under `brio check samc21`; the bench suite is
-`test_samc_freqm`.
+`test_samc_freqm` (a suite's letter, cited below, is one command key of
+its console and the group of verdicts that key runs).
 
 The AVR DA/DB has no counterpart: there a clock is measured by counting
 its edges in a timer with the CPU in the loop. This block does it in
@@ -23,8 +76,8 @@ REFNUM periods of the reference clock and leaves the count in VALUE
 
 Both clocks are generic clock channels of their own - GCLK_FREQM_MSR is
 channel 3, GCLK_FREQM_REF channel 4 - so what gets measured, and against
-what, is a GCLK routing question. The driver therefore takes GENERATOR
-NUMBERS, not sources: anything a generator can be pointed at is
+what, is a GCLK routing question. The driver therefore takes generator
+numbers, not sources: anything a generator can be pointed at is
 something this can measure.
 
 **The reference must be slower than the measured clock.** The chapter
@@ -56,7 +109,7 @@ would silently do nothing.
 measured periods over a whole number of reference periods, so the
 granularity is about f_msr/VALUE. The reference's own accuracy is a
 separate matter and counting longer does not improve it: this block
-measures a RATIO, and the absolute number it becomes is only ever as
+measures a ratio, and the absolute number it becomes is only ever as
 good as the f_ref the caller names.
 
 ## Types and verbs

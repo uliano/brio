@@ -1,12 +1,66 @@
 # EVSYS - the Event System (SAM C21)
 
-Documents of record: SAM C20/C21 data sheet DS60001479M ch. 29 - and
+This document is for a programmer who wants one peripheral to act on
+another's signal with no CPU in the path: a pin edge starting a
+conversion, a timer's compare moving a pad, a comparator's flip counted
+by a timer. The event system carries such signals - events - from a
+generator to one or more users over twelve channels. `Evsys` is the
+fabric, a monostate (a class whose state and functions are all static,
+with no instance to create: there is one event system); it routes
+channels, users, paths and edges, while each peripheral's own driver
+publishes the generator codes it offers and the user index it consumes.
+
+The smallest use, the first block of "How to use it" below - an event
+routed to a peripheral:
+
+```cpp
+Evsys::bus_clock(true);
+GclkChannel::connect(Evsys::gclk_id(0), /* generator */ 5);   // clocked paths only
+Evsys::connect(/* user */ 5, /* channel */ 0, EventChannelConfig{
+    .generator = some_peripheral_generator_code,
+    .path = EventPath::synchronous,
+    .edge = EventEdge::rising,
+});
+```
+
+Line by line: `bus_clock(true)` opens the event system's bus clock,
+which is off out of reset (the device header's MCLK_APBCMASK reset
+value is 0); `GclkChannel::connect()` gives channel 0 its own generic
+clock, here from generator 5 ([clock.md](clock.md)), which only the
+two clocked paths need; `Evsys::connect()` points user 5 at channel 0
+and then writes the channel's configuration - the generator code the
+generating peripheral's driver publishes, the path, and the edge the
+channel detects. Every verb here is a plain store, a setup verb with
+nothing to wait for and nothing masked, and `trigger()`, the software
+event, is one store into a write-only register.
+
+What decides correctness even there. The user is written before the
+channel, which is why `connect()` takes both. The path decides the
+edge both ways - an asynchronous channel takes no edge, a synchronous
+or resynchronized one must have one - and a synchronous channel keeps
+ONDEMAND set (erratum 1.12.1): `connect()` and `configure()` answer
+false and write nothing for a configuration that breaks either rule, a
+generator code past the seven-bit field, or a user or channel out of
+range. A synchronous channel's generator must share the channel's
+clock generator; the resynchronized path is the one for a generator
+that does not. The peripheral at the user end has its own event input
+to enable in its own driver. And two waits are the caller's, because
+this driver does not know the channel clock's rate: one channel-clock
+tick between configuring a channel and its first trigger (erratum
+1.12.4), three between two software events on a resynchronized path
+(erratum 1.12.3), or the second is lost with no overrun flag.
+
+## Documents of record
+
+SAM C20/C21 data sheet DS60001479M ch. 29 - and
 errata DS80000740S items 1.12.1, 1.12.3 and 1.12.4, **all three live on
 every silicon revision including this one** (1.12.2 is revisions B..E and
 not this chip). Driver: `samc21/evsys.hpp`. Family fixture
 `test/family_samc21/evsys.cpp` plus one negative under
 `brio check samc21`; the bench suite is `test_samc_evsys`, whose event
-user is a TC counting events (`samc21/tc.hpp`).
+user is a TC counting events (`samc21/tc.hpp`). A suite's letter, cited
+below (letter e), is one command key of its console and the group of
+verdicts that key runs.
 
 ## What the silicon does
 

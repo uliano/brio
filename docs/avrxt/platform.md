@@ -1,6 +1,111 @@
 # Platform - what the kernel stands on (AVR DA, DB and EA)
 
-Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B -
+This document is for a programmer putting a brio program on an AVR DA,
+DB or EA. It describes what the kernel stands on here. A brio kernel
+asks the chip for a handful of things, stated by the kernel's
+`Platform` concept (a concept is a compiler-checked set of requirements
+on a type;
+[design/kernel.md, "Platform: what the machine provides"](../design/kernel.md#11-platform-what-the-machine-provides-kernelplatformhpp)):
+a way to mask interrupts for a critical section, a way to sleep until
+the next interrupt without losing one that arrives at the wrong moment,
+a source of time, a breakpoint for a panic, and a record a panic leaves
+for the next boot. `AvrPlatform` is this family's answer, with the
+PIT-driven `Ticker` as its time ([rtc.md](rtc.md)). Beside it the page
+covers three services of the same silicon: the short busy-wait a driver
+uses for a hardware setup time (`delay_us`), the sleep controller and
+the regulator (`Sleep`, `Vreg`, and `AvrSleepSite`, through which the
+power manager arms a sleep deeper than IDLE), and the reset controller
+and the watchdog (`Reset`, `Watchdog`). The power manager is
+`util/power.hpp`'s active object that asks a program's other active
+objects before the chip sleeps deeper
+([design/power.md](../design/power.md)); an active object is a
+component of a brio program with its own event queue, served one event
+at a time by the kernel
+([the learning route's introduction](../learn/introduction.md)).
+
+These are not peripheral drivers in the tasks-over-resources sense:
+they are the services the kernel names in `kernel/platform.hpp` and
+`kernel/panic.hpp`, and the two silicon blocks that make the panic
+breadcrumb mean something. They live in one document because they are
+one story - how a program on this silicon waits, how it stops, and how
+the next boot finds out why.
+
+The smallest use is the platform line of the maintained example
+`blink` and its target glue, quoted from `avrxt/src/apps/blink.cpp`
+([the first program](../learn/first-program.md) reads the same example
+on another board):
+
+```cpp
+using P = brio::AvrPlatform;
+...
+ISR(RTC_PIT_vect) { brio::Ticker::pit(); }   // timebase tick + idle wakeup
+
+int main() {
+    SysClock::init();   // PA0/PA1 crystal -> CLK_PER = 24 MHz
+    brio::Ticker::init();       // RTC/PIT timebase (runs in IDLE sleep)
+    sei();
+
+    brio::Tenuto<P, Blinker, Supervisor>::run();  // never returns
+}
+```
+
+Line by line: `P` names the platform type once, and every kernel
+template the program writes takes it (the queues, the time events, the
+kernel `Tenuto`, whose template arguments are the platform and then the
+program's active objects from the highest priority to the lowest); `ISR(RTC_PIT_vect)` is avr-libc's way of writing the
+interrupt handler of a vector, here the RTC's periodic interrupt, whose
+body `Ticker::pit()` advances the kernel's tick; `SysClock::init()`
+brings the main clock up ([clkctrl.md](clkctrl.md)); `Ticker::init()`
+starts the periodic interrupt at 1024 Hz; `sei()` enables interrupts;
+and `run()` is the kernel loop, which never returns and calls
+`AvrPlatform::idle()` whenever every queue is empty.
+
+What decides correctness even there:
+
+- **The program binds the tick's vector.** The kernel binds no vector.
+  A program that leaves `RTC_PIT_vect` unbound gets avr-libc's
+  `__bad_interrupt`, a `jmp 0`: the first tick restarts the program
+  from its first instruction, without a hardware reset and without the
+  RETI that clears CPUINT's LVL0EX, so the restarted program takes no
+  level-0 interrupt again until a real reset (15.5.2; inferred from the
+  data sheet, not measured). One that binds
+  it to a body that does not call `pit()` runs with a kernel whose time
+  never moves.
+- **`idle()` takes whatever sleep mode is already armed.** It sleeps in
+  IDLE, where every peripheral keeps running and any interrupt wakes
+  the core, unless `SLPCTRL.CTRLA.SEN` is already set; then it takes
+  the armed mode instead, on purpose, for the power manager ("Types and
+  verbs" below). A program that arms STANDBY or POWER-DOWN with
+  `Sleep::arm` and does not disarm it turns every empty turn of the
+  loop into that sleep, and only the wake-up sources that mode keeps
+  can bring the loop back (the kernel's tick, the PIT, wakes STANDBY and
+  POWER-DOWN alike, measured under "The sleep modes" below).
+- **No interrupt handler interrupts another.** The kernel relies on it
+  ([design/kernel.md, "The model in one page"](../design/kernel.md#1-the-model-in-one-page)),
+  and on this core it holds because every vector stays at CPUINT's
+  normal priority level ("What the silicon does" below). Nothing in
+  brio raises a vector to level 1; a program that writes
+  `CPUINT.LVL1VEC` breaks the promise for that vector.
+- **`break_here()` halts only under a debugger.** The panic path's
+  breakpoint is the `BREAK` instruction, a NOP when the on-chip debugger
+  is not active: a panic with no debugger attached continues into its
+  reporter, the type that decides what a panic ends in (the default,
+  `kernel/panic.hpp`'s `HaltReporter`, returns at once and `panic()`
+  then loops for ever with interrupts masked; "How to use it" below
+  ends one in a reset instead).
+
+The rest of this page, in order: the documents of record; what the
+silicon does (sleep, reset, the watchdog, waiting on this core,
+interrupt priority, and the AVR EA's differences with its sleep modes
+and the offer inventoried item by item); the types and verbs; how to
+use it, one example per task; the bench findings (the delay paths, the
+critical section and the idle contract measured to the cycle, then the
+sleep modes, the wake-up latency measured from the partner board and
+the power manager on this target); what is not covered.
+
+## Documents of record
+
+AVR128DB28/32/48/64 data sheet DS40002247B -
 SLPCTRL chapter 13, RSTCTRL chapter 14, WDT chapter 22, the CPU's
 Configuration Change Protection in 7.4.6 - plus errata DS80000915F
 (item 2.2.4 is code here; clarifications 3.3.1 and 3.4.1 rewrite two
@@ -12,14 +117,10 @@ DS40002443A (SLPCTRL 13, RSTCTRL 14, WDT 21, CCP 7.4.6) and DS80001048D
 the kernel's `Platform` concept), `avrxt/delay.hpp` (the short-wait
 role), `avrxt/sleep.hpp` (`Sleep`, `Vreg`) and `avrxt/reset.hpp`
 (`Reset`, `Watchdog`). Reference tests: `test_avr_platform`,
-`test_avr_sleep` and `test_avr_power`.
-
-These are not peripheral drivers in the tasks-over-resources sense:
-they are the services the kernel names in `kernel/platform.hpp` and
-`kernel/panic.hpp`, and the two silicon blocks that make the panic
-breadcrumb mean something. They live in one document because they are
-one story - how a program on this silicon waits, how it stops, and how
-the next boot finds out why.
+`test_avr_sleep` and `test_avr_power` (a test suite's console takes
+one command key per group of verdicts, which this page calls a letter;
+`z` runs a suite's single-board set and, on `test_avr_sleep`, `y` the
+set that needs the partner board).
 
 ## What the silicon does
 
@@ -27,7 +128,7 @@ the next boot finds out why.
 IDLE / STANDBY / PDOWN and `CTRLA.SEN` enables the SLEEP instruction.
 Arming alone does nothing - "the SLEEP instruction must be executed to
 make the device go to sleep" (13.3.1), and the wake-up sources must be
-configured and enabled, with global interrupts on, BEFORE it runs: with
+configured and enabled, with global interrupts on, before it runs: with
 no enabled interrupt that reaches the armed mode, only a reset comes
 back. `CTRLA` is **not** under CCP - only `VREGCTRL` is (13.3.5). The
 register file and SRAM are kept through sleep (13.2), and a debugger
@@ -58,17 +159,17 @@ every mode, so no regulator start-up on the way out).
 **RUNSTDBY: the peripheral's flag is the one that decides.** Two
 different bits carry that name - a peripheral's, and each oscillator's -
 and the bench says they do different jobs. A peripheral's `RUNSTDBY` is
-a REQUEST: it keeps that peripheral clocked in standby and, through the
+a request: it keeps that peripheral clocked in standby and, through the
 request, keeps the main clock and the oscillator behind it running,
 whatever the oscillator's own flag says. An oscillator's `RUNSTDBY`
-keeps that oscillator running when NOTHING requests it - which never
+keeps that oscillator running when nothing requests it - which never
 makes a stopped peripheral count, and buys exactly one thing: no
 start-up time on the way out of the sleep (measured below, and it is
 worth 1.5 ms on this board's crystal). The corollary for a driver
-writer: a peripheral that must survive standby needs its OWN
+writer: a peripheral that must survive standby needs its own
 `RUNSTDBY`; an oscillator with the bit clear is not even startable
 while something else drives CLK_PER, because it only runs when
-requested - selecting it as the main clock IS the request.
+requested - selecting it as the main clock is the request.
 
 The one erratum that reaches into ordinary code lives here.
 **DS80000915F 2.2.4**, all silicon revisions: a store to an address
@@ -79,7 +180,7 @@ by an `ST`/`STD` to an address **< 64** (the low I/O space: VPORT,
 GPIOR) loses that write too, where the workaround is a NOP or using
 `OUT` instead of `ST`. Nothing in the stratum guards that half, and
 nothing needs to yet: for a compile-time address in the low I/O space
-GCC emits `out`/`sbi`/`cbi`, which IS the documented workaround, and a
+GCC emits `out`/`sbi`/`cbi`, which is the documented workaround, and a
 scan of the built images finds zero `sts` stores below 0x40 in any of
 them. A runtime-computed pointer into that space would be the
 exposure, and the stratum has none: the one pin a request carries at
@@ -128,9 +229,25 @@ there sets `LOCK` at boot.
 
 **Waiting on this core.** The AVR executes one instruction in a known
 number of cycles from flash, with no prefetch, cache or wait states,
-so counting cycles IS timing - which is why the short-wait role is a
+so counting cycles is timing - which is why the short-wait role is a
 cycle loop here and a hardware counter (DWT CYCCNT, SysTick, mcycle)
 on the cores that have one.
+
+**Interrupt priority: one level in use, so no handler nests.** The I
+bit of SREG is not cleared when an interrupt is entered, nor set by
+RETI (7.6.3); what holds the other vectors off is the interrupt
+controller. Every vector but the NMI is at priority level 0 out of reset
+(15.3.2.4.3), a level-0 handler is interrupted only by the one vector
+`CPUINT.LVL1VEC` raises to level 1 or by an NMI (15.3.2.4.2), and
+`CPUINT.STATUS.LVL0EX` is set while a level-0 handler executes and
+cleared by its RETI (15.5.2). Nothing in brio writes `LVL1VEC`, so every
+handler runs to completion with no other handler over it, which is the
+kernel's one-boundary promise; the AVR EA's CPUINT is the same chapter
+under the same numbers (DS40002443A 7.6.3, 15.3.2.4, 15.5.2). The one
+way to break it from inside a handler is a second RETI before the
+handler's own: a handler folded into a call to another by the
+compiler's identical code folding runs its epilogue after that RETI
+([README.md](README.md), "Build").
 
 **On the AVR EA** (DS40002443A ch. 13, 14, 21): the same core (AVRxt,
 the same instruction timings, a two-byte return address, CCP with the
@@ -150,7 +267,7 @@ DS80001048D 2.2.3's workaround there. The delay paths are the DB's to
 the cycle; only the rate moves (20 MHz on the EA board: 20 cycles a
 microsecond, `delay_mult(20 MHz)` = 20480 exactly), and from a 16 or
 20 MHz source four of a `DynamicClock`'s twelve rates are not whole
-hertz (clkctrl.md).
+hertz ([clkctrl.md](clkctrl.md)).
 
 **The AVR EA's sleep modes** (13.3.2.1, tables 13-1 to 13-4; the
 clarifications of the DB's errata have no EA counterpart):
@@ -164,7 +281,7 @@ clarifications of the DB's errata have no EA counterpart):
 
 Two rows of that table are wider than the DA/DB's. **Every pin senses
 fully asynchronously** (18.3.3.1, "the pulse width needed to trigger an
-interrupt is less than one CLK_PER cycle"): one edge of ANY pin wakes the
+interrupt is less than one CLK_PER cycle"): one edge of any pin wakes the
 device from power-down, where on the DA/DB only Px2 and Px6 do and the
 other pins need both edges or a level (their 18.3.3.1) - the device
 tables' `all_pins_fully_async`, and `Pin::fully_async` true on every EA
@@ -194,7 +311,9 @@ fuse, so its current is in every sleep below.
 ## Types and verbs
 
 `AvrPlatform` (`avrxt/platform.hpp`) is the `Platform` concept for
-this target: the RAII `CriticalSection` (save SREG, `cli`, restore -
+this target: the RAII `CriticalSection`, an object whose constructor
+masks and whose destructor, at the end of the block that declares it,
+restores (save SREG, `cli`, restore -
 so guards nest and a guard entered with interrupts masked leaves them
 masked), `idle()`, `break_here()`, `now()` and the compile-time
 `ticks_per_second` over `Ticker`, `atomic_width` = 1, and
@@ -206,11 +325,11 @@ armed, in which case it takes that one instead - see `AvrSleepSite`
 below.
 
 `avrxt/delay.hpp` is the short-wait role: `delay_us(clock, us)` reads
-the rate from the `Clock` type and never from `F_CPU`, and NO DIVISION
-EVER RUNS AT WAIT TIME. A static clock's rate folds; a `DynamicClock`
+the rate from the `Clock` type and never from `F_CPU`, and no division
+ever runs at wait time. A static clock's rate folds; a `DynamicClock`
 can only run at one of the discrete rates its type enumerates
 (`rate_count` / `rate_hz(i)` / `rate_index()`, from the twelve main
-prescalers), so `delay_us` dispatches on the current rate's INDEX into
+prescalers), so `delay_us` dispatches on the current rate's index into
 per-rate branches expanded at compile time: a constant `us` folds to
 the exact loop inside its branch, a runtime `us` picks the rate's
 Q4.12 loops-per-us factor (`delay_mult`, rounded up at compile time)
@@ -226,7 +345,7 @@ mechanism. `SleepMode` names the three modes; `Sleep` arms one
 (`arm`), disarms (`disarm`), reads back what is armed (`armed`,
 `armed_mode`), executes the instruction (`sleep`) and offers the
 bounded verb an application usually wants, `enter(mode)` = arm + sleep
-+ disarm. The pair exists as separate verbs for the callers that must
++ disarm. The pair (`arm` and `sleep`) exists as separate verbs for the callers that must
 close the lost-wake-up window themselves: arm first, then mask, test
 the condition and put `sei` and `sleep` back to back - which is exactly
 the sequence `AvrPlatform::idle()` emits for IDLE. `Vreg` (the DA and
@@ -234,7 +353,7 @@ the DB; not named on the EA, which has no `VREGCTRL`) covers
 `VREGCTRL` through its CCP key: `power(VregPower)` / `power()` for the
 regulator profile, `high_temp_low_leakage(bool)` / `()` for HTLLEN -
 and **enabling HTLLEN returns false, writing nothing, while any TWI
-client or the CCL is enabled**. That refusal IS chapter 13's warning:
+client or the CCL is enabled**. That refusal is chapter 13's warning:
 a rule stated in a comment and not enforced is a rule the next program
 breaks.
 
@@ -246,8 +365,8 @@ realizes every rung, so the model's "map an absent rung to the nearest
 shallower one" rule is the identity here and `armed()` reads back
 exactly what was asked.
 
-**The site only ARMS; the SLEEP instruction stays the kernel loop's.**
-That is why `AvrPlatform::idle()` is IDLE by DEFAULT rather than IDLE
+**The site only arms; the SLEEP instruction stays the kernel loop's.**
+That is why `AvrPlatform::idle()` is IDLE by default rather than IDLE
 only: if `SEN` is already set when it runs, something above the kernel
 armed a mode on purpose, so `idle()` leaves that arming alone and takes
 it - `sei` + `SLEEP`, and no disarming store on the way out, because the
@@ -256,7 +375,7 @@ dispatches after the wake). With nothing armed it arms IDLE, sleeps
 and disarms. This one branch is the whole of what the power model
 needs from the target; there is no new kernel hook.
 
-The POLICY otherwise stays out of this header. Standby and power-down
+The policy otherwise stays out of this header. Standby and power-down
 gate clock domains and shorten the wake-up list, so entering them is a
 decision about the whole application - which peripherals must survive,
 which oscillator must stay up for them, what is allowed to wake the
@@ -323,7 +442,9 @@ struct ResetReporter {
 brio::panic<brio::AvrPlatform, ResetReporter>(brio::PanicCode::kernel_fault, id);
 ```
 
-**Let the watchdog catch a hang**, with the same breadcrumb:
+**Let the watchdog catch a hang**, with the same breadcrumb (the
+watchdog writes no record of its own; one a `panic()` wrote before the
+reset survives it, "Bench findings" below):
 
 ```cpp
 brio::Watchdog::arm(brio::WdtTime::ms250);   // then WDR from the main loop

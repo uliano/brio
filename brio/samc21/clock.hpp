@@ -1,12 +1,36 @@
 /*
  * clock.hpp
  *
- * The SAM C21 clock tree in the two strata docs/design/clock.md
- * describes:
+ * The rate the CPU and the peripherals run at on the SAM C21, and the
+ * means to change it. A program names its main clock once and passes
+ * the tag object to every driver's init(), which computes its dividers
+ * from that rate:
  *
- *  RESOURCES - one monostate per block, a thin typed view of its
- *  registers with the synchronization discipline built in:
- *    Oscctrl      the BLOCK (OSCCTRL, ch. 20): the STATUS register all
+ *     using SysClock = brio::Clock<brio::ClockSource::internal, 48'000'000>;
+ *     constexpr SysClock clock;
+ *     SysClock::init();             // first in main(), before any driver
+ *
+ * Who calls what. Clock::init() is a setup call, first in main() and
+ * before any driver's init(): the drivers trust `hz` and not the
+ * hardware, and out of reset the CPU runs at 4 MHz. It waits for the
+ * oscillator and each synchronization, every wait bounded (0xFFFF polls
+ * by default), and answers false when one did not complete - the rate is
+ * then not the one `hz` states. The resources' configuring verbs are
+ * setup verbs as well, with no guard of their own (read-modify-write or
+ * whole-register stores), and their waits are bounded the same way
+ * (Xosc::init() polls up to 40 000 000 times for a crystal, Fdpll::init()
+ * up to 4 000 000 for each synchronization and for CLKRDY); nothing here
+ * masks interrupts. Oscctrl::isr() is an interrupt body for IRQ 0, which
+ * five blocks share: the program's SYSTEM_Handler calls it beside the
+ * other blocks' bodies. Stopping an oscillator has one ordering rule:
+ * every generator is moved off it first (Xosc::stop(), Fdpll::stop()).
+ *
+ * The clock tree in the two strata docs/design/clock.md describes:
+ *
+ *  Resources - one monostate per block (a class whose state and
+ *  functions are all static: one block, no instances), a thin typed
+ *  view of its registers with the synchronization discipline built in:
+ *    Oscctrl      the block (OSCCTRL, ch. 20): the STATUS register all
  *                 three oscillators report into, the seven interrupt
  *                 sources behind one shared vector, and the CFD's event
  *                 output enable
@@ -29,17 +53,17 @@
  *    Mclk         the main clock controller (MCLK, ch. 17): CPUDIV and
  *                 the AHB/APB bus-clock masks
  *
- *  TASK - what an application names:
- *    Clock<source, hz>   the static main clock: ONE constexpr truth
+ *  Task - what an application names:
+ *    Clock<source, hz>   the static main clock: one constexpr truth
  *                 `hz` every driver derives from (there is no F_CPU in
  *                 this build); init() composes the
  *                 resources and reports whether the requested source
  *                 really runs.
  *
- * SCOPE, honestly. All three OSCCTRL roots are now RESOURCES with their
- * full register description; what is still single-rooted is the TASK.
+ * Scope, honestly. All three OSCCTRL roots are now resources with their
+ * full register description; what is still single-rooted is the task.
  * `Clock<source, hz>` implements ClockSource::internal (OSC48M) only:
- * pointing CLK_MAIN at the crystal or at the DPLL is a main-clock DESIGN
+ * pointing CLK_MAIN at the crystal or at the DPLL is a main-clock design
  * decision - which rate is the compile-time truth, who is told when it
  * moves, what a DynamicClock looks like on a target whose peripherals
  * each have a generator of their own - and that decision is not this
@@ -57,20 +81,20 @@
  *    the rest of init() is confirmation rather than construction;
  *  - flash reads limit the CPU frequency per wait state (table 45-41,
  *    VDD > 2.7 V column: 19 MHz at 0 WS, 38 at 1, 64 at 2), and 27.5.2
- *    orders the wait states adapted BEFORE a frequency rise (and after a
+ *    orders the wait states adapted before a frequency rise (and after a
  *    fall, which is why set_for_hz() below looks at the current value);
- *  - erratum 1.2.2: writing OSC48MDIV while OSC48M runs UNREQUESTED
+ *  - erratum 1.2.2: writing OSC48MDIV while OSC48M runs unrequested
  *    leaves OSC48MSYNCBUSY.OSC48MDIV stuck - clear ONDEMAND first;
  *  - erratum 1.2.3: a rare no-start at power-up on parts built before
  *    2025-01, avoided by keeping ENABLE = 1 and ONDEMAND = 0. Both are
  *    what init() writes, which is also the erratum 1.2.2 mitigation;
- *  - erratum 1.25.1, LIVE ON EVERY REVISION: below 25 C the FDPLL
- *    reports SPURIOUS unlocks, and because the lock signal gates the
+ *  - erratum 1.25.1, live on every revision: below 25 C the FDPLL
+ *    reports spurious unlocks, and because the lock signal gates the
  *    output clock, the DPLL's consumers lose their clock for the
  *    duration. The workaround is DPLLCTRLB.LBYPASS, which ungates the
- *    output - `FdpllConfig::lock_bypass` defaults to TRUE for exactly
+ *    output - `FdpllConfig::lock_bypass` defaults to true for exactly
  *    that reason, and a caller who wants the gate back has to ask;
- *  - erratum 1.3.3: an on-the-fly ratio change does NOT set
+ *  - erratum 1.3.3: an on-the-fly ratio change does not set
  *    STATUS.DPLLLDRTO although INTFLAG.DPLLLDRTO does rise, so
  *    `ratio_updated()` reads the INTFLAG;
  *  - erratum 1.3.4: an on-the-fly ratio change needs GCLK_DPLL_32K
@@ -78,7 +102,7 @@
  *    channel of its own - `Fdpll::lock_timer_clock()` is the verb, and
  *    `set_ratio()` says so where it can only be a caller obligation.
  *
- * A NOTE ON NAMES. Chapter 20's register summary calls the XOSC failure
+ * A note on names. Chapter 20's register summary calls the XOSC failure
  * bits STATUS.CLKFAIL and STATUS.CLKSW; the device header calls them
  * XOSCFAIL and XOSCCKSW. The header wins in code (house rule), and the
  * verbs here are named for what they mean.
@@ -1237,8 +1261,10 @@ struct Clock {
 
     /// Bring CLK_CPU to `hz`. Returns false when the oscillator did not
     /// report ready or a synchronization did not complete - the caller
-    /// then knows the rate is NOT the one `hz` claims. Call first in
-    /// main(), before any driver init.
+    /// then knows the rate is not the one `hz` claims. Call first in
+    /// main(), before any driver init: a driver set up before it computes
+    /// its dividers for `hz` while the CPU still runs at the 4 MHz reset
+    /// rate. Each wait is bounded (0xFFFF polls); nothing is masked.
     static bool init() {
         // Wait states BEFORE a frequency rise, AFTER a fall (27.5.2):
         // the flash must never be read faster than its current setting

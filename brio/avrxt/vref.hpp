@@ -1,6 +1,34 @@
 /*
  * vref.hpp
  *
+ * What full scale means for the analog blocks of an AVR DA, DB or EA:
+ * the reference each converter and the comparators measure against. A
+ * program names its reference where it configures the ADC, the DAC or
+ * a comparator (avrxt/adc.hpp, avrxt/dac.hpp, avrxt/ac.hpp), whose
+ * init() writes the selection through the setters below, and converts
+ * counts to millivolts with ref_mv() and util/analog.hpp. Called
+ * directly, to keep a reference powered or to read its level:
+ *
+ *     brio::Vref::ac(brio::Ref::v1024, true);                  // the ACs' reference, always on
+ *     constexpr uint16_t fs_mv = brio::ref_mv(brio::Ref::v2048);  // 2048
+ *
+ * This is a vocabulary plus three setters, not a device: the enum Ref
+ * names this silicon's levels (another target's vref header defines
+ * its own brio::Ref - same name, its levels), ref_mv() gives their
+ * millivolts to whoever converts (util/analog.hpp holds the
+ * target-independent arithmetic); the setters are called by the
+ * consumers' init() - an app names its reference where it configures
+ * the ADC or the DAC and never writes VREF itself.
+ *
+ * Which context calls what. ref_mv() and refsel() are constant
+ * arithmetic, legal anywhere and folded at compile time. Each setter is
+ * one store into its VREF register: it waits for nothing, masks
+ * nothing, and is a setup verb of the consumer that owns that register
+ * (its init(), from main() or from the active object that owns the
+ * converter). Nothing here checks that VDD has the headroom a level
+ * needs, nor that the reference a program converts with is the one it
+ * selected.
+ *
  * The voltage reference selector (VREF) of the AVR DA/DB (DS40002247B
  * ch. 21) and the AVR EA (DS40002443A ch. 20): one REFSEL per consumer -
  * ADC0 (DA/DB only), DAC0, the analog comparators - each picking 1.024 /
@@ -15,14 +43,6 @@
  * its reference in its own CTRLC, with its own encoding (adc.hpp's
  * adc_refsel(): never refsel() below). A source turns on when its
  * consumer needs it; ALWAYSON keeps it on.
- *
- * This is a vocabulary plus three setters, not a device: the enum Ref
- * names this silicon's levels (another target's vref header defines
- * its own brio::Ref - same name, its levels), ref_mv() gives their
- * millivolts to whoever converts (util/analog.hpp holds the
- * target-independent arithmetic); the setters are called by the
- * consumers' init() - an app names its reference where it configures
- * the ADC or the DAC and never writes VREF itself.
  */
 
 #pragma once
@@ -62,7 +82,11 @@ struct Vref {
     /// tables' has_vref_adc0ref).
     static void adc0(Ref r, bool always_on = false) { VREF.ADC0REF = bits(r, always_on); }
 #endif
+    /// The DAC's reference (VREF.DAC0REF), one store; `always_on` sets
+    /// ALWAYSON, the source powered whether the DAC asks for it or not.
     static void dac0(Ref r, bool always_on = false) { VREF.DAC0REF = bits(r, always_on); }
+    /// The analog comparators' shared reference (VREF.ACREF, the one
+    /// their DACREF divides), one store; `always_on` as above.
     static void ac(Ref r, bool always_on = false) { VREF.ACREF = bits(r, always_on); }
 
     static constexpr uint8_t refsel(Ref r) {

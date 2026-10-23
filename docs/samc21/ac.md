@@ -1,17 +1,88 @@
 # AC (SAM C21)
 
-Documents of record: SAM C20/C21 data sheet DS60001479M ch. 40 and
+This document is for a programmer who needs to know whether a voltage
+is above or below a threshold without a conversion: a pad against a
+fraction of the supply, two pads against each other, a signal inside
+or outside a window, or a crossing that starts or ends something on
+the event system with no CPU in the loop. The AC holds four analog
+comparators; `Ac` is the block (its clocks, reset, enable and the one
+interrupt flag register), `AcComparator<n>` one comparator, and
+`AcWindow<w>` a pair of them as a window comparator.
+
+The smallest use, from "How to use it" below - PA04 against half the
+supply:
+
+```cpp
+brio::Ac::init(1);                        // GCLK_AC from generator 1
+using Comp = brio::AcComparator<0>;
+Comp::configure({
+    .positive = brio::AcPositive::pin0,   // AIN[0] = PA04
+    .negative = brio::AcNegative::vscale, // its own VDD ladder
+    .speed = brio::AcSpeed::high,
+    .out = brio::AcOut::synchronous,      // sampled, on the CMP0 pad
+});
+Comp::scaler(31);                         // threshold VDD/2
+Comp::enable(true);
+while (!Comp::ready()) { }
+bool above = Comp::state();
+```
+
+Line by line: `Ac::init(1)` opens the block's bus clock, connects its
+generic clock channel (GCLK_AC, which clocks the sampling, the filter,
+the edge detection and the synchronized output) to generator 1, resets
+the block and enables it, with no comparator running yet; `Comp` names
+comparator 0; `configure()` writes the comparator's whole control
+register - the positive input is AIN[0], the pad PA04, the negative
+input the comparator's own 64-step divider of VDD, the fast bias, and
+the sampled output routed towards the CMP0 pad - and leaves the
+comparator disabled; `scaler(31)` sets that divider to VDD x 32/64;
+`enable(true)` starts the comparator; the loop waits for STATUSB.READY,
+before which the state is undefined; `state()` is the sampled output,
+true when the positive input is above the negative.
+
+What decides correctness even there. The generator `init()` is given
+must already run (`Gclk<1>::configure()`, [clock.md](clock.md)): every
+digital stage of the block samples at it, and the block's reset and
+enable are write-synchronized waits that `init()` bounds and reports
+as false when one does not complete. `configure()` answers false, and
+writes nothing, for an input the package does not bond (COMP2/3 bond
+only AIN[5:4] on the E and G variants), for hysteresis in single-shot
+mode and for the end-of-comparison interrupt in continuous mode; every
+comparator field is writable only while that comparator is disabled,
+which is why `configure()` disables first and `enable()` is a step of
+its own. The ready loop is the example's own wait, unbounded: READY
+arrives about 6.7 GCLK_AC periods after a continuous-mode enable
+("What the silicon does"), so a stopped generator holds the loop for
+ever. A pad routed by the output field still needs its PMUX (the note
+under "How to use it"). With the bandgap as the negative input, a
+spurious flag can rise at the enable (erratum 1.5.6, below), so the
+flag is cleared before an interrupt is armed. An armed interrupt
+arrives on `AC_Handler`, which the program binds to `Ac::take_flags()`;
+the crt's default for an unbound vector is a silent spin.
+
+The page, in order: the documents of record and the errata; what the
+silicon does (the sampling clock and what each path costs, window
+mode, the event surface, the per-package inputs, enable protection);
+the types and verbs; how to use it; the bench findings of the
+chapter's own suite and of the DAC-driven suite; the second pair, the
+bandgap and the hysteresis; what is not covered.
+
+## Documents of record
+
+SAM C20/C21 data sheet DS60001479M ch. 40 and
 the electrical characteristics table 45-34 (whose note 4 states the
 propagation delay is measured on "ACOUT (AC direct output)" and
-covers ONLY the analog path - the digital path's cost in cycles is
+covers only the analog path - the digital path's cost in cycles is
 stated nowhere, which is what the probe below measures). Driver:
 `samc21/ac.hpp` (`Ac` block + `AcComparator<n>` + `AcWindow<w>`).
 Family fixture `test/family_samc21/ac.cpp` plus four negatives under
-`brio check samc21`. Two bench SUITES and one probe, and the
-distinction matters: `test_samc_ac` (6 letters, 93 verdicts, wireless)
-is the chapter's own, `test_samc_analog` carries what needs the DAC as
-a swept source (letters g to j), and `ac_sync_probe` is a PROBE - it
-answers one timing question and is not a reference test.
+`brio check samc21`. Two bench suites and one probe, and the
+distinction matters: `test_samc_ac` (6 letters, 93 verdicts, wireless;
+a letter is one command key of a suite's console and the group of
+verdicts that key runs) is the chapter's own, `test_samc_analog`
+carries what needs the DAC as a swept source (letters g to j), and
+`ac_sync_probe` is a probe - it answers one timing question and is not
+a reference test.
 
 The errata, read on the E/G/J row at silicon revision F: of six AC
 items plus one device-level one, **two apply** and neither is
@@ -23,7 +94,7 @@ MUXNEG = bandgap can raise a spurious COMPn flag, so clear that flag
 after enabling and before arming; the driver does not refuse the
 bandgap, which is a real input, and `AcNegative::bandgap` carries the
 obligation. Not this silicon: 1.5.1 and 1.5.4 (hysteresis, revisions
-B and B..E), **1.5.2 (low-power mode WITH hysteresis, B..E - so the
+B and B..E), **1.5.2 (low-power mode with hysteresis, B..E - so the
 pairing is legal here)**, 1.5.5 (power figures, B..E), and the
 device-level **1.8.2, which says GCLK_AC is not functional and the AC
 must borrow GCLK_ADC1's channel - revision B only**, so `clock()`
@@ -43,7 +114,7 @@ latency becomes visible to a software stopwatch, which is the
 probe's whole method.
 
 **A synchronized output edge costs the fraction of a period to the
-next GCLK_AC edge PLUS TWO WHOLE PERIODS** - a two-stage
+next GCLK_AC edge plus two whole periods** - a two-stage
 synchronizer, in the classic shape. Measured as a phase-anchored
 64-step staircase (a clean sawtooth spanning exactly one period) and
 as 1000 randomized shots, on two independent clockings: OSC48M/4096
@@ -54,7 +125,7 @@ Floor 2.05 periods, ceiling 3.03, the ~0.05 being the measurement
 chain's own constant (~210 CPU cycles, bounded by the ASYNC control
 run). Both edges behave identically.
 
-**AND THE CCL IS STRICTLY CHEAPER**, which is what an application
+**And the CCL is strictly cheaper**, which is what an application
 wanting a clock-synchronized comparator should do instead. 40.8.13's
 note - "for internal use of the comparison results by the CCL, this bit
 must be 0x1 or 0x2" - is about COMPCTRL.OUT and not about a pad, so a
@@ -73,9 +144,9 @@ STATUSB.READY is one; after a continuous-mode enable, READY itself
 arrives in ~6.7 GCLK_AC periods (the electrical t_STARTUP of 2-3 us
 is invisible at a slow clock - the domain crossings dominate).
 
-**INTFLAG raises on the SAME period as the output flip.** Edge
+**INTFLAG raises on the same period as the output flip.** Edge
 detection compares the current and previous sample (40.6.2.4.1), and
-the flag appears a few tens of CPU cycles BEFORE the pad readback
+the flag appears a few tens of CPU cycles before the pad readback
 (the pad round-trip pays PORT input sampling that the APB flag read
 does not) - not one period later.
 
@@ -83,7 +154,7 @@ does not) - not one period later.
 periods, not the chapter's N-1.** Measured exactly: MAJ3 adds one
 period (+4080 cycles on a 4096-cycle period), MAJ5 adds two (+8220).
 The chapter's "N-1 sampling cycles from when a comparison is
-started" times the FIRST VALID output from idle - a different
+started" times the first valid output from idle - a different
 question. The majority arithmetic explains the mid-stream number: a
 2-of-3 vote flips one sample after the edge's first new sample, a
 3-of-5 two samples after.
@@ -100,7 +171,7 @@ wireless measurement here rests on. The comparator's negative input
 never needs a pad at all: each comparator has its own 64-step VDD
 scaler (SCALERn), and the probe's threshold is scaler 31 = VDD/2.
 
-**Window mode is the second face of every PAIR** (40.6.4): COMP0/COMP1
+**Window mode is the second face of every pair** (40.6.4): COMP0/COMP1
 are window 0 and COMP2/COMP3 window 1. The pair shares one positive
 input - the signal - and its two negative inputs are the window's
 limits, **in either order**; STATUSA.WSTATEw reports above / inside /
@@ -120,12 +191,12 @@ inside/outside status - generated **whether or not the window's
 interrupt is enabled**), gated by EVCTRL.COMPEOx / WINEOx. In:
 `start_user(n)` (users 34..37, SOCn, "start a comparison"), gated by
 EVCTRL.COMPEIx with an optional INVEIx inversion - and **table 29-3
-marks all four SOC users ASYNCHRONOUS PATH ONLY**, which is a
+marks all four SOC users asynchronous path only**, which is a
 constraint the channel's configuration must honour. EVCTRL is
 enable-protected at BLOCK level, so `event_config()` refuses while
 the block is enabled.
 
-**Per-package input legality: the PAIR owns the pads.** COMP0/1 take
+**Per-package input legality: the pair owns the pads.** COMP0/1 take
 AIN[0..3] and COMP2/3 take AIN[4..7], so the same `pin2` code means
 AIN2 on one comparator and AIN6 on another - and 40.1 bonds only
 AIN[5:4] for COMP2/3 on the E and G variants. The device header says
@@ -156,7 +227,7 @@ linear field reaches past 255 (table 16-3).
 
 - **Vocabulary** - `AcPositive`/`AcNegative` (the input muxes; PIN0..3
   are AIN[0..3] for COMP0/1 and AIN[4..7] for COMP2/3),
-  `AcSpeed` (bias current: propagation delay AND startup),
+  `AcSpeed` (bias current: propagation delay and startup),
   `AcFilter` (off/majority3/majority5), `AcOut`
   (off/asynchronous/synchronous), `AcInterrupt` (toggle/rising/
   falling/end-of-comparison).
@@ -177,8 +248,8 @@ linear field reaches past 255 (table 16-3).
   consistency check), flag and arming verbs, plus its own
   `event_generator` and `start_event_user` codes. A fifth comparator
   is refused at compile time.
-- **`AcWindow<w>`** - a comparator PAIR: `configure(on, condition)`
-  (write-synchronized, but NOT enable-protected, so a window may be
+- **`AcWindow<w>`** - a comparator pair: `configure(on, condition)`
+  (write-synchronized, but not enable-protected, so a window may be
   turned on under a running block), `enabled()`, `interrupt_on()`,
   `state()` (`AcWindowState` above/inside/below), `ready()` (both
   comparators), `pair_consistent()`, `start()`, its `flag`/

@@ -1,12 +1,71 @@
 # TSENS - Temperature Sensor (SAM C21)
 
-Documents of record: SAM C20/C21 data sheet DS60001479M ch. 43, table 9-6
+This document is for a programmer who wants the die's temperature: a
+reading in hundredths of a degree Celsius, an average of ten, a
+threshold watched by the hardware with no CPU in the loop, or a
+reading paced by an event. `Tsens` is the block, a monostate (a class
+whose state and functions are all static, with no instance to create:
+the family has one sensor). Its measurement is not a voltage converted
+but a ratio of two clocks, which is why the generic clock it is given
+matters to the answer.
+
+The smallest use, the first block of "How to use it" below:
+
+```cpp
+Tsens::init(0, TsensConfig{.calibration = TsensCalibration::factory()});
+if (auto centi = Tsens::measure_average(10)) {   // 43.6.2.3
+    // *centi is hundredths of a degree Celsius
+}
+```
+
+Line by line: `TsensCalibration::factory()` reads the four production
+values out of the NVM temperature calibration area; `init(0, ...)`
+opens the block's bus clock, connects its generic clock channel
+(GCLK_TSENS) to generator 0, resets the block, writes the calibration
+and the rest of the configuration, and enables it; `measure_average(10)`
+runs ten measurements one after the other and returns their rounded
+mean, or nothing if any one of them failed; inside the `if`, `*centi`
+is the temperature.
+
+What decides correctness even there. The factory calibration is valid
+for one clock only, OSC48M undivided: generator 0 carries that clock
+when the main clock is `Clock<ClockSource::internal, 48'000'000>`
+([clock.md](clock.md)), and on any other rate the answer's gain term
+is scaled by the ratio of the rates until `tsens_gain_for()` or `rescaled()` puts
+it back (the other blocks of "How to use it"). The OSC48M's own error
+is in the answer too, about 5000 ppm on this die ("What the silicon
+does"). `init()` answers false for a configuration
+`tsens_config_valid()` refuses - a zero GAIN, whose reset value reads
+as 2^24 and stretches a conversion to 699 ms - and for a clock or
+synchronization wait that runs out (each bounded, 0xFFFF polls).
+`measure_average(10)` holds its caller for the ten conversions, about
+37 ms at 3.7 ms each, every wait bounded (2 000 000 polls); nothing
+here masks interrupts. A reading on an overflow or a timeout is
+nothing rather than a number, because the register wraps on an
+overflow. An interrupt-driven program binds `TSENS_Handler` to
+`Tsens::isr()` (the last block of "How to use it"); `init()` leaves the
+NVIC line disabled, and the crt's default for an unbound vector is a
+silent spin.
+
+The page is long because the bench measured a lot. In order: the
+documents of record; what the silicon does (the clock ratio, the
+calibration, the register disciplines, the width of VALUE, the
+window, the events); the types and verbs; how to use it, one block per
+use; the bench findings, from this die's calibration through the
+datapath, the window, the events and erratum 1.19.1; the inverted
+start event; what is not covered.
+
+## Documents of record
+
+SAM C20/C21 data sheet DS60001479M ch. 43, table 9-6
 (the NVM Temperature Calibration Area), tables 45-37 / 46-9 (the accuracy)
 - and errata DS80000740S item **1.19.1, live on every silicon revision
 including this one**, which is reproduced below. Driver: `samc21/tsens.hpp`.
 Family fixture `test/family_samc21/tsens.cpp` plus five negatives under
 `brio check samc21`; the bench suites are `test_samc_tsens` and, for
-the inverted start event, `test_samc_analog` (letter l).
+the inverted start event, `test_samc_analog` (letter l; a letter is
+one command key of a suite's console and the group of verdicts that
+key runs).
 
 The chapter is C21-only, and table 1-1's own note adds that TSENS is
 absent from the AEC-Q100 qualified part numbers - a marking difference the
@@ -26,7 +85,7 @@ during the second (43.6.1). What lands in VALUE is
 
     VALUE = OFFSET + GAIN x (f_TOSCMIN - f_TOSCMAX) / f_GCLK
 
-**So the generic clock is the measurement's RULER, not merely its pace**,
+**So the generic clock is the measurement's ruler, not merely its pace**,
 and three things follow that no other peripheral in this stratum has to
 worry about:
 
@@ -114,10 +173,10 @@ numbers are in thousandths. The unit everywhere is **centi-degrees
 Celsius**.
 
 **The clock arithmetic.** `tsens_calibration_gclk_hz` is the 48 MHz the
-factory assumed. `tsens_rescale(value, offset, gclk_hz)` scales a READING
+factory assumed. `tsens_rescale(value, offset, gclk_hz)` scales a reading
 taken at another rate back to that one, pivoting on the OFFSET because
 only the GAIN term carries the clock. `tsens_gain_for(factory_gain,
-gclk_hz)` does the same job on the way in, giving the GAIN to WRITE so
+gclk_hz)` does the same job on the way in, giving the GAIN to write so
 that VALUE keeps arriving in centi-degrees. Both are constexpr, both take
 the rate as an argument, and both work in 64 bits on the way through.
 

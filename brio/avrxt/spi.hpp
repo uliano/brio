@@ -1,55 +1,138 @@
 /*
  * spi.hpp
  *
- * The AVR DA/DB Serial Peripheral Interface (DS40002247B ch. 28) in two
- * strata, as docs/avrxt/spi.md describes:
+ * The Serial Peripheral Interface of the AVR DA and DB (DS40002247B
+ * ch. 28) and of the AVR EA (DS40002443A ch. 26, the DB's chapter word
+ * for word, SPI0 alone): what a program uses to drive a display, an ADC,
+ * a touch controller or a memory on an SPI bus as the host, or to answer
+ * another host as a client. The header has two strata, as
+ * docs/avrxt/spi.md describes:
  *
- *  RESOURCE - Spi<n>: the typed view of one instance. A config struct
- *  owns the whole configuration (route, host/client role, transfer
- *  mode, data order, bit rate, the Client Select policy, the buffer
- *  bits); init<cfg>() folds it and refuses at compile time what this
- *  package cannot bond, init(cfg) computes it at run time and returns
- *  false instead. Then the verbs the roles share: enable/disable, the
- *  role and its HOST DEMOTION readback, the rate, the mode, the data
- *  register, the two INTFLAGS layouts with the clear discipline of
- *  each flag, the interrupt enables, the two ISR bodies, and release() -
- *  route back to NONE with every pin handed back to PORT.
+ *  the resource - Spi<n>: the typed view of one instance. A config
+ *  struct owns the whole configuration (route, host/client role,
+ *  transfer mode, data order, bit rate, the Client Select policy, the
+ *  buffer bits); init<cfg>() folds it and refuses at compile time what
+ *  this package cannot bond, init(cfg) computes it at run time and
+ *  returns false instead. Then the verbs the roles share: enable/disable,
+ *  the role and its host demotion readback, the rate, the mode, the data
+ *  register, the two INTFLAGS layouts with the clear discipline of each
+ *  flag, the interrupt enables, the two ISR bodies, and release() -
+ *  route back to NONE with every pin handed back to PORT. The class is a
+ *  monostate: its state is static and it has no instances.
  *
- *  TASKS - what an application names:
- *    SpiHost<n, route>    the transfer ENGINE: two-phase descriptor
+ *  the tasks - what an application names (a task, in brio, is a driver
+ *  layer with state of its own over a resource, served from its
+ *  peripheral's interrupt or called by an active object):
+ *    SpiHost<n, route>    the transfer engine: two-phase descriptor
  *                         transactions in one chip-select window, the
- *                         instance in BUFFER MODE with two bytes in
+ *                         instance in buffer mode with two bytes in
  *                         flight on both completion styles - a polled
  *                         loop or the RXCIE pump -, the received bytes
- *                         READ BY COUNT, CS and DC owned by the engine.
+ *                         read by count, CS and DC owned by the engine.
  *                         Driven by util/spi_bus.hpp (arbitration and
  *                         replies).
- *    SpiClient<n, route>  the client side: the RUNS answer(), exchange()
+ *    SpiClient<n, route>  the client side: the runs answer(), exchange()
  *                         and receive() - a transaction in one polled
  *                         call, in buffer mode read by the count the
  *                         client's transmitter flags keep of the host's
  *                         transfers -, the per-byte verbs, the ISR
- *                         bodies.
+ *                         bodies. A run is the unit a transport moves:
+ *                         a buffer and a length, a single byte its
+ *                         degenerate case.
  *  A task owns its instance; two tasks on one Spi<n> is the app's bug.
  *
+ * The smallest use, a full-duplex transaction on SPI0's DEFAULT route
+ * (PA4 MOSI, PA5 MISO, PA6 SCK) through the arbiter of util/spi_bus.hpp,
+ * an active object (a component of a brio program with its own event
+ * queue, served one event at a time by the kernel) that runs the
+ * transactions other active objects post to it, one at a time:
+ *
+ *   using SysClock = brio::Clock<brio::ClockSource::crystal, 24'000'000>;
+ *   constexpr SysClock clock;
+ *   using SpiHw = brio::SpiHost<0>;
+ *   using Bus = brio::SpiBus<SpiHw, brio::AvrPlatform>;
+ *
+ *   ISR(SPI0_INT_vect) {
+ *       if (SpiHw::isr()) brio::post<Bus>(brio::TransferDone{SpiHw::status()});
+ *   }
+ *
+ *   // in a handler of the active object Me, tx and rx its own buffers:
+ *   brio::post<Bus>(SpiHw::Request{
+ *       CsPin::ref(), {}, {}, 0,
+ *       brio::lend<brio::Lease::reply>(tx), brio::lend<brio::Lease::reply>(rx), len,
+ *       brio::reply_to<Me, brio::SpiDone>()});
+ *
+ *   int main() {
+ *       SysClock::init();
+ *       CsPin::set();                  // the select: the program's pin, idle high
+ *       CsPin::output();
+ *       SpiHw::init(clock);            // host, buffer mode, SSD set
+ *       sei();
+ *       brio::Tenuto<brio::AvrPlatform, Me, Bus>::run();
+ *   }
+ *
+ * The request leaves its clock (CLK_PER/16), mode (0) and completion
+ * style (the interrupt pump) at their defaults; the reply, an SpiDone,
+ * reaches Me when the transaction is over, and tx and rx are the
+ * engine's until then.
+ *
+ * Who calls what, and from where. Spi<n>::init() and release(),
+ * SpiHost::init() and SpiClient::init() are setup verbs: main(), after
+ * the clock task and before interrupts are enabled globally; none of
+ * them waits (SpiHost::init() empties the receive FIFO with at most four
+ * DATA reads). SpiHost::start() and recover() are the arbiter's, called
+ * from its dispatch in main context; prime() is a main-context verb for
+ * a caller that frames the select itself. start() of a polled request
+ * spins inside the dispatch until the transaction ends - not bounded,
+ * because with SSD set nothing can take the clock generator from this
+ * host and a transfer written always completes - and before the first
+ * clock it spins the request's cs_setup_us; global interrupts stay
+ * enabled, masked only around the burst's last DATA store and the TXCIF
+ * clear behind it (AvrPlatform::CriticalSection). A pumped request's
+ * launch masks its two DATA stores and the flag clear behind them the
+ * same way and returns. recover() waits for the bytes in flight, at most
+ * 512 polls of TXCIF. SpiHost::isr() is the interrupt body: the
+ * program's ISR(SPIn_INT_vect) calls it and nothing else does; it runs
+ * to completion, no other handler interrupting it (avrxt/platform.hpp),
+ * and masks nothing of its own. rebase() is the DynamicClock's fan-out,
+ * with the bus idle. SpiClient's runs and per-byte verbs are polled
+ * main-context verbs (setup, or an active object's handler): a run
+ * spins until its bytes have moved, the host raises the select, a turn
+ * comes late or its `spins` budget runs out, and wait() and the per-byte
+ * exchange() are bounded by their `spins` (500000 by default). Storage:
+ * a Request's cmd, tx and rx are lent until its SpiDone (Lease::reply);
+ * the polled path reads every field through the reference it was lent
+ * and copies nothing, the pump copies the pins, the data phase's spans
+ * and its length at launch. A client run's spans are the caller's again
+ * when the call returns. Spi<n>'s configuring verbs (enable(), clock(),
+ * mode(), lsb_first(), client_select_disable(), buffer_mode(), the
+ * interrupt enables) are read-modify-writes of CTRLA, CTRLB or INTCTRL
+ * with no guard: one owner calls them, from setup or one active object.
+ * Its flag reads are single loads and its flag clears single stores.
+ *
  * Facts that shape the code (28.3, 28.5, errata DS80000915F 2.11.1 +
- * clarifications 3.5.1/3.5.2/3.7.3, and DS80000882C 2.10.1):
- *  - SPI0 and SPI1 exist on EVERY package of the family (28, 32, 48 and
- *    64 pins alike): there are no instance tiers here, only route ones;
- *  - the routes are PORTMUX.SPIROUTEA, two bits per instance, with a
- *    NONE code that disconnects every pin. Which positions a package
- *    bonds is the device header's route enums, and they are the table
- *    below - 28/32-pin parts list DEFAULT and NONE only for both
+ * clarifications 3.5.1/3.5.2/3.7.3, and DS80000882C 2.10.1; the AVR EA's
+ * route table DS40002443A 17.3.5, at SpiRoute below):
+ *  - on the AVR DA and DB, SPI0 and SPI1 exist on every package (28, 32,
+ *    48 and 64 pins alike): there are no instance tiers here, only route
+ *    ones; the AVR EA has SPI0 alone (device_tables.hpp's spi_count, the
+ *    reserve: the table of what each part has, read off the device
+ *    header);
+ *  - the routes are PORTMUX.SPIROUTEA, two bits per instance on the AVR
+ *    DA and DB (three for the AVR EA's SPI0), with a NONE code that
+ *    disconnects every pin. Which positions a package bonds is the
+ *    device header's route enums, and they are the table below -
+ *    28/32-pin AVR DA/DB parts list DEFAULT and NONE only for both
  *    instances;
- *  - ERRATA BEATS HEADER: the 48-pin header lists SPI1 ALT2 (MOSI PB4,
- *    MISO PB5, no SCK, no SS position), and DB errata 2.11.1 says that
- *    position is NON-FUNCTIONAL on 48-pin devices (rev. A4/A5; fixed in
- *    B0). The DA errata (DS80000882C) has no twin item, but the 48-pin
- *    DA header bonds no SCK for that route either - a host cannot clock
- *    and a client cannot be clocked - so the route is refused on 48-pin
- *    parts of BOTH families, at compile time and at run time;
+ *  - an erratum beats the header: the 48-pin header lists SPI1 ALT2
+ *    (MOSI PB4, MISO PB5, no SCK, no SS position), and DB errata 2.11.1
+ *    says that position is non-functional on 48-pin devices (rev. A4/A5;
+ *    fixed in B0). The DA errata (DS80000882C) has no twin item, but the
+ *    48-pin DA header bonds no SCK for that route either - a host cannot
+ *    clock and a client cannot be clocked - so the route is refused on
+ *    48-pin parts of both families, at compile time and at run time;
  *  - DA errata 2.10.1: with PORTMUX.SPIROUTE at NONE the Client Select
- *    line must be DISABLED (CTRLB.SSD = 1) for Host mode to survive. It
+ *    line must be disabled (CTRLB.SSD = 1) for Host mode to survive. It
  *    is listed for every DA revision and not at all for the DB, but the
  *    configuration it forbids (a pinless host still watching an SS
  *    input that no pin can hold high) has no use, so it is refused on
@@ -61,17 +144,17 @@
  *  - the host's SCK ceiling is CLK_PER/2 and a client's is CLK_PER/6
  *    (errata clarification 3.7.3 - the chapter's own "two peripheral
  *    clocks per SCK phase" would say /4; the tighter table wins);
- *  - TWO INTFLAGS LAYOUTS at the same address, chosen by CTRLB.BUFEN,
- *    with DIFFERENT clear disciplines (28.5.4, 28.5.5):
- *      normal mode: IF is cleared by writing a one to it OR by reading
- *      INTFLAGS while it is set and then accessing DATA; WRCOL has ONLY
- *      the read-then-DATA sequence documented, so clear_write_collision
- *      performs it;
+ *  - two INTFLAGS layouts at the same address, chosen by CTRLB.BUFEN,
+ *    with different clear disciplines (28.5.4, 28.5.5):
+ *      normal mode: IF is cleared by writing a one to it or by reading
+ *      INTFLAGS while it is set and then accessing DATA; WRCOL has only
+ *      the read-then-DATA sequence documented, so
+ *      clear_flags_by_data_access() performs it;
  *      buffer mode: TXCIF, SSIF and BUFOVF are write-one-to-clear (a
- *      PLAIN store of the single bit - an RMW would write back every
+ *      plain store of the single bit - an RMW would write back every
  *      flag it read and clear the lot, the pin.hpp discipline); RXCIF
  *      and BUFOVF also clear by reading DATA, and DREIF is cleared by
- *      WRITING DATA - never by a store to INTFLAGS;
+ *      writing DATA - never by a store to INTFLAGS;
  *  - host demotion (28.3.2.1.3): with SSD = 0 and the SS pin an input
  *    driven low, the hardware clears CTRLA.MASTER, the instance becomes
  *    a client, and IF (normal) or SSIF (buffer) is set. Nothing but the
@@ -84,10 +167,10 @@
  *  - the SPI has one interrupt vector (SPIn_INT) for both layouts and
  *    one event generator (SCK level in host mode, evsys.hpp EvSpiSck);
  *    it has no event users and no DBGCTRL/RUNSTDBY of its own;
- *  - A READ THAT EMPTIES THE FIFO AS A BYTE ENTERS IT IS NOT TAKEN
+ *  - a read that empties the FIFO as a byte enters it is not taken
  *    (measured, no erratum names it): the read returns the byte at the
  *    head and leaves it there, the arriving byte queues behind it, and
- *    RXCIF falls; the next read returns the SAME byte again and brings
+ *    RXCIF falls; the next read returns the same byte again and brings
  *    the flag back. A read that leaves a byte behind never meets that
  *    cycle, and neither does one made with nothing in flight. RXCIF is
  *    therefore a hint and never a count: SpiHost reads what the
@@ -120,8 +203,8 @@ namespace brio {
 
 // ---- routes and pins (DS40002247B 17.5.8, 28.2.2; DS40002443A 17.3.5) -------
 
-/// SPI pin routing (PORTMUX.SPIROUTEA), by NAME. On the AVR DA/DB the
-/// values ARE the device header's group values, `none` included (DEFAULT
+/// SPI pin routing (PORTMUX.SPIROUTEA), by name. On the AVR DA/DB the
+/// values are the device header's group values, `none` included (DEFAULT
 /// 0, ALT1 1, ALT2 2, NONE 3). On the AVR EA's layout SPI0's field is
 /// three bits wide, code 2 is reserved and NONE is 7 (DS40002443A 17.3.5):
 /// there the names ALT3..ALT6 exist, ALT2 does not, and every route's code
@@ -176,7 +259,7 @@ constexpr SpiRoute spi_route_of_code(uint8_t n, uint8_t code) {
 /// The four signals of a route (28.2.2), in pin order.
 enum class SpiSignal : uint8_t { mosi = 0, miso = 1, sck = 2, ss = 3 };
 
-/// Where one signal of one route sits, and whether THIS package bonds
+/// Where one signal of one route sits, and whether this package bonds
 /// it out. `bonded == false` means the silicon has the function but no
 /// pin for it here.
 struct SpiPin {
@@ -230,7 +313,7 @@ constexpr bool spi_route_exists(uint8_t n, SpiRoute r) {
     return true;
 }
 
-/// The position of one signal of one route on THIS package.
+/// The position of one signal of one route on this package.
 constexpr SpiPin spi_pin(uint8_t n, SpiRoute r, SpiSignal s) {
     if (n >= spi_count || r == SpiRoute::none || !spi_route_exists(n, r)) return {};
     const char port = spi_port_letter(n, r);
@@ -288,7 +371,7 @@ constexpr bool spi_route_exists(uint8_t n, SpiRoute r) {
     return port_exists(spi_port_letter(n, r));
 }
 
-/// The position of one signal of one route on THIS package.
+/// The position of one signal of one route on this package.
 constexpr SpiPin spi_pin(uint8_t n, SpiRoute r, SpiSignal s) {
     if (n >= spi_count || r == SpiRoute::none) return {};
     const char port = spi_port_letter(n, r);
@@ -310,7 +393,7 @@ constexpr SpiPin spi_pin(uint8_t n, SpiRoute r, SpiSignal s) {
 enum class SpiRole : uint8_t { host, client };
 
 /// CTRLB.MODE: the four clock phase/polarity combinations (28.3.2.3).
-/// The values ARE the device header's codes.
+/// The values are the device header's codes.
 enum class SpiMode : uint8_t {
     mode0 = SPI_MODE_0_gc,   ///< SCK idle low,  sample on the leading (rising) edge
     mode1 = SPI_MODE_1_gc,   ///< SCK idle low,  sample on the trailing (falling) edge
@@ -324,7 +407,7 @@ constexpr bool spi_cpol(SpiMode m) { return (static_cast<uint8_t>(m) & 0x02u) !=
 /// CPHA (MODE bit 0): the sampling edge is the trailing one.
 constexpr bool spi_cpha(SpiMode m) { return (static_cast<uint8_t>(m) & 0x01u) != 0; }
 
-/// The SEVEN host bit rates, named by what they divide CLK_PER by
+/// The seven host bit rates, named by what they divide CLK_PER by
 /// (28.5.1: PRESC picks 4/16/64/128, CLK2X halves it). CLK_PER/64 is
 /// reachable two ways; the canonical encoding here is PRESC DIV64
 /// without the doubler.
@@ -352,7 +435,7 @@ constexpr uint8_t spi_division(SpiClock c) {
 }
 
 /// The CTRLA bits (PRESC and CLK2X) that produce this rate. The enum's
-/// order IS the register's: its two high bits are PRESC (DIV4 for div2
+/// order is the register's: its two high bits are PRESC (DIV4 for div2
 /// and div4, DIV16 for div8 and div16, DIV64 for div32 and div64, DIV128
 /// for div128) and CLK2X belongs to the even member of each pair -
 /// div128 excepted, whose doubled twin would be div64 again. Arithmetic
@@ -388,7 +471,7 @@ constexpr uint32_t spi_sck_hz(uint32_t clk_per_hz, SpiClock c) {
     return clk_per_hz / spi_division(c);
 }
 
-/// The FASTEST rate whose SCK does not exceed `max_sck_hz` - the
+/// The fastest rate whose SCK does not exceed `max_sck_hz` - the
 /// chooser a device's datasheet limit is spoken to. Empty when even
 /// CLK_PER/128 is too fast for it.
 constexpr std::optional<SpiClock> spi_clock_for(uint32_t clk_per_hz, uint32_t max_sck_hz) {
@@ -543,7 +626,7 @@ public:
     static void enable(bool on) { ctrla(SPI_ENABLE_bm, on); }
     static bool enabled() { return (regs().CTRLA & SPI_ENABLE_bm) != 0; }
 
-    /// CTRLA.MASTER. The HARDWARE clears it on a demotion (28.3.2.1.3),
+    /// CTRLA.MASTER. The hardware clears it on a demotion (28.3.2.1.3),
     /// so this is a readback, not a memory of what was asked for.
     static bool is_host() { return (regs().CTRLA & SPI_MASTER_bm) != 0; }
     /// The role init() asked for - what is_host() is compared against.
@@ -580,10 +663,10 @@ public:
     // ---- CTRLB -----------------------------------------------------------
 
     /// The transfer mode. A CPOL change moves the SCK line's idle level,
-    /// and the AVR only refreshes the SCK OUTPUT while the peripheral is
+    /// and the AVR only refreshes the SCK output while the peripheral is
     /// enabled and at a transfer - not on a CTRLB write (bench: SCK
-    /// still low 10 us after a switch to mode 3). SpiHost::apply_mode
-    /// does the disable/preset/enable dance around this verb; a caller
+    /// still low 10 us after a switch to mode 3). SpiHost's reprogram(),
+    /// behind its apply(), does the disable/preset/enable dance itself; a caller
     /// changing polarity by hand must do the same.
     static void mode(SpiMode m) {
         mode_ = m;
@@ -610,7 +693,7 @@ public:
 
     // ---- data (28.5.6) ---------------------------------------------------
 
-    /// Write DATA: in host mode this STARTS a transfer; in client mode
+    /// Write DATA: in host mode this starts a transfer; in client mode
     /// it loads what the next incoming clock will shift out. In normal
     /// mode a write while a transfer is running is ignored and sets
     /// WRCOL; in buffer mode it is accepted while DREIF is set.
@@ -658,12 +741,12 @@ public:
     /// WRCOL: DATA was written while a transfer was running (the write
     /// was ignored; the transfer itself is unharmed).
     static bool write_collision() { return (regs().INTFLAGS & SPI_WRCOL_bm) != 0; }
-    /// The documented W1C half of the normal layout: IF alone (a PLAIN
+    /// The documented W1C half of the normal layout: IF alone (a plain
     /// store of the one bit - the pin.hpp discipline). WRCOL has no W1C
     /// path in the register description: use clear_flags_by_data_access.
     static void clear_if() { regs().INTFLAGS = SPI_IF_bm; }
     /// The other documented sequence: read INTFLAGS while the flag is
-    /// set, then access DATA. It is the ONLY way the chapter gives for
+    /// set, then access DATA. It is the only way the chapter gives for
     /// WRCOL, and it clears IF with it.
     static void clear_flags_by_data_access() {
         (void)regs().INTFLAGS;
@@ -677,7 +760,7 @@ public:
     static bool rxc_flag() { return (regs().INTFLAGS & SPI_RXCIF_bm) != 0; }
     /// TXCIF: the shifter and the transmit buffer are both empty. W1C.
     static bool txc_flag() { return (regs().INTFLAGS & SPI_TXCIF_bm) != 0; }
-    /// DREIF: room in the transmit buffer. Cleared by WRITING DATA -
+    /// DREIF: room in the transmit buffer. Cleared by writing DATA -
     /// never by a store to INTFLAGS.
     static bool dre_flag() { return (regs().INTFLAGS & SPI_DREIF_bm) != 0; }
     /// SSIF: the SS pin took a host out of Host mode (SSD = 0 only). W1C.
@@ -699,7 +782,7 @@ public:
     /// entry the flag shows (the FIFO's two and the shifter's one at
     /// most), BUFOVF cleared. A read of an empty FIFO returns the last
     /// byte read and changes nothing after it (docs/avrxt/spi.md). init()
-    /// does NOT do this: its store of one to RXCIF drops the flag and
+    /// does not do this: its store of one to RXCIF drops the flag and
     /// leaves the bytes, so a FIFO a former user left non-empty starts
     /// the next buffer-mode user with the flag down over it - and an
     /// RXCIF-paced reader is deaf from then on, every arrival queueing
@@ -739,7 +822,7 @@ public:
         constexpr bool collision() const { return (flags & SPI_WRCOL_bm) != 0; }
     };
 
-    /// ISR body for SPIn_INT_vect in NORMAL mode: read INTFLAGS, then
+    /// ISR body for SPIn_INT_vect in normal mode: read INTFLAGS, then
     /// DATA - the clear sequence - and hand both back.
     [[gnu::always_inline]] static NormalIsr take_normal() {
         const uint8_t f = regs().INTFLAGS;
@@ -747,9 +830,9 @@ public:
         return {f, d};
     }
 
-    /// ISR body for SPIn_INT_vect in BUFFER mode: the flags, with the
+    /// ISR body for SPIn_INT_vect in buffer mode: the flags, with the
     /// write-one-to-clear ones cleared (TXCIF, SSIF, BUFOVF by default).
-    /// RXCIF and DREIF are NOT cleared here - they follow the data: the
+    /// RXCIF and DREIF are not cleared here - they follow the data: the
     /// handler reads DATA to drain the FIFO and writes DATA to refill
     /// the transmitter.
     [[gnu::always_inline]] static uint8_t take_buffer(
@@ -920,16 +1003,17 @@ private:
 /*
  * SpiHost<n, route>
  *
- * The transfer ENGINE: the target-side half of the SPI stack, driven by
+ * The transfer engine: the target-side half of the SPI stack, driven by
  * util/spi_bus.hpp (which owns arbitration and replies). This task owns
  * the wire: chip select, the D/C line of display-style devices, and the
- * byte pump under the SPI interrupt (no DMA on AVR Dx).
+ * byte pump under the SPI interrupt (the AVR DA, DB and EA have no DMA
+ * controller).
  *
- * Transaction descriptor (Request) - two phases in ONE chip-select
+ * Transaction descriptor (Request) - two phases in one chip-select
  * window, covering every device on the bench:
  *
- *   phase 1 (optional): cmd[cmd_len] transmitted with DC LOW
- *   phase 2 (optional): len bytes with DC HIGH, FULL-DUPLEX -
+ *   phase 1 (optional): cmd[cmd_len] transmitted with DC low
+ *   phase 2 (optional): len bytes with DC high, full duplex -
  *                       transmit tx[] (or 0xFF dummies if tx == null),
  *                       capture into rx[] (or discard if rx == null)
  *
@@ -939,13 +1023,13 @@ private:
  *   - loopback / generic xfer:  tx and rx both set (true full duplex)
  *   - SD card:                  sequences of plain xfers
  *
- * CS is ACTIVE LOW and asserted/released by the engine around the whole
+ * CS is active low and asserted/released by the engine around the whole
  * transaction; dc may be a null PinRef for DC-less devices. Buffer
  * ownership travels with the request (the client hands the spans off
  * until its SpiDone comes back). A zero-total-length request completes
  * on the spot without touching the wire (SpiDone still arrives).
  *
- * THE ENGINE RUNS THE INSTANCE IN BUFFER MODE (28.3.2.1.2): the
+ * The engine runs the instance in buffer mode (28.3.2.1.2): the
  * transmitter is a shift register plus one buffer, so two bytes are in
  * flight and the wire never waits for the software while the software
  * keeps up; the receiver is a two-entry FIFO in front of the shifter,
@@ -963,8 +1047,8 @@ private:
  *    DREIF before each one that follows;
  *  - a received byte lands in the FIFO when its transfer completes
  *    (rule 2), and the FIFO must be read at least every second transfer
- *    (rule 3). The engine READS BY COUNT: it keeps how many bytes it has
- *    written and not yet read and reads what the TRANSMITTER's flags
+ *    (rule 3). The engine reads by count: it keeps how many bytes it has
+ *    written and not yet read and reads what the transmitter's flags
  *    prove has arrived - every written byte but the one shifting once
  *    DREIF stands, every written byte once TXCIF does -, never by RXCIF,
  *    which a read that empties the FIFO as a byte enters it loses (this
@@ -979,9 +1063,9 @@ private:
  *    loop or a late handler (an interrupt of the console's or the
  *    tick's inside a burst) idles the wire and loses nothing, at every
  *    division;
- *  - TXCIF says shifter and buffer are both empty: a CONDITION the
+ *  - TXCIF says shifter and buffer are both empty: a condition the
  *    register keeps (docs/avrxt/spi.md "Buffer mode"), so it speaks of a
- *    write only when it is cleared BEHIND that write, while the byte
+ *    write only when it is cleared behind that write, while the byte
  *    shifts and no earlier emptiness can raise it again. A polled burst
  *    clears it behind its last write with the two stores masked together
  *    - an interrupt between them could let the byte finish and the clear
@@ -994,10 +1078,10 @@ private:
  * recover() make it so (one DATA read whatever the flag says, then the
  * FIFO drained).
  *
- * The POLLED path completes inside start() and reads every field of the
+ * The polled path completes inside start() and reads every field of the
  * request through the reference it was lent (the arbiter's contract:
  * the slot stays as it is until the dispatch ends) - it copies nothing.
- * The PUMP (polled false) copies at launch what its tenure needs - the
+ * The pump (polled false) copies at launch what its tenure needs - the
  * two pins, the data phase's spans and length - into the engine's own
  * state, and runs on RXCIE with TXCIE beside it: the handler reads by
  * the same count and writes the next bytes until two are in flight. A
@@ -1005,9 +1089,10 @@ private:
  * complete, TXCIF rises with RXCIF down, and the handler drops the
  * repeated byte and reads both - a hiccup, not a stall.
  *
- * ISR wiring (app glue, as usual):
+ * ISR wiring (app glue, as usual), with `using Bus = brio::SpiBus<SpiHw,
+ * brio::AvrPlatform>;`:
  *   ISR(SPI0_INT_vect) {
- *       if (SpiHw::isr()) { brio::post<SpiBus>(brio::TransferDone{brio::spi_ok}); }
+ *       if (SpiHw::isr()) { brio::post<Bus>(brio::TransferDone{SpiHw::status()}); }
  *   }
  */
 template <uint8_t n, SpiRoute route = SpiRoute::def>
@@ -1036,45 +1121,45 @@ public:
         spi_route_exists(n, route) &&
         (route == SpiRoute::none || spi_pin(n, route, SpiSignal::sck).bonded);
 
-    /// THE LAYOUT: 21 bytes and no padding on this core (every type here
+    /// The layout: 21 bytes and no padding on this core (every type here
     /// is byte-aligned): two PinRefs of three, three pointers of two, a
     /// byte and a word of lengths, the reply's two, four bytes of
-    /// settings. The first fifteen are the TENURE's - what the pump
+    /// settings. The first fifteen are the tenure's - what the pump
     /// still needs once start() has returned - and lie together; the
     /// rest is consumed inside start(). The field names are the
     /// contract every stratum shares (docs/design/spi-bus.md).
     struct Request {
         PinRef cs;             ///< asserted low around the transaction
         PinRef dc;             ///< display D/C line; null = no such pin
-        /// Phase 1, sent with DC low; LENT until the reply lands.
+        /// Phase 1, sent with DC low; lent until the reply lands.
         Borrowed<const uint8_t, Lease::reply> cmd;
         uint8_t cmd_len;
-        /// Phase 2 out, null = 0xFF dummies; LENT until the reply lands.
+        /// Phase 2 out, null = 0xFF dummies; lent until the reply lands.
         Borrowed<const uint8_t, Lease::reply> tx;
-        /// Phase 2 in, null = discard; LENT until the reply lands.
+        /// Phase 2 in, null = discard; lent until the reply lands.
         Borrowed<uint8_t, Lease::reply> rx;
         uint16_t len;          ///< phase 2 length
         ReplyTo<SpiDone> reply;
-        // Per-transaction bus configuration: on a SHARED bus every
+        // Per-transaction bus configuration: on a shared bus every
         // device names its own speed and mode in the request (ILI9481
         // at 6 MHz, XPT2046 capped at ~2.5 MHz, ...); the engine folds
         // both into the two register bytes the block takes, compares
         // them with the pair it last wrote, and reprograms only on a
-        // change - nothing per byte. The rate is a DIVISION of CLK_PER,
+        // change - nothing per byte. The rate is a division of CLK_PER,
         // so it follows a clock change by itself; max_sck_hz() is the
         // ceiling that clamps it.
         SpiClock clock = SpiClock::div16;
         SpiMode mode = SpiMode::mode0;
         // Completion style, also the client's call: false = the
         // interrupt pump (the kernel keeps running between bytes -
-        // right for slow clocks and short transfers); true = POLLED
+        // right for slow clocks and short transfers); true = polled
         // inside start(), completing synchronously. The polled loop is
         // wire-bound from CLK_PER/4 (a byte is 32 CPU cycles there and
         // the loop fewer, counted in docs/avrxt/spi.md); the pump keeps
         // two bytes in flight, so the wire runs while its handler does,
         // but one interrupt per byte costs more than a byte at the fast
         // divisions and the pump is CPU-bound there. The price of
-        // polling is that THIS dispatch blocks for the whole transfer
+        // polling is that this dispatch blocks for the whole transfer
         // (bounded, chosen here); global interrupts stay enabled
         // throughout - the SPI's own interrupt is never armed for a
         // polled request.
@@ -1085,7 +1170,7 @@ public:
         // from shutdown on CS may need more: the MCP3550 datasheet
         // specifies tRDY <= 50 ns but only says "an internal power-up
         // delay must be observed" when exiting Shutdown (DS20001950F
-        // 5.2) - MEASURED: SDO drives ~4 us after CS falls, and a frame
+        // 5.2) - measured: SDO drives ~4 us after CS falls, and a frame
         // clocked 1.5 us after CS is lost (0x7FFFFF), 3.5 us is enough,
         // dac_adc uses 10. Spent spinning in start(), main context,
         // bounded by this byte; tested before the delay is called, so
@@ -1097,17 +1182,23 @@ public:
 
     /**
      * Host, MSB first, SSD set (the SS position stays free for a GPIO -
-     * chip selects are the engine's, not the peripheral's), BUFFER MODE
+     * chip selects are the engine's, not the peripheral's), buffer mode
      * on. Call after clock init, before sei(). CS/DC pins are configured
      * by their owners (the device clients), not here; clock and mode
      * travel per-request. `clock` is the app's brio::Clock tag: the
      * per-request cs_setup_us delay is timed from Clock::hz.
      *
-     * `max_sck_hz` is an optional CEILING for the whole bus: with it set
+     * `max_sck_hz` is an optional ceiling for the whole bus: with it set
      * the engine slows any request that would exceed it (and re-picks
      * the division after a clock change), which is what makes rebase()
      * meaningful. 0 = no ceiling, the request's division is used as it
      * stands.
+     *
+     * True with the instance enabled as a host, the receive FIFO empty
+     * and the pump idle. False, no register written, when this package
+     * does not bond the route's SCK (`available`), when even CLK_PER/128
+     * is faster than the ceiling, or when the resource refuses the
+     * configuration.
      */
     template <typename Clock>
     static bool init(Clock clock, uint32_t max_sck_hz = 0) {
@@ -1149,7 +1240,7 @@ public:
     /// divisions travel per request and scale with CLK_PER by
     /// themselves, so what is recomputed here is the cs_setup_us timing
     /// base and - when a ceiling was asked for - the slowest division
-    /// that still honours it. The bus must be IDLE: a transfer in
+    /// that still honours it. The bus must be idle: a transfer in
     /// flight keeps the old division for its remaining bytes.
     static void rebase(uint32_t hz) {
         clk_per_hz_ = hz;
@@ -1176,15 +1267,15 @@ public:
     /// exists so the glue is spelled the same way on every stratum.
     static constexpr uint8_t status() { return spi_ok; }
 
-    /// FOR CALLERS THAT FRAME THE SELECT WINDOW THEMSELVES (Request.cs
+    /// For callers that frame the select window themselves (Request.cs
     /// null). start() applies a request's mode before it asserts the
     /// request's own cs, so an engine-owned select window always opens
     /// with SCK settled at the new idle level - but a caller driving CS
-    /// by hand inverts that order, and a mode change is a CPOL FLIP ON
-    /// THE WIRE (the SCK pad moves to the new idle level while the
+    /// by hand inverts that order, and a mode change is a CPOL flip on
+    /// the wire (the SCK pad moves to the new idle level while the
     /// peripheral is off): flipped inside an open select window it is
     /// one extra edge a selected client can count into the character.
-    /// Prime FIRST, then assert the select.
+    /// Prime first, then assert the select. Main context.
     static void prime(SpiMode mode, SpiClock clock) { apply(mode, clamp(clock)); }
 
     /// Begin a transaction (called by SpiBus from main context).
@@ -1192,7 +1283,7 @@ public:
     /// (polled requests, and the degenerate zero-length one); false
     /// when it runs on the ISR and a TransferDone will follow.
     ///
-    /// The request is LENT for this call and read through `r`: the
+    /// The request is lent for this call and read through `r`: the
     /// polled path, which completes before returning, keeps nothing;
     /// the pump copies its tenure's fields in launch().
     static bool start(const Request& r) {
@@ -1247,7 +1338,8 @@ public:
     }
 
     /**
-     * SPI interrupt body - call from ISR(SPIn_INT_vect). The pump runs
+     * SPI interrupt body - call from ISR(SPIn_INT_vect) and from nowhere
+     * else. The pump runs
      * on RXCIE and TXCIE. The body reads the flags once, reads out of the
      * FIFO every byte the transmitter's flags prove has arrived (all it
      * wrote once TXCIF stands, all but the one shifting once DREIF does,
@@ -1614,28 +1706,28 @@ private:
  * SpiClient<n, route>
  *
  * The other end of the wire (28.3.2.2): SS, MOSI and SCK are inputs, the
- * host sets the pace, and the only thing this side controls is WHAT it
+ * host sets the pace, and the only thing this side controls is what it
  * has ready to shift out when the next clock arrives.
  *
  *  - NORMAL mode: one byte in flight. preload() while SS is high, then
  *    every byte the host clocks in arrives with IF set and the byte
- *    written last goes out. A write during a transfer is IGNORED and
+ *    written last goes out. A write during a transfer is ignored and
  *    sets WRCOL (a client cannot corrupt a frame the way a host can).
  *  - BUFFER mode: two transmit levels and a two-deep receive FIFO, with
  *    DREIF/TXCIF/RXCIF/BUFOVF instead of IF. `buffer_wait` (BUFWR)
- *    decides whether the FIRST byte the host clocks out is the one the
+ *    decides whether the first byte the host clocks out is the one the
  *    application wrote (BUFWR = 1: the write goes straight to the
- *    shifter while SS is high) or a DUMMY equal to whatever the shift
+ *    shifter while SS is high) or a dummy equal to whatever the shift
  *    register held (BUFWR = 0). Errata clarification 3.5.2 warns that a
  *    client in buffer mode near the maximum SCK may not set up data in
  *    time for the first sample edge of a back-to-back transfer.
  *
  * The SS pin is the frame boundary: driven high, the state machine is
- * RESET and a partial byte is lost (28.3.2.2.3). selected() reads it.
+ * reset and a partial byte is lost (28.3.2.2.3). selected() reads it.
  *
- * Its unit is the RUN - answer(), exchange(), receive() serve a
+ * Its unit is the run - answer(), exchange(), receive() serve a
  * transaction's bytes in one polled call - and the per-byte verbs are the
- * degenerate case. In buffer mode the runs READ BY COUNT and never by
+ * degenerate case. In buffer mode the runs read by count and never by
  * RXCIF: the client's transmitter flags count the host's transfers
  * (28.3.2.2.2: DREIF rises after each transfer that moves the transmit
  * buffer into the shifter, RXCIF one cycle after it, TXCIF one cycle
@@ -1710,7 +1802,7 @@ public:
         }
     }
 
-    /// The SS pin's level: LOW means this client is selected and the
+    /// The SS pin's level: low means this client is selected and the
     /// next SCK edge shifts. Reads the pin through PORT (the SPI does
     /// not report it outside buffer mode's SSIF).
     static bool selected() {
@@ -1722,17 +1814,17 @@ public:
         }
     }
 
-    /// HOW MANY ANSWERS MUST BE QUEUED AHEAD of the frame the host is
+    /// How many answers must be queued ahead of the frame the host is
     /// about to clock for them to reach the wire in order - the one
     /// integer that differs between this family's client pump and the
-    /// other strata's. ONE here: the byte written last goes out with the
+    /// other strata's. One here: the byte written last goes out with the
     /// next clock, so a write made in the gap after IF is in time (with
     /// BUFWR two can be queued, but one is what the pump needs).
     static constexpr uint8_t frames_ahead = 1;
 
     /// Load what the next clocked byte will carry out. While SS is high
     /// this is the answer prepared for the coming frame; in normal mode
-    /// during a transfer it is IGNORED and sets WRCOL.
+    /// during a transfer it is ignored and sets WRCOL.
     static void preload(uint8_t v) { S::write(v); }
 
     /// A byte if one has arrived (IF, or RXCIF in buffer mode).
@@ -1758,12 +1850,12 @@ public:
 
     // ---- the polled runs -----------------------------------------------------
     //
-    // A client's unit is the RUN: the answers to a transaction, or what it
+    // A client's unit is the run: the answers to a transaction, or what it
     // brings, served polled in one call. What bounds a run on this block
     // is one level of slack on each side (28.3.2.2.2): an answer written on
     // the DREIF that marks transfer t's end goes out in transfer t + 2, and
     // the FIFO, holding the newest byte and the one before it, has room for
-    // the byte of transfer t + 1 only once the older is read. So a TURN -
+    // the byte of transfer t + 1 only once the older is read. So a turn -
     // the flag seen, the older byte read, the next answer written - has
     // the whole of transfer t + 1 to land in, eight SCK periods. A turn
     // later than that finds the transmitter run dry, and the transfer that
@@ -1774,7 +1866,7 @@ public:
     // The cost of each turn is counted in the release listing and measured
     // against the wire in docs/avrxt/spi.md.
     //
-    // A run is called with the select HIGH and the transmitter empty (a
+    // A run is called with the select high and the transmitter empty (a
     // fresh init(), or a former run that ended complete): the preload goes
     // into the shifter (BUFWR) or the buffer before the host can clock.
     // The select pad is the window: a run waits for it to fall (or for the
@@ -1797,7 +1889,7 @@ public:
     };
 
     /**
-     * ANSWER a transaction with `out`, polled on DREIF alone, reading
+     * Answer a transaction with `out`, polled on DREIF alone, reading
      * nothing. In buffer mode the first answer is written with the select
      * still high - into the shifter under BUFWR, the buffer's second
      * beside it; without BUFWR into the buffer, and the shifter's leftover
@@ -1807,10 +1899,10 @@ public:
      * (28.3.2.2.1: a write during a transfer is ignored and raises WRCOL,
      * which ends the run `late`).
      *
-     * The run ENDS WHEN THE HOST RAISES THE SELECT, however many bytes it
+     * The run ends when the host raises the select, however many bytes it
      * clocked: fewer than the run, and `count` says how many answers were
      * loaded; more, and the bytes past the run carry what the shifter is
-     * left with. NOTHING IS READ while it runs, so the FIFO fills and what
+     * left with. Nothing is read while it runs, so the FIFO fills and what
      * the host sent is lost; the tail empties the FIFO (flush_receive) so
      * the next run starts clean.
      *
@@ -1829,9 +1921,9 @@ public:
     }
 
     /**
-     * EXCHANGE: answer with `out` and keep what the host sends in `in`,
+     * Exchange: answer with `out` and keep what the host sends in `in`,
      * the run's length the shorter of the two. The answers go as
-     * answer()'s; in buffer mode each turn then reads the byte BEFORE the
+     * answer()'s; in buffer mode each turn then reads the byte before the
      * one that just arrived (the count above), and the last two are read
      * once the last transfer is in - TXCIF under BUFWR, the last DREIF
      * without. In normal mode a turn reads the byte IF announced, after
@@ -1858,7 +1950,7 @@ public:
     }
 
     /**
-     * RECEIVE a run into `in`. In buffer mode the run still WRITES, the
+     * Receive a run into `in`. In buffer mode the run still writes, the
      * byte `fill` on every turn: the transmitter's flags are this block's
      * only count of the host's transfers, and a buffer left empty raises
      * no DREIF. What the host reads meanwhile is the fill (after the
@@ -1890,7 +1982,7 @@ public:
     [[gnu::always_inline]] static uint8_t take_buffer() { return S::take_buffer(); }
 
     /// ClockUser: a client derives no rate from CLK_PER - the host does
-    /// the clocking - but the FASTEST SCK it can follow is CLK_PER/6
+    /// the clocking - but the fastest SCK it can follow is CLK_PER/6
     /// (errata clarification 3.7.3), so the peripheral clock is kept for
     /// that readback. Nothing is reprogrammed.
     static void rebase(uint32_t hz) { clk_per_hz_ = hz; }

@@ -1,43 +1,100 @@
 /*
  * adc.hpp
  *
- * Adc<n>: the analog-to-digital converter of the stratum as ONE brio
- * task with knobs - see docs/avrxt/adc.md for why not several: every use
+ * Adc<n>: voltages measured - a sensor on a pin, a differential pair,
+ * the supply, the die's temperature, a stream of samples paced by a
+ * timer - with the analog-to-digital converter of an AVR DA, DB or EA.
+ * A program configures the one converter once with an AdcConfig, names
+ * an input, and either reads it (blocking) or lets the RESRDY interrupt
+ * hand each result to an active object (a component of a brio program
+ * with its own event queue, served one event at a time by the kernel).
+ * The smallest use, a blocking reading of PD1 on the DA/DB:
+ *
+ *     using SysClock = brio::Clock<brio::ClockSource::crystal, 24'000'000>;
+ *     constexpr SysClock clock;
+ *     using Meter = brio::Adc<0>;
+ *     using Wire = brio::AnalogIn<brio::Pin<'D', 1>>;            // AIN1
+ *
+ *     SysClock::init();                                          // first in main()
+ *     Meter::init<brio::AdcConfig{.reference = brio::Ref::v2048}>(clock);   // checked at compile time
+ *     Meter::select(Wire{});
+ *     const uint16_t raw = Meter::read();                        // start, wait, read
+ *
+ * On the AVR EA (its board's 20 MHz crystal, CLK_ADC 2 MHz by default)
+ * the same reading states the sampling an internal reference needs,
+ * which init<cfg>() refuses to go without, and claims the pad once:
+ *
+ *     Meter::init<brio::AdcConfig{.reference = brio::Ref::v2048,
+ *                                 .sample_duration = 8}>(clock);   // 4 us x 2 MHz
+ *     Meter::claim(Wire{});
+ *     Meter::select(Wire{});
+ *     const uint16_t raw = Meter::read();
+ *
+ * Results as events: the program binds the vector and posts what the
+ * interrupt body returns (the ISR condenses, the active object decides;
+ * Monitor is the program's active object, AdcResult its event), the
+ * interrupt enabled by enable_resrdy_interrupt(true) before sei():
+ *
+ *     ISR(ADC0_RESRDY_vect) { brio::post<Monitor>(AdcResult{Meter::resrdy()}); }
+ *
+ * Which context calls what. init() (both forms), reconfigure(),
+ * disable(), the window and interrupt-enable verbs, start_on() and
+ * start_on_events() are setup verbs of the converter's one owner:
+ * main() after the clock task, or the handler of the active object that
+ * owns the converter. The interrupt-enable verbs are a read-modify-write
+ * of INTCTRL with no guard, so they are not called from an interrupt
+ * body while the owner configures. resrdy(), wcmp() (the DA/DB),
+ * samprdy() and error() (the EA) are interrupt bodies, called from the
+ * program's handler for their vector; error() is also the polled form.
+ * Nothing in this file masks interrupts. What waits: the DA/DB's init()
+ * waits 10 us of warm-up (delay_us on the clock's rate), the EA's waits
+ * for nothing; read(), read_sum() (the EA) and flush() (the DA/DB) spin
+ * until RESRDY with no time-out, a conversion's length on an enabled
+ * converter (on the EA plus the initialization table 31-5 times, up to
+ * 60 us with LOWLAT off), and a disabled converter never raises RESRDY;
+ * reconfigure() and the DA/DB's rebase() spin on busy() until the
+ * converter is idle; the EA's select under an event pace spins the
+ * output latency, 36 CLK_PER at most, with interrupts on. One converter, one owner: the window match a
+ * result read captures, and on the EA the TEMP registers its 16- and
+ * 32-bit registers share, are state for one context at a time. The
+ * driver holds no buffer.
+ *
+ * Adc<n> is the analog-to-digital converter of the stratum as one brio
+ * task with knobs (a task: a driver layer with state of its own over a
+ * resource, served from its peripheral's interrupt or called by an
+ * active object) - see docs/avrxt/adc.md for why not several: every use
  * (single reading, paced stream, oversampled reading, window watch,
  * temperature, supply monitor) is the same sequence - select input,
  * trigger, wait for the result, read it - with different knobs and
  * different consumers of the same events. So: one type, a config struct
  * that owns the whole configuration, inputs as types, the ISR bodies for
  * the app to bind and post, and event start through the event system.
- * Ownership of the one converter belongs to one AO.
+ * Ownership of the one converter belongs to one active object.
  *
- * TWO CONVERTERS, TWO ENGINES, ONE FILE. The AVR DA and DB carry a
+ * Two converters, two engines, one file. The AVR DA and DB carry a
  * 12-bit SAR ADC with a 16-bit result register and a buffered input mux
- * (DS40002247B ch. 33); the AVR EA carries the 12-bit DIFFERENTIAL ADC
+ * (DS40002247B ch. 33); the AVR EA carries the 12-bit differential ADC
  * with a programmable gain amplifier (DS40002443A ch. 31): one COMMAND
  * store starts a conversion and carries its mode, a 16-bit SAMPLE and a
  * 32-bit RESULT, burst and series accumulation to 1024 samples, start-up
  * timed in hardware against CLKCTRL.MCLKTIMEBASE, its own reference
- * selection, and an UNBUFFERED input mux. The two share the surface
+ * selection, and an unbuffered input mux. The two share the surface
  * where the operation is the same (init<cfg>/init(cfg), select, start,
  * read, the window, the ISR bodies, event start, rebase) and nothing of
  * the engine; each half below is written from its own chapter, and the
  * part's header decides which half compiles (ADC_PGAEN_bm is the EA's
  * own bit). docs/avrxt/adc.md holds both halves' findings.
  *
- *   using Meter = brio::Adc<0>;
- *   Meter::init<brio::AdcConfig{.reference = brio::Ref::v2048, ...}>(clock); // checked at compile time
- *   Meter::select(brio::AnalogIn<brio::Pin<'D', 1>>{});   // AIN1
- *   const uint16_t raw = Meter::read();                    // start, wait, read
- *
  * The config comes in two forms with one implementation: init<cfg>()
  * (the struct as a template argument: static_asserts on the knobs,
  * every register write folded) and init(cfg) (a run-time value: same
- * writes computed on the fly - reconfigure from a console command).
+ * writes computed on the fly - reconfigure from a console command;
+ * false, touching nothing, for what the template form refuses). Both
+ * take the clock tag: the prescaler's range (and the DA/DB's warm-up
+ * wait) is computed from the rate the clock type claims, so init() comes
+ * after the clock task's, and a DynamicClock that does not list this
+ * Adc among its users fails to compile at init().
  *
- * ISR bodies (the app binds the vectors and posts what they return - the
- * ISR condenses, the AO decides):
- *   ISR(ADC0_RESRDY_vect) { post<Meter>(AdcResult{Adc<0>::resrdy()}); }
  * Event start: Adc<0>::start_on(EventChannel<n>{}) makes the converter
  * a user of that channel (async, works in standby).
  */
@@ -58,7 +115,7 @@
 #if !defined(ADC_PGAEN_bm)
 
 // =============================================================================
-// THE AVR DA/DB: the 12-bit SAR ADC (DS40002247B ch. 33)
+// The AVR DA/DB: the 12-bit SAR ADC (DS40002247B ch. 33)
 // =============================================================================
 //
 // Knobs, named as the datasheet names them (33.5): reference (VREF.
@@ -70,7 +127,7 @@
 // init_delay (0/16/../256 CLK_ADC cycles before the first sample after
 // enable or standby: reference and warm-up settling, >= 6 us),
 // accumulate 1..128 samples per result (hardware oversampling; RES is
-// the SUM, truncated to 16 bits above 16), left_adjust, free_running,
+// the sum, truncated to 16 bits above 16), left_adjust, free_running,
 // run_standby. Conversion time = 2/fPER + n*(13.5 + 2 + sample_delay +
 // sample_length)/fADC + 2/fPER (12-bit; 11.5 at 10 bits).
 // reconfigure(cfg) is init(cfg) that first waits for an idle converter
@@ -79,7 +136,7 @@
 //
 // Errata DS80000915F: 2.3.2 (all silicon) - with init_delay != 0, a
 // MUXPOS/MUXNEG/accumulate change made after enabling the ADC or after
-// a reference change takes effect only after ONE conversion. init()
+// a reference change takes effect only after one conversion. init()
 // writes the mux before enabling, so the first configured input is
 // right; a later select() with init_delay != 0 must be followed by a
 // throw-away conversion - flush() does exactly that, blocking. 2.3.1
@@ -87,20 +144,24 @@
 //
 // The clock: CLK_ADC = CLK_PER / prescaler must stay within 125 kHz ..
 // 2 MHz - init() refuses (compile time for a static clock) a prescaler
-// that does not. Adc is a ClockUser: on a DynamicClock change rebase()
-// re-picks the prescaler to keep the CLK_ADC chosen at init (stopped,
-// idle, rewritten, free-running resumed); the owner pauses event-
-// started conversions around the switch.
+// that does not. Adc is a ClockUser (a driver a DynamicClock tells of
+// every rate change through its rebase(hz)): on a DynamicClock change
+// rebase() re-picks the prescaler (stopped, idle, rewritten,
+// free-running resumed); the owner pauses event-started conversions
+// around the switch. The intent is the CLK_ADC chosen at init; the code
+// aims at the one in effect before the switch (clk_adc_hz_ is rewritten
+// by every rebase), so a round trip of the clock can leave it slower -
+// a gap docs/avrxt/adc.md lists.
 //
-// Bench facts (silicon A5): the converter needs its warm-up (t_ADC_INIT
+// Bench facts (the AVR DB's silicon A5): the converter needs its warm-up (t_ADC_INIT
 // 6 us typ.) after ENABLE before the first conversion is trustworthy -
 // init(clock, cfg) waits for it; INITDLY is paid only for the first
-// conversion after enable (not per start); the UNBUFFERED
+// conversion after enable (not per start); the unbuffered
 // DAC0 input (MUXPOS DAC0) is high-impedance and reads 3-4 % low with
 // the default 2-cycle sampling - give it sample_length (16-32 at
 // 1.5 MHz) like any source above 10 kOhm; the WCMP flag is cleared by
 // reading RES (33.5.12) - result() captures it first, window_hit()
-// tells about the LAST result read.
+// tells about the last result read.
 
 namespace brio {
 
@@ -233,7 +294,7 @@ public:
     static uint32_t steps() { return steps_; }
     static uint8_t accumulate() { return acc_; }
     static Ref reference() { return ref_; }
-    /// RES holds the SUM of the accumulated samples truncated to 16 bits:
+    /// RES holds the sum of the accumulated samples truncated to 16 bits:
     /// above 16 samples the hardware drops LSBs - 32 -> 1 bit, 64 -> 2,
     /// 128 -> 3. sum = result() << result_shift().
     static uint8_t result_shift() { return acc_ <= 16 ? 0 : acc_ == 32 ? 1 : acc_ == 64 ? 2 : 3; }
@@ -255,7 +316,7 @@ public:
         return init(clock, cfg);      // a DynamicClock's current rate can still refuse
     }
 
-    /// Run-time form. Writes the mux (GND) and every knob BEFORE enabling
+    /// Run-time form. Writes the mux (GND) and every knob before enabling
     /// (errata 2.3.2), enables, then waits the converter's warm-up
     /// (t_ADC_INIT, 6 us typ.: the first conversion before that is
     /// garbage - measured). Returns false, touching nothing, for an
@@ -314,9 +375,12 @@ public:
     }
 
     /// The peripheral clock changed (DynamicClock fan-out): keep CLK_ADC
-    /// as close as possible to the one chosen at init, within range.
+    /// as close as possible to the one in effect before the switch,
+    /// within range - init's on the first rebase, the last rebase's
+    /// after it (clk_adc_hz_ below is rewritten here; aiming at init's
+    /// is the intent, a gap docs/avrxt/adc.md lists).
     /// PRESC must not change during a conversion: this stops, waits for
-    /// idle, rewrites, and restarts free-running if it was on. The OWNER
+    /// idle, rewrites, and restarts free-running if it was on. The owner
     /// must have paused event-started conversions (start_on_events(false))
     /// before the clock switches - a conversion can begin at any time
     /// otherwise. Sample and init delays are in CLK_ADC cycles: they
@@ -400,7 +464,7 @@ public:
     /// True once a result is ready (RESRDY flag); result() clears it.
     static bool ready() { return (regs().INTFLAGS & ADC_RESRDY_bm) != 0; }
 
-    /// The result (RES: a sample, or the SUM of `accumulate` samples,
+    /// The result (RES: a sample, or the sum of `accumulate` samples,
     /// right- or left-adjusted as configured). Reading RES clears both
     /// RESRDY and WCMP: the window verdict is captured first, see
     /// window_hit().
@@ -412,7 +476,9 @@ public:
 
     /// Blocking one-shot: start, wait for the RESULT (RESRDY - STCONV
     /// clears 2 CLK_PER before the result and its flags are formatted;
-    /// waiting on busy() alone reads the previous result), read.
+    /// waiting on busy() alone reads the previous result), read. The
+    /// wait has no time-out: it ends when RESRDY is set, one conversion
+    /// on an enabled converter; a disabled converter never sets it.
     static uint16_t read() {
         start();
         while (!ready()) {
@@ -431,13 +497,13 @@ public:
         regs().WINHT = high;
         regs().CTRLE = static_cast<uint8_t>(mode);
     }
-    /// The thresholds in the DIFFERENTIAL conversion's format (33.5.16:
+    /// The thresholds in the differential conversion's format (33.5.16:
     /// two's complement) - the unsigned form above is for single-ended.
     static void window_signed(Window mode, int16_t low, int16_t high) {
         window(mode, static_cast<uint16_t>(low), static_cast<uint16_t>(high));
     }
     static void window_off() { regs().CTRLE = ADC_WINCM_NONE_gc; }
-    /// Did the LAST result read by result()/read() match the window?
+    /// Did the last result read by result()/read() match the window?
     /// (The hardware flag is cleared by the RES read itself, 33.5.12.)
     static bool window_hit() { return last_hit_; }
     /// The live flag, before any RES read (e.g. in a polling loop that
@@ -450,7 +516,6 @@ public:
     static void enable_resrdy_interrupt(bool on) { irq(ADC_RESRDY_bm, on); }
     static void enable_wcmp_interrupt(bool on) { irq(ADC_WCMP_bm, on); }
 
-    /// ISR body for ADCn_RESRDY_vect: the result (flags cleared by the read).
     /// Die temperature in kelvin from a 12-bit single-ended reading of
     /// AdcInput::temp with the 2.048 V reference (DS40002247B 33.3.3.8:
     /// T = (offset - result) * slope / 4096, the two factors from the
@@ -464,6 +529,7 @@ public:
         return static_cast<uint16_t>(t);
     }
 
+    /// ISR body for ADCn_RESRDY_vect: the result (flags cleared by the read).
     [[gnu::always_inline]] static uint16_t resrdy() { return result(); }
     /// ISR body for ADCn_WCMP_vect: the matching result (flags cleared by the read).
     [[gnu::always_inline]] static uint16_t wcmp() { return result(); }
@@ -513,32 +579,34 @@ static_assert(ClockUser<Adc<0>>);
 #else // ADC_PGAEN_bm
 
 // =============================================================================
-// THE AVR EA: the 12-bit differential ADC with PGA (DS40002443A ch. 31)
+// The AVR EA: the 12-bit differential ADC with PGA (DS40002443A ch. 31)
 // =============================================================================
 //
-// THE ENGINE, from the chapter:
-//  - ONE COMMAND STORE IS A CONVERSION (31.5.11): DIFF | MODE | START.
+// The engine, from the chapter:
+//  - One COMMAND store is a conversion (31.5.11): DIFF | MODE | START.
 //    The driver keeps the DIFF | MODE image (cmd_) and a start is that
-//    image with IMMEDIATE ORed in - a load and a store. MODE is the
+//    image with IMMEDIATE ORed in - a load and a store to COMMAND, beside
+//    the store that notes the start mode (start_). MODE is the
 //    configuration's: SINGLE_12BIT / SINGLE_8BIT, SERIES, BURST and their
-//    _SCALING forms (table 31-1); DIFF is the INPUT's (an AdcDiff pair
+//    _SCALING forms (table 31-1); DIFF is the input's (an AdcDiff pair
 //    sets it, a single-ended input clears it), so a walk mixing single-
 //    ended and differential inputs costs nothing extra.
-//  - TWO OUTPUTS (31.3.3.3): SAMPLE, 16 bits, every conversion; RESULT,
-//    32 bits, the sum of an accumulation (4095 x 1024 = 23 bits, signed
-//    24 in DIFF) or the single conversion. result() reads RESULT[15:0]
+//  - Two outputs (31.3.3.3): SAMPLE, 16 bits, every conversion; RESULT,
+//    32 bits, the sum of an accumulation (4095 x 1024 = 4193280, 22
+//    bits - adc_result_bits() below; in DIFF -2048 x 1024 at its lowest,
+//    a signed 22) or the single conversion. result() reads RESULT[15:0]
 //    (two loads, the low byte first: 8.10.2), sum() all four bytes,
 //    sample() SAMPLE. SCALING right-shifts the sum by SAMPNUM - 4 (left
 //    below 16 samples) so a scaled result's full scale is always 65536.
-//  - THE START MODES (31.3.3.2): IMMEDIATE (start()), EVENT_TRIGGER
+//  - The start modes (31.3.3.2): IMMEDIATE (start()), EVENT_TRIGGER
 //    (start_on(): the EVSYS user, edge, async), MUXPOS_WRITE
-//    (start_on_select(): the select IS the start, one store a
+//    (start_on_select(): the select is the start, one store a
 //    conversion). MUXNEG_WRITE is declined: a differential select
 //    writes MUXNEG first and MUXPOS last, so MUXPOS_WRITE serves both.
-//  - THE INPUT MUX IS NOT BUFFERED (31.3.3.5: "Changing any of these
+//  - The input mux is not buffered (31.3.3.5: "Changing any of these
 //    while a conversion is ongoing will corrupt the output"). Under the
 //    software pace the converter is idle when the owner selects; under
-//    the EVENT pace a select can land on an event-started conversion of
+//    the event pace a select can land on an event-started conversion of
 //    the old input, whose result would then be read under the new
 //    input's label. select() there is COMMAND = STOP (an event-started
 //    conversion in flight is aborted, 31.3.3.2), a wait of the output
@@ -552,50 +620,51 @@ static_assert(ClockUser<Adc<0>>);
 //    (no result), whichever input it selects - the chapter names only the
 //    DAC, TEMPSENSE and VDD inputs as aborting. Free-running is the
 //    owner's to stop before a select (31.3.3.5).
-//  - INITIALIZATION IS TIMED IN HARDWARE, PER CONVERSION (table 31-5):
+//  - Initialization is timed in hardware, per conversion (table 31-5):
 //    the ADC 10 us, the PGA 20 us, an internal reference 60 us, the
 //    temperature sensor and the DAC input 35 us, counted in
 //    CLKCTRL.MCLKTIMEBASE (the clock owns it: clock.hpp's
 //    ClockTimebase). LOWLAT (CTRLA) keeps the modules on and removes it
-//    from every conversion but the first; it is OFF by default - the
+//    from every conversion but the first; it is off by default - the
 //    energy of the modules kept on against 10..60 us a trigger -
 //    and `.low_latency` turns it on. STATUS.ADCBUSY covers conversion
 //    and settling: busy(). init() waits for nothing: the first
 //    conversion waits for its settling in hardware.
-//  - THE REFERENCE IS ADC.CTRLC'S OWN (31.5.3): VDD 0, VREFA 2, 1.024 V
+//  - The reference is ADC.CTRLC's own (31.5.3): VDD 0, VREFA 2, 1.024 V
 //    4, 2.048 V 5, 4.096 V 6, 2.5 V 7 - another encoding than VREF's
 //    (vref.hpp's Ref names the same six levels; adc_refsel() maps them).
 //    An internal reference wants VDD >= reference + 0.5 V and CLK_ADC
 //    <= 2 MHz; VDD and VREFA allow 6 MHz (table 35-24); never under
 //    300 kHz.
-//  - THE PGA (31.3.3.5.1, 31.5.12): gain 1..16, bias 100/75/50/25 %
+//  - The PGA (31.3.3.5.1, 31.5.12): gain 1..16, bias 100/75/50/25 %
 //    usable to CLK_ADC 6/4.5/3/1.5 MHz; the ADC samples the PGA for a
 //    fixed 3/5/6/12 us by bias (4 us at 100 % with an internal
-//    reference, table 31-6); the VIA bits are SHARED by both muxes, so
+//    reference, table 31-6); the VIA bits are shared by both muxes, so
 //    `.pga` routes every input of the configuration through it.
-//  - SAMPLING (31.5.9): SAMPDUR + 0.5 CLK_ADC cycles (+1 with the PGA);
+//  - Sampling (31.5.9): SAMPDUR + 0.5 CLK_ADC cycles (+1 with the PGA);
 //    with an internal reference and no PGA SAMPDUR >= 4 us x fCLK_ADC
 //    (the reference buffer's autozero, 31.3.3.6); a burst through the
 //    PGA SAMPDUR >= 11 (31.3.3.6.6; the PGA paragraph of 31.3.3.6 says
 //    12 - measured, 11 reads as 12: test_avr_analog letter p). init()
 //    refuses less.
-//  - THE WINDOW (31.3.3.8, 31.5.4): WINCM and WINSRC (RESULT[15:0] or
+//  - The window (31.3.3.8, 31.5.4): WINCM and WINSRC (RESULT[15:0] or
 //    SAMPLE) in CTRLD; INSIDE is strict (WINLT < x < WINHT); WCMP rides
 //    the RESRDY or the SAMPRDY vector by WINSRC (there is no WCMP
-//    vector) and is cleared ONLY by writing 1 (31.5.6): result() and
+//    vector) and is cleared only by writing 1 (31.5.6): result() and
 //    sample() capture it and clear it, window_hit() tells about the last
 //    read. A window on RESULT is refused where RESULT is wider than 16
 //    bits (an unscaled sum of 32 or more samples).
-//  - THE FLAGS (31.5.6, table 31-11): RESRDY and SAMPRDY clear when
+//  - The flags (31.5.6, table 31-11): RESRDY and SAMPRDY clear when
 //    RESULT and SAMPLE are read; TRIGOVR (a trigger during a
 //    conversion: the pace too fast), SAMPOVR and RESOVR (an unread
 //    sample or result overwritten: the reader too slow) on the ERROR
 //    vector - the hardware's own count of what a paced reader drops.
-//  - THE TEMPORARY REGISTERS ARE SHARED by RESULT, SAMPLE, WINLT and
+//  - The temporary registers are shared by RESULT, SAMPLE, WINLT and
 //    WINHT (31.5.17): one owner, one context reading or writing them.
 //
 // Cost per conversion (the release listing, CLK_PER cycles): start() 9 -
-// the image's load and one store; the RESRDY body 14 - one load of
+// the start mode noted in RAM (a store), the image's load and one store
+// to COMMAND; the RESRDY body 14 - one load of
 // INTFLAGS, the window match cleared and kept (two stores), RESULT's two
 // bytes; selected() 9 - two loads; a select ~20 - one MUXPOS store, two
 // for a pair - and under the event pace two COMMAND stores and the
@@ -833,7 +902,7 @@ static_assert(adc_period_cycles(20'000'000, AdcConfig{.prescaler = AdcPresc::div
 
 /// The internal inputs, by their MUXPOS codes (31.5.13). GND and DAC0 are
 /// negative inputs as well, at the same codes (31.5.14); VDDDIV10 and
-/// TEMPSENSE are positive only. The DAC0 input is the DAC's UNBUFFERED
+/// TEMPSENSE are positive only. The DAC0 input is the DAC's unbuffered
 /// output (32.3.2.3.1): it needs the sampling time of a high-impedance
 /// source.
 enum class AdcInput : uint8_t {
@@ -845,7 +914,7 @@ enum class AdcInput : uint8_t {
 static_assert(static_cast<uint8_t>(AdcInput::gnd) == ADC_MUXNEG_GND_gc &&
               static_cast<uint8_t>(AdcInput::dac0) == ADC_MUXNEG_DAC0_gc);
 
-/// The comparators' DAC references, NEGATIVE inputs only (31.5.14): the
+/// The comparators' DAC references, negative inputs only (31.5.14): the
 /// positive mux has no code for them on this converter.
 enum class AdcDacref : uint8_t {
     dacref0 = ADC_MUXNEG_DACREF0_gc,
@@ -892,7 +961,7 @@ template <typename P> constexpr bool adc_negative_ok(AnalogIn<P>) { return true;
 constexpr bool adc_negative_ok(AdcInput in) { return in == AdcInput::gnd || in == AdcInput::dac0; }
 constexpr bool adc_negative_ok(AdcDacref) { return true; }
 
-/// A DIFFERENTIAL PAIR as an input value: `AdcDiff<AnalogIn<Pin<'D', 1>>{},
+/// A differential pair as an input value: `AdcDiff<AnalogIn<Pin<'D', 1>>{},
 /// AdcInput::gnd>{}`. Selecting it sets COMMAND.DIFF and both muxes; the
 /// result is signed, (VINP - VINN) x gain / VREF x 2048 (31.3.3.3). The
 /// positions are checked here, at compile time.
@@ -1038,12 +1107,12 @@ public:
     }
 
     /// The peripheral clock changed (DynamicClock fan-out): keep CLK_ADC as
-    /// close as possible to the one chosen at INIT - not to the last
+    /// close as possible to the one chosen at init - not to the last
     /// rebase's, so a round trip of the clock brings it back (20 -> 10 ->
     /// 20 MHz: 2 -> 1.67 -> 2 MHz) - within the range the reference and
     /// the PGA bias allow. Aborts a conversion in flight,
     /// rewrites PRESC, re-arms the start mode in effect (free-running, the
-    /// event pace, the select start). The OWNER pauses an event pace
+    /// event pace, the select start). The owner pauses an event pace
     /// (start_on_events(false)) around the switch (docs/design/clock.md).
     /// MCLKTIMEBASE is the clock's: it moves with the switch. clock_ok()
     /// tells whether the last rebase found a valid CLK_ADC and SAMPDUR's
@@ -1070,7 +1139,7 @@ public:
 
     // ---- input selection --------------------------------------------------
 
-    /// The digital input buffer of an input's pins turned off, ONCE (the
+    /// The digital input buffer of an input's pins turned off, once (the
     /// PINCTRL write leaves the select path: a select is a mux store).
     /// Internal inputs have no pin: nothing to do. AnalogSampler calls it
     /// for every input of its list at init.
@@ -1154,6 +1223,9 @@ public:
 
     /// Blocking: trigger and wait for the RESULT - one start for a single
     /// conversion or a burst, one per sample for a series. Then result().
+    /// The wait has no time-out: the conversions and the initialization
+    /// table 31-5 times on an enabled converter; a disabled converter
+    /// never raises SAMPRDY and the wait never ends.
     static uint16_t read() {
         convert();
         return result();
@@ -1197,7 +1269,7 @@ public:
         cfg_.window = AdcWindow::none;
         regs().CTRLD = 0;
     }
-    /// Did the LAST result()/sum()/sample() match the window?
+    /// Did the last result()/sum()/sample() match the window?
     static bool window_hit() { return last_hit_ != 0; }
     /// The live flag (it stays until written 1).
     static bool window_flag() { return (regs().INTFLAGS & ADC_WCMP_bm) != 0; }
@@ -1233,7 +1305,7 @@ public:
     /// Die temperature in kelvin from a 12-bit single-ended reading of
     /// AdcInput::temp with the 1.024 V reference and SAMPDUR >= 32 us x
     /// fCLK_ADC (31.3.3.7): T = (result + offset) x slope / 4096, both
-    /// signature-row factors SIGNED (TEMPSENSE1 the offset, TEMPSENSE0 the
+    /// signature-row factors signed (TEMPSENSE1 the offset, TEMPSENSE0 the
     /// slope). Pure arithmetic over the reading.
     static uint16_t temp_kelvin(uint16_t result12) {
         const int16_t offset = static_cast<int16_t>(SIGROW.TEMPSENSE1);
@@ -1303,7 +1375,7 @@ private:
     }
 
     /// One store to the mux (two for a pair) under the software pace.
-    /// Under the event pace: STOP with the OLD input's DIFF, a wait of the
+    /// Under the event pace: STOP with the old input's DIFF, a wait of the
     /// output latency, the mux, the pace re-armed with the new DIFF - a
     /// conversion past its end when STOP lands still delivers its result
     /// up to 0.5 CLK_ADC + one CLK_MAIN later (figure 31-3's note 3; a
@@ -1398,7 +1470,7 @@ private:
 
 static_assert(ClockUser<Adc<0>>);
 
-/// A converter whose configuration is a CONSTANT of its type: init(clock)
+/// A converter whose configuration is a constant of its type: init(clock)
 /// is init<cfg>(clock), and the width of what it delivers is known at
 /// compile time - `sample_bits`, which AnalogSampler checks against its
 /// 16-bit Sampled.value (an unscaled sum of 32 or more samples is refused

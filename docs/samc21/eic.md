@@ -1,10 +1,84 @@
 # EIC - the External Interrupt Controller (SAM C21)
 
-Documents of record: SAM C20/C21 data sheet DS60001479M ch. 26 - and
+This document is for a programmer who needs an interrupt or an event
+from a pin: a button, an edge from another chip, a level that must wake
+the device, a pad edge that starts another peripheral through the event
+system. On this family the PORT has no pin interrupts at all; they live
+in the EIC, a peripheral of its own with sixteen lines and a
+non-maskable one. `Eic` is the block, a monostate (a class whose state
+and functions are all static, with no instance to create: there is one
+EIC); `ExtInt<Pin>` is one line reached through the pad that carries
+it, and `ExtNmi<Pin>` the NMI pad.
+
+The smallest use, the first example of "How to use it" below - a
+button on a line, interrupt-driven:
+
+```cpp
+using Button = brio::Pin<'B', 22>;
+using ButtonInt = brio::ExtInt<Button>;          // EXTINT6, from the header
+
+Eic::init();                                     // APB clock + reset, left DISABLED
+Eic::clock_select(EicClock::ulp32k);             // enable-protected: while disabled
+ButtonInt::claim(brio::PinPull::up);
+Eic::configure_line(ButtonInt::line,
+                    {.sense = EicSense::falling, .filter = true});
+Eic::enable(true);                               // check the return - see below
+ButtonInt::arm(true);
+Nvic::enable(Eic::irq());
+```
+
+```cpp
+extern "C" void EIC_Handler() {
+    const uint32_t lines = brio::Eic::isr();      // masked by INTENSET, flags cleared
+    if (lines & ButtonInt::mask) { /* ... */ }
+}
+```
+
+Line by line: `ButtonInt` names the line PB22 carries, its number read
+from the device header (a pad the device does not bond to the EIC does
+not compile); `Eic::init()` opens the block's bus clock and resets it,
+leaving it disabled; `clock_select()` runs the sampled parts of the
+block on CLK_ULP32K, the always-running 32 kHz oscillator, which needs
+no generic clock channel; `claim()` hands the pad to the EIC
+(peripheral function A) with its input buffer on and its pull-up;
+`configure_line()` writes the line's sense, filter, asynchronous and
+event bits together; `enable(true)` starts the block; `arm(true)` sets
+the line's interrupt enable and `Nvic::enable()` the one NVIC line all
+sixteen share; and the program's `EIC_Handler` calls `isr()`, which
+clears and returns the flags that were both raised and armed, one bit
+per line.
+
+What decides correctness even there. Every configuring verb is
+enable-protected: `clock_select()` and `configure_line()` answer false
+and write nothing while the block is enabled, so the lines are written
+between `init()` and `enable()`. `enable()` answers false when the
+block is not running, and the usual reason is a line that asks to be
+sampled (a filter, or a synchronous edge) while the clock it requests
+is not there - the enable then stands pending for ever and nothing is
+detected; CLK_ULP32K is the clock that is always there. A level sense
+whose pad still matches raises its flag again as soon as it is cleared,
+so a handler that only clears spins. `EIC_Handler` is the program's to
+define: left undefined, it is the crt's silent spin, entered at the
+first armed edge. The configuring verbs are setup verbs with no guard
+of their own; `isr()` and the flag verbs are single loads and stores.
+
+The page, in order: the documents of record; what the silicon does
+(the lines and the NMI, the pad-to-line map, the one vector, when a
+clock is needed); the errata, read on this silicon's row; the types and
+verbs; how to use it (a line, a line as an event generator, the NMI);
+the bench findings, among them the wireless stimulus every pad-driven
+suite of the stratum uses; what is not covered.
+
+## Documents of record
+
+SAM C20/C21 data sheet DS60001479M ch. 26 - and
 errata DS80000740S items 1.11.1 to 1.11.6, of which **exactly one is
 this silicon** (see below). Driver: `samc21/eic.hpp`. Family fixture
 `test/family_samc21/eic.cpp` plus three negatives under
-`brio check samc21`; the bench suite is `test_samc_eic`.
+`brio check samc21`; the bench suite is `test_samc_eic` (a letter is
+one command key of its console and the group of verdicts that key
+runs; `z`, the all-key, runs nine of them in a row, "Bench findings"
+below).
 
 ## What the silicon does
 

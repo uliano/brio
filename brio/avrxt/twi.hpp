@@ -1,21 +1,26 @@
 /*
  * twi.hpp
  *
- * The AVR DA/DB/EA Two-Wire Interface (DS40002247B ch. 29, DS40002443A
- * ch. 27) in two strata, as docs/avrxt/twi.md describes:
+ * The AVR DA/DB/EA two-wire interface (DS40002247B ch. 29, DS40002443A
+ * ch. 27) as an I2C bus for a program: a host that talks to sensors,
+ * converters and memories, a client that answers a host on another
+ * chip, or both at once on one instance. The header has the two strata
+ * every brio target's peripheral header has (docs/avrxt/twi.md is the
+ * document):
  *
- *  RESOURCE - Twi<n>: the typed view of one instance. A config struct
- *  owns the whole configuration (route, the shared CTRLA knobs, the
- *  host half, the client half, the dual-mode client); init<cfg>()
- *  folds it and refuses at compile time what this package cannot bond,
- *  init(cfg) computes it at run time and returns false instead. Then
- *  the verbs of the chapter's register description: CTRLA, DUALCTRL,
- *  DBGCTRL, MCTRLA/MCTRLB/MSTATUS/MBAUD/MADDR/MDATA on the host side,
+ *  the resource - Twi<n>: the typed view of one instance, a class whose
+ *  state is static, with no instances. A config struct owns the whole
+ *  configuration (route, the shared CTRLA knobs, the host half, the
+ *  client half, the dual-mode client); init<cfg>() folds it and refuses
+ *  at compile time what this package cannot bond, init(cfg) computes it
+ *  at run time and returns false instead. Then the verbs of the
+ *  chapter's register description: CTRLA, DUALCTRL, DBGCTRL,
+ *  MCTRLA/MCTRLB/MSTATUS/MBAUD/MADDR/MDATA on the host side,
  *  SCTRLA/SCTRLB/SSTATUS/SADDR/SDATA/SADDRMASK on the client side, the
- *  two ISR bodies (one per vector), and release().
+ *  two interrupt bodies (one per vector), and release().
  *
- *  TASKS - what an application names:
- *    I2cHost<n, route>    the transfer ENGINE: one Request = ONE bus
+ *  the tasks - what an application names:
+ *    I2cHost<n, route>    the transfer engine: one Request = one bus
  *                         tenure (write / read / write-then-read with a
  *                         repeated START / probe), the byte pump under
  *                         the host interrupt. Driven by util/i2c_bus.hpp
@@ -23,33 +28,96 @@
  *    I2cClient<n, route, on_dual_pins>
  *                         the other end: the address-match space, the
  *                         S1..S4 protocol surface as verbs, a polled
- *                         surface and the ISR body.
- *  Host and client of ONE instance may run together - COMBINED mode
- *  (same pins) or DUAL mode (the client on the route's second pin pair).
+ *                         surface and the interrupt body.
+ *  Host and client of one instance may run together - combined mode
+ *  (same pins) or dual mode (the client on the route's second pin pair).
  *  That is a first-class configuration here, not an accident.
  *
- *  THE TWO NAMES ARE DELIBERATE. The resource is named for the
- *  chapter - this silicon calls the peripheral a TWI - and the tasks
- *  for the bus they speak. I2cHost and I2cClient are spelled the same
- *  on every target, so an application reads unchanged when it moves;
- *  the resource stays in its own silicon's words, where a datasheet
- *  in hand is what a reader needs. docs/design/i2c-bus.md holds the
- *  contract the tasks implement.
+ * The smallest use, a host on TWI0's default route (PA2 SDA, PA3 SCL)
+ * under the bus arbiter of util/i2c_bus.hpp - an active object, a
+ * component of a brio program with its own event queue that the kernel
+ * serves one event at a time - which queues the requests of every
+ * active object sharing the bus and answers each with an I2cDone:
+ *
+ *   using SysClock = brio::Clock<brio::ClockSource::crystal, 24'000'000>;
+ *   constexpr SysClock clock;
+ *   using P = brio::AvrPlatform;
+ *   using I2cHw = brio::I2cHost<0>;
+ *   using I2c = brio::I2cBus<I2cHw, P>;
+ *
+ *   ISR(TWI0_TWIM_vect) {
+ *       if (I2cHw::isr()) brio::post<I2c>(brio::TransferDone{I2cHw::status()});
+ *   }
+ *
+ *   int main() {
+ *       SysClock::init();
+ *       I2cHw::init(clock);              // the default Options: 100 kHz, Smart mode
+ *       brio::Ticker::init();
+ *       sei();
+ *       brio::Tenuto<P, Me, I2c>::run();
+ *   }
+ *
+ *   // in a handler of the active object Me: write a register index,
+ *   // read two bytes back after a repeated START
+ *   brio::post<I2c>(I2cHw::Request{addr, brio::lend<brio::Lease::reply>(tx), 1,
+ *                                  brio::lend<brio::Lease::reply>(rx), 2,
+ *                                  brio::reply_to<Me, brio::I2cDone>()});
+ *
+ * The reply's status is i2c_ok or the code of what went wrong
+ * (util/i2c_bus.hpp). The bus's pull-ups are the board's: the driver
+ * enables no internal pull-up.
+ *
+ * Which context calls what. The init() verbs (Twi<n>::init,
+ * I2cHost::init, I2cClient::init) and release() are setup: main(), after
+ * the clock task - MBAUD is computed from the rate the clock type
+ * claims, never read from the hardware - and before sei(); none of them
+ * waits. I2cHost::start() is the arbiter's, called from its handler in
+ * the main context, and never waits: a START told to go out on a Busy
+ * bus is held by the silicon and leaves by itself when the bus goes
+ * Idle, and a request whose speed is not the one in force pays an
+ * ENABLE cycle there, between tenures. I2cHost::isr() is the body of the
+ * host vector (TWIn_TWIM_vect) and I2cClient::isr() of the client vector
+ * (TWIn_TWIS_vect): the program's ISR calls it and nothing else does,
+ * and like every handler in brio it runs to completion, no other
+ * handler interrupting it (avrxt/platform.hpp). The client's protocol
+ * verbs (respond, receive, transmit, complete) answer a flag the client
+ * half raised, from its handler or from a polled loop; wait_address()
+ * and wait_data() spin on that flag for at most `spins` turns of their
+ * loop (a count, not a time). recover() is an ENABLE cycle and returns
+ * at once; unstick() busy-waits through its bit-banged pulses, at least
+ * 10 us a pulse and 20 us for the closing STOP, with both halves down,
+ * so it belongs between tenures in the main context. Nothing in this
+ * header masks interrupts: the read-modify-write verbs on CTRLA, MCTRLA
+ * and SCTRLA carry no guard, and the interrupt bodies write none of
+ * those three registers, so only two callers of those verbs in two
+ * contexts can race. Buffers: a Request lends its tx and rx
+ * (Lease::reply) until its I2cDone lands - the host interrupt reads tx
+ * and writes rx meanwhile - and nothing checks at run time that the
+ * requester leaves them alone.
+ *
+ * The two names are deliberate. The resource is named for the chapter -
+ * this silicon calls the peripheral a TWI - and the tasks for the bus
+ * they speak. I2cHost and I2cClient are spelled the same on every
+ * target, so an application reads unchanged when it moves; the resource
+ * stays in its own silicon's words, where a datasheet in hand is what a
+ * reader needs. docs/design/i2c-bus.md holds the contract the tasks
+ * implement.
  *
  * Facts that shape the code (29.3, 29.5, errata DS80000915F 2.15.1/
  * 2.15.2 and DS80000882C 2.14.1/2.14.2/2.14.3):
- *  - TWI0 exists on every package; TWI1 appears at 32 pins. Unlike SPI
- *    and USART the TWI has NO pinless route: every PORTMUX code names a
- *    real SDA/SCL pair, so an instance always costs two pins. The route
- *    table below is the device headers' own route enums, per package;
- *  - each route also names a DUAL pair - where the client sits when
+ *  - on the AVR DA/DB, TWI0 exists on every package and TWI1 appears at
+ *    32 pins (the AVR EA has TWI0 alone, below). Unlike SPI and USART
+ *    the TWI has no pinless route: every PORTMUX code names a real
+ *    SDA/SCL pair, so an instance always costs two pins. The route table
+ *    below is the device headers' own route enums, per package;
+ *  - each route also names a dual pair - where the client sits when
  *    DUALCTRL.ENABLE is set. Several routes bond the main pair but not
  *    the dual one (TWI0 ALT1/ALT2 below 48 pins, TWI1 DEFAULT at 32
  *    pins, TWI1 ALT1/ALT2 below 64 pins): the main pair stays usable and
  *    only the dual client is refused;
- *  - ERRATA AS CODE, all three of them:
+ *  - errata as code, all three of them:
  *      * DB 2.15.1 (rev. A4/A5) / DA 2.14.1 (every rev.): with the TWI
- *        enabled the pin override covers the DRIVER but not the VALUE -
+ *        enabled the pin override covers the driver but not the value -
  *        a PORTx.OUT bit left at '1' on SDA or SCL holds that line high
  *        and no transaction can start. Both init paths clear the OUT
  *        bits of every pin they route, unconditionally: it is one store
@@ -57,44 +125,51 @@
  *        it;
  *      * DB 2.15.2 / DA 2.14.3 (every rev.): MCTRLB.FLUSH can leave the
  *        host stuck in the Unknown bus state. This resource does not
- *        expose FLUSH AT ALL - recover() is the documented work-around
+ *        expose FLUSH at all - recover() is the documented work-around
  *        (an ENABLE cycle on the host) followed by force_idle();
- *  - recover() and unstick() fix DIFFERENT things and neither replaces
- *    the other: recover() puts this PERIPHERAL back into a known state,
- *    unstick() bit-bangs the WIRE free of a client that is holding SDA
- *    low (the classic nine-clocks-and-a-STOP remedy). Noticing a stuck
- *    TRANSACTION is the bus AO's: util/bus_master.hpp's per-bus
- *    timeout_ticks answers the requester bus_timeout and calls
- *    recover() in its place. Noticing a stuck WIRE, and deciding to
- *    spend unstick() on it, stays the application's (design/i2c-bus.md);
  *      * DA 2.14.2 (every DA rev., DA only): the SDAHOLD 50 ns and
- *        300 ns SELECTIONS are swapped in the silicon. TwiSdaHold names
- *        TRUE nanoseconds and twi_sdahold_code() swaps the encoding on
+ *        300 ns selections are swapped in the silicon. TwiSdaHold names
+ *        true nanoseconds and twi_sdahold_code() swaps the encoding on
  *        the DA - the die, device_tables.hpp's
  *        erratum_da_twi_sdahold_swap;
+ *  - recover() and unstick() fix different things and neither replaces
+ *    the other: recover() puts this peripheral back into a known state,
+ *    unstick() bit-bangs the wire free of a client that is holding SDA
+ *    low (the classic nine-clocks-and-a-STOP remedy). Noticing a stuck
+ *    transaction is the bus active object's: util/bus_master.hpp's
+ *    per-bus timeout_ticks, when it is not 0, answers the requester
+ *    bus_timeout and calls recover() in its place. Noticing a stuck wire, and deciding to
+ *    spend unstick() on it, stays the application's (design/i2c-bus.md);
  *  - the baud arithmetic is the chapter's own three steps (29.3.2.2.1):
  *    equation 29-3, then equation 29-4 for tLOW, then equation 29-5
  *    when that tLOW came out below the mode's floor (4700 / 1300 /
- *    500 ns). The bus's RISE and FALL times are arguments, because that
+ *    500 ns). The bus's rise and fall times are arguments, because that
  *    is what the equations take: the default charges the specification's
  *    maxima for the mode and a bus that declares its measured edges gets
- *    the speed back. Charging nothing for the FALL is the one unsafe
+ *    the speed back. Charging nothing for the fall is the one unsafe
  *    choice - the SCL low time the pins really show is the register's
- *    BAUD + 5 clocks MINUS the fall, so it would land below the floor by
- *    exactly tOF (bench: 125 ns on slew-limited pads). MBAUD "must be
- *    written while the host is disabled" (29.5.7), so set_baud()
- *    performs the ENABLE cycle and re-declares the bus idle;
- *  - FMPEN is what Fast-mode Plus means to the PINS (x10 drive instead
+ *    BAUD + 5 clocks minus the fall, so it would land below the floor by
+ *    exactly tOF (measured: 166 ns at Sm and Fm on the AVR128DB48's bus,
+ *    docs/avrxt/twi.md). MBAUD "must be written while the host is
+ *    disabled" (29.5.7), so set_baud() performs the ENABLE cycle and
+ *    re-declares the bus idle;
+ *  - FMPEN is what Fast-mode Plus means to the pins (x10 drive instead
  *    of a slew limit, 29.3.3.1); the divider knows nothing about it. So
  *    I2cSpeed::fast_plus_1m and CTRLA.FMPEN are checked against each
  *    other by twi_config_valid: asking for 1 MHz with FMPEN off is
  *    refused rather than silently run on slew-limited pads;
  *  - CLK_PER must be at least four times f_SCL for the bus-error
  *    detector to work at all (29.5.6 BUSERR) and for the client's Stop
- *    interrupt (PIEN, 29.5.10). speed_ok() is the readback of that
- *    condition; the tasks report it, they do not enforce it (a slower
- *    main clock is legal, it only blinds those two features);
- *  - THE AVR EA (DS40002443A ch. 27: the DB's register description but
+ *    interrupt (PIEN, 29.5.10). The host side asks the stronger question
+ *    and enforces it: speed_ok() says whether twi_baud_for() has a BAUD
+ *    for the speed at the clock and timing in force, and since the
+ *    fastest the divider goes is CLK_PER/10 a reachable speed meets the
+ *    four-times condition; the host engine answers a request at an
+ *    unreachable speed i2c_rejected. The client keeps the condition as a
+ *    readback (max_scl_hz(), can_follow()) and does not enforce it: a
+ *    slower main clock is legal there, it only blinds those two
+ *    features;
+ *  - the AVR EA (DS40002443A ch. 27: the DB's register description but
  *    CTRLA.FMEN; DS80001048D has no TWI item). TWI0 alone, with an ALT3
  *    (SDA PA0, SCL PA1, dual PC2/PC3). Its SCL is not 50/50: the low phase
  *    is BAUD + 6 in Sm (equation 3.2), and FMEN (Fm) or FMPEN (Fm+) move
@@ -111,12 +186,12 @@
  *    an idle host never left it stuck (both measured, docs/avrxt/twi.md) -
  *    the init's OUT clear is kept, one store a pin, and FLUSH stays
  *    unexposed, recover() the verb on every die;
- *  - two vectors, two ISR bodies: TWIn_TWIM_vect (host: RIF/WIF) and
- *    TWIn_TWIS_vect (client: DIF/APIF). Neither body clears anything -
- *    the host's flags clear when the handler writes MADDR/MDATA/MCMD
- *    and the client's when it writes SCMD or touches SDATA (29.5.6,
- *    29.5.12), so a body that cleared them would eat the state its
- *    caller has to read.
+ *  - two vectors, two interrupt bodies: TWIn_TWIM_vect (host: RIF/WIF)
+ *    and TWIn_TWIS_vect (client: DIF/APIF). Neither body clears
+ *    anything - the host's flags clear when the handler writes
+ *    MADDR/MDATA/MCMD and the client's when it writes SCMD or touches
+ *    SDATA (29.5.6, 29.5.12), so a body that cleared them would eat the
+ *    state its caller has to read.
  */
 
 #pragma once
@@ -138,7 +213,7 @@ namespace brio {
 
 // ---- routes and pins (17.5.9, 29.2.2) ---------------------------------------
 
-/// TWI pin routing (PORTMUX.TWIROUTEA). The values ARE the device
+/// TWI pin routing (PORTMUX.TWIROUTEA). The values are the device
 /// header's own group values on every layout (the device tables'
 /// twi_route_codes, asserted below); ALT3 is the AVR EA's alone
 /// (DS40002443A 17.3.6: SDA PA0, SCL PA1, dual PC2/PC3). There is no
@@ -164,7 +239,7 @@ static_assert(twi_route_codes[0][0] == static_cast<uint8_t>(TwiRoute::def) &&
 /// The two signals of a route.
 enum class TwiSignal : uint8_t { sda = 0, scl = 1 };
 
-/// Where one signal of one route sits, and whether THIS package bonds
+/// Where one signal of one route sits, and whether this package bonds
 /// it out. `bonded == false` means the silicon has the function but no
 /// pin for it here.
 struct TwiPin {
@@ -185,7 +260,7 @@ constexpr bool twi_route_exists(uint8_t n, TwiRoute r) {
     return true;                                             // PF2/PF3
 }
 
-/// The MAIN pin pair of a route - where the host, and a client that is
+/// The main pin pair of a route - where the host, and a client that is
 /// not in Dual mode, sit:
 ///   TWI0  DEFAULT PA2/PA3   ALT1 PA2/PA3   ALT2 PC2/PC3   ALT3 PA0/PA1 (EA)
 ///   TWI1  DEFAULT PF2/PF3   ALT1 PF2/PF3   ALT2 PB2/PB3
@@ -205,7 +280,7 @@ constexpr TwiPin twi_pin(uint8_t n, TwiRoute r, TwiSignal s) {
     return {'F', static_cast<uint8_t>(2 + off), true};
 }
 
-/// The DUAL pin pair of a route - where the client sits when
+/// The dual pin pair of a route - where the client sits when
 /// DUALCTRL.ENABLE is set (29.3.3.4). Several routes have none on the
 /// smaller packages, which is what the `bonded` flag says:
 ///   TWI0  DEFAULT PC2/PC3 (every package)
@@ -229,7 +304,7 @@ constexpr TwiPin twi_dual_pin(uint8_t n, TwiRoute r, TwiSignal s) {
     return {'B', static_cast<uint8_t>(6 + off), package_pins >= 64};
 }
 
-/// Does this package bond BOTH dual pins of this route? (What a Dual
+/// Does this package bond both dual pins of this route? (What a Dual
 /// mode client needs.)
 constexpr bool twi_has_dual(uint8_t n, TwiRoute r) {
     return twi_dual_pin(n, r, TwiSignal::sda).bonded &&
@@ -241,13 +316,13 @@ constexpr bool twi_has_dual(uint8_t n, TwiRoute r) {
 /// CTRLA/DUALCTRL.INPUTLVL: the input voltage transition level.
 enum class TwiInputLevel : uint8_t { i2c = 0, smbus = 1 };
 
-/// CTRLA.SDASETUP: how many peripheral clocks the CLIENT stretches SCL
+/// CTRLA.SDASETUP: how many peripheral clocks the client stretches SCL
 /// to guarantee the setup time of its SDA output (29.5.1; the DA
 /// clarification 3.2 restates it as the clock-hold time). Every default
-/// of this driver is EIGHT, not the reset value's four: above 16 MHz four
+/// of this driver is eight, not the reset value's four: above 16 MHz four
 /// clocks are shorter than the I2C specification's Standard-mode data
 /// setup (250 ns), and on the wire they are not enough - a transmitting
-/// client whose SDA must FALL as it releases its stretch (it holds SDA
+/// client whose SDA must fall as it releases its stretch (it holds SDA
 /// through the stretch at the served byte's bit 6: after a byte with bit
 /// 6 set, before one whose first bit is 0) moves SDA as SCL rises,
 /// within 146 ns of it, and drops out of the read
@@ -255,8 +330,8 @@ enum class TwiInputLevel : uint8_t { i2c = 0, smbus = 1 };
 /// clocks more of stretch where the client releases SCL itself.
 enum class TwiSdaSetup : uint8_t { cycles4 = 0, cycles8 = 1 };
 
-/// CTRLA/DUALCTRL.SDAHOLD, named in TRUE nanoseconds. The DA silicon
-/// SWAPS the 50 ns and 300 ns selections (DS80000882C 2.14.2) and
+/// CTRLA/DUALCTRL.SDAHOLD, named in true nanoseconds. The DA silicon
+/// swaps the 50 ns and 300 ns selections (DS80000882C 2.14.2) and
 /// twi_sdahold_bits() undoes that, so this enum means the same thing on
 /// both families.
 enum class TwiSdaHold : uint8_t { off = 0, ns50 = 1, ns300 = 2, ns500 = 3 };
@@ -317,7 +392,7 @@ enum class TwiBusState : uint8_t { unknown = 0, idle = 1, owner = 2, busy = 3 };
 // ---- the baud arithmetic (29.3.2.2.1) ---------------------------------------
 
 /// The three bus speed classes of this peripheral. Fast-mode Plus needs
-/// CTRLA.FMPEN as well - it is what changes the PADS (x10 drive instead
+/// CTRLA.FMPEN as well - it is what changes the pads (x10 drive instead
 /// of the slew limit, 29.3.3.1), the divider knows nothing about it.
 enum class I2cSpeed : uint8_t {
     standard_100k,   ///< Sm, up to 100 kHz
@@ -333,9 +408,9 @@ constexpr uint32_t twi_scl_hz(I2cSpeed s) {
     }
 }
 
-/// The rise-time BUDGET the BAUD calculation charges to the bus: the
+/// The rise-time budget the BAUD calculation charges to the bus: the
 /// I2C specification's maximum tR for the mode. The real bus is faster
-/// with stiff pull-ups, which makes the real SCL run a little ABOVE the
+/// with stiff pull-ups, which makes the real SCL run a little above the
 /// value this budget predicts - measure it, do not assume it
 /// (twi_scl_hz_at() takes the rise time as an argument for that reason).
 constexpr uint32_t twi_rise_budget_ns(I2cSpeed s) {
@@ -346,10 +421,10 @@ constexpr uint32_t twi_rise_budget_ns(I2cSpeed s) {
     }
 }
 
-/// The fall-time BUDGET the calculation charges to the bus: the I2C
+/// The fall-time budget the calculation charges to the bus: the I2C
 /// specification's maximum tOF for the mode. It matters because the SCL
-/// LOW time the pins really show is the register's (BAUD + 5) clocks
-/// MINUS the fall (equation 29-4) - charge nothing for it and the low
+/// low time the pins really show is the register's (BAUD + 5) clocks
+/// minus the fall (equation 29-4) - charge nothing for it and the low
 /// period lands below the mode's floor by exactly tOF, which the bench
 /// measures. Fast-mode Plus drives the pads ten times harder, and its
 /// budget is correspondingly smaller.
@@ -373,30 +448,7 @@ constexpr uint32_t twi_low_min_ns(I2cSpeed s) {
 /// Does this speed require Fast-mode Plus pads?
 constexpr bool twi_needs_fm_plus(I2cSpeed s) { return s == I2cSpeed::fast_plus_1m; }
 
-/**
- * MBAUD for a speed at a peripheral clock - the chapter's own two-step
- * calculation (29.3.2.2.1), with the bus's rise and fall times as
- * arguments because that is what the equations take:
- *   1. equation 29-3, BAUD = f_CLK/(2 f_SCL) - (5 + f_CLK tR / 2);
- *   2. equation 29-4, tLOW = (BAUD + 5)/f_CLK - tOF;
- *   3. if that tLOW is below the mode's floor, equation 29-5,
- *      BAUD = f_CLK (tLOW_mode + tOF) - 5.
- *
- * `rise_ns` and `fall_ns` describe THIS bus; 0 means "charge the mode's
- * specification maximum", which is the safe default and the only choice
- * a driver can make on its own. Declaring the real numbers of a stiff
- * bus buys speed back: they only ever appear as terms that LENGTHEN the
- * period, so a smaller pair means a faster bus - and the floor check of
- * step 3 keeps it legal. The rounding is deliberately one-sided: the
- * first term and step 3 round UP, the rise term DOWN, all three of
- * which lengthen the period.
- *
- * Empty when the register cannot hold the solution: a BAUD below 0
- * (the divider cannot go that fast at this clock - even BAUD = 0 gives
- * a slower SCL than asked, and a speed is never approximated in
- * silence) or above 255 (nor that slow).
- */
-/// The SCL LOW phase the host drives for this MBAUD at a speed, in
+/// The SCL low phase the host drives for this MBAUD at a speed, in
 /// CLK_PER: equation 29-4's BAUD + 5 on the AVR DA/DB, whatever the speed;
 /// on the AVR EA the duty its speed sets (device_tables.hpp's twi_ea_scl):
 /// BAUD + 6 in Sm, plus min(5, BAUD) in Fm (the engine sets FMEN with that
@@ -424,6 +476,32 @@ constexpr uint8_t twi_baud_min(I2cSpeed s) {
     else return 0u;
 }
 
+/**
+ * MBAUD for a speed at a peripheral clock - the chapter's own three-step
+ * calculation (29.3.2.2.1), with the bus's rise and fall times as
+ * arguments because that is what the equations take (on the AVR DA/DB;
+ * the AVR EA's own duty takes the branch the comment inside describes):
+ *   1. equation 29-3, BAUD = f_CLK/(2 f_SCL) - (5 + f_CLK tR / 2);
+ *   2. equation 29-4, tLOW = (BAUD + 5)/f_CLK - tOF;
+ *   3. if that tLOW is below the mode's floor, equation 29-5,
+ *      BAUD = f_CLK (tLOW_mode + tOF) - 5.
+ *
+ * `rise_ns` and `fall_ns` describe this bus; 0 means "charge the mode's
+ * specification maximum", which is the safe default and the only choice
+ * a driver can make on its own. Declaring the real numbers of a stiff
+ * bus buys speed back: they only ever appear as terms that lengthen the
+ * period, so a smaller pair means a faster bus - and the floor check of
+ * step 3 keeps it legal. The rounding is deliberately one-sided: the
+ * first term and step 3 round up, the rise term down, all three of
+ * which lengthen the period.
+ *
+ * Empty when the register cannot hold the solution: a BAUD below 0
+ * (the divider cannot go that fast at this clock - even BAUD = 0 gives
+ * a slower SCL than asked, and a speed is never approximated in
+ * silence) or above 255 (nor that slow). Empty too at a clock of 0,
+ * and for Fm+ at a CLK_PER at or below twi_fm_plus_min_clk_hz where
+ * that floor is not 0 (the AVR EA's 12 MHz).
+ */
 constexpr std::optional<uint8_t> twi_baud_for(uint32_t clk_hz, I2cSpeed s,
                                               uint32_t rise_ns = 0, uint32_t fall_ns = 0) {
     if (clk_hz == 0) return {};
@@ -471,7 +549,7 @@ constexpr std::optional<uint8_t> twi_baud_for(uint32_t clk_hz, I2cSpeed s,
     return static_cast<uint8_t>(baud);
 }
 
-/// The SCL PERIOD this MBAUD produces, in peripheral clock ticks, on a
+/// The SCL period this MBAUD produces, in peripheral clock ticks, on a
 /// bus whose rise time is `t_rise_ns` (equation 29-2 rearranged). With
 /// t_rise_ns = 0 this is the fastest the pair can possibly run: the
 /// floor a frequency meter must never read below.
@@ -503,7 +581,7 @@ constexpr bool twi_clock_ok(uint32_t clk_hz, I2cSpeed s) {
 struct TwiConfig {
     TwiRoute route = TwiRoute::def;
 
-    // CTRLA - shared by the host and by a client that is NOT in Dual mode.
+    // CTRLA - shared by the host and by a client that is not in Dual mode.
     TwiInputLevel input_level = TwiInputLevel::i2c;
     TwiSdaSetup sda_setup = TwiSdaSetup::cycles8;
     TwiSdaHold sda_hold = TwiSdaHold::off;
@@ -519,7 +597,7 @@ struct TwiConfig {
     uint16_t rise_ns = 0;
     uint16_t fall_ns = 0;
     TwiTimeout timeout = TwiTimeout::disabled;
-    bool quick_command = false;         ///< QCEN: the address packet IS the transaction
+    bool quick_command = false;         ///< QCEN: the address packet is the transaction
     bool host_smart = false;            ///< MCTRLA.SMEN
     bool read_interrupt = false;        ///< RIEN
     bool write_interrupt = false;       ///< WIEN
@@ -529,14 +607,14 @@ struct TwiConfig {
     uint8_t address = 0;                ///< 7-bit, unshifted
     bool general_call = false;          ///< SADDR bit 0: also answer address 0x00
     uint8_t address_mask = 0;           ///< SADDRMASK[7:1], 7-bit
-    bool second_address = false;        ///< ADDREN: the mask field is a SECOND address
+    bool second_address = false;        ///< ADDREN: the mask field is a second address
     bool promiscuous = false;           ///< PMEN: answer every address
     bool client_smart = false;          ///< SCTRLA.SMEN
     bool data_interrupt = false;        ///< DIEN
     bool address_interrupt = false;     ///< APIEN
     bool stop_interrupt = false;        ///< PIEN: let a STOP raise APIF too
 
-    // DUALCTRL - the client on the route's SECOND pin pair, with its own
+    // DUALCTRL - the client on the route's second pin pair, with its own
     // copies of the CTRLA knobs (SDASETUP stays the shared one).
     bool dual = false;
     TwiInputLevel dual_input_level = TwiInputLevel::i2c;
@@ -665,7 +743,7 @@ public:
 
     // ---- CTRLA (29.5.1) --------------------------------------------------
 
-    /// The shared knobs. The chapter wants them written BEFORE the
+    /// The shared knobs. The chapter wants them written before the
     /// halves are enabled (29.3.2.1), so each of these verbs takes the
     /// enabled halves down and puts them back - which is free at
     /// configuration time and destructive in the middle of a tenure.
@@ -693,7 +771,7 @@ public:
                                                 twi_sdahold_bits(h));
         });
     }
-    /// The hold time in force, in TRUE nanoseconds (the DA swap undone).
+    /// The hold time in force, in true nanoseconds (the DA swap undone).
     static TwiSdaHold sda_hold() {
         return twi_sdahold_of(static_cast<uint8_t>((regs().CTRLA & TWI_SDAHOLD_gm) >>
                                                    TWI_SDAHOLD_gp));
@@ -706,7 +784,7 @@ public:
     static void fm_plus(bool on) { with_halves_down([on] { ctrla_bits(TWI_FMPEN_bm, on); }); }
     static bool fm_plus() { return (regs().CTRLA & TWI_FMPEN_bm) != 0; }
 
-    /// CTRLA.FMEN, the AVR EA's Fast-mode duty cycle for the HOST
+    /// CTRLA.FMEN, the AVR EA's Fast-mode duty cycle for the host
     /// (DS40002443A 27.5.1; no effect on a client or under FMPEN). Only
     /// where the bit exists (device_tables.hpp's twi_fmen_bm).
     static void fm_duty(bool on)
@@ -722,7 +800,7 @@ public:
 
     // ---- DUALCTRL (29.5.2) -----------------------------------------------
 
-    /// Dual mode: the client moves to the route's SECOND pin pair and
+    /// Dual mode: the client moves to the route's second pin pair and
     /// takes its own copies of INPUTLVL/SDAHOLD/FMPEN. False when this
     /// package does not bond that pair.
     static bool dual_mode(bool on, TwiInputLevel lvl = TwiInputLevel::i2c,
@@ -773,13 +851,13 @@ public:
     }
 
     /// Host Smart mode: the acknowledge action goes out as soon as
-    /// MDATA is READ, so a receiving handler needs no MCMD at all.
+    /// MDATA is read, so a receiving handler needs no MCMD at all.
     static void host_smart(bool on) { mctrla_bits(TWI_SMEN_bm, on); }
     static bool host_smart() { return (regs().MCTRLA & TWI_SMEN_bm) != 0; }
 
     // ---- MCTRLB (29.5.5) -------------------------------------------------
 
-    /// ACKACT and MCMD in ONE store - the register description says they
+    /// ACKACT and MCMD in one store - the register description says they
     /// may be written together and that the acknowledge action is taken
     /// first (table 29-2 note 1).
     ///
@@ -805,7 +883,7 @@ public:
         force_idle();
     }
 
-    // ---- the stuck WIRE (not the peripheral) -------------------------------
+    // ---- the stuck wire (not the peripheral) -------------------------------
 
     /// What unstick() returns when SDA never came back high.
     static constexpr uint8_t unstick_failed = 0xFF;
@@ -814,10 +892,10 @@ public:
     static constexpr uint8_t unstick_half_us = 5;
 
     /**
-     * The CLASSIC bus recovery, and the one thing recover() cannot do.
+     * The classic bus recovery, and the one thing recover() cannot do.
      *
      * recover() fixes this peripheral's own state machine. It cannot fix
-     * the WIRE: a client interrupted in the middle of a byte (a reset
+     * the wire: a client interrupted in the middle of a byte (a reset
      * host, a glitch) goes on holding SDA low waiting for the clock
      * edges that would let it finish, and while SDA is low no host on
      * the bus can even produce a START. The remedy every I2C note gives
@@ -827,7 +905,7 @@ public:
      * into a defined state.
      *
      * Both halves are taken down first, so the pins belong to PORT
-     * again, and the bit-bang is open drain BY HAND: DIRSET over a clear
+     * again, and the bit-bang is open drain by hand: DIRSET over a clear
      * OUT bit pulls a line down, DIRCLR lets the pull-up take it back. A
      * line is never driven high - this is a shared bus. The pins are
      * left inputs with OUT = 0 (errata 2.15.1 / 2.14.1 hygiene) and the
@@ -841,9 +919,10 @@ public:
      * wire, a dead driver) is not a recoverable condition and the caller
      * has to be told so.
      *
-     * The POLICY above this - noticing that a transaction is stuck at
-     * all, and deciding to call this - belongs to the bus AO and is not
-     * built (design/i2c-bus.md).
+     * The policy above this is split. Noticing that a transaction is
+     * stuck is the timed arbiter's (util/bus_master.hpp's timeout_ticks,
+     * which calls recover(), not this); deciding to spend this on the
+     * wire is the application's and is not built (design/i2c-bus.md).
      */
     static uint8_t unstick(uint8_t max_pulses = 9) {
         const TwiPin sda_p = twi_pin(n, route_, TwiSignal::sda);
@@ -900,7 +979,7 @@ public:
     static bool read_flag() { return (regs().MSTATUS & TWI_RIF_bm) != 0; }
     static bool write_flag() { return (regs().MSTATUS & TWI_WIF_bm) != 0; }
     static bool clock_hold() { return (regs().MSTATUS & TWI_CLKHOLD_bm) != 0; }
-    /// The last acknowledge bit the CLIENT sent: true = NACK.
+    /// The last acknowledge bit the client sent: true = NACK.
     static bool rx_nack() { return (regs().MSTATUS & TWI_RXACK_bm) != 0; }
     static bool arbitration_lost() { return (regs().MSTATUS & TWI_ARBLOST_bm) != 0; }
     static bool bus_error() { return (regs().MSTATUS & TWI_BUSERR_bm) != 0; }
@@ -908,7 +987,7 @@ public:
         return static_cast<TwiBusState>(regs().MSTATUS & TWI_BUSSTATE_gm);
     }
 
-    /// Write-one-to-clear, as a PLAIN store of exactly the named bits -
+    /// Write-one-to-clear, as a plain store of exactly the named bits -
     /// an RMW would write back every flag it read (and BUSSTATE with
     /// them). Only 0x1 in the BUSSTATE field has an effect, so a clear
     /// never moves the bus state by accident.
@@ -948,8 +1027,8 @@ public:
     static void maddr(uint8_t v) { regs().MADDR = v; }
     static uint8_t maddr() { return regs().MADDR; }
 
-    /// MDATA is the shift register itself: a WRITE commands a byte
-    /// transmit, a READ takes the received byte (and, in Smart mode,
+    /// MDATA is the shift register itself: a write commands a byte
+    /// transmit, a read takes the received byte (and, in Smart mode,
     /// sends the acknowledge action).
     [[gnu::always_inline]] static void host_write(uint8_t v) { regs().MDATA = v; }
     [[gnu::always_inline]] static uint8_t host_read() { return regs().MDATA; }
@@ -968,7 +1047,7 @@ public:
         return static_cast<uint8_t>(regs().SCTRLA & (TWI_DIEN_bm | TWI_APIEN_bm | TWI_PIEN_bm));
     }
 
-    /// PMEN: answer EVERY address on the bus (29.3.2.3).
+    /// PMEN: answer every address on the bus (29.3.2.3).
     static void promiscuous(bool on) { sctrla_bits(TWI_PMEN_bm, on); }
     static bool promiscuous() { return (regs().SCTRLA & TWI_PMEN_bm) != 0; }
 
@@ -995,7 +1074,7 @@ public:
     static bool data_flag() { return (regs().SSTATUS & TWI_DIF_bm) != 0; }
     static bool address_flag() { return (regs().SSTATUS & TWI_APIF_bm) != 0; }
     static bool client_clock_hold() { return (regs().SSTATUS & TWI_CLKHOLD_bm) != 0; }
-    /// The last acknowledge bit the HOST sent: true = NACK.
+    /// The last acknowledge bit the host sent: true = NACK.
     static bool client_rx_nack() { return (regs().SSTATUS & TWI_RXACK_bm) != 0; }
     /// COLL: this client could not put a high bit (or a NACK) on SDA.
     static bool collision() { return (regs().SSTATUS & TWI_COLL_bm) != 0; }
@@ -1019,11 +1098,11 @@ public:
     static bool general_call() { return (regs().SADDR & 0x01u) != 0; }
 
     /// SADDRMASK with ADDREN = 0: the set bits are the address bits the
-    /// match logic IGNORES - an address RANGE.
+    /// match logic ignores - an address range.
     static void address_mask(uint8_t mask7) {
         regs().SADDRMASK = static_cast<uint8_t>(mask7 << 1);
     }
-    /// SADDRMASK with ADDREN = 1: a SECOND exact address.
+    /// SADDRMASK with ADDREN = 1: a second exact address.
     static void second_address(uint8_t addr7) {
         regs().SADDRMASK = static_cast<uint8_t>((addr7 << 1) | 1u);
     }
@@ -1035,7 +1114,7 @@ public:
 
     // ---- ISR bodies (two vectors: TWIn_TWIM_vect, TWIn_TWIS_vect) --------
 
-    /// What a HOST interrupt found. Nothing is cleared here: RIF/WIF
+    /// What a host interrupt found. Nothing is cleared here: RIF/WIF
     /// clear when the handler writes MADDR, MDATA or MCMD (29.5.6), and
     /// a body that cleared them would eat the state its caller reads.
     struct HostIsr {
@@ -1052,7 +1131,7 @@ public:
     };
     [[gnu::always_inline]] static HostIsr take_host() { return {regs().MSTATUS}; }
 
-    /// What a CLIENT interrupt found. Same discipline: DIF and APIF
+    /// What a client interrupt found. Same discipline: DIF and APIF
     /// clear when the handler writes SCMD or touches SDATA (29.5.12).
     struct ClientIsr {
         uint8_t status;
@@ -1111,7 +1190,7 @@ public:
     /// Can the divider make `s` at the peripheral clock last seen and
     /// the bus timing declared - a BAUD the register holds, with the
     /// period at or above the request (twi_baud_for)? A speed that is
-    /// not is REFUSED by the host engine, never approximated: the
+    /// not is refused by the host engine, never approximated: the
     /// fastest the divider goes is CLK_PER/10, so reachability implies
     /// the chapter's CLK_PER >= 4 x f_SCL (twi_clock_ok), the condition
     /// the bus error detector (29.5.6) and the client Stop interrupt
@@ -1126,7 +1205,7 @@ public:
     /// Reprogram MBAUD (and FMPEN with it) for a speed at the peripheral
     /// clock last seen. False when the speed cannot be reached, or needs
     /// pads this call may not change (FMPEN moves with the speed here:
-    /// it IS the pad half of Fm+).
+    /// it is the pad half of Fm+).
     /// The bus's rise and fall times (0 = the mode's specification
     /// maximum), which equations 29-3 and 29-5 charge to every MBAUD
     /// this instance computes from now on.
@@ -1236,8 +1315,8 @@ private:
 
     /// Route, then prepare the pins the peripheral is about to take.
     ///
-    /// ERRATA DB 2.15.1 / DA 2.14.1: with the TWI enabled the pin
-    /// override covers the driver but NOT the value, so a PORTx.OUT bit
+    /// Errata DB 2.15.1 / DA 2.14.1: with the TWI enabled the pin
+    /// override covers the driver but not the value, so a PORTx.OUT bit
     /// left at '1' on SDA or SCL pins that line permanently high. Both
     /// pins therefore go back to being inputs with OUT = 0 before the
     /// peripheral takes them - unconditionally, on every revision: two
@@ -1299,15 +1378,15 @@ private:
 /*
  * I2cHost<n, route>
  *
- * The transfer ENGINE: the target-side half of the I2C stack, driven by
+ * The transfer engine: the target-side half of the I2C stack, driven by
  * util/i2c_bus.hpp (the BusMaster arbiter, which owns arbitration and
  * replies). This engine owns the wire: START/repeated START/STOP, the
  * address phase, the ACK policy and the byte pump under the TWI host
  * interrupt (one interrupt per byte, the same honest price the SPI
  * engine pays).
  *
- * Transaction descriptor (Request) - ONE bus tenure, from START to STOP,
- * in the three shapes I2C devices actually use:
+ * Transaction descriptor (Request) - one bus tenure, from START to STOP,
+ * in the four shapes I2C devices actually use:
  *
  *   write             tx[tx_len], rx_len == 0        S addr+W data... P
  *   read              tx_len == 0, rx[rx_len]        S addr+R data... P
@@ -1315,30 +1394,31 @@ private:
  *   probe             both empty                     S addr+W P     -> ACK/NACK
  *
  * The write-then-read shape is the register-access idiom (send the
- * register index, repeated START, read the value) and it MUST be one
+ * register index, repeated START, read the value) and it must be one
  * request: a repeated START is what keeps another host from slipping in
  * between - the SPI rule "the request is the complete script of one bus
  * tenure" holds verbatim. The probe is what an address scanner sends:
  * the reply's status says whether anybody ACKed.
  *
  * Status codes (util/i2c_bus.hpp): i2c_ok, i2c_nack_addr, i2c_nack_data,
- * i2c_arb_lost, i2c_bus_error. i2c_nack_addr is any ADDRESS nobody
- * acknowledged - a write's, a read's, the repeated START's - and
- * i2c_nack_data a written byte refused. On any NACK the engine still issues the
- * STOP so the bus is released; on arbitration lost the bus belongs to
- * the other host and no STOP is sent; on bus error the peripheral is
- * forced back to the idle bus state.
+ * i2c_arb_lost, i2c_bus_error, and i2c_rejected for a request whose
+ * speed the divider cannot make (start() below). i2c_nack_addr is any
+ * address nobody acknowledged - a write's, a read's, the repeated
+ * START's - and i2c_nack_data a written byte refused. On any NACK the
+ * engine still issues the STOP so the bus is released; on arbitration
+ * lost the bus belongs to the other host and no STOP is sent; on bus
+ * error the peripheral is forced back to the idle bus state.
  *
  * Buffer ownership travels with the request (the client hands the spans
  * off until its I2cDone comes back). Bus speed travels per request, as
  * on SPI: a shared bus can carry a 100 kHz sensor and a 400 kHz DAC.
  * MBAUD may only be written with the host disabled (29.5.7), so a speed
- * CHANGE costs an ENABLE cycle and a force-idle - paid at start(), only
+ * change costs an ENABLE cycle and a force-idle - paid at start(), only
  * when the speed actually moves, and never per byte.
  *
- * A stuck TRANSACTION is the bus AO's to notice: util/bus_master.hpp's
- * timeout_ticks answers the requester bus_timeout in its place and calls
- * recover() below. A stuck WIRE is a different fault and the remedy is
+ * A stuck transaction is the bus active object's to notice:
+ * util/bus_master.hpp's timeout_ticks, when it is not 0, answers the
+ * requester bus_timeout in its place and calls recover() below. A stuck wire is a different fault and the remedy is
  * Twi<n>::unstick() (and this task's `unstick()`), which nothing calls
  * on its own: which devices to free, and when, is the application's
  * (design/i2c-bus.md). What is not covered (10-bit addressing and the
@@ -1363,14 +1443,18 @@ public:
     static constexpr TwiRoute pin_route = route;
     static constexpr bool available = twi_route_exists(n, route);
 
+    /// One bus tenure, posted to the arbiter. The speed is the tenure's
+    /// own and defaults to Sm: a request that names none runs at 100 kHz
+    /// whatever init() programmed (start() reprograms MBAUD when it
+    /// differs from the speed in force).
     struct Request {
         uint8_t addr;          ///< 7-bit client address (unshifted)
-        /// Bytes written after START, LENT until the reply lands (may be
+        /// Bytes written after START, lent until the reply lands (may be
         /// null if tx_len == 0).
         Borrowed<const uint8_t, Lease::reply> tx;
         uint8_t tx_len;
         /// Where the bytes read after the (repeated) START+R are put;
-        /// LENT until the reply lands.
+        /// lent until the reply lands.
         Borrowed<uint8_t, Lease::reply> rx;
         uint8_t rx_len;
         ReplyTo<I2cDone> reply;
@@ -1380,10 +1464,10 @@ public:
 
     /// What the whole bus is configured with, beyond the per-request
     /// speed. The SMBus knobs live here because they are properties of
-    /// the WIRE, not of one transaction.
+    /// the wire, not of one transaction.
     struct Options {
         I2cSpeed speed = I2cSpeed::standard_100k;   ///< the speed init() programs
-        /// The rise and fall times of THIS bus in nanoseconds; 0 charges
+        /// The rise and fall times of this bus in nanoseconds; 0 charges
         /// the mode's specification maximum, which is what a driver that
         /// knows nothing about the wiring must assume. A stiff bus that
         /// declares its measured numbers gets a faster SCL and still
@@ -1394,25 +1478,31 @@ public:
         TwiSdaHold sda_hold = TwiSdaHold::off;
         TwiSdaSetup sda_setup = TwiSdaSetup::cycles8;
         TwiInputLevel input_level = TwiInputLevel::i2c;
-        /// MCTRLA.SMEN: the ACK rides the MDATA read (29.3.3.3). ON by
+        /// MCTRLA.SMEN: the ACK rides the MDATA read (29.3.3.3). On by
         /// default: a received byte but the last is then answered by the
         /// read itself, and the bus moves on at that read instead of at
         /// the command after it - measured 9 to 14 cycles less SCL held
-        /// per byte (bench_avr letter i, docs/avrxt/twi.md). A write is
-        /// the same either way: the action is not taken on a DATA write.
+        /// per byte (the benchmark skeleton's letter i, docs/avrxt/twi.md).
+        /// A write is the same either way: the action is not taken on a
+        /// data write.
         bool smart = true;
         bool debug_run = false;
     };
 
     /**
-     * Host, interrupt driven. Call after clock init, before sei(). The
+     * Host, interrupt driven: routes the pins, programs MBAUD for
+     * o.speed at the clock's rate, enables the host with both its
+     * interrupts (RIEN, WIEN) and declares the bus idle. Setup: call
+     * after the clock task's init, before sei(). The
      * pull-ups are external (the internal ones are far too weak for I2C
      * edges); the pins are left to the peripheral, which drives them
      * open-drain by itself - init only routes them and makes sure their
      * PORT.OUT bits are clear (errata 2.15.1 / 2.14.1).
      *
      * False when the package cannot bond the route or the speed cannot
-     * be reached at this clock.
+     * be reached at this clock. When a client of this instance is
+     * already enabled (combined mode), only the host half and the shared
+     * CTRLA knobs are written.
      */
     template <typename Clock>
     static bool init(Clock clock, Options o = {}) {
@@ -1469,7 +1559,7 @@ public:
 
     /// The peripheral clock changed (DynamicClock fan-out): MBAUD is
     /// derived from CLK_PER, so it is recomputed for the speed in force.
-    /// The bus must be IDLE - the rewrite costs an ENABLE cycle.
+    /// The bus must be idle - the rewrite costs an ENABLE cycle.
     static void rebase(uint32_t hz) { (void)T::rebase(hz); }
 
     /// The SCL the host really produces at the speed in force, on a bus
@@ -1497,7 +1587,7 @@ public:
     /// divider cannot make at the clock in force, answered i2c_rejected
     /// through status() - the I2cHost contract (docs/design/i2c-bus.md).
     ///
-    /// The per-byte state is set up HERE, once: a cursor into the phase's
+    /// The per-byte state is set up here, once: a cursor into the phase's
     /// buffer and the count of bytes left in it, so the handler's byte is
     /// a load, a store and a decrement (isr() below). In Smart mode a
     /// tenure that reads arms ACKACT = ACK here, once, and every byte but
@@ -1538,7 +1628,10 @@ public:
         return false;
     }
 
-    /// Outcome of the last transaction (valid once isr() returned true).
+    /// Outcome of the last transaction: an i2c_* code of util/i2c_bus.hpp,
+    /// valid once isr() returned true, or at once when start() returned
+    /// true (i2c_rejected). The program's host handler posts it to the
+    /// arbiter as TransferDone{status()}.
     static uint8_t status() { return status_; }
 
     /**
@@ -1546,10 +1639,10 @@ public:
      * true when the transaction just completed (STOP issued or bus
      * lost): the edge on which the glue posts TransferDone.
      *
-     * ONE INTERRUPT PER BYTE IS THE SILICON'S (29.3.2.2.4, 29.3.2.2.5):
+     * One interrupt per byte is the silicon's (29.3.2.2.4, 29.3.2.2.5):
      * no FIFO, no byte counter, no DMA, and SCL is held from the flag
      * until software answers - so the handler's latency to its MDATA
-     * access is time the BUS waits, every byte. The two common cases are
+     * access is time the bus waits, every byte. The two common cases are
      * therefore asked first and with one test each - a byte gone out and
      * acknowledged in the write phase (WIF alone among WIF, RXACK,
      * ARBLOST and BUSERR), a byte come in in the read phase (RIF without
@@ -1598,7 +1691,7 @@ public:
                 return false;
             }
             // The last byte: NACK and STOP. In Smart mode ACKACT must
-            // read NACK BEFORE MDATA is read - with ACK standing the read
+            // read NACK before MDATA is read - with ACK standing the read
             // would acknowledge the byte and clock in one more; with NACK
             // it sends nothing (29.3.3.3) and the STOP command carries it.
             if (smart_) T::ack_action(TwiAck::nack);
@@ -1612,7 +1705,7 @@ public:
     /// The errata's work-around for a wedged host (FLUSH is not usable:
     /// DB 2.15.2 / DA 2.14.3): an ENABLE cycle, then the bus idle again.
     static void recover() { T::recover(); }
-    /// The other half of recovery: the WIRE, not the peripheral. See
+    /// The other half of recovery: the wire, not the peripheral. See
     /// Twi<n>::unstick() - up to `max_pulses` bit-banged SCL pulses
     /// until a stuck client releases SDA, then a STOP. Returns the pulse
     /// count, or Twi<n>::unstick_failed.
@@ -1688,18 +1781,18 @@ private:
  *   S4  collision: this client could not put a high bit on SDA
  *
  * The address-match space is the whole of 29.3.2.3.1: the exact address,
- * the General Call address (SADDR bit 0), an address RANGE (SADDRMASK
- * with ADDREN = 0 masks the bits to ignore), a SECOND exact address
+ * the General Call address (SADDR bit 0), an address range (SADDRMASK
+ * with ADDREN = 0 masks the bits to ignore), a second exact address
  * (ADDREN = 1), or every address on the bus (PMEN).
  *
- * `on_dual_pins` puts the client on the route's SECOND pin pair through
+ * `on_dual_pins` puts the client on the route's second pin pair through
  * DUALCTRL, with its own INPUTLVL/SDAHOLD/FMPEN - the host then keeps
  * the main pair for itself. It is refused at compile time on a package
  * that does not bond that pair.
  *
- * Combined mode (a host and a client on the SAME instance and the SAME
+ * Combined mode (a host and a client on the same instance and the same
  * pins) is legal and needs no flag: initialize both tasks. The CTRLA
- * knobs are then ONE register shared by the two halves and the later
+ * knobs are then one register shared by the two halves and the later
  * init wins - which is what the silicon does, not a policy of this
  * driver.
  *
@@ -1740,8 +1833,8 @@ public:
     struct Options {
         uint8_t address = 0;                ///< 7-bit, unshifted
         bool general_call = false;          ///< also answer address 0x00
-        uint8_t address_mask = 0;           ///< bits to IGNORE, or a second address
-        bool second_address = false;        ///< ADDREN: address_mask IS a second address
+        uint8_t address_mask = 0;           ///< bits to ignore, or a second address
+        bool second_address = false;        ///< ADDREN: address_mask is a second address
         bool promiscuous = false;           ///< PMEN: answer everything
         bool smart = false;                 ///< SCTRLA.SMEN
         bool stop_interrupt = true;         ///< PIEN: let a STOP raise APIF
@@ -1755,7 +1848,10 @@ public:
 
     /// Configure the instance as a client. In Dual mode the knobs go to
     /// DUALCTRL (its own copies); otherwise they go to the CTRLA the
-    /// host shares. False when the package cannot bond the pins.
+    /// host shares. False when the package cannot bond the pins. Setup:
+    /// after the clock task's init, before sei(); when the host of this
+    /// instance is already enabled (combined mode), only the client half
+    /// and the shared knobs are written.
     template <typename Clock>
     static bool init(Clock clock, Options o) {
         static_assert(clock_follows<Clock, I2cClient>(),
@@ -1819,12 +1915,12 @@ public:
     static bool addressed() { return T::address_flag(); }
     /// Is a data byte waiting, or the last one finished (DIF)?
     static bool data_ready() { return T::data_flag(); }
-    /// What the last address packet asked for: true = the host READS.
+    /// What the last address packet asked for: true = the host reads.
     static bool host_reading() { return T::host_reading(); }
     /// What raised APIF: an address match (true) or a STOP (false).
     static bool matched_address() { return T::address_match(); }
     /// The address byte the match logic stored (SDATA after a match) -
-    /// with PMEN or a mask this is the only way to learn WHICH address
+    /// with PMEN or a mask this is the only way to learn which address
     /// was called. Reading it also clears DIF, so read it right after
     /// the address interrupt and before responding.
     static uint8_t last_address() { return static_cast<uint8_t>(T::client_read() >> 1); }
@@ -1862,7 +1958,7 @@ public:
         if (!smart_) T::client_command(TwiClientCmd::response);
     }
 
-    /// The last acknowledge bit the HOST sent (valid after a transmit):
+    /// The last acknowledge bit the host sent (valid after a transmit):
     /// true = NACK, the host wants no more.
     static bool nacked() { return T::client_rx_nack(); }
     /// S4: this client could not drive a high bit or a NACK. Cleared by
@@ -1899,8 +1995,10 @@ public:
     static void second_address(uint8_t addr7) { T::second_address(addr7); }
     static void promiscuous(bool on) { T::promiscuous(on); }
 
-    /// ISR body (TWIn_TWIS_vect). Clears nothing: DIF and APIF clear
-    /// when the handler responds (SCMD) or touches SDATA.
+    /// Interrupt body (TWIn_TWIS_vect): called from the program's ISR,
+    /// it returns the SSTATUS it found for the handler to decide on.
+    /// Clears nothing: DIF and APIF clear when the handler responds
+    /// (SCMD) or touches SDATA.
     [[gnu::always_inline]] static typename T::ClientIsr isr() { return T::take_client(); }
 
     /// ClockUser: a client derives no rate from CLK_PER - the host does

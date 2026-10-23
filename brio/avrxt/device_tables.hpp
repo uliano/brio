@@ -1,28 +1,43 @@
 /*
  * device_tables.hpp
  *
- * THE RESERVE of the avrxt stratum - the one file where the preprocessor
- * is allowed to ask the device header what exists. The standing rule
+ * What the part an image is compiled for has: the table of what each
+ * AVR DA, DB and EA part has, read off the device header, which the
+ * stratum's documents call the reserve. A driver of this stratum, or a
+ * program that adapts to its part, asks it a question and gets a
+ * compile-time answer:
+ *
+ *     static_assert(brio::port_exists('E'), "this board needs PORTE");
+ *     if constexpr (brio::has_xoschf) { ... }        // a crystal can drive PA0/PA1
+ *     if constexpr (brio::avr_die == brio::AvrDie::avr128da) { ... }   // a DA erratum
+ *
+ * Every entry is a constexpr value or a constexpr function, so there is
+ * nothing to call at run time and no context to respect. A part the
+ * table does not list is a compile error (the #error below), which is
+ * how the stratum's claim of the parts it builds for is checked.
+ *
+ * It is the one file of the avrxt stratum where the preprocessor is
+ * allowed to ask the device header what exists. The standing rule
  * (docs/design/overview.md, "Generalization rule"): a probe that yields
- * a VALUE lives here and is exported as constexpr data; a driver keeps
- * `#ifdef` only to select per-instance CODE (a register-struct
+ * a value lives here and is exported as constexpr data; a driver keeps
+ * `#ifdef` only to select per-instance code (a register-struct
  * reference, a block the part has not got), never to learn a fact.
  *
- * THREE KINDS OF ENTRY, each asked of the thing that IS the answer:
+ * Three kinds of entry, each asked of the thing that is the answer:
  *
- *  - FEATURES AND INSTANCES. Each a probe of the header symbol that is
+ *  - Features and instances. Each a probe of the header symbol that is
  *    the feature itself: `MVIO` is the multi-voltage I/O block,
  *    `CLKCTRL_XOSCHFCTRLA` the high-frequency crystal oscillator's
  *    register, `TCA1` the second TCA, `CLKCTRL_PLLS_bm` the PLL. Where
- *    the header names a feature by an ENUMERATOR rather than a macro (an
+ *    the header names a feature by an enumerator rather than a macro (an
  *    AC power profile, a window selection), the probe is a `requires` on
- *    the enum type; where it names it by a struct MEMBER (an event
+ *    the enum type; where it names it by a struct member (an event
  *    channel, an op amp's registers), a `requires` on the struct. A
- *    feature is never borrowed to mean a FAMILY: "has MVIO" is a fact
+ *    feature is never borrowed to mean a family: "has MVIO" is a fact
  *    about PORTC's supply, and it stops meaning "an AVR DB" the moment
  *    any other die without MVIO joins the stratum.
  *
- *  - THE PART: its DIE and its PACKAGE. What only a die can key - the
+ *  - The part: its die and its package. What only a die can key - the
  *    errata, whose sheets are written per die (DS80000882C for the
  *    AVR128DA28/32/48/64, DS80000915F for the AVR128DB28/32/48/64,
  *    DS80001048D for the AVR64EA28/32/48) - and the package's pin
@@ -35,12 +50,12 @@
  *    part this table does not list is a compile error: the stratum's
  *    claim (avrxt/cmake/avr-mcus.cmake's packages) made at compile time.
  *
- *  - THE ERRATA AND THE FAMILY FACTS NO HEADER CARRIES, as values keyed
+ *  - The errata and the family facts no header carries, as values keyed
  *    on the die, each with its section. Only the items a driver reads
  *    are here: a value no code consults would be a claim with no guard.
  *
  * The PORTMUX route fields are probed here too (mask and position per
- * instance, from the header's `_gm`/`_gp`): their WIDTH and which of a
+ * instance, from the header's `_gm`/`_gp`): their width and which of a
  * peripheral's route registers holds them is the one thing that moves
  * between the layouts, and the drivers write the fields from these
  * values rather than from a width they assume.
@@ -113,9 +128,9 @@ inline constexpr uint8_t package_pins = 48;
 
 /// Whether this package bonds out the port at all: the 28/32-pin parts
 /// lack PORTB and PORTE, PORTG exists on 64 pins only. Port-level only:
-/// a pin missing from an EXISTING port (PF4 on a 28-pin part) is a
+/// a pin missing from an existing port (PF4 on a 28-pin part) is a
 /// pin-level bonding fact the drivers' route tables carry. Drivers use
-/// this to keep an instance usable when only one of its pin POSITIONS
+/// this to keep an instance usable when only one of its pin positions
 /// is absent (an `if constexpr` on the missing branch), and to refuse a
 /// config that asks for it.
 constexpr bool port_exists(char p) {
@@ -143,7 +158,7 @@ inline constexpr bool has_mvio = false;
 
 /// Whether the part has the high-frequency crystal oscillator (XOSCHF:
 /// a crystal on PA0/PA1, or an external clock through it). A part
-/// without it takes an external CLOCK on PA0 directly; a program
+/// without it takes an external clock on PA0 directly; a program
 /// choosing its HF source asks this, never the device header.
 #if defined(CLKCTRL_XOSCHFCTRLA)
 inline constexpr bool has_xoschf = true;
@@ -336,7 +351,7 @@ inline constexpr uint8_t lut_count = 4;
 #endif
 
 /// The concepts below make a member or enumerator lookup a substitution
-/// rather than a hard error: a requires-expression over a NON-dependent
+/// rather than a hard error: a requires-expression over a non-dependent
 /// type is checked at once and would not compile where the name is
 /// absent.
 template <typename T>
@@ -580,7 +595,7 @@ inline constexpr uint8_t tca1_route_porta = route_absent;
 inline constexpr uint8_t tca1_route_portd = route_absent;
 #endif
 
-// The route CODES each instance's field takes, per layout. Each table is
+// The route codes each instance's field takes, per layout. Each table is
 // indexed by the value of the driver's route enumerator - UsartRoute {def,
 // alt1, alt2, none, alt3, alt4}, SpiRoute {def, alt1, alt2, none, alt3,
 // alt4, alt5, alt6}, TwiRoute {def, alt1, alt2, alt3}, whose values are
@@ -588,7 +603,7 @@ inline constexpr uint8_t tca1_route_portd = route_absent;
 // the header's `_gv` enumerator wherever the name exists on every package
 // of the layout, the chapter's number where only some packages name it
 // (test/family_avrxt/device_tables.cpp holds those against the header on the
-// packages that do). Whether THIS package bonds a route's pins is the
+// packages that do). Whether this package bonds a route's pins is the
 // driver's pin table; a code here says the silicon has the route.
 
 #if PORTMUX_USART0_gm == 0x07
@@ -685,7 +700,7 @@ inline constexpr uint8_t erratum_ea_nvm_supply_revid =
 /// releases the pin with the converter.
 inline constexpr bool erratum_dac_outen_drift = avr_die != AvrDie::avr64ea;
 
-/// The TCB's CCMPL and CCMPH as two INDEPENDENT 8-bit registers in PWM8
+/// The TCB's CCMPL and CCMPH as two independent 8-bit registers in PWM8
 /// mode, as each chapter says (DS40002247B 24.5.10, DS40002443A 23.5.10):
 /// true on the AVR EA, whose errata DS80001048D list no TCB item and
 /// whose rev B1 takes a lone CCMPH write with CCMPL kept (measured,

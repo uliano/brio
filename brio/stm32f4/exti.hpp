@@ -1,11 +1,12 @@
 /*
  * exti.hpp
  *
- * The STM32F4's external interrupt/event controller (RM0090 ch. 12,
- * RM0390 ch. 10, RM0383 ch. 10): the peripheral where THIS family keeps
- * its pin interrupts. There are none in GPIO - stm32f4/pin.hpp says so
- * and stops there - so every edge sense, every pending bit and every
- * wake-up line lives here.
+ * Interrupts from pins, and from the peripheral wake-up lines, on the
+ * STM32F4: the external interrupt/event controller (RM0090 ch. 12,
+ * RM0390 ch. 10, RM0383 ch. 10). This family keeps its pin interrupts
+ * here - there are none in GPIO, stm32f4/pin.hpp says so and stops
+ * there - so every edge sense, every pending bit and every wake-up line
+ * lives in this file.
  *
  *  Exti           the block: the trigger selection, the software trigger,
  *                 the one pending register, the interrupt and event
@@ -13,8 +14,43 @@
  *                 ISR body a vector calls.
  *
  *  ExtInt<Pin>    one GPIO line reached through the pad that carries it:
- *                 the line number IS the pin number, and the port is what
+ *                 the line number is the pin number, and the port is what
  *                 the multiplexer has to be told.
+ *
+ *  ExtiLine<n>    one line named as a constant, the way a peripheral
+ *                 wake-up above 15 is named; a line the part has not got
+ *                 is a compile error.
+ *
+ * The smallest use, a falling edge on a button (docs/stm32f4/exti.md
+ * carries it whole):
+ *
+ *   using ButtonInt = brio::ExtInt<brio::Pin<'C', 13>>;   // line 13
+ *   ButtonInt::claim(brio::PinPull::up);   // input + pull + EXTICR
+ *   ButtonInt::configure(brio::ExtiSense::falling);
+ *   ButtonInt::clear();                    // before arming
+ *   ButtonInt::arm(true);                  // EXTI_IMR
+ *   brio::Nvic::enable(ButtonInt::irq());  // EXTI15_10
+ *
+ * and in the program's EXTI15_10_IRQHandler, `Exti::isr(
+ * Exti::vector_lines(EXTI15_10_IRQn))` for the mask of lines that fired,
+ * `ButtonInt::served(fired)` to ask it about line 13, then a post.
+ *
+ * Who calls what, and from where. The configuring verbs - sense(),
+ * interrupt(), event(), select(), steal(), claim(), release() and their
+ * line-level faces - are setup verbs: main(), or an active object's
+ * handler, never an interrupt handler. Each is a read-modify-write of a
+ * register every line shares (RTSR, FTSR, IMR, EMR, SYSCFG_EXTICR) with
+ * no guard of its own, so two contexts configuring at once can lose one
+ * another's bit. isr() is the interrupt body: the program's handler for
+ * an EXTI vector calls it and nothing else should; it reads and clears
+ * the pending bits of the lines it is given, one load and one store, and
+ * masks nothing. pending(), clear() and clear_lines() are single loads
+ * and stores (PR is rc_w1), legal from any context. trigger() is a
+ * read-modify-write of SWIER, so a trigger from an interrupt handler
+ * racing one from the loop can be lost. Nothing here waits; the
+ * multiplexer verbs open SYSCFG's clock gate first. Every verb that takes
+ * a line answers false (or reads nothing) for a line the device does not
+ * implement.
  *
  * EIGHT FACTS THAT SHAPE THE FILE.
  *
@@ -97,20 +133,22 @@
  * `Exti::implemented()` is how such a number is checked against the
  * device.
  *
- * WAKE-UP is stated here and NOT built: an EXTI line with its IMR or EMR
- * bit set wakes the CPU sub-system and, through PWR, the system clocks
- * (12.2.3). What that costs and how the clocks come back is the power
- * chapter's, and there is no SleepSite in this stratum yet - so the only
- * sleep this file has anything to say about is the one the core can enter
- * unaided: WFE, which returns on an EXTI CPU EVENT (an EMR bit set, no
- * interrupt, no NVIC line, no pending bit and nothing to clear).
+ * Wake-up is stated here and not built here: an EXTI line with its IMR or
+ * EMR bit set wakes the CPU sub-system and, through PWR, the system
+ * clocks (12.2.3). What that costs and how the clocks come back is the
+ * power chapter's (stm32f4/pwr.hpp, and stm32f4/sleep.hpp's sites, which
+ * arm the deep sleeps) - so the only sleep this file has anything to say
+ * about is the one the core can enter unaided: WFE, which returns on an
+ * EXTI CPU event (an EMR bit set, no interrupt, no NVIC line, no pending
+ * bit and nothing to clear).
  *
- * ERRATA. No item of ES0206 Rev 24, ES0298 Rev 8 or ES0287 Rev 6 is filed
- * against the EXTI or SYSCFG. One item filed under the RTC is about this
- * peripheral all the same, and it applies to every revision of all three
- * parts (ES0206 2.9.3, ES0298 2.10.3, ES0287 2.8.3, "RTC interrupt can be
- * masked by another RTC interrupt"): THE EFFECTIVE CLEAR OF A PENDING BIT
- * IS DELAYED with respect to the store that clears it. A handler that
+ * ERRATA. No item of ES0206 Rev 24, ES0298 Rev 8, ES0287 Rev 6 or ES0321
+ * Rev 14 is filed against the EXTI or SYSCFG. One item filed under the
+ * RTC is about this peripheral all the same, and it applies to every
+ * revision of all four parts (ES0206 2.9.3, ES0298 2.10.3, ES0287 2.8.3,
+ * ES0321 2.11.3, "RTC interrupt can be masked by another RTC interrupt"):
+ * the effective clear of a pending bit is delayed with respect to the
+ * store that clears it. A handler that
  * clears its line last therefore returns while the request still stands
  * and is entered a second time - which is why `isr()` reads AND clears at
  * the top, before the handler does anything with what it read.
@@ -394,7 +432,8 @@ private:
 /**
  * A line the program names as a CONSTANT - which is what a peripheral
  * wake-up above 15 always is, since a driver publishes its number
- * (`Rtc::exti_line`, and the like) and an application spells it once:
+ * (`Rtc::wakeup_exti_line`, `Pwr::pvd_exti_line` and the like) and an
+ * application spells it once:
  *
  *   using RtcWake = brio::ExtiLine<22>;          // RTC wake-up
  *   RtcWake::configure(brio::ExtiSense::rising);

@@ -2,32 +2,48 @@
  * pac.hpp
  *
  * The SAM C21 Peripheral Access Controller (DS60001479M ch. 11): the
- * block that can WRITE-PROTECT any peripheral on any of the APB bridges,
+ * block that can write-protect any peripheral on any of the APB bridges,
  * and that reports every access violation - a protected write, a write
  * to an unimplemented register, a write while a synchronization is
- * running, an access to an address no client answers.
+ * running, an access to an address no client answers. The smallest use
+ * protects a peripheral by the identifier it publishes and puts it back
+ * (docs/samc21/pac.md, "How to use it"):
  *
- * THE POSITION THIS HEADER TAKES: MECHANISM ONLY, NO CONCEPT.
+ *     Pac::protect(Tsens::pac_id);
+ *     ...
+ *     Pac::unprotect(Tsens::pac_id);   // once: a double clear is an error
+ *
+ * Who calls what. Every verb is one store or one load, with no guard and
+ * nothing waited for or masked; write_control() and the three verbs over
+ * it answer false only for an identifier this device has no bridge for,
+ * and what the silicon made of a request is read back with is_protected()
+ * and flagged(). Protection, unlike the flags, is a program-wide state:
+ * two contexts protecting and clearing the same peripheral break the
+ * balance rule below. isr() is a body for IRQ 0, the system blocks'
+ * shared line: the program's SYSTEM_Handler calls it beside theirs. The APB
+ * clock is on out of reset, so nothing needs opening first.
+ *
+ * The position this header takes: mechanism only, no concept.
  *
  * There is no RAII guard here, no policy, no util/ contract, and no
  * "protect everything at boot" ceremony. The reasons are three and they
  * are worth stating, because a PAC driver invites all of them:
  *
- *  1. THE FRAMEWORK HAS NO USER. Nothing in brio turns protection
+ *  1. The framework has no user. Nothing in brio turns protection
  *     on, and a guard type designed before its first caller would be
  *     designed against an imagined one. The shape a guard should take -
  *     scoped, reference-counted, per-peripheral, or a boot-time policy
  *     table - is a question the first real safety-minded application
  *     gets to answer.
- *  2. THE DOUBLE-WRITE RULE MAKES NESTING A DESIGN DECISION, NOT A
- *     DETAIL. 11.5.2.6: setting protection on an already-protected
- *     peripheral is an ERROR, and so is clearing it twice. A naive
+ *  2. The double-write rule makes nesting a design decision, not a
+ *     detail. 11.5.2.6: setting protection on an already-protected
+ *     peripheral is an error, and so is clearing it twice. A naive
  *     scoped guard nested twice therefore raises a PAC error on the way
  *     in and again on the way out. Getting that right needs either a
  *     count or a read of STATUS, and which of those is right depends on
  *     whether interrupts share the peripheral - the chapter says so
  *     itself.
- *  3. PROTECTION IS NOT PROTECTION FROM EVERYTHING. Erratum 1.13.3
+ *  3. Protection is not protection from everything. Erratum 1.13.3
  *     (live on this silicon) lets IOBUS writes straight past a
  *     protected PORT; erratum 1.23.1 lets MCLK.CTRLA be written with no
  *     error at all. A util/ concept that promised "protected" would be
@@ -41,12 +57,12 @@
  * samc21/ccl.hpp do, for exactly the errata below); this header owns the
  * fabric and not the census.
  *
- * WHAT THE SILICON DOES.
+ * What the silicon does.
  *
- * WRCTRL IS A KEYED, WORD-WISE STORE. One 32-bit write carries the
+ * WRCTRL is a keyed, word-wise store. One 32-bit write carries the
  * peripheral identifier in the low sixteen bits and the operation in
  * KEY: 1 = clear, 2 = set, 3 = set-and-lock. 11.5.2.6 is explicit that
- * ONLY a word-wise write takes effect and that any other access is
+ * only a word-wise write takes effect and that any other access is
  * itself an error, flagged in INTFLAGA.PAC. There is no read-back of a
  * request: STATUSn is where the outcome is read.
  *
@@ -56,51 +72,51 @@
  * The device header states the whole table as `ID_<PERIPHERAL>` macros,
  * so no driver has to compute it.
  *
- * THE LOCK IS ONE-WAY UNTIL A RESET. Key 3 sets protection and locks
+ * The lock is one-way until a reset. Key 3 sets protection and locks
  * the setting; 11.5.2.5 says it "will only be cleared by a hardware
  * reset", and 11.5.2.2 that "only a hardware reset will reset the PAC
  * module". Which resets count as hardware is not spelled out anywhere in
  * the chapter, and it matters: see docs/samc21/pac.md, where the bench
  * answers it.
  *
- * THE FLAGS ARE FOUR BANKS. INTFLAGAHB reports client-bus errors (an
+ * The flags are four banks. INTFLAGAHB reports client-bus errors (an
  * access to an address no bridge or peripheral answers), INTFLAGA/B/C
  * one bit per peripheral of that bridge. All are write-one-to-clear and
- * all are OUTSIDE PAC write protection themselves (11.4.8), together
+ * all are outside PAC write protection themselves (11.4.8), together
  * with WRCTRL - so a fully protected system can still clear its own
  * error flags.
  *
- * ONE INTERRUPT, AND IT IS THE SHARED LINE. PAC_IRQn is line 0, shared
+ * One interrupt, and it is the shared line. PAC_IRQn is line 0, shared
  * with PM, MCLK, OSCCTRL, OSC32KCTRL and SUPC on this family - the
  * established discipline in this stratum (samc21/clock.hpp, samc21/supc.hpp,
  * samc21/osc32kctrl.hpp): the app binds one handler and calls each block's
  * isr() body, each of which acknowledges only what it armed.
  *
- * THE ERRATA. There is NO errata section for the PAC itself in
+ * The errata. There is no errata section for the PAC itself in
  * DS80000740S - not one item in 1.1..1.25 names this chapter. What
- * exists instead is a set of items in OTHER chapters, all live at
+ * exists instead is a set of items in other chapters, all live at
  * revision F, each of which says the PAC does not behave as ch. 11
  * promises for one particular peripheral:
  *
  *  - 1.7.4 (CCL): writing CCL.CTRL.SWRST triggers a PAC protection
  *    error - i.e. a flag with no protection set at all.
  *  - 1.13.2 (PORT): reads and writes of unimplemented PORT registers do
- *    NOT raise the protection error 11.5.2.4 promises for an illegal
+ *    not raise the protection error 11.5.2.4 promises for an illegal
  *    access.
  *  - 1.13.3 (PORT): IOBUS writes are not prevented when PORT is
  *    protected - the protection has a back door.
  *  - 1.19.1 (TSENS): a write to a protected TSENS.CTRLB is dropped, and
- *    the bench found it dropped IN SILENCE, with no flag raised.
+ *    the bench found it dropped in silence, with no flag raised.
  *  - 1.23.1 (MCLK): writes to MCLK.CTRLA raise no error even when MCLK
  *    is protected.
- *  - 1.24.1 (FREQM): READING FREQM.CTRLB raises a protection error, with
+ *  - 1.24.1 (FREQM): reading FREQM.CTRLB raises a protection error, with
  *    no protection involved and no workaround.
  *
  * Taken together those say the useful thing about this block: a raised
- * flag is good evidence, an ABSENT flag is not. docs/samc21/pac.md carries
+ * flag is good evidence, an absent flag is not. docs/samc21/pac.md carries
  * the measured map of which peripherals flag and which do not.
  *
- * NOT BUILT (docs/samc21/pac.md carries the list): no guard type and no
+ * Not built (docs/samc21/pac.md carries the list): no guard type and no
  * policy, for the reasons above; the ERR interrupt is exposed as flags,
  * an enable and an ISR body but nothing here waits on it; the fourth
  * bridge (D) exists on the C21N alone and neither its header nor a board

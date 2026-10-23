@@ -1,6 +1,98 @@
 # SERCOM I2C (SAM C21)
 
-Documents of record: SAM C20/C21 data sheet DS60001479M ch. 33 (over
+This document is for a programmer who needs an I2C bus on the SAM C21: a
+host reading and writing devices (a sensor, an EEPROM, a DAC) through
+the bus arbiter, or this chip answering another host as a client.
+`samc21/i2c.hpp` is the SERCOM's I2C mode in four parts: `I2cm<n>` and
+`I2cs<n>`, the host and the client resources, one function per register
+fact of one SERCOM instance; `I2cHost<n, pads, generator>`, the transfer
+engine `util/i2c_bus.hpp` drives, a task (in brio, a driver layer with
+state of its own, served from its peripheral's interrupt) whose Request
+every target's I2cHost carries field for field; and `I2cClient<n, pads,
+generator>`, the client role. The arbiter, `I2cBus`
+([design/i2c-bus.md](../design/i2c-bus.md) is the model), is an active
+object (a component of a brio program with its own event queue, served
+one event at a time by the kernel,
+[docs/learn/introduction.md](../learn/introduction.md)) that owns the
+bus on behalf of every other active object: a client posts one Request
+describing one tenure - one ownership of the bus from its START to its
+STOP: a write, a read, or a write then a read joined by a repeated START
+- and gets one `I2cDone` reply when it is over, the tenures run one at a
+time in the order they arrived.
+
+The smallest use, a device client on the arbitrated bus, is the block
+of "How to use" below:
+
+```cpp
+using I2cHw = brio::I2cHost<3, my_pads>;          // generator 0 on a clean wire
+using I2c = brio::I2cBus<I2cHw, P>;
+// main: I2cHw::init(clock, measured_rise_ns); kernel.init_all(); ...
+extern "C" void SERCOM3_Handler() {
+    if (I2cHw::isr()) { brio::post<I2c>(brio::TransferDone{I2cHw::status()}); }
+}
+// from an AO: {addr, tx spans as lend<Lease::reply>(...), rx, reply,
+// speed} posted to I2c; the I2cDone reply carries i2c_ok or the
+// wire's own answer (i2c_nack_addr is the address-scanner's probe
+// result).
+```
+
+Line by line: `I2cHw` names the engine over SERCOM3 with the pads
+`my_pads` (an `I2cPads` constant naming the two pins: SDA is the
+SERCOM's PAD[0] and SCL its PAD[1] by the chapter) and the SERCOM's core
+clock taken from generator 0, which runs at the CPU rate; `I2c` is the
+arbiter over that engine on the platform `P`
+([platform.md](platform.md)), with `util/i2c_bus.hpp`'s defaults of four
+pending requests and no timeout; `I2cHw::init(clock, measured_rise_ns)`
+takes the clock task's tag ([clock.md](clock.md)) and the bus's rise
+time in nanoseconds, which enters the baud arithmetic (300 ns when it is
+left out), and the rest of `main()` starts the kernel with `I2c` in its
+list of active objects (`run()` calls every active object's `init()`,
+which is what `init_all()` names); the `extern "C"` function is the
+SERCOM3 interrupt handler, as in C, under the name the crt's vector
+table gives it, and `I2cHw::isr()` answers true when a tenure has just
+completed, the edge on which the handler posts `TransferDone` with the
+engine's status to the arbiter; and an active object (AO) fills a
+`Request` - the 7-bit address, the bytes to write and the buffer to read
+into, both lent with `lend<Lease::reply>(...)`, the reply channel, the
+speed - posts it to `I2c` and receives `I2cDone` with `i2c_ok` or the
+wire's answer (an address nobody acknowledged is `i2c_nack_addr`, the
+probe result an address scanner reads).
+
+What decides correctness even there. `init()` comes after the clock
+task's: the three speeds' register pairs are computed from the rate the
+clock type claims (or from the `core_hz` a caller states for a divided
+generator), not read from the hardware. `init()` answers false when even
+the standard 100 kHz speed cannot be produced at that core rate, or a
+synchronization of the peripheral, the forcing of the bus state to IDLE
+included, did not complete; a faster speed the core cannot make is not
+an error at init but a request answered `i2c_rejected` without moving a
+byte. The pads are handed to the SERCOM with input enable and no pull,
+so the bus's pull-up resistors are the board's, and which pins may carry
+I2C at all is the data sheet's per-package table, which no header symbol
+encodes: the code cannot check the pins named. Every tenure that moves
+the wire runs on the interrupt, one per byte, so the SERCOM's vector
+must be bound to `isr()` as above; an unbound vector is a weak alias of
+the crt's silent spin, where the program stops at the first byte. The
+request's buffers are lent: the client leaves them untouched and in
+scope from the post until its `I2cDone` arrives, whatever the status,
+and nothing checks it. And the wire decides the core rate this engine
+can run at: the I2C logic has no input filter, so on a bundled pair with
+crosstalk a 48 MHz core reads glitches as false Start and Stop
+conditions and only a slowed core works (the headline section below);
+generator 0 is the choice for a clean, short wire.
+
+The page is long because the chapter is. In order: the documents of
+record; the headline, the wire finding that decides the core rate; what
+the silicon does (two register sets, SYSOP, the bus state machine, the
+clock hold, the automatic length and smart mode as this silicon runs
+them, the offer the engine takes or declines, the SMBus time-outs, the
+errata as code); the types and verbs; how to use; the host's cost,
+measured; the bench findings beyond the headline; and what is not
+covered.
+
+## Documents of record
+
+SAM C20/C21 data sheet DS60001479M ch. 33 (over
 the shared SERCOM ch. 30) and errata DS80000740S 1.17.x. Driver:
 `samc21/i2c.hpp` over `Sercom<n>`'s instance facts (sercom.md owns the
 address ladder; `i2cm_regs()`/`i2cs_regs()` and `gclk_slow_id()` sit
@@ -8,12 +100,12 @@ beside the SPI view). Family fixture `test/family_samc21/i2c.cpp` +
 seven negatives (the per-bus timeout adds an
 eighth at the util level: an engine without `recover()` refused);
 bench suite `test_samc_i2c`, bench letter `bench_samc` i
-(15 letters, two-board: the peer board runs `twi_peer` on an AVR64EA48,
+(15 letters - a letter is one command key of a suite's console and the
+group of verdicts it runs - two-board: the peer board runs `twi_peer` on an AVR64EA48,
 an AVR DA/DB or a second SAM C21, one `twi_link.hpp` wire format between them -
 commanded in band over the bus under test).
 
-## THE HEADLINE: this peripheral has no input filter, and the WIRE
-## decides everything
+## The headline: this peripheral has no input filter, and the wire decides everything
 
 The C21's I2C logic - the host's bus monitor and the client's
 Start/Stop/address machinery alike - samples SDA and SCL on
@@ -79,25 +171,25 @@ bits) - so `samc21/i2c.hpp` carries TWO resources, `I2cm<n>` and
 
 **The host's third SYNCBUSY bit.** Beside SWRST and ENABLE the host
 has SYSOP, raised by writing CTRLB.CMD, STATUS.BUSSTATE, ADDR or DATA
-while enabled (33.6.6). Every such store in the driver WAITS FIRST
+while enabled (33.6.6). Every such store in the driver waits first
 (the sdadc discipline).
 
 **The bus state machine and its exits.** A freshly enabled host is
 UNKNOWN and leaves it by a Stop, by the INACTOUT time-out, or by
 software forcing IDLE (33.6.2.3). Measured: with no time-out the state
-sits in UNKNOWN until `force_idle()`; whether INACTOUT walks it out BY
-ITSELF came out BOTH WAYS on this bench (IDLE on one run, still
+sits in UNKNOWN until `force_idle()`; whether INACTOUT walks it out by
+itself came out both ways on this bench (IDLE on one run, still
 UNKNOWN on the next, same code) - the suite records the observation
 and relies on `force_idle()`, which the engine's init always spends.
 
 **MB/SB hold SCL.** Both host flags stretch the clock until software
 answers with DATA, ADDR, a command or a flag clear - unlimited time to
-respond. STATUS.CLKHOLD says so, and ERRATUM 1.17.8 (live) makes that
-bit WRITABLE against the datasheet - writing it corrupts the clock
-hold, so both resources' W1C masks exclude bit 7 BY CONSTRUCTION
+respond. STATUS.CLKHOLD says so, and erratum 1.17.8 (live) makes that
+bit writable against the datasheet - writing it corrupts the clock
+hold, so both resources' W1C masks exclude bit 7 by construction
 (`I2cmStatus::w1c_all` / `I2csStatus::w1c_all` cannot express it).
 
-**One wire fault raises MB AND ERROR together**: an ISR that consumes
+**One wire fault raises MB and ERROR together**: an ISR that consumes
 MB and leaves ERROR standing lets the level storm the vector with main
 starved - measured, with IPSR reading the SERCOM's IRQ and INTFLAG
 0x80. So every exit of the engine sweeps all flags and W1C statuses
@@ -106,12 +198,12 @@ the idle guard rather than returned to.
 
 **A tenure into a busy bus parks in hardware.** Writing ADDR while
 another agent holds the wire parks the START until the bus idles
-(33.6.2.4.2). Behind a REAL foreign tenure it fires at that tenure's
+(33.6.2.4.2). Behind a real foreign tenure it fires at that tenure's
 STOP: started 1 ms into the peer's 16-byte write, a tenure waits it out
-and completes (letter o). Behind a PHANTOM - the peer pinning SDA low
+and completes (letter o). Behind a phantom - the peer pinning SDA low
 from a pin, no tenure around it - the bus reads BUSY for the hold's
-whole length, not one byte moves, and ON THIS SILICON the parked START
-does NOT fire when the hold releases (the phantom Start keeps the state
+whole length, not one byte moves, and on this silicon the parked START
+does not fire when the hold releases (the phantom Start keeps the state
 machine BUSY and even a configured INACTOUT does not walk it back): the
 way out is the engine's own re-init, and letter g prints the timeline.
 
@@ -125,15 +217,15 @@ the time-out statuses auto-clear on the next tenure's ADDR write
 
 - A WRITE under LEN = n raises MB after the address and after every data
   byte but the n-th, each with the clock held for the next DATA; after
-  the n-th it sends the STOP by itself and NO FLAG RISES - no MB after
+  the n-th it sends the STOP by itself and no flag rises - no MB after
   the last byte, none after the STOP, the bus simply going IDLE. With
   LEN = n + 1 the MB after byte n stands with the clock held and its
   acknowledge read, ready for a STOP or a repeated START.
 - A NACK under LEN - the address's or any data byte's before LEN - is
-  LENERR + RXNACK + ERROR with NO MB, and the STOP already sent: one
+  LENERR + RXNACK + ERROR with no MB, and the STOP already sent: one
   signature for an absent client and for a refused byte.
 - A READ under LEN = n raises SB for each byte; the DATA read of the
-  n-th sends the NACK and the STOP by themselves. SB then STANDS for a
+  n-th sends the NACK and the STOP by themselves. SB then stands for a
   while (some hundred cycles at 100 kHz), and an ADDR written while it
   stands is taken as a repeated START: the next tenure dies in BUSERR +
   ARBLOST, whether or not software swept the flag first. Waiting for SB
@@ -146,13 +238,13 @@ the time-out statuses auto-clear on the next tenure's ADDR write
   most 254 bytes long.
 
 **Smart mode, as this silicon runs it** (CTRLB.SMEN, 33.6.3.2): the DATA
-read sends ACKACT and clocks the next byte in WHATEVER ACKACT SAYS -
+read sends ACKACT and clocks the next byte in whatever ACKACT says -
 with ACKACT = NACK the read sent the NACK and still read one more byte
 (measured), unlike the AVR TWI's smart mode, which sends nothing on a
 NACK. So the last byte is closed by the STOP command with its NACK while
 SB holds the clock, synchronized, and only then read (33.10.10's
 "reading the last data byte after the stop condition has been sent").
-And ACKACT PERSISTS: a read's closing NACK leaves it set, and the next
+And ACKACT persists: a read's closing NACK leaves it set, and the next
 read's first DATA read would NACK that byte - every reading phase puts
 ACK back first.
 
@@ -174,14 +266,14 @@ ACK back first.
 when they are armed, on a slow clock weighed to 32 kHz.** Under LOWTOUTEN
 and SEXTTOEN a client stretching every byte by 40 ms ends the tenure at
 29 ms, inside the 25..35 ms window, and the engine answers
-`i2c_bus_error` (letter j). They bound the host's OWN unserviced hold as
+`i2c_bus_error` (letter j). They bound the host's own unserviced hold as
 well: MB left unserviced trips LOWTOUT at 29 ms measured, with the
 chapter's exact signature - STATUS.LOWTOUT + BUSERR and INTFLAG.ERROR
 beside the still-standing MB. MEXTTOEN, the host's own extend, polices
 that same unserviced hold alone - STATUS.MEXTTOUT + BUSERR and
-INTFLAG.ERROR, LOWTOUT never reached - and does NOT see a client's
+INTFLAG.ERROR, LOWTOUT never reached - and does not see a client's
 stretch: two bytes stretched 15 ms each complete `i2c_ok` under it.
-**THE THREE COUNTS ARE NOT THE CHAPTER'S NUMBERS.** Timed in
+**The three counts are not the chapter's numbers.** Timed in
 microseconds on the meter FREQM weighs (33.1 to 33.2 kHz, the factory
 trim), every shot of fifteen runs: LOWTOUT at 962 to 964 meter cycles,
 SEXTTOEN alone (one 40 ms stretch, counted from its start) at 960 or
@@ -190,15 +282,15 @@ At 32.768 kHz those are 29.3, 29.3 and 14.7 ms: LOWTOUT inside its
 25..35 ms window, but SEXT and MEXT late against the 25 and 10 ms
 33.6.3.1 states - MEXT exactly half of the other two - and both errata
 documents silent. A design that leans on SMBus's T_LOW:SEXT and
-T_LOW:MEXT gets them from this silicon at those counts. TWO OPERATIONAL RULES the chapter does not
-state: THE COUNTER ARMS AT configure() - the enables left in CTRLA by an
+T_LOW:MEXT gets them from this silicon at those counts. Two operational rules the chapter does not
+state: the counter arms at configure() - the enables left in CTRLA by an
 earlier configuration time nothing until a fresh disable/write/enable
-cycle - and A WRONG-RATE METER IS MUTE, not scaled: with
+cycle - and a wrong-rate meter is mute, not scaled: with
 GCLK_SERCOM_SLOW at 48 MHz the same hold never trips at all (a
-clock-domain limit), so a design that enables these time-outs must WEIGH
+clock-domain limit), so a design that enables these time-outs must weigh
 its slow clock (the suite prices its OSC32K meter on FREQM, 32.2 kHz
 with the factory trim). And a third, the one that hid the first finding
-for a while: `I2cm<n>::configure()` DISARMS EVERY INTERRUPT, so a caller
+for a while: `I2cm<n>::configure()` disarms every interrupt, so a caller
 that reconfigures the resource behind a running engine must start from
 `I2cHost::configuration()` - which keeps smart mode, the INACTOUT escape
 and the rest of what the engine relies on - and the engine arms ERROR
@@ -206,10 +298,10 @@ again with every phase. What the time-outs cannot see is a wire wedged
 by SDA: the START parks with no clock moving (letter g), and only the
 arbiter's per-bus `timeout_ticks` (util/bus_master.hpp, letter l)
 answers that with `i2c_timeout` on the kernel's clock and `recover()`s
-the engine; the WIRE - unstick(), re-probing the clients - stays the
+the engine; the wire - unstick(), re-probing the clients - stays the
 application's recovery ladder (docs/design/i2c-bus.md).
 
-**Erratum 1.17.16 NOT REPRODUCED in I2C mode either**: SWRST from the
+**Erratum 1.17.16 not reproduced in I2C mode either**: SWRST from the
 disabled state reset the block with its synchronization completing
 (0x30200014 -> 0), matching the SPI-mode measurement. The enable-first
 discipline is kept in both resources - the sheet marks every revision
@@ -221,7 +313,7 @@ bits not cleared with AMATCH): `I2cs::clear_errors()` writes them by
 hand and `answer_address()` spends it on every match. 1.17.13 (quick
 command + SCLSM=1 = bus error): the pair is refused at compile and run
 time. 1.17.21 (AACKEN broken on repeated start): no AACKEN knob - an
-AMATCH handler is the workaround's own prescription and `I2cClient` IS
+AMATCH handler is the workaround's own prescription and `I2cClient` is
 one. 1.17.22 (client RXNACK invalid at the first DRDY): the software
 flag the workaround prescribes is `I2cClient::first_drdy()`, armed by
 the acknowledged AMATCH. 1.17.6/7/9 (repeated starts in 10-bit and
@@ -239,9 +331,9 @@ with no workaround, and no bench wire here could carry 3.4 MHz).
   `end_transaction()` (table 33-3's CMD 0x2: after the host's closing
   NACK of a read tenure the machinery goes back to waiting for a start
   instead of stretching for a byte nobody wants - what a client that
-  SERVES reads needs).
+  serves reads needs).
 - **`i2c_baud_for(gclk_hz, scl_hz, rise_ns, fast_plus)`** - the
-  chapter's own formula solved for BAUD/BAUDLOW, the RISE TIME an
+  chapter's own formula solved for BAUD/BAUDLOW, the rise time an
   argument (a budget that ignores it lands T_LOW under the
   specification floor), the Fm+ 1:2 split per the chapter's note,
   rounding that never lands above the request, and
@@ -262,13 +354,13 @@ with no workaround, and no bench wire here could carry 3.4 MHz).
   1.10.4). `configuration(speed)` is the resource
   configuration the engine runs, what a caller that reconfigures the
   resource behind it starts from. `unstick()` - nine open-drain pulses
-  and a Stop by hand, which leaves a HEALTHY wire untouched (SDA read
+  and a Stop by hand, which leaves a healthy wire untouched (SDA read
   first; zero pulses is the answer and the action) - and `recover()`,
   the init() tail re-run from the cached configuration: what a timed I2cBus calls on a tenure that never answered,
-  and the ONLY way out of a START parked behind a phantom hold on this
-  silicon (the release does not fire it - letter g). recover() fixes the PERIPHERAL;
-  unstick() fixes the wire; neither replaces the other. NO PLACEMENT
-  PARAMETER: the event entry is inline in the vector that binds it, and
+  and the only way out of a START parked behind a phantom hold on this
+  silicon (the release does not fire it - letter g). recover() fixes the peripheral;
+  unstick() fixes the wire; neither replaces the other. No placement
+  parameter: the event entry is inline in the vector that binds it, and
   a program that wants it in SRAM places that vector in `.fast_text`
   ([platform.md](platform.md), "A handler in SRAM"); the entry as a
   util/placement.hpp `InRam` instance behind a vector in the flash was

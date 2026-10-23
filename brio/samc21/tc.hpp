@@ -3,9 +3,34 @@
  *
  * The SAM C21 Timer/Counters (DS60001479M ch. 35): five instances of a
  * counter with a prescaler, two compare/capture channels, four waveform
- * modes, one event input and three event outputs.
+ * modes, one event input and three event outputs - what a program uses
+ * for a PWM output on a pad, a counter that times an interval, or a
+ * capture of an input's period and pulse width. The smallest use, a PWM
+ * on the bench board's LED (docs/samc21/tc.md, "How to use it"):
  *
- *  Tc<n>            the RESOURCE: the whole chapter's register surface -
+ *   using LedWave = brio::TcWo<brio::Pin<'B', 23>>;   // TC3, WO1
+ *   using LedPwm = brio::TcPwm8<brio::Tc<3>, 1, 199>;
+ *   brio::Tc<3>::init(0);                       // generator 0
+ *   LedWave::claim();
+ *   LedPwm::setup(brio::TcPrescaler::div256);
+ *   LedPwm::duty(100);
+ *
+ * Which context calls what. init(), release(), configure(),
+ * event_config() and the tasks' setup() are setup verbs, from main() or
+ * an active object's handler (an active object is a brio component with
+ * its own event queue, served one event at a time by the kernel); the
+ * value verbs (duty(), the set_* writes, the commands, the synchronized
+ * reads) belong to one such context at a time. Each is a store or a
+ * read-modify-write followed by a bounded wait on SYNCBUSY (0xFFFF
+ * polls by default) that answers false when it runs out; nothing here
+ * has a guard of its own or masks interrupts. init() leaves the NVIC
+ * line disabled and the timer disabled. isr() is the interrupt body:
+ * the program arms the flags it wants, enables the line, and calls isr()
+ * from its TCn_Handler, nowhere else. The counter counts its generic
+ * clock generator, not Clock::hz, and the generator is the caller's to
+ * name.
+ *
+ *  Tc<n>            the resource: the whole chapter's register surface -
  *                   the three counter resolutions, the prescaler and its
  *                   synchronization, the waveform modes, capture with
  *                   its event actions, the commands, the buffered
@@ -22,15 +47,15 @@
  *  TcPeriodMeter    the capture shapes util/meter_sampler.hpp's
  *  TcPulseWidthMeter MeterSource is fed from.
  *
- * SIX FACTS THAT SHAPE THE FILE.
+ * Six facts that shape the file.
  *
- * 1. THE GEOMETRY IS THE DEVICE HEADER'S, ALL OF IT. How many
+ * 1. The geometry is the device header's, all of it. How many
  *    instances, how many channels each, which generic clock channel
- *    each uses, which instances can be PAIRED into a 32-bit counter -
+ *    each uses, which instances can be paired into a 32-bit counter -
  *    every one of those is a `TCn_*` constant, and none of them is
  *    spelled out here. Two of them are worth reading before writing
  *    any code:
- *      - TC0 and TC1 SHARE generic clock channel 30, TC2 and TC3 share
+ *      - TC0 and TC1 share generic clock channel 30, TC2 and TC3 share
  *        31, and TC4 has 32 to itself. 35.5.3 warns that two instances
  *        sharing a channel "cannot be set to different clock
  *        frequencies", and `gclk_id` is what says which do.
@@ -40,7 +65,7 @@
  *        sentence, and it is what `config_valid()` refuses a 32-bit
  *        mode on.
  *
- * 2. THE PAD-TO-(TC, WO) MAP IS NOT A FORMULA either, and it is
+ * 2. The pad-to-(TC, WO) map is not a formula either, and it is
  *    per-package: 26 pads on the J, 18 on the G, 8 on the E, with
  *    PA22 = TC0/WO0, PB12 = TC0/WO0 again, PB23 = TC3/WO1 (the bench
  *    board's LED). `PIN_P<pad>E_TC<n>_WO<k>` is the authority and the
@@ -48,14 +73,15 @@
  *    its own `#ifdef`, so `TcWo<>` on an unbonded pad simply does not
  *    compile.
  *
- * 3. READING COUNT IS A COMMAND, not a load. COUNT is
- *    READ-synchronized "on demand through the READSYNC command"
+ * 3. Reading COUNT is a command, not a load. COUNT is
+ *    read-synchronized "on demand through the READSYNC command"
  *    (35.6.8), so a correct read is: write CTRLBSET.CMD = READSYNC,
  *    wait out SYNCBUSY.CTRLB and SYNCBUSY.COUNT, then read. That is
- *    what `count16()` and its siblings do - the raw accessors are
+ *    what `count16()` and its siblings do (twice: the comment above
+ *    read_sync() says why) - the raw accessors are
  *    spelled `*_raw()` and say what they are.
  *
- * 4. THE REGISTER MAP IS THREE OVERLAID VIEWS. The device header gives
+ * 4. The register map is three overlaid views. The device header gives
  *    `tc_registers_t` as a union of COUNT8/COUNT16/COUNT32 structs;
  *    everything up to SYNCBUSY sits at the same offset in all three and
  *    only COUNT, PER and CC/CCBUF differ. So the control surface is
@@ -65,40 +91,42 @@
  *    8-bit ones; nothing dispatches at run time on a mode it could
  *    have known at compile time.
  *
- * 5. ENABLE-PROTECTION AND WRITE-SYNCHRONIZATION ARE DIFFERENT THINGS
+ * 5. Enable-protection and write-synchronization are different things
  *    here and both matter. CTRLA (bar ENABLE/SWRST), DRVCTRL, WAVE and
- *    EVCTRL are ENABLE-protected: `configure()` and `event_config()`
+ *    EVCTRL are enable-protected: `configure()` and `event_config()`
  *    refuse while the TC is enabled. CTRLB, COUNT, PER/PERBUF and
- *    CC/CCBUF are WRITE-synchronized: every verb that touches one
+ *    CC/CCBUF are write-synchronized: every verb that touches one
  *    waits its SYNCBUSY bit out, bounded, and reports.
  *
- * 6. THE PERIOD REGISTER EXISTS ONLY IN 8-BIT MODE (35.6.2.4). In
+ * 6. The period register exists only in 8-bit mode (35.6.2.4). In
  *    COUNT16 and COUNT32 the TOP of an NPWM or NFRQ waveform is fixed
  *    at MAX and the only way to shorten it is MPWM/MFRQ, which spend
  *    CC0 as the period and leave one channel. `period8()` says so by
  *    existing only in one width.
  *
- * ERRATA, DS80000740S, read on the E/G/J ROW at revision F - and once
+ * Errata, DS80000740S, read on the E/G/J row at revision F - and once
  * again the row is the whole story:
  *  - 1.20.1 Capture Overflow (a capture overflow within 3 APB + 3 GCLK
  *    periods of the previous one raises no INTFLAG.ERR): revision B
  *    only.
  *  - 1.20.2 I/O Pins ("the input capture on I/O pins does not work",
  *    workaround: capture through the event system with the EIC or CCL
- *    as generator): REVISION B ONLY. This is the item most likely to be
- *    applied by mistake - CTRLA.COPEN is implemented and usable here,
- *    and docs/samc21/tc.md carries the measurement.
- *  - 1.20.3 SYNCBUSY Flag: EVERY REVISION OF E/G/J, so LIVE HERE. When
+ *    as generator): revision B only. This is the item most likely to be
+ *    applied by mistake - CTRLA.COPEN is implemented here, and
+ *    docs/samc21/tc.md says why the bench declines a verdict on it (a
+ *    controlled edge cannot reach a muxed WO pad with no wire).
+ *  - 1.20.3 SYNCBUSY Flag: every revision of E/G/J, so live here. When
  *    STATUS.PERBUFV or STATUS.CCBUFVx is cleared, SYNCBUSY is released
- *    BEFORE the buffer register has been restored, and the remedy is to
+ *    before the buffer register has been restored, and the remedy is to
  *    clear the flag twice. `clear_buffer_valid()` writes it twice, and
  *    that is the whole workaround.
  *
- * NOT BUILT (docs/samc21/tc.md carries the list): the minimum and maximum
+ * Not built (docs/samc21/tc.md carries the list): the minimum and maximum
  * capture modes (SAM C20/C21 N variants only - this family's device
- * header does not declare CTRLA.CAPTMODE at all), and sleep, which
- * samc21/sleep.hpp owns together with CTRLA.ONDEMAND's clock-request
- * behaviour.
+ * header does not declare CTRLA.CAPTMODE at all), and CTRLA.ONDEMAND's
+ * clock-request behaviour, which `TcConfig::on_demand` writes and
+ * nothing owns; CTRLA.RUNSTDBY, the bit that keeps a TC counting through
+ * a standby, is `TcConfig::run_standby`.
  */
 
 #pragma once
@@ -408,8 +436,11 @@ public:
     static bool enabled() { return (regs().TC_CTRLA & TC_CTRLA_ENABLE_Msk) != 0u; }
 
     /// APB clock (both halves of a pair), generic clock, software reset;
-    /// the TC is left DISABLED because CTRLA, WAVE, DRVCTRL and EVCTRL
-    /// are enable-protected and the caller has them to write.
+    /// the TC is left disabled because CTRLA, WAVE, DRVCTRL and EVCTRL
+    /// are enable-protected and the caller has them to write, and its
+    /// NVIC line is left disabled. A setup verb; false when the channel
+    /// connection or the reset's bounded wait did not complete. Connecting
+    /// the channel routes the sibling's clock too (TC0/TC1, TC2/TC3).
     static bool init(uint8_t generator, uint32_t spins = 0xFFFFu) {
         Nvic::disable(irq());
         bus_clock(true);
@@ -871,6 +902,10 @@ struct TcPwm8 {
 
     static constexpr uint16_t max = top;
 
+    /// Bring the timer up as an 8-bit NPWM generator with PER = top and
+    /// the channel at duty 0, and enable it. The caller has already
+    /// called T::init() and claimed the pad. False when configure()
+    /// refuses (the timer already enabled) or a bounded wait runs out.
     static bool setup(TcPrescaler prescaler = TcPrescaler::div1,
                       uint32_t spins = 0xFFFFu) {
         if (!T::configure(TcConfig{.mode = TcMode::count8,
@@ -883,6 +918,8 @@ struct TcPwm8 {
                T::enable(true, spins);
     }
 
+    /// The buffered duty, clamped to `max`, taken at the next UPDATE;
+    /// the bounded wait's answer is discarded.
     static void duty(uint16_t v) {
         (void)T::set_cc_buffer8(ch, static_cast<uint8_t>(v > max ? max : v));
     }

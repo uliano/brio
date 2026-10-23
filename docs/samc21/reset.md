@@ -1,6 +1,67 @@
 # RSTC and WDT - why the program is running, and how to end it (SAM C21)
 
-Documents of record: SAM C20/C21 data sheet DS60001479M ch. 18 (RSTC) and
+This document is for a programmer who needs to know, at boot, why the
+program is running - a power-on, a watchdog, a crash - and who wants a
+program that stalls or faults to end in a reset that leaves a note for
+the next boot. `Reset` reads the reset controller's one register and
+causes a software reset; `Watchdog` is the watchdog timer, a monostate
+like `Reset` (a class whose state and functions are all static, with no
+instance to create: there is one of each block); `ResetReporter` and
+`hard_fault_reset<P>()` turn a panic or a fault into a reset that keeps
+the panic breadcrumb - the small record (a code and a context byte) the
+kernel's `panic()` writes into RAM that is neither loaded nor zeroed at
+boot, for the next boot to read.
+
+The smallest use, the first block of "How to use it" below - ask why
+you are here, once, at boot:
+
+```cpp
+switch (Reset::cause()) {
+case ResetCause::watchdog:       /* recover, and count it */ break;
+case ResetCause::power_on:       /* cold start */ break;
+default: break;
+}
+if (auto record = take_panic_record<SamPlatform>()) {
+    // report record->code and record->context over the console
+}
+```
+
+Line by line: `Reset::cause()` decodes RCAUSE, which names exactly one
+source - the last reset - so the answer is one `ResetCause` and not a
+set of flags; the `switch` acts on it; `take_panic_record<SamPlatform>()`
+(kernel/panic.hpp) returns the breadcrumb a panic or a fault left
+before the reset, once, clearing it as it returns it, and returns
+nothing when the record's magic word is not there - after a power-on,
+or when no panic happened.
+
+What decides correctness even there. RCAUSE is read-only and never
+cleared, so it can be asked at any time and always answers for the
+last reset alone; there is no history to collect. Nothing promises
+that SRAM survives a reset (table 18-1 has no row for it), which is
+why the record carries a magic word: a cold word reads as "no record",
+and that a record survives a system reset on this silicon is measured,
+not promised. A
+watchdog or a software reset spares the debug logic, so a board that a
+probe once attached to halts in silence on the BKPT every `panic()`
+ends in, unless that state is cleared ("Bench findings" below says
+how). When the program goes on to arm the watchdog: `arm()` answers
+false and writes nothing for a configuration the chapter makes
+useless (an early warning at or past the period in normal mode) or
+for a watchdog already always-on, and false as well for a
+synchronization into the watchdog's 1.024 kHz domain that never
+completed, each wait bounded; always-on can be undone only by a
+power-on; and a CLEAR written with any key but 0xA5 resets the device,
+which is why `clear()` and `force_reset()` are two names.
+
+The page, in order: the documents of record; what the silicon does
+(the exclusive cause, what each reset spares, the watchdog's fuses,
+periods and keys); the types and verbs, the fault body among them; how
+to use it (the cause, a watchdog over a loop, an early warning, a
+reportable panic); the bench findings; what is not covered.
+
+## Documents of record
+
+SAM C20/C21 data sheet DS60001479M ch. 18 (RSTC) and
 ch. 23 (WDT), with the fuse mapping in 9.3 and the reset-effect matrix in
 table 18-1 - and errata DS80000740S, where **neither module has an item**:
 there is no section for either. The watchdog does appear inside someone
@@ -10,7 +71,9 @@ application to run the WDT and switch clocks in firmware after the reset.
 Driver: `samc21/reset.hpp` (`Reset`, `Watchdog`, `ResetReporter`,
 `hard_fault_reset`). Family fixture `test/family_samc21/reset.cpp` plus one
 negative under `brio check samc21`; the bench suite is
-`test_samc_platform`.
+`test_samc_platform` (a letter is one command key of its console and
+the group of verdicts that key runs; `z` is the all-key that runs the
+letters of the set, and letter `i` stays outside it, below).
 
 ## What the silicon does
 
@@ -26,7 +89,7 @@ register and reading a history that does not exist.
 **Not every reset resets everything** (table 18-1). Only a power-supply
 reset - POR, BODVDD, BODCORE - clears the whole device. An external reset
 spares the RTC, OSC32KCTRL, RSTC itself and a WRTLOCK'd GCLK; a watchdog
-reset or a system reset request spares those AND THE DEBUG LOGIC. Two
+reset or a system reset request spares those and the debug logic. Two
 consequences, and the second one bites:
 
 - a watchdog reset leaves a running RTC running, which is a feature when
@@ -104,11 +167,11 @@ warning, not always-on.
 | `window` | CONFIG.WINDOW | the CLOSED window |
 | `early_warning` | INTENSET.EW | an interrupt before the bite |
 | `ew_offset` | EWCTRL.EWOFFSET | from the period's start; ignored in window mode |
-| `always_on` | CTRLA.ALWAYSON | ONE-WAY - only a power-on reset undoes it |
+| `always_on` | CTRLA.ALWAYSON | one-way - only a power-on reset undoes it |
 
 **`Watchdog`** - `arm<cfg>()` refuses an impossible configuration at
 compile time, `arm(cfg)` returns false and writes nothing. Impossible
-means one thing: in NORMAL mode an early-warning offset at or past the
+means one thing: in normal mode an early-warning offset at or past the
 period, where 23.6.8.2 says the reset arrives first and the interrupt
 never does, so a caller who asked for a warning would silently get none.
 Window mode is exempt - there the offset is unused.
@@ -127,7 +190,7 @@ a program that wants the APB clock off - it is on at reset.
 with a system reset instead of a spin, so the breadcrumb is read at the
 next boot rather than needing a debugger.
 
-**`hard_fault_reset<P>(context)`** - the HardFault handler BODY, bound by
+**`hard_fault_reset<P>(context)`** - the HardFault handler body, bound by
 the app:
 
 ```cpp
@@ -138,12 +201,12 @@ extern "C" void HardFault_Handler() {
 
 It does not go through `panic()`, and the reason is specific to this
 core: `panic()` calls `break_here()`, which is BKPT, and a BKPT taken
-from inside HardFault is a LOCKUP - a locked-up core never reaches the
+from inside HardFault is a lockup - a locked-up core never reaches the
 reset. And it does not overwrite an existing valid record: a fault that
 follows a panic is a consequence of something already diagnosed, so the
 original code and context stand.
 
-Both the reporter and the body COMPOSE with the trace half of the
+Both the reporter and the body compose with the trace half of the
 post-mortem, which lives in `samc21/postmortem.hpp` and changes nothing
 here: `TracingReporter<Store>` captures and then chains to
 `ResetReporter`, and `hard_fault_trace_reset<P, Store>()` captures and
@@ -268,7 +331,8 @@ Driver gaps (not built):
 
 Implemented but not bench-verified:
 
-- **The two brown-out causes.** `ResetCause::bodvdd` and `bodcore` are
+- **The two brown-out causes.** `ResetCause::brown_out_vdd` and
+  `brown_out_core` are
   decoded here and never produced: their detectors are
   [supc.md](supc.md)'s, and nothing on the bench forces a brown-out (the
   supply is not a program's to dip).

@@ -1,6 +1,72 @@
 # The embedded flash memory interface (STM32F4)
 
-Documents of record: RM0090 Rev 22 ch. 3 - which describes TWO flash
+This document is for a programmer who has to erase and program the
+STM32F4's own flash from a running program: a block of data kept across
+power cycles, a sector write-protected, the option bytes read. `Flash`
+is the program and erase engine, `FlashOptions` the option bytes and
+their one write, `FlashAccel` the accelerator switches with the cache
+flush the engine's users need; all three are monostates (classes with
+static members only, never instantiated). Every verb is a main-context
+call with no guard of its own; none masks interrupts, and every wait in
+it is bounded by a count of poll turns, not by a time, and turns into a
+`refused` answer when the count runs out. There is no storage layer
+above the engine on this family (below).
+
+The smallest use, the first block of "How to use it" below - erase a
+sector and program a block into it:
+
+```cpp
+#include "stm32f4/flash.hpp"
+using namespace brio;
+
+const std::optional<FlashSector> s = Flash::sector_of(0x08060000UL);
+if (s && Flash::unlock()) {
+    if (Flash::erase_sector(s->number) == 0u) {
+        FlashAccel::flush_caches();              // the erase invalidated nothing
+        Flash::program(s->base, std::span<const uint8_t>{data, sizeof(data)});
+        FlashAccel::flush_caches();              // now the read-back is the array's
+    }
+    Flash::lock();
+}
+```
+
+Line by line: `sector_of()` finds the sector holding an address, here
+the last 128 Kbyte sector of a 512 Kbyte part, and answers an empty
+`std::optional` for an address outside the array; `unlock()` writes the
+key pair only if the engine is locked; `erase_sector()` takes the
+manual's sector number, never an address, and answers a mask of
+`FlashFlag`s, zero for success; `flush_caches()` takes both caches down,
+resets them and puts them back, because neither an erase nor a program
+invalidates what they hold; `program()` writes the caller's bytes at the
+sector's base, a word at a time at the default x32 width, and answers
+the same kind of mask (the example does not look at it; a program that
+cares does); `lock()` sets the lock again.
+
+What decides correctness even there. On a single-bank part the core is
+frozen while the engine works, interrupts included: a 128 Kbyte erase
+takes about a second, the kernel tick advances one millisecond across
+it, and no handler runs (measured below), so a program schedules an
+erase where nothing has to be served; the dual-bank STM32F469NI keeps
+running when the code is in the other bank (measured below). Erasing
+the sector the code runs from is not refused and loses the board. The
+width (x32 by default) is the caller's claim about its supply - x32
+needs 2.7 V - which no register can check. A second program into a
+programmed word is accepted with no flag and stores the AND of the two,
+and a read-back through the data cache reports what was written rather
+than what the array holds, so the only verification is a read taken
+after `flush_caches()`. And a wrong key sequence locks the engine until
+the next reset with an imprecise bus error; `unlock()` writes the pair only
+when the lock stands, and no verb but `provoke_wrong_key()`, the suite's
+deliberate staging, writes a wrong one.
+
+The rest of this page, in order: the documents of record, with why
+there is no storage layer here; what the silicon does; the types and
+verbs; how to use it, one block per use; the bench findings; and what is
+not covered.
+
+## Documents of record
+
+RM0090 Rev 22 ch. 3 - which describes two flash
 interfaces, the F405/F407/F415/F417 class's in 3.3 and the F42x/F43x
 class's dual-bank one in 3.4 - and its twins RM0390 Rev 6 ch. 3 (the
 F446) and RM0383 Rev 4 ch. 3 (the F411); the erase and program times are
@@ -11,7 +77,10 @@ Errata: no item of ES0206 Rev 24, ES0298 Rev 8 or ES0287 Rev 6
 is filed against the program/erase engine or the option bytes; the two
 that touch the chapter from outside are quoted below and are both
 dual-bank only. Driver: `stm32f4/flash.hpp`; the per-part facts come
-from `stm32f4/device_tables.hpp`. Bench suite: `test_stm32f4_flash`.
+from `stm32f4/device_tables.hpp`, the reserve (the table of what each
+part has, read off the device header). Bench suite: `test_stm32f4_flash` (a letter of a suite is one command
+key of its console and the group of verdicts it runs, and `z` is the key
+that runs them all).
 Family fixture `test/family_stm32f4/flash.cpp` plus three negatives
 under `brio check stm32f4`.
 
@@ -22,12 +91,12 @@ the write side.
 
 **There is no FlashMedia here, and no partition in any linker script.**
 The geometry is what raises the question: the small sectors are at the
-BOTTOM of the bank, under the vector table, and everything above the
+bottom of the bank, under the vector table, and everything above the
 first 128 Kbytes is one 128 Kbyte sector, so a fixed storage zone would
 cost every image a partitioned linker script for a grain sixty-four
 times the STM32G0's page. That decision is the NV stack's own review
 (CLAUDE.md, "The NV stack reviewed as a whole"), and until it is taken
-this chapter delivers the ENGINE and nothing above it.
+this chapter delivers the engine and nothing above it.
 
 ## What the silicon does
 
@@ -35,31 +104,31 @@ this chapter delivers the ENGINE and nothing above it.
 four of 16 Kbytes, then one of 64, then 128 Kbytes to the end of the
 bank - the same rule in all four chapters read (RM0090 tables 5, 6, 8,
 9 and 10, RM0390 table 4, RM0383 table 4), which is why the driver
-COMPUTES the map from the flash size register instead of tabulating it.
+computes the map from the flash size register instead of tabulating it.
 The sector is the only erase unit: there is no page, no row and no
 half-word grain. A 512 Kbyte part has eight sectors, a 2 Mbyte one
 twenty-four.
 
-**The sector NUMBER is not the sector's position.** On a dual-bank part
+**The sector number is not the sector's position.** On a dual-bank part
 bank 1 ends at sector 11 whatever its length and bank 2 starts at
 sector 12, and FLASH_CR.SNB encodes 12..23 as 16..27 - RM0090 3.9.8
 leaves the four codes between "not allowed". The driver's `sector_at()`
 walks the array in address order and `sector()` looks a sector up by the
 manual's number; on a single-bank part the two agree.
 
-**Which part has what is the MANUAL's, and the device header is wrong in
+**Which part has what is the manual's, and the device header is wrong in
 both directions.** ST declares one `FLASH_TypeDef` and one set of bit
 masks for a whole marketing line, so the F446's header carries
 `FLASH_CR_MER2`, `FLASH_OPTCR_DB1M` and `FLASH_OPTCR_BFB2` - three bits
 of a second bank RM0390 3.3 says it has not got - while the F411's
-header does NOT carry `FLASH_OPTCR_SPRMOD`, a bit RM0383 3.6.5
+header does not carry `FLASH_OPTCR_SPRMOD`, a bit RM0383 3.6.5
 describes in full. So `flash_facts()` in the reserve is keyed on the
 part class and states only what was read: the sector count per bank, the
 width of SNB, whether a second bank can exist, whether PCROP and RDERR
 do, how many nWRP bits there are and whether OPTCR1 is real. A part
 class whose chapter 3 is not on the desk gets `known == false`, and
-there the driver refuses every ERASE (it has no map to aim SNB with)
-while PROGRAMMING, which needs no map, keeps working.
+there the driver refuses every erase (it has no map to aim SNB with)
+while programming, which needs no map, keeps working.
 
 **Two names in the code are the header's and not the manual's**: bit 1
 of FLASH_SR is OPERR in every reference manual and `FLASH_SR_SOP` in
@@ -69,22 +138,22 @@ every device header, and bit 15 of FLASH_CR is MER1 in RM0090 3.9.8 and
 manual's.
 
 **The program unit is the access width, declared twice.** FLASH_CR.PSIZE
-says x8, x16, x32 or x64 and the STORE INSTRUCTION must match it or the
-silicon raises PGPERR (3.5.4). That is why the parallelism is a TEMPLATE
+says x8, x16, x32 or x64 and the store instruction must match it or the
+silicon raises PGPERR (3.5.4). That is why the parallelism is a template
 parameter of `program()` and `erase_sector()`: it decides which
 instruction the compiler emits, where a runtime argument would need a
 switch over four widths inside the loop.
 
 **PSIZE is a claim about the supply, not a speed setting.** Table 6 /
-table 13: x8 from 1.7 V, x16 from 2.1, x32 from 2.7, and x64 ONLY with
-an external 8..9 V supply on the VPP pad. It also decides the ERASE
+table 13: x8 from 1.7 V, x16 from 2.1, x32 from 2.7, and x64 only with
+an external 8..9 V supply on the VPP pad. It also decides the erase
 time, which is not obvious: a 16 Kbyte sector is 400 ms at x8 and 250 at
-x32 (DS10314 table 45). The driver REFUSES x64 at compile time - no
+x32 (DS10314 table 45). The driver refuses x64 at compile time - no
 board here has the pad, and the datasheet forbids leaving VPP applied
 for more than an hour - and takes the other three on trust, no register
 being able to check a rail.
 
-**A cell is NOT written once.** 3.5.4: "Successive write operations are
+**A cell is not written once.** 3.5.4: "Successive write operations are
 possible without the need of an erase operation when changing bits from
 1 to 0. Writing 1 requires a flash memory erase operation." A second
 program into a programmed word is therefore accepted, ANDs into it and
@@ -92,7 +161,7 @@ raises nothing at all - the opposite of the STM32G0's PROGERR, and the
 reason `util/nv_heap.hpp`'s write-once cell contract cannot simply be
 carried here. Measured, with the twist the next paragraph describes.
 
-**A read-back through the D-cache is a report of what was WRITTEN.** The
+**A read-back through the D-cache is a report of what was written.** The
 same paragraph of 3.5.4 says a write "modifies the data in the flash
 memory AND the data in the cache", and the flash takes the AND while the
 cache takes the value: after programming 0x5A5A5A5A over 0xA5A5A5A5 the
@@ -113,18 +182,19 @@ decides the system's timing.
 
 **The core is frozen while the flash works.** 3.5: "Any attempt to read
 the flash memory while it is being written or erased causes the bus to
-stall." On a single-bank part the code IS in the array, so the
+stall." On a single-bank part the code is in the array, so the
 instruction fetches stop with it: no interrupt is taken and the kernel
 tick loses the whole of a one-second erase. The F42x/F43x class is the
-exception - two banks, and a read of one runs while the other is erased
-(3.6.5), which is what makes a storage bank thinkable there and nowhere
+exception, and so is the F469/F479 class, whose RM0386 3.3.1 gives it the
+same organization (the STM32F469NI measured below) - two banks, and a
+read of one runs while the other is erased (3.6.5), which is what makes a storage bank thinkable there and nowhere
 else. `Flash::last_wait_turns()` counts the poll iterations the CPU
 completed while the engine was busy and is what tells the two apart.
 
 **The unlock is a keyed sequence and a wrong one is fatal until the next
 reset.** 3.5.1: KEY1 then KEY2 into FLASH_KEYR, and "any wrong sequence
 returns a bus error and lock up the FLASH_CR register until the next
-reset". Both halves are real: the store raises an IMPRECISE bus error on
+reset". Both halves are real: the store raises an imprecise bus error on
 this core, and after it even the correct pair is refused. `unlock()` is
 therefore idempotent - it writes the keys only when LOCK really stands -
 and no verb of the file can produce half a sequence. The option bytes
@@ -138,12 +208,12 @@ flags; EOP is reported and never required.
 
 **The option bytes are a second engine, and writing any of them erases
 and reprograms the whole configuration sector** (3.6.2's note). RDP is
-READ and never written by any verb: level 2 is irreversible and takes
+read and never written by any verb: level 2 is irreversible and takes
 the debug port with it, level 1 costs a mass erase to leave, and
 provisioning belongs to a tool over the debug port. The one option the
 driver does write is nWRP, the per-sector write protection - reversible
 at RDP level 0 with PCROP off, which is figure 4's "options write (RDP
-level identical)" - and it reaches the register through a HALF-WORD
+level identical)" - and it reaches the register through a half-word
 store to OPTCR's upper half, so the RDP byte is not in the data path at
 all.
 
@@ -437,7 +507,10 @@ Implemented but not bench-verified, each with what would measure it:
   runs from the other, which is the property that would make a storage
   bank thinkable on this family. An STM32F42x or F43x part measures all
   of it: the suite's letters a and g already branch on the bank and
-  print what they find.
+  print what they find. On the STM32F469NI, a dual-bank part, letters e
+  and g have measured sector 23's erase and the read-while-write of a
+  bank-1 erase with the test zone in the other bank (the bench findings'
+  opening); the rest of this item was not run there.
 - **`mass_erase()`**, exposed and never called: it takes down the
   running image, so only a program that lives in RAM or a boot loader
   can measure it.

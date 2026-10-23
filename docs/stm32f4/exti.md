@@ -1,6 +1,86 @@
 # EXTI and SYSCFG (STM32F4)
 
-Documents of record: RM0090 Rev 22, the EXTI ch. 12 and SYSCFG ch. 9 (the
+This document is for a programmer who needs an interrupt from a pin - a
+button, a sensor's data-ready line, an edge to count - or from one of
+the peripheral wake-up lines (the PVD, the RTC's alarms and wake-up, the
+USB wake-ups). On this family a GPIO pad has no interrupt of its own:
+every edge sense, every pending bit and every pin vector belongs to the
+EXTI, the external interrupt/event controller, and the choice of which
+port feeds each of its sixteen pin lines is a register of SYSCFG, the
+system configuration block next door. `stm32f4/exti.hpp` has the block
+(`Exti`), one pin line reached through its pad (`ExtInt<Pin>`) and one
+line named by its number (`ExtiLine<n>`); `stm32f4/syscfg.hpp` has the
+multiplexer and SYSCFG's other switches.
+
+The smallest use, a falling edge on the Nucleo-F446RE's button (PC13),
+from the "How to use it" block below:
+
+```cpp
+using Button = brio::Pin<'C', 13>;
+using ButtonInt = brio::ExtInt<Button>;          // line 13, port C
+static_assert(brio::exti_lines_distinct<ButtonInt>());
+
+ButtonInt::claim(brio::PinPull::up);             // input + pull + EXTICR
+ButtonInt::configure(brio::ExtiSense::falling);
+ButtonInt::clear();                              // before arming, never after
+ButtonInt::arm(true);                            // EXTI_IMR - without it
+                                                 // there is no flag at all
+brio::Nvic::enable(ButtonInt::irq());            // EXTI15_10
+
+extern "C" void EXTI15_10_IRQHandler() {
+    const uint32_t fired = brio::Exti::isr(brio::Exti::vector_lines(EXTI15_10_IRQn));
+    if (ButtonInt::served(fired)) {
+        brio::post<Ui>(Pressed{});               // post() is ISR-safe
+    }
+}
+```
+
+Line by line: `Button` names the pad and `ButtonInt` the EXTI line it
+can raise, line 13 because the line number is the pin number; the
+`static_assert` is the compile-time check that no two pads of the
+program's own set share a line (here a set of one); `claim()` puts the
+pad in input mode with its pull and points line 13's multiplexer at
+port C; `configure()` selects the falling edge; `clear()` takes down a
+pending bit an earlier edge may have left, before the line is armed;
+`arm(true)` unmasks the line's interrupt in EXTI_IMR; `Nvic::enable()`
+opens the vector the line reaches, EXTI15_10, which lines 10..15 share.
+The `extern "C"` function is that vector's interrupt handler, as in C,
+under ST's name for it: `Exti::isr()` reads and clears the pending bits
+of the lines this vector serves and returns the mask of those that
+fired, `served()` asks it about line 13, and the handler posts an event
+to an active object (`Ui` here stands for one: a component of a brio
+program with its own event queue, served one event at a time by the
+kernel, [docs/learn/introduction.md](../learn/introduction.md)).
+
+What decides correctness even there. The line must be armed in
+EXTI_IMR for its pending bit to exist at all - with the mask clear an
+edge leaves no flag behind ("What the silicon does" below), so there is
+no polling a line with its interrupt off. The vector must be bound by the
+program, as above: the crt's `EXTI15_10_IRQHandler` is a weak alias of
+its `Default_Handler`, a silent spin, so a program that forgets it links
+and stops in that spin at the first edge. A handler on a shared vector
+passes `isr()` the lines of that vector alone (`vector_lines()`), so it
+neither takes nor leaves another vector's flags. And the sixteen pin
+lines are shared by up to eleven ports: `claim()` and `select()` answer
+false when another port is already using the line (a sense selected, an
+interrupt or an event unmasked), and a program that does not read that
+answer has a pad that raises nothing; the `static_assert` catches the
+same mistake at compile time across the pads the program lists in it.
+The configuring verbs are read-modify-writes of registers every line
+shares, with no guard of their own: they are setup verbs, called from
+`main()` or from an active object's handler, not from an interrupt
+handler.
+
+The rest of this page, in order: the documents of record; what the
+silicon does (the lines and which exist, the multiplexer and its clock
+gate, the edges, the one pending register and its mask, the software
+trigger, the vectors, the CPU event out of WFE, an errata item filed
+under the RTC, SYSCFG's other switches); the types and verbs; how to use
+it; the bench findings; and what is not covered.
+
+## Documents of record
+
+RM0090 Rev 22, the EXTI ch. 12 and SYSCFG ch. 9 (the
 vector tables are 62 and 63, one per part class); their twins RM0390 Rev 6
 (ch. 10 and 8) and RM0383 Rev 4 (ch. 10 and 7), which differ in exactly one
 thing - which peripheral wake-up lines the part has. Errata: no item of ES0206 Rev 24,
@@ -24,10 +104,11 @@ the opposite of the AVR's, where every pin carries its own `PINnCTRL.ISC`.
 rest are peripheral wake-ups: 16 the PVD, 17 the RTC alarm, 18 the USB OTG
 FS wake-up, 19 the Ethernet wake-up, 20 the USB OTG HS wake-up, 21 the RTC
 tamper and timestamp, 22 the RTC wake-up (12.2.5). **Which of them exist is
-a per-part fact and the PERIPHERAL is what decides**: RM0390 has no line 19
+a per-part fact and the peripheral is what decides**: RM0390 has no line 19
 (the F446 has no Ethernet MAC) and RM0383 neither 19 nor 20 (the F411 has
-neither), and the reserve derives the set from the controllers' own
-base-address macros rather than from a table. The EXTI's own bit macros are
+neither), and the reserve (`stm32f4/device_tables.hpp`, the table of
+what each part has, read off the device header) derives the set from the
+controllers' own base-address macros rather than from a table. The EXTI's own bit macros are
 no authority there - the pack spells `EXTI_IMR_MR18`, `MR19` and `MR20` on
 every header, including parts with no USB at all - but above 22 they are
 the only authority and they are used: a 24th line exists exactly on the
@@ -46,11 +127,11 @@ flag anywhere. The driver refuses that write (see "types and verbs").
 
 **The multiplexer is another peripheral's register**, not the EXTI's as on
 the STM32G0: SYSCFG's, on APB2, behind `RCC_APB2ENR.SYSCFGEN`, which is
-CLEAR out of reset (measured). With that gate shut the block reads back
+clear out of reset (measured). With that gate shut the block reads back
 zero and drops every write in silence, so every verb of `Syscfg` - reads
 included - opens it first.
 
-**The lines are EDGE triggered and nothing else.** There is no level sense
+**The lines are edge triggered and nothing else.** There is no level sense
 (12.3.3's own note). Rising and falling are two independent bits in two
 registers, and setting both is how a both-edges line is spelled. 12.3.3 and
 12.3.4 differ in one detail worth knowing when a line is armed under a
@@ -62,7 +143,7 @@ single rc_w1 register - unlike the STM32G0's RPR/FPR pair, a both-edges
 line here does not say which edge arrived, and the pad's level at handler
 time is the only clue.
 
-**The pending bit is only set for an UNMASKED interrupt.** The chapter
+**The pending bit is only set for an unmasked interrupt.** The chapter
 never says so; figure 41 draws the interrupt mask between the edge detector
 and the pending request register, and the bench agrees - with `EXTI_IMR`
 clear, eight edges on an enabled trigger leave `PR` at zero and unmasking
@@ -78,7 +159,7 @@ the vector later delivers one call for an edge already acknowledged
 samples the pad there; a pulse made of two adjacent `BSRR` stores - one
 AHB cycle wide at 180 MHz - goes unseen (measured, none of eight on the
 STM32F446 and on the STM32F429), and a pair of stores a few instructions
-apart is MARGINAL: the same source registered on one part and not on the
+apart is marginal: the same source registered on one part and not on the
 other. A program that makes an edge for its own line holds the level for
 at least one APB2 period; the suite holds it a microsecond.
 
@@ -117,12 +198,12 @@ The edge detection is asynchronous, which is what makes an EXTI line a
 wake-up source with the clocks stopped.
 
 **An EXTI line returns the core from WFE with no interrupt at all.**
-`EXTI_EMR` unmasks a CPU EVENT: no NVIC line, no handler and - 12.2.3 - no
+`EXTI_EMR` unmasks a CPU event: no NVIC line, no handler and - 12.2.3 - no
 pending bit to acknowledge. Measured against a masked control below. This
-is a Sleep-mode statement (SLEEPDEEP is never written by this stratum);
-Stop and Standby are the power chapter's.
+is a Sleep-mode statement (SLEEPDEEP is never written by this driver);
+Stop and Standby are the power chapter's ([pwr.md](pwr.md)).
 
-**THE ERRATA ITEM THAT IS FILED SOMEWHERE ELSE.** "RTC interrupt can be
+**The errata item that is filed somewhere else.** "RTC interrupt can be
 masked by another RTC interrupt" (ES0206 2.9.3, ES0298 2.10.3, ES0287
 2.8.3, ES0321 2.11.3) is an RTC item whose mechanism is this peripheral's: **the effective
 clear of an EXTI pending bit is delayed with respect to the store that asks
@@ -344,16 +425,18 @@ Driver gaps:
   `trigger()` raised from two contexts is the one call that would gain by
   it.
 - Wake-up from **Stop** and **Standby** through an EXTI line: the lines and
-  their masks are here, but arming a deep sleep is the power chapter's, and
-  there is no `SleepSite` in this stratum yet. What an EXTI line contributes
-  there is exactly its IMR or EMR bit, and what the clocks cost coming back
-  is that chapter's to measure.
-- The lines above 15 have no OWNERS yet: every one of them belongs to a
-  peripheral - PVD to PWR, three to the RTC, two or three to the USB
-  controllers, one to the Ethernet MAC - and each of those drivers will
-  publish its own line number the way this family's serial instances
-  publish their vectors. Until then an application spells the number
-  itself, and `ExtiLine<n>` is what checks it.
+  their masks are here, but arming a deep sleep is the power chapter's
+  (`stm32f4/sleep.hpp`'s sites, [pwr.md](pwr.md)), not this driver's. What
+  an EXTI line contributes there is exactly its IMR or EMR bit, and what
+  the clocks cost coming back is that chapter's to measure.
+- The lines above 15 belong to peripherals - PVD to PWR, three to the
+  RTC, two or three to the USB controllers, one to the Ethernet MAC - and
+  each owning driver publishes its own line number: `Pwr::pvd_exti_line`
+  ([pwr.md](pwr.md)) and the RTC's `alarm_exti_line`, `wakeup_exti_line`
+  and `tamper_stamp_exti_line` ([rtc.md](rtc.md)) do. The USB wake-up
+  lines and the Ethernet one have no owner: `stm32f4/usb.hpp` publishes no
+  line number and the stratum drives no Ethernet MAC, so for those an application
+  spells the number itself, and `ExtiLine<n>` is what checks it.
 
 Implemented, not bench-verified:
 

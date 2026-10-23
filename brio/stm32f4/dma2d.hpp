@@ -2,9 +2,10 @@
  * dma2d.hpp
  *
  * The STM32F4's Chrom-Art accelerator (RM0090 ch. 11) - a DMA that
- * knows what a PIXEL is: it fills, copies, converts between eleven
+ * knows what a pixel is: it fills, copies, converts between eleven
  * colour formats and blends two sources, all in rectangles rather than
- * in runs, and it is a bus master of its own.
+ * in runs, and it is a bus master of its own. A program uses it to draw
+ * into a frame buffer without the CPU moving the pixels.
  *
  *  Dma2dSource       one input: the address, the line offset, the
  *                    format, what to do with its alpha, and the CLUT
@@ -24,25 +25,41 @@
  *                     brio::argb8888(255, 0, 0, 255), {.pixels = 64, .lines = 32});
  *   (void)brio::Dma2d::wait();
  *
- * THE FOUR MODES ARE ONE ENGINE WITH PARTS SWITCHED OFF (11.3.11).
+ * Who calls what, and from where. init() and the configuring verbs are
+ * setup or an active object's handler, one context at a time. The four
+ * mode verbs (fill, copy, convert, blend) and start() write the
+ * registers and start the engine, then return: they do not wait, and
+ * they answer false, starting nothing, on a refused description or
+ * while a transfer runs. The destination belongs to the engine from
+ * that start until wait() answers true or the transfer-complete event
+ * is seen, and a CPU access to it in between races the engine; a
+ * source must hold still for as long.
+ * wait() and wait_clut() spin, bounded at busy_spins (20 000 000 polls),
+ * and answer false on a stopped block. Nothing here masks interrupts.
+ * isr() is the body of the program's handler for irq_line. A buffer the
+ * engine writes must be volatile to the CPU, because its address
+ * reaches the engine as an integer the compiler sees nothing dereference
+ * (docs/stm32f4/dma2d.md, bench findings).
+ *
+ * The four modes are one engine with parts switched off (11.3.11).
  * Register-to-memory writes one colour and fetches nothing;
  * memory-to-memory fetches through the foreground FIFO as a plain
- * buffer with NO conversion, so the format field says only how wide a
+ * buffer with no conversion, so the format field says only how wide a
  * pixel is; memory-to-memory with the pixel format converter runs the
  * foreground through its converter; and the blending mode fetches both
  * sources, converts each, and mixes them with 11.3.11's formula. So
  * `copy()` and `convert()` differ in one bit and in what they promise,
  * and they are two verbs because the promise is the point.
  *
- * THE OFFSETS ARE IN PIXELS AND THE ADDRESSES ARE BYTES. FGOR, BGOR and
- * OOR count PIXELS of their own format (11.5.5), added at the end of
+ * The offsets are in pixels and the addresses are bytes. FGOR, BGOR and
+ * OOR count pixels of their own format (11.5.5), added at the end of
  * every line, while FGMAR, BGMAR and OMAR are byte addresses that must
  * be aligned to the format's own width. A rectangle inside a wider
  * image is therefore "the image's width minus the rectangle's" as an
  * offset, and the address of its top left corner.
  *
- * THE SILICON CHECKS THE CONFIGURATION AND SAYS SO IN A FLAG, NOT IN A
- * REFUSAL. 11.3.11 lists a dozen ways to be wrong - an address not
+ * The silicon checks the configuration and says so in a flag, not in a
+ * refusal. 11.3.11 lists a dozen ways to be wrong - an address not
  * aligned to its format, a colour mode that is not one of the codes, an
  * odd pixel count with a 4-bit format - and the engine answers all of
  * them by raising CEIF at the START and transferring nothing. The
@@ -51,21 +68,21 @@
  * false instead of a flag; what is left to the flag is what only the
  * silicon knows.
  *
- * ONE TRANSFER AT A TIME, AND A CLUT LOAD IS A TRANSFER. CR.START is
+ * One transfer at a time, and a CLUT load is a transfer. CR.START is
  * cleared by hardware at the end, on an abort, on an error and on a
  * configuration error; FGPFCCR.START and BGPFCCR.START are the same bit
  * for the two automatic CLUT loads, and 11.3.11 says a CLUT load can
  * not run beside a data transfer. `busy()` is the one question and
  * `wait()` the one wait.
  *
- * IT IS A MASTER AND IT COMPETES. The AHB dead time (11.3.15) inserts a
+ * It is a master and it competes. The AHB dead time (11.3.15) inserts a
  * guaranteed minimum number of cycles between two of its accesses,
  * which is how a program stops the accelerator from starving a display
  * controller reading the same external memory. It is the only
  * bandwidth knob in the chapter, and the bench findings are what say
  * whether it is needed.
  *
- * CONCURRENCY. Every configuring verb writes registers the silicon
+ * Concurrency. Every configuring verb writes registers the silicon
  * makes read-only while a transfer runs, so they are setup verbs and
  * the four mode verbs refuse while `busy()`. `flags()`, `clear()` and
  * `isr()` are single stores of write-one bits and are legal from a
@@ -376,7 +393,7 @@ public:
     }
 
     /// The gate opened and every flag cleared - what a program calls
-    /// once before its first transfer.
+    /// once before its first transfer. A setup verb; it does not wait.
     static void init() {
         clock(true);
         regs().IFCR = 0x3Fu;
@@ -395,7 +412,8 @@ public:
     }
 
     /// Spin until the engine is idle. False on a time-out, which is a
-    /// stopped block and not a slow one.
+    /// stopped block and not a slow one. True is the moment the
+    /// transfer's buffers are the caller's again.
     static bool wait(uint32_t spins = busy_spins) {
         clock(true);
         for (uint32_t i = 0; i < spins; ++i) {
@@ -505,7 +523,9 @@ public:
 
     /// Register to memory: the rectangle painted in one colour, no
     /// source fetched at all. The colour is given in ARGB8888 and
-    /// packed into the output's own format here.
+    /// packed into the output's own format here. Starts the engine and
+    /// returns without waiting; false, nothing started, on a refused
+    /// output or area or while a transfer runs.
     static bool fill(const Dma2dOutput& out, uint32_t argb, const Dma2dArea& area) {
         if (!dma2d_output_valid(out) || !dma2d_area_valid(area) || busy()) {
             return false;

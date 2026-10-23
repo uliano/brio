@@ -1,6 +1,104 @@
 # CLKCTRL - the clock controller (AVR DA, DB and EA)
 
-Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B
+This document is for every programmer of the stratum, because the clock
+is the first thing every program does: it sets the rate the CPU and the
+peripherals run at (CLK_PER) and states that rate, once, as a type that
+every clocked driver computes its divisors from. `avrxt/clock.hpp` has
+the controller's blocks as resources - `Oschf`, `Osc32k`, `Xosc32k`,
+`Xoschf`, `Pll`, `MainClock`, `ClockTimebase` and `ClockFailure`, each a
+monostate (a class whose state is static, with no instances) over one
+block's registers, present where the part has the block - and two tasks
+over them (a task, in brio, is the driver layer over a resource that a
+program names and calls; these two are called from `main()`, and the
+second from an active object too, a component of a brio program with
+its own event queue, served one event at a time by the kernel,
+[../learn/introduction.md](../learn/introduction.md)): `Clock`, the static main
+clock, whose rate `hz` is a compile-time constant, and `DynamicClock`,
+which changes the rate under a running program after telling every
+driver it lists. `avrxt/delay.hpp`'s `delay_us(clock, us)` waits by the
+same rate. The model behind both, one rate truth in a static and a
+dynamic regime, is [design/clock.md](../design/clock.md).
+
+The smallest use is the clock of the AVR128DB48 board, from "How to use
+it" below:
+
+```cpp
+using SysClock = brio::Clock<brio::ClockSource::crystal, 24'000'000>;   // PA0/PA1 crystal
+constexpr SysClock clock;
+int main() {
+    const bool from_crystal = SysClock::init();   // false: OSCHF at 24 MHz instead
+    Serial::init(clock, 460800);
+    ...
+}
+```
+
+Line by line: `SysClock` names the clock type - the source, XOSCHF's
+crystal on PA0/PA1, and its rate; the third argument, the main
+prescaler, is left at its default `ClockDiv::div1`, so `SysClock::hz`,
+CLK_PER, is the constant 24000000 the compiler folds into every divisor
+computed from it. `clock` is an empty tag object of that type: the
+argument a driver's init takes so that it learns, at compile time, which
+clock it runs under; it holds no data. `SysClock::init()` brings the
+hardware to that rate: on the DB it sets OSCHF to 24 MHz and selects it,
+then starts the crystal, waits for it and switches to it; it returns
+true when the crystal runs, and false when the crystal did not start,
+OSCHF at the same 24 MHz then staying the main clock, so `hz` is still
+true to OSCHF's accuracy. `Serial::init(clock, 460800)` is the first
+driver's init, a `Uart` ([usart.md](usart.md)) computing its baud
+divisor from `SysClock::hz`. The other two dies spell the same lines
+with their own sources: the AVR128DA48 board's is
+`Clock<ClockSource::external, 24'000'000>`, an external clock into PA0;
+the AVR64EA48 board's is `Clock<ClockSource::crystal, 20'000'000>`, its
+20 MHz quartz on a part whose OSCCFG fuse runs OSCHF at 20 MHz, where
+`init()` reads the fuse first and also writes MCLKTIMEBASE ("The AVR EA"
+below).
+
+What decides correctness even there:
+
+- **`SysClock::init()` first, before every driver's init.** A driver
+  reads the rate from the type, not from the hardware, and nothing
+  checks the order: a `Uart` initialized before the clock computes its
+  divisor for 24 MHz while the part still runs at its reset clock (OSCHF
+  at 4 MHz on the DA and the DB, so a sixth of the baud asked; on the
+  AVR EA OSCHF at the fuse's rate over 6), and nothing refuses it. The
+  divisor is right once `init()` brings CLK_PER to `hz`; what the driver
+  did before that ran at the wrong rate.
+  `delay_us` called before the init counts cycles of a rate the part
+  does not run at either.
+- **OSCHF must be able to produce CLK_PER**, because OSCHF is the
+  fallback that keeps `hz` true when an external source does not start.
+  On the DA and the DB the source rate must be one OSCHF runs at (1, 2,
+  3, 4, 8, 12, 16, 20 or 24 MHz), and the type refuses any other at
+  compile time. On the AVR EA OSCHF runs at the one rate its OSCCFG fuse
+  chooses, 16 or 20 MHz: the type names that rate as a claim (an
+  internal source's own rate, or the fourth argument `oschf_hz` beside a
+  crystal or a clock), the compiler checks that it is 16 or 20 MHz and
+  that a prescaler takes it to `hz`, and `init()` reads the fuse; on a
+  mismatch it writes nothing and returns false, the part stays at the
+  fuse's rate over 6 and every divisor computed from `hz` is wrong. A
+  program that discards the answer of `init()` does not see it.
+- **The source's pads.** The crystal takes PA0/PA1 and an external clock
+  PA0, which leave the PORT while XOSCHF is enabled; the DA has no
+  crystal oscillator, and a `crystal` source does not compile there (its
+  24 MHz input is `ClockSource::external`).
+- **The part's maximum.** CLK_MAIN is refused at compile time above
+  24 MHz on the DA and the DB and above 20 MHz on the AVR EA; the EA's 20
+  MHz needs a 4.5 V supply, which no code checks ("Not covered yet").
+  A build that defines `F_CPU` must define it equal to `hz`, or `Clock`
+  does not compile.
+
+The rest of this page, in order: the documents of record; what the
+silicon does on the DA and the DB (the sources, the main clock, clock
+failure detection, the DB's errata); the types and verbs; how to use
+it, one example per use; the bench findings on the AVR128DB48 and the
+AVR128DA48, with the PLL measured through the TCD and the task's two
+deliberate restrictions; the AVR EA's chapter (its differences, its
+offer item by item, its verbs, its use, its cost and its bench
+findings); and what is not covered.
+
+## Documents of record
+
+AVR128DB28/32/48/64 data sheet DS40002247B
 (CLKCTRL chapter, electricals 39.10 and 39.3), errata DS80000915F
 (2.5.1-2.5.4); for the DA parts DS40002183A (CLKCTRL chapter 11,
 electricals 37.5.1) and DS80000882C (2.4.1); for the AVR64EA28/32/48
@@ -9,21 +107,35 @@ DS80001048D (no CLKCTRL item) - the EA's chapter is its own section
 below. Driver: `avrxt/clock.hpp` (resources `Oschf`, `Osc32k`,
 `Xosc32k`, `Xoschf`, `Pll`, `MainClock`, `ClockTimebase` (EA),
 `ClockFailure`; tasks `Clock`, `DynamicClock`), `avrxt/delay.hpp`; the target-independent contracts in
-`util/clock.hpp`. The clock MODEL (one rate truth, static and dynamic
-regimes, the rebase fan-out) is [clock.md](../design/clock.md); this page is the
+`util/clock.hpp`. The clock model (one rate truth, static and dynamic
+regimes, the rebase fan-out) is [design/clock.md](../design/clock.md); this page is the
 peripheral. Reference test: `test_avr_clock` (CLKOUT on PA7 to an
 oscilloscope, on the board whose PA7 is free); the dynamic regime is bench-verified under a running
-console (24 -> 12 -> 2 MHz at 115200).
+console (24 -> 12 -> 2 MHz at 115200). The suite is driven from its
+console a letter at a time - a letter is one command key of the suite's
+console and the group of verdicts it runs: `1` to `7` on the DA and the
+DB, with `8` and `9` on the board that fits a 32.768 kHz crystal (the
+AVR128DA48 board), and `r` and `1` to `8` on the AVR EA; `a` runs every
+letter the image carries (this suite has no `z` or `y` set), and `s`
+toggles, on the DA and the DB, a step mode in which each rate is held
+until a key.
 
 ## What the silicon does
+
+This section is the DA's and the DB's; the AVR EA's differences are its
+own section, "The AVR EA" below.
 
 The clock controller feeds CLK_MAIN, and from it CLK_CPU and CLK_PER
 (the same rate on this family), from one of four sources through a
 prescaler; other clocks run asynchronously to it (the RTC's, the WDT's,
-the BOD's, the TCD's). All clock-control registers are protected
+the BOD's, the TCD's). The clock-control registers are protected
 (CCP: a key written to CPU.CCP within four instructions of the access
-- `_PROTECTED_WRITE`). After any reset the device runs from OSCHF at
-4 MHz (or from OSC32K, per the OSCCFG fuse).
+- `_PROTECTED_WRITE`; interrupts are ignored for those four
+instructions, DS40002247B 7.4.6), all but three (DS40002247B 12.5.5,
+12.5.6, 12.5.8): the tune register OSCHFTUNE and the flag register
+MCLKINTFLAGS, which the driver writes with a plain store, and the
+status register MCLKSTATUS, which it only reads. After any reset the
+device runs from OSCHF at 4 MHz (or from OSC32K, per the OSCCFG fuse).
 
 **Sources.**
 
@@ -33,13 +145,13 @@ the BOD's, the TCD's). All clock-control registers are protected
 | OSC32K | internal 32.768 kHz ULP | 32.768 kHz | 29.5 .. 36 kHz (+-10 %); also feeds RTC/WDT/BOD; 950 us start-up from power-down |
 | XOSC32K | crystal on PF0/PF1, or a 32.768 kHz clock on PF0 | 32.768 kHz | start-up 1k..64k cycles selectable (300 ms typ., 1 s in low-power mode); load 18 pF (8 pF low-power); the RTC's precise clock and OSCHF's auto-tune reference |
 | XOSCHF | crystal on PA0/PA1 (DB only), or a clock on PA0 | crystal 4-24 MHz, clock up to 32 MHz | frequency-range setting (drive), start-up 256/1k/4k cycles; the pins leave the PORT while enabled |
-| PLL | x2 or x3 from OSCHF or XOSCHF | in 16-24 MHz, out 32-48 MHz | lock ~10 us; clocks the TCD ONLY - it is not a main-clock source; runs only while the TCD requests it. With SOURCE = XOSCHF it runs only from an external CLOCK, never a crystal (errata 2.5.4): `Pll::start` refuses that combination |
+| PLL | x2 or x3 from OSCHF or XOSCHF | in 16-24 MHz, out 32-48 MHz | lock ~10 us; clocks the TCD only - it is not a main-clock source; runs only while the TCD requests it. With SOURCE = XOSCHF it runs only from an external clock, never a crystal (errata 2.5.4): `Pll::start` refuses that combination |
 
 **Main clock.** `CLKSEL` picks OSCHF / OSC32K / XOSC32K / EXTCLK (the
 XOSCHF block: crystal or external clock per its source bit); the
 prescaler divides by 1, 2, 4, 6, 8, 10, 12, 16, 24, 32, 48, 64;
 CLK_MAIN must not exceed 24 MHz (at any VDD from 1.8 to 5.5 V).
-Switching is safe at run time: the source to switch TO must be running
+Switching is safe at run time: the source to switch to must be running
 (an external one stable) before it is selected - a selected source
 that never toggles leaves a switch pending that only a reset clears;
 SOSC says a switch is in progress. `CLKOUT` puts CLK_PER on PA7.
@@ -48,7 +160,7 @@ requests it (so a later request sees no start-up time) and in standby
 sleep; off, it runs only when requested. The main clock itself always
 runs in active and idle, and in standby only if requested.
 
-**Clock failure detection.** The CFD watches one source - the main
+**Clock failure detection** (the DB; the DA has none). The CFD watches one source - the main
 clock, XOSCHF or XOSC32K - for edges; after 8 reference-clock cycles
 of silence it sets a flag, raises an interrupt (regular `CLKCTRL_CFD`
 or the NMI) and, if the main clock is the one watched, forces CLKSEL
@@ -58,7 +170,7 @@ re-triggers every ten OSC32K cycles while the condition holds. Once
 enabled with the NMI type, the CFD registers are read-only until a
 reset - a lock-in for safety-critical use.
 
-**Errata (DS80000915F).** 2.5.1 (A4): EXTS not set for an external
+**Errata (DS80000915F, the DB's).** 2.5.1 (A4): EXTS not set for an external
 clock with RUNSTDBY and no requester - request it (RTC/TCD) before
 checking. 2.5.2 (A4): RUNSTDBY does not keep external sources on in
 sleep. 2.5.3 (A4/A5): PLLS never set with RUNSTDBY and no requester.
@@ -67,24 +179,26 @@ an external clock. Bench silicon: A5.
 
 ## Types and verbs
 
-Resources - thin typed views of the controller's blocks (all writes
-through CCP):
+Resources - thin typed views of the controller's blocks (every write to
+a control register through CCP; `Oschf::tune()`, `ClockFailure::clear()`
+and, on the EA, `ClockTimebase::write()` store to an unprotected
+register directly):
 
 | Resource | Verbs |
 |----------|-------|
 | `Oschf` | `set_hz(hz)` (one of the nine rates; immediate, also while it is the main clock; false, touching nothing, for a rate OSCHF does not produce), `run_standby(bool)`, `autotune(bool)` (needs a running XOSC32K; the clear waits 5 us for the auto-tune's value to land in TUNE, so a `tune()` right after it holds), `tune(-32..31)` / `tune()`, `stable()` |
 | `Osc32k` | `run_standby(bool)`, `stable()` |
 | `Xosc32k` | `start_crystal(Xosc32kStartup, low_power, run_standby)`, `start_external(run_standby)` (both stop a running oscillator first: CSUT/SEL are latched while enabled, so the new configuration always lands - at the price of the start-up time again), `stop()`, `enabled()`, `stable()`, `wait_stable(spins)`, `force_on(bool)` / `forced_on()` (RUNSTDBY on a running oscillator). `stable()` answers only while something REQUESTS the oscillator or it is forced on (below) |
-| `Xoschf` (DB) | `start_crystal(hz, XoschfStartup, run_standby)`, `start_external(hz, run_standby)` (both stop first: SELHF/FRQRANGE/CSUTHF are latched while enabled), `stop()`, `enabled()`, `stable()`, `wait_stable(spins)`, `range_for(hz)` |
-| `Pll` | `start(PllSource::oschf/xoschf, PllMultiplier::x2/x3, run_standby)` -> bool (false, writing nothing, when the source cannot drive the PLL on this silicon: errata 2.5.4), `source_ok(PllSource)`, `stop()`, `locked()`, `multiplier()`, `source()`; the arithmetic `pll_output_hz(in_hz, mul)` (0 outside the specified 16-24 MHz in / 32-48 MHz out) |
+| `Xoschf` (DB, EA) | `start_crystal(hz, XoschfStartup, run_standby)`, `start_external(hz, run_standby)` (both stop first: SELHF/FRQRANGE/CSUTHF are latched while enabled), `stop()`, `enabled()`, `stable()`, `wait_stable(spins)`, `range_for(hz)` |
+| `Pll` (DA, DB) | `start(PllSource::oschf/xoschf, PllMultiplier::x2/x3, run_standby)` -> bool (false, writing nothing, when the source cannot drive the PLL on this silicon: errata 2.5.4), `source_ok(PllSource)`, `stop()`, `locked()`, `multiplier()`, `source()`; the arithmetic `pll_output_hz(in_hz, mul)` (0 outside the specified 16-24 MHz in / 32-48 MHz out) |
 | `MainClock` | `select(MainSource::oschf/osc32k/xosc32k/extclk)` -> bool (switch completed), `source()`, `switching()`, `prescale(ClockDiv)`, `clkout(bool)` (PA7) |
-| `ClockFailure` | `watch(CfdSource::main/xoschf/xosc32k)`, `stop()`, `interrupt(on, nmi)`, `test(force)`, `failed()`, `clear()`, ISR body `cfd()` -> the main source now in effect |
+| `ClockFailure` (DB, EA) | `watch(CfdSource::main/xoschf/xosc32k)`, `stop()`, `interrupt(on, nmi)`, `test(force)`, `failed()`, `clear()`, ISR body `cfd()` -> the main source now in effect |
 
-Tasks - what an application names ([clock.md](../design/clock.md)):
+Tasks - what an application names ([design/clock.md](../design/clock.md)):
 
 | Task | Verbs |
 |------|-------|
-| `Clock<ClockSource, source_hz, ClockDiv, oschf_hz>` | `init()` -> bool (running from the requested source), `matches_fuse()` (true where FRQSEL sets OSCHF's rate; the EA's one fuse read), `hz`, `is_static = true`; `oschf_hz` the fallback's OSCHF rate, the source's own on the DA/DB and the fuse's claim on the EA (below); sources `internal`, `crystal` (DB, EA), `external` (DB via XOSCHF; DA directly on PA0, asked of TCD0 first because EXTS answers only while the clock is requested, and selected only when it answers), `osc32k`, `xosc32k` (forced on while it is waited for, the force dropped once the main clock requests it) |
+| `Clock<ClockSource, source_hz, ClockDiv, oschf_hz>` | `init()` -> bool (running from the requested source), `matches_fuse()` (true where FRQSEL sets OSCHF's rate; the EA's one fuse read), `hz`, `is_static = true`; `oschf_hz` the fallback's OSCHF rate, the source's own on the DA/DB and the fuse's claim on the EA (below); sources `internal`, `crystal` (DB, EA), `external` (DB and EA via XOSCHF; DA directly on PA0, asked of TCD0 first because EXTS answers only while the clock is requested, and selected only when it answers), `osc32k`, `xosc32k` (forced on while it is waited for, the force dropped once the main clock requests it) |
 | `DynamicClock<Boot, Users...>` | `init()`, `hz()`, `set<hz>()` / `set(hz)` -> bool, `can_run_at(hz)`, `rebases<U>`; `is_static = false` |
 | vocabulary | `ClockDiv`, `clock_divisor()`, `div_for()`, `oschf_frqsel()` (DA/DB), `clock_timebase_for()`, `MainSource`, `CfdSource`, `PllSource`, `PllMultiplier`, `Xosc32kStartup`, `XoschfStartup` |
 | waits | `delay_us(clock, us)`, `delay_us_runtime(cycles_per_us, us)`, `cycles_per_us(hz)`, `delay_cycles(n)` (raw cycles: for clocks below 1 MHz) (`avrxt/delay.hpp`) |
@@ -149,7 +263,7 @@ let a supervisor decide.
 ClockFailure::interrupt(true);              // regular interrupt (nmi=true locks the config)
 ClockFailure::watch(CfdSource::main);
 ISR(CLKCTRL_CFD_vect) { brio::post<Supervisor>(ClockLost{ClockFailure::cfd()}); }
-// in Supervisor: every clocked driver is now off-rate (OSCHF 4 MHz):
+// in Supervisor: every clocked driver is now off-rate (OSCHF 4 MHz on the DB, the fuse's rate on the EA):
 // rebase or re-init, or degrade gracefully; the kernel tick (RTC) is unaffected.
 ```
 

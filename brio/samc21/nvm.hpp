@@ -3,12 +3,34 @@
  *
  * The SAM C21 Non-Volatile Memory Controller (DS60001479M ch. 27): the
  * one resource through which flash is erased, programmed, protected and
- * described.
+ * described. What a program uses it for: a record kept across a power
+ * cycle (usually through samc21/nvm_flash.hpp's heap and journal
+ * backends rather than raw pages), the factory calibration and serial
+ * number, the fuse row read back. The smallest raw use
+ * (docs/samc21/nvm.md, "How to use it"):
  *
- *  Nvm            the BLOCK - geometry (from the device header, checked
+ *     if (Nvm::erase_row(NvmArray::rwwee, Nvm::rwwee_base) == NvmError::none) {
+ *         (void)Nvm::program_page(NvmArray::rwwee, Nvm::rwwee_base, page);
+ *     }
+ *
+ * Who calls what. The command verbs (erase_row, program_page, the lock
+ * and cache commands) wait for the command, bounded
+ * (command_spin_limit), and answer an NvmError - `none` the only
+ * success, `timed_out` a command that never finished. They are main
+ * context verbs with no guard: the page buffer, ADDR and CTRLA are one
+ * interface for both arrays, so one caller at a time, and nothing here
+ * masks interrupts. A command on the main array stalls every read of
+ * the main array, instruction fetches included, until it ends; on the
+ * RWWEE array the CPU runs on. program_page() reads the caller's span
+ * during the call and keeps nothing. isr() is the body the program's
+ * NVMCTRL_Handler calls. The readers (read, read_word, the factory
+ * views) are loads, legal from any context. No clock needs opening
+ * first: NVMCTRL's AHB and APB clocks are on out of reset.
+ *
+ *  Nvm            the block - geometry (from the device header, checked
  *                 against PARAM), read wait states and the cache, the
  *                 command interface with its CMDEX key and error
- *                 reporting, erase/program on EITHER array, the region
+ *                 reporting, erase/program on either array, the region
  *                 lock verbs, and the read-only factory views (user row,
  *                 calibration areas, the 128-bit serial number).
  *
@@ -16,44 +38,44 @@
  *                 here because it is NVMCTRL's register (CTRLB.RWS);
  *                 samc21/clock.hpp calls it around a rate change.
  *
- * WHAT THE SILICON DOES, in the four facts that shape every verb below.
+ * What the silicon does, in the four facts that shape every verb below.
  *
- * 1. TWO PROGRAMMABLE ARRAYS, ONE PAGE BUFFER. The main array (256 KB at
+ * 1. Two programmable arrays, one page buffer. The main array (256 KB at
  *    0x00000000 on the 18A parts) and a dedicated RWWEE array (8 KB at
  *    0x00400000) share the page buffer, the ADDR register and the command
- *    register - what differs is the command code and, decisively, WHO
- *    STALLS: reading the main array while the main array is programmed or
+ *    register - what differs is the command code and, decisively, who
+ *    stalls: reading the main array while the main array is programmed or
  *    erased stalls the AHB until the operation ends, while the main array
  *    can be read freely while the RWWEE array is written (27.6.4.1 and
  *    27.6.4.2). Code executes from the main array, so an RWWEE write is
  *    the only one a running program does not pay for in frozen cycles.
  *    Measured, and the difference is not subtle: through a row erase the
- *    CPU completes about 3950 polling turns on RWWEE and ONE on the main
- *    array. The RWWEE array is in exchange NOT CACHED, so reads from it
+ *    CPU completes about 3950 polling turns on RWWEE and one on the main
+ *    array. The RWWEE array is in exchange not cached, so reads from it
  *    are slower and full-word accesses take twice the data phase - and it
- *    is the more DURABLE of the two, 100k cycles against the main array's
+ *    is the more durable of the two, 100k cycles against the main array's
  *    25k (tables 45-43 and 45-44). Both halves of that trade point the
  *    same way for stored records, which is why samc21/nvm_flash.hpp puts
  *    the heap there.
  *
- * 2. ERASE BY ROW, PROGRAM BY PAGE. A page is 64 bytes, a row is four
+ * 2. Erase by row, program by page. A page is 64 bytes, a row is four
  *    pages = 256 bytes; erase granularity is the row, program granularity
  *    the page (27.6.2). This is exactly util/nv_heap.hpp's `erase_size` /
  *    `write_cell` split, and samc21/nvm_flash.hpp is where the two meet.
  *
- * 3. THE PAGE BUFFER IS LOADED BY WRITING TO THE MEMORY-MAPPED ARRAY, and
- *    it has two traps. Writes must be 16 or 32 bits wide - AN 8-BIT WRITE
- *    RAISES A SYSTEM EXCEPTION (27.6.4.3), which on this core is a
+ * 3. The page buffer is loaded by writing to the memory-mapped array, and
+ *    it has two traps. Writes must be 16 or 32 bits wide - an 8-bit write
+ *    raises a system exception (27.6.4.3), which on this core is a
  *    HardFault, so every store this header makes is a 32-bit one. And the
  *    64-bit holding register PBLDATA is reset to all ones whenever a write
- *    CROSSES a 64-bit boundary, which means a random-access write pattern
+ *    crosses a 64-bit boundary, which means a random-access write pattern
  *    silently fills the other half of each 64-bit section with ones
  *    (27.6.4.3's own second example).
  *
- *    THE REAL RULE IS NARROWER THAN "WRITE ASCENDING", and it was
+ *    The real rule is narrower than "write ascending", and it was
  *    measured rather than inferred: what a
- *    section needs is that ITS TWO WORDS BE WRITTEN BACK TO BACK.
- *    Ascending satisfies that; so does DESCENDING, which crosses a
+ *    section needs is that its two words be written back to back.
+ *    Ascending satisfies that; so does descending, which crosses a
  *    boundary on every store and still comes out byte-exact, because
  *    15-then-14 completes a section before the crossing. What actually
  *    loses data is interleaving - all even words then all odd words
@@ -61,39 +83,39 @@
  *    generalized. program_page() writes ascending, which is the simplest
  *    way to satisfy the rule.
  *
- *    A SEPARATE LIMIT, and it is not in chapter 27 at all but in table
- *    45-42's footnote: AT MOST 8 CONSECUTIVE WRITES ARE ALLOWED PER ROW
+ *    A separate limit, and it is not in chapter 27 at all but in table
+ *    45-42's footnote: at most 8 consecutive writes are allowed per row
  *    before a row erase becomes mandatory. A row is four pages, so
  *    programming every page of a row once is 4 and safe; a caller that
  *    rewrites pages of a live row without erasing must count.
  *
- * 4. ADDR IS A HALF-WORD OFFSET FROM THE SECTION BASE, not a byte address
+ * 4. ADDR is a half-word offset from the section base, not a byte address
  *    and not an absolute one: "the effective address for the operation is
- *    Start address of the section + 2*ADDR" (27.8.8). MEASURED on the
+ *    Start address of the section + 2*ADDR" (27.8.8). Measured on the
  *    bench chip rather than trusted, because 22 bits could have held
  *    either convention: a page-buffer load at 0x00400100 (RWWEE) leaves
  *    ADDR = 0x00000080 and one at 0x00020100 (main) leaves 0x00010080 -
  *    section-relative in both cases, as the chapter says.
  *
- * ERRATA: NVMCTRL HAS NONE. Item 1.14.1 of DS80000740S reads "Reserved"
+ * Errata: NVMCTRL has none. Item 1.14.1 of DS80000740S reads "Reserved"
  * with dashes across every silicon revision; the revision history records
  * that the one item this module ever had ("EEPROM Cache") was deprecated
  * due to resolution in the rev. K document (2021). Code written against
  * older SAMD/SAMC examples may still carry a cache workaround around
  * RWWEE access - it is not needed here.
  *
- * REGISTER ACCESS PROTECTION: CTRLA, CTRLB and ADDR are PAC
+ * Register access protection: CTRLA, CTRLB and ADDR are PAC
  * write-protected (27.5.5). PAC protection is off out of reset and no
  * brio driver enables it, so nothing here performs the unlock dance; a
  * program that turns it on through samc21/pac.hpp must.
  *
- * NOT BUILT (docs/samc21/nvm.md carries the list and the reasons):
- *  - The SSB command (Set Security Bit). It is ONE-WAY - only a debugger
+ * Not built (docs/samc21/nvm.md carries the list and the reasons):
+ *  - The SSB command (Set Security Bit). It is one-way - only a debugger
  *    chip erase clears it - and its whole effect is to lock the part
  *    against the debugger. `security_bit()` reads the state; nothing here
  *    sets it - a one-way hazard gets a reader and never a writer.
  *  - Writing the NVM User Row (the EAR and WAP commands). On this family
- *    the user row IS the fuses - BOOTPROT, EEPROM size, BODVDD level and
+ *    the user row is the fuses - BOOTPROT, EEPROM size, BODVDD level and
  *    action, and the watchdog's power-on ENABLE/ALWAYSON/PER - and it
  *    survives a chip erase, so a wrong word is not recoverable by
  *    reflashing. It is read here and typed; writing it is provisioning,

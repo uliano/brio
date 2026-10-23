@@ -1,6 +1,67 @@
 # AC - the analog comparators (AVR DA/DB, AVR EA)
 
-Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B (AC
+This document is for a programmer who needs to know when an analog
+voltage crosses a level, or on which side of a band it sits, without
+running a conversion: a threshold detector, a window detector, or a
+comparator output on a pin or on an event channel for a timer or the
+CCL. `Ac<n>` is the resource, one comparator: an `AcConfig` describes
+it and one function per register fact drives it. It is a monostate, a
+class whose state is static, with no instances: a program names the
+type and never makes an object of it. `Threshold<Ac>` and
+`Window<Lower, Upper>` are the tasks over it (a task, in brio, is a
+driver layer with state of its own over a resource, served from its
+peripheral's interrupt or called by an active object; an active object
+is a component of a brio program with its own event queue, served one
+event at a time by the kernel, [../learn/introduction.md](../learn/introduction.md)).
+`Threshold` sets the comparator's internal reference level, DACREF,
+from millivolts and reports each crossing; `Window` pairs two
+comparators on one pin and reports above, inside or below.
+
+The smallest use, a threshold at 1.000 V on PD6, trimmed from "How to
+use it" below:
+
+```cpp
+#include "avrxt/ac.hpp"
+using Level = brio::Threshold<brio::Ac<0>>;
+Level::init(brio::AcPos::ainp3, 1000, brio::Ref::v2048);     // medium hysteresis, both edges
+ISR(AC0_AC_vect) { post<Monitor>(Crossed{Level::crossed()}); }
+```
+
+Line by line: `Level` names the threshold task over comparator AC0,
+which every part of the three dies has. `init()` takes the positive
+input (`ainp3`, PD6 on every comparator), the threshold in millivolts
+and the reference: it writes VREF.ACREF to the internal 2.048 V
+reference, sets the negative input to DACREF with the code nearest
+1000 mV (125), turns PD6's digital input buffer off, and with its
+defaults selects the medium hysteresis, an interrupt on both crossing
+directions and the CMP interrupt enabled. It returns false, writing no
+register, when the reference's millivolts are unknown (`Ref::vdd` or
+`Ref::vrefa` without the `ref_known_mv` argument), when the threshold
+is above the reference, or when this package does not bond the input's
+pin; the excerpt ignores that answer. The `ISR()` line binds the
+comparator's vector, with avr-libc's macro: `crossed()` clears the CMP
+flag and returns the new state (true = above), and `post<Monitor>`
+hands it to an active object; `Monitor` and its event `Crossed` are
+the program's own names.
+
+What decides correctness even there. The vector is the program's to
+bind: the driver binds none and nothing checks that `AC0_AC_vect` has
+a handler while the interrupt is enabled, and the CMP flag stays set
+until the body clears it, which `crossed()` does. Interrupts must be
+enabled globally (`sei()`) before a crossing can be served. VREF.ACREF
+is one register for all the comparators: every `init()` whose negative
+input is DACREF writes it, so a second comparator initialized with
+another `Ref` moves the first one's threshold, and the first
+`Threshold`'s `mv()` then reports a level computed for the old
+reference. `init()` waits for nothing: on the DB a DACREF change settles in
+tDACREF = 25 us with the bandgap already running (DS80000915F 3.7.4),
+the comparator's start-up after enable has no figure (DS40002247B
+39.17 gives none), and a `state()` read right after
+`init()` may still show the start-up value INITVAL holds.
+
+## Documents of record
+
+AVR128DB28/32/48/64 data sheet DS40002247B (AC
 chapter 32, electricals 39.17, PORTMUX 17.3.10, EVSYS 16 generators
 0x20-0x22, I/O multiplexing chapter 3), errata DS80000915F (no AC
 silicon erratum; the data sheet clarification 3.7.4 adds tDACREF);
@@ -11,7 +72,12 @@ Complements: TB3211 "Getting Started with AC" (see
 [vendor/README.md](vendor/README.md)). Driver: `avrxt/ac.hpp` (`Ac<n>`,
 `Threshold`, `Window`); the reference is `Vref::ac` in `avrxt/vref.hpp`
 ([vref.md](vref.md)); the OUT event in `avrxt/evsys.hpp`. Reference
-test: `test_avr_timer` (test m).
+test: `test_avr_timer` (test m). A letter is one command key of a
+suite's console and the group of verdicts it runs: in
+`test_avr_timer`, `m` judges the comparators against the DAC (the
+threshold, its crossings, the window) and `w` the pin-vs-pin
+comparisons, AC1, INVERT, the OUT pins and the window senses; this
+suite's all-key is `a`, which runs every letter its image carries.
 
 ## What the silicon does
 
@@ -32,7 +98,7 @@ settles in tDACREF = 25 us, errata document clarification 3.7.4, with
 the bandgap already running). `RUNSTDBY` keeps it alive in standby:
 32.3.5 says event, interrupt and pin keep working without CLK_PER,
 but the CTRLA field description (32.5.1) says interrupts and status
-flags are NOT updated with the clock stopped. The bench sides with
+flags are not updated with the clock stopped. The bench sides with
 32.3.5 for the interrupt (below); whether CLK_PER runs for the
 comparator meanwhile is not measured, so the two sentences may yet
 both hold.
@@ -65,7 +131,7 @@ any comparator from outside; the pins must be set as analog inputs
 
 **Window mode**: `CTRLB.WINSEL` pairs ACn with ACn+1 or ACn+2 (the
 upper limit on the partner, the lower on ACn, both `MUXPOS` on the
-SAME pin - the user configures both MUXCTRLs); `STATUS.WINSTATE`
+same pin - the user configures both MUXCTRLs); `STATUS.WINSTATE`
 reports above / inside / below and `INTMODE` (above / inside / below
 / outside) selects which state raises the interrupt and the event;
 `CMPSTATE` is then "the window state matches INTMODE".
@@ -100,7 +166,7 @@ A window 0.5 .. 1.5 V with the interrupt when the signal leaves it:
 ```cpp
 using Band = brio::Window<brio::Ac<0>, brio::Ac<2>>;
 Band::init(brio::AcPos::ainp3, 500, 1500, brio::AcWindowSense::outside, brio::Ref::v2048);
-ISR(AC0_AC_vect) { post<Monitor>(Band{Band::changed()}); }
+ISR(AC0_AC_vect) { post<Monitor>(BandState{Band::changed()}); }
 ```
 
 The resource directly - two pins compared, output on PC6 and as an

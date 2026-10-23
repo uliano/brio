@@ -1,6 +1,73 @@
 # ADC (STM32F4)
 
-Documents of record: RM0090 Rev 22 ch. 13, RM0390 Rev 6 ch. 13 and RM0383
+This document is for a programmer who needs to measure a voltage on a
+pad, the supply rail or the die's temperature on an STM32F4. `Adc<n>` is
+one converter (`Adc<1>` the master), one function per register fact,
+with polled conversions, the two sequences, the analog watchdog and the
+interrupt body on top; `AdcCommon` is what the converters share (the
+clock prescaler, the internal sources, the multi-ADC modes, the one
+reset line); `AnalogIn<Pin, channel>` is a pad handed to a channel. The
+converter is also the `AnalogConverter` that `util/analog_sampler.hpp`'s
+sampler drives, the last example under "How to use it".
+
+The smallest use, one conversion of a pad, the first block of "How to
+use it" below:
+
+```cpp
+using Adc1 = brio::Adc<1>;
+using In4 = brio::AnalogIn<brio::Pin<'A', 4>>;   // channel 4 by the datasheet's map
+
+In4::claim();                                    // analog mode, input buffer off
+brio::AdcConfig cfg{};                           // 12 bits, one conversion when asked
+Adc1::init(clock, cfg);                          // the prescaler comes from the clock
+Adc1::sample_time(In4::channel, brio::AdcSampleTime::cycles480);
+Adc1::select(In4{});
+const uint16_t counts = Adc1::read();
+const uint16_t mv = brio::adc_mv(counts, Adc1::result_steps(), 3300);
+```
+
+Line by line: `Adc1` names the first converter and `In4` the pad PA4 as
+channel 4, the channel derived from the map every datasheet of this
+family gives (a pad off that map does not compile until its channel is
+stated); `claim()` puts the pad in analog mode, which turns its digital
+input buffer off; `AdcConfig{}` is the default configuration, 12 bits,
+right-aligned, one conversion each time one is asked for; `init()` takes
+the clock task's tag (`clock`, [clock.md](clock.md)), opens the
+converter's bus clock, picks the shared prescaler from the APB2 rate
+the clock type claims, writes the configuration and powers the
+converter up, waiting out its stabilization time; `sample_time()` gives
+channel 4 the longest sampling window, 480 converter cycles;
+`select()` makes channel 4 the sequence; `read()` starts one conversion,
+polls for its end and returns the counts; `adc_mv()`
+(`util/analog.hpp`) turns them into millivolts against a 3300 mV
+reference, the board's VREF+.
+
+What decides correctness even there. `init()` answers false, and powers
+nothing, when no prescaler code keeps the converter's clock between
+0.6 MHz and its 36 MHz ceiling at the APB2 rate the clock type claims;
+the smallest use ignores the answer, and a program that does the same
+on a clock with no legal division reads 0 from a converter that was
+never powered. `select()` and `read()` without an
+argument answer nothing: `select()` is void because the sampler's
+contract asks for it, and it refuses in silence while a conversion is in
+flight (`select_sync()` is the same with the answer); `read()` returns 0
+when its bounded poll (0x100000 turns) ends with no conversion, a value
+a real input can also read, so a caller that must tell the two apart
+uses `read(uint16_t&)`, which answers false. The sampling time is the
+caller's to choose: every channel comes out of reset at 3 cycles, the
+shortest, and nothing in `init()` changes it. And the reset line is not `init()`'s: one line resets every
+converter and the common block together, so `AdcCommon::reset()` is a
+separate verb the program calls when no sibling converter is at work.
+
+The page is long because the chapter is. In order: the documents of
+record; what the silicon does, with the two errata and how they are
+answered; the types and verbs (the reserve's facts, the vocabulary, the
+input types, the common block, the converter); how to use it, one
+example per use; the bench findings; what is not covered.
+
+## Documents of record
+
+RM0090 Rev 22 ch. 13, RM0390 Rev 6 ch. 13 and RM0383
 Rev 4 ch. 11 - the same converter under three chapter numbers, differing
 in how many of it a part has, which channel the temperature sensor is on
 and how many of the trigger codes carry a signal. The electrical numbers
@@ -12,9 +79,11 @@ agree on all of them. Errata: ES0206 Rev 24 2.5.1 and 2.2.8, ES0298 Rev 8
 2.2.8 - two items under four numbers, on every silicon revision of all
 four parts; both are quoted
 below. Driver: `stm32f4/adc.hpp`, with the per-part facts in
-`stm32f4/device_tables.hpp`. Bench suite: `test_stm32f4_analog` (one
-suite with the DAC, because the DAC's only route to this converter is a
-pad they share). Family fixture `test/family_stm32f4/analog.cpp` plus
+`stm32f4/device_tables.hpp` (the reserve: the table of what each part
+has, read off the device header). Bench suite: `test_stm32f4_analog`
+(one suite with the DAC, because the DAC's only route to this converter
+is a pad they share); a letter is one command key of the suite's
+console and the group of verdicts it runs. Family fixture `test/family_stm32f4/analog.cpp` plus
 five negatives under `brio check stm32f4`.
 
 ## What the silicon does
@@ -31,7 +100,7 @@ multiplexer.
 four codes, no bypass, no asynchronous root - so the fastest possible
 converter clock is half the bus, and where the bus is fast that is not a
 choice. fADC's ceiling is 36 MHz at 2.4..3.6 V and 18 MHz below (the
-datasheets' ADC characteristics table), and its FLOOR is 0.6 MHz. At
+datasheets' ADC characteristics table), and its floor is 0.6 MHz. At
 90 MHz on APB2 that leaves PCLK2/4 = 22.5 MHz as the fastest legal
 division, which is what `init()` picks and what every number below was
 measured at.
@@ -39,43 +108,43 @@ measured at.
 **There is no calibration and no regulator.** Unlike the STM32G0's
 converter this one has no ADCAL and no ADVREGEN: ADON powers it and
 tSTAB (2 us typical, 3 us maximum) is the whole bring-up. What ST
-measured on the die is elsewhere and is a MEASUREMENT rather than a trim -
+measured on the die is elsewhere and is a measurement rather than a trim -
 VREFINT_CAL at 0x1FFF7A2A, TS_CAL1 at 0x1FFF7A2C and TS_CAL2 at
 0x1FFF7A2E, all ADC results at VDDA = 3.3 V, the temperature ones at 30
 and 110 degrees (the F4's points are at 3.3 V where the STM32G0's are at
 3.0). Nothing is written back anywhere.
 
-**Two groups, and the injected one preempts.** A REGULAR sequence is up
-to sixteen conversions into ONE data register - so a sequence longer than
-one needs the DMA or a reader fast enough - and an INJECTED sequence is
+**Two groups, and the injected one preempts.** A regular sequence is up
+to sixteen conversions into one data register - so a sequence longer than
+one needs the DMA or a reader fast enough - and an injected sequence is
 up to four into four registers of their own, each with a subtractable
-12-bit offset and therefore a SIGN. An injected trigger interrupts a
+12-bit offset and therefore a sign. An injected trigger interrupts a
 regular conversion, the injected sequence runs, and the regular sequence
 resumes where it was (13.3.10). That second group has no counterpart on
 the two earlier targets of this project.
 
-**JSQR is filled from the TAIL.** 13.13.12's note: with JL = 0 the
+**JSQR is filled from the tail.** 13.13.12's note: with JL = 0 the
 converter runs JSQ4 alone, with JL = 1 it runs JSQ3 then JSQ4, and only a
 full four starts at JSQ1. A caller who wrote its list at JSQ1 and set JL
 would convert channels it never named. The driver does the placement.
 
 **The status register is rc_w0.** ADC_SR's six flags are cleared by
-writing ZERO (13.13.1), the opposite of every other flag register in this
-stratum - so a clear stores the COMPLEMENT of the mask (ones everywhere
+writing zero (13.13.1), the opposite of every other flag register in this
+stratum - so a clear stores the complement of the mask (ones everywhere
 else, which keep) and never a read-modify-write, which would take down a
 flag that rose between the read and the write.
 
 **EOC is cleared by reading the data, and STRT by nobody.** 13.13.1: EOC
 goes down on a read of ADC_DR. STRT - "a regular conversion has started" -
-goes down on a write and on nothing else, and this converter has NO BUSY
-BIT at all, so "started and not yet finished" is the only answer to "is a
+goes down on a write and on nothing else, and this converter has no busy
+bit at all, so "started and not yet finished" is the only answer to "is a
 conversion in flight". The driver therefore clears STRT inside
 `result()`, in the same verb that clears EOC by reading; without that the
 bit stands for the rest of the program and every sequence verb refuses
-for ever after the first conversion - IN SILENCE, because the selection
+for ever after the first conversion - in silence, because the selection
 verb the sampler's contract asks for returns void.
 
-**Overrun detection is a CHOICE.** OVR exists only with DMA = 1 or
+**Overrun detection is a choice.** OVR exists only with DMA = 1 or
 EOCS = 1 (13.13.3). With EOC at the end of the sequence and no DMA there
 is none at all, which 13.8.3 offers deliberately: a converter running
 continuously for an analog watchdog need not be read and will not be told
@@ -94,17 +163,17 @@ rail through VREFINT rather than believing them.
 ### The errata, and how they are answered
 
 - **ADC sequencer modification during conversion** (ES0206 2.5.1,
-  ES0298 2.6.1, ES0287 2.4.1, ES0321 2.6.1, every revision): with a SOFTWARE start, a
+  ES0298 2.6.1, ES0287 2.4.1, ES0321 2.6.1, every revision): with a software start, a
   write to ADC_SQRx or ADC_JSQR during a conversion resets that
   conversion and the converter does not restart by itself. The hardware
-  trigger is spared. ANSWERED STRUCTURALLY: every sequence verb refuses
+  trigger is spared. Answered structurally: every sequence verb refuses
   while a conversion is in flight, and a deliberately named unchecked
   verb exists so a suite can stage the item. Both halves are measured
   below.
 - **Internal noise impacting the ADC accuracy** (2.2.8 in all four,
   every revision): noise on VDD propagates inside whatever the power
-  mode. The workaround is a SYSTEM one - the flash accelerator's prefetch
-  OFF with both caches on, plus averaging - so it is not the driver's to
+  mode. The workaround is a system one - the flash accelerator's prefetch
+  off with both caches on, plus averaging - so it is not the driver's to
   apply: `stm32f4/flash.hpp` owns those bits and the application decides.
   What the choice is worth on this silicon is measured below.
 
@@ -168,7 +237,8 @@ rail through VREFINT rather than believing them.
 
 ### The block: `AdcCommon`
 
-A monostate, and a type of its own rather than a corner of `Adc<n>`
+A monostate (a class used through its type alone, all its members
+static, never instantiated), and a type of its own rather than a corner of `Adc<n>`
 because everything in it belongs to all of them. Verbs: `reset()` (the
 ONE line, which pulses every converter), `prescaler()` and `adc_hz()`,
 `internal_sources()` (TSVREFE, which wakes the sensor and VREFINT

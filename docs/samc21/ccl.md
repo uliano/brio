@@ -1,19 +1,88 @@
 # CCL - Configurable Custom Logic (SAM C21)
 
-Documents of record: SAM C20/C21 data sheet **DS60001479M** ch. 37
+This document is for a programmer who wants glue logic with no CPU in
+it: a gate between two pads, a comparator output resynchronized to a
+chosen clock, a flip-flop that divides a clock, or a function of
+signals carried on the event system. `Ccl` is the block (its one
+enable, its reset, its generic clock and its two sequencers), `Lut<n>`
+one of the four three-input look-up tables, and `CclIn<Pin>` /
+`CclOut<Pin>` a pad that carries a LUT input or output. The block has
+no interrupt and no DMA: what it computes leaves on a pad or as an
+event.
+
+The smallest use, the first block of "How to use it" below - an
+exclusive OR of two pads on a third, with no clock at all:
+
+```cpp
+using A = brio::CclIn<brio::Pin<'A', 16>>;    // CCL0/IN[0]
+using B = brio::CclIn<brio::Pin<'A', 17>>;    // CCL0/IN[1]
+using Y = brio::CclOut<brio::Pin<'A', 19>>;   // CCL0/OUT[0]
+
+brio::Ccl::init();                             // bus clock + reset, block down
+A::claim();
+B::claim();
+Y::claim();
+brio::Lut<0>::configure({
+    .in0 = brio::LutInput::io,
+    .in1 = brio::LutInput::io,
+    .truth = brio::lut_truth([](bool a, bool b, bool) { return a != b; }),
+});
+brio::Ccl::enable(true);                       // the LUT decodes from here on
+```
+
+Line by line: `A`, `B` and `Y` name the pads that carry LUT0's inputs
+0 and 1 and its output (a pad this device does not bond to the CCL does
+not compile); `Ccl::init()` with no generator opens the bus clock and
+resets the block, leaving it disabled and with no generic clock, which
+a purely combinational LUT does not need; each `claim()` hands its pad
+to the CCL on peripheral function I with its input buffer on;
+`configure()` writes LUT0's whole control register - both inputs from
+their pads, the truth table built from a function of the three input
+levels (here `a != b`, IN[0] being the table's lowest bit), and the
+LUT's own enable with it; `Ccl::enable(true)` starts the block, and the
+output follows from there.
+
+What decides correctness even there. Every configuring verb refuses,
+returning false and writing nothing, while the block is enabled
+(erratum 1.7.3, and the bench measured the two enables as an AND), so
+configuration comes before `Ccl::enable(true)`, and changing one LUT
+later means disabling the block and dropping every LUT's output for
+the duration. A program that ignores the false answer keeps the old
+configuration in silence. `configure()` also refuses an input code
+this variant does not implement, the edge detector with neither filter
+nor synchronizer, and an event input or its inversion without LUTEI.
+A filter, a synchronizer, an edge detector, an event input or a
+sequencer needs the generic clock, given as `Ccl::init(generator)`
+with a generator that runs. `init()`'s software reset raises a PAC
+protection error flag (erratum 1.7.4, observed), and nothing else
+happens. Nothing here waits beyond `init()`'s bounded channel wait,
+and nothing masks interrupts.
+
+The page is long because the bench measured the chapter's three
+disagreeing documents. In order: the documents of record; what the
+silicon does; the errata; the types and verbs; how to use it, one
+block per use; the bench findings (the enable protection, the truth
+table and the input multiplexer, the stages and their cost, the
+sequencers, the events, the latency table); what is not covered.
+
+## Documents of record
+
+SAM C20/C21 data sheet **DS60001479M** ch. 37
 (the CCL), ch. 29 (the event system's tables), ch. 6 (the I/O
 multiplexing) and silicon errata **DS80000740S** 1.7.1..1.7.4 and
 1.8.3. Driver: `samc21/ccl.hpp`, over `samc21/device_tables.hpp`'s CCL
 probes. Family fixture `test/family_samc21/ccl.cpp` plus ten negatives
-under `test/family_samc21/neg/`. Bench suite `test_samc_ccl`.
+under `test/family_samc21/neg/`. Bench suite `test_samc_ccl` (a
+letter of it is one command key of its console and the group of
+verdicts that key runs).
 
 ## What the silicon does
 
 **Four look-up tables and two sequencers, on every variant.** Each LUT
 takes three inputs through independent multiplexers, decodes them
-through an eight-bit TRUTH table, and optionally passes the result
+through an eight-bit truth table, and optionally passes the result
 through a synchronizer or a glitch filter and then an edge detector.
-Adjacent LUTs form a PAIR, and each pair has a sequential sub-module
+Adjacent LUTs form a pair, and each pair has a sequential sub-module
 that can be a gated D flip-flop, a JK flip-flop, a gated D latch or an
 RS latch - the even LUT driving D/J/D/S, the odd one G/K/G/R.
 
@@ -51,7 +120,7 @@ PB16) and its output OUT[3] (PB17) are bonded on the **J alone**, so on
 the E and the G, LUT3 exists in silicon - `CCL_LUT_NUM` is 4 everywhere
 - with no pin of its own, reachable only through events, a link or a
 sequencer. The E bonds no PORT B pad to the CCL at all. Two pads also
-carry the SAME input line: PA04 and PA16 are both CCL0/IN[0], PA08 and
+carry the same input line: PA04 and PA16 are both CCL0/IN[0], PA08 and
 PA30 both CCL1/IN[3].
 
 ## The errata
@@ -102,7 +171,7 @@ name).
 **`LutConfig`** - the whole LUTCTRLn bar its ENABLE bit: the three
 inputs, `truth`, `filter`, `edge_detect`, `event_in` (LUTEI),
 `invert_event_in` (INVEI) and `event_out` (LUTEO). ENABLE is not a
-field here because it is decided by WHICH verb runs.
+field here because it is decided by which verb runs.
 
 **`lut_truth(predicate)`** builds the table from a lambda of three
 bools, with IN[0] as the LSB (table 37-1) - the same convention as
@@ -171,7 +240,7 @@ brio::Ccl::enable(true);
 ```
 
 **A divide-by-two with no CPU: a JK flip-flop toggled by GCLK_CCL.**
-Note the order - the sequencer is written BEFORE the even LUT, and the
+Note the order - the sequencer is written before the even LUT, and the
 block goes up last:
 
 ```cpp
@@ -192,7 +261,7 @@ brio::Lut<0>::configure({.in0 = brio::LutInput::io,
 //                   {.generator = brio::Lut<0>::event_generator,
 //                    .path = brio::EventPath::asynchronous});
 
-// and the other direction - ASYNCHRONOUS ONLY (table 29-3):
+// and the other direction - asynchronous only (table 29-3):
 brio::Lut<1>::configure({.in0 = brio::LutInput::event,
                          .truth = brio::lut_truth_pass(0),
                          .event_in = true});

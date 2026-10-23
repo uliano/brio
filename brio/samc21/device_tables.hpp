@@ -1,25 +1,39 @@
 /*
  * device_tables.hpp
  *
- * THE RESERVE. Everything in this file is a probe of the device
- * header's own per-pad and per-instance symbols - `#ifdef` walls that
- * turn vendor macros into constexpr DATA - and nothing else is allowed
- * to live here.
+ * The reserve: the table of what each SAM C21 variant has, read off the
+ * device header. A driver asks it which EXTINT line a pad carries, which
+ * waveform output a pad and a peripheral function give, which analog
+ * inputs, pad pairs and LUT pads a package bonds, and the instance
+ * parameters of each block; a program meets it only through those
+ * drivers, as a compile error naming the absence when it names a pad or
+ * an instance its variant does not have:
  *
- * THE RULE THIS FILE ENFORCES (docs/design/overview.md, "Target
- * strata"): a preprocessor conditional whose product is a VALUE - a
+ *   static_assert(extint_exists<'B', 22>);           // what ExtInt<> checks
+ *   constexpr int line = eic_extint_line('B', 22);   // 6 on the G and J,
+ *                                                    // -1 on the E (no PB22)
+ *
+ * Everything here is constexpr, evaluated by the compiler: no verb runs
+ * on the target, nothing waits, nothing is called from any context.
+ *
+ * Everything in this file is a probe of the device header's own per-pad
+ * and per-instance symbols - `#ifdef` walls that turn vendor macros into
+ * constexpr data - and nothing else is allowed to live here.
+ *
+ * The rule this file enforces (docs/design/overview.md, "Target
+ * strata"): a preprocessor conditional whose product is a value - a
  * line number, a clock id, a trigger code, a bonding fact - belongs
- * HERE, quarantined, one entry per header symbol; a driver may keep an
+ * here, quarantined, one entry per header symbol; a driver may keep an
  * `#ifdef` only where it selects CODE that genuinely differs per
  * instance (a register-struct reference, an `if constexpr` tier),
  * which no constexpr table can hold. The drivers stay readable C++23;
  * the one thing C++ cannot do - ask whether a macro exists - happens
  * in one place, with a mandate.
  *
- * WHY PROBES AND NOT PER-VARIANT TABLES. The alternative - three
+ * Why probes and not per-variant tables. The alternative - three
  * hand-kept (or script-kept) tables selected by one `#if` on the
- * device macro - would be a COPY of the DFP's bonding information,
- * able to drift from it silently. These probes ARE that information,
+ * device macro - would be a copy of the DFP's bonding information,
+ * able to drift from it silently. These probes are that information,
  * re-read from the header at every compile: a pad the package does not
  * bond has no symbol, so it has no entry, and the driver's
  * static_assert names the absence. Ugly, deliberately confined, and
@@ -32,7 +46,7 @@
  *    the J.
  *  - TC waveform outputs: PA22 = TC0/WO0 and PB12 = TC0/WO0 again;
  *    8 pads on the E, 18 on the G, 26 on the J.
- *  - TCC waveform outputs: the same pad carries TWO of them, on two
+ *  - TCC waveform outputs: the same pad carries two of them, on two
  *    different peripheral functions - PA08 is TCC0/WO0 under function E
  *    and TCC1/WO2 under function F - so that map is keyed by pad AND
  *    function where the TC's is keyed by pad alone.
@@ -60,10 +74,10 @@
  *    CCL1/IN[3].
  *
  * Consumers: samc21/eic.hpp, samc21/tc.hpp, samc21/tcc.hpp, samc21/ac.hpp,
- * samc21/adc.hpp, samc21/dac.hpp, samc21/sdadc.hpp, samc21/ccl.hpp,
- * samc21/pac.hpp, samc21/dsu.hpp, samc21/mtb.hpp. Each declares the MEANING of its numbers
- * (what an EXTINT line is, what a WO pad does); this file only says
- * which numbers exist on this device.
+ * samc21/adc.hpp, samc21/dac.hpp, samc21/sdadc.hpp, samc21/tsens.hpp,
+ * samc21/ccl.hpp, samc21/pac.hpp, samc21/dsu.hpp, samc21/mtb.hpp. Each
+ * declares the meaning of its numbers (what an EXTINT line is, what a WO
+ * pad does); this file only says which numbers exist on this device.
  */
 
 #pragma once

@@ -1,16 +1,90 @@
 # TCC - Timer/Counter for Control Applications (SAM C21)
 
-Documents of record: SAM C20/C21 data sheet DS60001479M ch. 36 - and
+This document is for a programmer who needs more of a timer than the
+TC gives ([tc.md](tc.md)): a PWM whose period is any value at any
+counter width, a complementary pair of outputs with dead time between
+them for a half bridge, outputs a fault input can clamp or shut down in
+hardware, dithering, ramps and pattern generation. `Tcc<n>` is one of
+the three instances, one function per register fact; `TccWo<Pin,
+function>` is one of its waveform outputs, named by the pad and the
+peripheral function that carry it; and the tasks over them (a task, in
+brio, is the layer a program names, built over the register-level
+resource) are `TccPwm`, a PWM channel, and `TccPairPwm`, the
+complementary pair.
+
+The smallest use, a PWM channel on a pad, the first block of "How to
+use it" below:
+
+```cpp
+using OutPin  = brio::Pin<'A', 8>;
+using OutWave = brio::TccWo<OutPin, brio::PinFunction::e>;   // TCC0 / WO0
+using Pwm     = brio::TccPwm<brio::Tcc<0>, 0, 1999>;         // max = 1999
+
+brio::Tcc<0>::init(/* generator */ 0);
+OutWave::claim();
+Pwm::setup(brio::TccPrescaler::div256);   // 48 MHz / 256 / 2000 = 93.75 Hz
+Pwm::duty(500);                           // buffered, taken at the next UPDATE
+```
+
+Line by line: `OutPin` names PA08 ([port.md](port.md)); `OutWave` is
+the output PA08 carries under peripheral function E, TCC0's WO0, found
+in the device header's pad symbols (the same pad is TCC1's WO2 under
+function F, which is why the function is part of the name, and a pair
+the package does not bond does not compile); `Pwm` is channel 0 of TCC0
+as a single-slope PWM whose period register holds 1999, so the counter
+counts 2000 steps and `duty()` takes 0..1999; `Tcc<0>::init(0)` opens
+the bus clock, connects the generic clock channel to generator 0 and
+resets the timer, leaving it disabled; `claim()` hands the pad to the
+timer with its input buffer on; `setup()` writes the prescaler, the
+waveform mode and the period and enables the counter; `duty(500)`
+writes the channel's buffer register, which the counter takes at its
+next UPDATE condition, so a running output changes without a glitch.
+
+What decides correctness even there. The timer counts its generic
+clock generator, not `Clock::hz`: the 93.75 Hz of the comment holds
+because generator 0 runs at the CPU's 48 MHz once the clock task's
+`init()` has run ([clock.md](clock.md)), and nothing here checks it.
+TCC0 and TCC1 share one generic clock channel, so a `release()` of one
+disconnects the other's clock as well. **A second `duty()` inside one
+period is dropped**: a buffered write's SYNCBUSY bit stands until the
+update takes the value, the buffered setter refuses rather than waiting
+a whole period, and `duty()` discards that refusal ("Bench findings",
+the first of the two facts the chapter does not have). `init()` and
+`setup()` answer false when a bounded wait (0xFFFF polls) runs out or a
+configuration is refused, and the excerpt discards both. These are
+setup verbs and an active object's (an active object is a component of
+a brio program with its own event queue, served one event at a time by
+the kernel, [docs/learn/introduction.md](../learn/introduction.md)),
+with no guard of their own and no interrupt masked. `init()` leaves the
+NVIC line disabled; a program that arms an interrupt and enables the
+line defines `TCCn_Handler`, since an unbound vector is the crt's
+silent spin. And every event channel that feeds a TCC is asynchronous
+(erratum 1.21.9), which this driver states and cannot check.
+
+The page is long because the chapter is. In order: the documents of
+record; what the silicon does (three unlike instances, the pad map by
+pad and function, the period register, the synchronized read, the two
+kinds of protection, the waveform extension, the fault system,
+dithering); the errata, row by row; the types and verbs; how to use it
+(a PWM channel, a complementary pair, a recoverable fault, a
+non-recoverable shutdown); the bench findings, then those of the
+advanced modes; what is not covered.
+
+## Documents of record
+
+SAM C20/C21 data sheet DS60001479M ch. 36 - and
 errata DS80000740S items 1.21.1 to 1.21.11, of which **seven are live on
 this silicon**. Driver: `samc21/tcc.hpp`, with its per-instance and
 per-pad data in `samc21/device_tables.hpp`. Family fixture
 `test/family_samc21/tcc.cpp` plus eight negatives under
 `brio check samc21`; the bench suites are `test_samc_tcc` and - for
-the circular buffers and the advanced modes - `test_samc_timer_modes`.
+the circular buffers and the advanced modes - `test_samc_timer_modes`
+(a suite's letter, cited below, is one command key of its console and
+the group of verdicts that key runs).
 
 ## What the silicon does
 
-**Three instances, and they are NOT copies of each other.** That is the
+**Three instances, and they are not copies of each other.** That is the
 first thing separating this chapter from the TC's, where five identical
 timers differ only in which pads they reach.
 
@@ -28,7 +102,7 @@ confirms the decoding: OTMX, DTI, SWAP, PG, DITHERING from bit 0 up, so
 31 / 24 / 0 for the three instances. **TCC0 and TCC1 share generic clock
 channel 28** (36.5.3), so neither can run at a rate the other does not.
 
-**The pad map is keyed by pad AND peripheral function.** A TC waveform
+**The pad map is keyed by pad and peripheral function.** A TC waveform
 output lives on exactly one function, so `TcWo<Pin>` needs no more than
 the pad. A TCC output does not: **PA08 is TCC0/WO0 under function E and
 TCC1/WO2 under function F**, PA16 is TCC2/WO0 under E and TCC0/WO6 under
@@ -50,7 +124,7 @@ exactly as in the TC - and issued twice, exactly as in the TC: the
 COUNT shadow lands about half a counter-clock period after SYNCBUSY
 clears with no bit advertising it (measured on both timers; the
 mechanism and the numbers are in [tc.md](tc.md)), so a single-command
-read returns the PREVIOUS command's snapshot and `read_sync()` pays the
+read returns the previous command's snapshot and `read_sync()` pays the
 second crossing to return the count at the call's entry. `count()` does
 it; `count_raw()` skips it and says so.
 
@@ -73,13 +147,13 @@ and pattern generation overrides any output with a constant level. Each
 is optional per instance, and asking an instance for one it does not have
 is a compile error.
 
-**The fault system has two halves, and the fault inputs ARE the event
+**The fault system has two halves, and the fault inputs are the event
 inputs.** Recoverable faults A and B are the channel event inputs MCE0
 and MCE1: they clamp CC0's or CC1's output, and can additionally halt,
 restart, blank, qualify, filter and timestamp. Non-recoverable faults are
 the counter event inputs TCE0 and TCE1 with EVACT = FAULT: they stop the
 counter and force **every** enabled output to a level DRVCTRL names. Both
-must be carried on ASYNCHRONOUS event channels - 36.6.3.5 says so for the
+must be carried on asynchronous event channels - 36.6.3.5 says so for the
 fault use and erratum 1.21.9 for every use, and the bench measured both
 halves of that.
 
@@ -92,7 +166,7 @@ is off by a factor of 16, 32 or 64, silently.
 
 **Two facts the chapter does not carry at all**, both measured here and
 both shaping the driver's API - a buffered write's SYNCBUSY bit stands
-until the update CONSUMES the buffer, and the two halves of CTRLB are not
+until the update consumes the buffer, and the two halves of CTRLB are not
 a set/clear pair for the command fields. See "Bench findings".
 
 ## The errata: read the row, not the column
@@ -121,7 +195,7 @@ What the driver does with each live one:
   and `tcc_config_valid()` never lets the bit be written. It is the one
   item in this chapter that can be turned into a compile error, and it
   is.
-- **1.21.6 is code**: `clear_buffer_valid()` clears the flag TWICE, which
+- **1.21.6 is code**: `clear_buffer_valid()` clears the flag twice, which
   is the whole documented workaround and the exact twin of the TC's
   1.20.3.
 - **1.21.11 is out of reach by construction, twice over**: it applies
@@ -220,7 +294,7 @@ Pwm::duty(500);                           // buffered, taken at the next UPDATE
 ```
 
 **A complementary pair with dead time**, which is what this chapter is
-for. The dead times count UNPRESCALED GCLK_TCC cycles, so they are set in
+for. The dead times count unprescaled GCLK_TCC cycles, so they are set in
 a different unit from the period:
 
 ```cpp
@@ -235,7 +309,7 @@ Pair::setup(brio::TccPrescaler::div1, /* dead low */ 60, /* dead high */ 180);
 Pair::duty(1000);
 ```
 
-**A recoverable fault raised from a pin.** The fault input IS the
+**A recoverable fault raised from a pin.** The fault input is the
 channel's event input, so EVCTRL.MCEIx has to be set for it, and the
 channel must be asynchronous:
 

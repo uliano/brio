@@ -2,19 +2,28 @@
  * tcb.hpp
  *
  * The 16-bit timer/counter type B (TCB) of the AVR DA/DB (DS40002247B
- * ch. 24) and of the AVR EA (DS40002443A ch. 23, the same IP) in two
- * strata, as docs/avrxt/tcb.md describes:
+ * ch. 24) and of the AVR EA (DS40002443A ch. 23, the same IP): what a
+ * program uses to measure, count or time one signal - the period, the
+ * width or the duty of a pulse train, a count of edges (16 bits on one
+ * TCB, 32 on two), a single pulse of a set width started by an event,
+ * an interrupt at a rate of its own, a watch that fires when the next
+ * edge comes too late, or one 8-bit PWM channel. The signals arrive
+ * through the event system (evsys.hpp): a pin's level is an event. The
+ * header has the two strata of every brio peripheral header, as
+ * docs/avrxt/tcb.md describes:
  *
- *  RESOURCE - Tcb<n>: the typed view of one instance. A config struct
- *  owns the whole configuration (mode, clock, compare, event input and
- *  its edge, filter, async, cascade, sync-update, output pin and its
- *  route, run-standby); init<cfg>() folds it, init(cfg) computes it at
- *  run time. Then the verbs the modes share: count/compare/capture,
- *  running, the two flags, the two interrupt enables, the ISR body
- *  (take_flags: ONE vector per instance, CAPT and OVF share it), the
- *  event hooks capture_on / count_on over evsys.hpp.
+ *  the resource - Tcb<n>: the typed view of one instance. A config
+ *  struct owns the whole configuration (mode, clock, compare, event
+ *  input and its edge, filter, async, cascade, sync-update, output pin
+ *  and its route, run-standby); init<cfg>() folds it, init(cfg)
+ *  computes it at run time. Then the verbs the modes share:
+ *  count/compare/capture, running, the two flags, the two interrupt
+ *  enables, the interrupt body (take_flags: one vector per instance,
+ *  CAPT and OVF share it), the event hooks capture_on / count_on over
+ *  evsys.hpp.
  *
- *  TASKS - what an application names, each a mode with its knobs
+ *  the tasks - what an application names (a task is a driver layer with
+ *  state of its own over the resource), each a mode with its knobs
  *  expressed in the application's units (a clock and microseconds or
  *  hertz; the resource speaks ticks):
  *    PeriodicTick<Tcb>     INT: a CAPT interrupt at a rate (ClockUser)
@@ -24,28 +33,96 @@
  *    CascadedCounter<L, M> two TCBs, 32-bit count with a coherent capture
  *    FrequencyMeter<Tcb>   FRQ: period between equal edges
  *    PulseWidthMeter<Tcb>  PW: time between opposite edges
- *    DutyMeter<Tcb>        FRQPW: period AND width in one sequence
+ *    DutyMeter<Tcb>        FRQPW: period and width in one sequence
  *    Pwm8<Tcb, period>     PWM8: an 8-bit PwmChannel on WO
- *  A task owns its instance; two tasks on one Tcb<n> is the app's bug.
+ *  The resource and the tasks are monostates (classes whose state is
+ *  static, with no instances). A task owns its instance; two tasks on
+ *  one Tcb<n> is the app's bug, and nothing checks it.
  *
- * Facts that shape the code (24.3, 24.5, errata DS80000915F 2.13.x):
+ * The smallest use, a frequency meter on the pin PD0, its period posted
+ * to an active object (a component of a brio program with its own event
+ * queue, served one event at a time by the kernel; `Display` and
+ * `Period` stand for the program's own active object and event type):
+ *
+ *   using SysClock = brio::Clock<brio::ClockSource::crystal, 24'000'000>;
+ *   constexpr SysClock clock;
+ *   using P = brio::AvrPlatform;
+ *   using Meter = brio::FrequencyMeter<brio::Tcb<0>>;
+ *   using In = brio::EventChannel<2>;      // PORTC/PORTD pins: channels 2-3 on the DA/DB
+ *
+ *   ISR(TCB0_INT_vect) { brio::post<Display>(Period{Meter::period_ticks()}); }
+ *
+ *   int main() {
+ *       SysClock::init();
+ *       In::source(brio::EvPin<brio::Pin<'D', 0>>{});
+ *       Meter::init(clock, In{});          // FRQ mode, CLK_PER, CAPT interrupt on
+ *       sei();
+ *       brio::Tenuto<P, Display>::run();   // Display converts with Meter::hz(ticks)
+ *   }
+ *
+ * The meter's init() takes the clock tag and keeps its rate for hz(),
+ * us() and tick_hz(), so it comes after SysClock::init(); a DynamicClock
+ * that does not list the meter is a compile error there. It enables the
+ * CAPT interrupt, so the program binds TCBn_INT_vect, and the handler
+ * reads the capture: that read is what clears CAPT. A channel a pin's
+ * event cannot reach is refused at compile time by source().
+ *
+ * Which context may call what. Nothing here masks interrupts and nothing
+ * holds a caller's buffer; one verb waits, below.
+ *  - The configuring verbs - init(), init<cfg>(), the tasks' init(),
+ *    init_us() and init_ticks(), snapshot_on(), capture_on(),
+ *    capture_on_events(), count_on(), the interrupt enables,
+ *    enable()/disable(), PeriodicTick::start()/stop(),
+ *    CascadedCounter::reset() - are setup verbs: main(), after the clock
+ *    task and before sei(), or an active object's handler. Several are
+ *    read-modify-writes of a register with no set/clear twin (CTRLA,
+ *    EVCTRL, INTCTRL, and PORTMUX.TCBROUTEA, which holds every
+ *    instance's bit), so two contexts racing on one of them can lose a
+ *    bit: never call them from an interrupt handler that may interrupt
+ *    another such call.
+ *  - The interrupt bodies - take_flags(), PeriodicTick::tick(),
+ *    Timeout::expired(), OneShotPulse::pulse_done(),
+ *    PulseCounter::captured(), CascadedCounter::captured() (Lsb's
+ *    vector), FrequencyMeter::period_ticks(),
+ *    PulseWidthMeter::width_ticks(), DutyMeter::reading() - are called
+ *    from the program's ISR(TCBn_INT_vect) and nowhere else.
+ *  - The flag verbs, running(), busy(), pending() and
+ *    OneShotPulse::fire() (one store to the software-event register) are
+ *    single loads or stores, legal from any context; the meters' hz(),
+ *    us(), duty_permille() and tick_hz() are arithmetic over the rate
+ *    kept at init() (and moved by rebase()). The 16-bit accesses - count(), compare(),
+ *    capture() and the reads above built on them, Pwm8::duty() on the
+ *    DA/DB - pass through the instance's one TEMP register: a
+ *    main-context access racing an interrupt handler's 16-bit access of
+ *    the same TCB corrupts both, so such an access belongs in a critical
+ *    section (AvrPlatform::CriticalSection, avrxt/platform.hpp) or in the
+ *    handler alone. Pwm8::duty() also read-modify-writes CTRLB: one
+ *    context per instance.
+ *  - CascadedCounter::read() pulses the snapshot channel and polls both
+ *    CAPT flags at most 16 times: a miswired pair returns stale values
+ *    instead of hanging. Main context or an active object's handler.
+ *  - rebase() is called by the DynamicClock that lists the task, from
+ *    its set().
+ *
+ * Facts that shape the code (24.3, 24.5, errata DS80000915F 2.13.x and,
+ * for the DA, DS80000882C 2.12.1):
  *  - the counter clock is CLK_PER, CLK_PER/2, the prescaled clock of a
  *    TCA (CLK_TCA: in step with that TCA, SYNCUPD restarts with it) or
  *    the positive edges of an event channel (the COUNT user); the
  *    capture/start/stop edges come from the CAPT user, enabled by
  *    CAPTEI, and EDGE says which edge does what - per mode (24.5.3);
  *  - reading CCMP clears CAPT (on the low byte): capture() in the ISR
- *    IS the acknowledge; in FRQPW read CNT (period) BEFORE CCMP
+ *    is the acknowledge; in FRQPW read CNT (period) before CCMP
  *    (width), the read of CCMP re-arms the sequence; clocked by CLK_PER
  *    the captured value is the interval minus one tick in FRQ/PW/FRQPW
  *    (bench, A5: the restart cycle is not counted; exact on CLK_TCA) -
  *    the meters add one at div1;
  *  - SYNCUPD restarts the TCB at the clocking TCA's TOP: a capture
  *    aligned with that TCA's own edge (its FRQ output) reads 0 (bench);
- *    it is for captures of OTHER signals in phase with the TCA period. The 16-bit
- *    accesses go through the instance's one TEMP register: reads of
- *    CNT/CCMP from the main context while the ISR reads them too want
- *    a critical section (the task bodies below run in the ISR);
+ *    it is for captures of other signals in phase with the TCA period.
+ *    The 16-bit accesses go through the instance's one TEMP register:
+ *    reads of CNT/CCMP from the main context while the ISR reads them
+ *    too want a critical section (the task bodies below run in the ISR);
  *  - modes must not change while enabled: init() starts from CTRLA =
  *    0 and clears the flags after configuring (a flag may set during
  *    configuration);
@@ -59,13 +136,14 @@
  *    counts the LSB's OVF event (CLKSEL = EVENT, CASCADE = 1: its CAPT
  *    input is delayed one CLK_PER to absorb the carry), both in the
  *    same capture mode, one CAPT event to both;
- *  - errata 2.13.1 (A4/A5): in PWM8 CCMP and CNT are 16-bit only -
- *    Pwm8 writes CCMP as one word (period and duty together); on the
- *    AVR EA (DS40002443A ch. 23, the same IP, no TCB erratum) the two
- *    bytes are independent as the chapter says, and Pwm8 writes CCMPH
- *    alone;
+ *  - errata DB 2.13.1 (A4/A5) / DA 2.12.1 (every revision): in PWM8
+ *    CCMP and CNT are 16-bit only - Pwm8 writes CCMP as one word
+ *    (period and duty together); on the AVR EA (DS40002443A ch. 23, the
+ *    same IP, no TCB erratum) the two bytes are independent as the
+ *    chapter says, and Pwm8 writes CCMPH alone;
  *  - routes (PORTMUX.TCBROUTEA, one bit per instance): TCB0 PA2 /
- *    PF4, TCB1 PA3 / PF5, TCB2 PC0 / PB4, TCB3 PB5 / PC1.
+ *    PF4, TCB1 PA3 / PF5, TCB2 PC0 / PB4, TCB3 PB5 / PC1, TCB4 PG3 /
+ *    PC6 (64-pin parts).
  */
 
 #pragma once
@@ -84,7 +162,7 @@ namespace brio {
 
 // ---- the knobs (24.5.1 - 24.5.3) ---------------------------------------------------
 
-/// CNTMODE, in the datasheet's order (the values ARE the codes).
+/// CNTMODE, in the datasheet's order (the values are the codes).
 enum class TcbMode : uint8_t {
     periodic = TCB_CNTMODE_INT_gc,               ///< count 0..TOP, CAPT at TOP, restart
     timeout = TCB_CNTMODE_TIMEOUT_gc,            ///< start on one edge, stop on the next, CAPT if TOP first
@@ -158,7 +236,7 @@ public:
     static constexpr uint8_t index = n;
 
     /// The waveform output pin in the two PORTMUX positions (family
-    /// table, 17.3.8; whether THIS package bonds a position is
+    /// table, 17.3.8; whether this package bonds a position is
     /// `has_default_pin`/`has_alt_pin` below).
     using OutDefault =
         std::conditional_t<n == 0, Pin<'A', 2>,
@@ -303,7 +381,7 @@ public:
     }
 
     /// Drive the selected WO position as an output. The branch for a
-    /// position this package lacks is compiled OUT (a runtime `if`
+    /// position this package lacks is compiled out (a runtime `if`
     /// would instantiate the missing Pin and kill the whole instance);
     /// init() has already refused such a config.
     static void drive_output(bool alt) {
@@ -499,7 +577,7 @@ struct OneShotPulse {
                        .event_input = true, .edge = options_.any_edge, .filter = options_.filter,
                        .async = options_.async, .output = true, .alt_pin = options_.alt_pin});
     }
-    /// Change the width for the NEXT pulse (takes effect at once: do it
+    /// Change the width for the next pulse (takes effect at once: do it
     /// while idle).
     static void width_ticks(uint16_t t) { T::compare(t); }
 
@@ -658,16 +736,21 @@ protected:
 /// counter restarting at each: CAPT fires per period with the period
 /// in ticks. ISR body: period_ticks() (the read clears CAPT); hz()
 /// converts. Bench (A5): clocked by CLK_PER, the captured value is the
-/// interval MINUS ONE (the restart cycle is not counted: 24000 ticks
+/// interval minus one (the restart cycle is not counted: 24000 ticks
 /// read 23999) in FRQ, PW and FRQPW alike; clocked by a TCA's prescaled
 /// clock it is exact (the lost CLK_PER cycle is a fraction of a tick).
 /// The meters add one tick at div1 and nothing otherwise (div2: the
-/// half tick lost rounds either way - measure with div1 or a TCA). Range: 65535 ticks of the chosen clock (div2 doubles it;
+/// half tick lost rounds either way - measure with div1 or a TCA).
+/// Range: 65535 ticks of the chosen clock (div2 doubles it;
 /// OVF says "too slow"). The TCB-on-TCA clock (TcbClock::tca0/1)
 /// extends the range to the TCA's prescaler - then hz()/us() do not
 /// know the rate: convert with the TCA's.
 template <typename T>
 struct FrequencyMeter : CaptureMeterBase<T> {
+    /// Setup: FRQ mode on `source`'s event, the counter on `tclk`, the
+    /// clock tag's rate kept for hz()/us()/tick_hz(), the CAPT
+    /// interrupt enabled - the program binds TCBn_INT_vect. Main, after
+    /// the clock task, or an active object's handler.
     template <typename Clock, uint8_t ch>
     static void init(Clock clock, EventChannel<ch> source, TcbClock tclk = TcbClock::div1,
                      bool falling = false, bool filter = false) {
@@ -675,6 +758,8 @@ struct FrequencyMeter : CaptureMeterBase<T> {
                       "FrequencyMeter on a DynamicClock that does not list it: hz()/us() would go stale");
         CaptureMeterBase<T>::setup(clock, TcbMode::frequency, tclk, source, falling, filter);
     }
+    /// Interrupt body: the period in ticks of the counter clock, one
+    /// added at div1 (the restart cycle); the read clears CAPT.
     [[gnu::always_inline]] static uint16_t period_ticks() { return static_cast<uint16_t>(T::capture() + CaptureMeterBase<T>::adjust_); }
 };
 
@@ -728,7 +813,8 @@ struct DutyMeter : CaptureMeterBase<T> {
 /// (period + 1)). duty(v): high for v ticks of period + 1; v = 0 is a
 /// clean low, v = max overrides the pin high from PORT (the hardware's
 /// best is period / (period + 1)), the same endpoint policy as TcaPwm.
-/// Ratiometric on purpose - NOT a ClockUser: the duty survives a clock
+/// Ratiometric on purpose - not a ClockUser: the duty survives a clock
+
 /// change, only the PWM frequency moves with CLK_PER (a LED does not
 /// care; an app that does re-inits).
 /// The duty is CCMPH alone where the two bytes are independent (the AVR

@@ -1,40 +1,109 @@
 # RTC - Real-Time Counter (SAM C21)
 
-Documents of record: SAM C20/C21 data sheet DS60001479M ch. 24, plus
+This document is for a programmer who needs time that keeps counting
+when the rest of the chip sleeps: a 32-bit tick counter on a 32 kHz
+source, a 16-bit counter with a period, a clock/calendar with an alarm
+that wakes the device, or a periodic event that paces other
+peripherals with no CPU in the loop. `Rtc` is the block and the whole
+chapter, a monostate (a class whose state and functions are all
+static, with no instance to create: the family has one RTC); there is
+no task over it. The kernel's own time is SysTick's
+([platform.md](platform.md)); this stratum's timed sleep site,
+`SamTimedSleepSite`, uses this counter as its alarm and witness across
+a standby.
+
+The smallest use, a 32-bit tick counter, the first block of "How to use
+it" below:
+
+```cpp
+// A 32-bit tick counter on the always-available root.
+brio::Rtc::init();                                   // APB clock + reset
+brio::Osc32kctrl::rtc_clock(brio::RtcClock::ulp_32k);   // 21.6.7: RTC disabled
+brio::Rtc::init();                                   // reset on the chosen clock
+brio::Rtc::configure({.mode = brio::RtcMode::count32,
+                      .prescaler = brio::RtcPrescaler::div1});
+brio::Rtc::enable(true);
+const uint32_t ticks = brio::Rtc::count32();
+```
+
+Line by line: the first `init()` opens the RTC's bus clock, disables
+its interrupt line and resets it, so the RTC is disabled before its
+clock changes, as 21.6.7 asks; `Osc32kctrl::rtc_clock()` selects the
+RTC's source in the other chapter's register, here the 32.768 kHz
+output of the always-running OSCULP32K ([osc32kctrl.md](osc32kctrl.md));
+the second `init()` resets the RTC again, now synchronized to the clock
+chosen; `configure()` picks mode 0 (one 32-bit counter) with the
+prescaler passing the source straight through, the read
+synchronization on by default; `enable(true)` starts it; `count32()`
+waits for the read synchronization and loads the count.
+
+What decides correctness even there. The clock is not this driver's:
+it is selected through `Osc32kctrl` with the RTC disabled, and `init()`
+after it, because the reset and the enable synchronize into the
+selected clock's domain - with no source running they would never
+complete. Every such wait is bounded (0xFFFF polls) and `init()`,
+`configure()` and `enable()` answer false when one runs out;
+`count32()` loads COUNT whether or not its wait completed. `configure()`
+refuses while the RTC is enabled, since its fields are enable-protected,
+and refuses a combination chapter 24 forbids. Reading the counter needs
+CTRLA.COUNTSYNC, which is off at reset; `RtcConfig::read_sync` defaults
+to true and turns it on. A calendar needs a 1.024 kHz source, since the
+prescaler cannot bring 32.768 kHz down to 1 Hz (the second block). The
+verbs are setup verbs and an active object's (an active object is a
+component of a brio program with its own event queue, served one event
+at a time by the kernel,
+[docs/learn/introduction.md](../learn/introduction.md)), with no guard
+of their own and no interrupt masked; `isr()` is the body the
+program's `RTC_Handler` calls, once it has armed a flag and enabled the
+line, and an unbound vector is the crt's silent spin.
+
+In order: the documents of record; what the silicon does (the three
+faces, the clock chosen elsewhere, the calendar's 1 Hz, the prescaler
+and its periodic taps, the two kinds of protection, the read
+synchronization, MATCHCLR, the leap rule, CLKREP) and the errata; the
+types and verbs; how to use it (a tick counter, a calendar with an
+alarm, a periodic event); the bench findings, mode by mode; what is not
+covered.
+
+## Documents of record
+
+SAM C20/C21 data sheet DS60001479M ch. 24, plus
 21.6.7 for the clock selection that lives in another chapter - and
 errata DS80000740S items 1.16.1, 1.16.2, 1.16.3 and 1.8.7, of which
 **one is live on this silicon**. Driver: `samc21/rtc.hpp`. The family
 fixture is `test/family_samc21/rtc.cpp` plus seven negatives under
-`brio check samc21`; the bench suite is `test_samc_rtc`.
+`brio check samc21`; the bench suite is `test_samc_rtc` (a suite's
+letter, cited below, is one command key of its console and the group
+of verdicts that key runs).
 
 ## What the silicon does
 
 **One counter wearing three faces.** A 10-bit prescaler feeds a 32-bit
-counter, and CTRLA.MODE decides what that counter IS: a 32-bit counter
+counter, and CTRLA.MODE decides what that counter is: a 32-bit counter
 with one 32-bit compare (mode 0), a 16-bit counter whose top is the PER
 register with two 16-bit compares (mode 1), or a clock/calendar with
-one masked alarm (mode 2). The register map is three OVERLAID VIEWS -
+one masked alarm (mode 2). The register map is three overlaid views -
 CTRLA, EVCTRL, the interrupt registers, DBGCTRL, SYNCBUSY and FREQCORR
 sit at the same offsets in all three and only what follows differs - so
 the driver writes the control surface once and gives the width-carrying
 verbs explicit flavours, exactly as [tc.md](tc.md) does for
 COUNT8/16/32.
 
-**THE CLOCK IS NOT THIS DRIVER'S TO CHOOSE.** The RTC has no generic
+**The clock is not this driver's to choose.** The RTC has no generic
 clock channel at all; its source is picked by OSC32KCTRL.RTCCTRL.RTCSEL
 - one register in chapter 21, owned by
 [osc32kctrl.md](osc32kctrl.md)'s driver. `samc21/rtc.hpp` never writes
 it. What it does is state 21.6.7's obligation ("it is highly
 recommended to disable the RTC module first, before the RTC clock
-source selection is changed") and take the chosen RATE as an argument
+source selection is changed") and take the chosen rate as an argument
 where arithmetic needs one. The corollary is sharper than the rule:
-SWRST and ENABLE synchronize INTO that clock's domain, so resetting the
+SWRST and ENABLE synchronize into that clock's domain, so resetting the
 RTC with no source running would leave SYNCBUSY standing forever. The
 reset default (RTCSEL = ULP1K, off the always-running OSCULP32K) is
 what makes the naive order work anyway, and every wait in the driver is
 bounded and reports.
 
-**A 32.768 kHz source CANNOT REACH 1 Hz, so the calendar needs a
+**A 32.768 kHz source cannot reach 1 Hz, so the calendar needs a
 1.024 kHz one.** Mode 2 requires a 1 Hz counter clock (24.6.2.5) and
 the prescaler stops at /1024. Chapter 24 never draws the conclusion;
 `rtc_prescaler_for_hz()` is where it lives here, returning nothing for
@@ -43,7 +112,7 @@ output on every one of the three oscillators.
 
 **PRESCALER = OFF and PRESCALER = DIV1 divide the same and are not the
 same thing.** Both pass the source straight through; OFF additionally
-SILENCES all eight periodic events and interrupts (24.8.1, 24.6.8.1).
+silences all eight periodic events and interrupts (24.8.1, 24.6.8.1).
 The driver names both codes and refuses a configuration that asks for a
 periodic event with the prescaler off - which the silicon would accept
 and then never honour.
@@ -63,10 +132,10 @@ and can be moved under a running counter, which is what makes it
 measurable and is why the driver gives it a live verb beside the
 configuration field.
 
-**READING THE COUNTER NEEDS A BIT THAT IS OFF AT RESET.** COUNT (and
+**Reading the counter needs a bit that is off at reset.** COUNT (and
 CLOCK) are read-synchronized, gated by CTRLA.COUNTSYNC / CLOCKSYNC, and
 24.8.1 says plainly that "disabling the synchronization will prevent
-reading valid values". `RtcConfig::read_sync` therefore defaults TRUE.
+reading valid values". `RtcConfig::read_sync` therefore defaults true.
 What the bit actually gates is measured below.
 
 **MATCHCLR raises two flags at once.** With the counter cleared on a
@@ -77,13 +146,13 @@ and mode 1 asking for it is refused.
 
 **The calendar's leap rule is not the Gregorian one.** "The year is
 considered a leap year if YEAR[1:0] is zero" (24.12.9), where YEAR is
-a 0..63 OFFSET from a reference year the software picks and the silicon
-never sees - and 24.6.2.5 requires that reference to BE a leap year
+a 0..63 offset from a reference year the software picks and the silicon
+never sees - and 24.6.2.5 requires that reference to be a leap year
 (2016, 2020, ...). There is no century exception, which is harmless
 over the register's 64-year span as long as it does not cross a
 non-leap century.
 
-**CLKREP changes what HOUR MEANS, not how it is displayed.** In the
+**CLKREP changes what HOUR means, not how it is displayed.** In the
 24-hour representation HOUR is five bits holding 0..23 and bit 4 is
 part of the number; in the 12-hour one HOUR[3:0] holds 1..12 and
 HOUR[4] is AM/PM. The same bits, two readings. `RtcClockValue::
@@ -99,18 +168,18 @@ of the kind. The driver does not offer it.
 
 ### Errata, read on the E/G/J ROW at revision F
 
-- **1.16.3 Write Corruption - LIVE ON EVERY REVISION, this one
+- **1.16.3 Write Corruption - live on every revision, this one
   included.** "An 8-bit or 16-bit write access for a 32-bit register,
   or an 8-bit write access for a 16-bit register can fail", for COUNT
   in both counter modes and for CLOCK. The workaround is to write each
-  register at its full width, and the workaround here is STRUCTURAL:
+  register at its full width, and the workaround here is structural:
   the driver has no verb that writes a byte or a half of any of them,
   so no caller is offered a way to get it wrong.
 - **1.16.1 Read Synchronization** (COUNTSYNC/CLOCKSYNC has no effect,
-  read synchronization always on): **E/G/J revision B ONLY.**
+  read synchronization always on): **E/G/J revision B only.**
 - **1.16.2 COUNTSYNC** (the first COUNT value after enabling COUNTSYNC
   is wrong): **E/G/J revisions B..E.** The marks under F and H on that
-  item belong to the N-FAMILY ROW - the read-the-row trap
+  item belong to the N-family row - the read-the-row trap
   [dmac.md](dmac.md) already records. The bench looks for the symptom
   anyway and does not find it (below).
 - **1.8.7 DMA Write Access** (a DMA write during standby may not land;
@@ -135,7 +204,7 @@ of the kind. The driver does not offer it.
   `set_alarm_mask`. Each synchronized read waits its SYNCBUSY bit;
   `*_raw()` is the unsynchronized load and says so.
 - `set_frequency_correction(negative, value)` - refuses a value past
-  the seven-bit field AND a prescaler of OFF or DIV1, which 24.6.8.2
+  the seven-bit field and a prescaler of OFF or DIV1, which 24.6.8.2
   requires; `correction_value()` / `correction_negative()` read back.
 - **`RtcConfig`** (mode, prescaler, match_clear, twelve_hour,
   read_sync) and **`RtcEventConfig`** (periodic_out, compare_out,

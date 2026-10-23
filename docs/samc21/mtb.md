@@ -1,6 +1,68 @@
 # MTB - Micro Trace Buffer (SAM C21)
 
-Documents of record: SAM C20/C21 data sheet DS60001479M **10.3** (a
+This document is for a programmer who wants to know where a program
+went: the last branches before a fault, read by the program itself at
+the next boot with no debugger attached, or a trace window over one
+suspect piece of code. The Micro Trace Buffer is the Cortex-M0+'s own
+branch recorder: it writes every non-sequential change of the program
+counter into a buffer of ordinary SRAM. `Mtb` is the block, a
+monostate (a class whose state and functions are all static, with no
+instance to create: there is one MTB); `MtbPostMortem` in
+`samc21/postmortem.hpp` carries the tail of that trace across a reset,
+beside the panic breadcrumb - the code and context byte the kernel's
+`panic()` leaves in RAM the crt neither loads nor zeroes.
+
+The smallest use, the first block of "How to use it" below - a trace
+window over a known piece of code:
+
+```cpp
+alignas(1024) uint32_t trace[256];       // 1024 bytes = 128 packets
+
+Mtb::configure(trace, sizeof(trace));
+Mtb::enable(true);
+suspect();
+Mtb::enable(false);
+
+const uint32_t n = Mtb::packets_written(trace, sizeof(trace));
+for (uint32_t i = 0; i < n; ++i) {
+    const auto p = Mtb::packet(trace, i);
+    print(sink, hex(p.source()), " -> ", hex(p.destination()), crlf);
+}
+```
+
+Line by line: `trace` is the buffer, 1024 bytes aligned to its own
+size; `configure()` points the block at it, resets the write pointer
+and writes the mode registers without starting the trace;
+`enable(true)` and `enable(false)` bracket the code to be traced;
+`packets_written()` counts the packets the window produced (a packet is
+two 32-bit words, eight bytes); and the loop reads each one back,
+`source()` the address the flow left from and `destination()` the
+address it went to, bit 0 of each word masked off.
+
+What decides correctness even there. The buffer is a power of two of
+at least 16 bytes, aligned to its own size and above BASE (the start
+of the SRAM the block writes to): `configure()` answers false and
+writes nothing otherwise, because a misaligned buffer does not fail -
+the block traces somewhere else. The trace is stopped before it is
+read, since the block also records the reading code's own branches;
+`packets_written()` is exact only for a buffer that has not wrapped.
+There is no clock to enable and no wait anywhere: every verb is a few
+loads and stores. The two halt bits ask the core to halt and need a
+debugger to do anything. And for the post-mortem, the program binds
+the HardFault body: on a board whose DHCSR.C_DEBUGEN is clear, even an
+orderly `panic()` reaches the next boot through the fault path ("Bench
+findings - the post-mortem").
+
+The page, in order: the documents of record; what the silicon does
+(the buffer geometry, the packet, the wrap, the race against the
+reader, the halt bits, the event users); the types and verbs, the
+post-mortem store among them; how to use it (a window, a rolling
+buffer, a watermark, an event start, a post-mortem); the bench findings
+of the block and of the post-mortem; what is not covered.
+
+## Documents of record
+
+SAM C20/C21 data sheet DS60001479M **10.3** (a
 section, not a chapter - it names the four registers and then defers to
 the ARM CoreSight MTB-M0+ Technical Reference Manual, which is **not**
 among this project's documents of record) plus table 12-3 for the event
@@ -12,7 +74,10 @@ carried across a reset, beside the panic breadcrumb). Family fixtures
 `test/family_samc21/mtb.cpp` and `test/family_samc21/postmortem.cpp` plus six
 negatives under `brio check samc21`; the bench suites are
 `test_samc_debug` (the block) and `test_samc_postmortem` (the
-post-mortem).
+post-mortem). A suite's letter, cited below, is one command key of its
+console and the group of verdicts that key runs; `z` is the all-key that
+runs a suite's ordinary set, and the letters that halt or reboot the
+board sit outside it.
 
 The MTB records every non-sequential change of the program counter as a
 pair of 32-bit words in SRAM, with no CPU cycles spent and with write
@@ -43,7 +108,7 @@ bytes.
 each with bit 0 carrying a flag. Every instruction address on this core
 is halfword aligned, so bit 0 is free; the TRM names the flags and this
 project does not have it, so the driver exposes the addresses with bit 0
-masked off and the flags as unnamed bits. What they DO here is measured
+masked off and the flags as unnamed bits. What they do here is measured
 below.
 
 **POSITION.WRAP says the buffer has been round.** With no watermark the
@@ -54,10 +119,10 @@ trace at the watermark instead, clearing MASTER.EN itself.
 the processor that reads it, so every branch the reading code takes is
 another packet over the oldest thing still in the buffer - and a copy
 loop's backward branch is a branch. Stopping the trace is therefore the
-FIRST step of any post-mortem path and not a step in it; the driver
+first step of any post-mortem path and not a step in it; the driver
 spells that `freeze()` and the bench measures what skipping it costs.
 
-**MASTER.HALTREQ and FLOW.AUTOHALT ask the CORE to halt**, which on
+**MASTER.HALTREQ and FLOW.AUTOHALT ask the core to halt**, which on
 ARMv6-M needs DHCSR.C_DEBUGEN - a bit `bin/brio` deliberately
 clears at the end of every SAM flash so that no stray halt can stop an
 unattended board. The core cannot read DHCSR itself (it is
@@ -108,10 +173,10 @@ the buffer").
 - The post-mortem pair: `freeze()` - clear MASTER.EN and nothing else,
   one load and one store, legal with interrupts dead - and
   `snapshot(buffer, bytes, span)`, the bounded allocation-free copy of
-  the LAST packets the buffer holds, **oldest first**, walking back from
+  the last packets the buffer holds, **oldest first**, walking back from
   the write pointer and modulo the buffer when POSITION.WRAP says it has
   been round. A span with room for fewer packets than the buffer holds
-  drops the OLDEST, which is the right end to lose; an unwrapped buffer
+  drops the oldest, which is the right end to lose; an unwrapped buffer
   answers short; a geometry that is not a trace buffer's, or a POSITION
   that does not point inside the buffer given, answers zero.
 

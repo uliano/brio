@@ -2,7 +2,34 @@
  * dac.hpp
  *
  * The STM32F4's digital-to-analog converter (RM0090 ch. 14, RM0390
- * ch. 14): `Dac`, a MONOSTATE resource, because a part either has one DAC
+ * ch. 14): what a program uses to put a voltage on PA4 or PA5 - a DC
+ * level, a value held until a trigger, a triangle or noise wave, or a
+ * table a timer plays through the DMA. The smallest use, a DC level
+ * (docs/stm32f4/dac.md has it with every other use):
+ *
+ *     using Pa4 = brio::Pin<'A', 4>;
+ *     brio::Dac::init();                               // clock, block reset
+ *     brio::Dac::claim_pad<Pa4>();                     // analog mode, first
+ *     brio::Dac::configure(0, brio::DacChannelConfig{});   // left disabled
+ *     brio::Dac::enable(0, true);
+ *     brio::delay_us(clock, 20);                       // tWAKEUP
+ *     brio::Dac::write(0, brio::dac_code(1650, brio::Dac::steps, 3300));
+ *
+ * Who calls what, and from where. Every verb is a register verb with no
+ * guard of its own and nothing here masks interrupts or waits: init(),
+ * release(), configure(), enable() and wave() are read-modify-writes of
+ * DAC_CR (or a reset), setup calls or an active object's, never two
+ * contexts at once on the one CR both channels share; write() and its
+ * siblings are single stores into a holding register, which reaches
+ * DAC_DORx one APB1 cycle later with no trigger. The pad is the caller's
+ * to claim: nothing in init(), configure() or enable() puts it in analog
+ * mode. isr() is the body the program's TIM6_DAC handler calls - the
+ * vector is TIM6's too, so it answers 0 when the DAC did not speak. A
+ * DMA table is the caller's buffer, kept in scope while the stream
+ * plays it.
+ *
+ * `Dac` is a monostate resource (a class used through its type alone,
+ * every member static), because a part either has one DAC
  * block or none at all - and the F401, F411 and F412 have none, which
  * their device header says by declaring no DAC_BASE. On such a part the
  * register-facing half of this file is not compiled and a `Dac` spelled
@@ -10,69 +37,69 @@
  * the triggers, the waves, the channel config and its validity - is every
  * part's.
  *
- * WHAT THIS CONVERTER IS. Two 12-bit channels, DAC_OUT1 on PA4 and
+ * What this converter is. Two 12-bit channels, DAC_OUT1 on PA4 and
  * DAC_OUT2 on PA5 (14.3's table of DAC pins), each with its own trigger,
  * its own DMA request and its own output buffer.
  *
- * AND WHERE ITS OUTPUT CAN GO: TO A PAD, AND NOWHERE ELSE. This family's
+ * And where its output can go: to a pad, and nowhere else. This family's
  * DAC has no MCR and no internal route - 14.3's own note says the pin is
  * "automatically connected to the analog converter output" as soon as the
  * channel is enabled, and there is no code that keeps it off the pad. So
- * the only way from this converter to the ADC is the BOND PAD the two
+ * the only way from this converter to the ADC is the bond pad the two
  * share (PA4 is ADC12_IN4, PA5 is ADC12_IN5 on every datasheet of the
  * family), which is what makes a wireless DAC-into-ADC experiment
  * possible here at all - and what makes "configure the pad to analog
- * FIRST" a real obligation and not hygiene: a pad still in its reset
+ * first" a real obligation and not hygiene: a pad still in its reset
  * state (input floating, with its input buffer live) sits across a driven
  * analog node.
  *
- * FIVE FACTS THAT SHAPE THIS FILE.
+ * Six facts that shape this file.
  *
- * 1. CHANNELS ARE 0-BASED HERE AND 1-BASED IN THE MANUAL. `ch = 0` is
+ * 1. Channels are 0-based here and 1-based in the manual. `ch = 0` is
  *    DAC_CH1 / DAC_OUT1 / PA4 and `ch = 1` is DAC_CH2 / DAC_OUT2 / PA5.
  *    Every channel verb of this stratum counts from zero, and one file
  *    counting differently would be worse than one offset stated loudly.
  *    The two channels' fields are the same bits sixteen apart in CR, and
  *    that is what makes every verb below one body.
  *
- * 2. THE DATA REGISTER IS NOT THE OUTPUT REGISTER. A write lands in a
+ * 2. The data register is not the output register. A write lands in a
  *    holding register and reaches DAC_DORx one APB1 cycle later with no
  *    trigger, three cycles after the trigger with one, and one with the
- *    SOFTWARE trigger (14.3.4 and 14.3.6's note). So `output(ch)` reads
+ *    software trigger (14.3.4 and 14.3.6's note). So `output(ch)` reads
  *    DOR and `code(ch)` reads back what was asked for: a caller that
- *    confuses them measures its own write. And DOR is READ-ONLY - 14.3.4's
+ *    confuses them measures its own write. And DOR is read-only - 14.3.4's
  *    first sentence - so there is no verb here that writes it.
  *
- * 3. THE BUFFER IS DISABLED BY A ONE. BOFFx is an output buffer DISABLE
+ * 3. The buffer is disabled by a one. BOFFx is an output buffer disable
  *    (14.5.1), the opposite polarity of everything around it, so the
  *    config field is `buffered` and the inversion happens once, here. A
  *    buffered output drives a load and cannot reach either rail; an
  *    unbuffered one reaches them and cannot drive anything - including,
  *    measurably, the ADC's own sampling capacitor.
  *
- * 4. A TRIGGER IS AN EDGE AND THE WAVE GENERATORS NEED ONE. 14.5.1:
+ * 4. A trigger is an edge and the wave generators need one. 14.5.1:
  *    WAVEx is "only used if TENx = 1", so noise and triangle are refused
  *    without a trigger rather than quietly doing nothing; and TSELx
  *    cannot be written with ENx set, nor MAMPx after the channel is
  *    enabled - which is why `configure()` drops the enable first and puts
  *    nothing back.
  *
- * 5. THE DMA REQUEST COMES FROM A HARDWARE TRIGGER AND FROM NOTHING
- *    ELSE - 14.3.7's own parenthesis, "an external trigger (but not a
+ * 5. The DMA request comes from a hardware trigger and from nothing
+ *    else - 14.3.7's own parenthesis, "an external trigger (but not a
  *    software trigger)" - which is why a DMA-fed channel with the
  *    software trigger selected is refused here rather than left silent.
  *    Its cell is DAC1 on DMA1's stream 5, DAC2 on stream 6, channel 7
  *    both, and `engine_placed()` is what an application asserts against
  *    the reserve's copy of that table.
  *
- * 6. THE DMA REQUEST IS NOT QUEUED. 14.3.7: a second trigger arriving
+ * 6. The DMA request is not queued. 14.3.7: a second trigger arriving
  *    before the first request was acknowledged raises DMAUDRx and the
- *    channel keeps converting the OLD datum - so the flag is the count of
+ *    channel keeps converting the old datum - so the flag is the count of
  *    samples a stream did not deliver, and the chapter's own recovery is
  *    to clear it, stop the stream and re-initialize both. This driver
  *    reports; the owner decides.
  *
- * WHAT THIS FAMILY'S DAC HAS NOT, and the STM32G0's has: an offset
+ * What this family's DAC has not, and the STM32G0's has: an offset
  * calibration (no DAC_CCR, no CEN, no trim), sample-and-hold (no SHSR /
  * SHHR / SHRR), and any mode bits at all (no DAC_MCR). Three registers
  * fewer and one decision fewer.
@@ -80,11 +107,11 @@
  * The reference is the ADC's: 14.3.5's transfer function is
  * VREF+ x DOR / 4096, the same pad `stm32f4/adc.hpp`'s `Ref` names.
  *
- * ERRATA (ES0206 Rev 24 2.6, ES0298 Rev 8 2.7 - the F411's ES0287 files
+ * Errata (ES0206 Rev 24 2.6, ES0298 Rev 8 2.7 - the F411's ES0287 files
  * the same two items though that part has no DAC):
  *  - "DMA request not automatically cleared by clearing DMAEN": stopping
  *    a DMA-to-DAC stream leaves a pending request behind, to be served
- *    the moment the DAC is enabled again. The workaround is a SEQUENCE
+ *    the moment the DAC is enabled again. The workaround is a sequence
  *    over two peripherals (check DMAUDR, clear DMAEN, close the DAC's bus
  *    clock, reconfigure both) and its middle step is this driver's:
  *    `stop_dma()` does the DAC's half and says what the DMA's half is.
@@ -263,8 +290,8 @@ public:
     static bool bus_clock() { return Rcc::apb1_clock(dac_clock_mask()); }
     static void reset() { Rcc::apb1_reset(dac_reset_mask()); }
 
-    /// Bus clock on, block reset, both channels off. The PADS are not
-    /// touched: which of them this program wants in analog mode is the
+    /// Bus clock on, block reset, both channels off - a setup verb, no
+    /// wait. The pads are not touched: which of them this program wants in analog mode is the
     /// caller's, through `claim_pad()`.
     static void init() {
         bus_clock(true);
@@ -375,7 +402,10 @@ public:
 
     // ---- data ------------------------------------------------------------------------
 
-    /// 12-bit right-aligned (DAC_DHR12Rx), the natural format.
+    /// 12-bit right-aligned (DAC_DHR12Rx), the natural format: one store,
+    /// any context, the code masked to twelve bits; false only for a
+    /// channel this part has not got. With no trigger DAC_DORx follows
+    /// one APB1 cycle later; with one, after the trigger (fact 2).
     static bool write(uint8_t ch, uint16_t code) {
         if (!channel_valid(ch)) {
             return false;

@@ -1,6 +1,88 @@
 # FMC, the external memory controller (STM32F4)
 
-Documents of record: RM0090 Rev 22 ch. 37 and RM0390 Rev 6 ch. 11 - the
+This document is for a programmer whose board carries memory outside
+the chip - an SDRAM for a frame buffer, an asynchronous SRAM, a NOR
+flash - and who wants it reached by a plain load or store. The FMC adds
+address space rather than driving a wire: once a bank is brought up, a
+window of the Cortex's own map at a fixed address is that memory.
+`FmcSdram<1|2>` is one SDRAM bank and `initialize()` is its whole
+power-up sequence as one function; `FmcSram<n>` and `FmcNor<n>` are the
+static memories; `Fmc` is the block they share. The parts of the family
+that carry this block are the F42x/F43x, the F446 and the F469/F479
+("What the silicon does" below).
+
+The smallest use, the first block of "How to use it" below: the
+STM32F429I-DISC1's SDRAM on bank 2, brought up before anything else
+runs:
+
+```cpp
+using Sdram = brio::FmcSdram<2>;                      // SDNE1, 0xD0000000
+
+constexpr brio::SdramConfig geometry{
+    .columns = brio::SdramColumns::eight, .rows = brio::SdramRows::twelve,
+    .width = brio::SdramWidth::bits16,
+    .internal_banks = brio::SdramInternalBanks::four,
+    .cas = brio::SdramCas::three, .clock = brio::SdramClock::hclk_div2,
+    .read_burst = true};
+constexpr brio::SdramTiming timing{.load_mode_to_active = 2, .exit_self_refresh = 7,
+                                   .self_refresh = 4, .row_cycle = 6,
+                                   .write_recovery = 2, .row_precharge = 2,
+                                   .row_to_column = 2};
+
+constexpr uint32_t sdclk = brio::sdram_clock_hz(SysClock::hz, geometry.clock);
+constexpr uint32_t count = brio::sdram_refresh_count(sdclk, 64'000, 4096);
+
+board_claim_sdram_pads();                             // AF12, very high speed
+const bool up = Sdram::initialize(clock, geometry, timing,
+    {.power_up_us = 100, .refresh_cycles = 8,
+     .mode_register = brio::sdram_mode_register(brio::SdramCas::three),
+     .refresh_count = static_cast<uint16_t>(count)});
+```
+
+Line by line: `Sdram` names bank 2, the device on the SDNE1 chip select
+whose window starts at 0xD000 0000; `geometry` is the device's data
+sheet in the controller's words (8 column bits, 12 row bits, 16 bits
+wide, four internal banks, CAS latency 3) plus how the controller runs
+it (the memory clock at HCLK/2, the read FIFO on); `timing` is the
+device's seven delays in memory clock cycles; `sdclk` and `count` are
+compile-time arithmetic, the memory clock from the clock task's rate
+and the refresh counter for 4096 rows every 64 ms (`SysClock` is the
+clock task, [clock.md](clock.md)); `board_claim_sdram_pads()` stands
+for the program's own function that hands every FMC pad to the block
+on AF12 with [port.md](port.md)'s `function()`, since which pads a
+board wires is its schematic and not a register fact; `initialize()`
+runs the power-up sequence (the clock tag is the core clock, read for
+the power-up delay alone) and answers whether every step was taken.
+
+What decides correctness even there. Nothing may touch the window
+until `up` is true: a read of an SDRAM bank whose sequence has not run
+hangs the core with no fault (ES0206 2.3.3), and `at<T>()` hands out the
+pointer without checking, so the check is the caller's. The pads go
+first, because a command issued into pads that are still GPIO inputs
+reaches nothing. The rates are the clock task's: `count` is computed
+from `SysClock::hz` and not read from the hardware, so a bring-up run
+while the core still runs at its 16 MHz reset rate clocks the memory at
+8 MHz and refreshes the 4096 rows about every 0.7 s instead of every
+64 ms, and nothing refuses it (derived from 37.7.5's formula; the
+suites bring the clock up first). The memory is reached through
+`volatile` pointers, and a CPU read of FMC-held data with interrupts
+live is what ES0206 2.3.5 warns about ("What the silicon does" below).
+`initialize()` itself spins: the power-up delay on a cycle count, and
+each command's wait for the controller's BUSY bit, bounded at 100 000
+polls, so a stopped controller is a false answer and not a hang; it
+masks no interrupt.
+
+The rest of this page, in order: the documents of record; what the
+silicon does (the two blocks of the family, the live decoder, the
+errata around the read FIFO, the memory clock, the refresh counter and
+two measured departures from the manual, the low-power modes, the
+manuals' two differing fields, the NAND half); the types and verbs; how
+to use it, from the two-device bring-up to an asynchronous SRAM; the
+bench findings, measured on two boards; and what is not covered.
+
+## Documents of record
+
+RM0090 Rev 22 ch. 37 and RM0390 Rev 6 ch. 11 - the
 same block described twice, with two fields' difference in opposite
 directions (below). RM0383 Rev 4 has no such chapter: the F411 has no
 external memory controller. Errata: ES0206 Rev 24 section 2.3 has
@@ -9,7 +91,8 @@ code or as a default, and the ones it can only state, are named where
 they bite. Datasheet DocID024030 Rev 10 table 12 is where AF12 - the
 alternate function every FMC signal takes - is stated, and which pad
 carries which signal. Driver: `stm32f4/fmc.hpp`; the presence facts are
-in `stm32f4/device_tables.hpp`. Bench suite: `test_stm32f4_fmc`, against
+in `stm32f4/device_tables.hpp` (the reserve: the table of what each part
+has, read off the device header). Bench suite: `test_stm32f4_fmc`, against
 the 64-Mbit SDRAM the STM32F429I-DISC1 carries. Family fixture
 `test/family_stm32f4/fmc.cpp` plus four negatives under `brio check
 stm32f4`.
@@ -17,7 +100,7 @@ stm32f4`.
 ## What the silicon does
 
 **Two different peripherals answer to this chapter, and the family is
-split three ways.** The FSMC is a STATIC controller - NOR, PSRAM, SRAM,
+split three ways.** The FSMC is a static controller - NOR, PSRAM, SRAM,
 NAND, PC Card - and the FMC is that controller plus an SDRAM half in
 banks 5 and 6, plus three fields the FSMC has not (CCLKEN, CPSIZE,
 CBURSTRW). They are not the same block and the device headers give them
@@ -37,12 +120,12 @@ from 0x6000 0000 with a chip select each, NAND at 0x7000 0000 and
 nothing there": an access to a bank that is enabled but has no working
 memory behind it completes with whatever the data pads read. Worse,
 **a read of an SDRAM bank whose controller has not run its
-initialization sequence HANGS THE MACHINE with no fault** (ES0206
+initialization sequence hangs the machine with no fault** (ES0206
 2.3.3) - not a bus error, not a hard fault, a stopped core. That single
 fact shapes the driver: `initialize()` is one verb that runs the whole
 of 37.7.3 or answers false, and nothing hands out a pointer before it.
 
-**What the controller DOES raise an AHB error for** (37.3): a read or
+**What the controller does raise an AHB error for** (37.3): a read or
 write of a bank that is not enabled, of a NOR bank with FACCEN clear, of
 a PC Card with the presence pin low, a write to a write-protected SDRAM
 bank, and an access past the SDRAM device into the reserved part of its
@@ -55,7 +138,7 @@ Normal command on the way back. There is no code answer to this - it is
 a program-wide ordering - and it is why the bench suite's static letter
 touches registers only.
 
-**Three errata bracket the SDRAM read FIFO.** 2.3.4 says ENABLE it
+**Three errata bracket the SDRAM read FIFO.** 2.3.4 says enable it
 (`SDCR1.RBURST`): with the FIFO off, a 16- or 8-bit CPU burst read that
 crosses a row boundary and is interrupted reads the next row wrong.
 2.3.15 says the FIFO ON can serve a stale line when an interrupted
@@ -63,7 +146,7 @@ burst read of one internal bank is followed by a read of another, and
 offers three workarounds (turn the FIFO off, precharge all before the
 second read, or do a dummy write). 2.3.5 is the broadest: with the FMC
 holding stack, heap or variable data, an interrupt taken during a CPU
-read may corrupt the read or fault, and reads by any master OTHER than
+read may corrupt the read or fault, and reads by any master other than
 the CPU are not affected - so "read the FMC with DMA" is one of its two
 workarounds and "mask interrupts around the read" the other. The
 driver's default is the FIFO ON, because 2.3.4 has no other workaround
@@ -77,7 +160,7 @@ means re-running the initialization sequence, which is a program-wide
 decision and not a fan-out.
 
 **Fields that are not per bank, though the register pair suggests they
-are.** SDCLK, RBURST and RPIPE live in SDCR1 for BOTH banks (SDCR2's
+are.** SDCLK, RBURST and RPIPE live in SDCR1 for both banks (SDCR2's
 copies are read-only or don't-care); TRP and TRC live in SDTR1 for both.
 The driver writes them into bank 1's register whichever bank was asked,
 so a two-device board states the slowest device's value and gets it.
@@ -99,7 +182,7 @@ sentence.
 **Nor does `SDCR1.SDCLK = 00` stop the memory clock** (measured, below).
 37.7.5 calls the code "SDCLK clock disabled", the field reads back
 cleared, and FMC_SDCLK's own pad goes on toggling - so the refresh
-timer, which is decremented BY that clock, goes on counting too. The
+timer, which is decremented by that clock, goes on counting too. The
 field's real purpose is the one the same paragraph gives it: park the
 clock while the divider or HCLK changes, which is what `memory_clock()`
 is for (with the PALL 37.7.5 asks for in front of it, and the whole
@@ -115,9 +198,9 @@ clear `SDSR.RE` is to store SDRTR back - and "as soon as the FMC_SDRTR
 register is programmed, the timer starts counting" (37.7.5). A program
 that clears the flag often postpones a refresh each time.
 
-**The low-power modes are left by an ACCESS, not only by a command.**
+**The low-power modes are left by an access, not only by a command.**
 37.7.4: in self-refresh the device keeps itself alive with no clock; in
-power-down the CONTROLLER keeps refreshing it, leaving and re-entering
+power-down the controller keeps refreshing it, leaving and re-entering
 the mode for each refresh. In both, the first access to the bank makes
 the controller issue the exit sequence, and the device stays in normal
 mode afterwards.
@@ -127,7 +210,7 @@ RM0090's (37.5.6), and RM0090 states it does nothing anyway - no master
 of this family emits a wrapping burst; RM0390 11.6.6 leaves bit 10
 reserved, the F446/F469/F479 headers declare no mask for it, and the
 driver refuses a config that asks for it there. `BCR1.WFDIS` is
-RM0390's (11.6.6, bit 21): it DISABLES the write FIFO the whole
+RM0390's (11.6.6, bit 21): it disables the write FIFO the whole
 controller shares, it governs all four static banks from bank 1's
 register, and ES0298 2.3.4 says a read taken in a one-cycle window
 after a write returns corrupt data when it is set. Its reset value is
@@ -543,5 +626,8 @@ Implemented but not bench-verified:
   measurements.
 - **A framebuffer's worth of traffic from a second master while the CPU
   works** - the LTDC reading the same device the program writes is what
-  will decide whether the numbers above hold under contention, and the
-  LTDC has no driver yet. The DMA letter is one master at a time.
+  will decide whether the numbers above hold under contention. The
+  display controller's fetch beside the accelerator's fill on this same
+  device is measured ([ltdc.md](ltdc.md): some 160 MB/s between them,
+  the display never starved); the CPU's rates above under that
+  contention are not, and the DMA letter is one master at a time.

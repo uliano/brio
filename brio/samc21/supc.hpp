@@ -3,43 +3,64 @@
  *
  * The SAM C21 Supply Controller (DS60001479M ch. 22): the two brown-out
  * detectors, the core voltage regulator, and the bandgap reference every
- * analog block on this die eventually asks for.
+ * analog block on this die eventually asks for. What a program gets
+ * from it: whether VDD is below a threshold and what a crossing does,
+ * which regulator feeds the core in standby, and the bandgap's level.
+ * The smallest use (docs/samc21/supc.md, "How to use it"):
  *
- *   Supc        the BLOCK - the status register, the interrupt surface
+ *     brio::BodVdd::configure({.level = 40, .action = brio::BodAction::none});
+ *     const bool below = brio::BodVdd::detected();
+ *
+ * `action` defaults to `reset`, so a configuration that leaves it out
+ * resets the device whenever the supply is below the level.
+ *
+ * Who calls what. BodVdd::configure() and enable() are setup verbs, for
+ * main() or an active object's handler (an active object is a brio
+ * component with its own event queue, served one event at a time by the
+ * kernel): they wait on BVDDSRDY before every store, each wait bounded
+ * (0xFFFF polls), and answer false when one runs out. Vref::configure()
+ * and the regulator's run_standby() are single stores or
+ * read-modify-writes with no guard of their own, setup verbs too. The
+ * status reads are single loads, legal from any context. Supc::isr() is
+ * an interrupt body for IRQ 0, which five blocks share: the program's
+ * SYSTEM_Handler calls it beside the others' bodies. Nothing here masks
+ * interrupts.
+ *
+ *   Supc        the block - the status register, the interrupt surface
  *               behind the shared IRQ 0, and the ISR body.
  *   BodVdd      the VDD brown-out detector: level, action, hysteresis,
  *               continuous or sampled, and the synchronization its
- *               ENABLE bit needs. ITS RESET VALUE IS A FUSE.
- *   BodCore     the VDDCORE detector, READ-ONLY here on purpose.
+ *               ENABLE bit needs. Its reset value is a fuse.
+ *   BodCore     the VDDCORE detector, read-only here on purpose.
  *   Vreg        the core regulator, which cannot be turned off.
  *   Vref        INTREF, the bandgap: three levels, the output enable
- *               that lets the ADC and the AC see it, and its sleep
+ *               that routes it to an ADC input channel, and its sleep
  *               behaviour.
  *
- * WHAT MAKES THIS CHAPTER DIFFERENT FROM ITS NEIGHBOURS: three of these
- * registers come up with values NOBODY IN THE PROGRAM WROTE. The BODVDD
+ * What makes this chapter different from its neighbours: three of these
+ * registers come up with values nobody in the program wrote. The BODVDD
  * level, its enable and its action are loaded from the NVM user row at
  * every power-on or user reset (22.6.3.2), exactly as the watchdog's are
  * - so `samc21/nvm.hpp`'s `NvmUserRow` and this header describe the same
  * four fields from opposite ends, and `BodVdd::matches_fuses()` exists
  * to say so out loud.
  *
- * FOUR RULES, each with code behind it.
+ * Four rules, each with code behind it.
  *
- * 1. BODVDD IS ENABLE-PROTECTED AND WRITE-SYNCHRONIZED AT ONCE, which
+ * 1. BODVDD is enable-protected and write-synchronized at once, which
  *    is a combination no other register in this stratum has. Writes to
- *    the protected fields are DISCARDED while ENABLE is 1 and raise an
+ *    the protected fields are discarded while ENABLE is 1 and raise an
  *    APB error (22.6.3.1); and a write of any kind while
  *    STATUS.BVDDSRDY is 0 raises a PAC error (22.6.5). So every path
  *    here is: wait for BVDDSRDY, clear ENABLE, wait again, write the
- *    configuration, wait, set ENABLE ON ITS OWN, wait. `configure()`
- *    is that sequence and nothing else. THE LAST STEP IS NOT
- *    COSMETIC: a store carrying the configuration AND ENABLE = 1
+ *    configuration, wait, set ENABLE on its own, wait. `configure()`
+ *    is that sequence and nothing else. The last step is not
+ *    cosmetic: a store carrying the configuration and ENABLE = 1
  *    together sets the bit and leaves the protected fields where they
- *    were - the protection is judged on the value being WRITTEN, not
+ *    were - the protection is judged on the value being written, not
  *    on the one already in the register. Measured.
  *
- * 2. THE LEVEL IS A FIELD AND NOT A VOLTAGE. Table 45-18 gives three
+ * 2. The level is a field and not a voltage. Table 45-18 gives three
  *    points - level 8 is 2.8 V, level 9 is 2.85 V, level 44 is 4.51 V -
  *    and a "step size" of 60 mV that those points do not support (they
  *    imply about 47.5 mV a step). Rather than invent a conversion this
@@ -47,11 +68,11 @@
  *    the three anchors are stated here. The bench suite measures the
  *    step instead of trusting either number.
  *
- * 3. BODCORE IS NOT YOURS. 22.6.3.4: it is calibrated in production,
+ * 3. BODCORE is not yours. 22.6.3.4: it is calibrated in production,
  *    its calibration lives in the user row, and "this configuration
  *    must not be changed to assure the correct behavior". The register
- *    is exposed READ-ONLY, and the header offers no verb that writes
- *    it. NOTE that the register EXISTS at all only according to the
+ *    is exposed read-only, and the header offers no verb that writes
+ *    it. Note that the register exists at all only according to the
  *    device header: chapter 22's register summary marks offset 0x14
  *    Reserved, and the same disagreement runs through STATUS and
  *    INTFLAG, where the header declares BODCORERDY / BODCOREDET /
@@ -59,13 +80,13 @@
  *    wins in code, as always here, and the bench suite reads those bits
  *    to see whether anything is behind them.
  *
- * 4. THE MAIN REGULATOR CANNOT BE DISABLED. 22.8.6 says VREG.ENABLE
+ * 4. The main regulator cannot be disabled. 22.8.6 says VREG.ENABLE
  *    "must never be changed from its reset value of one", so there is
  *    no enable verb - only RUNSTDBY, which is the one bit an
  *    application has business writing (and which erratum 1.8.14 makes
  *    the workaround for a standby bug in PM).
  *
- * ERRATA. 1.8.14 is LIVE on this silicon and belongs to PM
+ * Errata. 1.8.14 is live on this silicon and belongs to PM
  * (samc21/sleep.hpp), not here: entering standby with
  * PM.STDBYCFG.VREGSMOD in performance mode wrongly switches to the
  * low-power regulator and keeps requesting GCLK0, and the workaround is
@@ -73,11 +94,11 @@
  * pointing at it. 1.8.11 (VREGSMOD having no effect at all) is revision B
  * only. Nothing else in the errata document touches this chapter.
  *
- * NOT BUILT (docs/samc21/supc.md carries the list): nothing here forces a
+ * Not built (docs/samc21/supc.md carries the list): nothing here forces a
  * brown-out - the supply is not this program's to dip - so RESET and INT
  * actions are configured and read back but never fired; and the standby
  * behaviour of all three blocks is written and read back but never
- * observed across a sleep, because a detection is a SUPPLY CROSSING
+ * observed across a sleep, because a detection is a supply crossing
  * nothing on this board can make while the CPU is stopped.
  */
 
@@ -220,7 +241,7 @@ struct BodVddConfig {
 /**
  * The VDD brown-out detector.
  *
- * TWO THINGS TO KNOW BEFORE USING IT. Its reset value comes from the
+ * Two things to know before using it. Its reset value comes from the
  * NVM user row, so a program that never touches it is still running
  * under whatever the fuses say - `matches_fuses()` is how to check that
  * the two agree. And every write is fenced by BVDDSRDY: `configure()`
@@ -259,7 +280,8 @@ struct BodVdd {
     /// on it is only meaningful for a continuous detector.
     static bool ready() { return (Supc::status() & SupcFlag::bodvdd_ready) != 0u; }
 
-    /// STATUS.BODVDDDET: the supply is BELOW the threshold right now.
+    /// STATUS.BODVDDDET: the supply is below the threshold right now.
+    /// A single load, legal from any context.
     /// Set whatever ACTION says, which is what makes a threshold sweep
     /// with ACTION = none both safe and informative.
     static bool detected() {
@@ -466,10 +488,11 @@ struct VrefConfig {
     VrefLevel level = VrefLevel::v1_024;
 
     /// VREFOE. 22.8.7 words it as routing the reference "to an ADC
-    /// input channel", which undersells it: the ANALOG COMPARATOR's
-    /// MUXNEG bandgap selection needs it too, and without this bit that
-    /// input is a floating promise. Its absence is what
-    /// docs/samc21/ac.md's gap list has been waiting for.
+    /// input channel", and that is what the bench finds it does: the
+    /// ADC's bandgap channel is dead without it, while the analog
+    /// comparator's MUXNEG bandgap selection and the DAC's reference reach
+    /// the bandgap internally and behave the same with it clear or set
+    /// (measured, docs/samc21/supc.md).
     bool output_enable = false;
 
     /// ONDEMAND: the reference runs only while a peripheral asks

@@ -2,11 +2,26 @@
  * crc.hpp
  *
  * The STM32F4's CRC calculation unit (RM0090 ch. 4, RM0390 ch. 4, RM0383
- * ch. 3): `Crc`, a MONOSTATE resource over the whole chapter - which is
- * three registers and no options at all.
+ * ch. 3) for a program that wants a 32-bit checksum over a block of
+ * memory computed by the hardware: `Crc`, a monostate resource (a class
+ * of static members standing for the one unit the chip has) over the
+ * whole chapter - which is three registers and no options at all. The
+ * smallest use:
  *
- * WHAT THIS BLOCK IS. A hardware CRC-32 with the Ethernet polynomial
- * 0x04C11DB7 WIRED IN: no polynomial register, no initial-value register,
+ *     brio::Crc::init();                       // the gate, then a reset
+ *     const uint32_t sum = brio::Crc::compute(words, count);
+ *
+ * Who calls what. Every verb is a few register accesses, callable from
+ * main, an active object's handler or an interrupt handler; none masks
+ * interrupts, and the one that waits is reset() (with init() and
+ * compute(), which call it), for at most `reset_spins` extra reads of
+ * CRC_DR. A word array handed to feed() or compute() is read during the
+ * call and free when it returns. The running result lives in the unit
+ * and nothing guards it: two contexts checksumming at once corrupt each
+ * other's answer, and the arrangement is the program's (see Crc below).
+ *
+ * What this block is. A hardware CRC-32 with the Ethernet polynomial
+ * 0x04C11DB7 wired in: no polynomial register, no initial-value register,
  * no reversal and no final XOR - the four knobs the L4's and F7's later
  * version of this peripheral grew. What it computes is therefore exactly
  * one function, the one catalogued as CRC-32/MPEG-2: initial value
@@ -17,60 +32,62 @@
  * block with this one polynomial wired in. The two agreeing is what the
  * bench suite measures.
  *
- * FIVE FACTS THAT SHAPE THE FILE.
+ * Five facts that shape the file.
  *
- * 1. THE DATA REGISTER IS THE OPERATION. One register, CRC_DR: a WRITE
- *    feeds a 32-bit word into the calculator, a READ returns the running
+ * 1. The data register is the operation. One register, CRC_DR: a write
+ *    feeds a 32-bit word into the calculator, a read returns the running
  *    result. There is no start bit and no ready flag - "the write
  *    operation is stalled until the end of the CRC computation" (4.3), so
  *    back-to-back writes and a read right after a write are correct by
  *    construction, and the four AHB cycles the computation takes are paid
  *    by the bus and not by a poll.
  *
- * 2. A WORD IS THE GRAIN, AND THE PROGRAM DECIDES ITS BYTE ORDER. 4.3:
+ * 2. A word is the grain, and the program decides its byte order. 4.3:
  *    "CRC computation is done on the whole 32-bit data word, and not byte
  *    per byte", and 4.4 adds that the registers "have to be accessed by
  *    words (32 bits)" - this version of the block has no byte or half-word
- *    access, so a BYTE STREAM has no direct answer here. `word_be()` packs
+ *    access, so a byte stream has no direct answer here. `word_be()` packs
  *    four bytes most-significant-first, which is the packing that makes
  *    the unit's result equal CRC-32/MPEG-2 over those bytes in that order;
  *    a stream whose length is not a multiple of four is the caller's to
  *    pad, and the padding is part of the checksum's definition.
  *
- * 3. THE RESET BIT IS THE ONLY CONTROL - AND IT IS NOT INSTANT. CRC_CR has
+ * 3. The reset bit is the only control - and it is not instant. CRC_CR has
  *    one bit, RESET, which is write-only and self-clearing and puts CRC_DR
  *    back to 0xFFFFFFFF (4.4.3). There is nothing else to configure, so
  *    `reset()` is what starts every checksum and `init()` is the clock gate
  *    plus that. What the chapter does not say, and the bench measured, is
- *    that the reset takes effect a few cycles AFTER the store: a read of
+ *    that the reset takes effect a few cycles after the store: a read of
  *    CRC_DR in the next instruction returns the old running value, and a
- *    word written in the next instruction is SWALLOWED. `reset()` therefore
+ *    word written in the next instruction is swallowed. `reset()` therefore
  *    waits for the initial value to appear before it returns.
  *
- * 4. CRC_IDR IS NOT PART OF THE CHECKSUM. Eight bits of scratch that the
+ * 4. CRC_IDR is not part of the checksum. Eight bits of scratch that the
  *    RESET bit deliberately does not touch (4.3, 4.4.2) - the block's one
  *    piece of state a program can use to remember something across a
  *    checksum. It is cleared by the peripheral's RCC reset line and by
  *    nothing else, which is the difference between `reset()` and
  *    `reset_block()`.
  *
- * 5. NO INTERRUPT, NO DMA REQUEST, NO EVENT. The chapter has no IER, the
+ * 5. No interrupt, no DMA request, no event. The chapter has no IER, the
  *    part has no CRC vector and no DMA request line is mapped to this
  *    block on any part of the family - a bulk checksum is a loop of stores
- *    and nothing else. What a DMA stream CAN do is memory-to-memory into
+ *    and nothing else. What a DMA stream can do is memory-to-memory into
  *    CRC_DR with the destination not incremented; that is the DMA
  *    chapter's arrangement and stm32f4/dma.hpp already has every verb it
  *    needs, so nothing is added here for it.
  *
- * ERRATA. No item of ES0206 Rev 24, ES0298 Rev 8 or ES0287 Rev 6 is filed
+ * Errata. No item of ES0206 Rev 24, ES0298 Rev 8 or ES0287 Rev 6 is filed
  * against the CRC calculation unit. (The three sheets' "wrong CRC
  * calculation when the polynomial is even" is the SPI's own CRC unit,
  * stm32f4/spi.hpp's, which is a different block with a programmable
  * polynomial.)
  *
- * PRESENT ON EVERY PART. All twenty-three device headers of the pack
+ * Present on every part. All twenty-three device headers of the pack
  * declare CRC_BASE and RCC_AHB1ENR_CRCEN, so unlike the RNG next door
- * this file has no absence to handle and nothing in the reserve.
+ * this file has no absence to handle and nothing in the reserve (the
+ * reserve: stm32f4/device_tables.hpp, the table of what each part has,
+ * read off the device header).
  */
 
 #pragma once
@@ -90,7 +107,7 @@ namespace brio {
 // The polynomial, in software
 // =============================================================================
 
-// THE FUNCTION IS NOT THIS FAMILY'S, so it does not live here.
+// The function is not this family's, so it does not live here.
 // `crc32_ethernet_poly`, `crc32_ethernet_init`, `crc32_ethernet_byte`,
 // `crc32_ethernet_word`, `crc32_ethernet` and `crc32_ethernet_bytes` are
 // util/crc.hpp's, beside the CRC-16 the stored records carry: more than
@@ -98,7 +115,7 @@ namespace brio {
 // to change it, so one function keeps one home and every such block is
 // judged against the same model.
 //
-// What stays here is the PACKING, which is the block's own: how a byte
+// What stays here is the packing, which is the block's own: how a byte
 // stream becomes the words this data register takes.
 
 /// Four bytes as the word that makes the unit's answer the byte stream's:
@@ -119,11 +136,11 @@ constexpr uint32_t word_be(uint8_t b0, uint8_t b1, uint8_t b2, uint8_t b3) {
  *   for (uint32_t w : words) brio::Crc::feed(w);
  *   const uint32_t sum = brio::Crc::value();
  *
- * NO OWNERSHIP AND NO GUARD. There is one unit and it holds the running
+ * No ownership and no guard. There is one unit and it holds the running
  * result in the same register a second user would write, so two pieces of
  * code that checksum from different contexts corrupt each other's answer
  * with no flag to show for it. This driver does not arbitrate that - there
- * is nothing in the silicon to arbitrate WITH - so a program that
+ * is nothing in the silicon to arbitrate with - so a program that
  * checksums from an interrupt as well as from the loop owns the
  * arrangement (a critical section around the run, or the unit reserved for
  * one context).
@@ -139,7 +156,8 @@ struct Crc {
     static bool clock() { return Rcc::ahb1_clock(RCC_AHB1ENR_CRCEN); }
 
     /// The gate open and the calculator at its initial value - what a
-    /// program calls once before its first checksum.
+    /// program calls once before its first checksum. Waits as reset()
+    /// does, and discards its count.
     static void init() {
         clock(true);
         (void)reset();
@@ -153,17 +171,20 @@ struct Crc {
     /**
      * CRC_CR.RESET (4.4.3): CRC_DR back to 0xFFFFFFFF. The bit is
      * write-only and clears itself, so the store is a plain one and never a
-     * read-modify-write, and CRC_IDR is deliberately NOT touched.
+     * read-modify-write, and CRC_IDR is deliberately not touched.
      *
-     * THE RESET IS NOT INSTANT, AND THE CHAPTER DOES NOT SAY SO. Measured:
+     * The reset is not instant, and the chapter does not say so. Measured:
      * a read of CRC_DR in the instruction after the store still returns the
-     * OLD running value, and a WORD FED in the instruction after the store
+     * old running value, and a word fed in the instruction after the store
      * is swallowed - the calculator is busy resetting and the write goes
      * nowhere, with no flag to say it did. (4.3's "the write operation is
      * stalled until the end of the CRC computation" covers a computation
      * and not this.) So the verb waits, by reading CRC_DR until it shows
-     * the initial value, and RETURNS the number of extra reads that took:
-     * a measurement the bench suite prints and a caller can ignore.
+     * the initial value, and returns the number of extra reads that took:
+     * a measurement the bench suite prints and a caller can ignore. The
+     * wait is bounded by `reset_spins`: a return equal to it means the
+     * initial value had not appeared when the bound ran out, and the verb
+     * returns regardless.
      */
     static uint8_t reset() {
         regs().CR = CRC_CR_RESET;
@@ -206,7 +227,8 @@ struct Crc {
     /// pieces.
     static uint32_t value() { return regs().DR; }
 
-    /// A whole checksum in one call: reset, feed, read.
+    /// A whole checksum in one call: reset, feed, read. `words` is read
+    /// during the call only; the wait is reset()'s.
     static uint32_t compute(const uint32_t* words, size_t count) {
         (void)reset();
         feed(words, count);
@@ -218,10 +240,10 @@ struct Crc {
     /// CRC_IDR, eight bits of general-purpose storage in the peripheral.
     /// It survives `reset()` by design and dies with `reset_block()`.
     ///
-    /// THE ACCESS WIDTH IS THE HEADER'S AND NOT THE MANUAL'S. 4.4 says the
+    /// The access width is the header's and not the manual's. 4.4 says the
     /// CRC registers "have to be accessed by words (32 bits)", but ST's own
     /// device header declares this one `__IO uint8_t` at offset 0x04 with
-    /// three reserved bytes after it - so the header asks for a BYTE store
+    /// three reserved bytes after it - so the header asks for a byte store
     /// where the manual asks for a word. The header wins in code (it is
     /// what every ST driver compiles to) and the bench suite is what
     /// settles it: `test_stm32f4_misc` writes a byte and reads it back.

@@ -2,14 +2,47 @@
  * adc.hpp
  *
  * The STM32F4's analog-to-digital converters (RM0090 ch. 13, RM0390
- * ch. 13, RM0383 ch. 11) in this stratum's faces:
+ * ch. 13, RM0383 ch. 11): what a program uses to measure a voltage on a
+ * pad, the supply rail through VREFINT, or the die's temperature, polled
+ * or under an interrupt, one channel or a sequence into memory through
+ * the DMA. The smallest use, one conversion of a pad (docs/stm32f4/adc.md
+ * has it with every other use):
  *
- *   AdcCommon        the BLOCK - one per device: the prescaler every
+ *     using Adc1 = brio::Adc<1>;
+ *     using In4 = brio::AnalogIn<brio::Pin<'A', 4>>;   // channel 4
+ *     In4::claim();                                    // analog mode
+ *     Adc1::init(clock, brio::AdcConfig{});            // after SysClock::init()
+ *     Adc1::sample_time(In4::channel, brio::AdcSampleTime::cycles480);
+ *     Adc1::select(In4{});
+ *     const uint16_t counts = Adc1::read();
+ *
+ * Who calls what, and from where. Every verb here is a register verb with
+ * no guard of its own: the configuring ones (init(), configure(),
+ * sample_time(), the sequence verbs, watchdog(), interrupts()) are setup
+ * calls or an active object's, never two contexts on one converter at
+ * once, since several are read-modify-writes of CR1, CR2 and the SMPRs;
+ * nothing here masks interrupts. What waits, and for how long: init() and
+ * power_on() spend the converter's stabilization time through delay_us
+ * (4 us); read() and read_settled() poll each conversion's end for at
+ * most `spins` turns (0x100000 by default) - read(uint16_t&) answers
+ * false when the bound runs out, the plain read() returns 0 then, a value
+ * a real input can also read. select() and start() are void because
+ * util/analog_sampler.hpp's AnalogConverter concept asks for them so, and
+ * select() refuses in silence while a conversion is in flight
+ * (select_sync() is the same with the answer). isr() is the body the
+ * program's ADC_IRQHandler calls, one vector for every converter; it
+ * clears the armed flags it finds and never reads the data. A DMA
+ * sequence writes into a buffer the caller owns, which stays the
+ * caller's to keep in scope while the stream runs.
+ *
+ * The faces:
+ *
+ *   AdcCommon        the block - one per device: the prescaler every
  *                    converter shares, the two internal-source switches,
  *                    the multi-ADC mode with its own DMA modes, the
- *                    common status and data registers, and the ONE reset
+ *                    common status and data registers, and the one reset
  *                    line all the converters hang from.
- *   Adc<n>           one converter, n in 1..3. `Adc<1>` is the MASTER -
+ *   Adc<n>           one converter, n in 1..3. `Adc<1>` is the master -
  *                    the internal channels and every multi-ADC trigger
  *                    are its alone.
  *   AnalogIn<Pin,ch> a pad handed to a channel. The channel defaults to
@@ -18,93 +51,95 @@
  *                    PC0..PC5 -> IN10..IN15) and is stated by the caller
  *                    for anything else - ADC3's own inputs on port F, or
  *                    a pad a package bonds differently.
- *   AdcInput         the three sources that are not pads, as TAGS: their
- *                    channel NUMBERS differ across the family and come
- *                    from the reserve.
+ *   AdcInput         the three sources that are not pads, as tags: their
+ *                    channel numbers differ across the family and come
+ *                    from the reserve (stm32f4/device_tables.hpp, the
+ *                    table of what each part has, read off the device
+ *                    header).
  *
- * SIX FACTS THAT SHAPE THIS FILE.
+ * Seven facts that shape this file.
  *
- * 1. THERE ARE UP TO THREE CONVERTERS AND ONE CLOCK. ADCCLK is PCLK2
+ * 1. There are up to three converters and one clock. ADCCLK is PCLK2
  *    divided by 2, 4, 6 or 8 - four codes, no bypass, and the divider is
- *    in the COMMON register, so it is the whole block's (13.3.3). fADC
+ *    in the common register, so it is the whole block's (13.3.3). fADC
  *    has a ceiling of 36 MHz at 2.4..3.6 V and 18 MHz below (the
  *    datasheets' table of ADC characteristics), which at this family's
  *    top rate makes PCLK2/2 illegal and PCLK2/4 the fastest legal
  *    division: 22.5 MHz from a 90 MHz APB2. `init()` is where that is
  *    judged, because only it knows the clock.
  *
- * 2. THERE IS NO CALIBRATION AND NO REGULATOR. Unlike the STM32G0's
+ * 2. There is no calibration and no regulator. Unlike the STM32G0's
  *    converter this one has no ADCAL and no ADVREGEN: ADON powers it up
  *    and tSTAB (2..3 us, the datasheets' power-up time) is the whole
  *    bring-up. What ST measured on the die is elsewhere - VREFINT_CAL and
  *    the two temperature points in the system memory - and is a
- *    MEASUREMENT, not a trim: nothing is written back (see `AdcFactory`).
+ *    measurement, not a trim: nothing is written back (see `AdcFactory`).
  *
- * 3. TWO GROUPS, AND THE INJECTED ONE PREEMPTS. A REGULAR sequence is up
- *    to sixteen conversions into ONE data register (so a sequence longer
- *    than one needs the DMA or a reader fast enough), and an INJECTED
+ * 3. Two groups, and the injected one preempts. A regular sequence is up
+ *    to sixteen conversions into one data register (so a sequence longer
+ *    than one needs the DMA or a reader fast enough), and an injected
  *    sequence is up to four into four registers of their own, each with a
- *    subtractable offset and a sign. An injected trigger INTERRUPTS a
+ *    subtractable offset and a sign. An injected trigger interrupts a
  *    regular conversion and the regular sequence resumes where it was
  *    (13.3.10) - which is the whole point of the second group and has no
  *    counterpart on the two earlier targets. JSQR's four slots are filled
- *    FROM THE TAIL (13.13.12's note: with JL = 0 the converter runs JSQ4
+ *    from the tail (13.13.12's note: with JL = 0 the converter runs JSQ4
  *    alone), a trap `injected_sequence()` hides by placing the list
  *    itself.
  *
- * 4. THE STATUS REGISTER IS rc_w0, AND THAT DECIDES HOW IT IS CLEARED.
- *    ADC_SR's six flags are "cleared by software" by writing ZERO
+ * 4. The status register is rc_w0, and that decides how it is cleared.
+ *    ADC_SR's six flags are "cleared by software" by writing zero
  *    (13.13.1), the opposite of every other flag register in this
  *    stratum. So `clear_flags(mask)` stores `~mask` - ones everywhere
- *    else, which KEEP - and never a read-modify-write, which would clear
+ *    else, which keep - and never a read-modify-write, which would clear
  *    a flag that rose between the read and the write.
  *
- * 5. EOC IS CLEARED BY READING THE DATA. 13.13.1: EOC goes down on a
+ * 5. EOC is cleared by reading the data. 13.13.1: EOC goes down on a
  *    read of ADC_DR as well as on a write of zero, which is what makes a
  *    polling loop one read - and what makes `result()` unusable from a
  *    place that wants the flag left standing. Overrun detection exists
  *    only with DMA = 1 or EOCS = 1 (13.13.3), so a program that converts
  *    without reading and without the DMA is not told it lost anything -
- *    and that is a CHOICE the chapter offers (13.8.3), not an oversight.
+ *    and that is a choice the chapter offers (13.8.3), not an oversight.
  *
- * 6. THE MULTI-ADC MODES ARE THE MASTER'S. Dual and triple modes are
+ * 6. The multi-ADC modes are the master's. Dual and triple modes are
  *    selected in the common register, the trigger comes from ADC1's own
- *    multiplexer and the slaves' triggers must be OFF (13.9), and the
+ *    multiplexer and the slaves' triggers must be off (13.9), and the
  *    results come back through the common data register. This file
  *    programs them; what a DMA stream does with ADC_CDR is the DMA
  *    chapter's.
  *
- * 7. A SEQUENCE LONGER THAN ONE NEEDS THE DMA, and the request is a CELL
+ * 7. A sequence longer than one needs the DMA, and the request is a cell
  *    of the fabric's mapping table rather than a number: ADC1 is DMA2's
  *    stream 0 or stream 4 on channel 0, ADC2 stream 2 or 3 on channel 1,
  *    ADC3 stream 0 or 1 on channel 2 - so ADC1 and ADC3 contend for one
  *    stream with two channels. The reserve carries the analog slice of
  *    that table and `engine_placed()` is what an application asserts
- *    against it; there is no engine SLOT here, because a converter has no
+ *    against it; there is no engine slot here, because a converter has no
  *    transport to hold one - its DMA is a caller-side composition, a scan
  *    into a buffer the caller owns.
  *
- * THE REFERENCE IS A PAD AND NOTHING ELSE. This family has no reference
+ * The reference is a pad and nothing else. This family has no reference
  * buffer and no reference selector: VREF+ is an input, tied to VDDA on
  * every board this stratum has met, and the only way to learn what it is
  * worth is VREFINT and the factory value. So `Ref` has one enumerator and
  * `ref_mv()` takes the board's millivolts, exactly as on the RP2040 - and
  * `Adc<1>::vdda_mv()` is what makes the guess unnecessary.
  *
- * ERRATA (ES0206 Rev 24 for the F42x/F43x, ES0298 Rev 8 for the F446,
+ * Errata (ES0206 Rev 24 for the F42x/F43x, ES0298 Rev 8 for the F446,
  * ES0287 Rev 6 for the F411 - the same two items under three numbers):
  *  - "ADC sequencer modification during conversion" (ES0206 2.5.1,
- *    ES0298 2.6.1, ES0287 2.4.1, every silicon revision): with a SOFTWARE
+ *    ES0298 2.6.1, ES0287 2.4.1, every silicon revision): with a software
  *    start, a write to ADC_SQRx or ADC_JSQR during a conversion resets
- *    that conversion and the converter does NOT restart by itself.
- *    ANSWERED STRUCTURALLY: every sequence verb here refuses while a
+ *    that conversion and the converter does not restart by itself.
+ *    Answered structurally: every sequence verb here refuses while a
  *    software-started conversion is in flight, and
  *    `regular_sequence_unchecked()` exists so a suite can stage the
  *    erratum deliberately.
  *  - "Internal noise impacting the ADC accuracy" (ES0206 2.2.8, ES0298
  *    2.2.8, ES0287 2.2.8): noise on VDD propagates inside and costs
- *    accuracy whatever the power mode. The workaround is a SYSTEM one -
- *    the flash accelerator's prefetch OFF with both caches on, plus
+ *    accuracy whatever the power mode. The workaround is a system one -
+ *    the flash accelerator's prefetch off with both caches on, plus
  *    averaging - so it is not this driver's to apply: stm32f4/flash.hpp
  *    owns those bits, the application decides, and the cost of each
  *    choice is measured in docs/stm32f4/adc.md.
@@ -1285,7 +1320,10 @@ public:
         return v;
     }
 
-    /// One conversion, polled: clear EOC, start, wait, read.
+    /// One conversion, polled: clear EOC, start, wait, read. Waits for at
+    /// most `spins` polls of EOC; false, `out` untouched, when the bound
+    /// runs out (a converter never powered is one way there). Main
+    /// context or an active object's.
     static bool read(uint16_t& out, uint32_t spins = 0x100000UL) {
         clear_flags(AdcFlag::converted);
         start();
@@ -1298,6 +1336,8 @@ public:
         return false;
     }
 
+    /// The same, the counts as the return: 0 when the bound ran out, which
+    /// a real input can also read - read(uint16_t&) tells the two apart.
     static uint16_t read(uint32_t spins = 0x100000UL) {
         uint16_t v = 0;
         (void)read(v, spins);

@@ -1,6 +1,103 @@
 # TWI - the two-wire interface (AVR DA, DB and EA)
 
-Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B (TWI
+This document is for a programmer who puts an I2C bus on an AVR DA, DB
+or EA: a host that talks to sensors, converters and memories, a client
+that answers a host on another chip, or both on one instance. `Twi<n>`
+is the resource, one instance of the peripheral as a monostate (a class
+whose state is static, with no instances): its whole configuration in
+one struct and one verb per register fact. Two tasks sit over it (a
+task, in brio, is a driver layer with state of its own over a resource,
+served from its peripheral's interrupt or called by an active object;
+an active object, AO for short, is a component of a brio program with
+its own event queue, served one event at a time by the kernel,
+[../learn/introduction.md](../learn/introduction.md)). `I2cHost<n,
+route>` is the transfer engine: it moves one bus tenure per request
+(the time the host holds the bus, from its START to its STOP), one
+interrupt per byte, and it is driven by the bus arbiter `I2cBus` of
+`util/i2c_bus.hpp`, an active object that queues the requests of every
+AO sharing the bus and answers each with an `I2cDone`.
+`I2cClient<n, route, on_dual_pins>` is the other end of the wire: the
+address-match space as options and the chapter's four client cases as
+verbs. [design/i2c-bus.md](../design/i2c-bus.md) is the contract above
+the engine.
+
+The smallest use, a host on TWI0's default route through the arbiter,
+from "How to use it" below:
+
+```cpp
+using I2cHw = brio::I2cHost<0>;                 // PA2 SDA / PA3 SCL
+using I2c = brio::I2cBus<I2cHw, P>;
+ISR(TWI0_TWIM_vect) { if (I2cHw::isr()) brio::post<I2c>(brio::TransferDone{I2cHw::status()}); }
+...
+I2cHw::init(clock, {.speed = brio::I2cSpeed::fast_400k});
+brio::post<I2c>(I2cHw::Request{addr, brio::lend<brio::Lease::reply>(tx), 3,
+                               brio::lend<brio::Lease::reply>(rx), 2,
+                               brio::reply_to<Me, brio::I2cDone>(), brio::I2cSpeed::fast_400k});
+```
+
+Line by line: `I2cHw` names the engine on TWI0 with its route at the
+default, `TwiRoute::def`, which puts SDA on PA2 and SCL on PA3; `I2c`
+names the arbiter over that engine, `P` being the platform
+(`brio::AvrPlatform`, [platform.md](platform.md)); the `ISR()` line
+binds the host vector to `isr()`, which returns true on the interrupt
+that ends the tenure, and the handler then posts the engine's
+`status()` to the arbiter as a `TransferDone`, which the arbiter
+forwards to the requester; `init()` takes the clock task's tag
+(`constexpr SysClock clock;`, [clkctrl.md](clkctrl.md)) and the
+options, routes the pins, programs MBAUD for the speed, enables the
+host with both its interrupts and declares the bus idle, and returns
+false when the speed cannot be reached at that clock; the `post` hands
+the arbiter one request: the 7-bit address, three bytes to write from
+`tx`, two bytes to read into `rx` after a repeated START, the reply
+channel to the active object `Me`, and the speed of this tenure. The
+reply is an `I2cDone` whose status is `i2c_ok` or the code of what went
+wrong (`util/i2c_bus.hpp`).
+
+What decides correctness even there:
+
+- **`init()` after the clock task's `SysClock::init()`.** MBAUD is
+  computed from the rate the clock type claims (`clock_hz(clock)`), not
+  read from the hardware, so a host initialized while the chip still
+  runs at its reset rate drives SCL off by the ratio of the two rates
+  until the clock task brings CLK_PER to the claimed rate, and nothing
+  refuses it. A `DynamicClock` must list the engine
+  among its users, or `init()` fails to compile.
+- **The host vector bound by the program.** `init()` enables RIEN and
+  WIEN, so the address packet's interrupt arrives at
+  `TWI0_TWIM_vect`; a vector left unbound enters avr-libc's
+  `__bad_interrupt`, a `jmp 0` (read in the release listing), and that
+  first interrupt restarts the program from its reset vector. An
+  interrupt-driven client binds `TWIn_TWIS_vect` the same way.
+- **The buffers are lent until the reply.** `tx` and `rx` are loans
+  (`Lease::reply`): the host interrupt reads `tx` and writes `rx` until
+  the `I2cDone` lands, and the requester leaves both alone until then;
+  nothing checks it at run time.
+- **The speed travels with each request.** A `Request` that names none
+  runs at `standard_100k`, whatever `init()` programmed: `start()`
+  reprograms MBAUD (an ENABLE cycle) whenever the request's speed is not
+  the one in force, which is why the example names it twice.
+- **The pull-ups are the board's.** The driver leaves the pins inputs
+  with OUT = 0 and the peripheral drives them open drain; it enables no
+  internal pull-up and checks none.
+- **The arbiter is an active object** and is listed with the others in
+  the kernel's list (`brio::Tenuto<P, Me, I2c>::run()`), interrupts
+  enabled (`sei()`) before `run()`. With its default `timeout_ticks` of
+  0 it never answers a tenure that never completes; a timed `I2cBus`
+  answers `i2c_timeout` and recovers the engine ("A wedged tenure" under
+  "Bench findings").
+
+The rest of this page, in order: the documents of record with the three
+errata items that shape the code; what the silicon does (the two
+halves, the bus state machine, the host and client cases, the
+address-match space, Smart mode, Quick Command, the two conditions on
+CLK_PER, the routes, the baud arithmetic, the AVR EA's SCL clock); the
+types and verbs; how to use it; what the silicon offers for the cost and
+the host's cost measured; the bench findings, most of the page, with a
+second chip on the wire and on the AVR64EA48; what is not covered.
+
+## Documents of record
+
+AVR128DB28/32/48/64 data sheet DS40002247B (TWI
 chapter 29, PORTMUX chapter 17, electricals 39.16), errata DS80000915F
 (2.15.1, 2.15.2) and, for the DA parts, DS80000882C (2.14.1, 2.14.2,
 2.14.3 and clarification 3.2); for the AVR64EA28/32/48 DS40002443A (TWI
@@ -10,7 +107,7 @@ itself, whose SCL clock is not the DA/DB's (below, "The AVR EA's SCL
 clock"):
 
 - **DB 2.15.1 / DA 2.14.1, the output pin override**: with the TWI
-  enabled the override covers the pin DRIVER but not the pin VALUE, so a
+  enabled the override covers the pin driver but not the pin value, so a
   `PORTx.OUT` bit left at '1' on SDA or SCL holds that line high and no
   transaction can start. Listed for DB rev. A4/A5 (fixed in B0) and for
   every DA revision. Both init paths of the driver clear the OUT bits of
@@ -24,7 +121,7 @@ clock"):
   (an ENABLE cycle leaves BUSSTATE Unknown).
 - **DA 2.14.2, the swapped SDA hold selections**: on every DA revision
   the 50 ns and 300 ns selections of CTRLA.SDAHOLD are swapped in the
-  silicon. `TwiSdaHold` names TRUE nanoseconds and the encoding is
+  silicon. `TwiSdaHold` names true nanoseconds and the encoding is
   swapped on the DA, so the same enumerator means the same hold time on
   both families. The swap is keyed on the die
   (`erratum_da_twi_sdahold_swap`, `avrxt/device_tables.hpp`), never on
@@ -32,7 +129,11 @@ clock"):
 
 Driver: `avrxt/twi.hpp`. The arbiter above it:
 [i2c-bus.md](../design/i2c-bus.md) (`util/bus_master.hpp`,
-`util/i2c_bus.hpp`). Reference test: `test_avr_twi`.
+`util/i2c_bus.hpp`). Reference test: `test_avr_twi` (a letter is one
+command key of the suite's console and the group of verdicts it runs;
+`z` runs the single-board set, letters a to j and, on the AVR EA, u and
+v, and `y` the set that needs a partner board, letters k to t, against
+a second board running `twi_peer`, on this page a SAM C21).
 
 ## What the silicon does
 
@@ -58,7 +159,7 @@ literally one register for both halves.
 enabled, in every sleep mode. It is Unknown after reset or after an
 ENABLE cycle, Idle when software forces it there or when a Stop or a
 time-out is seen, Busy after a START somebody else generated, and Owner
-after one of ours. A host told to start on a Busy bus WAITS: the START
+after one of ours. A host told to start on a Busy bus waits: the START
 is pending and goes out by itself as soon as the bus becomes Idle.
 Writing 0x1 to BUSSTATE is the only value software can impose.
 
@@ -71,17 +172,17 @@ collision - the client could not put a high bit or a NACK on SDA.
 
 **The address-match space** is richer than one address: SADDR[7:1] is
 the client's own address and SADDR[0] enables the General Call address
-0x00; SADDRMASK is either a MASK (ADDREN = 0: the set bits are the
-address bits the comparison ignores, so the client answers a RANGE) or a
-SECOND exact address (ADDREN = 1); and PMEN answers every address on the
+0x00; SADDRMASK is either a mask (ADDREN = 0: the set bits are the
+address bits the comparison ignores, so the client answers a range) or a
+second exact address (ADDREN = 1); and PMEN answers every address on the
 bus. The matched address is stored in SDATA, which is the only way to
 learn which one was called.
 
 **Smart mode** exists on both halves and means the same thing: the
-acknowledge action rides a DATA access instead of needing a command.
+acknowledge action rides a data access instead of needing a command.
 On the host, reading MDATA sends what ACKACT holds - so a multi-byte
 read costs one MCMD strobe (the closing STOP) instead of one per byte;
-the action is NOT performed on a DATA write, because the host is
+the action is not performed on a data write, because the host is
 sending. On the client, touching SDATA clears DIF and continues the
 operation.
 
@@ -95,7 +196,7 @@ the main clock to be at least four times f_SCL (`twi_clock_ok`). The
 resource's `speed_ok(speed)` asks a stronger question - can the
 divider make the speed at the clock and the bus timing in force, a
 BAUD the register holds with the period at or above the request - and
-that one IS enforced: `twi_baud_for` has no solution below BAUD 0 (the
+that one is enforced: `twi_baud_for` has no solution below BAUD 0 (the
 divider cannot go that fast: BAUD = 0 is CLK_PER/10, so any reachable
 speed also satisfies the four-times condition) or above 255, the
 resource refuses to program such a speed, and the host engine refuses
@@ -109,7 +210,7 @@ features.
 
 PORTMUX.TWIROUTEA, two bits per instance. Unlike SPI and USART there is
 **no pinless route**: every code names a real SDA/SCL pair, so an
-enabled instance always costs two pins. Each route also names a DUAL
+enabled instance always costs two pins. Each route also names a dual
 pair - where the client sits under DUALCTRL - and several routes bond
 the main pair without the dual one. TWI0 is on every package; TWI1
 arrives with the 32-pin step.
@@ -136,7 +237,7 @@ with a fourth route:
 `TwiRoute::alt3` exists only on that layout (a name the layout has not
 got is a compile error, never a code that writes another route).
 
-TWI0's DEFAULT and ALT1 carry the SAME main pair and differ only in
+TWI0's DEFAULT and ALT1 carry the same main pair and differ only in
 where the dual client lands. A route whose dual pair this package does
 not bond stays perfectly usable for the host and for a non-dual client;
 only the dual client is refused, at compile time in the task and at run
@@ -153,17 +254,17 @@ three steps, and the driver performs all three:
 3. if that tLOW is below the mode's floor (4700 / 1300 / 500 ns),
    equation 29-5, `BAUD = f_CLK (tLOW_mode + tOF) - 5`.
 
-Both tR and tOF belong to the BUS, not to the peripheral, so they are
+Both tR and tOF belong to the bus, not to the peripheral, so they are
 arguments: the default charges the I2C specification's maxima for the
 mode (rise 1000/300/120 ns, fall 300/300/120 ns), which is all a driver
 can assume, and a bus that declares its own measured numbers gets the
 speed back. They only ever appear as terms that lengthen the period, so
 smaller means faster - and step 3 keeps the result legal. Charging
-nothing for tOF is the one thing that is NOT safe: the SCL low time the
-pins really show is the register's `BAUD + 5` clocks MINUS the fall, so
+nothing for tOF is the one thing that is not safe: the SCL low time the
+pins really show is the register's `BAUD + 5` clocks minus the fall, so
 it would land below the floor by exactly tOF (measured, see below).
 
-Fast-mode Plus is a PAD setting as much as a divider one (29.3.3.1: x10
+Fast-mode Plus is a pad setting as much as a divider one (29.3.3.1: x10
 output drive instead of the slew limit), so `I2cSpeed::fast_plus_1m`
 and CTRLA.FMPEN are checked against each other: asking for 1 MHz with
 FMPEN off is refused rather than run on slew-limited drivers.
@@ -192,7 +293,7 @@ FMPEN on MBAUD 0 and 1 none. The driver takes it whole:
   duty (the data sheet's "- 3" matches neither its own 3.2 nor the
   silicon). The DA/DB keep equation 29-4's BAUD + 5 at every speed
   (`twi_ea_scl`, device_tables.hpp, keys the die).
-- FMEN is USED: the engine sets it with the Fm speed (`set_speed()`, and
+- FMEN is used: the engine sets it with the Fm speed (`set_speed()`, and
   `init()` for a host configured at Fm) as it sets FMPEN with Fm+. At
   20 MHz with the specification's edges charged, Fm is MBAUD 21 with it
   - 364 kHz on this desk's bus - and would be MBAUD 26 without, 308 kHz:
@@ -215,7 +316,7 @@ reads 99.5 kHz at 20 MHz and 101.0 kHz at 10 MHz.
 
 | Knob | Values | Default | Effect |
 |---|---|---|---|
-| `TwiRoute` | `def`, `alt1`, `alt2` | `def` | PORTMUX.TWIROUTEA. The values ARE the header's group values; there is no pinless code |
+| `TwiRoute` | `def`, `alt1`, `alt2`, and `alt3` on the AVR EA | `def` | PORTMUX.TWIROUTEA. The values ARE the header's group values; there is no pinless code |
 | `I2cSpeed` | `standard_100k`, `fast_400k`, `fast_plus_1m` | `standard_100k` | the bus speed class; MBAUD is solved from it and Fm+ also demands FMPEN |
 | `rise_ns` / `fall_ns` | nanoseconds, 0 = the mode's specification maximum | 0 | the bus's own edges, the only inputs equations 29-3 and 29-5 take beyond the clock |
 | `TwiInputLevel` | `i2c`, `smbus` | `i2c` | CTRLA/DUALCTRL.INPUTLVL, the input transition level |
@@ -320,7 +421,9 @@ using I2c = brio::I2cBus<I2cHw, P>;
 ISR(TWI0_TWIM_vect) { if (I2cHw::isr()) brio::post<I2c>(brio::TransferDone{I2cHw::status()}); }
 ...
 I2cHw::init(clock, {.speed = brio::I2cSpeed::fast_400k});
-brio::post<I2c>(I2cHw::Request{addr, tx, 3, rx, 2, brio::reply_to<Me, brio::I2cDone>()});
+brio::post<I2c>(I2cHw::Request{addr, brio::lend<brio::Lease::reply>(tx), 3,
+                               brio::lend<brio::Lease::reply>(rx), 2,
+                               brio::reply_to<Me, brio::I2cDone>(), brio::I2cSpeed::fast_400k});
 ```
 
 **A bus whose edges are known** - declare them and get the speed back:
@@ -371,8 +474,11 @@ const uint8_t pulses = I2cHw::unstick();          // <= 9 SCL pulses, then a STO
 if (pulses == brio::Twi<0>::unstick_failed) { /* the line is not clocked free */ }
 ```
 
-Deciding WHEN to call it - noticing that a transaction is stuck at all -
-is a policy for the bus AO and is not built ([i2c-bus.md](../design/i2c-bus.md)).
+Noticing that a transaction is stuck at all is the timed arbiter's: an
+`I2cBus` with a non-zero `timeout_ticks` answers the requester
+`i2c_timeout` and calls `recover()` ("A wedged tenure" under "Bench
+findings"). Deciding when to spend `unstick()` on the wire is a policy
+for the application and is not built ([i2c-bus.md](../design/i2c-bus.md)).
 
 ## What the silicon offers for the cost, and what the engine takes
 
@@ -392,11 +498,12 @@ and the bus, each item used or declined:
 | CTRLA.FMEN, the AVR EA's Fm duty | DS40002443A 27.5.1 | USED with the Fm speed: the floor's low phase bought from the high phase (The AVR EA's SCL clock) |
 | the inactive-bus time-out's base, CLKCTRL.MCLKTIMEBASE | DS40002443A 27.3.3.1 | USED: the clock writes TIMEBASE at every init and rate change, so `TwiTimeout` is microseconds; at TIMEBASE 0, its reset value, every setting fires at once (letter v) |
 
-### The host's cost, measured (bench_avr letter i)
+### The host's cost, measured (the benchmark skeleton's letter i)
 
-The bench: TWI0's host on PA2/PA3 against the SAME instance's client on
-the dual pair PC2/PC3, served from its own vector in Smart mode at
-SDASETUP four clocks (the dual loop of the findings below), 1.5k to 5 V,
+The benchmark skeleton is the app that measures the drivers' costs
+([../design/benchmark.md](../design/benchmark.md)). The bench: TWI0's
+host on PA2/PA3 against the SAME instance's client on the dual pair
+PC2/PC3, served from its own vector in Smart mode at SDASETUP four clocks (the dual loop of the findings below), 1.5k to 5 V,
 CLK_PER 24 MHz. Both handlers run on one
 core, so every byte waits TWO handler latencies - the client's before
 the acknowledge, the host's after it - and wall minus wire holds both.
@@ -432,8 +539,8 @@ What the rows say:
   handler's path from the flag to the MDATA store is 31 cycles of body
   after a 12-instruction prologue where it was about 50 after 15, and
   its whole entry 76 cycles where it was about 105 (counted in the
-  release listing). The handler carried no call in bench_avr either
-  way; in `test_avr_twi` it called `Twi::address_read` and
+  release listing). The handler carried no call in the benchmark
+  skeleton's image either way; in `test_avr_twi` it called `Twi::address_read` and
   `Twi::ack_action`, which that image had outlined for their several
   call sites, and saved the whole call-clobbered set - every verb the
   handler touches is always_inline now, so no image can.

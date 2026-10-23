@@ -2,29 +2,52 @@
  * rng.hpp
  *
  * The STM32F4's true random number generator (RM0090 ch. 24 - the chapter
- * says of itself that it "applies to the whole STM32F4xx family"): `Rng`,
- * a MONOSTATE resource, because a part either carries one generator or
- * none. The F401, the F411 and the F446 carry none, and their device
- * header says so by declaring no RNG_BASE; on those parts the
- * register-facing half of this file is not compiled and an `Rng` spelled
- * there is a compile error naming the reason.
+ * says of itself that it "applies to the whole STM32F4xx family"), for a
+ * program that needs random words from the hardware rather than a
+ * sequence it could reproduce: `Rng`, a monostate resource (a class of
+ * static members standing for the one generator), because a part either
+ * carries one generator or none. The smallest use:
  *
- * WHAT THIS BLOCK IS. Several ring oscillators whose outputs are XORed
+ *     if (!brio::Rng::init(clock)) { ... }          // the domain is not running
+ *     if (const auto v = brio::Rng::read()) { use(*v); }
+ *     else if (brio::Rng::last_error() == brio::RngError::seed_error) {
+ *         (void)brio::Rng::recover();
+ *     }
+ *
+ * The F401, the F411 and the F446 carry none, and their device header
+ * says so by declaring no RNG_BASE; on those parts the register-facing
+ * half of this file is not compiled and an `Rng` spelled there is a
+ * compile error (the name is not declared; the family fixture's
+ * neg/rng_absent_block.cpp is the proof).
+ *
+ * Who calls what. init(), recover() and release() are setup verbs, for
+ * main or an active object's handler, after the clock task: init() and
+ * recover() wait for the first word, at most `spins` status reads
+ * (100 000 by default), and answer false when it never came. read() does
+ * not wait: it answers a word or nothing, the reason kept for
+ * last_error(); read_blocking() is the bounded wait over it. isr() is the
+ * interrupt body the program's handler for irq() calls; it clears the
+ * latched error flags and leaves the word for the handler to take. read()
+ * keeps the previous word as the comparison value (one word of state, no
+ * guard), so the words are taken from one context. Nothing here masks
+ * interrupts.
+ *
+ * What this block is. Several ring oscillators whose outputs are XORed
  * into a seed, the seed shifted into a linear feedback register, and the
- * register handed over 32 bits at a time - a TRUE generator with an analog
+ * register handed over 32 bits at a time - a true generator with an analog
  * heart, not a pseudo-random sequence a program could reproduce. Beside
  * the datapath sit two monitors, one on the seed and one on the clock,
  * whose whole purpose is to say when the entropy is not to be trusted.
  *
- * SIX FACTS THAT SHAPE THE FILE.
+ * Six facts that shape the file.
  *
- * 1. IT HAS A CLOCK OF ITS OWN, AND THE 48 MHz DOMAIN IS WHERE IT COMES
- *    FROM. The LFSR is clocked by RNG_CLK "at a constant frequency, so
+ * 1. It has a clock of its own, and the 48 MHz domain is where it comes
+ *    from. The LFSR is clocked by RNG_CLK "at a constant frequency, so
  *    that the quality of the random number is independent of the HCLK
  *    frequency" (24.3), and on this family that clock is the main PLL's Q
  *    output - the domain the USB OTG FS and the SDIO share, which
- *    `Clock::usb_hz` reports. THE MANUAL'S ONLY STATED CONSTRAINT ON IT IS
- *    A RATIO, not a rate: the clock monitor raises CECS when
+ *    `Clock::usb_hz` reports. The manual's only stated constraint on it is
+ *    a ratio, not a rate: the clock monitor raises CECS when
  *    f(RNG_CLK) < f(HCLK)/16 (24.4.2), and that is what `init()`'s
  *    static_assert checks. 48 MHz is what the clock tree is meant to give
  *    the domain and what every ST example uses; a SYSCLK of 180 MHz gives
@@ -32,13 +55,14 @@
  *    refuse it - a rate that trips CECS is what the driver refuses, and
  *    CECS itself is what reports the rest.
  *
- * 2. THE CLOCK GATE IS ON A DIFFERENT BUS ON ONE PART. RNGEN is bit 6 of
+ * 2. The clock gate is on a different bus on one part. RNGEN is bit 6 of
  *    RCC_AHB2ENR on every part with the generator except the F410, which
- *    has no AHB2 at all and puts the same bit in RCC_AHB1ENR
- *    (`rng_clock_on_ahb1()` in the reserve). The bit number is the same;
- *    the register is not.
+ *    has no AHB2 at all and puts the enable in RCC_AHB1ENR, at bit 31
+ *    (`rng_clock_on_ahb1()` in the reserve, stm32f4/device_tables.hpp: the
+ *    table of what each part has, read off the device header). Neither the
+ *    register nor the bit is the same.
  *
- * 3. THE FIRST VALUE IS NOT A RANDOM NUMBER. FIPS PUB 140-2 asks that "the
+ * 3. The first value is not a random number. FIPS PUB 140-2 asks that "the
  *    first random number generated after setting the RNGEN bit should not
  *    be used, but saved for comparison with the next" and that each
  *    subsequent number be compared with the one before it, the test
@@ -47,33 +71,33 @@
  *    failure and not handed out, which is the continuous test the standard
  *    asks for and costs one word of state.
  *
- * 4. THE TWO ERRORS ARE NOT THE SAME KIND. A CLOCK error (CECS) means the
+ * 4. The two errors are not the same kind. A clock error (CECS) means the
  *    generator has stopped producing, but "has no impact on the previously
  *    generated random numbers, and the RNG_DR register contents can be
- *    used" - fix the clock tree, clear CEIS, carry on. A SEED error (SECS)
+ *    used" - fix the clock tree, clear CEIS, carry on. A seed error (SECS)
  *    means the analog part produced a sequence that failed its own test -
  *    more than 64 consecutive bits at one value, or more than 32
  *    alternations - and then "if a number is available in the RNG_DR
  *    register, it must not be used because it may not have enough
- *    entropy": clear SEIS, then clear AND SET RNGEN to reinitialize
+ *    entropy": clear SEIS, then clear and set RNGEN to reinitialize
  *    (24.3.2). `recover()` is that sequence, and `read()` refuses to hand
  *    out a word while either current-status bit stands.
  *
- * 5. THE TWO STATUS FLAGS ARE rc_w0, NOT rc_w1. SEIS and CEIS are
+ * 5. The two status flags are rc_w0, not rc_w1. SEIS and CEIS are
  *    "cleared by writing it to 0" (24.4.2) - the opposite convention from
  *    every other flag this stratum clears, and a plain read-modify-write
  *    with a one would leave them standing. So the clearing verbs store a
- *    word with the bit ZERO and every other bit of the register as it
+ *    word with the bit zero and every other bit of the register as it
  *    reads back, and never `|=`.
  *
- * 6. ONE VECTOR, AND IT MAY BE SHARED. The interrupt is raised by DRDY,
+ * 6. One vector, and it may be shared. The interrupt is raised by DRDY,
  *    SEIS or CEIS alike (24.4.1's IE bit), and there is no per-source
  *    enable - so `isr()` reports all three and the handler decides. The
- *    vector's NAME differs across the family (HASH_RNG_IRQn on the
+ *    vector's name differs across the family (HASH_RNG_IRQn on the
  *    large-line parts, whose slot is shared with the hash processor,
  *    RNG_IRQn on the small ones); `irq()` is the reserve's answer to that.
  *
- * ERRATA. No item of ES0206 Rev 24, ES0298 Rev 8 or ES0287 Rev 6 is filed
+ * Errata. No item of ES0206 Rev 24, ES0298 Rev 8 or ES0287 Rev 6 is filed
  * against the RNG - and only the first of those three sheets belongs to a
  * part that has one.
  */
@@ -97,7 +121,7 @@ namespace brio {
 // =============================================================================
 
 /**
- * THE ONE RATE RULE THE CHAPTER STATES (24.4.2, CECS and CEIS): the clock
+ * The one rate rule the chapter states (24.4.2, CECS and CEIS): the clock
  * monitor flags an error when f(RNG_CLK) is below f(HCLK)/16. True when
  * `rng_clk_hz` clears that bar - written as a multiplication so that a
  * division never rounds the answer in the caller's favour, and in 64 bits
@@ -110,7 +134,7 @@ constexpr bool rng_clock_ratio_ok(uint32_t rng_clk_hz, uint32_t hclk_hz) {
 
 /// What ST's clock tree is built to put on the domain (RM0090 6.2.5's
 /// "48 MHz clock": the USB OTG FS, the SDIO and this block). Stated
-/// because it is the design point, NOT enforced: the chapter's constraint
+/// because it is the design point, not enforced: the chapter's constraint
 /// is the ratio above.
 inline constexpr uint32_t rng_nominal_clock_hz = 48'000'000;
 
@@ -140,7 +164,7 @@ enum class RngError : uint8_t {
  *   brio::Rng::init(clock);                       // gate, enable, discard the first
  *   if (auto v = brio::Rng::read()) { use(*v); }  // or ask why not
  *
- * READ() IS THE WHOLE PROTOCOL: it checks the two error statuses, checks
+ * read() is the whole protocol: it checks the two error statuses, checks
  * DRDY, reads the word and compares it with the previous one, in the order
  * 24.3.1 asks for. `value()` beside it is the raw register for a program
  * that has already done its own checking - in an interrupt handler that
@@ -162,9 +186,10 @@ struct Rng {
 
     // ---- the clock gate --------------------------------------------------------
     //
-    // The register differs by part and the bit does not, so the store is
-    // selected by the header's own symbol: per-part CODE, which is what a
-    // driver may keep a preprocessor branch for.
+    // The register and the bit differ by part (bit 6 of AHB2ENR, bit 31 of
+    // AHB1ENR on the F410), so the store is selected by the header's own
+    // symbol: per-part code, which is what a driver may keep a
+    // preprocessor branch for.
 
     static void clock(bool on) {
 #if defined(RCC_AHB1ENR_RNGEN)
@@ -210,7 +235,7 @@ struct Rng {
     /// puts it back to zero until the next one is computed.
     static bool ready() { return (regs().SR & RNG_SR_DRDY) != 0u; }
 
-    /// SECS / CECS, the CURRENT statuses: what is wrong now, as opposed to
+    /// SECS / CECS, the current statuses: what is wrong now, as opposed to
     /// what went wrong at some point (SEIS/CEIS below). Generation is
     /// stopped for as long as SECS stands.
     static bool seed_error() { return (regs().SR & RNG_SR_SECS) != 0u; }
@@ -222,7 +247,7 @@ struct Rng {
     static bool seed_error_flag() { return (regs().SR & RNG_SR_SEIS) != 0u; }
     static bool clock_error_flag() { return (regs().SR & RNG_SR_CEIS) != 0u; }
 
-    /// Clear one latched flag. rc_w0: the bit is cleared by writing a ZERO
+    /// Clear one latched flag. rc_w0: the bit is cleared by writing a zero
     /// to it (see the file header, fact 5), so the store is the register as
     /// it reads with that one bit knocked out.
     static void clear_seed_error() { regs().SR = regs().SR & ~static_cast<uint32_t>(RNG_SR_SEIS); }
@@ -240,7 +265,9 @@ struct Rng {
      * stopped; the word standing there is still good, and `value()` is how
      * a caller takes it deliberately), DRDY decides readiness, and the word
      * is compared with the previous one - the continuous test FIPS PUB
-     * 140-2 asks for - before it is handed out.
+     * 140-2 asks for - before it is handed out. Does not wait: a
+     * register read or two and a compare, then the answer; the reason for
+     * an empty one is last_error()'s.
      */
     static std::optional<uint32_t> read() {
         const uint32_t sr = regs().SR;
@@ -289,9 +316,12 @@ struct Rng {
 
     /**
      * The gate, the enable and the FIPS discard, with the clock the
-     * program runs checked against 24.4.2's ratio at COMPILE time for a
-     * static clock. False when the first word never arrived - which on
-     * this block means the clock domain is not running at all.
+     * program runs checked against 24.4.2's ratio at compile time for a
+     * static clock (a DynamicClock is not checked here). Waits for the
+     * first word, discard_first()'s bounded wait. False when the first
+     * word never arrived - which on this block means the clock domain is
+     * not running at all - or when an error status (SECS or CECS) stood
+     * while waiting for it. Call it after the clock task's init().
      *
      * `Clock::usb_hz` is the PLL's Q output, which is this generator's
      * clock as well as the USB's; a rate with no PLL has none and is
@@ -346,7 +376,7 @@ struct Rng {
     // ---- the ISR body --------------------------------------------------------------
 
     /// What one interrupt found: any of the three sources may have raised
-    /// it, and the two error flags are LATCHED, so the body reports them
+    /// it, and the two error flags are latched, so the body reports them
     /// and clears them - the data, if any, is left in RNG_DR for the
     /// handler to take with `read()`.
     struct RngEvent {

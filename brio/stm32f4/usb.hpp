@@ -1,76 +1,107 @@
 /*
  * usb.hpp
  *
- * The STM32F4's USB OTG controller IN DEVICE MODE (RM0383 ch. 22,
- * RM0390 ch. 31, RM0090 ch. 34 and 35), as the endpoint controller
- * util/usb/device.hpp's stack runs on: `UsbOtg<core>`, realizing the
- * `UsbController` contract at the packet, with `UsbFs` and `UsbHs` the
- * two cores this family may carry. brio's SECOND realization of that
- * contract, after the RP2040's own controller (docs/design/usb.md).
+ * The STM32F4's USB OTG controller in device mode (RM0383 ch. 22,
+ * RM0390 ch. 31, RM0090 ch. 34 and 35), for a program that wants the
+ * chip to be a USB device - most often a CDC ACM serial port a host sees
+ * as a COM port and the program prints to as to a UART. This is the
+ * endpoint controller util/usb/device.hpp's stack runs on: `UsbOtg<core>`,
+ * realizing the `UsbController` contract at the packet, with `UsbFs` and
+ * `UsbHs` the two cores this family may carry. brio's second realization
+ * of that contract, after the RP2040's own controller
+ * (docs/design/usb.md).
  *
- * WHAT THE BLOCK IS. A Synopsys DWC2 core with ST's glue: a full-speed
+ *   using Usb = brio::UsbFs;                       // the full-speed core
+ *   using Port = brio::UsbCdcAcm<Usb, P>;          // util/usb/cdc.hpp
+ *   using Device = brio::UsbDevice<Usb, Descriptors, Port>;
+ *   Usb::init(clock);                              // after SysClock::init()
+ *   Device::start();                               // the pull-up: the host enumerates
+ *   extern "C" void OTG_FS_IRQHandler() { Device::isr(); }
+ *
+ * (docs/stm32f4/usb.md writes the descriptors out and explains each
+ * line.) The clock type must give the PLL's Q output 48 MHz, which init()
+ * checks at compile time (the clock paragraph below), and the clock task
+ * runs first; the vector is bound by the program, because init() unmasks
+ * the core's interrupts at the block and at the NVIC.
+ *
+ * Who calls what. init() and release() are setup verbs, main context;
+ * init() waits at least the 25 ms the chapter asks for after device mode
+ * is forced, and each of the core's resets and FIFO flushes for a bounded
+ * number of polls, false meaning a step did not answer. take_events() is
+ * the interrupt body, reached through the stack's isr() from the
+ * program's handler and from nowhere else; the stack and the class call
+ * the contract's other verbs from that body and, under the platform's
+ * critical section, from the main context. submit_in() is the one verb
+ * that masks interrupts itself - an InterruptGuard across its register
+ * writes and its push, for ES0287 2.12.1 below - and it copies the
+ * caller's packet before it returns (into the FIFO, or into the
+ * endpoint's own buffer when the FIFO has no room), so the caller's
+ * storage is free again on return. out_data() hands out the driver's own
+ * copy of the last packet, valid until the next one on that endpoint.
+ *
+ * What the block is. A Synopsys DWC2 core with ST's glue: a full-speed
  * PHY on two pins with its DP pull-up, and - the whole of the interface
  * between the core and the CPU - a block of dedicated RAM organized as
- * FIFOs, reached through PUSH AND POP REGISTERS and never addressed
+ * FIFOs, reached through push and pop registers and never addressed
  * directly. That is the opposite economy from the RP2040's dual-port
  * RAM: there is no buffer to write a packet into, only a word-wide
- * window per FIFO, and the packet's LENGTH travels in a transfer-size
+ * window per FIFO, and the packet's length travels in a transfer-size
  * register beside it.
  *
- *   - ONE SHARED RECEIVE FIFO for every OUT endpoint. Each packet is
- *     stacked behind the last with a STATUS ENTRY on top of it; the
+ *   - One shared receive FIFO for every OUT endpoint. Each packet is
+ *     stacked behind the last with a status entry on top of it; the
  *     application pops the status (GRXSTSP: which endpoint, how many
  *     bytes, what kind of entry) and then the bytes. A SETUP packet
  *     arrives as two entries - the eight bytes, then a "setup stage
  *     done" - and the endpoint's own SETUP interrupt follows the second.
- *   - ONE TRANSMIT FIFO PER IN ENDPOINT, each a slice of the same RAM
+ *   - One transmit FIFO per IN endpoint, each a slice of the same RAM
  *     the application maps by hand (a start address and a depth in
  *     32-bit words). This driver states the budget - 320 words on the FS
- *     core, 1024 on the HS one - and REFUSES a configuration that does
+ *     core, 1024 on the HS one - and refuses a configuration that does
  *     not fit rather than overlapping two FIFOs, which the silicon would
  *     accept in silence.
- *   - A TRANSFER, not a packet, is what an endpoint register describes:
+ *   - A transfer, not a packet, is what an endpoint register describes:
  *     a packet count and a byte count that the core walks down. This
  *     driver uses that on the OUT side and only there - see the next
  *     paragraph - and programs exactly one packet per transfer on every
  *     IN endpoint, which is what the contract above it promises.
  *
- * WHY THE OUT SIDE COUNTS PACKETS. A device that arms one OUT packet at
+ * Why the OUT side counts packets. A device that arms one OUT packet at
  * a time NAKs the host between packets, and a NAK behind a hub's
  * transaction translator costs a whole USB frame (measured on the
  * RP2040, docs/rp2040/usb.md, and the reason its bulk OUT endpoint is
  * double buffered). This core has no double buffer to offer, but it has
  * something better: an OUT transfer may be programmed for several
  * packets at once, and the core accepts them back to back into the
- * shared FIFO with no NAK in between. So `submit_out` COUNTS CREDITS -
+ * shared FIFO with no NAK in between. So `submit_out` counts credits -
  * the contract's one packet each - and the driver programs a transfer
  * of as many packets as the class has armed the moment the endpoint is
  * idle. `out_slots` says how many a class may hold armed, and the
  * receive FIFO is sized to hold exactly that many.
  *
- * ONE PACKET REPORTED PER PASS. The receive FIFO is one queue for every
+ * One packet reported per pass. The receive FIFO is one queue for every
  * endpoint, so a pass that pops two data packets for the same endpoint
  * could report only one of them (the contract's `out_data` is one packet
- * per endpoint). It therefore pops entries until the FIRST data packet,
- * hands that one over and LEAVES THE REST IN THE FIFO: RXFLVL is a level
+ * per endpoint). It therefore pops entries until the first data packet,
+ * hands that one over and leaves the rest in the FIFO: RXFLVL is a level
  * - the FIFO is not empty - so the interrupt stands and the next pass
  * takes the next packet. Nothing is lost and nothing is copied twice.
  *
- * THE ADDRESS GOES IN BEFORE THE STATUS STAGE, and it is the one place
+ * The address goes in before the status stage, and it is the one place
  * this core and chapter 9 disagree. The specification says the status of
- * SET_ADDRESS travels at the OLD address and the new one takes effect
+ * SET_ADDRESS travels at the old address and the new one takes effect
  * after it, which is what util/usb/device.hpp implements and what a
  * controller whose address register bites at once needs; RM0383 22.17.5
- * puts the two steps the other way round, and MEASURED: with the address
+ * puts the two steps the other way round, and measured: with the address
  * written after the status stage the host is answered by nobody at it.
  * So this driver takes the address out of the SETUP packet as it passes
  * (`take_address_early`, the only chapter-9 knowledge in the file) and
  * the stack's own set_address, a status stage later, writes the same
  * value again.
  *
- * THE ERRATA that are live in device mode, and both are answered here:
+ * The errata that are live in device mode, and both are answered here:
  *  - ES0287 2.12.1 (ES0298 2.16.1, ES0206 2.14.1 and 2.15.1): a write
- *    sequence into a transmit FIFO that is INTERRUPTED by an access to
+ *    sequence into a transmit FIFO that is interrupted by an access to
  *    an endpoint register corrupts the next data written. `submit_in`
  *    holds an InterruptGuard across the register writes and the push, so
  *    the sequence is uninterruptible whichever context called it.
@@ -79,16 +110,16 @@
  *    from the value this driver wrote and never reads the field.
  * The other four of that section are host-mode.
  *
- * THE CLOCK: the core wants 48 MHz +/- 0.25% on its own domain, which on
+ * The clock: the core wants 48 MHz +/- 0.25% on its own domain, which on
  * this family is the main PLL's Q output - so `init` static_asserts
  * `Clock::usb_hz == 48 MHz` and a program picks a SYSCLK whose ratio
  * yields it (96 or 168 MHz from a 25 or 8 MHz root; 180 MHz gives 45 and
  * is refused). The AHB must also run above 14.2 MHz (RM0383 22.3.3's
  * caution) and its rate chooses GUSBCFG's turnaround, table 132.
  *
- * WHAT IS NOT HERE: host mode and the OTG role switch (brio has no host
+ * What is not here: host mode and the OTG role switch (brio has no host
  * side, by decision - docs/design/usb.md), the ULPI transceiver of the
- * HS core (this driver drives that core's embedded FULL-SPEED PHY and
+ * HS core (this driver drives that core's embedded full-speed PHY and
  * nothing else), the internal DMA (the HS core's; the FS core has none),
  * and isochronous endpoints, refused by `configure_endpoint` because the
  * even/odd frame the silicon wants per transfer has no place in a
@@ -212,8 +243,10 @@ struct UsbOtg {
      * the two data pads handed to the PHY, the core soft-reset, the
      * transceiver powered and VBUS either sensed or given away, device
      * mode forced, the FIFO map written, the interrupts unmasked at the
-     * block and at the NVIC. The pull-up stays DOWN - the stack raises
-     * it with connect(true) when it is ready to answer.
+     * block and at the NVIC. The pull-up stays down - the stack raises
+     * it with connect(true) when it is ready to answer. A setup verb,
+     * main context, after the clock task's init() (the 48 MHz is the
+     * PLL's) and with the core's vector bound; it waits at least 25 ms.
      *
      * `sense_vbus` false (the default) frees the VBUS pad, which is what
      * a bus-powered device with no VBUS wire wants and what leaves that

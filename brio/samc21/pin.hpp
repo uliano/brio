@@ -1,15 +1,10 @@
 /*
  * pin.hpp
  *
- * The SAM C21 I/O pins (PORT, DS60001479M ch. 28), register-level, in
- * two faces:
- *
- *  Port<'B'>       the port RESOURCE - one GROUP of the PORT peripheral:
- *                  32-bit mask operations on DIR/OUT/IN and the
- *                  multi-pin configuration engine (WRCONFIG);
- *  Pin<'B', 23>    the per-pin face: direction and value, configure()
- *                  as one PINCFG store, the peripheral-function handoff
- *                  (PMUX), a PwmChannel (max 1) and a PinRef factory.
+ * The SAM C21 I/O pins (PORT, DS60001479M ch. 28): what a program uses
+ * to drive an LED, read a button, hand a pad to a peripheral, or let an
+ * event move a pad. A pin is a type - the group letter and the number
+ * are template arguments - and its functions are static:
  *
  *   using Led = brio::Pin<'B', 23>;   // PB23
  *   Led::output();
@@ -17,31 +12,65 @@
  *   Led::input(brio::PinPull::up);
  *   Rx::function(brio::PinFunction::d, {.input_enable = true});  // SERCOM
  *
- * TWO FACTS THAT SHAPE EVERYTHING BELOW.
+ * (Rx being another Pin alias, PB31 for the console's SERCOM5 - the
+ * function letter is the package's I/O multiplexing table's.)
  *
- * 1. THE INPUT BUFFER IS OFF BY DEFAULT. PINCFG.INEN gates it, and IN
+ * Two faces, register-level:
+ *
+ *  Port<'B'>       the port resource - one group of the PORT peripheral:
+ *                  32-bit mask operations on DIR/OUT/IN and the
+ *                  multi-pin configuration engine (WRCONFIG);
+ *  Pin<'B', 23>    the per-pin face: direction and value, configure()
+ *                  as one PINCFG store, the peripheral-function handoff
+ *                  (PMUX), a PwmChannel (max 1: a pin a generic actuator
+ *                  can drive like a timer channel) and a PinRef factory
+ *                  (ref(): a run-time handle for a request event).
+ *
+ * Which context may call what. The value verbs (set, clear, toggle,
+ * read, Port's out_set/out_clear/out_toggle and dir_* masks, PinRef's
+ * set and clear) are single stores into the write-one registers or a
+ * single load, legal from any context and needing no guard. The
+ * configuring verbs touch the pin's PINCFG byte - configure() and
+ * function() store it whole, input_enable(), pull() and strong_drive()
+ * read, modify and write it (output()/input() call two of them) -,
+ * function() also reads, modifies and writes the PMUX byte the pin
+ * shares with its neighbour, and Port::configure_event the group's
+ * EVCTRL: they belong to setup or to one active object's handler (an
+ * active object is a brio component with its own event queue, served one
+ * event at a time by the kernel), never to two contexts at once on the
+ * same byte - a context being main, an active object's dispatch (all of
+ * them one context, since the kernel runs one dispatch at a time) or an
+ * interrupt handler. Nothing here waits or masks
+ * interrupts, and nothing needs a clock first: the PORT's bus clock is
+ * on out of reset and no verb here touches it. output() leaves OUT as
+ * it is, so it drives the level OUT holds - 0 out of reset, 1 after an
+ * input(PinPull::up), whose pull direction is that same bit.
+ *
+ * Two facts that shape everything below.
+ *
+ * 1. The input buffer is off by default. PINCFG.INEN gates it, and IN
  *    reads 0 for a pin whose buffer is disabled - including a pin this
  *    program is driving. So input() turns it on, and output() turns it on
  *    too: read() then means the same thing here as on every other brio
  *    target. A pin whose microamps matter parks it with
  *    configure({}) (all of PINCFG cleared).
- * 2. THERE IS NO PIN INTERRUPT IN PORT. Edge and level sensing is a
+ * 2. There is no pin interrupt in PORT. Edge and level sensing is a
  *    separate peripheral here (EIC, ch. 26), reached
  *    through PMUX function A. Hence no PinSense vocabulary and no
  *    take_flags() in this file: samc21/eic.hpp owns them, and
  *    inventing half of one here would be a promise with no code behind
- *    it. What PORT does have is the OPPOSITE direction: it is an event
- *    USER (EVCTRL, 28.6.4), four inputs per group that set, clear,
- *    toggle or FOLLOW one pin each - and the follow ("out") action is
+ *    it. What PORT does have is the opposite direction: it is an event
+ *    user (EVCTRL, 28.6.4), four inputs per group that set, clear,
+ *    toggle or follow one pin each - and the follow ("out") action is
  *    the only one that survives a standby, which is what makes a pad
  *    move while the CPU is stopped.
  *
- * ONE PACKAGE FACT, EXHAUSTIVELY. This family has exactly TWO port
+ * One package fact, exhaustively. This family has exactly two port
  * groups, A and B, on every variant (E/G/J alike): the device header's
  * PORT_GROUPS says 2 and there is no third group anywhere in the pack.
  * port_exists() below reads that number rather than listing letters, so
- * it stays true if a relative ever grows a group C. Which PINS of an
- * existing group are bonded on a given package is a FINER question - a
+ * it stays true if a relative ever grows a group C. Which pins of an
+ * existing group are bonded on a given package is a finer question - a
  * device-table job, and open.
  */
 
@@ -58,8 +87,9 @@ namespace brio {
 /// Whether this device bonds out the port group of a letter at all.
 /// PORT_GROUPS is the device header's own count (the authority), so no
 /// #ifdef ladder is needed and none can go stale. Group-level only: a
-/// pin missing from an EXISTING group is the per-package device tables'
-/// job, and is not built.
+/// pin missing from an existing group is the per-package device tables'
+/// job, and that table is not built - such a pin compiles, and nothing
+/// says the package does not bond it.
 constexpr bool port_exists(char p) {
     const int group = p - 'A';
     return group >= 0 && group < static_cast<int>(PORT_GROUPS);

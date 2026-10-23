@@ -3,9 +3,33 @@
  *
  * The SAM C21 Event System (DS60001479M ch. 29): twelve channels
  * carrying events from any of 95 generators to any of 47 users, with no
- * CPU in the path.
+ * CPU in the path - what a program uses to let one peripheral act on
+ * another's signal (a pin edge starting a conversion, a compare moving a
+ * pad). The smallest use routes one generator to one user:
  *
- * IT IS AN ALLOCATOR AND NOT A TYPED TABLE, and the difference is worth
+ *     Evsys::bus_clock(true);
+ *     GclkChannel::connect(Evsys::gclk_id(0), 5);   // clocked paths only
+ *     Evsys::connect(user, 0, EventChannelConfig{
+ *         .generator = code, .path = EventPath::synchronous,
+ *         .edge = EventEdge::rising});
+ *
+ * the generator code and the user index being the ones the two
+ * peripherals' drivers publish. The bus clock is off out of reset
+ * (MCLK_APBCMASK), and bus_clock(true) is what opens it.
+ *
+ * Who calls what. Every verb here is one store or one load: configure(),
+ * connect(), attach(), disconnect() and the release verbs are setup
+ * verbs (main, or one active object's handler - an active object being
+ * a brio component with its own event queue, served one event at a time
+ * by the kernel); configure(), connect() and attach() answer false and
+ * write nothing for a user, a channel or a configuration the rules below
+ * refuse; trigger() is a single store into
+ * a write-only register and may be called from any context; isr() is
+ * the body the program's EVSYS_Handler calls. Nothing here waits or
+ * masks interrupts - the two waits the errata ask for are the caller's,
+ * because this header does not know the channel clock's rate.
+ *
+ * It is an allocator and not a typed table, and the difference is worth
  * stating before any verb: twelve identical channels, numeric generator
  * and user codes drawn from two tables ninety-five and forty-seven rows
  * long, and a per-channel generic clock. A typed vocabulary - one type
@@ -14,60 +38,60 @@
  * which generator a peripheral offers is that peripheral's driver's
  * knowledge, and it should hand over a code.
  *
- * So this header owns the FABRIC and not the vocabulary. It moves
+ * So this header owns the fabric and not the vocabulary. It moves
  * channels, users, paths and edges; a driver that generates events
  * publishes its generator codes, and a driver that consumes them
  * publishes its user index. That division is what keeps this file from
  * growing a table for every chapter in the book.
  *
- * THE FOUR RULES OF THE CHAPTER, each with code behind it.
+ * The four rules of the chapter, each with code behind it.
  *
- * 1. THE USER MULTIPLEXER IS WRITTEN BEFORE THE CHANNEL. "The user
+ * 1. The user multiplexer is written before the channel. "The user
  *    multiplexer must always be configured before the channel"
  *    (29.6.2.3), which is why `connect()` exists as one verb taking
  *    both and there is no way to do it in the wrong order by accident.
  *
- * 2. USER.CHANNEL IS THE CHANNEL PLUS ONE. Zero means "no channel
+ * 2. USER.CHANNEL is the channel plus one. Zero means "no channel
  *    output selected" and channel m is selected by writing m+1
  *    (29.8.9's own note). Every verb here speaks plain channel numbers
  *    and the off-by-one lives in exactly two lines.
  *
- * 3. THE PATH DECIDES WHETHER EDGE DETECTION IS LEGAL, and both ways.
+ * 3. The path decides whether edge detection is legal, and both ways.
  *    On the asynchronous path "the edge detection is not required and
  *    must be disabled by software"; on the synchronous and
  *    resynchronized paths "edge detection must be enabled" (29.6.2.6,
  *    29.6.2.7). A configuration that gets this backwards is refused
  *    rather than written.
  *
- * 4. THE ASYNCHRONOUS PATH HAS NO STATUS AT ALL. No interrupts, and
+ * 4. The asynchronous path has no status at all. No interrupts, and
  *    CHSTATUS and both interrupt flags read as zero for that channel
  *    (29.6.2.9, 29.6.2.10, 29.6.2.11). Code that polls `busy()` to pace
  *    an asynchronous channel is polling a constant.
  *
- * ERRATA: THREE OF THE FOUR ARE LIVE ON THIS SILICON, which is a lot
+ * Errata: three of the four are live on this silicon, which is a lot
  * for a twenty-page chapter.
  *
- *  - 1.12.1 (all revisions): in SYNCHRONOUS mode a channel whose
- *    generic clock is always on (ONDEMAND = 0) can raise SPURIOUS
- *    OVERRUN interrupts. The workaround is ONDEMAND = 1, so that is the
+ *  - 1.12.1 (all revisions): in synchronous mode a channel whose
+ *    generic clock is always on (ONDEMAND = 0) can raise spurious
+ *    overrun interrupts. The workaround is ONDEMAND = 1, so that is the
  *    default here and a synchronous configuration that clears it is
  *    refused.
- *  - 1.12.3 (all revisions): a software event on a RESYNCHRONIZED path
+ *  - 1.12.3 (all revisions): a software event on a resynchronized path
  *    does not set CHBUSY immediately, and a second event arriving in
- *    that window is LOST WITH NO OVERRUN FLAG - the worst kind of
+ *    that window is lost with no overrun flag - the worst kind of
  *    silence. The chapter's remedy is to wait three
  *    GCLK_EVSYS_CHANNEL_n cycles before the next software event.
  *    `trigger()` cannot know that clock's rate, so the wait is the
  *    caller's; what this header does is say so and offer `busy()`.
  *  - 1.12.4 (all revisions): a freshly configured and enabled channel is
- *    busy for one GCLK tick WITHOUT CHBUSY showing it, so a trigger
+ *    busy for one GCLK tick without CHBUSY showing it, so a trigger
  *    issued immediately can be swallowed. Visible when the EVSYS clock
  *    is slower than the CPU - which is the interesting case. Again the
  *    wait is the caller's and `configure()` says so.
- *  - 1.12.2 is NOT this silicon (E/G/J revisions B..E only).
+ *  - 1.12.2 is not this silicon (E/G/J revisions B..E only).
  *
- * NOT BUILT (docs/samc21/evsys.md carries the list): the generator and
- * user TABLES, deliberately - see above; and the channel INTERRUPT as a
+ * Not built (docs/samc21/evsys.md carries the list): the generator and
+ * user tables, deliberately - see above; and the channel interrupt as a
  * wake source (CHANNELn.RUNSTDBY is measured on the propagation path, a
  * channel interrupt leaving a standby is not).
  */
