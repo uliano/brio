@@ -248,6 +248,34 @@ letters land, nothing wired and nothing lit:
   see and the DSB's memory clobber not stopping it; the request is now
   a call the compiler cannot see into (`noinline`, `noipa`), one call
   and return on the asking path only.
+- **A second compiler hazard, in the kernel, found by the link suite
+  and closed**: the same compiler moved the queue's two cursor loads
+  ahead of the ceiling's raise in the scheduler's pass; a request
+  landing in that gap served the event in a nested scheduler and the
+  outer pass took it again and released the slot twice, wedging the
+  queue after half a second to nine seconds of pressure. The raise and
+  the restore are compiler barriers now (`kernel/rubato.hpp`), and the
+  suite below ran clean after it.
+
+`test_stm32f4_rubato_link`, 230 verdicts on the Nucleo-F446RE against
+the Nucleo-G0B1RE's unchanged `spi_peer` and `usart_peer` over the desk's
+SPI2 and USART1 wires: the real SPI and UART stacks under Rubato with
+an object above them preempting on TIM2 at 97, 193 and 389 us, its
+dispatch 300 then 3000 cycles, every letter run first without pressure
+as its control. The peer's command channel through the arbiter, the
+matrix on the DMA engines (152 kB/s, 977 to 1000 per mille of the
+control under pressure), the arbiter with three requesters of three
+priorities (every reply to its requester in order, no timeout), the
+UART's numbered lines echoed at 460800 and 921600 through `SerialPort`
+into a borrower above it (no line lost, out of order or corrupt, every
+port counter zero, 876 to 924 per mille of the wire), the one-writer
+blast judged by the peer, the loan with a slow borrower preempted
+inside its dispatch 21 to 106 times a pass: all byte-exact. The one
+limit found is the polled loop's, [spi.md](spi.md)'s "Not covered
+yet". Also observed: the peer's command window sent right after an
+answer window is not heard until the peer is back in command mode
+(the suite waits between windows); the receive engine tells the port
+of a stream only at an idle line or a half lap, up to 1024 characters.
 
 `test_stm32f4_platform`, letters a..e and g, 36 verdicts on each of the
 four boards, and letters `w`, `k` and `t` beside them in `z` (49

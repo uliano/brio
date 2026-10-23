@@ -96,6 +96,7 @@
 
 #include <stdint.h>
 
+#include <atomic>
 #include <optional>
 
 #include "kernel/active_object.hpp"
@@ -130,7 +131,9 @@ public:
         (Aos::queue.set_priority(index_of<Aos>()), ...);
         const uint8_t ceiling = P::ceiling;
         P::ceiling = 0;
+        std::atomic_signal_fence(std::memory_order_seq_cst);   // the hold before the inits (visit() says why)
         (Aos::init(), ...);
+        std::atomic_signal_fence(std::memory_order_seq_cst);
         P::ceiling = ceiling;
     }
 
@@ -180,7 +183,9 @@ public:
         init_all();
         for (;;) {
             P::ceiling = 0;
+            std::atomic_signal_fence(std::memory_order_seq_cst);   // the hold before the walk (visit() says why)
             TimeEvents<P>::process();
+            std::atomic_signal_fence(std::memory_order_seq_cst);
             P::ceiling = 255;
             if (!activate()) {
                 idle_if_empty();
@@ -216,10 +221,22 @@ private:
             return false;
         }
         P::ceiling = index;
+        // The raise must reach memory before the queue's cursors are read,
+        // and the restore must follow the slot's release: nothing in the
+        // language orders a plain store against those loads and stores,
+        // and GCC 16 at -Os moved take()'s two loads ahead of the raise
+        // (measured on the STM32F446RE: an interrupt's request landing in
+        // that gap served the event in a nested activate(), the outer pass
+        // took it again from its stale cursor and released the slot twice,
+        // which wedges the queue for good). The fences are compiler
+        // barriers alone - one core sees its own stores in order - and
+        // cost no instruction.
+        std::atomic_signal_fence(std::memory_order_seq_cst);
         // False only when an interrupt's exit, between the look above and
         // the raise of the ceiling, served this queue to empty: the pass
         // goes on.
         served = serve_one<Ao>();
+        std::atomic_signal_fence(std::memory_order_seq_cst);
         P::ceiling = ceiling;
         return served;
     }

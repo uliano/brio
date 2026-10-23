@@ -938,7 +938,14 @@ object whose index is below the ceiling may start a dispatch. Every
 and, when it is below, asks the platform for the scheduler
 (`P::pend_schedule()`); the compare reads the ceiling once, and a
 request that finds its queue already served by a scheduler that ran in
-between serves nothing and costs one pass of the scan.
+between serves nothing and costs one pass of the scan. The raise of
+the ceiling before a dispatch and its restore after are compiler
+barriers in the kernel (`std::atomic_signal_fence`, no instruction on
+one core): without them the compiler may move the queue's reads ahead
+of the raise, and a request landing in that gap serves the event in a
+nested scheduler while the outer pass takes it again from a stale
+cursor and releases the slot twice, which wedges the queue (seen on
+the STM32F446RE under GCC 16 at `-Os`, in the bench suite below).
 The scheduler is `activate()`: it serves the highest non-empty queue
 below the ceiling, one event, with the ceiling raised to that object's
 index for the length of the dispatch and restored after it, and repeats
@@ -1000,7 +1007,16 @@ a preemptive platform: the armed time events
 verbs of a `Ring` ([ring.md](ring.md)); the guard covers each verb, not
 a run a producer fills between `write_span()` and `publish()`, so a
 transmit ring two objects write is corrupted inside a run, and the one
-owner is the rule there. For a UART that is one direct writer per
+owner is the rule there. A polled loop a service runs inside its own
+dispatch (the bus arbiter's loop with two frames in flight) is held off
+by every dispatch above the service for that dispatch's whole length,
+which the service's hold-off figure, the image's longest handler or
+masked window, does not count: under Rubato the hold-off is the
+longest dispatch above the service, and a preemption that outlasts a
+frame ends the transaction with the status the service detects
+(`spi_overrun` on the STM32F4, measured: the service never hands back
+a run with a hole, the requester sees the status); the DMA engines and
+the interrupt pump carry no such limit. For a UART that is one direct writer per
 instance, in one of two forms, independent and never stacked on one
 instance: a bookable transport object (a `Request` with a run lent
 `Lease::reply`, a `Done`, the bus arbiter's shape) for heterogeneous
@@ -1049,7 +1065,14 @@ disarmed inside a walk of the list and the matured ones served in
 priority order, idle at the base only, overflow unchanged, the ring's
 guard counted, and Tenuto's scenarios giving Tenuto's traces when no
 interrupt ever fires. `Lease::reply` under preemption is reasoned, not
-yet in the suite.
+yet in the host suite; on the bench it is exercised: the STM32F4's SPI
+and UART stacks ran under Rubato against the STM32G0B1RE's unchanged
+peers with an object preempting at prime periods, the DMA engines, the
+interrupt pump, the arbiter with three requesters of three priorities,
+`SerialPort`'s line loans to a borrower above it and the one-writer
+UART all byte-exact (`test_stm32f4_rubato_link`, 230 verdicts, [the
+STM32F4 platform page](../stm32f4/platform.md)); the polled loop's
+limit above is what that suite found.
 
 Not Rubato: a blocking kernel (a handler that waits is a different
 kernel's, reserved under the name `Fermata` and not built), a
