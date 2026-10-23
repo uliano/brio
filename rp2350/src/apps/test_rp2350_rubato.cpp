@@ -556,8 +556,10 @@ void sort(uint32_t* v, uint32_t n) {
 ///   the handler's tail after the stamp (a literal, a store, the
 ///   frame's release, a pop of the PC)                               9
 ///   the tail-chain into PendSV                                      6
-///   PendSV's thirteen instructions to the BX (two pushes, two stores,
-///   a literal, a DSB: 19) and its return into thread mode (12)     31
+///   PendSV's twelve instructions to the BX (two pushes, two stores,
+///   a literal: 17; no barrier on this core, cortexm/schedule.hpp -
+///   the count keeps the DSB's two the bound was derived with) and
+///   its return into thread mode (12)                               31
 ///   the entry: cpsie, the call                                      5
 ///   activate(): nine registers saved and the frame, two literals,
 ///   the ceiling's load and test, Top's visit (the call to the queue

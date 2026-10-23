@@ -490,28 +490,32 @@ cost taken off:
 
 | clk_sys cycles | Cortex-M33 | Hazard3 |
 |---|---|---|
-| road 1: an interrupt's last statement to the preempting dispatch's first, min / median / max over 100 events | 115 / 115 / 157 | 188 / 188 / 188 |
+| road 1: an interrupt's last statement to the preempting dispatch's first, min / median / max over 100 events | 113 / 113 / 142 | 188 / 188 / 188 |
 | road 1: the path's count by the release listing, and the bound | 145, 232 | 182, 289 |
-| road 1 at depth 2, over a preempting dispatch | 96 | 171 |
-| `activate()` over four empty queues | 95 | 97 |
-| a post that asks nothing | 59 | 54 |
-| a road-2 post, the receiver's empty dispatch inside (the scheduling's share) | 321 (262) | 346 (292) |
-| one `arm()`, its masked window inside | 54 | 46 |
-| a post under the mask: the section's end to the receiver's first | 134 | 176 |
-| stack high-water of the suite's deepest chain (bytes), the deepest sample in a dispatch / in the interrupt | 656 (544 / 488) | 904 (864 / 736) |
+| road 1 at depth 2, over a preempting dispatch | 94 | 171 |
+| `activate()` over four empty queues | 96 | 97 |
+| a post that asks nothing | 60 | 54 |
+| a road-2 post, the receiver's empty dispatch inside (the scheduling's share) | 319 (259) | 346 (292) |
+| one `arm()`, its masked window inside | 63 | 46 |
+| a post under the mask: the section's end to the receiver's first | 132 | 176 |
+| stack high-water of the suite's deepest chain (bytes), the deepest sample in a dispatch / in the interrupt | 552 (544 / 488) | 904 (864 / 736) |
 
-The Cortex-M33's road-1 events over 115 are the ones a tick or a refill
+The Cortex-M33's road-1 events over 113 are the ones a tick or a refill
 landed in, and its measured path runs under the count drawn with the
 Cortex-M4's table, the model the suite takes for want of the M33's own
 figures. On Hazard3 the model, 3.8.7's counts with the interrupt's
 entry (which the section does not give) taken at `ecall`'s, is 6 cycles
 under the measurement. A post under the mask lengthened by a kernel
-tick reached 1275 cycles on the Cortex-M33 and 884 on Hazard3, and is
+tick reached 480 cycles on the Cortex-M33 and 884 on Hazard3, and is
 reported, not judged. The two halves' rows part where their mechanisms
 do: on the Cortex-M33 the hardware stacks the interrupted code's
 registers, on Hazard3 the crt's trampoline and the scheduler's entry
 each save sixteen in software ("What the silicon does"), and the
-stack's levels carry those frames.
+stack's levels carry those frames. The Cortex-M33's PendSV body is
+thirteen instructions and 32 bytes, without the DSB that is the
+Cortex-M4's alone ([../cortexm/README.md](../cortexm/README.md)); a
+build that kept it measured road 1 at 115, two cycles more, the
+barrier's cost on this core.
 
 - **The FPU across a preemption** (letter j, the Cortex-M33 alone):
   FPCCR reads 0xC000001C, ASPEN 1 and LSPEN 1, where the datasheet's

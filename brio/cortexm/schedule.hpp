@@ -114,10 +114,15 @@
  * nothing touched them (B1.5.8's PopStack). A core without an FPU builds
  * none of this, and its frames are always basic.
  *
- * ERRATUM. The Cortex-M4 r0p1 of the STM32F4 has erratum 838869: a store
- * just before an exception return may let the core vector to the wrong
- * interrupt. PendSV's last store is followed by a DSB, which is ARM's
- * workaround; the SVC handler stores nothing.
+ * THE RULE IS NO BARRIER IN THE BODY, AND THE CORTEX-M4 IS THE EXCEPTION.
+ * The exception return itself orders the body's stores on every core of
+ * the architecture; only the Cortex-M4 r0p1 (the STM32F4's) has erratum
+ * 838869, a store just before an exception return letting the core
+ * vector to the wrong interrupt, and ARM's workaround is a DSB after the
+ * last store. So PendSV's body carries that DSB on a Cortex-M4 alone
+ * (the device header's __CORTEX_M), three cycles the Cortex-M0+ and the
+ * Cortex-M33 do not pay for an erratum they have not got; the SVC
+ * handler stores nothing on any core.
  *
  * WHAT THIS FILE ASSUMES. Thread mode runs on the main stack
  * (CONTROL.SPSEL 0, the reset value, which no brio crt changes); every
@@ -206,9 +211,18 @@ template <class Kernel>
         :: "i"(&Kernel::activate));
 }
 
+#if (__CORTEX_M == 4U)
+/// The DSB erratum 838869 wants before the exception return: the
+/// Cortex-M4's alone (the file header).
+#define BRIO_CORTEXM_PENDSV_DSB "dsb\n\t"
+#else
+#define BRIO_CORTEXM_PENDSV_DSB
+#endif
+
 /// The body the program binds to PendSV_Handler, a naked handler: the two
 /// words and the fake frame, then the return into scheduler_thread<K>().
-/// Fourteen instructions.
+/// Thirteen instructions; fourteen on the Cortex-M4, whose erratum
+/// 838869 wants a DSB before the return (the file header).
 template <class Kernel>
 [[gnu::always_inline]] inline void scheduler_exception() {
     asm volatile(
@@ -225,7 +239,7 @@ template <class Kernel>
         "mov r0, lr\n\t"
         "movs r1, #16\n\t"
         "orrs r0, r0, r1\n\t"       // R's EXC_RETURN, a basic frame
-        "dsb\n\t"                   // Cortex-M4 erratum 838869
+        BRIO_CORTEXM_PENDSV_DSB      // the Cortex-M4 alone: erratum 838869
         "bx r0\n\t"
         ".ltorg\n\t"
         :: "i"(&scheduler_thread<Kernel>));

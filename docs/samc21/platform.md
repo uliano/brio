@@ -449,7 +449,7 @@ the road-1 letters land, nothing wired and nothing lit. The ruler is the
 kernel ticker's composed `BasicTicker::cycles()` (SysTick's position and
 the tick count; ARMv6-M has no cycle counter): two back-to-back reads
 are 48 cycles apart, a cost taken off every span below, and across four
-tick reloads it reads 4 x 48000 cycles within 7. CPU cycles, each figure
+tick reloads it reads 4 x 48000 cycles within 3. CPU cycles, each figure
 within the bound its letter derives from the release listing and the
 Cortex-M0+'s cycle table with every flash line paid at its worst
 alignment; an event a kernel tick landed in is told apart by the tick
@@ -462,40 +462,50 @@ nothing lengthened:
   in the UART's interrupt; Low posting to Mid and Mid to High nests High
   inside Mid inside Low, each inside the post that asked; at depth 2 an
   interrupt over High's handler, started by either road, runs Top before
-  High resumes, Top's first statement 205 to 206 cycles after the
+  High resumes, Top's first statement 200 to 201 cycles after the
   handler's last.
 - **The latency of road 1** (letter c): from the interrupt handler's
-  last statement to High's handler's first, 239 cycles min, 240 median,
-  283 max over 100 events, none missed, every event slower than the
-  path's own count one a kernel tick landed in.
+  last statement to High's handler's first, 244 cycles min and 245
+  median over 100 events in every run, the max 289 to 310 across ten
+  runs, none missed, every event slower than the path's own count one a
+  kernel tick landed in.
 - **The post** (letter d): a post that asks for nothing 107 cycles; a
-  post that runs High's empty dispatch inside it 693, the scheduling's
-  share 586.
+  post that runs High's empty dispatch inside it 700, the scheduling's
+  share 593.
 - **Time events under preemption** (letter f): three timers matured in
   one turn are posted with the ceiling held at 0 and served High, Mid,
   Low; High preempting Low's loop of `arm()` and `disarm()` by road 1
   leaves the list whole, every timer due fired once, the disarmed one
-  never; one `arm()` 126 cycles with its masked window inside.
+  never; one `arm()` 120 cycles with its masked window inside.
 - **The request under PRIMASK** (letter g, the core having no FPU to
   test): a post to a higher object inside a critical section pends
   PendSV and is served when the section's guard restores the mask,
   before the statement after it, from the Console's dispatch and from
   inside Low's; the section's last statement to the receiver's first
-  278 to 279 cycles.
+  297 to 298 cycles.
 - **The request pending at the idle's WFI** (letter w): with interrupts
   masked as the kernel's idle path masks them, a post to Mid pends
   PendSV and the platform's own `idle()` follows. **A pending PendSV
   ends the WFI, in IDLE0 and in IDLE2**: Mid served at the unmask,
-  before the next tick, in 10 of 10 runs in each mode, 289 to 290 cycles
+  before the next tick, in 10 of 10 runs in each mode, 306 to 307 cycles
   from the stamp before `idle()` to Mid's first statement; the letter
   hands PM.SLEEPCFG back at IDLE0. STANDBY is not walked (the end of
   "Not covered yet").
 - **Dark** (letter i): every object idle, no time event armed, TC4's
   line quiet, PB23 (the LED's pad) not an output, the ceiling the
   Console's, interrupts enabled.
-- **The stack** (letter h): 596 bytes of high-water for the suite's
-  deepest chain, the deepest sampled stack pointer at 496 bytes in a
-  dispatch and 408 in the interrupt.
+- **The stack** (letter h): 556 to 580 bytes of high-water for the
+  suite's deepest chain, the deepest sampled stack pointer at 496 bytes
+  in a dispatch and 392 to 400 in the interrupt.
+- **Where the code sits** (PendSV's body thirteen instructions and 32
+  bytes, without the DSB that is the Cortex-M4's alone,
+  [../cortexm/README.md](../cortexm/README.md)): a build of the suite
+  whose body kept the DSB, four bytes longer, measured road 1 at 239
+  min and 240 median, the road-2 post 693, `arm()` 126, the section 278
+  to 279 and the idle letter 289 to 290 - the four bytes moved the code
+  after the body, and on this flash where a path sits moves its cost by
+  more than the barrier's cycle (the STM32G0's
+  [platform page](../stm32g0/platform.md) measures the two apart).
 
 ## The idle path, measured
 

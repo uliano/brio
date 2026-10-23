@@ -79,7 +79,7 @@ architectures.
   [../stm32g0/platform.md](../stm32g0/platform.md)), the SAM C21's
   Cortex-M0+ (`samc21/platform.hpp`'s `SamRubatoPlatform`, measured on
   the SAMC21J18A: road 1 from an interrupt's last statement to the
-  preempting dispatch's first in 240 cycles, the SVC vector bound by
+  preempting dispatch's first in 245 cycles, the SVC vector bound by
   that crt's name `SVCall_Handler`, a PendSV pending at the idle's WFI
   ending it, [../samc21/platform.md](../samc21/platform.md)), the
   RP2040's (`rp2040/platform.hpp`'s `Rp2040RubatoPlatform`, one per
@@ -89,7 +89,7 @@ architectures.
   cycles, a Rubato on each core preempting at once through that entry,
   [../rp2040/platform.md](../rp2040/platform.md)) and the RP2350's
   Cortex-M33 (`rp2350/platform.hpp`'s `Rp2350RubatoPlatform`, measured
-  on the WeAct RP2350B: road 1 in 115 cycles,
+  on the WeAct RP2350B: road 1 in 113 cycles,
   [../rp2350/platform.md](../rp2350/platform.md)). The ARMv8-M facts the
   M33 rests on are checked against the documents there: EXC_RETURN's
   security bits (ES, DCRS and S, all 1 in the Secure state the image
@@ -100,7 +100,11 @@ architectures.
   the RP2350's own register table gives both a reset value of 0, and the
   register read after the bootrom is 0xC000001C, both bits 1, the FP
   registers bit-exact across a preemption there - the measurement
-  contradicts the table.
+  contradicts the table. One barrier in the PendSV body is the
+  Cortex-M4's alone: erratum 838869 (the STM32F4's r0p1) wants a DSB
+  before the exception return, and the body carries it on that core and
+  on no other (the device header's `__CORTEX_M`), the rule being no
+  barrier where no erratum asks for one.
 
 ## Why the stratum exists
 

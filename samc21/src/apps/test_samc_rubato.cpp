@@ -554,7 +554,8 @@ void sort(uint32_t* v, uint32_t n) {
 /// release listing (the file header says how a bound is drawn): the
 /// stamp's tail and the handler's exit (25 instructions, a pop of five
 /// into the PC); the tail-chain into PendSV (11) and its vector's read;
-/// PendSV's fourteen instructions and the return into thread mode (10);
+/// PendSV's thirteen instructions (no barrier on this core,
+/// cortexm/schedule.hpp) and the return into thread mode (10);
 /// the entry's cpsie and call; activate() at the Console's ceiling - its
 /// frame and the ceiling's test, Top's visit through the queue's
 /// out-of-line empty(), High's through empty() and take() to the

@@ -43,11 +43,12 @@
  * built in two (MOVS, LSLS: no literal, no data fetch from the flash),
  * the CPUID load, its scaling, the table's address (ADR) and the entry's
  * load - seven cycles where the literal took two at zero wait states
- * (table 81). And the body has no DSB: the single body's DSB is the
- * workaround for the Cortex-M4 r0p1's erratum 838869 (that file's
- * ERRATUM paragraph), this chip's two cores are Cortex-M0+ r0p1, and the
- * stores it would order are the core's own, unstacked by the same core.
- * Eighteen instructions to the single body's fourteen, 44 bytes with the
+ * (table 81). And the body has no DSB, as the single body has none on
+ * this core: the barrier is the Cortex-M4's alone, for its erratum
+ * 838869 (that file's header), this chip's two cores are Cortex-M0+
+ * r0p1, and the stores it would order are the core's own, unstacked by
+ * the same core.
+ * Eighteen instructions to the single body's thirteen, 44 bytes with the
  * table; two cycles more on each core.
  *
  * Each core keeps everything else as cortexm/schedule.hpp says: PendSV at
@@ -62,7 +63,7 @@
  * with a table of its own (the launch protocol's VTOR word is the table
  * core 1 runs with, 2.8.2), identical to core 0's but for entry 14, which
  * would hold a single body bound to K1 - so each core's PendSV is
- * cortexm/schedule.hpp's fourteen instructions with nothing asked. What
+ * cortexm/schedule.hpp's thirteen instructions with nothing asked. What
  * it costs: a second table of 48 words in the image (192 bytes in the
  * flash, or a copy in SRAM, aligned as VTOR requires), every vector the
  * program binds present in both; the crt to define it

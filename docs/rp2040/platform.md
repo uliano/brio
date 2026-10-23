@@ -104,10 +104,11 @@ nothing short of the DORMANT state stops.
   body with the core's identity read first (SIO's CPUID, one cycle on the
   IO port) and used to pick `scheduler_thread<K0>` or
   `scheduler_thread<K1>` from a two-word table, the same path on both
-  cores; and no DSB, the single body's being the Cortex-M4 erratum
-  838869's workaround, an erratum of another core. By the release
+  cores; and no DSB, as the single body has none on this core (the
+  barrier is the Cortex-M4's alone, for its erratum 838869,
+  [the core stratum's page](../cortexm/README.md)). By the release
   listing eighteen instructions and 44 bytes with the table, against the
-  single body's fourteen and 36: two cycles more at zero wait states.
+  single body's thirteen and 32: two cycles more at zero wait states.
   `K0` must be a Rubato on `Rp2040RubatoPlatform<0>` and `K1` one on
   `Rp2040RubatoPlatform<1>`, refused at compile time otherwise.
 - `Ticker` = `BasicTicker<1000>` on SysTick, `SysTickCounter` for a
@@ -210,7 +211,7 @@ An open decision: how one table serves two kernels. The pair body is
 one of two ways. The other is a vector table per core: core 1 launched
 with a table of its own (the launch protocol's VTOR word), identical to
 core 0's but for PendSV's entry, which would hold the single body bound
-to `K1` - each core's PendSV then the core stratum's fourteen
+to `K1` - each core's PendSV then the core stratum's thirteen
 instructions with nothing asked. What that costs: a second table of 48
 words, 192 bytes in the flash or a copy in SRAM aligned as VTOR
 requires, every vector a program binds present in both; a crt that
