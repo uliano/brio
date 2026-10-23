@@ -28,6 +28,24 @@
  * the timer. This is what keeps the armed list free of critical
  * sections.
  *
+ * On a preemptive platform (kernel/platform.hpp, the Rubato kernel's) a
+ * dispatch can start inside another, so "the kernel loop" is several
+ * dispatches on one stack, and any of them may arm or disarm while
+ * another is walking the list. There arm(), disarm(), clear_all(),
+ * process() and the two questions take P::CriticalSection around their
+ * list operations, the pointer reads and writes: arm() exactly one,
+ * disarm() one, a question one. process() walks the list under the
+ * guard and fires each matured payload with the guard dropped, because
+ * a fire is a post and a post can run a dispatch to its end, which must
+ * not run masked; after the fire it takes the guard again and reads
+ * the walk's place afresh, because the dispatch may have disarmed or
+ * re-armed anything. The walk's place is a pointer to the link it stands
+ * on, and an unlink of the node that owns that link moves the place to
+ * the node's predecessor, so the walk resumes at the node that follows:
+ * no node is skipped, none is visited twice, a disarmed one is never
+ * fired, and one armed during the walk is first looked at on the next
+ * turn. The interrupt handler's rule above does not change.
+ *
  * When a timer matures. arm() stores the deadline as P::now() plus the
  * delay, and P::now() is a whole number of ticks: the fraction of the
  * current tick already elapsed at the arming instant is not counted.
@@ -75,6 +93,7 @@
 
 #include <stdint.h>
 #include <optional>
+#include <type_traits>
 
 #include "kernel/active_object.hpp"
 #include "kernel/platform.hpp"
@@ -107,45 +126,67 @@ public:
     /// (0 = one-shot); both less than 2^31 (the file header's limits).
     /// Re-arming an armed event restarts it.
     static void arm(Base& te, uint32_t delay_ticks, uint32_t period_ticks) {
-        disarm(te);
-        te.deadline_ = P::now() + delay_ticks;
-        te.period_ = period_ticks;
-        te.armed_ = true;
-        te.next_ = head_;
-        head_ = &te;
+        if constexpr (Preemptive<P>) {
+            typename P::CriticalSection cs;   // the one guard: unlink and link in it
+            unlink(te);
+            te.deadline_ = P::now() + delay_ticks;
+            te.period_ = period_ticks;
+            te.armed_ = true;
+            te.next_ = head_;
+            head_ = &te;
+            if (walk_ == &head_) {
+                walk_ = &te.next_;            // behind the walk: looked at next turn
+            }
+        } else {
+            disarm(te);
+            te.deadline_ = P::now() + delay_ticks;
+            te.period_ = period_ticks;
+            te.armed_ = true;
+            te.next_ = head_;
+            head_ = &te;
+        }
     }
 
     static void disarm(Base& te) {
-        for (Base** link = &head_; *link != nullptr; link = &(*link)->next_) {
-            if (*link == &te) {
-                *link = te.next_;
-                break;
+        if constexpr (Preemptive<P>) {
+            typename P::CriticalSection cs;
+            unlink(te);
+        } else {
+            for (Base** link = &head_; *link != nullptr; link = &(*link)->next_) {
+                if (*link == &te) {
+                    *link = te.next_;
+                    break;
+                }
             }
+            te.next_ = nullptr;
+            te.armed_ = false;
         }
-        te.next_ = nullptr;
-        te.armed_ = false;
     }
 
     static bool armed(const Base& te) { return te.armed_; }
 
     /// Called by the kernel loop once per turn: post every matured event.
     static void process() {
-        const uint32_t now = P::now();
-        Base** link = &head_;
-        while (*link != nullptr) {
-            Base& te = **link;
-            if (static_cast<int32_t>(now - te.deadline_) >= 0) {
-                if (te.period_ != 0) {
-                    te.deadline_ += te.period_;   // drift-free
-                    link = &te.next_;
+        if constexpr (Preemptive<P>) {
+            process_guarded();
+        } else {
+            const uint32_t now = P::now();
+            Base** link = &head_;
+            while (*link != nullptr) {
+                Base& te = **link;
+                if (static_cast<int32_t>(now - te.deadline_) >= 0) {
+                    if (te.period_ != 0) {
+                        te.deadline_ += te.period_;   // drift-free
+                        link = &te.next_;
+                    } else {
+                        *link = te.next_;             // one-shot: unlink first,
+                        te.next_ = nullptr;           // so fire may re-arm freely
+                        te.armed_ = false;
+                    }
+                    te.fire_(te);
                 } else {
-                    *link = te.next_;             // one-shot: unlink first,
-                    te.next_ = nullptr;           // so fire may re-arm freely
-                    te.armed_ = false;
+                    link = &te.next_;
                 }
-                te.fire_(te);
-            } else {
-                link = &te.next_;
             }
         }
     }
@@ -167,6 +208,7 @@ public:
      * Main-loop context only, like the rest of this class.
      */
     static std::optional<uint32_t> ticks_to_next() {
+        [[maybe_unused]] const Guard guard{};
         const uint32_t now = P::now();
         std::optional<uint32_t> best;
         for (const Base* te = head_; te != nullptr; te = te->next_) {
@@ -192,6 +234,7 @@ public:
      * A question, not a decision; main-loop context only.
      */
     static std::optional<uint32_t> next_deadline() {
+        [[maybe_unused]] const Guard guard{};
         const uint32_t now = P::now();
         std::optional<uint32_t> best;
         int32_t best_left = 0;
@@ -207,6 +250,7 @@ public:
 
     /// Tests / diagnostics: drop every armed event.
     static void clear_all() {
+        [[maybe_unused]] const Guard guard{};
         while (head_ != nullptr) {
             Base* te = head_;
             head_ = te->next_;
@@ -217,6 +261,83 @@ public:
 
 private:
     static inline Base* head_ = nullptr;
+
+    // ---- the preemptive platform's list (the file header) ------------------
+
+    /// The guard a question and clear_all() take: the platform's critical
+    /// section on a preemptive platform, nothing - an empty object - on
+    /// every other.
+    struct NoGuard {};
+    using Guard = std::conditional_t<Preemptive<P>, typename P::CriticalSection, NoGuard>;
+
+    /// Where process() stands: the link it reads next (&head_, or the
+    /// next_ of the node it last passed); null when no walk is under way.
+    /// Written under the guard only, by process(), and by an unlink or an
+    /// arm that moves the node owning it.
+    static inline Base** walk_ = nullptr;
+
+    /// Take te out of the list, under the caller's guard. When te owns the
+    /// link the walk stands on, the walk moves to the link that pointed at
+    /// te, which now points at te's successor: nothing skipped.
+    static void unlink(Base& te) {
+        for (Base** link = &head_; *link != nullptr; link = &(*link)->next_) {
+            if (*link == &te) {
+                *link = te.next_;
+                if (walk_ == &te.next_) {
+                    walk_ = link;
+                }
+                break;
+            }
+        }
+        te.next_ = nullptr;
+        te.armed_ = false;
+    }
+
+    /// From the walk's place, the next matured node, with its list update
+    /// made (a periodic one's deadline advanced and the walk moved past
+    /// it, a one-shot unlinked and disarmed); null at the end of the list,
+    /// the walk over. Under the caller's guard.
+    static Base* next_due(uint32_t now) {
+        while (*walk_ != nullptr) {
+            Base& te = **walk_;
+            if (static_cast<int32_t>(now - te.deadline_) >= 0) {
+                if (te.period_ != 0) {
+                    te.deadline_ += te.period_;   // drift-free
+                    walk_ = &te.next_;
+                } else {
+                    *walk_ = te.next_;            // one-shot: unlinked before the fire
+                    te.next_ = nullptr;
+                    te.armed_ = false;
+                }
+                return &te;
+            }
+            walk_ = &te.next_;
+        }
+        walk_ = nullptr;
+        return nullptr;
+    }
+
+    /// process() on a preemptive platform: the list read and written under
+    /// the guard, each fire with the guard dropped, the walk's place read
+    /// again under the guard after it. One guard per process() and one
+    /// more per fire.
+    static void process_guarded() {
+        const uint32_t now = P::now();
+        Base* due;
+        {
+            typename P::CriticalSection cs;
+            walk_ = &head_;
+            due = next_due(now);
+        }
+        while (due != nullptr) {
+            due->fire_(*due);                     // unmasked: may run dispatches to their end
+            if constexpr (requires { P::preempt_point(); }) {
+                P::preempt_point();               // a host's: where an interrupt could land
+            }
+            typename P::CriticalSection cs;
+            due = next_due(now);
+        }
+    }
 };
 
 /**

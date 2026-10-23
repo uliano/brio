@@ -24,8 +24,9 @@
  * main loop produces and the interrupt handler consumes, in a receive
  * ring the other way round. Two producers break the rule silently: a
  * print from an interrupt handler beside the main loop's prints, say
- * (every active object's dispatch runs in the loop, so their prints are
- * one producer). When an index is a single
+ * (under Tenuto every active object's dispatch runs in the loop, one at
+ * a time, so their prints are one producer; under Rubato, below). When
+ * an index is a single
  * naturally atomic access for the target (sizeof(index_t) <=
  * P::atomic_width: one byte on an 8-bit core, a word on a 32-bit one)
  * every operation is lock-free: no interrupt masking, no added
@@ -72,6 +73,18 @@
  * atomically (docs/design/overview.md, "Authority of util/"); the strata
  * Ring runs on, and the path each takes, are docs/design/ring.md's
  * realizations table.
+ *
+ * Under a preemptive kernel (kernel/platform.hpp's Preemptive, the Rubato
+ * kernel's platform) a dispatch can start inside another, so two active
+ * objects that write one ring are no longer one producer: the second can
+ * land between the first's read of head_ and its store. There the
+ * producer's verbs, push(), write_span() and publish(), take
+ * P::CriticalSection whatever the index width, the path a wide index
+ * takes, so each verb is one indivisible step against the others; the
+ * consumer's verbs follow the index width as before. The guard covers a
+ * verb, not the run between write_span() and its publish(): a producer
+ * filling a run can still be preempted there by another producer of the
+ * same ring.
  *
  * A second flavour, for a producer that stores no index at all.
  * HardwareRing (below Ring) is the consumer half of a ring whose
@@ -132,6 +145,11 @@ public:
     /// True when head_/tail_ are shared bare (see the header comment).
     static constexpr bool lock_free = sizeof(index_t) <= P::atomic_width;
 
+    /// True when the producer's verbs run bare: the index is lock-free and
+    /// the platform is not preemptive (the header comment, "Under a
+    /// preemptive kernel").
+    static constexpr bool producer_lock_free = lock_free && !Preemptive<P>;
+
     static constexpr index_t capacity() {
         return static_cast<index_t>(size - 1);
     }
@@ -139,7 +157,7 @@ public:
     /// Append one element, copied into its slot; false (nothing written)
     /// when the ring is full. Producer side only; never waits.
     [[gnu::always_inline]] bool push(const T& value) {
-        if constexpr (lock_free) {
+        if constexpr (producer_lock_free) {
             return push_body(value);
         } else {
             typename P::CriticalSection cs;
@@ -218,7 +236,7 @@ public:
     /// run stays valid until the producer's next publish() or push(),
     /// and nothing it writes is visible to the consumer before publish().
     std::span<T> write_span() {
-        if constexpr (lock_free) {
+        if constexpr (producer_lock_free) {
             return write_span_body();
         } else {
             typename P::CriticalSection cs;
@@ -230,7 +248,7 @@ public:
     /// free room, so an over-long publish cannot walk the head into the
     /// tail and make a full ring read as empty. Producer side only.
     void publish(index_t n) {
-        if constexpr (lock_free) {
+        if constexpr (producer_lock_free) {
             publish_body(n);
         } else {
             typename P::CriticalSection cs;

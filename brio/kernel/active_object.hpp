@@ -13,7 +13,8 @@
  *  - `queue`: a static EventQueue<Event, depth, P>, the one place where
  *    events for this object wait. The depth is the object's own sizing
  *    decision, which is why no base class declares the queue for it;
- *  - `init()`: called once by Tenuto::init_all(), in list order, before
+ *  - `init()`: called once by the kernel's init_all() (Tenuto's or
+ *    Rubato's), in list order, before
  *    the first event is served. An Fsm-based object calls start(&initial)
  *    here, so its first state is entered before anything is posted;
  *  - `dispatch(const Event&)`: handle one event to completion. Fsm
@@ -23,11 +24,14 @@
  *
  * The rules the compiler cannot see, and that the kernel is written
  * assuming:
- *  - dispatch() is called from the kernel loop only, with interrupts
- *    enabled, and is never re-entered: while it runs no other active
- *    object runs, so the object's static data needs no lock against
- *    other objects. Interrupt handlers are the only concurrent code, and
- *    they touch nothing of the object but its queue, through post();
+ *  - dispatch() is called by the kernel only - from its loop or, under
+ *    Rubato (kernel/rubato.hpp), from inside a lower-priority object's
+ *    dispatch -, with interrupts enabled, and is never re-entered:
+ *    under Tenuto no other active object runs while it runs, under
+ *    Rubato a higher one may run inside it, and in both the object's
+ *    static data needs no lock against other objects, which touch
+ *    nothing of it but its queue, through post(), as interrupt
+ *    handlers do;
  *  - the event a dispatch receives lives in the queue's slot, and the
  *    slot is the object's until it is released: by the kernel right
  *    after the dispatch, or, when the object called the queue's hold()
@@ -54,7 +58,8 @@
 
 namespace brio {
 
-/// What Tenuto<P, Aos...> requires of every AO in its pack.
+/// What a kernel (Tenuto<P, Aos...>, Rubato<P, Aos...>) requires of
+/// every AO in its pack.
 template <typename A>
 concept ActiveObject = requires(const typename A::Event& e, uint8_t h) {
     A::init();
@@ -89,7 +94,7 @@ bool serve_one() {
 
 /// The platform an AO's queue is guarded by, when the queue names it
 /// (EventQueue does): on a chip with more than one core this is the
-/// AO's core. Tenuto and TimeEvent check it against their own P, so an
+/// AO's core. The kernels and TimeEvent check it against their own P, so an
 /// AO sits in the pack of its own core's kernel and a timer posts to an
 /// AO of its own core - or does not compile. A queue that names no
 /// platform (a hand-rolled one in a test) is trusted.

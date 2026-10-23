@@ -198,10 +198,16 @@
  *
  * What is not here. This core can nest interrupts - two, four or eight
  * levels, chosen in INTSYSCR with the priority bytes in IPRIOR - and
- * WCH's own startup file turns that on. brio does not: the kernel's rule
- * (docs/design/kernel.md section 1, "The model in one page") is that an
- * ISR body runs to completion, on every target, and the crt leaves
- * INESTEN clear. The four free vectored entries (VTFADDRR) are a real
+ * WCH's own startup file turns that on. brio does not, as a rule: the
+ * kernel's rule (docs/design/kernel.md section 1, "The model in one
+ * page") is that an ISR body runs to completion, on every target, so the
+ * crt leaves INESTEN clear and no driver writes a priority byte, and the
+ * peripheral handlers never nest among themselves. The one program that
+ * turns nesting on is a Rubato one, through ch32vx03/schedule.hpp's
+ * scheduler_init(): its scheduling request, the software interrupt, is
+ * put one preemption level below every peripheral line, which still
+ * share one level; that file owns the write to INTSYSCR and to that one
+ * priority byte. The four free vectored entries (VTFADDRR) are a real
  * feature of this core with no user yet; they arrive with one.
  */
 

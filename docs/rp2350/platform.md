@@ -11,7 +11,9 @@ compiler-checked set of requirements on a type;
 a way to mask interrupts for a critical section, a way to sleep until
 the next interrupt without losing one that arrives at the wrong moment,
 a source of time, a breakpoint for a panic, and a record a panic leaves
-for the next boot. `Rp2350Platform<core, TB>` is this chip's answer. It
+for the next boot. `Rp2350Platform<core, TB>` is this chip's answer, and
+`Rp2350RubatoPlatform<core, TB>` the preemptive kernel's, the same type
+with the three members of a preemptive platform ("Types and verbs"). It
 is one type per core, because the two cores of a pair run two kernels
 ([multicore.md](multicore.md)), and one type for both architectures: the
 same source compiles for the Cortex-M33 pair and for the Hazard3 pair,
@@ -110,18 +112,29 @@ numbering the two architectures share), 7.5 (the subsystem reset
 controller), 9.11 (the pad registers and their isolation latch), 12.15.1
 (SYSINFO) and 12.15.3 (TBMAN), 2.1.3 (the atomic register aliases),
 appendix C (the hardware revisions) and appendix E (the errata,
-RP2350-E9 among them). The drivers: `brio/rp2350/platform.hpp` (the brio
-Platform itself), `core.hpp` with `core_m33.hpp` and `core_hazard3.hpp`
-(the one file of the stratum that asks which processor is in the socket,
-and its two halves), `ticker.hpp` (the kernel timebase, one per core),
-`mtime.hpp` (the microsecond ruler), `resets.hpp`, `sysinfo.hpp` and
-`device.hpp`; 4.4.1 (the XIP cache) and `brio/util/placement.hpp` for
-the placement. The reference suite: `test_rp2350_platform`, which runs
-on both architectures from one source and is judged the same way on each
-(a letter is one command key of the suite's console and the group of
+RP2350-E9 among them). For the preemptive platform: 3.7.2 (the
+Cortex-M33's configuration: the Security Extension, the FPU, four
+priority bits), the M33 register list's FPCCR table (3.7.5), 3.8.4
+(Hazard3's trap entry and `mret`), 3.8.4.2.1 (the software interrupt and
+the SIO's RISCV_SOFTIRQ register, 3.1.11), 3.8.6.1 (Xh3irq's preemption,
+which is not used), 3.8.7 (Hazard3's instruction cycle counts) and 3.8.8
+(its configuration); and ARM's ARMv8-M Architecture Reference Manual
+(DDI 0553) for EXC_RETURN. The drivers: `brio/rp2350/platform.hpp` (the
+brio Platform itself, and the Rubato platform beside it), `core.hpp`
+with `core_m33.hpp` and `core_hazard3.hpp` (the one file of the stratum
+that asks which processor is in the socket, and its two halves),
+`schedule.hpp` with `schedule_hazard3.hpp` (the preemptive kernel's
+request, the core stratum's on one half and this stratum's on the
+other), `ticker.hpp` (the kernel timebase, one per core), `mtime.hpp`
+(the microsecond ruler), `resets.hpp`, `sysinfo.hpp` and `device.hpp`;
+4.4.1 (the XIP cache) and `brio/util/placement.hpp` for the placement.
+The reference suites: `test_rp2350_platform`, which runs on both
+architectures from one source and is judged the same way on each (a
+letter is one command key of the suite's console and the group of
 verdicts it runs; `z` is the key that runs every letter but two, which
 run by name: `r`, the breadcrumb across a processor reset, and `x`,
-`break_here()`, which stops the console).
+`break_here()`, which stops the console), and `test_rp2350_rubato` for
+the preemptive kernel, the same on both ("Bench findings").
 
 ## What the silicon does
 
@@ -201,6 +214,89 @@ not got is the bond wire. A build that states its package refuses an
 absent pad at compile time; a build that states none compiles for the
 larger package and refuses at run time against SYSINFO's PACKAGE_SEL.
 
+**THE PREEMPTIVE KERNEL'S REQUEST IS TWO ENGINES UNDER ONE NAME.** Rubato
+([design/kernel.md](../design/kernel.md), "Rubato") asks its platform for
+a way to run the scheduler at once from a dispatch and at the handler's
+exit from an interrupt handler, and a place where the scheduler then
+runs outside every handler. On the Cortex-M33 that is the core
+stratum's PendSV and SVC, the same code the STM32F4 and the STM32G0 run
+([../cortexm/README.md](../cortexm/README.md)): PendSV at the lowest of
+the core's sixteen levels (3.7.2: four priority bits) returns into the
+scheduler in thread mode through a second exception frame, and the
+scheduler leaves through SVC. On Hazard3 it is a realization of this
+stratum's own, written from 3.8.4:
+
+- The request is the machine software interrupt. mip.MSIP is wired to
+  the SIO's RISCV_SOFTIRQ register, one flag per hart, raised by a
+  write of CORE0_SET or CORE1_SET and lowered by a write of the
+  matching CLR bit (3.1.11,
+  3.8.4.2.1): a level, which the scheduler's body lowers before
+  anything else. The request raises the flag of the hart that asks.
+- The datasheet does not say how many instructions retire between the
+  store that raises the flag and the trap, so the request does not count
+  on a latency: with mstatus.MIE set it waits until the scheduler has
+  been served (a count the body moves in mscratch), and with MIE clear
+  it returns at once, the flag taken when the mask lifts. Measured, one
+  to two stores retire behind the raising store before the trap, and
+  none behind the request ("Bench findings").
+- Nothing nests, and nothing needs to. A trap entry clears mstatus.MIE
+  (3.8.4) and the crt never sets it inside a handler, so every handler
+  still runs masked to its end; what Rubato preempts is a dispatch, which
+  runs outside every trap with MIE set. Xh3irq's preemption levels
+  (3.8.6.1) are for an interrupt interrupting another, and stay unused.
+- The vector is reached through the crt's trampoline, which saves the
+  sixteen caller-saved registers in a 64-byte frame, calls
+  `isr_riscv_softirq`, restores them and executes `mret`. The body bound
+  there does not run the scheduler: it stores the interrupted code's
+  mepc and mstatus in the two words just below the trampoline's frame,
+  clears MPIE so that the trampoline's `mret` lands with MIE still
+  clear, and points mepc at the scheduler's entry. The entry builds an
+  80-byte frame whose words at offsets 8 and 12 ARE those two stores,
+  saves the sixteen registers, sets MIE, runs the scheduler, restores,
+  writes mstatus (the mask back on) and mepc from the two words and
+  executes `mret` itself. `mret` is legal without a prior trap (3.8.4),
+  and this core pushes nothing at a trap and keeps no per-interrupt
+  state, so there is nothing to pair it with: no exit vector, no
+  `ecall`, where the QingKe V4 of the CH32V203 needs one for its
+  hardware prologue's pop.
+- Hazard3 here has no floating-point unit (3.8.8), so the entry saves no
+  f-register.
+
+**WHAT THE CORTEX-M33'S HALF RESTS ON, CHECKED AGAINST THE DOCUMENTS.**
+The core stratum's code was written for ARMv6-M and ARMv7-M; on this
+ARMv8-M core with the Security Extension (3.7.2), running Secure as the
+bootrom hands over:
+
+- EXC_RETURN. The return value PendSV builds is the one it entered
+  with, bit 4 set. Entered from thread mode in the Secure state on the
+  main stack, that is 0xFFFFFFF9 (or 0xFFFFFFE9 with an FP frame):
+  bit 0 ES = 1, the exception taken to the Secure state; bit 2 SPSEL =
+  0, the main stack; bit 3 Mode = 1, thread; bit 4 FType = 1, a basic
+  frame; bit 5 DCRS = 1, the default rules for the callee registers
+  (none stacked); bit 6 S = 1, the frame on the Secure stack (DDI 0553,
+  the EXC_RETURN payload). Bit 4 is the only one the code changes, and
+  the three security bits are carried from the value the core wrote.
+  This chip's SFSR.INVER (the M33 register list) names the two ways a
+  return violates them - DCRS clear, or ES set returning to Non-secure -
+  and neither applies.
+- MSPLIM is zeroed by the crt (`startup_rp2350_arm.cpp`) and nothing
+  sets it, so the fake frame, written below the real one, is never under
+  a stack limit.
+- PendSV's priority: `scheduler_init()` writes every bit of SHPR3's
+  PRI_14 field, and the core implements four (3.7.2), so the byte is
+  0xF0, the sixteenth level, below every NVIC line at its reset value 0.
+- The FPU's lazy context save, which the core stratum leans on (an FP
+  frame reserved by every exception over FP code, its words written
+  only when an FP instruction runs before the return), is FPCCR's ASPEN
+  and LSPEN. ARM's architecture resets both to 1, while this chip's
+  FPCCR table gives both a reset value of 0, and so does the SVD it is
+  generated from. **Measured, the register table is contradicted:**
+  FPCCR reads 0xC000001C after the bootrom, ASPEN 1 and LSPEN 1, so
+  every exception taken over FP code stacks the FP context lazily, under
+  Tenuto as under Rubato, and the FP registers come back bit-exact
+  across a preemption, a float-computing handler's included
+  (`test_rp2350_rubato`'s letter j, "Bench findings").
+
 ## Types and verbs
 
 - `Rp2350Platform<core = 0, TB = CoreTicker<core>>` - the brio Platform:
@@ -215,6 +311,22 @@ larger package and refuses at run time against SYSINFO's PACKAGE_SEL.
   `Doorbell` (the bell a send to an AO of this core rings -
   [multicore.md](multicore.md)), and `panic_record()` - one `.noinit`
   record per core, a static of the template.
+- `Rp2350RubatoPlatform<core = 0, TB = CoreTicker<core>>` - the platform
+  of the preemptive kernel: `Rp2350Platform` whole, plus `preemptive`,
+  `ceiling` (the pack index being dispatched, 255 at the loop's base) and
+  `pend_schedule()`, the same text on both halves. Core 0 only - a
+  `Rp2350RubatoPlatform<1>` does not compile: both cores of a pair enter
+  one table of vectors, and which kernel a scheduler vector serves is
+  the two-kernel question not yet answered.
+- `schedule.hpp`'s names, the same on both halves: `request_scheduler()`
+  (what `pend_schedule()` calls), `scheduler_init()` (PendSV to its
+  level on one half; the hart's flag lowered and mie.MSIE set on the
+  other), `scheduler_thread<K>()` (the entry the scheduler runs in), and
+  the binding `BRIO_RP2350_SCHEDULER_VECTORS(K)`, which defines
+  `isr_pendsv` and `isr_svcall` on the Cortex-M33 and
+  `isr_riscv_softirq` on Hazard3; behind it the bodies
+  `scheduler_exception<K>()` and `scheduler_return()` (the core
+  stratum's) and `scheduler_trap<K>()` (Hazard3's).
 - `core.hpp`'s names, the same on both halves: `InterruptGuard`,
   `enable_interrupts()`, `disable_interrupts()`, `interrupts_enabled()`,
   `Irq` (the per-line controller over the device header's `IRQn_Type`:
@@ -304,6 +416,43 @@ is any `brio::Pin<n>`, [pin.md](pin.md)):
 ```cpp
 (void)Pad::input(brio::PinPull::up);   // and a LOW is the signal
 ```
+
+The preemptive kernel on core 0, one source for both architectures: the
+macro binds PendSV and SVCall on the Cortex-M33 and the machine software
+interrupt on Hazard3, and `scheduler_init()` comes before the unmask:
+
+```cpp
+using P = brio::Rp2350RubatoPlatform<>;
+using K = brio::Rubato<P, Sensor, Logger>;   // highest priority first
+
+BRIO_RP2350_SCHEDULER_VECTORS(K)
+extern "C" void isr_systick() { brio::Ticker::tick(); }
+
+int main() {
+    SysClock::init();
+    brio::Ticker::init(clock);
+    brio::scheduler_init();
+    brio::enable_interrupts();
+    K::run();
+}
+```
+
+Binding the vectors by hand is the macro's expansion: on the Cortex-M33
+
+```cpp
+extern "C" [[gnu::naked]] void isr_pendsv() { brio::scheduler_exception<K>(); }
+extern "C" [[gnu::naked]] void isr_svcall() { brio::scheduler_return(); }
+```
+
+and on Hazard3
+
+```cpp
+extern "C" [[gnu::naked]] void isr_riscv_softirq() { brio::scheduler_trap<K>(); }
+```
+
+A program on this platform executes no `svc` of its own on the
+Cortex-M33, leaves mscratch alone on Hazard3, and never writes the
+hart's RISCV_SOFTIRQ flag.
 
 ## Bench findings
 
@@ -439,6 +588,84 @@ architectures from one source. Where the halves differ, both numbers:
   included, while TBMAN's reads 0x00000001; the two registers and what
   each is for are in the findings above.
 
+**The preemptive kernel** - the reference suite is `test_rp2350_rubato`,
+one source and two images on the WeAct RP2350B at 150 MHz: 44 verdicts
+in `z` on the Cortex-M33 and 46 on Hazard3, ten runs of `z` alike on
+each half. A Rubato pack of five objects on `Rp2350RubatoPlatform<0>`,
+the Console the lowest and the letters' runner, TIMER1's alarm 0 the
+interrupt the road-1 letters land, nothing wired and nothing lit. The
+ruler is TIMER1 itself with its source on clk_sys, two back-to-back
+reads 3 cycles apart on both halves; beside it the core's own counter -
+on the Cortex-M33 the kernel ticker's composed `cycles()`, two reads 41
+cycles apart, agreeing with TIMER1 over 1 to 1.06 ms within 0 to 1
+cycle on every clean span, and on Hazard3 `mcycle`, two reads 1 cycle
+apart, agreeing within 0 cycles on every clean span (a span with an
+XIP refill inside a pair of reads is 110 off, reported). That is the
+suite's method throughout: an event, a run or a span that a kernel
+tick, an XIP refill or the console line's handler lengthened is told
+apart by counters read around it (the tick count, the XIP cache's miss
+counter, the console vector's entries) and reported, and each bound
+judges the ones nothing lengthened.
+
+On both halves road 1 preempts at any depth: an interrupt's post to
+High inside Low's dispatch runs High to its end before Low resumes,
+every object reading its own index as the ceiling and the UART's
+interrupt the base's 255; road 2 nests High inside Mid inside Low, each
+inside the post that asked; at depth 2 an interrupt over High's
+dispatch, started by either road, runs Top before High resumes; three
+timers matured in one turn are posted with the ceiling at 0 and served
+highest first, and High preempting Low's loop of `arm()` and `disarm()`
+leaves the list whole; a post under the mask (PRIMASK on one half,
+mstatus.MIE on the other) leaves the request pending and is served when
+the section ends, before the statement after it; dark at the end, the
+request as `scheduler_init()` set it. clk_sys cycles, the ruler's own
+cost taken off:
+
+| clk_sys cycles | Cortex-M33 | Hazard3 |
+|---|---|---|
+| road 1: an interrupt's last statement to the preempting dispatch's first, min / median / max over 100 events | 113 / 113 / 142 | 188 / 188 / 188 |
+| road 1: the path's count by the release listing, and the bound | 145, 232 | 182, 289 |
+| road 1 at depth 2, over a preempting dispatch | 94 | 171 |
+| `activate()` over four empty queues | 96 | 97 |
+| a post that asks nothing | 60 | 54 |
+| a road-2 post, the receiver's empty dispatch inside (the scheduling's share) | 319 (259) | 346 (292) |
+| one `arm()`, its masked window inside | 63 | 46 |
+| a post under the mask: the section's end to the receiver's first | 132 | 176 |
+| stack high-water of the suite's deepest chain (bytes), the deepest sample in a dispatch / in the interrupt | 552 (544 / 488) | 904 (864 / 736) |
+
+The Cortex-M33's road-1 events over 113 are the ones a tick or a refill
+landed in, and its measured path runs under the count drawn with the
+Cortex-M4's table, the model the suite takes for want of the M33's own
+figures. On Hazard3 the model, 3.8.7's counts with the interrupt's
+entry (which the section does not give) taken at `ecall`'s, is 6 cycles
+under the measurement. A post under the mask lengthened by a kernel
+tick reached 480 cycles on the Cortex-M33 and 884 on Hazard3, and is
+reported, not judged. The two halves' rows part where their mechanisms
+do: on the Cortex-M33 the hardware stacks the interrupted code's
+registers, on Hazard3 the crt's trampoline and the scheduler's entry
+each save sixteen in software ("What the silicon does"), and the
+stack's levels carry those frames. The Cortex-M33's PendSV body is
+thirteen instructions and 32 bytes, without the DSB that is the
+Cortex-M4's alone ([../cortexm/README.md](../cortexm/README.md)); a
+build that kept it measured road 1 at 115, two cycles more, the
+barrier's cost on this core.
+
+- **The FPU across a preemption** (letter j, the Cortex-M33 alone):
+  FPCCR reads 0xC000001C, ASPEN 1 and LSPEN 1, where the datasheet's
+  register table and the SVD give both a reset value of 0; Low's float
+  series, preempted at a mark inside its loop by High's own series, and
+  in a second run by an interrupt handler that computes a float too,
+  ends with every value bit-exact against the same functions run without
+  preemption.
+- **The software interrupt's own facts** (letter k, Hazard3 alone):
+  after the raw store that raises the hart's flag, 1 to 2 of the eight
+  stores behind it retire before the trap - the latency the request
+  waits out - and behind `request_scheduler()` none; each raise serves
+  Top exactly once (20 raises); the caller-saved registers, loaded with
+  patterns, are found again across an entry and across a nested one,
+  10 of 10 each; inside a dispatch the software interrupt started,
+  the flag is low, mstatus.MIE set and mscratch moved by one.
+
 ## A handler in SRAM
 
 **What the silicon does.** Both architectures execute the flash in place
@@ -539,12 +766,20 @@ Driver gaps, each with its reason:
   reset.md's findings); a rescue's is measured nowhere, a rescue being
   the flash verb's own path, and a letter that banks a token in
   `.noinit` before one and reads it after would measure it.
-- Interrupt priorities. Both halves have sixteen levels and neither uses
-  them: the kernel's promise is that no interrupt nests over another, and
-  it is kept structurally here (every line at the reset priority on the
-  Cortex-M33, mstatus.MIE never set inside a handler on Hazard3). The two
-  conventions run opposite ways - numerically higher is more urgent on
-  Hazard3 - which is why `Irq` carries no priority verb at all.
+- Interrupt priorities. Both halves have sixteen levels and no driver
+  uses them: the kernel's promise is that no interrupt nests over
+  another, and it is kept structurally here (every line at the reset
+  priority on the Cortex-M33, mstatus.MIE never set inside a handler on
+  Hazard3). The one priority written anywhere is PendSV's, by the
+  preemptive kernel's `scheduler_init()` on the Cortex-M33, below every
+  line. The two conventions run opposite ways - numerically higher is
+  more urgent on Hazard3 - which is why `Irq` carries no priority verb
+  at all.
+- Rubato on core 1, on either half: both crts give a pair one table, so
+  the scheduler's vectors would serve two kernels, and the body that
+  asks the core which kernel to run is the two-kernel question the
+  RP2040 shares. Born when that question is answered; until then
+  `Rp2350RubatoPlatform<1>` does not compile.
 - `idle_until()`. The timebase runs while the core sleeps on either
   half, in the plain idle path and through a standby; the one rung that
   stops it, DORMANT, is repaired afterwards only under the timed sleep

@@ -50,20 +50,28 @@ by the kernel, runs a short piece of code to completion (this is
 called **run-to-completion**), possibly posts events to other active
 objects, arms a timer or changes state, and returns. Between two
 events it holds no local variables and no stack of its own: all its
-data is static. The kernel has no way to suspend an active object and
-resume it later, so an active object cannot wait for anything inside a
-handler; if a handler calls a function that waits for hardware, every
-other active object on that core waits with it.
+data is static. The kernel has no way to make an active object wait
+and resume it when what it waited for arrives, so an active object
+cannot wait for anything inside a handler; if a handler calls a
+function that waits for hardware, every other active object on that
+core waits with it (under Rubato, every object of its own and lower
+priority).
 
-The **kernel** (its type is `Tenuto`,
-[the scheduler](#8-scheduler-kerneltenutohpp)) is a loop on the single
-main stack. Each turn it posts
+The **kernel** is a loop on the single main stack. Each turn it posts
 the time events that have matured, then serves one event from the
 highest-priority queue that is not empty, then starts again from the
-top. If every queue is empty it sleeps until an interrupt. There is no
-preemption between active objects: while one handler runs, no other
-active object runs on that core. The only concurrency on a core is an
-interrupt handler against the loop, and an interrupt handler may do
+top. If every queue is empty it sleeps until an interrupt. brio has
+two kernels over this one model ([the scheduler](#8-scheduler-kerneltenutohpp)):
+`Tenuto`, the cooperative one, under which no other active object runs
+while a handler runs on that core; and `Rubato`, the preemptive one,
+under which a handler of higher priority may run inside a handler of
+lower priority, on the same stack, the lower resuming when the higher
+returns. Under both a handler is never re-entered and an object's data
+is touched by its own handlers only; what Rubato changes is that the
+time a handler takes may contain other objects' handlers, the way it
+already contains interrupt handlers. The other concurrency on a core
+is an interrupt handler against the dispatches, and an interrupt
+handler may do
 exactly one thing with the kernel: post an event (`post()`, or on a
 two-core chip `send()` to the other core, which ends in a `post()`
 there), which builds a
@@ -84,7 +92,12 @@ another interrupt would be a third kind of context, and every driver
 whose two vectors share a state machine would become a design
 question. brio buys interrupt latency with short handler bodies and
 DMA instead, the means the smallest core has: nothing that needed
-nesting would run on the AVR, so nothing in brio may need it.
+nesting would run on the AVR, so nothing in brio may need it. Rubato
+adds no third context for a driver: peripheral handlers still never
+nest, and the exception that starts its scheduler sits below them all.
+What it adds is a boundary between two objects' dispatches, closed by
+the rule that objects share nothing but events ("Rubato" in
+[the scheduler](#8-scheduler-kerneltenutohpp)).
 
 This is the cooperative flavour of active objects described in
 Samek's book (he names it QV, for the vanilla kernel), written from
@@ -132,22 +145,23 @@ compiler-checked list of requirements on a type, named `ActiveObject`:
   whose `take_hold()` says whether the object held the slot it was
   just dispatched from, whose `release()` takes a slot's number back,
   and whose `empty()` answers a `bool`;
-- a static `init()`, called once by `Tenuto::init_all()` in list order,
+- a static `init()`, called once by the kernel's `init_all()` (Tenuto's or Rubato's) in list order,
   before the first event is served; an `Fsm`-based object calls
   `start(&initial)` here;
 - a static `dispatch(const Event&)`, which handles one event to
   completion.
 
 That is the **formal half**: names, signatures and return types,
-checked by the compiler where an active object enters `Tenuto<...>`.
+checked by the compiler where an active object enters `Tenuto<...>` or `Rubato<...>`.
 The **informal half** is the set of rules the compiler cannot see and
 that the kernel is written assuming:
 
-- `dispatch` runs to completion, is called from the loop only, with
-  interrupts enabled, and is never re-entered; the object's static data
-  therefore needs no lock against other active objects, since only
-  interrupt handlers are concurrent and they touch nothing of the
-  object but its queue, through `post()`;
+- `dispatch` runs to completion, is called by the kernel only (from
+  its loop or, under Rubato, from inside another object's dispatch),
+  with interrupts enabled, and is never re-entered; the object's static
+  data therefore needs no lock against other active objects, which
+  touch nothing of it but its queue, through `post()`, as interrupt
+  handlers do;
 - the event a dispatch receives stays in its queue slot (the storage
   the queue built it in), and the slot is the consumer's until it is
   released: by the loop right after the dispatch, unless the object
@@ -303,19 +317,21 @@ The case-by-case then reduces to one question per field: is this data
 read once by one receiver, or written by someone else while it is in
 flight? The first has one answer, the second has two.
 
-**Why the distinction is safe under this kernel.** There is no
-concurrency between active objects, so two of them can never write the
-same buffer at the same time. The only hazard of a loan is aliasing in
-time: the lender reusing storage the borrower still holds. Both leases
-pin that down. For `dispatch`, the list order guarantees that the
-borrower runs before the lender is dispatched again: the loop rescans
-the list from the top on every turn
-([the scheduler](#8-scheduler-kerneltenutohpp)), so a borrower that
-precedes the lender has its queue served, and the lent event with it,
-before the loop reaches the lender's queue again (under a
-preemptive kernel the same order would make the borrower preempt the
-lender right at the post, so the rule would survive such a kernel
-unchanged). For `reply`, the boundaries are two explicit events. At
+**Why the distinction is safe under either kernel.** Under Tenuto
+there is no concurrency between active objects; under Rubato two
+objects' dispatches nest but never run at the same time, so two of
+them can never write the same buffer at the same instant. The only
+hazard of a loan is aliasing in time: the lender reusing storage the
+borrower still holds. Both leases pin that down. For `dispatch`, the
+list order guarantees that the borrower runs before the lender is
+dispatched again: under Tenuto the loop rescans the list from the top
+on every turn ([the scheduler](#8-scheduler-kerneltenutohpp)), so a
+borrower that precedes the lender has its queue served, and the lent
+event with it, before the loop reaches the lender's queue again; under
+Rubato the same order makes the borrower's dispatch run inside the
+lender's `post()`, so the loan is consumed when the post returns, and
+what the lender reads in the storage afterwards is what the borrower
+left ("Rubato" there). For `reply`, the boundaries are two explicit events. At
 every instant exactly one party has the right to write: ownership
 moves, it is never shared.
 
@@ -383,9 +399,11 @@ queue.
 **One more discipline, kept for the future.** Active objects share
 nothing but events. An object's own statics are safe because its
 dispatch is never re-entered, but a global touched by two objects
-outside events is safe only because this kernel is cooperative; under
-a preemptive one it would be a race. The rule costs nothing today and
-keeps the door to such a kernel open.
+outside events is safe only under Tenuto; under Rubato it is a race,
+and a service two objects call directly has one owner object or
+guards its producers ("Rubato" in
+[the scheduler](#8-scheduler-kerneltenutohpp)). The rule costs nothing
+under Tenuto and is what makes a program ready for Rubato.
 
 ## 5. Queues (`kernel/event_queue.hpp`)
 
@@ -897,6 +915,217 @@ above the kernel by the power model ([power.md](power.md)), which arms
 a mode and lets this same hook take it, so the loop is unchanged and a
 program without a power manager pays nothing.
 
+### Rubato, the preemptive kernel (`kernel/rubato.hpp`)
+
+`Rubato<P, Ao1, Ao2, ...>` is the second kernel: the same list, the
+same objects, queues, state machines, delivery primitives, time events,
+loans and panic path, and the same compile-time checks plus one, fewer
+than 255 objects, since a list index is a byte. Its name is the
+musical marking for tempo stolen from one note and given back to
+another. What it adds is one thing: **the dispatch of a higher-priority
+object may start while a lower-priority dispatch is suspended, on the
+same stack, and the suspended one resumes when the higher one
+returns.** Nothing is ever suspended in the other direction: an object
+of equal or lower priority than the one running waits, as under Tenuto.
+
+The ceiling. The platform keeps one byte, `P::ceiling`: the list index
+of the object being dispatched, 255 at the loop's base, and 0 while
+nothing may be dispatched at all (during `init_all()`'s inits and while
+the loop posts the matured time events). "Above the ceiling" in what
+follows means a smaller index, that is a higher priority. Only an
+object whose index is below the ceiling may start a dispatch. Every
+`post()` compares the receiver's index with the ceiling after the copy
+and, when it is below, asks the platform for the scheduler
+(`P::pend_schedule()`); the compare reads the ceiling once, and a
+request that finds its queue already served by a scheduler that ran in
+between serves nothing and costs one pass of the scan. The raise of
+the ceiling before a dispatch and its restore after are compiler
+barriers in the kernel (`std::atomic_signal_fence`, no instruction on
+one core): without them the compiler may move the queue's reads ahead
+of the raise, and a request landing in that gap serves the event in a
+nested scheduler while the outer pass takes it again from a stale
+cursor and releases the slot twice, which wedges the queue (seen on
+the STM32F446RE under GCC 16 at `-Os`, in the bench suite below).
+The scheduler is `activate()`: it serves the highest non-empty queue
+below the ceiling, one event, with the ceiling raised to that object's
+index for the length of the dispatch and restored after it, and repeats
+from the top of the list until no queue below the ceiling holds
+anything. Each queue knows its index because `init_all()` writes it
+(the pack index, kept in the queue on a preemptive platform only),
+and `init_all()` holds the ceiling at 0 while the inits run, so nothing
+is dispatched before the last `init()` has returned.
+
+Two roads lead to a dispatch that preempts another:
+
+1. An interrupt handler posts to an object above the ceiling. The
+   request waits for the handler to end; at its exit the platform runs
+   `activate()`, so the higher object's dispatches run to their end
+   over the code the interrupt suspended, which resumes after them.
+2. A dispatch posts to an object above it. The platform runs
+   `activate()` at once, inside `post()`, which returns after the
+   receiver's dispatches have run to their end.
+
+A post to an object at or below the ceiling, the poster itself
+included, waits as under Tenuto: until no dispatch of its receiver's
+priority or higher is running or suspended, and then in list order.
+`publish` is one post per subscriber in the subscriber list's order,
+each of which may run its receiver's dispatch inside it before the
+next. How the platform tells a handler's call of `pend_schedule()`
+from a dispatch's is its own: the exception mechanics on a Cortex-M,
+the interrupt controller's preemption levels on a QingKe V4, the global
+mask on the RP2350's Hazard3 (clear in every handler, set by the
+scheduler's entry before any dispatch), a flag the harness raises on
+the host.
+
+What never changes. A handler is never re-entered, and an object is
+never dispatched while one of its own dispatches is suspended, because
+its index is never below a ceiling raised to it; so an object's own
+statics need no lock and its queue keeps one consumer. A dispatch still
+runs to its end before any object of its own or lower priority runs.
+Nothing blocks, nothing has a stack of its own, nothing is sliced in
+time; the kernel loop at its base is Tenuto's turn (the matured time
+events posted with the ceiling held at 0, so that no fire dispatches
+and the scheduler then serves them in priority order; the scheduler;
+sleep when every queue is empty), and a preempting dispatch never
+sleeps. The two-core model is unchanged: a Rubato per core, the
+doorbell's handler an interrupt handler like any other. Where two cores
+share one vector table, as on the RP2040, the one entry of the
+scheduler's exception serves two kernels - by a body that asks which
+core took it, built, or by a table per core, not built, which of the two
+is an open decision - and the body that asks is measured on the RP2040,
+a Rubato on each core preempting at once through the one entry ([the
+RP2040 platform page](../rp2040/platform.md)).
+
+The loans ([payloads](#4-payloads-what-travels-inside-the-event-kernelborrowedhpp)).
+A `Lease::dispatch` borrower precedes its lender in the list, so a loan
+posted from the lender's dispatch starts the borrower's dispatch inside
+the post: the borrower reads the storage, and may write it, before
+`post()` returns, and its lease ends there. The lender may reuse the
+storage from then on, within the same dispatch; what it may not do is
+read the lent storage after the post expecting what it put there,
+which under Tenuto it would have read only at its next dispatch.
+`Lease::reply` and `Lease::hold` are unchanged.
+
+What two objects may touch outside events. Under Tenuto a structure
+two objects call directly is safe because their dispatches never
+overlap; under Rubato two objects of different priority run one inside
+the other, so **a service called directly by two objects has one owner
+object, or guards its producers.** Two structures guard themselves on
+a preemptive platform: the armed time events
+([time](#9-time-kerneltimehpp-kerneltime_eventhpp)) and the producer
+verbs of a `Ring` ([ring.md](ring.md)); the guard covers each verb, not
+a run a producer fills between `write_span()` and `publish()`, so a
+transmit ring two objects write is corrupted inside a run, and the one
+owner is the rule there. A polled loop a service runs inside its own
+dispatch (the bus arbiter's loop with two frames in flight) is held off
+by every dispatch above the service for that dispatch's whole length,
+which the service's hold-off figure, the image's longest handler or
+masked window, does not count: under Rubato the hold-off is the
+longest dispatch above the service, and a preemption that outlasts a
+frame ends the transaction with the status the service detects
+(`spi_overrun` on the STM32F4, measured: the service never hands back
+a run with a hole, the requester sees the status); the DMA engines and
+the interrupt pump carry no such limit. For a UART that is one direct writer per
+instance, in one of two forms, independent and never stacked on one
+instance: a bookable transport object (a `Request` with a run lent
+`Lease::reply`, a `Done`, the bus arbiter's shape) for heterogeneous
+clients, or a high-level object that owns the port's meaning (a logger
+taking message events and formatting them itself). A UART used by one
+object needs neither, and under Tenuto nothing changes.
+
+The accepted limits are Tenuto's with preemption in place of "the
+running dispatch finishes first": the kernel promises that an object of
+higher priority is served before a lower one resumes, and nothing more;
+no response time, no fairness, no ageing. A long dispatch delays every
+object of its own and lower priority by its length. The stack is one,
+sized by the deepest chain of nested dispatches plus the deepest
+interrupt frame over it; it is to be measured on each realization, not
+computed (664 bytes of high-water on the STM32F446RE for the bench
+suite's deepest chain, [the STM32F4 platform page](../stm32f4/platform.md);
+500 on the STM32G0B1RE, whose frames carry no FPU words,
+[the STM32G0 platform page](../stm32g0/platform.md); 580 on the
+SAMC21J18A, [the SAM C21 platform page](../samc21/platform.md); 532 on
+the RP2040's core 0 and 236 on its core 1 for a pack of three, [the
+RP2040 platform page](../rp2040/platform.md); 552 on the RP2350's
+Cortex-M33 and 904 on its Hazard3, [the RP2350 platform
+page](../rp2350/platform.md); 1000 on the CH32V203C8T6 and 1156 on the
+CH32V303VCT6, whose levels carry the entry's registers on the stack
+where a Cortex-M's carry an exception frame, as the RP2350's Hazard3's
+do, [the CH32V203/CH32V303 platform page](../ch32vx03/platform.md)).
+
+What the platform provides is the three members above
+([the platform](#11-platform-what-the-machine-provides-kernelplatformhpp)).
+`pend_schedule()` runs `activate()` when no interrupt handler is
+running: at once when called from a dispatch, at the handler's exit
+when called from one. On a Cortex-M it is PendSV at the lowest
+exception priority, below every peripheral line, which does not run
+the scheduler itself but returns into it in thread mode through a
+second exception frame, so that PendSV is not active while the
+dispatches run and an interrupt's post preempts a dispatch at any
+depth; the scheduler leaves through SVC (`cortexm/schedule.hpp`, the
+frames and the FPU's part in its header). The kernel never names the
+vectors; the application binds the two as it binds every other.
+On a QingKe V4 it is the software interrupt, alone one preemption level
+below every peripheral line with the nesting the platform turns on at
+run time, which does not run the scheduler either but returns into it
+in thread mode with the trap's mepc and mstatus in a block on the
+stack, the scheduler leaving through the machine-mode environment call
+(`ch32vx03/schedule.hpp`, the frame and the f-registers' save in its
+header). Seven realizations exist, and all seven have run: the host's
+(`RubatoHostPlatform`, `host/platform.hpp`), and six on the bench,
+each with three figures in core cycles - an interrupt's post to the
+first instruction of the preempting dispatch (road 1), a post that asks
+nothing, and a post that runs the receiver's empty dispatch inside it
+(road 2). The STM32F4's (`Stm32f4RubatoPlatform`, measured on the
+Nucleo-F446RE: 145, 79 and 403 cycles, [the STM32F4 platform
+page](../stm32f4/platform.md)); the STM32G0's on the Cortex-M0+
+(`Stm32g0RubatoPlatform`, measured on the Nucleo-G0B1RE: 203, 95 and
+557, [the STM32G0 platform page](../stm32g0/platform.md)); the SAM
+C21's on the same core (`SamRubatoPlatform`, measured on the
+SAMC21J18A: 245, 107 and 700, a PendSV pending at the idle's WFI ending
+it as a pending line does, [the SAM C21 platform
+page](../samc21/platform.md)); the RP2040's (`Rp2040RubatoPlatform`,
+one per core, measured on the WeAct RP2040: 210, 80 and 491, road 1
+from the doorbell's handler across the cores the same 210, a Rubato on
+each core through the one PendSV entry, [the RP2040 platform
+page](../rp2040/platform.md)); the RP2350's (`Rp2350RubatoPlatform`,
+`rp2350/schedule.hpp`), one source over both of that chip's
+architectures - the Cortex-M one above on its Cortex-M33, measured on
+the WeAct RP2350B: 113, 60 and 319, the FP context stacked lazily
+(FPCCR's ASPEN and LSPEN read 1 where the chip's register table gives
+0); and on its Hazard3 the machine software interrupt reached through
+the startup code's own register-saving trampoline, whose body points
+the trampoline's `mret` at the scheduler's entry, the entry leaving by
+an `mret` of its own with no exit vector: 188, 54 and 346 ([the RP2350
+platform page](../rp2350/platform.md)); and the CH32V203's and
+CH32V303's on the QingKe V4 (`Ch32vx03RubatoPlatform`, measured on the
+CH32V203C8T6: 131, 55 and 337 cycles; 137, 54 and 337 on the
+CH32V303VCT6, whose entry saves the f-registers and fcsr in 31 to 32
+cycles where the preempted code's are live, [the CH32V203/CH32V303
+platform page](../ch32vx03/platform.md)). The host
+suite (`test/test_rubato`) is the specification every target
+realization is judged by: the ceiling over
+both roads, an object never nested in itself, the chain of three, the
+loans and the lender's trap, a hold under preemption, timers armed and
+disarmed inside a walk of the list and the matured ones served in
+priority order, idle at the base only, overflow unchanged, the ring's
+guard counted, and Tenuto's scenarios giving Tenuto's traces when no
+interrupt ever fires. `Lease::reply` under preemption is reasoned, not
+yet in the host suite; on the bench it is exercised: the STM32F4's SPI
+and UART stacks ran under Rubato against the STM32G0B1RE's unchanged
+peers with an object preempting at prime periods, the DMA engines, the
+interrupt pump, the arbiter with three requesters of three priorities,
+`SerialPort`'s line loans to a borrower above it and the one-writer
+UART all byte-exact (`test_stm32f4_rubato_link`, 230 verdicts, [the
+STM32F4 platform page](../stm32f4/platform.md)); the polled loop's
+limit above is what that suite found.
+
+Not Rubato: a blocking kernel (a handler that waits is a different
+kernel's, reserved under the name `Fermata` and not built), a
+zero-latency interrupt tier above the critical section (BASEPRI on the
+Cortex-M that has it is a later decision), the AVR (it stays on Tenuto
+by decision).
+
 ## 9. Time (`kernel/time.hpp`, `kernel/time_event.hpp`)
 
 **Timers post events; expiry runs in the loop, never in the interrupt
@@ -912,8 +1141,15 @@ timers is the opposite of a short handler, and it would buy no
 precision, since a posted event waits for the current dispatch anyway.
 
 - Armed events form an intrusive singly-linked list: no allocation,
-  and the RAM is what is declared. `arm`, `disarm` and `process` run in
-  the loop only, so the list needs no critical section. An interrupt
+  and the RAM is what is declared. Under Tenuto `arm`, `disarm` and
+  `process` run in the loop only, so the list needs no critical
+  section. Under Rubato a dispatch may arm or disarm while another
+  dispatch's `process()` walks the list, so on a preemptive platform
+  the list operations take the critical section, `process()` fires
+  each matured event with the guard dropped (a fire is a post, and a
+  post can run a dispatch to its end), and after the fire it reads its
+  place in the list afresh (the header says how a walk survives a
+  disarm or a re-arm from inside a fire). An interrupt
   handler that wants a delay posts an event to an active object, whose
   handler arms the timer.
 - One-shot (`arm(delay)`) or periodic (`arm_every(period)`). A
@@ -1127,6 +1363,16 @@ time event. The members:
   guarded with `if constexpr` on it).
 - `panic_record()`: a reference to a `PanicRecord` in storage that
   survives a reset without being zeroed by the startup code.
+- Optional, as a set, the three members of a preemptive platform, the
+  one Rubato runs on, detected by the `Preemptive` concept:
+  `preemptive` (true), `ceiling` (a byte, the list index of the object
+  being dispatched, 255 at the loop's base) and `pend_schedule()`, the
+  scheduling request ("Rubato" in
+  [the scheduler](#8-scheduler-kerneltenutohpp)). A platform that
+  declares `preemptive` without the other two is not preemptive:
+  Rubato refuses it, and the other headers treat it as Tenuto's. A
+  platform with none of them is Tenuto's, and every header that asks
+  compiles for it what it compiled before the question existed.
 
 And one promise that has no member because it is a fact about the
 whole machine: **an interrupt handler is not interrupted by another
@@ -1138,7 +1384,13 @@ priority (equal priorities never preempt one another;
 `Nvic::priority()` in `cortexm/nvic.hpp` is the one door, and no
 driver opens it), the QingKe families by leaving `INTSYSCR.INESTEN`
 at its reset value in the startup code (each crt says so in its
-opening comment). A driver whose two vectors share one state machine
+opening comment). Rubato keeps it: the exception that starts its
+scheduler (PendSV on a Cortex-M; on a QingKe V4 the software interrupt,
+with the nesting the Rubato platform turns on at run time, every
+peripheral line at one preemption level above it) sits below every
+peripheral line, is taken at a handler's exit, and is interrupted by
+peripheral handlers, which still never nest among themselves. A driver
+whose two vectors share one state machine
 (a UART with its DMA channels) counts on this promise, and a target
 that broke it would have to give such drivers guards of their own.
 
@@ -1208,14 +1460,14 @@ core sleeps.
 | stratum | realization | beyond the contract |
 |---|---|---|
 | avrxt | `AvrPlatform` (`avrxt/platform.hpp`) | `atomic_width` 1 (a 16-bit `Ring` index takes the guarded path); `idle()` sleeps in IDLE unless the power manager has armed a deeper mode, which it then honours: SEI then SLEEP back to back, the window closed by SEI's one-instruction shadow; both idle promises measured on the AVR128DB48, the AVR128DA48 and the AVR64EA48 on their three ways of sleeping, the core having no event latch; the IDLE wake is six CLK_PER cycles on all three, a deeper one adds the main clock's start-up and, on the DA and DB alone, the regulator's; the EA's OSCHF wakes from standby and power-down in 9.2 us whatever else stopped ([the AVR platform page](../avrxt/platform.md)); `break_here()` is BREAK, a NOP with no on-chip debugger |
-| samc21 | `SamPlatform` (`samc21/platform.hpp`) | `atomic_width` 4; `idle()` takes whatever PM.SLEEPCFG holds (SCR.SLEEPDEEP is never written) with the SysTick interrupt held off across a standby WFI, erratum 1.8.13's workaround and what holds kernel time still there, the counter measured running through a standby with the probe attached; both idle promises measured on the SAMC21J18A in IDLE0, IDLE2 and STANDBY, the WFI waking on an interrupt PRIMASK holds pending and leaving no latch, an IDLE2 or STANDBY wake paying about 15 us for the flash's sleep power reduction ([the SAM C21 platform page](../samc21/platform.md)); `break_here()` is BKPT and escalates with no debugger (the panic table above) |
-| stm32g0 | `Stm32g0Platform<TB>` (`stm32g0/platform.hpp`) | templated on its timebase; `idle()` is WFI = Sleep, both idle promises measured on the STM32G0B1RE, the WFI waking on an interrupt PRIMASK holds pending and leaving no latch; the sites arm the deeper Stops; `idle_until()` exists exactly when `TB` satisfies `Tickless` (the LPTIM timebase), its path not walked by the measurement; `atomic_width` 4; BKPT as the SAM's |
-| stm32f4 | `Stm32f4Platform<TB>` (`stm32f4/platform.hpp`) | templated on its timebase like the G0's, with no `Tickless` timebase on this family yet, so no `idle_until()`; `idle()` is WFI = Sleep, SLEEPDEEP never written, both idle promises measured on the STM32F446RE; the critical section is PRIMASK on a core that has BASEPRI and does not use it, the promise kept by one priority for every line, as the SAM does; `atomic_width` 4; BKPT as the SAM's, on a core that could read DHCSR and does not ([the STM32F4 platform page](../stm32f4/platform.md)) |
+| samc21 | `SamPlatform` (`samc21/platform.hpp`) | `atomic_width` 4; `idle()` takes whatever PM.SLEEPCFG holds (SCR.SLEEPDEEP is never written) with the SysTick interrupt held off across a standby WFI, erratum 1.8.13's workaround and what holds kernel time still there, the counter measured running through a standby with the probe attached; both idle promises measured on the SAMC21J18A in IDLE0, IDLE2 and STANDBY, the WFI waking on an interrupt PRIMASK holds pending and leaving no latch, an IDLE2 or STANDBY wake paying about 15 us for the flash's sleep power reduction ([the SAM C21 platform page](../samc21/platform.md)); `break_here()` is BKPT and escalates with no debugger (the panic table above); `SamRubatoPlatform` adds the three preemptive members over `cortexm/schedule.hpp` (PendSV at the fourth of the M0+'s four levels returning into the scheduler in thread mode, SVC the way back, its vector bound as this crt names it, `SVCall_Handler`), measured on the SAMC21J18A by `test_samc_rubato`: road 1 in 245 cycles from the handler's last statement to the dispatch's first, a quiet post 107, a road-2 post 700 with the receiver's empty dispatch inside, one `arm()` 120 with its masked window, a post under PRIMASK served when the section ends (298 cycles from its last statement), a PendSV pending at the idle's WFI ending it in IDLE0 and IDLE2, 580 bytes of stack for the suite's deepest chain ([the SAM C21 platform page](../samc21/platform.md)) |
+| stm32g0 | `Stm32g0Platform<TB>` (`stm32g0/platform.hpp`) | templated on its timebase; `idle()` is WFI = Sleep, both idle promises measured on the STM32G0B1RE, the WFI waking on an interrupt PRIMASK holds pending and leaving no latch; the sites arm the deeper Stops; `idle_until()` exists exactly when `TB` satisfies `Tickless` (the LPTIM timebase), its path not walked by the measurement; `atomic_width` 4; BKPT as the SAM's; `Stm32g0RubatoPlatform<TB>` adds the three preemptive members over `cortexm/schedule.hpp` (PendSV at the fourth of the M0+'s four levels returning into the scheduler in thread mode, SVC the way back, every frame basic), measured on the STM32G0B1RE by `test_stm32_rubato`: road 1 in 203 cycles from the handler's last statement to the dispatch's first, a quiet post 95, a road-2 post 557 with the receiver's empty dispatch inside, a four-queue scan 154, one `arm()` 97 with its masked window, a post under PRIMASK served when the section ends (225 cycles from its last statement), 500 bytes of stack for the suite's deepest chain ([the STM32G0 platform page](../stm32g0/platform.md)) |
+| stm32f4 | `Stm32f4Platform<TB>` (`stm32f4/platform.hpp`) | templated on its timebase like the G0's, with no `Tickless` timebase on this family yet, so no `idle_until()`; `idle()` is WFI = Sleep, SLEEPDEEP never written, both idle promises measured on the STM32F446RE; the critical section is PRIMASK on a core that has BASEPRI and does not use it, the promise kept by one priority for every line, as the SAM does; `atomic_width` 4; BKPT as the SAM's, on a core that could read DHCSR and does not; `Stm32f4RubatoPlatform<TB>` adds the three preemptive members over `cortexm/schedule.hpp` (PendSV at the sixteenth level returning into the scheduler in thread mode, SVC the way back), measured on the STM32F446RE by `test_stm32f4_rubato`: road 1 in 145 cycles from the handler's last statement to the dispatch's first, a quiet post 79, a road-2 post 403 with the receiver's empty dispatch inside, a four-queue scan 117, one `arm()` 82 with its masked window, 664 bytes of stack for the suite's deepest chain, the FPU's registers bit-exact across a preemption ([the STM32F4 platform page](../stm32f4/platform.md)) |
 | ch32v00x | `Ch32v00xPlatform<TB>` (`ch32v00x/platform.hpp`) | templated on its timebase like the G0's; `atomic_width` 4; the critical section is a `csrrci` on mstatus.MIE; `idle()` is not a WFI but a WFE (PFIC_SCTLR.WFITOWFE + SEVONPEND) entered with MIE set, because this core's WFI wakes only for an interrupt it can take and would sleep past a pending one with MIE clear, while a WFE with MIE clear wakes on a pending edge alone and loses one arriving on the cycle it goes to sleep (measured); the unmask comes first and the latched event closes the window between it and the sleep, and after the wake a SETEVENT and a second `wfi` consume the latch the waking edge left, so the loop turns once per interrupt, both idle promises measured on the CH32V006K8. On the CH32V003's QingKe V2A that entry wedges the core for good (an edge within a four-cycle window at the `wfi` leaves it beyond any interrupt and any debug halt, measured), so there `idle()` takes the vendor's shape: the latch emptied first and the PFIC asked for an enabled line pending, the `wfi` run masked from SRAM with a spin after it, and no sleep while the tick's match is within 96 cycles or a DMA channel works (the V2A's Sleep stops the controller); the tick keeps both promises there (none lost or late in 1600 tries, 100 turns over 100 ticks), another line's edge landing on the entry cycle itself is late by up to a tick (the masked order's hole, inferred), and a V2A Sleep lasts at least 66 us at 48 MHz once entered ([the CH32V00x platform page](../ch32v00x/platform.md)); `break_here()` is `ebreak`, escalating to the fault vector with no debugger ([the CH32V00x page](../ch32v00x/README.md)) |
-| ch32vx03 | `Ch32vx03Platform<TB>` (`ch32vx03/platform.hpp`) | templated on its timebase like the G0's; `atomic_width` 4; the critical section is a `csrrci` on mstatus.MIE, which has no shadow, measured on the CH32V303VC: an interrupt not yet taken when it retires is never taken after it, a `fence.i` changing nothing; on the CH32V203C8 one arriving on its cycle is taken at the boundary after it, the mask already in force and no masked instruction run. `idle()` is the same WFE as the sister family's, entered with MIE set for the same reason (a `wfi` with MIE clear measured to sleep past every pending interrupt on the CH32V203C8) and followed by the same SETEVENT and second `wfi` that consume the latch the wake left; both idle promises measured on the CH32V203C8, 200 turns over 100 ticks without the consume and 101 with it, and on the CH32V303VC's V4F, no f-register touched on the path, the deep path not consuming. Two guards no other target needs, because in a sleep of any depth this bus matrix serves the core alone (measured on the CH32V203C8 and the CH32V303VC): the idle path does not sleep at all while a bus master is working (`bus_masters_active()`, a DMA channel or a USB controller), and it pauses the timebase across a deep rung, a merely pending tick being an event that would end a WFE at once. `break_here()` is `ebreak`, landing on the breakpoint vector with no debugger. On the CH32V303's V4F the same type, over an FPU the startup code switches on for an image built with F: the hardware prologue saves integer registers only, so there every vector is a naked trampoline to an ordinary function, whose body the stratum's check keeps free of f-registers in the linked image, but a leaf, which saves nothing and stays the attributed handler, the same check holding it to being one ([the CH32V203/CH32V303 platform page](../ch32vx03/platform.md)) |
+| ch32vx03 | `Ch32vx03Platform<TB>` (`ch32vx03/platform.hpp`) | templated on its timebase like the G0's; `atomic_width` 4; the critical section is a `csrrci` on mstatus.MIE, which has no shadow, measured on the CH32V303VC: an interrupt not yet taken when it retires is never taken after it, a `fence.i` changing nothing; on the CH32V203C8 one arriving on its cycle is taken at the boundary after it, the mask already in force and no masked instruction run. `idle()` is the same WFE as the sister family's, entered with MIE set for the same reason (a `wfi` with MIE clear measured to sleep past every pending interrupt on the CH32V203C8) and followed by the same SETEVENT and second `wfi` that consume the latch the wake left; both idle promises measured on the CH32V203C8, 200 turns over 100 ticks without the consume and 101 with it, and on the CH32V303VC's V4F, no f-register touched on the path, the deep path not consuming. Two guards no other target needs, because in a sleep of any depth this bus matrix serves the core alone (measured on the CH32V203C8 and the CH32V303VC): the idle path does not sleep at all while a bus master is working (`bus_masters_active()`, a DMA channel or a USB controller), and it pauses the timebase across a deep rung, a merely pending tick being an event that would end a WFE at once. `break_here()` is `ebreak`, landing on the breakpoint vector with no debugger. On the CH32V303's V4F the same type, over an FPU the startup code switches on for an image built with F: the hardware prologue saves integer registers only, so there every vector is a naked trampoline to an ordinary function, whose body the stratum's check keeps free of f-registers in the linked image, but a leaf, which saves nothing and stays the attributed handler, the same check holding it to being one; `Ch32vx03RubatoPlatform<TB>` adds the three preemptive members over `ch32vx03/schedule.hpp` (the software interrupt one preemption level below every peripheral line, nesting turned on at run time, returning into the scheduler in thread mode with the trap's mepc and mstatus in a block on the stack, the machine-mode `ecall` the way back, the f-registers and fcsr saved by the entry where FS is Dirty), measured by `test_vx03_rubato`: road 1 in 131 cycles from the handler's last statement to the dispatch's first on the CH32V203C8T6 and 137 on the CH32V303VCT6, a quiet post 55, a road-2 post 337 with the receiver's empty dispatch inside, a four-queue scan 120, one `arm()` 51 to 61 with its masked window, a post under the mask served when the section ends (150 cycles from its last statement), 1000 bytes of stack for the suite's deepest chain, the FPU's registers and fcsr bit-exact across a preemption ([the CH32V203/CH32V303 platform page](../ch32vx03/platform.md)) |
 | ch32x035 | `Ch32x035Platform<TB>` (`ch32x035/platform.hpp`) | the CH32V203's file on the QingKe V4C, kept close enough that a `qingke/` core stratum is a diff of facts: templated on its timebase, `atomic_width` 4, the critical section a `csrrci` on mstatus.MIE, `idle()` a WFE as the sister strata's (the QingKe V4 manual's WFI wording being the same, a bare WFI unmeasured on this core, the WFE measured to wake on the tick on the CH32X035F8U6) entered with MIE set and followed by the SETEVENT and second `wfi` that consume the latch the wake left; both idle promises measured on the CH32X035F8U6 at 8 and 48 MHz, 200 turns over 100 ticks before the consume and 101 with it; the deep path out of line in `idle_deep()`, with a pause of the timebase when SLEEPDEEP is found set; no count of bus masters, because no driver of this stratum starts one, and no `idle_until()`; `break_here()` is `ebreak` ([the CH32X035 platform page](../ch32x035/platform.md)) |
-| rp2040 | `Rp2040Platform<core, TB>` (`rp2040/platform.hpp`) | one type per core, templated on the core and its timebase (the core's own SysTick ticker); the critical section is PRIMASK, per core; `idle()` is WFI, both idle promises measured on core 0 in the light rung and with SLEEPDEEP set, core 1 the same type unmeasured; `atomic_width` 4; BKPT as the SAM's; `on_own_core()` reads SIO's CPUID and `Doorbell` is the SIO FIFO towards the core ([the RP2040 multicore page](../rp2040/multicore.md)) |
-| rp2350 | `Rp2350Platform<core, TB>` (`rp2350/platform.hpp`) | one platform type per core as on the RP2040, and one for both processor architectures: everything target-specific is a name `rp2350/core.hpp` exports, so the critical section is PRIMASK on one half and `mstatus.MIE` on the other, per core in both spellings, while `idle()` is a wait-for-interrupt instruction on both, and no member of the concept is written twice. The lost-wakeup window is absent on both halves for two different reasons: PRIMASK does not stop a pending interrupt from waking the core on one, and this RISC-V core's `wfi` ignores `mstatus.MIE` on the other, which is not the QingKe cores' behaviour; both idle promises measured on core 0 of each half, light and standby, neither sleep instruction leaving a latch; `atomic_width` 4; `break_here()` is BKPT or `ebreak`; a `.noinit` breadcrumb per core; `on_own_core()` and `Doorbell` as on the RP2040, the doorbell here being a register of its own and not the mailbox FIFO; no `idle_until()`, and `sleep_hook` for a low-power state that is not a sleep instruction ([the RP2350 platform page](../rp2350/platform.md)) |
+| rp2040 | `Rp2040Platform<core, TB>` (`rp2040/platform.hpp`) | one type per core, templated on the core and its timebase (the core's own SysTick ticker); the critical section is PRIMASK, per core; `idle()` is WFI, both idle promises measured on core 0 in the light rung and with SLEEPDEEP set, core 1 the same type unmeasured; `atomic_width` 4; BKPT as the SAM's; `on_own_core()` reads SIO's CPUID and `Doorbell` is the SIO FIFO towards the core ([the RP2040 multicore page](../rp2040/multicore.md)); `Rp2040RubatoPlatform<core, TB>` adds the three preemptive members per core over `cortexm/schedule.hpp` (PendSV at the fourth of each M0+'s four levels, pended and taken by the core that asks, the request made only from the platform's own core so that a post the other core's queue refuses pends nothing), and with a Rubato on each core the shared vector table's one PendSV entry takes `rp2040/schedule.hpp`'s pair body, which reads CPUID and returns into that core's scheduler; measured on the WeAct RP2040 by `test_rp2040_rubato`, the pair body bound: road 1 in 210 cycles from the handler's last statement to the dispatch's first, the same from the doorbell's handler for a send from core 1, a post from core 1 refused and pending no PendSV there, a quiet post 80, a road-2 post 491 with the receiver's empty dispatch inside, a four-queue scan 124, one `arm()` 85 with its masked window, a post under PRIMASK served when the section ends (233 cycles from its last statement), a Rubato on each core preempting at once through the one entry, 532 bytes of stack on core 0 and 236 on core 1; the single-kernel binding runs in no image ([the RP2040 platform page](../rp2040/platform.md)) |
+| rp2350 | `Rp2350Platform<core, TB>` (`rp2350/platform.hpp`) | one platform type per core as on the RP2040, and one for both processor architectures: everything target-specific is a name `rp2350/core.hpp` exports, so the critical section is PRIMASK on one half and `mstatus.MIE` on the other, per core in both spellings, while `idle()` is a wait-for-interrupt instruction on both, and no member of the concept is written twice. The lost-wakeup window is absent on both halves for two different reasons: PRIMASK does not stop a pending interrupt from waking the core on one, and this RISC-V core's `wfi` ignores `mstatus.MIE` on the other, which is not the QingKe cores' behaviour; both idle promises measured on core 0 of each half, light and standby, neither sleep instruction leaving a latch; `atomic_width` 4; `break_here()` is BKPT or `ebreak`; a `.noinit` breadcrumb per core; `on_own_core()` and `Doorbell` as on the RP2040, the doorbell here being a register of its own and not the mailbox FIFO; no `idle_until()`, and `sleep_hook` for a low-power state that is not a sleep instruction; `Rp2350RubatoPlatform<core, TB>` adds the three preemptive members on core 0, the same text on both halves over `rp2350/schedule.hpp` (on the Cortex-M33 `cortexm/schedule.hpp`'s PendSV at the sixteenth level and SVC; on Hazard3 the machine software interrupt, a level flag per hart in the SIO, through the startup code's trampoline into a thread-mode entry that leaves by its own `mret`, a request made with interrupts enabled waiting until the scheduler has run, nothing nested), measured on the WeAct RP2350B by `test_rp2350_rubato` on both halves: road 1 in 113 cycles from the handler's last statement to the dispatch's first on the Cortex-M33 and 188 on Hazard3, a quiet post 60 and 54, a road-2 post 319 and 346 with the receiver's empty dispatch inside, a four-queue scan 96 and 97, one `arm()` 63 and 46 with its masked window, a post under the mask served when the section ends (132 and 176 cycles from its last statement), 552 and 904 bytes of stack for the suite's deepest chain; on the Cortex-M33 FPCCR's ASPEN and LSPEN read 1 where the chip's register table gives 0, the FPU's registers bit-exact across a preemption; on Hazard3 one to two stores retiring behind the raising one before the trap ([the RP2350 platform page](../rp2350/platform.md)) |
 | host | `HostPlatform` (`host/platform.hpp`) | a critical section that counts its depth and its entries, a virtual clock, recording `idle()` and `break_here()`; `atomic_width` 4, `Ring`'s guarded path being covered by a second host platform stating 1 in its own test; `HostCore<n>` adds the two members of a core of several over a test-set current core and a counting doorbell |
 
 **C++ note: `if constexpr`.** `if constexpr (cond)` (C++17) with a
@@ -1317,12 +1569,13 @@ balancing. The host proves the protocol deterministically
 | Entity | Header | Role |
 |--------|--------|------|
 | `ActiveObject` (concept), `queue_on<Ao, P>`, `serve_one<Ao>` | `active_object.hpp` | what Tenuto requires of an active object; whether an object's queue is P's (its core); one event served in its slot, released unless held |
-| `Platform` (concept), `PanicRecord` | `platform.hpp` | what the kernel requires of the machine (plus the optional `idle_until`, `on_own_core`, `Doorbell`, and the host's `interleave_point`) |
-| `EventQueue<E, depth, P>`, `CoreAware` | `event_queue.hpp` | the per-object queue (many producers, one consumer): the event built in its slot, `take()` handing over the slot's number, `at()` the event, `hold()`/`release()` keeping and returning a slot in any order, `depth` the events waiting or held at once; the overflow counter, the mispost check of a core-aware platform |
+| `Platform`, `Preemptive` (concepts), `PanicRecord` | `platform.hpp` | what the kernel requires of the machine (plus the optional `idle_until`, `on_own_core`, `Doorbell`, the host's `interleave_point`, and the three members of a preemptive platform: `preemptive`, `ceiling`, `pend_schedule`) |
+| `EventQueue<E, depth, P>`, `CoreAware`, `QueuePriority` | `event_queue.hpp` | the per-object queue (many producers, one consumer): the event built in its slot, `take()` handing over the slot's number, `at()` the event, `hold()`/`release()` keeping and returning a slot in any order, `depth` the events waiting or held at once; the overflow counter, the mispost check of a core-aware platform, the owner's list index on a preemptive one |
 | `Overloaded`, `match`, `Entry`, `Exit`, `Fsm<Derived, Alts...>` | `fsm.hpp` | variant dispatch helpers, the state machine base, `Event`, `Status` |
 | `post`, `Subscribers`, `publish`, `ReplyTo` (incl. `through`), `reply_to` | `post.hpp` | delivery primitives (the crossing `send` is `util/inbox.hpp`'s, [two cores](#12-two-cores-two-kernels-and-a-bridge-utilinboxhpp)) |
 | `Borrowed<T, Lease>`, `Lease`, `lend`, `Held<E>` | `borrowed.hpp` | pointer payloads with their lease in the type; a held queue slot's number with `Lease::hold` in its type |
-| `Pack<Aos...>`, `Tenuto<P, Aos...>` | `tenuto.hpp` | list ordering questions (`index`, `lends_ok`); the loop: `init_all`/`step`/`idle_if_empty`/`run` |
+| `Pack<Aos...>`, `Tenuto<P, Aos...>` | `tenuto.hpp` | list ordering questions (`index`, `lends_ok`); the cooperative loop: `init_all`/`step`/`idle_if_empty`/`run` |
+| `Rubato<P, Aos...>` | `rubato.hpp` | the preemptive kernel over the same list: `init_all` (the queues' indices, the ceiling held at 0), `activate` (the scheduler, re-entrant), `idle_if_empty`, `run` |
 | `TimeEvents<P>` (incl. `ticks_to_next`, `next_deadline`), `TimeEvent<P, Ao, Ev>` | `time_event.hpp` | the armed list and the owned time events |
 | `ticks_from_ms`, `ticks_from_secs` | `time.hpp` | `constexpr` tick conversions |
 | `PanicCode`, `panic_magic`, `HaltReporter`, `panic`, `take_panic_record` | `panic.hpp` | unrecoverable failures |
@@ -1330,13 +1583,15 @@ balancing. The host proves the protocol deterministically
 Include graph (arrows mean "is included by"; nothing here includes
 anything outside `kernel/` and the standard freestanding library):
 
-    platform.hpp        <- event_queue.hpp, time.hpp, panic.hpp,
-                           time_event.hpp, tenuto.hpp
+    platform.hpp        <- event_queue.hpp, post.hpp, time.hpp, panic.hpp,
+                           time_event.hpp, tenuto.hpp, rubato.hpp
     fsm.hpp             <- post.hpp
-    active_object.hpp   <- time_event.hpp, tenuto.hpp
-    post.hpp            <- time_event.hpp, tenuto.hpp
-    time_event.hpp      <- tenuto.hpp
+    active_object.hpp   <- time_event.hpp, tenuto.hpp, rubato.hpp
+    post.hpp            <- time_event.hpp, tenuto.hpp, rubato.hpp
+    time_event.hpp      <- tenuto.hpp, rubato.hpp
+    tenuto.hpp          <- rubato.hpp (the Pack and the checks)
     borrowed.hpp        <- event_queue.hpp (and util/ producers of loans)
 
 An application that only posts includes `kernel/post.hpp`; one that
-runs includes `kernel/tenuto.hpp` and gets the contract with it.
+runs includes `kernel/tenuto.hpp` or `kernel/rubato.hpp` and gets the
+contract with it.

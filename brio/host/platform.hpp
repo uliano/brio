@@ -27,7 +27,8 @@
  * sleep, no trap. All state is static inline so tests reach it without
  * plumbing; call reset() at the start of each test case. HostCore<n>
  * below is the two-core host of the inbox's suite (test_inbox), and
- * HostDoorbell<core> its counting doorbell.
+ * HostDoorbell<core> its counting doorbell; RubatoHostPlatform is the
+ * same platform made preemptive, for the Rubato kernel's tests.
  */
 
 #pragma once
@@ -93,6 +94,62 @@ struct HostPlatform {
 };
 
 static_assert(Platform<HostPlatform>);
+
+/// The host platform of a Rubato kernel (kernel/rubato.hpp): HostPlatform
+/// with the three members of a preemptive platform (kernel/platform.hpp)
+/// and what a test needs to simulate an interrupt over a dispatch.
+///  - pend_schedule() records the request in `pending` and, unless the
+///    test has raised `in_isr`, runs the scheduler at once and clears it:
+///    the host's image of a scheduling interrupt taken at once. Inside a
+///    simulated interrupt the request waits, and the test's harness runs
+///    the scheduler at the interrupt's exit when `pending` is set.
+///  - `scheduler` is that scheduler, the one indirect call the host pays:
+///    the test sets it to its kernel's activate(). Null, a request is
+///    recorded and nothing runs (a scheduling interrupt not yet enabled).
+///  - preempt_point() is where a test object's handler, or the time-event
+///    walk (kernel/time_event.hpp), lets a simulated interrupt land: it
+///    runs the test's `preempt_hook`, if any.
+/// The counters, the clock and the critical section are the base's: one
+/// set, shared. reset() clears all of it.
+struct RubatoHostPlatform : HostPlatform {
+    static constexpr bool preemptive = true;
+    static inline uint8_t ceiling = 255;     ///< the index being dispatched; 255 at the base
+
+    static inline bool in_isr = false;       ///< raised by the harness inside a simulated interrupt
+    static inline bool pending = false;      ///< a request not yet served
+    static inline uint32_t requests = 0;     ///< how many times pend_schedule() ran
+    static inline bool (*scheduler)() = nullptr;
+    static inline void (*preempt_hook)() = nullptr;
+
+    static void pend_schedule() {
+        ++requests;
+        pending = true;
+        if (!in_isr && scheduler != nullptr) {
+            pending = false;
+            (void)scheduler();
+        }
+    }
+
+    static void preempt_point() {
+        if (preempt_hook != nullptr) {
+            preempt_hook();
+        }
+    }
+
+    static void reset() {
+        HostPlatform::reset();
+        ceiling = 255;
+        in_isr = false;
+        pending = false;
+        requests = 0;
+        scheduler = nullptr;
+        preempt_hook = nullptr;
+    }
+};
+
+static_assert(Platform<RubatoHostPlatform>);
+static_assert(Preemptive<RubatoHostPlatform>);
+static_assert(!Preemptive<HostPlatform>);
 
 /// A doorbell on the host: the rings counted, the pending bells a
 /// number a test reads and pops. `pending` saturates at 8 the way a

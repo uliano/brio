@@ -203,6 +203,20 @@ overhead is about 150 cycles at 180 MHz and 50 at 100 MHz (measured:
   end the same way), `now()`/`ticks_per_second` (the timebase's),
   `atomic_width` 4, `panic_record()` in `.noinit`. No `idle_until()`: no
   timebase of this family counts through Stop yet.
+- `Stm32f4RubatoPlatform<TB = Ticker>` - `Stm32f4Platform<TB>` whole plus
+  the three members of a preemptive platform, the one the preemptive
+  kernel `Rubato` runs on ([design/kernel.md](../design/kernel.md),
+  "Rubato"): `preemptive`, `ceiling` (the index of the object being
+  dispatched, 255 at the loop's base) and `pend_schedule()`, which is
+  `cortexm/schedule.hpp`'s request: PendSV pended, at the lowest of the
+  sixteen levels, below every NVIC line at its reset priority 0. PendSV
+  returns into the scheduler in thread mode and the scheduler leaves
+  through SVC, so a program on this platform binds two vectors more
+  than a Tenuto one, `PendSV_Handler` and `SVC_Handler`, both naked,
+  to `scheduler_exception<K>()` and `scheduler_return()`, calls
+  `scheduler_init()` before it enables interrupts, and executes no
+  `svc` of its own. The critical section stays PRIMASK; the peripheral
+  handlers still never nest among themselves.
 - `Ticker` = `BasicTicker<1000>` (`cortexm/ticker.hpp`): `init(clock)`
   (the reload from the clock's rate, refused when it does not fit),
   `tick()` (the ISR body the app binds to `SysTick_Handler`), `ticks()`,
@@ -246,7 +260,109 @@ dispatch: `if (!brio::delay_us(clock, 20)) { ... }` - it answers false,
 spending no time, when SysTick is not counting or the request is a
 millisecond or more, which is a `TimeEvent`'s work.
 
+The same program under the preemptive kernel: the platform type, the
+two naked vectors and one call more.
+
+```cpp
+#include "kernel/rubato.hpp"
+
+using P = brio::Stm32f4RubatoPlatform<>;
+using K = brio::Rubato<P, Sensor, Logger>;   // Sensor preempts Logger
+
+extern "C" void SysTick_Handler() { brio::Ticker::tick(); }
+extern "C" [[gnu::naked]] void PendSV_Handler() { brio::scheduler_exception<K>(); }
+extern "C" [[gnu::naked]] void SVC_Handler() { brio::scheduler_return(); }
+
+int main() {
+    SysClock::init();
+    brio::Ticker::init(clock);
+    brio::scheduler_init();         // PendSV at the lowest priority
+    brio::enable_interrupts();
+    K::run();
+}
+```
+
 ## Bench findings
+
+`test_stm32f4_rubato`, 32 verdicts on the Nucleo-F446RE, the preemptive
+kernel on `Stm32f4RubatoPlatform` with the scheduler in thread mode;
+CYCCNT the ruler at 180 MHz, TIM9's compare the interrupt the road-1
+letters land, nothing wired and nothing lit:
+
+- **The ceiling, both roads** (letters a, b, e): an interrupt's post to
+  High inside Low's handler runs High to its end before Low resumes,
+  every handler reading its own index as the ceiling and the base's
+  255 in the UART's interrupt, ten runs alike; Low posting to Mid and
+  Mid to High nests High inside Mid inside Low, each inside the post
+  that asked; High's post to Low is served after High returns and after
+  Low's own dispatch ends; and at depth 2, an interrupt over High's
+  handler (started by either road) runs Top before High resumes, Top's
+  first statement 121 to 123 cycles after the handler's last.
+- **The latency of road 1** (letter c): from the interrupt handler's
+  last statement to High's handler's first, 145 cycles min, median and
+  max over 100 events; 190 to 205 when a kernel tick lands in the path.
+  The bound, 220, is the sum of the path's own counts in the listing
+  (148: the handler's exit, PendSV's entry by tail-chaining, the fake
+  frame's return, the entry, `activate()`'s scan and the dispatch's
+  call) plus one tick (58) and the flash accelerator's misses (12).
+- **The scan and the post** (letter d): `activate()` with four empty
+  queues below the ceiling 117 cycles (209 at worst, a tick inside); a
+  post that asks for nothing 79; a post that runs High's empty dispatch
+  inside it 403, the scheduling's share 324. At `-Os` the scan pays a
+  call per object for `empty()`, which the queue's header leaves out of
+  line: inlining it would take the scan to 80 and the two posts to 123
+  and 367 (measured, reverted; a change to the kernel's header and to
+  every image, posed, not taken).
+- **Time events under preemption** (letter f): three timers matured in
+  one turn, the lowest object's armed last, are posted with the ceiling
+  held at 0 and served High, Mid, Low; High preempting Low's loop of
+  `arm()` and `disarm()` by road 1 leaves the list whole, every timer
+  due fired once, the disarmed one never; one `arm()` 82 cycles with
+  its masked window inside.
+- **The FPU across a preemption** (letter g): Low's float series
+  interrupted at a mark, High's computed inside, the handler computing
+  a float too: every sum bit-exact against the same code run without
+  preemption, the lazy context save proved by the values.
+- **The stack** (letter h): 664 bytes of high-water for the suite's
+  deepest chain, the deepest sampled stack pointer at 520 bytes in a
+  dispatch and 472 in the interrupt, the mark within the 232 bytes an
+  exception frame with the FPU's words and the handler's frames add.
+- **Dark** (letter i): every object idle, no timer armed, TIM9 quiet,
+  PA5 not an output, the ceiling the Console's, interrupts enabled.
+- **A compiler hazard on road 2, found and closed**: GCC 16 at `-Os`
+  deleted as dead a store the receiving dispatch inside `post()` read,
+  the dispatch being reached through an exception the compiler cannot
+  see and the DSB's memory clobber not stopping it; the request is now
+  a call the compiler cannot see into (`noinline`, `noipa`), one call
+  and return on the asking path only.
+- **A second compiler hazard, in the kernel, found by the link suite
+  and closed**: the same compiler moved the queue's two cursor loads
+  ahead of the ceiling's raise in the scheduler's pass; a request
+  landing in that gap served the event in a nested scheduler and the
+  outer pass took it again and released the slot twice, wedging the
+  queue after half a second to nine seconds of pressure. The raise and
+  the restore are compiler barriers now (`kernel/rubato.hpp`), and the
+  suite below ran clean after it.
+
+`test_stm32f4_rubato_link`, 230 verdicts on the Nucleo-F446RE against
+the Nucleo-G0B1RE's unchanged `spi_peer` and `usart_peer` over the desk's
+SPI2 and USART1 wires: the real SPI and UART stacks under Rubato with
+an object above them preempting on TIM2 at 97, 193 and 389 us, its
+dispatch 300 then 3000 cycles, every letter run first without pressure
+as its control. The peer's command channel through the arbiter, the
+matrix on the DMA engines (152 kB/s, 977 to 1000 per mille of the
+control under pressure), the arbiter with three requesters of three
+priorities (every reply to its requester in order, no timeout), the
+UART's numbered lines echoed at 460800 and 921600 through `SerialPort`
+into a borrower above it (no line lost, out of order or corrupt, every
+port counter zero, 876 to 924 per mille of the wire), the one-writer
+blast judged by the peer, the loan with a slow borrower preempted
+inside its dispatch 21 to 106 times a pass: all byte-exact. The one
+limit found is the polled loop's, [spi.md](spi.md)'s "Not covered
+yet". Also observed: the peer's command window sent right after an
+answer window is not heard until the peer is back in command mode
+(the suite waits between windows); the receive engine tells the port
+of a stream only at an idle line or a half lap, up to 1024 characters.
 
 `test_stm32f4_platform`, letters a..e and g, 36 verdicts on each of the
 four boards, and letters `w`, `k` and `t` beside them in `z` (49
@@ -384,10 +500,11 @@ Driver gaps (this chapter's option space the stratum does not touch):
 - VTOR relocation, which nothing here needs while the vector table is
   the crt's and sits where the part boots; born with its first user (a
   bootloader).
-- NVIC priorities and BASEPRI: exposed and unassigned, respectively
-  unused, because the kernel is flat - every interrupt is one hardware
-  level above the loop, and a priority scheme is the preemptive
-  kernel's question ([design/kernel.md](../design/kernel.md)).
+- NVIC priorities and BASEPRI: the peripheral lines stay at one level
+  under both kernels (the preemptive one puts only PendSV below them),
+  and BASEPRI is unused: a zero-latency tier above the critical section
+  is a later decision ([design/kernel.md](../design/kernel.md),
+  "Rubato").
 - The three configurable faults' enables and bodies, the MPU, the FPU's
   exception flags: the reset chapter's. `reset.hpp` has the enables
   (`Faults`) and a body (`hard_fault_reset<P>()`); the MPU and the FPU's
@@ -413,6 +530,12 @@ OpenOCD's own console is what the findings were taken with;
 `delay_us` against an INDEPENDENT ruler (the suite judges it on
 SysTick's own counter and the kernel tick, both derived from HCLK; a
 timer on the crystal or the RTC is the ruler the M0+ suites use, and
-the timer chapter brings it); the FPU itself - no brio program executes
-a float instruction yet, so CPACR's enable is proven only by the
-absence of a UsageFault, not by a computed result.
+the timer chapter brings it); the scheduler's three bodies on the M33
+(compiled by the RP2350's family fixture, not run: the board is what
+would measure them; on the M0+ they ran, on the STM32G0B1RE,
+[the STM32G0 platform page](../stm32g0/platform.md)); a scheduling
+request made with PRIMASK set, served when the mask lifts, which this
+family's suite does not exercise (the STM32G0's letter g does, on the
+same core stratum's code). The FPU is no longer a gap: `test_stm32f4_rubato`'s
+letter g computes float sums across a preemption and judges them
+bit-exact.

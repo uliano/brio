@@ -108,9 +108,10 @@ launch), `brio/rp2040/platform.hpp` (one platform type per core),
 `brio/rp2040/ticker.hpp` (one ticker per core) over
 `brio/util/inbox.hpp`, the bridge of
 [design/kernel.md, "Two cores: two kernels and a bridge"](../design/kernel.md#12-two-cores-two-kernels-and-a-bridge-utilinboxhpp).
-The reference suite: `test_rp2040_multicore` (a suite's letter is one
+The reference suites: `test_rp2040_multicore` (a suite's letter is one
 command key of its console and the group of verdicts it runs, and its
-all-key, `z`, runs the set).
+all-key, `z`, runs the set), and `test_rp2040_rubato`'s letters j and k
+for the crossing under the preemptive kernel.
 
 ## What the silicon does
 
@@ -214,6 +215,23 @@ only when the program binds `isr_hardfault` to `fault_reset<P>()`
 the core stays in it. The suite's own panic on core 1 names no
 reporter, and that core halts (below).
 
+Under the preemptive kernel, Rubato, on either core or both
+(`Rp2040RubatoPlatform<core>`, [platform.md](platform.md)), the bridge
+is unchanged and a crossing is an interrupt like any other on the core
+it reaches: the doorbell's handler drains the inbox into local posts,
+a post to an object above that core's ceiling pends that core's PendSV,
+and the receiver's dispatch starts at the handler's exit over whatever
+dispatch the doorbell interrupted there - road 1 on the receiving core,
+the sending core's ceiling never consulted. With a Rubato on each core
+the one PendSV entry of the shared vector table takes
+`rp2040/schedule.hpp`'s `scheduler_exception_pair<K0, K1>()`, which
+reads SIO's CPUID and returns into the scheduler of the core that took
+it; a vector table per core is the other way, not built
+([platform.md](platform.md), "How to use it"). Both are measured by
+`test_rp2040_rubato` on the WeAct RP2040 at 125 MHz ("Bench findings"
+below, and [platform.md](platform.md)'s "Bench findings" for the rest of
+the suite).
+
 ## Bench findings
 
 All from `test_rp2040_multicore`, green on the Pico and the WeAct
@@ -280,6 +298,34 @@ events), every fact about core 1 carried by an event that crossed:
   dispatched, finds every byte incremented, the pointer and length its
   own, the sum right - the inbox's fences carry the loan's contents as
   they carry the event.
+
+Under Rubato, from `test_rp2040_rubato` on the WeAct RP2040 at 125 MHz,
+ten runs of its `z` alike, clk_sys cycles on core 0's composed
+`cycles()` with its own two-read cost of 55 taken off:
+
+- ROAD 1 ACROSS THE CORES (letter j, core 1 under Tenuto running one
+  object that answers each of core 0's sends with a send to core 0's
+  High): a `post()` from core 1 to core 0's object is refused and
+  counted as a mispost and pends no PendSV on core 1. Low's send crosses
+  to core 1 and the answer crosses back; core 0's doorbell handler posts
+  to High, and High's dispatch starts after that handler's last
+  statement and before Low resumes, 7 to 11 us from Low's send to High's
+  first statement across core 1 and back. From the doorbell handler's
+  last statement to High's first, 209 cycles min, 210 median and max
+  over 100 crossings, none over 292 - the figure of road 1 from an
+  alarm's handler on the same core (210 median), so a crossing preempts
+  as any interrupt does. A crossing a kernel tick or an XIP cache refill
+  lengthened is told apart by the counters read around it and reported,
+  and the bound judges the ones nothing lengthened.
+- A RUBATO ON EACH CORE (letter k, core 1 a pack of three on
+  `Rp2040RubatoPlatform<1>`, the one PendSV entry bound to the pair
+  body): each core's trace in 10 of 10 runs shows its own ceiling at
+  every entry, road 1 from its own alarm and road 2 inside it; the two
+  cores preempt at the same time, each preemption landing inside the
+  other core's preempted dispatch on the system timer, in 10 of 10; core
+  1's ceiling is 255 at its base after; its stack's high-water mark is
+  236 bytes, the deepest sampled stack pointer 216 in a dispatch and 104
+  in its interrupt.
 
 ## Not covered yet
 

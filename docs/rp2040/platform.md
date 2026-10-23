@@ -110,13 +110,23 @@ Appendix B. The drivers: `brio/rp2040/platform.hpp`, `nvic.hpp`,
 `brio/cortexm/`; the crt `rp2040/src/glue/startup_rp2040.cpp`, the
 second stage `rp2040/src/glue/boot2_*.S`, the linker script
 `rp2040/ld/rp2040_2m.ld`; `brio/util/placement.hpp` for the placement.
+The preemptive kernel's platform, `Rp2040RubatoPlatform`, is in the same
+`platform.hpp`, over the core stratum's `brio/cortexm/schedule.hpp`
+(ARM's PendSV and SVCall, [../cortexm/README.md](../cortexm/README.md))
+and this stratum's `brio/rp2040/schedule.hpp` (the one PendSV entry two
+kernels share).
 The reference suite: `test_rp2040_platform`
 (the boot state, the ticker against the system timer, `delay_us`, the
 reset controller, the SIO, the atomic aliases, the WFI idle, the idle
 path against an interrupt's edge placed to the cycle, the kernel's turn
 per interrupt, the breadcrumb, five real resets); a suite's letter is
 one command key of its console and the group of verdicts it runs, and
-`z`, the all-key, runs the suite's set. The failing half of the platform - the
+`z`, the all-key, runs the suite's set; the preemptive kernel's,
+`test_rp2040_rubato` ("Bench findings"). The family fixture
+`test/family_rp2040/rubato.cpp` instantiates both platforms, a pack on
+each core and both bindings of PendSV, and
+`neg/rubato_on_the_tenuto_platform.cpp` refuses the preemptive kernel
+on the Tenuto platform. The failing half of the platform - the
 causes, the watchdog, the timer - has its own documents:
 [reset.md](reset.md), [watchdog.md](watchdog.md), [timer.md](timer.md).
 
@@ -171,6 +181,41 @@ nothing short of the DORMANT state stops.
   one of those waits for one; `now()`,
   `ticks_per_second` 1000, `atomic_width` 4, `panic_record()` in
   `.noinit`, `break_here()` = BKPT; `core_id()` = SIO's CPUID.
+- `Rp2040RubatoPlatform<core = 0, TB = CoreTicker<core>>` - the platform
+  of the preemptive kernel, `Rubato`
+  ([design/kernel.md](../design/kernel.md), "Rubato"), one type per core:
+  `Rp2040Platform<core, TB>` whole plus the three members of a
+  preemptive platform - `preemptive`, `ceiling` (the index of the object
+  being dispatched, 255 at the loop's base; a static of the core's own
+  type, so each core has its own) and `pend_schedule()`, which is
+  `cortexm/schedule.hpp`'s request with one test first: PendSV pended in
+  the ICSR of the core that asks, at the lowest of that core's four
+  levels (the byte 0xC0), below every NVIC line at its reset priority 0,
+  and only when the asking core is the platform's own. A post from the
+  other core is a mispost the queue refuses and counts; without the test
+  `post()` would still ask, pend the posting core's PendSV and, under the
+  single body below, run this core's kernel on the other core. The test
+  is SIO's CPUID read and compared inside the request's one opaque call,
+  five cycles on the asking path alone (by the release listing). PendSV
+  returns into the
+  scheduler in thread mode on that core's stack and the scheduler leaves
+  through SVC, every frame basic (no FPU). The critical section stays
+  PRIMASK, per core, and a post made inside one serves its receiver when
+  the section ends; a send from the other core lands through the
+  doorbell's handler as a local post, road 1 on the receiving core
+  ([multicore.md](multicore.md)).
+- `scheduler_exception_pair<K0, K1>()` (`rp2040/schedule.hpp`) - the
+  body `isr_pendsv` takes when each core runs a Rubato: the core stratum's
+  body with the core's identity read first (SIO's CPUID, one cycle on the
+  IO port) and used to pick `scheduler_thread<K0>` or
+  `scheduler_thread<K1>` from a two-word table, the same path on both
+  cores; and no DSB, as the single body has none on this core (the
+  barrier is the Cortex-M4's alone, for its erratum 838869,
+  [the core stratum's page](../cortexm/README.md)). By the release
+  listing eighteen instructions and 44 bytes with the table, against the
+  single body's thirteen and 32: two cycles more at zero wait states.
+  `K0` must be a Rubato on `Rp2040RubatoPlatform<0>` and `K1` one on
+  `Rp2040RubatoPlatform<1>`, refused at compile time otherwise.
 - `Ticker` = `CoreTicker<0>`, the core stratum's `BasicTicker<1000>`
   on core 0's SysTick (`CoreTicker<1>` is core 1's), `SysTickCounter` for a
   program whose timebase is elsewhere, `delay_us(clock, us)` - the
@@ -215,6 +260,73 @@ A driver's first act, the reset release:
 ```cpp
 if (!brio::Resets::cycle(brio::ResetBlock::uart0)) { /* the block never came ready */ }
 ```
+
+The same program under the preemptive kernel, on core 0, with core 1
+under Tenuto or not launched: the platform type, the two naked vectors
+and one call more. Core 1 never pends PendSV - a Tenuto kernel never
+asks - so the core stratum's body for one kernel is the binding:
+
+```cpp
+#include "kernel/rubato.hpp"
+
+using P = brio::Rp2040RubatoPlatform<>;
+using K = brio::Rubato<P, Sensor, Logger>;   // Sensor preempts Logger
+
+extern "C" void isr_systick() { brio::Ticker::tick(); }
+extern "C" [[gnu::naked]] void isr_pendsv() { brio::scheduler_exception<K>(); }
+extern "C" [[gnu::naked]] void isr_svcall() { brio::scheduler_return(); }
+
+int main() {
+    SysClock::init();
+    brio::Ticker::init(clock);
+    brio::scheduler_init();         // PendSV at the lowest priority, this core's
+    brio::enable_interrupts();
+    K::run();
+}
+```
+
+A Rubato on each core: one vector table serves both cores (core 1 is
+launched with core 0's, [multicore.md](multicore.md)), so the one
+`isr_pendsv` entry takes the pair body, and each core sets PendSV's
+priority in its own registers before it enables its interrupts:
+
+```cpp
+#include "rp2040/schedule.hpp"
+
+using P0 = brio::Rp2040RubatoPlatform<0>;
+using P1 = brio::Rp2040RubatoPlatform<1>;
+using K0 = brio::Rubato<P0, Sensor, Logger>;   // core 0's pack
+using K1 = brio::Rubato<P1, Motor, Watch>;     // core 1's pack
+
+extern "C" [[gnu::naked]] void isr_pendsv() { brio::scheduler_exception_pair<K0, K1>(); }
+extern "C" [[gnu::naked]] void isr_svcall() { brio::scheduler_return(); }
+
+[[noreturn]] void core1_main() {
+    brio::CoreTicker<1>::init(clock);
+    brio::scheduler_init();         // core 1's own PendSV priority
+    brio::Inboxes<Motor>::enable();
+    brio::enable_interrupts();
+    K1::run();
+}
+```
+
+Core 0's `main()` is the single-kernel one above with `K0`, and
+`Core1::launch(&core1_main)` before it enables its interrupts.
+
+An open decision: how one table serves two kernels. The pair body is
+one of two ways. The other is a vector table per core: core 1 launched
+with a table of its own (the launch protocol's VTOR word), identical to
+core 0's but for PendSV's entry, which would hold the single body bound
+to `K1` - each core's PendSV then the core stratum's thirteen
+instructions with nothing asked. What that costs: a second table of 48
+words, 192 bytes in the flash or a copy in SRAM aligned as VTOR
+requires, every vector a program binds present in both; a crt that
+defines it and a launch that takes it (today the crt holds one table and
+`Core1::launch` passes core 0's VTOR); a second binding of PendSV a
+program must keep apart from the first. What it saves: the pair's two
+cycles and its question at every request. The pair body is what is
+built and measured ("Bench findings"); which road a two-kernel program
+takes is not decided ("Not covered yet").
 
 ## Bench findings
 
@@ -340,6 +452,81 @@ if (!brio::Resets::cycle(brio::ResetBlock::uart0)) { /* the block never came rea
     of 400 lost it. A quiet pack on core 1 turns 100 times over 100 of
     its ticks.
 
+**The preemptive kernel** - the reference suite is `test_rp2040_rubato`
+(55 verdicts in `z`, ten runs of `z` alike) on the WeAct RP2040 at
+125 MHz: a Rubato pack of five objects on `Rp2040RubatoPlatform<0>`,
+the Console the lowest and the letters' runner, alarm 0 of the system
+timer the interrupt the road-1 letters land, the one PendSV entry bound
+to the pair body for every letter (letter k runs a Rubato on each core),
+nothing wired and nothing lit. The ruler is core 0's composed `cycles()`
+(SysTick's position and the tick count): two back-to-back reads are 55
+cycles apart, a cost taken off every span below. Against the system
+timer over four spans of 1 ms, a span whose pairs of reads missed no
+XIP line agrees within 15 to 134 cycles - the microsecond's two floors,
+125 cycles, and the skew between the pairs - while a span with a cache
+refill inside a pair of reads is off by up to 573 and is reported, not
+judged. That is the suite's method throughout: an event, a run or a
+span that a kernel tick, an XIP refill or the console line's handler
+lengthened is told apart by counters read around it (the tick count,
+the XIP cache's miss counter, the console vector's entries) and
+reported, and each bound judges the ones nothing lengthened; the first
+span after a console drain always carries a refill. clk_sys cycles:
+
+- **The ceiling, both roads** (letters a, b, e): an alarm's post to High
+  inside Low's handler runs High to its end before Low resumes, every
+  handler reading its own index as the ceiling and the base's 255 in the
+  UART's interrupt; Low posting to Mid and Mid to High nests High inside
+  Mid inside Low, each inside the post that asked; at depth 2 an
+  interrupt over High's handler, started by either road, runs Top before
+  High resumes, Top's first statement 186 to 187 cycles after the
+  handler's last.
+- **The latency of road 1** (letter c): from the alarm handler's last
+  statement to High's handler's first, 209 cycles min, 210 median and
+  max over 100 events, none missed.
+- **The scan and the post** (letter d): `activate()` with four empty
+  queues below the ceiling 124 cycles; a post that asks for nothing 80;
+  a post that runs High's empty dispatch inside it 491, the scheduling's
+  share 411.
+- **Time events under preemption** (letter f): three timers matured in
+  one turn are posted with the ceiling held at 0 and served High, Mid,
+  Low; High preempting Low's loop of `arm()` and `disarm()` by road 1
+  leaves the list whole, every timer due fired once, the disarmed one
+  never; one `arm()` 85 cycles with its masked window inside.
+- **The request under PRIMASK** (letter g): a post to a higher object
+  inside a critical section pends PendSV and is served when the
+  section's guard restores the mask, before the statement after it,
+  from the Console's dispatch and from inside Low's; the section's last
+  statement to the receiver's first 233 cycles in every run nothing
+  lengthened (in one run of ten a kernel tick or an XIP refill
+  lengthened one, told apart by the counters).
+- **Road 1 across the cores** (letter j, core 1 under Tenuto running one
+  object, Relay, that answers core 0's send with a send to High): a post
+  from core 1 to core 0's object is refused and counted as a mispost and
+  pends no PendSV on core 1; Low's send crosses to core 1 and Relay's
+  answer crosses back, core 0's doorbell handler posts to High, and
+  High's dispatch starts after that handler's last statement and before
+  Low resumes, 7 to 11 us from Low's send to High's first statement. From
+  the doorbell handler's last statement to High's first, 209 cycles
+  min, 210 median and max over 100 crossings, none over 292: the road
+  1 of letter c, a doorbell's handler in place of an alarm's.
+- **A Rubato on each core** (letter k, core 1's pack of three on
+  `Rp2040RubatoPlatform<1>`, both cores through the one pair body):
+  core 0 traces `Ls3 Lm3 Hs1 Ts0 Te0 He1 Lr3 Le3` and core 1
+  `ls2 lm2 hs1 ts0 te0 he1 lr2 le2` (who, what, the ceiling read) in 10
+  of 10 runs, road 1 then road 2 on each core with every ceiling its own
+  object's index;
+  the two cores preempt at once, each preemption landing inside the
+  other core's preempted dispatch on the system timer, in 10 of 10;
+  core 1's ceiling reads 255 at its base after; core 1's stack
+  high-water mark 236 bytes, its deepest sampled stack pointer 216 in a
+  dispatch and 104 in its interrupt.
+- **Dark** (letter i): every object of core 0 idle, core 1 parked in the
+  bootrom, no time event and no alarm armed, GP25 not an output, the
+  ceiling the Console's, interrupts enabled.
+- **The stack** (letter h): core 0's high-water mark 532 bytes for the
+  suite's deepest chain, its deepest sampled stack pointer 512 in a
+  dispatch and 368 in an interrupt.
+
 ## A handler in SRAM
 
 **What the silicon does.** The core executes the flash in place through
@@ -452,8 +639,24 @@ Driver gaps, each with its reason:
   nothing portable wants them today.
 - The bus fabric's priorities and performance counters (BUSCTRL): a
   measurement tool, born with the two-core contention question.
+- A vector table per core, the other way two Rubato kernels could share
+  PendSV ("How to use it"): not built while the choice between it and the
+  pair body is open.
 
 Implemented but not bench-verified, each with what would measure it:
+
+- The single-kernel binding, the core stratum's `scheduler_exception<K>()`
+  bound to `isr_pendsv` with core 1 under Tenuto or not launched ("How
+  to use it"): it runs in no image, `test_rp2040_rubato` binding the pair
+  body for every letter. Measured by the suite's letters but k, built
+  with the single body bound.
+- The preemptive kernel on the Pico: `test_rp2040_rubato` is built for
+  that board too, and a `z` there would measure it.
+- Whether a pending PendSV ends a WFI as a pending NVIC line does: the
+  kernel's idle path never sleeps with PendSV pending in the suite's
+  shapes (a post made at the base is served before the masked check),
+  so no letter asks it; a WFI entered masked with PENDSVSET written
+  first, timed on the system timer, would.
 
 - The idle path through the DORMANT hook: a wake that is already
   latched when the keyword is written (a GPIO dormant-wake event, the

@@ -341,13 +341,14 @@ Driver gaps, each with its reason:
 - **The QFN-60 package.** The stratum compiles for it and refuses its
   absent pads, but no QFN-60 part is on the bench: everything below the
   compile check is untested there.
-- **Interrupt priorities.** Both halves have sixteen levels and neither
-  uses them: the kernel's promise is that no interrupt nests over
+- **Interrupt priorities.** Both halves have sixteen levels and no
+  driver uses them: the kernel's promise is that no interrupt nests over
   another, and here it is kept structurally (every line at the reset
   priority on the M33, mstatus.MIE never set inside a handler on
-  Hazard3). The two conventions run opposite ways (numerically higher
-  is more urgent on Hazard3), which is why `Irq` carries no priority
-  verb at all.
+  Hazard3); the one priority written is PendSV's, below every line, by
+  the preemptive kernel on the M33. The two conventions run opposite
+  ways (numerically higher is more urgent on Hazard3), which is why
+  `Irq` carries no priority verb at all.
 
 Implemented but not bench-verified, each with what would measure it:
 
@@ -360,12 +361,6 @@ Implemented but not bench-verified, each with what would measure it:
 - **`Mtime` and the tick generators under a clk_ref that is not
   12 MHz.** The arithmetic refuses a clk_ref that is not a whole number
   of megahertz, and only the 12 MHz crystal has been on the wire.
-- **The machine software interrupt** (`isr_riscv_softirq`, the RISC-V
-  crt's third trap): bound and never raised, and deliberately so, since
-  the second kernel's bell is the SIO doorbell, one line and one vector
-  name on both architectures, and a second channel on one half only
-  would be worth less ([multicore.md](multicore.md)). The external and
-  the timer traps beside it are both proven on the bench.
 - **The Arm crt's four configurable fault vectors.** They have their
   names in the table and their weak spins, and nothing has raised one
   of those four. The entry `fault_reset()` binds to is measured on both
@@ -386,7 +381,7 @@ in the document.
 
 | Document | Content |
 |----------|---------|
-| [platform.md](platform.md) | The platform on two instruction sets: one platform type per core and one for both architectures, the idle path and the lost-wakeup window it does not have (two rules, one promise), the microsecond ruler that is also the Hazard3 half's timebase, the subsystem reset controller, the atomic register aliases, the panic breadcrumb across a processor reset, erratum RP2350-E9 shown on a pad, and the two registers called PLATFORM; a handler in SRAM on both halves: `.fast_text`, `places_fast_text`, the vectors placed or the drivers given InRam, measured warm and cold, the placement buying the cold path; on Hazard3 the crt's dispatch stays in the flash |
+| [platform.md](platform.md) | The platform on two instruction sets: one platform type per core and one for both architectures, the idle path and the lost-wakeup window it does not have (two rules, one promise), the microsecond ruler that is also the Hazard3 half's timebase, the subsystem reset controller, the atomic register aliases, the panic breadcrumb across a processor reset, erratum RP2350-E9 shown on a pad, and the two registers called PLATFORM; a handler in SRAM on both halves: `.fast_text`, `places_fast_text`, the vectors placed or the drivers given InRam, measured warm and cold, the placement buying the cold path; on Hazard3 the crt's dispatch stays in the flash; the preemptive kernel's platform on both halves, measured by `test_rp2350_rubato`: the core stratum's PendSV and SVC on the Cortex-M33 with the ARMv8-M facts it rests on checked, road 1 in 113 cycles from the interrupt's last statement to the preempting dispatch's first, a quiet post 60, a road-2 post 319, FPCCR read as ASPEN 1 and LSPEN 1 where the register table says 0, the FP registers bit-exact across a preemption; the machine software interrupt through the crt's trampoline on Hazard3, its entry leaving by an `mret` of its own, road 1 in 188 cycles, a quiet post 54, a road-2 post 346, one to two stores retiring behind the raising one before the trap |
 | [clock.md](clock.md) | The clock tree: four roots where the RP2040 had three (the low-power oscillator joins clk_ref), a generator more and none for an RTC, the 16.16 dividers, the tick generators as a block of their own, the ring oscillator's randomiser, the PLLs' lost lock, the resus circuit, and two CTRL registers that are passwords, where a masked write is a refused write |
 | [pin.md](pin.md) | GPIO: the pads that come up isolated and the latch that holds them, the four overrides and the STATUS behind them, the pin interrupts with their summary registers and the forced event that bypasses the enable, and erratum RP2350-E9 measured four ways |
 | [uart.md](uart.md) | The UART: what this chip owes the PL011 that its predecessor did not, a second function column that makes every group's flow-control pads a second data pair, pads that come up isolated, a DREQ table with not one row in the old place, and one interrupt name bound on both architectures; on the pair's wires against the RP2040's `uart_peer`, an echo of 512 bytes in the two crystals' common time and the error attribution of 7E1 under 8N1 |

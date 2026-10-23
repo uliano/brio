@@ -92,7 +92,9 @@ Cortex-M0+ processor summary ch. 4 with ARM's ARMv6-M ARM behind it,
 PM (power manager) ch. 19 - and errata DS80000740S (1.8.13, 1.8.14,
 1.8.7 and 1.8.5 all touch this chapter; see "What the silicon does").
 Drivers: `samc21/platform.hpp` (`SamPlatform`, this target's
-realization of the kernel's `Platform` concept), `samc21/nvic.hpp`
+realization of the kernel's `Platform` concept, and
+`SamRubatoPlatform`, the same platform for the preemptive kernel over
+the core stratum's `cortexm/schedule.hpp`), `samc21/nvic.hpp`
 and `samc21/ticker.hpp` (this family's includes of the core stratum's
 `cortexm/nvic.hpp` - `InterruptGuard`, `Nvic` - and
 `cortexm/ticker.hpp` - `BasicTicker` - plus the SAM's own
@@ -104,9 +106,10 @@ target-independent power model above the last of these is
 startup_samc21.cpp` + `samc21/ld/samc21j18a.ld` in the build project.
 The bench suites are `test_samc_platform` (the idle hook and the
 kernel's turn, the waking half and `delay_us`), `test_samc_sleep` (the
-stopping half) and `test_samc_timebase` (the standby-surviving site);
-a suite's letter, cited below (letter w, letter k), is one command key
-of its console and the group of verdicts that key runs.
+stopping half), `test_samc_timebase` (the standby-surviving site) and
+`test_samc_rubato` (the preemptive platform, "Bench findings"); a
+suite's letter, cited below (letter w, letter k), is one command key of
+its console and the group of verdicts that key runs.
 
 These are one story - how a program on this silicon runs one event at
 a time, waits, keeps time and stops - told across one stratum header
@@ -243,6 +246,35 @@ ticker; `ticks_per_second` = 1000; `atomic_width` = 4 (an aligned
 word moves in one access - what lets `util/ring.hpp` take its
 lock-free path here); `panic_record()` lives in `.noinit`.
 
+**`SamRubatoPlatform`** (samc21/platform.hpp) is `SamPlatform` whole
+plus the three members of a preemptive platform, the one the
+preemptive kernel `Rubato` runs on
+([design/kernel.md](../design/kernel.md), "Rubato"): `preemptive`,
+`ceiling` (the index of the object being dispatched, 255 at the loop's
+base) and `pend_schedule()`, which is `cortexm/schedule.hpp`'s request:
+PendSV pended, at the lowest of the core's four levels (the byte 0xC0),
+below every NVIC line at its reset priority 0, which no header of this
+stratum changes. PendSV returns into the scheduler in thread mode and
+the scheduler leaves through SVC, so a program on this platform binds
+two vectors more than a Tenuto one, both naked: `PendSV_Handler` to
+`scheduler_exception<K>()` and `SVCall_Handler` to `scheduler_return()`.
+**The SVC vector is `SVCall_Handler` here**, the crt's name for entry 11
+because it is the device header's, and not the `SVC_Handler` of the
+other Cortex-M families: a program that defines `SVC_Handler` instead
+compiles and links, and the scheduler's first exit then lands in the
+crt's `Default_Handler`, a silent spin. The program calls
+`scheduler_init()` before it enables interrupts and executes no `svc`
+of its own. The type is not a template, as `SamPlatform` is not: the
+family has one kernel timebase, the SysTick `Ticker`. The critical
+section stays PRIMASK, a post made inside one serves its receiver when
+the section ends, and the peripheral handlers still never nest among
+themselves. The idle path is Tenuto's: `idle_if_empty()` masks, finds
+every queue empty and calls `idle()`, whose WFI takes the mode
+PM.SLEEPCFG holds; the interrupt that ends it runs at the unmask, and
+its post pends PendSV, which the core takes at that handler's exit. A
+PendSV already pending when the WFI executes ends it as a pending NVIC
+line does, in IDLE0 and IDLE2 (measured, "Bench findings").
+
 **`BasicTicker<tps>`** (ticker.hpp): monostate over SysTick (a class
 whose state and functions are all static, with no instance to create:
 there is one SysTick, so there is one timebase). The rate
@@ -352,6 +384,28 @@ int main() {
     brio::Ticker::init(clock);
     brio::enable_interrupts();
     brio::Tenuto<P, /* AOs */>::run();
+}
+```
+
+The same program under the preemptive kernel: the platform type, the
+two naked vectors and one call more.
+
+```cpp
+#include "kernel/rubato.hpp"
+
+using P = brio::SamRubatoPlatform;
+using K = brio::Rubato<P, Sensor, Logger>;   // Sensor preempts Logger
+
+extern "C" void SysTick_Handler() { brio::Ticker::tick(); }
+extern "C" [[gnu::naked]] void PendSV_Handler() { brio::scheduler_exception<K>(); }
+extern "C" [[gnu::naked]] void SVCall_Handler() { brio::scheduler_return(); }
+
+int main() {
+    SysClock::init();
+    brio::Ticker::init(clock);
+    brio::scheduler_init();         // PendSV at the lowest priority
+    brio::enable_interrupts();
+    K::run();
 }
 ```
 
@@ -482,6 +536,72 @@ Stopping:
   once, between the two halves of the first (the order 1, 3, 2); less
   urgent, or at the same level, it waits for the first to return (1, 2,
   3). Every line of every other letter runs at the reset default, 0.
+
+**The preemptive kernel** - the reference suite is `test_samc_rubato`
+(42 verdicts in `z`, ten runs of `z` alike): a Rubato pack of five
+objects on `SamRubatoPlatform` on the SAMC21J18A at 48 MHz, the Console
+the lowest and the letters' runner, TC4's compare match the interrupt
+the road-1 letters land, nothing wired and nothing lit. The ruler is the
+kernel ticker's composed `BasicTicker::cycles()` (SysTick's position and
+the tick count; ARMv6-M has no cycle counter): two back-to-back reads
+are 48 cycles apart, a cost taken off every span below, and across four
+tick reloads it reads 4 x 48000 cycles within 3. CPU cycles, each figure
+within the bound its letter derives from the release listing and the
+Cortex-M0+'s cycle table with every flash line paid at its worst
+alignment; an event a kernel tick landed in is told apart by the tick
+count read around it and reported, and the bound judges the events
+nothing lengthened:
+
+- **The ceiling, both roads** (letters a, b, e): an interrupt's post to
+  High inside Low's handler runs High to its end before Low resumes,
+  every handler reading its own index as the ceiling and the base's 255
+  in the UART's interrupt; Low posting to Mid and Mid to High nests High
+  inside Mid inside Low, each inside the post that asked; at depth 2 an
+  interrupt over High's handler, started by either road, runs Top before
+  High resumes, Top's first statement 200 to 201 cycles after the
+  handler's last.
+- **The latency of road 1** (letter c): from the interrupt handler's
+  last statement to High's handler's first, 244 cycles min and 245
+  median over 100 events in every run, the max 289 to 310 across ten
+  runs, none missed, every event slower than the path's own count one a
+  kernel tick landed in.
+- **The post** (letter d): a post that asks for nothing 107 cycles; a
+  post that runs High's empty dispatch inside it 700, the scheduling's
+  share 593.
+- **Time events under preemption** (letter f): three timers matured in
+  one turn are posted with the ceiling held at 0 and served High, Mid,
+  Low; High preempting Low's loop of `arm()` and `disarm()` by road 1
+  leaves the list whole, every timer due fired once, the disarmed one
+  never; one `arm()` 120 cycles with its masked window inside.
+- **The request under PRIMASK** (letter g, the core having no FPU to
+  test): a post to a higher object inside a critical section pends
+  PendSV and is served when the section's guard restores the mask,
+  before the statement after it, from the Console's dispatch and from
+  inside Low's; the section's last statement to the receiver's first
+  297 to 298 cycles.
+- **The request pending at the idle's WFI** (letter w): with interrupts
+  masked as the kernel's idle path masks them, a post to Mid pends
+  PendSV and the platform's own `idle()` follows. **A pending PendSV
+  ends the WFI, in IDLE0 and in IDLE2**: Mid served at the unmask,
+  before the next tick, in 10 of 10 runs in each mode, 306 to 307 cycles
+  from the stamp before `idle()` to Mid's first statement; the letter
+  hands PM.SLEEPCFG back at IDLE0. STANDBY is not walked (the end of
+  "Not covered yet").
+- **Dark** (letter i): every object idle, no time event armed, TC4's
+  line quiet, PB23 (the LED's pad) not an output, the ceiling the
+  Console's, interrupts enabled.
+- **The stack** (letter h): 556 to 580 bytes of high-water for the
+  suite's deepest chain, the deepest sampled stack pointer at 496 bytes
+  in a dispatch and 392 to 400 in the interrupt.
+- **Where the code sits** (PendSV's body thirteen instructions and 32
+  bytes, without the DSB that is the Cortex-M4's alone,
+  [../cortexm/README.md](../cortexm/README.md)): a build of the suite
+  whose body kept the DSB, four bytes longer, measured road 1 at 239
+  min and 240 median, the road-2 post 693, `arm()` 126, the section 278
+  to 279 and the idle letter 289 to 290 - the four bytes moved the code
+  after the body, and on this flash where a path sits moves its cost by
+  more than the barrier's cycle (the STM32G0's
+  [platform page](../stm32g0/platform.md) measures the two apart).
 
 ## The idle path, measured
 
@@ -939,3 +1059,9 @@ Implemented but not bench-verified:
 - **Sleeping under a debugger.** 19.5.6 says the power domains are not
   turned off then; everything here was measured with C_DEBUGEN
   cleared, and the debug-attached behaviour is trusted to the chapter.
+- **A PendSV pending at a STANDBY WFI.** Letter w walks IDLE0 and
+  IDLE2 only: in STANDBY the tick's interrupt is held off across the WFI
+  by erratum 1.8.13's guard, so a WFI the request did not end would have
+  no wake at all. Measured by the same leg in STANDBY with the RTC's
+  compare armed as a rescue, the receiver served before the rescue
+  saying the request ended the sleep.

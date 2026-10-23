@@ -90,12 +90,30 @@
  *    whatever the chip has between its cores (a hardware FIFO with an
  *    interrupt line per core on the RP2040, a counter on the host).
  *
- * Optional member of a HOST platform only, detected the same way:
+ * Optional members of a PREEMPTIVE platform, the one a Rubato kernel
+ * runs on (kernel/rubato.hpp), detected together by the Preemptive
+ * concept below; a platform with none of them is a Tenuto platform, and
+ * every header that asks (kernel/post.hpp, kernel/event_queue.hpp,
+ * kernel/time_event.hpp, util/ring.hpp) compiles for it exactly what it
+ * compiles without the question:
+ *  - preemptive: a static constexpr bool, true;
+ *  - ceiling: a static uint8_t, the pack index of the active object
+ *    being dispatched, 255 at the loop's base. A post to an object whose
+ *    index is below it asks for the scheduler;
+ *  - pend_schedule(): that request. The scheduler (Rubato's activate())
+ *    runs when no interrupt handler is running: at once from a
+ *    dispatch, at the handler's exit from an interrupt handler.
+ *
+ * Optional members of a HOST platform only, detected the same way:
  *  - interleave_point(): called by EventQueue's take() and release() at
  *    every boundary between two of their shared accesses - each place
  *    an interrupt could land - so a host suite can push from there and
  *    check every interleaving (test/test_event_queue). No target
- *    platform has it, and no code is compiled for it there.
+ *    platform has it, and no code is compiled for it there;
+ *  - preempt_point(): called by TimeEvents::process() after each fire
+ *    on a preemptive platform, the place a host suite lands a simulated
+ *    interrupt inside the walk (test/test_rubato); a test object's
+ *    handler may call it too. No target platform has it.
  */
 
 #pragma once
@@ -133,5 +151,15 @@ concept Platform =
         requires P::ticks_per_second > 0u;
         requires P::atomic_width > 0u;
     };
+
+/// Whether a platform is preemptive: it says so and carries the ceiling
+/// and the scheduling request (the optional members above). A platform
+/// that says so and lacks either is not one, and Rubato refuses it.
+template <typename P>
+concept Preemptive = requires {
+    requires P::preemptive;
+    { P::ceiling } -> std::same_as<uint8_t&>;
+    { P::pend_schedule() } -> std::same_as<void>;
+};
 
 } // namespace brio

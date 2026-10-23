@@ -1298,6 +1298,19 @@ Driver gaps:
 - TI frame format: the configuration is written and refused where the
   chapter says it must be, but nothing on this board frames its
   transactions that way. Born with its first device.
+- The polled loop with two frames in flight under the preemptive
+  kernel: it runs inside the arbiter's dispatch, which every dispatch
+  above the arbiter holds off for its whole length, and `hold_off_cycles`
+  counts the image's longest handler or masked window, not a dispatch.
+  Measured under Rubato against the STM32G0B1RE's `spi_peer` with an
+  object preempting every 97 to 389 us (`test_stm32f4_rubato_link`,
+  letter `p`): a preemption of 3000 cycles cuts the /64 to /8 rungs
+  short, one of 300 cycles the /8 rung alone, every time with
+  `spi_overrun` detected and never a run handed back with a hole; the
+  pump and the engines are exact at every rung. A hold-off that counts
+  the longest dispatch above the arbiter, or a polled path refused
+  under a preemptive platform, is the preemptive kernel's open question
+  ([design/kernel.md](../design/kernel.md), "Rubato").
 - No DMA engine slots on `SpiClient`: a program that wants its client
   on the streams binds them raw (the stm32f4 `spi_peer` does, "The
   client run"); a slot pair is born with a device-shaped client.

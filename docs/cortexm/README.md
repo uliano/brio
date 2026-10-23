@@ -15,7 +15,7 @@ STM32G0 and the RP2040), the M4 of the STM32F4 and the M33 half of the
 RP2350: one programmer's model over the ARMv6-M, ARMv7-M and ARMv8-M
 architectures.
 
-## The four files
+## The five files
 
 - **`cortexm/nvic.hpp`**: the NVIC and PRIMASK. `InterruptGuard` (the
   critical section every brio platform on these cores rides on), the
@@ -53,6 +53,58 @@ architectures.
   them; the count is never written; `now()` is one load; the file is
   refused by `static_assert` below the M3. On the STM32F4, measured, it
   counts through a WFI whatever DBG_SLEEP holds (`stm32f4/dwt.hpp`).
+- **`cortexm/schedule.hpp`**: the scheduling request of the preemptive
+  kernel, Rubato ([design/kernel.md](../design/kernel.md), "Rubato"),
+  and the place its scheduler runs. `request_scheduler()` pends PendSV
+  (PENDSVSET, then DSB and ISB, so a request from thread mode is taken
+  before the next instruction and one from a handler at the handler's
+  exit); `scheduler_init()` puts PendSV at the lowest priority the core
+  implements, below every peripheral line; `scheduler_exception<K>()`,
+  the naked body a program binds to `PendSV_Handler`, builds a second
+  exception frame and returns through it into `scheduler_thread<K>()`,
+  which runs the kernel's `activate()` in thread mode with PendSV no
+  longer active, so an interrupt's post preempts a dispatch at any
+  depth; `scheduler_return()`, the body bound to `SVC_Handler`
+  (`SVCall_Handler` on the SAM C21, whose crt names the core exceptions
+  as its device header does), steps over the SVC's frame and returns
+  into the real one. The frames, the
+  FPU's lazy context and EXC_RETURN's bits are the header's account.
+  The assembly is the ARMv6-M subset, so one source serves the M0+, the
+  M4 and the M33, and five platforms have run it: the STM32F4's
+  Cortex-M4 (`stm32f4/platform.hpp`'s `Stm32f4RubatoPlatform`, measured
+  on the Nucleo-F446RE, [../stm32f4/platform.md](../stm32f4/platform.md)),
+  the STM32G0's Cortex-M0+ (`stm32g0/platform.hpp`'s
+  `Stm32g0RubatoPlatform`, measured on the Nucleo-G0B1RE - PendSV at
+  0xC0, the frames basic, a request under PRIMASK served at the unmask,
+  [../stm32g0/platform.md](../stm32g0/platform.md)), the SAM C21's
+  Cortex-M0+ (`samc21/platform.hpp`'s `SamRubatoPlatform`, measured on
+  the SAMC21J18A: road 1 from an interrupt's last statement to the
+  preempting dispatch's first in 245 cycles, the SVC vector bound by
+  that crt's name `SVCall_Handler`, a PendSV pending at the idle's WFI
+  ending it, [../samc21/platform.md](../samc21/platform.md)), the
+  RP2040's (`rp2040/platform.hpp`'s `Rp2040RubatoPlatform`, one per
+  core, each core pending and taking its own PendSV, the one vector
+  table's entry bound to `rp2040/schedule.hpp`'s pair body when both
+  cores run the kernel, measured on the WeAct RP2040: road 1 in 210
+  cycles, a Rubato on each core preempting at once through that entry,
+  [../rp2040/platform.md](../rp2040/platform.md)) and the RP2350's
+  Cortex-M33 (`rp2350/platform.hpp`'s `Rp2350RubatoPlatform`, measured
+  on the WeAct RP2350B: road 1 in 113 cycles,
+  [../rp2350/platform.md](../rp2350/platform.md)). The ARMv8-M facts the
+  M33 rests on are checked against the documents there: EXC_RETURN's
+  security bits (ES, DCRS and S, all 1 in the Secure state the image
+  runs in) are carried unchanged from the value PendSV entered with,
+  MSPLIM is zeroed by that family's crt, and PRI_14's write lands on
+  the core's four bits as 0xF0. The header's lazy FP context save
+  assumes FPCCR.ASPEN and LSPEN at 1, the architecture's reset value;
+  the RP2350's own register table gives both a reset value of 0, and the
+  register read after the bootrom is 0xC000001C, both bits 1, the FP
+  registers bit-exact across a preemption there - the measurement
+  contradicts the table. One barrier in the PendSV body is the
+  Cortex-M4's alone: erratum 838869 (the STM32F4's r0p1) wants a DSB
+  before the exception return, and the body carries it on that core and
+  on no other (the device header's `__CORTEX_M`), the rule being no
+  barrier where no erratum asks for one.
 
 ## Why the stratum exists
 

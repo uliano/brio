@@ -60,6 +60,7 @@
 #include "kernel/platform.hpp"
 #include "stm32f4/nvic.hpp"
 #include "stm32f4/ticker.hpp"
+#include "cortexm/schedule.hpp"
 
 namespace brio {
 
@@ -139,5 +140,55 @@ private:
 };
 
 static_assert(Platform<Stm32f4Platform<>>);
+
+/**
+ * Stm32f4RubatoPlatform<TB>: the platform a Rubato kernel runs on
+ * (kernel/rubato.hpp), the preemptive one. It is Stm32f4Platform<TB>
+ * whole - the same critical section, idle, timebase, breakpoint and panic
+ * storage - plus the three members kernel/platform.hpp's Preemptive
+ * concept asks for:
+ *
+ *     using P = brio::Stm32f4RubatoPlatform<>;
+ *     using K = brio::Rubato<P, Sensor, Logger>;
+ *     extern "C" [[gnu::naked]] void PendSV_Handler() { brio::scheduler_exception<K>(); }
+ *     extern "C" [[gnu::naked]] void SVC_Handler() { brio::scheduler_return(); }
+ *     int main() { ...; brio::scheduler_init(); brio::enable_interrupts(); K::run(); }
+ *
+ *  - `preemptive`, true;
+ *  - `ceiling`, the byte the kernel keeps: the pack index of the object
+ *    being dispatched, 255 at the loop's base. A static of the platform,
+ *    so of the program: one kernel per platform type, which on this
+ *    single-core family is one kernel;
+ *  - `pend_schedule()`, the request for the scheduler, which is the core's
+ *    and not ST's: cortexm/schedule.hpp's PendSV, at the lowest priority
+ *    this core implements (the sixteenth level, below every NVIC line at
+ *    its reset priority 0). PendSV returns into the scheduler in thread
+ *    mode, and the scheduler leaves through SVC; that file says how, with
+ *    the frames it builds, the FPU's part and the stack each level of
+ *    preemption costs.
+ *
+ * The CriticalSection is still PRIMASK alone, and the promise that an
+ * interrupt handler is not interrupted by another keeps its meaning for
+ * the peripheral handlers, which still share one priority and never nest
+ * among themselves; the scheduler's exception sits below them all, and
+ * they do interrupt it. A program on this platform binds two vectors
+ * more than a Tenuto program, PendSV_Handler and SVC_Handler, both naked,
+ * executes no `svc` of its own, and calls scheduler_init() before it
+ * enables interrupts.
+ */
+template <class TB = Ticker>
+struct Stm32f4RubatoPlatform : Stm32f4Platform<TB> {
+    static constexpr bool preemptive = true;
+
+    /// The index of the object being dispatched; 255 at the loop's base.
+    static inline uint8_t ceiling = 255;
+
+    /// The request for the scheduler (cortexm/schedule.hpp).
+    [[gnu::always_inline]] static void pend_schedule() { request_scheduler(); }
+};
+
+static_assert(Platform<Stm32f4RubatoPlatform<>>);
+static_assert(Preemptive<Stm32f4RubatoPlatform<>>);
+static_assert(!Preemptive<Stm32f4Platform<>>);
 
 } // namespace brio
