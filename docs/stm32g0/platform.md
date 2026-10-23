@@ -69,10 +69,15 @@ busy-wait), `stm32g0/reset.hpp` ([reset.md](reset.md)),
 [../cortexm/README.md](../cortexm/README.md)). The
 crt is `stm32g0/src/glue/startup_stm32g0b1.cpp` +
 `stm32g0/ld/stm32g0b1re.ld` in the build project. The family fixtures
-are `test/family_stm32g0/platform.cpp` and `lptim_ticker.cpp` under
+are `test/family_stm32g0/platform.cpp`, `lptim_ticker.cpp` and
+`rubato.cpp` (the preemptive platform under the Rubato kernel) under
 `brio check stm32g0`, with the negatives that refuse a timed sleep
-site on a tickless platform and the tickless timebase off the value
-line.
+site on a tickless platform, the tickless timebase off the value
+line and the Rubato kernel on the Tenuto platform.
+`Stm32g0RubatoPlatform<TB>`, in the same header, is the platform of the
+preemptive kernel over the core stratum's `cortexm/schedule.hpp` (the
+ARMv6-M ARM's PendSV and SVCall; the Cortex-M0+ TRM, DDI 0484C, for
+the exception's cycles).
 
 ## What the silicon does
 
@@ -177,6 +182,23 @@ BKPT with no debugger escalates to the crt's distinct
   placed and the same DSB/WFI/unmask follows. `Tickless<TB>` requires
   `ticks()`, `ticks_per_second`, `arm_wake(now, deadline) -> bool`; the
   SysTick `Ticker` is statically not one.
+- `Stm32g0RubatoPlatform<TB = Ticker>` - `Stm32g0Platform<TB>` whole
+  (`idle_until()` with it where `TB` is `Tickless`) plus the three
+  members of a preemptive platform, the one the preemptive kernel
+  `Rubato` runs on ([design/kernel.md](../design/kernel.md), "Rubato"):
+  `preemptive`, `ceiling` (the index of the object being dispatched, 255
+  at the loop's base) and `pend_schedule()`, which is
+  `cortexm/schedule.hpp`'s request: PendSV pended, at the lowest of the
+  core's four levels (the byte 0xC0), below every NVIC line at its reset
+  priority 0. PendSV returns into the scheduler in thread mode and the
+  scheduler leaves through SVC, so a program on this platform binds two
+  vectors more than a Tenuto one, `PendSV_Handler` and `SVC_Handler`
+  (the crt's weak aliases), both naked, to `scheduler_exception<K>()`
+  and `scheduler_return()`, calls `scheduler_init()` before it enables
+  interrupts, and executes no `svc` of its own. The critical section
+  stays PRIMASK, and a post made inside one serves its receiver when the
+  section ends; the peripheral handlers still never nest among
+  themselves.
 - `LptimTicker<cfg>` (`LptimTickerConfig{instance = 1, shift = 5,
   source = lse, lsi_hz = 34000}`) - `init(clock)` (the LSE through the
   RTC domain's gate, or LSI through RCC; the LPTIM undivided with ARRM
@@ -272,6 +294,28 @@ int main() {
     const bool tick_ok = Tb::init(clock);        // false: no crystal
     brio::enable_interrupts();
     brio::Tenuto<P, Blinker, Supervisor>::run(); // sleeps TO each deadline
+}
+```
+
+The same program under the preemptive kernel: the platform type, the
+two naked vectors and one call more.
+
+```cpp
+#include "kernel/rubato.hpp"
+
+using P = brio::Stm32g0RubatoPlatform<>;
+using K = brio::Rubato<P, Sensor, Logger>;   // Sensor preempts Logger
+
+extern "C" void SysTick_Handler() { brio::Ticker::tick(); }
+extern "C" [[gnu::naked]] void PendSV_Handler() { brio::scheduler_exception<K>(); }
+extern "C" [[gnu::naked]] void SVC_Handler() { brio::scheduler_return(); }
+
+int main() {
+    SysClock::init();
+    brio::Ticker::init(clock);
+    brio::scheduler_init();         // PendSV at the lowest priority
+    brio::enable_interrupts();
+    K::run();
 }
 ```
 
@@ -449,6 +493,78 @@ listing) - ST's
   the first half of a lap. And a print in flight when a Stop is
   entered is a garbled line (the console's clock stops mid-character):
   drain first.
+
+**The preemptive kernel** - the reference suite is `test_stm32_rubato`
+(nine letters in `z`, 37 verdicts, ten runs of `z` alike): a Rubato pack
+of five objects on `Stm32g0RubatoPlatform` on the Nucleo-G0B1RE at
+64 MHz, the Console the lowest and the letters' runner, TIM14's compare
+the interrupt the road-1 letters land, nothing wired and nothing lit.
+The ruler is TIM2 free-running at HCLK: two back-to-back reads of its
+CNT are 4 cycles apart, against 68 for the kernel ticker's composed
+`cycles()` (SysTick's position and the tick count, five reads and a
+consistency check), and the two agree within 3 cycles over a millisecond
+and a reload. HCLK cycles, each figure beside the bound its letter
+derives from the core's own counts over the release listing:
+
+- **The ceiling, both roads** (letters a, b, e): an interrupt's post to
+  High inside Low's handler runs High to its end before Low resumes,
+  every handler reading its own index as the ceiling and the base's
+  255 in the UART's interrupt; Low posting to Mid and Mid to High nests
+  High inside Mid inside Low, each inside the post that asked, High's
+  post to Low served after Low's own dispatch ends; and at depth 2 an
+  interrupt over High's handler, started by either road, runs Top
+  before High resumes, Top's first statement 162 to 163 cycles after
+  the handler's last.
+- **The latency of road 1** (letter c): from the interrupt handler's
+  last statement to High's handler's first, 193 cycles min, 194 median
+  and max over 100 events, every run; 235 to 256 for the one event in
+  about two hundred a kernel tick lands in (five of the thousand events
+  of ten runs, a tick inside each). The path counts 159 cycles at zero
+  wait states - the handler's exit, the tail-chain into PendSV, its
+  thirteen instructions and the return through the fake frame, the
+  entry, `activate()`'s visits to Top and High - and 211 with every
+  flash refill paid; the bound, 323, adds one tick (70) and a fifth.
+- **The scan and the post** (letter d): `activate()` with four empty
+  queues below the ceiling 165 cycles (bound 220); a post that asks for
+  nothing 95 (bound 127); a post that runs High's empty dispatch inside
+  it 531 (bound 695), the scheduling's share 436 - two exception
+  entries from thread mode (PendSV's and the SVC's, DDI 0484C's 15
+  cycles each) and two returns, and a line of a flash at two wait
+  states refilled at every call and taken branch on the way.
+- **Time events under preemption** (letter f): three timers matured in
+  one turn are posted with the ceiling held at 0 and served High, Mid,
+  Low; High preempting Low's loop of `arm()` and `disarm()` by road 1
+  (in the loop's tenth turn of 200) leaves the list whole, every timer
+  due fired once, the disarmed one never; one `arm()` 93 cycles (bound
+  135) with its masked window inside.
+- **The request under PRIMASK** (letter g, the core having no FPU to
+  test): a post to a higher object inside a critical section pends
+  PendSV - PENDSVSET reads set inside the section, the receiver has not
+  run - and the receiver runs when the section's guard restores the
+  mask, before the statement after it, from the Console's dispatch and
+  from inside Low's, ten runs each; the section's last statement to the
+  receiver's first 222 to 223 cycles (bound 280). The nested guard of
+  the trace's own `note()` inside the section restores PRIMASK set and
+  takes nothing.
+- **The stack** (letter h): painted from main's frame down to the end of
+  `.bss` and `.noinit` (0x20000730..0x20023F80), 500 to 520 bytes of
+  high-water for the suite's deepest chain, the deepest sampled stack
+  pointer at 464 bytes in a dispatch and 344 in the interrupt, the mark
+  within the 156 bytes an action's frames, a basic exception frame and
+  a handler's or a PendSV level's frames add.
+- **Dark** (letter i): every object idle, no timer armed, TIM14 quiet,
+  PA5 not an output, the ceiling the Console's, interrupts enabled.
+- **The hot path in the release listing**: PendSV's body is fourteen
+  instructions, every one a 16-bit form but the DSB, 36 bytes with its
+  literal; the SVC's three; the request seven (the mask and the
+  address, the store to ICSR, DSB, ISB, the return), a call the
+  compiler cannot see into;
+  `post<Low>()` thirteen on the path that asks nothing and one call
+  more on the path that asks. Two builds of the same suite that differed
+  only in comments and constants put the road-1 path at 197..198 and
+  193..194 cycles, the scan at 184 and 165, the road-2 post at 546 and
+  531: a path's cost from this flash moves with where it sits, as "Code
+  in SRAM" below finds for the drivers.
 
 Two kernel programs on the Nucleo-G0B1RE: two AOs under time events at
 500/250/100 ms (PA5 sampled over SWD every 100 ms shows the 500 ms cadence
@@ -652,9 +768,12 @@ Driver gaps (this chapter's option space the stratum does not touch):
   the crt's and sits where the part boots; born with its first user (a
   bootloader).
 - NVIC priorities: exposed and measured (letter `n`), and nothing in
-  the stratum assigns one, because the kernel is flat - every interrupt
-  is one hardware level above the loop, and a priority scheme is the
-  preemptive kernel's question ([design/kernel.md](../design/kernel.md)).
+  the stratum assigns one to a peripheral line: under both kernels every
+  line stays at level 0, one hardware level above the loop, and the
+  preemptive one puts only PendSV below them (`scheduler_init()`);
+  priorities among the lines would break the promise that no handler
+  nests over another ([design/kernel.md](../design/kernel.md),
+  "Rubato"), and none is born until a design asks for one.
 - A per-package pin-bonding table - [port.md](port.md) says why not.
 - The veneer between the flash and SRAM: every `InRam` call from the
   flash pays the linker's long-branch stub; GCC's ARM `long_call` on
@@ -673,7 +792,15 @@ measurement); the idle path of `idle_until()` on the tickless
 timebase, whose arming adds instructions between the masked check and
 the WFI - the same WFI under PRIMASK closes it, and letter `w`'s walk
 over `Stm32g0Platform<LptimTicker>` with the LPTIM's compare as the
-edge is what would measure it; `abort()`'s and `HardFault_Handler`'s spins (the fault VECTOR is
+edge is what would measure it; the preemptive platform over the
+tickless timebase, `Stm32g0RubatoPlatform<LptimTicker<>>` (its
+`idle_until()` is the Tenuto platform's, inherited, and compiled by the
+family fixture; `test_stm32_rubato` runs on the SysTick `Ticker`, and
+the same pack on the LPTIM's platform with its vector bound is what
+would measure it); `test_stm32_rubato` on the STM32G071RB and the
+STM32G031K8 (built for the G0B1RE alone; TIM2, TIM14 and every verb it
+uses exist on both, so its boards line and a run there are the
+measurement); `abort()`'s and `HardFault_Handler`'s spins (the fault VECTOR is
 exercised, by `hard_fault_reset` - [reset.md](reset.md); the spins are
 what runs when no body is bound, and every suite binds one). The
 cortex-debug launch entry ([README.md](README.md)) has not been driven

@@ -133,8 +133,11 @@
  * three (SHPR3 is word-access only on ARMv6-M, which CMSIS's
  * NVIC_SetPriority honours). The assembly is the ARMv6-M subset - no IT
  * block, no load into the PC, the 16-bit forms only - so the one source
- * assembles for all three. The one family whose platform takes it today
- * is the STM32F4's (stm32f4/platform.hpp's Stm32f4RubatoPlatform).
+ * assembles for all three. Two families' platforms take it today and
+ * have run it: the STM32F4's (stm32f4/platform.hpp's
+ * Stm32f4RubatoPlatform, the M4) and the STM32G0's (stm32g0/
+ * platform.hpp's Stm32g0RubatoPlatform, the M0+); the M33 has compiled
+ * it and not run it.
  *
  * Include-order contract: the family's device header first (it brings
  * the CMSIS core header with SCB, PendSV_IRQn and __FPU_USED); the

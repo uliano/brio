@@ -68,10 +68,15 @@ architectures.
   over the SVC's frame and returns into the real one. The frames, the
   FPU's lazy context and EXC_RETURN's bits are the header's account.
   The assembly is the ARMv6-M subset, so one source serves the M0+, the
-  M4 and the M33: run on the STM32F4 (`stm32f4/platform.hpp`'s
-  `Stm32f4RubatoPlatform`, measured on the Nucleo-F446RE), compiled by
-  the family fixtures of the SAM C21, the STM32G0, the RP2040 and the
-  RP2350's Arm half and not yet run there.
+  M4 and the M33: run on the STM32F4's Cortex-M4 (`stm32f4/platform.hpp`'s
+  `Stm32f4RubatoPlatform`, measured on the Nucleo-F446RE,
+  [../stm32f4/platform.md](../stm32f4/platform.md)) and on the
+  STM32G0's Cortex-M0+ (`stm32g0/platform.hpp`'s
+  `Stm32g0RubatoPlatform`, measured on the Nucleo-G0B1RE - PendSV at
+  0xC0, the frames basic, a request under PRIMASK served at the unmask,
+  [../stm32g0/platform.md](../stm32g0/platform.md)), compiled by the
+  family fixtures of the SAM C21, the RP2040 and the RP2350's Arm half
+  and not yet run there.
 
 ## Why the stratum exists
 

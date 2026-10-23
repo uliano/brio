@@ -410,11 +410,12 @@ OpenOCD's own console is what the findings were taken with;
 `delay_us` against an INDEPENDENT ruler (the suite judges it on
 SysTick's own counter and the kernel tick, both derived from HCLK; a
 timer on the crystal or the RTC is the ruler the M0+ suites use, and
-the timer chapter brings it); the scheduler's three bodies on the M0+
-and the M33 (compiled by the SAM C21's, the STM32G0's, the RP2040's and
-the RP2350's family fixtures, run on none of them: a board of each is
-what would measure them); a scheduling request made with PRIMASK set,
-served when the mask lifts (reasoned from the architecture, not
-exercised by a letter). The FPU is no longer a gap: `test_stm32f4_rubato`'s
+the timer chapter brings it); the scheduler's three bodies on the M33
+(compiled by the RP2350's family fixture, not run: the board is what
+would measure them; on the M0+ they ran, on the STM32G0B1RE,
+[the STM32G0 platform page](../stm32g0/platform.md)); a scheduling
+request made with PRIMASK set, served when the mask lifts, which this
+family's suite does not exercise (the STM32G0's letter g does, on the
+same core stratum's code). The FPU is no longer a gap: `test_stm32f4_rubato`'s
 letter g computes float sums across a preemption and judges them
 bit-exact.

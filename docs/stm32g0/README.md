@@ -313,10 +313,11 @@ the sweep is the only check there is.
 ## The Nucleo-G071RB
 
 The STM32G071RB is the bench board's smaller sibling, an LQFP64 with the
-same board layout. Fourteen of the seventeen test suites build for it
-(the three that do not, `test_stm32_nvm`, `test_stm32_journal` and
+same board layout. Fourteen of the eighteen test suites build for it
+(three that do not, `test_stm32_nvm`, `test_stm32_journal` and
 `test_stm32_fdcan`, need a second flash bank or an FDCAN the part has
-not got), and the same fourteen build for the Nucleo-G031K8 below. An
+not got, and `test_stm32_rubato` is built for the G0B1RE alone), and
+the same fourteen build for the Nucleo-G031K8 below. An
 app that builds for more than one board says so in its
 `// build: boards = g0b1re,g071rb,g031k8` line. What a suite cannot do
 on a board it skips by name, printing the reserve's own fact and
@@ -350,6 +351,7 @@ and a peer is a second board on the other end of a link.
 | `test_stm32_nvm` | 85 | - | one flash bank: no storage attic ([nvm.md](nvm.md)) |
 | `test_stm32_journal` | 52 | - | the same |
 | `test_stm32_fdcan` | 96 | - | no FDCAN on this part ([fdcan.md](fdcan.md)) |
+| `test_stm32_rubato` | 37 | - | built for the G0B1RE alone (its boards line); TIM2 and TIM14, its ruler and its interrupt, exist on this part ([platform.md](platform.md)) |
 
 The I2C suite's figures on this part were measured with the other board
 as its peer, roles exchanged, in one set (the peer letters have since
@@ -392,7 +394,7 @@ dropped on the drive the probe presents) and nothing can be halted or
 read over SWD until the replug
 ([../probes/st-link.md](../probes/st-link.md)).
 
-Fourteen of the seventeen suites build for it, the same fourteen as for
+Fourteen of the eighteen suites build for it, the same fourteen as for
 the G071RB:
 
 | Suite | G0B1RE | G071RB | G031K8 | What skips on the G031K8, and why |
@@ -413,6 +415,7 @@ the G071RB:
 | `test_stm32_i2c` | 155 (+ `w` 35) | 54 (peer) | **54** (peer) | the eleven self-link letters, skipped on the probe's answer like everywhere else - this package does bond I2C2's PA11/PA12, so what rules them out is the desk and not the plastic |
 | `test_stm32_nvm`, `test_stm32_journal` | 85, 52 | - | - | one flash bank: no storage attic |
 | `test_stm32_fdcan` | 96 | - | - | no FDCAN |
+| `test_stm32_rubato` | 37 | - | - | built for the G0B1RE alone (its boards line); TIM2 and TIM14 exist on this part too |
 
 How the images fit: `brio check stm32g0` links each, `brio fit stm32g0`
 lists what each takes, and one suite does not fit whole.
@@ -471,7 +474,7 @@ in the document.
 
 | Document | Content |
 |----------|---------|
-| [platform.md](platform.md) | What the kernel stands on: `Stm32g0Platform<TB>` (TB the timebase), the PRIMASK critical section, WFI idle, the vector table with its shared lines, the start-up code, and its two timebases - the SysTick `Ticker` (1000 Hz, stops in Stop) and `LptimTicker` (the LPTIM on the LSE crystal, 1024 Hz), which makes a program tickless: no periodic interrupt, every deadline placed in the compare, kernel time running through a Stop. Measured to the cycle: the idle contract (no edge position of 400 loses its wake, one kernel turn per tick, a wake from Sleep 36 cycles to the handler) and the LPTIM compare's latency, the finding that put the counter undivided. "Code in SRAM": the opt-in `InRam` placement of the SPI host's and the UART task's hot paths, with its gain and its cost per path |
+| [platform.md](platform.md) | What the kernel stands on: `Stm32g0Platform<TB>` (TB the timebase) and `Stm32g0RubatoPlatform<TB>`, the preemptive kernel's (PendSV at the lowest of the four levels returning into the scheduler in thread mode, SVC the way back, `cortexm/schedule.hpp`), the PRIMASK critical section, WFI idle, the vector table with its shared lines, the start-up code, and its two timebases - the SysTick `Ticker` (1000 Hz, stops in Stop) and `LptimTicker` (the LPTIM on the LSE crystal, 1024 Hz), which makes a program tickless: no periodic interrupt, every deadline placed in the compare, kernel time running through a Stop. Measured to the cycle: the idle contract (no edge position of 400 loses its wake, one kernel turn per tick, a wake from Sleep 36 cycles to the handler) and the LPTIM compare's latency, the finding that put the counter undivided; and the preemptive kernel by `test_stm32_rubato` (road 1 in 194 cycles from a handler's last statement to the preempting dispatch's first, a quiet post 95, a road-2 post 531, a post under PRIMASK served when the section ends, 520 bytes of stack for the suite's deepest chain). "Code in SRAM": the opt-in `InRam` placement of the SPI host's and the UART task's hot paths, with its gain and its cost per path |
 | [reset.md](reset.md) | The reset flags of RCC_CSR as the accumulating history they are, the independent and the window watchdog with their traps (keyed registers that do not update until the start key clocks the block; a window counter that free-runs), the deliberate resets, and the panic breadcrumb proven across six real resets including a HardFault |
 | [clock.md](clock.md) | One SYSCLK, shared bus prescalers, per-peripheral enable bits, the kernel-clock multiplexers and the MCO clock output; HSI16 and the PLL to 64 MHz, the flash latency sequence, the three voltage regimes as static rates; the dynamic clock over a pack of rates, every rung measured and a switch 48..384 us; `LseTracker`, the core tracked against the LSE crystal with no CPU |
 | [port.md](port.md) | GPIO: a port has a clock and it is off at reset, analog is the reset state, the AF numbers are the datasheet's, BSRR/BRR are atomic, and four pads (PA8/PB15, PD0/PD2) are not ordinary GPIOs out of a power-on until SYSCFG's strobe releases the UCPD dead-battery pull-downs |

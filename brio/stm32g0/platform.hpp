@@ -74,6 +74,7 @@
 #include "kernel/platform.hpp"
 #include "stm32g0/nvic.hpp"
 #include "stm32g0/ticker.hpp"
+#include "cortexm/schedule.hpp"
 
 namespace brio {
 
@@ -226,5 +227,59 @@ private:
 
 static_assert(Platform<Stm32g0Platform<>>);
 static_assert(!Tickless<Ticker>);
+
+/**
+ * Stm32g0RubatoPlatform<TB>: the platform a Rubato kernel runs on
+ * (kernel/rubato.hpp), the preemptive one. It is Stm32g0Platform<TB>
+ * whole - the same critical section, idle, idle_until() where the
+ * timebase is Tickless, timebase, breakpoint and panic storage - plus the
+ * three members kernel/platform.hpp's Preemptive concept asks for:
+ *
+ *     using P = brio::Stm32g0RubatoPlatform<>;
+ *     using K = brio::Rubato<P, Sensor, Logger>;
+ *     extern "C" [[gnu::naked]] void PendSV_Handler() { brio::scheduler_exception<K>(); }
+ *     extern "C" [[gnu::naked]] void SVC_Handler() { brio::scheduler_return(); }
+ *     int main() { ...; brio::scheduler_init(); brio::enable_interrupts(); K::run(); }
+ *
+ *  - `preemptive`, true;
+ *  - `ceiling`, the byte the kernel keeps: the pack index of the object
+ *    being dispatched, 255 at the loop's base. A static of the platform,
+ *    so of the program: one kernel per platform type, which on this
+ *    single-core family is one kernel;
+ *  - `pend_schedule()`, the request for the scheduler, which is the core's
+ *    and not ST's: cortexm/schedule.hpp's PendSV, at the lowest priority
+ *    this core implements (the fourth of the Cortex-M0+'s four levels,
+ *    the byte 0xC0, below every NVIC line at its reset priority 0).
+ *    PendSV returns into the scheduler in thread mode, and the scheduler
+ *    leaves through SVC; that file says how, with the frames it builds
+ *    and the stack each level of preemption costs (a basic frame always:
+ *    this core has no FPU).
+ *
+ * The CriticalSection is still PRIMASK alone - ARMv6-M has nothing finer
+ * - and the promise that an interrupt handler is not interrupted by
+ * another keeps its meaning for the peripheral handlers, which still
+ * share one priority and never nest among themselves; the scheduler's
+ * exception sits below them all, and they do interrupt it. A request
+ * made with PRIMASK set is taken when the mask lifts, so a post inside a
+ * critical section serves its receiver when the section ends. A program
+ * on this platform binds two vectors more than a Tenuto program,
+ * PendSV_Handler and SVC_Handler (the crt's weak aliases), both naked,
+ * executes no `svc` of its own, and calls scheduler_init() before it
+ * enables interrupts.
+ */
+template <class TB = Ticker>
+struct Stm32g0RubatoPlatform : Stm32g0Platform<TB> {
+    static constexpr bool preemptive = true;
+
+    /// The index of the object being dispatched; 255 at the loop's base.
+    static inline uint8_t ceiling = 255;
+
+    /// The request for the scheduler (cortexm/schedule.hpp).
+    [[gnu::always_inline]] static void pend_schedule() { request_scheduler(); }
+};
+
+static_assert(Platform<Stm32g0RubatoPlatform<>>);
+static_assert(Preemptive<Stm32g0RubatoPlatform<>>);
+static_assert(!Preemptive<Stm32g0Platform<>>);
 
 } // namespace brio
