@@ -5,58 +5,77 @@
  * 7.1 the three tiers, 7.3 chip-level resets and their record, 7.4 the
  * power-on state machine, 12.9 the watchdog's REASON and trigger, 3.5.8
  * the rescue reset, 5.2 the bootrom) - the failing half of the platform
- * beside rp2350/platform.hpp's running half.
+ * beside rp2350/platform.hpp's running half. A program reads the causes
+ * at boot, ends itself with a reboot, and has a panic or a fault leave a
+ * breadcrumb (kernel/panic.hpp's PanicRecord, in .noinit) that the next
+ * boot reads:
  *
- * THREE TIERS, AND THE WORD THAT RECORDS THEM. Chapter 7 divides every
- * reset of this chip into CHIP-level (the whole device: the power-on
+ *     const uint32_t causes = brio::Reset::causes();   // once, at boot
+ *     const auto record = brio::take_panic_record<P>();
+ *     extern "C" void isr_hardfault()       { brio::fault_reset<P>(); }   // Arm
+ *     extern "C" void isr_riscv_exception() { brio::fault_reset<P>(); }   // RISC-V
+ *     brio::panic<P, brio::ResetReporter>(brio::PanicCode::assert_failed, 7);
+ *     brio::Reset::software();                         // the reboot, both halves
+ *
+ * Who calls what. causes(), rescue_flag() and double_tap() are reads,
+ * from any context, and change nothing. software() and core() never
+ * return, and neither waits for anything first. fault_reset<P>() runs in
+ * the fault, bound by the program to the crt's fault entry (each image
+ * links the name its own crt declares; an entry left unbound is the
+ * crt's default spin). ResetReporter::report() runs where panic() calls
+ * it, with interrupts masked. Nothing here masks interrupts itself or
+ * keeps storage of the caller's.
+ *
+ * Three tiers, and the word that records them. Chapter 7 divides every
+ * reset of this chip into chip-level (the whole device: the power-on
  * reset, brown-out, the RUN pin, a debugger's request, the rescue port, a
  * glitch, a switched-core power-down, and a watchdog event configured to
- * reach that far), SYSTEM (the power-on state machine's stages, which is
- * what an ordinary reboot runs) and SUBSYSTEM (the peripheral blocks,
+ * reach that far), system (the power-on state machine's stages, which is
+ * what an ordinary reboot runs) and subsystem (the peripheral blocks,
  * rp2350/resets.hpp). The source of the last chip-level reset is recorded
  * in POWMAN's CHIP_RESET - moved there from the RP2040's LDO block and
- * widened, because the power manager is in the ALWAYS-ON domain and so
+ * widened, because the power manager is in the always-on domain and so
  * the record outlives a power-down of the core.
  *
- * AND THE WORD IS NOT A CAUSE. WATCHDOG.REASON names the LAST watchdog
+ * And the word is not a cause. WATCHDOG.REASON names the last watchdog
  * event, TIMER or FORCE, each replacing the other. CHIP_RESET's HAD_*
- * half is the other question, and the bench answers it: A REBOOT DOES
- * NOT APPEAR THERE AT ALL. Measured across a `software()` reboot, a
+ * half is the other question, and the bench answers it: a reboot does
+ * not appear there at all. Measured across a `software()` reboot, a
  * watchdog time-out, a panic and a fault, the chip-level word comes out
  * of every one of them bit for bit as it went in, still naming the last
- * CHIP-level reset - because a watchdog event that runs the power-on
- * state machine is a SYSTEM reset and not a chip-level one. What would
+ * chip-level reset - because a watchdog event that runs the power-on
+ * state machine is a system reset and not a chip-level one. What would
  * make it chip-level is POWMAN's own WDSEL (6.4, RESET_PSM and the three
  * bits under it), whose reset value is zero and which nothing in brio
  * writes. So HAD_WATCHDOG_RESET_PSM stands for a reset this framework
- * never asks for, and a program answers "what caused THIS boot" from
+ * never asks for, and a program answers "what caused this boot" from
  * REASON and its own survivors, never from the chip-level half.
  *
- * ONE MORE THING CLEARS REASON HERE, AND NOT ON THE RP2040 (12.9's own
- * note): a DEBUGGER WARM RESET of either core - the Arm SYSRESETREQ or
+ * One more thing clears REASON here, and not on the RP2040 (12.9's own
+ * note): a debugger warm reset of either core - the Arm SYSRESETREQ or
  * the RISC-V hartreset - clears WATCHDOG.REASON, so that code loaded
  * under a probe after a time-out does not go on reading the time-out.
  * `Reset::core()` is that same signal from software, so it wipes the
  * watchdog's half of the word and leaves the chip-level half standing.
  *
- * POWMAN IS READ AND NEVER WRITTEN HERE. Every register of that block up
+ * POWMAN is read and never written here. Every register of that block up
  * to offset 0xac - CHIP_RESET among them - takes a write only with the
  * password 0x5AFE in its top half (6.4), and what those registers do is
- * the power chapter's business. The two flags a program might want to
- * clear, RESCUE_FLAG and DOUBLE_TAP, are the BOOTROM's: it reads the
- * rescue flag before anything else and clears it to acknowledge (5.2,
- * 3.5.8), so by the time this file runs the flag is already down and
- * `rescue_flag()` reports what is left rather than what happened. What
- * happened is `ResetCause::rescue`, the latch beside it.
+ * the power chapter's business (rp2350/powman.hpp). The two flags a
+ * program might want to clear, RESCUE_FLAG and DOUBLE_TAP, are the
+ * bootrom's: it reads the rescue flag before anything else and clears it
+ * to acknowledge (5.2, 3.5.8), so by the time this file runs the flag is
+ * already down and `rescue_flag()` reports what is left rather than what
+ * happened. What happened is `ResetCause::rescue`, the latch beside it.
  *
- * THE REBOOT. `software()` - what ResetReporter and fault_reset() call,
- * what a program means by "reboot" - is THE WATCHDOG'S TRIGGER with the
+ * The reboot. `software()` - what ResetReporter and fault_reset() call,
+ * what a program means by "reboot" - is the watchdog's trigger with the
  * power-on state machine's WDSEL selecting every stage but the two
  * oscillators (rp2350/watchdog.hpp): the whole system through the
  * bootrom, both cores, the crystal kept, REASON.FORCE at the next boot as
  * its mark. `core()` is the processor's own reset request, which exists
  * on the Cortex-M33 half alone: on Hazard3 the hart reset controls
- * (dmcontrol.hartreset, dmcontrol.ndmreset) are IN THE DEBUG MODULE
+ * (dmcontrol.hartreset, dmcontrol.ndmreset) are in the Debug Module
  * (3.8.5.3), reachable by a debugger and by no instruction, so the verb
  * is refused at compile time there rather than spelled as something it is
  * not.
@@ -66,7 +85,10 @@
  * `fault_reset<P>()` is the body an app binds to the crt's fault entry,
  * which is `isr_hardfault` on the Arm half and `isr_riscv_exception` on
  * the RISC-V one: two names because the two crts have two tables, one
- * function because the wreck is the same.
+ * function because the wreck is the same. A panic needs both: panic()
+ * executes the platform's breakpoint before its Reporter, and with no
+ * debugger attached that breakpoint is a fault, so the reboot then comes
+ * through fault_reset(), which keeps the panic's breadcrumb.
  */
 
 #pragma once
@@ -102,8 +124,8 @@ struct ResetCause {
     /// The RISC-V debug module's non-debug-module reset: both harts, no
     /// other hardware, and it is recorded here all the same.
     static constexpr uint32_t hazard3_sys_reset = 1u << 10;
-    /// A watchdog event that ran the power-on state machine AND was
-    /// selected in POWMAN's own WDSEL. NOT the one `software()` makes:
+    /// A watchdog event that ran the power-on state machine and was
+    /// selected in POWMAN's own WDSEL. Not the one `software()` makes:
     /// with that register at its reset value - and nothing here writes
     /// POWMAN - a reboot leaves this bit and the whole chip-level half
     /// untouched (measured; the file header).
@@ -150,7 +172,9 @@ private:
     };
 
 public:
-    /// ResetCause bits for this boot, read-only and unchanged by reading.
+    /// ResetCause bits for this boot, read-only and unchanged by reading:
+    /// CHIP_RESET's latches (the last chip-level reset, which a reboot
+    /// leaves alone - the file header) and REASON's two. Any context.
     static uint32_t causes() {
         const uint32_t chip = POWMAN->CHIP_RESET;
         uint32_t c = 0;
@@ -181,22 +205,22 @@ public:
         return (POWMAN->CHIP_RESET & POWMAN_CHIP_RESET_DOUBLE_TAP_BITS) != 0u;
     }
 
-    /// Reboot the SYSTEM: the watchdog's trigger under the power-on state
+    /// Reboot the system: the watchdog's trigger under the power-on state
     /// machine's selection (the file header) - both cores through the
     /// bootrom, the oscillators kept, the SRAM and the scratch registers
     /// untouched by the tier this takes, REASON.FORCE at the next boot.
     /// Never returns.
     [[noreturn]] static void software() { Watchdog::force_reset(); }
 
-    /// Reset THIS PROCESSOR through its own request. On the Cortex-M33
+    /// Reset this processor through its own request. On the Cortex-M33
     /// half that is SCB.AIRCR.SYSRESETREQ, a warm reset that restarts the
     /// core through the bootrom and leaves the clock tree, the pads and
     /// every peripheral exactly as they were - and that CLEARS
     /// WATCHDOG.REASON on the way (12.9). Never returns.
     ///
-    /// REFUSED AT COMPILE TIME ON THE HAZARD3 HALF, where the hart's
+    /// Refused at compile time on the Hazard3 half, where the hart's
     /// reset controls live in the Debug Module and no instruction reaches
-    /// them (3.8.5.3). The guard is on the ARGUMENT, so
+    /// them (3.8.5.3). The guard is on the argument, so
     /// `Reset::core<CoreKind::hazard3>()` is refused by both compilers
     /// and a plain `Reset::core()` is refused by exactly the build that
     /// has not got it.

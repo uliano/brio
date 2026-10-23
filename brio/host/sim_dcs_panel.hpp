@@ -1,49 +1,77 @@
 /*
  * sim_dcs_panel.hpp
  *
- * A COMMAND PANEL MADE OF RAM: the frame memory, the address counter
- * and the walk of a DCS controller, with no wire under it and no chip
- * over it. What it is for is the middle plane of design/gfx.md's three
- * planes of truth - a driver's window arithmetic, its walk bits, its
- * packing and its read framing judged pixel for pixel before any
+ * A command panel made of RAM: the frame memory, the address counter
+ * and the walk (the order in which a memory write fills the window) of a
+ * DCS controller, with no wire under it and no chip over it. It is what
+ * a host test drives instead of an ILI9481 module, and what it is for is
+ * the middle plane of docs/design/gfx.md's three planes of truth ("The
+ * three planes of truth") - a driver's window arithmetic, its walk bits,
+ * its packing and its read framing judged pixel for pixel before any
  * silicon is asked, and judged again afterwards against the same
- * expectations.
+ * expectations (docs/devices/README.md, "How a driver here is tested").
  *
- * TWO LAYERS, AS THE COMMAND TIER SAYS. `SimDcsPanel<Traits>` is the
- * CORE, and its seam is the DCS TRANSACTION: a command, the parameter
+ * The smallest use, drawn from test/test_ili9481 (which keeps the two as
+ * function-local statics) and docs/devices/ili9481.md: one panel and one
+ * serial adapter in static storage (the frame memory is 460800 bytes and
+ * has no business on a stack), a transaction clocked byte by byte, and
+ * the memory or the glass read back:
+ *
+ *     using Panel = SimDcsPanel<Ili9481>;
+ *     using Link = SimDcsSerial<Panel>;
+ *     constexpr SimDcsGlass bench_module{.column_mirror = true, .bgr = true,
+ *                                        .wants_inversion = true};
+ *     static Panel panel{bench_module};
+ *     static Link link{panel};
+ *
+ *     link.select(true);
+ *     link.dc(false);  (void)link.byte(Dcs::ramrd);
+ *     link.dc(true);   const uint8_t dummy = link.byte(0xFF);   // 0x80
+ *     link.select(false);
+ *
+ * One level up, brio/host/sim_spi_host.hpp attaches the adapter to a SPI
+ * host made of RAM, so the code a driver really calls - the link and the
+ * panel driver of brio/devices/ - is judged against this panel.
+ *
+ * Contexts: a single-threaded test. Nothing waits and nothing runs by
+ * itself - there is no time here - and every verb is a plain call on
+ * the object. The frame memory `gram` is public on purpose (below).
+ *
+ * Two layers, as the command tier says. `SimDcsPanel<Traits>` is the
+ * core, and its seam is the DCS transaction: a command, the parameter
  * or pixel bytes in, the answer bytes out. It knows nothing of dummy
  * bytes, of a D/C line or of a clock - those belong to a link, and
- * `SimDcsSerial<Core>` is the FRAMING ADAPTER for the four-wire serial
+ * `SimDcsSerial<Core>` is the framing adapter for the four-wire serial
  * interface in front of it, at the level of bytes. A simulated SPI host
  * drives that, and so can a captured trace; a second link would be a
  * second adapter in front of the same core.
  *
- * THE BENCH IS THE AUTHORITY AND THIS FILE IS NOT. Every rule below is
+ * The bench is the authority and this file is not. Every rule below is
  * a measurement on an ILI9481 module, restated from the traits type
  * that holds it (devices/ili9481.hpp) so that the driver and the
  * simulator cannot drift apart. The memory's rules, as measured:
  *
- *   1. The address counter is an ADDRESS and not an index into a walk.
+ *   1. The address counter is an address and not an index into a walk.
  *      RAMWR puts the write address at the walk's first pixel and RAMRD
  *      the read address; nothing else moves either. CASET and PASET
  *      re-issued, with the same values or with others, leave both where
  *      they are, and the two are independent of each other.
  *   2. A write steps the address along the walk and after the window's
- *      LAST pixel WRAPS to its first; so does a read. Nothing is
+ *      last pixel wraps to its first; so does a read. Nothing is
  *      dropped at the edge, the first pixels are overwritten.
- *   3. A write whose address lies OUTSIDE the window (the window moved
+ *   3. A write whose address lies outside the window (the window moved
  *      away from under it) lands nowhere, and the address stays.
  *   4. A pixel cut short at the close of a write transaction is
- *      DROPPED: the next RAMWR or write memory continue starts a fresh
+ *      dropped: the next RAMWR or write memory continue starts a fresh
  *      pixel, and the address has not moved for the partial one.
- *   5. A CASET or PASET whose START is beyond the axis it addresses is
- *      IGNORED - the register keeps its values and the window before it
- *      stands. One whose END is beyond the axis, or that runs
- *      BACKWARDS, is TAKEN and makes the window invalid: a write lands
+ *   5. A CASET or PASET whose start is beyond the axis it addresses is
+ *      ignored - the register keeps its values and the window before it
+ *      stands. One whose end is beyond the axis, or that runs
+ *      backwards, is taken and makes the window invalid: a write lands
  *      nowhere and a read answers the traits' `invalid_window_read_byte`
  *      on every clock.
  *   6. The registers keep the bytes they were given and the axes are
- *      resolved when the counter walks: a MADCTL written AFTER the
+ *      resolved when the counter walks: a MADCTL written after the
  *      window decides which axis is which.
  *
  * Two corners the bench has not reached are marked ASSUMPTION beside
@@ -51,9 +79,9 @@
  * is entitled to make: the axis a start is checked against under B5,
  * and a read whose address lies outside its window.
  *
- * WHAT IS NOT MODELLED: time, the glass's own refresh, the tearing
+ * What is not modelled: time, the glass's own refresh, the tearing
  * effect line, gamma, brightness, partial and idle modes, and every
- * command the bench did not exercise - those are COUNTED as unknown and
+ * command the bench did not exercise - those are counted as unknown and
  * otherwise ignored, which is the honest answer for a model built from
  * measurements.
  */
@@ -70,16 +98,16 @@
 namespace brio {
 
 /**
- * The MODULE's facts, which are a board's and not a controller's: how
+ * The module's facts, which are a board's and not a controller's: how
  * the glass is mounted on the die and what it wants of the inversion.
  * They reach the simulator the way they reach a driver - handed over,
  * like the pins.
  */
 struct SimDcsGlass {
-    /// The glass shows memory column `columns - 1` at its LEFT.
+    /// The glass shows memory column `columns - 1` at its left.
     bool column_mirror = false;
     /// The module's colour channels are crossed: the glass lights a
-    /// cell's FIRST byte as blue and its third as red, so a driver that
+    /// cell's first byte as blue and its third as red, so a driver that
     /// wants the eye to see its own colour writes B, G, R.
     bool bgr = false;
     /// The panel needs INVON, so the colours it shows are the stored
@@ -102,7 +130,7 @@ public:
     static constexpr uint16_t pages = Traits::pages;
     static constexpr uint32_t pixel_count = static_cast<uint32_t>(columns) * pages;
 
-    /// THE FRAME MEMORY, public on purpose: a test locates a pixel here
+    /// The frame memory, public on purpose: a test locates a pixel here
     /// the way the bench located one through a corner map, and a
     /// simulator that hid its memory would only be tested through the
     /// code under test. The two low bits of every byte are zero, because
@@ -119,7 +147,7 @@ public:
      * byte of `out` the panel does not drive reads 0xFF, which is a
      * link's idle level and the only thing a pull-up can say.
      *
-     * `commit` is what a FRAMING ADAPTER needs and nothing else: a
+     * `commit` is what a framing adapter needs and nothing else: a
      * serial link does not know how many bytes will be clocked until
      * the select rises, so it asks for the answer first with
      * `commit = false` - a pure query, no counter moved and no pointer
@@ -142,7 +170,7 @@ public:
 
     // ---- the reset lines ----------------------------------------------------
 
-    /// The RESET pin: the registers to their reset values AND the frame
+    /// The reset pin: the registers to their reset values and the frame
     /// memory to the alternate-page pattern the bench sees after one.
     void hard_reset() {
         reset_registers();
@@ -160,7 +188,7 @@ public:
     // ---- what the glass shows -----------------------------------------------
 
     /**
-     * The colour the GLASS shows at display column `d` (left to right)
+     * The colour the glass shows at display column `d` (left to right)
      * and `line` (top to bottom), as 0x00RRGGBB.
      *
      * Four things stand between the memory and the eye and no more:
@@ -169,7 +197,7 @@ public:
      * of MADCTL, which mirrors the page, and the inversion, which shows
      * the complement of every kept bit whenever the state does not
      * match what the module wants. B1 (horizontal flip) and B4 (line
-     * address order) DO NOTHING on this module - measured - so they are
+     * address order) do nothing on this module - measured - so they are
      * kept in the state and applied to nothing.
      */
     uint32_t glass(uint16_t d, uint16_t line) const {
@@ -624,23 +652,23 @@ private:
 };
 
 /**
- * THE FOUR-WIRE SERIAL INTERFACE, at the level of bytes: the framing
+ * The four-wire serial interface, at the level of bytes: the framing
  * adapter in front of a core. Three verbs, which is what the wires are
  * - `select(true)` pulls the chip select low, `dc(false)` marks a
  * command byte, `byte(mosi)` clocks eight bits in and returns the eight
  * MISO carried for them.
  *
- * HOW A TRANSACTION IS ASSEMBLED. With the select low, a byte with D/C
- * low is a COMMAND and closes whatever command was standing (the panel
+ * How a transaction is assembled. With the select low, a byte with D/C
+ * low is a command and closes whatever command was standing (the panel
  * does that too: a command ends when the host sends another one); bytes
  * with D/C high are that command's parameters, its pixel data or the
  * clocks of its answer; the select rising closes the transaction. A
  * write is buffered whole and handed to the core at the close, so the
  * core sees one transaction and not a stream of bytes.
  *
- * HOW A READ IS SERVED. The framing is the controller's fact, taken
- * from its traits: a memory read begins with one dummy BYTE, a
- * multi-parameter register read is shifted right by one BIT across the
+ * How a read is served. The framing is the controller's fact, taken
+ * from its traits: a memory read begins with one dummy byte, a
+ * multi-parameter register read is shifted right by one bit across the
  * whole stream, a single-parameter one is aligned, and a command the
  * panel does not drive leaves the line at 0xFF. The bytes must be
  * served as they are clocked, before the adapter can know how many
@@ -660,7 +688,7 @@ public:
 
     explicit SimDcsSerial(Core& core) : core_(core) {}
 
-    /// The chip select: true asserts it (the wire goes LOW).
+    /// The chip select: true asserts it (the wire goes low).
     void select(bool low) {
         if (low == selected_) {
             return;

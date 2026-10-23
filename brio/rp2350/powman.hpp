@@ -1,36 +1,78 @@
 /*
  * powman.hpp
  *
- * THE ALWAYS-ON BLOCK (datasheet 6.2 the power domains and their states,
+ * The always-on block (datasheet 6.2 the power domains and their states,
  * 6.3 the core voltage regulator, 6.4 the register list, 12.10 the
  * always-on timer, 3.5.10 what a debugger can do to the sequencers, 7
  * what a wake from a powered-down core is) - the one peripheral of this
  * chip that keeps running when the processors, the bus fabric and every
- * other peripheral have no supply at all.
+ * other peripheral have no supply at all. A program uses it for two
+ * things: the always-on timer, a millisecond count that runs in every
+ * power state and whose alarm wakes the chip (the sleep sites of
+ * rp2350/sleep.hpp take it as alarm and witness), and a power-down of
+ * the switched core whose return is a boot. The smallest use, an alarm
+ * half a second out:
  *
- * FIVE DOMAINS AND ONE SEQUENCER. 6.2.1 splits the digital core into
+ *     brio::AonTimer::init(clock);              // the divisor from a measurement
+ *     brio::AonTimer::alarm_in(500);            // 500 ms out
+ *     brio::AonTimer::interrupt(true);
+ *     brio::Irq::enable(brio::AonTimer::irq());
+ *     extern "C" void isr_powman_timer() { (void)brio::AonTimer::isr(); }
+ *
+ * (`clock` is the program's clock tag, rp2350/clock.hpp; Powman and
+ * AonTimer are monostates, types with only static members used without
+ * an object.)
+ *
+ * Who calls what. AonTimer::init() is a setup verb, main(), after the
+ * clock task - it counts the low-power oscillator against clk_ref, the
+ * crystal only once Clock::init() has run, through the frequency
+ * counter's bounded wait - and false means the timer was not started.
+ * now() and now_low() are reads, legal from any context. isr() is the
+ * body of the program's `isr_powman_timer` (the same name on both
+ * architectures), called from that handler directly or through
+ * rp2350/sleep.hpp's Rp2350TimedSleepSite::isr(), which calls it first
+ * and is itself the handler's body; nothing else calls it. The
+ * configuring verbs of both types are a few stores each with no guard of
+ * their own, and TIMER's are a read of the register and a store of it
+ * back (the password cannot be read, so no atomic alias serves): one
+ * context at a time, which a program keeps by configuring in setup or
+ * from one owner. Nothing here masks interrupts. The waits are bounded:
+ * Powman::wait_settled() and the timer's source changes poll four million
+ * times and answer false. Powman::power_down() returns
+ * PowerRequest::accepted when the sequencer took the request (any other
+ * value names why it did not); the caller then sleeps until the sequencer
+ * takes the core down, and what follows is a boot.
+ *
+ * Five domains and one sequencer. 6.2.1 splits the digital core into
  * AON (this block and the timer in it), SWCORE (the processors, the
  * fabric, every peripheral), XIP (the cache and the boot RAM), SRAM0
  * (banks 0..3) and SRAM1 (banks 4..9). A power state is named Pc.m: c is
  * the switched core, m the three memory domains in the order XIP, SRAM0,
  * SRAM1. A P0.m state is a normal one - software runs; a P1.m state has
- * no processor in it at all, and LEAVING ONE IS A BOOT. `PowerState`
+ * no processor in it at all, and leaving one is a boot. `PowerState`
  * below is the datasheet's twelve states as the four-bit code STATE.REQ
- * and STATE.CURRENT carry (a ONE means powered DOWN), and
+ * and STATE.CURRENT carry (a one means powered down), and
  * `power_transition_legal` is 6.2.3's table as arithmetic.
  *
- * THE PASSWORD. Every register of this block up to offset 0xac takes a
+ * The password. Every register of this block up to offset 0xac takes a
  * write only with 0x5AFE in its top sixteen bits; a write without it is
- * dropped and sets BADPASSWD (6.4). A READ of a protected register does
- * NOT return the password, so an ordinary read-modify-write would write
- * a zero password back - which is why the store in this file happens in
- * exactly ONE private verb and nothing else ever writes POWMAN. The
- * atomic aliases of 2.1.3 are unusable here for the same reason: they
- * carry bits, not a password. Only the scratch registers, the four boot
- * vector words and the three interrupt registers are unprotected.
+ * dropped and sets BADPASSWD (6.4). A read of a protected register does
+ * not return the password, so an ordinary read-modify-write would write a
+ * zero password back - which is why every store into a protected register
+ * in this file goes through a private `write_protected` verb (Powman's,
+ * and AonTimer's own copy of it), bar `probe_password()`, whose point is
+ * to carry none. Outside this file, rp2350/clock.hpp's
+ * low-power-oscillator verbs on its trim and its frequency registers
+ * write POWMAN with the password too; its Lposc::clear_bad_password()
+ * does not - it stores BADPASSWD's bit bare, which docs/rp2350/powman.md
+ * measures to be dropped and to raise the flag, so the verb to clear it
+ * is Powman::clear_bad_password(). The atomic aliases of 2.1.3 are
+ * unusable on the protected registers for the same reason: they carry
+ * bits, not a password. Only the scratch registers, the four boot vector
+ * words and the three interrupt registers are unprotected.
  *
- * WHAT THIS FILE WILL NOT WRITE, AND WHY. The core voltage regulator
- * (6.3) and the brown-out detector are decoded here and NEVER written: a
+ * What this file will not write, and why. The core voltage regulator
+ * (6.3) and the brown-out detector are decoded here and never written: a
  * wrong VSEL is a voltage on the digital core, and VREG_CTRL.UNLOCK
  * cannot be locked again once it is set. The chapter's own warning is
  * "avoid accidental writes to the VREG register", and a framework that
@@ -40,17 +82,17 @@
  * low-power modes, which is SEQ_CFG's business and takes no voltage from
  * anyone.
  *
- * THE ALWAYS-ON TIMER (12.10) IS PART OF THIS BLOCK, not a peripheral
+ * The always-on timer (12.10) is part of this block, not a peripheral
  * beside it: it shares the register file, the password and the domain.
- * It counts MILLISECONDS to 64 bits off whichever source TIMER names -
+ * It counts milliseconds to 64 bits off whichever source TIMER names -
  * the low-power oscillator (the only one that survives a P1 state), the
  * crystal through clk_ref, or a GPIO's tick - and its one alarm is both
- * an interrupt and a POWER-UP REQUEST. `AonTimer` is that counter;
+ * an interrupt and a power-up request. `AonTimer` is that counter;
  * `AonTimer::calibrate()` is what answers the low-power oscillator's own
  * inaccuracy, because the divider is told what rate to assume and this
  * die's oscillator is not at its nominal one.
  *
- * A DEBUGGER CAN BLOCK A POWER-DOWN. The SW-DP's CSYSPWRUPREQ powers
+ * A debugger can block a power-down. The SW-DP's CSYSPWRUPREQ powers
  * every domain and inhibits software's own transitions (6.2.3.3): a
  * probe that has attached and detached is likely to leave it asserted,
  * and then a request to power the core down is answered with
@@ -301,8 +343,10 @@ constexpr bool pwrup_source_valid(uint8_t source) {
  * POWMAN: the power manager, the always-on domain's one peripheral.
  *
  * Everything here is a monostate - there is one of this block - and
- * every write goes through `write_protected`, which is the only place in
- * brio that spells the password.
+ * every store into a protected register goes through `write_protected`,
+ * which adds the password (AonTimer below keeps its own copy of the verb,
+ * and rp2350/clock.hpp spells the password for the low-power
+ * oscillator's registers).
  */
 struct Powman {
     Powman() = delete;
@@ -323,15 +367,15 @@ struct Powman {
     static bool bad_password() { return (POWMAN->BADPASSWD & POWMAN_BADPASSWD_BITS) != 0u; }
     static void clear_bad_password() { write_protected(POWMAN->BADPASSWD, POWMAN_BADPASSWD_BITS); }
 
-    /// THE ONE WRITE IN THIS FILE THAT DOES NOT CARRY THE PASSWORD, and
-    /// the only register it may be aimed at: a store of BADPASSWD's own
-    /// bit with no password in it. If the password is a password the
-    /// write is dropped and the flag RISES; if it were not, the write
-    /// would CLEAR the flag instead. Either way nothing else in the
-    /// block moves, which is what makes this the one place the question
-    /// can be asked without staking anything on the answer - and a
-    /// document that says "a write without the password is ignored"
-    /// needs the measurement behind it.
+    /// The one write to a protected register in this file that does not carry
+    /// the password, and the only register it may be aimed at: a store of
+    /// BADPASSWD's own bit with no password in it. If the password is a
+    /// password the write is dropped and the flag rises; if it were not, the
+    /// write would clear the flag instead. Either way nothing else in the
+    /// block moves, which is what makes this the one place the question can
+    /// be asked without staking anything on the answer - and a document that
+    /// says "a write without the password is ignored" needs the measurement
+    /// behind it.
     static void probe_password() { POWMAN->BADPASSWD = POWMAN_BADPASSWD_BITS; }
 
     // ---- the power state (6.2) ----------------------------------------------
@@ -375,7 +419,7 @@ struct Powman {
     }
     /// Both write-to-clear flags of STATE, cleared together.
     ///
-    /// AND THE CLEAR IS ITSELF A REQUEST, because the two flags live in
+    /// And the clear is itself a request, because the two flags live in
     /// STATE beside REQ and acknowledging one means storing that
     /// register. 6.2.3.1's first rule is that a write to REQ with a
     /// power-up request pending sets REQ_IGNORED and takes no further
@@ -387,12 +431,12 @@ struct Powman {
     }
 
     /**
-     * Ask for a state that keeps the switched core POWERED - a move
+     * Ask for a state that keeps the switched core powered - a move
      * between P0.m states, which is a memory domain going down or coming
      * back up. It starts at once and the caller waits for CHANGING to
      * fall.
      *
-     * A powered-down SRAM domain LOSES ITS CONTENTS (6.5.5), so this is
+     * A powered-down SRAM domain loses its contents (6.5.5), so this is
      * a verb about memory a program has stopped using, never about
      * memory it means to find again.
      */
@@ -404,17 +448,17 @@ struct Powman {
     }
 
     /**
-     * THE ONE VERB THAT DOES NOT RETURN WHEN IT WORKS: power the
+     * The one verb that does not return when it works: power the
      * switched core down into `to`, one of the eight P1.m states.
      *
-     * What comes back is a BOOT - the bootrom runs, the crt runs, main()
+     * What comes back is a boot - the bootrom runs, the crt runs, main()
      * runs - so nothing of this program's state crosses but what lives
      * in this block (the eight scratch words, the four boot words, the
      * timer) and in whatever SRAM domain `to` left powered. The
      * boot-side report is `last_powerup_source()` beside
      * `Reset::causes()`'s `swcore_powerdown`.
      *
-     * A WAY BACK IS MANDATORY AND CHECKED HERE: with no GPIO power-up
+     * A way back is mandatory and checked here: with no GPIO power-up
      * enabled and no alarm armed to power up on, this returns
      * `no_wake` and writes nothing. The silicon would take the request
      * and the board would be gone until its supply is cycled.
@@ -464,7 +508,7 @@ struct Powman {
             (static_cast<uint32_t>(cfg.source) & POWMAN_PWRUP0_SOURCE_BITS) |
             (static_cast<uint32_t>(cfg.mode) << POWMAN_PWRUP0_MODE_LSB) |
             (static_cast<uint32_t>(cfg.direction) << POWMAN_PWRUP0_DIRECTION_LSB);
-        // THREE STORES AND NOT ONE. The pad, the sense and the enable
+        // Three stores and not one. The pad, the sense and the enable
         // are written apart: a slot enabled in the same word that names
         // its pad would latch whatever the multiplexer was passing
         // while it settled. Then the latched event is cleared, and only
@@ -594,19 +638,20 @@ struct Powman {
     }
 
     /**
-     * WHICH CLOCK THIS BLOCK ITSELF RUNS ON (SEQ_CFG.USE_FAST_POWCK, set
+     * Which clock this block itself runs on (SEQ_CFG.USE_FAST_POWCK, set
      * at reset): true = the reference clock while the switched core is
      * powered, false = the low-power oscillator always.
      *
-     * It matters to exactly one thing, and that thing is a DORMANT: the
+     * It matters to exactly one thing, and that thing is a dormant: the
      * power-down sequencer moves this block onto the low-power
      * oscillator by itself when the switched core goes, but a dormant is
      * not a power-down and gets no such help - so a dormant that stops
      * the crystal stops clk_ref, and with it everything in this block
      * that clk_ref was clocking. 6.4's own note is that the setting
      * "takes effect when a power up sequence is next run", which is a
-     * claim the bench measures: `sequencer().using_fast_powck` is what
-     * the block reports it is actually doing.
+     * claim the bench measures (the report bit follows the write at once,
+     * docs/rp2350/powman.md): `sequencer().using_fast_powck` is what the
+     * block reports it is actually doing.
      */
     static bool use_fast_clock(bool on) {
         if (changing()) {
@@ -682,7 +727,7 @@ struct Powman {
     // ---- the scratch registers (6.4) ----------------------------------------
 
     /// Eight words that survive a power-down of the switched core - the
-    /// watchdog's four do not, living in that domain. UNPROTECTED: no
+    /// watchdog's four do not, living in that domain. Unprotected: no
     /// password, a plain 32-bit store.
     static uint32_t scratch(uint8_t n) { return n < 8u ? (&POWMAN->SCRATCH0)[n] : 0u; }
     static void scratch(uint8_t n, uint32_t value) {
@@ -691,7 +736,7 @@ struct Powman {
         }
     }
 
-    /// The four words the BOOTROM reads as a vector after a power-up
+    /// The four words the bootrom reads as a vector after a power-up
     /// (5.2.3): BOOT0 and BOOT1 are magic numbers it checks, BOOT2 the
     /// entry point, BOOT3 a parameter. brio writes none of them - a
     /// program that wants the bootrom to jump somewhere else asks for
@@ -822,11 +867,11 @@ enum class AonTimeRefPin : uint8_t {
 };
 
 /**
- * The always-on timer: 64 bits of MILLISECONDS, the only counter on this
+ * The always-on timer: 64 bits of milliseconds, the only counter on this
  * chip that runs in every power state.
  *
- * THE DIVIDER IS TOLD WHAT TO DIVIDE. The tick is made by a fractional
- * divider whose divisor is a NUMBER SOFTWARE WRITES - 32.768 for the
+ * The divider is told what to divide. The tick is made by a fractional
+ * divider whose divisor is a number software writes - 32.768 for the
  * low-power oscillator, 12000.0 for a 12 MHz crystal - and not a
  * measurement the hardware makes. So the timer is exactly as accurate as
  * the rate it has been told, and on a die whose low-power oscillator is
@@ -836,15 +881,17 @@ enum class AonTimeRefPin : uint8_t {
  * the divisor. The crystal is the ruler because it is the only accurate
  * thing on the board.
  *
- * ONE ALARM, TWO DUTIES. TIMER.ALARM_ENAB arms a match against the
+ * One alarm, two duties. TIMER.ALARM_ENAB arms a match against the
  * 64-bit alarm registers; the match raises TIMER.ALARM, which can be an
- * INTERRUPT (INTE.TIMER, the line `isr_powman_timer`) and, with
- * TIMER.PWRUP_ON_ALARM set, a POWER-UP REQUEST that brings the switched
+ * interrupt (INTE.TIMER, the line `isr_powman_timer`) and, with
+ * TIMER.PWRUP_ON_ALARM set, a power-up request that brings the switched
  * core back from a P1.m state. It is also what ends a DORMANT, and for
  * that the interrupt need not be enabled at all (6.5.3.1) - though a
- * program that wants a handler to run enables it anyway.
+ * program that wants a handler to run enables it anyway. A dormant's
+ * alarm needs clk_ref running, too (measured, docs/rp2350/sleep.md),
+ * which is what the sleep sites arrange.
  *
- * THE SOURCE AND THE POWER STATE ARE TIED. The crystal stops when the
+ * The source and the power state are tied. The crystal stops when the
  * switched core is powered down, so the power-down sequencer reverts the
  * timer to the low-power oscillator before it goes (12.10.5.3) - but a
  * DORMANT is not a power-down and gets no such help: a program that
@@ -881,7 +928,7 @@ struct AonTimer {
     /// which is what every wrap-safe difference in this stratum uses.
     static uint32_t now_low() { return POWMAN->READ_TIME_LOWER; }
 
-    /// Set the time. Only with the counter STOPPED (12.10.3), which this
+    /// Set the time. Only with the counter stopped (12.10.3), which this
     /// verb enforces rather than assumes: false when it is running.
     static bool set(uint64_t ms) {
         if (running()) {
@@ -894,7 +941,7 @@ struct AonTimer {
         return true;
     }
 
-    /// Back to zero WITHOUT stopping and without touching the alarm -
+    /// Back to zero without stopping and without touching the alarm -
     /// the self-clearing CLEAR bit, which is what makes this an interval
     /// timer as well as a clock.
     static void clear() { write_timer(POWMAN_TIMER_CLEAR_BITS, POWMAN_TIMER_CLEAR_BITS); }
@@ -938,7 +985,7 @@ struct AonTimer {
     static bool alarm_fired() { return (POWMAN->TIMER & POWMAN_TIMER_ALARM_BITS) != 0u; }
     static void clear_alarm() { write_timer_raw(POWMAN_TIMER_ALARM_BITS); }
 
-    /// Make the match a POWER-UP REQUEST as well as a flag: the way back
+    /// Make the match a power-up request as well as a flag: the way back
     /// from a P1.m state, and the thing `Powman::power_down` insists on.
     static void powerup_on_alarm(bool on) {
         write_timer(on ? POWMAN_TIMER_PWRUP_ON_ALARM_BITS : 0u, POWMAN_TIMER_PWRUP_ON_ALARM_BITS);
@@ -955,11 +1002,13 @@ struct AonTimer {
     static bool pending() { return (Powman::pending() & Powman::Interrupt::timer) != 0u; }
 
     /**
-     * THE ISR BODY the app binds to `isr_powman_timer`: true when this
+     * The ISR body the app binds to `isr_powman_timer`: true when this
      * block's timer interrupt was standing, in which case the alarm has
-     * been acknowledged and DISARMED.
+     * been acknowledged and disarmed. Called from that handler, directly
+     * or through Rp2350TimedSleepSite::isr() (rp2350/sleep.hpp), and
+     * nowhere else; it waits for nothing.
      *
-     * Disarming is not optional. TIMER.ALARM is raised by a COMPARISON
+     * Disarming is not optional. TIMER.ALARM is raised by a comparison
      * that goes on being true after the match, so an armed alarm whose
      * flag is merely cleared raises it again on the next tick and the
      * handler never ends.
@@ -1086,7 +1135,7 @@ struct AonTimer {
     }
 
     /**
-     * MEASURE THE LOW-POWER OSCILLATOR AND TELL THE DIVIDER. The
+     * Measure the low-power oscillator and tell the divider. The
      * frequency counter of 8.1.4 counts it against clk_ref - the crystal
      * after `Clock::init()` - and the result becomes LPOSC_FREQ_KHZ_INT
      * and _FRAC.
@@ -1114,14 +1163,15 @@ struct AonTimer {
 
     /**
      * Start the timer from zero on the low-power oscillator, with the
-     * divisor set from a MEASUREMENT of that oscillator and the crystal
+     * divisor set from a measurement of that oscillator and the crystal
      * divisor set from the clock task's own crystal rate.
      *
      * The alarm is left disarmed, its interrupt off and its power-up
      * duty off: what wakes what is the program's decision and never a
      * default. False when the oscillator could not be counted - the
      * timer is then not started, because a counter told the wrong rate
-     * is worse than none.
+     * is worse than none. A setup verb: main(), after the clock task,
+     * whose crystal is the ruler the oscillator is counted against.
      */
     template <typename Clock>
     static bool init(Clock c) {
@@ -1152,7 +1202,7 @@ private:
         reg = password | value;
     }
 
-    /// TIMER's ORDINARY read-write bits - the ones a read-modify-write
+    /// TIMER's ordinary read-write bits - the ones a read-modify-write
     /// may carry back. The four USING_* flags are read-only, ALARM is
     /// write-to-clear and the three USE_* selects are self-clearing, so
     /// none of them belongs in the value that is preserved.
@@ -1177,7 +1227,7 @@ private:
 
     /// Wait for a source change to take: the select bit clears itself
     /// and the matching USING_* flag rises, which can take a whole tick
-    /// of the OLD source.
+    /// of the old source.
     static bool wait_source(AonSource want) {
         for (uint32_t spins = 4'000'000u; spins != 0u; --spins) {
             if (source() == want) {

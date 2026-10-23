@@ -2,56 +2,90 @@
  * nvm_flash.hpp
  *
  * The main flash of the CH32V203 and the CH32V303 as a FlashMedia
- * (util/nv_heap.hpp's contract): `MainFlashPartition`, where the line
- * is drawn, and `MainFlash<Clock>`, the medium itself.
+ * (util/nv_heap.hpp's contract, a concept: a compiler-checked set of
+ * requirements on a type): `MainFlashPartition`, where the line is
+ * drawn, and `MainFlash<Clock>`, the medium itself. A program uses it
+ * to keep data of its own in a 4 KB band of the chip's flash that the
+ * image never reaches, erased and written a 256-byte page at a time
+ * through verbs that refuse any address outside the band. The smallest
+ * use, as docs/ch32vx03/nvm.md's "How to use it" writes it, with `Clk`
+ * the program's clock type and `page` its 256 bytes:
  *
- * A MEDIUM AND NOTHING ABOVE IT. The heap (util/nv_heap.hpp) and the
+ *     using Store = brio::MainFlash<Clk>;
+ *     static_assert(brio::FlashMedia<Store>);
+ *
+ *     const brio::FlashZone z = Store::zones()[0];
+ *     (void)Store::erase(z.floor);
+ *     (void)Store::program(z.floor, page);
+ *
+ * Who calls what. erase() and program() belong to main(), after the
+ * clock task's init(), or to an active object's handler (an active
+ * object is a component of a brio program with its own event queue,
+ * served one event at a time by the kernel, docs/design/kernel.md), one
+ * context at a time and never beside another user of nvm.hpp's
+ * `Flash`: each opens the engine's two locks, runs nvm.hpp's verbs and
+ * shuts the locks again, with nothing masked and nothing guarded. Each
+ * blocks its caller for the operation - a page erase measured at 9.8 ms
+ * on the CH32V203C8 and 16.9 ms on the CH32V303VC, a page program at
+ * 1.5 ms on both - with every wait bounded as nvm.hpp's are, while
+ * interrupts keep being served (below). Each answers false for an
+ * address outside the zone or off a cell, a lock that would not open,
+ * a rate the clock refuses at run time or an error the engine
+ * reported; under a static clock above `flash_safe_sysclk_hz` the call
+ * does not compile. program()'s source is read during the call and not
+ * kept; read() is a copy that waits for nothing; zones() and build_id()
+ * read link-time symbols, legal from any context.
+ *
+ * A medium and nothing above it. The heap (util/nv_heap.hpp) and the
  * journal (util/nv_journal.hpp) stand on this contract on other
  * targets; on this family neither is instantiated, and that is a
  * decision rather than an omission - what a program here gets is a
- * BAND OF FLASH with bounds it cannot write outside of, and whatever it
+ * band of flash with bounds it cannot write outside of, and whatever it
  * keeps there is its own structure. Two facts stand behind the
  * decision, and the second of them is this silicon's own:
  *
- *  - THE ERASED PATTERN IS NOT 0xFF. An erased cell of this array reads
+ *  - The erased pattern is not 0xFF. An erased cell of this array reads
  *    back 0xE339E339 (RM 32.5.4 and 32.5.7, said four times), where
  *    every other flash this repository writes leaves all ones. The heap
  *    judges a map version by its magic and its CRC and would not care;
- *    the journal finds the end of a half by looking for a CELL OF 0xFF
- *    BYTES, so it would have to be taught this pattern before it could
+ *    the journal finds the end of a half by looking for a cell of 0xFF
+ *    bytes, so it would have to be taught this pattern before it could
  *    stand here at all.
- *  - THE CELL IS THE PAGE, 256 bytes, which is a coarse grain for the
+ *  - The cell is the page, 256 bytes, which is a coarse grain for the
  *    journal's small values: one entry would cost a page. The chapter
- *    offers a HALF-WORD program beside the page one (nvm.hpp's
- *    `program_half_word`), and the bench has since measured that a cell
- *    written that way TAKES PASS AFTER PASS between erases, each
- *    reading back exactly what was written - so a two-byte cell is
- *    possible on this silicon, and the page is the cell here by the
- *    decision above and not for want of a mechanism. What such a store
- *    would still have to be taught is the erased pattern, and that a
- *    half-word program costs more than the fast method spends on a
- *    whole page (2.6 ms against 1.5).
+ *    offers a half-word program beside the page one (nvm.hpp's
+ *    `program_half_word`), and the bench measured, on both parts, that
+ *    a cell of the window written that way takes pass after pass
+ *    between erases, each reading back exactly what was written - so a
+ *    two-byte cell is possible on this silicon, and the page is the
+ *    cell here by the decision above and not for want of a mechanism.
+ *    What such a store would still have to be taught is the erased
+ *    pattern, and that a half-word program costs more than the fast
+ *    method spends on a whole page (2.6 ms against 1.5 on the
+ *    CH32V203C8, 2.1 against 1.5 on the CH32V303VC).
  *
- * A CONSTANT PARTITION, DRAWN ONCE, AT THE TOP OF THE WINDOW. The zone
- * is the LAST 4 KB of the zero-wait window on every part of the two
- * series - sixteen pages of 256 bytes, and exactly one WRITE-PROTECTION
+ * A constant partition, drawn once, at the top of the window. The zone
+ * is the last 4 KB of the zero-wait window on every part of the two
+ * series - sixteen pages of 256 bytes, and exactly one write-protection
  * unit (RM 32.1's note 1), so the storage can be protected or left open
  * without touching the image's own sectors. The window and not the
  * tail above it, although both of the engine's methods reach the tail
- * (measured on the CH32V303VC): a word of the tail costs four times a
- * word of the window to read (nvm.hpp's header), a tail read carries
- * the rate contract a window read does not, and the tail's half-word
- * cells do not take a second pass the way the window's do - three
- * reasons a medium read by its program is better off where the image
- * is. Every linker script of this project stops its flash region 4 KB
- * short of the window (ch32vx03/ld/<part>.ld), so
+ * (measured on both parts): a word of the tail costs four times a word
+ * of the window to read on the CH32V303VC and some seven times on the
+ * CH32V203C8 (20 and 36 core cycles against 5 at 96 MHz, nvm.hpp's
+ * header), a tail read carries the rate contract a window read does
+ * not, and a tail cell's second half-word pass is not dependable (one
+ * bit off in some runs on the CH32V303VC) where a window cell's is -
+ * three reasons a medium read by its program is better off where the
+ * image is. Every linker script of this project stops its flash region
+ * 4 KB short of the window (ch32vx03/ld/<part>.ld), so
  * nothing the compiler emits can land there and the floor is a
- * CONSTANT rather than a symbol that moves with every build - the same
+ * constant rather than a symbol that moves with every build - the same
  * arrangement the sister family uses, and for the same reason:
  * util/nv_heap.hpp's placement rule wants a floor that stays put, and
  * an image that grew into its own storage would be a silent loss.
  * `__brio_rom_end` is read back as the proof; a script edited past the
- * line CLOSES the medium (`zones()` answers a band whose floor is its
+ * line closes the medium (`zones()` answers a band whose floor is its
  * ceiling, which every user of the contract refuses on) instead of
  * letting the two overlap.
  *
@@ -59,38 +93,37 @@
  *   window - 4K .. window     MainFlash, 16 pages of 256 bytes
  *   window .. tail_end        the non-zero-wait tail, nobody's by default
  *
- * ADDRESSES ARE THE ARRAY'S OWN, counted from zero - the addresses the
- * image runs at - and nvm.hpp adds the 0x0800 0000 alias where the
- * chapter wants it. util/nv_heap.hpp numbers erase units in a uint16_t:
- * the largest window of the two series is 256 KB, 1024 pages, no
- * problem.
+ * Addresses are the array's own, counted from zero - the addresses the
+ * image runs at - and nvm.hpp adds the 0x0800 0000 where the chapter
+ * wants it. util/nv_heap.hpp numbers erase units in a uint16_t: the
+ * largest window of the two series is 256 KB, 1024 pages, no problem.
  *
- * THE CLOCK IS PART OF THE MEDIUM'S TYPE, and this is the one place
+ * The clock is part of the medium's type, and this is the one place
  * where this stratum's FlashMedia differs in shape from the others'.
  * An erase or a program on this silicon is legal only below
  * `flash_safe_sysclk_hz` (nvm.hpp's header says why), and the contract's
  * `program()` and `erase()` take an address and nothing else - so the
- * rate has to arrive with the TYPE. `MainFlash<Clk>` is therefore
+ * rate has to arrive with the type. `MainFlash<Clk>` is therefore
  * written with the program's own clock, which makes the refusal a
  * compile error under a static one and a `false` under a dynamic one,
  * at the same place the contract already allows a false.
  *
- * A WRITE IS A WAIT AND NOT A STALL, which is the one thing about this
+ * A write is a wait and not a stall, which is the one thing about this
  * medium that the other families here would have predicted wrongly.
- * This is the array the core executes from, and yet MEASURED on the
+ * This is the array the core executes from, and yet measured on the
  * CH32V203C8 the core goes on running out of it while the engine works:
  * across a page erase the ruler showed 9.8 ms and the kernel's
- * millisecond tick - which counts HANDLER RUNS, so it can only advance
+ * millisecond tick - which counts handler runs, so it can only advance
  * if the core could fetch the handler - advanced by the same nine or
  * ten. A page program costs 1.5 ms the same way. So an erase or a
  * program here is a
- * BLOCKING CALL for its caller (the driver polls BSY) and not a hole in
+ * blocking call for its caller (the driver polls BSY) and not a hole in
  * the program: interrupts keep being served throughout.
  *
- * ON THE CH32V303 the zone is the top 4 KB of THAT part's window - the
+ * On the CH32V303 the zone is the top 4 KB of that part's window - the
  * 256 KB the option byte selects out of the factory on the RC and VC,
  * whole 128 KB on the CB and RB - with the tail above it left to a
- * program that asks nvm.hpp for it by name. MEASURED on the CH32V303VC:
+ * program that asks nvm.hpp for it by name. Measured on the CH32V303VC:
  * the zone at 0x3F000..0x40000, the linker's region ending exactly at
  * its floor, a cell erased, programmed, read back and found again after
  * a reset - and a page erase there taking 16.9 ms where the CH32V203C8
@@ -177,7 +210,9 @@ struct MainFlashPartition {
  *
  * THE UNLOCK WINDOW IS ONE CALL: both of the engine's locks are opened
  * for the pages of one `program()` or `erase()` and shut again on the
- * way out, so an operation that fails leaves the engine closed.
+ * way out, so an operation that fails once the locks are open leaves
+ * the engine closed (one whose `unlock()` fails returns at once,
+ * without the closing store).
  */
 template <typename Clock>
 struct MainFlash {
@@ -206,7 +241,14 @@ struct MainFlash {
      * Program whole pages inside the zone and nowhere else. The bounds
      * check is not decoration: a caller that miscounted would otherwise
      * be able to program the running image, and the silicon would carry
-     * it out.
+     * it out. Each page is nvm.hpp's `program_page()`, 1.5 ms measured,
+     * so the caller is blocked for that much a page; false for a run
+     * outside the zone or off a cell, a lock that would not open, or the
+     * first page the engine refuses (the rate among the reasons) or
+     * reports an error on. A page programmed with no erase before it is
+     * not one of them: it reports no error and holds neither pattern
+     * (nvm.hpp's header), so the caller erases first. `src` is read
+     * during the call and not kept.
      */
     static bool program(uint32_t addr, std::span<const uint8_t> src) {
         const uint32_t bytes = static_cast<uint32_t>(src.size());
@@ -225,7 +267,10 @@ struct MainFlash {
         return err == 0u;
     }
 
-    /// One page. Same bounds, same window.
+    /// One page. Same bounds, same window. nvm.hpp's `erase_page()`,
+    /// which blocks the caller for the erase (9.8 ms measured on the
+    /// CH32V203C8, 16.9 ms on the CH32V303VC); false when the engine
+    /// refuses or reports an error.
     static bool erase(uint32_t addr) {
         if (!MainFlashPartition::contains(addr, erase_size) ||
             !MainFlashPartition::cell_aligned(addr, erase_size)) {

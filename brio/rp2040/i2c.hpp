@@ -1,8 +1,42 @@
 /*
  * i2c.hpp
  *
- * The I2C (datasheet 4.3: two Synopsys DW_apb_i2c controllers). The
- * chapter's driver is NOT here: the DW_apb_i2c is a licensed design this
+ * The RP2040's I2C for a program: a host that talks to the devices on a
+ * bus (a sensor, a converter, an EEPROM) through the bus arbiter, or
+ * this chip answering as a client at an address of its own.
+ * `I2cHost<n, pins, ...>` is the host engine util/i2c_bus.hpp's `I2cBus`
+ * drives - the arbiter, an active object (a component of a brio program
+ * with its own event queue, served one event at a time by the kernel)
+ * that takes one request at a time from the program's active objects
+ * and replies to each when its tenure (one START to its STOP) ends
+ * (docs/design/i2c-bus.md); `I2cClient<n, pins>` is the other end;
+ * `DwApbI2c<n>` the resource, one function per register fact. The
+ * smallest use, a register read through the arbiter, as
+ * docs/rp2040/i2c.md spells it: the pin set and the two types (written
+ * out at `I2cHost` below), `Bus::init(clock)` after the clock task, a
+ * Request with `addr`, the register in `tx` and room for its value in
+ * `rx`, both lent with `brio::lend<brio::Lease::reply>`, the speed and
+ * `reply_to<Sensor, brio::I2cDone>()`, posted to the arbiter; the
+ * program's `isr_i2c0` posts `TransferDone{Bus::status()}` when
+ * `Bus::isr()` says the tenure ended.
+ *
+ * Who calls what. init(), rebase() and release() are setup verbs, main
+ * context, after the clock task's init(); init() solves the three
+ * speeds from clk_sys and answers false when not even standard_100k is
+ * legal (a clock under 2.7 MHz) or the block did not come up. start()
+ * is the arbiter's, called from its dispatch: false whenever the wire
+ * moves (the tenure completes on the vector and a TransferDone
+ * follows), true for the two refusals that move nothing, answered
+ * through status(). isr() is the vector's body and dma_isr() the DMA
+ * line's, called by the program's handlers and nothing else; unstick()
+ * and recover() are the application's and the timed arbiter's. The
+ * Request's two buffers are lent from the post until the I2cDone the
+ * arbiter replies with: untouched and in scope until then, which
+ * nothing checks. The client's verbs are its owner's - its vector's
+ * service() body, or a loop.
+ *
+ * The I2C chapter's driver (datasheet 4.3: two Synopsys DW_apb_i2c
+ * controllers) is not here: the DW_apb_i2c is a licensed design this
  * chip shares with others, so the resource, the host engine and the
  * client are written once in the IP stratum (brio/dw_apb_i2c/i2c.hpp,
  * docs/dw_apb_i2c/README.md) and this file is what that file asks of a
@@ -10,22 +44,22 @@
  *
  *  - the pin table of 2.19.2 (table 279) with its function code, and
  *    the pad setup 4.3.1.3 asks for;
- *  - `Rp2040DwApbI2c`, the CHIP TRAITS: the register block and where
+ *  - `Rp2040DwApbI2c`, the chip traits: the register block and where
  *    each instance's sits, the reset bits of 2.14, the NVIC lines of
  *    2.3.2, the atomic set/clear aliases of 2.1.2, the DREQ numbers of
  *    table 119, the pad type with the function code that routes an I2C
- *    to it and the five verbs the unstick drives an open-drain line
- *    with (2.19: the SIO output enable is the drive, over an output
- *    register holding a zero), the microsecond ruler the unstick paces
- *    itself by, and WHICH RATE IS ic_clk - clk_sys (4.3.14.1), so the
- *    counts come from the app's own clock and never from a second
- *    statement of the rate;
- *  - the PUBLIC NAMES: `DwApbI2c<n>` the resource, `I2cHost<n, pins,
+ *    to it and the pad verbs the unstick drives an open-drain line
+ *    with (a Pin's, and the two `I2cPad` adds below; 2.19: the SIO
+ *    output enable is the drive, over an output register holding a
+ *    zero), the microsecond ruler the unstick paces itself by, and
+ *    which rate is ic_clk - clk_sys (4.3.14.1), so the counts come from
+ *    the app's own clock and never from a second statement of the rate;
+ *  - the public names: `DwApbI2c<n>` the resource, `I2cHost<n, pins,
  *    ...>` the engine util/i2c_bus.hpp's I2cBus drives and
  *    `I2cClient<n, pins>` the other end, this chip's aliases of the
  *    three IP templates.
  *
- * THE PINS are fixed per instance under function 3 (2.19.2, table 279):
+ * The pins are fixed per instance under function 3 (2.19.2, table 279):
  * I2C0 has SDA on GPIO 0, 4, 8, 12, 16, 20, 24, 28 and SCL on 1, 5, 9,
  * 13, 17, 21, 25, 29; I2C1 has SDA on 2, 6, 10, 14, 18, 22, 26 and SCL
  * on 3, 7, 11, 15, 19, 23, 27. `i2c_pins_valid` is that table, and a pin
@@ -33,11 +67,11 @@
  * slew limit and the Schmitt trigger 4.3.1.3 asks for; the board's own
  * pull-ups do the pulling.
  *
- * THE LINE. The thirteen sources of an instance combine into ONE NVIC
+ * The line. The thirteen sources of an instance combine into one NVIC
  * line (I2C0_IRQ, I2C1_IRQ, table 2.3.2); the app binds isr_i2c0 /
  * isr_i2c1 to the instance's isr() or service() body.
  *
- * THE BUS CLEAR of 4.3.13 (nine clocks and a STOP) has no enable in this
+ * The bus clear of 4.3.13 (nine clocks and a STOP) has no enable in this
  * chip's IC_CON: the unstick is by hand, which is why the traits carry
  * the open-drain verbs.
  */
@@ -126,7 +160,7 @@ struct Rp2040DwApbI2c {
     template <uint8_t i>
     static constexpr uint32_t reset_bit() { return i == 0 ? ResetBlock::i2c0 : ResetBlock::i2c1; }
 
-    /// The three verbs over it, FORWARDERS and declared as such: each is
+    /// The three verbs over it, forwarders and declared as such: each is
     /// one call with a constant argument, and the function the compiler
     /// outlines must be the resource's verb rather than a frame of this
     /// file's - which is what keeps a program's image where it was.
@@ -164,7 +198,7 @@ struct Rp2040DwApbI2c {
     static constexpr PinPull open_drain_pull = PinPull::up;
 
     /// Two engines of one host must not share a channel: on this chip a
-    /// request is a field any channel takes, so the CHANNEL is the
+    /// request is a field any channel takes, so the channel is the
     /// identity (rp2040/dma_engine.hpp).
     template <typename Tx, typename Rx>
     static constexpr bool engines_distinct() { return uart_engines_distinct<Tx, Rx>(); }
@@ -198,12 +232,40 @@ using DwApbI2c = DwApbI2cBlock<Rp2040DwApbI2c, n>;
  *   using I2c = brio::I2cBus<Bus, P, 4, brio::BusPassThrough,
  *                            brio::ticks_from_ms<P>(20)>;
  *
+ *   Bus::init(clock);
+ *
+ *   Bus::Request r{};
+ *   r.addr = 0x48;
+ *   r.tx = brio::lend<brio::Lease::reply>(reg);   r.tx_len = 1;    // the register
+ *   r.rx = brio::lend<brio::Lease::reply>(value); r.rx_len = 2;    // then its value
+ *   r.speed = brio::I2cSpeed::fast_400k;
+ *   r.reply = brio::reply_to<Sensor, brio::I2cDone>();
+ *   brio::post<I2c>(r);
+ *
  *   extern "C" void isr_i2c0() {
  *       if (Bus::isr()) { brio::post<I2c>(brio::TransferDone{Bus::status()}); }
  *   }
  *
+ * Line by line: the pin set names I2C0's own pads under function 3
+ * (i2c_pins_valid refuses another instance's at compile time); `Bus` is
+ * the engine, its other arguments at their defaults (no DMA engines,
+ * InFlash); `I2c` is the arbiter with a queue of four requests, the
+ * BusPassThrough policy (a failure is passed to the client, never
+ * retried) and a 20 ms timeout after which it answers
+ * i2c_timeout and recover()s the engine; `reg` and `value` stay
+ * untouched and in scope until `Sensor` receives the I2cDone. The
+ * handler is the instance's vector under the pico-sdk's name, and its
+ * post is legal from an interrupt handler (kernel/post.hpp).
+ *
  * The two engine slots take rp2040/dma.hpp's DmaTxEngine<ch, uint16_t>
- * and DmaRxEngine<ch> on any two channels, both or neither.
+ * and DmaRxEngine<ch> on any two channels, both or neither; they serve a
+ * read phase of three bytes or more, a write phase staying on the pump
+ * (docs/rp2040/i2c.md). With engines the program binds the DMA line's
+ * vector to `Bus::dma_isr()` the same way, and `Dma::init()` runs
+ * before `Bus::init()`. `Placement`, the last parameter, is
+ * util/placement.hpp's tag: InRam makes start(), the vector's body and
+ * the DMA line's one flattened instance each in SRAM
+ * (docs/rp2040/platform.md, "A handler in SRAM").
  */
 template <uint8_t n, I2cPins pins, typename TxEngine = NoDmaEngine, typename RxEngine = NoDmaEngine,
           typename Placement = InFlash>

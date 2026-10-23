@@ -1,6 +1,115 @@
 # IP stratum: the ARM PrimeCell SSP (`pl022/`)
 
-A directory under `brio/` named for a peripheral DESIGN instead of for a
+This page is for a programmer who uses an SPI bus on the RP2040 or the
+RP2350 and wants to know what the driver under it does, for whoever
+reads or changes that driver, and for whoever brings up another chip
+that carries the same block. It is both the stratum's operational page
+and the document of its one header, `brio/pl022/spi.hpp`. A stratum is
+a directory of `brio/` that is one architectural layer; this one is an
+IP stratum, named for a peripheral design that several vendors license
+into their chips (an "IP block") rather than for a chip, and written
+once for every family that carries it.
+
+An application never names this stratum. It writes the family's names,
+which are aliases of the three templates here kept in the family's own
+`spi.hpp`, and the family supplies the chip's facts through a traits
+type - a struct of types, constants and static functions the templates
+read, so that they know the chip without including any of its headers:
+
+| Who | Traits type | Where | The public names, aliases of the templates here |
+|-----|-------------|-------|---------------------------------------------------|
+| the RP2040 | `Rp2040Pl022` | `brio/rp2040/spi.hpp` | `Pl022<n>` = `Pl022Ssp<Rp2040Pl022, n>`; `SpiHost<n, pins, TxEngine, RxEngine, Placement>` = `Pl022Host<Rp2040Pl022, n, pins, ...>`; `SpiClient<n, pins>` = `Pl022Client<Rp2040Pl022, n, pins>` |
+| the RP2350, both architectures | `Rp2350Pl022` | `brio/rp2350/spi.hpp` | the same three names over `Rp2350Pl022` |
+| the host suite | `SimPl022` | `brio/host/sim_pl022.hpp` | none: the suite names the templates itself |
+
+On both chips the traits give two instances, 8-frame FIFOs and SSPCLK
+as `clk_peri` (the clock type's `pclk_hz`); the request length below
+which the engines are not used, `dma_min_frames`, is 13 frames on the
+RP2040 and 10 on the RP2350, each measured on its own cores. The
+smallest use, a host under the bus arbiter on the RP2040 as its own
+document spells it (an excerpt of [../rp2040/spi.md](../rp2040/spi.md),
+"How to use it"):
+
+```cpp
+constexpr brio::SpiPins pins{.sck = 18, .tx = 19, .rx = 16};
+using Bus = brio::SpiHost<0, pins>;
+using Spi = brio::SpiBus<Bus, P, 4>;                  // the arbiter AO
+using Cs = brio::Pin<17>;
+
+Bus::init(clock, 8'000'000);                          // a ceiling for the whole bus
+Cs::output(true);
+
+Bus::Request r{};
+r.cs = Cs::ref();
+r.cmd = brio::lend<brio::Lease::reply>(cmd);  r.cmd_len = 1;
+r.tx = brio::lend<brio::Lease::reply>(pixels); r.len = 64;
+r.clock = brio::SpiClocks::div4;                      // 31.25 MHz at 125
+r.mode = brio::SpiMode::mode0;
+r.reply = brio::reply_to<Display, brio::SpiDone>();
+brio::post<Spi>(r);
+
+extern "C" void isr_spi0() {
+    if (Bus::isr()) { brio::post<Spi>(brio::TransferDone{Bus::status()}); }
+}
+```
+
+Line by line: `pins` names the clock, transmit and receive pads (no
+select: the select is a GPIO the request names); `Bus` is the family's
+`SpiHost` on instance 0, the engine; `Spi` is the arbiter, an active
+object (a component with its own event queue, served one event at a
+time by the kernel, here over the program's platform `P`) that takes
+requests from every active object that uses the bus in arrival order, with room for
+four waiting requests; `Cs` is the device's select pad, driven high
+(idle) before any request. A request names the select, lends a one-byte command and a
+64-byte data buffer (a loan under `Lease::reply`, kernel/borrowed.hpp:
+the arbiter and the engine may use them until the reply), sets the
+rate as a prescaler pair (`div4` is 31.25 MHz at a 125 MHz SSPCLK, and
+the host clamps a request to the bus's ceiling, here 8 MHz), the SPI
+mode, and the active object the `SpiDone` reply goes to; it is posted
+to the arbiter, and `post` copies the request into the arbiter's queue,
+so `r` itself may go out of scope - what it lends may not. The handler is
+the program's, under the name the family's startup code gives SPI0's
+vector (`isr_spi0` on both RP chips): when the engine's interrupt body returns true, the transaction
+has just completed (select released), and the handler posts the
+engine's status to the arbiter, which sends the reply.
+
+What decides correctness even there: **the buffers a request lends
+stay untouched by the requester until its `SpiDone` arrives**; the select
+is high before the first request; the vector is bound and posts
+`TransferDone`, or the arbiter never learns that a transaction ended;
+the arbiter is in the program's list of active objects; and `init()`
+runs after the clock's, since the ceiling it is given is turned into a
+divisor of the rate the clock type claims for SSPCLK. The bus
+vocabulary itself (the Request, the reply, the status codes) is
+[../design/spi-bus.md](../design/spi-bus.md)'s; what an active object
+is and how a program lists them is the learning route's
+([../learn/introduction.md](../learn/introduction.md)).
+
+The host runs a request in one of two completion styles, each
+described below: a request marked `polled` completes inside `start()`,
+the arbiter sending its reply in the same dispatch; any other runs on
+the pump, the interrupt-driven loop that keeps the FIFOs fed ("The host
+above the wire"), and completes on the interrupt. With the family's two
+engine slots filled, the data phase of either moves on the DMA engines
+instead once it is at least `dma_min_frames` long - except a phase of
+16-bit frames on byte engines, or on half-word engines with a buffer not
+aligned to a half-word, which runs as it would with no engines ("The
+engine slots"). A
+polled request the engines take still needs the DMA line's handler
+bound to `dma_isr()`: the polled path spins, bounded, on the completion
+only that body records, and without it the spin runs out and the request
+ends `spi_dma_fault`. The slots are empty by default (`NoDmaEngine` on
+both RP chips).
+
+The page goes on with what the stratum is for, the documents of record,
+what lives here, what a family owes (the traits type member by member),
+the include contract, the engine slots, the host above the wire (its
+cost and shape, measured), what stays per family, the host suite that
+proves the file knows no chip, and what is not covered.
+
+## What the stratum is
+
+A directory under `brio/` named for a peripheral design instead of for a
 silicon: the ARM PrimeCell Synchronous Serial Port (PL022), a block
 licensed by more than one vendor and dropped into their chips unchanged,
 register for register. It sits exactly where a core stratum sits - above
@@ -10,14 +119,15 @@ and it holds the whole of the chapter that is ARM's: the resource over
 the block's programmer's model, the host engine `SpiBus` drives and the
 client surface, with their measured facts and their ISR bodies.
 
-It exists under the discipline that governs the core stratum: what more
-than one family carries is factored out when the SECOND one carries it,
+It exists under the discipline that governs the core stratum (the
+stratum a processor core's families share, `cortexm/`): what more than
+one family carries is factored out when a second one carries it,
 with both copies in hand, and the extraction is gated by the images -
 every release image of the family that had it first is byte-identical
 before and after. What makes the PL022 worth a stratum of its own, where
 a merely similar peripheral would not be, is that its register
 description is not similar between the chips that carry it but
-IDENTICAL: the same names, the same offsets, the same bits, so there is
+identical: the same names, the same offsets, the same bits, so there is
 nothing to reconcile and nothing to gain by writing it twice.
 
 ## The documents of record
@@ -27,13 +137,13 @@ Reference Manual*, which is what a family's data sheet excerpts when it
 says its SPI is a PL022 (the RP2040 data sheet does, in its 4.4, and
 names the revision it carries: r1p4). That manual is not on this
 project's desk, so nothing here is cited by its section: the facts below
-are named by REGISTER, and each family's own document carries its data
+are named by register, and each family's own document carries its data
 sheet's chapter and verse for the same thing. A family's peculiarities -
 how deep the FIFOs were synthesized, which pads a signal reaches, which
 interrupt controller carries the line, what SOD does to a pad - are not
 in that manual either, which is exactly why they are the concept below.
 
-The bus VOCABULARY is not this stratum's and is not restated here: the
+The bus vocabulary is not this stratum's and is not restated here: the
 Request's arbitration, its reply and its status codes are
 [../design/spi-bus.md](../design/spi-bus.md)'s, realized in
 `util/spi_bus.hpp` over `util/bus_master.hpp`, and shared verbatim by
@@ -61,13 +171,15 @@ every family that drives an SPI. This file takes them.
   family's clock tree is SSPCLK, what a DMA request is called, how deep
   the FIFOs are, what a pin driven at run time is, and what a
   microsecond busy-wait is made of. Those are the concept, and each
-  family answers them in its own header - where the PUBLIC NAMES also
+  family answers them in its own header - where the public names also
   live, so an application never spells a chip-traits type.
 
 ## What a family owes: the `Pl022Chip` concept
 
 One traits type, stated in the family's own `spi.hpp` and checked there
-with a `static_assert`. Every member is here because a line of the driver
+with a `static_assert` (`Rp2040Pl022` and `Rp2350Pl022`; the host's
+`SimPl022` is checked the same way in its own header, the table at the
+top of this page). Every member is here because a line of the driver
 needs it; nothing is here for symmetry.
 
 The types:
@@ -78,16 +190,16 @@ The types:
 | `Irq` | what this family's interrupt controller calls a line: an enumerator on one target, a number on another |
 | `Interrupts` | that controller, with `enable` / `disable` - the driver never names an NVIC, because a family may carry one under one architecture and something else under another. It asks for no third verb: nothing here ever pends a line |
 | `Pins` | the family's pin-set type, one pad per signal - a pin table is a chip's, never an IP's |
-| `PinRef` | a pin named at RUN TIME, with `set()` and `clear()`: a Request's chip select and its D/C line are the APPLICATION's pins, chosen per transaction, and never the peripheral's own |
+| `PinRef` | a pin named at run time, with `set()` and `clear()`: a Request's chip select and its D/C line are the APPLICATION's pins, chosen per transaction, and never the peripheral's own |
 | `DmaRequest` | what this family's DMA calls a peripheral request |
-| `DelayRate` | the family's microsecond busy-wait as the precomputed factor a caller stores once, so that no division runs while a chip select settles. The driver calls the verb that BELONGS TO THAT TYPE - written unqualified and found where the type is - which is how a busy-wait made of a core's own counter reaches a file that must know no core. The verb itself is the second concept below |
+| `DelayRate` | the family's microsecond busy-wait as the precomputed factor a caller stores once, so that no division runs while a chip select settles. The driver calls the verb that belongs to that type - written unqualified and found where the type is - which is how a busy-wait made of a core's own counter reaches a file that must know no core. The verb itself is the second concept below |
 
 The constants:
 
 | Member | Why it exists |
 |--------|---------------|
 | `instances` | how many of the block this family carries: the resource refuses a number past it |
-| `fifo_depth` | the two FIFOs' depth, which is a SYNTHESIS parameter of the PL022 and therefore the family's fact, not this file's. It is the pump's window (how many frames may be in flight), the polled loop's and the client's `frames_ahead` |
+| `fifo_depth` | the two FIFOs' depth, which is a synthesis parameter of the PL022 and therefore the family's fact, not this file's. It is the pump's window (how many frames may be in flight), the polled loop's and the client's `frames_ahead` |
 | `no_pad` | what the family's pin set puts in a signal it does not route: a host with no receive pad is a write-only bus, and a client with no transmit pad is a listener |
 | `dma_min_frames` | below how many data frames a request takes the pump even on a host with engines bound: the engines' fixed cost per transaction over the pump's cost per frame, both MEASURED on the family's core and stated with their arithmetic in the family's document. A number of the core and the flash around the block, never of the block |
 
@@ -109,10 +221,10 @@ The verbs over a register, over the pads and over time:
 | `set_bits(reg, bits)`, `clear_bits(reg, bits)` | one write that sets or clears bits with no read-modify-write: `SSPCR1` carries the enable and the two live bits, and the interrupt mask is touched from two contexts. A family with atomic register aliases uses them; one without does the read-modify-write under its own guard |
 | `pins_valid(n, pins)` | is this pin set legal for this instance - the family's pin table, as a constexpr predicate the host's and the client's `static_assert` call |
 | `sck_pad(pins)`, `tx_pad(pins)`, `rx_pad(pins)`, `cs_pad(pins)` | which pad number carries each signal, or `no_pad` |
-| `Pad<pin>` | the pad AS A TYPE, with the three verbs the driver calls on one: hand it over (`function(code, config)`), take it back (`release()`) and read its level (`read()`, which is how a client answers `selected()`) |
+| `Pad<pin>` | the pad as a type, with the three verbs the driver calls on one: hand it over (`function(code, config)`), take it back (`release()`) and read its level (`read()`, which is how a client answers `selected()`) |
 | `pad_function` | the function code that routes an SPI to a pad, opaque to this file |
-| `no_function`, `dark_pad_config()` | a CLIENT's answer line while it listens dark: handed to no function, so nothing drives it, with a setup that carries NO PULL. Not the pad's reset state - that carries a pull on the families this file has met (a pull-down on both RP chips), and a far host's receive pad carries a pull-up, so a dark line released to reset sat between the two (measured on the RP pair: the far host read neither level) |
-| `sck_pad_config()`, `tx_pad_config()`, `host_rx_pad_config()`, `client_rx_pad_config()`, `cs_pad_config()` | the electrical setup each signal wants. They are FUNCTIONS returning a value rather than constants, so the driver materializes the configuration at the call, exactly as a family's own driver would have written it there - no object's address is taken and the call folds away. THE TWO RECEIVE PADS ARE ASKED SEPARATELY because they are two electrical situations and not one: a host's answer line may have nothing driving it (no client on the bus, or one listening dark), while a client's command line is driven by the host whenever it matters |
+| `no_function`, `dark_pad_config()` | a CLIENT's answer line while it listens dark: handed to no function, so nothing drives it, with a setup that carries no pull. Not the pad's reset state - that carries a pull on the families this file has met (a pull-down on both RP chips), and a far host's receive pad carries a pull-up, so a dark line released to reset sat between the two (measured on the RP pair: the far host read neither level) |
+| `sck_pad_config()`, `tx_pad_config()`, `host_rx_pad_config()`, `client_rx_pad_config()`, `cs_pad_config()` | the electrical setup each signal wants. They are functions returning a value rather than constants, so the driver materializes the configuration at the call, exactly as a family's own driver would have written it there - no object's address is taken and the call folds away. The two receive pads are asked separately because they are two electrical situations and not one: a host's answer line may have nothing driving it (no client on the bus, or one listening dark), while a client's command line is driven by the host whenever it matters |
 | `engines_distinct<Tx, Rx>()` | two engines of one host must not name one DMA channel; what "the same channel" means is the family's DMA's |
 | `delay_rate(hz)` | the busy-wait's factor for a rate, recomputed at every clock change so the `cs_setup_us` of a Request costs no division |
 
@@ -123,8 +235,8 @@ either:
 
 | Member | Why it exists |
 |--------|---------------|
-| `sspclk_hz(clock)` | WHICH rate of this family's tree is SSPCLK - the rate the bit rate is divided from. It is a template over the family's own clock types, of which this file knows none, so it is `Pl022ChipClock<Chip, Clock>`, checked inside `init()` where a clock is in hand |
-| `delay_us(rate, us)` | the verb over `DelayRate`. It is not a member of the traits type at all but a FREE function beside it, found by argument-dependent lookup on the type the traits hand over, so it is `Pl022ChipDelay<Chip>`, checked in the host's own body |
+| `sspclk_hz(clock)` | which rate of this family's tree is SSPCLK - the rate the bit rate is divided from. It is a template over the family's own clock types, of which this file knows none, so it is `Pl022ChipClock<Chip, Clock>`, checked inside `init()` where a clock is in hand |
+| `delay_us(rate, us)` | the verb over `DelayRate`. It is not a member of the traits type at all but a free function beside it, found by argument-dependent lookup on the type the traits hand over, so it is `Pl022ChipDelay<Chip>`, checked in the host's own body |
 
 ## The include contract
 
@@ -135,7 +247,7 @@ stratum - a PL022 may sit on a core `brio/cortexm/` knows nothing about,
 which is why the microsecond busy-wait arrives as a type of the family's
 rather than as an include. It may therefore be included anywhere, in any
 order, and a family's `spi.hpp` includes it beside its own headers.
-Apps and family drivers keep including the FAMILY's header, never this
+Apps and family drivers keep including the family's header, never this
 one - the family is where the public names are.
 
 It follows that this directory needs no `.clangd` fragment of its own:
@@ -203,7 +315,8 @@ polled loop on the same board is the figure beside them).
   contract lends the request for the call; a polled request completes
   inside `start()`, so it is read field by field through the reference
   and no copy is made. The asynchronous path (the pump, the engines)
-  copies what its tenure needs into one working set, `tenure_`: the
+  copies what its tenure (the time one transaction holds the bus)
+  needs into one working set, `tenure_`: the
   request AS WORDS - one load and one store a word, inline on every core,
   because a struct copy of this size is a `memcpy` call on a RISC-V
   build at `-Os` and a byte copy on a core that cannot load a misaligned
@@ -338,10 +451,11 @@ interrupt line and its controller; the crt's handler name an app binds;
 the DMA request numbers and the engine types that fill the slots; which
 rate is SSPCLK; the FIFO depth; the run-time pin type and the busy-wait;
 what SOD does to a pad on that silicon; whether the family places
-`.fast_text` (its traits' `places_fast_text`, the item above); and THE PUBLIC NAMES -
-`Pl022<n>`, `SpiHost<n, pins, TxEngine, RxEngine>` and `SpiClient<n,
+`.fast_text` (its traits' `places_fast_text`, the item above); and the public names -
+`Pl022<n>`, `SpiHost<n, pins, TxEngine, RxEngine, Placement>` and `SpiClient<n,
 pins>`, the family's aliases of the three templates here, with the
-family's own defaults for the empty engine slots. An application that
+family's own defaults for the empty engine slots and the placement. An
+application that
 says `brio::SpiHost<0, pins>` has no idea this stratum exists, which is
 the point.
 

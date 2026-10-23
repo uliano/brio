@@ -1,10 +1,50 @@
 /*
  * clock.hpp
  *
- * The RP2040 clock tree (datasheet 2.15 to 2.18) in the two strata every
- * brio target uses (docs/design/clock.md):
+ * The RP2040 clock tree (datasheet 2.15 to 2.18). A program uses it once,
+ * first in main(), to bring clk_sys from the boot's ring oscillator to
+ * the rate it names, and every driver then computes its divisors from
+ * that name. The smallest use (docs/rp2040/clock.md, "How to use it"):
  *
- *  RESOURCES - monostates, thin typed views with the discipline built in:
+ *     using SysClock = brio::Clock<brio::ClockSource::pll, 125'000'000>;
+ *     constexpr SysClock clock;
+ *     const bool clock_ok = SysClock::init();    // first in main()
+ *     Serial::init(clock, 115200);               // divides clk_peri = 125 MHz
+ *
+ * `SysClock` names the rate when the program is compiled - the alias
+ * configures nothing, init() does - and `clock` is an empty tag object
+ * the drivers' init() take to learn the rate (`clock_hz(clock)`).
+ *
+ * What decides correctness even there: init() runs before any driver's
+ * init(), because a driver's divisor is computed from the rate the type
+ * claims and never read from the hardware, so a driver opened before it
+ * runs at the wrong rate (on clk_sys, at the ring oscillator's) or, on
+ * clk_peri, which the boot leaves disabled, not at all, until init()
+ * brings the tree to `hz`; nothing refuses it. And init()'s answer is
+ * looked at: false means the tree is not at `hz`.
+ *
+ * Which context calls what. The clock tree is the chip's, one for both
+ * cores: init() is core 0's, in main() before interrupts are enabled. As
+ * the rate switch it is called from main or an active object's handler on
+ * core 0 (an active object being a brio component with its own event
+ * queue, served one event at a time by the kernel), with the drivers on
+ * clk_sys rebased after it: that context is the programmer's duty,
+ * checked by nothing and measured by nothing. It waits, each wait a
+ * bounded spin: the crystal's STABLE, the PLL's LOCK, each glitchless
+ * mux's SELECTED; it masks nothing. count_hz() waits, bounded, for the
+ * frequency counter's window (32 ms at the default interval). The
+ * resources' verbs below are setup verbs with no guard of their own: two
+ * contexts reconfiguring the tree at once race. Xosc::dormant() and
+ * Rosc::dormant() are the one wait here with no bound: they return only
+ * when a wake restarts the oscillator (rp2040/sleep.hpp's site is their
+ * caller).
+ *
+ * The header is in the two strata every brio target uses
+ * (docs/design/clock.md):
+ *
+ *  RESOURCES - monostates (classes with only static members, one per
+ *  block, never instantiated), thin typed views with the discipline
+ *  built in:
  *    Xosc     the crystal oscillator (2.16): the 1..15 MHz range code,
  *             the startup delay in units of 256 crystal periods, the
  *             STABLE flag a bounded wait watches
@@ -15,7 +55,7 @@
  *    Rosc     the ring oscillator (2.17): running/stable, start and stop
  *             - never a rate, so never a Clock
  *    Clocks   the clock generators (2.15): clk_ref and clk_sys with their
- *             GLITCHLESS mux and their aux mux, clk_peri, clk_adc and
+ *             glitchless mux and their aux mux, clk_peri, clk_adc and
  *             clk_rtc with their aux mux alone
  *             and enable - and the switching sequences of 2.15.3.2,
  *             which are the whole point of the block
@@ -27,8 +67,9 @@
  *             through a divider onto a pin, a pin as a source the
  *             generators and the counter can name
  *
- *  TASK - what an application names:
- *    Clock<source, hz, crystal_hz, peri>   the static main clock: ONE
+ *  TASK - what an application names (a task, in brio, is the layer over
+ *  the resources a program calls):
+ *    Clock<source, hz, crystal_hz, peri>   the static main clock: one
  *             constexpr truth `hz` every driver derives from (there is
  *             no F_CPU in this build); init() composes the resources and
  *             reports whether the tree reached the rate it claims;
@@ -37,8 +78,8 @@
  *             crystal_hz: the UARTs keep their rate through every
  *             change of clk_sys, the datasheet's reason for clk_peri).
  *
- * THE CLOCK MODEL, and what crosses the util contract. This chip has NO
- * shared bus prescaler and NO enable bit per peripheral: there is one
+ * The clock model, and what crosses the util contract. This chip has no
+ * shared bus prescaler and no enable bit per peripheral: there is one
  * clk_sys for the cores, the bus fabric, the memories and the
  * peripherals' bus interfaces, a separate clk_peri for the UARTs and
  * SPIs (so that they keep their bit rates when clk_sys is changed, the
@@ -48,18 +89,18 @@
  * PLLs, two GPIO inputs - and a divider; clk_ref and clk_sys have the
  * glitchless mux in front, because they must never stop. What crosses
  * the contract is unchanged: `clock_hz(clock)` is clk_sys, and by
- * default this file pins clk_peri TO clk_sys undivided so that
- * `Clock::pclk_hz`, the rate the UART divides, IS hz and one number
+ * default this file pins clk_peri to clk_sys undivided so that
+ * `Clock::pclk_hz`, the rate the UART divides, is hz and one number
  * serves every driver. `PeriSource::crystal` is the other choice, for
  * a program that moves clk_sys and wants its UARTs untouched: pclk_hz
  * is then the crystal's rate, and a UART on it keeps its divisor
  * through every switch (measured, test_rp2040_clock).
  *
- * THE BOOT STATE. The bootrom leaves the chip on the RING OSCILLATOR:
+ * The boot state. The bootrom leaves the chip on the ring oscillator:
  * clk_ref and clk_sys both from ROSC at roughly 6.5 MHz, a rate that is
  * neither exact nor stable (2.17), the crystal off, both PLLs in reset,
  * clk_peri disabled. That is what main() starts from, and it is why
- * `ClockSource::internal` is declared and REFUSED: a rate that is not a
+ * `ClockSource::internal` is declared and refused: a rate that is not a
  * truth cannot be `hz`. The two sources built:
  *   crystal - XOSC straight into clk_sys: hz == crystal_hz (12 MHz on
  *             every board here);
@@ -72,33 +113,40 @@
  *             larger divider in POSTDIV1 (its power advice). 125 MHz
  *             from 12 MHz is FBDIV 125, VCO 1500, 6 x 2.
  *
- * THE SEQUENCE init() RUNS, from the datasheet's own rules (2.15.3.2,
+ * The sequence init() runs, from the datasheet's own rules (2.15.3.2,
  * 2.16.2, 2.18.3): clk_sys parked on clk_ref (the glitchless mux away
- * from aux, so the aux select - and the PLL behind it - can change
- * under it); the crystal on and STABLE, or KEPT if it already is (a
- * stable crystal is not restarted: the second init() of a program
- * that changes rate costs no millisecond and never lets clk_ref, which
- * may be on the crystal by then, drop); clk_ref onto the crystal; the
- * PLL out of reset, configured while powered down, powered up, LOCK
- * waited for, its post dividers powered; clk_sys's aux onto the PLL
- * and the glitchless mux back onto aux, SELECTED polled; clk_peri
- * stopped, its aux set, restarted. Every wait is bounded and every
- * failure answers false, with the tree left on clk_ref - the caller
- * then knows the rate is NOT the one `hz` claims. So init() is the
- * RATE SWITCH too: a program on `Clock<pll, 125 MHz>` that calls
+ * from aux, so the aux select - and the PLL behind it - can change under
+ * it); the crystal on and STABLE, or kept if it already is (a stable
+ * crystal is not restarted: the second init() of a program that changes
+ * rate costs no millisecond and never lets clk_ref, which may be on the
+ * crystal by then, drop); clk_ref onto the crystal; the PLL out of reset,
+ * configured while powered down, powered up, LOCK waited for, its post
+ * dividers powered; clk_sys's aux onto the PLL and the glitchless mux
+ * back onto aux, SELECTED polled; clk_peri stopped, its aux set,
+ * restarted. Every wait is bounded and every failure answers false, and
+ * the caller then knows the rate is not the one `hz` claims. Where the
+ * tree is left depends on the step that failed: a crystal that never
+ * started leaves clk_sys parked on clk_ref and clk_ref where it was (the
+ * ring oscillator after the boot); a PLL that never locked leaves clk_sys
+ * parked on clk_ref, which is on the crystal by then; a glitchless switch
+ * that did not take - the park itself, clk_ref onto the crystal, clk_sys
+ * onto the PLL's aux - leaves that mux with its new select written
+ * (clk_sys's SRC already on aux in the last case) and its SELECTED
+ * unconfirmed, the mux where the failure found it. So init() is the rate
+ * switch too: a program on `Clock<pll, 125 MHz>` that calls
  * `Clock<pll, 48 MHz>::init()` is at 48 MHz when it returns, with the
- * drivers on clk_sys (the SysTick ticker, a UART on PeriSource::sys)
- * owed a rebase to the new `hz` - measured on the bench in a few
- * hundred microseconds. The ring oscillator is left running: the resus
- * circuit (2.15.5) and the bootrom's next life are on it; `Rosc::stop()`
- * is the program's verb when it wants the microamps.
+ * drivers on clk_sys (the SysTick ticker, a UART on PeriSource::sys) owed
+ * a rebase to the new `hz` - measured on the bench in a few hundred
+ * microseconds. The ring oscillator is left running: the resus circuit
+ * (2.15.5) and the bootrom's next life are on it; `Rosc::stop()` is the
+ * program's verb when it wants the microamps.
  *
- * A DYNAMIC CLOCK is not built: this chip has no voltage side to a rate
+ * A dynamic clock is not built: this chip has no voltage side to a rate
  * (one regulator setting serves the whole range) and clk_peri's
  * independence makes a rate change cheap on the drivers - the shape of
  * one is the STM32G0's Rates<> pack, the day a program wants it.
  *
- * ERRATUM RP2040-E7: the XOSC and ROSC COUNT registers are unreliable;
+ * Erratum RP2040-E7: the XOSC and ROSC COUNT registers are unreliable;
  * nothing here uses them - the frequency counter is the measure.
  */
 
@@ -233,9 +281,10 @@ struct Xosc {
     /// every clock derived from it - the core's included when clk_sys
     /// runs on it, so this call returns only once a configured wake
     /// (a GPIO dormant-wake event or the RTC's interrupt) has restarted
-    /// the oscillator and it is STABLE again. WITH NO WAKE CONFIGURED IT
-    /// NEVER RETURNS; rp2040/sleep.hpp's site refuses to arm that. The
-    /// PLLs are not stopped by the silicon: stop them first.
+    /// the oscillator and it is STABLE again; the wait for STABLE has no
+    /// bound. With no wake configured it never returns; rp2040/sleep.hpp's
+    /// site refuses to arm that. The PLLs are not stopped by the silicon:
+    /// stop them first.
     static void dormant() {
         XOSC->DORMANT = XOSC_DORMANT_VALUE_DORMANT;
         while (!stable()) {
@@ -609,8 +658,9 @@ struct Clocks {
     // ---- the top-level clock gates (2.11.1) ----------------------------------
 
     /// The gates that apply while the chip is in its SLEEP state (both
-    /// cores asleep with SLEEPDEEP, the DMA idle): what rp2040/sleep.hpp's
-    /// site arms a standby with. All open at reset.
+    /// cores asleep and the DMA idle - a plain WFI is enough, SLEEPDEEP or
+    /// not, measured: docs/rp2040/sleep.md): what rp2040/sleep.hpp's site
+    /// arms a standby with. All open at reset.
     static void sleep_enables(SleepClocks c) {
         CLOCKS->SLEEP_EN0 = c.en0;
         CLOCKS->SLEEP_EN1 = c.en1 & CLOCKS_SLEEP_EN1_BITS;
@@ -627,8 +677,9 @@ struct Clocks {
     static SleepClocks wake_enables() {
         return {.en0 = CLOCKS->WAKE_EN0, .en1 = CLOCKS->WAKE_EN1 & CLOCKS_WAKE_EN1_BITS};
     }
-    /// The gates as they stand this instant (ENABLED0/1): the wake set,
-    /// read from an awake core.
+    /// The gates as they stand this instant (ENABLED0/1): read from an
+    /// awake core, the wake set less the clocks whose generator is stopped
+    /// (docs/rp2040/sleep.md, "As found").
     static SleepClocks enabled() {
         return {.en0 = CLOCKS->ENABLED0, .en1 = CLOCKS->ENABLED1 & CLOCKS_ENABLED1_BITS};
     }
@@ -816,7 +867,7 @@ struct ClockIn {
 enum class PeriSource : uint8_t { sys, crystal };
 
 /**
- * The static main clock: `hz` is the ONE compile-time truth about clk_sys
+ * The static main clock: `hz` is the one compile-time truth about clk_sys
  * that every driver of this target derives from.
  *
  *   using SysClock = brio::Clock<brio::ClockSource::pll, 125'000'000>;
@@ -824,10 +875,11 @@ enum class PeriSource : uint8_t { sys, crystal };
  *   SysClock::init();                // first thing in main()
  *   Serial::init(clock, 115200);     // drivers ask the tag
  *
- * `hz` is clk_sys; `pclk_hz` is clk_peri, equal to `hz` because this
- * task feeds clk_peri from clk_sys undivided (the file header).
- * `crystal_hz` is the board's crystal, 12 MHz on the reference design
- * and every board brio has met.
+ * `hz` is clk_sys; `pclk_hz` is clk_peri: equal to `hz` under the
+ * default `PeriSource::sys`, where this task feeds clk_peri from clk_sys
+ * undivided, and `crystal_hz` under `PeriSource::crystal` (the file
+ * header). `crystal_hz` is the board's crystal, 12 MHz on the reference
+ * design and every board brio has met.
  */
 template <ClockSource src, uint32_t out_hz, uint32_t crystal_hz = 12'000'000UL,
           PeriSource peri = PeriSource::sys>
@@ -862,15 +914,19 @@ struct Clock {
     static constexpr uint32_t startup_delay = xosc_startup_delay(crystal_hz);
 
     /// Bring clk_sys to `hz`. Returns false when the crystal did not
-    /// start, the PLL did not lock or a mux switch did not take - the
-    /// tree is then left on the ring oscillator and the caller knows the
-    /// rate is NOT the one `hz` claims. Call first in main(), before any
-    /// driver init.
+    /// start, the PLL did not lock or a mux switch did not take, and the
+    /// caller then knows the rate is not the one `hz` claims. A crystal
+    /// that never started or a PLL that never locked leaves clk_sys
+    /// parked on clk_ref (the ring oscillator in the first case, the
+    /// crystal in the second); a mux switch that did not take leaves that
+    /// mux where the failure found it (the file header). Call first in
+    /// main(), on core 0, before any driver init. Every wait is a bounded
+    /// spin; nothing is masked.
     ///
-    /// The whole sequence is RE-STATED rather than assumed: the bootrom
+    /// The whole sequence is re-stated rather than assumed: the bootrom
     /// leaves the tree on the ring oscillator, but a debugger's reset
     /// or a previous life may have left anything behind, and `hz` is a
-    /// promise. Called on a running tree it is the RATE SWITCH (the file
+    /// promise. Called on a running tree it is the rate switch (the file
     /// header): the crystal is kept, the PLL re-locked at the new ratio
     /// with clk_sys parked on clk_ref meanwhile.
     static bool init() {
@@ -901,7 +957,9 @@ struct Clock {
     }
 
     /// A source counted against the crystal, which is clk_ref after
-    /// init(): FreqCounter::count_hz with this clock's reference.
+    /// init(): FreqCounter::count_hz with this clock's reference - a
+    /// bounded wait for the window (2^interval microseconds), nullopt
+    /// for a dead source or a count that never finished.
     static std::optional<uint32_t> count_hz(CountSource what, uint8_t interval = 15) {
         return FreqCounter::count_hz(what, crystal_hz, interval);
     }

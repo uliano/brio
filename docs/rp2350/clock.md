@@ -1,22 +1,91 @@
 # Clock (RP2350)
 
-Documents of record: the RP2350 datasheet (build d126e9e), chapter 8
-whole - 8.1 (the generators, their two multiplexers and the switching
-sequences of 8.1.3.2, the 16.16 divider, duty cycle correction, the
-clock enables of 8.1.3.5, the frequency counter of 8.1.4 with its
-interval table, the resus circuit of 8.1.5, and the programmer's model),
-8.2 (XOSC, with 8.2.2's "changes from RP2040"), 8.3 (ROSC, with its own
-8.3.2 and the randomiser of 8.3.6), 8.4 (the low-power oscillator, whose
-registers are POWMAN's), 8.5 (the tick generators) and 8.6 (the two
-PLLs) - plus 7.5 (the reset controller), 3.2 (the interrupt lines) and
-2.1.3 (the atomic register aliases). Appendix E names no erratum in this
-chapter. The driver: `brio/rp2350/clock.hpp`, with the microsecond
-busy-wait beside it in `brio/rp2350/delay.hpp`. The reference suite:
-`test_rp2350_clock`, which runs on BOTH of this chip's architectures
-from one source - every rate counted by the chip's own frequency
-counter, the switches timed by the platform timer, the drivers on
-clk_sys carried through each of them, and two letters over a clock wire
-to a peer board.
+This document is for a programmer who needs the RP2350's clocks set up:
+the system clock every core and peripheral runs on, the separate clock
+of the serial ports, the USB and converter clocks, a clock on a pin, or
+a count of how fast something really runs. `brio/rp2350/clock.hpp`
+gives a program one type to name, `Clock<source, hz, ...>`, whose `hz`
+is the one compile-time statement of the system clock's rate that every
+driver divides from, and whose `init()` brings the whole tree to that
+rate - the crystal, the system PLL, the switches between them; this
+type is the clock task, the layer a program names, which composes the
+resources of the file. Beside it are those resources, one monostate (a
+type with only static members, used without an object) per block: the
+two oscillators, the low-power oscillator, the two PLLs, the generators,
+the resuscitation circuit, the tick generators, the frequency counter
+and the clock pins. The same source runs on the Cortex-M33 pair and on
+the Hazard3 pair. The microsecond busy-wait `delay_us` lives beside it
+in `rp2350/delay.hpp` and is documented here; it stands on the ruler,
+the platform timer's 64-bit microsecond counter
+([platform.md](platform.md)).
+
+The smallest use is the first block under "How to use it" below:
+
+```cpp
+using SysClock = brio::Clock<brio::ClockSource::pll, 150'000'000>;
+constexpr SysClock clock;
+const bool clock_ok = SysClock::init();    // first in main()
+brio::Mtime::start(clock);                 // the ruler, and delay_us's
+Serial::init(clock, 115200);               // divides clk_peri = 150 MHz
+```
+
+Line by line: `SysClock` names the tree - clk_sys from the 12 MHz
+crystal through the system PLL at 150 MHz, clk_peri equal to clk_sys,
+the crystal on clk_ref (the defaults of the two template arguments left
+out); `clock` is an empty tag object of that type, the argument drivers
+take to learn the rates, since the type has only static members;
+`SysClock::init()` runs the whole sequence and answers whether the tree
+reached the rate the type claims; `Mtime::start(clock)` starts the ruler
+on a microsecond divided out of clk_ref; and `Serial::init(clock,
+115200)` is a UART ([uart.md](uart.md)) computing its baud divisor from
+the clk_peri rate the type states.
+
+What decides correctness even there. `init()` comes first in `main()`,
+before any driver's `init()`: the drivers compute their divisors from
+the rates the clock type claims (the UART's from `pclk_hz`, the ruler's
+tick from `ref_hz`) and read nothing from the hardware, so a driver
+initialized before the tree is up divides a rate the chip does
+not have yet - at power-up the chip runs on its ring oscillator with
+clk_peri disabled ("What the silicon does" below). `init()` answers
+false when the crystal did not start, the PLL did not lock or a switch
+did not take, and then the rate is not the one `hz` claims; every wait
+in it is bounded, and it masks no interrupts. Called again on a running
+tree, `init()` is the rate switch, and the drivers on clk_sys - the
+Cortex-M33 half's timebase, a UART on clk_sys - are then owed a
+`rebase(hz)`. And the chapter's one trap for a program that writes the
+oscillators' registers by hand: their `CTRL` fields are passwords, so a
+write through the atomic set, clear or XOR alias is refused ("Two
+registers in this chapter are passwords", below).
+
+The rest of this page, in order: the documents of record; what the
+silicon does (the tree, what changed since the RP2040, the switching
+sequences, the boot state and the crystal, the password registers, the
+low-power oscillator, the resus circuit); the types and verbs, and why
+there is no dynamic clock; how to use it, one example per use; the bench
+findings, both architectures; and what is not covered.
+
+## Documents of record
+
+The RP2350 datasheet (build d126e9e), chapter 8 whole - 8.1 (the
+generators, their two multiplexers and the switching sequences of
+8.1.3.2, the 16.16 divider, duty cycle correction, the clock enables of
+8.1.3.5, the frequency counter of 8.1.4 with its interval table, the
+resus circuit of 8.1.5, and the programmer's model), 8.2 (XOSC, with
+8.2.2's "changes from RP2040"), 8.3 (ROSC, with its own 8.3.2 and the
+randomiser of 8.3.6), 8.4 (the low-power oscillator, whose registers are
+POWMAN's), 8.5 (the tick generators) and 8.6 (the two PLLs) - plus 7.5
+(the reset controller), 3.2 (the interrupt lines) and 2.1.3 (the atomic
+register aliases). Appendix E names no erratum in this chapter. The
+driver: `brio/rp2350/clock.hpp`, with the microsecond busy-wait beside
+it in `brio/rp2350/delay.hpp`. The reference suite: `test_rp2350_clock`,
+which runs on both of this chip's architectures from one source - every
+rate counted by the chip's own frequency counter, the switches timed by
+the platform timer, the drivers on clk_sys carried through each of them,
+and two letters over a clock wire to a peer board (a letter is one
+command key of the suite's console and the group of verdicts it runs;
+`z` is the key that runs every letter but four, which run by name: the
+two clock-wire letters `o` and `p`, and `s` and `u`, the clock output's
+schedule and its one pulse per second for the partner's meters).
 
 ## What the silicon does
 
@@ -28,35 +97,35 @@ separate **clk_peri** feeds the UARTs and SPIs, so that their bit rates
 survive a change of clk_sys; **clk_usb**, **clk_adc** and (new here)
 **clk_hstx** have generators of their own; **clk_ref** is the
 always-running reference the tick generators and the frequency counter
-use. Each generator is an auxiliary multiplexer over the chip's sources
-- the crystal oscillator, the ring oscillator, the two PLLs, two GPIO
+use. Each generator is an auxiliary multiplexer over the chip's
+sources - the crystal oscillator, the ring oscillator, the two PLLs, two GPIO
 clock inputs, and for clk_ref the low-power oscillator - followed by a
-divider and an enable. clk_ref and clk_sys have a GLITCHLESS
+divider and an enable. clk_ref and clk_sys have a glitchless
 multiplexer in front, because they must never stop, and a SELECTED
 register that says which source is in force.
 
 **What is not the RP2040's**, beyond the bigger numbers: there is no
 clk_rtc, because there is no RTC - the always-on timer in POWMAN took
-its place, with a clock of its own; clk_ref gains the LOW-POWER
-OSCILLATOR as a fourth source and is capped at 25 MHz whatever the
+its place, with a clock of its own; clk_ref gains the low-power
+oscillator as a fourth source and is capped at 25 MHz whatever the
 crystal is; the dividers are 16.16 where the RP2040's were 24.8, and
-clk_peri has one at all; the TICK GENERATORS of 8.5 are a block of their
+clk_peri has one at all; the tick generators of 8.5 are a block of their
 own, where the RP2040 derived its microsecond from the watchdog; the
 ring oscillator can randomise its own frequency; the PLLs report a lock
-that was LOST and not only a lock that is present, on an interrupt line
+that was lost and not only a lock that is present, on an interrupt line
 each; and the frequency counter's source numbering is another one.
 
 **The switching sequences are the chapter's whole point** (8.1.3.2). A
-generator with a glitchless mux changes its AUX source only while the
+generator with a glitchless mux changes its aux source only while the
 glitchless mux is parked elsewhere; a generator without one is stopped,
 changed and restarted - and the datasheet asks for its `ENABLED` status
-to be POLLED rather than for cycles to be counted, because the generated
+to be polled rather than for cycles to be counted, because the generated
 clock may be far slower than the one counting them.
 
-**At power-up the chip runs on the RING OSCILLATOR**, at a nominal
+**At power-up the chip runs on the ring oscillator**, at a nominal
 11 MHz guaranteed only to sit between 4.6 and 19.6, with the crystal
 off, both PLLs in reset and clk_peri disabled. The crystal oscillator
-takes 1 to 50 MHz in one of FOUR range codes and needs a startup delay
+takes 1 to 50 MHz in one of four range codes and needs a startup delay
 in units of 256 crystal cycles before STATUS.STABLE rises (47 for 12 MHz
 and the 1 ms of the reference design). The system PLL multiplies the
 crystal into a VCO of 750..1600 MHz through FBDIV 16..320 and divides it
@@ -71,7 +140,7 @@ codes; anything else sets `STATUS.BADWRITE` and is refused. That makes a
 read-modify-write through the atomic SET / CLEAR / XOR aliases illegal,
 since such a write puts zeros in the field it does not mean to touch -
 and it makes carrying ROSC's own reset value over into a write illegal
-too, because `FREQ_RANGE` RESETS TO 0xaa0, which is none of its four
+too, because `FREQ_RANGE` resets to 0xaa0, which is none of its four
 codes. Both are measured, and both are why every write of either CTRL in
 this driver is a whole word with both passwords made legal.
 
@@ -80,7 +149,7 @@ this driver is a whole word with both passwords made legal.
 stopped from software, and is what the always-on timer counts while the
 switched core is powered down. Its accuracy is plus or minus 20 per cent
 untrimmed and about 1.5 trimmed, in 63 steps. Its registers live in
-POWMAN and are PASSWORD PROTECTED: a write whose top sixteen bits are
+POWMAN and are password protected: a write whose top sixteen bits are
 not 0x5AFE is ignored and sets BADPASSWD.
 
 **The resus circuit** (8.1.5) is the watchdog of clk_sys itself: with no
@@ -88,7 +157,7 @@ edge of clk_sys within TIMEOUT cycles of clk_ref it forces the
 glitchless mux back onto clk_ref and raises the CLOCKS interrupt, so
 that a program which stopped its own system clock still answers a
 debugger. The datasheet calls it a debugging aid and warns that a
-clk_sys merely SLOWER than the timeout assumes looks exactly like one
+clk_sys merely slower than the timeout assumes looks exactly like one
 that stopped.
 
 ## Types and verbs
@@ -97,13 +166,13 @@ that stopped.
   `external` (a clock into XIN) and `gpin` declared and refused - the
   ring oscillator's rate is not a truth `hz` could state.
 - `Clock<source, hz, crystal_hz = 12'000'000, peri = PeriSource::sys>`
-  - the static main clock, the ONE truth: `hz` = clk_sys, `pclk_hz` =
+  - the static main clock, the one truth: `hz` = clk_sys, `pclk_hz` =
   clk_peri (clk_sys undivided, or the crystal under
   `PeriSource::crystal`), `ref_hz` = clk_ref = the crystal, `pll` (the
   setting found), `startup_delay`; `init()` runs the whole sequence and
   answers false when the crystal did not start, the PLL did not lock or
-  a switch did not take. Called on a running tree it is THE RATE SWITCH,
-  and it is written to come back FROM ANY TREE a previous image can
+  a switch did not take. Called on a running tree it is the rate switch,
+  and it is written to come back from any tree a previous image can
   leave: it parks clk_sys on clk_ref and clk_ref on a ring oscillator it
   started before it touches a PLL. The drivers on clk_sys (the Cortex-M33
   half's timebase, a UART on `PeriSource::sys`) are owed a `rebase(hz)`;
@@ -117,22 +186,33 @@ that stopped.
 - `Xosc` - the crystal: `init` (the delay and the range in one word; a
   stable crystal is kept), `stable`, `enabled`, `startup_delay`,
   `startup_x4`, `range` and `range_code`, `wait_periods` (the countdown
-  register, a short wait in CRYSTAL periods and not in instructions),
-  `count`, `badwrite` / `clear_badwrite`, `stop`.
-- `Rosc` - the ring oscillator and THE SAFE PLACE TO PARK: `start` (which
+  register, a short wait in crystal periods and not in instructions),
+  `count`, `badwrite` / `clear_badwrite`, `stop`, and `dormant()`
+  (DORMANT, 8.2.6, 8.3.10 for the ring oscillator's: the keyword that
+  stops the oscillator and every clock derived from it, returning only
+  once a configured wake - a pad's or the always-on timer's - has
+  restarted it, and never with none; neither the silicon nor
+  `dormant()` stops the PLLs, so the caller stops them first. The sleep
+  chapter's deep rung does both - it stops the PLLs, then enters it - and
+  refuses to arm with no wake, [sleep.md](sleep.md)).
+- `Rosc` - the ring oscillator and the safe place to park: `start` (which
   does not write CTRL when it is already running), `stop`, `running`,
   `stable`, `div_running`, `range(RoscRange)` and `range_code`,
   `drive(stage, strength)` behind its password, `randomise(ds0, ds1)` /
   `randomised` / `seed`, `divider` (the divisor, with the block's rule
   that anything outside 1..127 divides by 128), `random_bit`,
-  `wait_periods` / `count`, `badwrite` / `clear_badwrite`.
+  `wait_periods` / `count`, `badwrite` / `clear_badwrite`, and
+  `dormant()` (the same keyword and the same contract, the restart a
+  microsecond against the crystal's milliseconds).
 - `Lposc` - the low-power oscillator, in the always-on domain: `trim`
   (0..63), `mode`, `freq_khz_int` / `freq_khz_frac` / `freq_khz` (what
-  the always-on timer is TOLD the rate is) and `declared_hz`,
-  `bad_password` / `clear_bad_password`.
+  the always-on timer is told the rate is) and `declared_hz`,
+  `bad_password` / `clear_bad_password` (the clear carries no password,
+  so by the measurement in [powman.md](powman.md) it raises the flag
+  instead: `Powman::clear_bad_password()` is the one that clears it).
 - `PllSys` and `PllUsb` (one `PllBlock` at two addresses): `init` with a
   `PllConfig`, `locked`, `unlocked`, `config` read back, `bypass` /
-  `bypassed`, `stop` / `stopped`, and THE LOCK-LOSS SIDE this chip adds -
+  `bypassed`, `stop` / `stopped`, and the lock-loss side this chip adds -
   `lock_lost` / `clear_lock_lost`, `lock_lost_interrupt`,
   `interrupt_pending`, `force_interrupt`, `irq()` and an `isr()` body.
 - `Clocks` - the generators. clk_ref: `ref_select(RefSource)`,
@@ -143,7 +223,10 @@ that stopped.
   `*_enabled` / `*_source` / `*_divider`: `peri_`, `usb_`, `adc_`,
   `hstx_`. And the top-level gates: `wake_enables`, `sleep_enables`,
   `enabled`, over a `SleepClocks` pair of words with `sleep_clocks_all`
-  and `sleep_clocks_none`.
+  and `sleep_clocks_none`. What `sleep_enables` does happens when both
+  cores are asleep and the DMA idle, the sleep chapter's standby; the
+  sleep site writes the program's pruning set there, and the effect of a
+  pruned gate is measured in [sleep.md](sleep.md).
 - `Resus`: `enable(timeout)` / `disable` / `enabled` / `timeout`,
   `resussed`, `clear`, `force` / `unforce`, the interrupt
   (`interrupt`, `raw`, `pending`, `force_interrupt`, `irq()`, `isr()`).
@@ -165,15 +248,15 @@ that stopped.
   `count_source`, `max_hz`.
 - `delay_us(clock, us)` and `delay_us(DelayRate, us)` with
   `delay_rate(hz)`, in `rp2350/delay.hpp`: the microsecond busy-wait,
-  AT LEAST and never early, refused at one kernel tick (1000 us) and at
+  at least and never early, refused at one kernel tick (1000 us) and at
   a rate of zero. It rides the platform timer and not a core counter,
-  which is what makes it ONE implementation for two instruction sets -
+  which is what makes it one implementation for two instruction sets -
   and what makes its resolution a microsecond rather than a cycle.
 
-There is NO DYNAMIC CLOCK on this target, as there is none on the
+There is no dynamic clock on this target, as there is none on the
 RP2040: this chip has no voltage side to a rate that a program must
 sequence, and clk_peri's independence makes a change of clk_sys cheap.
-`Clock<...>::init()` called again IS the rate switch, and what it costs
+`Clock<...>::init()` called again is the rate switch, and what it costs
 is measured below. A `Rates<>` pack in the STM32G0's shape would be
 built when a program wants to scale under the kernel's own users list.
 
@@ -325,8 +408,8 @@ fail** on the Hazard3 pair, from one source.
   uses starts at the count it is given and stops again, and a count that
   does not fit the nine-bit field (512) is refused, as is zero.
 - **The top-level gates**: every gate is open at reset (0xffffffff /
-  0x7fffffff). Closing one destination's wake gate - the SHA-256 block's
-  - clears exactly that bit of ENABLED0 and no other, and opening it
+  0x7fffffff). Closing one destination's wake gate - the SHA-256
+  block's - clears exactly that bit of ENABLED0 and no other, and opening it
   again puts the register back.
 - **The frequency counter itself**: clk_sys counted over 32 us, 1 ms and
   32 ms reads 150 016 000, 150 000 000 and 150 000 000 Hz, each within
@@ -383,11 +466,6 @@ Driver gaps, each with its reason:
   the section above says why there is none - no voltage side, and a
   cheap switch. Born with the first program on this target that scales
   its rate under load.
-- **DORMANT mode** for either oscillator (8.2.6, 8.3.10): entering it
-  stops every clock on the chip, and the wake source that brings it back
-  is the always-on timer's or a pad's - both of them the POWMAN
-  chapter's. The verb belongs with the wake source that makes it safe,
-  and is written there.
 - **The KILL control** of the four aux generators: the datasheet's own
   note is that it "should not be used", that it can glitch the clock and
   corrupt the logic it drives, and that the design has never been known
@@ -447,9 +525,6 @@ Implemented but not bench-verified, each with what would measure it:
   the step; an oscilloscope on GP21 against a second output of this
   chip, or the partner's sampler timing a nudge against a phase it has
   just locked, would measure them.
-- **The sleep gates.** `sleep_enables` is written and read back; what it
-  does happens when both cores are asleep and the DMA idle, which is the
-  power chapter's state and not this one's.
 - **A clk_ref that is not 12 MHz**: `tick_cycles_per_us` refuses a
   clk_ref that is not a whole number of megahertz, and only the 12 MHz
   crystal has been on the wire.

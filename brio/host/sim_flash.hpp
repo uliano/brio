@@ -1,27 +1,49 @@
 /*
  * sim_flash.hpp
  *
- * A FlashMedia (util/nv_heap.hpp) made of RAM, with the three things a
- * real one cannot offer: an arbitrary GEOMETRY, a COUNTER on every kind
- * of wear, and a POWER SWITCH that can be thrown between any two program
- * units.
+ * A FlashMedia (util/nv_heap.hpp: the concept a flash part meets for the
+ * NV heap and journal - read, program, erase, its geometry, its zones
+ * and build_id(), the running image's identifier) made of RAM, with the
+ * three things a real one cannot offer: an arbitrary geometry, a counter
+ * on every kind of wear, and a power switch that can be thrown between
+ * any two program units. The host
+ * suites of the NV heap and journal run over it (docs/design/nv-heap.md,
+ * docs/design/nv-journal.md).
  *
- * WHY THE GEOMETRY IS A PARAMETER. "Page" means 512 bytes erased and two
+ * The smallest use, as test/test_nv_heap spells it: the geometry named
+ * in the type, the part put back to virgin before each case, its zones
+ * set, then the heap run over it and the wear asserted:
+ *
+ *     using AvrFlash = SimFlash<512, 2, 128u * 1024u, 2>;   // erase, cell, size, zones
+ *     static_assert(FlashMedia<AvrFlash>);
+ *
+ *     AvrFlash::reset();
+ *     AvrFlash::set_zone(0, ceiling, floor);
+ *     // ... the heap's mutations ...
+ *     AvrFlash::cut_after(0);              // the lights go out before the next program
+ *     AvrFlash::power_on();
+ *     CHECK(AvrFlash::double_programs == 0);
+ *
+ * Contexts: a single-threaded test; every member is static, and a
+ * program or an erase completes inside the call (there is no busy flag
+ * to poll and nothing waits).
+ *
+ * Why the geometry is a parameter. "Page" means 512 bytes erased and two
  * bytes programmed on an AVR Dx, and 2 KB erased and eight ECC-guarded
  * bytes programmed on an STM32G0. A block allocator that is only ever
  * exercised against one of those shapes is an allocator with the other
  * shape's bugs still in it, so the host suite runs the same source over
  * both.
  *
- * WHAT IT MODELS OF REAL FLASH. Programming only clears bits (the stored
+ * What it models of real flash. Programming only clears bits (the stored
  * byte is ANDed with the new one), an erase puts a whole unit back to
  * 0xFF, and every program unit remembers whether it has already been
  * programmed since its last erase - the discipline ECC memories require,
  * and one that no amount of testing on a forgiving part would reveal.
- * Violations are COUNTED, not refused: a test asserts the count is zero,
+ * Violations are counted, not refused: a test asserts the count is zero,
  * which is a stronger statement than "the media said no".
  *
- * WHAT IT MODELS OF A POWER LOSS. cut_after(n) lets exactly n more
+ * What it models of a power loss. cut_after(n) lets exactly n more
  * program units land and then takes the power away: the (n+1)-th program
  * writes nothing, returns false, and every later program and erase does
  * the same until power_on(). A test can therefore sweep the cut across
@@ -29,7 +51,7 @@
  * heap comes back as either entirely the old thing or entirely the new
  * one.
  *
- * WHAT IT MODELS OF THE BENCH. reflash() is the avrdude -D convention:
+ * What it models of the bench. reflash() is the avrdude -D convention:
  * an image is written over the pages it occupies and the rest of the
  * part is left alone - the mechanism the whole survival story rests on.
  * chip_erase() is the other half of the truth: everything goes.

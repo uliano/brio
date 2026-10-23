@@ -1,20 +1,41 @@
 /*
  * gfx_reference.hpp (host)
  *
- * THE JUDGE OF THE PRIMITIVES, and nothing else. For every shape
+ * The judge of the primitives, and nothing else. For every shape
  * gfx/draw.hpp knows how to draw fast, this file computes the same set
- * of pixels SLOWLY AND FROM THE DEFINITION - by asking, of every pixel
+ * of pixels slowly and from the definition - by asking, of every pixel
  * on the canvas independently, whether it belongs to the shape. No
  * incremental error term, no octant symmetry, no shared arithmetic with
  * the thing it judges: an oracle is worth exactly its independence, and
  * a reference that borrowed the algorithm would prove f(x) == f(x).
  *
+ * A host test draws a shape twice - through the library into the
+ * surface under test, and through this file into a RefCanvas of the
+ * same size - and compares the two pixel by pixel. The smallest use, as
+ * test/test_gfx spells it:
+ *
+ *     brio::fill_rect(c.fb, x, y, w, h, 1);          // the library, into a Framebuffer
+ *
+ *     RefCanvas ref(W, H);
+ *     ref.fill_rect(x, y, w, h, 1);                   // the same shape, from its definition
+ *
+ *     const GfxDiff d = brio::compare(c.fb, ref);
+ *     INFO(d.map);                                    // the picture a failure prints
+ *     REQUIRE(d.agree());
+ *
+ * compare() takes any ReadableSurface (gfx/surface.hpp: a surface that
+ * can also answer get_pixel()), a framebuffer or a panel driver alike -
+ * test/test_dcs_panel judges a DcsPanel over a simulated ILI9481 this
+ * way. Contexts: a host test, single-threaded; nothing waits. The canvas
+ * owns its pixels (a std::vector), and compare() reads the surface
+ * through get_pixel() alone, once per pixel.
+ *
  * It lives in the host stratum because from here it cannot be linked
  * into a target image even by accident, and because down here the whole
- * standard library is allowed - this code exists to be obviously right,
+ * standard library is allowed - this code exists to be plainly correct,
  * never to be quick (docs/host/README.md).
  *
- * WHAT IT CANNOT JUDGE. Whether a specification is the RIGHT one: when
+ * What it cannot judge. Whether a specification is the right one: when
  * this file and a primitive disagree, the usual finding is that the
  * specification was never decided, not that either side is broken. And
  * whether a result is legible - that is a golden image looked at once by
@@ -39,7 +60,7 @@ namespace brio {
 
 /**
  * A canvas of one byte per pixel, whatever the format under test - this
- * is the observer's copy, not a surface. It is deliberately NOT a
+ * is the observer's copy, not a surface. It is deliberately not a
  * Surface: nothing must be able to draw into it through the library.
  */
 class RefCanvas {
@@ -69,7 +90,7 @@ public:
         }, c);
     }
 
-    /// In the rectangle AND on one of its four edges.
+    /// In the rectangle and on one of its four edges.
     void rect(Coord x, Coord y, Extent w, Extent h, uint8_t c) {
         if (w == 0 || h == 0) {
             return;
@@ -415,7 +436,7 @@ struct GfxDiff {
 };
 
 /// Compare a drawn surface against the reference, pixel by pixel. Takes
-/// a ReadableSurface because READING IS THE OBSERVER'S PRIVILEGE - the
+/// a ReadableSurface because reading is the observer's privilege - the
 /// library's primitives never get this concept.
 template <ReadableSurface S>
 GfxDiff compare(const S& s, const RefCanvas& ref) {

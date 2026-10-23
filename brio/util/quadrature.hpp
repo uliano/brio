@@ -1,19 +1,42 @@
 /*
  * quadrature.hpp (util)
  *
- * Quadrature: the active object that watches the two contacts of an
- * incremental rotary encoder and publishes when the shaft has turned by
- * whole detents - the knob half of what InputScanner is for a button.
+ * Quadrature: the active object (an object with its own event queue,
+ * dispatched by the kernel loop) that watches the two contacts of an
+ * incremental rotary encoder and publishes when the shaft has turned
+ * by whole detents - the knob half of what InputScanner is for a
+ * button. A program names the two contacts as ScannedInput types (each
+ * a struct whose read() returns the contact's level,
+ * util/input_scanner.hpp), lists the decoder among its active objects
+ * and gives it a poll period; each subscriber handles Turned{detents}.
+ * The smallest use, two pads of port A read as the contacts:
  *
- * AN INCREMENTAL ENCODER HAS NO POSITION. It says add or subtract, and
+ *     struct PadA { static bool read() { return brio::Pin<'A', 0>::read(); } };
+ *     struct PadB { static bool read() { return brio::Pin<'A', 1>::read(); } };
+ *     using Knob = brio::Quadrature<P, brio::Subscribers<Panel>, PadA, PadB>;
+ *
+ *     // once Tenuto's init_all() has run (it calls init() with no
+ *     // period, which leaves the decoder quiet): from an event handler, say
+ *     Knob::init(brio::ticks_from_ms<P>(1));   // poll every millisecond
+ *
+ * Who calls what, and from where: everything runs in the kernel loop,
+ * in main context. The decoder's TimeEvent posts a QuadratureTick every
+ * period; its dispatch reads the two contacts once (two read() calls,
+ * nothing masked, nothing waited for) and publishes a Turned by value
+ * when whole detents have accumulated. init(), start_every(), stop()
+ * and running_every() drive that TimeEvent, so they are main context
+ * only (kernel/time_event.hpp), never an interrupt handler. No
+ * interrupt is involved at all: the contacts are polled.
+ *
+ * An incremental encoder has no position. It says add or subtract, and
  * a count is an accumulator somebody added; here that accumulator is
  * private and never leaves, because what an application wants is "the
  * user turned it by two" and not a number to subtract from last time's.
- * A concept over a POSITION would only be needed to abstract over the
+ * A concept over a position would only be needed to abstract over the
  * hardware counters some families have, and is born with the first user
  * that needs one - which will be a motor and not a front panel.
  *
- * WHY SOFTWARE, ON EVERY TARGET. Hardware quadrature decoding exists on
+ * Why software, on every target. Hardware quadrature decoding exists on
  * some of these families and not others (a timer mode on three, a
  * programmable block on one, an application note's worth of glue on the
  * AVR, nothing at all on the SAM C21), and a panel knob does not justify
@@ -23,21 +46,22 @@
  * kernel's own millisecond tick oversamples it twelvefold. Hardware
  * decoding earns its keep at motor speeds and nowhere else.
  *
- * WHAT A MISSED SAMPLE COSTS, which is the whole of what can go wrong.
- * One missed state is DETECTABLE: two states away is not a legal step,
+ * What a missed sample costs, which is the whole of what can go wrong.
+ * One missed state is detectable: two states away is not a legal step,
  * and is the same distance in both directions, so nothing can say which
  * way it went. Two missed states are worse than undetectable - three
  * states forward is one state backward, and the decoder reports a turn
  * in the wrong direction. That is a property of the encoding and not of
  * this implementation; the defence is sampling fast enough, and the
- * measured degradation is in the test suite.
+ * measured degradation is in the host suite (test/test_quadrature, "a
+ * shaft outrunning the poll degrades in a known way").
  *
- * THE BUTTON IS NOT HERE. The shaft of these parts carries a push
+ * The button is not here. The shaft of these parts carries a push
  * switch, and it is a contact like any other: it belongs to
  * InputScanner, which already debounces contacts, and putting it here
  * would be a second place for the same mechanism.
  *
- * COUNTS PER DETENT IS A FACT OF THE PART - four on most, two on some -
+ * Counts per detent is a fact of the part - four on most, two on some -
  * so it is configuration and not a constant, and it is to be measured
  * with the part in hand rather than assumed.
  */
@@ -59,8 +83,9 @@
 namespace brio {
 
 /**
- * The step from one pair of contacts to the next, or NOTHING when at
- * least one state was missed.
+ * The step from one pair of contacts to the next (+1, -1, or 0 for no
+ * change), or nothing when at least one state was missed. Pure and
+ * constexpr; only the low two bits of each argument are read.
  *
  * A state is the two contacts read as (a << 1) | b, and a turn walks
  * them in Gray order - 00, 01, 11, 10 - so that exactly one contact
@@ -95,9 +120,10 @@ struct Turned {
 /// The decoder's own periodic tick.
 struct QuadratureTick {};
 
-/// The knobs, as an NTTP so a wrong value cannot reach run time.
+/// The knobs, as a non-type template parameter (a value given in the
+/// angle brackets) so a wrong value cannot reach run time.
 struct QuadratureConfig {
-    /// Quadrature counts the part gives per detent. A FACT OF THE PART -
+    /// Quadrature counts the part gives per detent. A fact of the part -
     /// four on most, two on some - to be measured, never assumed.
     uint8_t counts_per_detent = 4;
 
@@ -111,11 +137,12 @@ struct QuadratureConfig {
 };
 
 /**
- * The AO: one periodic tick, one reading of the two contacts, one
- * Turned per whole detent. The period is set at init(); start_every()
- * re-paces a running decoder and stop() silences it.
+ * The active object: one periodic tick, one reading of the two contacts,
+ * one Turned per tick on which whole detents accumulated (its count may
+ * be more than one). The period is set at init(); start_every() re-paces
+ * a running decoder and stop() silences it.
  *
- * NO TURN AT STARTUP. The first reading ESTABLISHES where the shaft
+ * No turn at startup. The first reading establishes where the shaft
  * sits without publishing it - a knob left somewhere is a fact about the
  * world and not something the user just did.
  */
@@ -140,12 +167,16 @@ public:
     static inline EventQueue<Event, 2, P> queue;
 
     /**
-     * Start decoding. The shaft's position is unknown until the first
-     * tick reads it.
+     * Start decoding: every count and counter back to zero, any pace in
+     * force disarmed, and the new one armed when `period_ticks` is not
+     * zero. Main context. The shaft's position is unknown until the
+     * first tick reads it.
      *
-     * The period is DEFAULTED because the kernel's AO contract calls
-     * init() with no arguments: Tenuto::init_all() leaves the decoder
-     * quiet and the application arms it right after.
+     * The period is defaulted because the kernel's active-object
+     * contract calls init() with no arguments: Tenuto::init_all() leaves
+     * the decoder quiet and the application arms it right after. A pace
+     * armed before init_all() is undone by it: this init() disarms
+     * first, and Tenuto::run() calls init_all() before its first event.
      */
     static void init(uint32_t period_ticks = 0) {
         state_ = 0;
@@ -163,6 +194,8 @@ public:
 
     static void dispatch(const Event& e) { Base::dispatch(e); }
 
+    /// Re-pace a running decoder, stop it (its counts are kept), and
+    /// whether a pace is armed. Main context only, like every TimeEvent.
     static void start_every(uint32_t period_ticks) {
         tick_.arm_every(period_ticks);
     }
@@ -172,12 +205,13 @@ public:
     /// Has the shaft's position been read at all yet?
     static bool settled() { return settled_; }
 
-    /// Readings that said a state had been missed. Saturating. THE
-    /// ACCOUNTING IS THE API: a decoder that cannot keep up cannot be
+    /// Readings that said a state had been missed. Saturating. The
+    /// accounting is the API: a decoder that cannot keep up cannot be
     /// made correct by cleverness, so it says how often it could not.
     static uint16_t lost() { return lost_; }
 
-    /// Detents published since init(). Saturating.
+    /// Turned events published since init() (one per tick that
+    /// published, whatever its count). Saturating.
     static uint16_t detents() { return detents_; }
 
 private:

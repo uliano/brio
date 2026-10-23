@@ -1,13 +1,34 @@
 /*
  * otp.hpp
  *
- * THE ONE-TIME PROGRAMMABLE ARRAY, READ SIDE ONLY (datasheet chapter 13,
+ * The one-time programmable array, read side only (datasheet chapter 13,
  * with 4.5 and 10.8): 4096 rows of 24 bits, of which the first rows are
  * what the factory wrote about this die and the rest is what an owner
- * has put there. A block the RP2040 never had.
+ * has put there. A block the RP2040 never had. A program reads here
+ * what the chip says about itself - its identity, its calibrations, its
+ * critical and boot flags, which architecture each core runs - through
+ * `Otp`, a monostate (a type with no objects, its functions all static,
+ * because the block exists once). The smallest use:
  *
- * THIS FILE HAS NO WRITE PATH, AND THAT IS A DECISION AND NOT AN
- * OVERSIGHT. Every bit of this array goes from zero to one exactly once
+ *     if (auto row = brio::Otp::read(brio::OtpRowId::num_gpios)) {
+ *         if (row->ecc != brio::OtpEcc::uncorrectable) { use(row->data); }
+ *     }
+ *
+ * Who calls what. The block has no init: its power-up state machine ran
+ * before the first instruction of this image (13.3.4). Every verb is a
+ * read of one or a few registers or rows, bar clear_interrupts(), one
+ * store of INTR's write-to-clear flags; none waits or masks, and none
+ * keeps state between calls, so any context may call them. read() and the
+ * verbs over it check the page's lock before they touch the array and
+ * answer an empty optional instead of a fault; the guarded windows
+ * (ecc_guarded(), raw_guarded()) fault on a refused read, and their
+ * caller asks readable() first. Every data read needs USR.DCTRL standing
+ * (data_window_enabled()) and clk_ref at or under 25 MHz (below). The
+ * constexpr functions (otp_ecc_decode() and its helpers, the votes) are
+ * plain arithmetic, usable at compile time.
+ *
+ * This file has no write path, and that is a decision and not an
+ * oversight. Every bit of this array goes from zero to one exactly once
  * and never back. Among those bits are CRIT1's SECURE_BOOT_ENABLE,
  * DEBUG_DISABLE and SECURE_DEBUG_DISABLE and CRIT0's two architecture
  * disables (13.4) - each of which, once set, permanently removes a
@@ -16,50 +37,50 @@
  * driver that can brick the board it is being developed on, with no way
  * back and no second try. So: no SBPI bridge, no bootrom `otp_access`
  * (its write flag is not a parameter of anything here because the call
- * is not here at all), and NO SOFT LOCK either - SW_LOCKn is read and
+ * is not here at all), and no soft lock either - SW_LOCKn is read and
  * decoded, never written, because a lock only ever advances and the one
  * that costs nothing to set costs a reset to undo. The programming side
  * of chapter 13 belongs to whatever tool provisions a device, and that
  * tool is not a brio program.
  *
- * THE FOUR READ WINDOWS (13.1). The block's control registers live at
- * OTP_BASE; the DATA lives in a second 64 kB region above them, split
+ * The four read windows (13.1). The block's control registers live at
+ * OTP_BASE; the data lives in a second 64 kB region above them, split
  * into four aliases by two address bits:
  *
  *   0x40130000  ECC          a 16-bit datum per row, error-corrected in
- *                            hardware, read as a HALFWORD at 2 x row
+ *                            hardware, read as a halfword at 2 x row
  *   0x40134000  raw          the row's 24 bits as a word at 4 x row, ECC
  *                            and bit-repair bypassed
  *   0x40138000  ECC guarded  the same data, plus hardware consistency
- *   0x4013c000  raw guarded  checks - and a BUS FAULT instead of a
+ *   0x4013c000  raw guarded  checks - and a bus fault instead of a
  *                            pattern of ones where a read is refused
  *
- * An UNGUARDED read that the page locks refuse returns all-ones and no
+ * An unguarded read that the page locks refuse returns all-ones and no
  * fault, which is indistinguishable from a row that genuinely reads
- * all-ones; a GUARDED read faults instead, which is safer and is what
+ * all-ones; a guarded read faults instead, which is safer and is what
  * the bootrom uses for boot flags, but a fault is not a value a function
  * can return. So this file offers both, and offers `read()` above them:
- * it asks the page's lock FIRST and only then touches the array, so a
+ * it asks the page's lock first and only then touches the array, so a
  * caller gets an answer or an empty optional and never a fault.
  *
- * ECC, DECODED IN SOFTWARE (13.6). An ECC row carries 16 bits of data,
+ * ECC, decoded in software (13.6). An ECC row carries 16 bits of data,
  * a 6-bit modified Hamming code and 2 bits of bit-repair-by-polarity.
  * The hardware corrects transparently and tells nobody; the only way for
  * a program to learn that a row needed correcting - or that it is beyond
- * correcting - is to read the RAW row and do the arithmetic. 13.6.2
+ * correcting - is to read the raw row and do the arithmetic. 13.6.2
  * publishes that arithmetic as a six-entry parity table, and
  * `otp_ecc_decode()` below is it: constexpr, so a test can flip a bit in
  * a known codeword and check the verdict with no silicon at all.
  *
- * REDUNDANCY WITHOUT ECC (13.10). A row whose bits are programmed at
+ * Redundancy without ECC (13.10). A row whose bits are programmed at
  * different times cannot carry ECC, because the code covers all sixteen
  * data bits at once. Those rows are replicated instead: three copies
- * with a majority vote for most of them, EIGHT copies with a
- * THREE-OF-EIGHT vote for the critical flags, which is deliberately
- * biased towards reading a flag as SET. `otp_vote3()` and `otp_vote8()`
+ * with a majority vote for most of them, eight copies with a
+ * three-of-eight vote for the critical flags, which is deliberately
+ * biased towards reading a flag as set. `otp_vote3()` and `otp_vote8()`
  * are those two rules.
  *
- * ARCHSEL_STATUS LIVES HERE. Which architecture each core is currently
+ * ARCHSEL_STATUS lives here. Which architecture each core is currently
  * running is an OTP-block register (offset 0x15c), not a power-manager
  * one: the critical flags that force an architecture are read by this
  * block's own power-up state machine, so the register that reports the
@@ -67,12 +88,12 @@
  * program on either half is likely to read every day, and it is why this
  * document's chapter and the platform's overlap.
  *
- * THE CLOCK. The OTP subsystem runs from its own ring oscillator during
+ * The clock. The OTP subsystem runs from its own ring oscillator during
  * the power-up sequence and switches to clk_ref before any software
- * runs; 13.3 states that clk_ref MUST NOT EXCEED 25 MHz while the OTP is
+ * runs; 13.3 states that clk_ref must not exceed 25 MHz while the OTP is
  * accessed. On this stratum's boards clk_ref is the 12 MHz crystal, so
- * the constraint is met by construction; `clk_ref_max_hz` states it so
- * that a program which moves clk_ref can check.
+ * the constraint is met by construction; `otp_clk_ref_max_hz` states it
+ * so that a program which moves clk_ref can check.
  */
 
 #pragma once
@@ -437,13 +458,13 @@ struct OtpArchSel {
 // =============================================================================
 
 /**
- * The array and its control registers, as a monostate resource - READ
- * ONLY, for the reason at the top of this file.
+ * The array and its control registers, as a monostate resource - read
+ * only, for the reason at the top of this file.
  *
  *   auto row = brio::Otp::read(brio::OtpRowId::num_gpios);
  *   if (row && row->ecc == brio::OtpEcc::ok) { use(row->data); }
  *
- *   const uint64_t id = brio::Otp::chip_id();      // this die's name
+ *   const auto id = brio::Otp::chip_id();          // this die's name, optional
  *   const uint32_t crit = brio::Otp::critical();   // what hardware latched
  *
  * The block has NO init: its power-up state machine ran before the first
@@ -494,9 +515,10 @@ struct Otp {
 
     /**
      * A row with its ECC verdict, and no fault whatever the locks say:
-     * the page's lock is read first, the RAW window second, and 13.6's
+     * the page's lock is read first, the raw window second, and 13.6's
      * arithmetic third. Nothing when the row is out of range or the page
-     * is inaccessible to this security domain.
+     * is inaccessible to this security domain. Any context: two bus
+     * loads and the arithmetic, no wait, no mask.
      *
      * It reads the raw window on purpose. The ECC window would give the
      * same sixteen bits with less code, and would say nothing at all

@@ -1,6 +1,65 @@
 # PWM (RP2040)
 
-Documents of record: the RP2040 datasheet (build 3184e62), 4.5 (the
+This document is for a programmer who wants a pulse-width-modulated
+output on an RP2040 - an LED's brightness, a motor's drive, a cheap
+DAC through a filter - or who wants to measure a frequency or a duty on
+a pin, or have a periodic interrupt with no pad. The PWM block has
+eight slices, each a 16-bit counter with two outputs, and every GPIO
+belongs to one slice's output (GPIO n to slice (n / 2) mod 8, A when n
+is even, B when odd). `PwmSlice<n>` is one slice, `Pwm` the block, and
+the tasks are what a program usually names (a task, in brio, is a
+driver layer with state of its own that a program calls):
+`PwmOutput<pin, top>`, an output that is a `PwmChannel`
+(`util/pwm_channel.hpp`'s interface of an output with a duty), a
+complementary pair with a dead time, two counters that turn a B pin
+into a frequency or duty meter, and a periodic tick.
+
+The smallest use, three outputs driving an RGB lamp, from "How to use
+it" below:
+
+```cpp
+using Red = brio::PwmOutput<12, 999>;      // slice 6 A
+using Green = brio::PwmOutput<13, 999>;    // slice 6 B, the same period
+using Blue = brio::PwmOutput<17, 999>;     // slice 0 B
+using Lamp = brio::RgbLamp<Red, Green, Blue>;
+
+(void)brio::Pwm::reset();                  // once: the block out of reset
+Red::setup_hz(clock, 10'000);              // the slice at 10 kHz
+Green::attach();                           // the pad alone
+Blue::setup_hz(clock, 10'000);
+Lamp::show({255, 128, 64});
+```
+
+Line by line: each output names its pin and its slice's TOP, the count
+the period ends at, so a duty runs from 0 to TOP + 1 (1000 here); GPIO
+12 and 13 are the two outputs of slice 6 and GPIO 17 the B output of
+slice 0; `RgbLamp` (`util/rgb_lamp.hpp`) drives three channels as one
+colour; `Pwm::reset()` takes the block out of reset (its answer,
+whether the block came out, discarded here); `setup_hz()` takes the
+clock's tag ([clock.md](clock.md)), solves the slice's divider for 10
+kHz at this TOP, configures the slice from scratch, hands the pad over
+and starts it - false when no divider reaches the rate; `attach()`
+hands GP13 to the slice already running, since the frequency belongs to
+the slice and the duty to the channel; `show()` sets the three duties,
+each taken at the slice's next wrap.
+
+What decides correctness even there. The block is held in reset at
+power-up and no task releases it: `Pwm::reset()` runs once before the
+first `setup`, as the suite's `main()` does. A second `setup` on a
+slice that already drives an output restarts that slice from scratch -
+the counter at zero, the period rewritten - which is why its second
+output takes `attach()`. The divider comes from the rate the clock type
+claims for clk_sys, so the clock's `init()` comes first. A level written
+while the slice runs lands at the next wrap, never mid-period. And the
+wrap interrupt is the program's twice over: its line is enabled by the
+program, `Nvic::enable(Pwm::irq())` on the core that serves it, since
+nothing in the driver enables it, and a wrap interrupt enabled with no
+`isr_pwm_wrap` bound parks the core in the crt's `Default_Handler`
+spin.
+
+## Documents of record
+
+The RP2040 datasheet (build 3184e62), 4.5 (the
 PWM block: 4.5.2.1 the counter and the compare, 4.5.2.2 the 0 % and
 100 % levels, 4.5.2.3 the double buffering, 4.5.2.4 the fractional
 divider, 4.5.2.5 the level and edge input modes, 4.5.2.6 the period,
@@ -12,9 +71,11 @@ block, `PwmSlice<n>` the resource, the tasks `PwmOutput`, `PwmPair`,
 `PwmEdgeCounter`, `PwmLevelCounter`, `PwmPeriodicTick`) over
 `pin.hpp`, `resets.hpp` and `dma_engine.hpp`. The reference suite:
 `test_rp2040_pwm`, wireless and on two wires between the chip's own
-slices - wires the pair desk does not carry
-([../boards/weact-rp2040.md](../boards/weact-rp2040.md)), so the six wire
-letters run by name only, outside z, when they are fitted.
+slices - wires the bench pair (this board wired to the WeAct RP2350B) does not
+carry ([../boards/weact-rp2040.md](../boards/weact-rp2040.md)), so the
+six wire letters run by name only, outside z, when they are fitted. A
+suite's letter is one command key of its console and the group of
+verdicts it runs; `z`, the all-key, runs the set.
 
 ## What the silicon does
 
@@ -35,10 +96,10 @@ count forward or back (an advance needs a divider above one). The
 raw interrupt register is write-one-to-clear; a force register raises
 the line without a raw flag.
 
-THE PINS (table 515): every GPIO is a PWM pin - GPIO n belongs to
+The pins (table 515): every GPIO is a PWM pin - GPIO n belongs to
 slice (n / 2) mod 8, its A output when n is even, its B when odd; GPIO
 16..29 repeat slices 0..6, and one output selected on two GPIOs
-appears on both. ONLY A B PIN IS AN INPUT: in the level and edge modes
+appears on both. Only a B pin is an input: in the level and edge modes
 the B pin stops being an output and CC B is ignored; two B pins of one
 slice selected at once are ORed. A frequency measured by edges needs
 the signal's high and low periods both longer than one clk_sys period
@@ -92,6 +153,7 @@ using Green = brio::PwmOutput<13, 999>;    // slice 6 B, the same period
 using Blue = brio::PwmOutput<17, 999>;     // slice 0 B
 using Lamp = brio::RgbLamp<Red, Green, Blue>;
 
+(void)brio::Pwm::reset();                  // once: the block out of reset
 Red::setup_hz(clock, 10'000);              // the slice at 10 kHz
 Green::attach();                           // the pad alone
 Blue::setup_hz(clock, 10'000);

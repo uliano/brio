@@ -1,18 +1,140 @@
 # RTC and the backup domain (CH32V203 and CH32V303)
 
-A 32-bit counter behind a 20-bit prescaler, the registers that survive
-what the rest of the chip does not, and the one pad the block can drive.
-Documents of record: the CH32F/V20x_V30x_V31x reference manual V2.3
+This document is for a programmer who wants, on a CH32V203 or a
+CH32V303, time that survives a reset - a count of seconds that keeps
+running while the rest of the chip restarts, an alarm that ends a
+low-power mode - or a few sixteen-bit words of storage that a system
+reset does not clear. The silicon is a 32-bit counter behind a 20-bit
+prescaler, the registers that survive what the rest of the chip does
+not, and the one pad the block can drive; it is not a calendar, and the
+date is the program's own arithmetic over the count. The driver is
+three monostates (classes with only static members, never
+instantiated: one block, one set of state): `RtcDomain`, the backup
+domain's write enable, the low-speed crystal and the clock select;
+`Rtc`, the counter with its prescaler, its alarm and its three events;
+and `Bkp`, the backup data registers, the tamper input that wipes them
+and what the TAMPER pad can put out. None of the three claims a pin or
+binds a vector.
+
+The smallest use, the first block of "How to use it" below, a
+one-second counter on the board's crystal from a cold boot:
+
+```cpp
+brio::RtcDomain::unlock(true);
+brio::RtcDomain::lse_enable(true);
+if (!brio::RtcDomain::lse_wait_ready()) {
+    // no crystal on this board: fall back on the LSI, whose rate is nominal
+}
+(void)brio::RtcDomain::open(brio::RtcClockSource::lse);
+(void)brio::Rtc::synchronize();
+(void)brio::Rtc::configure<brio::RtcConfig{.prescaler = brio::rtc_prescaler_for(32768)}>();
+
+const uint32_t seconds = brio::Rtc::count();
+```
+
+Line by line, each a call made in `main()` at boot, before the kernel's
+`run()`: `unlock(true)` opens the PWR block's bus clock and sets
+PWR_CTLR.DBP, the write enable of the backup domain, and answers whether
+the bit reads back set, which this line does not look at.
+`lse_enable(true)` sets LSEON, which starts the 32.768 kHz crystal, and
+`lse_wait_ready()` polls LSERDY for up to `lse_ready_spins` (40 000 000)
+turns and answers false when the crystal never reported stable - no
+crystal fitted, or a bad one; the body of the `if` is where a program
+for such a board turns to the LSI, and as written the excerpt goes on
+regardless. `open(RtcClockSource::lse)` selects the crystal as RTCCLK
+(RTCSEL) and sets RTCEN; it starts no oscillator, which is why the
+crystal was started first. `synchronize()` clears RSF and waits for the
+hardware to set it again, after which the registers the bus reads are
+the counter's own (14 us on the crystal, measured). `configure<...>()`
+writes the prescaler reload inside one configuration window (the write
+discipline under "Two disciplines the chapter imposes" below):
+`rtc_prescaler_for(32768)` is the reload that makes one tick a second
+out of 32768 Hz (0x7FFF), worked out by the compiler. A ratio that is
+not whole answers `rtc_prescaler_none`, a value the twenty-bit field
+cannot hold, and in this compile-time form such a reload does not
+compile. `count()` reads the 32-bit counter, here the seconds since it
+was last set. None of these calls reads the clock task's rate:
+the counter runs on RTCCLK, and every wait is bounded in polling turns,
+not in time.
+
+What decides correctness even there:
+
+- **The door first, at every boot.** With DBP clear the backup domain
+  ignores a write - measured for a backup data register and for
+  RCC_BDCTLR's own bits, LSEON among them ("Bench findings" below) - so
+  an `lse_enable()` made before `unlock()` writes nothing; and every
+  reset leaves DBP clear and both bus clocks shut, while what is behind
+  the door survives. `open()` unlocks on its own, `lse_enable()` does
+  not. The backup data registers want the BKP block's bus clock as
+  well, which is what `Bkp::open()` adds ("Three gates before a single
+  register answers" below).
+- **The clock select is one-way.** RTCSEL survives a system reset, and
+  once a source is selected a different one cannot be until the domain
+  is reset (3.4.9): `open()` then answers false with nothing written to
+  RTCSEL (its unlock has opened PWREN and set DBP by then), and the
+  counter is left on the source that stands, where a prescaler
+  computed for 32768 Hz makes a tick of another length. The line
+  discards that answer; `open(source, true)` is the form that resets
+  the domain first when the source differs, at the cost of the counter,
+  the prescaler, the alarm and the backup data registers.
+- **A count believed only after `synchronize()`.** After a system reset,
+  a power reset or a wake from Stop or Standby the bus reads stale
+  values until an RTCCLK edge has passed (6.2.3). `synchronize()` polls
+  up to `Rtc::sync_spins` (2 000 000) turns and answers false when no
+  edge came in that bound; the line discards it, and `count()` then
+  reads whatever the bus holds.
+- **The write verbs' answers.** `configure()` and every other verb that
+  writes the prescaler, the counter, the alarm or the interrupt enables
+  waits, bounded by the same `sync_spins`, for RTOFF before and after
+  its store, and answers false when RTOFF never came back or the value
+  does not fit its field; none of them checks DBP. Nothing in this
+  driver masks interrupts or arbitrates between two contexts, so the
+  writing verbs belong to one context at a time; `count()` and
+  `divider()` only read, and a handler may call them (the suite's alarm
+  handlers do). A count read faster than it ticks can step back by up
+  to three ticks (measured at 32768 ticks a second, "The carry between
+  two halves" below).
+
+The uses below that take an interrupt - the alarm on the RTC's own
+vector or on EXTI line 17, the tamper input - also need the vector
+bound by the program with `BRIO_CH32_VECTOR(name) { body }`
+(pfic.hpp) under the crt's name for it (the crt is the startup code
+that runs before `main()`): `rtc_handler` for `Irq::rtc`, whose body
+calls `Rtc::isr()`; `rtc_alarm_handler` for `Irq::rtc_alarm`, whose
+body calls `Rtc::alarm_isr()`; `tamper_handler` for `Irq::tamper`,
+whose body calls `Bkp::isr()`; and the line enabled with
+`Pfic::enable()`. A vector left unbound runs the crt's weak
+`default_handler`, a spin loop, with no fault and no message. On the
+CH32V303's images that body does no floating-point work, or binds with
+`BRIO_CH32_VECTOR_FLOAT` ([platform.md](platform.md)).
+
+The rest of this page, in order: the documents of record; what the
+silicon does (what the block is and is not, the three gates, the write
+window and the read synchronization, what is write-only and what is
+read-only, the carry between the counter's two halves, the alarm's two
+vectors, RTCCLK and the lot-keyed division of the HSE, the low-speed
+crystal, the backup registers and what wipes them, the tamper input,
+the pad's three uses); the types and verbs; how to use it, in five
+uses; the bench findings, on the CH32V203C8T6 and, where a finding
+names it, the CH32V303VCT6; and what is not covered.
+
+## Documents of record
+
+The CH32F/V20x_V30x_V31x reference manual V2.3
 (chapter 6 for the counter, chapter 4 for the backup registers and the
 tamper input, 3.2.3 and 3.4.9 for the domain's reset and its clock
 select, 3.3.3 for the low-speed oscillators, 2.4.1 for the write enable -
 chapters 4 and 6 apply to the whole family, and the one per-class note
-in either is the COUNT of backup data registers), the CH32V203 datasheet
+in either is the count of backup data registers), the CH32V203 datasheet
 V2.8 (the pin tables of 3.2 for which packages bond PC13, PC14 and PC15)
 and the CH32V303/305/307/317 datasheet V3.5 (the same tables, which bond
 all three on every CH32V303 package). Driver:
 [brio/ch32vx03/rtc.hpp](../../brio/ch32vx03/rtc.hpp). Reference suite:
-`test_vx03_rtc`.
+`test_vx03_rtc` (a suite's letter is one command key of its console and
+the group of verdicts it runs; `z` is the key that runs every letter but
+`w`, which wipes the domain, `v`, which reboots the board, and `t`,
+which wipes the data registers, each run by name; `k` exists only on a
+device class with forty-two data registers).
 
 ## What the silicon does
 
@@ -20,17 +142,17 @@ all three on every CH32V303 package). Driver:
 
 Per the manual, this is not the calendar RTC of the newer parts. There
 is no BCD register, no date, no sub-second field and no wake-up timer:
-what the silicon keeps is a NUMBER. RTCCLK feeds a 20-bit prescaler
-whose underflow is TR_CLK, one edge of TR_CLK raises the SECOND event
-and increments a 32-bit counter, the counter reaching the ALARM
+what the silicon keeps is a number. RTCCLK feeds a 20-bit prescaler
+whose underflow is TR_CLK, one edge of TR_CLK raises the second event
+and increments a 32-bit counter, the counter reaching the alarm
 register raises the alarm event, and the counter wrapping raises the
 overflow event. The calendar is the program's own arithmetic over that
 number.
 
 The prescaler, its reload value, the counter and the alarm live in the
-BACKUP DOMAIN: per 6.2.2 they "can only be reset by the reset signal in
+backup domain: per 6.2.2 they "can only be reset by the reset signal in
 the backup domain", so they survive a system reset, a Standby wake and,
-with a battery on VBAT, the loss of VDD. The CONTROL registers do not -
+with a battery on VBAT, the loss of VDD. The control registers do not -
 they are reset by a system or power reset - which is why a program that
 comes back finds its count intact and its interrupts disarmed.
 
@@ -55,7 +177,7 @@ more of the four backup-domain registers; clear CNF; wait for RTOFF
 again. Between the last two steps the write is crossing into RTCCLK's
 domain and a second write started there is lost. The chapter's own
 wording is "one or more", which is what lets the prescaler, the counter
-and the alarm be set in ONE crossing rather than three.
+and the alarm be set in one crossing rather than three.
 
 **Reading needs the domains synchronized.** The registers are clocked
 by RTCCLK and read over PB1, so "the RTC register reading through PB1
@@ -66,17 +188,17 @@ hardware to set it, then believe a count. It costs at most one RTCCLK
 period - thirty microseconds on a 32.768 kHz crystal, and measured at
 fourteen.
 
-AND THE FLAGS CROSS THAT BOUNDARY FASTER THAN THE COUNTER DOES.
+And the flags cross that boundary faster than the counter does.
 Measured on the overflow: at the instant OWF stands, the count the bus
 reads is still the one before the wrap, and the wrapped value appears a
-moment later. A handler that wants to know where the counter is READS
+moment later. A handler that wants to know where the counter is reads
 it, and does not infer it from the event.
 
 ### What is write-only, and what is read-only
 
-Per the manual: RTC_PSCRH/L (the prescaler RELOAD) and RTC_ALRMH/L (the
+Per the manual: RTC_PSCRH/L (the prescaler reload) and RTC_ALRMH/L (the
 alarm) are write-only and cannot be read back at all; RTC_DIVH/L (the
-prescaler's live DOWN-counter) is read-only. So a program that wants to
+prescaler's live down-counter) is read-only. So a program that wants to
 know what alarm it armed keeps the number itself - and `divider()`,
 which is the count of RTCCLK edges left before the next tick, is the
 finest time this block offers.
@@ -93,7 +215,7 @@ driver's own care and not a rule of the chapter.
 Measured at 32768 ticks a second, over four million reads that included
 a roll-over of the low half: the retry never fired and no read was ever
 torn - the worst step in either direction is a few ticks and never the
-65536 a half-read counter would give. BUT THE COUNT DOES STEP BACKWARDS
+65536 a half-read counter would give. But the count does step backwards
 by up to three ticks now and then (some 700 reads in four million),
 which is a read crossing back out of the RTC's clock domain and seeing
 a stale copy. A program that reads this counter faster than it ticks
@@ -102,34 +224,34 @@ cannot assume the number only grows.
 ### The alarm reaches two vectors
 
 Per the manual (table 9-2 and 9.4.2's line list): the second, the alarm
-and the overflow share the RTC's own line; the ALARM ALONE also reaches
+and the overflow share the RTC's own line; the alarm alone also reaches
 EXTI line 17 and its own line. The second path is what survives a
 low-power mode, because an EXTI line is asynchronous and needs no
 clock - which is the line the power chapter's timed sleep site arms,
 and its alarm is what ends a Stop there ([sleep.md](sleep.md)). A
-handler on that line clears TWO flags, the EXTI line's and the RTC's
+handler on that line clears two flags, the EXTI line's and the RTC's
 ALRF, because either one left standing re-enters the handler for ever.
 
-MEASURED, AND NEITHER CHAPTER SAYS IT: the line fires with RTC_CTLRH's
-own alarm enable CLEAR. The event leaves the peripheral by itself, so
+Measured, and neither chapter says it: the line fires with RTC_CTLRH's
+own alarm enable clear. The event leaves the peripheral by itself, so
 the wake costs no vector of the RTC's - which is the opposite direction
 of this family's other finding about this fabric, that an EXTI line
-INTO a peripheral reaches it through that peripheral's EVENT enable and
+into a peripheral reaches it through that peripheral's event enable and
 not its interrupt enable.
 
-AND THE ALARM FIRES AS THE COUNTER LEAVES THE VALUE IT WAS ARMED AT,
+And the alarm fires as the counter leaves the value it was armed at,
 on both parts - five ticks after a count set to zero and an alarm at
-four. What the handler then READS is the part's: ALR + 1 on the
+four. What the handler then reads is the part's: ALR + 1 on the
 CH32V203C8T6, ALR itself on the CH32V303VCT6, where the flag reaches
 the bus before the count does - as the overflow flag does on both. A
-program that wants something done AT a count arms the alarm at that
+program that wants something done at a count arms the alarm at that
 count and takes the count it reads in the handler for what the part
 makes it, one further on or not yet.
 
 ### RTCCLK, and the one number that is not knowable from the part number
 
 Per 3.4.9, RTCSEL takes the LSE, the LSI or the HSE divided, and the
-selection is ONE-WAY: "once the RTC clock source has been selected
+selection is one-way: "once the RTC clock source has been selected
 (RTCEN=1), it cannot be changed until the next backup domain is reset."
 RTCEN itself is forced to zero by hardware while RTCSEL is `none`.
 
@@ -138,7 +260,7 @@ whose spread the part table states as a range. The third is not, because
 3.4.9 says the division is 512 on some dies of the CH32V20x_D6 and 128
 on others, keyed on "the penultimate 5th digit of the lot number".
 Neither number is knowable from the part number, so the part table
-states BOTH (`device::rtc_hse_div`), `rtc_hse_divider_known` answers
+states both (`device::rtc_hse_div`), `rtc_hse_divider_known` answers
 whether they agree, and a program that clocks the RTC from the crystal
 on such a die measures which one it has - against the second event,
 which is the only ruler in the room. The CH32V203RB is named among the
@@ -159,15 +281,15 @@ three CH32V203 parts with a port C bring out, and every CH32V303.
 
 ### The backup registers, and what wipes them
 
-Per 4.3's note under table 4-1, the COUNT is the device class's: ten
+Per 4.3's note under table 4-1, the count is the device class's: ten
 16-bit registers on the CH32V20x_D6, forty-two on the CH32V20x_D8 and
 the CH32V30x_D8. They are written and read like any register while the
-three gates are open, and what clears them is a BACKUP DOMAIN reset
-(RCC_BDCTLR's BDRST) or a TAMPER event - explicitly NOT the block's own
+three gates are open, and what clears them is a backup domain reset
+(RCC_BDCTLR's BDRST) or a tamper event - explicitly not the block's own
 RCC reset line, which 4.2.4 says "is not affected by the RCC peripheral
-interface control BKPRST bit". Measured, that line moves NOTHING in this
+interface control BKPRST bit". Measured, that line moves nothing in this
 register file: the calibration and the tamper pair survive it as well,
-so BKPRST resets the backup INTERFACE and everything behind it is the
+so BKPRST resets the backup interface and everything behind it is the
 domain's. While the tamper event flag stands, every write to a data
 register is dropped (4.3.4).
 
@@ -189,22 +311,22 @@ Per 4.2.3 and 4.3.2, PC13 is one pad with four jobs and they exclude one
 another: an ordinary I/O; the tamper input (TPE); RTCCLK divided by 64
 (CCO), which is what a program measures the oscillator against before it
 trims; or a pulse at every alarm or every second event (ASOE with ASOS).
-The calibration register CAL[6:0] SKIPS that many RTCCLK pulses every
+The calibration register CAL[6:0] skips that many RTCCLK pulses every
 2^20, so it can slow the clock by up to 121 ppm and can never speed it
 up. CCO and ASOE are refused by the driver while the tamper input holds
 the pad. PC13 is bonded on three CH32V203 parts of the nine and on all
 four CH32V303.
 
-AND THE BLOCK TAKES THE PAD WHOLE. Measured: with TPE set the pad reads
+And the block takes the pad whole. Measured: with TPE set the pad reads
 zero and neither its own output stage nor its pull reaches the
-detector, so a tamper on this input can only come from OUTSIDE the
+detector, so a tamper on this input can only come from outside the
 chip.
 
 ## Types and verbs
 
 `RtcDomain` is the domain. `pwr_bus_clock()`, `unlock(on)` and
 `unlocked()` are the write enable, with `unlock()` answering the bit's
-READ-BACK so a caller can insist. `reset()` is BDRST, the way back from
+read-back so a caller can insist. `reset()` is BDRST, the way back from
 every one-way bit here and the only one - at the cost of the counter,
 the prescaler, the alarm and the data registers. The crystal is
 `lse_enable`, `lse_enabled`, `lse_ready`, `lse_wait_ready(spins)` and
@@ -220,7 +342,7 @@ the application's. `rtc_hse_clock_hz(hse_hz, which)` and
 `begin_config()` and `end_config()` are the window for a caller that
 wants to write the registers itself. `configure(config)` writes the
 prescaler and, when the config says so, the counter and the alarm, all
-in ONE window; `configure<config>()` is the same with the values
+in one window; `configure<config>()` is the same with the values
 constant, where a prescaler past the twenty-bit field is a compile
 error. `prescaler()`, `count(v)` and `alarm(v)` are the single writes,
 `count()` and `divider()` the two reads. `interrupts(mask)` is the
@@ -229,7 +351,7 @@ three enables, `flags()` / `second()` / `alarmed()` / `overflowed()` /
 the RTC's own vector. `wake_line`, `arm_wake(on)`, `arm_wake_event(on)`
 and `alarm_isr()` are the alarm's second path through EXTI line 17.
 
-`rtc_prescaler_for(rtcclk_hz, tick_hz)` is EXACT OR NOTHING: a ratio
+`rtc_prescaler_for(rtcclk_hz, tick_hz)` is exact or nothing: a ratio
 that is not whole, or one the field cannot hold, answers
 `rtc_prescaler_none` rather than a rounded reload, because a clock that
 is nearly right is a clock that drifts. `rtc_tick_hz()` is the inverse,
@@ -247,7 +369,7 @@ the pad itself is the program's to configure - nothing here claims a
 pin.
 
 `PwrRegs` and `pwr_dbp` are device.hpp's, beside RCC's registers,
-because two chapters reach that block: ONE of its bits is the door to
+because two chapters reach that block: one of its bits is the door to
 the backup domain and the rest - the sleep modes, the PVD, the RAM
 retention - are the power chapter's.
 

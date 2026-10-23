@@ -1,6 +1,79 @@
 # ADC (RP2350)
 
-Documents of record: the RP2350 datasheet (build d126e9e), 12.4 whole
+This document is for a programmer who needs to measure a voltage on an
+RP2350, on either of its two processor architectures: a pad read once
+when the program asks, a block of samples taken at a fixed rate into
+memory by a DMA channel, every input in turn, or the chip's own
+temperature. `Adc` is the one converter, a monostate (a type whose
+functions are all static and that has no object: the chip has one
+converter, so the type is the converter); `AnalogIn<Pin>` hands a pad to
+it; `AdcInput` names the inputs, the temperature sensor among them, by a
+number that depends on the package. The arithmetic from counts to
+millivolts is `util/analog.hpp`'s, and `util/analog_sampler.hpp`'s
+sampler drives this converter for a program that wants its readings as
+events ([design/analog.md](../design/analog.md) is the model).
+
+The smallest use, one reading of a pad, is an excerpt of the block under
+"How to use it" below:
+
+```cpp
+using Vin = brio::AnalogIn<brio::Pin<40>>;         // input 0 in the QFN-80
+brio::Adc::init(clock);                            // the USB PLL at 48 MHz, clk_adc on it
+Vin::claim();
+brio::Adc::select(Vin{});
+if (const auto counts = brio::Adc::read()) {
+    const uint16_t mv = brio::adc_mv(*counts, brio::adc_steps, brio::ref_mv(brio::Ref::avdd_pin));
+}
+```
+
+Line by line: `Vin` names GP40 as an analog input, which in the QFN-80
+is input 0 (a pad that is not an ADC input in the package the image is
+built for does not compile); `Adc::init(clock)` brings the converter up,
+taking the tag object `clock` of the clock task (the `Clock<...>` type
+of [clock.md](clock.md), whose `init()` brings the clock tree to the
+program's rate first thing in `main()`) for the crystal's rate, starting
+the USB PLL at 48 MHz unless it is already locked on that ratio, putting
+clk_adc on it, cycling the block through its reset and waiting, bounded,
+for READY; `Vin::claim()` turns the pad's digital input buffer and
+output driver off and drops its isolation latch, with no pull by
+default; `select()` names the input the next conversion takes; `read()`
+starts one conversion and waits for it, bounded, and answers nothing
+when READY never rose or the conversion failed to converge; `adc_mv`
+turns the count into millivolts against the full scale, which on this
+chip is the converter's own supply pin, ADC_AVDD, whose voltage the
+application states (`ref_mv` takes 3300 mV by default, a 3.3 V rail).
+
+What decides correctness even there. The clock task must have run
+first: `init()` computes the USB PLL from the crystal's rate the clock
+type states (`Clock::xtal_hz`) and starts no oscillator of its own.
+`init()` answers false, and the converter stays down, when the silicon
+is the other package than the one the image was built for (it reads
+SYSINFO.PACKAGE_SEL), when the PLL did not lock, when the block did not
+come out of reset or when READY never rose; the excerpt discards that
+answer, and a program that keeps it knows whether `read()` can work.
+The pad is claimed before it is read, since the claim is what turns its
+digital input off and, by dropping the isolation latch, is what lets a
+pull reach the pad at all. And the full scale is the supply: no
+reference pin exists, so a millivolt figure is only as good as the
+voltage the program states for ADC_AVDD. `init()`, `read()` and the
+other waits spin with a bound and mask nothing; they belong to setup in
+`main()` or to an active object's handler (an active object is a
+component of a brio program with its own event queue, served one event
+at a time by the kernel,
+[docs/learn/introduction.md](../learn/introduction.md)), and `read()`
+holds that handler for one conversion, 96 cycles of clk_adc (2 us at
+48 MHz).
+
+The rest of this page, in order: the documents of record; what the
+silicon does (the converter, the three things that are not the
+RP2040's, the pad and its latch, erratum RP2350-E9, the one stale
+sentence of the chapter); the types and verbs; how to use it, with the
+DMA block, the round-robin and the sampler; the bench findings; and what
+is not covered.
+
+## Documents of record
+
+The RP2350 datasheet (build d126e9e), 12.4 whole
 (12.4 the overview with the two connection diagrams, 12.4.1 what changed
 from the RP2040, 12.4.2 the controller with tables 1118 and 1119 - the
 channel map of each package -, 12.4.3 the SAR converter and its clock,
@@ -17,7 +90,9 @@ is the GPIO one this chapter meets at the pad. `util/analog.hpp` and
 driver: `brio/rp2350/adc.hpp` (`Adc` the resource, `AnalogIn<Pin>`,
 `AdcInput`, `Ref`) over `clock.hpp` (`PllUsb`, `Clocks::adc_select`),
 `pin.hpp` (`analog`), `resets.hpp`, `sysinfo.hpp` and `dma_engine.hpp`.
-The reference suite: `test_rp2350_adc`, wireless.
+The reference suite: `test_rp2350_adc`, wireless (a letter is one
+command key of the suite's console and the group of verdicts it runs;
+letters a to i, and `z`, the key that runs them all).
 
 ## What the silicon does
 
@@ -37,17 +112,17 @@ a sticky overflow flag when a conversion completes into a full FIFO. The
 temperature sensor is a diode's Vbe, 706 mV at 27 C with -1.721 mV per
 degree, its bias switched on apart from the converter and worth about
 40 uA. The block sits behind the subsystem reset controller
-(`ResetBlock::adc`), and `Adc::init()` CYCLES that line rather than
+(`ResetBlock::adc`), and `Adc::init()` cycles that line rather than
 merely releasing it: a processor reset on this chip leaves every
 peripheral as the previous image left it.
 
-THREE THINGS ARE NOT THE RP2040'S, and the first is the one a program
+Three things are not the RP2040's, and the first is the one a program
 feels.
 
 - **The package decides the input map, and with it the sensor's channel
   number.** The QFN-60 brings out four inputs on GPIO 26..29 as AINSEL
   0..3 with the sensor on AINSEL 4 - the RP2040's arrangement exactly -
-  and THE QFN-80 BRINGS OUT EIGHT, on GPIO 40..47 as AINSEL 0..7, with
+  and the QFN-80 brings out eight, on GPIO 40..47 as AINSEL 0..7, with
   the sensor on AINSEL 8 (tables 1118 and 1119). So AINSEL is four bits
   wide here against three, and RROBIN nine against five. The register
   description of AINSEL states that the field "is corrected for the
@@ -58,7 +133,7 @@ feels.
   sensor's code and the round-robin's width are compile-time facts and
   a pad the package has not got is a compile error. Since the die is
   one and an image may be built without stating a package, `Adc::init()`
-  reads SYSINFO.PACKAGE_SEL and REFUSES when the silicon disagrees with
+  reads SYSINFO.PACKAGE_SEL and refuses when the silicon disagrees with
   the build: there is no verb that could work around a sensor sitting
   on a channel number the image does not believe in.
 - **The precision.** Erratum RP2040-E11's differential-nonlinearity
@@ -67,11 +142,10 @@ feels.
   figure was 8.7 bits. The sheet gives two numbers for what is left:
   12.4's own feature list says 9.2 ENOB, table 1438 says 9 minimum and
   9.5 typical, and 12.4.5 says the integral and differential
-  nonlinearity are still to come. Appendix E has no ADC erratum at all
-  - and the
-  erratum numbered E11 in THIS chip's sheet is an XIP one, which is why
-  nothing here cites an erratum by its bare number.
-- **There is no ADC_VREF pin.** The converter's supply IS its full
+  nonlinearity are still to come. Appendix E has no ADC erratum at
+  all - and the erratum numbered E11 in this chip's sheet is an XIP one,
+  which is why nothing here cites an erratum by its bare number.
+- **There is no ADC_VREF pin.** The converter's supply is its full
   scale: ADC_AVDD, on a pin of its own so that it can be filtered
   (6.1.5, 12.4.3.7), with the input voltage range stated as 0 to
   ADC_AVDD (table 1438). So `Ref` has one enumerator, `avdd_pin`, and
@@ -79,31 +153,31 @@ feels.
   an ADC pad is IOVDD's and not ADC_AVDD's: above IOVDD the ESD diodes
   leak, whatever the converter is powered at.
 
-THE PAD, AND WHY AN ANALOG CLAIM IS NOT THE RP2040'S. 12.4 asks for a
+The pad, and why an analog claim is not the RP2040's. 12.4 asks for a
 shared pad's digital functions to be disabled - IE low and OD high in
 the pad control register - and `AnalogIn::claim()` does exactly that.
-What it also does, and must, is DROP THE ISOLATION LATCH: 9.7 says the
-latch holds the output enable, the output level AND THE PULL ENABLES, so
+What it also does, and must, is drop the isolation latch: 9.7 says the
+latch holds the output enable, the output level and the pull enables, so
 a pull written into an isolated pad never reaches it. The analogue tap
 and the digital input are both outside the latch, so the converter would
 read the pad either way - the pull would not be there.
 
-ERRATUM RP2350-E9 MEETS THIS CHAPTER AND LOSES. The leakage that makes a
+Erratum RP2350-E9 meets this chapter and loses. The leakage that makes a
 floating pad sit around 2.2 V on stepping A2 needs the pad's input
-buffer ENABLED; the errata sheet's own words are that "disabling the
+buffer enabled; the errata sheet's own words are that "disabling the
 input enable will reset (remove) the leakage" and that the pull-down
 "functions normally in this state". An ADC input configured as 12.4 asks
 is therefore the one configuration the erratum does not bite, and the
 chapter's instruction and the erratum's workaround are the same write.
 The converse is worth stating too: this converter is the only
-instrument on the chip that can see the leakage as a VOLTAGE rather than
+instrument on the chip that can see the leakage as a voltage rather than
 as a logic level, because the analogue mux taps the bond pad while the
 digital buffer is what leaks - and it does, measured, at the millivolt
 the errata sheet names (below).
 
-**AND THE ERRATUM HAS TO BE ENTERED, WHICH IS WHY EVERY PULLED-DOWN
-READING OF THIS CHAPTER IS SOUND.** Its first condition is that the pad
-voltage ALREADY be in the undefined logic region when the input buffer is
+**And the erratum has to be entered, which is why every pulled-down
+reading of this chapter is sound.** Its first condition is that the pad
+voltage already be in the undefined logic region when the input buffer is
 enabled. Every pad of this chip comes out of reset with its own pull-down
 on and its buffer off, so a pad that is merely released and then given an
 input buffer is at ground when the buffer is enabled: the leak never
@@ -111,7 +185,7 @@ starts, and the pull-down goes on holding it even with the buffer on.
 Measured both ways, and it is the difference between a test that provokes
 the erratum and one that only thinks it has.
 
-ONE SENTENCE OF THE CHAPTER IS STALE. 12.4.3.3 says each RROBIN bit
+One sentence of the chapter is stale. 12.4.3.3 says each RROBIN bit
 "corresponds to one of the five possible values of CS.AINSEL", which is
 the RP2040's count; the register description in 12.4.7 gives RROBIN nine
 bits and AINSEL four, and tables 1118 and 1119 give the channels. The
@@ -125,9 +199,9 @@ driver follows the register description and the tables.
   stratum's reserve and never spelled as a digit: `adc_pad_inputs`,
   `adc_first_pin`, `adc_temperature_code`, `adc_input_count`,
   `adc_round_robin_mask`.
-- `AdcInput` (ain0..ain7 and `temperature`, a TAG whose code is the
+- `AdcInput` (ain0..ain7 and `temperature`, a tag whose code is the
   package's) with `adc_code_of` and `adc_input_bonded` - whose bound is
-  the number of PADS and not of channels, because in the smaller
+  the number of pads and not of channels, because in the smaller
   package `ain4`'s number is the sensor's, and `select()` refuses a pad
   tag rather than hand the caller the diode;
   `Ref::avdd_pin` with `ref_mv(Ref, board_mv)`; `AdcClock` (pll_usb,
@@ -148,7 +222,7 @@ driver follows the register description and the tables.
   ratio already - or the crystal as it is -, clk_adc selected, the
   block cycled through reset, EN, READY waited for), `clock_hz`,
   `enable`, `ready` / `wait_ready`, `temperature_sensor`, `release` (the
-  block HELD in reset: a converter merely disabled with DREQ_EN set keeps
+  block held in reset: a converter merely disabled with DREQ_EN set keeps
   its sample in the FIFO and requests it - the next owner's channel reads
   it, `test_rp2350_dma` letter r); the sampler's surface `select(input)` / `select_input()`,
   `selected()` (AINSEL as it stands, moved by the round-robin),
@@ -165,7 +239,7 @@ driver follows the register description and the tables.
   with `entry_value` / `entry_failed`, `drain()`, `fifo_address()`,
   `dreq`; `interrupt(on)`, `raw_pending` / `pending`, `force`, `isr()`;
   `irq()`, `reset_bit`, `inputs`, `temperature_input`.
-- The two write-one-to-clear flags of this block are cleared by a PLAIN
+- The two write-one-to-clear flags of this block are cleared by a plain
   write-back with the flag's one, never through the atomic set alias:
   a plain write is right whether or not the alias reaches such a bit,
   so nothing in the driver depends on the answer.
@@ -247,8 +321,8 @@ flash-and-run cycles. Every verdict reads the same on the two halves.
   that arrives while the converter is busy is ignored, so a divider
   period at or below the conversion's own 96 clk_adc cycles stretches to
   a multiple of itself. Measured over a fixed window: **DIV 0 gives 508
-  to 512 ksps** (the free run), **DIV 95 - a period of exactly 96 cycles
-  - gives 255 ksps, HALF**, and **DIV 96 - 97 cycles - gives 495 to 500
+  to 512 ksps** (the free run), **DIV 95 - a period of exactly 96
+  cycles - gives 255 ksps, HALF**, and **DIV 96 - 97 cycles - gives 495 to 500
   ksps**. So the period must be strictly GREATER than the conversion, the
   driver's `adc_rate_hz` predicting 250 000 and 494 845 for those two, and
   its `<=` stands as written. DIV 99 gives 480 to 485 against 480 000

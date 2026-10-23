@@ -1,48 +1,73 @@
 /*
  * input_scanner.hpp (util)
  *
- * InputScanner: the active object that watches a fixed list of binary
- * inputs and publishes an event when one of them CHANGES - the button
- * half of what AnalogSampler is for a converter.
+ * InputScanner: the active object (an object with its own event queue,
+ * dispatched by the kernel loop) that watches a fixed list of binary
+ * inputs and publishes an event when one of them changes - the button
+ * half of what AnalogSampler is for a converter. A program wraps each
+ * contact in a type whose read() returns true when it is active, lists
+ * the scanner among its active objects with a poll period, and each
+ * subscriber handles InputEdge{index, active}, debounced. The smallest
+ * use, as the family fixture test/family_avrxt/util_services.cpp
+ * spells it:
  *
- * WHY POLLING AND NOT AN EDGE INTERRUPT. A mechanical contact does not
+ *     struct ButtonA2 { static bool read() { return !brio::Pin<'A', 2>::read(); } };
+ *     struct ButtonA3 { static bool read() { return !brio::Pin<'A', 3>::read(); } };
+ *     using Buttons = brio::InputScanner<P, brio::Subscribers<Watcher>, brio::ScanConfig{},
+ *                                        ButtonA2, ButtonA3>;
+ *
+ *     // once Tenuto's init_all() has run (it calls init() with no
+ *     // period, which leaves the scanner quiet): from an event handler, say
+ *     Buttons::init(brio::ticks_from_ms<P>(4));   // a reading every 4 ms
+ *
+ * Who calls what, and from where: everything runs in the kernel loop,
+ * in main context. The scanner's TimeEvent posts a ScanTick every
+ * period; its dispatch calls each input's read() once (nothing masked,
+ * nothing waited for) and publishes an InputEdge by value for each
+ * believed flip. init(), start_every(), stop() and running_every()
+ * drive that TimeEvent, so they are main context only
+ * (kernel/time_event.hpp), never an interrupt handler; state(),
+ * settled(), all_settled() and edges() are plain reads of what the last
+ * dispatch left. No interrupt is involved: the inputs are polled.
+ *
+ * Why polling and not an edge interrupt. A mechanical contact does not
  * change state: it changes it a few dozen times over a few
  * milliseconds, and every one of those changes is a real edge the pin's
- * interrupt would report. Debouncing in the ISR means counting time in
- * the ISR; debouncing after it means the interrupt bought nothing.
- * Sampling on the kernel's own timebase costs one dispatch per period
- * for the whole list, needs no pin hardware beyond a readable level,
- * and makes the debounce what it actually is - a decision about how
- * long a level must hold before it is believed.
+ * interrupt would report. Debouncing in the interrupt handler means
+ * counting time there; debouncing after it means the interrupt bought
+ * nothing. Sampling on the kernel's own timebase costs one dispatch per
+ * period for the whole list, needs no pin hardware beyond a readable
+ * level, and makes the debounce what it actually is - a decision about
+ * how long a level must hold before it is believed.
  *
- * THE RULE. `stable_samples` consecutive readings of the same level
+ * The rule. `stable_samples` consecutive readings of the same level
  * flip the published state; anything shorter is absorbed. So the worst
  * case a real press takes to be seen is period x stable_samples, and
  * any bounce shorter than that is invisible. The default, three samples,
  * is a working figure for switches on a 1 ms-class tick; an input with
  * a nastier contact or a slower tick sets its own.
  *
- * NO EDGE AT STARTUP. The first `stable_samples` readings ESTABLISH the
+ * No edge at startup. The first `stable_samples` readings establish the
  * state without publishing it: a switch already held down when the
  * program boots is a fact about the world, not something that just
  * happened, and an app that treats every InputEdge as a user action
  * would otherwise act on a press nobody made. Whoever needs the initial
- * levels reads state(i) once settled() is true.
+ * levels reads state(i) once settled(i) (or all_settled()) is true.
  *
- * POLARITY IS THE INPUT'S. `read()` returns TRUE for ACTIVE, and what
+ * Polarity is the input's. `read()` returns true for active, and what
  * makes an input active is the input's own business: a button to ground
- * with a pull-up wraps its pin and inverts there -
- *
- *     struct Button0 { static bool read() { return !brio::Pin<'A', 2>::read(); } };
- *
- * - because that inversion is a fact about the wiring, which belongs
- * where the wiring is described. The scanner has no polarity knob for
- * the same reason it has no pin type: it would be a second place for
- * the same truth.
+ * with a pull-up wraps its pin and inverts there, as ButtonA2 above
+ * does - because that inversion is a fact about the wiring, which
+ * belongs where the wiring is described. The scanner has no polarity
+ * knob for the same reason it has no pin type: it would be a second
+ * place for the same truth. A type without a read() returning bool is
+ * refused where it is listed, at compile time (the negative fixture
+ * test/family_avrxt/neg/scanner_input_without_read.cpp).
  *
  * The mechanism asks for nothing target-specific: a periodic read of a
  * level, which every target has. It has not yet met a real contact -
- * the debounce count is a chosen number, not a measured one.
+ * the debounce count is a chosen number, not a measured one; the host
+ * suite (test/test_input_scanner) drives it with simulated inputs.
  * (docs/design/overview.md, "Authority of util/".)
  */
 
@@ -59,7 +84,7 @@
 
 namespace brio {
 
-/// What the scanner needs of an input: a level, true when ACTIVE.
+/// What the scanner needs of an input: a level, true when active.
 template <typename I>
 concept ScannedInput = requires {
     { I::read() } -> std::same_as<bool>;
@@ -76,7 +101,8 @@ struct InputEdge {
 /// The scanner's own periodic tick.
 struct ScanTick {};
 
-/// The debounce knob, as an NTTP so a wrong value cannot reach run time.
+/// The debounce knob, as a non-type template parameter (a value given
+/// in the angle brackets) so a wrong value cannot reach run time.
 struct ScanConfig {
     /// Consecutive equal readings that make a level believed. One
     /// degenerates to raw sampling: every tick's reading is the state.
@@ -84,9 +110,9 @@ struct ScanConfig {
 };
 
 /**
- * The AO: one periodic tick, one read of each input, one InputEdge per
- * flip. The period is set at init(); start_every() re-paces a running
- * scanner and stop() silences it.
+ * The active object: one periodic tick, one read of each input, one
+ * InputEdge per flip. The period is set at init(); start_every()
+ * re-paces a running scanner and stop() silences it.
  */
 template <Platform P, typename Subs, ScanConfig config = ScanConfig{},
           ScannedInput... Inputs>
@@ -110,13 +136,17 @@ public:
     static inline EventQueue<Event, 2, P> queue;
 
     /**
-     * Start scanning. Every input begins UNSETTLED: the first
-     * stable_samples readings establish its state silently.
+     * Start scanning: edges() back to zero, any pace in force disarmed,
+     * and the new one armed when `period_ticks` is not zero. Main
+     * context. Every input begins unsettled: the first stable_samples
+     * readings establish its state silently.
      *
-     * The period is DEFAULTED because the kernel's AO contract calls
-     * init() with no arguments: Tenuto::init_all() leaves the scanner
-     * quiet and the application arms it right after with init(period)
-     * or start_every(period).
+     * The period is defaulted because the kernel's active-object
+     * contract calls init() with no arguments: Tenuto::init_all() leaves
+     * the scanner quiet and the application arms it right after with
+     * init(period) or start_every(period). A pace armed before
+     * init_all() is undone by it: this init() disarms first, and
+     * Tenuto::run() calls init_all() before its first event.
      */
     static void init(uint32_t period_ticks = 0) {
         for (uint8_t i = 0; i < input_count; ++i) {
@@ -135,6 +165,9 @@ public:
 
     static void dispatch(const Event& e) { Base::dispatch(e); }
 
+    /// Re-pace a running scanner, stop it (the believed states are
+    /// kept), and whether a pace is armed. Main context only, like every
+    /// TimeEvent.
     static void start_every(uint32_t period_ticks) { tick_.arm_every(period_ticks); }
     static void stop() { tick_.disarm(); }
     static bool running_every() { return tick_.armed(); }

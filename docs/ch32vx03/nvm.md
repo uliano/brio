@@ -1,7 +1,121 @@
 # Flash and the option bytes (CH32V203 and CH32V303)
 
-The flash memory, the user option bytes and the electronic signature.
-Documents of record: the CH32F/V20x_V30x_V31x reference manual V2.3
+This document is for a programmer who wants to keep data in the chip's
+own flash across a reset on a CH32V203 or a CH32V303, change a few bytes
+of that flash in place, or read what the option bytes and the electronic
+signature say about the part. It covers the flash memory, the user
+option bytes and the electronic signature. `Flash` is the program and
+erase engine, a monostate (a class with only static members, never
+instantiated: one engine, one set of state) whose verbs erase and
+program the array and read it back; `MainFlash<Clock>` is the storage
+medium over it, the last 4 KB of the zero-wait window behind
+[util/nv_heap.hpp](../../brio/util/nv_heap.hpp)'s `FlashMedia` concept
+(a concept is a compiler-checked set of requirements on a type), with
+`MainFlashPartition` stating where that zone lies; `FlashOptions` and
+`FlashOptionArea` decode the option bytes, read-only, and `DeviceUid`
+and `flash_size_kbytes()` read the signature.
+
+The smallest use, the first block of "How to use it" below, one page of
+the medium's zone rewritten:
+
+```cpp
+using Clk = brio::Clock<brio::ClockSource::pll, 96'000'000>;
+constexpr uint32_t at = brio::MainFlashPartition::storage_base;
+
+uint8_t page[brio::Flash::page_size] = { /* ... */ };
+if (brio::Flash::unlock()) {
+    uint32_t err = brio::Flash::erase_page(Clk{}, at);
+    if (err == 0u) {
+        err = brio::Flash::program_page(Clk{}, at, page);
+    }
+    brio::Flash::lock();
+}
+```
+
+Line by line: `Clk` is a type alias that names a rate, the PLL at
+96 MHz ([clock.md](clock.md)); `Clk{}` is a value of that type, which
+carries nothing but the type, handed to every write verb as its first
+argument so that the verb knows the rate the type claims - at 96 MHz,
+at or below `flash_safe_sysclk_hz` (120 MHz), an erase or a program
+needs nothing of the clock tree. `at` is the floor of the medium's
+zone, the last 4 KB of the zero-wait window, which every linker script
+of this project leaves out of the image; an address here is counted
+from the start of the array, as the image is linked, and the driver
+adds the array's 0x0800 0000 itself. `page` is the 256 bytes to write,
+one page, the fast method's grain. `unlock()` opens the two locks the
+fast verbs need, each with its key pair, and answers false when either
+stays shut. `erase_page()` erases the page and `program_page()` writes
+the 256 bytes into it, each answering a mask that is zero on success
+("Types and verbs" below); the caller's `page` is only read, during the
+call. `lock()` closes both locks again. The block runs in `main()`,
+after the clock task's `init()`, or from an active object's handler (an
+active object is a component of a brio program with its own event
+queue, served one event at a time by the kernel,
+[docs/learn/introduction.md](../learn/introduction.md)).
+
+What decides correctness even there:
+
+- **The clock type is the program's clock.** A verb checks the rate the
+  type it is handed claims (`Clock::hz` for a static clock, the rate a
+  `DynamicClock` holds at the moment), not the hardware's. Under a
+  static type above 120 MHz the call does not compile
+  (`Clock::flash_needs_halving`), so a program whose clock task is a
+  static 144 MHz type cannot hand that type to an erase or a
+  program; under a `DynamicClock` at such a rate the verb answers
+  `refused_rate` with nothing written, and the program steps the rate
+  down first. A `Clk`
+  that is not the clock the program runs - a 96 MHz type handed to an
+  erase while the tree runs at 144 MHz - passes the check, and the
+  erase then runs with the access clock at 72 MHz, over the 60 MHz the
+  datasheet rates, which nothing refuses and which is not measured
+  (derived from the code). A chip still at its 8 MHz HSI reset rate is
+  under every type's claim and inside the rating.
+- **The address is the caller's to choose.** `Flash` refuses an address
+  off its grain and a run outside the window and the tail, and nothing
+  more: an erase of a page the running image occupies is carried out,
+  unless the option bytes write-protect its sector. The zone at
+  `storage_base` is the one band no linker script reaches, and
+  `MainFlash`'s `erase()` and `program()` refuse any address outside
+  it.
+- **Erase before program.** An erased cell reads 0xE339E339 and not all
+  ones, and a page programmed twice with no erase between reports no
+  error and holds neither pattern nor their bitwise AND (measured on
+  both parts, "The erased pattern is not 0xFF" below), so the erase in
+  the block is not optional.
+- **The call blocks its caller.** Every erase and program polls BSY
+  until the operation ends: at 96 MHz a page erase took 9770 us and a
+  page program 1540 us on the CH32V203C8T6, 16862 and 1532 us on the
+  CH32V303VCT6 (measured, "Bench findings" below). The core goes on
+  executing and serving interrupts throughout, but an active object
+  that erases holds every other active object for that long. The poll
+  is bounded: with BSY still up after `Flash::timeout_polls` reads of
+  the status (four million), the verb answers `flash_bsy`.
+- **One context at a time.** Nothing here masks interrupts and nothing
+  guards the engine: the verbs are read-modify-writes of FLASH_CTLR and
+  sequences of several stores, so a program calls them from one context
+  at a time (derived from the code, which takes no lock).
+- **The flash vector, where the interrupt is armed.**
+  `interrupts(on_end, on_error)` arms EOPIE and ERRIE; a program that
+  also enables the line binds the vector, `flash_handler` in the crt's
+  table (the crt is the startup code that runs before `main()`), to
+  `Flash::isr()` with `BRIO_CH32_VECTOR(name) { body }` or one of its
+  two forms ([platform.md](platform.md)); left unbound, the first
+  interrupt runs the crt's weak `default_handler`, a spin loop, with no
+  fault and no message. The smallest use arms nothing, and the
+  interrupt raised by a real operation is not bench-verified ("Not
+  covered yet").
+
+The rest of this page, in order: the documents of record; what the
+silicon does (the array and its four erase grains, the window and the
+tail, the split and the signature's number, the erased pattern, the rate
+as part of the contract, the three locks, the status register, the
+enhanced read mode, the option bytes, the signature, what an operation
+costs); the types and verbs; how to use it, in five uses; the storage
+medium; the bench findings, on both parts; and what is not covered.
+
+## Documents of record
+
+The CH32F/V20x_V30x_V31x reference manual V2.3
 (chapter 32 for the array, the engine, the two programming methods, the
 four erase grains and the option bytes; chapter 31 for the signature -
 both chapters apply to the whole family, and the one per-part note in
@@ -15,24 +129,28 @@ and its note 1 for the same, tables 4-19 and 4-20 for the rest, table
 Drivers:
 [brio/ch32vx03/nvm.hpp](../../brio/ch32vx03/nvm.hpp) (the engine) and
 [brio/ch32vx03/nvm_flash.hpp](../../brio/ch32vx03/nvm_flash.hpp) (the
-storage medium over it). Reference suite: `test_vx03_nvm`.
+storage medium over it). Reference suite: `test_vx03_nvm` (a suite's
+letter is one command key of its console and the group of verdicts it
+runs; `z` is the key that runs every letter but the nine run by name,
+`w`, `v`, `q`, `u`, `x`, `y`, `t`, `s` and `r`, which erase the array,
+reboot the board or read the tail outside the rating).
 
 ## What the silicon does
 
 ### The array, and the four grains
 
-Per the manual, the main memory is a run of 256-byte PAGES starting at
+Per the manual, the main memory is a run of 256-byte pages starting at
 0x0800 0000, which the core also reads through the alias at zero it
 boots from; above it the information block holds the 28 KB system boot
-loader and the 128-byte option byte area at 0x1FFF F800. WRITE
-PROTECTION is granted in 4 KB units - sixteen pages - and that unit is
+loader and the 128-byte option byte area at 0x1FFF F800. Write
+protection is granted in 4 KB units - sixteen pages - and that unit is
 also the standard erase grain.
 
 Chapter 32 offers two ways to write and four to erase:
 
 | verb | grain | how |
 |---|---|---|
-| standard program | 2 bytes | PG set, then a HALF-WORD store at an even address; the store IS the operation |
+| standard program | 2 bytes | PG set, then a half-word store at an even address; the store is the operation |
 | fast program | 256 bytes | FTPG set, 64 words stored with WRBSY watched between them, then PGSTRT |
 | fast page erase | 256 bytes | FTER, the address, STRT |
 | standard erase | 4096 bytes | PER, the address, STRT |
@@ -42,26 +160,27 @@ Chapter 32 offers two ways to write and four to erase:
 Per the manual, a store of any width other than a half-word behind PG
 "will generate a bus error" (32.5.3), and "fast programming related
 functions can only be placed in the zero-wait area FLASH" (32.2.1) -
-which, on an array that is a window AND a tail, is the section below.
+which, on an array that is a window and a tail, is the section below.
 
 ### The window and the tail
 
-Per both datasheets, a part's "flash bytes" count its ZERO-WAIT run
+Per both datasheets, a part's "flash bytes" count its zero-wait run
 area and the die carries more code flash above it. The CH32V203's note
 1 to table 2-1: "flash bytes represent zero-wait run area R0WAIT. For
 the V203 series, non-zero-wait area is (224K-R0WAIT)" - every one of its
 nine parts. The CH32V303's note 1 to table 2-1-1: "the product of 256K
 FLASH+64K SRAM supports the non-zero waiting area of (480K-R0WAIT)
 bytes" - the CH32V303RC and VC, and not the CB and RB, whose window is
-the whole of what a program may write. So the part table states three
-numbers and the driver reads them: `window_bytes` (32, 64, 128 or 256
-KB), `tail_bytes` above it (192, 160, 96 or 224 KB, or none) and
+the whole of what a program may write. So the part table
+(`brio/ch32vx03/parts/`, the per-part facts `device::` exposes) states
+three numbers and the driver reads them: `window_bytes` (32, 64, 128 or
+256 KB), `tail_bytes` above it (192, 160, 96 or 224 KB, or none) and
 `array_bytes`, the die's code flash (224 KB on the CH32V203, 480 on the
 CH32V303). Every address is counted from the start of the array, so the
 tail runs from `tail_base` - where the window ends - to `tail_end`.
 
-The WINDOW is where every linker script of this project places the
-image, and what the core executes from at full speed; the TAIL is
+The window is where every linker script of this project places the
+image, and what the core executes from at full speed; the tail is
 nobody's by default - no script places a byte there. The window is read
 through the alias at zero the image runs at; the tail through the
 array's own address, 0x0800 0000 above the offset, because the memory
@@ -70,10 +189,10 @@ waiting areas" - and says of the alias only that it follows the BOOT
 pins. The CH32V303 datasheet says what the window is in a note: its
 table 4-18 counts, in the 8.9 ms a wake from Standby takes with 256 KB
 as its example, a "code load time" that "is calculated based on the
-current zero-wait area capacity". So the zero-wait area is a LOAD,
+current zero-wait area capacity". So the zero-wait area is a load,
 which the measurements below fit.
 
-WHAT THE TAIL COSTS is the non-zero wait. Measured on the CH32V303VC, a
+What the tail costs is the non-zero wait. Measured on the CH32V303VC, a
 kilobyte of words read with interrupts masked: **5 core cycles a word
 out of the window, at the alias and at the array's own address alike,
 against 20 out of the tail at 96 MHz** - and at 48 MHz, 20 with SCKMOD
@@ -87,25 +206,25 @@ ten; the window's 5 is the same on both. Neither datasheet states the
 tail's access time, so the difference is the dies' and not a number this
 driver derives.
 
-THE TAIL TAKES BOTH METHODS. 32.2.1's note - "fast programming related
+The tail takes both methods. 32.2.1's note - "fast programming related
 functions can only be placed in the zero-wait area FLASH", which V2.5 of
 the manual words as "FLASH erase related functions" - could be read as
-a statement about the TARGET those operations write. Measured on the
+a statement about the target those operations write. Measured on the
 CH32V303VC and the CH32V203C8, it is not: a fast page program into the tail's last page
 landed there byte for byte, a fast page erase erased it, and a 32 KB
 erase took the tail's last block whole, each ending with BSY down, EOP
-up and no error. So the note is about where the CODE running them sits,
+up and no error. So the note is about where the code running them sits,
 which an image linked into the window satisfies by construction, and
 every write verb takes a tail address as it takes a window one.
 
-A TAIL READ HAS THE RATE CONTRACT TOO. 32.1's note 2 lists "the
+A tail read has the rate contract too. 32.1's note 2 lists "the
 non-zero-wait area FLASH" among the flash operations that want HCLK
 halved above 120 MHz, and the tail is read out of the array at the
 access clock SCKMOD sets - 72 MHz at 144, over the chapter's 60. The
 window is not: every image here executes out of it at 144 MHz with
 SCKMOD at its reset value, which is also WCH's own configuration. So the
 tail's read, `read_tail()`, takes the clock as the write verbs do and
-refuses the same rates the same two ways. The refusal is the RATING's:
+refuses the same rates the same two ways. The refusal is the rating's:
 on the CH32V303VC and the CH32V203C8 alike a page of the tail read by
 hand at 144 MHz came back exact three times over, which is what two
 dies did outside the rating and not a promise about any other.
@@ -114,7 +233,10 @@ dies did outside the rating and not a promise about any other.
 
 Per the manual (32.4.6, table 32-4), USER[7:5] moves the line between
 the window and the SRAM - on the parts its two tables name, and on no
-other:
+other (the CH32V303RC and VC, and the CH32V203RB, the one CH32V203 of
+the reference manual's CH32V20x_D8 device class, a class being the
+manual's division of the families it covers by flash size, to which it
+keys many of its register descriptions):
 
 | USER[7:5] | the CH32V303RC and VC (note 1) | the CH32V203RB (CH32V20x_D8) |
 |---|---|---|
@@ -127,21 +249,21 @@ other:
 The part table states the factory's combination - 256 + 64 on the
 CH32V303RC and VC, 128 + 64 on the CH32V203RB - and so does each linker
 script; `device::flash_split_table` says which table a part reads, and
-`none` on the other ten. THE DRIVER DECODES THE FIELD AND WRITES NONE,
+`none` on the other ten. The driver decodes the field and writes none,
 like every option byte, and `FlashOptions::split_matches_part()` is the
 check a program can make at boot: a split that is not the part table's
 comes with a linker script that is not the part's either.
 
-WHERE FLASH_OBR CARRIES IT: 32.4.6's bit column prints the field at
+Where FLASH_OBR carries it: 32.4.6's bit column prints the field at
 [9:8] beside codes three bits wide. The register itself says otherwise -
-it carries the loaded USER byte WHOLE at [9:2], so the split is [9:7]:
+it carries the loaded USER byte whole at [9:2], so the split is [9:7]:
 measured, FLASH_OBR 0x000000FC against a USER byte of 0x3F on a
 CH32V203C8, and 0x0000027C against 0x9F on a CH32V303VC, whose code
 100 decodes - loaded and stored alike - to the 256 KB of window and 64
 KB of SRAM its part table and linker script state.
 
-ESIG_FLACAP IS NOT THE WINDOW IN FORCE. On that CH32V303VC, whose
-window is 256 KB, the register answers 288: the LARGEST window table
+ESIG_FLACAP is not the window in force. On that CH32V303VC, whose
+window is 256 KB, the register answers 288: the largest window table
 32-4 offers the part. On a part with no split it is the window itself
 (64 on the CH32V203C8). Both measured; `flash_window_max_bytes` is that
 number, which is what the signature is compared with.
@@ -157,21 +279,21 @@ for the same verbs, so this is this silicon's and not a habit of the
 vendor's. `Flash::erased_word` is that pattern and `Flash::erased()`
 the run test over it; what it costs a structure built on top is under
 the medium, below. Measured on an erased page of both parts, and again
-where nobody looked for it: the THIRD word of each die's own unique
+where nobody looked for it: the third word of each die's own unique
 identifier reads 0xE339E339 too.
 
-AND THE CELLS DO NOT BEHAVE LIKE BITS THAT ONLY FALL, which is the
+And the cells do not behave like bits that only fall, which is the
 other half of the same fact and the part a structure above the medium
-would get wrong. Measured on both parts: a HALF-WORD CELL OF THE WINDOW
-TAKES PASS AFTER PASS between erases - five in a row, 0xF0F0 then
-0xF000, 0x0F0F, 0xFFFF, 0x0000 and 0xA5A5, each reading back EXACTLY
+would get wrong. Measured on both parts: a half-word cell of the window
+takes pass after pass between erases - five in a row, 0xF0F0 then
+0xF000, 0x0F0F, 0xFFFF, 0x0000 and 0xA5A5, each reading back exactly
 what was written, so bits come back as well as go away - and on the
 CH32V303VC a cell given 0x9659 and then 0x0F0F still read 0x0F0F after
-a system reset. A half-word cell of the TAIL is not dependable: given
+a system reset. A half-word cell of the tail is not dependable: given
 the same two values it read 0x0F0F in nine runs of eleven on the
 CH32V303VC and a value one bit off it in two (0x1F0F; 0x0E0F in a
 twelfth), and 0x0F0F in eleven of eleven on the CH32V203C8. And a
-PAGE PROGRAMMED TWICE with no erase between reports no error and ends
+page programmed twice with no erase between reports no error and ends
 up holding neither pattern and not their bitwise AND either - the same
 0x15E60CED in its first word on both parts, from the same two
 patterns. So what the window's cells do is the window's and not the
@@ -187,18 +309,18 @@ shapes the driver's shape. The datasheet's table 4-17 gives a
 programming frequency of 60 MHz maximum and its note says the figure
 covers "read operation, program operation and erase operation" and that
 "the clock is from HCLK". FLASH_CTLR.SCKMOD chooses whether the flash
-access clock is HCLK or HALF of it, and its reset value is half. So:
+access clock is HCLK or half of it, and its reset value is half. So:
 
 - at or below 120 MHz of HCLK the array is inside its rating with the
   reset value of SCKMOD, and nothing has to be done;
 - SCKMOD may be set - the array read at the whole system clock - only
   at or below 60 MHz;
-- above 120 MHz, 32.1 asks for HCLK to be DIVIDED BY TWO around every
+- above 120 MHz, 32.1 asks for HCLK to be divided by two around every
   erase and program "and then restored after the FLASH operation is
   completed".
 
 Halving HCLK moves every peripheral's divisor with it, which is the
-program's business and not a storage driver's, so the driver REFUSES
+program's business and not a storage driver's, so the driver refuses
 the rate instead of moving the tree: at compile time under a static
 `Clock` (through `Clock::flash_needs_halving`), and with a code at run
 time under a `DynamicClock`, whose rate is a fact of the moment. A
@@ -207,17 +329,17 @@ program that wants to write at 144 MHz steps its own clock down first.
 ### Three locks, and a wrong key that lasts until a reset
 
 Per the manual: the FPEC lock (KEYR, CTLR.LOCK) guards CTLR and every
-standard operation; the FAST lock (MODEKEYR, CTLR.FLOCK) guards the
-fast ones on top of it; the OPTION lock (OBKEYR, CTLR.OBWRE) guards the
+standard operation; the fast lock (MODEKEYR, CTLR.FLOCK) guards the
+fast ones on top of it; the option lock (OBKEYR, CTLR.OBWRE) guards the
 option bytes. Each takes KEY1 = 0x45670123 then KEY2 = 0xCDEF89AB "in
 sequence and continuously", and a wrong sequence "will lock the FPEC
 module and FLASH_CTLR register and generate a bus error until the next
 system reset" (32.5.2). Nothing in the driver writes a wrong key.
 
-Measured, half of that sentence holds and half does not: the lock DOES
+Measured, half of that sentence holds and half does not: the lock does
 hold until the next system reset - a correct pair written afterwards is
-ignored and every write verb answers `refused` - and NO BUS ERROR IS
-RAISED. The store of the wrong key is taken in silence, the core takes
+ignored and every write verb answers `refused` - and no bus error is
+raised. The store of the wrong key is taken in silence, the core takes
 no trap, and the only sign is that the engine will not open. So a
 mistyped key is not a fault a program can catch; it is a door that
 stays shut until the next boot, which is exactly why this driver is the
@@ -227,8 +349,8 @@ only place that writes one.
 
 Per the manual, FLASH_STATR has five defined bits: BSY, WRBSY (the fast
 program's own "the buffer has taken the word"), WRPRTERR, EOP and
-EHMODS. The last two of the writable ones are cleared by writing a ONE.
-There is NO PGERR bit on this family, although CTLR.ERRIE's own
+EHMODS. The last two of the writable ones are cleared by writing a one.
+There is no PGERR bit on this family, although CTLR.ERRIE's own
 description names "PGERR/WRPRTERR" - so the only error this engine can
 report is a write into a protected address.
 
@@ -237,13 +359,13 @@ report is a write into a protected address.
 Per the manual (32.3), setting CTLR.EHMOD puts the array in a faster
 read mode reported by STATR.EHMODS; leaving it is EHMOD cleared and
 then RSENACT written one, in that order. Note 1 of that section says
-any erase or program attempted while the mode stands WILL FAIL, and
+any erase or program attempted while the mode stands will fail, and
 note 2 says the mode must be left before a Stop. The driver does not
 enter the mode on its own, and every erase and program verb refuses
 while EHMODS reads back set rather than starting an operation the
 chapter promises will not work.
 
-MEASURED ON BOTH PARTS, THE MODE DOES NOT ENGAGE: EHMOD takes the
+Measured on both parts, the mode does not engage: EHMOD takes the
 write and reads back set, and STATR.EHMODS never follows it, however
 long the verb waits - on the CH32V203C8, whose option bytes have no
 split, and on the CH32V303VC, whose option bytes carry the
@@ -259,7 +381,7 @@ its own inverse, reloaded into FLASH_OBR and FLASH_WPR at every system
 reset: RDPR (0xA5 = the array is readable), USER (IWDGSW, STOPRST,
 STANDYRST, and the memory split above on the parts table 32-4 names),
 Data0 and Data1 (two bytes of the user's own), and WRPR0..3 (one bit
-per 4 KB sector, a ZERO meaning protected; the last bit covers sectors
+per 4 KB sector, a zero meaning protected; the last bit covers sectors
 31 to 127, which on a part whose window is 128 KB or more is the whole
 of its tail).
 
@@ -271,7 +393,7 @@ about them - 32.4.6 gives 0 for "system will be reset when entering
 Stop mode" - so `FlashOptions` states `resets_on_stop` and
 `resets_on_standby`, which are the complements.
 
-THE DRIVER READS THEM AND WRITES NONE. Releasing read protection "will
+The driver reads them and writes none. Releasing read protection "will
 first cause the system to automatically perform a whole chip erasure
 operation on the flash memory" (32.6.4); everything else in the area is
 provisioning, a statement about the next boot rather than about the
@@ -289,9 +411,9 @@ window itself on the CH32V203C8 - measured, 64 KB against the part
 table's 64 KB - and 288 on a CH32V303VC whose window is 256, measured
 too.
 
-THE IDENTIFIER IS SIXTY-FOUR BITS AND NOT NINETY-SIX. Measured on a
+The identifier is sixty-four bits and not ninety-six. Measured on a
 CH32V203C8T6 and a CH32V303VCT6: the first two words carry the
-factory's number and the THIRD reads 0xE339E339, the erased pattern of
+factory's number and the third reads 0xE339E339, the erased pattern of
 this array - a word nobody programmed. A board is known by the pair.
 
 ### What an operation costs
@@ -303,19 +425,19 @@ with the same numbers: a 256-byte page program 2 ms typical, a
 typical, and data retention at 20 years. Measured at 96 MHz against a
 timer counting microseconds on the peripheral bus, on the CH32V203C8:
 **a 256-byte page erase 9.8 ms, a fast page program 1.5 ms, and a
-standard half-word program 2.6 ms**. On the CH32V303VC EVERY ERASE
-TAKES THE SAME 16.85 ms WHATEVER ITS GRAIN - a 256-byte page of the
+standard half-word program 2.6 ms**. On the CH32V303VC every erase
+takes the same 16.85 ms whatever its grain - a 256-byte page of the
 window, a 4 KB sector of the tail and a 32 KB block of the tail alike,
 the V303 datasheet's 16 ms typical - with a fast page program 1.5 ms in
 the window and in the tail and a standard half-word 2.1 ms in both. So
-on both parts the two-byte write of the standard method costs MORE than
+on both parts the two-byte write of the standard method costs more than
 the fast method spends on a whole page, which is what makes the page
 the grain a medium wants.
 
-A WRITE IS A WAIT AND NOT A STALL, which is where this array differs
+A write is a wait and not a stall, which is where this array differs
 from what the other families here would predict. The core executes from
 the window, and yet it goes on executing while the engine works: across
-the erase the kernel's millisecond tick - which counts HANDLER RUNS, so
+the erase the kernel's millisecond tick - which counts handler runs, so
 it can only advance if the core could fetch the handler - advanced by
 what the timer measured, nine or ten milliseconds on the CH32V203C8 and
 seventeen on the CH32V303VC, for a page of the window and a sector of
@@ -338,10 +460,10 @@ can pin an address it knows when it is built. The locks are `unlock()`
 FPEC's alone, for a program that only uses the half-word and 4 KB
 verbs), `lock()`, and the three readers `locked()` / `fast_locked()` /
 `options_locked()`.
-WHICH lock a verb needs is 32.4.4's own bit-by-bit statement and the
+Which lock a verb needs is 32.4.4's own bit-by-bit statement and the
 driver enforces it: PG, PER, MER and STRT are "a normal unlock", while
 FTPG, FTER, BER32, SCKMOD and EHMOD are "a normal unlock + quick
-unlock". The unlock WINDOW is the caller's: no verb opens a lock behind
+unlock". The unlock window is the caller's: no verb opens a lock behind
 its caller's back, so a medium writing several pages pays for one
 window.
 
@@ -362,29 +484,31 @@ do not offer.
 Reading is `read(addr, span)` and `erased(addr, bytes)` for the window
 and `read_tail(clock, addr, span)` for the tail. Erasing is
 `erase_page`, `erase_sector`, `erase_block32` and `erase_chip`;
-programming is `program_half_word` and `program_page`. Every one of
-them takes the CLOCK as its first argument, for the reason above, and
-reaches the window and the tail alike. Every verb that takes an address
-has a second spelling with the address as a template argument -
+programming is `program_half_word` and `program_page`. Every erase and
+program verb takes the clock as its first argument, for the reason
+above, and reaches the window and the tail alike; `read_tail` takes the
+clock first too, and `read` and `erased` take none. Every erase and
+program verb that takes an address, and `read_tail`, has a second
+spelling with the address as a template argument -
 `erase_sector<a>(clock)` beside `erase_sector(clock, a)`, and
 `read_tail<a>` - where a tail address on a part that has none and a run
-past the array are COMPILE errors instead of `refused`.
+past the array are compile errors instead of `refused`.
 `erase_chip` additionally takes a `ChipErasePolicy`, whose default
 value is `refuse`: the verb exists, has no address, spares nothing, and
 does nothing at all unless the caller spells out
 `erase_the_running_image`.
 
-Every write verb returns a MASK, not a bool. Zero is success; the low
+Every write verb returns a mask, not a bool. Zero is success; the low
 bits are FLASH_STATR's own (`flash_wrprterr`, and `flash_bsy` for an
 operation that never finished); `Flash::refused` is a contract the
-CALLER broke (a misaligned address, a span that is not a page, a run
+caller broke (a misaligned address, a span that is not a page, a run
 past the array, a policy not passed, an operation attempted locked or
-in the enhanced read mode); `Flash::refused_rate` is a rate the SILICON
+in the enhanced read mode); `Flash::refused_rate` is a rate the silicon
 will not write at - or read the tail at.
 The two refusals are bits no status flag uses, so a refusal is never
 mistaken for a flash error.
 
-`FlashOptions` decodes what the hardware LOADED, with `sector_protected`
+`FlashOptions` decodes what the hardware loaded, with `sector_protected`
 and `address_protected` over the write protection, `split_code` and
 `split()` over USER[7:5] and `split_matches_part()`; `FlashOptionArea`
 reads the eight bytes as they stand in flash with `consistent()` for
@@ -470,7 +594,9 @@ bytes, which is exactly one write-protection unit, so the storage can be
 protected or left open without touching a sector the image occupies -
 and the window and not the tail, although both of the engine's methods
 write the tail: a word of the tail costs four times a word of the
-window to read and carries the rate contract, so a medium its program
+window to read on the CH32V303VC and some seven times on the
+CH32V203C8 (20 and 36 core cycles against 5 at 96 MHz, "The window and
+the tail" above) and carries the rate contract, so a medium its program
 reads is better off where the image is. Every linker script of
 this project stops its flash region 4 KB short of the window
 ([ch32vx03/ld/ch32v203c8.ld](../../ch32vx03/ld/ch32v203c8.ld) and its
@@ -685,7 +811,9 @@ Driver gaps, each with its reason:
   VC's linker scripts name the tail as a region nothing is placed in,
   and the CH32V203's do not name it at all, so what lives there is what
   a program writes with the engine's verbs. A word of the tail costs
-  four times a word of the window to read (measured), so a section
+  four times a word of the window to read on the CH32V303VC and some
+  seven times on the CH32V203C8 (20 and 36 core cycles against 5 at
+  96 MHz, measured, "The window and the tail" above), so a section
   placed there is a decision that trades speed for room, born with the
   first program that needs the room.
 

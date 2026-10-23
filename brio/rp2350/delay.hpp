@@ -1,12 +1,24 @@
 /*
  * delay.hpp
  *
- * The microsecond busy-wait of this target: AT LEAST `us`, never early,
- * capped below one kernel tick - the contract every brio target states
- * (docs/design/clock.md), here with ONE implementation for both
- * instruction sets.
+ * The microsecond busy-wait of this target, for the short waits a driver
+ * or a program cannot express as a time event: a chip-select setup, an
+ * analog settle, a protocol gap. At least `us`, never early, capped
+ * below one kernel tick - the contract every brio target states
+ * (docs/design/clock.md), here with one implementation for both
+ * instruction sets. The smallest use (docs/rp2350/clock.md):
  *
- * WHY THE RULER IS THE PLATFORM TIMER AND NOT A CORE COUNTER. The other
+ *     brio::Mtime::start(clock);            // the ruler, once
+ *     (void)brio::delay_us(clock, 20);      // false if the ruler is not running
+ *
+ * Which context may call it: any context allowed to spend the time,
+ * interrupts masked or not; it spins on the ruler for up to `us + 1`
+ * microseconds plus whatever interrupts take meanwhile, masks nothing
+ * and keeps no storage. It answers false, spending no time, on a zero
+ * rate, on a request of a whole kernel tick or more, or when the ruler
+ * is not running.
+ *
+ * Why the ruler is the platform timer and not a core counter. The other
  * Cortex-M families ride SysTick's VAL: it is a cycle counter in all but
  * name, and cortexm/delay.hpp turns microseconds into cycles through the
  * clock's rate. That path exists on this chip's Cortex-M33 half and on
@@ -15,28 +27,28 @@
  * modes under one name, on a target whose whole claim is that one source
  * runs on two architectures. The platform timer of 3.1.8 is the other
  * choice and it is the better one: a 64-bit counter in the SIO, single
- * cycle to read from either architecture, counting the MICROSECOND TICK
+ * cycle to read from either architecture, counting the microsecond tick
  * the generator block of 8.5 divides out of clk_ref (rp2350/mtime.hpp).
  *
- * WHAT THAT BUYS, AND WHAT IT COSTS. It buys a wait that does not depend
+ * What that buys, and what it costs. It buys a wait that does not depend
  * on clk_sys at all: no rate arithmetic, no division anywhere, no table
  * per rate, and a wait that stays honest across a clk_sys switch that
- * happens while it runs. It costs RESOLUTION: the counter steps once a
+ * happens while it runs. It costs resolution: the counter steps once a
  * microsecond, its phase against the call is unknown, so a request of
  * `us` waits for `us + 1` counts. Every wait is therefore up to one
- * microsecond long - always LATE, which is the direction the contract
+ * microsecond long - always late, which is the direction the contract
  * asks for, and it is the price of a ruler that is the same on both
  * halves.
  *
- * THE CAP IS ONE MILLISECOND, one kernel tick at this target's 1000 Hz,
+ * The cap is one millisecond, one kernel tick at this target's 1000 Hz,
  * and it is the design and not a limitation: in a cooperative kernel a
  * dispatch that busy-waits for milliseconds starves every other active
  * object, so a wait of a tick or more is TimeEvent territory
- * (kernel/time_event.hpp) and this file REFUSES it - false, and no time
+ * (kernel/time_event.hpp) and this file refuses it - false, and no time
  * spent - instead of serving it. What remains is what a busy-wait is
  * for: a chip-select setup, an analog settle, a protocol gap.
  *
- * WHAT IT REFUSES BESIDES. A rate of zero (a clock that claims nothing
+ * What it refuses besides. A rate of zero (a clock that claims nothing
  * is not a clock), and a ruler that is not running: `Mtime::start(clock)`
  * is this target's one prerequisite for a wait, called by the program
  * that wants one - and already called for you on the Hazard3 half, where
@@ -79,9 +91,9 @@ struct DelayRate {
 /// from one is refused rather than served wrongly.
 constexpr DelayRate delay_rate(uint32_t hz) { return {hz != 0u}; }
 
-/// Busy-wait AT LEAST `us` microseconds on the platform timer.
+/// Busy-wait at least `us` microseconds on the platform timer.
 ///
-/// True when the time was served; false - AND NO TIME IS SPENT - when
+/// True when the time was served; false - and no time is spent - when
 /// the rate is zero, when the request is one kernel tick (1000 us) or
 /// more, or when the ruler is not running (nothing called
 /// `Mtime::start(clock)` in this program).

@@ -1,27 +1,74 @@
 /*
  * ticker.hpp
  *
- * The kernel timebase of this target, on the QingKe core's own system
- * counter (STK, QingKe V4 manual ch. 5).
+ * The kernel timebase of this target: the 1000 Hz tick the kernel's time
+ * events and a program's millis() run on, counted on the QingKe core's
+ * own system counter (STK, QingKe V4 manual ch. 5), on the CH32V203 and
+ * the CH32V303 alike. A program starts it after the clock and binds its
+ * vector, as docs/ch32vx03/platform.md's "How to use it" writes it:
  *
- * WHY STK AND NOT A TIM. The same reason as on every other family here:
+ *     BRIO_CH32_LEAF_VECTOR(systick_handler) { brio::Ticker::tick(); }
+ *
+ *     int main() {
+ *         SysClock::init();
+ *         brio::Ticker::init(clock);
+ *         brio::enable_interrupts();
+ *     }
+ *
+ * `SysClock` is the program's clock type and `clock` its tag, an object
+ * of that type (ch32vx03/clock.hpp); init() reads the rate from the
+ * tag's type. The program includes "ch32vx03/ticker.hpp" or
+ * platform.hpp, which includes it. The leaf binding is the cheapest of
+ * the three that compile (pfic.hpp's three macros): tick() is
+ * always_inline, so the body calls nothing and touches no f-register,
+ * and on the CH32V303's images (the F extension with the hardware
+ * prologue) BRIO_CH32_LEAF_VECTOR binds it as the attributed handler
+ * with no trampoline - the tick's edge to its handler's first statement
+ * 22 cycles against 24 under BRIO_CH32_VECTOR's trampoline, measured on
+ * the CH32V303VCT6 (pfic.hpp, letter w). On every CH32V203 image, and
+ * with the hardware prologue off, the three macros are one.
+ * BRIO_CH32_VECTOR(systick_handler) compiles too, and on the CH32V303's
+ * images the vector guard reports it as a candidate for the leaf form.
+ *
+ * The clock task first. init() computes the compare from the rate the
+ * clock type claims, not from the hardware, so a ticker started while
+ * the chip still runs on its 8 MHz HSI reset rate ticks at the ratio of
+ * the two rates - eighteen times too slowly for a 144 MHz clock type,
+ * and too fast for a type whose HCLK is below the HSI's (HPRE divides
+ * SYSCLK down that far: eight times too fast at 1 MHz) - derived from
+ * the compare arithmetic, not measured, and nothing refuses it.
+ *
+ * Who calls what: init() is a setup verb, main() after the clock task and
+ * before interrupts are enabled; tick() is the STK vector's body, called
+ * by the program's binding and by nothing else; ticks(), millis() and
+ * secs() are single loads, from any context without a mask; cycles() is
+ * from any context too, and repeats its five reads until they belong to
+ * one instant (util/cycle_count.hpp); now() masks for the two loads it
+ * joins; advance() masks and is a timed sleep site's (ch32vx03/sleep.hpp);
+ * pause() and resume() are the platform's deep idle path's
+ * (ch32vx03/platform.hpp); rebase() is called by a dynamic clock's
+ * set(), first and at the old rate, before the new rate's sequence runs
+ * (ch32vx03/clock.hpp). Nothing here waits.
+ *
+ * Why STK and not a TIM. The same reason as on every other family here:
  * the system counter is core-private, so claiming it costs the
  * application nothing - TIM1..TIM4 and every other block stay free.
  *
- * IT IS THE CH32V00x's COUNTER WITH A WIDER SHAPE. That family's V2C has
- * one 32-bit counter and one 32-bit compare; this core's is SIXTY-FOUR
+ * It is the CH32V00x's counter with a wider shape. That family's V2C has
+ * one 32-bit counter and one 32-bit compare; this core's is sixty-four
  * bits, CNTL/CNTH and CMPLR/CMPHR, and its control register carries two
  * bits the smaller core has not (MODE, the direction, and INIT, which
  * loads the counter). The logic below is the same all the same: count up
  * from zero to the compare, reload there by hardware (STRE), clear the
  * status flag in the handler. That near-identity is the argument for a
- * `qingke/` core stratum one day, and the reason it is NOT taken today:
+ * `qingke/` core stratum one day, and the reason it is not taken today:
  * the register file differs, so the saving would be the comments, and
  * the cortexm/ precedent is that a core stratum is factored with two
  * families in hand and every image byte-identical across the move.
  *
- * Monostate: one counter, one timebase per program, and the ISR body
- * reaches its counters with no indirection. State lives in .bss.
+ * Monostate (a type with only static members, never instantiated): one
+ * counter, one timebase per program, and the ISR body reaches its
+ * counters with no indirection. State lives in .bss.
  *
  * ## Time representations
  *  - ticks():  raw 32-bit tick counter (wraps: 49.7 days @ 1000 Hz)
@@ -42,7 +89,7 @@
  * ## Concurrency
  * tick() runs in the STK handler. The counters are 32-bit and this core
  * loads an aligned word in one uninterruptible access (atomic_width 4),
- * so a single-counter getter needs no mask - but it does need a VOLATILE
+ * so a single-counter getter needs no mask - but it does need a volatile
  * read, or a polling loop over an inlined getter folds to one hoisted
  * load that never sees the handler's store. now() reads two counters
  * that must belong to the same instant, so it masks.
@@ -51,21 +98,15 @@
  * STK is clocked from HCLK, so its compare value is a function of the
  * clock's rate: a program that changes SYSCLK at run time must rebase
  * the ticker, and that is what the ClockUser contract (util/clock.hpp)
- * is for. What the low-power modes do to this counter is not stated here
- * because no sleep site of this stratum exists yet.
- *
- * ## Usage
- * ```cpp
- * #include "ch32vx03/ticker.hpp"
- *
- * BRIO_CH32_VECTOR(systick_handler) { brio::Ticker::tick(); }
- *
- * int main() {
- *     SysClock::init();
- *     brio::Ticker::init(clock);
- *     brio::enable_interrupts();
- * }
- * ```
+ * is for - a dynamic clock that does not list the ticker among its users
+ * is refused where the ticker is initialized with its tag. In the plain
+ * Sleep the kernel's idle hook enters, the counter keeps counting and
+ * its interrupt is the usual wake (ch32vx03/platform.hpp's idle()). A
+ * Stop stops HCLK and the counter with it: the platform's deep idle path
+ * (idle_deep()) pauses this ticker, clears its flag and its pending
+ * line before the sleep and resumes it after, so kernel time stands
+ * still across the Stop, and a timed sleep site (ch32vx03/sleep.hpp)
+ * hands the frozen span back through advance().
  */
 
 #pragma once
@@ -106,7 +147,13 @@ public:
     static constexpr uint16_t ticks_per_second = tps;
 
     /**
-     * Program STK for `tps` and start its interrupt.
+     * Program STK for `tps` and start its interrupt. `clock` is the clock
+     * task's tag (ch32vx03/clock.hpp): the compare is computed from the
+     * rate its type claims, so a ticker started before the clock task
+     * ran, on a chip still at its 8 MHz reset rate, ticks off by the
+     * ratio of the two rates - slow under a faster type, fast under one
+     * whose HCLK is below 8 MHz - and nothing refuses it (the file
+     * header).
      *
      * The counter counts up from zero to the compare and, with STRE set,
      * restarts from zero there - so the compare is hclk/tps - 1 cycles.
@@ -151,9 +198,10 @@ public:
     }
 
     /**
-     * STK interrupt body - call it from the bound vector.
+     * STK interrupt body - call it from the bound vector (the file
+     * header), from nowhere else.
      *
-     * The flag MUST be cleared here (write 0 to CNTIF, QingKe V4 manual
+     * The flag must be cleared here (write 0 to CNTIF, QingKe V4 manual
      * table 5-3): unlike an ARM SysTick exception, entry does not clear
      * it, and a handler that returns with it standing is re-entered for
      * ever.
@@ -215,7 +263,7 @@ public:
     static uint32_t secs() { return read_shared(m_secs); }
 
     /**
-     * Advance kernel time by `n` ticks IN ONE STEP - the resync verb a
+     * Advance kernel time by `n` ticks in one step - the resync verb a
      * timed sleep site calls after a sleep that stopped this counter:
      * the frozen span, and only that, handed back so time events matured
      * during the sleep are seen as due on the next loop pass. Under the

@@ -3,36 +3,47 @@
  *
  * A named region of memory two processes can both reach, owned by one of
  * them. Everything the simulator shares with a viewer goes through this
- * - the framebuffer one way, the panel's inputs the other - so the rules
- * that make it portable are written once here instead of twice.
+ * - the framebuffer one way (host/sim_display.hpp), the panel's inputs
+ * the other (host/sim_panel.hpp) - so the rules that make it portable
+ * are written once here instead of twice. A program rarely names it: the
+ * display and the panel each hold one, built as
  *
- * THE NAME IS THE CONTRACT, NEVER A PATH. Linux exposes these objects
+ *     SharedSegment seg_("/brio-gfx-", name, total_bytes);   // prefix, name, size
+ *     uint8_t* bytes = seg_.base();                           // mapped, zeroed
+ *
+ * Contexts: one host process creates the segment and owns it for its
+ * whole life; the constructor maps it and zeroes it, the destructor
+ * unmaps and unlinks it. Nothing here synchronizes the two processes -
+ * each layout says who writes which field (docs/host/simulator.md, "One
+ * mechanism, both directions") - and nothing waits.
+ *
+ * The name is the contract, never a path. Linux exposes these objects
  * under /dev/shm and macOS exposes them nowhere in the filesystem, so a
  * viewer attaches with shm_open by the same name and the path is a
  * debugging convenience on one platform only. Two more rules come from
- * there: a name is SHORT, because macOS caps the whole of it at 31
- * characters; and a segment is SIZED ONCE at creation, because a second
+ * there: a name is short, because macOS caps the whole of it at 31
+ * characters; and a segment is sized once at creation, because a second
  * ftruncate fails there - so a change of geometry is a new segment and
  * never a resize.
  *
- * THE OWNER IS THE PROGRAM, NOT THE VIEWER, in both directions. A viewer
+ * The owner is the program, not the viewer, in both directions. A viewer
  * comes and goes; the program does not, and a segment that exists as
  * long as the program does removes every question about what happens
  * when no one is watching. The input segment then simply reads as
  * "nothing pressed" until a viewer writes into it.
  *
- * THE BOOT ID IS LOAD-BEARING. After a segment is unlinked and remade
+ * The boot id is load-bearing. After a segment is unlinked and remade
  * under the same name, a viewer's old mapping still points at the old
  * object, which stays alive as long as it is referenced: a counter
- * INSIDE that object could never tell it anything had changed. So every
+ * inside that object could never tell it anything had changed. So every
  * segment carries an id drawn afresh at creation, and a viewer that
  * re-opens by name and finds a different one knows to remap.
  *
- * THE BYTE COUNT IS IN THE HEADER, NOT IN THE OBJECT. What fstat reports
+ * The byte count is in the header, not in the object. What fstat reports
  * for a shared object is exact on Linux and rounded up to a page on
  * macOS (16 KB on Apple Silicon), so a viewer that sized itself from the
  * object would read a different count on each. A segment's size is
- * therefore known from its LAYOUT - the framebuffer's from its header,
+ * therefore known from its layout - the framebuffer's from its header,
  * the panel's a constant - the object's size only bounds what a viewer
  * may map, and a header claiming more than the object holds is another
  * layout's, not ours to read.

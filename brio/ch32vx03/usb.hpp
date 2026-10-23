@@ -1,34 +1,78 @@
 /*
  * usb.hpp
  *
- * The CH32V203's USB DEVICE controller (RM ch. 21), realizing
- * util/usb's UsbController at the packet.
+ * The CH32V203's USB device controller (RM ch. 21) as the endpoint
+ * controller of brio's USB stack: `Usbd<pma_bytes>` realizes util/usb's
+ * UsbController at the packet, so util/usb/device.hpp's UsbDevice
+ * answers a host's enumeration over it and util/usb/cdc.hpp's UsbCdcAcm
+ * makes the chip a serial port on its own connector - a console or a
+ * byte transport a Linux host binds to its own cdc-acm driver. `Usbd` is
+ * a monostate (a class with only static members, never instantiated:
+ * one block, one set of state); nothing above the packet is this
+ * file's. The CH32V303 has no such controller: its one full-speed
+ * controller is ch32vx03/usbfs.hpp's.
  *
- * WHAT THIS BLOCK IS. Register for register and bit for bit, it is the
+ * The smallest use, as docs/ch32vx03/usb.md's "How to use it" writes it
+ * (with the descriptors, the clock task and print() beside it there):
+ *
+ *     using Usb = brio::Usbd<>;                                  // 384 bytes, CAN-safe
+ *     using Port = brio::UsbCdcAcm<Usb, P>;                      // interface 0, endpoints 1 and 2
+ *     using Device = brio::UsbDevice<Usb, Descriptors, Port>;
+ *     Usb::init(clock);
+ *     Device::start();                                             // the pull-up: the host enumerates from here
+ *     BRIO_CH32_VECTOR(usb_lp_can1_rx0_handler) { Device::isr(); }
+ *
+ * Who calls what, and from where. init() and release() are setup verbs:
+ * main(), after the clock task's init(); init() waits for nothing (the
+ * analogue's start-up between clearing PDWN and clearing FRES is the
+ * time between two stores), and both open or close gates with unguarded
+ * read-modify-writes of RCC registers other drivers' gates share.
+ * connect() is the stack's (UsbDevice::start() and stop() call it, and
+ * the program calls those in main context): a read-modify-write of
+ * EXTEN_CTR, unguarded - clock.hpp and pwr.hpp's regulator trims write
+ * that register too - and the bus-master count taken or given back
+ * under the platform's guard for a few instructions
+ * (ch32vx03/bus_activity.hpp). The vector body is the stack's,
+ * UsbDevice::isr(), bound by the program to `usb_lp_can1_rx0_handler`
+ * (interrupt 36, shared with CAN1's receive FIFO 0) and called from
+ * nothing else; it drains take_events(), a loop bounded at 32 turns
+ * that masks nothing. The rest of the UsbController contract
+ * (set_address, configure_endpoint, stall, submit_in, submit_out,
+ * out_data, setup) is called by the stack inside that body, or by a
+ * class's program side under the platform's critical section:
+ * util/usb/cdc.hpp's write_byte(), write_bulk(), read_byte() and
+ * consume() arm a packet so, and submit_in() copies up to 64 bytes into
+ * the packet memory with interrupts masked. Storage: submit_in() copies
+ * the caller's span before it returns; out_data() hands out the
+ * driver's own copy of the last packet, valid until the next one on
+ * that endpoint arrives. The readbacks (frame(), address(),
+ * pulled_up(), the budget's two and the two counters) are single loads.
+ *
+ * What this block is. Register for register and bit for bit, it is the
  * USB device peripheral of the STM32F1 and F0 lines: eight endpoint
- * registers whose status fields are TOGGLES, a control and a status
+ * registers whose status fields are toggles, a control and a status
  * register, a device address, and a packet memory the CPU and the
  * engine share, addressed through a table of descriptors the program
  * lays out itself. Nothing here is DWC2 (the STM32F4's core) and
  * nothing here is the RP2040's: this is the third USB device controller
- * shape in this repository, and the first of ITS shape - which is why
+ * shape in this repository, and the first of its shape - which is why
  * it lives in this stratum and not in one of its own. An IP stratum is
- * born at the SECOND family that carries the IP, never at the first.
+ * born at the second family that carries the IP, never at the first.
  *
- * THE PACKET MEMORY IS 512 BYTES SEEN THROUGH A 32-BIT WINDOW. Each
+ * The packet memory is 512 bytes seen through a 32-bit window. Each
  * 16-bit word of it occupies four bytes of the CPU's address space, so
  * the PMA byte offset `o` lives at 0x40006000 + 2*o and nothing wider
  * than a halfword may be stored. Every access here goes through pma().
  *
- * AND IT IS SHARED WITH THE CAN CONTROLLER. 21.2.1: when CAN is used,
- * its filter table takes the TOP 128 bytes and the USB keeps the low
+ * And it is shared with the CAN controller. 21.2.1: when CAN is used,
+ * its filter table takes the top 128 bytes and the USB keeps the low
  * 384. That is not a fact this file can check - CAN is another driver's
- * business - so it is a PARAMETER: `Usbd<>` budgets 384 bytes and
+ * business - so it is a parameter: `Usbd<>` budgets 384 bytes and
  * refuses the endpoint that would not fit, and a program with no CAN
  * can say `Usbd<512>` and get the rest. The budget is spent by
  * configure_endpoint() in order, and a bus reset returns it.
  *
- * THE STATUS FIELDS ARE WRITTEN BY XOR. STAT_RX, STAT_TX, DTOG_RX and
+ * The status fields are written by XOR. STAT_RX, STAT_TX, DTOG_RX and
  * DTOG_TX are "write 1 to INVERT, write 0 to leave" (21.3.6), while
  * CTR_RX and CTR_TX in the same register are "write 0 to clear, write 1
  * to leave". So no field of an endpoint register can be written
@@ -37,12 +81,12 @@
  * write_epr(), set_stat_tx() and set_stat_rx() are for, and it is the
  * single sharpest edge of this peripheral.
  *
- * AND THE PROGRAM MUST NOT SLEEP WHILE IT USES THIS BLOCK. Measured on
+ * And the program must not sleep while it uses this block. Measured on
  * the bench, and the reference manual says the opposite: 2.4's table
  * gives Sleep as "core clock off, no effect on other clocks" and its
  * prose as "the core stops running and all peripherals are still
  * running" - but with the core in WFI or WFE this controller cannot
- * reach its packet memory. An armed bulk endpoint receives NOTHING (the
+ * reach its packet memory. An armed bulk endpoint receives nothing (the
  * host's bytes are lost and the packet-memory overflow counts up, one
  * per attempt), and an enumeration never gets past its first control
  * transfer: the SETUP is taken and answered, the host acknowledges the
@@ -59,29 +103,29 @@
  * packet is gone, a NAK'd endpoint still overflows; dividing HCLK
  * works down to 24 MHz, and 12 fails like the sleep - which is why
  * init() refuses a tree below `usbd_min_hclk_hz`.
- * SO THE RULE IS A MECHANISM AND NOT AN INSTRUCTION TO THE
- * PROGRAMMER: an attached controller counts itself as a bus master
- * (ch32vx03/bus_activity.hpp), idle() DOES NOT SLEEP while it is
+ * So the rule is a mechanism and not an instruction to the
+ * programmer: an attached controller counts itself as a bus master
+ * (ch32vx03/bus_activity.hpp), idle() does not sleep while it is
  * attached, and a sleep site refuses to arm over it - so a program
  * with USB may drive the kernel any way it likes, the loop included,
  * and what decides is the silicon's own state. `connect()` is where
  * the count is held and released.
  *
- * AND AN OVERFLOW IS NOT SOMETHING A RECEIVER SURVIVES BY ITSELF. The
- * lost packet leaves its COUNT in the halfword that carries the
- * buffer's SIZE, and raises no completion - so an endpoint left alone
+ * And an overflow is not something a receiver survives by itself. The
+ * lost packet leaves its count in the halfword that carries the
+ * buffer's size, and raises no completion - so an endpoint left alone
  * after one overflow reads as a buffer of zero blocks and loses every
  * packet after it, for ever. take_events() therefore writes that
  * encoding back for every armed receiver whenever the flag stands
  * (restore_rx_buffers): the counter still climbs for as long as the
  * cause lasts, and the port carries bytes again the moment it stops.
  *
- * WHAT IS NOT COVERED YET, each with its reason:
- *  - the DOUBLE BUFFER (EP_KIND on a bulk endpoint) and the
+ * What is not covered yet, each with its reason:
+ *  - the double buffer (EP_KIND on a bulk endpoint) and the
  *    isochronous endpoints: a CDC console needs neither, and the
  *    double buffer changes the meaning of DTOG on every access - it is
  *    written when a program needs the bandwidth and can measure it.
- *  - SUSPEND's low-power half: the handshake of 21.2.4 is kept as far
+ *  - suspend's low-power half: the handshake of 21.2.4 is kept as far
  *    as FSUSP, because that is what arms the wake-up (a module left
  *    running through a host's suspend never reports the resume -
  *    measured), but LPMODE and the regulator are not touched. What a
@@ -90,7 +134,7 @@
  *    from the pull-up to the detach and not from the first packet to
  *    the suspend.
  *  - the 1-wire mode of CNTR, which the manual gives to another family's
- *    lot numbers. (The host/device controller of ch. 23 is a DIFFERENT
+ *    lot numbers. (The host/device controller of ch. 23 is a different
  *    peripheral with its own registers and its own driver,
  *    ch32vx03/usbfs.hpp.)
  *  - remote wake-up (CNTR.RESUME): no program asks for it yet.
@@ -248,16 +292,26 @@ struct Usbd {
      * Bring the block up: its clock, then the wake from power-down that
      * 21.2.2 spells out - clear PDWN, let the analogue start, clear
      * FRES, clear the status flags, arm the interrupts, enable the
-     * endpoint machine at address zero. The pull-up is NOT raised here:
+     * endpoint machine at address zero. The pull-up is not raised here:
      * connect() is the stack's, and the host must not see a device
      * until the program is ready to answer it.
      *
-     * The clock is checked at COMPILE time, and TWICE: this peripheral
+     * A setup verb: main(), after the clock task's init(), once, before
+     * UsbDevice::start(). It waits for nothing - the analogue's start
+     * is the time between the store that clears PDWN and the one that
+     * clears FRES. False only when `pma_bytes` cannot hold the table
+     * and endpoint zero's two buffers (under 192 bytes), and then the
+     * pads, the gate and the module out of reset are left as they are,
+     * the interrupts not armed; the default budget always answers true.
+     *
+     * The clock is checked at compile time, and twice: this peripheral
      * wants 48 MHz exactly and the tree's USBPRE is what makes it
      * (clock.hpp), so a program whose rate cannot feed it does not
-     * build; and the BUS has its own floor, measured, so neither does a
+     * build; and the bus has its own floor, measured, so neither does a
      * program that would run the core below usbd_min_hclk_hz while the
-     * controller is attached to it.
+     * controller is attached to it. What is checked is the clock type:
+     * the clock task's own init() writes USBPRE and starts the PLL, so
+     * it runs first.
      */
     template <typename C>
     static bool init(C clock) {
@@ -320,7 +374,9 @@ struct Usbd {
     }
 
     /// Give the block back: the interrupts off, the pull-up down, the
-    /// module in reset and its clock closed.
+    /// module in reset and its clock closed. A setup verb, main context;
+    /// the pull-up's drop gives the bus-master count back (connect()),
+    /// and the two pads stay the floating inputs init() made them.
     static void release() {
         connect(false);
         regs().CNTR = usbd_fres | usbd_pdwn;
@@ -335,12 +391,16 @@ struct Usbd {
     /// block (RM 33.2.1), so the store masks the lock-up flag out - that
     /// bit is write-one-to-clear and is not this driver's to take.
     ///
-    /// AND IT IS WHERE THIS CONTROLLER COUNTS ITSELF AS A BUS MASTER.
+    /// And it is where this controller counts itself as a bus master.
     /// From the pull-up to the detach the block reaches its packet
     /// memory whenever the host speaks, and in a sleep of any depth it
     /// cannot (the file header); so an attached controller holds one
     /// count in ch32vx03/bus_activity.hpp, which is what keeps the
     /// kernel's idle path from sleeping and a sleep site from arming.
+    ///
+    /// The stack's verb (UsbDevice::start() and stop()), main context:
+    /// the EXTEN_CTR store is an unguarded read-modify-write, and the
+    /// count moves only on a change, under the platform's guard.
     static void connect(bool on) {
         const bool was = pulled_up();
         const uint32_t ctr = exten()->CTR & ~exten_lkuprst;
@@ -539,6 +599,10 @@ struct Usbd {
      * falls only when the endpoint's own flag does. The loop is bounded:
      * a block that keeps raising events would otherwise hold the
      * handler for ever.
+     *
+     * Called by the stack's vector body (UsbDevice::isr()) and from
+     * nowhere else: at most 32 turns, nothing masked, and an event
+     * still standing after the last turn left standing in ISTR.
      */
     static UsbEvents take_events() {
         UsbEvents ev;

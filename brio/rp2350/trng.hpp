@@ -1,21 +1,44 @@
 /*
  * trng.hpp
  *
- * The true random number generator (datasheet 12.12): `Trng`, a
- * MONOSTATE - one instance, and a block the RP2040 never had. Arm IP,
- * not Raspberry Pi's own, which is why its register names read unlike
- * anything else in this stratum and why its offsets start at 0x100.
+ * The true random number generator (datasheet 12.12) for a program that
+ * wants random bits from hardware - a seed, a nonce, a key: `Trng`, a
+ * monostate (a type with no objects, its functions and state all
+ * static, because the block exists once) - one instance, and a block the
+ * RP2040 never had. Arm IP, not Raspberry Pi's own, which is why its
+ * register names read unlike anything else in this stratum and why its
+ * offsets start at 0x100. The smallest use:
  *
- * WHAT IT IS. A free-running ring oscillator with no connection to the
+ *     brio::Trng::init();                       // the block, the settings
+ *     brio::Trng::start();                      // the ring oscillator
+ *     if (auto e = brio::Trng::read_blocking()) { seed(e->words); }
+ *     brio::Trng::stop();                       // it is a waste of power idle
+ *
+ * Who calls what. init(), recover() and release() are setup verbs, main
+ * context; init() answers false, with last_error() saying `misconfigured`
+ * or `not_ready`, for settings the chapter forbids or a block that did
+ * not come out of reset. A success leaves the source stopped; settings
+ * refused leave the block untouched, so a source an earlier start() left
+ * running is still running. read() is one look at the status and never
+ * waits; read_blocking() polls read() up to `spins` times
+ * (`default_spins`, four million status reads) and so blocks its caller
+ * for the whole collection, which can be a hundred times the average
+ * (below): main context, where that wait is acceptable. Nothing here
+ * masks interrupts. isr() is the body an app's `isr_trng` calls, and
+ * nothing else does; the rest are single loads and stores. Storage: a
+ * read answers the 192 bits by value, in a TrngEntropy the caller owns.
+ *
+ * What it is. A free-running ring oscillator with no connection to the
  * system clock tree, sampled every SAMPLE_CNT1 system clock cycles. The
  * samples go through three entropy checks and a von Neumann
  * decorrelator, and 192 accepted bits at a time appear in the six
- * EHR_DATA registers. About 7.5 kb/s at a 150 MHz system clock (12.12.1)
- * - a source to SEED with, not a stream to read from.
+ * EHR_DATA registers. About 7.5 kb/s at a 150 MHz system clock (12.12.1;
+ * docs/rp2350/trng.md measures the default setting here) - a source to
+ * seed with, not a stream to read from.
  *
- * THE THREE CHECKS, ALL ON AT RESET (12.12.2), AND WHAT EACH COSTS.
+ * The three checks, all on at reset (12.12.2), and what each costs.
  *
- *   AUTOCORR_ERR  the autocorrelation test failed FOUR TIMES IN A ROW.
+ *   AUTOCORR_ERR  the autocorrelation test failed four times in a row.
  *                 "RNG ceases functioning until next reset", and the
  *                 clear register says of this one bit alone "cannot be
  *                 cleared by SW". It is the one failure a program cannot
@@ -31,33 +54,33 @@
  * that treats it as one would give up where it should go round again.
  * `read()` reports each kind separately and `read_blocking()` goes round
  * again on the two recoverable ones, counting them, so that "how often
- * does this silicon fail its own checks" is a NUMBER a suite prints.
+ * does this silicon fail its own checks" is a number a suite prints.
  *
- * GENERATION TIME IS NOT DETERMINISTIC (12.12.4). The mean and the mode
+ * Generation time is not deterministic (12.12.4). The mean and the mode
  * are close, but a run can take a hundred times the average. The
  * datasheet's advice is to keep a small pool and refill it in the
  * background rather than to block; every wait here is therefore bounded
  * and says so when it runs out, and no verb of this file is safe to call
  * from an interrupt handler with a deadline behind it.
  *
- * THE SETTINGS, AND WHY THE DEFAULTS ARE WHAT THEY ARE. 12.12.2 advises
+ * The settings, and why the defaults are what they are. 12.12.2 advises
  * "ROSC chain length settings of 0 or 1 and sample count settings of
- * 20-25" - with no clock rate beside it, and SAMPLE_CNT1 counts CLK_SYS
- * CYCLES. Measured here, a sampling interval under about 800 ns makes
- * the autocorrelation test fail four times in a row and STOP THE BLOCK,
- * so the default is stated as a TIME (`trng_default_sample_ns`) and
+ * 20-25" - with no clock rate beside it, and SAMPLE_CNT1 counts clk_sys
+ * cycles. Measured here, a sampling interval under about 800 ns makes
+ * the autocorrelation test fail four times in a row and stop the block,
+ * so the default is stated as a time (`trng_default_sample_ns`) and
  * turned into a count for the family's highest clk_sys, which is safe at
  * every rate under it. `trng_sample_cycles_for()` is the same arithmetic
  * for a program that knows its own rate. The full measurement is beside
  * those constants.
  *
- * A LOW sample count is also wrong for a second, independent reason:
+ * A low sample count is also wrong for a second, independent reason:
  * with the von Neumann decorrelator bypassed the count "must not be less
  * than seventeen" (SAMPLE_CNT1's own description), and `init()` refuses
  * that combination rather than letting it produce plausible rubbish.
  *
- * WHAT THE BOOTROM DOES INSTEAD, and why this driver does not. The ROM
- * streams RAW ROSC samples past every check straight into the SHA-256
+ * What the bootrom does instead, and why this driver does not. The ROM
+ * streams raw ROSC samples past every check straight into the SHA-256
  * accelerator (12.12.4.1), because it must boot in bounded time and a
  * hash is a better conditioner than the decorrelator. That is a
  * legitimate use of the same silicon and a different contract; this file
@@ -66,14 +89,15 @@
  * rp2350/bootrom.hpp's `get_sys_info`, which is the cheap seed a program
  * usually wants.
  *
- * THE INTERNAL SOFT RESET NEEDS A DELAY. 12.12.4.1's listing writes
+ * The internal soft reset needs a delay. 12.12.4.1's listing writes
  * TRNG_SW_RESET and then reads the register twice before touching
  * anything else, with the comment "fixed delay is required after TRNG
  * soft reset". `sw_reset()` does exactly that and nothing more.
  *
- * ONE VECTOR, `isr_trng`, masked at reset (every RNG_IMR bit resets to
- * 1). The ISR body reports the four sources and clears the three that
- * can be cleared.
+ * One vector, `isr_trng`, masked at reset (every RNG_IMR bit resets to
+ * 1). The ISR body reports the four sources and clears the two that
+ * can be cleared (CRNGT_ERR and VN_ERR; EHR_VALID is cleared by reading
+ * the result, AUTOCORR_ERR only by a reset).
  */
 
 #pragma once
@@ -103,15 +127,15 @@ struct TrngFlag {
 };
 
 /**
- * THE SAMPLING INTERVAL IS A TIME, AND SAMPLE_CNT1 IS THAT TIME IN
- * CLK_SYS CYCLES - which is why no constant count is right at two clock
+ * The sampling interval is a time, and SAMPLE_CNT1 is that time in
+ * clk_sys cycles - which is why no constant count is right at two clock
  * rates. Measured on RP2350 A2 with clk_sys at 150 MHz: at 100 cycles
- * between samples and below, EVERY collection ends in AUTOCORR_ERR
+ * between samples and below, every collection ends in AUTOCORR_ERR
  * (four autocorrelation failures in a row, inside a few microseconds,
  * and the block then stops until it is reset); at 110 cycles seven runs
  * in ten still do; from 120 cycles up none of ten does, at any of the
  * four chain lengths. 120 cycles at 150 MHz is 800 ns, and it is the
- * INTERVAL that is the floor, not the number.
+ * interval that is the floor, not the number.
  *
  * That reconciles 12.12.2's "sample count settings of 20-25", which is
  * written with no clock rate beside it but with a time: "about 2
@@ -240,14 +264,17 @@ struct Trng {
      * The block from its reset state and the settings of `cfg`: the
      * subsystem reset cycled, the IP's own soft reset with its delay,
      * the chain length, the sample count, the three checks, every
-     * interrupt masked. The source is left STOPPED - `start()` is a
+     * interrupt masked. The source is left stopped - `start()` is a
      * separate verb because the oscillator costs power and 12.12.3 says
      * to clear the enable when it is not in use.
      *
      * False when the block did not come out of reset, or when `cfg` asks
      * for something the chapter forbids: a chain above 3, a sample count
      * of zero, or a count below seventeen with the von Neumann
-     * decorrelator bypassed.
+     * decorrelator bypassed. Such settings are refused before anything
+     * is written, so a source already running is left running. A setup
+     * verb, main context; it waits only for the reset controller's
+     * bounded release.
      */
     static bool init(TrngConfig cfg = {}) {
         if (!trng_config_legal(cfg)) {
@@ -425,8 +452,9 @@ struct Trng {
 
     /**
      * 192 bits or nothing, going round again on the two recoverable
-     * checks: `spins` status reads at most, which is a BOUND and not a
-     * promise of speed (see the file header). Nothing on
+     * checks: `spins` status reads at most, which is a bound and not a
+     * promise of speed (see the file header). Main context: it blocks
+     * its caller for the collection and masks nothing. Nothing on
      * AUTOCORR_ERR - the block is stopped until `recover()` - and
      * nothing when the budget runs out with the collection still
      * running.

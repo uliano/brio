@@ -1,6 +1,104 @@
 # Multicore (RP2040)
 
-Documents of record: the RP2040 datasheet (build 3184e62), 2.3.1 (the
+This document is for a programmer who wants the RP2040's second core
+to run a program of its own. A single-core brio program runs on core 0
+and leaves core 1 asleep in the bootrom; a two-core program runs two
+kernels, one per core, each with its own list of active objects (an
+active object is a component of a brio program with its own event
+queue, served one event at a time by the kernel,
+[docs/learn/introduction.md](../learn/introduction.md)), its own
+SysTick timebase and its own panic record. Nothing is shared between
+the two kernels but events, and an event crosses from one core to the
+other through a bridge, `util/inbox.hpp`'s `send<Ao>()`, never through
+the kernel's `post<Ao>()`, which is one core's primitive
+([design/kernel.md, "Two cores: two kernels and a bridge"](../design/kernel.md#12-two-cores-two-kernels-and-a-bridge-utilinboxhpp)).
+This stratum supplies the platform type per core
+(`Rp2040Platform<core>`), the ticker per core (`CoreTicker<core>`),
+the doorbell a crossing rings (the SIO's inter-core FIFO) and `Core1`,
+which starts core 1 on a function.
+
+The smallest use, from "How to use it" below - the two `main`s and the
+glue that binds them:
+
+```cpp
+using P0 = brio::Rp2040Platform<0>;
+using P1 = brio::Rp2040Platform<1>;
+
+extern "C" void isr_systick() {
+    if (P0::core_id() == 0) brio::CoreTicker<0>::tick(); else brio::CoreTicker<1>::tick();
+}
+extern "C" void isr_sio_proc0() { brio::Inboxes<Origin>::isr(); }
+extern "C" void isr_sio_proc1() { brio::Inboxes<Echo>::isr(); }
+
+[[noreturn]] void core1_main() {
+    brio::CoreTicker<1>::init(clock);
+    brio::Inboxes<Echo>::enable();
+    brio::enable_interrupts();
+    brio::Tenuto<P1, Echo>::run();
+}
+
+int main() {
+    SysClock::init();                         // core 0 owns the clock tree
+    brio::Ticker::init(clock);
+    const bool up = brio::Core1::launch(&core1_main);
+    brio::Inboxes<Origin>::enable();
+    brio::enable_interrupts();
+    brio::send<Echo>(Ping{1});                // crosses; post<Echo> would be refused
+    brio::Tenuto<P0, Origin>::run();
+}
+```
+
+Line by line: `P0` and `P1` are the two cores' platforms, and the
+kernel's state is kept per platform type, so `Tenuto<P0, ...>` and
+`Tenuto<P1, ...>` are two kernels; the one SysTick vector serves both
+cores, each core's SysTick raising it on that core, and ticks the
+ticker of the core that took it; `isr_sio_proc0` and `isr_sio_proc1`
+are the two doorbell lines, one per core, each draining the inboxes of
+the active objects that live on its core into ordinary local posts;
+`core1_main()` is core 1's program - its ticker, its doorbell, its
+interrupts, its kernel; `main()` is core 0's - the clock tree, its
+ticker, the launch of core 1 (false when core 1 did not answer the
+bootrom's protocol), its doorbell, its kernel. `Origin` lives on core 0
+and `Echo` on core 1 (its queue is declared over `P1`, and its
+`inbox_depth` sizes the ring that receives from core 0); `SysClock` and
+`clock` are the clock type and its tag, as in
+[platform.md](platform.md).
+
+What decides correctness even there. An event for an active object on
+the other core is sent, not posted: `post<Echo>()` from core 0 is
+refused and counted as a mispost, and the active object never sees it
+("Bench findings"). `send()` may be called from an active object's
+handler or from an interrupt handler of the sending core: the sender
+writes the inbox under its own core's critical section, so the loop and
+the handlers of one core take turns (`util/inbox.hpp`). A full inbox
+drops the event and counts it, as a full queue does; nobody waits.
+Within each core the kernel's rule is the single-core one: a handler
+runs to its end before the kernel serves another event there, whatever
+its priority, and an event that crosses joins its active object's queue
+on the other core like a local post. Each core enables its own lines: a
+line's enable acts on the NVIC of the calling core, so
+`Inboxes<...>::enable()` runs on the core whose inbox it is. The
+`init()` of the UART, the SPI and I2C drivers and the USB device
+enables the block's line on the core that calls it, and
+`DmaLine<n>::enable()` or a DMA engine's `arm()` the DMA line's; for
+every other block (the timer, the ADC, the RTC, the PIO, the PWM) the
+program calls `Nvic::enable` itself, on the core that will serve it. A
+critical section masks one core's interrupts and nothing on the other
+core: two kernels share nothing but the bridge. `Core1::launch()` runs
+on core 0 before core 0's doorbell interrupt is enabled, since the
+launch protocol speaks over the same FIFO - with the doorbell enabled,
+its handler would take the bootrom's answers out of the FIFO the
+protocol reads them from - and it resets core 1 first, so a core 1 left
+in an old life starts over. The clock tree is one for the chip and core
+0 sets it, before the launch, so core 1's ticker starts from the rate
+core 0 has already reached. And a debugger halting one core can stop
+the system timer under the other: `brio flash` keeps OpenOCD off core 1
+and `Timer::init()` clears the timer's debug pause ("The probe trap",
+below).
+
+## Documents of record
+
+The RP2040 datasheet (build 3184e62), 2.3.1 (the
 SIO: CPUID, the inter-core FIFOs and their interrupts, the spinlocks),
 2.3.2 (the two NVICs, every line reaching both), 2.4.2 (what
 SYSRESETREQ resets), 2.8.2 (the bootrom's launch protocol for core
@@ -8,15 +106,18 @@ SYSRESETREQ resets), 2.8.2 (the bootrom's launch protocol for core
 core). The drivers: `brio/rp2040/multicore.hpp` (the doorbell, the
 launch), `brio/rp2040/platform.hpp` (one platform type per core),
 `brio/rp2040/ticker.hpp` (one ticker per core) over
-`brio/util/inbox.hpp`, the bridge of design/kernel.md section 12. The
-reference suite: `test_rp2040_multicore`.
+`brio/util/inbox.hpp`, the bridge of
+[design/kernel.md, "Two cores: two kernels and a bridge"](../design/kernel.md#12-two-cores-two-kernels-and-a-bridge-utilinboxhpp).
+The reference suite: `test_rp2040_multicore` (a suite's letter is one
+command key of its console and the group of verdicts it runs, and its
+all-key, `z`, runs the set).
 
 ## What the silicon does
 
 Two Cortex-M0+ cores with one bus fabric, one flash and one SRAM
 between them, and everything else doubled: each core has its own
 NVIC, its own SysTick, its own PRIMASK, its own debug logic. Every
-one of the 32 interrupt lines reaches BOTH NVICs and each core enables
+one of the 32 interrupt lines reaches both NVICs and each core enables
 what it wants. SIO's CPUID reads 0 or 1 on the core that reads it; a
 pair of eight-word FIFOs, one per direction, links the cores, with
 one interrupt line per core (SIO_IRQ_PROC0, SIO_IRQ_PROC1) raised
@@ -55,8 +156,10 @@ debugger.
   with core 0's vector table; `protocol(entry, stack_top)` alone, for
   a core 1 known to be waiting; `reset()` - core 1 into the bootrom
   through FRCE_OFF, its "drained" word popped; every wait bounded,
-  false when unanswered. Core 0's doorbell interrupt is disabled
-  around either.
+  false when unanswered. Core 0's doorbell interrupt is to be disabled
+  around either, which the caller keeps: nothing in `Core1` disables
+  it, so a program launches before it enables the doorbell, or
+  disables it around a relaunch.
 - From `util/inbox.hpp`: `send<Ao>(ev)`, `Inbox<Ao>` (`overflows`,
   `pending`, `capacity`, `clear`), `Inboxes<Aos...>` (`isr()`,
   `enable()`, `idle()`), `send_reply_to<Ao, Payload>()`; from the
@@ -103,7 +206,13 @@ int main() {
 
 A panic on either core reboots the chip through `ResetReporter`
 (rp2040/reset.hpp), and core 0 reads both breadcrumbs at the next
-boot: `take_panic_record<P0>()` and `take_panic_record<P1>()`.
+boot: `take_panic_record<P0>()` and `take_panic_record<P1>()`. With no
+debugger attached a panic's breakpoint raises a HardFault before the
+reporter runs, so the reboot is the HardFault handler's, and happens
+only when the program binds `isr_hardfault` to `fault_reset<P>()`
+([reset.md](reset.md)): the crt's own `isr_hardfault` is a spin, and
+the core stays in it. The suite's own panic on core 1 names no
+reporter, and that core halts (below).
 
 ## Bench findings
 
@@ -179,8 +288,12 @@ Driver gaps, each with its reason:
 - The SIO spinlocks, dividers and interpolators: nothing in the model
   wants a lock, and the rest waits for a program.
 - Per-core GPIO interrupts (IO_BANK0's PROC0/PROC1 enables) and the
-  DMA's two lines: with their chapters, each driver's `init` enabling
-  its line on the calling core is rule 2 already.
+  DMA's two lines served one per core: with their chapters. Until
+  then the two-kernel model's rule 2 (each line has one owner core,
+  which enables it) is the programmer's duty: a line is enabled on
+  whichever core calls the verb that enables it (a driver's `init()`,
+  `DmaLine<n>::enable()`, an engine's `arm()`, or `Nvic::enable`), and
+  nothing refuses a line enabled on both cores.
 - The bus fabric's contention counters (BUSCTRL): the measure of two
   cores executing from one flash cache, born with the first program
   whose timing asks.

@@ -1,6 +1,78 @@
 # The link a command panel is spoken to over
 
-Documents of record: none outside this repository. The link is a
+This document is for a programmer who connects a display controller
+that keeps its own pixels (a DCS panel, [dcs.md](dcs.md)) to a family's
+SPI host, or who writes a link for another bus. A link carries one
+command and the bytes that belong with it, as one transaction on the
+bus, and knows nothing else. `devices/dcs_link.hpp` holds two things:
+`DcsLink`, the concept a panel driver is written over (a concept is a
+compile-time list of requirements on a type: here three functions,
+`command`, `write` and `read`, each answering `bool`); and
+`DcsSerialLink<Host>`, the realization over the four-wire serial
+interface (clock, data, select and a data/command line), built over any
+family's `SpiHost` unchanged.
+
+The smallest use, a link over a family's own host (an excerpt of "How
+to use it" below):
+
+```cpp
+using PanelHost = brio::SpiHost<1, panel_pins>;
+using PanelLink = brio::DcsSerialLink<PanelHost>;
+
+PanelHost::Request write{};
+write.cs = Cs::ref();
+write.dc = Dc::ref();
+write.cs_setup_us = 1;
+write.clock = brio::SpiClock::div8;       // under the write ceiling
+write.mode = brio::SpiMode::mode3;        // one the panel's traits take; no frame gap on a PL022
+write.bits = brio::SpiDataSize::bits8;    // where the stratum has one
+PanelHost::Request read = write;
+read.clock = brio::SpiClock::div32;       // under the READ ceiling, which is lower
+
+PanelLink link{PanelLink::Config{write, read}};
+```
+
+Line by line: `PanelHost` names the family's SPI host on its instance
+and pads (the family's document says how); `PanelLink` is the link over
+it. `write` is a prototype request: a request of that bus filled as the
+application would fill any other - the chip select and the D/C pin as
+run-time pin references, the select's setup time in microseconds, the
+rate, the SPI mode, and the frame size where the family's request has
+one - but never sent as it stands. `read` is the same with a slower
+clock, because a controller's read ceiling is lower than its write
+ceiling. The constructor copies both once; the link then runs every
+transaction from those copies.
+
+What decides correctness even there:
+
+- **The link must not be copied or moved, and is held by reference.**
+  Its copies of the prototypes lend the command byte from inside the
+  link object, so copying and moving are deleted ("The link does not
+  move" below).
+- **Both prototypes carry an 8-bit frame.** A wider frame is refused at
+  construction: `valid()` reads false and every verb answers false
+  without touching the bus.
+- **The host is the program's while it uses the link.** Every verb
+  hands a polled request (one that runs to completion inside the call)
+  straight to `Host::start()` and returns when the transaction is over,
+  so a verb waits for its whole transfer on the wire, and a large memory
+  write called from an active object's handler (an active object is a
+  component with its own event queue, served one event at a time by the
+  kernel) holds every other active object for that long. No `SpiBus`
+  arbiter queue is involved: this is the synchronous, direct shape.
+- **A buffer handed to a verb is the caller's again when the verb
+  returns.** The link lends the caller's span to the engine for that
+  one transaction (a loan under `Lease::reply`, kernel/borrowed.hpp)
+  and keeps nothing.
+
+The page goes on with the documents of record, what the design says,
+the types and verbs, how to use it (the three verbs, and the same link
+over the host made of RAM), what the host suite establishes, and what
+is not covered.
+
+## Documents of record
+
+None outside this repository. The link is a
 contract of brio's own, stated in
 [../design/gfx.md](../design/gfx.md)'s "The command tier" and shaped, on
 its serial realization, by the transaction descriptor of
@@ -15,14 +87,15 @@ against the simulated ILI9481.
 ## What the design says
 
 **A link carries a command and the bytes that belong with it, in one
-tenure of whatever bus it owns.** That is the whole of its job. It knows
+tenure of whatever bus it owns** (a tenure is the time one transaction
+holds the bus). That is the whole of its job. It knows
 no command code, no pixel format, no window and no dummy byte, which is
 what lets one panel driver sit over a four-wire serial bus, an 8080
 parallel bus and a DSI host without a branch: the four layers of the
 command tier are the vocabulary, a controller's traits, the link, and
 the driver that is the three of them together.
 
-**A read comes back RAW.** The bytes as the link clocked them - a dummy
+**A read comes back raw.** The bytes as the link clocked them - a dummy
 clock, a dummy byte, a line nobody drove, all of it still in the buffer.
 What a controller makes of them is that controller's `read_framing`
 ([dcs.md](dcs.md)'s `DcsReadFraming`) and the driver applies it. A link
@@ -39,17 +112,20 @@ that spelled them the same would be rewritten at the second link.
 
 **The synchronous face is the whole of what exists.** Every verb
 completes on return - `true` = done and accepted, `false` = refused or
-failed. That is the DIRECT surface shape of the command tier (a
-bring-up, a suite, a program that owns its bus), and the memory-mapped
-shape needs no link for its pixels at all. The asynchronous face waits
-for the tiled pipeline, for the reason in the gap list below.
+failed. That is the direct surface shape of the command tier (every
+drawing call a synchronous transaction on the link: a bring-up, a
+suite, a program that owns its bus; "The command tier" of
+[../design/gfx.md](../design/gfx.md#the-command-tier) names the three
+shapes, direct, tiled and memory-mapped), and the memory-mapped shape
+needs no link for its pixels at all. The asynchronous face waits for
+the tiled pipeline, for the reason in the gap list below.
 
-**The configuration of the serial link is two PROTOTYPE REQUESTS.** The
+**The configuration of the serial link is two prototype requests.** The
 strata do not spell a bus transaction the same way - the rate is an enum
 on most, a `uint8_t baud` divisor on the SAM, a prescaler pair on the
 PL022, and only some Requests carry a frame size - so the link reads
 none of those fields. The application fills a request of its own bus
-exactly as it would fill any other, and the link copies it ONCE, at
+exactly as it would fill any other, and the link copies it once, at
 construction. There are two because a controller's read ceiling is not
 its write ceiling: a third of it on the ILI9481.
 
@@ -78,12 +154,12 @@ are deleted. A panel driver holds its link by reference, which is how it
 was always meant to be held.
 
 **The mode is the panel's to judge, and the link shows it.** Which SPI
-modes a controller's serial interface takes is a fact of the CONTROLLER
+modes a controller's serial interface takes is a fact of the controller
 (its traits, [ili9481.md](ili9481.md)); the link knows no controller, but
 it exposes the mode each prototype carries, as the stratum spells it,
 and `dcs_spi_mode_number()` turns any stratum's enum into the number
 every data sheet uses (CPOL in bit 1, CPHA in bit 0) by reading its
-SPELLING - `mode0`..`mode3` are the vocabulary's names on every family
+spelling - `mode0`..`mode3` are the vocabulary's names on every family
 and on the simulated host - and never its value. The panel driver
 ([dcs_panel.md](dcs_panel.md)) is the layer that holds the two against
 each other, and neither it nor this file names a family's enum.
@@ -113,16 +189,20 @@ What the serial realization adds:
 | `valid()` | Both prototypes carry a byte-wide frame. A verb refuses while this is false |
 | `write_prototype_valid()`, `read_prototype_valid()` | Which of the two the constructor refused |
 | `write_mode()`, `read_mode()` | The mode each tenure runs in, as the application set it - for the panel driver to hold against its controller's traits |
-| `status()` | The engine's own code for the last transaction it ran - what to read after a `false` |
+| `status()` | The engine's own code for the last request it was handed - what to read after a `false` |
 
 Four rules the realization keeps, each of which a suite checks:
 
 - **A verb is `Host::start(r) && Host::status() == spi_ok`.** A polled
   request completes inside `start()` by the arbiter's contract
-  ([../design/spi-bus.md](../design/spi-bus.md)), so a `false` from
-  `start()` on one is a REFUSAL, and the status carries what the engine
-  made of the transaction it did run - a polled transfer over DMA
-  engines can come back `spi_dma_fault` from inside `start()`.
+  ([../design/spi-bus.md](../design/spi-bus.md)), so `start()` answers
+  `true` for it - a request the engine refuses without moving a byte
+  included - and the status carries the engine's code: a polled transfer
+  over DMA engines can come back `spi_dma_fault` from inside `start()`.
+  A `false` from `start()` is the asynchronous answer, which no host in
+  the tree gives for a polled request. Only the link's own refusals
+  (`valid()` false, a span over 65535 bytes) run no transaction and
+  leave `status()` as the previous transaction left it.
 - **The command byte is a member of the link.** A Request lends its
   `cmd` buffer under `Lease::reply`; on a polled request the reply is
   inside `start()`, so the byte must outlive the call and belong to the

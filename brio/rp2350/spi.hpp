@@ -1,75 +1,106 @@
 /*
  * spi.hpp
  *
- * The SPI (datasheet 12.3: two ARM PrimeCell SSPs, PL022 revision r1p4).
- * The chapter's driver is NOT here: the PL022 is a licensed design this
+ * The SPI (datasheet 12.3: two ARM PrimeCell SSPs, PL022 revision r1p4)
+ * for a program on either of this chip's architectures: a host that
+ * talks to devices on a bus - a display, a converter, a memory - through
+ * the shared bus arbiter, or a client that answers another chip's host.
+ * The smallest use, a host whose select is an ordinary pin, is written
+ * out at the SpiHost alias below: the pads named by number, `using Bus =
+ * brio::SpiHost<0, pins>`, `using Spi = brio::SpiBus<Bus, P, 4>` (the
+ * arbiter, an active object - a component with its own event queue that
+ * the kernel serves one event at a time), `Bus::init(clock, ceiling)`
+ * after the clock task, the select driven high, `isr_spi0` bound to
+ * Bus::isr() posting TransferDone, and a Bus::Request posted to Spi with
+ * its buffers lent and a reply channel inside (docs/rp2350/spi.md reads
+ * it line by line).
+ *
+ * The chapter's driver is not here: the PL022 is a licensed design this
  * chip shares with others, so the resource, the host engine and the
  * client are written once in the IP stratum (brio/pl022/spi.hpp,
  * docs/pl022/README.md) and this file is what that file asks of a
  * family -
  *
  *  - the pin table of 9.4 (table 645) with its function code;
- *  - `Rp2350Pl022`, the CHIP TRAITS: the register block and where each
+ *  - `Rp2350Pl022`, the chip traits: the register block and where each
  *    instance's sits, the reset bits of 7.5, the interrupt lines of 3.2,
  *    the atomic set/clear aliases of 2.1.3, the DREQ numbers of
  *    12.6.4.1, the pad type with the setup each signal wants, the
  *    run-time pin a Request carries as its select, the microsecond
- *    busy-wait `cs_setup_us` is spent on, and WHICH RATE IS SSPCLK -
+ *    busy-wait `cs_setup_us` is spent on, and which rate is SSPCLK -
  *    clk_peri (12.3, and the note under 12.3.3.3), which
  *    rp2350/clock.hpp feeds from clk_sys undivided by default, so the
  *    bit rate comes from Clock::pclk_hz and never from a second
  *    statement of the rate;
- *  - the PUBLIC NAMES: `Pl022<n>` the resource, `SpiHost<n, pins, ...>`
+ *  - the public names: `Pl022<n>` the resource, `SpiHost<n, pins, ...>`
  *    the engine `SpiBus` drives and `SpiClient<n, pins>` the other end,
  *    this chip's aliases of the three IP templates.
  *
- * THE PINS, AND THE COLUMN THIS CHAPTER DID NOT GAIN. The pads march in
+ * Who calls what, and from where (the IP file and util/bus_master.hpp
+ * state each verb in full). init() is a setup verb: main(), after the
+ * clock task; it answers false when the ceiling cannot be produced or
+ * the block did not come up, and it hands the pads over itself. A
+ * client of the bus posts its Request to the arbiter from its own
+ * dispatch; the arbiter calls start() from main context, which runs a
+ * polled request to its end inside the call and starts any other on the
+ * interrupt. isr() and dma_isr() are interrupt bodies, called from the
+ * program's handlers for the instance's line and the engines' DMA line
+ * and nowhere else; true from either means the transaction completed
+ * and the glue posts TransferDone. The Request's buffers are lent from
+ * the post to the SpiDone the arbiter replies with: untouched and in
+ * scope until then, which nothing checks. The select pin a Request
+ * carries is the program's, configured before the first request. A
+ * `cs_setup_us` is spent on rp2350/delay.hpp's busy-wait, served once
+ * `Mtime::start(clock)` has run and refused, with no time spent, before
+ * that.
+ *
+ * The pins, and the column this chapter did not gain. The pads march in
  * groups of four - RX, CSn, SCK, TX - and the groups cycle SPI0, SPI0,
  * SPI1, SPI1 and again, so GP0..GP7 are SPI0's, GP8..GP15 SPI1's,
  * GP16..GP23 SPI0's, all the way to GP47 on the QFN-80: the instance is
  * bit 3 of the pad number. That is the RP2040's rule over a longer bank,
- * and UNLIKE THE UART THIS CHAPTER HAS NO SECOND FUNCTION COLUMN - the
+ * and unlike the UART this chapter has no second function column - the
  * table's F11 entries are the UART's alternate data pads and carry no
  * SPI signal on any pad. So `pad_function` here is one constant,
  * `PinFunction::spi` (F1), and a pin set is four plain pad numbers.
  *
- * WHAT THIS SILICON PUTS AROUND THE BLOCK. Two FIFOs of eight frames
+ * What this silicon puts around the block. Two FIFOs of eight frames
  * each (12.3.3.4, 12.3.3.5), so a host keeps up to eight frames in
  * flight. The bit rate is clk_peri / (CPSDVSR x (1 + SCR)) with the
  * prescaler even in 2..254 and SCR in 0..255, which at the top of a 150
  * MHz clk_peri is 75 Mbit/s for a host; a CLIENT needs SSPCLK at least
  * twelve times its own clock (12.3.4.4), so 12.5 Mbit/s here. The pads
- * come up ISOLATED and pulled down (9.11): every configuring verb of
+ * come up isolated and pulled down (9.11): every configuring verb of
  * pin.hpp drops the latch as it writes, and a host's receive pad is
- * handed over with a pull-UP so an answer line nothing drives reads as
+ * handed over with a pull-up so an answer line nothing drives reads as
  * the idle ones a bus expects.
  *
- * WHAT 12.3.1 SAYS, AND WHAT THE PADS DO. The chapter says two different
+ * What 12.3.1 says, and what the pads do. The chapter says two different
  * things about the block's pad-enable output nSSPOE: 12.3.1 ("Changes
  * from RP2040") has it control the output enable of the SSPTXD pad, the
  * peripheral tristating its output when deselected in client mode; the
  * idle-level lists of 12.3.4.10 to 12.3.4.14 say, five times in the same
- * words, that the signal "is not connected to the pad in RP2350". THE
- * PADS ANSWER THE FIRST (measured on stepping A2 by test_rp2350_spi's
+ * words, that the signal "is not connected to the pad in RP2350". The
+ * pads answer the first (measured on stepping A2 by test_rp2350_spi's
  * letter m, the pad's own output enable read in GPIO_STATUS under a
  * foreign host's burst): a client's transmit pad is released while its
  * select is high and driven while it is low, and under SOD it is released
  * selected or not - the far host reading its own pull-up. The RP2040 keeps
  * both driven. The driver depends on neither: `Pl022Client::drive_output
- * (false)` makes the dark listener by taking the PAD away, and `sod()`
+ * (false)` makes the dark listener by taking the pad away, and `sod()`
  * stays a bit of the resource.
  *
- * THE LINE. The four maskable sources of an instance combine into ONE
+ * The line. The four maskable sources of an instance combine into ONE
  * interrupt line (SPI0_IRQ = 31, SPI1_IRQ = 32, datasheet 3.2); the app
  * binds isr_spi0 / isr_spi1 to the instance's isr() body, and those names
- * are bound on BOTH architectures - a Cortex-M vector table on one half,
+ * are bound on both architectures - a Cortex-M vector table on one half,
  * Hazard3's own dispatch on the other - because the interrupt numbering
  * is shared (3.8.4.2). Which is also why `Interrupts` below is the
  * controller core.hpp names and never an NVIC.
  *
- * THE DMA ENGINES ride any two channels, told the instance's requests
- * (Dreq::spi{n}_tx / spi{n}_rx) at arm(). THOSE ROWS ARE NOT THE
- * RP2040'S: a third PIO moved every number above the first PIO's, so the
+ * The DMA engines ride any two channels, told the instance's requests
+ * (Dreq::spi{n}_tx / spi{n}_rx) at arm(). Those rows are not the
+ * RP2040's: a third PIO moved every number above the first PIO's, so the
  * SPIs sit at 24..27 where they sat at 16..19 (rp2350/dma_engine.hpp).
  * The IP file raises the requests around the engines and nowhere else,
  * which is what this chip's controller wants.
@@ -81,7 +112,7 @@
 
 #include "rp2350/device.hpp"
 
-// This chip's busy-wait comes FIRST: the traits below hand the IP file
+// This chip's busy-wait comes first: the traits below hand the IP file
 // `DelayRate`, a type of this family, and the driver spends `cs_setup_us`
 // by calling that type's own verb - so the verb is in scope where the
 // driver that calls it is defined.
@@ -119,7 +150,7 @@ constexpr uint8_t spi_pad_instance(uint8_t pin) { return static_cast<uint8_t>((p
 
 /// The four signals of a group, in the table's order: RX, CSn, SCK, TX.
 ///
-/// The PACKAGE is not asked here: every pin's registers exist on both
+/// The package is not asked here: every pin's registers exist on both
 /// packages and only the bond wire does not, so a pad the QFN-60 has not
 /// got is refused one level down, by `Pin<n>`'s own static_assert, which
 /// says so in those words.
@@ -208,7 +239,7 @@ struct Rp2350Pl022 {
     template <uint8_t i>
     static void hold() { Resets::hold(reset_bit<i>()); }
 
-    /// 12.6.4.1: the two data requests of an instance. NOT the RP2040's
+    /// 12.6.4.1: the two data requests of an instance. Not the RP2040's
     /// numbers - a third PIO moved every row above it (dma_engine.hpp).
     template <uint8_t i>
     static constexpr DmaRequest tx_request() { return i == 0 ? Dreq::spi0_tx : Dreq::spi1_tx; }
@@ -230,13 +261,13 @@ struct Rp2350Pl022 {
     /// The pad as a type, the function code that routes an SPI to it
     /// (9.4: F1 on every SPI pin of both packages, one column and no
     /// other), and the electrical setup each signal wants. Every
-    /// configuring verb of pin.hpp drops the ISOLATION LATCH as it
+    /// configuring verb of pin.hpp drops the isolation latch as it
     /// writes, which is what makes a pad of this chip answer at all.
     ///
-    /// The two PULLED ones are the HOST's receive - this chip's pads come
-    /// up pulled DOWN, so an answer line with nothing driving it would
+    /// The two pulled ones are the host's receive - this chip's pads come
+    /// up pulled down, so an answer line with nothing driving it would
     /// read as zeros rather than as the idle ones a bus expects - and the
-    /// CLIENT's select, so an unwired select reads not-selected. The
+    /// client's select, so an unwired select reads not-selected. The
     /// client's receive is driven by the host whenever it matters and
     /// takes no pull.
     template <uint8_t pin>
@@ -255,7 +286,7 @@ struct Rp2350Pl022 {
     static constexpr PinConfig dark_pad_config() { return {}; }
 
     /// Two engines of one host must not share a channel: on this chip a
-    /// request is a field any channel takes, so the CHANNEL is the
+    /// request is a field any channel takes, so the channel is the
     /// identity (rp2350/dma_engine.hpp).
     template <typename Tx, typename Rx>
     static constexpr bool engines_distinct() { return uart_engines_distinct<Tx, Rx>(); }
@@ -283,7 +314,10 @@ template <uint8_t n>
 using Pl022 = Pl022Ssp<Rp2350Pl022, n>;
 
 /**
- * The engine `SpiBus` (= `BusMaster`) drives, over Pl022<n>.
+ * The engine `SpiBus` (= `BusMaster`) drives, over Pl022<n>. `init()` in
+ * main after the clock task, the handler bound to `isr()` posting
+ * TransferDone to the arbiter, then every transaction a Request posted
+ * to that arbiter:
  *
  *   constexpr brio::SpiPins pins{.sck = 18, .tx = 19, .rx = 16};
  *   using Bus = brio::SpiHost<0, pins>;
@@ -292,6 +326,15 @@ using Pl022 = Pl022Ssp<Rp2350Pl022, n>;
  *
  *   Bus::init(clock, 8'000'000);                      // a ceiling for the bus
  *   Cs::output(true);
+ *
+ *   Bus::Request r{};                                  // in Display's dispatch
+ *   r.cs = Cs::ref();
+ *   r.cmd = brio::lend<brio::Lease::reply>(cmd);   r.cmd_len = 1;
+ *   r.tx = brio::lend<brio::Lease::reply>(pixels); r.len = 64;
+ *   r.clock = brio::SpiClocks::div4;                  // 37.5 MHz at 150
+ *   r.mode = brio::SpiMode::mode0;
+ *   r.reply = brio::reply_to<Display, brio::SpiDone>();
+ *   brio::post<Spi>(r);
  *
  *   extern "C" void isr_spi0() {
  *       if (Bus::isr()) { brio::post<Spi>(brio::TransferDone{Bus::status()}); }
@@ -310,7 +353,7 @@ using SpiHost = Pl022Host<Rp2350Pl022, n, pins, TxEngine, RxEngine, Placement>;
 
 /**
  * The other end of the wire, over Pl022<n>: the select goes to the
- * PERIPHERAL here (the PL022 in slave mode frames on SSPFSSIN).
+ * peripheral here (the PL022 in slave mode frames on SSPFSSIN).
  *
  *   constexpr brio::SpiPins client_pins{.sck = 10, .tx = 11, .rx = 8, .cs = 9};
  *   using Client = brio::SpiClient<1, client_pins>;

@@ -1,21 +1,112 @@
 /*
  * dma.hpp
  *
- * The DMA controllers of the CH32V203 and the CH32V303 (RM ch. 11): the
- * STM32F1's DMA under WCH's names - channels each wired to a fixed handful
- * of peripheral requests, an arbiter over four software priorities with
- * the channel index deciding ties, and four flag bits a channel. How many
- * of them a part has is its DEVICE CLASS's: ONE controller of EIGHT
- * channels on every CH32V203 (one more than the F1 ancestor and than the
- * CH32V00x's seven), and on the CH32V303 (CH32V30x_D8) TWO - DMA1 with
- * SEVEN channels and DMA2 with eleven (device::dma_controller_count,
- * dma1_channel_count, dma2_channel_count). Every type here names its
- * CONTROLLER FIRST - `Dma<1|2>`, `DmaChannel<controller, n>`, the engines
- * `<controller, n, Elem>` - because a channel number alone names two
- * channels on the CH32V303.
+ * The DMA controllers of the CH32V203 and the CH32V303 (RM ch. 11), for
+ * a program and for the transports (the drivers that move a peripheral's
+ * data in runs: the Uart, the SpiHost, the I2cHost): `Dma<c>`, a
+ * controller - its gate, its flag registers and the ledger of the
+ * channels that keep the core awake; `DmaChannel<c, ch>`, one channel,
+ * programmed whole or piece by piece; and over a channel the engines,
+ * each a channel held for one shape of transfer, armed once and then
+ * started block by block - `DmaTxEngine` and `DmaRxEngine` for a
+ * peripheral's data register (the two the transports take in their
+ * engine slots), `DmaCopyEngine` for memory to memory, and the two block
+ * streams, `DmaLoopEngine` and `DmaPingPongEngine`. Every one is a
+ * monostate (a class with only static members, never instantiated: one
+ * channel, one set of state). The smallest use is docs/ch32vx03/dma.md's
+ * first "How to use it" block, a fill and a copy on the copy engine with
+ * the completion on its interrupt (`saved` the program's own array of
+ * 1024 words):
  *
- * THE CHANNEL IS THE REQUEST. There is no request multiplexer: the tables
- * of 11.2.3 wire each peripheral event to ONE channel of ONE controller,
+ *     using Copier = brio::DmaCopyEngine<1, 1>;
+ *     Copier::arm();                                   // once: the gate, the mode
+ *     BRIO_CH32_VECTOR(dma1_channel1_handler) { (void)Copier::service(); }
+ *
+ *     alignas(4) uint32_t frame[1024];
+ *     static const uint32_t black = 0;
+ *     (void)Copier::fill(frame, &black, 1024);         // 1024 word beats
+ *     while (Copier::busy()) { }
+ *     (void)Copier::copy(frame, saved, 1024);
+ *
+ * The binding stands at file scope under the crt's name for the channel's
+ * vector (the crt is the startup code that runs before main(),
+ * ch32vx03/src/glue/startup_ch32vx03.S); the wait ends only once the
+ * vector has run, so it comes after brio::enable_interrupts(); the copy
+ * engine armed with `arm(DmaPriority::low, false)` takes no interrupt and
+ * finds its completion in busy() itself.
+ *
+ * Which context calls what:
+ *
+ *   - Setup. An engine's arm() runs once before its first block, from
+ *     main() or from the engine's owner: it stops the channel (a block in
+ *     flight is cut where it stands), opens the controller's gate - a
+ *     read-modify-write of RCC_HBPCENR with no guard, a register the
+ *     other HB gates share - and enables or disables the channel's PFIC
+ *     line. The raw channel's enable(), configure(), prepare(), load()
+ *     and stop(), and Dma<c>::stop_all(), open the gate the same way
+ *     first; trigger() reads CFGR and CNTR before its enable() opens it,
+ *     and set_count(), set_peripheral(), set_memory() and arm(mask, on)
+ *     never open it, so they want a gate an earlier verb opened. The raw
+ *     channel belongs to one context; the engines' block path
+ *     (DmaBinding's go(), rearm(), halt() and service()) never touches
+ *     RCC.
+ *   - The block path. An engine's starting verbs - start(), launch(),
+ *     start_fixed(), start_discard(), kick(), copy(), fill() - are its
+ *     owner's: main(), an active object's handler (an active object is a
+ *     component of a brio program with its own event queue, served one
+ *     event at a time by the kernel), or the channel's own vector where
+ *     a completion starts the next block. One owner per engine: the
+ *     transmit engine's claim() and the copy engine's busy flag are a
+ *     test and a set with no mask, and a transport whose completion
+ *     handler starts the next block masks around claim() alone
+ *     (DmaTxEngine below).
+ *   - The interrupt bodies. Each engine's service() and
+ *     DmaChannel::isr() are called from the program's binding of the
+ *     channel's vector, `BRIO_CH32_VECTOR(name) { body }` (pfic.hpp), and
+ *     nowhere else, and so are the verbs that act on what service()
+ *     returned: DmaRxEngine::lap(), DmaLoopEngine's lap() and fail(),
+ *     DmaPingPongEngine's complete() and fail(). A vector left unbound
+ *     runs the crt's weak default_handler, a spin loop, with no fault and
+ *     no message. On the CH32V303's images (built with the F extension
+ *     and the hardware prologue on, the project's default) the binding is
+ *     a naked trampoline whose body must do no floating-point work, and
+ *     nothing here does any.
+ *   - Single loads, legal from any context: DmaRxEngine::remaining()
+ *     (CNTR) and laps(), DmaChannel::remaining(), enabled() and flags(),
+ *     Dma<c>::flags(), and the engines' faults(), running(), stalled()
+ *     and pending(); Dma<c>::enabled_channels() and any_enabled() are
+ *     loads alone, the gate's register and then one CFGR a channel.
+ *   - Nothing here waits: no verb polls a register. What masks: a verb
+ *     that sets or clears EN keeps the controller's ledger, and a change
+ *     of a channel's byte there takes the platform's critical section for
+ *     the bus-master count's increment or decrement
+ *     (ch32vx03/bus_activity.hpp); DmaPingPongEngine::release() holds it
+ *     over its whole body, a stalled stream's restart included (the
+ *     binding's five stores and the count). Nothing else masks.
+ *   - Buffers. A run handed to a one-shot start() is the caller's and
+ *     stays untouched and in scope until complete(), abandon(), kick()
+ *     or stop() ends its block; a ring's storage for as long as the
+ *     circular binding runs; a copy's or a fill's buffers and cell until
+ *     busy() answers false; a player's table and a source's two buffers
+ *     for as long as the stream runs, and the buffer ready() hands over
+ *     until release(). Nothing checks any of it.
+ *
+ * What follows is the controller as the chapter has it. The STM32F1's
+ * DMA under WCH's names - channels each wired to a fixed handful of
+ * peripheral requests, an arbiter over four software priorities with the
+ * channel index deciding ties, and four flag bits a channel. How many of
+ * them a part has is its device class's (the manual's groups of parts,
+ * each with its own register notes and request tables): one controller
+ * of eight channels on every CH32V203 (one more than the F1 ancestor and
+ * than the CH32V00x's seven), and on the CH32V303 (CH32V30x_D8) two -
+ * DMA1 with seven channels and DMA2 with eleven
+ * (device::dma_controller_count, dma1_channel_count, dma2_channel_count).
+ * Every type here names its controller first - `Dma<1|2>`,
+ * `DmaChannel<controller, n>`, the engines `<controller, n, Elem>` -
+ * because a channel number alone names two channels on the CH32V303.
+ *
+ * The channel is the request. There is no request multiplexer: the tables
+ * of 11.2.3 wire each peripheral event to one channel of one controller,
  * and an engine is named by that slot with the table in hand. The table
  * itself is ch32vx03/dma_engine.hpp's, because a transport must be able
  * to refuse an engine on the wrong slot without including this file;
@@ -24,14 +115,17 @@
  * to it whose DMA bit is set drives whatever transfer the channel holds -
  * measured, a receiver left running served a timer's transfer sixteen
  * items at once - so stopping a channel withdraws no request. Nor does
- * turning the peripheral off: a request once raised is held until the
- * channel acknowledges it or the peripheral's reset line is pulsed, and a
- * gated clock freezes it on the OR, where the next owner's first enable
- * moves one stray item and stalls behind it (measured on both series,
- * docs/ch32vx03/dma.md). A peripheral that is done with a channel is
- * RESET - the transports' release() pulses the line before the gate.
+ * turning the peripheral off: a request once raised by a USART, an I2C or
+ * a timer is held until the channel acknowledges it or the peripheral's
+ * reset line is pulsed, and a gated clock freezes it on the OR, where the
+ * next owner's first enable moves one stray item and stalls behind it
+ * (measured on both series, docs/ch32vx03/dma.md; an SPI's request,
+ * measured on all three instances, does not outlive its release). A
+ * peripheral that is done with a channel and would hold a request is
+ * reset - the USART's and the I2C host's release() pulse the line before
+ * the gate, and the SPI host's release() pulses none (spi.hpp).
  *
- * WHAT A CHANNEL IS. A configuration word (CFGR: direction, circular,
+ * What a channel is. A configuration word (CFGR: direction, circular,
  * memory-to-memory, the two increments, the two widths, the priority,
  * the three interrupt enables and EN), a count the controller
  * decrements as it moves items (CNTR, read-only while enabled), and two
@@ -39,24 +133,24 @@
  * where DIR says which side is the source: in memory-to-memory mode
  * both are memory and the names mean nothing.
  *
- * DMA2'S LAST FOUR CHANNELS SIT ELSEWHERE. Channels 1..7 of either
+ * DMA2's last four channels sit elsewhere. Channels 1..7 of either
  * controller are twenty bytes apart from offset 0x08 of the block (table
  * 11-7's stride, a reserved word after each channel), and so is DMA1's
- * eighth; DMA2's channels 8..11 follow its seventh at SIXTEEN bytes apart
+ * eighth; DMA2's channels 8..11 follow its seventh at sixteen bytes apart
  * from offset 0x90 (table 11-8, 11.3.7..11.3.10), and their four flags a
  * channel live in a register pair of their own, DMA2_EXTEM_INTFR and
  * DMA2_EXTEM_INTFCR at 0xD0 (11.3.11, 11.3.12). A channel knows which
  * pair holds its flags; nothing above it has to.
  *
- * THE ADDRESSES ARE ALIGNED BY THE SILICON, SILENTLY. 11.3.5 and 11.3.6
- * say the module IGNORES the low address bits of a 16- or 32-bit
+ * The addresses are aligned by the silicon, silently. 11.3.5 and 11.3.6
+ * say the module ignores the low address bits of a 16- or 32-bit
  * access, so a half-word transfer pointed at an odd address moves the
- * WRONG BYTES and reports success. Every verb here refuses an address
+ * wrong bytes and reports success. Every verb here refuses an address
  * that is not aligned to its own width rather than let the hardware
  * round it: a transfer that quietly reads elsewhere is worse than one
  * that does not start.
  *
- * AND ON THE CH32V303 DMA1 IS REFUSED A SPAN THAT CROSSES 64 KB. 11.2.3's
+ * And on the CH32V303 DMA1 is refused a span that crosses 64 KB. 11.2.3's
  * note (1) gives the CH32V30x_D8 a DMA1 whose accesses must not cross a
  * 64-kilobyte boundary on lots whose penultimate sixth digit is zero
  * ("the DMA source address + the number of transmission data ... can only
@@ -71,38 +165,41 @@
  * set_peripheral, set_memory) never see a transfer whole and do not ask
  * the rule; the verbs that take a DmaTransfer do.
  *
- * THE VECTORS ARE ONE PER CHANNEL: DMA1's seven consecutive from the
+ * The vectors are one per channel: DMA1's seven consecutive from the
  * table's entry 27 and its eighth, where there is one, on the tail of the
- * table this DEVICE CLASS has (62, 67 on the CH32V203RB); DMA2's first
+ * table this device class has (62, 67 on the CH32V203RB); DMA2's first
  * five at 72..76 and its other six at 98..103 (the crt states the
  * per-class truth, and device.hpp's Irq enum carries it). So a channel's
  * ISR body reads only its own flags and a handler needs no "which
  * channel" question. DMA1EN and DMA2EN in RCC_HBPCENR are the blocks'
- * gates and both are CLOSED at reset, so `Dma<c>::open()` is the first
- * thing every channel verb does.
+ * gates and both are closed at reset, so `Dma<c>::open()` is the first
+ * thing enable(), configure(), prepare(), load() and stop() do, and
+ * every engine's arm() through DmaBinding::bind(); trigger() reads CFGR
+ * and CNTR first and opens the gate at its enable(), and set_count(),
+ * set_peripheral(), set_memory() and arm(mask, on) never open it.
  *
- * NO DMA-FED TRANSPORT SLEEPS ON THIS FAMILY. In the Sleep of RM 2.4 no
+ * No DMA-fed transport sleeps on this family. In the Sleep of RM 2.4 no
  * bus master but the core gets a cycle: a memory-to-memory block
  * started right before an idle() moves the handful of items already in
  * the pipeline and then nothing until the core wakes, while the timers
  * and the core's counter count the whole sleep (measured on both parts -
  * docs/ch32vx03/dma.md, and it is the same starvation that kills the
- * USB controller in Sleep). SO A CHANNEL COUNTS ITSELF, on either
+ * USB controller in Sleep). So a channel counts itself, on either
  * controller: setting EN takes one count of a bus master and clearing it
  * gives the count back (ch32vx03/bus_activity.hpp), the controller's
- * LEDGER (`Dma<c>::count`) remembering which channel holds one, the
+ * ledger (`Dma<c>::count`) remembering which channel holds one, the
  * kernel's idle path does not sleep while the count stands, and a sleep
  * site refuses to arm over it - a program with an engine running holds
  * itself awake without having to know that it does. `Dma<c>::any_enabled()`
- * is the same question asked of the registers instead, of EVERY controller
+ * is the same question asked of the registers instead, of every controller
  * the part has, for a caller that wants the silicon's own answer.
  *
- * THE ENGINES. `DmaTxEngine<c, ch, Elem>` and `DmaRxEngine<c, ch, Elem>`
+ * The engines. `DmaTxEngine<c, ch, Elem>` and `DmaRxEngine<c, ch, Elem>`
  * pour caller-owned runs into one peripheral register and fill them from
  * one: the transmit engine reports how many items a block carried when it
  * completes, the receive engine answers how many have arrived since it was
  * last asked (one CNTR read - nothing suspended, nothing refused) or, in
- * its CIRCULAR shape, fills a ring for ever on the controller's cycle mode,
+ * its circular shape, fills a ring for ever on the controller's cycle mode,
  * its count being the ring's producer index (util/ring.hpp's
  * HardwareRing); the beat of a block is its run's element, `Elem` the
  * widest the binding takes. `DmaCopyEngine<c, ch>` is memory to memory, a
@@ -111,10 +208,10 @@
  * the first two, and a driver reaches its engines only through their
  * published names (start, claim, launch, service, complete, flag_complete,
  * flag_error, controller, channel) so that a driver with an empty slot
- * never includes this file. TWO ENGINES OF ONE TRANSPORT NAME TWO SLOTS: a
+ * never includes this file. Two engines of one transport name two slots: a
  * channel moves data one way, and the table gives each direction its own.
  *
- * THE LEVEL AN ENGINE ARMS AT IS ITS PERIPHERAL'S (ch32vx03/dma_engine.hpp's
+ * The level an engine arms at is its peripheral's (ch32vx03/dma_engine.hpp's
  * DmaPriority, docs/design/dma.md). The arbiter grants the bus item by item
  * to the highest level asking, the lower channel number between equals,
  * and a memory-to-memory channel asks without a pause: a receive ring it
@@ -125,25 +222,25 @@
  * engine and the block source at very_high, the transmit engine and the
  * player at high, the copy at low.
  *
- * EVERY ENGINE STANDS ON `DmaBinding<c, ch>`, which is where this
+ * Every engine stands on `DmaBinding<c, ch>`, which is where this
  * controller's two moments are kept apart: what is constant for a binding
  * written once when the engine is armed, and per block the four stores the
  * vendor's own restart is made of. Its header says which, and why.
  *
- * ONE THING THE SILICON DOES that the engines are built on: EN STAYS
- * SET when a non-circular block completes (CNTR at zero, TCIF up, the
+ * One thing the silicon does that the engines are built on: EN stays
+ * set when a non-circular block completes (CNTR at zero, TCIF up, the
  * channel enabled and idle - the F1 lineage: only software clears EN),
  * so every verb that programs a channel refuses while EN is up, an engine
  * stops its channel at the block's end, and a channel that may still be
- * standing is stopped before it is programmed again. A TRANSFER ERROR is
+ * standing is stopped before it is programmed again. A transfer error is
  * the one thing that clears EN by itself (11.3.3).
  *
- * THE BLOCK ENGINES beside them are util/block_stream.hpp's two
+ * The block engines beside them are util/block_stream.hpp's two
  * concepts: `DmaLoopEngine<c, ch, Elem>` is a BlockPlayer, one
- * caller-owned table poured into a peripheral for ever on THE
- * CONTROLLER'S OWN CIRCULAR MODE, with the lap interrupt doing nothing
+ * caller-owned table poured into a peripheral for ever on the
+ * controller's own circular mode, with the lap interrupt doing nothing
  * but count; `DmaPingPongEngine<c, ch, Elem>` is a BlockSource, two
- * caller-owned buffers filled in turn - and it does NOT use circular
+ * caller-owned buffers filled in turn - and it does not use circular
  * mode, which is the one place this file departs from what the
  * controller offers. The reason is the contract's and not the API's: a
  * circular channel never stops, so "skip rather than tear" could only
@@ -151,8 +248,8 @@
  * buffer the caller holds (measured on the STM32G0, and again here -
  * docs/ch32vx03/adc.md). So the source stops itself at every block and
  * the handler re-arms the other buffer, the STM32G0's shape; the four
- * engine names are the same words in both strata
- * (docs/design/block-stream.md).
+ * engine names are spelled the same on every stratum that has block
+ * engines (docs/design/block-stream.md).
  */
 
 #pragma once
@@ -1498,7 +1595,11 @@ public:
     /// completion raises the channel's line (`interrupt`) or is asked for
     /// by busy(). `low` by default: a copy asks for the bus without a
     /// pause, and a request-paced channel it outranked would move nothing
-    /// until its block ended (DmaPriority's rule).
+    /// until its block ended (DmaPriority's rule). Setup's verb, once
+    /// before the first block, from the engine's owner: it waits for
+    /// nothing and refuses nothing, and a block still in flight is cut
+    /// where it stands, the engine left free. With `interrupt` the
+    /// program binds the channel's vector to service().
     static void arm(DmaPriority priority = DmaPriority::low, bool interrupt = true) {
         stop();
         B::bind(nullptr);
@@ -1514,7 +1615,9 @@ public:
 
     /// Copy `n` elements from `src` to `dst`, one beat an element. False -
     /// nothing started - while a block is in flight and for a run the
-    /// header refuses.
+    /// header refuses. From the engine's one owner; it returns as soon as
+    /// the block is started, and both buffers stay untouched and in scope
+    /// until busy() answers false.
     template <typename T>
     static bool copy(T* dst, const T* src, uint32_t n) {
         static_assert(sizeof(T) == 1 || sizeof(T) == 2 || sizeof(T) == 4,
@@ -1523,7 +1626,9 @@ public:
     }
 
     /// Write `n` copies of `*cell` from `dst` on - the cell read each beat,
-    /// so it stays put until the block is over.
+    /// so it stays put until the block is over. False, and nothing
+    /// started, as copy(); from the same one owner, returning as soon as
+    /// the block is started.
     template <typename T>
     static bool fill(T* dst, const T* cell, uint32_t n) {
         static_assert(sizeof(T) == 1 || sizeof(T) == 2 || sizeof(T) == 4,
@@ -1533,6 +1638,9 @@ public:
 
     /// A block in flight. Armed without the interrupt, this is also where
     /// the completion is found: the flag asked, the channel stopped.
+    /// Armed with it, one load of the engine's flag, which service() in
+    /// the channel's vector clears - so a loop on busy() ends only once
+    /// interrupts are enabled and the vector is bound. Never waits.
     static bool busy() {
         if (busy_ && !interrupt_) {
             const uint32_t f = B::flags();
@@ -1557,7 +1665,11 @@ public:
     }
 
     /// The channel's ISR body: the block's end acted on - the channel
-    /// stopped, the engine free again - and the flags handed back.
+    /// stopped, the engine free again - and the flags handed back. Called
+    /// from the program's binding of the channel's vector and nowhere
+    /// else; an error flag counts a fault, and on either flag the
+    /// bus-master count is given back under the platform's mask for its
+    /// decrement.
     [[gnu::always_inline]] static uint8_t service() {
         const uint32_t up = B::service(DmaFlag::complete | DmaFlag::error);
         if ((up & DmaFlag::error) != 0u) {

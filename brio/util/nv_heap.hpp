@@ -2,68 +2,115 @@
  * nv_heap.hpp
  *
  * NvHeap: runtime-allocated blocks of flash that survive a reboot - and,
- * on a bench that reflashes page-selectively, a reflash.
+ * on a bench that reflashes page-selectively, a reflash. A program gets
+ * a table of kilobytes (a calibration table, a font, a captured
+ * waveform) stored under an id of its own in the flash its image does
+ * not occupy, found again at the next boot by that id, and told at boot
+ * which of its tables came through intact. The design is
+ * docs/design/nv-heap.md.
  *
- * WHAT IT IS FOR. The EEPROM (util/nv_record.hpp) is the right home for
+ * The smallest use: one heap object over the family's flash media,
+ * mount() once at boot, find(id) for a table that came through, and
+ * alloc(id, len), append(bytes) and seal() to write a new one:
+ *
+ *     using Heap = brio::NvHeap<brio::NvmFlash, 8, 2>;   // the AVR's media
+ *     Heap heap;
+ *
+ *     const Heap::MountReport& r = heap.mount();   // reads only
+ *     if (const auto b = heap.find(id)) {          // an NvBlock
+ *         b->read(0, std::span<uint8_t>(buf, n));  // bounds-checked
+ *     }
+ *     std::optional<Heap::Writer> w = heap.alloc(id, len);   // erases
+ *     w->append(std::span<const uint8_t>(bytes, len));       // any chunking
+ *     w->seal();                                    // the commit point
+ *
+ * Nothing is published until seal(): a power loss before it leaves the
+ * heap exactly as it was. rewrite(id) is the exception that costs: it
+ * erases the old copy at once (below, at rewrite()).
+ *
+ * Who calls what, and from where. A heap is an object with RAM state
+ * (the index, the reservations, the mount report) and no critical
+ * section, so one context uses it (nothing checks that). Every verb is a
+ * synchronous call that returns when its media calls have. mount(),
+ * find() and the readers only read the flash. alloc() and rewrite()
+ * erase the block's pages, append() programs a write cell each time one
+ * fills, seal() programs the last cell and then erases and programs a
+ * map page; each of those waits for the media for as long as the erase
+ * or program takes, and whether the core runs, stalls or runs with
+ * interrupts masked meanwhile is the media's (docs/design/nv-heap.md,
+ * "The `FlashMedia` contract", its realizations table: on the AVR DA/DB
+ * a write stalls the CPU for the page's whole erase, on the SAM C21 and
+ * the STM32G0 it stalls nothing, on the RP2040 every erase or program is
+ * a window with interrupts masked). The bytes a caller hands append()
+ * are copied before it returns. An NvBlock is an address and a length,
+ * and reading through it reads the flash: after a rewrite() or a seal of
+ * the same id it may no longer describe what is there, and find() is
+ * asked again.
+ *
+ * What it is for. The EEPROM (util/nv_record.hpp) is the right home for
  * a handful of small values rewritten often: byte-granular, 100k cycles.
  * It is the wrong home for a calibration table, a font, a captured
  * waveform - kilobytes, written once in a while, read constantly. That
  * belongs in the flash the image does not occupy, and the only thing
  * standing between an application and that flash is bookkeeping: which
  * pages are free, where a block starts, how long it is, and whether what
- * is there is still the thing that was written.
+ * is there is still the thing that was written (docs/design/nv-heap.md,
+ * "What it is for").
  *
- * THE MAP PAIR. All the bookkeeping lives in ONE structure, held in the
+ * The map pair. All the bookkeeping lives in one structure, held in the
  * last `map_pages` erase units of the part - an address anchored to the
  * silicon, not to the linker, so no image can be built over it by
  * accident. A map version is one whole-unit write: header, up to
  * `max_blocks` entries, CRC. Versions ping-pong: every mutation erases
- * the OLDEST of the rotation pages and writes the next version there
+ * the oldest of the rotation pages and writes the next version there
  * with seq + 1, and the current map is the highest-seq version whose
  * magic and CRC verify. Atomicity is therefore structural, not
  * defensive - the old version rules the heap until the new one is fully
  * down, and a version torn by a power loss simply fails its CRC. (The
  * same discipline is what keeps an ECC-guarded flash happy: no cell is
- * ever programmed twice between erases.)
+ * ever programmed twice between erases.) (docs/design/nv-heap.md, "The
+ * map pair".)
  *
- * BLOCKS ARE PURE PAYLOAD. No headers, no chaining, no in-band markers:
+ * Blocks are pure payload. No headers, no chaining, no in-band markers:
  * a block is `size_pages` erase units of application bytes and nothing
  * else, so find() hands out an address and a length and the reader is
  * free to walk it however it likes. Everything that describes it -
  * record id, length, checksum, flags - is in the map entry.
  *
- * SURVIVAL-AWARE MOUNT, AND WHY THE BUILD ID IS ONLY A DIAGNOSTIC.
- * mount() is READ-ONLY: it costs no erase cycle at boot. It picks the
- * current version, then verifies EVERY listed block by reading its
+ * Survival-aware mount, and why the build id is only a diagnostic.
+ * mount() is read-only: it costs no erase cycle at boot. It picks the
+ * current version, then verifies every listed block by reading its
  * payload and checking the recorded CRC. What verifies is served by
  * find(); what does not is reported as lost and disappears from the next
  * published version - its pages are free again the moment the map knows
  * it. The application therefore learns at boot exactly which of its
  * tables came through and which it must recreate. Validity is judged by
- * the CHECKSUM, never by which build wrote the block: the build id
+ * the checksum, never by which build wrote the block: the build id
  * travels in the map because it is worth seeing, not because anything
- * decides on it. A table whose MEANING changes between firmware
+ * decides on it. A table whose meaning changes between firmware
  * versions handles that in its own record id or in its own payload
- * versioning - the heap cannot know it.
+ * versioning - the heap cannot know it (docs/design/nv-heap.md,
+ * "Survival-aware mount").
  *
- * PLACEMENT. The free flash is described by the media as ZONES, each a
+ * Placement. The free flash is described by the media as zones, each a
  * ceiling and a floor, both of which are runtime facts (on a real target
- * they come from linker symbols). A new block goes as HIGH as it fits:
+ * they come from linker symbols). A new block goes as high as it fits:
  * in each zone the topmost gap among the live blocks that accommodates
- * it, and then the zone where the placed block ends up FARTHEST from its
+ * it, and then the zone where the placed block ends up farthest from its
  * own floor. No growth model is assumed - the rule measures the free
  * space that is actually there, which is the only honest thing to do
  * when whether the code or the read-only data grows next is a property
- * of the application and not of the allocator.
+ * of the application and not of the allocator (docs/design/nv-heap.md,
+ * "Placement: top-down, most clearance wins").
  *
- * THE MAP-HOME GUARD. The linker knows nothing about the map pages, so
+ * The map-home guard. The linker knows nothing about the map pages, so
  * nothing stops an image from growing its read-only data up into them.
  * mount() refuses - with a distinct status and no write of any kind - if
  * a zone floor has climbed into the map home, because publishing a map
  * version would then erase a page of the running image's own constants.
  * A refused mount serves nothing and mutates nothing.
  *
- * WHAT IS DELIBERATELY NOT HERE. There is no free() and there are no
+ * What is deliberately not here. There is no free() and there are no
  * tombstones: a block is superseded by allocating its id again (the old
  * one stays current until the new one is sealed, so a power loss in
  * between loses nothing), and a block whose payload no longer verifies
@@ -72,9 +119,10 @@
  * often does not belong in flash at all (that is what the EEPROM is
  * for). There is no journaling or ring log: a growing accumulator is a
  * different structure with different invariants and it waits for a real
- * user.
+ * user (docs/design/nv-heap.md, "Not covered yet"; the small values a
+ * part without EEPROM keeps in flash are util/nv_journal.hpp's).
  *
- * WEAR. Reads and mount() cost nothing. Each mutation costs one erase of
+ * Wear. Reads and mount() cost nothing. Each mutation costs one erase of
  * one map page plus the erases of the block being written; the rotation
  * spreads the map's own wear over `map_pages` pages, so the map endures
  * map_pages x (the part's per-page cycle budget) mutations.
@@ -113,7 +161,7 @@ struct FlashZone {
  *  - erase_size   bytes in one erase unit. The allocation granularity:
  *                 a block occupies whole erase units, because a
  *                 neighbour's erase would otherwise take it down.
- *  - write_cell   bytes in one program unit, written ONCE between
+ *  - write_cell   bytes in one program unit, written once between
  *                 erases (a word here, an ECC-guarded double-word
  *                 there). Kept separate from erase_size on purpose:
  *                 "page" means different things on different silicon.
@@ -122,7 +170,7 @@ struct FlashZone {
  *                 constant and a multiple of erase_size.
  *  - zone_count   how many usable bands the media reports.
  *  - zones()      the bands themselves, indexable, `zone_count` of them.
- *                 A RUNTIME call: the floors come from the image being
+ *                 A runtime call: the floors come from the image being
  *                 built and are not knowable when the heap is compiled.
  *  - read(addr, dst)      fill dst from flash. Never fails: a read of
  *                         erased flash returns the erased pattern.
@@ -132,10 +180,14 @@ struct FlashZone {
  *                         programmed. False = nothing (or not all of it)
  *                         went down.
  *  - erase(addr)          erase the one unit at addr (a multiple of
- *                         erase_size).
+ *                         erase_size). False = the erase failed.
  *  - build_id()           an identifier of the running image, recorded
  *                         in every map version. Diagnostic only - no
  *                         decision in this header consults it.
+ *
+ * The concept has no readiness verb: the heap calls read(), program()
+ * and erase() back to back, so each returns when its operation is
+ * over.
  */
 template <typename M>
 concept FlashMedia = requires(uint32_t addr, uint8_t index,
@@ -158,7 +210,7 @@ enum class NvHeapStatus : uint8_t {
     ok,             ///< a current map version was read (losses are in the report)
     empty,          ///< no version verified: virgin flash, or all of it unreadable
     bad_geometry,   ///< the media's zones are malformed, or a floor has climbed
-                    ///< into the map home - REFUSED, nothing was written
+                    ///< into the map home - refused, nothing was written
 };
 
 /**
@@ -200,8 +252,11 @@ struct NvBlock {
 /**
  * The flash block allocator. One instance per media; the constructor is
  * trivial and constexpr (RAM only, no global constructor, no flash
- * touched), and NOTHING happens until mount() is called - after the
- * clock is up, where a failure can be reported.
+ * touched), and nothing happens until mount() is called - after the
+ * clock is up, where a failure can be reported. The object is not
+ * copyable, and a Writer handle holds a pointer back at it (an
+ * NvHeap*), so the heap must outlive every Writer it hands out - a
+ * global, as in the smallest use above, meets that at once.
  *
  *   max_blocks  how many blocks may be live at once. It sizes the RAM
  *               index and the map entry table, and is static_asserted
@@ -285,9 +340,12 @@ public:
      * Costs no erase cycle: this is the boot path.
      *
      * Returns the report, which is also available afterwards from
-     * report(). A bad_geometry verdict leaves the heap CLOSED - alloc(),
+     * report(). A bad_geometry verdict leaves the heap closed - alloc(),
      * rewrite() and find() all refuse - because the only thing a heap
      * whose map home is occupied by the running image can do is damage.
+     * The time it takes is the reads: every page of the map's rotation
+     * and every listed block's payload, which mount() reads whole to
+     * check its CRC.
      */
     const MountReport& mount() {
         report_ = MountReport{};
@@ -371,7 +429,8 @@ public:
 
     // ---- reading -----------------------------------------------------------
 
-    /// The live block with this record id, if the heap holds one.
+    /// The live block with this record id, if the heap holds one; nothing
+    /// before a mount that opened the heap. Reads RAM only.
     std::optional<NvBlock<Media>> find(uint16_t id) const {
         if (!mounted_) {
             return std::nullopt;
@@ -389,9 +448,10 @@ public:
 
     /**
      * Reserve room for `len` bytes under `id` and erase it, ready to be
-     * filled. Nothing about the heap changes until the returned handle
-     * is sealed: a block with the same id stays live and findable, and a
-     * power loss before the seal leaves the heap exactly as it was.
+     * filled; returns when the erase is over. Nothing about the heap
+     * changes until the returned handle is sealed: a block with the same
+     * id stays live and findable, and a power loss before the seal
+     * leaves the heap exactly as it was.
      *
      * Refused (nothing written) when the heap is not mounted, when len
      * is 0, when no gap in any zone fits, when the block table is full
@@ -431,13 +491,17 @@ public:
     }
 
     /**
-     * Refill a live block IN PLACE: same address, same reserved size,
+     * Refill a live block in place: same address, same reserved size,
      * new contents. The payload pages are erased at once, so from this
      * moment until the seal the block's recorded checksum no longer
-     * describes what is on the flash - a power loss here is a LOSS, and
+     * describes what is on the flash - a power loss here is a loss, and
      * the next mount() reports it as one. That is the honest cost of
      * rewriting a block without a second copy of it; an application that
-     * cannot afford it allocates the id twice and alternates.
+     * cannot afford it supersedes the block with alloc(id) instead,
+     * which writes the new copy elsewhere and keeps the old one current
+     * until the seal (it needs the room for both). Nothing when
+     * the heap is not mounted, no live block has this id, every
+     * reservation slot is taken, or the erase fails.
      */
     std::optional<Writer> rewrite(uint16_t id) {
         if (!mounted_) {
@@ -517,10 +581,12 @@ public:
         bool failed() const { return failed_; }
         bool sealed() const { return done_; }
 
-        /// Append bytes to the block. False when the handle is spent,
-        /// when the payload would overrun the reservation, or when the
-        /// media refused a program - and in the last two cases the
-        /// handle is failed for good.
+        /// Append bytes to the block. The bytes are copied (a whole write
+        /// cell programmed each time one fills, waiting for it) before
+        /// this returns. False when the handle is spent, when the
+        /// payload would overrun the reservation, or when the media
+        /// refused a program - and in the last two cases the handle is
+        /// failed for good.
         bool append(std::span<const uint8_t> data) {
             if (heap_ == nullptr || failed_ || done_) {
                 return false;
@@ -546,10 +612,13 @@ public:
         }
 
         /// Flush the partial program unit (padded with the erased
-        /// pattern) and PUBLISH: a new map version listing this block
-        /// and every survivor except a previous block of the same id.
-        /// This is the commit point - before it, nothing about the heap
-        /// has changed; after it, the new block is the current one.
+        /// pattern) and publish: a new map version listing this block
+        /// and every survivor except a previous block of the same id,
+        /// one erase and one program of a map page. This is the commit
+        /// point - before it, nothing about the heap has changed; after
+        /// it, the new block is the current one. False, the handle
+        /// failed and the map unchanged, when a program or the map's
+        /// erase is refused.
         bool seal() {
             if (heap_ == nullptr || failed_ || done_) {
                 return false;
@@ -636,7 +705,7 @@ private:
     // ---- geometry ----------------------------------------------------------
 
     /// The zones must be inside the part, right way up, and - the guard
-    /// this whole check exists for - none of them may have a FLOOR above
+    /// this whole check exists for - none of them may have a floor above
     /// the map home. A floor is the first byte the heap may use, so
     /// everything below it belongs to the running image: a floor inside
     /// the map home means the image's own bytes are sitting where a map
@@ -711,7 +780,7 @@ private:
         return lowest;
     }
 
-    /// The TOPMOST window of `need` free pages in this zone.
+    /// The topmost window of `need` free pages in this zone.
     bool topmost_fit(const FlashZone& z, uint16_t need, uint16_t& page) const {
         if (z.empty()) {
             return false;

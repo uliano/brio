@@ -1,105 +1,170 @@
 /*
  * rtc.hpp
  *
- * The real-time clock and the backup domain around it (RM ch. 6 for the
- * counter, ch. 4 for the backup registers and the tamper input, 3.3.3
- * and 3.4.9 for the oscillator and the clock select, 2.4.1 for the one
- * bit that unlocks all of it):
+ * The real-time clock of the CH32V203 and the CH32V303 and the backup
+ * domain around it: a 32-bit counter behind a 20-bit prescaler, an alarm
+ * that can end a low-power mode, and sixteen-bit data registers that a
+ * system reset does not clear. A program uses it for time that survives
+ * a reset, for a timed wake, or for a few words kept across a reboot.
+ * Three monostates (classes with only static members, never
+ * instantiated), after RM ch. 6 for the counter, ch. 4 for the backup
+ * registers and the tamper input, 3.3.3 and 3.4.9 for the oscillator and
+ * the clock select, and 2.4.1 for the one bit that unlocks all of it:
  *
- *   RtcDomain   the DOMAIN: PWR_CTLR's write enable and the whole of
+ *   RtcDomain   the domain: PWR_CTLR's write enable and the whole of
  *               RCC_BDCTLR - the LSE with its bypass, RTCSEL one-way
  *               with BDRST the way back, RTCEN.
- *   Rtc         the COUNTER: a 32-bit up-counter behind a 20-bit
+ *   Rtc         the counter: a 32-bit up-counter behind a 20-bit
  *               prescaler, with an alarm, a second event and an
  *               overflow event.
- *   Bkp         the BACKUP REGISTERS, the tamper input that wipes them,
+ *   Bkp         the backup registers, the tamper input that wipes them,
  *               and the three things this block can put on the TAMPER
  *               pad.
  *
- * THIS IS NOT THE CALENDAR RTC of the newer ST parts. There is no BCD
+ * The smallest use, as docs/ch32vx03/rtc.md's "How to use it" writes
+ * it, a one-second counter on the board's crystal from a cold boot:
+ *
+ *     brio::RtcDomain::unlock(true);
+ *     brio::RtcDomain::lse_enable(true);
+ *     if (!brio::RtcDomain::lse_wait_ready()) {
+ *         // no crystal on this board: fall back on the LSI, whose rate is nominal
+ *     }
+ *     (void)brio::RtcDomain::open(brio::RtcClockSource::lse);
+ *     (void)brio::Rtc::synchronize();
+ *     (void)brio::Rtc::configure<brio::RtcConfig{.prescaler = brio::rtc_prescaler_for(32768)}>();
+ *
+ *     const uint32_t seconds = brio::Rtc::count();
+ *
+ * unlock() comes first, at every boot: with DBP clear the domain ignores
+ * a write, RCC_BDCTLR's LSEON included (measured), and every reset leaves
+ * DBP clear while what is behind it survives. open() answers false when
+ * a different clock source already stands (RTCSEL is one-way and
+ * survives a system reset), and leaves the counter on that source;
+ * open(source, true) resets the domain first when the source standing
+ * differs from the one asked. synchronize() runs before a count is
+ * believed. Each answer the excerpt discards is described at its verb
+ * below.
+ *
+ * Who calls what. The setup verbs - RtcDomain's, Bkp::open(), clock()
+ * and reset_block(), Rtc::configure() and the single writes - belong to
+ * main() at boot, before the kernel's run(), or to one active object's
+ * handler (an active object: a component of a brio program with its own
+ * event queue, served one event at a time by the kernel). RtcDomain's
+ * and Bkp's gate verbs are unguarded read-modify-writes of RCC_BDCTLR,
+ * of RCC_PB1PCENR (whose other bits are other drivers' gates) and of
+ * PWR_CTLR, the last through device.hpp's pwr_ctlr_store(), which
+ * carries the RAM-retention bits as the program last set them. Nothing
+ * in this file reads the clock task's rate. What waits:
+ * lse_wait_ready() for up to its `spins` turns; synchronize(),
+ * wait_write_finished(), begin_config() and end_config() for up to
+ * `sync_spins`; and every Rtc verb that writes the prescaler, the
+ * counter, the alarm or the interrupt enables waits through them for
+ * RTOFF before and after its store, answering false when a bound runs
+ * out. The bounds count polling turns, so their length in time follows
+ * the core's clock. count() and divider() retry with no bound while the
+ * two reads of the high half disagree (measured on count(): the retry
+ * never fired; divider()'s is not measured). Nothing here masks
+ * interrupts and nothing arbitrates between contexts, so the writing
+ * verbs belong to one context at a time; clear() and isr() store CTLRL
+ * with CNF clear, so one that runs while another context holds the
+ * configuration window open closes it (derived from the store, not
+ * measured). The reads - count(), divider(), flags() and its three
+ * single-flag forms, interrupts(), the gate and Bkp readers - only
+ * load, and are legal from any context. Rtc::isr(), Rtc::alarm_isr()
+ * and Bkp::isr() are the bodies of the vectors the crt names
+ * rtc_handler, rtc_alarm_handler and tamper_handler, called from the
+ * program's binding (`BRIO_CH32_VECTOR(name) { body }`, pfic.hpp) and
+ * nowhere else; a vector left unbound runs the crt's weak
+ * default_handler, a spin loop, with no fault and no message.
+ *
+ * This is not the calendar RTC of the newer ST parts. There is no BCD
  * register, no date, no sub-second, no wake-up timer: what the silicon
- * keeps is a NUMBER, one that counts a tick whose period the prescaler
+ * keeps is a number, one that counts a tick whose period the prescaler
  * decides, and the calendar is the program's own arithmetic over it.
  * The counter and the prescaler live in the backup domain and survive
  * a system reset, a Standby wake and - with a battery on VBAT - the
- * loss of VDD; the CONTROL register does not, which is why a program
+ * loss of VDD; the control register does not, which is why a program
  * that comes back finds its count intact and its interrupts disarmed.
  *
- * THREE GATES BEFORE A SINGLE REGISTER ANSWERS. 4.2: the PWR block's
+ * Three gates before a single register answers. 4.2: the PWR block's
  * bus clock and the BKP block's must be open in RCC_PB1PCENR, and
  * PWR_CTLR.DBP must be set, before the backup registers and the RTC's
- * can be reached at all. `RtcDomain::unlock()` is the second of those
- * and opens the first on the way; `Bkp::open()` adds the third.
+ * can be reached at all. `RtcDomain::unlock()` sets DBP and opens the
+ * PWR block's bus clock on the way; `Bkp::open()` adds the BKP block's.
  *
- * TWO DISCIPLINES THE CHAPTER IMPOSES, AND EVERY VERB HERE OBEYS THEM
+ * Two disciplines the chapter imposes, and every verb here obeys them
  * (6.2.3):
  *
- *  - WRITING is a WINDOW. Wait for RTOFF, set CNF, write one or more of
+ *  - Writing is a window. Wait for RTOFF, set CNF, write one or more of
  *    the four backup-domain registers, clear CNF, wait for RTOFF again.
  *    Between the last two steps the write is crossing into the RTC's
  *    own clock domain, and a second write started there is lost. Every
  *    verb below that touches the prescaler, the counter or the alarm
- *    opens and closes that window; `configure()` opens ONE window for
+ *    opens and closes that window; `configure()` opens one window for
  *    all three, which is what the chapter's "one or more" is for.
- *  - READING needs the domains SYNCHRONIZED. The RTC's registers are
+ *  - Reading needs the domains synchronized. The RTC's registers are
  *    clocked by RTCCLK and read over PB1, so after a system reset, a
  *    power reset or a wake from Stop or Standby the values the bus
  *    sees are stale until an RTCCLK edge has passed. RSF is the flag
  *    that says an edge has: `synchronize()` clears it and waits for the
- *    hardware to set it, and that is what a program calls ONCE after a
+ *    hardware to set it, and that is what a program calls once after a
  *    reset before it believes a count. Measured at 14 us on the
  *    crystal, inside the thirty a period would cost.
  *
- *    THE FLAGS CROSS THAT BOUNDARY FASTER THAN THE COUNTER DOES.
+ *    The flags cross that boundary faster than the counter does.
  *    Measured on the overflow: at the instant OWF stands, the count the
  *    bus reads is still the one before the wrap, and the wrapped value
  *    appears a moment later. A handler that wants to know where the
- *    counter is READS IT, and does not infer it from the event.
+ *    counter is reads it, and does not infer it from the event.
  *
- * THE COUNTER IS THIRTY-TWO BITS IN TWO SIXTEEN-BIT REGISTERS, and the
+ * The counter is thirty-two bits in two sixteen-bit registers, and the
  * chapter does not say what happens when the low half rolls over
  * between the two reads. It is a carry race whatever the silicon
  * intends, so `count()` reads the high half, the low half and the high
  * half again and retries while the first and the last disagree - the
- * driver's own care, not a rule of the chapter. MEASURED at 32768 ticks
+ * driver's own care, not a rule of the chapter. Measured at 32768 ticks
  * a second over four million reads and a roll-over of the low half: the
- * retry never fired and no read was ever torn - but THE COUNT DOES STEP
- * BACKWARDS by up to three ticks now and then, which is a read crossing
+ * retry never fired and no read was ever torn - but the count does step
+ * backwards by up to three ticks now and then, which is a read crossing
  * back out of the RTC's clock domain and seeing a stale copy. A program
  * that reads this counter faster than it ticks cannot assume the number
  * only grows.
  *
- * THE ALARM AND THE PRESCALER RELOAD ARE WRITE-ONLY: RTC_ALRMH/L and
+ * The alarm and the prescaler reload are write-only: RTC_ALRMH/L and
  * RTC_PSCRH/L cannot be read back at all (6.3.3, 6.3.4, 6.3.9, 6.3.10).
- * What CAN be read is the prescaler's live DOWN-counter, RTC_DIVH/L,
+ * What can be read is the prescaler's live down-counter, RTC_DIVH/L,
  * which is `divider()` - and which is also the fraction of the current
  * tick, the finest time this block offers.
  *
- * THE ALARM REACHES TWO VECTORS. The second, alarm and overflow events
- * share the RTC's own line (`Irq::rtc`); the ALARM ALONE also reaches
+ * The alarm reaches two vectors. The second, alarm and overflow events
+ * share the RTC's own line (`Irq::rtc`); the alarm alone also reaches
  * EXTI line 17 and its own line (`Irq::rtc_alarm`), which is the path
  * that survives a Stop, because an EXTI line is asynchronous and needs
  * no clock. `wake_line` names that line, `arm_wake()` configures it
  * and `alarm_isr()` is the body of the handler on it - clearing the
  * EXTI flag through exti.hpp and the RTC's own ALRF, because a flag
- * left standing re-enters the handler for ever. MEASURED: the line
- * fires WITH RTC_CTLRH's own alarm enable CLEAR, so the event leaves
+ * left standing re-enters the handler for ever. Measured: the line
+ * fires with RTC_CTLRH's own alarm enable clear, so the event leaves
  * the peripheral by itself and the wake costs no vector of the RTC's -
  * the opposite direction of this family's other finding, that an EXTI
- * line INTO a peripheral needs that peripheral's event enable.
+ * line into a peripheral needs that peripheral's event enable.
  *
- * AND THE ALARM FIRES AS THE COUNTER LEAVES THE VALUE IT WAS ARMED AT.
- * Measured with the handler reading the count: the number it sees is
- * ALR + 1, not ALR. A program that wants something done AT a count arms
- * the alarm at that count and finds the counter one further on.
+ * And the alarm fires as the counter leaves the value it was armed at.
+ * Measured with the handler reading the count, five ticks after a count
+ * set to zero and an alarm at four on both parts: the number it sees is
+ * ALR + 1 on the CH32V203C8T6 and ALR itself on the CH32V303VCT6, where
+ * the flag reaches the bus before the count does. A program that wants
+ * something done at a count arms the alarm at that count and takes the
+ * count it reads in the handler for what the part makes it, one further
+ * on or not yet (docs/ch32vx03/rtc.md, "The alarm reaches two vectors").
  *
- * WHAT RTCCLK MAY BE, AND THE ONE NUMBER THAT IS NOT KNOWABLE. RTCSEL
+ * What RTCCLK may be, and the one number that is not knowable. RTCSEL
  * takes the LSE, the LSI or the HSE divided (3.4.9). The first two are
  * plain; the third is not, because on the CH32V20x_D6 the division is
- * 512 OR 128 and the register description keys the choice on the LOT
- * NUMBER. `device::rtc_hse_div` states both, `rtc_hse_divider_known`
+ * 512 or 128 and the register description keys the choice on the lot
+ * number. `device::rtc_hse_div` states both, `rtc_hse_divider_known`
  * says whether they agree, and a program that clocks the RTC from the
- * crystal on a part where they do not agree MEASURES which one it has -
+ * crystal on a part where they do not agree measures which one it has -
  * against the second event, which is the only ruler in the room. (One
  * CH32V203C8 measured on this bench divides by 128: a reload asked for
  * one hertz out of 15625 Hz ticked at four, which puts RTCCLK at
@@ -107,12 +172,12 @@
  * not of the part, which is exactly why the driver measures instead of
  * choosing.)
  *
- * WHAT IS NOT HERE. PWR_CTLR's other bits - the sleep modes, the PVD,
+ * What is not here. PWR_CTLR's other bits - the sleep modes, the PVD,
  * the RAM retention - belong to the power chapter and its own file;
  * the register itself is device.hpp's, like RCC's, because two
  * chapters reach it and one of its bits is the door to this one.
  * The LSI stays clock.hpp's (`Rcc::lsi_start()`), because it is not a
- * backup-domain oscillator: only its SELECTION as RTCCLK is here.
+ * backup-domain oscillator: only its selection as RTCCLK is here.
  */
 
 #pragma once
@@ -217,6 +282,12 @@ struct RtcDomain {
      * what the bit READS BACK as, so a caller can insist rather than
      * assume - with the bus clock shut the write goes nowhere and this
      * answers false.
+     *
+     * A setup verb, the first call of every boot (a reset leaves DBP
+     * clear, measured): it opens PWREN, an unguarded read-modify-write
+     * of RCC_PB1PCENR, and stores PWR_CTLR through device.hpp's
+     * pwr_ctlr_store(), which carries the RAM-retention bits as the
+     * program last set them. It waits for nothing.
      */
     static bool unlock(bool on) {
         pwr_bus_clock(true);
@@ -247,6 +318,10 @@ struct RtcDomain {
 
     // ---- the low-speed crystal (3.3.3) --------------------------------------
 
+    /// LSEON: start or stop the 32.768 kHz crystal, a read-modify-write
+    /// of RCC_BDCTLR that waits for nothing (lse_wait_ready() is the
+    /// wait). Needs DBP: with it clear the store is dropped (measured),
+    /// and this verb does not unlock on its own as open() does.
     static void lse_enable(bool on) {
         rcc()->BDCTLR = on ? (rcc()->BDCTLR | rcc_lseon) : (rcc()->BDCTLR & ~rcc_lseon);
     }
@@ -257,7 +332,9 @@ struct RtcDomain {
 
     /// Bounded wait for LSERDY. False = the crystal did not start in
     /// `spins` turns, which is a FACT ABOUT THE BOARD (no crystal
-    /// fitted, or a bad one) and not an error to swallow.
+    /// fitted, or a bad one) and not an error to swallow. The bound
+    /// counts polling turns, so its length in time follows the core's
+    /// clock; nothing is masked while it spins.
     static bool lse_wait_ready(uint32_t spins = lse_ready_spins) {
         for (uint32_t i = 0; i < spins; ++i) {
             if (lse_ready()) {
@@ -327,9 +404,17 @@ struct RtcDomain {
      * crystal has to do on a board whose domain came up on something
      * else.
      *
-     * Does NOT start the LSE or the LSI: which oscillator to run and
+     * Does not start the LSE or the LSI: which oscillator to run and
      * how long to wait for it is the application's, and the
      * enable/wait pairs are right here and in clock.hpp.
+     *
+     * A setup verb, from main() or one active object's handler; it
+     * waits for nothing. When a different source stands and `wipe` is
+     * not given, the answer is false, nothing is written to RTCSEL and
+     * the counter is left on the source that stands, so a
+     * prescaler computed for the source asked for makes a tick of
+     * another length. With `wipe`, the reset costs the counter, the
+     * prescaler, the alarm and the backup data registers.
      */
     static bool open(RtcClockSource s, bool wipe = false) {
         if (!unlock(true)) {
@@ -441,9 +526,13 @@ constexpr bool rtc_config_valid(const RtcConfig& c) { return rtc_prescaler_valid
  *   (void)brio::Rtc::configure({.prescaler = brio::rtc_prescaler_for(32768)});
  *   const uint32_t now = brio::Rtc::count();
  *
- * EVERY WRITE VERB ANSWERS A BOOL, and a false means the hardware never
- * reported the previous write finished (RTOFF stayed low) or the value
- * does not fit its field - never that the write was silently dropped.
+ * Every verb that writes the prescaler, the counter, the alarm or the
+ * interrupt enables answers a bool, and a false means the hardware
+ * never reported the previous write finished (RTOFF stayed low within
+ * `sync_spins` turns) or the value does not fit its field. A true does
+ * not by itself prove the write landed: none of these verbs checks
+ * DBP, and with DBP clear the RTC's registers ignore a write (4.2).
+ * clear() is the one write here that answers nothing: one store.
  */
 struct Rtc {
     Rtc() = delete;
@@ -480,9 +569,13 @@ struct Rtc {
 
     /**
      * Clear RSF and wait for the hardware to set it again - the read
-     * discipline of 6.2.3, which a program runs ONCE after a reset or a
+     * discipline of 6.2.3, which a program runs once after a reset or a
      * wake before it believes a count. It costs up to one RTCCLK
      * period, which on the crystal is thirty microseconds.
+     *
+     * From main() or an active object's handler; it spins, unmasked,
+     * for up to `spins` turns, and false means no RTCCLK edge set RSF
+     * in that bound - a count read then is whatever the bus holds.
      */
     static bool synchronize(uint32_t spins = sync_spins) {
         regs().CTLRL = static_cast<uint16_t>(rtc_ctlrl_flags & ~rtc_rsf);
@@ -521,6 +614,11 @@ struct Rtc {
      * program uses at boot: the chapter's own "write operation to one
      * or more RTC registers" means the prescaler, the counter and the
      * alarm cost one crossing between them and not three.
+     *
+     * From main() or one active object's handler: it spins, unmasked,
+     * for RTOFF before the window and again after it, each up to
+     * `sync_spins` turns. False for a prescaler past the twenty-bit
+     * field (nothing written) or a bound that ran out.
      */
     static bool configure(const RtcConfig& c) {
         if (!rtc_config_valid(c)) {
@@ -542,9 +640,11 @@ struct Rtc {
         return end_config();
     }
 
-    /// The same, with the configuration a CONSTANT: a prescaler the
+    /// The same, with the configuration a constant: a prescaler the
     /// twenty-bit field cannot hold is a compile error here, where the
-    /// run-time form can only answer false.
+    /// run-time form can only answer false - `rtc_prescaler_none`
+    /// included. The waits and the false of a bound are the run-time
+    /// form's.
     template <RtcConfig cfg>
     static bool configure() {
         static_assert(rtc_prescaler_valid(cfg.prescaler),
@@ -600,6 +700,11 @@ struct Rtc {
      * the low, then the high again, and the whole thing is taken again
      * while the two high reads disagree. The chapter says nothing about
      * this; it is arithmetic, not silicon.
+     *
+     * Loads only, legal from any context, a handler included; the
+     * retry has no bound and, measured, never fired. A read faster than
+     * the counter ticks can come back up to three ticks below the one
+     * before it (the opening comment).
      */
     static uint32_t count() {
         for (;;) {
@@ -660,7 +765,11 @@ struct Rtc {
     /**
      * The RTC vector's body (`Irq::rtc`): the flags that stood,
      * cleared, and handed back for the program to read. The second, the
-     * alarm and the overflow all arrive here.
+     * alarm and the overflow all arrive here. Called from the program's
+     * binding of the vector the crt names rtc_handler
+     * (`BRIO_CH32_VECTOR(rtc_handler) { ... }`, pfic.hpp) and nowhere
+     * else; it waits for nothing, and its one store keeps CNF clear
+     * (the opening comment).
      */
     [[gnu::always_inline]] static uint16_t isr() {
         const uint16_t f = flags();
@@ -695,6 +804,8 @@ struct Rtc {
      * (`Irq::rtc_alarm`): the EXTI line's flag cleared first and the
      * RTC's ALRF after it, because either one left standing re-enters
      * the handler for ever. Answers whether the alarm really stood.
+     * Called from the program's binding of the vector the crt names
+     * rtc_alarm_handler and nowhere else; it waits for nothing.
      */
     [[gnu::always_inline]] static bool alarm_isr() {
         const bool stood = alarmed();
@@ -773,8 +884,9 @@ enum class BkpPulse : uint8_t {
  * beyond the count is refused - by static_assert where the index is a
  * constant, by an empty optional where it is not.
  *
- * THE TAMPER PAD IS PC13, WHICH TWO-THIRDS OF THIS SERIES DO NOT BOND.
- * The block's registers answer on every part and every verb here
+ * THE TAMPER PAD IS PC13, WHICH SIX OF THE NINE CH32V203 PARTS DO NOT
+ * BOND (every CH32V303 does: the part tables' port C). The block's
+ * registers answer on every part and every verb here
  * writes them; what a package decides is whether the pad comes out.
  * `has_tamper_pad` is that fact, and the pad itself is the PROGRAM's to
  * configure - nothing here claims a pin. AND THE BLOCK TAKES THE PAD
@@ -990,7 +1102,9 @@ struct Bkp {
     /**
      * The tamper vector's body (`Irq::tamper`): whether the event
      * stood, both flags cleared. The data registers are already gone by
-     * the time this runs - that is what the block is for.
+     * the time this runs - that is what the block is for. Called from
+     * the program's binding of the vector the crt names tamper_handler
+     * and nowhere else; one store, no wait.
      */
     [[gnu::always_inline]] static bool isr() {
         const bool stood = tamper_interrupt_flag() || tamper_event();

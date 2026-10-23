@@ -1,6 +1,86 @@
 # I2C (RP2040)
 
-Documents of record: the RP2040 datasheet (build 3184e62), 4.3 (the
+This document is for a programmer who has an I2C device on an RP2040 -
+a sensor, a converter, an EEPROM - and wants to talk to it through the
+bus arbiter ([design/i2c-bus.md](../design/i2c-bus.md) is the model),
+or who wants this chip to answer as a client on someone else's bus.
+The chip's two I2C blocks are Synopsys's DW_apb_i2c, so the driver is
+written once in the IP stratum (`brio/dw_apb_i2c/`) and this stratum
+supplies the chip's part and the public names: `DwApbI2c<n>` the
+instance, `I2cHost<n, pins, ...>` the host engine `util/i2c_bus.hpp`
+drives, `I2cClient<n, pins>` the client role. The arbiter, `I2cBus`,
+is an active object (a component of a brio program with its own event
+queue, served one event at a time by the kernel,
+[docs/learn/introduction.md](../learn/introduction.md)): devices post
+it requests, it runs them one tenure at a time on the host - a tenure
+being one START to its STOP - and replies to each.
+
+The smallest use, a register read through the arbiter, from "How to
+use it" below:
+
+```cpp
+constexpr brio::I2cPins pins{.scl = 13, .sda = 12};
+using Bus = brio::I2cHost<0, pins>;
+using I2c = brio::I2cBus<Bus, P, 4, brio::BusPassThrough, brio::ticks_from_ms<P>(20)>;
+
+Bus::init(clock);
+
+Bus::Request r{};
+r.addr = 0x48;
+r.tx = brio::lend<brio::Lease::reply>(reg);   r.tx_len = 1;    // the register
+r.rx = brio::lend<brio::Lease::reply>(value); r.rx_len = 2;    // then its value
+r.speed = brio::I2cSpeed::fast_400k;
+r.reply = brio::reply_to<Sensor, brio::I2cDone>();
+brio::post<I2c>(r);
+
+extern "C" void isr_i2c0() {
+    if (Bus::isr()) { brio::post<I2c>(brio::TransferDone{Bus::status()}); }
+}
+```
+
+Line by line: `pins` names I2C0's SCL and SDA pads, GP13 and GP12, which
+table 279 gives the instance (a pin it does not give does not
+compile); `Bus` is the host engine over I2C0; `I2c` the arbiter over it
+- four requests able to wait while one is in flight, `BusPassThrough`
+the failure policy (a failed request is answered to its client as it
+failed, never retried), and a 20 ms timeout after which
+a tenure that never completed is answered `i2c_timeout` and the host
+recovered - listed in the program's `Tenuto` like any active object;
+`init()` takes the clock task's tag ([clock.md](clock.md)) and solves
+the three speeds' SCL counts from clk_sys; the request writes one byte
+(the register's address) to the device at 0x48 and reads two back in
+the same tenure, at 400 kHz, and names `Sensor` as the active object
+that receives the `I2cDone` reply; `isr_i2c0` is I2C0's handler under
+the pico-sdk's name, and it tells the arbiter when the host's tenure
+completes.
+
+What decides correctness even there. The request lends its buffers
+(`brio::lend<Lease::reply>`): `reg` and `value` belong to the tenure
+from the post until `Sensor` receives its `I2cDone`, and stay
+untouched and in scope until then, which nothing checks. `init()` after
+the clock task's: the counts are computed from the rate the clock type
+claims for clk_sys, and `init()` answers false when that rate cannot
+reach the standard speed (under 2.7 MHz) or the block does not come up;
+a request for a speed the clock cannot reach is answered `i2c_rejected`
+and moves nothing on the wire. The vector is the program's to bind: the
+crt gives `isr_i2c0` a weak alias to `Default_Handler`'s spin, so an
+unbound vector parks the core there at the host's first interrupt. The
+pull-ups are the board's: the pads take the internal pull-up the
+chapter asks for, but the bus needs its external resistors. And a bus
+without a timeout (`I2cBus`'s last argument 0) waits for ever on a
+tenure whose completion never comes, a client holding SCL among the
+causes ("Bench findings", the timed bus).
+
+The page is long because the chapter is. In order: the documents of
+record; what the silicon does - the host as a command FIFO, the SCL
+timing, the client, two hosts, the pins; the types and verbs; how to
+use it, with the engines and a client; the bench findings, against the
+partner's peer on the pair's wires, with the host's cost and the
+vendor's tenure on the same wire; and what is not covered.
+
+## Documents of record
+
+The RP2040 datasheet (build 3184e62), 4.3 (the
 Synopsys DW_apb_i2c: 4.3.5 the behaviour - START and STOP generation,
 the combined formats -, 4.3.7 the transmit FIFO and the RESTART / STOP
 bits of a command, 4.3.10 the operation modes - the slave flows on
@@ -19,7 +99,7 @@ table 279 with its pad configuration, the `I2cPad` type that adds the
 two open-drain verbs to a `Pin`, the `Rp2040DwApbI2c` chip traits over
 `pin.hpp`, `resets.hpp`, `nvic.hpp`, `delay.hpp` and `dma_engine.hpp`,
 this chip's device description held against the bits the IP file spells
-itself, and the PUBLIC NAMES `DwApbI2c<n>` (the resource), `I2cHost`
+itself, and the public names `DwApbI2c<n>` (the resource), `I2cHost`
 (the engine `I2cBus` drives) and `I2cClient` (the other end), this
 chip's aliases of the three templates there. The reference suite:
 `test_rp2040_i2c`, the block wireless and then the wire, which is the
@@ -28,7 +108,8 @@ board's 3V3 on each, to the WeAct RP2350B
 ([../boards/weact-rp2040.md](../boards/weact-rp2040.md)), whose peer of
 the twi_link protocol is commanded over the bus under test; the same
 board's own suite, `test_rp2350_i2c`, judges this chip's block as that
-peer.
+peer. A suite's letter is one command key of its console and the group
+of verdicts it runs.
 
 ## What the silicon does
 
@@ -40,15 +121,15 @@ request per FIFO. The component parameter register that would report
 the FIFO depths is not implemented and reads zero: the depth is the
 chapter's word, and measured.
 
-THE HOST IS A COMMAND FIFO. Every IC_DATA_CMD entry is a byte to write
+The host is a command FIFO. Every IC_DATA_CMD entry is a byte to write
 or a read command, with a RESTART bit and a STOP bit: the first entry
 after idle issues START and the address in IC_TAR, a direction change
 (or the RESTART bit) a repeated START, the STOP bit a STOP after that
-entry. A transmit FIFO that runs EMPTY WITH NO STOP holds SCL low and
+entry. A transmit FIFO that runs empty with no STOP holds SCL low and
 stalls the bus until the next entry (4.3.7). There is no address-only
 entry: START, the address and STOP with no data cannot be issued, so
 the probe is a one-byte read. Every failure - a NACK on the address
-or on a byte, a lost arbitration, an abort asked for - is ONE
+or on a byte, a lost arbitration, an abort asked for - is one
 interrupt, TX_ABRT, with the reason in IC_TX_ABRT_SOURCE, and both
 FIFOs stay flushed until IC_CLR_TX_ABRT is read. IC_CON, the counts,
 the addresses and the hold times take a write only with ENABLE clear;
@@ -58,10 +139,10 @@ is the way out. TX_EMPTY and RX_FULL are levels against IC_TX_TL and
 IC_RX_TL, set and cleared by the hardware; the other eleven sources
 clear by reading their own register.
 
-THE SCL TIMING is two counts per speed in ic_clk cycles (HCNT, LCNT;
+The SCL timing is two counts per speed in ic_clk cycles (HCNT, LCNT;
 the standard pair and the fast pair, fast-mode-plus using the fast
 pair), the spike filter (SPKLEN), and the SDA hold and setup. The
-block ADDS to what is programmed: the low period is LCNT + 1, the
+block adds to what is programmed: the low period is LCNT + 1, the
 high period HCNT + SPKLEN + 7 (4.3.14.1), and the floors are HCNT at
 least SPKLEN + 5 and LCNT at least SPKLEN + 7 - table 450's own rows
 sit exactly there. The specification's minimum high and low times
@@ -69,31 +150,31 @@ sit exactly there. The specification's minimum high and low times
 too slow to meet them makes the speed unreachable: 2.7 MHz for
 standard, 12 for fast, 32 for fast-mode-plus.
 
-THE CLIENT answers IC_SAR and then: a written byte lands in its
-receive FIFO (RX_FULL), a read raises RD_REQ and HOLDS SCL until a byte
+The client answers IC_SAR and then: a written byte lands in its
+receive FIFO (RX_FULL), a read raises RD_REQ and holds SCL until a byte
 is given - the clock stretch is the block's own -, the host's NACK at
 the end of a read is RX_DONE, a repeated START while addressed is
 RESTART_DET, the STOP is STOP_DET (for its own tenures alone under
 STOP_DET_IFADDRESSED). Bytes queued beyond what the host takes are
 flushed at its NACK and reported as an abort (ABRT_SLVFLUSH_TXFIFO). A
 full receive FIFO holds SCL instead of overflowing
-(RX_FIFO_FULL_HLD_CTRL): the client holds SCL as a TRANSMITTER, at an
+(RX_FIFO_FULL_HLD_CTRL): the client holds SCL as a transmitter, at an
 empty transmit FIFO, and as a receiver only with its receive FIFO full.
 IC_SLV_DATA_NACK_ONLY makes the client refuse every data byte, written
 with the block disabled and the client idle; a refusal mid-tenure is a
 disable, which "stops the current transfer at the end of the current
 byte and does not acknowledge" (4.3.17, IC_ENABLE) and leaves
-SLV_RX_DATA_LOST set. A general call raises GEN_CALL and NO STOP_DET
+SLV_RX_DATA_LOST set. A general call raises GEN_CALL and no STOP_DET
 under STOP_DET_IFADDRESSED (the note on IC_CON bit 7). There is no
 address-match event.
 
-TWO HOSTS (4.3.8): a host's START waits while the bus is busy - a START
+Two hosts (4.3.8): a host's START waits while the bus is busy - a START
 on the wire not yet closed by its STOP - so two hosts whose STARTs wait
 on one STOP leave together and the wired-AND decides, the loser aborting
 with ARB_LOST. STOP_DET is raised in host mode for every STOP on the
 wire, another host's included.
 
-THE PINS are fixed per instance under function 3 (table 279): I2C0
+The pins are fixed per instance under function 3 (table 279): I2C0
 has SDA on GPIO 0, 4, 8, 12, 16, 20, 24, 28 and SCL on 1, 5, 9, 13,
 17, 21, 25, 29; I2C1 has SDA on 2, 6, 10, 14, 18, 22, 26 and SCL on
 3, 7, 11, 15, 19, 23, 27. The pads take the pull-up, the slew limit

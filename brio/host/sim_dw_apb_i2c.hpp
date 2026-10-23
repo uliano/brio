@@ -1,47 +1,75 @@
 /*
  * sim_dw_apb_i2c.hpp
  *
- * A DW_apb_i2c MADE OF RAM, and the chip traits over it: what
+ * A DW_apb_i2c made of RAM, and the chip traits over it: what
  * brio/dw_apb_i2c/i2c.hpp asks of a family (`DwApbI2cChip`), answered by
- * no family at all.
+ * no family at all. `SimDwApbI2c` is the traits type (a struct of types,
+ * constants and static functions the IP templates read) that the RP2040
+ * and the RP2350 supply for their silicon in their own i2c.hpp; here it
+ * stands over two register blocks that are plain arrays and a modelled
+ * wire, so the IP's resource, host and client run in a host test with no
+ * chip anywhere (docs/dw_apb_i2c/README.md, "The proof that it knows no
+ * chip"; docs/host/README.md).
  *
- * WHY IT EXISTS. The IP stratum's claim is that the driver knows no
- * chip. A claim of that shape is proved by a SECOND realization, and the
+ * The smallest use, as test/test_dw_apb_i2c spells it: the templates
+ * named over SimDwApbI2c with a clock of the test's choosing and the
+ * empty engine slots, the bench put back to power-on before each case,
+ * and the words and the order of a bring-up read back:
+ *
+ *     using Clock = SimDwApbI2cClock<125'000'000>;
+ *     constexpr SimDwApbI2cPins pins{.scl = 1, .sda = 0};
+ *     using Host = DwApbI2cHost<SimDwApbI2c, 0, pins, SimI2cNoEngine, SimI2cNoEngine>;
+ *
+ *     SimDwApbI2c::reset_all();
+ *     constexpr Clock clock;
+ *     REQUIRE(Host::init(clock));
+ *     CHECK(SimDwApbI2cBench::pad_claimed_at[pins.scl] < SimDwApbI2cBench::enabled_at);
+ *
+ * Contexts: a single-threaded test is every party at once - the program
+ * that calls start(), the core that would take the interrupt (the test
+ * stages a level and a source, then calls isr()), and the far end of the
+ * wire. Nothing waits and nothing runs by itself: the ruler counts the
+ * microseconds a caller spends instead of spending them.
+ *
+ * Why it exists. The IP stratum's claim is that the driver knows no
+ * chip. A claim of that shape is proved by a second realization, and the
  * cheapest second realization is one with no silicon under it: a
  * register block that is an ordinary array, a reset that fills it with
  * the block's reset values, an interrupt controller that counts, pads
  * that remember what they were handed to, and a microsecond ruler that
  * counts instead of waiting. The same header is compiled by the host
- * suite (test_dw_apb_i2c) and by a family's compile check
- * (test/family_rp2040/dw_apb_i2c_ip.cpp), so the proof is made twice,
- * once per compiler.
+ * suite (test_dw_apb_i2c) and by the families' compile checks
+ * (test/family_rp2040/dw_apb_i2c_ip.cpp, and
+ * test/family_rp2350/dw_apb_i2c_ip.cpp, which `brio check rp2350` builds
+ * with both of that chip's compilers), so the proof is made once per
+ * compiler.
  *
- * WHAT IT MODELS, and what it does not. The register map is the block's,
- * at the block's offsets, with the RESET VALUES a data sheet gives them
+ * What it models, and what it does not. The register map is the block's,
+ * at the block's offsets, with the reset values a data sheet gives them
  * (IC_CON comes up 0x65, IC_STATUS with both transmit-FIFO bits set and
  * the receive FIFO empty, which is what lets a tenure's flush_rx()
  * terminate). Three things behave rather than merely store: IC_ENABLE's
  * enable bit is mirrored into IC_ENABLE_STATUS, so a driver's bounded
  * disable() completes - and `stuck_enabled` stages the block that will
- * NOT disable, which is the one refusal a bench cannot produce; THE
- * PADS AND THE WIRE ARE MODELLED, an undriven line reading high through
+ * not disable, which is the one refusal a bench cannot produce; the
+ * pads and the wire are modelled, an undriven line reading high through
  * its pull-up and SDA held low for as many hand-driven SCL pulses as a
  * test asks, which is what makes the unstick judgeable with no wire; and
  * the ruler counts the microseconds a caller spends.
  *
- * The FIFOs are NOT modelled: nothing moves an entry out of
+ * The FIFOs are not modelled: nothing moves an entry out of
  * IC_DATA_CMD and nothing fills the receive side by itself, so the
  * transmit path runs (IC_TXFLR reads empty and the register holds the
- * LAST entry the pump wrote) and the receive path reads what a test
- * stages. The two LEVEL registers are plain memory a test writes: the
+ * last entry the pump wrote) and the receive path reads what a test
+ * stages. The two level registers are plain memory a test writes: the
  * driver reads IC_TXFLR and IC_RXFLR once and then stores or loads that
  * many entries, so a test that sets IC_RXFLR to eight and raises RX_FULL
  * has staged eight bytes, each reading back as the register's last value
  * - which counts a batch without needing a FIFO behind it.
  *
- * WHAT IT RECORDS, beside the registers: the order of the observable
+ * What it records, beside the registers: the order of the observable
  * acts of a bring-up - which pad was claimed when, and when the block's
- * enable went up - so a test can assert the ORDER the IP file's init()
+ * enable went up - so a test can assert the order the IP file's init()
  * promises (both pads with the block still disabled), which is a thing
  * no bench can see.
  */
@@ -151,8 +179,8 @@ struct SimDwApbI2cPadConfig {
 };
 
 /**
- * THE PADS AND THE WIRE. Each pad remembers what it was handed to and
- * whether this side is pulling it down; the LEVEL of a line is the wire's
+ * The pads and the wire. Each pad remembers what it was handed to and
+ * whether this side is pulling it down; the level of a line is the wire's
  * answer - low while somebody drives it, high through the pull-up
  * otherwise - with one staged fault: SDA is held low by an imaginary
  * client until `release_after` hand-driven SCL pulses have gone by
@@ -279,7 +307,7 @@ struct SimDwApbI2cSpin {
 };
 
 /**
- * THE CHIP THAT IS NOT A CHIP: every member `DwApbI2cChip` asks for, over
+ * The chip that is not a chip: every member `DwApbI2cChip` asks for, over
  * two register blocks in RAM.
  */
 struct SimDwApbI2c {
@@ -458,7 +486,7 @@ enum class SimDwApbI2cReport : uint8_t { blocks, errors };
 
 /**
  * A DMA engine of no controller: the slot's whole vocabulary over a few
- * counters, so that a host's engine BRANCHES - the ones a family with no
+ * counters, so that a host's engine branches - the ones a family with no
  * DMA driver never compiles - are exercised here too.
  */
 template <uint8_t ch, typename Elem>

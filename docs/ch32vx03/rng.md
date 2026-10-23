@@ -1,8 +1,61 @@
 # Random number generator (CH32V303)
 
-A random number generator on an analog noise source, three registers and
-one vector, on two parts of this stratum. Documents of record: the
-CH32F/V20x_V30x_V31x reference manual V2.3 - chapter 29 whole, which
+This document is for a programmer who wants words from the random
+number generator of the CH32V303RC or VC, the only two parts of this
+stratum that carry one: a block on an analog noise source, three
+registers and one vector. The driver, `Rng`, is a monostate (a class
+with only static members, never instantiated: one block, one set of
+state) that brings the generator up with the discards this silicon
+needs, hands out one word at a time with the continuous test of FIPS
+PUB 140-2 built in, and serves the vector. What a program must know
+before anything else is the finding of this chapter: on the
+CH32V303VCT6 measured, the words are not random bits ("The words are
+not to be taken as random bits" below), and the driver hands them out
+unconditioned.
+
+The smallest use, the first block of "How to use it" below:
+
+```cpp
+if (!brio::Rng::init()) {                    // gate, enable, the discards
+    // brio::Rng::last_error() says why
+}
+if (const auto v = brio::Rng::read()) {
+    use(*v);
+} else if (brio::Rng::last_error() == brio::RngError::seed_error) {
+    (void)brio::Rng::recover();
+}
+```
+
+Line by line: `init()` opens the block's clock gate, enables the
+generator and throws away the words this silicon gives first (a zero
+after every enable that follows a disable), and answers false, with the
+reason in `last_error()`, when no word came within its bound or an
+error status stood; `read()` answers at once with a word, as a
+`std::optional` (empty, or holding the value `*v` reads), or with
+nothing and the reason in `last_error()`: not ready yet, a repeat of
+the word before (the continuous test), a seed error or a clock error;
+`use()` stands for the program's own code; and `recover()` is the
+manual's sequence after a seed error, which restarts the generator with
+the same discards.
+
+What decides correctness even there: the part (on the eleven parts
+without the block, naming `Rng` is a compile error, and the header
+compiles everywhere); `read()`'s nothing is an answer to look at and
+not an error to ignore, because a ready word that repeats its
+predecessor is refused often on this silicon (one to sixteen in a
+thousand through `read()`); and one context takes words at a time,
+since the comparison word and `last_error()` are the driver's own
+state with no guard. No clock is asked of the program: SYSCLK runs the
+block at every rate.
+
+The rest of this page, in order: the documents of record; what the
+silicon does, ending with the finding on the words; the types and
+verbs; how to use it, polled and under the interrupt; the bench
+findings; and what is not covered.
+
+## Documents of record
+
+The CH32F/V20x_V30x_V31x reference manual V2.3 - chapter 29 whole, which
 says it applies to the whole family; figure 3-3, the clock tree of the
 CH32V30x_D8 class; 3.3.5.8 and 3.4.12 for the clock selector that
 belongs to another class; 3.4.6 and 3.4.11 for the gate and the reset
@@ -12,7 +65,9 @@ own clock tree. Driver:
 [brio/ch32vx03/rng.hpp](../../brio/ch32vx03/rng.hpp) (`Rng`,
 `RngError`, `RngEvent`). Family fixture: `test/family_ch32vx03/rng.cpp`,
 with a negative that refuses the type on every part without the block.
-Reference suite: `test_vx03_rng`.
+Reference suite: `test_vx03_rng` (a suite's letter is one command key
+of its console and the group of verdicts it runs; `z` is the key that
+runs them all).
 
 ## What the silicon does
 
@@ -42,7 +97,7 @@ register that would choose, RCC_CFGR2's RNG_SRC (3.3.5.8), belongs to a
 register 3.4.12 gives the D8C classes and not this one. The two
 readings predict different numbers, and the silicon gave the figures'
 (measured on the CH32V303VC): from a read of RNG_DR to the next DRDY,
-the same number of CORE CYCLES at 144, 96 and 48 MHz off the PLL, where
+the same number of core cycles at 144, 96 and 48 MHz off the PLL, where
 the 48 MHz reading would have run three to two to one; the same again
 with USBPRE dividing the PLL by 2 or 1 instead of 3, which would have
 sped the generator up under the other reading; and with no PLL at all,
@@ -59,22 +114,23 @@ after an enable be kept for comparison and not used, and that every word
 after it be compared with the one before, a repeat failing the test.
 Chapter 29 does not ask it; this silicon does. Measured: the first word
 after RNGEN is set is 0x00000000 on every enable that follows a disable,
-some sixty core cycles after it, at every rate - while the FIRST enable
-after a reset gave that zero at every boot of one day and a nonzero
+some sixty core cycles after it, at every rate - while the first enable
+after a reset gave that zero at every boot of one session and a nonzero
 word at every boot after a power cycle, a difference the bench has not
 explained; and RNGEN cleared freezes the block - the word that stood
-across the disable stays readable and no other lands behind it. So a RESTART - `init()` of a generator that is off, and `recover()` -
-takes the standing word between the disable and the enable and
-discards TWO words after it, the zero and the one that follows: a
+across the disable stays readable and no other lands behind it. So a
+restart - `init()` of a generator that is off, and `recover()` - takes
+the standing word between the disable and the enable and
+discards two words after it, the zero and the one that follows: a
 restart that discarded one handed the zero out once in some thirteen
 thousand on that silicon, with the cause never caught again, and one
 word is the price of it never happening. The last word discarded is
 what the next is compared with, and `read()` refuses a repeat.
 
-**The two errors are not the same kind**, and 29.2.2 says so. A CLOCK
+**The two errors are not the same kind**, and 29.2.2 says so. A clock
 error (CECS) stops the generator but "has no effect on the last random
 number and can be used normally": fix the tree, clear CEIS, carry on. A
-SEED error (SECS - "more than 64 identical consecutive bits; more than
+seed error (SECS - "more than 64 identical consecutive bits; more than
 32 consecutive alternating 0's and 1's") makes the word in RNG_DR
 unusable, and the way back is a sequence: "the SEIS bit needs to be
 cleared first, then the RNGEN bit is cleared and set to 1". `recover()`
@@ -100,15 +156,15 @@ class's table on a word ready or on either error, with no per-source
 enable. A ready word keeps DRDY up until RNG_DR is read, so a handler
 that does not take the word is entered again at once.
 
-**THE WORDS ARE NOT TO BE TAKEN AS RANDOM BITS.** Measured on the
+**The words are not to be taken as random bits.** Measured on the
 CH32V303VC, and the finding of this chapter:
 
-- DRDY rises again over an UNCHANGED word, the more often the faster
+- DRDY rises again over an unchanged word, the more often the faster
   the words are taken: 6 to 15 in a hundred of the words read raw as
   fast as the core polls DRDY equal the one before, one to sixteen in
   a thousand through `read()` at its own pace - the refusals its
   comparison makes are real ones, not a formality.
-- The words come from a SMALL SET. Four thousand words hold only 900 to
+- The words come from a small set. Four thousand words hold only 900 to
   3350 distinct values - fewest at 144 and 96 MHz, most on 8 MHz - read
   at DRDY's pace or 100 us apart alike, with a single value seen as
   often as twenty-five times; where a source of thirty-two random bits

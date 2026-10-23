@@ -1,10 +1,139 @@
 # PWR and the sleep sites (CH32V203 and CH32V303)
 
+This document is for a programmer who wants a brio program on a
+CH32V203 or a CH32V303 to stop its clocks while it has nothing to do
+and still keep its time, to put the chip in Standby on purpose and
+learn at the next boot that it did, or to watch the supply. A program
+needs nothing of it to sleep at all: when every queue is empty and no
+bus master but the core is at work, the kernel's idle path already
+takes the plain Sleep, the core clock stopped and nothing else
+([platform.md](platform.md)). What this page adds is every depth below
+that, and the one fact of this family that governs all of them.
+
+Three headers carry it. `Pwr` ([pwr.hpp](../../brio/ch32vx03/pwr.hpp))
+is the power controller, a monostate (a class with only static members,
+never instantiated: one block, one set of state): the pair of bits that
+names the mode, the regulator's setting in a Stop, the supply monitor,
+the wake-up pad, the two flags a boot reads, and what a Standby keeps of
+the RAM. `Ch32vx03SleepSite<Clock, config>` and
+`Ch32vx03TimedSleepSite<P, Clock, config, site_config>`
+([sleep.hpp](../../brio/ch32vx03/sleep.hpp)) are this family's sleep
+sites for [the power model](../design/power.md). In that model a
+program does not put the chip to sleep itself: it posts a request to a
+power manager, `PowerManager` in `util/power.hpp`, which is an active
+object (a component of a brio program with its own event queue, served
+one event at a time by the kernel,
+[docs/learn/introduction.md](../learn/introduction.md)); the manager
+asks every active object listed as its voter whether it agrees, and on
+a unanimous yes has the sleep site arm one rung of an ordered ladder of
+depths - `none` (no request), `light`, `standby`, `deep`. The site only
+writes the mode into the registers; the kernel's idle path executes the
+instruction that sleeps when the queues next run dry. Here `light` is
+the Sleep, `standby` a Stop on the main regulator and `deep` the same
+Stop on the low-power one. The timed site adds an alarm, placed on the
+program's next deadline, and a witness, the RTC's counter read after
+the wake, by which the kernel's tick count is advanced over the span its
+own counter did not see. `BusActivity`
+([bus_activity.hpp](../../brio/ch32vx03/bus_activity.hpp)) is the count
+of bus masters other than the core at work, which the platform
+publishes as `bus_masters_active()`.
+
+The smallest use, the first block of "How to use it" below:
+
+```cpp
+using Site = brio::Ch32vx03SleepSite<Clock>;
+using Power = brio::PowerManager<P, Site, brio::PowerConfig{}, Voters...>;
+```
+
+Line by line: `Site` is a type alias for the plain site over `Clock`,
+the program's clock task type (the type whose `init()` brought the tree
+to its rate, `SysClock` in [clock.md](clock.md)'s smallest use); the
+site takes it not for the rate but to put the clock back after a Stop,
+which leaves the chip on its 8 MHz HSI. `Power` is the manager's type:
+`P` the platform (`brio::Ch32vx03Platform<>`,
+[platform.md](platform.md)), `brio::PowerConfig{}` its configuration at
+the default (a request for `standby` or deeper refused when the next
+armed time event is nearer than two ticks, `min_deep_ticks`), and
+`Voters...` the active objects it asks before each sleep. The manager
+is an active object like the others: its type goes into the program's
+`Tenuto<P, ...>` list, and an active object that knows the program is
+idle posts it `SleepRequested{depth, reply}` from its handler
+([design/power.md, "The round: unanimity among stakeholders"](../design/power.md#the-round-unanimity-among-stakeholders)).
+
+What decides correctness even there:
+
+- **No sleep while a bus master works.** In a sleep of any depth on
+  this family no bus master but the core gets a cycle (measured, "A
+  sleep of any depth starves every other bus master" below), so the
+  site refuses every rung but `none` while `bus_masters_active()` is
+  above zero, and the round is lost. A DMA channel holds one count from
+  the verb that sets its EN to the verb that clears it - a channel whose
+  block has completed with EN still set counts until a verb clears it,
+  which the engines do at completion - and a USB
+  controller holds one from its pull-up to its detach. The program then
+  stays awake, its idle path returning at once, for as long as the
+  transfer runs.
+- **The clock task named is the clock task run, and the clock comes
+  back on the manager's next event.** A Stop leaves the chip on the
+  HSI with the PLL and the HSE off, and the site's `disarm()` re-runs
+  `Clock::init()` when SWS says so (a DynamicClock's `restore()`): a
+  site named over another type puts the tree back at that type's rate,
+  and nothing checks it. The manager calls `disarm()` on the first
+  event it receives after the wake, so until then every handler runs on
+  the HSI with its divisors computed for the program's rate, which is
+  why the model asks a wake path with nothing else to say to post the
+  manager `SleepRequested{none}`
+  ([design/power.md, "The first event after a wake disarms"](../design/power.md#the-first-event-after-a-wake-disarms)).
+  `disarm()` discards the clock task's answer: a tree that does not
+  come back leaves the program on the HSI with no report.
+- **No armed time event across a Stop on the plain site.** The core's
+  STK counter counts HCLK, which a Stop stops, so kernel time stands
+  still for the whole Stop; a program with an armed time event must
+  not take one on the plain site, and that restriction is stated, not
+  checked - the manager's deadline guard refuses a deep round only when
+  the next deadline is nearer than `min_deep_ticks`. A time event armed
+  across such a Stop matures late by the whole span slept. The timed
+  site, the second block below, lifts the restriction.
+- **A way back from a Stop armed first.** Only an EXTI line ends a Stop
+  (the table under "What the silicon does"): a pad's line, the supply monitor's, or the RTC
+  alarm's line 17, which the timed site arms for its deadline.
+
+The timed site adds two of its own. `Site::init()` answers false when
+the RTC could not be brought up (a clock select already taken by
+another source with `wipe_domain` not given, an oscillator that never
+reported ready, a synchronization that never settled), and the site
+then works as the plain one minus every timed property, so the program
+reads the answer.
+And the alarm's vector must be bound to the site's body by the program,
+`BRIO_CH32_VECTOR(rtc_alarm_handler) { Site::isr(); }`, under the
+crt's name for it (the crt is the startup code that runs before
+`main()`, `ch32vx03/src/glue/startup_ch32vx03.S`): `init()` enables
+that line in the interrupt controller, and a vector the program leaves
+unbound is a weak alias of the crt's `default_handler`, a spin loop, so
+the first alarm stops the program there with no fault and no message.
+On the CH32V303's images, built with the F extension, and with the
+project's `CH32VX03_HPE` option on (a CMake option of the `ch32vx03/`
+project, chosen at configure, on by default), that binding is a naked
+trampoline whose body must do no floating-point work; a body that does
+float work binds with `BRIO_CH32_VECTOR_FLOAT` ([platform.md](platform.md)).
+
+The rest of this page, in order: the documents of record; what the
+silicon does (the three modes and their pair of bits, the starvation of
+every other bus master in a sleep and the count that answers it, what a
+Stop costs and what comes back from one, what a Standby keeps, the
+supply monitor and its two tables, the wake-up pad and its flag, the
+debugger's bits, what the chapter has not got); the types and verbs of
+the three headers; how to use it, in five uses; the bench findings, on
+each part; and what is not covered.
+
 Three low-power modes behind one pair of bits, a regulator with two
 prices, a supply monitor, a pad that wakes the chip from the deepest of
-them - and, on this family, ONE FACT THAT DECIDES THE WHOLE CHAPTER: in
-a sleep of any depth no bus master but the core gets a cycle. Documents
-of record: the CH32F/V20x_V30x_V31x reference manual V2.3 (chapter 2 for
+them - and, on this family, one fact that decides the whole chapter: in
+a sleep of any depth no bus master but the core gets a cycle.
+
+## Documents of record
+
+The CH32F/V20x_V30x_V31x reference manual V2.3 (chapter 2 for
 the modes, the regulator, the PVD and the two registers, with 2.3.4's
 note giving each RAM retention bit its address range; 33.2.1 for the
 regulator trims that live in the extended register and 33.2.3 for the
@@ -19,7 +148,10 @@ PA0/WKUP on every package). Drivers:
 [brio/ch32vx03/pwr.hpp](../../brio/ch32vx03/pwr.hpp),
 [brio/ch32vx03/sleep.hpp](../../brio/ch32vx03/sleep.hpp) and
 [brio/ch32vx03/bus_activity.hpp](../../brio/ch32vx03/bus_activity.hpp).
-Reference suite: `test_vx03_sleep`.
+Reference suite: `test_vx03_sleep` (a suite's letter is one command key
+of its console and the group of verdicts it runs; `z` is the key that
+runs every letter but the four that enter Standby or reset the board,
+`w`, `r`, `x` and `g`, each run by name).
 
 ## What the silicon does
 
@@ -27,14 +159,14 @@ Reference suite: `test_vx03_sleep`.
 
 2.3's table 2-1, with the entry conditions of 2.3.2 to 2.3.4: the
 machine has three low-power modes and they are named by two bits -
-PFIC_SCTLR.SLEEPDEEP, which is the CORE's, and PWR_CTLR.PDDS, which is
+PFIC_SCTLR.SLEEPDEEP, which is the core's, and PWR_CTLR.PDDS, which is
 this block's:
 
 | Mode | SLEEPDEEP | PDDS | What stops | What ends it |
 |------|-----------|------|------------|--------------|
 | Sleep | 0 | 0 | the core clock, and nothing else | any interrupt or wake event |
 | Stop | 1 | 0 | HSE, HSI, PLL and every peripheral clock; SRAM, the registers and the pin states are kept | an EXTI line, interrupt or event |
-| Standby | 1 | 1 | the same, and the regulator too | the WKUP pad's rising edge, an RTC alarm, the NRST pad, an IWDG reset - and, measured, ANY armed EXTI line - each through a POWER RESET |
+| Standby | 1 | 1 | the same, and the regulator too | the WKUP pad's rising edge, an RTC alarm, the NRST pad, an IWDG reset - and, measured, any armed EXTI line - each through a power reset |
 
 Neither bit means anything without the other, which is why one verb
 writes the pair and one verb reads it back - and although SLEEPDEEP
@@ -49,12 +181,12 @@ hook.
 
 Standby has a second exit the table adds in a note - "any event can also
 wake up the system, but the system will not be reset after wake-up".
-HALF OF THAT IS TRUE HERE AND HALF IS NOT, measured on both parts: the
-alarm's line armed as an interrupt and the same line armed as an EVENT
-ALONE ended a Standby, and on the CH32V203 A PAD'S line armed as an
+Half of that is true here and half is not, measured on both parts: the
+alarm's line armed as an interrupt and the same line armed as an event
+alone ended a Standby, and on the CH32V203 a pad's line armed as an
 event did too, an exit 2.3.4 does not list at all - and every one of
-them came back through the RESET VECTOR and not through the instruction
-after the wait. So an ordinary EXTI line IS a way out of this mode, and
+them came back through the reset vector and not through the instruction
+after the wait. So an ordinary EXTI line is a way out of this mode, and
 there is no way out of it that returns. The independent watchdog is one
 of the documented exits and is measured as one on both parts: its reset
 ended a Standby some 200 ms after it was armed, with IWDGRSTF and
@@ -64,8 +196,8 @@ PORRSTF both standing at the boot.
 
 This is the chapter's governing fact on this family, and it is not in
 the chapter: measured on the silicon of both parts and recorded in
-[README.md](README.md), in a sleep NO BUS MASTER BUT THE CORE GETS A
-CYCLE. A memory-to-memory DMA started just before the sleep moves the
+[README.md](README.md), in a sleep no bus master but the core gets a
+cycle. A memory-to-memory DMA started just before the sleep moves the
 handful of items already in its pipeline and then nothing until the core
 wakes; the CH32V203's USB device controller cannot reach its packet
 memory, so an armed endpoint loses the host's bytes and an enumeration
@@ -77,12 +209,14 @@ the peripheral bus and the core's own counter count the whole sleep -
 and no software mitigation short of staying awake works.
 
 So the rule here is not "a program that uses the bus must not sleep", it
-is a MECHANISM. Every driver whose peripheral is a bus master keeps one
+is a mechanism. Every driver whose peripheral is a bus master keeps one
 count while it is working:
 
 - a DMA channel, of either controller where the part has two, from the
-  moment EN goes up to the moment it comes down, counted in the one verb
-  every engine and every task goes through - and EN stays SET when a
+  moment EN goes up to the moment it comes down, counted in the DMA
+  controller's ledger, which every verb that sets or clears EN goes
+  through, every engine's and every task's included
+  ([dma.md](dma.md)) - and EN stays set when a
   non-circular block completes here, so a channel its owner has not taken
   down still counts, which is what the registers say too;
 - a USB controller - the CH32V203's device controller or the
@@ -92,12 +226,12 @@ count while it is working:
 The kernel's idle path reads that count and sleeps only at zero; above
 zero it returns at once with interrupts enabled, which the Platform
 contract allows and which leaves the loop spinning and the bus served.
-The sleep sites read the same count and REFUSE to arm any rung over it -
+The sleep sites read the same count and refuse to arm any rung over it -
 a vote already lost, without a voter having to be written. A program is
 free to idle whatever it is doing, and the silicon's own state decides.
 
 What that costs, measured: an `idle()` that returns at once is some
-THIRTY TO FORTY HCLK CYCLES against the up-to-a-millisecond a tick-ended
+thirty to forty HCLK cycles against the up-to-a-millisecond a tick-ended
 sleep takes, and a memory-to-memory block of 65535 items went on running
 across eight of them and completed with its data moved. The USB consoles
 are the other half of the proof: with the ordinary kernel loop, idle
@@ -109,17 +243,17 @@ bytes with no receive overrun and no controller error, on both parts.
 Per 2.3.3, LPDS prices a Stop: with it clear the regulator stays in its
 normal mode, with it set it goes low-power, and RAMLV on top of that
 (valid, per its own note, only with LPDS set) puts the RAM in its
-low-voltage mode for "the lowest power consumption". What either SAVES
+low-voltage mode for "the lowest power consumption". What either saves
 is a current, and this desk has no meter: the driver enforces the
 interlock, states the bits, and measures neither. What the first of
-them COSTS is measurable and is measured: thirty microseconds more at
+them costs is measurable and is measured: thirty microseconds more at
 the wake on the CH32V203C8T6 and sixty on the CH32V303VCT6, which is one
 and two periods of the only clock a stopped core still counts (sixteen
 wakes on each regulator, and the difference divided).
 
 The alarm that ends a Stop lands one count of the ruler after the value
 it was written with, on both parts - but on the CH32V303VCT6 the same
-alarm served AWAKE arrives on the value itself, where the CH32V203C8T6's
+alarm served awake arrives on the value itself, where the CH32V203C8T6's
 is one count late awake too. Either way a Stop ends late and never
 early, which is the direction the timed site's arithmetic is built for.
 
@@ -129,17 +263,17 @@ running at 144 MHz resumes at 8; measured, SWS reads the HSI at every
 wake. The plain site is templated on the clock task for exactly this:
 SWS is read, and where it is not what the task promised the task is
 re-run (under a dynamic clock, its own restore(), for the rate in
-force). Putting a PLL rate on the board's crystal back takes ABOUT TWO
-MILLISECONDS on the CH32V203C8T6 and ONE AND A THIRD on the CH32V303VCT6,
+force). Putting a PLL rate on the board's crystal back takes about two
+milliseconds on the CH32V203C8T6 and one and a third on the CH32V303VCT6,
 nearly all of it the crystal's own start-up.
 
-AND SO DOES THE INDEPENDENT WATCHDOG, which is the opposite of what a
+And so does the independent watchdog, which is the opposite of what a
 reader of 7.1 would expect: measured on both parts, a watchdog armed for
 two hundred milliseconds and refreshed immediately before a Stop of two
 seconds did not reset the board in the sleep - the reset arrived 208 to
-215 milliseconds after the WAKE. So a watchdog is not a way back out of
+215 milliseconds after the wake. So a watchdog is not a way back out of
 a Stop on this family, and a program that stops for longer than its
-time-out is not reset for doing so. A STANDBY IS THE OPPOSITE: on both
+time-out is not reset for doing so. A Standby is the opposite: on both
 parts the same watchdog, armed after an alarm two seconds out, ended the
 Standby - at 225 ms on the CH32V303VCT6 and 228 to 230 ms on the
 CH32V203C8T6 - and the debug module's watchdog freeze bits read clear,
@@ -147,13 +281,13 @@ so neither answer is the probe's.
 
 Kernel time stands still for the whole of a Stop, because the core's STK
 counter counts HCLK. Two things follow, and both are answered in the
-idle path rather than in the site: the timebase is PAUSED and its
+idle path rather than in the site: the timebase is paused and its
 pending bit cleared immediately before the instruction - with the WFE
 idiom this core's idle uses, a tick that is merely pending would end the
 sleep before it began - and it is resumed when the instruction returns,
 after the handler that ended the sleep, which the core runs first
 because the idle path sleeps with interrupts unmasked. That costs
-ONE TICK, knowingly: a tick already fired when the sleep begins is
+one tick, knowingly: a tick already fired when the sleep begins is
 dropped instead of served. The timed site repairs it at no cost, its
 witness measuring the wall and subtracting only the ticks the counter
 served; without a timed site a deep sleep is legal only with no
@@ -170,25 +304,25 @@ the unit on again.
 Per 2.3.4 four bits decide what of the RAM survives, and the register
 description keys them by device class in a way that is easy to misread.
 On the CH32V20x_D6 - every part of that series but the CH32V203RB -
-R2KSTY and R2KVBAT govern THE WHOLE 20 KB and the other two do not
+R2KSTY and R2KVBAT govern the whole 20 KB and the other two do not
 exist; on the D8 classes - the CH32V203RB and every CH32V303 - the first
 pair is a 2 KB bank and the second a 30 KB one, and 2.3.4's own note
 gives their addresses: 0x2000_0000 to +2K, and +2K to +32K. The verbs
 are therefore named for the banks and not for the sizes, and what the
 first one covers is a constant of the part.
 
-MEASURED ON THE CH32V303VCT6, BANK BY BANK: with nearly all of its 64 KB
+Measured on the CH32V303VCT6, bank by bank: with nearly all of its 64 KB
 painted, a Standby with R2KSTY kept the whole first bank and nothing of
 the second, R30KSTY the whole second and nothing of the first, both of
-them the two banks whole, and neither nothing - and NOTHING ABOVE 32 KB
-SURVIVED ANY OF THEM, which is the datasheet's "32KB of SRAM". A word
+them the two banks whole, and neither nothing - and nothing above 32 KB
+survived any of them, which is the datasheet's "32KB of SRAM". A word
 that was not kept did not come back as zero but as another value, and a
 control across a software reset kept every painted word.
 
-AND THOSE BITS ARE WRITE-ONLY ON THAT DIE. Bits 16 to 20 of PWR_CTLR -
+And those bits are write-only on that die. Bits 16 to 20 of PWR_CTLR -
 the four retention bits and RAMLV - read back zero whatever was written,
 there and over the debug link, and they still act: so a read-modify-write
-of the register, ANY of them, writes them away, and a Standby entered
+of the register, any of them, writes them away, and a Standby entered
 after one keeps nothing - measured, every painted word lost in every
 bank, until the bits went into the store that sets PDDS. They read back
 on the CH32V203C8T6. The driver therefore keeps the program's choice of
@@ -199,7 +333,7 @@ every boot, so the first store after a boot writes the bits to zero
 whatever a reset left in them, and a program states its retention again
 before every Standby.
 
-And the D6's number is the CLASS'S LARGEST ARRAY: four parts of the
+And the D6's number is the class's largest array: four parts of the
 CH32V203 carry ten kilobytes and not twenty, and the note says nothing
 about them. The constant is the manual's number bounded by what the
 part has, which is the most that can honestly be said without a
@@ -210,10 +344,10 @@ be reset by backup" while every other bit of the register is reset by a
 Standby wake; and PWR_CSR "remains unchanged after woken up from Standby
 mode", which is what makes its two flags readable at the next boot.
 
-There is a THIRD flag in another chapter that might have been part of
+There is a third flag in another chapter that might have been part of
 this story and is not: RCC_RSTSCKR's LPWRRSTF (3.4.10), a "low-power
 reset" whose cause the register description never states. Measured on
-both parts, A STANDBY WAKE DOES NOT RAISE IT: what the reset chapter's
+both parts, a Standby wake does not raise it: what the reset chapter's
 register carries at that boot is PORRSTF and nothing else (beside
 IWDGRSTF when the watchdog ended it), so the power-on flag and a Standby
 exit are indistinguishable there and PWR_CSR.SBF is the only thing that
@@ -223,23 +357,23 @@ anything clears it.
 ### The supply monitor, and the table that is the die's
 
 Per 2.2.2 the PVD compares VDD against one of eight thresholds and
-reports the answer in PWR_CSR.PVDO - one while the supply is BELOW the
+reports the answer in PWR_CSR.PVDO - one while the supply is below the
 threshold - with about 200 mV of hysteresis (figure 2-3, and the tables
 state each level's falling edge). Its output is also wired to EXTI line
 16, so a supply crossing the threshold can be an interrupt or a wake
 event.
 
-What a level is worth in millivolts is NOT a fact of the part number.
+What a level is worth in millivolts is not a fact of the part number.
 2.4.1 gives two tables, one for dies whose FEATURE_SIGN.VLEVEL reads 1
 (a supply specified from 2.4 V) and one for dies where it reads 0 (from
 1.8 V), and 33.2.3 adds that the register is to be believed only where
 its low byte is the inverse of the next - a die that fails the test
-being read as the 2.4 V kind. So the millivolts are a RUN-TIME question
+being read as the 2.4 V kind. So the millivolts are a run-time question
 here: the driver reads the die and answers, and the constexpr forms take
 the supply level as an argument for a program that knows it.
 
-AND THAT VALIDITY TEST EARNS ITS KEEP. On both bench chips FEATURE_SIGN
-reads 0xE339E339 - this family's own ERASED pattern, the word never
+And that validity test earns its keep. On both bench chips FEATURE_SIGN
+reads 0xE339E339 - this family's own erased pattern, the word never
 having been programmed - whose low byte is not the inverse of the next,
 so the driver falls back to the 2.4 V table as 33.2.3 prescribes. A
 reader that believed the bit would have taken the other one.
@@ -258,11 +392,11 @@ threshold has been crossed on either board to tell the two apart.
 ### The wake-up pad, and the flag two sources share
 
 Per 2.4.2, EWUP forces PA0 to an input with a pull-down and makes its
-RISING edge a Standby exit; with the bit clear the pad is an ordinary
+rising edge a Standby exit; with the bit clear the pad is an ordinary
 pin. Both datasheets' pin tables name it PA0-WKUP on every package.
 
 WUF is the flag it raises - and per 2.4.2's own wording an RTC alarm
-raises THE SAME ONE, so a program that arms both learns from it only
+raises the same one, so a program that arms both learns from it only
 that it was woken. SBF is the other flag: it says the machine entered
 Standby, and it is what a program that came back through the reset
 vector reads to know where from. Both are cleared by write-one bits of
@@ -270,12 +404,12 @@ PWR_CTLR that read as zero always, and CWUF's own note says the flag
 falls two system clocks after the store - measured, both clears land
 within a hundred HCLK cycles of the store, verbs and all.
 
-WUF IS THE WAKE'S FLAG AND NOT THE EVENT'S, which the chapter does not
-say and the bench does: an alarm served with the core RUNNING leaves it
+WUF is the wake's flag and not the event's, which the chapter does not
+say and the bench does: an alarm served with the core running leaves it
 clear, on both parts, and so do rising edges on the pad with EWUP set and
 the core running on the CH32V203C8T6, while a Standby ended by that same
 alarm comes back with it standing. So it is read at the boot beside SBF and nowhere else
-- and between the two of them a program can tell the DOCUMENTED exits
+- and between the two of them a program can tell the documented exits
 (the alarm, the pad) from an ordinary EXTI line's and from the
 watchdog's, which set SBF alone.
 
@@ -286,11 +420,11 @@ Per 34.2.1 the debug module's configuration register - a core CSR at
 that keep FCLK and HCLK running through Sleep, Stop and Standby, and,
 further up, the bits that freeze each watchdog and each timer while the
 core is in its debug state. Any of the first three set turns a sleep
-measurement into a fiction. The driver READS them and offers no writer
+measurement into a fiction. The driver reads them and offers no writer
 at all, because a csrw to that CSR from the running program resets the
 part on this silicon ([README.md](README.md)).
 
-The probes on this bench leave the three low-power bits CLEAR, which is
+The probes on this bench leave the three low-power bits clear, which is
 what makes every span below the silicon's own and not the debugger's -
 and it is the first thing the suite prints. The register reads 0x300 on
 the CH32V203C8T6 behind its WCH-LinkE - the two watchdog freeze bits set
@@ -302,7 +436,7 @@ the CH32V203C8T6 behind its WCH-LinkE - the two watchdog freeze bits set
 ### What this chapter has not got
 
 There is no flash power-down bit here (PWR_CTLR [15:9] is reserved,
-where the sister family carries FLASH_LP), no low-power RUN mode (2.3
+where the sister family carries FLASH_LP), no low-power run mode (2.3
 lists three modes and no fourth), and no auto-wake-up unit: the alarm
 that ends a Stop on this family is the RTC's, reached through EXTI line
 17 (2.3.5). The regulator's two voltage trims live in the extended
@@ -374,8 +508,8 @@ with armed time events must not Stop. Beside the model's three verbs it
 has `init` (route the clock, start the oscillator, set the prescaler,
 arm the line), `ready`, `alarm_armed`, `place_alarm`, `counts_for`,
 `ticks_for`, `resync`, `last_advance`, `last_counts`, and `isr`, the
-four-act body the application binds to the alarm's vector. THAT BINDING
-IS NOT OPTIONAL: `init()` enables the line in the interrupt controller,
+four-act body the application binds to the alarm's vector. That binding
+is not optional: `init()` enables the line in the interrupt controller,
 and an unbound vector on this target's crt is a spin. The site also owns
 the RTC whole - the domain gate, the clock select, the prescaler and the
 alarm - so a program using it does not drive that counter elsewhere.
@@ -383,7 +517,7 @@ alarm - so a program using it does not drive that counter elsewhere.
 `TimedSleepConfig` states the RTC's rate and the tick wanted out of it,
 `timed_sleep_divider` and `timed_sleep_tr_hz` derive the prescaler and
 the ruler, and `timed_sleep_config_valid` refuses what the prescaler
-cannot make. THE RATE RULE IS DIRECTIONAL: state a rate NOT BELOW the
+cannot make. The rate rule is directional: state a rate not below the
 true one, and both halves err the way the kernel's time contract allows
 - the alarm lands late and the resync advances short, never the
 opposite.
@@ -402,7 +536,7 @@ A Stop under the power manager, with the clock put back on the way out:
 
 ```cpp
 using Site = brio::Ch32vx03SleepSite<Clock>;
-brio::PowerManager<P, Site, brio::PowerConfig{}, Voters...> power;
+using Power = brio::PowerManager<P, Site, brio::PowerConfig{}, Voters...>;
 ```
 
 The same with kernel time kept honest across the Stop - the RTC's alarm
@@ -416,7 +550,8 @@ BRIO_CH32_VECTOR(rtc_alarm_handler) { Site::isr(); }
 
 Standby, which is not a rung and does not come back the way the others
 do - the way back armed first, the SRAM to keep named, the flag read at
-the next boot:
+the next boot (`Site` here is the plain site of the first block; the
+timed site has no such verb):
 
 ```cpp
 (void)brio::Pwr::wakeup_pin(true);        // PA0's rising edge - or the RTC's alarm

@@ -1,38 +1,75 @@
 /*
  * platform.hpp
  *
- * CH32V203 (QingKe V4B, RV32IMAC) implementation of the brio Platform
- * concept - the one header of this stratum the kernel templates are
- * instantiated with. An app selects it by including it and passing
- * Ch32vx03Platform along.
+ * What the brio kernel stands on when it runs on a CH32V203 or a
+ * CH32V303: this stratum's realization of the kernel's Platform
+ * concept, the compiler-checked set of requirements kernel/platform.hpp
+ * states, on the QingKe V4B of the CH32V203 (RV32IMAC) and the QingKe
+ * V4F of the CH32V303 (the same core with a single-precision
+ * floating-point unit, RV32IMAFC). It is the one header of this stratum
+ * the kernel templates are instantiated with: a program names it once,
+ * as the first argument of its Tenuto (docs/ch32vx03/platform.md, "How
+ * to use it"):
  *
- * THE SECOND QINGKE FAMILY, AND THE BIGGER CORE OF THE TWO: thirty-two
- * registers where the CH32V00x has sixteen, a divider, an atomic
- * extension, user mode, a 64-bit system counter and up to 144 MHz. What
- * does NOT change is the contract above it: the kernel and util strata
- * compile here untouched, which is the fact this target exists to keep
- * true.
+ *     using P = brio::Ch32vx03Platform<>;
+ *     BRIO_CH32_LEAF_VECTOR(systick_handler) { brio::Ticker::tick(); }
+ *     ...
+ *     SysClock::init();
+ *     brio::Ticker::init(clock);
+ *     brio::enable_interrupts();
+ *     brio::Tenuto<P, ...>::run();   // the program's active objects
+ *
+ * It gives the kernel a critical section (interrupts masked for a
+ * scope), an idle that sleeps until the next interrupt without losing
+ * one that arrives at the wrong moment, the program's source of time
+ * (the template parameter, by default the STK `Ticker` of
+ * ch32vx03/ticker.hpp at 1000 Hz), a breakpoint for a panic and the
+ * storage a panic record survives a reset in.
+ *
+ * Who calls what. The kernel loop calls idle() in main-loop context,
+ * with interrupts already masked and nothing to do, and nothing else
+ * should; idle() returns with interrupts enabled, after the sleep or at
+ * once while a bus master works (below). now(), ticks_per_second,
+ * interrupts_enabled() and bus_masters_active() may be read from any
+ * context; CriticalSection may be opened from any context and nests;
+ * break_here() is the panic path's, and panic_record() the panic path's
+ * and the next boot's. A program binds the timebase's interrupt vector
+ * itself (systick_handler to Ticker::tick(), with one of
+ * ch32vx03/pfic.hpp's three binding macros) and initializes the ticker
+ * after the clock task, whose claimed rate the ticker's compare is
+ * computed from. The kernel binds no vector: a program that enables the
+ * tick and forgets the binding stops at the first tick in the crt's
+ * default_handler, a spin.
+ *
+ * A QingKe family beside the CH32V00x, and the bigger core of the two:
+ * thirty-two registers where the CH32V00x has sixteen, a divider, an
+ * atomic extension, user mode, a 64-bit system counter and up to
+ * 144 MHz. What does not change is the contract above it: the kernel
+ * and util strata compile here untouched, which is the fact this target
+ * exists to keep true.
  *
  * CriticalSection is ch32vx03/pfic.hpp's InterruptGuard: read-and-clear
  * mstatus.MIE in one instruction, restore what was there on scope exit.
- * All-or-nothing masking. This core DOES have a priority threshold and
+ * All-or-nothing masking. This core does have a priority threshold and
  * interrupt nesting, and brio uses neither: an ISR body runs to
- * completion here as everywhere (docs/design/kernel.md section 1).
+ * completion here as everywhere (docs/design/kernel.md section 1, "The
+ * model in one page").
  *
- * IDLE() ON THIS FAMILY ASKS THE BUS FIRST, and that is this target's
+ * idle() on this family asks the bus first, and that is this target's
  * one departure from the others. In a sleep of any depth here no bus
  * master but the core gets a cycle (ch32vx03/bus_activity.hpp carries
  * the measurements and the reasoning), so a sleep taken while a DMA
  * channel or the USB controller is working does not slow the program
  * down - it loses the transfer. The platform therefore reads the count
- * of active masters and SLEEPS ONLY AT ZERO; above zero it returns at
+ * of active masters and sleeps only at zero; above zero it returns at
  * once with interrupts enabled, which the Platform contract allows (the
  * host's idle() returns at once too) and which leaves the loop
  * spinning and the bus served.
  *
- * WHAT IS NOT HERE YET, and is deliberate rather than forgotten: no
- * idle_until() - this platform is not tickless, its timebase is the
- * core counter and stops with the core.
+ * Not here, and deliberate rather than forgotten: no idle_until() -
+ * this platform is not tickless, its timebase is the core counter,
+ * which keeps counting in the plain Sleep and stops with HCLK in a
+ * Stop.
  */
 
 #pragma once
@@ -64,7 +101,8 @@ struct Ch32vx03Platform {
 
     /**
      * Entered with interrupts MASKED and nothing to do: unmask, then
-     * sleep until the next interrupt.
+     * sleep until the next interrupt. The kernel loop's, in main-loop
+     * context; not for a program to call.
      *
      * NOT A PLAIN WFI. The RISC-V privileged specification lets WFI
      * resume when an interrupt is pending whatever mstatus.MIE says, and
@@ -216,10 +254,13 @@ struct Ch32vx03Platform {
      * CAVEAT. With a debugger halted on it, the program stops here.
      * With NO debugger attached, `ebreak` raises the breakpoint
      * exception, which this core takes to the vector table's own
-     * breakpoint entry - the crt provides that as a distinct spin loop,
-     * so the wreck is legible instead of running on into nothing. A
-     * reporter that must survive without a debugger cannot assume this
-     * call returns.
+     * breakpoint entry, index 9 (measured; docs/ch32vx03/platform.md) -
+     * the crt's breakpoint_handler, a weak alias of its default_handler
+     * spin until the program binds it (to fault_reset<P>() of
+     * ch32vx03/reset.hpp, which resets), so the wreck stops where a
+     * probe can see it instead of running on into nothing. A reporter
+     * that must survive without a debugger cannot assume this call
+     * returns.
      */
     static void break_here() { __asm__ volatile("ebreak"); }
 

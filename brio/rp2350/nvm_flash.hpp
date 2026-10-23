@@ -3,36 +3,50 @@
  *
  * The top of the board's quad-SPI chip as a FlashMedia
  * (util/nv_heap.hpp's contract): `QspiFlashPartition`, where the line is
- * drawn, and `QspiFlash`, the medium itself.
+ * drawn, and `QspiFlash`, the medium itself. A program that keeps data
+ * across a reset writes it here: a band of 64 kB the image cannot grow
+ * into, erased a sector and programmed a page at a time, every address
+ * checked against the band. The smallest use is written out at QspiFlash
+ * below: a page buffer in SRAM, `zones()[0]` for the band, `erase()` of
+ * one sector at its floor, `program()` of one page there.
  *
- * A MEDIUM AND NOTHING ABOVE IT. The block heap (util/nv_heap.hpp) and
+ * Who calls what. erase() and program() are rp2350/flash.hpp's windows
+ * behind the band's bounds: each runs from SRAM with this core's
+ * interrupts masked until the operation is done, and the other core and
+ * the DMA must stay off the flash meanwhile, which nothing here checks.
+ * Each answers false, and sends nothing, for a run outside the band or
+ * off its cells; the source page is the caller's for the call alone and
+ * must lie in SRAM. read(), zones(), build_id() and the partition's
+ * predicates open no window and wait for nothing.
+ *
+ * A medium and nothing above it. The block heap (util/nv_heap.hpp) and
  * the value journal (util/nv_journal.hpp) stand on this contract on
  * other targets; on this family neither is instantiated, and that is a
- * DECISION and not an omission. What a program here gets is a BAND OF
- * FLASH with bounds it cannot write outside of, and whatever it keeps
+ * decision and not an omission. What a program here gets is a band of
+ * flash with bounds it cannot write outside of, and whatever it keeps
  * there is its own structure. The reason is the one CLAUDE.md records as
  * the NV stack's own review: the heap and the journal were born where
  * flash was cheap to partition and carried to every target since for
- * coherence, and the question of WHICH programs need a block allocator,
+ * coherence, and the question of which programs need a block allocator,
  * which need small values, and whether a zone at a fixed address is
  * worth a partition every image pays is prior to any port. Until that
  * review, a new family gets the medium and stops there.
  *
- * A CONSTANT PARTITION, DRAWN ONCE, AT THE TOP. `flash` in
+ * A constant partition, drawn once, at the top. `flash` in
  * rp2350/ld/rp2350_16m.ld is 16320K where the chip is 16384K, so the
  * last 64 kB are not the linker's and nothing the compiler emits can
- * land there: the floor is a CONSTANT rather than a symbol that moves
+ * land there: the floor is a constant rather than a symbol that moves
  * with every build, which is what util/nv_heap.hpp's placement rule
  * wants and what keeps an image from growing into its own storage.
  * `__brio_flash_end` is read back as the proof; a script edited past the
- * line CLOSES the medium (`zones()` answers a band whose floor is its
+ * line closes the medium (`zones()` answers a band whose floor is its
  * ceiling, which every user of the contract refuses on) instead of
  * letting the two overlap.
  *
  *   0x00'0000 .. 0xff'0000   the image (the linker's)
  *   0xff'0000 .. 0x100'0000  QspiFlash, 64 kB: sixteen sectors of 4096
  *
- * THE CELL IS THE PAGE. The bootrom's program function takes whole
+ * The cell is the page. The bootrom's program function takes whole
  * 256-byte pages (rp2350/flash.hpp), so `write_cell` is 256 under an
  * `erase_size` of 4096: sixteen cells a sector. The chip itself
  * programs a byte at a time and accepts a second program into a page as
@@ -40,18 +54,21 @@
  * cell would want a program that takes less than a page, which the
  * bootrom's does not.
  *
- * ADDRESSES ARE THE CHIP'S OWN, from 0 - what the bootrom's functions
+ * Addresses are the chip's own, from 0 - what the bootrom's functions
  * take - and rp2350/flash.hpp adds the window where a pointer is wanted.
  * util/nv_heap.hpp numbers erase units in a uint16_t: 16 MB / 4 kB =
  * 4096, well inside it.
  *
- * A WRITE IS A HOLE IN THE PROGRAM, not a wait. This is the chip the
+ * A write is a hole in the program, not a wait. This is the chip the
  * core executes from: for the whole of an erase or a program the memory
  * windows are disconnected, the engine runs from SRAM with this core's
- * interrupts masked, and the kernel loses whatever ticks fall inside
- * (rp2350/flash.hpp's header says what else the application owes -
- * above all that the OTHER CORE must not fetch from flash meanwhile,
- * which nothing here can enforce).
+ * interrupts masked, and the kernel's tick falls behind: on the
+ * Cortex-M33 half SysTick keeps one pending tick of those that fall
+ * inside and the rest are lost, while the Hazard3 half's ticker catches
+ * up once the mask lifts (measured, docs/rp2350/flash.md).
+ * rp2350/flash.hpp's header says what else the application owes - above
+ * all that the other core must not fetch from flash meanwhile, which
+ * nothing here can enforce.
  */
 
 #pragma once
@@ -67,10 +84,10 @@
 extern "C" {
 /// The epoch of the link, injected by rp2350/CMakeLists.txt. Declared as
 /// an array so that no code can be tempted to dereference it: it is a
-/// VALUE, and only its address bits are ever read.
+/// value, and only its address bits are ever read.
 extern const char __nvheap_build_id[];
 
-/// One past the last byte the LINKER may place, from ld/rp2350_16m.ld:
+/// One past the last byte the linker may place, from ld/rp2350_16m.ld:
 /// an address in the cached window.
 extern const char __brio_flash_end[];
 }
@@ -101,7 +118,7 @@ struct QspiFlashPartition {
         return end >= Flash::window && end - Flash::window <= storage_base;
     }
 
-    /// Is the run [addr, addr + bytes) inside the zone? The COMPILE-TIME
+    /// Is the run [addr, addr + bytes) inside the zone? The compile-time
     /// half of the bounds check the medium makes at run time, for a
     /// program that keeps something at an address it knows when it is
     /// built: `static_assert(QspiFlashPartition::contains(a, n))` is how
@@ -110,7 +127,7 @@ struct QspiFlashPartition {
         return addr >= storage_base && addr <= storage_end && bytes <= storage_end - addr;
     }
 
-    /// Is the run a whole number of CELLS at a cell boundary? The other
+    /// Is the run a whole number of cells at a cell boundary? The other
     /// half of what `program()` insists on, asked at compile time.
     static constexpr bool cell_aligned(uint32_t addr, uint32_t bytes) {
         return (addr % page) == 0u && (bytes % page) == 0u;
@@ -148,7 +165,10 @@ struct QspiFlash {
 
     static void read(uint32_t addr, std::span<uint8_t> dst) { Flash::read(addr, dst); }
 
-    /// Whole pages inside the zone and nowhere else.
+    /// Whole pages inside the zone and nowhere else: false, and nothing
+    /// sent, for a run outside it or off its cells; otherwise
+    /// Flash::program()'s answer, a window that returns when the pages
+    /// are written.
     static bool program(uint32_t addr, std::span<const uint8_t> src) {
         const uint32_t bytes = static_cast<uint32_t>(src.size());
         if (!QspiFlashPartition::contains(addr, bytes) ||
@@ -158,7 +178,8 @@ struct QspiFlash {
         return Flash::program(addr, src);
     }
 
-    /// One sector. Same bounds.
+    /// One sector. Same bounds; a window that returns when the sector is
+    /// erased.
     static bool erase(uint32_t addr) {
         if (!QspiFlashPartition::contains(addr, erase_size) || (addr % erase_size) != 0u) {
             return false;

@@ -1,7 +1,10 @@
 /*
  * crc.hpp
  *
- * Two checksums, both bitwise and both constexpr:
+ * Two checksums in software, both bitwise and both constexpr, for any
+ * caller on any target: the CRC-16 a stored record carries so that a
+ * torn copy can be refused, and the CRC-32 some targets compute in
+ * hardware, here as the arithmetic that judges them:
  *
  *   CRC-16/CCITT-FALSE  polynomial 0x1021, initial value 0xFFFF, no
  *                       reflection, no final XOR - what a stored record
@@ -10,23 +13,44 @@
  *                       initial value 0xFFFFFFFF, most significant bit
  *                       first, no reflection, no final inversion.
  *
+ * The smallest use is one call over a buffer:
+ *
+ *     const uint16_t c = brio::crc16(bytes, len);   // 0xFFFF for len 0
+ *     const uint32_t d = brio::crc32_ethernet_bytes(bytes, len);
+ *
+ * The checks the host suite pins them to (test/test_nv_record): the
+ * standard check value over the nine ASCII bytes "123456789", 0x29B1
+ * for the CRC-16 and 0x0376E6E7 for the CRC-32.
+ *
+ * Who calls what. Every function here is pure: it reads the caller's
+ * bytes, keeps no state, masks nothing and waits for nothing, so it may
+ * be called from any context, an interrupt handler included, and from
+ * two contexts at once. The caller's buffer is only read, and only for
+ * the duration of the call. The cost is eight shifts a byte; a running
+ * checksum is carried by the caller (the `crc` argument and the `seed`
+ * of crc16()), so a payload can be fed in pieces.
+ *
  * Bitwise on purpose. A table would cost 512 bytes of flash to save a
  * few microseconds on payloads that are tens of bytes long and are
- * written to nonvolatile memory at 70 us PER BYTE - the checksum is
+ * written to nonvolatile memory at tens of microseconds a byte or
+ * slower (70 us for a bare EEPROM byte write on the AVR DA/DB, about
+ * 10 ms for its erase-and-write, avrxt/nvm.hpp) - the checksum is
  * never the slow part of anything that uses it. The loop is constexpr,
  * so a compile-time constant payload costs nothing at all.
  *
- * WHY THE CRC-32 IS HERE AND NOT IN A DRIVER. More than one of brio's
+ * Why the CRC-32 is here and not in a driver. More than one of brio's
  * targets carries a hardware CRC block with the Ethernet polynomial
- * WIRED IN and no knob beside it: no polynomial register, no initial
- * value, no reversal, no final XOR. What such a block computes is
- * therefore exactly one function - the one catalogued as CRC-32/MPEG-2 -
- * and one function has one home. The software twin below is what each of
- * those blocks' bench suites judges the silicon against, what a program
- * uses for a length the hardware's word grain cannot take, and what
- * answers at compile time for a constant.
+ * wired in and no knob beside it (stm32f4/crc.hpp, ch32vx03/crc.hpp):
+ * no polynomial register, no initial value, no reversal, no final XOR.
+ * What such a block computes is therefore exactly one function - the
+ * one catalogued as CRC-32/MPEG-2 - and one function has one home. The
+ * software twin below is what each of those blocks' bench suites judges
+ * the silicon against, what a program uses for a length the hardware's
+ * word grain cannot take, and what answers at compile time for a
+ * constant.
  *
- * The one property the CRC-16 users depend on: a torn write (power lost
+ * The one property the CRC-16 users depend on (util/nv_record.hpp,
+ * util/nv_heap.hpp, util/nv_journal.hpp): a torn write (power lost
  * halfway through a multi-byte record) shows up as a mismatch, so the
  * reader can refuse the record instead of returning half of it.
  */
@@ -40,7 +64,8 @@ namespace brio {
 
 // ---- CRC-16/CCITT-FALSE -----------------------------------------------------
 
-/// Feed one byte into a running CRC-16/CCITT-FALSE.
+/// Feed one byte into a running CRC-16/CCITT-FALSE and return the new
+/// running value; start from 0xFFFF.
 constexpr uint16_t crc16_byte(uint16_t crc, uint8_t byte) {
     crc = static_cast<uint16_t>(crc ^ (static_cast<uint16_t>(byte) << 8));
     for (uint8_t bit = 0; bit < 8; ++bit) {
@@ -52,6 +77,8 @@ constexpr uint16_t crc16_byte(uint16_t crc, uint8_t byte) {
 }
 
 /// CRC-16/CCITT-FALSE over a byte range. The empty range is 0xFFFF.
+/// `seed` continues a running checksum: crc16(b, n2, crc16(a, n1)) is
+/// the checksum of a followed by b.
 constexpr uint16_t crc16(const uint8_t* data, uint16_t len,
                          uint16_t seed = 0xFFFFu) {
     uint16_t crc = seed;
@@ -86,7 +113,7 @@ constexpr uint32_t crc32_ethernet_byte(uint32_t crc, uint8_t byte) {
     return crc;
 }
 
-/// One 32-bit word into a running CRC, most significant BYTE first: the
+/// One 32-bit word into a running CRC, most significant byte first: the
 /// order in which a hardware block of this kind consumes a word written
 /// to its data register, so feeding `w` here and storing `w` there are
 /// the same operation.
@@ -109,7 +136,7 @@ constexpr uint32_t crc32_ethernet(const uint32_t* words, size_t count) {
     return crc;
 }
 
-/// A run of BYTES in software, for the length a word-wise unit cannot
+/// A run of bytes in software, for the length a word-wise unit cannot
 /// take (anything that is not a whole number of words) and for the
 /// published check value an implementation is pinned to.
 constexpr uint32_t crc32_ethernet_bytes(const uint8_t* bytes, size_t count) {

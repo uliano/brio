@@ -1,48 +1,75 @@
 /*
  * dma_engine.hpp
  *
- * What a TRANSPORT needs to know about the DMA controllers without
- * including them: the "no engine" tag of every optional engine slot in
- * this stratum, the SLOT a request lands in, and THE REQUEST TABLE.
+ * What a program and a transport (a driver that moves a peripheral's
+ * data in runs: the Uart, the SpiHost, the I2cHost) need in order to
+ * name a DMA engine without including the controllers: the request
+ * table, which answers the controller and the channel the silicon wires
+ * to a peripheral's request on the part being built; `DmaSlot`, the slot
+ * a request lands in; `NoDmaEngine`, the empty tag every optional engine
+ * slot of this stratum (a transport's template parameter that names an
+ * engine) defaults to; the two checks a transport makes on a named
+ * engine; and `DmaPriority`, the level an engine arms at. The smallest
+ * use names the requests rather than their numbers, as
+ * docs/ch32vx03/dma.md's "How to use it" writes a console on both
+ * engines (`P` the program's platform type, platform.hpp):
  *
- * WHY THEY LIVE TOGETHER. On this family the channel IS the request
+ *     using Tx = brio::DmaRequestOf<brio::DmaRequest::usart2_tx>;
+ *     using Rx = brio::DmaRequestOf<brio::DmaRequest::usart2_rx>;
+ *     using Serial = brio::Uart<2, P, 128, 128, brio::UartFormat{},
+ *                               brio::DmaTxEngine<Tx::controller, Tx::channel>,
+ *                               brio::DmaRxEngine<Rx::controller, Rx::channel>>;
+ *
+ * and a request the part cannot raise is a compile error on the line
+ * that names it.
+ *
+ * Which context calls what: nothing here touches a register or keeps any
+ * storage. Every function is constexpr over the part table
+ * (brio/ch32vx03/parts/, the per-part facts device:: exposes), answered
+ * at compile time where its argument is a constant and a pure
+ * computation in any context where it is not; nothing waits and nothing
+ * masks.
+ *
+ * Why they live together. On this family the channel is the request
  * (RM 11.2.3): there is no multiplexer, the tables wire each peripheral
  * event to one channel of one controller, and a transport with an engine
- * slot must be able to REFUSE an engine that names another. It can only
+ * slot must be able to refuse an engine that names another. It can only
  * do that if it can read the table - and it must not include
  * ch32vx03/dma.hpp for it, because a driver with an empty slot would then
  * drag the whole controller into every program with a console. So the
- * table is here, beside the tag, and it is the ONE place in the stratum
+ * table is here, beside the tag, and it is the one place in the stratum
  * where a peripheral's channel number is written: the USARTs', the SPIs',
  * the I2Cs', the converters' and the timers' are all read out of the same
  * rows a reader can hold the manual against.
  *
- * A REQUEST LANDS IN A SLOT, NOT ON A CHANNEL NUMBER. The CH32V303
- * (CH32V30x_D8) carries TWO controllers - DMA1 with seven channels and
+ * A request lands in a slot, not on a channel number. The CH32V303
+ * (CH32V30x_D8) carries two controllers - DMA1 with seven channels and
  * DMA2 with eleven - and a channel number alone names two different
  * channels there: UART4 transmits on DMA2's fifth, which is not DMA1's
- * fifth. So the table answers a `DmaSlot`, the controller AND the channel,
+ * fifth. So the table answers a `DmaSlot`, the controller and the channel,
  * and every check a transport makes compares the whole slot. That is why
- * this is ONE function and not a controller function beside a channel
+ * this is one function and not a controller function beside a channel
  * function: two answers invite a check that asks only the second, and a
  * DMA2 engine would then pass for a DMA1 request that happens to share its
  * number - a wedge with no error flag, which is exactly what the check is
  * there to refuse.
  *
- * THE TABLE IS PER PART, not per family. Three device classes read three
- * tables - 11-5 for the CH32V20x_D6, 11-6 for the D8 (the same map plus
- * TIM5's six rows), and for the CH32V30x_D8 table 11-2 for DMA1 (11-5's
- * rows but for UART4's two) with tables 11-3 and 11-4 for DMA2 - and
- * WHICH peripherals the part in front of you offers is parts/<part>.hpp's
- * business: the smallest package has one usart and no I2C at all, the
- * 128 KB CH32V303 has no TIM5 and no TIM8. Such a row answers the empty
- * slot, `channel 0` meaning "no channel" everywhere in this stratum, and
- * `DmaRequestOf<r>` turns that into a compile error on the line that
- * asked.
+ * The table is per part, not per family. Three device classes (the
+ * manual's groups of parts, each with its own register notes and request
+ * tables) read three tables - 11-5 for the CH32V20x_D6, 11-6 for the D8
+ * (the same map plus TIM5's six rows), and for the CH32V30x_D8 table
+ * 11-2 for DMA1 (11-5's rows but for UART4's two) with tables 11-3 and
+ * 11-4 for DMA2 - and which peripherals the part being built offers is
+ * parts/<part>.hpp's business: the smallest package has one usart and no
+ * I2C at all, the 128 KB CH32V303 has no TIM5 and no TIM8. Such a row
+ * answers the empty slot, `channel 0` meaning "no channel" everywhere in
+ * this stratum, and `DmaRequestOf<r>` turns that into a compile error on
+ * the line that asked.
  *
- * `present` is the only thing a task asks the tag about, with
- * `if constexpr`, so every engine branch disappears from a driver that
- * does not name one.
+ * `present` is the only thing a task (a driver layer with state of its
+ * own, served from its peripheral's interrupt - here a transport) asks
+ * the tag about, with `if constexpr`, so every engine branch disappears
+ * from a driver that does not name one.
  */
 
 #pragma once
@@ -341,7 +368,8 @@ constexpr bool dma_request_present(DmaRequest r) { return dma_request_channel(r)
  *     using Engine = brio::DmaTxEngine<Tx::controller, Tx::channel>;
  *
  * which is how an application names the request rather than the numbers
- * and still gets the numbers the silicon wired.
+ * and still gets the numbers the silicon wired. Every member is a
+ * constant: nothing of it runs, and it is usable wherever a type is.
  */
 template <DmaRequest r>
 struct DmaRequestOf {

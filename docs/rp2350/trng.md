@@ -1,6 +1,75 @@
 # True random number generator (RP2350)
 
-Documents of record: the RP2350 datasheet (build d126e9e), 12.12 (the
+This document is for a programmer who needs random bits from the
+RP2350's hardware: a seed for a pseudo-random generator, a nonce, a key.
+`Trng` is the driver, a monostate (a type with no objects, all of whose
+functions and state are static, because the block exists once): it
+brings the generator up with settings that are safe at every clock rate
+of the chip, starts its ring oscillator, and hands out 192 bits at a
+time once the block's own entropy checks have passed them. It is a
+source to seed with, not a stream: a collection took 1351 to 1427 us
+at the default setting with clk_sys at 150 MHz ("Bench findings"
+below). For the cheaper seed a program usually
+wants, the 128 bits the bootrom made at boot, see
+[bootrom.md](bootrom.md)'s `get_sys_info`. Both architectures run the
+driver from one source.
+
+The smallest use, an excerpt of the block under "How to use it" below:
+
+```cpp
+brio::Trng::init();                       // the block and the settings
+brio::Trng::start();                      // the ring oscillator
+
+if (auto e = brio::Trng::read_blocking()) {
+    seed(e->words);                       // six words, 192 bits
+} else if (brio::Trng::last_error() == brio::TrngError::autocorrelation) {
+    brio::Trng::recover();                // the only cure for that one
+}
+
+brio::Trng::stop();                       // it is a waste of power idle
+```
+
+Line by line: `init()` takes the block out of the reset controller's
+hold, resets the generator's own logic and writes the default settings
+(`TrngConfig{}`: the sampling interval as 2 us at the chip's highest
+clock); it leaves the source stopped, bar when it refuses the settings,
+which it does before writing anything, so a source an earlier `start()`
+left running runs on; `start()` starts the ring oscillator, and with it
+the collection; `read_blocking()` waits for 192 bits, going round again
+when one of the two recoverable checks discards a run, and answers six
+32-bit words or nothing; `last_error()` says why there was nothing, and
+`TrngError::autocorrelation` is the one answer that stops the block
+until `recover()` resets it and writes the settings again; `stop()`
+stops the oscillator, which 12.12.3 asks for when the block is not in
+use.
+
+What decides correctness even there. The sampling interval: the block
+counts it in system clock cycles, and an interval under about 800 ns
+stops the block on its autocorrelation check within microseconds
+(measured, "Bench findings" below) - which is why the default is a time
+turned into cycles at the chip's highest rate and not the cycle count
+the datasheet suggests. A program that passes its own `sample_cycles`
+owns that floor; `init()` refuses only what the chapter forbids
+outright (a chain above 3, a count of zero, a count under seventeen
+with the decorrelator bypassed), answering false with
+`TrngError::misconfigured`. The wait: `read_blocking()` polls, bounded
+by `default_spins` (four million status reads), masks nothing and
+blocks its caller for the whole collection, a run sometimes taking a
+hundred times the average (12.12.4) - so it belongs in main context
+where that wait is acceptable, and no verb of this driver belongs in an
+interrupt handler with a deadline behind it. And the answer must be
+looked at: a read that gave nothing gave no bits.
+
+The rest of this page, in order: the documents of record; what the
+silicon does (the three checks, the generation time, the sampling
+interval and where the datasheet's advice breaks, the soft reset, the
+result registers, what the bootrom does instead); the types and verbs;
+how to use it, with a program's own interval; the bench findings; and
+what is not covered.
+
+## Documents of record
+
+The RP2350 datasheet (build d126e9e), 12.12 (the
 generator: 12.12.1 what it is and what it yields, 12.12.2 the two
 settings and the chapter's own working values, 12.12.3 the operating
 sequence, 12.12.4 the caveats and the two reference drivers - 12.12.4.1
@@ -9,11 +78,12 @@ registers), 7.5 (the reset controller), 3.2 (the interrupt line). No item
 of Appendix E is filed against this block. The driver:
 `brio/rp2350/trng.hpp`. The reference suite: `test_rp2350_blocks`,
 letters e, f and g, which runs on both of this chip's architectures from
-one source.
+one source (a letter is one command key of the suite's console and the
+group of verdicts it runs; `z` is the key that runs them all).
 
 ## What the silicon does
 
-ARM IP, NOT RASPBERRY PI'S - which is why its register names read unlike
+Arm IP, not Raspberry Pi's - which is why its register names read unlike
 anything else in this stratum and why its offsets start at 0x100 rather
 than at zero.
 
@@ -21,7 +91,7 @@ A free-running ring oscillator with **no connection to the system clock
 tree**, sampled every SAMPLE_CNT1 system clock cycles. The samples pass
 three entropy checks and a von Neumann decorrelator, and 192 accepted
 bits at a time appear in the six EHR_DATA registers. 12.12.1 gives the
-yield as about 7.5 kb/s with the core at 150 MHz: a source to SEED with,
+yield as about 7.5 kb/s with the core at 150 MHz: a source to seed with,
 not a stream to read from.
 
 **The three checks are all on at reset, and they are not errors in the
@@ -31,7 +101,7 @@ it should go round again:
 
 | Flag | What it means | What a program does |
 |------|---------------|---------------------|
-| `AUTOCORR_ERR` | the autocorrelation test failed FOUR TIMES IN A ROW | nothing: "RNG ceases functioning until next reset", and RNG_ICR's own description says this bit "cannot be cleared by SW". The internal soft reset is the only way back |
+| `AUTOCORR_ERR` | the autocorrelation test failed four times in a row | nothing: "RNG ceases functioning until next reset", and RNG_ICR's own description says this bit "cannot be cleared by SW". The internal soft reset is the only way back |
 | `CRNGT_ERR` | two consecutive blocks of sixteen collected bits were equal | clear it; the run was discarded and the next has started |
 | `VN_ERR` | thirty-two consecutive collected bits were identical | the same |
 
@@ -48,8 +118,8 @@ Every wait in this driver is therefore bounded and says so when it runs
 out, and no verb of it belongs in an interrupt handler with a deadline
 behind it.
 
-**THE SAMPLING INTERVAL IS A TIME, AND THE CHAPTER'S ADVICE IS A CYCLE
-COUNT - which is why a program that takes 12.12.2 literally at 150 MHz
+**The sampling interval is a time, and the chapter's advice is a cycle
+count - which is why a program that takes 12.12.2 literally at 150 MHz
 stops the block.** TRNG_CONFIG picks one of four inverter-chain lengths
 and SAMPLE_CNT1 the clk_sys cycles between two samples. The chapter's
 worked values are "ROSC chain length settings of 0 or 1 and sample count
@@ -62,14 +132,14 @@ samples (below), and 680 samples of 25 cycles in 2 ms is a clk_sys near
 8.5 MHz, the order of the ring oscillator this chip boots on. **25 cycles
 is 2.9 us there and 167 ns at 150 MHz**, and only the first of those
 works. So this driver states the
-setting as a TIME - `trng_default_sample_ns`, 2 us - and turns it into a
+setting as a time - `trng_default_sample_ns`, 2 us - and turns it into a
 count for the family's highest clk_sys, which is at or over the floor at
 every rate below it; `trng_sample_cycles_for(hz)` is the same arithmetic
 for a program that knows its own rate and wants the fastest legal
 setting. Longer is slower and never wrong.
 
 **The one combination that is wrong rather than slow.** With the von
-Neumann decorrelator BYPASSED, SAMPLE_CNT1 "must not be less than
+Neumann decorrelator bypassed, SAMPLE_CNT1 "must not be less than
 seventeen" - a rule and not a preference, and independent of the
 interval above. This driver refuses that combination at compile time
 when the settings are constant and at run time when they are not.
@@ -78,7 +148,7 @@ when the settings are constant and at run time when they are not.
 TRNG_SW_RESET and then reads the register twice, with the comment that a
 fixed delay is required after it. The reset also returns every setting to
 its reset value (SAMPLE_CNT1 to 0xffff), which is why the recovery verb
-is the reset AND the settings again.
+is the reset and the settings again.
 
 **Reading EHR_DATA5 is what clears the result registers** (12.12.3), so
 the six words are read in order 0..5 and never out of it. Until a
@@ -86,7 +156,7 @@ collection completes they all read zero, so the CPU cannot take a
 half-collected number.
 
 **What the bootrom does instead, and why this driver does not.** The ROM
-streams RAW ring-oscillator samples past every check straight into the
+streams raw ring-oscillator samples past every check straight into the
 SHA-256 accelerator (12.12.4.1), because it must boot in bounded time and
 because a hash is a better conditioner than the decorrelator. That is a
 legitimate use of the same silicon under a different contract; this
@@ -96,12 +166,12 @@ per-boot random number the ROM produced that way is available through
 program usually wants.
 
 One interrupt line, masked at reset (every RNG_IMR bit resets to one, and
-a ONE masks).
+a one masks).
 
 ## Types and verbs
 
 - `TrngConfig` - the chain length, the sample count and the three checks.
-  The sample count defaults to the measured-safe INTERVAL at the family's
+  The sample count defaults to the measured-safe interval at the family's
   highest clk_sys, not to the chapter's cycle count.
   `trng_config_legal(cfg)` is the rule both the compile-time and the
   run-time entry points judge by, written once.
@@ -110,7 +180,7 @@ a ONE masks).
   arithmetic between a sampling interval and SAMPLE_CNT1, rounded up.
 - `Trng::init(cfg)` / `Trng::init<cfg>()` - the block cycled through its
   subsystem reset, the IP's soft reset with its delay, the settings, every
-  interrupt masked. The source is left STOPPED. The templated form
+  interrupt masked. The source is left stopped. The templated form
   refuses an illegal setting at compile time, naming the rule.
 - `Trng::start()` / `stop()` / `running()` - the ring oscillator.
   12.12.3 asks that it be stopped when the block is not in use.
@@ -130,7 +200,7 @@ a ONE masks).
 - What the block says about itself: `version()` with
   `ehr_is_192_bits()`, `has_autocorrelation()` and `has_crngt()` beside
   it; `autocorr_stats()` (the tests started and the ones that failed, in
-  one register that ANY write resets); `bist()`, the three ring
+  one register that any write resets); `bist()`, the three ring
   oscillator counters; `chain()`, `sample_cycles()`, `debug_control()`
   and `debug_mode()` read back.
 - `reset_bit_counter()` - RST_BITS_COUNTER, which refuses while the

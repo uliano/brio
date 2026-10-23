@@ -1,40 +1,74 @@
 /*
  * device.hpp
  *
- * The silicon's own register map, in this stratum's words. Like the
- * CH32V00x and unlike every other 32-bit family here, this target
- * compiles with NO VENDOR HEADER: WCH ships its register definitions
- * inside the EVT package, whose licence is written for software running
- * on WCH parts, so the map lives here, read off the documents of record
+ * The silicon's own register map, in this stratum's words: what every
+ * driver of the stratum includes to reach its block, and what a program
+ * includes for the part's facts (`device::part_name`, the memories, the
+ * pads a package bonds, the instances, the device class) and the
+ * interrupt numbers of `Irq`. Nothing here runs: it is constants,
+ * register structs, the accessors that turn a block's address into a
+ * pointer, and the one `#if` that selects the part's table. A driver
+ * reaches its registers through an accessor and the bit constants, as
+ * ticker.hpp's init() programs the core's timer:
+ *
+ *     stk()->CMPLR = period - 1u;
+ *     stk()->CTLR = stk_ste | stk_stie | stk_stclk | stk_stre;
+ *     Pfic::enable(Irq::systick);
+ *
+ * and a program reads the part table (the per-part facts of parts/,
+ * which `device::` exposes), as a program that prints the name of the
+ * part it runs on reads `brio::device::part_name`.
+ * The register accessors are single loads and stores, legal from any
+ * context; what an access means, and whether it needs a guard, is each
+ * register's driver's to say. pwr_ctlr_store() below is the one
+ * function here that composes a store from kept state.
+ *
+ * Like the two other WCH families here, the CH32V00x and the CH32X035,
+ * and unlike every other 32-bit family, this target compiles with no
+ * vendor header: WCH ships its register definitions inside the EVT
+ * package, whose licence is written for software running on WCH parts,
+ * so the map lives here, read off the documents of record
  * (CH32F/V20x_V30x_V31x reference manual V2.3, the CH32V203 datasheet
  * V2.8, the CH32V303/305/307/317 datasheet V3.5 and the QingKe V4
  * microprocessor manual V1.1) and answerable to them.
  *
- * WHAT THAT COSTS. There is no device header to ask which instances
- * exist, so per-part variability has to be STATED: the build names the
- * part (cmake/ch32vx03-parts.cmake), this file asks that definition ONCE
- * and includes the part's own table from parts/, and every driver reads
- * the facts as `device::` constexpr values - the memories, the bonded
- * pins of each port, the instances, the device class. Thirteen parts
- * are the family: the nine CH32V203 of their datasheet and the four
- * CH32V303 of theirs.
+ * What that costs. There is no device header to ask which instances
+ * exist, so per-part variability has to be stated: the build names the
+ * part (cmake/ch32vx03-parts.cmake in the ch32vx03 project), this file
+ * asks that definition once and includes the part's own table from
+ * parts/, and every driver reads the facts as `device::` constexpr
+ * values - the memories, the bonded pins of each port, the instances,
+ * the device class. Thirteen parts are the family: the nine CH32V203 of
+ * their datasheet and the four CH32V303 of theirs.
  *
- * THE MANUAL IS FOUR FAMILIES WIDE. Its chapters cover the CH32F20x, the
+ * The manual is four families wide. Its chapters cover the CH32F20x, the
  * CH32V20x, the CH32V30x and the CH32V31x together, and a register
  * description that names a class (their D6, D8, D8C, D8W) is making a
- * statement about SOME of them. Three of those classes are this
+ * statement about some of them. Three of those classes are this
  * stratum's: the CH32V203 is CH32V20x_D6 for every part up to the C8
  * and CH32V20x_D8 for the RB, and the CH32V303 is CH32V30x_D8 (the
  * manual's "Specific classification abbreviations"). Where a field
  * belongs to another class it is not spelled here at all; where it
- * belongs to one of ours, the comment says which. A driver asks a FACT
+ * belongs to one of ours, the comment says which. A driver asks a fact
  * of the part - how many channels, whether a block exists - and asks
  * the class itself only where the manual's note is a list of classes
  * and nothing else answers.
  *
- * Register STRUCTS mirror the chapter's own field names and order, so a
- * reader can hold the manual beside the code. They are the only place in
- * the stratum where an address appears as a number.
+ * What this file maps: the bus bases; RCC; GPIO and AFIO; the USART;
+ * PWR's two registers, with the kept copy of PWR_CTLR's retention bits;
+ * FLASH's engine, its keys and the two addresses the array answers at;
+ * the electronic signature; EXTEN; the core's STK and PFIC with
+ * PFIC_SCTLR; the interrupt numbers per device class; and the base
+ * addresses of the blocks the CH32V303 adds. A block whose registers
+ * are its own driver's (the DMA, the timers, the I2C, the SPI, the EXTI,
+ * the ADC, the DAC, the CRC, the RTC and the backup registers, the
+ * watchdogs, the RNG, the operational amplifiers, the two USB
+ * controllers) keeps its register struct in that driver's header and
+ * places the block at one of the bases below or at an offset from one
+ * of the bus bases.
+ *
+ * Register structs mirror the chapter's own field names and order, so a
+ * reader can hold the manual beside the code, here as in those headers.
  */
 
 #pragma once

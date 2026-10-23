@@ -1,76 +1,114 @@
 /*
  * pio.hpp
  *
- * The RP2350's programmable I/O (datasheet chapter 11): THREE blocks of
- * four STATE MACHINES each, executing sixteen-bit programs from a shared
- * memory of thirty-two instructions - nine instructions, one cycle each,
- * a delay of up to 31 cycles and a side-set of up to five pins folded
- * into every one -, each machine with two 32-bit scratch registers, an
- * output and an input shift register with their counters, a four-deep
- * FIFO each way (joinable into one of eight, or turned into four
- * randomly addressed REGISTERS), a 16.8 clock divider, four pin ranges
- * (OUT, SET, IN, side-set) and a pin to branch on, eight flags shared by
- * the machines of a block and reaching the two system interrupt lines,
- * and a DMA request per FIFO. Three layers, the other strata's
- * arrangement:
+ * The RP2350's programmable I/O (datasheet chapter 11) for a program
+ * that needs an interface the chip has no dedicated block for, or one
+ * more of a kind it has: a serial port on any pad, a square wave, a PWM,
+ * a sampler, or a protocol of its own written as a PIO program. The
+ * smallest use, a serial port on two pads joined by a wire (each pad a
+ * system GPIO number; `clock` the program's clock tag, rp2350/clock.hpp):
  *
- *  - THE ASSEMBLER: the nine instructions as constexpr encoders
+ *     (void)brio::Pio<0>::reset();                  // the block out of reset
+ *     using Tx = brio::PioUartTx<0, 0, 13>;         // PIO0, machine 0, GPIO 13
+ *     using Rx = brio::PioUartRx<0, 1, 15>;
+ *     Tx::init(clock, 115'200);
+ *     Rx::init(clock, 115'200);
+ *     Tx::write_wait('A');
+ *     if (const auto b = Rx::read_wait()) { ... }
+ *
+ * Every block is held in reset at power-up (rp2350/resets.hpp) and no
+ * task's init() releases it: Pio<n>::reset() does, a cycle through the
+ * reset controller that also clears this file's map of the instruction
+ * memory. The clock task runs first, because every divider here is
+ * computed from the rate the clock type claims.
+ *
+ * Who calls what. Nothing in this file masks interrupts or keeps a
+ * caller's storage. The setup verbs - Pio<n>::reset(), gpio_base(),
+ * load()/add(), PioSm::configure()/init(), the tasks' init() and
+ * release() - belong to main() or to an active object's handler (a brio
+ * component with an event queue the kernel serves one event at a time),
+ * and the instruction-memory map they keep has no guard, so one context
+ * places programs. The waits are bounded spins: Pio<n>::reset(), the
+ * reset controller's wait for RESET_DONE (rp2350/resets.hpp), exec_wait()
+ * (100 000 polls), push_wait()/pop_wait() and the tasks'
+ * write_wait()/read_wait() (1 000 000), drain_tx() (64 instructions);
+ * none blocks for ever. The four tasks are polled and use no interrupt; a
+ * program that wants the block's interrupt lines binds the vector itself
+ * and calls Pio<n>::isr(line) from it, the body that clears the flag
+ * sources it returns. disable_across() reads and writes CTRL whole, so no
+ * other context may enable a machine of the same block across it (the
+ * comment at it says why).
+ *
+ * A block is four state machines executing sixteen-bit programs from a
+ * shared memory of thirty-two instructions - nine instructions, one
+ * cycle each, a delay of up to 31 cycles and a side-set of up to five
+ * pins folded into every one -, each machine with two 32-bit scratch
+ * registers, an output and an input shift register with their counters,
+ * a four-deep FIFO each way (joinable into one of eight, or turned into
+ * four randomly addressed registers), a 16.8 clock divider, four pin
+ * ranges (OUT, SET, IN, side-set) and a pin to branch on, eight flags
+ * shared by the machines of a block and reaching the two system
+ * interrupt lines, and a DMA request per FIFO. This chip has three such
+ * blocks. Three layers over them - an assembler, then the resource and
+ * task layering brio's drivers share:
+ *
+ *  - The assembler: the nine instructions as constexpr encoders
  *    (`pio_jmp` .. `pio_set`, and this chip's `pio_put` / `pio_get`), the
  *    side-set and delay folded in by `pio_side_delay`, a program as
  *    `PioProgram<N>` with its wrap points and side-set shape, JMP
  *    addresses relocated at load. Every program is written here in these
  *    words - there is no pioasm in this tree.
- *  - `Pio<n>` is the BLOCK: the reset gate, the GPIO window, the
+ *  - `Pio<n>` is the block: the reset gate, the GPIO window, the
  *    instruction memory with a first-fit placer, the enables and restarts
- *    in lockstep (CTRL) reaching the NEIGHBOURING BLOCKS as well, the
+ *    in lockstep (CTRL) reaching the neighbouring blocks as well, the
  *    FIFO status and debug words, what the pads are being driven with,
  *    the eight flags, the two interrupt lines with their sixteen sources,
  *    the ISR body.
- *  - `PioSm<n, sm>` is the RESOURCE of one machine: its configuration
+ *  - `PioSm<n, sm>` is the resource of one machine: its configuration
  *    (the divider, the execution controls, the shift controls, the pin
  *    ranges), the FIFOs and their register face, an instruction executed
  *    at once (SMx_INSTR), the pins claimed through a SET executed on the
  *    side.
- *  - THE TASKS are the chapter's own programs: `PioUartTx` and
+ *  - The tasks are the chapter's own programs: `PioUartTx` and
  *    `PioUartRx` (11.6.3, 11.6.4: a serial port on any pin at eight
  *    cycles a bit), `PioSquareWave` (11.2.1's four-cycle wave), `PioPwm`
  *    (11.6.8: a util/pwm_channel.hpp PwmChannel counted by a program).
  *    Any other program is the application's, written with the encoders
  *    above.
  *
- * WHAT THIS CHIP ADDED, and why none of it is the RP2040's file retyped
- * (11.1.1 states the list; every item below has a verb here):
+ * What this chip added, none of it the RP2040's file retyped (11.1.1
+ * states the list; every item below has a verb here):
  *
- *  - A THIRD BLOCK. Twelve state machines, three interrupt line pairs,
+ *  - A third block. Twelve state machines, three interrupt line pairs,
  *    three sets of DMA requests, and PIO2 as a pin function of its own
- *    (F8). `Pio<n>` takes n < 3, and the three form a RING for the
+ *    (F8). `Pio<n>` takes n < 3, and the three form a ring for the
  *    cross-block features below: the block after PIO2 is PIO0.
  *  - VERSION. DBG_CFGINFO.VERSION reads 1 here and read 0 on the RP2040,
  *    so a program can ask the silicon whether the features of this file
  *    exist at all. `Pio<n>::version()`.
- *  - GPIOBASE, and it is the one thing that changes the MEANING of every
+ *  - GPIOBASE, and it is the one thing that changes the meaning of every
  *    pin number in this file. A block still sees 32 GPIOs at a time, but
  *    which 32 is a register: 0 selects GPIO0..31, 16 selects GPIO16..47,
  *    and those two are the only values the bit accepts. Its own
- *    description is that it "relocates GPIO 0 FROM PIO'S POINT OF VIEW",
+ *    description is that it "relocates GPIO 0 from PIO's point of view",
  *    so the four pin ranges in `PioSmConfig`, EXECCTRL's JMP_PIN and the
- *    index of a WAIT GPIO are all the BLOCK's own 0..31 and not the
+ *    index of a WAIT GPIO are all the block's own 0..31 and not the
  *    system's GPIO number - `Pio<n>::pin_index(gpio)` is the single
  *    conversion, and the tasks take system numbers and do it themselves,
  *    refusing a pad outside the window instead of driving the wrong one.
- *  - CTRL's NEIGHBOUR MASKS. One write to a block's CTRL can start, stop
+ *  - CTRL's neighbour masks. One write to a block's CTRL can start, stop
  *    or restart the clock dividers of state machines in the block before
- *    and after it, ON THE SAME CYCLE as its own - which is the only way
+ *    and after it, on the same cycle as its own - which is the only way
  *    to put machines of different blocks in lockstep. `enable_across`,
  *    `disable_across`, `restart_clocks_across`.
- *  - ALL EIGHT FLAGS REACH THE LINES. On the RP2040 only flags 0..3 could
+ *  - All eight flags reach the lines. On the RP2040 only flags 0..3 could
  *    be masked into an interrupt request; here IRQ0_INTE and IRQ1_INTE
  *    are sixteen bits wide and the upper eight are the eight flags, so
  *    `PioInterrupt::flag(f)` takes 0..7.
  *  - SHIFTCTRL.IN_COUNT masks the IN-mapped pins above a count to zero -
  *    which is what makes `MOV X, PINS` usable, that instruction having
  *    had no other way to say how many pins it meant.
- *  - THE RX FIFO AS FOUR REGISTERS. FJOIN_RX_PUT turns a machine's
+ *  - The RX FIFO as four registers. FJOIN_RX_PUT turns a machine's
  *    receive FIFO into four cells the machine writes in any order (the
  *    PUT instruction) and the system reads at RXFn_PUTGETm - a status
  *    register a program keeps up to date and no one blocks on.
@@ -78,17 +116,17 @@
  *    Both set together give the machine four more scratch registers and
  *    shut the system out. `PioFifoJoin` carries those three modes beside
  *    the two the RP2040 had.
- *  - NEW INSTRUCTION FORMS (11.4): WAIT on JMP_PIN plus an offset of 0..3
+ *  - New instruction forms (11.4): WAIT on JMP_PIN plus an offset of 0..3
  *    (a wait whose pin is the machine's own branch pin and not the IN
  *    mapping); MOV to PINDIRS, which turns every OUT-mapped pin around in
  *    one instruction; the IRQ flags as a source for MOV X, STATUS, so a
- *    program can BRANCH on a flag instead of blocking on it; and an IRQ
- *    index that names a flag of the PREVIOUS or the NEXT block, with no
+ *    program can branch on a flag instead of blocking on it; and an IRQ
+ *    index that names a flag of the previous or the next block, with no
  *    cycle of delay between blocks. `PioIrqScope` is that index mode, and
  *    it is where the RP2040's single `relative` flag went: relative is
  *    one of its four values.
  *
- * THE PINS: any of the GPIOs the package bonds, under function 6 (PIO0),
+ * The pins: any of the GPIOs the package bonds, under function 6 (PIO0),
  * 7 (PIO1) or 8 (PIO2) - every pin of this chip offers all three (9.4). A
  * machine's four ranges are bases and counts modulo 32 over the block's
  * window; on one cycle the highest-numbered machine writing a pin wins,
@@ -96,23 +134,23 @@
  * input passes a two-flip-flop synchronizer unless INPUT_SYNC_BYPASS says
  * otherwise.
  *
- * THE RELOCATION: a JMP carries an ABSOLUTE address (11.4.2), so a
+ * The relocation: a JMP carries an absolute address (11.4.2), so a
  * program written from 0 is moved to its load offset by adding the offset
  * to every JMP's target - which is why programs here name their targets
  * from 0 and load() does the adding; an instruction executed through OUT
  * EXEC or MOV EXEC is the application's to relocate.
  *
- * THE FIFOS AND THE DMA: a word pushed to TXFx, a word popped from RXFx;
+ * The FIFOs and the DMA: a word pushed to TXFx, a word popped from RXFx;
  * the request of each rises with room or data (12.6.4.1). PIO0's and
  * PIO1's sixteen requests keep the numbers they had on the RP2040 and
- * PIO2's eight are new behind them, which is what pushed every OTHER
+ * PIO2's eight are new behind them, which is what pushed every other
  * peripheral's request up the table (rp2350/dma_engine.hpp). A byte-wide
  * read of RXFx + 3 takes the top byte of an entry, where a right-shifting
  * IN leaves eight bits (11.6.4).
  *
- * NO ERRATUM OF APPENDIX E NAMES THIS BLOCK. What does reach it is
+ * No erratum of appendix E names this block. What does reach it is
  * RP2350-E9, which is the pads': a floating pad with its input buffer
- * enabled reads HIGH on stepping A2, so a program that watches an
+ * enabled reads high on stepping A2, so a program that watches an
  * undriven pin is watching the leak and not the wire (rp2350/pin.hpp).
  */
 
@@ -484,7 +522,10 @@ struct Pio {
 
     /// The block from its reset state: every machine stopped, GPIOBASE
     /// back at zero, the memory as it was (the reset does not clear it),
-    /// the placer's map cleared.
+    /// the placer's map cleared. What a program calls before the first
+    /// task or machine of the block is set up - no init() of this file
+    /// releases the block - from setup or an active object's handler;
+    /// false when RESET_DONE did not rise within its bounded wait.
     static bool reset() {
         used_ = 0;
         return Resets::cycle(reset_bit);
@@ -941,8 +982,16 @@ inline constexpr PioProgram<7> pio_pwm_program = [] {
  * a bit. The FIFO is joined into eight entries of one byte each; the DMA
  * request is `Sm::dreq_tx` on `tx_address()`.
  *
- * `pin` is a SYSTEM GPIO number and init() converts it through the
+ * `pin` is a system GPIO number and init() converts it through the
  * block's GPIO window, refusing a pad the window does not cover.
+ *
+ * init(clock, baud) is a setup verb on a block already out of reset
+ * (Pio<n>::reset()): false, and the machine not started, when no divider
+ * reaches eight cycles a bit at the clock's claimed rate, when the
+ * window does not cover the pad, or when the instruction memory has no
+ * free run of four slots. write() pushes with no check (a byte written
+ * to a full FIFO is lost, FDEBUG's TXOVER); write_wait() spins, bounded,
+ * for room and answers false when none came. Both from one context.
  */
 template <uint8_t n, uint8_t sm, uint8_t pin>
 struct PioUartTx {
@@ -1002,6 +1051,12 @@ private:
  * counted in flag 4 + sm (`frame_error()`), the FIFO joined into eight;
  * the DMA request is `Sm::dreq_rx` on `rx_top_byte_address()` for a byte
  * engine.
+ *
+ * init(clock, baud, pull) is a setup verb on a block already out of
+ * reset, the pad pulled up by default: false for the same three reasons
+ * as the transmitter's (the divider, the window, nine free slots).
+ * read_wait() spins, bounded, and answers nothing when no byte came;
+ * read() pops with no check.
  */
 template <uint8_t n, uint8_t sm, uint8_t pin>
 struct PioUartRx {

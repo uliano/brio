@@ -1,14 +1,33 @@
 /*
  * sim_usb.hpp
  *
- * A UsbController (util/usb/device.hpp) made of RAM: the host tests
- * play the HOST against it, one packet at a time, and read back what
- * the device answered. It models what a controller shows the stack -
- * one packet offered per endpoint and direction, the setup packet,
- * the reset, the address, the stall bits, the completion events - and
- * nothing of the wire.
+ * A UsbController (util/usb/device.hpp: the concept a USB device
+ * controller meets for brio's device stack) made of RAM: the host tests
+ * play the host against it, one packet at a time, and read back what
+ * the device answered (docs/design/usb.md). It models what a controller
+ * shows the stack - one packet offered per endpoint and direction, the
+ * setup packet, the reset, the address, the stall bits, the completion
+ * events - and nothing of the wire.
  *
- * THE TEST'S VERBS (the host's side): `host_setup(packet)` delivers a
+ * The smallest use, as test/test_usb spells it: the stack named over
+ * SimUsb, then a control read played packet by packet, the stack's
+ * isr() run after each as the vector would:
+ *
+ *     using Cdc = UsbCdcAcm<SimUsb, HostPlatform, 0, 1, 2, 256, 256>;
+ *     using Device = UsbDevice<SimUsb, Descriptors, Cdc>;
+ *
+ *     SimUsb::host_setup(s);              // the setup stage
+ *     Device::isr();
+ *     const auto packet = SimUsb::host_in(0);   // an IN token; empty = NAK
+ *     Device::isr();
+ *     (void)SimUsb::host_out(0, {});      // the status stage
+ *     Device::isr();
+ *
+ * Contexts: a single-threaded test, which is the host on the bus and the
+ * core that takes the controller's interrupt at once. Nothing waits;
+ * every packet is a copy into or out of the controller's own buffers.
+ *
+ * The test's verbs (the host's side): `host_setup(packet)` delivers a
  * setup packet (the controller marks the event); `host_in(number)`
  * takes the packet the device offered on an IN endpoint, if any
  * (empty optional = NAK: nothing was offered); `host_out(number,

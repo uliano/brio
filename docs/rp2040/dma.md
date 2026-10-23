@@ -1,6 +1,61 @@
 # DMA (RP2040)
 
-Documents of record: the RP2040 datasheet (build 3184e62), 2.5 (the
+This document is for two readers. Most programs meet the DMA through a
+driver: the UART, SPI and I2C transports each have two engine slots,
+and a DMA engine named in a slot moves that driver's data while the
+core does something else ([uart.md](uart.md), [spi.md](spi.md),
+[i2c.md](i2c.md); [design/dma.md](../design/dma.md) is the contract
+the engines keep). The other reader drives the controller directly: a
+memory copy, a table poured into a register at a timer's pace, a
+checksum computed as data goes by. `brio/rp2040/dma.hpp` serves both:
+`Dma` the block, `DmaChannel<ch>` one of the twelve channels,
+`DmaLine<n>` one of the two interrupt lines, `DmaTimer<n>` a pacing
+timer, `DmaSniffer` the checksum unit, and the engines - `DmaTxEngine`,
+`DmaRxEngine` and `DmaCopyEngine`, a channel bound once to its job and
+started block by block.
+
+The smallest use, a copy, from "How to use it" below:
+
+```cpp
+brio::Dma::init();                                        // once
+using C = brio::DmaChannel<4>;
+C::load({.read = src, .write = dst, .count = 1024, .config = {.size = brio::DmaSize::word}});
+while (C::busy()) {}
+```
+
+Line by line: `Dma::init()` releases the controller from reset, once
+per program; `C` names channel 4; `load()` programs the transfer - the
+two addresses, the count in items, the width of an item - and starts
+it, here 1024 words from `src` to `dst` as fast as the bus allows (no
+request is named); the loop waits for the channel to finish. `load()`
+answers false, starting nothing, on a channel still busy and for a
+transfer `dma_transfer_valid` refuses - an end missing, an address not
+aligned to the item, a zero count, a ring of 16 bits or more, a chain
+to itself or to a channel that does not exist.
+
+What decides correctness even there. `Dma::init()` comes first and
+once: no channel verb and no engine releases the block. The buffers
+belong to the transfer until it completes: the controller reads and
+writes them on its own, so neither end is touched or goes out of scope
+before `busy()` reads false or the completion's interrupt has run. A
+peripheral FIFO a channel serves is the channel's: the processor does
+not touch it meanwhile, and two channels never share one request. A
+channel reports on the line the program routes it to, and a line's
+enable acts on the NVIC of the core that calls it - line 0 is core 0's
+by convention, line 1 core 1's ([multicore.md](multicore.md)). And a
+channel stalled on a request that never comes stays busy until
+`abort()`, which carries erratum E13's workaround.
+
+The page is long because the chapter is. In order: the documents of
+record; what the silicon does, with what the engines take of it and
+the priority bit; the types and verbs, with what a block costs; how to
+use it - a copy, a paced transfer, a line, a checksum, the copy engine,
+a transmit engine on a timer, a transport with engines; the bench
+findings; and what is not covered.
+
+## Documents of record
+
+The RP2040 datasheet (build 3184e62), 2.5 (the
 controller: 2.5.1 the four live registers, 2.5.2 the trigger aliases,
 chaining and null triggers, 2.5.3 the credit-based data request and
 table 119, 2.5.4 the two lines, 2.5.5 the pacing timers, the sniffer
@@ -51,8 +106,8 @@ reports a completion when they land - the interrupt enable is cleared
 before the abort, BUSY awaited, the status cleared, the enable
 restored.
 
-THE OFFER, and what the engines take of it. A channel's registers are
-LIVE and keep what was last written: an address that does not
+What a channel offers, and what the engines take of it. A channel's
+registers are live and keep what was last written: an address that does not
 increment is still the next sequence's start (2.5.1.1), a completed
 channel keeps CTRL with EN set, and TRANS_COUNT reloads from the last
 value written. So an engine binds its channel once - the peripheral's
@@ -82,7 +137,7 @@ raised between them, an order one mask write would not keep), the
 sniffer (not an engine's business). The gate - the block out of
 RESETS - is `Dma::init()`, once per program; no engine touches it.
 
-THE LEVEL is one bit, CTRL.HIGH_PRIORITY (2.5.7): "in each scheduling
+The level is one bit, CTRL.HIGH_PRIORITY (2.5.7): "in each scheduling
 round, all high priority channels are considered first, and then only a
 single low priority channel, before returning to the high priority
 channels". The engines take docs/design/dma.md's rule in that one bit: a

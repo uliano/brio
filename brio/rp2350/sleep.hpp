@@ -6,66 +6,103 @@
  * 6.5.4 the memory periphery, 6.5.5 the memory power domains; 8.2.6 and
  * 8.3.10 the two oscillators' DORMANT registers; 9.5 the IO bank's
  * dormant-wake destination), and the sleep sites of util/power.hpp over
- * them.
+ * them. A sleep site is the target's half of brio's power model: the
+ * power manager, an active object of the program, asks its voters how
+ * deep the chip may sleep, and the site arms that depth - a rung of the
+ * ladder below - so that the kernel's next idle enters it. The smallest
+ * use, a manager over the timed site:
  *
- * FOUR DEPTHS OF STOPPING EXIST ON THIS SILICON, and only three of them
+ *     using Site = brio::Rp2350TimedSleepSite<P, SysClock, brio::DormantSource::xosc>;
+ *     using Power = brio::PowerManager<P, Site, brio::PowerConfig{}, Voters...>;
+ *     brio::AonTimer::init(clock);                 // the witness, its divisor measured
+ *     Site::standby_clocks(brio::sleep_clocks_core | brio::sleep_clocks_timer |
+ *                          brio::sleep_clocks_uart0);
+ *     Site::init();                                // the alarm's line
+ *     extern "C" void isr_powman_timer() { (void)Site::isr(); }
+ *     brio::Tenuto<P, Power, ...>::run();
+ *
+ * (P is core 0's platform, SysClock the program's static clock type;
+ * docs/rp2350/sleep.md reads the lines one by one.)
+ *
+ * Who calls what. Both sites are core 0's: the timed site refuses any
+ * other platform at compile time, and the plain one installs its dormant
+ * entry in Rp2350Platform<0>'s sleep_hook, a dormant being chip-wide and
+ * the clock tree core 0's to restore. standby_clocks() and init() are
+ * setup verbs, main(), before the manager's first round; init() answers
+ * false while the always-on timer is not running. arm(), disarm() and
+ * armed() are the manager's, from its handler - and disarm() is also
+ * called in interrupt context, by the timed site's isr() from the
+ * program's isr_powman_timer, so the armed rung and the platform's
+ * sleep_hook are written from both; arm() answers false, and arms
+ * nothing, for a deep rung with no way back. go_dormant() is called
+ * by the platform's idle() with interrupts masked, and only while the
+ * deep rung is armed: it stops the core until a wake restarts the
+ * oscillator, then runs the program's Clock::init() before the caller
+ * unmasks. The timed site's isr() is the body of the program's
+ * `isr_powman_timer` (the same name on both architectures); its
+ * resync(), shared with disarm(), takes the platform's critical section
+ * for its few instructions, and nothing else here masks. DormantWake's
+ * verbs are the pin interrupt registers' single accesses.
+ *
+ * Four depths of stopping exist on this silicon, and only three of them
  * are on the ladder:
  *
  *   light    a plain sleep instruction. The core stops, the chip does
  *            not: every peripheral, the other core and the DMA run on.
  *            The kernel's own idle, named.
- *   standby  THE SLEEP STATE (6.5.2). The chip enters it when both
+ *   standby  The SLEEP state (6.5.2). The chip enters it when both
  *            processors are asleep and the DMA has no transfer in
  *            flight, and then the top-level clock gates switch from the
  *            WAKE_ENx masks to the SLEEP_ENx ones: what a program leaves
  *            out of SLEEP_ENx is unclocked until an interrupt of a block
  *            still clocked wakes a core. So this rung is the program's
  *            pruning set, applied at arm() and taken back at disarm() -
- *            AND THE OTHER HALF OF THE CONDITION, which is the one thing
+ *            and the other half of the condition, which is the one thing
  *            the two architectures do not share: "a processor is asleep"
  *            is a signal the core releases, and a Cortex-M33 releases it
  *            on any WFI while a Hazard3 releases it only with
  *            MSLEEP.POWERDOWN set. `sleep_releases_power_request()` in
  *            each half's core header is that one bit, and this rung arms
- *            it. What is NOT here is SLEEPDEEP: the M33's bit plays no
+ *            it. What is not here is SLEEPDEEP: the M33's bit plays no
  *            part in 6.5.2's condition, and the Hazard3's equivalent is
  *            the one erratum RP2350-E4 forbids.
  *   deep     DORMANT (6.5.3). The oscillator the program runs on is
  *            stopped by a keyword written into its DORMANT register;
  *            every clock derived from it stands still, the core
  *            included, and it restarts on a GPIO event the IO bank's
- *            dormant-wake destination detects, or on the ALWAYS-ON
- *            TIMER'S ALARM - which is this chip's replacement for the
+ *            dormant-wake destination detects, or on the always-on
+ *            timer's alarm - which is this chip's replacement for the
  *            RP2040's calendar, and a better one: it runs in every power
- *            state. NOT A SLEEP INSTRUCTION, so the platform's
- *            `sleep_hook` takes the idle path instead. REFUSED with no
+ *            state. Not a sleep instruction, so the platform's
+ *            `sleep_hook` takes the idle path instead. Refused with no
  *            way back.
  *
- * And off the ladder, deliberately: THE P1.m STATES (6.2.2), where the
+ * And off the ladder, deliberately: the P1.m states (6.2.2), where the
  * switched core has no supply at all. They are not a deeper rung because
- * leaving one is a BOOT and not a wake - nothing of the program's state
+ * leaving one is a boot and not a wake - nothing of the program's state
  * survives but the always-on block's scratch words and whichever SRAM
  * domain was left powered - and a rung of a ladder that never returns to
  * its caller would make `arm()` a lie. `Powman::power_down()`
  * (rp2350/powman.hpp) is that door, named for what it is.
  *
- * THE ALWAYS-ON TIMER IS BOTH THE ALARM AND THE WITNESS, on every rung,
+ * The always-on timer is both the alarm and the witness (the counter
+ * that says how long a sleep lasted), on every rung,
  * which is what makes this target's timed site simpler than the
  * RP2040's: one counter answers "wake me in n milliseconds" and "how
- * long was I gone" in a standby, in a dormant AND across a power-down,
+ * long was I gone" in a standby, in a dormant and across a power-down,
  * because it is the one counter that never stops. Its unit is the
  * millisecond and the kernel's tick is a millisecond on both halves, so
  * the two rulers need no scaling at all - but the conversions are
- * written out anyway, rounding the wake UP and the resync DOWN, because
+ * written out anyway, rounding the wake up and the resync down, because
  * a program may choose another tick rate and the direction of each
  * rounding is the contract (late, never early).
  *
- * WHAT STOPS THE KERNEL'S OWN TIMEBASE. The two halves differ here and
+ * What stops the kernel's own timebase. The two halves differ here and
  * the suite measures both: on the Cortex-M33 the timebase is SysTick,
  * core-private and clocked by the core, which has no gate in SLEEP_ENx
  * at all; on Hazard3 it is the platform timer in the SIO, counting a
  * tick generator's output off clk_ref, and both the SIO and the tick
- * generator DO have gates. Either way a DORMANT stops both, because
+ * generator do have gates. Either way a DORMANT stops both, because
  * every clock stops - and that is what the witness is for.
  */
 
@@ -91,7 +128,7 @@ namespace brio {
 // ---- the gate sets a sleeping program composes ------------------------------
 //
 // SleepClocks is clock.hpp's type (one bit per clock endpoint, both
-// registers, all open at reset). The SETS live here because they are
+// registers, all open at reset). The sets live here because they are
 // about SLEEPING and nothing else reads them: a program names the ones
 // it needs and ORs them together.
 
@@ -210,7 +247,7 @@ private:
  * 0's: a dormant is chip-wide, and the hook it installs is core 0's
  * platform's.
  *
- * THE PRUNING SET IS THE PROGRAM'S, handed over once with
+ * The pruning set is the program's, handed over once with
  * `standby_clocks()`. The site writes it into SLEEP_ENx when it arms a
  * standby and writes every gate open again when it disarms, so a light
  * sleep prunes nothing and a standby prunes exactly what the program
@@ -245,8 +282,8 @@ struct Rp2350SleepSite {
         case SleepDepth::standby:
             Platform0::sleep_hook = nullptr;
             Clocks::sleep_enables(standby_);
-            // THE OTHER HALF OF 6.5.2'S CONDITION, and the one place
-            // this file asks the PROCESSOR for anything. A Cortex-M33
+            // The other half of 6.5.2's condition, and the one place
+            // this file asks the processor for anything. A Cortex-M33
             // releases its power request on any WFI and this call is
             // empty there; a Hazard3 does it only with MSLEEP.POWERDOWN
             // set, and without it the chip never leaves its wake masks.
@@ -278,8 +315,8 @@ struct Rp2350SleepSite {
      * Is there a way back from a dormant?
      *
      * A GPIO dormant-wake event always is one - it needs no clock at
-     * all. The always-on timer's alarm is one too, and with ONE
-     * CONDITION that is this chip's own: the timer must not be counting
+     * all. The always-on timer's alarm is one too, and with one
+     * condition that is this chip's own: the timer must not be counting
      * the crystal when the crystal is what the dormant stops (12.10.5.3
      * gives the power-down sequencer that fallback and gives a DORMANT
      * none). On the ring-oscillator site the crystal keeps running and
@@ -319,8 +356,8 @@ struct Rp2350SleepSite {
         (void)Clocks::sys_from_ref();
         Clocks::sys_divider(1);
         if constexpr (source == DormantSource::rosc) {
-            // THE REFERENCE CLOCK IS LEFT ON THE CRYSTAL and clk_sys is
-            // taken to the ring oscillator through its OWN aux mux, not
+            // The reference clock is left on the crystal and clk_sys is
+            // taken to the ring oscillator through its own aux mux, not
             // through clk_ref. That is the whole point of this site: the
             // core stops and clk_ref does not, so the always-on block -
             // which runs on clk_ref while the switched core is powered
@@ -331,8 +368,8 @@ struct Rp2350SleepSite {
             PllSys::stop();
             Rosc::dormant();
         } else {
-            // AND THE SAME TRICK THE OTHER WAY ROUND. clk_ref is taken
-            // to the LOW-POWER OSCILLATOR, which no dormant stops, and
+            // And the same trick the other way round. clk_ref is taken
+            // to the low-power oscillator, which no dormant stops, and
             // clk_sys to the crystal through its own aux mux - so
             // stopping the crystal stops the core and leaves clk_ref
             // running. The always-on block's alarm needs clk_ref alive
@@ -360,7 +397,7 @@ private:
 };
 
 /**
- * The timed site: the plain site plus THE ALWAYS-ON TIMER as alarm and
+ * The timed site: the plain site plus the always-on timer as alarm and
  * witness on every rung it covers.
  *
  * `init()` enables the alarm's line at the interrupt controller; the
@@ -372,9 +409,9 @@ private:
  *
  * and that name is bound on both architectures.
  *
- * THE ALARM IS PLACED AT ARM AND THE SPAN IS READ AT WAKE. A deadline is
- * rounded UP into milliseconds (late, never early) and the span slept is
- * rounded DOWN into ticks (the kernel's time never runs ahead of the
+ * The alarm is placed at arm and the span is read at wake. A deadline is
+ * rounded up into milliseconds (late, never early) and the span slept is
+ * rounded down into ticks (the kernel's time never runs ahead of the
  * program's). What the resync hands `Ticker::advance()` is the span less
  * the ticks the timebase counted for itself - zero when the timebase
  * never stopped, which is the honest answer for a standby whose SysTick
@@ -390,7 +427,7 @@ struct Rp2350TimedSleepSite {
     using Plain = Rp2350SleepSite<Clock, source>;
     using Timebase = typename P::Timebase;
 
-    /// The gates a standby keeps for the ALARM to be reached: the
+    /// The gates a standby keeps for the alarm to be reached: the
     /// always-on block's two endpoints. A program ORs its own set with
     /// this one; `standby_clocks()` below does it for the caller.
     static constexpr SleepClocks alarm_gates = sleep_clocks_powman;
@@ -454,8 +491,8 @@ struct Rp2350TimedSleepSite {
 
     static SleepDepth armed() { return Plain::armed(); }
 
-    /// Catch kernel time up by the FROZEN span: the always-on timer's
-    /// elapsed milliseconds converted DOWN to ticks, less what the
+    /// Catch kernel time up by the frozen span: the always-on timer's
+    /// elapsed milliseconds converted down to ticks, less what the
     /// timebase counted for itself since arm(). Consumed once - isr()
     /// and disarm() both call it - and a round that never slept advances
     /// by nothing, because the two rulers then agree. The critical
@@ -479,10 +516,10 @@ struct Rp2350TimedSleepSite {
     }
 
     /**
-     * THE ISR BODY the app binds to `isr_powman_timer`: the timer's own
-     * body first (the alarm acknowledged AND disarmed - see
-     * AonTimer::isr on why the second is not optional), then the RESYNC,
-     * then THE MACHINE HANDED BACK TO A TICKING SLEEP.
+     * The ISR body the app binds to `isr_powman_timer`: the timer's own
+     * body first (the alarm acknowledged and disarmed - see
+     * AonTimer::isr on why the second is not optional), then the resync,
+     * then the machine handed back to a ticking sleep.
      *
      * The third act is the SAM's lesson, and it holds here for the same
      * reason: the never-early rounding can leave kernel time a fraction
@@ -508,14 +545,14 @@ struct Rp2350TimedSleepSite {
     /// never slept, or slept less than it stayed awake).
     static uint32_t last_advance() { return last_advance_; }
 
-    /// Ticks to milliseconds, rounded UP: a wake a shade late is "at
+    /// Ticks to milliseconds, rounded up: a wake a shade late is "at
     /// least", a wake a shade early is a wasted vote round.
     static constexpr uint32_t ticks_to_ms(uint32_t ticks) {
         return static_cast<uint32_t>(
             (static_cast<uint64_t>(ticks) * 1000u + P::ticks_per_second - 1u) /
             P::ticks_per_second);
     }
-    /// Milliseconds to ticks, rounded DOWN: kernel time never runs ahead
+    /// Milliseconds to ticks, rounded down: kernel time never runs ahead
     /// of the program.
     static constexpr uint32_t ms_to_ticks(uint32_t ms) {
         return static_cast<uint32_t>(static_cast<uint64_t>(ms) * P::ticks_per_second / 1000u);

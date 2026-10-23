@@ -2,75 +2,106 @@
  * watchdog.hpp
  *
  * The two watchdogs of the CH32V203 and the CH32V303, the same two
- * blocks on every device class: the INDEPENDENT one (RM ch. 7), a
+ * blocks on every device class: the independent one (RM ch. 7), a
  * twelve-bit down-counter on the LSI that nothing but a reset stops,
- * and the WINDOW one (ch. 8), a seven-bit down-counter on PCLK1 that
- * resets the chip both when it is refreshed too LATE and when it is
- * refreshed too EARLY.
+ * and the window one (ch. 8), a seven-bit down-counter on PCLK1 that
+ * resets the chip both when it is refreshed too late and when it is
+ * refreshed too early. A program arms one to have the chip reset when
+ * the program stops refreshing it, and reads which reset happened at
+ * the next boot through ch32vx03/reset.hpp's flags. The smallest use,
+ * as docs/ch32vx03/watchdog.md's "How to use it" writes it:
  *
- * WHY THIS IS ITS OWN FILE AND NOT reset.hpp's. The two chapters are
- * reset SOURCES, and reset.hpp reads their flags (ResetFlag::
+ *     (void)brio::Iwdg::arm({.prescaler = brio::IwdgPrescaler::div32,
+ *                            .reload = 249});
+ *     for (;;) {
+ *         kernel.step();
+ *         brio::Iwdg::refresh();
+ *     }
+ *
+ * arm() starts the independent watchdog and then writes the setting,
+ * the order the silicon needs (below), and from then on only a reset
+ * stops it; the loop is a sketch, `kernel.step()` standing for the
+ * program's work between two refreshes, which must come closer than
+ * the time-out at the LSI's fast corner (device::lsi_max_hz).
+ *
+ * Who calls what. Iwdg::refresh(), start() and unlock() are one store
+ * of a key and legal from any context; arm() and configure() are a few
+ * stores and wait for nothing; prescaler(), reload() and timeout_us()
+ * wait for the register's update flag, polling up to
+ * clock_timeout_turns times, and read the register when the bound runs
+ * out whether or not the flag cleared (the wait's answer is discarded;
+ * wait_idle() is the verb that gives it); force_reset() never returns.
+ * Wwdg::bus_clock(), reset() and init() are setup verbs, unguarded
+ * read-modify-writes of an RCC register other drivers share;
+ * configure() and start() are one store each; refresh() reads CTLR and
+ * stores it, from the program's loop or from the early-wake-up vector;
+ * isr() is the body of the vector the crt names wwdg_handler, called
+ * from the program's binding and nowhere else, and it leaves one tick
+ * of the counter to act in. No verb here masks interrupts.
+ *
+ * Why this is its own file and not reset.hpp's. The two chapters are
+ * reset sources, and reset.hpp reads their flags (ResetFlag::
  * independent_watchdog and ::window_watchdog) - but they are two
  * peripherals with their own registers, their own clocks, their own
  * arithmetic and, for the window one, its own vector; reset.hpp is the
- * PLATFORM's failing half (the reset causes, the software reset, the
+ * platform's failing half (the reset causes, the software reset, the
  * fault body) and includes kernel/panic.hpp for it. Keeping the
  * watchdogs here leaves that file about the core and this one about
  * two blocks, and a program that wants neither pays for neither.
  *
- * WHAT MAKES THEM DIFFERENT, IN ONE PARAGRAPH EACH.
+ * What makes them different, in one paragraph each.
  *
- * THE INDEPENDENT WATCHDOG has no enable bit and no clock gate: its
+ * The independent watchdog has no enable bit and no clock gate: its
  * registers answer out of reset, a key value written into IWDG_CTLR is
  * the only way in (0x5555 opens PSCR and RLDR, 0xCCCC starts it,
- * 0xAAAA refreshes it), and once started NOTHING IN SOFTWARE STOPS IT
- * - only a reset does. Its clock is the LSI, which the silicon FORCES
- * ON when the watchdog starts (3.3.5.4) whatever the program did with
+ * 0xAAAA refreshes it), and once started nothing in software stops it
+ * - only a reset does. Its clock is the LSI, which the silicon forces
+ * on when the watchdog starts (3.3.5.4) whatever the program did with
  * LSION: that is also how a program can tell the watchdog is running,
  * there being no status bit that says so. And the LSI is an
  * uncalibrated RC - device::lsi_min_hz..lsi_max_hz, a spread of 1.8 to
  * one at the least on every part of the two series - so a time-out
  * computed from its nominal rate is a nominal time-out. Every
  * arithmetic helper here
- * therefore takes the LSI rate as an ARGUMENT: the caller decides
+ * therefore takes the LSI rate as an argument: the caller decides
  * whether it is asking about the fast corner, the slow one or a
  * measured rate.
  *
- * ITS REGISTERS NEED THAT CLOCK TO BE RUNNING, which the chapter never
+ * Its registers need that clock to be running, which the chapter never
  * says and the bench does: with the LSI stopped, a prescaler or reload
- * written behind the unlock key NEVER ARRIVES - PVU and RVU stand set
+ * written behind the unlock key never arrives - PVU and RVU stand set
  * for ever, because the update they report is a crossing into the LSI's
  * own domain, and a read of either register is invalid while they do
  * (7.3.2, 7.3.3). Measured: the registers keep their reset values and
  * the flags never clear. So the order a program writes them in is not
- * free - `arm()` STARTS THE WATCHDOG FIRST, which forces the LSI on,
+ * free - `arm()` starts the watchdog first, which forces the LSI on,
  * and only then writes the setting, which is why the reset value (0x0FFF
  * at /4, some four hundred milliseconds at the nominal rate) is the
  * budget it has to get there. A program that wants to prepare the
  * registers without committing starts the LSI itself first
  * (`Rcc::lsi_start()`).
  *
- * THE WINDOW WATCHDOG is a PB1 peripheral with a clock gate, an
+ * The window watchdog is a PB1 peripheral with a clock gate, an
  * early-wake-up interrupt on its own vector one tick before the reset,
- * and TWO ways to be wrong - a refresh after the counter has fallen out
+ * and two ways to be wrong - a refresh after the counter has fallen out
  * of its window's bottom (0x3F, the reset) and a refresh before it has
- * fallen INTO the window (also the reset). Its tick is PCLK1 / 4096 /
+ * fallen into the window (also the reset). Its tick is PCLK1 / 4096 /
  * 2^WDGTB, so its time-outs move with the clock tree and are
  * milliseconds at most, where the independent one reaches seconds.
  *
- * TWO OF THIS CHAPTER'S SENTENCES ARE NOT WHAT THE SILICON DOES, and
- * both are measured. ITS COUNTER DOES NOT FREE-RUN: 8.2.1 says it
+ * Two of this chapter's sentences are not what the silicon does, and
+ * both are measured. Its counter does not free-run: 8.2.1 says it
  * counts down "no matter whether the watchdog function is enabled or
  * not", and with WDGA clear it does not move at all - it holds what the
  * last write put in it, and starts falling when WDGA is set. (The
  * CH32V00x's block behaves the same way against the same sentence, and
  * so do the CH32V203's and the CH32V303's, so this is WCH's design and
- * not one part's accident.) AND ITS CLOCK GATE IS HALF A SILENCE: with
- * RCC's WWDGEN clear, CTLR and CFGR still READ their reset values and a
+ * not one part's accident.) And its clock gate is half a silence: with
+ * RCC's WWDGEN clear, CTLR and CFGR still read their reset values and a
  * write is dropped - what the gate holds is the block's clock, which is
  * what 8.2.1 offers it for.
  *
- * WHAT IS NOT HERE. The option byte that starts the independent
+ * What is not here. The option byte that starts the independent
  * watchdog at every boot without software (IWDG_SW): the option bytes
  * are the flash chapter's. The debug module's freeze bits (ch. 34),
  * which stop either counter while a probe has the core halted: the
@@ -189,10 +220,9 @@ constexpr bool iwdg_config_valid(const IwdgConfig& c) {
 
 /**
  * The independent watchdog, monostate.
- *
- *   brio::Iwdg::configure({.prescaler = brio::IwdgPrescaler::div32,
- *                          .reload = 1250});     // about a second, nominal
- *   brio::Iwdg::start();                         // no way back but a reset
+ *   brio::Iwdg::arm({.prescaler = brio::IwdgPrescaler::div32,
+ *                    .reload = 1250});           // about a second, nominal;
+ *                                                // no way back but a reset
  *   ...
  *   brio::Iwdg::refresh();                       // in the program's loop
  *

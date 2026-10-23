@@ -2,16 +2,21 @@
  * adc.hpp
  *
  * The analog-to-digital converters of the CH32V203 and the CH32V303 (RM
- * ch. 12): TWO 12-bit successive-approximation units over sixteen pads and two
- * internal sources, a regular group of up to sixteen conversions and an
- * injected group of four that preempts it, scan, continuous and
- * discontinuous modes, an analog watchdog, external triggers from the
- * timers and from an EXTI line, one DMA request, a calibration the
- * chapter asks for at every power-up - and the DUAL modes, in which
- * ADC1 leads and ADC2 follows. It is the STM32F1's ADC under WCH's
- * names, with two additions of WCH's own.
+ * ch. 12) for a program that reads analog levels: a pad's voltage polled
+ * once, the supply and the die's temperature from the two internal
+ * sources, a scanned sequence streamed into caller-owned blocks by the
+ * DMA, conversions paced by a timer or by a pad's edge, the two
+ * converters in lockstep. Two 12-bit successive-approximation units over
+ * sixteen pads and two internal sources, a regular group of up to sixteen
+ * conversions and an injected group of four that preempts it, scan,
+ * continuous and discontinuous modes, an analog watchdog, external
+ * triggers from the timers and from an EXTI line, one DMA request, a
+ * calibration the chapter asks for at every power-up - and the dual
+ * modes, in which ADC1 leads and ADC2 follows. It is the STM32F1's ADC
+ * under WCH's names, with two additions of WCH's own.
  *
- *   Adc<1|2>       the RESOURCE, one per converter: the gate, the
+ *   Adc<1|2>       the resource, one per converter, a monostate (static
+ *                  members only, never instantiated): the gate, the
  *                  power-up, the calibration, the sample times, both
  *                  groups, the triggers, the watchdog, the flags, the
  *                  ISR body - and util/analog_sampler.hpp's converter
@@ -19,104 +24,162 @@
  *
  *   AnalogIn<Pin>  a pad handed to its channel. The map is the family's
  *                  (ADC_IN0..7 are PA0..PA7, 8 and 9 are PB0 and PB1,
- *                  10..15 are PC0..PC5 - datasheet 3.2) and the PART
+ *                  10..15 are PC0..PC5 - datasheet 3.2) and the part
  *                  decides which of those pads its package bonds, which
  *                  is what `Pin` itself refuses.
  *
  *   AdcInput       the two internal sources: the temperature sensor on
  *                  channel 16 and VREFINT on channel 17, both woken by
- *                  ONE bit (CTLR2.TSVREFE) and both ADC1's alone.
+ *                  one bit (CTLR2.TSVREFE) and both ADC1's alone.
  *
- * HOW MANY CONVERTERS, AND HOW MANY CHANNELS, IS THE PART'S (datasheet
+ * The smallest use, one conversion of a pad, polled, as
+ * docs/ch32vx03/adc.md's "How to use it" writes it:
+ *
+ *     using Vin = brio::AnalogIn<brio::Pin<'A', 1>>;        // channel 1
+ *     using SysClock = brio::Clock<brio::ClockSource::pll, 96'000'000>;   // ADCCLK 12 MHz
+ *     constexpr SysClock clock;
+ *
+ *     Vin::claim();
+ *     (void)brio::Adc<1>::init(clock, {.internal_sources = true});
+ *     brio::Adc<1>::sample_time_all(brio::adc_sample_longest);
+ *     brio::Adc<1>::select(Vin{});
+ *     const uint16_t counts = brio::Adc<1>::read();
+ *
+ * Who calls what, and from where. init(), release(), calibrate(),
+ * power() and the configuring verbs (the sampling times, the two
+ * sequences and the offsets, the triggers and their enables,
+ * continuous(), dma(), internal_sources(), gain(), the watchdog,
+ * dual(), interrupts(), claim_stream()) are setup verbs: main(), after
+ * the clock task's init() - which is what programs ADCPRE, a field this
+ * driver never writes - or the handler of an active object (a component
+ * of a brio program with its own event queue, served one event at a
+ * time by the kernel). Each is a store or a read-modify-write of the
+ * converter's own registers (init() and release() also of RCC's gate
+ * and reset registers, claim_stream() also of its engine's DMA channel)
+ * with no guard of its own; trigger() and injected_trigger() with code
+ * 110 on the CH32V303RC and VC also write an AFIO field
+ * (ch32vx03/afio.hpp's remap(), a read-modify-write of AFIO_PCFR1).
+ * release() of either converter disables the one PFIC line both
+ * converters report on, Irq::adc1_2, and so does init() once past its
+ * first three checks (an init() refused for its configuration, a DMA or
+ * internal sources the converter cannot serve returns before it); a
+ * program that serves the line enables it after the last init().
+ * select(), start() and the polled reads are the sampler's and the
+ * loop's: main() or an active object's handler. What waits: init()
+ * spins through a fixed loop past the datasheet's 1 us tSTAB after the
+ * wake-up write (and once more after TSVREFE), and calibrate() polls
+ * RSTCAL and then CAL with a bound of 0x100000 polls each, init()
+ * answering false when either never clears; read(out) and
+ * injected_read() poll EOC or JEOC with the same bound and answer false
+ * when it runs out, while read() returns 0 then and read_settled()
+ * discards each answer, so a time-out after an earlier conversion of
+ * its run returns that conversion's value (0 when none landed) - for
+ * their callers those two are bounded in time and not in truth. isr()
+ * is the body of the program's handler for that one vector
+ * (BRIO_CH32_VECTOR(adc1_2_handler), ch32vx03/pfic.hpp) and is called
+ * from nothing else; it runs to completion and clears the flags it
+ * returns. A result read (result(), result_counts(), follower_counts(),
+ * data()) is a load of RDATAR, which clears EOC, and flags() a load of
+ * STATR: legal from any context, which is how the sampler's handler
+ * takes its result in the vector. Nothing here masks interrupts.
+ * Storage: sequence() and injected_sequence() copy the caller's order
+ * into the registers and it is free when they return; a stream's two
+ * blocks are the caller's, filled by the DMA for as long as the stream
+ * runs (ch32vx03/dma.hpp's DmaPingPongEngine); the converter keeps only
+ * its configuration and the selected channel.
+ *
+ * How many converters, and how many channels, is the part's (datasheet
  * tables 2-1 and 2-1-1, `device::adc_count` and `device::adc_channel_count`):
- * two converters and nine or ten bonded channels up to the CH32V203C8, ONE
+ * two converters and nine or ten bonded channels up to the CH32V203C8, one
  * converter and sixteen channels on the CH32V203RB, and two converters on
  * every CH32V303 - ten channels bonded on the CB, sixteen on the RB, RC
  * and VC. `Adc<2>` does not compile on the CH32V203RB, and neither does a
  * dual mode.
  *
- * THE CLOCK IS THE ONE PLACE A LEGAL TREE LEAVES THIS PERIPHERAL OUT OF
- * SPECIFICATION. ADCCLK is PCLK2 divided by 2, 4, 6 or 8 and nothing
+ * The clock is the one place a legal tree leaves this peripheral out of
+ * specification. ADCCLK is PCLK2 divided by 2, 4, 6 or 8 and nothing
  * else (RM 3.4.2's ADCPRE), the converter is rated at 14 MHz, and this
  * family's PCLK2 is HCLK undivided - so above 112 MHz of HCLK there is
- * no code that keeps the converter in range, and at the 144 MHz this
- * stratum's own console runs at the slowest divider still gives 18 MHz.
+ * no code that keeps the converter in range, and at the family's
+ * ceiling of 144 MHz the slowest divider still gives 18 MHz.
  * ch32vx03/clock.hpp programs ADCPRE in `init()` and publishes
- * `Clock::adc_hz` and `Clock::adc_in_spec`; THIS DRIVER REFUSES A CLOCK
- * THAT IS OUT OF SPECIFICATION AT COMPILE TIME - `Adc<n>::init(clock)`
- * static_asserts it, the F4's pattern of a ceiling the caller must
- * meet. A program that wants the converter picks a tree that keeps it:
- * the PLL on the HSI at 96 MHz gives ADCCLK 12 MHz.
+ * `Clock::adc_hz` and `Clock::adc_in_spec`; this driver refuses a clock
+ * that is out of specification at compile time - `Adc<n>::init(clock)`
+ * static_asserts it, a ceiling the caller must meet, stated where the
+ * clock is handed over. A program that wants the converter picks a tree
+ * that keeps it: the PLL on the HSI at 96 MHz gives ADCCLK 12 MHz.
  *
- * THE CALIBRATION, AND THE ORDER THAT IS NOT OBVIOUS. 12.2.2 asks for a
+ * The calibration, and the order that is not obvious. 12.2.2 asks for a
  * calibration at every power-up: RSTCAL until the hardware clears it,
  * then CAL until the hardware clears it, with the converter powered for
  * at least two ADCCLK cycles first; the code lands in RDATAR. And
  * CTLR1.BUFEN's own note adds the trap: setting TSVREFE (or the TKEY
- * enable) turns the input buffer ON and it cannot be turned off again,
- * so THE CALIBRATION MUST HAPPEN BEFORE THEM, WITH THE BUFFER OFF.
+ * enable) turns the input buffer on and it cannot be turned off again,
+ * so the calibration must happen before them, with the buffer off.
  * `init()` runs that order: gate, reset, control words with the buffer
  * and the gain still off, power-up, tSTAB, calibrate, and only then the
  * buffer, the gain and the internal sources.
  *
- * WHAT WCH ADDED TO THE F1's CHAPTER: an input BUFFER (CTLR1.BUFEN) for
+ * What WCH added to the F1's chapter: an input buffer (CTLR1.BUFEN) for
  * sources above the impedance the sampling switch tolerates, and in
- * front of it a PROGRAMMABLE GAIN of 1, 4, 16 or 64 (CTLR1.PGA) that
+ * front of it a programmable gain of 1, 4, 16 or 64 (CTLR1.PGA) that
  * amplifies a small signal into the converter's range; the buffer must
  * be on for the gain to mean anything. The TKEY bits (TKENABLE,
- * TKITUNE) of the same register belong to RM ch. 13 and are DECLINED
+ * TKITUNE) of the same register belong to RM ch. 13 and are declined
  * here - touch sensing is an application and not a driver - so nothing
  * in this file writes them, and a program that wants them is writing
  * its own chapter.
  *
- * WHAT THE CH32V303 ADDS, which the notes of this chapter give to its
+ * What the CH32V303 adds, which the notes of this chapter give to its
  * class (CH32V30x_D8) among others and to no CH32V20x:
- *  - THE SHORT SAMPLING TIMES. ADCx_AUX at offset 0x54 holds one bit per
+ *  - The short sampling times. ADCx_AUX at offset 0x54 holds one bit per
  *    channel, ADC_SMP_SELx, that switches the upper four codes of that
  *    channel's SMPx from 41.5..239.5 cycles to 2.5, 3.5, 4.5 and 5.5
  *    (12.3.4, 12.3.5, 12.3.15) - and only on lots whose penultimate sixth
  *    digit is not zero, which a program cannot read. They are their own
  *    enum, `AdcShortSampleTime`, whose verbs a part without the register
- *    refuses at compile time and a DIE without it refuses at run time: the
+ *    refuses at compile time and a die without it refuses at run time: the
  *    bit is set and read back first, and on the CH32V303VCT6 of the
  *    reference suite ADCx_AUX keeps nothing written into it, on either
  *    converter. A long time written to a channel clears its bit, so the
  *    two tables never mix on one channel.
- *  - THE TIM8 TRIGGERS. Code 110 is EXTI line 11 (regular) or 15
+ *  - The TIM8 triggers. Code 110 is EXTI line 11 (regular) or 15
  *    (injected) until AFIO's ADCx_ETRGREG_RM / _ETRGINJ_RM hands it to
  *    TIM8's TRGO or fourth capture (10.2.11.8) - a remap that exists only
- *    where the part HAS a TIM8, which leaves the CH32V303RC and VC. So
+ *    where the part has a TIM8, which leaves the CH32V303RC and VC. So
  *    `AdcTrigger::tim8_trgo` and `AdcInjectedTrigger::tim8_cc4` are code
  *    110 with the remap bit, the trigger verbs write both (through
  *    ch32vx03/afio.hpp), and elsewhere those two are refused.
- *  - A DMA REQUEST FOR ADC2, on DMA2's channel 5 - table 11-3's row, whose
+ *  - A DMA request for ADC2, on DMA2's channel 5 - table 11-3's row, whose
  *    note gives it to this class "with the penultimate sixth digit of the
  *    lot number not being zero", against 12.2.7's note 2, which says only
  *    ADC1 has one; RM V2.5's DMA2 figure no longer draws it. The row is
- *    offered as the table gives it (`Adc<2>::has_dma`) and the DIE is
+ *    offered as the table gives it (`Adc<2>::has_dma`) and the die is
  *    asked: on the CH32V303VCT6 of the reference suite ADC2's CTLR2.DMA
  *    keeps no bit written into it and no request reaches the channel, so
  *    `dma()` reads the bit back and `init()` and `claim_stream()` answer
  *    false there.
- *  - A VREF+ PAD on the LQFP100 of the CH32V303VC (`Ref`, below).
+ *  - A VREF+ pad on the LQFP100 of the CH32V303VC (`Ref`, below).
  * The second duty bit of the ADC's clock, ADC_DUTY_SEL, is the same
  * class's too; it sits in RCC_CFGR0 and is the clock tree's verb
  * (ch32vx03/clock.hpp's `Rcc::adc_duty_75()`), because ADCCLK is one clock
  * for both converters.
  *
- * ONLY ADC1 HAS TSVREFE and the dual-mode field, and on the CH32V203 only
+ * Only ADC1 has TSVREFE and the dual-mode field, and on the CH32V203 only
  * ADC1 has a DMA request (12.2.7's note 2); the injected group takes no
  * DMA on either converter (12.2.2's note). ADC2's data reaches memory in a
  * dual mode through the upper half of ADC1's RDATAR - and on the
  * CH32V303, by the table, through its own request as well.
  *
- * THE FLAGS ARE WRITE-ZERO-TO-CLEAR (STATR's RW0, the timers' INTFR
- * discipline), and EOC is cleared by READING RDATAR as well.
+ * The flags are write-zero-to-clear (STATR's RW0, the timers' INTFR
+ * discipline), and EOC is cleared by reading RDATAR as well.
  *
- * NO DMA-FED STREAM SLEEPS ON THIS FAMILY. In the Sleep of RM 2.4 no
+ * No DMA-fed stream sleeps on this family. In the Sleep of RM 2.4 no
  * bus master but the core gets a cycle (docs/ch32vx03/dma.md), so an
  * ADC stream held by a DMA channel stalls for the whole sleep: a
- * program that runs one holds itself awake.
+ * program that runs one holds itself awake, and the platform's idle()
+ * returns at once while the channel is enabled
+ * (ch32vx03/bus_activity.hpp).
  */
 
 #pragma once
@@ -296,9 +359,10 @@ constexpr uint32_t adc_sample_half_cycles(AdcShortSampleTime t) {
 }
 /// tCONV = the sampling time + 12.5 ADCCLK cycles, in halves. NOT the
 /// manual's 11 (12.2.2's arithmetic): both datasheets give a conversion
-/// 14 cycles at 1.5 of sampling and 252 at 239.5, and on the CH32V303VCT6
-/// sixty-four back-to-back conversions at each of the four long codes took
-/// 12.5 cycles beyond their sampling time (docs/ch32vx03/adc.md).
+/// 14 cycles at 1.5 of sampling and 252 at 239.5, and on the CH32V203C8T6
+/// and the CH32V303VCT6 sixty-four back-to-back conversions at each of the
+/// four long codes took 12.5 cycles beyond their sampling time
+/// (docs/ch32vx03/adc.md).
 inline constexpr uint32_t adc_conversion_tail_half_cycles = 25;
 constexpr uint32_t adc_conversion_half_cycles(AdcSampleTime t) {
     return adc_sample_half_cycles(t) + adc_conversion_tail_half_cycles;
@@ -494,7 +558,10 @@ constexpr uint8_t adc_channel_of(Pad p) {
  * analog mode, which on this family is CNF 00 MODE 00: the input
  * driver off AND THE PULL GONE WITH IT (RM 10.2.7), so a program that
  * wants a pad's own pull as its analog source keeps the pad a pulled
- * INPUT and never calls this.
+ * INPUT and never calls this. claim() opens the port's clock itself and
+ * is a read-modify-write of the port's configuration register with no
+ * guard, as every configuring Pin verb is: setup, in main() or an active
+ * object's handler.
  */
 template <class P>
 struct AnalogIn {
@@ -592,9 +659,20 @@ public:
      * TSVREFE forces the buffer on and a calibration wants it off
      * (12.3.2's BUFEN note).
      *
-     * False for a configuration the chapter refuses, for a request no
-     * instance can serve (a DMA or internal sources on ADC2), or for a
-     * calibration that never completed.
+     * False for a configuration the chapter refuses (adc_config_valid),
+     * for a request this converter cannot serve (internal sources on
+     * ADC2, a DMA on a converter the request table gives no slot - ADC2
+     * on the CH32V203), for ADC2's DMA request on a CH32V303 die whose
+     * CTLR2.DMA kept no bit (the converter is released again), or for a
+     * calibration that never completed (the converter left powered).
+     *
+     * A setup verb: main(), after the clock task's init(), which programs
+     * ADCPRE - this verb does not, and checks the rate only at compile
+     * time, against what the type claims. Past its first three checks
+     * (the configuration, a DMA, the internal sources: a refusal there
+     * returns before it) it disables Irq::adc1_2, the line both
+     * converters share; it waits the fixed tSTAB spin and the
+     * calibration's two bounded polls, and masks nothing.
      */
     template <typename Clock>
     static bool init(Clock clock, const AdcConfig& c = {}) {
@@ -808,6 +886,9 @@ public:
                    ? static_cast<AdcSampleTime>((r.SAMPTR2 >> (3u * ch)) & 7u)
                    : static_cast<AdcSampleTime>((r.SAMPTR1 >> (3u * (ch - 10u))) & 7u);
     }
+    /// Every channel at one long time: SAMPTR2 and SAMPTR1 stored whole
+    /// (and ADCx_AUX cleared where the part has it). A setup verb that
+    /// waits for nothing.
     static void sample_time_all(AdcSampleTime t) {
         uint32_t v = 0;
         for (uint8_t i = 0; i < 10u; ++i) {
@@ -912,7 +993,10 @@ public:
     static constexpr uint8_t input_code(AdcInput in) { return static_cast<uint8_t>(in); }
     static constexpr uint8_t input_code(uint8_t ch) { return ch; }
 
-    /// A one-conversion regular sequence on this channel.
+    /// A one-conversion regular sequence on this channel: two stores of
+    /// the sequence registers and the selection kept for selected(),
+    /// from main() or an active object's handler. A channel number past
+    /// 17 is ignored, nothing written.
     template <class P>
     static void select(AnalogIn<P>) { select_channel(AnalogIn<P>::channel); }
     static void select(AdcInput in) { select_channel(static_cast<uint8_t>(in)); }
@@ -953,7 +1037,9 @@ public:
     }
 
     /// One conversion, polled: start, wait, read. False rather than a
-    /// hang if the result never comes.
+    /// hang if the result never comes - EOC polled `spins` times - and
+    /// `out` left as it was. From main() or an active object's handler,
+    /// whose turn the poll holds for the conversion's length.
     static bool read(uint16_t& out, uint32_t spins = 0x100000UL) {
         clear_flags(adc_eoc);
         start();
@@ -965,6 +1051,8 @@ public:
         out = result_counts();
         return true;
     }
+    /// The same with the answer discarded: 0 when the bound runs out,
+    /// which reads as a conversion of zero counts.
     static uint16_t read(uint32_t spins = 0x100000UL) {
         uint16_t v = 0;
         (void)read(v, spins);
@@ -1400,6 +1488,11 @@ public:
      *
      * EOC is also cleared by reading RDATAR, which a handler that takes
      * the result does anyway.
+     *
+     * Called from the program's handler for Irq::adc1_2
+     * (BRIO_CH32_VECTOR(adc1_2_handler)) and from nothing else; one load
+     * of CTLR1 and STATR each and, when a flag hit, a store of STATR - no
+     * wait, no mask.
      */
     [[gnu::always_inline]] static uint32_t isr() {
         AdcRegs& r = regs();
@@ -1439,7 +1532,7 @@ static_assert(sizeof(AdcRegs) == 0x58);
 static_assert(adc_base_for(1) == 0x40012400UL && adc_base_for(2) == 0x40012800UL);
 static_assert(adc_steps == 4096u && adc_max_count == 4095u);
 // tCONV = the sampling time + 12.5 cycles: the datasheets' two ends
-// (tables 4-27 and 4-41, 14 and 252 ADCCLK) and what the CH32V303VCT6
+// (tables 4-27 and 4-41, 14 and 252 ADCCLK) and what both bench parts
 // measured, where 12.2.2's arithmetic says 11 (the tail's comment above).
 static_assert(adc_conversion_half_cycles(adc_sample_shortest) == 28u);    // 1.5 + 12.5 = 14
 static_assert(adc_conversion_half_cycles(adc_sample_longest) == 504u);    // 239.5 + 12.5 = 252
@@ -1463,7 +1556,7 @@ static_assert(!adc_watchdog_config_valid(AdcWatchdogConfig{.high = adc_max_count
 static_assert(!adc_watchdog_config_valid(AdcWatchdogConfig{.channel = adc_channels}));
 static_assert(adc_watchdog_config_valid(AdcWatchdogConfig{.channel = adc_vrefint_channel}));
 static_assert(!adc_dual_mode_valid(static_cast<AdcDualMode>(10)));
-// The short times: 2.5..5.5 cycles, each plus the 11-cycle tail.
+// The short times: 2.5..5.5 cycles, each plus the 12.5-cycle tail.
 static_assert(adc_sample_half_cycles(AdcShortSampleTime::cycles2_5) == 5u);
 static_assert(adc_sample_half_cycles(AdcShortSampleTime::cycles5_5) == 11u);
 static_assert(adc_conversion_half_cycles(AdcShortSampleTime::cycles3_5) == 32u);   // 16

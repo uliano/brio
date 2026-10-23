@@ -1,54 +1,119 @@
 /*
  * pio.hpp
  *
- * The RP2040's programmable I/O (datasheet chapter 3): two blocks of
- * four STATE MACHINES each, executing sixteen-bit programs from a
- * shared memory of thirty-two instructions - nine instructions, one
- * cycle each, a delay of up to 31 cycles and a side-set of up to five
- * pins folded into every one -, each machine with two 32-bit scratch
- * registers, an output and an input shift register with their
- * counters, a four-deep FIFO each way (joinable into one of eight), a
- * 16.8 clock divider, four pin ranges (OUT, SET, IN, side-set) and a
- * pin to branch on, eight flags shared by the machines of a block of
- * which four reach the two system interrupt lines, and a DMA request
- * per FIFO. Three layers, the other strata's arrangement:
+ * Programs of one's own on the RP2040's programmable I/O (datasheet
+ * chapter 3), and four ready-made ones as tasks: a serial transmitter
+ * and receiver on any pin, a square wave and a PWM. What a program
+ * writes, from docs/rp2040/pio.md (`clock` is the clock task's empty
+ * tag object, rp2040/clock.hpp):
  *
- *  - THE ASSEMBLER: the nine instructions as constexpr encoders
+ *     (void)brio::Pio<0>::reset();               // once: the block out of reset
+ *     (void)brio::Pio<1>::reset();
+ *     using Tx = brio::PioUartTx<0, 0, 13>;      // PIO0, machine 0, GPIO 13
+ *     using Rx = brio::PioUartRx<0, 1, 15>;
+ *     Tx::init(clock, 115'200);
+ *     Rx::init(clock, 115'200);
+ *     Tx::write_wait('A');
+ *     if (const auto b = Rx::read_wait()) { got(*b); }
+ *
+ *     using Blink = brio::PioSquareWave<1, 0, 17>;
+ *     Blink::init(clock, 1'000'000);             // a 1 MHz wave, the divider solved
+ *
+ * Each task names a block, a state machine of it and a pin as template
+ * arguments; init() solves the machine's clock divider for the rate,
+ * places the task's program in the block's instruction memory (first
+ * fit), claims the pin, configures and starts the machine, and answers
+ * false - nothing started - when no divider reaches the rate or the
+ * memory has no room for the program (PioPwm takes its divider
+ * directly). The program is placed before the divider is looked at, so
+ * a false init() for want of a divider leaves the program loaded: its
+ * instructions are not given back.
+ *
+ * What decides correctness. A block is held in reset at power-up (2.14)
+ * and no task or verb here releases it: `Pio<n>::reset()` runs before
+ * the block's first use, as the suite test_rp2040_pio does at the
+ * start of every letter; it also forgets every program the placer had
+ * loaded, so it is not called under running tasks. Two tasks on one
+ * block share its thirty-two instructions and must not share a
+ * machine, which nothing checks. A block's interrupt lines are the
+ * program's to bind (`Pio<n>::isr(line)` the body of `isr_pio0_0` and
+ * its siblings), and the crt aliases every peripheral handler name
+ * weakly to Default_Handler, a spin
+ * (rp2040/src/glue/startup_rp2040.cpp), so a source enabled with no
+ * handler bound parks the core there. Nothing here enables a line in
+ * the NVIC: the program calls Nvic::enable(Pio<n>::irq(line)) on the
+ * core that serves it.
+ *
+ * Who calls what. The configuring verbs (load, add, configure, init,
+ * the tasks' init and release) are setup's or an active object's
+ * handler's (an active object is a brio component with its own event
+ * queue, served one event at a time by the kernel); the placer's map is
+ * a plain static with no guard, so one context loads programs at a time.
+ * Nothing here masks interrupts. The waits are spins on the machine or
+ * its FIFOs, each bounded: exec_wait() (a count the caller may pass,
+ * 100 000 polls by default), push_wait(), pop_wait() and the receiver's
+ * read_wait() over pop_wait() (a count the caller may pass, 1 000 000
+ * polls by default; false or nullopt when the FIFO stayed full or
+ * empty), the transmitter's write_wait() (push_wait()'s default count,
+ * no count of its own), drain_tx() (no count: at most 64 instructions
+ * of 1000 polls each); drain_rx() pops until the FIFO is empty with no
+ * count at all. A plain `write()` or `push()` into a full FIFO sets the
+ * block's TXOVER flag (docs/rp2040/pio.md's bench findings), so a
+ * caller asks writable() first.
+ * `isr(line)` runs in the vector. Nothing here keeps a buffer: a DMA
+ * engine on a FIFO (`tx_address()`, `rx_address()`,
+ * `rx_top_byte_address()` with the machine's `dreq_tx` / `dreq_rx`)
+ * owns its run until its block completes.
+ *
+ * Two blocks of four state machines each, executing sixteen-bit
+ * programs from a shared memory of thirty-two instructions - nine
+ * instructions, one cycle each, a delay of up to 31 cycles and a
+ * side-set of up to five pins folded into every one -, each machine
+ * with two 32-bit scratch registers, an output and an input shift
+ * register with their counters, a four-deep FIFO each way (joinable
+ * into one of eight), a 16.8 clock divider, four pin ranges (OUT, SET,
+ * IN, side-set) and a pin to branch on, eight flags shared by the
+ * machines of a block of which four reach the two system interrupt
+ * lines, and a DMA request per FIFO. Three layers:
+ *
+ *  - The assembler: the nine instructions as constexpr encoders
  *    (`pio_jmp` .. `pio_set`), the side-set and delay folded in by
  *    `pio_side_delay`, a program as `PioProgram<N>` with its wrap
  *    points and side-set shape, JMP addresses relocated at load. Every
  *    program is written here in these words - there is no pioasm in
  *    this tree.
- *  - `Pio<n>` is the BLOCK: the reset gate, the instruction memory
+ *  - `Pio<n>` is the block: the reset gate, the instruction memory
  *    with a first-fit placer, the enables and restarts in lockstep
  *    (CTRL), the FIFO status and debug words, the eight flags, the two
  *    interrupt lines with their twelve sources, the ISR body.
- *  - `PioSm<n, sm>` is the RESOURCE of one machine: its configuration
+ *  - `PioSm<n, sm>` is the resource of one machine: its configuration
  *    (the divider, the execution controls, the shift controls, the pin
  *    ranges), the FIFOs, an instruction executed at once (SMx_INSTR),
  *    the pins claimed through a SET executed on the side.
- *  - THE TASKS are the chapter's own programs: `PioUartTx` and
- *    `PioUartRx` (3.6.3, 3.6.4: a serial port on any pin at eight
- *    cycles a bit), `PioSquareWave` (3.2.1's four-cycle wave),
- *    `PioPwm` (3.6.8: a util/pwm_channel.hpp PwmChannel counted by a
- *    program). Any other program is the application's, written with
+ *  - The tasks (a task, in brio, is a driver layer with state of its
+ *    own that an active object calls) are the chapter's own programs:
+ *    `PioUartTx` and `PioUartRx` (3.6.3, 3.6.4: a serial port on any
+ *    pin at eight cycles a bit), `PioSquareWave` (3.2.1's four-cycle
+ *    wave), `PioPwm` (3.6.8: a util/pwm_channel.hpp PwmChannel - the
+ *    contract an output with a `max` and a `duty()` meets - counted by
+ *    a program). Any other program is the application's, written with
  *    the encoders above.
  *
- * THE PINS: any of the thirty GPIOs under function 6 (PIO0) or 7
+ * The pins: any of the thirty GPIOs under function 6 (PIO0) or 7
  * (PIO1); a machine's four ranges are bases and counts modulo 32 over
  * the block's pins; on one cycle the highest-numbered machine writing
  * a pin wins, and a side-set beats an OUT or SET of the same machine
  * (3.5.6.1). An input passes a two-flip-flop synchronizer unless
  * INPUT_SYNC_BYPASS says otherwise.
  *
- * THE RELOCATION: a JMP carries an ABSOLUTE address (3.4.2), so a
+ * The relocation: a JMP carries an absolute address (3.4.2), so a
  * program written from 0 is moved to its load offset by adding the
  * offset to every JMP's target - which is why programs here name
  * their targets from 0 and load() does the adding; an instruction
  * executed through OUT EXEC or MOV EXEC is the application's to
  * relocate.
  *
- * THE FIFOS AND THE DMA: a word pushed to TXFx, a word popped from
+ * The FIFOs and the DMA: a word pushed to TXFx, a word popped from
  * RXFx; the request of each rises with room or data (table 119); a
  * byte-wide read of RXFx + 3 takes the top byte of an entry, where a
  * right-shifting IN leaves eight bits (3.6.4).
@@ -316,7 +381,9 @@ struct Pio {
 
     /// The block from its reset state: every machine stopped, the
     /// memory as it was (the memory is not cleared by the reset), the
-    /// placer's map cleared.
+    /// placer's map cleared. The release a program owes before the
+    /// block's first use (nothing here calls it); false when RESET_DONE
+    /// did not rise within rp2040/resets.hpp's bounded wait.
     static bool reset() {
         used_ = 0;
         return Resets::cycle(reset_bit);
@@ -457,7 +524,7 @@ struct PioSm {
         return reinterpret_cast<volatile uint8_t*>(&rxf()) + 3;
     }
 
-    /// The four registers written, the machine DISABLED first (the
+    /// The four registers written, the machine disabled first (the
     /// caller enables); refused for a value out of range.
     static bool configure(const PioSmConfig& c) {
         if (!pio_sm_config_valid(c)) {
@@ -585,7 +652,8 @@ struct PioSm {
     static bool rx_stalled() { return (Block::fifo_debug() & (1u << sm)) != 0u; }
     static void clear_fifo_debug() { Block::clear_fifo_debug((1u << (24u + sm)) | (1u << (16u + sm)) | (1u << (8u + sm)) | (1u << sm)); }
 
-    /// The DMA requests of this machine (table 119).
+    /// This machine's two interrupt sources, as PioInterrupt masks for
+    /// Pio<n>::interrupts() (its DMA requests are dreq_tx / dreq_rx above).
     static constexpr uint32_t interrupt_rx_not_empty = PioInterrupt::rx_not_empty(sm);
     static constexpr uint32_t interrupt_tx_not_full = PioInterrupt::tx_not_full(sm);
 
@@ -686,6 +754,9 @@ struct PioUartTx {
     using Block = Pio<n>;
     using Sm = PioSm<n, sm>;
 
+    /// The program placed, the pad driven high (idle) and handed to the
+    /// block, the machine at eight cycles a bit and started. False when
+    /// no divider reaches `baud` or the memory has no room.
     template <typename Clock>
     static bool init(Clock clock, uint32_t baud) {
         const auto div = pio_clock_div_for(clock_hz(clock), baud * 8u);
@@ -713,8 +784,13 @@ struct PioUartTx {
         return true;
     }
     static bool writable() { return !Sm::tx_full(); }
+    /// One byte into the FIFO, no wait: into a full FIFO it sets TXOVER,
+    /// so the caller asks writable() first.
     static void write(uint8_t byte) { Sm::push(byte); }
+    /// The same, spinning (bounded, push_wait()'s count) for room; false
+    /// when none came.
     static bool write_wait(uint8_t byte) { return Sm::push_wait(byte); }
+    /// The FIFO empty and the program back at its first instruction.
     static bool idle() { return Sm::tx_empty() && Sm::address() == offset_; }
     static volatile void* tx_address() { return Sm::tx_address(); }
     static void release() {
@@ -730,7 +806,8 @@ private:
 /**
  * PioUartRx<n, sm, pin>: a receiver on any pin, the byte in the top
  * eight bits of each RX entry (`read()` takes it), a frame without its
- * stop bit counted in flag 4 + sm (`frame_error()`), the FIFO joined
+ * stop bit raising flag 4 + sm (`frame_error()` reads and clears it -
+ * a flag, not a count), the FIFO joined
  * into eight; the DMA request is `Sm::dreq_rx` on
  * `rx_top_byte_address()` for a byte engine.
  */
@@ -742,6 +819,10 @@ struct PioUartRx {
     using Sm = PioSm<n, sm>;
     static constexpr uint8_t frame_flag = static_cast<uint8_t>(4u + sm);
 
+    /// The program placed, the pad an input under `pull` (the idle line
+    /// high by default) handed to the block, the frame flag cleared, the
+    /// machine started. False when no divider reaches `baud` or the
+    /// memory has no room.
     template <typename Clock>
     static bool init(Clock clock, uint32_t baud, PinPull pull = PinPull::up) {
         const auto div = pio_clock_div_for(clock_hz(clock), baud * 8u);
@@ -768,7 +849,13 @@ struct PioUartRx {
         return true;
     }
     static bool readable() { return !Sm::rx_empty(); }
+    /// The next byte, no wait: ask readable() first (a pop of the empty
+    /// FIFO sets RXUNDER, and the byte returned is the top eight bits of
+    /// whatever the read of RXF answered, not a byte the machine
+    /// received).
     static uint8_t read() { return static_cast<uint8_t>(Sm::pop() >> 24); }
+    /// The next byte, spinning (bounded by `spins`) for one; nullopt
+    /// when none came.
     static std::optional<uint8_t> read_wait(uint32_t spins = 1'000'000u) {
         const auto w = Sm::pop_wait(spins);
         if (!w) {
@@ -876,6 +963,8 @@ struct PioPwm {
         Sm::enable(true);
         return true;
     }
+    /// The level, clamped to `max`, pushed into the FIFO with no wait and
+    /// taken at the next pulse; a push into a full FIFO sets TXOVER.
     static void duty(uint16_t v) { Sm::push(v > max ? max : v); }
     static void release() {
         Sm::enable(false);

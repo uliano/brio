@@ -1,21 +1,36 @@
 /*
  * dma_engine.hpp
  *
- * The "no DMA engine" default of the two optional Uart engine slots, the
- * other families' tag verbatim (stm32g0/dma_engine.hpp is where its
- * reasoning is written): `present` is the only thing a transport asks of an engine,
- * with `if constexpr`, so every engine branch disappears from a Uart that
- * names none. The real engines live in rp2350/dma.hpp (sixteen channels,
- * four interrupt lines, 12.6), so that a program with a serial port and
- * no DMA never sees the block.
+ * What a transport needs to name a DMA engine without including the DMA
+ * controller: the empty slot's tag and the request numbers. A transport
+ * (a driver such as the UART's Uart, which moves bytes for print and the
+ * serial services) takes two optional engine slots, one for transmit and
+ * one for receive; `NoDmaEngine`, the default of both, says "this
+ * direction runs on the transport's own interrupt":
  *
- * The REQUEST NUMBERS live here too (datasheet 12.6.4.1, the system DREQ
+ *     using Serial = brio::Uart<0, pins>;          // both slots NoDmaEngine
+ *     using Link = brio::Uart<1, pins, 1024, 1024,
+ *                             brio::DmaTxEngine<2>, brio::DmaRxEngine<3>>;
+ *
+ * Nothing here runs or waits: it is types and constants, read at
+ * compile time.
+ *
+ * `NoDmaEngine` is the same tag the other families' transports take (its
+ * reasoning is written out in stm32g0/dma_engine.hpp): `present` is the
+ * only thing a transport asks of an engine, with `if constexpr`, so
+ * every engine branch disappears from a Uart that names none. The real
+ * engines live in rp2350/dma.hpp (sixteen channels, four interrupt
+ * lines, 12.6), so that a program with a serial port and no DMA never
+ * sees the block. `uart_engines_distinct()` is the check a transport
+ * makes at compile time that its two engines are not one channel.
+ *
+ * The request numbers live here too (datasheet 12.6.4.1, the system DREQ
  * table): on this chip a request is a field any channel takes, so a
  * transport tells its engine which peripheral request paces it - and the
  * transport must be able to name that request without including the
  * controller.
  *
- * THE TABLE IS NOT THE RP2040'S, and not one row of it is. This chip has
+ * The table is not the RP2040's, and not one row of it is. This chip has
  * a third PIO and twelve PWM slices against eight, so every number above
  * the first PIO's has moved: the UARTs sit at 28..31 where they sat at
  * 20..23, the I2Cs at 44..47 where they sat at 32..35, and the entries

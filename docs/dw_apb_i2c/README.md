@@ -1,6 +1,99 @@
 # IP stratum: the Synopsys DesignWare I2C (`dw_apb_i2c/`)
 
-A directory under `brio/` named for a peripheral DESIGN instead of for a
+This page is for a programmer who uses an I2C bus on the RP2040 or the
+RP2350, as a host or as a client, and wants to know what the driver
+under it does, for whoever reads or changes that driver, and for
+whoever brings up another chip that carries the same block. It is both
+the stratum's operational page and the document of its one header,
+`brio/dw_apb_i2c/i2c.hpp`. A stratum is a directory of `brio/` that is
+one architectural layer; this one is an IP stratum, named for a
+peripheral design that several vendors license into their chips (an
+"IP block") rather than for a chip, and written once for every family
+that carries it.
+
+An application never names this stratum. It writes the family's names,
+which are aliases of the three templates here kept in the family's own
+`i2c.hpp`, and the family supplies the chip's facts through a traits
+type - a struct of types, constants and static functions the templates
+read, so that they know the chip without including any of its headers:
+
+| Who | Traits type | Where | The public names, aliases of the templates here |
+|-----|-------------|-------|---------------------------------------------------|
+| the RP2040 | `Rp2040DwApbI2c` | `brio/rp2040/i2c.hpp` | `DwApbI2c<n>` = `DwApbI2cBlock<Rp2040DwApbI2c, n>`; `I2cHost<n, pins, TxEngine, RxEngine, Placement>` = `DwApbI2cHost<Rp2040DwApbI2c, n, pins, ...>`; `I2cClient<n, pins>` = `DwApbI2cClient<Rp2040DwApbI2c, n, pins>` |
+| the RP2350, both architectures | `Rp2350DwApbI2c` | `brio/rp2350/i2c.hpp` | the same three names over `Rp2350DwApbI2c` |
+| the host suite | `SimDwApbI2c` | `brio/host/sim_dw_apb_i2c.hpp` | none: the suite names the templates itself |
+
+On both chips the traits give two instances, 16-entry FIFOs and ic_clk
+as `clk_sys`, the program's own clock rate (RP2040 4.3.14.1, RP2350
+12.2.1.2). The smallest use, a host under the bus arbiter on the RP2040
+as its own document spells it (an excerpt of
+[../rp2040/i2c.md](../rp2040/i2c.md), "How to use it"):
+
+```cpp
+constexpr brio::I2cPins pins{.scl = 13, .sda = 12};
+using Bus = brio::I2cHost<0, pins>;
+using I2c = brio::I2cBus<Bus, P, 4, brio::BusPassThrough, brio::ticks_from_ms<P>(20)>;
+
+Bus::init(clock);
+
+Bus::Request r{};
+r.addr = 0x48;
+r.tx = brio::lend<brio::Lease::reply>(reg);   r.tx_len = 1;    // the register
+r.rx = brio::lend<brio::Lease::reply>(value); r.rx_len = 2;    // then its value
+r.speed = brio::I2cSpeed::fast_400k;
+r.reply = brio::reply_to<Sensor, brio::I2cDone>();
+brio::post<I2c>(r);
+
+extern "C" void isr_i2c0() {
+    if (Bus::isr()) { brio::post<I2c>(brio::TransferDone{Bus::status()}); }
+}
+```
+
+Line by line: `pins` names the clock and data pads; `Bus` is the
+family's `I2cHost` on instance 0, the engine; `I2c` is the arbiter, an
+active object (a component with its own event queue, served one event
+at a time by the kernel, here over the program's platform `P`) that
+takes requests from every active object that uses the bus in arrival order, with room
+for four waiting requests, retries no failure (`BusPassThrough`: every
+outcome goes back to the requester as it is) and recovers the engine
+when a transaction has not answered within 20 ms (the per-bus timeout,
+in kernel ticks, `i2c_timeout` its answer). A request names the 7-bit
+address, lends one byte to write (the register number) and two bytes to
+read back (a loan under
+`Lease::reply`, kernel/borrowed.hpp: the arbiter and the engine may use
+them until the reply), the speed, and the active object the `I2cDone`
+reply goes to; it is posted to the arbiter, and `post` copies the
+request into the arbiter's queue, so `r` itself may go out of scope -
+what it lends may not. The handler is the program's, under the name the
+family's startup code gives I2C0's vector (`isr_i2c0` on both RP
+chips): when the engine's interrupt body returns true, the transaction
+has just ended, and the handler posts the engine's status to the
+arbiter, which sends the reply.
+
+What decides correctness even there: **the buffers a request lends
+stay untouched by the requester until its `I2cDone` arrives**; the vector
+is bound and posts `TransferDone`, or the arbiter never learns that a
+transaction ended (the timeout is what then answers); the arbiter is
+in the program's list of active objects; and `init()` runs after the
+clock's, since the SCL counts are computed from the rate the clock
+type claims for ic_clk. The bus vocabulary itself (the Request, the
+reply, the status codes) is [../design/i2c-bus.md](../design/i2c-bus.md)'s;
+what an active object is and how a program lists them is the learning
+route's ([../learn/introduction.md](../learn/introduction.md)). Every
+transaction that moves the wire completes on the interrupt: the host has
+no polled path, and a refusal that moves nothing (a speed the clock
+cannot produce) is answered at once.
+
+The page goes on with what the stratum is for, the document of record,
+what lives here, what a family owes (the traits type member by member),
+the include contract, what stays per family, the host suite that proves
+the file knows no chip, what the block offers the host's engine that
+bears on cost (used or declined, with the measured figures' homes), the
+client, and what is not covered.
+
+## What the stratum is
+
+A directory under `brio/` named for a peripheral design instead of for a
 silicon: the Synopsys DW_apb_i2c, a block licensed by more than one
 vendor and dropped into their chips unchanged, register for register. It
 sits exactly where a core stratum sits - above `util/`, below the
@@ -10,14 +103,15 @@ the whole of the chapter that is Synopsys's: the resource over the
 block's programmer's model, the host engine `util/i2c_bus.hpp`'s `I2cBus`
 drives, the client, their measured facts and their ISR bodies.
 
-It exists under the discipline that governs the core stratum: what more
-than one family carries is factored out when the SECOND one carries it,
+It exists under the discipline that governs the core stratum (the
+stratum a processor core's families share, `cortexm/`): what more than
+one family carries is factored out when a second one carries it,
 with both copies in hand, and the extraction is gated by the images -
 every release image of the family that had it first is byte-identical
 before and after. What makes this block worth a stratum of its own,
 where a merely similar peripheral would not be, is that its register
 description is not similar between the chips that carry it but
-IDENTICAL: the same names, the same offsets, the same bits, so there is
+identical: the same names, the same offsets, the same bits, so there is
 nothing to reconcile and nothing to gain by writing it twice.
 
 ## The document of record
@@ -25,7 +119,7 @@ nothing to reconcile and nothing to gain by writing it twice.
 The *DesignWare DW_apb_i2c Databook*, which is what a family's data sheet
 cites when it says its I2C is a DW_apb_i2c. That databook is not on this
 project's desk, so nothing here is cited by its section: the facts below
-are named by REGISTER, and each family's own document carries its data
+are named by register, and each family's own document carries its data
 sheet's chapter and verse for the same thing. A family's peculiarities -
 how deep the FIFOs were synthesized, which pads a line reaches, which
 interrupt controller carries the line, which rate of the clock tree is
@@ -55,9 +149,9 @@ the concept below.
   family's clock tree is ic_clk, what a DMA request is called, how deep
   the FIFOs are, and how a pad is driven low by hand. Those are the
   concept, and each family answers them in its own header - where the
-  PUBLIC NAMES also live, so an application never spells a chip-traits
+  public names also live, so an application never spells a chip-traits
   type.
-- Not here either, and not anywhere: the bus REQUEST and its outcome
+- Not here either, and not anywhere: the bus request and its outcome
   codes. They are `util/i2c_bus.hpp`'s, shared verbatim by every stratum
   that drives an I2C ([../design/i2c-bus.md](../design/i2c-bus.md)); this
   file takes them and restates nothing.
@@ -65,8 +159,10 @@ the concept below.
 ## What a family owes: the `DwApbI2cChip` concept
 
 One traits type, stated in the family's own `i2c.hpp` and checked there
-with a `static_assert`. Every member is here because a line of the driver
-needs it; nothing is here for symmetry.
+with a `static_assert` (`Rp2040DwApbI2c` and `Rp2350DwApbI2c`; the
+host's `SimDwApbI2c` is checked the same way in its own header, the
+table at the top of this page). Every member is here because a line of
+the driver needs it; nothing is here for symmetry.
 
 The types:
 
@@ -77,14 +173,14 @@ The types:
 | `Interrupts` | that controller, with `enable` / `disable` - the driver masks the line around a bring-up, a recover and the unstick, and never names an NVIC, because a family may carry one under one architecture and something else under another |
 | `Pins` | the family's pin-set type, one pad per line - a pin table is a chip's, never an IP's |
 | `DmaRequest` | what this family's DMA calls a peripheral request |
-| `SpinRate` | the family's microsecond ruler as a VALUE, computed once per clock change: the unstick drives the wire by hand and needs half a bit of standard mode between its edges |
+| `SpinRate` | the family's microsecond ruler as a value, computed once per clock change: the unstick drives the wire by hand and needs half a bit of standard mode between its edges |
 
 The constants:
 
 | Member | Why it exists |
 |--------|---------------|
 | `instances` | how many of the block this family carries: the resource refuses a number past it |
-| `fifo_depth` | the two FIFOs' depth, which is a SYNTHESIS parameter of the block and therefore the family's fact, not this file's; the engine puts both thresholds at its half |
+| `fifo_depth` | the two FIFOs' depth, which is a synthesis parameter of the block and therefore the family's fact, not this file's; the engine puts both thresholds at its half |
 
 The per-instance facts, each a template on the instance number so the
 answer is a compile-time constant - a register address, a line, a
@@ -104,9 +200,9 @@ The verbs over a register, over the pads and over time:
 | `set_bits(reg, bits)`, `clear_bits(reg, bits)` | one write that sets or clears bits with no read-modify-write: the enable, the abort and the command block are single bits of one register, and the interrupt mask is touched from two contexts. A family with atomic register aliases uses them; one without does the read-modify-write under its own guard |
 | `pins_valid(n, pins)` | is this pin set legal for this instance - the family's pin table, as a constexpr predicate the engine's `static_assert` calls |
 | `scl_pad(pins)`, `sda_pad(pins)` | which pad number carries each line |
-| `Pad<pin>` | the pad AS A TYPE, with the verbs the driver calls on one: hand it over (`function(code, config)`), take it back (`release()`), and the five the unstick drives an open-drain line with by hand - `input(pull)`, `clear()`, `read()`, `drive_low()`, `release_drive()`. A line is driven by its output ENABLE over an output register already holding a zero, which is what open drain is on every family that has no such mode |
+| `Pad<pin>` | the pad as a type, with the verbs the driver calls on one: hand it over (`function(code, config)`), take it back (`release()`), and the five the unstick drives an open-drain line with by hand - `input(pull)`, `clear()`, `read()`, `drive_low()`, `release_drive()`. A line is driven by its output enable over an output register already holding a zero, which is what open drain is on every family that has no such mode |
 | `pad_function` | the function code that routes an I2C to a pad, opaque to this file |
-| `pad_config` | the electrical setup both lines want - the pull-up, the slew limit, the input hysteresis. It is the family's OWN constant handed over, not a value this file composes: the driver passes it exactly as the family's own driver would have |
+| `pad_config` | the electrical setup both lines want - the pull-up, the slew limit, the input hysteresis. It is the family's own constant handed over, not a value this file composes: the driver passes it exactly as the family's own driver would have |
 | `open_drain_pull` | what a line released by hand idles at while the unstick owns it |
 | `engines_distinct<Tx, Rx>()` | two engines of one host must not name one DMA channel; what "the same channel" means is the family's DMA's |
 | `spin_rate(hz)`, `spin_us(rate, us)` | the ruler: the factor for a rate, recomputed at every clock change, and the wait itself |
@@ -117,7 +213,7 @@ none:
 
 | Member | Why it exists |
 |--------|---------------|
-| `ic_clk_hz(clock)` | WHICH rate of this family's tree clocks the block. It has a concept of its own, `DwApbI2cChipClock<Chip, Clock>`, checked by a `static_assert` inside each `init()` - the one place a clock is in hand |
+| `ic_clk_hz(clock)` | which rate of this family's tree clocks the block. It has a concept of its own, `DwApbI2cChipClock<Chip, Clock>`, checked by a `static_assert` inside each `init()` - the one place a clock is in hand |
 
 ## The include contract
 
@@ -126,7 +222,7 @@ none:
 nothing else: no vendor
 header, no family header, no device include. It may therefore be included
 anywhere, in any order, and a family's `i2c.hpp` includes it beside its
-own headers. Apps and family drivers keep including the FAMILY's header,
+own headers. Apps and family drivers keep including the family's header,
 never this one - the family is where the public names are.
 
 It follows that this directory needs no `.clangd` fragment of its own:
@@ -147,9 +243,10 @@ where they were under `InFlash`, the default, one flattened instance
 each in `.fast_text.brio` under `InRam`;
 [../rp2040/platform.md](../rp2040/platform.md), "A handler in SRAM",
 has what it buys); and
-THE PUBLIC NAMES - `DwApbI2c<n>`, `I2cHost<n, pins, TxEngine, RxEngine, Placement>`
+the public names - `DwApbI2c<n>`, `I2cHost<n, pins, TxEngine, RxEngine, Placement>`
 and `I2cClient<n, pins>`, the family's aliases of the three templates
-here, with the family's own defaults for the empty engine slots. An
+here, with the family's own defaults for the empty engine slots and the
+placement. An
 application that says `brio::I2cHost<0, pins>` has no idea this stratum
 exists, which is the point.
 

@@ -1,6 +1,67 @@
 # ADC (RP2040)
 
-Documents of record: the RP2040 datasheet (build 3184e62), 4.9 (the
+This document is for a programmer who wants to read a voltage or the
+chip's temperature on an RP2040. The chip has one 12-bit converter
+over four pads (GPIO 26..29) and an internal temperature sensor.
+`Adc` is the converter, a monostate (a type whose functions are all
+static, over the one block it stands for); `AnalogIn<Pin>` names a pad
+as an analog input; the arithmetic that turns counts into millivolts
+or hundredths of a degree is `util/analog.hpp`'s and this header's;
+and `util/analog_sampler.hpp`'s `AnalogSampler` is the active object
+that takes readings on a pace and publishes them (an active object is
+a component of a brio program with its own event queue, served one
+event at a time by the kernel,
+[docs/learn/introduction.md](../learn/introduction.md)).
+
+The smallest use, one pad and the sensor read once each, from "How to
+use it" below:
+
+```cpp
+using Vin = brio::AnalogIn<brio::Pin<26>>;        // input 0
+brio::Adc::init(clock);                           // the USB PLL at 48 MHz, clk_adc on it
+Vin::claim();
+brio::Adc::select(Vin{});
+if (const auto counts = brio::Adc::read()) {
+    const uint16_t mv = brio::adc_mv(*counts, brio::adc_steps, brio::ref_mv(brio::Ref::vref_pin));
+}
+brio::Adc::temperature_sensor(true);
+brio::Adc::select(brio::AdcInput::temperature);
+const int32_t centi = brio::adc_temperature_centi(*brio::Adc::read(), 3300);
+```
+
+Line by line: `Vin` names GPIO 26, the converter's input 0; `init()`
+takes the clock's tag ([clock.md](clock.md)) for the crystal's rate,
+starts the USB PLL at 48 MHz unless it is locked already, puts the
+converter's clock on it, releases the block and waits for it to be
+ready; `claim()` turns the pad's digital input and output off, so the
+converter reads the bare pad; `select()` chooses the input; `read()`
+runs one conversion and waits for it - about 2 us - and answers nothing
+when the converter did not answer or the conversion failed;
+`adc_mv()` turns counts into millivolts against the reference, the
+ADC_VREF pin, which `ref_mv()` takes as 3300 mV unless the program
+states what its board puts there; `temperature_sensor(true)` switches
+the sensor's bias on, and `adc_temperature_centi()` turns its counts
+into hundredths of a degree by the chapter's line for a typical device.
+
+What decides correctness even there. `init()` answers false when the
+PLL did not lock, the block did not come out of reset or the converter
+never came ready - a program that ignores it reads nothing. The pad is
+claimed before it is read: an unclaimed pad keeps the pull its last
+owner gave it - out of reset, the pull-down, which loads the signal -
+and on B0 and B1 silicon its digital input buffer too (erratum E6);
+`claim()` takes both off. The reference is a pin, not an
+internal voltage: what ADC_VREF carries on the board is the millivolts
+the program passes, and on the boards here it is the 3.3 V rail
+through a filter. A free-running conversion into a FIFO the DMA drains
+overflows within 16 us of the block's end at 500 ksps unless the
+converter is stopped from the completion itself ("How to use it",
+the DMA block). And a block left with its DMA request on after the
+converter is disabled still requests the sample in its FIFO:
+`release()` holds the block in reset for that reason.
+
+## Documents of record
+
+The RP2040 datasheet (build 3184e62), 4.9 (the
 ADC and the temperature sensor: 4.9.1 the controller, 4.9.2 the SAR
 converter and its clock, 4.9.2.1 the one-shot, 4.9.2.2 the free run
 and the divider, 4.9.2.3 the round-robin, 4.9.2.4 the FIFO, 4.9.2.5
@@ -11,7 +72,9 @@ util/analog.hpp and util/analog_sampler.hpp for the arithmetic and
 the sampler. The driver: `brio/rp2040/adc.hpp` (`Adc` the resource,
 `AnalogIn<Pin>`, `AdcInput`, `Ref`) over `clock.hpp` (`PllUsb`,
 `Clocks::adc_select`), `pin.hpp` (`analog`), `resets.hpp` and
-`dma_engine.hpp`. The reference suite: `test_rp2040_adc`, wireless.
+`dma_engine.hpp`. The reference suite: `test_rp2040_adc`, wireless (a
+suite's letter is one command key of its console and the group of
+verdicts it runs).
 
 ## What the silicon does
 
@@ -43,7 +106,7 @@ Three facts measured that the chapter states differently or not at
 all: the block's reset does not complete without clk_adc running
 (RESET_DONE never rises, and a read of its registers then faults), so
 the clock comes before the reset; a free run at a divider period of
-EXACTLY the conversion's 96 cycles halves the rate (the trigger at the
+exactly the conversion's 96 cycles halves the rate (the trigger at the
 conversion's last cycle is ignored with the ones inside it: DIV 95 is
 250 ksps, DIV 99 is 480 ksps - the chapter's "n will be >= 96"); and
 the atomic set alias does not clear a write-one-to-clear flag of this

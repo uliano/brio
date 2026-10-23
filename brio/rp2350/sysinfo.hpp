@@ -1,25 +1,41 @@
 /*
  * sysinfo.hpp
  *
- * SYSINFO (datasheet 12.15.1): what the chip says about itself. Three
- * facts, and one of them is load-bearing for every later chapter:
+ * SYSINFO (datasheet 12.15.1): what the chip says about itself - which
+ * part and which stepping this is, which package the die is in, whether
+ * it is silicon at all - for a program that reports it in a banner or
+ * keys a workaround to an erratum. The smallest use, in the shape the
+ * apps use it:
+ *
+ *     const brio::ChipId id = brio::ChipId::read();
+ *     if (id.revision == brio::ChipId::revision_a2) { ... RP2350-E9 is live ... }
+ *     const brio::Package pkg = brio::ChipId::package_sel();
+ *
+ * Which context calls what. Every verb is a register read after a
+ * release of its block from reset (resets.hpp: one alias write and a
+ * bounded wait for RESET_DONE, a confirmation once the block is out);
+ * nothing masks interrupts and nothing keeps storage - read() returns
+ * its answer by value. Any context that may spend that bounded wait may
+ * call them; the apps call them from main().
+ *
+ * Three facts, and one of them is load-bearing for every later chapter:
  *
  *  - CHIP_ID, the JEDEC JEP-106 identifier: a manufacturer, a part
- *    number and the silicon REVISION the errata are keyed by. The
+ *    number and the silicon revision the errata are keyed by. The
  *    datasheet names three steppings and the value each reports (A2 =
  *    0x2, A3 = 0x3, A4 = 0x8 - appendix C), and the numbering is not
  *    contiguous, so the raw field is what this file offers and the three
  *    documented values are constants beside it.
- *  - PACKAGE_SEL, which says WHICH PACKAGE the die is in: 0 = QFN-80
+ *  - PACKAGE_SEL, which says which package the die is in: 0 = QFN-80
  *    (48 GPIO, eight ADC inputs), 1 = QFN-60 (30 and four). Since the
  *    die is one, every pin's registers exist either way and only the
- *    PAD is absent - so this bit is how a program that was not told at
+ *    pad is absent - so this bit is how a program that was not told at
  *    build time finds out (device.hpp's `package` is the other half of
  *    that story).
  *  - "am I real" - silicon (ASIC), an FPGA or a simulation - which a
- *    suite can then state rather than assume. THE ANSWER IS NOT THIS
- *    BLOCK'S: the chip has TWO registers called PLATFORM, and SYSINFO's
- *    (12.15.1, offset 0x08) is the PRE-PRODUCTION indicator - it reads
+ *    suite can then state rather than assume. The answer is not this
+ *    block's: the chip has two registers called PLATFORM, and SYSINFO's
+ *    (12.15.1, offset 0x08) is the pre-production indicator - it reads
  *    all-zero on a production part, ASIC bit included (measured on
  *    stepping A2). The one that answers is the testbench manager's,
  *    TBMAN PLATFORM, whose ASIC bit resets to 1 and reads 1 on the same
@@ -47,7 +63,7 @@ struct ChipId {
     uint16_t part;           ///< 0x0004 = RP2350
     uint8_t revision;        ///< the silicon revision, raw (see the constants)
 
-    /// The manufacturer field of THIS chip is eleven bits with the
+    /// The manufacturer field of this chip is eleven bits with the
     /// JEP-106 stop bit split off beside it, so it reads 0x493 - the
     /// same bits the RP2040 reports as 0x927 with the stop bit included,
     /// which is why the two chips' constants differ by a shift and a

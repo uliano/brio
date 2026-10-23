@@ -1,34 +1,73 @@
 /*
  * clock.hpp
  *
- * The RP2350 clock tree (datasheet chapter 8 whole) in the two strata
- * every brio target uses (docs/design/clock.md):
+ * The RP2350 clock tree (datasheet chapter 8 whole): what a program names
+ * to bring its system clock to a known rate, and the one compile-time
+ * statement of that rate every driver of this target divides from. The
+ * same source serves the Cortex-M33 pair and the Hazard3 pair. The
+ * smallest use, first thing in main():
  *
- *  RESOURCES - monostates, thin typed views with the discipline built in:
+ *     using SysClock = brio::Clock<brio::ClockSource::pll, 150'000'000>;
+ *     constexpr SysClock clock;            // the tag drivers take
+ *     const bool ok = SysClock::init();    // false: the rate is not hz
+ *
+ * then the drivers' init(clock) calls, each computing its divisors from
+ * SysClock::hz (clk_sys), pclk_hz (clk_peri) or ref_hz (clk_ref) - rates
+ * the type claims, never read back from the hardware - which is why
+ * Clock::init() runs before any of them: at power-up the chip is on its
+ * ring oscillator with clk_peri disabled, and after a debugger's reset
+ * on whatever tree the previous image left.
+ *
+ * Who calls what. Clock::init() is a setup verb, main context; called
+ * again on a running tree it is the rate switch, and the drivers on
+ * clk_sys (the Cortex-M33 half's SysTick timebase, a UART whose clk_peri
+ * is clk_sys) are then owed a rebase(hz) by the caller. The waits of
+ * init() and of the switches are bounded polls whose running-out is
+ * reported (false, or no count): the crystal's STABLE, the ring
+ * oscillator's, a PLL's LOCK, a mux's SELECTED, a generator's ENABLED,
+ * the frequency counter's DONE. Three waits are not bounded by a spin
+ * count: the oscillators' wait_periods() polls a countdown the caller
+ * set, at the oscillator's own rate, and refuses at once when the
+ * oscillator is not running; TickGenerator::stop() polls RUNNING down;
+ * and Xosc::dormant() and Rosc::dormant() return only once a configured
+ * wake has restarted the oscillator. Nothing here masks interrupts, so a
+ * handler that runs during a switch runs on whatever the tree stands on
+ * then. PllBlock::isr() and Resus::isr() are interrupt bodies for a
+ * handler the program binds (the PLL's lock-loss line, the
+ * resuscitation's), offered for a program that wants to be told; the
+ * clock task works without them. The resources'
+ * configuring verbs carry no guard of their own and belong to setup or
+ * to one owner.
+ *
+ * The file is in the two strata every brio target uses
+ * (docs/design/clock.md):
+ *
+ *  Resources - monostates (types with only static members, used without
+ *  an object), thin typed views with the discipline built in:
  *    Xosc     the crystal oscillator (8.2): the four frequency ranges,
  *             the startup delay in units of 256 crystal periods, the
  *             STABLE flag a bounded wait watches, the countdown COUNT
  *             register that times a short wait in crystal periods, and
  *             the BADWRITE flag that catches a password the silicon
  *             refused
- *    Rosc     the ring oscillator (8.3): the boot clock and THE SAFE
- *             PLACE TO PARK - running/stable, start and stop, the four
+ *    Rosc     the ring oscillator (8.3): the boot clock and the safe
+ *             place to park - running/stable, start and stop, the four
  *             stage ranges, the eight drive strengths behind their
- *             password, THE FREQUENCY RANDOMISER this chip adds, the
+ *             password, the frequency randomiser this chip adds, the
  *             output divider, the one-bit random source and the same
  *             countdown COUNT. Never a rate, so never a Clock
  *    Lposc    the low-power oscillator (8.4): a nominal 32.768 kHz RC
- *             oscillator in the ALWAYS-ON domain that needs no starting
+ *             oscillator in the always-on domain that needs no starting
  *             and cannot be stopped, trimmable to about 1.5 per cent -
  *             a fourth root of clk_ref, and the only clock that outlives
  *             the switched core
  *    PllSys   the system PLL (8.6): REFDIV, FBDIV, the two post
- *             dividers, the power bits, LOCK and the STICKY LOCK-LOSS
+ *             dividers, the power bits, LOCK and the sticky lock-loss
  *             this chip adds with its own interrupt - and PllUsb, the
  *             same block at the USB PLL's address (48 MHz for the USB
  *             controller and for the converter's clk_adc)
  *    Clocks   the clock generators (8.1): clk_ref and clk_sys with their
- *             GLITCHLESS mux and their aux mux, clk_peri, clk_usb,
+ *             glitchless mux and their aux mux, clk_peri, clk_usb,
  *             clk_adc and clk_hstx with their aux mux alone, the
  *             switching sequences of 8.1.3.2 which are the whole point
  *             of the block, and the top-level gates of 8.1.3.5
@@ -39,7 +78,7 @@
  *    TickGenerator<which>  the tick generators of 8.5: clk_ref divided to
  *             a 1 us tick for each of the six consumers that count time
  *             rather than cycles - the two system timers, the watchdog,
- *             the two SysTicks and THE RISC-V PLATFORM TIMER, which is
+ *             the two SysTicks and the RISC-V platform timer, which is
  *             this target's timebase on its RISC-V half and its ruler on
  *             both
  *    FreqCounter  the frequency counter (8.1.4): any root or generator
@@ -49,44 +88,44 @@
  *    ClockOut<n> / ClockIn<n>   the four GPIO clock outputs (GP21, GP23,
  *             GP24, GP25) and the two inputs (GP20, GP22)
  *
- *  TASK - what an application names:
- *    Clock<source, hz, crystal_hz, peri>   the static main clock: ONE
+ *  Task - what an application names:
+ *    Clock<source, hz, crystal_hz, peri>   the static main clock: one
  *             constexpr truth `hz` every driver derives from (there is no
  *             F_CPU in this build); init() composes the resources and
  *             reports whether the tree reached the rate it claims.
  *
- * THE CLOCK MODEL is the RP2040's, and so is much of this file: no bus
+ * The clock model is the RP2040's, and so is much of this file: no bus
  * prescaler and no enable bit per peripheral, one clk_sys for the cores,
  * the fabric, the memories and the peripherals' bus interfaces, a
  * separate clk_peri for the UARTs and SPIs so they keep their bit rates
  * when clk_sys changes, dedicated generators for USB, the ADC and (new
- * here) the HSTX. What is NOT the RP2040's: there is no clk_rtc, because
+ * here) the HSTX. What is not the RP2040's: there is no clk_rtc, because
  * there is no RTC - the always-on timer in POWMAN took its place, with a
- * clock of its own; clk_ref gains the LOW-POWER OSCILLATOR as a fourth
+ * clock of its own; clk_ref gains the low-power oscillator as a fourth
  * source and is capped at 25 MHz; the dividers are 16.16 where the
  * RP2040's were 24.8, and clk_peri has one at all; the tick generators of
  * 8.5 are a block of their own, where the RP2040 derived its microsecond
  * from the watchdog; the ring oscillator can randomise its own frequency;
- * the PLLs report a LOST lock and not only a present one; and the
+ * the PLLs report a lost lock and not only a present one; and the
  * frequency counter's source numbering is another one. Every register
  * constant below is the device header's, so none of this is retyped from
  * the other chip.
  *
- * THE BOOT STATE, AND WHY init() PARKS BEFORE IT TOUCHES ANYTHING. The
+ * The boot state, and why init() parks before it touches anything. The
  * bootrom leaves the chip on the ring oscillator - and that is only the
- * COLD case. A debugger's `reset run` is a request to reset the
- * PROCESSORS, not the chip: the clock tree, the pads and the peripherals
+ * cold case. A debugger's `reset run` is a request to reset the
+ * processors, not the chip: the clock tree, the pads and the peripherals
  * stay exactly as the previous image left them, so an image may start on
  * a PLL it did not lock, with clk_sys running out of the very block
  * init() is about to hold in reset. So init() walks the tree back to a
- * source IT started before it touches a PLL: clk_sys onto clk_ref (both
+ * source it started before it touches a PLL: clk_sys onto clk_ref (both
  * glitchless, so nothing stops), clk_ref onto the ring oscillator once
  * that has been started and reported stable, and only then the crystal
  * and the PLL. It is also the rate switch, for the same reason it is on
  * the RP2040: calling init() on a running tree re-locks the PLL at the
  * new ratio with clk_sys parked meanwhile.
  *
- * `ClockSource::internal` is declared and REFUSED: the ring oscillator's
+ * `ClockSource::internal` is declared and refused: the ring oscillator's
  * rate is neither exact nor stable (8.3), and a rate that is not a truth
  * cannot be `hz`. The two sources built are the crystal straight into
  * clk_sys and the crystal through the system PLL, whose exact ratio is
@@ -112,8 +151,8 @@ namespace brio {
 
 /// Where clk_sys comes from. `crystal` and `pll` are implemented; the
 /// rest name the tree's other roots so the vocabulary does not change
-/// under an application when they are built, and so asking for one today
-/// is a compile error with an explanation instead of a wrong clock.
+/// under an application when they are built, and so asking for one is a
+/// compile error with an explanation instead of a wrong clock.
 enum class ClockSource : uint8_t {
     crystal,    ///< XOSC straight into clk_sys
     pll,        ///< XOSC x the system PLL (the road to 150 MHz)
@@ -588,6 +627,9 @@ struct Lposc {
 
     /// A write to a protected register that carried the wrong password:
     /// write-to-clear, and the proof that a password is a password.
+    /// clear_bad_password() stores the bit WITHOUT the password, a store
+    /// docs/rp2350/powman.md measures to be dropped and to raise the
+    /// flag; Powman::clear_bad_password() carries it.
     static bool bad_password() { return (POWMAN->BADPASSWD & POWMAN_BADPASSWD_BITS) != 0u; }
     static void clear_bad_password() { POWMAN->BADPASSWD = POWMAN_BADPASSWD_BITS; }
 
@@ -1511,7 +1553,7 @@ struct ClockIn {
 enum class PeriSource : uint8_t { sys, crystal };
 
 /**
- * The static main clock: `hz` is the ONE compile-time truth about
+ * The static main clock: `hz` is the one compile-time truth about
  * clk_sys that every driver of this target derives from.
  *
  *   using SysClock = brio::Clock<brio::ClockSource::pll, 150'000'000>;
@@ -1565,10 +1607,12 @@ struct Clock {
     /// Bring clk_sys to `hz`. Returns false when the crystal did not
     /// start, the PLL did not lock or a mux switch did not take - the
     /// tree is then left wherever the parking put it, and the caller
-    /// knows the rate is NOT the one `hz` claims. Call first in main(),
-    /// before any driver init.
+    /// knows the rate is not the one `hz` claims. Call first in main(),
+    /// before any driver init; main context, every wait bounded, no
+    /// interrupt masked. Called again on a running tree it is the rate
+    /// switch, and the drivers on clk_sys are then owed a rebase(hz).
     ///
-    /// THE WHOLE SEQUENCE IS RE-STATED rather than assumed, and the
+    /// The whole sequence is re-stated rather than assumed, and the
     /// parking is the first act (the file header says why): a debugger's
     /// reset resets the cores and nothing else, so this may be running
     /// out of the very PLL it is about to hold in reset.

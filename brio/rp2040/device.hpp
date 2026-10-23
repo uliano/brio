@@ -1,31 +1,42 @@
 /*
  * device.hpp
  *
- * The RP2040's device description, in one include: the CMSIS header
- * generated from the chip's SVD (the register blocks as structs, the
- * instance pointers, the IRQn enumerators, the core's revision and
- * priority width, core_cm0plus.h behind it) and the pico-sdk's
- * bit-field definitions for every register of every block - both from
- * third_party/pico-sdk/, the SVD's two halves. Every header of this
- * stratum includes this one first; the `cortexm/` core files are
- * written against the CMSIS half and refuse to be included before it.
+ * The RP2040's device description, in one include, and the three
+ * atomic register verbs every driver of this stratum writes with. A
+ * program rarely includes it itself: every header of this stratum
+ * includes it first, and the `cortexm/` core files are written against
+ * its CMSIS half and refuse to be included before it. What a driver
+ * writes with it:
  *
- * WHY TWO HALVES. The CMSIS header names the registers (UART0->UARTFR)
+ *     brio::hw_set(TIMER->INTE, 1u << n);       // INTE |= bit, one bus write
+ *     brio::hw_clear(RESETS->RESET, blocks);    // RESET &= ~blocks, one bus write
+ *
+ * The description is the CMSIS header generated from the chip's SVD
+ * (the register blocks as structs, the instance pointers, the IRQn
+ * enumerators, the core's revision and priority width, core_cm0plus.h
+ * behind it) and the pico-sdk's bit-field definitions for every
+ * register of every block - both from third_party/pico-sdk/, the SVD's
+ * two halves.
+ *
+ * Why two halves. The CMSIS header names the registers (UART0->UARTFR)
  * and nothing inside them; the regs headers name every field
  * (UART_UARTFR_TXFF_BITS) and no struct. The SDK's own structs
  * (hardware/structs/) are not taken: they would be a third spelling of
- * the same map. hardware/regs/addressmap.h is NOT included: its *_BASE
+ * the same map. hardware/regs/addressmap.h is not included: its *_BASE
  * macros are the CMSIS header's too, and -Werror would see the
  * redefinition.
  *
- * ATOMIC REGISTER ALIASES (2.1.2). Every peripheral register on the
+ * Atomic register aliases (2.1.2). Every peripheral register on the
  * APB and AHB-Lite fabric answers at three more addresses: +0x1000
  * XORs the written bits in, +0x2000 sets them, +0x3000 clears them -
  * one bus write, no read-modify-write, so a bit can be flipped from
- * an interrupt handler or from the OTHER CORE without a critical
+ * an interrupt handler or from the other core without a critical
  * section. hw_set / hw_clear / hw_xor below are those three verbs over
- * any register the CMSIS structs name; the SIO block has its own
- * SET/CLR/XOR registers instead and never needs them.
+ * any register the CMSIS structs name, legal from any context on
+ * either core; hw_write_masked reads first, so it is for configuration
+ * and not for a field two contexts race on (its comment).
+ * The SIO block has its own SET/CLR/XOR registers instead and never
+ * needs them.
  */
 
 #pragma once

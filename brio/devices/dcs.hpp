@@ -1,35 +1,58 @@
 /*
  * dcs.hpp (devices)
  *
- * THE VOCABULARY EVERY COMMAND PANEL SHARES. A display that keeps its
- * own pixels behind a link is addressed in the words of MIPI's Display
- * Command Set: a window, a memory write, a memory read, an address
- * mode, a pixel format. This file is that vocabulary and nothing else -
- * the codes, the bits, the packers - target-free, controller-free and
- * link-free, so that a controller's TRAITS type can say what its
- * silicon makes of these words and a LINK can carry them
- * (docs/design/gfx.md, "The command tier").
+ * The words every command panel shares. A display that keeps its own
+ * pixels behind a link - a serial interface, a parallel bus, a DSI host
+ * - is addressed in the words of MIPI's Display Command Set (DCS): a
+ * window (CASET, column address set, and PASET, page address set), a
+ * memory write (RAMWR), a memory read (RAMRD), an address mode (MADCTL,
+ * memory access control), a pixel format (COLMOD). This file is that
+ * vocabulary and nothing else - the command codes, the bits of the two
+ * mode registers, and the arithmetic that packs a window edge or a pixel
+ * into the bytes a command takes - target-free, controller-free and
+ * link-free, so that a controller's traits type (devices/ili9481.hpp: a
+ * struct of constexpr facts about one silicon) can say what its silicon
+ * makes of these words and a link (devices/dcs_link.hpp) can carry them
+ * (docs/design/gfx.md, "The command tier"; docs/devices/dcs.md).
  *
- * WHAT IS NOT HERE. Nothing is sent from this file and no state is
- * kept: there is no panel object, no link, no timing and no wait. How
- * the address counter WALKS the frame memory is the controller's fact,
- * because the address mode's bits mean what a given silicon makes them
- * mean, and the rotation map that turns a logical surface into a window
- * and a walk is the driver's, one level above both.
+ * The smallest use, a window and a memory write as a driver sends them
+ * (docs/devices/dcs.md, "How to use it"), `link` being any DcsLink:
  *
- * THE MIPI DCS SPECIFICATION IS NOT ON THIS DESK. Every code below is
- * the one a controller's own command table lists under the same name,
- * which is what the panel answers to; where two controllers disagree,
- * the traits type is where the disagreement is written and this file
- * stays as it is.
+ *     const auto columns = brio::dcs_window(x0, x1);   // CASET's four bytes
+ *     const auto pages = brio::dcs_window(y0, y1);     // PASET's four bytes
+ *     link.command(brio::Dcs::caset, columns);
+ *     link.command(brio::Dcs::paset, pages);
+ *     link.write(brio::Dcs::ramwr, pixel_bytes);       // packed by dcs_rgb666_pack
  *
- * A PACKER'S ROUND TRIP IS EXACT ONLY ON THE BITS THE FORMAT KEEPS.
+ * Contexts: none to speak of. Everything here is a constant or a pure
+ * constexpr function: callable from any context, at compile time or at
+ * run time, waiting for nothing and masking nothing. Nothing is sent from
+ * this file and no state is kept: there is no panel object, no link, no
+ * timing and no wait, so an image that does not use a name pays nothing
+ * for it.
+ *
+ * What is not here. How the address counter walks the frame memory (the
+ * order in which the pixels of a memory write fill the window) is the
+ * controller's fact, because the address mode's bits mean what a given
+ * silicon makes them mean, and the rotation map that turns a logical
+ * surface into a window and a walk is the driver's
+ * (devices/dcs_panel.hpp), one level above both.
+ *
+ * The MIPI DCS specification is not on this project's desk. Every code
+ * below is the one a controller's own command table lists under the
+ * same name, which is what the panel answers to; where two controllers
+ * disagree, the traits type is where the disagreement is written and
+ * this file stays as it is.
+ *
+ * A packer's round trip is exact only on the bits the format keeps.
  * Eighteen bits a pixel keep six bits a channel (mask 0xFC on each),
  * sixteen keep five, six and five (0xF8, 0xFC, 0xF8), twenty-four keep
  * everything; unpacking puts the kept bits back in the byte's most
  * significant bits and leaves the rest at zero, so pack then unpack is
  * the identity on a colour already masked and nothing weaker is
- * promised. A colour is the drawing world's: 0x00RRGGBB in a uint32_t.
+ * promised. A test that compares a read-back with what it wrote masks
+ * what it wrote the same way. A colour is the drawing world's:
+ * 0x00RRGGBB in a uint32_t, red in the most significant byte.
  */
 
 #pragma once
@@ -43,7 +66,7 @@ namespace brio {
 
 /**
  * The command codes. A scope with no instances rather than an enum:
- * these are BYTES on a link, sent beside a controller's own
+ * these are bytes on a link, sent beside a controller's own
  * manufacturer commands, and a type that had to be cast at every use
  * would buy nothing.
  */
@@ -92,19 +115,19 @@ struct Dcs {
  * MADCTL's bits, under the standard's names, with the meaning brio
  * takes them in beside each.
  *
- * The three high bits are the WALK: they reorder the way the address
+ * The three high bits are the walk: they reorder the way the address
  * counter crosses the window a CASET/PASET pair opened, and on the
  * controller measured here they never move that window's origin. The
- * three low ones are the DISPLAY's - what the panel does with memory it
+ * three low ones are the display's - what the panel does with memory it
  * already holds - and a module may leave any of them unconnected, which
  * is a fact of the module and not of the controller.
  */
 struct DcsAddressMode {
     DcsAddressMode() = delete;
 
-    static constexpr uint8_t page_order = 0x80;         ///< B7: the walk along the PAGES reversed
-    static constexpr uint8_t column_order = 0x40;       ///< B6: the walk along the COLUMNS reversed
-    static constexpr uint8_t exchange = 0x20;           ///< B5: the counter steps the PAGES first
+    static constexpr uint8_t page_order = 0x80;         ///< B7: the walk along the pages reversed
+    static constexpr uint8_t column_order = 0x40;       ///< B6: the walk along the columns reversed
+    static constexpr uint8_t exchange = 0x20;           ///< B5: the counter steps the pages first
     static constexpr uint8_t line_order = 0x10;         ///< B4: line address order, a display bit
     static constexpr uint8_t bgr = 0x08;                ///< B3: a pixel's channels in the other order
     static constexpr uint8_t horizontal_flip = 0x02;    ///< B1: a display bit
@@ -152,7 +175,7 @@ constexpr uint8_t dcs_colmod_18bpp = dcs_colmod(DcsPixelFormat::bpp18, DcsPixelF
 /**
  * One edge of a window - the four parameter bytes of CASET or of PASET:
  * the start and the end, each sixteen bits, most significant byte
- * first. THE END IS INCLUSIVE.
+ * first. The end is inclusive: columns 0 to 319 are dcs_window(0, 319).
  */
 constexpr std::array<uint8_t, 4> dcs_window(uint16_t start, uint16_t end) {
     return {static_cast<uint8_t>(start >> 8), static_cast<uint8_t>(start),
@@ -197,7 +220,7 @@ constexpr uint32_t dcs_rgb666_unpack(std::span<const uint8_t, 3> p, bool bgr = f
 
 /**
  * Sixteen bits a pixel, two bytes, most significant byte first on the
- * wire. Here `bgr` exchanges the two FIELDS and not two bytes: at this
+ * wire. Here `bgr` exchanges the two fields and not two bytes: at this
  * width a channel is not a byte.
  */
 constexpr std::array<uint8_t, 2> dcs_rgb565_pack(uint32_t colour, bool bgr = false) {
@@ -236,10 +259,10 @@ constexpr uint32_t dcs_rgb888_unpack(std::span<const uint8_t, 3> p, bool bgr = f
 }
 
 /**
- * How a panel's answer lines up on a link that clocks whole BYTES. A
+ * How a panel's answer lines up on a link that clocks whole bytes. A
  * read command's answer is not always byte-aligned with the command
  * that asked for it, and which of these a given command takes is the
- * CONTROLLER's fact - a traits type states it, a framing adapter obeys
+ * controller's fact - a traits type states it, a framing adapter obeys
  * it, and a panel driver above them never has to know.
  */
 enum class DcsReadFraming : uint8_t {

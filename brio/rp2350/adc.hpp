@@ -1,16 +1,61 @@
 /*
  * adc.hpp
  *
- * The RP2350's ADC (datasheet 12.4): one 12-bit successive-approximation
- * converter over FIVE OR NINE inputs - four pads or eight, by package,
- * plus the temperature sensor - a conversion of 96 cycles of its own
- * clock (clk_adc, 48 MHz from the USB PLL: 500 ksps), a one-shot start
- * and a free run paced by a 16.8 divider, a round-robin over the inputs,
- * an eight-entry FIFO with a threshold that is one interrupt and one DMA
- * request, an optional shift to eight bits for a byte buffer, an error
- * flag per conversion.
+ * The RP2350's ADC (datasheet 12.4) for a program that measures a
+ * voltage: a pad read when the program asks, a block of samples at a
+ * fixed rate into memory through a DMA channel, every input in turn, or
+ * the chip's own temperature. The smallest use, one reading of a pad
+ * (`clock` the program's clock tag, rp2350/clock.hpp; the counts become
+ * millivolts through util/analog.hpp's adc_mv):
  *
- *  Adc            the RESOURCE, a monostate (the chip has one): the
+ *     using Vin = brio::AnalogIn<brio::Pin<40>>;   // input 0 in the QFN-80
+ *     brio::Adc::init(clock);                      // the USB PLL at 48 MHz, clk_adc on it
+ *     Vin::claim();
+ *     brio::Adc::select(Vin{});
+ *     if (const auto counts = brio::Adc::read()) { ... }
+ *
+ * init() runs after the clock task - the Clock<...> type of
+ * rp2350/clock.hpp whose init() brings the clock tree to the program's
+ * rate, first thing in main() - because it computes the USB PLL from the
+ * crystal rate the clock type states (Clock::xtal_hz) and starts no
+ * oscillator itself. It answers false when the silicon is the other
+ * package, the PLL did not lock, the block did not come out of reset or
+ * READY never rose. The pad is claimed before it is read, which is what
+ * lets its pull reach it (below). The full scale is the ADC_AVDD pin's
+ * voltage, which the program states (`ref_mv`).
+ *
+ * Who calls what. Nothing here touches the global interrupt mask;
+ * init() and release() disable the ADC's own line (isr_adc_fifo) in the
+ * interrupt controller, and the program enables it again when it wants
+ * the FIFO's interrupt. init(), release(), fifo() and the configuring
+ * verbs belong to setup in main() or to an active object's handler (a
+ * brio component with an event queue the kernel serves one event at a
+ * time). read() and wait_ready() spin with a bound - read() for one
+ * conversion, 96 cycles of clk_adc, plus the READY waits, 100 000 polls
+ * by default; wait_ready() 1 000 000 - and answer nothing or false when
+ * it runs out; stop_many() the same. start(), result(), pop() and the
+ * flag reads are single register accesses, legal from any context;
+ * select() is a read of CS and one write through its XOR alias. isr()
+ * is the body the program's `isr_adc_fifo` handler calls (the same name
+ * on both architectures): it reports whether the FIFO is at its
+ * threshold and the handler pops until it is not. A DMA channel the
+ * program arms on fifo_address() writes into the program's buffer,
+ * which belongs to that channel until it completes and to the program
+ * again after. The error-flag clears (clear_error_seen(),
+ * clear_fifo_flags()) are a read and a plain write of the whole
+ * register (CS, FCS), with no guard: a program calls them from one
+ * context.
+ *
+ * One 12-bit successive-approximation converter over five or nine
+ * inputs - four pads or eight, by package, plus the temperature sensor
+ * - a conversion of 96 cycles of its own clock (clk_adc, 48 MHz from the
+ * USB PLL: 500 ksps), a one-shot start and a free run paced by a 16.8
+ * divider, a round-robin over the inputs, an eight-entry FIFO with a
+ * threshold that is one interrupt and one DMA request, an optional shift
+ * to eight bits for a byte buffer, an error flag per conversion.
+ *
+ *  Adc            the resource, a monostate (the chip has one; a type
+ *                 whose functions are all static, with no object): the
  *                 clock, the power-up, the input select, the two starts,
  *                 the divider, the round-robin, the FIFO and its flags,
  *                 the interrupt, the DMA request - and
@@ -18,61 +63,62 @@
  *                 start / selected / input_code).
  *
  *  AnalogIn<Pin>  a pad handed to its input. The claim turns the pad's
- *                 digital input buffer OFF and its output driver off
+ *                 digital input buffer off and its output driver off
  *                 (12.4's own instruction: IE low and OD high on an ADC
- *                 pad) and DROPS THE ISOLATION LATCH, which on this chip
+ *                 pad) and drops the isolation latch, which on this chip
  *                 is what makes the pad's pull-up or pull-down reach the
  *                 pad at all (9.7: the latch holds the output enable, the
- *                 output level AND the pull enables; the analogue tap and
+ *                 output level and the pull enables; the analogue tap and
  *                 the digital input are not isolated).
  *
- *  AdcInput       the inputs by name, the temperature sensor LAST - and
+ *  AdcInput       the inputs by name, the temperature sensor last - and
  *                 which number that is depends on the package.
  *
- * THE PACKAGE DECIDES THE INPUT MAP, and this is the first difference
+ * The package decides the input map, and this is the first difference
  * from the RP2040. The QFN-60 brings out four inputs on GPIO 26..29 with
- * the sensor on AINSEL 4, exactly as the RP2040 did; THE QFN-80 BRINGS
- * OUT EIGHT, on GPIO 40..47, with the sensor on AINSEL 8 (12.4.2.1,
+ * the sensor on AINSEL 4, exactly as the RP2040 did; the QFN-80 brings
+ * out eight, on GPIO 40..47, with the sensor on AINSEL 8 (12.4.2.1,
  * tables 1118 and 1119). AINSEL is therefore four bits wide here against
  * three, and RROBIN nine against five - and the register description of
  * AINSEL says the field "is corrected for the package option so only ADC
  * channels which are bonded are available, and in the correct order", so
  * the numbering above is the whole story on each package and there is no
- * hole in it. The stratum's reserve (device.hpp) states which package
+ * hole in it. The stratum's reserve (device.hpp: the package this image
+ * is built for and what it bonds, stated once) states which package
  * this image is for; everything below reads it from there and never
  * spells 4 or 8 again. Since the die is one, a program built for the
  * larger package and run on the smaller one would put the sensor's
- * number on nothing, so init() READS SYSINFO.PACKAGE_SEL and refuses when
+ * number on nothing, so init() reads SYSINFO.PACKAGE_SEL and refuses when
  * the silicon disagrees with the build.
  *
- * THE OTHER DIFFERENCE IS SILENT: erratum RP2040-E11's differential
- * nonlinearity spikes at codes 0x200, 0x600, 0xa00 and 0xe00 are GONE,
+ * The other difference is silent: erratum RP2040-E11's differential
+ * nonlinearity spikes at codes 0x200, 0x600, 0xa00 and 0xe00 are gone,
  * "improving the ADC's precision by around 0.5 ENOB" (12.4.1) over the
  * other chip's 8.7 bits - 9.2 by 12.4's feature list, 9 minimum and 9.5
  * typical by the electrical table. Appendix E has no ADC erratum at all
- * - and the erratum numbered E11 in THIS chip's sheet is an XIP one,
+ * - and the erratum numbered E11 in this chip's sheet is an XIP one,
  * which is why an erratum is never cited here by its bare number.
  *
- * THE REFERENCE IS THE ADC SUPPLY PIN, and that is the third difference:
- * this chip has NO ADC_VREF pin. ADC_AVDD supplies the converter and is
+ * The reference is the ADC supply pin, and that is the third difference:
+ * this chip has no ADC_VREF pin. ADC_AVDD supplies the converter and is
  * its full scale (6.1.5, and the electrical table's input voltage range
  * 0 .. ADC_AVDD), so `Ref` has one enumerator, `avdd_pin`, and what that
  * pin carries is the application's to state - `ref_mv(Ref, board_mv)`.
  * The maximum voltage an ADC pad may see is IOVDD's and not
  * ADC_AVDD's: above IOVDD the ESD diodes leak (12.4, 14.9).
  *
- * THE CLOCK IS THE CONVERTER'S OWN. clk_adc is a generator with an aux
+ * The clock is the converter's own. clk_adc is a generator with an aux
  * mux and no glitchless one (clock.hpp's Clocks::adc_select); the chapter
  * asks for 48 MHz, which the USB PLL makes from the crystal, so init()
- * starts that PLL unless it is locked ON THE RIGHT RATIO already - which
+ * starts that PLL unless it is locked on the right ratio already - which
  * matters here more than it did on the other chip, because a processor
  * reset leaves the clock tree as the previous image built it. The crystal
- * is the other source offered: a conversion then takes 96 of ITS cycles.
+ * is the other source offered: a conversion then takes 96 of its cycles.
  * The rate is clk_adc / 96 with the divider at zero, else clk_adc /
  * (1 + INT + FRAC / 256), the converter ignoring a start that arrives
  * while it converts.
  *
- * THE FIFO ENTRY is twelve bits with, under FCS.ERR, bit 15 flagging a
+ * The FIFO entry is twelve bits with, under FCS.ERR, bit 15 flagging a
  * conversion that failed to converge - a sample to discard (12.4.3.4's
  * caution); under FCS.SHIFT the entry is the result's top eight bits, the
  * flag where it was. A DMA channel reads the FIFO register paced by the
@@ -268,7 +314,8 @@ struct AnalogIn {
 // =============================================================================
 
 /**
- * Adc: the one converter, a monostate.
+ * Adc: the one converter, a monostate. The smallest use (the file
+ * header gives the order and the contexts):
  *
  *   using Vin = brio::AnalogIn<brio::Pin<40>>;   // input 0 in the QFN-80
  *   Adc::init(clock);                            // the USB PLL at 48 MHz, clk_adc on it
@@ -306,7 +353,7 @@ struct Adc {
     /// up or READY never rose; the FIFO is off, the sensor's bias off,
     /// the divider zero.
     ///
-    /// THE CLOCK COMES BEFORE THE RESET, and the reset is a CYCLE: a
+    /// The clock comes before the reset, and the reset is a cycle: a
     /// processor reset on this chip leaves every peripheral as the
     /// previous image left it, so a driver that wants the reset state has
     /// to make it.
@@ -382,8 +429,10 @@ struct Adc {
     static constexpr uint8_t input_code(AdcInput in) { return adc_code_of(in); }
     static constexpr uint8_t input_code(uint8_t in) { return in; }
 
-    /// CS.AINSEL, no settling time (12.4.3.1). A channel this package has
-    /// not got is not written.
+    /// CS.AINSEL, no settling time (12.4.3.1): the input the next
+    /// conversion takes. A channel this package has not got is not
+    /// written. One masked write through the XOR alias (a read of CS
+    /// before it), from setup or an active object's handler.
     template <class P>
     static void select(AnalogIn<P>) { select_input(AnalogIn<P>::input); }
     /// A pad tag this package has not bonded is not written - and in the
@@ -415,7 +464,9 @@ struct Adc {
     /// The most recent result (RESULT), whatever started it.
     static uint16_t result() { return static_cast<uint16_t>(regs().RESULT & ADC_RESULT_BITS); }
     /// One conversion of the selected input, waited for: nullopt when
-    /// READY never rose or the conversion errored (CS.ERR).
+    /// READY never rose or the conversion errored (CS.ERR). Each wait is
+    /// a bounded spin of up to `spins` polls; the conversion itself is 96
+    /// cycles of clk_adc (2 us at 48 MHz). Interrupts stay as they are.
     static std::optional<uint16_t> read(uint32_t spins = 100'000u) {
         if (!wait_ready(spins)) {
             return {};

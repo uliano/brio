@@ -1,22 +1,53 @@
 /*
  * platform.hpp
  *
- * RP2040 (Cortex-M0+) implementation of the brio Platform concept - the
- * one header of this stratum the kernel templates are instantiated with.
- * Apps select it by including it and passing Rp2040Platform<> along.
+ * What the brio kernel stands on when it runs on an RP2040: the RP2040
+ * (Cortex-M0+) realization of the kernel's Platform concept, the
+ * compiler-checked set of requirements kernel/platform.hpp states. A
+ * program names it once, as the first argument of its Tenuto, and every
+ * kernel template is instantiated with it. In outline (Console,
+ * SerialLines and Lamp stand for the program's active objects):
  *
- * ONE PLATFORM TYPE PER CORE. The first template parameter is the core,
+ *     using P = brio::Rp2040Platform<>;
+ *     extern "C" void isr_systick() { brio::Ticker::tick(); }
+ *     ...
+ *     SysClock::init();             // rp2040/clock.hpp, first
+ *     brio::Ticker::init(clock);    // the SysTick timebase, rp2040/ticker.hpp
+ *     brio::enable_interrupts();
+ *     brio::Tenuto<P, Console, SerialLines, Lamp>::run();
+ *
+ * It gives the kernel a critical section (interrupts masked for a
+ * scope), an idle that sleeps until the next interrupt without losing
+ * one that arrives at the wrong moment, the program's source of time, a
+ * breakpoint for a panic and the storage a panic record survives a reset
+ * in. Who calls what: the kernel loop calls idle() in main-loop context
+ * with interrupts already masked, and nothing else should; now() and
+ * ticks_per_second may be read from any context; CriticalSection may be
+ * opened from any context and nests; break_here() is the panic path's
+ * and panic_record() the panic path's and the next boot's; sleep_hook is
+ * written by a dormant sleep site (rp2040/sleep.hpp) and by nothing
+ * else. A program binds the timebase's vector itself (isr_systick to
+ * the ticker's tick()); the kernel binds no vector, and the crt aliases
+ * isr_systick, as it does every handler name but isr_hardfault (a weak
+ * spin of its own), weakly to Default_Handler, a spin
+ * (rp2040/src/glue/startup_rp2040.cpp), so a program that forgets it
+ * stops in that spin at its first tick.
+ *
+ * One platform type per core. The first template parameter is the core,
  * 0 or 1: the kernel's statics are keyed by the platform type, so
  * `Tenuto<Rp2040Platform<0>, ...>` and `Tenuto<Rp2040Platform<1>, ...>`
- * are two kernels with two packs, two timebases (the second parameter,
- * the core's own SysTick ticker by default) and two breadcrumbs, and
- * the type IS the core identity everywhere the kernel asks P (the
- * model: util/inbox.hpp, design/kernel.md). `Rp2040Platform<>` is core
- * 0's, what a single-core program names. The two optional members of a
- * multi-core platform (kernel/platform.hpp) are here: `on_own_core()`
- * reads SIO's CPUID, so a post to the other core's queue is refused
- * and counted; `Doorbell` is the SIO FIFO towards this core
- * (rp2040/multicore.hpp), what a send to an AO of this core rings.
+ * are two kernels with two lists of active objects (an active object is
+ * a component with its own event queue, served one event at a time by
+ * its core's kernel), two timebases (the second parameter, the core's
+ * own SysTick ticker by default) and two breadcrumbs, and the type is
+ * the core identity everywhere the kernel asks P (the model:
+ * util/inbox.hpp, design/kernel.md section 12, "Two cores: two kernels
+ * and a bridge"). `Rp2040Platform<>` is core 0's, what a single-core
+ * program names. The two optional members of a multi-core platform
+ * (kernel/platform.hpp) are here: `on_own_core()` reads SIO's CPUID, so
+ * a post to the other core's queue is refused and counted; `Doorbell`
+ * is the SIO FIFO towards this core (rp2040/multicore.hpp), what a send
+ * to an active object of this core rings.
  *
  * The platform offers no idle_until(): SysTick rides clk_sys, and
  * nothing of this chip's sleeping short of DORMANT stops clk_sys, so
@@ -27,8 +58,8 @@
  * CriticalSection is rp2040/nvic.hpp's InterruptGuard: save PRIMASK,
  * cpsid i, restore on scope exit. Nesting-correct, and the CMSIS
  * intrinsics behind it carry the "memory" clobbers the concept asks for.
- * ARMv6-M has no BASEPRI, so this is all-or-nothing masking - AND IT IS
- * PER CORE: PRIMASK is a register of the core that sets it, so a
+ * ARMv6-M has no BASEPRI, so this is all-or-nothing masking - and it is
+ * per core: PRIMASK is a register of the core that sets it, so a
  * critical section here excludes this core's handlers and nothing that
  * runs on the other core. Everything the kernel guards with it is
  * therefore correct within one core, which is what the kernel promises;
@@ -72,18 +103,20 @@ struct Rp2040Platform {
     /// What EventQueue::push checks before it copies.
     static bool on_own_core() { return SIO->CPUID == core_index; }
 
-    /// Entered with interrupts MASKED and nothing to do: sleep until the
-    /// next interrupt.
+    /// The kernel's idle: entered by the loop, in main-loop context on
+    /// this platform's core, with interrupts masked and nothing to do;
+    /// sleeps until the next interrupt (or runs sleep_hook instead) and
+    /// returns with interrupts enabled. Not for a program to call.
     ///
-    /// WFI FIRST, UNMASK AFTER. On Cortex-M a pending interrupt wakes
+    /// WFI first, unmask after. On Cortex-M a pending interrupt wakes
     /// WFI even with PRIMASK set - the handler simply does not run until
     /// PRIMASK clears. So sleeping before unmasking closes the
     /// lost-wakeup window by construction: an interrupt that becomes
     /// pending between the caller's queue check and the WFI does not put
     /// the core to sleep at all.
     ///
-    /// WHAT THE SLEEP IS on this chip: the core's clock stops, everything
-    /// else runs; when BOTH cores sleep and the DMA is idle the clock
+    /// What the sleep is on this chip: the core's clock stops, everything
+    /// else runs; when both cores sleep and the DMA is idle the clock
     /// enables switch from the WAKE_EN to the SLEEP_EN registers (2.15.3.5,
     /// all clocks enabled at reset, so nothing changes until a power model
     /// decides otherwise). SCR.SLEEPDEEP is never written here: this core
@@ -102,13 +135,13 @@ struct Rp2040Platform {
         __enable_irq();
     }
 
-    /// THE ONE STOP THAT IS NOT A WFI. The chip's DORMANT state is
+    /// The one stop that is not a WFI. The chip's DORMANT state is
     /// entered by a register write, not by the sleep instruction, so a
     /// site that arms it hands the idle path the function that does it
     /// (rp2040/sleep.hpp: the clocks onto the oscillator, the keyword,
     /// the tree restored after the wake) and takes it back when it
     /// disarms. Called with interrupts masked, like the WFI it replaces -
-    /// BUT ITS WAKE LIST IS THE DORMANT'S OWN: 2.11.3 ends the state on a
+    /// but its wake list is the DORMANT's own: 2.11.3 ends the state on a
     /// GPIO event or the RTC's interrupt and on nothing else, so a line
     /// that was pending at the call, or turns pending on the way in, is
     /// served after one of those and not at once. That is the deep rung's
@@ -122,15 +155,16 @@ struct Rp2040Platform {
 
     /// Halt in the debugger.
     ///
-    /// CAVEAT, ARMv6-M. The core cannot ask whether a debugger is
+    /// Caveat, ARMv6-M. The core cannot ask whether a debugger is
     /// attached (DHCSR is debugger-access-only), so BKPT cannot be made
     /// conditional: with no debugger halted on it, this escalates to
     /// isr_hardfault, which the crt provides as a distinct spin loop so
     /// the wreck is legible in a backtrace. And with C_DEBUGEN left set
-    /// by a flashing tool the core HALTS here in silence, which is why
+    /// by a flashing tool the core halts here in silence, which is why
     /// bin/brio clears DHCSR after every flash.
     static void break_here() { __BKPT(0); }
 
+    /// Kernel time in ticks of the timebase; any context.
     static uint32_t now() { return TB::ticks(); }
 
     /// Tick rate of the timebase: 1000 Hz on SysTick (rp2040/ticker.hpp).
@@ -152,7 +186,7 @@ struct Rp2040Platform {
     /// this stratum may therefore be given util/placement.hpp's InRam.
     static constexpr bool places_fast_text = true;
 
-    /// Which core runs this: SIO.CPUID, 0 or 1 (2.3.1.1).
+    /// Which core runs this: SIO.CPUID, 0 or 1 (2.3.1.1); any context.
     static uint8_t core_id() { return static_cast<uint8_t>(SIO->CPUID); }
 
     /// Panic breadcrumb in .noinit: the linker script marks the section

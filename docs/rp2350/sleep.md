@@ -1,21 +1,96 @@
 # Sleep (RP2350)
 
-Documents of record: the RP2350 datasheet (build d126e9e), 6.5 (the
-power reduction strategies: 6.5.1 the top-level clock gates, 6.5.2 the
-SLEEP state, 6.5.3 DORMANT and 6.5.3.1 what ends it, 6.5.4 the memory
-periphery, 6.5.5 the memory power domains), 8.2.6 and 8.3.10 (the two
-oscillators' DORMANT registers), 9.5 (the IO bank's dormant-wake
-destination), 6.2.2 (the P1.m states, which are off this ladder and in
+This document is for a programmer who wants an RP2350 program to sleep
+deeper than the kernel's own idle when it has nothing to do, on either
+of its two processor architectures. brio's power model
+([design/power.md](../design/power.md)) splits the work in two: a power
+manager, an active object of the program (a component with its own
+event queue, served one event at a time by the kernel,
+[docs/learn/introduction.md](../learn/introduction.md)), asks the
+program's stakeholders whether the chip may sleep and how deeply - a
+vote - and a sleep site, the target's half, arms the depth the vote
+chose, so that the kernel's next idle enters it. The depths are the
+rungs of a ladder: light (a plain sleep instruction), standby (the
+chip's SLEEP state, in which the clocks the program did not keep are
+gated) and deep (DORMANT, the oscillator stopped). `brio/rp2350/sleep.hpp`
+holds the two sites: `Rp2350SleepSite`, the plain one, and
+`Rp2350TimedSleepSite`, which adds the always-on timer
+([powman.md](powman.md)) as the alarm that ends a sleep and as its
+witness - the counter that says how long the sleep lasted - from which
+it resynchronizes the kernel's time after a sleep that stopped it.
+
+The smallest use, a program whose manager sleeps through the timed
+site, is the block under "How to use it" below:
+
+```cpp
+using Site = brio::Rp2350TimedSleepSite<P, SysClock, brio::DormantSource::xosc>;
+using Power = brio::PowerManager<P, Site, brio::PowerConfig{}, Voters...>;
+
+brio::AonTimer::init(clock);                 // the witness, its divisor measured
+Site::standby_clocks(brio::sleep_clocks_core | brio::sleep_clocks_timer |
+                     brio::sleep_clocks_uart0);
+Site::init();                                // the alarm's line
+extern "C" void isr_powman_timer() { (void)Site::isr(); }
+brio::Tenuto<P, Power, ...>::run();          // the manager arms, the loop's idle sleeps
+```
+
+Line by line: `Site` names the timed site over core 0's platform `P`,
+the program's static clock type `SysClock` and the crystal as the
+oscillator a dormant stops; `Power` is the power manager over that site,
+with its default configuration and the program's voters (`Voters...`
+stands for them); `AonTimer::init(clock)` starts the always-on timer
+with its divisor measured; `standby_clocks()` hands the site the gates
+a standby keeps open - the program's core set, the microsecond timer
+and the console's UART here, the alarm's own gates added by the site;
+`Site::init()` enables the alarm's interrupt line, answering false while
+the always-on timer is not running; `isr_powman_timer` is the alarm's
+handler under the crt's name, the same on both architectures, whose
+body is the site's; and the manager runs in the program's `Tenuto` (the
+`...` stands for the program's other active objects).
+
+What decides correctness even there. The site is core 0's: the timed
+site refuses any platform but `Rp2350Platform<0>` at compile time, and
+the plain one installs its dormant entry in core 0's platform, because
+a dormant is chip-wide and the clock tree is core 0's to restore. The
+always-on timer must run before `Site::init()`, or there is neither
+alarm nor witness. A standby gates what the program left out of its
+set, and a byte transport whose gates are pruned loses the byte in
+flight, so the console's UART stays in. A dormant needs a way back, and
+the site refuses to arm one without it: a GPIO event through
+`DormantWake::enable`, or the alarm, which the crystal site accepts only
+while the timer is not counting the crystal it is about to stop. And
+after a dormant the program's own `Clock::init()` restores the tree
+inside the hook, which is why the site takes the program's static clock
+type. A power-down of the switched core is not a rung: leaving one is a
+boot, and it is [powman.md](powman.md)'s verb.
+
+The rest of this page, in order: the documents of record; what the
+silicon does (the three depths, why a dormant's alarm needs clk_ref
+running, the power-down states kept off the ladder); the types and
+verbs; how to use it; the bench findings, both architectures; and what
+is not covered.
+
+## Documents of record
+
+The RP2350 datasheet (build d126e9e), 6.5 (the power reduction
+strategies: 6.5.1 the top-level clock gates, 6.5.2 the SLEEP state,
+6.5.3 DORMANT and 6.5.3.1 what ends it, 6.5.4 the memory periphery,
+6.5.5 the memory power domains), 8.2.6 and 8.3.10 (the two oscillators'
+DORMANT registers), 9.5 (the IO bank's dormant-wake destination), 6.2.2
+(the P1.m states, which are off this ladder and in
 [powman.md](powman.md)); `docs/design/power.md` for the model the sites
 serve. Appendix E carries no erratum against any of it. The driver:
 `brio/rp2350/sleep.hpp` (`DormantWake`, `Rp2350SleepSite`,
 `Rp2350TimedSleepSite` and the gate sets) over `clock.hpp` (the gate
-registers, the two oscillators' `dormant()`), `powman.hpp` (the alarm and
-the witness), `pin.hpp` (the wake destination), `platform.hpp` (the idle
-path's `sleep_hook`) and each architecture's core header (the one bit of
-6.5.2's condition that belongs to the processor). The reference suite:
-`test_rp2350_sleep`, letters f, g, h, j, m and the by-name letters n, o,
-p, u.
+registers, the two oscillators' `dormant()`), `powman.hpp` (the alarm
+and the witness), `pin.hpp` (the wake destination), `platform.hpp` (the
+idle path's `sleep_hook`) and each architecture's core header (the one
+bit of 6.5.2's condition that belongs to the processor). The reference
+suite: `test_rp2350_sleep` (a letter is one command key of the suite's
+console and the group of verdicts it runs; `z` is the key that runs
+every letter but the by-name ones, each run by its own key), letters f,
+g, h, j, m and the by-name letters n, o, p, u and x - x against the
+partner board's wave, which its own sleep suite's letter `w` drives.
 
 ## What the silicon does
 
@@ -24,16 +99,19 @@ p, u.
 A core's sleep instruction stops that core and nothing else: every
 peripheral, the other core and the DMA run on.
 
-THE SLEEP STATE (6.5.2) is reached when both processors are asleep and
+The SLEEP state (6.5.2) is reached when both processors are asleep and
 the DMA has no transfer in flight. Then the top-level clock gates switch
 from the WAKE_ENx masks to the SLEEP_ENx ones - one bit per clock
 endpoint, identical layouts, every gate open at reset - and what a
 program leaves out of SLEEP_ENx is unclocked until an interrupt of a
 block still clocked wakes a core. A peripheral whose gate closed resumes
 where it was; no reset, no reinitialisation. The oscillators and the PLLs
-run through it. NOTHING IN 6.5.2'S CONDITION IS A PROCESSOR BIT: the
-Cortex-M33's SLEEPDEEP plays no part in it and the Hazard3 half has no
-such bit, so this rung IS the program's pruning set and nothing else.
+run through it. Nothing in 6.5.2's condition is a sleep-depth bit of a
+processor: the Cortex-M33's SLEEPDEEP plays no part in it, and the
+Hazard3 half's equivalent, MSLEEP.DEEPSLEEP, is never set here (erratum
+RP2350-E4), so this rung is the program's pruning set. The one processor
+signal the condition does read, that a core is asleep, is where the two
+architectures differ (the bench findings below).
 
 DORMANT (6.5.3) is the other thing: the oscillator the program runs on is
 stopped by a keyword written into its DORMANT register, every clock
@@ -52,10 +130,10 @@ core is powered (SEQ_CFG.USE_FAST_POWCK), a dormant is not a power-down
 and gets no fallback from the power sequencer, so a dormant entered with
 clk_ref on the oscillator it is about to stop has no way back but a GPIO
 event. Both sites therefore leave clk_ref on something the dormant does
-NOT stop and take clk_sys to the stopped oscillator through its own aux
+not stop and take clk_sys to the stopped oscillator through its own aux
 mux.
 
-The P1.m states, where the switched core has no supply at all, are OFF
+The P1.m states, where the switched core has no supply at all, are off
 this ladder: leaving one is a boot and not a wake, so a rung of it would
 make `arm()` a lie. `Powman::power_down()` is that door
 ([powman.md](powman.md)).
@@ -93,7 +171,7 @@ make `arm()` a lie. `Powman::power_down()` is that door
   masked. A dormant site installs it and nothing else does.
 - `sleep_releases_power_request(bool)` and its readback, in each
   architecture's core header (`core_m33.hpp`, `core_hazard3.hpp`): the
-  half of 6.5.2's condition that is the PROCESSOR's. Empty on the M33,
+  half of 6.5.2's condition that is the processor's. Empty on the M33,
   MSLEEP.POWERDOWN on Hazard3. The standby rung is the only caller.
 
 ## How to use it

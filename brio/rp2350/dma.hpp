@@ -1,12 +1,59 @@
 /*
  * dma.hpp
  *
- * The RP2350's DMA controller (datasheet 12.6): SIXTEEN channels over one
+ * The RP2350's DMA controller for a program: data moved without the
+ * processor - a block copied or filled in memory, a table poured into a
+ * peripheral register at a timer's pace, or a transport (a driver such
+ * as the UART's Uart, which moves bytes for print and the serial
+ * services) moving its bytes through channels named in its two engine
+ * slots. The same source on the Cortex-M33 half and the Hazard3 half.
+ * The smallest use, a copy polled to its end (docs/rp2350/dma.md reads it
+ * line by line):
+ *
+ *     brio::Dma::init();                      // once, before any channel
+ *     using C = brio::DmaChannel<4>;
+ *     C::load({.read = src, .write = dst, .count = 1024,
+ *              .config = {.size = brio::DmaSize::word}});
+ *     while (C::busy()) {}
+ *
+ * and an engine in a transport's slot:
+ *
+ *     using Link = brio::Uart<1, pins, 1024, 1024,
+ *                             brio::DmaTxEngine<2>, brio::DmaRxEngine<3>>;
+ *     extern "C" void isr_dma_0() { (void)Link::dma_isr(); }
+ *
+ * Who calls what. Dma::init() is a setup verb, called once before any
+ * channel: it cycles the block's reset (a bounded wait for RESET_DONE,
+ * false if the block never came ready), so a second call stops every
+ * channel at work. The channel verbs and the engines' arm() belong to
+ * main() or to an active object's handler (an active object is a
+ * component of a brio program with its own event queue, served one event
+ * at a time by the kernel); a programming verb refuses a BUSY channel
+ * rather than waiting for it, bar DmaRxEngine's start() and
+ * start_discard(), which abort a running receive and bind the channel
+ * again. The waits are bounded spins: Dma::abort() polls CHAN_ABORT for
+ * at most 100 000 reads, and every verb that aborts (DmaChannel::abort()
+ * and stop(), an engine's arm(), abandon() and stop(), a receive engine's
+ * start() on a busy channel) spends that bound at worst. Nothing in this
+ * file masks interrupts: a transmit engine's claim() is the one step its
+ * owner takes under the owner's own mask, when it starts blocks from two
+ * contexts. An engine's service() is the body of the line's interrupt
+ * handler, bound by the program under the crt's name (isr_dma_0 ..
+ * isr_dma_3), the same names on both architectures, and a line is enabled
+ * in the calling core's interrupt controller. Storage: a run handed to a
+ * transmit engine is the engine's from launch() until complete() reports
+ * the block or abandon() throws it away; a run handed to a receive engine
+ * is written until the run ends, the owner counting what arrived with
+ * take(); a copy's or a fill's source, cell and destination belong to the
+ * block until busy() reads down; a DmaChannel transfer's two ends until
+ * BUSY reads down. Nothing checks any of these.
+ *
+ * The controller (datasheet 12.6): sixteen channels over one
  * read master and one write master, each channel four live registers -
  * READ_ADDR, WRITE_ADDR, TRANS_COUNT, CTRL - aliased four times so that
  * any one of them can be the TRIGGER (12.6.3.1), a credit-based data
  * request per channel that keeps as many transfers in flight as the
- * peripheral has room for (12.6.4.2), FOUR system interrupt lines each
+ * peripheral has room for (12.6.4.2), four system interrupt lines each
  * with its own enable, force and status bank (12.6.5), chaining, address
  * wrapping, four pacing timers, a passive checksum sniffer, an abort
  * register, and - new on this chip - a security level per channel, per
@@ -16,22 +63,24 @@
  *  Dma            the block: out of the reset controller once, the raw
  *                 interrupt status, the channel count, a trigger or an
  *                 abort over several channels, the debug FIFO levels,
- *                 and the security assignment READ BACK
+ *                 and the security assignment read back
  *  DmaChannel<ch> one channel, 0..15: a transfer prepared or loaded
- *                 (loaded = triggered), the live count and its MODE, the
+ *                 (loaded = triggered), the live count and its mode, the
  *                 bus errors, the route to any of the four lines, the
  *                 abort with erratum RP2350-E5's workaround, the debug
  *                 registers
- *  DmaLine<n>     one of the FOUR interrupt lines: its interrupt number,
+ *  DmaLine<n>     one of the four interrupt lines: its interrupt number,
  *                 the masked status, the force bits - a line belongs to
- *                 the CORE whose kernel serves it (rule 2 of the
+ *                 the core whose kernel serves it (rule 2 of the
  *                 two-kernel model)
  *  DmaTimer<n>    a pacing timer (12.6.8.1): X/Y of clk_sys as a request
  *  DmaSniffer     the checksum sniffer (12.6.8.2) over one channel's data
- *  DmaMpu         the memory protection unit (12.6.6.3), READ-ONLY here
+ *  DmaMpu         the memory protection unit (12.6.6.3), read-only here
  *  DmaTxEngine<ch, Elem, line> / DmaRxEngine<ch, Elem, line>
- *                 the two engines util-level transports name in their
- *                 slots, the other strata's surface: a transmit engine
+ *                 the two engines a transport names in its slots (an
+ *                 engine is one channel bound once to its peripheral and
+ *                 fed a block at a time), the surface the IP strata's
+ *                 transports are written against: a transmit engine
  *                 pours a caller-owned run into one peripheral register
  *                 and reports what the block carried when it completes;
  *                 a receive engine fills a caller-owned run and answers
@@ -41,33 +90,33 @@
  *  DmaCopyEngine<ch, line>
  *                 copy and fill, memory to memory on one channel
  *
- * WHAT DIFFERS FROM THE OTHER FAMILIES' CONTROLLERS, stated once:
- *  - the request is a FIELD, not a channel: any channel takes any DREQ
+ * What differs from the other families' controllers, stated once:
+ *  - the request is a field, not a channel: any channel takes any DREQ
  *    (12.6.4.1), so an engine is named by a free channel and told its
  *    peripheral's request in arm();
- *  - the trigger is a WRITE: a channel starts when its trigger alias is
+ *  - the trigger is a write: a channel starts when its trigger alias is
  *    written non-zero with EN set, or when another channel chains to it,
  *    or through MULTI_CHAN_TRIGGER; a trigger at a running channel is
  *    ignored, and a zero written to a trigger register (a null trigger)
  *    starts nothing and, with IRQ_QUIET, is the one thing that raises
  *    the interrupt;
- *  - a completed channel stays ENABLED and goes not-BUSY: load() refuses
+ *  - a completed channel stays enabled and goes not-BUSY: load() refuses
  *    a BUSY channel, never an enabled one, and clearing EN merely pauses
  *    a channel - the way out of a stalled one is the abort;
  *  - a bus error halts the channel, marks CTRL (AHB_ERROR with READ_ERROR
- *    or WRITE_ERROR, cleared by writing one) and RAISES THE CHANNEL'S
- *    INTERRUPT; the channel refuses to restart until the flags are
+ *    or WRITE_ERROR, cleared by writing one) and raises the channel's
+ *    interrupt; the channel refuses to restart until the flags are
  *    cleared, and 12.6.7.2 wants BUSY read down first;
  *  - one FIFO served by a channel must not be touched by the processor
  *    (12.6.4.2): a transport with an engine on a direction leaves that
  *    direction's data register to the engine.
  *
- * WHAT DIFFERS FROM THE RP2040'S SAME BLOCK (12.6.1), which is the
- * reason this file is an adapted copy and not a shared one:
- *  - SIXTEEN channels against twelve, and FOUR interrupt lines against
+ * What differs from the RP2040's same block (12.6.1), which is the
+ * reason the two chips do not share one file:
+ *  - sixteen channels against twelve, and four interrupt lines against
  *    two - so CHAIN_TO is four bits wide and every bit map here is
  *    sixteen bits;
- *  - THE TOP FOUR BITS OF TRANS_COUNT ARE A MODE. 0x0 counts down and
+ *  - the top four bits of TRANS_COUNT are a mode. 0x0 counts down and
  *    halts (the RP2040's only behaviour), 0x1 re-triggers the channel at
  *    zero (TRIGGER_SELF: the count reloads and the addresses carry on -
  *    the interrupt and the CHAIN_TO still happen), 0xf never decrements
@@ -75,47 +124,47 @@
  *    channel triggers no other channel and raises no interrupt, and only
  *    an abort ends it). A count is therefore 28 bits, and a READ of
  *    TRANS_COUNT carries the mode in its top nibble - every verb here
- *    that reads progress MASKS it off;
- *  - AN ADDRESS HAS FOUR STEPS, not two. INCR_READ/INCR_WRITE gained a
+ *    that reads progress masks it off;
+ *  - an address has four steps, not two. INCR_READ/INCR_WRITE gained a
  *    REV partner, and the four combinations are: the same address every
- *    time, forward by the transfer size, BACKWARD by it, or forward by
- *    TWICE it (skipping alternate cells). `DmaStep` is that field pair
+ *    time, forward by the transfer size, backward by it, or forward by
+ *    twice it (skipping alternate cells). `DmaStep` is that field pair
  *    as one enumeration, so the illegal reading of two bools cannot be
  *    written;
- *  - the CTRL fields above INCR_READ have all MOVED to make room for
+ *  - the CTRL fields above INCR_READ have all moved to make room for
  *    them (BUSY is bit 26 here, 24 there): every constant below is the
  *    device header's own name, and not one is retyped;
- *  - RP2040-E12 IS GONE: the read-back adjustment that made READ_ADDR and
+ *  - RP2040-E12 is gone: the read-back adjustment that made READ_ADDR and
  *    WRITE_ADDR lie during a wrapping or non-incrementing sequence is
  *    disabled for exactly those transfers now. Progress is still read
  *    from TRANS_COUNT here, because a count is what a run's accounting is
  *    in - one read, and no arithmetic against a base address;
- *  - RP2040-E13 IS GONE TOO, and replaced: the ABORT register may now be
- *    POLLED to completion (12.6.8.3), which is what abort() below does
+ *  - RP2040-E13 is gone too, and replaced: the ABORT register may now be
+ *    polled to completion (12.6.8.3), which is what abort() below does
  *    instead of waiting on BUSY alone. But RP2350-E5 arrives with it -
  *    see the abort verb;
  *  - the DREQ table has not one row in the RP2040's place (rp2350/
  *    dma_engine.hpp holds it).
  *
- * THE TWO ERRATA OF THIS CHAPTER, both live on stepping A2:
+ * The two errata of this chapter, both live on stepping A2:
  *  - RP2350-E5, aborting against CHAIN_TO: an aborted channel may fire
  *    its CHAIN_TO, and may itself be re-triggered on the last cycle of
  *    the abort and then complete immediately - raising its interrupt and
  *    its chain again. The datasheet's own sequence is the workaround and
- *    it is what Dma::abort() does: EN cleared AND CHAIN_TO pointed at the
+ *    it is what Dma::abort() does: EN cleared and CHAIN_TO pointed at the
  *    channel itself (which is how this chapter spells "chain to nobody")
- *    on every channel of the abort, THEN the CHAN_ABORT write, THEN the
+ *    on every channel of the abort, then the CHAN_ABORT write, then the
  *    poll. DmaChannel<ch>::abort() adds what a single channel knows: its
  *    routes come off all four lines first and go back afterwards, so
  *    nothing the abort raises reaches a handler.
  *  - RP2350-E8, CHAIN_TO against a zero-length transfer: a channel
  *    triggered with a count of zero completes with no bus access, and its
- *    CHAIN_TO then fires only by accident. THERE IS NO WAY TO REACH IT
- *    FROM THIS FILE: a zero count is refused by dma_transfer_valid, by
+ *    CHAIN_TO then fires only by accident. There is no way to reach it
+ *    from this file: a zero count is refused by dma_transfer_valid, by
  *    set_count and by every verb that starts a channel, so no sequence
  *    this driver can start has length zero.
  *
- * SECURITY, AND WHY THERE IS NO WRITE VERB FOR IT (12.6.6). Channels,
+ * Security, and why there is no write verb for it (12.6.6). Channels,
  * lines, the timers and the sniffer each carry a security level, and the
  * MPU filters both masters' addresses against eight regions. At reset
  * every channel, line, timer and the sniffer are SP - secure and
@@ -123,23 +172,23 @@
  * that runs entirely Secure and Privileged (which is what brio runs on
  * this chip: the bootrom hands over in that state and no stratum leaves
  * it) is never refused by any of it. What this file offers is therefore
- * the READ side alone - what the levels are, and whether a channel's
+ * the read side alone - what the levels are, and whether a channel's
  * assignment has locked - because a level written low cannot be written
  * back except through the block's reset, and because nothing here has a
  * second security domain to hand a channel to. Note one automatic
  * effect a program should know about: a successful write to a channel's
- * control registers LOCKS that channel's SECCFG register (12.6.6.1), so
+ * control registers locks that channel's SECCFG register (12.6.6.1), so
  * after the first prepare() or load() the assignment is read-only until
  * Dma::init() cycles the block.
  *
- * TWO CORES. The controller is one; a channel belongs to the core whose
+ * Two cores. The controller is one; a channel belongs to the core whose
  * kernel hosts the transport that armed it, and it reports on the line
- * that core enabled. THE CONVENTION OF THIS STRATUM, with four lines to
+ * that core enabled. The convention of this stratum, with four lines to
  * spend: line 0 is core 0's and line 1 is core 1's, as on the RP2040,
- * and lines 2 and 3 are SPARE - a second line a core may take for a
+ * and lines 2 and 3 are spare - a second line a core may take for a
  * channel whose completion it wants served apart from the rest. Which is
  * why every engine and every channel verb that routes takes the line as
- * a parameter and enables it in the CALLING core's interrupt controller.
+ * a parameter and enables it in the calling core's interrupt controller.
  */
 
 #pragma once
@@ -346,7 +395,10 @@ struct Dma {
 
     /// The block out of the reset controller: every channel at its reset
     /// state, every enable clear, every security assignment back at SP
-    /// with its lock dropped. Once per program, before any channel.
+    /// with its lock dropped. Once per program, before any channel - a
+    /// channel at work when it is called stops. A setup verb; false when
+    /// the block did not report ready within the reset controller's
+    /// bounded wait.
     static bool init() { return Resets::cycle(ResetBlock::dma); }
     static bool released() { return Resets::released(ResetBlock::dma); }
 
@@ -374,18 +426,18 @@ struct Dma {
     static uint32_t abort_pending() { return DMA->CHAN_ABORT; }
 
     /**
-     * END SEVERAL CHANNELS EARLY, 12.6.8.3's sequence with erratum
+     * End several channels early, 12.6.8.3's sequence with erratum
      * RP2350-E5 in it: on every channel of `mask` the EN bit is cleared
      * and CHAIN_TO is pointed at the channel itself (the erratum's
      * workaround - an abort may otherwise fire a chain, and a chained
      * channel may re-trigger the one being aborted), then CHAN_ABORT is
-     * written and POLLED to zero, then the raw status and the four
+     * written and polled to zero, then the raw status and the four
      * lines' pending bits of those channels are cleared.
      *
-     * THE WHOLE CHAIN AT ONCE is what this verb is for: 12.6.8.3's
+     * The whole chain at once is what this verb is for: 12.6.8.3's
      * closing advice is to abort every channel involved in a chain
      * together, and a mask is how that is said. False when the abort did
-     * not flush within the bounded wait.
+     * not flush within the bounded wait (100 000 polls).
      *
      * The error flags are deliberately left standing: the read-modify-
      * write below masks them out of the value it stores, so a bus error
@@ -446,7 +498,7 @@ struct Dma {
         return static_cast<DmaSecurity>(seccfg_line(line) &
                                         (DMA_SECCFG_IRQ0_S_BITS | DMA_SECCFG_IRQ0_P_BITS));
     }
-    /// The sniffer's level: the HIGHEST channel level it can observe.
+    /// The sniffer's level: the highest channel level it can observe.
     static DmaSecurity sniffer_security() {
         const uint32_t v = DMA->SECCFG_MISC;
         return level_of((v & DMA_SECCFG_MISC_SNIFF_S_BITS) != 0u,
@@ -509,7 +561,7 @@ struct DmaLine {
         if (on) { hw_set(Dma::force_bits(line), mask); } else { hw_clear(Dma::force_bits(line), mask); }
     }
 
-    /// The line in the CALLING core's interrupt controller.
+    /// The line in the calling core's interrupt controller.
     static void enable() { Irq::enable(irq()); }
     static void disable() { Irq::disable(irq()); }
 };
@@ -542,7 +594,7 @@ public:
     /// Transfers in progress or in flight (CTRL.BUSY).
     static bool busy() { return (ctrl() & DMA_CH0_CTRL_TRIG_BUSY_BITS) != 0u; }
 
-    /// EN on or off through the non-trigger alias: off PAUSES a running
+    /// EN on or off through the non-trigger alias: off pauses a running
     /// channel (12.6.8.3), it does not end it - and BUSY stays up while
     /// it is paused.
     static void enable(bool on) {
@@ -579,7 +631,7 @@ public:
         return true;
     }
 
-    /// Program the whole transfer WITHOUT starting it: the four
+    /// Program the whole transfer without starting it: the four
     /// registers through non-trigger aliases, EN set, the errors and
     /// the raw status cleared. trigger() or a chain starts it.
     static bool prepare(const DmaTransfer& t) {
@@ -595,8 +647,12 @@ public:
         return true;
     }
 
-    /// Program the whole transfer and START it: the three registers,
-    /// then CTRL through its trigger alias.
+    /// Program the whole transfer and start it: the three registers,
+    /// then CTRL through its trigger alias. False, and nothing written,
+    /// for a BUSY channel or a transfer dma_transfer_valid refuses (an
+    /// end missing or misaligned, a count of zero or past 28 bits, an
+    /// illegal mode or config). The two ends belong to the transfer until
+    /// busy() reads false.
     static bool load(const DmaTransfer& t) {
         if (busy() || !dma_transfer_valid(t, ch)) {
             return false;
@@ -613,12 +669,12 @@ public:
     /// Start a prepared channel (MULTI_CHAN_TRIGGER's bit).
     static void trigger() { Dma::trigger(bit); }
 
-    /// A NULL TRIGGER: zero into the trigger alias starts nothing and,
+    /// A null trigger: zero into the trigger alias starts nothing and,
     /// under IRQ_QUIET, is what raises the channel's interrupt - the end
     /// of a control-block chain (12.6.3.3).
     static void null_trigger() { ctrl_trig() = 0; }
 
-    /// Transfers remaining in the current sequence, live - WITHOUT the
+    /// Transfers remaining in the current sequence, live - without the
     /// mode, which shares the register's top nibble here.
     static uint32_t count() { return trans_count() & DMA_CH0_TRANS_COUNT_COUNT_BITS; }
 
@@ -658,15 +714,15 @@ public:
      * End the sequence early, erratum RP2350-E5's way: the routes to all
      * four lines lifted so nothing the abort raises reaches a handler,
      * Dma::abort() (EN and the chain cleared, CHAN_ABORT written and
-     * POLLED to zero - 12.6.8.3's own recovery, which the RP2040 could
+     * polled to zero - 12.6.8.3's own recovery, which the RP2040 could
      * not do), the routes restored. False when the abort did not flush
      * or BUSY is still up.
      *
-     * A channel in a CHAIN wants Dma::abort() over the whole chain's mask
+     * A channel in a chain wants Dma::abort() over the whole chain's mask
      * instead: this verb knows one channel, and the erratum's other half
      * is the chainee re-triggering it.
      *
-     * OUT OF LINE AND COLD, with stop(): a fault's or a bring-up's
+     * Out of line and cold, with stop(): a fault's or a bring-up's
      * path, never a block's, which a flattened hot body
      * (util/placement.hpp) would otherwise carry inline.
      */
@@ -700,7 +756,7 @@ public:
     }
 
     /// The request credits the channel holds (DBG_CTDREQ), and their
-    /// clear: THE CREDITS OUTLIVE A SEQUENCE. A peripheral keeps pulsing
+    /// clear: the credits outlive a sequence. A peripheral keeps pulsing
     /// while the channel sits completed, and a full FIFO that overflowed
     /// meanwhile has pulsed more than it holds - the next sequence would
     /// spend those credits reading an empty FIFO. A level request like
@@ -715,7 +771,7 @@ public:
     static uint32_t debug_reload() { return reg_at(DMA_BASE, DMA_CH0_DBG_TCR_OFFSET + 0x40u * ch); }
 
     /// This channel's security assignment, read back (12.6.6.1). A write
-    /// to the registers above LOCKS it until the block's next reset.
+    /// to the registers above locks it until the block's next reset.
     static DmaSecurity security() { return Dma::channel_security(ch); }
     static bool security_locked() { return Dma::channel_security_locked(ch); }
 
@@ -750,8 +806,8 @@ struct DmaTimer {
     static DmaSecurity security() { return Dma::timer_security(n); }
 
 private:
-    /// Reached by ADDRESS and not as `DMA->TIMER0 + n`, because on this
-    /// chip TIMER0 is also the device header's macro for the first SYSTEM
+    /// Reached by address and not as `DMA->TIMER0 + n`, because on this
+    /// chip TIMER0 is also the device header's macro for the first system
     /// timer's instance pointer, and a member named after a macro is not
     /// a member at all.
     static volatile uint32_t& reg() { return reg_at(DMA_BASE, DMA_TIMER0_OFFSET + 4u * n); }
@@ -794,7 +850,7 @@ struct DmaSniffer {
     static uint32_t result() { return DMA->SNIFF_DATA; }
     static void stop() { DMA->SNIFF_CTRL = 0; }
 
-    /// The HIGHEST channel level the sniffer may observe (SECCFG_MISC).
+    /// The highest channel level the sniffer may observe (SECCFG_MISC).
     static DmaSecurity security() { return Dma::sniffer_security(); }
 };
 
@@ -811,7 +867,7 @@ struct DmaMpuRegion {
 };
 
 /**
- * The eight-region filter in front of both masters. READ-ONLY here, and
+ * The eight-region filter in front of both masters. Read-only here, and
  * the reason is in this file's opening: every brio program on this chip
  * runs Secure and Privileged, and the reset state - a global level of NSU
  * with every region disabled - refuses it nothing. The write side is born
@@ -843,10 +899,10 @@ struct DmaMpu {
 
 // ---- the engines ---------------------------------------------------------------------
 //
-// TWO MOMENTS, written from this controller's own offer (12.6.2, 12.6.3.1).
+// Two moments, written from this controller's own offer (12.6.2, 12.6.3.1).
 //
-// arm() is the BINDING. The channel is put away (the abort with E5's
-// preparation, the routes off, CTRL zero), the PERIPHERAL side's address
+// arm() is the binding. The channel is put away (the abort with E5's
+// preparation, the routes off, CTRL zero), the peripheral side's address
 // written - a FIFO's address never moves, and 12.6.2.1 says an address
 // that is not reprogrammed is the next sequence's start, so it is written
 // once - CTRL written through its non-trigger alias with everything that
@@ -855,13 +911,13 @@ struct DmaMpu {
 // and the line enabled.
 //
 // A block writes what changes: the count and the memory side's address,
-// in the TUPLE 12.6.3.1 names for that direction - (TRANS_COUNT,
+// in the tuple 12.6.3.1 names for that direction - (TRANS_COUNT,
 // READ_ADDR_TRIG) to gather a run into a peripheral, (WRITE_ADDR,
 // TRANS_COUNT_TRIG) to scatter a peripheral into a run - so the second
-// store IS the trigger. Two stores a block. CTRL is a third only when the
+// store is the trigger. Two stores a block. CTRL is a third only when the
 // block's beat or step differs from the word the channel holds, and the
 // engine keeps that word (DmaBinding), so the question is a compare
-// against RAM and not a read of the bus: a completed channel KEEPS its
+// against RAM and not a read of the bus: a completed channel keeps its
 // CTRL, EN included, and only a trigger starts it (12.6.3). The count is
 // checked against the 28 bits the MODE nibble leaves (12.6.2.2.1): a
 // larger one written whole would set a mode - 0x1 is TRIGGER_SELF - and
@@ -869,24 +925,25 @@ struct DmaMpu {
 //
 // No flag is cleared per block. A completion is acted on by the engine's
 // service() through the line's INTS, which clears the raw status with it;
-// a bus error is cleared where it is SEEN, in service(), abandon() and
-// stop() - and a channel still holding one IGNORES its trigger (12.6.7.1),
+// a bus error is cleared where it is seen, in service(), abandon() and
+// stop() - and a channel still holding one ignores its trigger (12.6.7.1),
 // so a block started over one is a block that never begins, not a
 // corrupted one.
 //
-// THE BEAT IS THE TYPE. DATA_SIZE is one field of CTRL, read and write
-// the same width (12.6.2.3), so ONE channel carries 8-, 16- and 32-bit
+// The beat is the type (a beat is one transfer, one bus access).
+// DATA_SIZE is one field of CTRL, read and write
+// the same width (12.6.2.3), so one channel carries 8-, 16- and 32-bit
 // blocks, the width following the element of the run start() is handed.
-// `Elem`, the template parameter, is the WIDEST beat the binding allows -
+// `Elem`, the template parameter, is the widest beat the binding allows -
 // a PL022's data register is sixteen bits, a PL011's eight - and a wider
 // run does not compile. A run wider than a byte whose address is not
-// aligned to its beat is REFUSED at run time (12.6.2.1.1: the DMA does not
+// aligned to its beat is refused at run time (12.6.2.1.1: the DMA does not
 // enforce alignment and an unaligned access is unspecified), and the
 // caller falls back to whatever it has that moves bytes. Narrow writes are
 // byte-lane replicated (12.6's opening), so a byte beat into a half-word
 // register lands where the peripheral reads it.
 //
-// THE CLAIM. A transmit engine's `busy_` is its claim on the channel, and
+// The claim. A transmit engine's `busy_` is its claim on the channel, and
 // the claim is the one step a completion on the line can race: claim() is
 // that test-and-set, for a transport to take under its mask; launch()
 // programs a claimed channel with the mask down, because a channel that
@@ -894,21 +951,27 @@ struct DmaMpu {
 // claim with nothing to send. start() is claim() then launch(), for an
 // owner with one context.
 //
-// THE LEVEL IS THE PERIPHERAL'S (docs/design/dma.md), and this controller
+// The level is the peripheral's (docs/design/dma.md), and this controller
 // has one bit of it, CTRL.HIGH_PRIORITY (12.6.10): "in each scheduling
 // round, all high priority channels are considered first, and then only a
 // single low priority channel" - and 12.6.1 removes the idle cycle the
-// RP2040 inserted after a round of high ones. A normal channel therefore
-// waits one round of the high ones at most and is never starved outright,
-// so here the level decides no correctness and no transport offers it as
-// an option (docs/rp2350/dma.md measures a receive ring at normal beside
-// two HIGH_PRIORITY copies, on both architectures). The defaults are the
-// rule's all the same, one bit wide: a receive engine arms HIGH, its
-// peripheral being the one that overruns when starved; a transmit engine
-// and the copy engine normal; and a transport names its engines' levels at
-// the call.
+// RP2040 inserted after a round of high ones. Counted in that round, a
+// normal channel takes its one turn beside the high ones (letter w of
+// test_rp2350_dma, docs/rp2350/dma.md); and yet here the level decides
+// correctness: a receive ring at normal beside two HIGH_PRIORITY copies
+// always ready is starved and loses bytes as overruns, on both
+// architectures (letter p, same page), a cause the page lists as
+// unexplained. So the defaults are the rule's, one bit wide: a receive
+// engine arms HIGH, its peripheral being the one that overruns when
+// starved; a transmit engine and the copy engine normal; and a transport
+// names its engines' levels at the call, no transport offering the level
+// as an option. The UART's and the SPI host's receive engines arm HIGH
+// (brio/pl011/uart.hpp, brio/pl022/spi.hpp); the I2C host arms its
+// receive engine at normal on purpose (brio/dw_apb_i2c/i2c.hpp): a
+// starved channel leaves the receive FIFO full, the block holds SCL, and
+// the bus slows with nothing lost.
 //
-// THE SAME SURFACE AS THE RP2040'S ENGINES (brio/rp2040/dma.hpp) -
+// The same surface as the RP2040's engines (brio/rp2040/dma.hpp) -
 // DmaReport, the binding, the claim, the typed runs - because the IP
 // strata (brio/pl011/, brio/pl022/, brio/dw_apb_i2c/) drive both chips'
 // engines through one set of names. What is this chip's below is the count
@@ -918,11 +981,11 @@ struct DmaMpu {
 /// What an engine's channel reports on its line, chosen at arm(): every
 /// block (`blocks`), or a bus error alone (`errors`). `errors` is
 /// IRQ_QUIET: no interrupt at the end of a block - only a null trigger
-/// raises one, and no engine writes a null trigger - while a BUS ERROR
-/// STILL DOES (12.6.5 lists it as its own circumstance; 12.6.7.1: "bus
+/// raises one, and no engine writes a null trigger - while a bus error
+/// still does (12.6.5 lists it as its own circumstance; 12.6.7.1: "bus
 /// errors always cause the channel's interrupt request to be asserted").
 /// It is how two channels whose second completion proves the first's -
-/// an SPI host's transmit beside its receive - cost ONE interrupt a
+/// an SPI host's transmit beside its receive - cost one interrupt a
 /// transaction.
 enum class DmaReport : uint8_t { blocks, errors };
 
@@ -972,7 +1035,7 @@ template <typename T>
 [[gnu::always_inline]] inline void dma_handoff_fence() { std::atomic_signal_fence(std::memory_order_seq_cst); }
 
 /**
- * What every engine keeps of the channel it binds - ONE PER CHANNEL, so
+ * What every engine keeps of the channel it binds - one per channel, so
  * that two engine types naming one channel (a byte engine and a word
  * engine on one FIFO, armed in turn) agree on what CTRL holds. The channel
  * is the engine's from arm() to stop(): a channel verb that rewrites CTRL
@@ -1036,7 +1099,7 @@ struct DmaBinding {
 /**
  * A transmit engine: one caller-owned run poured into one peripheral
  * register, paced by that peripheral's request - or by a DmaTimer's,
- * which is the PACED shape (a table into one cell at a known rate).
+ * which is the paced shape (a table into one cell at a known rate).
  * `Elem` is the widest beat the register takes; `line` is the system
  * interrupt line the completion reports on - the owner core's.
  */
@@ -1063,13 +1126,15 @@ public:
     static constexpr uint8_t flag_half = 0;   ///< this controller has no half-transfer event
     static constexpr uint8_t flag_error = 1u << 1;
 
-    /// The ISR body folded into the engine (DmaBinding::service).
+    /// The ISR body folded into the engine (DmaBinding::service): for the
+    /// handler of the engine's line, or a transport's dma_isr() over it;
+    /// this channel's flags, flag_complete and flag_error.
     [[gnu::always_inline]] static uint8_t service() { return Binding::template service<line>(); }
 
     /// Bind the channel: `data` is the register the runs are poured into,
     /// `dreq` the request that paces them, `report` what reaches the line
     /// (DmaReport). The line is enabled in the calling core's interrupt
-    /// controller. NORMAL priority by default, the rule's level for a
+    /// controller. Normal priority by default, the rule's level for a
     /// transmit or a paced output (the engines' section): a starved
     /// transmit leaves the line idle a while, a paced output holds its
     /// last value a period.
@@ -1083,7 +1148,7 @@ public:
         DmaLine<line>::enable();
     }
 
-    /// THE CLAIM: busy_ tested and set, the one step to take under the
+    /// The claim: busy_ tested and set, the one step to take under the
     /// caller's mask. True = the channel is the caller's until
     /// complete(), abandon() or unclaim().
     [[gnu::always_inline]] static bool claim() {
@@ -1096,7 +1161,7 @@ public:
     /// A claim given back with nothing started.
     [[gnu::always_inline]] static void unclaim() { busy_ = false; }
 
-    /// Program a CLAIMED channel and start it: `length` beats from
+    /// Program a claimed channel and start it: `length` beats from
     /// `buffer` (the caller's, and it stays put until complete() reports
     /// the block). False, and the claim given back, for an empty run, one
     /// past the 28-bit count, or a misaligned one.
@@ -1108,7 +1173,7 @@ public:
     static bool launch(std::span<T> run) {
         return launch(run.data(), static_cast<uint32_t>(run.size()));
     }
-    /// `length` copies of ONE cell on a claimed channel: the read address
+    /// `length` copies of one cell on a claimed channel: the read address
     /// does not move. What a full-duplex bus needs to clock a read; the
     /// beat is the cell's.
     template <typename T>
@@ -1116,7 +1181,8 @@ public:
         return program(cell, length, 0u);
     }
 
-    /// claim() and launch(), for an owner with one context.
+    /// claim() and launch(), for an owner with one context. False when
+    /// the channel is already claimed, or as launch().
     template <typename T>
     static bool start(const T* buffer, uint32_t length) {
         return claim() && launch(buffer, length);
@@ -1246,8 +1312,10 @@ public:
     /// Nothing in progress: the run filled, or none started.
     static bool idle() { return !Channel::busy(); }
 
-    /// Fill `length` beats of `buffer`. False for an empty run, one past
-    /// the 28-bit count, or a misaligned one.
+    /// Fill `length` beats of `buffer`, which the channel writes until the
+    /// run ends (idle()). False for an empty run, one past the 28-bit
+    /// count, or a misaligned one. The request's banked credits are
+    /// cleared first.
     template <typename T>
     static bool start(T* buffer, uint32_t length) {
         return begin(buffer, length, DMA_CH0_CTRL_TRIG_INCR_WRITE_BITS);
@@ -1256,7 +1324,7 @@ public:
     static bool start(std::span<T> room) {
         return start(room.data(), static_cast<uint32_t>(room.size()));
     }
-    /// `length` beats into ONE cell, thrown away (the receive side of a
+    /// `length` beats into one cell, thrown away (the receive side of a
     /// bus write); the beat is the cell's.
     template <typename T>
     static bool start_discard(T* cell, uint32_t length) {
@@ -1341,7 +1409,7 @@ private:
 };
 
 /**
- * MEMORY TO MEMORY, this controller's native case (12.6's opening: "the
+ * Memory to memory, this controller's native case (12.6's opening: "the
  * DMA transfers data between two buffers in RAM, as fast as possible"):
  * any channel, no request (TREQ_SEL permanent), one read and one write a
  * clock.
@@ -1379,7 +1447,7 @@ public:
     /// `DmaReport::blocks` every block's end reaches `line`, enabled in
     /// the calling core's interrupt controller; with `DmaReport::errors`
     /// the channel is left off every line and the caller polls busy() - a
-    /// bus error then stands in errors() and stops the block. NORMAL
+    /// bus error then stands in errors() and stops the block. Normal
     /// priority by default, the rule's level for a copy: no request paces
     /// it, and a channel it outranked would wait behind it.
     static void arm(DmaReport report = DmaReport::blocks, bool high_priority = false) {
@@ -1392,7 +1460,8 @@ public:
     }
 
     /// `n` elements from `src` to `dst`. False while a block runs, and for
-    /// an empty, oversized or misaligned one.
+    /// an empty, oversized or misaligned one. Both buffers belong to the
+    /// block until busy() reads false.
     template <typename T>
     static bool copy(T* dst, const T* src, uint32_t n) {
         return program(dst, src, n, both_);

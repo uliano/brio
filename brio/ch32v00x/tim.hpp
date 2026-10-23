@@ -1,35 +1,79 @@
 /*
  * tim.hpp
  *
- * The CH32V00x's timers (RM ch. 11, 12, 13) in the two strata every
- * brio target uses (docs/design/overview.md, "Target strata"):
+ * The CH32V00x's timers (RM ch. 11, 12, 13): a program uses them for a
+ * PWM output, a pair of complementary outputs with dead time, a
+ * frequency or an interval measured on a pad, one timer counting or
+ * gated by another, a one-shot pulse, a timer that paces a DMA channel.
+ * The kernel's own time does not need any of them: it runs on the STK
+ * (ch32v00x/ticker.hpp). The smallest use, a 1 kHz PWM on TIM1's
+ * channel 1 (docs/ch32v00x/tim.md, "How to use it"):
  *
- *  Tim<n>          the RESOURCE, n = 1 or 2 - one TIMx block: the time
+ *     using Pwm = brio::TimPwm<brio::Tim<1>, 0, 999>;      // TIM1 CH1 on PD2
+ *     using Pad = brio::TimPad<brio::tim_default_pads::tim1_ch1>;
+ *
+ *     Pad::claim();
+ *     Pwm::setup(47);          // 48 MHz / 48 / 1000 = 1 kHz
+ *     Pwm::duty(250);          // a quarter, glitch-free (the compare is preloaded)
+ *
+ * which assumes `brio::Tim<1>::init()` has run first, as the timer suite's
+ * setup does: init() opens the timer's clock gate and pulses its reset
+ * line, and setup() - configure(), output_channel(), on TIM1 the main
+ * output enable MOE, then the counter started - writes the registers and
+ * opens no gate.
+ *
+ * Who calls what. Every verb is a register access with no guard of its
+ * own: the configuring ones (init(), configure(), output_channel(),
+ * capture_channel(), slave(), the tasks' setup()) read, modify and write
+ * the instance's control registers (init() RCC's gate and reset
+ * registers too), so they run in main or in one active object (a component of a brio program with
+ * its own event queue, served one event at a time by the kernel), not
+ * also from an interrupt handler. Nothing waits and nothing masks.
+ * set_compare() and so a PwmChannel's duty() are one store of CHxCVR.
+ * isr() is the body of the instance's vectors, called from the handlers
+ * the program binds (`tim1_up_handler`, `tim1_cc_handler`,
+ * `tim1_trg_com_handler`, `tim1_brk_handler`, `tim2_handler`) and
+ * nowhere else; a meter's interval() is its capture handler's alone. The
+ * clock task runs first: a prescaler is the program's arithmetic on the
+ * rate the clock type claims (tim_clock_hz()). A pad is claimed by
+ * TimPad, and a stopped counter holds its outputs: a forced level
+ * reaches the pad only once CEN has run (11.4.1's note under OE_MODE,
+ * measured, docs/ch32v00x/tim.md).
+ *
+ * The layers, the two every brio target uses (docs/design/overview.md,
+ * "Target strata"):
+ *
+ *  Tim<n>          the resource, n = 1 or 2 - one TIMx block: the time
  *                  base (prescaler, counter, auto-reload with its
  *                  preload), the counting modes, the four capture/
  *                  compare channels in both their faces, the slave
  *                  controller and the master TRGO, the external
  *                  trigger, the break/dead-time unit (TIM1) or the
- *                  dead-time pairs (TIM2), the flags and the ISR body.
+ *                  dead-time pairs (TIM2, the CH32V006's), the flags
+ *                  and the ISR body.
  *
- *  Tim3            the STREAMLINED timer of the CH32V006/007 (ch. 13),
- *                  a different block: a counter with four compare
- *                  registers and NO pad, whose matches are internal
- *                  pulses (the ADC's triggers) and DMA requests.
+ *  Tim3            the streamlined timer of the CH32V006/007 (ch. 13),
+ *                  a different block, which the CH32V003 has not: a
+ *                  counter with four compare registers and no pad,
+ *                  whose matches are internal pulses (the ADC's
+ *                  triggers) and DMA requests.
  *
  *  TimPad<pad>     a pad handed to a timer channel: the default pad of
  *                  the datasheet's table, or the pad a remap column
- *                  gives it (afio.hpp's afio_tim1_pads / afio_tim2_pads,
- *                  with Tim<n>::remap(code) writing the column).
+ *                  (the set of pads one AFIO code selects) gives it
+ *                  (afio.hpp's afio_tim1_pads / afio_tim2_pads, with
+ *                  Tim<n>::remap(code) writing the column).
  *
- *  TASKS           TimPwm / TimPairPwm (util/pwm_channel.hpp's
+ *  tasks           the shapes a program asks for (a task, in brio, is a
+ *                  driver layer over a resource, with state of its own):
+ *                  TimPwm / TimPairPwm (util/pwm_channel.hpp's
  *                  PwmChannel, one and two outputs), TimPeriodMeter /
  *                  TimIntervalMeter (what util/meter_sampler.hpp's
  *                  MeterLatch is fed from), TimEventCounter /
  *                  TimGatedCounter (one timer measuring another with
  *                  no wire and no CPU), TimPeriodicTick, TimOnePulse.
  *
- * THE LINEAGE, AND WHAT DIFFERS. TIM1 and TIM2 are the STM32F1's
+ * The lineage, and what differs. TIM1 and TIM2 are the STM32F1's
  * advanced and general-purpose timers under WCH's register names
  * (CTLR1, SMCFGR, DMAINTENR, INTFR, SWEVGR, CHCTLRx, CCER, ATRLR,
  * RPTCR, CHxCVR, BDTR, DMACFGR, DMAADR) at the F1's offsets, sixteen
@@ -38,52 +82,56 @@
  * F1 has not: three bits at the top of CTLR1 - CAPLVL (the captured
  * level in bit 16 of CHxCVR under a dual-edge capture), CAPOV (a
  * capture after an overflow reads 0xFFFF) and OE_MODE (what the
- * output pads do when CEN is cleared: hold, or float) - and, on
- * TIM2, DEAD TIME WITHOUT A BREAK UNIT: TIM2_DTCR pairs channel 3
- * with channel 1 and channel 4 with channel 2 as complementary
- * outputs with their own dead-time fields (12.3.9), so a TIM2 pair
- * costs two channels where a TIM1 pair costs one and its OCxN. What
- * the F1 has and this family has not: TIM3 as a copy of TIM2 - here
- * TIM3 is the streamlined block above, on the CH32V006/007 alone.
+ * output pads do when CEN is cleared: hold, or float) - and, on the
+ * CH32V006's TIM2, dead time without a break unit: TIM2_DTCR pairs
+ * channel 3 with channel 1 and channel 4 with channel 2 as
+ * complementary outputs with their own dead-time fields (12.3.9), so a
+ * TIM2 pair costs two channels where a TIM1 pair costs one and its
+ * OCxN. The CH32V003's TIM2 "lacks dead-time generation" (its RM 11.2:
+ * device::tim2_has_dead_time), so a TimPairPwm over it does not
+ * compile. What the F1 has and this family has not: TIM3 as a copy of
+ * TIM2 - here TIM3 is the streamlined block above, on the CH32V006/007
+ * alone.
  *
- * WHAT A TIMER IS comes from the chapters, stated once below as
+ * What a timer is comes from the chapters, stated once below as
  * constexpr facts keyed by instance (no vendor header exists in this
  * build to ask): TIM1 has four channels, three complementary outputs,
  * the break unit, the repetition counter and the slave controller;
- * TIM2 has four channels, the two dead-time pairs, the slave
- * controller and no repetition. Every verb that names a feature an
- * instance lacks REFUSES - false, nothing written - rather than store
- * into a reserved bit, and the tasks static_assert on the facts.
+ * TIM2 has four channels, the two dead-time pairs on the CH32V006 and
+ * none on the CH32V003, the slave controller and no repetition. Every
+ * verb that names a feature an instance lacks refuses - false, nothing
+ * written - rather than store into a reserved bit, and the tasks
+ * static_assert on the facts.
  *
- * THE STATUS REGISTER IS WRITE-ZERO-TO-CLEAR (11.4.5's RW0): a flag of
- * INTFR is cleared by writing ZERO to it and a one has no effect, so
+ * The status register is write-zero-to-clear (11.4.5's RW0): a flag of
+ * INTFR is cleared by writing zero to it and a one has no effect, so
  * clearing is `INTFR = ~flags`, a plain store, and a flag that arrives
  * between the read and the store survives. The same discipline as the
  * I2C's STAR1 and the opposite of the DMA's INTFCR.
  *
- * THE PRESCALER AND THE AUTO-RELOAD ARE SHADOWED. PSC is taken at the
+ * The prescaler and the auto-reload are shadowed. PSC is taken at the
  * next update event; ATRLR too under ARPE and at once without. So
  * configure() ends with SWEVGR.UG - a software update that loads both
  * shadows - and clears the UIF it raised.
  *
- * A COMPARE REGISTER IS PRELOADED BY DEFAULT HERE, a choice: OCxPE is
+ * A compare register is preloaded by default here, a choice: OCxPE is
  * clear out of reset, and every output channel this driver configures
  * sets it, because a PwmChannel::duty() that can glitch is not one an
  * actuator above can use. TimChannelConfig::preload = false reaches
  * the unbuffered behaviour.
  *
- * THE CLOCK. CK_INT is HCLK - this family has no APB prescaler, so
+ * The clock. CK_INT is HCLK - this family has no APB prescaler, so
  * `tim_clock_hz(clock)` is the Clock's hz, and a static clock only: a
  * DynamicClock would move every period at once and no rebase() can
  * promise the same periods.
  *
- * THE VECTORS. TIM1 has four (break, update, trigger/commutation,
+ * The vectors. TIM1 has four (break, update, trigger/commutation,
  * capture-compare; Irq::tim1_brk..tim1_cc), TIM2 one (Irq::tim2), TIM3
  * none at all - its events are DMA requests and internal pulses. The
  * ISR body answers for the flags that are both raised and enabled
  * whichever vector it is called from.
  *
- * NOT COVERED YET: the DMA burst (DMACFGR/DMAADR) and the timers' DMA
+ * Not covered yet: the DMA burst (DMACFGR/DMAADR) and the timers' DMA
  * requests as engine sources - born with a stream that needs them;
  * the encoder modes as a task (the resource has the three SMS codes;
  * a task needs an encoder on the desk); the COM event and the
@@ -283,7 +331,7 @@ enum class TimClockDivision : uint8_t { div1 = 0, div2 = 1, div4 = 2 };
 /// SMCFGR.TS.
 enum class TimTrigger : uint8_t {
     itr0 = 0, itr1 = 1, itr2 = 2, itr3 = 3,
-    ti1_edge = 4,   ///< TI1F_ED: one pulse per TRANSITION of TI1 (never gate on it)
+    ti1_edge = 4,   ///< TI1F_ED: one pulse per transition of TI1 (never gate on it)
     ti1 = 5,        ///< TI1FP1
     ti2 = 6,        ///< TI2FP2
     etr = 7,        ///< ETRF
@@ -296,9 +344,9 @@ enum class TimSlaveMode : uint8_t {
     encoder2 = 2,
     encoder3 = 3,
     reset = 4,             ///< a trigger edge reinitializes the counter
-    gated = 5,             ///< the counter runs while the trigger is HIGH
+    gated = 5,             ///< the counter runs while the trigger is high
     trigger = 6,           ///< a trigger edge starts the counter
-    external_clock1 = 7,   ///< the trigger's rising edges ARE the counter clock
+    external_clock1 = 7,   ///< the trigger's rising edges are the counter clock
 };
 
 /// CTLR2.MMS: what TRGO carries.
@@ -400,7 +448,7 @@ struct TimBreakDeadTime {
     bool break_active_high = false;      ///< BKP
     bool off_state_run = false;          ///< OSSR
     bool off_state_idle = false;         ///< OSSI
-    uint8_t lock = 0;                    ///< LOCK 0..3, ONE-WAY until a reset
+    uint8_t lock = 0;                    ///< LOCK 0..3, one-way until a reset
 };
 
 /// DTG's four ranges, in ticks of the dead-time clock (11.4.18).
@@ -493,15 +541,15 @@ inline constexpr Pad tim2_ch4{'D', 7};   ///< the reset pin on parts other than 
  * Tim<n>: one TIMx block, n = 1 or 2.
  *
  *   using Pwm = brio::Tim<2>;
- *   Pwm::init();                                   // clock on, reset
+ *   Pwm::init();                                   // clock on, reset - before any other verb
  *   Pwm::configure({.prescaler = 47, .period = 999});
  *   Pwm::output_channel(0, {.mode = brio::TimOutputMode::pwm1, .compare = 500});
  *   Pwm::enable(true);
  *
  * Every verb that names a feature this instance lacks returns false
- * and writes NOTHING; every verb that names a channel checks it
+ * and writes nothing; every verb that names a channel checks it
  * against `channels`. Channels are 0-based here (channel 1 of the
- * chapter is 0), the other strata's convention.
+ * chapter is 0), the convention every brio timer driver keeps.
  */
 template <uint8_t n>
 class Tim {
@@ -553,6 +601,9 @@ public:
             rcc()->PB1PRSTR &= ~rcc_pb1_tim2;
         }
     }
+    /// Open the instance's clock gate and pulse its reset line: every
+    /// register at its reset value. First, from main, before any other
+    /// verb of the instance - the tasks' setup() does not do it.
     static void init() {
         bus_clock(true);
         reset();
@@ -598,19 +649,19 @@ public:
         return true;
     }
 
-    /// Write the time base and leave the counter STOPPED: PSC and ATRLR
+    /// Write the time base and leave the counter stopped: PSC and ATRLR
     /// written, CTLR1 assembled in one store, the slave controller back
     /// at its reset (SMCFGR zero: a free-running counter until a verb
     /// after this one says otherwise - a TimPeriodMeter's reset-on-TI1
     /// must not outlive it into the next task's setup on the same timer,
     /// where every interval would read zero), the counter's start
     /// written, then UG loads both shadows and the UIF it raised is
-    /// cleared. UDIS goes in AFTER the UG, a second store: with it standing
+    /// cleared. UDIS goes in after the UG, a second store: with it standing
     /// a UG is no update event and loads no shadow (RM 11.4.1's UDIS) -
     /// asked for UDIS and a prescaler, the counter would run at the
     /// previous PSC (measured, test_ch32_tim letter c). The start is
-    /// WRITTEN - 0, or
-    /// ATRLR for an edge-aligned down counter, what a UG gives a RUNNING
+    /// written - 0, or
+    /// ATRLR for an edge-aligned down counter, what a UG gives a running
     /// counter - because a UG on a stopped counter leaves the count where
     /// it is (measured, the same letter): the first period after enable()
     /// is a whole one either way.
@@ -646,6 +697,8 @@ public:
         return true;
     }
 
+    /// CEN: start or stop the counter (a read-modify-write of CTLR1).
+    /// A stopped counter holds its outputs (11.4.1, the file header).
     static void enable(bool on) {
         TimRegs& t = regs();
         t.CTLR1 = static_cast<uint16_t>(on ? (t.CTLR1 | tim_cen) : (t.CTLR1 & ~tim_cen));
@@ -734,9 +787,10 @@ public:
     static uint16_t interrupts() { return regs().DMAINTENR; }
 
     /// The ISR body, for any of this timer's vectors: the flags that
-    /// were BOTH raised and enabled, cleared - exactly those - and handed
+    /// were both raised and enabled, cleared - exactly those - and handed
     /// back. A flag whose interrupt is off is left standing for a
-    /// poller.
+    /// poller. Called from the instance's bound vectors and nowhere else;
+    /// it masks nothing.
     [[gnu::always_inline]] static uint16_t isr() {
         TimRegs& t = regs();
         const uint16_t enabled_flags = static_cast<uint16_t>(t.DMAINTENR & 0xFFu);
@@ -769,7 +823,7 @@ public:
         return true;
     }
 
-    /// The channel as an OUTPUT: mode, preload, polarity, the enables,
+    /// The channel as an output: mode, preload, polarity, the enables,
     /// the idle states (TIM1). A complementary enable on TIM2 is DTCR's
     /// OCxN_EN, which borrows channel ch + 2's pad (12.3.9).
     static bool output_channel(uint8_t ch, const TimChannelConfig& c) {
@@ -813,7 +867,7 @@ public:
         return true;
     }
 
-    /// The channel as an INPUT: which TI it watches, the edge, the
+    /// The channel as an input: which TI it watches, the edge, the
     /// prescaler, the filter.
     static bool capture_channel(uint8_t ch, const TimCaptureConfig& c) {
         if (ch >= channels || c.select == TimChannelSelect::output || c.filter > 15u) {
@@ -1139,7 +1193,10 @@ private:
 
 /**
  * TimPwm<T, ch, top>: one PWM output, a `PwmChannel` (util/pwm_channel.hpp)
- * whose `max` is the PERIOD the timer runs at.
+ * whose `max` is the period the timer runs at. Tim<n>::init() first:
+ * setup() writes the registers (on TIM1 MOE too) and starts the
+ * counter, false if a step is refused, and opens no gate; duty() is one
+ * store of the compare, clamped to `max`, taken at the next update.
  *
  *   using Led = brio::TimPwm<brio::Tim<2>, 0, 1000>;
  *   Led::setup(47);           // 48 MHz / 48 / 1001 = about 1 kHz
@@ -1172,7 +1229,7 @@ struct TimPwm {
 };
 
 /**
- * TimPairPwm<T, ch, top>: a channel and its COMPLEMENT with the dead
+ * TimPairPwm<T, ch, top>: a channel and its complement with the dead
  * time the silicon inserts between them. On TIM1 the pair is OCx and
  * OCxN under the break unit (channels 1..3); on TIM2 it is channel ch
  * and channel ch + 2 under DTCR (12.3.9), so `setup()` takes the dead
@@ -1228,7 +1285,7 @@ struct TimPairPwm {
 };
 
 /**
- * TimPeriodMeter<T>: the PERIOD and the HIGH TIME of a signal on TI1 -
+ * TimPeriodMeter<T>: the period and the high time of a signal on TI1 -
  * the chapter's PWM input mode (11.3.4): channel 1 directly on the
  * rising edge, channel 2 indirectly on the falling one, the slave
  * controller resetting the counter on every rising edge. Costs both
@@ -1267,7 +1324,7 @@ struct TimPeriodMeter {
 
 /**
  * TimIntervalMeter<T, ch>: the interval between consecutive edges of
- * one input on ONE channel and a free-running counter - what a capture
+ * one input on one channel and a free-running counter - what a capture
  * ISR hands to a util/meter_sampler.hpp MeterLatch. The subtraction is
  * in the counter's modulus; `interval()` keeps one value of state and
  * is the capture handler's alone.
@@ -1313,10 +1370,10 @@ private:
 };
 
 /**
- * TimEventCounter<T>: a timer whose CLOCK is another timer's trigger -
+ * TimEventCounter<T>: a timer whose clock is another timer's trigger -
  * external clock mode 1 on the one ITR link each instance has (table
  * 11-2: TIM2 counts TIM1 on ITR0, TIM1 counts TIM2 on ITR1). With the
- * master publishing its update on TRGO, the count IS the number of
+ * master publishing its update on TRGO, the count is the number of
  * master periods: a frequency measured with no wire and no CPU.
  */
 template <class T>
@@ -1338,10 +1395,10 @@ struct TimEventCounter {
 };
 
 /**
- * TimGatedCounter<T>: a timer that counts ITS OWN clock only while the
- * trigger is HIGH (slave gated mode). Pointed at a master whose TRGO
+ * TimGatedCounter<T>: a timer that counts its own clock only while the
+ * trigger is high (slave gated mode). Pointed at a master whose TRGO
  * is OCxREF - the PWM waveform itself - the count over a known window
- * IS the high time: a duty cycle measured with no pad.
+ * is the high time: a duty cycle measured with no pad.
  */
 template <class T>
 struct TimGatedCounter {
@@ -1412,7 +1469,7 @@ struct TimOnePulse {
         // update here the shadow compare is still 0 when the trigger
         // comes, PWM mode 2 is active from the first count, and the pad
         // rises at the trigger and falls at the period - a pulse of
-        // delay + width + 1 (measured before this line existed).
+        // delay + width + 1 (measured without this update).
         T::update();
         return true;
     }

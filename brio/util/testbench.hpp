@@ -1,33 +1,13 @@
 /*
  * testbench.hpp
  *
- * TestBench: the one implementation of the bench SUITE GRAMMAR.
- *
- * A `test_<target>_<subject>` app is a menu of single-letter tests over
- * a serial console. The ritual around them - a letter table, a verdict
- * printer, a pair of counters, the per-letter tally and the closing
- * total - is not free decoration: `bin/brio` READS it. Its judge
- * matches
- *
- *     N pass, M fail
- *
- * and waits for the "ALL:" marker followed by the "> " prompt. A
- * machine-read grammar copied into every suite is one chance to drift
- * per copy, so the grammar lives here and nowhere else:
- *
- *     -- <title>                       (one letter starts)
- *       PASS  <name>                   (verdict, two spaces of indent)
- *       FAIL  <name>
- *       -> N pass, M fail              (that letter's tally, blank line)
- *     ALL: N pass, M fail              (the all-key's total)
- *     >                                (the prompt bin/brio waits for)
- *
- * A suite prints its OWN measurements between verdicts with plain
- * print(): the bench is about the scaffolding, not about what a test has
- * to say. Nothing here knows a target - the sink is any ByteSink, which
- * is what lets the host suite drive it with a capture sink.
- *
- * USE:
+ * TestBench: the one implementation of the bench suite grammar. A bench
+ * suite, a `test_<target>_<subject>` app, is a menu of letters over a
+ * serial console: each letter is one test, run by sending its key, and
+ * the all-key ('z' by default) runs every letter registered for it in a
+ * row. TestBench keeps the letter table, prints the menu, runs a letter
+ * with its tally cleared, prints each verdict and the closing totals.
+ * The smallest use, as the suites spell it:
  *
  *     brio::TestBench<Serial> bench;          // 'z' = the all-key; sized
  *                                             // by the build's selection
@@ -49,25 +29,56 @@
  *
  * and inside a test, `bench.verdict("what must be true", expression)`.
  *
- * COUNTERS. passed/failed are reset at the START of each letter, so a
+ * Who calls what. A bench is one object driven from one context, the
+ * suite's main loop: letter() at startup, then handle(), which runs the
+ * test function in the caller's context, to its end, before it returns.
+ * Nothing here is guarded, so a verdict from an interrupt handler races
+ * the tally. Every line is written with util/print.hpp, which waits
+ * until the sink has taken every byte (print.hpp, "Delivery policy"); a
+ * test that measures time should take its readings before it prints.
+ * The sink is any ByteSink and nothing here knows a target, which is
+ * what lets the host suite drive it with a capture sink.
+ *
+ * The ritual around the letters - a letter table, a verdict printer, a
+ * pair of counters, the per-letter tally and the closing total - is not
+ * decoration: `bin/brio` reads it. Its judge matches
+ *
+ *     N pass, M fail
+ *
+ * and waits for the "ALL:" marker followed by the "> " prompt. A
+ * machine-read grammar copied into every suite is one chance to drift
+ * per copy, so the grammar lives here and nowhere else:
+ *
+ *     -- <title>                       (one letter starts)
+ *       PASS  <name>                   (verdict, two spaces of indent)
+ *       FAIL  <name>
+ *       -> N pass, M fail              (that letter's tally, blank line)
+ *     ALL: N pass, M fail              (the all-key's total)
+ *     >                                (the prompt bin/brio waits for)
+ *
+ * A suite prints its own measurements between verdicts with plain
+ * print(): the bench is about the scaffolding, not about what a test has
+ * to say.
+ *
+ * Counters. passed/failed are reset at the start of each letter, so a
  * test never inherits the previous one's tally; the all-key accumulates
- * the letters' totals separately. A test that spans a RESET (the reset
+ * the letters' totals separately. A test that spans a reset (the reset
  * suites bank their tally in .noinit and resume) drives end_letter() by
  * hand - which is why it is public.
  *
- * A SECOND SET. A suite whose letters fall into two classes that must
+ * A second set. A suite whose letters fall into two classes that must
  * never run under one key - the single-board letters, runnable with the
- * far board dark, and the two-board letters, which need a peer and FAIL
- * loudly without one - names a second all-key as a template argument
- * (TwoKeyTestBench<Serial, 'y'>) and registers that class with
- * second_letter(). The first all-key never runs them, the second runs
- * them alone in registration order and closes with an ALL: line of its
- * own, each is also run by name. An image whose bench names no second
- * key compiles none of it: the set's mask is an empty member and every
- * branch that reads it is `if constexpr`. The mask is one bit per
- * registered letter, as wide as the table needs: 32 bits up to 32
- * letters, 64 up to 64 (the keys a group can gate - 'a'..'z',
- * '0'..'9' and 'A'..'Z' - are 62).
+ * far board dark, and the two-board letters, which need a peer (a second
+ * board wired to this one) and fail loudly without one - names a second
+ * all-key as a template argument (TwoKeyTestBench<Serial, 'y'>) and
+ * registers that class with second_letter(). The first all-key never
+ * runs them, the second runs them alone in registration order and closes
+ * with an ALL: line of its own, each is also run by name. An image whose
+ * bench names no second key compiles none of it: the set's mask is an
+ * empty member and every branch that reads it is `if constexpr`. The
+ * mask is one bit per registered letter, as wide as the table needs: 32
+ * bits up to 32 letters, 64 up to 64 (the keys a group can gate -
+ * 'a'..'z', '0'..'9' and 'A'..'Z' - are 62).
  */
 
 #pragma once
@@ -83,17 +94,18 @@ namespace brio {
 
 /**
  * The letters an image carries. A suite whose whole image does not fit
- * a part of its family declares its GROUPS of letters in its build
+ * a part of its family declares its groups of letters in its build
  * header (`// build: groups = abg,cdf,e`), and on such a part the build
  * emits one image per group, defining BRIO_TEST_LETTERS as that group's
- * keys; every other image carries every letter (design/overview.md, "A
- * suite's image fits the family's smallest chip"). A group names letters
+ * keys; every other image carries every letter (docs/design/overview.md,
+ * "Target strata: drivers by role, not a HAL", the rule "A suite's image
+ * fits the family's smallest chip"). A group names letters
  * and digits alike - a second set's digit keys belong to the group that
  * names them, as letters do - and upper-case keys too, once its line
  * names any (upper_mask_of()). letter() registers
  * nothing for a key outside the selection, so a letter the image does
  * not carry is never referenced and the linker drops it with its
- * verdict prose - the SOURCE is the same in every image, and the menu
+ * verdict prose - the source is the same in every image, and the menu
  * says which letters this one holds.
  */
 #ifdef BRIO_TEST_LETTERS
@@ -137,13 +149,13 @@ constexpr uint16_t digit_mask_of(const char* selection) {
 }
 
 /// The same for the upper-case keys 'A'..'Z', with one difference: a
-/// selection that names NO upper-case key carries every one of them. A
+/// selection that names no upper-case key carries every one of them. A
 /// groups line that partitions only the lower-case letters and the
 /// digits leaves each upper-case key in every image of the line; a line
 /// that names any upper-case key partitions them as it partitions the
 /// rest, and an upper-case key no group of it names is in no image. A
 /// group sees only its own keys, so the line's choice reaches it as a
-/// MARKER: the split build appends '.' to every group of a line that
+/// marker: the split build appends '.' to every group of a line that
 /// names any upper-case key (each project's CMakeLists.txt), and a
 /// selection carrying '.' names its upper-case keys explicitly, none
 /// included.
@@ -187,7 +199,7 @@ inline constexpr uint32_t test_uppers_carried = upper_mask_of(test_letters);
 /// Whether this image carries `key`: every key when the build named no
 /// selection; a lower-case letter or a digit when the selection names
 /// it, an upper-case letter by upper_mask_of()'s rule; any other key
-/// always. Read off the three masks, and ALWAYS INLINED: letter()'s
+/// always. Read off the three masks, and always inlined: letter()'s
 /// check must fold to a constant at the call site, and a call the
 /// optimizer leaves standing (-Os weighs this body against its callers)
 /// keeps every letter's address alive in every group image.
@@ -225,8 +237,8 @@ struct NoSecondSet {};
 
 /// The letter menu, the verdict lines and the two tallies bin/brio reads.
 /// `max_letters` bounds the static table; registration beyond it fails.
-/// `second_all_key`, when not NUL, names the SECOND SET's all-key (the
-/// header's "A SECOND SET").
+/// `second_all_key`, when not NUL, names the second set's all-key (the
+/// header's "A second set"). Main context, one caller (the file header).
 template <ByteSink Sink, uint8_t max_letters = test_letters_default_max(),
           char second_all_key = '\0'>
 class TestBench {
@@ -258,7 +270,7 @@ public:
     /**
      * Register one letter. `title` is what menu() prints beside the key
      * and what handle() prints when the test starts. `in_all` false
-     * keeps the letter OUT of the all-key set - the shape a test needs
+     * keeps the letter out of the all-key set - the shape a test needs
      * when it costs endurance, a fuse round trip or a reflash, and must
      * be asked for by name.
      *
@@ -277,7 +289,7 @@ public:
         return register_letter(key, title, fn, in_all);
     }
 
-    /// Register one letter of the SECOND SET: out of the first all-key,
+    /// Register one letter of the second set: out of the first all-key,
     /// run by the second and by name. The same refusals as letter(), and
     /// the second all-key is refused as a key too.
     [[gnu::always_inline]] bool second_letter(char key, const char* title, TestFn fn)
@@ -318,7 +330,8 @@ public:
         }
     }
 
-    /// One verdict line, and one tick on the tally.
+    /// One verdict line, and one tick on the tally (saturating at
+    /// UINT16_MAX). From the running test, in main context.
     void verdict(const char* name, bool ok) {
         count_verdict(ok);
         print(Sink{}, "  ", ok ? "PASS" : "FAIL", "  ", name, crlf);
@@ -340,8 +353,12 @@ public:
     /**
      * Run what `c` names. A registered letter prints its title, runs
      * with the counters cleared and closes with its tally. The all-key
-     * runs every letter marked in_all, in REGISTRATION order, and closes
-     * with the ALL: line bin/brio's default marker waits for.
+     * runs every letter marked in_all, in registration order, and closes
+     * with the ALL: line bin/brio's default marker waits for. Each test
+     * runs inside this call, in the caller's context; the call returns
+     * when the last one has.
+     *
+     * Returns the run's totals, or nothing for an unregistered key.
      *
      * The second all-key, where the bench has one, runs every letter of
      * the second set the same way and closes with its own ALL: line.
@@ -401,7 +418,7 @@ public:
     /// end_letter()'s reason to be public: a test that reboots the board
     /// keeps its counts in reset-surviving storage and hands them back
     /// here when it resumes, so the letter's closing line counts the
-    /// verdicts from BEFORE the reset as well as after.
+    /// verdicts from before the reset as well as after.
     void resume_tally(uint16_t pass, uint16_t fail) {
         passed_ = pass;
         failed_ = fail;
@@ -493,7 +510,7 @@ private:
 };
 
 /// A bench with a second set: `second_all_key` runs the letters
-/// second_letter() registers (the header's "A SECOND SET").
+/// second_letter() registers (the header's "A second set").
 template <ByteSink Sink, char second_all_key, uint8_t max_letters = test_letters_default_max()>
 using TwoKeyTestBench = TestBench<Sink, max_letters, second_all_key>;
 

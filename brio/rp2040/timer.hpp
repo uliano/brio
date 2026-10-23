@@ -1,42 +1,65 @@
 /*
  * timer.hpp
  *
- * The system timer (datasheet 4.6): ONE 64-bit counter of microseconds,
- * monotonic for thousands of years, read through a latching register
- * pair or two raw halves, and four alarms that match the low 32 bits and
- * raise one interrupt line each (TIMER_IRQ_0..3). It counts the
- * watchdog's tick (4.7.2, rp2040/watchdog.hpp), which is clk_ref
- * divided down to 1 us - so with clk_ref on the crystal this is THE
- * CHIP'S RULER: a microsecond wall clock independent of clk_sys, what
- * every timing measurement of the bench suites is judged against, and
- * what SysTick (on clk_sys) is compared to. It shares the crystal with
- * everything else, so it judges ratios and arithmetic, never the
- * crystal itself.
+ * The system timer (datasheet 4.6): for a program, a microsecond clock
+ * that never wraps in practice, for timing a span, and four one-shot
+ * alarms, each with its own interrupt line. The smallest use
+ * (docs/rp2040/timer.md):
  *
- * READING 64 BITS ON A 32-BIT BUS. TIMELR latches TIMEHR until TIMEHR is
+ *     brio::Timer::init(clock);                     // after SysClock::init()
+ *     const uint32_t t0 = brio::Timer::now_low();
+ *     ...
+ *     const uint32_t took_us = brio::Timer::now_low() - t0;
+ *
+ *     extern "C" void isr_timer_0() { brio::Timer::clear(0); ... }
+ *     brio::Timer::interrupt(0, true);
+ *     brio::Nvic::enable(brio::Timer::irq(0));
+ *     brio::Timer::alarm_in(0, 2000u);              // fires in 2 ms, once
+ *
+ * Who calls what: init() once in main(), after the clock task (its
+ * divider is the crystal's megahertz from the clock type); now() and
+ * now_low() from any context on either core; now_latched() from one
+ * context only (below); the alarm verbs are single stores, the
+ * interrupt enable and force go through the atomic aliases, and an
+ * alarm's line is enabled in the NVIC of the core whose handler serves
+ * it (Nvic::enable acts on the calling core's). Nothing here masks
+ * interrupts; now() loops only while the high half moves under it.
+ *
+ * One 64-bit counter of microseconds, monotonic for thousands of
+ * years, read through a latching register pair or two raw halves, and
+ * four alarms that match the low 32 bits and raise one interrupt line
+ * each (TIMER_IRQ_0..3). It counts the watchdog's tick (4.7.2,
+ * rp2040/watchdog.hpp), which is clk_ref divided down to 1 us - so with
+ * clk_ref on the crystal this is the chip's ruler: a microsecond wall
+ * clock independent of clk_sys, what every timing measurement of the
+ * bench suites is judged against, and what SysTick (on clk_sys) is
+ * compared to. It shares the crystal with everything else, so it judges
+ * ratios and arithmetic, never the crystal itself.
+ *
+ * Reading 64 bits on a 32-bit bus. TIMELR latches TIMEHR until TIMEHR is
  * read - correct for one reader, wrong the moment a second context
  * (the other core, a handler over the loop) reads TIMELR in between.
- * `now()` therefore reads the RAW pair the SDK's way: high, low, high
+ * `now()` therefore reads the raw pair the SDK's way: high, low, high
  * again, repeat if the high half moved. `now_low()` is the low half
  * alone, enough for any span under 71 minutes and what a bracket wants.
  *
- * ALARMS match the LOW 32 bits: at most 2^32 us ahead, and an alarm
- * set in the past by more than that fires at once... no: it fires when
- * the low half next equals the value, up to 71 minutes later. Writing
- * ALARMn arms it (ARMED bit set); the match clears ARMED and raises
- * INTR's bit, a level cleared by writing 1 to it; ARMED is written with
- * 1 to disarm. The interrupt line is INTR gated by INTE (INTF forces,
- * INTS is the masked status).
+ * Alarms match the low 32 bits: at most 2^32 us (about 71 minutes)
+ * ahead, and an alarm set to a value the low half has already passed
+ * does not fire at once: it fires when the low half next equals the
+ * value, up to 71 minutes later. Writing ALARMn arms it (ARMED bit set);
+ * the match clears ARMED and raises INTR's bit, a level cleared by
+ * writing 1 to it; ARMED is written with 1 to disarm. The interrupt
+ * line is INTR gated by INTE (INTF forces, INTS is the masked status).
  *
  * The block is one of the reset controller's; `init` releases it and
  * starts the tick. PAUSE stops the count (a debugging verb). DBGPAUSE's
- * two bits, SET AT RESET, stop it while either core is halted by a
+ * two bits, set at reset, stop it while either core is halted by a
  * debugger - and this chip has two cores: with the bits set, a
  * breakpoint on one core, or a BKPT taken by a core a probe left
- * debug-enabled, FREEZES THE RULER OF THE OTHER CORE, whose every
+ * debug-enabled, freezes the ruler of the other core, whose every
  * timed wait then never ends (measured: a panic on core 1 under a
  * probe's leftover C_DEBUGEN stopped core 0 dead in a 10 ms wait). So
- * `init` CLEARS them: the timer counts through a halt, a measurement
+ * `init` clears them: the timer counts through a halt, a measurement
  * across an OpenOCD halt is a measurement of the halt, and a program
  * that wants the datasheet's default asks for it with debug_pause().
  */
@@ -89,7 +112,7 @@ struct Timer {
     /// The low 32 bits alone: 71 minutes of unsigned span.
     static uint32_t now_low() { return TIMER->TIMERAWL; }
 
-    /// The latching read, ONE CONTEXT ONLY (the file header): TIMELR
+    /// The latching read, one context only (the file header): TIMELR
     /// then TIMEHR.
     static uint64_t now_latched() {
         const uint32_t lo = TIMER->TIMELR;
@@ -104,7 +127,9 @@ struct Timer {
     }
     /// Arm alarm `n` to match the low 32 bits at `at`.
     static void alarm(uint8_t n, uint32_t at) { alarm_reg(n) = at; }
-    /// Arm alarm `n` `us` microseconds from now.
+    /// Arm alarm `n` `us` microseconds from now (the low half read, the
+    /// sum stored; `us` at most 2^32 - 1). It fires once; the handler
+    /// clears the raised flag with clear(n).
     static void alarm_in(uint8_t n, uint32_t us) { alarm_reg(n) = now_low() + us; }
     static bool armed(uint8_t n) { return (TIMER->ARMED & (1u << n)) != 0u; }
     static void disarm(uint8_t n) { TIMER->ARMED = 1u << n; }

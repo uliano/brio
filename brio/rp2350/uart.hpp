@@ -1,48 +1,81 @@
 /*
  * uart.hpp
  *
- * The UART (datasheet 12.1: two ARM PL011s, revision r1p5). The chapter's
- * driver is NOT here: the PL011 is a licensed design this chip shares
- * with others, so the resource and the byte transport are written once in
- * the IP stratum (brio/pl011/uart.hpp, docs/pl011/README.md) and this
- * file is what that file asks of a family -
+ * The UART (datasheet 12.1: two ARM PL011s, revision r1p5) as a serial
+ * port for a program on either of this chip's architectures: the console
+ * a program prints to, a line-oriented link, a byte transport to another
+ * chip. The smallest use, the console on GP0/GP1, is written out at the
+ * Uart alias at the end of this file: the two pads named with the
+ * function that routes a UART to each, `using Serial = brio::Uart<0,
+ * console_pins>`, `isr_uart0` bound to Serial::isr() by the program,
+ * `Serial::init(clock, 115200)` after the clock task, then print().
  *
- *  - the pin table of 9.4 with its TWO function columns;
- *  - `Rp2350Pl011`, the CHIP TRAITS: the register block and where each
+ * The chapter's driver is not here: the PL011 is a licensed design this
+ * chip shares with others, so the resource and the byte transport are
+ * written once in the IP stratum (brio/pl011/uart.hpp, docs/pl011/README.md)
+ * and this file is what that file asks of a family -
+ *
+ *  - the pin table of 9.4 with its two function columns;
+ *  - `Rp2350Pl011`, the chip traits: the register block and where each
  *    instance's sits, the reset bits of 7.5, the interrupt lines of 3.2,
  *    the critical-section guard, the platform the rings are built on, the
  *    atomic set/clear aliases of 2.1.3, the DREQ numbers of 12.6.4.1, the
- *    pad type with the setup each direction wants, and WHICH RATE IS
+ *    pad type with the setup each direction wants, and which rate is
  *    UARTCLK - clk_peri (12.1, figure 33), which rp2350/clock.hpp feeds
  *    from clk_sys undivided by default, so the divisor comes from
  *    Clock::pclk_hz and never from a second statement of the rate;
- *  - the PUBLIC NAMES: `Pl011<n>` the resource and `Uart<n, pins, ...>`
- *    the task, this chip's aliases of the two IP templates.
+ *  - the public names: `Pl011<n>` the resource and `Uart<n, pins, ...>`
+ *    the task (a driver layer with state of its own, served from the
+ *    instance's interrupt), this chip's aliases of the two IP templates.
  *
- * THE PINS, AND THE COLUMN THE RP2040 HAD NOT. The pads march in groups
+ * Who calls what, and from where (the IP file states each verb in
+ * full). init() and release() are setup verbs: main(), after the clock
+ * task and before interrupts are enabled globally; init() answers false
+ * when the rate cannot be produced at this clock or the block did not
+ * come out of reset. isr() is the interrupt body: the program's handler
+ * for the instance's line calls it and nothing else does, and it returns
+ * true when the receive ring went from empty to non-empty. The transmit
+ * verbs (write_byte(), write_bulk(), and print() over them) and the
+ * receive verbs belong to the main context - setup, or the handler of an
+ * active object - and never to an interrupt handler: each ring has one
+ * producer and one consumer, and the interrupt body is the other end of
+ * both. Nothing in the task waits except rebase(), set_baud(),
+ * set_format() and loopback(), main-context verbs that spin, bounded,
+ * until the queued bytes have left the wire; print() waits above it,
+ * until the ring has taken every byte. Arming the transmit interrupt is
+ * one store through the SET alias of UARTIMSC (2.1.3), so the interrupt
+ * transport masks nothing; with a transmit engine in its slot, the
+ * engine's claim is taken under the platform's guard, and with a
+ * receive engine harvest() takes the same guard for the few
+ * instructions it shares the receive ring with the DMA line's handler;
+ * nothing else masks. The rings are the task's own static arrays;
+ * write_bulk() copies the caller's span, which is free again when it
+ * returns.
+ *
+ * The pins, and the column the RP2040 had not. The pads march in groups
  * of four - TX, RX, CTS, RTS - and the groups cycle UART0, UART1, UART1,
  * UART0 and again, so GP0..GP3 are UART0's, GP4..GP7 UART1's, GP8..GP11
  * UART1's, GP12..GP15 UART0's, all the way to GP47 on the QFN-80. That
- * much is the RP2040's rule over a longer bank. What is new is that EVERY
- * GROUP'S FLOW-CONTROL PADS CARRY DATA TOO, under a second function code:
+ * much is the RP2040's rule over a longer bank. What is new is that every
+ * group's flow-control pads carry data too, under a second function code:
  * the CTS pad is also that instance's TX and the RTS pad also its RX,
  * under function 11 where the first two pads use function 2. So GP2/GP3
  * are a second UART0 pair, GP6/GP7 a second UART1 pair, and a QFN-80 chip
  * offers twelve transmit pads and twelve receive pads per instance
  * instead of the RP2040's four.
  *
- * WHICH COLUMN A PAD USES IS NOT A CHOICE: a pad carries a UART signal
+ * Which column a pad uses is not a choice: a pad carries a UART signal
  * under exactly one function code, and the pad number says which. That is
- * why `pad_function` here is a TYPE and not a number - the IP file calls
- * it "the function code that routes a UART to a pad" and keeps it OPAQUE,
+ * why `pad_function` here is a type and not a number - the IP file calls
+ * it "the function code that routes a UART to a pad" and keeps it opaque,
  * which is exactly the room a chip with a column per pad needs. The tag
  * travels, `UartPad<pin>` resolves it against the table, and the IP file
  * is untouched.
  *
- * THE LINE. The eleven maskable sources of an instance combine into ONE
+ * The line. The eleven maskable sources of an instance combine into ONE
  * interrupt line (UART0_IRQ = 33, UART1_IRQ = 34, datasheet 3.2); the app
  * binds isr_uart0 / isr_uart1 to the instance's isr() body, and those
- * names are bound on BOTH architectures - a Cortex-M vector table on one
+ * names are bound on both architectures - a Cortex-M vector table on one
  * half, Hazard3's own dispatch on the other - because the interrupt
  * numbering is shared (3.8.4.2). Which is also why `Irq` below is the
  * controller core.hpp names and never an NVIC.
@@ -81,7 +114,7 @@ constexpr uint8_t uart_pad_instance(uint8_t pin) {
     return static_cast<uint8_t>(((group + 1u) / 2u) % 2u);
 }
 
-/// WHICH FUNCTION routes a UART signal to `pin`: function 2 on the first
+/// Which function routes a UART signal to `pin`: function 2 on the first
 /// two pads of a group, function 11 on the other two - the column the
 /// RP2040 had not, which turns every flow-control pad into a second data
 /// pad of the same instance.
@@ -89,7 +122,7 @@ constexpr PinFunction uart_pad_function(uint8_t pin) {
     return (pin % 4u) < 2u ? PinFunction::uart : PinFunction::uart_alt;
 }
 
-/// Is `pin` instance n's TRANSMIT pad? The first pad of a group carries
+/// Is `pin` instance n's transmit pad? The first pad of a group carries
 /// TX under function 2, the third under function 11.
 constexpr bool uart_tx_pin(uint8_t n, uint8_t pin) {
     if (pin >= gpio_count_max) {
@@ -99,7 +132,7 @@ constexpr bool uart_tx_pin(uint8_t n, uint8_t pin) {
     return (within == 0u || within == 2u) && uart_pad_instance(pin) == n;
 }
 
-/// And its RECEIVE pad: the second pad of a group under function 2, the
+/// And its receive pad: the second pad of a group under function 2, the
 /// fourth under function 11.
 constexpr bool uart_rx_pin(uint8_t n, uint8_t pin) {
     if (pin >= gpio_count_max) {
@@ -110,11 +143,11 @@ constexpr bool uart_rx_pin(uint8_t n, uint8_t pin) {
 }
 
 /// A legal pin set for instance n: a transmit pad and a receive pad the
-/// table gives that instance, EACH NAMED UNDER ITS OWN COLUMN - naming
+/// table gives that instance, each named under its own column - naming
 /// GP2 under function 2 asks for UART0's CTS and not its transmitter, so
 /// it is refused here rather than routed to the wrong signal.
 ///
-/// The PACKAGE is not asked here: every pin's registers exist on both
+/// The package is not asked here: every pin's registers exist on both
 /// packages and only the bond wire does not, so a pad the QFN-60 has not
 /// got is refused one level down, by `Pin<n>`'s own static_assert, which
 /// says so in those words.
@@ -124,10 +157,10 @@ constexpr bool uart_pins_valid(uint8_t n, const UartPins& p) {
            p.rx.function == uart_pad_function(p.rx.pin);
 }
 
-/// WHAT `Rp2350Pl011::pad_function` IS. The IP file hands this value to a
+/// What `Rp2350Pl011::pad_function` is. The IP file hands this value to a
 /// pad and never looks inside it ("the function code that routes a UART
 /// to a pad, opaque to this file"); on the RP2040 the answer really was
-/// one code, and here it is a COLUMN of the table whose number depends on
+/// one code, and here it is a column of the table whose number depends on
 /// the pad. So the chip's answer is this tag - "the column that carries a
 /// UART signal" - and `UartPad<pin>` below turns it into the one code
 /// that routes a UART to that pad.
@@ -136,7 +169,7 @@ struct UartColumn {};
 /// A UART pad as a type: the two verbs the IP driver calls on one, over
 /// the pin chapter's own. Handing it over resolves the column against the
 /// pad number; taking it back is the pin's ordinary release, which leaves
-/// the pad ISOLATED again with its pull-down, this chip's reset state.
+/// the pad isolated again with its pull-down, this chip's reset state.
 template <uint8_t pin>
 struct UartPad {
     static bool function(UartColumn, const PinConfig& cfg) {
@@ -195,7 +228,7 @@ struct Rp2350Pl011 {
     template <uint8_t i>
     static void hold() { Resets::hold(reset_bit<i>()); }
 
-    /// 12.6.4.1: the two data requests of an instance. NOT the RP2040's
+    /// 12.6.4.1: the two data requests of an instance. Not the RP2040's
     /// numbers - a third PIO moved every row above it (dma_engine.hpp).
     template <uint8_t i>
     static constexpr DmaRequest tx_request() { return i == 0 ? Dreq::uart0_tx : Dreq::uart1_tx; }
@@ -212,13 +245,13 @@ struct Rp2350Pl011 {
     static constexpr uint8_t tx_pad(const Pins& p) { return p.tx.pin; }
     static constexpr uint8_t rx_pad(const Pins& p) { return p.rx.pin; }
 
-    /// The pad as a type, the COLUMN that carries a UART signal (the tag
+    /// The pad as a type, the column that carries a UART signal (the tag
     /// above: on this chip the code is the pad's), and the electrical
-    /// setup each direction wants - the receive one WITH ITS PULL-UP,
-    /// because this chip's pads come up pulled DOWN and a receiver
+    /// setup each direction wants - the receive one with its pull-up,
+    /// because this chip's pads come up pulled down and a receiver
     /// enabled over a low line takes a break (the IP file's init() says
     /// why that matters). Every configuring verb of pin.hpp drops the
-    /// ISOLATION LATCH as it writes, which is what makes a pad of this
+    /// isolation latch as it writes, which is what makes a pad of this
     /// chip answer at all.
     template <uint8_t pin>
     using Pad = UartPad<pin>;
@@ -227,7 +260,7 @@ struct Rp2350Pl011 {
     static constexpr PinConfig rx_pad_config() { return {.pull = PinPull::up}; }
 
     /// Two engines of one transport must not share a channel: on this
-    /// chip a request is a field any channel takes, so the CHANNEL is the
+    /// chip a request is a field any channel takes, so the channel is the
     /// identity (rp2350/dma_engine.hpp).
     template <typename Tx, typename Rx>
     static constexpr bool engines_distinct() { return uart_engines_distinct<Tx, Rx>(); }
@@ -248,7 +281,10 @@ template <uint8_t n>
 using Pl011 = Pl011Uart<Rp2350Pl011, n>;
 
 /**
- * The task: the asynchronous byte transport over Pl011<n>.
+ * The task: the asynchronous byte transport over Pl011<n>. `init(clock,
+ * baud)` after the clock task, the handler bound to `isr()` under the
+ * crt's name for the line, then print() or the write verbs from the main
+ * context:
  *
  *   constexpr brio::UartPins console_pins{
  *       .tx = {0, brio::PinFunction::uart},

@@ -1,27 +1,60 @@
 /*
  * sim_pl011.hpp
  *
- * A PL011 MADE OF RAM, and the chip traits over it: what
+ * A PL011 made of RAM, and the chip traits over it: what
  * brio/pl011/uart.hpp asks of a family (`Pl011Chip`), answered by no
- * family at all.
+ * family at all. `SimPl011` is the traits type (a struct of types,
+ * constants and static functions the IP templates read) that the RP2040
+ * and the RP2350 supply for their silicon in their own uart.hpp; here it
+ * stands over two register blocks that are plain arrays, so the IP's
+ * resource and transport run in a host test with no chip anywhere
+ * (docs/pl011/README.md, "The proof that it knows no chip";
+ * docs/host/README.md).
  *
- * WHY IT EXISTS. The IP stratum's claim is that the driver knows no
- * chip. A claim of that shape is proved by a SECOND realization, and
+ * The smallest use, as test/test_pl011 spells it: the templates named
+ * over SimPl011 with a clock of the test's choosing and the empty engine
+ * slots, the bench put back to power-on before each case, the core
+ * played by the test - the handler run while the line is raised - and
+ * the wire a verb the test calls:
+ *
+ *     using Clock = SimPl011Clock<125'000'000>;
+ *     constexpr SimPl011Pins pins{.tx = 0, .rx = 1};
+ *     using Port = Pl011Transport<SimPl011, 0, pins, 64, 256, SimNoEngine, SimNoEngine>;
+ *
+ *     SimPl011::reset_all();
+ *     HostPlatform::reset();
+ *     constexpr Clock clock{};
+ *     Port::init(clock, 115200);
+ *     (void)Port::write_byte(0x55);
+ *     const auto b = SimPl011::shift<0>();          // the wire takes the oldest entry
+ *     while (SimPl011::line_raised<0>()) { (void)Port::isr(); }
+ *
+ * Contexts: a single-threaded test is every party at once - the program,
+ * the core that takes an interrupt (calling isr() while line_raised()
+ * says so), and the far end of the wire (shift(), receive(), raise()).
+ * Nothing waits and nothing runs by itself: no time passes unless the
+ * test makes it. The traits' Guard and Platform are HostPlatform's
+ * (brio/host/platform.hpp), whose critical section only counts.
+ *
+ * Why it exists. The IP stratum's claim is that the driver knows no
+ * chip. A claim of that shape is proved by a second realization, and
  * the cheapest second realization is one with no silicon under it: a
  * register block that is an ordinary array, a reset that memsets it to
  * the block's reset values, an interrupt controller that keeps its
  * enables, pads that remember what they were handed to. The same header
- * is compiled by the host suite (test_pl011) and by a family's compile
- * check (test/family_rp2040/pl011_ip.cpp), so the proof is made twice,
- * once per compiler.
+ * is compiled by the host suite (test_pl011) and by the families'
+ * compile checks (test/family_rp2040/pl011_ip.cpp, and
+ * test/family_rp2350/pl011_ip.cpp, which `brio check rp2350` builds with
+ * both of that chip's compilers), so the proof is made once per
+ * compiler.
  *
- * WHAT IT MODELS, and what it does not. The register map is the PL011's,
- * at the PL011's offsets, and the RESET VALUES are the block's (UARTFR
+ * What it models, and what it does not. The register map is the PL011's,
+ * at the PL011's offsets, and the reset values are the block's (UARTFR
  * comes up with both FIFOs empty, which is what lets a transport's
- * init() drain the receive FIFO and stop). THE TRANSMIT FIFO IS
- * MODELLED, because the transport's transmit policy is a contract with
+ * init() drain the receive FIFO and stop). The transmit FIFO is
+ * modelled, because the transport's transmit policy is a contract with
  * it: a write of UARTDR is an entry (one into a full FIFO is counted as
- * the byte the silicon would lose), the WIRE is a verb the test calls
+ * the byte the silicon would lose), the wire is a verb the test calls
  * (`shift<i>()` takes the oldest entry and hands it back, so the order
  * on the wire is judged), UARTFR's TXFF, TXFE and BUSY follow the
  * entries, and TXRIS follows the rule measured on the RP2350
@@ -30,7 +63,7 @@
  * by UARTICR, never set by the level alone. UARTICR clears what it is
  * written, and UARTMIS is kept equal to UARTRIS under UARTIMSC. The
  * shifter is not modelled: a byte leaves the FIFO when the wire takes
- * it. THE RECEIVE FIFO IS MODELLED TOO, as far as a transport's receive
+ * it. The receive FIFO is modelled too, as far as a transport's receive
  * path reads it: the wire is a verb the test calls (`receive<i>()` lands
  * a frame, its error bits with it, as an entry), a read of UARTDR takes
  * the oldest entry, UARTFR's RXFE and RXFF follow the entries, RXRIS
@@ -40,9 +73,9 @@
  * receive time-out is raised by hand (`raise<i>()`): there is no time
  * here.
  *
- * WHAT IT RECORDS, beside the registers: the order of the observable
+ * What it records, beside the registers: the order of the observable
  * acts of a bring-up - which pad was claimed when, and when UARTCR's
- * enable and its loop-back went up - so a test can assert the ORDER the
+ * enable and its loop-back went up - so a test can assert the order the
  * IP file's init() promises (the receive pad before the enable, the
  * transmit pad after it, a loop-back asked for before the enable), which
  * is a thing no bench can see.
@@ -234,7 +267,7 @@ struct SimPl011Pins {
 enum class SimPl011Request : uint8_t { uart0_tx = 0, uart0_rx = 1, uart1_tx = 2, uart1_rx = 3 };
 
 /**
- * THE CHIP THAT IS NOT A CHIP: every member `Pl011Chip` asks for, over
+ * The chip that is not a chip: every member `Pl011Chip` asks for, over
  * two register blocks in RAM.
  */
 struct SimPl011 {
@@ -358,7 +391,7 @@ struct SimPl011 {
     // ---- the transmit FIFO and the line, for a test that plays the wire
     // ---- and the core
 
-    /// THE WIRE takes instance i's oldest entry and hands it back; nothing
+    /// The wire takes instance i's oldest entry and hands it back; nothing
     /// when the FIFO is empty. The fall from one entry above the level to
     /// the level is the edge that sets TXRIS.
     template <uint8_t i>
@@ -385,10 +418,10 @@ struct SimPl011 {
         settle(i);
     }
 
-    /// THE WIRE lands one frame on instance i: an entry of the receive
+    /// The wire lands one frame on instance i: an entry of the receive
     /// FIFO, its error bits (UartDataError) beside the byte - or, the FIFO
     /// full, a frame lost: UARTRSR's OE set, no entry, and OERIS raised
-    /// at the ONSET of OE alone - as the silicon does: an OE left standing
+    /// at the onset of OE alone - as the silicon does: an OE left standing
     /// in UARTRSR hides every later overrun from the interrupt (measured
     /// on the RP2040 and the RP2350, docs/pl011/README.md).
     template <uint8_t i>
@@ -531,7 +564,7 @@ struct SimNoEngine {
 
 /**
  * A DMA engine of no controller: the slot's whole vocabulary over two
- * counters, so that a transport's engine BRANCHES - the ones a family
+ * counters, so that a transport's engine branches - the ones a family
  * with no DMA driver never compiles - are exercised here too.
  */
 template <uint8_t ch>

@@ -3,11 +3,45 @@
  *
  * The RP2350's USB controller in device mode (datasheet 12.7), as the
  * endpoint controller util/usb/device.hpp's stack runs on: `Usb`, a
- * monostate (the chip has one controller and one PHY on its own two
- * pins), realizing the `UsbController` contract at the packet.
+ * monostate (a type with only static members, used without an object;
+ * the chip has one controller and one PHY on its own two pins),
+ * realizing the `UsbController` contract at the packet. A program does
+ * not drive it packet by packet: it names it under the stack and a
+ * class, brings it up once and lets the stack run in the controller's
+ * interrupt handler. The smallest use, a CDC ACM serial port
+ * (docs/rp2350/usb.md writes out the descriptors):
  *
- * WHAT THE BLOCK IS. A full-speed PHY on DP and DM with its pull-up, a
- * serial engine each way, and 4 KB of DUAL-PORT RAM (12.7.3.7) that is
+ *     using Port = brio::UsbCdcAcm<brio::Usb, P>;
+ *     using Device = brio::UsbDevice<brio::Usb, Descriptors, Port>;
+ *     brio::Usb::init(clock);     // the PHY's isolation lifted last of all
+ *     Device::start();            // the pull-up: the host enumerates from here
+ *     extern "C" void isr_usbctrl() { Device::isr(); }
+ *
+ * Who calls what. init() and release() are setup verbs, main context:
+ * init() waits, each wait bounded, for the USB PLL's lock, the clk_usb
+ * generator's switch and the block's reset release, masks nothing, and
+ * enables the line at this core's interrupt controller; its clock type
+ * is checked at compile time against erratum RP2350-E12's rule below.
+ * The UsbController verbs - connect(), set_address(),
+ * configure_endpoint(), stall(), submit_in(), submit_out(), out_data(),
+ * setup(), take_events() - are the stack's: it calls them from
+ * UsbDevice::isr() in the handler the program binds as `isr_usbctrl`
+ * (the same name on both architectures), from start() and stop() in main
+ * context, and a class's program side calls them only inside the
+ * platform's critical section (util/usb/cdc.hpp); none of them takes a
+ * guard of its own, so one context at a time is the caller's rule.
+ * Nothing in them waits beyond the dozen nop instructions of a buffer
+ * hand-over. Storage: submit_in() copies the caller's packet into the
+ * controller's RAM, so the span is free when it returns; out_data()
+ * hands back the controller's own RAM, valid until the next
+ * submit_out() on that endpoint lands there. The readbacks and the
+ * diagnostics are register reads - one or two each (endpoint_errors()
+ * and since_sof() read two registers), buffers_used() a variable of the
+ * driver's - and the take_*() verbs a read of the status and a
+ * CLEAR-alias store for what stood (take_events() one per event).
+ *
+ * What the block is. A full-speed PHY on DP and DM with its pull-up, a
+ * serial engine each way, and 4 KB of dual-port RAM (12.7.3.7) that is
  * the whole of the interface: the eight-byte setup packet at offset 0,
  * an endpoint control word per endpoint and direction (the type, the
  * buffer's offset, single or double buffered, the interrupt per
@@ -21,39 +55,39 @@
  * interrupt quartet and BUFF_STATUS, one bit per endpoint and
  * direction, that says which buffers completed.
  *
- * WHAT IS NOT THE RP2040'S, and every item of it is 12.7.2's:
+ * What is not the RP2040's, and every item of it is 12.7.2's:
  *
- *  - MAIN_CTRL.PHY_ISO, THE ONE NEW DUTY. It resets to 1 and isolates
+ *  - MAIN_CTRL.PHY_ISO, the one new duty. It resets to 1 and isolates
  *    the PHY from the switched core power domain; until it is cleared
- *    the PHY does nothing at all. init() clears it LAST OF ALL - after
+ *    the PHY does nothing at all. init() clears it last of all - after
  *    the muxing, the power overrides, the controller's own enable, the
  *    SIE and the interrupt mask - which is 12.7.2.2.1's "remove
  *    isolation once software has configured the controller" and leaves
  *    the chapter's register order otherwise exactly as it stands;
  *    release() puts the isolation back, which is the resting state a
  *    power-down wants.
- *  - THREE RESET VALUES MOVED, and all three are answered by writing
- *    the register WHOLE rather than setting bits into it: USB_MUXING
+ *  - Three reset values moved, and all three are answered by writing
+ *    the register whole rather than setting bits into it: USB_MUXING
  *    resets with TO_PHY already set, SIE_CTRL with PULLDOWN_EN set
  *    (the host's termination, so that the pins do not float while the
  *    block is unused), MAIN_CTRL with PHY_ISO set.
- *  - DP AND DM CAN BE GPIO HERE. They are pads of GPIO BANK 1 (9.4's
+ *  - DP and DM can be GPIO here. They are pads of GPIO bank 1 (9.4's
  *    table 647), whose function-select registers are the IO_QSPI
  *    block's USBPHY_DP_CTRL and USBPHY_DM_CTRL and whose SIO face is
  *    the high bank's bits 24 and 25 - GPIO 56 and 57. They must not be
- *    GPIO while this driver owns them, and TWO facts guarantee it: bank
+ *    GPIO while this driver owns them, and two facts guarantee it: bank
  *    1's FUNCSEL resets to NULL and nothing in this stratum writes it
- *    (rp2350/pin.hpp is bank 0 alone), and init() STORES USB_MUXING
- *    WHOLE, so USBPHY_AS_GPIO, TO_EXTPHY, TO_DIGITAL_PAD and SWAP_DPDM
+ *    (rp2350/pin.hpp is bank 0 alone), and init() stores USB_MUXING
+ *    whole, so USBPHY_AS_GPIO, TO_EXTPHY, TO_DIGITAL_PAD and SWAP_DPDM
  *    all land clear whatever a previous image left. No verb of this
  *    file ever sets them.
  *  - ERRATUM RP2350-E12 replaces the RP2040's E16 and is stricter:
  *    eight SIE_STATUS flags and six INTR flags cross from clk_usb to
- *    clk_sys without adequate synchronisation, so CLK_SYS MUST RUN AT
- *    LEAST TEN PER CENT ABOVE CLK_USB while the peripheral is in use.
+ *    clk_sys without adequate synchronisation, so clk_sys must run at
+ *    least ten per cent above clk_usb while the peripheral is in use.
  *    `usb_clk_sys_ok` is that rule and init() asserts it at compile
  *    time - 52.8 MHz and not 48.
- *  - THE DIAGNOSTICS THE RP2040 HAD NOT: a per-endpoint transmit error
+ *  - The diagnostics the RP2040 had not: a per-endpoint transmit error
  *    count and a per-endpoint receive error pair (EP_TX_ERROR,
  *    EP_RX_ERROR) that replicate the host's own error count, a short
  *    packet flagged in its own right (SIE_STATUS.RX_SHORT_PACKET), the
@@ -62,11 +96,11 @@
  *    watchdog that forces the device state machine back to idle if it
  *    hangs. All of them are readbacks and verbs here; none is on the
  *    path a packet takes.
- *  - EVERY RP2040 USB ERRATUM IS FIXED (12.7.2.1), E2 and E5 of the B0
+ *  - Every RP2040 USB erratum is fixed (12.7.2.1), E2 and E5 of the B0
  *    and B1 steppings among them, so nothing of this file is a
  *    workaround.
  *
- * THE BUFFER CONTROL DISCIPLINE (12.7.3.7.1): the word is shared with
+ * The buffer control discipline (12.7.3.7.1): the word is shared with
  * a controller clocked at 48 MHz while the core runs at 150, so the
  * length, the PID and FULL are written first and AVAILABLE (or STALL)
  * in a second write after a short wait, or the controller could take
@@ -77,20 +111,20 @@
  * prescribe the two-step store, so the two-step store is what this
  * driver does and the fix is a second line of defence. LINESTATE_TUNING
  * is otherwise left exactly as it resets, as 12.7.2 asks: this file
- * READS it and has no verb that writes it.
+ * reads it and has no verb that writes it.
  *
  * The data PID alternates per endpoint and direction, starts at DATA0
  * after a configure, and endpoint zero's restarts at DATA1 on every
  * setup packet - the stack does not see PIDs, the controller keeps
  * them.
  *
- * ENDPOINT ZERO'S STALL is armed in EP_STALL_ARM as well as in the
+ * Endpoint zero's stall is armed in EP_STALL_ARM as well as in the
  * buffer control word, and the silicon clears both when a setup packet
  * arrives, as chapter 9 wants; the other endpoints' stall is the
  * buffer control's bit alone, cleared by the stack's CLEAR_FEATURE
  * with the PID back at DATA0.
  *
- * THE COMPLETED HALF of a double-buffered OUT endpoint is told from the
+ * The completed half of a double-buffered OUT endpoint is told from the
  * strict alternation of the halves and each half's own FULL bit, not
  * from BUFF_CPU_SHOULD_HANDLE: the alternation is what the other
  * Raspberry Pi controller was measured to do and this one inherits, and
@@ -98,17 +132,17 @@
  * is a readback here (`buff_cpu_should_handle`) so that a bench letter
  * can hold the two against each other.
  *
- * THE CLOCK: clk_usb at 48 MHz from the USB PLL, which init() brings up
+ * The clock: clk_usb at 48 MHz from the USB PLL, which init() brings up
  * at that rate if it is not already there. `reset run` on this chip
  * does not reset the clock tree, so a PLL already locked on the right
  * ratio is kept and one on a different ratio is re-locked.
  *
- * THE DUAL-PORT RAM TAKES NO ATOMIC ALIASES (12.7.3.7): +0x2000 and
+ * The dual-port RAM takes no atomic aliases (12.7.3.7): +0x2000 and
  * +0x3000 are the register block's, not the RAM's, so every write into
- * DPRAM here is a plain store. The REGISTERS take all four, natively
+ * DPRAM here is a plain store. The registers take all four, natively
  * (2.1.3), and every status bit of this block - the SIE's flags,
  * BUFF_STATUS, EP_ABORT_DONE, EP_STATUS_STALL_NAK, the error counters,
- * the watchdog's fired bit - is cleared THE SAME ONE WAY, through the
+ * the watchdog's fired bit - is cleared the same one way, through the
  * CLEAR alias, which is the idiom 12.7.4.2's own listing uses and which
  * leaves whatever else lives in the register alone.
  */
@@ -135,13 +169,13 @@ inline constexpr uint32_t usbctrl_dpram_base = USB_DEVICE_DPRAM_BASE;
 inline constexpr uint32_t usbctrl_regs_base = USB_BASE;
 
 /**
- * ERRATUM RP2350-E12's rule, as a predicate: clk_sys at least ten per
+ * Erratum RP2350-E12's rule, as a predicate: clk_sys at least ten per
  * cent above clk_usb while the controller is in use. Under that margin
  * the flags that cross the two domains - TRANS_COMPLETE, SETUP_REC,
  * RX_SHORT_PACKET, ACK_REQ, DATA_SEQ_ERROR, RX_OVERFLOW, STALL_REC,
  * NAK_REC and the six error interrupts - can be lost outright. The
  * quasi-static states (reset, suspend, resume) are exempt, which is
- * why this is the CONTROLLER's rule and not the chip's.
+ * why this is the controller's rule and not the chip's.
  */
 constexpr bool usb_clk_sys_ok(uint32_t sys_hz) {
     return static_cast<uint64_t>(sys_hz) * 10u >= static_cast<uint64_t>(clk_usb_hz) * 11u;
@@ -198,11 +232,18 @@ struct Usb {
      * already at that rate), the block out of reset, its RAM cleared,
      * the PHY muxed in and taken off the GPIO bank, VBUS detection
      * forced (the boards wire no VBUS pin), the host's pull-downs
-     * dropped, device mode, THE PHY'S ISOLATION LIFTED, and the
+     * dropped, device mode, the PHY's isolation lifted, and the
      * interrupts of a device (a buffer done, a bus reset, a setup
      * packet, suspend, resume) enabled at the block and at this core's
      * interrupt controller. The pull-up stays down: the stack raises it
      * when it is ready to answer.
+     *
+     * A setup verb, main context, before the stack's start(). Its waits
+     * are bounded; false means the USB PLL did not lock, clk_usb did not
+     * switch or the block did not leave reset. A clock type under
+     * erratum RP2350-E12's rule does not compile. After a power-down the
+     * isolation is back and this is the way back, with the reconnect
+     * forced through the pull-up (docs/rp2350/usb.md).
      */
     template <typename Clock>
     static bool init(Clock) {
@@ -275,6 +316,9 @@ struct Usb {
     }
 
     // ---- the UsbController contract ---------------------------------------------------
+    /// The pull-up on DP, which is what tells the host a device is
+    /// there: one alias store into SIE_CTRL. The stack's start() and
+    /// stop() call it.
     static void connect(bool on) {
         if (on) {
             hw_set(regs().SIE_CTRL, USB_SIE_CTRL_PULLUP_EN_BITS);
@@ -285,7 +329,7 @@ struct Usb {
 
     static void set_address(uint8_t address) { regs().ADDR_ENDP = address & USB_ADDR_ENDP_ADDRESS_BITS; }
 
-    /// A bulk OUT endpoint is DOUBLE BUFFERED (two 64-byte halves, the
+    /// A bulk OUT endpoint is double buffered (two 64-byte halves, the
     /// controller flipping between them): a packet lands in one while
     /// the stack empties the other, so the host is never NAKed between
     /// packets - and a NAK costs a whole frame when the device sits
@@ -361,7 +405,9 @@ struct Usb {
     }
 
     /// One packet copied into the endpoint's buffer and offered: the
-    /// controller answers the next IN token with it.
+    /// controller answers the next IN token with it. The caller's span is
+    /// free when this returns; false for an endpoint never configured or
+    /// a packet past 64 bytes.
     static bool submit_in(uint8_t number, std::span<const uint8_t> data) {
         if (number >= endpoint_count || data.size() > max_packet || in_buffer_[number] == 0u) {
             return false;
@@ -547,7 +593,7 @@ struct Usb {
 
     // ---- LINESTATE_TUNING, read and never written --------------------------------------
     /// The register 12.7.2 says to leave alone. These are readbacks of
-    /// the fixes that are on by DEFAULT, so that a program can report
+    /// the fixes that are on by default, so that a program can report
     /// what the silicon is doing rather than change it.
     static uint32_t linestate_tuning() { return regs().LINESTATE_TUNING; }
     static bool buffer_control_double_read_fix() {
@@ -637,7 +683,7 @@ struct Usb {
 
     /// The device state machine's watchdog: a limit in clk_usb cycles
     /// and, when it fires, the machine forced back to idle. The limit is
-    /// written with the watchdog DISABLED, as the register description
+    /// written with the watchdog disabled, as the register description
     /// requires, and the enable follows in its own store.
     static bool arm_device_watchdog(const UsbDeviceWatchdogConfig& cfg) {
         if (cfg.limit > USB_DEV_SM_WATCHDOG_LIMIT_BITS) {
@@ -694,7 +740,7 @@ struct Usb {
                         USB_SIE_CTRL_EP0_INT_STALL_BITS | USB_SIE_CTRL_EP0_INT_NAK_BITS);
     }
 
-    /// BUFF_CPU_SHOULD_HANDLE, the register that NAMES the half of a
+    /// BUFF_CPU_SHOULD_HANDLE, the register that names the half of a
     /// double-buffered endpoint the controller finished with. Not on
     /// the path a packet takes here (the file header says why), and a
     /// readback so that the two answers can be held against each other.

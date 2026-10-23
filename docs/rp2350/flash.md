@@ -1,6 +1,78 @@
 # Flash, the QMI and the XIP cache (RP2350)
 
-Documents of record: the RP2350 datasheet (build d126e9e), 12.14 (the
+This document is for a programmer who reads or writes the board's
+external quad-SPI flash at run time - to keep data across a reset, to
+read the chip's identity - or who wants to know what the memory
+interface between that flash and the processors is doing. The RP2350
+executes in place (XIP): both architectures run their code directly
+out of that flash, through a 16 kB cache, so the chip a program stores
+into is the chip it is running from. `brio/rp2350/flash.hpp` holds the
+memory interface (`Qmi`, `QmiWindow`), the cache (`Xip`) and `Flash`,
+the engine that erases, programs and reads the chip through the
+bootrom's own functions; `brio/rp2350/nvm_flash.hpp` holds `QspiFlash`,
+the top 64 kB of the chip as a bounded storage band. The same source
+runs on the Cortex-M33 pair and on the Hazard3 pair.
+
+The smallest use, the chip's identity, is the first block under "How to
+use it" below, and the second is the smallest that writes:
+
+```cpp
+if (brio::Flash::init()) {
+    const auto id = brio::Flash::jedec_id();            // 9Fh
+    const auto uid = brio::Flash::unique_id();          // 4Bh
+    const auto st = brio::Flash::status_register<1>();  // 05h
+}
+```
+
+```cpp
+uint8_t page[brio::QspiFlash::write_cell];              // SRAM, always
+const auto zone = brio::QspiFlash::zones()[0];
+brio::QspiFlash::erase(zone.floor);                     // one sector
+brio::QspiFlash::program(zone.floor, page);             // one page
+```
+
+Line by line: `Flash::init()` finds the bootrom's flash functions and
+copies the bootrom's XIP setup function into SRAM, and answers false
+when the ROM does not carry them (every operation calls it itself; a
+program calls it to learn early); `jedec_id()`, `unique_id()` and
+`status_register<1>()` each send one read command to the chip and
+return its answer, or nothing when the command could not be sent;
+`page` is one write cell, 256 bytes, in SRAM; `zones()[0]` is the
+storage band, its `floor` its lowest address; `erase(zone.floor)`
+erases one 4096-byte sector there and `program(zone.floor, page)`
+writes one page. Every address is an offset in the chip, from 0.
+
+What decides correctness even there. Each of those calls but `init()` is
+a window: while it runs the flash is disconnected from the bus, so the
+operation runs from SRAM with this core's interrupts masked for the
+whole of it - a sector erase about 44 ms on the bench chip, the whole 64
+kB band a quarter of a second or more, and on the Cortex-M33 half the
+kernel's tick keeps one of the ticks that fall inside ("Bench findings"
+below). Two rules nothing in the code can enforce stay the program's:
+the other core must not fetch or read flash while a window is open, and
+no DMA channel may read from the flash meanwhile. A program's source
+buffer must not lie in the XIP space (any flash window or alias: the
+bootrom would read it through the interface the window has
+disconnected), and an erase or a program takes whole sectors and whole
+pages at their boundaries; anything else is refused, false and nothing
+sent. `QspiFlash` refuses everything outside its band; `Flash` beneath
+it bounds only by the chip, so a `Flash::erase` that reaches the running
+image is carried out. And no block heap or value journal stands on the
+band on this family: a program gets the band and keeps its own structure
+there ("The storage partition" below).
+
+The page is long because the chapter is. In order: the documents of
+record; what the silicon does (the QMI and its two windows, address
+translation, direct mode, the cache and its maintenance window,
+erratum RP2350-E11, the streaming interface; then the flash chip and
+what the bootrom leaves behind, what a window costs and asks, and the
+storage partition); the types and verbs; how to use it, one example
+per use; the bench findings, both architectures; and what is not
+covered.
+
+## Documents of record
+
+The RP2350 datasheet (build d126e9e), 12.14 (the
 QSPI memory interface: the two memory windows with their timing,
 transfer formats and command constants, the four address translation
 panes a window, and direct mode), 4.4 (execute-in-place: the four
@@ -12,49 +84,52 @@ the bootrom leaves the interface set up before it enters an image.
 Appendix E carries one erratum this chapter answers, RP2350-E11, and one
 it only states, RP2350-E14. The drivers: `brio/rp2350/flash.hpp` over
 `bootrom.hpp`, and `brio/rp2350/nvm_flash.hpp` over that. The reference
-suite: `test_rp2350_flash`.
+suite: `test_rp2350_flash` (a letter is one command key of the suite's
+console and the group of verdicts it runs; `z` is the key that runs
+every letter but the three that spend flash endurance, `h`, `i` and
+`w`, which run by name).
 
 ## What the silicon does
 
-THE QMI IS NOT THE RP2040'S SSI RENAMED. It is a new block with two
-16 MB MEMORY WINDOWS, one per chip select, and each window carries its
+The QMI is not the RP2040's SSI renamed. It is a new block with two
+16 MB memory windows, one per chip select, and each window carries its
 own configuration: a timing register (the clock divisor, the sample
 delay, the chip select setup, hold, maximum assertion and minimum
 deassertion, a cooldown that lets a following access join the transfer
 in flight, and a page break that forbids a burst crossing 256, 1024 or
-4096 bytes), a READ format and a WRITE format, and a pair of command
+4096 bytes), a read format and a write format, and a pair of command
 constants for each. A transfer has five phases - prefix, address,
-suffix, dummy, data - and EACH PHASE HAS ITS OWN BUS WIDTH, serial, dual
+suffix, dummy, data - and each phase has its own bus width, serial, dual
 or quad, which is how one register file describes a 03h serial read and
 an EBh quad-I/O read alike. The prefix and the suffix are eight bits or
 absent; the dummy phase is a count of four-bit units, 0 to 28 bits; and
 one bit turns the whole thing into a double-transfer-rate transaction.
 
-ADDRESS TRANSLATION IS PART OF THE MEMORY MAP (12.14.4). Each window is
-four PANES of 4 MB, and each pane has a physical BASE and a SIZE, both
+Address translation is part of the memory map (12.14.4). Each window is
+four panes of 4 MB, and each pane has a physical BASE and a SIZE, both
 counted in 4 kB units. The reset state is the identity: pane n based at
 n times 4 MB, 4 MB wide. A pane's SIZE is a bound, not a hint - an
 access past it returns a bus error and never reaches the device - and
 the mapping wraps modulo the window's 16 MB, which is what the bootrom's
-documentation calls a rolling window. The translation sits DOWNSTREAM of
+documentation calls a rolling window. The translation sits downstream of
 the cache, so the cache is virtual with respect to it and a change of
 any pane needs a flush.
 
-DIRECT MODE DISCONNECTS BOTH WINDOWS. One CSR carries the enable, a busy
+Direct mode disconnects both windows. One CSR carries the enable, a busy
 flag, the two FIFOs' levels and flags, direct mode's own clock divisor
 and sample delay, and four chip select controls: two that drive a select
-low unconditionally - EVEN WITH THE ENABLE CLEAR, which 12.14.5.2 warns
+low unconditionally - even with the enable clear, which 12.14.5.2 warns
 about in as many words - and two that let the block drive it for as long
 as it is busy. A push into DIRECT_TX carries control bits above the
 data: the width, eight or sixteen data bits, the output enable for the
 bidirectional widths, and NOPUSH, which throws away the answer that
 record would otherwise put in the receive FIFO. All control bits zero is
-a plain eight-bit byte, so the FIFO can be used as one. THE RECEIVE FIFO
-NEVER DROPS A BYTE: a full one stalls the interface instead, which means
+a plain eight-bit byte, so the FIFO can be used as one. The receive FIFO
+never drops a byte: a full one stalls the interface instead, which means
 a caller may push freely as long as it also pops - and must never wait
 for the busy flag without also popping, or the two block each other.
 
-THE CACHE IS 16 kB, two-way, eight-byte lines, one cycle on a hit, and
+The cache is 16 kB, two-way, eight-byte lines, one cycle on a hit, and
 what it caches is a 26-bit downstream space mirrored four times in the
 system map: **cached** at 0x1000_0000, **uncached** at 0x1400_0000,
 **maintenance** at 0x1800_0000, and **uncached and untranslated** at
@@ -62,8 +137,8 @@ system map: **cached** at 0x1000_0000, **uncached** at 0x1400_0000,
 (two windows of 16 MB); the upper half is reserved, and is where a
 pinned line can be parked without ever aliasing a real address.
 
-MAINTENANCE IS AN ADDRESS AND NOT A REGISTER. There is no flush bit
-here: a write into the maintenance window maintains ONE LINE, and the
+Maintenance is an address and not a register. There is no flush bit
+here: a write into the maintenance window maintains one line, and the
 three least significant bits of the address say which of five
 operations - invalidate by set and way, clean by set and way,
 invalidate by address, clean by address, and PIN, which marks a line
@@ -74,24 +149,24 @@ the XIP power domain, so pinned lines survive a processor reset. The
 cache has two enables, Secure and Non-secure, a power-down that forces
 both clear, a split that gives each security level one way, a bit that
 hands maintenance to Non-secure code, four that turn an alias into a bus
-error, and TWO THAT MAKE A WINDOW WRITABLE - clear by default, because a
+error, and two that make a window writable - clear by default, because a
 store into a read-only device would appear to succeed in the cache and
 then, on eviction, issue a write command that can leave the chip
 returning garbage.
 
 **Erratum RP2350-E11 is live on stepping A2 and on A3 and A4.** A clean
-by set and way also OVERWRITES THE CLEANED LINE'S TAG with bits 25:13 of
+by set and way also overwrites the cleaned line's tag with bits 25:13 of
 the maintenance write's own address. A sweep driven from the bottom of
 the maintenance window would therefore leave every cleaned line claiming
 to hold address zero, and the next read of the flash's first bytes would
-hit it. `Xip::clean_all()` drives the sweep from the TOP of the window
+hit it. `Xip::clean_all()` drives the sweep from the top of the window
 instead, so the tag it leaves behind names the reserved upper half of
 the downstream space, which no QMI access can ask for; the cost is a
 miss on the next access to a cleaned address, which is what a clean is
 for. The other four operations are unaffected.
 
-THE STREAMING INTERFACE (4.4.3) is a linear run of words the XIP
-subsystem fetches in the BACKGROUND, at lower priority than the
+The streaming interface (4.4.3) is a linear run of words the XIP
+subsystem fetches in the background, at lower priority than the
 program's own accesses and with a nine-cycle cooldown after each cache
 miss, into a small FIFO whose DREQ paces a DMA channel. The auxiliary
 AHB port gives single-cycle access to that FIFO and to the QMI's two
@@ -100,35 +175,35 @@ cycles.
 
 ### The flash chip, and what the bootrom leaves behind
 
-THERE IS NO SECOND STAGE ON THIS CHIP. The RP2040's first 256 flash
+There is no second stage on this chip. The RP2040's first 256 flash
 bytes were a checksummed stage whose job was to set the flash interface
 up, and whose second job was to be the way back after a flash operation.
 Here the bootrom does the setup itself while scanning the flash: it
 tries sixteen combinations in turn - EBh, BBh, 0Bh and 03h reads at SCK
 divisors 3, 6, 12 and 24 (5.2.7's table 452) - keeps the first that
-works, and writes a position-independent XIP SETUP FUNCTION into the
-first 256 bytes of BOOT RAM that restores it. **On the bench board that
-is the FIRST of the sixteen, EBh quad-I/O at CLKDIV 3**, and what that
+works, and writes a position-independent XIP setup function into the
+first 256 bytes of boot RAM that restores it. **On the bench board that
+is the first of the sixteen, EBh quad-I/O at CLKDIV 3**, and what that
 costs is a fact of the program and not of the boot: the divisor divides
 clk_sys, so the same register that is 3.7 MHz of SCK while the bootrom
 runs on the ring oscillator is 50 MHz once a program has raised clk_sys
 to 150 MHz. Boot RAM is 1 kB on the APB and is physically not
-executable, so a program that wants that function must COPY IT INTO SRAM
-and call the copy. THE DATASHEET GIVES TWO ROUTES TO THAT ONE ADDRESS -
+executable, so a program that wants that function must copy it into SRAM
+and call the copy. The datasheet gives two routes to that one address -
 the ROM data entry 'X','F' names it, and 4.3 and 5.2.7 say it is at the
-BASE of boot RAM - so this driver takes the named one when it points
+base of boot RAM - so this driver takes the named one when it points
 into boot RAM and the base otherwise, and reports which route answered.
 Only the first is a promise the ROM keeps across releases.
 
-AND THE WAY BACK IS NOT LOAD-BEARING FOR CORRECTNESS, which is the other
+And the way back is not load-bearing for correctness, which is the other
 half of the difference from the RP2040. 5.4.8.6 states it: the ROM's
 `flash_exit_xip()` sets a basic 03h read mode up as it goes, and the
 program and erase functions do not leave XIP inaccessible. So after a
-window the flash is READABLE whatever happened; the setup function only
-restores the FAST mode. That is why this driver has two ways back and
+window the flash is readable whatever happened; the setup function only
+restores the fast mode. That is why this driver has two ways back and
 reports which it took.
 
-THE BOOTROM'S FLASH FUNCTIONS are the same six the RP2040 had, under the
+The bootrom's flash functions are the same six the RP2040 had, under the
 same two-character codes - 'I','F' to reconnect the pads and the QMI,
 'E','X' to put the device back in a serial command state, 'R','E' and
 'R','P' to erase and program, 'F','C' to flush the cache, 'C','X' for
@@ -137,7 +212,7 @@ panes, 'X','M' to pick a read mode and 'F','A' to translate a runtime
 address into a storage address. They are Secure-Arm and RISC-V both,
 found through the per-architecture lookup `bootrom.hpp` does, and none
 of them is among the four that 5.4.8.26 says want extra stack on
-RISC-V. Beside them sit two ROM DATA pointers, each a pointer TO a
+RISC-V. Beside them sit two ROM data pointers, each a pointer to a
 pointer: 'X','F' for the setup function and 'F','D' for the runtime
 copy of FLASH_DEVINFO in boot RAM.
 
@@ -153,7 +228,7 @@ ignores the chip select 1 pad FLASH_DEVINFO names and always uses GPIO 0.
 It bites only a board that has a device on chip select 1; nothing in brio
 writes that field, and the bench board has nothing there.
 
-WHAT A WINDOW COSTS, AND WHAT IT ASKS. While the QMI is in direct mode
+What a window costs, and what it asks. While the QMI is in direct mode
 the windows are gone: an access to them is a bus error, for the
 processor, for the debugger and for the other core alike (5.4.8.10). So
 every operation runs from `.ram_text` - an input section the linker
@@ -161,29 +236,29 @@ script folds into .data, copied to SRAM by the crt, spelled
 `.ram_text.brio` and never cloned as a header's function must be
 (util/placement.hpp) - with this core's
 interrupts masked for the whole of it. The rest cannot be enforced from
-here and is therefore stated: THE OTHER CORE MUST NOT FETCH OR READ
-FLASH while a window is open, and no DMA channel may have the window as
+here and is therefore stated: **the other core must not fetch or read
+flash while a window is open**, and no DMA channel may have the window as
 a source. A buffer of the caller's that lies in the XIP space is
 refused.
 
-AND THE ROM'S CACHE FLUSH IS AN INVALIDATE, not a clean: it drops every
+And the ROM's cache flush is an invalidate, not a clean: it drops every
 line, dirty ones included. That matters only to a program that has made
-a memory window WRITABLE - which only a RAM on the QSPI bus makes sense
+a memory window writable - which only a RAM on the QSPI bus makes sense
 of - so every window here cleans the cache first, and only when one of
 the two writable bits is set. The clean is a maintenance write and not a
 QSPI access, so it happens before the window opens, out of flash like the
 rest of the driver.
 
-TWO MORE THINGS ARE SAVED ACROSS A WINDOW, and neither was the RP2040's
-concern. `connect_internal_flash()` puts every QSPI PAD CONTROL back to
-its reset state, and `flash_exit_xip()` rewrites WINDOW 1's timing, read
+Two more things are saved across a window, and neither was the RP2040's
+concern. `connect_internal_flash()` puts every QSPI pad control back to
+its reset state, and `flash_exit_xip()` rewrites window 1's timing, read
 format and read command as well as window 0's. This driver snapshots the
 six pad registers and window 1's trio and writes them back - the trio
 only when FLASH_DEVINFO says nothing is attached to chip select 1, which
 is the only case in which the old configuration is still the right one.
 
-THE RAW COMMAND VERB READS AND NOTHING ELSE. The opcodes it will clock
-out are an ALLOW-LIST, every one of them a read: 03h, 0Bh, 05h, 35h,
+The raw command verb reads and nothing else. The opcodes it will clock
+out are an allow-list, every one of them a read: 03h, 0Bh, 05h, 35h,
 15h, 5Ah, 9Fh, 4Bh and 90h. There is no write enable, no status or
 configuration register write, no erase and no page program in it. The
 reason is not squeamishness: those registers are one-way on a good many
@@ -196,18 +271,18 @@ address and a length and never an opcode.
 
 The linker script stops the `flash` region 64 kB short of the chip
 (`rp2350/ld/rp2350_16m.ld`, 16320K of 16384K), so nothing the compiler
-emits can land in the top 64 kB and the storage's floor is a CONSTANT
+emits can land in the top 64 kB and the storage's floor is a constant
 rather than a symbol that moves with every build. `__brio_flash_end` is
-read back as the proof, and a script edited past the line CLOSES the
+read back as the proof, and a script edited past the line closes the
 medium rather than letting an image grow into its own storage.
 
     0x00'0000 .. 0xff'0000   the image (the linker's)
     0xff'0000 .. 0x100'0000  QspiFlash, 64 kB: sixteen sectors of 4096
 
-THE CELL IS THE PAGE: the bootrom's program takes whole 256-byte pages,
+The cell is the page: the bootrom's program takes whole 256-byte pages,
 so the medium's write cell is 256 under an erase size of 4096.
 
-NOTHING STANDS ON THE CONTRACT HERE. Neither the block heap nor the
+Nothing stands on the contract here. Neither the block heap nor the
 value journal is instantiated on this family, by the same decision the
 CH32V203 records: the NV stack is under review as a whole, and the
 question of which programs need a block allocator, which need small
@@ -221,7 +296,7 @@ flash with bounds it cannot write outside of.
 both FIFOs' levels and flags, direct mode's own divisor and sample
 delay, a push that takes a raw word or a described frame, a pop, the
 four FIFO addresses a DMA channel may be pointed at (the APB pair and
-the auxiliary AHB pair), a READ-ONLY view of the six QSPI pad controls,
+the auxiliary AHB pair), a read-only view of the six QSPI pad controls,
 and the verb that puts all eight translation panes back to the identity -
 eight stores this file makes itself rather than calling the ROM's
 'R','A', and a verb a program whose own code is reached through a
@@ -231,7 +306,7 @@ translated pane must not call, because the ground it runs on would move.
 (and a divisor-only setter, the one change 4.4 allows while the
 interface runs), its read and write formats as `QmiTransferFormat`, its
 two command pairs as `QmiCommand`, its four panes as `QmiTranslation`
-(by BYTES, never by the register's 4 kB units), a translation read off
+(by bytes, never by the register's 4 kB units), a translation read off
 the live registers, an identity check, and its chip select in both of
 the chapter's arrangements. A third window is a compile error, and so is
 a fifth pane.
@@ -255,16 +330,17 @@ flags, a pop, and the FIFO's two addresses.
 
 `Flash` is the engine: `init()` finds the ROM's functions and copies the
 setup function, `xip_restore_kind()` says which way back this image got,
-`device_info()` decodes the runtime FLASH_DEVINFO, `runtime_to_storage()`
-is the ROM's own translator, `address()` / `uncached_address()` /
-`untranslated_address()` are the three readable aliases, `read()` is a
-copy through the cache, `erase()` takes a grain (`FlashEraseGrain`) that
-says whether the 64 kB block command may be used, `program()` takes
-whole pages from SRAM, `commit_writes()` is the clean every window does
-for itself, and `command()` is the raw read - with the opcode
-as an argument, refused at run time, or as a template argument, refused
-at compile time. Over it `jedec_id()`, `unique_id()`,
-`status_register<1|2|3>()` and `read_sfdp()`.
+`device_info()` decodes the runtime FLASH_DEVINFO,
+`runtime_to_storage()` is the ROM's own translator, `address()` /
+`uncached_address()` / `untranslated_address()` are the three readable
+aliases, `read()` is a copy through the cache, `erase()` takes a grain
+(`FlashEraseGrain`) that says whether the 64 kB block command may be
+used, `program()` takes whole pages from a source outside the XIP space,
+`commit_writes()` is the clean every window does for itself, and
+`command()` is the raw read - with the opcode as an argument, refused at
+run time, or as a template argument, refused at compile time. Over it
+`jedec_id()`, `unique_id()`, `status_register<1|2|3>()` and
+`read_sfdp()`.
 
 `QspiFlashPartition` states the geometry once and answers
 `geometry_matches_silicon()`, plus two constexpr predicates a program
@@ -286,7 +362,8 @@ if (brio::Flash::init()) {
 }
 ```
 
-Erase and program the storage partition. The source must be in SRAM, and
+Erase and program the storage partition. The source must lie outside
+the XIP space - SRAM, as here; a constant table in flash is refused - and
 the caller owns the duty of keeping the other core off the flash:
 
 ```cpp
@@ -346,7 +423,7 @@ a write opcode is refused:
 ```cpp
 uint8_t sfdp[8];
 brio::Flash::read_sfdp(0, sfdp);                        // 5Ah
-brio::Flash::command<0x02>({}, sfdp);                   // COMPILE ERROR: 02h writes
+brio::Flash::command<0x02>({}, sfdp);                   // compile error: 02h writes
 ```
 
 ## Bench findings
@@ -489,8 +566,8 @@ Driver gaps, each with its reason:
   and issuing whatever the DEVICE needs to agree (a quad enable, a
   continuous read prefix). That sequence is a FLASH CHIP'S, not this
   block's, and it wants a board file that names the chip - which this
-  project does not have yet. A program that wants the flash faster today
-  gets what the bootrom found.
+  project does not have. A program that wants the flash faster gets
+  what the bootrom found.
 - **A device on chip select 1.** The second window has every verb the
   first has, and the driver refuses to restore its configuration across
   a window when FLASH_DEVINFO says something is attached to it, because

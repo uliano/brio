@@ -1,57 +1,102 @@
 /*
  * block_stream.hpp (util)
  *
- * The vocabulary of BLOCK STREAMS - data that moves in caller-owned
+ * The vocabulary of block streams - data that moves in caller-owned
  * buffers at a rate the CPU never touches per sample - and BlockRelay,
- * the active object that hands filled blocks to subscribers as loans.
+ * the active object (an object with its own event queue, dispatched by
+ * the kernel loop) that hands filled blocks to subscribers as loans. A
+ * program that captures samples into a pair of buffers (a family's
+ * DMA ping-pong engine over a converter, say) lists a BlockRelay over
+ * the source after its subscribers, posts BlockDone from the source's
+ * completion handler, and each subscriber reads every filled block in
+ * place, once. The smallest use, as the STM32G0's DMA suite
+ * (test_stm32_dma) spells it:
  *
- * THE CONTRACT IS ABOUT BLOCKS, NOT ABOUT DMA. What the concepts below
- * name is a shape: a source that fills one caller-owned buffer while the
- * caller drains another and accounts for what it could not keep, and a
- * player that feeds one caller-owned table to a peripheral for ever.
- * Where the silicon has DMA both are DMA engines; on a machine with no
- * DMA the same concepts are satisfiable by an interrupt handler filling
- * the buffers - nothing here asks HOW a block gets full. The concepts
- * are the fixed point against which a platform's stream machinery is
+ *     using Pong = brio::DmaPingPongEngine<1, 4, uint32_t>;   // the source
+ *     class Relay : public brio::BlockRelay<P, brio::Subscribers<Consumer>, Pong> {};
+ *     brio::Tenuto<P, Consumer, Relay>::run();               // subscribers first
+ *
+ *     // in the program's handler for the engine's vector, after its complete():
+ *     brio::post<Relay>(brio::BlockDone{});
+ *
+ *     // in Consumer, handling BlockReady<uint32_t> b:
+ *     const volatile uint32_t* p = b.data.get();   // b.length elements, this dispatch only
+ *
+ * The page this vocabulary belongs to is docs/design/block-stream.md,
+ * "Block streams".
+ *
+ * Who calls what, and from where, and who owns a block until when:
+ *  - the source fills its buffers (a DMA controller, or an interrupt
+ *    handler on a machine with none); its completion handler posts
+ *    BlockDone, legal from any context (kernel/post.hpp), never waiting;
+ *  - the relay runs in the kernel loop, in main context: each dispatch
+ *    first gives back to their sources the blocks it lent in its
+ *    previous dispatch (release()), then lends at most one ready block
+ *    per source to the subscribers (publish() of BlockReady) and, if it
+ *    lent any, posts BlockDone to itself;
+ *  - a subscriber may read the block only while handling that
+ *    BlockReady, and must not keep the pointer: the buffer goes back to
+ *    the source at the relay's next dispatch, which its self-post
+ *    guarantees. The buffers themselves are the application's (or the
+ *    source's), never the relay's. Nothing here waits, and nothing
+ *    masks interrupts beyond what each post() and publish() does for
+ *    the copy of its event (kernel/post.hpp).
+ *
+ * The contract is about blocks, not about DMA (docs/design/block-stream.md,
+ * "The two concepts"). What the concepts below name is a shape: a
+ * source that fills one caller-owned buffer while the caller drains
+ * another and accounts for what it could not keep, and a player that
+ * feeds one caller-owned table to a peripheral for ever. Where the
+ * silicon has DMA both are DMA engines; on a machine with no DMA the
+ * same concepts are satisfiable by an interrupt handler filling the
+ * buffers - nothing here asks how a block gets full. The concepts are
+ * the fixed point against which a platform's stream machinery is
  * measured, so that friction shows up as "this concept does not fit"
- * rather than as silent divergence.
+ * rather than as silent divergence (docs/design/block-stream.md, "Why a
+ * fixed point").
  *
- * WHY AN AO AT ALL, AND WHY IT IS NOT A SAMPLER. MeterSampler exists to
- * DISCARD: a meter's latest value is the only one worth publishing, so
+ * Why an active object at all, and why it is not a sampler
+ * (docs/design/block-stream.md, "BlockRelay"). MeterSampler exists to
+ * discard: a meter's latest value is the only one worth publishing, so
  * it paces publication below the capture rate and stale readings die in
- * the latch. A block stream is the opposite economy - EVERY block must
+ * the latch. A block stream is the opposite economy - every block must
  * reach its consumer exactly once, because the samples inside it exist
  * nowhere else. So BlockRelay is event-driven, not paced: the source's
- * own completion is the wakeup (the ISR glue posts BlockDone), the
- * source's two buffers are the slack that absorbs dispatch latency, and
- * a consumer that falls behind shows up in the SOURCE's overrun count -
- * the engine skips laps rather than tear blocks, and the relay invents
- * no second truth beside it.
+ * own completion is the wakeup (the interrupt glue posts BlockDone),
+ * the source's two buffers are the slack that absorbs dispatch latency,
+ * and a consumer that falls behind shows up in the source's overrun
+ * count - the engine skips laps rather than tear blocks, and the relay
+ * invents no second truth beside it.
  *
- * THE LOAN DISCIPLINE, which is the whole design. A block is too big to
+ * The loan discipline, which is the whole design. A block is too big to
  * copy through a queue, so BlockReady carries a Lease::dispatch loan
  * (kernel/borrowed.hpp): valid during the receiving dispatch only. The
- * relay declares `LendsTo = Subs` and the kernel refuses a pack where a
- * borrower does not precede it - which is what makes the release timing
- * correct BY CONSTRUCTION: when a BlockRelay dispatch starts, the kernel
- * has already served every borrower's queue, so every block lent in the
- * PREVIOUS dispatch has been consumed, and releasing it back to the
- * source is the first thing the new dispatch does (SerialPort's
- * two-line-buffer contract, generalized). Between the lend and that
- * release the source's other buffer is the one being filled, so the
- * consumer reads memory nothing is writing.
+ * relay declares `LendsTo = Subs` and Tenuto refuses, when the program
+ * is compiled, a list where a borrower does not precede it - which is
+ * what makes the release timing correct: when a BlockRelay dispatch
+ * starts, the kernel has already served every borrower's queue, so
+ * every block lent in the previous dispatch has been consumed, and
+ * releasing it back to the source is the first thing the new dispatch
+ * does (SerialPort's two-line-buffer contract, generalized,
+ * util/serial_port.hpp). Between the lend and that release the source's
+ * other buffer is the one being filled, so the consumer reads memory
+ * nothing is writing. What the order guarantees is the timing; that a
+ * subscriber keeps no copy of the pointer is the subscriber's duty,
+ * which nothing checks.
  *
- * WHAT IS DELIBERATELY ABSENT. A playback AO: a player needs no pacing
- * (the peripheral's own request paces it) and nothing to publish per
- * lap; its laps()/faults() are a readback, and an owner that wants them
- * as events arms its own TimeEvent. One-shot burst vocabulary: a finite
- * capture is a source started and stopped - or, below util, a bare
- * engine block - and earns a concept only when a second user shapes it.
- * Restart policy after a stall: release() restarting the stream is the
- * SOURCE's contract; whether the gap warrants an app-level response is
- * the subscriber's business, told by the overrun count it can read.
+ * What is deliberately absent (docs/design/block-stream.md, "What is
+ * deliberately absent"). A playback active object: a player needs no
+ * pacing (the peripheral's own request paces it) and nothing to publish
+ * per lap; its laps()/faults() are a readback, and an owner that wants
+ * them as events arms its own TimeEvent. One-shot burst vocabulary: a
+ * finite capture is a source started and stopped - or, below util, a
+ * bare engine block - and earns a concept only when a second user
+ * shapes it. Restart policy after a stall: release() restarting the
+ * stream is the source's contract; whether the gap warrants an
+ * app-level response is the subscriber's business, told by the overrun
+ * count it can read.
  *
- * (docs/design/block-stream.md.)
+ * (Host suite: test/test_block_stream.)
  */
 
 #pragma once
@@ -89,7 +134,7 @@ concept BlockSource = requires {
 
 /**
  * The playback half of the vocabulary: one caller-owned table fed to a
- * peripheral for ever. No AO consumes it - the readbacks are the
+ * peripheral for ever. No active object consumes it - the readbacks are the
  * surface, and laps() moving is the one fact that says the stream is
  * alive. Named here so a platform's playback machinery has a contract
  * to meet, exactly as BlockSource does for capture.
@@ -112,8 +157,10 @@ struct BlockDone {};
 
 /// Published per filled block: which source (its position in the
 /// relay's list), the block as a Lease::dispatch loan, and how many
-/// elements it holds. Read it during the receiving dispatch; the relay
-/// hands the buffer back to the source right after.
+/// elements it holds. Read it during the receiving dispatch and keep no
+/// pointer to it; the relay hands the buffer back to the source at its
+/// next dispatch (the one its self-post guarantees), after every
+/// subscriber has handled this event.
 template <typename T>
 struct BlockReady {
     uint8_t source;
@@ -122,18 +169,20 @@ struct BlockReady {
 };
 
 /**
- * The AO: woken by completions, it returns the loans of its previous
- * dispatch to their sources, then lends ONE ready block per source to
- * the subscribers - and re-posts itself whenever it lent anything, so
- * the returning dispatch is guaranteed even when the stream has gone
- * quiet (a stalled source emits no further completions; the self-post
- * is what lets release() restart it).
+ * The active object: woken by completions, it returns the loans of its
+ * previous dispatch to their sources, then lends one ready block per
+ * source to the subscribers - and re-posts itself whenever it lent
+ * anything, so the returning dispatch is guaranteed even when the
+ * stream has gone quiet (a stalled source emits no further
+ * completions; the self-post is what lets release() restart it).
  *
  * The relay configures no hardware and starts no stream - it does not
  * know any. The application arms its engines, binds the completion
  * glue (`post<Relay>(BlockDone{})` after the engine's complete()), and
- * lists the relay AFTER its subscribers in the kernel pack; the
- * static_assert on LendsTo holds it to that.
+ * lists the relay after its subscribers in Tenuto's list of active
+ * objects; Tenuto's compile-time check on LendsTo holds it to that. At
+ * most eight sources (the relay keeps one bit per source of what it
+ * lent).
  */
 template <Platform P, typename Subs, BlockSource... Sources>
     requires (sizeof...(Sources) > 0 && sizeof...(Sources) <= 8)
@@ -149,14 +198,19 @@ public:
 
     /// Depth: one completion per source can land before the relay runs,
     /// plus its own self-post. An overflow is harmless by construction -
-    /// any queued BlockDone triggers a full scan - and the queue's
-    /// saturating counter still reports it.
+    /// any queued BlockDone triggers a full scan, so a dropped one delays
+    /// work and loses none - and the queue's saturating counter still
+    /// reports it.
     static inline EventQueue<Event, source_count + 2, P> queue;
 
     /// BlockReady is a Lease::dispatch loan: every subscriber must
-    /// precede this AO in the pack (tenuto.hpp refuses otherwise).
+    /// precede this active object in Tenuto's list (kernel/tenuto.hpp
+    /// refuses otherwise, at compile time).
     using LendsTo = Subs;
 
+    /// Forgets any loan and zeroes published(); configures no hardware
+    /// and starts no stream. Called by Tenuto, in main context, before
+    /// the first event.
     static void init() {
         lent_ = 0;
         published_ = 0;
@@ -169,7 +223,8 @@ public:
     static uint16_t published() { return published_; }
 
     /// A source's own accounting, passed through by list position - the
-    /// relay keeps no second truth beside the source's.
+    /// relay keeps no second truth beside the source's. An index past the
+    /// list answers 0.
     static uint32_t laps(uint8_t index) {
         uint32_t out = 0;
         uint8_t k = 0;

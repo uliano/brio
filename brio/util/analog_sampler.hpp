@@ -1,45 +1,86 @@
 /*
  * analog_sampler.hpp (util)
  *
- * AnalogSampler: the active object that owns ONE analog-to-digital
+ * AnalogSampler: the active object (an object with its own event queue,
+ * dispatched by the kernel loop) that owns one analog-to-digital
  * converter, walks a fixed list of inputs and publishes every result
- * as a value event. A usage type, not an application: what it knows is
- * "a list of inputs, a pace, samples out"; what it does not know is
- * what the samples mean (the subscribers convert with util/analog.hpp),
+ * as a value event to the active objects that subscribe to it. A
+ * program that wants its readings as events, each labelled with the
+ * input it was taken on, names the converter, the inputs and the
+ * subscribers, binds the converter's result vector, and picks a pace.
+ * The smallest use, in the AVR's spelling:
+ *
+ *     using Sampler = brio::AnalogSampler<Adc, P, brio::Subscribers<Monitor, Alarm>,
+ *                                         Loop{}, brio::AdcInput::temp, brio::AdcInput::vdd_div10>;
+ *
+ *     // in main, before Tenuto runs: the owner configures the converter
+ *     Adc::init<adc_cfg>(clock);
+ *     // in the program's handler for the converter's result vector:
+ *     ISR(ADC0_RESRDY_vect) { brio::post<Sampler>(brio::Sampled{Adc::resrdy(), Adc::selected()}); }
+ *     // and, from an event handler, the software pace:
+ *     Sampler::start_every(brio::ticks_from_ms<P>(ms));
+ *
+ * Each subscriber handles AnalogSample{index, value}: index is the
+ * input's position in the list, value the raw counts, and what they
+ * mean is the subscriber's (it converts with util/analog.hpp). The page
+ * this service belongs to is docs/design/analog.md, "The sampler is a
+ * usage type, not an application".
+ *
+ * Who calls what, and from where:
+ *  - the converter's result-ready interrupt handler body (the driver's)
+ *    returns the value, and the program's vector binding posts
+ *    Sampled{value, input} to the sampler, reading the input code in
+ *    the same handler. post() copies the event and never waits
+ *    (kernel/post.hpp); a full queue drops it and counts it in
+ *    Sampler::queue.overflows();
+ *  - the sampler runs in the kernel loop, in main context: its init()
+ *    (called by Tenuto, in list order, before the first event) claims
+ *    every input and selects the first; a Sampled whose input code is
+ *    in the list is published as an AnalogSample and the next input
+ *    selected, one whose code is not is dropped and counted
+ *    (unknown_inputs()) and the input after the last known one is
+ *    selected; each SamplerTick of the
+ *    software pace starts one conversion. Nothing here waits or masks
+ *    beyond what the converter's own select and start do;
+ *  - start_every(), stop() and running_every() drive a TimeEvent, so
+ *    they run in main context only (kernel/time_event.hpp), never in an
+ *    interrupt handler;
+ *  - subscribers receive AnalogSample by value, copied into their own
+ *    queues by publish(): nothing is lent, nothing to give back.
+ *
+ * A usage type, not an application: what it knows is "a list of inputs,
+ * a pace, samples out"; what it does not know is what the samples mean,
  * where the pace comes from, or which silicon converts.
  *
  * The converter is a type satisfying AnalogConverter (a target's own
- * ADC; a fake in host tests): it can start one conversion, say which input is selected, and select each input of
- * the list (the inputs are values of the converter's own input
+ * ADC; a fake in host tests, test/test_analog_sampler): it can start
+ * one conversion, say which input is selected, and select each input
+ * of the list (the inputs are values of the converter's own input
  * vocabulary - pin tags, internal sources - given as template
- * arguments, so selection is an overload resolved at compile time).
+ * arguments, so selection is an overload resolved at compile time, and
+ * an input the converter cannot take is a compile error).
  *
  * Two paces, one sampler:
- *  - SOFTWARE: start_every(ticks) arms a periodic TimeEvent; every tick
+ *  - software: start_every(ticks) arms a periodic TimeEvent; every tick
  *    starts one conversion. Kernel-tick granularity (>= 1 ms on a 1024
  *    Hz ticker), no hardware beyond the converter.
- *  - HARDWARE: the application routes any event generator (a PIT
+ *  - hardware: the application routes any event generator (a PIT
  *    divider, a timer overflow, a pin, ...) to the converter's start
  *    input, in that target's own vocabulary, and never calls
  *    start_every: the sampler only receives results.
  *    That is the precise pace - jitter-free, in standby too - and the
- *    sampler does not care WHICH generator: the pace is the app's
+ *    sampler does not care which generator: the pace is the app's
  *    choice, made where the hardware is wired.
  *
- * The result path is the kernel's ISR contract: the driver's
- * result-ready ISR body returns the value, the application's vector
- * binding posts Sampled{value, input} to this AO:
- *
- *   ISR(ADC0_RESRDY_vect) { post<Sampler>(Sampled{Adc<0>::resrdy(), Adc<0>::selected()}); }
- *
- * Sampled carries the input CODE the converter had selected for that
- * conversion (read in the ISR, with the value): attribution never
- * depends on the sampler's dispatch being on time - a late dispatch,
- * a hardware pace faster than the dispatch, or a queue overflow can
- * delay or lose samples, never mislabel them. On each Sampled the
- * sampler publishes AnalogSample{index, value} (index = position in
- * the list) and selects the NEXT input, so the next conversion walks
- * the list. A code not in the list is dropped and counted.
+ * Attribution by the reported code, never by timing. Sampled carries
+ * the input code the converter had selected for that conversion (read
+ * in the interrupt handler, with the value): attribution never depends
+ * on the sampler's dispatch being on time - a late dispatch, a hardware
+ * pace faster than the dispatch, or a queue overflow can delay or lose
+ * samples, never mislabel them. On each Sampled the sampler publishes
+ * AnalogSample{index, value} and selects the input after the one just
+ * reported, so the next conversion walks the list. A code not in the
+ * list is dropped and counted (unknown_inputs()).
  *
  * The owner's duties stay with the application: configuring the
  * converter before init() (reference, accumulation: the sampler does
@@ -54,18 +95,19 @@
  * as configured - Sampled.value is 16 bits, and a converter declaring
  * more (an unscaled sum of many samples) is refused at compile time.
  *
- * A converter whose input mux is NOT buffered (a select landing during
+ * A converter whose input mux is not buffered (a select landing during
  * a conversion corrupts it) keeps the promise in its own select: under
  * a hardware pace the driver aborts the conversion in flight before it
  * moves the mux and re-arms the pace after - one dropped or aborted
  * trigger at worst, never a result under another input's label (the
- * AVR EA's adc.hpp; docs/design/analog.md).
+ * AVR EA's adc.hpp; docs/design/analog.md, "The sampler is a usage
+ * type, not an application", gives the sweep that measured it).
  *
- * The contract wants a converter that reports ONE result per interrupt
+ * The contract wants a converter that reports one result per interrupt
  * with the selected input readable from a register - which a converter
  * carrying a hardware sequencer and DMA also satisfies, because the
  * sampler uses neither: it walks its own list and reads the code the
- * driver reports. A source that delivers a whole BLOCK per interrupt is
+ * driver reports. A source that delivers a whole block per interrupt is
  * a different economy and belongs to util/block_stream.hpp instead.
  * Pacing from a hardware event survives everywhere, because the sampler
  * never names the trigger: the app's wiring does, and that is target
@@ -101,8 +143,9 @@ concept SamplerInput = requires {
     { std::integral_constant<uint8_t, C::input_code(in)>{} };
 };
 
-/// Posted by the application's ISR glue: one conversion result and the
-/// input code it was taken on.
+/// Posted by the application's interrupt glue: one conversion result
+/// and the input code the converter reported for it, both read in the
+/// same handler.
 struct Sampled {
     uint16_t value;
     uint8_t input;
@@ -145,12 +188,17 @@ public:
                   "AnalogSampler: Sampled.value is 16 bits and this converter delivers more as "
                   "configured (an unscaled sum of many samples) - scale the sum, or accumulate fewer");
 
-    /// Depth: results arrive from the ISR at the pace; a slow dispatch
-    /// elsewhere queues a few. Overflows are counted by the queue.
+    /// Depth: results arrive from the interrupt handler at the pace; a
+    /// slow dispatch elsewhere queues a few. Overflows are counted by the
+    /// queue (queue.overflows()), and a dropped Sampled is a lost sample,
+    /// never a mislabelled one.
     static inline EventQueue<Event, 4, P> queue;
 
-    /// Selects the first input and waits. The converter must already be
-    /// configured (init) by the owner.
+    /// Claims every input of the list (where the converter has claim()),
+    /// selects the first and waits for results. Called by Tenuto, in
+    /// main context, before the first event; the converter must already
+    /// be configured (its own init) by the owner. Starts no conversion
+    /// and arms no pace.
     static void init() {
         index_ = 0;
         unknown_ = 0;
@@ -162,12 +210,19 @@ public:
     static void dispatch(const Event& e) { Base::dispatch(e); }
 
     /// Software pace: one conversion every `period_ticks` kernel ticks
-    /// (main context only, like every TimeEvent).
+    /// (main context only, like every TimeEvent). Calling it again
+    /// re-paces; stop() disarms the pace (results of a conversion already
+    /// started still arrive and are published); running_every() says
+    /// whether the software pace is armed. A hardware pace is the
+    /// application's to start and stop, not these.
     static void start_every(uint32_t period_ticks) { tick_.arm_every(period_ticks); }
     static void stop() { tick_.disarm(); }
     static bool running_every() { return tick_.armed(); }
 
-    /// Results whose input code is not in the list (dropped).
+    /// Results whose input code is not in the list: dropped, no
+    /// AnalogSample published, and the input after the last one whose
+    /// code WAS in the list is selected all the same (the second input,
+    /// when no known code has come since init()). Saturating at 255.
     static uint8_t unknown_inputs() { return unknown_; }
 
 private:

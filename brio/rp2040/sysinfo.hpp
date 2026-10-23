@@ -1,16 +1,25 @@
 /*
  * sysinfo.hpp
  *
- * SYSINFO (datasheet 2.20): what the chip says about itself. CHIP_ID is
- * the JEDEC JEP-106 identifier - manufacturer 0x927 (Raspberry Pi),
- * part 0x0002 (the RP2040) and the silicon REVISION the errata are keyed
- * by (1 = B1, 2 = B2, the one on every board sold since 2021; 0 = B0) -
- * and GITREF_RP2040 the git hash of the chip's source. There is no
- * per-die serial number on this chip: a board's identity is its flash
- * chip's unique id, read over the SSI, which is a later chapter.
+ * SYSINFO (datasheet 2.20): what the chip says about itself - for a
+ * banner, or for a program that must know which silicon revision the
+ * errata apply to. The console prints it:
  *
- * The block is one of the reset controller's (2.14): read() releases it
- * first, so the first suite banner of a program costs one release.
+ *     const brio::ChipId id = brio::ChipId::read();
+ *     brio::print(serial, "RP2040 rev B", id.revision, ...);
+ *
+ * CHIP_ID is the JEDEC JEP-106 identifier - manufacturer 0x927
+ * (Raspberry Pi), part 0x0002 (the RP2040) and the silicon revision the
+ * errata are keyed by (1 = B1, 2 = B2, the one on every board sold since
+ * 2021; 0 = B0) - and GITREF_RP2040 the git hash of the chip's source.
+ * There is no per-die serial number on this chip: a board's identity is
+ * its flash chip's unique id, read over the SSI (rp2040/flash.hpp,
+ * `Flash::unique_id()`).
+ *
+ * The block is one of the reset controller's (2.14): read() and gitref()
+ * release it first (a bounded wait, rp2040/resets.hpp), so the first
+ * suite banner of a program costs one release. Neither masks
+ * interrupts: the release is one write to an atomic alias.
  */
 
 #pragma once

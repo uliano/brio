@@ -1,29 +1,93 @@
 # PWM (RP2350)
 
-Documents of record: the RP2350 datasheet (build d126e9e), 12.5 whole
-(12.5.1 the overview, 12.5.1.1 what changed from the RP2040, 12.5.2 the
-programmer's model with table 1130 - the slice and channel of every GPIO
--, 12.5.2.1 the counter and the compare, 12.5.2.2 the 0 % and 100 %
-levels, 12.5.2.3 the double buffering, 12.5.2.4 the fractional divider,
-12.5.2.5 the level and edge input modes, 12.5.2.6 the period, 12.5.2.7
-the two interrupt lines and the DMA request, 12.5.2.8 the phase nudges,
-12.5.3 the registers), 9.4 (the GPIO function table the pin map also
-appears in), 12.6.4.1 (the DREQ table); Appendix E names no erratum of
-this block. `util/pwm_channel.hpp` for the PwmChannel contract. The
-driver: `brio/rp2350/pwm.hpp` (`Pwm` the block, `PwmSlice<n>` the
-resource, the tasks `PwmOutput`, `PwmPair`, `PwmEdgeCounter`,
-`PwmLevelCounter`, `PwmPeriodicTick`) over `pin.hpp`, `resets.hpp` and
-`dma_engine.hpp`. The reference suite: `test_rp2350_pwm` - its wire
-letters on three wires between the chip's own pads that the pair desk
-does not carry ([../boards/weact-rp2350b.md](../boards/weact-rp2350b.md)),
-so they run by name only, outside z, when they are fitted.
+This document is for a programmer who needs a pulse-width-modulated
+output - an LED dimmed, a motor or a bridge driven, a pair of
+complementary outputs with a dead time between them - or who wants the
+block for one of its other uses: a frequency or a duty measured on a
+pin with no capture unit, or a periodic interrupt with no pad at all.
+`brio/rp2350/pwm.hpp` gives the block in three layers, the same source
+on both of this chip's architectures: `Pwm` the block, `PwmSlice<n>`
+one of its twelve slices, and the tasks over them (a task, in brio, is
+the driver layer over a resource, named for what it does, that owns the
+whole configuration of the peripheral for that use,
+[design/overview.md](../design/overview.md)): `PwmOutput`, `PwmPair`,
+`PwmEdgeCounter`, `PwmLevelCounter` and `PwmPeriodicTick`. A
+`PwmOutput` is a `PwmChannel` (`util/pwm_channel.hpp`), the portable
+dimmable output the services above it take, `util/rgb_lamp.hpp` among
+them.
+
+The smallest use, one output at 10 kHz, is an excerpt of the first
+block under "How to use it" below:
+
+```cpp
+using Red = brio::PwmOutput<12, 999>;      // slice 6 A
+
+brio::Pwm::reset();
+Red::setup_hz(clock, 10'000);              // the slice at 10 kHz
+```
+
+Line by line: `Red` names the output on GP12, which is slice 6's A
+output (every GPIO has its one slice and output, table 1130), with a
+TOP of 999, so its levels run from 0 (always low) to 1000, TOP + 1
+(always high); `Pwm::reset()` takes the block through the subsystem
+reset controller to its reset state; and `setup_hz()` solves the
+slice's divider for 10 kHz at that TOP from the rate the clock task's
+type claims (`clock` is the tag object of that type,
+[clock.md](clock.md)), configures the slice from scratch, hands GP12 to
+the PWM function and starts the slice at a level of zero. `Red::duty(v)`
+then sets the level, taken at the next wrap.
+
+What decides correctness even there. `Pwm::reset()` comes first and
+once: the block is held in reset at power-up, and the call cycles the
+reset rather than releasing it, so a second call stops every slice at
+work. The clock task runs before `setup_hz()`, whose divider is computed
+from the rate the clock type claims and not read from the hardware.
+`setup_hz()` answers false when the rate wants a divider under one (a
+smaller TOP) or above 256 (a larger TOP), and the example discards that
+answer. A pad the package has not got is a compile error. The frequency
+belongs to the slice and the duty to the output: the slice's other
+output shares the period and is handed its pad by `attach()`, while a
+second `setup()` on the same slice configures it again from scratch,
+its counter back at zero. And a slice reports its wrap on one of two
+interrupt lines, whose vectors the program binds under the crt's names,
+`isr_pwm_wrap_0` and `isr_pwm_wrap_1`, the same on both architectures;
+a slice enabled on both is served by whichever handler runs first.
+
+The rest of this page, in order: the documents of record; what the
+silicon does, and the three things in it that are not the RP2040's; the
+types and verbs; how to use it, an RGB lamp, two repeating timers, a
+frequency measured, a level table streamed; the bench findings; and
+what is not covered.
+
+## Documents of record
+
+The RP2350 datasheet (build d126e9e), 12.5 whole (12.5.1 the overview,
+12.5.1.1 what changed from the RP2040, 12.5.2 the programmer's model
+with table 1130 - the slice and channel of every GPIO -, 12.5.2.1 the
+counter and the compare, 12.5.2.2 the 0 % and 100 % levels, 12.5.2.3 the
+double buffering, 12.5.2.4 the fractional divider, 12.5.2.5 the level
+and edge input modes, 12.5.2.6 the period, 12.5.2.7 the two interrupt
+lines and the DMA request, 12.5.2.8 the phase nudges, 12.5.3 the
+registers), 9.4 (the GPIO function table the pin map also appears in),
+12.6.4.1 (the DREQ table); Appendix E names no erratum of this block.
+`util/pwm_channel.hpp` for the PwmChannel contract. The driver:
+`brio/rp2350/pwm.hpp` (`Pwm` the block, `PwmSlice<n>` the resource, the
+tasks `PwmOutput`, `PwmPair`, `PwmEdgeCounter`, `PwmLevelCounter`,
+`PwmPeriodicTick`) over `pin.hpp`, `resets.hpp` and `dma_engine.hpp`.
+The reference suite: `test_rp2350_pwm` (a letter is one command key of
+the suite's console and the group of verdicts it runs; `z` is the key
+that runs every letter but those that run by name: the wire letters `c`,
+`d`, `e`, `f`, `g`, `h` and `k`, on three wires between the chip's own
+pads that the pair desk does not carry
+([../boards/weact-rp2350b.md](../boards/weact-rp2350b.md)), run when
+they are fitted, and `y`, the instruments' diagnostics).
 
 ## What the silicon does
 
-TWELVE identical slices, each a 16-bit counter with a wrap value (TOP),
+Twelve identical slices, each a 16-bit counter with a wrap value (TOP),
 two compare levels (CC A and CC B) driving two outputs, an 8.4 fractional
 divider off clk_sys, a phase-correct mode in which the counter runs back
-down to 0 (the period doubles, the pulse stays centred), and an INPUT
+down to 0 (the period doubles, the pulse stays centred), and an input
 mode in which the B pin gates or clocks the counter: count while B is
 high, or once per rising or falling edge. A level of 0 is a 0 % output
 with no pulse and TOP + 1 a 100 % output with no gap. CC and TOP are
@@ -33,12 +97,12 @@ enable bit, so slices started by one write run in lockstep; PH_ADV and
 PH_RET move a running slice one count forward or back (an advance needs a
 divider above one).
 
-THREE THINGS ARE NOT THE RP2040'S, and they are what 12.5.1.1 names plus
+Three things are not the RP2040's, and they are what 12.5.1.1 names plus
 one sentence of 12.5.2.6:
 
 - **Four more slices.** Slices 8..11 are on the die of both packages, but
   their pads are GPIO 32..47, which only the QFN-80 bonds. In the QFN-60
-  they are REPEATING TIMERS with no output - the chapter's own words for
+  they are repeating timers with no output - the chapter's own words for
   them - and that is what `PwmPeriodicTick` is for there. This stratum
   takes the package from `device.hpp`, so a `PwmOutput` on a pad the
   package has not got is a compile error and `PwmSlice<8>` is legal in
@@ -54,7 +118,7 @@ one sentence of 12.5.2.6:
   and each is a system interrupt line of its own. So two handlers can own
   disjoint sets of slices, which is what 12.5.1.1 says the line was added
   for: PWM slices as simple repeating timers, beside whatever else the
-  block is driving. The raw flag is ONE, so a slice enabled on both lines
+  block is driving. The raw flag is one, so a slice enabled on both lines
   is served by whichever handler runs first and the other finds nothing.
 - **The divider stops at 256 exactly.** 12.5.2.6 states that no DIV_FRAC
   bit may be set while DIV_INT is 0, so the fractional part exists up to
@@ -62,14 +126,14 @@ one sentence of 12.5.2.6:
   refuses the combination in `PwmDivider::valid()`, before any register
   moves.
 
-THE PINS: only a B pin is an input, which is why every measuring pad is
+The pins: only a B pin is an input, which is why every measuring pad is
 an odd GPIO; in the level and edge modes the B pin stops being an output
 and CC B is ignored. A frequency measured by edges needs the signal's
 high and low periods both longer than one clk_sys period (the edge
 detector's rule, 12.5.2.5).
 
 The block is behind the subsystem reset controller (`ResetBlock::pwm`),
-and `Pwm::reset()` CYCLES that line rather than merely releasing it: a
+and `Pwm::reset()` cycles that line rather than merely releasing it: a
 processor reset on this chip leaves the peripherals as the previous image
 left them, so a driver that wants the reset state has to make it.
 
@@ -88,12 +152,12 @@ left them, so a driver that wants the reset state has to make it.
 - `Pwm`: `reset` / `hold` / `released`, `all_slices` (the twelve-bit
   mask), `start(mask)` / `stop(mask)` / `running()` (the global enable),
   `raw_pending()` / `clear_pending(mask)` (INTR, shared and
-  write-one-to-clear), and per LINE - the line a template parameter,
+  write-one-to-clear), and per line - the line a template parameter,
   because what makes a wrap a handler's is the app binding that line's
   vector - `interrupts<line>(mask, on)` / `interrupts<line>()`,
   `pending<line>()`, `force<line>(mask, on)`, `isr<line>()` (the
   raised-and-enabled slices, cleared) and `irq<line>()`.
-- `PwmSlice<n>`: `configure(config)` FROM SCRATCH in the vendor's order
+- `PwmSlice<n>`: `configure(config)` from scratch in the vendor's order
   (the slice disabled, its counter at zero, then the divider, TOP and the
   mode; the caller enables) and `config()` read back, `enable(on)` /
   `enabled()`, `level(ch, v)` / `levels(a, b)` / `level(ch)`, `top(v)` /
@@ -270,7 +334,7 @@ Implemented but not bench-verified, each with what would measure it:
 
 - A stream into TOP rather than into CC: `top_address()` is exposed and
   the pace would be the same request, but nothing has asked for a
-  frequency sweep yet.
+  frequency sweep.
 - A preset counter (`counter(v)` before a lockstep start, the phase
   relationship "determined by the initial counter values"): two outputs
   started with different counters, the offset read off the two pads' own

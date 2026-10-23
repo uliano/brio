@@ -1,44 +1,87 @@
 /*
  * surface.hpp (gfx)
  *
- * WHERE PIXELS GO. The Surface concept is the whole of what a drawing
- * primitive is allowed to assume, and it is deliberately the WRITE-ONLY
- * shape: two verbs, no way to read anything back. A panel that holds its
- * own pixels and answers no questions satisfies it; so does a
- * framebuffer in the program's memory, which can do far more and is not
- * asked to. Everything a primitive needs it gets from those two verbs.
+ * Where pixels go. A surface is anything a drawing primitive can draw
+ * on: a framebuffer in the program's memory, a window onto one, a panel
+ * driver that holds its own pixels behind a link. This header defines
+ * what a surface must offer (the Surface concept: a compiler-checked set
+ * of requirements on a type, here two operations and the bounds), the
+ * coordinate types and the clip a surface's fill_rect trims with, the
+ * two pixel formats, and the two surfaces the library itself provides:
+ * Framebuffer, pixels over storage the caller owns, and Viewport, a
+ * translated and clipped window onto another surface. The design is
+ * docs/design/gfx.md.
  *
- * WHY THE VERBS ARE THESE TWO. A panel is addressed as a window and then
+ * The smallest use is a framebuffer over the caller's bytes, drawn on
+ * with the free functions of gfx/draw.hpp and gfx/text.hpp (the AVR
+ * family's compile fixture, test/family_avrxt/gfx.cpp, spells it so; a
+ * 128x64 one-bit framebuffer is 16 bytes a row, 1024 in all, and the
+ * array is best a static, since the framebuffer points at it):
+ *
+ *     using Panel = brio::Framebuffer<brio::Mono, 128, 64>;
+ *     std::array<uint8_t, Panel::bytes> panel_bits;
+ *     Panel panel{panel_bits};
+ *     brio::clear(panel, 0);
+ *     brio::fill_rect(panel, 10, 10, 40, 20, 1);
+ *
+ * Who owns what, and where it runs. gfx is pure and kernel-free: it
+ * includes nothing of the kernel or of a target, so a draw runs in the
+ * caller's context, whatever that is (an active object's event handler,
+ * a host test), to completion. Nothing here waits, masks interrupts or
+ * allocates, and nothing is guarded, so a surface is drawn from one
+ * context only. Per format: a Mono framebuffer's pixel writes read,
+ * modify and write a byte that holds eight pixels, so a draw from an
+ * interrupt handler beside the main loop's on the same surface loses
+ * pixels; an Indexed8 framebuffer stores each pixel's byte whole and
+ * loses none, but where two contexts draw over the same pixels the
+ * order of their stores, and so the picture, is undefined. A
+ * Framebuffer keeps a pointer to the
+ * caller's storage and a Viewport one to the surface beneath it; each
+ * must outlive what points to it. What a surface's own verbs cost is
+ * the surface's: on a framebuffer a store, on a panel behind a link a
+ * transaction (docs/design/gfx.md, "The command tier").
+ *
+ * Why the base is write-only. The Surface concept is the whole of what
+ * a drawing primitive is allowed to assume, and it is deliberately the
+ * write-only shape: two verbs, no way to read anything back. A panel
+ * that holds its own pixels and answers no questions satisfies it; so
+ * does a framebuffer in the program's memory, which can do far more and
+ * is not asked to. Everything a primitive needs it gets from those two
+ * verbs (docs/design/gfx.md, "Three kinds of surface").
+ *
+ * Why the verbs are these two. A panel is addressed as a window and then
  * streamed into; that is what it is fast at. So the contract asks for a
  * rectangle filled with one colour and a horizontal run of caller-given
  * pixels - and a single pixel is the degenerate rectangle, derived, not
  * the foundation. A library built upward from set-a-pixel crawls on real
  * hardware because every pixel costs its own window command, and a
  * framebuffer hides that completely: the direction is fixed here so the
- * easy case cannot choose it later.
+ * easy case cannot choose it later (docs/design/gfx.md, "The surface
+ * contract").
  *
- * THE READ VERB IS A REFINEMENT, AND PRIMITIVES MAY NOT USE IT.
+ * The read verb is a refinement, and primitives may not use it.
  * ReadableSurface adds get_pixel for whoever owns the memory - a test,
  * an observer, an application in the memory-mapped tier. No primitive in
  * this library takes it as a parameter, and the base concept having no
  * such verb is the enforcement: a primitive that reached for it would
  * not compile against a write-only panel, which is the point.
  *
- * CLIPPING IS THE SURFACE'S JOB AND IT IS SILENT. On a microcontroller a
+ * Clipping is the surface's job and it is silent. On a microcontroller a
  * pixel written outside the buffer corrupts whatever lies beside it, so
  * every verb here trims to its own bounds. Silently, because an
  * interface that trims a shape at the edge of the screen is right and
  * one that refuses to draw it is not - and because a primitive that had
- * to ask first would pay for the question on every call.
+ * to ask first would pay for the question on every call
+ * (docs/design/gfx.md, "Conventions").
  *
- * COORDINATES ARE SIGNED, EXTENTS ARE NOT. A shape may begin off the
+ * Coordinates are signed, extents are not. A shape may begin off the
  * left or top edge and still be partly visible, so a coordinate is
- * signed; a width is not. Their SUM would not fit either of them, which
- * is why clip() below never forms it - and why nothing here needs to be
- * wider than sixteen bits. On an eight-bit part that is the difference
- * between one instruction and two on the hottest path in the library.
- *
- * (docs/design/gfx.md.)
+ * signed; a width is not. Their sum would not fit either of them, which
+ * is why clip() below never forms it - and why clip() needs nothing
+ * wider than sixteen bits (the two write_run() verbs below still form a
+ * run's far edge in 32 bits). On an eight-bit part that is the
+ * difference between one instruction and two on the hottest path in the
+ * library.
  */
 
 #pragma once
@@ -55,7 +98,7 @@ namespace brio {
 /// A position. Signed: a shape may start off-surface and still show.
 using Coord = int16_t;
 
-/// THE COORDINATE DOMAIN. A position, and a surface's own dimensions,
+/// The coordinate domain. A position, and a surface's own dimensions,
 /// stay within this: a panel an MCU drives is at most some hundreds of
 /// pixels a side, and this leaves room to place a shape several screens
 /// outside one and let the clipping deal with it.
@@ -64,9 +107,10 @@ using Coord = int16_t;
 /// value and reaches three times the segment's span - measured - so a
 /// domain is what lets that stepping stay sixteen bits wide instead of
 /// thirty-two. At 4096 the widest intermediate is 24574, a quarter of
-/// the type still spare.
+/// the type still spare (docs/design/gfx.md, "Conventions").
 ///
-/// A surface's size is checked against it; a coordinate a caller
+/// A framebuffer's size is checked against it (Framebuffer's
+/// static_assert; a Viewport's rectangle is not); a coordinate a caller
 /// computes cannot be, which is why the number is generous enough that
 /// reaching it means something has already gone wrong.
 inline constexpr Coord coord_max = 4096;
@@ -75,7 +119,7 @@ inline constexpr Coord coord_max = 4096;
 /// clip() reaches the same answer without forming that sum.
 using Extent = uint16_t;
 
-/// An axis-aligned rectangle: an ORIGIN AND AN EXTENT, never two
+/// An axis-aligned rectangle: an origin and an extent, never two
 /// corners. Whether a far corner is inside or outside is the commonest
 /// off-by-one in drawing code; an extent has no such question, and a
 /// zero extent means "nothing" with no special case anywhere.
@@ -96,12 +140,14 @@ constexpr uint_fast16_t off_near_edge(Coord p) {
 
 /**
  * The part of `r` that lies within a `bw` x `bh` surface, or nothing at
- * all.
+ * all (an empty optional when no pixel of `r` is inside, a zero extent
+ * included). Pure: any context, nothing touched.
  *
- * THIS RUNS ON EVERY PRIMITIVE CALL - on every pixel of a segment, since
- * a pixel is a one-by-one rectangle - so it is the one piece of
- * arithmetic in the library whose width is worth arguing about. It stays
- * in SIXTEEN BITS throughout, and does so without restricting what a
+ * This runs on every fill_rect a primitive makes - on every pixel of a
+ * segment, since a pixel is a one-by-one rectangle - so it is the one
+ * piece of arithmetic in the library whose width is worth arguing
+ * about. It stays
+ * in sixteen bits throughout, and does so without restricting what a
  * caller may ask: the trick is that the far edge `p + n` is never
  * formed. Trimming the near edge shortens the span, and trimming the far
  * one compares against the room that is left - `bound - p`, with `p`
@@ -158,11 +204,11 @@ constexpr std::optional<Rect> clip(Rect r, Extent bw, Extent bh) {
 
 /*
  * The pixel formats. A format says how a colour sits in a row of bytes
- * and nothing else - it is the "element type is the beat" rule of the
- * transfer engines, applied to pixels.
+ * and nothing else - the transfer engines' rule that the element type
+ * is the unit a transfer moves (the beat), applied to pixels.
  */
 
-/// One bit per pixel: row-major, the MOST SIGNIFICANT BIT LEFTMOST, each
+/// One bit per pixel: row-major, the most significant bit leftmost, each
 /// row a whole number of bytes. This is a framebuffer's layout in
 /// memory, and it is deliberately not any panel's native order - a panel
 /// that stores columns of pages converts inside its own driver, where
@@ -218,8 +264,9 @@ struct Mono {
 };
 
 /// Eight bits per pixel. The byte is a grey level or an index into a
-/// table of 256 colours, and THIS LIBRARY DOES NOT CARE WHICH: the
-/// palette travels with the surface, for whoever displays it. A grey
+/// table of 256 colours, and this library does not care which: the
+/// palette travels with the surface, for whoever displays it
+/// (docs/design/gfx.md, "Colour"). A grey
 /// ramp is the identity palette.
 struct Indexed8 {
     using Color = uint8_t;
@@ -242,6 +289,13 @@ struct Indexed8 {
  * What a drawing primitive may assume. Two verbs and the bounds - and
  * no way to read a pixel back, which is what keeps every primitive
  * correct on a panel that answers nothing.
+ *
+ *  - fill_rect(x, y, w, h, c): the rectangle, clipped to the surface,
+ *    filled with one colour;
+ *  - write_run(x, y, run): the run's pixels from (x, y) rightwards, on
+ *    one row, clipped; the run is the caller's and is read during the
+ *    call only;
+ *  - width(), height(): the bounds the two verbs clip to.
  */
 template <typename S>
 concept Surface = requires(S& s, const S& cs, Coord p, Extent e,
@@ -257,8 +311,8 @@ concept Surface = requires(S& s, const S& cs, Coord p, Extent e,
 
 /**
  * A surface whose pixels the program owns and may read back. The
- * memory-mapped tier, an observer, a test. NO PRIMITIVE IN THIS LIBRARY
- * REQUIRES IT - that is the whole point of it being a separate concept.
+ * memory-mapped tier, an observer, a test. No primitive in this library
+ * requires it - that is the whole point of it being a separate concept.
  */
 template <typename S>
 concept ReadableSurface = Surface<S> && requires(const S& cs, Coord p) {
@@ -266,9 +320,12 @@ concept ReadableSurface = Surface<S> && requires(const S& cs, Coord p) {
 };
 
 /**
- * Pixels in the program's own memory, over storage the CALLER owns -
- * nothing here allocates. The geometry is compile-time so the byte count
- * is a constant a caller can declare an array of; the bounds are still
+ * Pixels in the program's own memory, over storage the caller owns -
+ * nothing here allocates. The storage is `bytes` long, given at
+ * construction and pointed to for the framebuffer's whole life, so it
+ * must outlive it; the framebuffer never clears it. The geometry is
+ * compile-time so the byte count is a constant a caller can declare an
+ * array of; the bounds are still
  * read through width()/height() so that a Viewport, whose rectangle is a
  * run-time thing, satisfies the same concept.
  *
@@ -294,9 +351,13 @@ public:
     static constexpr Extent width() { return W; }
     static constexpr Extent height() { return H; }
 
-    /// The raw bytes, for whoever publishes them to an observer.
+    /// The raw bytes (the caller's storage), for whoever publishes them to
+    /// an observer: a panel driver that sends the framebuffer, a viewer,
+    /// a test.
     std::span<uint8_t, bytes> bits() const { return std::span<uint8_t, bytes>(px_, bytes); }
 
+    /// The rectangle clipped to the surface, one colour; nothing when no
+    /// pixel of it is inside.
     void fill_rect(Coord x, Coord y, Extent w, Extent h, Color c) {
         const auto r = clip(Rect{x, y, w, h}, W, H);
         if (!r) {
@@ -308,6 +369,8 @@ public:
         }
     }
 
+    /// The run's pixels from (x, y) rightwards, the part outside the
+    /// surface dropped; the run is read during the call only.
     void write_run(Coord x, Coord y, std::span<const Color> run) {
         const uint_fast16_t py = static_cast<uint_fast16_t>(y);
         if (run.empty() || py >= H) {
@@ -337,7 +400,7 @@ public:
     /// about a pixel that does not exist, and there is no colour to
     /// invent for it.
     Color get_pixel(Coord x, Coord y) const {
-        // ONE comparison each: read as unsigned, a negative coordinate
+        // One comparison each: read as unsigned, a negative coordinate
         // becomes a very large one and fails the same bound test. Half
         // the work of asking twice, and it says the same thing.
         const uint_fast16_t px = static_cast<uint_fast16_t>(x);
@@ -356,13 +419,18 @@ private:
 };
 
 /**
- * A window onto another surface: a translation and a clip, and NOT a
+ * A window onto another surface: a translation and a clip, and not a
  * mode. It is a surface in its own right, so a primitive drawing into it
  * knows nothing of the one underneath and cannot escape the rectangle -
  * which is how an element of an interface gets its sandbox without every
  * primitive having to consult a clip rectangle on every call.
  *
- * Composes with itself. Costs nothing where it is not used.
+ * Composes with itself. Costs nothing where it is not used. It keeps a
+ * pointer to the surface beneath, which must outlive it, and it is not
+ * readable even over a readable surface (no get_pixel: the family
+ * compile fixtures assert it, test/family_avrxt/gfx.cpp among them).
+ * The rectangle is given at construction, in the coordinates of the
+ * surface beneath.
  */
 template <Surface S>
 class Viewport {

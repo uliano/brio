@@ -1,17 +1,158 @@
 # ADC (CH32V203, CH32V303)
 
+This document is for a programmer who wants an analog level read on a
+CH32V203 or a CH32V303: a pad's voltage polled once, the supply or the
+die's temperature from the two internal sources, a sequence of channels
+streamed into memory by the DMA, conversions paced by a timer or by a
+pad's edge, or the two converters run in lockstep. `Adc<n>` is one
+converter, `Adc<1>` or `Adc<2>` (the second on every part but the
+CH32V203RB), a monostate (a class with only static members, never
+instantiated: one converter, one set of state) whose verbs are the
+chapter's registers - the power-up and the calibration, the sampling
+times, the regular and the injected group, the triggers, the analog
+watchdog, the dual modes, the flags and the interrupt body - and which
+offers the surface
+[util/analog_sampler.hpp](../../brio/util/analog_sampler.hpp) drives.
+`AnalogIn<Pin>` names a pad as a converter input, refused at compile
+time for a pad that carries none, and `AdcInput` names the two internal
+sources, the temperature sensor and VREFINT.
+
+The smallest use, the first block of "How to use it" below:
+
+```cpp
+using Vin = brio::AnalogIn<brio::Pin<'A', 1>>;        // channel 1
+using SysClock = brio::Clock<brio::ClockSource::pll, 96'000'000>;   // ADCCLK 12 MHz
+constexpr SysClock clock;
+
+Vin::claim();
+(void)brio::Adc<1>::init(clock, {.internal_sources = true});
+brio::Adc<1>::sample_time_all(brio::adc_sample_longest);
+brio::Adc<1>::select(Vin{});
+const uint16_t counts = brio::Adc<1>::read();
+```
+
+Line by line: `Vin` names PA1 as a converter input - a type, not an
+object - whose channel, 1, the driver derives from the pad; `SysClock`
+is the clock task's type, the PLL on the HSI at 96 MHz
+([clock.md](clock.md)), and `clock` its tag object, an empty object
+whose one use is to carry that type into `init()`. `Vin::claim()` puts
+the pad in analog mode, the input driver off and the pull with it (RM
+10.2.7), and opens the port's clock itself. `init()` brings the
+converter up in the order "The power-up and the calibration" gives
+below, the internal sources last (`.internal_sources = true` sets
+TSVREFE, which is ADC1's alone), and answers false for a configuration
+the chapter forbids, a request this converter cannot serve or a
+calibration that never completed - an answer this line discards.
+`sample_time_all()` gives every channel the longest sampling time,
+239.5 ADCCLK cycles, which makes a conversion 252 cycles: 21 us at the
+12 MHz the comment states, 96 MHz of PCLK2 over the divider of 8 the
+clock task picks (derived from the clock task's arithmetic). `select()`
+makes the regular group a sequence of one conversion on the pad's
+channel, and `read()` clears EOC, starts the conversion (SWSTART) and
+polls EOC, returning the twelve-bit result. The lines run in `main()`,
+after the clock task's `SysClock::init()` and before the kernel's
+`run()`; `select()` and `read()` may also run later from an active
+object's handler (an active object is a component of a brio program
+with its own event queue, served one event at a time by the kernel,
+[docs/learn/introduction.md](../learn/introduction.md)), where the poll
+holds that handler for the length of the conversion.
+
+What decides correctness even there:
+
+- **The clock task first, and a tree that keeps the converter in
+  specification.** ADCCLK is PCLK2 divided by ADCPRE, and ADCPRE is the
+  clock task's to program (`SysClock::init()`), not this driver's: the
+  converter runs at the `Clock::adc_hz` the type states only once the
+  clock task has run. The driver computes nothing from the rate, so an
+  `init()` before the clock task calibrates and converts at the ADCCLK
+  the reset tree gives, and a time a program derives from
+  `Clock::adc_hz` meanwhile (`adc_conversion_ns()`, a sequence sized
+  against a trigger rate) is wrong by the ratio of the two clocks
+  (derived from the arithmetic, not measured). What the compiler
+  refuses is the tree: `init()` static_asserts `Clock::adc_in_spec`, so
+  a clock type above 112 MHz of HCLK - the family's ceiling of 144 MHz
+  among them - fails to compile on the line that hands the clock over,
+  and a `DynamicClock` fails too (`Clock::is_static`), because every
+  time this driver states is in ADCCLK cycles.
+- **The source against the sampling time.** A pad its own port drives
+  reads true at every sampling time; a source of tens of kilohms - the
+  pads' own pull, 30 to 50 kOhm (datasheet table 4-19) - settles only at
+  the longest ("The sampling time, and the source it can settle"
+  below), which is why the smallest use takes the longest. The two
+  bench parts differ there (measured): on the CH32V203C8T6 a channel the
+  multiplexer stays on tracks between conversions and reads the pull's
+  rail at every sampling time, while on the CH32V303VCT6 every
+  conversion pays its sampling time. A pad whose level is its own pull
+  is converted as a pulled input and not claimed, since analog mode
+  takes the pull away.
+- **`read()`'s bound.** The poll gives up after 0x100000 reads of
+  STATR, and this form then returns 0, which reads as a conversion of
+  zero counts; `read(out)` answers false instead, and `read_settled()`
+  discards each answer, so a time-out after an earlier conversion of
+  its run returns that conversion's value (0 when none landed).
+- **The internal sources leave the input buffer on for good.** TSVREFE
+  forces BUFEN on and it cannot be cleared again (CTLR1.BUFEN's note),
+  which is why `init()` calibrates first; a later `gain()` that asks for
+  no buffer does not take it off, and `input_buffer()` reads back what
+  the silicon kept.
+
+Beyond the smallest use: the two converters share one vector, entry 34
+of the table (`Adc<n>::irq()`), and every `release()` of either
+converter disables that line in the PFIC, and so does every `init()`
+past its first checks (an `init()` refused for its configuration, a DMA
+or internal sources the converter cannot serve returns before it), so a
+program that serves the vector enables the line after the last
+`init()`, as the timer-paced block below does with
+`Pfic::enable(brio::Adc<1>::irq())`,
+and binds it with `BRIO_CH32_VECTOR(adc1_2_handler) { ... }` or one of
+that macro's two forms ([pfic.hpp](../../brio/ch32vx03/pfic.hpp)), the
+one spelling of a binding on this target. A line enabled with no binding
+runs the crt's weak `default_handler` (the crt is the startup code that
+runs before `main()`), a spin loop, with no fault and no message. On the
+CH32V303, whose images are built with the F extension, the macro under
+the project's `CH32VX03_HPE` option (a CMake option of the `ch32vx03/`
+project, chosen at configure, on by default: the core's hardware
+prologue on) makes a naked trampoline whose body must do no
+floating-point work, and none of the bodies on this page does any
+([platform.md](platform.md)). A stream's DMA engine (an engine is a DMA
+channel held for one shape of transfer, armed once and then started
+block by block, [dma.md](dma.md)) enables its own channel's vector when
+it is armed, so `dma1_channel1_handler` is bound before the first block
+completes; the two blocks are the caller's and outlive the stream, and
+the relay lends each filled one to its subscribers for one dispatch
+([design/block-stream.md](../design/block-stream.md)). No stream
+sleeps: in a sleep of any depth on this family no bus master but the
+core gets a cycle, so the platform's `idle()` returns at once while a
+DMA channel is enabled (the bus-master count, [sleep.md](sleep.md)).
+And the CH32V303's three lot-keyed additions - the short sampling
+times, ADC2's DMA request and the 75 % ADC clock - are verbs that ask
+the die and answer false where its lot has not got them, as the
+CH32V303VCT6 of the bench answers for all three.
+
+The rest of this page, in order: the documents of record; what the
+silicon does (how many converters and channels, the clock, the
+power-up and the calibration, the two groups, the sampling time, the
+analog watchdog, the triggers, the dual modes, what WCH added, one
+vector for two converters, the stream); the types and verbs (the
+vocabulary, the resource, the inputs, the reference and the arithmetic
+over it, the sampler's surface); how to use it, one block per use; the
+bench findings, on both parts; and what is not covered.
+
 Two 12-bit successive-approximation converters over sixteen pads and two
 internal sources, a regular group of up to sixteen conversions and an
 injected group of four that preempts it, scan, continuous and
 discontinuous modes, an analog watchdog, external triggers from the
 timers and from an EXTI line, a DMA request, a calibration the chapter
-asks for at every power-up, and the DUAL modes in which one converter
+asks for at every power-up, and the dual modes in which one converter
 leads and the other follows - the STM32F1's ADC under WCH's register
 names, with an input buffer and a programmable gain of WCH's own in
 front of it, and on the CH32V303 a trigger code that can be handed to
 TIM8 - and, on the dies of some lots, four sampling times shorter than
 the F1 ever had and a DMA request for the second converter too.
-Documents of record: the CH32F/V20x_V30x_V31x reference manual V2.3
+
+## Documents of record
+
+The CH32F/V20x_V30x_V31x reference manual V2.3
 (12.2.2 for the power-up, the calibration, the sampling times and the
 alignments, 12.2.3 with tables 12-1 and 12-2 for the triggers, 12.2.4
 with table 12-3 for the conversion modes, 12.2.5 with table 12-4 for the
@@ -32,7 +173,10 @@ CH32V20x_D6 for every CH32V203 up to the CH32V203C8, the CH32V20x_D8 for
 the CH32V203RB, and the CH32V30x_D8 for the four CH32V303 parts. Driver:
 [brio/ch32vx03/adc.hpp](../../brio/ch32vx03/adc.hpp), with the two block
 engines of [brio/ch32vx03/dma.hpp](../../brio/ch32vx03/dma.hpp) behind
-its stream. Reference suite: `test_vx03_adc`.
+its stream. Reference suite: `test_vx03_adc` (a suite's letter is one
+command key of its console and the group of verdicts it runs; `z` is
+the key that runs every letter its image registers, fourteen on the
+CH32V203C8T6 and nineteen on the CH32V303VCT6).
 
 ## What the silicon does
 
@@ -40,24 +184,25 @@ its stream. Reference suite: `test_vx03_adc`.
 
 The CH32V203's table 2-1 counts them together - "9@2", "10@2", "16@1" -
 and the two numbers are not independent: every part up to the
-CH32V203C8 has TWO converters with nine or ten of the sixteen channels
-bonded, and the 128 KB part has ONE with all sixteen. So `Adc<2>` does
+CH32V203C8 has two converters with nine or ten of the sixteen channels
+bonded, and the 128 KB part has one with all sixteen. So `Adc<2>` does
 not exist there, and neither does a dual mode. Every CH32V303 has two
 (table 2-1-1), with ten channels bonded on the LQFP48 of the CH32V303CB
 and all sixteen on the other three.
 
 The channel map is the family's and the same on every part: ADC_IN0 to
 ADC_IN7 are PA0 to PA7, 8 and 9 are PB0 and PB1, 10 to 15 are PC0 to
-PC5. What a PACKAGE decides is which of those pads it brings out, and
+PC5. What a package decides is which of those pads it brings out, and
 that is `Pin`'s own refusal - a pad this part does not bond does not
 compile - so the driver states the map once and never repeats the part
-table. Channels 16 and 17 are internal and reach no pad at all.
+table (`brio/ch32vx03/parts/`, the per-part facts `device::` exposes).
+Channels 16 and 17 are internal and reach no pad at all.
 
 ### The clock: the one place a legal tree leaves a peripheral out of specification
 
 ADCCLK is PCLK2 divided by 2, 4, 6 or 8 (RCC_CFGR0's ADCPRE) and nothing
 else, the converter is rated at 14 MHz, and this family's PCLK2 is HCLK
-undivided. Above 112 MHz of HCLK there is therefore NO code that keeps
+undivided. Above 112 MHz of HCLK there is therefore no code that keeps
 the converter in range: at the 144 MHz the part is rated for, the
 slowest divider still gives 18 MHz.
 
@@ -79,7 +224,7 @@ below). The driver's arithmetic is the datasheets'.
 ### The power-up and the calibration
 
 ADON written once wakes the converter (tSTAB, a microsecond by the
-datasheet); ADON written AGAIN with nothing else changing is a START.
+datasheet); ADON written again with nothing else changing is a START.
 Every verb of the driver therefore writes CTLR2 as a read-modify-write,
 and a software start is SWSTART under EXTSEL = 111 with EXTTRIG set,
 which `init()` arms - so `start()` is one spelling whatever the group.
@@ -90,9 +235,9 @@ powered for at least two ADCCLK cycles first, and the code left behind
 in the regular data register. The CH32V203's datasheet rates it at 100
 ADCCLK and the CH32V303's at 40 (tables 4-27 and 4-41).
 
-THE ORDER IS NOT OBVIOUS, and CTLR1.BUFEN's own note is where it hides:
-setting TSVREFE (or the TKEY enable) turns the input buffer ON and it
-cannot be turned off again, so the calibration must happen BEFORE them,
+The order is not obvious, and CTLR1.BUFEN's own note is where it hides:
+setting TSVREFE (or the TKEY enable) turns the input buffer on and it
+cannot be turned off again, so the calibration must happen before them,
 with the buffer off. `init()` runs exactly that order - gate, reset, the
 control words with the buffer and the gain still clear, the power-up,
 tSTAB, the calibration, and only then the buffer, the gain and the
@@ -100,18 +245,18 @@ internal sources.
 
 ### The two groups
 
-The REGULAR group is up to sixteen conversions named in RSQR1 to RSQR3
+The regular group is up to sixteen conversions named in RSQR1 to RSQR3
 with their count in L; its result lands in one register, RDATAR, which
 is why a sequence of more than one channel wants the DMA or a reader
-fast enough to take each datum before the next. The INJECTED group is up
-to four, named in ISQR, and it PREEMPTS the regular one: a trigger for
+fast enough to take each datum before the next. The injected group is up
+to four, named in ISQR, and it preempts the regular one: a trigger for
 it resets the regular conversion in flight, runs the injected sequence
 and gives the regular one back.
 
-Two asymmetries follow from that. The injected group's four slots FILL
-FROM THE END - a length of two uses JSQ3 and JSQ4 - while its results
-and its offsets count from the START, in conversion order. And its
-result is SIGNED: IDATARx holds the raw datum LESS the per-conversion
+Two asymmetries follow from that. The injected group's four slots fill
+from the end - a length of two uses JSQ3 and JSQ4 - while its results
+and its offsets count from the start, in conversion order. And its
+result is signed: IDATARx holds the raw datum less the per-conversion
 offset of IOFRx, with a sign bit above it, so `injected_result()`
 returns an `int16_t` where the regular one returns unsigned counts.
 
@@ -122,7 +267,7 @@ The injected group takes no DMA on either converter (12.2.2's note).
 Eight codes from 1.5 to 239.5 ADCCLK cycles, one per channel, in two
 registers (SAMPTR2 holds channels 0 to 9, SAMPTR1 the rest). What a
 sampling time buys is stated in the datasheets' tables 4-28 and 4-42 as
-a SOURCE IMPEDANCE: 0.4 kOhm at 1.5 cycles, 5.9 at 7.5, 11.4 at 13.5,
+a source impedance: 0.4 kOhm at 1.5 cycles, 5.9 at 7.5, 11.4 at 13.5,
 25.2 at 28.5, 37.2 at 41.5, 50 at 55.5, and "invalid" above that - the
 number the formula gives is past the 50 kOhm the converter is rated for
 at all.
@@ -131,25 +276,25 @@ analog chapter a digital program can act on: the pads' own weak pull is
 30 to 50 kOhm (table 4-19), so a pad held by its own pull is a source
 only the longest times settle.
 
-MEASURED, AND DIFFERENT ON THE TWO PARTS. On the CH32V203C8T6 the
-sample-and-hold TRACKS the selected channel between conversions: with
+Measured, and different on the two parts. On the CH32V203C8T6 the
+sample-and-hold tracks the selected channel between conversions: with
 the multiplexer parked on a pulled pad for the microseconds a polled
 read costs, every sampling time - the shortest included - reads the
 pull's own rail, and the sampling time only bites when the multiplexer
-MOVES at the start of the conversion, which is what a scanned sequence
+moves at the start of the conversion, which is what a scanned sequence
 does. The CH32V303VCT6 does not: the same polled read at 1.5 cycles
 reads a quarter of the scale, and parking the multiplexer on the pad for
 200 us before the start changes nothing. There the sampling time is what
 every conversion pays (the findings below).
 
-THE CH32V303 HAS FOUR MORE - on some dies. ADCx_AUX at offset 0x54
+The CH32V303 has four more - on some dies. ADCx_AUX at offset 0x54
 holds one bit a channel, ADC_SMP_SELx for channels 0 to 17 (12.3.15),
 and with a channel's bit set its SMP codes 100 to 111 mean 2.5, 3.5, 4.5
 and 5.5 cycles instead of 41.5 to 239.5 (12.3.4, 12.3.5). The register's
 note gives it to the CH32V30x_D8 and the classes beside it and to no
 CH32V20x - and only on lots whose sixth digit from the end is not zero,
-which a program cannot read. So the DIE is asked: `sample_time(ch,
-AdcShortSampleTime)` sets the channel's bit and reads it back BEFORE it
+which a program cannot read. So the die is asked: `sample_time(ch,
+AdcShortSampleTime)` sets the channel's bit and reads it back before it
 writes the code, and a die that kept nothing answers false with the
 channel's time as it was - because the code alone, on such a die, means
 41.5 to 239.5 cycles in silence. The CH32V303VCT6 of the bench is such a
@@ -159,11 +304,11 @@ codes clear the bit again, and `conversion_half_cycles(ch)` reads both.
 ### The analog watchdog
 
 One window, two thresholds twelve bits wide, and four bits of scope:
-AWDEN and JAWDEN say which GROUPS are guarded, AWDSGL narrows that to
+AWDEN and JAWDEN say which groups are guarded, AWDSGL narrows that to
 the single channel in AWDCH. A conversion outside the band - above the
 high threshold or below the low one - raises AWD and, with AWDIE, the
 interrupt. The thresholds may be changed during a conversion and take
-effect at the next one (12.3.7). In scan mode the interrupt ABORTS the
+effect at the next one (12.3.7). In scan mode the interrupt aborts the
 scan (12.3.2's note on AWDIE).
 
 ### The triggers
@@ -173,10 +318,10 @@ lists: the regular group takes TIM1's first three captures, TIM2's
 second, TIM3's TRGO, TIM4's fourth capture, an EXTI line and SWSTART;
 the injected one takes TIM1's TRGO and fourth capture, TIM2's TRGO and
 first capture, TIM3's fourth, TIM4's TRGO, an EXTI line and JSWSTART.
-Only the RISING edge of a trigger starts a conversion (12.2.3's note).
+Only the rising edge of a trigger starts a conversion (12.2.3's note).
 
-CODE 110 IS AN EXTI LINE - line 11 for the regular group, line 15 for
-the injected one - UNLESS AFIO HANDS IT TO TIM8. The manual writes it
+Code 110 is an EXTI line - line 11 for the regular group, line 15 for
+the injected one - unless AFIO hands it to TIM8. The manual writes it
 "EXTI line11/TIM8_TRGO", and four bits of AFIO_PCFR1 (ADC1_ETRGINJ_RM,
 ADC1_ETRGREG_RM, ADC2_ETRGINJ_RM, ADC2_ETRGREG_RM at 17 to 20) select
 the timer instead: TIM8's TRGO for a regular group, its fourth capture
@@ -191,27 +336,27 @@ where it is not. Measured on the CH32V303VCT6: with the field set EXTI
 line 11 started nothing and TIM8's TRGO paced the group; cleared, every
 edge of the line was a conversion again.
 
-What makes an EXTI line reach the converter is its EVENT enable and not
+What makes an EXTI line reach the converter is its event enable and not
 its interrupt enable - measured, and stated nowhere in either chapter.
 
 ### The dual modes
 
 With two converters, ADC1 leads and ADC2 follows: CTLR1's DUALMOD on the
-MASTER names one of ten arrangements (regular simultaneous, injected
+master names one of ten arrangements (regular simultaneous, injected
 simultaneous, fast and slow interleaved, alternate trigger, and four
 combinations), and the field is reserved in ADC2. The follower's datum
-arrives in the UPPER HALF of the master's data register. 12.2.7's note
+arrives in the upper half of the master's data register. 12.2.7's note
 asks for the external trigger to be set on the master and a software
 trigger on the slave, so that no spurious edge starts the follower
 alone, and for the two groups to take the same time.
 
-The interleaved modes are the regular group's on ONE channel: one
+The interleaved modes are the regular group's on one channel: one
 trigger starts ADC2 at once and ADC1 7 ADCCLK later (fast) or 14 later
 (slow), and in the slow one a new ADC2 start follows every 28 ADCCLK
 with no CONT bit (the notes under figures 12-8 and 12-9, measured
 below). Alternate trigger is the injected groups': the first trigger
-converts ADC1's, the second ADC2's, and so on. AND ITS TURN OUTLIVES THE
-MODE - measured, and in no note: after an odd count of alternate
+converts ADC1's, the second ADC2's, and so on. And its turn outlives the
+mode - measured, and in no note: after an odd count of alternate
 triggers the next trigger is still ADC2's through DUALMOD = 0 and into
 any other mode, so the master's next JSWSTART converts ADC2's injected
 group alone and stands, set, in ADC1's CTLR2, wedging ADC1's injected
@@ -222,14 +367,14 @@ re-initializes ADC1.
 
 `Adc<1>::dual()` is the verb; on the second converter, and on a part
 with one converter, it does not compile - the master's field is not a
-spelling both instances share. There is NO util shape for this: two
+spelling both instances share. There is no util shape for this: two
 converters in lockstep are a capability no other stratum in this tree
 has, and one family does not make a contract.
 
 ### What WCH added, and what belongs to another class
 
-CTLR1 carries an input BUFFER (BUFEN) for sources above the impedance
-the sampling switch tolerates, and in front of it a PROGRAMMABLE GAIN
+CTLR1 carries an input buffer (BUFEN) for sources above the impedance
+the sampling switch tolerates, and in front of it a programmable gain
 (PGA) of 1, 4, 16 or 64; the buffer must be on for the gain to mean
 anything, which the configuration refuses without. The same register's
 TKEY bits (TKENABLE, TKITUNE) belong to RM ch. 13 and nothing here
@@ -239,7 +384,7 @@ The short sampling times of ADCx_AUX, the TIM8 remaps and ADC2's DMA
 request are the CH32V303's (the sections above and below). One more bit
 is the same class's and the same lots': ADC_DUTY_SEL in RCC_CFGR0
 (3.4.2), which gives ADCCLK a 75 % duty instead of 50, beside the older
-ADCDUTY that holds the clock low for longer. Both are the CLOCK TREE's
+ADCDUTY that holds the clock low for longer. Both are the clock tree's
 and not a converter's - ADCCLK is one clock for both units - so the
 verbs are `Rcc::adc_duty_75()` and `Rcc::adc_duty_extended()`
 ([clock.md](clock.md)); how the two combine, the chapter does not say.
@@ -253,17 +398,17 @@ Both converters report on entry 34 of the vector table. A program that
 uses both calls the ISR body of each and unions the answers, and the
 body returns zero for the converter that had nothing - which is what
 makes that safe. The flags are write-zero-to-clear (STATR's RW0, the
-timers' discipline), and EOC is also cleared by READING the data
+timers' discipline), and EOC is also cleared by reading the data
 register, which a handler that takes the result does anyway.
 
 ### The stream, and why a block source does not ride circular mode
 
 ADC1's DMA request is DMA1's channel 1 on every part (tables 11-5, 11-6
-and 11-2), and the channel IS the request on this controller. On the
+and 11-2), and the channel is the request on this controller. On the
 CH32V303 ADC2 has one too, DMA2's channel 5 (table 11-3) - a row whose
 note gives it to lots whose sixth digit from the end is not zero, while
 12.2.7's note 2 still says only ADC1 has a DMA request; the table is
-followed and the DIE is asked. On a die without the request ADC2's
+followed and the die is asked. On a die without the request ADC2's
 CTLR2.DMA keeps no bit written into it - the CH32V303VCT6's does not,
 and no request reaches DMA2's channel 5 there - so `dma(on)` reads the
 bit back on ADC2, and `init()` refuses a configuration that asks for the
@@ -279,17 +424,17 @@ a sample a starved channel has not taken is written over in silence.
 
 The engine behind it is `DmaPingPongEngine`, this family's realization
 of [util/block_stream.hpp](../../brio/util/block_stream.hpp)'s
-`BlockSource`, and it does NOT use the controller's circular mode even
-though the controller has one. The contract's rule is SKIP RATHER THAN
-TEAR, and on a channel that never stops the decision could only be taken
+`BlockSource`, and it does not use the controller's circular mode even
+though the controller has one. The contract's rule is skip rather than
+tear, and on a channel that never stops the decision could only be taken
 after the edge - by which time the controller is already writing the
 buffer the caller holds. That was the STM32G0's finding and it is
 measured again here (the findings below). So the source stops itself at
-every block and its handler re-arms the other buffer, while the PLAYER,
+every block and its handler re-arms the other buffer, while the player,
 `DmaLoopEngine`, rides circular mode exactly as on the STM32G0: a table
 fed for ever, with the lap interrupt doing nothing but count.
 
-AND NO STREAM SLEEPS. In the Sleep of RM 2.4 no bus master but the core
+And no stream sleeps. In the Sleep of RM 2.4 no bus master but the core
 gets a cycle ([dma.md](dma.md)), so a DMA-fed converter stalls for the
 whole sleep: a program that runs one holds itself awake.
 
@@ -333,7 +478,7 @@ verb that answers false for a remapped code the part cannot hand over,
 a compile-time one whose refusal is a static_assert, and a read-back)
 and their enables, `continuous`, `dma`, `internal_sources`, `gain`,
 `dual`, the flags and their interrupts, the ISR body `isr()`, and
-`claim_stream<Engine>()`. What an instance HAS is published beside
+`claim_stream<Engine>()`. What an instance has is published beside
 them: `dma_slot` and `has_dma`, `has_internal_sources`,
 `has_dual_mode`, and the two AFIO fields its code 110 is handed over
 with, `regular_trigger_remap` and `injected_trigger_remap`.
@@ -348,7 +493,7 @@ Both are `input_code()`-able, which is what the sampler walks.
 ### The reference, and the arithmetic over it
 
 No package of the CH32V203 brings out a VREF+ pad, so the converter's
-reference IS the analog supply; the CH32V303VC's LQFP100 does, VREF-
+reference is the analog supply; the CH32V303VC's LQFP100 does, VREF-
 and VREF+ on pins 20 and 21 (table 3-1), and the evaluation board ties
 VREF+ to VDDA through a zero-ohm link. `Ref` names both, `vdda` and
 `vref_pad`, `adc_reference` says which the part has (the part table's
@@ -361,7 +506,7 @@ series, tables 4-26 and 4-5);
 `temperature_centi_c(counts, vdda)` is 12.2.6's formula with the
 datasheet's typical numbers.
 
-THERE IS NO FACTORY CALIBRATION TO READ. The electronic signature (RM
+There is no factory calibration to read. The electronic signature (RM
 ch. 31) holds the flash capacity and a 96-bit unique identifier and
 nothing else, so there is none of the STM32F4's `AdcFactory` here: the
 reference is 1.17 to 1.23 V and the sensor's slope 3.8 to 4.7 mV per
@@ -466,7 +611,7 @@ if (brio::Adc<2>::init(clock, {.dma = true})) {   // false: this die raises no r
 }
 ```
 
-A pad's own edge pacing it instead - the line's EVENT enable is what
+A pad's own edge pacing it instead - the line's event enable is what
 reaches the converter:
 
 ```cpp

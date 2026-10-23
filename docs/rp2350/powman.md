@@ -1,21 +1,88 @@
 # POWMAN and the always-on timer (RP2350)
 
-Documents of record: the RP2350 datasheet (build d126e9e), 6.2 (the core
-power domains, the twelve power states and the transitions between
-them), 6.3 (the core voltage regulator), 6.4 (the register list and the
-password), 12.10 (the always-on timer), 3.5.10 (what the debug port's
-RP-AP can see and do to the power sequencers), 7.3 (the chip-level reset
-record, which lives in this block). Appendix E carries no erratum against
-POWMAN or its timer. The driver: `brio/rp2350/powman.hpp` (`Powman`,
-`AonTimer`) over `clock.hpp` (the low-power oscillator's trim and the
-frequency counter) and `core.hpp`. The reference suite:
-`test_rp2350_sleep`, letters a, b, c, d, e, k - and the by-name letters
+This document is for a programmer who needs a clock that runs in every
+power state of an RP2350, or who powers the chip's switched core down
+and expects the program to come back. POWMAN is the always-on block: it
+keeps running when the processors, the bus fabric and every other
+peripheral have no supply, and it holds the power sequencers, eight
+scratch words that survive a power-down, and the always-on timer, a
+64-bit count of milliseconds with one alarm. `brio/rp2350/powman.hpp`
+gives it two monostates (a type with only static members, used without
+an object): `Powman`, the block, and `AonTimer`, the timer. In a program
+the timer is the alarm and the witness of the sleep sites
+([sleep.md](sleep.md)) - the counter that says how long a sleep lasted
+when every other counter stood still - and `Powman::power_down()` is the
+one verb of this stratum that powers the switched core down. The same
+source runs on the Cortex-M33 pair and on the Hazard3 pair.
+
+The smallest use, an alarm half a second out, is the first block under
+"How to use it" below:
+
+```cpp
+brio::AonTimer::init(clock);              // the divisor from a measurement
+brio::AonTimer::alarm_in(500);            // 500 ms out
+brio::AonTimer::interrupt(true);
+brio::Irq::enable(brio::AonTimer::irq());
+extern "C" void isr_powman_timer() { (void)brio::AonTimer::isr(); }
+```
+
+Line by line: `AonTimer::init(clock)` measures the low-power oscillator
+against the crystal, writes what it found into the timer's divisor,
+zeroes the time and starts the counter, with the alarm left disarmed
+(`clock` is the program's clock tag, [clock.md](clock.md));
+`alarm_in(500)` places the alarm 500 ms from now; `interrupt(true)`
+enables the alarm's interrupt in the block, and `Irq::enable` its line
+in this core's interrupt controller; and `isr_powman_timer` is the
+handler, bound under the crt's name for the line, the same on both
+architectures, whose body acknowledges and disarms the alarm.
+
+What decides correctness even there. The clock task must have run
+first: `init()` counts the oscillator against clk_ref, which is the
+crystal only after `Clock::init()`, and writes the crystal's divisor
+from the rate the clock type claims. `init()` answers false, and starts
+nothing, when the oscillator could not be counted - a timer told the
+wrong rate is worse than none - and the example discards that answer.
+The handler must disarm as well as acknowledge, which `AonTimer::isr()`
+does: the match goes on being true after the event, and an alarm whose
+flag is merely cleared raises it again on the next tick. A power-down of
+the switched core does not return: what comes back is a boot, the
+eight scratch words and whatever memory domain the state left powered
+being all that survives, and `power_down()` refuses, writing nothing,
+unless a way back is armed (the alarm with `powerup_on_alarm(true)`, or
+a GPIO power-up slot). On this bench the debug port also blocks a
+power-down until `ignore_debug_powerup(true)` (the second block below).
+Every register of the block up to offset 0xac takes a write only with
+its password; the verbs carry it, and a program that writes the block
+by hand loses its write.
+
+The rest of this page, in order: the documents of record; what the
+silicon does (the always-on domain, the five power domains and the
+twelve states, the password, the transitions, the regulator and the
+detector kept read-only, the debugger's power-up request, the timer);
+the types and verbs; how to use it, the alarm and a power-down; the
+bench findings; and what is not covered.
+
+## Documents of record
+
+The RP2350 datasheet (build d126e9e), 6.2 (the core power domains, the
+twelve power states and the transitions between them), 6.3 (the core
+voltage regulator), 6.4 (the register list and the password), 12.10 (the
+always-on timer), 3.5.10 (what the debug port's RP-AP can see and do to
+the power sequencers), 7.3 (the chip-level reset record, which lives in
+this block). Appendix E carries no erratum against POWMAN or its timer.
+The driver: `brio/rp2350/powman.hpp` (`Powman`, `AonTimer`) over
+`clock.hpp` (the low-power oscillator's trim and the frequency counter)
+and `core.hpp`. The reference suite: `test_rp2350_sleep` (a letter is
+one command key of the suite's console and the group of verdicts it
+runs; `z` is the key that runs every letter but the by-name ones, each
+run by its own key), letters a, b, c, d, e, k - and the by-name letters
 q and r, which are the only place a program of this project powers the
-switched core down.
+switched core down, with v beside them, the rescue tried against a
+powered-down core.
 
 ## What the silicon does
 
-THE ALWAYS-ON DOMAIN IS A PERIPHERAL. Where the RP2040 had a power
+The always-on domain is a peripheral. Where the RP2040 had a power
 controller that was little more than a regulator and a reset latch, this
 chip has a block that keeps running when the processors, the bus fabric
 and every other peripheral have no supply at all: POWMAN. In it live the
@@ -28,14 +95,14 @@ SWCORE (the processors, the fabric, every peripheral), XIP (the cache and
 the boot RAM), SRAM0 (banks 0..3) and SRAM1 (banks 4..9). A power state
 is named Pc.m: c is the switched core, m the three memory domains in the
 order XIP, SRAM0, SRAM1. STATE.CURRENT and STATE.REQ carry that as four
-bits where a ONE means powered DOWN, and `PowerState` is those twelve
+bits where a one means powered down, and `PowerState` is those twelve
 codes under the datasheet's own names. A P0.m state is a normal one -
-software runs. A P1.m state has no processor in it, and LEAVING ONE IS A
-BOOT.
+software runs. A P1.m state has no processor in it, and leaving one is a
+boot.
 
 **The password.** Every register up to offset 0xac takes a write only
 with 0x5AFE in its top sixteen bits; a write without it is dropped and
-sets BADPASSWD, which is itself protected. A READ of a protected register
+sets BADPASSWD, which is itself protected. A read of a protected register
 does not return the password, so an ordinary read-modify-write would
 write a zero password back - and the atomic aliases of 2.1.3 are unusable
 here for the same reason, since they carry bits and not a password. Past
@@ -47,7 +114,7 @@ which is what the silicon obeys): a request may not combine a power-up
 with a power-down; it may not leave the switched core powered with the
 XIP domain unpowered; and a P1.m state may only be left for a P0.m one.
 The prose of 6.2.3 states a fourth rule - that leaving a P1.m state may
-not power a powered-off SRAM domain back on - which its OWN table
+not power a powered-off SRAM domain back on - which its own table
 contradicts, P1.1 -> P0.0 being listed as valid, and which the register
 description does not repeat. `power_transition_legal` enforces the
 register's three.
@@ -57,7 +124,7 @@ decision and not by omission. A wrong VSEL is a voltage on the one
 digital core supply this board has, and VREG_CTRL.UNLOCK cannot be undone
 once it is set - the chapter's own words are "the regulator can't be
 relocked after it's been unlocked". What a program gets is `VregStatus`,
-`VregLowPower` and `BodStatus`, decoded in millivolts. What it does NOT
+`VregLowPower` and `BodStatus`, decoded in millivolts. What it does not
 get is any verb that writes a threshold; the family check asserts their
 absence.
 
@@ -69,11 +136,11 @@ nothing happens. DBG_PWRCFG.IGNORE is the way past it, and on this bench
 it is needed every time (below).
 
 **The always-on timer** (12.10) shares the block, the password and the
-domain. It counts MILLISECONDS to 64 bits off whichever source TIMER
+domain. It counts milliseconds to 64 bits off whichever source TIMER
 names - the low-power oscillator, the crystal through clk_ref, or an
 external tick on one of four pads - and its one alarm is both an
-interrupt and a POWER-UP REQUEST. The tick is made by a fractional
-divider whose divisor is A NUMBER SOFTWARE WRITES, not a measurement the
+interrupt and a power-up request. The tick is made by a fractional
+divider whose divisor is a number software writes, not a measurement the
 hardware makes: 32.768 for the low-power oscillator, 12000.0 for a 12 MHz
 crystal. So the timer is exactly as accurate as the rate it has been
 told, and on a die whose low-power oscillator is well away from its
@@ -91,7 +158,7 @@ is the answer.
     `changing`, `waiting`, `bad_software_request`, `bad_hardware_request`,
     `powerup_while_waiting`, `request_ignored`, `clear_request_flags`,
     `wait_settled`; `request_state(to)` for a move between P0.m states
-    and `power_down(to)` for a P1.m one - the second REFUSING when no
+    and `power_down(to)` for a P1.m one - the second refusing when no
     wake source is armed, which `powerup_armed()` is the question behind;
   - the four GPIO power-up slots - `pwrup(slot, PwrupConfig{source, mode,
     direction})`, `pwrup_disable`, `pwrup_enabled`, `pwrup_source`,
@@ -105,21 +172,26 @@ is the answer.
   - the sequencer - `sequencer()` returning `SequencerConfig`,
     `use_fast_clock`, `run_lposc_in_low_power`,
     `sram_stays_down_on_powerup`;
-  - the supplies, READ-ONLY - `vreg()`, `vreg_low_power_entry()`,
+  - the supplies, read-only - `vreg()`, `vreg_low_power_entry()`,
     `vreg_low_power_exit()`, `bod()`, and the two tables `vreg_vsel_mv`,
     `bod_vsel_mv` beside `high_temp_threshold_c`;
   - `scratch(n)` / `scratch(n, value)` for the eight words, `boot_word(n)`
     for the four the bootrom reads;
   - the password - `bad_password`, `clear_bad_password`, and
-    `probe_password()`, THE ONE WRITE IN THE TREE THAT CARRIES NO
-    PASSWORD, aimed at BADPASSWD's own bit so that the answer costs
-    nothing either way;
+    `probe_password()`, a write to a protected register that carries no
+    password on purpose, aimed at BADPASSWD's own bit so that the answer
+    costs nothing either way. It is one of two such writes in the tree:
+    the other, `Lposc::clear_bad_password()` in `brio/rp2350/clock.hpp`,
+    stores the same bit with no password, and by the measurement under
+    "Bench findings" ("the password is a password") that store is
+    dropped and raises the flag it is named to clear - use
+    `Powman::clear_bad_password()`, which carries the password;
   - the interrupts - `Powman::Interrupt`'s four bits, `raw_interrupts`,
     `clear_raw`, `interrupt`, `interrupts`, `force`, `forced`, `pending`,
     and the two lines `irq_pow()` / `irq_timer()` (`isr_powman_pow` and
     `isr_powman_timer`, the same names on both architectures).
 - `AonTimer`, the counter in the same block: `init(clock)` (the divisors
-  written from a MEASUREMENT of the low-power oscillator and from the
+  written from a measurement of the low-power oscillator and from the
   clock task's own crystal rate, the time zeroed, the counter started,
   the alarm left disarmed), `running` / `run`, `now` (12.10.3's read
   procedure) / `now_low`, `set` (refused while running), `clear`;
@@ -283,7 +355,7 @@ Driver gaps, each with its reason:
   not got, and the 1 Hz synchronisation would need a GPS.
 - **A tick faster than a millisecond** (12.10.8), by scaling the divisor:
   the arithmetic is there in `lposc_khz` / `xosc_khz` and no program has
-  wanted 62.5 us of resolution yet.
+  wanted 62.5 us of resolution.
 - **POW_FASTDIV and POW_DELAY**, the sequencer's own step timings: the
   reset values are what every measurement here was made against, and
   changing them changes how long a domain takes to come up. Born with the

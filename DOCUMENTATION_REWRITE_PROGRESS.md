@@ -8848,32 +8848,2644 @@ the comparator's start-up after enable has no figure (DS40002247B
 `init()` may still show the start-up value INITVAL holds.
 
 
-## Next batches (not started)
+## Local batch: the rp2040 stratum
 
-The credit of the cloud sessions ended with the sixth batch. What it
-did not reach, each on the stm32g0 batch's pattern (the documents'
+Scope: the eighteen peripheral documents of `docs/rp2040/` (every page
+but README.md and vendor/README.md) in the brief's additive pass, and
+the comments of all twenty-six headers of `brio/rp2040/`. Base:
+`docs-rewrite` at a70d4b23b8e46be0fb89bff8890f1b8b8214bcd2, the
+reference of every token check; local branch `docs-rp2040`, nothing
+committed, the work delivered as a patch against the base. Not
+touched: every code token, apps, CMake, presets, ld, the crt, svd,
+`.vscode`, `.clangd`, the IP strata (`brio/pl011/`, `brio/pl022/`,
+`brio/dw_apb_i2c/`, read only), every other stratum, the design pages
+and the learning route, docs/rp2040/README.md and vendor/README.md,
+CLAUDE.md, docs/README.md. No `// build:` or `// mcu:` line exists in
+the headers. Environment: a local checkout with `/sw` present; the
+token check lexed with the host g++ the gate finds; no build, no host
+test and no board.
+
+### The documents
+
+Each of the eighteen opens with whom the document is for and what the
+driver does in a program; the smallest use, an excerpt of the
+document's own "How to use it" block, explained line by line; the
+prerequisite that decides correctness even there; and on the long pages
+(platform, clock, uart, dma, spi, i2c) a reading guide. "Documents of
+record" became a heading on every page, with a suite's letter (and,
+where the page uses it, the all-key `z` and a letter "by name")
+defined beside the suite's name, never inside the bench findings, which
+are untouched. Terms defined where the pages first use them: a concept,
+an active object, a task, a monostate, the pack, the tag object, the
+arbiter, a tenure, a FlashMedia, the attic, a sleep site and its rungs,
+the desk partner, the bench pair (replacing "the pair desk" in pio.md
+and pwm.md). kernel.md is linked by heading in the new text and in
+multicore.md's one numbered reference ("Two cores: two kernels and a
+bridge"); platform.md, reset.md link "Platform: what the machine
+provides" and "Failures: overflow and panic". Insistence capitals
+lowered in the orientation's neighbours - "Documents of record" and
+"What the silicon does" - register names, acronyms and the SLEEP and
+DORMANT state names kept. The two-core facts are kept whole and stated
+in the orientations of platform.md, clock.md, timer.md, reset.md,
+dma.md and multicore.md (one platform type per core, the per-core
+critical section, the per-core NVIC enable, `send` against `post`, the
+launch order, core 0 owning the clock tree, the probe trap).
+
+The prerequisites stated, each checked against the code: the clock's
+`init()` first and its answer looked at (a driver's divisor is the
+type's claim, clk_peri is off until the clock's `init()`, a failed
+`init()` leaves the tree on clk_ref); every handler name aliased weakly
+to `Default_Handler`'s spin by the crt, so an unbound vector parks the
+core at its first interrupt (and the vendored header's macros spell the
+same slot on both sides); `Dma::init()`, `Pio<n>::reset()` and
+`Pwm::reset()` before their first users, none of which releases the
+block (the suites' `main()` call them); the lent buffers of the SPI and
+I2C requests until the reply; the flash window masking the calling core
+alone; the ADC pad claimed; the RTC's NVIC line enabled by the program
+(the page's own example leaves it out, and the orientation says so);
+`rearm_after()` and not an immediate re-arm; the SLEEP_ENx set and a
+dormant's way back; the timed sleep site core 0's only.
+
+### Each document, and what else changed
+
+- platform.md: `Rp2040Platform<TB = Ticker>` in "Types and verbs" was
+  stale (the class is `Rp2040Platform<core = 0, TB = CoreTicker<core>>`)
+  and `Ticker` was `BasicTicker<1000>` where it is `CoreTicker<0>`; both
+  corrected. The panic path stated as the code has it (below).
+- clock.md: "The FOURTH clock model brio meets" (a chronicle) is now "A
+  clock model of its own", the README's own words.
+- pin.md: "every configuring verb" releases the banks is now the verbs
+  that hand a pin to an owner (`release()`, `pull()` and the overrides
+  call no `ready()`), in the orientation and in "Types and verbs".
+- multicore.md: "Core 0's doorbell interrupt is disabled around either"
+  read as the driver's act; nothing in `Core1` disables it, the caller
+  does. The How-to's "a panic on either core reboots the chip through
+  `ResetReporter`" gains the HardFault qualifier (below). "rule 2" is
+  spelled out once.
+- spi.md: the example's `div4` comment ("31.25 MHz at 125") gains
+  "clamped to the ceiling": under `init(clock, 8'000'000)` a faster
+  request runs at the ceiling's setting (`clamp()` in
+  brio/pl022/spi.hpp), 7.8125 MHz.
+- reset.md, watchdog.md, timer.md, uart.md, dma.md, i2c.md, adc.md,
+  flash.md, usb.md, pio.md, pwm.md, rtc.md, sleep.md: the orientation
+  and the local fixes above; nothing else changed.
+
+A script checked every backticked span, number and register-like word
+of each old page for presence in the new one: the only absences are
+the two stale Types spellings and "FOURTH" above (the hits on 29, 31
+and 7 are the regular expression missing `..29`, `..31`, `..7`, which
+are present).
+
+### The headers
+
+Comments only, every one of the twenty-six token-identical to the
+base. Done by five forks under one written instruction (the opening's
+order: what the caller gets and the smallest use, which context and
+which core calls what, then every fact with its citation), each
+reporting its stale claims and its open facts; their diffs spot-read
+(uart, flash, dma, sleep, ticker, platform, clock, reset), and the
+slips found fixed by hand. Stale claims corrected to the code's truth:
+
+- ticker.hpp and platform.hpp (a fork's slip, caught on review): "a
+  program that forgets the vector never advances time"; the crt aliases
+  `isr_systick` to `Default_Handler`, a spin, so the program stops at
+  its first tick.
+- uart.hpp and spi.hpp: clk_peri "fed from clk_sys undivided"; it is
+  the default, `PeriSource::crystal` the other choice (clock.hpp's
+  `pclk_hz`).
+- clock.hpp: `pclk_hz == hz` stated as always; a failed `init()` "left
+  on the ring oscillator" (clk_sys is parked on clk_ref, which is the
+  crystal once it started); `Clocks::enabled()`; the SLEEP state
+  "needs SLEEPDEEP" (sleep.md measures it on a plain WFI), also in
+  sleep.hpp.
+- pin.hpp: "every configuring verb releases the banks".
+- reset.hpp: `causes()` "zero after a software reset" (FORCE is
+  set); and ResetReporter now says panic()'s breakpoint raises a
+  HardFault first with no debugger, so the probe-less reboot is the
+  bound `fault_reset()`'s (kernel/panic.hpp calls `break_here()` before
+  the reporter; `Rp2040Platform::break_here()` says a BKPT with no
+  debugger escalates to HardFault; `test_rp2040_platform` binds
+  `isr_hardfault` to `fault_reset<P>()`).
+- watchdog.hpp: `reason()` "zero after any other reset".
+- nvic.hpp, sysinfo.hpp: pointers to a "later" reset.hpp, multicore
+  work and flash unique id, all of which exist.
+- resets.hpp: "bounded like every wait in this stratum" (the two
+  oscillators' `dormant()` spin with no bound).
+- dma_engine.hpp: NoDmaEngine the default of the UART's slots alone
+  (SpiHost and I2cHost take it too). dma.hpp: "the engines read the
+  error before the completion" (the line's status is read and cleared
+  first, the error read after); "every channel verb that routes enables
+  the line in the calling core's NVIC" (`route()` writes INTEn only;
+  `DmaLine::enable()` and the engines' `arm()` enable).
+- i2c.hpp: "the five verbs" of the unstick (the concept asks six).
+- flash.hpp, nvm_flash.hpp: "a sector erase is tens of milliseconds, a
+  page program under a millisecond" (the Zetta erases in 5.2 ms and
+  programs a page in 1.3 ms); `Flash::init()`'s failure cases.
+- rtc.hpp: `init()` "out of reset only under its clock" (the reset
+  completes without clk_rtc, measured); `rtc_alarm_repeats` ignores the
+  weekday flag. adc.hpp: `adc_pin_valid` "the fifth input's pin".
+- pio.hpp: two interrupt source masks commented as DMA requests; the
+  receiver's frame flag "counted" (it is one flag). pwm.hpp: "the one
+  wait" said twice of two different waits.
+- The five prose-net "genealogy" review items (dma.hpp, flash.hpp,
+  pio.hpp, pwm.hpp, sleep.hpp) rewritten to stand on this chip's
+  reasons; nvm_flash.hpp's partition justified by util/nv_heap.hpp's
+  reasons instead of two other strata's.
+
+### Facts resolved, and facts left open
+
+- docs/rp2040/README.md's map cell for platform.md names
+  `Rp2040Platform<TB>`: outside this pass's scope (the README beyond a
+  link or a figure), open for its owner; platform.md now spells the
+  class right.
+- Whether `ResetReporter` ever reboots a probe-less board itself: by the
+  code, a panic's breakpoint raises a HardFault before the reporter
+  runs, so without a debugger the reboot is the HardFault handler's;
+  which record a HardFault on core 1 writes when `isr_hardfault` is
+  bound to `fault_reset<P0>()` (the vector table is core 0's) is not
+  measured. Open for the multicore suite's owner.
+- The I2C host arms its receive engine at normal priority
+  (brio/dw_apb_i2c/i2c.hpp, `RxEngine::arm(..., false, ...)`), the UART
+  and SPI hosts at HIGH; dma.md's "a transport names its engines'
+  levels at the call" covers it, i2c.md says nothing either way.
+  Answered by the host's own comment (`arm_engines()`): both engines
+  at the normal level on purpose, the rule's for a peripheral that
+  waits - a starved receive channel leaves the receive FIFO full and
+  the block holds SCL (RX_FIFO_FULL_HLD_CTRL), nothing is lost.
+- brio/dw_apb_i2c/i2c.hpp's concept comment counts "five" pad verbs:
+  the five the unstick drives a line with (`input`, `clear`, `read`,
+  `drive_low`, `release_drive`); `function` and `release` are the
+  setup verbs the same sentence names before them. Correct as written.
+- Whether the PL011 block's reset completes without clk_peri (the ADC's
+  does not without clk_adc) is not established: the pages say the
+  UARTs have no clock before the clock's `init()` and claim nothing
+  about the reset.
+- Whether `Rtc::read()` from two contexts at once disturbs the latch,
+  whether `rearm_after()`'s default 100 000 reads cover a whole
+  matching second, whether `Adc::read()` is valid under a free run:
+  not established, not written.
+- The rate-switch's legal contexts (clock.hpp says "main or an active
+  object's handler on core 0", from clock.md's "rate switch under a
+  running program" and multicore.md's "core 0 owns the clock tree");
+  nothing in the code checks it.
+
+### Reader review (fresh subagents, one round)
+
+Two readers, each given only its files, the audience profile and the
+brief's four questions with scenarios: one on platform.md and
+multicore.md (nine scenarios), one on the comments of uart.hpp and
+flash.hpp (ten). Supported directly: the unbound `isr_systick`; a
+`post` across the cores refused and counted; a `CriticalSection` not
+reaching the other core; the letter and the all-key; `InRam`'s cold
+gain and warm cost; the unbound UART vector; no transmit verb from an
+interrupt handler and why; `write_bulk`'s copy; `read_span`'s
+lifetime; the engine's prerequisite; the window against core 1 and a
+source in the window; the masked core and the lost ticks. Residue,
+applied: the ticker right again once the tree reaches its rate (now
+said); the scheduling rule (a handler runs to its end before another
+event on that core, now in platform.md's and multicore.md's
+orientations); whether `send` may be called from an interrupt handler
+(now said, from util/inbox.hpp); what launching after the doorbell is
+enabled does (the handler would take the bootrom's answers out of the
+FIFO, now said); `SysClock` and `clock` undeclared in multicore.md's
+excerpt (pointed at platform.md); a panic with no debugger and its
+record (now stated as the code has it, which found the ResetReporter
+fact above); "the pack" undefined; `Ticker` against `CoreTicker`
+(Types corrected); "rule 2"; on the headers, what a UART initialized
+before the clock gets (clk_peri off until the clock's `init()`), what
+`write_byte` and `write_bulk` answer on a full ring, whether the
+flash operation flushes the cache (it does, 'FC', now said), and what
+happens to UART bytes during a long window (they wait in the 32-entry
+FIFO, under 3 ms at 115200, then overrun - derived, not measured). Left
+as is, with the reason: the C++ notation (`extern "C"`, templates,
+`constexpr`, lambdas, `std::optional`, designated initializers) is the
+learning route's, which the pages link; the includes, the build and
+flash commands are the operational README's; kernel vocabulary the
+bench findings use (turn, breadcrumb, lease) is kernel.md's, and the
+findings are kept word for word. No second round: nothing the first
+found was broken in substance beyond what is applied above.
+
+### Checks
+
+- `bin/brio prose docs/rp2040/*.md brio/rp2040/*.hpp`: 45 files, 0
+  errors, 0 for review (before the batch: 0 errors, 5 for review, the
+  five genealogy items above).
+- `bin/brio gate --tokens --against a70d4b2 brio/rp2040/*.hpp`: all
+  twenty-six token-identical.
+- Links and anchors of the nineteen pages of docs/rp2040 and the vendor
+  page, by a script with GitHub's anchor rules (checked against a
+  planted bad anchor): 0 problems; no page outside the stratum links a
+  docs/rp2040 anchor.
+- `grep -P '[^\x00-\x7F]'` over the touched files: nothing; no
+  `// build:` line in any header.
+- `git diff --stat a70d4b2 -- . ':!docs/rp2040' ':!brio/rp2040'
+  ':!DOCUMENTATION_REWRITE_PROGRESS.md'`: empty.
+- Not run: any build, `brio check rp2040`, the host tests, the full
+  `brio gate`.
+
+### Local handoff
+
+- The full `brio gate` against a70d4b2 confirms the rp2040 presets'
+  images unmoved (comments only; the token check says so, the gate
+  proves it); `brio check rp2040` for the family fixtures' sake.
+- The excerpts in the orientations are copies of each document's own
+  "How to use it" block (spi.md's one comment changed with it); a
+  re-read of each pair after any API change is the maintained-example
+  rule applied to them.
+- On a board, in a minute each: a panic through `ResetReporter` with
+  `isr_hardfault` left unbound and no probe (expected: no reboot, the
+  core in the HardFault spin), and a UART initialized before the clock
+  (expected: silent until `SysClock::init()`, at the rate asked after).
+
+### Fact check and its residue
+
+A fact check read every claim of the pass against the code; its
+twenty-seven findings, each re-read at the cited code before the fix.
+Comments only in the headers (all twenty-six token-identical to
+0694bda), docs/rp2040 only among the pages.
+
+- 1. nvic.hpp, multicore.md: "a driver's init() enables its own line"
+  was false; now: the UART, SPI host and client, I2C host and client
+  and USB `init()` enable their line, the DMA's line comes from
+  `DmaLine::enable()` or an engine's `arm()`, the doorbell's from the
+  inbox's `enable()`, and for the timer, ADC, RTC, PIO and PWM the
+  program calls `Nvic::enable` on the serving core. multicore.md's gap
+  gloss no longer says the code keeps kernel.md's rule 2: it is the
+  programmer's duty, nothing refuses a line enabled on both cores.
+  The finding's list was short of the SPI host and client
+  (brio/pl022/spi.hpp, `init()` ends `Chip::Interrupts::enable`) and
+  the I2C client: added.
+- 2. sleep.md: "DORMANT, where every clock stops" - now the stopped
+  oscillator and its clocks, the calendar a wake only with the ring
+  oscillator stopped and clk_rtc on the crystal.
+- 3. spi.md: "a one-byte command sent with D/C low" - the example sets
+  no `r.dc`; now: D/C is driven only when the request names a pin
+  there, and here none is.
+- 4. i2c.md: `BusPassThrough` "runs each as it comes" - now the
+  failure policy that never retries.
+- 5. pio.md: the suite's `main()` does not reset the PIO blocks; now:
+  the suite resets both blocks at the start of every letter.
+- 6. uart.hpp: "uart_pins_valid refuses any other pair" - any of the
+  instance's four TX pads pairs with any of its four RX pads; said.
+- 7. pin.md: "the pad first" for every configuring verb - now per verb:
+  `function()` and the verbs over it the pad first, `analog()` and
+  `release()` CTRL first.
+- 8. clock.hpp (header and `init()`), clock.md: "parked on clk_ref" on
+  every failure - now per step: the crystal and the PLL leave clk_sys
+  on clk_ref, a glitchless switch that did not take leaves that mux
+  with its select written and SELECTED unconfirmed. platform.md's
+  orientation said the same absolute: narrowed too.
+- 9. spi.hpp: "31.25 MHz at 125" - the request is clamped to 7.8125
+  MHz under the 8 MHz ceiling; said, as spi.md says it.
+- 10. dma.hpp: `abandon()` spins inside the abort and is called from
+  the DMA line's handler (the UART's and the SPI host's DMA bodies) -
+  stated in the opening and at both `abandon()`s; only the UART splits
+  `claim()` from `launch()` under its guard, the SPI and I2C hosts call
+  `start()` under none - said.
+- 11. usb.hpp: "no verb here waits" - `init()` waits; now "no packet
+  verb".
+- 12. usb.md: "the identity 1209:0001 above" pointed at nothing - now
+  the descriptors under "How to use it".
+- 13. reset.md: "memory no reset clears" - now every reset short of a
+  power cycle.
+- 14. clock.hpp, platform.hpp, uart.hpp, usb.hpp, usb.md: every pointer
+  to a bench app removed, the fact kept on its own (the platform's glue
+  "in outline", the post a program's handler makes, a program that
+  waits for `configured()` and `dtr()`).
+- 15. rtc.hpp: `Nvic::enable(Rtc::irq())` added to the smallest use and
+  its summary; pwm.md: `Pwm::reset()` added to both excerpts, and
+  `Nvic::enable(Pwm::irq())` stated as the program's in pwm.md and
+  pwm.hpp (nothing in pwm.hpp enables it).
+- 16. pio.hpp: "each bounded by a count the caller may pass" - now per
+  wait: `write_wait()` and `drain_tx()` take no count.
+- 17. pio.hpp, pio.md: "dropped" for a write into a full FIFO - now
+  "sets TXOVER", the bench finding's words; pio.hpp `read()`: the byte
+  returned is the top eight bits of the RXF read; pin.hpp: "from either
+  core", "or core" and "low out of reset" dropped (stated nowhere in the
+  code, the old text or multicore.md).
+- 18. flash.hpp `erase()`: returns true unconditionally after the ROM
+  call; said.
+- 19. flash.hpp, flash.md: the FIFO figure qualified (2.78 ms at 115200
+  8N1, 3.33 ms with 12-bit frames), a receive engine keeps the bytes
+  moving (the DMA is not masked); flash.md's orientation gains the 29 ms
+  erase against the 2.78 ms FIFO.
+- 20. multicore.md: the probe-less reboot is the HardFault handler's
+  only when `isr_hardfault` is bound to `fault_reset<P>()`; the crt's is
+  a spin. Said.
+- 21. The crt's weak aliases: `isr_hardfault` is a weak spin of its own.
+  pio.hpp and pwm.hpp now say "every peripheral handler name";
+  platform.hpp, ticker.hpp and platform.md, whose vector is
+  `isr_systick` (a core exception, which the crt does alias to
+  `Default_Handler`), say "every handler name but `isr_hardfault`" -
+  the finding's "every peripheral handler name" would have left
+  `isr_systick` out of the very sentence about it. platform.md: only the
+  peripheral names are macros.
+- 22. uart.hpp `init()`'s false answers gain a refused format and the
+  divisor/line-control refusals; adc.hpp (both places) a crystal with
+  no PLL configuration; multicore.hpp a popped word that is not 0 and
+  "at most 63 restarts"; platform.md a zero reload; pio.hpp the program
+  left loaded on a divider failure.
+- 23. clock.hpp: the rate switch's context is the programmer's duty,
+  checked and measured by nothing; said in those words.
+- 24. sleep.hpp: the light and standby rungs made consistent with the
+  code (`arm()` writes SLEEPDEEP and nothing else between them) and the
+  measurement (the SLEEP state is reached with it clear or set): the
+  masks the program set decide what a standby prunes.
+- 25. rtc.hpp: `isr()` is also called by the timed site's `rtc_isr()`;
+  dma_engine.hpp: "every family's transports" now the other families'
+  transports with engine slots; uart.md and pio.md name the WeAct
+  RP2040 and link the WeAct RP2350B's page beside the wires' page;
+  spi.hpp: start()'s true answers (polled and empty) and the engined
+  completion on the DMA line, and the header's excerpt now carries the
+  doc's `r.cmd` line; pin.md: `analog()` hands the pin to no owner.
+- 26. platform.md, uart.md: "the trap this once was" rewritten as
+  today's truth (the handler name is a macro; a definition without the
+  header names no slot).
+- 27. clock.hpp: the two overlong comment lines wrapped.
+
+Also fixed while there: platform.md's "each driver's `init()` releases
+its own block" now names the three exceptions (`Dma::init()`,
+`Pio<n>::reset()`, `Pwm::reset()`); clock.md's switching sequence no
+longer starts a line with a list marker. Not applied: none of the
+findings was wrong in substance; finding 1's list and finding 21's
+wording were completed as above. Left as they were: the open facts
+above, `Rp2040Platform<TB>` in README.md among them; usb.md's bench
+findings that say "the USB console app" (findings are kept word for
+word, and they name no app).
+
+Checks: `bin/brio prose docs/rp2040/*.md brio/rp2040/*.hpp` 45 files,
+0 errors, 0 for review; `bin/brio gate --tokens --against 0694bda
+brio/rp2040/*.hpp` 26 token-identical; no non-ASCII byte; the
+src/apps grep finds only README.md's app-discovery glob; every link of
+docs/rp2040 resolves, anchors included.
+
+## Local batch: the util and gfx headers
+
+Scope: the comments of every header of `brio/util/` that the fourth
+batch did not reach (twenty-eight: the twenty-five at the top level,
+`proto/line_parser.hpp`, `usb/device.hpp` and `usb/cdc.hpp`) and of
+the seven headers of `brio/gfx/`; the fourth batch's eight
+(`serial_port.hpp`, `print.hpp`, `stream.hpp`, `bench.hpp`, `ring.hpp`,
+`bus_master.hpp`, `spi_bus.hpp`, `i2c_bus.hpp`) untouched. Base:
+`docs-rewrite` at a70d4b23b8e46be0fb89bff8890f1b8b8214bcd2, the
+reference of every token check. Done locally on a branch of that base,
+not committed; the patch against the base is the handoff. Not touched:
+every code token (the token check on every file), every page (the
+design pages were rewritten in the second batch; where a header and
+its page disagree the header follows the code and the disagreement is
+listed below), the other strata, apps, CMake, `.vscode`, `.clangd`. No
+header holds a `// build:` line or any other tool-read line.
+
+Method: the third batch's, applied to services. Each opening now says
+first what the service does for a caller and its smallest use, written
+in the spelling a suite, a family fixture, a host test, a driver's own
+comment or a design page already uses (no header names an app's path:
+a suite is named by its suite name, another program's spelling by its
+family, so nothing under brio/ points into an app); then which context
+calls what (what waits and for how long, what masks, who owns a buffer
+until when, the one-producer rules); then every fact the old comment
+gave, each with its citation (a design page by name and heading, a
+measurement by its suite letter, a kernel.md numbered reference keeping
+its number and gaining its heading text). Insistence capitals are
+lowered (acronyms and register, descriptor and standard names kept); a
+term of the project's own is defined where the header first uses it
+(an active object, a concept, a run, a letter and the all-key, a peer,
+a tag object, a rung, a monostate, the DLC, a ZLP, a NAK, an IN token).
+The public operations the smallest uses call gained the sentence they
+lacked. The work was split in five groups (the NV stack; analog, power
+and meters; the infrastructure and protocol headers; the USB pair;
+gfx): the infrastructure group and the USB pair by hand, the other
+three by forked agents under one written brief, every diff then read
+and the agents' claims checked against the code before this record.
+
+### Each file, and what changed
+
+The infrastructure and protocol headers:
+
+- `clock.hpp`: the opening says a program never calls these helpers
+  itself, shows the AVR's static clock, its tag object and a driver's
+  init (the spelling of docs/design/clock.md and the AVR console), says
+  everything is constexpr and context-free, and cites the two regimes
+  and the synchronous fan-out by heading. ClockUser says who calls
+  rebase() and when (main context, before the hardware switches, may
+  wait for its own hardware); clock_hz() lost "for free"; the
+  assertion's effect (a forgotten user stops the build) said.
+- `placement.hpp`: the opening leads with what a program chooses (a
+  tag among a driver's template arguments) and the CH32V00x SPI host
+  named `InRam`, says nothing else changes for the caller and nothing
+  waits, then keeps every paragraph (the measured 300.5 against 268.5
+  cycles, the section-name conflict, the 272-byte frame) with the
+  capitals lowered; the ISR-body rule cited to overview.md's "ISR
+  binding pattern"; `Hot` says it runs its body at once in the
+  caller's context.
+- `cycle_count.hpp`: the opening says a program calls its ticker's
+  cycles() and a ticker author writes it with these two functions,
+  shows the CH32V00x ticker's loop as written, says it is callable
+  from any context and retries only while a tick or restart lands
+  among the five reads, and cites kernel.md section 9 and
+  benchmark.md's "The ruler". ticker_compose() says nothing checks the
+  consistency it requires.
+- `timestamp.hpp`: the console's uptime command as the smallest use,
+  ownership (a value, filled by now()), the layering cited by heading.
+- `wire.hpp`: a DAC code packed and an ADC word read as the smallest
+  use; the bus's buffer rule placed where it belongs (spi-bus.md, "The
+  transaction descriptor"); the pillar cited by heading; the load and
+  store families gained a comment each.
+- `trace.hpp`: the opening shows a trace stamped from a USB controller's
+  vector and dumped from a console command (the CH32V203 USB probe's
+  spelling), and says who calls what: stamp() from any context by any
+  number of writers under the critical section, dump() in main context
+  and waiting as print waits. The old example's
+  `Meter::period_ticks()` named a verb that exists nowhere; replaced by
+  the real one. stamp(), count() (since the last clear(), saturating)
+  and dump() (its closing line) say their context.
+- `inbox.hpp`: the opening defines the two-kernel model in a sentence,
+  shows the RP2040 program whose core 1 commands a lamp on core 0
+  (send, the drain alias, the vector, enable() in main), and lists
+  who calls what: send() from any context of the sending core, masking
+  it for the copy, the index store and the bell; the drop counted in
+  `Inbox<Ao>::overflows()` and answered only by `Inbox<Ao>::send()`;
+  the drain in the receiving core's vector; an object left out of the
+  list never drained; nothing drained before enable(). The table names
+  `send_reply_to<Ao, Payload>` as the template has it (it said
+  `<Ao, P>`, which reads as a platform). The rest kept, the capitals
+  lowered, kernel.md section 12 cited by heading.
+- `testbench.hpp`: the opening defines a suite, a letter and the
+  all-key before the grammar, keeps the suites' own loop as the
+  smallest use, and says who calls what (one object, one context, the
+  test run inside handle(), every line printed with print's wait); the
+  group rule cited to overview.md's section and rule by name; handle()
+  says what it returns, verdict() its saturation.
+- `proto/line_parser.hpp`: the opening names the three pieces, shows
+  the console's line sink (parser, router, routes, the dispatch, as the
+  STM32G0 console spells them) and the bare assembler loop, and says
+  who owns what: nothing copied, the parsers writing into the line, a
+  command valid exactly as long as its line (until the next push(), or
+  the end of SerialPort's LineReceived dispatch). LineAssembler says a
+  line holds max_line_length - 1 characters and that the overflowing
+  line's own newline completes nothing; the parsers say when they
+  answer false; the router says it matches case-insensitively and what
+  its answer means.
+- `can.hpp`: the opening leads with what a program does (a frame, the
+  family's timing search, the check of its answer) in the STM32F4
+  driver's own spelling, says everything is constexpr and
+  context-free, and cites can.md's sections by heading ("The bus
+  active object, still absent", "Born at the third controller", "The
+  bit timing", "Errors and the error state"); the DLC expanded;
+  can_frame_valid() gained its comment; "the seventh" error code
+  spelled as code 7, no_change.
+
+The USB pair:
+
+- `usb/device.hpp`: the opening says what the stack does for a program,
+  shows the RP2040 USB console's descriptors, device alias, vector and
+  start() (as `console_usb` spells them), and lists who calls what:
+  start() and stop() in main context, isr() in the controller's vector
+  and nowhere else with every class verb inside it, the readbacks as
+  snapshots, the descriptors and a class's answer as storage the stack
+  reads until the data stage ends. Each old section cites usb.md by
+  heading; the ZLP expanded; the controller contract says where its
+  verbs are called from; start(), stop() and isr() gained their
+  sentences, the readbacks their wrap.
+- `usb/cdc.hpp`: CDC ACM and the tag object expanded; the console's
+  class alias, SerialPort and vector as the smallest use; who calls
+  what: the contract verbs inside the device's isr(), the byte
+  transport main context only with one producer and one consumer, the
+  critical section taken by every write that queued bytes (the first
+  packet gathered inside it) and by a re-arm, a print to an
+  unconfigured port waiting for ever if no host comes; NAK and the IN
+  token explained; a bus reset emptying both rings said;
+  read_byte(), write_bulk(), read_span(), tx_idle() and take_rx_edge()
+  gained their sentences.
+
+The NV stack:
+
+- `crc.hpp`: the opening adds the smallest use and the check values
+  the host suite pins (0x29B1, 0x0376E6E7), the context (pure, any
+  context, the caller's buffer read during the call, a running value
+  carried); the 70 us figure attributed to the AVR's bare EEPROM byte.
+- `sha256.hpp`: the smallest use, the host suite, the context; the
+  hardware half pointed at (`rp2350/sha256.hpp`); the cost corrected
+  (below).
+- `persistent_panic.hpp`: the smallest use as the AVR's NVM suite
+  spells it; report() said to run only where break_here() returns,
+  the boot-side verbs' waits; the 2.73 ms against 21.4 ms figure cited
+  to nv-journal.md by heading; each verb gained its sentence.
+- `nv_record.hpp`: the smallest use; store() and clear() said to wait
+  on the bounded wait_ready() with the measured wait, the writer named
+  as the path that never waits; concept, run and monostate defined;
+  store()'s failure corrected (below).
+- `nv_writer.hpp`: the smallest use (the request with its loan and
+  reply), kernel.md section 1 cited by heading, who calls what (no
+  dispatch waits, the glue's disable and why it is mandatory), the
+  queue's depth and the drop with no reply (whose bytes are the
+  requester's again at once, the counter its only trace), the loan
+  from the post to the NvDone whatever its status; nv_refused
+  corrected (below).
+- `nv_heap.hpp`: the smallest use as the AVR heap suite spells it, the
+  seal as the commit point, what each verb erases or programs and how
+  long it waits, what the core does meanwhile per family (nv-heap.md's
+  realizations), append()'s copy and a stale NvBlock; each old section
+  cites its heading; rewrite() corrected (below).
+- `nv_journal.hpp`: the smallest use as the SAM C21 and STM32G0
+  journal suites spell it (the example's placeholder `JournalZone`
+  became the real `RwweeJournalZone`), who calls what (the read-only
+  verbs, save() and collect() erasing, save_reserved() for a panic
+  reporter with its 1.4 ms figure), the copy of the caller's bytes;
+  each section cites its heading; collect() states its outcomes.
+
+Analog, power and meters:
+
+- `analog.hpp`: the smallest use in the AVR's spelling, the context,
+  analog.md cited; the rounding and saturation of each conversion said.
+- `analog_sampler.hpp`: the sampler, the owner's init, the vector and
+  the pace as the smallest use; who calls what (the glue's post and the
+  drop counted, init() by Tenuto, the TimeEvent verbs main context
+  only, subscribers served by copy); unknown_inputs() saturating.
+- `meter_sampler.hpp`: two latches, the sampler and the two capture
+  bindings as meters.md and the AVR's meter suite spell them; the
+  latch's one producer and one consumer, its critical section; the two
+  "why" paragraphs cited by heading; init()'s reset of published().
+- `power.hpp`: the manager, the request, the vote and the wake path's
+  request at depth none as the AVR's power suite spells them; who
+  calls what (nothing in the manager waits, the lock counters under
+  the critical section and so legal from an interrupt handler); each
+  section cited by heading; every cause of a refused request listed;
+  PowerLock clamped, not refused; the lock's saturation and the
+  window between arming and idle corrected (below).
+- `block_stream.hpp`: the relay, the engine and the post as the
+  STM32G0's DMA suite spells them; who owns a block until when (read
+  only in the BlockReady dispatch, released at the relay's next
+  dispatch); "correct by construction" replaced by what Tenuto checks
+  and what stays the subscriber's duty.
+- `pwm_channel.hpp`, `rgb_lamp.hpp`: concept defined; a TCA channel and
+  a pin as channels; keeping v within [0, max] the caller's duty (some
+  implementations clamp); whether duty() may run in an interrupt
+  handler is each implementation's to say (the AVR TCA's split mode
+  read-modify-writes a shared register).
+- `quadrature.hpp`, `input_scanner.hpp`: the smallest uses as the
+  family fixtures spell them; everything polled in main context; the
+  pace armed after Tenuto's init_all() (an init() before run() is
+  undone by it).
+
+gfx:
+
+- `surface.hpp`: the parts of the header named, a framebuffer over the
+  caller's bytes as the smallest use (the AVR family fixture's
+  spelling), gfx's context stated (kernel-free, the caller's context,
+  no wait, no mask, no allocation, no guard: one context draws a
+  surface), the lifetimes (a Framebuffer points at the caller's
+  storage, a Viewport at its base); each old section cited by heading;
+  clip(), the verbs and Viewport gained their sentences.
+- `draw.hpp`: the primitives listed with a four-call smallest use, each
+  call becoming fill_rect() calls and nothing else, coordinates off the
+  surface clipped and the domain unchecked; line() and circle() say
+  what they cost a panel (one window per pixel when oblique or round).
+- `pen.hpp`, `text.hpp`, `font.hpp`, `font_5x7.hpp`, `counting.hpp`:
+  each opening a smallest use from the host suite or the host's supply
+  panel, the context and the lifetimes (a pen and a counting surface
+  point at their surface; a string is read during the call; a font is
+  static data); text() says the returned x counts clipped cells,
+  text_field() what it returns; the 5x7 table's 672 bytes cited to
+  "What it costs"; the tally's wrap.
+
+### Facts resolved while writing
+
+Stale claims corrected to the code's truth:
+
+- `trace.hpp`'s example stamped `Meter::period_ticks()`, which exists
+  nowhere in the tree; the example is now a real program's.
+- `timestamp.hpp`: "raw Platform::now() ticks serve fine-grained
+  measurement": P::now() counts the kernel's ticks (a millisecond or
+  1/1024 s), coarser than the type's milliseconds; the header now
+  points a finer measurement at a cycle ruler (benchmark.md, "The
+  ruler").
+- `inbox.hpp` listed "the PRIMASK critical section" among the per-core
+  guarantees; the RP2350's Hazard3 half has no PRIMASK: now "the
+  platform's critical section". The mask was said to cover the copy
+  and the index store; the guard lives to the end of send(), the bell
+  included: said. `send_reply_to<Ao, P>` is `<Ao, Payload>`.
+- `proto/line_parser.hpp`: "route names should be provided in canonical
+  uppercase form" is a convention, not a requirement: command_equals()
+  folds both sides. parse_long() and parse_ulong() call strtol() and
+  strtoul(), which no 32-bit image has (runtime.md: no C library on the
+  link line), so a call there fails to link; nothing calls them today.
+- `usb/device.hpp`: "every controller brio will meet" listed the four
+  controllers as a future; they are the realizations table's present,
+  the sentence now says so.
+- `usb/cdc.hpp`: the transmit path was said to take the guard for the
+  decision; kick() takes it on every write that queued bytes and
+  gathers the first packet, up to 64 bytes, inside it. Said as it is;
+  whether the copy belongs inside the mask is the driver owner's call
+  (CLAUDE.md's "a critical section around the decision and never
+  around the work"), open below.
+- `sha256.hpp`: "about 2 kB of constants" is 288 bytes (64 round
+  constants and 8 initial words; nm on the RP2350 image agrees), and
+  "on the order of a microsecond per block" is about 40 us a block on
+  the Cortex-M33 and 35 on the Hazard3 at 150 MHz, measured by
+  test_rp2350_blocks letter c (docs/rp2350/sha256.md, "Bench
+  findings": 4096 bytes in 2547 and 2216 us).
+- `nv_record.hpp`: after a refused write "load() will report the record
+  invalid" holds only once a byte was written; a refusal of the very
+  first operation leaves the old record valid. Both outcomes said.
+- `nv_writer.hpp`: nv_refused also answers a refused write_run, and
+  `written` can be smaller than len (zero when nothing differs).
+- `nv_journal.hpp` quoted "util/nv_heap.hpp opens by naming two needs";
+  the sentence is docs/design/nv-heap.md's ("What it is for").
+- `nv_heap.hpp`'s rewrite() comment followed nv-heap.md's "allocates two
+  ids and alternates"; the code supersedes one id by a second copy
+  (alloc(id) while the old copy rules until the seal). The header
+  follows the code.
+- `power.hpp`: the lock counter's saturation "errs toward keeping the
+  restriction"; the increment stops at 255 while every release
+  decrements, so past 255 live locks the restriction lifts with locks
+  still alive. "A lock taken while a round is already armed ... is not
+  a gap - the interrupt that takes the lock is itself a wake": the
+  ceiling is read when a request is judged; a lock taken while the
+  voters are asked or once the site is armed does not touch that
+  round, and one taken while the CPU is still awake between the
+  arming and the idle does not stop that sleep. armed_state's "the CPU
+  has stopped at least once by the time anything reaches here" is not
+  enforced: an event posted to the manager between the arming and the
+  idle ends the round unslept. "publishes a WakeReport" is a post to
+  each stakeholder (tell()), not a publish().
+- `quadrature.hpp`'s detents() counted "detents published"; it adds one
+  per Turned event. `input_scanner.hpp` named a `settled()` with no
+  argument; the verbs are settled(index) and all_settled().
+- `meter_sampler.hpp`: "a capture unit that reports through an
+  interrupt exists on every machine brio targets"; meters.md's
+  realizations give the RP2040 and the RP2350 none.
+- `block_stream.hpp`: the relay hands a buffer back "right after"; it
+  does at its next dispatch, the one its self-post guarantees.
+- `pwm_channel.hpp`'s "callable from any handler" narrowed to an event
+  handler: the AVR TCA's split-mode duty() read-modify-writes a CTRLB
+  its six channels share.
+- `surface.hpp`: "nothing here needs to be wider than sixteen bits";
+  both write_run() verbs form a run's far edge in 32 bits; now said of
+  clip() alone. `pen.hpp` called the pen "the only stateful thing in
+  this library"; the counting surface keeps a tally: "the only drawing
+  state". `counting.hpp`'s "three additions" is two counter updates a
+  call, a rectangle's pixel count a multiplication first.
+
+Headers and pages that disagree (the pages are not edited in this lane;
+each is open for the page's owner):
+
+- docs/design/gfx.md, "The one place that still computes wider", says
+  the segment's stepping keeps a 32-bit error term and that a
+  coordinate domain is a way out not yet taken; the code has taken it:
+  `line()` steps in `int_fast16_t` under `coord_max = 4096`
+  (gfx/surface.hpp, gfx/draw.hpp). The page's "Conventions" agrees
+  with the code; that subsection is stale.
+- docs/design/nv-heap.md, "The operations": "allocates two ids and
+  alternates" against the code's one id superseded by a second copy.
+- docs/design/meters.md's excerpt calls
+  `Meters::init(ticks_from_ms<P>(100))` and its bullet says the
+  application arms the sampler "right after" Tenuto's init_all(); an
+  init() with a period made in main before run() is undone by
+  init_all(), so the headers say the pace is armed once init_all() has
+  run.
+- docs/design/power.md, "The deadline guard", and docs/avrxt/platform.md
+  give the crystal restart as 1.77 ms and about 1.5 ms; the page
+  records both, the header points there.
+
+Open (not written as true anywhere):
+
+- `usb/cdc.hpp`: a packet the controller refuses (submit_in() false)
+  has already been popped from the transmit ring: its bytes are lost,
+  still counted in tx_bytes, and tx_idle() then answers true. Whether
+  that can happen on any controller, and whether the first packet
+  should be gathered outside the critical section, are the driver
+  owner's questions.
+- `power.hpp`: the queue is `sizeof...(Voters) + 3` deep while its
+  comment counts one request, every vote and one re-post (+ 2); and
+  whether a lock taken between the arming and the idle should stop
+  that sleep (today it does not) is the power model's question.
+- `inbox.hpp`: what a send<Ao>() to an object of the sending core's own
+  kernel does (its own doorbell rung) is not stated by the code's
+  checks; not written.
+- `quadrature.hpp`'s "a timer mode on three, a programmable block on
+  one" matches the strata with an encoder driver today; whether it
+  describes every family's silicon is unchecked.
+- `sha256.hpp`'s "a few hundred bytes of code" is kept; the RP2350
+  image shows about 600 (not built at the base to confirm).
+- One user per NV store (an NvRecord::store() or a PersistentPanic on a
+  store an NvWriter is writing) is implied by the code and stated
+  nowhere; a JournalPanic::report() from a fault that interrupts a
+  save() meets a half-updated index, which no comment or page
+  addresses.
+- Where the 5x7 glyph table is stored on the AVR (flash, or copied to
+  RAM) is not established; the header says "static data of the image".
+- gfx: the coordinate domain bounds positions, not extents; a size or a
+  radius large enough that a computed edge passes the 16-bit Coord
+  (fill_circle's rows, the rounded rectangles) wraps when narrowed, and
+  nothing bounds it. A reader's observation from the code, not
+  exercised by a test; not written into the headers.
+
+### Reader review (fresh subagents, one round)
+
+Two readers, each given only its files, the audience profile and the
+brief's four questions with scenarios: one on `inbox.hpp`,
+`usb/cdc.hpp`, `nv_writer.hpp` and `power.hpp` (eleven scenarios), one
+on `gfx/surface.hpp`, `gfx/draw.hpp` and `gfx/text.hpp` (eight).
+Supported directly: a send into a full inbox (dropped, counted, no
+wait); send() from an interrupt handler; a print to an unconfigured
+USB port; write_byte from a handler beside main's prints (refused by
+the one-producer rule); read_span()'s validity; the NV writer's loan
+until NvDone whatever its status, its rejection, and that nothing in
+it waits; an interrupt handler's power lock, legal there and not
+retroactive; a voter that never answers; a framebuffer's storage and
+lifetime; a rectangle off the left edge (clipped, nothing written
+outside); erasing on a write-only panel (a field, or the background
+colour); an over-long field (cut, the x after its last cell
+returned); a character outside the font. Residue, applied, each
+checked against the code first: inbox.hpp's `send_reply_to<Ao, P>`
+(the template is `<Ao, Payload>`), the mask said to end before the
+bell (it covers it), how a drop is noticed (`overflows()`, or
+`Inbox<Ao>::send()`'s answer; `send<Ao>()` answers nothing), drain()
+popping no bell, nothing drained before enable(), an object left out
+of the drain, "lends_ok" and "its compiler-only fence" unexplained,
+each core's own platform type; cdc.hpp's "tag" undefined, "none of
+them waits" read against print's wait, the guard said to be taken
+for a decision where kick() takes it on every write that queued bytes
+and gathers the first packet inside it, "the next IN token" against a
+packet handed over at once, a bus reset emptying both rings unsaid,
+for ever with no host unsaid; nv_writer.hpp's dropped request (its
+bytes free at once, the counter its only trace, no NvDone), "the
+disabling line"; power.hpp's "of any event" (one posted to the
+manager), a lock "while it lives" against a ceiling read once per
+request and a sleep a lock taken between the arming and the idle does
+not stop, armed_state's unenforced "the CPU has stopped at least
+once", the wake path's reply argument unspelled; surface.hpp's
+drawing from two contexts stated as a description (now a rule with
+its reason, the read-modify-write of a Mono byte), the framebuffer's
+size and placement, "the clip every surface trims with" (write_run
+does not use clip()), "runs on every primitive call" (every
+fill_rect), the size check said of every surface (a Viewport's is not
+checked), "observer", the fixtures unnamed, "the element type is the
+beat"; draw.hpp's "handed to the run verb" (it is fill_rect), "shapes
+do not overlap" against the bordered shape's two fills (now the
+layout rule and its one sanctioned overdraw), the ring's "each pixel
+its own fill_rect" (the mirrors' meeting pixels are drawn more than
+once); text.hpp's `fb` and `cells` undefined, the font's range and
+concept unpointed, "a handful of windows" (now one window per row of
+the cell per text_run_max pixels, eight for a five-character 5x7
+field), the field's left alignment, "a scaled cell". Left as is, with
+the reason: the C++ notation itself (`using`, `std::array`,
+`std::span`, `std::optional`, braces, `typename S::Color`) is the
+learning route's; the headers' paths are relative to brio/ as every
+include is (`host/gfx_reference.hpp` is brio/host's, the prose net
+resolves it so); the measured 24574 at the domain's edge is the
+measurement's figure; the questions the readers raised that the code
+cannot answer are under Open above (a refused USB packet, a lock
+between the arming and the idle, the power queue's count, a send to
+one's own core, extents past the domain). No second round: the
+residue was wording and missing statements, each applied and checked
+against the code, and nothing a reader found was a false scheduling
+or lifetime model left standing.
+
+### Checks
+
+- `bin/brio gate --tokens --against a70d4b2` over the thirty-five
+  files: all thirty-five token-identical.
+- `bin/brio prose` over the thirty-five files: 35 files, 0 errors, 0
+  for review (before the batch: 0 errors, 0 for review).
+- `grep -P '[^\x00-\x7F]'` over brio/util and brio/gfx: nothing; no
+  `// build:` line in any header.
+- `git diff --stat a70d4b2 -- . ':!brio/util' ':!brio/gfx'
+  ':!DOCUMENTATION_REWRITE_PROGRESS.md'`: empty.
+- Every path the comments cite exists (the prose net); every page and
+  heading cited by name was checked by a script: 81 citations, the
+  three it does not find being overview.md's "Authority of util/", a
+  rule named in bold inside "Generalization rule" and not a heading, cited
+  so in the base. Every smallest use was copied from the file named
+  for its spelling.
+- `bin/brio prose DOCUMENTATION_REWRITE_PROGRESS.md`: 0 errors, 1 for
+  review, at line 598, the second batch's record and not this
+  section.
+- Not run: any build, `brio check`, the host tests, the full
+  `brio gate` (comments only; the token check says so).
+
+### Local verification handoff
+
+- The full `brio gate` against a70d4b2 confirms every image unmoved.
+- The four header-against-page disagreements above, for the pages'
+  owners (gfx.md's "The one place that still computes wider" first:
+  the code has taken the way out the page says is open).
+- The open questions above that are the drivers' and the power
+  model's: the refused USB packet, the transmit packet gathered under
+  the mask, the lock taken between the arming and the idle, the power
+  queue's count.
+
+### Fact check and its residue
+
+A fact check read every claim of the thirty-five headers against the
+code; its twenty-four findings were applied over 0694bda, comments
+only, each read against the cited code first.
+
+Applied, one line each (file: what was wrong -> what it says now):
+
+- usb/cdc.hpp: reset() "inside isr() and nowhere else" -> also from
+  start() and stop() in main context; it masks nothing and clears both
+  rings (ring.hpp's clear() is not concurrent), so main-context calls
+  are the caller's duty (no controller interrupt across them) and the
+  isr-side call is unguarded against a transport verb in progress.
+- usb/device.hpp (three places): "none waits", "without waiting",
+  "never waits" -> the stack never waits; a controller's verbs may
+  poll the silicon, bounded, the STM32F4 OTG's configure_endpoint()
+  and deconfigure_endpoints() the case (the second inside isr() at a
+  bus reset), stm32f4/usb.hpp's flag_spins the bound.
+- gfx/surface.hpp: one read-modify-write rule for every framebuffer ->
+  per format: Mono loses pixels to a second context, Indexed8 stores
+  whole bytes and loses none but the order of two writers is undefined.
+- util/nv_record.hpp: "part written -> checksum mismatch" absolute ->
+  the address order (magic first) and its consequence over a cleared
+  record: a store cut after the magic revives the old record (open
+  facts below).
+- proto/line_parser.hpp, gfx/font.hpp: the pointers to a program's
+  spelling dropped, the examples kept (font.hpp's `f.unit`, the
+  program's field, became the literal "V").
+- util/trace.hpp: the example read a USB register from the vector ->
+  it runs Device::isr() and stamps the stack's setups() readback.
+- usb/cdc.hpp, ring sizes: "the receive ring holds two packets at
+  least, the transmit ring one" -> storage of at least 128 and 64
+  bytes, holding 127 (one packet and 63 bytes) and 63 (one packet less
+  a byte), from ring.hpp's capacity of size - 1.
+- usb/cdc.hpp: read_byte()/consume() "take the guard when the room
+  takes a packet" -> whenever fewer receptions stand armed than
+  out_slots(), arming inside it only where a packet fits (the header,
+  both verbs' comments).
+- usb/cdc.hpp, write_byte(): "with the packet after the one in
+  flight" -> only when fewer than 64 bytes are queued ahead of it.
+- usb/cdc.hpp: configured()'s readback paragraph -> stop() and a
+  SET_CONFIGURATION repeated while configured also empty both rings;
+  read_span()'s validity -> also ended by reset() from isr(), start()
+  or stop().
+- util/inbox.hpp, util/can.hpp: "may be today", "would today be" ->
+  the process word dropped.
+- util/inbox.hpp: "never drained" -> not drained by Inboxes, only by a
+  direct Inbox<Ao>::drain() on the receiving core.
+- util/inbox.hpp: send() "masks that core's interrupts (its
+  platform's critical section)" -> it opens the receiving object's
+  platform's CriticalSection, which masks the sending core because on
+  the RP2040 and the RP2350 both cores' CriticalSection is the one
+  InterruptGuard masking the executing core (send()'s own comment too).
+- gfx/draw.hpp: the cost of specifying thick round shapes pointed at
+  gfx.md's "Conventions" -> "What is deliberately absent".
+- util/power.hpp, the queue: "the deepest this queue can get" over a
+  count of N + 2 -> the depth N + 3 stated, the N + 2 the comment
+  accounts for stated, the extra place said to be beyond that count
+  (open facts below).
+- util/power.hpp, SleepSite: "all three from its own dispatch" -> and
+  disarm() from init(), which Tenuto calls before the first event.
+- util/power.hpp: the 1.77 ms figure's circular pointer to power.md
+  dropped -> stated as the header's own figure, the 290 us credited to
+  the AVR platform page that measures it.
+- util/block_stream.hpp, util/nv_writer.hpp: "nothing here masks" /
+  "takes a critical section" -> beyond what each post() (and
+  publish()) takes for the copy of its event.
+- util/nv_journal.hpp: a collection "erases both halves" -> erases the
+  idle half, programs one copy per live value not already there,
+  erases the old half, a resumed one erasing only the old; collect()'s
+  failures gain no_room for a copy.
+- util/nv_heap.hpp, util/nv_journal.hpp: "lives as long as the
+  program" -> the heap outlives every Writer (each holds an NvHeap*);
+  the journal needs static storage only where JournalPanic's `auto&`
+  names it.
+- util/persistent_panic.hpp: "the reporter is never reached" -> reached
+  only if the fault handler calls it (as nv_journal.hpp and
+  kernel/panic.hpp say).
+- util/quadrature.hpp: the pointer to the ch32vx03 fixture and the
+  host suite dropped (neither spells the example: the fixture's pads
+  are constants, the host suite's are simulated); the example kept.
+- util/analog_sampler.hpp (two places): after an unknown code the
+  input after the last KNOWN one is selected (index_ not updated), and
+  no AnalogSample is published.
+- util/nv_heap.hpp: the "no readiness verb" paragraph moved after the
+  FlashMedia list, which it split.
+- util/meter_sampler.hpp: ch32x035 added to the strata with no
+  MeterSource; `Meter` said to be a placeholder for the family's meter
+  type (avrxt's FrequencyMeter, ch32v00x's TimPeriodMeter offer
+  period_ticks()), a driver verb and not a register read.
+
+Applied beyond the findings' letter: usb/cdc.hpp's smallest use was
+titled "the RP2040's USB console", close to the rp2040 project's USB
+console program; it is now "a serial port over the RP2040's own
+controller", the example unchanged.
+
+Not applied as worded (the finding itself slightly off):
+
+- Finding 22 says an unknown code "publishes no Sampled"; Sampled is
+  the event the sampler receives, what it does not publish is the
+  AnalogSample (analog_sampler.hpp, the running state). Written so.
+
+Open facts, for the owners:
+
+- nv_record.hpp, a code defect: store() writes in address order, the
+  magic first, and clear() rewrites only the magic, leaving payload and
+  checksum. A store() ended right after the magic over a cleared
+  record (a byte store, or a run store whose first run is the magic
+  alone) makes the old record valid again: PersistentPanic's take()
+  then a report() cut there (a brown-out during the panic report)
+  brings back the failure take() consumed. The comment states the
+  sequence; the code is unchanged.
+- power.hpp: the queue is sizeof...(Voters) + 3 deep; the code's own
+  traffic (one request, every vote, one re-posted request) is + 2, and
+  no line of the code says what the third place is for. It was + 3 at
+  the manager's birth too, when EventQueue had no sacrificed slot, so
+  it is not that slot's remnant.
+- power.hpp: the 1.77 ms wake beside a crystal is stated by the header
+  alone; docs/design/power.md quotes it from the header, and no page
+  records the measurement that produced it.
+- usb/cdc.hpp, a code finding: the size assertion's message says "the
+  transmit ring one" packet, but its minimum, 64 bytes of storage,
+  holds 63; the message is code and stays.
+- usb/cdc.hpp, a code finding: reset() from isr() (a bus reset, a
+  SET_CONFIGURATION) clears both rings while main context may be
+  inside a transport verb (a push between write_span() and publish(),
+  a read_span() in use); nothing guards it.
+
+Checks over the thirty-five files, after the edits:
+`bin/brio gate --tokens --against 0694bda`: 35 token-identical;
+`bin/brio prose`: 0 errors, 0 for review; the non-ASCII grep: nothing;
+the app grep (`src/apps`, `console`, `supply_panel`, `usb_probe`):
+every hit a generic use of the word, none naming a program.
+
+## Local batch: the rp2350 stratum
+
+Scope: the twenty-two peripheral documents of `docs/rp2350/` (every
+page but README.md and vendor/README.md) in the brief's additive pass,
+and the comments of all thirty-three headers of `brio/rp2350/`. Base:
+`docs-rewrite` at a70d4b23b8e46be0fb89bff8890f1b8b8214bcd2, the
+reference of every token check. Local branch `docs-rp2350`, no commit;
+the patch is handed over as a file. Not touched: every code token, apps
+(blink.cpp's own comment, which still says the target has no console,
+included), CMake, presets, ld, the crts, svd, `.vscode`, `.clangd`,
+every other stratum, the design pages and the learning route,
+docs/rp2350/README.md and vendor/README.md, CLAUDE.md, docs/README.md.
+No `// build:` or `// mcu:` line exists in the headers. Environment: a
+local checkout with the toolchains under /sw present but unused; the
+token check lexed with the host g++. No build, no host test, no board.
+
+Method: platform.md, pin.md, platform.hpp and pin.hpp written first as
+the pattern; the rest by nine forked agents in groups of a subject each
+(the core headers; clock; timer, watchdog, reset; uart, spi, i2c; dma,
+pwm; pio, adc; sha256, trng, otp, bootrom; usb, flash; multicore,
+powman, sleep), each with the document and its headers together, each
+reporting its prerequisites with their evidence, its stale claims and
+its checks; their reports were read and their diffs spot-read
+(timer.md, reset.md, otp.md, clock.md, pio.md, watchdog.md, trng.hpp,
+dma.hpp, ticker.hpp), and the slips found are corrected below.
+
+### The documents
+
+Each of the twenty-two opens with: whom the page is for and what the
+driver does in a program, on which architecture (both, for every page);
+the smallest use, an excerpt of the page's own "How to use it" block,
+explained line by line; the prerequisite that decides correctness even
+there, each checked against the header (the clock task first, because
+every divisor is computed from the rate the clock type claims; the
+vector bound by the program under the crt's name, the same on both
+architectures, an unbound one landing in the crt's default spin; the
+isolated pads and the verbs that clear the latch; a block held in reset
+until a verb releases it, `Pio<n>::reset()` the one a PIO task needs
+before its `init()`; a buffer lent until the reply; the bounded waits
+and what masks); and a reading guide. "Documents of record" became a
+heading on every page, with a suite's letter, its all-key `z` and the
+letters run by name only defined beside the suite's name. Terms
+defined where the pages use them: concept, active object, task,
+monostate, pack, the ruler, the crt, the clock task, the bridge, engine,
+run, transport, slot, arbiter, sleep site, rung, witness, resync,
+execute-in-place, breadcrumb. The kernel.md references by number
+(multicore.md) are links by heading. Capitals used for emphasis lowered
+in Documents of record, What the silicon does, Types and verbs and How
+to use it (dma.md's engines section too); register, bit and erratum
+names kept. The bench findings are untouched on every page; nothing
+reordered.
+
+Sentences corrected because another page or the code contradicts them:
+- platform.md: four gap items a later chapter answered. `delay_us`
+  "wants a measured fact ... nothing yet needs the verb" (it is
+  `rp2350/delay.hpp`, measured in clock.md) and the ARCHSEL_STATUS item
+  "no driver of this stratum reaches yet" (`Otp::archsel_status()`,
+  measured in otp.md) deleted, each fact moved into "Types and verbs";
+  `Ticker::advance` "born with the first sleep site ... the power
+  chapter's" deleted, its facts moved into the `Ticker` bullet
+  (`advance` is the sleep sites' resync, measured in sleep.md; `pause`
+  and `resume` judged per core in multicore.md; this suite judges
+  neither); `idle_until()`'s reason "until a power chapter offers a
+  state that stops it" now says the DORMANT rung stops the timebase and
+  the sleep site's resync repairs it; core 1 "nothing has launched a
+  second core here" now "this suite launches no second core", with
+  multicore.md's measurements pointed at; the reboot item says reset.md
+  carries the watchdog's resets.
+- pin.md: the dormant-wake gap ("It belongs with the POWMAN chapter")
+  deleted - `DormantWake` in `rp2350/sleep.hpp` arms it and sleep.md
+  measures a dormant ended by a pad on both halves - its fact moved
+  into the `PinIrqTarget` bullet; `PadVoltage` and the threshold gap
+  said "read ... by nothing" where `Gpio::voltage()` reads it.
+- clock.md: two gap items deleted with their facts moved into "Types
+  and verbs" (DORMANT, which `Xosc::dormant()` and `Rosc::dormant()`
+  implement and sleep.md measures; the sleep gates, which sleep.md
+  measures pruned).
+- timer.md: the orientation's "`Timer<0>` is the usual ruler" now says
+  the timer suite's ruler, the platform suite's being `Mtime`.
+- reset.md: "POWMAN is read and never written by this stratum" (powman
+  and clock write it) now "by this driver", powman.md writing neither
+  CHIP_RESET nor POWMAN's WDSEL; the gaps that called the power and
+  multicore chapters unwritten now point at powman.md and multicore.md,
+  each gap kept for what is still unmeasured.
+- multicore.md: "Born with the power chapter (POWMAN), which is not
+  written" - the gap is kept (the sleep sites are core 0's, `static_assert(P::core == 0u)`,
+  and util/power.hpp's round asks one kernel's voters) and its reason
+  corrected.
+- powman.md: "the one write in the tree that carries no password" now
+  "the one write to a protected register".
+- sleep.md: "the Hazard3 half has no such bit" (core_hazard3.hpp names
+  MSLEEP.DEEPSLEEP, never set under RP2350-E4) and "nothing in 6.5.2's
+  condition is a processor bit" (the page's own MSLEEP.POWERDOWN
+  finding) corrected; letter x added to the letter list.
+- pio.md: the wireless letters of `z` were listed as a, b, h, j; the
+  suite registers m inside `z` too.
+- dma.md: the loop and ping-pong engines' gap said "born with the ADC
+  chapter" (adc.md exists and leaves the block-stream task to a program
+  that streams); the declined-features item's work narrative ("this
+  round", "the next round's", "being bisected over") reworded to what
+  stands.
+- usb.md: the suspend gaps "belong to the power chapter" as if none
+  existed (sleep.md carries no USB content); a missing blank line that
+  merged the two "Not covered yet" lists restored.
+
+### The headers
+
+Comments only, all thirty-three token-identical to the base. Each
+opening now says what the component does for a caller and the smallest
+use, then which context calls what (the setup verbs in `main()` after
+the clock task; the interrupt bodies called from the program's handlers
+under the crt's names; what waits, with the bound read off the code;
+what masks: the platform's critical section, the flash windows with
+this core's interrupts masked, the transmit engine's claim; the
+read-modify-writes through the XOR alias that belong to one context;
+who owns a lent buffer until when), then every fact the old comment
+gave with its citation, insistence capitals lowered. The public
+operations the smallest uses call gained the sentence they lacked
+(context, waits, what false means). The numbered kernel.md references
+keep their number and gain the heading text.
+
+Stale claims corrected to the code's truth:
+- platform.hpp: "until the power chapter arrives with something deeper"
+  and `sleep_hook`'s "until the power chapter offers a deeper one" -
+  `rp2350/sleep.hpp`'s site installs its DORMANT entry in core 0's hook
+  while the deep rung is armed.
+- pin.hpp: the ExtInt example `if (Button::served())` does not compile
+  (`PinEvents` has no conversion to bool); now `!Button::served().none()`.
+- core.hpp: "rp2350/ticker.hpp is the one place above here that asks
+  the preprocessor anything" - multicore.hpp and reset.hpp ask
+  `BRIO_RP2350_CORE_M33` too, and flash.hpp asks `BRIO_RP2350_FLASH_KB`;
+  the comment now says the architecture is asked only through the
+  macro and names the three files.
+- ticker.hpp: "the RISC-V half will not have to" list the ticker among
+  a dynamic clock's users - `MtimeTicker::init` asserts the listing
+  too; the alias comment "Change the rate here" points at the 1000 in
+  `CoreTickerOf`; the note that this target has no dynamic clock.
+- core_hazard3.hpp: no owner arms the machine software interrupt
+  (`machine_software_interrupt` has no caller).
+- timer.hpp: LOCKED "refuses every write including its own clear" now
+  states the datasheet's claim against the measured A2 behaviour in the
+  same file.
+- watchdog.hpp: the scratch-register "until the bench says which is
+  true" - watchdog.md's findings settle it.
+- reset.hpp: the POWMAN sentence points at powman.hpp.
+- trng.hpp: the handler clears two flags (CRNGT_ERR, VN_ERR), not
+  three; otp.hpp: `clk_ref_max_hz` is `otp_clk_ref_max_hz`, and
+  `chip_id()` returns `std::optional<uint64_t>` (the example's
+  `uint64_t` did not match); bootrom.hpp: `get_partition_table_info`'s
+  "ordinary answer" said precondition_not_met where bootrom.md measures
+  a flash boot served with 4 words.
+- dma.hpp: the internal comment's "a normal channel is never starved
+  outright" against dma.md's letter p, which measures two HIGH_PRIORITY
+  channels starving a normal one.
+- nvm_flash.hpp: "the kernel loses whatever ticks fall inside" - flash.md
+  measures 1 tick kept on the Cortex-M33 half and 45 on Hazard3 across a
+  44 to 45 ms erase.
+- powman.hpp: "exactly ONE private verb" writes the password and
+  "nothing else ever writes POWMAN" - AonTimer has its own
+  `write_protected`, `probe_password()` writes BADPASSWD without it, and
+  clock.hpp writes POWMAN's LPOSC registers with the password.
+- The prose net's three review items (dma.hpp, pio.hpp, pwm.hpp: "the
+  other strata's" surface or arrangement) reworded to describe the
+  surface; 0 for review after.
+
+### Facts open
+
+- uart.md's bench finding "no chapter reprograms the QMI yet" may be
+  stale (flash.hpp has QMI timing and format fields); kept word for
+  word, for the flash chapter's owner.
+- usb.md's bench findings say "the three host-assisted letters" where
+  the suite registers four outside `z` (y, w, v, x); kept word for word,
+  the orientation names the four.
+- spi.md's bench finding "letter d after this round" carries a work
+  narrative; kept word for word.
+- dma.md's CHAIN_TO reason referred to "an open question about the
+  engined SPI being bisected over" in spi.md; spi.md holds no such
+  question, and the reason now says only that the launch keeps its
+  measured order. What the open question was is not on record.
+- Whether a second `Mtime::start()` (the platform example calls it, and
+  the Hazard3 ticker's `init()` calls it again) disturbs the tick phase:
+  it stops and restarts the generator; the comments keep "idempotent"
+  and add nothing.
+- Whether core 1's `CoreTicker<1>::init()` on Hazard3, which calls
+  `Mtime::start()`, disturbs core 0's shared counter: not written.
+- What a PIO task does on a block still held in reset, and what a UART
+  or SPI port does when initialized before the clock task: stated as not
+  measured, no figure written.
+- Whether the chip-level reset latches accumulate or replace: powman.md's
+  one rescue-then-power-down pair is pointed at, the question kept open.
+- flash.md justifies the NV decision as "the same decision the CH32V203
+  records", a pointer to another family; kept.
+- blink.cpp's header comment ("THERE IS NO CONSOLE YET on this target")
+  is contradicted by `rp2350/src/apps/console.cpp`; the apps are out of
+  scope.
+
+### Reader review (fresh subagents)
+
+Round 1, two readers, each given only its files, the audience profile
+and the brief's questions with scenarios: one on platform.md and pin.md
+(ten scenarios), one on the comments of platform.hpp and ticker.hpp
+(nine). Supported directly: the unbound `isr_systick` and when it stops,
+the source unchanged between architectures, the lost-wakeup window on
+both halves and why, the 5 ms mask (1 tick against 5), the pull-down
+workaround and why, the level and forced interrupts and what ends each,
+the letter and `z`; the contexts of now(), idle(), break_here() and
+on_own_core(), core 1's platform and ticker types and the per-core
+critical section, the ticker's refusals, the listing in a dynamic
+clock, the pause/resume asymmetry, sleep_hook's writer and effect,
+break_here() with and without a probe. Broken, and fixed: pin.md's
+orientation said a pad with its buffer on "reads high whatever its
+pull-down says" (contradicting "a pad driven low and released stays
+low": now conditioned on a released high) and that every configuring
+verb "but release()" clears the latch (`isolate(true)` sets it, `pull()`
+leaves it: now the four hand-over verbs named); platform.md's and
+pin.md's `PadVoltage` "read by nothing" against `Gpio::voltage()`.
+Residue applied: the crt, the clock task, `extern "C"`, the bridge, the
+ruler on the Arm half, which half "a kernel with no time" means and
+what the Cortex-M33 ticker refuses, `Pad` in the E9 snippet,
+`delay_us`'s refusal as a run-time false, the board's 12 MHz crystal,
+`input(pull)` with its buffer on and what `read()` returns, the output
+enable through SIO's set and clear registers (so `output()` on one pin
+does not disturb another), `ExtInt`'s default target, `PinEvents::none`;
+in the headers the misposts() count, the flash verb named, the sleep
+site and its rungs defined, the fault entry a breakpoint reaches, the
+ticker's now(out) told apart from the platform's now(), core 1's tick
+under the same vector name, the rate's place in `CoreTickerOf`, "what a
+document must say" dropped. Left as is, with the reason: the C++
+notation itself (`using`, the digit separator, designated initializers)
+and how to write an active object are the learning route's; how to
+select the architecture and flash are the operational page's; the
+bench findings' test vocabulary (rungs, rescues, a period late) is kept
+word for word.
+
+Round 2, one fresh reader on platform.md and pin.md, only on what the
+first found broken (nine questions). Supported directly: the hand-over
+verbs that clear the latch and the three that set it or leave it; the
+pull-down readings after a low and after a high and the workaround;
+`Pad`; `ExtInt`'s core; the crt and the clock task; which half a
+non-integral reference clock leaves without time and what the Arm
+ticker refuses; `delay_us`'s run-time refusal. Residue, applied: the
+silicon section's "every configuring verb ... writes ... with ISO
+clear" read against the exceptions (now "every verb that hands a pad
+over"); "cut off ... in both directions" against "the input is never
+isolated" (now the reset state, latch and input buffer off together);
+the contexts paragraph's two kinds of verb named apart; that
+`output()` writes no level; `read()` true for high; platform.md's E9
+paragraph pointing at pin.md's workaround. No third round.
+
+### Checks
+
+- `bin/brio prose docs/rp2350/*.md docs/rp2350/vendor/README.md
+  brio/rp2350/*.hpp`: 57 files, 0 errors, 0 for review (before the
+  batch: 0 errors, 3 for review, the three genealogy items).
+- `bin/brio gate --tokens --against a70d4b2 brio/rp2350/*.hpp`: all
+  thirty-three token-identical.
+- Links and anchors of the twenty-three pages and the vendor page, by a
+  script with GitHub's anchor rules: 0 problems.
+- `grep -P '[^\x00-\x7F]'` over the touched files: nothing.
+- The retention script (every number, backticked identifier and
+  register-like word of each base file present in the working file, a
+  lowered emphasis capital counted apart): 0 missing on 52 of the 55
+  files; the three exceptions are pin.md's "POWMAN" (the stale reason
+  deleted with its gap), otp.hpp's `clk_ref_max_hz` (corrected to the
+  constant's real name) and a backtick span in spi.hpp the script read
+  across a line break.
+- `git diff --stat a70d4b2 -- . ':!docs/rp2350' ':!brio/rp2350'
+  ':!DOCUMENTATION_REWRITE_PROGRESS.md'`: empty.
+- Not run: any build, `brio check rp2350`, the host tests, the full
+  `brio gate`.
+
+### Local handoff
+
+- The full `brio gate` against a70d4b2 confirms every image of the four
+  rp2350 presets unmoved (comments only; the token check says so, the
+  gate proves it), and `brio check rp2350` for the family fixtures'
+  sake.
+- The excerpts in the orientations are copies of each page's own "How
+  to use it" block, and the headers' smallest uses copies of those or of
+  blink's lines; a re-read of each pair after any API change is the
+  maintained-example rule applied to them.
+- The open facts above, for the owners of the pages named.
+
+### Fact check and its residue
+
+A fact check of this batch against the code, the suites' registrations
+and the pages' own findings, applied on `docs-rewrite` at 0694bda,
+comments and prose only (every header token-identical to 0694bda). One
+line per finding: file, what was wrong, what it says now.
+
+1. powman.md, powman.hpp, clock.hpp, clock.md: `probe_password()` was
+   "the one" password-less write and Lposc's clear was listed among the
+   password-carrying writes; now `Lposc::clear_bad_password()` is named
+   as the second password-less store, which by powman.md's own
+   measurement raises the flag it is named to clear, and
+   `Powman::clear_bad_password()` is pointed at. The code defect is
+   under "Facts open (fact check)" below.
+2. powman.hpp: `power_down()` "does not return when it works"; now it
+   returns `PowerRequest::accepted`, then the caller sleeps.
+3. adc.hpp: the DMA buffer was "the program's until that channel
+   completes"; now the channel's until it completes, the program's after.
+4. flash.md: "a source buffer must lie in SRAM"; now only a source in
+   the XIP space is refused (also the Flash verb list and the storage
+   example's lead-in).
+5. platform.hpp, sleep.hpp: `sleep_hook` "written from arm() and
+   disarm(), main context"; now also from interrupt context, the timed
+   site's `isr()` calling `disarm()` in `isr_powman_timer`.
+6. pin.hpp, pin.md: `release()` was among the verbs that write ISO
+   clear; now it writes the reset value 0x116, ISO set, and the
+   hand-over verbs are named.
+7. uart.hpp, uart.md: the masking list lacked the receive engine's
+   `harvest()` under the platform's guard; added.
+8. uart.hpp: the waiting verbs lacked `loopback()` (it drains first);
+   added.
+9. pwm.hpp: the waits lacked `Pwm::reset()`'s RESET_DONE wait; added.
+10. dma.hpp, dma.md: "the transports' receive engines fixed at HIGH";
+    now the UART's and the SPI host's arm HIGH and the I2C host's at
+    normal on purpose (SCL held on a full FIFO, nothing lost). dma.hpp:
+    "every programming verb refuses a BUSY channel"; now
+    `DmaRxEngine::start()` / `start_discard()` abort and rebind one.
+11. dma.md: starvation stated as a rule; now letter p as the one
+    measured case and letter w's fair round beside it (orientation and
+    "The level"). "Every type here is a monostate"; now the block, the
+    channels and the engines are, and the descriptions and readings
+    (`DmaTransfer`, `DmaChannelConfig`, ...) are values.
+12. watchdog.md: "the hardware being the only state"; now `Watchdog`
+    keeps the time-out in RAM for `kick()`.
+13. bootrom.hpp, bootrom.md: "every wrapper BootromError::not_found";
+    now the raw wrappers do and `sys_info()` / `git_revision()` answer
+    `std::nullopt`.
+14. reset.md: the accumulate-or-replace gap deleted, the fact (the
+    latches replace, on the one pair on record) stated in "What the
+    silicon does"; the power-down cause removed from the provoke gap,
+    pointed at powman.md.
+15. resets.hpp: "the drivers' inits use release()"; now ChipId::read()
+    and Gpio::ready() use release(), the drivers' inits cycle().
+16. platform.md: the core 1 item promised a letter in multicore.md's
+    list; now it points at what multicore.md measures (launch, ticker,
+    kernel, panic, bell, bridge) and keeps the idle-contract recipe.
+17. platform.md: the `.noinit` gap narrowed to the rescue (reset.md
+    measures the reboot and the time-out); "only one of them is the one
+    a program's memories survive" replaced by what each reset keeps.
+18. platform, timer, uart, spi, i2c, pwm, pin, clock, dma (.md): "`z`
+    runs them all"; now `z` runs every letter but the by-name ones,
+    named from each suite's registration (platform r, x; timer i; serial
+    y, w; spi x; i2c x; pwm c, d, e, f, g, h, k, y; pin b, f, g, h, i, j;
+    clock o, p, s, u; dma p, m, n, x). The same wording also on sleep,
+    powman, flash, reset, watchdog and usb, whose sentence said "all"
+    and then excepted letters.
+19. timer.md, platform.md: the platform suite "measures on Mtime" /
+    "every measurement on this page"; now Mtime and Timer<0>
+    (microseconds) and Timer<1> (clk_sys cycles, letters w and o).
+20. timer.hpp, watchdog.hpp (both places), ticker.hpp, mtime.hpp: the
+    tick generator's restart called bounded; now the stop before it,
+    RUNNING polled down, is said to have no bound.
+21. clock.hpp: "no image binds them today" dropped; now what the two
+    ISR bodies are for. Also ClockSource's "asking for one today".
+22. dma.md: the CHAIN_TO reason had no source; now the SPI host's own
+    launch order (receive first, brio/pl022/spi.hpp) is what its
+    measurements stand on, and whether one store would be equivalent is
+    an open question no letter has measured.
+23. spi.hpp: the alias example had no Request; now it posts one, as
+    spi.md's block does.
+24. core_hazard3.hpp (Irq::enable is two CSR writes), usb.hpp (two-
+    register readbacks, take_events), multicore.hpp (doorbell and
+    mailbox verbs read CPUID or FIFO_ST first; both places), sha256.hpp
+    (every CSR write is a read then a store), otp.hpp
+    (clear_interrupts() writes): "a single access" replaced by what the
+    code does.
+25. pin.hpp: "cut off in both directions" now the output side, the input
+    never isolated (9.7), the reset pad cut off both ways only with its
+    buffer off; "the power chapter's" now sleep.hpp's DormantWake;
+    pin.md lists every verb that sets, clears or keeps ISO.
+26. watchdog.md: pause_on_debug's effect now the datasheet's statement,
+    pointed at the unverified item.
+27. sha256.hpp: not_ready now only for a block still held in reset.
+28. trng.hpp, trng.md: init() on refused settings writes nothing, so a
+    running source runs on; stated.
+29. multicore.hpp: "tens of microseconds" now 5 to 35 us measured.
+30. multicore.md: `isr_systick` was one of "the bridge's" vectors; now
+    the bridge's doorbell and the tickers' tick.
+31. bootrom.md: `device_id` and `chip_id()` were "the same OTP rows";
+    now the order each returns, the halves swapped (otp.md's finding).
+32. usb.md: the orientation names the four host-assisted letters (it
+    already did; the `z` sentence reworded as in 18); the finding's
+    "three" kept, under the open facts below.
+33. adc.hpp, adc.md: "the clock task" defined at first use.
+34. flash.hpp: `init()` "a second call answers at once" now only after a
+    success.
+35. adc.hpp: "nothing here masks" now the global mask untouched and the
+    ADC's own line disabled by init() and release().
+36. pio.md: the blocks cycled at the start of each letter, not once;
+    pio.hpp: reset()'s wait added to the waits.
+37. i2c.md: "the third block below" now the second.
+38. pio.md, pwm.md, pwm.hpp: "task" now design/overview.md's one
+    definition on all three.
+39. clock.md: the caller, not `dormant()`, stops the PLLs.
+40. powman.hpp (both places): AonTimer::isr() is also called through
+    Rp2350TimedSleepSite::isr().
+41. platform.md, platform.hpp: only the timed site resyncs after a
+    dormant; the plain site's deep rung has no witness.
+42. platform.md (and README.md's paragraph saying the same):
+    `core.hpp` alone asks `__riscv`; ticker.hpp, multicore.hpp and
+    reset.hpp ask BRIO_RP2350_CORE_M33.
+43. platform.md: a second `Mtime::start()` keeps the count, restarts the
+    generator and writes MTIME_CTRL back to EN alone (FULLSPEED and the
+    debug-pause bits cleared). i2c.md's example comment "idempotent"
+    reworded to "keeps the count".
+44. platform.md: `hw_write_masked` taken out of the one-bus-write list,
+    its read stated.
+45. timer.md, timer.hpp: one core per line is the program's convention,
+    checked by nothing.
+46. platform.md: interrupts enabled before `run()` is Tenuto::run()'s
+    precondition; the reason now the kernel's idle restoring the mask
+    the loop entered with.
+47. Process words reworded to today's truth, the measurement kept:
+    multicore.md "the letter now checks", "now it reads 0" (the
+    measurement restated as measured without the clear), "the whole
+    mechanism today"; watchdog.md "does yet"; spi.md "as the driver did
+    before ... now gives it" (restated as what the reset state does),
+    "no dynamic clock yet"; uart.md "no dynamic clock yet"; usb.md "do
+    not carry them yet", "does not carry it yet". Beyond the list, in
+    gap lists only: i2c.md "no dynamic clock yet", flash.md "does not
+    have yet ... today", pwm.md and powman.md "yet", README.md's HSTX
+    "yet".
+48. core_hazard3.hpp (the `///` at column 0, the ragged wfi comment),
+    core_m33.hpp (both comments), platform.md (the overlong delay_us
+    line): reflowed. Also, as formatting with the wording unchanged: a
+    continuation line that began with "- " (read as a list item) moved
+    by a word in adc.md (two), clock.md (two), dma.md, multicore.md,
+    pio.md, platform.md, spi.md, timer.md and usb.md (three); and
+    i2c.md's finding cited a bench helper's path, now the verb it uses,
+    `Pin::read_pulsed()`.
+
+Also, beside the list: README.md's document map lines for dma.md (the
+starvation as the one measured case) and powman.md ("the only state a
+power-down keeps", against powman.md's `.noinit` crossing P1.0) now
+agree with the pages. This closes two of "Facts open" above: the
+CHAIN_TO reason (22) and the accumulate-or-replace question (14).
+
+Not applied: none of the 48 was found wrong. Item 32 needed no change
+to the orientation, which already named y, w, v and x.
+
+### Facts open (fact check)
+
+- CODE DEFECT, for brio/rp2350/clock.hpp's owner:
+  `Lposc::clear_bad_password()` stores POWMAN->BADPASSWD without the
+  password (`POWMAN->BADPASSWD = POWMAN_BADPASSWD_BITS`), and
+  powman.md's "the password is a password" measures such a store
+  dropped and the flag RAISED - the verb does the opposite of its name.
+  The fix is one word, the password bits in the store (Powman's
+  `clear_bad_password()` already does it), and moves no image: only
+  test/family_rp2350/clock.cpp calls it. Not this pass's to make; the
+  comments now say what it does.
+- usb.md's bench finding says "the three host-assisted letters run
+  beside them" where the suite registers four outside `z` (y, w, v, x);
+  kept word for word, for the USB page's owner.
+- Process words left in bench findings, which this pass does not
+  reword unless named: clock.md "the two things the driver now refuses
+  to do", uart.md "now clears it and masks the source", spi.md "the
+  fill now comes first" and "are now the tenure's seven word copies",
+  pin.md "Every letter that lets a driver go now turns".
+- uart.md's orientation names the desk partner's program `uart_peer`, a
+  bench app; not a finding of this check, left.
+- README.md's build paragraph cites `rp2350/src/apps/*.cpp` (the app
+  discovery path), which the brief's grep for `src/apps` reports; the
+  model page (docs/stm32g0/README.md) says the same, so it was kept.
+
+### Checks (fact check)
+
+- `bin/brio prose docs/rp2350/*.md docs/rp2350/vendor/README.md
+  brio/rp2350/*.hpp`: 57 files, 0 errors, 0 for review.
+- `bin/brio gate --tokens --against 0694bda brio/rp2350/*.hpp`: 33
+  token-identical.
+- `LC_ALL=C grep -nP '[^\x00-\x7F]'` over the pages and headers:
+  nothing.
+- `grep -rn 'src/apps' docs/rp2350 brio/rp2350`: README.md's build
+  paragraph alone (above).
+- Every relative link of the pages resolves (script); every line added
+  within 80 columns, bar README.md's table rows.
+- Outside docs/rp2350, brio/rp2350 and this section: nothing changed
+  by this pass (the tree's other modifications are other lanes').
+
+## Local batch: the ch32v00x stratum
+
+Scope: the twelve peripheral documents of `docs/ch32v00x/` (every page
+but README.md and vendor/README.md) in the brief's additive pass, and
+the comments of all twenty-one headers of `brio/ch32v00x/` (the two part
+tables under `parts/` untouched). Base: `docs-rewrite` at
+a70d4b2 (the sixth batch's slips), the reference of every token check.
+Local branch `docs-ch32v00x` from `origin/docs-rewrite`, nothing
+committed; the work is delivered as a patch against the base
+(`docs_ch32v00x.patch` in the session's scratchpad). Not touched: every
+code token (the token check on every header), apps, CMake, presets, ld,
+the crt, `.vscode`, `.clangd`, every other stratum, the design pages and
+the learning route (no link of theirs broke: no page links a
+`docs/ch32v00x/` page by anchor, and no heading of the stratum was
+renamed), docs/ch32v00x/README.md and vendor/README.md, CLAUDE.md,
+docs/README.md. No `// build:` or `// mcu:` line exists in the headers.
+No board touched. The token check lexed with the local g++.
+
+The headers were done in five slices: four by forked agents under one
+written instruction (the platform core; the pins and the USART; the
+DMA and the SPI; the I2C and the timers), one by hand (the ADC, the
+OPA, the flash engine and media, the sleep sites), the agents running
+in parallel with the documents; each agent's report was checked and
+its openings spot-read (platform.hpp, usart.hpp, pin.hpp, spi.hpp,
+i2c.hpp), one attribution corrected by hand (usart.hpp's smallest use
+is the console's glue with its rate written out and one print, not the
+file verbatim). The readers' residue on pin.hpp and sleep.hpp was
+applied by hand (the reader review, below).
+
+### The documents
+
+Each of the twelve opens with: whom the document is for and what the
+driver does in a program; the smallest use, an excerpt of the
+document's own "How to use it" block (clock.md's the console's glue,
+which the block's own sentence on a one-rate program names; nvm.md's
+the CH32V006's block, said to be that part's), explained line by line;
+the prerequisites that decide correctness even there; and a reading
+guide. "Documents of record" became a heading on every page, with the
+header and the reference suite named and a suite's letter and the
+all-key `z` defined beside the suite (usart.md also names the two-board
+key `w`; sleep.md says what a letter run "by name" is). Terms defined
+where the pages use them: a concept, the crt, the hardware prologue and
+its `CH32V00X_HPE` option, an active object, a task, a resource, a
+monostate, an engine, a run, a beat, a tenure, a column, a sleep site
+and a rung, a medium, the clock task. The one reference to kernel.md by
+section number (platform.md, section 1) is a link by heading. Capitals
+used for emphasis lowered in the sections the reader meets first (the
+opening, "What the silicon does", the offer tables, "Types and verbs"),
+acronyms, register and bit names kept; the bench findings, the
+CH32V003 sections, "A handler in SRAM" and the gap lists word for word.
+Nothing reordered, no finding, figure, register name, gap item or part
+distinction cut; every CH32V003 fact stays with its part.
+
+The prerequisites stated, each checked against the code: the clock
+task first (a ticker, a port, an SPI or I2C bus initialized at the
+8 MHz reset rate with a 48 MHz clock type runs six times too slowly,
+nothing refuses it; derived from the divisor arithmetic); the vector
+bound under the crt's name with `BRIO_CH32_INTERRUPT` (an unbound one
+is the crt's weak alias to `default_handler`, a spin); the CH32V003's
+`idle()` not sleeping over a working DMA channel
+(`device::sleep_stops_bus_masters`); a lent SPI or I2C buffer untouched
+until the reply; the I2C's pull-ups on the wire; the AWU vector bound
+under the timed site; the OPA's pads and lock; the flash write's stall.
+
+Corrected in the existing sections, because the sentence was wrong for
+the reader: spi.md's "the remaps are AFIO's, which the stratum does not
+touch yet" (`SpiPins` carries a remap code, `spi1_pins_for(code)`).
+Added to a gap list: i2c.md's last-byte wait (the headers, below).
+Stated in the orientation and not in the block, because the block is
+kept as it stands: tim.md's "How to use it" calls `TimPwm::setup()`
+with no `Tim<1>::init()`, and `setup()` does not open the timer's gate
+(`configure()` writes the registers; the gate and the reset pulse are
+`init()`'s, which the timer suite calls first); spi.md's block comments
+`SpiClock::div4` as "12 MHz at 48", and its 8 MHz ceiling clamps the
+request to HCLK/8, 6 MHz (`floor_code_`, `spi_rate_for()`).
+
+### The headers
+
+Comments only, all twenty-one token-identical to the base. Each
+opening now says what the component does for a caller and its smallest
+use (copied
+from the page's "How to use it" block or the console's glue), which
+context calls what (the setup verbs in main after the clock task, the
+vectors' bodies called from the program's handlers and nowhere else,
+the rings' one producer and one consumer, what waits and its bound,
+what masks: the USART's transmit arming under a receive engine alone,
+the transmit engine's claim, the ring restart), who owns a lent buffer
+until when, then every fact the old comment gave with its citation. The
+public operations the smallest uses call gained the sentence they
+lacked. The prose net's eight review items (all "a genealogy", in
+i2c.hpp, spi.hpp and tim.hpp) are reworded as statements of the shared
+surface or of whose fact it is.
+
+Stale claims corrected to the code's truth:
+- clock.hpp: `Clock::init()` writes the wait states and HPRE before the
+  root comes ready, so a false leaves SYSCLK on the HSI with HCLK at the
+  HSI over the new divider (24 MHz for `Clock<pll, 48 MHz>`), not "the
+  reset clock"; the tree has three roots (the HSE too), the wait-state
+  table is each part's, the clock monitor is the CH32V006's; the
+  `init()` comment had drifted onto `restore()`.
+- ticker.hpp: "the family has no dynamic clock yet" and "no sleep site
+  exists" (clock.hpp's DynamicClock rebases the ticker, sleep.hpp
+  advances and the platform pauses it).
+- platform.hpp names both cores; pfic.hpp says the `CH32V00X_HPE` option
+  defines `BRIO_CH32_HPE`; reset.hpp's IWDG fact stated as this chip's.
+- pin.hpp: "every verb is a single register access" (the configuring
+  verbs read, modify and write CFGLR and RCC_PB2PCENR, unguarded);
+  "NOT COVERED YET: the AFIO remaps" (afio.hpp and the drivers' remap
+  codes exist). exti.hpp: `ExtInt<Pin>` is `ExtInt<char L, uint8_t N>`.
+  device.hpp: GPIO is RM ch. 7, not 10; the "only place an address
+  appears as a number" claim (every block header holds its offset).
+- usart.hpp: the class example `Uart<1>` does not compile (no default
+  for `P`); "no synchronous mode, no smartcard" was the CH32V006's, the
+  CH32V003 has both; the detached Uart comment moved onto the template.
+- spi.hpp: `Spi::disable()` waits for TXE then not BSY, not for RXNE;
+  the opening's "not yet read on the silicon" list (the constants are
+  measured, and spi.md's lists hold no such item).
+- nvm.hpp and nvm_flash.hpp: written for the CH32V006 alone (256-byte
+  pages, 64 words, "no half-word PG mode", one partition); both parts'
+  geometry now stated (64-byte pages of 16 words on the CH32V003, its
+  standard PG mode unused, its 15 KB image and 1 KB attic of two halves
+  of eight, six ids); the engine's addresses count from 0 with the
+  alias added inside each verb; "both arrive with the brio fuses work"
+  (a plan) replaced by the gap and its reason; the HSI rule says
+  `Rcc`'s verb can turn it off and nothing checks it.
+- sleep.hpp: the plain site's no-deadline rule was attributed to "the
+  manager's deadline guard"; the guard refuses only a deadline nearer
+  than `min_deep_ticks` (util/power.hpp), and `Ch32SleepSite::arm()`
+  checks nothing: the rule is the program's.
+- tim.hpp: the opening gave TIM2 the dead-time pairs on both parts
+  (`device::tim2_has_dead_time`, TimPairPwm's assertion: the CH32V006's
+  alone); "measured before this line existed" (history) now says what
+  was measured without the update.
+- i2c.hpp: the read's last byte of a pumped read of three bytes or more
+  is waited for inside the event vector, `wait_until()`'s answer
+  discarded: when its 100 000 polls run out DATAR is read regardless and
+  `i2c_ok` reported. No comment said so; now the opening and the call
+  do, and docs/ch32v00x/i2c.md's second gap list carries it with what
+  would measure it and the verdict question for the driver's owner (the
+  CH32X035's host has the same shape, listed by the sixth batch).
+
+### Facts resolved while writing
+
+- A port, a ticker, an SPI or an I2C bus opened before the clock task
+  runs six times too slowly until the clock moves, and at the rate
+  asked after (the divisors are written once from the claimed rate):
+  derived, not measured.
+- The crt binds every vector a program leaves alone to `default_handler`
+  (weak aliases), a spin: the consequence of an unbound vector stated on
+  each page from that.
+- The CH32V003 has no USART2 (`usart_base_for`), and `Uart<2, ...>` at
+  code 0 does not compile on the CH32V006K8 (`usart_remap_valid`).
+- The three transports refuse at compile time an engine on another
+  channel or two engines on one (`dma_engines_distinct` and the channel
+  asserts in usart.hpp, spi.hpp, i2c.hpp).
+- `Adc::read()` answers 0 and `read(out)` false when the conversion
+  never comes (bounded spins): what a program sees of the stall.
+- `adc_prescaler_for(48 MHz, 6 MHz)` is /8 (the smallest divider at or
+  under the bound).
+
+Open, stated rather than chosen:
+- `Pin::output(level)` and `Pin::input(pull)` store the level (BSHR or
+  BCR) before `Port::configure()` opens the port's gate in RCC_PB2PCENR:
+  on a port no earlier call has configured, whether that store lands is
+  not measured (the USART2 finding says a gated block reads zero; a
+  write is not recorded). If it is lost, a first `input(PinPull::up)`
+  pulls down and a first `output(true)` drives low until the next
+  store - the case of the console's `Lamp::init()`, whose
+  `Led::output(true)` is port C's first configuration in that program
+  (ch32v00x/src/apps/console.cpp; apps out of scope, not edited). The
+  pages state it and the workaround; whether the driver should
+  open the gate first, as the CH32X035's does, is the driver owner's
+  call, and a scratch letter on a fresh port would settle the silicon's
+  half.
+- The hardware prologue's worth: docs/ch32v00x/README.md says nine
+  cycles, 83 against 92, in "What the silicon taught the stratum" and
+  "on top of its nine cycles" in "Toolchain", where platform.md's table
+  and the README's own map row and Toolchain paragraph say three, 81
+  against 84; platform.md's CH32V003 section compares the V2A's 66 to 68
+  with "the V2C's 83". The README is out of this pass's scope; the
+  figures are the desk's to settle.
+- spi.md and spi.hpp count the prologue's entry 29 and exit 25 cycles
+  "measured in platform.md", whose table reads 28 and 33 for the minimal
+  handler with the prologue on; `spi_pump_read_cycles` rests on the 29.
+- The SPI engines' fixed cost: 864 cycles above the wire in spi.md and
+  spi.hpp (letter s), 846 to 852 in dma.md and the README's map row; two
+  sessions or two images, not reconciled here.
+- pin.hpp's "30 MHz" for the CH32V006's one output speed: pin.md gives
+  30 MHz only for the CH32V003's MODE code 11.
+- sleep.hpp's `Awu::clear()` says a standing pending bit "would end the
+  next WFE at once"; the timed site says "a line still pending under a
+  closed enable wakes nothing" and platform.md quotes 5.2's "the
+  previously generated pending signal does not take effect". Probably
+  two enable states (the line enabled in the PFIC or not); not reworded
+  without a measurement or the owner's reading.
+
+### Reader review (fresh subagents)
+
+Round 1, two readers, each given only its files, the audience profile
+and the brief's four questions with scenarios: one on platform.md and
+usart.md (ten scenarios), one on the comments of pin.hpp and sleep.hpp
+(nine). Supported directly: a port opened before the clock task and its
+recovery once the clock runs; the unbound STK vector; the unbound USART
+vector; `BRIO_CH32_INTERRUPT`, `CH32V00X_HPE` and why one spelling per
+image; a 4000-byte print from a handler stalling the other active
+objects; `write_byte()` never from an interrupt handler; the CH32V003
+never sleeping over a working receive channel; USART2 absent on the
+CH32V003 and refused at code 0 on the CH32V006K8; the `ebreak` and
+`fault_reset<P>()`; two pins of one port configured from main and a
+handler (not safe) against a toggle beside a handler's set (safe);
+`Pin<'B', n>` on the CH32V003; the plain site's unchecked no-deadline
+rule; the unbound AWU vector; a Standby a pad ended (no advance, late
+never early); the first bytes after a wake at the HSI's rate and the
+restore in `disarm()`; `Site::init()`'s place and its false;
+SLEEPDEEP with PDDS clear.
+
+Substantive findings, all applied: the orientation's definition of `z`
+("every letter of the suite") contradicted the platform suite's letter
+`i` outside it (now, on every page, the image's set of letters, a
+letter outside it run by its own key); `Tenuto` was never defined on
+the platform page (now: the kernel, the loop that serves the queues,
+linked to kernel.md's "Scheduler"); the ticker's rate read as wrong for
+ever where the USART's recovered (now both, and clock.md, clock.hpp,
+ticker.hpp and i2c.md, say until the clock task runs, the divisor
+written once from the claimed rate); and the header reader found, from
+the code, that `output(level)` and `input(pull)` store the level or the
+pull's direction before the configuring step opens the port's clock, so
+on a port no earlier call has configured the first store meets a gated
+port - pin.md's orientation said the pad "never shows the other level"
+and pin.hpp that the level is driven first, neither checked against
+the gate. Both now state the order, that whether the store lands is
+not measured, and `Port<L>::clock_on()` first as the way to be sure (the
+CH32X035's `output(level)` opens the clock first; this stratum's does
+not; open, below). Also: sleep.hpp's plain `disarm()` comment said the
+restore is "not made conditional" where the code restores only after an
+armed Standby, and its class comment "if it finds it fallen" where it
+decides by what was armed (both now say the code's rule); the deadline
+guard, `min_deep_ticks`, the gate, the crt, HPRE, the never-deeper rule,
+"the tick's" (vector) and "the manager's next dispatch" (of any event)
+defined where sleep.hpp uses them; a deadline beyond the longest AWU
+window stated on the timed `arm()` (several Standbys, the kernel
+advanced by each span, nothing early); pin.hpp's "MODE here is one bit"
+scoped to the CH32V006; usart.md's "cost nothing" said as byte-identity,
+the remap code and the column tied together, `print`'s wait said to be
+the ring's (one byte time per byte that does not fit, 87 us at 115200,
+design/serial.md's derivation), the unbound vector's first interrupt a
+send or a receive; platform.md's `fault_reset<P>()` argument, the
+record's "first, and once" (it is returned once and cleared), the
+`-DCH32V00X_HPE=OFF` spelling, a link to the learning route's C++ page.
+Left as is, with the reason: the C++ notation itself (`constexpr`,
+`const auto`, `brio::`) is the learning route's, which platform.md now
+links; the receive side's objects (`SerialPort`, `RxActivity`, `post`)
+are util/serial_port.hpp's and design/serial.md's, which the pages
+link; how a suite's console is reached is the operational page's; the
+bench vocabulary ("the desk", the far chip's instrument) belongs to the
+findings, kept word for word; the static_assert text "ports A, B, C and
+D" read on a CH32V003 is a code token.
+
+Round 2, one fresh reader, only on what round 1 found broken (the
+openings of platform.md and pin.md, the comments of pin.hpp and
+sleep.hpp; eight questions). Supported directly: `Tenuto` and the
+`...`; `fault_reset<P>()`'s argument; `z` and a letter outside it; the
+ticker's rate recovering once the clock runs; the first-store caveat,
+pin.md, pin.hpp and the code agreeing, `Port<L>::clock_on()` the way to
+be sure; the plain `disarm()`'s restore, the class comment, the
+in-function comment and the code agreeing; a deadline two minutes away
+(several Standbys, the window clamped); the gate and the crt. Residue,
+applied: pin.md's line-by-line said the pull-up without the caveat (now
+points at it); pin.hpp's "no separate step for the caller to forget"
+beside the step it then names (reworded); sleep.hpp's "neither ... nor
+the manager checks" beside the guard it describes (now: the manager
+checks in part, a nearer deadline only); the level-wake reasoning true
+of the CH32V006 alone (now scoped, the CH32V003's masked SRAM Standby
+with the lines made events, platform.hpp's `idle_deep()`, said beside
+it); "nothing matures early" on the timed `arm()` now says in kernel
+time, with the measured real-time shortfall (11 to 15 per cent with the
+probe attached, sleep.md), and sleep.md's orientation says the same; a
+not-ready site's Standby said to freeze kernel time and to end only by
+another source; platform.md's line-by-line split into two paragraphs,
+"tag" defined there. Left as is, with the reason: `Awu::clear()`'s "a
+standing pending bit would end the next WFE at once" against the timed
+site's "a line still pending under a closed enable wakes nothing" (two
+old comments about two enable states; which the first means is the
+driver owner's to word, open below); the advance computed from the
+LSI rate `init()` measured once, which the round-2 reader noted would
+overstate the slept span if the LSI ran faster afterwards (the real-time
+finding above is that effect's measured size, the gap list's item says
+what would separate it); the static_assert text; "the desk" in the
+pages' existing sentences.
+
+### Checks
+
+- `bin/brio prose docs/ch32v00x/*.md docs/ch32v00x/vendor/README.md
+  brio/ch32v00x/*.hpp`: 35 files, 0 errors, 0 for review (before the
+  batch: 0 errors, 8 for review, the eight genealogies of i2c.hpp,
+  spi.hpp and tim.hpp, now gone). The record itself: 0 errors, 1 for
+  review, the second batch's claim of absence at line 598, unchanged.
+- `bin/brio gate --tokens --against a70d4b2 brio/ch32v00x/*.hpp`: all
+  twenty-one token-identical (lexed with the local g++).
+- Links and anchors of the thirteen pages of docs/ch32v00x and the
+  vendor page, by a script with GitHub's anchor rules: 0 problems; no
+  page outside the stratum links one of its pages by anchor.
+- `grep -P '[^\x00-\x7F]'` over the touched files: nothing; no
+  `// build:` or `// mcu:` line in any header.
+- `git diff --stat a70d4b2 -- . ':!docs/ch32v00x' ':!brio/ch32v00x'
+  ':!DOCUMENTATION_REWRITE_PROGRESS.md'`: empty.
+- Not run: any build, `brio check ch32v00x`, the host tests, the full
+  `brio gate` (the local handoff below).
+
+### Local handoff
+
+- The full `brio gate` against a70d4b2 on this machine confirms every
+  image of the stratum's release presets unmoved (comments only; the
+  token check says so, the gate proves it); `brio check ch32v00x` for
+  the family fixtures.
+- The excerpts in the orientations are copies of each document's own
+  "How to use it" block, and the headers' smallest uses copies of those
+  or of the console's glue (`ch32v00x/src/apps/console.cpp`); a re-read
+  of each pair after any API change is the maintained-example rule
+  applied to them.
+- The open figures above, from the desk's records; and the first store
+  into a gated GPIO port (`output(level)`, `input(pull)` on a port no
+  call has configured), a scratch letter on a fresh port of either
+  board, before the driver owner decides whether `output(level)` opens
+  the gate first.
+
+### Fact check and its residue
+
+Applied, each read against the code first:
+- platform.hpp, ticker.hpp, platform.md: "forgets the systick_handler
+  binding ... never advances time" was false; now the crt's weak alias
+  to its spin, `Ticker::init()` enabling the line, the first tick after
+  `enable_interrupts()` stopping the program in the spin.
+- sleep.hpp, "Who calls what": "write two registers with no guard and
+  wait for nothing" said per site and verb: the plain `arm()` two
+  registers; the timed `arm()` also the AWU, its EXTI flag and PFIC
+  pending bit and the PFIC enable; both `disarm()`s `Clock::restore()`
+  after an armed Standby (init() again, bounded waits for the
+  oscillator and the switch); the timed `disarm()` also
+  `Ticker::advance()`, which masks.
+- usart.hpp, device.hpp, clock.hpp, clock.md (orientation and the
+  `FAILED` aside), usart.md: the pointers to the console app removed,
+  each fact kept on its own (a console's glue, what a program spells,
+  what a program with a console may print); clock.md's smallest use
+  now names `blink`, the maintained example, as the type's other user.
+- spi.hpp and spi.md (both blocks): `div4 // 12 MHz at 48` under an
+  8 MHz ceiling now `// at 48 MHz: clamped to div8, 6 MHz`; spi.hpp
+  gains spi.md's sentence on the clamp.
+- device.hpp: what is where - the bus bases, RCC, GPIO, FLASH, EXTEND
+  with struct and address, STK and PFIC at their core addresses, the
+  USART's struct alone (addresses in usart.hpp's `usart_base_for()`),
+  the OPA's base a literal in opa.hpp.
+- sleep.md orientation: the plain site's rule "stated, not checked" now
+  as sleep.hpp says it - the manager refuses a deadline nearer than
+  `min_deep_ticks` (two ticks by default) and lets a farther one
+  through, the plain site checks nothing.
+- i2c.md: the error vector at the first error of any kind (NACK, lost
+  arbitration, bus error), not the first NACK; the RxNE-bound gap's
+  "driver owner's open question" now "is open".
+- spi.hpp: an asynchronous `start()` returns after the select and the
+  `cs_setup_us` busy wait, not "at once".
+- pfic.hpp: the SPI host and client and the timed sleep site's `arm()`
+  added to the drivers that open their own line; the ADC named as one
+  that does not. adc.hpp's "Who calls what" (and adc.md's sampler
+  sentence) tell the program to call `Pfic::enable(Irq::adc)` after
+  `init()`; nothing in the stratum enables that line (init() and
+  release() disable it).
+- opa.md (orientation and the silicon list): the 3.2 kOhm is figure
+  17-1's; what was measured is that a pad's pull cannot hold the
+  differential PGA's input.
+- pin.hpp: the smallest use attributed precisely (the pad of pin.md's
+  "How to use it" without its line, the read() of the sentence after
+  it); the bonding gap ("until a second part gives it something to
+  say") rewritten for two parts, in pin.hpp and pin.md's gap list: the
+  part tables state ports, not pins, a pin the package leaves out
+  compiles, the build names one package per part.
+- nvm.hpp and nvm.md's gap list: "a session of their own" / "deserves
+  its own session" now the reason as it stands (provisioning; `brio
+  fuses` has no CH32V00x side).
+- Wrapped to 100 columns: pin.hpp's MODE sentence, delay.hpp's
+  contract line, platform.md's `CH32V00X_HPE` sentence and its SRAM
+  paragraph's citation line, and the over-long comment lines of
+  i2c.hpp, usart.hpp and adc.hpp.
+
+Not applied, with the reason:
+- clock.hpp's over-long lines: every line of it over 100 columns is
+  code or a string literal (lines 164-168, 241, 298, 304), not a
+  comment; wrapping them changes tokens.
+- The pin.hpp attribution: the finding said the example's read() came
+  from pin.md's prose rather than from "How to use it"; that prose is
+  inside the "How to use it" section, after its code block. The
+  attribution is made precise rather than moved.
+- Three comment lines over 100 columns stay: the code examples at
+  adc.hpp's and opa.hpp's openings (a designated initializer each,
+  copies of their pages' blocks).
+
+The open fact about the console's `Lamp::init()` on a gated port stands
+as stated above.
+
+## Local batch: devices, host and the IP strata
+
+Scope: the five pages of `docs/devices/` (README.md and the four
+documents) and the three IP pages (`docs/pl011/README.md`,
+`docs/pl022/README.md`, `docs/dw_apb_i2c/README.md`, each the stratum's
+operational page and its one document) in the additive pass; the
+comments of the twenty headers `brio/devices/*.hpp` (four),
+`brio/host/*.hpp` (thirteen), `brio/pl011/uart.hpp`,
+`brio/pl022/spi.hpp`, `brio/dw_apb_i2c/i2c.hpp`. Base: `docs-rewrite`
+at a70d4b23b8e46be0fb89bff8890f1b8b8214bcd2, the reference of every
+token check; local branch `docs-devices`, nothing committed, the patch
+handed over. Not touched: `docs/host/README.md` (already rewritten) and
+`docs/host/simulator.md`, every code token, every family header (the
+traits types and the public names were read, not edited), tests, apps,
+CMake, `.vscode`, `.clangd`, the design pages, the learning route,
+CLAUDE.md, docs/README.md. No `// build:` or other tool-read line exists
+in these headers. Environment: local, `/sw/gcc/bin/g++` 16.2 on the PATH
+for the token check; no build and no host test was run.
+
+### The documents
+
+Each page opens with whom it is for and what the component does in a
+program, the smallest use as an excerpt explained line by line, the
+prerequisites that decide correctness even there, and a reading guide;
+"Documents of record" became a heading on the four device documents
+(the IP pages already had theirs); the IP pages' former opening became
+the section "What the stratum is". Terms defined where first used:
+stratum, IP stratum, traits type, concept, active object, tenure, the
+walk, the direct shape (linked to gfx.md's "The command tier" by
+heading), the pump, the core stratum. Insistence capitals lowered in the
+sections the reader meets first; register, command and bit names kept.
+Nothing reordered; no finding, figure, gap item or table cut; every
+"Bench findings" section untouched.
+
+- `docs/devices/README.md`: the orientation (who, what a drawing program
+  writes and where each piece is documented, where the prerequisites
+  are); the map cells lowered and two terms glossed.
+- `docs/devices/dcs.md`: CASET, PASET, RAMWR, RAMRD, MADCTL, COLMOD
+  expanded; the window-and-write excerpt; the inclusive end and the
+  masked round trip as the two prerequisites.
+- `docs/devices/dcs_link.md`: the link excerpt (the two prototypes);
+  four prerequisites: the link neither copied nor moved, an 8-bit frame
+  on both prototypes, every verb a polled transaction that waits for its
+  wire (no arbiter queue), the caller's span free on return.
+- `docs/devices/dcs_panel.md`: the wake-turn-draw excerpt (the prototype
+  lines left out, said); wake before drawing, a refused mode turning
+  every verb into a counted refusal, every verb waiting for its wire,
+  the 2891-byte object placed in static storage; the DCS command names
+  the later sections use; `rotation()` sending MADCTL at once.
+- `docs/devices/ili9481.md`: the traits type explained, the register-read
+  excerpt; modes 0 and 3, the two clock ceilings no code enforces, the
+  eighteen-bit format.
+- The three IP pages: the orientation names the reader, defines the IP
+  stratum and the traits type, and tabulates who supplies which traits
+  type where (`Rp2040Pl011`/`Rp2350Pl011`/`SimPl011` and their PL022
+  and DW_apb_i2c counterparts) with the public names each family's
+  header keeps as aliases (template parameters copied from the
+  aliases); the traits facts both RP chips give (instances, FIFO depth,
+  the clock that is UARTCLK, SSPCLK or ic_clk, the PL011's copy
+  crossover, the PL022's `dma_min_frames` per chip: 13 on the RP2040,
+  10 on the RP2350); the smallest use quoted from docs/rp2040's
+  uart.md, spi.md and i2c.md "How to use it", explained line by line;
+  the prerequisites (init after the clock, the vector bound, the lent
+  buffers untouched until the reply, the arbiter in the program's
+  list, the one producer per ring and print's wait for the UART); the
+  PL022's two completion styles and the engines; the request copied by
+  `post`, its buffers lent.
+
+### The headers
+
+Comments only; all twenty token-identical to a70d4b2. Each opening now
+says what the component does for a caller and the smallest use (spelled
+as a test, a family header, a document or a host program spells it, the
+source named, never an app by name), then who calls what from where
+(setup in main after the clock, the vector bodies from the program's
+handlers only, the arbiter's dispatch calling start(), what waits and
+its bound, what masks, who owns a buffer until when), then every fact
+of the old opening with its citation, capitals lowered. The IP headers
+and their three host simulations name the traits type each family
+supplies and where, and the public names the family keeps. Public
+operations that gained a sentence: `DcsSerialLink::command` (it had no
+comment) and `read`; `DcsPanel::wake`, `fill_rect`, `write_run`;
+`Ili9481::read_framing`; the PL011 transport's `init`, `isr`,
+`harvest`, `write_byte`, `write_bulk`, `read_bulk`; the PL022 host's
+`init`, `start`, `isr`; the DW_apb_i2c host's `init`, `isr`,
+`unstick`. Internal comments touched only to lower capitals and fix the
+claims below.
+
+### Stale claims corrected, and other facts resolved
+
+- docs/devices/README.md: "every family fixture directory carries a
+  `devices_link.cpp` and a `devices_panel.cpp`" - `test/family_ch32x035/`
+  had neither, although the CH32X035 stratum has an `SpiHost`. The two
+  fixtures are added in this batch, in the shape of the SPI fixture's
+  own: the link and the panel formed only on a part whose package lets
+  the host drive SPI1's default column (the CH32X033F8 twins PA7 with
+  PB0 and forms none), compiled on all seven parts under both prologue
+  ways. The page's sentence stands as it was, with that caveat.
+- docs/devices/README.md and brio/devices/ili9481.hpp,
+  brio/host/sim_panel.hpp, brio/host/sim_input.hpp: "the board file" as
+  the place a fact lives - no board file exists in the tree; now the
+  program's own board-specific code, the board (`DcsModule`), or the
+  code that wires the pin.
+- docs/devices/ili9481.md: "no verb here but one classifier" - there are
+  two, `read_framing` and `serial_mode_accepted`; the types table gains
+  the `invalid_window_read_byte` row the traits have; the wake excerpt's
+  `link.command(c)` with one argument does not satisfy `DcsLink`, which
+  takes `(c, parameters)`: now `link.command(c, {})`.
+- docs/pl022/README.md: the public names listed `SpiHost<n, pins,
+  TxEngine, RxEngine>`; both RP aliases also take `Placement`. Added, and
+  "the empty engine slots and the placement" in both the PL022 and the
+  DW_apb_i2c pages.
+- brio/pl022/spi.hpp, Pl022Host's comment: "the bus AO asserts the
+  request's own chip select" - the host does (`r.cs.clear()` in the
+  start path, `cs.set()` at completion and in recover()).
+- brio/devices/dcs_panel.hpp, DcsPanel's comment: "both are held by
+  reference ... the module's facts by value" - the link by reference
+  (`Link& link_`), the module by value (`DcsModule module_`).
+- brio/host/sim_panel.hpp: "design/gfx.md's input note" - gfx.md has no
+  input note; the passage is docs/host/simulator.md's "One mechanism,
+  both directions".
+- brio/host/sim_pl011.hpp, sim_pl022.hpp, sim_dw_apb_i2c.hpp: "a
+  family's compile check (test/family_rp2040/...), so the proof is made
+  twice, once per compiler" - test/family_rp2350/ carries the same three
+  fixtures, built by `brio check rp2350` with both of its compilers; now
+  both fixtures, "once per compiler".
+- brio/pl011/uart.hpp: the detached doc comment "The slowest clock that
+  can still produce `baud`" sat above set_format(); moved onto
+  min_hz_for().
+- brio/host/sim_spi_host.hpp: "the old order's fields made 64" (history)
+  restated as the alternative layout it measures against.
+- The prose net's ten "genealogy" review items (pl022/spi.hpp six,
+  dw_apb_i2c/i2c.hpp two lines, two hits each on two of them) reworded as
+  statements of the shared surface: the descriptor of util/spi_bus.hpp
+  and docs/design/spi-bus.md, the Request of util/i2c_bus.hpp and
+  docs/design/i2c-bus.md, "the answer every brio resource's ISR body
+  gives".
+- Contexts established from the code: the PL022 and DW_apb_i2c hosts
+  mask their own line (not a global section) in init(), recover(),
+  release() and, for the I2C, unstick(); nothing of either transfer path
+  takes a critical section; the PL011 transport takes the family's Guard
+  in harvest() and around pump_tx()'s claim; set_bits/clear_bits are
+  hw_set/hw_clear on both RP chips; the DW_apb_i2c client's
+  acknowledge(), flush_tx() and release() wait in a bounded disable.
+
+### Reader review (fresh subagents, one round)
+
+Two fresh readers, each given only its files, the audience profile,
+the brief's four questions and scenarios. The fan-out of header agents
+the batch first planned could not be launched (the session's
+concurrent-agent limit was reached by other batches), so every header
+was written by hand and only the readers ran as subagents.
+
+Documents (dcs_panel.md and pl022/README.md, eight scenarios). Supported
+directly: the refused SPI mode (nothing on the bus, `valid()` and
+`link_failures()` the only signs), a full-screen fill holding every
+other active object, the panel object not on a 2 KB stack, waking before
+drawing; which names an RP2350 program writes and which traits type in
+which file supplies the facts, the lent buffer overwritten before the
+reply, the unbound vector, modes 1 and 3 saving the frame gap. Residue
+applied: tenure and the DCS command names (CASET, PASET, RAMWR, MADCTL,
+the walk bits) defined in dcs_panel.md; `reset_and_wake()`'s false and
+`rotation()` sending MADCTL at once said; the object's place named
+(static or global); in the PL022 page the clamp of a request's
+prescaler to the bus ceiling (31.25 MHz asked, 8 MHz ceiling), the two
+completion styles and the engines with their empty default slots, the
+pump and tenure defined, `isr_spi0` named for both RP chips, the
+request copied by `post` while its buffers stay lent, the learning
+route linked for the active-object list; the DW_apb_i2c page gained the
+same request and vector sentences and its having no polled path. Left
+as is, with the reason: the undefined names of the excerpts (`PanelLink`,
+`P`, `clock`, the buffers) belong to the linked pages and to a complete
+program the reference pages do not carry; the clock ceilings in Hz are
+ili9481.md's; the per-pixel read cost and the eight-codes table are
+findings kept word for word; the dense deeper sections of the PL022
+page (capitals, linker terms) are the reference body the additive pass
+does not rewrite.
+
+Headers (dcs_link.hpp and dw_apb_i2c/i2c.hpp, nine scenarios). Supported
+directly: the 1440-byte write returning when its transfer ends and the
+span free on return, the copy refused, a 16-bit frame refused at
+construction, the RP2040's names and traits file, who calls start(),
+the address change's bounded disable paid in the dispatch, the lent rx
+buffer. Substantive findings, both fixed: dcs_link.hpp's status()
+comment promised to tell a refusal from a failure, but a refusal runs no
+transaction and leaves the previous code (now said, with what to check
+first); i2c.hpp's unstick() judges SDA alone, so a client holding SCL
+low is not freed and the answer is 0 (now said, and "a short, not a
+client" softened to what the routine reads). Residue applied: "client"
+used for the bus requester and the I2C target role (the requester now
+named so in both IP headers and pages), start()'s true meaning
+"completed without the interrupt" tied to util/bus_master.hpp's engine
+contract, main context defined, "the one synchronous completion"
+against a second one (now "a synchronous completion"), ic_clk named as
+clk_sys and the eight-bytes figure tied to the RP chips' 16-entry FIFOs,
+the link's sharing of a host with an arbiter (the program keeps them
+apart, nothing checks it), "accepted" explained (SPI has no
+acknowledge), "a copy is a compile error", "stratum" replaced, the
+three-bytes-a-pixel length commented, a history-flavoured phrase
+dropped. Left as is: the design vocabulary (shapes, pipeline, pump's
+DMA credits) of the internal paragraphs, the undefined `P` and
+`BusPassThrough` of the excerpt (util/bus_master.hpp's), release()'s
+missing comment (an internal verb this pass did not reach). No second
+round: nothing the first found was left broken in substance.
+
+### Checks
+
+- `bin/brio prose` over the eight pages and the twenty headers: 28
+  files, 0 errors, 0 for review (before the batch: 0 errors, 10 for
+  review, the genealogy lines of pl022/spi.hpp and dw_apb_i2c/i2c.hpp).
+- `bin/brio gate --tokens --against a70d4b2` over the twenty headers:
+  all twenty token-identical (lexed with `/sw/gcc/bin/g++` 16.2).
+- Links and anchors of the eight pages, by a script with GitHub's anchor
+  rules: 8 files, 0 problems; no incoming anchor to these pages exists
+  outside them (grep), and no heading was renamed (two were added:
+  "Documents of record" on the device pages, "What the stratum is" on
+  the IP pages).
+- `grep -P '[^\x00-\x7F]'` over the 28 files: nothing; no `// build:`
+  line in any header.
+- `git diff --stat a70d4b2 -- . ':!brio/devices' ':!brio/host'
+  ':!brio/pl011' ':!brio/pl022' ':!brio/dw_apb_i2c' ':!docs/devices'
+  ':!docs/pl011' ':!docs/pl022' ':!docs/dw_apb_i2c'
+  ':!DOCUMENTATION_REWRITE_PROGRESS.md'`: empty.
+- Not run: any build, `brio check`, the host tests, the full
+  `brio gate`.
+
+### Open facts
+
+- The DcsPanel's size over the ILI9481, measured by a `static_assert`
+  on `sizeof` in a scratch TU: 2892 bytes on an AVR128DB48 (`avr-g++`
+  16.2, `-mmcu=avr128db48 -Os`) and 2900 on a Cortex-M0+
+  (`arm-none-eabi-g++` 16.2, `-mcpu=cortex-m0plus -Os`): row buffer 1440
+  + read buffer 1441 + link reference 2 (4) + DcsModule 3 + rotation 1 +
+  valid_ 1 + failure counter 4, the M0+ adding the counter's alignment
+  and the tail padding. The page and the header now state both.
+- CODE FINDING, for the owner of brio/pl011/uart.hpp: harvest()'s Guard
+  covers the whole verb - RxEngine::service()/abandon() for an owed
+  completion, publish_rx() (UART register writes on its overrun path)
+  and rearm_rx(), which calls RxEngine::start() and programs the DMA
+  channel under the mask. Against the rule "a masked section covers the
+  decision, not the work" (CLAUDE.md, design/overview.md), the re-arm is
+  work inside the mask; the transmit side (pump_tx()) masks the claim
+  alone. Not changed here (comments and docs only); the header and
+  docs/pl011/README.md now state the real extent.
+- Observed, not established: pl011 release() masks its own line first
+  but not the DMA line the engines report on, and stops the engines with
+  that line live. Whether a receive completion served between the abort
+  and the end of RxEngine::stop() can re-arm the channel is not
+  established; the header states only that the DMA line is not masked.
+- The three IP pages' "The proof that it knows no chip" sections name
+  the RP2040's compile fixture alone; the RP2350's exists too. The
+  sentences say "a family's" and are true; left as they are.
+- What exactly a PL011 or PL022 port initialized before the clock does on
+  the RP chips (a wrong rate, or a peripheral clock not yet running) is
+  not established; the pages say the clock comes first and nothing
+  refuses the other order.
+
+### Fact check and its residue
+
+Applied, comments and docs only, each claim read against the code:
+
+- The link's refusal model (devices/dcs_link.hpp status(), command(),
+  send()'s comment; docs/devices/dcs_link.md): by the engine contract
+  (util/bus_master.hpp) start() answers true for a polled request, an
+  engine's refusal included, its code in status(); only the link's own
+  refusals (valid() false, a span over 65535 bytes) leave status() as
+  the previous transaction left it; the false branch of start() is the
+  asynchronous one and no host in the tree takes it for a polled
+  request.
+- The DcsPanel's size: 2892 bytes on an AVR128DB48, 2900 on a
+  Cortex-M0+, measured (Open facts above), in dcs_panel.hpp and twice in
+  dcs_panel.md.
+- pl011/uart.hpp: harvest()'s mask stated whole, in the "What masks"
+  item and in harvest()'s comment, and in docs/pl011/README.md's engine
+  slots; posed as a code finding under Open facts.
+- dcs_panel.hpp: "a board file names a pad" now "a program names a pad".
+- ili9481.hpp's excerpt declares the SimDcsPanel `static` (its frame
+  memory is 460800 bytes), as sim_dcs_panel.hpp says; ili9481.md's
+  simulator excerpt likewise, the adapter too.
+- pl011/uart.hpp: release() is a main-context verb with no setup
+  precondition (it masks its own line first; on the RP chips a channel's
+  abort waits, bounded); init() also waits, bounded, for the reset
+  controller through U::reset(), and masks the instance's line for the
+  whole bring-up, a failure past that point returning with it masked
+  (the header item and init()'s comment).
+- host/platform.hpp names the atomic width among the Platform
+  requirements; host/sim_flash.hpp names build_id() among FlashMedia's.
+- pl022/spi.hpp: the client's verbs costed one by one (poll() a status
+  read plus the data read when a frame waits, isr() a read of the masked
+  status plus the clear-register write when a clearable source is up);
+  the Request's field names cited to docs/design/spi-bus.md's
+  "Realizations", in the file header and the Request's comment.
+- docs/pl022/README.md: the engines also refuse 16-bit frames on byte
+  engines and half-word buffers not aligned; a polled request on the
+  engines needs dma_isr() bound (the polled spin waits, bounded, on the
+  completion only that body records, and ends spi_dma_fault without it).
+- host/sim_input.hpp: reset() leaves a knob's contacts at 00, the
+  encoder keeps no count; host/sim_spi_host.hpp: the 64-byte
+  hypothetical dropped, the 48 kept (re-measured: `static_assert` on
+  `sizeof(SimSpiHost<0>::Request) == 48`, host g++).
+- docs/devices/dcs_panel.md: reset_and_wake() is false also when a
+  transaction ran with a status other than spi_ok.
+- The refusal count per verb (dcs_panel.hpp's link_failures() and
+  wake() comments, dcs_panel.md's refusal paragraph, its mode paragraph
+  and two bench findings): fill_rect(), write_run(), read_run(),
+  get_pixel() and rotation() stop at their first refusal and count one;
+  wake() and reset_and_wake() send all five commands and count five, as
+  test/test_dcs_panel expects.
+- dcs_panel.md's "the probe's letters" (a bench app) and "the same
+  probe" replaced by a bench run of the driver repeating ili9481.md's
+  bench findings.
+
+Not applied: none; every finding read true against the code.
+
+Checks: `bin/brio prose` over the 28 files: 0 errors, 0 for review;
+`bin/brio gate --tokens --against 0694bda` over the 20 headers: 20
+token-identical; `LC_ALL=C grep -nP '[^\x00-\x7F]'` over the 28 files:
+nothing.
+
+### Local verification handoff
+
+- `brio gate --against a70d4b2` on a machine with the toolchains confirms
+  every image unmoved (comments and docs only; the token check says so).
+- The host tests (`ctest --preset host`) and `brio check rp2040`,
+  `brio check rp2350`, for the record: nothing in them changed.
+- The excerpts quoted in the orientations and the openings (the RP2040
+  family documents' "How to use it" blocks, test_pl011, test_pl022,
+  test_dw_apb_i2c, test_dcs_link, test_ili9481, test_gfx, test_usb,
+  test_nv_heap, test_quadrature, test_time_event, the host program's
+  display and panel setup) are re-read after any API change, the
+  maintained-example rule applied to them.
+
+## Local batch: the ch32vx03 stratum
+
+Scope: the nineteen peripheral documents of `docs/ch32vx03/` (every page
+but README.md and vendor/README.md) in the brief's additive pass, and the
+comments of all thirty headers of `brio/ch32vx03/` (the thirteen part
+tables under `parts/` untouched). Base: `docs-rewrite` at
+a70d4b23b8e46be0fb89bff8890f1b8b8214bcd2, the reference of every token
+check; local branch `docs-ch32vx03`, nothing committed, the work handed
+over as a patch against the base. Not touched: every code token, apps,
+CMake, presets, ld, the crt, `.vscode`, every other stratum, the design
+pages and the learning route, docs/ch32vx03/README.md and
+vendor/README.md (no link of theirs broke: no heading they cite was
+renamed), CLAUDE.md, docs/README.md. No `// build:` or `// mcu:` line
+exists in the headers. No build, no host test, no board.
+
+Method: platform.md, platform.hpp, crc, rng, watchdog and opa (pages
+and headers) by hand as this stratum's pattern; the other thirteen
+pages and twenty-four headers by twelve fresh agents in groups (clock;
+pin with afio and exti; usart; tim; dma with dma_engine; sleep with pwr,
+sleep.hpp and bus_activity; rtc; spi; i2c; adc with dac; nvm with
+nvm_flash; usb with usbfs; the core headers pfic, ticker, delay, reset,
+device), each under one written sub-brief (the pass, the canonical
+definitions of this stratum's recurring prerequisites, the review
+findings of 66e5bbc and a70d4b2 as the list of what not to do) and each
+reporting its stale claims and its open facts; their reports were
+checked and their diffs spot-read (clock, pin, pfic, ticker, device,
+usart, i2c). A fact check ran on every file: each number, backticked
+span, register-like word, link and path of the base text that occurs
+fewer times in the new one, each explained (below).
+
+### The documents
+
+Each of the nineteen opens with: whom the document is for and what the
+driver does in a program; the smallest use, an excerpt of the page's
+own "How to use it" block (platform.md's the platform's lines of it;
+spi.md's its first two blocks, the polled one and the arbiter's, since
+the polled one binds no vector), explained line by line; the
+prerequisite that decides correctness even there; a reading guide.
+"Documents of record" became a heading on every page, with the suite's
+letter and its all-keys defined from the app's own `letter()` calls
+(`z`, and `y`, `x` where a suite has them, and the letters run by name).
+The terms defined where the pages use them: a concept, the crt, the
+hardware prologue and the `CH32VX03_HPE` option, a leaf and a naked
+trampoline, an active object, a task, a monostate, the part table, the
+device classes, an engine, a slot, a run, a tenure, the arbiter, a
+block stream, the power model's site, rung, manager, voter and witness.
+The one reference to kernel.md by section number (platform.md) is a
+link by heading. Capitals used for emphasis lowered in the openings,
+"Documents of record", "What the silicon does", "Types and verbs" and
+"How to use it"; acronyms, register, bit and mnemonic names kept.
+"Bench findings" and "Not covered yet" are byte-identical to the base
+on sixteen pages (checked by a script); the three exceptions are
+listed under the facts. Nothing reordered, no finding, figure,
+register name, erratum, lot-keyed caveat, gap item or realization cut;
+each fact kept with its part (CH32V203C8T6 or CH32V303VCT6, V4B or V4F).
+
+The prerequisites stated, each checked against the code: the clock task
+first (a divisor or a compare is computed from the rate the clock type
+claims: under a 144 MHz type, a block on HCLK or PB2 initialized at the
+8 MHz HSI reset rate runs eighteen times too slowly, a port or bus host
+on PB1 nine, a timer on PB1 eighteen, until the clock task runs;
+derived from the divisor arithmetic, not measured; nothing refuses the
+order); `SysClock::init()`'s false leaving the tree on the HSI with the
+type's prescalers possibly written; the vector bound by the program,
+an unbound one running the crt's weak `default_handler` spin; the one
+spelling of a binding, `BRIO_CH32_VECTOR`, its float and leaf forms,
+and on the CH32V303's images (F and the hardware prologue on) the naked
+trampoline's float-free body, held by `brio check ch32vx03`'s vector
+guard and not by an ordinary build; no sleep while a DMA channel is
+enabled or a USB controller attached (the count of active bus
+masters); a lent buffer untouched from the post to the reply; a
+lot-keyed feature a verb that asks the die.
+
+### The headers
+
+Comments only, every one of the thirty token-identical to the base
+(`bin/brio gate --tokens --against a70d4b2 brio/ch32vx03/*.hpp`). Each
+opening now says first what the component does for a caller and the
+smallest use (copied from the page's "How to use it", an app, or the
+code that uses the verb), which context calls what (setup verbs in
+main after the clock task; the vectors' bodies called from the
+program's bindings only; every wait with its bound as the code has it,
+a bound whose answer the code discards said so; what masks and for how
+long; which verbs are unguarded read-modify-writes of a register other
+drivers share, RCC's gates above all; who owns a lent buffer until
+when), then every fact the old comment gave with its citation, capitals
+lowered. The public operations the smallest uses call gained the
+sentence they lacked. A kernel.md section number kept with its heading
+text (platform.hpp, pfic.hpp). The prose net's eight genealogy review
+items (i2c.hpp 1, spi.hpp 6, tim.hpp 1) reworded to the surface fact
+("the Request is the same struct on every stratum", "the shape every
+bus driver of brio has", the fields design/spi-bus.md lists) or to this
+chip's reason.
+
+### Stale claims corrected to the code's truth
+
+- platform.hpp: the opening named the CH32V203 alone; the crt's
+  breakpoint entry described as "a distinct spin loop" (it is a weak
+  alias of `default_handler`, the same spin, until the program binds
+  it); "the second QingKe family" reworded without the ordinal.
+- pfic.hpp, reset.hpp, crc.hpp: "on the CH32V203" where the file
+  serves both parts.
+- ticker.hpp: "no sleep site of this stratum exists yet" (sleep.hpp and
+  platform.hpp's `idle_deep()` pause the ticker across a Stop and the
+  timed site hands the span back through `advance()`); its usage block
+  binds the tick with `BRIO_CH32_LEAF_VECTOR`, as the console does.
+- device.hpp: the vendor-header sentence omitted the CH32X035; "the only
+  place where an address appears as a number" (exti.hpp, pwr.hpp and
+  four static_asserts hold addresses).
+- delay.hpp: `delay_us`'s false cases listed two of four.
+- crc.hpp: the reset's latency called "the one open question" (measured:
+  zero extra reads on the CH32V203C8T6); a shut gate's registers said to
+  "still answer a read" (crc.md measures a read returning the last word
+  the bus carried, not the register).
+- rng.hpp: the first word "0 on every enable" (on every enable that
+  follows a disable; the first after a reset was zero on one day's
+  boots and nonzero after a power cycle).
+- watchdog.hpp: the `Iwdg` class example configured before starting,
+  the order the file's own measurement says never lands with the LSI
+  stopped; it now uses `arm()`.
+- opa.hpp: the class example called `pin::output_high()` and
+  `output_low()`, which do not exist; now `output(true)` and
+  `output(false)`.
+- clock.hpp: `init()`'s order ("roots, prescalers, switch") against the
+  code's park, PLL stop, prescalers, roots, PLL, switch; a failed
+  `init()` "stays on the reset clock" (prescalers already written);
+  the CH32V20x_D8's HSE divider; the flash rate "the flash driver's to
+  do" in clock.md (nvm.hpp refuses the rate, it does not halve HCLK).
+- pin.hpp: "every verb is a single register access" (the configuring
+  verbs read-modify-write CFGxR and RCC_PB2PCENR); "the one place this
+  stratum reaches another chapter's register" (reset.hpp and rtc.hpp do
+  too). exti.hpp: a pointer to fact 5 that is fact 6.
+- usart.hpp: `init()`'s false cases (the divisor's upper bound, the
+  debug-port column, a receive ring the engine refuses); usart.md's "the
+  console, as every app has it".
+- tim.hpp: a forced output "not under the counter" (measured: evaluated
+  only while the counter runs); an encoder pad left "low" (left where it
+  rests, high on the CH32V303VCT6's board); `TimPairPwm` as TIM1's alone.
+- dma.hpp, dma.md: a raised request held "whatever the peripheral" (the
+  SPI host's release pulses no reset and leaves none, measured);
+  `open()` as "the first thing every channel verb does"; the circular
+  arm "never the half".
+- sleep.md, sleep.hpp: `PowerManager<...> power;` does not compile (the
+  manager is a monostate: `using Power = ...`); the Standby block's
+  `Site` is the plain site; the deadline guard as "enforcing" no armed
+  time event across a Stop (it refuses only a deadline nearer than
+  `min_deep_ticks`). bus_activity.hpp: the engines count through the
+  controller's ledger, and a transfer error clears EN with the count
+  kept. pwr.hpp: `enter()` as "the only door to Standby"; "every verb
+  opens the gate"; `wakeup_pin(on)`'s answer.
+- rtc.hpp: which call opens which of the three gates; ALR + 1 seen at
+  the alarm (the CH32V203C8T6's; the CH32V303VCT6's bus reads ALR); "two
+  thirds of this series" for PC13 (six of the nine CH32V203 parts, no
+  CH32V303); "every write verb answers" (`clear()` is void, no verb
+  checks DBP).
+- i2c.hpp, i2c.md: the I2C's legal HCLK ranges (up to 60 MHz, or above
+  72 and up to 120 MHz); RTR's enable protection (stated by the manual,
+  contradicted by the measurement); the late-START loss as one part's.
+- spi.hpp, spi.md: "the Request is the other strata's verbatim" (the
+  field order differs between families; the engine, not the bus's
+  active object, asserts the select); `init()`'s missing remap refusal.
+- adc.hpp: "the 11-cycle tail" (the code's 12.5); `init()`'s false
+  cases; the 12.5-cycle measurement credited to one part. dac.hpp:
+  `claim_stream()` and `configure()`'s refusal.
+- nvm.hpp, nvm_flash.hpp: twelve, among them a tail cell's second pass
+  ("not dependable", with the figures), the tail's price per part
+  (four times on the CH32V303VC, some seven on the CH32V203C8), the
+  `refused` list, the alias named as the array's own address.
+- usb.md: the HSI's error given as the family's; usbfs.md: the
+  binding's "twenty `fsw`" (with the prologue on it is a trampoline that
+  saves none).
+
+### Facts resolved, and the three changed gap sections
+
+- crc.md's "Not covered yet" opened with a finding (the fourteen
+  verdicts on the CH32V303VCT6), not a gap; moved word for word to the
+  end of "Bench findings".
+- i2c.md's "Implemented, not bench-verified" gains the read's last bytes
+  when the wait for RxNE runs out (100 000 polls, DATAR read anyway,
+  `i2c_ok`), the same code shape as the CH32X035's, listed as open as
+  that stratum's review listed it.
+- pin.md's "Implemented but not bench-verified" gains a level or a pull
+  asked as a port's first configuration: `output(level)` and
+  `input(pull)` store through `set()`/`clear()` before the configuring
+  store that opens the port's gate. Whether the GPIO drops a store
+  behind its shut gate is not measured; the console's `Lamp` writes
+  `Led::output(led_lit_low)` as port B's first configuration, so the
+  CH32V303 board's LED at boot would show it. Whether the code should
+  open the gate first is the driver owner's question.
+- The 144 MHz console tree leaves no legal I2C rate (PB1 at 72 MHz
+  against FREQ's 60): stated in i2c.hpp from clock.hpp's `ppre_for`.
+
+### Open (not written as true)
+
+- clock.md's bench findings give 54 verdicts in `z` on the CH32V303VCT6
+  where the README's map says 49.
+- spi: the console handler's length (122 instructions in the header,
+  151 in the page); `dma_min_frames = 3` against the page's figures,
+  which work out to about 4; `test_vx03_spi.cpp`'s header lists fewer
+  letters in `z` and `y` than the code registers (an app, out of scope).
+- rtc: whether the RTC's registers need BKPEN (the page cites 4.2; the
+  code and the suites run the counter without it); "4.2's whole
+  sequence" claimed by two verbs that each cover part of it; the
+  `sync_spins` "hundred microseconds or so"; what a write verb answers
+  with DBP clear; the CNF hazard of `clear()`/`isr()` inside another
+  context's window, derived only.
+- nvm: SCKMOD dividing SYSCLK (header) or HCLK (page); `timeout_polls`
+  in time; `esig_chip_id()`'s pointer to a page that records no chip ID.
+- usb: a second package of "two packages bond neither" (one part file
+  says so); the README map's "362" and "616" against the page's 363 and
+  "some 620".
+- dma: the bench findings' "listing" of the transport's eight
+  instructions, which the page does not carry; `DmaPingPongEngine::
+  release()` masking over five register stores (a masked section around
+  work, for the driver's owner).
+- afio.hpp: the debug port given up "until the next power cycle" in one
+  comment and "until the board reboots" in another.
+- tim: `TimPwm::setup()` reachable under a `DynamicClock` with a raw
+  prescaler (only `clock_hz()` enforces the static clock).
+- ADC: what ADCCLK the reset tree gives an ADC started before the clock
+  task; whether the DAC's smallest use's four conversions span its
+  wake-up and settling time.
+- Out of scope, found on the way: design/power.md's ch32vx03 row gives
+  the watchdog's Standby exit to the CH32V303VCT6 alone (measured on
+  both); design/nv-heap.md's row carries the tail's "four times" and
+  "no second pass"; the crt's comment shows `BRIO_CH32_VECTOR` for the
+  tick where the apps bind it leaf.
+
+### Reader review (fresh subagents)
+
+Two readers in the first round, each given only its files, the audience
+profile and the brief's questions with scenarios: one on platform.md and
+usart.md (nine scenarios), one on the comments of pfic.hpp and i2c.hpp
+(nine). Supported directly: a port initialized before the clock task
+(6400 baud for 115200, right after the clock task runs, nothing
+refusing it); an unbound vector and the probe's way to name it; a float
+body under `BRIO_CH32_VECTOR` on the CH32V303 and the float binding; a
+4000-byte print's stall; no sleep under a DMA receive engine; the
+suite's `z` and letter; the panic with no debugger under
+`ResetReporter`; `write_byte` from a handler and the copied buffer; the
+lot-keyed MARK parity; which binding macro for the tick, the I2C event
+and a float handler, and a hand-written attribute on an F image; the
+HPE option and why one setting; `Pfic::enable()` from a handler and a
+nested guard; the lent buffers until `I2cDone`; `init()`'s refusals;
+the last byte's discarded wait; every wait of the I2C host with its
+bound; 64 MHz of HCLK refused. Residue, applied: `Tenuto` undefined on
+the platform page (now: the kernel, the cooperative scheduler, linked);
+the leaf form defined as "calls nothing" beside a body that calls
+`Ticker::tick()` (now: compiles to no call, the call being always
+inlined; pfic.hpp the same); whether an ordinary build runs the vector
+guard (now: it does not, only `brio check ch32vx03`); "PB1" read as a
+pin where it names the bus (usart.md now names PCLK2 and PCLK1 the
+clocks of the buses PB2 and PB1, i2c.hpp says so before using it); "the
+count of working bus masters" against "active" (one name now); the
+V4F unexplained in pfic.hpp; i2c.hpp's `4` and `BusPassThrough`, the
+"buffer vector" read as a third vector, what a request after a refused
+`init()` gets (`i2c_rejected`), and 144 MHz of HCLK (refused: PB1 at 72
+MHz). A second round, one fresh reader on the four repaired passages
+only: all eight questions answered, six "supported directly"; residue
+applied: the ninth's arithmetic (now spelled), the naked trampoline and
+the tag object undefined on the platform page (now defined), a stray
+space before four comment lines and two overlong lines that the
+repairs had introduced. Left as is, with the reason: the C++ notation
+of the examples (`lend<Lease::reply>`, `reply_to<>`, `post<>`, `auto`)
+is the learning route's and the kernel headers', which the pages link;
+how a console key is sent and how a suite is run is the operational
+page's; the How-to blocks' undeclared names (`LoopLines`, `U4`, `brr`)
+sit in sections kept as they are and are named in the record as such;
+`write_bulk`'s partial count and `print`'s formats are util/'s.
+
+### Checks
+
+- `bin/brio prose docs/ch32vx03/*.md brio/ch32vx03/*.hpp`: 50 files, 0
+  errors, 0 for review (before the batch: 0 errors, 8 for review, the
+  genealogy items above).
+- `bin/brio gate --tokens --against a70d4b2 brio/ch32vx03/*.hpp
+  brio/ch32vx03/parts/*.hpp`: all forty-three token-identical (lexed
+  with `/sw/gcc/bin/g++` 16.2 from the PATH).
+- The fact check over the forty-nine touched files: no number,
+  backticked span, register-like word, link or path of the base text
+  missing, except eight explained drops: usbfs.md's `fsw` (the corrected
+  binding), adc.hpp's `11`, a `CH32V303VCT6` and `F4` (the corrected
+  tail, the both-parts credit, the genealogy), clock.hpp's `AOs`, a
+  `D8` and `F1` (spelled out), rng.hpp's `CH32V303` (now
+  "CH32V303RC and VC").
+- Links and anchors of the twenty pages of docs/ch32vx03 and the
+  vendor page, by a script with GitHub's anchor rules: 0 problems.
+- "Bench findings" and "Not covered yet" byte-identical to the base on
+  every page but crc.md, i2c.md and pin.md (the three changes above).
+- `grep -P '[^\x00-\x7F]'` over the touched files: nothing.
+- `git diff --stat a70d4b2 -- . ':!docs/ch32vx03' ':!brio/ch32vx03'
+  ':!DOCUMENTATION_REWRITE_PROGRESS.md'`: empty.
+- Not run: any build, `brio check ch32vx03`, the host tests, the full
+  `brio gate`.
+
+### Local handoff
+
+- The full `brio gate` against a70d4b2 confirms every image of the
+  thirteen presets unmoved (comments only; the token check says so, the
+  gate proves it), and `brio check ch32vx03` the family fixtures and the
+  vector guard (nothing in them changed).
+- The excerpts in the orientations are copies of each page's own "How
+  to use it" block, and the headers' smallest uses copies of those or of
+  the apps; re-read each pair after any API change. sleep.md's "How to
+  use it" was corrected (`using Power = brio::PowerManager<...>;`):
+  compiling that line once confirms it.
+- Two claims the desk can settle in minutes: the first-configuration
+  level of `Pin::output(level)` on a fresh boot (the console's LED on
+  the CH32V303 board), and the clock-before-driver ratios (a port
+  initialized before `SysClock::init()` speaking 6400 baud for 115200),
+  both derived, not measured.
+
+### Fact check and its residue
+
+A second fact check read the pass's claims against the code; its
+residue, applied on 0694bda (comments and documents only, every header
+token-identical), one line a finding:
+
+1. clock.hpp: `Clock::init()` is no longer "once": it runs again on a
+   sleep site's wake path, from the manager's handler and from the RTC
+   alarm's body (file header and `init()`'s comment).
+2. sleep.hpp: the plain site's `disarm()` is also called from the timed
+   site's `isr()` in the alarm's interrupt (opening and `disarm()`).
+3. pwr.hpp: `arm()` reached from the alarm interrupt and `pvd_isr()`'s
+   gate store through `supply_low()` stated, the store harmless with
+   PWREN already set; clock.hpp's gate rule names the two paths.
+4. i2c.hpp, i2c.md: with engines, `init()`, `recover()`, `release()` and
+   the vectors count channels under an InterruptGuard.
+5. exti.hpp: a false writes no EXTI register or EXTICR field, but
+   `select()`'s in-use refusal opens AFIO's gate and `claim()` has set
+   the pad first.
+6. usart.hpp: `configure()` writes three registers, `mute_mode()`,
+   `irda()` and `smartcard()` two or three, `ctlr4_present()` CTLR4 and,
+   on a mirror, a reset and five rewrites.
+7. dma.hpp (two places), dma.md: which channel verbs open the gate,
+   `trigger()` reading CFGR and CNTR first, four setters never.
+8. spi.hpp: `isr()`'s two 64-poll TXE waits, the second `prime_phase()`'s.
+9. delay.hpp, ticker.hpp: under a type slower than the reset clock the
+   wait is short and the tick fast.
+10. platform.md: "measured to the cycle on both dies" now "not every one
+    on both".
+11. i2c.hpp: "the shape brio's SPI and I2C drivers share".
+12. nvm.md's gap item: four times on the CH32V303VC, some seven on the
+    CH32V203C8 (20 and 36 cycles against 5).
+13. watchdog.md: the opening says what letter `c` measures and no more;
+    `arm()` kept.
+14. i2c.md's gap item rewritten: one byte, the code's path, why SCL
+    stretching cannot hold RxNE back, what would show it, no process
+    voice.
+15. The app pointers removed (platform.hpp, device.hpp, delay.hpp,
+    i2c.hpp, platform.md twice, spi.md twice, nvm.md) and the same class
+    found beside them (adc.hpp's and adc.md's "the console's" 144 MHz,
+    pfic.hpp's "the console's receive body", platform.md's "bound as the
+    console binds its own" and its gap's "The console's host-timed
+    bracket").
+16. "or one of its two forms" on the nine bindings and platform.md's
+    type paragraph; platform.md's opening: one spelling on both parts,
+    the expansion chosen by F and `CH32VX03_HPE`.
+17. pin.md (two), pin.hpp: "the `configure()` that opens the gate",
+    through `set()`/`clear()`; pin.md's "driver owner's question" gone.
+18. adc.hpp (two), adc.md (two): `init()`'s early refusals return before
+    `Pfic::disable`; `read_settled()` keeps the previous conversion.
+19. usart.hpp (two), usart.md: the debug-port check opens AFIO's gate;
+    `rx_skips()`/`rx_overruns()` up to two loads, `clear_errors()`
+    racing the vector.
+20. i2c.hpp: two 16-poll waits in one entry, the ticker for `start()`
+    and `unstick()` only, a re-init refused at AFIO keeping its table,
+    the polled client's `service()`; i2c.md's TxE sentence and client
+    paragraph made to agree.
+21. rtc.hpp (two), rtc.md: the wipe only on a differing source, PWREN
+    and DBP written by then, only `count()`'s retry measured.
+22. watchdog.md: the LSI per part (the CH32V203RB's 25/32/45 kHz) in the
+    opening and the documents of record, pointing at the part tables.
+23. sleep.hpp: `arm(none)` is `disarm()`, which waits; an HSI-fed PLL
+    waits for its lock alone.
+24. pwr.hpp: four `debug_cr()` readers, `retention_readback()` reads the
+    register, `pwr_r30ksty` "the D8 classes alone".
+25. clock.hpp: eighteen times "for as long as the chip stays on the reset
+    clock"; clock.md: `restore()` as the second verb.
+26. platform.md: interrupts before `run()` as tenuto.hpp's requirement;
+    platform.hpp: the STK counts in the plain Sleep.
+27. ticker.hpp (three bindings, three macros one), pfic.hpp (entry 0 and
+    the reserved words), opa.hpp (EXTEN_CTR2, the RCC gate), afio.hpp
+    (ECR), crc.hpp (seven extra reads, and `reset_spins`' own comment),
+    nvm.hpp (`mode_spins` and once more), tim.hpp (three
+    read-modify-writes), usb.hpp and usbfs.hpp (`write_bulk()`), usb.md
+    and usbfs.md (letter `d` wants the host), spi.hpp (`baud` on the SAM
+    C21, `Arb` introduced), reset.hpp (103).
+28. Formatting: the three bare comment lines, rng.hpp's orphan "and",
+    "one day" now "one session" (rng.hpp and rng.md's "What the silicon
+    does"; the findings' copy kept), watchdog.md's line, and an unwrapped
+    line of rng.md.
+
+Applied beyond the list, the same class: spi.hpp's "Nothing here masks
+interrupts" (with engines its blocks count under the same guard as the
+I2C host's).
+
+Applied with a narrowing: 19's "two loads each" is "up to two" (without
+a receive engine `rx_overruns()` is one load); 14's example of a target
+that releases the bus mid-read is written as what a letter would try,
+not as a case known to reach the bound (byte N is in the shifter by the
+second BTF).
+
+Open facts (record only, not edited):
+
+- ch32vx03/src/glue/startup_ch32vx03.S:337-339 calls fault_handler and
+  breakpoint_handler "their own symbols" where :351 and :354 alias both
+  to default_handler.
+- usbfs.md's findings tell change history (:563, :586, :628); usb.md
+  names `usb_probe` at :495 (findings) and in "Documents of record"
+  (now :169), the latter outside the findings rule.
+- docs/ch32x035/i2c.md's same gap item still says "the last two bytes",
+  "a client holding SCL past the bound" and "the driver owner's open
+  question"; the two pages agree once that one is rewritten.
+- Kept inside findings: i2c.md's "the app's 144 MHz" (letter `i`);
+  `bench_vx03` named in spi.md, spi.hpp and i2c.md (a bench app or
+  apparatus: not ruled by the brief); docs/ch32vx03/README.md's build
+  block targets `console` (outside this pass).
+- watchdog.md's "What the silicon does" and watchdog.hpp still say a
+  write behind a stopped LSI "never arrives ... for ever"; letter `c`
+  bounds it at 20 000 polls.
+
+Checks: `bin/brio prose docs/ch32vx03/*.md docs/ch32vx03/vendor/README.md
+brio/ch32vx03/*.hpp`: 51 files, 0 errors, 0 for review; `bin/brio gate
+--tokens --against 0694bda brio/ch32vx03/*.hpp`: 30 token-identical;
+non-ASCII grep: nothing; every link of docs/ch32vx03 resolves; "Bench
+findings" unchanged on every page; "Not covered yet" changed on i2c.md,
+nvm.md, pin.md and platform.md alone; nothing outside docs/ch32vx03,
+brio/ch32vx03 (parts/ untouched) and this section.
+
+## What remains
+
+The credit of the cloud sessions ended with the sixth batch; the local
+batches above, each on the stm32g0 batch's pattern (the documents'
 additive pass: the reader's orientation, the smallest use, the
 prerequisite, local fixes; the headers' comments under the same brief:
 what the caller gets, which context calls what, then every fact kept
-with its citation, token identity on every file):
+with its citation, token identity on every file; a fact check by a
+second reader and its residue applied), reached every peripheral
+document and every header of the seven target strata the cloud did not
+(`avrxt`, `samc21`, `stm32f4`, `ch32v00x`, `ch32vx03`, `rp2040`,
+`rp2350`), the rest of `brio/util/`, `gfx/`, `devices/` with its README
+and four documents, the headers of `brio/host/` and the IP strata's
+documents with their headers. Not reached:
 
-1. The peripheral documents and the headers of the seven target
-   strata whose README the fifth batch rewrote and whose documents no
-   batch has reached: `docs/avrxt/` (20 documents, `brio/avrxt/`),
-   `docs/samc21/` (27, `brio/samc21/`), `docs/stm32f4/` (25,
-   `brio/stm32f4/`), `docs/ch32v00x/` (12, `brio/ch32v00x/`),
-   `docs/ch32vx03/` (19, `brio/ch32vx03/`), `docs/rp2040/` (18,
-   `brio/rp2040/`), `docs/rp2350/` (22, `brio/rp2350/`), and the vendor
-   pages' links; the `ch32x035` stratum is done (the sixth batch).
-2. The rest of `brio/util/` (the twenty-five other headers: the analog
-   converter and sampler, block streams, CAN, the clock and placement
-   vocabularies, the NV heap, journal, record and writer, power, the
-   meter sampler, the inbox, the USB stack under `usb/`, the test-bench
-   grammar, the line parser under `proto/`, the smaller services), then
-   `gfx/`, `devices/` (its README and four documents), the headers of
-   `brio/host/` and `docs/host/simulator.md`, and the IP strata's
-   documents (`docs/pl011/`, `docs/pl022/`, `docs/dw_apb_i2c/`) with
-   their headers.
-3. Before the public merge: remove DOCUMENTATION_REWRITE_BRIEF.md,
+1. `docs/host/simulator.md` (the additive pass; the host headers it
+   describes are done) and the vendor pages' links.
+2. The operational pages' cells the local batches found stale, listed
+   under each batch's open facts: `docs/rp2040/README.md`'s
+   `Rp2040Platform<TB>`, `docs/ch32v00x/README.md`'s prologue figure
+   and map row, `docs/ch32vx03/README.md`'s `console` target and its
+   map counts (`docs/rp2350/README.md`'s rows are corrected above).
+3. The code findings the fact checks raised, each posed to the driver's
+   owner in its batch's open facts and none taken here: the RP2350's
+   `Lposc::clear_bad_password()` (a store with no password, which raises
+   the flag it means to clear), `NvRecord`'s magic-first write order
+   against `clear()`, the PL011 host's `harvest()` programming a DMA
+   channel under its mask, the CDC class's `reset()` unguarded from the
+   controller's interrupt, the power manager's queue one deeper than its
+   traffic accounts for, the CH32V00x and CH32Vx03 `Pin::output(level)`
+   storing the level before the port's gate opens, the I2C hosts' last
+   byte reported `i2c_ok` after a timed-out wait (three strata).
+4. Before the public merge: remove DOCUMENTATION_REWRITE_BRIEF.md,
    DOCUMENTATION_REWRITE_PROGRESS.md and the two review files, unless
    the user keeps them.

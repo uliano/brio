@@ -3,10 +3,58 @@
  *
  * The stopping half of the CH32V00x platform: PWR (RM ch. 2) - the two
  * low-power modes, the regulator, the supply monitor, the auto-wakeup
- * unit - and the two sleep sites that run util/power.hpp's model over
- * them.
+ * unit (the AWU) - and the two sleep sites that run util/power.hpp's
+ * model over them (docs/design/power.md). A program that wants the chip
+ * in Standby between events names a site, puts util/power.hpp's
+ * PowerManager among its active objects (a component of a brio program
+ * with its own event queue, served one event at a time by the kernel),
+ * and lets the kernel's loop idle. A sleep site is the target's part of
+ * that model: it arms a depth of the ladder (`light`, `standby`, `deep`,
+ * each a rung) before the platform's idle() runs, and disarm() puts the
+ * chip back after the wake. Here `light` is Sleep, `standby` and `deep`
+ * both Standby. The smallest use, the timed site under the manager
+ * (docs/ch32v00x/sleep.md, "How to use it"):
  *
- * TWO MODES, ONE BIT EACH. Sleep stops the core clock and nothing
+ *     using Site = brio::Ch32TimedSleepSite<P, SysClock>;
+ *     using Power = brio::PowerManager<P, Site, brio::PowerConfig{}, Voters...>;
+ *
+ *     extern "C" BRIO_CH32_INTERRUPT void awu_handler() { Site::awu_isr(); }
+ *
+ *     Site::init();                       // the LSI on and measured
+ *     brio::Tenuto<P, Power, ...>::run(); // the manager arms, the loop's idle path sleeps
+ *
+ * Who calls what. Site::init() runs once in main, after the clock task
+ * (the program's clock type and its init(), clock.hpp) and the ticker,
+ * before run(): it waits, bounded, for the LSI and for
+ * the short AWU window it times on the STK. arm() and disarm() are the
+ * manager's, called in its dispatch, and take no guard of their own.
+ * The plain site's arm() writes PFIC_SCTLR and PWR_CTLR and waits for
+ * nothing; the timed site's arm(), for a Standby with a time event
+ * armed, also programs the AWU (prescaler, window, enable), clears the
+ * AWU line's EXTI flag and PFIC pending bit and enables that line in the
+ * PFIC, and waits for nothing either. Both disarm()s write the same two
+ * registers and, when a Standby was armed, call Clock::restore(), which
+ * runs the clock type's init() again and waits, bounded, for its
+ * oscillator (the HSI, the HSE or the PLL) and for the switch; the timed
+ * site's disarm() also stops the AWU and, after a wake by the alarm,
+ * calls Ticker::advance(), which masks interrupts for its update. The
+ * sleep itself is the platform's idle(), entered by the kernel loop
+ * with interrupts masked (ch32v00x/platform.hpp), which with SLEEPDEEP
+ * armed (a Standby) pauses the ticker across the WFE, since a tick
+ * turning pending would end the Standby before it began; in a Sleep the
+ * ticker runs. awu_isr() is the AWU vector's body, called from
+ * the program's `awu_handler` and nowhere else; an image on the timed
+ * site must bind it, since the site enables that line in the PFIC and an
+ * unbound vector lands in the crt's spin (the crt is the startup code,
+ * whose default handler is a loop on itself). Since the clock comes
+ * back only in disarm(), a peripheral moves its
+ * first bytes after the wake at the HSI's rate, through whatever divider
+ * (HPRE, the HCLK divider) stands, until the manager's next dispatch -
+ * of any event, util/power.hpp - has run. The `Pwr` and `Awu` verbs are
+ * register accesses with no guard of their own, for main or the site,
+ * each opening PWR's gate first (its clock enable on the PB1 bus).
+ *
+ * Two modes, one bit each. Sleep stops the core clock and nothing
  * else; Standby stops every high-frequency clock (HSE, HSI, PLL and
  * the peripheral clocks with them), keeps the SRAM, the registers and
  * the pins, drops the regulator to its low-power setting, and wakes
@@ -16,12 +64,12 @@
  * not the Sleep RM 2.4.1's PDDS row names (measured: the STK and TIM2
  * stop through it and the core wakes on the HSI, as from a Standby),
  * so no site arms that pair. The platform's idle() then sleeps as it
- * always does: the site ARMS, the kernel loop's idle path sleeps, the
+ * always does: the site arms, the kernel loop's idle path sleeps, the
  * model of docs/design/power.md unchanged on the CH32V00x as on the
  * others.
  *
- * WHAT A STANDBY DOES TO THIS PROGRAM, and what the sites answer:
- *  - THE CORE WAKES ON THE HSI. The hardware switches SYSCLK to the
+ * What a Standby does to this program, and what the sites answer:
+ *  - The core wakes on the HSI. The hardware switches SYSCLK to the
  *    HSI and turns the PLL off, so the first instructions after the
  *    wake - the wake vector's handler included - run at the HSI's
  *    rate through whatever HPRE stands. disarm() restores the clock
@@ -29,31 +77,36 @@
  *    peripheral clocked from HCLK runs at the wrong rate, which is
  *    why a program that talks on its USART across a Standby expects
  *    the first bytes after the wake to be garbage.
- *  - KERNEL TIME STANDS STILL. The STK stops with the core clock, so
- *    the plain site's rule is the SAM's: a deep sleep is legal only
- *    with no armed time event (the manager's deadline guard), and the
- *    TIMED site lifts that by placing the AWU as the alarm and handing
+ *  - Kernel time stands still. The STK stops with the core clock, so
+ *    the plain site's rule is: a deep sleep is legal only with no armed
+ *    time event - a rule the program keeps, which the plain site's
+ *    arm() does not check and the manager checks only in part (its
+ *    deadline guard refuses a standby or deeper request when the
+ *    nearest time event is nearer than its min_deep_ticks, two ticks
+ *    by default, util/power.hpp, and lets a farther one through) -
+ *    and the
+ *    timed site lifts that by placing the AWU as the alarm and handing
  *    the slept span back through Ticker::advance().
- *  - THE AWU IS AN ALARM WITHOUT A COUNTER TO READ. It counts the LSI
+ *  - The AWU is an alarm without a counter to read. It counts the LSI
  *    through a prescaler up to a six-bit window and raises EXTI line 9
  *    at the match (RM 2.3.4, 2.4.3..2.4.5); its count is not readable.
  *    So the witness of a slept span is the alarm itself: when the wake
- *    WAS the AWU, the span is the interval that was programmed; when
+ *    was the AWU, the span is the interval that was programmed; when
  *    something else woke the core first, the span is unknown and the
- *    site advances by NOTHING - late maturation is legal, early is not,
+ *    site advances by nothing - late maturation is legal, early is not,
  *    and a guess would risk early. A program that sleeps deep with
  *    other wake sources should size its deadlines knowing this.
- *  - THE LSI IS "ABOUT 128 kHz". The site MEASURES it at init(), awake,
+ *  - The LSI is "about 128 kHz". The site measures it at init(), awake,
  *    against the STK: a short AWU window timed on HCLK gives the rate
  *    the alarm will run at, and the counts for a deadline are computed
- *    from that rate rounded UP, so an alarm lands late rather than
+ *    from that rate rounded up, so an alarm lands late rather than
  *    early (the kernel's own "at least").
  *
  * The regulator's modes (LDO_MODE), the flash's low-power setting and
  * the PVD are exposed as verbs of `Pwr` and judged by no site: what
  * they are worth is a current on the bench meter.
  *
- * THE TWO PARTS (device::): the modes, the AWU - its window, its
+ * The two parts (device::): the modes, the AWU - its window, its
  * prescaler table, its line - and the PVD's flag are the same on the
  * CH32V003 and the CH32V006. What differs is the PVD's threshold
  * field (three bits from 2.85 to 4.4 V on the CH32V003, whose supply
@@ -211,7 +264,7 @@ struct Awu {
     static constexpr uint8_t window_max = 63;   ///< AWUWR is six bits; the period is window + 1 counts
 
     /// Turn the LSI on and arm line 9 on its rising edge as an
-    /// INTERRUPT line of the EXTI - which is what sets a flag a program
+    /// interrupt line of the EXTI - which is what sets a flag a program
     /// can poll and a pending bit a WFE with SEVONPEND wakes on (RM
     /// 6.4.2's first shape) - without enabling it in the PFIC unless a
     /// handler is wanted (`with_interrupt`). The unit stays disabled.
@@ -276,10 +329,11 @@ struct Awu {
 /**
  * The plain sleep site: the depth ladder onto this family's two modes.
  * `light` is Sleep; `standby` and `deep` both map to Standby, the
- * deepest this silicon has, so the never-deeper rule is the identity
- * for those two; `none` disarms. A Standby restores nothing about the
- * clock by itself - see the timed site for the whole story, and
- * `disarm()` here, which puts the tree back if it finds it fallen.
+ * deepest this silicon has, so util/power.hpp's never-deeper rule (a
+ * site sleeps no deeper than asked) is the identity for those two;
+ * `none` disarms. A Standby restores nothing about the clock by itself -
+ * see the timed site for the whole story, and `disarm()` here, which
+ * puts the tree back (Clock::restore()) whenever a Standby was armed.
  */
 template <typename Clock>
 struct Ch32SleepSite {
@@ -312,8 +366,9 @@ struct Ch32SleepSite {
         armed_ = SleepDepth::none;
         // A Standby that ran leaves SYSCLK on the HSI with the PLL off:
         // the tree goes back to what the program's clock type says.
-        // Idempotent and cheap when the sleep never went deep or never
-        // happened, so it is not made conditional on either.
+        // Run whenever a Standby was armed, whether or not the sleep
+        // happened: restore() is idempotent and cheap on a tree that never
+        // fell, so it is not made conditional on the sleep having run.
         if (was_deep) {
             (void)Clock::restore();
         }
@@ -330,27 +385,31 @@ static_assert(SleepSite<Ch32SleepSite<Clock<ClockSource::pll, 48'000'000>>>);
 /**
  * The timed site: the plain site plus the AWU as the alarm that lifts
  * the no-deadline rule from a Standby. arm() places the nearest armed
- * time event's distance on the AWU, rounded UP in the LSI's measured
+ * time event's distance on the AWU, rounded up in the LSI's measured
  * rate; disarm() advances kernel time by the programmed span when the
  * AWU is what fired, and by nothing otherwise (see the file header).
  *
- * THE AWU'S WAKE IS A LEVEL: arm() enables line 9 in the PFIC, and the
+ * The AWU's wake is a level: arm() enables line 9 in the PFIC, and the
  * app binds the AWU vector to awu_isr() -
  *
  *   extern "C" BRIO_CH32_INTERRUPT void awu_handler() { Site::awu_isr(); }
  *
- * - which an image using this site MUST do, as it binds the tick's
- * (the crt's default handler is a spin). Why: idle() sleeps with MIE
- * set, and an ENABLED interrupt with MIE set is a wake by the QingKe V2
- * manual's WFE item (2), "woken up when an interrupt is generated",
+ * - which an image using this site must do, as it binds the tick's
+ * vector (the crt's default handler is a spin). Why, on the CH32V006:
+ * idle() sleeps with MIE set, and an enabled interrupt with MIE set is
+ * a wake by the QingKe V2 manual's WFE item (2), "woken up when an
+ * interrupt is generated",
  * the handler run first - a pending line the sleeping core takes, not
  * an edge it has to catch. A PFIC-disabled line wakes a WFE only by
- * SEVONPEND's "new interrupt pending signal" (item (3)), an EDGE, and
+ * SEVONPEND's "new interrupt pending signal" (item (3)), an edge, and
  * an edge that lands on the cycle the WFE goes to sleep is lost
  * (platform.hpp's idle()); the AWU's next match makes no new one while
  * the line's flag stands, so the core would sleep until something else
  * woke it - in a Standby with no other source armed, for good. The
  * line also stays an EXTI event (item (1)), as Awu::init() arms it.
+ * (The CH32V003's idle() enters its Standby masked, from SRAM, with the
+ * EXTI lines that interrupt made events for the Standby's span -
+ * platform.hpp's idle_deep() - so there the event is the wake.)
  * Measured with the AWU's edge locked to its own period and swept
  * across the sleep entry: in a Sleep the pending edge alone loses
  * positions, every one woken only by the rescue timer, while the event
@@ -368,9 +427,15 @@ struct Ch32TimedSleepSite {
 
     using Plain = Ch32SleepSite<Clock>;
 
-    /// The LSI on and MEASURED against the STK: one AWU period of 64
+    /// The LSI on and measured against the STK: one AWU period of 64
     /// undivided counts timed in HCLK cycles. About half a millisecond
-    /// at 128 kHz; the result is what the alarm arithmetic uses.
+    /// at 128 kHz; the result is what the alarm arithmetic uses. Once,
+    /// from main, after the clock task and Ticker::init() (it reads the
+    /// STK): it polls the AWU's flag, bounded by a count, and answers
+    /// false when the LSI or the window never comes - a site that is not
+    /// ready then arms a Standby with no alarm, as the plain site does:
+    /// kernel time stands still across it, and only another wake source
+    /// ends it.
     static bool init() {
         if (!Awu::init()) {
             return false;
@@ -399,6 +464,15 @@ struct Ch32TimedSleepSite {
 
     static uint32_t lsi_hz() { return lsi_hz_; }
 
+    /// The manager's arm(): the plain site's depth, and for a Standby the
+    /// alarm at the nearest deadline. A deadline beyond the longest
+    /// window (64 counts at /61440, about 30 s) is reached in more than
+    /// one Standby: the window is clamped, the alarm ends the first at
+    /// its end and the kernel advances by that span alone, so nothing
+    /// matures early in kernel time (in real time a Standby measured,
+    /// with the probe attached, 11 to 15 per cent shorter than the
+    /// span handed back: docs/ch32v00x/sleep.md). Waits for nothing;
+    /// no guard of its own.
     static bool arm(SleepDepth d) {
         if (!Plain::arm(d)) {
             return false;
@@ -441,11 +515,11 @@ struct Ch32TimedSleepSite {
     /// closed, the flag left standing as disarm()'s witness.
     [[gnu::always_inline]] static void awu_isr() { Pfic::disable(Irq::awu); }
 
-    /// Catch kernel time up by the FROZEN span: the alarm's programmed
+    /// Catch kernel time up by the frozen span: the alarm's programmed
     /// span minus what the STK itself counted since arm() - the AWU
     /// counts from arm(), the core may stay awake a while before it
     /// sleeps and after it wakes, and those ticks were delivered.
-    /// Advancing them again would mature events EARLY, which the time
+    /// Advancing them again would mature events early, which the time
     /// contract forbids. Nothing is advanced when the alarm did not
     /// fire: the span is then unknown (see the file header).
     static void disarm() {

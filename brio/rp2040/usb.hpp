@@ -1,13 +1,42 @@
 /*
  * usb.hpp
  *
- * The RP2040's USB controller in device mode (datasheet 4.1), as the
- * endpoint controller util/usb/device.hpp's stack runs on: `Usb`, a
- * monostate (the chip has one controller and one PHY on its own two
- * pins), realizing the `UsbController` contract at the packet.
+ * The RP2040's USB controller in device mode (datasheet 4.1), for a
+ * program that shows up on a host through the chip's own connector -
+ * a CDC ACM serial port, for one. `Usb` is the endpoint controller
+ * util/usb/device.hpp's stack runs on: a monostate (a type whose state
+ * and functions are all static; the chip has one controller and one PHY
+ * on its own two pins), realizing the `UsbController` contract at the
+ * packet. A program does not call the packet verbs itself: it brings
+ * the controller up and hands it to `UsbDevice` and its classes
+ * (docs/rp2040/usb.md, "How to use it"):
  *
- * WHAT THE BLOCK IS. A full-speed PHY on DP/DM with its pull-up, a
- * serial engine each way, and 4 KB of DUAL-PORT RAM (4.1.2.7) that is
+ *     using Port = brio::UsbCdcAcm<brio::Usb, P>;
+ *     using Device = brio::UsbDevice<brio::Usb, Descriptors, Port>;
+ *
+ *     extern "C" void isr_usbctrl() { Device::isr(); }
+ *     brio::Usb::init(clock);
+ *     Device::start();               // the pull-up: the host enumerates from here
+ *
+ * init() answers false when the USB PLL did not lock or the block did
+ * not come out of reset.
+ *
+ * Which context calls what. init() and release() are setup verbs in
+ * main(); init() waits, bounded, for the USB PLL's lock and the block's
+ * reset, and enables the controller's line in the calling core's NVIC,
+ * so that core serves the device. The UsbController verbs are the
+ * stack's: it calls them inside `UsbDevice::isr()`, the body the
+ * program's `isr_usbctrl` calls, and a class's main-context side calls
+ * the packet verbs under the platform's critical section
+ * (util/usb/device.hpp, "Where it runs"; util/usb/cdc.hpp). No packet
+ * verb masks interrupts or waits beyond the twelve-NOP gap of the
+ * two-step offer below. submit_in() copies the caller's packet into the
+ * controller's RAM, so the caller's bytes are free when it returns;
+ * out_data() hands out the controller's own RAM, valid until the next
+ * submit_out() lands there.
+ *
+ * What the block is. A full-speed PHY on DP/DM with its pull-up, a
+ * serial engine each way, and 4 KB of dual-port RAM (4.1.2.7) that is
  * the whole of the interface: the eight-byte setup packet at offset 0,
  * an endpoint control word per endpoint and direction (the type, the
  * buffer's offset, the interrupt per buffer), a buffer control word
@@ -20,7 +49,7 @@
  * resume), the interrupt trio and BUFF_STATUS, one bit per endpoint
  * and direction, that says which buffers completed.
  *
- * THE BUFFER CONTROL DISCIPLINE (4.1.2.7.1): the word is shared with
+ * The buffer control discipline (4.1.2.7.1): the word is shared with
  * a controller clocked at 48 MHz while the core runs at 125, so the
  * length, the PID and FULL are written first and AVAILABLE (or STALL)
  * in a second write after a short wait, or the controller could take
@@ -30,15 +59,16 @@
  * setup packet - the stack does not see PIDs, the controller keeps
  * them.
  *
- * ENDPOINT ZERO'S STALL is armed in EP_STALL_ARM as well as in the
+ * Endpoint zero's stall is armed in EP_STALL_ARM as well as in the
  * buffer control word, and the silicon clears both when a setup packet
  * arrives, as chapter 9 wants; the other endpoints' stall is the
  * buffer control's bit alone, cleared by the stack's CLEAR_FEATURE
  * with the PID back at DATA0.
  *
- * THE CLOCK: clk_usb at 48 MHz from the USB PLL, which init() brings
+ * The clock: clk_usb at 48 MHz from the USB PLL, which init() brings
  * up at that rate if it is not already (the converter shares it,
- * rp2040/adc.hpp), and clk_sys above 48 MHz (erratum E16).
+ * rp2040/adc.hpp), and clk_sys above 48 MHz (erratum E16, refused at
+ * compile time).
  *
  * The two errata of the device controller (E2, E5) are fixed on the
  * B2 silicon of every board on the bench; this driver carries no
@@ -99,7 +129,9 @@ struct Usb {
      * VBUS to a pin), device mode, the interrupts of a device (a
      * buffer done, a bus reset, a setup packet, suspend, resume)
      * enabled at the block and at this core's NVIC. The pull-up stays
-     * down: the stack raises it when it is ready to answer.
+     * down: the stack raises it when it is ready to answer. False when
+     * the USB PLL did not lock or the block did not come out of reset;
+     * setup's verb, its waits bounded.
      */
     template <typename Clock>
     static bool init(Clock) {
@@ -157,7 +189,7 @@ struct Usb {
 
     static void set_address(uint8_t address) { reg(USB_ADDR_ENDP_OFFSET) = address & 0x7Fu; }
 
-    /// A bulk OUT endpoint is DOUBLE BUFFERED (two 64-byte halves, the
+    /// A bulk OUT endpoint is double buffered (two 64-byte halves, the
     /// controller flipping between them): a packet lands in one while
     /// the stack empties the other, so the host is never NAKed between
     /// packets - and a NAK costs a whole frame when the device sits

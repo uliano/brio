@@ -1,6 +1,91 @@
 # UART (RP2040)
 
-Documents of record: the RP2040 datasheet (build 3184e62), 4.2
+This document is for a programmer who needs a serial port on an
+RP2040: the console a program prints to, a line-oriented link, a byte
+transport to another chip. The chip's two UARTs are ARM's PL011, so the
+driver is written once in the IP stratum (`brio/pl011/`, a directory
+named for a peripheral design rather than a chip) and this stratum
+supplies the chip's part and the public names. `Pl011<n>` is the
+instance, one function per register fact. `Uart<n, pins, ...>` is the
+task over it (a task, in brio, is a driver layer with state of its own,
+served from its peripheral's interrupt, that an active object or
+`print` calls; an active object is a component of a brio program with
+its own event queue, served one event at a time by the kernel,
+[docs/learn/introduction.md](../learn/introduction.md)): a byte
+transport with a transmit ring and a receive ring, with the same public
+surface as the other targets' tasks, which is what lets
+`util/serial_port.hpp` and `print()` run here unchanged
+([design/serial.md](../design/serial.md) is the stack above it).
+
+The smallest use, the console on the Debug Probe's UART bridge, from
+"How to use it" below:
+
+```cpp
+constexpr brio::UartPins console_pins{
+    .tx = {0, brio::PinFunction::uart},
+    .rx = {1, brio::PinFunction::uart},
+};
+using Serial = brio::Uart<0, console_pins>;
+constexpr Serial serial;
+
+extern "C" void isr_uart0() { (void)Serial::isr(); }
+
+int main() {
+    SysClock::init();
+    Serial::init(clock, 115200);
+    brio::enable_interrupts();
+    brio::print(serial, "hello", brio::crlf);
+}
+```
+
+Line by line: `console_pins` names GP0 and GP1 under the UART function
+(function 2), which table 279 gives UART0 as its transmit and receive
+pads - a pin the table does not give the instance does not compile;
+`Serial` names the transport type (`0` the instance, the pads, and
+every other template argument at its default: a 64-byte receive ring,
+a 256-byte transmit ring, no DMA engines, the code in the flash);
+`serial` is an empty tag object of that type, the argument `print`
+takes to pick the port, since the type's functions are all static;
+the `extern "C"` function is the interrupt handler, as in C, under the
+pico-sdk's name for UART0's line; `init()` takes the clock task's tag
+(`clock`, [clock.md](clock.md)) and the baud rate; `brio::crlf` is the
+line ending.
+
+What decides correctness even there. `init()` after the clock's: the
+divisor is computed from the rate the clock type claims for clk_peri
+(`pclk_hz`) and not read from the hardware, and clk_peri itself is off
+until `SysClock::init()` enables it. The vector is the program's to
+bind: the crt gives `isr_uart0` a weak alias to `Default_Handler`'s
+spin, so a port whose vector is left unbound parks the core there at its
+first interrupt - the first received byte, or the first transmit that
+backs up behind a full FIFO; and the name `isr_uart0` is a macro of the
+vendored device header for the vector's slot, so the handler is defined
+in a file that includes a brio header ([platform.md](platform.md),
+"Bench findings"). `isr()` returns true when a received byte made the
+receive ring non-empty, the edge an active object is told of: the
+smallest use discards it, and the kernel's console posts it to the
+active object that assembles lines (the second block under "How to use
+it"). Three more things to know before the first `print`: `print` waits
+until the transmit ring has taken every byte, so a long message printed
+from an active object's handler holds every other active object for that
+long ([design/serial.md](../design/serial.md)); the transmit ring has
+one producer, so `write_byte` and `write_bulk` are called from active
+objects and from `main`, never from an interrupt handler, and both copy,
+the caller's buffer being free when the call returns; and an idle
+transmitter takes the first 32 bytes straight into its FIFO with no
+interrupt, so a short message leaves before the first transmit interrupt
+ever fires ("How the transmitter starts", below).
+
+The page is long because the chapter is. In order: the documents of
+record; what the silicon does; the types and verbs, with how the
+transmitter starts; how to use it; the bench findings - the loop-back,
+the pair's wires against the RP2350B, the engines, the probe's bridge,
+the receive and transmit costs, the vendor's loops on the same board;
+and what is not covered.
+
+## Documents of record
+
+The RP2040 datasheet (build 3184e62), 4.2
 (UART: the ARM PL011 - 4.2.2 functional description, 4.2.3 operation,
 4.2.6 interrupts, 4.2.7 the programmer's model and the baud
 calculation of 4.2.7.1, 4.2.8 the registers), 2.19.2 (table 279: the
@@ -9,13 +94,18 @@ it lives in the IP stratum: `brio/pl011/uart.hpp` holds the resource and
 the byte transport ([../pl011/README.md](../pl011/README.md)), and
 `brio/rp2040/uart.hpp` holds what this chip owes it - the pin table of
 table 279, the `Rp2040Pl011` chip traits over `pin.hpp`, `resets.hpp`,
-`clock.hpp`, `nvic.hpp` and `dma_engine.hpp`, and the PUBLIC NAMES
+`clock.hpp`, `nvic.hpp` and `dma_engine.hpp`, and the public names
 `Pl011<n>` (the resource) and `Uart<n, pins, ...>` (the task), this
 chip's aliases of the two templates there. The reference suite:
 `test_rp2040_serial` (the second instance under the loop-back for the
 formats, the ladder, the FIFOs, a break, an overrun and bulk traffic;
 the desk partner's `uart_peer` on the pair's UART wires; the host at the
-console's other end).
+console's other end); a suite's letter is one command key of its
+console and the group of verdicts it runs, and the desk partner is the
+board wired to the WeAct RP2040 the suite runs on, a WeAct RP2350B
+([../boards/weact-rp2350b.md](../boards/weact-rp2350b.md); the wires
+between the two are listed on
+[../boards/weact-rp2040.md](../boards/weact-rp2040.md)).
 
 ## What the silicon does
 
@@ -23,18 +113,18 @@ Two ARM PL011s, clocked from clk_peri (UARTCLK) with their registers
 on clk_sys. The baud rate divisor is UARTCLK / (16 x baud), a 16-bit
 integer (UARTIBRD) plus a 6-bit fraction (UARTFBRD), so the reach is
 UARTCLK/16 down to UARTCLK/(16 x 65535); the two registers take
-effect on the NEXT write of the line control register, and LCR_H,
+effect on the next write of the line control register, and LCR_H,
 IBRD and FBRD are written with the UART disabled. Both FIFOs are 32
 deep; the receive FIFO stores the framing, parity and break flags
-WITH EACH BYTE (bits 8..10 of UARTDR), while the overrun flag (bit
-11) is a LIVE condition - set while the FIFO is full and a frame
+with each byte (bits 8..10 of UARTDR), while the overrun flag (bit
+11) is a live condition - set while the FIFO is full and a frame
 lands, cleared as soon as a read makes room - so the entries never
 show it and UARTRSR's sticky OE is where an overrun is read
 (measured). The loop-back bit UARTCR.LBE feeds the transmitter into
 the receiver with the RX pad ignored. Eleven maskable interrupts
 combine into one line per instance (UART0_IRQ, UART1_IRQ): receive at
-the FIFO's trigger level, RECEIVE TIMEOUT when bytes wait and the
-line has idled 32 bit periods, transmit when the FIFO falls THROUGH
+the FIFO's trigger level, receive timeout when bytes wait and the
+line has idled 32 bit periods, transmit when the FIFO falls through
 its trigger level - "based on a transition through a level, rather
 than on the level itself" (4.2.6.3), cleared by writing the FIFO
 above the level or through UARTICR, so enabling it over an empty FIFO

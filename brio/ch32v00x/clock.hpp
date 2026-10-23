@@ -2,50 +2,83 @@
  * clock.hpp
  *
  * The main clock of the CH32V00x: where HCLK comes from and what its
- * rate is, as ONE compile-time truth every driver of this stratum
- * derives from (docs/design/clock.md; no F_CPU here either).
+ * rate is, as one compile-time truth every driver of this stratum
+ * derives from (docs/design/clock.md; no F_CPU here either). The
+ * smallest use (docs/ch32v00x/clock.md, "How to use it"):
  *
- * THE TREE, IN ONE PARAGRAPH (RM ch. 3). The root is either the 24 MHz
- * internal RC (HSI, on out of reset) or the PLL, which on this family
- * has no ratio to choose: it doubles its source, so HSI gives exactly
- * 48 MHz. SYSCLK is one of those two, and HCLK is SYSCLK divided by
- * HPRE - whose reset value is /3, which is why the chip wakes up at 8
- * MHz. There is no APB prescaler on this family: the peripheral buses
- * run at HCLK, so `pclk_hz` is `hz` and a driver that asks either gets
- * the same number.
+ *     using SysClock = brio::Clock<brio::ClockSource::pll, 48'000'000>;
+ *     constexpr SysClock clock;
+ *     SysClock::init();                // first thing in main(): HSI x2 -> 48 MHz
+ *     Serial::init(clock, 115200);     // drivers ask the tag
  *
- * WHAT init() ORDERS. The flash wait states first (RM 18.3.1: 0 waits
- * to 15 MHz, 1 to 24, 2 to 48), then the divider, then - for a PLL
- * rate - the PLL and the switch, each wait bounded so a dead
- * oscillator returns false instead of hanging the boot. Raising the
- * latency before raising the rate is the safe order, and this runs at
- * boot from the reset clock where the latency can only go up.
+ * `clock` is an empty tag object a driver's init() takes to learn the
+ * rate at compile time; Clock is the clock task (a task, in brio, is a
+ * driver layer with state of its own that a program calls). init() must
+ * run before any driver that derives a rate from it: a divisor or a
+ * compare is computed from the rate the type claims, not read from the
+ * hardware, so a driver initialized while the chip still runs at its 8
+ * MHz reset rate under a 48 MHz type runs six times too slowly until
+ * init() has run (the divisor is written once, from the claimed rate),
+ * and nothing refuses it.
  *
- * THE RESOURCE UNDER THE TASKS. `Rcc` is the block itself: the roots
+ * Who calls what. Clock::init() once in main(), with interrupts still
+ * masked; it waits, bounded (clock_timeout_turns per root and per
+ * switch), and masks nothing. restore() is a sleep site's, on its way
+ * out of a Standby (ch32v00x/sleep.hpp). DynamicClock::set() is called
+ * from main or an active object's handler (an active object is a
+ * component of a brio program with its own event queue, served one
+ * event at a time by the kernel) when nothing that depends on the rate
+ * is mid-transfer; it calls every listed user's rebase() synchronously
+ * and waits for nothing else. The Rcc verbs carry no guard of their
+ * own: each is a read-modify-write of a shared RCC register, so two
+ * contexts that configure gates or roots at once race.
+ *
+ * The tree, in one paragraph (RM ch. 3). The root is the 24 MHz
+ * internal RC (HSI, on out of reset), the HSE (below), or the PLL, which
+ * on this family has no ratio to choose: it doubles its source, so HSI
+ * gives exactly 48 MHz. SYSCLK is one of those, and HCLK is SYSCLK
+ * divided by HPRE - whose reset value is /3, which is why the chip wakes
+ * up at 8 MHz. There is no APB prescaler on this family: the peripheral
+ * buses run at HCLK, so `pclk_hz` is `hz` and a driver that asks either
+ * gets the same number.
+ *
+ * What init() orders. The flash wait states first, from the part's own
+ * table (device::flash_latency_for: on the CH32V006 0 waits to 15 MHz,
+ * 1 to 24, 2 to 48, RM 18.3.1; on the CH32V003 0 to 24 and 1 to 48),
+ * then the divider, then - for an HSE or a PLL rate - the oscillator,
+ * the PLL and the switch, each wait bounded so a dead oscillator returns
+ * false instead of hanging the boot. Raising the latency before raising
+ * the rate is the safe order, and this runs at boot from the reset clock
+ * where the latency can only go up. Because the divider is written
+ * before the switch, a false leaves SYSCLK on the HSI with HCLK at the
+ * HSI over the new divider (24 MHz for Clock<pll, 48'000'000>), not at
+ * the 8 MHz reset rate, and the wait states at the target rate's.
+ *
+ * The resource under the tasks. `Rcc` is the block itself: the roots
  * (HSI and its trim, the LSI that the watchdogs and the AWU count on,
  * the PLL), the switch and the divider as they stand, the MCO output
  * on PC4, the system clock monitor (SCM: SYSCM_EN and its failure
- * flag, the one clock supervisor this family offers a program without
- * a crystal - the CSS proper watches the HSE), and the per-peripheral
+ * flag, the one clock supervisor the CH32V006 offers a program without
+ * a crystal, and absent on the CH32V003 - the CSS proper watches the
+ * HSE), and the per-peripheral
  * clock enables and resets on the three buses. Every configuring
  * driver of the stratum opens its own enable through it.
  *
- * THE RUNTIME REGIME. `DynamicClock<Boot, Users...>` is the AVR's
- * shape and the simplest of the four families': one root (Boot's, the
- * HSI or the PLL), one divider (HPRE), and set<hz>() / set(hz) that
- * name the NEW RATE, fan it out to the users synchronously and in
+ * The runtime regime. `DynamicClock<Boot, Users...>`: one root (Boot's,
+ * the HSI, the HSE or the PLL), one divider (HPRE), and set<hz>() /
+ * set(hz) that name the new rate, fan it out to the users synchronously and in
  * list order, and then move the divider - with the flash wait states
  * raised before a rise and lowered after a fall. The discrete-rate
  * surface (rate_count, rate_hz, rate_index) is what a delay table
  * indexes by.
  *
- * THE HSE (RM 3.3.2): a crystal on PA1/PA2, 4..25 MHz, or an external
+ * The HSE (RM 3.3.2): a crystal on PA1/PA2, 4..25 MHz, or an external
  * clock into PA1 with HSEBYP - as SYSCLK itself (ClockSource::crystal
  * / external) or as the PLL's source (ClockSource::pll with the
  * crystal's rate named): `Clock<ClockSource::pll, 48'000'000,
  * 24'000'000>` is the PLL doubling a 24 MHz crystal. HSEON, then
  * HSERDY within a bounded wait (a missing crystal returns false and
- * leaves the boot on the reset clock), PLLSRC chosen before the PLL is
+ * leaves SYSCLK on the HSI, under the divider already written), PLLSRC chosen before the PLL is
  * turned on, and the crystal pads handed to the oscillator through
  * AFIO (`Afio::pa1_pa2_gpio(false)`, a bit whose sense differs per
  * part). The CSS (RM 3.3.6): `Rcc::css(true)` arms the clock security
@@ -53,7 +86,7 @@
  * the HSI, turns the HSE and the PLL off, raises CSSF and the NMI, and
  * brakes TIM1.
  *
- * WHAT IS NOT HERE. The LSI as a SYSCLK root is named in ClockSource
+ * Not here: the LSI as a SYSCLK root is named in ClockSource
  * so that asking for it is a compile error with an explanation rather
  * than a wrong clock. A root switch at run time (PLL on and off) is
  * not a DynamicClock rate: two clocks of different roots are two
@@ -232,7 +265,7 @@ struct Rcc {
 };
 
 /**
- * The static main clock: `hz` is the ONE compile-time truth about HCLK.
+ * The static main clock: `hz` is the one compile-time truth about HCLK.
  *
  *   using SysClock = brio::Clock<brio::ClockSource::pll, 48'000'000>;
  *   constexpr SysClock clock;
@@ -271,16 +304,20 @@ struct Clock {
     static_assert(sysclk_hz <= sysclk_max_hz, "SYSCLK must not exceed 48 MHz: a PLL from a crystal above 24 MHz cannot be");
     static_assert(target_hz <= sysclk_max_hz, "HCLK must not exceed 48 MHz");
 
-    /**
-     * Take the clock to `hz`. Returns false if the PLL never locks or
-     * the switch never takes - the caller decides what to say about a
-     * boot that stayed on the reset clock.
-     */
     /// After a Standby the hardware has switched SYSCLK to the HSI and
     /// turned the PLL off (RM 2.3.3): the tree is put back by running
     /// init() again, which is what a sleep site calls on its way out.
     static bool restore() { return init(); }
 
+    /**
+     * Take the clock to `hz`: the wait states, the divider, then the
+     * root and the switch, each wait bounded. Returns true when the
+     * switch has taken; false if the HSI, the HSE or the PLL never
+     * comes ready or the switch never takes - the caller decides what
+     * to say about a boot that stayed on the HSI (under the new
+     * divider: the file header). Called once in main(), before any
+     * driver that derives a rate from this type; masks nothing.
+     */
     static bool init() {
         // Wait states first: at boot the core runs at the reset rate (8
         // MHz, zero waits), so this can only raise them, which is the
@@ -327,7 +364,7 @@ struct Clock {
             return wait_for([] { return (rcc()->CFGR0 & rcc_sws_mask) == rcc_sws_hse; });
         } else {
             // PLLSRC: 0 is the HSI, 1 the HSE undivided; RM 3.3.4 wants
-            // the source chosen BEFORE the PLL is turned on, and it
+            // the source chosen before the PLL is turned on, and it
             // cannot be changed while the PLL runs.
             rcc()->CTLR &= ~rcc_pllon;
             if constexpr (uses_hse) {
@@ -360,11 +397,11 @@ private:
 
 /**
  * The runtime regime. Boot is a static Clock<...> naming the root and
- * its undivided rate; set<hz>() / set(hz) name the NEW RATE (the app
+ * its undivided rate; set<hz>() / set(hz) name the new rate (the app
  * speaks Hz - the HPRE code that produces it is this silicon's detail,
  * resolved by hpre_for; a rate no divider reaches is a compile error /
  * a false), fan it out to Users (each a ClockUser, checked where the
- * list is written) in list order, synchronously, and THEN move the
+ * list is written) in list order, synchronously, and then move the
  * divider - so a user can drain what it has in flight at the old rate
  * before adopting the new one. The flash wait states are raised before
  * a rise and lowered after a fall, so the array is never read with
@@ -388,7 +425,7 @@ struct DynamicClock {
 
     static uint32_t hz() { return hz_; }
 
-    /// The DISCRETE-RATE surface: this clock only ever runs at source_hz
+    /// The discrete-rate surface: this clock only ever runs at source_hz
     /// divided by one of the sixteen HPRE codes, so per-rate arithmetic
     /// can be expanded per index at compile time, and the one runtime
     /// fact is WHICH code is current. (Three rates have two codes; the
@@ -400,6 +437,9 @@ struct DynamicClock {
     template <typename U>
     static constexpr bool rebases = (std::same_as<U, Users> || ...);
 
+    /// Boot's init(): the root at its undivided rate, HPRE 1, rate index
+    /// 0. Its answer is Boot::init()'s; called once in main() as
+    /// Clock::init() is.
     static bool init() {
         const bool ok = Boot::init();
         hz_ = Boot::hz;
@@ -408,7 +448,7 @@ struct DynamicClock {
     }
 
     /// After a Standby: the root back up (Boot's init, which also puts
-    /// HPRE at 1 and the wait states at the root's), then the CURRENT
+    /// HPRE at 1 and the wait states at the root's), then the current
     /// rate's divider and wait states again. The users are told nothing:
     /// their rate never changed, only the silicon forgot it.
     static bool restore() {
@@ -421,6 +461,9 @@ struct DynamicClock {
 
     static constexpr bool can_run_at(uint32_t hz) { return hpre_for(source_hz, hz) != 0xFF; }
 
+    /// Move to `hz`, a rate checked at compile time: every user rebased
+    /// in list order, then HPRE and the wait states. Waits for nothing
+    /// but the users' own rebase().
     template <uint32_t hz>
     static void set() {
         static_assert(can_run_at(hz),
@@ -429,6 +472,8 @@ struct DynamicClock {
         apply(hpre_for(source_hz, hz), hz);
     }
 
+    /// The same at run time: false, and nothing changed, for a rate no
+    /// HPRE divider reaches from the root.
     static bool set(uint32_t hz) {
         const uint8_t code = hpre_for(source_hz, hz);
         if (code == 0xFF) {

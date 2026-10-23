@@ -1,67 +1,100 @@
 /*
  * timer.hpp
  *
- * The system timers (datasheet 12.8) - TWO of them here, TIMER0 and
- * TIMER1, where the RP2040 had one. Each is a 64-bit counter of
- * microseconds, monotonic for thousands of years, read through a latching
- * register pair or two raw halves, with four alarms that match the low 32
- * bits and raise one interrupt line each. Two instances exist so that two
- * security domains can each own a timebase; brio uses neither security
- * domain, so what the second one is here is a SECOND RULER - one a
- * measurement can stop, lock or take off the microsecond tick without
- * disturbing the one every other letter of a suite is judged against.
+ * The system timers (datasheet 12.8) as a microsecond ruler and four
+ * one-shot alarms per instance, on either architecture: a program
+ * measures a span with two readings of the counter, and asks to be
+ * interrupted at a moment of its choosing with an alarm. The kernel's
+ * own timebase is rp2350/ticker.hpp's, not this file's.
  *
- * WHAT IT COUNTS COMES FROM ANOTHER BLOCK. On the RP2040 the tick was the
+ *     brio::Timer<0>::init(clock);                    // after SysClock::init()
+ *     const uint32_t t0 = brio::Timer<0>::now_low();
+ *     // ...
+ *     const uint32_t took_us = brio::Timer<0>::now_low() - t0;
+ *
+ *     extern "C" void isr_timer0_2() { brio::Timer<0>::clear<2>(); }
+ *     brio::Timer<0>::interrupt<2>(true);
+ *     brio::Irq::enable(brio::Timer<0>::irq<2>());
+ *     brio::Timer<0>::alarm_in<2>(2000u);             // fires in 2 ms, once
+ *
+ * Who calls what. init() is a setup verb, main context, after the clock
+ * task's init(): it divides clk_ref by the megahertz the clock type
+ * claims, and it waits, bounded, for the block's reset to be done and for
+ * its tick generator to start (false when either does not) - after the
+ * generator's stop, a poll of its RUNNING bit with no bound
+ * (rp2350/clock.hpp's TickGenerator). It also starts the counter from
+ * zero, so a second init() moves the ruler under anyone measuring on it.
+ * now() and now_low() may be read from any context; now_latched() from
+ * one context only (below). The alarm verbs are single register accesses,
+ * the interrupt-enable and force verbs through the atomic aliases, so
+ * none of them masks interrupts or needs a critical section; clear<a>()
+ * is the alarm handler's first act, and the program binds the handler
+ * itself under the crt's name (`isr_timer0_0` .. `isr_timer1_3`, the same
+ * names on both architectures). Nothing else here waits, and nothing
+ * holds storage of the caller's.
+ *
+ * Two of them here, TIMER0 and TIMER1, where the RP2040 had one. Each is
+ * a 64-bit counter of microseconds, monotonic for thousands of years,
+ * read through a latching register pair or two raw halves, with four
+ * alarms that match the low 32 bits and raise one interrupt line each.
+ * Two instances exist so that two security domains can each own a
+ * timebase; brio uses neither security domain, so what the second one is
+ * here is a second ruler - one a measurement can stop, lock or take off
+ * the microsecond tick without disturbing the one every other letter of a
+ * suite is judged against.
+ *
+ * What it counts comes from another block. On the RP2040 the tick was the
  * watchdog's; here every consumer of a timebase has its own generator in
  * the TICKS block of 8.5 - one for each system timer, one for the
  * watchdog, one for each core's SysTick, one for the RISC-V platform
  * timer - and `TickGenerator<TickConsumer::timer0>` (rp2350/clock.hpp) is
  * this instance's. `init` starts it at clk_ref divided to one microsecond,
- * which with clk_ref on the crystal makes this THE CHIP'S RULER: a
+ * which with clk_ref on the crystal makes this the chip's ruler: a
  * microsecond wall clock independent of clk_sys. It shares the crystal
  * with everything else, so it judges ratios and arithmetic, never the
  * crystal itself.
  *
- * READING 64 BITS ON A 32-BIT BUS. TIMELR latches TIMEHR until TIMEHR is
+ * Reading 64 bits on a 32-bit bus. TIMELR latches TIMEHR until TIMEHR is
  * read - correct for one reader, wrong the moment a second context (the
  * other core, a handler over the loop) reads TIMELR in between. `now()`
- * therefore reads the RAW pair: high, low, high again, repeat if the high
+ * therefore reads the raw pair: high, low, high again, repeat if the high
  * half moved. `now_low()` is the low half alone, enough for any span
  * under 71 minutes and what a bracket wants.
  *
- * ALARMS match the LOW 32 bits, so at most 2^32 us - about 71 minutes -
+ * Alarms match the low 32 bits, so at most 2^32 us - about 71 minutes -
  * ahead. Writing ALARMn arms it (ARMED's bit set); the match clears ARMED
- * and raises INTR's bit, a level cleared by writing 1 to it; ARMED is
- * written with 1 to disarm early. The interrupt line is INTR gated by
- * INTE (INTF forces, INTS is the masked status). THE ALARM INDEX IS A
- * TEMPLATE PARAMETER and not an argument, because an alarm is claimed at
- * BUILD time: what makes alarm 2 of TIMER1 this program's is the app
- * binding the vector `isr_timer1_2`, a name the linker resolves. An index
- * the hardware has not got is then a compile error and not a silent write
+ * and raises INTR's bit, a level cleared by writing 1 to it - a handler
+ * that leaves it standing is entered again at once; ARMED is written with
+ * 1 to disarm early. The interrupt line is INTR gated by INTE (INTF
+ * forces, INTS is the masked status). The alarm index is a template
+ * parameter and not an argument, because an alarm is claimed at build
+ * time: what makes alarm 2 of TIMER1 this program's is the app binding
+ * the vector `isr_timer1_2`, a name the linker resolves. An index the
+ * hardware has not got is then a compile error and not a silent write
  * into the next register.
  *
- * TWO REGISTERS THE RP2040 HAD NOT:
- *  - SOURCE (12.8.1.1) takes the counter OFF the tick and onto clk_sys
+ * Two registers the RP2040 had not:
+ *  - SOURCE (12.8.1.1) takes the counter off the tick and onto clk_sys
  *    cycles. It is not a timebase then - it moves with every rate change
  *    - but it is the finest counter this chip offers a program, and what
  *    a cycle-level measurement wants.
  *  - LOCKED, which 12.8 describes as disabling write access to the block.
- *    ON THIS SILICON IT DISABLES NOTHING: with the bit set and reading
+ *    On this silicon it disables nothing: with the bit set and reading
  *    back set, a plain alarm register, the PAUSE and SOURCE registers
  *    that change the counting, and a register written through an atomic
  *    alias all take their writes (measured, stepping A2). So `lock()` is
- *    the write and `locked()` the read-back, and NEITHER IS A GUARD: no
+ *    the write and `locked()` the read-back, and neither is a guard: no
  *    verb of this file relies on the bit, and a program must not either.
  *    The bit still survives a write of any value, so the way out is the
  *    subsystem reset controller (rp2350/resets.hpp) - which is why `init`
- *    CYCLES this block's reset line instead of merely releasing it, and
+ *    cycles this block's reset line instead of merely releasing it, and
  *    comes back with the counter at zero on its microsecond tick.
  *
- * DBGPAUSE's two bits, SET AT RESET, stop the count while a debugger has
+ * DBGPAUSE's two bits, set at reset, stop the count while a debugger has
  * a core halted - and this chip has two cores per architecture: with the
  * bits set, a breakpoint on one core, or a fault taken by a core a probe
- * left debug-enabled, FREEZES THE RULER OF THE OTHER CORE, whose every
- * timed wait then never ends. So `init` CLEARS them, as the RP2040's
+ * left debug-enabled, freezes the ruler of the other core, whose every
+ * timed wait then never ends. So `init` clears them, as the RP2040's
  * driver does and for the reason that chip measured: the timer counts
  * through a halt, a measurement across a halt is a measurement of the
  * halt, and a program that wants the datasheet's default asks for it with
@@ -115,13 +148,20 @@ struct Timer {
     /// rp2350/clock.hpp's Clock puts on the crystal undivided: the
     /// divider is the crystal's megahertz.
     ///
-    /// THE RESET IS CYCLED AND NOT MERELY RELEASED. A debugger's reset
+    /// The reset is cycled and not merely released. A debugger's reset
     /// request on this chip resets the cores alone, so an image ordinarily
     /// starts on a previous life's peripherals - and this block has one
-    /// bit, LOCKED, that refuses every write including its own clear. A
-    /// release that found it set would leave `init` writing into a block
-    /// that ignores it and reporting success. The price is the counter,
-    /// which starts from zero, and an init means exactly that.
+    /// bit, LOCKED, that the datasheet says refuses every write and that
+    /// no write clears, its own clear included (on stepping A2 it refuses
+    /// nothing else, the file header says). A release that found it set
+    /// would leave `init` reporting success over a block the datasheet
+    /// says ignores it. The price is the counter, which starts from zero,
+    /// and an init means exactly that.
+    ///
+    /// Setup's verb, main context, after the clock task's init(); of the
+    /// waits inside it, the reset's done bit and the generator's start
+    /// are bounded, and the generator's stop before that start, a poll of
+    /// RUNNING down, is not.
     ///
     /// False when the block did not come ready or the generator did not
     /// start. A clk_ref that is not a whole number of megahertz does not
@@ -158,7 +198,7 @@ struct Timer {
     /// The low 32 bits alone: 71 minutes of unsigned span.
     static uint32_t now_low() { return block().TIMERAWL; }
 
-    /// The latching read, ONE CONTEXT ONLY (the file header): TIMELR
+    /// The latching read, one context only (the file header): TIMELR
     /// then TIMEHR.
     static uint64_t now_latched() {
         const uint32_t lo = block().TIMELR;
@@ -174,7 +214,9 @@ struct Timer {
         check_alarm<a>();
         alarm_reg<a>() = at;
     }
-    /// Arm alarm `a` `us` microseconds from now.
+    /// Arm alarm `a` `us` microseconds from now: it fires once at the
+    /// match, which clears ARMED, and raises its line if interrupt<a>(true)
+    /// let it. A read of the counter and one register write, any context.
     template <uint8_t a>
     static void alarm_in(uint32_t us) {
         check_alarm<a>();
@@ -199,7 +241,8 @@ struct Timer {
     }
 
     /// The alarm's interrupt enable (INTE), through the atomic aliases so
-    /// that arming one line never disturbs another.
+    /// that arming one line never disturbs another - one bus write, no
+    /// critical section, any context.
     template <uint8_t a>
     static void interrupt(bool on) {
         check_alarm<a>();
@@ -221,7 +264,8 @@ struct Timer {
         check_alarm<a>();
         return (block().INTS & bit<a>()) != 0u;
     }
-    /// Clear the raised flag: the handler's first act.
+    /// Clear the raised flag: the handler's first act. INTR is a level,
+    /// so a handler that does not clear it is entered again at once.
     template <uint8_t a>
     static void clear() {
         check_alarm<a>();
@@ -240,7 +284,9 @@ struct Timer {
 
     /// The interrupt line alarm `a` raises: TIMER0_IRQ_0..3 are lines
     /// 0..3 and TIMER1_IRQ_0..3 lines 4..7, one numbering for both
-    /// architectures (3.8.4.2).
+    /// architectures (3.8.4.2). What Irq::enable() takes; the line is
+    /// served by the core that enables it, and that only one core enables
+    /// it is the program's convention, checked by nothing.
     template <uint8_t a>
     static constexpr IRQn_Type irq() {
         check_alarm<a>();
@@ -261,7 +307,7 @@ struct Timer {
         block().DBGPAUSE = (core0 ? TIMER_DBGPAUSE_DBG0_BITS : 0u) |
                            (core1 ? TIMER_DBGPAUSE_DBG1_BITS : 0u);
     }
-    /// The readback for one core. `core` is a RUN-TIME number because it
+    /// The readback for one core. `core` is a run-time number because it
     /// is ordinarily `core_id()`; 0 reads DBG0 and anything else DBG1,
     /// this chip having two cores per architecture and no third bit.
     static bool debug_paused(uint8_t core) {
@@ -285,8 +331,8 @@ struct Timer {
     /// header): a true answer here is not a promise that a write will be
     /// refused, only that the bit is set.
     static bool locked() { return (block().LOCKED & TIMER_LOCKED_BITS) != 0u; }
-    /// Set LOCKED. Nothing in this file is gated on it, because MEASURED
-    /// ON STEPPING A2 the block goes on taking every write with it set;
+    /// Set LOCKED. Nothing in this file is gated on it, because, measured
+    /// on stepping A2, the block goes on taking every write with it set;
     /// what stands is that the bit itself only goes away with the block's
     /// reset line, which `init` cycles at the cost of the counter's value.
     static void lock() { block().LOCKED = TIMER_LOCKED_BITS; }

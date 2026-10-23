@@ -2,21 +2,47 @@
  * nvm_flash.hpp
  *
  * The CH32V00x's main flash as a FlashMedia (util/nv_heap.hpp): the
- * backends that let the block allocator and the value journal run on
- * this silicon, where the storage and the running image share ONE
- * array of 62 KB.
+ * backends that let the block allocator (the heap) and the value journal
+ * run on this silicon, where the storage and the running image share one
+ * array - 62 KB on the CH32V006, 16 KB on the CH32V003. A medium is a
+ * zone of the array above the image with the operations the heap or the
+ * journal asks of it; a program names it as the heap's or the journal's
+ * first template argument and calls the medium itself never
+ * (docs/ch32v00x/nvm.md, "How to use it", the CH32V006's):
  *
- * A CONSTANT PARTITION, drawn once. The linker script gives the linker
- * the first 40 KB only (`rom` in ch32v00x/ld/ch32v006k8.ld), so
- * nothing the compiler emits can land above 0xA000, and the storage's
- * floor and homes are constants rather than symbols that move with
- * every build - the STM32G0's arrangement, for the same reasons:
- * util/nv_heap.hpp's placement rule wants a floor that stays put, and
- * an image that grew into its own storage would be a silent loss. The
+ *     using Heap = brio::NvHeap<brio::MainFlash, 8, 2>;
+ *     using Journal = brio::NvJournal<brio::MainFlashJournalZone, 6, 32, 12>;
+ *     Heap heap;
+ *     Journal journal;
+ *
+ *     heap.mount();                           // survival-aware, reports losses
+ *     journal.mount();
+ *     journal.save<Calibration>(id, cal);     // a page program, ~2 ms, the core stalled
+ *
+ * The CH32V003 has no MainFlash (BRIO_CH32_HAS_FLASH_HEAP), and its
+ * journal's halves are eight pages, so a program for both parts spells
+ * the last argument `MainFlashPartition::journal_pages / 2u`, as the nvm
+ * suite does.
+ *
+ * Who calls what. The media are called by the heap and the journal, from
+ * main or the one active object that owns them, never from an interrupt
+ * handler; each program() and erase() opens the engine's locks for the
+ * one operation and shuts them after, and stalls the core for it
+ * (nvm.hpp). The caller's buffer is read during program() and free when
+ * it returns. A program() or erase() outside the medium's own zone, or
+ * not on a page, is refused (false) before any store.
+ *
+ * A constant partition, drawn once. The linker script gives the linker
+ * the first 40 KB of the CH32V006's array (`rom` in
+ * ch32v00x/ld/ch32v006k8.ld) and the first 15 KB of the CH32V003's, so
+ * nothing the compiler emits can land above the storage's floor, and the
+ * floor and homes are constants rather than symbols that move with every
+ * build: util/nv_heap.hpp's placement rule wants a floor that stays put,
+ * and an image that grew into its own storage would be a silent loss. The
  * script's own `__brio_rom_end` is read back as the proof; a script
- * edited past 0xA000 closes the storage (both users read a zone with
+ * edited past the floor closes the storage (both users read a zone with
  * its floor at its ceiling as "refuse") instead of letting an image
- * grow into it.
+ * grow into it. On the CH32V006:
  *
  *   0x0000 .. 0xA000   the image (40 KB, the linker's)
  *   0xA000 .. 0xE000   MainFlash             16 KB, 64 pages  blocks
@@ -26,31 +52,40 @@
  *                                            (util/nv_journal.hpp), two
  *                                            halves of twelve pages
  *
- * THE CELL IS THE PAGE, and that is the fact that sizes everything
- * here. This family programs by whole 256-byte pages and nothing
- * smaller (nvm.hpp), so `write_cell` is 256 and coincides with
- * `erase_size`. For the journal every entry therefore costs a page:
- * a half of twelve pages holds twelve entries, and its geometry
- * assertion, (max_ids + 2) x max_entry_cells <= half_cells, allows up
- * to ten ids - a handful of small values is what the journal is for,
- * and the attic is sized for a handful. For the heap an append of any
- * length costs a page too. What a smaller cell would need is a page
- * that accepts a SECOND program between erases with more bits cleared;
- * the chapter does not promise it, and the storage suite has a letter
- * that asks the silicon.
+ * and on the CH32V003, with no heap share on a 16 KB array:
  *
- * ADDRESSES ARE THE ARRAY'S OWN, from 0 - the addresses the image
+ *   0x0000 .. 0x3C00   the image (15 KB, the linker's)
+ *   0x3C00 .. 0x4000   MainFlashJournalZone   1 KB, 16 pages of 64 bytes,
+ *                                            two halves of eight pages
+ *
+ * The cell is the page, and that is the fact that sizes everything
+ * here. This family programs by whole pages and nothing smaller
+ * (nvm.hpp: 256 bytes on the CH32V006, 64 on the CH32V003), so
+ * `write_cell` is the page and coincides with `erase_size`. For the
+ * journal every entry therefore costs a page: a half of twelve pages
+ * holds twelve entries, of eight eight, and its geometry assertion,
+ * (max_ids + 2) x max_entry_cells <= half_cells, allows up to ten ids on
+ * the CH32V006 and six on the CH32V003 - a handful of small values is
+ * what the journal is for, and the attic is sized for a handful. For the
+ * heap an append of any length costs a page too. What a smaller cell
+ * would need is a page that accepts a second program between erases
+ * with more bits cleared; the chapter does not promise it, and the
+ * storage suite's letter c measured that a page does (docs/ch32v00x/
+ * nvm.md, where the endurance question that stands in front of using
+ * it is listed).
+ *
+ * Addresses are the array's own, from 0 - the addresses the image
  * runs at - and the engine adds the 0x0800 0000 alias where the
  * chapter wants it. util/nv_heap.hpp numbers erase units in a
  * uint16_t: 0xF800 / 256 = 248, no problem here.
  *
- * NO READ-WHILE-WRITE: this array is the one the core executes from,
- * and a page program or erase stalls the fetch for its duration (a
- * few milliseconds for an erase). An ordinary NvJournal::save() from
- * the main loop is therefore a pause of the whole program, not a
- * background operation as it is in the STM32G0's second bank or the
- * SAM C21's RWWEE array - a fact for the application, measured by the
- * storage suite.
+ * No read-while-write: this array is the one the core executes from,
+ * and a page program or erase stalls the fetch for its duration (2.9 ms
+ * for a page erase, 1.9 ms for a program on the CH32V006K8U6). An
+ * ordinary NvJournal::save() from the main loop is therefore a pause of
+ * the whole program, not a background operation as it is in the
+ * STM32G0's second bank or the SAM C21's RWWEE array - a fact for the
+ * application, measured by the storage suite.
  */
 
 #pragma once
@@ -66,10 +101,10 @@
 extern "C" {
 /// The epoch of the link, injected by ch32v00x/CMakeLists.txt. Declared
 /// as an array so that no code can be tempted to dereference it: it is
-/// a VALUE, and only its address bits are ever read.
+/// a value, and only its address bits are ever read.
 extern const char __nvheap_build_id[];
 
-/// One past the last byte the LINKER may place, from ld/<part>.ld.
+/// One past the last byte the linker may place, from ld/<part>.ld.
 extern const char __brio_rom_end[];
 }
 
@@ -115,7 +150,7 @@ struct MainFlashOps {
      * Program whole pages inside [floor, ceiling) and nowhere else.
      * The bounds check is not decoration: a heap that miscounted would
      * otherwise be able to program the running image, and the silicon
-     * would carry it out. THE UNLOCK WINDOW IS THIS CALL: both locks
+     * would carry it out. The unlock window is this call: both locks
      * open for the pages and shut again on the way out.
      */
     static bool program(uint32_t addr, std::span<const uint8_t> src,
@@ -166,8 +201,8 @@ struct MainFlashOps {
 struct MainFlash {
     MainFlash() = delete;
 
-    static constexpr uint32_t erase_size = Flash::page_size;   // 256
-    static constexpr uint32_t write_cell = Flash::page_size;   // 256: the page IS the cell
+    static constexpr uint32_t erase_size = Flash::page_size;   // 256 (the CH32V006's alone has a heap)
+    static constexpr uint32_t write_cell = Flash::page_size;   // 256: the page is the cell
     static constexpr uint32_t flash_end = MainFlashPartition::heap_end;
     static constexpr uint8_t zone_count = 1;
 
@@ -196,12 +231,13 @@ static_assert(MainFlash::flash_end % MainFlash::erase_size == 0u);
 static_assert(MainFlash::flash_end / MainFlash::erase_size <= 0xFFFFu);
 #endif   // the CH32V003's array has no heap share (device::has_flash_heap)
 
-/// The journal's share: the attic, the top 24 pages.
+/// The journal's share: the attic, the top 24 pages on the CH32V006,
+/// the top 16 on the CH32V003.
 struct MainFlashJournalZone {
     MainFlashJournalZone() = delete;
 
-    static constexpr uint32_t erase_size = Flash::page_size;   // 256
-    static constexpr uint32_t write_cell = Flash::page_size;   // 256
+    static constexpr uint32_t erase_size = Flash::page_size;   // the page: 256, or 64 on the CH32V003
+    static constexpr uint32_t write_cell = Flash::page_size;   // the same page
     static constexpr uint32_t flash_end = MainFlashPartition::storage_end;
     static constexpr uint8_t zone_count = 1;
 

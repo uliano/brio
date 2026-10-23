@@ -2,12 +2,57 @@
  * sleep.hpp
  *
  * The RP2040's two ways of stopping (datasheet 2.11), and the sleep
- * sites of util/power.hpp over them.
+ * sites of util/power.hpp over them. A sleep site is the object the
+ * power manager (util/power.hpp's PowerManager, an active object: a brio
+ * component with its own event queue, served one event at a time by the
+ * kernel) arms with a depth before the kernel's idle path puts the chip
+ * to sleep; the depths are the rungs of a ladder - light, standby, deep -
+ * docs/design/power.md being the model. A program that wants its idle
+ * time spent in the SLEEP state or in DORMANT names one of the two sites
+ * here and lets the manager drive it. The smallest use
+ * (docs/rp2040/sleep.md, "How to use it"):
  *
- * WHAT THE SILICON HAS. A core's WFI stops that core and nothing else:
- * every peripheral, the other core and the DMA run on. When BOTH cores
- * are asleep with SLEEPDEEP set and the DMA has no transfer in flight
- * the chip is in its SLEEP STATE (2.11.2), and the top-level clock
+ *     using Site = brio::Rp2040TimedSleepSite<P, SysClock, brio::DormantSource::rosc>;
+ *     using Power = brio::PowerManager<P, Site, brio::PowerConfig{}, Voters...>;
+ *
+ *     brio::Clocks::sleep_enables(brio::sleep_clocks_core | brio::sleep_clocks_uart0 | brio::sleep_clocks_rtc);
+ *     Site::init();                            // the timer's alarm line
+ *     brio::Rtc::init(clock); brio::Rtc::set(now);   // a dormant with a deadline wants the calendar
+ *     extern "C" void isr_timer_3() { Site::isr(); }
+ *     extern "C" void isr_rtc() { (void)Site::rtc_isr(); }
+ *     brio::Tenuto<P, Power, ...>::run();      // the manager arms, the loop's idle path sleeps
+ *
+ * What decides correctness even there: the SLEEP_ENx set keeps what must
+ * run while the chip sleeps (the fabric, the memories, the wake sources;
+ * a byte transport whose gates are pruned loses the byte in flight), the
+ * program binds the site's alarm vector and isr_rtc itself, and a
+ * dormant has a way back - a GPIO dormant-wake event enabled, or on the
+ * ring-oscillator site the calendar's alarm - or the site refuses it.
+ *
+ * Which context calls what. Both sites are core 0's: a dormant is
+ * chip-wide, the hook a site installs is core 0's platform's, and the
+ * timed site refuses any other platform at compile time. init() runs
+ * once in main(), after Timer::init(), before the manager's first round.
+ * arm(), disarm() and armed() are the manager's, from its handler; arm()
+ * waits for nothing (it writes SCR, the hook, the gates and an alarm).
+ * go_dormant() is the platform's idle path's alone, called with
+ * interrupts masked in place of the WFI; it waits without a bound for
+ * the oscillator to restart (Xosc::dormant(), Rosc::dormant()) - the
+ * reason arm(deep) demands a wake first - then for Clock::init()'s
+ * bounded waits. isr() is the body the program binds to the alarm's
+ * vector (isr_timer_<alarm_n>), rtc_isr() the one it binds to isr_rtc;
+ * both run to completion like every interrupt handler in brio. resync(),
+ * shared by isr(), rtc_isr() and disarm(), masks interrupts (the
+ * platform's critical section) for the few instructions that consume
+ * the witness.
+ *
+ * What the silicon has. A core's WFI stops that core and nothing else:
+ * every peripheral, the other core and the DMA run on. When both cores
+ * are asleep and the DMA has no transfer in flight the chip is in its
+ * SLEEP state (2.11.2) - a plain WFI is enough, SLEEPDEEP set or not
+ * (measured: docs/rp2040/sleep.md, the note in 2.11.2 asking for deep
+ * sleep on both cores describing the SDK's example rather than a
+ * condition) - and the top-level clock
  * gates switch from the WAKE_ENx masks to the SLEEP_ENx masks: what a
  * program leaves out of SLEEP_ENx is unclocked until an interrupt of a
  * block still clocked wakes a core. The oscillators and the PLLs run
@@ -19,55 +64,63 @@
  * execution resumes at the next instruction. The PLLs are not stopped
  * by the silicon: the program stops them first and brings them back.
  *
- * THE LADDER on this chip:
+ * The ladder on this chip:
  *
  *   light    a plain WFI (SLEEPDEEP clear): the core stops, the chip
- *            does not. The kernel's own idle, named.
- *   standby  the SLEEP state: SLEEPDEEP set, the SLEEP_ENx masks
- *            applied (`Clocks::sleep_enables`, the sets in clock.hpp).
- *            What the masks prune is the program's decision; the
- *            default prunes nothing, so a standby armed by a program
- *            that never set them is a light sleep with SLEEPDEEP. The
- *            timer keeps counting (its gates are forced open by the
- *            timed site), so it is both the alarm and the witness.
+ *            does not - with the other core asleep and the DMA idle it
+ *            reaches the SLEEP state all the same, under whatever
+ *            SLEEP_ENx masks the program set. The kernel's own idle,
+ *            named.
+ *   standby  a WFI with SLEEPDEEP set, for the SLEEP state under the
+ *            program's SLEEP_ENx masks (`Clocks::sleep_enables`, the
+ *            sets in clock.hpp). SLEEPDEEP is the one bit the site
+ *            writes differently from light, and it decides nothing
+ *            here: the SLEEP state is reached with it clear or set
+ *            (above). What the masks prune is the program's decision,
+ *            and the default prunes nothing, so a standby armed by a
+ *            program that never set them sleeps as a light sleep does.
+ *            The timer keeps counting (the timed site forces its gates
+ *            into the SLEEP mask), so it is both the alarm and the
+ *            witness.
  *   deep     DORMANT on the oscillator `source` names: the clocks
  *            moved onto that oscillator, the PLL stopped, the keyword
  *            written; the tree restored on the way back by the
- *            program's own Clock::init(). NOT A WFI - the platform's
+ *            program's own Clock::init(). Not a WFI - the platform's
  *            idle path takes the site's `sleep_hook` instead
- *            (rp2040/platform.hpp). REFUSED when no wake is
+ *            (rp2040/platform.hpp). Refused when no wake is
  *            configured: with nothing to restart the oscillator the
  *            keyword is the last instruction the chip executes.
  *
- * THE TWO OSCILLATORS AND THE WAKE. A GPIO dormant-wake event restarts
+ * The two oscillators and the wake. A GPIO dormant-wake event restarts
  * either oscillator. The RTC's alarm restarts either too, but the RTC
- * counts clk_rtc, which brio derives from the crystal: with the CRYSTAL
+ * counts clk_rtc, which brio derives from the crystal: with the crystal
  * dormant the calendar stops and its alarm never comes, so the RTC is
- * a wake only when the RING OSCILLATOR is the one stopped and the
+ * a wake only when the ring oscillator is the one stopped and the
  * crystal keeps clk_rtc alive (`DormantSource::rosc`) - a dormant that
  * saves the digital core's whole dynamic power and leaves the crystal
  * running. The site's `dormant_wake_ready()` says whether a way back
  * exists, and arm(deep) refuses without one.
  *
- * WHAT A STANDBY ASKS OF THE APPLICATION: the other core asleep with
- * SLEEPDEEP set too (a core 1 still parked in the bootrom sits in a
- * WFE without it, and the suite measures whether the state is reached
- * regardless), the DMA idle, and a SLEEP_ENx set that keeps the
+ * What a standby asks of the application: the other core asleep too (a
+ * core 1 still parked in the bootrom sits in a WFE, and the suite
+ * measures the SLEEP state reached with it there, SLEEPDEEP clear or
+ * set), the DMA idle, and a SLEEP_ENx set that keeps the
  * fabric, the memories and the wake sources clocked
  * (`sleep_clocks_core` plus the sources). A byte transport whose clocks
  * are pruned loses the byte in flight.
  *
- * THE TIMED SITE lifts nothing here that the plain site forbids -
- * SysTick's behaviour in the SLEEP state is measured by the suite and
- * stated in docs/rp2040/sleep.md - and does what the other strata's
- * timed sites do: places the nearest armed deadline on a TIMER alarm
- * (microseconds, rounded up: late, never early), and after the wake
- * hands the ticker the span the timer counted less the ticks SysTick
- * counted itself (rounded down: never early). For a dormant with a
- * deadline it places the RTC's alarm on the calendar's h:m:s (whole
- * seconds up), the calendar being the witness in whole seconds down;
- * it refuses a dormant with a deadline when the calendar is not
- * running or the crystal is the oscillator stopped.
+ * The timed site lifts nothing here that the plain site forbids -
+ * SysTick counts through the SLEEP state, measured by the suite and
+ * stated in docs/rp2040/sleep.md - and keeps the timed-site contract of
+ * docs/design/power.md: it places the nearest armed deadline on a timer
+ * alarm (microseconds, rounded up: late, never early), and after the
+ * wake hands the ticker the span the timer counted less the ticks
+ * SysTick counted itself (rounded down: never early). For a dormant
+ * with a deadline it places the RTC's alarm on the calendar's h:m:s
+ * (whole seconds up), the calendar being the witness in whole seconds
+ * down; it refuses a dormant with a deadline when the calendar is not
+ * running, the crystal is the oscillator stopped, or the deadline is a
+ * day or more out.
  */
 
 #pragma once
@@ -400,8 +453,8 @@ struct Rp2040TimedSleepSite {
 
     static SleepDepth armed() { return Plain::armed(); }
 
-    /// Catch kernel time up by the FROZEN span: the witness's elapsed
-    /// time converted DOWN to ticks, less what SysTick itself counted
+    /// Catch kernel time up by the frozen span: the witness's elapsed
+    /// time converted down to ticks, less what SysTick itself counted
     /// since arm(). Consumed once - isr() and disarm() both call it, and
     /// a round that never slept advances by nothing because the two
     /// rulers agree. The critical section makes the once-ness hold
@@ -432,8 +485,8 @@ struct Rp2040TimedSleepSite {
 
     /**
      * The ISR body the app's timer alarm vector binds: acknowledge,
-     * RESYNC, and HAND THE MACHINE BACK TO A TICKING SLEEP. The third
-     * act is the SAM's lesson: the never-early rounding can leave
+     * resync, and hand the machine back to a ticking sleep. The third
+     * act's reason: the never-early rounding can leave
      * kernel time a fraction of a tick short of the deadline at the
      * alarm, and an alarm posts nothing to any queue, so with the
      * standby still armed and the alarm spent the loop would re-enter a

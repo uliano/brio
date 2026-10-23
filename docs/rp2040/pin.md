@@ -1,6 +1,60 @@
 # GPIO (RP2040)
 
-Documents of record: the RP2040 datasheet (build 3184e62), 2.19
+This document is for a programmer who needs a pin: an LED, a button, a
+pad handed to a peripheral. The RP2040 has one bank of thirty user
+pins, so a pin is named by its number alone: `Pin<25>` names GPIO25 as
+a type (the number is a template argument, fixed when the program is
+compiled), and its functions configure the pin and drive or read it.
+`Gpio` works on the whole bank at once, a word a pin a bit, and
+`PinRef` is a small run-time handle for a request that must carry a
+pin by value (a bus request's select line, [spi.md](spi.md)).
+
+The smallest use, the LED both boards carry on GP25 and the WeAct
+board's button on GP23, from "How to use it" below:
+
+```cpp
+using Led = brio::Pin<25>;
+Led::output();                       // SIO owns it, driven
+Led::toggle();
+
+using Key = brio::Pin<23>;
+Key::input(brio::PinPull::up);       // the button to ground reads low when pressed
+if (!Key::read()) { ... }
+```
+
+Line by line: `Led` names GP25; `output()` hands the pad to SIO, the
+processor's own single-cycle path, and enables its output; `toggle()`
+flips the level with one store. `Key` names GP23; `input(PinPull::up)`
+makes it an input with the pad's pull-up, and `read()` returns the
+pad's level.
+
+What decides correctness even there. Every pin comes up an input with
+its pull-down enabled, reading low unless something drives it, and
+`input()` with no argument removes the pull: a button wired to ground
+needs the pull-up asked for, as above. The two register blocks that
+configure a pin are held in reset at power-up, and every function that
+hands a pin to an owner - `output()`, `input()`, `function()`,
+`Gpio::outputs()` - releases them first (`Gpio::ready()`), as does
+`analog()`, which takes the pin from every owner (function none) and
+gives the bare pad to the converter; `release()`, `pull()`, the
+overrides and the value functions (`set`, `clear`, `toggle`, `read`) do
+not, so they act on a pin one of those has set up. The configuring
+functions write the pin's own pad and control registers whole -
+`function()`, and `output()`, `input()` and `Gpio::outputs()` through
+it, the pad first; `analog()` and `release()` the control register
+first - and belong to setup or to one context at a time for a given
+pin; `pull()` and the two overrides read the register before they write
+it, and are for setup, not for a field two contexts race on. `set`,
+`clear` and `toggle` are single stores into SIO's write-one registers,
+legal from any context, and `read()` reads the pad whoever owns it. A
+pad handed to a peripheral (`function(PinFunction::uart)`) carries that
+peripheral's signal only on the pins table 279 gives it; the
+peripherals' own pin tables refuse the others at compile time
+([uart.md](uart.md), [spi.md](spi.md), [i2c.md](i2c.md)).
+
+## Documents of record
+
+The RP2040 datasheet (build 3184e62), 2.19
 (GPIO: function select and table 279, interrupts, pads, the bus
 keeper), 2.3.1.2 (SIO's GPIO control), 2.14 (the two banks' resets);
 Appendix B (E6). The driver: `brio/rp2040/pin.hpp`. No reference
@@ -17,13 +71,13 @@ same on every pin a peripheral reaches (2 is UART everywhere, 5 is
 SIO everywhere) and the instance and signal fixed per pin by table
 279. PADS_BANK0's register per pin holds the pad's electrical setup:
 drive strength 2/4/8/12 mA, slew, hysteresis, a pull-up, a pull-down,
-BOTH pulls together being the bus-keeper mode that holds the last
-level, the input buffer enable, and an output DISABLE that overrides
+both pulls together being the bus-keeper mode that holds the last
+level, the input buffer enable, and an output disable that overrides
 whoever owns the pad. The pad's reset state is input enabled,
 pull-down, 4 mA, hysteresis on (0x56): every pin comes up reading low
 unless driven. SIO is the processor's single-cycle path: GPIO_OUT,
 GPIO_OE and their SET/CLR/XOR twins move the whole bank in one word,
-and GPIO_IN ALWAYS READS THE PADS whatever function owns them. Both
+and GPIO_IN always reads the pads, whatever function owns them. Both
 blocks are in reset at power-up.
 
 Pin interrupts exist per pin and per destination (core 0, core 1,
@@ -42,7 +96,7 @@ disabled by the B2 one).
   after the function select and the overrides), `PinOverride` and
   `PinOeOverride` (CTRL's OUTOVER and OEOVER).
 - `Gpio` - the bank: `ready()` releases both blocks from reset (every
-  configuring verb calls it); the SIO word-wide verbs `in`, `out`,
+  verb that hands a pin to an owner calls it); the SIO word-wide verbs `in`, `out`,
   `out_set`, `out_clear`, `out_toggle`, `oe`, `oe_set`, `oe_clear`;
   `ctrl(n)`, `status(n)`, `pad(n)` the per-pin registers by number;
   `function(n, fn, cfg)` (the pad first, then FUNCSEL with every

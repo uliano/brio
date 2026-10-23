@@ -1,19 +1,86 @@
 # RCC (CH32V00x)
 
-The clock tree of RM ch. 3 as this stratum drives it: the static
-`Clock` every driver derives its rate from, the `DynamicClock` that
-walks the HPRE ladder at run time, and the `Rcc` resource under both -
-the roots, the switch, the output, the monitor, the peripheral gates.
-Documents of record: the CH32V00X reference manual V1.5 (3.3 for the
+This document is for a programmer bringing a CH32V006 or a CH32V003 to
+the rate the program wants, and for one who needs the clock block
+itself: the roots, the peripheral gates, the clock output pad, the
+clock monitors. It covers the clock tree of RM ch. 3 as this stratum
+drives it, where brio's clock model
+([design/clock.md](../design/clock.md)) meets a doubling PLL and one
+divider. A static `Clock<src, hz, xtal_hz>` names the root and the rate
+and is the one truth every driver derives from: a driver asks the clock
+type for its rate and computes its own divisors from it, nothing is
+read from the hardware. A `DynamicClock` walks the HPRE ladder at run
+time with its users rebased first. `Rcc`, under both, is the block
+itself: the roots, the switch, the output, the monitor, the peripheral
+gates. The program's clock type, with `init()` called once at the top
+of `main()`, is what the other pages call the clock task.
+
+The smallest use is the clock type `blink`, the maintained example,
+names (this fragment adds a serial port beside it): the HSI doubled by
+the PLL to the part's 48 MHz, one rate for the whole run (the "How to
+use it" block below shows the moving clock; "a program with one rate
+names `Clock<...>` alone"):
+
+```cpp
+using SysClock = brio::Clock<brio::ClockSource::pll, 48'000'000>;
+constexpr SysClock clock;
+
+int main()
+{
+    const bool clock_ok = SysClock::init();            // HSI x2 -> 48 MHz
+    const bool serial_ok = Serial::init(clock, console_baud);
+    const bool tick_ok = brio::Ticker::init(clock);
+    ...
+}
+```
+
+`SysClock` is the type, `clock` an empty tag object of it, the argument
+every driver's `init` takes to learn the rate (its functions are all
+static: the type has no object of its own to hold); `init()` sets the
+flash's wait states for the rate first, writes the divider, starts the
+PLL on the HSI and switches the system clock to it. A third template
+argument names a crystal instead: `Clock<ClockSource::pll, 48'000'000,
+24'000'000>` doubles the bench boards' 24 MHz crystal on PA1/PA2.
+
+Three things decide whether that works. `init()` runs before any
+driver's: a driver computes its divisor from the rate the type claims,
+so a port or a ticker initialized on a chip still at its 8 MHz reset
+rate with a 48 MHz clock type runs six times too slowly until `init()`
+has run (its divisor is written once, from the claimed rate), and
+nothing refuses it. The rate must be the root's (the HSI's 24 MHz, the
+crystal's, or either doubled by the PLL) divided exactly by one of
+HPRE's dividers (1 to 8, then 16, 32, 64, 128, 256), and no more than
+48 MHz: any other rate is a compile error, never a rounded one, and so
+is a crystal outside 4 to 25 MHz. And `init()` answers false when a
+root never reports ready or the switch never takes, within a bounded
+number of turns; the program decides what to say about it (a program
+with a console can print the answer beside the clock's name), and the
+drivers it then initializes compute their divisors from a rate the chip
+is not running at.
+
+The rest of this page, in order: the documents of record; what the
+silicon does, the two parts' differences among it; the types and verbs;
+how to use it, the moving clock; the bench findings, the whole ladder
+of rates and the crystal against a host's clock among them; and what is
+not covered.
+
+## Documents of record
+
+The CH32V00X reference manual V1.5 (3.3 for the
 tree, 3.4 for the registers), the CH32V006 datasheet V2.0 (the HSI's
-and LSI's accuracy, the MCO's pad).
+and LSI's accuracy, the MCO's pad). The header is
+[brio/ch32v00x/clock.hpp](../../brio/ch32v00x/clock.hpp); the reference
+suite is `test_ch32_clock` (a suite's letter, below, is one command key
+of its console and the group of verdicts it runs, `z` the key that runs
+the image's set of letters, a letter outside it run by its own
+key).
 
 ## What the silicon does
 
 - **Three roots for SYSCLK**: the 24 MHz internal RC (HSI, on out of
   reset, factory-calibrated through HSICAL and nudged by a five-bit
   HSITRIM), the HSE (a crystal of 4 to 25 MHz on PA1/PA2, or a clock
-  into PA1 with HSEBYP) and the PLL, which has NO ratio to choose - it
+  into PA1 with HSEBYP) and the PLL, which has no ratio to choose - it
   doubles its source, the HSI or the HSE undivided (PLLSRC), so 48 MHz
   comes from the HSI or from a 24 MHz crystal and a PLL from a crystal
   above 24 MHz cannot be. The crystal pads are handed to the
@@ -30,7 +97,7 @@ and LSI's accuracy, the MCO's pad).
 - **Two supervisors, one of them the CH32V006's alone**: the CSS
   (CSSON) watches a ready HSE and, on its failure, switches SYSCLK to
   the HSI, turns the HSE and the PLL off, raises CSSF and the NMI and
-  brakes TIM1 - on both parts; the SCM (SYSCM_EN) watches the SYSTEM
+  brakes TIM1 - on both parts; the SCM (SYSCM_EN) watches the system
   clock, raising SYSCLK_FAILIF, braking TIM1 and, if enabled,
   interrupting on the RCC line - and the CH32V003 has no such monitor
   (its CTLR bits 23:20 are reserved: `Rcc::has_monitor`).

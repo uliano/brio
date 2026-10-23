@@ -2,14 +2,32 @@
  * resets.hpp
  *
  * The subsystem reset controller (RESETS, datasheet 7.5): this chip's
- * gate on every peripheral. Every block the controller governs - the
- * UARTs, SPIs, I2Cs, PWM, both system timers, the ADC, both PLLs, the
- * three PIOs, the DMA, the IO and pad banks, the USB controller, the
- * SHA-256 and TRNG accelerators, the HSTX, SYSINFO - is HELD IN RESET at
+ * gate on every peripheral, which a driver opens before it touches a
+ * block's registers. Every block the controller governs - the UARTs,
+ * SPIs, I2Cs, PWM, both system timers, the ADC, both PLLs, the three
+ * PIOs, the DMA, the IO and pad banks, the USB controller, the SHA-256
+ * and TRNG accelerators, the HSTX, SYSINFO - is held in reset at
  * power-up, and a register of a block in reset is not there to be
  * written. So "open the peripheral's clock", the first act of every
  * driver's init on the other families, is "release its reset" here, and
- * RESET_DONE is what says the release has taken.
+ * RESET_DONE is what says the release has taken. The smallest use
+ * (docs/rp2350/platform.md):
+ *
+ *     if (!brio::Resets::release(brio::ResetBlock::pwm)) { ... it never came ready ... }
+ *
+ * Which context calls what. Every write here is one bus write, through
+ * the SET/CLR aliases or a whole-word store, so nothing masks interrupts;
+ * release() and cycle() then poll RESET_DONE with a bound of 100 000
+ * polls, and nothing else waits. hold() and cycle() take a block from
+ * whoever was using it, which nothing here checks, so they belong to that
+ * block's driver, at its init() or release() in main context; release()
+ * of a block already out of reset is a confirmation (one alias write and
+ * a done-bit read), which is how ChipId::read() (rp2350/sysinfo.hpp) and
+ * the pin bank's Gpio::ready() (rp2350/pin.hpp) use it. The drivers'
+ * inits use cycle() instead, so that each starts its block from the reset
+ * state whatever a previous image left. Psm's verbs are the watchdog's
+ * (rp2350/watchdog.hpp: its selection and erratum RP2350-E19's guard) and
+ * the second core's launch (rp2350/multicore.hpp).
  *
  * Three registers: RESET (a bit per block, set = in reset), WDSEL (which
  * blocks a watchdog event resets) and RESET_DONE (read-only). The writes
@@ -18,15 +36,15 @@
  * wait is bounded like every wait in this stratum: a block whose done
  * bit never rises answers false, and the caller knows.
  *
- * THE BIT MAP IS NOT THE RP2040'S. Twenty-nine blocks here against
+ * The bit map is not the RP2040's. Twenty-nine blocks here against
  * twenty-seven there, and the order differs from the first bit on: this
  * chip has no RTC (the always-on timer in POWMAN took its place) and no
  * separate JTAG line in the same position, and it adds TIMER1, PIO2,
  * HSTX, SHA256 and TRNG. Every constant below is the device header's
  * own name, so the map is read and never retyped.
  *
- * AND BESIDE IT, THE POWER-ON STATE MACHINE (7.4), which is chapter 7's
- * MIDDLE tier: the SYSTEM resets, the ones a processor cannot run
+ * And beside it, the power-on state machine (7.4), which is chapter 7's
+ * middle tier: the system resets, the ones a processor cannot run
  * without - the oscillators, the clock generators, the bus fabric, the
  * memories, SIO, the access controller, the processors themselves - each
  * released in sequence by hardware, every stage waiting for the one
@@ -87,8 +105,10 @@ struct Resets {
     Resets() = delete;
 
     /// Release `blocks` from reset and wait for each one's RESET_DONE.
-    /// True when every one reported ready within the bounded wait; a
+    /// True when every one reported ready within the bounded wait; false
+    /// when one never did, and its registers are not to be trusted. A
     /// block already released is simply confirmed. A no-op on zero.
+    /// One alias write and the wait; masks nothing.
     static bool release(uint32_t blocks) {
         hw_clear(RESETS->RESET, blocks);
         return wait_done(blocks);

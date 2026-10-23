@@ -1,25 +1,140 @@
 # RCC (CH32V203 and CH32V303)
 
-The clock tree of RM ch. 3 as this stratum drives it: the static
-`Clock` every driver derives its rate from, the `DynamicClock` that
-moves between a pack of rates at run time, and the `Rcc` resource under
-both - the roots, the PLL, the switch, the four prescalers, the output,
-the security system and the peripheral gates. The pieces of the tree
-that live in another chapter are here too, because they are the tree:
-the PLL's input divider for the HSI (EXTEN_CTR.HSIPRE, RM 33.2.1) and
-the rate above which the flash chapter asks for HCLK halved around an
-erase (RM 32.1). Documents of record: the CH32F/V20x_V30x_V31x
-reference manual V2.3 (3.3 for the tree, 3.4 for the registers, 33.2
-for EXTEN) read under the **CH32V20x_D6** class note for every part up
-to the CH32V203C8, **CH32V20x_D8** for the CH32V203RB and
-**CH32V30x_D8** for the four CH32V303 parts - the chapter's simple
-tree, which it gives the D6 and the V30x_D8 alike, the PLL2, PLL3 and
-PREDIV of the D8C classes being another family's - the CH32V203
-datasheet V2.8 (tables 4-11 and 4-13 to 4-15 for the oscillators and
-the PLL) and the CH32V303/305/307/317 datasheet V3.5 (tables 4-12 and
-4-14 to 4-16). Driver:
+This document is for a programmer bringing a CH32V203 or a CH32V303 to
+the rate the program wants, and for one who needs the clock block
+itself: the roots and the PLL, the peripheral gates, the clock output,
+the clock security system. Its first subject is the clock task, the
+driver every driver that takes a clock depends on (a task, in brio,
+is the driver layer over a block's registers that a program or an
+active object calls; an active object is a component of a brio program
+with its own event queue, served one event at a time by the kernel,
+[docs/learn/introduction.md](../learn/introduction.md)). A static
+`Clock<source, hz, xtal_hz>` names a rate as a type and is the one rate
+truth of the program: its `init()` takes the tree from the reset clock
+(the 8 MHz HSI, undivided) to that rate, and each such driver's
+`init()` takes the type's tag and computes its divisor from the rates the type
+states - HCLK, the two peripheral buses, what a timer counts, what the
+ADC and the USB blocks get - never from the hardware
+([design/clock.md](../design/clock.md) is the model). A
+`DynamicClock<Rates<...>, Users...>` is a pack of such types the program
+switches between at run time, every driver that follows the tree listed
+as a user and rebased before the tree moves. `Rcc` is the resource under
+both, the block itself, and `Mco` the small task over the clock output
+pad.
+
+The smallest use, the first block of "How to use it" below, which is
+most programs:
+
+```cpp
+using SysClock = brio::Clock<brio::ClockSource::pll, 144'000'000>;
+constexpr SysClock clock;
+
+SysClock::init();                  // the HSI whole, x18
+Serial::init(clock, 115200);       // the divisor folds at compile time
+brio::Ticker::init(clock);
+```
+
+Line by line: `SysClock` is a type alias that names the rate - the PLL
+fed by the HSI, 8 MHz arriving whole and multiplied by eighteen to
+144 MHz, this family's ceiling; the PLL's input divider and multiplier,
+HPRE and the two bus prescalers are found at compile time, and every
+rate the tree derives from it (`pclk1_hz`, `pclk2_hz`, `usb_hz`,
+`adc_hz` ...) is a constant of the type. `clock` is an empty tag object
+of that type: it holds nothing, its type carries the rates, and it is
+the argument every driver's `init` takes to learn them. `SysClock::init()`
+is the clock task's verb that takes the tree to the rate, called first
+in `main()` (its second verb, `restore()`, puts the rate back after a
+sleep, [sleep.md](sleep.md)): it parks SYSCLK on the HSI, writes the
+prescalers while the machine is slow, starts the roots the rate needs
+and the PLL, switches, and answers whether all of it took (the excerpt
+discards the answer; a program reads it). The
+next two lines are other drivers' `init`, each handed the tag: `Serial`
+is the program's alias for a serial port ([usart.md](usart.md), USART1
+for instance, `brio::Uart<1, P>`), whose baud divisor is computed from
+the tag's rate for its bus (PCLK2 for USART1) and folds at compile time
+because the rate is a constant; `brio::Ticker` is the kernel's timebase
+([platform.md](platform.md)), whose compare is computed from HCLK. All
+three run in `main()` before `brio::enable_interrupts()` and the
+kernel's `run()`.
+
+What decides correctness even there:
+
+- **The clock task first.** A driver initialized before
+  `SysClock::init()`, on a chip still at the reset clock (what
+  `Clock<ClockSource::internal, 8'000'000>` names), computes its divisor
+  for the rate the type claims and runs at the ratio of the two: under
+  the 144 MHz type above, eighteen times too slowly for a block clocked
+  from HCLK or PB2 (the ticker, USART1, SPI1, TIM1: a port asked for
+  115200 baud speaks at 6400) and for a timer on PB1 (which counts twice
+  its divided bus, 144 MHz by the type), nine times too slowly for a
+  port or a bus host on PB1, whose rate the type states as 72 MHz, the
+  stratum's cap - derived from the divisor arithmetic, not measured. A
+  port or the ticker writes its divisor once, so it is right again once
+  the clock task has run. Nothing checks the order: no driver reads the
+  tree.
+- **Its answer.** `init()` answers false when the HSI or the HSE
+  never comes ready, the PLL never locks or a switch never takes, each
+  wait a bounded poll (`clock_timeout_turns`, 100 000 turns), and it
+  stops at that step. Past its first two steps (the HSI started, SYSCLK
+  parked on it) the prescalers of the rate asked are already written, so a
+  false can leave the chip neither on the reset clock nor at the rate
+  its type claims (on the HSI with PB1 halved, for a 144 MHz type whose
+  PLL never locked), and every divisor computed from the type is wrong.
+- **What the type refuses.** A rate the tree cannot make exactly, a
+  crystal rate outside the part's oscillator range, a crystal on a
+  package that brings out no oscillator pad, a PLL input or output
+  outside the part's ranges, an HCLK above the part's ceiling: each is a
+  compile error in `Clock`, never a rounded rate.
+- **A dynamic clock's users.** `DynamicClock::init()` enters the pack's
+  first rate with no fan-out and runs first in `main()` the same way. A
+  driver that follows the tree and takes a dynamic clock (the serial
+  port, the ticker, the SPI and I2C hosts) does not compile unless it is
+  listed among the users; the timers, the ADC and the I2S take a static
+  clock only. `set<hz>()`, `set(hz)` and `set_index()` are called from
+  `main()` or an active object's handler, never from an interrupt
+  handler, one caller at a time, and only while nothing that depends on
+  the rate is mid-transfer; `restore()` is the sleep site's
+  ([sleep.md](sleep.md)), called on its wake path, an interrupt body
+  among them, and does nothing while a switch is in progress.
+
+The rest of this page, in order: the documents of record; what the
+silicon does (the roots and the PLL with its per-class input divider,
+the prescalers, the ADC's and the USB blocks' dividers, the flash, the
+clock security system and the ready interrupts, the clock output, the
+LSI, the gates); the types and verbs (`Clock`, `Rates` and
+`DynamicClock`, `Rcc` and `Mco`, and what is not in this file); how to
+use it (one rate, the same from the crystal, a pack of rates, a driver
+that follows the rate, the clock output, the clock security system);
+the bench findings, measured on the CH32V203C8T6 and the CH32V303VCT6;
+and what is not covered.
+
+The clock tree of RM ch. 3 (the reference manual named below) as this
+stratum drives it: the static `Clock` every driver derives its rate
+from, the `DynamicClock` that moves between a pack of rates at run
+time, and the `Rcc` resource under both - the roots, the PLL, the
+switch, the four prescalers, the output, the security system and the
+peripheral gates. The pieces of the tree that live in another chapter
+are here too, because they are the tree: the PLL's input divider for
+the HSI (EXTEN_CTR.HSIPRE, RM 33.2.1) and the rate above which the
+flash chapter asks for HCLK halved around an erase (RM 32.1).
+
+## Documents of record
+
+The CH32F/V20x_V30x_V31x reference manual V2.3 (3.3 for the tree, 3.4
+for the registers, 33.2 for EXTEN) read under the **CH32V20x_D6** class
+note for every part up to the CH32V203C8, **CH32V20x_D8** for the
+CH32V203RB and **CH32V30x_D8** for the four CH32V303 parts (the device
+classes are the manual's names for the groups of parts whose registers
+differ; the part table, `brio/ch32vx03/parts/`, gives each part its
+class) - the chapter's simple tree, which it gives the D6 and the
+V30x_D8 alike, the PLL2, PLL3 and PREDIV of the D8C classes being
+another family's - the CH32V203 datasheet V2.8 (tables 4-11 and 4-13 to
+4-15 for the oscillators and the PLL) and the CH32V303/305/307/317
+datasheet V3.5 (tables 4-12 and 4-14 to 4-16). Driver:
 [brio/ch32vx03/clock.hpp](../../brio/ch32vx03/clock.hpp). Reference
-suite: `test_vx03_clock`.
+suite: `test_vx03_clock` (a suite's letter is one command key of its
+console and the group of verdicts it runs; `z` the key that runs the
+suite's single-board set, here every letter, `a` to `i`).
 
 ## What the silicon does
 
@@ -34,7 +149,7 @@ suite: `test_vx03_clock`.
   CH32V30x_D8 and by four or eight on the CH32V203RB, whose oscillator
   is 32 MHz and nothing else. The HSI's own divider is not an RCC bit at all: it is
   EXTEN_CTR.HSIPRE, which is 0 out of reset - the PLL sees 4 MHz, not
-  8 - and whose sense is the opposite of PLLXTPRE's, the bit SET being
+  8 - and whose sense is the opposite of PLLXTPRE's, the bit set being
   the whole clock.
 - **The PLL's own range is not the multiplier's.** The datasheets rate
   the input at 3..25 MHz (4..25 on the CH32V203RB) and the output at
@@ -43,7 +158,7 @@ suite: `test_vx03_clock`.
   always a rate the PLL may run at; both edges are part facts and both
   are checked at compile time.
 - **PLLMUL, PLLSRC and PLLXTPRE take a write only while the PLL is
-  OFF, and the PLL does not stop while it is the system clock.** A
+  off, and the PLL does not stop while it is the system clock.** A
   program that reaches for a new rate without parking SYSCLK on the HSI
   first has every one of those writes swallowed in silence, and keeps
   the rate it had while its drivers compute divisors for the rate they
@@ -51,7 +166,7 @@ suite: `test_vx03_clock`.
 - **One HPRE and two peripheral prescalers.** HPRE's ladder is 1, then
   2, 4, 8, 16, 64, 128, 256, 512: **it skips 32**. PPRE1 and PPRE2
   share one encoding (0xx undivided, then /2 /4 /8 /16). A timer on a
-  bus whose prescaler is not 1 counts at TWICE the bus rate (figure
+  bus whose prescaler is not 1 counts at twice the bus rate (figure
   3-3) - which is the timers' chapter, stated here because it is a
   property of the tree.
 - **The ADC has a prescaler of its own** off PCLK2 (/2 /4 /6 /8) and a
@@ -59,12 +174,12 @@ suite: `test_vx03_clock`.
   keeps the converter in range. The duty-cycle bit beside the field
   (ADCDUTY) belongs to every class; the second one (ADC_DUTY_SEL, a
   75 % duty) is the CH32V30x_D8's alone and even there only by lot
-  number, so its verb writes the bit and READS IT BACK, answering what
+  number, so its verb writes the bit and reads it back, answering what
   the die kept - nothing, on the CH32V303VCT6 measured, where ADCDUTY
   takes its write and moves neither a reading nor a conversion's length
   ([adc.md](adc.md)).
 - **The USB controllers want exactly 48 MHz** from the PLL through
-  USBPRE, and 3.4.2 asks for the divider to be written BEFORE the USB
+  USBPRE, and 3.4.2 asks for the divider to be written before the USB
   clock gates are opened. The codes are /1, /2 and /3 on the
   CH32V20x_D6 and the CH32V30x_D8; the fourth code, /5 from a 240 MHz
   PLL, is the CH32V20x_D8's and even there it depends on the lot
@@ -77,7 +192,9 @@ suite: `test_vx03_clock`.
   FLASH_CTLR.SCKMOD chooses whether the flash is read at the system
   clock or at half of it, defaulting to half. What the chapter does ask
   for is at the other end - above 120 MHz an erase or a program wants
-  HCLK halved around it (32.1), which is the flash driver's to do.
+  HCLK halved around it (32.1), which the flash driver does not do
+  behind the program's back: it refuses an erase or a program at such a
+  rate instead ([nvm.md](nvm.md)).
 - **The clock security system is the non-maskable interrupt's.** With
   CSSON set and the HSE ready, a failure of the oscillator makes the
   silicon switch SYSCLK to the HSI, stop the HSE and the PLL, brake the
@@ -86,7 +203,7 @@ suite: `test_vx03_clock`.
   disarmed when the oscillator stops. The ready flags of the five roots
   have ordinary interrupt enables in RCC_INTR and share the RCC vector,
   and each flag is cleared by a write-only bit sixteen places above it -
-  but THE HSI'S IS NEVER RAISED (measured on both parts, below), so four
+  but the HSI's is never raised (measured on both parts, below), so four
   roots of the five can interrupt.
 - **The clock output is a pad on PA8** carrying SYSCLK, the HSI, the
   HSE or the PLL halved - the four codes of MCO[3:0] this class has,
@@ -111,7 +228,7 @@ suite: `test_vx03_clock`.
 `Clock<source, hz, xtal_hz>` is the static main clock: `internal` (the
 HSI), `crystal` or `external` (the HSE at the rate named third), `pll`
 (the HSI multiplied, or the crystal named third multiplied). It is a
-TUPLE of constants, not just a rate - `hz` is HCLK, `pclk1_hz` and
+tuple of constants, not just a rate - `hz` is HCLK, `pclk1_hz` and
 `pclk2_hz` the two bus rates, `timclk1_hz`/`timclk2_hz` what a timer on
 each counts, `usb_divider`/`usb_hz` what the USB blocks get,
 `adc_code`/`adc_hz`/`adc_in_spec` what the converter gets and whether
@@ -127,7 +244,7 @@ to the HSI.
 
 `Rates<R0, R1, ...>` + `DynamicClock<Rates<...>, Users...>` is the
 runtime regime, the STM32F4's shape: R0 is the boot rate, the Users are
-the drivers a switch rebases IN LIST ORDER before anything moves, and
+the drivers a switch rebases in list order before anything moves, and
 every switch is a rate's own `init()` - which parks on the HSI, so one
 order serves both directions. The rate in force answers `hz()`,
 `pclk1_hz()`, `pclk2_hz()`, `usb_hz()`, `adc_hz()`, `adc_in_spec()`;
@@ -169,7 +286,7 @@ its own gate with. `Mco` is the small task over the output pad:
 `source()` reads back, `has_pad` is the part fact that makes `init()`
 answer false instead of refusing to compile.
 
-What is NOT in this file: RCC_BDCTLR - the LSE, the RTC's clock select
+What is not in this file: RCC_BDCTLR - the LSE, the RTC's clock select
 and RTCEN - because the whole register is write-protected by PWR's DBP
 bit and belongs with the backup domain, where `RtcDomain` owns it
 ([rtc.md](rtc.md)), and RCC_RSTSCKR's reset flags, which are

@@ -1,15 +1,44 @@
 /*
  * pin.hpp
  *
- * GPIO on the RP2350 (datasheet chapter 9): the user bank as
- * compile-time types, the two register blocks that govern it, and the
- * single-cycle path the processors drive it through.
+ * GPIO on the RP2350 (datasheet chapter 9): a program drives a LED, a
+ * chip select or a sense line, reads a pad, takes a pin interrupt or
+ * hands a pad to a peripheral through the types here - each pin of the
+ * user bank a type of its own, the two register blocks that govern it,
+ * and the single-cycle path the processors drive it through. The same
+ * source serves the Cortex-M33 pair and the Hazard3 pair. The smallest
+ * use, the LED of the WeAct RP2350B board:
  *
- * THREE BLOCKS OWN A PIN, and the chapter names them:
- *  - IO_BANK0 (9.4): a CTRL register per pin whose FUNCSEL chooses WHICH
- *    PERIPHERAL owns the pad's direction, level and input - an SPI, a
- *    UART, an I2C, a PWM slice, one of THREE PIOs, SIO for software, and
- *    per-pin functions above that - plus the FOUR OVERRIDES that sit
+ *     using Led = brio::Pin<25>;
+ *     Led::output();      // SIO, the pad written, the isolation latch dropped
+ *     Led::set();
+ *
+ * A pin is a GPIO number, GP0..GP47; its pad is the cell behind it, with
+ * its driver, its pulls and its input buffer. Pin<n> is a monostate (a
+ * type with only static members, used without an object); Gpio is the
+ * bank by number, PinRef a pin named at run time, PinIrq the bank's
+ * interrupt controller and ExtInt one pin's interrupt as a type.
+ *
+ * Who calls what. set(), clear() and toggle() are single stores into
+ * SIO's set, clear and XOR registers, and read() a single load: legal
+ * from any context, and a store touches no other pin. The configuring
+ * verbs - output(), input(), function(), analog(), release() - write the
+ * pin's pad and control registers with plain stores, and pull(),
+ * isolate(), input_enable(), output_disable() and the four overrides
+ * read the register and write it back through its XOR alias
+ * (device.hpp's hw_write_masked): two contexts configuring the same pin
+ * at once race, so a pin is configured in setup or by one owner. No verb
+ * here waits, bar the reset release output(), input(), function() and
+ * analog() open with (Gpio::ready(), resets.hpp's bounded wait for
+ * IO_BANK0 and PADS_BANK0), and none masks interrupts.
+ * ExtInt::served() is an ISR body, called from the handler the program
+ * binds as `isr_io_bank0` (the same name on both architectures).
+ *
+ * Three blocks own a pin, and the chapter names them:
+ *  - IO_BANK0 (9.4): a CTRL register per pin whose FUNCSEL chooses which
+ *    peripheral owns the pad's direction, level and input - an SPI, a
+ *    UART, an I2C, a PWM slice, one of three PIOs, SIO for software, and
+ *    per-pin functions above that - plus the four overrides that sit
  *    between the chosen function and the pad (the output level, the
  *    output enable, the input the function sees and the interrupt the
  *    pad raises, each of them passable, invertible or forced either way)
@@ -17,58 +46,64 @@
  *    pad. The low function numbers are the same on every pin they reach
  *    (F5 is SIO everywhere), and WHICH instance and signal a pin carries
  *    is the per-peripheral table each driver keeps; the same block holds
- *    THE PIN INTERRUPTS (9.5), four events per pin over six registers
+ *    the pin interrupts (9.5), four events per pin over six registers
  *    per destination;
  *  - PADS_BANK0 (9.11): a register per pin for the pad's electrical
  *    behaviour - drive strength, slew, hysteresis, the pull-up, the
  *    pull-down (both together = the bus keeper), the input buffer
- *    enable, an output DISABLE that overrides whoever owns the pad - AND
- *    THE ISOLATION LATCH, which is this chip's own;
+ *    enable, an output disable that overrides whoever owns the pad - and
+ *    the isolation latch, which is this chip's own;
  *  - SIO (3.1.3): the processors' own path, one cycle per access, with
  *    the whole bank in TWO words: GPIO_OUT and GPIO_HI_OUT, their
  *    SET/CLR/XOR twins, GPIO_OE and GPIO_HI_OE, GPIO_IN and GPIO_HI_IN.
  *    A pin under FUNCSEL = SIO follows these; a pin under any other
- *    function does not, but GPIO_IN ALWAYS READS THE PAD.
+ *    function does not, but GPIO_IN always reads the pad.
  *
- * THE ISOLATION LATCH IS THE NEW THING, and it is the reason a pad
+ * The isolation latch is the new thing, and it is the reason a pad
  * configured as on the RP2040 would do nothing at all here. PADS_BANK0's
- * reset value is 0x116 (9.11): ISO set, the input buffer DISABLED, a
+ * reset value is 0x116 (9.11): ISO set, the input buffer disabled, a
  * pull-down on, 4 mA, hysteresis on. The latch exists so that pads keep
  * their state through a powered-down core domain and glitch nothing on
- * the way back up, and while it stands the pad is cut off from the
- * digital logic in both directions. Every configuring verb here writes
- * the whole pad register with ISO CLEAR, which is the documented order:
- * set the pad and the function up first, drop the isolation last.
+ * the way back up, and while it stands the pad's output side - level,
+ * output enable, pulls - ignores the digital logic (9.7: the input is
+ * never isolated, but at reset its buffer is off, so a pad out of reset
+ * is cut off in both directions). Every configuring verb that hands a
+ * pin over - output(), input(), function(), analog() - writes the whole
+ * pad register with ISO clear, which is the documented order: set the
+ * pad and the function up first, drop the isolation last. release()
+ * writes the pad's reset value, 0x116, with ISO set; the verbs that
+ * change one setting keep ISO as it was, bar isolate(), which sets or
+ * clears it.
  *
- * AND THE INPUT BUFFER IS OFF AT RESET, where the RP2040's was on. A pin
+ * And the input buffer is off at reset, where the RP2040's was on. A pin
  * this stratum hands to SIO or a peripheral gets it enabled (PinConfig's
  * default); a pin nothing has configured reads nothing.
  *
- * ERRATUM RP2350-E9 IS LIVE ON THE BENCH SILICON (stepping A2). With the
+ * Erratum RP2350-E9 is live on the bench silicon (stepping A2). With the
  * input buffer enabled, a pad that nothing drives leaks enough current
- * through the input stage to sit HIGH against its own pull-down, once
+ * through the input stage to sit high against its own pull-down, once
  * the voltage has drifted into the undefined region; a pad driven low
- * and then released stays low. So an idle level on this chip is HISTORY
+ * and then released stays low. So an idle level on this chip is history
  * and not a measurement: a program that wants to read a floating pad
- * through its pulls must drive it first, or use the pull-UP and read a
+ * through its pulls must drive it first, or use the pull-up and read a
  * low as the signal. A3 fixes the leakage path.
  *
- * THE ERRATUM'S OWN WORKAROUND IS A VERB HERE. The leakage exists only
+ * The erratum's own workaround is a verb here. The leakage exists only
  * while the input buffer is enabled and stops the moment it is disabled,
- * so a pad that must be held down by its pull-down keeps the buffer OFF
+ * so a pad that must be held down by its pull-down keeps the buffer off
  * and is read with the buffer enabled for the length of the read alone:
  * `input({.pull = PinPull::down, .input_enable = false})` and then
  * `read_pulsed()`. That is the pair the errata sheet prescribes, and on
- * this stepping it is the ONLY way a pull-down holds a pad that nothing
+ * this stepping it is the only way a pull-down holds a pad that nothing
  * else drives.
  *
- * NO PORT LETTERS: one bank, `Pin<25>`. THE BANK'S SIZE IS THE
- * PACKAGE'S: 48 pins on the QFN-80, 30 on the QFN-60 (device.hpp states
+ * No port letters: one bank, `Pin<25>`. The bank's size is the
+ * package's: 48 pins on the QFN-80, 30 on the QFN-60 (device.hpp states
  * both and which one this build was told about). Since the die is one,
  * every pin's CTRL and PAD register exists on both packages - what a
- * QFN-60 has not got is the BOND WIRE - so a build that states its
- * package refuses GP30..GP47 at COMPILE time, and a build that states
- * none compiles them and refuses at RUN time, against SYSINFO's
+ * QFN-60 has not got is the bond wire - so a build that states its
+ * package refuses GP30..GP47 at compile time, and a build that states
+ * none compiles them and refuses at run time, against SYSINFO's
  * PACKAGE_SEL. That is why the configuring verbs answer bool: a pad the
  * package has not got is not written, and the caller is told.
  *
@@ -502,6 +537,10 @@ struct Pin {
     /// Which half: false for GPIO0..31, true for GPIO32..47.
     static constexpr bool high_half = n >= 32u;
 
+    /// The pin a software-driven output: handed to SIO with its pad set
+    /// up per `cfg` (the latch dropped), then its output enabled through
+    /// SIO's set register. The level is whatever GPIO_OUT holds for it.
+    /// False, and nothing written, for a pad this package has not got.
     static bool output(const PinConfig& cfg = {}) {
         if (!Gpio::function(n, PinFunction::sio, cfg)) {
             return false;
@@ -515,6 +554,9 @@ struct Pin {
         if (level) { set(); } else { clear(); }
         return output(cfg);
     }
+    /// The pin a software-read input: its output enable cleared, then
+    /// handed to SIO with the input buffer on and `pull`. False for a pad
+    /// this package has not got.
     static bool input(PinPull pull = PinPull::none) {
         if constexpr (high_half) { Gpio::oe_clear_hi(mask); } else { Gpio::oe_clear(mask); }
         return Gpio::function(n, PinFunction::sio, {.pull = pull});
@@ -529,6 +571,7 @@ struct Pin {
     static bool function(PinFunction fn, const PinConfig& cfg = {}) {
         return Gpio::function(n, fn, cfg);
     }
+    /// Back to the reset state, isolated again (Gpio::release()).
     static bool release() { return Gpio::release(n); }
     /// The bare pad for the converter, a pull optional.
     static bool analog(PinPull pull = PinPull::none) { return Gpio::analog(n, pull); }
@@ -540,6 +583,10 @@ struct Pin {
     /// This pin as a run-time reference (a bus request's select line).
     static constexpr PinRef ref() { return PinRef{n}; }
 
+    /// Drive high, low, or the other way: one store into SIO's set, clear
+    /// or XOR register for this pin's half, legal from any context and
+    /// touching no other pin. What reaches the pad is the level only while
+    /// the pin is SIO's and an output.
     static void set() {
         if constexpr (high_half) { SIO->GPIO_HI_OUT_SET = mask; } else { SIO->GPIO_OUT_SET = mask; }
     }
@@ -679,13 +726,13 @@ inline constexpr PinEvents pin_edges{static_cast<uint8_t>(PinEvent::edge_low) |
 enum class PinIrqTarget : uint8_t {
     proc0 = 0,          ///< the core 0 line, IO_IRQ_BANK0 (`isr_io_bank0`)
     proc1 = 1,          ///< the core 1 line, the same number to the other NVIC
-    dormant_wake = 2,   ///< the wake path out of DORMANT - the power chapter's
+    dormant_wake = 2,   ///< the wake out of DORMANT: sleep.hpp's DormantWake
 };
 
 /**
  * The bank's interrupt controller (9.5).
  *
- * WHAT IS DIFFERENT FROM EVERY OTHER STRATUM'S PIN INTERRUPTS: nothing
+ * What is different from every other stratum's pin interrupts: nothing
  * is shared, so nothing is claimed. On the SAM's EIC and on the STM32's
  * EXTI a LINE is a resource several pads compete for, and a driver's
  * first job is to refuse the second claimant; here every one of the
@@ -694,13 +741,13 @@ enum class PinIrqTarget : uint8_t {
  * of the block - one per destination, which is why an ISR asks the
  * summary registers which pin rang.
  *
- * THE LEVELS ARE NOT LATCHED. A level event stands while the pad holds
+ * The levels are not latched. A level event stands while the pad holds
  * that level and vanishes when it changes, so a handler that wants to
  * return must disable the event rather than clear it - clearing does
- * nothing at all. The edges ARE latched, in INTR, and clearing is a
+ * nothing at all. The edges are latched, in INTR, and clearing is a
  * write of one to the bit.
  *
- * BOTH SECURITY DOMAINS HAVE THEIR OWN LINE (twelve outputs in all,
+ * Both security domains have their own line (twelve outputs in all,
  * 9.5), and everything in brio runs Secure: the verbs below drive the
  * Secure destinations, whose line is IO_IRQ_BANK0. Which pins a
  * Non-secure context may see at all is ACCESSCTRL's, a chapter this
@@ -841,19 +888,19 @@ private:
 /**
  * One pad's interrupt, in the name the other strata use for the same
  * thing (`ExtInt<Pin>` on the SAM's EIC, the STM32s' EXTI and the
- * CH32s'): the pin interrupt as a TYPE, so an application names a pad
+ * CH32s'): the pin interrupt as a type, so an application names a pad
  * and not a line number.
  *
  * Here it is thinner than its namesakes, and the file header says why:
  * no line is shared, so there is nothing to claim and nothing to refuse.
- * What the type still buys is the PACKAGE CHECK the pad already carries
+ * What the type still buys is the package check the pad already carries
  * and one place for the ISR body - arm, the handler, disarm - written
  * once instead of at four call sites.
  *
  *   using Button = brio::ExtInt<brio::Pin<23>>;
  *   Button::arm(brio::pin_edges);              // the pad already an input
  *   brio::Irq::enable(Button::irq());
- *   extern "C" void isr_io_bank0() { if (Button::served()) { ... } }
+ *   extern "C" void isr_io_bank0() { if (!Button::served().none()) { ... } }
  */
 template <typename P, PinIrqTarget target = PinIrqTarget::proc0>
 struct ExtInt {
@@ -885,16 +932,17 @@ struct ExtInt {
     static void unforce(PinEvents events) { PinIrq::unforce(pin, events, target); }
     static PinEvents forced() { return PinIrq::forced(pin, target); }
 
-    /// THE ISR BODY: which of this pad's events are standing, with the
-    /// LATCHED ones cleared before it returns them - so a handler is
+    /// The ISR body, called from the program's `isr_io_bank0`: which of
+    /// this pad's events are standing, with the latched ones cleared
+    /// before it returns them - so a handler is
     /// told once per edge. An empty set means this pad is not why the
     /// line rang.
     ///
-    /// TWO KINDS OF EVENT DO NOT GO AWAY WHEN THEY ARE CLEARED, and a
+    /// Two kinds of event do not go away when they are cleared, and a
     /// handler that means to return must end each in its own way: a
-    /// LEVEL, which is not latched and stands while the pad holds it,
-    /// ends when the pad is DISARMED; an event FORCED through INTF
-    /// stands whether or not it is armed, so only UNFORCING ends it.
+    /// level, which is not latched and stands while the pad holds it,
+    /// ends when the pad is disarmed; an event forced through INTF
+    /// stands whether or not it is armed, so only unforcing ends it.
     /// The served set names the first and `forced()` the second.
     [[gnu::always_inline]] static PinEvents served() {
         const PinEvents now = pending();

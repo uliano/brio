@@ -1,14 +1,29 @@
 /*
  * pen.hpp (gfx)
  *
- * THE CONVENIENCE, KEPT OUT OF THE CONTRACT. A pen holds what a caller
+ * The convenience, kept out of the contract. A pen holds what a caller
  * would otherwise repeat - a colour, a background, and a current point -
- * and forwards to the stateless primitives. It is the only stateful
- * thing in this library, and it is deliberately ABOVE the surface rather
- * than in it, because state below would make primitives order-dependent
- * and would let a golden image turn on something nobody can see.
+ * and forwards to the stateless primitives of gfx/draw.hpp and
+ * gfx/text.hpp. The smallest use, a polyline and a line of text (the
+ * host suite, test/test_gfx, spells the pen so):
  *
- * THE CURSOR IS FOR TRACING, and for nothing else. Sequential work - a
+ *     brio::Pen<Panel> p(panel, 1, 0);       // ink 1 on background 0
+ *     p.move_to(2, 3);
+ *     p.line_to(20, 15);                     // from the cursor, which moves on
+ *     p.line_to(25, 2);
+ *     p.text<brio::Font5x7>("brio");         // in the pen's two colours
+ *
+ * A pen is an ordinary object the caller owns, over a surface it points
+ * to (which must outlive it); it runs in the caller's context, as the
+ * primitives do, and adds nothing to what they cost but its own few
+ * stores. It is the only drawing state in this library (the counting
+ * surface's tally, gfx/counting.hpp, is a measurement), and it is
+ * deliberately above the surface rather than in it, because state below
+ * would make primitives order-dependent and would let a golden image
+ * turn on something nobody can see (docs/design/gfx.md, "Conventions":
+ * drawing state lives above the base).
+ *
+ * The cursor is for tracing, and for nothing else. Sequential work - a
  * polyline across a plot, a run of text - is where each step begins
  * where the last one ended and repeating the coordinate would be noise.
  * The shapes are placed rather than continued, so they take their own
@@ -18,12 +33,13 @@
  * all of its arguments, so a program that wants none of this pays for
  * none of it, and the two surfaces of the library never disagree.
  *
- * A WIDTH belongs here too, the day an oblique stroke wider than one
- * pixel earns its specification (docs/design/gfx.md says what that
- * costs). It would be a fourth member and a set of overloads, not a
- * change to anything that exists. The axis-aligned thick forms take
- * their thickness as an argument of the shape (gfx/draw.hpp), because it
- * is a property of one rectangle and not of a stroke.
+ * A width belongs here too, the day an oblique stroke wider than one
+ * pixel earns its specification (docs/design/gfx.md, "What is
+ * deliberately absent", says what that costs). It would be a fourth
+ * member and a set of overloads, not a change to anything that exists.
+ * The axis-aligned thick forms take their thickness as an argument of
+ * the shape (gfx/draw.hpp), because it is a property of one rectangle
+ * and not of a stroke.
  */
 
 #pragma once
@@ -49,6 +65,8 @@ class Pen {
 public:
     using Color = typename S::Color;
 
+    /// A pen over `surface` (kept by pointer), ink `fg`, background `bg`,
+    /// the cursor at (0, 0).
     explicit Pen(S& surface, Color fg = Color{1}, Color bg = Color{})
         : s_(&surface), fg_(fg), bg_(bg) {}
 
@@ -66,19 +84,20 @@ public:
     Coord y() const { return y_; }
 
     /// Draws from the current point to (x, y) and ends there. This and
-    /// the text verbs are the WHOLE of what the cursor is for.
+    /// the text verbs are the whole of what the cursor is for.
     void line_to(Coord x, Coord y) {
         line(*s_, x_, y_, x, y, fg_);
         x_ = x;
         y_ = y;
     }
 
+    /// The whole surface in the background colour.
     void clear() { brio::clear(*s_, bg_); }
 
     /*
      * The shapes take their own coordinates and leave the cursor alone.
      *
-     * The cursor exists for work that is SEQUENTIAL - a polyline, a run
+     * The cursor exists for work that is sequential - a polyline, a run
      * of text - where each step begins where the last one ended and
      * repeating the coordinate would be noise. Nothing about a rectangle
      * or a circle is sequential: they are placed, not continued. Letting
@@ -86,7 +105,7 @@ public:
      * origin and a centre, which are not the same point, and a reader
      * would have to remember which verb meant which.
      *
-     * So here the pen supplies the COLOURS and nothing else.
+     * So here the pen supplies the colours and nothing else.
      */
     void set_pixel(Coord x, Coord y) { brio::set_pixel(*s_, x, y, fg_); }
 
@@ -109,14 +128,17 @@ public:
         brio::fill_circle(*s_, cx, cy, r, fg_);
     }
 
-    /// Text in the pen's two colours, the cursor left after the last
-    /// cell so successive calls run on.
+    /// Text in the pen's two colours at the cursor (the top-left of the
+    /// first cell), the cursor left after the last cell so successive
+    /// calls run on.
     template <typename F>
         requires Font<F>
     void text(std::string_view str) {
         x_ = brio::text<F>(*s_, x_, y_, str, fg_, bg_);
     }
 
+    /// A field of `cells` characters at the cursor (gfx/text.hpp's
+    /// text_field()), the cursor left after the field.
     template <typename F>
         requires Font<F>
     void text_field(std::string_view str, Extent cells) {

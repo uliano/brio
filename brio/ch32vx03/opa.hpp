@@ -2,14 +2,38 @@
  * opa.hpp
  *
  * The operational amplifiers of the CH32V203 and the CH32V303 (RM ch. 30):
- * up to FOUR of them, each with a positive input that is one of two pads, a
+ * up to four of them, each with a positive input that is one of two pads, a
  * negative input that is one of two pads, and an output that is one of two
- * pads. That is the whole chapter - four bits an amplifier in ONE register,
+ * pads. That is the whole chapter - four bits an amplifier in one register,
  * no key, no lock, no interrupt, no event, no DMA, and nothing that is
  * refused while it runs - plus, on the CH32V303, one high-speed bit an
- * amplifier in another register.
+ * amplifier in another register. A program uses one as a comparator
+ * between two pads, or, with a wire strapped from an output pad back to a
+ * negative input, as a follower or a divider, and reads the output by
+ * converting its pad. The smallest use, as docs/ch32vx03/opa.md's "How to
+ * use it" writes it:
  *
- * WHAT IT IS NOT, WHICH MATTERS MORE THAN WHAT IT IS. There is no
+ *     using Out = brio::OpaOut<2, brio::OpaPin::out0>;        // PA2, channel 2
+ *     Out::claim();
+ *     (void)brio::Opa<2>::configure({.positive = brio::OpaPin::positive1,
+ *                                    .negative = brio::OpaPin::negative1,
+ *                                    .output = brio::OpaPin::out0});
+ *     brio::Opa<2>::enable(true);
+ *
+ * Who calls what. Every verb of Opa<n> is a read-modify-write of
+ * OPA_CTLR, the one word all the amplifiers share - high_speed(on) and
+ * release() also of EXTEN_CTR2, where the die has it - with no guard of
+ * its own: a program that changes two amplifiers from two contexts (the
+ * loop and an interrupt handler) arranges the exclusion itself. Nothing
+ * here waits or masks interrupts, and nothing keeps storage. The pads
+ * are the caller's: OpaIn and OpaOut name them and claim() puts one in
+ * analog mode (a read-modify-write of its port's clock gate in
+ * RCC_PB2PCENR and of its configuration register, as every Pin verb
+ * that configures), and Opa<n> writes its four bits of OPA_CTLR and its
+ * high-speed bit of EXTEN_CTR2, nothing else. The high-speed verbs read
+ * EXTEN_CTR2 and EXTEN_CTR before they write anything (below).
+ *
+ * What it is not, which matters more than what it is. There is no
  * internal feedback network here and no gain: the CH32V00x's block
  * switches a 192 kOhm resistor in and offers gains of 4 to 32, and this
  * one offers neither, so the amplifier as WCH ships it on this family
@@ -18,47 +42,47 @@
  * is the same statement said twice: with a wire from an output pad back
  * to a negative input pad it is a follower or a divider, and with no
  * wire at all it is a comparator whose output saturates to a rail.
- * THE GAIN A PROGRAM CAN REACH WITH NO WIRE IS THE ADC's (CTLR1.PGA,
+ * The gain a program can reach with no wire is the ADC's (CTLR1.PGA,
  * ch32vx03/adc.hpp), which sits in front of the converter and not here.
  *
- * HOW MANY A PART HAS, AND WHICH, is `device::has_opa(n)` (the datasheets'
+ * How many a part has, and which, is `device::has_opa(n)` (the datasheets'
  * tables 2-1 and 2-1-1): two on every CH32V203 but the CH32V203F6, whose
  * twenty pins bond neither of OPA1's positive inputs and which its table
  * therefore counts as having one (OPA2); four on every CH32V303. The
  * register's upper half, OPA3 and OPA4, carries the note "Applied for
  * CH32F20x_D8, CH32F20x_D8C, CH32V30x_D8, CH32V30x_D8C and CH32V31x_D8C"
  * on every one of its eight fields (30.3.1) - the CH32V303's class and no
- * CH32V203's - and nothing else in the register is class-keyed. WHICH
- * PADS a package bonds is `Pin`'s own refusal, as everywhere in this
+ * CH32V203's - and nothing else in the register is class-keyed. Which
+ * pads a package bonds is `Pin`'s own refusal, as everywhere in this
  * stratum.
  *
- * THE PADS ARE THE CLASS'S (the datasheets' pin tables and the CH32V303's
+ * The pads are the class's (the datasheets' pin tables and the CH32V303's
  * table 3-4). The first output of OPA1 and OPA2 and all four inputs are the
- * same pads on both series; the SECOND output is not - PB1 and PA4 on the
+ * same pads on both series; the second output is not - PB1 and PA4 on the
  * CH32V203, PE15 and PE14 on the CH32V303, whose OPA3 and OPA4 put theirs on
  * PE7 and PE8. `opa_pad()` reads the class.
  *
- * WHERE THE OUTPUT GOES. There is no internal route: 30.2's "the output
+ * Where the output goes. There is no internal route: 30.2's "the output
  * pin can select general-purpose I/O or the ADC sampling channel" means
- * the PAD, and the converter reads the amplifier by converting that pad's
+ * the pad, and the converter reads the amplifier by converting that pad's
  * own channel - OUT0 is PA3, PA2, PA1 or PA0 (ADC channels 3, 2, 1 and 0)
  * for OPA1..OPA4 on every part. On the CH32V203 every output pad is an ADC
  * input (OUT1 is PB1, channel 9, and PA4, channel 4); on the CH32V303 the
- * OUT1 pads of port E are NOT - `OpaOut<n, out1>::adc_channel` says 0xFF
+ * OUT1 pads of port E are not - `OpaOut<n, out1>::adc_channel` says 0xFF
  * there - and the CH32V303's datasheet (table 4-46, note 3) limits their
  * swing to 0..2 V at a VDDA of 3.3 V.
  *
- * THE REGISTER LIVES IN THE EXTEN BLOCK'S WINDOW, at 0x40023804,
+ * The register lives in the EXTEN block's window, at 0x40023804,
  * between EXTEN_CTR and EXTEN_CTR2 (which is why device.hpp's ExtenRegs
  * shows a reserved word there). Like EXTEN it has no clock gate in RCC
  * and no reset line: a program writes it and it is written. EXTEN_CTR2's
- * four low bits (33.2.2) are the amplifiers' HIGH-SPEED modes, OPAn_HSMD -
+ * four low bits (33.2.2) are the amplifiers' high-speed modes, OPAn_HSMD -
  * the CH32V303's datasheet gives the pair of rating tables 4-46-1 and
  * 4-46-2 (a unity-gain bandwidth of 19 MHz and 53 MHz, a slew rate of 8 and
  * 16 V/us, 195 and 770 uA) - on the CH32V30x_D8 and only on lots whose
  * penultimate sixth digit is not zero, which a program cannot read.
  *
- * AND ON A LOT WITHOUT THE REGISTER ITS ADDRESS IS NOT EMPTY: IT MIRRORS
+ * And on a lot without the register its address is not empty: it mirrors
  * EXTEN_CTR. Measured on the CH32V303VCT6 of the reference suite: a read
  * of 0x40023808 returns EXTEN_CTR's word, and a write there lands in
  * EXTEN_CTR - its USB bits in the low nibble the high-speed bits would
@@ -286,8 +310,8 @@ struct OpaOut {
  * Opa<n>: one amplifier.
  *
  *   using Out = brio::OpaOut<2, brio::OpaPin::out0>;       // PA2, channel 2
- *   brio::OpaIn<2, brio::OpaPin::positive1>::pin::output_high();
- *   brio::OpaIn<2, brio::OpaPin::negative1>::pin::output_low();
+ *   brio::OpaIn<2, brio::OpaPin::positive1>::pin::output(true);   // PA7 high
+ *   brio::OpaIn<2, brio::OpaPin::negative1>::pin::output(false);  // PA5 low
  *   Out::claim();
  *   brio::Opa<2>::configure({.positive = brio::OpaPin::positive1,
  *                            .negative = brio::OpaPin::negative1,

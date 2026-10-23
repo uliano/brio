@@ -1,18 +1,76 @@
 # Watchdog (RP2350)
 
-Documents of record: the RP2350 datasheet (build d126e9e), 12.9 (the
+This document is for a programmer who wants an RP2350 program to reboot
+itself when it stops making progress, to reboot on purpose, or to carry
+a few words of state across a reboot, on either architecture. `Watchdog`
+drives the countdown: started with a time-out, kicked by the program
+while it is healthy, and when a kick does not come in time the chip
+reboots through the bootrom. `Scratch<n>` is four of the block's
+registers that outlive that reboot. Both are monostates: types whose
+functions are all static, never instantiated; `Scratch<n>` keeps no
+state but the hardware's, and `Watchdog` keeps one word in RAM beside
+it, the time-out `start()` was given, which every `kick()` stores back
+into the countdown. The reasons a boot can have, and the reboot verb a
+program normally calls, are [reset.md](reset.md)'s.
+
+The smallest use is the block under "How to use it" below:
+
+```cpp
+brio::Watchdog::init(clock);             // the tick, once
+brio::Watchdog::start(500'000u);         // half a second
+for (;;) { /* ... */ brio::Watchdog::kick(); }
+
+brio::Scratch<0>::write(state);          // meant to cross the reboot below
+brio::Watchdog::force_reset();           // never returns
+```
+
+Line by line: `init(clock)` starts the block's own tick generator at one
+microsecond, from the clock task's tag object ([clock.md](clock.md));
+`start(500'000u)` loads the countdown with half a second and selects
+what a time-out resets, every stage of the chip's power-on sequence but
+its two oscillators; `kick()` reloads the time-out, so a loop that kicks
+more often than every half second never reboots; `Scratch<0>::write()`
+stores a word in the first scratch register; and `force_reset()` reboots
+at once through the same path, and does not return.
+
+What decides correctness even there. `init()` must have run before
+`start()`: the countdown decrements on the tick `init()` starts, and
+with that generator stopped the countdown stands still (measured,
+below): a watchdog started without it never fires, and nothing refuses
+it. `init()` answers false when the generator did not start, which the
+excerpt discards; a clk_ref that is not a whole number of megahertz does
+not compile. `start()` sets the debug-pause bits by default
+(`pause_on_debug`), which by the datasheet's description (12.9) hold the
+count while a debugger has a core halted, so that a breakpoint does not
+reboot the board under the probe - a consequence no letter of this
+target has measured ("Not covered yet"). And only SCRATCH0..3 are the
+program's: the bootrom reads the upper four at every boot, and
+`Scratch<4>` does not compile.
+
+The rest of this page, in order: the documents of record; what the
+silicon does (the countdown and its rate, the tick, the scratch
+registers, the three tiers a time-out can reset, erratum RP2350-E19);
+the types and verbs; how to use it; the bench findings; and what is not
+covered.
+
+## Documents of record
+
+The RP2350 datasheet (build d126e9e), 12.9 (the
 watchdog: the countdown, what it resets, the scratch registers), 8.5 (the
 tick generator that feeds it), 7.4 (the power-on state machine and its
 WDSEL), 5.2.4 (the bootrom's use of the upper scratch registers);
 Appendix E, RP2350-E19. The driver: `brio/rp2350/watchdog.hpp` over
 `clock.hpp` and `resets.hpp`. The reference suite: `test_rp2350_timer`,
-letters a, j, m and i.
+letters a, j, m and i (a letter is one command key of the suite's
+console and the group of verdicts it runs; `z` is the key that runs
+every letter but `i`, which reboots the board once per leg and runs by
+name).
 
 ## What the silicon does
 
-TWO THINGS UNDER ONE NAME, where the RP2040's was three.
+Two things under one name, where the RP2040's was three.
 
-THE COUNTDOWN is a 24-bit counter loaded through LOAD and decremented on
+The countdown is a 24-bit counter loaded through LOAD and decremented on
 its tick, resetting whatever the WDSEL registers select when it reaches
 zero, or at once on CTRL.TRIGGER. CTRL.TIME is the live value; the three
 pause bits hold the count while a debugger has a core halted or is
@@ -22,34 +80,34 @@ chip's**: there the counter decremented twice per tick, so every LOAD was
 doubled and the reach halved; here LOAD is microseconds as written and
 the register's 0xffffff is about 16.8 s, which is what 12.9's LOAD
 description states. The suite measures the decrement rate against the
-system timer rather than trusting either sentence, and MEASURES ONE
-DECREMENT PER MICROSECOND (below).
+system timer rather than trusting either sentence, and measures one
+decrement per microsecond (below).
 
-THE TICK IS NOT THIS BLOCK'S ANY MORE (12.9.2). Every consumer of a
+The tick is not this block's any more (12.9.2). Every consumer of a
 timebase has its own generator in the TICKS block of 8.5, and this one's
 is one of the six. So the watchdog and the system timers are independent:
 a program can run either without the other, and stopping this generator
 stands the countdown still.
 
-EIGHT SCRATCH REGISTERS survive a system or a subsystem reset. The
+Eight scratch registers survive a system or a subsystem reset. The
 bootrom reads SCRATCH4..7 at every boot for a magic word, an entry point
 and a stack pointer that redirect the boot into user code, and takes
 SCRATCH2/3 as that redirection's two parameters when it fires (5.2.4) -
 so brio hands out SCRATCH0..3 and never writes the upper four, which is
 what leaves 2 and 3 "free for arbitrary user values" in 5.2.4's own
-words. THE DATASHEET IS NOT OF ONE MIND about what a watchdog reset does
+words. The datasheet is not of one mind about what a watchdog reset does
 to them: 7.2's note says they are kept by a system or a subsystem reset
 and lost to a chip-level one, while 7.3.1's table of chip-level causes
 lists the watchdog's own power-on-state-machine reset among its rows and
 says every row resets the watchdog peripheral "including watchdog scratch
-registers SCRATCH0 -> SCRATCH7". The MECHANISM argues for 7.2: the
+registers SCRATCH0 -> SCRATCH7". The mechanism argues for 7.2: the
 bootrom's own watchdog boot vector exists to divert a reboot into user
 code and reads SCRATCH4..7 to do it, which only works if a watchdog
 reboot leaves them standing. The suite settles it rather than reasons
 about it: it carries its token twice, in the scratch registers and in a
 `.noinit` record, and reports which crossed.
 
-WHAT A TIME-OUT RESETS is three registers in three tiers (7.1), and this
+What a time-out resets is three registers in three tiers (7.1), and this
 driver writes one of them:
 
 | Register | Tier | Who writes it |
@@ -59,9 +117,9 @@ driver writes one of them:
 | `POWMAN_WDSEL` | chip: the power manager, the switched core domain | nobody - password-protected, the power chapter's |
 
 The third is new on this chip and the difference matters to a program and
-not only to a driver: a CHIP-level watchdog reset also clears the scratch
+not only to a driver: a chip-level watchdog reset also clears the scratch
 registers, where the system-level one this driver takes is documented not
-to - and, MEASURED, does not even reach the power manager's record of
+to - and, measured, does not even reach the power manager's record of
 chip-level resets, because POWMAN_WDSEL is what would carry it there
 ([reset.md](reset.md)).
 
@@ -169,7 +227,7 @@ Implemented but not bench-verified, each with what would measure it:
   OFF on purpose, so that it is the silicon's and not the probe's. What
   the bits do while a debugger is halted on a core or driving the bus
   fabric would take a suite that runs under a probe and reports to it,
-  which no letter of this target does yet.
+  which no letter of this target does.
 - The countdown against a clk_ref that is not 12 MHz: the tick generator
   is set from the clock task's own rate and only the board's crystal has
   been on the wire.

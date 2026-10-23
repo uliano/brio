@@ -1,24 +1,41 @@
 /*
  * watchdog.hpp
  *
- * The watchdog block (datasheet 4.7), which on this chip is three things
- * under one name:
+ * The watchdog block (datasheet 4.7): for a program, a countdown that
+ * reboots the chip when it is not kicked in time, four words that
+ * survive a reboot, and the 1 us tick the system timer counts. The
+ * smallest use (docs/rp2040/watchdog.md):
  *
- *  - THE TICK GENERATOR (4.7.2): clk_ref divided by TICK.CYCLES into the
- *    nominal 1 us tick that the watchdog counts - AND THAT THE SYSTEM
- *    TIMER COUNTS (4.6.4: "the watchdog tick must be running for the
+ *     brio::Watchdog::start(500'000u);      // half a second, the tick running
+ *     for (;;) { ...; brio::Watchdog::kick(); }
+ *
+ *     brio::Scratch<0>::write(state);       // survives a watchdog or a core reset
+ *
+ * Who calls what: the tick must be running before start() - Timer::init
+ * (rp2040/timer.hpp) starts it, or WatchdogTick::start. start() and
+ * stop() are a few writes through the atomic aliases and plain stores;
+ * kick() is one store of the LOAD value start() kept, so a kick before
+ * the first start() loads zero. Nothing here waits or masks interrupts;
+ * force_reset() never returns. There is one block for the chip, shared
+ * by both cores.
+ *
+ * On this chip the block is three things under one name:
+ *
+ *  - The tick generator (4.7.2): clk_ref divided by TICK.CYCLES into the
+ *    nominal 1 us tick that the watchdog counts - and that the system
+ *    timer counts (4.6.4: "the watchdog tick must be running for the
  *    timer to start counting"). Nothing starts it at boot but software,
  *    so `WatchdogTick::start` is the first act of rp2040/timer.hpp's
  *    init and the reason this file sits below it;
- *  - THE COUNTDOWN (4.7.3): a 24-bit counter loaded through LOAD,
+ *  - The countdown (4.7.3): a 24-bit counter loaded through LOAD,
  *    decremented on the tick, resetting through the power-on state
  *    machine and the reset controller (whatever their WDSEL registers
  *    select) when it reaches zero, or at once on CTRL.TRIGGER. Erratum
- *    RP2040-E1: it decrements TWICE per tick, so every value written to
+ *    RP2040-E1: it decrements twice per tick, so every value written to
  *    LOAD is doubled here and the chapter's 8.3 s maximum is the truth;
- *  - EIGHT SCRATCH REGISTERS (4.7.4) that survive every reset but a RUN
+ *  - Eight scratch registers (4.7.4) that survive every reset but a RUN
  *    pin or a power cycle: this chip's second reset-surviving store
- *    beside the .noinit SRAM. THE BOOTROM READS SCRATCH4..7 at every
+ *    beside the .noinit SRAM. The bootrom reads SCRATCH4..7 at every
  *    boot for a magic word that redirects the boot into user code
  *    (2.8.1.1), so brio hands out SCRATCH0..3 alone and never writes
  *    the upper four.
@@ -108,7 +125,7 @@ struct Watchdog {
     /// Microseconds left before the reset (CTRL.TIME, halved for E1).
     static uint32_t remaining_us() { return (WATCHDOG->CTRL & WATCHDOG_CTRL_TIME_BITS) / 2u; }
 
-    /// Reset NOW through the watchdog's path (CTRL.TRIGGER), REASON.FORCE
+    /// Reset now through the watchdog's path (CTRL.TRIGGER), REASON.FORCE
     /// at the next boot. The power-on state machine's selection is
     /// written here as start() writes it - everything but the two
     /// oscillators - so the trigger reboots the whole chip whether or
@@ -121,7 +138,11 @@ struct Watchdog {
         }
     }
 
-    /// WATCHDOG.REASON: WatchdogReason bits, zero after any other reset.
+    /// WATCHDOG.REASON: WatchdogReason bits. It names the last watchdog
+    /// event and keeps it through every core reset and reflash over the
+    /// debug port until a chip-level reset (measured,
+    /// docs/rp2040/watchdog.md); zero when no watchdog event has
+    /// happened since one.
     static uint32_t reason() { return WATCHDOG->REASON & WATCHDOG_REASON_BITS; }
 
 private:

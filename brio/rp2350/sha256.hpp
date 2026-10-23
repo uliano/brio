@@ -1,44 +1,72 @@
 /*
  * sha256.hpp
  *
- * The SHA-256 accelerator (datasheet 12.13): `Sha256`, a MONOSTATE - one
- * instance, ten registers, no configuration worth the name. A block the
- * RP2040 never had.
+ * The SHA-256 accelerator (datasheet 12.13) for a program that wants a
+ * digest computed by the chip: `Sha256`, a monostate (a type with no
+ * objects, its functions and state all static, because the block exists
+ * once) - one instance, ten registers, no configuration worth the name.
+ * A block the RP2040 never had. The smallest use:
  *
- * WHAT IT IS. The compression function of FIPS 180-4 in hardware and
- * NOTHING ELSE. There is no message length register, no padding, no
+ *     brio::Sha256::init();
+ *     if (auto d = brio::Sha256::hash(message)) { use(*d); }
+ *
+ * hash() is the whole function, padding included, and answers nothing
+ * (with last_error() saying why) when the core stopped answering.
+ *
+ * Who calls what. init() and release() are setup verbs, main context;
+ * init() cycles the block through its subsystem reset and answers false
+ * when it did not come up. A block never initialized answers hash() with
+ * not_ready while it is still held in reset, as at power-up; one a
+ * previous image released and left running answers it as that image left
+ * it, which is why init() cycles the reset rather than trusting it.
+ * hash(), digest(), write_word() and write_block() poll the block's
+ * status, each poll bounded by `default_spins` status reads, and mask
+ * nothing; they belong to main context - setup, or an active object's
+ * handler, an active object being a component of a brio program with its
+ * own event queue, served one event at a time by the kernel - and not to
+ * an interrupt handler, because the block holds one message at a time
+ * (below). Storage: hash() and write_block() read the caller's bytes
+ * during the call and keep none, so the buffer is free again when they
+ * return. The status reads are single loads of CSR; every verb that
+ * writes CSR (start(), byte_swap(), dma_size(), the error clear) reads it
+ * first and then stores it once, the configuration fields carried over,
+ * with no guard of its own - one context at a time.
+ *
+ * What it is. The compression function of FIPS 180-4 in hardware and
+ * nothing else. There is no message length register, no padding, no
  * multi-context state to save: a write to CSR.START loads the eight
  * initial words, every sixteen words written to WDATA are digested as
  * one 512-bit block, and SUM0..SUM7 hold the state after the last block
  * that completed. So the block computes exactly one function, and what
- * that function IS lives in util/sha256.hpp - the constexpr twin this
+ * that function is lives in util/sha256.hpp - the constexpr twin (the
+ * same function in C++ the compiler can evaluate at compile time) this
  * file's bench suite judges the silicon against, and the half of the job
  * the hardware does not do.
  *
- * THE PADDING IS SOFTWARE'S (12.13.1). The standard's trailing one bit,
+ * The padding is software's (12.13.1). The standard's trailing one bit,
  * the zeros and the 64-bit length are bytes like any others here, and
  * `hash()` builds them with util/sha256.hpp's `sha256_tail()` - the same
  * arithmetic the software path uses, so the two cannot drift apart.
  *
- * BSWAP, AND WHY EVERY WORD THIS DRIVER WRITES IS LOADED LITTLE-ENDIAN
+ * BSWAP, and why every word this driver writes is loaded little-endian
  * (12.13.3). The bus interface assembles byte and halfword writes into a
- * message word in LITTLE-endian order, so that the same buffer DMAed at
+ * message word in little-endian order, so that the same buffer DMAed at
  * any transfer width gives the same answer on a little-endian machine;
- * but SHA-256 wants the first byte of the message in the MOST
+ * but SHA-256 wants the first byte of the message in the most
  * significant lane. CSR.BSWAP, set at reset, swaps the assembled word on
  * its way into the core and reconciles the two. This driver leaves it
  * set and loads each word from the message little-endian, which makes a
  * word write and four byte writes the same operation - and makes a
  * driver that never has to think about the machine's own endianness.
  *
- * THE HANDSHAKE, AND THE FLAG THAT CATCHES A MISSED ONE. After sixteen
+ * The handshake, and the flag that catches a missed one. After sixteen
  * words the core is busy for 57 cycles: CSR.WDATA_RDY goes low and a
- * write during that window is DROPPED, with CSR.ERR_WDATA_NOT_RDY left
+ * write during that window is dropped, with CSR.ERR_WDATA_NOT_RDY left
  * standing to say so. Every write here polls first, and the error flag
  * is a first-class verb because a suite that does not read it cannot
  * tell a lost word from a wrong answer.
  *
- * THROUGHPUT (12.13.2). Sixty-four cycles to write a block over the APB
+ * Throughput (12.13.2). Sixty-four cycles to write a block over the APB
  * (four cycles a word) plus 57 to digest it: one block per 121 system
  * clock cycles at best, 0.53 bytes a cycle, 79.3 MB/s at 150 MHz - and
  * that is the DMA's figure. A polled loop like this one pays a status
@@ -46,26 +74,26 @@
  * actually gets rather than repeating the ceiling.
  *
  * DMA (12.13.4). The block raises `Dreq::sha256`, and the request is for
- * a WHOLE BLOCK at a time - there is no FIFO, the data goes straight
+ * a whole block at a time - there is no FIFO, the data goes straight
  * into the message schedule - so CSR.DMA_SIZE must match the channel's
  * transfer width and the channel's count must be a multiple of sixteen
  * words. `dma_size()` is here and no engine is: a channel that feeds
  * this block is the caller's, and the accounting that would make it a
  * BlockPlayer belongs to whoever needs it.
  *
- * ONE SUM AT A TIME. There is one block and no context save, so two
+ * One sum at a time. There is one block and no context save, so two
  * owners cannot interleave messages through it (5.4.4 says the same of
  * the bootrom's own use, and gives the boot locks as the mechanism for
  * agreeing about it). This driver states the rule and enforces nothing:
  * a lock is a policy, and brio's programs have one owner.
  *
- * AND WHY NO ATOMIC ALIAS TOUCHES CSR. One word holds four kinds of bit:
- * two ordinary read-write fields, a SELF-CLEARING one (START), a
- * WRITE-ONE-TO-CLEAR one (ERR_WDATA_NOT_RDY) and two read-only statuses.
+ * And why no atomic alias touches CSR. One word holds four kinds of bit:
+ * two ordinary read-write fields, a self-clearing one (START), a
+ * write-one-to-clear one (ERR_WDATA_NOT_RDY) and two read-only statuses.
  * The set alias of 2.1.3 ORs a bit into the register's contents, which
- * would SET a write-one-to-clear flag rather than clear it; and a plain
+ * would set a write-one-to-clear flag rather than clear it; and a plain
  * read-modify-write would carry a standing error flag back as a one and
- * clear it in silence. So every store here is the two CONFIGURATION
+ * clear it in silence. So every store here is the two configuration
  * fields as they read, plus the one bit being asked for - the error flag
  * is cleared when a caller asks and never as a side effect. One owner
  * makes the read-modify-write safe; the file says so above.
@@ -137,7 +165,9 @@ struct Sha256 {
      * Release the block from reset and put the state machine at the
      * start of a message: BSWAP set (so a word loaded little-endian from
      * a byte buffer is the standard's big-endian message word),
-     * DMA_SIZE at words, the write-error flag cleared.
+     * DMA_SIZE at words, the write-error flag cleared. A setup verb,
+     * main context; true when the block came out of reset and reads
+     * ready for a word, false otherwise.
      *
      * `Resets::cycle()` and not `release()`: on this chip a previous
      * life is the ordinary case - a debugger's reset request resets the
@@ -168,7 +198,7 @@ struct Sha256 {
 
     /// CSR.START: load the eight initial words and clear the internal
     /// counters. Forces WDATA_RDY and SUM_VLD high at once, so a digest
-    /// taken before any data is written is the INITIAL STATE and not a
+    /// taken before any data is written is the initial state and not a
     /// message's - which is why `hash()` always writes at least the
     /// padding block.
     static void start() { store(SHA256_CSR_START_BITS); }
@@ -289,6 +319,11 @@ struct Sha256 {
      * Nothing when the core stopped answering; `last_error()` says which
      * way. An empty message is legal and gives the standard's own
      * answer, because the padding block is still a block.
+     *
+     * Main context. It polls the handshake before every word, each poll
+     * bounded by `spins` status reads, masks nothing, and reads
+     * `message` during the call only - the caller's buffer is free again
+     * when it returns.
      */
     static std::optional<Sha256Digest> hash(std::span<const uint8_t> message,
                                             uint32_t spins = default_spins) {

@@ -1,6 +1,63 @@
 # The bootrom's function table (RP2350)
 
-Documents of record: the RP2350 datasheet (build d126e9e), 5.4 (the
+This document is for a programmer who wants something the RP2350's mask
+ROM offers a running program: the 128-bit random number it made at
+boot (a cheap seed), the chip's identity and boot state as the ROM
+reports them, or one of its public functions that brio does not wrap.
+`Bootrom` is the driver, a monostate (a type with no objects, all of
+whose functions are static, because the ROM exists once): it finds the
+ROM's entry points through the ROM's own table, the right way for the
+architecture the image runs on, and wraps the two read-only calls this
+stratum needs. Both architectures run it from one source.
+
+The smallest use, an excerpt of the block under "How to use it" below:
+
+```cpp
+if (brio::Bootrom::present()) {
+    if (auto info = brio::Bootrom::sys_info()) {
+        if (info->has(brio::SysInfoFlag::boot_random)) {
+            seed(info->boot_random);      // 128 bits the ROM made at boot
+        }
+        const uint64_t id = info->device_id;
+    }
+}
+```
+
+Line by line: `present()` checks the three magic bytes at 0x10 that make
+the ROM's other fixed words trustworthy; `sys_info()` looks up the ROM's
+`get_sys_info`, calls it for every item this driver can decode and sorts
+the answer into a `BootromSysInfo`, or answers nothing when the call
+failed; `has(flag)` asks whether the ROM actually served that item,
+since what a caller asks for and what the ROM supports are not the same
+set; `boot_random` is the four words of the per-boot random number and
+`device_id` the 64-bit identity, the ROM's two answer words with the
+first as the low half. It covers the same OTP rows as [otp.md](otp.md)'s
+`chip_id()`, but not in the same order: `chip_id()` assembles CHIPID0..3
+least significant row first, and `device_id` holds those rows with its
+two 32-bit halves the other way round (otp.md's "Bench findings").
+
+What decides correctness even there. The served word comes first: the
+answer's words carry no tags and follow in flag order, so a field is
+meaningful only where `has()` says so, and a call that serves less than
+was asked for is not a failure. The calls run ROM code on the caller's
+stack and in its context, with nothing here masking interrupts: they
+belong to main context and never to an interrupt handler, and on the
+RISC-V half 5.4.8 warns that some ROM functions want a good deal of
+stack. Every lookup answers nullptr, every raw wrapper
+`BootromError::not_found` and `sys_info()` and `git_revision()` nothing
+(`std::nullopt`), rather than jumping to address zero when the table is
+not where it should be.
+
+The rest of this page, in order: the documents of record; what the
+silicon does (the fixed words and the two sets of them, the two
+lookups, the security state, the codes, `get_sys_info`'s answer,
+`get_partition_table_info`, the boot locks); what is deliberately not
+wrapped; the types and verbs; how to use it; the bench findings; and
+what is not covered.
+
+## Documents of record
+
+The RP2350 datasheet (build d126e9e), 5.4 (the
 bootrom APIs: 5.4.1 locating them, with table 453 for Arm and table 454
 for RISC-V, 5.4.2 which architectures and security states each entry
 point serves, 5.4.3 the return codes, 5.4.4 the boot locks, 5.4.6 and
@@ -13,7 +70,8 @@ flags and the two-character codes - are published in the pico-sdk's
 description this stratum reads its register names from. The driver:
 `brio/rp2350/bootrom.hpp`. The reference suite: `test_rp2350_blocks`,
 letters a and k, which runs on both of this chip's architectures from one
-source.
+source (a letter is one command key of the suite's console and the group
+of verdicts it runs; `z` is the key that runs them all).
 
 ## What the silicon does
 
@@ -22,7 +80,7 @@ there. Beside the boot code it carries public entry points, and 5.4.1
 says plainly why they are found through a table rather than called at a
 fixed address: their locations "may change with each bootrom release".
 
-**What is fixed is a handful of well-known words**, and there are TWO
+**What is fixed is a handful of well-known words**, and there are two
 sets of them:
 
 | Address | Contents | For |
@@ -33,13 +91,13 @@ sets of them:
 | `0x7df6` / `0x7df8` / `0x7dfa` | the same three, near the top of the ROM | RISC-V |
 | `0x7dfc` | the ROM's RISC-V entry point | RISC-V |
 
-Each pointer cell is a HALFWORD, the ROM being small enough that every
+Each pointer cell is a halfword, the ROM being small enough that every
 address in it fits in sixteen bits.
 
 **The two architectures are two lookups, not one.** On Arm the table
-holds a POINTER to the function, so the helper that returns the stored
-VALUE is the right one; on RISC-V the table entry IS a jump instruction,
-so the helper that returns the ENTRY'S OWN ADDRESS is. And the flag
+holds a pointer to the function, so the helper that returns the stored
+value is the right one; on RISC-V the table entry is a jump instruction,
+so the helper that returns the entry's own address is. And the flag
 differs: a Secure Arm entry point, or the RISC-V one. This driver asks
 `core_kind` - a constant, not the preprocessor - and does the right one,
 which is the only place in the stratum outside `core.hpp` where the
@@ -53,7 +111,7 @@ Secure code before it exists, and all of them are disabled initially.
 **A function is asked for by a two-character code** ('G','S' for
 `get_sys_info`), packed as `c1 | c2 << 8`.
 
-**`get_sys_info` answers with a buffer whose FIRST WORD is the set of
+**`get_sys_info` answers with a buffer whose first word is the set of
 flags the ROM actually served** (5.4.8.17), and the words after it follow
 in flag order with no tags - so a caller must check that word before
 reading any of the rest. What it can bring back: the package select bit
@@ -66,7 +124,7 @@ on this silicon.
 
 **`get_partition_table_info`** (5.4.8.16) reports
 `BOOTROM_ERROR_PRECONDITION_NOT_MET` when no partition table has been
-loaded - which, measured, is NOT what an image that simply carries no
+loaded - which, measured, is not what an image that simply carries no
 table gets: a flash boot leaves the ROM's resident view loaded whether
 there is anything in it or not, so the call is served and answers with a
 table that is not present. The precondition code belongs to the boot

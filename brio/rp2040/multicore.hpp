@@ -5,18 +5,56 @@
  * SIO's CPUID and inter-core FIFOs, 2.3.2 the two NVICs, 2.8.2 the
  * bootrom's launch protocol, 2.13 the power-on state machine that can
  * hold one core in reset): the doorbell util/inbox.hpp rings, and the
- * launch of core 1.
+ * launch of core 1. A program with a kernel on each core starts core 1
+ * from core 0 and gives each core its doorbell's vector
+ * (docs/rp2040/multicore.md, where the whole program is):
  *
- * THE MODEL IS TWO KERNELS, NOT ONE ON TWO CORES (util/inbox.hpp's
- * header, design/kernel.md): every AO lives on one core, in the pack of
- * that core's kernel, on that core's platform type (Rp2040Platform<0>
- * or <1>); events cross through inboxes; a peripheral and its
- * interrupt line belong to the core whose kernel hosts the driver -
- * every line reaches BOTH NVICs (2.3.2), so the owning core is the one
- * that enables it, and a line enabled on both runs its handler twice.
+ *     extern "C" void isr_sio_proc0() { brio::Inboxes<Origin>::isr(); }
+ *     extern "C" void isr_sio_proc1() { brio::Inboxes<Echo>::isr(); }
  *
- * THE DOORBELL is the SIO's pair of inter-core FIFOs: eight words deep
- * each, one per direction, FIFO_WR feeding the OTHER core's FIFO_RD, and
+ *     [[noreturn]] void core1_main() {
+ *         brio::CoreTicker<1>::init(clock);
+ *         brio::Inboxes<Echo>::enable();
+ *         brio::enable_interrupts();
+ *         brio::Tenuto<P1, Echo>::run();
+ *     }
+ *
+ *     int main() {
+ *         SysClock::init();                         // core 0 owns the clock tree
+ *         brio::Ticker::init(clock);
+ *         const bool up = brio::Core1::launch(&core1_main);
+ *         brio::Inboxes<Origin>::enable();
+ *         brio::enable_interrupts();
+ *         brio::Tenuto<P0, Origin>::run();
+ *     }
+ *
+ * Who calls what, and on which core: `Core1::launch()`, `protocol()` and
+ * `reset()` on core 0 (the program calls launch() from main()), with core
+ * 0's doorbell interrupt disabled - nothing here disables it: the caller
+ * launches before enabling it, or disables it around a relaunch; every
+ * wait in them is a bounded poll of the FIFO (1 000 000 polls a word, at
+ * most 63 restarts of the sequence) or of FRCE_OFF (100 000), and false
+ * means one ran out - or, for reset(), that the word core 1 pushed on its
+ * way into the bootrom was not the 0 it should be.
+ * `SioDoorbell<core>::ring()` on the other core (util/inbox.hpp's send
+ * calls it): one status read and at most one write, no wait. `pop_all()`
+ * on `core`, inside util/inbox.hpp's doorbell handler body; `enable()`
+ * and `disable()` on `core` too, since they act on the calling core's
+ * NVIC. Nothing here masks interrupts.
+ *
+ * The model is two kernels, not one on two cores (util/inbox.hpp's
+ * header, design/kernel.md section 12, "Two cores: two kernels and a
+ * bridge"): every active object (a component with its own event queue,
+ * served one event at a time by its kernel) lives on one core, in the
+ * list of that core's kernel, on that core's platform type
+ * (Rp2040Platform<0> or <1>); events cross through inboxes; a
+ * peripheral and its interrupt line belong to the core whose kernel
+ * hosts the driver - every line reaches both NVICs (2.3.2), so the
+ * owning core is the one that enables it, and a line enabled on both
+ * runs its handler twice.
+ *
+ * The doorbell is the SIO's pair of inter-core FIFOs: eight words deep
+ * each, one per direction, FIFO_WR feeding the other core's FIFO_RD, and
  * one interrupt line per core - SIO_IRQ_PROC0 / SIO_IRQ_PROC1 - raised
  * while that core's inbound FIFO holds a word. `SioDoorbell<core>::ring()`
  * is called on the other core: one word in if there is room, nothing
@@ -25,7 +63,7 @@
  * ends fence with the inbox's own barriers. The value of the word is
  * nothing: the bell is the interrupt.
  *
- * THE LAUNCH is the bootrom's protocol (2.8.2, the SDK's
+ * The launch is the bootrom's protocol (2.8.2, the SDK's
  * multicore_launch_core1_raw): after a reset core 1 sits in the bootrom
  * draining its FIFO and echoing what it reads, and core 0 sends the
  * sequence 0, 0, 1, VTOR, SP, PC, each word answered by its echo, the
@@ -34,7 +72,7 @@
  * is echoed core 1 loads the table, the stack and jumps: `entry` runs
  * on core 1 with interrupts masked, on the stack the linker script
  * reserves in the unstriped bank SRAM4 (`__stack_one_top`), the vector
- * table shared with core 0. THE LAUNCH RESETS CORE 1 FIRST: only a core
+ * table shared with core 0. The launch resets core 1 first: only a core
  * 1 in the bootrom's wait loop answers the protocol, and core 1 is not
  * there whenever core 0 alone was reset - SYSRESETREQ resets one core
  * (2.4.2, rp2040/reset.hpp), which is what a probe's `reset run` and a
@@ -50,10 +88,11 @@
  * relaunch), and leaves both FIFOs empty.
  *
  * What core 1's entry does is the program's: its own ticker on its own
- * SysTick (CoreTicker<1>), the lines its drivers own enabled in ITS
+ * SysTick (CoreTicker<1>), the lines its drivers own enabled in its
  * NVIC, interrupts on, its kernel's run(). What it must not do: touch
- * the clock tree (core 0 owns it), or post to an AO of core 0 (the
- * queue refuses and counts).
+ * the clock tree (core 0 owns it), or post to an active object of core
+ * 0 (the queue refuses and counts; a send through the inbox is the way
+ * across).
  */
 
 #pragma once
@@ -77,7 +116,7 @@ struct SioDoorbell {
 
     static constexpr IRQn_Type irq() { return core == 0 ? SIO_IRQ_PROC0_IRQn : SIO_IRQ_PROC1_IRQn; }
 
-    /// From the OTHER core: a bell in if there is room. A full FIFO
+    /// From the other core: a bell in if there is room. A full FIFO
     /// holds eight bells already, and one is enough.
     static void ring() {
         if ((SIO->FIFO_ST & SIO_FIFO_ST_RDY_BITS) != 0u) {
@@ -97,7 +136,7 @@ struct SioDoorbell {
     /// Whether a bell is pending for this core.
     static bool pending() { return (SIO->FIFO_ST & SIO_FIFO_ST_VLD_BITS) != 0u; }
 
-    /// The line in THIS core's NVIC - so it is called on `core`.
+    /// The line in this core's NVIC - so it is called on `core`.
     static void enable() { Nvic::enable(irq()); }
     static void disable() { Nvic::disable(irq()); }
 };

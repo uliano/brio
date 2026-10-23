@@ -1,6 +1,57 @@
 # Flash (RP2040)
 
-Documents of record: the RP2040 datasheet (build 3184e62), 2.6.3 (the
+This document is for a programmer who wants an RP2040 program to keep
+something across a power cycle - a calibration, a counter, a log - in
+the flash chip the program itself runs from. The RP2040 has no flash
+of its own: it executes in place out of an external quad-SPI chip, and
+erasing or programming that chip means stopping execution from it for
+the length of the operation. `Flash` is the driver that does it safely
+through the bootrom's own functions, and `Xip` the cache in front of
+the chip. Most programs do not call `Flash` directly: the two storage
+services of `util/` - `NvJournal`, a store of small typed values, and
+`NvHeap`, a store of sealed blocks - run over the two FlashMedia this
+stratum provides (a FlashMedia is the interface those services ask of
+a flash: erase a unit, write a cell, read), `QspiFlashJournalZone` and
+`QspiFlash`, both inside a fixed 64 KB at the top of the chip that the
+linker never fills with code.
+
+The smallest use, from "How to use it" below:
+
+```cpp
+brio::NvJournal<brio::QspiFlashJournalZone, 6, 32, 2> journal;   // two sectors a half, 32 cells
+journal.mount();
+journal.save<Calibration>(1, cal);                                // one page program, the window under 2 ms
+const auto back = journal.load<Calibration>(1);
+```
+
+Line by line: `journal` is a journal over the attic, the top 16 KB of
+the chip (its template arguments, `util/nv_journal.hpp`'s, size it: up
+to six values of up to 32 bytes each, two sectors in each of its two
+halves); `mount()` finds the values a previous life saved; `save()`
+writes value 1, here a `Calibration` struct, as one 256-byte page
+program; `load()` reads it back, nothing when it was never saved or
+has another width.
+
+What decides correctness even there. Every erase and program is a window
+during which there is no flash to execute from: the driver masks the
+calling core's interrupts, runs its own code from SRAM and re-enters the
+fast read mode at the end, but it cannot stop what it does not own - the
+other core must not be executing from flash and no DMA channel may read
+the flash meanwhile, which nothing here checks ("How to use it" says
+what the application keeps clear). A window lasts the chip's own time -
+a page program 0.6 ms on the Pico's Winbond and 1.3 ms on the WeAct
+board's Zetta, a sector erase 29 ms and 5.2 ms - and every interrupt
+waits for its end: the ticker loses the ticks of a long window but one,
+and a byte transport holds its bytes in its FIFO - a UART's 32 entries
+are 2.78 ms at 115200 baud (8N1), so a 29 ms erase overruns it unless a
+receive engine drains the FIFO into its run meanwhile, the DMA not being
+masked by the window. The storage partition is drawn for the 2 MB chips
+on the bench: the linker script and the partition move together, and a
+board with another flash size wants its own.
+
+## Documents of record
+
+The RP2040 datasheet (build 3184e62), 2.6.3 (the
 XIP cache, its four aliases and its registers), 2.8.1 (the flash
 second stage and its checksum), 2.8.3 (the bootrom's table and the
 flash access functions, 2.8.3.1.3, with the sequence a caller owes
@@ -13,7 +64,9 @@ the raw command, `Xip` the cache) and `brio/rp2040/nvm_flash.hpp`
 (`QspiFlashPartition` and the two FlashMedia `QspiFlash` and
 `QspiFlashJournalZone`), with the linker script `rp2040/ld/rp2040_2m.ld`
 (the storage floor and the RAM code section). The reference suite:
-`test_rp2040_flash`, wireless.
+`test_rp2040_flash`, wireless (a suite's letter is one command key of
+its console and the group of verdicts it runs; the all-key runs the
+set, and a letter outside it runs only when asked by name).
 
 ## What the silicon does
 
@@ -28,14 +81,14 @@ carries a table of functions found by two-letter codes - connect the
 pads, leave execute-in-place, erase a range, program a range, flush
 the cache, and a slow command-mode re-entry - and the sequence a
 caller owes them (connect, exit, the operation, flush, re-enter).
-WHILE THE OPERATION RUNS THERE IS NO FLASH: the SSI is out of its
+While the operation runs there is no flash: the SSI is out of its
 execute-in-place mode, so the caller, everything it calls and every
 handler that could run must be somewhere else, in SRAM or in ROM. The
 chip erases by 4 KB sectors (20h) and larger blocks (D8h, 64 KB),
 programs by 256-byte pages, and a program only clears bits.
 
 Three facts measured that the chapter does not state: the second
-stage RETURNS to a caller whose link register is not zero (it vectors
+stage returns to a caller whose link register is not zero (it vectors
 into flash only when it is), so a copy of it in SRAM is the way back
 into the fast quad-I/O mode the board booted in, whatever chip it
 carries; a page programmed a second time between erases holds the AND

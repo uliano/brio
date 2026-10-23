@@ -1,6 +1,68 @@
 # Reset (RP2350)
 
-Documents of record: the RP2350 datasheet (build d126e9e), chapter 7
+This document is for a programmer who needs to know why an RP2350 started,
+to end a program with a reboot, or to have a panic or a fault leave a
+record the next boot can read, on either architecture. `Reset` reads the
+causes the chip records and offers the two reboots; `ResetReporter`
+makes the kernel's panic end in a reboot; `fault_reset<P>()` is the body
+a program binds to the crt's fault entry. A panic in brio writes a
+breadcrumb, a small record (`PanicRecord`: a validity mark, a code and a
+context byte) in SRAM that the startup code neither loads nor zeroes, so
+it survives the reboot and `take_panic_record<P>()` hands it to the
+program, once, at the next boot ([design/kernel.md, "Failures: overflow and panic"](../design/kernel.md#10-failures-overflow-and-panic-kernelpanichpp)).
+
+The smallest use is the block under "How to use it" below:
+
+```cpp
+const uint32_t causes = brio::Reset::causes();       // once, at boot
+const auto record = brio::take_panic_record<P>();
+
+extern "C" void isr_hardfault()       { brio::fault_reset<P>(); }   // Arm
+extern "C" void isr_riscv_exception() { brio::fault_reset<P>(); }   // RISC-V
+brio::panic<P, brio::ResetReporter>(brio::PanicCode::assert_failed, 7);
+
+brio::Reset::software();                             // the reboot, both halves
+```
+
+Line by line: `Reset::causes()` reads the chip-level record and the
+watchdog's reason as one word of `ResetCause` bits; `take_panic_record<P>()`
+returns the breadcrumb the previous boot left, if a valid one stands, and
+clears it (`P` is the program's platform, [platform.md](platform.md));
+the two `extern "C"` functions bind `fault_reset<P>()` to the crt's fault
+entry under each architecture's name, and each image links the one its
+own crt declares; `panic<P, ResetReporter>(code, context)` writes the
+breadcrumb (here the code `assert_failed` and the context 7), executes
+the platform's breakpoint and ends in a reboot instead of a halt -
+through `ResetReporter` where the breakpoint returns, through the fault
+entry and `fault_reset()`, which keeps a valid breadcrumb, where it
+faults (`kernel/panic.hpp`); and `Reset::software()` is the reboot both
+architectures have, which does not return.
+
+What decides correctness even there. The causes word is not the answer
+to "what caused this boot": its chip-level half names the last
+chip-level reset, and a reboot is a system-level one that leaves it
+alone (measured, below), so a program answers from the watchdog's two
+bits and from its own survivors - the breadcrumb, a `.noinit` word, a
+scratch register ([watchdog.md](watchdog.md)). A fault is bound to
+`fault_reset()` and never routed through `panic()`, whose breakpoint
+instruction with no debugger attached escalates into the very fault the
+body serves. A fault entry the program does not bind lands in the crt's
+default spin, and the board stops there instead of rebooting - a panic
+too, since with no debugger attached its breakpoint is such a fault.
+Under a probe with halting debug enabled the breakpoint halts the core
+instead ([platform.md](platform.md)). And
+`Reset::core()` exists on the Cortex-M33 half alone: a Hazard3 build
+that names it does not compile.
+
+The rest of this page, in order: the documents of record; what the
+silicon does (the three tiers of reset, the record and what it says, the
+two ways a program ends itself, where the architecture is sampled,
+POWMAN read and not written here); the types and verbs; how to use it;
+the bench findings; and what is not covered.
+
+## Documents of record
+
+The RP2350 datasheet (build d126e9e), chapter 7
 whole (7.1 the three tiers, 7.2 what changed from the RP2040, 7.3
 chip-level resets with their table of causes, 7.4 the power-on state
 machine, 7.5 the subsystem reset controller), 6.4 (POWMAN's CHIP_RESET
@@ -12,11 +74,13 @@ causes and the two reboots) and the power-on state machine beside the
 subsystem reset controller in `brio/rp2350/resets.hpp` - the controller
 itself is [platform.md](platform.md)'s, which every chapter reaches its
 own block through. The reference suite: `test_rp2350_timer`, letters a,
-n and i.
+n and i (a letter is one command key of the suite's console and the
+group of verdicts it runs; `z` is the key that runs every letter but
+`i`, which reboots the board once per leg and runs by name).
 
 ## What the silicon does
 
-THREE TIERS (7.1), and a program meets all three:
+Three tiers (7.1), and a program meets all three:
 
 - **Chip-level** resets take the whole device down: the power-on reset,
   brown-out, the RUN pin, a debugger's request, the rescue port, a supply
@@ -30,55 +94,59 @@ THREE TIERS (7.1), and a program meets all three:
   sequence from whatever PSM_WDSEL names. This is the tier an ordinary
   reboot takes.
 - **Subsystem** resets are the peripheral blocks (7.5), which come up
-  HELD and are released by software - which is why "open the clock" on
+  held and are released by software - which is why "open the clock" on
   other families is "release the reset" here. That tier is
   [platform.md](platform.md)'s: every chapter of this stratum starts by
   releasing its own block.
 
-THE RECORD MOVED AND WIDENED. CHIP_RESET lived in the RP2040's LDO block;
-here it is POWMAN's, in the ALWAYS-ON power domain, so it outlives a
+The record moved and widened. CHIP_RESET lived in the RP2040's LDO block;
+here it is POWMAN's, in the always-on power domain, so it outlives a
 power-down of the core - and it carries twelve latches where the RP2040
-had three. Beside it WATCHDOG.REASON names the LAST watchdog event, TIMER
+had three. Beside it WATCHDOG.REASON names the last watchdog event, TIMER
 or FORCE, each replacing the other. `Reset::causes()` reads both as one
-word.
+word. A chip-level reset replaces the twelve latches rather than adding
+to them: a program the flash path started carries that path's rescue
+latch, and the boot after it powers the switched core down reads
+`swcore_powerdown` and nothing else ([powman.md](powman.md), "Bench
+findings"), the one pair of chip-level kinds on record.
 
-AND THE WORD IS NOT A CAUSE - NOR DOES A REBOOT APPEAR IN IT. 7.3.3 calls
-CHIP_RESET "the source of the last chip-level reset", and CHIP-LEVEL is
+And the word is not a cause - nor does a reboot appear in it. 7.3.3 calls
+CHIP_RESET "the source of the last chip-level reset", and chip-level is
 the operative word: a watchdog event that runs the power-on state machine
-is a SYSTEM reset, and the chip-level half comes through it bit for bit
+is a system reset, and the chip-level half comes through it bit for bit
 unchanged (measured across a software reboot, a time-out, a panic and a
 fault). What would make a watchdog event reach that record is POWMAN's
 own WDSEL - RESET_PSM and the three bits under it (6.4) - whose reset
 value is zero and which nothing in this stratum writes, POWMAN being the
 power chapter's whole. So HAD_WATCHDOG_RESET_PSM and its three
 neighbours stand for resets this framework never asks for, and a program
-answers "what caused THIS boot" from WATCHDOG.REASON and from its own
+answers "what caused this boot" from WATCHDOG.REASON and from its own
 survivors, never from the chip-level half. The bench suite reads it that
 way, through a token it banks before each leg.
 
-ONE MORE THING CLEARS REASON HERE, and not on the RP2040 (12.9's own
-note): a DEBUGGER WARM RESET of either core - the Arm SYSRESETREQ or the
+One more thing clears REASON here, and not on the RP2040 (12.9's own
+note): a debugger warm reset of either core - the Arm SYSRESETREQ or the
 RISC-V hartreset - clears WATCHDOG.REASON, so that code loaded under a
 probe after a time-out does not go on reading the time-out.
 `Reset::core()` is that same signal from software.
 
-THE TWO WAYS A PROGRAM ENDS ITSELF ARE NOT THE SAME ON THE TWO HALVES.
+The two ways a program ends itself are not the same on the two halves.
 
 - `software()` is the watchdog's trigger with PSM_WDSEL selecting every
   stage but the two oscillators: the whole system through the bootrom,
   both cores, the crystal kept, REASON.FORCE as its mark. It is the
-  reboot BOTH architectures have, and it is what ResetReporter and
+  reboot both architectures have, and it is what ResetReporter and
   `fault_reset()` call.
 - `core()` is the processor's own reset request, and it exists on the
   Cortex-M33 half alone. On Hazard3 the hart reset controls -
-  `dmcontrol.hartreset` and `dmcontrol.ndmreset` - are IN THE DEBUG
-  MODULE (3.8.5.3), reachable by a debugger and by no instruction, and
+  `dmcontrol.hartreset` and `dmcontrol.ndmreset` - are in the Debug
+  Module (3.8.5.3), reachable by a debugger and by no instruction, and
   the RISC-V cores have no cold reset domain at all (13.9). So the verb
   is refused at compile time there, with the guard on its argument, and
   the suite's reset letter has five legs on one half and four on the
   other.
 
-A WARM RESET IS WHERE THE ARCHITECTURE IS SAMPLED (13.9): a core reads
+A warm reset is where the architecture is sampled (13.9): a core reads
 ARCHSEL when its warm reset is released, whether that reset came from the
 power-on state machine, the watchdog, SYSRESETREQ or hartreset. That is
 the mechanism behind this target's whole build shape - the bootrom writes
@@ -86,10 +154,11 @@ ARCHSEL from the image it found and resets the cores into it - and it is
 why `reset run` from a probe restarts a program in its own architecture
 without touching the clock tree, the pads or the peripherals.
 
-POWMAN IS READ AND NEVER WRITTEN BY THIS STRATUM. Every register of that
+POWMAN is read and never written by this driver. Every register of that
 block up to offset 0xac, CHIP_RESET among them, takes a write only with
 the password 0x5AFE in its top half (6.4), and what those registers do
-belongs to the power chapter. The two flags a program might think to
+belongs to the power chapter ([powman.md](powman.md)), which writes
+neither CHIP_RESET nor POWMAN's WDSEL. The two flags a program might think to
 clear are the bootrom's anyway: RESCUE_FLAG is read and cleared by the
 boot path before any user code runs (5.2, 3.5.8), so `rescue_flag()`
 ordinarily reads false even after a rescue and `ResetCause::rescue` is
@@ -197,30 +266,30 @@ pass, 0 fail** on each half; the reboot letter runs by name and reports
 Driver gaps, each with its reason:
 
 - Writing anything in POWMAN, the password included: the whole block is
-  the power chapter's, and the two flags a reset story might want to
-  clear are the bootrom's own. Until that chapter, the always-on tier of
-  this word is read and reported.
-- Brown-out detection, the glitch detector and the switched-core
-  power-down as causes a program can PROVOKE: the first wants a supply to
-  lower, the second is read-only here (a detector that fires is a reset
-  the bench cannot argue with), the third belongs to the power chapter.
-  Their latches are decoded and reported; nothing here raises one.
+  the power chapter's ([powman.md](powman.md)), which writes neither
+  CHIP_RESET nor POWMAN's WDSEL, and the two flags a reset story might
+  want to clear are the bootrom's own. The always-on tier of this word is
+  read and reported.
+- Brown-out detection and the glitch detector as causes a program can
+  PROVOKE: the first wants a supply to lower, the second is read-only
+  here (a detector that fires is a reset the bench cannot argue with).
+  Their latches are decoded and reported; nothing here raises one. The
+  switched-core power-down is raised by the power chapter's
+  `Powman::power_down()` and its cause measured there
+  ([powman.md](powman.md)).
 - The RUN pin and the rescue port as causes: the pin needs a wire to
   ground and a hand on the desk, the rescue port is the flash verb's own
   path and marks the boot it recovers - both are one verdict to add to
   the suite's first letter when a run happens to carry them.
 - A second core's reset, and what SYSRESETREQ does to the core that did
-  not ask: that is the multicore chapter, which this stratum has not
-  written.
+  not ask: a second core's reset is the multicore chapter's
+  (`Core1::reset()`, measured in [multicore.md](multicore.md)), and what
+  `Reset::core()` does to the core that did not ask is measured by no
+  suite.
 
 Implemented but not bench-verified, each with what would measure it:
 
-- WHETHER THE CHIP-LEVEL LATCHES ACCUMULATE OR REPLACE. Every boot of
-  this bench arrives through the same chip-level source, the flash path's
-  rescue, so the word has never had to hold two: it would take a boot of
-  one chip-level kind followed by one of another - a RUN-pin reset after
-  a rescue, say - and both of those want a hand or a wire on the desk.
-- The decoded latches for brown-out, the glitch detector, the
-  switched-core power-down, the RUN pin and the debug port: each is read
-  and reported and none has been raised, for the reasons in the driver
-  gaps above.
+- The decoded latches for brown-out, the glitch detector, the RUN pin
+  and the debug port: each is read and reported and none has been
+  raised, for the reasons in the driver gaps above. The switched-core
+  power-down's is raised and read in [powman.md](powman.md).

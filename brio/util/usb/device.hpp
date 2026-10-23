@@ -1,62 +1,115 @@
 /*
  * usb/device.hpp
  *
- * The USB device stack, target-independent: the vocabulary of the
+ * The USB device stack, target-independent: what makes a chip with a
+ * USB device controller enumerate on a host and carry a class, a serial
+ * port for instance (usb/cdc.hpp). It holds the vocabulary of the
  * specification's chapter 9 (the setup packet, the descriptors as
  * constexpr bytes), the contract a target's endpoint controller
  * realizes (`UsbController`), the contract a class realizes
  * (`UsbClass`), and `UsbDevice`, the control-endpoint machine that
- * enumerates the device and routes everything else to its classes.
+ * enumerates the device and routes everything else to its classes. The
+ * design is docs/design/usb.md; the controllers that realize the
+ * contract are its "Realizations" table.
  *
- * WHY A STACK IN UTIL. Every controller brio will meet - the RP2040's
- * own, a Synopsys OTG, ST's device block, WCH's - differs in how a
- * packet is handed over (a dual-port RAM, a FIFO, a table of buffers
- * in main memory) and agrees on everything the host can see: endpoint
- * zero takes eight-byte setup packets and answers them in stages, the
- * other endpoints move packets of at most their maximum size, a bus
- * reset puts the device back at address zero. So the contract below is
- * drawn at the PACKET: a controller accepts one packet to send on an
+ * The smallest use, a serial port over the RP2040's own controller: the
+ * program states its descriptors, names the device over the controller
+ * and its classes, binds the controller's vector to the stack's
+ * interrupt handler body and raises the pull-up once the controller is
+ * up.
+ *
+ *     using Serial = brio::UsbCdcAcm<brio::Usb, P>;
+ *     struct Descriptors {
+ *         static constexpr auto device = brio::usb_device_descriptor(
+ *             {.vendor_id = 0x1209, .product_id = 0x0001, .device_class = 2});
+ *         static constexpr auto configuration = brio::usb_concat(
+ *             brio::usb_configuration_head(9 + Serial::descriptor_bytes, Serial::interface_count),
+ *             Serial::descriptors);
+ *         static std::span<const uint8_t> string(uint8_t index);   // 0: the language list
+ *     };
+ *     using Device = brio::UsbDevice<brio::Usb, Descriptors, Serial>;
+ *
+ *     extern "C" void isr_usbctrl() { Device::isr(); ... }
+ *     ...
+ *     if (brio::Usb::init(clock)) { Device::start(); }   // in main()
+ *
+ * Who calls what, and from where:
+ *  - the program brings the controller up (its clock, its block: the
+ *    target's init()), then calls start() from main context; from there
+ *    the host enumerates the device at its own pace, and nothing in
+ *    main context takes part in it;
+ *  - isr() is the interrupt handler body the program's controller
+ *    vector calls, and nowhere else: the whole stack and every class's
+ *    contract verbs (configure, control, control_data, in_done,
+ *    out_done, and reset, which start() and stop() also call from main
+ *    context) run inside it, to completion. The stack itself never
+ *    waits; a controller's verbs may, for a bounded number of polls of
+ *    the silicon (the STM32F4's OTG core spins on a FIFO flush and an
+ *    endpoint disable, the contract below);
+ *  - the readbacks (state(), configured(), the counters) are plain reads
+ *    of what the handler wrote, legal from main context as snapshots: a
+ *    loop waiting for configured() sees the state arrive;
+ *  - the descriptors are the program's constexpr bytes, sent from where
+ *    they are; a class's answer to a request is a span of its own
+ *    storage, which the stack reads from until the data stage ends (a
+ *    new setup packet ends it at the latest), so it stays unchanged
+ *    until then.
+ *
+ * Why a stack in util. Every controller brio meets - the RP2040's own,
+ * a Synopsys OTG, ST's device block under WCH's names, WCH's own -
+ * differs in how a packet is handed over (a dual-port RAM, a FIFO, a
+ * table of buffers in main memory) and agrees on everything the host
+ * can see: endpoint zero takes eight-byte setup packets and answers them
+ * in stages, the other endpoints move packets of at most their maximum
+ * size, a bus reset puts the device back at address zero. So the
+ * contract below is drawn at the packet (docs/design/usb.md, "Why the
+ * cut is at the packet"): a controller accepts one packet to send on an
  * endpoint and reports when it went, arms one packet's reception and
  * reports when it came with its bytes, delivers the setup packet,
  * reports the reset. Everything above the packet - the control
  * transfer's data and status stages, the descriptors, the address that
  * takes effect only after its status stage, the configuration, the
  * classes - is written once, here, and tested on the host against a
- * scripted controller (host/sim_usb.hpp) before any silicon.
+ * scripted controller (host/sim_usb.hpp, test/test_usb) before any
+ * silicon.
  *
- * WHERE IT RUNS. The whole stack is an ISR body: `UsbDevice::isr()` is
- * what the app's controller vector calls. Enumeration is a dialogue
- * the host paces in milliseconds and every answer here is a copy of
- * constexpr bytes or a one-line state change, so nothing is deferred
- * to an active object: a class that has more to do than moving bytes
- * (a byte transport's rings, as usb/cdc.hpp) does it in the same body
- * and hands the rest to the program through its own surface. The
- * program's side of a class (write_byte, read_byte) runs in the main
- * loop under the platform's guard, the ISR side in this body: the two
- * contexts brio has, and one boundary.
+ * Where it runs (docs/design/usb.md, "Where it runs"). The whole stack
+ * is an ISR body: `UsbDevice::isr()` is what the app's controller vector
+ * calls. Enumeration is a dialogue the host paces in milliseconds and
+ * every answer here is a copy of constexpr bytes or a one-line state
+ * change, so nothing is deferred to an active object (a component of
+ * the program with its own event queue, served by the kernel one event
+ * at a time): a class that has more to do than moving bytes (a byte
+ * transport's rings, as usb/cdc.hpp) does it in the same body and hands
+ * the rest to the program through its own surface. The program's side
+ * of a class (write_byte, read_byte) runs in the main loop under the
+ * platform's guard, the ISR side in this body: the two contexts brio
+ * has, and one boundary.
  *
- * THE CONTROL TRANSFER, in the stack's words. A setup packet opens a
- * transfer and closes any pending one. A request answered with DATA
- * sends it in packets of the control endpoint's size and, when the
- * data is shorter than the host asked and ends on a packet boundary,
- * a zero-length packet after it; the host then sends an empty OUT as
- * the status stage. A request answered with RECEIVE arms the control
- * endpoint for the host's data (at most one packet here: the class
- * requests brio carries fit in one), hands it to the class, and
- * answers an empty IN as the status. A request answered with ACK
- * answers the empty IN at once. A request answered with STALL stalls
- * both directions of the control endpoint until the next setup. A new
- * ADDRESS is written to the controller only when its status stage has
- * gone, because the status itself travels at the old one.
+ * The control transfer, in the stack's words (docs/design/usb.md, "The
+ * control transfer"). A setup packet opens a transfer and closes any
+ * pending one. A request answered with data (send) sends it in packets
+ * of the control endpoint's size and, when the data is shorter than the
+ * host asked and ends on a packet boundary, a zero-length packet (ZLP)
+ * after it; the host then sends an empty OUT as the status stage. A
+ * request answered with receive arms the control endpoint for the
+ * host's data (at most one packet here: the class requests brio carries
+ * fit in one), hands it to the class, and answers an empty IN as the
+ * status. A request answered with ack answers the empty IN at once. A
+ * request answered with stall stalls both directions of the control
+ * endpoint until the next setup. A new address is written to the
+ * controller only when its status stage has gone, because the status
+ * itself travels at the old one.
  *
- * WHAT A CLASS IS. A type with static verbs (the file header of
- * usb/cdc.hpp is the model): the interfaces it owns, the descriptor
- * bytes the app appends to the configuration, `configure()` (the host
- * chose the configuration: claim the endpoints and arm them),
- * `reset()`, `control(setup)` for the class requests aimed at its
- * interfaces, `control_data` for the bytes a RECEIVE brought, and
- * `in_done` / `out_done` for its own endpoints' packets. `UsbDevice`
- * asks each class whether an interface or an endpoint is its.
+ * What a class is (docs/design/usb.md, "A class"). A type with static
+ * verbs (the file header of usb/cdc.hpp is the model): the interfaces it
+ * owns, the descriptor bytes the app appends to the configuration,
+ * `configure()` (the host chose the configuration: claim the endpoints
+ * and arm them), `reset()`, `control(setup)` for the class requests
+ * aimed at its interfaces, `control_data` for the bytes a receive
+ * brought, and `in_done` / `out_done` for its own endpoints' packets.
+ * `UsbDevice` asks each class whether an interface or an endpoint is
+ * its.
  */
 
 #pragma once
@@ -73,6 +126,8 @@ namespace brio {
 
 // ---- the setup packet and its fields ------------------------------------------
 
+/// The eight bytes of a setup packet, as the controller delivers them:
+/// bmRequestType, bRequest, wValue, wIndex, wLength.
 struct UsbSetup {
     uint8_t request_type;
     uint8_t request;
@@ -206,7 +261,7 @@ constexpr std::array<uint8_t, 2 + 2 * (N - 1)> usb_string_descriptor(const char 
 // ---- the contracts ------------------------------------------------------------------
 
 /// What a controller reports when asked: the bus events and the
-/// packets that completed since the last time, endpoint NUMBERS as
+/// packets that completed since the last time, endpoint numbers as
 /// bit positions.
 struct UsbEvents {
     bool reset = false;
@@ -219,18 +274,26 @@ struct UsbEvents {
 
 /**
  * The endpoint controller a target realizes. Endpoints are named by
- * NUMBER and direction here (the number, 0..15; IN or OUT), the
- * descriptor address only where the host speaks.
+ * number and direction here (the number, 0..15; IN or OUT), the
+ * descriptor address only where the host speaks. The packet verbs are
+ * called from inside UsbDevice::isr(), or from main context under the
+ * platform's critical section (a class's program side, usb/cdc.hpp);
+ * connect() and deconfigure_endpoints() also from start() and stop() in
+ * main context. The stack never waits on a verb; a realization's verb
+ * may poll the silicon, bounded: the STM32F4's configure_endpoint() and
+ * deconfigure_endpoints() spin on a FIFO flush and on each endpoint's
+ * disable, the second inside isr() too, at a bus reset (stm32f4/usb.hpp
+ * gives the bound, flag_spins).
  *
  *  - configure_endpoint(address, type, max_packet): claim one
  *    direction of one endpoint (control endpoint zero is claimed by
  *    init()). False when the controller cannot (its memory, its
  *    count). deconfigure_endpoints(): every one but zero released.
- *  - submit_in(number, data): ONE packet, data.size() <= its maximum
+ *  - submit_in(number, data): one packet, data.size() <= its maximum
  *    (zero for a zero-length packet), copied into the controller's
  *    own storage before this returns; the controller answers the next
  *    IN token with it and reports it in UsbEvents::in_done.
- *  - submit_out(number, max): arm the reception of ONE packet of at
+ *  - submit_out(number, max): arm the reception of one packet of at
  *    most `max`; reported in out_done, its bytes in out_data(number)
  *    until the next submit_out on that endpoint.
  *  - setup(): the last setup packet.
@@ -315,8 +378,9 @@ public:
     UsbDevice() = delete;
 
     /// The controller brought up by the application (its clock, its
-    /// block), then this: the state cleared, the classes reset, the
-    /// pull-up raised. From here on isr() does the rest.
+    /// block), then this, from main context: the state cleared, the
+    /// classes reset, the pull-up raised. From here on isr() does the
+    /// rest; the host enumerates at its own pace.
     static void start() {
         state_ = UsbDeviceState::defaulted;
         stage_ = Stage::idle;
@@ -325,6 +389,9 @@ public:
         Controller::connect(true);
     }
 
+    /// The device off the bus, from main context: the pull-up dropped,
+    /// every endpoint but zero released, the classes reset, the state
+    /// detached.
     static void stop() {
         Controller::connect(false);
         Controller::deconfigure_endpoints();
@@ -332,7 +399,12 @@ public:
         state_ = UsbDeviceState::detached;
     }
 
-    /// THE ISR BODY the controller's vector calls.
+    /// The ISR body the controller's vector calls, and nothing else: the
+    /// events taken from the controller, a reset and a setup packet
+    /// handled first, then every completed packet routed to endpoint
+    /// zero's machine or to the class that owns the endpoint. Runs to
+    /// completion; the stack waits for nothing, the controller's verbs it
+    /// calls for as long as their own bound (the contract above).
     [[gnu::always_inline]] static void isr() {
         const UsbEvents ev = Controller::take_events();
         if (ev.reset) {
@@ -367,6 +439,8 @@ public:
     }
 
     // ---- readbacks ---------------------------------------------------------------
+    // Written by the ISR body, read anywhere as a snapshot. The counters
+    // count since the program started and wrap at 2^32.
     static UsbDeviceState state() { return state_; }
     static bool configured() { return state_ == UsbDeviceState::configured; }
     static uint8_t address() { return address_; }

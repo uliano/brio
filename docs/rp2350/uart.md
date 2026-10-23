@@ -1,24 +1,119 @@
 # UART (RP2350)
 
-Documents of record: the RP2350 datasheet (build d126e9e), 12.1 (UART:
-two ARM PL011s, revision r1p5 - the FIFO depths and the feature list in
-its opening, the programmer's model and the registers below it), 9.4 (the
-GPIO function table, which is where this chip differs most from its
-predecessor), 12.6.4.1 (the system DREQ table), 7.5 (the reset
-controller), 3.2 (the interrupt lines), 2.1.3 (the atomic register
-aliases). The driver is ARM's and not this chip's, so it lives in the IP
-stratum: `brio/pl011/uart.hpp` holds the resource and the byte transport
+This document is for a programmer who needs a serial port on an RP2350:
+the console a program prints to, a line-oriented link, or a byte
+transport to another chip, on either of the chip's two processor
+architectures. The chip carries two ARM PL011 UARTs. Their driver is
+written once for every family that carries the block, in the PL011 IP
+stratum ([../pl011/README.md](../pl011/README.md)); this page and
+`brio/rp2350/uart.hpp` are what the RP2350 adds to it - the pads, the
+reset bits, the interrupt lines, the DMA request numbers and which clock
+the divisor is computed from - and the two names a program writes:
+`Pl011<n>`, the instance, and `Uart<n, pins, ...>`, the task over it (a
+task, in brio, is a driver layer with state of its own, served from its
+peripheral's interrupt, that an active object or `print` calls; an
+active object is a component of a brio program with its own event queue,
+served one event at a time by the kernel,
+[docs/learn/introduction.md](../learn/introduction.md)). The task is a
+byte transport with a transmit ring and a receive ring, both served from
+the instance's interrupt, with the same public surface as the other
+families' UART tasks, which is what lets `util/serial_port.hpp` and
+`print()` run here unchanged ([design/serial.md](../design/serial.md)).
+
+The smallest use, the console on GP0/GP1 (the Debug Probe's UART
+bridge), is the first block under "How to use it" below:
+
+```cpp
+constexpr brio::UartPins console_pins{
+    .tx = {0, brio::PinFunction::uart},
+    .rx = {1, brio::PinFunction::uart},
+};
+using Serial = brio::Uart<0, console_pins>;
+constexpr Serial serial;
+
+extern "C" void isr_uart0() { (void)Serial::isr(); }
+
+int main() {
+    SysClock::init();
+    Serial::init(clock, 115200);
+    brio::enable_interrupts();
+    brio::print(serial, "hello", brio::crlf);
+}
+```
+
+Line by line: `console_pins` names the two pads, each with the function
+code that routes a UART to it (function 2, `PinFunction::uart`, on these
+two; a wrong pad or a wrong code for the pad does not compile);
+`Serial` names the transport type (`0` the instance, the pads, and every
+other template argument at its default: the ring sizes, no DMA engines,
+the code in the flash); `serial` is an empty tag object of that type,
+the argument `print` takes to pick the port, since the type's functions
+are all static and it has no object of its own; the `extern "C"`
+function is the interrupt handler, under the crt's name for UART0's
+line, which is the same on both architectures; `SysClock::init()` is
+the clock task ([clock.md](clock.md)), and `clock` its tag object;
+`Serial::init()` takes the clock's tag and the baud rate; `brio::crlf`
+is the line ending.
+
+What decides correctness even there. `init()` comes after the clock
+task and before interrupts are enabled: the divisor is computed from
+the clk_peri rate the clock type claims (`Clock::pclk_hz`), not read
+from the hardware, so a port initialized before the clock task is set
+for a rate the hardware has not got, and nothing refuses it. `init()`
+answers false when the rate cannot be produced at this clock or the
+block did not come out of reset, and the example discards that answer.
+The program binds `isr_uart0` itself; a port whose vector is left
+unbound sends its line's first interrupt into the crt's default spin
+and the program stops there. `isr()` returns true when a received byte
+made the receive ring non-empty, the edge an active object is told of:
+the smallest use discards it, and the third block below posts it to
+`SerialPort`. `init()` hands both pads over itself, the isolation latch
+dropped and the receive pad pulled up ("What the silicon does" below).
+`print` waits until the transmit ring has taken every byte, so a long
+message printed from an active object's handler holds every other
+active object for that long ([design/serial.md](../design/serial.md));
+and the transmit ring has one producer, so `write_byte`, `write_bulk`
+and `print` over them are called from `main` and from active objects,
+never from an interrupt handler, and each copies, the caller's buffer
+being free when the call returns. Arming the transmit interrupt is one
+store through the SET alias of the interrupt mask (2.1.3), so the
+interrupt transport masks nothing; with a transmit engine, the engine's
+claim is taken under the platform's critical section, and with a
+receive engine `harvest()` takes the same critical section for the few
+instructions it shares the receive ring with the DMA line's handler;
+nothing else masks.
+
+The rest of this page, in order: the documents of record; what the
+silicon does (the two function columns, the isolated pads, the DMA
+request numbers, the shared interrupt numbering); the types and verbs
+this stratum adds; how to use it; the bench findings, most of the page,
+both architectures; and what is not covered. What the block itself does
+is the IP stratum's page.
+
+## Documents of record
+
+The RP2350 datasheet (build d126e9e), 12.1 (UART: two ARM PL011s,
+revision r1p5 - the FIFO depths and the feature list in its opening, the
+programmer's model and the registers below it), 9.4 (the GPIO function
+table, which is where this chip differs most from its predecessor),
+12.6.4.1 (the system DREQ table), 7.5 (the reset controller), 3.2 (the
+interrupt lines), 2.1.3 (the atomic register aliases). The driver is
+ARM's and not this chip's, so it lives in the IP stratum:
+`brio/pl011/uart.hpp` holds the resource and the byte transport
 ([../pl011/README.md](../pl011/README.md)), and `brio/rp2350/uart.hpp`
-holds what this chip owes it - the pin table with BOTH of its function
+holds what this chip owes it - the pin table with both of its function
 columns, the `Rp2350Pl011` chip traits over `pin.hpp`, `resets.hpp`,
-`clock.hpp`, `core.hpp` and `dma_engine.hpp`, and the PUBLIC NAMES
+`clock.hpp`, `core.hpp` and `dma_engine.hpp`, and the public names
 `Pl011<n>` (the resource) and `Uart<n, pins, ...>` (the task), this
 chip's aliases of the two templates there. The reference suite:
-`test_rp2350_serial`, which runs on BOTH of this chip's architectures
-from one source (the second instance under the loop-back for the formats,
-the ladder, the FIFOs, a break, an overrun and bulk traffic; the second
-function column on its own pads; the desk partner's `uart_peer` on the
-pair's UART wires; the host at the console's other end).
+`test_rp2350_serial`, which runs on both of this chip's architectures
+from one source (the second instance under the loop-back for the
+formats, the ladder, the FIFOs, a break, an overrun and bulk traffic;
+the second function column on its own pads; the desk partner's
+`uart_peer` on the pair's UART wires; the host at the console's other
+end). A letter of a suite is one command key of its console and the
+group of verdicts it runs; `z` is the key that runs every letter but the
+two the host drives, `y` and `w`, which run by name.
 
 This page says what is the RP2350's. What the block itself does - the
 fractional divider, the disabled-write rule, the transmit interrupt that
@@ -34,12 +129,12 @@ with the same 32-deep FIFOs (12.1: 32x8 transmit, 32x12 receive), clocked
 from clk_peri as UARTCLK with its registers on clk_sys. Four things about
 it are this chip's:
 
-**TWO FUNCTION COLUMNS CARRY UART DATA.** The pads march in groups of
+**Two function columns carry UART data.** The pads march in groups of
 four - TX, RX, CTS, RTS - and the groups cycle UART0, UART1, UART1,
 UART0 and again, over the whole bank: GP0..GP3 are UART0's, GP4..GP7
 UART1's, GP8..GP11 UART1's, GP12..GP15 UART0's, up to GP47 on the QFN-80.
 That much is the RP2040's rule over a longer bank. What is new is that
-EVERY GROUP'S FLOW-CONTROL PADS CARRY DATA TOO, under a second code: the
+every group's flow-control pads carry data too, under a second code: the
 CTS pad is also that instance's transmitter and the RTS pad also its
 receiver, under function 11 where the first two pads use function 2. So
 GP2/GP3 are a second UART0 pair, GP6/GP7 a second UART1 pair, and a
@@ -48,25 +143,25 @@ instance against the RP2040's four. Which column a pad uses is not a
 choice: a pad carries a UART signal under exactly one code, and the pad
 number says which.
 
-**THE PADS COME UP ISOLATED** (9.11, and [README.md](README.md)): a pad
+**The pads come up isolated** (9.11, and [README.md](README.md)): a pad
 answers nothing until the isolation latch is cleared, which every
 configuring verb of `pin.hpp` does as it writes. The transport's receive
-pad is handed over with a PULL-UP, because this chip's pads reset pulled
-DOWN and a receiver enabled over a low line takes a break.
+pad is handed over with a pull-up, because this chip's pads reset pulled
+down and a receiver enabled over a low line takes a break.
 
-**THE DREQ NUMBERS ARE NOT THE RP2040'S** - not one row of the table is.
+**The DREQ numbers are not the RP2040's** - not one row of the table is.
 A third PIO and twelve PWM slices against eight move everything above the
 first PIO's rows: the UARTs sit at 28..31 where they sat at 20..23.
 `rp2350/dma_engine.hpp` carries the table so that a transport can name a
 request without including a controller, and the engines that take those
 requests are [dma.md](dma.md)'s.
 
-**THE INTERRUPT NUMBERING IS SHARED BETWEEN THE ARCHITECTURES** (3.8.4.2),
+**The interrupt numbering is shared between the architectures** (3.8.4.2),
 so UART0_IRQ is line 33 and UART1_IRQ line 34 whichever processor pair is
 running, and an app binds `isr_uart0` / `isr_uart1` once for both. The
 controller behind those names is not the same object - an NVIC on the
 Cortex-M33 half, Hazard3's own on the other - which is exactly why the IP
-stratum's concept takes the controller as a TYPE.
+stratum's concept takes the controller as a type.
 
 ## Types and verbs
 
@@ -75,22 +170,22 @@ the register bit layouts, the resource's and the transport's verbs) is in
 [../pl011/README.md](../pl011/README.md). This stratum adds:
 
 - `UartPins` - a `PinSel` for each direction, each carrying the pad
-  number AND the function that routes a UART to it.
+  number and the function that routes a UART to it.
 - `uart_pad_instance(pin)` - which instance the four pads of that pin's
   group belong to.
-- `uart_pad_function(pin)` - WHICH column routes a UART signal to that
+- `uart_pad_function(pin)` - which column routes a UART signal to that
   pad: `PinFunction::uart` (2) on the first two pads of a group,
   `PinFunction::uart_alt` (11) on the other two.
 - `uart_tx_pin(n, pin)`, `uart_rx_pin(n, pin)` - the table of 9.4 as
   constexpr facts, over both columns.
 - `uart_pins_valid(n, pins)` - a legal pin set for instance n: a
-  transmit pad and a receive pad of that instance, EACH NAMED UNDER ITS
-  OWN COLUMN. Naming GP6 under function 2 asks for UART1's CTS and not
-  its transmitter, and does not compile. The PACKAGE is not asked here:
+  transmit pad and a receive pad of that instance, each named under its
+  own column. Naming GP6 under function 2 asks for UART1's CTS and not
+  its transmitter, and does not compile. The package is not asked here:
   the table is the die's, and a pad the QFN-60 has not bonded is refused
   one level down by `Pin<n>`'s own static_assert, which says so in those
   words.
-- `UartColumn` and `UartPad<pin>` - what `pad_function` IS on this chip.
+- `UartColumn` and `UartPad<pin>` - what `pad_function` is on this chip.
   The IP file calls it "the function code that routes a UART to a pad"
   and keeps it opaque; here the code is a property of the PAD, so the
   chip's answer is a tag meaning "the column that carries a UART signal"
@@ -130,7 +225,7 @@ int main() {
 The same source builds for both architectures; `isr_uart0` is a
 vector-table slot on one half and a dispatch entry on the other.
 
-The SECOND COLUMN is named and nothing else changes - the pads that carry
+The second column is named and nothing else changes - the pads that carry
 UART1's CTS and RTS under function 2 are its transmitter and receiver
 under function 11:
 
@@ -359,6 +454,6 @@ Implemented but not bench-verified, each with what would measure it:
   program that gives the console up.
 - The QFN-60's pin table: the stratum compiles for that package and
   refuses the pads it has not got, but no QFN-60 part is on the bench.
-- `rebase` under a dynamic clock: this target has no dynamic clock yet,
+- `rebase` under a dynamic clock: this target has no dynamic clock,
   so the verb is exercised by moving clk_peri (letter r, above), never
   by a clk_sys that changes under a running port.

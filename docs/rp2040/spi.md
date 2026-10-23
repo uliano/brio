@@ -1,6 +1,90 @@
 # SPI (RP2040)
 
-Documents of record: the RP2040 datasheet (build 3184e62), 4.4 (the
+This document is for a programmer who has an SPI device on an RP2040 -
+a display, a converter, a flash chip - and wants to talk to it through
+the bus arbiter ([design/spi-bus.md](../design/spi-bus.md) is the
+model), or who wants this chip to answer as an SPI client. The chip's
+two SPI blocks are ARM's PL022, so the driver is written once in the IP
+stratum (`brio/pl022/`) and this stratum supplies the chip's part and
+the public names: `Pl022<n>` the instance, `SpiHost<n, pins, ...>` the
+host engine `util/spi_bus.hpp` drives, `SpiClient<n, pins>` the client
+role. The arbiter, `SpiBus`, is an active object (a component of a
+brio program with its own event queue, served one event at a time by
+the kernel, [docs/learn/introduction.md](../learn/introduction.md)):
+devices post it requests, it runs them one at a time on the host and
+replies to each.
+
+The smallest use, a device on the bus through the arbiter, from "How
+to use it" below:
+
+```cpp
+constexpr brio::SpiPins pins{.sck = 18, .tx = 19, .rx = 16};
+using Bus = brio::SpiHost<0, pins>;
+using Spi = brio::SpiBus<Bus, P, 4>;                  // the arbiter AO
+using Cs = brio::Pin<17>;
+
+Bus::init(clock, 8'000'000);                          // a ceiling for the whole bus
+Cs::output(true);
+
+Bus::Request r{};
+r.cs = Cs::ref();
+r.cmd = brio::lend<brio::Lease::reply>(cmd);  r.cmd_len = 1;
+r.tx = brio::lend<brio::Lease::reply>(pixels); r.len = 64;
+r.clock = brio::SpiClocks::div4;                      // 31.25 MHz at 125, clamped to the ceiling
+r.mode = brio::SpiMode::mode0;
+r.reply = brio::reply_to<Display, brio::SpiDone>();
+brio::post<Spi>(r);
+
+extern "C" void isr_spi0() {
+    if (Bus::isr()) { brio::post<Spi>(brio::TransferDone{Bus::status()}); }
+}
+```
+
+Line by line: `pins` names SPI0's clock, transmit and receive pads,
+GP18, GP19 and GP16, which table 279 gives the instance (a pin it does
+not give does not compile); `Bus` is the host engine over SPI0 and `Spi`
+the arbiter over it, four requests able to wait while one is in flight
+(a fifth is answered `spi_rejected` at once), listed in the program's
+`Tenuto` like any active object; `Cs` is the device's select, a plain
+GPIO driven high (deselected) before the first request, since the
+PL022's own select pulses between frames in modes 0 and 2; `init()`
+takes the clock task's tag ([clock.md](clock.md)) and a ceiling for
+every request on the bus - here 8 MHz, so this request's `div4`, 31.25
+MHz at a 125 MHz clk_peri, runs at the ceiling's setting, 7.8125 MHz;
+the request names the select, a one-byte command, 64 data bytes, the
+clock divisor, the mode, and the active object the reply goes to
+(`Display`, which receives an `SpiDone`); `isr_spi0` is SPI0's handler
+under the pico-sdk's name, and it tells the arbiter when the host's
+transaction completes. The command goes out with a D/C line low and the
+data with it high only when the request names that pin in `r.dc` (a
+pin's `ref()`, as `r.cs` takes); left at its default, no pin, as here,
+the host drives no D/C line and the command is simply the first byte.
+
+What decides correctness even there. The request lends its buffers
+(`brio::lend<Lease::reply>`): `cmd` and `pixels` belong to the
+transaction from the post until `Display` receives its `SpiDone`, and
+stay untouched and in scope until then, which nothing checks. `init()`
+after the clock task's: the divisor is computed from the rate the clock
+type claims for clk_peri, and clk_peri is off until `SysClock::init()`
+enables it. The vector is the program's to bind: the crt gives
+`isr_spi0` a weak alias to `Default_Handler`'s spin, so an unbound
+vector parks the core there at the host's first interrupt, and the
+arbiter never hears of a completion. A request with `polled` set spins
+inside `start()`, in the arbiter's dispatch, for its whole wire time,
+holding every other active object meanwhile. And the engines, when a
+host has them, need `Dma::init()` before the host's `init()`
+([dma.md](dma.md)).
+
+The page is long because the chapter is. In order: the documents of
+record; what the silicon does, with the PL022's two facts as a client;
+the types and verbs; how to use it - the host, the engines, a client,
+a host whose select is its own frame signal; the bench findings, the
+loop-back first, then the cost of the host above the wire, the engines,
+the placement, and the pair's wire; and what is not covered.
+
+## Documents of record
+
+The RP2040 datasheet (build 3184e62), 4.4 (the
 ARM PL022: 4.4.2 the functional description - the prescaler, the two
 FIFOs, the DMA interface -, 4.4.3 the operation - the clock ratios
 of 4.4.3.4, the bit rate of 4.4.3.6.1, the frame formats of 4.4.3.7
@@ -11,13 +95,15 @@ in the IP stratum: `brio/pl022/spi.hpp` holds the resource, the host
 engine and the client ([../pl022/README.md](../pl022/README.md)), and
 `brio/rp2040/spi.hpp` holds what this chip owes it - the pin table of
 table 279, the `Rp2040Pl022` chip traits over `pin.hpp`, `resets.hpp`,
-`delay.hpp`, `nvic.hpp` and `dma_engine.hpp`, and the PUBLIC NAMES
+`delay.hpp`, `nvic.hpp` and `dma_engine.hpp`, and the public names
 `Pl022<n>` (the resource), `SpiHost<n, pins, ...>` (the engine `SpiBus`
 drives) and `SpiClient<n, pins>` (the other end), this chip's aliases of
 the three templates there. The reference suite: `test_rp2040_spi`, on
 the loop-back; the wire is the desk partner's, SPI1 on GP10 / GP11 /
 GP8 with GP29 its select, to the WeAct RP2350B
-([../boards/weact-rp2040.md](../boards/weact-rp2040.md)).
+([../boards/weact-rp2040.md](../boards/weact-rp2040.md)), the board
+wired to this one. A suite's letter is one command key of its console
+and the group of verdicts it runs.
 
 ## What the silicon does
 
@@ -34,7 +120,7 @@ bit periods), the transmit FIFO at or below half, the receive
 overrun; the last two clear by writing, the first two by moving
 data. A DMA request per FIFO. LBM loops the transmitter into the
 receiver with nothing on the wire. The PL022's own select output,
-SSPFSSOUT, pulses BETWEEN FRAMES in Motorola format - which is why a
+SSPFSSOUT, pulses between frames in Motorola format - which is why a
 multi-frame transaction under one select is a GPIO's business - and
 the PL022 as a client frames on SSPFSSIN. The pins are fixed per
 instance under function 1: SPI0 clocks on GPIO 2, 6, 18, 22,
@@ -47,8 +133,8 @@ select freezes the slave's shift register, so the host must raise
 SSPFSSIN between every two frames (4.4.3.10, 4.4.3.12) - a host holding a
 GPIO select for a whole transaction reaches a PL022 client for more than
 one frame only in modes 1 and 3, and a host whose select is the block's
-OWN frame signal reaches it in all four, the signal pulsing between the
-frames in exactly those two modes. And nSSPOE is NOT CONNECTED TO THE PAD
+own frame signal reaches it in all four, the signal pulsing between the
+frames in exactly those two modes. And nSSPOE is not connected to the pad
 here (4.4.3.14's list of idle levels): a client's transmit pad stays
 driven while it is deselected and under SOD, the host then clocking the
 client's first answer in every frame (bench findings). The dark listener
@@ -145,7 +231,7 @@ Bus::Request r{};
 r.cs = Cs::ref();
 r.cmd = brio::lend<brio::Lease::reply>(cmd);  r.cmd_len = 1;
 r.tx = brio::lend<brio::Lease::reply>(pixels); r.len = 64;
-r.clock = brio::SpiClocks::div4;                      // 31.25 MHz at 125
+r.clock = brio::SpiClocks::div4;                      // 31.25 MHz at 125, clamped to the ceiling
 r.mode = brio::SpiMode::mode0;
 r.reply = brio::reply_to<Display, brio::SpiDone>();
 brio::post<Spi>(r);

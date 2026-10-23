@@ -1,6 +1,88 @@
 # Multicore (RP2350)
 
-Documents of record: the RP2350 datasheet (build d126e9e), 3.1.2 (SIO's
+This document is for a programmer who wants the second core of an
+RP2350 to run part of a program, on either of its two processor
+architectures. In brio the second core does not share the first core's
+kernel: it runs a kernel of its own, with its own list of active objects
+(an active object is a component of a brio program with its own event
+queue, served one event at a time by the kernel,
+[docs/learn/introduction.md](../learn/introduction.md)), its own
+timebase and its own panic record
+([design/kernel.md, "Two cores: two kernels and a bridge"](../design/kernel.md#12-two-cores-two-kernels-and-a-bridge-utilinboxhpp)).
+An event crosses from one kernel to the other through the bridge
+(`util/inbox.hpp`): `send<Ao>(ev)` copies it into the receiving active
+object's inbox, a ring the other core drains, and rings that core's
+doorbell, an SIO flag that raises an interrupt on it. `brio/rp2350/multicore.hpp`
+holds the doorbell, the mailbox FIFO and the launch of core 1;
+`Rp2350Platform<0>` and `Rp2350Platform<1>` are the two kernels'
+platforms ([platform.md](platform.md)). The same source runs on the
+Cortex-M33 pair and on the Hazard3 pair.
+
+The smallest use is the block under "How to use it" below, core 1's
+program and the launch from core 0; its core lines are:
+
+```cpp
+using P0 = brio::Rp2350Platform<0>;
+using P1 = brio::Rp2350Platform<1>;
+
+[[noreturn]] void core1_main() {
+    brio::CoreTicker<1>::init(clock);
+    brio::Inboxes<Echo>::enable();
+    brio::enable_interrupts();
+    brio::Tenuto<P1, Echo>::run();
+}
+
+int main() {
+    SysClock::init();                          // core 0 owns the clock tree
+    brio::Ticker::init(clock);
+    const bool up = brio::Core1::launch(&core1_main);
+    brio::Inboxes<Origin>::enable();
+    brio::enable_interrupts();
+    brio::send<Echo>(Ping{1});                 // crosses; post<Echo> would be refused
+    brio::Tenuto<P0, Origin>::run();
+}
+```
+
+Line by line: `P0` and `P1` are the two cores' platform types, and every
+active object names the one of the core it lives on (`Echo`'s queue is
+an `EventQueue<Event, 16, P1>`); `core1_main` is what core 1 runs once
+launched - its own ticker, `CoreTicker<1>`, its doorbell's interrupt
+enabled in its own interrupt controller by `Inboxes<Echo>::enable()`,
+interrupts unmasked on core 1, and its kernel over its own active
+objects, which never returns; on core 0, `main()` brings the clock tree
+up and starts its own ticker, then `Core1::launch()` resets core 1 into
+the bootrom's wait loop and hands it `core1_main` through the bootrom's
+launch protocol, answering false when the protocol does not complete
+within its bounded waits; core 0 enables its own doorbell, unmasks, and
+`send<Echo>` crosses to core 1's `Echo`, where a `post<Echo>` from core 0
+would be refused and counted by `Echo`'s queue.
+
+What decides correctness even there. Each active object lives on one
+core, in that core's `Tenuto`, on that core's platform type; an event
+for an active object of the other core goes through `send`, never
+`post`. Two vectors are bound once for both cores, under the crt's
+names - the bridge's doorbell and the tickers' tick - and each handler asks
+which core took it: `isr_sio_bell` drains that core's inboxes, and
+`isr_systick` ticks the ticker of the core that took it. The doorbell
+line is core-local and has one number on both cores, which is why
+`SioDoorbell<c>::enable()` refuses on any core but `c`. Core 1 must not
+touch the clock tree, which core 0 owns. `Core1::launch()` refuses while
+this core's mailbox interrupt (SIO_IRQ_FIFO) is enabled, because its
+handler would eat the protocol's echoes; nothing in brio enables it. A
+critical section masks the interrupts of its own core only, so nothing
+two kernels share is guarded by it: the bridge carries its own fences.
+
+The rest of this page, in order: the documents of record; what the
+silicon does (two cores of one pair, the mailbox FIFOs and the
+doorbells, the bootrom's wait state and launch protocol, what the
+bootrom does not hand over, the power-on state machine's hold on core 1,
+erratum RP2350-E2), with what differs from the RP2040; the types and
+verbs; how to use it; the bench findings, both architectures; and what
+is not covered.
+
+## Documents of record
+
+The RP2350 datasheet (build d126e9e), 3.1.2 (SIO's
 CPUID, and MHARTID answering the same), 3.1.5 (the inter-processor FIFOs
 and their interrupt), 3.1.6 (the doorbells: eight flags each way behind
 one core-local line), 3.1.8 (the platform timer, one counter and a
@@ -14,13 +96,16 @@ SIO registers at 0x180 and above release the spinlock 128 bytes below)
 and RP2350-E19 (a reboot hangs with any FRCE_OFF bit but PROC1 set). The
 drivers: `brio/rp2350/multicore.hpp` (the doorbell, the mailbox, the
 launch) and `brio/rp2350/platform.hpp` (one platform type per core) over
-`brio/util/inbox.hpp`, the bridge of design/kernel.md section 12; the
-tickers are `brio/rp2350/ticker.hpp`'s, one per core. The reference
-suite: `test_rp2350_multicore`.
+`brio/util/inbox.hpp`, the bridge of
+[design/kernel.md, "Two cores: two kernels and a bridge"](../design/kernel.md#12-two-cores-two-kernels-and-a-bridge-utilinboxhpp);
+the tickers are `brio/rp2350/ticker.hpp`'s, one per core. The reference
+suite: `test_rp2350_multicore` (a letter is one command key of the
+suite's console and the group of verdicts it runs; `z` is the key that
+runs them all, letters a to h, j and k here).
 
 ## What the silicon does
 
-FOUR PROCESSOR SOCKETS AND TWO CORES: a pair of Cortex-M33 and a pair of
+Four processor sockets and two cores: a pair of Cortex-M33 and a pair of
 Hazard3, of which one pair runs (3.9). Everything below is the same on
 both pairs, and that is a fact of this chip rather than a convenience:
 the system interrupt numbers are shared (3.8.4.2), the SIO is the SIO
@@ -36,23 +121,23 @@ its timebase (two SysTicks on the Arm pair; on the RISC-V pair one shared
 mask, its stack, its debug logic - and, on the Arm pair, its VTOR, its
 MSPLIM and its CPACR. SIO's CPUID reads 0 or 1 on the core that reads it.
 
-TWO CROSS-CORE CHANNELS, and the datasheet says plainly what each is for:
+Two cross-core channels, and the datasheet says plainly what each is for:
 
 - **The mailbox FIFOs** (3.1.5), one per direction, "for cross-core
   events whose count and order is important". Each core writes FIFO_WR
   and reads FIFO_RD; FIFO_ST carries a room bit, a data bit and two
   sticky misuse flags (a read of an empty FIFO, a write to a full one).
-  One interrupt line per core, SIO_IRQ_FIFO, number 25. THE DEPTH IS
-  STATED TWICE AND DIFFERENTLY: 3.1.5 says four entries, the FIFO_ST
+  One interrupt line per core, SIO_IRQ_FIFO, number 25. The depth is
+  stated twice and differently: 3.1.5 says four entries, the FIFO_ST
   register description says eight - which is why the driver states no
   depth and the suite measures one.
 - **The doorbells** (3.1.6), eight flags in each direction, "for events
   which are accumulative (i.e. may post multiple times, but only answered
   once) and which can be responded to in any order". DOORBELL_OUT_SET
-  raises a flag on the OPPOSITE core, DOORBELL_IN_SET on this one,
+  raises a flag on the opposite core, DOORBELL_IN_SET on this one,
   DOORBELL_IN_CLR acknowledges and reads back what stands; the interrupt
   stands while any flag does. The line is SIO_IRQ_BELL, number 26, and it
-  is CORE-LOCAL: the same number on each core, notifying the core that
+  is core-local: the same number on each core, notifying the core that
   reads it.
 
 Out of reset core 1 goes to the ROM's wait state (5.2, table 451): it
@@ -63,11 +148,11 @@ top on any wrong word - then "set Secure main sp and VTOR, then jump into
 the entry point provided". The fourth word means VTOR on the Arm pair and
 mtvec on the RISC-V one; the sixth carries the Thumb bit on the Arm pair.
 A 0 must be preceded by a drain of the sender's own inbound FIFO and by
-an EVENT, because core 1 may be asleep waiting for FIFO room - `sev`
+an event, because core 1 may be asleep waiting for FIFO room - `sev`
 there, `h3.unblock` here, and both are sticky, so an event posted before
 the sleep makes the sleep fall through.
 
-What the ROM does NOT hand over is the rest of a core's private state:
+What the ROM does not hand over is the rest of a core's private state:
 the global pointer on the RISC-V pair (a register the crt sets once, on
 core 0), MSPLIM and CPACR on the Arm one. Nothing else of the image is
 per core: one vector table, one flash, one SRAM, one clock tree.
@@ -79,7 +164,7 @@ any other FRCE_OFF bit set - therefore costs this chapter nothing: PROC1
 is the only bit it touches, and the watchdog's reboot clears the rest
 before it triggers ([watchdog.md](watchdog.md)).
 
-RP2350-E2 IS LIVE AND HARMLESS HERE. A write to an SIO register at offset
+RP2350-E2 is live and harmless here. A write to an SIO register at offset
 0x180 or above is also decoded as a write to the spinlock 128 bytes
 below, releasing that lock: the four doorbell registers alias SPINLOCK0
 to SPINLOCK3, and the platform timer's registers alias others. brio takes
@@ -98,14 +183,14 @@ stay safe.
   either core (OUT_SET or IN_SET by CPUID), and a launch needs nothing
   masked - on the RP2040 the doorbell interrupt had to be off while the
   protocol ran, because its handler would have eaten the echoes.
-- The doorbell line has ONE number for both cores, where the RP2040's two
+- The doorbell line has one number for both cores, where the RP2040's two
   FIFO lines had two (SIO_IRQ_PROC0 and SIO_IRQ_PROC1). Enabling it
   enables the bell of the core that runs the verb, so the verb refuses on
   any other core rather than arm the wrong one.
 - The RP2040's memory-mapped divider is gone (3.1.7) and the doorbells,
   the RISC-V soft interrupt and the platform timer stand in that address
   space instead - which is what RP2350-E2 is about.
-- The mailbox FIFO is FOUR words deep here against the RP2040's eight -
+- The mailbox FIFO is four words deep here against the RP2040's eight -
   measured, which also settles the two places this datasheet states it
   differently: 3.1.5 is right and the FIFO_ST register description's
   "8 words deep" is not.
@@ -123,14 +208,14 @@ stay safe.
   one; `Ticker` is core 0's. The app's one `isr_systick` binding ticks
   the ticker of the core that took it.
 - `SioDoorbell<core>`: `flags` (all eight) and `bell` (the one a ring
-  raises); `ring()` from EITHER core - the opposite core's flags or this
+  raises); `ring()` from either core - the opposite core's flags or this
   core's own, chosen by CPUID, followed by the architecture's event;
   `pop_all()` on this core, which acknowledges what stands and returns
   it; `pending()`, answerable from either core; `enable()` / `disable()`,
-  which refuse unless the calling core IS `core`; `irq()`.
+  which refuse unless the calling core is `core`; `irq()`.
 - `SioMailbox`: the FIFO as a channel of a program's own, since the
   bridge does not use it - `writable()`, `readable()`, `push()` (which
-  REFUSES on a full FIFO rather than leave the sticky flag a bare store
+  refuses on a full FIFO rather than leave the sticky flag a bare store
   would), `pop()`, `drain()`, `read_on_empty()`, `write_on_full()`,
   `clear_errors()`, `irq()`.
 - `core_send_event()`: the architecture's cross-core event instruction,
@@ -138,14 +223,14 @@ stay safe.
 - `Core1`: `launch(entry, stack_top = default_stack_top())` - core 1
   reset into the ROM, then the protocol; `entry` runs on core 1 on the
   stack the linker script reserves in the unstriped bank scratch_x, with
-  this core's vector base. `protocol(entry, stack_top)` alone, for a core
-  1 known to be waiting - it refuses while this core's SIO_IRQ_FIFO is
-  enabled, whose handler would eat the echoes, and does NOT care whether
-  the bell is enabled. `reset()` - core 1 into the ROM through
+  this core's vector base. `protocol(entry, stack_top)` alone, for a
+  core 1 known to be waiting - it refuses while this core's SIO_IRQ_FIFO
+  is enabled, whose handler would eat the echoes, and does not care
+  whether the bell is enabled. `reset()` - core 1 into the ROM through
   FRCE_OFF.PROC1, its "drained" word popped. `entered()` - the entry
-  shim's own word, true once core 1 has arrived. `trace` / `trace_count`
-  - what core 1 answered, for a suite's eyes. Every wait bounded, false
-  when unanswered.
+  shim's own word, true once core 1 has arrived. `trace` /
+  `trace_count` - what core 1 answered, for a suite's eyes. Every wait
+  bounded, false when unanswered.
 - `core1_trampoline`, `Core1Frame`, `Core1::start`, `core_global_pointer()`,
   `core_vector_base()`: the entry shim in the open - the naked, relocation-
   free first instructions core 1 runs, the four words core 0 leaves on its
@@ -180,7 +265,7 @@ extern "C" void isr_systick() {
     if (brio::core_id() == 0) brio::CoreTicker<0>::tick();
     else                      brio::CoreTicker<1>::tick();
 }
-// ONE bell vector for both cores: the line is core-local and carries one
+// One bell vector for both cores: the line is core-local and carries one
 // number, so the core that took it decides which drain runs.
 extern "C" void isr_sio_bell() {
     if (brio::core_id() == 0) brio::Inboxes<Origin>::isr();
@@ -294,7 +379,7 @@ about it was carried by an event that crossed.
   bounded by a COUNT and not by a time because an overflow counter is
   sixteen bits and saturates: at 100 ms flat out the Arm half offers some
   122000 Pings and loses 118807, which 65535 cannot say, and the letter
-  now checks that no counter reached that ceiling.
+  checks that no counter reached that ceiling.
 - **The lower-priority AO of core 1 is starved by pack order, visibly.**
   Under that load Beat's metronome gets 78 of its Ticks dispatched and
   39 or 40 dropped at its own queue, on either half - the kernel serving
@@ -320,9 +405,10 @@ about it was carried by an event that crossed.
   there once. **EVERY LAUNCH LEAVES CORE 1'S ROE STANDING**: its FIFO_ST
   read 0x1 after the boot's launch and after letter g's relaunch, and
   SIO_IRQ_FIFO is VLD | ROE | WOF (3.1.5), so a core 1 opening its
-  mailbox line took the interrupt with no word in the FIFO - 541 437
-  entries in half a second, its kernel starved, before the entry shim
-  cleared the flags; now it reads 0 every time. THE MAILBOX AS A
+  mailbox line with the flag standing takes the interrupt with no word
+  in the FIFO (measured without the clear: 541 437 entries in half a
+  second, its kernel starved); the entry shim clears the flags, and
+  with it FIFO_ST reads 0 every time. THE MAILBOX AS A
   PROGRAM'S CHANNEL UNDER LOAD: 4096 sequence words, one every 2 us,
   through the FIFO into core 1's vector beside a Ping every 64 words
   through the inbox - every word in sequence, all 64 Pongs in order, no
@@ -350,14 +436,18 @@ Driver gaps, each with its reason:
   at all), and the rest waits for a program. RP2350-E2 is the reason a
   lock, if one were ever wanted, would have to be chosen by number.
 - **Per-core ownership of a peripheral's interrupt beyond rule 2**
-  (design/kernel.md section 12): each driver's `init` enabling its line
-  on the calling core is the whole mechanism today; a check that the same
+  ([design/kernel.md, "Two cores: two kernels and a bridge"](../design/kernel.md#12-two-cores-two-kernels-and-a-bridge-utilinboxhpp)): each driver's `init` enabling its line
+  on the calling core is the whole mechanism; a check that the same
   line is not enabled on both cores would need a register the chip does
   not offer.
 - **A power model across the cores** - the chip-level sleep needs both
   kernels' consent, a vote through the bridge with the round's deadline
-  as the veto. Born with the power chapter (POWMAN), which is not
-  written.
+  as the veto. The power chapter ([sleep.md](sleep.md),
+  [powman.md](powman.md)) has no such vote: its sleep sites are core 0's
+  (`Rp2350TimedSleepSite` refuses any platform but `Rp2350Platform<0>`,
+  and the dormant hook is core 0's platform's), and `util/power.hpp`'s
+  round asks the voters of one kernel; [sleep.md](sleep.md) lists the
+  same gap.
 - **The bus fabric's contention counters** (BUSCTRL): the measure of two
   cores executing from one XIP cache, born with the first program whose
   timing asks.

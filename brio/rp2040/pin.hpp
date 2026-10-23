@@ -3,37 +3,69 @@
  *
  * GPIO on the RP2040 (datasheet 2.19): the thirty pins of the user bank
  * as compile-time types, the two register blocks that govern them, and
- * the single-cycle path the processor drives them through.
+ * the single-cycle path the processor drives them through. A program
+ * uses it to drive an LED or read a button, to hand a pad to a
+ * peripheral, and to move many pins in one word. The smallest use, the
+ * LED of both bench boards (docs/rp2040/pin.md, "How to use it"):
  *
- * THREE BLOCKS OWN A PIN, and the chapter names them:
+ *     using Led = brio::Pin<25>;    // GPIO25, a type: nothing configured yet
+ *     Led::output();                // SIO owns the pad, driven at GPIO_OUT's
+ *                                   // bit
+ *     Led::toggle();
+ *
+ * `Pin<25>` names the pin when the program is compiled; the alias
+ * configures nothing, and output() is the call that does. There is no
+ * port letter: one bank, pins 0..29.
+ *
+ * Which context calls what. The level verbs - set(), clear(), toggle()
+ * and Gpio's out_set / out_clear / out_toggle / oe_set / oe_clear - are
+ * single stores into SIO's SET/CLR/XOR registers (2.3.1.2): no read, no
+ * window, legal from any context. read(), read_out(), is_output() and
+ * status() are single loads, legal anywhere. The configuring verbs
+ * (output(), input(), function(), analog(), release(), pull(), the two
+ * overrides, Gpio::outputs()) belong to setup in main() or to an active
+ * object's handler (an active object is a brio component with its own
+ * event queue, served one event at a time by the kernel): function(),
+ * analog() and release() write a pin's CTRL and pad registers whole, and
+ * pull() and the overrides read the register before their one alias write
+ * (device.hpp's hw_write_masked), so two contexts configuring the same
+ * pin at once race; different pins never share a register. Nothing here
+ * masks interrupts, and nothing waits but the first configuring verb's
+ * bounded wait for the two banks to leave reset (below).
+ *
+ * Three blocks own a pin, and the chapter names them:
  *  - IO_BANK0 (2.19.2): a CTRL register per pin whose FUNCSEL chooses
- *    WHICH PERIPHERAL owns the pad's direction, level and input - a
+ *    which peripheral owns the pad's direction, level and input - a
  *    UART, an SPI, an I2C, a PWM slice, a PIO, a clock, USB control,
  *    or SIO for software - plus the overrides that sit between the
  *    function and the pad (2.19.6.1's OUTOVER and OEOVER; INOVER and
  *    IRQOVER are not offered here). The
  *    peripheral's function number is the same on every pin it reaches
- *    (F2 is UART on every UART pin, F5 SIO everywhere), and WHICH
+ *    (F2 is UART on every UART pin, F5 SIO everywhere), and which
  *    instance and signal a pin carries under that number is table 279,
  *    which the driver of each peripheral keeps (uart.hpp's pin table);
  *  - PADS_BANK0 (2.19.4): a register per pin for the pad's electrical
  *    behaviour - drive strength, slew, hysteresis, the pull-up, the
  *    pull-down (both together = the bus keeper), the input buffer
  *    enable and an output DISABLE that overrides whoever owns the pad.
- *    The reset state is INPUT ENABLED, PULL-DOWN, 4 mA, hysteresis on
+ *    The reset state is input enabled, pull-down, 4 mA, hysteresis on
  *    (the register's reset value 0x56), so every pin comes up as an
  *    input reading low unless something drives it;
  *  - SIO (2.3.1.2): the processor's own path, one cycle per access,
  *    with the whole bank in one word: GPIO_OUT, GPIO_OE and their
  *    SET/CLR/XOR twins, GPIO_IN. A pin under FUNCSEL = SIO follows
- *    these; a pin under any other function does not, BUT GPIO_IN
- *    ALWAYS READS THE PAD, whatever owns it (table 280).
+ *    these; a pin under any other function does not, but GPIO_IN
+ *    always reads the pad, whatever owns it (table 280).
  *
- * The two banks are the reset controller's (2.14): every configuring
- * verb here releases IO_BANK0 and PADS_BANK0 first, once, the way the
- * other families open a port's clock.
+ * The two banks are the reset controller's (2.14) and are held in reset
+ * at power-up: Gpio::ready() releases IO_BANK0 and PADS_BANK0 and waits,
+ * bounded, for their RESET_DONE (resets.hpp), and function(), analog(),
+ * outputs() and the Pin verbs over them (output(), input()) call it
+ * first, the way the other families open a port's clock. release(),
+ * pull() and the overrides do not, so they act on a pad some earlier
+ * verb has already brought out of reset.
  *
- * No port letters: one bank, pins 0..29, `Pin<25>`. The QSPI bank (the
+ * The QSPI bank (the
  * six flash pins, 2.19.2's table 281) is the flash's and is not offered
  * here. GPIO26..29 double as the ADC's inputs; erratum RP2040-E6 (the
  * digital input left enabled on them, fixed in the B2 bootrom) is the
@@ -150,7 +182,10 @@ constexpr uint32_t pad_value(const PinConfig& cfg) {
 struct Gpio {
     Gpio() = delete;
 
-    /// Every configuring verb opens with this: both blocks out of reset.
+    /// Both blocks out of reset: confirmed at once when they already
+    /// are, else released and their RESET_DONE waited for, bounded
+    /// (resets.hpp); false when a bank never reported ready. function(),
+    /// analog() and outputs() open with it and discard the answer.
     static bool ready() {
         constexpr uint32_t both = ResetBlock::io_bank0 | ResetBlock::pads_bank0;
         return Resets::released(both) || Resets::release(both);
@@ -257,11 +292,7 @@ struct Gpio {
     }
 };
 
-/**
- * One pin as a type. Also a PwmChannel of one level (util/pwm_channel.hpp):
- * `max` 1, `duty(v)` = set or clear.
- */
-/// A pin named at RUN TIME - what a bus request carries as its chip
+/// A pin named at run time - what a bus request carries as its chip
 /// select or D/C line (rp2040/spi.hpp's Request): the pin number, or
 /// none. Every verb is a SIO word access on the pin's bit; a null
 /// reference does nothing and reads false.
@@ -292,6 +323,11 @@ struct PinRef {
     bool read_out() const { return valid() && (SIO->GPIO_OUT & (1u << pin)) != 0u; }
 };
 
+/**
+ * One pin as a type: GPIO n, a pin number outside 0..29 a compile error.
+ * Also a PwmChannel of one level (util/pwm_channel.hpp): `max` 1,
+ * `duty(v)` = set or clear.
+ */
 template <uint8_t n>
 struct Pin {
     static_assert(n < gpio_count, "the RP2040's user bank has thirty pins, GPIO0..GPIO29");
@@ -299,16 +335,21 @@ struct Pin {
     static constexpr uint8_t number = n;
     static constexpr uint32_t mask = 1u << n;
 
+    /// A software output: the pad set up per `cfg`, SIO as its function,
+    /// then the output enable, so the pad drives whatever GPIO_OUT's bit
+    /// holds. A configuring verb (the opening comment).
     static void output(const PinConfig& cfg = {}) {
         Gpio::function(n, PinFunction::sio, cfg);
         Gpio::oe_set(mask);
     }
-    /// An output starting at `level`, the level written BEFORE the
+    /// An output starting at `level`, the level written before the
     /// direction so the pin never shows the other one.
     static void output(bool level, const PinConfig& cfg = {}) {
         if (level) { set(); } else { clear(); }
         output(cfg);
     }
+    /// A software input: the output enable cleared first, then the pad
+    /// with `pull` (the input buffer on) under SIO. read() gives the level.
     static void input(PinPull pull = PinPull::none) {
         Gpio::oe_clear(mask);
         Gpio::function(n, PinFunction::sio, {.pull = pull});
@@ -324,6 +365,9 @@ struct Pin {
     /// This pin as a run-time reference (a bus request's select line).
     static constexpr PinRef ref() { return PinRef{n}; }
 
+    /// The level verbs: one store into SIO's SET/CLR/XOR register each,
+    /// legal from any context; they move the pad only while SIO
+    /// owns it and its output is enabled.
     static void set() { SIO->GPIO_OUT_SET = mask; }
     static void clear() { SIO->GPIO_OUT_CLR = mask; }
     static void toggle() { SIO->GPIO_OUT_XOR = mask; }

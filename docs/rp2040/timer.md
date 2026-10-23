@@ -1,11 +1,64 @@
 # Timer (RP2040)
 
-Documents of record: the RP2040 datasheet (build 3184e62), 4.6 (the
+This document is for a programmer who needs to time something on an
+RP2040 in microseconds, or to be interrupted at a moment microseconds
+ahead. The system timer is one 64-bit counter of microseconds counting
+the crystal's own time, independent of the rate the cores run at, and
+four alarms that each raise an interrupt line of their own. `Timer` is
+the driver, a monostate (a type whose functions are all static, over
+the one block it stands for). It is not the kernel's timebase - the
+kernel's time events run on SysTick ([platform.md](platform.md)) - but
+it is the ruler every timing verdict of this stratum's suites is judged
+against.
+
+The smallest use, from "How to use it" below - a span measured, then
+an alarm 2 ms ahead:
+
+```cpp
+brio::Timer::init(clock);                     // after SysClock::init()
+const uint32_t t0 = brio::Timer::now_low();
+...
+const uint32_t took_us = brio::Timer::now_low() - t0;
+
+extern "C" void isr_timer_0() { brio::Timer::clear(0); /* ... */ }
+brio::Timer::interrupt(0, true);
+brio::Nvic::enable(brio::Timer::irq(0));
+brio::Timer::alarm_in(0, 2000u);              // fires in 2 ms, once
+```
+
+Line by line: `init()` takes the clock's tag ([clock.md](clock.md)),
+releases the block from reset and starts the 1 us tick by dividing the
+crystal's rate down; `now_low()` reads the counter's low 32 bits, and
+the difference of two readings is the span in microseconds, right
+across a wrap of the low half for any span under 71 minutes;
+`isr_timer_0` is alarm 0's handler under the pico-sdk's name, and its
+first act clears the alarm's flag; `interrupt(0, true)` enables the
+alarm's interrupt at the block and `Nvic::enable()` its line in the
+NVIC of the calling core; `alarm_in()` arms the alarm `2000` us from
+now, and it fires once.
+
+What decides correctness even there. `init()` after `SysClock::init()`:
+the tick is clk_ref divided by the crystal's megahertz, so it is a
+microsecond only once clk_ref runs on the crystal, and `init()` answers
+false when the block did not come out of reset or the divider did not
+fit. The handler clears the alarm's flag, a level that otherwise
+re-enters the handler at once. An alarm matches the low half alone:
+it can be at most 2^32 us (about 71 minutes) ahead. `now()`, the
+64-bit read, is safe from any context; `now_latched()` is one
+context's only. And `init()` clears DBGPAUSE: on this two-core chip a
+core halted by a debugger would otherwise stop the ruler of the other
+core ("Bench findings").
+
+## Documents of record
+
+The RP2040 datasheet (build 3184e62), 4.6 (the
 system timer: the 64-bit counter, the latching pair, the four alarms)
 and 4.7.2 (the watchdog's tick generator it counts). The driver:
 `brio/rp2040/timer.hpp` over `resets.hpp` and `watchdog.hpp`. The
 reference suite: `test_rp2040_platform`, letter j, and every timing
-letter of that suite, which this timer is the ruler of.
+letter of that suite, which this timer is the ruler of (a suite's
+letter is one command key of its console and the group of verdicts it
+runs).
 
 ## What the silicon does
 
@@ -14,15 +67,15 @@ so it is monotonic - counting the nominal 1 us tick the watchdog block
 derives from clk_ref (4.7.2): with clk_ref on the crystal, as
 rp2040/clock.hpp puts it, the count is the crystal's own microseconds,
 independent of clk_sys and of whatever the PLL does. Four alarms match
-the LOW 32 bits (at most 2^32 us, about 71 minutes, ahead): writing an
+the low 32 bits (at most 2^32 us, about 71 minutes, ahead): writing an
 ALARMn register arms it (ARMED's bit), the match clears ARMED and
 raises INTR's bit - a level, cleared by writing 1 to it - and each
 alarm has its own NVIC line, TIMER_IRQ_0..3. INTE masks, INTF forces,
 INTS is the masked status. The 64-bit value is read either through
-TIMELR/TIMEHR, where reading the low half LATCHES the high one until
+TIMELR/TIMEHR, where reading the low half latches the high one until
 it is read (right for one reader, wrong for two contexts), or through
 the raw halves TIMERAWL/TIMERAWH with a re-read of the high half.
-PAUSE stops the count; DBGPAUSE's two bits, SET AT RESET, stop it
+PAUSE stops the count; DBGPAUSE's two bits, set at reset, stop it
 while either core is halted by a debugger. The block is one of the
 reset controller's, and nothing starts the tick but software.
 

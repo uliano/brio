@@ -1,12 +1,189 @@
 # SPI and I2S (CH32V203, CH32V303)
 
+This document is for a programmer who needs an SPI bus on a CH32V203 or
+a CH32V303: a display, a flash chip or a converter driven from an
+active object (a component of a brio program with its own event queue,
+served one event at a time by the kernel,
+[docs/learn/introduction.md](../learn/introduction.md)), this chip as a
+client another host clocks, or, on the CH32V303RC and VC, an I2S audio
+link. `Spi<n>` is the resource, a monostate (a class with only static
+members, never instantiated: one block, one set of state) with one verb
+per register fact. `SpiHost<n, pins, TxEngine, RxEngine,
+hold_off_cycles>` is the host engine, the driver layer that moves one
+transaction's frames - on the instance's interrupt, on two DMA
+channels, or polled - for the bus arbiter of
+[util/spi_bus.hpp](../../brio/util/spi_bus.hpp), `SpiBus`: an active
+object that owns the bus, runs the requests posted to it one at a time
+in the order they arrived, and replies to each with a `SpiDone` event
+([design/spi-bus.md](../design/spi-bus.md) is the model). `SpiClient<n,
+pins>` is the client, served in polled runs, and `I2s<n>` the same
+block's audio face, a resource with nothing above it.
+
+The smallest use, the first block of "How to use it" below - one
+device, polled, on SPI2's own column:
+
+```cpp
+using Bus = brio::SpiHost<2>;
+Bus::init(clock);                        // no ceiling: every rate legal
+
+const uint8_t cmd[1] = {0x9F};
+uint8_t id[3] = {};
+Bus::Request r{};
+r.cs      = brio::Pin<'B', 12>::ref();
+r.cmd     = brio::lend<brio::Lease::reply>(cmd);
+r.cmd_len = 1;
+r.rx      = brio::lend<brio::Lease::reply>(id);
+r.len     = 3;
+r.mode    = brio::SpiMode::mode0;
+r.clock   = brio::SpiClock::div16;
+r.polled  = true;
+(void)Bus::start(r);                     // true: it is done, `id` is filled
+```
+
+Line by line: `Bus` names the host engine over SPI2 with every other
+template argument at its default - the instance's one column
+(`spi_default_pins<2>`: NSS PB12, SCK PB13, MISO PB14, MOSI PB15), no
+DMA engines, and the default hold-off (below); SPI2 is a part fact, and
+on a CH32V203 below the CH32V203C8, which has SPI1 alone, the line does
+not compile. `Bus::init(clock)` takes the clock task's tag object
+(`constexpr SysClock clock;`, [clock.md](clock.md)) and no SCK ceiling,
+so every rate a request names is legal: it opens the gate, pulses the
+block's reset, writes the column, configures a host in mode 0 with
+8-bit frames and a software select, hands SCK and MOSI to the
+peripheral and takes MISO as an input, raises SPE and enables the
+instance's interrupt line at the PFIC, waiting for nothing; it answers
+false where a ceiling cannot be made at this clock or the column or the
+boot configuration is refused, and the line discards the answer. `cmd`
+and `id` are the transaction's buffers, one byte out and three in.
+`Bus::Request r{}` is the transaction's descriptor with every field at
+its default (no D/C line, no chip-select setup time, an asynchronous
+completion) until the lines below set them: `r.cs` is the chip select,
+PB12 as a plain GPIO pin (`ref()` makes the pin a value the request
+carries), which the engine drives low in `start()` and high again at
+the end; `r.cmd` and `r.rx` lend the two buffers
+(`brio::lend<brio::Lease::reply>`, a loan that lasts until the reply);
+`r.cmd_len = 1` is a command phase of one frame and `r.len = 3` a data
+phase of three, which with no out buffer (`r.tx` left null) clocks 0xFF
+and keeps what comes back in `id`; `r.mode` and `r.clock` are the device's mode and rate,
+the rate a division of the instance's own bus (SPI2 sits on PB1, so
+`div16` is 4.5 MHz of SCK under a 144 MHz clock, where PB1
+runs at 72 MHz); and `r.polled = true` makes `start()` run the whole
+transaction before it returns, spinning with global interrupts enabled
+and only this instance's RXNE interrupt silenced, under one spin budget
+for the transaction. `start()` then answers true, and `Bus::status()`
+says how it ended: `spi_ok`, `spi_stalled` when a flag never came
+within the budget (a bus whose clock does not run), or `spi_overrun`
+when a frame was lost. These lines run in `main()` after
+`SysClock::init()`. A bus that several active objects share goes
+through the arbiter instead, which calls `start()` itself - the second
+block of "How to use it":
+
+```cpp
+using Arb = brio::SpiBus<Bus, Platform, 4>;
+BRIO_CH32_VECTOR(spi2_handler) {
+    if (Bus::isr()) { brio::post<Arb>(brio::TransferDone{Bus::status()}); }
+}
+r.polled = false;
+r.reply  = brio::reply_to<MyAo, brio::SpiDone>();
+brio::post<Arb>(r);
+```
+
+`Arb` names the arbiter over `Bus`, an active object listed in the
+program's `Tenuto` (`Platform` is the program's platform type,
+[platform.md](platform.md)'s `P`), with up to four requests waiting
+while one is in flight; a further one is answered `spi_rejected` at
+once. `BRIO_CH32_VECTOR(spi2_handler)` binds SPI2's interrupt vector,
+under the name the crt (the startup code that runs before `main()`,
+`ch32vx03/src/glue/startup_ch32vx03.S`) gives it; its body calls
+`Bus::isr()`, the engine's pump, which reads each frame on RXNE and
+writes the one after, and which answers true when the transaction has
+just completed and the select is high again - the moment the body posts
+`TransferDone{Bus::status()}` to the arbiter. `r.polled = false` puts
+the transaction on that interrupt, `r.reply` names the active object
+(`MyAo`) and the event (`SpiDone`) the answer comes back as, and
+`brio::post<Arb>(r)`, from one of `MyAo`'s handlers, copies the request
+into the arbiter's queue: the arbiter calls `start()` from its own
+dispatch, the frames run on the vector, and `SpiDone`, with the status,
+reaches `MyAo` as an event of its own.
+
+What decides correctness even there:
+
+- **The clock task first.** `init()` takes its rates from the clock
+  type, not from the hardware: the instance's bus rate
+  (`reference_hz()`), against which `sck_hz()` and a ceiling's code are
+  worked out, the busy-wait of a request's `cs_setup_us`, and the
+  write-ahead codes ("The host engine" below). The rate on the wire is
+  the real bus over the request's division, so a host initialized while
+  the chip still runs at its 8 MHz HSI reset rate, under a 144 MHz
+  type, clocks SPI1's requests eighteen times and SPI2's and
+  SPI3's nine times slower than `sck_hz()` reports, and its chip-select
+  setup waits eighteen times as long; and on SPI2 and SPI3 the
+  write-ahead codes assume a bus at half of HCLK where the reset
+  clock's PB1 runs at all of it, so a receive may keep two frames in
+  flight at a frame half as long in core cycles as the threshold
+  assumed (derived from the arithmetic, not measured). Nothing refuses
+  that order: `init()` answers false only for the ceiling, the column
+  and the boot configuration.
+- **The select pin made an output first.** The engine only stores to
+  the request's `cs` (one BSHR or BCR store) and configures nothing, so
+  the program drives the pin high and makes it an output
+  (`brio::Pin<'B', 12>::output(true)`, [pin.md](pin.md)) before the
+  first request - a line neither block writes. A select left as the
+  reset leaves it, a floating input, drives nothing.
+- **The vector bound by the program**, for a request that is not
+  polled: it completes on the instance's interrupt, and a vector left
+  unbound runs the crt's weak `default_handler`, a spin loop, at the
+  first frame, with no fault and no message. On a host with DMA engines
+  a data phase that rides them completes on the receive channel's vector
+  instead (`dma_rx_isr()`, the third block of "How to use it"), a polled
+  request's included, whose wait in `start()` ends on that vector, while
+  the command phase of a request that is not polled still runs on the
+  instance's. On the
+  CH32V303's images, built with the F extension and the hardware
+  prologue on (the core saving the caller-saved integer registers at
+  interrupt entry; the project's `CH32VX03_HPE` option, a CMake option
+  of the `ch32vx03/` project chosen at configure, on by default),
+  `BRIO_CH32_VECTOR` makes a naked trampoline whose body must do no
+  floating-point work, which the pump's does not; `brio check ch32vx03`'s
+  vector guard fails an image whose trampoline body reaches an FP
+  instruction ([platform.md](platform.md)).
+- **The buffers lent until the reply.** Through the arbiter, `cmd` and
+  `id` stay untouched and in scope from the post to the `SpiDone` event
+  `MyAo` receives: a local array of the handler that posts dies with
+  the handler, so such buffers are an active object's members or
+  static, and nothing checks it. A polled `start()` called directly
+  reads and writes them inside the call only.
+- **The mode, the rate and the frame size the device wants** travel in
+  every request and are checked by nothing but the device; and on a bus
+  of loose wires the pads' slew class (`pad_speed()`, the port's fastest
+  by default) decides modes 1 and 2 ("A data line's edge is a
+  correctness parameter" below).
+- **No sleep while an engined block runs.** In a sleep of any depth no
+  bus master but the core gets a cycle on this family, so the kernel's
+  idle hook returns at once while a DMA channel is enabled (the
+  bus-master count, `ch32vx03/bus_activity.hpp`; [sleep.md](sleep.md)),
+  and a host with engines holds the program awake while a block is in
+  flight.
+
+The rest of this page, in order: the documents of record; what the
+silicon does - the instances and their buses, the one buffer each way,
+what may be written when, the flags, a data line's edge, the pads, the
+DMA slots, the high-speed read and the I2S face; the types and verbs -
+the vocabulary, the resource, the host engine and the client; how to use
+it, in six blocks; the bench findings - the CH32V203C8T6's, the
+CH32V303VCT6's, the pair's, and this part as the desk's instrument
+`spi_peer`; and what is not covered.
+
 Up to three synchronous serial ports, both roles, 8- or 16-bit frames,
 the four transfer modes, three chip-select arrangements, the simplex and
 one-wire line modes, a hardware CRC over the traffic and two DMA
 requests each - the STM32F1's SPI under WCH's register names, with one
 register of its own (HSCR, a high-speed read mode) - and on the
 CH32V303RC and VC the I2S face of the second and third instances.
-Documents of record: the CH32F/V20x_V30x_V31x reference manual V2.3
+
+## Documents of record
+
+The CH32F/V20x_V30x_V31x reference manual V2.3
 (20.1 for what the block claims, 20.2 for the SPI face's behaviour,
 20.3 for the I2S face's, 20.4 for the registers with tables 20-1 to 20-3
 for the three instances' maps and 20.4.10's lot notes for HSCR, 3.3.5.8
@@ -16,15 +193,25 @@ and figure 3-3 for the I2S clock, 10.2.11 with tables 10-5, 10-32 and
 the CH32V203 datasheet V2.8 (table 2-1 for how many SPI a part has,
 section 3 for which pads it bonds) and the CH32V303 datasheet V3.5
 (table 2-1-1 for the SPI and I2S counts, table 3-4 for the audio pads).
-Three device classes read the chapter: CH32V20x_D6 for every CH32V203 up
-to the CH32V203C8, CH32V20x_D8 for the CH32V203RB and CH32V30x_D8 for
-the four CH32V303. Driver:
-[brio/ch32vx03/spi.hpp](../../brio/ch32vx03/spi.hpp). Reference suites:
-`test_vx03_spi`, whose second set runs against the desk partner - the
-CH32V203C8T6's SPI2 wired to the CH32V303VCT6's SPI3 on its second
-column, the far board running `spi_peer` - and whose single-board set
-uses the CH32V203's SPI1 strap and the CH32V303's SPI2-SPI3 jumpers, and
-`test_vx03_i2s` for the audio face.
+Three device classes (WCH's own division of the family, which the
+manual keys its chapters and many of its registers by) read the
+chapter: CH32V20x_D6 for every CH32V203 up to the CH32V203C8,
+CH32V20x_D8 for the CH32V203RB and CH32V30x_D8 for the four CH32V303.
+Driver: [brio/ch32vx03/spi.hpp](../../brio/ch32vx03/spi.hpp). Reference
+suites: `test_vx03_spi`, whose second set runs against the desk
+partner - the CH32V203C8T6's SPI2 wired to the CH32V303VCT6's SPI3 on
+its second column, the far board running `spi_peer` - and whose
+single-board set uses the CH32V203's SPI1 strap and the CH32V303's
+SPI2-SPI3 jumpers, and `test_vx03_i2s` for the audio face. A suite's
+letter is one command key of its console and the group of verdicts it
+runs: in `test_vx03_spi`, `z` is the key that runs the single-board set
+(letters a, b, c, e and f, with h and i on the parts that have SPI3)
+and `y` the key that runs the pair's set (d, j, k, l, m, n and o, on
+the parts that have the pair's instance), while `x` runs only when
+asked for by name; in `test_vx03_i2s`, `z` runs all seven letters.
+`bench_vx03`, the stratum's benchmark program (not a test: its letters
+print measurements, [design/benchmark.md](../design/benchmark.md)), is
+driven by letters the same way.
 
 ## What the silicon does
 
@@ -32,13 +219,13 @@ uses the CH32V203's SPI1 strap and the CH32V303's SPI2-SPI3 jumpers, and
 
 SPI1 is the PB2 instance and SPI2 and SPI3 the PB1 ones, which decides
 three things at once: the gate bit, the reset line, and - the one that
-surprises - THE CLOCK BR DIVIDES. PB2 runs at HCLK on this family and
+surprises - the clock BR divides. PB2 runs at HCLK on this family and
 PB1 is capped at 72 MHz by this stratum, so at the 144 MHz the bench
 runs, `SpiClock::div2` is 72 MHz of SCK on SPI1 and 36 MHz on SPI2 and
-SPI3. A program asks the INSTANCE for its reference and never the system
+SPI3. A program asks the instance for its reference and never the system
 clock.
 
-WHICH INSTANCES a part has is its datasheet's table and nothing else,
+Which instances a part has is its datasheet's table and nothing else,
 held as a mask (`device::spi_instances`): every CH32V203 below the
 CH32V203C8 carries SPI1 alone, the CH32V203C8 and RB and the 128 KB
 CH32V303 carry SPI1 and SPI2, and the CH32V303RC and VC all three. An
@@ -51,27 +238,27 @@ the CH32V303's tail.
 Figure 20-1 is one transmit buffer, one receive buffer and one shift
 register. That single fact shapes both roles:
 
-- **TXE means "the buffer moved into the shifter"** - a frame EARLY -
+- **TXE means "the buffer moved into the shifter"** - a frame early -
   and **RXNE means "a frame has been shifted both ways"**, which is the
   one moment the bus is provably idle. A host's pump therefore runs on
   RXNE: one write, one interrupt, one read per frame.
-- **A client answers ONE FRAME AHEAD.** 20.2.3: the slave starts to
+- **A client answers one frame ahead.** 20.2.3: the slave starts to
   transmit on the first sampling edge, moving the buffer into the
   shifter and raising TXE. So the first answer must be in the buffer
   before the host's first clock, and every received frame loads the
   next. A client that falls behind does not stall the bus - the host
   reads whatever the shifter held, a wrong answer and never a missing
   one (measured: see the dummy byte below).
-- **A client that never drains keeps ONE frame** and raises the overrun
+- **A client that never drains keeps one frame** and raises the overrun
   for every frame after it (measured).
-- **A HOST MAY KEEP TWO FRAMES IN FLIGHT, AND THE RECEIVE BUFFER IS THE
-  PRICE.** 20.2.2: "if the TXE flag bit is set, data needs to be filled
+- **A host may keep two frames in flight, and the receive buffer is the
+  price.** 20.2.2: "if the TXE flag bit is set, data needs to be filled
   into the data register to maintain a complete data flow" - one frame in
   the shifter, the next in the transmit buffer, the clock never pausing.
   But the receive buffer is one deep too: frame k stands in it while
   k + 1 shifts, and if k is not read before k + 1 completes, 20.2.7's
-  overrun discards one. So a host that READS its answers may run two
-  frames ahead only where ONE FRAME TIME exceeds the longest the read can
+  overrun discards one. So a host that reads its answers may run two
+  frames ahead only where one frame time exceeds the longest the read can
   be late, and a host that does not read them (a display's pixel path,
   every command phase) may run two ahead at every rate and let the
   receive side overrun - the transmit side goes on regardless (measured:
@@ -96,7 +283,7 @@ register. That single fact shapes both roles:
 - **The disable is a drain**, not a bit: clearing SPE while a frame is
   in flight truncates it on the wire, so the driver waits for TXE and
   for BSY to fall first, each wait bounded.
-- **A RECEIVE-ONLY HOST NEVER STOPS BY ITSELF.** With RXONLY set (or
+- **A receive-only host never stops by itself.** With RXONLY set (or
   BIDIMODE with BIDIOE clear) the host's clock runs as long as SPE
   stands and frames keep arriving with nothing written, so BSY is the
   wrong thing to wait for. Such a host is stopped by dropping SPE in the
@@ -115,30 +302,32 @@ STATR's eight bits, and what each costs (20.2.7, 20.4.3):
 | TXE | a DATAR write |
 | OVR | a DATAR read followed by a STATR read |
 | MODF | nothing software can do (measured below); the block's RCC reset pulse |
-| CRCERR | a ZERO into its bit and ones elsewhere (the one rc_w0 bit) |
+| CRCERR | a zero into its bit and ones elsewhere (the one rc_w0 bit) |
 | BSY | hardware's, never software's |
 | UDR | the I2S face's: a read of STATR (20.3.7.1) |
 | CHSIDE | the I2S face's: refreshed by the hardware, never cleared |
 
-**MODF IS A DEMOTION**, not a report: the silicon clears SPE and MSTR
+**MODF is a demotion**, not a report: the silicon clears SPE and MSTR
 with it (measured). That is why this driver's bus engine keeps its chip
-select as an ordinary GPIO and never hands the NSS pad to a host. AND
-20.2.7's RECIPE FOR CLEARING IT DOES NOT WORK HERE - six sequences
+select as an ordinary GPIO and never hands the NSS pad to a host. And
+20.2.7's recipe for clearing it does not work here - six sequences
 measured in this driver and eight more with WCH's own peripheral library
 on the same board, its documented one among them, and only the RCC
 reset pulse puts the flag down (the findings below list them).
 
-Five interrupt sources over ONE vector per instance in the SPI face:
+Five interrupt sources over one vector per instance in the SPI face:
 TXE and RXNE under their own enables, and CRCERR, OVR and MODF together
 under ERRIE; in the I2S face ERRIE gates OVR and UDR.
 
 ### A data line's edge is a correctness parameter
 
 On a bus made of jumper wires the fastest pad is the loudest one, and an
-edge coupled from a data line into the clock is ONE SAMPLING EDGE TOO
-MANY - which shows in exactly the two modes that sample on the FALLING
+edge coupled from a data line into the clock is one sampling edge too
+many - which shows in exactly the two modes that sample on the falling
 edge while the data lines change on the rising one, modes 1 and 2. So
-both tasks carry `pad_speed()`, the slew class of the pads they drive,
+both tasks (the host engine and the client below, the driver layers with
+state of their own over the resource) carry `pad_speed()`, the slew
+class of the pads they drive,
 and the default is the port's fastest with the measurement in the
 findings below.
 
@@ -146,7 +335,7 @@ findings below.
 
 Table 10-32 gives SPI1 two columns - PA4/PA5/PA6/PA7 and
 PA15/PB3/PB4/PB5 - selected by one bit of AFIO_PCFR1, and gives SPI2
-NONE: the second instance has no remap field at all and its four pads
+none: the second instance has no remap field at all and its four pads
 (PB12..PB15) come from the datasheet's pin table. Table 10-33 gives SPI3
 two behind PCFR1's bit 28: the default PA15/PB3/PB4/PB5 - the very pads
 of SPI1's second column - and PA4/PC10/PC11/PC12, and the same bit moves
@@ -156,49 +345,50 @@ column, so naming it there is refused.
 
 ### The DMA slots
 
-Tables 11-2 to 11-5, and on this family THE CHANNEL IS THE REQUEST, on
+Tables 11-2 to 11-5, and on this family the channel is the request, on
 one of two controllers where the part has two: SPI1 receives on DMA1's
 channel 2 and transmits on 3, SPI2 on DMA1's 4 and 5, and SPI3 - and
-I2S3, whose requests are the same two - on DMA2's 1 and 2. An engine
+I2S3, whose requests are the same two - on DMA2's 1 and 2 (a slot is
+that pair, a controller and one of its channels). An engine
 named on any other slot is refused at compile time, because a wrong one
 would move nothing.
 
-ONE INTERRUPT A TRANSACTION: every frame that comes back was clocked out
+One interrupt a transaction: every frame that comes back was clocked out
 first, so the receive block's completion proves the transmit block's, and
-the host arms its transmit engine for a transfer error alone. THE RECEIVE
-ENGINE ARMS AT VERY_HIGH AND THE TRANSMIT AT HIGH
+the host arms its transmit engine for a transfer error alone. The receive
+engine arms at VERY_HIGH and the transmit at HIGH
 ([../design/dma.md](../design/dma.md)): DATAR's receive half holds one
 frame, and a receive channel the transmit one outran would find the next
 frame on top of its last - OVR, the frame lost (20.2.7) - while a
 transmit channel that waits only stops the host's clock between two
-frames. THE BEAT IS
-THE FRAME: a 16-bit request runs on the engines as half-words - DFF and
+frames. The beat - one bus access of a channel - is
+the frame: a 16-bit request runs on the engines as half-words - DFF and
 the access to DATAR agreeing - when its buffers are half-word aligned
-(a misaligned one goes to the pump). And the requests are raised AFTER
+(a misaligned one goes to the pump). And the requests are raised after
 both channels are programmed, in one store: a one-frame transaction can
 complete before the launch returns, and the old order - each request
 raised beside its own channel - raised both again after that completion
 and wedged the next transaction ([dma.md](dma.md)).
 
-IN SLEEP THE BUS MATRIX SERVES THE CORE ALONE on this family
+In sleep the bus matrix serves the core alone on this family
 ([dma.md](dma.md)), so a transport with engines holds the program awake
 while a block is in flight.
 
 ### The high-speed read mode: one code means the same on every lot
 
-HSCR.HSRXEN moves a HOST's sampling of MISO late enough to catch an
+HSCR.HSRXEN moves a host's sampling of MISO late enough to catch an
 answer at the top rate, and 20.4.10 tells its story four ways by class
 and by lot. On the CH32V20x_D6 it "is only valid at clock division 2"
 and the bit is write-only. On the CH32V20x_D8 - the CH32V203RB - the bit
 is write-only and the mode valid at /2 alone on lots whose fifth digit
 from the end is below two, anywhere on the others. On the CH32V30x_D8
 lots whose penultimate sixth digit is not zero the bit reads back, BR
-takes a SECOND LADDER under it (20.4.1: FPCLK/2, /3, /4 ... /9 in place
+takes a second ladder under it (20.4.1: FPCLK/2, /3, /4 ... /9 in place
 of the powers of two) and a second mode, HSRXEN2, exists - "used only
 when HSRXEN is turned on and SPI PCLK is greater than or equal to 120M".
 On that class's lots whose sixth digit is zero the bit is write-only
 again, and the mode valid at /2 alone where the fifth digit is below
-two. BR = 000 is FPCLK/2 in BOTH ladders,
+two. BR = 000 is FPCLK/2 in both ladders,
 so /2 is the one code at which the mode means the same thing on every
 die of every class: `high_speed_read()` refuses at any other, at run
 time against the code in the register and at compile time where the
@@ -216,7 +406,7 @@ is not CTLR1), so a host that moves off /2 turns it off first.
 What the mode buys is measured on the CH32V303VCT6: SPI2 hosting SPI3
 at /2 - 36 MHz of SCK, over the evaluation board's jumper wires, every
 frame a DMA channel's - read 254 of 256 bytes wrong without it, 253 of
-them the client's byte ONE BIT LATE (shifted one place toward the least
+them the client's byte one bit late (shifted one place toward the least
 significant end with the previous byte's last bit on top: a sample
 taken before the answer's edge), and every byte right with it, in both
 8- and 16-bit frames; the client received every byte both times. That
@@ -226,7 +416,7 @@ die kept no HSRXEN2.
 
 The register file carries SPIx_I2S_CFGR on every instance and SPIx_I2SPR
 on SPI2 and SPI3, and chapter 20 is written for four families at once;
-what decides whether a part HAS the face is its datasheet - table 2-1-1
+what decides whether a part has the face is its datasheet - table 2-1-1
 gives two I2S to the 256 KB CH32V303 and none to the 128 KB ones, and
 the CH32V203's table 2-1 has no I2S row at all. So `I2s<n>` compiles
 where the part has the face and for SPI2 and SPI3 alone, and elsewhere
@@ -249,9 +439,9 @@ that register.
   or 32-bit one in a 32-bit channel - DATLEN's fourth code "not allowed",
   and CHLEN "only meaningful when DATLEN = 00, otherwise the channel
   length is fixed to 32 bits by hardware". A wider datum in a 16-bit
-  channel is therefore REFUSED rather than quietly given a 32-bit one.
-  A 16-bit datum is ONE data-register access a channel, a 24- or 32-bit
-  one TWO (the high half first, a 24-bit datum's last byte forced to zero
+  channel is therefore refused rather than quietly given a 32-bit one.
+  A 16-bit datum is one data-register access a channel, a 24- or 32-bit
+  one two (the high half first, a 24-bit datum's last byte forced to zero
   on reception) - and two DMA items.
 - **The clock a master divides is SYSCLK.** Figure 3-3, the simple tree
   this class has, draws SYSCLK to both I2S interfaces, and RCC_CFGR2's
@@ -271,16 +461,16 @@ that register.
   data register was written, cleared by a STATR read), OVR (as the SPI
   face's), and BSY - which 20.3.6.1 says stays LOW throughout a master
   reception, and does (measured: never read set through one).
-- **TXE READS 1 WITH I2SE CLEAR**, against 20.3.6.2's "when I2S is
+- **TXE reads 1 with I2SE clear**, against 20.3.6.2's "when I2S is
   turned off (I2SE bit is 0), this flag is also 0": on a configured
   transmitting face, before the enable, through it and after the
   disable, TXE read 1 - and a datum written before the enable is the
-  FIRST WORD ON THE WIRE once the face is enabled (measured on the
+  first word on the wire once the face is enabled (measured on the
   CH32V303VCT6). So a program may load its first word before it
   enables, and nothing waits for TXE to rise at the enable.
 - **The first word is the left channel's.** Under all four standards a
   client receiver's first word was the host's first datum, on the left
-  (CHSIDE clear); and a client TRANSMITTER fed one datum ahead put that
+  (CHSIDE clear); and a client transmitter fed one datum ahead put that
   datum out as the host's first word, on the left, under Philips -
   20.3.5.1's closing sentence, "a WS signal of 1 means that the left
   channel is sent first", describes no level this pair shows.
@@ -311,14 +501,14 @@ I2S face, beside `underrun` and `channel_side`).
 `spi_rate_for(pclk, max_hz)` is the runtime chooser - the coarsest code
 at or below a ceiling, an empty optional where even the bus over 256 is
 faster, never rounded up - and `SpiRateOf<pclk, max_hz>::clock` is the
-same answer as a compile-time constant, REFUSED rather than reported
+same answer as a compile-time constant, refused rather than reported
 where the bus cannot make it. `spi_bus_hz<n>(clock)` is the rate that
 instance's BR field divides, out of a static or a dynamic clock tag.
 
 `SpiConfig` collects everything the two control words hold, and
 `spi_config_valid` is the chapter's refusals: a field holding a value
 its register field does not encode, the CRC asked for outside full
-duplex or with a zero polynomial, and a CLIENT asking for the NSS output
+duplex or with a zero polynomial, and a client asking for the NSS output
 (SSOE is a host's verb).
 
 `SpiPins` is a column - the four pads and the remap code - and
@@ -361,7 +551,7 @@ the sequence each needs (`overrun` / `clear_overrun`, `mode_fault` /
 `half_duplex_output`, `high_speed_read`, `configure_high_speed_read<cfg>()`,
 `high_speed_read2(on, bus_hz)` (the CH32V303's), `i2s_config_writable`,
 `dma_requests`; the three interrupt enables and `isr()`, the body that
-hands back the raised-and-ENABLED sources and consumes nothing.
+hands back the raised-and-enabled sources and consumes nothing.
 
 `I2s<n>` for n = 2 and 3 on the parts that have the face: `bus_clock()`,
 `reset()`, `remap()` (the instance's), `configure(I2sConfig)` and
@@ -382,33 +572,37 @@ enables and requests shared with the SPI face (`dma_requests`,
 
 `SpiHost<n, pins, TxEngine, RxEngine, hold_off_cycles>` is the engine
 [util/spi_bus.hpp](../../brio/util/spi_bus.hpp)'s `SpiBus` drives, and
-its `Request` is the other strata's VERBATIM: a chip select the bus AO
-asserts, a display D/C line, a CS setup time, a command phase and a data
+its `Request` carries the fields every family's host shares
+([design/spi-bus.md, "Realizations"](../design/spi-bus.md#realizations)),
+with the rate and the frame size as this family's `SpiClock` and
+`SpiDataSize`: a chip select the engine asserts in `start()`, which the
+bus AO calls, a display D/C line, a CS setup time, a command phase and a data
 phase with optional out and in buffers, the mode/rate/frame size per
 request, and a `polled` flag choosing between the per-frame ISR pump and
 a synchronous spin inside `start()`. The Request is laid out with no
 padding - the two `PinRef`s, the three buffers and the reply in seven
 words, the lengths and the four settings in two (40 bytes where the old
-order had 48) - and it is LENT for the call: a polled request is read
+order had 48) - and it is lent for the call: a polled request is read
 where it lies and nothing of it is copied; an asynchronous one has what
-its tenure needs - the pins, the buffers, the lengths, the width -
+its tenure (the transaction's time on the bus, from `start()` to its
+completion) needs - the pins, the buffers, the lengths, the width -
 stored into the engine's own Tenure in word stores, and the reply stays
 the arbiter's.
 
-The engine tells TWO SHAPES apart by the in buffer. A WRITE (no in
+The engine tells two shapes apart by the in buffer. A write (no in
 buffer, and every command phase) keeps two frames in flight at every
 rate: the polled loop writes on TXE and never reads the answers - the
 tail waits TXE and then not BSY, and the DATAR-then-STATR read clears
 RXNE and OVR - and the pump reads frame k on RXNE and writes k + 2,
-counting an overrun as the frame it is and going on. THE PUMP TESTS OVR
-IN A STATR LOAD MADE AFTER THE DATAR ONE: the frame in flight behind
+counting an overrun as the frame it is and going on. The pump tests OVR
+in a STATR load made after the DATAR one: the frame in flight behind
 frame k may complete at any moment before the read, and a status copy
 taken before it would miss the OVR that completion raises - frame k + 1
 lost uncounted and, on a phase's last pair, no interrupt after it: a
 transaction that never completes (measured, below). The load after the
 read sees every overrun up to it, and DATAR-then-STATR is 20.2.7's clear,
-so the flag goes down in the same handler. A RECEIVE (an in
-buffer) keeps ONE frame in flight below the write-ahead threshold and
+so the flag goes down in the same handler. A receive (an in
+buffer) keeps one frame in flight below the write-ahead threshold and
 two above it: the polled loop below it pins the next frame's load inside
 the wire time and puts the DATAR read and the next write in adjacent
 instructions, the loop above it is 20.2.2's sequence (TXE then the next
@@ -419,15 +613,15 @@ never comes within the transaction's one spin budget ends it with
 `spi_stalled` - the two codes every host spells from `util/spi_bus.hpp`
 beside the engines' own `spi_dma_fault` (design/spi-bus.md).
 
-THE THRESHOLD is `spi_write_ahead_min_frame_cycles(hold_off)`, the sum
-of two inputs: the HOLD-OFF - the longest, in core cycles at the clock
+The threshold is `spi_write_ahead_min_frame_cycles(hold_off)`, the sum
+of two inputs: the hold-off - the longest, in core cycles at the clock
 the host runs at, that the image keeps the host's vector from running,
 which on a platform where no interrupt nests is the longer of the
 image's longest handler and its longest masked window - and the pump's
 own path from RXNE to the DATAR load (the prologue's 16 and five
 instructions, two of them APB loads; the OVR test is a second STATR
 load after the DATAR one, below). The hold-off is a fact of the
-IMAGE and not of the family, so it is the host's template parameter
+image and not of the family, so it is the host's template parameter
 `hold_off_cycles`, declared by the application or its board file; its
 default, 200, is the longest counted in this family's own images
 (bench_vx03's console handler with its stamps, 151 instructions behind
@@ -446,11 +640,11 @@ The oracle above agrees with the default. An image measures its own
 hold-off with util/bench.hpp's `IsrMeter` in each of its vectors -
 `bench_vx03` meters the tick (letter t), the console (p), the DMA's
 vectors (d) and the pump (e), `isr` over `irq` a handler's body, the
-hardware prologue's entry and exit ([platform.md](platform.md)) on top
-- and its longest masked window in its listing; an `spi_overrun` in a
+hardware prologue's entry and exit ([platform.md](platform.md)) on
+top - and its longest masked window in its listing; an `spi_overrun` in a
 reply is the witness of a figure declared too short.
 
-`apply()` compares ONE WORD: the request's mode, rate code and width are
+`apply()` compares one word: the request's mode, rate code and width are
 folded into CTLR1's own bits over the applied base (CPHA and CPOL are
 `SpiMode`'s two bits in the register's places, BR the code, DFF the
 width), compared with the word in force, and written - with the
@@ -467,8 +661,8 @@ which is a fault path here, and every fault path drains the buffer.
 Beside it: `init(clock, max_sck_hz)` with an optional bus-wide SCK
 ceiling, `rebase()` for a dynamic clock's fan-out, `clock_for()` /
 `sck_hz()` / `reference_hz()`, `prime()` (mode and rate now, moving no
-data - a CPOL flip is an edge, so prime BEFORE the select falls),
-`bit_order()` (a property of the WIRE and so a bus-level verb),
+data - a CPOL flip is an edge, so prime before the select falls),
+`bit_order()` (a property of the wire and so a bus-level verb),
 `pad_speed()` (the slew class of SCK and MOSI, a choice that survives
 the next `init()`), `start()`, `isr()`, `dma_rx_isr()` and
 `dma_tx_isr()` (the two channels' bodies, each reading its own flags;
@@ -488,13 +682,13 @@ with the first answer already in the buffer) and `enable()` (SPE up, the
 buffer empty, for a run), `write` / `writable` / `poll`, `selected()` (a
 live read of the NSS pad, since the peripheral publishes no select
 status), `select()` for a client under software management,
-`drive_output()` and `output_driven()` - THE DARK LISTENER, the answer
+`drive_output()` and `output_driven()` - the dark listener, the answer
 line handed to the peripheral only for the window it answers in -
 `pad_speed()` for that one pad, the error verbs, `isr()`, `release()`,
 and `frames_ahead` = 1, this silicon's answer to the one number a
 portable client would need.
 
-THE RUNS are a client's unit, its per-frame verbs the degenerate case:
+The runs are a client's unit, its per-frame verbs the degenerate case:
 `answer(out, spins)` (the answers on TXE alone, nothing read),
 `exchange(out, in, spins)` (each frame answered one ahead and read on its
 RXNE inside the next frame's time) and `receive(in, spins)` (RXNE alone,
@@ -502,10 +696,10 @@ nothing written), over `uint8_t` or `uint16_t` frames - anything else is
 refused at compile time, DFF having two widths - each returning a `Run`
 (the frames moved and a `RunEnd`: complete, closed by the host, or
 stalled on the spin budget). They are always inline, so the frame width
-and the buffers are constants of the caller's loop. THE SELECT PAD IS THE
-WINDOW: a run waits for it to fall, polls its flag four times a look
-and reads the pad once a look, and takes the host's close only from TWO
-LOOKS IN A ROW reading it high (a transient on a board-to-board select
+and the buffers are constants of the caller's loop. The select pad is the
+window: a run waits for it to fall, polls its flag four times a look
+and reads the pad once a look, and takes the host's close only from two
+looks in a row reading it high (a transient on a board-to-board select
 wire is not a close - the findings below). Per frame, the 8-bit exchange
 in the release listing is fifteen instructions with four APB accesses
 (the two STATR polls, the DATAR store and load) and three taken branches,

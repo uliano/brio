@@ -1,17 +1,70 @@
 /*
  * dma.hpp
  *
- * The DMA controller of the CH32V00x (RM ch. 8): seven channels, each
- * wired to a fixed handful of peripheral requests, an arbiter over four
- * software priorities with the channel index deciding ties, and three
- * flags per channel - the STM32F1's DMA1 under WCH's names, with no
- * request multiplexer: HERE THE CHANNEL IS THE REQUEST. RM table 8-2
- * says which peripheral event each channel answers, and an engine is
- * named by channel number with that table in hand (USART1 transmits on
- * channel 4 and receives on 5, SPI1 on 3 and 2, the ADC on 1, I2C1 on 6
- * and 7, TIM1's update on 5 and TIM2's on 2).
+ * The DMA controller of the CH32V00x (RM ch. 8), for a program that
+ * wants a peripheral served without the CPU or a block of memory moved.
+ * What a program gets: the engines a transport names in its slots (the
+ * USART's, the SPI host's, the I2C host's; an engine, in brio, is the
+ * driver piece that runs one channel for a transport) - the program
+ * names the channel and the transport does the rest -, `DmaCopyEngine`
+ * for memory to memory, and `DmaChannel<ch>`'s one-shot verbs for a
+ * block programmed by hand.
  *
- * WHAT A CHANNEL IS. A configuration word (CFGR: direction, circular,
+ * The smallest use is a transport's slot, as docs/ch32v00x/dma.md
+ * spells it: the console on both engines, USART1 transmitting on channel
+ * 4 and receiving on 5 (table 8-2), each channel's vector bound by the
+ * program to the transport's body:
+ *
+ *     using Serial = brio::Uart<1, P, 64, 128, brio::DmaTxEngine<4>, brio::DmaRxEngine<5>>;
+ *
+ *     extern "C" BRIO_CH32_INTERRUPT void dma1_channel5_handler() {
+ *         if (Serial::dma_isr()) { brio::post<SerialLines>(brio::RxActivity{}); }
+ *     }
+ *     extern "C" BRIO_CH32_INTERRUPT void dma1_channel4_handler() { (void)Serial::dma_isr(); }
+ *
+ * and a copy, its end reported by the channel's vector:
+ *
+ *     using Copy = brio::DmaCopyEngine<1>;           // word beats at most
+ *     Copy::arm(brio::DmaPriority::high);            // interrupt on: the line enabled
+ *     (void)Copy::copy(frame, tile, 1024);           // 1024 words, uint32_t* both
+ *
+ *     extern "C" BRIO_CH32_INTERRUPT void dma1_channel1_handler() {
+ *         if (Copy::isr() != 0u) { ... }             // the block ended (busy() is false)
+ *     }
+ *
+ * Who calls what. An engine's arm() runs once, in main: a transport's
+ * init() arms the engines in its slots, a program arms the ones it owns
+ * itself; it stops whatever the channel was running. A block is started
+ * by the engine's one owner - the transport, from main, an active
+ * object's dispatch or its own completion vector; the copy engine's
+ * caller - and no verb here masks interrupts: a transport whose
+ * completion vector starts the next block holds its own mask over
+ * claim() alone, the decision, and launches outside it (below). The
+ * ISR bodies (service(), isr()) are called from the channel's vector,
+ * which the program binds; the engines bind none. A run handed to an
+ * engine is the caller's storage and stays valid and untouched until
+ * the engine reports the block's end (the completion flag its service()
+ * hands back, busy() false for the copy); the receive ring's storage is
+ * the channel's for
+ * as long as the ring is armed. Nothing waits here but the polled
+ * one-shot loop a caller writes itself. And on the CH32V003 a working
+ * channel keeps the core awake: in that core's Sleep the controller
+ * moves nothing, so its idle() asks Dma::any_working() and does not
+ * sleep while a channel is enabled and circular or with items left
+ * (device::sleep_stops_bus_masters, ch32v00x/platform.hpp) - a circular
+ * receive ring keeps that part's kernel from sleeping at all.
+ *
+ * What the controller is: seven channels, each wired to a fixed handful
+ * of peripheral requests, an arbiter over four software priorities with
+ * the channel index deciding ties, and three flags per channel - the
+ * STM32F1's DMA1 under WCH's names, with no request multiplexer: here
+ * the channel is the request. RM table 8-2 says which peripheral event
+ * each channel answers, and an engine is named by channel number with
+ * that table in hand (USART1 transmits on channel 4 and receives on 5,
+ * SPI1 on 3 and 2, the ADC on 1, I2C1 on 6 and 7, TIM1's update on 5
+ * and TIM2's on 2).
+ *
+ * What a channel is. A configuration word (CFGR: direction, circular,
  * memory-to-memory, the two increments, the two widths, the priority,
  * the three interrupt enables and EN), a count that the controller
  * decrements as it moves items (CNTR), and two addresses named after
@@ -20,38 +73,39 @@
  * names mean nothing. 8.2.1's note makes PADDR, MADDR, CNTR and CFGR's
  * DIR, CIRC, PINC and MINC writable only while EN is clear.
  *
- * THE VECTORS ARE ONE PER CHANNEL (Irq::dma1_channel1..7), and the
- * FLAGS OF ALL SEVEN ARE ONE REGISTER (INTFR, four bits a channel), so a
+ * The vectors are one per channel (Irq::dma1_channel1..7), and the
+ * flags of all seven are one register (INTFR, four bits a channel), so a
  * handler serving two channels of one transport reads it once. DMA1EN in
- * RCC_HBPCENR is the block's one gate, CLOSED at reset (the register's
+ * RCC_HBPCENR is the block's one gate, closed at reset (the register's
  * reset value opens the SRAM alone).
  *
- * TWO THINGS THE SILICON DOES that the engines are built on. EN STAYS
- * SET when a non-circular block completes (CNTR at zero, TCIF up, the
+ * Two things the silicon does that the engines are built on. EN stays
+ * set when a non-circular block completes (CNTR at zero, TCIF up, the
  * channel enabled and idle - only software clears EN), and 8.3.4's note
  * says a channel whose count is zero moves nothing enabled or not. And
- * A READ FROM A HOLE IN THE MAP COMPLETES AS A NORMAL BLOCK (zeros
- * arrive, TEIF stays down): the transfer-error path is written and
- * armed on every engine, but no address the bench could name reaches
- * it. And 8.3.5/8.3.6 say the module IGNORES the low address bits of a
- * 16- or 32-bit access, so a half-word transfer pointed at an odd
- * address moves the wrong bytes and reports success - every verb here
- * that takes a whole transfer or a run refuses an end that is not
+ * a read from a hole in the map completes as a normal block (zeros
+ * arrive, TEIF stays down), as do a write into a hole and a write into
+ * the flash (measured, docs/ch32v00x/dma.md): the transfer-error path is
+ * written and armed on every engine, but no address the bench could name
+ * reaches it. And 8.3.5/8.3.6 say the module ignores the low address
+ * bits of a 16- or 32-bit access, so a half-word transfer pointed at an
+ * odd address moves the wrong bytes and reports success - every verb
+ * here that takes a whole transfer or a run refuses an end that is not
  * aligned to its width (the piecewise set_peripheral()/set_memory()
  * store what they are given).
  *
  * `DmaChannel<ch>` is the channel's whole register surface: the
  * one-shot verbs a suite or a rare user programs a block with
  * (configure, prepare, load - each validating, each opening the gate),
- * the flags, the ISR body. THE ENGINES do not go through it: they are
- * the hot path and are written as TWO MOMENTS.
+ * the flags, the ISR body. The engines do not go through it: they are
+ * the hot path and are written as two moments.
  *
- *  - `arm()` CONFIGURES ONCE. The gate opened, the channel stopped,
+ *  - `arm()` configures once. The gate opened, the channel stopped,
  *    PADDR written - the peripheral's register never changes for a
- *    binding - and the configuration word computed and KEPT IN THE
- *    ENGINE: direction, priority, the interrupt enables the binding
+ *    binding - and the configuration word computed and kept in the
+ *    engine: direction, priority, the interrupt enables the binding
  *    wants. The PFIC line enabled.
- *  - `start()` WRITES WHAT CHANGES, five stores and no load: CFGR with
+ *  - `start()` writes what changes, five stores and no load: CFGR with
  *    EN clear (the configuration word with this block's beat and
  *    increment - the disable 8.2.1 asks for before the count and the
  *    address, and EN may still be standing from the last block), CNTR,
@@ -63,17 +117,18 @@
  *    binding is the engine's type (the channel, the widest beat - checked
  *    at compile time) and arm()'s arguments.
  *
- * THE BEAT IS THE ELEMENT OF THE RUN. `start()` takes a span of uint8_t,
- * uint16_t or uint32_t and the transfer's two widths follow the type, so
- * one channel moves bytes for one block and half-words for the next (an
- * SPI's 8- and 16-bit frames). The engine's `Elem` is the WIDEST beat
- * the binding allows - the peripheral register's width - and a wider
- * span does not compile. A run whose address is not aligned to its beat
- * is REFUSED (8.3.6), and its caller falls back to whatever moves it
- * otherwise.
+ * The beat is the element of the run. A run is the contiguous span of
+ * elements one block moves, and the beat the width of one bus access.
+ * `start()` takes a span of uint8_t, uint16_t or uint32_t and the
+ * transfer's two widths follow the type, so one channel moves bytes for
+ * one block and half-words for the next (an SPI's 8- and 16-bit frames).
+ * The engine's `Elem` is the widest beat the binding allows - the
+ * peripheral register's width - and a wider span does not compile. A run
+ * whose address is not aligned to its beat is refused (8.3.6), and its
+ * caller falls back to whatever moves it otherwise.
  *
- * THE CLAIM AND THE PROGRAMMING ARE TWO VERBS. A transmit engine is
- * BUSY from its claim to its complete(). `claim()` is that flag's
+ * The claim and the programming are two verbs. A transmit engine is
+ * busy from its claim to its complete(). `claim()` is that flag's
  * test-and-set and nothing else; `launch()` programs a claimed engine.
  * A transport whose completion handler starts the next block holds its
  * mask over `claim()` alone and launches outside it: a claimed channel
@@ -86,15 +141,15 @@
  * n in elements of the beat, on any channel, with no request - 8.2.1:
  * with MEM2MEM set the channel runs as soon as it is enabled.
  *
- * THE LEVEL AN ENGINE ARMS AT IS ITS PERIPHERAL'S (ch32v00x/dma_engine.hpp's
- * DmaPriority, docs/design/dma.md). The arbiter gives the bus to the
- * highest level asking, the lower channel number between equals, and a
- * memory-to-memory channel asks without a pause - so a receive channel it
- * outranks moves nothing until its block is over. The defaults are the
- * rule's: the receive engine at very_high, the transmit engine at high,
- * the copy at low.
+ * The level an engine arms at is its peripheral's (ch32v00x/dma_engine.hpp's
+ * DmaPriority, docs/design/dma.md). The controller's arbiter gives the
+ * bus to the highest level asking, the lower channel number between
+ * equals, and a memory-to-memory channel asks without a pause - so a
+ * receive channel it outranks moves nothing until its block is over. The
+ * defaults are the rule's: the receive engine at very_high, the transmit
+ * engine at high, the copy at low.
  *
- * NOT COVERED YET: the loop and ping-pong engines a block stream is
+ * Not covered yet: the loop and ping-pong engines a block stream is
  * served by (util/block_stream.hpp's two concepts: an ADC sampled into
  * caller-owned halves, a table played for ever), born with their first
  * block user.
@@ -529,7 +584,9 @@ public:
      * CFGR.PL, `high` by default: a peripheral a transmit channel feeds
      * waits for it, or holds its last value, where a starved receive
      * overruns (DmaPriority's rule). The gate and the PFIC line are opened
-     * here, once.
+     * here, once. Called in main, by the transport's init() for an engine
+     * in its slot, before the first block; it stops whatever the channel
+     * was running and forgets a claim. Waits for nothing, masks nothing.
      */
     static void arm(volatile void* data, uint32_t interrupts = DmaFlag::complete | DmaFlag::error,
                     DmaPriority priority = DmaPriority::high) {
@@ -690,9 +747,10 @@ public:
     }
     [[gnu::always_inline]] static uint32_t block_flags() { return Dma::flags(); }
 
-    /// Bind the channel to its peripheral (DmaTxEngine::arm()'s terms),
-    /// `very_high` by default: a peripheral a receive channel empties
-    /// overruns when the channel is starved (DmaPriority's rule).
+    /// Bind the channel to its peripheral (DmaTxEngine::arm()'s terms and
+    /// context: once, in main, before the first block), `very_high` by
+    /// default: a peripheral a receive channel empties overruns when the
+    /// channel is starved (DmaPriority's rule).
     static void arm(volatile void* data, uint32_t interrupts = DmaFlag::complete | DmaFlag::error,
                     DmaPriority priority = DmaPriority::very_high) {
         armed_ = interrupts & dma_cfgr_irqs;
@@ -833,11 +891,15 @@ private:
  *
  * The source is the PADDR side (DIR clear: read PADDR, write MADDR), so
  * a copy is PINC and MINC set and a fill is MINC alone. The engine is
- * BUSY from a block's start to its end, which the program learns either
+ * busy from a block's start to its end, which the program learns either
  * from the channel's vector - arm(..., true), the app binding isr() -
  * or by polling busy(), which reads the flags while a block runs.
  * `abandon()` stops a running block where it stands: EN cleared, the
  * count holding what was left.
+ *
+ * One owner: the busy flag is tested and set with no mask, so blocks
+ * are started from one context (main or one active object's dispatch),
+ * and the vector that binds isr() is the only other party.
  */
 template <uint8_t ch, typename Elem = uint32_t>
 class DmaCopyEngine {
@@ -860,7 +922,8 @@ public:
     /// no interrupt the line stays disabled and busy() is the witness.
     /// `low` by default: a copy asks for the bus without a pause, and a
     /// request-paced channel it outranked would move nothing until its
-    /// block ended (DmaPriority's rule).
+    /// block ended (DmaPriority's rule). Called once, in main, before the
+    /// first copy; it stops whatever the channel was running.
     static void arm(DmaPriority priority = DmaPriority::low, bool interrupt = true) {
         armed_ = interrupt ? (DmaFlag::complete | DmaFlag::error) : 0u;
         word_ = dma_cfgr_mem2mem | dma_cfgr_minc | dma_cfgr_priority(priority) | armed_;
@@ -874,7 +937,10 @@ public:
     /// Copy `n` elements from `src` to `dst`, the beat the element's
     /// width (T: uint8_t, uint16_t or uint32_t, no wider than Elem).
     /// False while a block runs, and for n of zero or over CNTR's 65535,
-    /// or an end off its beat's boundary (8.3.5, 8.3.6).
+    /// or an end off its beat's boundary (8.3.5, 8.3.6). True means the
+    /// block is running: the call returns at once, and both buffers stay
+    /// the caller's to keep valid and untouched until busy() is false or
+    /// isr() reported the end.
     template <typename T>
     static bool copy(T* dst, const T* src, uint32_t n) {
         static_assert(dma_beat_fits<T, Elem>, "a beat wider than this binding's widest (its Elem)");

@@ -1,22 +1,26 @@
 /*
  * i2c.hpp
  *
- * The I2C of the CH32V00x (RM ch. 15): one instance, host and client,
- * 7- and 10-bit addresses, dual addressing and the general call, two
- * speeds, clock stretching, PEC, two DMA requests - the STM32F1's I2C,
- * an EVENT MACHINE (SB, ADDR, TxE, RxNE, BTF, STOPF and the five
- * errors) over two vectors, one for events and one for errors. Three
- * layers, the other three strata's arrangement:
+ * The I2C of the CH32V00x (RM ch. 15; the CH32V003's ch. 13 is the same
+ * block word for word): a program talks to I2C devices - a sensor, an
+ * EEPROM, a converter - with the part as the bus host, or makes the part
+ * a client another host addresses. One instance, host and client, 7- and
+ * 10-bit addresses, dual addressing and the general call, two speeds,
+ * clock stretching, PEC, two DMA requests: an event machine (SB, ADDR,
+ * TxE, RxNE, BTF, STOPF and the five errors) over two vectors, one for
+ * events and one for errors - the STM32F1's register description under
+ * WCH's names. Three layers, the arrangement every brio I2C driver has:
  *
- *  - `I2c<n>` is the RESOURCE: the register block, its gate and reset,
+ *  - `I2c<n>` is the resource: the register block, its gate and reset,
  *    the clock arithmetic, the flags and the sequences that clear them,
  *    the control bits as verbs. It decides nothing.
- *  - `I2cHost<n, pins, TxEngine, RxEngine>` is the ENGINE util/
- *    i2c_bus.hpp's I2cBus drives: the Request is the other strata's
- *    VERBATIM - {addr, tx span, rx span, reply, speed}, one bus tenure
- *    that is a write, a read, a write-then-read with a repeated START,
- *    or the empty probe - and the outcome vocabulary is i2c_bus.hpp's
- *    (a NACK on the address, a NACK on a byte, arbitration lost, a bus
+ *  - `I2cHost<n, pins, TxEngine, RxEngine>` is the engine util/
+ *    i2c_bus.hpp's I2cBus drives. Its Request is the same struct on every
+ *    stratum - {addr, tx span, rx span, reply, speed}, one bus tenure (one
+ *    transaction from its START to its STOP) that is a write, a read, a
+ *    write-then-read with a repeated START, or the empty probe - and the
+ *    outcome vocabulary is i2c_bus.hpp's (a NACK, the receiver's refusal
+ *    of a byte, on the address or on a byte; arbitration lost; a bus
  *    error).
  *  - `I2cClient<n, pins>` is the target side: a polled surface and two
  *    ISR bodies, deliberately thin, because a client is a protocol and
@@ -24,41 +28,93 @@
  *    (`I2cClientOptions`), with `flush()` for the byte a target
  *    transmitter is asked beyond the host's closing NACK.
  *
- * THE MACHINE THIS CHAPTER PRESCRIBES is a set of software sequences,
+ * The smallest use, a register read through the arbiter
+ * (docs/ch32v00x/i2c.md, "How to use it"):
+ *
+ *     using Bus = brio::I2cHost<1>;                          // PC2 SCL, PC1 SDA
+ *     using I2c = brio::I2cBus<Bus, P, 4, brio::BusPassThrough, brio::ticks_from_ms<P>(20)>;
+ *
+ *     Bus::init(clock);                                      // both speeds solved at 48 MHz
+ *
+ *     Bus::Request r{};
+ *     r.addr = 0x48;
+ *     r.tx = brio::lend<brio::Lease::reply>(reg); r.tx_len = 1;
+ *     r.rx = brio::lend<brio::Lease::reply>(value); r.rx_len = 2;   // write-then-read
+ *     r.speed = brio::I2cSpeed::fast_400k;
+ *     r.reply = brio::reply_to<Sensor, brio::I2cDone>();
+ *     brio::post<I2c>(r);
+ *
+ *     extern "C" BRIO_CH32_INTERRUPT void i2c1_ev_handler() {
+ *         if (Bus::isr()) { brio::post<I2c>(brio::TransferDone{Bus::status()}); }
+ *     }
+ *     extern "C" BRIO_CH32_INTERRUPT void i2c1_er_handler() {
+ *         if (Bus::error_isr()) { brio::post<I2c>(brio::TransferDone{Bus::status()}); }
+ *     }
+ *
+ * `I2c` is the arbiter (util/bus_master.hpp's BusMaster): an active
+ * object of the program - a component with its own event queue, served
+ * one event at a time by the kernel - that takes the clients' requests
+ * one at a time in arrival order, calls the host's start() for each and
+ * replies to the sender with the outcome; `BusPassThrough` is its failure
+ * policy (no retry) and the last argument its per-bus timeout, the one
+ * answer to a client that holds the clock. `Sensor` is the program's
+ * active object that sent this request.
+ *
+ * Who calls what. init() runs in main, after the clock task (the timing
+ * is computed from the rate the clock type claims) and before the
+ * kernel's run(). start() is the arbiter's, called in its own dispatch:
+ * it is the one place on the host's request path that waits - up to 5 ms
+ * for the last tenure's STOP to leave CTLR1 (stop_drain_us), then up to
+ * 100 us for BUSY to clear (bus_free_us) - and it masks nothing. isr()
+ * and error_isr() are the bodies of the event and the error vectors,
+ * dma_isr() the body of both DMA channels' vectors; the program binds
+ * each under the crt's name and calls it nowhere else, and an unbound
+ * vector lands in the crt's spin. The request's buffers are lent
+ * (Lease::reply): from the post until the I2cDone reply the host reads
+ * `tx` and writes `rx`, and the sender keeps away from both - nothing
+ * checks it. Inside the event vector one wait remains: the last byte of
+ * a pumped read of three bytes or more is waited for after the read of
+ * the one before it (receive_step(), up to 100 000 polls of RxNE), and if
+ * that bound runs out DATAR is read regardless and the tenure reports
+ * i2c_ok. unstick(), recover() and release() are for main or the
+ * arbiter, with no tenure in flight.
+ *
+ * The machine this chapter prescribes is a set of software sequences,
  * each stretching SCL low until it completes (15.3's notes): EV5 (SB
  * up: read STAR1, write the address), EV6 (ADDR up: read STAR1 then
  * STAR2), EV8 (TxE: write DATAR), EV8_2 (TxE and BTF: the last byte is
  * out, STOP or repeated START), EV7 (RxNE: read DATAR) - and a
- * RECEIVE PROCEDURE THAT DEPENDS ON THE COUNT: one byte wants ACK
- * cleared BEFORE ADDR is cleared and STOP set right after; two bytes
+ * receive procedure that depends on the count: one byte wants ACK
+ * cleared before ADDR is cleared and STOP set right after; two bytes
  * want POS set with ACK, ACK cleared after ADDR, and the pair read
  * after one BTF; three or more run on RxNE until three remain, then
  * wait for BTF twice - the first clears ACK and reads N-2, the second
  * sets STOP and reads N-1 and N. All of it is in `isr()`, phase by
  * phase, and the reason the ITBUFEN enable is switched on and off
- * during a tenure: TxE and RxNE interrupt only while the byte pump
- * needs them, BTF (under ITEVTEN alone) carries the rest. ITEVTEN is
- * the TENURE'S in turn - raised by start(), dropped at its end - because
- * the BTF a STOP leaves standing until the condition is out (15.10.6)
- * and the slave half's STOPF would otherwise enter the vector between
- * tenures for nothing; a DMA read phase drops it too, the channel's
- * completion ending that phase (begin_receive()).
+ * during a tenure: TxE and RxNE interrupt only while the byte pump (the
+ * vector moving one byte an entry) needs them, BTF (under ITEVTEN
+ * alone) carries the rest. ITEVTEN is the tenure's in turn - raised by
+ * start(), dropped at its end - because the BTF a STOP leaves standing
+ * until the condition is out (15.10.6) and the slave half's STOPF would
+ * otherwise enter the vector between tenures for nothing; a DMA read
+ * phase drops it too, the channel's completion ending that phase
+ * (begin_receive()).
  *
- * THE REPEATED START OF A WRITE-THEN-READ IS REQUESTED WHILE THE LAST
- * WRITTEN BYTE IS STILL GOING OUT, on the TxE that says it went into the
+ * The repeated START of a write-then-read is requested while the last
+ * written byte is still going out, on the TxE that says it went into the
  * shifter: 15.10.1's START bit, set in master mode, makes the controller
  * repeat the start condition, and requested while a byte shifts it goes
  * out as that byte ends (measured: every written byte taken, and no BTF
  * entering the vector behind it). It is not the chapter's own end of a write - 15.3 ends a write at
  * EV8_2 (TxE and BTF, figure 15-4), with SCL held low past the last
  * acknowledge - and it is the order WCH's interrupt example uses: a
- * POLLED target of this block's lineage loses the last written byte when
+ * polled target of this block's lineage loses the last written byte when
  * the START comes after BTF (measured on the CH32V203C8T6 and the
  * CH32V303VCT6, docs/ch32vx03/i2c.md), and a register index followed by
  * a read is exactly that shape. The price is in the error path: the START
  * is requested before the last byte's acknowledge is known, so the phase
  * between the request and SB is its own (`restart`), and a NACK in it is
- * the byte's - i2c_nack_data. THE REPEATED START IS NOT WITHDRAWN: the
+ * the byte's - i2c_nack_data. The repeated START is not withdrawn: the
  * controller generates it after the refused byte all the same (measured:
  * left alone, START clears and SB rises a few tens of cycles after the
  * error vector sees AF), and a CTLR1 store that clears START and sets STOP
@@ -66,7 +122,7 @@
  * STOP standing over a master holding the bus and the next tenure stalled
  * (measured, docs/ch32v00x/i2c.md). So the refusal lets the Sr go out and
  * closes the tenure from its SB with the one sequence EV5 allows: the
- * address with the WRITE bit and STOP requested behind it - a void write,
+ * address with the write bit and STOP requested behind it - a void write,
  * Sr A P on the wire - its ADDR cleared or its own NACK taken before the
  * tenure reports i2c_nack_data. Nothing else of the controller is touched,
  * so nothing races it.
@@ -76,7 +132,7 @@
  * interrupt - and the transmit channel is armed for its errors alone, so
  * that a plain write takes no DMA interrupt at all.
  *
- * THERE IS NO RISE-TIME REGISTER, ON EITHER PART. 15.3's text names an
+ * There is no rise-time register, on either part. 15.3's text names an
  * "R16_I2C1_RTR" the register list (table 15-1) does not carry - the
  * CH32V003's manual does the same in its 13.3 against its table 13-1
  * - and the vendor's own headers end the block at CKCFGR on both: the
@@ -85,16 +141,16 @@
  * in MHz, 8 to 48 (15.10.2) - below 8 MHz no speed is legal and init()
  * refuses. The CCR arithmetic is the F1's: standard mode divides by
  * 2 x CCR, fast mode by 3 x CCR at DUTY 2 and 25 x CCR at DUTY 16/9,
- * rounded UP here so a bus never runs faster than asked.
+ * rounded up here so a bus never runs faster than asked.
  *
- * THE DMA REQUESTS ARE CHANNELS 6 (transmit) and 7 (receive), table
+ * The DMA requests are channels 6 (transmit) and 7 (receive), table
  * 8-2 of both manuals, and an engine on any other channel is refused. With engines a
  * plain write of any length and a read phase of two bytes or more run
  * on them (CTLR2.LAST makes the controller NACK the last byte a
  * receive block takes, 15.10.2); a one-byte read stays on the pump,
  * whose ACK-before-ADDR sequence the DMA path cannot express.
  *
- * THE EVENT PUMP TAKES NO PLACEMENT (util/placement.hpp), unlike this
+ * The event pump takes no placement (util/placement.hpp), unlike this
  * family's SPI host and USART: it is inline in the vector that binds it,
  * and a program that wants it in SRAM places that vector (`.fast_text`) -
  * measured on the CH32V006K8U6 at 48 MHz, an entry of a 255-byte write
@@ -104,7 +160,7 @@
  * flash's two wait states (RM 18.3.1) cost the entry more than SRAM saves
  * it (docs/ch32v00x/i2c.md).
  *
- * NOT COVERED YET: 10-bit addressing on the host side (the resource
+ * Not covered yet: 10-bit addressing on the host side (the resource
  * has the mode and the client matches such an address; the host's
  * header-byte sequence, EV9, has no user); PEC (the resource has the
  * enable, no tenure shape asks for it); the general call as a host
@@ -181,7 +237,7 @@ inline constexpr uint16_t i2c_itbufen   = 1u << 10;
 inline constexpr uint16_t i2c_dmaen     = 1u << 11;
 inline constexpr uint16_t i2c_last      = 1u << 12;
 // OADDR1 (15.10.3). The F1 lineage's "bit 14 must be kept at one" is
-// NOT here: 15.10.3 lists the bit as reserved and it reads back zero
+// not here: 15.10.3 lists the bit as reserved and it reads back zero
 // whatever is written (measured), so nothing writes it.
 inline constexpr uint16_t i2c_addmode      = 1u << 15;
 // OADDR2 (15.10.4)
@@ -285,8 +341,9 @@ constexpr uint32_t i2c_scl_hz(uint32_t pclk, I2cTiming t) {
     return pclk / (((t.ckcfgr & i2c_duty) != 0u ? 25UL : 3UL) * ccr);
 }
 
-/// Which pads carry the two lines, and the REMAP CODE that puts the
-/// peripheral on them (afio.hpp's table 7-13-1): init() writes it.
+/// Which pads carry the two lines, and the remap code (the column of
+/// pads one AFIO code selects) that puts the peripheral on them
+/// (afio.hpp's table 7-13-1): init() writes it.
 struct I2cPins {
     Pad scl{};
     Pad sda{};
@@ -447,7 +504,7 @@ struct I2c {
 
     // ---- interrupts ----------------------------------------------------------
 
-    /// CTLR1's control bits, some set and some cleared, in ONE store
+    /// CTLR1's control bits, some set and some cleared, in one store
     /// (i2c_start, i2c_stop, i2c_ack, i2c_pos ...): what a tenure's start
     /// writes at once. No CTLR1 write may land while START or STOP stands
     /// (the F1 lineage's rule, 15.10.1), and this is one write.
@@ -501,12 +558,12 @@ inline constexpr uint8_t i2c_dma_fault = bus_engine_status + 4;
  * inside start(), no byte moved - the one synchronous completion of
  * an I2C engine, and the arbiter replies with status() for it.
  *
- * THE ENGINE SLOTS: `DmaTxEngine<6>` and `DmaRxEngine<7>`, both or
+ * The engine slots: `DmaTxEngine<6>` and `DmaRxEngine<7>`, both or
  * neither. A plain write runs on the transmit engine; a read phase of
  * two bytes or more on the receive engine under CTLR2.LAST; the one-
  * byte read and the write half of a write-then-read on the pump (the
  * file header: its repeated START wants the TxE of the last byte). The
- * transmit engine is armed for its ERRORS ALONE: a plain write ends on
+ * transmit engine is armed for its errors alone: a plain write ends on
  * BTF, which the event vector takes anyway, with the channel's count at
  * zero - the controller wrote the last byte a byte time before it left
  * the shifter - so the block's own completion interrupt would prove
@@ -549,11 +606,11 @@ public:
 
     struct Request {
         uint8_t addr;          ///< 7-bit client address (unshifted)
-        /// Bytes written after START, LENT until the reply lands (may be
+        /// Bytes written after START, lent until the reply lands (may be
         /// null if tx_len == 0).
         Borrowed<const uint8_t, Lease::reply> tx;
         uint8_t tx_len;
-        /// Where the bytes read after the (repeated) START+R land; LENT
+        /// Where the bytes read after the (repeated) START+R land; lent
         /// until the reply lands.
         Borrowed<uint8_t, Lease::reply> rx;
         uint8_t rx_len;
@@ -570,7 +627,12 @@ public:
     /// here and at rebase(); one the clock cannot produce is marked
     /// unreachable (speed_ok()) and a Request naming it is answered
     /// i2c_rejected. False when not even standard_100k is legal - which
-    /// is every clock below 8 MHz (15.10.2).
+    /// is every clock below 8 MHz (15.10.2). From main, after the clock
+    /// task and before run(): the gate opened, the block's reset pulsed,
+    /// the remap code written, the engines armed, the pads handed over
+    /// open-drain (the pull-ups are the wire's: such a pad has no internal
+    /// pull on this family) and both PFIC lines enabled. It waits for
+    /// nothing.
     template <typename Clock>
     static bool init(Clock clock, I2cDuty duty = I2cDuty::ratio_2) {
         static_assert(clock_follows<Clock, I2cHost>(),
@@ -616,7 +678,7 @@ public:
     }
 
     /// The bus clock changed (DynamicClock fan-out): both rows solved
-    /// again and the applied one rewritten. THE BUS MUST BE IDLE.
+    /// again and the applied one rewritten. The bus must be idle.
     static void rebase(uint32_t hz) {
         pclk_hz_ = hz;
         for (uint8_t i = 0; i < i2c_speed_count; ++i) {
@@ -638,12 +700,18 @@ public:
 
     // ---- the transfer -------------------------------------------------------
 
-    /// Begin a tenure (I2cBus calls it from main context). False
+    /// Begin a tenure (I2cBus calls it from main context, in its own
+    /// dispatch; a program never does). The Request's fields are copied
+    /// and its buffers stay lent until the tenure's TransferDone. False
     /// whenever the wire moves: the tenure completes on the event
     /// vector and a TransferDone{status()} follows. True only for the
     /// one refusal that moves nothing - a speed the clock cannot
     /// produce, answered i2c_rejected through status() - the I2cHost
-    /// contract (docs/design/i2c-bus.md).
+    /// contract (docs/design/i2c-bus.md). It waits, bounded: up to
+    /// stop_drain_us for the last STOP to leave CTLR1 - past that the
+    /// tenure parks, false with no START and no vector, for the per-bus
+    /// timeout to answer - then up to bus_free_us for BUSY. It masks
+    /// nothing.
     static bool start(const Request& r) {
         // What the tenure's entries read, and nothing else of the Request:
         // the reply and the speed are the arbiter's and start()'s.
@@ -666,8 +734,8 @@ public:
         // CTLR1 must not be written while STOP stands - a second STOP
         // request otherwise, the F1 lineage's rule - so it is waited for
         // before anything writes CTLR1, a speed change's PE cycle
-        // included, BOUNDED IN TIME (stop_drain_us). A clock held past
-        // the bound is a wedge: the tenure PARKS - no START and no vector
+        // included, bounded in time (stop_drain_us). A clock held past
+        // the bound is a wedge: the tenure parks - no START and no vector
         // - for the per-bus timeout to answer.
         if (!wait_for_us([] { return !S::stopping(); }, stop_drain_us)) {
             return false;
@@ -680,7 +748,7 @@ public:
         // inside any per-bus timeout.
         (void)wait_for_us([] { return !S::busy(); }, bus_free_us);
         apply(r.speed);
-        // ONE CTLR1 store: START, with POS and ACK down for the address
+        // One CTLR1 store: START, with POS and ACK down for the address
         // phase. Read after STAR1, it is also the second half of a stale
         // STOPF's clear (15.10.6: STAR1 read, then a CTLR1 write) - the
         // slave half's, which nothing between two tenures takes, the
@@ -691,15 +759,20 @@ public:
         return false;
     }
 
-    /// The engine's completion status, for the TransferDone payload.
+    /// The engine's completion status, for the TransferDone payload:
+    /// i2c_ok or one of i2c_bus.hpp's codes, or i2c_dma_fault. Read it in
+    /// the vector that just reported the tenure complete, as the glue
+    /// does.
     static uint8_t status() { return status_; }
 
-    /// The EVENT vector's body - call from i2c1_ev's handler. Returns
-    /// true when the tenure just completed: the edge the app's glue
-    /// posts TransferDone on.
+    /// The event vector's body - call from i2c1_ev's handler and
+    /// nowhere else. Returns true when the tenure just completed: the
+    /// edge the app's glue posts TransferDone on. It masks nothing; the
+    /// one wait inside it is the last byte of a pumped read of three or
+    /// more (receive_step(), the file header).
     [[gnu::always_inline]] static bool isr() {
         const uint16_t s1 = S::status1();
-        // STOPF is the SLAVE half's flag - a STOP seen after a START this
+        // STOPF is the slave half's flag - a STOP seen after a START this
         // host did not issue: another master's, or the one unstick()
         // makes by hand - and ITEVTEN routes it here in every phase.
         // Left standing it re-enters this vector without end (measured:
@@ -817,7 +890,8 @@ public:
         return false;
     }
 
-    /// The ERROR vector's body - call from i2c1_er's handler. Every
+    /// The error vector's body - call from i2c1_er's handler and
+    /// nowhere else. Every
     /// error ends the tenure with its i2c_bus.hpp code; a NACK is on
     /// the address or on a byte by the phase it landed in. True when
     /// the tenure just completed.
@@ -833,7 +907,7 @@ public:
         }
         uint8_t st = i2c_bus_error;
         if ((errs & i2c_af) != 0u && phase_ == Phase::restart) {
-            // The LAST WRITTEN byte refused, its repeated START already
+            // The last written byte refused, its repeated START already
             // requested (request_restart()): the NACK is the byte's, and
             // the Sr the controller generates anyway is waited for - its
             // SB closes the tenure (close_refused(), the class comment).
@@ -892,7 +966,9 @@ public:
 
     /// The classic bus unstick: nine SCL pulses and a STOP, by hand,
     /// open-drain, with the pads reclaimed from the peripheral for the
-    /// duration. RECOVER() FIXES THE PERIPHERAL, THIS FIXES THE WIRE.
+    /// duration. recover() fixes the peripheral, this fixes the wire.
+    /// From main or the arbiter with no tenure in flight; it spins half
+    /// a standard-mode bit per edge, a few hundred microseconds at most.
     /// Returns the pulses it took a stuck client to release SDA (0 =
     /// the wire was never stuck), or 0xFF when nine pulses and a STOP
     /// left SDA low - a short, not a client. A healthy wire is left
@@ -946,7 +1022,7 @@ public:
         return released_at == 0xFF ? 0u : released_at;
     }
 
-    /// Put the ENGINE back where start() is legal - the verb a timed
+    /// Put the engine back where start() is legal - the verb a timed
     /// I2cBus calls on a tenure that never answered: the engines put
     /// away, SWRST pulsed (the chapter's own verb for a controller
     /// stuck BUSY), the timing rewritten, PE back. The WIRE stays the
@@ -977,12 +1053,12 @@ public:
         Pfic::disable(S::event_irq());
         Pfic::disable(S::error_irq());
         S::disable();
-        // THE RESET LINE BEFORE THE GATE: on the CH32V203 and the CH32V303
+        // The reset line before the gate: on the CH32V203 and the CH32V303
         // a request DMAEN raised is held through DMAEN and PE cleared and
         // frozen on the channel's OR by the gate, stalling the next owner
         // of channel 6 or 7 - USART2's here (docs/ch32vx03/dma.md). On this
         // die this block's own request, raised by a read stalled over a
-        // dead channel, measured NOT to outlive its gate, where a timer's
+        // dead channel, measured not to outlive its gate, where a timer's
         // compare request does (docs/ch32v00x/i2c.md); the pulse, the
         // vendor's own I2C_DeInit, leaves none either way.
         S::reset();
@@ -1092,7 +1168,7 @@ private:
         if constexpr (has_engines) {
             if (dma_serves_rx()) {
                 // DMAEN with LAST - the block's last byte is NACKed - and
-                // THE EVENT LINE DOWN, in one store: dma_isr() ends the
+                // The event line down, in one store: dma_isr() ends the
                 // phase and the event vector has nothing to serve in it,
                 // while over a channel that does not serve its request RxNE
                 // and BTF would stand and re-enter it for ever, the thread
@@ -1174,6 +1250,10 @@ private:
         S::stop();
         out[pos_] = S::data();
         ++pos_;
+        // N arrives a byte time after N-1's read: waited for here, inside
+        // the vector, up to wait_until()'s 100 000 polls. The answer is
+        // discarded - if the bound runs out, DATAR is read regardless and
+        // the tenure reports i2c_ok with whatever it held.
         (void)wait_until([] { return S::flag(i2c_rxne); });
         out[pos_] = S::data();
         ++pos_;
@@ -1299,7 +1379,7 @@ enum class I2cClientEvent : uint8_t {
 /// What a client is beyond its addresses. `no_stretch` gives up the clock
 /// stretch (NOSTRETCH, 15.10.1), and with it the guarantee against OVR.
 /// `interrupts` false leaves the three enables and the two PFIC lines
-/// down for a POLLED client, which is what an instrument that must spend
+/// down for a polled client, which is what an instrument that must spend
 /// a commanded hold inside a tenure needs: the flags then belong to the
 /// loop alone.
 struct I2cClientOptions {
@@ -1311,7 +1391,7 @@ struct I2cClientOptions {
  * I2cClient<n, pins>
  *
  * The target side. The peripheral matches the own address(es), ACKs it,
- * raises ADDR and STRETCHES SCL until the sequence that clears it runs
+ * raises ADDR and stretches SCL until the sequence that clears it runs
  * (15.4); every byte then comes on RxNE or is asked for on TxE, with
  * the clock stretched while the flag stands unless NOSTRETCH. A read
  * tenure ends with the host's NACK (AF, on the error vector); a write
@@ -1377,7 +1457,7 @@ public:
     /// NOSTRETCH).
     static bool addressed() { return S::flag(i2c_addr); }
     /// Answer the match and release the clock: EV1's STAR1-then-STAR2
-    /// read. Returns true when the host READS (this side transmits).
+    /// read. Returns true when the host reads (this side transmits).
     static bool answer_address() { return (S::clear_addr() & i2c_tra) != 0u; }
     /// Valid after answer_address(): which own address matched.
     static bool second_address_matched() { return S::second_address_matched(); }
@@ -1402,11 +1482,11 @@ public:
     static uint16_t flags() { return S::status1(); }
 
     /**
-     * THROW AWAY A BYTE THE HOST NEVER TOOK. A target transmitter is
+     * Throw away a byte the host never took. A target transmitter is
      * asked for one byte more than the controller takes: DATAR empties
      * into the shifter and TxE rises again, so the byte standing in DATAR
      * when the closing NACK arrives is never clocked out and would be the
-     * FIRST byte of the next read tenure. The chapter has no verb that
+     * first byte of the next read tenure. The chapter has no verb that
      * discards it; a PE cycle does - with PE clear the hardware clears
      * TxE, RxNE, BTF, ADDR, STOPF and the error flags (15.10.6) and ACK
      * (15.10.1), while CTLR2, OADDR1, OADDR2 and CKCFGR keep what they
@@ -1430,7 +1510,7 @@ public:
 
     // ---- the ISR bodies -----------------------------------------------------
 
-    /// The EVENT vector's body: one event per call, the flag consumed
+    /// The event vector's body: one event per call, the flag consumed
     /// where the chapter's sequence consumes it (ADDR and STOPF here;
     /// RxNE by take(), TxE by give(), which the glue owes).
     [[gnu::always_inline]] static I2cClientEvent service() {

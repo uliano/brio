@@ -1,8 +1,94 @@
 # USB (RP2350)
 
-Documents of record: the RP2350 datasheet (build d126e9e), 12.7 (the
+This document is for a programmer who wants the RP2350's own USB
+connector to carry something: a serial console or a byte link to a
+host, with no UART bridge in between. `brio/rp2350/usb.hpp` is the
+chip's USB controller in device mode, `Usb`, a monostate (a type with
+only static members, used without an object; the chip has one
+controller and one PHY on its own two pins). It moves packets and
+nothing more: the enumeration, the descriptors and the classes are the
+target-independent stack above it, `UsbDevice` in `util/usb/device.hpp`,
+and `UsbCdcAcm` in `util/usb/cdc.hpp`, a serial port the host sees as a
+CDC ACM device and the program sees as a byte transport, the same
+surface a UART has ([design/usb.md](../design/usb.md)). The same source
+runs on the Cortex-M33 pair and on the Hazard3 pair.
+
+The smallest use, a serial port on the board's USB-C, is the first block
+under "How to use it" below:
+
+```cpp
+using SysClock = brio::Clock<brio::ClockSource::pll, 150'000'000UL>;   // E12 wants > 52.8 MHz
+using Port = brio::UsbCdcAcm<brio::Usb, P>;                            // interface 0, endpoints 1 and 2
+struct Descriptors {
+    static constexpr auto device = brio::usb_device_descriptor({.vendor_id = 0x1209, .product_id = 0x0001, .device_class = 2});
+    static constexpr auto configuration = brio::usb_concat(
+        brio::usb_configuration_head(9 + Port::descriptor_bytes, Port::interface_count), Port::descriptors);
+    static std::span<const uint8_t> string(uint8_t index);   // 0 the languages, then the strings
+};
+using Device = brio::UsbDevice<brio::Usb, Descriptors, Port>;
+
+brio::Usb::init(clock);        // clears MAIN_CTRL.PHY_ISO last of all
+Device::start();               // the pull-up: the host enumerates from here
+extern "C" void isr_usbctrl() {
+    Device::isr();
+    if (Port::take_rx_edge()) { brio::post<SerialLines>(brio::RxActivity{}); }
+}
+brio::print(Port{}, "hello", brio::crlf);   // once the host has configured the port
+```
+
+Line by line: `SysClock` is the program's clock type, here the system
+PLL at 150 MHz ([clock.md](clock.md)), and `clock` its tag object;
+`Port` is the CDC ACM class over this controller, `P` the program's
+platform type ([platform.md](platform.md)), whose critical section the
+class's program side takes; `Descriptors` is what the host reads during
+enumeration - the device descriptor (1209:0001, pid.codes' test pair,
+class 2, communications), the configuration built from a header and the
+port's own descriptors, and a `string()` function the program writes;
+`Device` is the stack over the controller, the descriptors and the
+classes; `Usb::init(clock)` brings clk_usb up from the USB PLL, takes the
+block out of reset, configures it, lifts the PHY's isolation last and
+leaves the pull-up down; `Device::start()` raises the pull-up, which is
+when the host sees a device and enumerates it; `isr_usbctrl` is the
+controller's interrupt handler under the crt's name, the same on both
+architectures, and `Device::isr()` is the whole stack, enumeration
+included, run in that handler; `take_rx_edge()` says a packet has just
+filled an empty receive ring, and the handler posts `RxActivity` to the
+program's line-assembling active object (`SerialLines` here: an active
+object is a component of a brio program with its own event queue,
+served one event at a time by the kernel,
+[docs/learn/introduction.md](../learn/introduction.md)); and `print`
+writes to the port as it would to a UART.
+
+What decides correctness even there. Erratum RP2350-E12 makes the
+system clock's rate part of the contract: clk_sys must run at least ten
+per cent above clk_usb, 52.8 MHz, while the controller is in use, and
+`init()` refuses at compile time a clock type that does not; the
+erratum's own boundary, not a margin brio adds. The PHY comes out of
+reset isolated (MAIN_CTRL.PHY_ISO), and only `init()`'s whole sequence
+lifts it in the order the chapter asks; after a power-down of the
+switched core domain the isolation is back, and the way back is
+`init()` again with the reconnect forced through the pull-up (the
+second block below), since lifting the isolation alone tells the host
+nothing. The port only takes bytes once the host has configured it:
+before that its `write_byte` refuses every byte, so a `print` issued
+earlier waits, in the caller's context, until a host has configured the
+port - with no host attached, for ever. And the program side of the
+class (`write_byte`, `read_byte`, `print` over them) runs in main
+context, an active object's dispatch or `main()`, never in an interrupt
+handler: `Device::isr()` is the ring's other end.
+
+The rest of this page, in order: the documents of record; what the
+silicon does (the dual-port RAM, the one new duty, the three moved
+reset values, DP and DM as pads, erratum RP2350-E12, LINESTATE_TUNING,
+the diagnostics, the errata fixed); the types and verbs; how to use it;
+the bench findings, against a Linux host on both architectures; and
+what is not covered.
+
+## Documents of record
+
+The RP2350 datasheet (build d126e9e), 12.7 (the
 controller: 12.7.1 what it is and the 4 kB of dual-port RAM that is its
-whole interface, 12.7.2 CHANGES FROM RP2040 - 12.7.2.1 the errata fixed,
+whole interface, 12.7.2 "Changes from RP2040" - 12.7.2.1 the errata fixed,
 12.7.2.2 the new features, 12.7.2.2.3 the device ones and 12.7.2.2.4 the
 error handling -, 12.7.3 the architecture with 12.7.3.7.1 the concurrent
 access rule, 12.7.3.7.2 the memory map, 12.7.3.7.3 and 12.7.3.7.4 the
@@ -16,7 +102,10 @@ The driver: `brio/rp2350/usb.hpp` (`Usb`, the endpoint controller) over
 `clock.hpp` (`Clocks::usb_select`, `PllUsb`) and `resets.hpp`; the stack
 `util/usb/device.hpp` and the class `util/usb/cdc.hpp` above it. The
 reference suite: `test_rp2350_usb`, the host as the other end, from one
-source on both of this chip's architectures.
+source on both of this chip's architectures (a letter is one command key
+of the suite's console and the group of verdicts it runs; `z` is the key
+that runs every letter but the four host-assisted ones, `y`, `w`, `v`
+and `x`, which run by name, each with a host script at the other end).
 
 ## What the silicon does
 
@@ -38,7 +127,7 @@ which buffers completed. The register block answers the atomic aliases of
 this block is cleared - the SIE's flags, BUFF_STATUS, EP_ABORT_DONE,
 EP_STATUS_STALL_NAK, the error counters, the watchdog's fired bit - which
 is the idiom 12.7.4.2's own listing uses and which leaves whatever else
-lives in the register alone. THE DUAL-PORT RAM ANSWERS NO ALIAS
+lives in the register alone. The dual-port RAM answers no alias
 (12.7.3.7), so every write into it is a plain store.
 
 A buffer is handed over by writing its control word in two steps, the
@@ -46,38 +135,38 @@ length and the PID first and AVAILABLE after a few cycles, because the
 controller reads the word at 48 MHz while the core writes it at 150
 (12.7.3.7.1 and the warning under table 1194).
 
-**Everything of the RP2040's controller is here and works the same way**
-- 12.7.2 says so in as many words - and what is added is the following.
+**Everything of the RP2040's controller is here and works the same
+way** - 12.7.2 says so in as many words - and what is added is the following.
 
 **The one new duty: MAIN_CTRL.PHY_ISO.** It resets to 1, it isolates the
 PHY from the switched core power domain, and while it stands the PHY does
 nothing at all. Software must clear it at start-up and after a
 power-down: it is the one line of RP2040 software that does not carry
-over. The driver clears it LAST OF ALL - after the muxing, the power
+over. The driver clears it last of all - after the muxing, the power
 overrides, the controller's own enable, the SIE and the interrupt mask -
 which is 12.7.2.2.1's "remove isolation once software has configured the
 controller", and which leaves the chapter's register order otherwise
 exactly as it stands.
 
-**AND IT IS NOT A DISCONNECT.** Isolating the PHY cuts it from the
+**And it is not a disconnect.** Isolating the PHY cuts it from the
 switched core domain; it does not take the pull-up off the wire, and the
 host is told nothing. Measured: with PHY_ISO set for half a second and
 the whole bring-up run afterwards, **no bus reset arrives in six
 seconds** - the host goes on addressing the address it assigned, while
 the device's own stack has been reset to DEFAULT and answers at none.
-A program coming back from a power-down must therefore FORCE the
+A program coming back from a power-down must therefore force the
 reconnect: drop the pull-up long enough for the host to run its
 disconnect debounce, then raise it. `Device::stop()`, half a second,
 `Device::start()` is that, and it is the only way back.
 
 **Three reset values moved**, and all three are answered by writing the
-register WHOLE rather than setting bits into it:
+register whole rather than setting bits into it:
 
 | Register | RP2040 reset | RP2350 reset | Why it matters to a device |
 |---|---|---|---|
 | `MAIN_CTRL` | 0x00000000 | 0x00000004 | PHY_ISO set: the PHY is isolated until told otherwise |
 | `USB_MUXING` | 0x00000000 | 0x00000001 | TO_PHY already set, to match the PHY's isolation latches |
-| `SIE_CTRL` | 0x00000000 | 0x00008000 | PULLDOWN_EN set - the HOST's termination, so the pins do not float while the block is unused; a device must drop it |
+| `SIE_CTRL` | 0x00000000 | 0x00008000 | PULLDOWN_EN set - the host's termination, so the pins do not float while the block is unused; a device must drop it |
 
 **DP and DM can be ordinary pads.** They are GPIO 56 and 57 of **bank
 1** (table 647), whose function-select registers are the IO_QSPI block's
@@ -92,7 +181,7 @@ TO_DIGITAL_PAD and SWAP_DPDM land clear whatever a previous image left.
 SIE_STATUS flags (TRANS_COMPLETE, SETUP_REC, STALL_REC, NAK_REC,
 RX_SHORT_PACKET, ACK_REQ, DATA_SEQ_ERROR, RX_OVERFLOW) and six INTR
 flags cross from clk_usb to clk_sys without adequate synchronisation and
-can be LOST when clk_sys is at or below clk_usb. The workaround is a
+can be lost when clk_sys is at or below clk_usb. The workaround is a
 frequency rule: **clk_sys at least ten per cent above clk_usb** - 52.8
 MHz, not 48 - while the peripheral is in use. The quasi-static bus states
 (reset, suspend, resume) are exempt. It affects stepping A2, which is the
@@ -102,7 +191,7 @@ one on the bench.
 plainly, and its reset value 0x0f8 already has every device-side fix on:
 wake from suspend on any bus activity, the receive-error quiesce, the SE0
 chatter fix, the bit-stuff fix, and the buffer-control DOUBLE READ that
-makes the two-step AVAILABLE write unnecessary. The driver READS it and
+makes the two-step AVAILABLE write unnecessary. The driver reads it and
 has no verb that writes it - a negative of the family check asserts the
 absence rather than a comment promising it. The two-step write is kept
 all the same, because 12.7.3.7.1 still prescribes it.
@@ -140,9 +229,9 @@ design: brio has no host side.
   cleared, then the chapter's own register order - USB_MUXING, USB_PWR
   with VBUS detection forced because the board wires no VBUS pin,
   MAIN_CTRL enabling the controller in device mode, SIE_CTRL, the
-  interrupt mask - each of the three written WHOLE so that the moved
-  reset values cannot survive, and THE PHY'S ISOLATION LIFTED LAST OF
-  ALL, which is what 12.7.2.2.1 asks for; the pull-up stays down),
+  interrupt mask - each of the three written whole so that the moved
+  reset values cannot survive, and the PHY's isolation lifted last of
+  all, which is what 12.7.2.2.1 asks for; the pull-up stays down),
   `release` (the line dropped, the PHY isolated again, the block back
   into reset - for a block `init()` has taken out of reset, its first
   acts being register writes).
@@ -174,7 +263,7 @@ design: brio has no host side.
   taken into account), `sm_state` with `sm_main` / `sm_bus_control` /
   `sm_rx_deserialiser`, and the device state-machine watchdog:
   `arm_device_watchdog(UsbDeviceWatchdogConfig)` (a limit past eighteen
-  bits is REFUSED, not truncated), `disarm_device_watchdog`,
+  bits is refused, not truncated), `disarm_device_watchdog`,
   `device_watchdog_armed`, `device_watchdog_limit`,
   `take_device_watchdog_fired`.
 - The abort path: `abort(address, on)`, `aborted`, `abort_done`.
@@ -267,8 +356,8 @@ beside them. Every verdict reads the same on the two halves.
   advances exactly **10 frames in 10 ms**; and the SIE error word is
   **0x0** through the whole of it.
 - **THE TWO FREE-RUNNING 48 MHz TIMESTAMPS.** The raw counter advances
-  **14 429 to 14 477 cycles over 300 us** - 48 MHz within half a per cent
-  - and `since_sof` reads **18 024 to 40 002 cycles** on a live bus,
+  **14 429 to 14 477 cycles over 300 us** - 48 MHz within half a per
+  cent - and `since_sof` reads **18 024 to 40 002 cycles** on a live bus,
   always under the 48 000 that would be a millisecond. SM_STATE reads
   **0x100** and nothing above its three fields: main 0, bus control 0,
   receive deserialiser 1.
@@ -366,7 +455,9 @@ Driver gaps, each with its reason:
 - **Suspend as a power state**: the suspend and resume events are
   counted and `remote_wakeup()` exists, but the current a suspended
   device draws, and the sleep site that would let the chip sleep with
-  the controller armed, belong to the power chapter.
+  the controller armed, belong to the power chapter, and the power
+  chapter's sleep sites ([sleep.md](sleep.md)) do not carry them.
+
 Implemented but not bench-verified, each with what would measure it:
 
 - **`take_errors` reporting a real error**: a cable pulled mid-packet,
@@ -375,8 +466,8 @@ Implemented but not bench-verified, each with what would measure it:
   proof that the wrong one would be reported. It wants a hand on the
   cable.
 - **`ep0_stop_on_short_packet`, `take_short_packet`, `stall_nak_status` /
-  `ep0_report` and `remote_wakeup`**: written, and no letter drives them
-  - the stack's control machine ends its own data stage and reads the
+  `ep0_report` and `remote_wakeup`**: written, and no letter drives
+  them - the stack's control machine ends its own data stage and reads the
   length rather than the flag, nothing here wants an interrupt per NAK,
   and a remote wakeup needs a host that has armed it, which this one
   does not.
@@ -384,4 +475,4 @@ Implemented but not bench-verified, each with what would measure it:
   suspends.** They advance here - the console's own report shows one
   suspend on a live port - but nothing arms an autosuspend on purpose or
   measures what the device draws in it; that pair belongs to the power
-  chapter.
+  chapter ([sleep.md](sleep.md)), which does not carry it.

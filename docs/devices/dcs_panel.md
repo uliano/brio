@@ -1,6 +1,97 @@
 # The panel driver
 
-Documents of record: none outside this repository, the driver being
+This document is for a programmer who wants to draw on a display
+controller that keeps its own pixels (the ILI9481 today,
+[ili9481.md](ili9481.md)) with the drawing library of `gfx/`, or to
+judge a drawing on one without looking at the glass. `DcsPanel<Traits,
+Link>` (`devices/dcs_panel.hpp`) is a drawing surface over the panel: a
+`Surface` in the sense of `gfx/surface.hpp`, the base every primitive of
+the library draws through (a width, a height, a filled rectangle and a
+run - one row of pixels, x increasing). It turns the picture to any of
+four orientations, answers the module's mounting and colour order, sends
+every drawing call as synchronous transactions over a link
+([dcs_link.md](dcs_link.md)), and reads the frame memory back in the
+picture's own coordinates. `Traits` is the controller's traits type (a
+struct of constexpr facts, `brio::Ili9481`), `Link` any `DcsLink`.
+
+The smallest use, a panel woken and turned, then a drawing (an excerpt
+of the first two blocks of "How to use it" below, the lines that fill
+the two prototype requests left out):
+
+```cpp
+using Panel = brio::DcsPanel<brio::Ili9481, PanelLink>;
+
+PanelLink link{PanelLink::Config{write_prototype, read_prototype}};
+Panel panel{link, brio::DcsModule{.column_mirror = true,
+                                  .bgr = true,
+                                  .wants_inversion = true}};
+if (!panel.valid()) {
+    // the link's mode is not one the controller takes: nothing will reach the bus
+}
+
+brio::Pin<'A', 2>::output();            // the reset line is a pad the board wires
+auto reset = brio::Pin<'A', 2>::ref();  // named at run time, as a request names a select
+if (!panel.reset_and_wake(reset, [](uint16_t ms) {
+        brio::delay_us(clock, static_cast<uint32_t>(ms) * 1000u);
+    })) {
+    // a link verb was refused: panel.link_failures() says how many
+}
+panel.rotation(brio::DcsRotation::r90);   // 480 x 320 now
+
+brio::fill_rect(panel, 0, 0, panel.width(), panel.height(), 0x00000000u);
+```
+
+Line by line: `Panel` names the driver over the ILI9481's traits and a
+link type; `link` is a serial link built from two prototype requests of
+the family's SPI host ([dcs_link.md](dcs_link.md)); the `DcsModule` is
+the module's own facts, handed over as the pins are - its glass mounted
+mirrored, its colour channels crossed, and its need of the inversion
+command; `valid()` says whether the link's SPI mode is one the
+controller takes. The reset line is an ordinary output pad, passed by a
+run-time reference; `reset_and_wake()` drives it low and high, wakes the
+controller and sets its formats, spends the controller's waits through
+the lambda (a small function written in place: here it takes the
+milliseconds and busy-waits them with `brio::delay_us`, which the
+driver itself never does), and answers false when a link transaction
+was refused or ran with a status other than `spi_ok`. `rotation()`
+turns the picture a quarter and sends the new address mode at once, and
+`fill_rect` is the library's own primitive,
+drawing through the panel with no adapter. The sections below speak the
+DCS command names of [dcs.md](dcs.md): CASET and PASET open a window,
+RAMWR writes memory into it, MADCTL is the address mode whose three
+walk bits (B5, B6, B7) set the order the pixels fill the window in.
+
+What decides correctness even there:
+
+- **Wake the panel before drawing.** `reset_and_wake()` (or `wake()`,
+  where the board gives the program no reset line) takes the controller
+  out of sleep, turns the display on, and states the pixel format and
+  the address mode every later write assumes; a drawing before it
+  assumes a format and an orientation nobody stated.
+- **A link in a mode the controller does not take makes every verb
+  refuse.** The ILI9481 takes SPI modes 0 and 3; a link in mode 1 or 2
+  leaves `valid()` false, and the drawing calls, which return nothing,
+  only count their refusals in `link_failures()`.
+- **Every verb waits for its link transactions.** A full-screen fill is
+  one window and a write per row, all on the wire before `fill_rect`
+  returns; a program drawing from an active object's handler (an active
+  object is a component with its own event queue, served one event at a
+  time by the kernel) holds every other active object meanwhile.
+- **The object carries its run buffers**, sized by the glass's long
+  side: for the ILI9481 the object is 2892 bytes on an AVR128DB48 and
+  2900 on a Cortex-M0+, so it is placed
+  where that much fits - a static or global object, not on the stack of
+  a part whose stack is two kilobytes ("The buffers are members"
+  below).
+
+The page goes on with the documents of record, what the design says
+and what the driver does (the rotation map, the module, the oracle, the
+refusals, the mode, the buffers), the types and verbs, how to use it,
+what the host suite establishes, and what is not covered.
+
+## Documents of record
+
+None outside this repository, the driver being
 brio's own. What it stands on is stated elsewhere and not repeated here:
 the design in [../design/gfx.md](../design/gfx.md)'s "The command tier"
 and its surface contract, the words in [dcs.md](dcs.md), what one
@@ -20,22 +111,22 @@ controller makes of them, the link carries bytes - and none of them
 knows which way up the picture is. This file does, and that is the whole
 of what it contributes besides the two `Surface` verbs.
 
-**The DIRECT shape, and only it.** Every verb is a synchronous link
+**The direct shape, and only it.** Every verb is a synchronous link
 transaction, complete on return: the shape of a bring-up, of a suite and
-of a program that owns its bus. The TILED shape - primitives drawing
+of a program that owns its bus. The tiled shape - primitives drawing
 into a rectangle of RAM that a display active object streams as one
 transfer - is a layer above this one; nothing here knows the kernel.
 
 **A rotation is a window plus a walk, never a transform.** The address
-mode's three walk bits reorder the counter INSIDE the window a
+mode's three walk bits reorder the counter inside the window a
 CASET/PASET pair opened, and never move that window's origin
 ([ili9481.md](ili9481.md)). So the driver turns a logical rectangle into
 a rectangle of the glass's own columns and pages, and then states the
 walk bits that make the counter cross it in the order a logical row
 runs. The rule that decides every bit: **a run of the logical surface -
-one row, x increasing - must be ONE CONTIGUOUS WALK of the address
-counter.** Each rotation therefore states the bit ALONG its runs and
-leaves the bits ACROSS them clear:
+one row, x increasing - must be one contiguous walk of the address
+counter.** Each rotation therefore states the bit along its runs and
+leaves the bits across them clear:
 
 | Rotation | A row runs along | Walk bits | Straight module | Mirrored module |
 |----------|------------------|-----------|-----------------|-----------------|
@@ -50,7 +141,7 @@ oracle; the second is a wire a module may leave unconnected.
 
 **Why the bits across a run may be left clear**, which is what makes one
 code serve both verbs: the two Surface verbs never send a multi-row
-block that is not UNIFORM. A fill is one colour, so the order the
+block that is not uniform. A fill is one colour, so the order the
 counter takes across the rows of a rectangle cannot show; a run has no
 second row. A verb that streamed a two-dimensional image would have to
 state those bits, and there is no such verb.
@@ -60,7 +151,7 @@ that memory column `columns - 1` shows at its left cannot be undone by
 MADCTL's horizontal flip - measured, that bit does nothing on the module
 this was written against - so the driver answers it where it can: the
 memory column of a display column `d` is `columns - 1 - d`, which moves
-the WINDOW under every rotation and flips the walk's direction only
+the window under every rotation and flips the walk's direction only
 where a row runs along the columns. That is why the mirror changes the
 MADCTL code under r0 and r180 and not under r90 and r270.
 
@@ -74,36 +165,44 @@ run in logical coordinates, through the same window and the same walk a
 write used, which is what lets one test judge a drawing pixel for pixel
 in every orientation with no eye on the glass. `get_pixel()` is that
 verb for one pixel, and it exists so a panel satisfies `ReadableSurface`
-and the reference renderer judges it with no adapter - AT THE PRICE OF A
-WINDOW AND A READ PER PIXEL on the wire. No primitive of `gfx/` may use
+and the reference renderer judges it with no adapter - **at the price of
+a window and a read per pixel** on the wire. No primitive of `gfx/` may use
 it, and the base concept having no such verb is the enforcement.
 
 **A refusal is counted, because the Surface verbs are `void`.** They
 have nowhere to report one, so `link_failures()` is where a refused
-transaction goes instead of becoming a silently wrong picture. A verb
-stops at its first refusal - a window half written is not a window - so
-a link that refuses everything counts one per verb. What an update costs
+transaction goes instead of becoming a silently wrong picture. The
+drawing, reading and turning verbs (`fill_rect()`, `write_run()`,
+`read_run()`, `get_pixel()`, `rotation()`) stop at their first refusal -
+a window half written is not a window - so a link that refuses
+everything counts one for each of them; `wake()`, and so
+`reset_and_wake()`, sends all five of its commands whatever each one
+answers and counts five. A refusal here is a transaction the panel
+asked for and did not get: one the panel itself withheld (`valid()`
+false), a link verb answering false for a request the link or the engine
+refused, or a transfer whose status was not `spi_ok`. What an update costs
 in rectangles, runs and pixels is a different question and
 `gfx/counting.hpp` is where it is asked; this driver counts nothing
 else.
 
 **The link's SPI mode is judged here, at construction.** Which modes a
-controller's serial interface takes is a fact of the CONTROLLER - the
+controller's serial interface takes is a fact of the controller - the
 traits' `serial_mode_accepted(mode)` ([ili9481.md](ili9481.md): modes 0
 and 3, from the data sheet's own cycle) - and which mode a link runs in
 is the link's (`write_mode()` / `read_mode()`,
 [dcs_link.md](dcs_link.md)). This driver is the one layer with both in
 hand, so it holds them against each other when it is built: a link whose
-mode the traits refuse, on either tenure, leaves the panel with `valid()`
+mode the traits refuse, on either tenure (the link's write or its read
+transaction), leaves the panel with `valid()`
 false, and every verb then refuses before it touches the bus - counted in
-`link_failures()`, one per verb, exactly as a link that refuses a wide
-frame behaves - because a command clocked in a mode the controller does
-not sample is not a wrong picture but no picture, and no verb would ever
-say so. A link that shows no mode at all (a DSI host, a parallel bus) has
+`link_failures()` as each verb counts a refusal, exactly as over a link
+that refuses a wide frame - because a command clocked in a mode the
+controller does not sample is not a wrong picture but no picture, and
+no verb would ever say so. A link that shows no mode at all (a DSI host, a parallel bus) has
 nothing to judge and the panel is valid as it stands; a serial link over a
 controller whose traits do not state their modes is a compile error. The
 comparison goes through `dcs_spi_mode_number()`, which reads a mode's
-number off the SPELLING of any stratum's enum, so this file names no
+number off the spelling of any stratum's enum, so this file names no
 family's enum and compiles over every host unchanged. What mode 3 buys
 over mode 0 is a block's business and not this driver's: on the PL022 it
 removes the 1.5 SCK gap the block leaves between frames in modes 0 and 2
@@ -112,14 +211,17 @@ removes the 1.5 SCK gap the block leaves between frames in modes 0 and 2
 carry the block in [../pl022/README.md](../pl022/README.md); the other
 blocks have no gap to lose.
 
-**The buffers are members, sized by the glass's LONG side.** A run of
+**The buffers are members, sized by the glass's long side.** A run of
 the rotated surface is as wide as the glass is tall, so a buffer sized
 by the short side is correct until the first r90 and then writes past
 itself; and a buffer on the stack is one a run can overflow on a part
 whose stack is two kilobytes. On the ILI9481 that is 1440 bytes for the
-row and 1441 for the read - 2891 bytes for the whole object on an AVR
-DA/DB, of a part's sixteen kilobytes. They are the GLASS's size and not
-the driver's choice, so a panel of 480 pixels a side is a panel the
+row and 1441 for the read; with the link's reference, the module's
+facts, the rotation, the validity flag and the four-byte failure count
+the whole object is 2892 bytes on an AVR128DB48 (avr-g++ 16.2, `-Os`),
+of that part's sixteen kilobytes, and 2900 on a Cortex-M0+, where the
+reference is four bytes and the counter is aligned. They are the
+glass's size and not the driver's choice, so a panel of 480 pixels a side is a panel the
 smallest parts brio touches cannot drive this way, and a smaller glass
 costs proportionally less.
 
@@ -251,13 +353,15 @@ truth"). `test/test_dcs_panel` establishes, off any hardware:
   segment, a circle, a filled round rectangle and a word of text - made
   through the panel under r0 and under r90 and read back a pixel at a
   time.
-- **A link that refuses** everything: one refusal counted per verb,
-  nothing on the bus, nothing in the panel.
+- **A link that refuses** everything: five refusals counted for
+  `reset_and_wake()` (SLPOUT, DISPON, the inversion, COLMOD, MADCTL),
+  one each for `fill_rect()`, `write_run()`, `read_run()`, `get_pixel()`
+  and `rotation()`, nothing on the bus, nothing in the panel.
 - **The link's mode against the traits**: a link in mode 0 or 3 leaves
   the panel valid and every verb open; one in mode 1 or 2 - on either
   tenure - is refused at construction, the panel behaving as it does
   over a link that refuses: the reset line still driven and the waits
-  still spent, one refusal counted per verb, nothing on the bus. The
+  still spent, each refusal counted, nothing on the bus. The
   host made of RAM has no wire, so an accepted mode changes nothing in
   it; what the case proves is the gate and not the glass.
 
@@ -316,12 +420,14 @@ Implemented, not bench-verified:
   the bench's own measurement of the controller, but the code that meets
   them has only ever run against RAM - and a driver and a simulator
   written from one reading of a command table agree on the same mistake.
-  What would measure it is the probe's letters run through this driver
-  on the module, the memory read back through `read_run()` in each of
-  the four rotations and the picture looked at once by a human.
+  What would measure it is a bench run of this driver on the module:
+  the measurements of [ili9481.md](ili9481.md)'s bench findings repeated
+  through it, the memory read back through `read_run()` in each of the
+  four rotations and the picture looked at once by a human.
 - **Mode 3 on the glass.** The traits take it from the data sheet's own
   cycle and the gate here lets it through, but every byte the bench
   measured was clocked in mode 0 ([ili9481.md](ili9481.md)). What would
-  measure it is the same probe with the host's prototypes in mode 3: the
+  measure it is the same bench run with the host's prototypes in mode 3:
+  the
   write and read rate ladders judged by read-back, and the frame read
   back whole.

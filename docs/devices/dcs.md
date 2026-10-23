@@ -1,7 +1,52 @@
 # The DCS vocabulary
 
-Documents of record: none of its own. The MIPI Display Command Set
-specification is NOT on this project's desk, so nothing here is cited by
+This document is for a programmer who drives a display controller that
+keeps its own pixels - a panel with a frame memory of its own behind a
+serial interface, a parallel bus or a DSI host - or who writes the
+traits type of a new controller. Such a panel is spoken to in the words
+of MIPI's Display Command Set (DCS): open a window (CASET, column
+address set, and PASET, page address set), write pixels into it
+(RAMWR, memory write), read them back (RAMRD), set the address mode
+(MADCTL, memory access control) and the pixel format (COLMOD).
+`devices/dcs.hpp` is those words and nothing else: the command codes,
+the bits of the two mode registers, and the arithmetic that packs a
+window or a pixel into bytes. It sends nothing and keeps no state. A
+program that draws through the panel driver
+([dcs_panel.md](dcs_panel.md)) never needs it directly; a bring-up, a
+test or a driver that speaks to a panel command by command does.
+
+The smallest use, a window and a memory write as a driver sends them
+(an excerpt of "How to use it" below):
+
+```cpp
+const auto columns = brio::dcs_window(x0, x1);       // CASET's four bytes
+const auto pages = brio::dcs_window(y0, y1);         // PASET's four bytes
+link.command(brio::Dcs::caset, columns);
+link.command(brio::Dcs::paset, pages);
+link.write(brio::Dcs::ramwr, pixel_bytes);   // the memory verb, not the command one
+```
+
+Line by line: `dcs_window(start, end)` packs one edge of the window
+into the four parameter bytes the command takes, each address
+most significant byte first; `Dcs::caset` and `Dcs::paset` are the two
+command codes, plain bytes; `link` is a `DcsLink`, the object that
+carries a command and its bytes over the bus ([dcs_link.md](dcs_link.md)),
+which this file knows nothing about; `pixel_bytes` are pixels already
+packed by one of the pixel packers below (`dcs_rgb666_pack` for an
+eighteen-bit interface).
+
+What decides correctness even there: **the window's end is inclusive**
+(columns 0 to 319 are `dcs_window(0, 319)`), and **a read-back matches
+what was written only on the bits the pixel format keeps** - so a test
+that compares the two masks what it wrote the same way (the third
+paragraph of "What the vocabulary is"). What the address mode's walk
+bits do to the order the pixels land in is not this file's but the
+controller's ([ili9481.md](ili9481.md)).
+
+## Documents of record
+
+None of its own. The MIPI Display Command Set
+specification is not on this project's desk, so nothing here is cited by
 a clause of it; every code below is the one a controller's own command
 table lists under the same name, and the authority for what a code MEANS
 is the controller's document beside this one
@@ -22,17 +67,20 @@ there is no panel object, no timing and no wait, so the file compiles on
 every compiler of the tree and costs an image that does not use a name
 exactly nothing.
 
-**The WALK is not here.** MADCTL's three high bits reorder the way a
-panel's address counter crosses a window, and what they do to it is a
-property of the silicon: the constants are here, their effect is the
-controller's document. This is the one place where the division between
-this file and a traits type is easy to get wrong, and getting it wrong
-is how a vocabulary silently becomes one panel's driver.
+**The walk is not here.** MADCTL's three high bits reorder the way a
+panel's address counter crosses a window (the order in which the pixels
+of a memory write fill it, called the walk on these pages), and what
+they do to it is a property of the silicon: the constants are here,
+their effect is the controller's document. This is the one place where
+the division between this file and a traits type (a struct of constexpr
+facts a controller supplies, [ili9481.md](ili9481.md)) is easy to get
+wrong, and getting it wrong is how a vocabulary silently becomes one
+panel's driver.
 
-**A ROUND TRIP IS EXACT ONLY ON THE BITS THE FORMAT KEEPS.** Eighteen
+**A round trip is exact only on the bits the format keeps.** Eighteen
 bits a pixel keep six bits a channel (mask 0xFC on each byte), sixteen
 keep five, six and five (0xF8, 0xFC, 0xF8), twenty-four keep everything.
-Unpacking puts the kept bits back in the MOST significant bits of each
+Unpacking puts the kept bits back in the most significant bits of each
 channel and leaves the rest at zero - it does not replicate the high
 bits down, which some libraries do to make a colour look right. So
 `unpack(pack(c))` equals `c & mask` and nothing weaker is promised, and
@@ -42,15 +90,15 @@ was written the same way.
 **A colour is the drawing world's.** 0x00RRGGBB in a `uint32_t`, red in
 the most significant byte, which is what `gfx/`'s surfaces carry and
 what a panel driver hands down. A packer's `bgr` argument is the
-exchange - of the first and third BYTE at eighteen and twenty-four bits,
-of the two FIELDS at sixteen, where a channel is not a byte. It exists
+exchange - of the first and third byte at eighteen and twenty-four bits,
+of the two fields at sixteen, where a channel is not a byte. It exists
 for two different reasons that happen to need the same operation: the
 address mode's BGR bit, and a module wired with its colour channels
 crossed.
 
 **A read's framing is a named thing.** On a link that clocks whole
 bytes, a panel's answer is not always byte-aligned with the command that
-asked for it: some commands answer one byte late, some one CLOCK late
+asked for it: some commands answer one byte late, some one clock late
 (the whole stream shifted by a bit), some are not driven at all. Which
 of those a command takes is the controller's fact, so `DcsReadFraming`
 is the vocabulary's word for it and a traits type is what says which.
@@ -74,9 +122,9 @@ each means to brio beside it:
 
 | Name | Bit | What it is |
 |------|-----|------------|
-| `page_order` | B7, 0x80 | the walk along the PAGES reversed |
-| `column_order` | B6, 0x40 | the walk along the COLUMNS reversed |
-| `exchange` | B5, 0x20 | the counter steps the PAGES first |
+| `page_order` | B7, 0x80 | the walk along the pages reversed |
+| `column_order` | B6, 0x40 | the walk along the columns reversed |
+| `exchange` | B5, 0x20 | the counter steps the pages first |
 | `line_order` | B4, 0x10 | line address order - a display bit |
 | `bgr` | B3, 0x08 | a pixel's channels in the other order |
 | `horizontal_flip` | B1, 0x02 | a display bit |
@@ -91,7 +139,7 @@ masks. `dcs_colmod(dbi, dpi)` builds the byte, `dcs_colmod_dbi` and
 because it is the reset value of the controller documented beside this.
 
 The window: `dcs_window(start, end)` gives the four parameter bytes of
-CASET or PASET, each address big-endian, THE END INCLUSIVE;
+CASET or PASET, each address big-endian, the end inclusive;
 `dcs_window_range(span)` is its inverse and gives a `DcsWindowRange`.
 
 The pixel packers, all constexpr, each with a `bgr` flag that defaults

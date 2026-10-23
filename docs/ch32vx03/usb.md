@@ -1,10 +1,154 @@
 # USB device controller (CH32V203)
 
-A full-speed USB DEVICE controller that is, register for register, the
-one on the STM32F1 and F0 lines under WCH's names. Documents of record:
-the CH32FV2x_V3xRM reference manual V2.3, chapter 21 whole - one manual
+This document is for a programmer who wants a CH32V203 to appear to a
+host computer as a USB device on the chip's own connector: in practice
+a serial port, a console or a byte transport, which a Linux host binds
+to its own cdc-acm driver with nothing installed. It covers the
+part's USB device controller, which the CH32V303 has not got (that
+part's one full-speed controller is [usbfs.md](usbfs.md)'s). The
+driver, `Usbd<pma_bytes>`, is a monostate (a class with only static
+members, never instantiated: one block, one set of state) that moves
+packets and nothing above them. The protocol is the stack's
+([design/usb.md](../design/usb.md)): `UsbDevice` of
+[util/usb/device.hpp](../../brio/util/usb/device.hpp) answers the
+host's enumeration over the controller, and `UsbCdcAcm` of
+[util/usb/cdc.hpp](../../brio/util/usb/cdc.hpp) is the serial-port
+class, a byte transport with a UART's surface, so `print` and a
+`SerialPort` run over it unchanged.
+
+The smallest use, the block under "How to use it" below with the
+descriptors' bytes left out:
+
+```cpp
+using Usb = brio::Usbd<>;                                  // 384 bytes, CAN-safe
+using Port = brio::UsbCdcAcm<Usb, P>;                      // interface 0, endpoints 1 and 2
+struct Descriptors {
+...
+};
+using Device = brio::UsbDevice<Usb, Descriptors, Port>;
+
+using SysClock = brio::Clock<brio::ClockSource::pll, 96'000'000, 8'000'000>;   // the crystal: 2500 ppm
+Usb::init(clock);
+Device::start();                                             // the pull-up: the host enumerates from here
+
+BRIO_CH32_VECTOR(usb_lp_can1_rx0_handler) { Device::isr(); }
+brio::print(Port{}, "hello", brio::crlf);                    // once the host has configured the port
+```
+
+Line by line: `Usb` names the controller type with its default budget,
+384 of the 512 bytes of packet memory the block shares with the CAN
+controller, the top 128 being left to the CAN's filter table ("And the
+memory is shared with the CAN controller" below). `Port` is the CDC ACM
+class over that controller; `P` is the platform
+([platform.md](platform.md), `using P = brio::Ch32vx03Platform<>;`),
+whose critical section guards the class's two rings, and the class's
+template defaults put its communications interface at 0, its
+notification endpoint at 1 and its bulk pair at 2. `Descriptors` holds
+the bytes the host reads while it enumerates the device - the device
+descriptor (pid.codes' test identity 1209:0001, class 2), the
+configuration glued from `usb_configuration_head` and the class's own
+descriptor bytes, and `string(index)` - spelled out under "How to use
+it" (the `...` stands for them). `Device` is the stack, the
+control-endpoint machine over the controller with the class it routes
+to. `SysClock` is the clock task's type, the PLL at 96 MHz from the
+board's 8 MHz crystal (the third argument), and `clock` its tag object,
+declared `constexpr SysClock clock;` as in [clock.md](clock.md)'s
+smallest use. `Usb::init(clock)` brings the block up - its clock gate,
+PA11 and PA12 left floating inputs with port A's clock open, the wake
+from power-down, endpoint zero laid out, the interrupts armed and the
+vector's PFIC line enabled - with the pull-up still down, so the host
+sees no device yet; it answers false only when the budget cannot hold
+the descriptor table and endpoint zero's two buffers (a `pma_bytes`
+under 192), which the default can, and the line discards the answer.
+`Device::start()` clears the stack's state, resets the class and raises
+the pull-up: from that call the host sees a full-speed device and
+enumerates it. The `BRIO_CH32_VECTOR` line binds the controller's
+low-priority vector, interrupt 36, which it shares with CAN1's receive
+FIFO 0, under the name the crt (the startup code that runs before
+`main()`,
+[startup_ch32vx03.S](../../ch32vx03/src/glue/startup_ch32vx03.S))
+gives it, to `Device::isr()`: the whole stack runs in that interrupt
+body, the enumeration, the class's requests and its packets
+([design/usb.md](../design/usb.md), "Where it runs"), and a program
+whose lines a `SerialPort` assembles also posts its `RxActivity` from
+there when `Port::take_rx_edge()` reports the receive ring's
+empty-to-non-empty edge. `Port{}` is an empty tag object of the class
+type, the argument `print` takes to pick the port, as a UART's tag is;
+`brio::crlf` is the line ending.
+
+`init()` and `start()` go in `main()`, after `SysClock::init()`; the
+suite enables interrupts before `Device::start()`. `print` is called
+from `main()` or from an active object's event handler (an active
+object is a component of a brio program with its own event queue,
+served one event at a time by the kernel,
+[docs/learn/introduction.md](../learn/introduction.md)), never from an
+interrupt handler, because the class's transmit ring has one producer.
+It copies the text and waits until the ring has taken every byte, and
+the class takes none until the host has configured the port, so a
+`print` issued before that waits until the host does, for ever with no
+host attached (derived from util/usb/cdc.hpp's `write_byte` and
+`write_bulk` and util/print.hpp's delivery policy).
+
+What decides correctness even there:
+
+- **The clock task first, and a tree the type alone vouches for.**
+  `init()` checks the clock type at compile time, twice: its USB rate
+  must be 48 MHz (a PLL at 48, 96 or 144 MHz, which USBPRE divides by
+  1, 2 or 3) and its HCLK at least `usbd_min_hclk_hz`, 24 MHz, the
+  floor measured below; a type that fails either does not compile. It
+  reads the type and not the hardware. The clock task's `init()` is
+  what starts the PLL and writes USBPRE, before any USB gate is open
+  in the order 3.4.2 asks for, so a `Usb::init()` called before
+  `SysClock::init()` opens the gate first, and what the block does then
+  is not measured; and a `SysClock::init()` that answered false leaves
+  the chip off the rate the type claims while `Usb::init()` still
+  answers true (the suite reads both answers). Nor is the source
+  checked: a PLL on the HSI compiles, and the clock chapter measures
+  every HSI-rooted tree of the CH32V203C8T6 0.42 to 0.46 % fast against
+  the 2500 ppm full speed allows, so the program takes its PLL from a
+  crystal, as the excerpt does, and nothing refuses the other.
+- **The vector bound by the program.** `init()` enables the vector's
+  PFIC line, and the crt's table entry is a weak alias of
+  `default_handler`, a spin loop, until the program defines it: a
+  program that forgets the binding stops in that spin at the
+  controller's first interrupt, with no fault and no message (the probe
+  names the line: [README.md](README.md), "Debugging").
+  `BRIO_CH32_VECTOR(name) { body }`, or one of its two forms, is the one
+  spelling of a binding on this target ([platform.md](platform.md)).
+- **No sleep while the device is attached, by mechanism.** From the
+  pull-up to the detach the controller holds one count in the
+  platform's count of bus masters at work (the bus-master count,
+  [bus_activity.hpp](../../brio/ch32vx03/bus_activity.hpp),
+  [sleep.md](sleep.md)), and the kernel's `idle()` returns at once
+  while it stands, because with the core asleep this block cannot reach
+  its packet memory ("The core must not sleep while the controller
+  works" below). The program may run the kernel's ordinary loop; an
+  attached device spins in it instead of sleeping, and the current a
+  sleep would save is the price.
+- **The budget states whether the CAN is used.** When it is, the CAN's
+  filter table takes the top 128 bytes of the packet memory, and
+  nothing in this driver can see whether it is: `Usbd<>` stays out of
+  them, and `Usbd<512>` is for a program with no CAN ("How to use it").
+
+The rest of this page, in order: the documents of record; what the
+silicon does (ST's controller under WCH's names, the packet memory and
+its window, the share with the CAN, the status fields written by XOR,
+the toggles and a halt's release, the pads that are port A's, the one
+clock rate, the sleep the controller does not survive, the overflow and
+the driver's repair, the suspend handshake, the two vectors); the types
+and verbs; how to use it; the bench findings, on the CH32V203C8T6; and
+what is not covered.
+
+A full-speed USB device controller that is, register for register, the
+one on the STM32F1 and F0 lines under WCH's names.
+
+## Documents of record
+
+The CH32FV2x_V3xRM reference manual V2.3, chapter 21 whole - one manual
 covers four families and what this page states is the CH32V20x_D6
-class's, every part up to the CH32V203C8 - with 21.2.1 for the packet
+class's (a device class is the manual's grouping of parts; this stratum
+spans three, the CH32V20x_D6, the CH32V20x_D8 and the CH32V30x_D8),
+every part up to the CH32V203C8 - with 21.2.1 for the packet
 memory it shares with the CAN, 21.2.2 for the wake from power-down,
 21.2.4 for the suspend and wake process, 21.3 for the registers and
 33.2.1 for the pull-up, which lives outside the chapter; the datasheet CH32V203DS0 V2.8 table 2-1 for which parts
@@ -16,8 +160,12 @@ stack [util/usb/device.hpp](../../brio/util/usb/device.hpp) and the
 class [util/usb/cdc.hpp](../../brio/util/usb/cdc.hpp) above it, the
 clock tree of [clock.md](clock.md) feeding it and
 [sleep.md](sleep.md)'s count of bus masters keeping the core awake for
-it. Reference suite: `test_vx03_usb`, the console on the probe's UART
-and the board's own connector under test; the enumeration's own
+it. Reference suite: `test_vx03_usb` (a suite's letter is one command
+key of its console and the group of verdicts it runs; `z` is the key
+that runs `a`, `u`, `d` and `k`, `d` among them wanting the host at the
+connector too, and the other letters, which want a script at the host's
+end, are run by name), the console on the probe's
+UART and the board's own connector under test; the enumeration's own
 apparatus is `usb_probe`, the instrument that asks the controller what
 it is doing while a host tries to enumerate it.
 
@@ -31,7 +179,7 @@ table offset, and a packet memory the CPU and the engine share and the
 program lays out itself. Nothing here is the Synopsys core of the
 STM32F4 and nothing is the RP2040's: it is a third shape, and the
 reason it lives in this stratum rather than in one of its own is that
-an IP stratum is born at the SECOND family that carries the IP.
+an IP stratum is born at the second family that carries the IP.
 
 The part table says which packages have it
 ([parts/](../../brio/ch32vx03/parts/), `device::has_usbd`): every one
@@ -52,9 +200,9 @@ each endpoint - and this driver puts it at offset zero and hands
 buffers out above it, in the order the classes claim their endpoints.
 
 COUNTn_RX is two fields in one halfword, which is the sharpest of the
-small edges here: the program writes the buffer's SIZE into it as a
-BLOCK COUNT (blocks of two up to 62 bytes, of thirty-two from 64 up)
-and the hardware writes the RECEIVED count into the same halfword. An
+small edges here: the program writes the buffer's size into it as a
+block count (blocks of two up to 62 bytes, of thirty-two from 64 up)
+and the hardware writes the received count into the same halfword. An
 endpoint left as the hardware leaves it therefore has no size any more,
 which is why the driver rewrites that field every time it arms a
 reception - measured: an endpoint armed without it acknowledges the
@@ -64,8 +212,8 @@ untouched memory.
 ### And the memory is shared with the CAN controller
 
 Per 21.2.1, when the CAN controller is used its filter table takes the
-TOP 128 bytes of the 512 and the USB keeps the low 384. Whether CAN is
-in use is not a fact this file can see, so it is a PARAMETER and not a
+top 128 bytes of the 512 and the USB keeps the low 384. Whether CAN is
+in use is not a fact this file can see, so it is a parameter and not a
 guess: `Usbd<>` budgets 384 bytes and refuses the endpoint that would
 not fit, and a program with no CAN says `Usbd<512>` and gets the rest.
 A CDC ACM port spends 328 of them - the table's 64, endpoint zero's two
@@ -84,13 +232,13 @@ storing a word with a zero in that one bit and ones everywhere else -
 and its CTR bit is not clearable there at all: it stands until the
 endpoint's own flag falls.
 
-The endpoint TYPE codes are the chapter's and not the descriptor's
+The endpoint type codes are the chapter's and not the descriptor's
 (bulk is 00 here and 10 on the wire), which is a translation the driver
 owns so that nothing above it has to know.
 
 ### The toggles outlive a bus reset, and a halt's release is the driver's
 
-THE TWO DTOG BITS SURVIVE A BUS RESET AND A NEW CONFIGURATION on this
+The two DTOG bits survive a bus reset and a new configuration on this
 silicon - measured: a reconnect after an odd count of packets left
 DTOG_RX at DATA1, and the host's first packet of the new configuration,
 sent as DATA0, was acknowledged and dropped as a repeat. USB 2.0 9.4.5
@@ -100,7 +248,7 @@ inverts a one).
 
 A host's CLEAR_FEATURE(ENDPOINT_HALT) asks the same of the halted
 endpoint, and on a data endpoint `stall(address, false)` does more: it
-writes back the STATUS the halt replaced, at DATA0. A reception the class
+writes back the status the halt replaced, at DATA0. A reception the class
 had armed before the halt is armed again - released to NAK it was lost
 for good while the class went on counting it armed, the host's next
 packet NAKed until a reconnect (measured) - and a packet armed for an IN
@@ -109,12 +257,12 @@ protocol stall a SETUP clears, released to NAK as before.
 
 ### The pads are GPIO pads, and that is nowhere in the chapter
 
-D- and D+ are PA11 and PA12, and the block reaches them THROUGH PORT A.
+D- and D+ are PA11 and PA12, and the block reaches them through port A.
 With that port's clock closed - which is how it comes out of reset -
 the pull-up still works, because the pull-up is not in this block
 either: it is EXTEN_CTR's bit 1 (33.2.1). So a program that opened only
 the USB's own gate presents a device to the host and then fails every
-packet. MEASURED that way: the SETUP counted but its first halfword
+packet. Measured that way: the SETUP counted but its first halfword
 never stored, sixteen packet-memory overflows in one attempt, the host
 giving up with a protocol error. WCH's own `USB_Port_Set()` opens port
 A's clock and leaves the two pads floating inputs before it touches the
@@ -125,19 +273,19 @@ pull-up, and `init()` does the same.
 The controller wants 48 MHz exactly, and RCC's USBPRE divides the PLL
 by 1, 2 or 3 to make it - so only a PLL at 48, 96 or 144 MHz can feed
 it, the divider is programmed before the USB gate is ever opened
-(3.4.2's order), and `init()` refuses at COMPILE time a tree that
+(3.4.2's order), and `init()` refuses at compile time a tree that
 cannot ([clock.md](clock.md)). Full speed wants that 48 MHz within 2500
-ppm, and every HSI-rooted tree of this family measures four tenths of a
-per cent fast (the clock chapter) - nearly twice the allowance - so a
+ppm, and every HSI-rooted tree measured on the CH32V203C8T6 runs four
+tenths of a per cent fast (the clock chapter) - nearly twice the allowance - so a
 program with a USB takes its PLL from a crystal.
 
 ### The core must not sleep while the controller works
 
-MEASURED, and the manual says the opposite: 2.4's table gives Sleep as
+Measured, and the manual says the opposite: 2.4's table gives Sleep as
 "core clock off, no effect on other clocks" and its prose as "the core
 stops running and all peripherals are still running". With the core in
 WFI or in the platform's WFE idle this controller cannot reach its
-packet memory. An armed bulk endpoint receives NOTHING - the host's
+packet memory. An armed bulk endpoint receives nothing - the host's
 bytes are lost and the overflow counter climbs one per attempt - and an
 enumeration never gets past its first control transfer: the SETUP is
 taken and answered, the host acknowledges the data, and the status
@@ -145,7 +293,7 @@ stage dies with an overflow. The same image with a loop that only
 steps enumerates, configures and carries bytes with not one overflow.
 
 It is not the USB's alone and it is not this driver's doing. In a sleep
-of any depth here NO BUS MASTER BUT THE CORE GETS A CYCLE: a
+of any depth here no bus master but the core gets a cycle: a
 memory-to-memory DMA started just before a sleep moves the handful of
 items already in its pipeline and then nothing until the core wakes,
 while the clocks keep running (the timers and the core's own counter
@@ -159,14 +307,14 @@ is already gone and the host does not retry a failed bulk burst;
 staying awake for ten or a hundred milliseconds after an overflow
 recovers nothing of the burst in flight; holding the endpoint at NAK
 across the sleep still overflows; re-validating the endpoint finds it
-valid. What DOES work is not sleeping and dividing HCLK instead: the
+valid. What does work is not sleeping and dividing HCLK instead: the
 device enumerates and carries its four kilobytes with HCLK at 96, at 48
 and at 24 MHz with the USB clock at 48, and fails at 12 MHz with the
 sleeping case's own signature. So 24 MHz is the floor, `init()` refuses
 a slower tree at compile time (`usbd_min_hclk_hz`), and what the
 program gives up on this family is not throughput but sleep.
 
-THE VENDOR'S OWN EXAMPLE FAILS THE SAME WAY, which is what settles
+The vendor's own example fails the same way, which is what settles
 whose finding this is: the EVT's SimulateCDC, built with WCH's compiler
 and flags and unchanged but for one `wfi` at the end of its loop, never
 reaches CONFIGURED - SET_ADDRESS gets through, the descriptor reads do
@@ -178,7 +326,7 @@ frame, so it is neither the depth nor the length of the sleep. There is
 no errata sheet for this family, and the absence of an erratum is
 evidence of nothing.
 
-AND SO IT IS A MECHANISM AND NOT AN INSTRUCTION TO THE PROGRAMMER. An
+And so it is a mechanism and not an instruction to the programmer. An
 attached controller counts itself one bus master
 ([bus_activity.hpp](../../brio/ch32vx03/bus_activity.hpp)), the
 platform's `idle()` does not sleep while that count stands and a sleep
@@ -191,14 +339,14 @@ idle path included, and what decides is the silicon's own state.
 ### An overflow costs the endpoint its buffer, and the driver gives it back
 
 COUNTn_RX once more, and this is its sharpest face. A reception that
-completes writes its length into the low ten bits and leaves the SIZE
+completes writes its length into the low ten bits and leaves the size
 above them standing - measured 0x8440 where a 64-byte buffer's encoding
-is 0x8400 and the packet was 64 bytes. A reception that OVERFLOWS does
-not: the size field comes back ZERO and the halfword reads as the bare
+is 0x8400 and the packet was 64 bytes. A reception that overflows does
+not: the size field comes back zero and the halfword reads as the bare
 count, 0x0040 (measured over the debug port on an endpoint that had
 just lost a packet). And because the packet never completed, no CTR_RX
 is raised and no layer above ever arms that endpoint again: it stays
-VALID over a buffer that now says zero blocks, so EVERY packet after it
+VALID over a buffer that now says zero blocks, so every packet after it
 overflows too. Measured, before the driver answered it: an endpoint
 left alone after one overflow took 64 bytes in 200 ms where a healthy
 one takes ninety thousand, and the overflow counter climbed for as long
@@ -207,7 +355,7 @@ as the host kept sending.
 So the packet-memory overflow is not a flag this driver only counts:
 `take_events()` writes the size encoding back for every endpoint that
 is still armed and has no reception standing. The lost packet is still
-lost - a control transfer survives because the HOST retries it, a bulk
+lost - a control transfer survives because the host retries it, a bulk
 burst does not - but the port is a port again the moment the cause
 stops.
 
@@ -216,9 +364,9 @@ stops.
 21.2.4 asks the program to answer the bus going idle by putting the
 module in suspend itself: FSUSP shields the detector, which would
 otherwise raise the flag again for as long as the bus stays idle, and
-LPMODE is the low-power half beside it. THE WAKE-UP IS WHAT MAKES THAT
-MANDATORY AND NOT A COURTESY: the condition for WKUP is a wake-up
-signal reaching a SUSPENDED module, so a program that reports the
+LPMODE is the low-power half beside it. The wake-up is what makes that
+mandatory and not a courtesy: the condition for WKUP is a wake-up
+signal reaching a suspended module, so a program that reports the
 suspend and leaves the block running never hears the resume. Measured
 that way before the driver kept the handshake: the suspend counted, the
 host's resume never, over twenty seconds of a bus carrying frames
@@ -256,7 +404,7 @@ what the program gives the USB of the shared memory, 384 by default
 (the CAN-safe budget) and 512 for a program with no CAN. `init(clock)`
 is the block's clock, 21.2.2's wake from power-down, the two pads
 through port A, the control endpoint laid out and the interrupts armed
-- with the pull-up left DOWN, because the host must not see a device
+- with the pull-up left down, because the host must not see a device
 before the program can answer it; `release()` gives all of it back.
 Both of the compile-time refusals live in `init()`: the 48 MHz the tree
 must make, and `usbd_min_hclk_hz`, the measured floor of the bus.
@@ -278,7 +426,7 @@ The readbacks are what a program and a suite ask: `frame()` (the
 host's start-of-frame number), `address()`, `pulled_up()`,
 `buffer_used()` / `buffer_free()` (the shared memory spent and left),
 `errors()` (the block's error flag, counted) and `overruns()` (the
-packet-memory overflow, counted). Both counters SATURATE - a counter
+packet-memory overflow, counted). Both counters saturate - a counter
 that wrapped would report a healthy bus - and both count from `init()`,
 so what they carry is what this bring-up of the block has seen and not
 what the last one did.

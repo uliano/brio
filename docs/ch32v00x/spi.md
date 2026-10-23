@@ -1,13 +1,100 @@
 # SPI (CH32V00x)
 
-The one SPI of RM ch. 16 - both roles, 8- or 16-bit frames, the four
-modes, a software or hardware chip select, hardware CRC, two DMA
-requests - and the host engine util/spi_bus.hpp's arbiter drives on
-this silicon as on the other three. Documents of record: the CH32V00X
+This document is for a programmer who talks to an SPI device - a
+display, a flash, a converter - with the CH32V006 or the CH32V003 as
+the bus host, or who makes the part a client another host clocks. It
+covers the one SPI of RM ch. 16 - both roles, 8- or 16-bit frames, the
+four modes, a software or hardware chip select, hardware CRC, two DMA
+requests - in three layers: `Spi<1>`, the resource, its registers as
+functions; `SpiHost`, the host engine, which runs one request at a time
+from its interrupt, on its DMA engines or polled; and `SpiClient`, the
+client. A program drives the host through util/spi_bus.hpp's arbiter,
+`SpiBus`, an active object of the program (a component with its own
+event queue, served one event at a time by the kernel,
+[docs/learn/introduction.md](../learn/introduction.md)) that takes the
+clients' requests one at a time in arrival order and sends each its
+reply ([design/spi-bus.md](../design/spi-bus.md)). The request is the
+same struct on every stratum.
+
+The smallest use, a host writing a command byte and 64 pixel bytes to
+a device whose select is PC3, from "How to use it" below:
+
+```cpp
+using Bus = brio::SpiHost<1>;                         // the default pads
+using Spi = brio::SpiBus<Bus, P, 4>;                  // the arbiter AO
+using Cs = brio::Pin<'C', 3>;
+
+Bus::init(clock, 8'000'000);                          // a ceiling for the whole bus
+Cs::output(true);
+
+Bus::Request r{};
+r.cs = Cs::ref();
+r.cmd = brio::lend<brio::Lease::reply>(cmd);  r.cmd_len = 1;
+r.tx = brio::lend<brio::Lease::reply>(pixels); r.len = 64;
+r.clock = brio::SpiClock::div4;                       // at 48 MHz: clamped to div8, 6 MHz
+r.mode = brio::SpiMode::mode0;
+r.reply = brio::reply_to<Display, brio::SpiDone>();
+brio::post<Spi>(r);
+
+extern "C" BRIO_CH32_INTERRUPT void spi1_handler() {
+    if (Bus::isr()) { brio::post<Spi>(brio::TransferDone{Bus::status()}); }
+}
+```
+
+Line by line: `Bus` is the host on SPI1's default pads (SCK PC5, MOSI
+PC6, MISO PC7) with no DMA engines, so its interrupt pumps the frames;
+`Spi` is the arbiter over it, with room for four pending requests; `Cs`
+is the device's chip select, an ordinary GPIO the request carries and
+the host drives around the transaction, not the peripheral's NSS pad.
+`Bus::init()` takes the clock task's tag and a ceiling for every
+request's SCK, and answers false when not even HCLK/256 honours it;
+`Cs::output(true)` makes the select an output driven high, inactive,
+before the first request. The request lends the host two buffers
+(`lend<Lease::reply>`: the buffers stay the sender's, lent until the
+reply comes), names the SCK as a division of HCLK and the mode, and
+says where the answer goes: a `SpiDone` event posted to `Display`, the
+program's active object that sent it. The ceiling clamps and never
+speeds up: HCLK/4 is 12 MHz at 48 MHz, over the 8 MHz ceiling, so this
+request runs at HCLK/8, 6 MHz. The program binds SPI1's vector to the
+host's `isr()`, under the startup code's name, and posts the host's
+status to the arbiter when a transaction ends.
+
+What decides correctness even there. `init()` after the clock task's,
+since the ceiling and the select's timing are computed from the rate
+the clock type claims; a request's SCK is a division of the real HCLK,
+so on a chip still at its 8 MHz reset rate every transaction runs six
+times slower than its numbers say, and nothing refuses it. The buffers
+are untouched by the sender from the post until `SpiDone` arrives (the
+host reads and writes them in between, and nothing checks that the
+sender keeps away). The vector must be bound: an unbound one lands in
+the startup code's spin at the first frame. The client is narrower than
+the host: on the CH32V006 `SpiClient` refuses modes 1 and 2, measured
+served in neither. And on the CH32V003 a sleeping core changes the
+host's timing: its Sleep stops the DMA controller, so `idle()` does not
+sleep while an engined transaction is in flight, and the pump's two
+frames in flight overrun when the program idles between frames at
+HCLK/64 (the bench findings; a gap listed below).
+
+The page is long because the host's costs are on it. In order: the
+documents of record; what the silicon does; the types and verbs; the
+host above the wire, cycle by cycle against the wire's figure; the
+client's runs; how to use it, the engines and the client among the
+examples; the bench findings, with this part as the desk's SPI client;
+and what is not covered.
+
+## Documents of record
+
+The CH32V00X
 reference manual V1.5 (16.2.1 for the pins and the select, 16.2.2 and
 16.2.3 for the two roles, 16.2.5 for the CRC, 16.2.7 for the errors,
 16.3 for the registers), the CH32V006 datasheet V2.0 (table 2-1-1 for
-the pads).
+the pads). The header is
+[brio/ch32v00x/spi.hpp](../../brio/ch32v00x/spi.hpp); the reference
+suite is `test_ch32_spi`, and the host's costs are `bench_ch32`'s (a
+suite's letter, below, is one command key of its console and the group
+of verdicts it runs, `z` the key
+that runs the image's set of letters, a letter outside it run by its
+own key).
 
 ## What the silicon does
 
@@ -19,7 +106,7 @@ the pads).
   RXNE that a frame has been shifted both ways. A frame written while
   another shifts waits in the buffer and follows it with no gap on SCK
   (16.2.2: "if the TXE flag is set, fill the data register, maintain
-  the complete data flow"); and the receive buffer holds ONE frame - a
+  the complete data flow"); and the receive buffer holds one frame - a
   frame that ends while the one before it stands unread is lost, OVR
   set, the transmit side untouched (16.2.7), the flag cleared by a
   DATAR read followed by a STATR read. Those two sentences are what the
@@ -30,14 +117,14 @@ the pads).
   the level from SSI, the pad free), hardware output (SSOE, driven
   low while SPE is set), hardware input (the multi-host arrangement:
   a low level raises MODF and demotes the host).
-- **NOTHING IS ENABLE-PROTECTED** (measured): 16.3.1 says DFF and CRCEN
+- **Nothing is enable-protected** (measured): 16.3.1 says DFF and CRCEN
   "can only be written when SPE is 0" and that BR, CPOL, CPHA, MSTR
   and LSBFIRST "cannot be modified during communication" - and a raw
   write to each of the seven lands with SPE set. The driver's
   refusals and its disable/enable pair are the only protection there
   is.
 - **A DMA request that rises while its channel is disabled is
-  LATCHED** and served at the channel's next enable (measured: with
+  latched** and served at the channel's next enable (measured: with
   RXDMAEN standing through a command phase pumped by hand, the
   command's echo landed as the block's first byte; with it standing
   between transactions, the stale frame in DATAR did - every engined
@@ -52,8 +139,9 @@ the pads).
   first, so the receive block ends after the transmit block: the
   receive channel's completion is the one edge a transaction needs.
 - **The default pads on the CH32V006** are SCK PC5, MOSI PC6, MISO PC7,
-  NSS PC1 (table 2-1-1); the remaps are AFIO's, which the stratum does
-  not touch yet.
+  NSS PC1 (table 2-1-1); the remaps are AFIO's columns, which
+  `SpiPins` carries as a remap code (`spi1_pins_for(code)` is a whole
+  column, and `init()` writes the code; [pin.md](pin.md)).
 - **Two of the chapter's sentences are slips**: DFF's two codes are
   both described as "16-bit" (0 is 8-bit), and 16.2.1 describes CPHA
   with the same words for both values (table 16-1 and the figures
@@ -61,8 +149,8 @@ the pads).
 - **The client is restricted, and not as 16.2.3 says.** "If you need to
   send in slave mode, you need to set CPOL to mode 2 or mode 3" - and
   measured against a foreign host (the CH32X035's, below), this client is
-  served in modes 0 and 3 BOTH WAYS, MSb and LSb first, and in modes 1 and
-  2 NEITHER way: what it hears there is every byte one bit early (0x14
+  served in modes 0 and 3 both ways, MSb and LSb first, and in modes 1 and
+  2 neither way: what it hears there is every byte one bit early (0x14
   read 0x28), as a client that samples on the rising edge in every mode
   would, and its MISO a fixed pattern whatever it was given. The host's
   own waveforms are the standard's in all four modes (measured by the far
@@ -88,7 +176,7 @@ the pads).
   dummies) and an optional in buffer (null = discard), the per-request
   `mode`, `clock` and `bits`, and `polled` - false runs the frames on
   the RXNE interrupt with the kernel free between them, true spins
-  inside `start()` and completes synchronously. The ORDER of the fields
+  inside `start()` and completes synchronously. The order of the fields
   is this host's: forty bytes with no padding, the eight words an
   asynchronous tenure needs first, then one word holding `clock`,
   `mode` and `bits` behind `cs_setup_us`, then the reply (the next
@@ -101,7 +189,7 @@ the pads).
   keeps two frames in flight at, the next section), `prime()` for a
   caller framing its own select, `bit_order()`, `isr()`, `dma_isr()`,
   `recover()`, `release()`, `claim_nss_pad()`. `hold_off_cycles` is
-  the IMAGE's: the longest, in core cycles at the clock the host runs
+  the image's: the longest, in core cycles at the clock the host runs
   at, that the image keeps the host's vector from running - the longer
   of its longest handler and its longest masked window - with a default
   of 320 and a zero refused at compile time (the next section).
@@ -118,8 +206,8 @@ the pads).
   the pump; `uint16_t` engines - DATAR's width, nothing wider compiles
   - serve both, the 16-bit request in half-word beats when both of its
   buffers sit on a half-word boundary and on the pump otherwise. The
-  transmit engine is armed for its errors alone: ONE DMA INTERRUPT A
-  TRANSACTION, the receive channel's, and `dma_isr()` reads the
+  transmit engine is armed for its errors alone: one DMA interrupt a
+  transaction, the receive channel's, and `dma_isr()` reads the
   controller's one flag register once for both channels. The receive
   engine arms at very_high and the transmit at high
   ([../design/dma.md](../design/dma.md)): DATAR's receive half holds one
@@ -137,9 +225,9 @@ the pads).
   `spi_client_mode_served()`: modes 1 and 2 on the CH32V006) and
   `init<cfg>(clock)`, where such a mode does not compile; the per-frame
   verbs - `enable(first)` with the first answer loaded before the host's
-  clock, `enable()` with the buffer empty, `write()` on TXE (ONE frame
+  clock, `enable()` with the buffer empty, `write()` on TXE (one frame
   ahead: no FIFO), `poll()`, `selected()` read off the NSS pad,
-  `drive_output()` for a dark listener, `isr()` -; and THE RUNS a
+  `drive_output()` for a dark listener, `isr()` -; and the runs a
   transaction is served by, its unit (the next section but one):
   `answer(out, spins)`, `exchange(out, in, spins)`, `receive(in, spins)`
   over `uint8_t` or `uint16_t` frames, each returning a `Run` - the
@@ -487,7 +575,7 @@ Bus::Request r{};
 r.cs = Cs::ref();
 r.cmd = brio::lend<brio::Lease::reply>(cmd);  r.cmd_len = 1;
 r.tx = brio::lend<brio::Lease::reply>(pixels); r.len = 64;
-r.clock = brio::SpiClock::div4;                       // 12 MHz at 48
+r.clock = brio::SpiClock::div4;                       // at 48 MHz: clamped to div8, 6 MHz
 r.mode = brio::SpiMode::mode0;
 r.reply = brio::reply_to<Display, brio::SpiDone>();
 brio::post<Spi>(r);

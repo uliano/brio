@@ -1,14 +1,33 @@
 /*
  * platform.hpp
  *
- * Host (native test) implementation of the brio Platform concept: the
- * critical section only tracks its nesting depth and counts its entries
- * (tests are single threaded), the clock is a plain counter the test advances by hand, and
- * idle()/break_here() record their calls so tests can assert on them.
- * Time becomes deterministic arithmetic.
+ * The host's implementation of the brio Platform concept
+ * (kernel/platform.hpp: the set of requirements a platform type meets -
+ * a critical section, a clock, idle(), break_here(), the panic record,
+ * the atomic width), for a native test process. A host test names
+ * `HostPlatform` wherever a target program names its family's platform,
+ * and the kernel and util/ run over it unchanged (docs/host/README.md, "The host platform").
  *
- * All state is static inline so tests reach it without plumbing; call
- * reset() at the start of each test case.
+ * The smallest use, as test/test_time_event spells it: the platform as
+ * the template argument, its state put back at the start of each case,
+ * and time advanced by hand:
+ *
+ *     using TE = brio::TimeEvents<brio::HostPlatform>;
+ *     static inline brio::EventQueue<Event, 8, brio::HostPlatform> queue;
+ *
+ *     brio::HostPlatform::reset();      // the start of every test case
+ *     ++brio::HostPlatform::ticks;      // one tick of the virtual clock
+ *     TE::process();                    // then assert what was posted
+ *
+ * What each piece does: the critical section only tracks its nesting
+ * depth and counts its entries (tests are single threaded, so there is
+ * nothing to mask); the clock is a plain counter the test advances by
+ * hand, so time becomes deterministic arithmetic; and idle() and
+ * break_here() record their calls so tests can assert on them - no
+ * sleep, no trap. All state is static inline so tests reach it without
+ * plumbing; call reset() at the start of each test case. HostCore<n>
+ * below is the two-core host of the inbox's suite (test_inbox), and
+ * HostDoorbell<core> its counting doorbell.
  */
 
 #pragma once

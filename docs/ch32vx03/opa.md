@@ -1,12 +1,75 @@
 # OPA (CH32V203, CH32V303)
 
-Up to four operational amplifiers - two on the CH32V203, four on the
-CH32V303 - each with a positive input that is one of two pads, a
-negative input that is one of two pads, and an output that is one of two
-pads. That is the whole chapter: four bits an amplifier in ONE register,
+This document is for a programmer who wants one of the on-chip
+operational amplifiers of a CH32V203 or a CH32V303: as a comparator
+between two pads, or, with a wire strapped from an output pad back to a
+negative input pad, as a follower or a divider, its output read by the
+converter or as a pad's level. There is no gain and no internal
+feedback here (below), so with no wire the amplifier is a comparator.
+`Opa<n>` is one amplifier, its four bits of one shared register;
+`OpaIn<n, which>` and `OpaOut<n, which>` name its pads as types, so a
+pad in the wrong role, an amplifier the part has not got or a pad the
+package does not bond is a compile error.
+
+The smallest use, the first block of "How to use it" below:
+
+```cpp
+using Pos = brio::OpaIn<2, brio::OpaPin::positive1>;    // PA7
+using Neg = brio::OpaIn<2, brio::OpaPin::negative1>;    // PA5
+using Out = brio::OpaOut<2, brio::OpaPin::out0>;        // PA2, channel 2
+
+Pos::pin::output(true);
+Neg::pin::output(false);
+Out::claim();
+(void)brio::Opa<2>::configure({.positive = brio::OpaPin::positive1,
+                               .negative = brio::OpaPin::negative1,
+                               .output = brio::OpaPin::out0});
+brio::Opa<2>::enable(true);
+
+brio::Adc<1>::select_channel(Out::adc_channel);
+const uint16_t counts = brio::Adc<1>::read_settled(3);
+```
+
+Line by line: the three `using` lines name OPA2's second positive
+input, second negative input and first output as types, each with the
+pad it is (the comments) and, for the output, the converter channel
+that pad carries; the two `output()` lines drive the two input pads
+high and low as plain GPIO outputs, so the comparison has a known
+answer (an input carrying a signal from outside is put in analog mode
+with its own `claim()` instead); `Out::claim()` puts the output pad in
+analog mode, the way the converter reads it; `configure()` writes the
+three selections, keeping the enable as it was, and answers false only
+for a pad in the wrong role; `enable(true)` switches the amplifier on;
+and the last two lines are the converter's ([adc.md](adc.md)): select
+the output pad's channel and convert three times, keeping the last, so
+the result is not what the sampling capacitor held from the channel
+before.
+
+What decides correctness even there: the amplifier is an open-loop
+stage, so without a wire the output saturates to a rail and reads as
+the comparison's answer, never as a scaled copy of an input; the
+converter reads the amplifier only through the output pad, so the
+output selected must be one that is a converter input (on the
+CH32V303 the second outputs, port-E pads, are none: `reaches_adc`
+says so at compile time); the register is one word shared by all the
+amplifiers and written by read-modify-write with no guard, so two
+contexts that change two amplifiers at once arrange the exclusion
+themselves; and the CH32V303's high-speed mode is a question to the
+die, a lot feature, which `high_speed(on)` asks before it writes
+anything.
+
+The rest of this page, in order: the documents of record; what the
+silicon does (what the block is not, where the output goes, the pads,
+how many a part has, the register, the high-speed bits); the types and
+verbs; how to use it; the bench findings; and what is not covered.
+
+## Documents of record
+
+The pads, the register and the high-speed bits are the whole chapter:
+four bits an amplifier in one register,
 no key, no lock, no interrupt, no event, no DMA, and no verb that is
 refused while the block runs - plus, on the CH32V303, one high-speed bit
-an amplifier in another register. Documents of record: the
+an amplifier in another register. The documents of record are the
 CH32F/V20x_V30x_V31x reference manual V2.3 (30.2 for what the four bits
 do, 30.3.1 for the register and for which amplifiers belong to which
 device class, 33.2.2 for the high-speed bits), the CH32V203 datasheet
@@ -20,43 +83,44 @@ the CH32V30x_D8 for the four CH32V303 parts; the register's upper half
 is OPA3 and OPA4, and every one of those bit descriptions names the last
 class and the ones beside it. Driver:
 [brio/ch32vx03/opa.hpp](../../brio/ch32vx03/opa.hpp). Reference suite:
-`test_vx03_opa`.
+`test_vx03_opa` (a suite's letter is one command key of its console and
+the group of verdicts it runs; `z` is the key that runs them all).
 
 ## What the silicon does
 
 ### What it is not, which matters more than what it is
 
-There is NO internal feedback network here and NO gain. The CH32V00x's
+There is no internal feedback network here and no gain. The CH32V00x's
 amplifier switches a 192 kOhm resistor in and offers gains of 4 to 32;
 this one offers neither, so as WCH ships it on this family the amplifier
 is an open-loop stage. The datasheets call it "operational
 amplifier/comparator" and rate it at 136 dB of open-loop gain, which is
 the same statement said twice: with a wire from an output pad back to a
 negative input pad it is a follower or a divider, and with no wire at
-all it is a COMPARATOR whose output saturates to a rail.
+all it is a comparator whose output saturates to a rail.
 
-The gain a program can reach with no wire is the CONVERTER's (CTLR1's
+The gain a program can reach with no wire is the converter's (CTLR1's
 PGA behind BUFEN, [adc.md](adc.md)), which sits in front of the
 converter and not here.
 
 ### Where the output goes
 
 There is no internal route: 30.2's "the output pin can select
-general-purpose I/O or the ADC sampling channel" means the PAD, and the
+general-purpose I/O or the ADC sampling channel" means the pad, and the
 converter reads the amplifier by converting that pad's own channel. The
 first output of each amplifier is a converter input on every part -
 PA3, PA2, PA1 and PA0, channels 3, 2, 1 and 0, for OPA1 to OPA4. The
-SECOND output is where the two series part: on the CH32V203 it is PB1
+second output is where the two series part: on the CH32V203 it is PB1
 (channel 9) for OPA1 and PA4 (channel 4) for OPA2, so every output pad
 is a converter input; on the CH32V303 it is PE15, PE14, PE7 and PE8 for
-OPA1 to OPA4, port-E pads that are NO converter's input and whose swing
+OPA1 to OPA4, port-E pads that are no converter's input and whose swing
 the datasheet limits to 0 to 2 V at a VDDA of 3.3 V (table 4-46, note
 3). `OpaOut<n, which>::adc_channel` is the channel, or 0xFF there, and
 `reaches_adc` says which.
 
 ### The pads
 
-The map is the device class's; what a PACKAGE decides is which of those
+The map is the device class's; what a package decides is which of those
 pads it brings out, which is `Pin`'s own refusal.
 
 | | positive 0 | positive 1 | negative 0 | negative 1 | output 0 | output 1 |
@@ -74,7 +138,7 @@ does.
 ### How many a part has
 
 The CH32V203's table 2-1 gives every part two except the twenty-pin
-one, which it gives one - and WHICH one is in the pin table rather than
+one, which it gives one - and which one is in the pin table rather than
 the count: that package bonds neither PB15 nor PB0, which are OPA1's two
 positive inputs, so the amplifier it has is OPA2. The CH32V303's table
 2-1-1 gives every part four. `device::has_opa(n)` is that fact, and
@@ -84,7 +148,7 @@ positive inputs, so the amplifier it has is OPA2. The CH32V303's table
 
 OPA_CTLR, one word, four bits an amplifier at 4 x (n - 1): the enable,
 the output selection, the negative selection and the positive one. It
-sits INSIDE THE EXTEN BLOCK'S WINDOW, between EXTEN_CTR and EXTEN_CTR2 -
+sits inside the EXTEN block's window, between EXTEN_CTR and EXTEN_CTR2 -
 which is the reserved word `device.hpp`'s `ExtenRegs` shows there - and
 like EXTEN it has no clock gate in RCC and no reset line: a program
 writes it and it is written.
@@ -99,21 +163,21 @@ register's note gives it to the CH32V30x_D8 and the classes beside it,
 and only on lots whose sixth digit from the end is not zero - which a
 program cannot read. No CH32V203 has it.
 
-AND WHERE A DIE HAS NOT GOT THE REGISTER, ITS ADDRESS IS NOT EMPTY: IT
-MIRRORS EXTEN_CTR. Measured on the CH32V303VCT6: 0x4002 3808 reads
+And where a die has not got the register, its address is not empty: it
+mirrors EXTEN_CTR. Measured on the CH32V303VCT6: 0x4002 3808 reads
 EXTEN_CTR's own word (0xA50 - the reset value's regulator trims and
 lock-up enable, and the HSI divider bit the clock task sets), and a
 write there lands in EXTEN_CTR: a high-speed bit set there would set
 EXTEN_CTR's USB bits, and a whole word would rewrite the regulator's
-trims. So reading a bit back is NOT how a die says it has the register;
-reading the WORD is - the real register keeps bits 31:4 clear and reads
+trims. So reading a bit back is not how a die says it has the register;
+reading the word is - the real register keeps bits 31:4 clear and reads
 unlike EXTEN_CTR, the mirror reads EXTEN_CTR - and nothing in the driver
 writes the address before `opa_high_speed_present()` has told the two
 apart.
 
 ## Types and verbs
 
-`OpaPin` names the six pads an amplifier can reach in ONE enum
+`OpaPin` names the six pads an amplifier can reach in one enum
 (`positive0`, `positive1`, `negative0`, `negative1`, `out0`, `out1`), so
 that a configuration cannot be spelled with a pad in the wrong role and
 only then refused; `opa_is_positive` / `opa_is_negative` /
@@ -139,7 +203,7 @@ while it runs, `field()` for the four bits as they read, `pad()` and
 `adc_channel()` for what is selected now, `high_speed(on)` and
 `high_speed()` over the amplifier's HSMD bit where the class has it
 (`has_high_speed`; a compile error elsewhere) - `high_speed(on)`
-answering false, with nothing written, where the DIE has not got the
+answering false, with nothing written, where the die has not got the
 register (`opa_high_speed_present()`, the section above) - and
 `release()`, which puts this amplifier's four bits back - and its
 high-speed bit, where there is one - and leaves the others alone.

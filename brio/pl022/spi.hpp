@@ -1,16 +1,20 @@
 /*
  * spi.hpp
  *
- * THE ARM PRIMECELL SYNCHRONOUS SERIAL PORT (PL022), written once for
- * every family that carries it: an IP STRATUM, a directory named for a
- * peripheral DESIGN rather than for a silicon, sitting where a core
- * stratum sits - above util/, below the families (docs/pl022/README.md,
- * and the rule in docs/design/overview.md: "A core stratum sits between
+ * The ARM PrimeCell Synchronous Serial Port (PL022), written once for
+ * every family that carries it: the SPI of the RP2040 and the RP2350, as
+ * a bus host an application's active objects share through the bus
+ * arbiter, or as a client at the other end of the wire. This is an IP
+ * stratum - a directory of brio/ named for a peripheral design that
+ * several vendors license into their chips (an "IP block") rather than
+ * for a silicon - and it sits where a core stratum sits, above util/ and
+ * below the families (docs/pl022/README.md, this file's document, and
+ * the rule in docs/design/overview.md: "A core stratum sits between
  * util/ and the families that share a core").
  *
  * The three layers every brio bus driver has are all here:
  *
- *  Pl022Ssp<Chip, n>     the RESOURCE, named for the IP: which instance,
+ *  Pl022Ssp<Chip, n>     the resource, named for the IP: which instance,
  *                        where its registers are, its reset and its
  *                        interrupt line (both asked of the family), the
  *                        two control registers under the block's rule
@@ -19,77 +23,167 @@
  *                        and the ISR body that reads the raised-and-
  *                        enabled sources. It decides nothing.
  *  Pl022Host<Chip, n, pins, TxEngine, RxEngine, Placement>
- *                        the ENGINE util/spi_bus.hpp's SpiBus drives.
- *                        Its Request is the other strata's VERBATIM (a
- *                        chip select, a D/C line, a command phase, a data
- *                        phase with optional out and in, the per-request
- *                        mode / rate / frame size, the polled or
- *                        ISR-pumped completion), so an application
- *                        written over SpiBus on another target runs here
- *                        unchanged.
+ *                        the engine util/spi_bus.hpp's SpiBus drives (the
+ *                        arbiter: util/bus_master.hpp's active object
+ *                        that serializes every client's requests to one
+ *                        bus). Its Request is the transaction descriptor
+ *                        every stratum's SPI host takes
+ *                        (docs/design/spi-bus.md: a chip select, a D/C
+ *                        line, a command phase, a data phase with
+ *                        optional out and in, the per-request mode / rate
+ *                        / frame size, the polled or ISR-pumped
+ *                        completion), so an application written over
+ *                        SpiBus on another target runs here unchanged.
  *  Pl022Client<Chip, n, pins>
  *                        the other end of the wire, a thin surface with
  *                        an ISR body: a client is a protocol and which
  *                        one is the application's.
  *
- * THIS FILE KNOWS NO CHIP, AND NO CORE EITHER. It includes kernel/ and
+ * An application never writes these names. A family supplies the chip's
+ * facts as a traits type - a struct of types, constants and static
+ * functions this file reads, checked against the `Pl022Chip` concept
+ * below - and keeps, in its own header, the public names apps use as
+ * aliases of the three templates:
+ *
+ *   RP2040   Rp2040Pl022 in brio/rp2040/spi.hpp: Pl022<n>,
+ *            SpiHost<n, pins, TxEngine, RxEngine, Placement> and
+ *            SpiClient<n, pins>
+ *   RP2350   Rp2350Pl022 in brio/rp2350/spi.hpp: the same three names
+ *   host     SimPl022 in brio/host/sim_pl022.hpp: a block made of RAM,
+ *            for the host suite test_pl022, which names the templates
+ *
+ * The smallest use, a host under the arbiter on the RP2040 as
+ * brio/rp2040/spi.hpp and docs/rp2040/spi.md spell it:
+ *
+ *   constexpr brio::SpiPins pins{.sck = 18, .tx = 19, .rx = 16};
+ *   using Bus = brio::SpiHost<0, pins>;
+ *   using Spi = brio::SpiBus<Bus, P, 4>;              // the arbiter
+ *   using Cs = brio::Pin<17>;
+ *
+ *   Bus::init(clock, 8'000'000);                      // a ceiling for the whole bus
+ *   Cs::output(true);                                 // the select idles high
+ *
+ *   Bus::Request r{};
+ *   r.cs = Cs::ref();
+ *   r.cmd = brio::lend<brio::Lease::reply>(cmd);  r.cmd_len = 1;
+ *   r.tx = brio::lend<brio::Lease::reply>(pixels); r.len = 64;
+ *   r.clock = brio::SpiClocks::div4;
+ *   r.mode = brio::SpiMode::mode0;
+ *   r.reply = brio::reply_to<Display, brio::SpiDone>();
+ *   brio::post<Spi>(r);
+ *
+ *   extern "C" void isr_spi0() {
+ *       if (Bus::isr()) { brio::post<Spi>(brio::TransferDone{Bus::status()}); }
+ *   }
+ *
+ * Who calls what, and from where.
+ *  - init(), rebase() and release() are setup verbs, in main: init()
+ *    after the clock and before interrupts are enabled globally,
+ *    rebase() with the bus idle. init() turns the ceiling it is given
+ *    into a divisor of the rate the family's traits call SSPCLK, so the
+ *    clock comes first.
+ *  - A requester - an active object that uses the bus, not the SPI
+ *    client below - never calls the host: it posts a Request to the
+ *    arbiter from its own dispatch (an active object's handler - an
+ *    active object is a component with its own event queue, served one
+ *    event at a time by the kernel) or from main, and gets an SpiDone
+ *    event back. The arbiter calls start() from its dispatch, in main
+ *    context (code that is not an interrupt handler: main and every
+ *    dispatch), one request at a time. start() follows the engine
+ *    contract of util/bus_master.hpp: true means the request completed
+ *    inside the call.
+ *  - start() of a polled request runs the whole transaction before it
+ *    returns: it waits for every frame, bounded by one budget for the
+ *    whole transaction, with interrupts left on (no handler that holds
+ *    the loop off can overrun it, below), and spends the request's
+ *    cs_setup_us in the family's busy-wait. An asynchronous request
+ *    returns at once and completes on the interrupt.
+ *  - isr() is the instance's interrupt body and dma_isr() the body of
+ *    the DMA line the engines report on: the program's handler for each
+ *    calls it and nothing else does. Each returns true when the
+ *    transaction has just completed (the select released), the edge on
+ *    which the handler posts TransferDone to the arbiter. Both run to
+ *    completion, as every interrupt handler in brio does.
+ *  - What masks: init(), recover() and release() mask the instance's
+ *    own line while they reconfigure the block; nothing of the transfer
+ *    path (start(), isr(), dma_isr()) takes a critical section. The
+ *    family's set_bits() and clear_bits() are one bus write where the
+ *    chip has atomic register aliases (both RP chips use theirs), a
+ *    guarded read-modify-write otherwise.
+ *  - Storage: a Request's buffers are lent (`Lease::reply`,
+ *    kernel/borrowed.hpp) from the post until its SpiDone arrives, and
+ *    the requester leaves them untouched for that whole time; the arbiter
+ *    lends the request itself to start() for the call, the polled path
+ *    keeping nothing and the asynchronous one copying what its tenure (the
+ *    time one transaction holds the bus) needs into `tenure_`.
+ *  - The client is not driven by the arbiter: init() and enable() (with
+ *    the first answer queued, the select still high) in main, then its
+ *    verbs, which the program calls from its handler for the instance's
+ *    vector (docs/rp2040/spi.md shows one) or from main, and none of
+ *    which waits: writable() and write() are one register access each,
+ *    poll() a status read and, when a frame waits, the data read, and
+ *    isr() a read of the masked status and a write to the clear
+ *    register when a clearable source is up.
+ *
+ * This file knows no chip, and no core either. It includes kernel/ and
  * util/ and nothing else: no vendor header, no family header, no core
  * stratum, and it never names a reset controller, a clock, a pad
  * function, an interrupt controller or a DMA request. Even the
  * microsecond busy-wait a chip select's setup time is spent on arrives
- * as a TYPE of the family's, whose verb this file calls without naming
+ * as a type of the family's, whose verb this file calls without naming
  * it - a PL022 may sit on a core brio/cortexm/ knows nothing about.
- * WHAT A FAMILY OWES IT is the `Pl022Chip` concept below,
+ * What a family owes it is the `Pl022Chip` concept below,
  * satisfied by one traits type the family's own header defines; that
- * header also keeps the PUBLIC NAMES apps use (`Pl022<n>`, `SpiHost<n,
+ * header also keeps the public names apps use (`Pl022<n>`, `SpiHost<n,
  * pins, ...>`, `SpiClient<n, pins>`) as aliases of these three
  * templates, so nothing above ever spells a Chip.
  *
- * WHAT THE IP DOES, and shapes the engine:
+ * What the IP does, and how it shapes the engine:
  *  - a host or a client, Motorola SPI, TI or Microwire framing, frames
- *    of 4 to 16 bits (DSS), two FIFOs whose DEPTH is a synthesis
- *    parameter and therefore the family's (`Chip::fifo_depth`);
- *  - the bit rate is SSPCLK / (CPSDVSR x (1 + SCR)), the prescaler EVEN
+ *    of 4 to 16 bits (DSS), two FIFOs whose depth is a synthesis
+ *    parameter and therefore the family's (`Chip::fifo_depth`: 8 on
+ *    both RP chips);
+ *  - the bit rate is SSPCLK / (CPSDVSR x (1 + SCR)), the prescaler even
  *    in 2..254 and the serial clock rate 0..255, so the reachable
- *    divisors run from 2 to 65024 and a rate is REFUSED rather than
+ *    divisors run from 2 to 65024 and a rate is refused rather than
  *    rounded up past the slowest;
- *  - a CLIENT needs SSPCLK at least twelve times its own clock: the
+ *  - a client needs SSPCLK at least twelve times its own clock: the
  *    input is double-synchronized, which is the block's ratio and not a
  *    chip's;
- *  - CONTROL REGISTERS ARE WRITTEN WITH THE PORT DISABLED (SSE clear),
+ *  - control registers are written with the port disabled (SSE clear),
  *    so a change of mode, rate or width costs a disable/enable pair -
  *    paid only when something moved. LBM and SOD are the two live bits,
  *    changeable under SSE;
- *  - four maskable sources on ONE interrupt line per instance: the
- *    receive FIFO at or above half (RXIM), the RECEIVE TIMEOUT (RTIM: a
+ *  - four maskable sources on one interrupt line per instance: the
+ *    receive FIFO at or above half (RXIM), the receive timeout (RTIM: a
  *    frame waiting and no clock for 32 bit periods), the transmit FIFO
  *    at or below half (TXIM), the receive overrun (RORIM). Only the
  *    timeout and the overrun clear through SSPICR; the two FIFO levels
  *    clear by moving data;
  *  - one DMA request per FIFO (SSPDMACR);
  *  - LBM loops the transmitter into the receiver with nothing on the
- *    wire - a self-test with no peer, which is why it is a HOST verb
+ *    wire - a self-test with no peer, which is why it is a host verb
  *    here: the host re-applies its whole configuration at a request that
  *    changes mode, rate or width, so the loop-back has to be part of the
  *    applied state or it would be lost at the first such request.
  *
- * THE FIFOS ARE THE WRITE-AHEAD, on both completion styles. A FIFO's
+ * The FIFOs are the write-ahead, on both completion styles. A FIFO's
  * worth of frames is in flight at once - written with no flag read, since
  * a transmit FIFO that holds fewer than its depth cannot be full and a
  * receive FIFO that is handed back no more than its depth cannot overrun
  * (12.3.3.4 and 12.3.3.5 of the RP2350 data sheet, the depth the
- * family's `fifo_depth`) - and every frame that comes BACK is the one
+ * family's `fifo_depth`) - and every frame that comes back is the one
  * witness the bus has room for one more: the receive side counts what
  * the transmit side only promised.
  *
- * THE POLLED LOOP has two shapes. The RECEIVE shape (`run_duplex`)
+ * The polled loop has two shapes. The receive shape (`run_duplex`)
  * primes the transmit FIFO with the first `fifo_depth` frames and then,
  * per frame, waits for RNE, reads the frame - stored, or thrown away
  * when the request has no in buffer - and writes the one `fifo_depth`
  * ahead: three accesses of the block a frame (SSPSR, SSPDR in, SSPDR
  * out), the frames in flight - written and not yet read - never more
  * than the receive FIFO holds, so no handler that holds the loop off can
- * overrun it. The TRANSMIT-ONLY shape (`run_write`) paces on TNF and
+ * overrun it. The transmit-only shape (`run_write`) paces on TNF and
  * reads nothing per frame - two accesses a frame - letting the receive
  * FIFO overrun by design with RORIM masked, and at its tail waits for
  * BSY to clear, drains the receive FIFO and clears the overrun; that
@@ -98,103 +192,105 @@
  * receive shape falls behind the wire (clk_peri / 2 on 8-bit frames,
  * measured on both of the RP2350's cores). No accessor call on either,
  * the width a template parameter, the buffers advancing pointers, the
- * waits bounded by ONE budget for the whole transaction. Both read every field through the Request they
- * were lent and copy nothing: a polled request completes inside
- * start(), so nothing of it is needed after the return
- * (util/bus_master.hpp's contract).
+ * waits bounded by one budget for the whole transaction. Both read every
+ * field through the Request they were lent and copy nothing: a polled
+ * request completes inside start(), so nothing of it is needed after the
+ * return (util/bus_master.hpp's contract).
  *
- * THE PUMP (`fill` / `take`, the interrupt body) is the same window on
- * the interrupt: start() fills the FIFO and THEN arms the receive level
+ * The pump (`fill` / `take`, the interrupt body) is the same window on
+ * the interrupt: start() fills the FIFO and then arms the receive level
  * and the timeout - filling with the line already armed let the handler
  * run inside the fill and both sides count the same frames, which was
  * measured to overrun the receive FIFO at 37.5 MHz on the Hazard3 half.
  * Each receive interrupt (the FIFO at half, or the timeout for a tail)
- * takes what came back and writes as many more. THE TRANSMIT INTERRUPT
- * IS NEVER THE PUMP'S EDGE. What the pump needs after start() returned -
+ * takes what came back and writes as many more. The transmit interrupt
+ * is never the pump's edge. What the pump needs after start() returned -
  * the three buffers, the counts, the two pins, the width - is copied
  * into `tenure_` as inline stores, never a call; the reply capsule is
  * the arbiter's and is not copied. The phase boundary drains: the first
  * data frame goes out only when the last command frame has come back, so
- * D/C flips between them on the wire. The receive FIFO is NOT flushed at
+ * D/C flips between them on the wire. The receive FIFO is not flushed at
  * start(): every transaction takes back every frame it wrote, so a frame
  * can stand in it only after a fault, and the fault paths drain it.
  *
- * THE REQUEST IS LAID OUT WITHOUT PADDING: the four words first (the two
+ * The Request is laid out without padding: the four words first (the two
  * out buffers, the in buffer, the reply), then the two half-words (the
  * length, the prescaler pair), then the bytes - 28 bytes where the
  * family's PinRef is one byte, and every copy the kernel and the arbiter
- * make of it is that much shorter. The field NAMES are the other
- * strata's and do not move.
+ * make of it is that much shorter. The field names are the ones every
+ * stratum's Request carries (docs/design/spi-bus.md, "Realizations")
+ * and do not move; the order is this file's.
  *
- * `apply()` IS ONE COMPARE: the prescaler pair, the mode and the width
+ * `apply()` is one compare: the prescaler pair, the mode and the width
  * are folded into the word the block takes (SSPCPSR over SSPCR0,
  * `spi_control_word`) and held against the word last applied; only a
  * change pays the disable/enable pair the chapter demands. A request
  * above the bus's ceiling is clamped on the slow path alone.
  *
- * THE SELECTS. The host's chip select is a pin the Request carries
+ * The selects. The host's chip select is a pin the Request carries
  * (docs/design/spi-bus.md's arrangement on every target): a device
  * reading a multi-frame transaction inside one select window wants a
  * select that stays low, which the block's own frame signal SSPFSSOUT is
- * not in every mode - with SPH = 0 it PULSES HIGH BETWEEN the frames of a
+ * not in every mode - with SPH = 0 it pulses high between the frames of a
  * continuous transfer, with SPH = 1 it stays low through one and rises
  * only after the last frame (RP2040 4.4.3.10 to 4.4.3.13). A host whose
- * pin set NAMES `cs` hands that pad to the block all the same, as the
+ * pin set names `cs` hands that pad to the block all the same, as the
  * frame signal and nothing else: a select per frame in modes 0 and 2,
  * per run of back-to-back frames in modes 1 and 3, the request's own
  * `cs` then left null - exactly what a client of this block takes in
  * modes 0 and 2, and what a device whose every frame is a transaction
- * wants. The CLIENT's select IS the pad: the PL022 in slave
+ * wants. The client's select is the pad: the PL022 in slave
  * mode frames on SSPFSSIN, so a client's `cs` goes to the peripheral and
  * `selected()` reads the same pad. And with SPH = 0 (modes 0 and 2) the
- * client frames on the SELECT: it takes ONE frame per select window and
+ * client frames on the select: it takes one frame per select window and
  * ignores the rest while the select stays low, so a host holding a
  * select for a whole transaction reaches it for more than one frame only
  * in modes 1 and 3.
  *
- * THE DARK LISTENER IS THE PAD AND NOT SOD. `Pl022Client::drive_output`
- * hands the transmit pad to the peripheral or takes it away to NO
+ * The dark listener is the pad and not SOD. `Pl022Client::drive_output`
+ * hands the transmit pad to the peripheral or takes it away to no
  * function with the family's dark config - an input with no pull - because
- * what SOD does to the PAD is a fact of the chip around the block and not
+ * what SOD does to the pad is a fact of the chip around the block and not
  * of the block: the block's pad-enable output nSSPOE reaches the pad on
  * one silicon this file has met and not on the other (the RP2350 tristates
  * a deselected client and one under SOD, the RP2040 keeps both driven -
  * each family's document). Taking the pad away is right either way. It is
- * NOT the pad's reset state: that carries a pull-down on both chips, and a
+ * not the pad's reset state: that carries a pull-down on both chips, and a
  * far host's receive pad carries a pull-up, so a dark line released to
  * reset sat between the two (measured: a foreign host read neither level).
  * `sod()` stays a bit of the resource, for a program that wants to see
  * what its own silicon does with it.
  *
- * THE ENGINE SLOTS: a transmit and a receive engine, both or neither
+ * The engine slots: a transmit and a receive engine, both or neither
  * (the data phase is full duplex and the transaction's completion is the
- * RECEIVE block's), told the instance's two requests at arm(). The data
+ * receive block's), told the instance's two requests at arm(). The data
  * phase of a request moves as one block each way, the command phase on
- * the pump. ONE INTERRUPT A TRANSACTION: every frame that came back was
+ * the pump. One interrupt a transaction: every frame that came back was
  * sent, so the receive block's completion proves the transmit block's,
  * and the transmit engine is armed to report a bus error and nothing
- * else (the family's DmaReport::errors). THE BEAT IS THE FRAME: engines
+ * else (the family's DmaReport::errors). The beat is the frame: engines
  * whose element is 16 bits wide - SSPDR's width - carry both frame sizes,
  * each block at its frame's width; byte engines carry 8-bit frames, and a
  * 16-bit request then falls back to the pump, as does one whose buffers
- * are not aligned to a half-word. FRAMES IN A BYTE BUFFER: one byte per
- * 8-bit frame, two bytes low-first per 16-bit frame - the other strata's
- * rule, which on a little-endian core IS a half-word in memory.
+ * are not aligned to a half-word. Frames in a byte buffer: one byte per
+ * 8-bit frame, two bytes low-first per 16-bit frame - the rule of the
+ * Request every stratum's SPI host takes (docs/design/spi-bus.md), which
+ * on a little-endian core is a half-word in memory.
  *
- * WHERE THE HOT PATH RUNS is the program's choice, by the host's last
+ * Where the hot path runs is the program's choice, by the host's last
  * template parameter, util/placement.hpp's tag: start(), the pump (isr())
  * and the DMA line's body (dma_isr()) each run through `Hot<Placement>`
  * - where they would be without it under `InFlash`, the default (the
  * pump and the DMA body inline in the app's vectors, start() a function
  * in the flash), one flattened instance each in `.fast_text.brio` under
  * `InRam`, on a family whose chip traits say `places_fast_text`. On a
- * core executing in place behind a cache what that buys is the COLD
+ * core executing in place behind a cache what that buys is the cold
  * transaction, the one whose code the cache has not got (the family's
  * platform document, "A handler in SRAM"). The engines' launch is one
  * body under either tag (shared()), and a change of mode, rate or width
  * and a polled wait that ran out stay out of line in the flash.
  *
- * NOT built, each with its reason in docs/pl022/README.md: the National
+ * Not built, each with its reason in docs/pl022/README.md: the National
  * Semiconductor Microwire transaction (half duplex, a control frame and then the
  * slave's answer, where this engine's Request is full duplex and one
  * frame wide), the client on the DMA engines.
@@ -391,8 +487,9 @@ struct SpiClock {
     constexpr bool operator==(const SpiClock& o) const { return cpsdvsr == o.cpsdvsr && scr == o.scr; }
 };
 
-/// The named divisors the other strata's requests speak (the reference
-/// rate over a power of two), and any even divisor up to 65024.
+/// The named divisors of the rate field every stratum's SPI Request
+/// carries (docs/design/spi-bus.md: the reference rate over a power of
+/// two), and any even divisor up to 65024.
 struct SpiClocks {
     static constexpr SpiClock div2{2, 0};
     static constexpr SpiClock div4{2, 1};
@@ -621,8 +718,8 @@ struct Pl022Ssp {
     /// The two clearable sources (the timeout, the overrun).
     static void clear_pending(uint32_t mask) { regs().SSPICR = mask & (SpiInterrupt::rx_timeout | SpiInterrupt::overrun); }
 
-    /// The raised-and-enabled sources, the way the other strata's ISR
-    /// bodies answer; the two clearable ones are cleared here.
+    /// The raised-and-enabled sources, the answer every brio resource's
+    /// ISR body gives; the two clearable ones are cleared here.
     [[gnu::always_inline]] static uint32_t isr() {
         const uint32_t up = pending();
         if ((up & (SpiInterrupt::rx_timeout | SpiInterrupt::overrun)) != 0u) {
@@ -671,13 +768,14 @@ static_assert(spi_control_word(SpiClocks::div2, SpiMode::mode1, SpiDataSize::bit
  *
  * The engine SpiBus (util/spi_bus.hpp = BusMaster) drives; the family's
  * own header aliases it to `SpiHost<n, pins, ...>` and carries the
- * example in that family's spelling. Its Request is the other strata's
- * (the file header): the bus AO asserts the request's own chip select
- * around the transaction, a COMMAND phase goes out with D/C low and a
- * DATA phase with it high, the data phase has an optional out buffer
- * (null = 0xFF dummies) and an optional in buffer (null = the frames
- * read back are discarded), and every buffer is LENT until the reply
- * lands. The mode, rate and frame size travel per request; the bit order
+ * example in that family's spelling. Its Request is the descriptor every
+ * stratum's SPI host takes (docs/design/spi-bus.md; the file header):
+ * this host asserts the request's own chip select around the
+ * transaction (low at start(), high when it completes), a command phase
+ * goes out with D/C low and a data phase with it high, the data phase
+ * has an optional out buffer (null = 0xFF dummies) and an optional in
+ * buffer (null = the frames read back are discarded), and every buffer
+ * is lent until the reply lands. The mode, rate and frame size travel per request; the bit order
  * is the PL022's (most significant first, no other) and no verb offers
  * another.
  */
@@ -762,9 +860,10 @@ public:
     }
     static bool loopback() { return applied_.loopback; }
 
-    /// The transaction descriptor - the other strata's fields under the
-    /// other strata's names, laid out words first so that nothing is
-    /// padded but the tail (the file header).
+    /// The transaction descriptor - the fields docs/design/spi-bus.md
+    /// ("Realizations") gives every stratum's SPI Request, under those
+    /// names, laid out words first so that nothing is padded but the
+    /// tail (the file header).
     struct Request {
         /// Phase 1, sent with DC low; LENT until the reply lands.
         Borrowed<const uint8_t, Lease::reply> cmd;
@@ -798,9 +897,10 @@ public:
     /// Bring the instance up as a host: the block out of reset, the boot
     /// configuration, the pads, the line. `clock` is the app's Clock tag
     /// - the divisor is of whichever rate the family's traits call
-    /// SSPCLK. `max_sck_hz` is an optional CEILING for the whole bus;
+    /// SSPCLK. `max_sck_hz` is an optional ceiling for the whole bus;
     /// 0 = none. False when the ceiling cannot be produced or the block
-    /// did not come up.
+    /// did not come up. Main context, after the clock and before
+    /// interrupts are enabled globally.
     template <typename Clock>
     static bool init(Clock clock, uint32_t max_sck_hz = 0) {
         static_assert(Pl022ChipClock<Chip, Clock>,
@@ -854,7 +954,7 @@ public:
 
     /// The reference rate and the core rate changed. A Request's `clock`
     /// is a DIVISION of SSPCLK and scales by itself; what is recomputed
-    /// is the ceiling and the cs_setup timing. THE BUS MUST BE IDLE.
+    /// is the ceiling and the cs_setup timing. The bus must be idle.
     static void rebase(uint32_t pclk_hz, uint32_t sys_hz) {
         pclk_hz_ = pclk_hz;
         ceiling_ = ceiling_hz_ != 0u ? spi_clock_for(pclk_hz, ceiling_hz_) : std::optional<SpiClock>{};
@@ -884,12 +984,16 @@ public:
     /// when it runs on the ISR and a TransferDone follows - exactly
     /// util/bus_master.hpp's engine contract. The request is LENT for the
     /// call: the polled path reads it and keeps nothing, the asynchronous
-    /// one copies what its tenure needs (the file header).
+    /// one copies what its tenure needs (the file header). A polled
+    /// request waits here for its whole transaction, bounded by one
+    /// budget; a budget that runs out ends it with the engine's own
+    /// status and the block left for recover().
     static bool start(const Request& r) {
         return Hot<Placement>::run([&r] { return start_body(r); });
     }
 
-    /// The instance's interrupt body - call from its vector. The receive
+    /// The instance's interrupt body - call from its vector (isr_spi0 or
+    /// isr_spi1 on the RP chips), and from nowhere else. The receive
     /// level and the timeout are the pump's edges; the batch that came
     /// back is taken and the next written. True when the transaction
     /// just completed (CS released): the edge the app's glue posts
@@ -915,9 +1019,9 @@ public:
     /// The engine's completion status, for the TransferDone payload.
     static uint8_t status() { return status_; }
 
-    /// Put the ENGINE back where start() is legal (the verb a timed
+    /// Put the engine back where start() is legal (the verb a timed
     /// SpiBus calls on a transaction that never answered): the select
-    /// released FIRST, the engines put away and re-claimed, the block
+    /// released first, the engines put away and re-claimed, the block
     /// reset and reconfigured to the applied state.
     static bool recover() {
         tenure_.req.cs.set();
@@ -1547,15 +1651,15 @@ private:
  * Pl022Client<Chip, n, pins>
  *
  * The other end of the wire: SCK, TX-in and the select are inputs, the
- * host sets the pace, and the only thing this side controls is WHAT it
+ * host sets the pace, and the only thing this side controls is what it
  * has ready to shift out when the next clock arrives - up to
  * `frames_ahead` frames in the transmit FIFO, written on TNF. A client
  * that falls behind does not stall the bus: what the host reads is
- * whatever the shifter held, a wrong answer and never a missing one. THE
- * SELECT IS THE PAD: the PL022 in slave mode frames on SSPFSSIN, so
+ * whatever the shifter held, a wrong answer and never a missing one. The
+ * select is the pad: the PL022 in slave mode frames on SSPFSSIN, so
  * `pins.cs` goes to the peripheral and `selected()` reads the same pad.
- * `drive_output(false)` leaves the transmit line undriven, a DARK
- * LISTENER on a shared harness - the PAD taken away to no function with no
+ * `drive_output(false)` leaves the transmit line undriven, a dark
+ * listener on a shared harness - the pad taken away to no function with no
  * pull, since what SOD does to a pad is the chip's fact and not the
  * block's (the file header).
  * The family's own header aliases this to `SpiClient<n, pins>`.
@@ -1639,7 +1743,7 @@ public:
     /// wants to see what it does on its board.
     static void sod(bool on) { S::output_disabled(on); }
 
-    /// SSE up with the FIRST ANSWER in the FIFO before the host's clock
+    /// SSE up with the first answer in the FIFO before the host's clock
     /// can arrive. Call it with the select still high.
     static void enable(uint16_t first = 0xFFFFu) {
         S::enable(true);

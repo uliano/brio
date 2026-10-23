@@ -1,50 +1,84 @@
 /*
  * pin.hpp
  *
- * Compile-time GPIO for the CH32V00x: `Pin<'D', 5>` is a type, its port
- * and mask fold to constants, and every verb is a single register
- * access.
+ * GPIO for the CH32V00x: one pad as a type. `Pin<'D', 5>` names port D,
+ * pin 5 when the program is compiled; its port and mask fold to
+ * constants, and the type has no object (a monostate: its functions are
+ * all static and nothing is constructed). The smallest use, the pad of
+ * docs/ch32v00x/pin.md's "How to use it" without its interrupt line, the
+ * read() as the sentence after that example spells it:
  *
- * THE ENCODING, AND THE TRAP IN IT (RM 7.3.1.1). Four bits per pin in
- * ONE configuration register - there is no CFGHR, because this family
+ *     using Button = brio::Pin<'D', 4>;
+ *     Button::input(brio::PinPull::up);
+ *     ... Button::read() ...
+ *
+ * The alias names the pad and configures nothing; input() configures
+ * it (and opens the port's clock), and read() then answers the level.
+ *
+ * Who calls what. The level verbs - set(), clear(), toggle(), read(),
+ * read_out() - may be called from any context: set() and clear() are
+ * one store of BSHR or BCR, read() one load of INDR, and toggle() a
+ * load of OUTDR and one BSHR store, so none disturbs a handler driving
+ * another pin of the same port. The configuring verbs - output(),
+ * input(), analog(), function(), release() - are read-modify-writes
+ * with no guard: of CFGLR, which the port's eight pins share, and,
+ * through Port::clock_on(), of RCC_PB2PCENR, the gate register every
+ * GPIO port and the other PB2 blocks (AFIO, the ADC, TIM1, SPI1, the
+ * USARTs) share. Nothing masks, so a configuring verb races an
+ * interrupt handler that configures a pin of the same port or opens a
+ * PB2 gate: configure from main or from an active object (a component
+ * of a brio program with its own event queue, served one event at a
+ * time), never where such a handler can run in between. Nothing here
+ * waits.
+ *
+ * The encoding, and the trap in it (RM 7.3.1.1). Four bits per pin in
+ * one configuration register - there is no CFGHR, because this family
  * bonds at most eight pins per port. The shape looks like the STM32F1's
  * CNF/MODE pair, and code carried over from one will appear to work,
- * but MODE HERE IS ONE BIT: 1 is output (at the port's only speed, 30
- * MHz) and 0 is input; the second bit of the field is reserved. So an
+ * but on the CH32V006 MODE is one bit (the CH32V003's is two, below):
+ * 1 is output (at the port's only speed, 30 MHz) and 0 is input; the
+ * second bit of the field is reserved. So an
  * F1 nibble like 0xB (AF push-pull, "50 MHz") lands on this silicon as
  * AF push-pull with a reserved bit set - right by accident. This file
  * spells the two halves separately so the accident cannot happen.
  *
- * PULLS HAVE NO REGISTER. An input with CNF = 10 is pulled, and the
- * DIRECTION comes from that pin's bit in OUTDR: 1 pulls up, 0 pulls
+ * Pulls have no register. An input with CNF = 10 is pulled, and the
+ * direction comes from that pin's bit in OUTDR: 1 pulls up, 0 pulls
  * down. Setting the pull therefore writes the output data register of a
  * pin that is an input, which reads oddly and is exactly what the
  * chapter prescribes.
  *
- * The port clock is opened by every configuring verb, the way the other
- * strata do it: a Pin that is configured works, with no separate step
- * for the caller to forget. Nothing here turns a clock back OFF - that
- * would be a decision about the whole port, and this file only speaks
- * about pins.
+ * The port clock is opened by every configuring verb: a Pin that is
+ * configured works with no separate clock step to remember - with
+ * one order to know: output(level) and input(pull) store the level or
+ * the pull's direction before the configuring step opens the clock, so
+ * on a port no earlier call has configured that first store meets a
+ * gated port, and whether it lands is not measured; a program that
+ * needs it from the first instant calls Port<L>::clock_on() first.
+ * Nothing here turns a clock back off - that would be a decision about
+ * the whole port, and this file only speaks about pins.
  *
- * TWO PARTS, TWO MODE FIELDS. The CH32V006's MODE is one bit (the
+ * Two parts, two MODE fields. The CH32V006's MODE is one bit (the
  * second reserved); the CH32V003's is the F1's two, with a speed, and
  * this file drives its outputs at that part's top speed - so a nibble
  * spelled here lands right on both (device::gpio_mode_output). Port B
  * is the CH32V006's alone: a Pin on it does not compile for the
  * CH32V003 (device::has_port_b through gpio_base_for).
  *
- * THE BONDING SHOWS IN THE REGISTERS: port B of the CH32V006 has seven
+ * The bonding shows in the registers: port B of the CH32V006 has seven
  * pins (PB0..PB6, DS 2.1), and its eighth configuration nibble reads
  * zero after a reset where the seven read 0x4 (measured). The pin-level
  * table of which pins each package brings out is still the datasheet's.
  *
- * NOT COVERED YET: the alternate-function REMAPS (AFIO_PCFR1), so a
- * peripheral is reachable only on its default pins - they arrive with
- * the first driver that needs a remapped pad; the pin-level bonding
- * table (which pins a package actually brings out), which needs the
- * second part to be worth writing. The external interrupt lines are
- * exti.hpp's.
+ * Not covered yet: the pin-level bonding table (which pins a package
+ * actually brings out). The part tables state ports, not pins, so a Pin
+ * on a pin of a bonded port that the package leaves out (PB7 on the
+ * CH32V006, PA0 on the CH32V003) compiles; the datasheet's pinout is
+ * the record, and the build names one package per part
+ * (docs/ch32v00x/pin.md). The alternate-function
+ * remaps (AFIO_PCFR1), which move a peripheral's pads to another column
+ * of the chapter's tables, are ch32v00x/afio.hpp's; the external
+ * interrupt lines are exti.hpp's.
  */
 
 #pragma once
@@ -61,7 +95,8 @@ enum class PinMode : uint8_t { input, output, alternate, analog };
 /// Output stage, for `output` and `alternate`.
 enum class PinDrive : uint8_t { push_pull, open_drain };
 
-/// Input pull, for `input`. The direction lives in OUTDR (see header).
+/// Input pull, for `input`. The direction lives in OUTDR (the file
+/// header).
 enum class PinPull : uint8_t { none, up, down };
 
 /// A pad named at compile time - port letter and pin number - for the
@@ -76,9 +111,9 @@ struct Pad {
     constexpr bool operator==(const Pad&) const = default;
 };
 
-/// A pin as a RUNTIME value: the port's registers and the mask. What a
-/// bus request carries for its chip select, so the bus AO can drive a
-/// pin it does not know the type of. The stores are BSHR/BCR (RM
+/// A pin as a runtime value: the port's registers and the mask. What a
+/// bus request carries for its chip select, so the bus's active object
+/// can drive a pin it does not know the type of. The stores are BSHR/BCR (RM
 /// 7.3.1.4, 7.3.1.5), atomic against a handler on another pin of the
 /// same port. A null PinRef (the default) drives nothing. Build one
 /// with Pin<...>::ref().
@@ -141,7 +176,8 @@ struct Port {
     static GpioRegs& regs() { return *reinterpret_cast<GpioRegs*>(gpio_base_for(L)); }
 
     /// Open the port's clock. Idempotent, and every configuring verb
-    /// calls it, so a configured pin works.
+    /// calls it, so a configured pin works. A read-modify-write of
+    /// RCC_PB2PCENR with no guard (the file header).
     static void clock_on() { rcc()->PB2PCENR |= gpio_clock_for(L); }
 
     static uint32_t in() { return regs().INDR; }
@@ -162,7 +198,8 @@ struct Port {
         regs().BSHR = (driven << 16) | (mask & ~driven);
     }
 
-    /// Write the four configuration bits of one pin.
+    /// Write the four configuration bits of one pin: the gate opened,
+    /// then a read-modify-write of CFGLR with no guard (the file header).
     static void configure(uint8_t pin, uint32_t nibble) {
         clock_on();
         const uint32_t shift = static_cast<uint32_t>(pin) * 4u;
@@ -174,7 +211,7 @@ struct Port {
 };
 
 /**
- * One pin, as a type.
+ * One pin, as a type (the file header gives the contexts).
  *
  *   using Led = brio::Pin<'D', 0>;
  *   Led::output();
@@ -208,27 +245,40 @@ struct Pin {
     static void set() { P::out_set(mask); }
     static void clear() { P::out_clear(mask); }
     static void toggle() { P::out_toggle(mask); }
+    /// The level at the pad (INDR), one load: true is high. An analog
+    /// pad's input buffer is off, so it reads false whatever the level.
     static bool read() { return (P::in() & mask) != 0u; }
     static bool read_out() { return (P::out() & mask) != 0u; }
 
     // ---- configuration ----------------------------------------------------
+    /// The pin as an output, push-pull or open-drain, driving whatever
+    /// OUTDR holds for it; the port's clock opened first.
     static void output(PinDrive drive = PinDrive::push_pull) {
         P::configure(N, pin_nibble(PinMode::output, drive));
     }
 
-    /// Drive the level BEFORE the pin becomes an output, so the pad
-    /// never shows the other one for the width of two stores.
+    /// Drive the level before the pin becomes an output, so the pad
+    /// never shows the other one for the width of two stores. The level's
+    /// store comes before output() opens the port's clock: on a port no
+    /// earlier call has configured, it is a store into a gated block,
+    /// and whether it lands is not measured - Port<L>::clock_on() first
+    /// makes it a store into an open one.
     static void output(bool level, PinDrive drive = PinDrive::push_pull) {
         if (level) { set(); } else { clear(); }
         output(drive);
     }
 
+    /// The pin as an input, floating or pulled; for a pull, the
+    /// direction's OUTDR bit is written first, then the nibble - the
+    /// bit's store before configure() opens the port's clock, so on a
+    /// port no earlier call has configured the same caveat as
+    /// output(level) holds.
     static void input(PinPull pull = PinPull::none) {
         if (pull == PinPull::none) {
             P::configure(N, pin_nibble(PinMode::input, PinDrive::push_pull));
             return;
         }
-        // The pull direction IS the output data bit (see file header):
+        // The pull direction is the output data bit (the file header):
         // write it first, then let the configuration take effect.
         if (pull == PinPull::up) { set(); } else { clear(); }
         P::configure(N, 0x8u);   // CNF 10, MODE 0: pulled input
@@ -237,7 +287,7 @@ struct Pin {
     static void analog() { P::configure(N, pin_nibble(PinMode::analog, PinDrive::push_pull)); }
 
     /// Hand the pad to its peripheral. Which peripheral is not a choice
-    /// here: a pin has ONE default alternate function (the datasheet's
+    /// here: a pin has one default alternate function (the datasheet's
     /// pin table), and the remaps that would move it are AFIO's
     /// (ch32v00x/afio.hpp), a verb of the resource that owns the pad.
     static void function(PinDrive drive = PinDrive::push_pull) {

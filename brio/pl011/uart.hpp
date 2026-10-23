@@ -1,71 +1,163 @@
 /*
  * uart.hpp
  *
- * THE ARM PRIMECELL UART (PL011), written once for every family that
- * carries it: an IP STRATUM, a directory named for a peripheral DESIGN
- * rather than for a silicon, sitting where a core stratum sits - above
- * util/, below the families (docs/pl011/README.md, and the rule in
- * docs/design/overview.md: "A core stratum sits between util/ and the
- * families that share a core").
+ * The ARM PrimeCell UART (PL011), written once for every family that
+ * carries it: the serial port of the RP2040 and the RP2350, as a console
+ * a program prints to, a line-oriented link, or a byte transport to
+ * another chip. This is an IP stratum - a directory of brio/ named for a
+ * peripheral design that several vendors license into their chips (an
+ * "IP block") rather than for a silicon - and it sits where a core
+ * stratum sits, above util/ and below the families (docs/pl011/README.md,
+ * this file's document, and the rule in docs/design/overview.md: "A core
+ * stratum sits between util/ and the families that share a core").
  *
- * The two strata every brio serial driver has (docs/design/serial.md)
+ * The two layers every brio serial driver has (docs/design/serial.md)
  * are both here:
  *
- *  Pl011Uart<Chip, n>    the RESOURCE, named for the IP: which instance,
+ *  Pl011Uart<Chip, n>    the resource, named for the IP: which instance,
  *                        where its registers are, its reset and its
  *                        interrupt line (both asked of the family), the
  *                        line control, the two baud divisors and the
  *                        write that latches them, the FIFOs and their
  *                        trigger levels, the interrupt mask/status/clear
- *                        trio, the flag register;
+ *                        trio, the flag register - for a program that
+ *                        drives the block by hand;
  *  Pl011Transport<Chip, n, pins, ...>
- *                        the TASK: the asynchronous byte transport with
- *                        ring buffers and one ISR body - every console's
- *                        personality, a ByteTransport for print() and
- *                        SerialPort. Its public surface is every target's
- *                        Uart surface, which is what lets
+ *                        the task (a driver layer with state of its own,
+ *                        served from its peripheral's interrupt): the
+ *                        asynchronous byte transport with ring buffers
+ *                        and one ISR body - every console's personality,
+ *                        a ByteTransport for print() and SerialPort. Its
+ *                        public surface is the Uart surface every target
+ *                        shares (util/stream.hpp's concepts,
+ *                        docs/design/serial.md), which is what lets
  *                        util/serial_port.hpp and print() compile over it
  *                        untouched.
  *
- * THIS FILE KNOWS NO CHIP. It includes kernel/ and util/ and nothing
+ * An application never writes these names. A family supplies the chip's
+ * facts as a traits type - a struct of types, constants and static
+ * functions this file reads, checked against the `Pl011Chip` concept
+ * below - and keeps, in its own header, the public names apps use as
+ * aliases of the two templates:
+ *
+ *   RP2040   Rp2040Pl011 in brio/rp2040/uart.hpp: Pl011<n> and
+ *            Uart<n, pins, rx_size, tx_size, TxEngine, RxEngine, Placement>
+ *   RP2350   Rp2350Pl011 in brio/rp2350/uart.hpp: the same two names
+ *   host     SimPl011 in brio/host/sim_pl011.hpp: a block made of RAM,
+ *            for the host suite test_pl011, which names the templates
+ *
+ * The smallest use, the console on the RP2040 as brio/rp2040/uart.hpp
+ * and docs/rp2040/uart.md spell it (the RP2350's is the same source):
+ *
+ *   constexpr brio::UartPins console_pins{
+ *       .tx = {0, brio::PinFunction::uart},
+ *       .rx = {1, brio::PinFunction::uart},
+ *   };
+ *   using Serial = brio::Uart<0, console_pins>;
+ *   constexpr Serial serial;                    // tag object, the argument print takes
+ *
+ *   extern "C" void isr_uart0() { (void)Serial::isr(); }
+ *
+ *   int main() {
+ *       SysClock::init();
+ *       Serial::init(clock, 115200);            // after the clock
+ *       brio::enable_interrupts();
+ *       brio::print(serial, "hello", brio::crlf);
+ *   }
+ *
+ * With the kernel, the handler posts RxActivity to the SerialPort active
+ * object when isr() returns true.
+ *
+ * Who calls what, and from where.
+ *  - init() is a setup verb: main, after the clock and before
+ *    interrupts are enabled globally. It computes the divisor from the
+ *    rate the family's traits call UARTCLK for the clock type it is
+ *    given, never from the hardware, so the clock comes first and
+ *    nothing refuses a port brought up before it. It masks this
+ *    instance's line for the whole bring-up, from before the rings are
+ *    cleared to its last step (a failure past that point returns with
+ *    the line still masked), and waits, bounded, for two things: the
+ *    reset controller to report the block out of reset (the family's
+ *    reset()) and the flush of what the receive FIFO already holds.
+ *  - release() is a main-context verb with no such precondition: it
+ *    masks this instance's line before it touches anything, then stops
+ *    the engines (on the RP chips a channel's abort waits, bounded, for
+ *    the channel to settle) and puts the block into reset. The DMA line
+ *    the engines report on is not masked by it.
+ *  - set_baud(), set_format(), loopback() and rebase() are main-context
+ *    verbs that first wait for the transmit ring and the shifter to
+ *    empty (drain(): bounded spins, so a wedged line cannot hang them)
+ *    and then disable the port around the change.
+ *  - isr() is the instance's interrupt body: the program's handler for
+ *    the instance's line calls it and nothing else does; dma_isr() is
+ *    the body of the DMA line the engines report on, called from that
+ *    line's handler. Both run to completion, as every interrupt handler
+ *    in brio does, and no handler nests over another.
+ *  - The byte verbs - write_byte(), write_bulk() and print() over them,
+ *    read_byte(), read_bulk(), read_span() with consume(), and harvest()
+ *    under a receive engine - belong to the main context: setup code, or
+ *    the handler of an active object (a component with its own event
+ *    queue, served one event at a time by the kernel), never an
+ *    interrupt handler. Each ring has one producer and one consumer, and
+ *    the interrupt body is the other end of both.
+ *  - What masks: harvest() takes the family's Guard (a critical section)
+ *    around its whole body, because it shares the receive ring's
+ *    producer side with the DMA line's handler: the engine's service()
+ *    and abandon() for a completion the line still owes, the publish
+ *    (UART register writes on its overrun path) and the re-arm, which
+ *    programs the DMA channel under the mask; pump_tx(), under a
+ *    transmit engine, takes it around the engine's claim alone. The
+ *    family's set_bits() and clear_bits() are one bus write where the
+ *    chip has atomic register aliases (both RP chips use theirs, hw_set
+ *    and hw_clear), a guarded read-modify-write otherwise.
+ *  - Nothing in the transport waits but the verbs above. write_byte()
+ *    has try semantics (false on a full ring, nothing written); print()
+ *    is what waits for room (util/print.hpp).
+ *  - Storage: the rings are the transport's own static arrays;
+ *    write_bulk() copies the caller's span, which is free again when it
+ *    returns; read_span() hands out the ring's own bytes, valid until
+ *    consume() releases them.
+ *
+ * This file knows no chip. It includes kernel/ and util/ and nothing
  * else: no vendor header, no family header, and it never names a reset
  * controller, a clock, a pad function, an interrupt controller or a DMA
- * request. WHAT A FAMILY OWES IT is the `Pl011Chip` concept below,
+ * request. What a family owes it is the `Pl011Chip` concept below,
  * satisfied by one traits type the family's own header defines; that
- * header also keeps the PUBLIC NAMES apps use (`Pl011<n>`, `Uart<n,
+ * header also keeps the public names apps use (`Pl011<n>`, `Uart<n,
  * pins, ...>`) as aliases of these two templates, so nothing above ever
  * spells a Chip.
  *
- * WHAT THE IP DOES, and shapes the task:
+ * What the IP does, and how it shapes the task:
  *  - the baud rate divisor is UARTCLK / (16 x baud) as a 16-bit integer
  *    (UARTIBRD) plus a 6-bit fraction (UARTFBRD); the two registers take
- *    effect only on the NEXT write of UARTLCR_H, so the divisor is
+ *    effect only on the next write of UARTLCR_H, so the divisor is
  *    written before the line control, and a divisor change alone is
  *    followed by a dummy LCR_H write;
- *  - LCR_H, IBRD and FBRD are written with the UART DISABLED (the
+ *  - LCR_H, IBRD and FBRD are written with the UART disabled (the
  *    PL011's rule): the task disables around every configuration;
- *  - the receive FIFO stores the framing, parity and break flags WITH
- *    EACH BYTE (bits 8..10 of UARTDR), so a corrupted byte is dropped
- *    precisely; the overrun bit (bit 11) says a byte was lost AFTER the
- *    one read, and that one is good. How DEEP the two FIFOs are is a
- *    synthesis parameter and therefore the family's (`Chip::fifo_depth`);
- *  - THE TRANSMIT INTERRUPT IS AN EDGE THAT STAYS LATCHED. ARM's text,
+ *  - the receive FIFO stores the framing, parity and break flags with
+ *    each byte (bits 8..10 of UARTDR), so a corrupted byte is dropped
+ *    precisely; the overrun bit (bit 11) says a byte was lost after the
+ *    one read, and that one is good. How deep the two FIFOs are is a
+ *    synthesis parameter and therefore the family's (`Chip::fifo_depth`:
+ *    32 on both RP chips);
+ *  - the transmit interrupt is an edge that stays latched. ARM's text,
  *    which both Raspberry Pi data sheets reproduce (RP2040 4.2.6.3,
  *    RP2350 12.1.6.3): it is asserted when the transmit FIFO is at or
  *    below its trigger level, cleared by writing the FIFO above the level
  *    or by UARTICR, and "based on a transition through a level, rather
  *    than on the level itself". Measured on the RP2350
- *    (docs/rp2350/uart.md): TXRIS is SET when the FIFO falls through the
- *    level, masked or not; it STAYS set until a write takes the FIFO above
- *    the level or UARTICR clears it; and the level alone never sets it
- *    again - a TXIM armed over a FIFO at or below its level with TXRIS
+ *    (docs/rp2350/uart.md): TXRIS is set when the FIFO falls through the
+ *    level, masked or not; it stays set until a write takes the FIFO
+ *    above the level or UARTICR clears it; and the level alone never sets
+ *    it again - a TXIM armed over a FIFO at or below its level with TXRIS
  *    clear never fires. The transmit side is built on exactly that:
  *      - a byte with nothing queued ahead of it and room in the FIFO is
- *        WRITTEN STRAIGHT INTO UARTDR by the caller, so an idle
+ *        written straight into UARTDR by the caller, so an idle
  *        transmitter takes a FIFO's depth of bytes with no interrupt;
  *      - a byte behind a full FIFO, or behind bytes already queued, goes
- *        into the ring and ARMS TXIM. Every queued byte has an edge
- *        coming or one latched: the first queues only behind a FULL FIFO,
+ *        into the ring and arms TXIM. Every queued byte has an edge
+ *        coming or one latched: the first queues only behind a full FIFO,
  *        which is above its level, and from there the FIFO draining
  *        latches TXRIS while a write either stays above the level or
  *        leaves TXRIS as it was - so the one store that could take the
@@ -73,7 +165,7 @@
  *        transmit path never writes. One interrupt per FIFO level, each
  *        refilling the FIFO from the ring, and TXIM disarmed by the
  *        handler when the ring runs dry;
- *      - a byte the full ring REFUSES writes nothing at all: the ring is
+ *      - a byte the full ring refuses writes nothing at all: the ring is
  *        not empty, so TXIM is armed and its edge is what drains the
  *        ring. A caller spinning on a full ring costs no interrupt.
  *    The ring's consumer is the handler alone, and the caller writes
@@ -81,38 +173,39 @@
  *    so a ring the caller sees empty has every byte queued before it in
  *    the FIFO already, and the wire carries the bytes in the order they
  *    were written;
- *  - the receive side arms RXIM (the FIFO at its trigger level) AND
+ *  - the receive side arms RXIM (the FIFO at its trigger level) and
  *    RTIM (bytes waiting and the line idle for 32 bit periods), so a
  *    short burst is delivered after one character time and a long one
  *    every sixteen bytes; the handler drains the FIFO whole;
- *  - the eleven maskable sources combine into ONE interrupt line per
+ *  - the eleven maskable sources combine into one interrupt line per
  *    instance, which the family names.
  *
- * THE ENGINE SLOTS (the family's DmaTxEngine / DmaRxEngine, the other
- * families' shape). With a TRANSMIT engine the handler never touches the
- * transmit FIFO: write_byte() and write_bulk() queue into the ring and
- * pump_tx() starts a block over the ring's contiguous run whenever it can
- * CLAIM the engine - the claim alone under the mask, the block programmed
- * after it; the block's completion - on the DMA line the engine reports
- * on, dma_isr() - releases exactly that run and starts the next.
- * The transmit FIFO's own data request (UARTDMACR.TXDMAE) paces it,
- * credit by credit, so no kick is ever needed. With a RECEIVE engine the
+ * The engine slots (the family's DmaTxEngine / DmaRxEngine, each
+ * written to what docs/pl011/README.md's "The engine slots" lists). With
+ * a transmit engine the handler never touches the transmit FIFO:
+ * write_byte() and write_bulk() queue into the ring and pump_tx() starts
+ * a block over the ring's contiguous run whenever it can claim the
+ * engine - the claim alone under the mask, the block programmed after
+ * it; the block's completion - on the DMA line the engine reports on,
+ * dma_isr() - releases exactly that run and starts the next. The
+ * transmit FIFO's own data request (UARTDMACR.TXDMAE) paces it, credit
+ * by credit, so no kick is ever needed. With a receive engine the
  * receive interrupts stay off and the engine fills the ring's free run
  * straight from UARTDR; a run that fills is published and re-armed by
  * its completion on the DMA line, whose dma_isr() answers the ring's
  * edge, and a run still filling is read off the engine's own count by
- * harvest(), a VERB the owner calls at its own pace, which publishes it
- * and re-arms the run. The engine moves BYTES and the per-entry error
+ * harvest(), a verb the owner calls at its own pace, which publishes it
+ * and re-arms the run. The engine moves bytes and the per-entry error
  * flags of UARTDR are not among them - a framed or break entry's byte
  * lands in the ring like any other - so the error interrupts are armed
  * under an engine and isr() counts each received error, clearing it
- * through UARTICR and never reading UARTDR. NO VECTOR ENDS A BURST UNDER AN ENGINE: the receive time-out
- * needs a character waiting, and the channel's single request leaves
- * none (measured, docs/pl011/README.md) - the interrupt receiver is the
- * burst path with an edge. The DMA and the handler never touch one FIFO
- * at once.
+ * through UARTICR and never reading UARTDR. No vector ends a burst under
+ * an engine: the receive time-out needs a character waiting, and the
+ * channel's single request leaves none (measured, docs/pl011/README.md)
+ * - the interrupt receiver is the burst path with an edge. The DMA and
+ * the handler never touch one FIFO at once.
  *
- * WHERE THE VECTORS' BODIES RUN is the program's choice, by the
+ * Where the vectors' bodies run is the program's choice, by the
  * transport's last template parameter, util/placement.hpp's tag: isr()
  * and dma_isr() run their bodies through `Hot<Placement>` - inline in the
  * app's vectors under `InFlash`, the default, one flattened instance each
@@ -121,9 +214,9 @@
  * handler in SRAM"). The thread's verbs (write_byte, write_bulk, harvest)
  * stay where the program's code is.
  *
- * NOT built, each with its reason in docs/pl011/README.md: hardware flow
+ * Not built, each with its reason in docs/pl011/README.md: hardware flow
  * control, IrDA, the modem status inputs and outputs, the stick-parity
- * bit. The slots for DMA engines ARE here, empty, so the type's shape
+ * bit. The slots for DMA engines are here, empty, so the type's shape
  * does not move when a family fills them.
  */
 
@@ -156,12 +249,14 @@ struct Pl011AbsentEngine {
 };
 
 /**
- * THE CONTRACT: what a family's chip-traits type states so that this
- * file can drive the block without knowing which silicon carries it.
- * Every member is here because some line below needs it.
+ * The contract: what a family's chip-traits type states so that this
+ * file can drive the block without knowing which silicon carries it
+ * (Rp2040Pl011, Rp2350Pl011 and the host's SimPl011 satisfy it, each
+ * checked by a static_assert beside its definition). Every member is
+ * here because some line below needs it.
  *
  * The one thing the concept names and cannot check here is
- * `uartclk_hz(clock)` - it is a template over the family's OWN clock
+ * `uartclk_hz(clock)` - it is a template over the family's own clock
  * types, of which this file knows none - so it has a concept of its own,
  * `Pl011ChipClock`, checked at the one call site that needs it, init().
  */
@@ -196,7 +291,7 @@ concept Pl011Chip =
         { C::fifo_depth } -> std::convertible_to<uint8_t>;
         /// The run length from which the runtime's memcpy copies a run
         /// into the transmit ring faster than a byte loop, its two ends
-        /// sharing their word alignment: a fact of the CORE and the
+        /// sharing their word alignment: a fact of the core and the
         /// memory the code runs from, measured on each family (its bench
         /// app's letter u), never this file's.
         { C::copy_crossover } -> std::convertible_to<uint32_t>;
@@ -225,7 +320,7 @@ concept Pl011Chip =
         C::set_bits(reg, bits);
         C::clear_bits(reg, bits);
         /// The pads: is this pin set legal for this instance, and which
-        /// pad carries each direction. Then the PAD ITSELF as a type,
+        /// pad carries each direction. Then the pad itself as a type,
         /// with the function code that routes a UART to it and the
         /// electrical setup each direction wants - the two verbs this
         /// file calls on a pad are handing it over and taking it back.
@@ -247,7 +342,7 @@ concept Pl011Chip =
     };
 
 /**
- * WHICH CLOCK OF THIS FAMILY'S TREE IS UARTCLK - the half of the
+ * Which clock of this family's tree is UARTCLK - the half of the
  * contract that is a template over the family's clock types and so can
  * only be checked where a clock is in hand (Pl011Transport::init).
  */
@@ -274,7 +369,7 @@ constexpr bool uart_format_valid(const UartFormat& f) {
     return bits >= 5u && bits <= 8u && (f.stop_bits == 1u || f.stop_bits == 2u);
 }
 
-/// WHERE THE RECEIVER LISTENS, chosen when the transport is brought up:
+/// Where the receiver listens, chosen when the transport is brought up:
 /// its pad, or the block's own transmitter (UARTCR.LBE, the loop-back).
 /// Chosen there, the loop-back is set while the UART is still disabled,
 /// so the receiver never samples its pad at all; switched on later under
@@ -558,12 +653,13 @@ struct Pl011Uart {
 
 /**
  * The interrupt-driven byte transport over Pl011Uart<Chip, n> (the file
- * header). The family's own header aliases it to `Uart<n, pins, ...>`
- * and carries the example in that family's spelling.
+ * header says who calls what). The family's own header aliases it to
+ * `Uart<n, pins, ...>` and carries the example in that family's
+ * spelling.
  *
- * TX policy: write_byte() has TRY semantics (false when the TX ring is
+ * TX policy: write_byte() has try semantics (false when the TX ring is
  * full, nothing counted - the caller decides whether to retry, drop or
- * block; print.hpp blocks). RX overflow (ring full, byte lost) IS
+ * block; print.hpp blocks). RX overflow (ring full, byte lost) is
  * counted, as are the hardware error flags.
  *
  * Ring sizes: where the platform reads the ring's index atomically,
@@ -632,7 +728,7 @@ public:
     /// the line control, the FIFOs at their levels, the receive
     /// interrupts, the pads, the interrupt line.
     ///
-    /// Call AFTER the main clock is set up and before interrupts are
+    /// Call after the main clock is set up and before interrupts are
     /// enabled globally; `clock` is the app's brio::Clock tag, and the
     /// family's traits say which of its rates is UARTCLK - so the
     /// divisor never comes from a second statement of the rate.
@@ -642,8 +738,12 @@ public:
     ///
     /// False when the rate cannot be produced at this clock or the
     /// block did not come out of reset - the caller then knows the
-    /// transport is NOT up, rather than printing into a ring nothing
-    /// will drain.
+    /// transport is not up, rather than printing into a ring nothing
+    /// will drain. Main context; it masks this instance's line for the
+    /// whole bring-up, from before the rings are cleared to the end (a
+    /// failure past that point returns with the line still masked), and
+    /// waits, bounded, for the reset controller (U::reset()) and for the
+    /// flush of the receive FIFO.
     template <typename Clock>
     static bool init(Clock clock, uint32_t baud, const UartFormat& format = {},
                      UartRx rx = UartRx::pad) {
@@ -780,7 +880,6 @@ public:
         return true;
     }
 
-    /// The slowest clock that can still produce `baud`.
     /// Change the frame format under the running port, once the TX side
     /// is idle; false and nothing written for a format the block has
     /// not got. Main context only.
@@ -807,6 +906,7 @@ public:
         return ok;
     }
 
+    /// The slowest clock that can still produce `baud`.
     static constexpr uint32_t min_hz_for(uint32_t baud) { return uart_min_hz(baud); }
 
     /// True if the generator can produce `baud` at `hz`.
@@ -839,8 +939,9 @@ public:
 
     // ---- the ISR body -----------------------------------------------------
 
-    /// The instance's ONE interrupt body - call from the handler the
-    /// family's crt names for this instance's line.
+    /// The instance's one interrupt body - call from the handler the
+    /// family's crt names for this instance's line (isr_uart0 or
+    /// isr_uart1 on the RP chips), and from nowhere else.
     ///
     /// Serves what UARTMIS reports, and nothing else: the receive FIFO
     /// on its level or its timeout, the transmit ring into the FIFO on
@@ -924,7 +1025,7 @@ private:
 
 public:
     /**
-     * The ISR body of the DMA LINE this transport's engines report on -
+     * The ISR body of the DMA line this transport's engines report on -
      * the app binds that line's handler to it.
      *
      * Each engine reads only its own channel's status, so a line other
@@ -932,12 +1033,12 @@ public:
      * completion releases exactly the block's bytes from the ring and
      * starts the next run; a receive completion publishes and re-arms
      * here - unless harvest() met it first, under its guard, and served
-     * it there: a completion is acted on ONCE.
+     * it there: a completion is acted on once.
      *
      * Returns the receive ring's empty -> non-empty edge across the
      * completion's publish, the answer isr() gives: the same kernel glue
      * posts RxActivity on it, so a stream that fills runs is told once a
-     * run with no poll. A BURST SHORTER THAN THE RUN HAS NO EDGE HERE,
+     * run with no poll. A burst shorter than the run has no edge here,
      * and none anywhere on this block: the receive time-out needs a
      * character waiting in the FIFO, and the channel's single request
      * leaves none (measured: UARTRIS.RTRIS never rises under an engine,
@@ -990,7 +1091,11 @@ public:
     /**
      * Ask the receive engine what has arrived, and publish it (the file
      * header). Returns the same edge isr() does - the ring went from
-     * empty to non-empty. False, and free, without an engine.
+     * empty to non-empty. False, and free, without an engine. Main
+     * context, the receive ring's consumer side. Because it shares the
+     * ring's producer side with dma_isr(), it takes the family's Guard
+     * for its whole body: the owed completion's service(), the publish
+     * and the re-arm, the DMA channel programmed under the mask.
      */
     static bool harvest() {
         if constexpr (!has_rx_engine) {
@@ -1036,7 +1141,8 @@ public:
 
     // ---- byte transport (satisfies ByteSink / ByteSource) -----------------
 
-    /// Try to send one byte; false when the TX ring is full. Without a
+    /// Try to send one byte; false when the TX ring is full. Main
+    /// context only (the ring's one producer); never waits. Without a
     /// transmit engine (the file header's three rules): straight into
     /// UARTDR when nothing is queued and the FIFO has room, else into the
     /// ring with TXIM armed, and a refusal writes nothing. With one, the
@@ -1075,13 +1181,14 @@ public:
         return true;
     }
 
-    /// Send a run of bytes in BULK: without a transmit engine, as much of
+    /// Send a run of bytes in bulk: without a transmit engine, as much of
     /// it as the FIFO has room for goes straight into UARTDR when nothing
     /// is queued (write_byte()'s first rule, a run at a time); the rest
-    /// is copied into the ring's own free run, and TXIM armed ONCE if any
+    /// is copied into the ring's own free run, and TXIM armed once if any
     /// of it was queued. With an engine, all of it is queued and the
     /// engine pumped once. Returns how many were taken (short of
-    /// `src.size()` when the ring filled).
+    /// `src.size()` when the ring filled). The span is copied, and the
+    /// caller's again on return; main context only, never waits.
     static uint32_t write_bulk(std::span<const uint8_t> src) {
         uint32_t done = 0;
         if constexpr (!has_tx_engine) {
@@ -1113,7 +1220,8 @@ public:
         return done;
     }
 
-    /// Take a run of received bytes in BULK, the mirror of write_bulk().
+    /// Take a run of received bytes in bulk, the mirror of write_bulk().
+    /// Main context only (the ring's one consumer).
     static uint32_t read_bulk(std::span<uint8_t> dst) {
         uint32_t done = 0;
         while (done < dst.size()) {
@@ -1133,7 +1241,7 @@ public:
         return done;
     }
 
-    /// The received bytes IN PLACE: the contiguous run ready to be read,
+    /// The received bytes in place: the contiguous run ready to be read,
     /// never wrapping - the receive ring's consumer half under the ring's
     /// own names. With consume() it is util/stream.hpp's SpanSource,
     /// which SerialPort drains a run at a time with no copy at all.
@@ -1166,7 +1274,7 @@ public:
     static uint8_t hw_overruns() { return m_hw_overruns; }
 
     /// Every byte the line carried that the receive ring will not deliver,
-    /// since the program started, NEVER CLEARED (modulo 2^32) -
+    /// since the program started, never cleared (modulo 2^32) -
     /// util/stream.hpp's SkippingSource, the epoch util/serial_port.hpp
     /// compares at every run: the receive ring's skips (SkipRing), one at
     /// the consumer's look after an entry dropped for its flags or refused

@@ -1,10 +1,75 @@
 # DMA (CH32V00x)
 
-The one DMA controller of RM ch. 8 - seven channels, each answering a
-fixed handful of peripheral requests, an arbiter over four software
-priorities, three flags a channel - the engines the transports name in
-their slots (the USART's, the SPI host's, the I2C host's), and the copy
-engine. Documents of record: the CH32V00X reference manual V1.5 (8.2.1
+This document is for a programmer who wants a peripheral's data moved
+without the CPU: a serial port's receive stream or transmit runs, an SPI
+or I2C transaction, a memory copy or fill, a table paced out by a timer.
+It covers the one DMA controller of RM ch. 8 - seven channels, each
+answering a fixed handful of peripheral requests, an arbiter over four
+software priorities, three flags a channel - and brio's engines over
+it. An engine is the driver of one channel bound to one peripheral
+register, configured once by its `arm()` and then handed one run at a
+time (a run is a contiguous stretch of elements, the unit every brio
+transfer takes; the element's width is the beat the channel moves). A
+program rarely calls an engine itself: it names one in a transport's
+slot (the USART's, the SPI host's, the I2C host's) and the transport
+drives it, or it uses the copy engine for memory to memory.
+
+The smallest use is the console on both engines, from "How to use it"
+below - USART1 transmits on channel 4 and receives on 5 (table 8-2):
+
+```cpp
+using Serial = brio::Uart<1, P, 64, 128, brio::DmaTxEngine<4>, brio::DmaRxEngine<5>>;
+
+// The receive edge from the vectors: the USART's (an idle line, a
+// burst's first frame) and the receive channel's (the lap's marks).
+extern "C" BRIO_CH32_INTERRUPT void usart1_handler() {
+    if (Serial::isr()) { brio::post<SerialLines>(brio::RxActivity{}); }
+}
+extern "C" BRIO_CH32_INTERRUPT void dma1_channel5_handler() {
+    if (Serial::dma_isr()) { brio::post<SerialLines>(brio::RxActivity{}); }
+}
+extern "C" BRIO_CH32_INTERRUPT void dma1_channel4_handler() { (void)Serial::dma_isr(); }
+```
+
+Line by line: `Serial` is the console's transport ([usart.md](usart.md))
+with a receive ring of 64 bytes, a transmit ring of 128, and an engine
+in each slot, named by its channel; the receive engine runs the whole
+receive ring as one circular block the channel writes lap after lap, and
+the transmit engine sends the transmit ring's contents one run a block;
+`Serial::init(clock, baud)` arms both, once, as it opens the port. The
+three handlers are bound by the program under the startup code's names:
+the USART's own vector reports a burst's edge, the receive channel's
+reports the lap's half and full marks, and the transmit channel's
+vector starts the next block when one ends; the first two post
+`RxActivity` to the active object that assembles lines (`SerialLines`,
+a `SerialPort` of `util/serial_port.hpp`; an active object is a
+component of a brio program with its own event queue, served one event
+at a time by the kernel, [docs/learn/introduction.md](../learn/introduction.md)).
+
+What decides correctness even there. The channel is the request: there
+is no multiplexer, each peripheral's request reaches one fixed channel
+(table 8-2), and each transport (the USART's, the SPI host's, the I2C
+host's) refuses at compile time an engine on any other channel, or two
+engines on one. Every channel a program engines
+has its vector bound, as above; an unbound one lands in the startup
+code's spin at its channel's first interrupt. A run handed to an engine stays
+the caller's until its end is reported, and a run off its beat's
+boundary is refused (the controller ignores an address's low bits for a
+wide access, 8.3.5). And on the CH32V003 the platform's idle hook does
+not sleep while a channel works, since that core's Sleep stops the
+controller ([platform.md](platform.md)): a receive ring is a channel
+always at work, so a program with one there never sleeps.
+
+The page is long because the costs are on it. In order: the documents
+of record; what the silicon does, with the offer item by item; the
+types and verbs and what a block costs in the release listings; how to
+use it, the SPI host's engines, a copy, a timer-paced block and the
+one-shot verbs among the examples; the bench findings; and what is not
+covered.
+
+## Documents of record
+
+The CH32V00X reference manual V1.5 (8.2.1
 for the channel and its three outcomes, 8.2.2 for the widths, table 8-2
 for the request map, 8.3 for the registers), the CH32V003 reference
 manual V1.9 (its chapter 8 is the same controller, table 8-2 the same
@@ -12,11 +77,13 @@ rows but TIM3's), the QingKe V2 manual V1.3 (3.5 for the vector table
 the seven lines sit in). Driver: [brio/ch32v00x/dma.hpp](../../brio/ch32v00x/dma.hpp)
 and [brio/ch32v00x/dma_engine.hpp](../../brio/ch32v00x/dma_engine.hpp);
 reference suite `test_ch32_dma`; the costs in `bench_ch32`'s letters d
-(the controller) and s (the SPI host's engines).
+(the controller) and s (the SPI host's engines) - a suite's letter is
+one command key of its console and the group of verdicts it runs, `z`
+the key that runs the image's set of letters.
 
 ## What the silicon does
 
-- **The channel IS the request.** There is no request multiplexer:
+- **The channel is the request.** There is no request multiplexer:
   table 8-2 wires each peripheral event to one channel and an engine
   is named by channel number with that table in hand - the ADC on 1,
   SPI1 receives on 2 and transmits on 3, USART1 transmits on 4 and
@@ -27,18 +94,18 @@ reference suite `test_ch32_dma`; the costs in `bench_ch32`'s letters d
   footnote). The rows of one channel are an OR: whichever of its
   peripherals has its DMA bit set drives the channel's transfer. On the
   CH32V203 and the CH32V303 - this controller's lineage - a request once
-  raised is moreover HELD until the channel acknowledges it or the
+  raised is moreover held until the channel acknowledges it or the
   peripheral's reset line is pulsed, its DMA bit, its enable and a gated
   clock notwithstanding, and the next owner of the channel takes one
   stray item and stalls behind it ([../ch32vx03/dma.md](../ch32vx03/dma.md),
-  "A released requester"). THIS DIE HOLDS A TIMER'S: TIM1's channel 3 and
+  "A released requester"). This die holds a timer's: TIM1's channel 3 and
   TIM2's channel 2 compare requests, raised by a match with no channel
   enabled and their gates closed with no reset, leave the next owner of
   channel 6 or 7 one stray item and a channel that serves nothing after
   it - the dead channel the I2C host's guards and the USART's receive
   vector answer ([i2c.md](i2c.md), letter p; [usart.md](usart.md), letter
   m); the I2C's own request, raised under DMAEN by a stalled read, falls
-  with its gate. USART2's both requests are HELD: its transmit request on
+  with its gate. USART2's both requests are held: its transmit request on
   channel 6 and its receive request on channel 7, each raised with no
   channel enabled, leave the next owner one stray item after the request
   bit, UE, TE and RE or the gate alone is let go, and none after the
@@ -60,12 +127,12 @@ reference suite `test_ch32_dma`; the costs in `bench_ch32`'s letters d
   HTIF, TEIF at 4 x (channel - 1) in INTFR, read-only, cleared by
   writing one to the same position in INTFCR. Each enable in CFGR sits
   at its flag's position (TCIE bit 1, HTIE 2, TEIE 3).
-- **EN STAYS SET after a completed block** (measured): CNTR at zero,
+- **EN stays set after a completed block** (measured): CNTR at zero,
   TCIF and GIF up, the channel enabled and idle. 8.3.4's note: a
   channel whose count is zero moves nothing, enabled or not. Only
   software clears EN, and until it does every configuring store is
   dropped.
-- **The address's low bits are IGNORED for a wide access** (8.3.5,
+- **The address's low bits are ignored for a wide access** (8.3.5,
   8.3.6): with a 16-bit width the module drops bit 0, with a 32-bit
   one bits 1:0 - a half-word block pointed at an odd address moves the
   wrong bytes and completes.
@@ -87,17 +154,17 @@ engines do with each:
 
 | item | used | how, or why not |
 |---|---|---|
-| the register file (CFGR, CNTR, PADDR, MADDR) | yes | PADDR and the configuration word at `arm()`, once; a block is FIVE STORES - CFGR with EN clear, CNTR, MADDR, INTFCR, CFGR with EN - and no load. The word is kept in the engine, because the enable store needs it and a read-modify-write would read it back from the bus |
+| the register file (CFGR, CNTR, PADDR, MADDR) | yes | PADDR and the configuration word at `arm()`, once; a block is five stores - CFGR with EN clear, CNTR, MADDR, INTFCR, CFGR with EN - and no load. The word is kept in the engine, because the enable store needs it and a read-modify-write would read it back from the bus |
 | the write protection of 8.2.1 | yes | the block's first store is the word with EN clear: the disable the note asks for before CNTR and MADDR, which EN standing from the last block makes necessary, and the store that changes the beat or the increment in the same access |
-| the two width fields | yes | the BEAT: PSIZE and MSIZE both follow the element of the run a block is handed (8, 16 or 32 bits), so one channel moves bytes for one block and half-words for the next; unequal widths (table 8-1's packing and truncation, measured as the table spells it) declined - no transport's register and buffer differ in width; the one-shot channel takes them |
-| the address alignment of 8.3.5/8.3.6 | yes | a run off its beat's boundary is REFUSED, its caller falling back to whatever moves it otherwise |
+| the two width fields | yes | the beat: PSIZE and MSIZE both follow the element of the run a block is handed (8, 16 or 32 bits), so one channel moves bytes for one block and half-words for the next; unequal widths (table 8-1's packing and truncation, measured as the table spells it) declined - no transport's register and buffer differ in width; the one-shot channel takes them |
+| the address alignment of 8.3.5/8.3.6 | yes | a run off its beat's boundary is refused, its caller falling back to whatever moves it otherwise |
 | the increments | yes | MINC per block (a run, or one fixed cell a bus write clocks out or a discard cell a bus read fills); PINC for the copy |
 | memory to memory | yes | `DmaCopyEngine`: no request, the channel runs from its enable |
 | circular mode | the receive engine's circular shape (`arm_ring()`) | a byte transport's receive ring: the channel writes the whole storage lap after lap, its count the producer index of util/ring.hpp's `HardwareRing`, the completion a lap counted by `lap()` (the transport's vector); a transfer engine's block has an end, and a circular player waits for its first block-stream user |
 | the half-transfer flag | no | no engine acts on a midpoint before a stream does |
 | the completion interrupt | per binding | `arm()` names the flags whose interrupt the binding wants: a transport whose completion another event proves arms the errors alone - the SPI host's transmit block (the receive block's end proves it), the I2C host's (BTF proves it) |
-| one flag register for seven channels | yes | a transport serving two channels in one handler body reads INTFR ONCE |
-| the priorities | yes | an argument of `arm()`, and THE LEVEL IS THE PERIPHERAL'S ([../design/dma.md](../design/dma.md)): a memory-to-memory channel asks for the bus on every cycle of its block, so a channel it outranks moves nothing until it ends - by default the receive engine at very_high, the transmit engine at high, the copy at low; the USART's ring at very_high (`UartOptions::rx_priority` the knob) and its transmit at high, the SPI host's receive at very_high (OVR, 16.2.7) and transmit at high, the I2C host's two at high (the bus stretches, 15.3); strict - the level, then the lower channel number (8.2.1, measured) |
+| one flag register for seven channels | yes | a transport serving two channels in one handler body reads INTFR once |
+| the priorities | yes | an argument of `arm()`, and the level is the peripheral's ([../design/dma.md](../design/dma.md)): a memory-to-memory channel asks for the bus on every cycle of its block, so a channel it outranks moves nothing until it ends - by default the receive engine at very_high, the transmit engine at high, the copy at low; the USART's ring at very_high (`UartOptions::rx_priority` the knob) and its transmit at high, the SPI host's receive at very_high (OVR, 16.2.7) and transmit at high, the I2C host's two at high (the bus stretches, 15.3); strict - the level, then the lower channel number (8.2.1, measured) |
 | the software trigger | yes | MEM2MEM is the only one (figure 8-1): there is no trigger register beside it |
 | the gate | yes | opened once, by `arm()` |
 | the transfer error | yes | armed on every engine; it clears EN by itself (8.2.1) and an engine's `abandon()` halts the channel and counts the fault |
@@ -111,20 +178,20 @@ of one channel to another: there is nothing more to use or decline.
 
 - `Dma` is the block: `open()` the gate, `flags()` the whole INTFR.
 - `DmaChannel<ch>` is one channel, 1..7, with its whole register
-  surface as ONE-SHOT verbs for a suite or a rare user:
+  surface as one-shot verbs for a suite or a rare user:
   `configure(DmaChannelConfig)`, `set_count()`, `set_peripheral()` /
   `set_memory()`, `prepare()` and `load()` over a `DmaTransfer` (both
   ends, a count, a config - checked by `dma_transfer_valid()`, and
   both ends' alignment against their widths), `enable()`, `count()`
   live, the flags (`flags()`, `flag(mask)`, `clear(mask)` with
   `DmaFlag`'s four bits), `arm(mask, on)` for the three interrupt
-  enables, `isr()` - the ISR body that reads only the ARMED flags that
+  enables, `isr()` - the ISR body that reads only the armed flags that
   are up, clears exactly those with GIF and hands them back, deciding
-  nothing -, `progress()` and `stop()`. Every configuring verb REFUSES
+  nothing -, `progress()` and `stop()`. Every configuring verb refuses
   while the channel is enabled and for the one config the chapter
   forbids, and opens the gate first.
 - `DmaTxEngine<ch, Elem>` and `DmaRxEngine<ch, Elem>` are the
-  TRANSFER ENGINES, in TWO MOMENTS. `arm(data, interrupts, priority)`
+  transfer engines, in two moments. `arm(data, interrupts, priority)`
   binds the channel to its peripheral register: the gate opened, the
   channel stopped, PADDR written, the configuration word (direction,
   priority - high for the transmit engine and very_high for the receive
@@ -132,14 +199,14 @@ of one channel to another: there is nothing more to use or decline.
   `flag_complete` and/or `flag_error`, both by default and with
   `arm(data, priority)`)
   computed and kept, the PFIC line enabled. A block takes a span of
-  uint8_t, uint16_t or uint32_t - the BEAT is the element, `Elem` the
-  WIDEST the binding allows (the register's width; a wider span does
+  uint8_t, uint16_t or uint32_t - the beat is the element, `Elem` the
+  widest the binding allows (the register's width; a wider span does
   not compile) - and writes its five stores; it is refused for an
   empty run, one over 65535 elements or one off its beat's boundary.
-  The transmit engine is BUSY from its claim to `complete()`, which
+  The transmit engine is busy from its claim to `complete()`, which
   hands back how many elements the block carried and touches no
-  register (EN stands; the next block's first store clears it). THE
-  CLAIM AND THE PROGRAMMING ARE TWO VERBS: `claim()` is that flag's
+  register (EN stands; the next block's first store clears it). The
+  claim and the programming are two verbs: `claim()` is that flag's
   test-and-set and nothing else, the one step a transport whose
   completion handler starts the next block takes under its mask;
   `launch(run)` programs a claimed engine, outside it (a refused run
@@ -152,7 +219,7 @@ of one channel to another: there is nothing more to use or decline.
   receive side of a bus write); it answers `take()` (how many arrived
   since last asked: one CNTR read, nothing suspended), `full()`,
   `capacity()`, `idle()` (EN clear: stopped, or halted by a transfer
-  error). Its CIRCULAR SHAPE, `arm_ring(data, storage, half_mark,
+  error). Its circular shape, `arm_ring(data, storage, half_mark,
   priority)`, binds the channel to a caller's whole ring storage and
   starts it for good - CIRC, MINC, the beat, the lap's completion and
   the error, and with `half_mark` the half lap - and makes the engine
@@ -172,7 +239,7 @@ of one channel to another: there is nothing more to use or decline.
   reports it): `arm(priority, interrupt)` once, low unless named;
   `copy(dst, src, n)` -
   the source the PADDR side, both increments - and `fill(dst, cell, n)`
-  - the source one cell IN MEMORY, the caller's, PINC clear - with `n`
+  - the source one cell in memory, the caller's, PINC clear - with `n`
   in elements of the beat the pointers' type names, each refused while
   a block runs and for an `n` of zero or over CNTR's 65535 or an end
   off its beat's boundary; `busy()`, which while a block runs reads the

@@ -1,11 +1,158 @@
 # USB host/device controller, device mode (CH32V303, CH32V203)
 
+This document is for a programmer who wants a CH32V303, or one of the
+five CH32V203 parts that carry this block, to appear to a host computer
+as a USB device on the chip's own connector: in practice a serial port,
+a console or a byte transport, which a Linux host binds to its own
+cdc-acm driver with nothing installed. The driver, `Usbfs<pool_bytes>`, is
+a monostate (a class with only static members, never instantiated: one
+block, one set of state) that moves packets and nothing above them,
+over endpoint buffers it keeps in the program's own RAM. The protocol
+is the stack's ([design/usb.md](../design/usb.md)), the same one the
+CH32V203's device controller runs ([usb.md](usb.md)): `UsbDevice` of
+[util/usb/device.hpp](../../brio/util/usb/device.hpp) answers the
+host's enumeration over the controller, and `UsbCdcAcm` of
+[util/usb/cdc.hpp](../../brio/util/usb/cdc.hpp) is the serial-port
+class, a byte transport with a UART's surface, so `print` and a
+`SerialPort` run over it unchanged.
+
+The smallest use, the first block of "How to use it" below:
+
+```cpp
+using Usb = brio::Usbfs<>;                                  // 960 bytes: no claim ever refused
+using Port = brio::UsbCdcAcm<Usb, P>;                       // interface 0, endpoints 1 and 2
+struct Descriptors { /* the device, the configuration, the strings: design/usb.md */ };
+using Device = brio::UsbDevice<Usb, Descriptors, Port>;
+
+using SysClock = brio::Clock<brio::ClockSource::pll, 96'000'000, 8'000'000>;   // the crystal: 2500 ppm
+Usb::init(clock);
+Device::start();                                             // the pull-up: the host enumerates from here
+
+BRIO_CH32_VECTOR(usbfs_handler) { Device::isr(); }
+```
+
+Line by line: `Usb` names the controller type with its default pool,
+960 bytes of the program's RAM, a static array that holds endpoint
+zero's buffer and both directions of all seven other endpoint numbers,
+so no claim of the stack's is ever refused for want of memory
+(`Usbfs<256>` is a CDC ACM port's exact need, "How to use it"). `Port`
+is the CDC ACM class over that controller; `P` is the platform
+([platform.md](platform.md), `using P = brio::Ch32vx03Platform<>;`),
+whose critical section guards the class's two rings, and the class's
+template defaults put its communications interface at 0, its
+notification endpoint at 1 and its bulk pair at 2. `Descriptors` holds
+the bytes the host reads while it enumerates the device, the device
+descriptor, the configuration and the strings; the comment stands for
+them, and [usb.md](usb.md)'s "How to use it" writes them out, the same
+bytes over either controller. `Device` is the stack, the
+control-endpoint machine over the controller with the class it routes
+to. `SysClock` is the clock task's type, the PLL at 96 MHz from the
+board's 8 MHz crystal (the third argument), and `clock` its tag object,
+declared `constexpr SysClock clock;` as in [clock.md](clock.md)'s
+smallest use. `Usb::init(clock)` brings the block up - the part's two
+pads left floating inputs with their port's clock open, the HB gate,
+the protocol engine reset and released, every endpoint parked at NAK,
+endpoint zero laid out, the device's interrupts, the automatic pause,
+the DMA, the transceiver and the vector's PFIC line - with the pull-up
+still down, so the host sees no device yet; under a static clock type
+like this one it answers true (the line discards it). `Device::start()`
+clears the stack's state, resets the class and raises the pull-up: from
+that call the host sees a full-speed device and enumerates it. The
+`BRIO_CH32_VECTOR` line binds the controller's one vector (interrupt 83
+on the CH32V303, 59 on the CH32V203), under the name the crt (the
+startup code that runs before `main()`,
+[startup_ch32vx03.S](../../ch32vx03/src/glue/startup_ch32vx03.S))
+gives it, to `Device::isr()`: the whole stack runs in that interrupt
+body, the enumeration, the class's requests and its packets
+([design/usb.md](../design/usb.md), "Where it runs"), and a program
+whose lines a `SerialPort` assembles also posts its `RxActivity` from
+there when `Port::take_rx_edge()` reports the receive ring's
+empty-to-non-empty edge.
+
+`init()` and `start()` go in `main()`, after `SysClock::init()`; the
+suite enables interrupts before `Device::start()`. A program then
+prints to the port as [usb.md](usb.md)'s smallest use does, from
+`main()` or from an active object's event handler (an active object is
+a component of a brio program with its own event queue, served one
+event at a time by the kernel,
+[docs/learn/introduction.md](../learn/introduction.md)) and never from
+an interrupt handler; a `print` issued before the host has configured
+the port waits until it does, because the class takes no byte until
+then (derived from util/usb/cdc.hpp's `write_byte` and `write_bulk`
+and util/print.hpp's delivery policy).
+
+What decides correctness even there:
+
+- **The clock task first, and a tree the type alone vouches for.**
+  Under a static clock type `init()` checks it at compile time, twice:
+  its USB rate must be 48 MHz (a PLL at 48, 96 or 144 MHz, which USBPRE
+  divides by 1, 2 or 3) and its HCLK at least `usbfs_min_hclk_hz`,
+  12 MHz, the floor measured below; a type that fails either does not
+  compile. Under a dynamic clock it asks the rate in force and answers
+  false, touching nothing, when either fails. It reads the type and not
+  the hardware. The clock task's `init()` is what starts the PLL and
+  writes USBPRE, before any USB gate is open in the order 3.4.2 asks
+  for, so a `Usb::init()` called before `SysClock::init()` opens the
+  gate first, and what the block does then is not measured; and a
+  `SysClock::init()` that answered false leaves the chip off the rate
+  the type claims while `Usb::init()` still answers true (the suite
+  reads both answers). Nor is the source checked: a PLL on the HSI
+  compiles, and the clock chapter measures the HSI-rooted trees 0.26 to
+  0.38 % fast on the CH32V303VCT6 (0.42 to 0.46 % on the CH32V203C8T6)
+  against the 2500 ppm full speed allows, so the program takes its PLL
+  from a crystal, as the excerpt does, and nothing refuses the other.
+- **The vector bound by the program.** `init()` enables the vector's
+  PFIC line, and the crt's table entry is a weak alias of
+  `default_handler`, a spin loop, until the program defines it: a
+  program that forgets the binding stops in that spin at the
+  controller's first interrupt, with no fault and no message (the probe
+  names the line: [README.md](README.md), "Debugging").
+  `BRIO_CH32_VECTOR(name) { body }`, or one of its two forms, is the one
+  spelling of a binding on this target. On the CH32V303's images, built
+  with the F extension and the hardware prologue on (the project's
+  `CH32VX03_HPE` option, a CMake option of the `ch32vx03/` project
+  chosen at configure, on by default), it makes a naked trampoline whose
+  body must do no floating-point work, and `brio check ch32vx03`'s
+  vector guard fails an image whose trampoline body reaches a
+  floating-point instruction ([platform.md](platform.md)); the stack's
+  body is held to that.
+- **No sleep while the device is attached, by mechanism.** From the
+  pull-up to the detach the controller holds one count in the
+  platform's count of bus masters at work (the bus-master count,
+  [bus_activity.hpp](../../brio/ch32vx03/bus_activity.hpp),
+  [sleep.md](sleep.md)), and the kernel's `idle()` returns at once
+  while it stands, because with the core asleep the IN packets the
+  block reads out of the program's RAM carry zeros ("The core must not
+  sleep while the controller works" below). The program may run the
+  kernel's ordinary loop; an attached device spins in it instead of
+  sleeping, and the current a sleep would save is the price.
+- **The pads are the part's, and nothing else is asked.** PA11/PA12 on
+  the CH32V303; PB6/PB7 on the CH32V203, which are I2C1's default pair
+  as well and, on the CH32V203F8's TSSOP20, the same two pins as the
+  debug port. `init()` makes them floating inputs whatever else holds
+  them, and no board here has a connector on PB6/PB7 ("Not covered
+  yet").
+
+The rest of this page, in order: the documents of record; what the
+silicon does (WCH's own design, the buffers in the program's memory,
+the buffer register's offset, the one receive length and status and
+the pause that keeps them, the response the silicon never changes, the
+data toggle, a SETUP taken whatever endpoint zero answers, the pull-up
+that is the device enable, the pads that need no port clock, the clock
+rate and the floor under the bus, the sleep the controller does not
+survive, suspend and resume with the wake-up line, the one vector); the
+types and verbs; how to use it; the bench findings, on the
+CH32V303VCT6; and what is not covered.
+
 WCH's own full-speed USB controller - host and device in one block,
-USBFS or OTG_FS in the vendor's documents - driven in DEVICE mode as the
+USBFS or OTG_FS in the vendor's documents - driven in device mode as the
 endpoint controller of brio's USB stack. It is the CH32V303's one
 full-speed controller and the CH32V203's second one, beside the device
-controller of [usb.md](usb.md). Documents of record: the
-CH32FV2x_V3xRM reference manual V2.3, chapter 23 - 23.1, the global
+controller of [usb.md](usb.md).
+
+## Documents of record
+
+The CH32FV2x_V3xRM reference manual V2.3, chapter 23 - 23.1, the global
 registers of 23.2.1 and the device registers of 23.2.2; the host
 registers of 23.2.3 are read only far enough to confirm they are the
 host's - with its class notes (23.2.1.2 gives the 1-wire mode to some
@@ -23,22 +170,26 @@ realizes. Driver: [brio/ch32vx03/usbfs.hpp](../../brio/ch32vx03/usbfs.hpp)
 [util/usb/cdc.hpp](../../brio/util/usb/cdc.hpp) above it, the clock tree
 of [clock.md](clock.md) feeding it and [sleep.md](sleep.md)'s count of
 bus masters keeping the core awake for it. Reference suite:
-`test_vx03_usbfs`, the console on the probe's UART and the board's own
-connector under test. The vendor's voice on this block is the EVT's
-USBFS device examples (SimulateCDC among them), read against the manual
-and never copied.
+`test_vx03_usbfs` (a suite's letter is one command key of its console
+and the group of verdicts it runs; `z` is the key that runs `a`, `p`,
+`u`, `e`, `f`, `d` and `k`, `d` among them wanting the host at the
+connector too, and the other letters, which want the bench's host script
+at the other end, are run by name), the console on the probe's UART and
+the board's own connector under test. The vendor's voice on this block
+is the EVT's USBFS device examples (SimulateCDC among them), read
+against the manual and never copied.
 
 ## What the silicon does
 
 ### WCH's own design, and a different peripheral from the device controller
 
-From the manual (23.2.1, 23.2.2): a register file of BYTES at
+From the manual (23.2.1, 23.2.2): a register file of bytes at
 0x50000000 on the HB bus - a control register, an interrupt enable, a
 device address, a state register, a flag register with a status
 register beside it, one receive-length register - then eight endpoint
-numbers with a MODE NIBBLE each, packed two to a byte in the order the
+numbers with a mode nibble each, packed two to a byte in the order the
 chapter gives register by register (1 above 4, 3 above 2, 6 above 5, 7
-alone), a buffer address, a transmit length, and TWO RESPONSE BYTES per
+alone), a buffer address, a transmit length, and two response bytes per
 number, one answering IN and one answering OUT. The numbers 8 to 15 have
 no registers of their own: 23.2.2 maps them onto those of 1 to 7 - 9 onto
 1, 8 and 12 onto 4, 10 onto 2, 11 onto 3, 13 onto 5, 14 onto 6, 15 onto 7,
@@ -65,7 +216,7 @@ the pull-up on PA12 while PB7 sits at its board's pull-up.
 ### The buffers are the program's memory
 
 From the manual (23.2.2, table 23-4, 23.2.2.6): endpoint zero sends and
-receives through ONE 64-byte buffer; endpoints 1..7 take a buffer per
+receives through one 64-byte buffer; endpoints 1..7 take a buffer per
 direction, and a number with both directions enabled uses one region
 with the OUT half first and the IN half 64 bytes above it (the vendor's
 sequence loads an IN packet at +64 exactly when the number receives
@@ -73,14 +224,14 @@ too). Every buffer address is four-byte aligned, and a receive buffer is
 at least min(the largest packet + 2, 64) bytes long, which a 64-byte
 half always is.
 
-So the driver owns a POOL, a static array aligned to four, and hands it
+So the driver owns a pool, a static array aligned to four, and hands it
 out in the order the stack claims endpoints: endpoint zero's 64 bytes
 at init(), then 64 bytes a direction. The stack claims one direction at
 a time, so the second claim of a number lands beside the first when the
 first was the last thing handed out - the IN half moving up by 64 when
 it was claimed first - and otherwise both halves move to a fresh 128
 bytes. That happens inside a configuration, before anything is armed,
-and a claim that would move an ARMED half is refused. The pool's size
+and a claim that would move an armed half is refused. The pool's size
 is a template parameter because the memory is the program's: 960 bytes
 by default (endpoint zero and all seven numbers both ways, so no claim
 ever fails for want of memory), and a CDC ACM port spends 256 of them -
@@ -89,8 +240,8 @@ halves in one piece.
 
 ### The buffer register holds an offset
 
-The manual gives R32_UEPn_DMA thirty-two bits. MEASURED, it reads back
-the address's LOW BITS alone: 0x5E0 for a buffer at 0x2000_05E0 and 0x660
+The manual gives R32_UEPn_DMA thirty-two bits. Measured, it reads back
+the address's low bits alone: 0x5E0 for a buffer at 0x2000_05E0 and 0x660
 for one at 0x2000_0660, while the registers nothing wrote read reset
 values of up to seventeen bits. The vendor's copy path reads it the same
 way, back and plus 0x20000000. So a buffer must lie in the low part of
@@ -106,17 +257,17 @@ last reception is one register, for every endpoint - both overwritten by
 the next transfer. RB_UC_INT_BUSY (23.2.1.1) is what keeps them
 standing: with it set the block answers NAK to every transaction while
 the transfer flag is up, so the status and the length describe exactly
-one transfer until the handler clears the flag. MEASURED under a host's
+one transfer until the handler clears the flag. Measured under a host's
 pour with the vector held off for 20 ms: with the bit set the status
-byte changed ONCE, for the first packet, and then stood; with it clear
+byte changed once, for the first packet, and then stood; with it clear
 it changed 248 to 297 times, each change a packet taken into the buffer
 nobody had read, and the stream the host sent came out with jumps. The
 driver sets the bit at init(), and its event loop reads the status and
-the length first, answers the endpoint, and clears the flag LAST. The
+the length first, answers the endpoint, and clears the flag last. The
 length is filed per endpoint on the spot, which is what `out_data(n)`
 returns.
 
-AND A SETUP IS NOT JUDGED BY THAT BYTE'S ENDPOINT FIELD. At a SETUP the
+And a SETUP is not judged by that byte's endpoint field. At a SETUP the
 field holds what the last IN or OUT left, or its reset garbage: measured
 on the CH32V303VCT6, it read 6 at the first SETUP after a bus reset, and
 a driver that took it for the setup's endpoint dropped every SETUP of an
@@ -129,7 +280,7 @@ enumeration, so the eight bytes are copied whatever it says.
 ### The response is not changed by the silicon
 
 The manual describes no change the block makes to a response field
-(23.2.2.8, 23.2.2.9) - only the automatic toggle - and MEASURED: after a
+(23.2.2.8, 23.2.2.9) - only the automatic toggle - and measured: after a
 completed OUT the endpoint's register still answers ACK, the pause above
 being the only thing that holds the next packet off. WCH's sequence sets
 NAK itself after every IN it completes on a data endpoint, while after a
@@ -148,15 +299,15 @@ on every endpoint the same way and in the register, with no second copy
 to fall out of step: DATA0 at a claim and after a cleared halt, DATA1
 both ways on endpoint zero at every SETUP (chapter 9's rule), and flipped
 at every IN the host took and every OUT whose PID matched. An OUT whose
-PID did NOT match (RB_UIS_TOG_OK clear, 23.2.1.6) is a packet the host
+PID did not match (RB_UIS_TOG_OK clear, 23.2.1.6) is a packet the host
 is sending again because it never saw the device's acknowledgement.
-MEASURED with the mismatch staged under a pour: the block acknowledges
+Measured with the mismatch staged under a pour: the block acknowledges
 such a packet - the host moved on and did not send it again - the
 driver dropped it, the stream showed one jump of one packet, and the
 two ends ran on in step. The stack never sees a PID.
 
 A cleared halt on a data endpoint gives back more than the toggle:
-`stall(address, false)` writes the RESPONSE the halt replaced, at DATA0.
+`stall(address, false)` writes the response the halt replaced, at DATA0.
 A reception the class had armed is armed again - released to NAK it was
 lost for good while the class went on counting it armed, the host's next
 packet NAKed until a reconnect (measured) - and a packet armed for an IN
@@ -165,7 +316,7 @@ is offered again, never having been taken.
 ### A SETUP is taken whatever endpoint zero's response says
 
 Chapter 9 demands it, the vendor's sequence depends on it, and 23.2.2.9
-is silent about it. MEASURED: this driver leaves endpoint zero at NAK in
+is silent about it. Measured: this driver leaves endpoint zero at NAK in
 both directions between control transfers (the two response bytes read
 0x02 at rest), and every SETUP of every enumeration landed. At a SETUP
 the driver sets both directions of endpoint zero to NAK with DATA1,
@@ -185,7 +336,7 @@ device until `connect()` - the stack's `start()` - raises it; measured,
 the host enumerated the device every time the field went up, after an
 init() that left it down.
 
-AND A DETACHED BLOCK REPORTS NOTHING, which the silicon would otherwise
+And a detached block reports nothing, which the silicon would otherwise
 contradict: with the pull-up down the bus is SE0 - the host's two
 pull-downs and nobody's pull-up - and the transceiver, still on, calls
 that a bus reset (measured: one within 100 ms of every detach, which put
@@ -195,7 +346,7 @@ driver acknowledges and drops every flag while the field is down.
 ### The pads need no port clock
 
 From the manual, nothing: the chapter never mentions GPIO, and the
-vendor's sequence for this block touches none. MEASURED: with the gate
+vendor's sequence for this block touches none. Measured: with the gate
 of the pads' port shut the host enumerated the device - where the
 device controller of ch. 21 attaches and then fails every packet so
 ([usb.md](usb.md)) - and a GPIO input still reads the level on D+ while
@@ -212,11 +363,11 @@ and `init()` refuses at compile time a static tree that cannot, and
 answers false under a dynamic clock whose rate in force cannot. The
 datasheet's note under its clock tree, and the manual's under figure
 3-3, ask the CPU clock to be 48, 96 or 144 MHz whenever USB is used.
-MEASURED with HCLK divided under a 96 MHz PLL whose 48 MHz USBPRE takes
+Measured with HCLK divided under a 96 MHz PLL whose 48 MHz USBPRE takes
 whole: the host enumerated the device, and a pour arrived with no jump
 and no overflow, at 96, 48, 24 and 12 MHz; at 6 MHz the device still
 enumerated every time, but some 2.3 to 3.4 % of the packets of a pour
-arrived WRITTEN WRONG - a right prefix, then bytes repeated and the
+arrived written wrong - a right prefix, then bytes repeated and the
 previous packet's in place of the rest - with no overflow flagged and no
 packet missing whole (a pour whose every packet carries its own number,
 below); at 1.5 MHz it enumerated never, with the FIFO overflow counting,
@@ -236,11 +387,11 @@ here ran on, and nothing here writes it.
 
 In a sleep of any depth on this family no bus master but the core gets
 a cycle ([sleep.md](sleep.md)), and this block's DMA reaches its buffers
-over the same matrix. MEASURED on the CH32V303VCT6 with a bare `wfi` -
+over the same matrix. Measured on the CH32V303VCT6 with a bare `wfi` -
 the instruction the platform's idle path would not execute over this
 controller - between packets: the host's OUT packets arrived whole (25
-to 32 kB in 50 ms, the awake rate, no jump, no overflow), but THE IN
-PACKETS THE BLOCK READ OUT OF RAM CARRIED ZEROS where the program's bytes
+to 32 kB in 50 ms, the awake rate, no jump, no overflow), but the IN
+packets the block read out of RAM carried zeros where the program's bytes
 should have been - 360 000 to 500 000 breaks in 1.3 to 1.5 MB of a
 counting stream, the first of them always a byte followed by 0x00, with
 no error at either end - and an enumeration with the core in wfi
@@ -254,7 +405,7 @@ given back.
 
 ### Suspend and resume, and the wake-up line
 
-From the manual (23.2.1.5, 23.2.1.4): ONE flag for both events - the bus
+From the manual (23.2.1.5, 23.2.1.4): one flag for both events - the bus
 went idle, or it woke - with the state register saying which; the
 driver reads it after the ten microseconds the vendor's sequence waits,
 and measured, that reading told a host's suspend from its resume, the
@@ -263,7 +414,7 @@ suspend, where the device controller of ch. 21 wants FSUSP set.
 
 Table 9-3 gives this controller's wake-up event to EXTI line 20 on every
 class of this stratum, and on the CH32V30x_D8 it names line 18 for
-"USBD/USBFSOTG" as well. MEASURED on the CH32V303VCT6, both lines armed:
+"USBD/USBFSOTG" as well. Measured on the CH32V303VCT6, both lines armed:
 a host's resume raised line 18 once and line 20 never, and neither fired
 at the suspend. So the driver's wake-up line is 18 (vector 58) on that
 class and table 9-3's 20 (vector 60) on the CH32V203's.
@@ -274,9 +425,13 @@ Every event of this block in device mode arrives on one line
 (`Irq::usbfs`: 59 on the CH32V203, 83 on the CH32V303). Host mode
 (23.2.3) is the same block with other meanings at some of the same
 addresses; the driver never selects it. The handler's body is the
-stack's, which calls out of line, so on the CH32V303 it opens with the
-twenty f-register saves [platform.md](platform.md) prices - twenty `fsw`
-in the compiled handler of both images that bind it.
+stack's, which calls out of line. On the CH32V303's images, built with
+the F extension, the binding with the hardware prologue on (the
+project's default) is a naked trampoline, which saves no f-register
+and holds the body to no floating-point work; with the prologue off it
+is the attributed handler, which saves in software the twenty
+f-registers a call may clobber ([platform.md](platform.md) prices
+them).
 
 ## Types and verbs
 
@@ -292,7 +447,7 @@ pads, the HB gate, the protocol engine reset and released, every
 endpoint parked at NAK, endpoint zero laid out, the interrupts of a
 device (a bus reset, a completed transfer, suspend and resume, a FIFO
 overflow), the automatic pause, the DMA and the transceiver - with the
-pull-up left DOWN, because the host must not see a device before the
+pull-up left down, because the host must not see a device before the
 program can answer it. `release()` gives all of it back. Both clock
 refusals live in `init()`.
 
@@ -381,7 +536,7 @@ BRIO_CH32_VECTOR(usb_wakeup_handler) { (void)Usb::wakeup_isr(); }   // CH32V303:
 
 And a program that runs on either series takes whichever controller the
 part carries. The controller is a type, chosen by a constant; the
-VECTOR is a symbol, which only the preprocessor can choose, so the part
+vector is a symbol, which only the preprocessor can choose, so the part
 table states the one fact it needs for that as a macro too:
 
 ```cpp

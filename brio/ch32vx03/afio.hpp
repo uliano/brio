@@ -4,38 +4,74 @@
  * The alternate-function block of the CH32V203 and the CH32V303 (RM
  * 10.2.11, 10.3.2): the two remap registers, the external-interrupt port
  * multiplexer and the event output - everything in chapter 10 that is not
- * a pad.
+ * a pad. For a caller it is two things: the remap columns as constexpr
+ * tables (which pads a peripheral's signals sit on under each code of its
+ * field, judged against this part's device class and package), and
+ * `Afio`, the monostate (a type with only static members, never
+ * instantiated: one block, one set of registers) that writes a field,
+ * reads it back, points an EXTI line at a port, drives the event output
+ * and holds the debug port's own field. The smallest use, a peripheral on
+ * a remapped column with its code and pads from the same table
+ * (docs/ch32vx03/pin.md, "How to use it"):
  *
- * A REMAP IS A COLUMN, NOT A PIN. AFIO_PCFR1 and AFIO_PCFR2 hold one
- * field per peripheral, and the field's value selects a whole COLUMN of
+ *     constexpr brio::SpiPadSet pads = brio::afio_spi1_pads(1);   // PA15/PB3/PB4/PB5
+ *     static_assert(brio::afio_remap_has_code(brio::Remap::spi1, 1));
+ *     brio::Afio::remap<brio::Remap::spi1, 1>();
+ *
+ * The drivers whose pads are a column (the SPI's and I2C's pin structs, the
+ * Uart's code parameter, a timer's remap(), the ADC's trigger remaps) call
+ * Afio::remap() themselves; a program calls it for a peripheral it drives
+ * itself.
+ *
+ * Who calls what. The table functions are constexpr and touch no
+ * register: any context, and at compile time. Every Afio verb opens the
+ * block's clock gate first through Rcc::enable(), a read-modify-write
+ * of RCC_PB2PCENR, the readers too; remap() and exti_source(line, port)
+ * then read-modify-write PCFR1, PCFR2 (both, for USART1's code on the
+ * CH32V303) or EXTICR, event_output_off() read-modify-writes ECR, and
+ * event_output() stores ECR whole. None has a guard of its own, and
+ * none waits or masks: they belong to setup in main() or to one active
+ * object (a component of a brio program with its own event queue,
+ * served one event at a time by the kernel), or are masked (pfic.hpp's
+ * InterruptGuard) against an interrupt handler that opens or closes a
+ * gate of RCC_PB2PCENR - every port's, AFIO's and the other PB2
+ * peripherals' share that register (pin.hpp) - or writes one of this
+ * block's registers; disable_debug_port_until_reset() is a
+ * read-modify-write of PCFR1 too. A false from remap(),
+ * exti_source(line, port) or event_output() means nothing was written.
+ *
+ * A remap is a column, not a pin. AFIO_PCFR1 and AFIO_PCFR2 hold one
+ * field per peripheral, and the field's value selects a whole column of
  * the chapter's tables: SPI1's four signals move together, TIM1's nine
  * do, a USART's five do. Every column this family has is stated here as
  * constexpr data, so a driver names a code and gets its pads from the
- * same source that programs the register - the CH32V00x stratum's
- * arrangement, and the one the later chapters of this family take their
- * pads from (the SPI's and I2C's pin structs carry a code, the Uart
- * takes one as a template parameter, a timer gets remap()).
+ * same source that programs the register - the arrangement the CH32V00x
+ * stratum's afio.hpp has too (brio/ch32v00x/afio.hpp), and the one the
+ * later chapters of this family take their pads from (the SPI's and
+ * I2C's pin structs carry a code, the Uart takes one as a template
+ * parameter, a timer gets remap()).
  *
- * WHICH COLUMNS ARE OURS IS TWO QUESTIONS, AND THE FILE ANSWERS BOTH.
+ * Which columns are ours is two questions, and the file answers both.
  *
- *  1. THE DEVICE CLASS. This manual covers four families and nearly
+ *  1. The device class. This manual covers four families and nearly
  *     every field carries a note naming the classes it applies to. Ours
  *     are CH32V20x_D6 (every part up to the CH32V203C8), CH32V20x_D8
  *     (the CH32V203RB) and CH32V30x_D8 (the four CH32V303). So USART1
  *     has the two columns of table 10-23 on the CH32V203 and all four on
  *     the CH32V303 - the high bit of its code is AFIO_PCFR2 bit 26, which
  *     10.3.2.2's note excludes for the D6, the D8 and the D8W alike -
- *     USART2's remap (10-24) is not the D6's; UART4 reads a DIFFERENT
- *     TABLE per class (10-26 for every class but the D6, 10-27 for the
+ *     USART2's remap (10-24) is not the D6's; UART4 reads a different
+ *     table per class (10-26 for every class but the D6, 10-27 for the
  *     CH32V203C8, whose default pads are PB0/PB1 and not PC10/PC11); and
  *     the fields the CH32V303 adds - TIM8, TIM9, TIM10, UART5..8, SPI3,
  *     the four ADC trigger remaps and the FSMC's - exist where their block
- *     does, which the part table says. CAN2's field (PCFR1 22) and the
+ *     does, which the part table (parts/<part>.hpp, the per-part facts
+ *     `device::` exposes) says. CAN2's field (PCFR1 22) and the
  *     Ethernet's (21, 23) belong to blocks no part of this stratum
  *     carries: they are named, so that a program asking for them is
- *     REFUSED rather than writing a bit, and nothing reaches them.
- *     TWO OF THOSE CLASS NOTES ARE MEASURED and not taken on trust,
- *     because the field is READ-ONLY AT ZERO on the CH32V203C8 where the
+ *     refused rather than writing a bit, and nothing reaches them.
+ *     Two of those class notes are measured and not taken on trust,
+ *     because the field is read-only at zero on the CH32V203C8 where the
  *     note is easy to read the other way: USART3's two bits (its note
  *     (4) says the default mapping alone is the D6's) and TIM2's
  *     internal-trigger bit (whose note names this whole series). A write
@@ -43,16 +79,16 @@
  *     stages both - so the driver refuses them on the D6 and offers them
  *     on the other two classes; on the CH32V303VCT6 both take a write
  *     and read it back (measured by the same letter).
- *  2. THE PACKAGE. A column whose pads no pin of this package brings out
+ *  2. The package. A column whose pads no pin of this package brings out
  *     is not a remap, it is a disconnection: TIM3's full column is
  *     PC6..PC9, which only the 64-pin and 100-pin parts bond; TIM1's is
  *     port E, which only the LQFP100 has; USART2's and USART3's upper
  *     columns need PD3..PD12. `afio_remap_has_code()` therefore asks the
  *     part's own bonding table (pin.hpp's `pad_bonded`) as well as the
- *     class, and a column with not one pad on this package is REFUSED -
+ *     class, and a column with not one pad on this package is refused -
  *     by a static_assert where the code is a constant, by false where it
  *     is not. The CH32V303's three extra advanced timers are judged by
- *     their FOUR CHANNEL PADS and not by one: the columns the manual
+ *     their four channel pads and not by one: the columns the manual
  *     restricts to the LQFP100 in words ("only LQFP100 package") are
  *     exactly the ones whose channel pads the 64-pin part does not bond -
  *     where TIM10's full column would otherwise pass on the two PD0/PD1
@@ -61,25 +97,27 @@
  *     columns it restricts to "64-pin and above" are exactly the ones
  *     whose pads only the 64-pin part bonds.
  *
- * THE DEBUG PORT IS NOT A REMAP. SW_CFG (PCFR1 26:24) hands PA13 and
+ * The debug port is not a remap. SW_CFG (PCFR1 26:24) hands PA13 and
  * PA14 back to GPIO, and a program that does that on this board has lost
  * its probe until the next power cycle - the two-wire port is how the
- * image got there. The field is READ here by default and written only
+ * image got there. The field is read here by default and written only
  * through a verb spelled long enough that nobody reaches it by accident.
  *
- * WHAT THE REGISTER PAIR ALSO HOLDS. AFIO_EXTICR1..4 (10.3.2.3..6) is
- * the multiplexer that says WHICH PORT feeds each of the sixteen pin
- * lines of the EXTI - exti.hpp's verbs go through this file's, the way
- * the STM32F4's go through SYSCFG's. AFIO_ECR (10.3.2.1) is the EVENT
- * OUTPUT: a core "EVENTOUT" signal brought out on a pad of ports A..D.
- * That signal is the Cortex-M3's, of the CH32F20x half of this manual;
- * nothing in the QingKe V4 processor manual names an instruction that
- * raises it, so the register is implemented and what can drive it here
- * is a question this stratum has not answered (docs/ch32vx03/pin.md).
+ * What the register pair also holds. AFIO_EXTICR1..4 (10.3.2.3..6) is
+ * the multiplexer that says which port feeds each of the sixteen pin
+ * lines of the EXTI - exti.hpp's select() and steal() go through this
+ * file's exti_source(), as the STM32F4's go through SYSCFG's
+ * (brio/stm32f4/exti.hpp, brio/stm32f4/syscfg.hpp).
+ * AFIO_ECR (10.3.2.1) is the event output: a core "EVENTOUT" signal
+ * brought out on a pad of ports A..D. That signal is the Cortex-M3's, of
+ * the CH32F20x half of this manual; nothing in the QingKe V4 processor
+ * manual names an instruction that raises it, so the register is
+ * implemented and what can drive it here is a question this stratum has
+ * not answered (docs/ch32vx03/pin.md).
  *
  * The AFIO's clock gate is closed out of reset and every verb opens it,
- * the way pin.hpp's opens a port's: a register that answers nothing
- * because of a gate is the most expensive kind of silence.
+ * as pin.hpp's configuring verbs open a port's: a register that answers
+ * nothing because of a gate is the most expensive kind of silence.
  */
 
 #pragma once
@@ -925,7 +963,11 @@ struct Afio {
     /**
      * Select a column. False - and NOTHING WRITTEN - when this part has
      * no such column: a code the device class does not have, a reserved
-     * one, or one whose pads no pin of this package brings out.
+     * one, or one whose pads no pin of this package brings out. Setup's
+     * verb, main context or one active object: the gate's and the
+     * field's read-modify-writes are unguarded (the file header). The
+     * field moves the signals; the pads are still configured by their
+     * own verbs (pin.hpp's function(), input()).
      */
     static bool remap(Remap r, uint8_t code) {
         if (!afio_remap_has_code(r, code)) {

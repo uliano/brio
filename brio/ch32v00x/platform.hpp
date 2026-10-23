@@ -1,26 +1,68 @@
 /*
  * platform.hpp
  *
- * CH32V00x (QingKe V2C, RV32EC) implementation of the brio Platform
- * concept - the one header of this stratum the kernel templates are
- * instantiated with. An app selects it by including it and passing
- * Ch32v00xPlatform along.
+ * What the brio kernel stands on when it runs on a CH32V00x: the
+ * realization of the kernel's Platform concept (the compiler-checked
+ * set of requirements kernel/platform.hpp states) on the QingKe V2C of
+ * the CH32V006 and the QingKe V2A of the CH32V003, both RV32EC. A
+ * program names it once, as the first argument of its Tenuto, and every
+ * kernel template is instantiated with it. The smallest use is the glue
+ * every program of this project writes (docs/ch32v00x/platform.md, "How
+ * to use it"):
  *
- * THE SMALLEST MACHINE BRIO RUNS ON, and the one whose instruction set
- * has SIXTEEN registers instead of thirty-two (RV32E): everything the
- * kernel does here it does with half the register file, which is
- * exactly why this target is worth having - it prices the abstractions
- * honestly.
+ *     using P = brio::Ch32v00xPlatform<>;
+ *
+ *     extern "C" BRIO_CH32_INTERRUPT void systick_handler() { brio::Ticker::tick(); }
+ *     extern "C" BRIO_CH32_INTERRUPT void fault_handler() { brio::fault_reset<P>(); }
+ *
+ *     int main() {
+ *         const auto record = brio::take_panic_record<P>();   // first, and once
+ *         SysClock::init();
+ *         brio::Ticker::init(clock);
+ *         brio::enable_interrupts();
+ *         brio::Tenuto<P, ...>::run();
+ *     }
+ *
+ * The empty angle brackets take the default timebase, the STK Ticker of
+ * ch32v00x/ticker.hpp (1000 Hz); the `...` stands for the program's
+ * active objects in priority order (an active object is a component of
+ * a brio program with its own event queue, served one event at a time
+ * by the kernel). The kernel binds no vector: a program that forgets
+ * the systick_handler binding compiles, but the crt points that vector
+ * at its spin for unbound vectors, Ticker::init() enables the line, and
+ * the first tick after enable_interrupts() enters the spin and the
+ * program stops there.
+ * BRIO_CH32_INTERRUPT is the one spelling of a handler attribute on
+ * this target (ch32v00x/pfic.hpp). fault_reset<P>() is the fault
+ * vector's body (ch32v00x/reset.hpp).
+ *
+ * Who calls what. The kernel loop calls idle() in main-loop context,
+ * with interrupts already masked, and nothing else should; it returns
+ * with interrupts enabled. now() and ticks_per_second may be read from
+ * any context. CriticalSection may be opened from any context and
+ * nests. break_here() is the panic path's, and panic_record() the panic
+ * path's and the next boot's (take_panic_record<P>() in kernel/panic.hpp
+ * reads and clears it). Nothing here waits except the sleep itself, and
+ * the only interrupts masked are the critical section's and, on the
+ * CH32V003, idle()'s own sleep entry (below).
+ *
+ * The register file is half the usual one: RV32E has sixteen registers
+ * instead of thirty-two, so everything the kernel does here it does with
+ * half the register file, which is why this target is worth having: it
+ * prices the abstractions honestly. The CH32V003 is the smallest machine
+ * brio runs on (16 KB of flash, 2 KB of SRAM, no multiplier).
  *
  * CriticalSection is ch32v00x/pfic.hpp's InterruptGuard: read-and-clear
  * mstatus.MIE in one instruction, restore what was there on scope exit.
- * All-or-nothing masking, like the AVR's I flag and ARMv6-M's PRIMASK;
- * this core has no priority threshold that generic code could use.
+ * The masking is all-or-nothing, one bit; this core has no priority
+ * threshold that generic code could use.
  *
- * WHAT IS NOT HERE, and is deliberate rather than forgotten: no
- * idle_until() - this platform is not tickless, its timebase is the
- * core counter and stops with the core. The sleep sites are
- * ch32v00x/sleep.hpp's, which reset happened is ch32v00x/reset.hpp's.
+ * What is not here, on purpose: no idle_until(). This platform is not
+ * tickless (a tickless timebase keeps counting while the core sleeps and
+ * can place a wake at the next deadline); its timebase is the core
+ * counter and stops with the core. The sleep sites are
+ * ch32v00x/sleep.hpp's; which reset happened, the fault body and the
+ * watchdogs are ch32v00x/reset.hpp's.
  */
 
 #pragma once
@@ -44,10 +86,14 @@ struct Ch32v00xPlatform {
     using Timebase = TB;
 
     /**
-     * Entered with interrupts MASKED and nothing to do: unmask, then
-     * sleep until the next interrupt.
+     * The kernel's idle: entered by the loop, in main-loop context, with
+     * interrupts masked and nothing to do; sleeps until the next
+     * interrupt and returns with interrupts enabled, having let that
+     * interrupt's handler run. Not for a program to call. On the
+     * CH32V006 it unmasks, then sleeps; on the CH32V003 it sleeps masked
+     * from SRAM (the CH32V003, below).
      *
-     * NOT A PLAIN WFI, AND THIS IS THE CORE'S OWN RULE. The RISC-V
+     * Not a plain WFI, and this is the core's own rule. The RISC-V
      * privileged specification lets WFI resume when an interrupt is
      * pending whatever mstatus.MIE says, and the two Cortex-M0+ targets
      * lean on the same property to sleep first and unmask after. The
@@ -59,9 +105,9 @@ struct Ch32v00xPlatform {
      * core asleep with MIE clear, the console silent.
      *
      * So the instruction is the core's WFE, and it is executed with MIE
-     * SET. PFIC_SCTLR.WFITOWFE makes wfi a wait-for-EVENT, and SEVONPEND
+     * set. PFIC_SCTLR.WFITOWFE makes wfi a wait-for-event, and SEVONPEND
      * makes every interrupt entering the pending state an event,
-     * LATCHED: a WFE executed after the event returns at once (3.1's
+     * latched: a WFE executed after the event returns at once (3.1's
      * SCTLR: "if the WFE instruction is not executed, the system will
      * be woken up immediately after the next execution"). The order is
      * store, unmask, wfi, and each interleaving with an interrupt is
@@ -71,16 +117,16 @@ struct Ch32v00xPlatform {
      *  - pending between the unmask and the wfi: taken there, latched
      *    the same way - the WFE returns, the caller's loop turns and
      *    finds what the handler posted;
-     *  - pending while asleep, or ON the cycle the WFE goes to sleep:
-     *    an ENABLED interrupt with MIE set is a wake by 5.2's WFE item
+     *  - pending while asleep, or on the cycle the WFE goes to sleep:
+     *    an enabled interrupt with MIE set is a wake by 5.2's WFE item
      *    (2), "woken up when an interrupt is generated", and the handler
      *    runs before the instruction after the wfi.
      * Measured on the CH32V006 with the STK's edge placed to the cycle
      * across the whole sequence and the window between the unmask and
      * the wfi widened by eight nops: no position loses the wake.
      *
-     * WHY NOT SLEEP MASKED. With MIE clear the only wake left is 5.2's
-     * item (3), SEVONPEND's "NEW interrupt pending signal" - an EDGE -
+     * Why not sleep masked. With MIE clear the only wake left is 5.2's
+     * item (3), SEVONPEND's "new interrupt pending signal" - an edge -
      * and the edge has a hole: a pending edge arriving on the very
      * cycle the WFE goes to sleep is neither latched for that WFE nor
      * seen by the sleeping core. Measured: exactly one cycle in each
@@ -89,7 +135,7 @@ struct Ch32v00xPlatform {
      * edge ever comes: the core sleeps for ever with the tick pending
      * and enabled. A kernel loop entering sleep at a phase that walks
      * against the tick's (anything asynchronous to it) meets that cycle
-     * sooner or later. The hole stays for a line the PFIC does NOT
+     * sooner or later. The hole stays for a line the PFIC does not
      * enable (a SEVONPEND-only wake, measured on TIM2's update): such a
      * wake waits for its line's next edge.
      *
@@ -99,16 +145,16 @@ struct Ch32v00xPlatform {
      * first safe, and this hook does not trust that nothing else wrote
      * the register.
      *
-     * ONE TURN PER WAKE: THE LATCH IS CONSUMED AFTER IT. The edge that
+     * One turn per wake: the latch is consumed after it. The edge that
      * wakes the WFE is an interrupt entering the pending state, so
-     * SEVONPEND latches it too, and left there it would end the NEXT
+     * SEVONPEND latches it too, and left there it would end the next
      * idle() at once: the caller's loop would turn twice per interrupt,
      * the second turn finding nothing (measured: 200 kernel turns over
      * 100 quiet ticks, a wasted turn of a three-AO pack 287 cycles).
      * So after the wake the hook writes SETEVENT - 3.1's "set the event
      * to wake up the WFE case" - and executes one more wfi, which that
      * event ends at once and which clears the latch whatever it held.
-     * This is safe because MIE is SET by then: an enabled interrupt
+     * This is safe because MIE is set by then: an enabled interrupt
      * pending around the consume is taken by level, its handler run
      * before the caller's next masked check - it is not the latch that
      * lets the caller see it. What the consume can eat is a latch whose
@@ -121,16 +167,16 @@ struct Ch32v00xPlatform {
      * tick late. The consume is three instructions, 6 to 15 cycles a
      * wake by layout, against the 287 of the turn it saves.
      *
-     * WHAT DEPTH. SLEEPDEEP as found: out of reset it is clear, so this
+     * What depth. SLEEPDEEP as found: out of reset it is clear, so this
      * is the plain Sleep of QingKe 5.1 (the core clock gated, STK and
      * the wake logic alive), and with ch32v00x/sleep.hpp's site having
      * armed a Standby the same instruction is that Standby. The hook
-     * takes what it finds, as on the other strata - with one thing it
-     * does for a Standby, because only this hook can: THE TICK IS HELD
-     * OFF ACROSS IT. The STK fires every millisecond, and a tick turning
-     * pending is an event that ends the WFE before the Standby begins
-     * (the SAM's SysTick had the same power, and its idle() holds it
-     * off the same way). So with SLEEPDEEP armed the timebase is paused
+     * takes what it finds, with one thing it does for a Standby,
+     * because only this hook can: the tick is held off across it. The
+     * STK fires every millisecond, and a tick turning pending is an
+     * event that ends the WFE before the Standby begins (the SAM C21's
+     * SysTick has the same power over its sleep, and its idle() holds
+     * it off the same way). So with SLEEPDEEP armed the timebase is paused
      * and its pending bit cleared before the sleep, and resumed after;
      * kernel time stands still for exactly the slept span, which the
      * timed site hands back. A stale latched event (a USART interrupt
@@ -153,11 +199,11 @@ struct Ch32v00xPlatform {
         const uint32_t wfe = (sctlr | sctlr_wfitowfe | sctlr_sevonpend) & ~sctlr_setevent;
         if constexpr (device::sleep_entry_from_sram) {
             // The QingKe V2A (the CH32V003), whose sleep entry has a
-            // wedge the V2C has not: see THE CH32V003 below. Masked
+            // wedge the V2C has not: see "The CH32V003" below. Masked
             // throughout, fetched from SRAM, the unmask back here - and
             // no sleep at all while a DMA channel works, which the V2A's
             // Sleep would stall (parts/ch32v003.hpp).
-            // The latch emptied FIRST: SETEVENT and a wfi it ends at
+            // The latch emptied first: SETEVENT and a wfi it ends at
             // once.
             pfic_sctlr() = wfe | sctlr_setevent;
             wfi_from_sram();
@@ -187,10 +233,10 @@ struct Ch32v00xPlatform {
     }
 
     /**
-     * THE CH32V003 (QingKe V2A) SLEEPS ANOTHER WAY, because its sleep
-     * entry WEDGES. Measured with the STK's edge placed to the cycle
+     * The CH32V003 (QingKe V2A) sleeps another way, because its sleep
+     * entry wedges. Measured with the STK's edge placed to the cycle
      * across the sleep, an IWDG fed by the tick catching each hang: an
-     * edge landing in a window FOUR CYCLES wide at the wfi's entry
+     * edge landing in a window four cycles wide at the wfi's entry
      * leaves the core in a state nothing ends - not that interrupt, not
      * a later line's edge, not a debugger's halt (with DBGMCU_CR.SLEEP
      * keeping HCLK on as well) - only a reset. The same window with the
@@ -199,7 +245,7 @@ struct Ch32v00xPlatform {
      * fetched from flash (with a spin after the wfi or not). What ends
      * it is the shape of the vendor's own CH32V003 WFE (its EVT's
      * core_riscv.h, read as the oracle; the CH32V006's EVT has none of
-     * it): the wfi run from SRAM with interrupts MASKED and a spin of 19
+     * it): the wfi run from SRAM with interrupts masked and a spin of 19
      * turns in SRAM after it - so that no vector and no instruction is
      * fetched from flash in the first cycles after the wake. In that
      * shape the window wedges nothing in 1600 tries (a spin of 1 turn
@@ -208,10 +254,10 @@ struct Ch32v00xPlatform {
      * entry cycle is not seen (the CH32V006 measured the same of its
      * masked order).
      *
-     * The masked order moves the CONSUME: an interrupt is taken only at
+     * The masked order moves the consume: an interrupt is taken only at
      * the unmask after the sleep, and a latch emptied before that comes
      * back (measured: 200 turns over 100 ticks with the V2C's consume
-     * after the wake). So the latch is emptied FIRST - SETEVENT and a
+     * after the wake). So the latch is emptied first - SETEVENT and a
      * wfi it ends at once, 5 cycles - and the PFIC is asked what it may
      * have held: an enabled line pending means no sleep, the caller's
      * unmask takes it. An edge after that question latches for the
@@ -219,7 +265,7 @@ struct Ch32v00xPlatform {
      * is kept off the entry: if its match is closer than
      * sram_sleep_tick_guard_cycles there is no sleep either, and the
      * caller's loop turns until the tick is in. What stays: the edge of
-     * another line that lands on the entry cycle itself is LATE - it
+     * another line that lands on the entry cycle itself is late - it
      * stands pending and masked, and the next wake (the tick's, at the
      * latest) lets the unmask take it.
      *
@@ -248,8 +294,8 @@ struct Ch32v00xPlatform {
     /**
      * Halt in the debugger.
      *
-     * CAVEAT. With a debugger halted on it, the program stops here.
-     * With NO debugger attached, `ebreak` raises the breakpoint
+     * Caveat. With a debugger attached, the program stops here.
+     * With no debugger attached, `ebreak` raises the breakpoint
      * exception, which this core takes to the vector table's fault
      * entry - the crt provides that as a distinct spin loop, so the
      * wreck is legible instead of running on into nothing. A reporter
@@ -258,6 +304,7 @@ struct Ch32v00xPlatform {
      */
     static void break_here() { __asm__ volatile("ebreak"); }
 
+    /// Kernel time: the timebase's tick count, readable from any context.
     static uint32_t now() { return TB::ticks(); }
 
     /// Tick rate of the timebase: 1000 Hz on the core counter.
@@ -291,10 +338,10 @@ struct Ch32v00xPlatform {
     static PanicRecord& panic_record() { return panic_record_; }
 
 private:
-    /// The CH32V003's wfi (THE CH32V003, above): executed masked from
+    /// The CH32V003's wfi ("The CH32V003", above): executed masked from
     /// SRAM with the spin after it, so that nothing is fetched from flash
     /// in the first cycles after a wake - twelve bytes of RAM. Code that
-    /// MUST run from SRAM, so `.ram_text` (util/placement.hpp's two
+    /// must run from SRAM, so `.ram_text` (util/placement.hpp's two
     /// names), which ld/ch32v003f4.ld carries in .data - as
     /// `.ram_text.brio`, never cloned: a member of a class template is
     /// emitted in a COMDAT group, and GCC refuses one section name for a
@@ -310,7 +357,7 @@ private:
     /// Standby (idle()'s comment says why), then the same store, unmask
     /// and wfi - on the CH32V003 the masked SRAM entry instead, its
     /// EXTI lines that interrupt made events for the Standby's span
-    /// (the sleep entry's wedge, THE CH32V003 above: masked, a line's
+    /// (the sleep entry's wedge, "The CH32V003" above: masked, a line's
     /// interrupt is no wake, and an EXTI event is one - 5.2's item (1);
     /// the vendor's own deep WFE does the same).
     [[gnu::noinline]] static void idle_deep(uint32_t sctlr) {

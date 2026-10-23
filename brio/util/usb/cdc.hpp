@@ -1,39 +1,98 @@
 /*
  * usb/cdc.hpp
  *
- * CDC ACM, the communications class as a serial port: two interfaces
- * (the communications interface with its notification endpoint, the
- * data interface with a bulk pair), the three requests every host
- * driver sends (the line coding both ways, the control line state),
- * and - the point of it - a BYTE TRANSPORT over the bulk pair with the
- * same surface as a UART's (`write_byte`, `write_bulk`, `read_byte`,
- * `read_span`/`consume`, `tx_idle`), so a console or a SerialPort runs
- * over the chip's own connector with nothing above it changed.
+ * CDC ACM (the communications device class's abstract control model:
+ * the class a host's serial-port driver binds to), the communications
+ * class as a serial port: two interfaces (the communications interface
+ * with its notification endpoint, the data interface with a bulk pair),
+ * the three requests every host driver sends (the line coding both ways,
+ * the control line state), and - the point of it - a byte transport
+ * over the bulk pair with the same surface as a UART's (`write_byte`,
+ * `write_bulk`, `read_byte`, `read_span`/`consume`, `tx_idle`), so a
+ * console or a SerialPort runs over the chip's own connector with
+ * nothing above it changed.
  *
- * THE TWO SIDES. The program's side pushes into a transmit ring and
+ * The smallest use, a serial port over the RP2040's own controller:
+ * the class over the controller, a SerialPort over the class, and the
+ * receive edge posted from the controller's vector after the stack has
+ * run (usb/device.hpp shows the descriptors and the device around it;
+ * a tag object is an empty value that stands for its type in a call,
+ * so print(serial, ...) knows where to write):
+ *
+ *     using Serial = brio::UsbCdcAcm<brio::Usb, P>;   // interface 0, endpoints 1 and 2
+ *     constexpr Serial serial;                         // the tag object print() takes
+ *     using SerialLines = brio::SerialPort<Serial, P, Console, 80>;
+ *
+ *     extern "C" void isr_usbctrl() {
+ *         Device::isr();
+ *         if (Serial::take_rx_edge()) { brio::post<SerialLines>(brio::RxActivity{}); }
+ *     }
+ *
+ * Who calls what, and from where:
+ *  - the contract verbs (owns_*, configure, reset, control,
+ *    control_data, in_done, out_done) are UsbDevice's, called inside its
+ *    isr(); reset() is also called from main context, by start() before
+ *    the pull-up rises and by stop() after it drops. reset() clears both
+ *    rings and the flags with plain stores and masks nothing
+ *    (util/ring.hpp's clear() is not concurrent), so it is safe only
+ *    while the other context is quiet. From main context that is the
+ *    caller's duty: no controller interrupt may run across start() or
+ *    stop(). From isr() (a bus reset, a SET_CONFIGURATION) nothing
+ *    keeps the program out of a transport verb meanwhile: the class
+ *    does not guard that case. take_rx_edge() belongs in the
+ *    controller's vector, after Device::isr();
+ *  - the byte transport is the program's, from main context: one
+ *    producer of the transmit ring (write_byte, write_bulk, and print
+ *    over them) and one consumer of the receive ring (read_byte,
+ *    read_span/consume, or a SerialPort draining it), as util/ring.hpp's
+ *    rule asks. None of these verbs waits (a print over them does,
+ *    below). Every write_byte or write_bulk that queued bytes takes the
+ *    platform's critical section (interrupts masked) and, when no packet
+ *    is in flight, gathers the first one from the ring, up to 64 bytes,
+ *    and hands it to the controller inside it; read_byte and consume
+ *    take it whenever fewer receptions stand armed than the controller
+ *    takes at once (out_slots()), and inside it arm receptions up to
+ *    that number while the ring has a whole packet's room behind each -
+ *    possibly none, the section taken all the same;
+ *  - write_byte and write_bulk refuse everything while the host has not
+ *    configured the port, so a print over it (util/print.hpp waits until
+ *    every byte is taken) waits until the host configures it, in main
+ *    context with the other active objects held, and for ever if no
+ *    host does (the USB handler keeps running meanwhile);
+ *  - the readbacks are snapshots of what the handler wrote, from main
+ *    context.
+ *
+ * The two sides. The program's side pushes into a transmit ring and
  * pops from a receive ring under the platform's guard; the stack's
  * side, in the controller's ISR body, moves packets: a completed IN
  * takes the next packet out of the transmit ring and hands it to the
  * controller (a zero-length packet after a full one when the ring ran
  * dry, so the host's reader is not left waiting for a short packet),
  * a completed OUT lands in the receive ring and the endpoint is re-armed
- * ONLY WHEN THE RING HAS A PACKET'S ROOM - the host sees NAKs meanwhile,
- * which is USB's own flow control and costs no byte. `read_byte` and
- * `consume` re-arm the endpoint when they free the room.
+ * only when the ring has a packet's room - the host sees NAKs (the
+ * device's "not now", after which the host retries) meanwhile, which is
+ * USB's own flow control and costs no byte. `read_byte` and `consume`
+ * re-arm the endpoint when they free the room.
  *
- * THE LINE CODING IS RECEIVED AND REPORTED, NOT OBEYED: a virtual
+ * The line coding is received and reported, not obeyed: a virtual
  * port has no baud rate. The program reads what the host set
  * (`line_coding()`, `dtr()`, `rts()`) and does with it what it likes -
  * a bridge to a real UART would apply it, a console ignores it. The
  * notification endpoint is declared because the class demands one and
  * never written: no serial state is signalled.
  *
- * ENDPOINTS AND INTERFACES are template parameters so two ports can
+ * Endpoints and interfaces are template parameters so two ports can
  * share a device: `interface` is the communications interface's
  * number (the data interface is the next), `ep_notify` the
  * notification endpoint's number (IN), `ep_data` the bulk pair's
  * number (IN and OUT). The descriptor bytes the application glues
- * into its configuration are `descriptors`.
+ * into its configuration are `descriptors`. The rings are rx_size and
+ * tx_size bytes of storage (256 each by default) and hold one byte less
+ * each (util/ring.hpp: capacity is size - 1). The assertion asks for at
+ * least 128 and 64 bytes of storage, so the smallest receive ring holds
+ * 127 bytes, one full packet and 63 of a second (a reception is armed
+ * only while a whole packet's room is free), and the smallest transmit
+ * ring 63, one packet less a byte.
  */
 
 #pragma once
@@ -211,9 +270,15 @@ public:
     }
 
     // ---- the byte transport (the program's side) --------------------------------------
-    /// TRY semantics like a UART's: false when the ring is full or the
-    /// host has not configured the port; a queued byte goes out on the
-    /// next IN token.
+    /// Try semantics like a UART's (the call answers at once, never
+    /// waits): false when the ring is full or the host has not configured
+    /// the port. A queued byte is handed to the controller at once when no
+    /// packet is in flight; otherwise each completed IN takes the oldest
+    /// 64 bytes of the ring as the next packet, so the byte goes with the
+    /// packet after the one in flight when fewer than 64 bytes are queued
+    /// ahead of it, and with a later one otherwise. It travels when the
+    /// host next asks the endpoint for data (an IN token, the host's
+    /// poll). Main context, the transmit ring's one producer.
     static bool write_byte(uint8_t b) {
         if (!configured_ || !m_tx.push(b)) {
             return false;
@@ -222,6 +287,10 @@ public:
         return true;
     }
 
+    /// The oldest received byte into `b`; false when none is queued. Main
+    /// context, the receive ring's one consumer. Takes the guard whenever
+    /// fewer receptions stand armed than out_slots(), and re-arms the OUT
+    /// endpoint inside it when the room freed takes a packet.
     static bool read_byte(uint8_t& b) {
         const std::optional<uint8_t> v = m_rx.pop();
         if (!v) {
@@ -235,12 +304,13 @@ public:
         return true;
     }
 
-    /// A RUN (util/stream.hpp's BulkSink): as many of the bytes as the
-    /// ring has room for, copied into its free run, then kicked ONCE, so
+    /// A run (util/stream.hpp's BulkSink): as many of the bytes as the
+    /// ring has room for, copied into its free run, then kicked once, so
     /// the first packet carries as many of them as fit - write_byte alone
     /// would send the first byte on its own and batch the rest behind it.
     /// Never blocks; returns how many were queued, none while the host has
-    /// not configured the port.
+    /// not configured the port. The bytes are copied: `src` is free when
+    /// this returns.
     static uint32_t write_bulk(std::span<const uint8_t> src) {
         if (!configured_) {
             return 0;
@@ -272,14 +342,18 @@ public:
         return queued;
     }
 
-    /// The received bytes IN PLACE: the contiguous run ready to be read,
+    /// The received bytes in place: the contiguous run ready to be read,
     /// never wrapping - the receive ring's consumer half under the ring's
     /// own names. With consume() it is util/stream.hpp's SpanSource,
-    /// which SerialPort drains a run at a time.
+    /// which SerialPort drains a run at a time. The span stays valid until
+    /// the next consume() or read_byte(), or until reset() empties the
+    /// ring - from isr() at a bus reset or a SET_CONFIGURATION, or from
+    /// start() or stop().
     static std::span<const uint8_t> read_span() { return m_rx.read_span(); }
 
     /// Release the first `count` bytes of read_span(), oldest first, clamped
-    /// to what is queued - and, as read_byte() does, re-arm the OUT
+    /// to what is queued - and, as read_byte() does, take the guard while
+    /// fewer receptions stand armed than out_slots() and re-arm the OUT
     /// endpoint when the room freed takes a packet.
     static void consume(uint32_t count) {
         constexpr uint32_t most = decltype(m_rx)::capacity();
@@ -293,12 +367,14 @@ public:
     static constexpr uint32_t rx_capacity() { return Ring<uint8_t, rx_size, P>::capacity(); }
     static constexpr uint32_t tx_capacity() { return Ring<uint8_t, tx_size, P>::capacity(); }
 
-    /// Nothing queued and nothing in flight.
+    /// Nothing queued and nothing in flight: the last packet handed to the
+    /// controller has been taken by the host.
     static bool tx_idle() { return m_tx.empty() && !in_armed_; }
 
     /// ISR glue: did a packet just fill an empty receive ring? Consumed
     /// by the read; the app posts a SerialPort's RxActivity on it, the
-    /// way a UART's isr() returns the edge.
+    /// way a UART's isr() returns the edge. Call it in the controller's
+    /// vector, after Device::isr().
     static bool take_rx_edge() {
         const bool edge = rx_edge_;
         rx_edge_ = false;
@@ -316,6 +392,13 @@ public:
     }
 
     // ---- readbacks ---------------------------------------------------------------------
+    // configured() is true from the host's SET_CONFIGURATION to the next
+    // bus reset, deconfiguration or UsbDevice::stop(). Each of those
+    // empties both rings (reset()), the bytes queued in them lost, and
+    // so does a SET_CONFIGURATION repeated while configured (the stack
+    // resets the classes before configuring them again), after which
+    // configured() is true again; dtr() and rts() are the control line
+    // state the host last set.
     static bool configured() { return configured_; }
     static bool dtr() { return dtr_; }
     static bool rts() { return rts_; }

@@ -3,9 +3,35 @@
  *
  * The external interrupt/event lines of the CH32V00x (RM 6.4, 6.5):
  * ten lines, eight of them pads, two internal - and the wake sources
- * the power modes count on.
+ * the power modes count on. A program uses it to be interrupted (or
+ * woken) by a pad's edge. The smallest use, as docs/ch32v00x/pin.md's
+ * "How to use it" spells it:
  *
- * THE LINES. EXTI0..EXTI7 are pins: line n is pin n of ONE port, the
+ *     using Button = brio::Pin<'D', 4>;
+ *     using Line = brio::ExtInt<'D', 4>;
+ *
+ *     Button::input(brio::PinPull::up);
+ *     Line::init(false, true);           // the falling edge
+ *     Line::interrupt(true);
+ *     brio::Pfic::enable(brio::Irq::exti7_0);
+ *
+ *     extern "C" BRIO_CH32_INTERRUPT void exti7_0_handler() {
+ *         if (Line::flag()) { Line::clear(); ... }
+ *     }
+ *
+ * The pad is configured by its Pin (the line only listens), the line
+ * routed and its edges armed by init(), its interrupt enabled in the
+ * EXTI and its vector in the PFIC; the program binds the vector, and
+ * its handler asks INTFR which line fired and clears the flag it
+ * serves. Who calls what: init(), interrupt(), event(), rising(),
+ * falling() and port() are read-modify-writes of the EXTI's enable and
+ * edge registers (and port() of AFIO_EXTICR and the AFIO gate) with no
+ * guard - setup verbs, for main or an active object, never beside a
+ * handler that writes the same registers; flag() is one load, clear()
+ * and soft() one store each, safe from the handler. Nothing here waits
+ * or masks.
+ *
+ * The lines. EXTI0..EXTI7 are pins: line n is pin n of one port, the
  * port chosen per line in AFIO_EXTICR (two bits each: A, B, C, D), so
  * PA3 and PB3 cannot both interrupt at once - the line is the pin
  * number. EXTI8 is the PVD's output and EXTI9 the auto-wakeup unit's
@@ -13,19 +39,20 @@
  * with a vector of its own (Irq::pvd, Irq::awu), while the eight pin
  * lines share one (Irq::exti7_0) and a handler asks INTFR which fired.
  *
- * INTERRUPT OR EVENT. A line enabled in INTENR raises its flag, and
- * through the PFIC its vector; a line enabled in EVENR raises a WAKE
- * EVENT instead - what ends a WFE with no handler run and no flag to
+ * Interrupt or event. A line enabled in INTENR raises its flag, and
+ * through the PFIC its vector; a line enabled in EVENR raises a wake
+ * event instead - what ends a WFE with no handler run and no flag to
  * clear (6.4.2, measured: eighteen cycles from a latched event to the
  * WFE's return). The flags are write-one-clear. SWIEVR raises a line
  * by software, which is how a program tests its own wiring without a
- * pad - ON A LINE ENABLED IN INTENR: a line enabled nowhere raises no
+ * pad - on a line enabled in INTENR: a line enabled nowhere raises no
  * flag from it (measured).
  *
- * `ExtInt<Pin>` is the pad-facing task: the port select, the edges,
- * the enables, the flag - the shape of the SAM's ExtInt over its EIC.
- * The bare `Exti` resource is what the internal lines are driven with
- * (sleep.hpp's AWU uses line 9 through it).
+ * `ExtInt<'D', 4>` is the pad-facing type: the port select, the edges,
+ * the enables, the flag, for the line its pin number names. The bare
+ * `Exti` resource (the block's registers as functions, line by line) is
+ * what the internal lines are driven with (sleep.hpp's AWU uses line 9
+ * through it).
  */
 
 #pragma once
@@ -58,7 +85,8 @@ inline constexpr uint8_t exti_line_pvd = 8;
 inline constexpr uint8_t exti_line_awu = 9;
 inline constexpr uint8_t exti_line_count = 10;
 
-/// The block, line by line. Monostate.
+/// The block, line by line. A monostate: its functions are all static
+/// and no object of it is made.
 struct Exti {
     Exti() = delete;
 
@@ -76,7 +104,10 @@ struct Exti {
     }
     /// Raise the line by software: the flag comes up as if the edge had.
     static void soft(uint8_t line) { exti()->SWIEVR = bit(line); }
+    /// Whether the line's flag stands in INTFR: one load, any context.
     static bool flag(uint8_t line) { return (exti()->INTFR & bit(line)) != 0u; }
+    /// Clear the line's flag: one write-one store, which touches no
+    /// other line's flag - the handler's verb.
     static void clear(uint8_t line) { exti()->INTFR = bit(line); }
     static uint32_t flags() { return exti()->INTFR; }
 
@@ -102,9 +133,11 @@ struct ExtInt {
     static constexpr uint8_t line = N;
     static constexpr uint8_t port_code = L == 'A' ? 0 : L == 'B' ? 1 : L == 'C' ? 2 : 3;
 
-    /// Route the line to this pad and arm the edges asked for. The pad
-    /// itself is configured by the caller (input, with or without a
-    /// pull) - the line only listens.
+    /// Route the line to this pad and arm the edges asked for, then
+    /// clear a flag left standing; the interrupt or the event is enabled
+    /// apart (interrupt(), event()). The pad itself is configured by the
+    /// caller (input, with or without a pull) - the line only listens.
+    /// A setup verb (the file header): read-modify-writes, no guard.
     static void init(bool on_rising, bool on_falling) {
         Exti::port(line, port_code);
         Exti::rising(line, on_rising);

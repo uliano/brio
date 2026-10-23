@@ -1,34 +1,56 @@
 /*
  * draw.hpp (gfx)
  *
- * The primitives. Every one of them is a FREE FUNCTION over the
- * write-only Surface concept, so it works on any surface - a
- * framebuffer, a window onto one, a panel that answers no questions -
- * without that surface implementing anything beyond the two verbs.
+ * The primitives: clear, a pixel, horizontal and vertical runs (thin and
+ * thick), rectangle outlines (thin and thick), segments, circles and
+ * discs, rounded rectangles and their filled form. Every one of them is
+ * a free function over the write-only Surface concept (gfx/surface.hpp),
+ * so it works on any surface - a framebuffer, a window onto one, a panel
+ * that answers no questions - without that surface implementing anything
+ * beyond the two verbs. The smallest use, on any surface `panel` whose
+ * colour 1 is the ink:
  *
- * AXIS-ALIGNED WORK TAKES THE FAST PATH. An interface is mostly frames,
+ *     brio::clear(panel, 0);
+ *     brio::rect(panel, 0, 0, 128, 64, 1);          // the outline, inside the rectangle
+ *     brio::line(panel, 0, 0, 127, 63, 1);          // both endpoints drawn
+ *     brio::fill_circle(panel, 64, 32, 20, 1);
+ *
+ * What a call does, and where. Each primitive runs in the caller's
+ * context, to completion, and turns into calls of the surface's
+ * fill_rect(), and of nothing else; it keeps no state, waits for
+ * nothing and masks nothing of its own, and costs what the surface's
+ * verbs cost (docs/design/gfx.md, "What it costs"). Every coordinate may
+ * lie off the surface: the surface clips, silently, and a shape wholly
+ * outside draws nothing. A coordinate is expected within gfx/surface.hpp's
+ * coord_max of the origin; nothing checks it.
+ *
+ * Axis-aligned work takes the fast path. An interface is mostly frames,
  * separators and bars, so a horizontal or vertical run is not a
  * convenience spelling of line(): it is a one-pixel-thick fill_rect, the
  * shape a panel does in a single window, and line() routes the
  * axis-aligned cases into it rather than stepping them.
  *
- * A THICK STROKE IS A FILLED RECTANGLE, and only where the shape is
- * axis-aligned. An outline `t` pixels thick grows INWARD from the
+ * A thick stroke is a filled rectangle, and only where the shape is
+ * axis-aligned. An outline `t` pixels thick grows inward from the
  * boundary the thin outline sits on, and a thick horizontal or vertical
- * line grows DOWN or RIGHT from the row or column a thin one occupies -
+ * line grows down or right from the row or column a thin one occupies -
  * so the thin form is exactly the case t = 1, and an outline never grows
  * the shape. Four windows behind a bus, where an arc of the same
  * thickness would be a hundred, which is why nothing oblique and nothing
- * round is thick here (the design page says what that would cost to
- * specify).
+ * round is thick here (docs/design/gfx.md, "What is deliberately
+ * absent", says what that would cost to specify and why it waits).
  *
- * NOTHING HERE READS. Not one primitive takes a ReadableSurface, which
+ * Nothing here reads. Not one primitive takes a ReadableSurface, which
  * is what makes them all correct on a write-only panel; erasing is
- * drawing again in the background colour, and shapes do not overlap
- * (there is no compositing in this library, by decision - see the design
- * page).
+ * drawing again in the background colour, and an interface is laid out
+ * so that its elements do not overlap (there is no compositing in this
+ * library, by decision - docs/design/gfx.md, "No compositing"; a
+ * bordered shape is the one sanctioned overdraw, two filled shapes, the
+ * larger first).
  *
- * (docs/design/gfx.md.)
+ * The primitives are judged against a reference renderer derived from
+ * each shape's definition (host/gfx_reference.hpp, test/test_gfx):
+ * docs/design/gfx.md, "The three planes of truth".
  */
 
 #pragma once
@@ -60,7 +82,7 @@ constexpr uint16_t isqrt(uint32_t n) {
     return static_cast<uint16_t>(res);
 }
 
-/// The whole surface, one colour.
+/// The whole surface, one colour: one fill_rect of the surface's bounds.
 template <Surface S>
 void clear(S& s, typename S::Color c) {
     s.fill_rect(0, 0, s.width(), s.height(), c);
@@ -94,20 +116,20 @@ void vline(S& s, Coord x, Coord y, Extent len, typename S::Color c) {
 }
 
 /// `len` pixels rightwards from (x, y), `t` rows deep: the thick line
-/// grows DOWN from the row a thin one occupies, so t = 1 is hline().
+/// grows down from the row a thin one occupies, so t = 1 is hline().
 template <Surface S>
 void hline(S& s, Coord x, Coord y, Extent len, Extent t, typename S::Color c) {
     s.fill_rect(x, y, len, t, c);
 }
 
 /// `len` pixels downwards from (x, y), `t` columns wide: the thick line
-/// grows RIGHT from the column a thin one occupies, so t = 1 is vline().
+/// grows right from the column a thin one occupies, so t = 1 is vline().
 template <Surface S>
 void vline(S& s, Coord x, Coord y, Extent len, Extent t, typename S::Color c) {
     s.fill_rect(x, y, t, len, c);
 }
 
-/// The OUTLINE of a rectangle, one pixel thick, drawn inside the given
+/// The outline of a rectangle, one pixel thick, drawn inside the given
 /// rectangle (an outline never grows the shape). Four fills; the two
 /// horizontals already cover a rectangle two pixels tall or less, so the
 /// verticals are only asked for what remains.
@@ -134,7 +156,7 @@ void rect(S& s, Coord x, Coord y, Extent w, Extent h, typename S::Color c) {
     }
 }
 
-/// The outline `t` pixels thick, grown INWARD from the boundary the thin
+/// The outline `t` pixels thick, grown inward from the boundary the thin
 /// outline sits on - so t = 1 is rect() pixel for pixel, and an outline
 /// never grows the shape. Four fills that do not overlap: the two
 /// horizontals full width, the verticals between them. When twice the
@@ -167,9 +189,9 @@ void rect(S& s, Coord x, Coord y, Extent w, Extent h, Extent t,
 /**
  * A segment, both endpoints drawn.
  *
- * THE SPECIFICATION, because this is the first primitive where there is
- * one to state: the segment is walked along its MAJOR axis - the one it
- * spans further - and at each step exactly ONE pixel is lit, the one
+ * The specification, because this is the first primitive where there is
+ * one to state: the segment is walked along its major axis - the one it
+ * spans further - and at each step exactly one pixel is lit, the one
  * whose centre is nearest the ideal segment at that step. So a line is
  * everywhere one pixel thick, it is never thicker where it runs shallow,
  * and it has exactly max(|dx|, |dy|) + 1 pixels. The reference renderer
@@ -177,11 +199,14 @@ void rect(S& s, Coord x, Coord y, Extent w, Extent h, Extent t,
  * brute force over every pixel, and the two are compared exhaustively.
  *
  * Where the ideal segment passes exactly half way between two pixel
- * centres the tie is broken AWAY FROM ZERO in the minor axis, which is
+ * centres the tie is broken away from zero in the minor axis, which is
  * what the integer form below does and what the reference is written to
  * match.
  *
- * Axis-aligned segments are handed to the run verb instead of stepped.
+ * Axis-aligned segments are handed to the one-pixel-thick fill_rect of
+ * the horizontal or vertical run instead of stepped: one fill_rect. Any
+ * other segment costs one one-pixel fill_rect per pixel, the part off
+ * the surface included (the surface clips each).
  */
 template <Surface S>
 void line(S& s, Coord x0, Coord y0, Coord x1, Coord y1, typename S::Color c) {
@@ -202,8 +227,8 @@ void line(S& s, Coord x0, Coord y0, Coord x1, Coord y1, typename S::Color c) {
         return;
     }
 
-    // Sixteen bits is enough for all of this INSIDE THE COORDINATE
-    // DOMAIN, and only there: the error is tested at twice its value and
+    // Sixteen bits is enough for all of this inside the coordinate
+    // domain, and only there: the error is tested at twice its value and
     // reaches three times the segment's span, so at the domain's edge
     // the widest intermediate here is 24574. gfx/surface.hpp's
     // `coord_max` is what buys that, and a fast type is what keeps a
@@ -275,11 +300,11 @@ void corner_points(S& s, int32_t ax0, int32_t ay0, int32_t ax1, int32_t ay1,
 }
 
 /**
- * A circle's OUTLINE, one pixel thick.
+ * A circle's outline, one pixel thick, centred on (cx, cy).
  *
- * THE SPECIFICATION: the ring holds, for every column within the
+ * The specification: the ring holds, for every column within the
  * radius, the row nearest the ideal circle there - and, for every row,
- * the column nearest it. The UNION of those two families is what makes
+ * the column nearest it. The union of those two families is what makes
  * the ring connected: stepping columns alone leaves gaps where the
  * circle runs steep, stepping rows alone leaves them where it runs
  * shallow. A radius of zero is the single pixel at the centre, the
@@ -287,7 +312,11 @@ void corner_points(S& s, int32_t ax0, int32_t ay0, int32_t ax1, int32_t ay1,
  *
  * Below is the integer midpoint form, which carries no square root; the
  * reference computes the same set from the definition and the two are
- * compared over every radius a test surface holds.
+ * compared over every radius a test surface holds. Each pixel of the ring
+ * is its own one-pixel fill_rect, the eight mirrors of an octant point in
+ * turn (a pixel where two mirrors meet, on an axis or a diagonal, is
+ * drawn more than once) (docs/design/gfx.md, "What an update costs,
+ * and what found it": behind a bus that is a window command a pixel).
  */
 template <Surface S>
 void circle(S& s, Coord cx, Coord cy, Extent r, typename S::Color c) {
@@ -312,9 +341,11 @@ void circle(S& s, Coord cx, Coord cy, Extent r, typename S::Color c) {
 
 /**
  * A filled disc: every pixel whose centre lies within the radius, which
- * is a DIFFERENT SET from circle()'s ring and deliberately so - the ring
- * is the nearest pixels to a curve, the disc is an inequality. One run
- * per row, because a row of one colour is what a panel is fast at.
+ * is a different set from circle()'s ring and deliberately so - the ring
+ * is the nearest pixels to a curve, the disc is an inequality
+ * (docs/design/gfx.md, "Conventions": a filled shape with a border is two
+ * filled shapes, the larger drawn first). One run per row, because a
+ * row of one colour is what a panel is fast at.
  */
 template <Surface S>
 void fill_circle(S& s, Coord cx, Coord cy, Extent r, typename S::Color c) {
@@ -332,16 +363,17 @@ void fill_circle(S& s, Coord cx, Coord cy, Extent r, typename S::Color c) {
 /**
  * A rectangle with quarter-circle corners, outline only.
  *
- * THE SPECIFICATION: the shape is the set of points within `r` of the
+ * The specification: the shape is the set of points within `r` of the
  * rectangle inset by `r` on every side - a Minkowski sum, which is what
  * makes "rounded rectangle" mean one thing and not four. Its outline is
  * then four straight runs and four quarter rings, each ring obeying
  * circle()'s rule above.
  *
- * THE RADIUS IS CLAMPED to (min(w, h) - 1) / 2, the largest that leaves
+ * The radius is clamped to (min(w, h) - 1) / 2, the largest that leaves
  * the inset rectangle non-empty; at exactly that value on a square the
- * shape IS a circle. A radius of zero is a plain rectangle, with no
- * special case needed anywhere else.
+ * shape is a circle. A zero width or height draws nothing. A radius of
+ * zero is a plain rectangle, with no special case needed anywhere
+ * else.
  */
 template <Surface S>
 void round_rect(S& s, Coord x, Coord y, Extent w, Extent h, Extent r,

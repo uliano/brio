@@ -1,17 +1,122 @@
 # Platform (CH32V00x)
 
-The kernel's Platform concept realized on the QingKe V2C, in two
-halves: the RUNNING half - the critical section, the idle hook, the
-STK timebase, the microsecond busy-wait, the interrupt round trip -
-and the FAILING half - which reset happened, how to cause one, and the
-record a crash leaves for the next boot.
+This document is for a programmer putting a brio program on a CH32V006
+or a CH32V003. It describes what the kernel stands on here, the
+platform. A brio kernel asks the chip for a handful of things, stated
+by the kernel's `Platform` concept (a concept is a compiler-checked set
+of requirements on a type;
+[design/kernel.md, "Platform: what the machine provides"](../design/kernel.md#11-platform-what-the-machine-provides-kernelplatformhpp)):
+a way to mask interrupts for a critical section, a way to sleep until
+the next interrupt without losing one that arrives at the wrong moment,
+a source of time, a breakpoint for a panic, and a record a panic leaves
+for the next boot. `Ch32v00xPlatform<TB>` is this family's answer, on
+the QingKe V2C core of the CH32V006 and the QingKe V2A of the CH32V003,
+and `TB` is its timebase: the `Ticker` on the core's system counter
+(the STK), a 1000 Hz interrupt. The page has two halves: the running
+half (the critical section, the idle hook, the STK timebase, the
+microsecond busy-wait, the interrupt round trip) and the failing half
+(which reset happened, how to cause one, the two watchdogs, and the
+record a crash leaves for the next boot).
 
-Documents of record: the CH32V00X reference manual V1.5 (ch. 3 RCC for
+The smallest use is the glue every program of this project writes, as
+"How to use it" below has it (`SysClock` and its tag `clock` - an empty
+object of that type, which a driver's `init` takes to learn the rate -
+are the clock task's, the program's clock type, whose `init()` sets the
+chip's rate, declared as in [clock.md](clock.md)'s smallest use; the C++
+notation, `using`, the angle brackets, `brio::`, is explained in
+[the C++ used by blink](../learn/cpp-notation.md)):
+
+```cpp
+using P = brio::Ch32v00xPlatform<>;
+
+extern "C" BRIO_CH32_INTERRUPT void systick_handler() { brio::Ticker::tick(); }
+extern "C" BRIO_CH32_INTERRUPT void fault_handler() { brio::fault_reset<P>(); }
+
+int main() {
+    const auto record = brio::take_panic_record<P>();   // first, and once
+    SysClock::init();
+    brio::Ticker::init(clock);
+    brio::enable_interrupts();
+    brio::Tenuto<P, ...>::run();
+}
+```
+
+Line by line: `P` names the platform with its default timebase, the
+empty angle brackets meaning that default, the `Ticker`. The two
+`extern "C"` functions are interrupt handlers, as in C, under the
+startup code's names for the STK's vector and for the fault entry (the
+startup code, the crt, is the assembly file
+`ch32v00x/src/glue/startup_ch32v00x.S` that runs before `main()`; it
+names every vector and points each one the program does not bind at a
+spin, a loop on itself). `fault_reset<P>()` is the fault entry's body:
+it writes a `kernel_fault` record (never over one that already stands)
+and resets the chip, its optional argument a context byte the record
+carries (0 when omitted). An `ebreak` with no debugger attached lands
+there; a program that binds no fault handler, as `blink`, leaves that
+entry on the crt's spin.
+
+In `main()`, `record` is the record of a panic that ended the previous
+run, if any, for the program to report before anything else
+(kernel/panic.hpp): the call returns a valid record once and clears it,
+so it is taken first, before anything can panic again, and once; a
+program that reports nothing may discard it. `Ticker::init()` starts
+the STK at the tick rate and answers false only for a clock too slow to
+divide. The `...` of the last line stands for the program's active
+objects in priority order (an active object is a component of a brio
+program with its own event queue, served one event at a time by the
+kernel, [docs/learn/introduction.md](../learn/introduction.md)), and
+`Tenuto` is that kernel, the loop that serves their queues and calls
+the platform's `idle()` when they are empty
+([design/kernel.md, "Scheduler"](../design/kernel.md#8-scheduler-kerneltenutohpp)).
+`blink`, the maintained example, is this glue with no fault binding and
+no record taken.
+
+Three things decide whether that works. The clock task must have run
+first (`SysClock::init()`, [clock.md](clock.md)): the ticker computes
+its compare value from the rate the clock type claims, and a ticker
+initialized on a chip still at its 8 MHz reset rate with a 48 MHz
+clock type ticks six times too slowly until the clock task runs (the
+compare is written once, from the claimed rate, so it is right once the
+chip runs at that rate); nothing refuses it. The STK vector must be
+bound to `Ticker::tick()` by the program, as above,
+under the crt's name for it (`systick_handler`) and with
+`BRIO_CH32_INTERRUPT` in front: the kernel binds no vector, and a
+program that forgets it compiles, but the startup code points that
+vector at its spin for unbound vectors and `Ticker::init()` enables the
+line, so the first tick after `enable_interrupts()` enters the spin and
+the program stops there. `BRIO_CH32_INTERRUPT` is the one spelling of a
+handler attribute on this target, and it follows the project's
+`CH32V00X_HPE` option, a CMake option of the `ch32v00x/` project chosen
+at configure (`-DCH32V00X_HPE=OFF` turns it off), on by default: with
+it the crt sets INTSYSCR.HWSTKEN and the attribute is
+WCH's fast attribute, the core's hardware prologue saving the registers
+a handler clobbers; without it the attribute is gcc's plain `interrupt`
+and the handler saves them itself. One switch for the whole image,
+because a fast handler in an image whose crt did not set the bit
+corrupts the program it interrupted. And on the CH32V003 the idle hook
+refuses to sleep while a DMA channel works, since that core's Sleep
+stops the DMA controller ([dma.md](dma.md)): a program with a channel
+always at work there never sleeps.
+
+The rest of this page, in order: the documents of record; what the
+silicon does; the types and verbs; how to use it; the bench findings,
+measured to the cycle on the CH32V006K8U6; what the CH32V003F4P6
+changes, its sleep entry above all; "A handler in SRAM", the opt-in
+placement of a driver's or a program's hot path; and what is not
+covered.
+
+## Documents of record
+
+The CH32V00X reference manual V1.5 (ch. 3 RCC for
 the reset flags, ch. 6 for the PFIC and the STK), the QingKe V2
 microprocessor manual V1.3 (2.2 for what interrupt entry does to
 mstatus, 3.4 for the hardware prologue/epilogue, 5.2 for what wakes a
 WFI). No errata sheet exists for this family that the desk could find;
 the findings below are the entries this document keeps in its place.
+The bench suites below are named with their letters: a suite's letter
+is one command key of its console and the group of verdicts it runs,
+`z` the key that runs the suite's set of letters (a letter outside it,
+such as the platform suite's resetting `i`, runs by its own key).
 
 ## What the silicon does
 
@@ -19,16 +124,16 @@ the findings below are the entries this document keeps in its place.
   handler runs with the global enable still set; the PFIC decides
   whether another line may preempt it, and with INTSYSCR.INESTEN off
   it holds the next line until MRET.
-- **A WFI sleep ends only when an interrupt is RESPONDED** (5.2) -
+- **A WFI sleep ends only when an interrupt is responded** (5.2) -
   which needs MIE set. Sleeping with MIE clear over a pending interrupt
   is a sleep nobody ends.
 - **The core can sleep as a WFE instead**: PFIC_SCTLR.WFITOWFE turns
   `wfi` into a wait-for-event, and SEVONPEND makes every interrupt
-  entering the pending state an event, LATCHED, so a WFE after the
+  entering the pending state an event, latched, so a WFE after the
   event returns at once (3.1's SCTLR). The manual's "the subsequent
   WFI" reads as one-shot; on the CH32V006 WFITOWFE reads back set
   after the `wfi` and the next `wfi` is a WFE again (measured).
-- **A WFE wakes on an enabled interrupt or on a pending EDGE** (5.2,
+- **A WFE wakes on an enabled interrupt or on a pending edge** (5.2,
   the WFE list): item (2), an enabled interrupt "generated", with the
   handler run first - which takes MIE set - and item (3), SEVONPEND's
   "new interrupt pending signal (the previously generated pending
@@ -39,19 +144,19 @@ the findings below are the entries this document keeps in its place.
   The pending bit then stands with no new edge to come.
 - **The waking edge is latched too.** An interrupt that wakes a WFE
   enters the pending state, so SEVONPEND latches it as well, and the
-  NEXT WFE returns at once on it. PFIC_SCTLR.SETEVENT (3.1, "set the
+  next WFE returns at once on it. PFIC_SCTLR.SETEVENT (3.1, "set the
   event to wake up the WFE case") sets the latch by hand, and a WFE
   executed over a set latch returns at once and clears it - the pair
   that consumes it.
 - **The hardware prologue/epilogue (HPE)** pushes the ten caller-saved
-  registers (x1, x5..x7, x10..x15) to the USER STACK on entry - SP
+  registers (x1, x5..x7, x10..x15) to the user stack on entry - SP
   moves by 48 bytes - and pops them on MRET, two levels deep at most
   (3.4). It is enabled by INTSYSCR.HWSTKEN and used by a handler
   declared with the vendor compiler's `interrupt("WCH-Interrupt-fast")`
   attribute, which then emits no prologue of its own.
 - **The STK** is a 32-bit up-counter at HCLK or HCLK/8 with a compare,
   an auto-reload (STRE) and a flag the handler must clear (RM 6.5.4);
-  it is interrupt 12 of the vector table, and the interrupt number IS
+  it is interrupt 12 of the vector table, and the interrupt number is
   the table index on this core.
 - **The reset flags accumulate** in RCC_RSTSCKR until RMVF is written,
   and **PINRSTF names the pin alone**: unlike the STM32 register this
@@ -68,10 +173,10 @@ the findings below are the entries this document keeps in its place.
   a second divider that resets when T6 falls and when it is refreshed
   above its window, with an early warning one step before; WDGA is
   cleared only by a reset - the RCC pulse on PB1PRSTR is one. **Its
-  counter does NOT run unarmed** (measured): 5.2.1's "free operation
+  counter does not run unarmed** (measured): 5.2.1's "free operation
   regardless of whether the watchdog function is turned on" does not
   describe this silicon.
-- **The two debug freezes** (IWDG_STOP, WWDG_STOP) are bits of a CORE
+- **The two debug freezes** (IWDG_STOP, WWDG_STOP) are bits of a core
   CSR, DBGMCU_CR at 0x7C0 (RM ch. 21), not a peripheral register.
 
 ## Types and verbs
@@ -96,14 +201,14 @@ the ticker off across the WFE, since a tick turning pending would end
 it before the Standby began. The interrupt verbs and
 the per-line enables are [brio/ch32v00x/pfic.hpp](../../brio/ch32v00x/pfic.hpp):
 `enable/disable/enabled/pending/set_pending/clear_pending/active`
-(the manual's ISR bank is the ENABLE status and its IPR the pending
+(the manual's ISR bank is the enable status and its IPR the pending
 one; IENR/IRER/IPSR/IPRR are write-one). `BRIO_CH32_INTERRUPT` is the
 one spelling of the handler attribute, expanding to WCH's fast
 attribute when the image is built with `CH32V00X_HPE` (the default)
 and to gcc's plain `interrupt` otherwise - one option for the whole
 image, because a fast handler under an HPE that is off corrupts the
 program it interrupted. Interrupt nesting is never enabled: the
-kernel's rule ([../design/kernel.md](../design/kernel.md), section 1).
+kernel's rule ([design/kernel.md, "The model in one page"](../design/kernel.md#1-the-model-in-one-page)).
 `stack_untouched()` is the RAM ledger: the crt paints the free RAM
 between the last section the linker placed and the stack top with one
 pattern before the first call, and the verb walks up from that floor
@@ -125,7 +230,7 @@ stands - and resets. The two watchdogs live there too: `Iwdg`
 (`start()`, `configure(IwdgConfig)` - unlock, both fields, the
 bounded wait for the update flags -, `arm()` in the chapter's order,
 `refresh()`, `force_reset()`, `iwdg_timeout_ms(prescaler, reload,
-lsi_hz)` at a STATED LSI rate) and `Wwdg` (`configure(WwdgConfig)`
+lsi_hz)` at a stated LSI rate) and `Wwdg` (`configure(WwdgConfig)`
 refusing a window below 0x40, `start(t)`, `refresh(t)` with T6 always
 written set, `force_reset()`, `counter()`, the EWIF verbs and `isr()`,
 `wwdg_timeout_us(hclk, prescaler, t)`), each with its `debug_freeze()`
@@ -448,7 +553,8 @@ the interrupt transmitter goes from 1.42 times the wire at 3 Mbaud to
 1.08 with its vector placed, and the engine's block restart, inside its
 window at 3 Mbaud from both placements, keeps more of it from SRAM: 40
 cycles spent ahead of the body idle the line 52 to 78 cycles a boundary
-from the flash and 0 to 25 from SRAM (`bench_ch32` letters e and u, [spi.md](spi.md), [usart.md](usart.md), [i2c.md](i2c.md)).
+from the flash and 0 to 25 from SRAM (`bench_ch32` letters e and u,
+[spi.md](spi.md), [usart.md](usart.md), [i2c.md](i2c.md)).
 
 **What it costs.** The bytes in the last column, of the part's SRAM -
 the load image stays in the flash beside them. On the CH32V003's 2 KB

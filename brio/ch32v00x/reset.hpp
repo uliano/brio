@@ -1,50 +1,69 @@
 /*
  * reset.hpp
  *
- * The failing half of the CH32V00x platform: WHICH reset happened, how
- * to cause one, and the fault body that turns a crash into a note the
- * next boot can read.
+ * The failing half of the CH32V00x platform: which reset happened, how
+ * to cause one, the fault body that turns a crash into a note the next
+ * boot can read, and the two watchdogs. The smallest use, beside the
+ * platform's glue (docs/ch32v00x/platform.md, "How to use it"):
  *
- * THE FLAGS ACCUMULATE. RCC_RSTSCKR (RM 3.4.9) carries one bit per
+ *     extern "C" BRIO_CH32_INTERRUPT void fault_handler() { brio::fault_reset<P>(); }
+ *
+ * A reboot on purpose is Reset::software(); a panic that must be seen
+ * at the next boot goes through panic<P, ResetReporter>(code, context)
+ * (kernel/panic.hpp); Reset::take_flags() at boot reads the flags'
+ * history and clears it.
+ *
+ * Who calls what. fault_reset<P>() is the body of the fault vector the
+ * program binds, and runs nowhere else; Wwdg::isr() is the body of the
+ * WWDG's vector. Nothing here masks interrupts. The Reset and watchdog
+ * verbs are register accesses with no guard of their own:
+ * Reset::clear_flags() and the WWDG's bus gate are read-modify-writes
+ * of RCC registers other verbs share (RCC_RSTSCKR holds the LSI's bits
+ * too), so a program calls them from one context at a time.
+ * Iwdg::configure() and arm() wait, bounded, for the update flags (some
+ * 40 us; sync_spin_limit turns a stopped block's hang into a false);
+ * software() and fault_reset() do not return.
+ *
+ * The flags accumulate. RCC_RSTSCKR (RM 3.4.9) carries one bit per
  * reset source, and they stay set until the software writes RMVF, so a
- * read is a HISTORY since the last clear, not "the cause". PORRSTF is
+ * read is a history since the last clear, not "the cause". PORRSTF is
  * set at power-on and reads 1 on a board that never cleared it. And
- * PINRSTF NAMES THE PIN ALONE: on the STM32 this register descends
+ * PINRSTF names the pin alone: on the STM32 this register descends
  * from, the pin flag is raised beside every system reset and can only
  * be trusted when it stands by itself; here a software reset leaves
- * SFTRSTF standing WITHOUT PINRSTF (measured: 0x18000000 at the boot
+ * SFTRSTF standing without PINRSTF (measured: 0x18000000 at the boot
  * after one, SFTRSTF and the power-on flag and nothing else), so each
  * flag means what it says.
  *
- * THE RESET REQUEST IS THE CORE'S. There is no reset controller on
+ * The reset request is the core's. There is no reset controller on
  * this family: the request is PFIC_CFGR.SYSRESET written together with
  * its key (QingKe V2 manual 3.1, KEY3 = 0xBEEF in the high half), and
  * it shows up as SFTRSTF at the next boot.
  *
- * THE FAULT BODY DOES NOT GO THROUGH panic(). panic() ends in
+ * The fault body does not go through panic(). panic() ends in
  * break_here(), which on this core is `ebreak`, and `ebreak` with no
  * debugger attached lands in the fault vector - so a fault body that
  * called panic() would re-enter itself. It writes the same record
  * panic() would, by hand, and resets; and it never overwrites a record
  * that already stands, because with no debugger panic()'s own ebreak
- * arrives HERE, and clobbering the record would turn every diagnosed
+ * arrives here, and clobbering the record would turn every diagnosed
  * panic into a kernel_fault.
  *
- * THE TWO WATCHDOGS (RM ch. 4 and 5) live here as well, because what
+ * The two watchdogs (RM ch. 4 and 5) live here as well, because what
  * they do is a reset: the IWDG, a 12-bit down-counter on the LSI
  * behind a prescaler, started by a key and never stopped again but by
  * a reset, its two setting registers written only after the unlock
  * key and read only once their update flag drops; and the WWDG, a
  * 7-bit down-counter on HCLK/4096 behind a second divider that resets
- * when T6 falls AND when it is refreshed above its window, with an
+ * when T6 falls and when it is refreshed above its window, with an
  * early-warning interrupt one step before the reset. 5.2.1 says its
  * counter runs "regardless of whether the watchdog function is turned
- * on or not"; ON THIS SILICON IT DOES NOT (measured: 0x7F for 100 ms
+ * on or not"; on this silicon it does not (measured: 0x7F for 100 ms
  * with WDGA clear, EWIF never raised), so nothing about the WWDG can
  * be timed before it is armed, and armed it stays until the RCC
- * pulse. Both are the STM32F1's: the G0 stratum's driver minus the
- * IWDG window register, and a debug freeze that is a CORE CSR here
- * (DBGMCU_CR at 0x7C0, RM ch. 21) rather than a peripheral register.
+ * pulse. Both blocks are the STM32F1's: the IWDG has no window
+ * register here, and the debug freeze is a core CSR (DBGMCU_CR at
+ * 0x7C0, RM ch. 21) rather than a peripheral register.
  *
  * Not here: the reset-related option bytes (the RST pin choice, the
  * standby reset, IWDG_SW), which are the flash chapter's.
@@ -101,15 +120,15 @@ struct Reset {
         rcc()->RSTSCKR = rcc()->RSTSCKR & ~rstsckr_rmvf;
     }
 
-    /// Read-and-clear: the boot verb.
+    /// Read-and-clear: the boot verb, called once early in main().
     static uint32_t take_flags() {
         const uint32_t f = flags();
         clear_flags();
         return f;
     }
 
-    /// Reset the device now. Shows up as SFTRSTF - alone - at the next
-    /// boot. The spin after the store is for the compiler and for the
+    /// Reset the device now; never returns. Shows up as SFTRSTF - alone -
+    /// at the next boot. The spin after the store is for the compiler and for the
     /// few cycles the request takes to land.
     [[noreturn]] static void software() {
         pfic()->CFGR = pfic_key3 | pfic_sysreset;
@@ -148,7 +167,7 @@ enum class IwdgPrescaler : uint8_t {
 constexpr uint32_t iwdg_divider(IwdgPrescaler p) { return 4UL << static_cast<uint8_t>(p); }
 
 /// The time-out of a (prescaler, reload) pair in milliseconds at a
-/// STATED LSI rate - the caller's argument, never a constant here: the
+/// stated LSI rate - the caller's argument, never a constant here: the
 /// LSI is "about 128 kHz" and the bench measured 124 (sleep.md).
 /// 4.2.1: the time-out is (reload + 1) counts.
 constexpr uint32_t iwdg_timeout_ms(IwdgPrescaler p, uint16_t reload, uint32_t lsi_hz = 128'000UL) {
@@ -184,7 +203,7 @@ struct Iwdg {
     [[gnu::always_inline]] static void refresh() { iwdg()->CTLR = key_refresh; }
     /// Open the write window on PSCR and RLDR.
     static void unlock() { iwdg()->CTLR = key_unlock; }
-    /// Start the watchdog. ONE WAY IN SOFTWARE.
+    /// Start the watchdog. One way in software: only a reset stops it.
     static void start() { iwdg()->CTLR = key_start; }
 
     /// Ask for the reset on purpose: the smallest reload, then wait.
@@ -202,7 +221,7 @@ struct Iwdg {
 
     /// Bounded wait for an update to cross into the LSI domain: five
     /// LSI cycles at most (4.3.4), some 40 us; the bound is a safety
-    /// net, and on a STOPPED watchdog it is what turns a hang into a
+    /// net, and on a stopped watchdog it is what turns a hang into a
     /// false.
     static constexpr uint32_t sync_spin_limit = 400'000UL;
     static bool sync(uint16_t mask = update_mask) {
@@ -324,7 +343,7 @@ constexpr bool wwdg_config_valid(const WwdgConfig& c) {
 struct Wwdg {
     Wwdg() = delete;
 
-    /// RCC_PB1PCENR.WWDGEN, CLEAR AT RESET: until it is on the
+    /// RCC_PB1PCENR.WWDGEN, clear at reset: until it is on the
     /// registers read as nothing. 5.2.1's own note: closing it again
     /// pauses the count, "stopping the watchdog indirectly".
     static void bus_clock(bool on) {
@@ -352,7 +371,7 @@ struct Wwdg {
         return true;
     }
 
-    /// Reload T[6:0]. T6 IS WRITTEN SET whatever the value asked for:
+    /// Reload T[6:0]. T6 is written set whatever the value asked for:
     /// a value below 0x40 written into the register is the "software
     /// reset" 5.2.1 describes, and force_reset() spells that on purpose.
     [[gnu::always_inline]] static void refresh(uint8_t counter_value = 0x7Fu) {
@@ -411,7 +430,7 @@ struct ResetReporter {
 };
 
 /**
- * The fault vector's BODY: record the wreck and reset. An app binds it:
+ * The fault vector's body: record the wreck and reset. An app binds it:
  *
  *     extern "C" BRIO_CH32_INTERRUPT void fault_handler() {
  *         brio::fault_reset<brio::Ch32v00xPlatform<>>();

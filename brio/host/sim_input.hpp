@@ -2,21 +2,37 @@
  * sim_input.hpp (host)
  *
  * The world's side of a button and a knob, for a program running on the
- * host. Each is an ordinary ScannedInput - a level somebody else
+ * host. Each is an ordinary ScannedInput (util/input_scanner.hpp: a type
+ * with a static read() answering a level) - a level somebody else
  * decides - so nothing above learns that the somebody is a test script
  * or a viewer's mouse instead of a finger.
  *
- * THE SEAM IS set(), AND THAT IS THE WHOLE INTERFACE. A test calls it
+ * The smallest use, as test/test_quadrature spells it: the button set by
+ * the world and read by whatever scans it, the knob turned by its shaft
+ * and its two pads handed to a decoder as two pins would be:
+ *
+ *     using Knob = brio::SimEncoder<0>;
+ *     brio::SimButton<3>::set(panel.pressed(2));     // the world presses
+ *     CHECK(brio::SimButton<3>::read());             // the scanner reads
+ *     Knob::step(+1);                                // one quadrature count
+ *     Knob::set_shaft(panel.shaft(1));               // or where a snapshot says
+ *
+ * Contexts: single-threaded - a test, or a host program's idle() - with
+ * every state static and every verb a plain store or load; nothing waits.
+ * reset() puts each back between test cases: a button released, a
+ * knob's contacts at 00 (the encoder keeps no count of its own).
+ *
+ * The seam is set(), and that is the whole interface. A test calls it
  * directly; an interactive simulator calls it from the kernel's idle
  * path when a snapshot arrives from the viewer. One policy, two
  * sources, and the automated half needs no socket, no viewer and no
  * second process - the same split the pixel store has.
  *
- * A KNOB IS DRIVEN BY ITS SHAFT, not by its contacts: step() turns it
+ * A knob is driven by its shaft, not by its contacts: step() turns it
  * one quadrature count and the two pads follow the Gray sequence a real
  * one walks. force() is the other door, for putting the contacts in a
  * state a turn would never produce - a bounce between two of them, or a
- * jump that skips one - because INJECTING THE DIRT IS THE POINT. A real
+ * jump that skips one - because injecting the dirt is the point. A real
  * contact cannot be asked to bounce between two named states on demand;
  * here it is three lines, which is why the host is the better place to
  * test this and not merely the cheaper one.
@@ -34,9 +50,9 @@ namespace brio {
  * A contact a test or a viewer holds down. `id` only tells two of them
  * apart - each is its own type, with its own state.
  *
- * True means ACTIVE, as the ScannedInput contract asks; whether the real
- * pin would be high or low is the board file's business, and there is
- * nothing here to invert.
+ * True means active, as the ScannedInput contract asks; whether the real
+ * pin would be high or low is the business of the code that wires it,
+ * and there is nothing here to invert.
  */
 template <uint8_t id>
 struct SimButton {
@@ -94,7 +110,7 @@ public:
     static void force(uint8_t state) { state_ = static_cast<uint8_t>(state & 3u); }
 
     /// Put the shaft at an absolute count - what a panel's snapshot
-    /// carries. It SNAPS rather than walking through what was passed,
+    /// carries. It snaps rather than walking through what was passed,
     /// because that is what a decoder sampling once a tick sees anyway,
     /// and hiding it would hide the one failure a decoder has.
     static void set_shaft(int32_t count) {

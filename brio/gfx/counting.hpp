@@ -1,9 +1,20 @@
 /*
  * counting.hpp (gfx)
  *
- * WHAT AN UPDATE ACTUALLY COST. A surface that forwards everything to
- * another and counts what went through it: how many filled rectangles,
- * how many runs, how many pixels in them.
+ * What an update actually cost. Counting is a surface that forwards
+ * everything to another and counts what went through it: how many
+ * filled rectangles, how many runs, how many pixels in them. A program
+ * or a test wraps its surface in one, draws, and reads the tally. The
+ * smallest use, as the host suite (test/test_gfx) spells it:
+ *
+ *     brio::Counting<Fb> counted(fb);
+ *     brio::rect(counted, 2, 2, 20, 10, 3, 1);
+ *     CHECK(counted.take().rects == 4);        // a thick outline: four windows
+ *
+ * The counting surface runs in the caller's context, as the surface
+ * beneath does; it keeps a pointer to that surface, which must outlive
+ * it, and its tally is plain memory, unguarded, read and reset by the
+ * one context that draws.
  *
  * It exists because the whole economy of a write-only panel is "touch
  * only what changed", and that is a claim until something counts. On a
@@ -12,11 +23,14 @@
  * one cell of it is the difference between an interface that answers and
  * one that crawls - and the numbers here are what makes that visible
  * instead of asserted. The accounting is the same idea as a flash
- * simulation's wear counters: the cost of a decision, told plainly.
+ * simulation's wear counters: the cost of a decision, told plainly. What
+ * it measured is docs/design/gfx.md, "What an update costs, and what
+ * found it".
  *
  * It is a Surface, so it goes anywhere a surface goes and a primitive
  * cannot tell. It costs nothing where it is not used, and where it is
- * used it costs three additions.
+ * used it costs two counter updates a call (a rectangle's pixel count a
+ * multiplication first).
  */
 
 #pragma once
@@ -29,7 +43,7 @@
 
 namespace brio {
 
-/// What went through, since the last reset.
+/// What went through, since the last reset(). The counters wrap at 2^32.
 struct DrawTally {
     uint32_t rects;  ///< filled rectangles asked for
     uint32_t runs;   ///< runs of caller-given pixels asked for
@@ -41,7 +55,7 @@ struct DrawTally {
 
 /**
  * A surface that forwards to another and counts. The one underneath does
- * the work and the clipping; these numbers are what the LIBRARY asked
+ * the work and the clipping; these numbers are what the library asked
  * for, which is what a bus would have carried.
  */
 template <Surface S>
@@ -67,6 +81,7 @@ public:
         under_->write_run(x, y, run);
     }
 
+    /// The tally so far, and the tally back to zero.
     const DrawTally& tally() const { return tally_; }
     void reset() { tally_ = DrawTally{}; }
 

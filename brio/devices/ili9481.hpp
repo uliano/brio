@@ -1,62 +1,88 @@
 /*
  * ili9481.hpp (devices)
  *
- * WHAT THE ILI9481 MAKES OF THE DCS WORDS: the controller as a TRAITS
- * type, one constexpr fact at a time, each with the section or the
- * measurement that settles it. There is no verb here and no state - a
- * panel driver is the vocabulary (devices/dcs.hpp) over a traits type
- * over a link, and this is the middle one (docs/design/gfx.md, "The
- * command tier").
+ * What the ILI9481 - the controller of a 320 x 480 panel with its own
+ * frame memory - makes of the DCS words: the controller as a traits type
+ * (a struct of constants and constexpr functions a template reads, never
+ * an object and never instantiated), one constexpr fact at a time, each
+ * with the section or the measurement that settles it. There is no verb
+ * here and no state - a panel driver is the vocabulary (devices/dcs.hpp)
+ * over a traits type over a link, and this is the middle one
+ * (docs/design/gfx.md, "The command tier"; docs/devices/ili9481.md is
+ * this file's document).
  *
- * DOCUMENTS OF RECORD: the ILI9481 data sheet version 0.27 - chapter 7
+ * The smallest use: a program names it once, as the panel driver's
+ * first template argument, and the driver and the simulator ask it the
+ * rest (docs/devices/dcs_panel.md and docs/devices/ili9481.md, "How to
+ * use it"):
+ *
+ *     using Panel = brio::DcsPanel<brio::Ili9481, PanelLink>;
+ *     // host only; its frame memory is 460800 bytes, so static storage
+ *     static brio::SimDcsPanel<brio::Ili9481> panel{{.column_mirror = true,
+ *                                                    .wants_inversion = true}};
+ *     static_assert(brio::Ili9481::read_framing(brio::Dcs::rddpm) ==
+ *                   brio::DcsReadFraming::aligned);   // no dummy at all
+ *
+ * Contexts: none to speak of. Every member is a constant or a pure
+ * constexpr function, legal anywhere and at compile time; nothing waits
+ * and nothing masks. What a program must respect is in the facts
+ * themselves: the serial interface takes SPI modes 0 and 3 only
+ * (serial_mode_accepted), a write stays at or under write_clock_max_hz
+ * and a read under read_clock_max_hz - ceilings nothing in code
+ * enforces, the rate living in the link's prototype requests - and the
+ * interface stores eighteen bits a pixel and no other width.
+ *
+ * Documents of record: the ILI9481 data sheet version 0.27 - chapter 7
  * for the interfaces, chapter 8 for the commands, 13.3.2 for the serial
- * clock - and THE BENCH, which wins wherever the two differ. A bench
+ * clock - and the bench, which wins wherever the two differ. A bench
  * finding corrects this file; this file never corrects the bench.
  *
- * WHAT A MODULE ADDS, AND WHY IT IS STILL HERE. Which way a glass is
+ * What a module adds, and why it is still here. Which way a glass is
  * mounted, what its colour order is and whether it wants the inversion
- * are the MODULE's facts and belong to a board file, not to a
- * controller. Two of them are stated below all the same, marked as the
- * module's: a simulator has to answer with the same bytes the bench
- * saw, and "this module drives nothing for 04h and 09h" is a fact about
- * the answer, not about the glass.
+ * are the module's facts and belong to the board - handed to the driver
+ * as a DcsModule (devices/dcs_panel.hpp) - not to a controller. Two of
+ * them are stated below all the same, marked as the module's: a
+ * simulator has to answer with the same bytes the bench saw, and "this
+ * module drives nothing for 04h and 09h" is a fact about the answer, not
+ * about the glass.
  *
- * THE MEMORY'S SEMANTICS, STATED ONCE. A driver and a panel simulator
+ * The memory's semantics, stated once. A driver and a panel simulator
  * written from two readings of a command table agree on the same
  * mistake, so the rules are written here, every one of them measured,
  * and read from here by both:
  *
- *   - B5, B6 and B7 of MADCTL reorder the address counter's walk INSIDE
- *     the window and never move its origin.
- *   - Under B5 (exchange) CASET addresses the PAGES (0..479) and PASET
- *     the COLUMNS (0..319), and the counter steps the pages first.
+ *   - B5, B6 and B7 of MADCTL reorder the address counter's walk (the
+ *     order in which a memory write fills the window) inside the window
+ *     and never move its origin.
+ *   - Under B5 (exchange) CASET addresses the pages (0..479) and PASET
+ *     the columns (0..319), and the counter steps the pages first.
  *   - B6 reverses the walk along the columns and B7 along the pages -
  *     each of them whichever axis it has become, the fast one or the
  *     slow one.
  *   - The registers keep the bytes they were given and the axes are
- *     resolved when the counter walks: a MADCTL written AFTER the window
+ *     resolved when the counter walks: a MADCTL written after the window
  *     decides which axis is which.
- *   - The BGR bit acts on WRITES alone: a pixel written under it is
+ *   - The BGR bit acts on writes alone: a pixel written under it is
  *     stored with its first and third byte exchanged, and read back as
  *     stored.
- *   - The address counter is an ADDRESS, not an index into the walk:
+ *   - The address counter is an address, not an index into the walk:
  *     RAMWR puts the write address at the walk's first pixel and RAMRD
  *     the read address, and nothing else moves either - a window
  *     re-issued, with the same values or others, leaves both where they
  *     are, and the two are independent of each other.
  *   - A write steps along the walk and after the window's last pixel
- *     WRAPS to its first, the first pixels overwritten; a read wraps the
+ *     wraps to its first, the first pixels overwritten; a read wraps the
  *     same way. A write whose address lies outside the window (the
  *     window moved away from under it) lands nowhere.
- *   - The read pointer counts the BYTES CLOCKED: a following 3Eh starts
+ *   - The read pointer counts the bytes clocked: a following 3Eh starts
  *     at the first pixel not fully clocked, from that pixel's first
  *     byte.
- *   - A pixel cut short at the close of a write transaction is DROPPED;
+ *   - A pixel cut short at the close of a write transaction is dropped;
  *     the next 2Ch or 3Ch starts a fresh pixel and the address has not
  *     moved for the partial one.
- *   - A CASET or PASET whose START is beyond the axis it addresses is
- *     IGNORED, the register unchanged. One whose END is beyond the axis,
- *     or that runs backwards, is TAKEN and makes the window invalid: a
+ *   - A CASET or PASET whose start is beyond the axis it addresses is
+ *     ignored, the register unchanged. One whose end is beyond the axis,
+ *     or that runs backwards, is taken and makes the window invalid: a
  *     write lands nowhere and a read answers `invalid_window_read_byte`
  *     on every clock.
  *   - A hardware reset leaves the frame memory in alternate pages of
@@ -88,7 +114,7 @@ struct Ili9481 {
     static constexpr uint16_t columns = 320;
     static constexpr uint16_t pages = 480;
 
-    /// The four-wire serial interface stores EIGHTEEN BITS A PIXEL and
+    /// The four-wire serial interface stores eighteen bits a pixel and
     /// nothing else (7.2): three bytes, the six most significant bits of
     /// each carrying the channel, the low two ignored on a write and
     /// zero on a read.
@@ -101,8 +127,8 @@ struct Ili9481 {
     /// that has only been woken.
     static constexpr uint8_t reset_madctl = 0x00;
 
-    /// What a HARDWARE reset leaves in the frame memory: alternate pages
-    /// of two values, the EVEN pages the first of them (measured).
+    /// What a hardware reset leaves in the frame memory: alternate pages
+    /// of two values, the even pages the first of them (measured).
     static constexpr uint8_t reset_fill_even_page = 0x54;
     static constexpr uint8_t reset_fill_odd_page = 0xA8;
 
@@ -115,21 +141,21 @@ struct Ili9481 {
     // ---- how a read comes back on the four-wire serial link -----------------
 
     /// 7.2.2 gives every read command a "dummy read" as its first
-    /// parameter and its figures do not say whether that is a BYTE or a
-    /// CLOCK. The bench answers, and the answer is not one answer:
+    /// parameter and its figures do not say whether that is a byte or a
+    /// clock. The bench answers, and the answer is not one answer:
     ///
-    ///  - a MULTI-PARAMETER register read comes one dummy CLOCK late -
+    ///  - a multi-parameter register read comes one dummy clock late -
     ///    the whole stream shifted right by one bit. Measured on the
     ///    device code (BFh): the raw bytes 01 02 4A 40 FF for the value
     ///    02 04 94 81 FF, the leading bit driven low.
-    ///  - a SINGLE-parameter read (RDDPM 0Ah, RDDMADCTL 0Bh, RDDCOLMOD
-    ///    0Ch) has NO dummy at all: the value is the first byte clocked.
-    ///  - RAMRD (2Eh) and read memory continue (3Eh) begin with ONE
-    ///    DUMMY BYTE, which reads 0x80 on the bench, and then three
+    ///  - a single-parameter read (RDDPM 0Ah, RDDMADCTL 0Bh, RDDCOLMOD
+    ///    0Ch) has no dummy at all: the value is the first byte clocked.
+    ///  - RAMRD (2Eh) and read memory continue (3Eh) begin with one
+    ///    dummy byte, which reads 0x80 on the bench, and then three
     ///    bytes a pixel.
     ///
     /// RDDID (04h) and RDDST (09h) are multi-parameter reads of the
-    /// device code's shape, but THE BENCH MODULE DRIVES NEITHER: both
+    /// device code's shape, but the bench module drives neither: both
     /// read all ones, which is the link's pull-up and not a value. They
     /// are classified `undriven` below, because a shift applied to an
     /// undriven line would invent a 0x7F that the bench never saw.
@@ -146,6 +172,9 @@ struct Ili9481 {
     /// The four bytes behind the dummy clock (measured).
     static constexpr std::array<uint8_t, 4> device_code{0x02, 0x04, 0x94, 0x81};
 
+    /// The framing of one read command on this link, as a
+    /// DcsReadFraming: what the panel driver strips before the value
+    /// (devices/dcs.hpp says what each answer means).
     static constexpr DcsReadFraming read_framing(uint8_t command) {
         switch (command) {
             case Dcs::ramrd:
@@ -166,12 +195,12 @@ struct Ili9481 {
 
     // ---- the serial clock ---------------------------------------------------
 
-    /// WHICH SPI MODES THE FOUR-WIRE SERIAL INTERFACE TAKES, numbered as
+    /// Which SPI modes the four-wire serial interface takes, numbered as
     /// every SPI block numbers them (CPOL in bit 1, CPHA in bit 0). 7.2.1
     /// states the write cycle and 7.2.2 the read cycle in the same words:
     /// SCL is driven from high to low and pulled back to high, the host
-    /// puts a bit on the line at the FALLING edge and the module - or the
-    /// host, on a read - takes it at the RISING edge (the write-cycle and
+    /// puts a bit on the line at the falling edge and the module - or the
+    /// host, on a read - takes it at the rising edge (the write-cycle and
     /// read-cycle figures of those two sections). A clock that idles high
     /// and samples on its second edge is mode 3, the cycle as the data
     /// sheet writes it; one that idles low and samples on its first edge
@@ -191,9 +220,9 @@ struct Ili9481 {
     static constexpr uint32_t write_clock_max_hz = 12'500'000;
     static constexpr uint32_t read_clock_max_hz = 4'166'666;
 
-    /// WHAT ONE MODULE ON ONE DESK DID, which is a different statement
+    /// What one module on one desk did, which is a different statement
     /// and is kept apart from the one above: a write reads back exact at
-    /// the first of these and garbage at the second, and a READ is exact
+    /// the first of these and garbage at the second, and a read is exact
     /// at three times the data sheet's ceiling and wrong above it.
     static constexpr uint32_t measured_write_exact_hz = 12'000'000;
     static constexpr uint32_t measured_write_wrong_hz = 24'000'000;

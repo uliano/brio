@@ -1,13 +1,59 @@
 # CRC (CH32V203 and CH32V303)
 
-A hardware CRC-32 with one polynomial wired in, three registers and no
-options at all. Documents of record: the CH32F/V20x_V30x_V31x reference
+This document is for a programmer who wants a checksum computed in
+hardware on a CH32V203 or a CH32V303: a CRC-32 over a block of words,
+or over a byte stream packed into words, taken whole or in pieces. The
+block is a hardware CRC-32 with one polynomial wired in, three
+registers and no options at all, so it computes exactly one function,
+CRC-32/MPEG-2. The driver, `Crc`, is a monostate (a class with only
+static members, never instantiated: there is one unit) whose verbs feed
+words and read the running result; `util/crc.hpp` holds the same
+function in software, and the suite checks that the two agree.
+
+The smallest use, the first block of "How to use it" below:
+
+```cpp
+(void)brio::Crc::init();
+const uint32_t sum = brio::Crc::compute(words, count);
+const bool agrees = sum == brio::crc32_ethernet(words, count);
+```
+
+Line by line: `init()` opens the block's clock gate and resets the
+calculator to its initial value, and answers how many extra reads the
+reset took to land (zero on the CH32V203C8T6, below), which the line
+discards; `compute()` resets, feeds `count` 32-bit words from `words`
+in order and reads the result, and the caller's words are only read,
+during the call; `crc32_ethernet()` is the software twin from
+`util/crc.hpp`, here to show that both give the same number.
+
+What decides correctness even there: `init()` before the first
+checksum, because with the gate shut a store into the block is dropped
+in silence and a read returns the last word the bus carried rather than
+the register, so a checksum taken without it is a wrong number and no
+error ("The clock gate is the block's whole presence" below); the unit
+has one running result, so two contexts that checksum at once (an
+interrupt handler and the main loop) corrupt each other's answer, and
+the driver does not arbitrate that ("No ownership" below); and a byte
+stream is checksummed four bytes to a word, most significant first, so
+`compute_bytes()` takes only a length that is a multiple of four (any
+other is a compile error) and the padding of a shorter stream is part
+of the checksum's definition.
+
+The rest of this page, in order: the documents of record; what the
+silicon does; the types and verbs; how to use it, in four uses; the
+bench findings; and what is not covered.
+
+## Documents of record
+
+The CH32F/V20x_V30x_V31x reference
 manual V2.3, chapter 5 whole - which applies to the entire family and
 carries no per-class note, and which neither datasheet's resource table
 makes a per-part fact either. Driver:
 [brio/ch32vx03/crc.hpp](../../brio/ch32vx03/crc.hpp), over the software
 twin in [brio/util/crc.hpp](../../brio/util/crc.hpp). Reference suite:
-`test_vx03_misc`.
+`test_vx03_misc` (a suite's letter is one command key of its console
+and the group of verdicts it runs; `z` is the key that runs every
+letter but `w`, the one that reboots the board).
 
 ## What the silicon does
 
@@ -29,20 +75,20 @@ the suite measures.
 
 ### The data register is the operation
 
-Per the manual (5.2), one register, CRC_DATAR: a WRITE feeds a 32-bit
-word into the calculator, a READ returns the running result. There is
+Per the manual (5.2), one register, CRC_DATAR: a write feeds a 32-bit
+word into the calculator, a read returns the running result. There is
 no start bit and no ready flag - "the hardware calculation interrupts
 the write operation of the system, so new values can be written
 continuously" - and 5.1 prices the computation at four HCLK cycles. So
-back-to-back writes, and a read right after a write, are correct by
-construction and the cost is paid by the bus rather than by a poll.
+back-to-back writes, and a read right after a write, need no poll
+between them, and the cost is paid by the bus rather than by a poll.
 Reading does not consume the result either, which is what lets a
 checksum be taken in pieces.
 
 ### A word is the grain, and the program decides its byte order
 
 Per 5.2: the unit "calculates the whole 32-bit data word, rather than
-byte per byte". A BYTE STREAM therefore has no direct answer here.
+byte per byte". A byte stream therefore has no direct answer here.
 `word_be()` packs four bytes most-significant-first, which is the
 packing that makes the unit's result equal CRC-32/MPEG-2 over those
 bytes in that order; a stream whose length is not a multiple of four is
@@ -56,15 +102,15 @@ Per 5.3.3, CRC_CTLR has one bit, RST, write-only and self-clearing,
 which puts CRC_DATAR back to 0xFFFFFFFF. There is nothing else to
 configure, so a reset is what starts every checksum.
 
-WHETHER THE RESET LANDS INSTANTLY IS WHERE THIS BLOCK AND ITS RELATIVE
-DIFFER. The same design on an STM32F4 was measured taking a few cycles -
-a read of the data register in the next instruction returning the OLD
+Whether the reset lands instantly is where this block and its relative
+differ. The same design on an STM32F4 was measured taking a few cycles -
+a read of the data register in the next instruction returning the old
 running value, and a word written in the next instruction swallowed -
 and neither manual says so. Measured on the CH32V203C8T6: it lands
 before the next instruction can look. `Crc::reset()` waits for the
-initial value to appear and RETURNS how many extra reads that took,
+initial value to appear and returns how many extra reads that took,
 which is zero every time on that silicon, and a word stored in the very
-next instruction is TAKEN and not swallowed - so a checksum may be
+next instruction is taken and not swallowed - so a checksum may be
 started and fed with nothing in between.
 
 ### The scratch register is not part of the checksum
@@ -77,7 +123,7 @@ that store: measured, it takes a byte store, gives back all two hundred
 and fifty-six values, and survives both a reset and every word fed
 through the calculator.
 
-AND NOTHING SHORT OF A SYSTEM RESET CLEARS IT. This block has no line
+And nothing short of a system reset clears it. This block has no line
 in RCC_AHBRSTR, whose bits [11:0] are reserved (3.4.11), so there is no
 peripheral reset to offer and the driver offers none: what RST spares,
 only a reboot takes away. Measured on both halves - the pattern
@@ -89,11 +135,11 @@ after a software reset.
 Per 3.4.6, the block hangs off RCC_AHBPCENR's CRCEN, which is clear at
 reset. What that gate holds is not a detail a program can work around,
 and it is worth stating precisely because a register read is the usual
-way of asking whether a peripheral is there: MEASURED, with the gate
-shut a read of CRC_IDATAR - which held 0x3C - came back as the LOW BYTE
+way of asking whether a peripheral is there: measured, with the gate
+shut a read of CRC_IDATAR - which held 0x3C - came back as the low byte
 of the last word the data register had answered, and a read of the data
 register came back as that same word again. What a read returns from a
-block behind a closed gate is the last word the BUS carried, byte lane
+block behind a closed gate is the last word the bus carried, byte lane
 and all, never the register that was asked for; and a store into either
 register is dropped in silence. Re-opening the gate finds the running
 value and the scratch exactly where they were left, so the state is the
@@ -104,7 +150,7 @@ block's and the gate is what stands between the bus and it.
 Per the manual, the chapter has no interrupt register; the vector table
 has no CRC line; and no table of 11.2.3 maps a DMA request to this
 block, on either series. A bulk checksum is a loop of stores and nothing
-else. What a DMA channel CAN do is memory-to-memory into CRC_DATAR with
+else. What a DMA channel can do is memory-to-memory into CRC_DATAR with
 the destination not incremented - that is the DMA chapter's arrangement
 and [ch32vx03/dma.hpp](../../brio/ch32vx03/dma.hpp) already has every
 verb it needs, so nothing is added here for it.
@@ -221,12 +267,11 @@ and two in the letter that reboots the board.
   all: the scratch register read back as the data register's low byte
   and the data register as the word before it, both stores were lost,
   and re-opening the gate found the block exactly as it had been left.
-
-## Not covered yet
 - **The CH32V303VCT6** (`test_vx03_misc`, every letter of `z`): the
   fourteen verdicts above hold on that part as they do on the
   CH32V203C8T6.
 
+## Not covered yet
 
 Driver gaps, each with its reason:
 

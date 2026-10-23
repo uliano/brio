@@ -1,35 +1,51 @@
 /*
  * device.hpp
  *
- * The RP2350's device description, in one include: the CMSIS header
- * generated from the chip's SVD (the register blocks as structs, the
- * instance pointers, the IRQn enumerators, the core's revision and
- * priority width) and the pico-sdk's bit-field definitions for every
- * register of every block - both from third_party/pico-sdk/rp2350/, the
- * SVD's two halves. Every header of this stratum includes this one
- * first.
+ * The RP2350's device description, in one include, and the three things
+ * every driver of this stratum takes from it: the register map, the
+ * atomic register aliases, and the package the image is built for. A
+ * driver includes it first and writes, in this shape (resets.hpp's own
+ * hold and release; a program reaches registers only through drivers):
  *
- * AND IT IS THE SAME FILE ON BOTH ARCHITECTURES. This chip carries two
+ *     hw_set(RESETS->RESET, blocks);      // one bus write, no read
+ *     hw_clear(RESETS->RESET, blocks);
+ *     if (n >= gpio_count) { ... }        // a pad this image's package has not got
+ *
+ * Which context calls what. hw_set, hw_clear and hw_xor are one bus
+ * write each, with no read: legal from any context and from either
+ * core, they need no critical section to keep another context's bits.
+ * hw_write_masked reads the register first, so it is a read-modify-write
+ * again and belongs to one context at a time. The package constants are
+ * compile-time facts; nothing here waits or keeps storage.
+ *
+ * The description itself: the CMSIS header generated from the chip's
+ * SVD (the register blocks as structs, the instance pointers, the IRQn
+ * enumerators, the core's revision and priority width) and the
+ * pico-sdk's bit-field definitions for every register of every block -
+ * both from third_party/pico-sdk/rp2350/, the SVD's two halves. Every
+ * header of this stratum includes this one first.
+ *
+ * And it is the same file on both architectures. This chip carries two
  * Cortex-M33 cores and two Hazard3 RISC-V cores over one set of
- * peripherals, and the IRQ NUMBERING IS SHARED (datasheet 3.8.4.2), so
+ * peripherals, and the IRQ numbering is shared (datasheet 3.8.4.2), so
  * `RP2350.h`'s IRQn enumerators are as true of a hart as of an M33.
- * What is architecture-specific is the CORE, and RP2350.h's
+ * What is architecture-specific is the core, and RP2350.h's
  * unconditional `#include "core_cm33.h"` is the one thing the RISC-V
  * build must not take: its preset puts
  * third_party/pico-sdk/rp2350/no_core/ first on the include path, where
  * that name resolves to a stub. Nothing here, and nothing above here,
  * asks which processor is in the socket - brio/rp2350/core.hpp is the
- * ONE file that does.
+ * one file that does.
  *
- * WHY TWO HALVES. The CMSIS header names the registers (UART0->UARTFR)
+ * Why two halves. The CMSIS header names the registers (UART0->UARTFR)
  * and nothing inside them; the regs headers name every field
  * (UART_UARTFR_TXFF_BITS) and no struct. The SDK's own structs
  * (hardware/structs/) are not taken: they would be a third spelling of
- * the same map. hardware/regs/addressmap.h is NOT included: its *_BASE
+ * the same map. hardware/regs/addressmap.h is not included: its *_BASE
  * macros are the CMSIS header's too, and -Werror would see the
  * redefinition.
  *
- * ATOMIC REGISTER ALIASES (2.1.3). Every peripheral register on the APB
+ * Atomic register aliases (2.1.3). Every peripheral register on the APB
  * and AHB fabric answers at three more addresses: +0x1000 XORs the
  * written bits in, +0x2000 sets them, +0x3000 clears them - one bus
  * write, no read-modify-write, so a bit can be flipped from an interrupt
@@ -38,17 +54,18 @@
  * CMSIS structs name; the SIO block has its own SET/CLR/XOR registers
  * instead and never needs them.
  *
- * THE PACKAGE IS A BUILD FACT AND A SILICON FACT AT ONCE. This chip
- * comes in two packages that differ in what is BONDED: QFN-60 brings out
+ * The package is a build fact and a silicon fact at once. This chip
+ * comes in two packages that differ in what is bonded: QFN-60 brings out
  * 30 GPIO and four ADC inputs, QFN-80 brings out 48 and eight (1.2). The
  * die is one, so every register of every pin exists on both; what does
  * not exist is the pad. A build states the package it is for
- * (BRIO_RP2350_PACKAGE_PINS, rp2350/CMakeLists.txt) and then a pin the
- * package has not got is a COMPILE error; a build that states nothing
- * compiles for the larger package and the refusal happens at RUN time,
- * against SYSINFO.PACKAGE_SEL (rp2350/sysinfo.hpp). This file is where
- * both truths are stated once, and every later chapter reads them from
- * here rather than spelling 30 or 48 again.
+ * (BRIO_RP2350_PACKAGE_PINS, rp2350/CMakeLists.txt, which derives it
+ * from the project's RP2350_PACKAGE) and then a pin the package has not
+ * got is a compile error; a build that states nothing compiles for the
+ * larger package and the refusal happens at run time, against
+ * SYSINFO.PACKAGE_SEL (rp2350/sysinfo.hpp). This file is where both
+ * truths are stated once, and every later chapter reads them from here
+ * rather than spelling 30 or 48 again.
  */
 
 #pragma once
@@ -156,7 +173,7 @@ constexpr uint8_t package_adc_inputs(Package p) { return p == Package::qfn60 ? 4
 constexpr uint8_t package_adc_base_pin(Package p) { return p == Package::qfn60 ? 26u : 40u; }
 
 #if defined(BRIO_RP2350_PACKAGE_PINS)
-/// Whether the BUILD states which package this image is for: with it, a
+/// Whether the build states which package this image is for: with it, a
 /// pad the package has not got is a compile error; without it, the
 /// refusal is a run-time one against SYSINFO.PACKAGE_SEL.
 inline constexpr bool package_known = true;
@@ -168,7 +185,7 @@ inline constexpr bool package_known = false;
 inline constexpr Package package = Package::qfn80;
 #endif
 
-/// The size of the user GPIO bank in THIS image: the package's when the
+/// The size of the user GPIO bank in this image: the package's when the
 /// build states one, the larger package's otherwise.
 inline constexpr uint8_t gpio_count = package_gpio_count(package);
 /// The largest bank any package of this chip has - the size of the

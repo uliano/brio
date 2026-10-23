@@ -1,97 +1,211 @@
 # Platform (RP2350)
 
-Documents of record: the RP2350 datasheet (build d126e9e), 3.1 (the
-processor subsystem and SIO, with 3.1.2's CPUID and 3.1.8's platform
-timer), 3.2 (the interrupt lines, the six spare ones among them), 3.8
-(Hazard3: the CSRs, the interrupt controller, and 3.8.1.23 on `wfi`),
-3.8.4.2 (the interrupt numbering the two architectures share), 7.5 (the
-subsystem reset controller), 9.11 (the pad registers and their isolation
-latch), 12.15.1 (SYSINFO) and 12.15.3 (TBMAN), 2.1.3 (the atomic register aliases), appendix C
-(the hardware revisions) and appendix E (the errata, RP2350-E9 among
-them). The drivers: `brio/rp2350/platform.hpp` (the brio Platform
-itself), `core.hpp` with `core_m33.hpp` and `core_hazard3.hpp` (the one
-file of the stratum that asks which processor is in the socket, and its
-two halves), `ticker.hpp` (the kernel timebase, one per core),
+This document is for a programmer putting a brio program on an RP2350,
+on either of its two processor architectures. It describes what the
+kernel stands on here: the platform, the kernel timebase, the
+microsecond ruler, the subsystem reset controller and the registers the
+chip identifies itself by. A brio kernel asks the chip for a handful of
+things, stated by the kernel's `Platform` concept (a concept is a
+compiler-checked set of requirements on a type;
+[design/kernel.md, "Platform: what the machine provides"](../design/kernel.md#11-platform-what-the-machine-provides-kernelplatformhpp)):
+a way to mask interrupts for a critical section, a way to sleep until
+the next interrupt without losing one that arrives at the wrong moment,
+a source of time, a breakpoint for a panic, and a record a panic leaves
+for the next boot. `Rp2350Platform<core, TB>` is this chip's answer. It
+is one type per core, because the two cores of a pair run two kernels
+([multicore.md](multicore.md)), and one type for both architectures: the
+same source compiles for the Cortex-M33 pair and for the Hazard3 pair,
+and only `core.hpp` asks the compiler which one it is built for
+(`__riscv`); the three headers that must include a different file or run
+different instructions per architecture - `ticker.hpp`, `multicore.hpp`
+and `reset.hpp` - ask the macro `core.hpp` defines from that answer,
+`BRIO_RP2350_CORE_M33`. `TB` is the core's timebase, a 1000 Hz tick:
+SysTick on the Cortex-M33, a comparator of the RISC-V platform timer on
+Hazard3, under one name, `Ticker`. The ruler is that platform timer
+itself, `Mtime`, a 64-bit counter of microseconds that both
+architectures read. The platform's suite measures with it and with the
+two system timers of [timer.md](timer.md): `Timer<0>` in microseconds,
+the idle letter's rescue clock among its uses, and `Timer<1>` on clk_sys
+counting cycles, the unit of the rows of letters `w` and `o`.
+
+The smallest use, the start of a program, is an excerpt of the block
+under "How to use it" below:
+
+```cpp
+using P = brio::Rp2350Platform<>;
+using SysClock = brio::Clock<brio::ClockSource::pll, 150'000'000UL>;
+constexpr SysClock clock;
+
+extern "C" void isr_systick() { brio::Ticker::tick(); }
+
+int main() {
+    SysClock::init();
+    brio::Mtime::start(clock);      // the ruler; the Hazard3 ticker starts it too
+    brio::Ticker::init(clock);
+    brio::enable_interrupts();
+    brio::Tenuto<P, MyAo>::run();
+}
+```
+
+Line by line: `P` names core 0's platform with its default timebase,
+what a single-core program names; `SysClock` names the clock tree, here
+the system PLL at 150 MHz from the board's 12 MHz crystal
+([clock.md](clock.md)), and its `init()` is the clock task, the call
+that brings the tree up; `clock` is an empty tag object of that type,
+the argument the ruler and the ticker take to learn the rates;
+`isr_systick` is the timebase's interrupt handler, written `extern "C"`
+so that it carries the plain C name the crt - the startup code that
+holds the vector table - binds, and that name is the same on both
+architectures (SysTick's vector on the Cortex-M33, the machine timer
+trap the RISC-V crt routes there on Hazard3); `SysClock::init()` brings
+the tree up; `Mtime::start(clock)` starts the ruler, and may be called
+again: a second start keeps the count, restarts the tick generator and
+writes the counter's control register back to its enable bit alone,
+clearing FULLSPEED and both debug-pause bits if anything had set them;
+`Ticker::init(clock)` starts the kernel's tick; `enable_interrupts()`
+unmasks interrupts on this core; and `Tenuto<P, MyAo>::run()` starts the
+kernel over the program's active objects (`MyAo` stands for them: an
+active object is a component of a brio program with its own event queue,
+served one event at a time by the kernel,
+[docs/learn/introduction.md](../learn/introduction.md)) and never
+returns.
+
+Four things decide whether that works. The clock task must have run
+first: the SysTick reload is computed from the rate the clock type
+claims and the ruler's divisor from the reference clock's, neither read
+from the hardware. The program must bind `isr_systick` itself, as above;
+the kernel binds no vector, and a program that forgets it compiles,
+links and stops in the crt's default spin at the first tick. Interrupts
+must be enabled before `run()`, the precondition `Tenuto::run()` states
+(`brio/kernel/tenuto.hpp`): the kernel never unmasks them itself outside
+its idle, and the critical section around that idle restores the mask
+the loop entered with, so a loop entered masked would take the tick and
+every driver's interrupt only in the instant each idle returns, and not
+at all while events keep coming. And the ruler refuses a reference clock
+that is not a whole number of megahertz: `Mtime::start()` answers false
+then, and so does the Hazard3 ticker's `init()`, which stands on it (the
+Cortex-M33 ticker's `init()` answers false instead when the SysTick
+reload does not fit); the example discards both answers, and a Hazard3
+program on such a clock has a kernel with no time. A critical section
+here masks this core alone, so anything two kernels share goes through
+the bridge of [multicore.md](multicore.md) - an inbox each way and the
+SIO doorbell
+that rings the other core - and not through `CriticalSection`.
+
+The rest of this page, in order: the documents of record; what the
+silicon does (one platform type per core and for both architectures,
+the idle path, the ruler, the three meanings of reset, erratum
+RP2350-E9, the two registers called PLATFORM, the package); the types
+and verbs; how to use it; the bench findings, both halves side by side;
+"A handler in SRAM", an opt-in placement of a handler or a driver's hot
+path, with its measured cost; and what is not covered.
+
+## Documents of record
+
+The RP2350 datasheet (build d126e9e), 3.1 (the processor subsystem and
+SIO, with 3.1.2's CPUID and 3.1.8's platform timer), 3.2 (the interrupt
+lines, the six spare ones among them), 3.8 (Hazard3: the CSRs, the
+interrupt controller, and 3.8.1.23 on `wfi`), 3.8.4.2 (the interrupt
+numbering the two architectures share), 7.5 (the subsystem reset
+controller), 9.11 (the pad registers and their isolation latch), 12.15.1
+(SYSINFO) and 12.15.3 (TBMAN), 2.1.3 (the atomic register aliases),
+appendix C (the hardware revisions) and appendix E (the errata,
+RP2350-E9 among them). The drivers: `brio/rp2350/platform.hpp` (the brio
+Platform itself), `core.hpp` with `core_m33.hpp` and `core_hazard3.hpp`
+(the one file of the stratum that asks which processor is in the socket,
+and its two halves), `ticker.hpp` (the kernel timebase, one per core),
 `mtime.hpp` (the microsecond ruler), `resets.hpp`, `sysinfo.hpp` and
 `device.hpp`; 4.4.1 (the XIP cache) and `brio/util/placement.hpp` for
-the placement. The reference suite: `test_rp2350_platform`, which runs on
-BOTH architectures from one source and is judged the same way on each.
+the placement. The reference suite: `test_rp2350_platform`, which runs
+on both architectures from one source and is judged the same way on each
+(a letter is one command key of the suite's console and the group of
+verdicts it runs; `z` is the key that runs every letter but two, which
+run by name: `r`, the breadcrumb across a processor reset, and `x`,
+`break_here()`, which stops the console).
 
 ## What the silicon does
 
-**ONE PLATFORM TYPE PER CORE, AND ONE PLATFORM TYPE FOR TWO
-ARCHITECTURES.** `Rp2350Platform<core, TB>` is keyed by the core because
+**One platform type per core, and one platform type for two
+architectures.** `Rp2350Platform<core, TB>` is keyed by the core because
 the kernel's statics are keyed by the platform type, so two cores are two
-kernels with two packs, two timebases and two breadcrumbs. It is NOT
-keyed by the architecture: everything architecture-specific in it is a
+kernels with two packs (a pack is the program's list of active objects,
+the arguments of its `Tenuto`), two timebases and two breadcrumbs. It is
+not keyed by the architecture: everything architecture-specific in it is a
 name from `core.hpp`, so the same file, the same kernel and the same
 `util/` sit above the Cortex-M33 pair and the Hazard3 pair alike. What
 differs is one level down - PRIMASK against mstatus.MIE, WFI against
 `wfi`, BKPT against `ebreak`, SysTick against the platform timer's
 comparator.
 
-**THE IDLE PATH HAS NO LOST-WAKEUP WINDOW ON EITHER HALF, AND FOR TWO
-DIFFERENT REASONS.** The kernel's loop masks interrupts, looks at its
+**The idle path has no lost-wakeup window on either half, and for two
+different reasons.** The kernel's loop masks interrupts, looks at its
 queues, sleeps and unmasks; an interrupt that becomes pending between the
 look and the sleep must not put the core to sleep. On the Cortex-M33 that
 is ARM's rule, that a pending interrupt wakes WFI even through PRIMASK;
 on Hazard3 it is 3.8.1.23's, that `wfi` ignores mstatus.MIE and respects
 every other interrupt control. The two are the same promise in two
 spellings, which is why the kernel needs no target knowledge - and it is
-NOT the behaviour of the QingKe cores brio's other RISC-V strata run on,
+not the behaviour of the QingKe cores brio's other RISC-V strata run on,
 where the same sequence deadlocks. Neither sleep instruction has an
 event latch to leave behind (Hazard3's latch belongs to `h3.block`,
 3.8.6.3.1; the M33's event register to WFE), so a wake is one return of
 `idle()` and the kernel's loop turns once per interrupt - both halves of
 the contract measured below.
 
-**THE RULER IS THE PLATFORM TIMER, AND IT BELONGS TO EVERYBODY.** 3.1.8's
-64-bit counter is named for RISC-V and the datasheet is explicit that it
-is usable equally by either architecture; brio runs it on a tick divided
-out of clk_ref so that it counts MICROSECONDS and a change of clk_sys
-does not move it. It is the ruler every measurement here is taken with,
-and on the Hazard3 half it is ALSO the kernel timebase, its comparator
-raising the trap the tick handler serves. Its DBGPAUSE bits are cleared
-at init: a ruler one core's breakpoint can freeze for the other core is
-not a ruler.
+**The ruler is the platform timer, and it belongs to everybody.**
+3.1.8's 64-bit counter is named for RISC-V and the datasheet is explicit
+that it is usable equally by either architecture; brio runs it on a tick
+divided out of clk_ref so that it counts microseconds and a change of
+clk_sys does not move it. It is this page's ruler beside the two system
+timers named at the top, and on the Hazard3 half it is also the kernel
+timebase, its comparator raising the trap the tick handler serves. Its
+DBGPAUSE bits are cleared at init: a ruler one core's breakpoint can
+freeze for the other core is not a ruler.
 
-**RESET MEANS THREE DIFFERENT THINGS ON THIS CHIP**, and only one of them
-is the one a program's memories survive. A PROCESSOR reset (the debug
+**Reset means three different things on this chip**, and a program's
+memories survive more than one of them. A processor reset (the debug
 port's, SYSRESETREQ) resets the cores and leaves the SRAM, the clock tree
 and the peripherals exactly as they were - measured: a `.noinit` word and
-a panic breadcrumb cross it intact. A rescue over the debug port, a
-watchdog event or a power cycle do reset them. And the SUBSYSTEM reset
+a panic breadcrumb cross it intact. A watchdog event, a rescue over the
+debug port or a power cycle reset the system or the whole chip; of
+those, the watchdog's reboot and its time-out keep the `.noinit` SRAM
+and the watchdog's scratch registers (measured in [reset.md](reset.md),
+"Bench findings"), a power cycle keeps nothing, and what a rescue keeps
+is not measured ("Not covered yet" below). And the subsystem reset
 controller of 7.5 is a third thing again: every peripheral is held in
 reset at power-up, so "open the peripheral's clock" is "release its
 reset" here, and RESET_DONE is what says the release has taken.
 
-**ERRATUM RP2350-E9 IS LIVE ON STEPPING A2**, and it changes what an
+**Erratum RP2350-E9 is live on stepping A2**, and it changes what an
 input means. With its input buffer enabled, a pad that nothing drives
-leaks enough current through the input stage to sit HIGH against its own
+leaks enough current through the input stage to sit high against its own
 pull-down; a pad driven low and then released stays low. An idle level on
-this silicon is HISTORY and not a measurement. A program that must read a
-floating pad through its pulls drives it first, or uses the pull-UP and
-reads a LOW as its signal.
+this silicon is history and not a measurement. A program that must read a
+floating pad through its pulls drives it first, or uses the pull-up and
+reads a low as its signal; for a pad that must be held by its pull-down,
+[pin.md](pin.md) gives the erratum's own workaround, the input buffer
+kept off and switched on for the read alone (`read_pulsed()`).
 
-**THERE ARE TWO REGISTERS CALLED PLATFORM, AND THE ONE IN SYSINFO IS NOT
-THE ONE THAT ANSWERS.** SYSINFO's (12.15.1, offset 0x08) is a
-PRE-PRODUCTION indicator - its own description says the platform "is
+**There are two registers called PLATFORM, and the one in SYSINFO is not
+the one that answers.** SYSINFO's (12.15.1, offset 0x08) is a
+pre-production indicator - its own description says the platform "is
 always ASIC, non-SIM" post-production - and on production silicon the
 whole register reads zero, ASIC bit included (measured). The register
 that answers whether this is an ASIC is TBMAN's, whose ASIC bit the data
 sheet gives a reset value of 1 and which reads 1 here; `ChipId::asic()`
 reads that one.
 
-**THE PACKAGE IS A BUILD FACT AND A SILICON FACT AT ONCE.** The die is
+**The package is a build fact and a silicon fact at once.** The die is
 one and every pin's registers exist on both packages; what the QFN-60 has
 not got is the bond wire. A build that states its package refuses an
-absent pad at COMPILE time; a build that states none compiles for the
-larger package and refuses at RUN time against SYSINFO's PACKAGE_SEL.
+absent pad at compile time; a build that states none compiles for the
+larger package and refuses at run time against SYSINFO's PACKAGE_SEL.
 
 ## Types and verbs
 
 - `Rp2350Platform<core = 0, TB = CoreTicker<core>>` - the brio Platform:
-  `CriticalSection` (the RAII mask, PER CORE in both spellings, saved and
+  `CriticalSection` (the RAII mask - a guard object that masks
+  interrupts while it is in scope - per core in both spellings, saved and
   restored rather than cleared), `idle()` (sleep then unmask, through
   `sleep_hook` when a low-power state that is not a sleep instruction has
   armed one), `sleep_hook` (null unless a dormant site has armed one,
@@ -106,13 +220,27 @@ larger package and refuses at RUN time against SYSINFO's PACKAGE_SEL.
   `Irq` (the per-line controller over the device header's `IRQn_Type`:
   `enable`, `disable`, `enabled`, `set_pending`, `clear_pending`,
   `pending`), `irq_priority_levels`, `wait_for_interrupt()`,
-  `debug_break()`, `core_id()`. Plus `CoreKind` and `core_kind`, a VALUE,
+  `debug_break()`, `core_id()`. Plus `CoreKind` and `core_kind`, a value,
   so a driver with something genuinely different to do branches on it
-  with `if constexpr` instead of asking the preprocessor.
+  with `if constexpr` instead of asking the preprocessor. `core_kind` is
+  the image's own claim, and it is what this suite reports; the chip's
+  answer to which architecture is running is ARCHSEL_STATUS, in the OTP
+  block's register window, which `Otp::archsel_status()` reads
+  ([otp.md](otp.md), measured there); read over the debug port it is 0
+  after an Arm image and 3 after a RISC-V one.
 - `Ticker` / `CoreTicker<core>` - the kernel timebase at 1000 Hz, one per
   core: `init(clock)`, `tick()` (the handler's body, bound as
   `isr_systick` on both halves), `ticks`, `millis`, `secs`, `now`,
-  `advance`, `pause`, `resume`, `rebase`, `ticks_per_second`.
+  `advance`, `pause`, `resume`, `rebase`, `ticks_per_second`. This
+  suite runs `pause` and `resume` around letter `w`'s passes and judges
+  neither; `Ticker::advance` is the sleep sites' resync, measured in
+  [sleep.md](sleep.md), and `pause` and `resume` are judged per core in
+  [multicore.md](multicore.md).
+- `delay_us` - the microsecond busy-wait over the ruler, in
+  `rp2350/delay.hpp`: at least the time asked, refused at run time (it
+  answers false and waits nothing) from a whole kernel tick up;
+  documented and measured in [clock.md](clock.md). This page's suite
+  does not use it: every wait there is a spin on `Mtime::micros()`.
 - `Mtime` - the ruler: `start(clock)` (idempotent; false when clk_ref is
   not a whole number of megahertz), `running()`, `now()` (64 bits, read
   against a rollover of its low half), `micros()` (the low half alone,
@@ -121,21 +249,24 @@ larger package and refuses at RUN time against SYSINFO's PACKAGE_SEL.
 - `Resets` and `ResetBlock` - the subsystem reset controller:
   `release(blocks)` (with its bounded RESET_DONE wait), `hold`, `cycle`,
   `released`, `held`, `watchdog_resets`.
-- `ChipId` - SYSINFO: `read()` (manufacturer, part, the STEPPING the
+- `ChipId` - SYSINFO: `read()` (manufacturer, part, the stepping the
   errata are keyed by, with `revision_a2` / `a3` / `a4` beside it),
   `package_sel()`, `gitref()`, and `asic()`, which reads the testbench
   manager's register and not SYSINFO's of the same name.
-- `device.hpp`'s `hw_set` / `hw_clear` / `hw_xor` / `hw_write_masked` -
-  2.1.3's three write-only aliases of every APB and AHB register, one bus
-  write and no read-modify-write, which is what lets a bit be flipped
-  from a handler or from the other core with no critical section; and
+- `device.hpp`'s `hw_set` / `hw_clear` / `hw_xor` - 2.1.3's three
+  write-only aliases of every APB and AHB register, one bus write and no
+  read-modify-write, which is what lets a bit be flipped from a handler
+  or from the other core with no critical section - and `hw_write_masked`
+  over them, which reads the register first and then makes one XOR-alias
+  write: a read-modify-write again, fine for configuration and not for a
+  field two contexts race on; and
   `Package`, `package_gpio_count`, `gpio_count`, `gpio_count_max`,
   `package_known`.
 
 ## How to use it
 
 An app names the platform, the timebase and the clock, and binds its
-vectors by the crt's names - the SAME names on both architectures:
+vectors by the crt's names - the same names on both architectures:
 
 ```cpp
 using P = brio::Rp2350Platform<>;
@@ -167,7 +298,8 @@ A peripheral out of its reset state before its registers are touched:
 if (!brio::Resets::release(brio::ResetBlock::pwm)) { /* it never came ready */ }
 ```
 
-Reading a pad that nothing drives, on a part where E9 is live:
+Reading a pad that nothing drives, on a part where E9 is live (`Pad`
+is any `brio::Pin<n>`, [pin.md](pin.md)):
 
 ```cpp
 (void)Pad::input(brio::PinPull::up);   // and a LOW is the signal
@@ -398,16 +530,15 @@ Driver gaps, each with its reason:
   placed one too ("A handler in SRAM"), and the residue measured there on
   two placed bodies is not split. A placed copy of the dispatch is born
   with a program whose handlers must answer cold within a deadline.
-- `delay_us`. The microsecond busy-wait wants a measured fact per family
-  and a ruler both halves share; the ruler exists and the fact does not,
-  and nothing yet needs the verb - every wait in the suite is a spin on
-  `Mtime::micros()`.
 - The reboot and the causes of a boot: they belong to another chapter -
   [reset.md](reset.md) for the causes and the two reset verbs,
-  [watchdog.md](watchdog.md) for the countdown and the scratch registers
-  - which is why the breadcrumb letter HERE is driven by a reset from the
-  debug port and is outside `z`. The `.noinit` survival of a watchdog
-  reset and of a rescue is that chapter's to measure.
+  [watchdog.md](watchdog.md) for the countdown and the scratch
+  registers - which is why the breadcrumb letter HERE is driven by a reset from
+  the debug port and is outside `z`. The `.noinit` survival of a
+  watchdog reset is measured there (across a reboot and a time-out,
+  reset.md's findings); a rescue's is measured nowhere, a rescue being
+  the flash verb's own path, and a letter that banks a token in
+  `.noinit` before one and reads it after would measure it.
 - Interrupt priorities. Both halves have sixteen levels and neither uses
   them: the kernel's promise is that no interrupt nests over another, and
   it is kept structurally here (every line at the reset priority on the
@@ -415,34 +546,30 @@ Driver gaps, each with its reason:
   conventions run opposite ways - numerically higher is more urgent on
   Hazard3 - which is why `Irq` carries no priority verb at all.
 - `idle_until()`. The timebase runs while the core sleeps on either
-  half, so the plain idle path is the whole story until a power chapter
-  offers a state that stops it.
+  half, in the plain idle path and through a standby; the one rung that
+  stops it, DORMANT, is repaired afterwards only under the timed sleep
+  site, `Rp2350TimedSleepSite`, whose resync from the always-on timer
+  restores the time ([sleep.md](sleep.md)) - under the plain site the
+  deep rung has no witness and the time a dormant spent is lost - and
+  the platform offers no tickless idle.
 - The Cortex-M33's own extensions - the MPU, the SAU and TrustZone,
   MSPLIM, BASEPRI, the coprocessor ports: everything here runs Secure, as
   the bootrom hands over, and nothing has needed one.
-- Which architecture is running, asked of the CHIP rather than of the
-  build. The suite reports `core_kind`, which is the image's own claim,
-  and the chip's ARCHSEL_STATUS lives in the OTP block's register window,
-  which no driver of this stratum reaches yet; read over the debug port
-  it is 0 after an Arm image and 3 after a RISC-V one.
 
 Implemented but not bench-verified, each with what would measure it:
 
 - CORE 1, on either architecture. The platform is per core and the
   tickers are per core by construction, and the suite proves that
-  `on_own_core()` agrees with CPUID on core 0; nothing has launched a
-  second core here. The idle contract there would want letters `w` and
-  `o` launched on core 1 with `Rp2350Platform<1>` and `CoreTicker<1>`
-  (its own SysTick, its own comparator), the rescue enabled in core 1's
-  controller, and the SIO doorbell as a third edge placed from core 0. The launch, the bell and the bridge are
-  [multicore.md](multicore.md)'s, whose own list names the letter that
-  will measure each.
+  `on_own_core()` agrees with CPUID on core 0; this suite launches no
+  second core (core 1's launch, its ticker, its kernel and its panic are
+  measured in [multicore.md](multicore.md), with the bell and the
+  bridge). The idle contract there would want letters `w` and `o`
+  launched on core 1 with `Rp2350Platform<1>` and `CoreTicker<1>` (its
+  own SysTick, its own comparator), the rescue enabled in core 1's
+  controller, and the SIO doorbell as a third edge placed from core 0.
 - The QFN-60's run-time refusals: the stratum compiles for that package
   and the suite checks the die's own PACKAGE_SEL against the build's, but
   no QFN-60 part is on the bench.
-- `Ticker::advance`: born with the first sleep site that stops the
-  timebase, which is the power chapter's; `pause` and `resume` run
-  around letter `w`'s passes and are judged by nothing there.
 - The idle path through the DORMANT hook: its wake list is the dormant's
   own (a GPIO event, the always-on timer's alarm), and a wake already
   latched when the oscillator stops is not shown to end it at once. A

@@ -1,13 +1,50 @@
 /*
  * dac.hpp
  *
- * The digital-to-analog converter of the CH32V303 (RM ch. 17): `Dac`, a
- * MONOSTATE resource, because a part has one DAC block or none - every
- * CH32V303 has one with two channels, and no CH32V203 has any (datasheet
- * table 2-1-1 against the CH32V203's table 2-1; device::has_dac). On a part
- * without it `Dac` is a compile error naming the reason.
+ * The digital-to-analog converter of the CH32V303 (RM ch. 17) for a
+ * program that puts out a voltage: a level held on a pad, a datum moved
+ * to the output at a trigger's edge, a table played at a timer's pace by
+ * the DMA, both channels fed from one stream, or the block's own noise
+ * and triangle waves. `Dac` is a monostate resource (a class with only
+ * static members, never instantiated), because a part has one DAC block
+ * or none - every CH32V303 has one with two channels, and no CH32V203
+ * has any (datasheet table 2-1-1 against the CH32V203's table 2-1;
+ * device::has_dac). On a part without it `Dac` is a compile error naming
+ * the reason. `DacOut<ch>` is a channel's pad.
  *
- * WHAT THIS CONVERTER IS. Two 12-bit channels, DAC1 on PA4 and DAC2 on PA5
+ * The smallest use, a level on PA4 read back by the converter on the same
+ * pad, as docs/ch32vx03/dac.md's "How to use it" writes it:
+ *
+ *     brio::Dac::init();
+ *     brio::DacOut<1>::claim();                         // PA4, analog, before the enable
+ *     (void)brio::Dac::configure(1, brio::DacChannelConfig{});   // buffered, no trigger
+ *     (void)brio::Dac::enable(1, true);
+ *     (void)brio::Dac::write(1, brio::Dac::code_for_mv(1650, vdda_mv));
+ *
+ *     brio::Adc<1>::select_channel(brio::DacOut<1>::adc_channel);   // channel 4
+ *     const uint16_t counts = brio::Adc<1>::read_settled(4);
+ *
+ * Who calls what. init(), release(), configure(), enable(), wave(), dma(),
+ * claim_stream() and claim_dual_stream() are setup verbs, for main() or
+ * the handler of an active object (a component of a brio program with
+ * its own event queue, served one event at a time by the kernel): each
+ * is a read-modify-write of DAC_CTLR, the one word both channels share,
+ * or of RCC's gate and reset registers, with no guard of its own, so two
+ * contexts that change the two channels at once arrange the exclusion
+ * themselves; the two claim verbs also arm their engine on its DMA
+ * channel (ch32vx03/dma.hpp), which enables that channel's vector. The
+ * data verbs - write(), write_left(), write8(), the three dual writes,
+ * software_trigger() and software_trigger_both() - are one store each,
+ * and code(), output() and configuration() are loads: legal from any
+ * context. Nothing here waits or masks interrupts: enable() returns
+ * before the channel's wake-up time (6.5 to 10 us, datasheet table 4-45)
+ * and a write before the output settles (3 to 4 us), both the caller's
+ * to wait out. The block has no vector and no ISR body; a stream's
+ * interrupt is its DMA channel's, served by the engine's body in the
+ * program's handler for that channel. A stream's table is the caller's
+ * and outlives the stream; nothing here keeps storage.
+ *
+ * What this converter is. Two 12-bit channels, DAC1 on PA4 and DAC2 on PA5
  * (the datasheet's DAC1_OUT and DAC2_OUT, table 3-4), each with its own
  * enable, its own output buffer, its own trigger, its own wave generator
  * and its own DMA request - and no status register and no interrupt at
@@ -15,74 +52,74 @@
  * a flag. So there is no underrun here to report, no ISR body, and
  * nothing a program waits on but the output register itself.
  *
- * AND WHERE ITS OUTPUT GOES: TO A PAD, AND NOWHERE ELSE. No register of
+ * And where its output goes: to a pad, and nowhere else. No register of
  * this chapter routes a channel inside the chip, and PA4 and PA5 are also
  * the converter's inputs 4 and 5 (ADC_IN4 and ADC_IN5 on every package of
- * the datasheet's table) - so the ADC reads a DAC through the BOND PAD the
+ * the datasheet's table) - so the ADC reads a DAC through the bond pad the
  * two share, which is what makes a DAC-into-ADC measurement possible with
- * no wire at all. 17.2.2.1 asks for the pad in analog mode BEFORE the
+ * no wire at all. 17.2.2.1 asks for the pad in analog mode before the
  * channel is enabled; `DacOut<ch>::claim()` is that store, and PA4/PA5 are
  * also SPI1's pads, so a program with both blocks decides which one owns
  * them.
  *
- * FIVE FACTS THAT SHAPE THIS FILE.
+ * Five facts that shape this file.
  *
- * 1. CHANNELS ARE NUMBERED AS THE MANUAL NUMBERS THEM: 1 and 2, the
+ * 1. Channels are numbered as the manual numbers them: 1 and 2, the
  *    DAC1/DAC2 of the pad names and of the DMA table (11-3's "DAC1" on
  *    DMA2's channel 3, "DAC2" on its channel 4). The two channels' fields
  *    are the same bits sixteen apart in DAC_CTLR, and that is what makes
  *    every verb one body.
  *
- * 2. THE DATA REGISTER IS NOT THE OUTPUT REGISTER. A write lands in a
+ * 2. The data register is not the output register. A write lands in a
  *    holding register (nine spellings of it, 17.4.3 to 17.4.11: three per
  *    channel and three for both) and reaches DAC_DORx one PB1 cycle later
- *    with no trigger or after the software trigger, and THREE PB1 cycles
+ *    with no trigger or after the software trigger, and three PB1 cycles
  *    after a hardware trigger (17.2.2.5, 17.2.3). So `output(ch)` reads DOR and
  *    `code(ch)` reads the 12-bit right-aligned holding register back, and
- *    DOR is READ-ONLY - there is no verb here that writes it.
+ *    DOR is read-only - there is no verb here that writes it.
  *
- * 3. THE BUFFER IS DISABLED BY A ONE. BOFFx is an output buffer DISABLE
+ * 3. The buffer is disabled by a one. BOFFx is an output buffer disable
  *    (17.4.1), so the config field is `buffered` and the inversion happens
  *    once, here. The datasheet (table 4-45) rates a load of 5 kOhm with
  *    the buffer and 15 kOhm without, and an unbuffered output reaching
  *    closer to the rails (0 to 3 mV against 0 to 8 mV at the bottom).
  *
- * 4. A TRIGGER IS AN EDGE, AND THE WAVE GENERATORS AND THE DMA NEED ONE.
+ * 4. A trigger is an edge, and the wave generators and the DMA need one.
  *    17.2.4's and 17.2.5's notes make TENx a precondition of both
  *    generators; 17.2.2.4 raises the DMA request on a trigger event and
  *    "software trigger not included" - so a wave without a trigger and a
- *    DMA without a hardware one are REFUSED here rather than left silent.
+ *    DMA without a hardware one are refused here rather than left silent.
  *    TSELx cannot change with ENx set (17.2.2.5's note) and MAMPx must be
  *    set before the enable (17.2.4's note 2), which is why `configure()`
  *    drops the enable first and does not put it back.
  *
- * 5. A TRIGGER CODE NAMES A TIMER THE PART MAY NOT HAVE. Table 17-1's six
+ * 5. A trigger code names a timer the part may not have. Table 17-1's six
  *    timer codes are TIM6, TIM8, TIM7, TIM5, TIM2 and TIM4: every CH32V303
  *    has TIM2 and TIM4, the CH32V303RC and VC have the other four, and the
  *    128 KB CH32V303CB and RB have none of TIM5..TIM8 (table 2-1-1). A code
  *    whose timer is absent is refused - by a static_assert where the
  *    configuration is a constant, by false where it is not.
  *
- * THE DMA REQUEST IS ON DMA2: DAC1 on its channel 3, DAC2 on its channel 4
+ * The DMA request is on DMA2: DAC1 on its channel 3, DAC2 on its channel 4
  * (table 11-3, ch32vx03/dma_engine.hpp), and `claim_stream<ch, Engine>()`
  * arms an engine on the holding register its element width selects and
  * sets DMAENx in one verb, refusing at compile time an engine on any other
  * slot - an engine there would wait for a request that never comes. The
- * DUAL registers take one word for both channels, and WCH's own dual
+ * dual registers take one word for both channels, and WCH's own dual
  * example feeds DAC_RD12BDHR from DAC1's request alone; `claim_dual_stream`
  * does the same.
  *
- * WHAT THIS REGISTER SET HAS NOT, against the STM32F4's DAC this chapter
+ * What this register set has not, against the STM32F4's DAC this chapter
  * is the relative of: the underrun flag and its interrupt (no DAC_SR), and
  * the TIM6-shared vector that would carry it. RM V2.3's 17.4.1 also closes
- * with a note that with BOTH channels enabled "the same wave is output to
+ * with a note that with both channels enabled "the same wave is output to
  * 2 hardware channels according to the configuration of channel1"; RM V2.5
  * deletes that note and 17.3's eleven dual modes say the opposite, and the
  * silicon sides with the later text - on the CH32V303VCT6 each pad followed
  * its own channel's configuration with both enabled - so this driver
  * writes each channel's own fields (docs/ch32vx03/dac.md).
  *
- * THE REFERENCE is the converter's: 17.2.3 gives the output as VDDA x
+ * The reference is the converter's: 17.2.3 gives the output as VDDA x
  * DOR / 4096, and the datasheet (table 4-45) as VREF+, which is VDDA on
  * every package but the LQFP100, whose VREF+ pad the board ties
  * (ch32vx03/adc.hpp's `adc_reference`). util/analog.hpp's `dac_code()` and
@@ -271,7 +308,10 @@ constexpr uint8_t dac_adc_channel(uint8_t ch) { return ch == 1u ? 4u : ch == 2u 
 /**
  * DacOut<ch>: one channel's output pad. `claim()` puts it in analog mode,
  * which 17.2.2.1 asks for BEFORE the channel is enabled, and which is also
- * the mode the ADC reads it through.
+ * the mode the ADC reads it through. It opens the port's clock itself
+ * and is a read-modify-write of the port's configuration register with
+ * no guard, as every configuring Pin verb is: setup, in main() or an
+ * active object's handler.
  */
 template <uint8_t ch>
 struct DacOut {
@@ -332,7 +372,9 @@ public:
     static void reset() { Rcc::reset(Bus::pb1, rcc_pb1_dac); }
 
     /// Gate open, block reset, both channels off. The PADS are the
-    /// caller's, through `DacOut<ch>::claim()`.
+    /// caller's, through `DacOut<ch>::claim()`. A setup verb, before any
+    /// other verb of the block: read-modify-writes of RCC_PB1PCENR and
+    /// RCC_PB1PRSTR, no wait.
     static void init() {
         bus_clock(true);
         reset();
@@ -355,6 +397,11 @@ public:
      * 17.2.4), so this drops the enable first and does not put it back:
      * the caller enables after, which is also where the channel's wake-up
      * time (datasheet table 4-45's tWAKEUP, 6.5 to 10 us) is spent.
+     *
+     * False, with nothing written, for a channel other than 1 or 2 or a
+     * configuration dac_channel_config_valid() refuses. A setup verb: a
+     * read-modify-write of DAC_CTLR, which channel 2 shares, with no
+     * guard and no wait.
      */
     static bool configure(uint8_t ch, const DacChannelConfig& c) {
         if (!channel_valid(ch) || !dac_channel_config_valid(c)) {
@@ -418,7 +465,9 @@ public:
 
     /// ENx: the analog power to the channel (17.2.2.1), usable after the
     /// wake-up time. The holding registers work with the bit clear, which
-    /// is what lets a datum be primed before the output is on.
+    /// is what lets a datum be primed before the output is on. False only
+    /// for a channel other than 1 or 2; a read-modify-write of DAC_CTLR
+    /// that returns at once, the wake-up time the caller's to wait out.
     static bool enable(uint8_t ch, bool on) {
         if (!channel_valid(ch)) {
             return false;
@@ -463,7 +512,9 @@ public:
 
     // ---- data ------------------------------------------------------------------------
 
-    /// 12 bits right-aligned (DAC_R12BDHRx), the natural format.
+    /// 12 bits right-aligned (DAC_R12BDHRx), the natural format: the code
+    /// masked to twelve bits, one store, legal from any context. False
+    /// only for a channel other than 1 or 2.
     static bool write(uint8_t ch, uint16_t code) {
         if (!channel_valid(ch)) {
             return false;
@@ -586,8 +637,11 @@ public:
      * Hand channel `ch`'s request to a DMA engine: the engine armed on the
      * holding register of `format` and DMAENx set - the two things every
      * stream user must do, as one verb. The channel's configuration must
-     * already name a hardware trigger (17.2.2.4), which `configure()` has
-     * refused to leave out.
+     * already name a hardware trigger (17.2.2.4): `configure()` refuses a
+     * configuration whose `dma` is set without one, but this verb sets
+     * DMAENx whatever the trigger is and checks nothing, so a channel
+     * with no hardware trigger selected raises no request and the engine
+     * waits.
      *
      * REFUSED AT COMPILE TIME for an engine on the wrong slot - DAC1's
      * request is DMA2's channel 3 and DAC2's its channel 4 (table 11-3), and

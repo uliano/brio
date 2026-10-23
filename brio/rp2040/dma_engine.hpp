@@ -1,15 +1,20 @@
 /*
  * dma_engine.hpp
  *
- * The "no DMA engine" default of the two optional Uart engine slots,
- * the other families' tag verbatim (stm32g0/dma_engine.hpp is where its
- * reasoning is written): `present` is the only thing a transport asks
- * of an engine, with `if constexpr`, so every engine branch disappears
- * from a Uart that names none. The real engines live in rp2040/dma.hpp
+ * What a transport names when it wants no DMA: `NoDmaEngine`, the default
+ * of the two optional engine slots of `Uart`, `SpiHost` and `I2cHost`
+ * (rp2040/uart.hpp, spi.hpp, i2c.hpp). A program never writes it; it is
+ * what `brio::Uart<0, console_pins>` gets for the slots it leaves out.
+ * `present` is the only thing a transport asks of an engine, with
+ * `if constexpr`, so every engine branch disappears from a transport that
+ * names none - the same tag, with the same one member, as the transports
+ * of the other families with engine slots take (stm32g0/dma_engine.hpp
+ * writes its reasoning out). The real engines live in rp2040/dma.hpp
  * (twelve channels, two interrupt lines, 2.5), so that a program with a
- * serial port and no DMA never sees the block.
+ * serial port and no DMA never includes the block. Nothing here runs: the
+ * file holds types and constants only.
  *
- * The REQUEST NUMBERS live here too (table 119): on this chip a
+ * The request numbers live here too (table 119): on this chip a
  * request is a field any channel takes, so a transport tells its
  * engine which peripheral request paces it - and the transport must be
  * able to name that request without including the block.
@@ -26,7 +31,10 @@ struct NoDmaEngine {
     static constexpr bool present = false;
 };
 
-/// Two engines on one transport must not name the same DMA channel.
+/// Two engines on one transport must not name the same DMA channel:
+/// a request being a field any channel takes, the channel is the
+/// engine's identity. The UART's, the SPI's and the I2C's chip traits
+/// all answer their `engines_distinct()` with it.
 template <typename Tx, typename Rx>
 constexpr bool uart_engines_distinct() {
     if constexpr (Tx::present && Rx::present) {

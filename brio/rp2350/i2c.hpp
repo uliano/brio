@@ -2,73 +2,103 @@
  * i2c.hpp
  *
  * The I2C (datasheet 12.2: two Synopsys DW_apb_i2c controllers, IP
- * version 2.03a). The chapter's driver is NOT here: the DW_apb_i2c is a
- * licensed design this chip shares with others, so the resource, the host
- * engine and the client are written once in the IP stratum
- * (brio/dw_apb_i2c/i2c.hpp, docs/dw_apb_i2c/README.md) and this file is
- * what that file asks of a family -
+ * version 2.03a) for a program on either of this chip's architectures:
+ * a host that talks to devices on a bus - a sensor, a converter, a
+ * memory - through the shared bus arbiter, or a client that answers
+ * another chip's host. The smallest use, a host and its arbiter, is
+ * written out at the I2cHost alias below: the two pads named by number,
+ * `using Bus = brio::I2cHost<0, pins>`, `using I2c = brio::I2cBus<Bus,
+ * P, ...>` (the arbiter, an active object - a component with its own
+ * event queue that the kernel serves one event at a time),
+ * `Bus::init(clock)` after the clock task, `isr_i2c0` bound to
+ * Bus::isr() posting TransferDone, and a Bus::Request posted to I2c with
+ * its buffers lent and a reply channel inside (docs/rp2350/i2c.md reads
+ * it line by line).
+ *
+ * The chapter's driver is not here: the DW_apb_i2c is a licensed design
+ * this chip shares with others, so the resource, the host engine and the
+ * client are written once in the IP stratum (brio/dw_apb_i2c/i2c.hpp,
+ * docs/dw_apb_i2c/README.md) and this file is what that file asks of a
+ * family -
  *
  *  - the pin table of 9.4 with its function code, and the pad setup
  *    12.2.1.3 asks for;
- *  - `Rp2350DwApbI2c`, the CHIP TRAITS: the register block and where each
+ *  - `Rp2350DwApbI2c`, the chip traits: the register block and where each
  *    instance's sits, the reset bits of 7.5, the interrupt lines of 3.2,
  *    the atomic set/clear aliases of 2.1.3, the DREQ numbers of 12.6.4.1,
  *    the pad type with the function code that routes an I2C to it and the
  *    five verbs the unstick drives an open-drain line with (3.1.3: the
  *    SIO output enable is the drive, over an output register holding a
- *    zero), the microsecond ruler the unstick paces itself by, and WHICH
- *    RATE IS ic_clk - clk_sys (12.2.1.2), so the counts come from the
+ *    zero), the microsecond ruler the unstick paces itself by, and which
+ *    rate is ic_clk - clk_sys (12.2.1.2), so the counts come from the
  *    app's own clock and never from a second statement of the rate;
- *  - the PUBLIC NAMES: `DwApbI2c<n>` the resource, `I2cHost<n, pins,
+ *  - the public names: `DwApbI2c<n>` the resource, `I2cHost<n, pins,
  *    ...>` the engine util/i2c_bus.hpp's I2cBus drives and `I2cClient<n,
  *    pins>` the other end, this chip's aliases of the three IP templates.
  *
- * THE PINS ARE ONE COLUMN AND NOT TWO. Every fourth pad from GP0 carries
+ * Who calls what, and from where (the IP file and util/bus_master.hpp
+ * state each verb in full). init() is a setup verb: main(), after the
+ * clock task; it answers false when not even standard mode can be
+ * produced (a clock under 2.7 MHz) or the block did not come up, and it
+ * hands the pads over itself. A client of the bus posts its Request to
+ * the arbiter from its own dispatch, and the arbiter calls start() from
+ * main context; a speed the clock cannot produce is answered
+ * i2c_rejected there. isr() and dma_isr() are interrupt bodies, called
+ * from the program's handlers for the instance's line and the engines'
+ * DMA line and nowhere else; true from either means the tenure
+ * completed and the glue posts TransferDone. The Request's two buffers
+ * are lent from the post to the I2cDone the arbiter replies with:
+ * untouched and in scope until then, which nothing checks. unstick()
+ * disables the instance's line for its length and enables it again; it
+ * spends its half-bits on the platform timer, which must have been
+ * started (below).
+ *
+ * The pins are one column and not two. Every fourth pad from GP0 carries
  * an I2C signal - SDA on the even pads, SCL on the odd ones, the instance
  * alternating in pairs - so I2C0 has SDA on GP0, 4, 8, ... 44 and SCL on
  * 1, 5, 9, ... 45, and I2C1 has SDA on 2, 6, 10, ... 46 and SCL on 3, 7,
  * 11, ... 47. That is the RP2040's rule over a longer bank: forty-eight
  * pads on the QFN-80 against thirty, so twelve SDA pads and twelve SCL
- * pads per instance against eight and eight. WHAT THE UART GAINED HERE,
- * THIS BLOCK DID NOT: the UART's flow-control pads carry data too under a
+ * pads per instance against eight and eight. What the UART gained here,
+ * this block did not: the UART's flow-control pads carry data too under a
  * second function code, and 9.4 gives the I2C exactly one I2C entry per
  * pad, all forty-eight of them function 3. So `I2cPins` stays a pair of
  * pad numbers, as on the RP2040, and needs no column beside them.
  *
- * THE PADS COME UP ISOLATED (9.7 for the latch, 9.11 for the reset value
+ * The pads come up isolated (9.7 for the latch, 9.11 for the reset value
  * 0x116, which has it set and the input buffer off), so a pad set up as
  * on the RP2040 would answer nothing. Every configuring verb of pin.hpp
- * writes the whole pad register with ISO CLEAR, which is what makes the
+ * writes the whole pad register with ISO clear, which is what makes the
  * two lines reach the block; the setup 12.2.1.3 asks for - pull-up, slew
  * limited, Schmitt trigger - is `i2c_pad_config` below, and the board's
  * own pull-ups do the pulling.
  *
- * THE BANK IS TWO WORDS, which is the one thing `I2cPad` does not share
+ * The bank is two words, which is the one thing `I2cPad` does not share
  * with its RP2040 twin: SIO holds GPIO0..31 in GPIO_OE and GPIO32..47 in
  * GPIO_HI_OE, so an open-drain drive by hand picks the half the pad falls
- * in. `Pin<n>::mask` is the pin's bit in ITS OWN half and `high_half`
+ * in. `Pin<n>::mask` is the pin's bit in its own half and `high_half`
  * says which, so the choice is an `if constexpr` and costs nothing.
  *
- * THE LINE. The thirteen sources of an instance combine into ONE
+ * The line. The thirteen sources of an instance combine into ONE
  * interrupt line (I2C0_IRQ = 36, I2C1_IRQ = 37, datasheet 3.2); the app
  * binds isr_i2c0 / isr_i2c1 to the instance's isr() or service() body,
- * and those names are bound on BOTH architectures - a Cortex-M vector
+ * and those names are bound on both architectures - a Cortex-M vector
  * table on one half, Hazard3's own dispatch on the other - because the
  * interrupt numbering is shared (3.8.4.2). Which is also why
  * `Interrupts` below is the controller core.hpp names and never an NVIC.
  *
- * THE BUS CLEAR of 12.2.13 (nine clocks and a STOP by the master) has no
+ * The bus clear of 12.2.13 (nine clocks and a STOP by the master) has no
  * enable in this chip's IC_CON, whose writable bits are 0x7FF and stop at
  * the eleventh - so the unstick is by hand, which is why the traits carry
  * the open-drain verbs.
  *
- * THE RULER THE UNSTICK PACES ITSELF BY is rp2350/delay.hpp, which counts
- * THE PLATFORM TIMER and not CPU cycles, because that counter is the one
+ * The ruler the unstick paces itself by is rp2350/delay.hpp, which counts
+ * the platform timer and not CPU cycles, because that counter is the one
  * ruler both architectures have (the file says why). It follows that a
  * program which calls `unstick()` must have started that counter -
  * `Mtime::start(clock)`, which the Hazard3 half's ticker already does and
  * the Cortex-M33 half's does not. With the counter stopped every wait is
- * REFUSED and spends no time, so the nine pulses go out at the speed of
+ * refused and spends no time, so the nine pulses go out at the speed of
  * two register writes: legal on the wire, far faster than a bus, and
  * measurable, which is how the reference suite states it.
  */
@@ -98,11 +128,11 @@ struct I2cPins {
     uint8_t sda = 0xFFu;
 };
 
-/// SDA is an EVEN pad, and which instance it belongs to is the pad number
+/// SDA is an even pad, and which instance it belongs to is the pad number
 /// halved: GP0/GP1 are I2C0's, GP2/GP3 I2C1's, and so on in pairs to
 /// GP47.
 ///
-/// The PACKAGE is not asked here: every pad's registers exist on both
+/// The package is not asked here: every pad's registers exist on both
 /// packages and only the bond wire does not, so a pad the QFN-60 has not
 /// got is refused one level down, by `Pin<n>`'s own static_assert, which
 /// says so in those words.
@@ -119,16 +149,16 @@ constexpr bool i2c_pins_valid(uint8_t n, const I2cPins& p) {
 
 /// The pad configuration 12.2.1.3 asks for: pull-up, slew limited,
 /// Schmitt trigger. The board's pull-ups do the pulling; the pad's is a
-/// courtesy, and the note beside that list says so. Writing this value IS
+/// courtesy, and the note beside that list says so. Writing this value is
 /// taking the pad out of isolation (pin.hpp's `pad_value`).
 inline constexpr PinConfig i2c_pad_config{.pull = PinPull::up, .drive = PinDrive::ma4, .slew_fast = false,
                                           .schmitt = true, .input_enable = true};
 
 /**
  * One pad of an I2C, with the two verbs the unstick adds to a Pin's: an
- * open-drain line is driven by its OUTPUT ENABLE alone, over an output
+ * open-drain line is driven by its output enable alone, over an output
  * register the caller has already cleared (3.1.3's GPIO_OE_SET and
- * GPIO_OE_CLR). This chip's bank is TWO words, so each verb picks the
+ * GPIO_OE_CLR). This chip's bank is two words, so each verb picks the
  * half its pad falls in - the one place where the RP2040's I2cPad would
  * have written the wrong register for GP32..GP47.
  */
@@ -188,7 +218,7 @@ struct Rp2350DwApbI2c {
     template <uint8_t i>
     static constexpr Irq irq() { return i == 0 ? I2C0_IRQ_IRQn : I2C1_IRQ_IRQn; }
 
-    /// The instance's bit in the subsystem reset controller (7.5). NOT
+    /// The instance's bit in the subsystem reset controller (7.5). Not
     /// the RP2040's bits: this chip's controller governs twenty-nine
     /// blocks against twenty-seven and everything above the third has
     /// moved, so the numbers come from this chip's own header through
@@ -196,7 +226,7 @@ struct Rp2350DwApbI2c {
     template <uint8_t i>
     static constexpr uint32_t reset_bit() { return i == 0 ? ResetBlock::i2c0 : ResetBlock::i2c1; }
 
-    /// The three verbs over it, FORWARDERS and declared as such: each is
+    /// The three verbs over it, forwarders and declared as such: each is
     /// one call with a constant argument, and the function the compiler
     /// outlines must be the resource's verb rather than a frame of this
     /// file's.
@@ -207,7 +237,7 @@ struct Rp2350DwApbI2c {
     template <uint8_t i>
     [[gnu::always_inline]] static void hold() { Resets::hold(reset_bit<i>()); }
 
-    /// 12.6.4.1: the two data requests of an instance. NOT the RP2040's
+    /// 12.6.4.1: the two data requests of an instance. Not the RP2040's
     /// numbers - a third PIO and twelve PWM slices moved every row above
     /// the first PIO's, so the I2Cs sit at 44..47 where they sat at
     /// 32..35 (dma_engine.hpp).
@@ -230,7 +260,7 @@ struct Rp2350DwApbI2c {
     /// (9.4: F3 on every I2C pad, and there is no second column here)
     /// and the electrical setup both lines want; `open_drain_pull` is
     /// what a line released by hand idles at while the unstick owns it -
-    /// the pull-UP, which is also why erratum RP2350-E9 cannot colour
+    /// the pull-up, which is also why erratum RP2350-E9 cannot colour
     /// what the unstick reads.
     template <uint8_t pin>
     using Pad = I2cPad<pin>;
@@ -239,7 +269,7 @@ struct Rp2350DwApbI2c {
     static constexpr PinPull open_drain_pull = PinPull::up;
 
     /// Two engines of one host must not share a channel: on this chip a
-    /// request is a field any channel takes, so the CHANNEL is the
+    /// request is a field any channel takes, so the channel is the
     /// identity (rp2350/dma_engine.hpp).
     template <typename Tx, typename Rx>
     static constexpr bool engines_distinct() { return uart_engines_distinct<Tx, Rx>(); }
@@ -272,7 +302,10 @@ template <uint8_t n>
 using DwApbI2c = DwApbI2cBlock<Rp2350DwApbI2c, n>;
 
 /**
- * The engine util/i2c_bus.hpp's I2cBus drives, over DwApbI2c<n>.
+ * The engine util/i2c_bus.hpp's I2cBus drives, over DwApbI2c<n>. `init()`
+ * in main after the clock task, the handler bound to `isr()` posting
+ * TransferDone to the arbiter, then every tenure a Request posted to that
+ * arbiter:
  *
  *   constexpr brio::I2cPins pins{.scl = 13, .sda = 12};
  *   using Bus = brio::I2cHost<0, pins>;
@@ -303,7 +336,7 @@ using I2cClient = DwApbI2cClient<Rp2350DwApbI2c, n, pins>;
 
 // The IP file spells the block's bits itself, because it may not read a
 // vendor header; here is where the two are held against each other. This
-// chip's i2c.h is its own file in its own include root, and these are ITS
+// chip's i2c.h is its own file in its own include root, and these are its
 // macros - that they turn out to agree with the other chip's, register
 // for register, is the measurement that made an IP stratum worth having
 // and not an assumption this file may make.

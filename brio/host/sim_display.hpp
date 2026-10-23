@@ -1,16 +1,34 @@
 /*
  * sim_display.hpp (host)
  *
- * A PANEL THAT SOMETHING ELSE SCANS OUT. On a part with a display
+ * A panel that something else scans out. On a part with a display
  * controller the program writes pixels into memory and a peripheral
  * reads that memory on its own, without being asked and without the
  * program ever waiting. This publishes a framebuffer into POSIX shared
  * memory so a viewer in another process can do exactly that - read the
  * same physical pages, at its own rate, tearing where a real panel would
  * tear. It is a faithful model of the memory-mapped tier and not an
- * imitation of one.
+ * imitation of one (docs/host/simulator.md, "Pixels out").
  *
- * THIS IS NOT A SURFACE. It owns the mapping and publishes what the
+ * The smallest use, in the shape a host program builds it: a display
+ * of a format and a size under a name a viewer opens, its palette, the
+ * drawing surface over its bytes, and a publish() when the picture
+ * changed:
+ *
+ *     using Screen = SimDisplay<Indexed8, 256, 128>;
+ *     Screen display("supply");                 // the segment /brio-gfx-supply
+ *     display.set_palette(0, 0x10, 0x14, 0x1C);
+ *     Screen::Surface surface = display.surface();
+ *     brio::fill_rect(surface, 0, 0, 256, 128, 0);
+ *     display.publish();
+ *
+ * Contexts: the program owns the display and draws from its own thread
+ * of control, the kernel's dispatch on the host; the viewer reads the
+ * same pages whenever it likes. Nothing waits and nothing locks: a
+ * picture read in the middle of a drawing tears, as a real panel's
+ * would. The constructor throws when the segment cannot be made.
+ *
+ * This is not a surface. It owns the mapping and publishes what the
  * mapping holds; the drawing surface is an ordinary Framebuffer over the
  * bytes it hands out. So nothing in gfx/ knows that its pixels live in
  * shared memory, and the same library code runs against a plain array in
@@ -55,7 +73,7 @@ struct SimPixelCode<Indexed8> {
 
 /**
  * What sits at the front of the segment. Fixed layout, little-endian
- * (every target brio has is), and SELF-DESCRIBING: a viewer reads this
+ * (every target brio has is), and self-describing: a viewer reads this
  * and needs no arguments of its own.
  *
  * `frame` is bumped by publish(); a viewer that repaints only when it
@@ -87,7 +105,7 @@ inline constexpr size_t sim_display_header_bytes = 1024;
 static_assert(sizeof(SimDisplayHeader) <= sim_display_header_bytes);
 
 /// The bytes a segment holds by its own account - the header and the
-/// pixel planes - which is what a viewer reads. It is NOT the size the
+/// pixel planes - which is what a viewer reads. It is not the size the
 /// operating system reports for the object: macOS rounds that up to a
 /// page (host/shared_segment.hpp), so the count comes from the header
 /// the program wrote, and the object's size only bounds what may be

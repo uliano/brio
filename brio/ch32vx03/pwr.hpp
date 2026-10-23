@@ -1,23 +1,69 @@
 /*
  * pwr.hpp
  *
- * The power controller (RM ch. 2): the three low-power modes and the
- * pair of bits that choose between them, the regulator's price in a
- * Stop, what a Standby keeps of the RAM, the supply monitor with its
- * own EXTI line, the wake-up pad, and the two flags a program reads at
- * the boot to learn how it got there.
+ * The power controller of the CH32V203 and the CH32V303 (RM ch. 2) as
+ * `Pwr`, a monostate (a class with only static members, never
+ * instantiated: one block, one set of state), with the types and the
+ * arithmetic around it: the three low-power modes and the pair of bits
+ * that choose between them, the regulator's price in a Stop, what a
+ * Standby keeps of the RAM, the supply monitor with its own EXTI line,
+ * the wake-up pad, and the two flags a program reads at the boot to
+ * learn how it got there. A program that sleeps through the power model
+ * reaches the Sleep and the Stop through ch32vx03/sleep.hpp's sites,
+ * which arm them here; it calls `Pwr` itself for Standby on purpose, the
+ * flags, the retention bits and the supply monitor. The smallest use,
+ * Standby with the way back armed first, as docs/ch32vx03/sleep.md's
+ * "How to use it" spells it (`Site` a plain sleep site):
  *
- * TWO REGISTERS, AND A THIRD PLACE. PWR_CTLR and PWR_CSR are the whole
+ *     (void)brio::Pwr::wakeup_pin(true);        // PA0's rising edge - or the RTC's alarm
+ *     brio::Pwr::retain_ram(true);              // the first bank: 2 KB on a D8 class, all of it on the D6
+ *     brio::Pwr::retain_upper_ram(true);        // the 30 KB above it, where the class has it
+ *     Site::enter_standby();
+ *     // ... at the next boot:
+ *     if (brio::Pwr::standby_flag()) { brio::Pwr::clear_flags(); }
+ *
+ * Which context calls what. No verb here masks interrupts, and nothing
+ * waits but the three instruction verbs (`wait_for_interrupt()`,
+ * `wait_for_event()`, `enter()`), which sleep until a wake. Every verb
+ * that reaches PWR_CTLR or PWR_CSR first opens the block's gate, a
+ * read-modify-write of RCC_PB1PCENR, and the configuring verbs are
+ * read-modify-writes of PWR_CTLR, PWR_CSR, PFIC_SCTLR, EXTEN_CTR, the
+ * EXTI registers or the kept copy in RAM, none with a guard of its own:
+ * they belong to main() or to one active object's handler at a time (an
+ * active object is a component of a brio program with its own event
+ * queue, served one event at a time by the kernel). One of them is also
+ * reached from an interrupt: `arm()`, through the plain sleep site's
+ * disarm(), which the timed site's isr() calls from the RTC alarm's
+ * interrupt (ch32vx03/sleep.hpp), so PWR_CTLR, PFIC_SCTLR and the gate
+ * are written from there too. The flag readers, `mode()` and
+ * `supply_low()` are loads after that gate store; `debug_cr()` and its
+ * four readers are one CSR read; the retention readers read the kept
+ * copy and touch no register, bar `retention_readback()`, which reads
+ * PWR_CTLR after the gate store, and `stop_config()` reads LPDS off the
+ * register and RAMLV off the copy. `pvd_isr()` is the body the program
+ * binds to the PVD's vector (`pvd_handler`, the crt's name), whose PFIC
+ * line the program enables itself - `arm_pvd()` arms the EXTI line
+ * alone - and it runs nowhere else; it reads PVDO through
+ * `supply_low()`, so it too stores the gate from an interrupt. Either
+ * store from an interrupt is a read-modify-write of RCC_PB1PCENR that
+ * writes back the value it read with PWREN, already set by then (the
+ * detector was enabled through PWR_CTLR, the timed site's init() opened
+ * the gate), and so loses no main-context store it lands inside. A
+ * false answer means what each verb's comment says: a configuration the
+ * chapter forbids, a level past the field, a line EXTI refuses, a bit
+ * that does not read back as written.
+ *
+ * Two registers, and a third place. PWR_CTLR and PWR_CSR are the whole
  * chapter (table 2-2); their map is ch32vx03/device.hpp's, because the
  * RTC chapter reaches the same block for DBP alone. Two bits that
  * belong to this subject are in neither register - the core voltage and
  * the low-power one - because this family puts in EXTEN_CTR (ch. 33)
  * what did not fit elsewhere; they are verbs of `Pwr` here, so a reader
  * looking for the regulator finds it in the power chapter's file. A
- * third bit of that register, HSEPLP, is the CLOCK chapter's
+ * third bit of that register, HSEPLP, is the clock chapter's
  * (`Rcc::hse_in_low_power()`): it is about the oscillator.
  *
- * ## The three modes, and the ONE pair of bits that names them
+ * ## The three modes, and the one pair of bits that names them
  *
  * Table 2-1, with the entry conditions of 2.3.2 .. 2.3.4:
  *
@@ -29,18 +75,18 @@
  *                                       and registers are kept, the
  *                                       pins hold their state; only an
  *                                       EXTI line ends it, and the
- *                                       program resumes ON THE HSI
+ *                                       program resumes on the HSI
  *   Standby  SLEEPDEEP = 1, PDDS = 1    the same, plus the regulator
  *                                       off; the documented exits are
  *                                       the WKUP pad's rising edge, the
  *                                       RTC alarm, the NRST pad and an
  *                                       IWDG reset (the alarm and the
- *                                       watchdog measured) - and AN
- *                                       ORDINARY EXTI LINE ends it too,
+ *                                       watchdog measured) - and an
+ *                                       ordinary EXTI line ends it too,
  *                                       which 2.3.4 does not say
  *                                       (measured) - and every one of
- *                                       them comes back THROUGH A POWER
- *                                       RESET
+ *                                       them comes back through a power
+ *                                       reset
  *
  * SLEEPDEEP is the core's, not this block's (2.3's note points at
  * PFIC_SCTLR), which is why `arm()` writes the pair together: neither
@@ -50,7 +96,7 @@
  * kernel hook. `enter()` is the deliberate one-shot for a program that
  * means to stop right here.
  *
- * LPDS PRICES A STOP: with it clear the regulator stays in its normal
+ * LPDS prices a Stop: with it clear the regulator stays in its normal
  * mode, with it set the regulator goes low-power, and RAMLV on top of
  * that puts the RAM itself in its low-voltage mode (2.3.3, and RAMLV's
  * own note: "valid when the LPDS bit is 1"). Nothing here measures what
@@ -58,11 +104,11 @@
  * document says so - so they are a `StopConfig` a caller states and
  * this file only enforces the interlock.
  *
- * WHAT A STANDBY KEEPS, PER CLASS. 2.3.4 gives four bits, and the
+ * What a Standby keeps, per class. 2.3.4 gives four bits, and the
  * register description keys them by device class in a way that is easy
  * to misread: on the CH32V20x_D6 - every part of this series but the
- * CH32V203RB - R2KSTY and R2KVBAT govern THE WHOLE 20 KB (which is
- * that class's LARGEST array: four parts of this series carry ten),
+ * CH32V203RB - R2KSTY and R2KVBAT govern the whole 20 KB (which is
+ * that class's largest array: four parts of this series carry ten),
  * and R30KSTY and R30KVBAT do not exist; on the D8 classes they are a
  * 2 KB bank at the bottom of SRAM and a 30 KB one above it, and nothing
  * above 32 KB is kept (measured on the CH32V303VC, bank by bank). So the
@@ -70,11 +116,11 @@
  * `ram_retention_bytes` says what the first one covers on the part
  * being compiled.
  *
- * AND THOSE BITS ARE WRITE-ONLY ON THE CH32V303VC, measured: bits 16..20
+ * And those bits are write-only on the CH32V303VC, measured: bits 16..20
  * read back zero whatever was written, and act - so a read-modify-write
  * of PWR_CTLR, any of them, writes them away, and a Standby entered after
  * one keeps nothing. The program's choice is therefore kept in RAM
- * (device.hpp's pwr_ctlr_kept) and EVERY store to the register carries it
+ * (device.hpp's pwr_ctlr_kept) and every store to the register carries it
  * (pwr_ctlr_store(), which the RTC chapter's DBP goes through too); the
  * readbacks of those five bits are that copy, the silicon's being
  * unreadable there. RAMLV is one of them. The copy starts at zero at
@@ -83,45 +129,45 @@
  * the copy, so a program states its retention again before every
  * Standby - whether they outlive a reset is not measured.
  *
- * THE PVD IS TWO TABLES AND THE PART DOES NOT SAY WHICH. PLS[2:0]
+ * The PVD is two tables and the part does not say which. PLS[2:0]
  * selects one of eight thresholds, and 2.4.1 gives two sets of
  * voltages: one for dies whose FEATURE_SIGN.VLEVEL reads 1 (a supply
  * from 2.4 V) and one for dies where it reads 0 (from 1.8 V), with
  * 33.2.3 adding that the register is only to be believed when its low
  * byte is the inverse of the next - and that a die failing that test is
- * to be read as the 2.4 V kind. That is a fact about the DIE and not
+ * to be read as the 2.4 V kind. That is a fact about the die and not
  * about the part number, so it cannot be a constant in parts/: the
- * millivolts of a level are a RUN-TIME question here, and
+ * millivolts of a level are a run-time question here, and
  * `pvd_rising_mv(level)` reads the die to answer it. The constexpr
  * forms take the supply level as an argument for a program that knows.
  *
- * THE WAKE-UP PAD IS PA0, on every package of this series (datasheet
+ * The wake-up pad is PA0, on every package of this series (datasheet
  * 3.2's pin tables name it PA0-WKUP in all four). EWUP forces it to an
  * input with a pull-down and arms its rising edge as a Standby exit;
  * with EWUP clear it is an ordinary pin. WUF is the flag it raises -
  * and the RTC alarm raises the same one (2.4.2's own wording), which is
- * why a program that arms both learns from it only THAT it was woken.
+ * why a program that arms both learns from it only that it was woken.
  *
- * AND WUF IS THE WAKE'S FLAG AND NOT THE EVENT'S, measured: neither an
+ * And WUF is the wake's flag and not the event's, measured: neither an
  * alarm served with the core running nor an edge on the pad with EWUP
  * set and the core running moves it, while a Standby ended by that same
- * alarm comes back with it standing. It is therefore read at the BOOT,
+ * alarm comes back with it standing. It is therefore read at the boot,
  * beside SBF, and it tells one exit from another - a Standby ended by
  * an ordinary EXTI line comes back with SBF alone.
  *
- * THE DEBUG MODULE'S LOW-POWER BITS ARE READ HERE AND NEVER WRITTEN.
+ * The debug module's low-power bits are read here and never written.
  * DBGMCU_CR (34.2.1) is a core CSR at 0x7C0 on this family, and its
  * three lowest bits decide whether FCLK and HCLK keep running in Sleep,
  * in Stop and in Standby - which is to say whether a debugger's
  * presence turns a measurement into a fiction. A `csrw` to that CSR
- * from the running program RESETS THE PART on this silicon (measured,
- * docs/ch32vx03/README.md), so this file offers the three READS and no
+ * from the running program resets the part on this silicon (measured,
+ * docs/ch32vx03/README.md), so this file offers the three reads and no
  * writer at all: a suite says what it found and refuses to trust a
  * timing it did not take with them clear.
  *
- * WHAT IS NOT HERE. There is no flash power-down bit in this chapter
+ * What is not here. There is no flash power-down bit in this chapter
  * (PWR_CTLR [15:9] is reserved, where the sister family carries
- * FLASH_LP), no low-power RUN mode (2.3 lists three modes and no
+ * FLASH_LP), no low-power run mode (2.3 lists three modes and no
  * fourth), and no auto-wake-up unit: the alarm that ends a Stop on this
  * family is the RTC's, through EXTI line 17 (2.3.5), and
  * ch32vx03/sleep.hpp is what arms it. VBAT itself is a pin and not a
@@ -157,7 +203,7 @@ inline constexpr uint32_t pwr_pls_mask  = 0x7UL << 5;
 inline constexpr uint32_t pwr_pls_shift = 5;
 // pwr_dbp (bit 8) is device.hpp's: the RTC chapter opens the domain with it.
 inline constexpr uint32_t pwr_r2ksty    = 1UL << 16;   ///< the first RAM bank kept in Standby
-inline constexpr uint32_t pwr_r30ksty   = 1UL << 17;   ///< the second bank, CH32V20x_D8 alone
+inline constexpr uint32_t pwr_r30ksty   = 1UL << 17;   ///< the second bank, the D8 classes alone
 inline constexpr uint32_t pwr_r2kvbat   = 1UL << 18;   ///< the first bank kept on VBAT
 inline constexpr uint32_t pwr_r30kvbat  = 1UL << 19;   ///< the second on VBAT, D8 alone
 inline constexpr uint32_t pwr_ramlv     = 1UL << 20;   ///< the RAM's low-voltage mode, needs LPDS
@@ -307,10 +353,12 @@ static_assert(pvd_falling_mv(PvdLevel::level3, PwrSupplyLevel::from_1v8) <
  *   if (brio::Pwr::standby_flag()) { ... we came back from a Standby ... }
  *   brio::Pwr::clear_flags();
  *
- * EVERY VERB OPENS THE GATE FIRST. PWREN in RCC_PB1PCENR is clear out
- * of reset (3.4.8) and this block's registers answer nothing through a
- * closed gate, so a read that skipped the gate would report a state the
- * silicon never held.
+ * Every verb that reaches this block's two registers opens the gate
+ * first. PWREN in RCC_PB1PCENR is clear out of reset (3.4.8) and this
+ * block's registers answer nothing through a closed gate, so a read that
+ * skipped the gate would report a state the silicon never held. The
+ * verbs that read the kept copy, DBGMCU_CR or EXTEN_CTR do not touch
+ * the gate, and `bus_clock(false)` is the one that closes it.
  */
 struct Pwr {
     Pwr() = delete;
@@ -441,8 +489,12 @@ struct Pwr {
 
     /**
      * Arm `m` and stop, here and now - the deliberate one-shot for a
-     * program with no kernel under it, and the ONLY door to Standby in
-     * this stratum (ch32vx03/sleep.hpp's ladder does not reach it).
+     * program with no kernel under it, and the one verb that both arms
+     * Standby and executes the instruction (ch32vx03/sleep.hpp's ladder
+     * does not reach Standby, and its enter_standby() is this verb).
+     * `arm(PwrMode::standby)` alone arms the mode for whatever executes
+     * the next sleep instruction, the kernel's idle path included, until
+     * a sleep site's next arm() takes PDDS down.
      *
      * NOT [[noreturn]], although every Standby measured on this silicon
      * has ended in a POWER RESET - the RTC alarm's line as an interrupt,
@@ -456,6 +508,9 @@ struct Pwr {
      * It does NOT refuse over an active bus master. This is the
      * mechanism, and the policy - a sleep is legal only while the core
      * owns the bus - is the sleep site's, where the model can see it.
+     *
+     * From main() or a handler; it waits in the instruction until a
+     * wake, and for a Standby what follows is normally the boot path.
      */
     static void enter(PwrMode m) {
         (void)arm(m);
@@ -470,6 +525,9 @@ struct Pwr {
 
     /// SBF: the machine entered Standby. Read at the boot, it is how a
     /// program that came back through the reset vector knows where from.
+    /// The gate store and one load; PWR_CSR is not reset by the Standby
+    /// wake, so the flag still stands at the boot that follows, until
+    /// clear_flags() or clear_standby_flag() takes it down.
     static bool standby_flag() { return (csr() & pwr_sbf) != 0u; }
 
     /// CWUF: "clear the WUF after 2 system clock cycles" (2.4.1), so a
@@ -485,6 +543,8 @@ struct Pwr {
     }
 
     /// Both, in one store - the boot verb, after the flags have been read.
+    /// A read-modify-write of PWR_CTLR through pwr_ctlr_store(), which
+    /// writes the kept retention bits with it (the file header).
     static void clear_flags() {
         open();
         pwr_ctlr_store(pwr()->CTLR | pwr_cwuf | pwr_csbf);
@@ -504,8 +564,9 @@ struct Pwr {
      * EWUP: "WKUP is forced in input pull-down configuration, used to
      * wake up the MCU from standby mode" (2.4.2). Setting it takes the
      * pad away from the port - the pull-down is the hardware's, not
-     * ch32vx03/pin.hpp's - and its RISING edge is the wake. Returns
-     * what the bit reads back as.
+     * ch32vx03/pin.hpp's - and its RISING edge is the wake. Answers
+     * whether the bit reads back as asked; a read-modify-write of
+     * PWR_CSR, a setup verb for main() or one handler.
      */
     static bool wakeup_pin(bool on) {
         open();
@@ -522,7 +583,8 @@ struct Pwr {
     static constexpr uint8_t pvd_exti_line = Exti::line_pvd;
 
     /// Arm the detector at a threshold, or disarm it. The order is
-    /// 2.2.2's: the level first, the enable after.
+    /// 2.2.2's: the level first, the enable after. False for a level past
+    /// the field, or when PVDE does not read back as asked; a setup verb.
     static bool pvd(bool on, PvdLevel level = pvd_level_lowest) {
         if (!pvd_level_valid(level)) {
             return false;
@@ -572,6 +634,8 @@ struct Pwr {
     /// Point EXTI line 16 at the detector and arm it as an INTERRUPT
     /// (the PFIC line is the caller's), or take it down. Both edges by
     /// default: the fall is the warning and the rise is the recovery.
+    /// Answers what the EXTI verbs answer; the vector it leads to is
+    /// `pvd_handler`, bound by the program to a body calling pvd_isr().
     static bool arm_pvd(bool on, ExtiSense sense = ExtiSense::both) {
         if (!Exti::sense(pvd_exti_line, on ? sense : ExtiSense::none)) {
             return false;
@@ -621,7 +685,9 @@ struct Pwr {
 
     /// R2KSTY: keep the first bank powered through a Standby on VDD. The
     /// readback is the kept copy (the file header): the silicon's reads
-    /// zero on the CH32V303VC.
+    /// zero on the CH32V303VC. The copy is written and stored at once, a
+    /// read-modify-write with no guard; it starts at zero at every boot,
+    /// so the call is made again before every Standby.
     static void retain_ram(bool on) {
         keep(pwr_r2ksty, on);
         open();

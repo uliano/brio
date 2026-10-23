@@ -1,10 +1,13 @@
 /*
  * usart.hpp
  *
- * The serial ports of the CH32V203 and the CH32V303 (RM ch. 18) in the
- * two strata every brio serial driver has (docs/design/serial.md):
+ * The serial ports of the CH32V203 and the CH32V303 (RM ch. 18) for a
+ * program: the console it prints to, a line-oriented link, a byte
+ * transport to another chip, or one of the chapter's modes beyond the
+ * plain frame. The header has the two strata every brio serial driver
+ * has (docs/design/serial.md):
  *
- *  Usart<n>              the RESOURCE: which instance, where its
+ *  Usart<n>              the resource: which instance, where its
  *                        registers are, its bus gate and its reset, its
  *                        vector, its DMA slots, and the whole register
  *                        description of chapter 18 as verbs - the
@@ -14,37 +17,109 @@
  *                        flow-control pair, the DMA requests, every flag
  *                        and every interrupt enable, and on the CH32V303
  *                        the lot's MARK and SPACE parity and short words;
- *  Uart<n, P, ...>       the TASK: the interrupt-driven byte transport
+ *  Uart<n, P, ...>       the task: the interrupt-driven byte transport
  *                        with two rings and one ISR body - every
  *                        console's personality, a ByteTransport for
- *                        print() and SerialPort, the same surface the
- *                        other five targets expose.
+ *                        print() and SerialPort, with the public surface
+ *                        util/serial_port.hpp and util/print.hpp are
+ *                        written against, which is what lets them run
+ *                        here unchanged.
  *
- * UP TO EIGHT INSTANCES, TWO BUSES. USART1 sits on PB2 and every other
+ * Both are monostates - every member static, one instance's state - and
+ * a Uart's only object is an empty tag, the argument print() takes to
+ * pick the port. The smallest use, the console on USART1's default pads
+ * PA9/PA10 (docs/ch32vx03/usart.md, "How to use it"):
+ *
+ *   using Serial = brio::Uart<1, P>;                 // USART1, PA9/PA10, 8N1
+ *   constexpr Serial serial;
+ *   Serial::init(clock, 115200);
+ *   BRIO_CH32_VECTOR(usart1_handler) { (void)Serial::isr(); }
+ *
+ * `P` is the platform (ch32vx03/platform.hpp), `clock` the clock task's
+ * tag (ch32vx03/clock.hpp), and the last line binds USART1's vector,
+ * under the crt's name for it, with pfic.hpp's one spelling of a
+ * handler (BRIO_CH32_VECTOR, or one of its two forms); a vector left
+ * unbound is the crt's weak default_handler, a spin loop.
+ *
+ * Who calls what, and from where. init() runs in main(), after the
+ * clock task's init() and before interrupts are enabled; it waits for
+ * nothing. The divisor is computed from the rate the clock type claims
+ * for the instance's bus (usart_bus_hz), not read from the hardware, so
+ * a port opened while the chip still runs at its 8 MHz reset rate under
+ * a 144 MHz clock type speaks at an eighteenth of the rate asked on
+ * USART1 and a ninth on a PB1 port until the clock task has run
+ * (derived from the divisor arithmetic, not measured), and nothing
+ * refuses it. init() answers false for a divisor outside 16..65535 and
+ * for a column on the debug port's pads while the probe owns them, both
+ * before it writes any register of the port (the second check reads
+ * AFIO's PCFR1, which opens AFIO's gate, a read-modify-write of
+ * RCC_PB2PCENR), and for a receive ring the engine's channel refuses; a
+ * port that answered false is not to be printed to, since nothing
+ * drains its ring. isr() and dma_isr() are interrupt bodies: the
+ * program's bindings of the instance's vector and of its engines'
+ * channel vectors call them and nothing else does. Neither waits; isr()
+ * masks nothing, and dma_isr()'s transmit completion starts the next
+ * block through pump_tx(), whose claim takes the guard (below). The
+ * transmit verbs, write_byte() and write_bulk() (and print() over
+ * them), are the transmit ring's one producer: main() and active
+ * objects' handlers (an active object is a component of a brio program
+ * with its own event queue, served one event at a time by the kernel),
+ * never an interrupt handler; both copy, the caller's buffer free when
+ * the call returns, and neither waits - print() is what spins on a
+ * refusal. The receive verbs, read_byte(), read_span() with consume(),
+ * and harvest(), are the receive ring's one consumer, in the same
+ * thread; read_span()'s run is the ring's own storage, the caller's
+ * until consume() releases it, and with a receive engine the channel
+ * may write over it while it is held, which consume() answers. rebase()
+ * and set_baud() spin, bounded at 2'000'000 polls each, for the
+ * transmit ring to drain and then for TC, and write the divisor
+ * whatever the two waits found (set_baud() refuses an unreachable rate
+ * before it waits). release() is a setup verb, main context. The error
+ * counters, baud() and dma_faults() are single loads and rx_skips() and
+ * rx_overruns() up to two loads each, legal from any context;
+ * clear_errors() zeroes counters the vector increments, with no guard,
+ * so it races the vector's counting. Usart<n>'s verbs take no guard:
+ * most are a store or a read-modify-write of one control register -
+ * configure() writes CTLR1, CTLR2 and BRR, mute_mode(), irda() and
+ * smartcard() two or three registers each, and ctlr4_present() writes
+ * CTLR4 and, on a die where the address is a mirror, pulses the block's
+ * reset and rewrites five registers - and keeping them apart from a
+ * vector that writes the same register (a Uart's isr() rewrites CTLR1)
+ * is the caller's; its status reads are single loads, but under a
+ * receive engine any read of STATR arms the clear of the next frame's
+ * error (below). What masks interrupts here: the transmit engine's
+ * claim in pump_tx() (the busy flag's test-and-set), arm_txe()'s CTLR1
+ * read-modify-write on a port with a receive engine and the interrupt
+ * transmitter, and restart_if_stopped()'s two control-register writes
+ * on the rare restart path; the engines' channel verbs keep the
+ * bus-master count under a guard of their own
+ * (ch32vx03/bus_activity.hpp).
+ *
+ * Up to eight instances, two buses. USART1 sits on PB2 and every other
  * port - USART2, USART3 and UART4..UART8 - on PB1, which on this family
- * does NOT run at the same rate above 72 MHz (clock.hpp caps PB1 there),
+ * does not run at the same rate above 72 MHz (clock.hpp caps PB1 there),
  * so the transport asks its own bus for the clock its divisor counts.
- * WHICH instances a part offers is the part's table (device::has_usart),
+ * Which instances a part offers is the part's table (device::has_usart),
  * and the list is not always the first n of them: the smallest part
  * offers one usart and it is USART2, because its package bonds neither
  * of USART1's pin pairs; the CH32V203C8 and RB offer four; the 128 KB
  * CH32V303 three; the CH32V303RC and VC all eight. UART5..UART8 live at
- * addresses that are not in instance order (UART6..8 BELOW USART2 on
+ * addresses that are not in instance order (UART6..8 below USART2 on
  * PB1), which is device.hpp's usart_base_for() and nobody else's.
  *
- * WHICH OF THEM IS A FULL USART is a second part fact. Chapter 18's
+ * Which of them is a full USART is a second part fact. Chapter 18's
  * opening counts three USARTs and five UARTs for the whole family and
  * then names the exception: on the CH32V203C8 the fourth serial port is
  * a USART4 - the datasheet's pin table agrees, giving it a CK, a CTS and
  * an RTS pad - while on the CH32V203RB and every CH32V303 it is a UART4
  * with TX and RX alone, and UART5..8 are UARTs everywhere. So `is_full`
  * - the synchronous clock, the smartcard and the flow-control pair - is
- * a PART fact (device::usart_full) and not a number's parity, and the
- * verbs behind it are REFUSED AT COMPILE TIME on an instance that is not
+ * a part fact (device::usart_full) and not a number's parity, and the
+ * verbs behind it are refused at compile time on an instance that is not
  * one; the read-backs of those modes answer false there.
  *
- * THE PADS ARE THE REMAP TABLES' (afio.hpp, tables 10-23..10-31): the
- * `remap` template parameter names a COLUMN and the TX, RX, CK, CTS and
+ * The pads are the remap tables' (afio.hpp, tables 10-23..10-31): the
+ * `remap` template parameter names a column and the TX, RX, CK, CTS and
  * RTS pads follow from the same table that programs AFIO_PCFR1/PCFR2.
  * A code of 0 writes nothing at all - the reset column is already
  * there, and USART1 carries the probe's console on this board, which is
@@ -52,51 +127,52 @@
  * where the table matters most: the manual has two of them and the one
  * that starts at PC10/PC11 belongs to the CH32V20x_D8 and the CH32V303,
  * the CH32V203C8 being named in the other, whose default pads are PB0
- * and PB1. TWO COLUMNS LAND ON THE DEBUG PORT'S OWN PADS - USART3's
+ * and PB1. Two columns land on the debug port's own pads - USART3's
  * code 2 (PA13/PA14) and UART8's code 1 (PA14/PA15) - and a transport
  * naming one is refused by init() while the two-wire port is still the
  * probe's: afio.hpp's long-spelled verb is how a program gives it up.
  *
- * TWO RINGS AND TWO FLAGS. Bytes leave through a TX ring drained by the
+ * Two rings and two flags. Bytes leave through a TX ring drained by the
  * TXE interrupt (write_byte() arms TXEIE after a byte, write_bulk() after
  * a run's first byte and again after the rest; the ISR disarms it when
  * the ring runs dry, because TXE stands for ever while the transmitter
  * is idle and would re-enter the handler without end), and arrive into
  * an RX ring filled by RXNE, taken a byte at a time by read_byte() or a
  * run at a time, in place, by read_span() and consume(). isr() returns
- * the "RX went non-empty" EDGE that util/serial_port.hpp posts on -
+ * the "RX went non-empty" edge that util/serial_port.hpp posts on -
  * one event per idle-to-busy transition, not one per byte.
  *
- * THE BAUD DIVISOR IS THE WHOLE REGISTER. BRR counts the peripheral
+ * The baud divisor is the whole register. BRR counts the peripheral
  * clock's periods per bit in sixteenths (18.3: a 12-bit mantissa and a
  * 4-bit fraction), so the value to store is simply pclk / baud - no
  * field arithmetic - and actual_baud() inverts it, which is how a
  * program reports the rate it is really running at. Below 16 the
- * generator has nothing to divide by: refused.
+ * generator has nothing to divide by: refused, as is a divisor above
+ * the register's 0xFFFF (usart_divisor_valid()).
  *
- * ERRORS ARE READ THEN CLEARED. Parity, framing, noise, overrun and the
+ * Errors are read then cleared. Parity, framing, noise, overrun and the
  * idle line stand in STATR and go away when STATR is read and then
  * DATAR, in that order (18.10.1); RXNE, TC, LBD and CTS also clear by
  * writing a zero over them. The handler therefore reads the status
- * ONCE, decides from that copy, and lets the DATAR read do the
- * clearing. A byte that arrived with an error is DROPPED rather than
+ * once, decides from that copy, and lets the DATAR read do the
+ * clearing. A byte that arrived with an error is dropped rather than
  * pushed - a corrupted byte in a line assembler is worse than a gap -
  * and the counter says it happened.
  *
- * THE MODES EXCLUDE EACH OTHER THE WAY 18.4 .. 18.7 SAY, and the
- * exclusions are NOT symmetrical: the synchronous clock wants SCEN,
+ * The modes exclude each other the way 18.4 .. 18.7 say, and the
+ * exclusions are not symmetrical: the synchronous clock wants SCEN,
  * HDSEL and IREN clear; half duplex wants SCEN, CLKEN and IREN clear;
- * the smartcard wants LINEN, HDSEL and IREN clear and KEEPS CLKEN,
+ * the smartcard wants LINEN, HDSEL and IREN clear and keeps CLKEN,
  * which is where its card clock comes from - so smartcard() writes that
  * bit itself, there being no other verb the exclusions would let reach
  * it under SCEN; IrDA wants LINEN, STOP, CLKEN, SCEN and HDSEL clear.
  * Each verb refuses instead of storing a combination the chapter
  * declares undefined.
  *
- * TWO OPTIONAL DMA ENGINE SLOTS, the shape every stratum with a
+ * Two optional DMA engine slots, the shape every stratum with a
  * controller uses: a transmit engine drains the TX ring by contiguous
  * runs (the ring's read_span, consumed by exactly what the block
- * carried), and a receive engine runs in its CIRCULAR shape over the
+ * carried), and a receive engine runs in its circular shape over the
  * whole receive ring's storage (ch32vx03/dma.hpp's DmaRxEngine): the
  * channel writes the storage lap after lap and is never re-armed, the
  * ring's producer index is the channel's own count, and the receive ring
@@ -107,7 +183,7 @@
  * the ring counts and skips, and rx_overruns() reports it. Without an
  * engine the slot is the NoDmaEngine tag, every engine branch is
  * compiled out and init() does not so much as touch CTLR3. An engine is refused
- * on any SLOT but the instance's own - the controller and the channel -
+ * on any slot but the instance's own - the controller and the channel -
  * which the request table of ch32vx03/dma_engine.hpp answers: USART1
  * transmits on DMA1's channel 4 and receives on 5, USART2 on 7 and 6,
  * USART3 on 2 and 3, UART4 on DMA1's 1 and 8 on the CH32V203 and on
@@ -115,16 +191,16 @@
  * 6 and 7, 8 and 9, 10 and 11). A program with an engine running does not
  * sleep on this family, because in Sleep the bus matrix serves the core
  * alone (docs/ch32vx03/dma.md) - and a receive ring runs from init() to
- * release(). THE RING OUTRANKS THE COPIES: DATAR holds one frame, so the
+ * release(). The ring outranks the copies: DATAR holds one frame, so the
  * receive engine arms at very_high (UartOptions::rx_priority, the one
  * knob) and the transmit engine at high, the rule of docs/design/dma.md.
  *
- * UNDER THE RECEIVE ENGINE THE CPU NEVER READS DATAR, and what a clear
+ * Under the receive engine the CPU never reads DATAR, and what a clear
  * costs is this silicon's own answer - measured on the CH32V203C8T6, and
- * NOT the STM32F4's although the two chapters word it alike (18.10.1:
+ * not the STM32F4's although the two chapters word it alike (18.10.1:
  * "reading the status register and then reading the data register").
- * Here a read of STATR ARMS the clear and the next read of DATAR - the
- * channel's - clears EVERY error flag and IDLE standing at that read,
+ * Here a read of STATR arms the clear and the next read of DATAR - the
+ * channel's - clears every error flag and IDLE standing at that read,
  * including one its own frame just raised: a break whose FE rose after a
  * status read is gone by the time anybody looks, while one with no status
  * read since the last DATAR read stands until somebody reads STATR and
@@ -132,29 +208,29 @@
  * forgets the idle the clearing frame armed, as on the F4: a burst of one
  * frame after an idle the vector saw raises no IDLE of its own.
  *
- * THE BURST EDGE COMES FROM A VECTOR. With the receive engine the USART's
- * vector runs two states over that clear. WAITING FOR THE END: IDLEIE,
+ * The burst edge comes from a vector. With the receive engine the USART's
+ * vector runs two states over that clear. Waiting for the end: IDLEIE,
  * PEIE and EIE armed; an idle line or an error enters, its status read
  * counts the errors and arms the clear, the edge is reported, and the
- * vector turns to WAITING FOR A FRAME - those three disarmed, RXNEIE
+ * vector turns to waiting for a frame - those three disarmed, RXNEIE
  * armed (the channel still takes the byte; the interrupt only says one
  * came, and the channel's read of it finished the clear). That entry
- * READS NO STATR - after the channel's read a status read would arm the
+ * reads no STATR - after the channel's read a status read would arm the
  * clear again, and the next frame's own error would be cleared by its own
  * read unseen - but CNTR alone: a moved count turns the vector back,
  * reporting the edge again, the edge of a burst of one frame. The
  * channel's half and full marks report it too, so a stream with no
- * silence in it is told twice a lap. AN OVERRUN WITH NOTHING TO TAKE -
+ * silence in it is told twice a lap. An overrun with nothing to take -
  * ORE left up with RXNE down by a channel that was starved, and no frame
  * after it - would re-enter that wait back to back (RXNEIE rides ORE): its
- * second entry with the count UNMOVED, where no read of DATAR has come
+ * second entry with the count unmoved, where no read of DATAR has come
  * since the wait's own status read and a second one arms nothing new,
  * reads STATR once and, finding ORE without RXNE, reads DATAR - the clear
  * that status read armed - and turns back to the wait for the end
  * (rx_overrun_probe). Two interrupts a burst, none a byte, the edge gated
  * as the interrupt receiver's: once per idle-to-busy transition of the
- * consumer, re-opened when its look finds the ring empty. A CHANNEL THAT NEVER TAKES
- * THE FRAME - stopped by a transfer error, or frozen by a request another
+ * consumer, re-opened when its look finds the ring empty. A channel that never takes
+ * the frame - stopped by a transfer error, or frozen by a request another
  * peripheral left held on its OR (docs/ch32vx03/dma.md) - leaves RXNE
  * standing under RXNEIE, and the wait would re-enter for ever: its entries
  * that find the count unmoved are counted, and the 255th gives the channel
@@ -163,29 +239,29 @@
  * from its first element and arms the wait for the end, as after a
  * transfer error.
  *
- * WHAT THE CHANNEL'S READ BOUNDS - the counts, never the bytes. The frame
+ * What the channel's read bounds - the counts, never the bytes. The frame
  * after one whose error the vector counted loses its own (the count's
  * status read armed the clear that frame's read performs): a run of
  * errored frames counts every other one, errors separated by a clean
  * frame count each. The first frame of a burst after an idle line the
- * vector saw loses its error the same way. And a status read ANYWHERE
- * ELSE - tx_idle(), the interrupt transmitter's entry, a thread polling a
+ * vector saw loses its error the same way. And a status read anywhere
+ * else - tx_idle(), the interrupt transmitter's entry, a thread polling a
  * flag - arms the clear for the next frame: an error there is cleared
  * unseen.
  *
- * THE LOT'S REGISTERS. Four things the chapter gives the CH32V30x_D8 -
+ * The lot's registers. Four things the chapter gives the CH32V30x_D8 -
  * and there only "with the penultimate sixth digit of the lot number not
  * being zero", which no register states and the part number does not
  * carry: CTLR4 (18.10.8: the MARK and SPACE parity, a parity bit held at
  * one or at zero, and MS_ERRIE, its error's interrupt), CTLR1's M_EXT
  * (18.10.4: seven, six and five-bit words), and STATR's MS_ERR and
  * RX_BUSY (18.10.1). None of them is the CH32V203's: every verb here that
- * names one is REFUSED AT COMPILE TIME on that series' two classes. On a
- * CH32V303 they are VERBS THAT ASK THE DIE, this stratum's rule for a
+ * names one is refused at compile time on that series' two classes. On a
+ * CH32V303 they are verbs that ask the die, this stratum's rule for a
  * lot's register (docs/ch32vx03/README.md): M_EXT is a field of a
  * register that exists, so it is written and read back; CTLR4 is a
  * register of its own at 0x1C, and an absent register can answer as a
- * MIRROR of another, so `ctlr4_present()` reads the word first - the
+ * mirror of another, so `ctlr4_present()` reads the word first - the
  * real one holds nothing outside its three bits - and then writes it
  * only on a disabled port, every other register of the block compared
  * before and after and the block put back through its reset line and
@@ -195,7 +271,7 @@
  * a die without them. The CH32V303VCT6 the reference suite ran on is
  * such a die: CTLR4's address read zero on USART2 and UART4 and moved
  * nothing when written, M_EXT did not keep a code, RX_BUSY never rose
- * under a frame - and the WIRE agrees, the parity bit staying computed
+ * under a frame - and the wire agrees, the parity bit staying computed
  * and the word eight bits long with both stored raw, so the four are
  * absent there and not write-only (docs/ch32vx03/usart.md).
  */
@@ -1178,10 +1254,10 @@ struct UartRxRing<true, Owner, size, Engine, P> {
 /**
  * The interrupt-driven serial port.
  *
- *   using Serial = brio::Uart<1, Platform>;
- *   constexpr Serial serial;                 // tag for print(serial, ...)
+ *   using Serial = brio::Uart<1, P>;                 // USART1, PA9/PA10, 8N1
+ *   constexpr Serial serial;                         // tag for print(serial, ...)
  *   Serial::init(clock, 115200);
- *   BRIO_CH32_VECTOR(usart1_handler) { Serial::isr(); }
+ *   BRIO_CH32_VECTOR(usart1_handler) { (void)Serial::isr(); }
  *
  * `P` is the platform, which the rings need to know whether an index can
  * be shared with a handler bare (atomic_width) or wants a guard.
@@ -1256,12 +1332,21 @@ struct Uart {
 
     /**
      * Open the port at `baud` in the given frame (8N1 by default), with
-     * the receive interrupt armed.
+     * the receive interrupt armed and the instance's line enabled in the
+     * PFIC. From main(), after the clock task's init() - the divisor is
+     * the rate the clock type claims for this instance's bus over `baud`
+     * - and before interrupts are enabled; nothing here waits.
      *
      * Returns false when the divisor comes out below the smallest the
      * chapter allows (16, i.e. one whole peripheral-clock period per bit
-     * sixteenth): a baud rate this clock cannot serve is a fact the
-     * caller must see rather than a port that mangles every frame.
+     * sixteenth) or above the register's 0xFFFF (1200 baud from a 144 MHz
+     * bus): a baud rate this clock cannot serve is a fact the caller must
+     * see rather than a port that mangles every frame. Also false, like
+     * those two before any register of the port is written, for a column
+     * on the debug port's pads while the probe owns them (the check reads
+     * AFIO's PCFR1, which opens AFIO's gate first); and false, after the
+     * frame and the enables are written but before the instance's line is
+     * enabled, for a receive ring the engine's channel refuses.
      */
     template <typename C>
     static bool init(C clock, uint32_t baud) {
@@ -1462,10 +1547,12 @@ struct Uart {
 
     /**
      * The port's whole interrupt body - bind this instance's vector to
-     * it.
+     * it (BRIO_CH32_VECTOR, pfic.hpp); the binding calls it and nothing
+     * else does. It waits for nothing and masks nothing.
      *
-     * Returns true when a byte arrived into an EMPTY ring: the edge
-     * util/serial_port.hpp posts on.
+     * Returns true when a byte arrived into an empty ring: the edge
+     * util/serial_port.hpp posts on. With a receive engine the edge is
+     * the burst's (the file header's two states).
      */
     // always_inline: one call site (the app's vector binding), so the
     // compiler saves only the registers this body uses.
@@ -1545,7 +1632,9 @@ struct Uart {
     // ---- byte transport (ByteSink / ByteSource) ---------------------------
 
     /// Queue one byte; false when the TX ring is full (print() spins).
-    /// Without an engine TXEIE is armed; with one the engine is pumped -
+    /// From main() or an active object's handler, never from an interrupt
+    /// handler: the TX ring has one producer (util/ring.hpp). It never
+    /// waits. Without an engine TXEIE is armed; with one the engine is pumped -
     /// and a REFUSED byte pumps it too. print() answers false by trying
     /// again for ever, and the ring is full exactly when nothing is
     /// draining it: an engine left idle by a block dma_isr() abandoned
@@ -1592,7 +1681,9 @@ struct Uart {
     /// Queue a RUN (util/stream.hpp's BulkSink): as much of `src` as the
     /// ring has room for, copied into the ring's own free run and handed
     /// over with one index store per contiguous part. Never blocks;
-    /// returns how many were queued. A run that finds no room is
+    /// returns how many were queued. The TX ring's producer, as
+    /// write_byte() is: main() or an active object's handler; `src` is
+    /// copied and free again when the call returns. A run that finds no room is
     /// write_byte()'s refusal: nothing armed on the plain transport (the
     /// push that filled the ring armed TXEIE, a level), the engine pumped
     /// on the engined one.
@@ -1813,7 +1904,8 @@ struct Uart {
 
     /// Stop the port and park its pads: the vector off, the engines
     /// stopped, UE clear, the block's reset pulsed, the bus clock closed,
-    /// the pins released.
+    /// the pins released. A setup verb, main context; what the rings held
+    /// no longer goes out, and is cleared by the next init().
     ///
     /// THE RESET LINE BEFORE THE GATE. A DMA request this block has raised
     /// is HELD until the channel acknowledges it or the block is reset -

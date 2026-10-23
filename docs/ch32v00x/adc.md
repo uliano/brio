@@ -1,19 +1,81 @@
 # ADC (CH32V00x)
 
-The one converter of RM ch. 9 - eight pads and two internal sources, a
-rule group of sixteen and an injection group of four, timer triggers a
-group, an analog watchdog, one DMA request - and util/analog_sampler.hpp's
+This document is for a programmer who measures a voltage: a pad, the
+supply through the internal reference, a stream of samples paced by a
+timer, a level watched in hardware. It covers the one converter of
+RM ch. 9 - eight pads and two internal sources, a rule group of sixteen
+and an injection group of four, timer triggers a group, an analog
+watchdog, one DMA request - and util/analog_sampler.hpp's
 AnalogSampler running over it unchanged: 12 bits with a third control
 register and two more watchdogs on the CH32V006, 10 bits with the F1's
-calibration and a trigger delay register on the CH32V003. Documents of
-record: the CH32V00X reference manual V1.5 (9.2.2 for the
+calibration and a trigger delay register on the CH32V003. `Adc` is the
+converter, a type whose functions are all static (a monostate: the one
+block on the chip, never an object); `AnalogIn<Pin>` names a pad and
+derives its channel.
+
+The smallest use, the supply measured through VREFINT and then a pad
+read in millivolts, from "How to use it" below:
+
+```cpp
+using Vin = brio::AnalogIn<brio::Pin<'D', 2>>;      // channel 3
+brio::Adc::init(clock, {.prescaler_code = brio::adc_prescaler_for(48'000'000, 6'000'000)->code});
+brio::Adc::sample_time_all(brio::adc_sample_longest);
+Vin::claim();
+
+brio::Adc::select(brio::AdcInput::vrefint);
+const uint16_t vdd_mv = brio::Adc::supply_mv(brio::Adc::read_settled(4));
+brio::Adc::select(Vin{});
+const uint16_t mv = brio::Adc::millivolts(brio::Adc::read(), vdd_mv);
+```
+
+Line by line: `Vin` names PD2, the converter's channel 3 (a pad that is
+no input does not compile); `init()` takes the clock task's tag and a
+configuration whose one field here is the ADC clock's prescaler code,
+the smallest divider of 48 MHz whose ADC clock is 6 MHz or under (/8),
+opens the block's gate, and answers false for a configuration
+the part refuses or an ADC clock above the part's bound (on the
+CH32V003 it also runs the calibration, and answers false if it never
+completes); `sample_time_all()` sets every channel's sample to the
+longest of the eight codes; `claim()` makes the pad analog, its input
+buffer off; `select()` makes a one-conversion sequence of one input;
+`read_settled(4)` converts four times and keeps the last, and
+`supply_mv()` turns the VREFINT reading (1.2 V nominal) into the
+supply in millivolts; `read()` converts once, polled, and
+`millivolts()` scales the counts against that supply.
+
+What decides correctness even there. The prescaler is computed from a
+rate written in the call, 48 MHz, and not from the clock type: a
+program at another rate writes its own, and `init()` checks the result
+against the part's bound (48 MHz of ADC clock on the CH32V006, 12 MHz
+on the CH32V003) with the rate the clock type claims. The polled reads
+wait, bounded by a count of spins: `read()` answers 0 when the
+conversion never comes and `read(out)` answers false, which is what a
+program sees of the stall below (a triggered, DMA-served run that stops
+converting until `recover()` cycles ADON). VREFINT wants a slow sample
+(the findings). And the console's transmitter perturbs the readings: a
+line leaving USART1 on PD5 while VREFINT is read shows spikes of 40 to
+60 counts.
+
+The rest of this page, in order: the documents of record; what the
+silicon does, the two parts' differences among it; the types and verbs;
+how to use it, the sampler; the bench findings on both parts; and what
+is not covered.
+
+## Documents of record
+
+The CH32V00X reference manual V1.5 (9.2.2 for the
 configuration and tCONV, 9.2.3 and tables 9-3/9-4 for the triggers,
 9.2.4 for the modes, 9.2.5 for the watchdog, 9.3 for the registers),
 the CH32V006 datasheet V2.0 (table 3-5 for VREFINT, the ADC
 characteristics, table 2-1-1 for the pads); for the CH32V003 its
 reference manual V1.9 (the same chapter 9: 9.2.2 for the calibration
 and its tCONV, 9.3.15 for DLYR) and its datasheet V1.6 (3.3.14 for the
-ADC characteristics).
+ADC characteristics). The header is
+[brio/ch32v00x/adc.hpp](../../brio/ch32v00x/adc.hpp); the reference
+suite is `test_ch32_adc` (a suite's letter, below, is one command key
+of its console and the group of verdicts it runs, `z` the key that runs
+the image's set of letters, a letter outside it run by its own
+key).
 
 ## What the silicon does
 
@@ -21,8 +83,8 @@ ADC characteristics).
   the converter and written again starts it, SWSTART under EXTSEL =
   111 with EXTTRIG is the other software start, the rule sequence
   in RSQR1..3 and the injection one in ISQR (its slots filling from
-  the END, its results counting from the START), a per-slot offset
-  and a SIGNED injected result, the flags write-zero-to-clear.
+  the end, its results counting from the start), a per-slot offset
+  and a signed injected result, the flags write-zero-to-clear.
 - **No calibration on the CH32V006**: no CAL bit, no procedure, the
   vendor's own init runs none. **The CH32V003 has the F1's**: RSTCAL
   then CAL, each cleared by the hardware, recommended at every
@@ -60,16 +122,16 @@ ADC characteristics).
   bits (TGREGU/TGINJE): refused.
 - **More than one conversion of a group needs SCAN** (9.2.4's table):
   without it the first channel alone converts, in either group.
-- **THE WATCHDOG SCAN** (AWD_SCAN, measured, the vendor's own example's
-  arrangement): with it set and a SCANNED rule sequence, watchdog 0
-  compares the FIRST conversion against WDHTR/WDLTR, watchdog 1 the
-  SECOND against WDTR1, watchdog 2 the THIRD against WDTR2, each
+- **The watchdog scan** (AWD_SCAN, measured, the vendor's own example's
+  arrangement): with it set and a scanned rule sequence, watchdog 0
+  compares the first conversion against WDHTR/WDLTR, watchdog 1 the
+  second against WDTR1, watchdog 2 the third against WDTR2, each
   result in CTLR3's AWDx_RES - 9.3.15's "only applicable to watchdog
   channel 1" is that rank. Without the scan, watchdogs 1 and 2 compare
   nothing.
-- **A watchdog can RESET THE CHIP** (AWDx_RST_EN): the boot reads
+- **A watchdog can reset the chip** (AWDx_RST_EN): the boot reads
   ADCRSTF in RCC_RSTSCKR and nothing else.
-- **THE STALL** (measured on both parts): with a rule group paced by a
+- **The stall** (measured on both parts): with a rule group paced by a
   hardware trigger and served by the DMA, and the CPU accessing the
   peripheral buses meanwhile, the converter has been seen to stop converting -
   STRT standing, no EOC ever again - within the first conversions of a
@@ -135,7 +197,9 @@ const uint16_t mv = brio::Adc::millivolts(brio::Adc::read(), vdd_mv);
 
 The sampler: `AnalogSampler<Adc, P, Subscribers<...>, AdcInput::vrefint,
 Vin{}>` with the EOC handler posting `Sampled{Adc::result_counts(),
-Adc::selected()}`.
+Adc::selected()}`. No driver opens the ADC's line at the interrupt
+controller: the program calls `brio::Pfic::enable(brio::Irq::adc)`
+itself, after `Adc::init()`.
 
 ## Bench findings
 

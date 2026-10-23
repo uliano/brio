@@ -1,6 +1,84 @@
 # IP stratum: the ARM PrimeCell UART (`pl011/`)
 
-A directory under `brio/` named for a peripheral DESIGN instead of for a
+This page is for a programmer who uses a serial port on the RP2040 or
+the RP2350 and wants to know what the driver under it does, for whoever
+reads or changes that driver, and for whoever brings up another chip
+that carries the same UART. It is both the stratum's operational page
+and the document of its one header, `brio/pl011/uart.hpp`. A stratum is
+a directory of `brio/` that is one architectural layer; this one is an
+IP stratum, named for a peripheral design that several vendors license
+into their chips (an "IP block") rather than for a chip, and written
+once for every family that carries it.
+
+An application never names this stratum. It writes the family's names,
+which are aliases of the two templates here kept in the family's own
+`uart.hpp`, and the family supplies the chip's facts through a traits
+type - a struct of types, constants and static functions the templates
+read, so that they know the chip without including any of its headers:
+
+| Who | Traits type | Where | The public names, aliases of the templates here |
+|-----|-------------|-------|---------------------------------------------------|
+| the RP2040 | `Rp2040Pl011` | `brio/rp2040/uart.hpp` | `Pl011<n>` = `Pl011Uart<Rp2040Pl011, n>`; `Uart<n, pins, rx_size, tx_size, TxEngine, RxEngine, Placement>` = `Pl011Transport<Rp2040Pl011, n, pins, ...>` |
+| the RP2350, both architectures | `Rp2350Pl011` | `brio/rp2350/uart.hpp` | the same two names over `Rp2350Pl011` |
+| the host suite | `SimPl011` | `brio/host/sim_pl011.hpp` | none: the suite names the templates itself |
+
+On both chips the traits give two instances, 32-entry FIFOs, a copy
+crossover of 12 bytes, and UARTCLK as `clk_peri` (the clock type's
+`pclk_hz`). The smallest use, the console on the RP2040 as its own
+document spells it (an excerpt of [../rp2040/uart.md](../rp2040/uart.md),
+"How to use it"; the RP2350's is the same source):
+
+```cpp
+constexpr brio::UartPins console_pins{
+    .tx = {0, brio::PinFunction::uart},
+    .rx = {1, brio::PinFunction::uart},
+};
+using Serial = brio::Uart<0, console_pins>;
+constexpr Serial serial;
+
+extern "C" void isr_uart0() { (void)Serial::isr(); }
+
+int main() {
+    SysClock::init();
+    Serial::init(clock, 115200);
+    brio::enable_interrupts();
+    brio::print(serial, "hello", brio::crlf);
+}
+```
+
+Line by line: `console_pins` names the two pads and the function that
+routes the UART to them (the family's pin table checks the pair at
+compile time); `Serial` is the family's `Uart` on instance 0 with every
+other argument at its default (ring sizes 64 and 256, no DMA engines,
+the handler bodies in flash), which is `Pl011Transport` over the
+family's traits; `serial` is an empty tag object, the argument `print`
+takes, since the type's functions are all static; `isr_uart0` is the
+handler name the family's startup code gives instance 0's vector, and
+it calls the transport's interrupt body; `init()` takes the clock
+task's tag and the baud rate.
+
+What decides correctness even there: `init()` runs after the clock's,
+since the divisor is computed from the rate the clock type claims for
+UARTCLK and not read from the hardware; the vector is bound to `isr()`
+by the program, since nothing else drains the receive FIFO or a
+transmit ring queued behind a full FIFO (an unbound vector is the
+startup code's default handler, a spin, on the RP2040); each
+ring has one producer and one consumer, so `write_byte`, `write_bulk`
+and `print` over them are called from `main` or an active object's
+handler (a component with its own event queue, served one event at a
+time by the kernel), never from an interrupt handler; and `print` waits
+until the transmit ring has taken every byte
+([design/serial.md](../design/serial.md)).
+
+The page goes on with what the stratum is for, the document of record,
+what lives here, what a family owes (the traits type member by member),
+the include contract, what stays per family, the transmit side, the
+receive side, the engine slots, the host suite that proves the file
+knows no chip, and what is not covered.
+
+## What the stratum is
+
+A directory under `brio/` named for a peripheral design instead of for a
 silicon: the ARM PrimeCell UART (PL011), a block licensed by more than
 one vendor and dropped into their chips unchanged, register for register.
 It sits exactly where a core stratum sits - above `util/`, below the
@@ -10,14 +88,15 @@ the whole of the chapter that is ARM's: the resource over the block's
 programmer's model and the interrupt-driven byte transport above it,
 with their measured facts and their ISR body.
 
-It exists under the discipline that governs the core stratum: what more
-than one family carries is factored out when the SECOND one carries it,
+It exists under the discipline that governs the core stratum (the
+stratum a processor core's families share, `cortexm/`): what more than
+one family carries is factored out when a second one carries it,
 with both copies in hand, and the extraction is gated by the images -
 every release image of the family that had it first is byte-identical
 before and after. What makes the PL011 worth a stratum of its own, where
 a merely similar peripheral would not be, is that its register
 description is not similar between the chips that carry it but
-IDENTICAL: the same names, the same offsets, the same bits, so there is
+identical: the same names, the same offsets, the same bits, so there is
 nothing to reconcile and nothing to gain by writing it twice.
 
 ## The document of record
@@ -26,7 +105,7 @@ ARM DDI 0183, the *PrimeCell UART (PL011) Technical Reference Manual*,
 which is what a family's data sheet cites when it says its UART is a
 PL011 (the RP2040 data sheet does, in its 4.2). That manual is not on
 this project's desk, so nothing here is cited by its section: the facts
-below are named by REGISTER, and each family's own document carries its
+below are named by register, and each family's own document carries its
 data sheet's chapter and verse for the same thing. A family's
 peculiarities - how deep the FIFOs were synthesized, which pads a signal
 reaches, which interrupt controller carries the line - are not in that
@@ -50,13 +129,15 @@ manual either, which is exactly why they are the concept below.
   controller owns the line and what it calls it, which rate of the
   family's clock tree is UARTCLK, what a DMA request is called, how deep
   the FIFOs are. Those are the concept, and each family answers them in
-  its own header - where the PUBLIC NAMES also live, so an application
+  its own header - where the public names also live, so an application
   never spells a chip-traits type.
 
 ## What a family owes: the `Pl011Chip` concept
 
 One traits type, stated in the family's own `uart.hpp` and checked there
-with a `static_assert`. Every member is here because a line of the driver
+with a `static_assert` (`Rp2040Pl011` and `Rp2350Pl011`; the host's
+`SimPl011` is checked the same way in its own header, the table at the
+top of this page). Every member is here because a line of the driver
 needs it; nothing is here for symmetry.
 
 The types:
@@ -76,7 +157,7 @@ The constants:
 | Member | Why it exists |
 |--------|---------------|
 | `instances` | how many of the block this family carries: the resource refuses a number past it |
-| `fifo_depth` | the two FIFOs' depth, which is a SYNTHESIS parameter of the PL011 and therefore the family's fact, not this file's; the receive level the transport programs, half of it, is what an entry for the level reads blind |
+| `fifo_depth` | the two FIFOs' depth, which is a synthesis parameter of the PL011 and therefore the family's fact, not this file's; the receive level the transport programs, half of it, is what an entry for the level reads blind |
 | `copy_crossover` | the run length from which `write_bulk()` copies into the transmit ring with the runtime's `memcpy` (its two ends aligned alike) rather than its byte loop: a fact of the core and of the memory the code runs from, measured by the family's bench app (letter `u`) |
 
 The per-instance facts, each a template on the instance number so the
@@ -97,9 +178,9 @@ The verbs over a register and over the pads:
 | `set_bits(reg, bits)`, `clear_bits(reg, bits)` | one write that sets or clears bits with no read-modify-write: the interrupt mask is touched from two contexts, and the enable must leave the rest of `UARTCR` alone. A family with atomic register aliases uses them; one without does the read-modify-write under its own guard |
 | `pins_valid(n, pins)` | is this pin set legal for this instance - the family's pin table, as a constexpr predicate the transport's `static_assert` calls |
 | `tx_pad(pins)`, `rx_pad(pins)` | which pad number carries each direction |
-| `Pad<pin>` | the pad AS A TYPE, with the two verbs the driver calls on one: hand it over (`function(code, config)`) and take it back (`release()`) |
+| `Pad<pin>` | the pad as a type, with the two verbs the driver calls on one: hand it over (`function(code, config)`) and take it back (`release()`) |
 | `pad_function` | the function code that routes a UART to a pad, opaque to this file |
-| `tx_pad_config()`, `rx_pad_config()` | the electrical setup each direction wants. They are FUNCTIONS returning a value rather than constants, so the driver materializes the configuration at the call, exactly as a family's own driver would have written it there - no object's address is taken and the call folds away. The receive one carries a decision: where a pad comes up pulled DOWN, the receiver must find a pulled-up line, or its first act is to report a break |
+| `tx_pad_config()`, `rx_pad_config()` | the electrical setup each direction wants. They are functions returning a value rather than constants, so the driver materializes the configuration at the call, exactly as a family's own driver would have written it there - no object's address is taken and the call folds away. The receive one carries a decision: where a pad comes up pulled DOWN, the receiver must find a pulled-up line, or its first act is to report a break |
 | `engines_distinct<Tx, Rx>()` | two engines of one transport must not name one DMA channel; what "the same channel" means is the family's DMA's |
 
 And one member the concept names but cannot check, because it is a
@@ -108,7 +189,7 @@ none:
 
 | Member | Why it exists |
 |--------|---------------|
-| `uartclk_hz(clock)` | WHICH rate of this family's tree is UARTCLK. It has a concept of its own, `Pl011ChipClock<Chip, Clock>`, checked by a `static_assert` inside `init()` - the one place a clock is in hand |
+| `uartclk_hz(clock)` | which rate of this family's tree is UARTCLK. It has a concept of its own, `Pl011ChipClock<Chip, Clock>`, checked by a `static_assert` inside `init()` - the one place a clock is in hand |
 
 ## The include contract
 
@@ -116,7 +197,7 @@ none:
 `util/placement.hpp` and `util/ring.hpp`, and nothing else: no vendor header, no family header,
 no device include. It may therefore be included anywhere, in any order,
 and a family's `uart.hpp` includes it beside its own headers. Apps and
-family drivers keep including the FAMILY's header, never this one - the
+family drivers keep including the family's header, never this one - the
 family is where the public names are.
 
 It follows that this directory needs no `.clangd` fragment of its own:
@@ -135,7 +216,7 @@ parameter is util/placement.hpp's tag, and `isr()` and `dma_isr()` run
 their bodies through `Hot<P>` - inline in the app's vectors under
 `InFlash`, the default, one flattened instance each in `.fast_text.brio`
 under `InRam`; [../rp2040/platform.md](../rp2040/platform.md), "A
-handler in SRAM", has what it buys); and THE PUBLIC NAMES - `Pl011<n>` and
+handler in SRAM", has what it buys); and the public names - `Pl011<n>` and
 `Uart<n, pins, rx_size, tx_size, TxEngine, RxEngine, Placement>`, the family's
 aliases of the two templates here, with the family's own defaults for
 the ring sizes and the empty engine slots. An application that says
@@ -308,7 +389,9 @@ claimed engine has no block in flight, so nothing consumes the ring or
 starts another block under the loader, and the run read after it never
 holds bytes an ended block already sent. A receive engine fills the
 ring's free run and is re-armed when it has ended, by the line's handler
-or by `harvest()` under the guard.
+or by `harvest()` - whose guard, unlike the transmit side's, covers the
+whole verb: the completion the line still owes served, the publish, and
+the re-arm, so the receive channel is programmed under the mask.
 
 What the transport asks of an engine, so a family's engines are written
 to it: `present`, `channel`, `arm(data, request, high_priority)` - the

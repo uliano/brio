@@ -89,9 +89,12 @@ stratum (`brio/rp2350/core_m33.hpp` is the device header and then
 `cortexm/nvic.hpp`, [../cortexm/README.md](../cortexm/README.md)); what
 is RISC-V and not Raspberry Pi's is `brio/rp2350/core_hazard3.hpp`,
 which is this stratum's own until a second RISC-V family of this shape
-earns a core stratum. `core.hpp` is the one file that asks which
-processor is in the socket, and both halves export the same names, so
-nothing above it knows.
+earns a core stratum. `core.hpp` is the one file that asks the compiler
+which processor is in the socket, and both halves export the same names;
+above it, the three headers that must include a different file or run
+different instructions per architecture (`ticker.hpp`, `multicore.hpp`,
+`reset.hpp`) ask the macro `core.hpp` defines, `BRIO_RP2350_CORE_M33`,
+and nothing else asks at all.
 
 The device description is vendored from the pico-sdk at tag 2.3.1
 (`third_party/pico-sdk/rp2350/`, BSD-3-Clause), in its own include root
@@ -318,10 +321,10 @@ Driver gaps, each with its reason:
 - **The HSTX** (12.11), born with its first user. It is an output-only
   streaming serialiser for a display or a fast link, eight pads, a
   command expander and a bit crossbar behind one FIFO a DMA channel
-  feeds, and the display link that would use it is not in this project
-  yet. No instrument is missing: a PIO block reads a pad another
-  function drives ([pio.md](pio.md)), so its suite can sample the
-  block's own pads with no wire.
+  feeds, and the display link that would use it is not in this project.
+  No instrument is missing: a PIO block reads a pad another function
+  drives ([pio.md](pio.md)), so its suite can sample the block's own
+  pads with no wire.
 - **The Cortex-M33's coprocessors** (3.6), declined as drivers. They
   exist on one of this chip's two processor architectures, and this
   stratum is written once for both. The GPIO coprocessor (3.6.1) is a
@@ -392,7 +395,7 @@ in the document.
 | [timer.md](timer.md) | The two system timers: a 64-bit counter of microseconds each, four alarms with an interrupt line apiece, the tick generator of 8.5 behind each one, and the two registers this chip added, the counter taken off the tick and onto clk_sys, and a lock that refuses every write until the block is reset |
 | [watchdog.md](watchdog.md) | The countdown and the four scratch registers a program may use: the tick that now comes from the TICKS block, the RP2040's double decrement that is not this chip's, the three WDSEL registers in their three tiers, and erratum RP2350-E19's guard before every reboot |
 | [reset.md](reset.md) | Chapter 7 whole: the three tiers, the causes recorded in the always-on power manager beside the watchdog's REASON, the power-on state machine, the subsystem controller, the reboot both architectures have and the processor reset only one of them has |
-| [dma.md](dma.md) | The DMA: sixteen channels and four interrupt lines, a MODE in the top nibble of the transfer count that makes a channel re-arm itself or run forever, an address step that can go backward or by twos, the abort that answers erratum RP2350-E5, a security level on every resource; the engines: the two a transport names in its slots, the copy and fill engine over a channel in memory-to-memory, each binding its channel once and starting a block with two stores, the second the trigger; the level as one bit, a receive engine HIGH by default, and here two HIGH_PRIORITY channels starve a normal one; what a released requester leaves the next owner |
+| [dma.md](dma.md) | The DMA: sixteen channels and four interrupt lines, a MODE in the top nibble of the transfer count that makes a channel re-arm itself or run forever, an address step that can go backward or by twos, the abort that answers erratum RP2350-E5, a security level on every resource; the engines: the two a transport names in its slots, the copy and fill engine over a channel in memory-to-memory, each binding its channel once and starting a block with two stores, the second the trigger; the level as one bit, a receive engine HIGH by default, and the one measured case where two HIGH_PRIORITY channels starve a normal one beside a round that is otherwise fair; what a released requester leaves the next owner |
 | [pwm.md](pwm.md) | The PWM: twelve slices where the RP2040 had eight, the pin map's second half on GPIO 32..47 and what the four highest slices are in the package that bonds none of those pads, a second shared interrupt line with a register set of its own, and a fractional divider whose last step is a whole 256 |
 | [pio.md](pio.md) | The programmable I/O, chapter 11: three blocks of four machines over one instruction set, and the six things this chip added to it: a version field, a window that says which thirty-two pads a block can see, a CTRL write that reaches the blocks either side of it, all eight flags on the interrupt lines, a masked input count, and a receive FIFO that can be four registers instead of a queue |
 | [adc.md](adc.md) | The ADC: one converter over five channels or nine, because the package decides the input map and the temperature sensor's channel number with it; a four-bit AINSEL and a nine-bit round-robin where the RP2040 had three and five; no ADC_VREF pin, the converter's own supply being its full scale; the RP2040's differential-nonlinearity spikes gone; and an analog claim that must drop the pad's isolation latch for its pull to exist at all, which is also the one configuration erratum RP2350-E9 does not bite |
@@ -403,6 +406,6 @@ in the document.
 | [usb.md](usb.md) | The USB device controller: the RP2040's block with one new duty, the PHY's isolation latch, set at reset and lifted last of all, three reset values moved under it, two pads that are bank 1's and could be GPIO, an erratum that makes the system clock's rate part of the contract, and a shelf of diagnostics that are a report and never a path |
 | [flash.md](flash.md) | The external quad-SPI chip and the two blocks between it and the bus: a memory interface with two windows, a transfer described phase by phase, four translation panes a window and a direct mode that disconnects them all; a cache whose flush is an address and not a register, with one erratum in its clean sweep; and an engine whose way back into execute-in-place is the bootrom's own function out of boot RAM, where its predecessor had a second stage |
 | [multicore.md](multicore.md) | The second core: a kernel of its own on either instruction set, the doorbell registers this chip has and its predecessor had not, which free the mailbox FIFO for the launch alone, one bell line with one number for both cores, the bootrom's six-word protocol and the entry shim that gives core 1 what the ROM does not hand it |
-| [powman.md](powman.md) | The always-on block: five power domains and twelve states of which eight have no processor in them, a password on every register and a read of it that does not return the password, the core regulator and the brown-out detector decoded and never written, the eight scratch words that are the only state a power-down keeps, and the millisecond timer in the same block, whose divisor is a number software writes and which therefore has to be told what the low-power oscillator really runs at |
+| [powman.md](powman.md) | The always-on block: five power domains and twelve states of which eight have no processor in them, a password on every register and a read of it that does not return the password, the core regulator and the brown-out detector decoded and never written, the eight scratch words of the always-on domain, which a power-down leaves powered (as a state that keeps the SRAM powered keeps the SRAM), and the millisecond timer in the same block, whose divisor is a number software writes and which therefore has to be told what the low-power oscillator really runs at |
 | [sleep.md](sleep.md) | The three depths a program can arm: a plain sleep instruction, the SLEEP state that is the program's pruning set and no processor bit at all, and DORMANT, whose alarm needs the reference clock left running, which is what makes both sites move clk_sys and clk_ref apart before the keyword; the always-on timer as alarm and witness on every rung, and the memory power-down states kept off the ladder because leaving one is a boot |
 | [vendor/README.md](vendor/README.md) | The RP2350 datasheet by build, the hardware design guide, the vendored pico-sdk subset and the SVD, the bench chip's identity, the errata this stratum answers |

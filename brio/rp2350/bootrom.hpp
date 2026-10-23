@@ -1,62 +1,83 @@
 /*
  * bootrom.hpp
  *
- * THE MASK ROM'S PUBLIC FUNCTIONS (datasheet 5.4): 32 kB of code that
- * booted this image and is still there at address zero, with a table
- * that says where its entry points are. The RP2040 had one of these; the
- * RP2350's is larger, its table has an entry PER ARCHITECTURE, and both
- * of those facts are why this file exists rather than a handful of
- * constants in whoever needs one.
+ * The mask ROM's public functions (datasheet 5.4) for a program that
+ * wants what the ROM offers after boot - the per-boot random number, the
+ * chip's identity and boot state as the ROM reports them, or a ROM
+ * function by its code: 32 kB of code that booted this image and is
+ * still there at address zero, with a table that says where its entry
+ * points are. The RP2040 had one of these; the RP2350's is larger, its
+ * table has an entry per architecture, and both of those facts are why
+ * this file exists rather than a handful of constants in whoever needs
+ * one. The smallest use:
  *
- * WHY THE TABLE AND NOT A FIXED ADDRESS. 5.4.1: the locations of the
+ *     if (brio::Bootrom::present()) {
+ *         if (auto info = brio::Bootrom::sys_info()) {
+ *             if (info->has(brio::SysInfoFlag::boot_random)) { seed(info->boot_random); }
+ *         }
+ *     }
+ *
+ * Who calls what. present(), version(), table() and the two lookups are
+ * reads of fixed ROM words (the lookups also call the ROM's helper),
+ * callable from main context; every wrapper calls ROM code on the
+ * caller's stack, in the caller's context, with nothing here masking
+ * interrupts - so all of them belong to main context and none to an
+ * interrupt handler (the last paragraph of this comment). The caller owns
+ * every buffer it hands a raw call (`out`, `out_words`), for the call's
+ * duration; sys_info() uses a buffer of its own and answers by value.
+ * Every lookup answers nullptr, every raw wrapper BootromError::not_found
+ * and sys_info() and git_revision() std::nullopt, rather than jumping to
+ * address zero when the table is not where it should be.
+ *
+ * Why the table and not a fixed address. 5.4.1: the locations of the
  * functions "may change with each bootrom release", so what is fixed is
- * a handful of well-known WORDS at the bottom of the ROM - a magic
+ * a handful of well-known words at the bottom of the ROM - a magic
  * number, a version byte, and pointers to the table and to two lookup
  * helpers that walk it. A caller asks for a function by a two-character
- * CODE ('G','S' for get_sys_info) and gets an address back, or nothing.
+ * code ('G','S' for get_sys_info) and gets an address back, or nothing.
  *
- * THE TWO ARCHITECTURES ARE TWO LOOKUPS, NOT ONE (5.4.1's tables 453 and
+ * The two architectures are two lookups, not one (5.4.1's tables 453 and
  * 454). Arm code finds the helpers at 0x14..0x18; RISC-V code finds its
  * own at 0x7df6..0x7dfc, near the top of the ROM. And the two ask for
- * different things: on Arm the table holds a POINTER to the function, so
- * the helper that returns the stored VALUE is the right one; on RISC-V
- * the table entry IS a jump instruction, so the helper that returns the
- * ENTRY'S OWN ADDRESS is. This file asks `core_kind` - a constant, not
+ * different things: on Arm the table holds a pointer to the function, so
+ * the helper that returns the stored value is the right one; on RISC-V
+ * the table entry is a jump instruction, so the helper that returns the
+ * entry's own address is. This file asks `core_kind` - a constant, not
  * the preprocessor - and does the right one.
  *
- * SECURITY STATE. brio runs Secure on the Arm half (the bootrom hands
+ * Security state. brio runs Secure on the Arm half (the bootrom hands
  * over that way and nothing here writes the SAU), so functions are
  * looked up with the Secure Arm flag; the Non-secure entry points, which
  * must be enabled one by one by Secure code before they exist at all,
  * are not offered. On RISC-V there is one entry point per function and
  * no flag to choose.
  *
- * WHAT IS WRAPPED, AND WHAT DELIBERATELY IS NOT. Three read-only things:
+ * What is wrapped, and what deliberately is not. Three read-only things:
  * `get_sys_info`, `get_partition_table_info` and the ROM's own git
  * revision word. Not here:
  *
- *   - THE FLASH FUNCTIONS. They disconnect the QSPI interface from the
+ *   - The flash functions. They disconnect the QSPI interface from the
  *     execute-in-place window, so they must run from RAM with interrupts
  *     masked; that discipline is a chapter of its own and belongs beside
  *     the flash driver, not in a lookup table's file.
  *   - `reboot()`. This stratum's reboot is the watchdog's (reset.hpp),
  *     which is what the reset chapter measured; a second spelling of the
  *     same act would be a second thing to keep true.
- *   - `otp_access()`. It is the bootrom's OTP PROGRAMMING entry point -
+ *   - `otp_access()`. It is the bootrom's OTP programming entry point -
  *     its `row_and_flags` argument carries an IS_WRITE bit - and this
  *     project's rule is that no write path to OTP exists in the tree.
  *     The read side of OTP is memory-mapped and needs no ROM call
  *     (rp2350/otp.hpp), so there is nothing lost and one irreversible
  *     mistake made impossible.
  *
- * THE BOOT LOCKS (5.4.4) ARE NOT CLAIMED. The ROM checks them only when
+ * The boot locks (5.4.4) are not claimed. The ROM checks them only when
  * boot lock 7 has been claimed to turn checking on, and nothing in brio
  * claims it; the two functions wrapped here own no hardware, so there is
  * nothing to arbitrate. A program that starts using the ROM's flash or
  * OTP entry points is the program that will need the locks, and it can
  * have them then.
  *
- * NOTHING HERE IS CALLED FROM AN INTERRUPT. These are ordinary C
+ * Nothing here is called from an interrupt. These are ordinary C
  * functions in ROM with ordinary stack needs, and 5.4.8's own notes warn
  * that some want a good deal of stack on RISC-V.
  */
@@ -225,7 +246,7 @@ struct Bootrom {
     static bool present() { return (word_at(BootromAddress::magic) & 0x00FFFFFFu) == bootrom_magic; }
 
     /// The ROM's version byte (5.4.1): 2 on A2 silicon. Informational,
-    /// and explicitly NOT a way to infer where anything lives.
+    /// and explicitly not a way to infer where anything lives.
     static uint8_t version() {
         return *reinterpret_cast<const volatile uint8_t*>(rom_address(BootromAddress::version));
     }
@@ -238,7 +259,7 @@ struct Bootrom {
                                                       : BootromAddress::table_arm)));
     }
 
-    /// The helper that returns the VALUE stored in a table entry: what
+    /// The helper that returns the value stored in a table entry: what
     /// an Arm function lookup and a data lookup on either half want.
     static Lookup lookup_value() {
         return reinterpret_cast<Lookup>(static_cast<uintptr_t>(
@@ -246,7 +267,7 @@ struct Bootrom {
                                                       : BootromAddress::lookup_value_arm)));
     }
 
-    /// The helper that returns the ADDRESS OF the table entry: what a
+    /// The helper that returns the address of the table entry: what a
     /// RISC-V function lookup wants, the entry itself being a jump.
     static Lookup lookup_entry() {
         return reinterpret_cast<Lookup>(static_cast<uintptr_t>(
@@ -303,11 +324,13 @@ struct Bootrom {
     /**
      * `get_sys_info` decoded: the flags asked for, the answer's own
      * "what I served" word checked, and the words that follow taken in
-     * the ORDER the flags are listed in - which is the whole protocol,
+     * the order the flags are listed in - which is the whole protocol,
      * there being no tags in the buffer.
      *
      * Nothing when the call failed. A call that succeeds but serves less
-     * than was asked for is NOT a failure: `served` says what is there.
+     * than was asked for is not a failure: `served` says what is there.
+     * Main context; it calls the ROM function on the caller's stack, with
+     * a sixteen-word buffer of its own, and answers by value.
      */
     static std::optional<BootromSysInfo> sys_info(uint32_t flags = SysInfoFlag::all) {
         std::array<uint32_t, 16> buffer{};
@@ -367,13 +390,17 @@ struct Bootrom {
     }
 
     /**
-     * `get_partition_table_info` (5.4.8.16), raw. It reports
-     * `BootromError::precondition_not_met` when no partition table has
-     * been loaded - which is the ordinary answer on a board whose image
-     * carries none, and the reason this wrapper is offered without
-     * `load_partition_table()` beside it: loading one wants a three
-     * kilobyte work area and a program that has a partition table to
-     * load.
+     * `get_partition_table_info` (5.4.8.16), raw. 5.4.8.16 says it
+     * reports `BootromError::precondition_not_met` when no partition
+     * table has been loaded. Measured (docs/rp2350/bootrom.md), that is
+     * not what an image carrying no table gets after a flash boot: the
+     * ROM's resident view is loaded whether there is anything in it or
+     * not, and the call is served, answering a table that is not
+     * present; the precondition code belongs to the boot paths that skip
+     * that step, a watchdog boot or a RAM boot. The wrapper is offered
+     * without `load_partition_table()` beside it: loading one wants a
+     * three kilobyte work area and a program that has a partition table
+     * to load.
      */
     static int32_t get_partition_table_info(uint32_t* out, uint32_t out_words,
                                             uint32_t flags_and_partition) {

@@ -1,56 +1,124 @@
 # Timer (RP2350)
 
-Documents of record: the RP2350 datasheet (build d126e9e), 12.8 (the
-system timers: the 64-bit counter, the latching pair, the four alarms,
-and the two registers this chip added) and 8.5 (the tick generators that
-feed them). Appendix E carries no erratum against this block. The driver:
+This document is for a programmer who needs to measure a span in
+microseconds, or to be interrupted at a moment of their choosing, on an
+RP2350 of either architecture. `Timer<n>` drives the chip's two system
+timers, TIMER0 and TIMER1: each a 64-bit counter of microseconds with
+four alarms, each alarm raising an interrupt line of its own. In a brio
+program a timer is a ruler for a measurement (`Timer<0>` is the timer
+suite's; the platform's suite measures on the platform timer, `Mtime`,
+and on both of these, `Timer<0>` in microseconds and `Timer<1>` counting
+clk_sys cycles - [platform.md](platform.md)), and an alarm is a one-shot
+interrupt a handler serves; the kernel's own timebase is not here but in
+[platform.md](platform.md), and the timers are what a program uses
+beside it. `Timer<n>` is a monostate: a type whose functions are all
+static, never instantiated, the hardware being the only state.
+
+The smallest use, a span measured and an alarm armed, is an excerpt of
+the block under "How to use it" below:
+
+```cpp
+brio::Timer<0>::init(clock);                    // after SysClock::init()
+const uint32_t t0 = brio::Timer<0>::now_low();
+// ...
+const uint32_t took_us = brio::Timer<0>::now_low() - t0;
+
+extern "C" void isr_timer0_2() { brio::Timer<0>::clear<2>(); /* ... */ }
+brio::Timer<0>::interrupt<2>(true);
+brio::Irq::enable(brio::Timer<0>::irq<2>());
+brio::Timer<0>::alarm_in<2>(2000u);             // fires in 2 ms, once
+```
+
+Line by line: `init(clock)` takes the clock task's tag object
+([clock.md](clock.md)), takes the block through its reset and starts its
+tick at one microsecond; `now_low()` reads the low 32 bits of the
+counter, and the difference of two readings is the span in
+microseconds, correct across the low half's wrap for spans under 71
+minutes; `isr_timer0_2` is the handler of TIMER0's alarm 2, under the
+crt's name for that line (the same name on both architectures), and its
+first act clears the alarm's raised flag; `interrupt<2>(true)` lets the
+alarm reach its line; `Irq::enable(...)` enables the line in this core's
+interrupt controller; and `alarm_in<2>(2000u)` arms the alarm 2000 us
+from now, after which it fires once and disarms itself. The alarm's
+index is a template argument (the angle brackets), fixed when the
+program is compiled: a fifth alarm, or a third timer, does not compile.
+
+What decides correctness even there. `init()` runs after the clock
+task's, because it divides clk_ref by the megahertz the clock type
+claims and does not read the hardware; it answers false when the block
+did not come ready or the tick did not start, which the excerpt
+discards. `init()` also restarts the counter from zero, so a second
+`init()` moves the ruler under anyone bracketing a span on it. The
+handler must clear the raised flag: INTR's bit is a level that stands
+until a one is written to it, so a handler that does not clear it is
+entered again at once. The program binds the vector itself; a name it
+does not bind lands in the crt's default spin. And `Irq::enable` enables
+the line on the calling core, and the core that enabled a line serves
+it. That each line is enabled by exactly one core is a convention the
+program keeps: nothing in the code checks it, and the chip offers no
+register that would ([multicore.md](multicore.md), "Not covered yet").
+
+The rest of this page, in order: the documents of record; what the
+silicon does (the two instances, the tick that feeds them, the 64-bit
+read, the two registers this chip added, PAUSE and DBGPAUSE); the types
+and verbs; how to use it; the bench findings; and what is not covered.
+
+## Documents of record
+
+The RP2350 datasheet (build d126e9e), 12.8 (the system timers: the
+64-bit counter, the latching pair, the four alarms, and the two
+registers this chip added) and 8.5 (the tick generators that feed them).
+Appendix E carries no erratum against this block. The driver:
 `brio/rp2350/timer.hpp` over `clock.hpp` and `resets.hpp`. The reference
-suite: `test_rp2350_timer`, letters b, c, d, e, f, g, h and k - and every
-timing letter of that suite, which `Timer<0>` is the ruler of.
+suite: `test_rp2350_timer`, letters b, c, d, e, f, g, h and k - and
+every timing letter of that suite, which `Timer<0>` is the ruler of (a
+letter is one command key of the suite's console and the group of
+verdicts it runs; `z` is the key that runs every letter but `i`, the
+real resets, a letter that reboots the board and runs by name).
 
 ## What the silicon does
 
-TWO INSTANCES, TIMER0 and TIMER1, where the RP2040 had one: identical
+Two instances, TIMER0 and TIMER1, where the RP2040 had one: identical
 hardware at two addresses, put there so that two security domains can
 each own a timebase. Each is a 64-bit counter of microseconds - it cannot
 overflow in practice, so it is monotonic - with four alarms that match
-the LOW 32 bits, at most 2^32 us (about 71 minutes) ahead. Writing an
+the low 32 bits, at most 2^32 us (about 71 minutes) ahead. Writing an
 ALARMn register arms it (ARMED's bit), the match clears ARMED and raises
 INTR's bit - a level, cleared by writing 1 to it - and each alarm has one
 interrupt line of its own: TIMER0's are lines 0..3 and TIMER1's lines
 4..7, one numbering for both architectures (3.8.4.2). INTE masks, INTF
 forces, INTS is the masked status.
 
-WHAT THE COUNTER COUNTS COMES FROM ANOTHER BLOCK. On the RP2040 the tick
+What the counter counts comes from another block. On the RP2040 the tick
 was the watchdog's and was lent to the timer; here every consumer of a
 timebase has its own generator in the TICKS block of 8.5, and each system
-timer has one. A generator divides clk_ref by a CYCLE COUNT, so with
+timer has one. A generator divides clk_ref by a cycle count, so with
 clk_ref on the crystal the counter reads microseconds whatever clk_sys is
 doing - and stopping the generator stops the counter behind it, the tick
 being what the counter counts rather than a clock the block owns. Nothing
 starts a generator at boot but software.
 
 The 64-bit value is read either through TIMELR/TIMEHR, where reading the
-low half LATCHES the high one until it is read (right for one reader,
+low half latches the high one until it is read (right for one reader,
 wrong for two contexts - and this chip has two cores), or through the raw
 halves TIMERAWL/TIMERAWH with a re-read of the high half.
 
-TWO REGISTERS THE RP2040 HAD NOT (12.8.1.1):
+Two registers the RP2040 had not (12.8.1.1):
 
 - **SOURCE** takes the counter off the tick and onto clk_sys cycles. It
   is not a timebase then - it moves with every rate change - but it is
   the finest counter this chip offers a program.
-- **LOCKED** is described as disabling write access to the block. IT
-  DISABLES NOTHING ON THIS STEPPING (measured, below): the bit takes its
+- **LOCKED** is described as disabling write access to the block. It
+  disables nothing on this stepping (measured, below): the bit takes its
   write and reads back set, and every register of the block goes on
   taking writes under it. What is true of it is the other half of the
   datasheet's sentence - only a reset takes it down - which is why `init`
-  CYCLES this block's reset line instead of merely releasing it. No verb
+  cycles this block's reset line instead of merely releasing it. No verb
   of the driver is gated on the bit, and a program must not gate one
   either.
 
 PAUSE stops the count where it is; it is taken up again from there, with
-nothing caught up. DBGPAUSE's two bits, SET AT RESET, stop the count
+nothing caught up. DBGPAUSE's two bits, set at reset, stop the count
 while a debugger has a core halted - and a halted core is one of four
 here, so with the bits set a breakpoint on one core freezes the ruler of
 another, whose every timed wait then never ends.
@@ -61,13 +129,13 @@ another, whose every timed wait then never ends.
   `alarm_count` is 4; `tick_consumer` and `reset_block` name this
   instance's generator and reset line, and `Timer<n>::Tick` is the
   generator itself.
-- `init(clock)` - the block's reset CYCLED, DBGPAUSE cleared, SOURCE on
+- `init(clock)` - the block's reset cycled, DBGPAUSE cleared, SOURCE on
   the tick and the generator started at the crystal's megahertz. A
   clk_ref that is not a whole number of megahertz does not compile.
 - `now()` (64 bits, the raw-pair discipline, any context), `now_low()`
   (the low half: 71 minutes of unsigned span, what a bracket wants),
   `now_latched()` (the latching pair, one context only).
-- The alarms, with the index a TEMPLATE PARAMETER because an alarm is
+- The alarms, with the index a template parameter because an alarm is
   claimed at build time - what claims it is the app binding its vector by
   name: `alarm<a>(at)`, `alarm_in<a>(us)`, `alarm_at<a>()`, `armed<a>()`,
   `disarm<a>()`, `interrupt<a>(on)`, `raised<a>()`, `pending<a>()`,
@@ -108,8 +176,8 @@ fail** on the Hazard3 pair, from one source.
   200003 us, TIMER1 200004 us and the SIO's platform timer 200003 us on
   the Arm half (200001 / 200001 / 200002 on the RISC-V one): three
   generators of the TICKS block dividing one clk_ref, agreeing to within
-  4 us over 200 000. The crystal's own accuracy is nobody's verdict here
-  - they all share it.
+  4 us over 200 000. The crystal's own accuracy is nobody's verdict
+  here - they all share it.
 - **The 64-bit read.** The raw pair and the latching pair agree within a
   microsecond of each other on both instances, and 2000 raw-pair reads of
   each never go backwards. The high half is still zero, so the low half

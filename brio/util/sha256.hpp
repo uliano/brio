@@ -3,9 +3,25 @@
  *
  * SHA-256 in constexpr C++, as FIPS 180-4 defines it: the message
  * digested 512 bits at a time, the result 256 bits, the padding the
- * standard's own.
+ * standard's own. A caller gets the digest of a byte range, at run time
+ * or at compile time, and the padding bytes a block-wise accelerator
+ * needs.
  *
- * WHY IT IS HERE AND NOT IN A DRIVER, for util/crc.hpp's reason. A
+ * The smallest use is one call:
+ *
+ *     constexpr auto d = brio::sha256(std::span<const uint8_t>{text});
+ *     const auto out = d.bytes();   // the 32 bytes, as written down
+ *
+ * The host suite judges it against the FIPS 180-4 vectors
+ * (test/test_sha256).
+ *
+ * Who calls what. Every function here is pure: no state, no masking, no
+ * wait, so any context may call it, an interrupt handler included, and
+ * two contexts at once. The caller's bytes are only read, for the
+ * duration of the call; `sha256_tail()` writes the caller's array and
+ * nothing else. The cost is the stack (below) and the time.
+ *
+ * Why it is here and not in a driver, for util/crc.hpp's reason. A
  * hardware accelerator for this function has nothing to configure: no
  * polynomial, no initial value, no variant - it computes SHA-256 and
  * only SHA-256, so what it computes has one home, and this is it. The
@@ -17,22 +33,27 @@
  *     has none;
  *   - what answers for a constant with no code at all.
  *
- * AND IT IS ALSO HALF OF THE DRIVER. The accelerators of this kind
- * digest whole 512-bit blocks and PAD NOTHING: software owes them the
+ * And it is also half of the driver. The accelerators of this kind
+ * digest whole 512-bit blocks and pad nothing: software owes them the
  * trailing one bit, the zeros and the 64-bit length. `sha256_tail()`
  * below builds exactly those bytes, so the arithmetic that decides where
  * a message ends is written once, tested on the host, and shared by the
- * software path and the hardware one.
+ * software path and the hardware one (rp2350/sha256.hpp's hash() is
+ * the hardware one; docs/rp2350/sha256.md).
  *
- * COST. Sixty-four rounds a block over a sixty-four word schedule: about
- * 2 kB of constants and a few hundred bytes of code, and on the order of
- * a microsecond per block on a 150 MHz 32-bit core. The message schedule
- * is a local array of 64 words - 256 bytes of stack - which is why this
- * is a function and never an object a small target keeps around.
+ * Cost. Sixty-four rounds a block over a sixty-four word schedule: 288
+ * bytes of constants (the sixty-four round constants and the eight
+ * initial words) and a few hundred bytes of code. Measured on the
+ * RP2350 at 150 MHz, 4096 bytes in 2547 us on the Cortex-M33 and 2216
+ * us on the Hazard3, about 40 and 35 us a block (test_rp2350_blocks,
+ * letter c; docs/rp2350/sha256.md, "Bench findings"). The message
+ * schedule is a local array of 64 words - 256 bytes of stack, and
+ * sha256() keeps a 128-byte tail beside it - which is why this is a
+ * function and never an object a small target keeps around.
  *
- * NOT A MESSAGE AUTHENTICATION CODE. HMAC, key derivation and signature
- * verification are built ON this and are not here; nothing in brio needs
- * them yet.
+ * Not a message authentication code. HMAC, key derivation and signature
+ * verification are built on this and are not here; nothing in brio
+ * needs them yet.
  */
 
 #pragma once
@@ -176,15 +197,15 @@ constexpr void sha256_compress(std::array<uint32_t, sha256_digest_words>& state,
 inline constexpr size_t sha256_max_tail_bytes = 2 * sha256_block_bytes;
 
 /**
- * THE PADDING, as a run of bytes a caller can feed to anything that
+ * The padding, as a run of bytes a caller can feed to anything that
  * digests whole blocks - the software loop below, or an accelerator's
  * data port.
  *
  * `leftover` is what is left of the message after every whole block has
  * been consumed (fewer than 64 bytes), `total_bytes` the length of the
- * WHOLE message. Writes into `out` the leftover, then a byte 0x80 (the
+ * whole message. Writes into `out` the leftover, then a byte 0x80 (the
  * standard's single one bit followed by seven zeros), then zeros, then
- * the message length in BITS as eight bytes most significant first, and
+ * the message length in bits as eight bytes most significant first, and
  * returns how many bytes that came to - always 64 or 128, never
  * anything else, because the whole point of the padding is to land on a
  * block boundary.
@@ -219,7 +240,8 @@ constexpr size_t sha256_tail(std::span<const uint8_t> leftover, uint64_t total_b
 
 /**
  * The whole function over a byte range: the digest of `message`, with
- * the padding done here.
+ * the padding done here. `message` is read during the call and not
+ * kept; the result is a value.
  *
  *   constexpr auto d = brio::sha256(std::span<const uint8_t>{text});
  *

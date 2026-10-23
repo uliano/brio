@@ -1,6 +1,66 @@
 # Sleep (RP2040)
 
-Documents of record: the RP2040 datasheet (build 3184e62), 2.11 (power
+This document is for a programmer who wants an RP2040 program to spend
+its idle time drawing less: with clocks switched off while the chip
+sleeps, or in the DORMANT state, where the oscillator the program runs
+on stops and every clock derived from it with it until a pin wakes the
+chip - or the calendar, when the ring oscillator is the one stopped and
+the RTC runs from the crystal, which keeps going. A brio program does
+not put the chip to sleep itself. The kernel's idle path sleeps whenever
+no active object has an event to handle (an active object is a component
+of a brio program with its own event queue, served one event at a time
+by the kernel, [docs/learn/introduction.md](../learn/introduction.md)),
+and how deep it sleeps is decided by util/power.hpp's `PowerManager`, an
+active object that asks the program's other objects for their consent
+and then arms a sleep site with a depth - a rung of the ladder light,
+standby, deep ([design/power.md](../design/power.md) is the model). This
+stratum supplies the two sites: `Rp2040SleepSite`, and
+`Rp2040TimedSleepSite`, which also wakes the chip for the kernel's next
+deadline and catches kernel time up after a dormant.
+
+The smallest use, from "How to use it" below:
+
+```cpp
+using Site = brio::Rp2040TimedSleepSite<P, SysClock, brio::DormantSource::rosc>;
+using Power = brio::PowerManager<P, Site, brio::PowerConfig{}, Voters...>;
+
+brio::Clocks::sleep_enables(brio::sleep_clocks_core | brio::sleep_clocks_uart0 | brio::sleep_clocks_rtc);
+Site::init();                            // the timer's alarm line
+brio::Rtc::init(clock); brio::Rtc::set(now);   // a dormant with a deadline wants the calendar
+extern "C" void isr_timer_3() { Site::isr(); }
+extern "C" void isr_rtc() { (void)Site::rtc_isr(); }
+brio::Tenuto<P, Power, ...>::run();      // the manager arms, the loop's idle path sleeps
+```
+
+Line by line: `Site` is the timed site on core 0's platform `P`, its
+dormant on the ring oscillator so the crystal keeps the calendar
+running; `Power` is the manager over it, with the program's voters,
+the active objects it asks; `sleep_enables()` names the clocks that
+stay on in the SLEEP state - the chip's core set, the console's UART
+and the RTC; `Site::init()` takes the system timer's alarm 3 for the
+deadlines; the calendar is set, since a dormant with a deadline wakes
+on the RTC's alarm; the two handlers are the site's, bound under the
+pico-sdk's names for alarm 3's line and the RTC's; the manager is
+listed in the `Tenuto` with the program's other active objects.
+
+What decides correctness even there. The SLEEP_ENx set keeps clocked
+whatever must run while the chip sleeps - the fabric, the memories,
+the wake sources, a byte transport whose bytes are in flight - since a
+peripheral whose clock is pruned stands still and a UART loses the
+byte it was moving. A dormant needs a way back: a GPIO dormant-wake
+event enabled (`DormantWake::enable()`), or on the ring-oscillator site
+the calendar's alarm, armed with its interrupt on; the site refuses to
+arm a dormant without one, since with nothing to restart the
+oscillator the dormant keyword is the last instruction the chip runs.
+`Site::init()` runs after `Timer::init()`, answering false while the
+timer's tick is not running. Both sites are core 0's: a dormant stops
+the whole chip, and the timed site does not compile on core 1's
+platform. And after a dormant the program's own `Clock::init()`
+restores the tree before the wake's handler runs.
+
+## Documents of record
+
+The RP2040 datasheet (build 3184e62), 2.11 (power
 control: 2.11.1 the top-level clock gates, 2.11.2 the SLEEP state,
 2.11.3 the DORMANT state, 2.11.5 the programmer's model), 2.16.5 and
 2.17.7 (the crystal's and the ring oscillator's DORMANT registers),
@@ -33,13 +93,13 @@ the silicon. With no wake configured the keyword is the last
 instruction the chip executes.
 
 Three facts measured that the chapter does not state as they stand:
-THE SLEEP STATE IS REACHED ON A PLAIN WFI - core 0 in WFI, core 1 in
+the SLEEP state is reached on a plain WFI - core 0 in WFI, core 1 in
 the bootrom's WFE, SLEEPDEEP clear - exactly as 2.11.2's rule reads,
 and the note asking for deep sleep on both cores describes the SDK's
-example, not a condition; SYSTICK COUNTS THROUGH THE SLEEP STATE, a
+example, not a condition; SysTick counts through the SLEEP state, a
 tick a millisecond ending each turn, so kernel time never freezes in
 a standby and a time event matures on its own; and the RTC's
-interrupt wakes a dormant RING OSCILLATOR while the crystal keeps
+interrupt wakes a dormant ring oscillator while the crystal keeps
 clk_rtc, which is the dormant with a deadline this stratum offers.
 
 ## Types and verbs

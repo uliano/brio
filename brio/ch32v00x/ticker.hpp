@@ -2,20 +2,54 @@
  * ticker.hpp
  *
  * The kernel timebase of this target, on the QingKe core's own system
- * counter (STK, RM 6.5.4).
+ * counter (STK, RM 6.5.4): a 1000 Hz interrupt that counts the ticks
+ * the kernel's time events are measured in. The smallest use
+ * (docs/ch32v00x/platform.md, "How to use it"):
  *
- * WHY STK AND NOT A TIM. The same reason as on the two Cortex-M0+
- * families: the system counter is core-private, so claiming it costs
- * the application nothing - TIM1, TIM2 and every other block stay
- * free. It is not the ARM SysTick though, and this file is not
- * cortexm/ticker.hpp with different names: the counter here counts UP to
+ *     extern "C" BRIO_CH32_INTERRUPT void systick_handler() { brio::Ticker::tick(); }
+ *
+ *     int main() {
+ *         SysClock::init();
+ *         brio::Ticker::init(clock);
+ *         brio::enable_interrupts();
+ *     }
+ *
+ * The clock task must run first: init() computes the compare from the
+ * rate the clock type claims, not from the hardware, so a ticker
+ * initialized on a chip still at its 8 MHz reset rate under a 48 MHz
+ * clock type ticks six times too slowly until the clock task runs (the
+ * compare is written once, from the claimed rate), and nothing refuses
+ * it. The
+ * vector at Irq::systick must be bound to tick() by the program, under
+ * the crt's name for it (systick_handler, the crt being the startup code
+ * that runs before main()); the kernel binds no vector, and in a program
+ * that forgets it the vector stays on the crt's spin for unbound
+ * vectors: init() enables the line, so the first tick after interrupts
+ * are enabled enters the spin and the program stops there.
+ * ch32v00x/platform.hpp uses this timebase by default.
+ *
+ * Who calls what. init() once in main(), after the clock task and
+ * before interrupts are enabled. tick() is the interrupt body, called
+ * from the bound vector and nowhere else. ticks(), millis(), secs() and
+ * cycles() may be read from any context and do not mask; now() masks
+ * for two loads. advance() masks; it is a timed sleep site's verb
+ * (ch32v00x/sleep.hpp). pause() and resume() are idle()'s across a
+ * Standby (ch32v00x/platform.hpp); rebase() is a DynamicClock's, from
+ * its set(). Nothing here waits, except cycles(), which retries until
+ * its reads are consistent.
+ *
+ * Why STK and not a TIM: the system counter is core-private, so claiming
+ * it costs the application nothing - TIM1, TIM2 and every other block
+ * stay free. It is not the ARM SysTick though, and this file is not
+ * cortexm/ticker.hpp with different names: the counter here counts up to
  * a compare value, reloads to zero by itself when STRE is set, and
- * raises a flag in a status register that the handler must CLEAR. A
+ * raises a flag in a status register that the handler must clear. A
  * core stratum shared with a second QingKe family would start from
  * this file; there is no second family yet, so it stays here (the
  * stratum-naming rule: a name widens when a real part proves it).
  *
- * Monostate: one counter, one timebase per program, and the ISR body
+ * Monostate (a type used only through its static members, never as an
+ * object): one counter, one timebase per program, and the ISR body
  * reaches its counters with no indirection. State lives in .bss.
  *
  * ## Time representations
@@ -38,31 +72,19 @@
  * tick() runs in the STK handler. The counters are 32-bit and this core
  * loads an aligned word in one uninterruptible access (atomic_width 4),
  * so a single-counter getter needs no mask - but it does need a
- * VOLATILE read, or a polling loop over an inlined getter folds to one
+ * volatile read, or a polling loop over an inlined getter folds to one
  * hoisted load that never sees the handler's store. now() reads two
  * counters that must belong to the same instant, so it masks.
  *
- * ## The caveat
+ * ## The clock and the low-power modes
  * STK is clocked from HCLK, so its compare value is a function of the
- * clock's rate: a program that changes SYSCLK at run time must rebase
- * the ticker, and that is what the ClockUser contract (util/clock.hpp)
- * is for. This family has no dynamic clock yet; when it gets one, the
- * assertion in init() is what will refuse a clock that forgot the
- * ticker. What the low-power modes do to this counter is not stated
- * here because no sleep site of this stratum exists yet.
- *
- * ## Usage
- * ```cpp
- * #include "ch32v00x/ticker.hpp"
- *
- * extern "C" BRIO_CH32_INTERRUPT void systick_handler() { brio::Ticker::tick(); }
- *
- * int main() {
- *     SysClock::init();
- *     brio::Ticker::init(clock);
- *     brio::enable_interrupts();
- * }
- * ```
+ * clock's rate: a program that changes HCLK at run time rebases the
+ * ticker, and that is what the ClockUser contract (util/clock.hpp) is
+ * for - ch32v00x/clock.hpp's DynamicClock calls rebase() on every user
+ * it lists, and the assertion in init() refuses a dynamic clock that
+ * does not list the ticker. The counter stops with the core in a
+ * Standby: idle() pauses the interrupt across it, and the timed sleep
+ * site hands the slept span back through advance() (ch32v00x/sleep.hpp).
  */
 
 #pragma once
@@ -103,7 +125,8 @@ public:
     static constexpr uint16_t ticks_per_second = tps;
 
     /**
-     * Program STK for `tps` and start its interrupt.
+     * Program STK for `tps` and start its interrupt (the PFIC line
+     * enabled here). Returns true when the timebase runs.
      *
      * The counter counts up from zero to CMP and, with STRE set,
      * restarts from zero there - so the compare is hclk/tps - 1 cycles.
@@ -147,7 +170,7 @@ public:
     /**
      * STK interrupt body - call it from the bound vector.
      *
-     * The flag MUST be cleared here (write 0 to CNTIF, RM 6.5.4.2):
+     * The flag must be cleared here (write 0 to CNTIF, RM 6.5.4.2):
      * unlike an ARM SysTick exception, entry does not clear it, and a
      * handler that returns with it standing is re-entered for ever.
      */
@@ -208,7 +231,7 @@ public:
     static uint32_t secs() { return read_shared(m_secs); }
 
     /**
-     * Advance kernel time by `n` ticks IN ONE STEP - the resync verb a
+     * Advance kernel time by `n` ticks in one step - the resync verb a
      * timed sleep site calls after a Standby that stopped this counter
      * (sleep.hpp): the frozen span, and only that, handed back so time
      * events matured during the sleep are seen as due on the next loop

@@ -1,27 +1,46 @@
 /*
  * device.hpp
  *
- * The silicon's own register map, in this stratum's words. Unlike the
- * two Cortex-M0+ families, this target compiles with NO VENDOR HEADER:
- * WCH ships its register definitions inside the EVT package, whose
- * licence is written for software running on WCH parts and whose
- * headers carry no per-part tiering worth deriving from - so the map
- * lives here, read off the documents of record (CH32V00X reference
- * manual V1.5 and CH32V006 datasheet V2.0) and answerable to them.
+ * The silicon's own register map, in this stratum's words, and the
+ * part's facts. A program meets it through the drivers that include it
+ * and through two of its names: the interrupt numbers it hands the PFIC
+ * and the part's constants, as a program spells them (the first line
+ * as docs/ch32v00x/pin.md's "How to use it" does):
  *
- * WHAT THAT COSTS. The other 32-bit strata ask the device header which
- * instances exist (`#if defined(TCB4)`); here there is nothing to ask,
- * so per-part variability has to be STATED: the build names the part
- * (CH32V003 or CH32V006, from CH32V00X_MCU), this file asks that
- * definition ONCE and includes the part's own table from parts/, and
+ *     brio::Pfic::enable(brio::Irq::exti7_0);
+ *     brio::print(serial, brio::device::part_name, ...);
+ *
+ * Nothing here runs code but the register accessors (rcc(), stk(),
+ * pfic(), ...), which are inline functions returning a pointer, usable
+ * from any context; what a store does to the hardware, and under which
+ * guard, is the driver's that makes it.
+ *
+ * This target compiles with no vendor header: WCH ships its register
+ * definitions inside the EVT package, whose licence is written for
+ * software running on WCH parts and whose headers carry no per-part
+ * tiering worth deriving from - so the map lives here, read off the
+ * documents of record (CH32V00X reference manual V1.5 and CH32V006
+ * datasheet V2.0) and answerable to them.
+ *
+ * What that costs. A stratum built on a vendor's device header asks it
+ * which instances exist (`#if defined(TCB4)`); here there is nothing to
+ * ask, so per-part variability has to be stated: the build names the
+ * part (CH32V003 or CH32V006, from CH32V00X_MCU), this file asks that
+ * definition once and includes the part's own table from parts/, and
  * every driver reads the facts as `device::` constexpr values - the
  * memories, the page, the bonded ports, the instances, the GPIO mode
  * width, AFIO's register order, what the USART has. Two parts are the
  * whole family brio builds for.
  *
- * Register STRUCTS mirror the chapter's own field names and order, so
- * a reader can hold the manual beside the code. They are the only
- * place in the stratum where an address appears as a number.
+ * Register structs mirror the chapter's own field names and order, so
+ * a reader can hold the manual beside the code. Spelled here: the three
+ * bus bases; RCC, GPIO, FLASH and EXTEND, each with its register struct
+ * and its address as an offset from a bus base; the core's STK and PFIC
+ * at their fixed core addresses; and the USART's register struct alone,
+ * its instances' addresses being usart.hpp's (usart_base_for()). The
+ * other blocks' maps live in their own headers, each addressed as an
+ * offset from a bus base defined here, except the OPA's, whose base
+ * opa.hpp writes as a literal address (opa_base).
  */
 
 #pragma once
@@ -143,7 +162,7 @@ inline constexpr uint32_t rcc_pb2_usart1 = 1UL << 14;
 /// answers on and the register that clocks it are two facts.
 inline constexpr uint32_t rcc_pb2_usart2 = 1UL << 13;
 
-// ---- GPIO (RM ch. 10) -----------------------------------------------------
+// ---- GPIO (RM ch. 7) ------------------------------------------------------
 // One configuration register: this family bonds at most eight pins per
 // port, so there is no CFGHR - four bits per pin, the F1 shape (CNF
 // above MODE).
@@ -341,7 +360,7 @@ inline constexpr uint32_t stk_cntif = 1UL << 0;   ///< in SR
 /// system control register that decides what a WFI does. The rest of
 /// the block (priorities, the two free vectored entries, the hardware
 /// stack) arrives with its first user. Mind the names: the manual's
-/// ISR is the ENABLE status and its IPR the PENDING status - the
+/// ISR is the enable status and its IPR the pending status - the
 /// opposite of what the letters suggest.
 struct PficRegs {
     volatile uint32_t ISR[8];     ///< 0x000 ENABLE status, read-only
@@ -375,7 +394,7 @@ inline constexpr uint32_t sctlr_wfitowfe    = 1UL << 3;   ///< the NEXT wfi acts
 inline constexpr uint32_t sctlr_sevonpend   = 1UL << 4;   ///< any interrupt turning pending is a wake event
 inline constexpr uint32_t sctlr_setevent    = 1UL << 5;   ///< write-one: latch an event by hand
 
-/// Interrupt numbers, which on this core ARE the vector table's word
+/// Interrupt numbers, which on this core are the vector table's word
 /// indices (RM 6.3): the word at address 0 is an instruction, the words
 /// after it are handler addresses.
 enum class Irq : uint8_t {

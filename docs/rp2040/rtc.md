@@ -1,6 +1,68 @@
 # RTC (RP2040)
 
-Documents of record: the RP2040 datasheet (build 3184e62), 4.8 (the
+This document is for a programmer who wants the date and the time of
+day on an RP2040, or an alarm at a time of day - every minute at :00,
+every day at 13:00 - or a wake from the chip's DORMANT state at a time
+([sleep.md](sleep.md)). The RTC is a calendar of seven fields counting
+seconds, with one alarm. `Rtc` is the driver, a monostate (a type whose
+functions are all static, over the one block it stands for);
+`RtcDateTime` is a date and time as ordinary numbers, `RtcAlarm` the
+alarm's fields with a match flag each, and the calendar arithmetic (the
+leap years, the days of a month, the day of the week) is here too,
+because the block computes none of it.
+
+The smallest use, a date set and read and an alarm every minute, from
+"How to use it" below:
+
+```cpp
+brio::Rtc::init(clock);                                   // clk_rtc = crystal / 256, CLKDIV_M1 = 46874
+brio::Rtc::set({.year = 2026, .month = 9, .day = 13, .weekday = brio::rtc_weekday_of(2026, 9, 13),
+                .hour = 12, .minute = 30, .second = 0});
+if (const auto now = brio::Rtc::read()) { show(*now); }
+
+brio::Rtc::alarm({.at = {.second = 0}, .match_second = true});   // every minute at :00
+brio::Rtc::interrupt(true);
+extern "C" void isr_rtc() {
+    if (brio::Rtc::isr()) {            // the line masked, the match disarmed
+        minute_passed = true;          // the application re-arms with rearm_after() once the second is over
+    }
+}
+```
+
+Line by line: `init()` takes the clock's tag ([clock.md](clock.md)) for
+the crystal's rate, puts the RTC's clock on the crystal over 256 and
+sets the divider for a one-second reference - the calendar not yet
+running; `set()` writes the date, starts the calendar and returns once
+a read shows the value written, about 210 us; the day of the week is
+the program's to give, and `rtc_weekday_of()` computes it; `read()`
+answers the date and time, nothing while the calendar is stopped;
+`alarm()` arms a match on the seconds field alone, so it repeats every
+minute; `interrupt(true)` enables the alarm's interrupt at the block;
+`isr_rtc` is the RTC's handler under the pico-sdk's name, and `isr()`
+answers true for the alarm, leaving the block's line masked and the
+match disarmed.
+
+What decides correctness even there. The alarm's line is also the
+program's to enable in its core's NVIC, `brio::Nvic::enable(brio::Rtc::irq())`,
+which the excerpt leaves out: `init()` leaves it disabled, and without
+it the alarm never reaches the handler. The alarm is a level that
+stands for the whole matching second, which is why `isr()` masks and
+disarms; a repeating alarm is re-armed by `rearm_after()`, which reads
+the calendar until it has left the matching value, within its `spins`
+reads (false, the match left disarmed and the line masked, when they
+run out), and never by arming the match again at once ("Bench
+findings": a re-arm inside the matching second fired again, the ISR
+body disarmed it, and the alarm never came back). `set()` and `alarm()` answer false for a value
+outside the calendar's ranges, which the block itself never checks. A
+century year that is not a leap year (2100, 2200, 2300) wants
+`force_not_leap_year(true)` across its February, as "How to use it"
+says, since the block's rule is "divisible by four". And `read()` reads
+the two registers until two readings agree: a single pair read across
+a day's rollover can put the new time beside the old date.
+
+## Documents of record
+
+The RP2040 datasheet (build 3184e62), 4.8 (the
 real-time clock: 4.8.1 the storage format and the day of the week,
 4.8.2 the leap year, 4.8.3 the interrupt, 4.8.4 the reference clock
 and the clock-domain crossing, 4.8.5 the programmer's model - the
@@ -8,7 +70,10 @@ divider, the set, the read, the alarm, the dormant state -, 4.8.6
 the registers), 2.15 (clk_rtc). The driver: `brio/rp2040/rtc.hpp`
 (`Rtc` the resource, `RtcDateTime`, `RtcAlarm` and the calendar
 arithmetic) over `clock.hpp` (`Clocks::rtc_select`) and
-`resets.hpp`. The reference suite: `test_rp2040_rtc`, wireless.
+`resets.hpp`. The reference suite: `test_rp2040_rtc`, wireless (a
+suite's letter is one command key of its console and the group of
+verdicts it runs; a letter "by name" is outside the all-key and runs
+only when asked).
 
 ## What the silicon does
 
@@ -21,7 +86,7 @@ own with an aux mux and a 24.8 divider, and any whole rate from 1 to
 256, 46875 Hz. A leap year is "divisible by four" and nothing more,
 with a bit (FORCE_NOTLEAPYEAR) to switch it off for a century year.
 The block checks no field's range and computes no day of the week -
-it increments the one given. ONE alarm: a match on any subset of the
+it increments the one given. One alarm: a match on any subset of the
 seven fields, a field left out a wildcard, so fewer fields make a
 repeating alarm; the match is the block's interrupt and the wake of
 the chip's dormant state. Every register lives in clk_sys and is
@@ -30,23 +95,23 @@ periods to land, and a coherent reading is RTC_0 before RTC_1, the
 first read latching the second.
 
 Five facts measured that the chapter does not state: the block's
-reset completes without clk_rtc (the converter's does not); A
-CALENDAR ENABLED FROM A STOP TICKS AT ONCE - one second some 130 us
+reset completes without clk_rtc (the converter's does not); a
+calendar enabled from a stop ticks at once - one second some 130 us
 after RTC_ACTIVE, whatever the divider's phase was, the next a whole
 second later, where a LOAD into a running calendar ticks nothing -
 so a set value reads one second on within microseconds unless undone;
-a LOAD written with the calendar stopped is NOT seen before that tick
+a LOAD written with the calendar stopped is not seen before that tick
 in every timing - the chapter's own sequence (LOAD, then the enable)
 showed the value before the tick in one build and never in another
 with the same instructions placed elsewhere in flash, the read path
 going from the old calendar straight to the value plus one second - so
 the value is loaded after the tick, into the running calendar;
-and THE ALARM IS A LEVEL - the interrupt stands for the whole matching
+and the alarm is a level - the interrupt stands for the whole matching
 second, and the disarm itself lands two clk_rtc periods later, during
 which the handler is re-entered (124 entries in 43 us measured), so a
-handler masks the line first; and THE LATCH IS SOMETIMES LATE - the
+handler masks the line first; and the latch is sometimes late - the
 RTC_1 read issued right after its RTC_0 returned the latch of the
-PREVIOUS RTC_0 read in 29 of 500 day rollovers (a tight loop of pairs),
+previous RTC_0 read in 29 of 500 day rollovers (a tight loop of pairs),
 the new time beside the old date for a microsecond to a few, where a
 gap of 5 us or a second RTC_0 read before RTC_1 read coherent in 500 of
 500 - so read() reads the pair until two agree. The pico-sdk's

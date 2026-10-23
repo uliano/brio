@@ -1,60 +1,83 @@
 /*
  * core_hazard3.hpp
  *
- * The RISC-V half of this target's core: a pair of Hazard3 harts
- * (RV32IMA with Zicsr/Zifencei, the Zba/Zbb/Zbs/Zbkb bit manipulation
- * sets and the Zca/Zcb/Zcmp compressed ones - datasheet 3.8.1), with
- * three custom extensions of which one matters here: Xh3irq, the
- * interrupt controller that multiplexes the chip's 52 system interrupt
- * lines onto the standard external interrupt (3.8.6.1).
+ * The RISC-V half of this target's core names: what rp2350/core.hpp
+ * provides when the image is built for the Hazard3 pair. A program never
+ * includes this file; it includes core.hpp and uses the names listed
+ * there (InterruptGuard, enable_interrupts(), Irq, wait_for_interrupt(),
+ * debug_break(), ...), which this half and rp2350/core_m33.hpp both
+ * export, so the same source compiles on both.
  *
- * NOBODY INCLUDES THIS FILE DIRECTLY: rp2350/core.hpp does, when the
- * processor in the socket is a hart, and that is the ONE place in the
+ * The core: a pair of Hazard3 harts (a hart is a RISC-V hardware thread,
+ * here one per core; RV32IMA with Zicsr/Zifencei, the Zba/Zbb/Zbs/Zbkb
+ * bit manipulation sets and the Zca/Zcb/Zcmp compressed ones -
+ * datasheet 3.8.1), with three custom extensions of which one matters
+ * here: Xh3irq, the interrupt controller that multiplexes the chip's 52
+ * system interrupt lines onto the standard external interrupt
+ * (3.8.6.1).
+ *
+ * Nobody includes this file directly: rp2350/core.hpp does, when the
+ * processor in the socket is a hart, and that is the one place in the
  * stratum where the architecture is asked. The names below are the same
  * names core_m33.hpp exports, so a driver that includes core.hpp cannot
  * tell which half answered.
  *
- * THE INTERRUPT NUMBERS ARE THE ARM ONES (3.8.4.2): the system IRQ
+ * Which context calls what. InterruptGuard may be opened from any context
+ * and nests; it masks this hart alone. enable_interrupts() and
+ * disable_interrupts() are main-context calls. Irq's verbs are CSR
+ * instructions on this hart's own arrays - one each, bar enable(), which
+ * also sets mie.MEIE, a second - legal from any context, none waiting.
+ * The three machine_*_interrupt() verbs belong to whoever owns that
+ * source (the controller below for the external one, the ticker for the
+ * timer; nothing in this stratum arms the software one).
+ * wait_for_interrupt() is the platform's idle path, entered masked;
+ * sleep_releases_power_request() is the sleep site's; debug_break() the
+ * panic path's.
+ *
+ * The interrupt numbers are the Arm ones (3.8.4.2): the system IRQ
  * numbering is shared between the two architectures, so this controller
  * takes the device header's `IRQn_Type` enumerators - `UART0_IRQ_IRQn`
  * means line 33 on a hart as it does on an M33 - and the vector an app
  * binds has the same name on both (the crts: rp2350/src/glue/).
  *
- * THE ARRAY CSR IDIOM (3.8.6.1.1). Xh3irq holds one bit per line in
- * arrays too wide for a CSR, so each array answers at ONE CSR address
- * as a 16-bit WINDOW: the low half of the value written selects which
- * window, the high half is the data. A set is `csrs`, a clear is
- * `csrc`, and a read is a `csrrs` of the index alone (whose high half is
- * zero, so it sets nothing). Three arrays are used here - the enables
- * MEIEA, the pending bits MEIPA and the FORCE bits MEIFA, which are how
- * a line is made pending in software.
+ * The array CSR idiom (3.8.6.1.1). Xh3irq holds one bit per line in
+ * arrays too wide for a CSR (a control and status register, the
+ * architecture's own register file reached by csr instructions), so each
+ * array answers at one CSR address as a 16-bit window: the low half of
+ * the value written selects which window, the high half is the data. A
+ * set is `csrs`, a clear is `csrc`, and a read is a `csrrs` of the index
+ * alone (whose high half is zero, so it sets nothing). Three arrays are
+ * used here - the enables MEIEA, the pending bits MEIPA and the FORCE
+ * bits MEIFA, which are how a line is made pending in software.
  *
- * THE PRIORITY ARRAY MEIPRA IS LEFT AT ITS RESET VALUE, as every other
+ * The priority array MEIPRA is left at its reset value, as every other
  * target of this project leaves its own: the kernel's promise is that no
- * interrupt nests over another (design/kernel.md sections 1 and 11), and
- * here that is kept structurally - the crt's dispatch never sets
- * mstatus.MIE inside a handler, so nothing can preempt whatever the
- * numbers say. Note for a reader who knows the SDK: in the hardware,
- * numerically HIGHER means more urgent, the opposite of the Arm
- * convention and of the SDK's own irq_set_priority(). That is exactly
- * why `Irq` carries no priority verb.
+ * interrupt nests over another (design/kernel.md sections 1, The model
+ * in one page, and 11, Platform: what the machine provides), and here
+ * that is kept structurally - the crt's dispatch never sets mstatus.MIE
+ * inside a handler, so nothing can preempt whatever the numbers say.
+ * Note for a reader who knows the SDK: in the hardware, numerically
+ * higher means more urgent, the opposite of the Arm convention and of
+ * the SDK's own irq_set_priority(). That is exactly why `Irq` carries no
+ * priority verb.
  *
- * MSLEEP.DEEPSLEEP IS NEVER WRITTEN. Hazard3's Xh3power extension can
+ * MSLEEP.DEEPSLEEP is never written. Hazard3's Xh3power extension can
  * make a WFI gate the core's clock (MSLEEP.DEEPSLEEP) or release its
  * power request (MSLEEP.POWERDOWN); erratum RP2350-E4 makes the first of
  * those a trap on core 1 - with DEEPSLEEP set, a debugger's system-bus
  * reads stall until that core wakes - and the datasheet's own note is
  * that the saving over a plain WFI is minimal. So `wait_for_interrupt()`
- * is a bare wfi. The SECOND bit is the sleep chapter's and has a verb of
+ * is a bare wfi. The second bit is the sleep chapter's and has a verb of
  * its own below: without it this half never reaches the chip's SLEEP
  * state at all, where a Cortex-M33 reaches it on any WFI.
  *
- * WFI HERE IS NOT THE QingKe's WFI (the trap the ch32v00x stratum
- * carries): 3.8.1.23 states that wfi IGNORES mstatus.MIE and respects every
- * other interrupt control, so a wfi executed with interrupts masked and
- * a pending enabled line falls through immediately. That is what makes
- * the kernel's idle path - mask, look at the queues, sleep, unmask -
- * free of a lost-wakeup window on this half, exactly as on the Arm one.
+ * WFI here is not the QingKe's WFI (the trap the ch32v00x stratum
+ * carries): 3.8.1.23 states that wfi ignores mstatus.MIE and respects
+ * every other interrupt control, so a wfi executed with interrupts
+ * masked and a pending enabled line falls through immediately. That is
+ * what makes the kernel's idle path - mask, look at the queues, sleep,
+ * unmask - free of a lost-wakeup window on this half, exactly as on the
+ * Arm one.
  */
 
 #pragma once
@@ -70,6 +93,7 @@ inline constexpr uint32_t mstatus_mie = 1UL << 3;
 
 /// Read a CSR named by number (the assembler knows none of Hazard3's
 /// names, and the pico-sdk's rvcsr.h is where the numbers come from).
+/// One instruction, any context.
 template <uint32_t csr>
 [[gnu::always_inline]] inline uint32_t csr_read() {
     uint32_t value;
@@ -116,15 +140,15 @@ inline void disable_interrupts() { __asm__ volatile("csrci mstatus, 8" ::: "memo
  * The kernel's CriticalSection on this half.
  *
  * The constructor clears mstatus.MIE and keeps what it found; the
- * destructor sets the bit again only if it WAS set, so an inner guard
+ * destructor sets the bit again only if it was set, so an inner guard
  * inside an outer one leaves interrupts masked on the way out. `csrrci`
  * does the read and the clear in ONE instruction, which is what makes
- * the guard correct against an interrupt arriving between the two
- * halves. Both halves carry a "memory" clobber, the barrier the Platform
+ * the guard correct against an interrupt arriving between the read and
+ * the clear. Both halves carry a "memory" clobber, the barrier the Platform
  * concept asks for: data shared with a handler needs no volatile of its
  * own inside a guarded region.
  *
- * AND IT IS PER CORE, as PRIMASK is on the other half: mstatus belongs
+ * And it is per core, as PRIMASK is on the other half: mstatus belongs
  * to the hart that writes it, so a critical section excludes this core's
  * handlers and nothing that runs on the other core.
  */
@@ -152,7 +176,7 @@ private:
 /// (the SIO's MTIME against this core's MTIMECMP) and the machine
 /// software interrupt (the SIO's RISCV_SOFTIRQ bit for this core). Each
 /// is armed by whoever owns it - the interrupt controller below with its
-/// first line, the ticker once a deadline is in MTIMECMP - and NOT by
+/// first line, the ticker once a deadline is in MTIMECMP - and not by
 /// the crt, which leaves mie empty: MTIME runs out of reset, so a
 /// blanket arm would take a timer trap on the spot.
 inline void machine_external_interrupt(bool on) {
@@ -212,9 +236,10 @@ struct Irq {
         return valid(irq) && (read_array<RVCSR_MEIPA_OFFSET>(irq) != 0u);
     }
 
-    /// Raise a line in software: the FORCE array, which makes MEIPA read
-    /// as asserted although the peripheral is silent. The six spare
-    /// lines (46..51) exist for exactly this and reach no hardware.
+    /// Raise a line in software, from any context: the FORCE array, which
+    /// makes MEIPA read as asserted although the peripheral is silent.
+    /// The six spare lines (46..51) exist for exactly this and reach no
+    /// hardware.
     static void set_pending(IRQn_Type irq) {
         if (!valid(irq)) {
             return;
@@ -222,7 +247,7 @@ struct Irq {
         csr_set<RVCSR_MEIFA_OFFSET>(window(irq));
     }
 
-    /// Withdraw a FORCED line. What a peripheral asserts is not
+    /// Withdraw a forced line. What a peripheral asserts is not
     /// withdrawable here - it clears when the peripheral stops asserting
     /// it - and a forced bit also clears by itself when the dispatch
     /// samples it, so this verb is for a force that has not been taken
@@ -253,28 +278,31 @@ private:
     }
 };
 
-/// Sleep until an interrupt is pending. mstatus.MIE is ignored by this
-/// instruction and every other interrupt control is respected (3.8.1.23),
-/// so a wake that is already pending does not sleep at all - the
-/// lost-wakeup window the kernel's idle path would otherwise have.
+/// Sleep until an interrupt is pending: the platform's idle path, called
+/// with interrupts masked (rp2350/platform.hpp). mstatus.MIE is ignored
+/// by this instruction and every other interrupt control is respected
+/// (3.8.1.23), so a wake that is already pending does not sleep at all -
+/// the lost-wakeup window the kernel's idle path would otherwise have.
 [[gnu::always_inline]] inline void wait_for_interrupt() {
     __asm__ volatile("wfi" ::: "memory");
 }
 
 /**
- * WHETHER A SLEEPING CORE RELEASES ITS POWER REQUEST, which is half of
- * datasheet 6.5.2's condition for the chip's SLEEP state.
+ * Whether a sleeping core releases its power request, which is half of
+ * datasheet 6.5.2's condition for the chip's SLEEP state. Set and read
+ * by the sleep site (rp2350/sleep.hpp), main context; one CSR
+ * instruction, this hart's alone.
  *
- * MSLEEP.POWERDOWN, and this half of the chip HAS TO BE ASKED. 3.8.9's
+ * MSLEEP.POWERDOWN, and this half of the chip has to be asked. 3.8.9's
  * description of the bit is "release the external power request when
  * going to sleep - the function of this is platform-defined"; on this
  * platform it is what tells the clock controller a processor is asleep,
- * and MEASURED (docs/rp2350/sleep.md) a wfi WITHOUT it leaves the chip
+ * and measured (docs/rp2350/sleep.md) a wfi without it leaves the chip
  * out of the SLEEP state altogether, the SLEEP_ENx masks never applied.
  * A Cortex-M33 asserts the same signal by itself, which is why its half
  * of this pair is empty.
  *
- * It is NOT MSLEEP.DEEPSLEEP, the bit erratum RP2350-E4 makes a trap on
+ * It is not MSLEEP.DEEPSLEEP, the bit erratum RP2350-E4 makes a trap on
  * core 1 and which this stratum never sets: that one gates the core's
  * own clock and saves little over a plain wfi. The price of POWERDOWN is
  * in the same entry of 3.8.9 - the core reasserts its power-up
@@ -292,7 +320,8 @@ private:
     return (csr_read<RVCSR_MSLEEP_OFFSET>() & RVCSR_MSLEEP_POWERDOWN_BITS) != 0u;
 }
 
-/// Halt in the debugger. With no debugger attached this raises a
+/// Halt in the debugger: the panic path's breakpoint, from any context.
+/// With no debugger attached this raises a
 /// breakpoint exception, which lands in the crt's exception trap - the
 /// legible wreck a panic wants.
 [[gnu::always_inline]] inline void debug_break() { __asm__ volatile("ebreak"); }

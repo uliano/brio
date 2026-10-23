@@ -1,54 +1,88 @@
 /*
  * reset.hpp
  *
- * The failing half of the CH32V203 platform: WHICH reset happened, how
- * to cause one, and the fault body that turns a crash into a note the
- * next boot can read.
+ * The failing half of the platform of the CH32V203 and the CH32V303:
+ * which reset happened, how to cause one, and the fault body that turns
+ * a crash into a note the next boot can read. A program reads the flags
+ * first thing at boot and hands both trap entries the fault body, as
+ * docs/ch32vx03/platform.md's "How to use it" writes it:
  *
- * THE FLAGS ACCUMULATE. RCC_RSTSCKR (RM 3.4.10) carries one bit per
+ *     BRIO_CH32_VECTOR(fault_handler) { brio::fault_reset<P>(); }
+ *     BRIO_CH32_VECTOR(breakpoint_handler) { brio::fault_reset<P>(); }
+ *
+ *     int main() {
+ *         const uint32_t flags = brio::Reset::take_flags();    // first, and once
+ *         const auto record = brio::take_panic_record<P>();    // fetch-and-clear
+ *         ...
+ *     }
+ *
+ * `P` is the program's platform type (`using P =
+ * brio::Ch32vx03Platform<>;`, platform.hpp), whose panic_record() is the
+ * breadcrumb in `.noinit` that survives the reset; fault_handler and
+ * breakpoint_handler are the crt's names for the exception entry (index
+ * 3) and the breakpoint entry (index 9) of the vector table, and both
+ * are bound because an `ebreak` with no debugger arrives on the second
+ * (below). take_panic_record() is kernel/panic.hpp's, the reader of the
+ * record a fault_reset() or a panic() left.
+ *
+ * Who calls what: take_flags() is the boot verb, in main() before
+ * anything else touches RCC_RSTSCKR - clear_flags() is two unguarded
+ * read-modify-writes of a register it shares with the clock tree's LSI
+ * bits; flags() is one load, any context; Reset::software(), from any
+ * context, is one keyed store and then a spin until the reset lands,
+ * never returning; the trap readers machine_cause(), machine_epc() and
+ * machine_tval() are one CSR read each, meant for the top of a handler;
+ * fault_reset<P>() is the body of a bound trap vector and runs in the
+ * trap, writing the record by hand and resetting, never returning;
+ * ResetReporter is the reporter panic() calls. Nothing here masks
+ * interrupts.
+ *
+ * The flags accumulate. RCC_RSTSCKR (RM 3.4.10) carries one bit per
  * reset source and they stay set until the software writes RMVF, so a
- * read is a HISTORY since the last clear, not "the cause". The
+ * read is a history since the last clear, not "the cause". The
  * register's own reset value states the first entry of that history:
  * 0x0C000000, PORRSTF and PINRSTF together, so at the boot after a
  * power-on the pin flag stands without a pin having been pulled low. A
- * SOFTWARE RESET, measured, raises SFTRSTF alone and leaves the pin
+ * software reset, measured, raises SFTRSTF alone and leaves the pin
  * flag where it was. Each flag therefore means what it says only for a
  * program that clears the register at every boot, which is what
  * take_flags() is for.
  *
- * THE FAMILY'S OWN SIXTH FLAG is LPWRRSTF, the low-power reset: with
+ * The family's own sixth flag is LPWRRSTF, the low-power reset: with
  * nRST_STDBY or nRST_STOP cleared in the option bytes, the sequence
  * that would enter Standby or Stop resets the chip instead (RM 3.2.2).
  * The option bytes are the flash chapter's; the flag is read here.
+ * Nothing on the bench has raised it (docs/ch32vx03/platform.md, "Not
+ * covered yet").
  *
- * THE RESET REQUEST IS THE CORE'S. There is no reset controller on this
+ * The reset request is the core's. There is no reset controller on this
  * family either: the request is PFIC_CFGR.RSTSYS (RM 9.5.2.10, the
  * QingKe V4 manual's PFIC_CFGR.SYSRESET), and that register takes a
  * write only with the right one of its three keys in the high half -
  * KEY3, 0xBEEF, for this bit. It shows up as SFTRSTF at the next boot.
  * PFIC_SCTLR bit 31 is the same reset with no key and has no verb here.
  *
- * THE FAULT BODY DOES NOT GO THROUGH panic(). panic() ends in
+ * The fault body does not go through panic(). panic() ends in
  * break_here(), which on this core is `ebreak`, and `ebreak` with no
  * debugger attached is taken to a vector of this same table - so a
  * fault body that called panic() would re-enter itself. It writes the
  * same record panic() would, by hand, and resets; and it never
  * overwrites a record that already stands, because with no debugger
- * panic()'s own ebreak arrives HERE, and clobbering the record would
+ * panic()'s own ebreak arrives here, and clobbering the record would
  * turn every diagnosed panic into a kernel_fault.
  *
- * WHICH VECTOR A TRAP ARRIVES ON is not the exception code. This
+ * Which vector a trap arrives on is not the exception code. This
  * table has two entries a trap can take - the exception vector at
  * index 3 and the breakpoint one at index 9 - and an `ebreak` with no
- * debugger attached lands on the SECOND (measured), while mcause
+ * debugger attached lands on the second (measured), while mcause
  * reports exception code 3, this core's number for a breakpoint. A
  * program that wants a crash recorded binds both entries to this body.
  *
- * WHAT KILLED IT IS IN mcause. The core updates mcause, mepc and mtval
+ * What killed it is in mcause. The core updates mcause, mepc and mtval
  * on the way in (QingKe V4 manual 2.2): the cause register's top bit
  * says interrupt or exception and its low bits carry the code of table
  * 2-1, mepc the instruction that trapped and mtval the address or the
- * opcode behind it. The breadcrumb has ONE byte for the detail, so the
+ * opcode behind it. The breadcrumb has one byte for the detail, so the
  * cause byte is what crosses the reset (fault_context()); a program
  * that wants the address reads mepc in its own handler, before it calls
  * anything.
@@ -111,7 +145,9 @@ struct Reset {
         rcc()->RSTSCKR = rcc()->RSTSCKR & ~rstsckr_rmvf;
     }
 
-    /// Read-and-clear: the boot verb.
+    /// Read-and-clear: the boot verb, called once in main() before
+    /// anything else - the flags as they stood, and the register left
+    /// clean for the next boot's read.
     static uint32_t take_flags() {
         const uint32_t f = flags();
         clear_flags();
@@ -153,7 +189,7 @@ enum class FaultCause : uint8_t {
 };
 
 /// Why the core trapped, where it was, and the value behind it. Read
-/// them at the top of a handler: what they hold is the LAST trap's, so
+/// them at the top of a handler: what they hold is the last trap's, so
 /// a second one on the way to reading them is what loses the first.
 inline uint32_t machine_cause() {
     uint32_t v;
@@ -174,8 +210,8 @@ inline uint32_t machine_tval() {
 /// The breadcrumb's one detail byte, packed: bit 7 is mcause[31] and
 /// the seven below it are the code. Every exception code of this core
 /// fits, and so does every interrupt number of this family's vector
-/// table (62 at most); a number above 127 would not, and this silicon
-/// has none.
+/// tables (103 at most, the CH32V303's); a number above 127 would not,
+/// and this silicon has none.
 inline constexpr uint8_t fault_interrupt_bit = 0x80;
 
 inline uint8_t fault_context() {
@@ -221,7 +257,7 @@ struct ResetReporter {
 };
 
 /**
- * The fault vector's BODY: record the wreck and reset. An app binds it
+ * The fault vector's body: record the wreck and reset. An app binds it
  * to the vectors an exception can arrive on -
  *
  *     BRIO_CH32_VECTOR(fault_handler) {
@@ -233,7 +269,10 @@ struct ResetReporter {
  * has something better to say than mcause: the vector it was bound to,
  * an application state, a subsystem id.
  *
- * An existing record is not overwritten (see the file header).
+ * An existing record is not overwritten (see the file header). It runs
+ * in the trap, in the vector's own context, and never returns: the
+ * record is written in place in P::panic_record() and
+ * Reset::software() follows.
  */
 template <Platform P>
 [[noreturn]] void fault_reset(uint8_t context) {

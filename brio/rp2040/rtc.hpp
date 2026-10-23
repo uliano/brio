@@ -1,21 +1,25 @@
 /*
  * rtc.hpp
  *
- * The RP2040's real-time clock (datasheet 4.8): a calendar of seven
- * binary fields - a 12-bit year, the month, the day, the day of the
- * week, the hour, the minute, the second - counting seconds from a
- * reference the block makes by dividing clk_rtc by an integer
- * (CLKDIV_M1), a leap-year rule of "divisible by four" with a bit to
- * force it off, and ONE alarm: a match on any subset of the seven
- * fields, the interrupt of the block and the wake of the chip's
- * dormant state. In the two strata every brio target uses:
+ * The RP2040's real-time clock (datasheet 4.8), for a program that
+ * keeps the date and the time of day, or wants an alarm at a time of
+ * the calendar - and the wake of a dormant chip on the ring oscillator
+ * (rp2040/sleep.hpp). The block is a calendar of seven binary fields -
+ * a 12-bit year, the month, the day, the day of the week, the hour, the
+ * minute, the second - counting seconds from a reference the block
+ * makes by dividing clk_rtc by an integer (CLKDIV_M1), a leap-year rule
+ * of "divisible by four" with a bit to force it off, and one alarm: a
+ * match on any subset of the seven fields, the interrupt of the block
+ * and the wake of the chip's dormant state. In the two strata every
+ * brio target uses:
  *
- *  Rtc            the RESOURCE, a monostate (the chip has one): the
+ *  Rtc            the resource, a monostate (a type whose state and
+ *                 functions are all static; the chip has one): the
  *                 clock, the reference divider, the set and the read,
  *                 the load while running, the alarm and its enables,
  *                 the interrupt and the ISR body.
  *
- *  RtcDateTime    the seven fields in ORDINARY NUMBERS, the chapter's
+ *  RtcDateTime    the seven fields in ordinary numbers, the chapter's
  *                 encoding (the year 0..4095, Sunday 0); the calendar
  *                 arithmetic the silicon has not: the days of a month,
  *                 the weekday of a date, the century years the
@@ -25,7 +29,33 @@
  *                 matched is a wildcard, so an alarm on the second
  *                 alone repeats every minute (4.8.3).
  *
- * THE CLOCK IS THE BLOCK'S OWN. clk_rtc is a generator of its own with
+ * The smallest use is written out at `Rtc` below (docs/rp2040/rtc.md,
+ * "How to use it"): init() with the program's Clock tag, set() with a
+ * date whose weekday rtc_weekday_of() fills, read() for the calendar,
+ * alarm() and interrupt(true) for a match, the line enabled by the
+ * program (`Nvic::enable(Rtc::irq())`), and the program's `isr_rtc`
+ * calling isr(), which answers true on the alarm with the block's
+ * interrupt enable cleared and the match disarmed - the application
+ * re-arms with rearm_after() once the matching second is over.
+ *
+ * Which context calls what. init(), set() and release() are setup verbs
+ * in main(); set() waits, bounded by its `spins` argument and by init()'s
+ * computed bound on the enable's tick, about 210 us on the crystal over
+ * 256 (measured, docs/rp2040/rtc.md) and 12 to 13 s on a 1 Hz input,
+ * which wants a `spins` far above the default; init(), when it finds the
+ * generator running, waits three periods of whatever clk_rtc runs on
+ * before it changes the source. read() is a few register reads with no
+ * wait (at most four pairs) and answers nullopt while the calendar is
+ * stopped. isr() is the body the program's `isr_rtc` calls, directly or
+ * through Rp2040TimedSleepSite::rtc_isr() (rp2040/sleep.hpp), which calls
+ * it first, and nothing else calls it; the line is enabled by the program
+ * in its core's NVIC (`Nvic::enable(Rtc::irq())`), init() leaving it
+ * disabled. rearm_after() spins, at most `spins` calendar reads, until
+ * the calendar has left the matching value (the suite calls it from main,
+ * test_rp2040_rtc letter g). Nothing here masks interrupts; "the line
+ * masked" below means the block's INTE cleared, not the NVIC's enable.
+ *
+ * The clock is the block's own. clk_rtc is a generator of its own with
  * an aux mux and a 24.8 divider (clock.hpp's Clocks::rtc_select), and
  * the block wants it at any whole rate from 1 to 65536 Hz (4.8.4):
  * init() puts the crystal over 256 on it, 46875 Hz, and CLKDIV_M1 at
@@ -34,35 +64,35 @@
  * completes without its clock (measured - the converter's does not),
  * and the clock comes first all the same.
  *
- * THE TWO CLOCK DOMAINS. Every register is written and read from
+ * The two clock domains. Every register is written and read from
  * clk_sys and synchronized across: a write takes two clk_rtc periods
  * to land (4.8.4's note - 43 us at 46875 Hz, two seconds on a 1 Hz
  * reference), a value crosses back to the read path some time after
- * RTC_ACTIVE rises, and a coherent reading is RTC_0 THEN RTC_1 - the
- * first read latches the second (4.8.5.3). BUT THE LATCH IS NOT ALWAYS
- * THERE FOR THE VERY NEXT READ: an RTC_1 read issued right after its
+ * RTC_ACTIVE rises, and a coherent reading is RTC_0 then RTC_1 - the
+ * first read latches the second (4.8.5.3). But the latch is not always
+ * there for the very next read: an RTC_1 read issued right after its
  * RTC_0 returned the latch of the previous RTC_0 read in 29 of 500 day
  * rollovers (measured, a tight loop of pairs; RTC_1 read alone returns
  * the previous latch every time) - the new time beside the old date,
  * for a microsecond to a few. A gap of 5 us, or a second RTC_0 read
  * before RTC_1, read coherent in 500 of 500. So read() reads the pair
- * until two agree. AND THE ENABLE TICKS: a
+ * until two agree. And the enable ticks: a
  * calendar enabled from a stop counts one second at once, some 130 us
  * after RTC_ACTIVE, whatever the divider's phase was (measured: the
  * value set reads one second on, the next rollover a whole second
- * after that tick; a LOAD into a running calendar ticks nothing). AND
- * A LOAD WRITTEN WITH THE CALENDAR STOPPED IS NOT SEEN BEFORE THAT
- * TICK IN EVERY TIMING (measured: 4.8.5.2's sequence - LOAD, then the
+ * after that tick; a LOAD into a running calendar ticks nothing). And
+ * a LOAD written with the calendar stopped is not seen before that
+ * tick in every timing (measured: 4.8.5.2's sequence - LOAD, then the
  * enable - showed the value before the tick in one build and never in
  * another with the same instructions placed elsewhere in flash, the
  * read path going from the old calendar straight to the value plus one
  * second). So set() does not load before the enable: it starts the
  * calendar stopped with the two words written, waits for the enable's
- * tick in the read path, THEN loads into the running calendar and
+ * tick in the read path, then loads into the running calendar and
  * returns once the read path shows the value: the first second is a
  * whole one and the value the one asked for, in any timing.
  *
- * WHAT THE SILICON DOES NOT DO (4.8.1.1, 4.8.2): it checks no field's
+ * What the silicon does not do (4.8.1.1, 4.8.2): it checks no field's
  * range - an illegal value is undefined behaviour, so set() refuses
  * one -; it computes no day of the week - it increments the one given,
  * so `rtc_weekday_of` is offered for the caller to fill it -; and its
@@ -70,7 +100,7 @@
  * CTRL.FORCE_NOTLEAPYEAR is the caller's to set (any time between 1
  * March 2096 and 28 February 2100, the note says).
  *
- * THE ALARM IS A LEVEL: MATCH_ACTIVE and the interrupt stand for the
+ * The alarm is a level: MATCH_ACTIVE and the interrupt stand for the
  * whole second the calendar matches (or the whole minute, hour ...
  * of a coarser match), so a handler that leaves the match armed is
  * re-entered until the second passes - the vendor's own handler
@@ -163,7 +193,8 @@ struct RtcAlarm {
     bool match_second = false;
 };
 
-/// An alarm repeats when not every field is matched.
+/// An alarm repeats when one of the year, month, day, hour, minute and
+/// second is not matched; the weekday's flag is not consulted.
 constexpr bool rtc_alarm_repeats(const RtcAlarm& a) {
     return !(a.match_year && a.match_month && a.match_day && a.match_hour && a.match_minute && a.match_second);
 }
@@ -223,6 +254,7 @@ enum class RtcClock : uint8_t {
  *   if (const auto now = Rtc::read()) { ... }
  *   Rtc::alarm({.at = {.second = 0}, .match_second = true});   // every minute at :00
  *   Rtc::interrupt(true);
+ *   brio::Nvic::enable(Rtc::irq());   // the line: the program's to enable
  *   extern "C" void isr_rtc() { if (Rtc::isr()) { tick(); } }   // rearm_after() once the second is over
  */
 struct Rtc {
@@ -237,12 +269,15 @@ struct Rtc {
     // ---- lifecycle ----------------------------------------------------------
 
     /// Bring the block up: clk_rtc selected (the crystal over 256, or
-    /// the one-pulse-per-second input), the block out of reset - only
-    /// under its clock -, CLKDIV_M1 for a one-second reference. The
-    /// calendar is NOT started: set() does that. `clock` is the app's
+    /// the one-pulse-per-second input), the block out of reset - after
+    /// its clock, though its reset completes without it (measured, the
+    /// file header) -, CLKDIV_M1 for a one-second reference. The
+    /// calendar is not started: set() does that. `clock` is the app's
     /// Clock tag, the one truth of the crystal's rate. False when the
     /// crystal over 256 is not a whole rate under 65537 Hz or the block
-    /// did not come up.
+    /// did not come up. Setup's verb, in main(); its waits are the
+    /// generator's three periods (above) and the bounded reset, and it
+    /// leaves the NVIC line disabled.
     template <typename Clock>
     static bool init(Clock clock, RtcClock src = RtcClock::crystal_div256) {
         (void)clock;
@@ -319,10 +354,14 @@ struct Rtc {
     /// two words, enabled and waited active, the enable's own tick
     /// waited for in the read path, THEN the LOAD into the running
     /// calendar (the file header: a LOAD before the enable is not seen
-    /// before that tick in every timing) - AND WAITED FOR IN THE READ
-    /// PATH: RTC_ACTIVE rises before a value has crossed back to RTC_0 /
+    /// before that tick in every timing) - and waited for in the read
+    /// path: RTC_ACTIVE rises before a value has crossed back to RTC_0 /
     /// RTC_1, so set() returns once read() shows what was written.
     /// Refused for a value outside table 551; the silicon checks none.
+    /// False also when a wait ran out of `spins` (shared by the waits for
+    /// RTC_ACTIVE to fall and rise and for the value to show; the
+    /// enable's tick has init()'s own bound). About 210 us on the
+    /// crystal over 256; on the 1 Hz input pass a far larger `spins`.
     static bool set(const RtcDateTime& d, uint32_t spins = 1'000'000u) {
         if (!rtc_datetime_valid(d)) {
             return false;
@@ -374,9 +413,9 @@ struct Rtc {
         if (on) { hw_set(regs().CTRL, RTC_CTRL_RTC_ENABLE_BITS); } else { hw_clear(regs().CTRL, RTC_CTRL_RTC_ENABLE_BITS); }
     }
     /// The calendar now; nullopt while it is not running. RTC_0 is read
-    /// before RTC_1 (the first latches the second, 4.8.5.3) - AND THE
-    /// PAIR IS READ UNTIL TWO IN A ROW AGREE: an RTC_1 read right after
-    /// its RTC_0 can still return the latch the PREVIOUS RTC_0 read
+    /// before RTC_1 (the first latches the second, 4.8.5.3) - and the
+    /// pair is read until two in a row agree: an RTC_1 read right after
+    /// its RTC_0 can still return the latch the previous RTC_0 read
     /// made (the file header), which at a day's rollover is the new
     /// time beside the old date. RTC_1 returns this pair's latch or the
     /// last pair's (measured), so a second pair equal to the first was
@@ -460,8 +499,9 @@ struct Rtc {
     static void force(bool on) {
         if (on) { hw_set(regs().INTF, RTC_INTF_RTC_BITS); } else { hw_clear(regs().INTF, RTC_INTF_RTC_BITS); }
     }
-    /// The ISR body: true when the alarm raised the line, WITH THE LINE
-    /// MASKED AND THE MATCH DISARMED - the interrupt is the match's
+    /// The ISR body, called from the program's isr_rtc: true when the
+    /// alarm raised the line, with the line masked (INTE cleared) and
+    /// the match disarmed - the interrupt is the match's
     /// level and stands for the whole matching period otherwise (the
     /// file header), and the disarm itself lands two clk_rtc periods
     /// later, during which the line would re-enter the handler
@@ -481,7 +521,7 @@ struct Rtc {
     /// alarm's fields in software, `spins` reads at most (a
     /// second-matched alarm leaves within a second; a coarser match
     /// takes its period - which is the application's to know and to
-    /// wait for elsewhere). NOT MATCH_ACTIVE: an arm and a disarm each
+    /// wait for elsewhere). Not MATCH_ACTIVE: an arm and a disarm each
     /// take two clk_rtc periods to land, and MATCH_ACTIVE read across
     /// them is not the calendar's - an arm written right after the ISR
     /// body's disarm read MATCH_ACTIVE 1 throughout the 121 us sampled

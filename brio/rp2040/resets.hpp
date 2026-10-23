@@ -2,21 +2,33 @@
  * resets.hpp
  *
  * The subsystem reset controller (RESETS, datasheet 2.14): the RP2040's
- * gate on every peripheral. Every block the controller governs - the
- * UARTs, SPIs, I2Cs, PWM, timer, ADC, both PLLs, both PIOs, the DMA,
- * the IO and pad banks, the USB controller, SYSINFO - is HELD IN RESET
- * at power-up (2.14.1), and a register of a block in reset is not there
- * to be written. So "open the peripheral's clock", the first act of
- * every driver's init on the other families, is "release its reset"
- * here, and RESET_DONE is what says the release has taken: a block's
- * registers are ready to be accessed once its bit rises.
+ * gate on every peripheral, and the first call of every driver's init
+ * on this chip. Every block the controller governs - the UARTs, SPIs,
+ * I2Cs, PWM, timer, ADC, both PLLs, both PIOs, the DMA, the IO and pad
+ * banks, the USB controller, SYSINFO - is held in reset at power-up
+ * (2.14.1), and a register of a block in reset is not there to be
+ * written. So "open the peripheral's clock", the first act of every
+ * driver's init on the other families, is "release its reset" here, and
+ * RESET_DONE is what says the release has taken: a block's registers
+ * are ready to be accessed once its bit rises. The smallest use
+ * (docs/rp2040/platform.md):
+ *
+ *     if (!brio::Resets::cycle(brio::ResetBlock::uart0)) { ... the block never came ready ... }
+ *
+ * Who calls what: the drivers' init() and release() call these verbs in
+ * main context; a program calls them directly only for a block it
+ * drives by hand. Nothing here masks interrupts: the writes go through
+ * the SET/CLR aliases (device.hpp), one bus write each, so releasing one
+ * block never disturbs another and no critical section is needed, from
+ * either core. release() and cycle() wait for RESET_DONE, bounded at
+ * 100 000 polls: a block whose done bit never rises answers false, and
+ * the caller knows (measured: the bit is up within 3 us of the release,
+ * test_rp2040_platform).
  *
  * Three registers: RESET (a bit per block, set = in reset), WDSEL
  * (which blocks a watchdog event resets) and RESET_DONE (read-only).
- * The writes go through the SET/CLR aliases (device.hpp), so releasing
- * one block never disturbs another and no critical section is needed.
- * The release wait is bounded like every wait in this stratum: a block
- * whose done bit never rises answers false, and the caller knows.
+ * The controller is a monostate: a type with static members only,
+ * never an object.
  */
 
 #pragma once

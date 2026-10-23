@@ -1,77 +1,175 @@
 /*
  * spi.hpp
  *
- * The SPI of the CH32V203 and the CH32V303 (RM ch. 20): up to three
- * instances, both roles, 8- or 16-bit frames, the four modes, the three
- * chip-select arrangements, the simplex and bidirectional line modes,
- * hardware CRC and two DMA requests per instance - the STM32F1's SPI under
- * WCH's register names, with one register of its own (HSCR, a high-speed
- * read mode) - and on the CH32V303RC and VC the I2S FACE of SPI2 and SPI3.
- * Four layers, the other strata's arrangement:
+ * The SPI of the CH32V203 and the CH32V303 (RM ch. 20) as a bus for a
+ * program: a display, a flash chip or a converter driven from an active
+ * object (a component of a brio program with its own event queue, served
+ * one event at a time by the kernel) through the arbiter of
+ * util/spi_bus.hpp, this chip as a client another host clocks, or, on
+ * the CH32V303RC and VC, an I2S audio link. Up to three instances, both
+ * roles, 8- or 16-bit frames, the four modes, the three chip-select
+ * arrangements, the simplex and bidirectional line modes, hardware CRC
+ * and two DMA requests per instance - the STM32F1's SPI under WCH's
+ * register names, with one register of its own (HSCR, a high-speed read
+ * mode) - and on the CH32V303RC and VC the I2S face of SPI2 and SPI3.
+ * Four layers: the resource, the host engine and the client of the stack
+ * docs/design/spi-bus.md draws, and the audio face.
  *
- *  - `Spi<n>` is the RESOURCE: the register block, its gate and reset,
- *    the configuration under the rules the chapter states, the data and
+ *  - `Spi<n>` is the resource, a monostate (static members only, never
+ *    instantiated): the register block, its gate and reset, the
+ *    configuration under the rules the chapter states, the data and
  *    status verbs, the sequences that clear each flag, and the ISR body
  *    that reads the raised-and-enabled sources. It decides nothing.
  *  - `SpiHost<n, pins, TxEngine, RxEngine, hold_off_cycles>` is the
- *    ENGINE util/spi_bus.hpp's SpiBus drives: the Request is the other strata's
- *    VERBATIM (chip select, D/C, a command phase, a data phase with
- *    optional out and in, the per-request mode/rate/frame size, the
- *    polled or ISR-pumped completion), so an application written over
- *    SpiBus on a Nucleo runs here unchanged.
+ *    engine util/spi_bus.hpp's SpiBus drives, the layer that moves one
+ *    transaction's frames on the instance's interrupt, on two DMA
+ *    channels or polled. Its Request carries the fields
+ *    docs/design/spi-bus.md lists as every family's ("Realizations": a
+ *    chip select, D/C, a command phase, a data phase with optional out
+ *    and in, the per-request mode, the polled or ISR-pumped
+ *    completion), with the rate and the frame size as this family's
+ *    SpiClock and SpiDataSize, so an 8-bit request written over SpiBus
+ *    on another family carries the same fields here, the rate and the
+ *    frame size apart: their types are each family's, and so is the
+ *    rate field's name (`baud` on the SAM C21).
  *  - `SpiClient<n, pins>` is the other end of the wire, a thin polled
  *    surface with an ISR body: a client is a protocol, and which one is
  *    the application's.
- *  - `I2s<n>` is the same register block in its AUDIO face, a resource
+ *  - `I2s<n>` is the same register block in its audio face, a resource
  *    and nothing above it: the four standards, the data and channel
  *    widths, both roles and both directions, the clock generator and its
  *    master clock, the flags and the requests the two faces share.
  *
- * INSTANCES ON TWO BUSES, AND THAT IS THE RATE TABLE. SPI1 sits on PB2,
- * whose rate IS HCLK on this family, and SPI2 and SPI3 on PB1, which the
+ * The smallest use, docs/ch32vx03/spi.md's first block of "How to use
+ * it" - one device, polled, on SPI2's own column, in main() after the
+ * clock task's init():
+ *
+ *     using Bus = brio::SpiHost<2>;
+ *     Bus::init(clock);                        // no ceiling: every rate legal
+ *
+ *     const uint8_t cmd[1] = {0x9F};
+ *     uint8_t id[3] = {};
+ *     Bus::Request r{};
+ *     r.cs      = brio::Pin<'B', 12>::ref();
+ *     r.cmd     = brio::lend<brio::Lease::reply>(cmd);
+ *     r.cmd_len = 1;
+ *     r.rx      = brio::lend<brio::Lease::reply>(id);
+ *     r.len     = 3;
+ *     r.mode    = brio::SpiMode::mode0;
+ *     r.clock   = brio::SpiClock::div16;
+ *     r.polled  = true;
+ *     (void)Bus::start(r);                     // true: it is done, `id` is filled
+ *
+ * and its second block, the same request on a bus several active
+ * objects share: the arbiter (util/spi_bus.hpp, the active object that
+ * runs the posted requests one after another),
+ * `using Arb = brio::SpiBus<Bus, Platform, 4>;`, listed in the program's
+ * Tenuto, SPI2's vector bound with `BRIO_CH32_VECTOR(spi2_handler)` to
+ * a body that posts `TransferDone{Bus::status()}` to the arbiter when
+ * `Bus::isr()` answers true, then `r.polled = false`, a
+ * `reply_to<MyAo, SpiDone>()` and `brio::post<Arb>(r)` from an active
+ * object's handler. The chip select is a plain pin the program has made
+ * an output and driven high first (pin.hpp's `output(true)`): the engine
+ * only stores to it, one BSHR or BCR store an edge.
+ *
+ * Who calls what, and from where. init() runs in main(), after the
+ * clock task's init(): every rate it works out - the instance's bus, a
+ * ceiling's code, the chip-select setup's busy-wait, the write-ahead
+ * codes - is the clock type's and not the hardware's, so a host
+ * initialized at the 8 MHz reset clock under a 144 MHz type clocks
+ * SPI1's requests eighteen times and SPI2's and SPI3's nine times
+ * slower than sck_hz() reports (derived from the arithmetic, not
+ * measured), and nothing checks the order; init() waits for nothing.
+ * release(), bit_order(), pad_speed(s), prime() and claim_nss_pad() are
+ * setup verbs as well, main context or one active object, none guarded;
+ * release(), and bit_order() and prime() when they move CTLR1, drain
+ * the block first with Spi::disable()'s bounded waits (200 000 polls
+ * each) and discard their answer. start() is the arbiter's, from its
+ * dispatch in main context, or the program's for a polled request on a
+ * bus no arbiter owns. A request that is not polled returns once its
+ * first frames are written (the second after at most 64 polls for TXE)
+ * or its engines launched, and the rest runs on the vectors; a polled
+ * one completes inside start(), spinning with global interrupts enabled
+ * and only this instance's RXNE interrupt silenced, under one spin
+ * budget for the transaction (polled_budget(): a budget that runs out
+ * ends spi_stalled), and on the engines it waits for the receive
+ * channel's vector under a budget of its own (spin_dma(): spi_dma_fault
+ * when it runs out). Inside start() the chip-select setup time is a
+ * busy wait, and a request that changes the mode, the rate or the width
+ * drains the block first with the same bounded waits, their answer
+ * discarded (apply()). isr(), dma_rx_isr(), dma_tx_isr() and dma_isr()
+ * are vector bodies, called from the program's bound vector and nowhere
+ * else; isr() waits in two places, each a spin of at most 64 polls for
+ * TXE: when two frames completed under one entry, and when a command
+ * phase ends and the data phase is primed with two frames
+ * (prime_phase()). On the CH32V303's images (the F extension, the
+ * hardware prologue on) the vector BRIO_CH32_VECTOR binds is a naked
+ * trampoline whose body must do no floating-point work (pfic.hpp);
+ * these bodies do none. recover() is the timed arbiter's, on a tenure
+ * (a transaction's time on the bus) that never answered, and waits,
+ * bounded, for the drain. status() and busy() are reads of volatile
+ * flags, legal from any context. Without engines nothing here masks
+ * interrupts; with them, wherever a DMA block starts or ends (in
+ * start(), in the vectors, in init(), recover() and release()) the
+ * channel's entry into or exit from the count of active bus masters is
+ * made under an InterruptGuard of a few instructions
+ * (ch32vx03/bus_activity.hpp). init(), recover() and release() switch
+ * the instance's own line at the PFIC. The Request is lent for the
+ * start() call, and what an asynchronous tenure needs after it is
+ * copied; its three buffers are lent from the post to the SpiDone the
+ * arbiter replies with - untouched and in scope until then, which
+ * nothing checks - and, for a polled start() called directly, for the
+ * call. The client's runs are polled verbs that spin for a whole
+ * transaction under the caller's spin budget, and its isr() is its
+ * vector's body. The I2S face's smallest use is written out at I2s
+ * below.
+ *
+ * Instances on two buses, and that is the rate table. SPI1 sits on PB2,
+ * whose rate is HCLK on this family, and SPI2 and SPI3 on PB1, which the
  * stratum caps at 72 MHz - so the same BR code means two different
  * frequencies on SPI1 and on the other two, and a program must ask the
- * INSTANCE (`Spi<n>::bus_hz(clock)`), never the system clock. Which
+ * instance (`Spi<n>::bus_hz(clock)`), never the system clock. Which
  * instances a part has is `device::spi_instances` (the datasheets' tables
  * 2-1 and 2-1-1: the parts below the CH32V203C8 have SPI1 alone, the
  * CH32V203C8 and RB and the 128 KB CH32V303 SPI1 and SPI2, the CH32V303RC
  * and VC all three), and an instance a part has not got does not compile.
  *
- * NO FIFO (figure 20-1): one transmit buffer, one receive buffer, one
+ * No FIFO (figure 20-1): one transmit buffer, one receive buffer, one
  * shift register. TXE means "the buffer moved into the shifter" - a
- * frame EARLY - and RXNE "a frame has been shifted both ways", which is
+ * frame early - and RXNE "a frame has been shifted both ways", which is
  * the one moment the bus is provably idle; so the host's pump runs on
- * RXNE and a client answers ONE AHEAD. DFF and CRCEN "can only be
+ * RXNE and a client answers one ahead. DFF and CRCEN "can only be
  * written when SPE is 0" (20.4.1), which is what makes apply() pay a
  * disable/enable pair when a request changes the frame size, and BR,
  * LSBFIRST, MSTR, CPOL and CPHA "cannot be modified during
  * communication".
  *
- * ONE OF THE CHAPTER'S SEQUENCES DOES NOT WORK HERE. 20.2.7's recipe
+ * One of the chapter's sequences does not work here. 20.2.7's recipe
  * for clearing MODF - a STATR access then a CTLR1 write - leaves the
  * flag standing on this silicon under every variant the bench tried
  * (clear_mode_fault()'s own comment lists them), and the block's RCC
  * reset pulse is the way back. The verb reports rather than promises.
  *
- * THE PADS ARE A COLUMN (afio.hpp, tables 10-32 and 10-33). SPI1 has two:
- * the default PA4/PA5/PA6/PA7 and code 1's PA15/PB3/PB4/PB5. SPI2 has NO
+ * The pads are a column (afio.hpp, tables 10-32 and 10-33). SPI1 has two:
+ * the default PA4/PA5/PA6/PA7 and code 1's PA15/PB3/PB4/PB5. SPI2 has no
  * remap field - one column, PB12..PB15, from the datasheet's pin table.
  * SPI3 has two: the default PA15/PB3/PB4/PB5 - the very pads of SPI1's
  * second column - and code 1's PA4/PC10/PC11/PC12, behind PCFR1's bit 28,
  * which moves I2S3's pads with them. `SpiPins` carries the code and
  * init() writes it, refused where the part bonds no pad of it.
  *
- * THE DMA REQUESTS ARE SLOTS (dma_engine.hpp, tables 11-2 to 11-5): SPI1
- * receives on DMA1's channel 2 and transmits on 3, SPI2 on DMA1's 4 and
- * 5, and SPI3 - and the I2S face of SPI3, whose requests are the same two
- * - on DMA2's 1 and 2. On this family the channel IS the request, so an
- * engine slot naming any other one is refused at compile time - it would
- * move nothing. IN SLEEP THE BUS MATRIX SERVES THE CORE ALONE (this
+ * The DMA requests are slots, a controller and one of its channels
+ * (dma_engine.hpp, tables 11-2 to 11-5): SPI1 receives on DMA1's channel
+ * 2 and transmits on 3, SPI2 on DMA1's 4 and 5, and SPI3 - and the I2S
+ * face of SPI3, whose requests are the same two - on DMA2's 1 and 2. On
+ * this family the channel is the request, so an engine slot naming any
+ * other one is refused at compile time - it would move nothing. In sleep
+ * the bus matrix serves the core alone (this
  * stratum's finding, docs/ch32vx03/README.md): a transport with engines
  * holds the program awake, exactly as usart.hpp's does.
  *
- * THE HIGH-SPEED READ MODE IS A LOT'S STORY, AND ONE CODE MEANS THE SAME
- * ON EVERY LOT. HSCR.HSRXEN delays a HOST'S sampling of MISO so that a
+ * The high-speed read mode is a lot's story, and one code means the same
+ * on every lot. HSCR.HSRXEN delays a host's sampling of MISO so that a
  * late answer is caught at the top rate. 20.4.10 tells it four ways by
  * class and lot: on the CH32V20x_D6 it "is only valid at clock division
  * 2" and the bit is write-only; on the CH32V20x_D8 the bit is write-only
@@ -81,7 +179,7 @@
  * second ladder under it (20.4.1: FPCLK/2, /3 ... /9) and a second mode,
  * HSRXEN2, exists; on that class's other lots the bit is write-only again
  * and the mode valid at /2 alone where the fifth digit is below 2. BR =
- * 000 is FPCLK/2 in BOTH ladders, so the one code at
+ * 000 is FPCLK/2 in both ladders, so the one code at
  * which HSRXEN means the same thing on every die of every class is /2 -
  * and `high_speed_read()` refuses at any other, at run time against the
  * code in the register and at compile time where the configuration is a
@@ -90,18 +188,18 @@
  * above, which only SPI1's PB2 reaches). What the mode buys is measured
  * (docs/ch32vx03/spi.md): on the CH32V303VCT6, SPI2 hosting SPI3 over
  * the evaluation board's wires at /2 - 36 MHz - read 254 bytes of 256
- * wrong without it, 253 of them the client's byte ONE BIT LATE, and every
+ * wrong without it, 253 of them the client's byte one bit late, and every
  * byte right with it; that die kept no HSRXEN2.
  *
- * THE I2S FACE, THE CH32V303RC'S AND VC'S. The register file carries
+ * The I2S face, the CH32V303RC's and VC's. The register file carries
  * SPIx_I2S_CFGR on every instance and SPIx_I2SPR on SPI2 and SPI3, and
  * chapter 20 is written for four families at once; what decides whether
- * a part HAS the face is its datasheet - table 2-1-1 gives two I2S to the
+ * a part has the face is its datasheet - table 2-1-1 gives two I2S to the
  * 256 KB CH32V303 and none to the 128 KB ones, and the CH32V203's table
  * 2-1 has no I2S row at all - so `I2s<n>` compiles where
  * `device::has_i2s` says and for SPI2 and SPI3 alone, and the SPI face
  * keeps `i2s_config_writable()`, the one question it asks of that
- * register elsewhere. THE CLOCK A MASTER DIVIDES IS SYSCLK: figure 3-3,
+ * register elsewhere. The clock a master divides is SYSCLK: figure 3-3,
  * the simple tree this class has, draws SYSCLK to both I2S interfaces,
  * and RCC_CFGR2's I2S2SRC and I2S3SRC only choose between SYSCLK and a
  * PLL3 the CH32V30x_D8C has and this class has not - so `i2s_clock_hz()`
@@ -110,7 +208,7 @@
  * the core for the 16014 that arithmetic gives at 144 MHz). The face
  * shares the vector, the gate, the reset, CTLR2's enables and the two DMA
  * requests with the SPI face; CTLR1, the CRC and MODF are not used in
- * it. ONE SENTENCE OF 20.3.6.2 DOES NOT HOLD: TXE reads 1 on a configured
+ * it. One sentence of 20.3.6.2 does not hold: TXE reads 1 on a configured
  * transmitting face with I2SE clear, and a datum written there is the
  * first word on the wire once the face is enabled (measured on the
  * CH32V303VCT6) - so nothing here waits for TXE to rise at the enable,
@@ -896,9 +994,10 @@ struct Spi {
     static void txe_interrupt(bool on) { interrupt(spi_txeie, on); }
     static void error_interrupt(bool on) { interrupt(spi_errie, on); }
 
-    /// The raised sources that are ENABLED, the way the other strata's
-    /// ISR bodies answer: RXNE and TXE under their own enables, the
-    /// three errors under ERRIE. Nothing is cleared here.
+    /// The raised sources that are ENABLED, as SpiFlag bits for the
+    /// program's handler to act on: RXNE and TXE under their own enables,
+    /// the three errors under ERRIE. Nothing is cleared here; two loads,
+    /// STATR and CTLR2, from the vector the program binds.
     [[gnu::always_inline]] static uint32_t isr() {
         const uint16_t st = regs().STATR;
         const uint16_t en = regs().CTLR2;
@@ -1045,8 +1144,10 @@ constexpr uint8_t spi_write_ahead_code(uint8_t bits, uint32_t hclk_over_pclk) {
  * SpiHost<n, pins, TxEngine, RxEngine, hold_off_cycles>
  *
  * The engine SpiBus (util/spi_bus.hpp = BusMaster) drives. Its Request
- * is the other strata's: the bus AO asserts the request's own chip
- * select around the transaction, a COMMAND phase goes out with D/C low
+ * carries the fields every family's host shares (docs/design/spi-bus.md,
+ * "Realizations"): the engine asserts the request's own chip select in
+ * start(), which the bus AO calls, and releases it when the transaction
+ * ends; a COMMAND phase goes out with D/C low
  * and a DATA phase with it high, the data phase has an optional out
  * buffer (null = 0xFF dummies) and an optional in buffer (null = the
  * frames read back are discarded), and every buffer is LENT until the
@@ -1119,7 +1220,9 @@ constexpr uint8_t spi_write_ahead_code(uint8_t bits, uint32_t hclk_over_pclk) {
  * (docs/ch32vx03/spi.md).
  *
  * FRAMES IN A BYTE BUFFER: one byte per 8-bit frame, two bytes low-first
- * per 16-bit frame - the other strata's rule.
+ * per 16-bit frame - the Request's rule, its buffers being bytes whatever
+ * the frame size (the pump's frame_at() and store_frame(), the polled
+ * loops' load_frame() and store_into()).
  *
  * NO FLUSH AT START: the chapter gives no way for a frame to stand in the
  * receive buffer at the start of a transaction but a tenure that ended
@@ -1244,7 +1347,14 @@ public:
      * instance's BR field divides is ITS OWN BUS'S, which the tag
      * answers. `max_sck_hz` is an optional CEILING for the whole bus,
      * re-resolved on rebase(); 0 = none. False when the ceiling cannot
-     * be produced at this clock, or the boot configuration is refused.
+     * be produced at this clock, the column's remap is refused, or the
+     * boot configuration is refused.
+     *
+     * Once, from main(), after the clock task's init() and before the
+     * first request: the rates it works out are the clock type's, not
+     * the hardware's, and nothing checks the order (the file header).
+     * It waits for nothing. The chip select is not one of its pads: the
+     * program makes the Request's `cs` an output, driven high, itself.
      */
     template <typename Clock>
     static bool init(Clock clock, uint32_t max_sck_hz = 0) {
@@ -1389,6 +1499,16 @@ public:
     /// util/bus_master.hpp's engine contract. The request is read where
     /// it lies; what an asynchronous tenure needs after the return is
     /// copied into the engine's Tenure here, in word stores.
+    ///
+    /// The arbiter's call, from its dispatch, or the program's for a
+    /// polled request on a bus no arbiter owns. A polled request spins
+    /// here for the whole transaction, global interrupts enabled, under
+    /// one spin budget (spi_stalled when it runs out; spi_dma_fault when
+    /// the engines' completion never comes); the chip-select setup time
+    /// is a busy wait here too. The buffers stay the engine's until the
+    /// reply, or until the return for a polled request called directly.
+    /// The answer is the completion style, never a verdict: status()
+    /// carries how the transaction ended.
     static bool start(const Request& r) {
         status_ = spi_ok;
         if ((static_cast<uint32_t>(r.cmd_len) + r.len) == 0u) {
@@ -1481,7 +1601,8 @@ public:
         return true;
     }
 
-    /// The instance's interrupt body - call from its vector. Only RXNE is
+    /// The instance's interrupt body - call from its vector, the program's
+    /// binding, and from nowhere else; it masks nothing. Only RXNE is
     /// ever armed by this engine, and reading DATAR is both the capture
     /// and the acknowledgement. True when the transaction just completed
     /// (CS released): the edge the app's glue posts TransferDone on. The

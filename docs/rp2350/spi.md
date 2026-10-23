@@ -1,6 +1,99 @@
 # SPI (RP2350)
 
-Documents of record: the RP2350 datasheet (build d126e9e), 12.3 whole
+This document is for a programmer who puts a device on an SPI bus of an
+RP2350 - a display, a converter, a memory - or who makes this chip
+answer as the device on another chip's bus, on either of the chip's two
+processor architectures. The chip carries two ARM PL022 synchronous
+serial ports. Their driver is written once for every family that carries
+the block, in the PL022 IP stratum ([../pl022/README.md](../pl022/README.md));
+this page and `brio/rp2350/spi.hpp` are what the RP2350 adds to it - the
+pads, the reset bits, the interrupt lines, the DMA request numbers,
+which clock the bit rate is divided from and the busy-wait a select's
+setup time is spent on - and the names a program writes: `Pl022<n>`, the
+instance; `SpiHost<n, pins, ...>`, the host engine; `SpiClient<n, pins>`,
+the other end. A host is not usually driven directly: a program names
+one arbiter per bus, `SpiBus` (an active object - a component of a brio
+program with its own event queue, served one event at a time by the
+kernel, [docs/learn/introduction.md](../learn/introduction.md) - that
+takes the transactions of every client of the bus in turn and answers
+each with an event, [design/spi-bus.md](../design/spi-bus.md)), and
+posts it a request.
+
+The smallest use, a host with its select as an ordinary pin and one
+transaction posted to the arbiter, is the first block under "How to use
+it" below:
+
+```cpp
+constexpr brio::SpiPins pins{.sck = 18, .tx = 19, .rx = 16};
+using Bus = brio::SpiHost<0, pins>;
+using Spi = brio::SpiBus<Bus, P, 4>;                  // the arbiter AO
+using Cs = brio::Pin<17>;
+
+Bus::init(clock, 8'000'000);                          // a ceiling for the whole bus
+Cs::output(true);
+
+Bus::Request r{};
+r.cs = Cs::ref();
+r.cmd = brio::lend<brio::Lease::reply>(cmd);   r.cmd_len = 1;
+r.tx = brio::lend<brio::Lease::reply>(pixels); r.len = 64;
+r.clock = brio::SpiClocks::div4;                      // 37.5 MHz at 150
+r.mode = brio::SpiMode::mode0;
+r.reply = brio::reply_to<Display, brio::SpiDone>();
+brio::post<Spi>(r);
+
+extern "C" void isr_spi0() {
+    if (Bus::isr()) { brio::post<Spi>(brio::TransferDone{Bus::status()}); }
+}
+```
+
+Line by line: `pins` names the clock, transmit and receive pads of SPI0
+by number (a pad that is not the instance's for its signal does not
+compile); `Bus` names the host engine over it with every other template
+argument at its default (no DMA engines, the code in the flash); `Spi`
+is the arbiter for that bus, an active object of the program's `Tenuto`
+over platform `P`, with four requests of queue; `Cs` is the select, an
+ordinary pin the request carries; `Bus::init()` takes the clock task's
+tag ([clock.md](clock.md)) and an optional ceiling for every
+transaction on the bus; `Cs::output(true)` drives the select high, not
+selected, before the first request; the request names the select, lends
+its two buffers (`brio::lend<brio::Lease::reply>` - the buffers stay
+the caller's and are only read until the reply), the rate as a division
+of clk_peri, the mode, and where the reply goes (`Display`, the active
+object that posts it, receives an `SpiDone`); `post` hands it to the
+arbiter; and the `extern "C"` function is the instance's interrupt
+handler, under the crt's name for SPI0's line, the same on both
+architectures, which tells the arbiter when the transaction has
+completed.
+
+What decides correctness even there. `init()` comes after the clock
+task: the bit rate is a division of the clk_peri rate the clock type
+claims (`Clock::pclk_hz`), not read from the hardware. `init()` answers
+false when the ceiling cannot be produced or the block did not come up,
+and the example discards that answer. The program binds `isr_spi0`
+itself; left unbound, the line's first interrupt goes into the crt's
+default spin and the program stops there (the arbiter's per-bus timeout
+cannot answer from inside a spinning handler). The two lent buffers must stay
+untouched and in scope from the post to the `SpiDone` the arbiter
+replies with; nothing checks it. The request is posted from an active
+object's handler, which is what the reply is sent back to. `init()`
+hands the pads over itself, the isolation latch dropped and a host's
+receive pad pulled up ("What the silicon does" below); the select pad
+is the program's, configured before the first request. And a request's
+`cs_setup_us` is spent on this target's microsecond ruler: served once
+`Mtime::start(clock)` has run, refused with no time spent before that.
+
+The rest of this page, in order: the documents of record; what the
+silicon does (the one function column, the bit rate at this clock, what
+the chapter says about the transmit pad's output enable and what the
+pads do, the isolated pads, the three number tables); the types and
+verbs this stratum adds; how to use it, the host, its engines and the
+client; the bench findings, most of the page, on the loop-back and on
+the pair's wire; and what is not covered. What the block itself does is
+the IP stratum's page.
+
+## Documents of record
+
+The RP2350 datasheet (build d126e9e), 12.3 whole
 (12.3.1 what changed from the RP2040, 12.3.2 the overview with the four
 interrupt sources, 12.3.3 the functional description - 12.3.3.3 the
 prescaler, 12.3.3.4 and 12.3.3.5 the two FIFOs, 12.3.3.7 the combined
@@ -19,14 +112,17 @@ The driver is ARM's and not this chip's, so it lives in the IP stratum:
 ([../pl022/README.md](../pl022/README.md)), and `brio/rp2350/spi.hpp`
 holds what this chip owes it - the pin table of table 645, the
 `Rp2350Pl022` chip traits over `pin.hpp`, `resets.hpp`, `clock.hpp`,
-`core.hpp`, `delay.hpp` and `dma_engine.hpp`, and the PUBLIC NAMES
+`core.hpp`, `delay.hpp` and `dma_engine.hpp`, and the public names
 `Pl022<n>` (the resource), `SpiHost<n, pins, ...>` (the engine `SpiBus`
 drives) and `SpiClient<n, pins>` (the other end), this chip's aliases of
 the three templates there. The reference suite: `test_rp2350_spi`, which
-runs on BOTH of this chip's architectures from one source, on the
+runs on both of this chip's architectures from one source, on the
 loop-back; the wire is the desk partner's, SPI1 on GP30 / GP28 / GP31
 with GP41 its select, to the WeAct RP2040
-([../boards/weact-rp2350b.md](../boards/weact-rp2350b.md)).
+([../boards/weact-rp2350b.md](../boards/weact-rp2350b.md)). A letter of
+a suite is one command key of its console and the group of verdicts it
+runs; `z` is the key that runs every letter but `x`, the slip
+statistics, which runs by name.
 
 This page says what is the RP2350's. What the block itself does - the
 prescaler pair, the disabled-write rule, the pump's batching, the phase
@@ -36,7 +132,7 @@ restated here.
 
 ## What the silicon does
 
-The block is the same one the RP2040 carries, at the SAME REVISION (r1p4,
+The block is the same one the RP2040 carries, at the same revision (r1p4,
 named in 12.3 on both chips) and with the same eight-deep FIFOs (12.3.3.4,
 12.3.3.5). SSPCLK is clk_peri and PCLK is clk_sys, which is why a bit rate
 is divided from `Clock::pclk_hz` and never from a second statement of the
@@ -44,14 +140,14 @@ rate; clk_peri follows clk_sys undivided unless a program detaches it, and
 12.3.4.4's constraint is that SSPCLK may not exceed PCLK. Five things
 about it are this chip's:
 
-**ONE FUNCTION COLUMN, and that is worth stating because the UART's is
+**One function column, and that is worth stating because the UART's is
 two.** The pads march in groups of four - RX, CSn, SCK, TX - and the
 groups cycle SPI0, SPI0, SPI1, SPI1 over the whole bank, so the instance
 is bit 3 of the pad number: GP0..GP7 are SPI0's, GP8..GP15 SPI1's,
 GP16..GP23 SPI0's, up to GP47 on the QFN-80. That is the RP2040's rule
 over a longer bank. Unlike the UART, which gained a second data pair on
 every group's flow-control pads under function 11, the SPI appears in
-ONE column of table 645 and one only: F1, on every pad that carries it,
+one column of table 645 and one only: F1, on every pad that carries it,
 on both packages. So a pin set here is four plain pad numbers.
 
 Every signal of both instances is reachable in the QFN-60 as well: SPI0
@@ -59,19 +155,19 @@ clocks on GP2, GP6, GP18 and GP22 there and SPI1 on GP10, GP14 and GP26,
 each with its own group's other three signals beside it. The eighteen
 pads above GP29 (GP30..GP47) are the QFN-80's alone.
 
-**THE BIT RATE AT THIS CLOCK.** clk_peri / (CPSDVSR x (1 + SCR)), the
+**The bit rate at this clock.** clk_peri / (CPSDVSR x (1 + SCR)), the
 prescaler even in 2..254 and SCR in 0..255. At a clk_peri of 150 MHz that
 is 75 Mbit/s at the top (CPSDVSR 2, SCR 0) down to 2306 Hz at the bottom
-(254 x 256), and a ceiling the pair cannot reach is REFUSED rather than
-rounded up past the slowest. A CLIENT needs SSPCLK at least twelve times
+(254 x 256), and a ceiling the pair cannot reach is refused rather than
+rounded up past the slowest. A client needs SSPCLK at least twelve times
 its own clock (12.3.4.4: the input is double-synchronized), so 12.5
 Mbit/s here. Note that 12.3.4.4's own worked example names 70.5 Mbit/s as
 the peak at a clk_peri of 150 MHz with exactly those register values; the
 equation printed two paragraphs earlier gives clk_peri / 2, and that is
 what the driver's chooser computes.
 
-**THE CHAPTER SAYS TWO DIFFERENT THINGS ABOUT nSSPOE, AND THE PADS ANSWER
-THE FIRST.** 12.3.1 says the output enable of the SSPTXD data output IS
+**The chapter says two different things about nSSPOE, and the pads answer
+the first.** 12.3.1 says the output enable of the SSPTXD data output is
 controlled by nSSPOE on this chip, and that the peripheral tristates its
 output when deselected in client mode, which it offers as the reason
 software need not manage the output enable even where several clients
@@ -86,24 +182,24 @@ burst, is OFF while the client's select is high and ON while it is low,
 and under SOD it is off selected or not - the far host reading its own
 pull-up where the RP2040's client repeats its first answer (bench
 findings). The driver depends on neither: `SpiClient::drive_output
-(false)` makes the dark listener by taking the PAD away - to no function
+(false)` makes the dark listener by taking the pad away - to no function
 with no pull, the traits' dark config, because the pad's reset state
 carries a pull-down that fights the far host's pull-up - and `sod()`
 stays a bit of the resource.
 
-**THE PADS COME UP ISOLATED** (9.11, and [README.md](README.md)): a pad
+**The pads come up isolated** (9.11, and [README.md](README.md)): a pad
 answers nothing until the isolation latch is cleared, which every
 configuring verb of `pin.hpp` does as it writes. Two of the four signals
-are handed over with a PULL-UP, because this chip's pads reset pulled
-DOWN: a HOST's receive pad, so an answer line with nothing driving it
-reads as the idle ones a bus expects rather than as zeros, and a CLIENT's
+are handed over with a pull-up, because this chip's pads reset pulled
+down: a host's receive pad, so an answer line with nothing driving it
+reads as the idle ones a bus expects rather than as zeros, and a client's
 select pad, so an unwired select reads not-selected. And because erratum
-RP2350-E9 is live on the A2 stepping, an idle LEVEL on a pad of this chip
+RP2350-E9 is live on the A2 stepping, an idle level on a pad of this chip
 is history and not a measurement: whether a transmit pad is driven is
 read where the pad sees it, in GPIO_STATUS's output enable
 (`Pin<n>::status()`), and never from the level a wire holds.
 
-**THE THREE NUMBER TABLES ARE NOT THE RP2040'S**, and each has its own
+**The three number tables are not the RP2040's**, and each has its own
 reason. The DREQ rows are 24..27 where they were 16..19, because a third
 PIO and its twelve rows moved everything above them (12.6.4.1,
 `rp2350/dma_engine.hpp`). The reset bits are 18 and 19 where they were 16
@@ -113,7 +209,7 @@ and 17, the controller governing twenty-nine blocks against twenty-seven
 `isr_spi0` / `isr_spi1` once and is bound on both halves. The controller
 behind those names is not the same object - an NVIC on the Cortex-M33
 half, Hazard3's own on the other - which is exactly why the IP stratum's
-concept takes the controller as a TYPE.
+concept takes the controller as a type.
 
 ## Types and verbs
 
@@ -122,25 +218,26 @@ arithmetic, the register bit layouts, the resource's verbs, the host's
 Request and its two ISR bodies, the client's surface) is in
 [../pl022/README.md](../pl022/README.md). This stratum adds:
 
-- `SpiPins` - the four pad numbers, each the instance's own or `0xFF` for
-  a signal the set leaves out. A host with no receive pad is a write-only
-  bus; a host's transaction select is NOT here (it is a GPIO the Request
-  carries) - a host whose set names `cs` drives the block's own frame
-  signal there (`frame_select`, [../pl022/README.md](../pl022/README.md))
-  - while the CLIENT's select IS its select pad.
+- `SpiPins` - the four pad numbers, each the instance's own or `0xFF`
+  for a signal the set leaves out. A host with no receive pad is a
+  write-only bus; a host's transaction select is not here (it is a GPIO
+  the Request carries) - a host whose set names `cs` drives the block's
+  own frame signal there (`frame_select`,
+  [../pl022/README.md](../pl022/README.md)) - while the client's select
+  is its select pad.
 - `spi_pad_instance(pin)` - which instance the four pads of that pin's
   group belong to: bit 3 of the pad number.
 - `spi_rx_pin(n, pin)`, `spi_cs_pin(n, pin)`, `spi_sck_pin(n, pin)`,
   `spi_tx_pin(n, pin)` - table 645 as constexpr facts, in the table's own
   order.
-- `spi_pins_valid(n, pins)` - a legal pin set for instance n. The PACKAGE
-  is not asked here: the table is the DIE's, and a pad the QFN-60 has not
+- `spi_pins_valid(n, pins)` - a legal pin set for instance n. The package
+  is not asked here: the table is the die's, and a pad the QFN-60 has not
   bonded is refused one level down by `Pin<n>`'s own static_assert, which
   says so in those words.
 - `Rp2350Pl022` - the chip traits, which nothing above this file names.
   Its `pad_function` is the single code `PinFunction::spi`, and its
   `DelayRate` is [clock.md](clock.md)'s - the microsecond busy-wait of
-  this target, which counts on the PLATFORM TIMER and not on a core
+  this target, which counts on the platform timer and not on a core
   counter, so a Request's `cs_setup_us` is served once `Mtime::start` has
   run and refused (with no time spent) before that.
 - `Pl022<n>`, `SpiHost<n, pins, TxEngine, RxEngine, Placement>` and
@@ -149,13 +246,13 @@ Request and its two ISR bodies, the client's surface) is in
   default (`Placement`: util/placement.hpp's tag, [platform.md](platform.md),
   "A handler in SRAM").
 - `Rp2350Pl022::dma_min_frames`, the data-phase length below which a
-  request takes the pump even with engines bound - TEN frames here, the
+  request takes the pump even with engines bound - ten frames here, the
   quotient of two of this chip's measurements (the bench findings). The
   host's receive engine arms at HIGH_PRIORITY, a frame landing on a full
   receive FIFO being lost, its transmit engine at normal
   ([dma.md](dma.md)).
 
-Beside them, at the foot of the file, is the VOCABULARY CHECK: the IP
+Beside them, at the foot of the file, is the vocabulary check: the IP
 file spells the block's bit layout itself, because it may not read a
 vendor header, and a block of `static_assert`s holds every one of those
 constants against this chip's own device description (`SPI_SSPCR0_*`,
@@ -200,7 +297,7 @@ frames ride them at a byte beat and 16-bit frames at a half-word one;
 byte engines leave a 16-bit request to the pump, as does a buffer not
 aligned to a half-word - and the line the engines report on calling
 `Bus::dma_isr()` the same way. The receive block's completion is the
-transaction's ONE interrupt: the transmit engine is armed to report a bus
+transaction's one interrupt: the transmit engine is armed to report a bus
 error and nothing else ([dma.md](dma.md)).
 
 ```cpp
@@ -209,7 +306,7 @@ extern "C" void isr_dma_0() {
 }
 ```
 
-A client, whose select IS a pad:
+A client, whose select is a pad:
 
 ```cpp
 constexpr brio::SpiPins client_pins{.sck = 10, .tx = 11, .rx = 8, .cs = 9};
@@ -529,10 +626,11 @@ same on both halves:
   selected or not - the far host reading its own pull-up, 0xFF x 32 -
   so nSSPOE does reach the pad here (12.3.1), the RP2040's opposite. The
   dark listener takes the pad away and the far host reads its own
-  pull-up, the client hearing every frame. Taken to the pad's RESET state
-  as the driver did before, the pad's pull-down fought the far host's
-  pull-up and the host read 0x02 and the like (sum 0xEBE where a steady
-  0xFF gives 0x1FE0): the driver now gives it to no function with no pull.
+  pull-up, the client hearing every frame. Taken to the pad's RESET
+  state instead, the pad's pull-down fights the far host's pull-up and
+  the host reads 0x02 and the like (measured: sum 0xEBE where a steady
+  0xFF gives 0x1FE0), which is why the driver gives it to no function
+  with no pull.
 
 ## Not covered yet
 
@@ -554,7 +652,7 @@ than 8 and 16 in the Request, a client on the DMA engines - are in
   it worth a letter is a display, which this desk has not got.
 - Detaching clk_peri from clk_sys: `Clock`'s `PeriSource::crystal` is
   what would hold the bit rate still across a clk_sys change, and this
-  target has no dynamic clock yet, so nothing changes clk_sys under a
+  target has no dynamic clock, so nothing changes clk_sys under a
   running bus.
 
 Implemented but not bench-verified, each with what would measure it:

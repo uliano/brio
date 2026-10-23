@@ -1,17 +1,23 @@
 /*
  * flash.hpp
  *
- * The RP2040's flash: an EXTERNAL quad-SPI chip the core executes out
- * of through the XIP window (datasheet 2.6.3, the cache and its four
+ * The RP2040's flash, for a program that must erase or program it
+ * itself, ask the chip what it is, or watch the cache it executes
+ * through. A program that only wants to keep data across power cycles
+ * does not drive this header: it takes the block heap or the value
+ * journal over rp2040/nvm_flash.hpp, which are built on it.
+ *
+ * The flash is an external quad-SPI chip the core executes out of
+ * through the XIP window (datasheet 2.6.3, the cache and its four
  * aliases; 4.10, the SSI that drives the chip), erased and programmed
- * through THE BOOTROM'S OWN FUNCTIONS (2.8.3.1.3) - the chip has no
+ * through the bootrom's own functions (2.8.3.1.3) - the chip has no
  * flash controller of its own, and the only code that knows how to
  * take the SSI out of its execute-in-place mode, drive a command and
  * put it back is the one in mask ROM, found by name in the ROM table
  * (2.8.3, the lookup at 0x18 over the function table at 0x14). Three
  * things here:
  *
- *  - `Flash`, THE ENGINE: `erase(addr, bytes)` by whole 4 KB sectors
+ *  - `Flash`, the engine: `erase(addr, bytes)` by whole 4 KB sectors
  *    (the 64 KB block command taken where a run is aligned to it),
  *    `program(addr, src)` by whole 256-byte pages, `read` through the
  *    cached window, `command(tx, rx)` - a raw exchange with the chip
@@ -21,30 +27,68 @@
  *    BRIO_RP2040_FLASH_KB, the same number the linker script and the
  *    storage partition (nvm_flash.hpp) are drawn from.
  *
- *  - `Xip`, THE CACHE: enable, flush, power down, the hit and access
+ *  - `Xip`, the cache: enable, flush, power down, the hit and access
  *    counters the suite reads a hit ratio off, and the four aliases
  *    of the window as addresses (`Flash::address` cached,
  *    `Flash::uncached_address` through the no-cache-no-allocate one).
  *
- *  - THE WINDOW OF THE OPERATION, which is what makes this driver
- *    unlike the other strata's. While the SSI is out of XIP mode THERE
- *    IS NO FLASH: a fetch from 0x1000_0000 hangs or faults. So every
- *    operation runs from `.ram_text`, an input section the linker
- *    script folds into .data (the crt copies it to SRAM with the
- *    initialized data), with INTERRUPTS MASKED for its whole duration
- *    - a handler fetched from flash would be the fault - and returns
- *    to XIP through THE SECOND STAGE ITSELF: the 256 bytes at the start
- *    of the image, copied to SRAM once by `init()` and called as a
- *    function (the stage returns to a caller whose link register is
- *    not zero, and vectors into flash when it is: src/glue/boot2_*.S),
- *    so the SSI comes back in the same quad-I/O mode it booted in,
- *    whatever chip the board carries. The bootrom's own 'CX' entry
- *    would leave it in a slow single-line mode instead. The masked
- *    window is measured by the suite: a sector erase is tens of
- *    milliseconds, a page program under a millisecond, and the ticker
- *    loses whatever ticks fall inside.
+ *  - The window of the operation, below.
  *
- * WHAT THE WINDOW ASKS OF THE APPLICATION, stated because nothing here
+ * The smallest use, the board's identity and one page written into the
+ * storage partition's first sector (test_rp2040_flash spells both):
+ *
+ *     if (const auto id = brio::Flash::unique_id()) { show(*id); }
+ *     const uint32_t sector = brio::QspiFlashPartition::storage_base;
+ *     if (brio::Flash::erase_sector(sector) && brio::Flash::program(sector, page)) { ... }
+ *
+ * where `page` is 256 bytes in SRAM. Every operation answers false
+ * (the id queries nullopt), touching nothing, for an address or a
+ * length that is not whole sectors or pages inside the chip, a buffer
+ * in the window, or an `init()` that failed: a ROM with no table, a
+ * function missing from it, or a stage whose CRC is not the bootrom's.
+ *
+ * Which context calls what. The operations are setup's or an active
+ * object's (an active object is a component of a brio program with its
+ * own event queue, served one event at a time by the kernel), one caller
+ * at a time: they share the bootrom's state and the stage's copy with no
+ * lock, and nothing checks it. Each one is a window that masks interrupts
+ * on the calling core for its whole duration (PRIMASK saved, cpsid,
+ * restored after) - the other core and the DMA are not masked, which is
+ * the application's business (below). The window lasts as long as the
+ * bootrom's operation does, with no bound of brio's own: measured on the
+ * bench chips (docs/rp2040/flash.md), a sector erase is 29 ms on the
+ * Winbond W25Q16JV and 5.2 ms on the Zetta ZD25Q16, a page program 0.6 ms
+ * and 1.3 ms, and the ticker loses every tick that falls inside but one
+ * (SysTick pends once however long the mask stays). No handler runs
+ * meanwhile, so a byte transport's received bytes wait in its
+ * peripheral's FIFO - 32 entries on a UART, 2.78 ms of bytes at 115200
+ * baud in 8N1 (32 frames of 10 bits; 3.33 ms with 12-bit frames) - and
+ * what lands past that is an overrun, unless the transport has a receive
+ * engine: the DMA is not masked, so its channel keeps moving the bytes
+ * into its run through the window. Every operation flushes the cache on
+ * its way back ('FC'), so a cached read after it shows the new bytes.
+ * `read()`, `address()`, `in_window()` and the `Xip` readbacks are plain
+ * loads from any context; `Xip::flush()` holds the bus until the flush is
+ * done. Storage: `program()`'s source and `command()`'s `rx` are the
+ * caller's, used during the call only, and must lie outside the window;
+ * `command()` copies `tx` to the stack first, so it may live anywhere.
+ *
+ * The window of the operation. While the SSI is out of XIP mode there
+ * is no flash: a fetch from 0x1000_0000 hangs or faults. So every
+ * operation runs from `.ram_text`, an input section the linker script
+ * folds into .data (the crt copies it to SRAM with the initialized
+ * data), with interrupts masked for its whole duration - a handler
+ * fetched from flash would be the fault - and returns to XIP through
+ * the second stage itself: the 256 bytes at the start of the image,
+ * copied to SRAM once by `init()` and called as a function (the stage
+ * returns to a caller whose link register is not zero, and vectors into
+ * flash when it is: src/glue/boot2_*.S), so the SSI comes back in the
+ * same quad-I/O mode it booted in, whatever chip the board carries. The
+ * bootrom's own 'CX' entry would leave it in a slow single-line mode
+ * instead. The masked window is measured by the suite, with the figures
+ * above.
+ *
+ * What the window asks of the application, stated because nothing here
  * can enforce it: nothing else may fetch from flash while it is open -
  * not the other core (a core 1 running a program out of flash must be
  * parked in the bootrom or in SRAM first; the suite runs with core 1
@@ -53,7 +97,7 @@
  * when they lie in the window (`in_window`): the bootrom would read
  * them through a flash that is not there.
  *
- * ADDRESSES ARE OFFSETS IN THE CHIP, from 0 - what the bootrom's
+ * Addresses are offsets in the chip, from 0 - what the bootrom's
  * functions take - and the window adds 0x1000_0000 where a pointer is
  * wanted. The first 256 bytes are the stage, the image follows: an
  * erase that reaches the image is the application's to refuse; the
@@ -202,10 +246,10 @@ struct FlashRom {
 
     // ----- what runs with the flash disconnected --------------------------
     // Every function below is in .ram_text, not inlined into a caller in
-    // flash, and FLATTENED so that nothing it calls is a call into flash
+    // flash, and flattened so that nothing it calls is a call into flash
     // (the CMSIS intrinsics fold in; the bootrom's functions and the
     // stage are reached through pointers). No switch (its jump table
-    // would be in .rodata), no library call. THE SECTION IS SPELLED
+    // would be in .rodata), no library call. The section is spelled
     // `.ram_text.brio`, and nothing is cloned: these are a header's
     // functions, which GCC emits in a COMDAT group, and it refuses one
     // section name for a grouped function and a program's plain one in
@@ -353,7 +397,9 @@ struct Flash {
 
     /// Find the bootrom's functions and copy the stage out. Every
     /// operation calls it itself; an application calls it to learn
-    /// early. False on a ROM with no table or a stage with no CRC.
+    /// early. False on a ROM with no table, a function missing from it,
+    /// or a stage whose CRC is not the one stored in its last word (the
+    /// image's first 256 bytes would then not lead back into XIP).
     static bool init() { return detail::FlashRom::ensure(); }
     static bool ready() { return detail::FlashRom::ready; }
     static uint8_t rom_version() { return detail::FlashRom::rom_version(); }
@@ -398,7 +444,12 @@ struct Flash {
 
     /// Whole sectors from `addr`, `bytes` long; the 64 KB block command
     /// where the run is aligned to it (the bootrom's own choice). The
-    /// window is open for the whole run: bound it.
+    /// window is open for the whole run, interrupts masked on this core
+    /// until it closes: bound it. False, nothing erased, for a run that
+    /// is empty, not whole sectors or past the chip, or when init()
+    /// fails; otherwise true, unconditionally, once the bootrom's erase
+    /// has returned and XIP is back - the answer does not check that the
+    /// run reads erased.
     static bool erase(uint32_t addr, uint32_t bytes) {
         if (bytes == 0u || (addr % sector_size) != 0u || (bytes % sector_size) != 0u || addr >= size_bytes ||
             bytes > size_bytes - addr) {
@@ -410,12 +461,16 @@ struct Flash {
         detail::FlashRom::erase_in_ram(addr, bytes, block_size, block_command);
         return true;
     }
-    /// One sector.
+    /// One sector: the window of a sector erase (5.2 to 29 ms on the
+    /// bench chips).
     static bool erase_sector(uint32_t addr) { return erase(addr, sector_size); }
 
     /// Whole pages from `addr`, `src` in SRAM (a source in the window is
     /// refused: the bootrom would read it through a flash that is not
-    /// there). A page programs 1 -> 0 only; a page programmed twice
+    /// there), used during the call only; one window, interrupts masked
+    /// on this core. False, nothing written, for a misaligned address, a
+    /// span that is not whole pages or runs past the chip, or a failed
+    /// init(). A page programs 1 -> 0 only; a page programmed twice
     /// between erases holds the AND of the two, which is the physics
     /// the chapter does not state and the suite measures.
     static bool program(uint32_t addr, std::span<const uint8_t> src) {
@@ -431,7 +486,10 @@ struct Flash {
     }
 
     /// A raw exchange: `tx` clocked out, as many bytes clocked into `rx`
-    /// (the same length, at most `max_command`, `rx` in SRAM). The
+    /// (the same length, at most `max_command`, `rx` in SRAM), one
+    /// window with interrupts masked on this core; false for an empty,
+    /// unequal or longer exchange, an `rx` in the window or a failed
+    /// init(). The
     /// command byte, its address and dummy bytes and the zeros that
     /// clock the answer in are the caller's; `tx` may live anywhere,
     /// it is copied to the stack first.

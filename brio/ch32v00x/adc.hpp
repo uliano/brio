@@ -7,16 +7,50 @@
  * group of four, timer triggers a group, an analog watchdog, one DMA
  * request - the STM32F1's ADC1 under WCH's names, 12-bit on the
  * CH32V006 with a third control register of its own, 10-bit on the
- * CH32V003 with the F1's calibration and a trigger delay register. In
- * the two strata every brio target uses:
+ * CH32V003 with the F1's calibration and a trigger delay register. A
+ * program measures a pad or the supply with it, polled, or hands the
+ * conversions to util/analog_sampler.hpp's AnalogSampler, an active
+ * object (a component of a brio program with its own event queue, served
+ * one event at a time by the kernel) fed from the ADC's interrupt. The
+ * smallest use, the supply through VREFINT and then a pad in millivolts
+ * (docs/ch32v00x/adc.md, "How to use it"):
  *
- *  Adc            the RESOURCE, a monostate (every part has exactly one):
+ *     using Vin = brio::AnalogIn<brio::Pin<'D', 2>>;      // channel 3
+ *     brio::Adc::init(clock, {.prescaler_code = brio::adc_prescaler_for(48'000'000, 6'000'000)->code});
+ *     brio::Adc::sample_time_all(brio::adc_sample_longest);
+ *     Vin::claim();
+ *
+ *     brio::Adc::select(brio::AdcInput::vrefint);
+ *     const uint16_t vdd_mv = brio::Adc::supply_mv(brio::Adc::read_settled(4));
+ *     brio::Adc::select(Vin{});
+ *     const uint16_t mv = brio::Adc::millivolts(brio::Adc::read(), vdd_mv);
+ *
+ * Who calls what. init() runs in main after the clock task, and waits,
+ * bounded, for tSTAB and on the CH32V003 for the calibration. The
+ * configuring verbs and the polled reads are for main or the one active
+ * object that owns the converter, with no guard of their own (prescaler()
+ * is a read-modify-write of RCC_CFGR0, which the clock's divider shares).
+ * A polled read spins a bounded count of polls for EOC: read(out) answers
+ * false and read() answers 0 when the conversion never comes - which is
+ * what a program sees of the stall below, the remedy being recover().
+ * isr() is the ADC vector's body, called from the program's `adc_handler`
+ * and nowhere else; under the sampler that handler posts each result,
+ * `Sampled{Adc::result_counts(), Adc::selected()}`. Nothing here opens
+ * the ADC's line at the interrupt controller (init() and release()
+ * close it): a program that takes the interrupt enables its sources
+ * with interrupts() and calls brio::Pfic::enable(brio::Irq::adc) itself,
+ * after init(). Nothing here masks interrupts. A DMA engine on channel
+ * 1 owns RDATAR's results while its block runs (ch32v00x/dma.hpp). In
+ * the two layers every brio target uses:
+ *
+ *  Adc            the resource, a monostate (a type whose functions are
+ *                 all static; every part has exactly one):
  *                 the clock, the power-up, the sample times, both
  *                 groups, the triggers, the watchdogs, the flags and
  *                 the ISR body - and util/analog_sampler.hpp's converter
  *                 surface (select / start / selected / input_code).
  *
- *  AnalogIn<Pin>  a pad handed to its channel: the channel NUMBER comes
+ *  AnalogIn<Pin>  a pad handed to its channel: the channel number comes
  *                 from the pad (DS table 2-1-1, the same eight pads and
  *                 channels on both parts), stated here once.
  *
@@ -25,33 +59,33 @@
  *                 the OPA's output on the CH32V006 and Vcal, a fraction
  *                 of AVDD, on the CH32V003 - each part's own enum.
  *
- * WHAT THE F1 HAS NOT, ON THE CH32V006. ADC_CTLR3: a LOW-POWER bit
+ * What the F1 has not, on the CH32V006. ADC_CTLR3: a low-power bit
  * (ADC_LP, set at reset, the mode for rates under a megasample - and
- * the mode the SAMPLE TIME TABLE depends on, 9.3.4 giving two
+ * the mode the sample time table depends on, 9.3.4 giving two
  * columns), a clock duty-cycle knob, and two more watchdogs (AWD1 and
  * AWD2 with their own threshold registers, compare results in CTLR3
- * cleared by writing zero) beside the F1's AWD0 - EACH OF THE THREE
- * ABLE TO RESET THE SYSTEM when its comparison fails (AWDx_RST_EN; the
+ * cleared by writing zero) beside the F1's AWD0 - each of the three
+ * able to reset the system when its comparison fails (AWDx_RST_EN; the
  * boot reads ADCRSTF in RCC_RSTSCKR, reset.hpp's ResetFlag::adc),
  * which is what 9's opening paragraph calls "the reset and protection
  * system". What the three guard is the chapter's least clear sentence
- * and the bench's finding: under AWD_SCAN each watchdog takes ONE RANK
+ * and the bench's finding: under AWD_SCAN each watchdog takes one rank
  * of a scanned rule sequence - the first conversion against watchdog
  * 0's thresholds, the second against watchdog 1's, the third against
- * watchdog 2's. Also an INPUT BUFFER (CTLR1.BUFEN) for sources above
+ * watchdog 2's. Also an input buffer (CTLR1.BUFEN) for sources above
  * the 50 kOhm the sampling switch tolerates. What the F1 has and this
  * part has not: a calibration - no CAL bit, no procedure, the vendor's
  * own init runs none; and a second sample-time register, the ten
  * channels fitting in SAMPTR2 alone.
  *
- * WHAT THE CH32V003 HAS INSTEAD (device::adc_*): the F1's whole shape
+ * What the CH32V003 has instead (device::adc_*): the F1's whole shape
  * - 10 bits, a conversion of the sample time plus 11 ADCCLK cycles
- * with the sample table in whole cycles (3 to 241), the CALIBRATION
+ * with the sample table in whole cycles (3 to 241), the calibration
  * (RSTCAL, then CAL, each cleared by the hardware; the chapter
  * recommends one at every power-up and init() runs it), the Vcal
  * source on channel 9 at 2/4 or 3/4 of AVDD (CTLR1.CALVOL, 01 at
  * reset and "invalid" at 00 - init() writes it, never zero), a
- * 10-bit watchdog 0 and nothing above it, and at 0x50 the DELAY
+ * 10-bit watchdog 0 and nothing above it, and at 0x50 the delay
  * register DLYR (9.3.15: an external trigger delayed by up to 511
  * ADCCLK cycles, for the rule or the injection group) where the
  * CH32V006 has CTLR3. No CTLR3 means no low-power mode, no input
@@ -61,7 +95,7 @@
  * source. The injection group's TIM3 triggers name a timer the part has
  * not (table 9-4's codes 100 and 101 are blank) and are refused.
  *
- * THE CLOCK. ADCCLK is HCLK through RCC_CFGR0.ADCPRE, a five-bit code
+ * The clock. ADCCLK is HCLK through RCC_CFGR0.ADCPRE, a five-bit code
  * whose dividers are a two-level table (/2 to /128, twelve distinct
  * values), the same encoding on both parts; the datasheet bounds fADC
  * at 48 MHz on the CH32V006 and 12 MHz on the CH32V003
@@ -69,22 +103,22 @@
  * 12.5 ADCCLK cycles on the CH32V006 (9.2.2) and plus 11 on the
  * CH32V003 (its 9.2.2) - adc_conversion_half_cycles() says which.
  *
- * THE POWER-UP IS THE F1's: ADON written once wakes the converter,
- * tSTAB passes, and ADON written AGAIN with nothing else changed is a
- * START. A software start is therefore either that second write (no
+ * The power-up is the F1's: ADON written once wakes the converter,
+ * tSTAB passes, and ADON written again with nothing else changed is a
+ * start. A software start is therefore either that second write (no
  * trigger armed) or SWSTART under EXTSEL = 111 with EXTTRIG set - this
  * driver arms the software trigger in init(), so `start()` is one
  * spelling whatever the group.
  *
- * THE INJECTION GROUP subtracts a per-slot offset and stores a SIGNED
+ * The injection group subtracts a per-slot offset and stores a signed
  * result (table 9-1/9-2's SIGNB), so `injected_result()` returns
  * int16_t; the rule group's RDATAR is unsigned. The injection group
  * takes no DMA (9.2.2's note).
  *
- * THE STATUS FLAGS are write-zero-to-clear (STATR's RW0), the same
+ * The status flags are write-zero-to-clear (STATR's RW0), the same
  * discipline as the timers' INTFR.
  *
- * NOT COVERED YET: TouchKey (TKENABLE/TKITUNE, the DRV bits of CTLR3 -
+ * Not covered yet: TouchKey (TKENABLE/TKITUNE, the DRV bits of CTLR3 -
  * an application-level mode, declined until one wants it); the OPA as
  * a trigger source (TGREGU/TGINJE; the OPA chapter's); the discontinuous
  * mode beyond its configuration bits (no user); the external trigger
@@ -527,7 +561,7 @@ struct Adc {
         bus_clock(false);
     }
 
-    /// THE CALIBRATION (the CH32V003's 9.2.2 step 4): RSTCAL until the
+    /// The calibration (the CH32V003's 9.2.2 step 4): RSTCAL until the
     /// hardware clears it, then CAL until the hardware clears it, with
     /// the converter powered for at least two ADCCLK cycles first;
     /// the calibration code lands in RDATAR. False when either bit
@@ -554,10 +588,10 @@ struct Adc {
         }
     }
 
-    /// THE STALL, AND ITS REMEDY. With a rule group paced by a hardware
+    /// The stall, and its remedy. With a rule group paced by a hardware
     /// trigger and served by the DMA, and the CPU accessing the
-    /// peripheral buses meanwhile, the converter has been seen to STOP
-    /// CONVERTING (STRT standing, no EOC ever again) within the first
+    /// peripheral buses meanwhile, the converter has been seen to stop
+    /// converting (STRT standing, no EOC ever again) within the first
     /// conversions of a run - at rates from none to a tenth of the runs
     /// depending on the CPU's access pattern, and once in two hundred
     /// with an EOC interrupt reader and no DMA. Neither a read of RDATAR
@@ -642,7 +676,10 @@ struct Adc {
     static constexpr uint8_t input_code(AdcInput in) { return static_cast<uint8_t>(in); }
     static constexpr uint8_t input_code(uint8_t ch) { return ch; }
 
-    /// A one-conversion rule sequence on this channel.
+    /// A one-conversion rule sequence on this channel: the next start
+    /// converts it alone. Two stores, no wait; a channel the part has
+    /// not is ignored. From the converter's owner (main or one active
+    /// object), with no conversion in flight.
     template <class P>
     static void select(AnalogIn<P>) { select_channel(AnalogIn<P>::channel); }
     static void select(AdcInput in) { select_channel(static_cast<uint8_t>(in)); }
@@ -673,7 +710,8 @@ struct Adc {
     }
 
     /// One conversion, polled: start, wait, read. False rather than a
-    /// hang if the result never comes.
+    /// hang if the result never comes: the wait is `spins` polls of EOC,
+    /// with nothing masked. From the converter's owner.
     static bool read(uint16_t& out, uint32_t spins = 0x100000UL) {
         clear_flags(adc_eoc);
         start();
@@ -685,6 +723,7 @@ struct Adc {
         out = result_counts();
         return true;
     }
+    /// The same, the value alone: 0 when the conversion never came.
     static uint16_t read(uint32_t spins = 0x100000UL) {
         uint16_t v = 0;
         (void)read(v, spins);

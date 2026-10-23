@@ -1,38 +1,132 @@
 # I2C (RP2350)
 
-Documents of record: the RP2350 datasheet (build d126e9e), 12.2 (the
-Synopsys DW_apb_i2c v2.03a: 12.2.1 the feature list with the FIFO depths
-and the pad setup, 12.2.5 the behaviour - START and STOP generation, the
-combined formats -, 12.2.7 the transmit FIFO and the RESTART / STOP bits
-of a command, 12.2.10 the operation modes, 12.2.11 the spike filter,
-12.2.12 fast-mode-plus, 12.2.13 the bus clear, 12.2.14 the SCL counts
-with their floors and the cycles the block adds, 12.2.15 the DMA
-interface, 12.2.16 the interrupt registers, 12.2.17 the registers), 9.4
-(the GPIO function table), 12.6.4.1 (the system DREQ table), 7.5 (the
-reset controller), 3.2 (the interrupt lines), 2.1.3 (the atomic register
-aliases), 2.1.5 (narrow writes replicated across a register), 3.1.3 and
-9.8 (the single-cycle IO the unstick drives an open-drain line through),
-9.7 (the pad isolation latches);
-[../design/i2c-bus.md](../design/i2c-bus.md) for the Request and the
-vocabulary. The driver is Synopsys's and not this chip's, so it lives in
-the IP stratum: `brio/dw_apb_i2c/i2c.hpp` holds the resource, the host
-engine and the client
+This document is for a programmer who puts a device on an I2C bus of an
+RP2350 - a sensor, a converter, a memory - or who makes this chip answer
+as a device on another chip's bus, on either of the chip's two
+processor architectures. The chip carries two Synopsys DW_apb_i2c
+controllers. Their driver is written once for every family that carries
+the block, in the DW_apb_i2c IP stratum
+([../dw_apb_i2c/README.md](../dw_apb_i2c/README.md)); this page and
+`brio/rp2350/i2c.hpp` are what the RP2350 adds to it - the pads and
+their setup, the reset bits, the interrupt lines, the DMA request
+numbers, which clock the bus timing is counted in, and the open-drain
+verbs a bus clear by hand needs - and the names a program writes:
+`DwApbI2c<n>`, the instance; `I2cHost<n, pins, ...>`, the host engine;
+`I2cClient<n, pins>`, the other end. A host is not usually driven
+directly: a program names one arbiter per bus, `I2cBus` (an active
+object - a component of a brio program with its own event queue, served
+one event at a time by the kernel,
+[docs/learn/introduction.md](../learn/introduction.md) - that takes the
+transactions of every client of the bus in turn and answers each with
+an event, [design/i2c-bus.md](../design/i2c-bus.md)), and posts it a
+request.
+
+The smallest use, a register read from a device at 0x48 through the
+arbiter, is the first block under "How to use it" below:
+
+```cpp
+constexpr brio::I2cPins pins{.scl = 13, .sda = 12};
+using Bus = brio::I2cHost<0, pins>;
+using I2c = brio::I2cBus<Bus, P, 4, brio::BusPassThrough, brio::ticks_from_ms<P>(20)>;
+
+Bus::init(clock);
+
+Bus::Request r{};
+r.addr = 0x48;
+r.tx = brio::lend<brio::Lease::reply>(reg);   r.tx_len = 1;    // the register
+r.rx = brio::lend<brio::Lease::reply>(value); r.rx_len = 2;    // then its value
+r.speed = brio::I2cSpeed::fast_400k;
+r.reply = brio::reply_to<Sensor, brio::I2cDone>();
+brio::post<I2c>(r);
+
+extern "C" void isr_i2c0() {
+    if (Bus::isr()) { brio::post<I2c>(brio::TransferDone{Bus::status()}); }
+}
+```
+
+Line by line: `pins` names I2C0's clock and data pads by number (a pair
+that is not the instance's does not compile); `Bus` names the host
+engine with every other template argument at its default (no DMA
+engines, the code in the flash); `I2c` is the arbiter for that bus, an
+active object of the program's `Tenuto` over platform `P`, with four
+requests of queue, every completion sent straight back to its
+requester with no retry (`BusPassThrough`, the default policy) and a
+timeout of 20 ms for a transaction that never
+completes; `Bus::init()` takes the clock task's tag
+([clock.md](clock.md)); the request names the device's address, lends
+the register number to write and the buffer to read into
+(`brio::lend<brio::Lease::reply>` - the buffers stay the caller's until
+the reply), the speed, and where the reply goes (`Sensor`, the active
+object that posts it, receives an `I2cDone`); `post` hands it to the
+arbiter; and the `extern "C"` function is the instance's interrupt
+handler, under the crt's name for I2C0's line, the same on both
+architectures, which tells the arbiter when the transaction has
+completed.
+
+What decides correctness even there. `init()` comes after the clock
+task: the bus timing is counted in clk_sys cycles at the rate the clock
+type claims, not read from the hardware. `init()` answers false when not
+even standard mode can be produced (a clock under 2.7 MHz) or the block
+did not come up, and the example discards that answer; a speed the
+clock cannot produce is answered `i2c_rejected` at the request. The
+program binds `isr_i2c0` itself; left unbound, the line's first
+interrupt goes into the crt's default spin and the program stops there
+(no timeout can answer from inside a spinning handler). `reg` and `value` must
+stay untouched and in scope from the post to the `I2cDone`; nothing
+checks it. The request is posted from an active object's handler, which
+is what the reply is sent back to. `init()` hands both pads over itself,
+the isolation latch dropped and the pull-up 12.2.1.3 asks for on, but
+the pulling is the board's ("What the silicon does" below). And a
+program that calls `unstick()`, the bus clear by hand, must first start
+the microsecond ruler that paces it (`Mtime::start(clock)`, the second
+block below): on the Cortex-M33 half nothing else starts it.
+
+The rest of this page, in order: the documents of record; what the
+silicon does (the one function column, the isolated pads, the bank in
+two words, the DREQ numbers and the reset bits, the shared interrupt
+numbering, the bus clear by hand and its ruler, erratum RP2350-E9); the
+types and verbs this stratum adds; how to use it, the host, its
+engines, the ruler and the client; the bench findings, against the desk
+partner; and what is not covered. What the block itself does is the IP
+stratum's page.
+
+## Documents of record
+
+The RP2350 datasheet (build d126e9e), 12.2 (the Synopsys DW_apb_i2c
+v2.03a: 12.2.1 the feature list with the FIFO depths and the pad setup,
+12.2.5 the behaviour - START and STOP generation, the combined formats
+-, 12.2.7 the transmit FIFO and the RESTART / STOP bits of a command,
+12.2.10 the operation modes, 12.2.11 the spike filter, 12.2.12
+fast-mode-plus, 12.2.13 the bus clear, 12.2.14 the SCL counts with their
+floors and the cycles the block adds, 12.2.15 the DMA interface, 12.2.16
+the interrupt registers, 12.2.17 the registers), 9.4 (the GPIO function
+table), 12.6.4.1 (the system DREQ table), 7.5 (the reset controller),
+3.2 (the interrupt lines), 2.1.3 (the atomic register aliases), 2.1.5
+(narrow writes replicated across a register), 3.1.3 and 9.8 (the
+single-cycle IO the unstick drives an open-drain line through), 9.7 (the
+pad isolation latches); [../design/i2c-bus.md](../design/i2c-bus.md) for
+the Request and the vocabulary. The driver is Synopsys's and not this
+chip's, so it lives in the IP stratum: `brio/dw_apb_i2c/i2c.hpp` holds
+the resource, the host engine and the client
 ([../dw_apb_i2c/README.md](../dw_apb_i2c/README.md)), and
-`brio/rp2350/i2c.hpp` holds what this chip owes it - the pin table of 9.4
-with its pad configuration, the `I2cPad` type that adds the two
+`brio/rp2350/i2c.hpp` holds what this chip owes it - the pin table of
+9.4 with its pad configuration, the `I2cPad` type that adds the two
 open-drain verbs to a `Pin`, the `Rp2350DwApbI2c` chip traits over
 `pin.hpp`, `resets.hpp`, `core.hpp`, `delay.hpp` and `dma_engine.hpp`,
 this chip's device description held against the bits the IP file spells
-itself, and the PUBLIC NAMES `DwApbI2c<n>` (the resource), `I2cHost` (the
-engine `I2cBus` drives) and `I2cClient` (the other end), this chip's
-aliases of the three templates there. The reference suite:
-`test_rp2350_i2c`, which runs on BOTH of this chip's architectures from
+itself, and the public names `DwApbI2c<n>` (the resource), `I2cHost`
+(the engine `I2cBus` drives) and `I2cClient` (the other end), this
+chip's aliases of the three templates there. The reference suite:
+`test_rp2350_i2c`, which runs on both of this chip's architectures from
 one source: the block wireless, its pads, and the wire to the desk
 partner - I2C0 on GP36 (SDA) / GP37 (SCL), 1.5 kOhm to the WeAct
-RP2040's 3V3 on each ([../boards/weact-rp2350b.md](../boards/weact-rp2350b.md)),
-whose peer of the twi_link protocol is commanded over the bus under
-test; that board's own suite, `test_rp2040_i2c`, judges this chip's block
-as that peer.
+RP2040's 3V3 on each
+([../boards/weact-rp2350b.md](../boards/weact-rp2350b.md)), whose peer
+of the twi_link protocol is commanded over the bus under test; that
+board's own suite, `test_rp2040_i2c`, judges this chip's block as that
+peer. A letter of a suite is one command key of its console and the
+group of verdicts it runs; `z` is the key that runs every letter but
+`x`, the hand-made window traced, which runs by name.
 
 This page says what is the RP2350's. What the block itself does - the
 command FIFO, the counts and their floors, the single TX_ABRT, the
@@ -52,19 +146,19 @@ descriptions agree define for define - which is why the driver is one
 file in an IP stratum and this one is a page of differences. There are
 five, and none of them is inside the block:
 
-**THE PINS ARE ONE COLUMN, OVER A LONGER BANK.** Every fourth pad from
+**The pins are one column, over a longer bank.** Every fourth pad from
 GP0 carries an I2C signal - SDA on the even pads, SCL on the odd, the
 instance alternating in pairs - so I2C0 has SDA on GP0, 4, 8, ... 44 and
 SCL on 1, 5, 9, ... 45, and I2C1 has SDA on 2, 6, 10, ... 46 and SCL on
 3, 7, 11, ... 47. That is the RP2040's rule over forty-eight pads instead
 of thirty: twelve SDA pads and twelve SCL pads per instance against eight
-and eight. WHAT THE UART GAINED HERE, THIS BLOCK DID NOT - the UART's
+and eight. What the UART gained here, this block did not - the UART's
 flow-control pads carry data too under a second function code
 ([uart.md](uart.md)), while 9.4 gives every one of the forty-eight I2C
 pads exactly one I2C entry, all of them function 3. So a pin set stays a
 pair of pad numbers and carries no column beside them.
 
-**THE PADS COME UP ISOLATED** (9.7, 9.11, and [README.md](README.md)):
+**The pads come up isolated** (9.7, 9.11, and [README.md](README.md)):
 PADS_BANK0's reset value is 0x116, the ISO latch set and the input buffer
 disabled, and while the latch stands the pad is cut off from the digital
 logic in both directions. A pad configured as on the RP2040 would do
@@ -75,31 +169,31 @@ own list: pull-up enabled, slew rate limited, Schmitt trigger enabled,
 with the chapter's note that the pad's pull-up is not meant to do the
 pulling and the board's should.
 
-**THE BANK IS TWO WORDS**, and that is the one line of the family header
+**The bank is two words**, and that is the one line of the family header
 that is not the RP2040's. An open-drain line is driven by its output
-ENABLE over an output register already holding a zero, and SIO holds
+enable over an output register already holding a zero, and SIO holds
 GPIO0..31 in GPIO_OE and GPIO32..47 in GPIO_HI_OE (3.1.3). `I2cPad` picks
 the half its pad falls in with an `if constexpr` on the pin number, so a
 line on GP32..GP47 is driven through the right register and the choice
 costs nothing.
 
-**THE DREQ NUMBERS AND THE RESET BITS ARE NOT THE RP2040'S.** A third PIO
+**The DREQ numbers and the reset bits are not the RP2040's.** A third PIO
 and twelve PWM slices against eight move every DREQ row above the first
 PIO's: the I2Cs sit at 44..47 where they sat at 32..35. The reset
 controller governs twenty-nine blocks against twenty-seven, and I2C0 and
 I2C1 sit at bits 4 and 5 where they sat at 3 and 4. Both come from this
 chip's own headers, through `dma_engine.hpp` and `resets.hpp`.
 
-**THE INTERRUPT NUMBERING IS SHARED BETWEEN THE ARCHITECTURES** (3.8.4.2),
+**The interrupt numbering is shared between the architectures** (3.8.4.2),
 so I2C0_IRQ is line 36 and I2C1_IRQ line 37 whichever processor pair is
 running - not the RP2040's 23 and 24 - and an app binds `isr_i2c0` /
 `isr_i2c1` once for both. The controller behind those names is not the
 same object, an NVIC on the Cortex-M33 half and Hazard3's own on the
 other, which is exactly why the IP stratum's concept takes the controller
-as a TYPE.
+as a type.
 
 And one thing that is not a difference in the block but changes what a
-program must do: **THE UNSTICK IS PACED BY THE PLATFORM TIMER.** The bus
+program must do: **the unstick is paced by the platform timer.** The bus
 clear of 12.2.13 has no enable in this chip's IC_CON, whose writable bits
 are 0x7FF and stop at the eleventh, so the nine clocks and the STOP
 are driven by hand, half a bit of standard mode at a time, and the ruler
@@ -112,17 +206,17 @@ With the counter stopped every wait is refused and spends no time, and
 the nine pulses go out at the speed of two register writes - legal on the
 wire, far faster than a bus, and measurable.
 
-**ERRATUM RP2350-E9 CHANGES HOW A WIRE IS PROVEN, NOT HOW IT WORKS.** On
+**Erratum RP2350-E9 changes how a wire is proven, not how it works.** On
 stepping A2 a pad whose input buffer is enabled and which nothing drives
-leaks enough current to sit HIGH against its own pull-down, so an idle
+leaks enough current to sit high against its own pull-down, so an idle
 level is history and not a measurement. An I2C line idles high anyway,
 pulled there by the board, and the driver hands both pads over with the
 pull-up the chapter asks for, so nothing the block does is coloured by
-the leak: a line that reads LOW is genuinely being driven low, which is
+the leak: a line that reads low is genuinely being driven low, which is
 all `unstick()` asks. What the erratum does change is a program's ability
 to ask "is a pull-up fitted at all", because a bare pad answers the same
 as a pulled-up one. The errata sheet's own workaround is the instrument:
-the pad's pull-down on with the input buffer OFF, the buffer enabled for
+the pad's pull-down on with the input buffer off, the buffer enabled for
 the read alone (`Pin::read_pulsed()`, [pin.md](pin.md)) - the leak needs
 the buffer on, so only an external pull-up reads high that way. It drives
 nothing, which is why it is also how an image here asks whether the desk
@@ -139,7 +233,7 @@ stratum adds:
   function travels with them.
 - `i2c_sda_pin(n, pin)`, `i2c_scl_pin(n, pin)` - the table of 9.4 as
   constexpr facts over the whole bank, and `i2c_pins_valid(n, pins)`,
-  which an engine's `static_assert` calls. The PACKAGE is not asked
+  which an engine's `static_assert` calls. The package is not asked
   there: the table is the die's, and a pad the QFN-60 has not bonded is
   refused one level down by `Pin<n>`'s own static_assert, which says so
   in those words.
@@ -158,7 +252,7 @@ stratum adds:
   default (`Placement`: util/placement.hpp's tag, [platform.md](platform.md),
   "A handler in SRAM").
 
-The family header also holds THE VOCABULARY CHECK: every bit the IP file
+The family header also holds the vocabulary check: every bit the IP file
 spells for itself, held by `static_assert` against the macro this chip's
 own device description gives it. That the two agree register for register
 is a measurement and not an assumption a driver may make.
@@ -199,7 +293,7 @@ A program that means to call `unstick()` starts the ruler its half-bits
 are paced by, which on the Cortex-M33 half nothing else does:
 
 ```cpp
-brio::Mtime::start(clock);      // idempotent; the Hazard3 ticker does it too
+brio::Mtime::start(clock);      // keeps the count; the Hazard3 ticker does too
 ```
 
 A client:
@@ -251,10 +345,11 @@ cost figures are `bench_rp2350` letter i's, against the same peer.
   The interrupt lines are **36 and 37**, not the RP2040's 23 and 24.
 - **THE PULL-UPS READ THE WAY E9 FORCES.** A pad of this stepping whose
   input buffer is on holds history against its own pull-down, so an idle
-  level says nothing: GP36 and GP37 are read with the pull-down on and the
-  buffer pulsed for the read alone (`rp2350/src/apps/pair_power.hpp`), and
-  both read HIGH - the 1.5 kOhm to the partner's 3V3, which is also the
-  proof that the partner is powered before a pad of the link is driven.
+  level says nothing: GP36 and GP37 are read with the pull-down on and
+  the buffer pulsed for the read alone (`Pin::read_pulsed()`,
+  [pin.md](pin.md)), and both read HIGH - the 1.5 kOhm to the partner's
+  3V3, which is also the proof that the partner is powered before a pad
+  of the link is driven.
 - **THE PADS AND THE ISOLATION LATCH, ABOVE GP31.** After the hand-over
   GP36 and GP37 read **0x5A** - exactly what 12.2.1.3 asks for: the
   pull-up, the slew limit, the Schmitt trigger, ISO clear, the input
@@ -387,7 +482,7 @@ here.
 
 Implemented but not bench-verified, each with what would measure it:
 
-- `rebase()`: this stratum has no dynamic clock yet; measured when the
+- `rebase()`: this stratum has no dynamic clock; measured when the
   clock chapter grows one, a tenure exact after a switch.
 - The QFN-60's pin table: the stratum compiles for that package and
   refuses the pads it has not got, but no QFN-60 part is on the bench.

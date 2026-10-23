@@ -1,70 +1,146 @@
 /*
  * clock.hpp
  *
- * The clock tree of the CH32V203 (RM ch. 3, with the pieces of ch. 33
- * that belong to it): the roots, the PLL, the switch, the four
- * prescalers, the clock output, the security system and the peripheral
- * gates - and the two tasks that take the tree to a rate, one stated at
- * compile time and one chosen from a pack at run time.
+ * The clock tree of the CH32V203 and the CH32V303 (RM ch. 3, with the
+ * pieces of ch. 33 that belong to it), and the clock task every driver
+ * that takes a clock depends on. A program names its rate as a type,
+ * `Clock<source, hz, xtal_hz>`, takes the chip to it first thing in
+ * main(), and hands the type's empty tag object to every driver it
+ * initializes; the driver computes its divisor from the rates the type
+ * states (HCLK, PCLK1, PCLK2, what a timer on each bus counts, the ADC's
+ * and the USB blocks' rates) and reads nothing from the hardware - the
+ * one rate truth every driver reads (`clock_hz(clock)`), so there is no
+ * F_CPU here (docs/design/clock.md is the model, docs/ch32vx03/clock.md
+ * the chapter). The smallest use, as that chapter's "How to use it"
+ * writes it:
  *
- * WHAT MAKES THIS TREE ITS OWN. Four things, none of them the F1's
+ *     using SysClock = brio::Clock<brio::ClockSource::pll, 144'000'000>;
+ *     constexpr SysClock clock;
+ *
+ *     SysClock::init();                  // the HSI whole, x18
+ *     Serial::init(clock, 115200);       // the divisor folds at compile time
+ *     brio::Ticker::init(clock);
+ *
+ * A program that changes rate while it runs names a pack of such types
+ * instead, `DynamicClock<Rates<R0, R1, ...>, Users...>`, and switches
+ * between them with set(); every driver that follows the tree is listed
+ * among the Users and rebased before the tree moves (written out at
+ * DynamicClock below). `Rcc` is the block under both - the roots, the
+ * PLL, the switch, the four prescalers, the security system, the ready
+ * interrupts and the peripheral gates every configuring driver opens its
+ * own clock with - and `Mco` the task over the clock output pad.
+ *
+ * Which context calls what. Clock::init() and DynamicClock::init() are
+ * setup verbs: first in main(), before any driver's init(clock, ...)
+ * and before interrupts are enabled. A static Clock's init() runs again
+ * on a sleep site's wake path, when a Stop left SYSCLK on the HSI
+ * (resume_clock() in ch32vx03/sleep.hpp, directly or through a
+ * DynamicClock's restore()): from the power manager's handler when it
+ * disarms the site, and from the RTC alarm's interrupt body under the
+ * timed site. A driver initialized while the chip still runs the reset
+ * clock (the 8 MHz HSI undivided, what Clock<ClockSource::internal,
+ * 8'000'000> names) computes its divisor for the rate the type claims:
+ * under a 144 MHz type, for as long as the chip stays on the reset
+ * clock, it runs eighteen times too slowly on HCLK or PB2, and a port
+ * or a bus host on PB1, whose rate the type states as 72 MHz, nine
+ * times (a timer there counts twice its divided bus, so eighteen
+ * again), derived from the divisor arithmetic and not measured; nothing
+ * checks the order. init() waits in bounded polls (clock_timeout_turns
+ * each) for the HSI, the HSE, the PLL's lock and each switch, and
+ * answers false when one runs out; it stops at that step, and past the
+ * park on the HSI the prescalers of the rate asked are already written,
+ * so a false can leave the chip at neither the reset clock nor the rate
+ * the type claims - the caller reads the answer. DynamicClock's
+ * set<hz>(), set(hz) and set_index() are main-context verbs (main() or
+ * an active object's handler - an active object is a component of a
+ * brio program with its own event queue, served one event at a time by
+ * the kernel), never an interrupt handler's, one caller at a time, and
+ * for a moment when nothing that depends on the rate is mid-transfer:
+ * they call every listed user's rebase() in list order (what each one
+ * waits is its own driver's), then run the rate's init() with its
+ * bounded waits. restore() is the sleep site's (ch32vx03/sleep.hpp),
+ * called on its wake path, the RTC alarm's interrupt body among them:
+ * it answers true at once while a set() is in progress or when SWS
+ * already reports the rate's root, and otherwise re-runs the current
+ * rate's init() with no fan-out. Rcc::css_isr() and Rcc::ready_isr()
+ * are the bodies the program's nmi_handler and rcc_handler bindings
+ * call, and nothing else calls them; neither touches an f-register, so
+ * a binding that calls only them is a plain BRIO_CH32_VECTOR on the
+ * CH32V303's images too (ch32vx03/pfic.hpp). The other Rcc verbs are
+ * plain register accesses with no guard of their own: enable(),
+ * disable() and reset() are read-modify-writes of the gate registers
+ * every driver's init() shares, so they belong to setup and to an
+ * active object's handler, and a program that touches a gate from an
+ * interrupt handler masks the other side. Two of brio's own interrupt
+ * paths store a gate: pvd_isr() and the timed sleep site's alarm body
+ * (through Pwr::arm()) open the power block's (ch32vx03/pwr.hpp), a
+ * read-modify-write that writes back the value it read with PWREN, a
+ * bit already set by then, so the main-context store it interrupts
+ * loses nothing. Nothing in this file masks interrupts, and no storage
+ * changes hands: a clock is a type with static state, and the tag
+ * object is empty.
+ *
+ * What makes this tree its own. Four things, none of them the STM32F1's
  * whose register names it borrows:
  *
- *  - THE PLL'S INPUT DIVIDER FOR THE HSI IS IN ANOTHER BLOCK. RCC_CFGR0
- *    says only WHICH root feeds the PLL; whether the HSI arrives whole
+ *  - The PLL's input divider for the HSI is in another block. RCC_CFGR0
+ *    says only which root feeds the PLL; whether the HSI arrives whole
  *    or halved is EXTEN_CTR.HSIPRE (RM 33.2.1), a register the RCC
  *    chapter never mentions. Out of reset it is 0 - the PLL sees 4 MHz,
  *    not 8 - so a program that only ever wrote RCC registers would find
  *    every rate half of what it asked for. This file owns that bit.
- *  - PB1 RUNS AT HALF OF HCLK ABOVE 72 MHz, AND THAT IS A MEASUREMENT,
- *    NOT A HABIT. The datasheet's block diagram rates both peripheral
- *    buses at the core's own ceiling of 144 MHz, and this file believed
- *    it - until the USB device controller, which lives on PB1, answered
- *    every packet of an enumeration with a packet-memory overflow and
- *    stored none of them (sixteen PMAOVR in one attempt, the data never
- *    reaching the buffer). WCH's own clock code sets PPRE1 = /2 at
- *    EVERY rate it offers - 48, 56, 72, 96, 120 and 144 MHz, from the
- *    HSI or a crystal - and only the bare-HSE path leaves it undivided;
- *    the datasheet's own consumption tables are measured with
- *    PCLK1 = HCLK/2. So PB1 is capped at `pb1_max_hz` here and
- *    `pclk1_hz` says so; where the real ceiling of that bus lies,
- *    between that cap and the datasheet's 144, is in the document's gap
- *    list with what would answer it. PB2 keeps the whole rate, as it
- *    does in the vendor's ladder.
- *  - THERE ARE NO FLASH WAIT STATES TO PROGRAM. The flash chapter's
+ *  - PB1 runs at half of HCLK above 72 MHz, and that is a measurement,
+ *    not a habit. The datasheet's block diagram rates both peripheral
+ *    buses at the core's own ceiling of 144 MHz; with PB1 undivided, the
+ *    USB device controller, which lives on PB1, answered every packet of
+ *    an enumeration with a packet-memory overflow and stored none of
+ *    them (sixteen PMAOVR in one attempt, the data never reaching the
+ *    buffer). WCH's own clock code sets PPRE1 = /2 at every rate it
+ *    offers - 48, 56, 72, 96, 120 and 144 MHz, from the HSI or a crystal
+ *    - and only the bare-HSE path leaves it undivided; the datasheet's
+ *    own consumption tables are measured with PCLK1 = HCLK/2. So PB1 is
+ *    capped at `pb1_max_hz` here and `pclk1_hz` says so; where the real
+ *    ceiling of that bus lies, between that cap and the datasheet's 144,
+ *    is in the document's gap list with what would answer it. PB2 keeps
+ *    the whole rate, as it does in the vendor's ladder.
+ *  - There are no flash wait states to program. The flash chapter's
  *    register table (RM 32.4) has no latency field at all: the array is
  *    divided into a zero-wait region and a non-zero-wait one by the
  *    part, and FLASH_CTLR.SCKMOD chooses whether the flash is accessed
  *    at the system clock or at half of it, defaulting to half. So
- *    nothing here touches the flash controller. What the chapter DOES
- *    ask for is at the other end: above `flash_safe_sysclk_hz` an ERASE
- *    or a PROGRAM wants HCLK halved around it (32.1), which is the NVM
- *    driver's business and is named here only because it is a statement
- *    about a RATE.
- *  - THE DEVICE CLASS DECIDES PART OF THE ARITHMETIC. One manual covers
+ *    nothing here touches the flash controller. What the chapter does
+ *    ask for is at the other end: above `flash_safe_sysclk_hz` an erase
+ *    or a program wants HCLK halved around it (32.1), which is the NVM
+ *    driver's business - ch32vx03/nvm.hpp refuses such a rate rather
+ *    than halving HCLK behind the program's back - and is named here
+ *    only because it is a statement about a rate.
+ *  - The device class decides part of the arithmetic. One manual covers
  *    four families, and two of its clock fields mean different things
- *    per class - PLLXTPRE divides the HSE by 1 or 2 on the CH32V20x_D6
- *    and by 4 or 8 on the D8, and USBPRE's fourth code (the PLL over
- *    five) exists only on the D8 - so both are read from the part's own
- *    table (device::pll_hse_div, device::has_usb_pre_div5) and never
- *    spelled here. The PLL's input and output ranges are part facts for
- *    the same reason.
+ *    per class (the device classes are the manual's groups of parts,
+ *    CH32V20x_D6, CH32V20x_D8 and CH32V30x_D8, each part's given by its
+ *    table under ch32vx03/parts/) - PLLXTPRE divides the HSE by 1 or 2
+ *    on the CH32V20x_D6 and by 4 or 8 on the CH32V20x_D8 (the
+ *    CH32V203RB), and USBPRE's fourth code (the PLL over five) exists
+ *    only on that D8 - so both are read from the part's own table
+ *    (device::pll_hse_div, device::has_usb_pre_div5) and never spelled
+ *    here. The PLL's input and output ranges are part facts for the same
+ *    reason.
  *
- * THE ORDER OF init() IS THE SILICON'S, NOT A HABIT: it parks SYSCLK on
+ * The order of init() is the silicon's, not a habit: it parks SYSCLK on
  * the HSI before it touches anything else. The PLL's own fields are
  * writable only while it is off, and it will not go off while it is the
  * system clock, so a tree that is already running the PLL swallows every
  * write without a flag - see init().
  *
- * THE USB CLOCK IS PART OF THE TREE. USBPRE divides the PLL by 1, 2 or 3
+ * The USB clock is part of the tree. USBPRE divides the PLL by 1, 2 or 3
  * and the device controller needs exactly 48 MHz, so `usb_hz` here is
  * a compile-time answer - 48 MHz when the PLL runs at 48, 96 or 144, and
- * zero otherwise - and init() programs the divider BEFORE any USB gate
+ * zero otherwise - and init() programs the divider before any USB gate
  * is opened, which is the order 3.4.2 asks for. A USB driver
  * static_asserts on it rather than discovering at run time that its
  * frames are the wrong length.
  *
- * THE ADC'S PRESCALER IS PART OF THE TREE TOO, and it is the one place
+ * The ADC's prescaler is part of the tree too, and it is the one place
  * where a legal SYSCLK leaves a peripheral out of specification: ADCPRE
  * divides PCLK2 by 2, 4, 6 or 8 and the converter is rated for
  * `adc_max_hz`, so any PCLK2 above eight times that has no code which
@@ -73,10 +149,10 @@
  * driver's to make, because a program that never converts is not wrong
  * to run at the family's ceiling.
  *
- * WHAT A DYNAMIC CLOCK HANDS ITS USERS is HCLK, once, before the switch
+ * What a dynamic clock hands its users is HCLK, once, before the switch
  * - never a bus rate. A driver on PB1 derives its own with
  * pclk1_hz_at(hclk), the same arithmetic the static task folds at
- * compile time, because the RCC still holds the OLD prescalers at that
+ * compile time, because the RCC still holds the old prescalers at that
  * moment and reading them would be reading the past.
  */
 
@@ -740,15 +816,15 @@ struct Mco {
 };
 
 /**
- * The clock as a TASK: a rate stated at compile time, reached once at
+ * The clock as a task: a rate stated at compile time, reached once at
  * boot and true for the life of the program.
  *
  * `Clock<ClockSource::pll, 144'000'000>` is the HSI whole into the PLL
  * times eighteen; `Clock<ClockSource::internal, 8'000'000>` is the reset
  * clock named out loud; `Clock<ClockSource::crystal, 24'000'000,
  * 24'000'000>` is a crystal straight through. The ratio search is
- * constexpr and a rate this tree cannot make exactly is a COMPILE error,
- * never a rounded one - the ONE rate truth every driver reads
+ * constexpr and a rate this tree cannot make exactly is a compile error,
+ * never a rounded one - the one rate truth every driver reads
  * (`clock_hz(clock)`), so there is no F_CPU here either.
  */
 template <ClockSource src, uint32_t target_hz, uint32_t xtal_hz = 0>
@@ -873,12 +949,24 @@ struct Clock {
     static_assert(target_hz <= device::sysclk_max_hz, "brio Clock: HCLK must not exceed this part's ceiling");
 
     /**
-     * Take the clock to `hz`. Returns false if a root never starts, the
-     * PLL never locks or the switch never takes - the caller decides
-     * what to say about a boot that stayed on the reset clock.
+     * Take the clock to `hz`. A setup verb: first in main(), before any
+     * driver's init(clock, ...) and before interrupts are enabled (the
+     * file header says what a driver initialized earlier does), and run
+     * again by a sleep site's wake path - from the power manager's
+     * handler, or from the RTC alarm's interrupt body under the timed site
+     * (ch32vx03/sleep.hpp's resume_clock()). Returns false if a root never
+     * starts, the PLL never locks or a switch never takes, each a bounded
+     * poll of clock_timeout_turns, and stops at that step: past the park
+     * on the HSI the prescalers of the rate asked are already written, so
+     * a false need not leave the reset clock's prescalers either (the HSI
+     * with PB1 halved, under a 144 MHz type whose PLL never locked) - the
+     * caller decides what to say about it.
      *
-     * The order is the tree's: the roots first, then the prescalers (so
-     * no bus is ever briefly over its ceiling), then the switch.
+     * The order is the tree's: the HSI started and SYSCLK parked on it,
+     * the PLL stopped, then the prescalers (written while HCLK is the
+     * HSI's 8 MHz, so no bus is ever briefly over its ceiling), then the
+     * HSE and the PLL the rate needs with the USB divider, then the
+     * switch.
      */
     static bool init() {
         // PARK ON THE HSI FIRST, AND THIS IS NOT A FORMALITY. PLLMUL,
@@ -977,8 +1065,10 @@ struct Rates {
  * set_index<i>() / set_index(i) name one exactly.
  *
  * Call set() only when nothing that depends on the rate is mid-transfer
- * (a bus transaction in flight is the caller's problem - in an AO
- * system, ask the bus AOs first). Main context only.
+ * (a bus transaction in flight is the caller's problem - in a program
+ * of active objects, ask the bus arbiters first). Main context only:
+ * main() or an active object's handler, never an interrupt handler,
+ * one caller at a time.
  *
  * WHAT A STOP DOES TO THIS: the part comes out of Stop and Standby on
  * the HSI with the PLL off (RM 3.3.1's note), while the prescalers and
@@ -1040,18 +1130,24 @@ struct DynamicClock<Rates<Rs...>, Users...> {
     static constexpr bool can_run_at(uint32_t hz) { return index_of(hz) < rate_count; }
 
     /// The boot rate (the pack's first), no fan-out: nothing is
-    /// initialized yet. See Clock::init for the return.
+    /// initialized yet. A setup verb, first in main() exactly as
+    /// Clock::init(), whose answer this is.
     static bool init() { return enter(0, false); }
 
     /// Switch to a rate known at compile time (checked: a rate the pack
-    /// does not name does not compile).
+    /// does not name does not compile). Main context, nothing rate-bound
+    /// mid-transfer (the class comment); the users are rebased in list
+    /// order, then the rate's init() runs with its bounded waits, and
+    /// false is that init()'s answer - the mirror then names the rate
+    /// asked (enter_rate()).
     template <uint32_t hz>
     static bool set() {
         static_assert(can_run_at(hz), "brio DynamicClock: this rate is not in the Rates pack");
         return enter(index_of(hz), true);
     }
     /// Switch to a rate chosen at run time; false (nothing changed) when
-    /// the pack has no such rate.
+    /// the pack has no such rate, and otherwise set<hz>()'s context and
+    /// answer.
     static bool set(uint32_t hz) {
         const uint8_t i = index_of(hz);
         if (i >= rate_count) {

@@ -2,44 +2,82 @@
  * nv_record.hpp
  *
  * A typed value that survives a power cycle: the byte-granular
- * nonvolatile store as a CONCEPT, and one record layout over it.
+ * nonvolatile store as a concept, and one record layout over it. A
+ * caller gets a struct written to the store and read back whole, or
+ * read back as "no value" when the store holds nothing it can trust
+ * (erased, written by an older layout, or torn by a power loss), with
+ * each store touching only the bytes that changed.
+ *
+ * The smallest use names the value's type, a store and an offset, then
+ * loads and stores it:
+ *
+ *     struct Settings { uint16_t rate; uint8_t mode; uint8_t flags; };
+ *     using SettingsRecord = brio::NvRecord<Settings, brio::EepromStore, 16>;
+ *
+ *     if (const std::optional<Settings> s = SettingsRecord::load()) { ... }
+ *     SettingsRecord::store(Settings{9600, 1, 0});   // 0 bytes if unchanged
+ *
+ * EepromStore is the AVR's EEPROM as a store (avrxt/nvm.hpp); the host
+ * suite runs the same record over an array (test/test_nv_record).
+ *
+ * Who calls what, and from where. NvRecord is a set of synchronous
+ * static functions with no state of its own and no critical section.
+ * load() and valid() only read. store() and clear() wait: before each
+ * operation and after the last one they poll the store's bounded
+ * wait_ready(), so the call returns once the last operation is over, the
+ * store refused one, or a bounded wait gave up. The wait is one
+ * operation per differing byte on a byte store and one per write unit
+ * touched on a store that takes a run (below); on the AVR EA the
+ * eight-byte panic record is one operation of 2.73 ms on the run path
+ * where the byte path takes eight, 21.4 ms (docs/design/nv-journal.md,
+ * "The EEPROM spelling's store: a byte, and a run where the silicon
+ * writes one"). A caller that must not wait that long uses the writer
+ * active object instead (util/nv_writer.hpp), which starts one operation
+ * per dispatch and waits for nothing. The value passed to store() is
+ * copied into a local image before the first write; the caller's object
+ * is not kept.
  *
  * Why a concept and not a driver call: the store is the only
  * target-specific thing here (on silicon with EEPROM it is the EEPROM
  * behind that target's nvm driver; on the host it is an array), while
  * the layout, the validity rule and the write policy are pure logic and
- * are tested on the host. util/ never includes a target.
+ * are tested on the host. util/ never includes a target. (A concept is
+ * a compiler-checked list of what a type must provide; NvStore below is
+ * that list for a store.)
  *
- * THE WRITE POLICY IS THE POINT. A nonvolatile byte has a finite number
- * of erase/write cycles (100k on a typical EEPROM), so store()
- * READS FIRST and writes only the bytes that actually differ. Storing
- * the same value twice costs zero cycles of endurance; changing one
- * field of a struct costs the bytes of that field plus the two checksum
+ * The write policy is the point. A nonvolatile byte has a finite number
+ * of erase/write cycles (100k on a typical EEPROM), so store() reads
+ * first and writes only the bytes that actually differ. Storing the
+ * same value twice costs zero cycles of endurance; changing one field
+ * of a struct costs the bytes of that field plus the two checksum
  * bytes. A record that is rewritten every second lives for days if it
  * is written blindly and for years if it is written this way.
  *
- * VALIDITY. Four header bytes precede the payload: a magic byte, a
+ * Validity. Four header bytes precede the payload: a magic byte, a
  * version byte, and the CRC-16 of the payload. load() returns the value
  * only when all three agree - an erased store (0xFF everywhere), a
  * record written by an older layout, and a write torn by a power loss
  * are all indistinguishable from "no value", which is exactly what the
- * caller can act on. The magic is deliberately NOT rewritten around
+ * caller can act on. The magic is deliberately not rewritten around
  * each store: the checksum already catches a tear, and rewriting the
  * magic twice per store would wear one byte at twice the rate of the
  * payload it guards.
  *
- * THE RUN. A store whose silicon writes several neighbouring bytes in
- * ONE operation (a page buffer) says so with two more verbs - the
- * NvRunStore refinement below - and store() then writes a RUN per
- * operation instead of a byte: the same bytes end up stored and the
- * same count is returned, in as many operations as the record touches
- * write units. A store without them is served a byte at a time,
- * exactly as before. The choice is made at compile time from the
- * store's type; nothing is asked at run time.
+ * The run. A run is a stretch of neighbouring bytes. A store whose
+ * silicon writes several of them in one operation (a page buffer) says
+ * so with two more verbs - the NvRunStore refinement below - and
+ * store() then writes a run per operation instead of a byte: the same
+ * bytes end up stored and the same count is returned, in as many
+ * operations as the record touches write units. A store without them
+ * is served a byte at a time. The choice is made at compile time from
+ * the store's type; nothing is asked at run time.
  *
- * NOT BUILT: wear levelling, journaling, more than one copy. Those are
+ * Not built: wear levelling, journaling, more than one copy. Those are
  * policies that need a user with real numbers behind them; the
- * mechanism here is the floor they would be built on.
+ * mechanism here is the floor they would be built on (the flash
+ * journal, util/nv_journal.hpp, is a different spelling for a part with
+ * no EEPROM; docs/design/nv-journal.md, "The two spellings, and why
+ * they stay apart").
  */
 
 #pragma once
@@ -55,12 +93,13 @@
 namespace brio {
 
 /**
- * A byte-granular nonvolatile store.
+ * A byte-granular nonvolatile store: what NvRecord, NvWriter and
+ * PersistentPanic stand on.
  *
  *  - size()          bytes addressable, offsets are 0 .. size()-1;
  *  - read(a)         the byte at offset a (never fails: a read of a
  *                    never-written store returns the erased pattern);
- *  - write(a, b)     START writing one byte; false = refused (bad
+ *  - write(a, b)     start writing one byte; false = refused (bad
  *                    offset, or the store was still busy). The write
  *                    may still be in flight when this returns;
  *  - ready()         no write/erase is in flight;
@@ -96,16 +135,16 @@ concept NvPacedStore = NvStore<S> && requires(bool on) {
 };
 
 /**
- * A store that writes a RUN in one operation: the contract's optional
+ * A store that writes a run in one operation: the contract's optional
  * verb, offered by a store whose silicon has a page buffer and taken by
  * every writer here when it is offered (a contract's unit is the run;
  * the byte is its degenerate case).
  *
  *  - run_room(a)          the bytes from offset a to the end of the
- *                         store's WRITE UNIT that holds it: the longest
+ *                         store's write unit that holds it: the longest
  *                         run one operation writes from a. At least 1
  *                         for every a < size(), never past size();
- *  - write_run(a, src, n) START one operation that leaves src[0..n) in
+ *  - write_run(a, src, n) start one operation that leaves src[0..n) in
  *                         [a, a + n), 1 <= n <= run_room(a). Bytes that
  *                         already hold their value may be left alone (a
  *                         store whose silicon marks bytes does). False =
@@ -139,9 +178,9 @@ struct NvRunScan {
  * The next run of image[i..n) to write at store offset `base`: the first
  * byte that differs from the store, and the last one that differs
  * within that byte's room - so the run carries no equal byte at either
- * end, and never more than one operation's worth. READS THE STORE: call
- * it with the store idle (a read during an operation can be a bus wait
- * that holds the CPU and its interrupts to the operation's end).
+ * end, and never more than one operation's worth. It reads the store:
+ * call it with the store idle (a read during an operation can be a bus
+ * wait that holds the CPU and its interrupts to the operation's end).
  */
 template <NvRunStore S>
 NvRunScan nv_scan_run(uint16_t base, const uint8_t* image, uint16_t i, uint16_t n) {
@@ -181,10 +220,14 @@ inline constexpr uint16_t nv_record_size =
 /**
  * One typed record at a fixed offset of a store.
  *
- * T must be trivially copyable: the record IS its object representation,
+ * T must be trivially copyable: the record is its object representation,
  * byte for byte, and nothing is serialized. `version` travels in the
  * header, so changing T's layout and bumping the version makes every
- * older record read back as "no value" instead of as garbage.
+ * older record read back as "no value" instead of as garbage. A monostate:
+ * every verb is static and nothing is constructed (one record is one
+ * place in one store, named by its type). `offset` is where its
+ * nv_record_size<T> bytes live; nothing checks that two records or a
+ * PersistentPanic do not overlap.
  */
 template <typename T, NvStore S, uint16_t offset = 0, uint8_t version = 1>
 struct NvRecord {
@@ -200,7 +243,8 @@ struct NvRecord {
 
     /// The stored value, or nothing when the store holds no valid record
     /// of this version at this offset (erased, older version, or a write
-    /// torn by a power loss).
+    /// torn by a power loss). Reads only; a store too small for the
+    /// record's offset answers nothing as well.
     static std::optional<T> load() {
         if (!fits()) {
             return std::nullopt;
@@ -229,12 +273,23 @@ struct NvRecord {
     /// True when a valid record of this version is present.
     static bool valid() { return load().has_value(); }
 
-    /// Write the value, touching ONLY the bytes that differ from what is
-    /// already stored. Returns the number of bytes actually written -
-    /// zero when the store already held exactly this value, which is the
-    /// endurance the whole design is for. A store that refuses a byte or
-    /// never becomes ready ends the run: the count returned is what got
-    /// through, and load() will report the record invalid.
+    /// Write the value, touching only the bytes that differ from what is
+    /// already stored, and return when the last write is over. Returns
+    /// the number of bytes actually written - zero when the store
+    /// already held exactly this value, which is the endurance the whole
+    /// design is for. A store that refuses a byte or never becomes ready
+    /// ends the call: the count returned is what got through. When
+    /// nothing got through the previous record stands. The bytes go
+    /// down in address order, the magic first; over a valid record a
+    /// call ended part-way (a refusal, a time-out, a power loss) leaves
+    /// a checksum that no longer matches, and load() reports no value.
+    /// Over a record clear() invalidated, whose payload and checksum
+    /// clear() left in place, a call ended right after the magic (on a
+    /// byte store, or a run store whose first run is the magic alone)
+    /// makes the OLD record valid again: PersistentPanic's take() then a
+    /// report() cut there brings back the failure take() consumed.
+    /// Zero, writing nothing, when the store is too small for the
+    /// record's offset.
     ///
     /// On an NvRunStore the differing bytes go a run per operation, and
     /// every read waits for the store to be idle first; on a byte store
@@ -285,7 +340,9 @@ struct NvRecord {
     /// Invalidate the record with one byte write: the magic goes to the
     /// erased pattern and load() reports nothing from here on. The
     /// payload is left as it is - this is a "consume it" verb, not a
-    /// scrub.
+    /// scrub. Waits for the write like store(); true when the magic is
+    /// erased (or already was), false when the store refused or never
+    /// became ready.
     static bool clear() {
         if (!fits()) {
             return false;

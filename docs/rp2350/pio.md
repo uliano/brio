@@ -1,6 +1,74 @@
 # PIO (RP2350)
 
-Documents of record: the RP2350 datasheet (build d126e9e), chapter 11
+This document is for a programmer who needs an interface the chip has
+no dedicated block for, or one more of a kind it has: a serial port on
+any pad, a square wave or a PWM, a sampler, or a protocol of the
+program's own, run by the programmable I/O on either of the chip's two
+processor architectures. The PIO is three blocks of four small state
+machines each, running short programs from a shared instruction memory
+and moving data through FIFOs a processor or a DMA channel serves.
+`brio/rp2350/pio.hpp` gives three layers over it: an assembler (the
+instructions as constant encoders, a program as `PioProgram<N>`), the
+resources (`Pio<n>` the block, `PioSm<n, sm>` one machine), and four
+tasks, the chapter's own programs ready to use: `PioUartTx` and
+`PioUartRx`, a serial port on any pad; `PioSquareWave`; and `PioPwm`, a
+PWM a program drives through `util/pwm_channel.hpp`'s `PwmChannel`. (A
+task, in brio, is the driver layer over a resource, named for what it
+does, that owns the whole configuration of the peripheral for that use
+([design/overview.md](../design/overview.md)); these four are polled and
+use no interrupt.)
+
+The smallest use, a serial port on two pads, is an excerpt of the block
+under "How to use it" below:
+
+```cpp
+using Tx = brio::PioUartTx<0, 0, 13>;         // PIO0, machine 0, GPIO 13
+using Rx = brio::PioUartRx<0, 1, 15>;
+Tx::init(clock, 115'200);
+Rx::init(clock, 115'200);
+Tx::write_wait('A');
+if (const auto b = Rx::read_wait()) { got(*b); }
+```
+
+Line by line: `Tx` names a transmitter on PIO0's machine 0 driving GP13,
+`Rx` a receiver on the same block's machine 1 reading GP15 (pin numbers
+are the system's GPIO numbers; the task converts them through the
+block's window, below); `init(clock, baud)` takes the clock task's tag
+object `clock` for clk_sys's rate, solves the machine's divider for
+eight cycles a bit, places the program in the block's instruction
+memory, hands the pad to the block and starts the machine, the receiver
+with a pull-up on its pad by default; `write_wait()` waits, bounded,
+for room in the transmit FIFO and pushes the byte; `read_wait()` waits,
+bounded, for a byte and answers nothing when none came; `got()` stands
+for the program's own use of it. The two pads are joined by a wire here,
+the suite's GP13 -> GP15.
+
+What decides correctness even there. The block must be out of reset:
+every PIO block is held in reset at power-up (`rp2350/resets.hpp`), no
+task's `init()` releases it, and `Pio<n>::reset()` does, cycling it to
+its reset state - the suite calls it for all three blocks at the start
+of each letter; what a task does on a block still held in reset is not
+measured. The clock task must have run first, since the divider is
+computed from the rate the clock type claims and not read from the
+hardware. Each `init()` answers false when the divider cannot reach the
+rate, when the pad is outside the block's window of 32 GPIOs (GP0..31
+or GP16..47, set by `Pio<n>::gpio_base()` for every machine of the
+block) or when the block's 32-instruction memory has no free run long
+enough for the program; the excerpt discards that answer. The waits
+spin, bounded, and mask nothing: the tasks belong to setup in `main()`
+or to an active object's handler (an active object is a component of a
+brio program with its own event queue, served one event at a time by
+the kernel, [docs/learn/introduction.md](../learn/introduction.md)).
+
+The rest of this page, in order: the documents of record; what the
+silicon does (the machines and their instruction set, then what this
+chip added to the RP2040's PIO, item by item); the types and verbs; how
+to use it, with the window moved, a program of one's own and two blocks
+started on one cycle; the bench findings; and what is not covered.
+
+## Documents of record
+
+The RP2350 datasheet (build d126e9e), chapter 11
 whole - 11.1.1 (what this chip added to the RP2040's PIO), 11.2 (the
 programmer's model: the programs, the control flow, the registers and
 shift counters, the FIFOs, the stalls, the pin mapping, the flags), 11.4
@@ -14,7 +82,9 @@ the suite reads an undriven pin. The driver: `brio/rp2350/pio.hpp` (the
 assembler, `Pio<n>` the block, `PioSm<n, sm>` the machine, the four
 tasks) over `pin.hpp`, `resets.hpp`, `core.hpp` and `dma_engine.hpp`; and
 `util/pwm_channel.hpp` for the PwmChannel the PIO PWM satisfies. The
-reference suite: `test_rp2350_pio` - letters a, b, h and j wireless, c,
+reference suite: `test_rp2350_pio` (a letter is one command key of the
+suite's console and the group of verdicts it runs, `z` the key that runs
+the five wireless letters together) - letters a, b, h, j and m wireless, c,
 d, e, g, i, k and l on two wires between the chip's own pads, and f on
 both; the pair desk does not carry those wires
 ([../boards/weact-rp2350b.md](../boards/weact-rp2350b.md)), so the wire
@@ -24,7 +94,7 @@ what the request numbers here are for.
 
 ## What the silicon does
 
-THREE BLOCKS of four state machines each - twelve machines against the
+Three blocks of four state machines each - twelve machines against the
 RP2040's eight - running sixteen-bit programs from a shared memory of
 thirty-two instructions. Nine instructions - JMP, WAIT, IN, OUT, PUSH,
 PULL, MOV, IRQ, SET -, every one taking one cycle of the machine's clock
@@ -40,43 +110,43 @@ shared by a block's machines, raised, cleared and waited on by IRQ and
 WAIT. Each FIFO is a DMA request. On one cycle the highest-numbered
 machine writing a pin wins, and a machine's side-set beats its own OUT or
 SET. An instruction written to SMx_INSTR executes at once, the program
-resuming after - and a DISABLED machine executes those and nothing else,
+resuming after - and a disabled machine executes those and nothing else,
 which is how a program is started (a JMP to its offset) and how pins are
 claimed before it runs (a SET). A JMP holds an absolute address, so a
 program loaded at an offset has its JMPs relocated. All of that is the
 RP2040's chapter too.
 
-WHAT IS THIS CHIP'S OWN (11.1.1), and what a driver has to say about each:
+What is this chip's own (11.1.1), and what a driver has to say about each:
 
-- **A VERSION FIELD.** DBG_CFGINFO's top four bits read 1 here and 0 on
+- **A version field.** DBG_CFGINFO's top four bits read 1 here and 0 on
   the RP2040, where they were reserved. It is the only thing in the
   chapter that lets a program ask the silicon whether the rest of this
   list exists.
 - **GPIOBASE, and it changes what every pin number means.** A block still
-  sees 32 GPIOs at a time; GPIOBASE picks WHICH 32, and only the values 0
+  sees 32 GPIOs at a time; GPIOBASE picks which 32, and only the values 0
   and 16 are writable, so the two windows are GPIO0..31 and GPIO16..47.
-  The register's own description is that it relocates GPIO 0 FROM PIO'S
-  POINT OF VIEW, so everything a machine names in pin terms - the four
+  The register's own description is that it relocates GPIO 0 "from PIO's
+  point of view", so everything a machine names in pin terms - the four
   ranges of PINCTRL, EXECCTRL's JMP_PIN, the index of a WAIT GPIO
   (measured: 11.4.3's "absolute GPIO index" is absolute against the
   input mapping, not against the window) - is counted from there,
   so on the QFN-80 a pad above GP31 is reachable only with the window
   moved, and with it moved a pad below GP16 is not reachable at all.
   Sixteen pads, GP16..GP31, are in both windows.
-- **CTRL reaches the NEIGHBOURING BLOCKS.** Three new bits say "do this
+- **CTRL reaches the neighbouring blocks.** Three new bits say "do this
   to the machines named by NEXT_PIO_MASK and PREV_PIO_MASK as well":
-  enable, disable, restart the clock divider. The blocks are a RING -
+  enable, disable, restart the clock divider. The blocks are a ring -
   PIO2's next is PIO0, PIO0's previous is PIO2 - and the point of the
-  feature is SIMULTANEITY: one bus write starts machines of two blocks on
+  feature is simultaneity: one bus write starts machines of two blocks on
   the same cycle, which nothing else on this chip arranges.
-- **ALL EIGHT FLAGS REACH THE INTERRUPT LINES.** IRQ0_INTE and IRQ1_INTE
+- **All eight flags reach the interrupt lines.** IRQ0_INTE and IRQ1_INTE
   are sixteen bits here: four receive-FIFO sources, four transmit-FIFO
   sources, and the eight flags. On the RP2040 the upper four flags were
   visible to the machines and to no interrupt.
 - **SHIFTCTRL.IN_COUNT** masks the IN-mapped pins above a count to zero.
   It matters most to `MOV X, PINS`, which otherwise has no way at all to
   say how many pins it meant and returns the whole rotated bank.
-- **THE RECEIVE FIFO AS FOUR REGISTERS.** FJOIN_RX_PUT disables the
+- **The receive FIFO as four registers.** FJOIN_RX_PUT disables the
   receive queue and hands its four cells to the machine as randomly
   addressed storage (the PUT instruction), with the system reading them
   at RXFn_PUTGETm: a status register a program keeps up to date and
@@ -85,13 +155,13 @@ WHAT IS THIS CHIP'S OWN (11.1.1), and what a driver has to say about each:
   it runs. Both together give the machine four more scratch registers and
   shut the system out. Setting either clears FJOIN_TX and FJOIN_RX, and
   changing any join discards what the FIFOs held.
-- **FOUR NEW INSTRUCTION FORMS** (11.4), all of them sharing opcodes with
+- **Four new instruction forms** (11.4), all of them sharing opcodes with
   instructions the RP2040 had: WAIT on JMP_PIN plus an offset of 0..3
   (source 3, which was reserved), so a WAIT can use the machine's own
   branch pin instead of the IN mapping; MOV to PINDIRS (destination 3,
   reserved), which turns every OUT-mapped pin around in one instruction
   and past a SET's five-pin limit; the IRQ flags as a source for
-  `MOV X, STATUS`, so a program can BRANCH on a flag where before it
+  `MOV X, STATUS`, so a program can branch on a flag where before it
   could only block on one; and an IRQ index whose two most significant
   bits choose a scope - this block, the previous block, this block
   relative to the machine's number, the next block - with no cycle of
@@ -103,11 +173,11 @@ Each FIFO is still a DMA request, and PIO0's and PIO1's sixteen keep the
 numbers they had on the RP2040; PIO2's eight are new behind them, which is
 what pushed every other peripheral's request up the table
 (`rp2350/dma_engine.hpp`). PIO0, PIO1 and PIO2 are functions 6, 7 and 8,
-and EVERY pad of this chip offers all three (9.4).
+and every pad of this chip offers all three (9.4).
 
 ## Types and verbs
 
-- THE ASSEMBLER: `PioInstr`, `pio_jmp(cond, address)`, `pio_wait(
+- The assembler: `PioInstr`, `pio_jmp(cond, address)`, `pio_wait(
   polarity, on, index)`, `pio_wait_irq(polarity, flag, scope)`,
   `pio_wait_jmppin(polarity, offset)`, `pio_in(from, bits)`, `pio_out(to,
   bits)`, `pio_push(if_full, block)`, `pio_pull(if_empty, block)`,
@@ -125,9 +195,9 @@ and EVERY pad of this chip offers all three (9.4).
   vendor's own assembler produces.
 - `PioSmConfig` (the divider, the wrap points, the side-set, the JMP pin,
   sticky and inline-enable outputs, the STATUS source, the FIFO join,
-  both thresholds and directions, autopull and autopush, THE INPUT COUNT,
+  both thresholds and directions, autopull and autopush, the input count,
   the four pin ranges) with `pio_sm_config_valid` and the three register
-  words - and every pin field in it is the BLOCK'S index, not a system
+  words - and every pin field in it is the block's index, not a system
   GPIO number; `PioFifoJoin` (none, tx, rx, rx_put, rx_get, rx_putget);
   `PioStatus` (tx_level, rx_level, irq_flag) with `PioStatusIrq` and
   `pio_status_irq(flag, where)` for the STATUS_N value an IRQ source
@@ -163,7 +233,7 @@ and EVERY pad of this chip offers all three (9.4).
   `rx_top_byte_address` (the top byte of an entry for a byte engine),
   `putget(entry)` (the system's end of the PUT and GET modes), `dreq_tx`
   / `dreq_rx`, the two interrupt source masks.
-- THE TASKS, which take SYSTEM GPIO numbers and convert them through the
+- The tasks, which take system GPIO numbers and convert them through the
   block's window, refusing a pad the window does not cover:
   `PioUartTx<n, sm, pin>` (init(clock, baud): 11.6.3's program, eight
   cycles a bit, the FIFO joined; `write`, `writable`, `write_wait`,
@@ -284,8 +354,8 @@ this chapter reads differently between the halves.
   192 of 256 and not 128, the words reading 0x77777777 or 0xBBBBBBBB: with
   only four samples to a period, the pad that drives, the jumper and the
   pad that reads do not carry a rise and a fall in the same time, and 6.7
-  ns of difference IS a whole sample. The same sampler on a 2.34 MHz wave
-  - 64 samples to a period - reads **132 ones of 256**, half of them
+  ns of difference IS a whole sample. The same sampler on a 2.34 MHz
+  wave - 64 samples to a period - reads **132 ones of 256**, half of them
   within two per cent, which is what places the distortion on the wire and
   not on the program.
 - **THE RECEIVE FIFO AS FOUR REGISTERS.** Under FJOIN_RX_PUT a machine

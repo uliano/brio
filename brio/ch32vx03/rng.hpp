@@ -1,16 +1,46 @@
 /*
  * rng.hpp
  *
- * The CH32V303's random number generator (RM ch. 29 - which says of
- * itself that it "applies to the whole family", as far as the family has
- * the block at all): `Rng`, a MONOSTATE resource over three registers.
+ * The random number generator of the CH32V303RC and VC (RM ch. 29 -
+ * which says of itself that it "applies to the whole family", as far as
+ * the family has the block at all): `Rng`, a monostate resource (a
+ * class with only static members, never instantiated: one block, one
+ * set of state) over three registers. A program takes 32-bit words from
+ * it - words that on the CH32V303VCT6 measured are not random bits (fact
+ * 7 below), so a program that needs randomness decides how many words
+ * it folds into one. The smallest use, as docs/ch32vx03/rng.md's "How
+ * to use it" writes it:
+ *
+ *     if (!brio::Rng::init()) {                    // gate, enable, the discards
+ *         // brio::Rng::last_error() says why
+ *     }
+ *     if (const auto v = brio::Rng::read()) {
+ *         use(*v);
+ *     }
+ *
  * The CH32V303RC and VC carry one and every other part of this stratum
  * carries none - the CH32V303 datasheet's table 2-1-1 gives the RNG row
  * a dash under the CB and the RB, and the CH32V203's table 2-1 has no
  * such row - so `device::has_rng` is the part fact, and an `Rng` named
  * on a part without it is a compile error naming the reason.
  *
- * WHAT THIS BLOCK IS. "Based on continuous analog noise" (29.1): an
+ * Who calls what. init(), recover() and release() are setup or
+ * recovery verbs for main() or an active object's handler; init() and
+ * recover() wait for a word with a bound (`spins` status reads per
+ * discarded word) and answer false, with the reason in last_error(),
+ * when it runs out or an error status stands. read() never waits: it
+ * answers a word or nothing at once. read_blocking(limit) tries up to
+ * `limit` times and gives up at once on an error. isr() is the body of
+ * the vector the crt names rng_handler, called from the program's
+ * binding and nowhere else; it leaves the word in RNG_DR for the handler
+ * to take with value(). read() and the restarts keep the comparison
+ * word and last_error() in the driver's own statics with no guard, so
+ * one context takes words at a time. No verb masks interrupts; the
+ * gate verbs are unguarded read-modify-writes of an RCC register other
+ * drivers' gates share, and the control verbs read-modify-writes of
+ * RNG_CR.
+ *
+ * What this block is. "Based on continuous analog noise" (29.1): an
  * analog circuit produces a seed, the seed is shifted into a linear
  * feedback register, and "when a large number of seeds are introduced"
  * the register's content is handed over as a 32-bit word (29.2). Beside
@@ -20,14 +50,14 @@
  * with five, RNG_DR with the word. No DMA request - no table of chapter
  * 11 names this block - and no event.
  *
- * SEVEN FACTS THAT SHAPE THE FILE.
+ * Seven facts that shape the file.
  *
- * 1. SYSCLK RUNS IT, AND NO RATE IS REFUSED. Chapter 29 says the LFSR is
+ * 1. SYSCLK runs it, and no rate is refused. Chapter 29 says the LFSR is
  *    clocked "by a dedicated clock (PLL48CLK)" and names that clock again
  *    in the two clock-error bits; the class's own clock tree (figure 3-3,
  *    "applied for ... CH32V30x_D8") and the CH32V303 datasheet's (figure
  *    2-4) draw SYSCLK to the TRNG instead, and RCC_CFGR2's RNG_SRC, which
- *    would choose, is the D8C classes' register (3.4.12). MEASURED on the
+ *    would choose, is the D8C classes' register (3.4.12). Measured on the
  *    CH32V303VCT6: the time from one word to the next is the same number
  *    of core cycles at 144, 96 and 48 MHz off the PLL, it does not move
  *    when USBPRE divides the PLL by 2 or 1 instead of 3, and with no PLL
@@ -36,21 +66,24 @@
  *    PLL48CLK is not this class's, and `init()` asks nothing of the
  *    clock tree.
  *
- * 2. THE GATE AND NO RESET LINE. RCC_HBPCENR.RNGEN (3.4.6, bit 9)
+ * 2. The gate and no reset line. RCC_HBPCENR.RNGEN (3.4.6, bit 9)
  *    opens the bus clock; RCC_AHBRSTR has no bit for this block (its
  *    [11:0] are reserved, 3.4.11), so there is no peripheral reset and
  *    no verb offers one - the way back is RNGEN cleared and set.
  *
- * 3. THE FIRST VALUE IS ZERO. FIPS PUB 140-2 asks that the first word
+ * 3. The first value is zero. FIPS PUB 140-2 asks that the first word
  *    generated after an enable be saved for comparison and not used, and
  *    that each word after it be compared with the one before, the test
  *    failing on a repeat. The chapter does not ask it; this silicon
- *    does: MEASURED, the first word after RNGEN is set is 0x00000000 on
- *    every enable, at every rate, some sixty core cycles after it - and
- *    RNGEN cleared freezes the block, the word standing across the
+ *    does: measured, the first word after RNGEN is set is 0x00000000 on
+ *    every enable that follows a disable, at every rate, some sixty core
+ *    cycles after it (the first enable after a reset gave that zero at
+ *    every boot of one session and a nonzero word at every boot after a
+ *    power cycle, a difference docs/ch32vx03/rng.md leaves unexplained) -
+ *    and RNGEN cleared freezes the block, the word standing across the
  *    disable staying readable and no other landing behind it. So a
- *    RESTART (`init()` from off, `recover()`) takes the standing word
- *    between the disable and the enable and discards TWO words after it,
+ *    restart (`init()` from off, `recover()`) takes the standing word
+ *    between the disable and the enable and discards two words after it,
  *    the zero and the word that follows: a restart that discarded one
  *    handed the zero out once in some thirteen thousand on that silicon,
  *    with the cause never caught again, and one word is the price of it
@@ -58,13 +91,13 @@
  *    compared with, and `read()` refuses a repeated word instead of
  *    handing it out.
  *
- * 4. THE TWO ERRORS ARE NOT THE SAME KIND, and 29.2.2 says so. A CLOCK
+ * 4. The two errors are not the same kind, and 29.2.2 says so. A clock
  *    error (CECS) stops the generator but "has no effect on the last
  *    random number and can be used normally": fix the clock tree, clear
- *    CEIS, carry on. A SEED error (SECS: "more than 64 identical
+ *    CEIS, carry on. A seed error (SECS: "more than 64 identical
  *    consecutive bits; more than 32 consecutive alternating 0's and
  *    1's") makes the word standing in RNG_DR unusable, and the way back
- *    is a SEQUENCE - "the SEIS bit needs to be cleared first, then the
+ *    is a sequence - "the SEIS bit needs to be cleared first, then the
  *    RNGEN bit is cleared and set to 1". `recover()` is that sequence,
  *    and `read()` hands out no word while either current status stands.
  *    Neither monitor has been seen to fire on this silicon: SYSCLK never
@@ -72,10 +105,10 @@
  *    the HSI, and the seed test watches runs, which fact 7's words do
  *    not have.
  *
- * 5. THE TWO LATCHED FLAGS ARE CLEARED WITH A ZERO, AND A ONE DOES
- *    NOTHING. SEIS and CEIS are "RW" in 29.3.2, which names no clearing
+ * 5. The two latched flags are cleared with a zero, and a one does
+ *    nothing. SEIS and CEIS are "RW" in 29.3.2, which names no clearing
  *    rule; WCH's own library clears one by storing the register with that
- *    bit ZERO and every other bit ONE. MEASURED: a one written into
+ *    bit zero and every other bit one. Measured: a one written into
  *    either flag sets neither, and the two reserved "RW" bits [4:3] keep
  *    nothing written into them. So the vendor's store clears exactly the
  *    one flag, and the other - should it latch between a read and the
@@ -84,24 +117,24 @@
  *    program can raise either flag, and the error paths are reached by
  *    the silicon alone.
  *
- * 6. ONE VECTOR FOR THREE EVENTS. RNG_CR.IE raises line 63 of this
+ * 6. One vector for three events. RNG_CR.IE raises line 63 of this
  *    class's table (`Irq::rng`) on a word ready or on either error, with
  *    no per-source enable, so `isr()` reports all three and clears the
  *    two latched ones; the word itself is the handler's to take. A ready
  *    word keeps DRDY up until RNG_DR is read, so a handler that does not
  *    read it is entered again at once.
  *
- * 7. THE WORDS ARE NOT TO BE TAKEN AS RANDOM BITS. MEASURED on the
+ * 7. The words are not to be taken as random bits. Measured on the
  *    CH32V303VCT6 (docs/ch32vx03/rng.md has the numbers): DRDY rises
- *    again over an UNCHANGED word, the more often the faster the words
+ *    again over an unchanged word, the more often the faster the words
  *    are taken - up to one in seven read raw at DRDY's pace - which is
  *    what `read()`'s comparison refuses; and the words come from a
  *    small set - from nine hundred to three thousand-odd distinct values
  *    in four thousand words, some two hundred and twenty in 256 read ten
  *    milliseconds apart - so a chi-square over their bytes fails at
  *    every rate and every pace tried, and so do FIPS PUB 140-2's poker
- *    and runs tests. The two monitors say nothing about it. THIS DRIVER
- *    DOES NOT CONDITION THE WORDS: what it hands out is what the block
+ *    and runs tests. The two monitors say nothing about it. This driver
+ *    does not condition the words: what it hands out is what the block
  *    produced, a word that repeats its predecessor excepted, and a
  *    program that needs randomness from it decides how many words make
  *    one it can use.

@@ -1,12 +1,17 @@
 /*
  * tim.hpp
  *
- * The timers of the CH32V203 and the CH32V303 (RM ch. 14 for the
- * advanced-control block, ch. 15 for the general-purpose ones, ch. 16 for
- * the basic ones) in the two strata every brio target uses
+ * The timers of the CH32V203 and the CH32V303 for a program: a PWM
+ * output, or a channel and its complement with a dead band between
+ * them; a period, a high time or an interval measured by capture; one
+ * timer counting or gating another over an internal trigger, with no
+ * pad; a periodic tick; one pulse of a chosen width after a chosen
+ * delay; a quadrature encoder. RM ch. 14 is the advanced-control block,
+ * ch. 15 the general-purpose ones and ch. 16 the basic ones, and the
+ * header has the two strata every brio target uses
  * (docs/design/overview.md, "Target strata"):
  *
- *  Tim<n>          the RESOURCE - one TIMx block: the time base
+ *  Tim<n>          the resource - one TIMx block: the time base
  *                  (prescaler, counter, auto-reload and their shadow
  *                  registers), the counting modes, the four
  *                  capture/compare channels in both their faces, the
@@ -17,31 +22,87 @@
  *                  bodies.
  *
  *  TimPad<pad>     a pad handed to a timer signal, its Pad taken from
- *                  afio.hpp's remap COLUMN (below).
+ *                  afio.hpp's remap column (below).
  *
- *  TASKS           TimPwm / TimPairPwm (util/pwm_channel.hpp's
+ *  Tasks           TimPwm / TimPairPwm (util/pwm_channel.hpp's
  *                  PwmChannel, one output and the complementary pair),
  *                  TimPeriodMeter / TimIntervalMeter (what a capture
  *                  body hands util/meter_sampler.hpp's MeterLatch),
  *                  TimEventCounter / TimGatedCounter (one timer
  *                  measuring another with no wire and no CPU),
- *                  TimPeriodicTick, TimOnePulse, TimEncoder.
+ *                  TimPeriodicTick, TimOnePulse, TimEncoder - each a
+ *                  monostate (static members only, never instantiated)
+ *                  that sets a Tim<n> up for one use and gives that use
+ *                  its verbs.
  *
- * WHAT A PART HAS. The reference manual covers four families at once and
+ * The smallest use, a PWM on TIM3's channel 1 (0 here: the driver counts
+ * channels from 0) at about 1 kHz, the first use of docs/ch32vx03/tim.md's
+ * "How to use it":
+ *
+ *   using Lamp = brio::TimPwm<brio::Tim<3>, 0, 1000>;
+ *   constexpr brio::Pad pad = brio::tim_channel_pad(3, 0, 0);   // PA6 in column 0
+ *   (void)brio::Tim<3>::init();
+ *   (void)brio::Tim<3>::remap(0);
+ *   brio::TimPad<pad>::claim();
+ *   (void)Lamp::setup(143);          // 144 MHz / 144 / 1001 = about 1 kHz
+ *   Lamp::duty(250);
+ *
+ * The 143 is a count of TIMxCLK, which is HCLK at every rate this
+ * stratum makes (fact 5 below). A program works its prescalers and
+ * periods out from the rate the clock type claims - `clock_hz(clock)`
+ * folds it at compile time - and not from the hardware, so these lines
+ * run after the clock task's init(): before it, on the 8 MHz HSI the
+ * chip resets to, a timer set up for 144 MHz runs eighteen times slowly
+ * until the tree is switched (derived from the counting arithmetic, not
+ * measured), and nothing here refuses it. The compare is preloaded
+ * (fact 3), so the first period runs at the compare the shadow held,
+ * zero after the reset, and the 250 takes over at the first update.
+ *
+ * Who calls what, and from where. init(), release(), bus_clock(),
+ * reset(), remap() and TimPad's claim(), claim_input() and release() are
+ * setup verbs - main(), after the clock task's init() - and each is a
+ * read-modify-write of a register other blocks share (RCC's gate and
+ * reset registers, AFIO's PCFR1/PCFR2, the port's configuration
+ * register) with no guard of its own. The configuring verbs of Tim<n>
+ * (configure(), enable(), the channel, slave, master, break,
+ * external-trigger and burst verbs, interrupts()) and the tasks' setup()
+ * are read-modify-writes of the timer's own registers, unguarded too: a
+ * timer is configured from one context, main or one handler, and a
+ * program that touches one from two masks around it. isr() is the body
+ * of any of the timer's vectors: the program's handler calls it, bound
+ * with BRIO_CH32_VECTOR or one of its two forms (pfic.hpp) under the
+ * crt's name for the vector (tim3_handler, tim1_cc_handler, ...), and a
+ * vector left unbound runs the crt's weak default_handler, a spin loop
+ * (the crt is the startup code that runs before main(),
+ * ch32vx03/src/glue/startup_ch32vx03.S). No verb here enables a
+ * PFIC line: interrupts() sets the timer's own enables, and the program
+ * enables the line itself (Pfic::enable(), pfic.hpp). One load or one
+ * store, legal from any context: flags(), flag(), clear_flags() (which
+ * cannot swallow a flag that arrives meanwhile, fact 1), count(),
+ * set_count(), period(), set_prescaler(), compare() (on a capture
+ * channel the acknowledgement as well), set_compare(), set_period() and
+ * the PWM tasks' duty() (a bound check, then the store), and the
+ * software events. TimIntervalMeter's interval() keeps one value of
+ * state and belongs to the capture handler alone. Nothing here waits,
+ * nothing masks interrupts, and nothing holds a caller's buffer: the DMA
+ * addresses (chcvr_address(), dmaadr_address(), cnt_address()) are the
+ * timer's own registers, for a channel the program arms (dma.hpp).
+ *
+ * What a part has. The reference manual covers four families at once and
  * its timer chapters name TIM1/8/9/10 (advanced), TIM2/3/4/5
  * (general-purpose) and TIM6/7 (basic). The datasheets' tables 2-1 and
- * 2-1-1 are what say which of them a PART offers: every CH32V203 and the
- * two 128 KB CH32V303 have ONE advanced-control timer (TIM1) and THREE
+ * 2-1-1 are what say which of them a part offers: every CH32V203 and the
+ * two 128 KB CH32V303 have one advanced-control timer (TIM1) and three
  * general-purpose ones (TIM2..TIM4), the CH32V203RB a fourth - the
- * 32-bit TIM5 - and the CH32V303RC and VC the whole set: FOUR advanced
- * ones (TIM1, TIM8, TIM9, TIM10), FOUR general-purpose ones (TIM2..TIM5,
- * TIM5 sixteen bits there) and the TWO BASIC ones of chapter 16 (TIM6,
- * TIM7), which no CH32V203 has. Those facts are the part table's MASKS
+ * 32-bit TIM5 - and the CH32V303RC and VC the whole set: four advanced
+ * ones (TIM1, TIM8, TIM9, TIM10), four general-purpose ones (TIM2..TIM5,
+ * TIM5 sixteen bits there) and the two basic ones of chapter 16 (TIM6,
+ * TIM7), which no CH32V203 has. Those facts are the part table's masks
  * (`device::advanced_timer_instances`, `general_timer_instances`,
- * `basic_timer_instances`), read by `tim_present()` and its siblings; no
- * file of this stratum but parts/ names a part.
+ * `basic_timer_instances`, in parts/), read by `tim_present()` and its
+ * siblings; no file of this stratum but parts/ names a part.
  *
- * A BASIC TIMER IS A TIME BASE AND NOTHING ELSE (16.2.2): no channel, no
+ * A basic timer is a time base and nothing else (16.2.2): no channel, no
  * slave controller, no external trigger, no down-counting, no burst
  * engine - CTLR1, CTLR2's MMS, UIE/UDE, UIF, UG, CNT, PSC and ATRLR are
  * its whole register file (16.4), and its TRGO goes to the DAC and, on
@@ -49,16 +110,16 @@
  * `channels == 0`, and a channel verb on one of them does not compile:
  * the registers it would write are not there.
  *
- * THE BLOCK IS THE STM32F1's, NOT THE CH32V00x's. Same register file,
+ * The block is the STM32F1's, not the CH32V00x's. Same register file,
  * same bit positions, WCH's names (CTLR1, SMCFGR, DMAINTENR, INTFR,
  * SWEVGR, CHCTLR1/2, CCER, ATRLR, RPTCR, CHxCVR, BDTR, DMACFGR). What
  * the sister family added to it - TIM2's own dead-time pairs in DTCR,
  * the CAPLVL/CAPOV bits that carry a capture's level, the OE_MODE bit -
- * IS NOT HERE: CTLR1 of this family ends at CKD, and a program ported
+ * is not here: CTLR1 of this family ends at CKD, and a program ported
  * from the CH32V00x that wrote bits 13..15 of CTLR1 would write nothing
  * at all. What the manual's own chapter adds for the CH32V30x_D8 is the
- * DUAL-EDGE CAPTURE register TIMx_AUX (14.3.11, 15.3.9, 14.4.21): one
- * channel capturing both edges of its input and holding the pulse WIDTH
+ * dual-edge capture register TIMx_AUX (14.3.11, 15.3.9, 14.4.21): one
+ * channel capturing both edges of its input and holding the pulse width
  * in its own register, on channels 2..4 of every timer but the basic
  * ones - and only "for lot numbers where the penultimate sixth bit is not
  * zero", so it is the class's verb and the silicon's answer:
@@ -66,50 +127,59 @@
  * back and answers false, writing nothing else, where the lot kept no
  * bit - which is what the CH32V303VCT6 the reference suite ran on did.
  *
- * SIX FACTS THAT SHAPE THIS FILE.
+ * Six facts that shape this file.
  *
- * 1. THE FLAG REGISTER IS rc_w0. A flag of TIMx_INTFR is cleared by
- *    writing ZERO to it and a write of one has no effect (14.4.5), so
+ * 1. The flag register is rc_w0. A flag of TIMx_INTFR is cleared by
+ *    writing zero to it and a write of one has no effect (14.4.5), so
  *    clearing is `INTFR = ~flags` - a plain store, no read-modify-write,
- *    and a flag that arrives between a read and the store SURVIVES.
+ *    and a flag that arrives between a read and the store survives.
  *    Every other flag register of this stratum - the EXTI's INTFR, the
- *    RCC's INTR - is cleared by writing ONES, so this is the one place
+ *    RCC's INTR - is cleared by writing ones, so this is the one place
  *    where that reflex is wrong.
  *
- * 2. THE PRESCALER AND THE AUTO-RELOAD ARE SHADOWED. PSC is copied into
- *    the working register at the next UPDATE event and never before
+ * 2. The prescaler and the auto-reload are shadowed. PSC is copied into
+ *    the working register at the next update event and never before
  *    (14.2.3); ATRLR is too when CTLR1.ARPE is set, and is taken at once
  *    when it is clear. So a configuration is only in force after an
  *    update, which is why configure() ends with SWEVGR.UG - a software
  *    update that loads both shadows - and then clears the UIF that
  *    update raised.
  *
- * 3. A COMPARE REGISTER IS PRELOADED BY DEFAULT HERE, AND THAT IS A
- *    CHOICE. OCyPE is clear out of reset (a write to CHxCVR acts at
+ * 3. A compare register is preloaded by default here, and that is a
+ *    choice. OCyPE is clear out of reset (a write to CHxCVR acts at
  *    once, which can produce a runt pulse if it lands past the current
  *    count); every output channel this driver configures sets it,
  *    because a PwmChannel::duty() that can glitch is not one an actuator
  *    above can use. 14.3.5's own PWM recipe asks for it too. The
  *    unbuffered behaviour stays reachable - TimChannelConfig::preload =
- *    false.
+ *    false. A compare written into a preloaded channel reaches the
+ *    shadow at the next update and not before, so a timer configured and
+ *    started in one breath runs its first period with what the shadow
+ *    held (measured, docs/ch32vx03/tim.md); TimOnePulse::setup() raises
+ *    the update for its own pulse.
  *
- * 4. CCyS IS WRITABLE ONLY WITH THE CHANNEL OFF (14.4.7's own note).
+ * 4. CCyS is writable only with the channel off (14.4.7's own note).
  *    output_channel() and capture_channel() therefore clear the
- *    channel's CCER bits BEFORE they write CHCTLRx: without that a
- *    channel that is currently an INPUT stays one, the CCyS field being
+ *    channel's CCER bits before they write CHCTLRx: without that a
+ *    channel that is currently an input stays one, the CCyS field being
  *    dropped in silence, and the timer goes on capturing a pad the
  *    caller believes it is driving.
  *
- * 5. THE COUNTER'S CLOCK IS NOT THE BUS CLOCK. RM 3.3.1's own rule: a
- *    timer counts its bus clock when that bus's prescaler is 1 and TWICE
+ * 5. The counter's clock is not the bus clock. RM 3.3.1's own rule: a
+ *    timer counts its bus clock when that bus's prescaler is 1 and twice
  *    it otherwise. The clock task states both numbers (`timclk1_hz`,
  *    `timclk2_hz`), so `Tim<n>::clock_hz(clock)` folds at compile time,
  *    and `clock_hz_now(hclk)` reads the same number back out of RCC -
  *    the witness that stops this file from lying if a prescaler moves.
+ *    At every rate this stratum makes both products are HCLK: PB2 runs
+ *    undivided, and PB1 is divided by two exactly when HCLK is above its
+ *    72 MHz cap (clock.hpp's pb1_max_hz), so a PB1 timer counts PCLK1 at
+ *    or under the cap and twice PCLK1 above it (docs/ch32vx03/tim.md,
+ *    "The time base").
  *
- * 6. THERE IS NO BOTH-EDGE CODE IN CCER. CCER carries CCyP for the
- *    capture polarity and nothing else: CCyNP is the COMPLEMENTARY
- *    OUTPUT's polarity on the advanced timers (14.4.9) and Reserved on
+ * 6. There is no both-edge code in CCER. CCER carries CCyP for the
+ *    capture polarity and nothing else: CCyNP is the complementary
+ *    output's polarity on the advanced timers (14.4.9) and Reserved on
  *    the general-purpose ones (15.4.9). The later STM32 families' "11 =
  *    both edges" encoding does not exist here, so TimCapturePolarity has
  *    two values and a caller that wants both edges uses two channels on
@@ -117,47 +187,53 @@
  *    dual-edge capture above, which is a different register and not a
  *    CCER code.
  *
- * MEASURING WITH NO WIRE. Three of this chapter's own features make a
+ * Measuring with no wire. Three of this chapter's own features make a
  * timer observable with nothing attached, which is what the reference
  * suite is built on:
- *  - THE INTERNAL TRIGGERS. Every timer here publishes TRGO and listens
- *    on ITR0..ITR3; which timer each ITRx IS comes from tables 14-2 and
+ *  - The internal triggers. Every timer here publishes TRGO and listens
+ *    on ITR0..ITR3; which timer each ITRx is comes from tables 14-2 and
  *    15-2, reproduced by `tim_internal_trigger()`. A master publishing
  *    its update event and a slave in external clock mode 1 count each
  *    other exactly, with no pad in the path.
- *  - A PAD THE TIMER ITSELF DRIVES. Forced output mode (14.3.3) puts
- *    OCyREF under CHCTLRx instead of under the counter, so the CPU
+ *  - A pad the timer itself drives. Forced output mode (14.3.3) puts
+ *    OCyREF under CHCTLRx instead of under the compare, so the CPU
  *    drives a level onto the pin through the timer's own output stage -
  *    `output_mode(ch, force_active/force_inactive)` - and the channel
  *    inputs see it, a channel's input path being live whatever CCyS
- *    says. IT STOPS WORKING IN AN ENCODER MODE: measured with one
- *    variable, the same channel and the same forced mode drive the pad
- *    while SMS is zero and leave it low while SMS names an encoder
- *    mode, so this family's quadrature interface cannot be fed by the
- *    timer that reads it.
- *  - A PAD THE PORT DRIVES, which on this family reaches a timer's
- *    input too: sixteen edges written on a pad in PLAIN OUTPUT mode,
+ *    says. The level is evaluated only while the counter runs: a stopped
+ *    counter holds the level the output had, and one that never ran
+ *    holds it low (measured, docs/ch32vx03/tim.md), so a program that
+ *    forces a level starts the counter first. It stops working in an
+ *    encoder mode: measured with one variable, the same channel and the
+ *    same forced mode drive the pad while SMS is zero and leave it where
+ *    it rests while SMS names an encoder mode (low on the CH32V203C8T6's
+ *    board, high on the CH32V303VCT6's, whose PB6 carries an external
+ *    pull-up), so
+ *    this family's quadrature interface cannot be fed by the timer that
+ *    reads it.
+ *  - A pad the port drives, which on this family reaches a timer's
+ *    input too: sixteen edges written on a pad in plain output mode,
  *    with no alternate-function nibble at all, are sixteen captures
  *    (measured; the same experiment on the STM32F4 gives zero, its
  *    alternate-function input multiplexer being opened by the mode
- *    register). The alternate-function INPUT here is the pad's own
+ *    register). The alternate-function input here is the pad's own
  *    input buffer (10.2.4), so the CPU can stimulate a capture, an
  *    external clock or a break input with a GPIO store - which is what
  *    the encoder's two tracks are driven with.
  *
- * THE PADS ARE REMAP COLUMNS, NOT AF NUMBERS. On this family a
- * peripheral's pads move as a COLUMN of the chapter's table (afio.hpp),
+ * The pads are remap columns, not AF numbers. On this family a
+ * peripheral's pads move as a column of the chapter's table (afio.hpp),
  * so a timer's pad is not a per-pin selector: `Tim<n>::remap(code)`
  * writes the column and `tim_channel_pad(n, code, ch)` says which pad
  * carries a signal in it. Both come from afio.hpp's tables - the one
- * source that also knows which columns this PACKAGE bonds and which
+ * source that also knows which columns this package bonds and which
  * belong to another device class. A pad is then claimed with
  * `TimPad<pad>`: an output channel wants the alternate-function push-
  * pull nibble, a capture wants a plain input (on this family the
- * alternate-function INPUT is the pad's own input buffer, so an input
+ * alternate-function input is the pad's own input buffer, so an input
  * channel needs no AF nibble at all - 10.2.4).
  *
- * NO ERRATA SHEET EXISTS FOR THIS FAMILY (docs/ch32vx03/vendor/
+ * No errata sheet exists for this family (docs/ch32vx03/vendor/
  * README.md): what the bench finds is the errata list, and
  * docs/ch32vx03/tim.md carries it.
  */
@@ -821,7 +897,10 @@ struct TimPad {
     using pin = Pin<pad.port, pad.pin>;
     static constexpr Pad selection = pad;
 
-    /// The pad as the timer's OUTPUT.
+    /// The pad as the timer's output: alternate function, push-pull by
+    /// default. A setup verb, main context: a read-modify-write of the
+    /// port's configuration register (the port's clock opened first)
+    /// with no guard of its own.
     static void claim(PinDrive drive = PinDrive::push_pull, PinSpeed speed = PinSpeed::fast) {
         pin::function(drive, speed);
     }
@@ -967,7 +1046,10 @@ public:
     /// the chapter's register map prints.
     static void reset() { Rcc::reset(tim_bus(n), tim_gate(n)); }
 
-    /// Clock on, then reset. The whole of "bring this timer up".
+    /// Clock on, then reset. The whole of "bring this timer up". A setup
+    /// verb, main context, after the clock task's init(): three
+    /// read-modify-writes of RCC's registers (the gate, then the reset
+    /// set and released), unguarded, and nothing to answer.
     static void init() {
         bus_clock(true);
         reset();
@@ -988,7 +1070,9 @@ public:
     /// written - for a code this device class or this package has not
     /// got. TIM5 has no column of its own: its channel 4 can be fed the
     /// LSI instead of a pad, which is Remap::tim5_ch4's business; and a
-    /// basic timer has no pad at all.
+    /// basic timer has no pad at all. A setup verb, main context: a
+    /// read-modify-write of AFIO_PCFR1 or PCFR2, which every remap
+    /// shares, with no guard of its own.
     static bool remap(uint8_t code) {
         if constexpr (!has_remap) {
             (void)code;
@@ -1064,6 +1148,10 @@ public:
      * would stand until the first overflow of the OLD period. CNT is
      * zeroed too, so a reconfigured timer starts where the caller
      * thinks it does.
+     *
+     * From main or the one context that drives this timer; nothing
+     * waits. False, with nothing written, for a configuration
+     * config_valid() refuses.
      */
     static bool configure(const TimConfig& c) {
         if (!config_valid(c)) {
@@ -1096,7 +1184,8 @@ public:
     }
 
     /// CTLR1.CEN. Starting a timer is one bit and nothing else -
-    /// everything that has to be true first is configure()'s.
+    /// everything that has to be true first is configure()'s. A
+    /// read-modify-write of CTLR1 with no guard of its own.
     static void enable(bool on) {
         TimRegs& t = regs();
         t.CTLR1 = static_cast<uint16_t>(on ? (t.CTLR1 | tim_cen) : (t.CTLR1 & ~tim_cen));
@@ -1279,7 +1368,10 @@ public:
     static uint16_t interrupts() { return regs().DMAINTENR; }
 
     /**
-     * The body of one of this timer's vectors.
+     * The body of one of this timer's vectors, called from the
+     * program's handler for it (bound with BRIO_CH32_VECTOR or one of
+     * its two forms, pfic.hpp)
+     * and from nowhere else; it waits for nothing and masks nothing.
      *
      * `mask` says which flags this vector answers for: `vector_flags(v)`
      * on the advanced timer, whose four event groups have four lines,
@@ -1349,6 +1441,11 @@ public:
      * is currently an INPUT stays one - the field is dropped in silence
      * - and the timer goes on capturing a pad the caller believes it is
      * driving.
+     *
+     * False, with nothing written, for a channel this timer has not
+     * got, a compare past the counter's width, a complementary output
+     * on a channel without one, or OCyCE on a timer with no external
+     * trigger.
      */
     static bool output_channel(uint8_t ch, const TimChannelConfig& c) {
         static_assert(channels > 0u,
@@ -1427,10 +1524,14 @@ public:
      *
      * `force_active` and `force_inactive` are what make an output
      * channel A PAD THE PROGRAM DRIVES while the pad stays in alternate
-     * function: OCyREF follows the field and not the counter, so the
+     * function: OCyREF follows the field and not the compare, so the
      * CPU puts a level on the pin through the timer's own output stage.
-     * That is the stimulus a capture or an encoder input has on a board
-     * with no wire.
+     * That is the stimulus a capture input has on a board with no wire.
+     * The level is evaluated only while the counter runs: with it
+     * stopped the output holds the level it had, and a counter that
+     * never ran holds it low (measured, docs/ch32vx03/tim.md); and in an
+     * encoder mode the output stage no longer reaches its pad at all
+     * (the file header).
      */
     static bool output_mode(uint8_t ch, TimOutputMode m) {
         static_assert(channels > 0u, "brio Tim: a basic timer has no capture/compare channel");
@@ -1886,7 +1987,13 @@ struct TimPwm {
     /// Bring the timer up as an edge-aligned PWM generator on this
     /// channel. On the advanced timer MOE is raised too, without which
     /// nothing reaches the pad at all (14.4.18) - the trap that makes a
-    /// first TIM1 PWM look dead.
+    /// first TIM1 PWM look dead. A setup verb, from main or the one
+    /// context that drives the timer, after the clock task (the
+    /// prescaler is a count of TIMxCLK); false if configure() or
+    /// output_channel() refused, which the arguments passed here leave
+    /// no case of. The compare is preloaded, so the first period runs at
+    /// the value the shadow held (zero after a reset), and a duty()
+    /// written meanwhile takes over at the first update.
     static bool setup(uint16_t prescaler = 0, TimOutputMode mode = TimOutputMode::pwm1,
                       bool active_low = false) {
         if (!T::configure({.prescaler = prescaler,
@@ -1906,7 +2013,8 @@ struct TimPwm {
 
     /// The duty, in counts out of `max`. A plain store into a PRELOADED
     /// compare register: it is taken at the next update, so a change
-    /// never cuts the pulse being produced.
+    /// never cuts the pulse being produced. A value past `max` is
+    /// clamped to it. One store, legal from any context.
     static void duty(uint16_t v) { (void)T::set_compare(ch, v > max ? max : v); }
     static uint16_t duty() { return static_cast<uint16_t>(T::compare(ch)); }
 };
@@ -1914,7 +2022,8 @@ struct TimPwm {
 /**
  * TimPairPwm<T, ch, top>: a channel and its COMPLEMENT, with the dead
  * time the silicon inserts between them - the shape only the advanced
- * timer has here (TIM1, channels 1..3).
+ * timers have here (TIM1 on every part, and TIM8, TIM9 and TIM10 on the
+ * CH32V303RC and VC; channels 1..3).
  *
  * `max` and `duty()` are the PwmChannel contract again, on the pair:
  * the two outputs are one actuator and one duty.
@@ -2276,9 +2385,9 @@ struct TimOnePulse {
  * channels: setup() leaves both channels as inputs, and a caller that
  * wants the timer to count a quadrature of its own making drives those
  * two pads AS GPIO OUTPUTS (the file header's third wireless
- * instrument). The other strata's trick - the channels' own forced
- * output stages - is measured NOT to work here: in an encoder mode a
- * channel's output stage no longer reaches its pad.
+ * instrument). The channels' own forced output stages cannot stand in
+ * for the pads: in an encoder mode a channel's output stage no longer
+ * reaches its pad (measured, docs/ch32vx03/tim.md).
  */
 template <class T>
 struct TimEncoder {

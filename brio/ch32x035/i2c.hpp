@@ -48,11 +48,13 @@
  * dma_isr() are the three vectors' bodies: the program's handlers call
  * them and nothing else does; each runs to completion, masks nothing,
  * and the first ends a tenure with a bounded poll of TxE (a few STAR1
- * reads) and, on the last two bytes of a read, a bounded wait for RxNE
- * - a bound that runs out (a clock stopped under the block between the
- * two bytes) reads DATAR regardless and reports i2c_ok with what it
- * holds; whether a measured case reaches it is not recorded
- * (docs/ch32x035/i2c.md lists it as open).
+ * reads) and, on the last byte of a read of three or more, a wait for
+ * its RxNE of at most 100 000 polls whose answer is discarded: when the
+ * bound runs out DATAR is read regardless and the tenure reported
+ * i2c_ok with what it holds (receive_step() and wait_until()). At that
+ * point the byte is already in the shifter, so a target stretching SCL
+ * cannot hold it back; whether a measured case reaches the bound is not
+ * recorded (docs/ch32x035/i2c.md lists it as open).
  * The Request's two buffers are lent from the post to the I2cDone the
  * arbiter replies with: untouched and in scope until then, which nothing
  * checks. The client's polled verbs are the loop's, its service() and

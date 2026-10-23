@@ -3,30 +3,50 @@
  *
  * The world's side of a front panel, shared with whoever is watching:
  * the contacts a viewer presses and the shafts it turns, read by the
- * program in its idle path and handed to the simulated devices.
+ * program in its idle path and handed to the simulated devices
+ * (host/sim_input.hpp; docs/host/simulator.md, "Input in").
  *
- * THE SAME MECHANISM AS THE FRAMEBUFFER, POINTING THE OTHER WAY, and
+ * The smallest use, in the shape a host program builds it: the panel
+ * created under a name a viewer opens, its controls named, and the
+ * snapshot mirrored into the simulated contacts in the platform's
+ * idle():
+ *
+ *     SimPanel panel("supply");                  // the segment /brio-in-supply
+ *     panel.name_button(0, "V / A");
+ *     panel.name_shaft(0, "Adjust", 1, 4);      // its switch is contact 1, four counts a detent
+ *
+ *     // in idle():
+ *     SelectKey::set(panel.pressed(0));          // a SimButton
+ *     Knob::set_shaft(panel.shaft(0));           // a SimEncoder
+ *
+ * Contexts: two processes and two writers that never overlap (the
+ * SimPanelState comment below says which fields are whose); the program
+ * reads whenever it polls, with no lock, and takes the latest values.
+ * Nothing waits. The constructor throws when the segment cannot be made.
+ *
+ * The same mechanism as the framebuffer, pointing the other way, and
  * that is the whole design. A socket was the obvious answer and turned
- * out to be the wrong one: an input is a small SNAPSHOT OF STATE, not a
+ * out to be the wrong one: an input is a small snapshot of state, not a
  * stream of gestures, and a shared segment gives for free everything a
  * datagram protocol would have had to specify. There is nothing to frame
  * and nothing to reassemble - a reader takes the current values.
  * Latest-wins is not a drain rule but the only thing that can happen.
- * "What if no viewer is attached" does not arise, because the PROGRAM
+ * "What if no viewer is attached" does not arise, because the program
  * owns the segment and it reads as nothing-pressed until someone writes.
  * And nobody has to decide which side binds and which connects.
  *
  * The one thing a socket would have added is a notification, and the
  * program does not want one: it polls in idle(), which is what a pad is
- * for (design/gfx.md's input note - nothing pushes into the kernel,
- * because nothing pushes into it on silicon either).
+ * for (docs/host/simulator.md, "One mechanism, both directions" - nothing
+ * pushes into the kernel, because nothing pushes into it on silicon
+ * either).
  *
- * A SHAFT IS AN ABSOLUTE COUNT, not a delta, for the same reason the
+ * A shaft is an absolute count, not a delta, for the same reason the
  * contacts are levels: a snapshot that is lost costs nothing, because
  * the next one carries the whole truth. The viewer owns the count and
  * the program mirrors it.
  *
- * AND THE MIRROR SNAPS RATHER THAN WALKS. Setting the pads straight to
+ * And the mirror snaps rather than walks. Setting the pads straight to
  * where the shaft now is - rather than stepping them through everything
  * it passed - is not a shortcut: it is what a real decoder sees. The
  * pads are sampled once a tick, so whatever the shaft did in between is
@@ -62,9 +82,9 @@ inline constexpr uint8_t sim_panel_no_switch = 0xFF;
 /**
  * What sits in the segment. Fixed layout, little-endian, self-describing.
  *
- * TWO WRITERS, AND THEY NEVER OVERLAP. The viewer owns what the world is
- * DOING - the contacts and the shafts - and the program owns what the
- * panel IS, which is the names. Neither ever writes the other's fields,
+ * Two writers, and they never overlap. The viewer owns what the world is
+ * doing - the contacts and the shafts - and the program owns what the
+ * panel is, which is the names. Neither ever writes the other's fields,
  * so there is nothing to arbitrate.
  *
  * `seq` is the viewer's to bump when it changes anything; a program that
@@ -80,19 +100,19 @@ struct SimPanelState {
     uint8_t shafts;
     uint8_t reserved[6];
     uint32_t seq;                          ///< bumped by the viewer
-    uint8_t pressed[sim_panel_buttons];    ///< 0 or 1, ACTIVE-true
+    uint8_t pressed[sim_panel_buttons];    ///< 0 or 1, active-true
     int32_t shaft[sim_panel_shafts];       ///< absolute quadrature counts
 
     /// What each control IS, written by the program. A viewer showing a
     /// grid of "button 3" and "shaft 1" is unusable past two controls,
-    /// and WHICH CONTACT IS WHICH IS A FACT ABOUT THE PANEL - so it
-    /// comes from the board file that describes the panel, like every
+    /// and which contact is which is a fact about the panel - so it
+    /// comes from the program that describes the panel, like every
     /// other such fact. Not null-terminated of necessity: a reader takes
     /// at most the whole field.
     char button_name[sim_panel_buttons][sim_panel_name_max];
     char shaft_name[sim_panel_shafts][sim_panel_name_max];
 
-    /// Which contact is a shaft's OWN switch, since these parts carry
+    /// Which contact is a shaft's own switch, since these parts carry
     /// one under the knob - or `sim_panel_no_switch` where the shaft has
     /// none. Declared rather than guessed: a viewer that decided for
     /// itself which button belonged to which knob would be inventing a
@@ -100,7 +120,7 @@ struct SimPanelState {
     uint8_t shaft_switch[sim_panel_shafts];
 
     /// Quadrature counts the part gives per detent. Declared for the
-    /// same reason as the switch: it is a fact about the PART, the
+    /// same reason as the switch: it is a fact about the part, the
     /// program configures its decoder with it, and a viewer pretending
     /// to be a hand has to turn the shaft by whole detents - one notch
     /// of a wheel is one click of a knob, not a quarter of one.
@@ -115,11 +135,11 @@ static_assert(sizeof(SimPanelState) <= sim_panel_bytes);
 /**
  * The program's end: it creates the segment, and reads it.
  *
- * Nothing here touches the simulated devices, because WHICH contact is
+ * Nothing here touches the simulated devices, because which contact is
  * which button is a fact about the panel and belongs where the panel is
- * described - the board file wires `pressed(0)` to its own SimButton and
- * `shaft(0)` to its own SimEncoder, exactly as a target's board file
- * wires a pin.
+ * described - the program wires `pressed(0)` to its own SimButton and
+ * `shaft(0)` to its own SimEncoder, exactly as a target program wires a
+ * pin.
  */
 class SimPanel {
 public:

@@ -1,13 +1,76 @@
 # TIM (CH32V00x)
 
-The three timers of RM ch. 11, 12 and 13: TIM1, the advanced-control
-timer; TIM2, the general-purpose one; and TIM3, a streamlined block
-of the CH32V006/007 with no pad. Documents of record: the CH32V00X
+This document is for a programmer who needs a hardware timer: a PWM
+output, a pair of complementary outputs with dead time, a frequency or
+an interval measured on a pad, one timer counting or gated by another,
+a one-shot pulse, a timer that paces a DMA channel. It covers the three
+timers of RM ch. 11, 12 and 13: TIM1, the advanced-control timer; TIM2,
+the general-purpose one; and TIM3, a streamlined block of the
+CH32V006/007 with no pad, which the CH32V003 has not. `Tim<n>` is the
+resource, the instance's registers as functions; the tasks over it
+(`TimPwm`, `TimPairPwm`, the meters, the counters, `TimOnePulse`) are
+the shapes a program asks for, each a type whose functions are all
+static, and `TimPad` hands a channel its pad. The kernel's time events
+do not need any of these: they run on the STK ([platform.md](platform.md)).
+
+The smallest use, a 1 kHz PWM on TIM1's channel 1, from "How to use it"
+below:
+
+```cpp
+using Pwm = brio::TimPwm<brio::Tim<1>, 0, 999>;      // TIM1 CH1 on PD2
+using Pad = brio::TimPad<brio::tim_default_pads::tim1_ch1>;
+
+Pad::claim();
+Pwm::setup(47);          // 48 MHz / 48 / 1000 = 1 kHz
+Pwm::duty(250);          // a quarter, glitch-free (the compare is preloaded)
+```
+
+Line by line: `Pwm` names the task, TIM1's channel 1 (channels are
+counted from 0) with a top count of 999, so a period of 1000 counts and
+duties from 0 to 999; `Pad` names the channel's default pad, PD2, from
+the datasheet's table; `claim()` hands the pad to the timer as an
+alternate-function output; `setup(47)` loads the prescaler (47, a
+division by 48), the period with its preload, the channel's PWM mode,
+on TIM1 the main output enable (MOE) the break unit gates every output
+with, and starts the counter, answering false if a step is refused;
+`duty()` writes the compare, clamped to the top, and the new value
+takes effect at the next update.
+
+What decides correctness even there. The timer's clock gate: `setup()`
+writes the timer's registers but does not open its gate, and
+`Tim<n>::init()` does (opening the gate and pulsing the block's reset
+line), so the excerpt assumes `brio::Tim<1>::init()` has run, as the
+timer suite's setup does. The clock task first (the
+prescaler's arithmetic is the program's, and the comment's 1 kHz holds
+only at the 48 MHz the clock type claims, [clock.md](clock.md)); a pad
+the part bonds and a channel that exists (the default pads are the
+CH32V006's, `tim_default_pads`; a column is chosen by `Tim<n>::remap()`
+from AFIO's tables, [pin.md](pin.md)); a pad that is not the debug
+port's (TIM1's CH3N default is PD1, SWDIO, and a program that claims it
+loses the probe); and the counter's state: a stopped counter holds its
+outputs, so a forced level reaches the pad only once the counter has
+run (`setup()` starts it). A program that binds a timer's vector does
+so under the startup code's names, listed below, each calling
+`Tim<n>::isr()`.
+
+The rest of this page, in order: the documents of record; what the
+silicon does, the two parts' differences closing it; the types and
+verbs; how to use it, a frequency measured with no wire among the
+examples; the bench findings; and what is not covered.
+
+## Documents of record
+
+The CH32V00X
 reference manual V1.5 (11.2 and 11.3 for the structure and the modes,
 11.4 for TIM1's registers, 12.2.2 for what TIM2 lacks, 12.3.9 and
 12.4.17 for TIM2's dead-time pairs, 13.2 and 13.4 for TIM3, table 8-2
 for the DMA channels), the CH32V006 datasheet V2.0 (table 2-1-1 for
-the default pads).
+the default pads). The header is
+[brio/ch32v00x/tim.hpp](../../brio/ch32v00x/tim.hpp); the reference
+suite is `test_ch32_tim` (a suite's letter, below, is one command key
+of its console and the group of verdicts it runs, `z` the key that runs
+the image's set of letters, a letter outside it run by its own
+key).
 
 ## What the silicon does
 
@@ -16,11 +79,11 @@ the default pads).
   capture/compare channels, the slave controller with its trigger
   selection, the master TRGO, the external trigger with its filter and
   prescaler, sixteen bits at a four-byte stride but for the four
-  CHxCVR, 32 bits wide so that bit 16 can carry a captured LEVEL.
+  CHxCVR, 32 bits wide so that bit 16 can carry a captured level.
 - **What TIM1 has that TIM2 has not** (12.2.2): the repetition counter,
   three complementary outputs under the break/dead-time unit (BDTR),
   the break input and the idle states.
-- **What TIM2 has instead**: DEAD TIME WITHOUT A BREAK UNIT. TIM2_DTCR
+- **What TIM2 has instead**: dead time without a break unit. TIM2_DTCR
   pairs channel 3 with channel 1 and channel 4 with channel 2 as
   complementary outputs, each pair with its own dead time of 1..16
   module clocks and two polarities (12.3.9): a TIM2 pair costs two
@@ -47,7 +110,7 @@ the default pads).
 - **BIF cannot be cleared while the break input stands** (measured):
   a break handler on a held level re-enters for ever unless it
   silences its own enable.
-- **TIM3's DMA request is ONE-SHOT** (measured): the channel 3 or 4
+- **TIM3's DMA request is one-shot** (measured): the channel 3 or 4
   match serves exactly one transfer after a reset of the block and
   never another - not the compare rewritten, not CCxDE toggled, not
   CEN toggled, not the counter zeroed, not the register read; only the
@@ -61,10 +124,10 @@ the default pads).
   on PD1, the SWIO pad, and 0110 (CH2 PB0, CH3 PB1, CH4 PB2) keeps every
   TIM1 signal off the debug port - a signal is claimed only by its
   channel's enable.
-- **A stopped counter HOLDS its outputs** (11.4.1, the note under
+- **A stopped counter holds its outputs** (11.4.1, the note under
   OE_MODE: "the current output pin state is maintained when ... the
   counter is disabled"): a channel forced high on a timer that has not
-  run since its reset drives the pad LOW, the reset level, until CEN is
+  run since its reset drives the pad low, the reset level, until CEN is
   set - measured, a pad handed to TIM1's channel 2 that way held the
   line low until the first list's counter started. A forced level is
   seen at the pad once the counter runs, and a stop then holds it.
@@ -87,7 +150,7 @@ the default pads).
   cleared), `enable()`,
   `count()`, `period()`, `prescaler()`, the software events, the flags
   and `clear_flags()`, `interrupts(mask, on)` for DMAINTENR's
-  interrupt AND DMA enables, `isr()` (the raised-and-enabled flags,
+  interrupt and DMA enables, `isr()` (the raised-and-enabled flags,
   cleared, for any of the instance's vectors), `output_channel(ch,
   TimChannelConfig)` (mode, preload, polarity, the complementary
   output through CCER on TIM1 and through DTCR on TIM2, the idle

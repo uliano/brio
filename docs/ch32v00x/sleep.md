@@ -1,14 +1,93 @@
 # PWR (CH32V00x)
 
-The stopping half of the platform: RM ch. 2's two low-power modes, the
-regulator and the supply monitor, the auto-wakeup unit that counts the
-LSI - and the two sleep sites that run util/power.hpp's model over
-them, the model unchanged here as on the other three. Documents of record:
-the CH32V00X reference manual V1.5 (2.3 for the modes, 2.3.4 and
+This document is for a programmer who wants a CH32V006 or a CH32V003 to
+spend its idle time in Standby, the deepest mode this silicon has, and
+wake for the program's next timer; and for one who needs the supply
+monitor (the PVD) or the regulator's modes. It covers the stopping half
+of the platform: RM ch. 2's two low-power modes, the regulator and the
+supply monitor, the auto-wakeup unit (the AWU) that counts the LSI, and
+the two sleep sites that run util/power.hpp's model over them, the
+model unchanged ([design/power.md](../design/power.md)). In that model
+a sleep site is the target's part: it arms a depth of the ladder
+(`light`, `standby`, `deep`, each a rung) before the kernel's idle hook
+runs, and puts the chip back after the wake; the `PowerManager`, an
+active object of the program (a component with its own event queue,
+served one event at a time by the kernel,
+[docs/learn/introduction.md](../learn/introduction.md)), decides the
+depth from the votes of the components with something at stake. Here
+`light` is Sleep, `standby` and `deep` both Standby. The STK, the
+kernel's tick, stops in a Standby, so kernel time stands still across
+one: the plain site `Ch32SleepSite` arms a Standby whenever it is
+asked, and a program on it asks only with no time event armed - a rule
+the program keeps, which the plain site does not check and the manager
+checks only in part (it refuses a `standby` or `deep` request when the
+nearest time event is nearer than its `min_deep_ticks`, two ticks by
+default, [util/power.hpp](../../brio/util/power.hpp), and lets a farther
+one through); the timed site `Ch32TimedSleepSite` lifts the rule with
+the AWU as the alarm for the next deadline.
+
+The smallest use, the timed site under the manager, from "How to use
+it" below:
+
+```cpp
+using Site = brio::Ch32TimedSleepSite<P, SysClock>;
+using Power = brio::PowerManager<P, Site, brio::PowerConfig{}, Voters...>;
+
+extern "C" BRIO_CH32_INTERRUPT void awu_handler() { Site::awu_isr(); }
+
+Site::init();                       // the LSI on and measured
+brio::Tenuto<P, Power, ...>::run(); // the manager arms, the loop's idle path sleeps
+```
+
+Line by line: `Site` names the timed site over the platform `P`
+([platform.md](platform.md)) and the clock type, which the site puts
+back after each Standby; `Power` is the manager, with the default
+configuration and the program's voters (`Voters...` stands for them);
+the `extern "C"` function binds the AWU's vector to the site's body, as
+the program binds the tick's; `Site::init()` turns the LSI on and
+measures it against the STK, the rate every alarm is computed from; the
+manager goes in the list of active objects given to the kernel (the
+other `...`). The kernel's loop then idles as always, and the platform's
+`idle()` sleeps at whatever depth the site armed.
+
+What decides correctness even there. The AWU's vector must be bound:
+the site enables the AWU's line in the interrupt controller, so its
+wake is a level the sleeping core cannot miss, and an unbound vector
+lands in the startup code's spin. The clock comes back on the HSI: the
+hardware switches the system clock to the HSI and turns the PLL off in
+a Standby, and `disarm()` restores the clock type's tree (a static
+`Clock` re-runs its init, a `DynamicClock` re-applies its current
+rate), so the first bytes a peripheral moves after
+the wake, before `disarm()`, run at the HSI's rate. A wake the AWU did
+not cause advances kernel time by nothing: the AWU has no count to
+read, so a Standby a pad or the PVD ended leaves the kernel's tick
+short by the slept span, late and never early. In real time the
+account errs the other way: with the probe attached a Standby
+measured 11 to 15 per cent shorter than the span the site hands the
+kernel, so a time event across one comes early on a wall clock
+though never early in kernel time (the bench findings). And the
+probe: a core in debug mode cannot enter any sleep (QingKe V2 manual
+5.1), so a
+program measured with the probe attached proves that it sleeps and
+wakes, not what the sleep draws.
+
+The rest of this page, in order: the documents of record; what the
+silicon does, the two parts' differences closing it; the types and
+verbs, with what the timed site guarantees of its wake; how to use it;
+the bench findings on both parts, the AWU's edge swept to the cycle
+among them; and what is not covered.
+
+## Documents of record
+
+The CH32V00X reference manual V1.5 (2.3 for the modes, 2.3.4 and
 2.4.3..2.4.5 for the AWU, 6.4 for the EXTI lines the wake sources are),
 the CH32V003 reference manual V1.9 (its ch. 2, the same shape with its
 own PVD table), the QingKe V2 manual V1.3 (5.1 and 5.2 for what a WFI
-and a WFE do).
+and a WFE do). The header is
+[brio/ch32v00x/sleep.hpp](../../brio/ch32v00x/sleep.hpp); the reference
+suite is `test_ch32_sleep` (a suite's letter, below, is one command key
+of its console and the group of verdicts it runs, `z` the key that runs
+the image's set of letters; a letter run "by name" is outside `z`).
 
 ## What the silicon does
 
@@ -31,9 +110,9 @@ and a WFE do).
   enabled (measured); its count cannot be read, and its window
   cannot exceed 2.048 s at /4096 - or 30 s at the /61440 code.
 - **Line 9 reaches a WFE three ways** (QingKe V2 manual 5.2, RM 2.3.1
-  and 6.4.2): as an EXTI EVENT (item 1, no handler, no flag), as an
+  and 6.4.2): as an EXTI event (item 1, no handler, no flag), as an
   interrupt the PFIC does not enable, through SEVONPEND's "new
-  interrupt pending signal" (item 3 - an EDGE), and as an interrupt
+  interrupt pending signal" (item 3 - an edge), and as an interrupt
   the PFIC enables, with MIE set (item 2 - a pending line the core
   takes, the handler run first). The edge has the hole platform.md
   measures: one arriving on the cycle the WFE goes to sleep is lost,
@@ -66,22 +145,22 @@ each part's own thresholds, `pvd_rising_mv()` / `pvd_falling_mv()`
 saying what a level is and `pvd_level_lowest` / `pvd_level_highest`
 spelling the ends of either ladder; every verb opens the PB1 gate
 first), `Awu` (`init()` turning the LSI on and arming line 9 as an
-EXTI interrupt line WITHOUT the PFIC - a flag to poll and a pending
+EXTI interrupt line without the PFIC - a flag to poll and a pending
 bit a WFE wakes on -, `arm(prescaler, window)`, `fired()`, `clear()`
-clearing the flag AND the PFIC's pending bit, `period_us()`), and the
+clearing the flag and the PFIC's pending bit, `period_us()`), and the
 two sites. `Ch32SleepSite<Clock>` is the ladder onto the two modes:
 `light` is Sleep, `standby` and `deep` both Standby, the deepest this
 silicon has; `disarm()` after a Standby calls `Clock::restore()` (a
 static `Clock` re-runs its init, a `DynamicClock` re-applies its
 current rate) because the core woke on the HSI.
 `Ch32TimedSleepSite<P, Clock>` lifts the no-deadline rule: `init()`
-MEASURES the LSI against the STK (64 undivided counts timed in HCLK
+measures the LSI against the STK (64 undivided counts timed in HCLK
 cycles), `arm(deep)` converts `TimeEvents<P>::ticks_to_next()` into
-LSI counts at the measured rate rounded UP, picks the coarsest
-prescaler that keeps the window in six bits and ENABLES line 9 in the
+LSI counts at the measured rate rounded up, picks the coarsest
+prescaler that keeps the window in six bits and enables line 9 in the
 PFIC, `awu_isr()` is the vector's body (it closes the line again,
 leaving the flag as the witness), and `disarm()` advances
-kernel time by the alarm's span LESS the ticks the STK counted awake
+kernel time by the alarm's span less the ticks the STK counted awake
 since arm() - when the AWU is what fired; when something else ended
 the Standby the span is unknown and nothing is advanced (late
 maturation is legal, early is not). [brio/ch32v00x/exti.hpp](../../brio/ch32v00x/exti.hpp)
@@ -93,7 +172,7 @@ and resumes it after, so kernel time stands still for exactly the
 slept span and the tick cannot end the Standby before it begins.
 
 **What the timed site guarantees of its wake.** The AWU's match ends
-the Standby by the one path that is a LEVEL: line 9 an interrupt the
+the Standby by the one path that is a level: line 9 an interrupt the
 PFIC enables, the WFE entered with MIE set, so the match is a pending
 line the sleeping core takes (5.2's WFE item 2) whenever it arrives -
 before the masked check (the check sees the flag and the loop does not

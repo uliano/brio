@@ -1,8 +1,42 @@
 /*
  * nv_writer.hpp
  *
- * NvWriter: the active object that writes nonvolatile memory WITHOUT
- * ever stalling the system.
+ * NvWriter: the active object that writes nonvolatile memory without
+ * ever stalling the system. A caller posts one request (an address, the
+ * bytes, their length, where to reply) and gets one NvDone back when
+ * the bytes are down, the rest of the program running meanwhile. An
+ * active object is a component with its own event queue whose dispatch
+ * the kernel loop runs, one event at a time (docs/design/kernel.md,
+ * section 1, "The model in one page").
+ *
+ * The smallest use names the writer over a store that has a ready
+ * interrupt (util/nv_record.hpp's NvPacedStore: the AVR's EepromStore,
+ * avrxt/nvm.hpp), lends it the bytes, and handles the reply in the
+ * requesting active object:
+ *
+ *     using Writer = brio::NvWriter<brio::EepromStore, P, 2>;
+ *
+ *     static const uint8_t payload[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+ *     brio::post<Writer>(brio::NvWrite{
+ *         96, brio::lend<brio::Lease::reply>(payload), sizeof payload,
+ *         brio::reply_to<Requester, brio::NvDone>()});
+ *     // Requester's dispatch receives NvDone{status, written}
+ *
+ * plus the interrupt glue below, which posts NvReady.
+ *
+ * Who calls what, and from where:
+ *  - the requester posts NvWrite from its own dispatch (post() itself
+ *    is legal from any context, kernel/post.hpp); the reply comes later,
+ *    as an NvDone event in the requester's queue;
+ *  - the store's ready interrupt handler, the program's glue, disables
+ *    the interrupt and posts NvReady;
+ *  - NvWriter's dispatch, in the kernel loop like every active object,
+ *    starts at most one operation per event and returns. No dispatch
+ *    waits: none calls the store's wait_ready(), and the only reads of
+ *    the store are made with no operation of the writer's in flight.
+ *    Nothing here takes a critical section beyond the one each post()
+ *    takes for the copy of its event (kernel/post.hpp); the pending
+ *    FIFO is touched by the dispatch alone.
  *
  * The problem it exists for. A byte of EEPROM takes about ten
  * milliseconds to erase-and-write, and the silicon halts the CPU the
@@ -12,33 +46,48 @@
  * second. That is not a slow write, it is a dead system.
  *
  * The shape. One operation per interrupt: the store announces "ready"
- * with its own interrupt, the app's ISR glue posts NvReady, and the
- * writer's dispatch starts exactly ONE operation and returns - one byte
- * on a byte store, one RUN (the differing bytes of one write unit,
- * util/nv_record.hpp's NvRunStore) on a store that takes a run. Between
- * two operations the kernel runs everything else. The whole transfer is
- * therefore made of dispatches of some tens of microseconds (what one
- * run costs on the AVR EA: docs/avrxt/nvm.md) spread over as long as
- * the memory needs, and no code anywhere waits.
+ * with its own interrupt, the program's interrupt glue posts NvReady,
+ * and the writer's dispatch starts exactly one operation and returns -
+ * one byte on a byte store, one run (the differing bytes of one write
+ * unit, util/nv_record.hpp's NvRunStore) on a store that takes a run.
+ * Between two operations the kernel runs everything else. The whole
+ * transfer is therefore made of dispatches of some tens of
+ * microseconds (what one run costs on the AVR EA: docs/avrxt/nvm.md)
+ * spread over as long as the memory needs, and no code anywhere waits.
  *
  * The interface is BusMaster's, for the same reason (util/bus_master.hpp):
  * a request that outlives its dispatch needs a queue to wait in and a
  * return channel to answer on. Requests that arrive while one is in
- * flight wait in a small FIFO; a full FIFO answers immediately with
- * nv_rejected rather than blocking or dropping.
+ * flight wait in a small FIFO of pending_depth entries; a full FIFO
+ * answers immediately with nv_rejected rather than blocking or
+ * dropping. The writer's event queue holds pending_depth + 2 events
+ * (the code's own count: the waiting requests, the one in flight and
+ * one NvReady); a post past that is dropped by the queue and counted in
+ * queue.overflows() (kernel/event_queue.hpp), with no reply. The writer
+ * never sees a dropped request, so its bytes are the requester's again
+ * at once, and that counter is the only trace of it.
  *
- * OWNERSHIP. The bytes travel as a Borrowed<..., Lease::reply> inside
- * the request and are read as the writer advances: the
- * requester must keep them alive and unchanged until its NvDone arrives.
- * A static buffer or a member of the requesting AO is the normal answer.
+ * Who owns the bytes, and until when. The bytes travel as a
+ * Borrowed<..., Lease::reply> inside the request (kernel/borrowed.hpp)
+ * and are read as the writer advances: the requester must keep them
+ * alive and unchanged from the post until its NvDone arrives, whatever
+ * its status. A static buffer or a member of the requesting active
+ * object is the normal answer. Nothing checks it.
  *
- * ISR GLUE the app must provide (the vector name is the target's, and
- * never appears in portable code):
+ * Interrupt glue the program must provide (the vector name is the
+ * target's, and never appears in portable code; on the AVR the
+ * driver's handler body Nvm::eeready() does the disabling,
+ * avrxt/nvm.hpp):
  *
  *     ISR(<the store's ready vector>) {
  *         Store::arm_ready_interrupt(false);   // level flag: mandatory
  *         brio::post<Writer>(brio::NvReady{});
  *     }
+ *
+ * The disable is mandatory because the ready flag is a level: left
+ * enabled, the vector would run again as soon as it returned, for as
+ * long as the store is idle. The writer re-arms it when it starts the
+ * next operation.
  */
 
 #pragma once
@@ -55,7 +104,10 @@
 
 namespace brio {
 
-/// Reply payload of an NvWrite.
+/// Reply payload of an NvWrite: sent once per request the writer
+/// received, whatever its fate (a request the event queue dropped never
+/// reached it, and gets none). After it the lent bytes are the
+/// requester's again.
 struct NvDone {
     uint8_t status;    ///< nv_ok, nv_rejected, nv_bad_range, nv_refused
     uint16_t written;  ///< bytes actually committed (0 .. len)
@@ -64,21 +116,24 @@ struct NvDone {
 inline constexpr uint8_t nv_ok = 0;
 inline constexpr uint8_t nv_rejected = 1;   ///< the pending FIFO was full
 inline constexpr uint8_t nv_bad_range = 2;  ///< the request leaves the store
-inline constexpr uint8_t nv_refused = 3;    ///< the store refused a byte
+inline constexpr uint8_t nv_refused = 3;    ///< the store refused a byte or a run
 
 /// Write `len` bytes at `addr`. Bytes already equal to what is stored
-/// are SKIPPED (endurance, exactly as in NvRecord::store), so `written`
-/// in the reply is normally smaller than `len`.
+/// are skipped (endurance, exactly as in NvRecord::store), so `written`
+/// in the reply can be smaller than `len`: zero when the store already
+/// held them all. A request that leaves the store is answered with
+/// nv_bad_range and writes nothing.
 struct NvWrite {
     uint16_t addr;
-    /// The source bytes, read as the writer advances: LENT until the
+    /// The source bytes, read as the writer advances: lent until the
     /// reply lands.
     Borrowed<const uint8_t, Lease::reply> data;
     uint16_t len;
     ReplyTo<NvDone> reply;
 };
 
-/// Posted by the app's ISR glue when the store's ready interrupt fires.
+/// Posted by the program's interrupt glue when the store's ready
+/// interrupt fires.
 struct NvReady {};
 
 template <NvPacedStore Store, Platform P, uint8_t pending_depth = 2>
@@ -92,6 +147,8 @@ public:
     // pending_depth requests waiting + one in flight + one NvReady.
     static inline EventQueue<Event, pending_depth + 2, P> queue;
 
+    /// The kernel's call before the first dispatch (Tenuto calls every
+    /// active object's init()): the ready interrupt off, the FIFO empty.
     static void init() {
         Store::arm_ready_interrupt(false);
         pending_head_ = pending_count_ = 0;

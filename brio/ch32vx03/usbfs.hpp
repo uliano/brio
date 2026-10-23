@@ -1,33 +1,88 @@
 /*
  * usbfs.hpp
  *
- * The USB full-speed HOST/DEVICE controller of RM ch. 23 - USBFS, which
- * WCH's datasheets also call OTG_FS - in DEVICE mode, realizing
- * util/usb's UsbController at the packet: the CH32V303's one full-speed
- * controller, and the CH32V203's second one beside the device controller
- * of usb.hpp.
+ * The USB full-speed host/device controller of RM ch. 23 - USBFS, which
+ * WCH's datasheets also call OTG_FS - in device mode, as the endpoint
+ * controller of brio's USB stack: `Usbfs<pool_bytes>` realizes
+ * util/usb's UsbController at the packet, so util/usb/device.hpp's
+ * UsbDevice answers a host's enumeration over it and util/usb/cdc.hpp's
+ * UsbCdcAcm makes the chip a serial port on its own connector - a
+ * console or a byte transport a Linux host binds to its own cdc-acm
+ * driver. It is the CH32V303's one full-speed controller, and the
+ * CH32V203's second one beside the device controller of usb.hpp.
+ * `Usbfs` is a monostate (a class with only static members, never
+ * instantiated: one block, one set of state) whose endpoint buffers are
+ * a pool in the program's RAM; nothing above the packet is this file's.
  *
- * WHAT THIS BLOCK IS. WCH's own design and nothing of ST's: a register
- * file of BYTES at 0x50000000 on the HB bus, eight endpoint numbers with
+ * The smallest use, as docs/ch32vx03/usbfs.md's "How to use it" writes
+ * it (with the descriptors and the clock task beside it there):
+ *
+ *     using Usb = brio::Usbfs<>;                                  // 960 bytes: no claim ever refused
+ *     using Port = brio::UsbCdcAcm<Usb, P>;                       // interface 0, endpoints 1 and 2
+ *     using Device = brio::UsbDevice<Usb, Descriptors, Port>;
+ *     Usb::init(clock);
+ *     Device::start();                                             // the pull-up: the host enumerates from here
+ *     BRIO_CH32_VECTOR(usbfs_handler) { Device::isr(); }
+ *
+ * Who calls what, and from where. init() and release() are setup verbs:
+ * main(), after the clock task's init(); both open or close gates with
+ * unguarded read-modify-writes of RCC registers other drivers' gates
+ * share, and init() waits once, for the engine's reset, at least ten
+ * microseconds by a loop of register reads sized for the part's fastest
+ * HCLK (longer at every slower one, settle()). connect() is the stack's
+ * (UsbDevice::start() and stop() call it, and the program calls those
+ * in main context): a read-modify-write of R8_USB_CTRL, and the
+ * bus-master count taken or given back under the platform's guard for a
+ * few instructions (ch32vx03/bus_activity.hpp). The vector body is the
+ * stack's, UsbDevice::isr(), bound by the program to `usbfs_handler`
+ * (interrupt 83 on the CH32V303, 59 on the CH32V203) and called from
+ * nothing else; it drains take_events(), a loop bounded at 16 turns
+ * that masks nothing, stops at the first transfer on endpoint zero, and
+ * waits at least ten microseconds the same way at a suspend or resume
+ * flag before it reads the state register. On the CH32V303's images,
+ * built with the F extension and the hardware prologue on (the
+ * project's CH32VX03_HPE option, on by default), BRIO_CH32_VECTOR makes
+ * that binding a naked trampoline whose body must do no floating-point
+ * work, which `brio check ch32vx03`'s vector guard holds it to
+ * (ch32vx03/pfic.hpp). The rest of the UsbController contract
+ * (set_address, configure_endpoint, stall, submit_in, submit_out,
+ * out_data, setup) is called by the stack inside that body, or by a
+ * class's program side under the platform's critical section:
+ * util/usb/cdc.hpp's write_byte(), write_bulk(), read_byte() and
+ * consume() arm a packet so, and submit_in() copies up to 64 bytes into
+ * the pool with interrupts masked. arm_wakeup() is a setup verb, and
+ * wakeup_isr() the body of the wake-up line's vector
+ * (`usb_wakeup_handler` on the CH32V303, `usbfs_wakeup_handler` on the
+ * CH32V203), called from nothing else. set_out_toggle() takes the
+ * platform's guard for its read-modify-write; count_frames() and
+ * auto_pause() are unguarded read-modify-writes, the suites' verbs.
+ * Storage: the pool is this driver's static array, `pool_bytes` of RAM;
+ * submit_in() copies the caller's span before it returns; out_data()
+ * hands out the pool's own bytes, valid until the endpoint is armed
+ * again (on endpoint zero, until the next submit_in() there too). The
+ * readbacks are loads, with no guard and no wait.
+ *
+ * What this block is. WCH's own design and nothing of ST's: a register
+ * file of bytes at 0x50000000 on the HB bus, eight endpoint numbers with
  * a mode nibble each - packed two to a byte, in an order the chapter
  * spells out register by register (usbfs_mod_slot) - a DMA address, a
- * transmit length and TWO RESPONSE BYTES per number (one for IN, one for
+ * transmit length and two response bytes per number (one for IN, one for
  * OUT), and the endpoint buffers in the program's own SRAM, which the
  * block reaches by DMA. One flag byte, and beside it one status byte
- * naming the TOKEN and the ENDPOINT of the transfer that completed, and
- * ONE receive-length register for every endpoint. It shares nothing with
+ * naming the token and the endpoint of the transfer that completed, and
+ * one receive-length register for every endpoint. It shares nothing with
  * the device controller of ch. 21 - other registers, other buffers,
  * another vector - and a part may carry both on different pads (the
  * CH32V203C8 does); which parts carry this one, and on which pads, is
  * the part table's (`device::has_usbfs`, `device::usbfs_dm_port` and its
  * three siblings).
  *
- * THE BUFFERS ARE THE PROGRAM'S RAM, AND THIS DRIVER OWNS THEM. A static
+ * The buffers are the program's RAM, and this driver owns them. A static
  * pool, four-byte aligned because 23.2.2.6 asks every buffer address to
  * be, handed out in the order the stack claims endpoints (the RP2040's
  * method): endpoint zero's 64 bytes by init(), since that endpoint sends
- * and receives through ONE buffer (23.2.2); then 64 bytes a direction.
- * A number with BOTH directions takes 128 bytes in one piece, the OUT
+ * and receives through one buffer (23.2.2); then 64 bytes a direction.
+ * A number with both directions takes 128 bytes in one piece, the OUT
  * half first and the IN half 64 above it - table 23-4's single-buffered
  * row with both enables set, and the vendor's own sequence loads an IN
  * packet at +64 exactly when the number receives too. The stack claims
@@ -35,13 +90,13 @@
  * the first when the first was the last thing handed out, and otherwise
  * both halves move to a fresh 128 bytes; that happens inside a
  * configuration, before anything is armed, and a claim that would move
- * an ARMED half is refused. `pool_bytes` is a template parameter because
+ * an armed half is refused. `pool_bytes` is a template parameter because
  * the memory is the program's: `Usbfs<>` reserves 960 bytes (endpoint
  * zero and all seven numbers both ways, so no claim ever fails for want
  * of memory) and a CDC ACM port spends 256 of them.
  *
- * THE BUFFER REGISTER HOLDS AN OFFSET. R32_UEPn_DMA is written with the
- * buffer's whole address, and it reads back the address's LOW BITS alone
+ * The buffer register holds an offset. R32_UEPn_DMA is written with the
+ * buffer's whole address, and it reads back the address's low bits alone
  * - 0x5E0 for a buffer at 0x2000_05E0, measured on the CH32V303VC, with
  * reset values of up to seventeen bits in the numbers nothing wrote -
  * which is also how WCH's copy path reads it (back, plus 0x20000000). So
@@ -50,22 +105,22 @@
  * reads the register back: it keeps its own copy of every buffer's
  * place.
  *
- * ONE RX_LEN AND ONE INT_ST FOR EVERY ENDPOINT, AND THE BIT THAT MAKES
- * THAT SAFE. The length of the last reception and the token and endpoint
+ * One RX_LEN and one INT_ST for every endpoint, and the bit that makes
+ * that safe. The length of the last reception and the token and endpoint
  * of the last transfer are single registers, overwritten by the next
  * transfer. RB_UC_INT_BUSY (23.2.1.1) is what keeps them standing: with
  * it set the block answers NAK to every transaction while UIF_TRANSFER
  * is up, so the two registers describe exactly one transfer until the
- * handler clears the flag - MEASURED: with the vector held off for 20 ms
+ * handler clears the flag - measured: with the vector held off for 20 ms
  * under a host's pour the status byte changed once, for the first packet,
  * and never again, where with the bit clear it changed 248 to 297 times,
  * each change a packet taken over one nobody had read. init() sets it
  * and every other line of take_events() rests on it: the status and the
  * length are read first, the endpoint's response is changed, and the
- * flag is cleared LAST. `auto_pause(false)` exists for one reason - a
+ * flag is cleared last. `auto_pause(false)` exists for one reason - a
  * suite staging what the pause prevents.
  *
- * A SETUP IS NOT JUDGED BY ITS ENDPOINT FIELD. At a SETUP the status
+ * A SETUP is not judged by its endpoint field. At a SETUP the status
  * byte's endpoint number is not the setup's: on the CH32V303VC it read 6
  * at the first SETUP after a bus reset - the field holds what the last IN
  * or OUT left, or its reset garbage - and a driver that took it for the
@@ -74,7 +129,7 @@
  * RX_LEN beside it is not the setup's length either (1022, measured): the
  * eight bytes are copied whatever it says.
  *
- * AND THE RESPONSE IS NOT CHANGED BY THE SILICON: after a completed OUT
+ * And the response is not changed by the silicon: after a completed OUT
  * the endpoint's register still answers ACK (measured, with the vector
  * held off), and only the pause above keeps the block from taking the
  * next packet into the same buffer - where ST's block drops its status to
@@ -84,7 +139,7 @@
  * reports a completion for, before it clears the flag, and a packet goes
  * out or comes in once per submit: the stack's own contract.
  *
- * THE DATA TOGGLE IS THE DRIVER'S, AND ITS ONLY COPY IS THE REGISTER.
+ * The data toggle is the driver's, and its only copy is the register.
  * T_TOG and R_TOG (23.2.2.8, 23.2.2.9) are the PID to send and the PID
  * to expect. The AUTO_TOG bits would flip them in hardware on endpoints
  * 1..7 and endpoint zero has none, so this driver flips them itself, on
@@ -92,22 +147,22 @@
  * to fall out of step: DATA0 at a claim and after a cleared halt, DATA1
  * both ways on endpoint zero at every SETUP (chapter 9's rule, as the
  * RP2040's driver keeps it), and flipped at every IN the host took and at
- * every OUT whose PID matched. An OUT whose PID did NOT match (RB_UIS_
- * TOG_OK clear) is a packet the host is sending AGAIN because it never
+ * every OUT whose PID matched. An OUT whose PID did not match (RB_UIS_
+ * TOG_OK clear) is a packet the host is sending again because it never
  * saw the device's acknowledgement: the silicon acknowledges it
  * (measured: a staged mismatch cost the stream exactly one packet and the
  * host did not send it again), and this driver drops it and leaves the
  * endpoint armed - `toggle_errors()` counts them. The stack never sees a
  * PID.
  *
- * A SETUP IS TAKEN WHATEVER ENDPOINT ZERO'S RESPONSE SAYS - measured:
+ * A SETUP is taken whatever endpoint zero's response says - measured:
  * this driver leaves endpoint zero at NAK both ways between control
  * transfers and every SETUP of every enumeration landed. At a SETUP both
  * directions of endpoint zero go to NAK with DATA1 and the eight bytes
- * are COPIED OUT of the shared buffer at once, because the answer the
+ * are copied out of the shared buffer at once, because the answer the
  * stack writes next lands in that same buffer.
  *
- * THE PULL-UP IS THIS BLOCK'S, AND IT IS ALSO THE DEVICE ENABLE.
+ * The pull-up is this block's, and it is also the device enable.
  * MASK_UC_SYS_CTRL (table 23-2) is one field for both: 00 the device
  * function off and no pull-up, 1x the device function on with the
  * internal 1.5 kOhm on D+. connect() writes that field and nothing else,
@@ -115,14 +170,14 @@
  * ready to answer - and the transceiver itself (RB_UD_PORT_EN) and the
  * pull-downs' release (RB_UD_PD_DIS, for host mode) are init()'s.
  *
- * AND A DETACHED BLOCK REPORTS NOTHING. With the pull-up down the bus is
+ * And a detached block reports nothing. With the pull-up down the bus is
  * SE0 - the host's two pull-downs and nobody's pull-up - and the
  * transceiver, still on, calls that a bus reset (measured: one within
  * 100 ms of every detach), which the stack would take for an attachment.
  * take_events() acknowledges and drops every flag while connect(false)
  * stands.
  *
- * AND connect() IS WHERE THIS CONTROLLER COUNTS ITSELF A BUS MASTER, for
+ * And connect() is where this controller counts itself a bus master, for
  * the reason usb.hpp gives for the other one: its DMA reaches the pool
  * over the bus matrix whenever the host speaks, and in a sleep of any
  * depth on this family no master but the core gets a cycle
@@ -136,7 +191,7 @@
  * holds one count from the pull-up to the detach, the platform's idle()
  * does not sleep over it and a sleep site refuses to arm over it.
  *
- * THE PADS NEED NO PORT CLOCK, and are left floating inputs anyway.
+ * The pads need no port clock, and are left floating inputs anyway.
  * Measured: with the gate of the pads' port shut the host enumerated the
  * device, and WCH's own sequence touches no GPIO - where the device
  * controller of ch. 21 cannot work so (usb.hpp). init() still opens the
@@ -144,7 +199,7 @@
  * GPIO configuration a program left behind stands between the
  * transceiver and the wire.
  *
- * ONE CLOCK RATE, AND A FLOOR UNDER THE BUS. The controller wants 48 MHz
+ * One clock rate, and a floor under the bus. The controller wants 48 MHz
  * and the tree's USBPRE makes it (clock.hpp): refused at compile time
  * under a static Clock that cannot, and answered with false by init()
  * under a dynamic one whose rate in force cannot. The datasheet's own
@@ -155,33 +210,33 @@
  * with no overflow flagged - at 6, and did neither at 1.5 - so
  * `usbfs_min_hclk_hz` is 12 MHz, refused below at compile time.
  *
- * THE WAKE-UP LINE. Table 9-3 gives this controller's wake-up event to
+ * The wake-up line. Table 9-3 gives this controller's wake-up event to
  * EXTI line 20 on every class of this stratum, and on the CH32V30x_D8 it
- * names line 18 for "USBD/USBFSOTG" as well. MEASURED on the CH32V303VC:
+ * names line 18 for "USBD/USBFSOTG" as well. Measured on the CH32V303VC:
  * a host's resume raises line 18, once, and line 20 never - so
  * `wakeup_line` and `wakeup_irq` are 18 and vector 58 on that class and
  * table 9-3's 20 (vector 60) on the CH32V203's. `arm_wakeup()` arms the
  * line and `wakeup_isr()` is its body. The stack uses neither: a
  * suspended controller keeps its bus-master count.
  *
- * THE ISR BODY IS THE STACK'S: `UsbDevice<Usbfs<>, ...>::isr()` is what
+ * The ISR body is the stack's: `UsbDevice<Usbfs<>, ...>::isr()` is what
  * the app binds to `usbfs_handler`, and it drains take_events(). One
  * vector carries every event of this block in device mode.
  *
- * WHAT IS NOT COVERED YET, each with its reason:
- *  - the HOST half of the chapter (23.2.3) and OTG's SRP and HNP: brio
+ * What is not covered yet, each with its reason:
+ *  - the host half of the chapter (23.2.3) and OTG's SRP and HNP: brio
  *    has no host side and will not (docs/design/usb.md); the OTG
  *    registers are, besides, the CH32V305's and CH32V307's alone.
- *  - the DOUBLE BUFFER (RB_UEPn_BUF_MOD, table 23-4) and ISOCHRONOUS
+ *  - the double buffer (RB_UEPn_BUF_MOD, table 23-4) and isochronous
  *    endpoints (the "no response" codes, endpoint 3's 1023 bytes): the
  *    contract admits one packet in flight per endpoint and direction, and
  *    no class here streams.
  *  - endpoints 8..15, which 23.2.2 maps onto the registers of 1..7: a
  *    number above 7 would share the resources of the one it maps onto.
- *  - LOW SPEED (RB_UC_LOW_SPEED, RB_UD_LOW_SPEED) and the 1-WIRE MODE
+ *  - low speed (RB_UC_LOW_SPEED, RB_UD_LOW_SPEED) and the 1-wire mode
  *    (RB_U_1WIRE_MODE, the CH32V303's on some lots): this stratum is a
  *    full-speed device on two wires.
- *  - the NAK INTERRUPT (RB_UIE_DEV_NAK): it would fire on every NAK this
+ *  - the NAK interrupt (RB_UIE_DEV_NAK): it would fire on every NAK this
  *    device answers - every poll of an idle IN endpoint - and nothing
  *    above the packet wants that; it is left disabled.
  *  - the suspend's low-power half: what a suspended controller would let
@@ -421,7 +476,7 @@ struct Usbfs {
      * laid out over its buffer, the interrupts of a device (a bus reset,
      * a completed transfer, suspend and resume, a FIFO overflow), the
      * automatic pause, the DMA and the transceiver on - and the device
-     * function and its pull-up still OFF: connect() is the stack's, and
+     * function and its pull-up still off: connect() is the stack's, and
      * the host must not see a device until the program is ready to
      * answer it. The counters start again here: they belong to this
      * bring-up of the block, not to the program.
@@ -429,6 +484,14 @@ struct Usbfs {
      * The clock is checked where it can be (the file header): at compile
      * time under a static Clock, at run time - false, nothing touched -
      * under a dynamic one.
+     *
+     * A setup verb: main(), after the clock task's init(), before
+     * UsbDevice::start(). What is checked is the clock type, or the
+     * rate a dynamic clock reports in force, not the hardware: the
+     * clock task's own init() writes USBPRE and starts the PLL, so it
+     * runs first. The one wait is the engine's reset, at least ten
+     * microseconds (settle()). Under a static Clock the answer is
+     * always true.
      */
     template <typename C>
     static bool init(C clock) {
@@ -494,7 +557,8 @@ struct Usbfs {
     /// Give the block back: the wake-up line and the vector off, the
     /// device function and its pull-up off (the bus-master count with
     /// them), the transceiver off, the engine held in reset - the
-    /// register's reset value - and the HB gate shut.
+    /// register's reset value - and the HB gate shut. A setup verb, main
+    /// context; the two pads stay the floating inputs init() made them.
     static void release() {
         (void)arm_wakeup(false);
         connect(false);
@@ -509,7 +573,10 @@ struct Usbfs {
 
     /// The device function and the internal pull-up on D+, which is one
     /// field here (the file header) - and the bus-master count, held from
-    /// the pull-up to the detach.
+    /// the pull-up to the detach. The stack's verb (UsbDevice::start()
+    /// and stop()), main context: the CTRL store is an unguarded
+    /// read-modify-write, and the count moves only on a change, under
+    /// the platform's guard.
     static void connect(bool on) {
         const uint8_t ctrl = static_cast<uint8_t>(regs().CTRL & ~usbfs_uc_sys_ctrl_mask);
         regs().CTRL = on ? static_cast<uint8_t>(ctrl | usbfs_uc_dev_pu_en) : ctrl;
@@ -733,6 +800,10 @@ struct Usbfs {
      * completions, so a completion and a SETUP that followed it must not
      * reach it in one batch - the next pass of the vector brings the
      * rest, in the order the bus made them.
+     *
+     * Called by the stack's vector body (UsbDevice::isr()) and from
+     * nowhere else: at most 16 turns, nothing masked, and a wait of at
+     * least ten microseconds (settle()) at a suspend or resume flag.
      */
     static UsbEvents take_events() {
         UsbEvents ev;
@@ -794,6 +865,8 @@ struct Usbfs {
      * vector to wakeup_isr(): `usb_wakeup_handler` on the CH32V303, whose
      * line is 18, and `usbfs_wakeup_handler` on the CH32V203. False where
      * the part has no such line.
+     *
+     * A setup verb, main context, after init(); it waits for nothing.
      */
     static bool arm_wakeup(bool on) {
         if (!on) {
@@ -809,8 +882,9 @@ struct Usbfs {
 
     static bool wakeup_armed() { return Exti::interrupt(wakeup_line); }
 
-    /// THE WAKE-UP LINE'S ISR BODY: its flag read and cleared, and counted.
-    /// True when this vector's line had fired.
+    /// The wake-up line's ISR body: its flag read and cleared, and counted.
+    /// True when this vector's line had fired. Called from the program's
+    /// binding of `wakeup_irq`'s vector and from nothing else.
     [[gnu::always_inline]] static bool wakeup_isr() {
         const uint32_t fired = Exti::isr(Exti::vector_lines(wakeup_irq));
         if (fired != 0u) {

@@ -1,12 +1,37 @@
 /*
  * crc.hpp
  *
- * The CH32V203's cyclic redundancy check unit (RM ch. 5): `Crc`, a
- * MONOSTATE resource over the whole chapter - which is three registers
- * and no options at all.
+ * The cyclic redundancy check unit of the CH32V203 and the CH32V303
+ * (RM ch. 5): `Crc`, a monostate resource (a class with only static
+ * members, never instantiated: there is one unit) over the whole
+ * chapter - which is three registers and no options at all. A program
+ * uses it to checksum a block of words in hardware: twelve core cycles
+ * a word against seventy-nine for util/crc.hpp's constexpr twin, which
+ * walks the polynomial bit by bit (measured on the CH32V203C8T6 at
+ * 96 MHz, docs/ch32vx03/crc.md, "Bench findings"). The smallest
+ * use, as docs/ch32vx03/crc.md's "How to use it" writes it:
  *
- * WHAT THIS BLOCK IS. A hardware CRC-32 with the Ethernet polynomial
- * 0x04C11DB7 WIRED IN: no polynomial register, no initial-value
+ *     (void)brio::Crc::init();
+ *     const uint32_t sum = brio::Crc::compute(words, count);
+ *
+ * Who calls what. init() opens the clock gate and resets the
+ * calculator, once, before the first checksum, from setup in main():
+ * the gate, like clock(on), is an unguarded read-modify-write of an RCC
+ * register other drivers' gates share. The calculation verbs are loads
+ * and stores of the block's own registers, with no guard and no
+ * interrupt involved, so any context may call them - but the unit has
+ * one running result, so two contexts that checksum at once corrupt
+ * each other's answer, and a program that checksums from an interrupt
+ * handler as well as from the loop arranges the exclusion itself (the
+ * class comment below). reset() and every verb that calls it (init(),
+ * compute(), compute_bytes()) wait, by reading the data register until
+ * it shows the initial value, for at most `reset_spins` reads, the
+ * first included (seven extra reads at most); the store into the data
+ * register stalls the bus for the computation and no verb polls for it.
+ * The caller's words are read during the call and not kept.
+ *
+ * What this block is. A hardware CRC-32 with the Ethernet polynomial
+ * 0x04C11DB7 wired in: no polynomial register, no initial-value
  * register, no reversal and no final XOR. What it computes is therefore
  * exactly one function, the one catalogued as CRC-32/MPEG-2 - initial
  * value 0xFFFFFFFF, most significant bit first, no reflection of input
@@ -14,23 +39,23 @@
  * family's: `crc32_ethernet()` in util/crc.hpp is the same arithmetic
  * in constexpr C++, shared with every other target whose silicon has
  * this one polynomial and no knob to change it. The two agreeing is
- * what a bench suite measures.
+ * what a bench suite measures (test_vx03_misc).
  *
- * FOUR FACTS THAT SHAPE THE FILE.
+ * Four facts that shape the file.
  *
- * 1. THE DATA REGISTER IS THE OPERATION. One register, CRC_DATAR: a
- *    WRITE feeds a 32-bit word into the calculator, a READ returns the
+ * 1. The data register is the operation. One register, CRC_DATAR: a
+ *    write feeds a 32-bit word into the calculator, a read returns the
  *    running result. There is no start bit and no ready flag - 5.2 says
  *    "the hardware calculation interrupts the write operation of the
  *    system, so new values can be written continuously", which is the
  *    same promise the same block makes on its ST relatives, and 5.1
  *    prices it at four HCLK cycles. Back-to-back writes and a read
- *    right after a write are correct by construction, and the cost is
+ *    right after a write need no poll between them, and the cost is
  *    paid by the bus rather than by a poll.
  *
- * 2. A WORD IS THE GRAIN, AND THE PROGRAM DECIDES ITS BYTE ORDER. 5.2:
+ * 2. A word is the grain, and the program decides its byte order. 5.2:
  *    "the CRC unit calculates the whole 32-bit data word, rather than
- *    byte per byte". A BYTE STREAM therefore has no direct answer here.
+ *    byte per byte". A byte stream therefore has no direct answer here.
  *    `word_be()` packs four bytes most-significant-first, which is the
  *    packing that makes the unit's result equal CRC-32/MPEG-2 over
  *    those bytes in that order; a stream whose length is not a multiple
@@ -40,37 +65,38 @@
  *    states it - and where the two chapters state the same thing, the
  *    two files spell it the same way.)
  *
- * 3. THE RESET BIT IS THE ONLY CONTROL. CRC_CTLR has one bit, RST,
+ * 3. The reset bit is the only control. CRC_CTLR has one bit, RST,
  *    write-only and self-clearing, which puts CRC_DATAR back to
  *    0xFFFFFFFF (5.3.3). There is nothing else to configure, so
  *    `reset()` is what starts every checksum and `init()` is the clock
- *    gate plus that. Whether the reset lands INSTANTLY is the one open
- *    question of this chapter: the same block on an STM32F4 was
- *    measured taking a few cycles, with a read in the next instruction
- *    returning the old value and a word written in the next instruction
- *    SWALLOWED, and neither manual says so. `reset()` therefore waits
- *    for the initial value to appear and RETURNS how many extra reads
- *    that took - zero if this silicon is instant, which is a
- *    measurement rather than an assumption.
+ *    gate plus that. Whether the reset lands instantly is not in either
+ *    manual: the same block on an STM32F4 was measured taking a few
+ *    cycles, with a read in the next instruction returning the old
+ *    value and a word written in the next instruction swallowed.
+ *    `reset()` therefore waits for the initial value to appear and
+ *    returns how many extra reads that took - a measurement rather than
+ *    an assumption, and zero every time on the CH32V203C8T6, where a
+ *    word stored in the next instruction is taken and not swallowed
+ *    (docs/ch32vx03/crc.md, "Bench findings").
  *
- * 4. CRC_IDATAR IS NOT PART OF THE CHECKSUM. Eight bits of scratch that
+ * 4. CRC_IDATAR is not part of the checksum. Eight bits of scratch that
  *    RST deliberately does not touch (5.2, 5.3.2) - the block's one
  *    piece of state a program can use to remember something across a
- *    checksum. NOTHING SHORT OF A SYSTEM RESET CLEARS IT: this block
+ *    checksum. Nothing short of a system reset clears it: this block
  *    has no line in RCC_AHBRSTR, whose bits [11:0] are reserved
  *    (3.4.11), so there is no peripheral reset to offer and no verb
  *    here offers one. Measured: a checksum, a pattern in the scratch,
  *    and the register still holding it afterwards.
  *
- * NO INTERRUPT, NO DMA REQUEST, NO EVENT. The chapter has no interrupt
+ * No interrupt, no DMA request, no event. The chapter has no interrupt
  * register, the vector table has no CRC line, and tables 11-5 and 11-6
  * map no DMA request to this block - a bulk checksum is a loop of
- * stores and nothing else. What a DMA channel CAN do is memory-to-
+ * stores and nothing else. What a DMA channel can do is memory-to-
  * memory into CRC_DATAR with the destination not incremented; that is
  * the DMA chapter's arrangement and ch32vx03/dma.hpp already has every
  * verb it needs, so nothing is added here for it.
  *
- * PRESENT ON EVERY PART. The block hangs off the HB bus behind
+ * Present on every part. The block hangs off the HB bus behind
  * RCC_HBPCENR's CRCEN, and neither the reference manual nor the
  * datasheet's table 2-1 makes it a per-part fact, so unlike most of
  * this stratum this file asks the part table nothing.
@@ -151,11 +177,16 @@ struct Crc {
 
     static CrcRegs& regs() { return *crc_regs(); }
 
-    /// RCC_HBPCENR.CRCEN, clear at reset. Every verb below needs it -
-    /// but what the gate holds is the WRITE path alone: with it shut
-    /// the block keeps its state and its registers still ANSWER a read,
-    /// while a store into them is dropped in silence (measured, and the
-    /// same shape the window watchdog's gate has on this family).
+    /// RCC_HBPCENR.CRCEN, clear at reset. Every verb below needs it.
+    /// With the gate shut the block keeps its state, a store into
+    /// either register is dropped in silence (as the window watchdog's
+    /// are behind its gate, docs/ch32vx03/watchdog.md), and a read does not
+    /// reach the register asked for: it comes back as the last word the
+    /// bus carried, byte lane and all (measured on the CH32V203C8T6,
+    /// docs/ch32vx03/crc.md, "The clock gate is the block's whole
+    /// presence"); re-opening the gate finds the running value and the
+    /// scratch where they were left. A setup verb: one unguarded
+    /// read-modify-write of the RCC gate register.
     static void clock(bool on) {
         if (on) {
             Rcc::enable(Bus::hb, rcc_hb_crc);
@@ -174,9 +205,9 @@ struct Crc {
         return reset();
     }
 
-    /// How many extra reads of CRC_DATAR `reset()` spends waiting for
-    /// the reset to land before it gives up. A BOUND and not an
-    /// expectation.
+    /// How many reads of CRC_DATAR, the first included, `reset()` spends
+    /// waiting for the reset to land before it gives up. A BOUND and not
+    /// an expectation.
     static constexpr uint8_t reset_spins = 8;
 
     /**

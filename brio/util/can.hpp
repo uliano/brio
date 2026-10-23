@@ -4,37 +4,63 @@
  * The CAN vocabulary the controllers share: the classic frame, the bit
  * timing in the units a human states it in with the search that finds
  * it, the protocol's own error codes and error states, and the two
- * counters every node keeps. NO BUS AO, NO ARBITER POLICY AND NO
- * CONCEPT - docs/design/can.md says why: a transmission's completion is
- * not a reply, reception is routing, and a contract for either would
- * today be one controller's element layout with a util name on it.
+ * counters every node keeps. A program builds a CanFrame with a natural
+ * identifier and a length in bytes, finds a CanTiming with its family's
+ * `can_timing_for(clock_hz, bitrate_hz, sample)` (this header's search
+ * under that controller's limits) and checks the answer, then hands both
+ * to the family's `Can` or `Fdcan` resource. The smallest use, in the
+ * STM32F4's spelling:
  *
- * BORN AT THE THIRD CONTROLLER, NOT THE SECOND. Two bxCAN strata (the
- * STM32F4's and the CH32V203's, the same IP under two vendors' names)
- * and one M_CAN (the STM32G0's FDCAN) are what this file was written
- * against: what all three say the same way is here, what each says its
- * own way stays in its stratum. The frame is the classic one, eight
- * bytes; the FD superset stays the M_CAN stratum's until a second FD
- * controller exists to write it against. The filters are not here at
- * all: a bank of two registers with four shapes and a list of elements
- * with a range/dual/mask type are two models of the same idea, and a
- * shared type would be one of them wearing the other's name.
+ *     constexpr auto t = brio::can_timing_for(brio::apb_hz(clock, false), 500'000);
+ *     static_assert(brio::can_timing_valid(t), "no exact 500 kbit/s from this PCLK1");
  *
- * THE IDENTIFIER IS NATURAL AND RIGHT-ALIGNED, 0..0x7FF standard and
+ *     brio::CanFrame out{};
+ *     out.id = 0x100u;              // natural, right-aligned
+ *     out.length = 2;               // bytes, not a DLC
+ *
+ * Everything here is constexpr and pure: no register, no wait, no
+ * masking, callable from any context, and the search runs at compile
+ * time when its arguments are constants. A frame is a value the caller
+ * owns; what a controller does with it, and from which context its
+ * driver may be called, is the stratum's document. The model is
+ * docs/design/can.md.
+ *
+ * No bus active object, no arbiter policy and no concept -
+ * docs/design/can.md, "The bus active object, still absent", says why:
+ * a transmission's completion is not a reply, reception is routing, and
+ * a contract for either would be one controller's element layout with
+ * a util name on it. Until one is written, each stratum's `Can` or
+ * `Fdcan` is a resource a program drives from its own active object.
+ *
+ * Born at the third controller, not the second (docs/design/can.md,
+ * "Born at the third controller"). Two bxCAN strata (the STM32F4's and
+ * the CH32V203's, the same IP under two vendors' names) and one M_CAN
+ * (the STM32G0's FDCAN) are what this file was written against: what all
+ * three say the same way is here, what each says its own way stays in
+ * its stratum. The frame is the classic one, eight bytes; the FD
+ * superset stays the M_CAN stratum's until a second FD controller exists
+ * to write it against. The filters are not here at all: a bank of two
+ * registers with four shapes and a list of elements with a
+ * range/dual/mask type are two models of the same idea, and a shared
+ * type would be one of them wearing the other's name.
+ *
+ * The identifier is natural and right-aligned, 0..0x7FF standard and
  * 0..0x1FFFFFFF extended, whatever a register does with it (a bxCAN
  * mailbox stores the standard identifier in bits 31:21, an M_CAN
  * element in ID[28:18]): the driver shifts, the program never does.
- * THE LENGTH IS BYTES AND NOT A DLC: the DLC is the wire's coding of it,
- * computed on the way out, and a classic frame carries at most eight.
+ * The length is bytes and not a DLC (the data length code): the DLC is
+ * the wire's coding of it, computed on the way out, and a classic frame
+ * carries at most eight.
  *
- * THE TIMING IS STATED IN HUMAN UNITS - a prescaler that DIVIDES, three
- * segments that COUNT quanta, one less than each in the registers -
+ * The timing is stated in human units - a prescaler that divides, three
+ * segments that count quanta, one less than each in the registers -
  * and the limits a controller's registers put on them travel as a
  * value, `CanTimingLimits`, which each stratum states from its own
- * chapter. The search is EXACT: a bit rate that is a fraction of a per
+ * chapter. The search is exact: a bit rate that is a fraction of a per
  * cent off is a bus that works between two nodes of one crystal and
  * fails when the third joins, so a clock that cannot divide into the
- * rate yields an empty timing, never a rounded one.
+ * rate yields an empty timing, never a rounded one (docs/design/can.md,
+ * "The bit timing").
  */
 
 #pragma once
@@ -57,7 +83,7 @@ inline constexpr uint8_t can_max_length = 8;
 
 /**
  * A classic CAN message, in or out. `filter_index` and `timestamp` are
- * filled on RECEPTION only - which filter admitted the frame, and the
+ * filled on reception only - which filter admitted the frame, and the
  * controller's counter at its start of frame, in the unit and under the
  * conditions the stratum's document states (a bxCAN stamps only in its
  * time-triggered mode, an M_CAN whenever its counter runs) - and are
@@ -73,11 +99,13 @@ struct CanFrame {
     uint16_t timestamp = 0;
 };
 
+/// Whether a frame is well formed: a length of at most eight bytes and
+/// an identifier within its format's width.
 constexpr bool can_frame_valid(const CanFrame& f) {
     return f.length <= can_max_length && f.id <= (f.extended ? can_ext_id_max : can_std_id_max);
 }
 
-/// How many BIT TIMES a classic data frame of `length` bytes occupies on
+/// How many bit times a classic data frame of `length` bytes occupies on
 /// the wire before stuffing: 44 + 8N with a standard identifier, 64 + 8N
 /// with an extended one, end of frame included and the three-bit
 /// inter-frame space not. Bit stuffing adds up to one bit in five to the
@@ -92,8 +120,8 @@ constexpr uint16_t can_frame_bits(uint8_t length, bool extended) {
 
 /**
  * The bit time, in the units a human states it in and not in the
- * registers' off-by-ones: `brp` is the prescaler as a DIVIDER, `ts1` and
- * `ts2` are the two bit segments as quanta COUNTS, `sjw` the
+ * registers' off-by-ones: `brp` is the prescaler as a divider, `ts1` and
+ * `ts2` are the two bit segments as quanta counts, `sjw` the
  * resynchronization jump width in quanta. `brp == 0` means "no timing" -
  * what the search returns when the clock cannot make the rate exactly.
  */
@@ -156,7 +184,7 @@ constexpr uint16_t can_sample_point_of(const CanTiming& t) {
 }
 
 /**
- * THE TIMING SEARCH, at compile time when its arguments are: the EXACT
+ * The timing search, at compile time when its arguments are: the exact
  * `bitrate_hz` from `clock_hz` within `limits`, with the sample point as
  * close to `sample_permille` as the segments allow.
  *
@@ -167,7 +195,8 @@ constexpr uint16_t can_sample_point_of(const CanTiming& t) {
  * best sample point beats every wider one's wins; the jump width is the
  * second segment capped at the controller's widest jump. A stratum wraps
  * this in its own `can_timing_for(clock_hz, bitrate_hz, sample)` with
- * its limits bound, which is the verb a program calls.
+ * its limits bound, which is the verb a program calls. An empty answer
+ * (`brp == 0`) is the caller's to check: nothing here refuses it.
  */
 constexpr CanTiming can_timing_search(uint32_t clock_hz, uint32_t bitrate_hz,
                                       const CanTimingLimits& limits,
@@ -215,9 +244,9 @@ constexpr CanTiming can_timing_search(uint32_t clock_hz, uint32_t bitrate_hz,
 /**
  * The last error code the protocol engine saw on the bus - the eight
  * codes ISO 11898-1's controllers all publish in one three-bit field
- * (bxCAN's ESR.LEC, M_CAN's PSR.LEC and DLEC). The seventh is the one
- * SOFTWARE writes, so that a later read can tell nothing has happened
- * since; an M_CAN writes it back on every read of its own.
+ * (bxCAN's ESR.LEC, M_CAN's PSR.LEC and DLEC). Code 7, no_change, is
+ * the one software writes, so that a later read can tell nothing has
+ * happened since; an M_CAN writes it back on every read of its own.
  */
 enum class CanError : uint8_t {
     none = 0,
@@ -230,9 +259,10 @@ enum class CanError : uint8_t {
     no_change = 7,
 };
 
-/// The node's error state, the protocol's fault confinement as ONE
-/// observable: the two counters below the warning limit, at or above it
-/// (warning), a counter past 127 (passive: the node acknowledges but no
+/// The node's error state, the protocol's fault confinement as one
+/// observable (docs/design/can.md, "Errors and the error state"): the
+/// two counters below the warning limit, at or above it (warning), a
+/// counter past 127 (passive: the node acknowledges but no
 /// longer signals active error flags), or the transmit counter past 255
 /// (bus-off: the node is off the wire until its recovery sequence).
 enum class CanErrorState : uint8_t {

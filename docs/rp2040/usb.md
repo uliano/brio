@@ -1,6 +1,65 @@
 # USB (RP2040)
 
-Documents of record: the RP2040 datasheet (build 3184e62), 4.1 (the
+This document is for a programmer who wants an RP2040 program to talk
+to a computer over the chip's own USB connector, with no probe and no
+adapter - most often as a serial port the computer sees as
+`/dev/ttyACM*`, a console that needs no driver installed. Three layers
+do it: `Usb`, this stratum's driver of the chip's device controller;
+`util/usb/device.hpp`'s `UsbDevice`, the device stack that answers the
+host's enumeration; and `util/usb/cdc.hpp`'s `UsbCdcAcm`, the serial
+port class, a byte transport with the same surface as a UART's, so a
+console's `SerialPort` and `print` run over it unchanged
+([design/usb.md](../design/usb.md) is the stack and its contracts).
+
+The smallest use, a serial port on the connector, from "How to use it"
+below:
+
+```cpp
+using Port = brio::UsbCdcAcm<brio::Usb, P>;                 // interface 0, endpoints 1 and 2
+...
+using Device = brio::UsbDevice<brio::Usb, Descriptors, Port>;
+
+brio::Usb::init(clock);
+Device::start();                                             // the pull-up: the host enumerates from here
+extern "C" void isr_usbctrl() {
+    Device::isr();
+    if (Port::take_rx_edge()) { brio::post<SerialLines>(brio::RxActivity{}); }
+}
+brio::print(Port{}, "hello", brio::crlf);                     // once the host has configured the port
+```
+
+Line by line: `Port` names the serial class over this chip's controller
+and the program's platform `P`; `Descriptors` (written out under "How to
+use it") is the device's identity - the device descriptor, the
+configuration with the port's own descriptors glued in, the strings -
+and `Device` the stack over the controller with the port as its one
+class; `Usb::init()` takes the clock's tag ([clock.md](clock.md)),
+starts the USB PLL at 48 MHz unless it runs already, releases the
+controller and enables its line, with the pull-up still down;
+`Device::start()` raises the pull-up, and the host sees a device
+attach and starts enumerating; `isr_usbctrl` is the controller's
+handler under the pico-sdk's name: `Device::isr()` answers the host,
+and `take_rx_edge()` reports that the port received bytes, which the
+console posts to the active object that assembles lines; `print` writes
+to the port as to a UART.
+
+What decides correctness even there. The vector is bound and calls
+`Device::isr()`: the whole enumeration runs in that handler, and an
+unbound vector parks the core in the crt's `Default_Handler` spin at the
+first bus event. The port takes bytes only once the host has configured
+it: before that `write_byte` and `write_bulk` refuse everything, so a
+`print` - which waits until every byte is taken - spins until the host
+has enumerated the device and configured the port, and a program whose
+first line must be seen waits for `Port::configured()` and for the
+host's terminal to raise DTR (`Port::dtr()`) before it prints. clk_sys
+runs above 48 MHz, erratum E16's condition, which `init()` refuses at
+compile time otherwise. And the identity 1209:0001 the descriptors under
+"How to use it" name is a test pair, not a product's: a product names
+its own.
+
+## Documents of record
+
+The RP2040 datasheet (build 3184e62), 4.1 (the
 USB controller: 4.1.2 the architecture - the clock, the PHY, the dual-
 port RAM and its layout, the endpoint and buffer control words, the
 device controller's SETUP, IN and OUT handling, suspend and resume -,
@@ -10,7 +69,9 @@ the contracts. The driver: `brio/rp2040/usb.hpp` (`Usb`, the
 endpoint controller) over `clock.hpp` (`Clocks::usb_select`, the USB
 PLL) and `resets.hpp`; the stack `util/usb/device.hpp` and the class
 `util/usb/cdc.hpp` above it. The reference suite: `test_rp2040_usb`,
-the host as the other end.
+the host as the other end (a suite's letter is one command key of its
+console and the group of verdicts it runs; the all-key runs the set,
+and a host-assisted letter outside it runs only when asked by name).
 
 ## What the silicon does
 
@@ -40,7 +101,7 @@ RESET_BUFSEL or the halves and the host's data toggles disagree; the
 halves of a double-buffered OUT endpoint complete in strict
 alternation and each half's FULL bit says whether it did, which is
 the way to tell the two apart when both completed before the
-interrupt ran; and A NAK COSTS A WHOLE FRAME behind a hub's
+interrupt ran; and a NAK costs a whole frame behind a hub's
 transaction translator, so a single-buffered bulk OUT endpoint takes
 some 60 KB/s and a double-buffered one over 900.
 

@@ -1,18 +1,135 @@
 # GPIO, the remaps and the EXTI (CH32V203 and CH32V303)
 
+This document is for a programmer who needs a pin of a CH32V203 or a
+CH32V303: an LED, a button, an analog input, a pad handed to a
+peripheral, and for one who moves a peripheral's signals to other pads,
+gives up the debug port, or takes a pad's edge as an interrupt or a
+wake. Three words are kept apart here: a pad is one of the die's I/O
+cells, named by its port and its number (PA9); a pin is that number
+within its port (the 9 of PA9, sixteen pins a port); and a package pin
+is the lead of the package a pad is bonded to. A package brings out
+some of each port's pads, and on the CH32V203's smallest packages one
+package pin carries more than one I/O function (the datasheet's note 7,
+"Not covered yet" below). `Pin<'A', 9>` names pad PA9 as a type (the
+letter and the number in the angle brackets are fixed when the program
+is compiled, and a `using` alias gives the type a name), and its
+functions configure the pad and drive or read it; `Port<'B'>` works on
+a whole port at once, and `PinRef` is a small run-time handle a bus
+request carries ([pin.hpp](../../brio/ch32vx03/pin.hpp)). `Afio`
+([afio.hpp](../../brio/ch32vx03/afio.hpp)) selects a remap column (one
+code of a peripheral's field moves all of that peripheral's pads
+together), with the columns as constant tables a driver takes its pads
+from; it also holds the debug port's field and tells each pin line of
+the EXTI which port feeds it. `Exti`, `ExtiLine<n>` and `ExtInt<Pin>`
+([exti.hpp](../../brio/ch32vx03/exti.hpp)) make a pad's edge, or a
+peripheral's wake-up, an interrupt or a wake event.
+
+The smallest use, the first lines of the block under "How to use it"
+below, an LED and a button:
+
+```cpp
+using Led = brio::Pin<'B', 2>;
+Led::output();                                   // push-pull, 50 MHz
+Led::toggle();
+
+using Button = brio::Pin<'A', 1>;
+Button::input(brio::PinPull::up);                // the pull is OUTDR's bit
+if (Button::read()) { /* ... */ }
+```
+
+Line by line: `Led` names PB2, the WeAct board's LED and, through a
+jumper, the evaluation board's ([README.md](README.md), "The boards");
+the `using` line configures nothing, and a pad this part's package
+does not bond does not compile (the part table, `brio/ch32vx03/parts/`,
+the per-part facts `device::` exposes, says which pads each package
+bonds). `Led::output()` makes the pad a
+push-pull output of the fastest speed class, 50 MHz (the two defaults,
+`PinDrive::push_pull` and `PinSpeed::fast`), opening port B's clock
+gate first, so a configured pin works with no separate step.
+`Led::toggle()` flips the level: one load of OUTDR and one store into
+BSHR. `Button` names PA1; `input(PinPull::up)` makes it a pulled input,
+whose direction is that pin's bit in OUTDR, written before the
+configuration; `read()` is one load of INDR, the level the pad is at.
+These lines run in `main()` at setup or from an active object's handler
+(an active object is a component of a brio program with its own event
+queue, served one event at a time by the kernel,
+[docs/learn/introduction.md](../learn/introduction.md)).
+
+What decides whether that works:
+
+- **Which verbs are single accesses, and which race a handler.**
+  `set()`, `clear()` and `read()` (and `read_out()`, and the same verbs
+  of a `PinRef`) are one store into BSHR or BCR, or one load, legal from
+  any context, an interrupt handler included; `toggle()` is a load and
+  one store, which another pin's handler cannot split. The configuring
+  verbs - `output()`, `input()`, `analog()`, `function()`, `release()`,
+  `lock()` and the port's `configure()` and `configure_pins()` - carry
+  read-modify-writes with no guard of their own: of the configuration
+  register whose eight pins the configured one shares (all but
+  `lock()`, whose key sequence is three stores into LCKR), and, through
+  `Port::clock_on()`, of RCC_PB2PCENR, whose gate bits every port shares
+  with AFIO, ADC1 and ADC2, TIM1, SPI1, USART1 and, on the CH32V303RC
+  and VC, TIM8, TIM9 and TIM10. So a configuring verb belongs to setup
+  or to one active object, and one that must run beside an interrupt
+  handler that configures any port, or opens or closes any gate of that
+  register, is masked (pfic.hpp's `InterruptGuard`). `Port::out_write()`
+  is one store, but of OUTDR whole: it takes every pin of the port with
+  it.
+- **The gate, and a level asked before the first configuration.** The
+  level verbs open no gate: a pad is driven and read after its port
+  has been configured. `output(level)`, and `input(pull)` with a pull,
+  store the level or the pull's direction through `set()` or `clear()`
+  before the `configure()` that opens the gate (pin.hpp), so on a port
+  nothing has configured yet that first store meets a shut gate.
+  What the GPIO does with it is not measured on this family; the CRC
+  behind its shut gate drops a store in silence ([crc.md](crc.md),
+  measured), and a pull whose OUTDR bit never landed pulls the way that
+  bit already stood. A program that needs the level, or the pull, right
+  from a port's first configuration opens the gate first, with
+  `Port<'A'>::clock_on()` or any configuring verb of another pin of that
+  port.
+- **The lock is silent.** A pin frozen by the configuration lock keeps
+  its nibble through every configuring verb, which writes and is
+  ignored (measured, below), and stays frozen until the next reset.
+- **For a line, the vector bound by the program.** The EXTI example
+  under "How to use it" binds `exti1_handler`, the crt's name for that
+  vector (the crt is the startup code that runs before `main()`,
+  [startup_ch32vx03.S](../../ch32vx03/src/glue/startup_ch32vx03.S)),
+  with `BRIO_CH32_VECTOR(name) { body }` or one of its two forms, the
+  one spelling of a binding ([platform.md](platform.md)). A line enabled
+  with its vector left unbound runs the crt's weak `default_handler`, a
+  spin loop, with no fault and no message. On the CH32V303's images,
+  built with the F extension and the hardware prologue on (the project's
+  `CH32VX03_HPE` option, a CMake option of the `ch32vx03/` project,
+  chosen at configure, on by default), `BRIO_CH32_VECTOR` makes a naked
+  trampoline (a handler with no prologue of its own, which calls the
+  body as an ordinary function) whose body must do no floating-point
+  work; a body
+  that does binds with `BRIO_CH32_VECTOR_FLOAT`, and a leaf (a handler
+  that calls no function and touches no floating-point register) may
+  bind with `BRIO_CH32_LEAF_VECTOR`, as the suite's handlers do.
+
+The rest of this page, in order: the documents of record; what the
+silicon does, the pad, the remaps and the lines; the types and verbs of
+the three headers; how to use it, one block per use; the bench findings;
+and what is not covered.
+
 The pads of RM chapter 10 and the external interrupt lines of 9.4:
 sixteen pins a port over five ports, four configuration bits a pin,
 pulls that live in the output register, two remap registers that move
 whole peripherals between pad sets, and twenty-two lines of which
-sixteen are pins. Documents of record: the CH32F/V20x_V30x_V31x
-reference manual V2.3 (10.1 and 10.2 for the modes, 10.2.11 and 10.3.2
-for the remaps with tables 10-15 to 10-46, 10.3.1 for the registers and
-the lock, 9.4 and 9.5.1 for the lines with table 9-3 for what lies
-above the pins), the CH32V203 datasheet V2.8 (3.2's pin tables for the
+sixteen are pins.
+
+## Documents of record
+
+The CH32F/V20x_V30x_V31x reference manual V2.3 (10.1 and 10.2 for the
+modes, 10.2.11 and 10.3.2 for the remaps with tables 10-15 to 10-46,
+10.3.1 for the registers and the lock, 9.4 and 9.5.1 for the lines with
+table 9-3 for what lies above the pins), the CH32V203 datasheet V2.8 (3.2's pin tables for the
 bonding and for which remapped function reaches which pad of each
 package, note 4 for the oscillator's pads, note 7 for the shorted pins
 of the small packages), the CH32V303/305/307/317 datasheet V3.5 (3.2's
-pin tables, whose note 4 says the LQFP100's PD0 and PD1 are pins of
+pin tables, whose note 4 says the LQFP100's PD0 and PD1 are pads of
 their own, and 3.3's table 3-4 of alternate and remapped functions), and
 the device class notes all three are full of - CH32V20x_D6 for every
 part up to the CH32V203C8, CH32V20x_D8 for the CH32V203RB and
@@ -20,26 +137,29 @@ CH32V30x_D8 for the four CH32V303. Drivers:
 [brio/ch32vx03/pin.hpp](../../brio/ch32vx03/pin.hpp),
 [afio.hpp](../../brio/ch32vx03/afio.hpp),
 [exti.hpp](../../brio/ch32vx03/exti.hpp). Reference suite:
-`test_vx03_pin`.
+`test_vx03_pin` (a suite's letter is one command key of its console and
+the group of verdicts it runs; `z` is the key that runs every letter
+but `k`, which wants a finger on the KEY, in the order they are
+registered, `e` last because it locks PC13 until the next reset).
 
 ## What the silicon does
 
 ### The pad
 
-- **One nibble a pin, CNF above a TWO-BIT MODE** (10.3.1.1), sixteen
+- **One nibble a pin, CNF above a two-bit MODE** (10.3.1.1), sixteen
   pins a port split over CFGLR (0..7) and CFGHR (8..15). MODE carries a
-  SPEED: 00 input, 01 output at 10 MHz, 10 at 2 MHz, 11 at 50 MHz. CNF
+  speed: 00 input, 01 output at 10 MHz, 10 at 2 MHz, 11 at 50 MHz. CNF
   under an input means analog (00), floating (01) or pulled (10), with
   11 reserved; under an output it means push-pull (00), open-drain
   (01), alternate push-pull (10) or alternate open-drain (11). Fifteen
   configurations in all, and the reset one is 0x4, a floating input.
   The block is the same on the three device classes.
 - **Pulls have no register**: an input with CNF 10 is pulled, and the
-  DIRECTION is that pin's bit in OUTDR - 1 up, 0 down (10.3.1.4).
+  direction is that pin's bit in OUTDR - 1 up, 0 down (10.3.1.4).
   Setting a pull therefore writes the output data register of a pin
   that is an input. Measured both ways on four pads, and on every
   free pad of ports C, D and E of the LQFP100 at once.
-- **The pulls are the INPUT driver's** (10.2.7: an output mode disables
+- **The pulls are the input driver's** (10.2.7: an output mode disables
   them), so a released open-drain output is not held anywhere by the
   chip. Measured: from a low level, an open-drain output with a one in
   OUTDR leaves its pad low - there is no P-MOS and no pull to take it
@@ -52,7 +172,7 @@ CH32V30x_D8 for the four CH32V303. Drivers:
   clears, and both are write-one: a zero touches nothing, so a masked
   store leaves every other pin of the port alone. There is no toggle
   register - `toggle()` reads OUTDR and writes both halves of BSHR in
-  ONE store, which is atomic against a handler on another pin. Writing
+  one store, which is atomic against a handler on another pin. Writing
   OUTDR whole is the other kind of verb and takes every pin with it.
 - **A port's clock gate is closed out of reset** and every configuring
   verb opens it - port E's gate, IOPEEN, the LQFP100's alone, like the
@@ -71,7 +191,7 @@ CH32V30x_D8 for the four CH32V303. Drivers:
   can be handed to port D through a remap (below); the CH32V203RB's
   "cannot be reused as PD0 and PD1", the smallest CH32V203 packages
   bring out no oscillator pad at all, and on the CH32V303VC's LQFP100
-  PD0 and PD1 are pins of their own beside two oscillator pads that are
+  PD0 and PD1 are pads of their own beside two oscillator pads that are
   not port D's - measured, every pad of port D of that package driven
   both ways and pulled both ways. The part table states which
   (`device::osc_pads_as_pd0_pd1`).
@@ -84,13 +204,13 @@ CH32V30x_D8 for the four CH32V303. Drivers:
 
 ### The remaps
 
-- **A remap is a COLUMN, not a pin**: AFIO_PCFR1 and AFIO_PCFR2 hold one
+- **A remap is a column, not a pin**: AFIO_PCFR1 and AFIO_PCFR2 hold one
   field per peripheral and its value selects a whole column of the
   chapter's tables (10.2.11), so SPI1's four signals move together and
   TIM1's nine do. The datasheets' own pin tables name the remapped
   function on each pad of each package, which is the per-package half
   of the same statement.
-- **Which columns exist is the DEVICE CLASS's question.** On the
+- **Which columns exist is the device class's question.** On the
   CH32V20x_D6: USART1 has two columns and not four (its high bit is
   AFIO_PCFR2 bit 26, which 10.3.2.2 excludes for the D6, the D8 and the
   D8W alike); UART4 reads table 10-27 and not 10-26, so its default pads
@@ -109,7 +229,7 @@ CH32V30x_D8 for the four CH32V303. Drivers:
   carries, and are named only to be refused.
 - **Two of those class notes are the silicon's, not the manual's.**
   Measured on the CH32V203C8: USART3's two bits and TIM2's
-  internal-trigger bit are READ-ONLY AT ZERO - a write of 01 into
+  internal-trigger bit are read-only at zero - a write of 01 into
   USART3_RM reads back 00, and a write of 1 into TIM2ITR1_RM reads back 0.
   The first settles 10.3.2.2's ambiguous note (4), "default mapping
   (00b) only exists for CH32V20x_D6, CH32F20x_D6", in favour of "on this
@@ -141,7 +261,7 @@ CH32V30x_D8 for the four CH32V303. Drivers:
 - **AFIO_ECR is an event output** (10.3.2.1): EVOE brings a core
   "EVENTOUT" signal out on a pad of ports A..D (the field's other codes
   are reserved). The register takes a port and a pin and reads them
-  back, measured on both parts; WHAT raises that signal on the QingKe V4
+  back, measured on both parts; what raises that signal on the QingKe V4
   is named in no document of this family - the signal is the
   Cortex-M3's, of the CH32F20x half of this manual.
 
@@ -159,7 +279,7 @@ CH32V30x_D8 for the four CH32V303. Drivers:
   pends interrupt 58 and line 20's pends 84, read over the debug port
   ([README.md](README.md)), and a host's resume raises line 18 alone
   ([usbfs.md](usbfs.md)).
-- **The line number IS the pin number and the port is a choice**
+- **The line number is the pin number and the port is a choice**
   (10.2.3): PA1, PB1, PC1, PD1 and PE1 all reach EXTI1 and only one of
   them at a time, chosen four bits at a time in AFIO_EXTICR1..4 - port
   E's code, 0100, reachable only on the package that bonds it. The
@@ -183,7 +303,7 @@ CH32V30x_D8 for the four CH32V303. Drivers:
   trigger sets the flag whatever the enables hold. A line enabled in
   INTENR with its vector masked at the controller does raise the flag,
   which is how a program polls one; the flag is write-one-clear.
-- **The software trigger's bit STANDS until the flag is cleared.**
+- **The software trigger's bit stands until the flag is cleared.**
   Measured: after `SWIEVR` is written, the bit reads back 1, and
   clearing the line's flag clears it - the STM32F1's rule for this
   register, and not the sister family's self-clearing store. The
@@ -209,8 +329,8 @@ drive, speed)`, `input(pull)`, `analog()`, `function(drive, speed)`,
 request carries (`set`/`clear`/`write`/`toggle`/`read`, all of which do
 nothing and read low on a null one), and the constexpr `Pad` the remap
 tables are made of; a `PwmChannel` with max 1, so a bare pin drives an
-`RgbLamp`. `Port<'B'>`
-- the registers, `clock_on()` (called by every configuring verb),
+`RgbLamp`. `Port<'B'>` -
+the registers, `clock_on()` (called by every configuring verb),
 `in()`/`out()`, the masked stores `out_set`/`out_clear`/`out_toggle`,
 the whole-port `out_write`, `configure(pin, nibble)` and
 `configure_pins(mask, nibble)`, `nibble(pin)`, and the lock in both
@@ -219,8 +339,8 @@ time) with `locked()`/`locked_pins()`. `pin_nibble(mode, drive, speed)`
 is the encoding, `pad_bonded(pad)` the bonding question. A port the
 package does not bond, port E included, is a compile error.
 
-[afio.hpp](../../brio/ch32vx03/afio.hpp): the columns as constexpr data
-- `afio_tim1_pads(code)` .. `afio_tim4_pads`, `afio_tim5_pad_set`,
+[afio.hpp](../../brio/ch32vx03/afio.hpp): the columns as constexpr data -
+`afio_tim1_pads(code)` .. `afio_tim4_pads`, `afio_tim5_pad_set`,
 `afio_tim8_pads`, `afio_tim9_pads`, `afio_tim10_pads`,
 `afio_usart1_pads` .. `afio_usart3_pads`, `afio_uart4_pads` (whose
 table is the class's), `afio_uart5_pads` .. `afio_uart8_pads`,
@@ -231,7 +351,7 @@ tx)` (the code whose column puts TX on a pad, 0xFF where none does),
 `afio_spi2_pad_set` / `afio_i2s2_pad_set` / `afio_i2c2_pad_set` of the
 instances with no remap field - plus `Remap`, the enumeration of the
 fields the two series have, `afio_field_present(remap)` (the class),
-`afio_remap_has_code(remap, code)` (the class AND the bonding),
+`afio_remap_has_code(remap, code)` (the class and the bonding),
 `afio_column_fully_bonded()`, `afio_advanced_timer(n)`, and `Afio`:
 `remap(r, code)` refusing what the part has not, `remap<R, Code>()`
 refusing it at compile time, `remap_code(r)` and its compile-time face
@@ -492,3 +612,13 @@ Implemented but not bench-verified, each with what would measure it:
 - **The configuration lock on a whole mask**, and what a peripheral
   reset pulse does to a standing lock: the suite locks one pin of one
   port, which is all it can afford when the lock stands until a reset.
+- **A level or a pull asked as a port's first configuration.**
+  `output(level)` and `input(pull)` store the level, or the pull's
+  direction, through `set()` or `clear()` before the `configure()` that
+  opens the port's clock gate ([pin.hpp](../../brio/ch32vx03/pin.hpp)),
+  so on a port nothing has configured yet that first store meets a shut
+  gate. Whether the GPIO drops a store behind its shut gate, as the CRC
+  does behind its own ([crc.md](crc.md)), is not measured; what would
+  measure it is a fresh boot whose first configuration of a port is
+  `output(true)` or `input(PinPull::up)`, with OUTDR and the pad read
+  after it.

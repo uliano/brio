@@ -1,17 +1,20 @@
 /*
  * i2c.hpp
  *
- * THE SYNOPSYS DESIGNWARE I2C (DW_apb_i2c), written once for every
- * family that carries it: an IP STRATUM, a directory named for a
- * peripheral DESIGN rather than for a silicon, sitting where a core
- * stratum sits - above util/, below the families
- * (docs/dw_apb_i2c/README.md, and the rule in docs/design/overview.md:
- * "A core stratum sits between util/ and the families that share a
- * core").
+ * The Synopsys DesignWare I2C (DW_apb_i2c), written once for every
+ * family that carries it: the I2C of the RP2040 and the RP2350, as a bus
+ * host an application's active objects share through the bus arbiter,
+ * or as a client (a target address) on someone else's bus. This is an IP
+ * stratum - a directory of brio/ named for a peripheral design that
+ * several vendors license into their chips (an "IP block") rather than
+ * for a silicon - and it sits where a core stratum sits, above util/ and
+ * below the families (docs/dw_apb_i2c/README.md, this file's document,
+ * and the rule in docs/design/overview.md: "A core stratum sits between
+ * util/ and the families that share a core").
  *
  * Three layers, the arrangement every brio bus driver has:
  *
- *  DwApbI2cBlock<Chip, n>  the RESOURCE: the register block behind the
+ *  DwApbI2cBlock<Chip, n>  the resource: the register block behind the
  *                          family's gate, the configuration under the
  *                          block's rule (IC_CON, the counts, the
  *                          addresses and the hold times take a write
@@ -20,13 +23,18 @@
  *                          sources with their read-to-clear registers,
  *                          the abort source decoded. It decides nothing.
  *  DwApbI2cHost<Chip, n, pins, TxEngine, RxEngine, Placement>
- *                          the ENGINE util/i2c_bus.hpp's I2cBus drives:
- *                          the Request is the other strata's VERBATIM -
- *                          {addr, tx span, rx span, reply, speed}, one
- *                          bus tenure that is a write, a read, a
- *                          write-then-read with a repeated START, or the
- *                          probe - and the outcome vocabulary is
- *                          i2c_bus.hpp's, read off IC_TX_ABRT_SOURCE.
+ *                          the engine util/i2c_bus.hpp's I2cBus drives
+ *                          (the arbiter: util/bus_master.hpp's active
+ *                          object that serializes every client's
+ *                          requests to one bus). The Request is the one
+ *                          every stratum's I2C host takes, util/i2c_bus.hpp's
+ *                          and docs/design/i2c-bus.md's - {addr, tx span,
+ *                          rx span, reply, speed}, one bus tenure (the
+ *                          time one transaction holds the bus) that is a
+ *                          write, a read, a write-then-read with a
+ *                          repeated START, or the probe - and the outcome
+ *                          vocabulary is i2c_bus.hpp's, read off
+ *                          IC_TX_ABRT_SOURCE.
  *  DwApbI2cClient<Chip, n, pins>
  *                          the target side: a polled surface and one ISR
  *                          body reporting one event per call,
@@ -34,47 +42,130 @@
  *                          protocol and which protocol is the
  *                          application's.
  *
- * THIS FILE KNOWS NO CHIP. It includes kernel/ and util/ and nothing
+ * An application never writes these names. A family supplies the chip's
+ * facts as a traits type - a struct of types, constants and static
+ * functions this file reads, checked against the `DwApbI2cChip` concept
+ * below - and keeps, in its own header, the public names apps use as
+ * aliases of the three templates:
+ *
+ *   RP2040   Rp2040DwApbI2c in brio/rp2040/i2c.hpp: DwApbI2c<n>,
+ *            I2cHost<n, pins, TxEngine, RxEngine, Placement> and
+ *            I2cClient<n, pins>
+ *   RP2350   Rp2350DwApbI2c in brio/rp2350/i2c.hpp: the same three names
+ *   host     SimDwApbI2c in brio/host/sim_dw_apb_i2c.hpp: a block made of
+ *            RAM over a modelled wire, for the host suite test_dw_apb_i2c,
+ *            which names the templates
+ *
+ * The smallest use, a host under the arbiter on the RP2040 as
+ * brio/rp2040/i2c.hpp and docs/rp2040/i2c.md spell it:
+ *
+ *   constexpr brio::I2cPins pins{.scl = 13, .sda = 12};
+ *   using Bus = brio::I2cHost<0, pins>;
+ *   using I2c = brio::I2cBus<Bus, P, 4, brio::BusPassThrough,
+ *                            brio::ticks_from_ms<P>(20)>;     // the arbiter
+ *
+ *   Bus::init(clock);
+ *
+ *   Bus::Request r{};
+ *   r.addr = 0x48;
+ *   r.tx = brio::lend<brio::Lease::reply>(reg);   r.tx_len = 1;    // the register
+ *   r.rx = brio::lend<brio::Lease::reply>(value); r.rx_len = 2;    // then its value
+ *   r.speed = brio::I2cSpeed::fast_400k;
+ *   r.reply = brio::reply_to<Sensor, brio::I2cDone>();
+ *   brio::post<I2c>(r);
+ *
+ *   extern "C" void isr_i2c0() {
+ *       if (Bus::isr()) { brio::post<I2c>(brio::TransferDone{Bus::status()}); }
+ *   }
+ *
+ * Who calls what, and from where.
+ *  - init(), rebase() and release() are setup verbs, in main: init()
+ *    after the clock and before interrupts are enabled globally (the SCL
+ *    counts are solved from the rate the family's traits call ic_clk -
+ *    clk_sys on both RP chips - so the clock comes first), rebase() with
+ *    the bus idle.
+ *  - A requester - an active object that uses the bus, not the I2C
+ *    client role below - never calls the host: it posts a Request to the
+ *    arbiter from its own dispatch (an active object's handler - an
+ *    active object is a component with its own event queue, served one
+ *    event at a time by the kernel) or from main, and gets an I2cDone
+ *    event back. The arbiter calls start() from its dispatch, in main
+ *    context (code that is not an interrupt handler: main and every
+ *    dispatch), one request at a time, and recover() on a tenure its
+ *    timeout ended.
+ *  - start() follows the engine contract of util/bus_master.hpp, where
+ *    true means "completed without the interrupt": it moves the wire and
+ *    returns false, the tenure completing on
+ *    the interrupt; it answers true at once for the refusals that move
+ *    nothing (a speed the clock cannot produce, a block that would not
+ *    disable). When the address or the speed moves it disables the block
+ *    first and waits, bounded, for the block's own shutdown - about 6 us
+ *    at 100 kHz and 1.5 us at 400 kHz on an idle bus, paid in the
+ *    dispatch.
+ *  - isr() is the instance's interrupt body and dma_isr() the body of
+ *    the DMA line the engines report on: the program's handler for each
+ *    calls it and nothing else does. Each returns true when the tenure
+ *    has just completed, the edge on which the handler posts
+ *    TransferDone to the arbiter. Both run to completion, as every
+ *    interrupt handler in brio does.
+ *  - unstick() is the application's, from main or a dispatch, when the
+ *    arbiter's timeout answered i2c_timeout: it drives up to nine SCL
+ *    pulses and a STOP by hand, spinning half a bit of standard mode
+ *    between edges, with the instance's line masked for its duration.
+ *  - What masks: init(), recover(), unstick() and release() mask the
+ *    instance's own line while they work; nothing of the transfer path
+ *    takes a critical section. The family's set_bits() and clear_bits()
+ *    are one bus write where the chip has atomic register aliases (both
+ *    RP chips use theirs), a guarded read-modify-write otherwise.
+ *  - Storage: a Request's spans are lent (`Lease::reply`,
+ *    kernel/borrowed.hpp) from the post until its I2cDone arrives, and
+ *    the requester leaves them untouched for that whole time.
+ *  - The client: init() in main, then service() and the polled verbs
+ *    from the program's handler for the instance's vector (the client's
+ *    class comment shows the glue); none waits but the bounded disable
+ *    of acknowledge(), flush_tx() and release().
+ *
+ * This file knows no chip. It includes kernel/ and util/ and nothing
  * else: no vendor header, no family header, and it never names a reset
  * controller, a clock, a pad function, an interrupt controller or a DMA
- * request. WHAT A FAMILY OWES IT is the `DwApbI2cChip` concept below,
+ * request. What a family owes it is the `DwApbI2cChip` concept below,
  * satisfied by one traits type the family's own header defines; that
- * header also keeps the PUBLIC NAMES apps use (`DwApbI2c<n>`,
+ * header also keeps the public names apps use (`DwApbI2c<n>`,
  * `I2cHost<n, pins, ...>`, `I2cClient<n, pins>`) as aliases of these
  * three templates, so nothing above ever spells a Chip. Every register
  * bit below is spelled as the block's own description gives it, in this
  * file's words; a family whose vendor device description names the same
  * bits checks the two against each other once, in its own header.
  *
- * THE MACHINE THIS BLOCK PRESCRIBES IS A COMMAND FIFO, not an event
+ * The machine this block prescribes is a command FIFO, not an event
  * machine: a host writes IC_DATA_CMD entries - a data byte to write, or
  * a read command - each carrying a RESTART bit and a STOP bit, and the
  * controller strings them into a transaction: the first entry issues
  * START and the address held in IC_TAR, a direction change (or the
  * RESTART bit) issues a repeated START, the STOP bit issues STOP after
- * that entry. AN EMPTY TRANSMIT FIFO WITH NO STOP HOLDS SCL LOW (the bus
+ * that entry. An empty transmit FIFO with no STOP holds SCL low (the bus
  * stalls until the next entry), which is why the last entry of every
  * tenure carries STOP and the pump keeps the FIFO ahead of the wire.
  * Nothing stands for an address-only frame: the controller cannot issue
- * START, the address and STOP with no data entry, so THE PROBE ON THIS
- * BLOCK IS A ONE-BYTE READ - START, the address with the read bit, one
+ * START, the address and STOP with no data entry, so the probe on this
+ * block is a one-byte read - START, the address with the read bit, one
  * byte taken and not acknowledged, STOP - the answer still being the
  * acknowledge on the address (i2c_nack_addr when nobody is home). A
- * NACK, a lost arbitration and every other failure come back as ONE
+ * NACK, a lost arbitration and every other failure come back as one
  * interrupt, TX_ABRT, with the reason in IC_TX_ABRT_SOURCE, and the
  * FIFOs are flushed and held so until IC_CLR_TX_ABRT is read.
  *
- * THE SCL TIMING is two counts per speed (HCNT, LCNT in ic_clk cycles,
+ * The SCL timing is two counts per speed (HCNT, LCNT in ic_clk cycles,
  * the rate the family names), the spike filter (SPKLEN), and the SDA
  * hold and setup times, under the block's floors (LCNT at least SPKLEN +
- * 7, HCNT at least SPKLEN + 5) and WITH THE CYCLES THE BLOCK ADDS (the
+ * 7, HCNT at least SPKLEN + 5) and with the cycles the block adds (the
  * low period is LCNT + 1, the high period is HCNT + SPKLEN + 7), so
  * `i2c_timing_for` subtracts them and a bus asked for 100 kHz runs at
  * 100 kHz, not at 96. The speed's minimum high and low times (the I2C
  * specification's) bound the split, and a clock too slow to meet them
  * makes the speed unreachable - answered i2c_rejected.
  *
- * THE DMA ENGINES serve the READ phase: the read commands are one
+ * The DMA engines serve the read phase: the read commands are one
  * constant halfword the transmit engine pours from a fixed cell (the
  * command register ignores the width of a write and replicates a byte
  * across the word, so a command is written as a halfword), the bytes
@@ -86,7 +177,7 @@
  * request's bytes with a flag each, and a byte buffer cannot carry the
  * flag.
  *
- * WHERE THE HOST'S HOT PATH RUNS is the program's choice, by the host's
+ * Where the host's hot path runs is the program's choice, by the host's
  * last template parameter, util/placement.hpp's tag: start(), isr() and
  * dma_isr() run their bodies through `Hot<Placement>` - where they would
  * be without it under `InFlash`, the default, one flattened instance each
@@ -94,9 +185,9 @@
  * `places_fast_text` (what it buys: the family's platform document, "A
  * handler in SRAM"). The client is the program's own code to place.
  *
- * NOT built, each with its reason in docs/dw_apb_i2c/README.md: the
+ * Not built, each with its reason in docs/dw_apb_i2c/README.md: the
  * high-speed mode, SMBus, the stuck-bus timeouts, the bus clear of the
- * blocks that have one. The slots for DMA engines ARE here, empty, so
+ * blocks that have one. The slots for DMA engines are here, empty, so
  * the type's shape does not move when a family fills them.
  */
 
@@ -755,8 +846,8 @@ struct DwApbI2cBlock {
         return src;
     }
 
-    /// The raised-and-enabled sources, the way the other strata's ISR
-    /// bodies answer; nothing cleared - each source's owner clears it.
+    /// The raised-and-enabled sources, the answer every brio resource's
+    /// ISR body gives; nothing cleared - each source's owner clears it.
     [[gnu::always_inline]] static uint32_t isr() { return pending(); }
 
     /// The DMA request enables (IC_DMA_CR).
@@ -799,12 +890,13 @@ inline constexpr uint8_t i2c_dma_fault = bus_engine_status + 4;
  * still the answer. Every outcome the wire can give comes back as
  * util/i2c_bus.hpp's codes through TransferDone{status()}.
  *
- * THE PUMP RUNS AT HALF A FIFO. It writes IC_DATA_CMD entries into the
+ * The pump runs at half a FIFO. It writes IC_DATA_CMD entries into the
  * room the transmit FIFO has (one level read, then stores) and refills on
  * TX_EMPTY (TX_TL at the FIFO's half); it takes the bytes read on RX_FULL
- * (RX_TL at the receive FIFO's half: eight bytes an interrupt, one level
- * read, then loads) and the tail at the STOP; and EVERY TENURE ENDS ON
- * ITS STOP_DET - a write, a read and the probe alike - or on TX_ABRT
+ * (RX_TL at the receive FIFO's half: eight bytes an interrupt on the RP
+ * chips' 16-entry FIFOs, one level
+ * read, then loads) and the tail at the STOP; and every tenure ends on
+ * its STOP_DET - a write, a read and the probe alike - or on TX_ABRT
  * with the abort source decoded. A tenure of a FIFO or less is one
  * interrupt; a longer one, one per half FIFO, the two levels of a long
  * read rising within a byte of each other and served by one entry. The
@@ -815,17 +907,18 @@ inline constexpr uint8_t i2c_dma_fault = bus_engine_status + 4;
  *
  * `speed` names a row of the timing table init() solves for ic_clk; a
  * speed the clock cannot produce is answered i2c_rejected inside
- * start(), no byte moved - the one synchronous completion of an I2C
- * engine, and the arbiter replies with status() for it. The address and
+ * start(), no byte moved - a synchronous completion (the other is the
+ * block that will not disable, below), and the arbiter replies with
+ * status() for it. The address and
  * the speed go into the block under a disable/enable pair (IC_TAR and
- * IC_CON take a write only with ENABLE clear) ONLY WHEN THEY MOVE, or
+ * IC_CON take a write only with ENABLE clear) only when they move, or
  * when the last tenure did not end on its own STOP: a block whose last
  * tenure ended on STOP_DET keeps both, idle, its FIFOs empty, and the
  * next tenure's entries go straight in. A block that will not disable -
  * a command under way with no STOP, which a finished tenure never
  * leaves - is answered i2c_bus_error the same way.
  *
- * THE ENGINE SLOTS: a transmit engine of uint16_t and a receive engine
+ * The engine slots: a transmit engine of uint16_t and a receive engine
  * of uint8_t on any two of the family's DMA channels, both or neither,
  * serving a READ phase of three bytes or more (the file header): the
  * transmit engine pours the plain read command from a fixed cell for the
@@ -897,7 +990,8 @@ public:
     /// cannot produce is marked unreachable (speed_ok()) and a Request
     /// naming it is answered i2c_rejected. False when not even
     /// standard_100k is legal (a clock under 2.7 MHz) or the block did
-    /// not come up.
+    /// not come up. Main context, after the clock and before interrupts
+    /// are enabled globally.
     template <typename Clock>
     static bool init(Clock clock) {
         static_assert(DwApbI2cChipClock<Chip, Clock>,
@@ -941,7 +1035,7 @@ public:
     }
 
     /// ic_clk changed (DynamicClock fan-out): the three rows solved
-    /// again and the applied one rewritten. THE BUS MUST BE IDLE.
+    /// again and the applied one rewritten. The bus must be idle.
     static void rebase(uint32_t hz) {
         solve(hz);
         if (S::enabled() && valid_[static_cast<uint8_t>(applied_)]) {
@@ -974,7 +1068,8 @@ public:
     /// The engine's completion status, for the TransferDone payload.
     static uint8_t status() { return status_; }
 
-    /// The instance's interrupt body - call from its vector. True when
+    /// The instance's interrupt body - call from its vector (isr_i2c0 or
+    /// isr_i2c1 on the RP chips), and from nowhere else. True when
     /// the tenure just completed: the edge the app's glue posts
     /// TransferDone on.
     [[gnu::always_inline]] static bool isr() {
@@ -1198,11 +1293,14 @@ public:
     /// The classic bus unstick: nine SCL pulses and a STOP, by hand,
     /// open-drain through the family's own software path (the pad driven
     /// low or released to the pull-up), with the pads reclaimed from the
-    /// peripheral for the duration. RECOVER() FIXES THE PERIPHERAL, THIS
-    /// FIXES THE WIRE. Returns the pulses it took a stuck client to
+    /// peripheral for the duration. recover() fixes the peripheral, this
+    /// fixes the wire. Returns the pulses it took a stuck client to
     /// release SDA (0 = the wire was never stuck), or 0xFF when nine
-    /// pulses and a STOP left SDA low - a short, not a client. A healthy
-    /// wire is left alone.
+    /// pulses and a STOP left SDA low - which it reads as a short rather
+    /// than a client. A healthy wire is left alone. It judges SDA alone:
+    /// a client that holds SCL low is not freed here, and with SDA high
+    /// the answer is 0. The instance's line is masked throughout, and
+    /// the pulses are spun at half a bit of standard mode (5 us) an edge.
     static uint8_t unstick() {
         Chip::Interrupts::disable(S::irq());
         SclPad::input(Chip::open_drain_pull);
@@ -1245,11 +1343,11 @@ public:
         return released_at == 0xFF ? 0u : released_at;
     }
 
-    /// Put the ENGINE back where start() is legal - the verb a timed
+    /// Put the engine back where start() is legal - the verb a timed
     /// I2cBus calls on a tenure that never answered: the engines put
     /// away, the block reset (a command under way with no STOP holds
     /// the block enabled forever, and the family's reset is the one
-    /// way out), the configuration and the timing rewritten. The WIRE
+    /// way out), the configuration and the timing rewritten. The wire
     /// stays the application's (unstick()).
     static bool recover() {
         Chip::Interrupts::disable(S::irq());
@@ -1555,7 +1653,7 @@ enum class I2cClientEvent : uint8_t {
  *
  * The target side. The peripheral matches IC_SAR, acknowledges, and
  * then: a byte written to it lands in the receive FIFO (RX_FULL), a read
- * of it raises RD_REQ and HOLDS SCL until a byte is given - the clock
+ * of it raises RD_REQ and holds SCL until a byte is given - the clock
  * stretch is the block's own; the host's NACK at the end of a read is
  * RX_DONE; a repeated START while addressed is RESTART_DET; the STOP is
  * STOP_DET, raised for this client's tenures alone
@@ -1563,8 +1661,8 @@ enum class I2cClientEvent : uint8_t {
  * an earlier one flushes them and says so (ABRT_SLVFLUSH_TXFIFO); bytes
  * queued beyond what the host takes are flushed at its NACK the same
  * way. There is no address-match event: the tenure is known by its first
- * byte or its first read request. A DISABLE AT A READ REQUEST NEVER
- * COMPLETES - the block waits for a byte its erased FIFO cannot take,
+ * byte or its first read request. A disable at a read request never
+ * completes - the block waits for a byte its erased FIFO cannot take,
  * holding SCL (measured, docs/dw_apb_i2c/README.md) - so acknowledge()
  * and flush_tx() are for a client between tenures, and release(), whose
  * disable is bounded and whose reset lets SCL go, is the way out of one.

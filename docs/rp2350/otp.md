@@ -1,6 +1,56 @@
 # One-time programmable memory, read side (RP2350)
 
-Documents of record: the RP2350 datasheet (build d126e9e), chapter 13
+This document is for a programmer who wants to read what the RP2350's
+one-time programmable array (OTP) says about the chip it is on: its
+64-bit identity, the factory's oscillator calibrations, the package's
+pad count, the critical and boot flags that decide what the chip will
+do, and which architecture is running. `Otp` is the driver, a monostate
+(a type with no objects, all of whose functions and state are static,
+because the block exists once), and it reads only: brio has no verb that
+writes a bit of this array, for the reason the next section gives. Both
+architectures run it from one source.
+
+The smallest use, an excerpt of the block under "How to use it" below:
+
+```cpp
+// a row, with its verdict, and never a fault
+if (auto row = brio::Otp::read(brio::OtpRowId::num_gpios)) {
+    if (row->ecc != brio::OtpEcc::uncorrectable) { use(row->data); }
+}
+```
+
+Line by line: `OtpRowId::num_gpios` names the row (the row numbers are
+the device header's own); `read()` checks the page's lock first, reads
+the row's raw 24 bits and decodes its error correction in software, and
+answers nothing when the row is out of range or its page is closed to
+this program, so it never faults; `row->ecc` is the decoder's verdict,
+`ok`, `corrected` or `uncorrectable`; `row->data` is the 16-bit datum,
+repaired where one bit had flipped.
+
+What decides correctness even there. The block has no `init()`: its
+power-up state machine read the array before the first instruction of
+the program ran, and nothing needs starting. The data windows answer
+only while USR.DCTRL stands - always, unless something else is
+programming the array, and then every read takes a bus error
+(`data_window_enabled()` asks). The reference clock must not exceed
+25 MHz while the array is read (13.3); clk_ref is the 12 MHz crystal on
+this stratum's board, and `otp_clk_ref_max_hz` is the bound a program
+that moves clk_ref checks. And the two guarded windows (`ecc_guarded()`,
+`raw_guarded()`) fault instead of answering where a read is refused, so
+a caller asks `readable()` before using them, as the last lines of the
+block below do. No verb here waits or masks interrupts: a read is one
+or a few bus loads.
+
+The rest of this page, in order: the documents of record; why there is
+no write path; what the silicon does (the four read windows, the
+locks, the error correction and the sentence of 13.6.2 that must be read
+carefully, the replicated rows, ARCHSEL_STATUS, the clock limit, the
+decommissioning flag); the types and verbs; how to use it; the bench
+findings; and what is not covered.
+
+## Documents of record
+
+The RP2350 datasheet (build d126e9e), chapter 13
 (13.1 the address map and the four read windows with 13.1.1 the guarded
 ones, 13.2 and 13.3 the IP and the hardware around it with 13.3.1 the
 lock shim, 13.3.2 the two interfaces and the interrupt, 13.3.3 the boot
@@ -13,7 +63,9 @@ predefined data locations), 4.5 (what the boot path reads out of it) and
 10.8 (its place in the security architecture); Appendix E, RP2350-E16 and
 RP2350-E28. The driver: `brio/rp2350/otp.hpp`. The reference suite:
 `test_rp2350_blocks`, letters a, h and j, which runs on both of this
-chip's architectures from one source.
+chip's architectures from one source (a letter is one command key of
+the suite's console and the group of verdicts it runs; `z` is the key
+that runs them all, every letter here being read-only).
 
 ## There is no write path here, and that is a decision
 
@@ -47,17 +99,17 @@ registers:
 
 | Base | What a read gives | On a refused read |
 |------|-------------------|-------------------|
-| `0x40130000` | 16 bits per row, hardware-corrected, addressed as a HALFWORD at 2 x row | all-ones |
+| `0x40130000` | 16 bits per row, hardware-corrected, addressed as a halfword at 2 x row | all-ones |
 | `0x40134000` | the row's 24 raw bits as a word at 4 x row, correction bypassed | all-ones |
-| `0x40138000` | the ECC data again, with hardware consistency checks | a BUS FAULT |
-| `0x4013c000` | the raw data again, with the same checks | a BUS FAULT |
+| `0x40138000` | the ECC data again, with hardware consistency checks | a bus fault |
+| `0x4013c000` | the raw data again, with the same checks | a bus fault |
 
 Bit 14 of the address picks raw over ECC and bit 15 guarded over
 unguarded. An unguarded refusal is indistinguishable from a row that
 genuinely reads all-ones, which is exactly why the guarded windows exist
 and why the bootrom uses them for boot flags; but a bus fault is not a
 value a function can return. So this driver offers both, and offers a
-lock-checked `read()` above them: the page's permission is read FIRST and
+lock-checked `read()` above them: the page's permission is read first and
 only then is the array touched, so a caller gets an answer or an empty
 optional and never a fault.
 
@@ -69,7 +121,7 @@ above.
 **The locks are a thermometer that only climbs** (13.5.1). Read/write,
 then read-only, then inaccessible; Secure and Non-secure advance
 independently; the registers are preloaded from the array at reset, are
-world-readable, and IGNORE a write of a lower value. Reads and writes are
+world-readable, and ignore a write of a lower value. Reads and writes are
 not orthogonal here - the IP performs both in the course of programming a
 row, so a page whose reads are blocked has its writes blocked too
 (13.3.1). On a device that has only been through manufacturing test
@@ -82,24 +134,24 @@ row carries 16 bits of data, a 6-bit modified Hamming code in bits 21:16
 and 2 bits of bit-repair-by-polarity in 23:22. The hardware corrects
 transparently and tells nobody, so the only way for a program to learn
 that a row needed correcting - or is beyond correcting - is to read the
-RAW row and do the arithmetic. 13.6.2 publishes that arithmetic as a
+raw row and do the arithmetic. 13.6.2 publishes that arithmetic as a
 six-entry parity table.
 
 Its decode sentence is "ECC recalculates the six parity bits based on the
 value read from the OTP row" and XORs them with the stored six. For the
 five Hamming bits that is unambiguous: their masks cover data bits only,
 so recomputing them from the sixteen data bits is right. **The sixth mask
-covers bits 0..20 - the data AND the five Hamming bits** - so
-recalculating IT from the data alone and the recomputed Hamming bits
+covers bits 0..20 - the data and the five Hamming bits** - so
+recalculating it from the data alone and the recomputed Hamming bits
 gives a check that is blind to a whole class of single-bit errors: a flip
 in data bit 3, or in any stored parity bit, comes out with the syndrome's
-top bit CLEAR and would be filed as uncorrectable. The sixth check must
-be the parity of the WHOLE RECEIVED row, which is what makes the code
+top bit clear and would be filed as uncorrectable. The sixth check must
+be the parity of the whole received row, which is what makes the code
 single-error-correcting and double-error-detecting: any odd number of
 flips sets it. This driver's `otp_ecc_checks()` is that definition, and
 the family check sweeps all twenty-two single flips (each located and
 repaired) and all two hundred and thirty-one double flips (each detected
-and refused) against it at COMPILE time, with no silicon involved.
+and refused) against it at compile time, with no silicon involved.
 
 **Bit repair by polarity** (13.6.1) compensates for one bit that was
 already set before a row was programmed: the row is stored inverted and
@@ -110,7 +162,7 @@ inverts the row before the Hamming stage.
 different times cannot carry ECC, because the code covers all sixteen
 data bits at once. Those rows are replicated: best-of-three for most of
 them, and **three-of-eight for the critical flags** (13.4) - a rule
-deliberately biased towards reading a flag as SET.
+deliberately biased towards reading a flag as set.
 
 **ARCHSEL_STATUS lives in this block**, at `OTP_BASE + 0x15c`. The
 critical flags that force an architecture are read by this block's own
@@ -141,7 +193,7 @@ more.
   arithmetic. `Otp::read_run(first, rows)` reads several rows as one
   unsigned value, least significant row first.
 - `Otp::ecc(row)`, `raw(row)`, `ecc_guarded(row)`, `raw_guarded(row)` -
-  the four windows themselves. The guarded pair FAULTS where the others
+  the four windows themselves. The guarded pair faults where the others
   return a pattern of ones.
 - `OtpRow` - the raw 24 bits, the datum, `OtpEcc::ok|corrected|
   uncorrectable`, which bit was repaired and whether the row was stored

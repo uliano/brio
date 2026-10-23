@@ -1,54 +1,82 @@
 /*
  * opa.hpp
  *
- * The operational amplifier of the CH32V00x, in two shapes the part
- * decides (device::has_opa_block):
+ * The operational amplifier of the CH32V00x: a program amplifies a small
+ * signal before the ADC reads it, or uses the amplifier as a comparator
+ * of two pads. `Opa` is the block, a monostate (a type whose functions
+ * are all static: the one amplifier on the chip, never an object). The
+ * smallest use, on the CH32V006 (docs/ch32v00x/opa.md, "How to use it"):
+ *
+ *     brio::Opa::unlock();
+ *     brio::Opa::configure({.positive = brio::OpaPositive::pd3, .negative = brio::OpaNegative::gain8});
+ *     brio::Opa::enable(true);
+ *     brio::Adc::select(brio::AdcInput::opa);              // channel 9: the amplified pad
+ *     const uint16_t counts = brio::Adc::read_settled(4);
+ *
+ * and on the CH32V003, a pad on each side and the output read through
+ * PD4:
+ *
+ *     brio::Opa::configure({.positive = brio::OpaPositive::pa2, .negative = brio::OpaNegative::pd0});
+ *     brio::Opa::enable(true);
+ *     brio::AnalogIn<brio::Pin<'D', 4>>::claim();          // the output pad is the ADC's input
+ *     brio::Adc::select_channel(brio::Opa::adc_channel);   // channel 7
+ *
+ * Who calls what. Every verb is a register access with no guard of its
+ * own, called from main (or one active object) and nowhere else:
+ * configure() and enable() read, modify and write OPA_CTLR1 on the
+ * CH32V006 and EXTEND_CTR on the CH32V003, a register that also holds
+ * the lock-up monitor. Nothing waits and nothing masks. configure()
+ * selects pads and configures none of them: the input pads' GPIO state
+ * is the program's, and so is PD4's analog mode on the CH32V003. The
+ * ADC that reads the output is adc.hpp's, initialized by the program.
+ * The block takes two shapes, which the part decides
+ * (device::has_opa_block):
  *
  * ON THE CH32V006 (RM ch. 17) one OPA with a selectable positive input
  * (four pads), a negative input that is a pad or an internal gain of
  * 4, 8, 16 or 32 (the PGA, with a 192 kOhm feedback the block
  * switches in), a differential PGA whose negative side is PA4, a bias
  * reference of VDD/2 or VDD/4 for the PGA, a high-speed mode, an
- * output that is a pad (PD4 or PA5) and ALWAYS the ADC's channel 9 -
+ * output that is a pad (PD4 or PA5) and always the ADC's channel 9 -
  * and the comparator CMP2 that reads the OPA's output against that
  * same bias. The chapter's second comparator, CMP1 with its own pads,
  * exists on the CH32V007 alone (17's opening paragraph), so this file
  * spells CMP2 and the polling and leaves CMP1 for the part that has it.
  *
- * THE LOCKS. OPA_CTLR1.OPA_LOCK is SET at reset: nothing in the register
+ * The locks. OPA_CTLR1.OPA_LOCK is set at reset: nothing in the register
  * takes a write until the two keys go into OPA_KEY in order (17.3.5,
  * the flash's own pair 0x45670123 / 0xCDEF89AB), and OPA_LOCK written
  * one locks it again until the next system reset. CMP_KEY and POLL_KEY
  * are the same arrangement for OPA_CTLR2 and the polling fields.
  *
- * WHAT THE OPA REACHES WITH NO PAD: its output is the ADC's channel 9
+ * What the OPA reaches with no pad: its output is the ADC's channel 9
  * whatever MODE1 says (measured: the single-ended PGA at a gain of 4
- * reads 2 counts with its input pulled down and 4095 pulled up). THE
- * DIFFERENTIAL PGA'S INPUTS ARE NOT HIGH-IMPEDANCE: figure 17-1 draws
+ * reads 2 counts with its input pulled down and 4095 pulled up). The
+ * differential PGA's inputs are not high-impedance: figure 17-1 draws
  * 3.2 kOhm into its network, and a pad's own pull cannot hold such an
  * input at a rail - both inputs pulled up read near zero on channel 9,
  * both pulled down near 0.77 VDD, neither the bias reference - so the
- * bias, the gains and the differential transfer want a SOURCE.
+ * bias, the gains and the differential transfer want a source.
  *
- * CMP2 ON THIS PART: CMP_KEY lifts CMP_LOCK, and CMP_EN2 does not take
+ * CMP2 on the CH32V006: CMP_KEY lifts CMP_LOCK, and CMP_EN2 does not take
  * a write (measured) - the comparators are the CH32V007's, as 17's
  * opening paragraph says of the CMP module; the verbs stay for the
  * part that has them and answer false here.
  *
- * ON THE CH32V003 (its RM ch. 17) the OPA is THREE BITS OF EXTEND_CTR:
+ * ON THE CH32V003 (its RM ch. 17) the OPA is three bits of EXTEND_CTR:
  * OPA_EN, OPA_PSEL (channel 0 = PA2, 1 = PD7) and OPA_NSEL (0 = PA1,
  * 1 = PD0); the output is the pad PD4 and nothing else, read by the
- * ADC as its channel 7 THROUGH THAT PAD (no internal route: PD4 must
+ * ADC as its channel 7 through that pad (no internal route: PD4 must
  * be an analog input for the reading). No key, no lock, no gain, no
  * feedback switch (a resistor across the pads closes the loop), no
  * bias, no comparator. The same OpaConfig spells it: the selections
  * the part has are the first two codes of each enum, and everything
- * else is REFUSED by opa_config_valid() - so a configuration written
+ * else is refused by opa_config_valid() - so a configuration written
  * for one part is not silently a different one on the other. The
  * lock verbs answer as a block with no lock (never locked, lock()
  * false), the CMP2 verbs as a part with no comparator.
  *
- * NOT COVERED YET: the front-end POLLING (CFGR1/CFGR2: three P-side
+ * Not covered yet: the front-end polling (CFGR1/CFGR2: three P-side
  * channels sampled in turn on a timer trigger, each into the ADC, with
  * a per-channel window and a reset on a fault) - the shape of a task
  * this stratum has no user for; CMP2's output as TIM1's break source
@@ -263,8 +291,9 @@ struct Opa {
     /// bias, the differential PGA, the output selection, CMP2).
     static constexpr bool has_block = device::has_opa_block;
 
-    /// The key pair, in order. Nothing takes before this on the
-    /// CH32V006; nothing to do on the CH32V003.
+    /// The key pair, in order: two stores into OPA_KEY that lift the
+    /// lock standing from reset. Nothing takes before this on the
+    /// CH32V006; nothing to do on the CH32V003. Once per reset, from main.
     static void unlock() {
         if constexpr (has_block) {
             regs().OPA_KEY = opa_key1;
@@ -288,7 +317,10 @@ struct Opa {
     }
 
     /// The whole configuration, the enable left as it is. False for a
-    /// config the part refuses, or with the block locked.
+    /// config the part refuses (opa_config_valid()), or with the block
+    /// locked - on the CH32V006 before unlock() or after lock(). It
+    /// selects the pads and configures none of them: their GPIO state is
+    /// the caller's. A read-modify-write with no guard, from main.
     static bool configure(const OpaConfig& c) {
         if (!opa_config_valid(c) || locked()) {
             return false;
@@ -303,6 +335,9 @@ struct Opa {
         }
         return true;
     }
+    /// The amplifier on or off, the selections left as they are (OPA_EN1
+    /// on the CH32V006, OPA_EN in EXTEND_CTR on the CH32V003). The lock
+    /// guards this bit too on the CH32V006, so it takes only unlocked.
     static void enable(bool on) {
         if constexpr (has_block) {
             regs().CTLR1 = on ? (regs().CTLR1 | opa_en1) : (regs().CTLR1 & ~opa_en1);

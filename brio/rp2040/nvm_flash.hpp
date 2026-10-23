@@ -1,19 +1,44 @@
 /*
  * nvm_flash.hpp
  *
- * The RP2040's flash as a FlashMedia (util/nv_heap.hpp): the backends
- * that let the block allocator and the value journal run on this
- * silicon, where the storage and the running image share ONE external
- * quad-SPI chip that the core executes out of.
+ * The RP2040's flash as storage that survives a power cycle: the two
+ * backends that let util/nv_heap.hpp's block allocator and
+ * util/nv_journal.hpp's value journal run on this silicon, where the
+ * storage and the running image share one external quad-SPI chip that
+ * the core executes out of. Each backend is a FlashMedia - the concept
+ * util/nv_heap.hpp states for a flash a heap or a journal can live on:
+ * its erase size, its write cell, its zones, and read, program and
+ * erase within them. A program names a backend as the heap's or the
+ * journal's first template argument and never calls it itself
+ * (docs/rp2040/flash.md, "How to use it"):
  *
- * A CONSTANT PARTITION, drawn once at the top of the chip. The linker
+ *     brio::NvJournal<brio::QspiFlashJournalZone, 6, 32, 2> journal;
+ *     journal.mount();
+ *     journal.save<Calibration>(1, cal);          // one page program
+ *     const auto back = journal.load<Calibration>(1);
+ *
+ *     brio::NvHeap<brio::QspiFlash, 8, 2> heap;
+ *     heap.mount();
+ *
+ * Which context calls what. The heap and the journal call these
+ * backends from the context that calls them - setup, or an active
+ * object's handler (an active object is a component of a brio program
+ * with its own event queue, served one event at a time by the kernel) -
+ * one caller at a time, which nothing checks. Every program and erase
+ * is one of rp2040/flash.hpp's windows: interrupts masked on the calling
+ * core for the whole operation, and the other core and the DMA kept off
+ * the flash by the application (below). `read()` is a copy through the
+ * cache and masks nothing. The buffers are the caller's, used during the
+ * call only.
+ *
+ * A constant partition, drawn once at the top of the chip. The linker
  * script gives the linker everything but the last 64 KB (`flash` in
  * rp2040/ld/rp2040_2m.ld stops at 1984K), so nothing the compiler
  * emits can land there, and the storage's floor and homes are
- * constants rather than symbols that move with every build - the
- * STM32G0's and the CH32V00x's arrangement, for the same reasons:
+ * constants rather than symbols that move with every build:
  * util/nv_heap.hpp's placement rule wants a floor that stays put, and
- * an image that grew into its own storage would be a silent loss. The
+ * an image that grew into its own storage would be a silent loss (the
+ * STM32G0 and CH32V00x strata draw the same arrangement). The
  * script's own `__brio_flash_end` is read back as the proof; a script
  * edited past the floor closes the storage (both users read a zone
  * with its floor at its ceiling as "refuse") instead of letting an
@@ -27,7 +52,10 @@
  *                                                 (util/nv_journal.hpp), two
  *                                                 halves of two sectors
  *
- * THE CELL IS THE PAGE. The bootrom's program takes whole 256-byte
+ * The top four sectors are the attic, the journal's zone above the
+ * heap's share.
+ *
+ * The cell is the page. The bootrom's program takes whole 256-byte
  * pages (flash.hpp), so `write_cell` is 256 under an `erase_size` of
  * 4096: sixteen cells a sector, a journal half of two sectors holding
  * thirty-two entries, and the heap's map entries and headers in cells
@@ -36,20 +64,21 @@
  * (the suite asks it); a smaller cell would want a program that takes
  * less than a page, which the bootrom's does not.
  *
- * ADDRESSES ARE THE CHIP'S OWN, from 0 - what the bootrom's functions
+ * Addresses are the chip's own, from 0 - what the bootrom's functions
  * take - and the engine adds the window where a pointer is wanted.
  * util/nv_heap.hpp numbers erase units in a uint16_t: 2 MB / 4 KB =
  * 512, no problem here.
  *
- * NO READ-WHILE-WRITE, AND MORE: this chip is the one the core executes
+ * No read-while-write, and more: this chip is the one the core executes
  * from, and for the whole of an erase or a program the flash is
- * DISCONNECTED - the engine runs from SRAM with interrupts masked
+ * disconnected - the engine runs from SRAM with interrupts masked
  * (flash.hpp). An ordinary NvJournal::save() from the main loop is a
- * pause of the whole program - under a millisecond for the page, tens
- * of milliseconds when it erases a sector - during which no interrupt
- * is served and the ticker loses its ticks; the suite measures both.
- * The other core and the DMA must keep off the window for that time,
- * which nothing here enforces.
+ * pause of the whole program - a page program's window (0.6 ms on the
+ * Winbond W25Q16JV, 1.3 ms on the Zetta ZD25Q16), a sector erase's
+ * (29 ms and 5.2 ms) when it collects - during which no interrupt of
+ * this core is served and the ticker loses its ticks; the suite
+ * measures both (docs/rp2040/flash.md). The other core and the DMA must
+ * keep off the window for that time, which nothing here enforces.
  */
 
 #pragma once
@@ -65,10 +94,10 @@
 extern "C" {
 /// The epoch of the link, injected by rp2040/CMakeLists.txt. Declared
 /// as an array so that no code can be tempted to dereference it: it is
-/// a VALUE, and only its address bits are ever read.
+/// a value, and only its address bits are ever read.
 extern const char __nvheap_build_id[];
 
-/// One past the last byte the LINKER may place, from ld/rp2040_2m.ld:
+/// One past the last byte the linker may place, from ld/rp2040_2m.ld:
 /// an address in the window.
 extern const char __brio_flash_end[];
 }
@@ -175,7 +204,8 @@ static_assert(FlashMedia<QspiFlash>);
 static_assert(QspiFlash::flash_end % QspiFlash::erase_size == 0u);
 static_assert(QspiFlash::flash_end / QspiFlash::erase_size <= 0xFFFFu);
 
-/// The journal's share: the attic, the top four sectors.
+/// The journal's share: the attic, the top four sectors, behind the
+/// FlashMedia contract.
 struct QspiFlashJournalZone {
     QspiFlashJournalZone() = delete;
 

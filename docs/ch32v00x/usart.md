@@ -1,20 +1,117 @@
 # USART (CH32V00x)
 
-The USARTs of RM ch. 14 (two on the CH32V006, the CH32V003's one under
-its ch. 12) - the asynchronous frame in every shape
-the register description allows, the fractional baud generator, mute
-mode with both wakes, LIN's break, single-wire half duplex, IrDA, the
-flow-control pair, two DMA requests, every flag and interrupt - and
-the interrupt-driven byte transport every brio console is, sitting on
-that resource with its options costing nothing. Documents of record:
-the CH32V00X reference manual V1.5 (14.2 for the frame and TE's idle
+This document is for a programmer who needs a serial port: the console
+a program prints to, a line-oriented link, a byte transport to another
+chip, or one of the shapes the peripheral offers (LIN, IrDA, a
+single-wire bus, the flow-control pair, and on the CH32V003 a
+synchronous clock). It covers the USARTs of RM ch. 14 (two on the
+CH32V006, the CH32V003's one under its ch. 12) - the asynchronous frame
+in every shape the register description allows, the fractional baud
+generator, mute mode with both wakes, LIN's break, single-wire half
+duplex, IrDA, the flow-control pair, two DMA requests, every flag and
+interrupt - in the two layers every brio serial driver has
+([design/serial.md](../design/serial.md)): `Usart<n>`, the resource,
+which instance, its clock gate, its vector, its DMA channels and the
+chapter's registers as functions, one per register fact; and
+`Uart<n, P, ...>`, the task (a task, in brio, is a driver layer with
+state of its own, served from its peripheral's interrupt, that an
+active object or `print` calls; an active object is a component of a
+brio program with its own event queue, served one event at a time by
+the kernel, [docs/learn/introduction.md](../learn/introduction.md)):
+the interrupt-driven byte transport every brio console is, with a
+transmit ring and a receive ring, a DMA engine in either slot, and the
+same public surface as the other targets' tasks, which is what lets
+`util/serial_port.hpp` and `print()` run here unchanged. Its options
+cost nothing when left at their defaults: an image with them is
+byte-identical to one without.
+
+The smallest use is the console, as every app has it ("How to use it"
+below):
+
+```cpp
+using Serial = brio::Uart<1, P>;                 // USART1, PD5/PD6, 8N1
+constexpr Serial serial;
+Serial::init(clock, 115200);
+extern "C" BRIO_CH32_INTERRUPT void usart1_handler() { (void)Serial::isr(); }
+```
+
+Line by line: `Serial` names the transport type, `1` the instance, `P`
+the platform ([platform.md](platform.md)), which the rings ask whether
+a ring index can be shared with a handler without masking interrupts
+(the platform's `atomic_width`), and every other template argument at
+its default: rings of 64 and 64 bytes, no DMA engines, remap code 0
+(a remap code selects a column, the set of pads the instance uses,
+[pin.md](pin.md); code 0 is USART1's default column, PD5 and PD6, wired
+to the probe's own serial on both bench boards), 8N1, the flash
+placement; `serial` is an empty
+tag object of that type, the argument `print` takes to pick the port
+(`brio::print(serial, "hello", brio::crlf)`; what else `print` takes,
+numbers among it, is util/print.hpp's), since the type's functions are
+all static and it has no object of its own; `init()` takes the clock task's tag
+(`constexpr SysClock clock;`, declared as in [clock.md](clock.md)'s
+smallest use) and the baud rate, opens the gate, the pads and the
+receive interrupt, and answers false for a rate the clock cannot divide
+(a divisor below 16); the `extern "C"` function is the interrupt
+handler, as in C, under the startup code's name for USART1's vector and
+with `BRIO_CH32_INTERRUPT` in front (the one spelling of a handler
+attribute on this target, [platform.md](platform.md)). `isr()` is the
+port's whole interrupt body and returns true when a received byte made
+the receive ring non-empty, the edge a program posts as `RxActivity` to
+the active object that assembles lines (`SerialLines`, a `SerialPort`
+of `util/serial_port.hpp`, in a program that has one); the smallest
+use, with no such object, discards it. `init()` goes in `main()`
+after `SysClock::init()` and before the kernel's `run()`; `print` may
+also be called later, from an active object's event handler.
+
+What decides correctness even there: `init()` after the clock task's,
+since the baud divisor is computed from the rate the clock type claims
+and not read from the hardware, so a port initialized on a chip still
+at its 8 MHz reset rate with a 48 MHz clock type speaks at a sixth of
+the rate asked until the clock task runs, the same divisor giving the
+rate asked once it has, and nothing refuses it; the instance must be
+one the part has (USART2 is the CH32V006's alone, and on the
+CH32V006K8 its default column is refused at compile time, its TX being
+the reset pin PA7: it takes codes 1 to 6); and the instance's vector
+must be bound to `isr()` by the program, as above - a port whose vector
+is left unbound raises its first interrupt (the first byte it sends or
+receives) into the startup code's spin for unbound vectors, and the
+program stops there. Three
+more things to know before the first `print`: `print` waits until the
+transmit ring has taken every byte (taken into the ring, not yet sent:
+the wait is one byte time for each byte that does not fit, about 87 us
+a byte at 115200), so a long message printed from an active object's
+event handler stalls every other active object for that long
+([design/serial.md](../design/serial.md)); the transmit ring has
+one producer, so `write_byte` and `write_bulk` are called from active
+objects and from `main`, never from an interrupt handler, and both
+copy, the caller's buffer being free when the call returns; and the
+transmit arming masks interrupts around its read-modify-write of CTLR1
+only when a receive engine is in its slot, whose vector rewrites that
+register's receive enables; the plain console's arming masks nothing.
+
+The page is long because the chapter is. In order: the documents of
+record; what the silicon does, the two parts' differences first; the
+receive side's offer and what the transport takes of it; the types and
+verbs; how to use it, the DMA engines and the placement in SRAM among
+the examples; the bench findings, most of the page, with the far chip's
+suite and this part as its instrument; and what is not covered.
+
+## Documents of record
+
+The CH32V00X reference manual V1.5 (14.2 for the frame and TE's idle
 frame, 14.3 for the baud generator, 14.4 for half duplex, 14.5 for
 IrDA, 14.6 for DMA, 14.7 for the interrupts, 14.8 for the registers;
 3.4.4 and 3.4.7 for USART2's reset and gate; table 8-2 for the DMA
 channels), the CH32V006 datasheet V2.0 (table 2-1-1 for the pads),
 AFIO's tables 7-10 and 7-11 (the columns, [pin.md](pin.md)), and for
 the CH32V003 its reference manual V1.9 (12.4 for the synchronous mode,
-12.6 for the smartcard, 12.10 for its registers).
+12.6 for the smartcard, 12.10 for its registers). The header is
+[brio/ch32v00x/usart.hpp](../../brio/ch32v00x/usart.hpp), the columns
+in [afio.hpp](../../brio/ch32v00x/afio.hpp) and the engines in
+[dma.hpp](../../brio/ch32v00x/dma.hpp) ([dma.md](dma.md)); the
+reference suite is `test_ch32_serial` (a suite's letter, below, is one
+command key of its console and the group of verdicts it runs; `z` is
+the key that runs the single-board set, `w` the two-board key, below).
 
 ## What the silicon does
 
@@ -33,8 +130,8 @@ the CH32V003 its reference manual V1.9 (12.4 for the synchronous mode,
   time; LBCL adds the last data bit's pulse (seven pulses per
   eight-bit frame without it, eight with it - measured), CPOL is the
   clock's idle level on the pad (measured), CPHA the receiver's
-  capture edge; the three want TE and RE clear when written. THE
-  RECEIVER SAMPLES ON THE OUTPUT CLOCK (12.4): with nothing answering
+  capture edge; the three want TE and RE clear when written. The
+  receiver samples on the output clock (12.4): with nothing answering
   on RX it collects one frame of the idle line per clocked byte
   (measured), so a program in this mode reads those frames as the
   full-duplex answer or keeps RE clear while it transmits alone. The
@@ -48,12 +145,12 @@ the CH32V003 its reference manual V1.9 (12.4 for the synchronous mode,
   (tables 7-11 and 7-13-1): a port on that column with the flow-control
   pair and the I2C on its column 3 cannot share the part.
 - **The frame is a word length plus a parity choice**: M gives 8 or 9
-  bits INCLUDING the parity bit when PCE is set, so seven data bits
+  bits including the parity bit when PCE is set, so seven data bits
   exist only with parity and nine only without; STOP has four codes,
   1, 0.5, 2 and 1.5 bits, and the receiver takes all four (measured
   both ways: the transmitter's low run and stop gap on a timer
   capture, the receiver fed each format from a bit-banged line).
-- **A read of STATR ARMS the receive clear; the next read of DATAR
+- **A read of STATR arms the receive clear; the next read of DATAR
   performs it on every flag standing at that read** - measured with
   frames banged into USART2's receive pad and channel 7 reading DATAR,
   the CPU never: a break's FE raised after a status read is gone once
@@ -75,7 +172,7 @@ the CH32V003 its reference manual V1.9 (12.4 for the synchronous mode,
   the enable waits a whole frame in the data register before TXE
   returns. Measured: 1145 us at 9600 for the first byte, 52 us once
   the idle frame is out.
-- **HALF DUPLEX IS A BUS, NOT A LOOP.** With HDSEL the receiver listens
+- **Half duplex is a bus, not a loop.** With HDSEL the receiver listens
   on the TX pad through the alternate-function mux - a frame driven
   onto that wire from another pad arrives byte-exact with the pad in
   AF open drain and a pull-up on the line, and is not heard with the
@@ -93,7 +190,7 @@ the CH32V003 its reference manual V1.9 (12.4 for the synchronous mode,
   sample between 46 and 56 128ths of the bit (the spread a sixteenth
   plus the banger's own edges, a spin of the cycle count late), the
   others 8 and 16 128ths after it. A glitch over one sample raises NE
-  and the majority keeps the bit, over two it flips the bit AND raises
+  and the majority keeps the bit, over two it flips the bit and raises
   NE, over all three it flips it in silence - so how many a glitch
   covers is a matter of chance unless it is all three or none: twelve
   128ths from the 53rd raised NE in every frame, the bit flipped in 44 to
@@ -126,12 +223,12 @@ the CH32V003 its reference manual V1.9 (12.4 for the synchronous mode,
 - **The flow-control pair**: CTS high holds the next frame back (TC
   does not come) and low lets it out; RTS is low while the receiver
   can take a frame, high while a received byte waits unread, low
-  again once it is read. The CTS flag rises on EACH edge of the CTS
+  again once it is read. The CTS flag rises on each edge of the CTS
   input under CTSE, rising and falling, and a written zero clears it;
   CTSIE enters the vector once a toggle (four of four).
 - **The flags**: TXE returns within a bit of a write on an idle
   transmitter, TC at the end of the frame (1093 us for a 1042 us frame
-  at 9600); TC's clear is a PAIR, a STATR read then a DATAR write, or a
+  at 9600); TC's clear is a pair, a STATR read then a DATAR write, or a
   zero written (14.8.1), so a DATAR write that no status read preceded
   leaves the TC of the frame before standing, and a wait for TC right
   after it returns at once with the new frame still on the wire
@@ -141,7 +238,7 @@ the CH32V003 its reference manual V1.9 (12.4 for the synchronous mode,
   delivered; TXE with TXEIE re-enters the vector until it is disarmed,
   which is what the transport's ISR does when its ring runs dry.
 - **DMA**: USART1 transmits on channel 4 and receives on 5, USART2 on
-  6 and 7 (table 8-2, the channel IS the request - [dma.md](dma.md));
+  6 and 7 (table 8-2, the channel is the request - [dma.md](dma.md));
   an engine on any other channel is refused at compile time.
 - **The reset values** are table 14-3's: STATR 0xC0, the rest zero.
 - **The errors are read then cleared**: PE, FE, NE, ORE and IDLE by
@@ -156,7 +253,7 @@ the CH32V003 its reference manual V1.9 (12.4 for the synchronous mode,
 | the chapter's offer | taken? | why |
 |---|---|---|
 | DATAR, one level: no FIFO | the interrupt receiver takes every byte at RXNE, one entry a byte | nothing deeper to batch |
-| DMAR and a CIRCULAR channel (8.2.1's CIRC, [dma.md](dma.md)) | the receive engine | the bulk path: the channel writes the whole receive storage lap after lap and is never re-armed, util/ring.hpp's `HardwareRing` reading it |
+| DMAR and a circular channel (8.2.1's CIRC, [dma.md](dma.md)) | the receive engine | the bulk path: the channel writes the whole receive storage lap after lap and is never re-armed, util/ring.hpp's `HardwareRing` reading it |
 | IDLE and IDLEIE (14.8.1) | the engine's burst edge | one frame after the last stop bit; the channel's read finishes its clear, so the vector waits for the next frame with IDLEIE disarmed |
 | RXNEIE beside DMAR | the engine's wait for a frame | the channel still takes the byte and the vector learns one came - the edge of a burst of one frame; ORE raises it too, which is how an overrun with nothing left to take is found and cleared |
 | EIE (FE, NE, ORE under DMAR) and PEIE | counted by the engine's vector | an error is counted when it rises, disarmed until the channel's next read clears it |

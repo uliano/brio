@@ -1,6 +1,107 @@
 # Platform (RP2040)
 
-Documents of record: the RP2040 datasheet (build 3184e62), 2.3
+This document is for a programmer putting a brio program on an RP2040.
+It describes what the kernel stands on here, the platform, and the
+chip's start-up around it. A brio kernel asks the chip for a handful
+of things, stated by the kernel's `Platform` concept (a concept is a
+compiler-checked set of requirements on a type;
+[design/kernel.md, "Platform: what the machine provides"](../design/kernel.md#11-platform-what-the-machine-provides-kernelplatformhpp)):
+a way to mask interrupts for a critical section, a way to sleep until
+the next interrupt without losing one that arrives at the wrong moment,
+a source of time, a breakpoint for a panic, and a record a panic leaves
+for the next boot. `Rp2040Platform<core, TB>` is this family's answer.
+The chip has two cores, and the first template argument says which one
+the platform is: `Rp2040Platform<>` is core 0's, the one a single-core
+program names, and a program that runs a second kernel on core 1 names
+`Rp2040Platform<1>` for it ([multicore.md](multicore.md)). `TB` is the
+timebase, by default that core's SysTick ticker at 1000 Hz, which keeps
+counting through every sleep short of the chip's DORMANT state.
+
+The smallest use, from "How to use it" below - the lines of a kernel
+program's start-up that concern the platform:
+
+```cpp
+using P = brio::Rp2040Platform<>;
+using SysClock = brio::Clock<brio::ClockSource::pll, 125'000'000>;
+constexpr SysClock clock;
+
+extern "C" void isr_systick() { brio::Ticker::tick(); }
+
+int main() {
+    SysClock::init();
+    brio::Ticker::init(clock);
+    brio::enable_interrupts();
+    brio::Tenuto<P, Console, SerialLines, Lamp>::run();
+}
+```
+
+Line by line: `P` names the platform of core 0 with its default
+timebase; `SysClock` names the clock tree the program runs on (the
+crystal through the PLL to 125 MHz, [clock.md](clock.md)) and `clock`
+is an empty tag object of that type, which the drivers' `init()` take
+to learn the rate; `isr_systick` is the SysTick exception's handler,
+under the pico-sdk's name for it, and its one statement advances kernel
+time; `main()` starts the clock tree, starts the ticker from the
+clock's rate, enables interrupts and hands the core to `Tenuto`, the
+kernel's scheduler, with the program's active objects in priority
+order, the list these pages call the pack (an active object is a
+component of a brio program with its own event queue, served one event
+at a time by the kernel: a handler runs to its end before the kernel
+serves another event on that core, whatever its priority,
+[docs/learn/introduction.md](../learn/introduction.md); `Console`,
+`SerialLines` and `Lamp` are the console program's). `run()` never
+returns.
+
+What decides correctness even there. The clock comes first:
+`Ticker::init()` computes the SysTick reload from the rate the clock
+type claims and does not read the hardware, so a tick is a millisecond
+only once clk_sys runs at that rate - a ticker started before
+`SysClock::init()` ticks some twenty times too slowly on the ring
+oscillator's 6.5 MHz until the tree reaches 125 MHz, and at the
+millisecond from then on, and a `SysClock::init()` that answered false
+has left the tree short of the rate (on clk_ref after a crystal or PLL
+failure, [clock.md](clock.md)), with every rate computed from the type
+wrong (the program looks at that answer). `Ticker::init()` itself
+answers false, starting nothing, only when the reload is zero (a clock
+slower than the tick rate) or does not fit SysTick's 24 bits. The vector
+is the program's to bind: the crt gives every handler name but
+`isr_hardfault` (a weak spin of its own) a weak alias to
+`Default_Handler`, a spin, so a program that forgets `isr_systick` stops
+in that spin at its first tick. The peripheral handler names - not
+`isr_systick` or `isr_hardfault` - are macros of the vendored device
+header that every header of this stratum includes (`isr_uart0` is
+`isr_irq20`), and the crt includes the same header, so a program that
+includes a brio header spells the same slot the crt declares; a handler
+defined without that header names a symbol no slot holds and leaves the
+vector on the spin ("Bench findings", the handler names). Interrupts are
+enabled before `run()`, since the kernel sleeps between events and the
+tick is what brings it back. And the critical section is per core: it
+masks this core's interrupts and nothing on the other one, so anything
+two kernels share goes through the bridge of
+[multicore.md](multicore.md), never through a `CriticalSection`. A
+`panic()` writes its record and then executes a breakpoint: under a
+debugger the core halts there, and with none the breakpoint escalates to
+HardFault, whose handler the crt gives a spin of its own - a program
+that wants the record read at the next boot binds `isr_hardfault` to
+[reset.md](reset.md)'s `fault_reset<P>()`, which keeps a record that
+stands and reboots the chip, and reads it with `take_panic_record<P>()`.
+One more fact meets every program at its first driver: every peripheral
+the reset controller governs is held in reset at power-up, and each
+driver's `init()` releases its own block - except the DMA, the PIO and
+the PWM, whose release is a verb of its own the program calls once
+before the block's first user (`Dma::init()`, `Pio<n>::reset()`,
+`Pwm::reset()`).
+
+The rest of this page, in order: the documents of record; what the
+silicon does (the two cores, the boot chain, the reset controller, the
+SRAM banks); the types and verbs; how to use it; the bench findings,
+the idle path measured to the cycle on both cores; "A handler in
+SRAM", an opt-in placement of the drivers' hot paths and the vectors,
+with its cost table; and what is not covered.
+
+## Documents of record
+
+The RP2040 datasheet (build 3184e62), 2.3
 (processor subsystem: SIO, the two NVICs, table 2.3.2's interrupt
 lines), 2.6 (memory: the SRAM banks), 2.7 and 2.8 (boot sequence,
 bootrom, the second stage), 2.14 (subsystem resets), 2.20 (SYSINFO);
@@ -13,7 +114,9 @@ The reference suite: `test_rp2040_platform`
 (the boot state, the ticker against the system timer, `delay_us`, the
 reset controller, the SIO, the atomic aliases, the WFI idle, the idle
 path against an interrupt's edge placed to the cycle, the kernel's turn
-per interrupt, the breadcrumb, five real resets). The failing half of the platform - the
+per interrupt, the breadcrumb, five real resets); a suite's letter is
+one command key of its console and the group of verdicts it runs, and
+`z`, the all-key, runs the suite's set. The failing half of the platform - the
 causes, the watchdog, the timer - has its own documents:
 [reset.md](reset.md), [watchdog.md](watchdog.md), [timer.md](timer.md).
 
@@ -21,14 +124,14 @@ causes, the watchdog, the timer - has its own documents:
 
 Two Cortex-M0+ cores share one bus fabric, one flash and one SRAM;
 each has its own NVIC, its own SysTick and its own PRIMASK. Every one
-of the 32 interrupt lines reaches BOTH NVICs and each core enables
+of the 32 interrupt lines reaches both NVICs and each core enables
 what it wants; a line enabled on both interrupts both cores. Out of
 reset only core 0 runs code; core 1 sits in the bootrom's launch
 protocol, waiting on the inter-core FIFO (2.8.2).
 
 The boot chain: the bootrom (in ROM, on the ring oscillator at about
 6.5 MHz) reads the first 256 bytes of the flash into SRAM, checks
-their CRC32 and runs them; that SECOND STAGE programs the XIP serial
+their CRC32 and runs them; that second stage programs the XIP serial
 interface for the flash chip in use and then vectors through the
 table it expects at flash offset 0x100 - it writes VTOR with that
 address and loads SP and PC from the table's first two words. So an
@@ -38,13 +141,13 @@ window and whatever a program places ("A handler in SRAM", below) -
 then the code, and nothing in brio writes VTOR again. Every peripheral the reset controller
 governs (2.14: the UARTs, SPIs, I2Cs, the timer, the PWM, the ADC,
 both PLLs, both PIOs, the DMA, the IO and pad banks, USB, SYSINFO) is
-HELD IN RESET at power-up: a driver's first act is releasing its
+held in reset at power-up: a driver's first act is releasing its
 block and waiting for RESET_DONE, the way the other families open a
 clock gate.
 
 The SRAM is 264 KB in six banks: four of 64 KB striped word by word
 over 0x2000_0000..0x2003_FFFF, so consecutive words fall in different
-banks and two masters seldom contend, and two UNSTRIPED banks of 4 KB
+banks and two masters seldom contend, and two unstriped banks of 4 KB
 at 0x2004_0000 and 0x2004_1000 - where the two cores' stacks go, one
 each, so a core's stack traffic never contends with the other core's
 or the DMA's. Kernel time is the core's SysTick on clk_sys, which
@@ -52,7 +155,9 @@ nothing short of the DORMANT state stops.
 
 ## Types and verbs
 
-- `Rp2040Platform<TB = Ticker>` - the kernel's Platform:
+- `Rp2040Platform<core = 0, TB = CoreTicker<core>>` - the kernel's
+  Platform, one type per core ([multicore.md](multicore.md)); `Rp2040Platform<>`
+  is core 0's on `Ticker`:
   `CriticalSection` = the PRIMASK guard of `cortexm/nvic.hpp`, PER CORE
   (it excludes this core's handlers and nothing of the other core);
   `idle()` = DSB, WFI, unmask - the core's clock stops, everything
@@ -66,7 +171,8 @@ nothing short of the DORMANT state stops.
   one of those waits for one; `now()`,
   `ticks_per_second` 1000, `atomic_width` 4, `panic_record()` in
   `.noinit`, `break_here()` = BKPT; `core_id()` = SIO's CPUID.
-- `Ticker` = `BasicTicker<1000>` on SysTick, `SysTickCounter` for a
+- `Ticker` = `CoreTicker<0>`, the core stratum's `BasicTicker<1000>`
+  on core 0's SysTick (`CoreTicker<1>` is core 1's), `SysTickCounter` for a
   program whose timebase is elsewhere, `delay_us(clock, us)` - the
   core stratum's, unchanged.
 - `Nvic`, `InterruptGuard`, `enable_interrupts()` - the core stratum's,

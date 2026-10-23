@@ -1,26 +1,76 @@
 # Reset (RP2040)
 
-Documents of record: the RP2040 datasheet (build 3184e62), 2.12
+This document is for a programmer who wants to know why an RP2040
+program started, to restart it on purpose, or to have a failure leave
+a trace the next boot can read. `Reset` reads the causes and causes a
+reset; `ResetReporter` is the panic reporter that reboots the chip
+instead of halting, so the kernel's panic record (the breadcrumb a
+`panic()` writes into memory that every reset short of a power cycle
+leaves as it was,
+[design/kernel.md, "Failures: overflow and panic"](../design/kernel.md#10-failures-overflow-and-panic-kernelpanichpp))
+is read at the next boot; and `fault_reset<P>()` is the body a
+program gives its HardFault handler, so a fault leaves the same trace.
+
+The smallest use, from "How to use it" below:
+
+```cpp
+const uint32_t causes = brio::Reset::causes();
+const auto record = brio::take_panic_record<P>();     // once, at boot
+
+extern "C" void isr_hardfault() { brio::fault_reset<P>(); }
+brio::panic<P, brio::ResetReporter>(brio::PanicCode::assert_failed, 7);
+```
+
+Line by line: `causes()` reads the reset flags of two blocks as one
+word of `ResetCause` bits; `take_panic_record<P>()` hands back the
+record the previous life left for platform `P`, if there is one, and
+consumes it; `isr_hardfault` is the HardFault handler under the
+pico-sdk's name, bound to the body that records a `kernel_fault` -
+unless a record already stands - and reboots; `panic()` records its
+code and context, then executes a breakpoint, and `ResetReporter`, the
+reporter it names, reboots the chip once that breakpoint returns. With
+no debugger attached the breakpoint does not return: it raises a
+HardFault, and the `fault_reset()` bound above keeps the panic's record
+and reboots (`test_rp2040_platform` binds the two exactly so).
+
+What decides correctness even there. The causes word is a history, not
+the cause of this boot: the chip-level flags stand for the life of the
+supply and the watchdog's reason stands until a chip-level reset, so a
+program that wants to know what started this boot compares the word
+with the one the previous life saw ("What the silicon does"). The chip
+has no chip-wide software reset of its own: `Reset::software()`, the
+program's reboot and what `ResetReporter` and `fault_reset()` call, is
+the watchdog's trigger, and `Reset::core()` resets the calling core
+alone - on a program with a kernel on each core the other core runs on
+untouched ([multicore.md](multicore.md)). And the HardFault handler is
+`fault_reset()`, never `panic()`: a panic ends in a breakpoint, which
+with no debugger escalates to HardFault, and a breakpoint taken inside
+HardFault locks the core up.
+
+## Documents of record
+
+The RP2040 datasheet (build 3184e62), 2.12
 (chip-level reset), 2.13 (the power-on state machine), 2.4.2 (what
 SYSRESETREQ resets), 4.7 (the watchdog's REASON and trigger), 2.8 (the
 bootrom); the Cortex-M0+ AIRCR. The driver: `brio/rp2040/reset.hpp`
 over `kernel/panic.hpp` and `rp2040/watchdog.hpp`. The reference
 suites: `test_rp2040_platform`, letters a, g and i;
-`test_rp2040_multicore` for the two-core facts.
+`test_rp2040_multicore` for the two-core facts (a suite's letter is one
+command key of its console and the group of verdicts it runs).
 
 ## What the silicon does
 
-Three kinds of reset, three signatures. A CHIP-LEVEL reset (power-on
+Three kinds of reset, three signatures. A chip-level reset (power-on
 or brown-out, the RUN pin, the rescue debug port) takes the power-on
 state machine down and back up and sets its flag in
 VREG_AND_CHIP_RESET.CHIP_RESET - HAD_POR, HAD_RUN, HAD_PSM_RESTART -
-which then STANDS for the life of the supply. A WATCHDOG reset (the
+which then stands for the life of the supply. A watchdog reset (the
 countdown or CTRL.TRIGGER) resets what the PSM's WDSEL selects and
 names itself in WATCHDOG.REASON, the last event replacing the
 previous. A CORE reset, SCB.AIRCR.SYSRESETREQ, "only resets the
 Cortex-M0+ processor core" (2.4.2): the core that asked restarts
 through the bootrom and the second stage, the other core keeps
-running, the debug logic keeps what a probe left in it, and NO MARK
+running, the debug logic keeps what a probe left in it, and no mark
 is left - no flag set, none cleared. So this chip has no chip-wide
 software reset of its own, and a program's "reboot" is the
 watchdog's trigger under the power-on state machine's selection:

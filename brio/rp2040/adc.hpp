@@ -1,21 +1,23 @@
 /*
  * adc.hpp
  *
- * The RP2040's ADC (datasheet 4.9): one 12-bit successive-approximation
- * converter over five inputs - four pads, GPIO 26..29, and the
- * temperature sensor -, a conversion of 96 cycles of its own clock
- * (clk_adc, 48 MHz from the USB PLL: 500 ksps), a one-shot start and a
- * free-running mode paced by a 16.8 divider, a round-robin over the
- * inputs, an eight-entry FIFO with a threshold that is one interrupt
- * and one DMA request, an optional shift to eight bits for a byte
- * buffer, an error flag per conversion. In the two strata every brio
- * target uses:
+ * The RP2040's ADC (datasheet 4.9), for a program that reads a voltage
+ * on one of four pads or the chip's own temperature: one 12-bit
+ * successive-approximation converter over five inputs - four pads,
+ * GPIO 26..29, and the temperature sensor -, a conversion of 96 cycles
+ * of its own clock (clk_adc, 48 MHz from the USB PLL: 500 ksps), a
+ * one-shot start and a free-running mode paced by a 16.8 divider, a
+ * round-robin over the inputs, an eight-entry FIFO with a threshold
+ * that is one interrupt and one DMA request, an optional shift to
+ * eight bits for a byte buffer, an error flag per conversion. In the
+ * two strata every brio target uses:
  *
- *  Adc            the RESOURCE, a monostate (the chip has one): the
- *                 clock, the power-up, the input select, the two
- *                 starts, the divider, the round-robin, the FIFO and
- *                 its flags, the interrupt, the DMA request - and
- *                 util/analog_sampler.hpp's converter surface
+ *  Adc            the resource, a monostate (a type whose state and
+ *                 functions are all static; the chip has one
+ *                 converter): the clock, the power-up, the input
+ *                 select, the two starts, the divider, the round-robin,
+ *                 the FIFO and its flags, the interrupt, the DMA request
+ *                 - and util/analog_sampler.hpp's converter surface
  *                 (select / start / selected / input_code).
  *
  *  AnalogIn<Pin>  a pad handed to its input: GPIO 26..29 are inputs 0..3
@@ -28,18 +30,52 @@
  *  AdcInput       the five inputs by name, the temperature sensor the
  *                 fifth (AINSEL 4, 4.9.5).
  *
- * THE CLOCK IS THE CONVERTER'S OWN. clk_adc is a generator of its own
+ * The smallest use, one conversion of GPIO 26 (docs/rp2040/adc.md,
+ * "How to use it"):
+ *
+ *     using Vin = brio::AnalogIn<brio::Pin<26>>;        // input 0
+ *     brio::Adc::init(clock);                           // the USB PLL at 48 MHz, clk_adc on it
+ *     Vin::claim();
+ *     brio::Adc::select(Vin{});
+ *     if (const auto counts = brio::Adc::read()) { ... }
+ *
+ * `clock` is the program's Clock tag (rp2040/clock.hpp), the truth of the
+ * crystal's rate the USB PLL is derived from; `init()` answers false when
+ * no PLL configuration reaches 48 MHz from that crystal, the PLL did not
+ * lock, the block did not come out of reset or READY never rose, and
+ * `read()` answers nullopt for a conversion that did not complete within
+ * its bound or failed to converge.
+ *
+ * Which context calls what. `init()` and `release()` are setup verbs in
+ * main(); init() waits, bounded, for the USB PLL's lock, the block's
+ * reset and READY. The configuring verbs (select, divider, round_robin,
+ * fifo, the interrupt enable) belong to setup or to an active object's
+ * handler (an active object is a component of a brio program with its
+ * own event queue, served one event at a time by the kernel), one
+ * context at a time: `select()` and `round_robin()` read CS before they
+ * write it, and nothing checks the owner. `read()` and `stop_many()`
+ * spin, bounded by their `spins` argument; `drain()` pops until the FIFO
+ * reads empty and has no count of its own. `isr()` is the body of the
+ * FIFO's interrupt, called from the program's `isr_adc_fifo`, which pops
+ * the entries itself; the line is enabled by the program in its core's
+ * NVIC (`Nvic::enable(Adc::irq())`), init() leaving it disabled. Nothing
+ * here masks interrupts. A DMA channel reading the FIFO owns its buffer
+ * until the channel's completion (rp2040/dma.hpp).
+ *
+ * The clock is the converter's own. clk_adc is a generator of its own
  * with an aux mux and no glitchless one (clock.hpp's Clocks::adc_select);
  * the chapter asks for 48 MHz, which only the USB PLL makes from the
  * crystal, so init() starts that PLL unless it is locked already. The
  * crystal itself (12 MHz on every board here) is the other source
- * offered: a conversion then takes 96 of ITS cycles, 8 us, and the
+ * offered: a conversion then takes 96 of its cycles, 8 us, and the
  * result is the same reading (measured) - the choice of a program that
  * would rather not run a second PLL. The rate is clk_adc / 96 with the
  * divider at zero, else clk_adc / (1 + INT + FRAC / 256), the converter
- * ignoring a start that arrives while it converts.
+ * ignoring a start that arrives while it converts. The block's reset
+ * does not complete without clk_adc running (measured, docs/rp2040/adc.md:
+ * RESET_DONE never rises), which is why init() selects the clock first.
  *
- * THE REFERENCE IS THE ADC_VREF PIN and nothing selectable: on the
+ * The reference is the ADC_VREF pin and nothing selectable: on the
  * boards here the 3.3 V rail through a filter, and what the pin
  * carries is the application's to state - `ref_mv(Ref, board_mv)`.
  * util/analog.hpp's arithmetic takes it as an argument. The
@@ -48,7 +84,7 @@
  * moves 4 C for a 1 % change of the reference, the chapter's own
  * warning.
  *
- * THE FIFO ENTRY is twelve bits with, under FCS.ERR, bit 15 flagging a
+ * The FIFO entry is twelve bits with, under FCS.ERR, bit 15 flagging a
  * conversion that failed to converge - a sample to discard (4.9.2.4's
  * caution); under FCS.SHIFT the entry is the result's top eight bits,
  * the flag where it was. A DMA channel reads the FIFO register paced
@@ -136,7 +172,7 @@ constexpr std::optional<AdcDivider> adc_divider_for(uint32_t clk_hz, uint32_t ra
 
 /// The free-running rate a divider produces at `clk_hz`: DIV 0 is the
 /// conversion's own 96 cycles; a period of 96 cycles or less is
-/// stretched to the first multiple of it PAST the conversion (the
+/// stretched to the first multiple of it past the conversion (the
 /// trigger inside a conversion is ignored, the one at its last cycle
 /// too); above 96 the period is the divider's.
 constexpr uint32_t adc_rate_hz(uint32_t clk_hz, AdcDivider d) {
@@ -173,7 +209,8 @@ struct AdcFlag {
     static constexpr uint32_t error_sticky = ADC_CS_ERR_STICKY_BITS;
 };
 
-/// The fifth input's pin: a pad is an input when it is GPIO 26..29.
+/// Which pads are inputs: GPIO 26..29, inputs 0..3 (the fifth input,
+/// the sensor, has no pad).
 constexpr bool adc_pin_valid(uint8_t pin) { return pin >= adc_first_pin && pin < adc_first_pin + 4u; }
 constexpr uint8_t adc_input_of(uint8_t pin) { return static_cast<uint8_t>(pin - adc_first_pin); }
 
@@ -223,8 +260,11 @@ struct Adc {
     /// from the crystal unless locked already, or the crystal as it is),
     /// the block out of reset, EN, READY waited for. `clock` is the
     /// app's Clock tag, the one truth of the crystal's rate. False when
-    /// the PLL did not lock, the block did not come up or READY never
-    /// rose; the FIFO is off, the sensor's bias off, the divider zero.
+    /// no PLL configuration reaches 48 MHz from the crystal, the PLL did
+    /// not lock, the block did not come up or READY never rose; the FIFO
+    /// is off, the sensor's bias off, the divider zero.
+    /// Setup's verb, in main(): every wait bounded, nothing masked, the
+    /// NVIC line left disabled for the program to enable.
     template <typename Clock>
     static bool init(Clock clock, AdcClock src = AdcClock::pll_usb) {
         (void)clock;
@@ -268,6 +308,11 @@ struct Adc {
     }
     static bool temperature_sensor() { return (regs().CS & ADC_CS_TS_EN_BITS) != 0u; }
 
+    /// The converter stopped and the block held in reset, its line
+    /// disabled. Held and not merely disabled: a converter disabled with
+    /// DREQ_EN set keeps its sample in the FIFO and requests it, and the
+    /// next owner's DMA channel reads it (measured, test_rp2040_dma
+    /// letter r). Setup's verb.
     static void release() {
         Nvic::disable(irq());
         interrupt(false);
@@ -305,7 +350,9 @@ struct Adc {
     /// The most recent result (RESULT), whatever started it.
     static uint16_t result() { return static_cast<uint16_t>(regs().RESULT & ADC_RESULT_BITS); }
     /// One conversion of the selected input, waited for: nullopt when
-    /// READY never rose or the conversion errored (CS.ERR).
+    /// READY never rose or the conversion errored (CS.ERR). A spin of at
+    /// most `spins` polls in each of its waits, 2 us a conversion at
+    /// 48 MHz; from main or an active object's handler.
     static std::optional<uint16_t> read(uint32_t spins = 100'000u) {
         if (!wait_ready(spins)) {
             return {};
@@ -359,7 +406,7 @@ struct Adc {
     /// CS.ERR: the most recent conversion failed to converge.
     static bool error() { return (regs().CS & ADC_CS_ERR_BITS) != 0u; }
     /// CS.ERR_STICKY: some conversion did, since the last clear. The
-    /// clear is a PLAIN write of the register with the flag's one: the
+    /// clear is a plain write of the register with the flag's one: the
     /// atomic set alias does not clear a write-one-to-clear bit of this
     /// block (measured on FCS.OVER).
     static bool error_seen() { return (regs().CS & ADC_CS_ERR_STICKY_BITS) != 0u; }

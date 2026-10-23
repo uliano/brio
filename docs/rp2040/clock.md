@@ -1,6 +1,66 @@
 # Clock (RP2040)
 
-Documents of record: the RP2040 datasheet (build 3184e62), 2.15
+This document is for a programmer choosing the rate an RP2040 program
+runs at. The chip comes out of the bootrom on its ring oscillator, a
+rate that is neither exact nor stable; `Clock<source, hz>` is the type
+that names the rate the program wants (the crystal alone, or the
+crystal through the system PLL), and its `init()` brings the clock tree
+there. Every driver that divides a clock - the ticker, the UARTs, the
+SPI and I2C hosts - computes its divisor from the rate the type claims,
+`hz` for clk_sys and `pclk_hz` for clk_peri, so the type is the one
+truth about the rate in the program (there is no `F_CPU`). The rest of
+the chapter's resources are here too, for a program that needs them:
+the oscillators and the two PLLs one by one, the clock generators, the
+frequency counter that measures any clock against the crystal, and the
+GPIO clock outputs and inputs.
+
+The smallest use, from "How to use it" below:
+
+```cpp
+using SysClock = brio::Clock<brio::ClockSource::pll, 125'000'000>;
+constexpr SysClock clock;
+const bool clock_ok = SysClock::init();    // first in main()
+Serial::init(clock, 115200);               // divides clk_peri = 125 MHz
+```
+
+Line by line: `SysClock` names the tree - the PLL as the source, 125 MHz
+as clk_sys, and the defaults for the rest (a 12 MHz crystal, the boards'
+own, and clk_peri following clk_sys undivided); the ratio the PLL needs
+is found when the program is compiled, and a rate no exact ratio reaches
+does not compile. `clock` is an empty tag object of that type: the
+drivers' `init()` take it to learn the rate, since the type's members
+are all static. `SysClock::init()` runs the switching sequence - the
+crystal started and waited for, the PLL locked, clk_sys moved onto it,
+clk_peri enabled - and answers whether the tree reached the rate.
+`Serial` is a UART task ([uart.md](uart.md)), whose divisor is computed
+from `pclk_hz`.
+
+What decides correctness even there. `init()` runs first in `main()`,
+before any driver's `init()`, and the program looks at its answer: every
+wait in the sequence is bounded, and a crystal that did not start, a PLL
+that did not lock or a multiplexer that did not switch answers false.
+The first two leave clk_sys parked on clk_ref (on the ring oscillator or
+the crystal), where every divisor the drivers compute from the type is
+wrong by the ratio; a multiplexer that did not switch is left where the
+failure found it, its new select written and unconfirmed
+(`brio/rp2040/clock.hpp`'s opening comment names each case). clk_peri is
+disabled out of reset and is enabled by this `init()`, so the UARTs and
+SPIs have no clock before it. The clock tree is one for the chip: on a
+program with a kernel on each core, core 0 owns it
+([multicore.md](multicore.md)). And a second `init()` of another `Clock`
+type under a running program is a rate switch (about 200 us): the
+drivers on clk_sys are then owed a `rebase()` to the new rate, which
+nothing performs for them.
+
+The rest of this page, in order: the documents of record; what the
+silicon does (the clock model, the boot state, the oscillators and the
+PLL); the types and verbs; how to use it, with the crystal alone, a
+rate switch and a clock on a wire; the bench findings; and what is not
+covered.
+
+## Documents of record
+
+The RP2040 datasheet (build 3184e62), 2.15
 (clocks: the generators, the multiplexers, the switching sequences of
 2.15.3.2, the enables, resus), 2.16 (XOSC), 2.17 (ROSC), 2.18 (PLL:
 the constraints of 2.18.2, the configuration of 2.18.3); Appendix B
@@ -8,11 +68,12 @@ the constraints of 2.18.2, the configuration of 2.18.3); Appendix B
 `test_rp2040_clock` (every rate counted by the chip's own frequency
 counter, the switches timed by the system timer, the drivers on
 clk_sys through every switch, and two letters over a clock wire
-between two boards).
+between two boards; a suite's letter is one command key of its
+console and the group of verdicts it runs).
 
 ## What the silicon does
 
-The FOURTH clock model brio meets. There is no bus prescaler and no
+A clock model of its own. There is no bus prescaler and no
 enable bit per peripheral: one clk_sys feeds the cores, the fabric,
 the memories and every peripheral's bus interface; a separate
 clk_peri feeds the UARTs and SPIs, so that their bit rates survive a
@@ -22,14 +83,14 @@ always-running reference the watchdog's tick and the frequency
 counter use. Each generator is an auxiliary multiplexer over the
 chip's sources - the crystal oscillator, the ring oscillator, the two
 PLLs, two GPIO clock inputs - and a divider (integer plus a fraction
-that dithers); clk_ref and clk_sys have a GLITCHLESS multiplexer in
+that dithers); clk_ref and clk_sys have a glitchless multiplexer in
 front, because they must never stop, and its SELECTED register says
 which source is in force. The sequences of 2.15.3.2 follow: a
 glitchless generator's aux select is changed only with the glitchless
 mux parked elsewhere; a generator without one is stopped, changed and
 restarted.
 
-At power-up the chip runs on the RING OSCILLATOR - clk_ref and
+At power-up the chip runs on the ring oscillator - clk_ref and
 clk_sys at about 6.5 MHz, a rate that is neither exact nor stable -
 with the crystal off, both PLLs in reset and clk_peri disabled. The
 crystal oscillator takes 1..15 MHz and needs a startup delay in units

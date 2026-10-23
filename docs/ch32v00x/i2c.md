@@ -1,17 +1,108 @@
 # I2C (CH32V00x)
 
-The one I2C of RM ch. 15 - host and client, 7- and 10-bit addresses,
-dual addressing and the general call, two speeds, clock stretching,
-PEC, two DMA requests - and the host engine util/i2c_bus.hpp's arbiter
-drives on this silicon as on the other three. The same register
+This document is for a programmer who talks to I2C devices - a sensor,
+an EEPROM, a converter - with the part as the bus host, or who makes
+the part a client another host addresses. It covers the one I2C of
+RM ch. 15 - host and client, 7- and 10-bit addresses, dual addressing
+and the general call, two speeds, clock stretching, PEC, two DMA
+requests - in three layers: `I2c<1>`, the resource, its registers as
+functions; `I2cHost`, the host engine, which runs one tenure (one
+transaction from its START to its STOP) at a time from its two
+interrupt vectors, on its DMA engines or one byte an entry; and
+`I2cClient`, the target side. A program drives the host through
+util/i2c_bus.hpp's arbiter, `I2cBus`, an active object of the program
+(a component with its own event queue, served one event at a time by
+the kernel, [docs/learn/introduction.md](../learn/introduction.md))
+that takes the clients' requests one at a time in arrival order and
+sends each its reply ([design/i2c-bus.md](../design/i2c-bus.md)). The
+request is the same struct on every stratum. The same register
 description on both parts: the CH32V003's chapter 13 is the CH32V006's
-chapter 15 word for word, the same block at the same address, the
-same two DMA channels, the same default pads. Documents of record:
-the CH32V00X reference manual V1.5 (15.3 for the host's event
+chapter 15 word for word, the same block at the same address, the same
+two DMA channels, the same default pads.
+
+The smallest use, a register read from the device at address 0x48 (a
+write of the register number, then a read of two bytes behind a
+repeated START), from "How to use it" below:
+
+```cpp
+using Bus = brio::I2cHost<1>;                          // PC2 SCL, PC1 SDA
+using I2c = brio::I2cBus<Bus, P, 4, brio::BusPassThrough, brio::ticks_from_ms<P>(20)>;
+
+Bus::init(clock);                                      // both speeds solved at 48 MHz
+
+Bus::Request r{};
+r.addr = 0x48;
+r.tx = brio::lend<brio::Lease::reply>(reg); r.tx_len = 1;
+r.rx = brio::lend<brio::Lease::reply>(value); r.rx_len = 2;   // write-then-read
+r.speed = brio::I2cSpeed::fast_400k;
+r.reply = brio::reply_to<Sensor, brio::I2cDone>();
+brio::post<I2c>(r);
+
+extern "C" BRIO_CH32_INTERRUPT void i2c1_ev_handler() {
+    if (Bus::isr()) { brio::post<I2c>(brio::TransferDone{Bus::status()}); }
+}
+extern "C" BRIO_CH32_INTERRUPT void i2c1_er_handler() {
+    if (Bus::error_isr()) { brio::post<I2c>(brio::TransferDone{Bus::status()}); }
+}
+```
+
+Line by line: `Bus` is the host on the default pads with no DMA
+engines; `I2c` is the arbiter over it, with room for four pending
+requests, the failure policy `BusPassThrough` (no retry: every outcome
+goes to the requester as it came) and a per-bus timeout of 20 ms, the one answer to a client that holds the
+clock; `Bus::init()` takes the clock task's tag, solves the timing of
+both speeds at the rate the clock type claims, hands the two pads to
+the peripheral as open-drain outputs, and answers false when not even
+the standard speed can be produced (the block wants a bus clock of 8 to
+48 MHz). The request names the 7-bit address, lends the host the
+register byte to send and the two-byte buffer to fill
+(`lend<Lease::reply>`: the buffers stay the sender's, lent until the
+reply comes), asks for 400 kHz and says where the answer goes: an
+`I2cDone` event posted to `Sensor`, the program's active object that
+sent it. The program binds both vectors, the event vector to `isr()`
+and the error vector to `error_isr()`, under the startup code's names,
+and posts the host's status to the arbiter when a tenure ends.
+
+What decides correctness even there. The pull-ups are the wire's: an
+open-drain alternate-function pad has no internal pull on this family,
+so a bus with no resistors never rises. `init()` after the clock
+task's, since the timing is computed from the rate the clock type
+claims; while the chip is still at its 8 MHz reset rate the bus runs
+six times slower than asked, and nothing refuses it. The buffers are untouched by
+the sender from the post until `I2cDone` arrives, and nothing checks
+that it keeps away. Both vectors must be bound: an unbound one lands in
+the startup code's spin, the event vector at the first START and the
+error vector at the first error of any kind (a NACK, a lost
+arbitration, a bus error). A busy bus
+is answered, not waited for: a START into a line a peer holds low comes
+back `i2c_arb_lost` at once, while a live tenure another controller is
+clocking is waited out (the findings). And `start()`, which the arbiter
+calls in its own dispatch, waits: up to 5 ms for the last tenure's
+STOP to leave the control register, then up to 100 us for the bus to
+free; and the event vector waits once, in a pumped read of three bytes
+or more, for the last byte (up to 100 000 polls, then `i2c_ok` whatever
+DATAR holds - a gap listed below).
+
+The page is long because the chapter's event machine is. In order: the
+documents of record; what the silicon does, with what the chapter
+offers a controller's transfer and what the engine takes; the types and
+verbs; how to use it; the bench findings, with the repeated START, this
+part as the desk's I2C instrument and the host's cost; and what is not
+covered.
+
+## Documents of record
+
+The CH32V00X reference manual V1.5 (15.3 for the host's event
 sequences, 15.4 for the target's, 15.5 for the errors, 15.8 for the
 DMA, 15.10 for the registers), the CH32V003 reference manual V1.9
 (ch. 13, table 13-1), the CH32V006 datasheet V2.0 (table 2-1-1 for the
-pads).
+pads). The header is
+[brio/ch32v00x/i2c.hpp](../../brio/ch32v00x/i2c.hpp); the reference
+suite is `test_ch32_i2c`, and the host's cost is `bench_ch32_i2c`'s (a
+suite's letter, below, is one command key of its console and the group
+of verdicts it runs, `z` the key
+that runs the image's set of letters, a letter outside it run by its
+own key).
 
 ## What the silicon does
 
@@ -21,7 +112,7 @@ pads).
   until it runs (SB: read STAR1, write the address; ADDR: read STAR1
   then STAR2; the two-byte and N-byte receive procedures with their
   ACK and POS choreography).
-- **NO RISE-TIME REGISTER, ON EITHER PART.** 15.3's prose names an
+- **No rise-time register, on either part.** 15.3's prose names an
   "R16_I2C1_RTR" that table 15-1 does not list, and the CH32V003's
   13.3 does the same against its table 13-1; both blocks end at
   CKCFGR, and so do the vendor's own headers. The SCL timing is CCR
@@ -43,10 +134,10 @@ pads).
   on this family: the pull-ups are the wire's.
 - **A START into a busy bus is answered ARLO** (measured): with a peer
   holding SDA low, the START comes back as arbitration lost at once.
-  The other strata's peripherals PARK such a START until the bus frees;
+  The other strata's peripherals park such a START until the bus frees;
   this one answers, and `i2c_arb_lost` is the wire's own word for "not
   our bus".
-- **A START into a tenure ANOTHER CONTROLLER IS CLOCKING is held**
+- **A START into a tenure another controller is clocking is held**
   (measured, raw): set 30 us into the peer's probe of an address nobody
   answers, it raised no ARLO and no BERR; the peer's STOP reached the
   pads 48 us after the store and SB rose 59 us after that STOP, the
@@ -85,7 +176,7 @@ takes** - the inventory the costs below are read against:
 | the event machine, SB / ADDR / TxE / RxNE / BTF on one vector and the five errors on another (15.3, 15.7) | yes | the silicon's: no byte counter and no FIFO, so the pump is one entry a data byte and the frame a few entries more (SB, ADDR, the end) |
 | ITBUFEN as a switch inside a tenure (15.10.2) | yes | TxE and RxNE reach the vector only while the pump needs them, BTF carries the ends |
 | ITEVTEN as a switch between tenures (15.10.2) | yes | up at `start()`, down at the end: the BTF that stands while the STOP goes out, and the slave half's STOPF, enter no vector between tenures |
-| the END of a write at BTF, EVT8_2 (15.3, figure 15-4) | yes, for a plain write's STOP | the last byte's acknowledge is known there |
+| the end of a write at BTF, EVT8_2 (15.3, figure 15-4) | yes, for a plain write's STOP | the last byte's acknowledge is known there |
 | START set while the last written byte shifts, the repeated START generated at its end (15.10.1) | yes, for a write-then-read | a polled CH32 target loses the last written byte when the repeated START comes after BTF ([../ch32vx03/i2c.md](../ch32vx03/i2c.md)); requested on the TxE of that byte - the order WCH's interrupt example uses - it is on the wire as the byte ends (the findings) |
 | START cleared by the user code, a requested start withdrawn (15.10.1) | declined | behind a refused last byte the controller generates the repeated START all the same, and the withdrawal races it: won at 100 kHz, lost at 400 kHz with the bus left held (the findings); the refusal is closed from the Sr's SB instead |
 | POS and ACK for the two-byte and the N-byte receive (15.3, 15.10.1) | yes | the chapter's procedures by count |
@@ -108,7 +199,7 @@ takes** - the inventory the costs below are read against:
   sequences
   (`clear_addr()` = STAR1 then STAR2, `clear_stopf()` = STAR1 then a
   CTLR1 write, `clear_errors()` write-zero), the three interrupt
-  enables. `i2c_timing_for(pclk, speed, duty)` solves CCR rounded UP
+  enables. `i2c_timing_for(pclk, speed, duty)` solves CCR rounded up
   (a bus at most as fast as asked) and refuses outside FREQ's window.
 - `I2cHost<1, pins, TxEngine, RxEngine>` is the engine `I2cBus` (=
   `BusMaster`) drives. Its `Request` is the other strata's verbatim -
@@ -137,7 +228,7 @@ takes** - the inventory the costs below are read against:
   STOP stands, and a client stretching the clock after the last
   acknowledge holds it there - for up to 5 ms of the dispatch's time,
   then for BUSY to clear for up to 100 us; a clock held past the first
-  bound PARKS the tenure (no START, no vector) for the per-bus timeout,
+  bound parks the tenure (no START, no vector) for the per-bus timeout,
   and a bus still busy after the second gets its START anyway, which
   this silicon answers ARLO. `isr()` clears a STOPF the slave half
   raises inside a tenure, once no START or STOP stands. `unstick()`
@@ -149,7 +240,7 @@ takes** - the inventory the costs below are read against:
   `DmaTxEngine<6>` and `DmaRxEngine<7>`, both or neither: a plain write
   of any length and a read of two bytes or more run on them; the
   one-byte read and the write half of a write-then-read stay on the
-  pump. A PLAIN WRITE ENDS ON BTF, which the event vector takes anyway,
+  pump. A plain write ends on BTF, which the event vector takes anyway,
   with the transmit channel's count read at zero: the controller wrote
   the last byte a byte time before it left the shifter, so the transmit
   engine is armed for its errors alone and a write takes no DMA
@@ -162,7 +253,7 @@ takes** - the inventory the costs below are read against:
   nothing lost.
 - `I2cClient<1, pins>`: the target side - `init(clock, addresses,
   options)`, `I2cClientOptions` giving up the clock stretch or leaving
-  the three enables and the two PFIC lines down for a POLLED client, the
+  the three enables and the two PFIC lines down for a polled client, the
   polled surface (`addressed()`, `answer_address()` returning the
   direction, `take()`/`give()`, `stop_seen()`, `host_nacked()`),
   `flush()` - the PE cycle that drops the byte a target transmitter is
@@ -505,3 +596,12 @@ Implemented but not bench-verified, each with what would measure it:
 - Letters r and q on the CH32V003: their own group images, the board
   being off the desk (the engine is the CH32V006's, the same code on the
   same registers).
+- The last byte of a pumped read of three bytes or more when the wait
+  for RxNE runs out: the host waits for it inside the event vector with
+  a bound of 100 000 polls and, when the bound runs out, reads DATAR
+  regardless and reports `i2c_ok` with what it holds
+  ([brio/ch32v00x/i2c.hpp](../../brio/ch32v00x/i2c.hpp),
+  `receive_step()`). No measured case reaches it; what would is a clock
+  stopped under the block between the last two bytes (a client holding
+  SCL past the bound), and whether the verdict should then be a timeout
+  rather than a success is open.

@@ -1,25 +1,164 @@
 # Platform (CH32V203 and CH32V303)
 
-The kernel's Platform concept realized on the QingKe V4B of the
-CH32V203 and the QingKe V4F of the CH32V303 - the same core with a
-single-precision floating-point unit, RV32IMAFC where the other is
-RV32IMAC - in two halves: the RUNNING half - the critical section, the
-idle hook, the STK timebase, the microsecond busy-wait, the interrupt
-round trip, and on the V4F the floating-point unit's state and what an
-interrupt pays for it - and the FAILING half - which reset happened,
-how to cause one, and the record a crash leaves for the next boot.
+This document is for a programmer putting a brio program on a CH32V203
+or a CH32V303. It describes what the kernel stands on here, the
+platform, and the timebase the program's time events run on. A brio
+kernel asks the chip for a handful of things, stated by the kernel's
+`Platform` concept (a concept is a compiler-checked set of requirements
+on a type;
+[design/kernel.md, "Platform: what the machine provides"](../design/kernel.md#11-platform-what-the-machine-provides-kernelplatformhpp)):
+a way to mask interrupts for a critical section, a way to sleep until
+the next interrupt without losing one that arrives at the wrong moment,
+a source of time, a breakpoint for a panic, and a record a panic leaves
+for the next boot. `Ch32vx03Platform<TB>` is this family's answer, and
+`TB` is its timebase: the `Ticker` on the core's own 64-bit system
+counter (the STK), a 1000 Hz interrupt. The page also covers the one
+spelling of an interrupt handler on this target, the same on both
+parts, whose expansion the F extension and the `CH32VX03_HPE` option
+choose, and the failing half: which reset happened, how to cause
+one, and the record a crash leaves for the next boot.
 
-Documents of record: the CH32F/V20x_V30x_V31x reference manual V2.3
+The smallest use, the platform's lines of the block under "How to use
+it" below:
+
+```cpp
+using P = brio::Ch32vx03Platform<>;
+
+BRIO_CH32_LEAF_VECTOR(systick_handler) { brio::Ticker::tick(); }
+...
+
+int main() {
+    const uint32_t flags = brio::Reset::take_flags();    // first, and once
+    const auto record = brio::take_panic_record<P>();    // fetch-and-clear
+    SysClock::init();
+    brio::Ticker::init(clock);
+    brio::enable_interrupts();
+    brio::Tenuto<P, ...>::run();
+}
+```
+
+Line by line: `P` names the platform with its default timebase, the
+empty angle brackets taking the `Ticker`. The second line binds the
+STK's interrupt vector to `Ticker::tick()`: `systick_handler` is the
+name the crt (the startup code that runs before `main()`,
+`ch32vx03/src/glue/startup_ch32vx03.S`) gives that vector, and
+`BRIO_CH32_LEAF_VECTOR` is the binding's form for a leaf, a handler that
+compiles to no call and touches no floating-point register, which the
+tick is (`Ticker::tick()` is always inlined into it). The `...` line
+after it stands for the two fault bindings "How to use it" adds, for a
+program that wants a crash recorded. `flags` is the history of reset
+causes since the last clear, read and cleared once at boot
+([reset.hpp](../../brio/ch32vx03/reset.hpp)); `record` is the record of
+a panic that ended the previous run, if any, for the program to report
+(kernel/panic.hpp); a program that reports neither may discard both.
+`SysClock::init()` is the clock task and `clock` its tag object (an
+empty object whose type carries the rates, the argument each driver's
+`init()` takes), declared as in [clock.md](clock.md)'s smallest use
+(`using SysClock = brio::Clock<brio::ClockSource::pll, 144'000'000>;`
+and `constexpr SysClock clock;`). `Tenuto<P, ...>` is the kernel itself,
+the cooperative scheduler ([design/kernel.md](../design/kernel.md)), and
+the `...` inside it stands for the program's active objects in priority
+order (an active object is a component of a brio program with its own
+event queue, served one event at a time by the kernel,
+[docs/learn/introduction.md](../learn/introduction.md)); `run()` never
+returns.
+
+What decides whether that works:
+
+- **The clock task first.** The ticker computes its compare from the
+  rate the clock type claims (`Clock::hz / 1000 - 1`), not from the
+  hardware, so it is right only once the tree runs at that rate: a
+  ticker set up for 144 MHz on a chip still at its 8 MHz HSI reset rate
+  ticks eighteen times too slowly (derived from the compare arithmetic,
+  not measured), and nothing refuses it - `Ticker::init()` answers false
+  only when the period comes out zero. `SysClock::init()` answers
+  false when a root never starts, the PLL never locks or the switch
+  never takes, and the chip is then not at the rate the type claims (on
+  the HSI, possibly with the type's prescalers already written,
+  [clock.md](clock.md)); a program looks at both answers.
+- **The vector bound by the program.** The kernel binds no vector.
+  Every handler the crt's vector table names is a weak alias of
+  `default_handler`, a spin loop, until the program defines it: a
+  program that enables the tick and forgets its binding stops in that
+  spin at the first tick, with no fault and no message
+  (the probe names the line: [README.md](README.md), "Debugging").
+- **The one spelling of a binding.** A vector is bound with
+  `BRIO_CH32_VECTOR(name) { body }` or one of its two forms, never by
+  writing an interrupt attribute by hand: the macro follows the
+  project's `CH32VX03_HPE` option (a CMake option of the `ch32vx03/`
+  project, chosen at configure, on by default: with it the crt sets
+  INTSYSCR.HWSTKEN and the core's hardware prologue saves the
+  caller-saved integer registers, so a handler must carry WCH's fast
+  attribute, and one switch serves the whole image because a fast
+  handler under a prologue that is off corrupts the program it
+  interrupted). On the CH32V303, whose images are built with the F
+  extension, and with the hardware prologue on, `BRIO_CH32_VECTOR` makes
+  a naked trampoline (a vector with no prologue of its own that calls
+  the body as an ordinary function) whose body must do no floating-point
+  work, because
+  nothing saves the interrupted program's f-registers; a body that does
+  float work binds with `BRIO_CH32_VECTOR_FLOAT`. `brio check ch32vx03`
+  holds every F image to those promises ("Types and verbs" below); an
+  ordinary build does not run that check, so a body that breaks the
+  promise compiles and links, and the interrupted program's f-registers
+  are then not saved.
+- **Interrupts enabled before `run()`** (`brio::enable_interrupts()`),
+  because that is `run()`'s own requirement: it is called once, with
+  interrupts enabled and the clock and the timebase set up
+  ([kernel/tenuto.hpp](../../brio/kernel/tenuto.hpp)).
+- **No sleep while a bus master works.** In a sleep of any depth on
+  this family no bus master but the core gets a cycle, so `idle()`
+  returns at once, interrupts enabled, while a DMA channel is enabled
+  or a USB controller is attached (the count of active bus masters,
+  [sleep.md](sleep.md)): such a program spins instead of sleeping.
+  There is no tickless timebase here: the STK stops with HCLK in a
+  Stop, and the kernel's optional `idle_until()` hook is not provided.
+
+The rest of this page, in order: the documents of record; what the
+silicon does (the interrupt entry, how the core sleeps and wakes, the
+hardware prologue, the STK, the reset flags and the reset request, the
+trap vectors, corecfgr, and the V4F's floating-point unit with what an
+interrupt pays for it), with "Code in SRAM buys nothing here"; the
+types and verbs (the platform, the three vector bindings and the check
+that holds them to their promises, the timebase and the busy-wait, the
+failing half); how to use it; the bench findings, on the CH32V203C8T6
+and the CH32V303VCT6, not every one on both; and what is not covered.
+
+The platform is realized on the QingKe V4B of the CH32V203 and the
+QingKe V4F of the CH32V303 - the same core with a single-precision
+floating-point unit, RV32IMAFC where the other is RV32IMAC - in two
+halves: the running half - the critical section, the idle hook, the
+STK timebase, the microsecond busy-wait, the interrupt round trip, and
+on the V4F the floating-point unit's state and what an interrupt pays
+for it - and the failing half - which reset happened, how to cause
+one, and the record a crash leaves for the next boot.
+
+## Documents of record
+
+The CH32F/V20x_V30x_V31x reference manual V2.3
 (3.2 for the reset sources and 3.4.10 for the flags, 9.5.2 for the
 PFIC's registers, read for the CH32V20x_D6 class of the CH32V203C8 and
 the CH32V30x_D8 class of the CH32V303) and the QingKe V4 microprocessor
 manual V1.1 (2.1 for the exception codes, 2.2 for what a trap does to
 mcause, mepc, mtval and mstatus, 3.2 and 3.4 for the interrupt CSRs and
-the hardware prologue - its note 3 for what that prologue does NOT
+the hardware prologue - its note 3 for what that prologue does not
 save - 5 for the system timer, 6 for the sleep modes, 8 for the CSR
 list and 8.2 for mstatus.FS and the floating-point CSRs). No errata
 sheet exists for this family; the bench findings below are the entries
 this document keeps in its place.
+
+The headers are [platform.hpp](../../brio/ch32vx03/platform.hpp),
+[pfic.hpp](../../brio/ch32vx03/pfic.hpp) (the mask, the per-line
+enables and the three vector bindings),
+[ticker.hpp](../../brio/ch32vx03/ticker.hpp),
+[delay.hpp](../../brio/ch32vx03/delay.hpp) and
+[reset.hpp](../../brio/ch32vx03/reset.hpp); the crt is
+[startup_ch32vx03.S](../../ch32vx03/src/glue/startup_ch32vx03.S), and
+the check that holds the F images' vectors to their promises is
+`cli/vector_guard.py`. The reference suite is `test_vx03_platform` (a
+suite's letter is one command key of its console and the group of
+verdicts it runs; `z` is the key that runs every letter but `i`, which
+reboots the board three times).
 
 ## What the silicon does
 
@@ -27,7 +166,7 @@ this document keeps in its place.
   runs with the global enable still set; the PFIC decides whether
   another line may preempt it, and with INTSYSCR.INESTEN off - which is
   what the crt leaves - it holds the next line until MRET.
-- **A WFI sleep ends on an interrupt the controller RESPONDS to**
+- **A WFI sleep ends on an interrupt the controller responds to**
   (6.2), and with mstatus.MIE clear it responds to none: a `wfi`
   executed masked on the CH32V203C8T6 slept past the STK and TIM2, both
   pending and enabled, for as long as it was left - twenty seconds, and
@@ -35,16 +174,16 @@ this document keeps in its place.
   lists a debug request among the wakes). The core can sleep as a WFE
   instead: PFIC_SCTLR.WFITOWFE turns `wfi` into a wait-for-event and
   SEVONPEND makes every interrupt entering the pending state an event,
-  LATCHED, so a WFE after the event returns at once. 6.2 gives a WFE
-  three wakes that matter here - an event; an ENABLED interrupt "when
+  latched, so a WFE after the event returns at once. 6.2 gives a WFE
+  three wakes that matter here - an event; an enabled interrupt "when
   an interrupt is generated", whose handler then runs first; and,
   through SEVONPEND, "a new interrupt pending signal (the previously
   generated pending signal does not take effect)" - and only the last,
-  an EDGE, reaches a core sleeping with MIE clear. The platform
+  an edge, reaches a core sleeping with MIE clear. The platform
   therefore sleeps with MIE set.
 - **The waking edge is latched too.** An interrupt that wakes a WFE
   enters the pending state, so SEVONPEND latches it as well, and the
-  NEXT WFE returns at once on it. PFIC_SCTLR.SETEVENT (V4 manual 3.1,
+  next WFE returns at once on it. PFIC_SCTLR.SETEVENT (V4 manual 3.1,
   "set the event to wake up the WFE case") sets the latch by hand, and
   a WFE executed over a set latch returns at once and clears it - the
   pair that consumes it. WFITOWFE and SEVONPEND stay set after
@@ -53,25 +192,25 @@ this document keeps in its place.
 - **A core in debug mode cannot enter any sleep mode at all** (6.1), so
   a sleep measured with a probe halted on the core is not a
   measurement.
-- **The hardware prologue/epilogue (HPE)** saves SIXTEEN caller-saved
+- **The hardware prologue/epilogue (HPE)** saves sixteen caller-saved
   registers (x1, x5..x7, x10..x17, x28..x31) in one cycle to an
-  INTERNAL stack the program cannot see, three levels deep, and pops
+  internal stack the program cannot see, three levels deep, and pops
   them on MRET (3.4). This is where the two QingKe cores differ: the V2C
-  of the CH32V00x pushes its ten registers to the USER stack, so there
+  of the CH32V00x pushes its ten registers to the user stack, so there
   the hardware buys only the fetch of a prologue, while here it buys
   the pushes themselves (measured below: 64 bytes of stack and 10
   cycles). It is enabled by INTSYSCR.HWSTKEN and used by a handler
   declared with the vendor compiler's `interrupt("WCH-Interrupt-fast")`
   attribute, which then emits no prologue of its own.
-- **The STK is SIXTY-FOUR bits wide** (5): CNTL/CNTH count up (or down,
+- **The STK is sixty-four bits wide** (5): CNTL/CNTH count up (or down,
   MODE) at HCLK or HCLK/8 towards CMPLR/CMPHR, with an auto-reload
   (STRE) and a flag the handler must clear by writing zero to it. It is
-  interrupt 12 of the vector table, and the interrupt number IS the
+  interrupt 12 of the vector table, and the interrupt number is the
   table index on this core. Its control register also carries SWIE, the
   software interrupt's other way in.
 - **The reset flags accumulate** in RCC_RSTSCKR until RMVF is written
   (3.4.10), and the register's own reset value is 0x0C000000: a
-  power-on raises PORRSTF and PINRSTF TOGETHER, so the pin flag does
+  power-on raises PORRSTF and PINRSTF together, so the pin flag does
   not name the pin at the boot that follows one. This family carries
   six flags where the CH32V00x carries seven of its own: the two
   watchdogs, software, power, pin, and LPWRRSTF - the low-power reset
@@ -80,7 +219,7 @@ this document keeps in its place.
   the high half, 9.5.2.10); PFIC_SCTLR bit 31 is the same reset with no
   key. It reads back as SFTRSTF, alone (measured).
 - **`ebreak` with no debugger attached is taken to the vector table's
-  BREAKPOINT entry, index 9** (measured), not to the exception entry at
+  breakpoint entry, index 9** (measured), not to the exception entry at
   index 3 - while mcause reports exception code 3, which is that
   manual's number for a breakpoint. The vector index and the exception
   code are two different numbers here, and a program that wants a crash
@@ -95,39 +234,39 @@ this document keeps in its place.
   startup file writes 0x1F into it, and so does this crt. It is
   writable at run time and reads back what is written (measured), and
   what those five bits buy is measured below.
-- **The V4F's floating-point unit is OFF out of reset.** mstatus.FS
+- **The V4F's floating-point unit is off out of reset.** mstatus.FS
   (bits 14:13) is its state - 00 Off, 01 Initial, 10 Clean, 11 Dirty -
   and with FS Off every FP instruction, fcsr's own accesses among them,
   raises an exception (8.2). The crt of an image built with the F
   extension writes FS = 01 and then clears fcsr, and that write is
   itself a change of FP state: main() finds FS = 11 (measured, and a
   write to fcsr alone measured to move Initial to Dirty). The state is
-  only on or off to a program with no context switch. The unit RECORDS
+  only on or off to a program with no context switch. The unit records
   its exceptions in fcsr's five sticky flags and never traps on them,
   and the rounding mode in frm is honoured (measured, below).
 - **The hardware prologue saves integer registers and nothing else**
   (3.4, note 3): the sixteen above, never an f-register. WCH's compiler,
   under the fast attribute and the ilp32f ABI, stores in a handler's own
-  prologue every caller-saved f-register the handler clobbers, and ALL
-  TWENTY of them (ft0..ft11, fa0..fa7) once it calls a function -
+  prologue every caller-saved f-register the handler clobbers, and all
+  twenty of them (ft0..ft11, fa0..fa7) once it calls a function -
   without looking at the callee, a visible float-free one included - 80
   bytes of user stack and forty memory accesses, placed at the entry
   ahead of the branch that calls or shrink-wrapped onto it as the
   function's shape decides. So in an image built with F a vector is not
-  an attributed handler but a NAKED TRAMPOLINE, a call of an ordinary
+  an attributed handler but a naked trampoline, a call of an ordinary
   function and MRET (Types and verbs, below): the body saves what the
   ABI asks of a callee and no caller-saved register, and since nothing
   then saves the f-registers of the program it interrupts, the
   stratum's check walks every trampoline's body in every linked image
-  and fails on a floating-point instruction it reaches. A LEAF - a
+  and fails on a floating-point instruction it reaches. A leaf - a
   handler that calls nothing and touches no f-register - saves nothing
   under the fast attribute, F or not, so it is bound as the attributed
   handler still (the leaf form), the check holding it to being one.
   Measured on the CH32V303VCT6, a trampoline against the attributed
   handler in images built from one source: a receive vector that posts,
-  bound as the console binds its own, 65 cycles a byte against 105 (the
-  twenty saves gone, the kernel's `post` reached by a tail jump), about
-  35 cycles less a transmit interrupt; a handler that calls out 65
+  65 cycles a byte against 105 (the twenty saves gone, the kernel's
+  `post` reached by a tail jump), about 35 cycles less a transmit
+  interrupt; a handler that calls out 65
   cycles of round trip against 100 (letter `l`); a leaf 53 to 66 cycles
   bound leaf against 57 to 70 as a trampoline, the call and its return
   (letter `e`); and the I2C suite's refused last byte at 8 MHz and 400
@@ -145,7 +284,7 @@ Other families let a program place a driver's hot path in SRAM, opt-in
 per driver ([../../brio/util/placement.hpp](../../brio/util/placement.hpp)),
 because their code flash answers behind wait states. This one's does
 not where the image runs: both datasheets count a part's flash as its
-ZERO-WAIT run area (the CH32V203's note 1 to table 2-1, the CH32V303's
+zero-wait run area (the CH32V203's note 1 to table 2-1, the CH32V303's
 to table 2-1-1), which the hardware loads at boot - the CH32V303
 datasheet's table 4-18 counts that "code load time" in a wake from
 Standby ([nvm.md](nvm.md), "The window and the tail") - and every
@@ -170,7 +309,7 @@ platform does not compile (util/placement.hpp's `HotPlacement`). The
 tail above the window is the one code flash here behind a wait - 20
 cycles a word read (nvm.md) - and no script places code there.
 
-THE TWO CORES PART AT A TAKEN BRANCH: in a loop where any predictor is
+The two cores part at a taken branch: in a loop where any predictor is
 warm, a turn with a forward branch taken costs one to three cycles more
 than the same turn with it not taken on the CH32V203C8T6's V4B and none
 to one more on the CH32V303VCT6's V4F, and a taken branch to a 32-bit
@@ -200,22 +339,22 @@ line with a pause of the timebase and no consume ([sleep.md](sleep.md))
 a `PanicRecord` in `.noinit`. The interrupt verbs and the per-line
 enables are [brio/ch32vx03/pfic.hpp](../../brio/ch32vx03/pfic.hpp):
 `enable/disable/enabled/pending/set_pending/clear_pending/active` (the
-manual's ISR bank is the ENABLE status and its IPR the pending one;
-IENR/IRER/IPSR/IPRR are write-one). `BRIO_CH32_VECTOR(name) { body }`
-is the one spelling of a vector binding, and it follows two facts of
-the build. Without the F extension (every CH32V203 image) it is an
-attributed handler under the name - WCH's fast attribute when the image
-is built with `CH32VX03_HPE` (the default), gcc's plain `interrupt`
-otherwise, one option for the whole image because a fast handler under
-an HPE that is off corrupts the program it interrupted - and the
-attribute carries `no_icf`: gcc's identical code folding turns the
-second of two handlers of one body into a handler that CALLS the first,
-which ends in MRET, so the call never returns and the caller's frame
-stays on the stack; on the V4F that frame is the twenty f-registers
-such a caller saves, eighty bytes (measured on the CH32V303VCT6: the
-interrupted program's next return jumped to a saved float). With F and
-the hardware prologue (the CH32V303's images) it is the naked
-trampoline: `name` is two instructions - a `jal` to an ordinary
+manual's ISR bank is the enable status and its IPR the pending one;
+IENR/IRER/IPSR/IPRR are write-one). `BRIO_CH32_VECTOR(name) { body }`,
+with its two forms, is the one spelling of a vector binding, and it
+follows two facts of the build. Without the F extension (every CH32V203
+image) it is an attributed handler under the name - WCH's fast attribute
+when the image is built with `CH32VX03_HPE` (the default), gcc's plain
+`interrupt` otherwise, one option for the whole image because a fast
+handler under an HPE that is off corrupts the program it interrupted -
+and the attribute carries `no_icf`: gcc's identical code folding turns
+the second of two handlers of one body into a handler that calls the
+first, which ends in MRET, so the call never returns and the caller's
+frame stays on the stack; on the V4F that frame is the twenty
+f-registers such a caller saves, eighty bytes (measured on the
+CH32V303VCT6: the interrupted program's next return jumped to a saved
+float). With F and the hardware prologue (the CH32V303's images) it is
+the naked trampoline: `name` is two instructions - a `jal` to an ordinary
 `extern "C"` function `name_body` holding the braces (two bytes
 compressed where the body lies within its reach, four otherwise) and
 MRET - and the body ends in `ret`; two bodies that fold are ordinary
@@ -243,7 +382,7 @@ the fast attribute, which saves nothing for a body that calls nothing
 and touches no f-register, so it needs no trampoline; the image carries
 the absolute symbol `__brio_leaf_<name>` as the binding's mark, which
 costs no byte of it; and wherever else it is `BRIO_CH32_VECTOR`
-exactly. THE PROMISES ARE A CHECK: `brio check ch32vx03`, after linking
+exactly. The promises are a check: `brio check ch32vx03`, after linking
 every image, runs `cli/vector_guard.py` over the F images - from each
 vector table entry that is a plain trampoline it walks the body's calls,
 tail jumps and branches through the listing and fails on a
@@ -256,7 +395,7 @@ and fcsr, each from its own slot, and its body is left alone; a vector
 bound leaf fails on a call, a jump or a branch out of it, an indirect
 transfer other than a jump table into itself, or a floating-point
 instruction, naming the vector; and a plain trampoline whose body came
-out a leaf is REPORTED as a candidate for the leaf form, a line of the
+out a leaf is reported as a candidate for the leaf form, a line of the
 output and not a failure; and any other entry of the table but the
 crt's `default_handler` - a handler attributed by hand among them -
 fails, the three macros being the only bindings the check can hold to
@@ -266,7 +405,7 @@ float operation reached through a call, a call through a pointer, a
 leaf that calls out, a leaf that does float work, a float trampoline
 that leaves fcsr unsaved and a handler attributed by hand.
 Interrupt nesting is never enabled: the kernel's rule
-([../design/kernel.md](../design/kernel.md), section 1).
+([design/kernel.md, "The model in one page"](../design/kernel.md#1-the-model-in-one-page)).
 `stack_untouched()` is the RAM ledger: the crt paints the free RAM
 between the last section the linker placed and the stack top with one
 pattern before the first call, and the verb walks up from that floor
@@ -278,7 +417,7 @@ The timebase is [brio/ch32vx03/ticker.hpp](../../brio/ch32vx03/ticker.hpp)'s
 `ticks/millis/secs/now`, `pause/resume`, `advance` for a site that
 froze time, `rebase` for a clock that changed rate), and the busy-wait
 [brio/ch32vx03/delay.hpp](../../brio/ch32vx03/delay.hpp)'s `delay_us`:
-at least, never early, no division at wait time, and REFUSED - with no
+at least, never early, no division at wait time, and refused - with no
 time spent and a `[[nodiscard]]` answer - for a request of one tick
 period or more, above the 65536 us gate its 32-bit arithmetic rests on,
 or with the counter stopped.
@@ -299,7 +438,7 @@ instead, for a vector that has something better to say than mcause.
 ## How to use it
 
 An app names the platform, binds the vectors it owns with the one
-attribute, and hands BOTH trap entries the fault body:
+attribute, and hands both trap entries the fault body:
 
 ```cpp
 using P = brio::Ch32vx03Platform<>;
@@ -632,7 +771,7 @@ Implemented but not bench-verified, each with what would measure it:
   three instructions later and that a `fence.i` does not stop it; a
   read-back of the register, or of the line's enable status, after the
   store is the next variant to time.
-- **Letter `g` timed on the CH32V303VCT6.** The console's host-timed
+- **Letter `g` timed on the CH32V303VCT6.** The suite's host-timed
   bracket through that board's probe carries the probe's block
   forwarding; the rate of that die's HSI is the clock suite's
   measurement ([clock.md](clock.md)), and this letter's own number

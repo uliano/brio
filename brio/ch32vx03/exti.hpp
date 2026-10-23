@@ -4,7 +4,10 @@
  * The external interrupt/event controller of the CH32V203 and the
  * CH32V303 (RM 9.4, 9.5.1): twenty-two lines, sixteen of them pins and the
  * rest peripheral wake-ups, with the edge detection, the two enables, the
- * software trigger and one flag apiece.
+ * software trigger and one flag apiece. For a caller it turns a pad's edge,
+ * or a peripheral's wake-up, into an interrupt the program's handler
+ * serves or into a wake event that ends the platform's idle() with no
+ * handler at all.
  *
  *   Exti           the block: the senses, the interrupt and event enables,
  *                  the software trigger, the flags, the multiplexer, the
@@ -15,65 +18,112 @@
  *                  has no such line.
  *   ExtInt<Pin>    one line reached through the pad that raises it.
  *
- * SEVEN FACTS THAT SHAPE THE FILE.
+ * The smallest use, a pad's falling edge as an interrupt
+ * (docs/ch32vx03/pin.md, "How to use it"):
  *
- * 1. THE LINE NUMBER IS THE PIN NUMBER, AND THE PORT IS A CHOICE. 10.2.3
+ *     using Sense = brio::Pin<'A', 1>;
+ *     using Line = brio::ExtInt<Sense>;
+ *
+ *     Line::claim(brio::PinPull::up);                  // input + pull + EXTICR
+ *     (void)Line::configure(brio::ExtiSense::falling);
+ *     (void)Line::arm(true);
+ *     brio::Pfic::enable(*Line::irq());                // exti1
+ *
+ *     BRIO_CH32_VECTOR(exti1_handler) {
+ *         const uint32_t fired = brio::Exti::isr(brio::Exti::vector_lines(brio::Irq::exti1));
+ *         if (brio::Exti::served(fired, Line::line)) { ... }
+ *     }
+ *
+ * The binding is the program's, at file scope, under the crt's name for
+ * the vector (exti0_handler .. exti4_handler, exti9_5_handler,
+ * exti15_10_handler, ch32vx03/src/glue/startup_ch32vx03.S): a line armed
+ * with its vector unbound runs the crt's weak default_handler, a spin
+ * loop, with no fault and no message. On the CH32V303's images (the F
+ * extension, the hardware prologue on) BRIO_CH32_VECTOR is a naked
+ * trampoline whose body must do no floating-point work; pfic.hpp has the
+ * float and leaf forms (docs/ch32vx03/platform.md).
+ *
+ * Who calls what. The configuring verbs - sense(), interrupt(), event(),
+ * trigger(), release(), and the ExtiLine and ExtInt verbs over them -
+ * read-modify-write INTENR, EVENR, RTENR, FTENR or SWIEVR, which every
+ * line shares, with no guard of their own; select() and steal() go
+ * through afio.hpp, which opens AFIO's gate (a read-modify-write of
+ * RCC_PB2PCENR) and read-modify-writes the EXTICR register four lines
+ * share; claim() is pin.hpp's input() and then select(). They belong to
+ * setup in main() or to one active object (a component of a brio program
+ * with its own event queue, served one event at a time by the kernel), or
+ * are masked (pfic.hpp's InterruptGuard) against an interrupt handler
+ * that configures any line. isr() is the bound vector's body and runs
+ * there: one load of INTFR and, when a line fired, one store. pending()
+ * is one load and clear() and clear_lines() one store each, legal from any
+ * context; implemented(), irq(), vector_lines() and served() touch no
+ * register. Nothing here waits or masks. A false from a verb is a line
+ * this part has not got, or, for select(), a line that is not a pin
+ * line, a port this package does not bond, or a line another port is
+ * using; no EXTI register and no EXTICR field is written then, but
+ * select() refuses a line in use only after reading EXTICR, which opens
+ * AFIO's gate, and claim() has already put the pad in input mode with
+ * its pull when select() answers.
+ *
+ * Seven facts that shape the file.
+ *
+ * 1. The line number is the pin number, and the port is a choice. 10.2.3
  *    says it in so many words: PA1, PB1, PC1, PD1 and PE1 all reach EXTI1
  *    and "EXTI1 can only accept mappings from one of" them. The choice is
- *    AFIO_EXTICR's four bits per line (afio.hpp), so THE SIXTEEN LINES ARE
- *    A SCARCE RESOURCE SHARED ACROSS THE PORTS: PA5 and PB5 cannot both
+ *    AFIO_EXTICR's four bits per line (afio.hpp), so the sixteen lines are
+ *    a scarce resource shared across the ports: PA5 and PB5 cannot both
  *    raise an edge. The silicon does not arbitrate - the last write takes
- *    the line and the pad that had it goes quiet - so `select()` REFUSES a
+ *    the line and the pad that had it goes quiet - so `select()` refuses a
  *    line another port is using, `steal()` is the deliberate override that
  *    says so in its name, and `exti_lines_distinct<...>()` is the
  *    compile-time check an application puts on its own set.
  *
- * 2. THE MULTIPLEXER IS ANOTHER BLOCK'S REGISTER, behind a clock gate that
+ * 2. The multiplexer is another block's register, behind a clock gate that
  *    is closed out of reset. Every verb here that touches it goes through
  *    afio.hpp, which opens the gate first; with the gate shut the write is
  *    dropped in silence.
  *
- * 3. THERE IS NO LEVEL SENSE, and no register for one: RTENR and FTENR are
+ * 3. There is no level sense, and no register for one: RTENR and FTENR are
  *    the whole of it, so `ExtiSense` has four values and none of them is a
  *    level. A line with neither edge enabled detects nothing - which is
  *    its reset state, and what `release()` puts it back to.
  *
- * 4. ONE FLAG PER LINE, FOR BOTH EDGES, WRITE-ONE-CLEAR. EXTI_INTFR is a
+ * 4. One flag per line, for both edges, write-one-clear. EXTI_INTFR is a
  *    single register with no edge in it, so a both-edges line does not say
- *    WHICH edge arrived: the pad's level at handler time is the only clue
- *    and it is a racy one. `isr()` therefore returns a mask of LINES. The
+ *    which edge arrived: the pad's level at handler time is the only clue
+ *    and it is a racy one. `isr()` therefore returns a mask of lines. The
  *    flags are cleared by a plain store of the bits to clear, never a
  *    read-modify-write: on a write-one-clear register a zero is exactly
  *    the "leave it alone" value, and a read-modify-write would acknowledge
  *    every other line's edge.
  *
- * 5. A LINE ENABLED NOWHERE RAISES NO FLAG - measured, for a pad's edge and
+ * 5. A line enabled nowhere raises no flag - measured, for a pad's edge and
  *    for the software trigger alike, though 9.5.1.5 says a trigger sets the
  *    flag whatever the enables hold. So a line cannot be watched without
  *    being armed: what replaces the "poll the flag with the interrupt off"
  *    idiom is INTENR set with the line's vector left shut at the PFIC, and
  *    the flag then stands until it is written one (measured).
  *
- * 6. THE SOFTWARE TRIGGER'S BIT STANDS until the flag is cleared - measured:
+ * 6. The software trigger's bit stands until the flag is cleared - measured:
  *    after a write, SWIEVR reads its bit back, and clearing the line's flag
  *    clears it. That is the STM32F1's rule for this register, this one's
- *    ancestor, and NOT the sister family's, whose SWIEVR takes a plain
+ *    ancestor, and not the sister family's, whose SWIEVR takes a plain
  *    store. `trigger()` is a read-modify-write for that reason, so a second
  *    trigger needs the first acknowledged and a trigger raised from an
  *    interrupt can be lost against one in the loop.
  *
- * 7. THE BLOCK HAS NO CLOCK GATE AND NO RESET OF ITS OWN. There is no
+ * 7. The block has no clock gate and no reset of its own. There is no
  *    EXTIEN bit in RCC_PB2PCENR (3.4.7) - the chapter says the registers
  *    are reached "through the PB2 interface" and that is all - so nothing
  *    here has to be turned on, and a line's edge detection is asynchronous,
  *    which is what makes it a wake-up source with the clocks stopped.
  *
- * THE WAKE-UP PATH. 9.4.2 gives two ways to end a WFE: a line in EVENR,
+ * The wake-up path. 9.4.2 gives two ways to end a WFE: a line in EVENR,
  * which needs no handler and leaves no flag; or a line in INTENR with the
  * vector masked at the PFIC and SEVONPEND set, in which case the flag and
  * the pending bit must both be cleared afterwards. The platform's idle()
  * is a WFE with SEVONPEND and WFITOWFE already set (platform.hpp), so an
- * armed line ends it either way. What a real SLEEP costs and how the
+ * armed line ends it either way. What a real sleep costs and how the
  * clocks come back is the power chapter's (sleep.hpp), which takes its
  * wake from these lines: this file provides the source and measures only
  * that the event latches.
@@ -284,7 +334,7 @@ public:
     // ---- the software trigger (9.5.1.5) ------------------------------------
 
     /// Raise a line by hand, with no pad and no regard for the senses.
-    /// A read-modify-write of one bit: see the file header, fact 5.
+    /// A read-modify-write of one bit: see the file header, fact 6.
     static bool trigger(uint8_t line) {
         if (!implemented(line)) {
             return false;

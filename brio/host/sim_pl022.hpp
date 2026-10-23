@@ -1,37 +1,65 @@
 /*
  * sim_pl022.hpp
  *
- * A PL022 MADE OF RAM, and the chip traits over it: what
+ * A PL022 made of RAM, and the chip traits over it: what
  * brio/pl022/spi.hpp asks of a family (`Pl022Chip`), answered by no
- * family at all.
+ * family at all. `SimPl022` is the traits type (a struct of types,
+ * constants and static functions the IP templates read) that the RP2040
+ * and the RP2350 supply for their silicon in their own spi.hpp; here it
+ * stands over two register blocks that are plain arrays, so the IP's
+ * resource, host and client run in a host test with no chip anywhere
+ * (docs/pl022/README.md, "The proof that it knows no chip";
+ * docs/host/README.md).
  *
- * WHY IT EXISTS. The IP stratum's claim is that the driver knows no
- * chip. A claim of that shape is proved by a SECOND realization, and the
+ * The smallest use, as test/test_pl022 spells it: the templates named
+ * over SimPl022 with a clock of the test's choosing and the empty engine
+ * slots, the bench put back to power-on before each case, and the words
+ * the driver left in the block read back:
+ *
+ *     using Clock = SimPl022Clock<125'000'000>;
+ *     constexpr SimPl022Pins host_pins{.sck = 0, .tx = 1, .rx = 2};
+ *     using Host = Pl022Host<SimPl022, 0, host_pins, SimPl022NoEngine, SimPl022NoEngine>;
+ *
+ *     SimPl022::reset_all();
+ *     constexpr Clock clock;
+ *     REQUIRE(Host::init(clock, 10'000'000));
+ *     CHECK(SimPl022Interrupts::line_enabled[0]);
+ *     CHECK(SimPl022Bench::pad_claimed_at[host_pins.rx] < SimPl022Bench::enabled_at);
+ *
+ * Contexts: a single-threaded test is every party at once - the program
+ * that calls start(), and the core that would take the interrupt. Nothing
+ * waits and nothing runs by itself: the busy-wait counts the
+ * microseconds it is asked for, and no frame ever comes back on the
+ * receive side (below).
+ *
+ * Why it exists. The IP stratum's claim is that the driver knows no
+ * chip. A claim of that shape is proved by a second realization, and the
  * cheapest second realization is one with no silicon under it: a
  * register block that is an ordinary array, a reset that memsets it to
  * the block's reset values, an interrupt controller that counts, pads
  * that remember what they were handed to, a run-time pin that remembers
  * which way it was driven and when, and a busy-wait that counts
  * microseconds instead of spending them. The same header is compiled by
- * the host suite (test_pl022) and by a family's compile check
- * (test/family_rp2040/pl022_ip.cpp), so the proof is made twice, once
- * per compiler.
+ * the host suite (test_pl022) and by the families' compile checks
+ * (test/family_rp2040/pl022_ip.cpp, and test/family_rp2350/pl022_ip.cpp,
+ * which `brio check rp2350` builds with both of that chip's compilers),
+ * so the proof is made once per compiler.
  *
- * WHAT IT MODELS, and what it does not. The register map is the PL022's,
- * at the PL022's offsets, and the RESET VALUES are the block's (SSPSR
+ * What it models, and what it does not. The register map is the PL022's,
+ * at the PL022's offsets, and the reset values are the block's (SSPSR
  * comes up with the transmit FIFO empty and not full, which is what lets
  * a bring-up's flush of the receive FIFO stop and a pump write its first
- * batch). The FIFOs themselves are NOT modelled - a register block that
+ * batch). The FIFOs themselves are not modelled - a register block that
  * is plain memory cannot: a store to SSPDR is a store and nothing
- * watches it - so nothing ever comes BACK, and the receive half of a
+ * watches it - so nothing ever comes back, and the receive half of a
  * transfer stays the bench's to judge. What is judged here is what a
  * bench cannot see cheaply: the exact words a configuration leaves in
- * the two control registers, the frames a pump wrote, and the ORDER of
+ * the two control registers, the frames a pump wrote, and the order of
  * the acts of a bring-up.
  *
- * WHAT IT RECORDS, beside the registers: which pad was claimed or
+ * What it records, beside the registers: which pad was claimed or
  * released when, when SSPCR1's enable went up, and which way a Request's
- * select line was driven and when - so a test can assert the ORDER the
+ * select line was driven and when - so a test can assert the order the
  * IP file's init() and start() promise (the pads after the registers
  * hold the idle polarity, the select asserted before the first frame),
  * which is a thing no bench can see.
@@ -210,7 +238,7 @@ inline bool delay_us(SimPl022DelayRate rate, uint32_t us) {
 }
 
 /**
- * THE CHIP THAT IS NOT A CHIP: every member `Pl022Chip` asks for, over
+ * The chip that is not a chip: every member `Pl022Chip` asks for, over
  * two register blocks in RAM.
  */
 struct SimPl022 {

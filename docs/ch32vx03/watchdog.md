@@ -1,22 +1,85 @@
 # The two watchdogs (CH32V203 and CH32V303)
 
-An INDEPENDENT watchdog on its own oscillator, which nothing but a reset
-stops, and a WINDOW watchdog on the peripheral bus, which resets the
-chip both when it is refreshed too late and when it is refreshed too
-early. Documents of record: the CH32F/V20x_V30x_V31x reference manual
+This document is for a programmer who wants the chip reset when the
+program stops making progress, on a CH32V203 or a CH32V303, and wants
+to know at the next boot that this is what happened. Both parts carry
+the same two blocks: an independent watchdog on its own oscillator,
+which nothing but a reset stops, and a window watchdog on the
+peripheral bus, which resets the chip both when it is refreshed too
+late and when it is refreshed too early. The drivers are two monostates
+(classes with only static members, never instantiated: one block, one
+set of state), `Iwdg` and `Wwdg`, with the arithmetic that turns a
+setting into a time-out as free functions; which reset ended the last
+run is read through [reset.hpp](../../brio/ch32vx03/reset.hpp)'s flags.
+
+The smallest use, the first block of "How to use it" below:
+
+```cpp
+(void)brio::Iwdg::arm({.prescaler = brio::IwdgPrescaler::div32,
+                       .reload = 249});
+for (;;) {
+    kernel.step();
+    brio::Iwdg::refresh();
+}
+```
+
+Line by line: `arm()` starts the independent watchdog and then writes
+the setting, a prescaler of /32 and a reload of 249 (about a fifth of a
+second at the oscillator's typical 39 kHz, a quarter at the CH32V203RB's
+32 kHz: `lsi_typ_hz` in each part's table,
+[brio/ch32vx03/parts/](../../brio/ch32vx03/parts/)), and answers false
+only for a setting the fields cannot hold, which the line discards; from
+then on only a reset stops it. The loop is the page's sketch of a
+program's turn: `kernel.step()` stands for the work done between two
+refreshes, and `refresh()`, one store of a key, reloads the counter.
+
+What decides correctness even there: the order, start before setting,
+which `arm()` keeps and `configure()` alone does not, because the
+watchdog's registers take a write only while its oscillator runs and
+the start is what forces that oscillator on. Measured: a setting
+written with the oscillator stopped does not land while it stays
+stopped (the reload reads back unchanged and both update flags stand
+through their bounded wait), and once the oscillator is started the
+flags clear, which fits the pending write completing then; which
+setting the watchdog would run on after that order is not measured
+("The independent watchdog" below). Second, the refresh interval,
+computed from the oscillator's fast corner (`device::lsi_max_hz`), since
+the oscillator is an uncalibrated RC rated from 25 to 60 kHz (25 to
+45 kHz on the CH32V203RB; each part table's `lsi_min_hz` and
+`lsi_max_hz`) and the fast corner is the one that resets a program early
+(the second block below); and the commitment itself, since nothing in
+software stops an armed independent watchdog, so a program that stops
+refreshing it is reset - a core halted by a debugger included, unless
+the debug module's freeze bits hold the counter, which no verb here sets
+("Not covered yet"). The window watchdog adds its own two: a refresh
+before the counter has fallen into the window is itself the reset, and
+its early-wake-up interrupt leaves one counter tick to act in.
+
+The rest of this page, in order: the documents of record; what the
+silicon does, for each watchdog; the types and verbs; how to use it;
+the bench findings, on both parts; and what is not covered.
+
+## Documents of record
+
+The CH32F/V20x_V30x_V31x reference manual
 V2.3 (chapter 7 for the independent watchdog, chapter 8 for the window
 one, 3.3.5.4 for the oscillator the first forces on, 3.4.10 for the
 reset flags both raise), the CH32V203 datasheet V2.8 (table 2-1, whose
 "2 (WWDG + IWDG)" row spans every part of the series, and table 4-14
 for the LSI's rated spread) and the CH32V303/305/307/317 datasheet V3.5
-(table 2-1-1 and table 4-15, the same 25 to 60 kHz with 39 typical).
+(table 2-1-1 and table 4-15, 25 to 60 kHz with 39 typical, as table
+4-14 gives every CH32V203 but the RB, whose LSI is the 32 kHz one,
+25 to 45 kHz in its part table).
 Both chapters open with "this chapter applies to the whole family" and
 carry no device-class note, so the two blocks are the same on the
 CH32V20x_D6, the CH32V20x_D8 and the CH32V30x_D8, and neither is a
 device-class question. Driver:
 [brio/ch32vx03/watchdog.hpp](../../brio/ch32vx03/watchdog.hpp); the
 reset flags are [reset.hpp](../../brio/ch32vx03/reset.hpp)'s. Reference
-suite: `test_vx03_watchdog`.
+suite: `test_vx03_watchdog` (a suite's letter is one command key of its
+console and the group of verdicts it runs; `z` is the key that runs
+every letter but the three that reboot the board, `w`, `v` and `p`,
+each run by name).
 
 ## What the silicon does
 
@@ -24,8 +87,8 @@ suite: `test_vx03_watchdog`.
 
 - **A twelve-bit down-counter on the LSI**, with an eight-bit prescaler
   of seven codes (/4 to /256) and a period of `reload + 1` prescaled
-  ticks (7.2.1). It has no clock gate and no enable bit: three KEY
-  VALUES written into IWDG_CTLR are the whole interface - 0x5555 opens
+  ticks (7.2.1). It has no clock gate and no enable bit: three key
+  values written into IWDG_CTLR are the whole interface - 0x5555 opens
   the prescaler and reload registers, 0xCCCC starts the watchdog, 0xAAAA
   reloads the counter.
 - **Starting it is one way.** Nothing in software stops it again; a
@@ -36,19 +99,19 @@ suite: `test_vx03_watchdog`.
   running, there being no status bit that says so. `running()` is that
   reading: the oscillator ready while nothing in the program asked for
   it.
-- **THE REGISTERS LIVE IN THE OSCILLATOR'S DOMAIN, and the chapter never
+- **The registers live in the oscillator's domain, and the chapter never
   says so.** Measured on both parts: with the LSI stopped, a prescaler
-  or reload written behind the unlock key NEVER ARRIVES - the registers
+  or reload written behind the unlock key never arrives - the registers
   keep their reset values and STATR's PVU and RVU stand set for ever,
   since the update they report is the crossing into that domain. With
   the LSI running the same write lands and both flags clear within
-  microseconds. So the ORDER a program writes them in is not free:
-  `arm()` starts the watchdog FIRST, which forces the oscillator on, and
+  microseconds. So the order a program writes them in is not free:
+  `arm()` starts the watchdog first, which forces the oscillator on, and
   writes the setting afterwards - the reset setting (0x0FFF at /4, some
   four hundred milliseconds at the nominal rate) being the budget it has
   to get there. A program that wants the registers ready before it
   commits starts the LSI itself.
-- **The unlock STANDS until another key closes it** (7.3.1's "a write
+- **The unlock stands until another key closes it** (7.3.1's "a write
   access to this register with a different value breaks the sequence").
   Measured on both parts: after a keyed configuration a naked store into
   RLDR still lands, and after a refresh the same store changes nothing.
@@ -56,15 +119,15 @@ suite: `test_vx03_watchdog`.
 - **Its time-out is the LSI's, and the LSI is an uncalibrated RC.** Both
   datasheets rate it 25 to 60 kHz with 39 kHz typical (the CH32V203RB's
   to 45), a spread of 1.8 to one at the least - so every arithmetic
-  helper here takes the RATE as an argument (`device::lsi_min_hz`,
+  helper here takes the rate as an argument (`device::lsi_min_hz`,
   `lsi_typ_hz`, `lsi_max_hz`) and a program that must not be reset
-  early computes its refresh interval from the FAST corner. There is no
+  early computes its refresh interval from the fast corner. There is no
   window register in this chapter: the independent watchdog has one
   edge and not two.
-- **It is no way out of a Stop, and it IS one out of a Standby.** On
+- **It is no way out of a Stop, and it is one out of a Standby.** On
   both parts it does not count through a Stop, against 7.2.1's "can
   still work normally in stop and standby mode" - its reset arrives
-  some 200 ms after the WAKE - so a program that sleeps that deep arms
+  some 200 ms after the wake - so a program that sleeps that deep arms
   the RTC's alarm as its way back, which is what the timed sleep site
   does. Through a Standby it counts, and its reset is the exit RM 2.3.4
   lists: measured on both parts ([sleep.md](sleep.md)).
@@ -76,7 +139,7 @@ suite: `test_vx03_watchdog`.
   so a time-out is `T[5:0] + 1` ticks from a refresh (8.2.1). Its whole
   range is milliseconds where the independent watchdog's is seconds:
   3.6 ms to 29 ms at 72 MHz of PCLK1.
-- **THE COUNTER DOES NOT FREE-RUN**, against 8.2.1's own sentence ("no
+- **The counter does not free-run**, against 8.2.1's own sentence ("no
   matter whether the watchdog function is enabled or not, the counter
   keeps counting down"). Measured on both parts: with WDGA clear the
   counter holds what the last write put in it for twenty milliseconds -
@@ -85,21 +148,21 @@ suite: `test_vx03_watchdog`.
   sentence ([the CH32V00x's own document](../ch32v00x/platform.md)), so
   this is WCH's design and not one part's accident.
 - **Its clock gate is half a silence.** With RCC's WWDGEN clear the
-  registers still READ their reset values (0x007F both) and a write is
-  DROPPED - measured both ways, on both parts. What the gate holds is
+  registers still read their reset values (0x007F both) and a write is
+  dropped - measured both ways, on both parts. What the gate holds is
   the block's clock, which is what 8.2.1 offers it for: a way to
-  suspend a watchdog whose enable bit is one-way. The block's RESET
-  LINE is the other way, and the one this driver's `reset()` uses.
+  suspend a watchdog whose enable bit is one-way. The block's reset
+  line is the other way, and the one this driver's `reset()` uses.
 - **WDGA is one-way in software** (8.3.1), like the other watchdog's
   start key - but unlike it, a peripheral reset really does clear it,
   which is what lets a suite arm this one and carry on.
-- **A refresh outside the window IS the reset**: a write into T[6:0]
+- **A refresh outside the window is the reset**: a write into T[6:0]
   while the counter is still above the window value resets the chip on
   the spot. Measured, both deliberately and by accident - narrowing the
   window under a counter that has just been refreshed and refreshing
   again is the accident.
 - **The early-wake-up flag is raised at 0x40 whether or not its
-  interrupt is enabled** (8.3.3), and what follows it is ONE TICK. With
+  interrupt is enabled** (8.3.3), and what follows it is one tick. With
   the interrupt enabled the vector is this block's own (entry 16 of the
   table on every class), and a handler that does not refresh does not
   prevent the reset - measured, the handler running exactly once.
@@ -132,7 +195,7 @@ judges it.
   setting at compile time: `iwdg_prescaler_divider()`,
   `iwdg_timeout_us(p, reload, lsi_hz)`, `iwdg_timeout_ms(...)` and
   `iwdg_reload_for(p, us, lsi_hz)` - the smallest reload whose time-out
-  REACHES what was asked, 0xFFFF when the twelve-bit field cannot.
+  reaches what was asked, 0xFFFF when the twelve-bit field cannot.
 
 ### The window watchdog
 
@@ -173,7 +236,7 @@ for (;;) {
 }
 ```
 
-A refresh interval computed for the FAST corner, which is the one that
+A refresh interval computed for the fast corner, which is the one that
 resets a program early:
 
 ```cpp

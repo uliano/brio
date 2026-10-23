@@ -1,33 +1,79 @@
 /*
  * nv_journal.hpp
  *
- * NvJournal: a handful of small values kept in FLASH, rewritten often,
+ * NvJournal: a handful of small values kept in flash, rewritten often,
  * and readable after any power loss - the storage class an MCU with no
- * EEPROM does not have and every application still wants.
+ * EEPROM does not have and every application still wants. A program
+ * gets a value per id (a calibration offset, a mode, a counter): save()
+ * makes a value current, load() reads the current one back, at the next
+ * boot as now, and a power loss at any moment costs at most the value
+ * being written. The design is docs/design/nv-journal.md.
  *
- * WHAT IT IS FOR, AND WHAT IT IS NOT. util/nv_heap.hpp opens by naming
- * two needs and one storage class each: "a handful of small values,
- * rewritten often - a calibration offset, a mode, a counter - belong in
- * the EEPROM", and "a table belongs somewhere else". NvHeap is the
- * second one. This header is the FIRST one, on a part where the first
- * sentence's EEPROM does not exist. It is not a heap and it is not a
- * log: there is no address handed out, no block, no growth. There are
- * ids, and each id has a current value.
+ * The smallest use: one journal object over the family's journal
+ * media, mount() once at boot, then save() and load() from the loop:
  *
- * THE TWO HALVES. The journal's region is split into two halves that
- * ping-pong WHOLESALE. Entries are APPENDED into the active half, one
+ *     // the SAM C21's journal media, six ids of up to 32 bytes
+ *     using Journal = brio::NvJournal<brio::RwweeJournalZone, 6, 32, 2>;
+ *     Journal journal;
+ *
+ *     journal.mount();                     // reads only
+ *     journal.save(id_cal, calibration);   // any trivially copyable T
+ *     const std::optional<Calibration> c = journal.load<Calibration>(id_cal);
+ *
+ * Only save_reserved() is legal from a panic handler: an ordinary save()
+ * may erase, and so may wait for a whole erase (below, "The panic
+ * reserve").
+ *
+ * Who calls what, and from where. A journal is an object with a RAM
+ * index and no critical section, so one context uses it (nothing checks
+ * that), every verb a synchronous call that returns when its media
+ * calls have:
+ *  - mount(), load(), has() and the counters read only; load() copies
+ *    the stored bytes into the caller's buffer before it returns;
+ *  - save() and collect() are main context's: save() programs one
+ *    entry, and a collection (save() runs one when it is due) erases
+ *    the idle half, programs one copy of each live value not already
+ *    in it and erases the old half - a resumed collection erasing only
+ *    the old one - one erase unit at a time, waiting for each erase
+ *    and program as long as the media takes (whether the core stalls
+ *    or runs with interrupts masked meanwhile is the media's:
+ *    docs/design/nv-journal.md, "Realizations", an ordinary save that
+ *    collects on the RP2040 erasing a sector with every handler masked
+ *    for it);
+ *  - save_reserved() programs one entry and never erases: it is the
+ *    path of a panic reporter, with interrupts masked for good
+ *    (JournalPanic, at the end of this file; one page program of 1.4 ms
+ *    on the RP2040, window included, docs/design/nv-journal.md,
+ *    "Realizations").
+ * The bytes handed to save() and save_reserved() are copied into an
+ * entry image before the program starts; the caller's buffer is not
+ * kept.
+ *
+ * What it is for, and what it is not. docs/design/nv-heap.md, "What it
+ * is for", names two needs and one storage class each: a handful of
+ * small values, rewritten often (a calibration offset, a mode, a
+ * counter), belong in the EEPROM; a table belongs somewhere else. NvHeap
+ * (util/nv_heap.hpp) is the second one. This header is the first one, on
+ * a part where the first sentence's EEPROM does not exist. It is not a
+ * heap and it is not a log: there is no address handed out, no block, no
+ * growth. There are ids, and each id has a current value
+ * (docs/design/nv-journal.md, "What it is for").
+ *
+ * The two halves. The journal's region is split into two halves that
+ * ping-pong wholesale. Entries are appended into the active half, one
  * write cell at a time and never rewritten; when an append plus the
- * reserve (below) no longer fits, a COLLECTION copies the latest value
+ * reserve (below) no longer fits, a collection copies the latest value
  * of every live id into the freshly erased other half and erases the
  * old one. That is the same atomicity argument as the heap's map pair,
  * one size up: nothing is ever programmed twice between erases, the old
  * half rules until the new data is entirely down, and a power loss
- * anywhere costs at most the entry being written - never history.
+ * anywhere costs at most the entry being written - never history
+ * (docs/design/nv-journal.md, "The two halves").
  *
- * SEQUENCE NUMBERS DECIDE, CRC JUDGES. Every entry carries a
+ * Sequence numbers decide, the CRC judges. Every entry carries a
  * monotonically increasing 32-bit sequence number and a CRC-16 over its
  * own header and payload. The current value of an id is the
- * highest-seq entry with a valid CRC, wherever it lies; the ACTIVE half
+ * highest-seq entry with a valid CRC, wherever it lies; the active half
  * is the one holding the highest-seq valid entry of all. Those two
  * rules alone resolve every state a power loss can leave:
  *
@@ -35,12 +81,12 @@
  *    that id still rules;
  *  - torn mid-collection, before the source half was erased: both
  *    halves hold entries, the destination is the one with the newer
- *    entries, and the collection is RESUMED - ids whose latest still
+ *    entries, and the collection is resumed - ids whose latest still
  *    lives in the source are copied over, then the source is erased;
  *  - torn while erasing the source: every live id is already in the
  *    destination, so the resume copies nothing and simply finishes the
  *    erase;
- *  - torn while erasing the DESTINATION (a half is one or more erase
+ *  - torn while erasing the destination (a half is one or more erase
  *    units, so that erase is not one hardware operation either): the
  *    survivors there are older than everything in the source, so the
  *    source is the newer half and is treated as the destination - and
@@ -49,37 +95,40 @@
  *
  * None of those is a special case in the code: they are what "newer
  * half is the destination, drain the other into it, then erase the
- * other" does.
+ * other" does (docs/design/nv-journal.md, "Sequence numbers decide, the
+ * CRC judges", tabulates the four cuts).
  *
- * MOUNT IS READ-ONLY. Booting costs no erase cycle and no program
+ * Mount is read-only. Booting costs no erase cycle and no program
  * cycle: mount() walks both halves, builds the id index in RAM, and
  * reports what it found - including how many torn entries it stepped
  * over, which is the atomicity working and not an error. A collection
- * left unfinished by a power loss is NOTED at mount and completed by
+ * left unfinished by a power loss is noted at mount and completed by
  * the next ordinary save(), never by the boot path.
  *
- * THE PANIC RESERVE. An ordinary save() collects EARLY: it leaves the
+ * The panic reserve. An ordinary save() collects early: it leaves the
  * active half with room for at least one more maximum-size entry in
  * cells that are already erased. save_reserved() spends exactly that
  * room - no collection, no erase, one bounded polled program - which is
  * what makes it legal from a panic handler, where interrupts are masked
  * for good and an erase would be an unbounded wait on a dying supply.
  * JournalPanic is that reporter; the room it needs is guaranteed by the
- * static_assert on the geometry, not by hoping.
+ * static_assert on the geometry, not by hoping
+ * (docs/design/nv-journal.md, "The panic reserve").
  *
- * WEAR. A save costs one program cell. A collection costs one erase of
+ * Wear. A save costs one program cell. A collection costs one erase of
  * every unit of both halves plus one program cell per live id. So the
  * erase budget is spent once per (half capacity / average entry size)
  * saves, and the two halves wear evenly by construction.
  *
- * WHAT IS DELIBERATELY NOT HERE. No iteration over ids in write order
+ * What is deliberately not here. No iteration over ids in write order
  * (this is a set of values, not a log). No compaction policy knob. No
  * delete verb: an application that wants an id to mean "absent" writes
  * a payload that says so, because a tombstone entry would cost the same
  * cell and buy nothing. And no unification with util/nv_record.hpp -
- * see docs/design/nv-journal.md for why the two spellings stay apart.
+ * docs/design/nv-journal.md, "The two spellings, and why they stay
+ * apart", says why.
  *
- * ONE CONSEQUENCE WORTH KNOWING: if the flash holds more distinct ids
+ * One consequence worth knowing: if the flash holds more distinct ids
  * than `max_ids` - an older firmware wrote them, or the parameter was
  * lowered - the surplus is not indexed at mount and is dropped at the
  * next collection, in silence. That is the right behaviour for a
@@ -108,7 +157,7 @@ enum class NvJournalStatus : uint8_t {
     ok,             ///< at least one valid entry was read
     empty,          ///< both halves are blank (or hold nothing that verifies)
     bad_geometry,   ///< the media's zones do not contain the journal's
-                    ///< region - REFUSED, nothing was written
+                    ///< region - refused, nothing was written
 };
 
 /// Why the last save() refused. Readable through last_error().
@@ -116,7 +165,7 @@ enum class NvJournalError : uint8_t {
     none = 0,
     not_mounted,    ///< mount() has not run, or it refused
     too_big,        ///< the payload is larger than an entry can ever be
-    too_many_ids,   ///< a NEW id, and max_ids are already live
+    too_many_ids,   ///< a new id, and max_ids are already live
     no_room,        ///< the half cannot hold it even after a collection
     media,          ///< the flash refused a program
     gc_failed,      ///< the flash refused an erase during a collection
@@ -141,13 +190,16 @@ struct NvJournalEntry {
  *               RAM index and is what the geometry assertion is about.
  *   max_payload bytes in the largest value. Fixes the entry size the
  *               reserve is measured in.
- *   half_pages  erase units in ONE half. The journal occupies the top
+ *   half_pages  erase units in one half. The journal occupies the top
  *               2 x half_pages erase units of the media, anchored to
- *               Media::flash_end - to the SILICON, like the heap's map
+ *               Media::flash_end - to the silicon, like the heap's map
  *               home, so no image can be built over it by accident.
  *
  * The constructor is trivial and constexpr; nothing touches the flash
- * until mount().
+ * until mount(). The object is not copyable. A journal JournalPanic
+ * names must have static storage (a global or a static: the template
+ * takes it as an `auto&` argument, which the compiler checks); one no
+ * JournalPanic names need only outlive the code that uses it.
  */
 template <FlashMedia Media, uint8_t max_ids = 8, uint8_t max_payload = 32,
           uint8_t half_pages = 2>
@@ -207,7 +259,7 @@ public:
                   "erase-unit boundary");
     static_assert(2u * half_bytes <= flash_end,
                   "the journal would swallow the whole part");
-    // The reserve is a GUARANTEE, so the arithmetic behind it is
+    // The reserve is a guarantee, so the arithmetic behind it is
     // checked and not assumed: after a collection the half holds at
     // most max_ids maximum-size entries, the save being made adds one
     // more, and one more still must remain free for save_reserved().
@@ -244,9 +296,10 @@ public:
      * Walk both halves, build the index, and open the journal. Costs no
      * erase and no program: this is the boot path.
      *
-     * A bad_geometry verdict leaves the journal CLOSED - load() and
+     * A bad_geometry verdict leaves the journal closed - load() and
      * save() both refuse - because the only thing a journal whose home
-     * is occupied by the running image can do is damage.
+     * is occupied by the running image can do is damage. The time it
+     * takes is the reads of both halves, cell by cell.
      */
     const MountReport& mount() {
         report_ = MountReport{};
@@ -370,7 +423,7 @@ public:
     /**
      * Make `data` the current value of `id`.
      *
-     * This is the ORDINARY path: it finishes an interrupted collection,
+     * This is the ordinary path: it finishes an interrupted collection,
      * collects when the entry plus the reserve no longer fit, and
      * leaves the reserve intact behind it. It may therefore erase, and
      * it may take as long as an erase takes - which is why it is not
@@ -423,14 +476,15 @@ public:
     }
 
     /**
-     * Make `data` the current value of `id` WITHOUT collecting and
-     * WITHOUT erasing: one program into cells the last ordinary save
+     * Make `data` the current value of `id` without collecting and
+     * without erasing: one program into cells the last ordinary save
      * left erased for exactly this.
      *
      * Bounded, polled and safe from a panic handler. It spends the
      * reserve, so a second call in the same failure may find nothing
      * left - which is honest: after a panic the program is not going to
-     * write anything else either.
+     * write anything else either. False, with last_error() saying
+     * which, as for save(); no_room when the reserve is spent.
      */
     bool save_reserved(uint8_t id, std::span<const uint8_t> data) {
         if (!mounted_) {
@@ -470,7 +524,13 @@ public:
      * Copy every live value into the other half and erase this one -
      * or, when a collection was interrupted, finish that one instead.
      * save() calls it when it has to; an application may call it to
-     * spend the erase time at a moment of its own choosing.
+     * spend the erase time at a moment of its own choosing. It waits
+     * for every erase and program it makes. False, with last_error()
+     * saying which: a refused erase of the idle half (gc_failed) leaves
+     * the journal as it was; a refused copy (media, or no_room when the
+     * live values do not fit the destination) or erase of the old half
+     * (gc_failed) leaves the collection pending for the next save() or
+     * collect().
      */
     bool collect() {
         if (!mounted_) {
@@ -532,7 +592,7 @@ private:
 
     /// The media must contain the journal's region: every band it
     /// reports has to be inside the part, the right way up, and none of
-    /// them may have a FLOOR above the journal home - a floor is the
+    /// them may have a floor above the journal home - a floor is the
     /// first byte the journal may use, so a floor inside the region
     /// means the running image's own bytes are sitting where an entry
     /// would be programmed.
@@ -667,7 +727,7 @@ private:
     // ---- writing one entry ---------------------------------------------------
 
     /// Build the whole entry - header, payload, 0xFF padding - and
-    /// program it as ONE call, so the media sees a single append and
+    /// program it as one call, so the media sees a single append and
     /// the cells inside it go down in order.
     bool append(uint8_t id, std::span<const uint8_t> data) {
         const uint8_t len = static_cast<uint8_t>(data.size());
@@ -769,28 +829,36 @@ private:
  * boot-side verb that takes it back out - util/persistent_panic.hpp's
  * shape over flash instead of over an EEPROM record.
  *
- *   inline brio::NvJournal<JournalZone, 6, 32> journal;   // any FlashMedia
+ *   inline brio::NvJournal<brio::RwweeJournalZone, 6, 32> journal;   // any FlashMedia
  *   using Panic = brio::JournalPanic<journal, 0>;
  *   ...
  *   brio::panic<P, Panic>(PanicCode::assert_failed, 7);   // at the fault
  *   ...
  *   auto old = Panic::take();                             // at boot
  *
- * The journal is reached through a REFERENCE template parameter because
+ * The journal is reached through a reference template parameter because
  * a journal is an object with a RAM index, not a static store: there is
  * one per media and the application owns it.
  *
  * report() uses save_reserved(): no collection, no erase, one bounded
  * program into cells the last ordinary save left ready. take() is the
  * opposite - it runs on the boot path, where an erase is affordable, so
- * it consumes the record by saving a cleared one through the ORDINARY
+ * it consumes the record by saving a cleared one through the ordinary
  * save(), which also restores the reserve for the next failure.
+ *
+ * report() is called by panic() (kernel/panic.hpp) only where the
+ * platform's break_here() returns; where that instruction faults with
+ * no debugger attached, the fault handler is the path that runs, and
+ * report() is reached only if that handler calls it. One program with
+ * no erase is what makes it legal there as in panic().
  */
 template <auto& Journal, uint8_t id = 0>
 struct JournalPanic {
     JournalPanic() = delete;
 
-    /// The panic Reporter interface (kernel/panic.hpp).
+    /// The panic Reporter interface (kernel/panic.hpp): save_reserved(),
+    /// one bounded program, no erase; its answer is not checked, there
+    /// being nobody left to tell.
     static void report(PanicCode code, uint8_t context) {
         (void)Journal.save_reserved(
             id, PanicRecord{panic_magic, static_cast<uint8_t>(code), context});
@@ -798,12 +866,16 @@ struct JournalPanic {
 
     /// Store a record that was not produced by panic() - the breadcrumb
     /// a boot found in SRAM, on its way somewhere it will still be
-    /// tomorrow. Ordinary path: an erase is affordable here.
+    /// tomorrow (the record take_panic_record<P>() returned, say).
+    /// Ordinary path, main context: an erase is affordable here. True
+    /// when the journal took it.
     static bool save(const PanicRecord& r) {
         return Journal.template save<PanicRecord>(id, r);
     }
 
-    /// Peek without consuming.
+    /// The stored record without consuming it: nothing when the id holds
+    /// no value, a value of another size, or one without the panic magic
+    /// (a record take() cleared). Reads only.
     static std::optional<PanicRecord> peek() {
         const std::optional<PanicRecord> r =
             Journal.template load<PanicRecord>(id);
@@ -813,9 +885,10 @@ struct JournalPanic {
         return r;
     }
 
-    /// Boot-side fetch-and-clear: a stored record is returned ONCE and
-    /// a cleared one is appended in its place. A second call returns
-    /// nothing.
+    /// Boot-side fetch-and-clear: a stored record is returned once and
+    /// a cleared one is appended in its place, through the ordinary
+    /// save() (which may collect, and waits for it). A second call
+    /// returns nothing.
     static std::optional<PanicRecord> take() {
         const std::optional<PanicRecord> r = peek();
         if (r) {

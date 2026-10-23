@@ -1,76 +1,120 @@
 /*
  * dcs_panel.hpp (devices)
  *
- * THE PANEL DRIVER OF THE COMMAND TIER: the vocabulary
- * (devices/dcs.hpp) over a controller's traits (devices/ili9481.hpp and
- * its siblings) over a link (devices/dcs_link.hpp), and the fourth and
- * last of the tier's layers (docs/design/gfx.md, "The command tier").
- * What it adds to the three under it is the whole of what a drawing
- * needs and none of them has: a LOGICAL SURFACE over the glass.
+ * The panel driver of the command tier: a drawing surface over a display
+ * controller that keeps its own pixels. `DcsPanel<Traits, Link>` is a
+ * `Surface` in the sense of gfx/surface.hpp (a width, a height, a filled
+ * rectangle and a run - one row of pixels, x increasing), so every
+ * primitive of gfx/ draws on the panel with no adapter. It turns the
+ * picture to any of four orientations, answers the module's mounting and
+ * colour order, sends every drawing call as synchronous transactions
+ * over the link, and reads the frame memory back in the picture's own
+ * coordinates. It is the vocabulary (devices/dcs.hpp) over a
+ * controller's traits (devices/ili9481.hpp: a struct of constexpr facts
+ * about one silicon) over a link (devices/dcs_link.hpp), the fourth and
+ * last of the tier's layers (docs/design/gfx.md, "The command tier");
+ * docs/devices/dcs_panel.md is this file's document. What it adds to the
+ * three under it is the whole of what a drawing needs and none of them
+ * has: a logical surface over the glass.
  *
- * THE DIRECT SHAPE, AND ONLY IT. Every verb here is a synchronous link
+ * The smallest use (docs/devices/dcs_panel.md, "How to use it"), `link`
+ * a serial link over the family's SPI host and `reset` a run-time
+ * reference to the pad wired to the panel's reset line:
+ *
+ *     using Panel = brio::DcsPanel<brio::Ili9481, PanelLink>;
+ *     Panel panel{link, brio::DcsModule{.column_mirror = true,
+ *                                       .bgr = true,
+ *                                       .wants_inversion = true}};
+ *     if (!panel.valid()) { ... }          // the link's mode is refused
+ *     panel.reset_and_wake(reset, [](uint16_t ms) {
+ *         brio::delay_us(clock, static_cast<uint32_t>(ms) * 1000u);
+ *     });
+ *     panel.rotation(brio::DcsRotation::r90);
+ *     brio::fill_rect(panel, 0, 0, panel.width(), panel.height(), 0x00000000u);
+ *
+ * Who calls what, and from where. A panel is a plain object with no
+ * interrupt body and no knowledge of the kernel; its verbs are called
+ * from the context that owns the bus - main, a test, or an active
+ * object's dispatch (an active object is a component with its own event
+ * queue, served one event at a time by the kernel). Every verb is one or
+ * more link transactions, each complete on return, so a verb waits for
+ * its bytes on the wire: a full-screen fill is a window and a write a
+ * row, and a dispatch that draws holds every other active object
+ * meanwhile. The wake waits too, but through the caller's own `delay_ms`
+ * callable, never by itself. Storage: the link is held by reference and
+ * must outlive the panel; the module's facts are copied; a run handed to
+ * write_run() or read_run() is the caller's again on return; the row and
+ * read buffers are members of the panel, sized by the glass's long side
+ * (the whole object over the ILI9481 is 2892 bytes on an AVR128DB48 and
+ * 2900 on a Cortex-M0+, docs/devices/dcs_panel.md), so the object lives
+ * where that much fits.
+ * Wake the panel before drawing: reset_and_wake() or wake() states the
+ * pixel format and the address mode every later write assumes.
+ *
+ * The direct shape, and only it. Every verb here is a synchronous link
  * transaction, complete on return, which is the shape of a bring-up, of
- * a suite and of a program that owns its bus. The TILED shape - the
+ * a suite and of a program that owns its bus. The tiled shape - the
  * primitives drawing into a rectangle of RAM that a display active
  * object streams - is a layer above this one and is not here; nothing
  * in this file knows the kernel, and a program that draws through it
  * spends its own time on the bus.
  *
- * WHAT A ROTATION IS HERE, AND WHY IT IS NOT A TRANSFORM. The address
- * mode's three walk bits reorder the counter INSIDE the window a
+ * What a rotation is here, and why it is not a transform. The address
+ * mode's three walk bits reorder the counter inside the window a
  * CASET/PASET pair opened and never move that window's origin
  * (docs/devices/ili9481.md). So a rotation is not applied to a picture:
- * it is a WINDOW in the glass's own frame plus the walk bits that make
+ * it is a window in the glass's own frame plus the walk bits that make
  * the counter cross that window in the order a logical row runs. The
- * one rule that decides every bit: A RUN OF THE LOGICAL SURFACE - one
- * row, x increasing - MUST BE ONE CONTIGUOUS WALK OF THE COUNTER. Each
- * rotation therefore states the bit ALONG its runs and leaves the bits
- * ACROSS them clear, and the module's mirror flips the column direction,
+ * one rule that decides every bit: a run of the logical surface - one
+ * row, x increasing - must be one contiguous walk of the counter. Each
+ * rotation therefore states the bit along its runs and leaves the bits
+ * across them clear, and the module's mirror flips the column direction,
  * which touches the rotations whose runs lie along the columns and not
  * the ones whose runs lie along the pages.
  *
- * WHY THE BITS ACROSS A RUN MAY BE LEFT CLEAR. Because the two Surface
- * verbs never send a multi-row block that is not UNIFORM: a fill is one
- * colour and a run is one row. The order the counter takes ACROSS the
+ * Why the bits across a run may be left clear. Because the two Surface
+ * verbs never send a multi-row block that is not uniform: a fill is one
+ * colour and a run is one row. The order the counter takes across the
  * rows of a filled rectangle therefore never shows - every cell of it
  * gets the same three bytes - and a run never has a second row to get
  * wrong. That is what lets one MADCTL code serve both verbs; a verb
  * that streamed a two-dimensional image would have to state those bits
  * too, and there is no such verb.
  *
- * THE ORACLE VERB IS THE OBSERVER'S AND NEVER A PRIMITIVE'S. read_run()
- * and get_pixel() read the frame memory back in LOGICAL coordinates,
+ * The oracle verb is the observer's and never a primitive's. read_run()
+ * and get_pixel() read the frame memory back in logical coordinates,
  * through the same window and the same walk a write used, which is what
- * makes the bench plane of the three planes of truth cheap: a drawing
- * is judged pixel for pixel with no eye on the glass, and the same test
- * is written once for every orientation. get_pixel() exists so that a
+ * makes the bench plane of the three planes of truth cheap
+ * (docs/design/gfx.md, "The three planes of truth"): a drawing is
+ * judged pixel for pixel with no eye on the glass, and the same test is
+ * written once for every orientation. get_pixel() exists so that a
  * DcsPanel is a `ReadableSurface` and the reference renderer's
- * compare() judges it directly - AND IT COSTS A WINDOW AND A READ PER
- * PIXEL on the wire. No primitive of gfx/ may use it, and the base
+ * compare() judges it directly - and it costs a window and a read per
+ * pixel on the wire. No primitive of gfx/ may use it, and the base
  * concept having no such verb is the enforcement (gfx/surface.hpp).
  *
- * THE MODULE IS NOT THE CONTROLLER. Which way a glass is mounted on the
+ * The module is not the controller. Which way a glass is mounted on the
  * die, whether its colour channels are crossed and whether it wants the
- * inversion are facts of a BOARD, handed to the driver the way the pins
+ * inversion are facts of a board, handed to the driver the way the pins
  * are. The colour order in particular is answered in the byte order the
  * driver packs and never in MADCTL's BGR bit, because that bit acts on
  * writes alone (measured) and would leave every read-back crossed -
  * which would cost the oracle.
  *
- * THE LINK'S MODE IS JUDGED HERE, because this is the one layer with
+ * The link's mode is judged here, because this is the one layer with
  * both facts in hand: the traits say which SPI modes the controller's
  * serial interface takes (`Traits::serial_mode_accepted`, a fact of the
  * controller) and a serial link says which mode each of its two tenures
- * runs in (`write_mode()` / `read_mode()`, as the stratum spells it).
- * A link whose mode the traits refuse is refused AT CONSTRUCTION -
- * `valid()` false and every verb refusing before it touches the bus, as
- * the link itself refuses a frame wider than a byte - because a command
- * clocked in a mode the controller does not sample is not a wrong
- * picture but no picture, and no verb would ever say so. A link with no
- * mode to show (a DSI host, a parallel bus) has nothing to judge and is
- * valid as it stands. The comparison goes through
- * `dcs_spi_mode_number()` (devices/dcs_link.hpp), so no family's enum
- * is named here either.
+ * (the transactions of its write and of its read prototype) runs in
+ * (`write_mode()` / `read_mode()`, as the stratum spells it). A link
+ * whose mode the traits refuse is refused at construction - `valid()`
+ * false and every verb refusing before it touches the bus, as the link
+ * itself refuses a frame wider than a byte - because a command clocked
+ * in a mode the controller does not sample is not a wrong picture but
+ * no picture, and no verb would ever say so. A link with no mode to show
+ * (a DSI host, a parallel bus) has nothing to judge and is valid as it
+ * stands. The comparison goes through `dcs_spi_mode_number()`
+ * (devices/dcs_link.hpp), so no family's enum is named here either.
  */
 
 #pragma once
@@ -90,12 +134,12 @@
 namespace brio {
 
 /**
- * The logical surface's orientation over the glass, in DISPLAY
+ * The logical surface's orientation over the glass, in display
  * coordinates - d left to right, line top to bottom, the glass in its
  * portrait.
  *
  *  - `r0`   the glass's own portrait;
- *  - `r90`  the picture turned CLOCKWISE: logical x runs down the
+ *  - `r90`  the picture turned clockwise: logical x runs down the
  *           glass and logical y leftward;
  *  - `r180` upside down;
  *  - `r270` counter-clockwise: logical x runs up the glass and logical
@@ -108,20 +152,20 @@ namespace brio {
 enum class DcsRotation : uint8_t { r0, r90, r180, r270 };
 
 /// True where the rotation exchanges the surface's axes with the
-/// glass's - the two whose logical rows run along the PAGES.
+/// glass's - the two whose logical rows run along the pages.
 constexpr bool dcs_rotation_exchanges(DcsRotation r) {
     return r == DcsRotation::r90 || r == DcsRotation::r270;
 }
 
 /**
- * THE MODULE'S FACTS, which are a board's and not a controller's, and
+ * The module's facts, which are a board's and not a controller's, and
  * the mirror image of the simulator's own glass on the world's side.
  */
 struct DcsModule {
-    /// The glass shows memory column `columns - 1` at its LEFT, so a
+    /// The glass shows memory column `columns - 1` at its left, so a
     /// picture written straight is mirrored. It is answered in the
     /// rotation map below, because MADCTL's horizontal flip is a
-    /// DISPLAY bit a module may leave unconnected.
+    /// display bit a module may leave unconnected.
     bool column_mirror = false;
     /// The module's channels are crossed: the glass lights a cell's
     /// first byte as blue. The driver therefore writes B, G, R so that
@@ -136,7 +180,7 @@ struct DcsModule {
 /**
  * The surface format of a command panel: twenty-four bits of colour in
  * a uint32_t as 0x00RRGGBB, which is the drawing world's own colour.
- * What a panel KEEPS of it is the controller's business - eighteen bits
+ * What a panel keeps of it is the controller's business - eighteen bits
  * on the one this file has - and the packers of devices/dcs.hpp are
  * where that is decided.
  *
@@ -152,21 +196,21 @@ struct DcsRgb888 {
 };
 
 /**
- * THE ROTATION MAP, as a function of nothing but the rotation and the
+ * The rotation map, as a function of nothing but the rotation and the
  * module's mirror - so that it can be read, checked and tabulated
  * without a panel, a link or a bus.
  *
- * Each rotation states the walk bit ALONG its runs and leaves the ones
+ * Each rotation states the walk bit along its runs and leaves the ones
  * across them clear:
  *
- *  - under r0 and r180 a logical row runs along the COLUMNS, so B5 is
+ *  - under r0 and r180 a logical row runs along the columns, so B5 is
  *    clear and B6 says which way: memory columns ascend under r0 on a
  *    straight module and under r180 on a mirrored one, descend
  *    otherwise. That is the whole of the mirror's effect;
- *  - under r90 and r270 a logical row runs along the PAGES, so B5 is
+ *  - under r90 and r270 a logical row runs along the pages, so B5 is
  *    set (the counter steps the pages first) and B7 says which way -
  *    clear under r90, where the lines descend with x, set under r270,
- *    where they ascend. The mirror moves the WINDOW here and not the
+ *    where they ascend. The mirror moves the window here and not the
  *    walk, so it touches neither code.
  *
  * No BGR bit and no display bit: the first would cost the read-back its
@@ -187,19 +231,19 @@ constexpr uint8_t dcs_rotation_madctl(DcsRotation r, bool column_mirror) {
 }
 
 /**
- * A COMMAND PANEL AS A SURFACE. `Traits` is the controller
- * (devices/ili9481.hpp), `Link` any `DcsLink`; both are held by
- * reference to things the caller owns - the link, and the module's
- * facts by value.
+ * A command panel as a surface. `Traits` is the controller
+ * (devices/ili9481.hpp), `Link` any `DcsLink`. The link is held by
+ * reference - the caller owns it and keeps it alive as long as the
+ * panel - and the module's facts are held by value.
  *
- * THE TWO BUFFERS ARE MEMBERS AND SIZED BY THE GLASS'S LONG SIDE,
- * because a run of the ROTATED surface is as wide as the glass is tall.
+ * The two buffers are members and sized by the glass's long side,
+ * because a run of the rotated surface is as wide as the glass is tall.
  * A buffer sized by the short side is correct until the first r90 and
  * then writes past itself, which is a bug that costs an afternoon to
  * find; and a buffer on the stack is one a run can overflow on a part
  * whose stack is two kilobytes.
  *
- * EIGHTEEN BITS A PIXEL. This driver packs with `dcs_rgb666_pack`,
+ * Eighteen bits a pixel. This driver packs with `dcs_rgb666_pack`,
  * which is what the one controller it has states as its only format on
  * a serial link; a controller with another width is a gap in
  * docs/devices/dcs_panel.md and not a branch here.
@@ -241,13 +285,13 @@ public:
     // ---- the wake -----------------------------------------------------------
 
     /**
-     * THE WAKE, from the reset line up. `reset` is a Pin-like with
+     * The wake, from the reset line up. `reset` is a Pin-like with
      * `set()` and `clear()`, the line being active LOW - every stratum's
-     * `PinRef` is one, which is how a board file names a pad at run
-     * time; `delay_ms` is any callable `void(uint16_t)`.
+     * `PinRef` is one, which is how a program names a pad at run time;
+     * `delay_ms` is any callable `void(uint16_t)`.
      *
      * The traits own the numbers, this driver owns the sequence and the
-     * application owns the clock - which is what lets a host test COUNT
+     * application owns the clock - which is what lets a host test count
      * the milliseconds instead of spending them, and a program on
      * silicon spend them however it spends time. False when a link verb
      * refused; every refusal is counted whether or not the caller reads
@@ -266,7 +310,9 @@ public:
      * The same sequence from SLPOUT on, for a panel whose reset line
      * the board does not give the program: SLPOUT, the wait, DISPON,
      * the wait, the inversion the module asks for, COLMOD as a
-     * STATEMENT and not a guess, and MADCTL for the rotation in force.
+     * statement and not a guess, and MADCTL for the rotation in force.
+     * Every one of the five is sent whatever the one before answered,
+     * each refusal counted; false when any was refused.
      */
     template <typename Delay>
     bool wake(Delay&& delay_ms) {
@@ -284,7 +330,7 @@ public:
 
     /**
      * Put the logical surface in `r`: MADCTL takes the map's code and
-     * width()/height() follow. The geometry follows the INTENT, so a
+     * width()/height() follow. The geometry follows the intent, so a
      * caller that ignores a false draws into a panel that is not in the
      * orientation it thinks - which is why the answer exists.
      */
@@ -313,11 +359,12 @@ public:
     }
 
     /**
-     * A rectangle of one colour: ONE window, one row of packed pixels
+     * A rectangle of one colour: one window, one row of packed pixels
      * built once, then RAMWR for the first row and write memory
      * continue for each of the others - so a `w` x `h` fill is h + 2
      * link transactions whatever w is. A rectangle wholly outside the
-     * surface touches the link not at all.
+     * surface touches the link not at all. A refusal stops the verb and
+     * is counted in link_failures(), the verb returning nothing.
      */
     void fill_rect(Coord x, Coord y, Extent w, Extent h, Color c) {
         const std::optional<Rect> r = clip(Rect{x, y, w, h}, width(), height());
@@ -344,9 +391,11 @@ public:
     }
 
     /**
-     * One row of caller-given pixels: the head the clip cut is SKIPPED
+     * One row of caller-given pixels: the head the clip cut is skipped
      * in the caller's run, not dropped from its tail, then one window
-     * one row high and one RAMWR - three link transactions.
+     * one row high and one RAMWR - three link transactions. The run is
+     * packed into the panel's own row buffer, so the caller's span is
+     * free again on return; a refusal is counted in link_failures().
      */
     void write_run(Coord x, Coord y, std::span<const Color> run) {
         const std::optional<Rect> r = clip(Rect{x, y, run_extent(run), 1}, width(), height());
@@ -374,11 +423,11 @@ public:
     // ---- the oracle ---------------------------------------------------------
 
     /**
-     * THE ORACLE VERB: the logical run at (x, y) read back in LOGICAL
+     * The oracle verb: the logical run at (x, y) read back in logical
      * order, through the same window and the same walk a write of it
      * would use - one window, one RAMRD, three link transactions.
      *
-     * The bytes come back as the LINK clocked them, which is what the
+     * The bytes come back as the link clocked them, which is what the
      * link promises, and the controller's own framing for a memory read
      * is applied here: the dummy byte or the dummy clock the traits
      * name, then three bytes a pixel, unpacked in the module's colour
@@ -429,10 +478,10 @@ public:
 
     /**
      * One pixel read back, so that a DcsPanel is a `ReadableSurface`
-     * and the reference renderer judges it with no adapter. ON SILICON
-     * IT IS A WINDOW AND A READ PER PIXEL, which is a whole screen's
+     * and the reference renderer judges it with no adapter. On silicon
+     * it is a window and a read per pixel, which is a whole screen's
      * worth of transactions for a whole screen's worth of pixels: it is
-     * the OBSERVER'S verb - a test, a golden, an eye - and never a
+     * the observer's verb - a test, a golden, an eye - and never a
      * primitive's. Out of bounds, and where the link refused, it
      * answers 0.
      */
@@ -450,9 +499,12 @@ public:
      * Link transactions this panel asked for and did not get. The two
      * Surface verbs are `void` by contract, so a refusal has nowhere
      * else to go and counting is what keeps it from being a silent
-     * wrong picture. A verb STOPS at its first refusal - a window half
-     * written is not a window - so this counts one per verb on a link
-     * that refuses everything.
+     * wrong picture. On a link that refuses everything the count per
+     * verb is what each verb does: fill_rect(), write_run(), read_run(),
+     * get_pixel() and rotation() stop at their first refusal - a window
+     * half written is not a window - and count one; wake() and so
+     * reset_and_wake() send all five of their commands whatever each
+     * answers, and count five.
      *
      * The driver counts nothing else. What an update costs in
      * rectangles, runs and pixels is a different question, and

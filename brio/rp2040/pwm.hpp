@@ -1,47 +1,106 @@
 /*
  * pwm.hpp
  *
- * The RP2040's PWM block (datasheet 4.5): eight identical SLICES, each
- * a 16-bit counter with a wrap value (TOP), two compare levels (CC A
- * and CC B) driving two outputs, an 8.4 fractional clock divider, a
- * phase-correct mode, an input mode in which the B pin GATES or CLOCKS
- * the counter (a duty or a frequency measured with no capture unit),
- * and one wrap event per slice that is an interrupt bit on the block's
- * single line and a DMA request. Three layers, the other strata's
- * arrangement:
+ * PWM outputs, a dead-time pair, a frequency or duty measured on a pin,
+ * and a periodic interrupt with no pad, on the RP2040's PWM block
+ * (datasheet 4.5). What a program writes, the RGB lamp of
+ * docs/rp2040/pwm.md (`clock` is the clock task's empty tag object,
+ * rp2040/clock.hpp; util/rgb_lamp.hpp the lamp over three channels):
  *
- *  - `Pwm` is the BLOCK: the reset gate, the global enable register
+ *     using Red = brio::PwmOutput<12, 999>;      // slice 6 A
+ *     using Green = brio::PwmOutput<13, 999>;    // slice 6 B, the same period
+ *     using Blue = brio::PwmOutput<17, 999>;     // slice 0 B
+ *     using Lamp = brio::RgbLamp<Red, Green, Blue>;
+ *
+ *     (void)brio::Pwm::reset();                  // once: the block out of reset
+ *     Red::setup_hz(clock, 10'000);              // the slice at 10 kHz
+ *     Green::attach();                           // the pad alone
+ *     Blue::setup_hz(clock, 10'000);
+ *     Lamp::show({255, 128, 64});
+ *
+ * Each alias names a pin and its slice's TOP as template arguments;
+ * setup_hz() solves the divider for the rate, configures the slice
+ * from scratch, hands the pad over and enables the slice; attach() is
+ * for the second output of a slice already set up (the frequency
+ * belongs to the slice, the duty to the channel); duty() - here through
+ * the lamp - sets the level, taken at the next wrap.
+ *
+ * What decides correctness. The block is held in reset at power-up (2.14)
+ * and no task or slice verb releases it: `Pwm::reset()` runs once before
+ * the first setup, as the main() of the suite test_rp2040_pwm does; it
+ * also puts every slice back at its reset state. A second setup() on a
+ * slice running another output restarts that slice from scratch (the
+ * counter at zero, the period rewritten), which is why the second output
+ * takes attach(). The wrap interrupt is the program's to bind and to
+ * enable: nothing here enables its NVIC line, the program calls
+ * `Nvic::enable(Pwm::irq())` on the core that serves it; `Pwm::isr()` is
+ * the body of `isr_pwm_wrap`, and the crt aliases every peripheral
+ * handler name weakly to Default_Handler, a spin
+ * (rp2040/src/glue/startup_rp2040.cpp), so a wrap interrupt enabled with
+ * no handler bound parks the core there.
+ *
+ * Who calls what. The configuring verbs (setup, setup_hz, attach,
+ * configure, release, the counters' setup) are setup's or an active
+ * object's handler's (an active object is a brio component with its
+ * own event queue, served one event at a time by the kernel); they
+ * write whole registers or go through the atomic aliases, none of
+ * them masks interrupts, and the one wait among them is the pad banks'
+ * release from reset the first time a pad is handed over (bounded,
+ * rp2040/pin.hpp). A single level change
+ * (`PwmSlice::level(ch, v)`, which PwmOutput::duty() calls) reads CC
+ * and writes the difference through the XOR alias, so two contexts
+ * changing the two levels of one slice race; `levels(a, b)` is one
+ * store. `Pwm::isr()` runs in the vector. Outside the configuring
+ * verbs, the two phase nudges are the one wait, bounded (100 000 polls
+ * by default). Nothing here keeps a
+ * buffer: a DMA stream into CC (`cc_address()`, paced by the slice's
+ * `dreq`) owns its table until its channel completes.
+ *
+ * Three layers:
+ *
+ *  - `Pwm` is the block: the reset gate, the global enable register
  *    that starts slices in lockstep, the four interrupt registers
  *    (raw, enable, force, status) and the ISR body.
- *  - `PwmSlice<n>` is the RESOURCE: one slice's CSR / DIV / TOP / CC /
+ *  - `PwmSlice<n>` is the resource: one slice's CSR / DIV / TOP / CC /
  *    CTR, the configuration, the levels, the phase nudges, its wrap
  *    bit and its request. It decides nothing.
- *  - THE TASKS: `PwmOutput<pin, top>` (util/pwm_channel.hpp's
- *    PwmChannel), `PwmPair<pin_a, pin_b, top>` (A and its complement
- *    on B with a dead time by arithmetic - no dead-time unit exists
- *    here), `PwmEdgeCounter<pin_b>` and `PwmLevelCounter<pin_b>` (the
- *    B pin as the counter's clock or gate: a frequency and a duty
- *    measured over a window the caller times), `PwmPeriodicTick<n>`
- *    (the wrap as a tick).
+ *  - The tasks (a task, in brio, is a driver layer with state of its
+ *    own that an active object calls): `PwmOutput<pin, top>`
+ *    (util/pwm_channel.hpp's PwmChannel, the contract an output with
+ *    a `max` and a `duty()` meets), `PwmPair<pin_a, pin_b, top>` (A
+ *    and its complement on B with a dead time by arithmetic - no
+ *    dead-time unit exists here), `PwmEdgeCounter<pin_b>` and
+ *    `PwmLevelCounter<pin_b>` (the B pin as the counter's clock or
+ *    gate: a frequency and a duty measured over a window the caller
+ *    times), `PwmPeriodicTick<n>` (the wrap as a tick).
  *
- * THE PINS: every GPIO is a PWM pin (table 515). GPIO n belongs to
+ * The block is eight identical slices, each a 16-bit counter with a
+ * wrap value (TOP), two compare levels (CC A and CC B) driving two
+ * outputs, an 8.4 fractional clock divider, a phase-correct mode, an
+ * input mode in which the B pin gates or clocks the counter (a duty or
+ * a frequency measured with no capture unit), and one wrap event per
+ * slice that is an interrupt bit on the block's single line and a DMA
+ * request.
+ *
+ * The pins: every GPIO is a PWM pin (table 515). GPIO n belongs to
  * slice (n / 2) mod 8 and is its A output when n is even, its B when
  * odd; GPIO 16..29 repeat slices 0..6, and the same output selected on
- * two GPIOs appears on both. ONLY A B PIN IS AN INPUT: in the level
+ * two GPIOs appears on both. Only a B pin is an input: in the level
  * and edge modes the B pin stops being an output and CC B is ignored,
  * and two B pins of one slice selected at once are ORed.
  *
- * THE PERIOD is (TOP + 1) counts, twice that in phase-correct mode
+ * The period is (TOP + 1) counts, twice that in phase-correct mode
  * (the counter runs back down to 0), at a count rate of clk_sys over
  * the divider: 1..255 plus sixteenths, and 0 in the integer field is
  * 256. A level of 0 is a 0 % output with no pulse and a level of
  * TOP + 1 a 100 % output with no gap (4.5.2.2), which is why a
- * PwmOutput's `max` is TOP + 1. CC and TOP are DOUBLE BUFFERED: a write
+ * PwmOutput's `max` is TOP + 1. CC and TOP are double buffered: a write
  * lands at the next wrap (the 0-to-0 turn in phase-correct mode), so a
- * duty change is glitch-free by construction, and a DMA channel paced
- * by the wrap request streams one level per period.
+ * duty change takes effect whole at a period's boundary and never
+ * mid-period, and a DMA channel paced by the wrap request streams one
+ * level per period.
  *
- * THE FREQUENCY MEASUREMENT'S RULE (4.5.2.5): the measured signal's low
+ * The frequency measurement's rule (4.5.2.5): the measured signal's low
  * and high periods must each exceed one clk_sys period, the edge
  * detector's own.
  */
@@ -127,7 +186,7 @@ constexpr uint32_t pwm_csr_of(const PwmSliceConfig& c) {
     return v;
 }
 
-/// The period of a free-running slice in SIXTEENTHS of a clk_sys cycle
+/// The period of a free-running slice in sixteenths of a clk_sys cycle
 /// (4.5.2.6): (TOP + 1) x (1 + phase_correct) x the divider.
 constexpr uint32_t pwm_period_sixteenths(const PwmSliceConfig& c) {
     return (static_cast<uint32_t>(c.top) + 1u) * (c.phase_correct ? 2u : 1u) * c.divider.sixteenths();
@@ -172,7 +231,9 @@ struct Pwm {
     static constexpr IRQn_Type irq() { return PWM_IRQ_WRAP_IRQn; }
 
     /// The block from its reset state: every slice disabled, DIV at
-    /// one, TOP at 0xFFFF, the levels at zero.
+    /// one, TOP at 0xFFFF, the levels at zero. The release every program
+    /// owes before its first slice (nothing below calls it); false when
+    /// RESET_DONE did not rise within rp2040/resets.hpp's bounded wait.
     static bool reset() { return Resets::cycle(reset_bit); }
     static bool released() { return Resets::released(reset_bit); }
     static void hold() { Resets::hold(reset_bit); }
@@ -197,7 +258,8 @@ struct Pwm {
         if (on) { hw_set(PWM->INTF, mask); } else { hw_clear(PWM->INTF, mask); }
     }
 
-    /// The ISR body: the raised-and-enabled slices, cleared here.
+    /// The ISR body, called from the program's isr_pwm_wrap: the
+    /// raised-and-enabled slices as a mask, cleared here.
     [[gnu::always_inline]] static uint8_t isr() {
         const uint8_t up = pending();
         if (up != 0u) {
@@ -231,7 +293,7 @@ struct PwmSlice {
     static volatile void* cc_address() { return &cc(); }
     static volatile void* top_address() { return &top_reg(); }
 
-    /// The whole configuration FROM SCRATCH, the vendor's order: the
+    /// The whole configuration from scratch, the vendor's order: the
     /// slice disabled, its counter at zero, then DIV, TOP and the mode
     /// bits - the caller enables. A slice reconfigured while running
     /// keeps its counter, and a counter above a new, smaller TOP runs
@@ -270,7 +332,9 @@ struct PwmSlice {
     static bool enabled() { return (csr() & PWM_CH0_CSR_EN_BITS) != 0u; }
 
     // ---- the levels and the counter -------------------------------------------
-    /// One channel's level (ch 0 = A, 1 = B), taken at the next wrap.
+    /// One channel's level (ch 0 = A, 1 = B), taken at the next wrap. A
+    /// read of CC then one XOR-alias write: not for two contexts writing
+    /// the two levels of one slice (levels() is one store).
     static void level(uint8_t ch, uint16_t v) {
         if (ch == 0u) {
             hw_write_masked(cc(), v, PWM_CH0_CC_A_BITS);
@@ -317,7 +381,7 @@ private:
 /**
  * PwmOutput<pin, top>: one output as a util/pwm_channel.hpp
  * PwmChannel, `max` = TOP + 1 (the 100 % level, 4.5.2.2). The
- * FREQUENCY BELONGS TO THE SLICE, the duty to the channel: setup()
+ * frequency belongs to the slice, the duty to the channel: setup()
  * configures the slice (its other output, if any, shares the period)
  * and hands the pad over; `attach()` hands the pad over alone, for the
  * second output of a slice already set up.
@@ -333,7 +397,10 @@ struct PwmOutput {
     static constexpr uint16_t max = top + 1u;
 
     /// The slice free-running at `divider`, this level at zero, the
-    /// pad on the PWM function, the slice enabled.
+    /// pad on the PWM function, the slice enabled. The slice is
+    /// configured from scratch (its counter restarted), so a second
+    /// output of a running slice takes attach() instead. False for an
+    /// invalid divider, nothing written.
     static bool setup(PwmDivider divider = {}, bool phase_correct = false, bool invert = false) {
         PwmSliceConfig c = Slice::config();
         c.mode = PwmDivMode::free_running;
@@ -349,7 +416,8 @@ struct PwmOutput {
         return true;
     }
     /// The slice at `hz` (the divider solved for this TOP), else as
-    /// setup().
+    /// setup(). False, nothing written, when no divider of 1 to 256 and
+    /// fifteen sixteenths reaches `hz` with this TOP.
     template <typename Clock>
     static bool setup_hz(Clock clock, uint32_t hz, bool phase_correct = false, bool invert = false) {
         const auto c = pwm_config_for(clock_hz(clock), hz, top, phase_correct);
@@ -364,6 +432,7 @@ struct PwmOutput {
         Pin<pin>::function(PinFunction::pwm);
     }
 
+    /// The level, clamped to `max`; taken at the next wrap.
     static void duty(uint16_t v) { Slice::level(channel, v > max ? max : v); }
     static uint16_t duty() { return Slice::level(channel); }
 
@@ -374,13 +443,13 @@ struct PwmOutput {
 };
 
 /**
- * PwmPair<pin_a, pin_b, top>: A and its COMPLEMENT on B, both pins of
+ * PwmPair<pin_a, pin_b, top>: A and its complement on B, both pins of
  * one slice, with a dead time by arithmetic - no dead-time unit exists
  * on this block. A is high for the first `v` counts of the period; B
- * is INVERTED and its raw level is `v + dead`, so B is low for the
+ * is inverted and its raw level is `v + dead`, so B is low for the
  * first `v + dead` counts and high for the rest: B rises `dead` counts
  * after A falls. In the plain mode A rises and B falls together at the
- * wrap, so the dead time is on ONE edge; in PHASE-CORRECT mode both
+ * wrap, so the dead time is on one edge; in phase-correct mode both
  * outputs are centred (A on the wrap, B on TOP) and the dead time
  * appears at both transitions - the mode a bridge takes. `max` = TOP
  * + 1, B's level clamped to it.
@@ -396,6 +465,9 @@ struct PwmPair {
     using Slice = PwmSlice<pwm_slice_of(pin_a)>;
     static constexpr uint16_t max = top + 1u;
 
+    /// The slice configured from scratch with B inverted, both pads
+    /// handed over, the slice enabled at zero duty. False, the slice
+    /// untouched, for a dead time above TOP or an invalid divider.
     static bool setup(PwmDivider divider = {}, uint16_t dead_time = 0, bool phase_correct = false) {
         if (dead_time > top) {
             return false;
@@ -464,7 +536,7 @@ struct PwmEdgeCounter {
 
 /**
  * PwmLevelCounter<pin_b>: the B pin as the counter's gate - the
- * counter advances on every divided clk_sys cycle the pin is HIGH.
+ * counter advances on every divided clk_sys cycle the pin is high.
  * Over a window the caller times, the count against the window's
  * cycles is the duty.
  */

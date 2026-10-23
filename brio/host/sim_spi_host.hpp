@@ -1,28 +1,52 @@
 /*
  * sim_spi_host.hpp
  *
- * A SPI HOST MADE OF RAM, AT THE LEVEL OF THE REQUEST. The same static
+ * A SPI host made of RAM, at the level of the request. The same static
  * surface a family's `SpiHost<n>` offers to the arbiter
- * (util/bus_master.hpp) and to a device driver, with no register block
- * behind it: its seam is the REQUEST, and what it does with one is clock
- * the bytes into whatever device sits on the select line the request
- * names.
+ * (util/bus_master.hpp, the active object that serializes requests to
+ * one bus) and to a device driver, with no register block behind it:
+ * its seam is the Request, and what it does with one is clock the bytes
+ * into whatever device sits on the select line the request names. A host
+ * test uses it as the bus under a device driver - the DCS link and the
+ * panel driver of brio/devices/ - with a simulated device attached
+ * (docs/host/README.md; docs/devices/dcs_link.md, "How to use it").
  *
- * WHY THAT IS THE RIGHT SEAM HERE, and not the register block
+ * The smallest use, as test/test_dcs_link spells it: a device model put
+ * on a select line, then the driver built over the host type as it would
+ * be over a family's:
+ *
+ *     using Host = SimSpiHost<0>;
+ *     using Link = DcsSerialLink<Host>;
+ *     constexpr SimSpiPinRef panel_cs{2};
+ *
+ *     Host::attach(panel_cs, front());            // a SimDcsSerial over a SimDcsPanel
+ *     Link link{Link::Config{write, read}};       // requests of this host's bus
+ *
+ * Contexts: a single-threaded test, which is also the program's
+ * interrupt glue when it wants to be. A polled request completes inside
+ * start(); an unpolled one completes there too under the `immediate`
+ * completion style (the default), and under `deferred` it is held until
+ * the test calls finish(), which plays the handler that would post
+ * TransferDone. Nothing waits: cs_setup_us is counted, never spent.
+ * Storage: a request's buffers are read and written during the call
+ * that performs it (start() or finish()) and not after; an attached
+ * device model is held by reference and must outlive the bus.
+ *
+ * Why that is the right seam here, and not the register block
  * sim_pl022.hpp models. Those two headers answer different questions. A
- * simulated PL022 proves that ONE DRIVER knows no chip, so it has to be
+ * simulated PL022 proves that one driver knows no chip, so it has to be
  * the chip - the registers at their offsets, the reset values, the order
  * of the acts of a bring-up. This file proves nothing about a driver of
- * the silicon; it is the WORLD on the other side of a bus, so that a
+ * the silicon; it is the world on the other side of a bus, so that a
  * device driver (a display over devices/dcs_link.hpp, a converter, a
  * touch controller) can be judged against a device made of RAM with no
  * silicon anywhere. docs/design/simulation.md places it: a device the
  * program reaches through its own driver, never a channel into the
  * kernel.
  *
- * WHAT IT MODELS. The two phases of the descriptor in one select window
- * with the D/C line flipping between them, the select active LOW, the
- * setup time COUNTED and never spent, a null `tx` clocking 0xFF and a
+ * What it models. The two phases of the descriptor in one select window
+ * with the D/C line flipping between them, the select active low, the
+ * setup time counted and never spent, a null `tx` clocking 0xFF and a
  * null `rx` discarding, a frame of two bytes where the request asks for
  * one, and a select line with nothing on it reading 0xFF - which is a
  * bus with no device on it and not an error, exactly as a real one would
@@ -30,12 +54,12 @@
  * arbiter distinguishes them and a test of an asynchronous transfer
  * needs the one that does not answer inside `start()`.
  *
- * WHAT IT DOES NOT MODEL: the wire and the time on it. There is no
+ * What it does not model: the wire and the time on it. There is no
  * clock rate, no mode, no setup or hold, no bit - a mode the device
  * disagrees with changes nothing here, and a rate is a number that
  * travels in the request and is never spent. A test that wants those
- * wants silicon. What this world is exact about is the BYTES and their
- * ORDER, which is what a device driver is made of.
+ * wants silicon. What this world is exact about is the bytes and their
+ * order, which is what a device driver is made of.
  */
 
 #pragma once
@@ -155,7 +179,7 @@ struct SimSpiTraceEntry {
 };
 
 /**
- * The host itself: a TYPE and never an object, as a family's is.
+ * The host itself: a type and never an object, as a family's is.
  *
  * `n` is the instance, so `SimSpiHost<0>` and `SimSpiHost<1>` are two
  * buses with two device tables and two sets of counters, the way two
@@ -184,12 +208,11 @@ public:
      * - so a driver written over one of those compiles over this one and
      * a frame-size check has something to check.
      *
-     * The ORDER is the pointer-sized fields first, the two-byte length,
+     * The order is the pointer-sized fields first, the two-byte length,
      * then the bytes, so that no padding stands between fields (48 bytes
-     * on a 64-bit host, where alignment holes between the old order's
-     * fields made 64). Nothing here is copied for speed; the shape is
+     * on a 64-bit host). Nothing here is copied for speed; the shape is
      * the one an engine wants when it copies a tenure's fields with word
-     * stores, and a driver fills a Request by NAME, so a driver proved
+     * stores, and a driver fills a Request by name, so a driver proved
      * over this host is proved over a Request of that shape.
      */
     struct Request {
@@ -266,11 +289,11 @@ public:
     /**
      * Run the transaction, or hold it.
      *
-     * A POLLED request always completes inside this call and returns
+     * A polled request always completes inside this call and returns
      * true, in either completion mode. An unpolled one completes here
      * too while the mode is `immediate` - the synchronous completion the
      * contract allows, and the arbiter then sends the reply itself; in
-     * `deferred` mode it is HELD instead and this returns false, which
+     * `deferred` mode it is held instead and this returns false, which
      * is the engine saying "I run on my interrupt". The test is then the
      * app's ISR glue: `finish()` performs the transfer and hands back
      * the status a `TransferDone` would carry.
@@ -318,7 +341,7 @@ public:
         status_ = spi_ok;
     }
 
-    /// The shape of the other engines' release: the bus goes back to
+    /// release() as every SPI engine has it: here the bus goes back to
     /// nothing attached and nothing counted.
     static void release() {
         detach_all();

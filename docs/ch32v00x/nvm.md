@@ -1,11 +1,74 @@
 # FLASH (CH32V00x)
 
-The flash program/erase engine of RM ch. 18 and the two storage media
-over it - the `FlashMedia` backends that carry util/nv_heap.hpp's block
-allocator and util/nv_journal.hpp's value journal on this silicon,
-their fourth. Documents of record: the CH32V00X reference manual V1.5
+This document is for a programmer who keeps data across a reset or a
+power cut in the part's own flash: a calibration, a configuration, a
+counter, a record a panic leaves. It covers the flash program/erase
+engine of RM ch. 18 and the two storage media over it, the
+`FlashMedia` backends that carry util/nv_heap.hpp's block allocator
+(the heap, [design/nv-heap.md](../design/nv-heap.md)) and
+util/nv_journal.hpp's value journal (the journal,
+[design/nv-journal.md](../design/nv-journal.md)) on this silicon. A
+medium is a zone of the array above the program, fixed by the linker
+script, with the operations the heap or the journal asks of it; a
+program uses the heap or the journal and rarely the engine itself.
+
+The smallest use, from "How to use it" below, is the CH32V006's (the
+CH32V003 has no heap share, below):
+
+```cpp
+using Heap = brio::NvHeap<brio::MainFlash, 8, 2>;
+using Journal = brio::NvJournal<brio::MainFlashJournalZone, 6, 32, 12>;
+Heap heap;
+Journal journal;
+
+heap.mount();                           // survival-aware, reports losses
+auto w = heap.alloc(record_id, bytes);  // a block, appended then sealed
+journal.mount();
+journal.save<Calibration>(id, cal);     // a page program, ~2 ms, the core stalled
+journal.save_reserved(id, value);       // the panic path: one program, no erase
+```
+
+Line by line: `Heap` is the block allocator over the heap's 16 KB
+(`MainFlash`), with up to eight blocks and a map of two pages; `Journal`
+is the value journal over its 6 KB attic (`MainFlashJournalZone`), with
+up to six value ids, values of up to 32 bytes and halves of twelve
+pages; each is an object of the program, and `mount()` reads what the
+flash holds before anything else is asked of it. `alloc()` appends a
+block under a record id; `save()` writes a value as a new entry (a page
+program); `save_reserved()` is the panic path's write: one program,
+no erase.
+
+What decides correctness even there. A write stops the whole program:
+the core executes from this array and there is no read-while-write, so
+an ordinary save is a pause of about 2 ms, a save that collects one of
+some 78 ms on the CH32V006, and every interrupt waits too, the kernel's
+tick among them (it counts one tick for a stall of two or three
+periods, so kernel time runs slow across one). Nothing that must run
+every tick sits in the same turn as a save. The HSI must be on while
+programming or erasing (18.2.2): no clock type of this stratum turns it
+off, and `Rcc`'s HSI verb can. The page is the write cell: every journal entry and every
+heap append costs a page. And the two parts' partitions differ: on the
+CH32V003 there is no `MainFlash` (the heap lines do not compile) and the
+journal's attic is 1 KB, two halves of eight pages, so its last template
+argument is eight, the spelling `MainFlashPartition::journal_pages / 2u`
+the nvm suite uses being right on both parts.
+
+The rest of this page, in order: the documents of record; what the
+silicon does; the types and verbs, the partition among them; how to use
+it; the bench findings, timed on a microsecond stopwatch; and what is
+not covered.
+
+## Documents of record
+
+The CH32V00X reference manual V1.5
 (18.2 for the security model, 18.3 for the registers, 18.4 for the
 procedures), the CH32V006 datasheet V2.0 (the array's size per part).
+The headers are [nvm.hpp](../../brio/ch32v00x/nvm.hpp) and
+[nvm_flash.hpp](../../brio/ch32v00x/nvm_flash.hpp); the reference suite
+is `test_ch32_nvm` (a suite's letter, below, is one command key of its
+console and the group of verdicts it runs, `z` the key
+that runs the image's set of letters, a letter outside it run by its
+own key).
 
 ## What the silicon does
 
@@ -15,8 +78,8 @@ procedures), the CH32V006 datasheet V2.0 (the array's size per part).
   from) and aliased at 0x0800 0000 (the address the chapter's
   procedures write through). No second bank, no read-while-write: a
   program or erase stalls the core for its duration.
-- **Programming is by whole page.** The main memory is written by FAST
-  PAGE PROGRAMMING (18.4.5): the page's words loaded one by one into
+- **Programming is by whole page.** The main memory is written by fast
+  page programming (18.4.5): the page's words loaded one by one into
   an internal buffer (64 on the CH32V006, 16 on the CH32V003), each
   followed by BUFLOAD, then one STRT. The CH32V006's FLASH_CTLR has no
   half-word PG mode; the CH32V003's has the standard one (its bit 0),
@@ -37,7 +100,8 @@ procedures), the CH32V006 datasheet V2.0 (the array's size per part).
 ## Types and verbs
 
 `Flash` ([brio/ch32v00x/nvm.hpp](../../brio/ch32v00x/nvm.hpp)) is the
-engine, monostate: `unlock()` opens both locks and `lock()` shuts
+engine, a monostate (a type whose functions are all static, never an
+object): `unlock()` opens both locks and `lock()` shuts
 both, `erase_page()`, `erase_sector()` and `program_page()` each wait
 for BSY, run the chapter's sequence and return the error bits STATR
 left (WRPRTERR) or zero - and `Flash::refused` (a bit no STATR error
@@ -47,7 +111,7 @@ silicon error. Every address the engine takes is the array's own,
 from 0, and `alias_of()` adds 0x0800 0000 where the chapter wants it.
 
 [brio/ch32v00x/nvm_flash.hpp](../../brio/ch32v00x/nvm_flash.hpp) draws
-a CONSTANT PARTITION, each part's (`device::flash_program_bytes`,
+a constant partition, each part's (`device::flash_program_bytes`,
 `device::flash_journal_pages`): the linker script gives the linker the
 first 40 KB of the CH32V006's array and the first 15 KB of the
 CH32V003's, and states the boundary as `__brio_rom_end`; the media
@@ -60,7 +124,7 @@ CH32V003 the partition is the journal's 1 KB attic alone
 (0x3C00..0x4000, 16 pages of 64 bytes, two halves of eight) - there
 is no heap share on a 16 KB array and no `MainFlash` there
 (`BRIO_CH32_HAS_FLASH_HEAP`). Both media declare `erase_size =
-write_cell =` the page: THE PAGE IS THE CELL, and every journal entry
+write_cell =` the page: the page is the cell, and every journal entry
 and every heap append costs a page (a half of twelve pages holds
 twelve entries, of eight eight; the geometry assertion allows up to
 ten ids on the CH32V006 and six on the CH32V003). Both open the locks
@@ -87,7 +151,7 @@ An ordinary save is a pause of the whole program of about two
 milliseconds, and a save that collects one of some 78 ms on the
 CH32V006, not a background operation: this is the array the core
 executes from, and every interrupt waits too - the kernel's tick among
-them, which counts ONE tick for each stall of two or three periods (the
+them, which counts one tick for each stall of two or three periods (the
 bench findings). Nothing that must run every tick should sit in the
 same turn as a save, and kernel time runs slow across one.
 
@@ -159,8 +223,9 @@ Driver gaps, each with its reason:
 
 - The option bytes (18.5: RDPR, the USER byte with the PD7/RST choice,
   IWDG_SW, the standby reset) and the write-protection units as verbs:
-  the `brio fuses` work for this target, where a wrong write costs a
-  chip erase and deserves its own session.
+  they are provisioning, where a wrong write costs a chip erase, and
+  `brio fuses`, the bench verb that provisions the AVR's fuses, has no
+  side for this target.
 - The 32 KB block erase (the CH32V006's) and the whole-array erase: no
   user; the probe erases the array when it programs (the bench
   findings).

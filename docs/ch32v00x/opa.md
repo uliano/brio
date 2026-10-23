@@ -1,17 +1,69 @@
 # OPA (CH32V00x)
 
-The operational amplifier of RM ch. 17, in the two shapes the parts
-give it: on the CH32V006 one OPA with four positive input pads, a
-negative input that is a pad or a programmable gain, a differential
-PGA, a bias reference, an output on a pad and always on the ADC's
-channel 9 - and what of the chapter's comparators this part has; on
-the CH32V003 three bits of EXTEND_CTR, two pads a side, the output on
-PD4 alone. Documents of record: the CH32V00X reference manual V1.5
+This document is for a programmer who amplifies a small signal before
+the ADC reads it, or uses the on-chip amplifier as a comparator of two
+pads. It covers the operational amplifier of RM ch. 17, in the two
+shapes the parts give it: on the CH32V006 one OPA with four positive
+input pads, a negative input that is a pad or a programmable gain, a
+differential PGA, a bias reference, an output on a pad and always on
+the ADC's channel 9 - and what of the chapter's comparators this part
+has; on the CH32V003 three bits of EXTEND_CTR, two pads a side, the
+output on PD4 alone. `Opa` is the block, a type whose functions are all
+static (a monostate: one amplifier on the chip, never an object), and
+the same program text configures either part's within what that part
+can spell.
+
+The smallest use, on the CH32V006, a pad amplified eight times and read
+on the ADC's channel 9, from "How to use it" below:
+
+```cpp
+brio::Opa::unlock();
+brio::Opa::configure({.positive = brio::OpaPositive::pd3, .negative = brio::OpaNegative::gain8});
+brio::Opa::enable(true);
+brio::Adc::select(brio::AdcInput::opa);              // channel 9: the amplified pad
+const uint16_t counts = brio::Adc::read_settled(4);
+```
+
+Line by line: `unlock()` writes the key pair that lifts the block's
+lock, standing from reset (nothing takes before it on the CH32V006; on
+the CH32V003, which has no lock, it does nothing); `configure()` writes
+the selections - PD3 on the positive side, the internal gain of 8 with
+its feedback on the negative - and answers false for a configuration
+the part cannot spell or with the block locked; `enable(true)` turns
+the amplifier on; the last two lines read its output through the ADC,
+which must already be initialized ([adc.md](adc.md)).
+
+What decides correctness even there. The lock is one-way: `lock()`
+locks the block until the next system reset, and every `configure()`
+after it answers false. `configure()` selects pads and configures none
+of them: the input pads' GPIO state is the program's, and a pad's own
+pull holds the single-ended PGA's input at a rail but cannot hold the
+differential PGA's (measured), whose input network figure 17-1 draws
+at 3.2 kOhm. On the
+CH32V003 the output reaches the ADC only through the pad: PD4 must be
+an analog input (`AnalogIn<Pin<'D', 4>>::claim()`) and the channel is
+7, `Opa::adc_channel`, as the second example below spells it. And the
+chapter's comparators are not the CH32V006's: CMP2 does not enable on
+it (measured).
+
+The rest of this page, in order: the documents of record; what the
+silicon does on each part; the types and verbs; how to use it, the
+CH32V003's program among it; the bench findings; and what is not
+covered.
+
+## Documents of record
+
+The CH32V00X reference manual V1.5
 (17.2.1 and its sub-sections for the modes, figure 17-1 for the
 network, 17.3 for the registers), the CH32V006 datasheet V2.0 (2.1
 for the parts the chapter's opening paragraph divides); the CH32V003
 reference manual V1.9 (its ch. 17, EXTEND_CTR) and datasheet V1.6
-(2.2 for the OPA pads).
+(2.2 for the OPA pads). The header is
+[brio/ch32v00x/opa.hpp](../../brio/ch32v00x/opa.hpp); the reference
+suite is `test_ch32_opa` (a suite's letter, below, is one command key
+of its console and the group of verdicts it runs, `z` the key that runs
+the image's set of letters, a letter outside it run by its own
+key).
 
 ## What the silicon does
 
@@ -26,12 +78,12 @@ reference manual V1.9 (its ch. 17, EXTEND_CTR) and datasheet V1.6
   (FB_EN1, mandatory in the PGA modes); PGADIF makes the PGA
   differential with PA4 as its negative side (no gain 32 there); VBEN/
   VBSEL add a bias reference of VDD/2 or VDD/4.
-- **The output** goes to PD4, PA5 or nowhere (MODE1), and ALWAYS to
+- **The output** goes to PD4, PA5 or nowhere (MODE1), and always to
   the ADC's channel 9 and CMP2's positive input.
 - **The single-ended PGA's input is high-impedance and the
-  differential PGA's is not** (figure 17-1's 3.2 kOhm network,
-  measured): a pad's own pull holds the first at a rail and cannot
-  hold the second.
+  differential PGA's is not** (figure 17-1 draws a 3.2 kOhm network
+  into it): a pad's own pull holds the first at a rail and cannot hold
+  the second (measured).
 - **CMP2 does not enable on the CH32V006** (measured: CMP_KEY lifts
   the lock, CMP_EN2 does not take): the chapter's comparators are the
   CH32V007's, as its opening paragraph says of the CMP module.

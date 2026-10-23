@@ -3,25 +3,41 @@
  *
  * The alternate-function remaps of the CH32V00x (RM 7.2.11, 7.3.2.2):
  * one register, AFIO_PCFR1, moves whole peripherals between pad sets -
- * a CODE per peripheral selecting one COLUMN of the chapter's tables.
- * Every column is stated here as constexpr data, so a program names a
- * code and gets its pads from the same source that programs the
+ * a code per peripheral (the remap code) selecting one column of the
+ * chapter's tables, the set of pads that peripheral's signals sit on
+ * together. Every column is stated here as constexpr data, so a program
+ * names a code and gets its pads from the same source that programs the
  * register, and a pin table in a driver can be built from a code
  * instead of being retyped.
  *
- * TWO PARTS, TWO REGISTERS UNDER ONE NAME. The CH32V006's PCFR1 (its
+ * A program rarely calls this file itself: it names the code where a
+ * driver takes it, and the driver's init() writes PCFR1. The smallest
+ * use, USART2 on column 3, as docs/ch32v00x/usart.md's "How to use it"
+ * spells it:
+ *
+ *     using Link = brio::Uart<2, P, 64, 64, brio::NoDmaEngine, brio::NoDmaEngine, 3, link_opts>;
+ *     Link::init(clock, 9600);                          // TX PD2, RX PD3, CTS PA0, RTS PA1
+ *
+ * Who calls what: the tables and the `afio_*_pads()` lookups are
+ * constexpr, for any context and for the compiler. Afio's verbs are
+ * read-modify-writes of PCFR1, and of RCC_PB2PCENR for the AFIO's gate,
+ * with no guard: setup verbs, run from main or from a driver's init(),
+ * never beside a handler that writes either register. Nothing here
+ * waits.
+ *
+ * Two parts, two registers under one name. The CH32V006's PCFR1 (its
  * manual's 7.3.2.2) keeps four-bit codes for TIM1 and USART1, three
  * for TIM2, USART2, SPI1 and I2C1, one for each ADC trigger, and sits
  * at offset 0x0C. The CH32V003's (its own manual's 7.3.2.1, at offset
  * 0x04) keeps the F1's layout: two bits for TIM1 and TIM2, one for
  * SPI1, a low bit and a high bit for USART1 (2 and 21) and for I2C1
  * (1 and 22), TIM1_IREMAP feeding TIM1_CH1 from the LSI, the crystal
- * pads' bit at 15 with the OPPOSITE sense. The tables and the fields
+ * pads' bit at 15 with the opposite sense. The tables and the fields
  * are the part's (device::part, the two macros of parts/), the verbs
  * one spelling over both, each writing where its part keeps the field.
  *
- * WHAT THE TABLES SAY that a caller has to know:
- *  - a code is per PERIPHERAL, not per signal: TIM1's nine signals move
+ * What the tables say that a caller has to know:
+ *  - a code is per peripheral, not per signal: TIM1's nine signals move
  *    together, and a column's pads may collide with another column's -
  *    the tables are the datasheet's and nothing here checks two
  *    peripherals against each other;
@@ -32,12 +48,12 @@
  *  - the crystal pads (PA1/PA2) are handed to GPIO or to the
  *    oscillator by one bit, whose sense differs per part:
  *    `pa1_pa2_gpio(bool)` says what it means;
- *  - SWCFG = 100 DISABLES THE DEBUG PORT until the next reset, on both
+ *  - SWCFG = 100 disables the debug port until the next reset, on both
  *    (bits 26:24). The verb exists (a program that wants PD1 as a pad
  *    is a legitimate thing), spelled so that no caller reaches it by
  *    accident, and a program that calls it has lost the probe until it
  *    reboots;
- *  - USART2's default column puts TX on PA7 - the RESET PIN of the
+ *  - USART2's default column puts TX on PA7 - the reset pin of the
  *    CH32V006K8 - so USART2 exists on this package only remapped; the
  *    CH32V003 has no USART2 and its USART1 has four columns, the
  *    fourth carrying the CK pad of a synchronous mode this part has.
@@ -259,7 +275,7 @@ constexpr Pad afio_adc_rule_trigger_pad(bool remapped) { return remapped ? Pad{'
 
 /// AFIO_PCFR1's fields as verbs, one spelling over both parts. The
 /// AFIO's clock is opened first: the register answers nothing without
-/// it.
+/// it. Each verb is a read-modify-write with no guard (the file header).
 struct Afio {
     Afio() = delete;
 
@@ -309,7 +325,7 @@ struct Afio {
     }
     /// PA1 and PA2 as GPIO (true) or as the crystal's pads (false): the
     /// bit's sense is the opposite of the CH32V006's - its reset value
-    /// leaves them GPIO, and a crystal needs the bit SET.
+    /// leaves them GPIO, and a crystal needs the bit set.
     static void pa1_pa2_gpio(bool gpio) { bit(afio_pa1pa2_rm, !gpio); }
     static bool pa1_pa2_are_gpio() { return (afio_pcfr1() & afio_pa1pa2_rm) == 0u; }
 
@@ -329,7 +345,7 @@ struct Afio {
     static void remap_adc_injected_trigger(bool on) { bit(afio_adc_etrginj_rm, on); }
     static void remap_adc_rule_trigger(bool on) { bit(afio_adc_etrgreg_rm, on); }
 
-    /// SWCFG = 100: THE DEBUG PORT OFF, PD1 a pad, until the next reset.
+    /// SWCFG = 100: the debug port off, PD1 a pad, until the next reset.
     /// A program that calls this has lost its probe until it reboots -
     /// and a program that calls it early in every boot has lost it for
     /// good unless the boot reads a condition first. Spelled long on

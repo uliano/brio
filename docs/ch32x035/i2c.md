@@ -533,11 +533,16 @@ Implemented but not bench-verified, each with what would measure it:
 - **The USB_IOEN refusal**: nothing in the stratum sets the bit; the USB
   controller's driver, when it is born, is what would set it and see
   `init()` refuse.
-- **The last two bytes of a read when the wait for RxNE runs out**: the
-  host waits for the last byte with a bound of 100 000 polls and, when it
-  runs out, reads DATAR regardless and reports `i2c_ok` with what it
-  holds (`brio/ch32x035/i2c.hpp`). No measured case reaches it; what
-  would is a clock stopped under the block between the two bytes (a
-  client holding SCL past the bound), and what the verdict should then
-  be - a timeout rather than a success - is the driver owner's open
-  question.
+- **The last byte of a read when the wait for its RxNE runs out.** On a
+  host with no engines, a read of three or more bytes sets STOP at its
+  second BTF, reads byte N-1 and waits for byte N's RxNE with a bound of
+  100 000 polls whose answer is discarded: when the bound runs out, DATAR
+  is read regardless and the tenure reported `i2c_ok` with what it holds
+  (`receive_step()` and `wait_until()` in
+  [brio/ch32x035/i2c.hpp](../../brio/ch32x035/i2c.hpp)). Whether a
+  measured case reaches it is not recorded. At that BTF byte N is
+  already in the shifter, so its RxNE follows the read of N-1 and a
+  target stretching SCL cannot hold it back; what would show the bound
+  running out is a target that never produces the byte (one that
+  releases the bus in the middle of the read), or a review of what the
+  code does with the wait's result.

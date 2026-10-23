@@ -1,6 +1,63 @@
 # PIO (RP2040)
 
-Documents of record: the RP2040 datasheet (build 3184e62), chapter 3
+This document is for a programmer who wants an interface the chip has
+no block for - a serial port on any pin, a protocol of one's own, a
+logic sampler - or one more of a block it has. The RP2040's
+programmable I/O is two blocks of four small state machines, each
+running a program of up to thirty-two instructions out of its block's
+memory, one instruction a cycle, on the pins the program names.
+`brio/rp2040/pio.hpp` gives three things: the nine instructions as
+encoders evaluated when the program is compiled (there is no separate
+assembler in this tree), `Pio<n>` the block and `PioSm<n, sm>` one
+machine, and four programs of the chapter's own as ready-made tasks (a
+task, in brio, is a driver layer with state of its own that a program
+calls): a serial transmitter and receiver, a square wave, and a PWM
+output that is a `PwmChannel` (`util/pwm_channel.hpp`'s interface of
+an output with a duty).
+
+The smallest use, a serial link and a square wave, from "How to use it"
+below:
+
+```cpp
+using Tx = brio::PioUartTx<0, 0, 13>;         // PIO0, machine 0, GPIO 13
+using Rx = brio::PioUartRx<0, 1, 15>;
+Tx::init(clock, 115'200);
+Rx::init(clock, 115'200);
+Tx::write_wait('A');
+if (const auto b = Rx::read_wait()) { got(*b); }
+
+using Blink = brio::PioSquareWave<1, 0, 17>;
+Blink::init(clock, 1'000'000);                 // a 1 MHz wave, the divider solved
+```
+
+Line by line: each task names a block, a machine of it and a pin as
+template arguments, so `Tx` is a transmitter on PIO0's machine 0
+driving GPIO 13 and `Rx` a receiver on machine 1 reading GPIO 15;
+`init()` takes the clock's tag ([clock.md](clock.md)) and the rate,
+solves the machine's clock divider from clk_sys, loads the task's
+program into the block's memory, claims the pin and starts the machine
+- false, nothing started, when no divider reaches the rate or the
+memory has no room; `write_wait()` waits, bounded, for room in the
+transmit FIFO and writes the byte; `read_wait()` waits, bounded, for a
+received byte and answers nothing when none came; `Blink` is a square
+wave on PIO1's machine 0 at GPIO 17.
+
+What decides correctness even there. Each block is held in reset at
+power-up and no task releases it: `Pio<0>::reset()` and
+`Pio<1>::reset()` run before the first task's `init()` - the suite
+resets both blocks at the start of every letter - and since a reset
+also forgets every program loaded, never under running tasks. The
+divider comes from the rate the clock type claims for clk_sys, so the
+clock's `init()` comes first. Two tasks on one block share its
+thirty-two instructions and must not share a machine, which nothing
+checks. A plain `write()` into a full FIFO sets the block's TXOVER flag
+(a bench finding below), so a caller that does not wait asks
+`writable()` first. And a FIFO or flag interrupt enabled with no handler
+bound parks the core in the crt's `Default_Handler` spin.
+
+## Documents of record
+
+The RP2040 datasheet (build 3184e62), chapter 3
 (the programmable I/O: 3.2 the programmer's model - the programs, the
 control flow, the registers and shift counters, the FIFOs, the
 stalls, the pin mapping, the flags -, 3.4 the instruction set and its
@@ -13,9 +70,12 @@ driver: `brio/rp2040/pio.hpp` (the assembler, `Pio<n>` the block,
 `PioSm<n, sm>` the machine, the four tasks) over `pin.hpp`,
 `resets.hpp` and `dma_engine.hpp`. The reference suite:
 `test_rp2040_pio`, wireless and on two wires between the chip's own
-pads - wires the pair desk does not carry
-([../boards/weact-rp2040.md](../boards/weact-rp2040.md)), so the six wire
-letters run by name only, outside z, when they are fitted.
+pads - wires the bench pair (the WeAct RP2040 the suite runs on,
+wired to a WeAct RP2350B) does not carry
+([../boards/weact-rp2040.md](../boards/weact-rp2040.md)), so the
+six wire letters run by name only, outside z, when they are fitted. A
+suite's letter is one command key of its console and the group of
+verdicts it runs; `z`, the all-key, runs the set.
 
 ## What the silicon does
 
@@ -43,7 +103,7 @@ before it runs (a SET). A JMP holds an absolute address, so a program
 loaded at an offset has its JMPs relocated.
 
 Three facts measured that the chapter does not state: a machine held
-by IRQ WAIT reads, in SMx_ADDR, the address of the instruction AFTER
+by IRQ WAIT reads, in SMx_ADDR, the address of the instruction after
 the IRQ; the TX FIFO is emptied by executing a non-blocking PULL per
 word when autopull is off (an OUT NULL only serves under autopull);
 and a byte written by the DMA into the TX FIFO lands as the word's low

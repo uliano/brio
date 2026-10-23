@@ -1,23 +1,33 @@
 /*
  * font_5x7.hpp (gfx)
  *
- * A five-by-seven glyph in a six-by-eight cell: the smallest size at
- * which every printable ASCII character is still told apart, and the one
- * a 128x64 panel fits twenty-one columns of.
+ * Font5x7: the one font the library carries, a five-by-seven glyph in a
+ * six-by-eight cell for the printable ASCII range 0x20..0x7E. It is the
+ * smallest size at which every printable ASCII character is still told
+ * apart, and the one a 128x64 panel fits twenty-one columns of. A program
+ * names it as the text verbs' font, directly or scaled (gfx/font.hpp):
  *
- * Each stored row is FIVE bits with bit 4 leftmost; row_bits() shifts it
+ *     brio::text<brio::Font5x7>(panel, 2, 2, "brio", 1, 0);
+ *
+ * The type is constexpr data: nothing to initialize, callable from any
+ * context. Its table is the largest datum gfx puts in an image, 672
+ * bytes of glyph rows (docs/design/gfx.md, "What it costs"), and the
+ * linker keeps it only in an image that names the font.
+ *
+ * Each stored row is five bits with bit 4 leftmost; row_bits() shifts it
  * into the cell, so bit 5 is the leftmost pixel and bit 0 is the advance
  * column, always background. Row seven is the line gap and is likewise
  * always background - which is what makes consecutive cells tile with no
  * seam and an opaque write erase the whole of what stood there.
  *
- * A character outside the range draws a HOLLOW BOX rather than nothing:
+ * A character outside the range draws a hollow box rather than nothing:
  * a hole that shows is worth more than a hole that hides.
  *
  * The glyphs are this file's own, drawn to be legible at this size
  * rather than to match any typeface; the whole set is rendered and
  * looked at as a golden image, because no reference renderer can judge
- * the shape of a letter (docs/design/gfx.md, the three planes of truth).
+ * the shape of a letter (docs/design/gfx.md, "The three planes of
+ * truth").
  */
 
 #pragma once

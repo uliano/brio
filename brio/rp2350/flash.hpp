@@ -1,78 +1,107 @@
 /*
  * flash.hpp
  *
- * THE EXTERNAL QUAD-SPI CHIP THE CORE EXECUTES OUT OF, and the two
+ * The external quad-SPI chip the core executes out of, and the two
  * blocks between it and the bus: the QMI (datasheet 12.14), which turns
  * a bus access into a serial transfer, and the XIP cache with its four
- * address aliases (4.4). Three things live here:
+ * address aliases (4.4). Both architectures execute in place (XIP): the
+ * code runs straight out of this chip through the cache, so a program
+ * that erases or programs it is writing the chip it runs from. A program
+ * uses this header to read the chip's identity, to erase and program it
+ * (most often through rp2350/nvm_flash.hpp's bounded band), to read it
+ * past the cache, or to ask what the memory interface was left
+ * configured for. The smallest use:
  *
- *  - `Qmi` and `QmiWindow<0|1>`, THE RESOURCE over 12.14. The QMI is
+ *     if (brio::Flash::init()) {
+ *         const auto id = brio::Flash::jedec_id();      // 9Fh
+ *     }
+ *
+ * Who calls what. Flash's operations that touch the chip - erase(),
+ * program(), command() and the reads over it (jedec_id(), unique_id(),
+ * status_register(), read_sfdp()) - each open a window: they run from
+ * SRAM with this core's interrupts masked for the whole operation and
+ * return when it is done (a sector erase is tens of milliseconds,
+ * measured in docs/rp2350/flash.md), and nothing here checks which
+ * context calls them; the raw command's waits on the QMI's flags inside
+ * its window carry no bound, and an erase or a program waits as long as
+ * the bootrom's function does. The other core and the DMA are the program's
+ * to keep off the flash meanwhile (below). Flash::init() and read() open
+ * no window: init() is lookups and a 256-byte copy, read() a copy
+ * through the cached alias. Storage: a program's source and a command's
+ * answer buffer are the caller's for the call alone and must lie outside
+ * the XIP space, which is refused. Qmi, QmiWindow and Xip are register
+ * verbs with no guard of their own; a change to the live interface
+ * belongs in `.ram_text` (QmiWindow's comment says which).
+ *
+ * Three things live here:
+ *
+ *  - `Qmi` and `QmiWindow<0|1>`, the resource over 12.14. The QMI is
  *    what replaces the RP2040's SSI, and it is not that peripheral
- *    renamed: it has TWO MEMORY WINDOWS of 16 MB, one per chip select,
- *    each with its own timing, its own read and write transfer FORMAT
+ *    renamed: it has two memory windows of 16 MB, one per chip select,
+ *    each with its own timing, its own read and write transfer format
  *    (prefix / address / suffix / dummy / data, every phase with its own
- *    bus width), its own command constants, and FOUR ADDRESS TRANSLATION
+ *    bus width), its own command constants, and four address translation
  *    panes that map a virtual 4 MB slice onto any 4 kB-aligned physical
- *    base. Beside the windows sits DIRECT MODE, a plain SPI FIFO pair
+ *    base. Beside the windows sits direct mode, a plain SPI FIFO pair
  *    that disconnects the memory windows for the duration - which is
  *    what a flash command needs and what makes a window of the operation
  *    below.
  *
- *  - `Xip`, THE CACHE (4.4.1): 16 kB, two-way, eight-byte lines. Where
- *    the RP2040 had one FLUSH register this chip has a MAINTENANCE
- *    ADDRESS WINDOW - one write per line, four operations and a fifth
- *    that PINS a line so it can be used as SRAM - and where the RP2040
+ *  - `Xip`, the cache (4.4.1): 16 kB, two-way, eight-byte lines. Where
+ *    the RP2040 had one FLUSH register this chip has a maintenance
+ *    address window - one write per line, four operations and a fifth
+ *    that pins a line so it can be used as SRAM - and where the RP2040
  *    had one enable this one has a pair (Secure and Non-secure) beside
  *    five more access controls. The two performance counters are the
  *    RP2040's. Erratum RP2350-E11 is answered in `clean_all()`: a clean
  *    by set/way rewrites the line's tag with the maintenance address, so
- *    the sweep is driven from an address whose tag falls OUTSIDE the
+ *    the sweep is driven from an address whose tag falls outside the
  *    QMI's half of the downstream space.
  *
- *  - `Flash`, THE ENGINE, over the bootrom's own flash functions (5.4):
- *    `erase`, `program` and a raw READ command, each a WINDOW with the
+ *  - `Flash`, the engine, over the bootrom's own flash functions (5.4):
+ *    `erase`, `program` and a raw read command, each a window with the
  *    memory interface disconnected. The functions are found by two-
  *    character code through rp2350/bootrom.hpp, which does the right
  *    lookup on either architecture, so this file names no address and
  *    asks the preprocessor nothing.
  *
- * THERE IS NO SECOND STAGE HERE. On the RP2040 the way back into
+ * There is no second stage here. On the RP2040 the way back into
  * execute-in-place after a flash operation was the image's own first 256
  * bytes, called as a function. This chip has no such stage: the bootrom
  * sets the interface up itself while scanning the flash, and leaves a
- * position-independent XIP SETUP FUNCTION in the first 256 bytes of boot
+ * position-independent XIP setup function in the first 256 bytes of boot
  * RAM (4.3, 5.2.7) that restores the mode and divisor it found. Boot RAM
  * is on the APB and is never executable, so `init()` copies those 256
  * bytes into SRAM once and the window calls the copy. What the mode
  * turns out to be is the board's, not this file's: on the bench board it
- * is the FIRST of 5.2.7's sixteen combinations, EBh quad-I/O at CLKDIV 3
+ * is the first of 5.2.7's sixteen combinations, EBh quad-I/O at CLKDIV 3
  * (docs/rp2350/flash.md), and no verb here rewrites it.
  *
- * AND THE WAY BACK IS NOT LOAD-BEARING FOR CORRECTNESS, which is the
+ * And the way back is not load-bearing for correctness, which is the
  * other half of the difference. 5.4.8.6 states it plainly: the ROM's
  * `flash_exit_xip()` leaves a basic 03h serial read mode set up as it
  * goes, and the program and erase functions do not leave XIP
- * inaccessible - so after a window the flash is READABLE whatever
- * happens, and the setup function only restores the FAST mode. This file
+ * inaccessible - so after a window the flash is readable whatever
+ * happens, and the setup function only restores the fast mode. This file
  * therefore has two ways back and says which it used
  * (`xip_restore_kind()`): the copied setup function when it validated,
  * and the ROM's own `flash_enter_cmd_xip()` when it did not.
  *
- * THE WINDOW, AND WHAT IT ASKS OF THE APPLICATION. While the QMI is in
+ * The window, and what it asks of the application. While the QMI is in
  * direct mode the memory windows are gone: an access to 0x1000_0000
  * returns a bus error (12.14.5, and 5.4.8.10 says the same of the
  * debugger and the other core). So every operation here runs from
  * `.ram_text` - an input section the linker script folds into .data, so
- * the crt copies it to SRAM with the initialized data - with INTERRUPTS
- * MASKED ON THIS CORE for its whole duration, a handler fetched from
+ * the crt copies it to SRAM with the initialized data - with interrupts
+ * masked on this core for its whole duration, a handler fetched from
  * flash being exactly the fault. Nothing here can enforce the rest, so
- * it is stated: THE OTHER CORE MUST NOT FETCH OR READ FLASH while a
+ * it is stated: the other core must not fetch or read flash while a
  * window is open (park it in SRAM or leave it where the bootrom did),
  * and no DMA channel may have the window as a source. A buffer of the
  * caller's that lies in the window is refused (`in_window`).
  *
- * WHAT IS SAVED ACROSS A WINDOW. The ROM's `connect_internal_flash()`
- * puts every QSPI pad control back to its RESET state, and its
+ * What is saved across a window. The ROM's `connect_internal_flash()`
+ * puts every QSPI pad control back to its reset state, and its
  * `flash_exit_xip()` rewrites the second window's timing, read format
  * and read command as well as the first's. Neither is this driver's to
  * lose: the six QSPI pad registers are snapshotted and written back, and
@@ -81,8 +110,8 @@
  * board can be. A program with a PSRAM on CS1 wants its own setup
  * function and does not have one here.
  *
- * THE RAW COMMAND VERB READS AND NOTHING ELSE. `command()` accepts an
- * ALLOW-LIST of opcodes (`FlashCommand`, all of them reads), refused by
+ * The raw command verb reads and nothing else. `command()` accepts an
+ * allow-list of opcodes (`FlashCommand`, all of them reads), refused by
  * static_assert where the opcode is a template argument and by a false
  * return where it is a value. No write enable, no status or
  * configuration register write, no erase or program opcode can travel
@@ -91,7 +120,7 @@
  * the erase and program paths that this file does offer go through the
  * bootrom's own bounds-checked functions instead.
  *
- * ADDRESSES ARE OFFSETS IN THE CHIP, from 0 - what the bootrom's
+ * Addresses are offsets in the chip, from 0 - what the bootrom's
  * functions take - and the aliases add their base where a pointer is
  * wanted. The image begins at offset 0; an erase that reaches it is the
  * application's to refuse, and rp2350/nvm_flash.hpp refuses it by its
@@ -1287,7 +1316,9 @@ struct FlashRom {
  * Every verb that opens a window costs the whole program the window's
  * duration, with this core's interrupts masked and the other core's
  * flash access forbidden. A `read()` costs nothing: it is a memcpy
- * through the cached alias.
+ * through the cached alias. The bounds checked here are the chip's
+ * alone, so an erase that reaches the running image is carried out;
+ * rp2350/nvm_flash.hpp's QspiFlash is the bounded band a program writes.
  */
 struct Flash {
     Flash() = delete;
@@ -1313,7 +1344,9 @@ struct Flash {
     /// Find the bootrom's flash functions and copy the XIP setup
     /// function. Every operation calls it itself; an application calls
     /// it to learn early. False when the ROM carries no table or a
-    /// function is missing from it.
+    /// function is missing from it. Opens no window and waits for
+    /// nothing; after a success the work is done, and a later call
+    /// answers at once (after a failure, each call looks again).
     static bool init() { return detail::FlashRom::ensure(); }
     static bool ready() { return detail::FlashRom::ready; }
 
@@ -1440,9 +1473,14 @@ struct Flash {
      * which is much faster and assumes the chip has that command; the
      * default asks for 20h and nothing else.
      *
-     * THE WINDOW IS OPEN FOR THE WHOLE RUN - one call, one window,
+     * The window is open for the whole run - one call, one window,
      * however many sectors - so bound it. The chapter does not say what
      * a sector erase costs; the suite measures it.
+     *
+     * False, and nothing sent, for a run that is empty, not whole
+     * sectors at a sector boundary, or past the chip's end, or when
+     * init() fails; true once the window has run. Returns when the erase
+     * is done, this core's interrupts masked meanwhile.
      */
     static bool erase(uint32_t addr, uint32_t bytes, FlashEraseGrain grain = FlashEraseGrain::sector) {
         if (bytes == 0u || (addr % sector_size) != 0u || (bytes % sector_size) != 0u ||
@@ -1468,6 +1506,11 @@ struct Flash {
      * A page programs ones to zeros only; a page programmed twice
      * between erases holds the AND of the two, which is the physics the
      * chapter does not state and the suite measures.
+     *
+     * False, and nothing sent, for a run that is empty, not whole pages
+     * at a page boundary, past the chip's end or in the XIP space, or
+     * when init() fails. `src` is read during the call and free when it
+     * returns.
      */
     static bool program(uint32_t addr, std::span<const uint8_t> src) {
         if (src.empty() || (addr % page_size) != 0u || (src.size() % page_size) != 0u ||
@@ -1488,7 +1531,7 @@ struct Flash {
      * as `rx` is long. The opcode and the head are sent with their
      * answers discarded, so `rx` begins at the first byte of the reply.
      *
-     * `opcode` MUST BE A READ (`flash_command_reads_only`), and this is
+     * `opcode` must be a read (`flash_command_reads_only`), and this is
      * the run-time face of that rule; `command<opcode>()` below is the
      * compile-time one. `head` is copied to the stack, so it may live
      * anywhere, and is capped at `max_command_head`; `rx` may be any
@@ -1514,7 +1557,7 @@ struct Flash {
     }
 
     /// The same, with the opcode as a template argument: an opcode that
-    /// is not one of `FlashCommand`'s reads is a COMPILE error here.
+    /// is not one of `FlashCommand`'s reads is a compile error here.
     template <uint8_t opcode>
     static bool command(std::span<const uint8_t> head, std::span<uint8_t> rx) {
         static_assert(flash_command_reads_only(opcode),
@@ -1523,7 +1566,8 @@ struct Flash {
         return command(opcode, head, rx);
     }
 
-    /// 9Fh: manufacturer, memory type, capacity.
+    /// 9Fh: manufacturer, memory type, capacity. A window like every
+    /// command; nothing when the command could not be sent.
     static std::optional<FlashJedecId> jedec_id() {
         uint8_t rx[3] = {};
         if (!command<FlashCommand::read_jedec_id>({}, rx)) {
@@ -1542,7 +1586,7 @@ struct Flash {
         return id;
     }
 
-    /// 05h / 35h / 15h: the three status registers, READ. `which` is
+    /// 05h / 35h / 15h: the three status registers, read. `which` is
     /// 1, 2 or 3; anything else is refused at compile time.
     template <uint8_t which>
     static std::optional<uint8_t> status_register() {
