@@ -32,14 +32,18 @@
  *  - the contract verbs (owns_*, configure, reset, control,
  *    control_data, in_done, out_done) are UsbDevice's, called inside its
  *    isr(); reset() is also called from main context, by start() before
- *    the pull-up rises and by stop() after it drops. reset() clears both
- *    rings and the flags with plain stores and masks nothing
- *    (util/ring.hpp's clear() is not concurrent), so it is safe only
- *    while the other context is quiet. From main context that is the
- *    caller's duty: no controller interrupt may run across start() or
- *    stop(). From isr() (a bus reset, a SET_CONFIGURATION) nothing
- *    keeps the program out of a transport verb meanwhile: the class
- *    does not guard that case. take_rx_edge() belongs in the
+ *    the pull-up rises and by stop() after it drops. reset() drops the
+ *    stack's side of the port - the configured flag, the packets armed,
+ *    the control lines - and TOUCHES NEITHER RING: the rings are the
+ *    program's, each index written by one party only (util/ring.hpp's
+ *    rule), and a clear from the handler would write the program's index
+ *    under a write_bulk() or a consume() in progress. So a bus reset, a
+ *    deconfiguration, stop() and start() lose only the one packet the
+ *    controller held (at most 64 bytes popped for it): what was queued
+ *    behind it leaves when the host configures the port again (configure()
+ *    hands the first packet over itself), and what was received stays
+ *    readable; a program that wants them emptied calls discard(), main
+ *    context, with the device stopped. take_rx_edge() belongs in the
  *    controller's vector, after Device::isr();
  *  - the byte transport is the program's, from main context: one
  *    producer of the transmit ring (write_byte, write_bulk, and print
@@ -132,7 +136,7 @@ class UsbCdcAcm {
     static_assert(ep_notify != 0u && ep_data != 0u && ep_notify != ep_data && ep_notify < 16u && ep_data < 16u,
                   "brio UsbCdcAcm: two endpoint numbers of 1..15, the notification's and the bulk pair's, distinct");
     static_assert(rx_size >= 2u * usb_full_speed_packet && tx_size >= usb_full_speed_packet,
-                  "brio UsbCdcAcm: the receive ring holds two packets at least, the transmit ring one");
+                  "brio UsbCdcAcm: rx_size is two packets of storage at least and tx_size one, each ring holding a byte less");
 
 public:
     constexpr UsbCdcAcm() = default;   // a tag for print(), like a Uart
@@ -177,9 +181,19 @@ public:
         outs_armed_ = 0;
         last_full_ = false;
         arm_out();
+        // Bytes a reset left queued (behind the packet it took, or pushed
+        // in the moment between write_byte's check of configured_ and its
+        // push) leave from here: the ISR side owns the transmit ring's
+        // consumer index and nothing is in flight.
+        if (!m_tx.empty()) {
+            send_packet();
+        }
         return true;
     }
 
+    /// The stack's side dropped, the rings untouched (the file header):
+    /// from isr() at a bus reset or a deconfiguration, from start() and
+    /// stop() in main context.
     static void reset() {
         configured_ = false;
         in_armed_ = false;
@@ -188,8 +202,6 @@ public:
         last_full_ = false;
         dtr_ = false;
         rts_ = false;
-        m_rx.clear();
-        m_tx.clear();
     }
 
     static UsbControlAnswer control(const UsbSetup& s) {
@@ -346,9 +358,8 @@ public:
     /// never wrapping - the receive ring's consumer half under the ring's
     /// own names. With consume() it is util/stream.hpp's SpanSource,
     /// which SerialPort drains a run at a time. The span stays valid until
-    /// the next consume() or read_byte(), or until reset() empties the
-    /// ring - from isr() at a bus reset or a SET_CONFIGURATION, or from
-    /// start() or stop().
+    /// the next consume() or read_byte(): nothing on the stack's side
+    /// moves the receive ring's consumer index, a bus reset included.
     static std::span<const uint8_t> read_span() { return m_rx.read_span(); }
 
     /// Release the first `count` bytes of read_span(), oldest first, clamped
@@ -362,6 +373,17 @@ public:
             typename P::CriticalSection cs;
             arm_out();
         }
+    }
+
+    /// Both rings emptied, the program's choice and the one write of both
+    /// indices of a ring (util/ring.hpp's clear() is not concurrent): main
+    /// context, with the controller's handler kept out - the device
+    /// stopped (UsbDevice::stop(), the pull-up down, so no configuration
+    /// can arrive and kick the queue) or its line masked. Nothing else
+    /// ever empties them: not a bus reset, not stop() or start().
+    static void discard() {
+        m_rx.clear();
+        m_tx.clear();
     }
 
     static constexpr uint32_t rx_capacity() { return Ring<uint8_t, rx_size, P>::capacity(); }
@@ -393,12 +415,13 @@ public:
 
     // ---- readbacks ---------------------------------------------------------------------
     // configured() is true from the host's SET_CONFIGURATION to the next
-    // bus reset, deconfiguration or UsbDevice::stop(). Each of those
-    // empties both rings (reset()), the bytes queued in them lost, and
-    // so does a SET_CONFIGURATION repeated while configured (the stack
-    // resets the classes before configuring them again), after which
-    // configured() is true again; dtr() and rts() are the control line
-    // state the host last set.
+    // bus reset, deconfiguration or UsbDevice::stop(), and across a
+    // SET_CONFIGURATION repeated while configured (the stack resets the
+    // class and configures it again). Each of those loses the one packet
+    // the controller held and no byte of either ring (the file header):
+    // tx_idle() stays false over the queued bytes until a host takes
+    // them; dtr() and rts() are the control line state the host last set,
+    // false again after each.
     static bool configured() { return configured_; }
     static bool dtr() { return dtr_; }
     static bool rts() { return rts_; }

@@ -173,8 +173,15 @@
 //      draining on every edge, the last edge against BUSY falling,
 //      signed; the engine's edge is harvest() asked from the tick, its
 //      owner's poll. Then the receive time-out probed under the engine
-//      (UARTRIS read raw after ten frames of silence), and the copy into
-//      the ring: write_bulk's byte loop against the runtime's memcpy.
+//      (UARTRIS read raw after ten frames of silence), the copy into
+//      the ring: write_bulk's byte loop against the runtime's memcpy,
+//      and uart.harvest: THE MASKED WINDOW of harvest() on the ruler
+//      around the one call, best of 8, in its three states - quiet
+//      (nothing landed), partial (16 bytes published) and ended (the
+//      run filled with the DMA line masked, so the owed completion is
+//      served, the run published and the channel re-armed inside the
+//      window); the `stopwatch` line of letter r is the floor inside
+//      each. The tick's own harvest() is held off meanwhile.
 //   i  THE I2C HOST ABOVE THE WIRE (dw_apb_i2c/i2c.hpp over rp2040/i2c.hpp)
 //      against THE DESK PARTNER: I2C1 on GP2 (SDA) / GP3 (SCL), the pair's I2C
 //      wires to the WeAct RP2350B, which runs `twi_peer` and is commanded over
@@ -1110,6 +1117,7 @@ using RxEngined = Uart<1, loop_pins, 512, 256, LoopTx, LoopRx, HotPath>;
 
 enum class LoopMode : uint8_t { none, tx_plain, tx_engined, rx_plain, rx_engined };
 volatile LoopMode loop_mode = LoopMode::none;   // read by the vectors
+volatile bool tick_harvest = true;              // the tick's harvest() under the receive engine, held off by uart.harvest
 volatile uint32_t edge_at = 0;                  // the ruler at the last edge a vector reported
 volatile uint32_t edge_count = 0;
 
@@ -1319,6 +1327,121 @@ void run_uart_edge(const char* op, LoopMode mode, uint32_t baud) {
           " isr=- rate=- wire=- x=-", crlf);
 }
 
+/// uart.harvest: THE MASKED WINDOW of harvest() (pl011/uart.hpp), whose
+/// guard covers the whole verb, read on the ruler around the one call
+/// (the guard's own instructions inside it) in the three states the verb
+/// meets, each the best of 8:
+///   quiet    the run filling and nothing landed since the last look -
+///            the owner's poll from a tick, the common call;
+///   partial  16 bytes landed in the run: published (index arithmetic,
+///            no copy);
+///   ended    the run filled with the DMA line masked in the NVIC, so its
+///            completion stands owed: served here, the run published, the
+///            channel re-armed - all under the mask, the longest the
+///            window gets. The run is the ring's free run from the last
+///            re-arm (511 bytes after init, then whatever is contiguous
+///            to the storage's end), fed to its end minus a tail with the
+///            line live and drained as it fills, then the tail as ONE
+///            block (the transmit engine needs no completion for a block
+///            to leave) with the line masked.
+/// Beside each window what the call did: the bytes it published and
+/// whether the engine was idle before it and busy after (the re-arm).
+void run_harvest_window() {
+    constexpr uint32_t baud = 1'000'000u;
+    drain();
+    if (!loop_up<RxEngined>(LoopMode::rx_engined, baud, true)) {
+        print(serial, "  uart.harvest: init refused at ", baud, crlf);
+        return;
+    }
+    const uint32_t frame = SysClock::hz / (baud / 10u);
+    const uint32_t budget = 4096u * frame;
+    uint8_t got[512];
+    // The tick's own harvest() held off: it would meet an ended run first
+    // and leave this verb a quiet one to measure (it did, before this).
+    tick_harvest = false;
+    const auto settle = [&] {
+        Stopwatch<Ruler> sw;
+        sw.start();
+        while (!RxEngined::tx_idle() && sw.elapsed() < budget) {
+        }
+        const uint32_t t = Ruler::now();
+        while (Ruler::now() - t < 2u * frame) {
+        }
+    };
+    // The window on the ruler, then the ring drained: with the line's
+    // handler out of the picture (no completion fires in the quiet and the
+    // partial states, and the line is masked in the ended one) what the
+    // drain returns is what the call published.
+    const auto window = [&](uint32_t& best, uint32_t& published) {
+        const uint32_t t0 = Ruler::now();
+        (void)RxEngined::harvest();
+        const uint32_t t1 = Ruler::now();
+        published = RxEngined::read_bulk(got);
+        best = t1 - t0 < best ? t1 - t0 : best;
+    };
+    uint32_t quiet = 0xFFFFFFFFu, partial = 0xFFFFFFFFu, ended = 0xFFFFFFFFu;
+    uint32_t published = 0;
+    uint32_t quiet_published = 0, partial_published = 0, ended_published = 0;
+    uint32_t idle_before = 0, busy_after = 0, runs_ended = 0;
+    for (uint8_t i = 0; i < 8u; ++i) {
+        window(quiet, published);
+        quiet_published += published;
+    }
+    for (uint8_t i = 0; i < 8u; ++i) {
+        (void)RxEngined::write_bulk(payload_bytes(0, 16));
+        settle();
+        window(partial, published);
+        partial_published += published;
+    }
+    for (uint8_t i = 0; i < 8u; ++i) {
+        // What the running run still takes, fed to a tail of at most 200
+        // with the line live, then the tail as one block under the mask.
+        const uint32_t remaining = LoopRx::capacity() - LoopRx::taken();
+        uint32_t fed = 0;
+        const uint32_t live = remaining > 200u ? remaining - 200u : 0u;
+        while (fed < live) {
+            const uint32_t chunk = live - fed > 255u ? 255u : live - fed;
+            fed += RxEngined::write_bulk(payload_bytes(fed, chunk));
+            settle();
+            (void)RxEngined::harvest();
+            (void)RxEngined::read_bulk(got);
+        }
+        const uint32_t tail = remaining - live;
+        Nvic::disable(DmaLine<0>::irq());
+        uint32_t sent = 0;
+        while (sent < tail) {
+            sent += RxEngined::write_bulk(payload_bytes(0, tail - sent));
+        }
+        // tx_idle() needs the block's completion served, and the line is
+        // masked: wait on the wire instead, the tail's frames and two more.
+        const uint32_t t = Ruler::now();
+        while (Ruler::now() - t < (tail + 2u) * frame) {
+        }
+        if (LoopRx::idle()) {
+            ++idle_before;
+        }
+        window(ended, published);
+        ended_published += published;
+        if (!LoopRx::idle()) {
+            ++busy_after;
+        }
+        if (published == tail) {
+            ++runs_ended;
+        }
+        Nvic::enable(DmaLine<0>::irq());
+    }
+    tick_harvest = true;
+    loop_down<RxEngined>();
+    print(serial, "  uart.harvest: the masked window of harvest(), best of 8 - quiet ", quiet,
+          " cycles (", quiet_published, " bytes published over the 8), partial ", partial, " (",
+          partial_published, "), ended ", ended, " (", ended_published, "; the engine idle before ",
+          idle_before, " of 8, busy after ", busy_after, ", the run's tail published whole ", runs_ended,
+          ")", crlf);
+    print(serial, "bench uart.harvest.quiet n=0 wall=", quiet, " busy=- irq=- isr=- rate=- wire=- x=-", crlf);
+    print(serial, "bench uart.harvest.partial n=16 wall=", partial, " busy=- irq=- isr=- rate=- wire=- x=-", crlf);
+    print(serial, "bench uart.harvest.ended n=0 wall=", ended, " busy=- irq=- isr=- rate=- wire=- x=-", crlf);
+}
+
 /// THE QUESTION THE ENGINE'S EDGE STANDS ON: does the receive time-out
 /// rise while a channel keeps the FIFO empty? 17 bytes under the receive
 /// engine, then ten frames of silence: UARTRIS read raw (RTRIS, RXRIS),
@@ -1432,6 +1555,7 @@ void tu_uart() {
     }
     probe_rt_under_engine(115200u);
     probe_rt_under_engine(1'000'000u);
+    run_harvest_window();
     bench.verdict("ran", true);
 }
 
@@ -1875,7 +1999,7 @@ extern "C" void isr_systick() {
     // vector ends a burst on this block (pl011/uart.hpp's dma_isr()), so
     // the burst edge of letter u's engined op is harvest() asked once a
     // tick.
-    if (loop_mode == LoopMode::rx_engined && RxEngined::harvest()) {
+    if (loop_mode == LoopMode::rx_engined && tick_harvest && RxEngined::harvest()) {
         edge_at = Ruler::now();
         edge_count = edge_count + 1u;
     }

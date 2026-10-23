@@ -1095,7 +1095,13 @@ public:
      * context, the receive ring's consumer side. Because it shares the
      * ring's producer side with dma_isr(), it takes the family's Guard
      * for its whole body: the owed completion's service(), the publish
-     * and the re-arm, the DMA channel programmed under the mask.
+     * and the re-arm, the DMA channel programmed under the mask. The
+     * body is a bounded straight line - no loop, no copy, no spin: the
+     * channel's state read, the count's arithmetic, the re-arm's register
+     * writes (start() aborts only a running channel, and a run is
+     * re-armed once it has ended) - so the window is a fixed figure of
+     * the family's, measured on its bench and stated on its page
+     * (docs/rp2040/uart.md, "Bench findings").
      */
     static bool harvest() {
         if constexpr (!has_rx_engine) {

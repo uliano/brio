@@ -391,7 +391,17 @@ holds bytes an ended block already sent. A receive engine fills the
 ring's free run and is re-armed when it has ended, by the line's handler
 or by `harvest()` - whose guard, unlike the transmit side's, covers the
 whole verb: the completion the line still owes served, the publish, and
-the re-arm, so the receive channel is programmed under the mask.
+the re-arm, so the receive channel is programmed under the mask. The
+whole verb is a bounded straight line - a read of the channel's state,
+the count's arithmetic, five register writes for the re-arm, no loop, no
+copy and no spin (the abort that waits for a busy channel is not on
+this path: a run is re-armed only once it has ended) - and the mask is
+kept over all of it because the three acts must be one against the
+line's handler: a completion served in two halves would send the
+handler to re-arm over the run `harvest()` has just begun. Its length
+is a family figure, read on the family's bench and stated on its page
+([../rp2040/uart.md](../rp2040/uart.md), "Bench findings": under two
+microseconds at the longest on that chip).
 
 What the transport asks of an engine, so a family's engines are written
 to it: `present`, `channel`, `arm(data, request, high_priority)` - the

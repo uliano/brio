@@ -367,6 +367,17 @@ extern "C" void isr_uart0() {
   `UARTRIS.RTRIS` never rose (17 bytes and ten frames of silence: the
   FIFO empty, every byte moved), so the engine's burst edge is its
   owner's poll - 2.4 frames at 115200 to 43 at 1 Mbaud on a 1 ms tick.
+- THE MASKED WINDOW OF `harvest()` (the same letter, the ruler read
+  around the one call, best of 8; the ruler's own `stopwatch` floor, 41
+  cycles, is inside each figure): 151 cycles with nothing landed - the
+  owner's poll from a tick -, 175 with 16 bytes published, 263 when the
+  run has filled with the DMA line masked, so the verb serves the owed
+  completion, publishes the run and re-arms the channel inside the
+  window: about 1.8 us at 125 MHz at the longest, the whole verb being a
+  straight line with no loop and no spin
+  ([../pl011/README.md](../pl011/README.md), "The engine slots"). For
+  scale, the interrupt receiver's own entry for a FIFO level costs 46
+  cycles a byte, 16 bytes a level.
 - THE TRANSMIT SIDE through the same letter: 4096 bytes in 145 refills
   at 25 cycles a byte (27 before), wire-bound (x 1.00) to UARTCLK / 16 =
   7.8125 Mbaud; through the transmit engine in 40 to 47 blocks, about 3

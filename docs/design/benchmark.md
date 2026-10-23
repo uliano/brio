@@ -410,7 +410,10 @@ receive path with a consumer draining it, `uart.edge` the cycles from
 the burst's last stop bit to the edge leaving the handler (the
 contract's "within two frame times", [serial.md](serial.md)), at
 115200 and up to the loop's top rate, every vector bound plain (as an
-application binds it), counted and metered; `tx_idle()` timed on the
+application binds it), counted and metered; where the transport has a
+receive engine, `uart.harvest` the masked window of the owner's publish
+verb in its three states (nothing landed, a part of the run published,
+the run ended and re-armed inside the window); `tx_idle()` timed on the
 pad by the family's serial suite; the vendor's receive (its library,
 or the data sheet's sequence where none exists) on the same board in a
 scratch program. `x` is read on the plain binding; the core's share is

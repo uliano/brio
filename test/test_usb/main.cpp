@@ -103,6 +103,7 @@ bool control_write(const UsbSetup& s, std::span<const uint8_t> data = {}) {
 void fresh() {
     SimUsb::clear();
     Device::stop();
+    Cdc::discard();   // the rings outlive a stop (the class's rule): a case starts them empty by hand
     Device::start();
     SimUsb::host_reset();
     Device::isr();
@@ -451,12 +452,95 @@ TEST_CASE("unconfigured, the transport refuses bytes; a bus reset unconfigures a
     CHECK(Device::address() == 0u);
     CHECK(SimUsb::address == 0u);
     CHECK(!Cdc::configured());
-    CHECK(Cdc::tx_idle());
+    CHECK(Cdc::tx_idle());   // 'x' had been popped for the packet the reset took: nothing is queued
     (void)control_read(get_descriptor(UsbDescriptorType::device, 0, 64));
     REQUIRE(control_write({0x00, UsbRequest::set_address, 9, 0, 0}));
     REQUIRE(control_write({0x00, UsbRequest::set_configuration, 1, 0, 0}));
     CHECK(Device::configured());
     CHECK(Device::address() == 9u);
+}
+
+TEST_CASE("a bus reset loses the packet in flight and no byte of either ring: the queue leaves at the next configuration, the received bytes stay readable") {
+    enumerate();
+    // 'x' goes into the packet in flight; 70 more queue behind it.
+    REQUIRE(Cdc::write_byte('x'));
+    std::vector<uint8_t> run(70);
+    for (uint32_t i = 0; i < 70u; ++i) {
+        run[i] = static_cast<uint8_t>(0x30u + i);
+    }
+    REQUIRE(Cdc::write_bulk(run) == 70u);
+    CHECK(!Cdc::tx_idle());
+    // 64 bytes from the host, 10 of them read.
+    std::vector<uint8_t> packet(64);
+    for (uint32_t i = 0; i < 64u; ++i) {
+        packet[i] = static_cast<uint8_t>(0x80u + i);
+    }
+    REQUIRE(SimUsb::host_out(2, packet));
+    Device::isr();
+    uint8_t b = 0;
+    for (uint32_t i = 0; i < 10u; ++i) {
+        REQUIRE(Cdc::read_byte(b));
+        CHECK(b == static_cast<uint8_t>(0x80u + i));
+    }
+    const std::span<const uint8_t> lent = Cdc::read_span();
+    REQUIRE(lent.size() == 54u);
+
+    SimUsb::host_reset();
+    Device::isr();
+    CHECK(!Cdc::configured());
+    CHECK(!SimUsb::in_offered(2));   // the controller's packet ('x') is gone with the endpoint
+    CHECK(!Cdc::tx_idle());          // the 70 queued behind it are still queued
+    CHECK(Cdc::read_span().size() == 54u);   // the span lent before the reset still stands
+    CHECK(Cdc::read_span().data() == lent.data());
+    CHECK(!Cdc::dtr());
+
+    // The host enumerates again: the queue is offered as soon as the port
+    // is configured, 64 bytes and then 6, no write needed.
+    (void)control_read(get_descriptor(UsbDescriptorType::device, 0, 64));
+    REQUIRE(control_write({0x00, UsbRequest::set_address, 9, 0, 0}));
+    REQUIRE(control_write({0x00, UsbRequest::set_configuration, 1, 0, 0}));
+    CHECK(Cdc::configured());
+    CHECK(SimUsb::in_offered(2));
+    auto p = SimUsb::host_in(2);
+    REQUIRE(p.has_value());
+    REQUIRE(p->size() == 64u);
+    CHECK((*p)[0] == 0x30u);
+    CHECK((*p)[63] == 0x30u + 63u);
+    Device::isr();
+    p = SimUsb::host_in(2);
+    REQUIRE(p.has_value());
+    REQUIRE(p->size() == 6u);
+    CHECK((*p)[5] == 0x30u + 69u);
+    Device::isr();
+    CHECK(Cdc::tx_idle());
+    // The received bytes read on, in order, across the reset.
+    for (uint32_t i = 10; i < 64u; ++i) {
+        REQUIRE(Cdc::read_byte(b));
+        CHECK(b == static_cast<uint8_t>(0x80u + i));
+    }
+    CHECK(!Cdc::read_byte(b));
+    // stop() then start() keep the queue too: 'y' in the controller's
+    // packet is lost with the endpoint, 'z' queued behind it is offered
+    // alone at the next configuration.
+    REQUIRE(Cdc::write_byte('y'));
+    REQUIRE(Cdc::write_byte('z'));
+    CHECK(SimUsb::in_offered(2));
+    Device::stop();
+    CHECK(!SimUsb::pulled_up);
+    CHECK(!Cdc::configured());
+    CHECK(!Cdc::tx_idle());
+    Device::start();
+    SimUsb::host_reset();
+    Device::isr();
+    (void)control_read(get_descriptor(UsbDescriptorType::device, 0, 64));
+    REQUIRE(control_write({0x00, UsbRequest::set_address, 3, 0, 0}));
+    REQUIRE(control_write({0x00, UsbRequest::set_configuration, 1, 0, 0}));
+    p = SimUsb::host_in(2);
+    REQUIRE(p.has_value());
+    REQUIRE(p->size() == 1u);
+    CHECK((*p)[0] == 'z');
+    Device::isr();
+    CHECK(Cdc::tx_idle());
 }
 
 TEST_CASE("the standard odds and ends: status, endpoint halt through the feature requests, interface, unknown request") {

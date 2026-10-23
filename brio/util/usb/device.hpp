@@ -105,7 +105,11 @@
  * verbs (the file header of usb/cdc.hpp is the model): the interfaces it
  * owns, the descriptor bytes the app appends to the configuration,
  * `configure()` (the host chose the configuration: claim the endpoints
- * and arm them), `reset()`, `control(setup)` for the class requests
+ * and arm them), `reset()` (the stack's side of the class dropped - its
+ * endpoints are gone -, called inside isr() at a bus reset and a
+ * deconfiguration and from main context by start() and stop(), so it
+ * writes nothing the program's verbs may be writing), `control(setup)`
+ * for the class requests
  * aimed at its interfaces, `control_data` for the bytes a receive
  * brought, and `in_done` / `out_done` for its own endpoints' packets.
  * `UsbDevice` asks each class whether an interface or an endpoint is

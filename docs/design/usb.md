@@ -92,7 +92,11 @@ controller brio runs is full speed.
 A type with static functions: the interfaces it owns, the descriptor
 bytes the application glues after `usb_configuration_head`,
 `configure()` when the host chooses the configuration (claim the
-endpoints, arm them), `reset()`, `control(setup)` for the class
+endpoints, arm them), `reset()` (the stack's side of the class dropped,
+its endpoints gone: at a bus reset and a deconfiguration inside the
+controller's handler, and from main context when the device starts and
+stops - so it writes nothing a program's verb may be writing at the
+same moment), `control(setup)` for the class
 requests aimed at its interfaces (an answer of SEND, RECEIVE, ACK or
 STALL), `control_data` for the bytes a RECEIVE brought, `in_done` /
 `out_done` for its endpoints' packets. A device lists its classes as
@@ -105,7 +109,14 @@ the host needs no driver for, with `write_byte` and `write_bulk`,
 UART, so a console or a `SerialPort` runs over the chip's own
 connector unchanged. Its flow control is USB's own: the OUT endpoint
 is re-armed only while a whole packet fits in the receive ring, and
-the host NAKs meanwhile, losing no byte. The line coding and the
+the host NAKs meanwhile, losing no byte. The two rings are the
+program's: a bus reset or a deconfiguration loses the one packet the
+controller held (at most 64 bytes) and no byte of either ring - what
+was queued leaves when the host configures the port again, what was
+received stays readable - because each ring's indices are written by
+one party each, and a clear from the handler would break that rule
+under a write or a read in progress; a program that wants them emptied
+calls `discard()` itself, with the device stopped. The line coding and the
 control line state are received and reported, not obeyed: a virtual
 port has no baud rate.
 
