@@ -11614,7 +11614,8 @@ document and every header of the seven target strata the cloud did not
 and four documents, the headers of `brio/host/` and the IP strata's
 documents with their headers. Not reached:
 
-1. The vendor pages' links (`docs/<target>/vendor/README.md`).
+1. (closed) The vendor pages' links: the nine `docs/<target>/vendor/
+   README.md` pages checked, 49 links, every one resolving; prose clean.
 2. The operational pages' cells the local batches found stale, listed
    under each batch's open facts: `docs/rp2040/README.md`'s
    `Rp2040Platform<TB>`, `docs/ch32v00x/README.md`'s prologue figure
