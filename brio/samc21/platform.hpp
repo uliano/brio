@@ -3,7 +3,9 @@
  *
  * SAM C21 (Cortex-M0+) implementation of the brio Platform concept - the
  * one header of this stratum the kernel templates are instantiated with.
- * Apps select it by including it and passing SamPlatform along.
+ * Apps select it by including it and passing SamPlatform along - or
+ * SamRubatoPlatform, the same platform with the three members of a
+ * preemptive one, under the Rubato kernel (below).
  *
  * CriticalSection is samc21/nvic.hpp's InterruptGuard: save PRIMASK,
  * cpsid i, restore on scope exit. Nesting-correct, and the CMSIS
@@ -32,6 +34,7 @@
 #include "kernel/platform.hpp"
 #include "samc21/nvic.hpp"
 #include "samc21/ticker.hpp"
+#include "cortexm/schedule.hpp"
 
 namespace brio {
 
@@ -139,5 +142,74 @@ private:
 };
 
 static_assert(Platform<SamPlatform>);
+
+/**
+ * SamRubatoPlatform: the platform a Rubato kernel runs on
+ * (kernel/rubato.hpp), the preemptive one. It is SamPlatform whole - the
+ * same critical section, idle() through PM.SLEEPCFG with its erratum
+ * guard, timebase, breakpoint and panic storage - plus the three members
+ * kernel/platform.hpp's Preemptive concept asks for:
+ *
+ *     using P = brio::SamRubatoPlatform;
+ *     using K = brio::Rubato<P, Sensor, Logger>;
+ *     extern "C" [[gnu::naked]] void PendSV_Handler() { brio::scheduler_exception<K>(); }
+ *     extern "C" [[gnu::naked]] void SVCall_Handler() { brio::scheduler_return(); }
+ *     int main() { ...; brio::scheduler_init(); brio::enable_interrupts(); K::run(); }
+ *
+ *  - `preemptive`, true;
+ *  - `ceiling`, the byte the kernel keeps: the pack index of the object
+ *    being dispatched, 255 at the loop's base. A static of the platform,
+ *    so of the program: one kernel per platform type, which on this
+ *    single-core family is one kernel;
+ *  - `pend_schedule()`, the request for the scheduler, which is the core's
+ *    and not Microchip's: cortexm/schedule.hpp's PendSV, at the lowest
+ *    priority this core implements (the fourth of the Cortex-M0+'s four
+ *    levels - `__NVIC_PRIO_BITS` is 2 in the device header - the byte
+ *    0xC0), below every NVIC line at its reset priority 0, which no
+ *    header of this stratum changes. PendSV returns into the scheduler in
+ *    thread mode, and the scheduler leaves through SVC; that file says
+ *    how, with the frames it builds and the stack each level of
+ *    preemption costs (a basic frame always: this core has no FPU).
+ *
+ * Not a template, as SamPlatform is not: this family has one kernel
+ * timebase, the SysTick `Ticker` (samc21/ticker.hpp).
+ *
+ * THE SVC VECTOR IS SPELLED `SVCall_Handler` HERE. The crt
+ * (samc21/src/glue/startup_samc21.cpp) names the core exceptions the way
+ * the device header declares them, so entry 11 of the table is
+ * SVCall_Handler, not the CMSIS-classic SVC_Handler of the other
+ * Cortex-M families. A program that defines SVC_Handler instead compiles
+ * and links, and the scheduler's first exit then lands in the crt's
+ * Default_Handler, a silent spin.
+ *
+ * The CriticalSection is still PRIMASK alone - ARMv6-M has nothing finer
+ * - and the promise that an interrupt handler is not interrupted by
+ * another keeps its meaning for the peripheral handlers, which still
+ * share one priority and never nest among themselves; the scheduler's
+ * exception sits below them all, and they do interrupt it. A request
+ * made with PRIMASK set is taken when the mask lifts, so a post inside a
+ * critical section serves its receiver when the section ends. The idle
+ * path is Tenuto's: Rubato's idle_if_empty() masks, finds every queue
+ * empty and calls idle() above, whose WFI takes the mode PM.SLEEPCFG
+ * holds; the interrupt that ends it runs at the unmask, and its post
+ * pends PendSV, which the core takes at that handler's exit. A program
+ * on this platform binds two vectors more than a Tenuto program,
+ * PendSV_Handler and SVCall_Handler (the crt's weak aliases), both
+ * naked, executes no `svc` of its own, and calls scheduler_init() before
+ * it enables interrupts.
+ */
+struct SamRubatoPlatform : SamPlatform {
+    static constexpr bool preemptive = true;
+
+    /// The index of the object being dispatched; 255 at the loop's base.
+    static inline uint8_t ceiling = 255;
+
+    /// The request for the scheduler (cortexm/schedule.hpp).
+    [[gnu::always_inline]] static void pend_schedule() { request_scheduler(); }
+};
+
+static_assert(Platform<SamRubatoPlatform>);
+static_assert(Preemptive<SamRubatoPlatform>);
+static_assert(!Preemptive<SamPlatform>);
 
 } // namespace brio

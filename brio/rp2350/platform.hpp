@@ -58,6 +58,7 @@
 
 #include "kernel/platform.hpp"
 #include "rp2350/multicore.hpp"
+#include "rp2350/schedule.hpp"
 #include "rp2350/ticker.hpp"
 
 namespace brio {
@@ -157,5 +158,70 @@ private:
 
 static_assert(Platform<Rp2350Platform<>>);
 static_assert(Platform<Rp2350Platform<1>>);
+
+/**
+ * Rp2350RubatoPlatform<core, TB>: the platform a Rubato kernel runs on
+ * (kernel/rubato.hpp), the preemptive one. It is Rp2350Platform<core, TB>
+ * whole - the same critical section, idle, timebase, breakpoint, panic
+ * storage, core identity and doorbell - plus the three members
+ * kernel/platform.hpp's Preemptive concept asks for, and the same text on
+ * both processor architectures:
+ *
+ *     using P = brio::Rp2350RubatoPlatform<>;
+ *     using K = brio::Rubato<P, Sensor, Logger>;
+ *     BRIO_RP2350_SCHEDULER_VECTORS(K)
+ *     int main() { ...; brio::scheduler_init(); brio::enable_interrupts(); K::run(); }
+ *
+ *  - `preemptive`, true;
+ *  - `ceiling`, the byte the kernel keeps: the pack index of the object
+ *    being dispatched, 255 at the loop's base. A static of the platform
+ *    type, so of the core;
+ *  - `pend_schedule()`, the request for the scheduler (rp2350/
+ *    schedule.hpp): on the Cortex-M33 the core stratum's PendSV at the
+ *    lowest of the core's sixteen levels (0xF0, below every NVIC line at
+ *    its reset priority 0), returning into the scheduler in thread mode,
+ *    the scheduler leaving through SVC; on Hazard3 the machine software
+ *    interrupt, the SIO flag of the asking hart, through the crt's
+ *    trampoline into the scheduler's entry, which leaves by an `mret` of
+ *    its own. Both files say how, with the stack each level costs.
+ *
+ * The CriticalSection is still PRIMASK on one half and mstatus.MIE on the
+ * other, and the promise that an interrupt handler is not interrupted by
+ * another keeps its meaning: on the Cortex-M33 the peripheral lines share
+ * one priority and the scheduler's exception sits below them all; on
+ * Hazard3 no handler ever runs with MIE set, and the scheduler runs
+ * outside every trap. A request made with the mask set is taken when the
+ * mask lifts, so a post inside a critical section serves its receiver
+ * when the section ends. A program on this platform binds the
+ * scheduler's vectors (the macro above: two on one half, one on the
+ * other), executes no `svc` of its own on the Cortex-M33 and leaves
+ * mscratch alone on Hazard3, and calls scheduler_init() before it
+ * enables interrupts.
+ *
+ * CORE 0 ONLY. Both crts give the two cores of a pair one table, so a
+ * second Rubato on core 1 would enter the same scheduler vectors with a
+ * second kernel to serve; which kernel a vector serves is the two-kernel
+ * question the RP2040 shares, and until it is answered core 1 runs
+ * Tenuto (rp2350/multicore.hpp).
+ */
+template <uint8_t core_index = 0, class TB = CoreTicker<core_index>>
+struct Rp2350RubatoPlatform : Rp2350Platform<core_index, TB> {
+    static_assert(core_index == 0u,
+                  "brio Rp2350RubatoPlatform: a Rubato kernel runs on core 0 alone - both cores "
+                  "of a pair enter one table of scheduler vectors, and the two-kernel body is not "
+                  "written (rp2350/schedule.hpp)");
+
+    static constexpr bool preemptive = true;
+
+    /// The index of the object being dispatched; 255 at the loop's base.
+    static inline uint8_t ceiling = 255;
+
+    /// The request for the scheduler (rp2350/schedule.hpp).
+    [[gnu::always_inline]] static void pend_schedule() { request_scheduler(); }
+};
+
+static_assert(Platform<Rp2350RubatoPlatform<>>);
+static_assert(Preemptive<Rp2350RubatoPlatform<>>);
+static_assert(!Preemptive<Rp2350Platform<>>);
 
 } // namespace brio

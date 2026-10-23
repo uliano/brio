@@ -37,6 +37,9 @@
  *
  * core_id() reads SIO's CPUID: the core that is running, whatever the
  * platform type says it should be.
+ *
+ * Rp2040RubatoPlatform<core_index, TB>, at the end of this file, is the
+ * same platform for the preemptive kernel, Rubato: one per core, as here.
  */
 
 #pragma once
@@ -49,6 +52,7 @@
 #include "rp2040/multicore.hpp"
 #include "rp2040/nvic.hpp"
 #include "rp2040/ticker.hpp"
+#include "cortexm/schedule.hpp"
 
 namespace brio {
 
@@ -172,5 +176,103 @@ private:
 
 static_assert(Platform<Rp2040Platform<>>);
 static_assert(Platform<Rp2040Platform<1>>);
+
+/**
+ * Rp2040RubatoPlatform<core_index, TB>: the platform a Rubato kernel runs
+ * on (kernel/rubato.hpp), the preemptive one, for one core. It is
+ * Rp2040Platform<core_index, TB> whole - the same critical section, idle,
+ * sleep hook, timebase, breakpoint, panic storage, core identity and
+ * doorbell - plus the three members kernel/platform.hpp's Preemptive
+ * concept asks for:
+ *
+ *  - `preemptive`, true;
+ *  - `ceiling`, the byte the kernel keeps: the pack index of the object
+ *    being dispatched, 255 at the loop's base. A static of the platform
+ *    type, and the type is the core, so each core has its own ceiling
+ *    and the two never meet;
+ *  - `pend_schedule()`, the request for the scheduler, which is the core's
+ *    and not Raspberry Pi's: cortexm/schedule.hpp's PendSV, pended in the
+ *    ICSR of the core that asks and taken by that core, at the lowest of
+ *    the Cortex-M0+'s four levels (the byte 0xC0), below every NVIC line
+ *    at its reset priority 0 - and asked only from the platform's own
+ *    core, so that a post from the other core, which the queue refuses,
+ *    pends nothing (the member's comment). PendSV returns into the
+ *    scheduler in thread mode, and the scheduler leaves through SVC; that
+ *    file says how, with the frames it builds (always basic: this core
+ *    has no FPU).
+ *
+ * WHAT THIS CHIP ADDS: ONE VECTOR TABLE FOR TWO CORES. Core 1 is launched
+ * with core 0's VTOR (rp2040/multicore.hpp), so `isr_pendsv` and
+ * `isr_svcall` are one entry each for both cores. A program with one
+ * Rubato, on core 0, core 1 under Tenuto or not launched, binds them as
+ * every Cortex-M program does - core 1 never pends PendSV: a Tenuto
+ * kernel never asks, and a post of core 1's to an object of core 0 is
+ * refused by the queue and asks nothing (pend_schedule() below):
+ *
+ *     using P = brio::Rp2040RubatoPlatform<>;
+ *     using K = brio::Rubato<P, Sensor, Logger>;
+ *     extern "C" [[gnu::naked]] void isr_pendsv() { brio::scheduler_exception<K>(); }
+ *     extern "C" [[gnu::naked]] void isr_svcall() { brio::scheduler_return(); }
+ *     int main() { ...; brio::scheduler_init(); brio::enable_interrupts(); K::run(); }
+ *
+ * A program with a Rubato on each core binds PendSV to the body that asks
+ * which core took it, rp2040/schedule.hpp's scheduler_exception_pair<K0,
+ * K1>(), and each core calls scheduler_init() itself, before it enables
+ * its interrupts (PendSV's priority is a register of each core); the SVC
+ * body serves both cores as it is. Which of two ways a two-kernel program
+ * should take - that body, or a vector table per core - is an open
+ * decision, rp2040/schedule.hpp's header states both with their costs.
+ *
+ * The CriticalSection is still PRIMASK alone, per core: the peripheral
+ * handlers still share one priority and never nest among themselves; the
+ * scheduler's exception sits below them all, and they interrupt it. A
+ * request made with PRIMASK set is taken when the mask lifts, so a post
+ * inside a critical section serves its receiver when the section ends. A
+ * post from the other core is a send through the inbox (util/inbox.hpp),
+ * whose doorbell handler posts locally: road 1 on the receiving core,
+ * taken at that handler's exit. A program on this platform executes no
+ * `svc` of its own.
+ */
+template <uint8_t core_index = 0, class TB = CoreTicker<core_index>>
+struct Rp2040RubatoPlatform : Rp2040Platform<core_index, TB> {
+    static constexpr bool preemptive = true;
+
+    /// The index of the object being dispatched on this core; 255 at the
+    /// loop's base.
+    static inline uint8_t ceiling = 255;
+
+    /// The request for the scheduler, made only when the calling core is
+    /// this platform's. post() asks after the queue's push whenever the
+    /// receiver's index is below this ceiling, and a post from the other
+    /// core is a mispost the push has already refused and counted
+    /// (kernel/event_queue.hpp); asking then would pend the posting
+    /// core's PendSV, and with the single body bound - a Rubato on core
+    /// 0, core 1 under Tenuto - PendSV taken on core 1 would run core 0's
+    /// kernel there, one kernel on two cores. Asked from here only on its
+    /// own core, a mispost stays what the queue made it: a count.
+    ///
+    /// The body is cortexm/schedule.hpp's request_scheduler() - PENDSVSET,
+    /// then the DSB and the ISB, in a call the compiler cannot see into,
+    /// for the reason that function gives - with SIO's CPUID compared
+    /// first, inside the same opaque call: written as a test around a
+    /// call of request_scheduler(), GCC 16 at -Os splits the test into a
+    /// helper of its own, and the asking path pays a second call, a
+    /// frame and its return around the test, 16 cycles in all by the
+    /// release listing, where the test alone costs five here (the
+    /// CPUID's address built and loaded over the IO port, the compare,
+    /// the branch: table 81 of the datasheet).
+    [[gnu::noinline, gnu::noipa]] static void pend_schedule() {
+        if (SIO->CPUID == core_index) {
+            SCB->ICSR = SCB_ICSR_PENDSVSET_Msk;   // every other ICSR bit written 0: no effect
+            __DSB();
+            __ISB();
+        }
+    }
+};
+
+static_assert(Platform<Rp2040RubatoPlatform<>>);
+static_assert(Preemptive<Rp2040RubatoPlatform<>>);
+static_assert(Preemptive<Rp2040RubatoPlatform<1>>);
+static_assert(!Preemptive<Rp2040Platform<>>);
 
 } // namespace brio

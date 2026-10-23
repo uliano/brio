@@ -64,8 +64,10 @@ architectures.
   exception frame and returns through it into `scheduler_thread<K>()`,
   which runs the kernel's `activate()` in thread mode with PendSV no
   longer active, so an interrupt's post preempts a dispatch at any
-  depth; `scheduler_return()`, the body bound to `SVC_Handler`, steps
-  over the SVC's frame and returns into the real one. The frames, the
+  depth; `scheduler_return()`, the body bound to `SVC_Handler`
+  (`SVCall_Handler` on the SAM C21, whose crt names the core exceptions
+  as its device header does), steps over the SVC's frame and returns
+  into the real one. The frames, the
   FPU's lazy context and EXC_RETURN's bits are the header's account.
   The assembly is the ARMv6-M subset, so one source serves the M0+, the
   M4 and the M33: run on the STM32F4's Cortex-M4 (`stm32f4/platform.hpp`'s
@@ -74,9 +76,25 @@ architectures.
   STM32G0's Cortex-M0+ (`stm32g0/platform.hpp`'s
   `Stm32g0RubatoPlatform`, measured on the Nucleo-G0B1RE - PendSV at
   0xC0, the frames basic, a request under PRIMASK served at the unmask,
-  [../stm32g0/platform.md](../stm32g0/platform.md)), compiled by the
-  family fixtures of the SAM C21, the RP2040 and the RP2350's Arm half
-  and not yet run there.
+  [../stm32g0/platform.md](../stm32g0/platform.md)); taken by three
+  more platforms, each compiled with its bench suite and not yet run:
+  the SAM C21's Cortex-M0+ (`samc21/platform.hpp`'s `SamRubatoPlatform`,
+  [../samc21/platform.md](../samc21/platform.md)), the RP2040's
+  (`rp2040/platform.hpp`'s `Rp2040RubatoPlatform`, one per core, each
+  core pending and taking its own PendSV, the one vector table's entry
+  bound to `rp2040/schedule.hpp`'s pair body when both cores run the
+  kernel, [../rp2040/platform.md](../rp2040/platform.md)) and the
+  RP2350's Cortex-M33 (`rp2350/platform.hpp`'s `Rp2350RubatoPlatform`;
+  the ARMv8-M facts it rests on are checked against the documents there,
+  [../rp2350/platform.md](../rp2350/platform.md): EXC_RETURN's security
+  bits (ES, DCRS and S, all 1 in the Secure state the image runs in) are
+  carried unchanged from the value PendSV entered with, MSPLIM is zeroed
+  by that family's crt, and PRI_14's write lands on the core's four bits
+  as 0xF0; one fact is in question - the header's lazy FP context save
+  assumes FPCCR.ASPEN and LSPEN at 1, the architecture's reset value,
+  while the RP2350's own register table gives both a reset value of 0,
+  so the suite's FPU letter reads the register before it judges
+  anything).
 
 ## Why the stratum exists
 

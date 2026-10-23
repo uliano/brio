@@ -105,6 +105,23 @@ A panic on either core reboots the chip through `ResetReporter`
 (rp2040/reset.hpp), and core 0 reads both breadcrumbs at the next
 boot: `take_panic_record<P0>()` and `take_panic_record<P1>()`.
 
+Under the preemptive kernel, Rubato, on either core or both
+(`Rp2040RubatoPlatform<core>`, [platform.md](platform.md)), the bridge
+is unchanged and a crossing is an interrupt like any other on the core
+it reaches: the doorbell's handler drains the inbox into local posts,
+a post to an object above that core's ceiling pends that core's PendSV,
+and the receiver's dispatch starts at the handler's exit over whatever
+dispatch the doorbell interrupted there - road 1 on the receiving core,
+the sending core's ceiling never consulted. With a Rubato on each core
+the one PendSV entry of the shared vector table takes
+`rp2040/schedule.hpp`'s `scheduler_exception_pair<K0, K1>()`, which
+reads SIO's CPUID and returns into the scheduler of the core that took
+it; a vector table per core is the other way, not built
+([platform.md](platform.md), "How to use it"). Neither is bench-verified
+yet: `test_rp2040_rubato`'s letters `j` and `k` are what would measure
+the crossing's latency into a preempting dispatch and the two
+schedulers at once.
+
 ## Bench findings
 
 All from `test_rp2040_multicore`, green on the Pico and the WeAct

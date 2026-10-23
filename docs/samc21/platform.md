@@ -5,7 +5,9 @@ Cortex-M0+ processor summary ch. 4 with ARM's ARMv6-M ARM behind it,
 PM (power manager) ch. 19 - and errata DS80000740S (1.8.13, 1.8.14,
 1.8.7 and 1.8.5 all touch this chapter; see "What the silicon does").
 Drivers: `samc21/platform.hpp` (`SamPlatform`, this target's
-realization of the kernel's `Platform` concept), `samc21/nvic.hpp`
+realization of the kernel's `Platform` concept, and
+`SamRubatoPlatform`, the same platform for the preemptive kernel over
+the core stratum's `cortexm/schedule.hpp`), `samc21/nvic.hpp`
 and `samc21/ticker.hpp` (this family's includes of the core stratum's
 `cortexm/nvic.hpp` - `InterruptGuard`, `Nvic` - and
 `cortexm/ticker.hpp` - `BasicTicker` - plus the SAM's own
@@ -17,7 +19,9 @@ target-independent power model above the last of these is
 startup_samc21.cpp` + `samc21/ld/samc21j18a.ld` in the build project.
 The bench suites are `test_samc_platform` (the idle hook and the
 kernel's turn, the waking half and `delay_us`), `test_samc_sleep` (the
-stopping half) and `test_samc_timebase` (the standby-surviving site).
+stopping half) and `test_samc_timebase` (the standby-surviving site);
+`test_samc_rubato`, the preemptive platform's, is built and has not
+run (the end of "Not covered yet").
 
 These are one story - how a program on this silicon runs one event at
 a time, waits, keeps time and stops - told across one stratum header
@@ -154,6 +158,33 @@ ticker; `ticks_per_second` = 1000; `atomic_width` = 4 (an aligned
 word moves in one access - what lets `util/ring.hpp` take its
 lock-free path here); `panic_record()` lives in `.noinit`.
 
+**`SamRubatoPlatform`** (samc21/platform.hpp) is `SamPlatform` whole
+plus the three members of a preemptive platform, the one the
+preemptive kernel `Rubato` runs on
+([design/kernel.md](../design/kernel.md), "Rubato"): `preemptive`,
+`ceiling` (the index of the object being dispatched, 255 at the loop's
+base) and `pend_schedule()`, which is `cortexm/schedule.hpp`'s request:
+PendSV pended, at the lowest of the core's four levels (the byte 0xC0),
+below every NVIC line at its reset priority 0, which no header of this
+stratum changes. PendSV returns into the scheduler in thread mode and
+the scheduler leaves through SVC, so a program on this platform binds
+two vectors more than a Tenuto one, both naked: `PendSV_Handler` to
+`scheduler_exception<K>()` and `SVCall_Handler` to `scheduler_return()`.
+**The SVC vector is `SVCall_Handler` here**, the crt's name for entry 11
+because it is the device header's, and not the `SVC_Handler` of the
+other Cortex-M families: a program that defines `SVC_Handler` instead
+compiles and links, and the scheduler's first exit then lands in the
+crt's `Default_Handler`, a silent spin. The program calls
+`scheduler_init()` before it enables interrupts and executes no `svc`
+of its own. The type is not a template, as `SamPlatform` is not: the
+family has one kernel timebase, the SysTick `Ticker`. The critical
+section stays PRIMASK, a post made inside one serves its receiver when
+the section ends, and the peripheral handlers still never nest among
+themselves. The idle path is Tenuto's: `idle_if_empty()` masks, finds
+every queue empty and calls `idle()`, whose WFI takes the mode
+PM.SLEEPCFG holds; the interrupt that ends it runs at the unmask, and
+its post pends PendSV, which the core takes at that handler's exit.
+
 **`BasicTicker<tps>`** (ticker.hpp): monostate over SysTick. The rate
 must divide 1000 exactly - `millis()` is then EXACT, ticks times a
 constant, with none of the AVR's skip-correction - and `Ticker` is
@@ -261,6 +292,28 @@ int main() {
     brio::Ticker::init(clock);
     brio::enable_interrupts();
     brio::Tenuto<P, /* AOs */>::run();
+}
+```
+
+The same program under the preemptive kernel: the platform type, the
+two naked vectors and one call more.
+
+```cpp
+#include "kernel/rubato.hpp"
+
+using P = brio::SamRubatoPlatform;
+using K = brio::Rubato<P, Sensor, Logger>;   // Sensor preempts Logger
+
+extern "C" void SysTick_Handler() { brio::Ticker::tick(); }
+extern "C" [[gnu::naked]] void PendSV_Handler() { brio::scheduler_exception<K>(); }
+extern "C" [[gnu::naked]] void SVCall_Handler() { brio::scheduler_return(); }
+
+int main() {
+    SysClock::init();
+    brio::Ticker::init(clock);
+    brio::scheduler_init();         // PendSV at the lowest priority
+    brio::enable_interrupts();
+    K::run();
 }
 ```
 
@@ -841,3 +894,38 @@ Implemented but not bench-verified:
 - **Sleeping under a debugger.** 19.5.6 says the power domains are not
   turned off then; everything here was measured with C_DEBUGEN
   cleared, and the debug-attached behaviour is trusted to the chapter.
+- **The preemptive platform, `SamRubatoPlatform`.** Compiled by the
+  family fixture on the E, G and J headers (`test/family_samc21/
+  rubato.cpp`, with the negative that refuses Rubato on `SamPlatform`)
+  and by its suite, `test_samc_rubato`, built for the SAMC21J18A board
+  and not yet run on it; running it is the measurement. Every bound the
+  suite judges is derived in its source from the release listing and
+  the Cortex-M0+'s cycle table, every flash line paid at its worst
+  alignment. Its letters, in the order `z` runs them:
+  - a: the ceiling and road 1 at depth 1 - a TC4 interrupt's post runs
+    High to its end inside Low's dispatch, every handler reading its
+    own index;
+  - b: road 2 - Low posts to Mid and Mid to High, each served inside
+    the post that asked, High's post to Low served after Low's own
+    dispatch;
+  - c: the latency of road 1, the interrupt handler's last statement to
+    the preempting dispatch's first, over 100 events;
+  - d: the ruler's own cost (SysTick's composed `cycles()`) and its
+    count across four tick reloads; the scan of four empty queues; a
+    post that asks nothing and one that runs its receiver inside it;
+  - e: road 1 at depth 2, over a dispatch started by either road;
+  - f: three time events matured in one turn served in priority order,
+    the armed list whole under a preemption inside `arm()` and
+    `disarm()`, the cost of one `arm()`;
+  - g: a post made under PRIMASK served when the section ends, from the
+    Console's dispatch and from inside Low's;
+  - w: THE IDLE PATH'S OPEN QUESTION - whether a PendSV pending at the
+    idle's WFI ends it as a pending NVIC line does ("The idle path,
+    measured" measures the line), in IDLE0 and IDLE2: the receiver
+    served before the next tick says it does. STANDBY is not walked: its
+    tick is held off across the WFI by the erratum guard, and a WFI the
+    request did not end would have no wake at all;
+  - i: dark - every object idle, no time event armed, TC4's line quiet,
+    the LED's pad not an output, interrupts enabled;
+  - h: the stack's high-water mark for the suite's deepest chain against
+    the deepest stack pointer the dispatches and the interrupt sampled.
