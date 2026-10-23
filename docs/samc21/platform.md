@@ -19,9 +19,8 @@ target-independent power model above the last of these is
 startup_samc21.cpp` + `samc21/ld/samc21j18a.ld` in the build project.
 The bench suites are `test_samc_platform` (the idle hook and the
 kernel's turn, the waking half and `delay_us`), `test_samc_sleep` (the
-stopping half) and `test_samc_timebase` (the standby-surviving site);
-`test_samc_rubato`, the preemptive platform's, is built and has not
-run (the end of "Not covered yet").
+stopping half), `test_samc_timebase` (the standby-surviving site) and
+`test_samc_rubato` (the preemptive platform, "Bench findings").
 
 These are one story - how a program on this silicon runs one event at
 a time, waits, keeps time and stops - told across one stratum header
@@ -183,7 +182,9 @@ the section ends, and the peripheral handlers still never nest among
 themselves. The idle path is Tenuto's: `idle_if_empty()` masks, finds
 every queue empty and calls `idle()`, whose WFI takes the mode
 PM.SLEEPCFG holds; the interrupt that ends it runs at the unmask, and
-its post pends PendSV, which the core takes at that handler's exit.
+its post pends PendSV, which the core takes at that handler's exit. A
+PendSV already pending when the WFI executes ends it as a pending NVIC
+line does, in IDLE0 and IDLE2 (measured, "Bench findings").
 
 **`BasicTicker<tps>`** (ticker.hpp): monostate over SysTick. The rate
 must divide 1000 exactly - `millis()` is then EXACT, ticks times a
@@ -439,6 +440,62 @@ Stopping:
   once, between the two halves of the first (the order 1, 3, 2); less
   urgent, or at the same level, it waits for the first to return (1, 2,
   3). Every line of every other letter runs at the reset default, 0.
+
+**The preemptive kernel** - the reference suite is `test_samc_rubato`
+(42 verdicts in `z`, ten runs of `z` alike): a Rubato pack of five
+objects on `SamRubatoPlatform` on the SAMC21J18A at 48 MHz, the Console
+the lowest and the letters' runner, TC4's compare match the interrupt
+the road-1 letters land, nothing wired and nothing lit. The ruler is the
+kernel ticker's composed `BasicTicker::cycles()` (SysTick's position and
+the tick count; ARMv6-M has no cycle counter): two back-to-back reads
+are 48 cycles apart, a cost taken off every span below, and across four
+tick reloads it reads 4 x 48000 cycles within 7. CPU cycles, each figure
+within the bound its letter derives from the release listing and the
+Cortex-M0+'s cycle table with every flash line paid at its worst
+alignment; an event a kernel tick landed in is told apart by the tick
+count read around it and reported, and the bound judges the events
+nothing lengthened:
+
+- **The ceiling, both roads** (letters a, b, e): an interrupt's post to
+  High inside Low's handler runs High to its end before Low resumes,
+  every handler reading its own index as the ceiling and the base's 255
+  in the UART's interrupt; Low posting to Mid and Mid to High nests High
+  inside Mid inside Low, each inside the post that asked; at depth 2 an
+  interrupt over High's handler, started by either road, runs Top before
+  High resumes, Top's first statement 205 to 206 cycles after the
+  handler's last.
+- **The latency of road 1** (letter c): from the interrupt handler's
+  last statement to High's handler's first, 239 cycles min, 240 median,
+  283 max over 100 events, none missed, every event slower than the
+  path's own count one a kernel tick landed in.
+- **The post** (letter d): a post that asks for nothing 107 cycles; a
+  post that runs High's empty dispatch inside it 693, the scheduling's
+  share 586.
+- **Time events under preemption** (letter f): three timers matured in
+  one turn are posted with the ceiling held at 0 and served High, Mid,
+  Low; High preempting Low's loop of `arm()` and `disarm()` by road 1
+  leaves the list whole, every timer due fired once, the disarmed one
+  never; one `arm()` 126 cycles with its masked window inside.
+- **The request under PRIMASK** (letter g, the core having no FPU to
+  test): a post to a higher object inside a critical section pends
+  PendSV and is served when the section's guard restores the mask,
+  before the statement after it, from the Console's dispatch and from
+  inside Low's; the section's last statement to the receiver's first
+  278 to 279 cycles.
+- **The request pending at the idle's WFI** (letter w): with interrupts
+  masked as the kernel's idle path masks them, a post to Mid pends
+  PendSV and the platform's own `idle()` follows. **A pending PendSV
+  ends the WFI, in IDLE0 and in IDLE2**: Mid served at the unmask,
+  before the next tick, in 10 of 10 runs in each mode, 289 to 290 cycles
+  from the stamp before `idle()` to Mid's first statement; the letter
+  hands PM.SLEEPCFG back at IDLE0. STANDBY is not walked (the end of
+  "Not covered yet").
+- **Dark** (letter i): every object idle, no time event armed, TC4's
+  line quiet, PB23 (the LED's pad) not an output, the ceiling the
+  Console's, interrupts enabled.
+- **The stack** (letter h): 596 bytes of high-water for the suite's
+  deepest chain, the deepest sampled stack pointer at 496 bytes in a
+  dispatch and 408 in the interrupt.
 
 ## The idle path, measured
 
@@ -894,38 +951,9 @@ Implemented but not bench-verified:
 - **Sleeping under a debugger.** 19.5.6 says the power domains are not
   turned off then; everything here was measured with C_DEBUGEN
   cleared, and the debug-attached behaviour is trusted to the chapter.
-- **The preemptive platform, `SamRubatoPlatform`.** Compiled by the
-  family fixture on the E, G and J headers (`test/family_samc21/
-  rubato.cpp`, with the negative that refuses Rubato on `SamPlatform`)
-  and by its suite, `test_samc_rubato`, built for the SAMC21J18A board
-  and not yet run on it; running it is the measurement. Every bound the
-  suite judges is derived in its source from the release listing and
-  the Cortex-M0+'s cycle table, every flash line paid at its worst
-  alignment. Its letters, in the order `z` runs them:
-  - a: the ceiling and road 1 at depth 1 - a TC4 interrupt's post runs
-    High to its end inside Low's dispatch, every handler reading its
-    own index;
-  - b: road 2 - Low posts to Mid and Mid to High, each served inside
-    the post that asked, High's post to Low served after Low's own
-    dispatch;
-  - c: the latency of road 1, the interrupt handler's last statement to
-    the preempting dispatch's first, over 100 events;
-  - d: the ruler's own cost (SysTick's composed `cycles()`) and its
-    count across four tick reloads; the scan of four empty queues; a
-    post that asks nothing and one that runs its receiver inside it;
-  - e: road 1 at depth 2, over a dispatch started by either road;
-  - f: three time events matured in one turn served in priority order,
-    the armed list whole under a preemption inside `arm()` and
-    `disarm()`, the cost of one `arm()`;
-  - g: a post made under PRIMASK served when the section ends, from the
-    Console's dispatch and from inside Low's;
-  - w: THE IDLE PATH'S OPEN QUESTION - whether a PendSV pending at the
-    idle's WFI ends it as a pending NVIC line does ("The idle path,
-    measured" measures the line), in IDLE0 and IDLE2: the receiver
-    served before the next tick says it does. STANDBY is not walked: its
-    tick is held off across the WFI by the erratum guard, and a WFI the
-    request did not end would have no wake at all;
-  - i: dark - every object idle, no time event armed, TC4's line quiet,
-    the LED's pad not an output, interrupts enabled;
-  - h: the stack's high-water mark for the suite's deepest chain against
-    the deepest stack pointer the dispatches and the interrupt sampled.
+- **A PendSV pending at a STANDBY WFI.** Letter w walks IDLE0 and
+  IDLE2 only: in STANDBY the tick's interrupt is held off across the WFI
+  by erratum 1.8.13's guard, so a WFI the request did not end would have
+  no wake at all. Measured by the same leg in STANDBY with the RTC's
+  compare armed as a rescue, the receiver served before the rescue
+  saying the request ended the sleep.

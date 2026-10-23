@@ -165,6 +165,7 @@
 #include "rp2350/core.hpp"
 #include "rp2350/pin.hpp"
 #include "rp2350/platform.hpp"
+#include "rp2350/flash.hpp"
 #include "rp2350/schedule.hpp"
 #include "rp2350/ticker.hpp"
 #include "rp2350/timer.hpp"
@@ -533,6 +534,7 @@ void tb_road2() {
 // =============================================================================
 constexpr uint32_t latency_events = 100;
 uint32_t latency[latency_events];
+bool lengthened[latency_events];   ///< per event: a tick, a refill or the console line inside
 
 void sort(uint32_t* v, uint32_t n) {
     for (uint32_t i = 1; i < n; ++i) {
@@ -602,6 +604,28 @@ void sort(uint32_t* v, uint32_t n) {
 constexpr uint32_t latency_count = per_half(145u, 182u);
 constexpr uint32_t latency_bound = per_half(232u, 289u);
 
+/// The XIP cache's misses so far (both halves read the same counters):
+/// a refill between two reads of a span is read as letter c reads a tick.
+uint32_t xip_misses() { return Xip::accesses() - Xip::hits(); }
+
+/// The console line's handler entries so far: on Hazard3 the external
+/// trap serves every pending line before its mret (3.8.6.1's meinext), so
+/// a console byte's interrupt pending beside the alarm's lengthens the
+/// alarm handler's trap by that handler, and on both halves a handler
+/// landing on the path lengthens it; read around an event as the tick is.
+volatile uint32_t uart_interrupts = 0;
+
+/// Everything that can lengthen a measured path without being part of it,
+/// read before and after: a kernel tick, an XIP refill, the console line.
+struct Lengtheners {
+    uint32_t ticks, misses, uart;
+    static Lengtheners now() { return {Ticker::ticks(), xip_misses(), uart_interrupts}; }
+    bool moved() const {
+        const Lengtheners n = now();
+        return n.ticks != ticks || n.misses != misses || n.uart != uart;
+    }
+};
+
 void tc_latency() {
     reset_scenario();
     tracing = false;
@@ -609,28 +633,43 @@ void tc_latency() {
     // at most 1 ms for High's first statement.
     console_drain();
     uint32_t missed = 0;
-    // An event slower than the path's own count is one a tick landed in:
-    // the kernel tick read around each says so.
+    // An event slower than the path's own count is one a tick landed in,
+    // or an XIP refill (the suite is larger than the cache's share a run
+    // keeps warm): the kernel tick and the cache's miss counter read
+    // around each say so.
     uint32_t slow = 0;
     uint32_t slow_ticked = 0;
     for (uint32_t i = 0; i <= latency_events; ++i) {
         const uint32_t r = High::runs;
-        const uint32_t t0 = Ticker::ticks();
+        const Lengtheners before = Lengtheners::now();
         edge_to = 1;
         edge_in(400u);
         if (!wait_runs(High::runs, r, one_ms)) {
             ++missed;
             flush();
         }
-        const bool ticked = Ticker::ticks() != t0;
+        const bool ticked = before.moved();
         if (i > 0u) {
-            const uint32_t d = High::entered - edge_last;
-            latency[i - 1u] = d;
-            if (d > latency_count) {
-                ++slow;
-                if (ticked) {
-                    ++slow_ticked;
-                }
+            latency[i - 1u] = High::entered - edge_last;
+            lengthened[i - 1u] = ticked;
+        }
+    }
+    // The events that something lengthened are told apart from the
+    // fastest, not from the model's count: the count is a cost model of
+    // the listing (the Hazard3's measured 5 cycles under its fastest
+    // event, the Cortex-M33's exact), and a transfer's cost in that model
+    // is uncertain by a cycle or two, so an event within the fastest plus
+    // 18 (nine taken transfers at two) is the path itself and one beyond
+    // that had something else in it.
+    uint32_t lo_raw = 0xFFFF'FFFFu;
+    for (uint32_t i = 0; i < latency_events; ++i) {
+        lo_raw = latency[i] < lo_raw ? latency[i] : lo_raw;
+    }
+    for (uint32_t i = 0; i < latency_events; ++i) {
+        if (latency[i] > lo_raw + 18u) {
+            ++slow;
+            if (lengthened[i]) {
+                ++slow_ticked;
             }
         }
     }
@@ -643,10 +682,11 @@ void tc_latency() {
           " events (", missed, " missed); the three slowest ", latency[latency_events - 3u],
           " ", latency[latency_events - 2u], " ", hi, crlf);
     print(serial, "  the path's count ", latency_count, " cycles, its bound ", latency_bound,
-          "; events over the count: ", slow, ", a kernel tick inside ", slow_ticked, " of them",
-          crlf);
+          "; events over the fastest + 18: ", slow, ", a kernel tick, an XIP refill or the "
+          "console line's handler inside ", slow_ticked, " of them", crlf);
     bench.verdict("every interrupt's post started High within 1 ms", missed == 0u);
-    bench.verdict("every event over the path's own count had a tick land in it",
+    bench.verdict("every event over the fastest + 18 had a tick, a cache refill or the console "
+                  "line's handler in it",
                   slow == slow_ticked);
     bench.verdict("the latency stays under the path's bound (the arithmetic beside it)",
                   hi <= latency_bound);
@@ -695,18 +735,42 @@ void td_scan() {
     // The two rulers over spans of 1.0 to 1.06 ms (a SysTick reload
     // crossed on the Cortex-M33), each pair of reads taken back to back in
     // the same order.
+    // Each pair under the platform's mask, so no handler lands between
+    // its two reads, and the cache's miss counter read around each pair:
+    // a refill inside a pair skews it by the line's cost (measured on the
+    // Hazard3 half: a span so lengthened 110 cycles off against the
+    // others' 0 to 1), so such a span is reported and left out of the
+    // bound, which judges the clean ones.
     uint32_t agree_hi = 0;
+    uint8_t spans_clean = 0;
+    uint32_t diffs[4];
+    bool clean[4];
     for (int i = 0; i < 4; ++i) {
-        const uint32_t c0 = core_cycles();
-        const uint32_t r0 = Ruler::now();
+        uint32_t c0, r0, c1, r1;
+        const uint32_t m0 = xip_misses();
+        {
+            P::CriticalSection cs;
+            c0 = core_cycles();
+            r0 = Ruler::now();
+        }
+        const uint32_t m1 = xip_misses();
         spin(one_ms + 3000u * static_cast<uint32_t>(i));
-        const uint32_t c1 = core_cycles();
-        const uint32_t r1 = Ruler::now();
+        const uint32_t m2 = xip_misses();
+        {
+            P::CriticalSection cs;
+            c1 = core_cycles();
+            r1 = Ruler::now();
+        }
+        const uint32_t m3 = xip_misses();
         const uint32_t dc = c1 - c0;
         const uint32_t dr = r1 - r0;
-        const uint32_t diff = dc > dr ? dc - dr : dr - dc;
-        if (diff > agree_hi) {
-            agree_hi = diff;
+        diffs[i] = dc > dr ? dc - dr : dr - dc;
+        clean[i] = m1 == m0 && m3 == m2;
+        if (clean[i]) {
+            ++spans_clean;
+            if (diffs[i] > agree_hi) {
+                agree_hi = diffs[i];
+            }
         }
     }
 #if !defined(BRIO_RP2350_CORE_M33)
@@ -751,8 +815,10 @@ void td_scan() {
     print(serial, "  the ruler's two reads (TIMER1 on clk_sys) ", ruler, " cycles; the core's ",
           hazard3 ? "mcycle" : "ticker's composed cycles()", " two reads ", core_ruler,
           " cycles", crlf);
-    print(serial, "  over 1.00..1.06 ms the two rulers differ by at most ", agree_hi, " cycles",
-          crlf);
+    print(serial, "  over 1.00..1.06 ms the two rulers differ by ", diffs[0], clean[0] ? "" : "*",
+          " ", diffs[1], clean[1] ? "" : "*", " ", diffs[2], clean[2] ? "" : "*", " ", diffs[3],
+          clean[3] ? "" : "*", " cycles (* a cache refill inside a pair of reads); at most ",
+          agree_hi, " on the ", spans_clean, " clean spans", crlf);
     print(serial, "  activate() with nothing ready below the Console: ", scan, "..", scan_hi,
           " cycles (four empty queues, the fifth at the ceiling)", crlf);
     print(serial, "  from Mid: a post to Low (asks nothing) ", quiet,
@@ -764,9 +830,10 @@ void td_scan() {
     // composed read's loop when a reload falls between its reads - twice
     // the slower two-read cost, and the ruler's own on top.
     const uint32_t slower = ruler > core_ruler ? ruler : core_ruler;
-    bench.verdict("the two rulers agree over the span within twice the slower two-read cost and "
-                  "the ruler's (both count clk_sys)",
-                  agree_hi <= 2u * slower + ruler);
+    bench.verdict("the two rulers agree within twice the slower two-read cost and the ruler's "
+                  "over every span whose pairs missed no cache line, at least one (both count "
+                  "clk_sys)",
+                  spans_clean != 0u && agree_hi <= 2u * slower + ruler);
     // The bounds below are the release listing's count under the file
     // header's cost model, and a fifth of it as the margin.
     // The scan, the call to the stamp after it included. The Cortex-M33:
@@ -841,6 +908,9 @@ void te_depth2() {
         uint8_t alike = 0;
         uint32_t least = 0xFFFF'FFFFu;
         uint32_t most = 0;
+        uint32_t most_clean = 0;   ///< the longest run no tick and no refill lengthened
+        uint8_t slow = 0;          ///< runs over the bound
+        uint8_t explained = 0;     ///< of them, with a tick or a refill inside
         for (int run = 0; run < 10; ++run) {
             reset_scenario();
             High::action = [](uint8_t) {
@@ -851,6 +921,10 @@ void te_depth2() {
                 note('H', 'r');
             };
             const uint32_t r = High::runs;
+            // A kernel tick or an XIP refill landing between the edge and
+            // Top's first statement lengthens the run: both are read as
+            // letter c reads them, and such a run is explained, not judged.
+            const Lengtheners before = Lengtheners::now();
             if (road == 2) {
                 post<High>(Hit{1});
             } else {
@@ -860,12 +934,22 @@ void te_depth2() {
                     flush();
                 }
             }
+            const bool lengthened = before.moved();
             const uint32_t d = Top::entered - edge_last;
             if (d < least) {
                 least = d;
             }
             if (d > most) {
                 most = d;
+            }
+            if (!lengthened && d > most_clean) {
+                most_clean = d;
+            }
+            if (d > depth2_bound) {
+                ++slow;
+                if (lengthened) {
+                    ++explained;
+                }
             }
             if (trace_is(want)) {
                 ++alike;
@@ -875,15 +959,17 @@ void te_depth2() {
         }
         print(serial, "  High started by road ", road, ": ", alike, " of 10 runs traced ", want,
               "; Top's first statement ", least, "..", most,
-              " cycles after the interrupt's last (bound ", depth2_bound, ")", crlf);
+              " cycles after the interrupt's last (bound ", depth2_bound, "); runs over it ",
+              slow, ", a kernel tick or an XIP refill inside ", explained, crlf);
         bench.verdict(road == 2 ? "road 1 at depth 2 (High by road 2): Top runs before High "
                                   "resumes (10 runs)"
                                 : "road 1 at depth 2 (High by road 1): Top runs before High "
                                   "resumes (10 runs)",
                       alike == 10u);
         bench.verdict("and Top's first statement within its bound of the interrupt's last "
-                      "(the arithmetic beside it)",
-                      most <= depth2_bound);
+                      "(the arithmetic beside it) in every run nothing lengthened, every "
+                      "lengthened one with a tick or a refill inside",
+                      most_clean <= depth2_bound && slow == explained);
     }
     reset_scenario();
 }
@@ -1108,16 +1194,37 @@ void tg_mask() {
     const char* const want_low = "Ls3 Lm3 Lp3 Hs1 He1 La3 Le3";
     uint8_t alike_console = 0;
     uint8_t alike_low = 0;
+    constexpr uint32_t section_bound = per_half(208u, 206u);   // derived below the loop
     uint32_t least = 0xFFFF'FFFFu;
     uint32_t most = 0;
+    uint32_t most_clean = 0;   ///< the longest run no tick and no refill lengthened
+    uint8_t slow = 0;          ///< runs over the bound
+    uint8_t explained = 0;     ///< of them, with a tick or a refill inside
     bool back = true;
     for (int run = 0; run < 10; ++run) {
         reset_scenario();
+        // A tick that matures inside the section runs its handler at the
+        // unmask, before the scheduler's trap (it outranks it on both
+        // halves), and an XIP refill on the path adds its lines: both are
+        // read as letter c reads them, and such a run is explained, not
+        // judged against the warm bound (measured on the Cortex-M33: one
+        // run of ten at 1275 cycles against 134 for the others).
+        const Lengtheners before = Lengtheners::now();
         post_in_section<Mid>('C');
         {
+            const bool lengthened = before.moved();
             const uint32_t d = Mid::entered - section_last;
             least = d < least ? d : least;
             most = d > most ? d : most;
+            if (!lengthened && d > most_clean) {
+                most_clean = d;
+            }
+            if (d >= section_bound) {
+                ++slow;
+                if (lengthened) {
+                    ++explained;
+                }
+            }
         }
         if (trace_is(want_console)) {
             ++alike_console;
@@ -1152,9 +1259,9 @@ void tg_mask() {
     // activate() at the Console's ceiling - Top's visit (35), High's
     // (14), Mid's with its branch taken (13), Mid's serve to the stamp
     // (24): 171, 206 with the fifth.
-    constexpr uint32_t section_bound = per_half(208u, 206u);
     print(serial, "  the section's last statement to Mid's first: ", least, "..", most,
-          " cycles (bound ", section_bound, ")", crlf);
+          " cycles (bound ", section_bound, "); runs at or over it ", slow,
+          ", a kernel tick or an XIP refill inside ", explained, crlf);
     bench.verdict(hazard3 ? "the hart's software interrupt flag stood raised inside every "
                             "section, and no receiver ran inside one"
                           : "PendSV stood pending inside every section, and no receiver ran "
@@ -1166,8 +1273,9 @@ void tg_mask() {
     bench.verdict("Low's post to High under the mask likewise, inside Low's dispatch (10 runs)",
                   alike_low == 10u);
     bench.verdict("the section's end to the receiver's first statement under its bound "
-                  "(the arithmetic beside it)",
-                  most < section_bound);
+                  "(the arithmetic beside it) in every run nothing lengthened, every "
+                  "lengthened one with a tick or a refill inside",
+                  most_clean < section_bound && slow == explained);
     bench.verdict("the ceiling is the Console's again, interrupts enabled", back);
 }
 
@@ -1587,6 +1695,7 @@ void console_turn() {
 // ONE NAME, BOTH ARCHITECTURES, for every vector but the scheduler's, which
 // the macro binds for the half the image is built for.
 extern "C" void isr_uart0() {
+    uart_interrupts = uart_interrupts + 1u;
     if (Serial::isr()) {
         rx_ceiling = P::ceiling;
         brio::post<Console>(ConsoleEvent{console_rx});

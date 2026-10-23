@@ -26,8 +26,8 @@ other), `ticker.hpp` (the kernel timebase, one per core), `mtime.hpp`
 4.4.1 (the XIP cache) and `brio/util/placement.hpp` for the placement.
 The reference suites: `test_rp2350_platform`, which runs on BOTH
 architectures from one source and is judged the same way on each, and
-`test_rp2350_rubato` for the preemptive kernel, built for both and not
-yet run.
+`test_rp2350_rubato` for the preemptive kernel, the same on both
+("Bench findings").
 
 ## What the silicon does
 
@@ -122,7 +122,9 @@ stratum's own, written from 3.8.4:
   store that raises the flag and the trap, so the request does not count
   on a latency: with mstatus.MIE set it waits until the scheduler has
   been served (a count the body moves in mscratch), and with MIE clear
-  it returns at once, the flag taken when the mask lifts.
+  it returns at once, the flag taken when the mask lifts. Measured, one
+  to two stores retire behind the raising store before the trap, and
+  none behind the request ("Bench findings").
 - Nothing nests, and nothing needs to. A trap entry clears mstatus.MIE
   (3.8.4) and the crt never sets it inside a handler, so every handler
   still runs masked to its end; what Rubato preempts is a dispatch, which
@@ -172,14 +174,14 @@ bootrom hands over:
 - The FPU's lazy context save, which the core stratum leans on (an FP
   frame reserved by every exception over FP code, its words written
   only when an FP instruction runs before the return), is FPCCR's ASPEN
-  and LSPEN. ARM's architecture resets both to 1; THIS CHIP'S FPCCR
-  TABLE GIVES BOTH A RESET VALUE OF 0, and so does the SVD it is
-  generated from. If the silicon holds 0 after the bootrom, no exception
-  stacks the FP context at all, under Tenuto as under Rubato, and a
-  handler or a preempting dispatch that uses an FP register corrupts
-  the code it interrupts. `test_rp2350_rubato`'s letter j reads FPCCR
-  before it judges the registers; the fix, if the read says 0, is the
-  crt's (both bits set beside CPACR), not the core stratum's.
+  and LSPEN. ARM's architecture resets both to 1, while this chip's
+  FPCCR table gives both a reset value of 0, and so does the SVD it is
+  generated from. **Measured, the register table is contradicted:**
+  FPCCR reads 0xC000001C after the bootrom, ASPEN 1 and LSPEN 1, so
+  every exception taken over FP code stacks the FP context lazily, under
+  Tenuto as under Rubato, and the FP registers come back bit-exact
+  across a preemption, a float-computing handler's included
+  (`test_rp2350_rubato`'s letter j, "Bench findings").
 
 ## Types and verbs
 
@@ -453,6 +455,80 @@ architectures from one source. Where the halves differ, both numbers:
   included, while TBMAN's reads 0x00000001; the two registers and what
   each is for are in the findings above.
 
+**The preemptive kernel** - the reference suite is `test_rp2350_rubato`,
+one source and two images on the WeAct RP2350B at 150 MHz: 44 verdicts
+in `z` on the Cortex-M33 and 46 on Hazard3, ten runs of `z` alike on
+each half. A Rubato pack of five objects on `Rp2350RubatoPlatform<0>`,
+the Console the lowest and the letters' runner, TIMER1's alarm 0 the
+interrupt the road-1 letters land, nothing wired and nothing lit. The
+ruler is TIMER1 itself with its source on clk_sys, two back-to-back
+reads 3 cycles apart on both halves; beside it the core's own counter -
+on the Cortex-M33 the kernel ticker's composed `cycles()`, two reads 41
+cycles apart, agreeing with TIMER1 over 1 to 1.06 ms within 0 to 1
+cycle on every clean span, and on Hazard3 `mcycle`, two reads 1 cycle
+apart, agreeing within 0 cycles on every clean span (a span with an
+XIP refill inside a pair of reads is 110 off, reported). That is the
+suite's method throughout: an event, a run or a span that a kernel
+tick, an XIP refill or the console line's handler lengthened is told
+apart by counters read around it (the tick count, the XIP cache's miss
+counter, the console vector's entries) and reported, and each bound
+judges the ones nothing lengthened.
+
+On both halves road 1 preempts at any depth: an interrupt's post to
+High inside Low's dispatch runs High to its end before Low resumes,
+every object reading its own index as the ceiling and the UART's
+interrupt the base's 255; road 2 nests High inside Mid inside Low, each
+inside the post that asked; at depth 2 an interrupt over High's
+dispatch, started by either road, runs Top before High resumes; three
+timers matured in one turn are posted with the ceiling at 0 and served
+highest first, and High preempting Low's loop of `arm()` and `disarm()`
+leaves the list whole; a post under the mask (PRIMASK on one half,
+mstatus.MIE on the other) leaves the request pending and is served when
+the section ends, before the statement after it; dark at the end, the
+request as `scheduler_init()` set it. clk_sys cycles, the ruler's own
+cost taken off:
+
+| clk_sys cycles | Cortex-M33 | Hazard3 |
+|---|---|---|
+| road 1: an interrupt's last statement to the preempting dispatch's first, min / median / max over 100 events | 115 / 115 / 157 | 188 / 188 / 188 |
+| road 1: the path's count by the release listing, and the bound | 145, 232 | 182, 289 |
+| road 1 at depth 2, over a preempting dispatch | 96 | 171 |
+| `activate()` over four empty queues | 95 | 97 |
+| a post that asks nothing | 59 | 54 |
+| a road-2 post, the receiver's empty dispatch inside (the scheduling's share) | 321 (262) | 346 (292) |
+| one `arm()`, its masked window inside | 54 | 46 |
+| a post under the mask: the section's end to the receiver's first | 134 | 176 |
+| stack high-water of the suite's deepest chain (bytes), the deepest sample in a dispatch / in the interrupt | 656 (544 / 488) | 904 (864 / 736) |
+
+The Cortex-M33's road-1 events over 115 are the ones a tick or a refill
+landed in, and its measured path runs under the count drawn with the
+Cortex-M4's table, the model the suite takes for want of the M33's own
+figures. On Hazard3 the model, 3.8.7's counts with the interrupt's
+entry (which the section does not give) taken at `ecall`'s, is 6 cycles
+under the measurement. A post under the mask lengthened by a kernel
+tick reached 1275 cycles on the Cortex-M33 and 884 on Hazard3, and is
+reported, not judged. The two halves' rows part where their mechanisms
+do: on the Cortex-M33 the hardware stacks the interrupted code's
+registers, on Hazard3 the crt's trampoline and the scheduler's entry
+each save sixteen in software ("What the silicon does"), and the
+stack's levels carry those frames.
+
+- **The FPU across a preemption** (letter j, the Cortex-M33 alone):
+  FPCCR reads 0xC000001C, ASPEN 1 and LSPEN 1, where the datasheet's
+  register table and the SVD give both a reset value of 0; Low's float
+  series, preempted at a mark inside its loop by High's own series, and
+  in a second run by an interrupt handler that computes a float too,
+  ends with every value bit-exact against the same functions run without
+  preemption.
+- **The software interrupt's own facts** (letter k, Hazard3 alone):
+  after the raw store that raises the hart's flag, 1 to 2 of the eight
+  stores behind it retire before the trap - the latency the request
+  waits out - and behind `request_scheduler()` none; each raise serves
+  Top exactly once (20 raises); the caller-saved registers, loaded with
+  patterns, are found again across an entry and across a nested one,
+  10 of 10 each; inside a dispatch the software interrupt started,
+  the flag is low, mstatus.MIE set and mscratch moved by one.
+
 ## A handler in SRAM
 
 **What the silicon does.** Both architectures execute the flash in place
@@ -581,30 +657,6 @@ Driver gaps, each with its reason:
   it is 0 after an Arm image and 3 after a RISC-V one.
 
 Implemented but not bench-verified, each with what would measure it:
-
-- THE PREEMPTIVE PLATFORM, on both halves: `Rp2350RubatoPlatform` and
-  `schedule.hpp` compile for both architectures and both packages and
-  have run on neither. `test_rp2350_rubato`, built on both presets with
-  every bound derived in its source from the release listing, would
-  measure, on the Cortex-M33 and on Hazard3 each: letter a (road 1 at
-  depth 1, the ceiling at every entry), b (road 2, the chain of three),
-  c (road 1's latency against a bound of 232 cycles on the Cortex-M33
-  and 289 on Hazard3, 145 and 182 of them the path's own count), d (the
-  scan, a quiet post and a road-2 post), e (depth 2, by both roads), f
-  (time events armed and disarmed under preemption), g (a request under
-  the mask served when the section ends), i (dark, and the request as
-  set) and h (the stack's high-water mark in core 0's 4 KB bank); on
-  the Cortex-M33 alone letter j (FPCCR's ASPEN and LSPEN read, the FP
-  registers bit-exact across a preemption and under a handler that
-  computes a float); on Hazard3 alone letter k (how many instructions
-  retire after the raising store before the trap, the request's wait
-  against it, fifteen caller-saved registers across an entry and a
-  nested one, the flag already lowered and MIE set inside the dispatch).
-  The facts only the board answers: the softirq's latency, whether the
-  trap is taken on the instruction after the `csrsi` that ends a
-  critical section, the M33's FPCCR after the bootrom, and the
-  trampoline's real cost - 67 of Hazard3's 182 road-1 cycles are the
-  crt's two dispatches by the listing.
 
 - CORE 1, on either architecture. The platform is per core and the
   tickers are per core by construction, and the suite proves that

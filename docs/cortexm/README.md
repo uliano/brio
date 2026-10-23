@@ -70,31 +70,37 @@ architectures.
   into the real one. The frames, the
   FPU's lazy context and EXC_RETURN's bits are the header's account.
   The assembly is the ARMv6-M subset, so one source serves the M0+, the
-  M4 and the M33: run on the STM32F4's Cortex-M4 (`stm32f4/platform.hpp`'s
-  `Stm32f4RubatoPlatform`, measured on the Nucleo-F446RE,
-  [../stm32f4/platform.md](../stm32f4/platform.md)) and on the
-  STM32G0's Cortex-M0+ (`stm32g0/platform.hpp`'s
+  M4 and the M33, and five platforms have run it: the STM32F4's
+  Cortex-M4 (`stm32f4/platform.hpp`'s `Stm32f4RubatoPlatform`, measured
+  on the Nucleo-F446RE, [../stm32f4/platform.md](../stm32f4/platform.md)),
+  the STM32G0's Cortex-M0+ (`stm32g0/platform.hpp`'s
   `Stm32g0RubatoPlatform`, measured on the Nucleo-G0B1RE - PendSV at
   0xC0, the frames basic, a request under PRIMASK served at the unmask,
-  [../stm32g0/platform.md](../stm32g0/platform.md)); taken by three
-  more platforms, each compiled with its bench suite and not yet run:
-  the SAM C21's Cortex-M0+ (`samc21/platform.hpp`'s `SamRubatoPlatform`,
-  [../samc21/platform.md](../samc21/platform.md)), the RP2040's
-  (`rp2040/platform.hpp`'s `Rp2040RubatoPlatform`, one per core, each
-  core pending and taking its own PendSV, the one vector table's entry
-  bound to `rp2040/schedule.hpp`'s pair body when both cores run the
-  kernel, [../rp2040/platform.md](../rp2040/platform.md)) and the
-  RP2350's Cortex-M33 (`rp2350/platform.hpp`'s `Rp2350RubatoPlatform`;
-  the ARMv8-M facts it rests on are checked against the documents there,
-  [../rp2350/platform.md](../rp2350/platform.md): EXC_RETURN's security
-  bits (ES, DCRS and S, all 1 in the Secure state the image runs in) are
-  carried unchanged from the value PendSV entered with, MSPLIM is zeroed
-  by that family's crt, and PRI_14's write lands on the core's four bits
-  as 0xF0; one fact is in question - the header's lazy FP context save
-  assumes FPCCR.ASPEN and LSPEN at 1, the architecture's reset value,
-  while the RP2350's own register table gives both a reset value of 0,
-  so the suite's FPU letter reads the register before it judges
-  anything).
+  [../stm32g0/platform.md](../stm32g0/platform.md)), the SAM C21's
+  Cortex-M0+ (`samc21/platform.hpp`'s `SamRubatoPlatform`, measured on
+  the SAMC21J18A: road 1 from an interrupt's last statement to the
+  preempting dispatch's first in 240 cycles, the SVC vector bound by
+  that crt's name `SVCall_Handler`, a PendSV pending at the idle's WFI
+  ending it, [../samc21/platform.md](../samc21/platform.md)), the
+  RP2040's (`rp2040/platform.hpp`'s `Rp2040RubatoPlatform`, one per
+  core, each core pending and taking its own PendSV, the one vector
+  table's entry bound to `rp2040/schedule.hpp`'s pair body when both
+  cores run the kernel, measured on the WeAct RP2040: road 1 in 210
+  cycles, a Rubato on each core preempting at once through that entry,
+  [../rp2040/platform.md](../rp2040/platform.md)) and the RP2350's
+  Cortex-M33 (`rp2350/platform.hpp`'s `Rp2350RubatoPlatform`, measured
+  on the WeAct RP2350B: road 1 in 115 cycles,
+  [../rp2350/platform.md](../rp2350/platform.md)). The ARMv8-M facts the
+  M33 rests on are checked against the documents there: EXC_RETURN's
+  security bits (ES, DCRS and S, all 1 in the Secure state the image
+  runs in) are carried unchanged from the value PendSV entered with,
+  MSPLIM is zeroed by that family's crt, and PRI_14's write lands on
+  the core's four bits as 0xF0. The header's lazy FP context save
+  assumes FPCCR.ASPEN and LSPEN at 1, the architecture's reset value;
+  the RP2350's own register table gives both a reset value of 0, and the
+  register read after the bootrom is 0xC000001C, both bits 1, the FP
+  registers bit-exact across a preemption there - the measurement
+  contradicts the table.
 
 ## Why the stratum exists
 

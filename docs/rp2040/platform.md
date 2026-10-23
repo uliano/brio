@@ -19,8 +19,7 @@ The reference suite: `test_rp2040_platform`
 reset controller, the SIO, the atomic aliases, the WFI idle, the idle
 path against an interrupt's edge placed to the cycle, the kernel's turn
 per interrupt, the breadcrumb, five real resets); the preemptive
-kernel's, `test_rp2040_rubato`, is built and not yet run ("Not covered
-yet"). The family fixture `test/family_rp2040/rubato.cpp` instantiates
+kernel's, `test_rp2040_rubato` ("Bench findings"). The family fixture `test/family_rp2040/rubato.cpp` instantiates
 both platforms, a pack on each core and both bindings of PendSV, and
 `neg/rubato_on_the_tenuto_platform.cpp` refuses the preemptive kernel
 on the Tenuto platform. The failing half of the platform - the
@@ -219,8 +218,8 @@ defines it and a launch that takes it (today the crt holds one table and
 `Core1::launch` passes core 0's VTOR); a second binding of PendSV a
 program must keep apart from the first. What it saves: the pair's two
 cycles and its question at every request. The pair body is what is
-built and compiled; which road a two-kernel program takes is not
-decided ("Not covered yet").
+built and measured ("Bench findings"); which road a two-kernel program
+takes is not decided ("Not covered yet").
 
 ## Bench findings
 
@@ -346,6 +345,81 @@ decided ("Not covered yet").
     of 400 lost it. A quiet pack on core 1 turns 100 times over 100 of
     its ticks.
 
+**The preemptive kernel** - the reference suite is `test_rp2040_rubato`
+(55 verdicts in `z`, ten runs of `z` alike) on the WeAct RP2040 at
+125 MHz: a Rubato pack of five objects on `Rp2040RubatoPlatform<0>`,
+the Console the lowest and the letters' runner, alarm 0 of the system
+timer the interrupt the road-1 letters land, the one PendSV entry bound
+to the pair body for every letter (letter k runs a Rubato on each core),
+nothing wired and nothing lit. The ruler is core 0's composed `cycles()`
+(SysTick's position and the tick count): two back-to-back reads are 55
+cycles apart, a cost taken off every span below. Against the system
+timer over four spans of 1 ms, a span whose pairs of reads missed no
+XIP line agrees within 15 to 134 cycles - the microsecond's two floors,
+125 cycles, and the skew between the pairs - while a span with a cache
+refill inside a pair of reads is off by up to 573 and is reported, not
+judged. That is the suite's method throughout: an event, a run or a
+span that a kernel tick, an XIP refill or the console line's handler
+lengthened is told apart by counters read around it (the tick count,
+the XIP cache's miss counter, the console vector's entries) and
+reported, and each bound judges the ones nothing lengthened; the first
+span after a console drain always carries a refill. clk_sys cycles:
+
+- **The ceiling, both roads** (letters a, b, e): an alarm's post to High
+  inside Low's handler runs High to its end before Low resumes, every
+  handler reading its own index as the ceiling and the base's 255 in the
+  UART's interrupt; Low posting to Mid and Mid to High nests High inside
+  Mid inside Low, each inside the post that asked; at depth 2 an
+  interrupt over High's handler, started by either road, runs Top before
+  High resumes, Top's first statement 186 to 187 cycles after the
+  handler's last.
+- **The latency of road 1** (letter c): from the alarm handler's last
+  statement to High's handler's first, 209 cycles min, 210 median and
+  max over 100 events, none missed.
+- **The scan and the post** (letter d): `activate()` with four empty
+  queues below the ceiling 124 cycles; a post that asks for nothing 80;
+  a post that runs High's empty dispatch inside it 491, the scheduling's
+  share 411.
+- **Time events under preemption** (letter f): three timers matured in
+  one turn are posted with the ceiling held at 0 and served High, Mid,
+  Low; High preempting Low's loop of `arm()` and `disarm()` by road 1
+  leaves the list whole, every timer due fired once, the disarmed one
+  never; one `arm()` 85 cycles with its masked window inside.
+- **The request under PRIMASK** (letter g): a post to a higher object
+  inside a critical section pends PendSV and is served when the
+  section's guard restores the mask, before the statement after it,
+  from the Console's dispatch and from inside Low's; the section's last
+  statement to the receiver's first 233 cycles in every run nothing
+  lengthened (in one run of ten a kernel tick or an XIP refill
+  lengthened one, told apart by the counters).
+- **Road 1 across the cores** (letter j, core 1 under Tenuto running one
+  object, Relay, that answers core 0's send with a send to High): a post
+  from core 1 to core 0's object is refused and counted as a mispost and
+  pends no PendSV on core 1; Low's send crosses to core 1 and Relay's
+  answer crosses back, core 0's doorbell handler posts to High, and
+  High's dispatch starts after that handler's last statement and before
+  Low resumes, 7 to 11 us from Low's send to High's first statement. From
+  the doorbell handler's last statement to High's first, 209 cycles
+  min, 210 median and max over 100 crossings, none over 292: the road
+  1 of letter c, a doorbell's handler in place of an alarm's.
+- **A Rubato on each core** (letter k, core 1's pack of three on
+  `Rp2040RubatoPlatform<1>`, both cores through the one pair body):
+  core 0 traces `Ls3 Lm3 Hs1 Ts0 Te0 He1 Lr3 Le3` and core 1
+  `ls2 lm2 hs1 ts0 te0 he1 lr2 le2` (who, what, the ceiling read) in 10
+  of 10 runs, road 1 then road 2 on each core with every ceiling its own
+  object's index;
+  the two cores preempt at once, each preemption landing inside the
+  other core's preempted dispatch on the system timer, in 10 of 10;
+  core 1's ceiling reads 255 at its base after; core 1's stack
+  high-water mark 236 bytes, its deepest sampled stack pointer 216 in a
+  dispatch and 104 in its interrupt.
+- **Dark** (letter i): every object of core 0 idle, core 1 parked in the
+  bootrom, no time event and no alarm armed, GP25 not an output, the
+  ceiling the Console's, interrupts enabled.
+- **The stack** (letter h): core 0's high-water mark 532 bytes for the
+  suite's deepest chain, its deepest sampled stack pointer 512 in a
+  dispatch and 368 in an interrupt.
+
 ## A handler in SRAM
 
 **What the silicon does.** The core executes the flash in place through
@@ -464,39 +538,13 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
-- The preemptive platform on both cores, `Rp2040RubatoPlatform<0>` and
-  `<1>`, the pair body bound to `isr_pendsv`: `test_rp2040_rubato` is
-  built for the Pico and the WeAct RP2040 (`// build: boards =
-  pico,weact2040`) and has not been run. Its letters, each with its
-  bound derived from the release listing's count beside its verdict, are
-  what would measure it, on either board through the Debug Probe:
-  - `a`, the ceiling over road 1 at depth 1 (an alarm's post to High
-    inside Low's dispatch, every ceiling its own index);
-  - `b`, road 2 (a chain of three posts, each served inside the post
-    that asked);
-  - `c`, the latency of road 1 from the alarm handler's last statement
-    to the preempting dispatch's first, against a warm count of 212
-    cycles and a bound of 399;
-  - `d`, the ruler (core 0's composed `cycles()`, a count of 55 for two
-    reads) against the system timer, the scan of four empty queues, a
-    post that asks nothing and one that runs its receiver inside it;
-  - `e`, road 1 at depth 2, started by either road;
-  - `f`, time events under preemption: the base turn's order, `arm()`
-    and `disarm()` preempted inside their masked windows, one `arm()`'s
-    cost;
-  - `g`, the request under PRIMASK, served when the section ends;
-  - `j`, road 1 across the cores: a post from core 1 to core 0's object
-    refused and counted with no PendSV pended on core 1; then core 1
-    under Tenuto answering core 0's send with a send to High, core 0's
-    doorbell handler's post preempting Low, the latency from that
-    handler's last statement;
-  - `k`, a Rubato on each core at once through the one pair body, each
-    core's trace with its own ceiling, each preemption inside the other
-    core's preempted dispatch on the system timer, core 1's stack
-    high-water mark;
-  - `i`, dark: every object idle, core 1 back in the bootrom, no alarm
-    armed, GP25 not an output;
-  - `h`, core 0's stack high-water mark against its deepest samples.
+- The single-kernel binding, the core stratum's `scheduler_exception<K>()`
+  bound to `isr_pendsv` with core 1 under Tenuto or not launched ("How
+  to use it"): it runs in no image, `test_rp2040_rubato` binding the pair
+  body for every letter. Measured by the suite's letters but k, built
+  with the single body bound.
+- The preemptive kernel on the Pico: `test_rp2040_rubato` is built for
+  that board too, and a `z` there would measure it.
 - Whether a pending PendSV ends a WFI as a pending NVIC line does: the
   kernel's idle path never sleeps with PendSV pending in the suite's
   shapes (a post made at the base is served before the masked check),

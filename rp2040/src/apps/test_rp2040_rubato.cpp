@@ -819,21 +819,63 @@ void td_scan() {
     const uint32_t ruler = ruler_cost();
     // The ruler against the system timer over about a millisecond,
     // crossing a reload: the cycles' delta against the microseconds'
-    // times 125, each pair of reads taken back to back in the same order.
-    uint32_t agree_hi = 0;
+    // times 125, each pair of reads taken back to back in the same order
+    // under the platform's own mask, so that no handler lands between a
+    // pair's two reads (both counters run through the mask, and cycles()
+    // reads a reload the handler has not counted yet off the pending bit;
+    // measured unmasked: a tick's handler between the reads put 282 to
+    // 607 cycles on one side in three runs of ten). The first pair after
+    // the console's drain runs from a cold XIP cache, and the refills of
+    // the pair's own code land between its two reads (measured: the first
+    // span 73 to 513 cycles off, the three after it 6 to 30), so one
+    // unmeasured pair warms the path first, as letter c warms its own.
+    {
+        P::CriticalSection cs;
+        (void)Ruler::now();
+        (void)Timer::now_low();
+    }
+    // A refill that lands inside one pair and not the other skews that
+    // pair's two reads by the line's cost (measured: spans with a refill
+    // in a pair 89 to 326 cycles off, spans without 4 to 35), so each
+    // pair's misses are read as letter c reads them, and a span one
+    // lengthened is reported and left out of the bound.
+    uint32_t agree_hi = 0;        ///< the worst span whose pairs missed no line
+    uint8_t spans_clean = 0;
+    uint32_t diffs[4];
+    bool clean[4];
     for (int i = 0; i < 4; ++i) {
-        const uint32_t c0 = Ruler::now();
-        const uint32_t u0 = Timer::now_low();
+        uint32_t c0, u0, c1, u1;
+        const uint32_t m0 = xip_misses();
+        {
+            P::CriticalSection cs;
+            c0 = Ruler::now();
+            u0 = Timer::now_low();
+        }
+        const uint32_t m1 = xip_misses();
         spin(one_ms + 1000u * static_cast<uint32_t>(i));
-        const uint32_t c1 = Ruler::now();
-        const uint32_t u1 = Timer::now_low();
+        const uint32_t m2 = xip_misses();
+        {
+            P::CriticalSection cs;
+            c1 = Ruler::now();
+            u1 = Timer::now_low();
+        }
+        const uint32_t m3 = xip_misses();
         const uint32_t dc = c1 - c0;
         const uint32_t du = (u1 - u0) * cycles_per_us;
-        const uint32_t diff = dc > du ? dc - du : du - dc;
-        if (diff > agree_hi) {
-            agree_hi = diff;
+        diffs[i] = dc > du ? dc - du : du - dc;
+        clean[i] = m1 == m0 && m3 == m2;
+        if (clean[i]) {
+            ++spans_clean;
+            if (diffs[i] > agree_hi) {
+                agree_hi = diffs[i];
+            }
         }
     }
+    print(serial, "  the four spans' ruler-against-timer differences: ", diffs[0],
+          clean[0] ? "" : "*", " ", diffs[1], clean[1] ? "" : "*", " ", diffs[2],
+          clean[2] ? "" : "*", " ", diffs[3], clean[3] ? "" : "*",
+          " cycles (* a cache refill inside a pair of reads); ", spans_clean,
+          " spans clean", crlf);
     uint32_t scan = 0xFFFF'FFFFu;
     uint32_t scan_hi = 0;
     for (int i = 0; i < 16; ++i) {
@@ -872,7 +914,7 @@ void td_scan() {
     reset_scenario();
     print(serial, "  the ruler's two reads (core 0's composed cycles()) ", ruler, " cycles", crlf);
     print(serial, "  over 1..1.003 ms the ruler and the system timer differ by at most ", agree_hi,
-          " cycles", crlf);
+          " cycles on the clean spans", crlf);
     print(serial, "  activate() with nothing ready below the Console: ", scan, "..", scan_hi,
           " cycles (four empty queues, the fifth at the ceiling)", crlf);
     print(serial, "  from Mid: a post to Low (asks nothing) ", quiet,
@@ -892,11 +934,12 @@ void td_scan() {
     // (125 cycles, two floors), and that span from the ruler's by the
     // difference of the two skews from a ruler's sample to the timer's
     // read: the listing's two pairs differ by a literal and a move (3),
-    // and a SysTick handler landing between one pair's two reads delays
-    // that read by its 64 (letter c's comment; a retry of cycles() comes
-    // before its sample and moves nothing). 192, 231 with a fifth.
-    bench.verdict("the ruler agrees with the system timer over the span within 231 cycles",
-                  agree_hi <= 231u);
+    // and nothing lands between a pair's reads under the mask (a retry
+    // of cycles() comes before its sample and moves nothing). 128, 154
+    // with a fifth.
+    bench.verdict("the ruler agrees with the system timer within 154 cycles over every span "
+                  "whose pairs of reads missed no cache line (at least one such span)",
+                  spans_clean != 0u && agree_hi <= 154u);
     // The bounds below are the release listing's count with every fetch
     // a hit of the XIP cache (letter c's comment), the least of 16 taken
     // so the cache is warm, and a fifth of the whole as the margin; the
@@ -1197,14 +1240,34 @@ void tg_primask() {
     uint8_t alike_low = 0;
     uint32_t least = 0xFFFF'FFFFu;
     uint32_t most = 0;
+    uint8_t slow = 0;        ///< runs over the path's warm count
+    uint8_t explained = 0;   ///< of them, with a kernel tick or an XIP refill inside
+    uint32_t most_clean = 0; ///< the longest run nothing lengthened
     bool back = true;
     for (int run = 0; run < 10; ++run) {
         reset_scenario();
+        // A tick that matures inside the section runs its handler at the
+        // unmask, before PendSV (SysTick outranks it), and an XIP refill
+        // on the path adds its lines: both are read as letter c reads them,
+        // and a run they lengthen is explained, not judged against the
+        // warm bound.
+        const uint32_t t0 = CoreTicker<0>::ticks();
+        const uint32_t m0 = xip_misses();
         post_in_section<Mid>('C');
         {
             const uint32_t d = Mid::entered - section_last;
             least = d < least ? d : least;
             most = d > most ? d : most;
+            const bool lengthened = CoreTicker<0>::ticks() != t0 || xip_misses() != m0;
+            if (!lengthened) {
+                most_clean = d > most_clean ? d : most_clean;
+            }
+            if (d > 236u) {
+                ++slow;
+                if (lengthened) {
+                    ++explained;
+                }
+            }
         }
         if (Trace0::is(want_console)) {
             ++alike_console;
@@ -1226,7 +1289,8 @@ void tg_primask() {
           want_console, crlf);
     print(serial, "  from Low to High: ", alike_low, " of 10 runs traced ", want_low, crlf);
     print(serial, "  the section's last statement to Mid's first: ", least, "..", most,
-          " cycles", crlf);
+          " cycles; runs over 236: ", slow, ", a kernel tick or an XIP refill inside ",
+          explained, crlf);
     bench.verdict("PendSV stood pending inside every section, and no receiver ran inside one",
                   pend_inside && !ran_inside);
     bench.verdict("the Console's post to Mid under PRIMASK is served when the section ends, "
@@ -1242,9 +1306,15 @@ void tg_primask() {
     // the Console's ceiling - its frame and test (20), Top's visit (22),
     // High's (21), Mid's to its dispatch (19); Mid's dispatch to its
     // stamp's sample (63, High's in letter c): 236 warm; 284 with a
-    // fifth.
-    bench.verdict("the section's end to the receiver's first statement under 284 cycles",
-                  most < 284u);
+    // fifth. A run a tick's handler or a refill lengthened is explained
+    // by the counters read around it (measured: one run of ten at 604
+    // cycles, a tick inside), so the bound judges the runs nothing
+    // lengthened, and every lengthened one must be explained.
+    bench.verdict("the section's end to the receiver's first statement under 284 cycles "
+                  "in every run nothing lengthened",
+                  most_clean < 284u);
+    bench.verdict("every run over the path's warm count had a tick or a cache refill in it",
+                  slow == explained);
     bench.verdict("the ceiling is the Console's again, interrupts enabled", back);
 }
 
