@@ -2,8 +2,9 @@
  * delay.hpp
  *
  * Microsecond busy-waits for the STM32F4 stratum: a short wait inside a
- * dispatch or a driver's setup, `brio::delay_us(clock, 20);`, for at
- * least that many microseconds. It spins on SysTick's VAL: it needs the
+ * dispatch or a driver's setup, `if (!brio::delay_us(clock, 20)) { ... }`,
+ * for at least that many microseconds - or none, with false, when it
+ * cannot. It spins on SysTick's VAL: it needs the
  * counter running (Ticker::init() or SysTickCounter::start()), never its
  * interrupt, so it is correct inside a masked window too; it waits, by
  * design, and is capped below one SysTick period - a millisecond or

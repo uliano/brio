@@ -17,12 +17,16 @@ The smallest use, one reading of a pad, is an excerpt of the block under
 "How to use it" below:
 
 ```cpp
+uint16_t vin_mv = 0;                              // the program's own readings
+int32_t die_centi = 0;
 using Vin = brio::AnalogIn<brio::Pin<40>>;         // input 0 in the QFN-80
-brio::Adc::init(clock);                            // the USB PLL at 48 MHz, clk_adc on it
+if (!brio::Adc::init(clock)) {                     // the USB PLL at 48 MHz, clk_adc on it
+    // the package has no such pin, no 48 MHz PLL, the reset or READY: stop
+}
 Vin::claim();
 brio::Adc::select(Vin{});
 if (const auto counts = brio::Adc::read()) {
-    const uint16_t mv = brio::adc_mv(*counts, brio::adc_steps, brio::ref_mv(brio::Ref::avdd_pin));
+    vin_mv = brio::adc_mv(*counts, brio::adc_steps, brio::ref_mv(brio::Ref::avdd_pin));
 }
 ```
 
@@ -247,16 +251,22 @@ driver follows the register description and the tables.
 ## How to use it
 
 ```cpp
+uint16_t vin_mv = 0;                              // the program's own readings
+int32_t die_centi = 0;
 using Vin = brio::AnalogIn<brio::Pin<40>>;         // input 0 in the QFN-80
-brio::Adc::init(clock);                            // the USB PLL at 48 MHz, clk_adc on it
+if (!brio::Adc::init(clock)) {                     // the USB PLL at 48 MHz, clk_adc on it
+    // the package has no such pin, no 48 MHz PLL, the reset or READY: stop
+}
 Vin::claim();
 brio::Adc::select(Vin{});
 if (const auto counts = brio::Adc::read()) {
-    const uint16_t mv = brio::adc_mv(*counts, brio::adc_steps, brio::ref_mv(brio::Ref::avdd_pin));
+    vin_mv = brio::adc_mv(*counts, brio::adc_steps, brio::ref_mv(brio::Ref::avdd_pin));
 }
 brio::Adc::temperature_sensor(true);
 brio::Adc::select(brio::AdcInput::temperature);     // AINSEL 8 here, 4 in the QFN-60
-const int32_t centi = brio::adc_temperature_centi(*brio::Adc::read(), 3300);
+if (const auto counts = brio::Adc::read()) {       // empty when the ready wait or the conversion failed
+    die_centi = brio::adc_temperature_centi(*counts, 3300);
+}
 ```
 
 A block through the DMA at a paced rate:

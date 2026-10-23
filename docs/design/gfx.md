@@ -1,23 +1,22 @@
 # Graphics
 
-This page decides how a program draws: the contract every drawing
-surface meets (two operations, a filled rectangle and a window fed a
-run of pixels), the three kinds of surface told apart by where the
-truth about a pixel lives, the conventions that keep a shape the same
-on every surface, the colour model, text, the refusal of compositing,
-what the primitives cost, how a renderer is judged, and the command
-tier that drives a panel behind a link. It is written for an embedded
+The graphics library draws shapes and text on a framebuffer in RAM, on
+a display panel behind a link, or on the host's simulated display,
+through one surface interface. A program picks a surface (a framebuffer
+type over a pixel type, or a panel driver over a link) and calls the
+free functions of `gfx/draw.hpp` and `gfx/text.hpp` with it - `clear`,
+`line`, the surface's own `fill_rect`, `text_field`; the surface decides
+where the pixels go. The library is `brio/gfx/` (pure, kernel-free); the
+panel drivers are `brio/devices/`. It is written for an embedded
 programmer who has drawn on a small display from a loop and wants one
-library that is correct on a framebuffer in RAM, on a panel that
-answers no questions, and on the host. The library is `brio/gfx/`
-(pure, kernel-free); the panel drivers are `brio/devices/`.
+library that is correct on every one of those surfaces.
 
-The smallest use: a surface (a framebuffer type over a pixel type, or a
-panel driver over a link), and the free functions of `gfx/draw.hpp`
-and `gfx/text.hpp` called with it: `clear`, `line`, the surface's own
-`fill_rect`, `text_field`. The prerequisite that decides correctness: **a surface may
-be write-only, so erasing is drawing again in the background colour**,
-and an interface is laid out so that its elements do not overlap.
+One fact shapes everything else here: a panel may answer no questions,
+so **a surface may be write-only, and erasing an element is drawing it
+again in the background colour** - which is why an interface is laid
+out so that its elements do not overlap. The sections below explain the
+surface interface, what each kind of surface can and cannot do, and the
+conventions every drawing operation shares.
 
 ## Why the contract comes before the primitives
 

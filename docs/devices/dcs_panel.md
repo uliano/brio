@@ -31,10 +31,12 @@ if (!panel.valid()) {
 
 brio::Pin<'A', 2>::output();            // the reset line is a pad the board wires
 auto reset = brio::Pin<'A', 2>::ref();  // named at run time, as a request names a select
-if (!panel.reset_and_wake(reset, [](uint16_t ms) {
-        brio::delay_us(clock, static_cast<uint32_t>(ms) * 1000u);
-    })) {
-    // a link verb was refused: panel.link_failures() says how many
+// wait_ms is the program's: a void(uint16_t) that spends AT LEAST that many
+// milliseconds (the controller's settling times, 10 to 150 ms). brio::delay_us
+// is not it on the 32-bit targets: there it refuses a wait of a tick or more
+// and spends no time (the AVR's has no cap).
+if (!panel.reset_and_wake(reset, wait_ms)) {
+    // a link verb was refused or failed: panel.link_failures() says how many
 }
 panel.rotation(brio::DcsRotation::r90);   // 480 x 320 now
 
@@ -49,11 +51,22 @@ mirrored, its colour channels crossed, and its need of the inversion
 command; `valid()` says whether the link's SPI mode is one the
 controller takes. The reset line is an ordinary output pad, passed by a
 run-time reference; `reset_and_wake()` drives it low and high, wakes the
-controller and sets its formats, spends the controller's waits through
-the lambda (a small function written in place: here it takes the
-milliseconds and busy-waits them with `brio::delay_us`, which the
-driver itself never does), and answers false when a link transaction
-was refused or ran with a status other than `spi_ok`. `rotation()`
+controller and sets its formats, spends the controller's four waits (10,
+150, 150 and 25 ms, the traits' figures) through `wait_ms`, a callable
+the program supplies and the driver never has of its own, and answers
+false when a link transaction was refused or ran with a status other
+than `spi_ok` - it cannot tell whether `wait_ms` waited. The contract
+`wait_ms` must keep: at least the milliseconds asked, every time. A
+loop on the platform's tick counter does it when the ticker runs and
+interrupts are enabled, waiting `ticks_from_ms<P>(ms) + 1` ticks
+(`kernel/time_event.hpp`'s conversion, one tick more because a count of
+whole ticks can fall short of the physical interval by up to one);
+`brio::delay_us` does not on any 32-bit target, since there it refuses a
+wait of a tick or more and spends no time on it (the AVR's has no cap
+and does wait). The four waits add up to 335 ms, during which a
+dispatch that wakes a panel holds every other active object: the wake
+belongs before the kernel runs, in `main()` with interrupts enabled, or
+the program accepts the hold. `rotation()`
 turns the picture a quarter and sends the new address mode at once, and
 `fill_rect` is the library's own primitive,
 drawing through the panel with no adapter. The sections below speak the
@@ -246,7 +259,7 @@ The driver's verbs, by purpose:
 | Verb | What it does |
 |------|--------------|
 | `valid()` | The link's mode is one the controller's serial interface takes, on both tenures - or the link has no mode to show. Every verb refuses while this is false, counted in `link_failures()` |
-| `reset_and_wake(reset, delay_ms)` | The reset line low and high by the traits' times, then `wake()`. `reset` is a pin-like with `set()` and `clear()`, active LOW - every stratum's `PinRef` is one |
+| `reset_and_wake(reset, delay_ms)` | The reset line low and high by the traits' times, then `wake()`. `reset` is a pin-like with `set()` and `clear()`, active LOW - every stratum's `PinRef` is one; `delay_ms` must spend at least the milliseconds asked, which the verb cannot check |
 | `wake(delay_ms)` | SLPOUT, the wait, DISPON, the wait, the inversion the module asks for, COLMOD as a statement, MADCTL for the rotation in force |
 | `rotation(r)` / `rotation()` | Put the logical surface in an orientation, and read the one in force. `width()`/`height()` follow |
 | `madctl()` | The code the map produces for the rotation and the module in force |
@@ -256,13 +269,14 @@ The driver's verbs, by purpose:
 | `link_failures()` / `reset_counters()` | Link transactions asked for and not got |
 
 The wake's numbers are the traits' and the waiting is the application's:
-`delay_ms` is any callable `void(uint16_t)`, which is what lets a host
-test COUNT the milliseconds instead of spending them and a program on
-silicon spend them however it spends time.
+`delay_ms` is any callable `void(uint16_t)` that, on silicon, spends at
+least the milliseconds asked every time (the driver cannot check it),
+which is what lets a host test count the milliseconds instead of
+spending them.
 
 ## How to use it
 
-**The wake, on a family, with a real pin and a real clock.** The link is
+**The wake, on a family, with a real pin and the program's wait.** The link is
 [dcs_link.md](dcs_link.md)'s, built over that stratum's `SpiHost` from
 two prototype requests the application fills as it fills any request of
 that bus - in a mode the controller's traits take; the reset line is a
@@ -289,10 +303,12 @@ if (!panel.valid()) {
 
 brio::Pin<'A', 2>::output();            // the reset line is a pad the board wires
 auto reset = brio::Pin<'A', 2>::ref();  // named at run time, as a request names a select
-if (!panel.reset_and_wake(reset, [](uint16_t ms) {
-        brio::delay_us(clock, static_cast<uint32_t>(ms) * 1000u);
-    })) {
-    // a link verb was refused: panel.link_failures() says how many
+// wait_ms is the program's: a void(uint16_t) that spends AT LEAST that many
+// milliseconds (the controller's settling times, 10 to 150 ms). brio::delay_us
+// is not it on the 32-bit targets: there it refuses a wait of a tick or more
+// and spends no time (the AVR's has no cap).
+if (!panel.reset_and_wake(reset, wait_ms)) {
+    // a link verb was refused or failed: panel.link_failures() says how many
 }
 panel.rotation(brio::DcsRotation::r90);   // 480 x 320 now
 ```

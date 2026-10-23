@@ -325,13 +325,16 @@ const uint16_t mv = brio::adc_mv(counts, Adc1::result_steps(), 3300);
 The supply and the junction temperature, with no meter:
 
 ```cpp
+int32_t die_centi = 0;                           // the program's own reading
 brio::AdcCommon::internal_sources(true);         // TSVREFE wakes both
-brio::delay_us(clock, 20);                       // their start-up time
+if (!brio::delay_us(clock, 20)) {                // their start-up time; false, nothing waited, with SysTick stopped
+    // wait another way before the first reading
+}
 Adc1::sample_time_all(brio::AdcSampleTime::cycles480);
 Adc1::select(brio::AdcInput::vrefint);
 const uint16_t vdda = Adc1::vdda_mv(Adc1::read_settled(4));
 Adc1::select(brio::AdcInput::temperature);
-const int32_t centi_c = Adc1::temperature_centi_c(Adc1::read_settled(4), vdda);
+die_centi = Adc1::temperature_centi_c(Adc1::read_settled(4), vdda);
 ```
 
 A window on one channel, and the flag it raises:

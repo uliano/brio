@@ -34,7 +34,7 @@
  * "How to use it"):
  *
  *     using Vin = brio::AnalogIn<brio::Pin<26>>;        // input 0
- *     brio::Adc::init(clock);                           // the USB PLL at 48 MHz, clk_adc on it
+ *     if (!brio::Adc::init(clock)) { ... }                           // the USB PLL at 48 MHz, clk_adc on it
  *     Vin::claim();
  *     brio::Adc::select(Vin{});
  *     if (const auto counts = brio::Adc::read()) { ... }
@@ -237,7 +237,7 @@ struct AnalogIn {
  * Adc: the one converter, a monostate.
  *
  *   using Vin = brio::AnalogIn<brio::Pin<26>>;   // input 0
- *   Adc::init(clock);                              // the USB PLL at 48 MHz, clk_adc on it
+ *   if (!Adc::init(clock)) { ... }                              // the USB PLL at 48 MHz, clk_adc on it
  *   Vin::claim();
  *   Adc::select(Vin{});
  *   const auto counts = Adc::read();

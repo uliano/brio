@@ -53,7 +53,9 @@ it starts, 16 - and the record takes four header bytes (a magic byte,
 the version, a CRC-16) plus the payload, eight bytes here, 16 to 23;
 `load()` returns the stored value, or nothing when the EEPROM holds no
 valid record of this version at that offset (erased, an older layout, a
-write torn by a power loss); `store()` writes only the bytes that differ
+write torn by a power loss - but for the two torn-write sequences
+`util/nv_record.hpp`'s `store()` comment records, after which an old
+value comes back as if current); `store()` writes only the bytes that differ
 from what is stored and returns how many it wrote, zero when the value
 is already there.
 

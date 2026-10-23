@@ -26,9 +26,10 @@
  *                                       .bgr = true,
  *                                       .wants_inversion = true}};
  *     if (!panel.valid()) { ... }          // the link's mode is refused
- *     panel.reset_and_wake(reset, [](uint16_t ms) {
- *         brio::delay_us(clock, static_cast<uint32_t>(ms) * 1000u);
- *     });
+ *     // wait_ms: the program's void(uint16_t), AT LEAST that many
+ *     // milliseconds every time (10 to 150 ms here); on the 32-bit targets
+ *     // brio::delay_us is not it: it refuses a tick or more, waiting nothing
+ *     if (!panel.reset_and_wake(reset, wait_ms)) { ... }
  *     panel.rotation(brio::DcsRotation::r90);
  *     brio::fill_rect(panel, 0, 0, panel.width(), panel.height(), 0x00000000u);
  *
@@ -41,7 +42,11 @@
  * its bytes on the wire: a full-screen fill is a window and a write a
  * row, and a dispatch that draws holds every other active object
  * meanwhile. The wake waits too, but through the caller's own `delay_ms`
- * callable, never by itself. Storage: the link is held by reference and
+ * callable, never by itself - and it cannot tell whether that callable
+ * waited: the callable must spend at least the milliseconds asked (a loop
+ * of `ticks_from_ms<P>(ms) + 1` ticks on a running ticker with interrupts
+ * enabled does; `brio::delay_us` refuses a tick or more on every target
+ * but the AVR and spends no time there). Storage: the link is held by reference and
  * must outlive the panel; the module's facts are copied; a run handed to
  * write_run() or read_run() is the caller's again on return; the row and
  * read buffers are members of the panel, sized by the glass's long side
@@ -288,12 +293,17 @@ public:
      * The wake, from the reset line up. `reset` is a Pin-like with
      * `set()` and `clear()`, the line being active LOW - every stratum's
      * `PinRef` is one, which is how a program names a pad at run time;
-     * `delay_ms` is any callable `void(uint16_t)`.
+     * `delay_ms` is any callable `void(uint16_t)`; on silicon it must
+     * spend AT LEAST the milliseconds asked, every time it is called: the
+     * traits' figures are settling times the controller needs, and this
+     * verb cannot tell whether the callable waited (a loop of
+     * `ticks_from_ms<P>(ms) + 1` ticks on a running ticker with
+     * interrupts enabled does; `brio::delay_us` refuses a tick or more
+     * on every target but the AVR and spends no time there).
      *
      * The traits own the numbers, this driver owns the sequence and the
-     * application owns the clock - which is what lets a host test count
-     * the milliseconds instead of spending them, and a program on
-     * silicon spend them however it spends time. False when a link verb
+     * application owns the time - which is what lets a host test count
+     * the milliseconds instead of spending them. False when a link verb
      * refused; every refusal is counted whether or not the caller reads
      * the answer.
      */

@@ -242,8 +242,9 @@ int main() {
 
 A vector is bound by defining its strong symbol beside `main()`:
 `extern "C" void USART1_IRQHandler() { ... }`. A short wait inside a
-dispatch: `brio::delay_us(clock, 20);` - a millisecond or more is a
-`TimeEvent`.
+dispatch: `if (!brio::delay_us(clock, 20)) { ... }` - it answers false,
+spending no time, when SysTick is not counting or the request is a
+millisecond or more, which is a `TimeEvent`'s work.
 
 ## Bench findings
 

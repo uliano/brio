@@ -242,7 +242,9 @@ both, in practice:
   against the code, the configuration or the measurement it rests on -
   a reader finding a sentence proves only that the page says it, and
   the defect every editorial pass has produced is a claim with no
-  source or an absolute the page's own findings contradict. The bench
+  source or an absolute the page's own findings contradict; a copied
+  snippet is compiled in its stated context with the target's warning
+  policy, and a check not run is stated with its handoff. The bench
   chip alone masks half the family (SWEVENTB, TCA1, PORTB proved it).
 - **Definition of done for a test letter**: (1) every verdict's bound is
   DERIVED, its arithmetic written beside it (the instrument's
@@ -284,7 +286,19 @@ both, in practice:
   operation's comment says what it does, from which context it may be
   called, whether it waits, blocks or masks interrupts, who owns the
   storage and for how long, and which requirement is checked against
-  which stays the caller's. A workflow step is verified, configured or
+  which stays the caller's. An example a reader may copy obeys the
+  contracts it teaches (an optional checked before access, a result
+  that decides setup, timing or validity acted on, a void cast with its
+  reason beside it), says whether it is a complete example or an
+  excerpt and states the setup an excerpt assumes; a claim about an
+  operation ("never waits", "never masks", "safe from any context") is
+  read through the helpers on its path and the policies it may run
+  with, and an exception a detailed section establishes narrows the
+  opening and every summary of the same guarantee in the same change;
+  purpose, first use and prerequisite are questions the author answers,
+  not sentence templates, and a table cell past about eighty words is a
+  paragraph in the wrong place (docs/README.md has the full rules). A
+  workflow step is verified, configured or
   unavailable, and says which. A comments-only edit is proved by
   `brio gate` (whole, or `--tokens` where no toolchain is at hand), and
   `// build:` lines and every other comment a tool reads are never

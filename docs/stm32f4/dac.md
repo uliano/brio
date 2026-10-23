@@ -17,7 +17,9 @@ brio::Dac::init();
 brio::Dac::claim_pad<Pa4>();
 brio::Dac::configure(0, brio::DacChannelConfig{});   // buffered, untriggered
 brio::Dac::enable(0, true);
-brio::delay_us(clock, 20);                       // tWAKEUP
+if (!brio::delay_us(clock, 20)) {                // tWAKEUP; false, no time spent, with SysTick stopped
+    // the ticker is not running yet: the output is valid only after tWAKEUP
+}
 brio::Dac::write(0, brio::dac_code(1650, brio::Dac::steps, 3300));
 ```
 
@@ -27,7 +29,14 @@ pad; `claim_pad<Pa4>()` puts PA4 in analog mode; `configure()` writes
 channel 0's options - the default `DacChannelConfig{}` is the output
 buffer on, no trigger, no wave, no DMA - and leaves the channel
 disabled; `enable()` switches the channel on, and the 20 us wait covers
-tWAKEUP, the time the datasheet gives the output to come up; `write()`
+tWAKEUP, the time the datasheet gives the output to come up - a wait
+`delay_us` serves only while SysTick is counting (the ticker's `init()`
+starts it, [platform.md](platform.md)) and only below one tick, and
+answers false, spending no time, otherwise, so the example tests the
+answer instead of trusting an output whose settling time was never
+waited (the write itself may come at any time, the holding register
+takes it with the channel off too; what tWAKEUP decides is when the
+pad's level is valid); `write()`
 puts a 12-bit right-aligned code in the holding register, which reaches
 the pad one APB1 cycle later because no trigger is selected, and
 `dac_code()` (`util/analog.hpp`) turns 1650 mV against a 3300 mV
@@ -211,7 +220,9 @@ brio::Dac::init();
 brio::Dac::claim_pad<Pa4>();
 brio::Dac::configure(0, brio::DacChannelConfig{});   // buffered, untriggered
 brio::Dac::enable(0, true);
-brio::delay_us(clock, 20);                       // tWAKEUP
+if (!brio::delay_us(clock, 20)) {                // tWAKEUP; false, no time spent, with SysTick stopped
+    // the ticker is not running yet: the output is valid only after tWAKEUP
+}
 brio::Dac::write(0, brio::dac_code(1650, brio::Dac::steps, 3300));
 ```
 

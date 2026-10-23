@@ -9,7 +9,7 @@
  * millivolts through util/analog.hpp's adc_mv):
  *
  *     using Vin = brio::AnalogIn<brio::Pin<40>>;   // input 0 in the QFN-80
- *     brio::Adc::init(clock);                      // the USB PLL at 48 MHz, clk_adc on it
+ *     if (!brio::Adc::init(clock)) { ... }                      // the USB PLL at 48 MHz, clk_adc on it
  *     Vin::claim();
  *     brio::Adc::select(Vin{});
  *     if (const auto counts = brio::Adc::read()) { ... }
@@ -318,7 +318,7 @@ struct AnalogIn {
  * header gives the order and the contexts):
  *
  *   using Vin = brio::AnalogIn<brio::Pin<40>>;   // input 0 in the QFN-80
- *   Adc::init(clock);                            // the USB PLL at 48 MHz, clk_adc on it
+ *   if (!Adc::init(clock)) { ... }                            // the USB PLL at 48 MHz, clk_adc on it
  *   Vin::claim();
  *   Adc::select(Vin{});
  *   const auto counts = Adc::read();

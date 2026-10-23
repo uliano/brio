@@ -12,7 +12,7 @@
  *     brio::Dac::claim_pad<Pa4>();                     // analog mode, first
  *     brio::Dac::configure(0, brio::DacChannelConfig{});   // left disabled
  *     brio::Dac::enable(0, true);
- *     brio::delay_us(clock, 20);                       // tWAKEUP
+ *     if (!brio::delay_us(clock, 20)) { ... }          // tWAKEUP; false, nothing waited, with SysTick stopped
  *     brio::Dac::write(0, brio::dac_code(1650, brio::Dac::steps, 3300));
  *
  * Who calls what, and from where. Every verb is a register verb with no

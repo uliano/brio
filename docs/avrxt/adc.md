@@ -1,18 +1,20 @@
 # ADC - the 12-bit analog-to-digital converters (AVR DA/DB, AVR EA)
 
-This document is for a programmer who measures voltages: a sensor on a
-pin, a differential pair, the supply, the die's temperature, or a
-stream of samples paced by a timer. The driver is `Adc<0>`, one task
-with knobs (a task, in brio, is a driver layer with state of its own
-over a resource, served from its peripheral's interrupt or called by
-an active object; an active object is a component of a brio program
-with its own event queue, served one event at a time by the kernel,
-[../learn/introduction.md](../learn/introduction.md)). It is a
-monostate (a class whose state is static, with no instances): one
-`AdcConfig` holds the whole configuration, an input is a type
-(`AnalogIn<Pin<'D', 1>>`) or an enumerator (`AdcInput::temp`), the
-interrupt bodies return the result for the program's vector to post,
-and the event system can start conversions with no CPU between them.
+`Adc<0>` reads voltages on the AVR DA, DB and EA: a sensor on a pin, a
+differential pair, the supply, the die's temperature. A program asks for
+one conversion and reads the result, or arranges repeated conversions
+started by a timer or the event system with no CPU between them, the
+results read directly or handed to an active object as events (an
+active object is a component of a brio program with its own event
+queue, served one event at a time by the kernel,
+[../learn/introduction.md](../learn/introduction.md)). The driver has
+no instances: one `AdcConfig` holds the whole configuration, an input
+is a type (`AnalogIn<Pin<'D', 1>>`) or an enumerator
+(`AdcInput::temp`), and the interrupt bodies return the result for the
+program's vector to post. Two things decide correctness before any
+knob: `init()` runs after the clock task's, because the prescaler's
+range and the warm-up are computed from the rate the clock type claims,
+and the blocking `read()` waits for the result with no time-out.
 
 Two converters, two engines, one surface (`avrxt/adc.hpp`, whose
 part's header decides which half compiles): the AVR DA/DB's 12-bit SAR

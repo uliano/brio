@@ -8,8 +8,8 @@
  * (docs/design/clock.md), here with one implementation for both
  * instruction sets. The smallest use (docs/rp2350/clock.md):
  *
- *     brio::Mtime::start(clock);            // the ruler, once
- *     (void)brio::delay_us(clock, 20);      // false if the ruler is not running
+ *     if (!brio::Mtime::start(clock)) { ... }   // the ruler, once (false: mtime.hpp says when)
+ *     if (!brio::delay_us(clock, 20)) { ... }   // false, nothing waited, with the ruler stopped
  *
  * Which context may call it: any context allowed to spend the time,
  * interrupts masked or not; it spins on the ruler for up to `us + 1`

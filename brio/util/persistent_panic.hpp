@@ -133,7 +133,11 @@ struct PersistentPanic {
     /// Boot-side fetch-and-clear, the twin of take_panic_record(): a
     /// stored record is returned once and the slot is invalidated with a
     /// single byte write (NvRecord::clear(), which waits for it). A
-    /// second call returns nothing.
+    /// second call returns nothing once the clear went through: its
+    /// answer is not read here, so a store that refused the write leaves
+    /// the record for the next call, and a report() torn right after the
+    /// magic byte brings the consumed record back (nv_record.hpp,
+    /// store()'s comment).
     static std::optional<PanicRecord> take() {
         const std::optional<PanicRecord> r = peek();
         if (r) {

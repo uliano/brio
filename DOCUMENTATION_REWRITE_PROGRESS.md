@@ -11454,6 +11454,151 @@ findings" unchanged on every page; "Not covered yet" changed on i2c.md,
 nvm.md, pin.md and platform.md alone; nothing outside docs/ch32vx03,
 brio/ch32vx03 (parts/ untouched) and this section.
 
+## The correction pass after the second review
+
+A second review of the whole rewrite (the project's reviewer, at
+2981010) found the pass sound and left a bounded tail: examples a
+reader might copy that break the contracts they teach, broad claims
+with exceptions hundreds of lines below, a few dense openings and table
+cells, and the writing rules to tighten. Applied here, each claim read
+against the code and each corrected fragment compiled in its stated
+context with the target's flags and -Werror (wrappers in the
+scratchpad, outside the build globs).
+
+Documentation corrected:
+- docs/devices/dcs_panel.md (both copies) and brio/devices/dcs_panel.hpp
+  (the smallest use, the class comment and reset_and_wake()'s): the wake
+  no longer busy-waits through `brio::delay_us`, which on every Cortex-M
+  and the RP2040 refuses a wait of a tick or more and spends no time, so
+  none of the ILI9481's four settling times (10, 150, 150, 25 ms) was
+  ever waited and the panel's own `false` cannot see it. The example
+  takes a program-supplied `wait_ms` under a stated contract (at least
+  the milliseconds asked, every time; a loop of `ms + 1` ticks on a
+  running ticker does it; inside a dispatch it holds every other object,
+  so a wake after the kernel runs is spread over time events). Compiled
+  over the RP2040's SpiHost with a declared `wait_ms`.
+- docs/rp2040/adc.md (both copies), docs/rp2350/adc.md: the temperature
+  read dereferenced `Adc::read()`'s optional unchecked and `init()`'s
+  answer was ignored; both are tested now. Compiled on both targets.
+- docs/stm32f4/dac.md (both copies): `delay_us(clock, 20)` discarded a
+  `[[nodiscard]]` bool (an error under -Werror) and hid that the wait
+  happens only with SysTick counting; now tested, the prerequisite in
+  the line-by-line. Compiled on the STM32F429. docs/stm32f4/platform.md
+  and docs/rp2350/clock.md's short-wait lines likewise;
+  docs/rp2040/pwm.md's `delay_us(clock, 100'000)` (refused) replaced by
+  a window the program times.
+- docs/design/serial.md: "neither the handlers nor write_byte mask
+  interrupts" was the ring's property extended to the transport; the
+  STM32G0's write_byte masks around CR1 every byte. Narrowed.
+- brio/util/nv_record.hpp: the opening promised "no value" for every
+  torn write while store()'s comment records the exception (the magic
+  written first; after clear(), a tear right after it revives the old
+  record); the opening, the validity paragraph and clear()'s comment now
+  say so, and the "days vs years" endurance claim is replaced by its
+  conditions. Comments only, token-identical.
+- docs/rp2040/README.md: `Rp2040Platform<TB>` -> `Rp2040Platform<core,
+  TB>` on `CoreTicker<core>`. docs/ch32vx03/README.md: the build block's
+  `console` target -> `<app>`.
+- docs/design/gfx.md and docs/avrxt/adc.md: the openings rewritten
+  directly - the component, its use, its one trap - with no inventory of
+  the page and no nested definitions.
+- docs/design/power.md (the ch32vx03 and rp2350 rows), analog.md (the
+  ch32vx03 row), clock.md (the ch32vx03 row): each cell reduced to the
+  realization and the restriction that decides a choice, the full text
+  moved word for word into a "#### ... in detail" subsection after the
+  table, linked from the row.
+- docs/host/simulator.md: the one page the local pass had not reached,
+  given its additive pass (the reader's orientation, the smallest use
+  compiled and run on Linux, what decides correctness: who creates the
+  segments, naming before the viewer reads, `publish()`, input seen in
+  `idle()`, the name limit, a stale segment, no viewer attached) with
+  five sentences corrected against the code (today's display is
+  memory-mapped, not write-only; the quadrature's lost-count behaviour;
+  the slot counts the program writes; the viewer's one-row layout; the
+  reserved bytes the layout tables omitted) and one cold-reader round
+  applied. Not established: whether the program and viewer ever ran on
+  macOS (the 31-character cap and the single ftruncate kept as written);
+  the viewer window itself was read from cli/gfxview.py, not run. A
+  second fact check (which drove the viewer offscreen and measured the
+  segments' lifecycle) found ten more defects, applied: the wheel claim
+  narrowed to 120-unit notches, the verified/configured/unavailable
+  status stated for the build, the window and macOS, a restarted viewer
+  reads the current names, the byte order is the host's and unchecked,
+  the kernel-loop argument, the pad's definition and the interrupt's
+  post, the signals measured, the constructor's own attach window, the
+  missing includes, source path and binary path, and an "implemented but
+  not bench-verified" list (the window, macOS). Viewer findings recorded
+  below, not fixed.
+- docs/README.md and CLAUDE.md: the writing rules gained, as
+  replacements of their overlapping sentences: an example obeys the
+  contracts it teaches; a block says what it is and what an excerpt
+  assumes; a claim about an operation is read through the helpers on its
+  path; an exception narrows the opening in the same change; purpose
+  and prerequisite are questions, not templates; a table cell past about
+  eighty words moves to prose; two reviews (a cold reader and a check
+  against the code), snippets compiled in context, unperformed checks
+  stated.
+
+A second reader and fact check of this pass found fifteen defects,
+applied: `brio::delay_us` has no cap on the AVR, so "refuses a tick or
+more" holds on the 32-bit targets alone (every copy now says so); a wait
+of `ms + 1` ticks is right only at 1 kHz, the general form is
+`ticks_from_ms<P>(ms) + 1` with interrupts enabled; the panel has no
+path that spreads its wake over time events (the four waits add up to
+335 ms; the wake belongs before the kernel runs, or the program accepts
+the hold), and its verb table and "How to use it" lead repeated the
+unconditioned `delay_ms`; NvRecord's revived-record case has a second
+sequence (a new version over a same-sized old record, torn after the
+version byte, reads old bytes as the new type), now in the opening, the
+validity paragraph, load()'s, store()'s and the class comment,
+persistent_panic.hpp's take() and docs/avrxt/nvm.md; serial.md's
+narrowing also covers the transmit engines' claim under the mask and
+points at a real place; the ADC snippets left `mv` and `centi` unused
+(an error under the projects' -Wall -Wextra -Werror) and named the wrong
+cause for a failed `init()` - the readings now go into the program's own
+variables and the causes are each target's; the same unchecked
+`delay_us` stood in docs/stm32f4/adc.md, brio/stm32f4/dac.hpp,
+brio/stm32f4/delay.hpp and brio/rp2350/delay.hpp (a void cast with no
+reason), and `init()`'s answer was ignored in brio/rp2040/adc.hpp and
+brio/rp2350/adc.hpp; the "in detail" subsections had swallowed the
+general text that followed the tables (moved to the end of each
+Realizations section); gfx.md still opened with its own table of
+contents; dac.md put the hazard on the write where it is the output's
+validity; the rp2350 power cell said the sites move clk_ref where they
+keep it; `Mtime::start()`'s bool was ignored in docs/rp2350/clock.md.
+Every corrected fragment recompiled from the page's own text with the
+target's flags and -Werror: the RP2040 and RP2350 ADC blocks, the
+STM32F4 DAC and ADC blocks, the panel's wake over the RP2040's host.
+
+Documentation deferred:
+- docs/ch32v00x/README.md's prologue figure (nine cycles against the
+  platform page's three) and map row; docs/ch32vx03/README.md's map
+  counts: the operational pages' cells, each a measurement to reconcile,
+  not a rename.
+- The process words inside bench findings the fact checks listed
+  (rp2350, ch32vx03), kept word for word by the pass's rule.
+
+Implementation issues recorded (none taken; each in its batch's open
+facts above): the RP2350's `Lposc::clear_bad_password()`, `NvRecord`'s
+write order against `clear()`, the PL011 host's `harvest()` mask, the
+CDC class's `reset()` from the controller's interrupt, the power
+manager's queue depth, the WCH `Pin::output(level)` before the gate,
+the I2C hosts' last byte.
+
+Tool findings recorded (cli/gfxview.py, not fixed here): the wheel's
+`angleDelta // 120` floors a fine wheel's events (small steps forward
+turn nothing, backward a whole detent); a viewer started after the
+program keeps its "waiting for" title; stale docstrings ("one quadrature
+count a notch", "in a grid"); brio/host/sim_panel.hpp's `buttons`
+comment ("slots that mean anything") against the constructor's fixed 8
+and 4; sim_display.hpp and shared_segment.hpp cite simulator.md for
+"failures throw" where the page states the name-length throw alone.
+
+Hardware checks still needed: the panel's wake timing on silicon with a
+program's `wait_ms` (the pass compiled the example and checked the
+contract; no board ran it); the DAC's tWAKEUP with the ticker running
+(the page's finding predates the corrected example).
+
 ## What remains
 
 The credit of the cloud sessions ended with the sixth batch; the local
@@ -11469,8 +11614,7 @@ document and every header of the seven target strata the cloud did not
 and four documents, the headers of `brio/host/` and the IP strata's
 documents with their headers. Not reached:
 
-1. `docs/host/simulator.md` (the additive pass; the host headers it
-   describes are done) and the vendor pages' links.
+1. The vendor pages' links (`docs/<target>/vendor/README.md`).
 2. The operational pages' cells the local batches found stale, listed
    under each batch's open facts: `docs/rp2040/README.md`'s
    `Rp2040Platform<TB>`, `docs/ch32v00x/README.md`'s prologue figure

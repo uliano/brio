@@ -3,10 +3,20 @@
  *
  * A typed value that survives a power cycle: the byte-granular
  * nonvolatile store as a concept, and one record layout over it. A
- * caller gets a struct written to the store and read back whole, or
- * read back as "no value" when the store holds nothing it can trust
- * (erased, written by an older layout, or torn by a power loss), with
- * each store touching only the bytes that changed.
+ * record is one typed value at a fixed offset, checked by its version
+ * byte and its CRC when loaded, updated in place with no second
+ * committed copy, each store touching only the bytes that changed. An
+ * update cut short (a refusal, a time-out, a power loss) that reached
+ * the payload or the checksum leaves a record load() reports as "no
+ * value", as an erased store and one written by an older layout are; one
+ * that reached nothing leaves the previous record standing. Two tears
+ * revive what should be gone: after clear(), which erases the magic byte
+ * alone, a store cut short right after that byte makes the PREVIOUS
+ * value valid again; and a store of a new version over an old record of
+ * the same size, cut short right after the version byte, leaves the old
+ * payload under the new version with the old checksum still matching,
+ * so load() returns old-layout bytes as the new type - store()'s comment
+ * has both sequences.
  *
  * The smallest use names the value's type, a store and an offset, then
  * loads and stores it:
@@ -50,18 +60,27 @@
  * first and writes only the bytes that actually differ. Storing the
  * same value twice costs zero cycles of endurance; changing one field
  * of a struct costs the bytes of that field plus the two checksum
- * bytes. A record that is rewritten every second lives for days if it
- * is written blindly and for years if it is written this way.
+ * bytes. What that buys depends on the workload: a value stored again
+ * unchanged costs nothing, a changing field costs its own bytes and the
+ * checksum's two every time, so the checksum bytes wear at the rate the
+ * value changes, and a lifetime figure is the store's rated endurance
+ * against that rate - not a property of the record.
  *
  * Validity. Four header bytes precede the payload: a magic byte, a
  * version byte, and the CRC-16 of the payload. load() returns the value
  * only when all three agree - an erased store (0xFF everywhere), a
  * record written by an older layout, and a write torn by a power loss
  * are all indistinguishable from "no value", which is exactly what the
- * caller can act on. The magic is deliberately not rewritten around
- * each store: the checksum already catches a tear, and rewriting the
- * magic twice per store would wear one byte at twice the rate of the
- * payload it guards.
+ * caller can act on - with the two exceptions above: a store over a
+ * cleared record writes the magic first, so a tear right after it
+ * revives the old payload and its old checksum, which still agree, and
+ * a store of a new version over a same-sized old record writes the
+ * version before the checksum, so a tear between them leaves the old
+ * payload readable as the new type. The
+ * magic is deliberately not rewritten around each store: the checksum
+ * already catches a tear inside the payload, and rewriting the magic
+ * twice per store would wear one byte at twice the rate of the payload
+ * it guards.
  *
  * The run. A run is a stretch of neighbouring bytes. A store whose
  * silicon writes several of them in one operation (a page buffer) says
@@ -223,7 +242,10 @@ inline constexpr uint16_t nv_record_size =
  * T must be trivially copyable: the record is its object representation,
  * byte for byte, and nothing is serialized. `version` travels in the
  * header, so changing T's layout and bumping the version makes every
- * older record read back as "no value" instead of as garbage. A monostate:
+ * older record read back as "no value" instead of as garbage - but for
+ * a store of the new version over it cut short right after its version
+ * byte, which leaves the old payload readable as the new type (store()'s
+ * comment). A monostate:
  * every verb is static and nothing is constructed (one record is one
  * place in one store, named by its type). `offset` is where its
  * nv_record_size<T> bytes live; nothing checks that two records or a
@@ -243,8 +265,10 @@ struct NvRecord {
 
     /// The stored value, or nothing when the store holds no valid record
     /// of this version at this offset (erased, older version, or a write
-    /// torn by a power loss). Reads only; a store too small for the
-    /// record's offset answers nothing as well.
+    /// torn by a power loss) - or, after one of the two torn-write
+    /// sequences store()'s comment records, a previous value as if it
+    /// were current. Reads only; a store too small for the record's
+    /// offset answers nothing as well.
     static std::optional<T> load() {
         if (!fits()) {
             return std::nullopt;
@@ -287,7 +311,12 @@ struct NvRecord {
     /// clear() left in place, a call ended right after the magic (on a
     /// byte store, or a run store whose first run is the magic alone)
     /// makes the OLD record valid again: PersistentPanic's take() then a
-    /// report() cut there brings back the failure take() consumed.
+    /// report() cut there brings back the failure take() consumed. Over
+    /// a valid record of an OLDER version with the same size, a call
+    /// ended right after the version byte (the checksum comes later in
+    /// address order) leaves the old payload and its still-matching
+    /// checksum under the new version, and load() returns those bytes as
+    /// the new type.
     /// Zero, writing nothing, when the store is too small for the
     /// record's offset.
     ///
@@ -339,8 +368,13 @@ struct NvRecord {
 
     /// Invalidate the record with one byte write: the magic goes to the
     /// erased pattern and load() reports nothing from here on. The
-    /// payload is left as it is - this is a "consume it" verb, not a
-    /// scrub. Waits for the write like store(); true when the magic is
+    /// payload and its checksum are left as they are - this is a
+    /// "consume it" verb, not a scrub, and that is its limit: the next
+    /// store() writes the magic first, so a store cut short right after
+    /// that byte makes this record valid again (store()'s comment). A
+    /// consume that must hold through any later tear needs a scrub of
+    /// the checksum too, which nothing here does. Waits for the write
+    /// like store(); true when the magic is
     /// erased (or already was), false when the store refused or never
     /// became ready.
     static bool clear() {

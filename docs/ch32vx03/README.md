@@ -96,10 +96,10 @@ project, so every CMake command runs from `ch32vx03/`:
 
 ```bash
 (cd ch32vx03 && cmake --preset ch32v203c8-release)                      # configure (once, or after adding an app)
-(cd ch32vx03 && cmake --build --preset ch32v203c8-release --target console)
-(cd ch32vx03 && cmake --build --preset ch32v203c8-release --target console-upload)
-(cd ch32vx03 && cmake --build --preset ch32v303vc-release --target console)   # the CH32V303: rv32imafc_xw, ilp32f
-brio flash <board> console    # the same thing through the bench's one command
+(cd ch32vx03 && cmake --build --preset ch32v203c8-release --target <app>)
+(cd ch32vx03 && cmake --build --preset ch32v203c8-release --target <app>-upload)
+(cd ch32vx03 && cmake --build --preset ch32v303vc-release --target <app>)   # the CH32V303: rv32imafc_xw, ilp32f
+brio flash <board> <app>      # the same thing through the bench's one command
 brio run <board> z            # a suite's single-board set, judged
 brio check ch32vx03 [name]    # the family compile check, no hardware
 ```

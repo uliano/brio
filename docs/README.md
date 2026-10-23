@@ -104,18 +104,65 @@ documents), and the strata that sit between `util/` and the families:
   bold marks a consequence the reader must remember, a correctness
   rule first of all. A link names its destination, never "section 7"
   or "see above"; where a tool needs a letter or a code, the code
-  stands beside its meaning. A table compares short parallel facts; a
-  causal explanation is prose. Precision is never traded for a
-  simplification the code does not support: the conceptual rule, what
-  the compiler checks, what a runtime check catches, what stays the
-  programmer's duty and what was measured on which hardware are kept
-  apart, and a measured cost names its build, clock and part.
+  stands beside its meaning. A table compares short parallel facts: a
+  cell that needs a causal explanation, several qualifications or a
+  hardware narrative (about eighty words is the signal) moves that text
+  into linked prose and keeps in the row the one restriction that
+  decides the reader's choice, deleting no measurement or exception.
+  Precision is never traded for a simplification the code does not
+  support: the conceptual rule, what the compiler checks, what a
+  runtime check catches, what stays the programmer's duty and what was
+  measured on which hardware are kept apart, and a measured cost, a
+  latency, an endurance or a precision names the conditions that make
+  it true (its build, clock and part; for endurance which bytes change
+  and how often; for time the timebase and its phase uncertainty) - an
+  optimization is never written as a guarantee about every workload.
+  Purpose, the first useful action and the prerequisite that decides
+  correctness are questions the author answers, not headings or
+  sentence templates: a page writes directly about the component,
+  opens with no inventory of its own contents, and introduces the
+  project's ideas one at a time rather than through nested definitions.
+- **An example obeys the contracts it teaches.** A code block a reader
+  may copy respects the called functions' actual contracts: it checks
+  an optional result before access, acts on a result that says whether
+  setup, timing or data validity succeeded, and hides no required check
+  to be shorter; a void cast carries the reason why ignoring that
+  result is right there. A block says what it is - a complete example,
+  an excerpt from a named source, or an illustration - and an excerpt
+  states the setup it assumes (a running ticker, a clock task's
+  `init()`, a helper the program supplies) and what that helper must
+  do, never calling a fragment the whole example. The same example
+  written twice on one page is one maintenance unit, checked in both
+  places on every change.
+- **A claim about an operation covers the helpers on its path.** Before
+  a page or a header says "never waits", "never masks", "always
+  succeeds" or "safe from any context", the helpers that operation
+  calls and the policies or engines it may be configured with are read:
+  a property of a buffer or a type is not a property of the whole
+  operation. For a callback or an adapter the units, the accepted
+  range, the failure behaviour, the context and the lifetime are
+  verified - a parameter named `delay_ms` proves nothing about what the
+  callable does. When a detailed section establishes an exception, the
+  opening, the examples, the API comment and every summary of the same
+  guarantee are narrowed in the same change; a correctness-critical
+  exception never stays hidden below an unconditional promise.
 - **A step is verified, configured or unavailable - and says which.**
   A workflow page states, for every step, whether it was performed on
   the named configuration, is configured but awaits an interactive
   check, exists only on the command line, or is blocked and why. A
   configuration file is evidence to examine, not proof that a session
   succeeds; a result obtained on one board is not a claim about another.
+- **Writing is reviewed two ways.** A reader who does not know the
+  implementation, given the page alone, explains its purpose, its use
+  and its main trap; a separate check against the code, the
+  configuration or the measurement establishes that the explanation
+  and the example are true - a sentence a reader cites proves that the
+  page says it, not that the code keeps it. A copied snippet is
+  compiled in its stated context with the target's normal warning
+  policy where the toolchain is at hand; a check not performed is
+  stated in the work record with its local handoff, and source
+  inspection, a passing prose checker or a host test that counts
+  callback arguments is never represented as hardware verification.
 - **Teaching examples are maintained applications; bench apps are
   disposable.** A MAINTAINED TEACHING EXAMPLE is an application the
   documentation reads and explains (`blink` today, in every project

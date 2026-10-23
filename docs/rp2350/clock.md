@@ -315,8 +315,12 @@ const auto hz = SysClock::count_hz(brio::ClockIn<0>::count_source);
 A busy-wait, and the one thing it needs first:
 
 ```cpp
-brio::Mtime::start(clock);            // once, in main(); the ruler
-(void)brio::delay_us(clock, 20);      // false if the ruler is not running
+if (!brio::Mtime::start(clock)) {     // once, in main(); the ruler (false: see mtime.hpp)
+    // no ruler: no delay_us below will wait
+}
+if (!brio::delay_us(clock, 20)) {     // false, nothing waited, with the ruler stopped
+    // wait another way
+}
 ```
 
 ## Bench findings

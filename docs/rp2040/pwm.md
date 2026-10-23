@@ -166,7 +166,8 @@ A frequency measured with no capture unit:
 using Edges = brio::PwmEdgeCounter<15>;    // slice 7's B pin
 Edges::setup();
 Edges::run(true);
-brio::delay_us(clock, 100'000);            // or any window the timer times
+// ... 100 ms later, in the handler of a TimeEvent the program armed (a
+// wait of a tick or more is a time event's, never delay_us()'s):
 Edges::run(false);
 const uint32_t hz = Edges::count() * 10u;  // over 100 ms
 ```

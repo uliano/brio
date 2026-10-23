@@ -33,9 +33,15 @@ each side ([ring.md](ring.md)), interrupt handler bodies the
 application binds to its vectors, and the error counters as named
 statics, inspectable from gdb. The rings default to 64 bytes for
 receive and 256 for transmit, with 8-bit indices on both sides, so
-they are lock-free on every stratum, the AVR included: neither the
-handlers nor `write_byte` mask interrupts. The driver moves bytes and
-nothing else; `brio::print` formats on top of any `ByteSink`.
+publishing an index needs no interrupt masking on any stratum, the AVR
+included ([ring.md](ring.md)). That is a property of the ring, not of
+the whole transport: `write_byte` may still mask interrupts briefly -
+the STM32G0's does on every byte, around the control register its
+handler writes too, and every family's does under a transmit engine,
+around the claim of the DMA channel (the costs counted after "The run
+is the unit" below) - and the target's UART document names those
+critical sections. The driver moves
+bytes and nothing else; `brio::print` formats on top of any `ByteSink`.
 
 ### The run is the unit, the byte its degenerate case
 

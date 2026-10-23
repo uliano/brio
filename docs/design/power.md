@@ -56,10 +56,10 @@ offer, and whether the kernel tick survives the rung.
 | stm32g0 | `Stm32g0SleepSite`, `Stm32g0TimedSleepSite` and `Stm32g0LptimTimedSleepSite` over `Pwr` (`stm32g0/sleep.hpp`) | `none` and `light` are both Sleep (the only mode between Sleep and Stop wants the whole program at 2 MHz, which a site may not do), `standby` is Stop 0, `deep` is Stop 1; Standby and Shutdown are off the ladder because the program does not resume from them; a SYSCLK restore and a ticker pause ride the two functions; the timed sites take the RTC or the LPTIM as alarm and witness, and both refuse a `Tickless` platform, whose timebase counts through the Stop by itself |
 | stm32f4 | `Stm32f4SleepSite` and `Stm32f4TimedSleepSite` over `Pwr` (`stm32f4/sleep.hpp`) | `none` and `light` are both Sleep (this family has nothing between Sleep and Stop), `standby` is a Stop on the main regulator, `deep` the same Stop on the low-power one with the flash in power-down, one mode with two prices, so `armed()` answers from the mirror the site wrote and `deep` for a Stop somebody else armed; Standby is off the ladder and enforced off it, every `arm()` clearing PDDS, because its wake is the reset vector; a SYSCLK restore rides `disarm()` (a Stop leaves the core on the HSI with the PLL, the HSE and over-drive gone) and the ticker is paused across a deep rung, which is also ES0298 2.2.1's workaround; the timed site takes the RTC whole, the wake-up timer as alarm and the calendar and sub-second counter as witness, and the Stop is left only through the NVIC line the application must enable |
 | ch32v00x | `Ch32SleepSite` and `Ch32TimedSleepSite` over `Pwr` (`ch32v00x/sleep.hpp`) | `light` is Sleep, `standby` and `deep` are both Standby, the deepest this silicon has (`armed()` reports `standby` for a `deep` request, the SAM's rule); the core wakes from a Standby on the HSI with the PLL off, so `disarm()` restores the clock before anything clocked from HCLK runs right; the tick (the STK) stops with the core, so the plain site restricts a Standby to no armed deadline and the timed site lifts that with the AWU as the alarm, an alarm with no readable count, so the slept span is the programmed interval when the AWU is what woke the core and nothing otherwise, and the LSI it runs on is measured at init against the STK, the counts rounded up so an alarm lands late and never early; the AWU's line is enabled in the PFIC so its wake is a level the core cannot miss on the cycle it goes to sleep (an edge-only wake can, measured), which makes the AWU's vector one the program binds to the site's body |
-| ch32vx03 | `Ch32vx03SleepSite` and `Ch32vx03TimedSleepSite` over `Pwr` (`ch32vx03/sleep.hpp`) | `none` and `light` are both Sleep (this family has nothing between Sleep and Stop), `standby` is a Stop on the main regulator, `deep` the same Stop on the low-power one, one mode with two prices (measured: the second costs 30 us more at the wake on the CH32V203C8T6 and 61 us on the CH32V303VCT6), so `armed()` answers from the mirror the site wrote and `deep` for a Stop somebody else armed; Standby is off the ladder and enforced off it, every `arm()` clearing PDDS, because every exit measured on this silicon is a power reset (the RTC alarm's line as an interrupt, the same line as an event alone, even a pad's line as an event, which the chapter does not list as an exit at all, and on the CH32V303VCT6 the independent watchdog's time-out); a SYSCLK restore rides `disarm()` (a Stop leaves the core on the HSI with the PLL off, and putting a PLL rate back takes 1.4 to 2 ms of crystal start-up) and the tick is paused by the platform's idle hook rather than by the site, because with this core's WFE idiom a merely pending tick would end the sleep before it began, at the price of one dropped tick, which the timed site's witness repairs. And the one thing no other target has: a sleep of any depth starves every bus master but the core here (measured on both parts), so the site refuses every rung but `none` while `bus_masters_active()` is not zero (a DMA channel of either controller while its EN is up and a USB controller from its pull-up to its detach each hold one count), and the kernel's idle path makes the same test before it sleeps at all, which is what turns "a program with USB never idles" from a rule into a mechanism. The timed site takes the RTC's counter as alarm and witness on a 1024 Hz tick out of the crystal, the counts rounded up and the span down so a wake is late and a resync short: a 500 ms deadline met at 502 ms (the CH32V203C8T6) and 501 ms (the CH32V303VCT6) of wall and of kernel tick |
+| ch32vx03 | `Ch32vx03SleepSite` and `Ch32vx03TimedSleepSite` over `Pwr` (`ch32vx03/sleep.hpp`) | `none` and `light` are both Sleep, `standby` a Stop on the main regulator, `deep` the same Stop on the low-power one; Standby is off the ladder (every measured exit is a power reset); a sleep of any depth starves every bus master but the core, so every rung but `none` is refused while a DMA channel or the USB controller is active; the timed site takes the RTC at 1024 Hz. Detail: [The CH32V203 and CH32V303 realization in detail](#the-ch32v203-and-ch32v303-realization-in-detail) |
 | ch32x035 | none | not written: this series has no RTC and no low-speed oscillator, so the auto-wakeup on SYSCLK/1024 is the one wake a Stop or a Standby has, and the site is born with it; until then `idle()` is the plain Sleep and nothing in the stratum sets SLEEPDEEP ([the CH32X035 page](../ch32x035/README.md)) |
 | rp2040 | `Rp2040SleepSite` and `Rp2040TimedSleepSite` (`rp2040/sleep.hpp`) | `light` is a WFI (which already reaches the chip's SLEEP state when core 1 sleeps too, measured), `standby` the SLEEP state with the program's SLEEP_ENx gates pruned, `deep` DORMANT on the crystal or on the ring oscillator, which is not a WFI, so the site installs the platform's `sleep_hook` and the idle path runs it: the clocks onto the oscillator, the PLL off, the keyword, the tree restored by `Clock::init()` after the wake; `arm(deep)` refuses with no way back configured (a GPIO event, or the RTC's alarm with the ring oscillator the one stopped and the crystal keeping clk_rtc), because the keyword would be the chip's last instruction; the tick (SysTick) counts through a standby, so nothing freezes there, and the timed site's timer alarm is the deadline's belt over that; a dormant freezes everything and the calendar is the alarm and the witness, in whole seconds |
-| rp2350 | `Rp2350SleepSite` and `Rp2350TimedSleepSite` (`rp2350/sleep.hpp`) | `light` is a plain sleep instruction with every gate open, `standby` the chip's SLEEP state, which on this silicon is the program's SLEEP_ENx pruning set and no processor bit at all (no SLEEPDEEP takes part in its condition) plus the one thing the two architectures do not share: "a processor is asleep" is a signal the core releases, and a Cortex-M33 releases it on any WFI while a Hazard3 releases it only with MSLEEP.POWERDOWN set (measured: without it the pruned masks are never applied), so the standby rung arms `sleep_releases_power_request()` and each half's core header spells it; `deep` is DORMANT on the crystal or on the ring oscillator, not a sleep instruction, so the site installs the platform's `sleep_hook`, and `arm(deep)` refuses with no way back configured. The way back is where this chip surprises: the always-on timer's alarm ends a dormant only while clk_ref is still running (measured four ways over), so both sites move clk_sys to the oscillator they are about to stop through its own aux mux and leave clk_ref on one that keeps going, the low-power oscillator for a crystal dormant and the crystal for a ring-oscillator one; a GPIO event needs no clock at all and is the other way out. The P1.m states, where the switched core has no supply, are off the ladder and behind `Powman::power_down()`, because leaving one is a boot and not a wake: the only state that crosses is the always-on block's eight scratch words, and on the bench the debug port's rescue does not reach a powered-down core, so the driver's refusal without an armed wake is the only way back. The timed site takes the always-on timer as alarm and witness on every rung, milliseconds against a 1000 Hz tick, the deadline rounded up and the span down; the kernel timebase counts through a standby on both halves, so the resync has at most a tick to do there and the whole of a dormant afterwards ([the RP2350 sleep page](../rp2350/sleep.md), [the RP2350 power manager page](../rp2350/powman.md)) |
+| rp2350 | `Rp2350SleepSite` and `Rp2350TimedSleepSite` (`rp2350/sleep.hpp`) | `light` a plain sleep instruction, `standby` the chip's SLEEP state as the program's SLEEP_ENx pruning and no processor bit (a Hazard3 releases the power request only with MSLEEP.POWERDOWN set), `deep` DORMANT through the platform's `sleep_hook`, refused with no way back configured; the alarm ends a dormant only while clk_ref runs, so the sites keep clk_ref on an oscillator that keeps going; the P1.m states are off the ladder, behind `Powman::power_down()`. Detail: [The RP2350 realization in detail](#the-rp2350-realization-in-detail) |
 | host | none | the model's round, guard and locks are host-tested against a scripted site (`test_power`) |
 
 Three things the realizations proved about the model, each with no
@@ -119,6 +119,77 @@ its coarsest permitted split included, and a test of "never early" is
 only fair if the deadline is armed on a tick edge, since a deadline
 armed at an arbitrary phase is honestly N - 1 to N milliseconds away
 ([the STM32G0 power page](../stm32g0/pwr.md)).
+
+#### The CH32V203 and CH32V303 realization in detail
+
+`none` and `light` are both Sleep (this family has nothing between Sleep
+and Stop), `standby` is a Stop on the main regulator, `deep` the same
+Stop on the low-power one, one mode with two prices (measured: the
+second costs 30 us more at the wake on the CH32V203C8T6 and 61 us on the
+CH32V303VCT6), so `armed()` answers from the mirror the site wrote and
+`deep` for a Stop somebody else armed; Standby is off the ladder and
+enforced off it, every `arm()` clearing PDDS, because every exit
+measured on this silicon is a power reset (the RTC alarm's line as an
+interrupt, the same line as an event alone, even a pad's line as an
+event, which the chapter does not list as an exit at all, and on the
+CH32V303VCT6 the independent watchdog's time-out); a SYSCLK restore
+rides `disarm()` (a Stop leaves the core on the HSI with the PLL off,
+and putting a PLL rate back takes 1.4 to 2 ms of crystal start-up) and
+the tick is paused by the platform's idle hook rather than by the site,
+because with this core's WFE idiom a merely pending tick would end the
+sleep before it began, at the price of one dropped tick, which the timed
+site's witness repairs.
+
+And the one thing no other target has: a sleep of any depth starves
+every bus master but the core here (measured on both parts), so the site
+refuses every rung but `none` while `bus_masters_active()` is not zero
+(a DMA channel of either controller while its EN is up and a USB
+controller from its pull-up to its detach each hold one count), and the
+kernel's idle path makes the same test before it sleeps at all, which is
+what turns "a program with USB never idles" from a rule into a
+mechanism.
+
+The timed site takes the RTC's counter as alarm and witness on a 1024 Hz
+tick out of the crystal, the counts rounded up and the span down so a
+wake is late and a resync short: a 500 ms deadline met at 502 ms (the
+CH32V203C8T6) and 501 ms (the CH32V303VCT6) of wall and of kernel tick.
+
+#### The RP2350 realization in detail
+
+`light` is a plain sleep instruction with every gate open, `standby` the
+chip's SLEEP state, which on this silicon is the program's SLEEP_ENx
+pruning set and no processor bit at all (no SLEEPDEEP takes part in its
+condition) plus the one thing the two architectures do not share: "a
+processor is asleep" is a signal the core releases, and a Cortex-M33
+releases it on any WFI while a Hazard3 releases it only with
+MSLEEP.POWERDOWN set (measured: without it the pruned masks are never
+applied), so the standby rung arms `sleep_releases_power_request()` and
+each half's core header spells it; `deep` is DORMANT on the crystal or
+on the ring oscillator, not a sleep instruction, so the site installs
+the platform's `sleep_hook`, and `arm(deep)` refuses with no way back
+configured.
+
+The way back is where this chip surprises: the always-on timer's alarm
+ends a dormant only while clk_ref is still running (measured four ways
+over), so both sites move clk_sys to the oscillator they are about to
+stop through its own aux mux and leave clk_ref on one that keeps going,
+the low-power oscillator for a crystal dormant and the crystal for a
+ring-oscillator one; a GPIO event needs no clock at all and is the other
+way out.
+
+The P1.m states, where the switched core has no supply, are off the
+ladder and behind `Powman::power_down()`, because leaving one is a boot
+and not a wake: the only state that crosses is the always-on block's
+eight scratch words, and on the bench the debug port's rescue does not
+reach a powered-down core, so the driver's refusal without an armed wake
+is the only way back.
+
+The timed site takes the always-on timer as alarm and witness on every
+rung, milliseconds against a 1000 Hz tick, the deadline rounded up and
+the span down; the kernel timebase counts through a standby on both
+halves, so the resync has at most a tick to do there and the whole of a
+dormant afterwards ([the RP2350 sleep page](../rp2350/sleep.md), [the
+RP2350 power manager page](../rp2350/powman.md)).
 
 ## The ladder
 
