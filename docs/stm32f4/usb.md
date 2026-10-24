@@ -229,7 +229,7 @@ extern "C" void OTG_FS_IRQHandler() { Device::isr(); }
 brio::print(Port{}, "hello", brio::crlf);                   // once the host has configured it
 ```
 
-The port is a `ByteTransport`: a console's SerialPort runs over it as
+The port is a `ByteTransport`: a console's LineReader runs over it as
 over a UART. THE CLOCK IS THE ONE THING TO GET RIGHT FIRST - the rate a
 program picks must give the PLL's Q output 48 MHz exactly, and
 `Clock::usb_hz` says what a rate gives: from a 25 MHz root 96 MHz does

@@ -3,22 +3,22 @@
 This page decides how a program talks over a UART: the transport
 every family writes under one surface (bytes in a run, interrupt
 handler bodies the application binds, counters), the line service over
-it (`SerialPort`, which turns received bytes into `LineReceived` events
+it (`LineReader`, which turns received bytes into `LineReceived` events
 for an active object), the output policy (`print` waits, received
 bytes are dropped and counted), and how numbers become text. It is
 written for an embedded programmer who wants a console on a board:
 lines typed by a person or a script in, `print` out.
 
 The smallest use is three types and one rule. A `Uart` of the family,
-with the sizes of its two rings as template arguments; a `SerialPort`
+with the sizes of its two rings as template arguments; a `LineReader`
 over it, an active object (a component with its own event queue,
 [kernel.md](kernel.md)) which drains the receive ring and posts each
 complete line to another active object of the program's, the line
 sink; and `print(uart, ...)` wherever text goes out. The rule that
-decides correctness: **the line sink must come before `SerialPort` in
+decides correctness: **the line sink must come before `LineReader` in
 the list of active objects the application gives Tenuto, the kernel**,
 because the line is lent to the sink for one dispatch (one call of the
-sink's handler) and `SerialPort` overwrites the buffer with the next
+sink's handler) and `LineReader` overwrites the buffer with the next
 line it assembles once it runs again; a sink that saved the pointer
 would read that next line. Tenuto refuses a list in the wrong order
 when the program is compiled. And one cost to know: `print` waits
@@ -111,8 +111,8 @@ port having a vector a side, and `dma_isr()` where a receive engine
 has a vector of its own) return `true` when the receive ring holds
 bytes the consumer has not been told of, and the application's
 interrupt glue posts one `RxActivity` on `true`. `RxActivity` is the
-one event that tells the consumer (`SerialPort`) that bytes are
-waiting; the interrupt glue posts it on that edge, and `SerialPort`
+one event that tells the consumer (`LineReader`) that bytes are
+waiting; the interrupt glue posts it on that edge, and `LineReader`
 posts it to itself when it had to stop a drain early. Told once: the next
 `true` waits until the consumer has found the ring empty, so there is
 no flood of events and no lost wakeup. No owner polls for that edge on
@@ -180,7 +180,7 @@ an entry, is every family's receive path unless the program asks for
 more. A receive engine with its edge is a stream's opt-in: a
 transport whose bytes arrive faster than its interrupts can take them,
 or a program that wants the CPU off the per-byte path, names an engine
-in the transport's slot. `SerialPort` runs over either.
+in the transport's slot. `LineReader` runs over either.
 
 ### Realizations
 
@@ -192,7 +192,7 @@ and the four counters `frame_errors`, `parity_errors`, `rx_overruns`,
 `hw_overruns`; the two rings and the edge contract above; and five
 more, `set_baud(hz, baud)`, `release`, `can_baud`, `min_hz_for` and
 `rx_skips`, every byte the receive ring will not deliver, never
-cleared (`SerialPort`'s epoch, below). What differs is how the pins
+cleared (`LineReader`'s epoch, below). What differs is how the pins
 are named, how many vectors the silicon gives the port, and what each
 family's port has that the others' has not.
 
@@ -207,26 +207,26 @@ family's port has that the others' has not.
 | ch32x035 | `Uart<n, P, rx_size, tx_size, format, TxEngine, RxEngine, remap, opts>` = the task over `Usart<n>` (`ch32x035/usart.hpp`), n = 1..4 | the CH32V203's parameter list and surface, verbatim: the pins the instance's own under a remap code (`afio.hpp`'s columns, a code of 0 writes no register, a column whose TX or RX sits on the debug port's pads refused by `init()` while the probe owns them, one whose TX pad shares its package pin with another refused at compile time); the frame a template parameter of its own; one vector and `isr()`; the two engine slots take `NoDmaEngine` alone, the DMA chapter not being written here, so `dma_isr()`, `harvest()` and `dma_faults()` answer false and zero; every instance counts its divisor in HCLK, the series having no bus prescaler, and which instances a part offers is read off its pins (the CH32X035F8U6 has no USART1) |
 | rp2040 | `Uart<n, pins, rx_size, tx_size, TxEngine, RxEngine>` (`rp2040/uart.hpp`), the family's alias of the IP stratum's `Pl011Transport` (`pl011/uart.hpp`) | the PL011 with its 32-deep FIFOs: the pins are GPIO numbers under function 2, and table 279 decides which of them carry which instance; one vector and `isr()`; `write_byte()` and `write_bulk()` write an idle FIFO directly and arm the transmit interrupt only behind a full one, because the PL011's transmit interrupt is an edge that stays latched and not a level, so an idle transmitter takes 32 bytes with no interrupt, a long print takes one per FIFO level, and a refused byte writes nothing; the divisor's integer and fractional halves are latched by the LCR_H write that follows them; the same engine slots (`rp2040/dma.hpp`'s `DmaTxEngine`/`DmaRxEngine`, on any two distinct channels) with `dma_isr()`, `dma_faults()`, `harvest()`, `read_bulk()`, the receive run read off TRANS_COUNT by `harvest()`, the FIFO emptied and the credits cleared before a run, a run's completion onto a drained ring the engine's edge; the receive level's entry reads its sixteen entries without asking the flag register, the receive time-out (RT) the burst's tail; the four error interrupts armed and counted in `isr()` under an engine too, an overrun's sticky UARTRSR cleared there and its source masked until the next publish; the receive engine at HIGH_PRIORITY, the transmit at normal, and no level option, one bit, nothing above the ring ([dma.md](dma.md)); the run copy's crossover a member of the chip's traits (`copy_crossover`, 12 on both RP families) ([the RP2040 UART page](../rp2040/uart.md)) |
 | rp2350 | `Uart<n, pins, rx_size, tx_size, TxEngine, RxEngine>` (`rp2350/uart.hpp`) | the same PL011 and the same driver: the resource and the transport are the RP2040's verbatim because they are neither family's; they live in the IP stratum (`pl011/uart.hpp`), and what each family writes is a traits type. So everything the row above says of the transport holds here, and what this file adds is the chip's: the pads march in groups of four as on the RP2040 but over a longer bank, and every group's flow-control pads carry data too under a second function code (the CTS pad is also that instance's TX, the RTS pad also its RX), so a pad's function code is not a choice but a property of the pad, which is why the IP file keeps that code opaque and this file makes it a type; UARTCLK is clk_peri as before; and the one interrupt line per instance is bound under one name on both of this chip's processor architectures, the interrupt numbering being shared between them ([the RP2350 UART page](../rp2350/uart.md), [the PL011 page](../pl011/README.md)) |
-| host | none | `SerialPort` is host-tested over a scripted `ByteTransport` and over a transport lending a real ring's run, every case through both drains (`test_serial_port`); the IP stratum's own driver is tested against a PL011 made of RAM (`test_pl011`, `host/sim_pl011.hpp`), which is the second realization that proves it knows no chip |
+| host | none | `LineReader` is host-tested over a scripted `ByteTransport` and over a transport lending a real ring's run, every case through both drains (`test_line_reader`); the IP stratum's own driver is tested against a PL011 made of RAM (`test_pl011`, `host/sim_pl011.hpp`), which is the second realization that proves it knows no chip |
 
-## SerialPort (`util/serial_port.hpp`)
+## LineReader (`util/line_reader.hpp`)
 
-`SerialPort<Transport, P, LineSink>` is the active object above the
+`LineReader<Transport, P, LineSink>` is the active object above the
 driver: it drains the receive ring, feeds two `LineAssembler`s that
 alternate, and posts `LineReceived{char*}` to the line sink. The line
 (80 bytes by default) travels by reference and never enters a queue;
 it is valid and mutable only during the sink's dispatch. With both
-buffers in flight `SerialPort` stops draining (the ring absorbs, that
+buffers in flight `LineReader` stops draining (the ring absorbs, that
 is its job) and posts an `RxActivity` to itself to resume later.
 
-**The scheduling rule.** The line sink must precede `SerialPort` in
+**The scheduling rule.** The line sink must precede `LineReader` in
 Tenuto's list of active objects. The kernel then serves every posted
-line before `SerialPort` runs again, which is why its count of lines
+line before `LineReader` runs again, which is why its count of lines
 in flight can reset at the start of each dispatch and two buffers are
 exactly sufficient. The line is a `Lease::dispatch` loan
 (`Borrowed<char, Lease::dispatch>`,
 [kernel.md, "Payloads"](kernel.md#4-payloads-what-travels-inside-the-event-kernelborrowedhpp)):
-`SerialPort` declares `LendsTo = Subscribers<LineSink>` and Tenuto
+`LineReader` declares `LendsTo = Subscribers<LineSink>` and Tenuto
 refuses a list that violates the order. The sink may use the line only
 while handling `LineReceived`; it must not save the pointer for a
 later event.
@@ -260,7 +260,7 @@ that answer up by returning `consume()`'s `bool`; one whose
 `consume()` returns nothing (every Ring-backed transport) has a
 release that cannot refuse, and none of this is compiled for it: the
 byte loop and its 14 instructions are the same either way. Validated
-on the host (`test_serial_port`, a real `HardwareRing` over a scripted
+on the host (`test_line_reader`, a real `HardwareRing` over a scripted
 channel that writes while a run is held).
 
 **A gap between two runs is seen.** The stream a ring hands out can
@@ -365,7 +365,7 @@ serial suite's image, 10 in the console's, whose binding flattens the
 kernel's post). A transport whose release can refuse and that does not
 report its skips is refused at compile time
 (`test/family_ch32x035/neg/`). Validated on the host
-(`test_serial_port`: the scripted channel lapping a `HardwareRing`
+(`test_line_reader`: the scripted channel lapping a `HardwareRing`
 between two drains, the skip made by the drain's own look and by one
 outside it; a `SkipRing` dropping bytes between two runs, while a run
 is held, on a full ring with lines queued before the drop, while both

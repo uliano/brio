@@ -1077,7 +1077,7 @@ private:
  *    ring, discarded for FERR or PERR, lost to a buffer overflow - is
  *    reported to the receive ring (util/ring.hpp's SkipRing), whose
  *    consumer's next look skips everything queued; rx_skips() counts the
- *    skips, never cleared: SerialPort compares it at every run and tears
+ *    skips, never cleared: LineReader compares it at every run and tears
  *    the line a loss cut.
  *
  * The empty default constructor is intentionally available: an instance
@@ -1306,7 +1306,7 @@ public:
      * first byte, and a line's end is the console's terminator. A program
      * that reads no input binds the vector to rxc() and discards the
      * answer; one that does posts on it to the active object that
-     * assembles lines (util/serial_port.hpp's SerialPort).
+     * assembles lines (util/line_reader.hpp's LineReader).
      */
     // always_inline: single call site (the ISR binding) - see ticker.hpp
     // pit() for the register-set rationale. The registers are read here
@@ -1503,7 +1503,7 @@ public:
     /// The received bytes in place: the contiguous run ready to be read,
     /// never wrapping - the receive ring's consumer half under the ring's
     /// own names. With consume() it is util/stream.hpp's SpanSource,
-    /// which SerialPort drains a run at a time.
+    /// which LineReader drains a run at a time.
     static std::span<const uint8_t> read_span() { return m_rx.read_span(); }
 
     /// Release the first `count` bytes of read_span(), oldest first, clamped
@@ -1540,7 +1540,7 @@ public:
 
     /// The skips the receive ring has made since the program started,
     /// never cleared (modulo 2^8): util/stream.hpp's SkippingSource, the
-    /// epoch SerialPort compares at every run. One moves at the consumer's
+    /// epoch LineReader compares at every run. One moves at the consumer's
     /// look after a byte dropped on a full ring, discarded for FERR or
     /// PERR, or lost to a buffer overflow - the look that discards what
     /// the ring held (SkipRing) -, never when the loss is made.

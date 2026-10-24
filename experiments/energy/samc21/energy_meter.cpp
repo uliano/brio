@@ -55,9 +55,9 @@
 #include "samc21/sercom.hpp"
 #include "samc21/supc.hpp"
 #include "samc21/ticker.hpp"
+#include "util/line_reader.hpp"
 #include "util/print.hpp"
 #include "util/proto/line_parser.hpp"
-#include "util/serial_port.hpp"
 #include "util/timestamp.hpp"
 
 using P = brio::SamPlatform;
@@ -893,7 +893,7 @@ private:
         sizeof(routes) / sizeof(routes[0]);
 };
 
-using SerialLines = brio::SerialPort<Serial, P, Console, 80>;
+using SerialLines = brio::LineReader<Serial, P, Console, 80>;
 
 }  // namespace
 

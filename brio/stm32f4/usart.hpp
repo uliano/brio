@@ -22,8 +22,8 @@
  *  Uart<n, pins, ...>    the task: the interrupt-driven byte transport
  *                        with two rings and one ISR body - every
  *                        console's personality, a ByteTransport for
- *                        print() and SerialPort (util/stream.hpp's
- *                        concept, which is what lets util/serial_port.hpp
+ *                        print() and LineReader (util/stream.hpp's
+ *                        concept, which is what lets util/line_reader.hpp
  *                        and print() compile here untouched). Its options
  *                        ride one trailing template parameter and cost
  *                        nothing when left at their defaults.
@@ -85,7 +85,7 @@
  * the ring runs dry, because TXE stands for ever while the transmitter
  * is idle and would re-enter the handler without end), and arrive into
  * an RX ring filled by RXNE. isr() returns the "RX went non-empty" edge
- * that util/serial_port.hpp wants to post on - one event per idle-to-
+ * that util/line_reader.hpp wants to post on - one event per idle-to-
  * busy transition, not one per byte.
  *
  * The baud divisor (30.3.4): USARTDIV = fCK / (8 x (2 - OVER8) x baud),
@@ -866,8 +866,8 @@ struct UartOptions {
  *   }
  *   Serial::init(clock, 115200);
  *
- * `SerialLines` stands for the program's SerialPort active object
- * (util/serial_port.hpp), told of received bytes by the edge isr()
+ * `SerialLines` stands for the program's LineReader active object
+ * (util/line_reader.hpp), told of received bytes by the edge isr()
  * returns. The shared Uart surface - same verbs, same return contracts:
  * init/rebase/set_baud/isr/write_byte/write_bulk/read_byte/read_bulk/
  * read_span/consume, the error counters, release().
@@ -1481,7 +1481,7 @@ public:
     /// The received bytes IN PLACE: the contiguous run ready to be read,
     /// never wrapping - the receive ring's consumer half under the ring's
     /// own names. With consume() it is util/stream.hpp's SpanSource,
-    /// which SerialPort drains a run at a time with no copy at all.
+    /// which LineReader drains a run at a time with no copy at all.
     static std::span<const uint8_t> read_span() {
         if constexpr (has_rx_engine) {
             return look();
@@ -1508,7 +1508,7 @@ public:
 
     /// The gaps in the stream the receive ring hands out, since the
     /// program started, NEVER CLEARED - util/stream.hpp's SkippingSource,
-    /// the epoch util/serial_port.hpp compares at every run. Without an
+    /// the epoch util/line_reader.hpp compares at every run. Without an
     /// engine: the SkipRing's skips (modulo 2^8), one at the consumer's
     /// look after a byte a full ring refused or FE/PE dropped, or an
     /// overrun - the look that discards what the ring held. With one: the view's skips (a lap

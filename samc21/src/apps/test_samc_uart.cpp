@@ -1137,7 +1137,7 @@ struct ConsumerLeg {
 
 /// The host pumps (sink, 115200); the console's interrupt receiver fills
 /// its ring and the consumer takes it IN PLACE, a run a look (read_span()
-/// and consume(), SerialPort's shape). EAGER looks at every turn; LAZY
+/// and consume(), LineReader's shape). EAGER looks at every turn; LAZY
 /// looks for 150 ms and then holds 100 ms - longer than the 44 ms the
 /// ring's 511 bytes last at this rate, so every hold the host pumps
 /// through overflows it.

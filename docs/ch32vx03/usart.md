@@ -20,7 +20,7 @@ event at a time by the kernel,
 [docs/learn/introduction.md](../learn/introduction.md)): the
 interrupt-driven byte transport every console runs on, with a transmit
 ring and a receive ring, an optional DMA engine in either slot, and the
-public surface `util/serial_port.hpp` and `print()` are written
+public surface `util/line_reader.hpp` and `print()` are written
 against, which is what lets them run here unchanged.
 
 The smallest use, the console on USART1's default pads PA9/PA10, which
@@ -71,7 +71,7 @@ takes each received byte into the receive ring and feeds the data
 register from the transmit ring, and returns true when a received byte
 made the receive ring non-empty, the edge an active object is told of.
 The `(void)` discards that answer; a program whose line-assembling
-active object (a `SerialPort` of `util/serial_port.hpp`) waits for the
+active object (a `LineReader` of `util/line_reader.hpp`) waits for the
 edge posts `brio::RxActivity{}` to it on true, as the fourth block under
 "How to use it" does. `print` is then called after
 `brio::enable_interrupts()`, from `main()` or from an active object's
@@ -773,7 +773,7 @@ edges and one DMA beat an edge.
   `hw_overruns()`, `clear_errors()`), `baud()`/`actual_baud()`/
   `set_baud()`/`rebase()`/`divisor_for()`/`can_baud()`/`min_hz_for()`,
   `release()`, `rx_skips()` (the gaps in the stream the receive ring
-  hands out, never cleared - util/serial_port.hpp's epoch: without an
+  hands out, never cleared - util/line_reader.hpp's epoch: without an
   engine the SkipRing's skips, one at the consumer's look after `isr()`
   dropped a flagged byte or a full ring refused one; with one the view's
   skips plus an overrun and a restart after a transfer error), and the

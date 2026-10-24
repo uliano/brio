@@ -98,7 +98,7 @@ of `MeterSampler`'s ([meters.md](meters.md)) for a stated reason:
   dispatch starts, the kernel has already served every borrower, so
   every block lent in the previous dispatch has been consumed, and
   returning those loans is the first thing the new dispatch does
-  (`SerialPort`'s two-buffer contract, generalized). Between lend and
+  (`LineReader`'s two-buffer contract, generalized). Between lend and
   release the source fills its other buffer, so the consumer reads
   memory nothing is writing.
 - **A dispatch scans every source and lends at most one block per

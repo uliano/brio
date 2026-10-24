@@ -39,7 +39,7 @@ current core and a counting doorbell.
 Because the kernel and `util/` are pure logic templated on the
 platform, everything above the drivers runs here unchanged: the queues,
 the scheduler, the state-machine contract, time events, panic, `Ring`,
-`SerialPort`, `BusMaster` (with a fake bus engine). This is where the
+`LineReader`, `BusMaster` (with a fake bus engine). This is where the
 things that are hard to provoke on silicon are tested first: queue
 overflow and its counters, entry/exit ordering, drift-free periodic
 re-arm, scan priority, many-producer stress with simulated producers,

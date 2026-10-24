@@ -303,7 +303,7 @@ extern "C" void isr_usbctrl() {
 brio::print(Port{}, "hello", brio::crlf);   // once the host has configured the port
 ```
 
-The port is a `ByteTransport`: a console's `SerialPort` runs over it as
+The port is a `ByteTransport`: a console's `LineReader` runs over it as
 over a UART, and the source is the same on both architectures. The
 identity 1209:0001 is pid.codes' test pair, meant for a device that is
 not a product; a product states its own.

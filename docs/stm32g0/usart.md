@@ -12,7 +12,7 @@ queue, served one event at a time by the kernel,
 [docs/learn/introduction.md](../learn/introduction.md)): a byte
 transport with a transmit ring and a receive ring, both served from the
 interrupt, with the same public surface as the other targets' tasks,
-which is what lets `util/serial_port.hpp` and `print()` run here
+which is what lets `util/line_reader.hpp` and `print()` run here
 unchanged ([design/serial.md](../design/serial.md) is the stack above
 it). The LPUARTs run the same task over their own resource
 ([lpuart.md](lpuart.md)).
@@ -317,7 +317,7 @@ a compile-time refusal in the task.
   `read_byte`/`read_bulk`, `read_span`/`consume` (the receive run in
   place; with a receive engine `consume()` answers whether the run was
   intact), `rx_skips` (the gaps in the stream the receive ring hands
-  out, never cleared - util/serial_port.hpp's epoch: without an engine
+  out, never cleared - util/line_reader.hpp's epoch: without an engine
   the SkipRing's skips, one at the consumer's look after `isr()` reported
   a byte refused by a full ring, dropped for FE or PE, or an overrun -
   the look discarding what the ring held, so where in the entry's drain
@@ -338,7 +338,7 @@ a compile-time refusal in the task.
   pace and the flag that ends a burst, as the instantiation resolved
   them. The public surface is
   IDENTICAL to avrxt's and samc21's, which is what lets
-  `util/serial_port.hpp` and `print()` compile here untouched.
+  `util/line_reader.hpp` and `print()` compile here untouched.
 - `Rs485<n, pins, de_pin, assertion, deassertion, ..., Placement>` - the
   same task with the driver enable filled in. **`OneWire` is NOT a task here**:
   33.5.15 is a bit, so single-wire is `Uart` with

@@ -8,7 +8,7 @@ do it: `Usb`, this stratum's driver of the chip's device controller;
 `util/usb/device.hpp`'s `UsbDevice`, the device stack that answers the
 host's enumeration; and `util/usb/cdc.hpp`'s `UsbCdcAcm`, the serial
 port class, a byte transport with the same surface as a UART's, so a
-console's `SerialPort` and `print` run over it unchanged
+console's `LineReader` and `print` run over it unchanged
 ([design/usb.md](../design/usb.md) is the stack and its contracts).
 
 The smallest use, a serial port on the connector, from "How to use it"
@@ -155,7 +155,7 @@ extern "C" void isr_usbctrl() {
 brio::print(Port{}, "hello", brio::crlf);                     // once the host has configured the port
 ```
 
-The port is a `ByteTransport`: a console's SerialPort runs over it as
+The port is a `ByteTransport`: a console's LineReader runs over it as
 over a UART. The identity 1209:0001 is pid.codes' test pair, meant
 for a device that is not a product; a product states its own.
 `Port::write_bulk(run)` queues a run before the first packet goes,

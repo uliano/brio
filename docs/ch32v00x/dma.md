@@ -42,7 +42,7 @@ the USART's own vector reports a burst's edge, the receive channel's
 reports the lap's half and full marks, and the transmit channel's
 vector starts the next block when one ends; the first two post
 `RxActivity` to the active object that assembles lines (`SerialLines`,
-a `SerialPort` of `util/serial_port.hpp`; an active object is a
+a `LineReader` of `util/line_reader.hpp`; an active object is a
 component of a brio program with its own event queue, served one event
 at a time by the kernel, [docs/learn/introduction.md](../learn/introduction.md)).
 

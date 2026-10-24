@@ -21,7 +21,7 @@ the kernel, [docs/learn/introduction.md](../learn/introduction.md)):
 the interrupt-driven byte transport every brio console is, with a
 transmit ring and a receive ring, a DMA engine in either slot, and the
 same public surface as the other targets' tasks, which is what lets
-`util/serial_port.hpp` and `print()` run here unchanged. Its options
+`util/line_reader.hpp` and `print()` run here unchanged. Its options
 cost nothing when left at their defaults: an image with them is
 byte-identical to one without.
 
@@ -57,8 +57,8 @@ with `BRIO_CH32_INTERRUPT` in front (the one spelling of a handler
 attribute on this target, [platform.md](platform.md)). `isr()` is the
 port's whole interrupt body and returns true when a received byte made
 the receive ring non-empty, the edge a program posts as `RxActivity` to
-the active object that assembles lines (`SerialLines`, a `SerialPort`
-of `util/serial_port.hpp`, in a program that has one); the smallest
+the active object that assembles lines (`SerialLines`, a `LineReader`
+of `util/line_reader.hpp`, in a program that has one); the smallest
 use, with no such object, discards it. `init()` goes in `main()`
 after `SysClock::init()` and before the kernel's `run()`; `print` may
 also be called later, from an active object's event handler.
@@ -312,7 +312,7 @@ the key that runs the single-board set, `w` the two-board key, below).
   `tx_idle()` (THE WIRE IS IDLE: the ring empty, no block in flight and
   TC set, TC cleared as every transmit block starts), `rx_skips()` (the
   gaps in the stream the receive ring hands out, never cleared -
-  util/serial_port.hpp's epoch: without an engine the SkipRing's skips,
+  util/line_reader.hpp's epoch: without an engine the SkipRing's skips,
   one at the consumer's look after `isr()` dropped a flagged byte or a
   full ring refused one; with one the view's skips plus an overrun and a
   restart after a transfer error), the counters (`rx_overruns()` - a byte a full

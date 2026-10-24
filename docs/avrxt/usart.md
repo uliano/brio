@@ -14,7 +14,7 @@ event at a time by the kernel,
 [learn/introduction.md](../learn/introduction.md)). `Uart<n, route>` is
 the one most programs use: an interrupt-driven byte transport with a
 receive ring and a transmit ring, both served from the instance's two
-interrupts, which satisfies the transport concepts `util/serial_port.hpp`
+interrupts, which satisfies the transport concepts `util/line_reader.hpp`
 and `print()` are written against (`ByteTransport`, `BulkSink`,
 `SkippingSource`, checked by a static_assert in the header;
 [design/serial.md](../design/serial.md) is the stack above it). The other
@@ -48,8 +48,8 @@ two `ISR()` lines, avr-libc's macro, bind the instance's two vectors to
 the task's interrupt bodies. `rxc()` takes every frame the receive
 buffer holds into the ring and returns true when the ring went from
 empty to non-empty, the edge on which this console posts `RxActivity`
-to `Lines`, the active object that assembles lines (`util/serial_port.hpp`'s
-`SerialPort`); a program that reads nothing discards the answer
+to `Lines`, the active object that assembles lines (`util/line_reader.hpp`'s
+`LineReader`); a program that reads nothing discards the answer
 (`ISR(USART2_RXC_vect) { Serial::rxc(); }`, the header's own example),
 and `ISR_FLATTEN` inlines the post into this vector alone, for the
 reason "What a byte costs `Uart`" below gives. `dre()` moves the next
@@ -138,7 +138,7 @@ Driver: `avrxt/usart.hpp`; the instance counts, the route fields and
 codes and the die-keyed facts it reads come from
 `avrxt/device_tables.hpp` (the reserve: the table of what each part has,
 read off the device header). The line service above it:
-[design/serial.md](../design/serial.md) (`util/serial_port.hpp`).
+[design/serial.md](../design/serial.md) (`util/line_reader.hpp`).
 Reference test: `test_avr_serial` (a letter is one command key of its
 console and the group of verdicts it runs; `z` runs its single-board
 set and `y` the set that needs a partner board running `usart_peer`);
@@ -275,7 +275,7 @@ of a rate change through its static `rebase(hz)`,
 | `Usart<n>` interrupts | `enable_rxc_interrupt`, `enable_txc_interrupt`, `enable_dre_interrupt`, `enable_rxs_interrupt`, `enable_autobaud_error_interrupt` |
 | `Usart<n>` data | `receive()` / `receive_as<bits>()` -> `UsartFrame` (ISR body of `USARTn_RXC_vect`), `transmit(v)` / `transmit_as<bits>(v)`, `clear_txc()` (ISR body of `USARTn_TXC_vect`), the bounded `send`/`poll`/`wait`/`wait_line_idle` |
 | `Usart<n>` events | `XckEvent` (generator), `IrdaIn` (user) |
-| `Uart<n, Route, rx, tx>` | the interrupt-driven transport: `init(clock, baud)`, `rebase(hz)`, `set_baud(hz, baud)` (a new rate under the running port, once `tx_idle()`), `release()`, `can_baud`, `min_hz_for`, `actual_baud(hz)`, `write_byte`/`write_bulk` (a run: as many as fit, its first byte pushed and DREIE set before the rest is copied, the rest copied in parts of at most `copy_part` (32) bytes, each published and DREIE set behind it), `read_byte`/`read_span`/`consume` (the receive run in place), `rx_pending`, `tx_idle` (the WIRE is idle: the ring empty and the last stop bit out - TXCIF, which the transport owns), the error counters, `rx_skips` (the gaps in the stream the receive ring hands out, never cleared - util/serial_port.hpp's epoch: the SkipRing's skips, modulo 2^8, one at the consumer's look after `rxc()` reported a frame refused by a full ring, dropped for FERR or PERR, or a BUFOVF - on the rare paths alone, the RXC vector saving no register for them), ISR bodies `rxc()` (takes every frame the buffer holds, returns the empty -> non-empty edge) and `dre()` |
+| `Uart<n, Route, rx, tx>` | the interrupt-driven transport: `init(clock, baud)`, `rebase(hz)`, `set_baud(hz, baud)` (a new rate under the running port, once `tx_idle()`), `release()`, `can_baud`, `min_hz_for`, `actual_baud(hz)`, `write_byte`/`write_bulk` (a run: as many as fit, its first byte pushed and DREIE set before the rest is copied, the rest copied in parts of at most `copy_part` (32) bytes, each published and DREIE set behind it), `read_byte`/`read_span`/`consume` (the receive run in place), `rx_pending`, `tx_idle` (the WIRE is idle: the ring empty and the last stop bit out - TXCIF, which the transport owns), the error counters, `rx_skips` (the gaps in the stream the receive ring hands out, never cleared - util/line_reader.hpp's epoch: the SkipRing's skips, modulo 2^8, one at the consumer's look after `rxc()` reported a frame refused by a full ring, dropped for FERR or PERR, or a BUFOVF - on the rare paths alone, the RXC vector saving no register for them), ISR bodies `rxc()` (takes every frame the buffer holds, returns the empty -> non-empty edge) and `dre()` |
 | `OneWire<n, route>` | `available`, `init(clock, baud, fmt)`, `talk()`/`listen()`, `line()`, `echo_matches(sent)` |
 | `Rs485<n, route>` | `available`, `init(clock, baud, fmt, one_wire)`, `drive_enable()`, `guard_bits` |
 | `SyncHost<n, route>` / `SyncClient<n, route>` | `available`, `init(...)`, `clock_pin()`, `invert_xck(bool)` (host), `max_xck_hz(hz)` (client) |

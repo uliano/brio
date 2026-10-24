@@ -108,7 +108,7 @@ its headers' business (their comments) and its documents' (the map in
 |---|---|
 | `kernel/` | the AO kernel: the Platform concept, per-AO queues, the FSM, post/publish/reply, the two loans, time events, `Tenuto`, panic |
 | `rt/` | the runtime every 32-bit image compiles - memcpy, memmove, memset, memcmp, strlen, memchr, abort - in the framework's one source file; libgcc and no C library (design/runtime.md) |
-| `util/` | services over the kernel: streams and print, the benchmark instrument, rings, the bus arbiter with the SPI, I2C and CAN vocabularies, the serial port, the NV heap and journal, power, meters, block streams, the two-core inbox, the USB device stack, the test-bench grammar |
+| `util/` | services over the kernel: streams and print, the benchmark instrument, rings, the bus arbiter with the SPI, I2C and CAN vocabularies, the line reader, the NV heap and journal, power, meters, block streams, the two-core inbox, the USB device stack, the test-bench grammar |
 | `gfx/` | drawing, pure and kernel-free: surfaces, primitives, fonts, text, the counting surface (design/gfx.md) |
 | `devices/` | what sits OFF the chip over a link the chip provides: the DCS vocabulary, a traits type per display controller, the serial DCS link over any family's SpiHost, the panel driver; includes kernel/, util/ and gfx/, never a family |
 | `cortexm/` | the CORE stratum every Cortex-M family includes after its device header: NVIC + PRIMASK guard, the SysTick ticker, delay_us, the DWT cycle counter |

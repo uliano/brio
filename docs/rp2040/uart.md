@@ -14,7 +14,7 @@ its own event queue, served one event at a time by the kernel,
 [docs/learn/introduction.md](../learn/introduction.md)): a byte
 transport with a transmit ring and a receive ring, with the same public
 surface as the other targets' tasks, which is what lets
-`util/serial_port.hpp` and `print()` run here unchanged
+`util/line_reader.hpp` and `print()` run here unchanged
 ([design/serial.md](../design/serial.md) is the stack above it).
 
 The smallest use, the console on the Debug Probe's UART bridge, from
@@ -230,7 +230,7 @@ int main() {
 }
 ```
 
-With the kernel, the edge feeds `SerialPort`:
+With the kernel, the edge feeds `LineReader`:
 
 ```cpp
 extern "C" void isr_uart0() {
@@ -340,7 +340,7 @@ extern "C" void isr_uart0() {
 - The transport works on the wire in both directions through the
   Debug Probe's bridge at 115200: the pin-check tool's banner and its
   echo-with-code of every character typed, the kernel console's
-  banner, replies and prompt through `SerialPort` and `print`, with
+  banner, replies and prompt through `LineReader` and `print`, with
   the frame, parity, break and hardware-overrun counters and the ring
   overrun all at zero. The receive timeout interrupt is what
   delivers a single typed character - and it is also what exposed

@@ -316,7 +316,7 @@ wired to.
 
 EVERY LOSS IS REPORTED TO THE RING (util/ring.hpp's `SkipRing`), whose
 consumer's next look skips everything queued, and `rx_skips()` counts
-the skips, never cleared - util/serial_port.hpp's epoch, moving between
+the skips, never cleared - util/line_reader.hpp's epoch, moving between
 two runs: an entry dropped for its flags or refused by a full ring,
 reported on its rare path where the drain meets it, and an overrun read
 from `UARTRSR` after the drain - where in the drain a loss fell does not

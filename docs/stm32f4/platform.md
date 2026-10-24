@@ -353,7 +353,7 @@ as its control. The peer's command channel through the arbiter, the
 matrix on the DMA engines (152 kB/s, 977 to 1000 per mille of the
 control under pressure), the arbiter with three requesters of three
 priorities (every reply to its requester in order, no timeout), the
-UART's numbered lines echoed at 460800 and 921600 through `SerialPort`
+UART's numbered lines echoed at 460800 and 921600 through `LineReader`
 into a borrower above it (no line lost, out of order or corrupt, every
 port counter zero, 876 to 924 per mille of the wire), the one-writer
 blast judged by the peer, the loan with a slow borrower preempted

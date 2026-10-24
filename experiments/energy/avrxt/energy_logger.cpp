@@ -60,9 +60,9 @@
 #include "kernel/time.hpp"
 #include "kernel/time_event.hpp"
 #include "util/crc.hpp"
+#include "util/line_reader.hpp"
 #include "util/print.hpp"
 #include "util/proto/line_parser.hpp"
-#include "util/serial_port.hpp"
 
 using P = brio::AvrPlatform;
 
@@ -375,7 +375,7 @@ private:
         sizeof(routes) / sizeof(routes[0]);
 };
 
-using SerialLines = brio::SerialPort<Serial, P, Console, 48>;
+using SerialLines = brio::LineReader<Serial, P, Console, 48>;
 
 }  // namespace
 

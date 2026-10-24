@@ -1,8 +1,8 @@
 // console - the brio kernel console on the SAM C21: three active objects
 // over the SERCOM5 UART.
 //
-//   SerialPort   turns RX bytes into LineReceived events (ping-pong line
-//              buffers, backpressure on the ring - see util/serial_port.hpp)
+//   LineReader   turns RX bytes into LineReceived events (ping-pong line
+//              buffers, backpressure on the ring - see util/line_reader.hpp)
 //   Console  parses and routes each line, replies via blocking print
 //              (bounded by the wire rate), drives the lamp BY POSTING
 //   Lamp     owns the LED, dark from boot: the LED ON|OFF|TOG
@@ -18,8 +18,8 @@
 // Uart::isr() sorts out what is pending (samc21/sercom.hpp says why).
 //
 // Tenuto pack order is a CONTRACT here: Console (line consumer) must
-// precede SerialPort (line producer) so the ping-pong buffers are always
-// free when SerialPort runs - see the scheduling contract in serial_port.hpp.
+// precede LineReader (line producer) so the ping-pong buffers are always
+// free when LineReader runs - see the scheduling contract in line_reader.hpp.
 //
 // Wiring: none - the console is the board's own CH340 USB bridge on
 // PB30/PB31. Connect at 115200 8N1 (any serial monitor, including
@@ -44,9 +44,9 @@
 #include "samc21/platform.hpp"
 #include "samc21/sercom.hpp"
 #include "samc21/ticker.hpp"
+#include "util/line_reader.hpp"
 #include "util/print.hpp"
 #include "util/proto/line_parser.hpp"
-#include "util/serial_port.hpp"
 
 using P = brio::SamPlatform;
 
@@ -194,7 +194,7 @@ private:
 };
 
 // ---- the serial line producer ----------------------------------------------
-using SerialLines = brio::SerialPort<Serial, P, Console, 80>;
+using SerialLines = brio::LineReader<Serial, P, Console, 80>;
 
 void Console::cmd_err(const Cmd&, Serial s) {
     brio::print(s,

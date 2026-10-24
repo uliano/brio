@@ -533,7 +533,7 @@ clock should.
 - What `blink` does not show, each with its own design page: events
   that carry a pointer to a buffer and the rules on how long the buffer
   stays valid ([kernel.md, "Payloads"](../design/kernel.md#4-payloads-what-travels-inside-the-event-kernelborrowedhpp));
-  the services over the kernel, starting with the serial port and
+  the services over the kernel, starting with the line reader and
   `print` ([serial.md](../design/serial.md)) and the shared SPI and I2C
   buses ([spi-bus.md](../design/spi-bus.md),
   [i2c-bus.md](../design/i2c-bus.md)); sleeping deeper than the idle

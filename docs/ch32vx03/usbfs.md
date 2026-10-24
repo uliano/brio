@@ -14,7 +14,7 @@ CH32V203's device controller runs ([usb.md](usb.md)): `UsbDevice` of
 host's enumeration over the controller, and `UsbCdcAcm` of
 [util/usb/cdc.hpp](../../brio/util/usb/cdc.hpp) is the serial-port
 class, a byte transport with a UART's surface, so `print` and a
-`SerialPort` run over it unchanged.
+`LineReader` run over it unchanged.
 
 The smallest use, the first block of "How to use it" below:
 
@@ -65,7 +65,7 @@ startup code that runs before `main()`,
 gives it, to `Device::isr()`: the whole stack runs in that interrupt
 body, the enumeration, the class's requests and its packets
 ([design/usb.md](../design/usb.md), "Where it runs"), and a program
-whose lines a `SerialPort` assembles also posts its `RxActivity` from
+whose lines a `LineReader` assembles also posts its `RxActivity` from
 there when `Port::take_rx_edge()` reports the receive ring's
 empty-to-non-empty edge.
 

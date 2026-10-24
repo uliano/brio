@@ -27,11 +27,11 @@
  *                        served from its peripheral's interrupt): the
  *                        asynchronous byte transport with ring buffers
  *                        and one ISR body - every console's personality,
- *                        a ByteTransport for print() and SerialPort. Its
+ *                        a ByteTransport for print() and LineReader. Its
  *                        public surface is the Uart surface every target
  *                        shares (util/stream.hpp's concepts,
  *                        docs/design/serial.md), which is what lets
- *                        util/serial_port.hpp and print() compile over it
+ *                        util/line_reader.hpp and print() compile over it
  *                        untouched.
  *
  * An application never writes these names. A family supplies the chip's
@@ -65,7 +65,7 @@
  *       brio::print(serial, "hello", brio::crlf);
  *   }
  *
- * With the kernel, the handler posts RxActivity to the SerialPort active
+ * With the kernel, the handler posts RxActivity to the LineReader active
  * object when isr() returns true.
  *
  * Who calls what, and from where.
@@ -1250,7 +1250,7 @@ public:
     /// The received bytes in place: the contiguous run ready to be read,
     /// never wrapping - the receive ring's consumer half under the ring's
     /// own names. With consume() it is util/stream.hpp's SpanSource,
-    /// which SerialPort drains a run at a time with no copy at all.
+    /// which LineReader drains a run at a time with no copy at all.
     static std::span<const uint8_t> read_span() { return m_rx.read_span(); }
 
     /// Release the first `count` bytes of read_span(), oldest first, clamped
@@ -1281,7 +1281,7 @@ public:
 
     /// Every byte the line carried that the receive ring will not deliver,
     /// since the program started, never cleared (modulo 2^32) -
-    /// util/stream.hpp's SkippingSource, the epoch util/serial_port.hpp
+    /// util/stream.hpp's SkippingSource, the epoch util/line_reader.hpp
     /// compares at every run: the receive ring's skips (SkipRing), one at
     /// the consumer's look after an entry dropped for its flags or refused
     /// by a full ring, or an overrun - the ring discarding what it held.

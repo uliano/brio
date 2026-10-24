@@ -140,7 +140,7 @@ was written looking at the targets that exist, and the authority to
 call the type general is exactly the list of those targets. Every
 `util/` type therefore states in its header on which targets it has
 been validated and which assumption of theirs its contract may carry.
-Examples: `SerialPort` assumes a byte stream with a receive edge;
+Examples: `LineReader` assumes a byte stream with a receive edge;
 `BusMaster` a transaction that runs on interrupts and completes later;
 `Ring` an index that fits the platform's atomic access width;
 `AnalogSampler` one result per interrupt with the selected input
@@ -184,7 +184,7 @@ from its includes.
 |---------|-------------|---------|
 | `kernel/` | nothing of brio | pure logic: queues, the scheduler, state machines, time events, panic, delivery ([kernel.md](kernel.md)) |
 | `rt/` | nothing of brio | the runtime every 32-bit image compiles: the seven functions the compiler and libstdc++ expect of a freestanding program, in the framework's one source file; the AVR keeps avr-libc instead ([runtime.md](runtime.md)) |
-| `util/` | `kernel/` | services over the kernel: streams and `print`, the benchmark instrument, rings, the bus arbiter with the SPI, I2C and CAN vocabularies, the serial port, the flash heap and journal, power, meters, block streams, the two-core inbox, the USB device stack, the test-bench grammar |
+| `util/` | `kernel/` | services over the kernel: streams and `print`, the benchmark instrument, rings, the bus arbiter with the SPI, I2C and CAN vocabularies, the line reader, the flash heap and journal, power, meters, block streams, the two-core inbox, the USB device stack, the test-bench grammar |
 | `gfx/` | nothing of brio | drawing: the surface contract, the primitives, fonts and text ([gfx.md](gfx.md)) |
 | `devices/` | `kernel/`, `util/`, `gfx/` | what sits off the chip and is reached over a link the chip provides: the DCS vocabulary, a traits type per display controller, the panel driver over a link concept ([gfx.md](gfx.md), "The command tier") |
 | `cortexm/` | `util/`, and the CMSIS-Core symbols a family's device header brings (the family includes that header first) | what every Cortex-M family shares whatever the vendor: the interrupt controller and its guard, the SysTick ticker, the microsecond delay, the cycle counter |
@@ -615,7 +615,7 @@ timer, and an application picks one in its board file:
 
 - No `Ao` suffix on active-object class names. In an active-object
   framework every service is an active object, so the suffix is noise;
-  the class is named for what it is (`SpiBus`, `SerialPort`,
+  the class is named for what it is (`SpiBus`, `LineReader`,
   `Blinker`). The term stays where it is information: the
   `ActiveObject` concept and the prose.
 - Private members carry a trailing underscore (`head_`), not `m_`.

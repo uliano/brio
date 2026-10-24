@@ -1,7 +1,7 @@
 // console - the brio kernel console: three active objects over a USART.
 //
-//   SerialPort   turns RX bytes into LineReceived events (ping-pong line
-//              buffers, backpressure on the ring - see util/serial_port.hpp)
+//   LineReader   turns RX bytes into LineReceived events (ping-pong line
+//              buffers, backpressure on the ring - see util/line_reader.hpp)
 //   Console  parses and routes each line, replies via blocking print
 //              (bounded by the wire rate), drives the lamp BY POSTING
 //   Lamp     owns the LED, dark from boot: the LED ON|OFF|TOG
@@ -13,8 +13,8 @@
 // transport, and the vector binding.
 //
 // Tenuto pack order is a CONTRACT here: Console (line consumer) must
-// precede SerialPort (line producer) so the ping-pong buffers are always
-// free when SerialPort runs - see the scheduling contract in serial_port.hpp.
+// precede LineReader (line producer) so the ping-pong buffers are always
+// free when LineReader runs - see the scheduling contract in line_reader.hpp.
 //
 // Wiring: none on the ST boards - the console is the board's own
 // ST-LINK virtual COM port: USART1 on PA9 (TX) / PA10 (RX) at AF7 on the
@@ -47,9 +47,9 @@
 #include "stm32f4/pwr.hpp"
 #include "stm32f4/ticker.hpp"
 #include "stm32f4/usart.hpp"
+#include "util/line_reader.hpp"
 #include "util/print.hpp"
 #include "util/proto/line_parser.hpp"
-#include "util/serial_port.hpp"
 
 using P = brio::Stm32f4Platform<>;
 
@@ -235,7 +235,7 @@ private:
 };
 
 // ---- the serial line producer ----------------------------------------------
-using SerialLines = brio::SerialPort<Serial, P, Console, 80>;
+using SerialLines = brio::LineReader<Serial, P, Console, 80>;
 
 void Console::cmd_err(const Cmd&, Serial s) {
     brio::print(s,

@@ -1,17 +1,17 @@
 // mcu: ch32x035f8
 // A transport whose release can refuse - a HardwareRing behind it, its
 // consume() answering bool - and that does not report the ring's skip
-// epoch (rx_skips()) cannot back a SerialPort: a skip between two runs
+// epoch (rx_skips()) cannot back a LineReader: a skip between two runs
 // would complete the line begun with bytes from after the gap
-// (util/serial_port.hpp). Refused where the drain is compiled.
+// (util/line_reader.hpp). Refused where the drain is compiled.
 #include <stdint.h>
 
 #include <span>
 
 #include "ch32x035/platform.hpp"
 #include "kernel/fsm.hpp"
+#include "util/line_reader.hpp"
 #include "util/ring.hpp"
-#include "util/serial_port.hpp"
 
 namespace {
 
@@ -41,9 +41,9 @@ struct Sink : brio::Fsm<Sink, brio::LineReceived> {
 
 } // namespace
 
-using Port = brio::SerialPort<Refusing, P, Sink>;
+using Reader = brio::LineReader<Refusing, P, Sink>;
 
 void run() {
-    Port::init();
-    Port::dispatch(brio::RxActivity{});
+    Reader::init();
+    Reader::dispatch(brio::RxActivity{});
 }

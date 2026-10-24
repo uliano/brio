@@ -77,8 +77,8 @@
  * starts, the kernel has already served every borrower's queue, so
  * every block lent in the previous dispatch has been consumed, and
  * releasing it back to the source is the first thing the new dispatch
- * does (SerialPort's two-line-buffer contract, generalized,
- * util/serial_port.hpp). Between the lend and that release the source's
+ * does (LineReader's two-line-buffer contract, generalized,
+ * util/line_reader.hpp). Between the lend and that release the source's
  * other buffer is the one being filled, so the consumer reads memory
  * nothing is writing. What the order guarantees is the timing; that a
  * subscriber keeps no copy of the pointer is the subscriber's duty,

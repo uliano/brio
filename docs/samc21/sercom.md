@@ -13,7 +13,7 @@ with its own event queue, served one event at a time by the kernel,
 [docs/learn/introduction.md](../learn/introduction.md)): a byte
 transport with a transmit ring and a receive ring, both served from the
 instance's one interrupt, with the same public surface as the other
-targets' tasks, which is what lets `util/serial_port.hpp` and `print()`
+targets' tasks, which is what lets `util/line_reader.hpp` and `print()`
 run here unchanged ([design/serial.md](../design/serial.md) is the
 stack above it). The SERCOM's SPI and I2C modes have their own
 documents, [spi.md](spi.md) and [i2c.md](i2c.md).
@@ -58,7 +58,7 @@ functions are all static and it has no object of its own. The
 under the name the crt's vector table gives it; it calls `isr()`, which
 returns true when a received byte made the receive ring non-empty, and
 then posts `RxActivity` to `SerialLines`, the program's line-assembling
-active object (a `SerialPort` of `util/serial_port.hpp`, declared
+active object (a `LineReader` of `util/line_reader.hpp`, declared
 elsewhere in the program). `SysClock::init()` is the clock task's
 ([clock.md](clock.md)); `Serial::init()` takes that task's tag
 (`constexpr SysClock clock;`) and the baud rate, the frame at its

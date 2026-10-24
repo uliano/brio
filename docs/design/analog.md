@@ -80,7 +80,7 @@ page](../ch32vx03/dac.md)).
 What it knows: a list of inputs, a pace, samples out. What it does not
 know: what the samples mean (the subscribers scale them with `adc_mv`
 and their reference), where the pace comes from, which silicon
-converts. It is the analog sibling of `SerialPort<Transport>` and
+converts. It is the analog sibling of `LineReader<Transport>` and
 `BusMaster<Bus>`: a `util/` active-object template over a concept the
 target driver satisfies.
 

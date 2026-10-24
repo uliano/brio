@@ -2,7 +2,7 @@
  * stream.hpp
  *
  * The requirements a byte transport meets so that the services above it
- * (print.hpp, serial_port.hpp, proto/) can be written once: what a sink
+ * (print.hpp, line_reader.hpp, proto/) can be written once: what a sink
  * that accepts bytes and a source that yields them must provide. They
  * are C++ concepts, compiler-checked sets of requirements on a type, so
  * a transport is a type and not a virtual interface: it inherits from
@@ -29,7 +29,7 @@
  * where a byte at a time pays that nudge per byte. So a sink may also
  * offer `write_bulk(run)` (BulkSink below), and print.hpp hands it every
  * string and every formatted number whole; the source's mirror is the
- * run lent in place (SpanSource below), which is how SerialPort drains a
+ * run lent in place (SpanSource below), which is how LineReader drains a
  * receive ring. Both are optional: a sink with the byte verb alone (a
  * test capture, a simulated port) stays a sink, and every service falls
  * back to the byte for it. The rule and its measured cost per family are
@@ -97,7 +97,7 @@ concept ByteSource = requires(uint8_t &b) {
 /// hardware (a HardwareRing behind the transport) the run is valid only
 /// as long as the producer has not lapped it: consume() then answers
 /// whether the run was still intact when released, and a reader that
-/// acted on the run before releasing it (SerialPort's lines) acts on
+/// acted on the run before releasing it (LineReader's lines) acts on
 /// that answer. Over a plain Ring consume() answers nothing.
 template <typename S>
 concept SpanSource = requires(uint32_t n) {
@@ -121,7 +121,7 @@ concept SpanSource = requires(uint32_t n) {
 /// between the run before the gap and the run after it, never inside
 /// one. A transport whose consume() answers bool (a HardwareRing behind
 /// it, whose producer can lap a run while it is held) must be one of
-/// these; serial_port.hpp refuses one that is not.
+/// these; line_reader.hpp refuses one that is not.
 template <typename S>
 concept SkippingSource = SpanSource<S> && requires {
     { S::rx_skips() } -> std::convertible_to<uint32_t>;

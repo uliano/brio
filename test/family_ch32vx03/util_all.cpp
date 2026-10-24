@@ -48,6 +48,7 @@
 #include "util/cycle_count.hpp"
 #include "util/i2c_bus.hpp"
 #include "util/input_scanner.hpp"
+#include "util/line_reader.hpp"
 #include "util/meter_sampler.hpp"
 #include "util/nv_heap.hpp"
 #include "util/nv_journal.hpp"
@@ -61,7 +62,6 @@
 #include "util/quadrature.hpp"
 #include "util/rgb_lamp.hpp"
 #include "util/ring.hpp"
-#include "util/serial_port.hpp"
 #include "util/sha256.hpp"
 #include "util/spi_bus.hpp"
 #include "util/stream.hpp"
@@ -207,7 +207,7 @@ struct Listener : Fsm<Listener, AnalogSample, BlockReady<uint16_t>, PrepareSleep
 using Sampler = AnalogSampler<FakeAdc, P, Subscribers<Listener>, PinIn<2>{}, Internal::vref>;
 using Relay = BlockRelay<P, Subscribers<Listener>, FakeSource>;
 using Power = PowerManager<P, FakeSite, PowerConfig{}, Listener>;
-using Lines = SerialPort<Serial, P, Listener, 48>;
+using Lines = LineReader<Serial, P, Listener, 48>;
 
 // Two contacts a knob would drive, and the decoder over them: pure util,
 // so what this proves is that the compiler takes it.

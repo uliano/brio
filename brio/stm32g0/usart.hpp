@@ -20,14 +20,14 @@
  *                        a transmit ring and a receive ring, both served
  *                        by one interrupt body - every console's
  *                        personality, a ByteTransport for print() and
- *                        SerialPort. `Uart<n, pins, ...>` names it over a
+ *                        LineReader. `Uart<n, pins, ...>` names it over a
  *                        Usart<n> and stm32g0/lpuart.hpp's `LpUart<n,
  *                        pins, ...>` names the same task over an
  *                        Lpuart<n>: one implementation, two peripherals,
  *                        because chapter 34 is chapter 33 with a
  *                        different baud generator. Its public surface
  *                        is every target's Uart surface, which is what
- *                        lets util/serial_port.hpp and print() compile
+ *                        lets util/line_reader.hpp and print() compile
  *                        here untouched.
  *
  * The smallest use, the console on the Nucleo's virtual COM port, is
@@ -1432,7 +1432,7 @@ struct UartFifo {
  * character per interrupt says `.fifo = false`.
  *
  * Why an options struct and not ten template parameters: the surface of
- * Uart is a shared one (util/serial_port.hpp and print() compile
+ * Uart is a shared one (util/line_reader.hpp and print() compile
  * against every target's), so its parameter list cannot grow a
  * target-specific tail. One trailing non-type template parameter with a
  * default is the whole change, and a caller who names nothing sees
@@ -2643,7 +2643,7 @@ public:
     /// The received bytes in place: the contiguous run ready to be read,
     /// never wrapping - the receive ring's consumer half under the ring's
     /// own names. With consume() it is util/stream.hpp's SpanSource,
-    /// which SerialPort drains a run at a time with no copy at all. The
+    /// which LineReader drains a run at a time with no copy at all. The
     /// span is the ring's own storage: valid until consume() releases it,
     /// and without an engine the handler appends behind it and never
     /// writes over it. Main context.
@@ -2683,7 +2683,7 @@ public:
     /// The skip epoch: it moves whenever the line carried something the
     /// receive ring will not deliver, since the program started, never
     /// cleared (modulo 2^32) - util/stream.hpp's SkippingSource, the epoch
-    /// util/serial_port.hpp compares at every run. Without an engine: the
+    /// util/line_reader.hpp compares at every run. Without an engine: the
     /// SkipRing's skips, one at the consumer's look after a character a
     /// full ring refused or FE/PE dropped, or an overrun - the ring
     /// discarding what it held. With one: the ring's skips (a lap missed,

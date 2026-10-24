@@ -57,9 +57,9 @@
 #include "kernel/time_event.hpp"
 #include "util/analog.hpp"
 #include "util/analog_sampler.hpp"
+#include "util/line_reader.hpp"
 #include "util/print.hpp"
 #include "util/proto/line_parser.hpp"
-#include "util/serial_port.hpp"
 
 #include "avr_board.hpp"
 
@@ -334,7 +334,7 @@ private:
     static constexpr uint8_t route_count = sizeof(routes) / sizeof(routes[0]);
 };
 
-using SerialLines = brio::SerialPort<Serial, P, Console, 80>;
+using SerialLines = brio::LineReader<Serial, P, Console, 80>;
 
 void Console::cmd_stat(const Cmd&, Serial s) {
     brio::print(s, Monitor::rate, " samples/s | sampler q_drops=", Sampler::queue.overflows(),

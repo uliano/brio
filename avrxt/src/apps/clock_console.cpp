@@ -41,9 +41,9 @@
 #include "kernel/fsm.hpp"
 #include "kernel/tenuto.hpp"
 #include "kernel/time.hpp"
+#include "util/line_reader.hpp"
 #include "util/print.hpp"
 #include "util/proto/line_parser.hpp"
-#include "util/serial_port.hpp"
 
 using P = brio::AvrPlatform;
 
@@ -217,7 +217,7 @@ private:
 };
 
 // ---- the serial line producer ----------------------------------------------
-using SerialLines = brio::SerialPort<Serial, P, Console, 80>;
+using SerialLines = brio::LineReader<Serial, P, Console, 80>;
 
 void Console::cmd_err(const Cmd&, Serial s) {
     brio::print(s,

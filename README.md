@@ -149,7 +149,7 @@ and no target include leaves the target strata.
 |---|---|---|
 | `kernel/` | queues, the scheduler, state machines, delivery, time events, panic: pure logic | nothing of brio |
 | `rt/` | the runtime every 32-bit image compiles: seven functions, one source file ([runtime.md](docs/design/runtime.md)) | nothing of brio |
-| `util/` | services over the kernel: serial port and `print`, the bus arbiter with its SPI, I2C and CAN vocabularies, rings, power, storage in flash, meters, the USB device stack, the two-core bridge | `kernel/` |
+| `util/` | services over the kernel: the line reader and `print`, the bus arbiter with its SPI, I2C and CAN vocabularies, rings, power, storage in flash, meters, the USB device stack, the two-core bridge | `kernel/` |
 | `gfx/` | drawing: surfaces, primitives, fonts, text ([gfx.md](docs/design/gfx.md)) | nothing of brio |
 | `devices/` | what sits off the chip over a link the chip provides: display controllers and their panel driver | `kernel/`, `util/`, `gfx/` |
 | `cortexm/` | what every Cortex-M shares: the interrupt controller and its guard, the SysTick timebase, the microsecond delay | `util/` and the family's device header |

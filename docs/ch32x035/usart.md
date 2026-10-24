@@ -16,7 +16,7 @@ the kernel, [docs/learn/introduction.md](../learn/introduction.md)): the
 interrupt-driven byte transport every console runs on, with a transmit
 ring and a receive ring, a DMA engine in either slot, and the same
 public surface and template parameters as the sibling strata's tasks,
-which is what lets `util/serial_port.hpp` and `print()` run here
+which is what lets `util/line_reader.hpp` and `print()` run here
 unchanged.
 
 The smallest use, the console on the evaluation board's USART2 (its
@@ -51,8 +51,8 @@ as in C, under the crt's name for USART2's vector and with
 on this target, [platform.md](platform.md)); `isr()` is the port's
 whole interrupt body and returns true when a received byte made the
 receive ring non-empty, the edge the program posts as `RxActivity` to
-the active object that assembles lines (`SerialLines`, a `SerialPort`
-of `util/serial_port.hpp`, declared as
+the active object that assembles lines (`SerialLines`, a `LineReader`
+of `util/line_reader.hpp`, declared as
 [design/serial.md](../design/serial.md) shows; a program with no such
 object writes `(void)Serial::isr();` instead); `init()` takes the clock
 task's tag (`constexpr SysClock clock;`, declared as in
@@ -287,7 +287,7 @@ place - under a receive engine the channel's own ring, `consume()`
 answering whether the run was intact), `tx_idle()` (no block in flight,
 the ring empty, TC up - each block clears TC as it starts), `rx_pending()`,
 `rx_skips()` (the gaps in the stream the receive ring hands out, never
-cleared - util/serial_port.hpp's epoch: without an engine the SkipRing's
+cleared - util/line_reader.hpp's epoch: without an engine the SkipRing's
 skips, with one the view's skips and the overruns and restarts the vector
 and the look count); the counters `rx_overruns` (a full ring, or a lap of
 the channel's ring written over unread bytes), `hw_overruns`,

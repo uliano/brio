@@ -409,7 +409,7 @@ private:
  * producer that can drop elements on rare paths (a receive interrupt's
  * byte that finds the ring full, one the receiver flags as corrupt, the
  * frames a hardware overrun swallowed), feeding a consumer that carries
- * state from one element to the next (util/serial_port.hpp's line
+ * state from one element to the next (util/line_reader.hpp's line
  * begun), which must never join the two sides of a drop. The producer
  * reports a drop with lost(); the consumer's verbs are Ring's, and its
  * skips() is the epoch a reader compares between two runs.
@@ -668,7 +668,7 @@ concept RingCounter = requires {
  * A skip is an epoch. Whichever look skips (the drain's read_span(), a
  * count() asked between two drains, a release refused), the stream the
  * consumer reads jumps there, and a reader that carries state across its
- * runs (util/serial_port.hpp's partial line) must learn of it even when
+ * runs (util/line_reader.hpp's partial line) must learn of it even when
  * its own calls did not make the jump. skips() counts every skip and is
  * never cleared: the reader compares it across its runs, one load a run.
  * overruns() is the same count since the last clear_overruns().

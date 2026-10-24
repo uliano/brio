@@ -20,8 +20,8 @@
  *  Uart<n, P, ...>       the task: the interrupt-driven byte transport
  *                        with two rings and one ISR body - every
  *                        console's personality, a ByteTransport for
- *                        print() and SerialPort, with the public surface
- *                        util/serial_port.hpp and util/print.hpp are
+ *                        print() and LineReader, with the public surface
+ *                        util/line_reader.hpp and util/print.hpp are
  *                        written against, which is what lets them run
  *                        here unchanged.
  *
@@ -139,7 +139,7 @@
  * is idle and would re-enter the handler without end), and arrive into
  * an RX ring filled by RXNE, taken a byte at a time by read_byte() or a
  * run at a time, in place, by read_span() and consume(). isr() returns
- * the "RX went non-empty" edge that util/serial_port.hpp posts on -
+ * the "RX went non-empty" edge that util/line_reader.hpp posts on -
  * one event per idle-to-busy transition, not one per byte.
  *
  * The baud divisor is the whole register. BRR counts the peripheral
@@ -1551,7 +1551,7 @@ struct Uart {
      * else does. It waits for nothing and masks nothing.
      *
      * Returns true when a byte arrived into an empty ring: the edge
-     * util/serial_port.hpp posts on. With a receive engine the edge is
+     * util/line_reader.hpp posts on. With a receive engine the edge is
      * the burst's (the file header's two states).
      */
     // always_inline: one call site (the app's vector binding), so the
@@ -1746,7 +1746,7 @@ struct Uart {
     /// The received bytes IN PLACE: the contiguous run ready to be read,
     /// never wrapping - the receive ring's consumer half under the ring's
     /// own names. With consume() it is util/stream.hpp's SpanSource,
-    /// which SerialPort drains a run at a time.
+    /// which LineReader drains a run at a time.
     ///
     /// With a receive engine the run is the CHANNEL'S ring, read where it
     /// writes: its bytes are the stream as long as the consumer is less than
@@ -1792,7 +1792,7 @@ struct Uart {
 
     /// The gaps in the stream the receive ring hands out, since the
     /// program started, NEVER CLEARED - util/stream.hpp's SkippingSource,
-    /// the epoch util/serial_port.hpp compares at every run. Without an
+    /// the epoch util/line_reader.hpp compares at every run. Without an
     /// engine: the SkipRing's skips (modulo 2^8), one at the consumer's
     /// look after a byte the handler dropped for a flag or a full ring, or
     /// an overrun - the look that discards what the ring held. With one: the view's skips (a lap missed, a held

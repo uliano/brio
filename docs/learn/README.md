@@ -37,8 +37,9 @@ The learning route stops where the reference begins. What it leads to:
 - The design of the kernel, decision by decision, with the exact
   contracts: [docs/design/kernel.md](../design/kernel.md). Read after
   the first program, when its names mean something.
-- The services over the kernel: a serial port with line events and
-  `print` ([serial.md](../design/serial.md)), shared SPI and I2C buses
+- The services over the kernel: a line reader that posts each received
+  line as an event, and `print` ([serial.md](../design/serial.md)),
+  shared SPI and I2C buses
   with an arbiter ([spi-bus.md](../design/spi-bus.md),
   [i2c-bus.md](../design/i2c-bus.md)), the power model
   ([power.md](../design/power.md)), storage in flash

@@ -300,7 +300,7 @@ three lines:
      program is compiled. The sender is an active object in that list
      (the order has no meaning for anything else); a driver whose
      interrupt handler fills a buffer lends it through the active
-     object that owns the driver, as `SerialPort` does: the interrupt
+     object that owns the driver, as `LineReader` does: the interrupt
      handler writes the driver's ring, and the active object fills the
      buffer it lends in its own dispatch, so nothing writes a lent
      buffer while the borrower reads it;
@@ -1123,7 +1123,7 @@ yet in the host suite; on the bench it is exercised: the STM32F4's SPI
 and UART stacks ran under Rubato against the STM32G0B1RE's unchanged
 peers with an object preempting at prime periods, the DMA engines, the
 interrupt pump, the arbiter with three requesters of three priorities,
-`SerialPort`'s line loans to a borrower above it and the one-writer
+`LineReader`'s line loans to a borrower above it and the one-writer
 UART all byte-exact (`test_stm32f4_rubato_link`, 230 verdicts, [the
 STM32F4 platform page](../stm32f4/platform.md)); the polled loop's
 limit above is what that suite found.

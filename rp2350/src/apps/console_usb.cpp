@@ -1,5 +1,5 @@
 // console_usb - the brio kernel console over the chip's own USB-C: the
-// same three active objects as the console app (SerialPort, Console,
+// same three active objects as the console app (LineReader, Console,
 // Lamp), the transport a CDC ACM port on the RP2350's controller
 // instead of a UART - nothing above the transport changed, and nothing
 // in the source changes between the Cortex-M33 build and the Hazard3
@@ -39,9 +39,9 @@
 #include "rp2350/sysinfo.hpp"
 #include "rp2350/ticker.hpp"
 #include "rp2350/usb.hpp"
+#include "util/line_reader.hpp"
 #include "util/print.hpp"
 #include "util/proto/line_parser.hpp"
-#include "util/serial_port.hpp"
 #include "util/usb/cdc.hpp"
 #include "util/usb/device.hpp"
 
@@ -192,7 +192,7 @@ private:
     static constexpr uint8_t route_count = sizeof(routes) / sizeof(routes[0]);
 };
 
-using SerialLines = brio::SerialPort<Serial, P, Console, 80>;
+using SerialLines = brio::LineReader<Serial, P, Console, 80>;
 
 void Console::cmd_err(const Cmd&, Serial s) {
     brio::print(s, "rx_overruns=", Serial::rx_overruns(), " rx_bytes=", Serial::rx_bytes(),

@@ -1,7 +1,7 @@
 // two_consoles - two kernels on two cores, each with a console of its
 // own: core 0's over UART0 (GP0 / GP1, the Debug Probe's bridge), core
 // 1's over UART1 (GP4 / GP5, a second bridge). The same three active
-// objects as the console app on core 0 - SerialPort, Console, Lamp -
+// objects as the console app on core 0 - LineReader, Console, Lamp -
 // and two of them again on core 1, where the LED command CROSSES THE
 // BRIDGE: core 1 has no LED of its own (there is one, and core 0's
 // Lamp owns it), so its console sends the SetLed to core 0's Lamp
@@ -24,7 +24,7 @@
 // that took it; UART1's line is enabled by core 1's init, in ITS NVIC).
 //
 // Tenuto pack order is a CONTRACT: a Console (line consumer) precedes
-// its SerialPort (line producer) on both cores.
+// its LineReader (line producer) on both cores.
 //
 // build: boards = pico,weact2040
 // build: monitor_speed = 115200
@@ -44,9 +44,9 @@
 #include "rp2040/ticker.hpp"
 #include "rp2040/uart.hpp"
 #include "util/inbox.hpp"
+#include "util/line_reader.hpp"
 #include "util/print.hpp"
 #include "util/proto/line_parser.hpp"
-#include "util/serial_port.hpp"
 
 using P0 = brio::Rp2040Platform<0>;
 using P1 = brio::Rp2040Platform<1>;
@@ -110,7 +110,7 @@ struct ConsoleOn : brio::Fsm<ConsoleOn<Serial, P, core>, brio::LineReceived> {
     using Event = typename Base::Event;
     using Status = typename Base::Status;
     static inline brio::EventQueue<Event, 2, P> queue;
-    using Lines = brio::SerialPort<Serial, P, ConsoleOn, 80>;
+    using Lines = brio::LineReader<Serial, P, ConsoleOn, 80>;
 
     using Parser = brio::ConsoleCommandParser<4>;
     using Router = brio::CommandRouter<Serial, 4>;

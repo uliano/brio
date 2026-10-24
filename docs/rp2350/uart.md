@@ -17,7 +17,7 @@ served one event at a time by the kernel,
 [docs/learn/introduction.md](../learn/introduction.md)). The task is a
 byte transport with a transmit ring and a receive ring, both served from
 the instance's interrupt, with the same public surface as the other
-families' UART tasks, which is what lets `util/serial_port.hpp` and
+families' UART tasks, which is what lets `util/line_reader.hpp` and
 `print()` run here unchanged ([design/serial.md](../design/serial.md)).
 
 The smallest use, the console on GP0/GP1 (the Debug Probe's UART
@@ -67,7 +67,7 @@ unbound sends its line's first interrupt into the crt's default spin
 and the program stops there. `isr()` returns true when a received byte
 made the receive ring non-empty, the edge an active object is told of:
 the smallest use discards it, and the third block below posts it to
-`SerialPort`. `init()` hands both pads over itself, the isolation latch
+`LineReader`. `init()` hands both pads over itself, the isolation latch
 dropped and the receive pad pulled up ("What the silicon does" below).
 `print` waits until the transmit ring has taken every byte, so a long
 message printed from an active object's handler holds every other
@@ -237,7 +237,7 @@ constexpr brio::UartPins alt_pins{
 using Link = brio::Uart<1, alt_pins>;
 ```
 
-With the kernel, the edge feeds `SerialPort`:
+With the kernel, the edge feeds `LineReader`:
 
 ```cpp
 extern "C" void isr_uart0() {

@@ -1,5 +1,5 @@
 // console_usb - the brio kernel console over the chip's own USB: the
-// same three active objects as the console app (SerialPort, Console,
+// same three active objects as the console app (LineReader, Console,
 // Lamp), the transport a CDC ACM port instead of a UART - nothing
 // above the transport changed. THE CONTROLLER IS THE PART'S: the
 // CH32V203's USB device controller (ch32vx03/usb.hpp, RM ch. 21) where
@@ -58,9 +58,9 @@
 #include "kernel/fsm.hpp"
 #include "kernel/tenuto.hpp"
 #include "kernel/time.hpp"
+#include "util/line_reader.hpp"
 #include "util/print.hpp"
 #include "util/proto/line_parser.hpp"
-#include "util/serial_port.hpp"
 #include "util/trace.hpp"
 #include "util/usb/cdc.hpp"
 #include "util/usb/device.hpp"
@@ -214,7 +214,7 @@ private:
     static constexpr uint8_t route_count = sizeof(routes) / sizeof(routes[0]);
 };
 
-using SerialLines = brio::SerialPort<Serial, P, Console, 80>;
+using SerialLines = brio::LineReader<Serial, P, Console, 80>;
 
 }  // namespace
 

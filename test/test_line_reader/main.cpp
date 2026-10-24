@@ -1,4 +1,4 @@
-// Host tests for util/serial_port.hpp: line assembly, ping-pong ownership,
+// Host tests for util/line_reader.hpp: line assembly, ping-pong ownership,
 // backpressure with self-post, consumer-above-producer scheduling - each
 // over the two drains: a byte at a time through read_byte(), and a run at
 // a time over a transport that lends its receive ring in place - and,
@@ -25,8 +25,8 @@
 #include <vector>
 
 #include "host/platform.hpp"
+#include "util/line_reader.hpp"
 #include "util/ring.hpp"
-#include "util/serial_port.hpp"
 
 namespace {
 
@@ -34,7 +34,7 @@ using brio::HostPlatform;
 using brio::LineReceived;
 using brio::RxActivity;
 
-// Fake byte transport: the test loads bytes, SerialPort drains them one
+// Fake byte transport: the test loads bytes, LineReader drains them one
 // read_byte() at a time.
 struct ByteFake {
     static inline std::deque<uint8_t> rx;
@@ -244,7 +244,7 @@ struct Sink : brio::Fsm<Sink, LineReceived> {
 };
 
 template <typename Transport>
-using SerialOver = brio::SerialPort<Transport, HostPlatform, Sink, 16>;
+using SerialOver = brio::LineReader<Transport, HostPlatform, Sink, 16>;
 
 // Mimic the kernel: consumer (Sink) above producer (Serial).
 template <typename Serial>

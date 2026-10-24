@@ -12,7 +12,7 @@ active object is a component of a brio program with its own event
 queue, served one event at a time by the kernel,
 [docs/learn/introduction.md](../learn/introduction.md)): a byte
 transport with a transmit ring and a receive ring, both served from the
-instance's interrupt, with the surface `util/serial_port.hpp` and
+instance's interrupt, with the surface `util/line_reader.hpp` and
 `print()` are written against (`util/stream.hpp`'s `ByteTransport`), so
 both run here unchanged ([design/serial.md](../design/serial.md) is the
 stack above it). Two optional DMA engines move the bytes without the
@@ -52,8 +52,8 @@ empty-to-non-empty transition, not one per byte; under a receive engine
 the same edge is gated once per idle-to-busy transition of the consumer,
 "Types and verbs" below), the edge on which the handler posts
 `RxActivity` to `SerialLines`, which stands for the program's
-`SerialPort` active object, the one that assembles lines
-(`util/serial_port.hpp`; how it is declared, and that the active object
+`LineReader` active object, the one that assembles lines
+(`util/line_reader.hpp`; how it is declared, and that the active object
 receiving its lines comes before it in the `Tenuto` list, is
 [design/serial.md](../design/serial.md)'s); `init()` takes the clock
 task's tag (`constexpr SysClock clock;`, [clock.md](clock.md)) and the
@@ -277,7 +277,7 @@ TX and RX inside the chip and leaves the RX pad alone.
   `tx_idle` (THE WIRE IS IDLE: the ring empty - an engine's block holds
   its run there until its completion - and SR.TC set, cleared as every
   transmit block starts), `rx_skips` (the gaps in the stream the receive
-  ring hands out, never cleared - util/serial_port.hpp's epoch: without
+  ring hands out, never cleared - util/line_reader.hpp's epoch: without
   an engine the SkipRing's skips, one at the consumer's look after
   `isr()` reported a byte refused by a full ring, dropped for FE or PE,
   or an overrun; with one the view's skips plus an ORE and a restart
@@ -431,7 +431,7 @@ verbs on the same instance.
 - The TX ring drains through TXE and disarms when dry (CR1 read back
   0x202C - UE, TE, RE, RXNEIE, TXEIE clear - with the ring's indices
   equal after the banner); the RX path fills the ring and the edge
-  posts (the ring's indices consumed by `SerialPort`). A DR poked by
+  posts (the ring's indices consumed by `LineReader`). A DR poked by
   the debugger reached the host, which is how a stalled-looking console
   was told apart from a dead transmitter during the bring-up: the
   transmitter was fine and the host had sent `\r` where the line

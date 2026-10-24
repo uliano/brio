@@ -9,7 +9,7 @@
  * program with its own event queue, served one event at a time by the
  * kernel): a byte transport with a transmit ring and a receive ring,
  * the public surface every target's Uart has, which is what lets
- * util/serial_port.hpp and print() run here unchanged. `Pl011<n>` is
+ * util/line_reader.hpp and print() run here unchanged. `Pl011<n>` is
  * the resource under it, one function per register fact. The smallest
  * use, the console on UART0 (written out at `Uart` below, as
  * docs/rp2040/uart.md spells it): the two pads named with function 2,

@@ -4,7 +4,7 @@
  * The serial ports of the CH32V00x: USART1, and USART2 on the
  * CH32V005/006/007 (RM ch. 14; the CH32V003's one USART under its
  * ch. 12). A program uses this file for its console, a line-oriented
- * link or a byte transport to another chip; util/serial_port.hpp and
+ * link or a byte transport to another chip; util/line_reader.hpp and
  * print() run on it unchanged. The smallest use, a console's glue (the
  * port, its vector bound, one print):
  *
@@ -21,7 +21,7 @@
  *     Serial::init(clock, 115200);       // in main, after SysClock::init()
  *     brio::print(serial, "hello", brio::crlf);
  *
- * `SerialLines` is the program's SerialPort (util/serial_port.hpp), the
+ * `SerialLines` is the program's LineReader (util/line_reader.hpp), the
  * active object that assembles lines (an active object is a component
  * of a brio program with its own event queue, served one event at a
  * time by the kernel); a program with none writes `(void)Serial::isr();`
@@ -43,7 +43,7 @@
  *                        interrupt-driven byte transport with two rings
  *                        and one ISR body - every console's
  *                        personality, a ByteTransport for print() and
- *                        SerialPort, the same surface as the other
+ *                        LineReader, the same surface as the other
  *                        strata's transports. Its options ride one
  *                        trailing template parameter (single wire, the
  *                        flow-control pads, the frame) and cost nothing
@@ -114,7 +114,7 @@
  * end), and arrive into an RX ring filled by RXNE, taken a byte at a
  * time by read_byte() or a run at a time, in place, by read_span() and
  * consume(). isr() returns the "RX went non-empty" edge that
- * util/serial_port.hpp wants to post on - one event per idle-to-busy
+ * util/line_reader.hpp wants to post on - one event per idle-to-busy
  * transition, not one per byte.
  *
  * The baud divisor is the whole register. BRR counts the peripheral
@@ -1043,7 +1043,7 @@ struct Uart {
      *
      * Returns true when a byte arrived into an empty ring - under a
      * receive engine, when the consumer has bytes it was not told of:
-     * the edge util/serial_port.hpp posts on (post RxActivity on true).
+     * the edge util/line_reader.hpp posts on (post RxActivity on true).
      */
     // always_inline: one call site (the app's vector binding), so the
     // compiler saves only the registers this body uses. Inline in the vector
@@ -1235,7 +1235,7 @@ struct Uart {
     /// The received bytes in place: the contiguous run ready to be read,
     /// never wrapping - the receive ring's consumer half under the ring's
     /// own names. With consume() it is util/stream.hpp's SpanSource,
-    /// which SerialPort drains a run at a time. The run is the ring's
+    /// which LineReader drains a run at a time. The run is the ring's
     /// storage, valid until consume() releases it; called from the
     /// consumer's side (main or an active object).
     /// With a receive engine the run is the channel's ring, read where it
@@ -1267,7 +1267,7 @@ struct Uart {
 
     /// The gaps in the stream the receive ring hands out, since the
     /// program started, never cleared - util/stream.hpp's SkippingSource,
-    /// util/serial_port.hpp's epoch. Without an engine: the SkipRing's
+    /// util/line_reader.hpp's epoch. Without an engine: the SkipRing's
     /// skips (modulo 2^8), one at the consumer's look after a byte the
     /// handler dropped for a flag or a full ring, or an overrun - the look
     /// that discards what the ring held. With one: the view's skips (a lap

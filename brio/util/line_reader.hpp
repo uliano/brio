@@ -1,24 +1,24 @@
 /*
- * serial_port.hpp
+ * line_reader.hpp
  *
- * SerialPort: the active object that turns the bytes a serial transport
+ * LineReader: the active object that turns the bytes a serial transport
  * receives into complete lines, each delivered as one event to another
  * active object of the program, the line sink. Below it bytes arrive at
  * the wire's rate, into a ring an interrupt handler or a receive engine
- * fills; above it events arrive at a line's rate. SerialPort is pure
+ * fills; above it events arrive at a line's rate. LineReader is pure
  * logic over its Transport template parameter: it compiles against any
  * type that meets util/stream.hpp's ByteSource, so it runs on every
  * target unchanged and the host suite drives it with a scripted
- * transport (test/test_serial_port). The stack it belongs to is
- * docs/design/serial.md, "SerialPort".
+ * transport (test/test_line_reader). The stack it belongs to is
+ * docs/design/serial.md, "LineReader".
  *
  * The smallest use is a console. The program names a transport of its
- * family, a SerialPort over it with the active object that handles the
- * lines, lists the sink before the port, and posts RxActivity from the
+ * family, a LineReader over it with the active object that handles the
+ * lines, lists the sink before the reader, and posts RxActivity from the
  * transport's interrupt handler:
  *
- *     using Lines = brio::SerialPort<Serial, P, Shell>;   // Shell handles LineReceived
- *     brio::Tenuto<P, Shell, Lines>::run();              // the sink before the port
+ *     using Lines = brio::LineReader<Serial, P, Shell>;   // Shell handles LineReceived
+ *     brio::Tenuto<P, Shell, Lines>::run();              // the sink before the reader
  *
  *     // in the program's handler for the transport's vector:
  *     if (Serial::isr()) { brio::post<Lines>(brio::RxActivity{}); }
@@ -29,8 +29,8 @@
  *    returns true when the ring holds bytes the consumer
  *    has not been told of; the program's glue posts one RxActivity on
  *    that true (docs/design/serial.md, "The burst edge comes from a
- *    vector"). RxActivity is the one event SerialPort handles;
- *  - SerialPort runs in the kernel loop, in main context like every
+ *    vector"). RxActivity is the one event LineReader handles;
+ *  - LineReader runs in the kernel loop, in main context like every
  *    active object: its dispatch drains the ring into a LineAssembler
  *    (util/proto/line_parser.hpp) and posts each completed line to
  *    LineSink as LineReceived{line}. The event carries a pointer to the
@@ -38,7 +38,7 @@
  *    characters (max_line is 80 by default) and a NUL, stays in the
  *    assembler's buffer and never travels through a queue;
  *  - LineSink reads or parses the line inside its own dispatch, the one
- *    that handles LineReceived. SerialPort itself waits for nothing and
+ *    that handles LineReceived. LineReader itself waits for nothing and
  *    masks nothing (a transport's ring may take the platform's critical
  *    section on its guarded path, util/ring.hpp); the console's one wait
  *    is print, below.
@@ -50,24 +50,24 @@
  * for one dispatch, a Lease::dispatch loan (kernel/borrowed.hpp): the
  * sink may read it and may write it (tokenizing it in place is the
  * point of the loan) while handling LineReceived, and must not keep the
- * pointer for a later event, because SerialPort's next dispatch may
+ * pointer for a later event, because LineReader's next dispatch may
  * already be assembling into that buffer again. With both lines in
- * flight SerialPort stops draining (the ring absorbs the bytes; that is
+ * flight LineReader stops draining (the ring absorbs the bytes; that is
  * its job) and posts RxActivity to itself: there is leftover work,
  * serve me again. Two lines can be in flight, so the sink's queue needs
  * room for two LineReceived beside its own events; a LineReceived
  * dropped by a full sink queue is a line lost, counted in the sink's
  * queue.overflows() (kernel/event_queue.hpp).
  *
- * The order the loan needs: LineSink must come before SerialPort in the
+ * The order the loan needs: LineSink must come before LineReader in the
  * list of active objects given to Tenuto. The kernel serves the queues
  * in list order (the position in the list is the priority, the first
  * the highest) and a dispatch runs to its end, so every LineReceived
- * posted is handled before SerialPort runs again; when a SerialPort
+ * posted is handled before LineReader runs again; when a LineReader
  * dispatch starts, every line it posted has been consumed and both
- * buffers are free (in_flight_ goes back to zero). SerialPort declares
+ * buffers are free (in_flight_ goes back to zero). LineReader declares
  * `using LendsTo = Subscribers<LineSink>` and Tenuto refuses, when the
- * program is compiled, a list in which the sink comes after the port.
+ * program is compiled, a list in which the sink comes after the reader.
  *
  * Transmit has no active object. print() (util/print.hpp) goes straight
  * to the transport, from main context only (print.hpp says why), and
@@ -165,13 +165,13 @@ namespace brio {
 
 /// Bytes are waiting in the receive ring. Posted by the program's
 /// interrupt glue when the transport's handler returns true, and by
-/// SerialPort to itself when it stopped a drain with bytes still queued.
+/// LineReader to itself when it stopped a drain with bytes still queued.
 struct RxActivity {};
 
 /// A completed line, NUL-terminated and without its end of line, lent to
 /// the sink for the dispatch that handles this event only. The sink may
 /// write it (tokenizing it in place is the point of the loan) and must
-/// not keep the pointer past that dispatch: SerialPort's next dispatch
+/// not keep the pointer past that dispatch: LineReader's next dispatch
 /// may assemble a line into that buffer again (the two buffers
 /// alternate, the header says how).
 struct LineReceived {
@@ -180,9 +180,9 @@ struct LineReceived {
 
 template <typename Transport, Platform P, typename LineSink,
           uint8_t max_line = 80>
-class SerialPort
-    : public Fsm<SerialPort<Transport, P, LineSink, max_line>, RxActivity> {
-    using Base = Fsm<SerialPort<Transport, P, LineSink, max_line>, RxActivity>;
+class LineReader
+    : public Fsm<LineReader<Transport, P, LineSink, max_line>, RxActivity> {
+    using Base = Fsm<LineReader<Transport, P, LineSink, max_line>, RxActivity>;
 
 public:
     using Event = typename Base::Event;
@@ -322,7 +322,7 @@ private:
         if (in_flight_ >= 2) {
             // Both buffers in flight and possibly more bytes in the ring:
             // reschedule ourselves AFTER the sink has consumed.
-            post<SerialPort>(RxActivity{});
+            post<LineReader>(RxActivity{});
         }
     }
 

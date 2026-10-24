@@ -45,9 +45,9 @@
 #include "kernel/fsm.hpp"
 #include "kernel/tenuto.hpp"
 #include "kernel/time.hpp"
+#include "util/line_reader.hpp"
 #include "util/print.hpp"
 #include "util/proto/line_parser.hpp"
-#include "util/serial_port.hpp"
 #include "util/trace.hpp"
 #include "util/usb/cdc.hpp"
 #include "util/usb/device.hpp"
@@ -215,7 +215,7 @@ private:
     static constexpr uint8_t route_count = sizeof(routes) / sizeof(routes[0]);
 };
 
-using SerialLines = brio::SerialPort<Serial, P, Console, 64>;
+using SerialLines = brio::LineReader<Serial, P, Console, 64>;
 
 
 }  // namespace

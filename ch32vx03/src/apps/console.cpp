@@ -2,8 +2,8 @@
 // objects over USART1, and the proof that the kernel this repository is
 // built around runs unchanged on a second RISC-V core.
 //
-//   SerialPort  turns RX bytes into LineReceived events (ping-pong line
-//               buffers, backpressure on the ring - util/serial_port.hpp)
+//   LineReader  turns RX bytes into LineReceived events (ping-pong line
+//               buffers, backpressure on the ring - util/line_reader.hpp)
 //   Console     parses and routes each line, replies via blocking print,
 //               owns a 1 Hz time event whose count says the kernel's
 //               timers are alive, and drives the lamp BY POSTING
@@ -16,9 +16,9 @@
 // the clock type, the transport, and the two vector bindings.
 //
 // Tenuto pack order is a CONTRACT here: Console (line consumer) must
-// precede SerialPort (line producer) so the ping-pong buffers are always
-// free when SerialPort runs - see the scheduling contract in
-// serial_port.hpp.
+// precede LineReader (line producer) so the ping-pong buffers are always
+// free when LineReader runs - see the scheduling contract in
+// line_reader.hpp.
 //
 // The board is a WeAct CH32V203C8T6 core board (a blue board in the
 // black-pill shape): an 8 MHz crystal, a 32.768 kHz one, a blue LED on
@@ -52,9 +52,9 @@
 #include "kernel/tenuto.hpp"
 #include "kernel/time.hpp"
 #include "kernel/time_event.hpp"
+#include "util/line_reader.hpp"
 #include "util/print.hpp"
 #include "util/proto/line_parser.hpp"
-#include "util/serial_port.hpp"
 
 using P = brio::Ch32vx03Platform<>;
 
@@ -199,7 +199,7 @@ private:
 };
 
 // ---- the serial line producer ----------------------------------------------
-using SerialLines = brio::SerialPort<Serial, P, Console, 64>;
+using SerialLines = brio::LineReader<Serial, P, Console, 64>;
 
 void Console::cmd_err(const Cmd&, Serial s) {
     brio::print(s,

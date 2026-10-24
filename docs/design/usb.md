@@ -16,7 +16,7 @@ side of USB is not brio's and will not be.
 The smallest use: a family's controller type, a `UsbDevice` over it
 listing the CDC class, the descriptor bytes the application glues
 after `usb_configuration_head`, and the controller's vector bound to
-`UsbDevice::isr()`; then `print` to the CDC class, or a `SerialPort`
+`UsbDevice::isr()`; then `print` to the CDC class, or a `LineReader`
 over it. The prerequisite that decides correctness: **the whole stack
 runs in the interrupt handler body**, so the program's side of a class
 (a console reading its ring) runs in the loop and the handler's side in
@@ -106,7 +106,7 @@ endpoint is its.
 CDC ACM is the first class and the reason for the stack: a serial port
 the host needs no driver for, with `write_byte` and `write_bulk`,
 `read_byte` and `read_span`/`consume`, and `tx_idle`, the surface of a
-UART, so a console or a `SerialPort` runs over the chip's own
+UART, so a console or a `LineReader` runs over the chip's own
 connector unchanged. Its flow control is USB's own: the OUT endpoint
 is re-armed only while a whole packet fits in the receive ring, and
 the host NAKs meanwhile, losing no byte. The two rings are the

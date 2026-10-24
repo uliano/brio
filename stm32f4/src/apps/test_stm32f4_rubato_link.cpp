@@ -1,7 +1,7 @@
 // test_stm32f4_rubato_link - the bench suite of the SPI and UART stacks of
 // the STM32F4 stratum under Rubato, the preemptive kernel
 // (kernel/rubato.hpp): util/spi_bus.hpp's arbiter over stm32f4/spi.hpp's
-// SpiHost and its DMA engines, and util/serial_port.hpp's SerialPort over
+// SpiHost and its DMA engines, and util/line_reader.hpp's LineReader over
 // stm32f4/usart.hpp's Uart and its receive engine, run against the desk's
 // STM32G0B1RE and its unchanged instruments (stm32g0/src/apps/spi_peer.cpp,
 // usart_peer.cpp) while an object of the highest priority preempts them at
@@ -22,8 +22,8 @@
 //             time events with the ceiling held at 0 - a tick there waits
 //             for the walk's end -, and whether the arbiter was dispatching
 //             a completion at any depth).
-//   LineSink  the borrower of the SerialPort's lines (Lease::dispatch),
-//             above the port as the loan requires: each line parsed against
+//   LineSink  the borrower of the LineReader's lines (Lease::dispatch),
+//             above the reader as the loan requires: each line parsed against
 //             the sequence this suite numbers and checks, gaps, duplicates
 //             and corrupt lines counted, then written over in place (the
 //             borrower may write what it is lent; a lender that read it
@@ -45,7 +45,7 @@
 //             the event kind around the service's own dispatch - the one
 //             thing the landing trace needs that the service does not say.
 //   Minor     a second SPI client BELOW the arbiter (letter w).
-//   LinePort  SerialPort<Uart<1, ...>, P, LineSink, 80> over the receive
+//   LinePort  LineReader<Uart<1, ...>, P, LineSink, 80> over the receive
 //             engine the serial suite uses on the link (DMA2 stream 2
 //             channel 4), the interrupt transmitter beside it.
 //   Console   the lowest: it owns USART2 (the ST-LINK virtual COM port),
@@ -134,7 +134,7 @@
 //   t  the UART, received: numbered, checked lines (L, five digits, a
 //      payload of 8 to 60 characters derived from the number, a checksum)
 //      written by the Console and turned around by the peer's ECHO at
-//      460800 and 921600 baud, assembled by the SerialPort from the receive
+//      460800 and 921600 baud, assembled by the LineReader from the receive
 //      engine's ring and lent to LineSink: 200 lines a leg, none lost, none
 //      out of order, none corrupt, the port's own counters (ring overruns,
 //      ORE, FE, PE, NE, DMA faults, line overflows, torn lines) zero, and
@@ -188,8 +188,8 @@
 #include "stm32f4/ticker.hpp"
 #include "stm32f4/tim.hpp"
 #include "stm32f4/usart.hpp"
+#include "util/line_reader.hpp"
 #include "util/print.hpp"
-#include "util/serial_port.hpp"
 #include "util/spi_bus.hpp"
 #include "util/testbench.hpp"
 
@@ -537,7 +537,7 @@ bool parse_line(const char* s, uint16_t& seq) {
 
 struct LineSink {
     using Event = std::variant<LineReceived>;
-    /// Two LineReceived in flight at most (serial_port.hpp) and room beside.
+    /// Two LineReceived in flight at most (line_reader.hpp) and room beside.
     static inline EventQueue<Event, 4, P> queue;
 
     // The tally, written here, read by the Console between legs.
@@ -791,7 +791,7 @@ private:
 // LinePort, Console, the kernel
 // =============================================================================
 
-using LinePort = SerialPort<LinkPort, P, LineSink, 80>;
+using LinePort = LineReader<LinkPort, P, LineSink, 80>;
 
 struct ConsoleEvent {
     uint8_t kind;

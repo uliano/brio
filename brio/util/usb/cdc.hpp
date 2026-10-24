@@ -9,11 +9,11 @@
  * the control line state), and - the point of it - a byte transport
  * over the bulk pair with the same surface as a UART's (`write_byte`,
  * `write_bulk`, `read_byte`, `read_span`/`consume`, `tx_idle`), so a
- * console or a SerialPort runs over the chip's own connector with
+ * console or a LineReader runs over the chip's own connector with
  * nothing above it changed.
  *
  * The smallest use, a serial port over the RP2040's own controller:
- * the class over the controller, a SerialPort over the class, and the
+ * the class over the controller, a LineReader over the class, and the
  * receive edge posted from the controller's vector after the stack has
  * run (usb/device.hpp shows the descriptors and the device around it;
  * a tag object is an empty value that stands for its type in a call,
@@ -21,7 +21,7 @@
  *
  *     using Serial = brio::UsbCdcAcm<brio::Usb, P>;   // interface 0, endpoints 1 and 2
  *     constexpr Serial serial;                         // the tag object print() takes
- *     using SerialLines = brio::SerialPort<Serial, P, Console, 80>;
+ *     using SerialLines = brio::LineReader<Serial, P, Console, 80>;
  *
  *     extern "C" void isr_usbctrl() {
  *         Device::isr();
@@ -48,7 +48,7 @@
  *  - the byte transport is the program's, from main context: one
  *    producer of the transmit ring (write_byte, write_bulk, and print
  *    over them) and one consumer of the receive ring (read_byte,
- *    read_span/consume, or a SerialPort draining it), as util/ring.hpp's
+ *    read_span/consume, or a LineReader draining it), as util/ring.hpp's
  *    rule asks. None of these verbs waits (a print over them does,
  *    below). Every write_byte or write_bulk that queued bytes takes the
  *    platform's critical section (interrupts masked) and, when no packet
@@ -270,7 +270,7 @@ public:
         }
         out_armed_ = outs_armed_ != 0u;
         if (m_rx.empty() && !data.empty()) {
-            rx_edge_ = true;   // the ring's empty -> non-empty edge: what a SerialPort wants posted
+            rx_edge_ = true;   // the ring's empty -> non-empty edge: what a LineReader wants posted
         }
         for (const uint8_t b : data) {
             if (!m_rx.push(b)) {
@@ -357,7 +357,7 @@ public:
     /// The received bytes in place: the contiguous run ready to be read,
     /// never wrapping - the receive ring's consumer half under the ring's
     /// own names. With consume() it is util/stream.hpp's SpanSource,
-    /// which SerialPort drains a run at a time. The span stays valid until
+    /// which LineReader drains a run at a time. The span stays valid until
     /// the next consume() or read_byte(): nothing on the stack's side
     /// moves the receive ring's consumer index, a bus reset included.
     static std::span<const uint8_t> read_span() { return m_rx.read_span(); }
@@ -394,7 +394,7 @@ public:
     static bool tx_idle() { return m_tx.empty() && !in_armed_; }
 
     /// ISR glue: did a packet just fill an empty receive ring? Consumed
-    /// by the read; the app posts a SerialPort's RxActivity on it, the
+    /// by the read; the app posts a LineReader's RxActivity on it, the
     /// way a UART's isr() returns the edge. Call it in the controller's
     /// vector, after Device::isr().
     static bool take_rx_edge() {

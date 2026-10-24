@@ -96,7 +96,7 @@ takes.
 | host | 4, and a second test platform stating 1 | both paths run under the same suite (`test_ring`), the guarded one on the platform that states 1 |
 
 The extra template parameter is the honest price, and it is the same
-price `EventQueue`, `SerialPort`, `SpiBus` and `Tenuto` already pay:
+price `EventQueue`, `LineReader`, `SpiBus` and `Tenuto` already pay:
 the application names its platform once (`using P = AvrPlatform;`)
 and every service reads it from there.
 
@@ -211,7 +211,7 @@ bytes of flash; RAM identical.
 A receive interrupt drops bytes on rare paths (one that finds the
 ring full, one the receiver flags as framed or failing its parity, the
 frames a hardware overrun swallowed), and a consumer that carries
-state from one byte to the next (`SerialPort`'s line begun) must never
+state from one byte to the next (`LineReader`'s line begun) must never
 join the two sides of a drop. It needs one fact, that the run it is
 handed follows on from the run before, and not how much was lost, nor
 where. `SkipRing<T, size, P>` is Ring with that fact in two bytes: a
@@ -409,7 +409,7 @@ peripheral, if it can tell, is the one to say.
 transport's `rx_pending()`, a release refused), the stream the
 consumer reads jumps there, and the run handed out next is the stream
 after a gap. A reader that carries state across its runs
-(`SerialPort`'s partial line, [serial.md](serial.md)) must learn of a
+(`LineReader`'s partial line, [serial.md](serial.md)) must learn of a
 jump its own calls did not make, and the empty run a skipping
 `read_span()` returns cannot tell it (an empty run is also a drained
 ring). So `skips()` counts every skip and is never cleared: the reader

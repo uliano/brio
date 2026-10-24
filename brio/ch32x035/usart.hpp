@@ -20,7 +20,7 @@
  *  Uart<n, P, ...>       the task: the interrupt-driven byte transport with
  *                        two rings and one interrupt body - every
  *                        console's personality, a ByteTransport for
- *                        print() and SerialPort, the same surface - and
+ *                        print() and LineReader, the same surface - and
  *                        the same template parameters - as the
  *                        CH32V203's (brio/ch32vx03/usart.hpp).
  *
@@ -89,7 +89,7 @@
  * is idle and would re-enter the handler without end), and arrive into
  * an RX ring filled by RXNE, taken a byte at a time by read_byte() or a
  * run at a time, in place, by read_span() and consume(). isr() returns
-  * the "RX went non-empty" edge that util/serial_port.hpp posts on - one
+  * the "RX went non-empty" edge that util/line_reader.hpp posts on - one
  * event per idle-to-busy transition, not one per byte.
  *
  * The baud divisor is the whole register. BRR counts HCLK periods per bit
@@ -1065,7 +1065,7 @@ struct Uart {
      * errors, and masks nothing.
      *
      * Returns true when a byte arrived into an empty ring: the edge
-     * util/serial_port.hpp posts on (RxActivity to the active object that
+     * util/line_reader.hpp posts on (RxActivity to the active object that
      * assembles lines); a program with no such object discards it.
      */
     // always_inline: one call site (the app's vector binding), so the
@@ -1315,7 +1315,7 @@ public:
     /// The received bytes in place: the contiguous run ready to be read,
     /// never wrapping - the receive ring's consumer half under the ring's
     /// own names, valid until consume() releases it. With consume() it is
-    /// util/stream.hpp's SpanSource, which SerialPort drains a run at a
+    /// util/stream.hpp's SpanSource, which LineReader drains a run at a
     /// time. With a receive engine the run is the channel's ring, read
     /// where it writes, and consume() says whether it was intact. Main
     /// context only.
@@ -1360,7 +1360,7 @@ public:
 
     /// The gaps in the stream the receive ring hands out, since the program
     /// started, never cleared - util/stream.hpp's SkippingSource,
-    /// util/serial_port.hpp's epoch. Without an engine: the SkipRing's
+    /// util/line_reader.hpp's epoch. Without an engine: the SkipRing's
     /// skips (modulo 2^8), one at the consumer's look after a byte the
     /// handler dropped for a flag or a full ring, or an overrun - the look
     /// that discards what the ring held. With one: the view's skips (a lap

@@ -8,7 +8,7 @@
  *  - LineAssembler, fed one byte at a time, returns each completed line
  *    (a push model: it holds no reference to any transport, so it works
  *    with any source - a UART ring, a test vector, a host-side unit
- *    test). util/serial_port.hpp's SerialPort runs two of them and
+ *    test). util/line_reader.hpp's LineReader runs two of them and
  *    delivers the lines as events, which is how a program usually meets
  *    it;
  *  - ConsoleCommandParser ("CMD arg1 arg2") and ScpiCommandParser
@@ -20,7 +20,7 @@
  *    sources resolved at compile time.
  *
  * The smallest use is a console's line sink, the active object that
- * handles SerialPort's LineReceived:
+ * handles LineReader's LineReceived:
  *
  *     using Parser = brio::ConsoleCommandParser<4>;
  *     using Router = brio::CommandRouter<Serial, 4>;
@@ -51,8 +51,8 @@
  * lives in its assembler's buffer, the parsers write into it (separators
  * become NULs, the command word is uppercased), and a ParsedCommand
  * points into it. So a command is valid for exactly as long as the line
- * is: until the assembler's next push(), or, for a line SerialPort
- * lends, until the end of the LineReceived dispatch (serial_port.hpp,
+ * is: until the assembler's next push(), or, for a line LineReader
+ * lends, until the end of the LineReceived dispatch (line_reader.hpp,
  * "Who owns a line, and for how long"). A router's handler runs inside
  * dispatch(), in the caller's context, and answers through the sink it
  * is handed; a print there waits as util/print.hpp says.

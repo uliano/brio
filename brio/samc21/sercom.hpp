@@ -2150,7 +2150,7 @@ public:
     /// The received bytes IN PLACE: the contiguous run ready to be read,
     /// never wrapping - the receive ring's consumer half under the ring's
     /// own names. With consume() it is util/stream.hpp's SpanSource,
-    /// which SerialPort drains a run at a time with no copy at all.
+    /// which LineReader drains a run at a time with no copy at all.
     static std::span<const uint8_t> read_span() { return m_rx.read_span(); }
 
     /// Release the first `count` bytes of read_span(), oldest first, clamped

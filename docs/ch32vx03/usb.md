@@ -14,7 +14,7 @@ packets and nothing above them. The protocol is the stack's
 host's enumeration over the controller, and `UsbCdcAcm` of
 [util/usb/cdc.hpp](../../brio/util/usb/cdc.hpp) is the serial-port
 class, a byte transport with a UART's surface, so `print` and a
-`SerialPort` run over it unchanged.
+`LineReader` run over it unchanged.
 
 The smallest use, the block under "How to use it" below with the
 descriptors' bytes left out:
@@ -70,7 +70,7 @@ FIFO 0, under the name the crt (the startup code that runs before
 gives it, to `Device::isr()`: the whole stack runs in that interrupt
 body, the enumeration, the class's requests and its packets
 ([design/usb.md](../design/usb.md), "Where it runs"), and a program
-whose lines a `SerialPort` assembles also posts its `RxActivity` from
+whose lines a `LineReader` assembles also posts its `RxActivity` from
 there when `Port::take_rx_edge()` reports the receive ring's
 empty-to-non-empty edge. `Port{}` is an empty tag object of the class
 type, the argument `print` takes to pick the port, as a UART's tag is;
@@ -464,7 +464,7 @@ BRIO_CH32_VECTOR(usb_lp_can1_rx0_handler) { Device::isr(); }
 brio::print(Port{}, "hello", brio::crlf);                    // once the host has configured the port
 ```
 
-The port is a `ByteTransport`: a `SerialPort` and a console run over it
+The port is a `ByteTransport`: a `LineReader` and a console run over it
 exactly as over a UART, and the line coding and DTR the host sets are
 reported and not obeyed - a virtual port has no baud rate. The identity
 1209:0001 is pid.codes' test pair, meant for a device that is not a

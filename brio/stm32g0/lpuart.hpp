@@ -19,7 +19,7 @@
  * (RtcDomain::lse_enable(), stm32g0/rtc.hpp) and the kernel clock has to
  * be running before init() (docs/stm32g0/lpuart.md writes it out; 9600
  * baud is the crystal's ceiling). Everything the task does - its rings,
- * its options, print() and SerialPort over it, which context calls what
+ * its options, print() and LineReader over it, which context calls what
  * and what waits - is stm32g0/usart.hpp's opening comment, and holds
  * here unchanged: init() and release() from setup, isr() from the
  * program's handler for the shared vector, the transmit and receive
