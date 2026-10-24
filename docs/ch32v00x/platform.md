@@ -202,7 +202,14 @@ it before the Standby began. The interrupt verbs and
 the per-line enables are [brio/ch32v00x/pfic.hpp](../../brio/ch32v00x/pfic.hpp):
 `enable/disable/enabled/pending/set_pending/clear_pending/active`
 (the manual's ISR bank is the enable status and its IPR the pending
-one; IENR/IRER/IPSR/IPRR are write-one). `BRIO_CH32_INTERRUPT` is the
+one; IENR/IRER/IPSR/IPRR are write-one), and `Pfic::in_handler()`,
+which the platform's `in_handler()` forwards (kernel/platform.hpp's
+optional member, `HandlerAware`): PFIC_GISR's GACTSTA, bit 8 at offset
+0x4C, an interrupt being executed at any nesting level (the CH32V00X
+reference manual 6.5.2.7, the CH32V003's 6.5.2.7, the QingKe V2 manual
+3.1) - not mstatus.MIE, which interrupt entry leaves set on this core
+("What the silicon does") and a critical section clears.
+`BRIO_CH32_INTERRUPT` is the
 one spelling of the handler attribute, expanding to WCH's fast
 attribute when the image is built with `CH32V00X_HPE` (the default)
 and to gcc's plain `interrupt` otherwise - one option for the whole
@@ -582,6 +589,13 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
+- **`in_handler()` on this silicon**: the read of PFIC_GISR's GACTSTA
+  is the manual's on both parts,
+  compiled for both; a letter that asks it from a
+  vector, from the main loop and under a critical section, as the
+  STM32F4's serial suite does
+  ([../stm32f4/usart.md](../stm32f4/usart.md), letter h), would
+  measure it.
 - The idle hook's POWER: `idle()` is proven to sleep and wake, and the
   loop to turn once per interrupt, not to sleep cheaply -
   a current measurement with the probe detached (a core in debug mode

@@ -139,6 +139,20 @@ struct AvrPlatform {
     /// SREG.I: the one bit CriticalSection saves and restores.
     static bool interrupts_enabled() { return (SREG & (1u << SREG_I)) != 0; }
 
+    /// Whether the caller runs inside an interrupt handler (the optional
+    /// member of kernel/platform.hpp): CPUINT.STATUS's three executing
+    /// bits, LVL0EX, LVL1EX and NMIEX, each set while a handler of its
+    /// level runs - or one of a higher level interrupted it - and cleared
+    /// by that handler's RETI (DS40002247B 15.5.2 on the DB, DS40002183A
+    /// 14.5.2 on the DA, DS40002443A 15.5.2 on the EA: the same register at
+    /// the same offset, 0x01 of CPUINT, with the same three bits). Not
+    /// SREG's I bit, which says nothing here: entry to a handler leaves it
+    /// set (7.6.3, above), and a critical section in thread code clears
+    /// it. Any context; one load of the register and a test.
+    static bool in_handler() {
+        return (CPUINT.STATUS & (CPUINT_LVL0EX_bm | CPUINT_LVL1EX_bm | CPUINT_NMIEX_bm)) != 0;
+    }
+
     /// Halt in the debugger when the OCD is active, plain NOP otherwise:
     /// the panic path's breakpoint (kernel/panic.hpp), callable from any
     /// context. With no debugger the panic continues into its reporter.
@@ -170,6 +184,6 @@ private:
     [[gnu::section(".noinit")]] static inline PanicRecord panic_record_;
 };
 
-static_assert(Platform<AvrPlatform>);
+static_assert(Platform<AvrPlatform> && HandlerAware<AvrPlatform>);
 
 } // namespace brio

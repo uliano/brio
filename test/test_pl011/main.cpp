@@ -418,6 +418,83 @@ TEST_CASE("a bulk run from idle goes straight into the FIFO, its tail queued beh
     CHECK(entries == 1u);
 }
 
+TEST_CASE("the transmit room falls by what the ring queued and rises as the FIFO drains; the edge is told once") {
+    fresh();
+    constexpr Clock clock;
+    REQUIRE(Port::init(clock, 115200));
+    entries = 0;
+
+    // An idle port: the whole ring free, no edge standing.
+    constexpr uint32_t capacity = 255u;   // a 256-slot ring holds a slot less
+    CHECK(Port::tx_room() == capacity);
+    CHECK_FALSE(Port::tx_drained());
+
+    // A run longer than the FIFO: its depth straight into UARTDR, the
+    // rest queued - the room falls by what the ring holds, not by the
+    // run.
+    constexpr uint32_t queued = 100u;
+    uint8_t run[SimPl011::fifo_depth + queued];
+    for (uint32_t i = 0; i < sizeof run; ++i) {
+        run[i] = pattern(i);
+    }
+    REQUIRE(Port::write_bulk(run) == sizeof run);
+    CHECK(Port::tx_room() == capacity - queued);
+    CHECK_FALSE(Port::tx_drained());   // nothing has run dry
+
+    // Each fall through the level refills the FIFO from the ring, the
+    // room rising by the refill; the ring empty, TXIM disarmed and the
+    // edge raised - once.
+    constexpr uint32_t refill = SimPl011::fifo_depth - tx_level;
+    uint32_t sent = 0;
+    uint32_t last_room = Port::tx_room();
+    uint32_t rises = 0;
+    bool told = false;
+    uint32_t edges = 0;
+    while (!Port::tx_idle()) {
+        REQUIRE(wire_takes_one(sent));
+        const uint32_t room = Port::tx_room();
+        CHECK(room >= last_room);   // the producer's room only grows behind it
+        if (room != last_room) {
+            rises = rises + 1u;
+            CHECK(room - last_room <= refill);
+        }
+        last_room = room;
+        if (Port::tx_drained()) {
+            edges = edges + 1u;
+            told = true;
+            CHECK(room == capacity);   // raised where the ring ran dry
+            CHECK((regs().UARTIMSC & UartInterrupt::tx) == 0u);
+        }
+    }
+    CHECK(sent == sizeof run);
+    CHECK(last_room == capacity);
+    CHECK(rises == (queued + refill - 1u) / refill);
+    CHECK(told);
+    CHECK(edges == 1u);
+    CHECK_FALSE(Port::tx_drained());   // told once: the read cleared it
+
+    // A run the FIFO takes whole queues nothing in the ring: no room
+    // taken, and no edge to wait for.
+    const uint8_t short_run[5] = {'b', 'r', 'i', 'o', '!'};
+    REQUIRE(Port::write_bulk(short_run) == 5u);
+    CHECK(Port::tx_room() == capacity);
+    while (!Port::tx_idle()) {
+        (void)SimPl011::shift<0>();
+        serve();
+    }
+    CHECK_FALSE(Port::tx_drained());
+
+    // init() starts the edge cleared: one left standing by an earlier
+    // life is not this one's.
+    REQUIRE(Port::write_bulk(run) == sizeof run);
+    uint32_t again = 0;
+    while (!Port::tx_idle()) {
+        REQUIRE(wire_takes_one(again));
+    }
+    REQUIRE(Port::init(clock, 115200));
+    CHECK_FALSE(Port::tx_drained());
+}
+
 TEST_CASE("an entry for the receiver alone leaves the transmit side to its edge") {
     fresh();
     constexpr Clock clock;
@@ -545,7 +622,7 @@ TEST_CASE("the engine slots carry the requests and the blocks") {
     CHECK(TxEngine::length == 1u);
 
     // The completion releases exactly that run; nothing else is queued,
-    // so the claim the pump took is given back and no next block starts.
+    // so no next block starts and the engine is left free.
     TxEngine::next_flags = TxEngine::flag_complete;
     CHECK_FALSE(Streamed::dma_isr());
     CHECK(TxEngine::blocks == started + 2u);
@@ -633,6 +710,54 @@ TEST_CASE("the engine slots carry the requests and the blocks") {
 
     Streamed::release();
     CHECK(SimPl011::regs<1>().UARTDMACR == 0u);
+}
+
+TEST_CASE("under a transmit engine the room grows a block at a time and the completion that empties the ring is the edge") {
+    using TxEngine = SimPl011Engine<0>;
+    using Streamed = Pl011Transport<SimPl011, 1, SimPl011Pins{.tx = 2, .rx = 3}, 64, 64,
+                                    TxEngine, SimNoEngine>;
+    fresh();
+    TxEngine::reset();
+    constexpr Clock clock;
+    REQUIRE(Streamed::init(clock, 3'000'000));
+    constexpr uint32_t capacity = 63u;   // a 64-slot ring holds a slot less
+    CHECK(Streamed::tx_room() == capacity);
+    CHECK_FALSE(Streamed::tx_drained());
+
+    // A run starts a block over it: the block holds its bytes in the ring
+    // until its completion, so the room falls by the whole run.
+    const uint8_t first[10] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9};
+    REQUIRE(Streamed::write_bulk(first) == 10u);
+    CHECK(TxEngine::busy());
+    CHECK(Streamed::tx_room() == capacity - 10u);
+
+    // A second run queues behind the block in flight.
+    const uint8_t second[5] = {10, 11, 12, 13, 14};
+    REQUIRE(Streamed::write_bulk(second) == 5u);
+    CHECK(Streamed::tx_room() == capacity - 15u);
+
+    // The first completion releases the first block and starts the
+    // second: the room grows by a block, and the ring is not dry.
+    TxEngine::next_flags = TxEngine::flag_complete;
+    (void)Streamed::dma_isr();
+    CHECK(TxEngine::length == 5u);
+    CHECK(Streamed::tx_room() == capacity - 5u);
+    CHECK_FALSE(Streamed::tx_drained());
+
+    // The second leaves nothing to start: the edge, told once.
+    TxEngine::next_flags = TxEngine::flag_complete;
+    (void)Streamed::dma_isr();
+    CHECK_FALSE(TxEngine::busy());
+    CHECK(Streamed::tx_room() == capacity);
+    CHECK(Streamed::tx_drained());
+    CHECK_FALSE(Streamed::tx_drained());
+
+    // A bus error throws the block away; it is no edge.
+    REQUIRE(Streamed::write_byte('e'));
+    TxEngine::next_flags = TxEngine::flag_error;
+    (void)Streamed::dma_isr();
+    CHECK_FALSE(Streamed::tx_drained());
+    Streamed::release();
 }
 
 // ---- the receive side: every loss is reported, and skipped ---------------------

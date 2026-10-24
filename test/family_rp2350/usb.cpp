@@ -251,7 +251,9 @@ void usb_stack_verbs() {
     (void)Device::last_request();
     Device::stop();
 
-    static_assert(BulkSink<Port> && SpanSource<Port>);
+    static_assert(BulkSink<Port> && EdgeSink<Port> && SpanSource<Port>);
+    (void)Port::tx_room();
+    (void)Port::tx_drained();
     (void)Port::write_byte('x');
     uint8_t b = 0;
     (void)Port::read_byte(b);

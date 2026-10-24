@@ -47,8 +47,11 @@
  * instance's vector calls it and nothing else does; it runs to
  * completion like every interrupt handler in brio, and what it masks
  * is the few instructions of the resource's read-modify-write verbs it
- * calls. The transmit verbs (write_byte(), write_bulk(), and print()
- * over them) and the receive verbs (read_byte(), read_bulk(),
+ * calls; tx_drained(), the transmit edge, is read by the program's glue
+ * in the vector whose body raised it (the instance's, or the transmit
+ * channel's under an engine). The transmit verbs (write_byte(),
+ * write_bulk(), tx_room(), and print() over them) and the receive verbs
+ * (read_byte(), read_bulk(),
  * read_span() with consume()) belong to the main context - setup, or
  * the handler of an active object, a brio object with an event queue
  * the kernel serves one event at a time - and never to an interrupt
@@ -1828,6 +1831,11 @@ class UartTask {
     /// Touched only under a receive engine with the FIFO on.
     static inline volatile uint8_t m_rx_kicks = 0;
 
+    /// The transmit edge: set where the transmitter finds the ring dry
+    /// (the transmit entry that disarms, or a transmit block's completion
+    /// that leaves the ring empty), cleared by tx_drained()'s read.
+    static inline volatile bool m_tx_drained = false;
+
     /// EVERY COUNTER SATURATES at 255: a count that wraps reads as a few
     /// errors after a storm of them. One compare on a rare path.
     [[gnu::always_inline]] static void bump(volatile uint8_t& counter) {
@@ -1954,6 +1962,7 @@ public:
         Nvic::disable(S::irq());
         m_rx.clear();
         m_tx.clear();
+        m_tx_drained = false;
         clear_errors();
         m_baud = baud;
 
@@ -2147,7 +2156,11 @@ private:
             } else if ((f & TxEngine::flag_complete) != 0u) {
                 m_tx.consume(static_cast<typename decltype(m_tx)::index_t>(
                     TxEngine::complete()));
-                pump_tx();
+                if (m_tx.empty()) {
+                    m_tx_drained = true;   // the transmit edge: no next run to start
+                } else {
+                    pump_tx();
+                }
             }
         }
         if constexpr (has_rx_engine) {
@@ -2471,6 +2484,7 @@ private:
                     const auto run = m_tx.read_span();
                     if (run.empty()) {
                         disarm_tx();
+                        m_tx_drained = true;   // the transmit edge, tx_drained()'s
                         break;
                     }
                     uint32_t sent = 0;
@@ -2490,6 +2504,7 @@ private:
                 r.TDR = *v;
             } else {
                 r.CR1 = r.CR1 & ~USART_CR1_TXEIE_TXFNFIE;   // ring dry: TXE would re-fire
+                m_tx_drained = true;                        // the transmit edge, tx_drained()'s
             }
         }
         return edge;
@@ -2718,6 +2733,32 @@ public:
         } else {
             return m_tx.empty() && (S::status() & UsartFlag::tc) != 0u;
         }
+    }
+
+    /// The bytes write_bulk() would take now: the transmit ring's free
+    /// count (util/stream.hpp's RoomSink). Main context, the ring's
+    /// producer; one read of the consumer's index, never waits. Without
+    /// an engine the room grows as the handler moves the ring into TDR
+    /// (a byte an entry, or as much as TXFNF lets through with the FIFO
+    /// on); with one, a block holds its run in the ring until its
+    /// completion, so the room grows a block at a time.
+    static uint32_t tx_room() { return m_tx.room(); }
+
+    /// The transmit edge, told once (util/stream.hpp's EdgeSink): true when the
+    /// transmitter has run the ring dry since the last true, the read clearing
+    /// it. Raised by isr() on the transmit entry that finds the ring empty and
+    /// disarms - the last byte in the shift register, or the last ones in the
+    /// TXFIFO with the FIFO on - and, with a transmit engine, by dma_isr() on
+    /// the completion that leaves the ring empty: the glue reads it right after
+    /// that body, in the same vector (the instance's, or the transmit
+    /// channel's). From main context the read is safe too, while that context
+    /// is the ring's one producer: only a write it makes can arm the next edge.
+    [[gnu::always_inline]] static bool tx_drained() {
+        const bool drained = m_tx_drained;
+        if (drained) {
+            m_tx_drained = false;
+        }
+        return drained;
     }
 
     /// The receive ring's losses to a consumer that did not keep up:

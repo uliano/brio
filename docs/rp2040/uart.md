@@ -192,6 +192,12 @@ function 2: UART0 transmits on GPIO 0, 12, 16, 28 and receives on 1,
   vector ends a burst under an engine
   ([../pl011/README.md](../pl011/README.md), "The receive side");
   `dma_faults()` counts the blocks abandoned after a bus error.
+- `tx_room()` and `tx_drained()`, the transmit pair (util/stream.hpp's
+  `RoomSink` and `EdgeSink`): the ring's free count, and the edge the
+  handler raises where it finds the ring dry - in `isr()`, or in
+  `dma_isr()` under a transmit engine - for the glue of that handler to
+  read; the IP stratum's page says where each grows and is raised
+  ([../pl011/README.md](../pl011/README.md), "The transmit side").
 - `Placement`, the last parameter: util/placement.hpp's tag, `InFlash`
   by default, `InRam` making the bodies of `isr()` and `dma_isr()` one
   flattened instance each in SRAM ([platform.md](platform.md), "A
@@ -414,6 +420,14 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
+- `tx_room()` and `tx_drained()` on this silicon: the IP file's own
+  verbs, judged on the host over the simulated PL011 (test/test_pl011:
+  the room falling by what the ring queued and rising a FIFO refill at a
+  time, the edge told once, under the interrupt transmitter and a
+  transmit engine) and measured on another family's silicon ([the
+  STM32F4 USART page](../stm32f4/usart.md), letter h); a letter that
+  writes a run with interrupts masked, reads the room under the mask and
+  the edge after the wire time would measure them here.
 - Why a burst of 17 at 1 Mbaud is told 1.6 to 2.7 frames after its last
   stop bit, under the 32 bit periods of the time-out (letter u; the
   M33 and Hazard3 read 3.26 on the same source) - where a lone byte's

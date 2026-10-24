@@ -132,7 +132,8 @@ static_assert(!smartcard_valid(SmartcardConfig{.clock_prescaler = 32}));
 static_assert(!smartcard_valid(SmartcardConfig{.clock_prescaler = 0}));
 
 // The transport is a ByteTransport for util's services.
-static_assert(ByteSink<Serial> && ByteSource<Serial> && BulkSink<Serial> && SpanSource<Serial>);
+static_assert(ByteSink<Serial> && ByteSource<Serial> && BulkSink<Serial> && EdgeSink<Serial> && SpanSource<Serial>);
+uint32_t edge_verbs_Serial() { return Serial::tx_room() + (Serial::tx_drained() ? 1u : 0u); }
 
 void usart_resource_verbs() {
     Console::bus_clock(true);

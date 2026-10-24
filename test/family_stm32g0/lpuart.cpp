@@ -128,7 +128,9 @@ void lpuart_verbs() {
     (void)LpRam::init(clock, 115200);
     (void)LpRam::isr();
     (void)LpWake::wakes();
-    static_assert(BulkSink<Lp> && SpanSource<Lp>);
+    static_assert(BulkSink<Lp> && EdgeSink<Lp> && SpanSource<Lp>);
+    (void)Lp::tx_room();
+    (void)Lp::tx_drained();
     (void)Lp::write_byte(0x55);
     uint8_t b = 0;
     (void)Lp::read_byte(b);

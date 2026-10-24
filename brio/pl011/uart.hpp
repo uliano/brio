@@ -92,8 +92,11 @@
  *    the instance's line calls it and nothing else does; dma_isr() is
  *    the body of the DMA line the engines report on, called from that
  *    line's handler. Both run to completion, as every interrupt handler
- *    in brio does, and no handler nests over another.
- *  - The byte verbs - write_byte(), write_bulk() and print() over them,
+ *    in brio does, and no handler nests over another. tx_drained(), the
+ *    transmit edge, is read by the program's glue in the handler whose
+ *    body raised it: the instance's line's, or the DMA line's under a
+ *    transmit engine.
+ *  - The byte verbs - write_byte(), write_bulk(), tx_room() and print() over them,
  *    read_byte(), read_bulk(), read_span() with consume(), and harvest()
  *    under a receive engine - belong to the main context: setup code, or
  *    the handler of an active object (a component with its own event
@@ -707,6 +710,10 @@ class Pl011Transport {
     static inline volatile uint8_t m_break_errors = 0;  // BE: a break, dropped
     static inline volatile uint8_t m_hw_overruns = 0;   // OE: the FIFO was full when a frame landed (UARTRSR)
     static inline volatile uint16_t m_dma_faults = 0;   // blocks the engines threw away
+    // The transmit edge: set where the transmitter finds the ring dry
+    // (feed()'s disarm, or a transmit block's completion that leaves the
+    // ring empty), cleared by tx_drained()'s read.
+    static inline volatile bool m_tx_drained = false;
     // Under a receive engine: the overrun interrupt masked by isr() after
     // a loss, until publish_rx() hands the next run over.
     static inline volatile bool m_overrun_quiet = false;
@@ -766,6 +773,7 @@ public:
         Chip::Interrupts::disable(U::irq());
         m_rx.clear();
         m_tx.clear();
+        m_tx_drained = false;
         clear_errors();
         m_baud = baud;
 
@@ -1065,7 +1073,11 @@ private:
                 bump(m_dma_faults);
             } else if ((f & TxEngine::flag_complete) != 0u) {
                 m_tx.consume(static_cast<typename decltype(m_tx)::index_t>(TxEngine::complete()));
-                pump_tx();
+                if (m_tx.empty()) {
+                    m_tx_drained = true;   // the transmit edge: no next run to start
+                } else {
+                    pump_tx();
+                }
             }
         }
         if constexpr (has_rx_engine) {
@@ -1269,6 +1281,35 @@ public:
         } else {
             return m_tx.empty() && !U::busy();
         }
+    }
+
+    /// The bytes the transmit ring would take now: its free count
+    /// (util/stream.hpp's RoomSink). Main context, the ring's producer;
+    /// one read of the consumer's index, never waits. It counts the ring
+    /// alone: without a transmit engine, write_bulk() on an idle ring
+    /// puts as much of a run as the FIFO has room for straight into it
+    /// and takes that much more. The room grows as feed() moves the ring
+    /// into the FIFO, a FIFO level at a time; with a transmit engine a
+    /// block holds its run in the ring until its completion, so the room
+    /// grows a block at a time.
+    static uint32_t tx_room() { return m_tx.room(); }
+
+    /// The transmit edge, told once (util/stream.hpp's EdgeSink): true when the
+    /// transmitter has run the ring dry since the last true, the read clearing
+    /// it. Raised by isr() where feed() finds the ring empty and disarms TXIM -
+    /// the FIFO still holding its last bytes - and, with a transmit engine, by
+    /// dma_isr() on the completion that leaves the ring empty: the glue reads
+    /// it right after that body, in the same handler (the instance's line's, or
+    /// the DMA line's). A run the FIFO took whole queued nothing in the ring
+    /// and raises none. From main context the read is safe too, while that
+    /// context is the ring's one producer: only a write it makes can arm the
+    /// next edge.
+    [[gnu::always_inline]] static bool tx_drained() {
+        const bool drained = m_tx_drained;
+        if (drained) {
+            m_tx_drained = false;
+        }
+        return drained;
     }
 
     // ---- diagnostics ------------------------------------------------------
@@ -1493,6 +1534,7 @@ private:
             const auto run = m_tx.read_span();
             if (run.empty()) {
                 U::interrupts(UartInterrupt::tx, false);
+                m_tx_drained = true;   // the transmit edge, tx_drained()'s
                 return;
             }
             uint32_t moved = 0;

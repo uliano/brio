@@ -226,7 +226,8 @@ static_assert(TxOnly::has_tx_engine && !TxOnly::has_rx_engine);
 static_assert(!RxOnly::has_tx_engine && RxOnly::has_rx_engine);
 static_assert(Both::has_tx_engine && Both::has_rx_engine);
 static_assert(ByteTransport<Plain> && ByteTransport<TxOnly> && ByteTransport<RxOnly> && ByteTransport<Both>);
-static_assert(BulkSink<Both> && SpanSource<Both>);
+static_assert(BulkSink<Both> && EdgeSink<Both> && SpanSource<Both>);
+uint32_t edge_verbs_Both() { return Both::tx_room() + (Both::tx_drained() ? 1u : 0u); }
 
 template <typename U>
 void uart_verbs() {

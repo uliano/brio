@@ -170,7 +170,9 @@ BKPT with no debugger escalates to the crt's distinct
 
 - `Stm32g0Platform<TB = Ticker>` - `Timebase` (= TB), `CriticalSection`
   (= `InterruptGuard`), `idle()` (DSB, WFI, unmask),
-  `interrupts_enabled()`, `break_here()` (BKPT), `now()`/
+  `interrupts_enabled()`, `in_handler()` (kernel/platform.hpp's optional
+  member: IPSR's exception number, zero in thread mode, ARMv6-M ARM
+  B1.4.2, cortexm/nvic.hpp's read), `break_here()` (BKPT), `now()`/
   `ticks_per_second` (the timebase's), `atomic_width` 4,
   `places_fast_text` (the three linker scripts collect `.fast_text`, so
   a driver may be given util/placement.hpp's `InRam` - "Code in SRAM"
@@ -792,8 +794,12 @@ Driver gaps (this chapter's option space the stratum does not touch):
   instead (measured on the SAM C21: 8 to 18 cycles a call). That header
   is every family's, so the choice is made there, not here.
 
-Implemented, not bench-verified: a VECTOR the program places in
-`.fast_text` over the flattened bodies ("Code in SRAM" gives the pump's
+Implemented, not bench-verified: `in_handler()` on this core (IPSR is
+the architecture's, ARMv6-M ARM B1.4.2, and the same read is measured
+on the STM32F4's Cortex-M4, [../stm32f4/usart.md](../stm32f4/usart.md)
+letter h - a letter that asks it from a vector, from the main loop and
+under a critical section would measure it here); a VECTOR the program
+places in `.fast_text` over the flattened bodies ("Code in SRAM" gives the pump's
 entry inline and unflattened, 305 cycles) - a `bench_stm32` built with
 its vectors in `.fast_text` would measure it;
 `bench_stm32_ram` on the STM32G071RB (the same image, run there, is the

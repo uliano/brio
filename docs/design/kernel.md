@@ -1429,8 +1429,12 @@ The kernel keeps which object is being dispatched (`dispatching<P>`,
 index of the dispatch it interrupted, so this is how such a service
 tells a handler's call from that object's. The `HandlerAware` concept
 detects it; a platform without it is refused by such a service and by
-nothing else. How the core knows is the platform's: the Cortex-M reads
-the exception number register, zero in thread mode; Hazard3 reads
+nothing else. Every target platform has it, and how the core knows is
+the platform's: the Cortex-M reads the exception number register, zero
+in thread mode; the AVR reads its interrupt controller's executing bits
+(CPUINT.STATUS) and the QingKe cores theirs (PFIC_GISR's GACTSTA), both
+clear in thread code by their manuals, a critical section or none;
+Hazard3 reads
 `mstatus.MIE` clear, which a trap's entry clears and the crt never sets
 again before the return, so that inside a critical section the answer
 is "a handler" too, and no service asks under a guard.

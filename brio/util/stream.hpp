@@ -36,6 +36,12 @@
  * docs/design/serial.md, "The run is the unit, the byte its degenerate
  * case".
  *
+ * A writer that must never split what it writes asks two more things of
+ * a sink: how much it would take now (RoomSink's tx_room()) and when the
+ * transmitter has emptied it (EdgeSink's tx_drained(), the transmit
+ * edge, the mirror of the receive edge a transport's isr() returns).
+ * Every serial transport of every family is both.
+ *
  * Monostate transports (all-static classes such as Uart<n>, with no
  * per-instance data) are passed around as empty tag instances:
  * `constexpr Uart<2> serial;` costs nothing and lets call sites read
@@ -77,6 +83,44 @@ concept ByteSink = requires(uint8_t b) {
 template <typename S>
 concept BulkSink = ByteSink<S> && requires(std::span<const uint8_t> run) {
     { S::write_bulk(run) } -> std::same_as<uint32_t>;
+};
+
+/// A sink that tells its free room: tx_room() is the number of bytes
+/// write_bulk() would take now without refusing any, the transmit ring's
+/// capacity less what is queued in it (zero where the transport refuses
+/// every write, a USB port its host has not configured). Main context,
+/// the ring's producer side; it never waits and moves nothing, and the
+/// answer can only grow behind the caller's back, as the transmitter
+/// drains. Where the ring's consumer is an engine (a DMA block, a USB
+/// packet) the engine releases a whole run at once, so the room grows in
+/// steps of a run. A writer that queues a piece only where it fits whole
+/// asks this first.
+template <typename S>
+concept RoomSink = ByteSink<S> && requires {
+    { S::tx_room() } -> std::same_as<uint32_t>;
+};
+
+/// A RoomSink that tells its transmit edge: tx_drained() answers true
+/// once for each time the transmitter ran the transmit ring dry - the
+/// moment tx_room() is the whole ring again - and false until the next
+/// time. The edge is raised in the transport's own interrupt body, at the
+/// place that finds the ring empty and disarms (an interrupt
+/// transmitter's dry branch, an engine's completion that finds no next
+/// run, a USB IN completion with nothing left to send; and a USB port
+/// whose host configures it while its ring is empty, the moment its room
+/// goes from none to the whole ring), and the read clears it. It is
+/// meant for the program's interrupt glue, called right after the body
+/// that may raise it, in the same vector, so the read and the raise
+/// never race; each transport says which vector that is. An
+/// edge follows every write that queued bytes into the ring, and only
+/// those: a write the transmitter took whole straight into its FIFO
+/// queued nothing and leaves the room as it found it. A spare edge is
+/// possible (a run whose first byte the transmitter took before the rest
+/// was queued), a missing one is not. tx_idle(), where a transport has
+/// it, is a different fact: the wire idle, the shift register included.
+template <typename S>
+concept EdgeSink = RoomSink<S> && requires {
+    { S::tx_drained() } -> std::same_as<bool>;
 };
 
 /// A source yields bytes: read_byte() copies the oldest pending byte

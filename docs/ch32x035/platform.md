@@ -223,7 +223,12 @@ The interrupt verbs are [pfic.hpp](../../brio/ch32x035/pfic.hpp)'s:
 `enable_interrupts`, `disable_interrupts`, `interrupts_enabled`, and
 `Pfic`'s per-line `enable/disable/enabled/pending/set_pending/
 clear_pending/active` over the write-one banks (the manual's ISR bank is
-the ENABLE status and its IPR the pending one). `BRIO_CH32_INTERRUPT` is
+the ENABLE status and its IPR the pending one), and
+`Pfic::in_handler()`, which the platform's `in_handler()` forwards
+(kernel/platform.hpp's optional member, `HandlerAware`): PFIC_GISR's
+GACTSTA, bit 8 at offset 0x4C, an interrupt being executed (the
+reference manual 7.5.2.11, the QingKe V4 manual 3.1) - not mstatus.MIE,
+which a critical section clears as a trap's entry does. `BRIO_CH32_INTERRUPT` is
 the one spelling of the handler attribute: WCH's fast attribute when the
 image is built with `CH32X035_HPE` (the default), gcc's plain
 `interrupt` otherwise - one option for the whole image, because a fast
@@ -579,6 +584,13 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
+- **`in_handler()` on this silicon**: the read of PFIC_GISR's GACTSTA
+  is the manual's, compiled for
+  the seven parts; a letter that asks it from a
+  vector, from the main loop and under a critical section, as the
+  STM32F4's serial suite does
+  ([../stm32f4/usart.md](../stm32f4/usart.md), letter h), would
+  measure it.
 - **The deep path, `idle_deep()`**: no verb of this stratum sets
   SLEEPDEEP, so the paused timebase, the unmask before the `wfi` and the
   absent consume are unmeasured; the sleep site born with the power

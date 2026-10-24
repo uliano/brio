@@ -442,6 +442,14 @@ signals, the stick-parity bit - are in
 
 Implemented but not bench-verified, each with what would measure it:
 
+- `tx_room()` and `tx_drained()` on this silicon: the IP file's own
+  verbs, judged on the host over the simulated PL011 (test/test_pl011:
+  the room falling by what the ring queued and rising a FIFO refill at a
+  time, the edge told once, under the interrupt transmitter and a
+  transmit engine) and measured on another family's silicon ([the
+  STM32F4 USART page](../stm32f4/usart.md), letter h); a letter that
+  writes a run with interrupts masked, reads the room under the mask and
+  the edge after the wire time would measure them here.
 - THE RECEIVE HALF OF THE SECOND COLUMN. The transmitter is proven on its
   alternate pad by watching the pad itself; the receiver on an alternate
   pad is proven only as far as the pad register - no wire of this bench

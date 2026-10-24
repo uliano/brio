@@ -289,7 +289,9 @@ void usart_transport() {
         (void)T::parity_errors();
         (void)T::hw_overruns();
         T::clear_errors();
-        static_assert(ByteTransport<T> && BulkSink<T> && SpanSource<T>);
+        static_assert(ByteTransport<T> && BulkSink<T> && EdgeSink<T> && SpanSource<T>);
+        (void)T::tx_room();
+        (void)T::tx_drained();
     }
 }
 

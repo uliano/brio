@@ -47,8 +47,10 @@
  * program's handler for the instance's vector calls it and nothing else
  * does, and with engines dma_isr() is the body of
  * each engine's stream vector; both run to completion like every
- * interrupt handler in brio. The transmit verbs (write_byte(),
- * write_bulk(), and print() over them) and the receive verbs
+ * interrupt handler in brio, and tx_drained() is read by the program's
+ * glue in the vector whose body raised it. The transmit verbs
+ * (write_byte(), write_bulk(), tx_room(), and print() over them) and the
+ * receive verbs
  * (read_byte(), read_bulk(), read_span() with consume(), rx_pending(),
  * harvest()) belong to the main context - setup, or the handler of an
  * active object, a brio object with an event queue the kernel serves one
@@ -86,7 +88,11 @@
  * is idle and would re-enter the handler without end), and arrive into
  * an RX ring filled by RXNE. isr() returns the "RX went non-empty" edge
  * that util/line_reader.hpp wants to post on - one event per idle-to-
- * busy transition, not one per byte.
+ * busy transition, not one per byte. The transmit side's mirror is
+ * tx_drained(), the edge the dry branch raises (with a transmit engine,
+ * the completion that leaves the ring empty), and tx_room() the ring's
+ * free count a writer asks before it queues (util/stream.hpp's
+ * EdgeSink).
  *
  * The baud divisor (30.3.4): USARTDIV = fCK / (8 x (2 - OVER8) x baud),
  * a 12-bit mantissa and a 4-bit fraction in BRR. At OVER8 = 0 the
@@ -946,6 +952,10 @@ class Uart {
     static inline volatile uint8_t m_noise_errors = 0;  // NE: byte kept, line suspect
     static inline volatile uint8_t m_hw_overruns = 0;   // ORE: a byte lost in silicon
     static inline volatile uint8_t m_dma_faults = 0;    // blocks a dead stream lost
+    // The transmit edge: set where the transmitter finds the ring dry (the
+    // TXE entry that disarms, or a transmit block's completion that leaves
+    // the ring empty), cleared by tx_drained()'s read.
+    static inline volatile bool m_tx_drained = false;
 
     /// EVERY COUNTER SATURATES at 255: a count that wraps reads as a few
     /// errors after a storm of them. One compare on a rare path.
@@ -1041,6 +1051,7 @@ public:
         Nvic::disable(S::irq);
         m_rx.clear();
         m_tx.clear();
+        m_tx_drained = false;
         clear_errors();
         m_baud = baud;
 
@@ -1142,7 +1153,11 @@ public:
                 bump(m_dma_faults);
             } else if ((f & TxEngine::flag_complete) != 0u) {
                 m_tx.consume(static_cast<typename decltype(m_tx)::index_t>(TxEngine::complete()));
-                pump_tx();
+                if (m_tx.empty()) {
+                    m_tx_drained = true;   // the transmit edge: no next run to start
+                } else {
+                    pump_tx();
+                }
             }
         }
         if constexpr (has_rx_engine) {
@@ -1335,6 +1350,7 @@ public:
                 r.DR = *v;
             } else {
                 r.CR1 &= ~USART_CR1_TXEIE;   // ring dry: TXE would re-fire for ever
+                m_tx_drained = true;         // the transmit edge, tx_drained()'s
             }
         }
         return edge;
@@ -1535,6 +1551,33 @@ public:
     /// the interrupt path the handler's status read and data write clear
     /// it with every byte.
     static bool tx_idle() { return m_tx.empty() && (S::status() & UsartFlag::tc) != 0u; }
+
+    /// The bytes write_bulk() would take now: the transmit ring's free
+    /// count (util/stream.hpp's RoomSink). Main context, the ring's
+    /// producer; one read of the consumer's index, never waits. On the
+    /// plain transport the room grows a byte at a time as the handler
+    /// hands DR the ring's bytes; with a transmit engine a block holds
+    /// its run in the ring until its completion, so the room grows a
+    /// block at a time.
+    static uint32_t tx_room() { return m_tx.room(); }
+
+    /// The transmit edge, told once (util/stream.hpp's EdgeSink): true when the
+    /// transmitter has run the ring dry since the last true, the read clearing
+    /// it. Raised by isr() on the TXE entry that finds the ring empty and
+    /// disarms - the last byte just moved into the shift register, a frame
+    /// before the wire is idle - and, with a transmit engine, by dma_isr() on
+    /// the completion that leaves the ring empty: the glue reads it right after
+    /// that body, in the same vector (the instance's, or the transmit stream's
+    /// under an engine). From main context the read is safe too, while that
+    /// context is the ring's one producer: only a write it makes can arm the
+    /// next edge.
+    [[gnu::always_inline]] static bool tx_drained() {
+        const bool drained = m_tx_drained;
+        if (drained) {
+            m_tx_drained = false;
+        }
+        return drained;
+    }
 
     /// What the receive side lost for want of room. Without an engine,
     /// each count a byte the RX ring was full for; with one, each a LAP

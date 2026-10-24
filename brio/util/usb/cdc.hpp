@@ -43,11 +43,13 @@
  *    behind it leaves when the host configures the port again (configure()
  *    hands the first packet over itself), and what was received stays
  *    readable; a program that wants them emptied calls discard(), main
- *    context, with the device stopped. take_rx_edge() belongs in the
- *    controller's vector, after Device::isr();
+ *    context, with the device stopped. take_rx_edge() and tx_drained(),
+ *    the receive and the transmit edge, belong in the controller's
+ *    vector, after Device::isr();
  *  - the byte transport is the program's, from main context: one
  *    producer of the transmit ring (write_byte, write_bulk, and print
- *    over them) and one consumer of the receive ring (read_byte,
+ *    over them, tx_room the room they would find) and one consumer of
+ *    the receive ring (read_byte,
  *    read_span/consume, or a LineReader draining it), as util/ring.hpp's
  *    rule asks. None of these verbs waits (a print over them does,
  *    below). Every write_byte or write_bulk that queued bytes takes the
@@ -184,9 +186,13 @@ public:
         // Bytes a reset left queued (behind the packet it took, or pushed
         // in the moment between write_byte's check of configured_ and its
         // push) leave from here: the ISR side owns the transmit ring's
-        // consumer index and nothing is in flight.
+        // consumer index and nothing is in flight. With nothing queued
+        // the room has just gone from none to the whole ring - the
+        // transmit edge, as an IN completion that empties it is.
         if (!m_tx.empty()) {
             send_packet();
+        } else {
+            tx_drained_ = true;
         }
         return true;
     }
@@ -253,7 +259,10 @@ public:
         in_armed_ = false;
         if (!m_tx.empty()) {
             send_packet();
-        } else if (last_full_) {
+            return;
+        }
+        tx_drained_ = true;   // the transmit edge: nothing left to send
+        if (last_full_) {
             last_full_ = false;
             in_armed_ = Controller::submit_in(ep_data, {});
         }
@@ -403,6 +412,29 @@ public:
         return edge;
     }
 
+    /// The bytes write_bulk() would take now (util/stream.hpp's
+    /// RoomSink): the transmit ring's free count while the host has the
+    /// port configured, none while it has not (write_bulk() refuses
+    /// everything then). Main context, the ring's producer; one read of
+    /// the consumer's index, never waits. The ring's consumer is the
+    /// packet the stack gathers, up to 64 bytes popped at once, so the
+    /// room grows a packet at a time: at the write that starts a run
+    /// with nothing in flight, and at each IN completion after it.
+    static uint32_t tx_room() { return configured_ ? static_cast<uint32_t>(m_tx.room()) : 0u; }
+
+    /// The transmit edge, told once (util/stream.hpp's EdgeSink): true
+    /// when the room has become the whole ring since the last true, the
+    /// read clearing it - an IN completion that finds nothing left to
+    /// send (the zero-length packet that may follow it then is not
+    /// waited for, and its own completion raises a spare edge), or a
+    /// configuration by the host with the ring empty. ISR glue, like
+    /// take_rx_edge(): the controller's vector, after Device::isr().
+    static bool tx_drained() {
+        const bool drained = tx_drained_;
+        tx_drained_ = false;
+        return drained;
+    }
+
     /// How many OUT packets the controller takes at once (its double
     /// buffering, if it has any); one otherwise.
     static constexpr uint8_t out_slots() {
@@ -491,6 +523,7 @@ private:
     static inline volatile uint8_t outs_armed_ = 0;
     static inline bool last_full_ = false;
     static inline bool rx_edge_ = false;
+    static inline bool tx_drained_ = false;
     static inline volatile bool dtr_ = false;
     static inline volatile bool rts_ = false;
     static inline volatile uint32_t coding_changes_ = 0;

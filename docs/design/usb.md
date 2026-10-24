@@ -120,6 +120,19 @@ calls `discard()` itself, with the device stopped. The line coding and the
 control line state are received and reported, not obeyed: a virtual
 port has no baud rate.
 
+It has the transmit pair a UART has ([serial.md](serial.md), "The
+transmit edge, and the room a writer asks"). `tx_room()` is the bytes
+`write_bulk()` would take now: the transmit ring's free count while
+the host has the port configured, none while it has not, since every
+write is refused then. The ring's consumer is the packet the stack
+gathers, up to 64 bytes popped at once, so the room grows a packet at
+a time. `tx_drained()` is the transmit edge, raised in the
+controller's handler by an IN completion that finds nothing left to
+send (the zero-length packet that may follow it then raises a spare
+one) and by a configuration that finds the ring empty, the moment the
+room goes from none to the whole ring; the glue reads it in the
+controller's vector after `Device::isr()`, beside `take_rx_edge()`.
+
 ## Realizations
 
 | stratum | controller | beyond the contract |

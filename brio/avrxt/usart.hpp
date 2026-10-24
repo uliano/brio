@@ -78,11 +78,13 @@
  *    it from interrupts; the polled verbs read the same registers from
  *    main context where no vector is bound to them. A handler runs to
  *    completion, no other handler interrupting it (avrxt/platform.hpp).
+ *    Uart::tx_drained(), the transmit edge, is read by the program's
+ *    glue in the DRE handler, right after dre().
  *  - Main context - setup, or the handler of an active object (a
  *    component of a brio program with its own event queue, served one
  *    event at a time by the kernel) - and never an interrupt handler:
- *    Uart's write_byte(), write_bulk() and print() over them, read_byte(),
- *    read_span() with consume(), rx_pending(), tx_idle(), rx_skips(),
+ *    Uart's write_byte(), write_bulk() and print() over them, tx_room(),
+ *    read_byte(), read_span() with consume(), rx_pending(), tx_idle(), rx_skips(),
  *    rebase() and set_baud(). Each ring has one producer and one
  *    consumer, and the interrupt body is the other end of both; nothing
  *    checks for a second one. The error counters are single bytes,
@@ -1145,6 +1147,9 @@ class Uart {
     // until then - the flag's reset value is 0, so before the first run
     // it would call an idle transmitter busy (tx_idle()).
     static inline volatile bool m_txc_owned = false;
+    // The transmit edge: set by dre() when it hands TXDATA the ring's last
+    // byte and disarms, cleared by tx_drained()'s read.
+    static inline volatile bool m_tx_drained = false;
 
 public:
     /// Instances are empty tags for concept-based call sites (print(serial,...)).
@@ -1193,6 +1198,7 @@ public:
         m_rx.clear();
         m_tx.clear();
         m_txc_owned = false;
+        m_tx_drained = false;
         clear_errors();
         U::baud_reg(usart_baud_reg(clock_hz(clock), baud));
         U::enable_rxc_interrupt(true);
@@ -1402,6 +1408,7 @@ public:
                 U::regs().CTRLA &= static_cast<uint8_t>(~USART_DREIE_bm);
                 U::regs().STATUS = USART_TXCIF_bm;   // a plain store: the W1C bits beside it read 0
                 m_txc_owned = true;
+                m_tx_drained = true;                  // the transmit edge, tx_drained()'s
             }
         } else {
             U::regs().CTRLA &= static_cast<uint8_t>(~USART_DREIE_bm);
@@ -1533,6 +1540,29 @@ public:
         return U::txc_flag();
     }
 
+    /// The bytes write_bulk() would take now: the transmit ring's free
+    /// count (util/stream.hpp's RoomSink), growing a byte at a time as
+    /// dre() hands TXDATA the ring's bytes. Main context, the ring's
+    /// producer; one load of the consumer's index (a byte, so no mask
+    /// with the default sizes), never waits.
+    static uint32_t tx_room() { return m_tx.room(); }
+
+    /// The transmit edge, told once (util/stream.hpp's EdgeSink): true when
+    /// dre() has run the ring dry since the last true - the entry that hands
+    /// TXDATA the ring's last byte and clears DREIE, that byte and up to two
+    /// before it still in the transmitter (27.3.2.3) - the read clearing it.
+    /// The glue reads it right after dre(), in the USARTn_DRE_vect handler.
+    /// From main context the read is safe too, while that context is the ring's
+    /// one producer: only a write it makes can arm the next edge. A load, a
+    /// test and, on true, a store.
+    [[gnu::always_inline]] static bool tx_drained() {
+        const bool drained = m_tx_drained;
+        if (drained) {
+            m_tx_drained = false;
+        }
+        return drained;
+    }
+
     static uint8_t rx_overruns() { return m_rx_overruns; }
     static uint8_t frame_errors() { return m_frame_errors; }
     static uint8_t parity_errors() { return m_parity_errors; }
@@ -1554,7 +1584,8 @@ public:
     }
 };
 
-static_assert(ByteTransport<Uart<0>> && BulkSink<Uart<0>> && SkippingSource<Uart<0>>,
+static_assert(ByteTransport<Uart<0>> && BulkSink<Uart<0>> && EdgeSink<Uart<0>> &&
+                  SkippingSource<Uart<0>>,
               "Uart must satisfy the transport concepts");
 
 /// The polled half-duplex and synchronous tasks share this much: a

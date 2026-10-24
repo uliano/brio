@@ -37,7 +37,8 @@ using Serial = UsbCdcAcm<Usb, P>;
 // The claim the driver makes, once more where the fixture can see it.
 static_assert(UsbController<Usb> && UsbController<Cdc>);
 static_assert(UsbClass<Serial>);
-static_assert(ByteSink<Serial> && ByteSource<Serial> && BulkSink<Serial> && SpanSource<Serial>);
+static_assert(ByteSink<Serial> && ByteSource<Serial> && BulkSink<Serial> && EdgeSink<Serial> && SpanSource<Serial>);
+uint32_t edge_verbs_Serial() { return Serial::tx_room() + (Serial::tx_drained() ? 1u : 0u); }
 
 // The block's shape: eight endpoint numbers, 64-byte packets, endpoint
 // zero's one buffer, and the pool that no set of claims exhausts.

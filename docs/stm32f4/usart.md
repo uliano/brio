@@ -298,6 +298,17 @@ TX and RX inside the chip and leaves the RX pad alone.
   edge asked from the consumer's side, below) and `dma_faults()`. Refused at compile time: invalid or coincident pads,
   an engine off the instance's request cells, flow control on a UART, a
   flow pad missing, and with a receive engine a ring above 32768 bytes.
+- `tx_room()` is the bytes `write_bulk()` would take now, the transmit
+  ring's free count (util/stream.hpp's `RoomSink`,
+  [design/serial.md](../design/serial.md)): it grows a byte at a time as
+  the handler hands DR the ring's bytes, and a block at a time under a
+  transmit engine, whose block holds its run in the ring until its
+  completion. `tx_drained()` is the transmit edge (`EdgeSink`), true once
+  each time the ring ran dry: raised by `isr()` on the TXE entry that
+  finds the ring empty and disarms, the last byte then in the shift
+  register, or by `dma_isr()` on the transmit completion that leaves the
+  ring empty, and read by the program's glue right after that body, in
+  the same vector (the instance's, or the transmit stream's).
 - THE RECEIVE ENGINE ARMS AT `rx_priority`, `very_high` by default, and
   the transmit engine at `high` (docs/design/dma.md's rule): DR holds one
   character, so a starved receive stream overruns, and a starved transmit
@@ -522,6 +533,20 @@ burst of one frame told; a burst of 16 at 1 Mbaud told 1954 cycles after
 its last stop bit (1.0 frame) with two USART interrupts and none a byte;
 four laps of a 64-byte ring with no silence read whole on the lap's
 marks, nine stream interrupts.
+
+**The transmit room and edge are exact** (letter h, at 1 Mbaud, ten runs
+alike): a run of 48 written with interrupts masked leaves `tx_room()` at
+463 of the 512-byte ring's 511 under both transmitters - under the mask
+neither the TXE handler nor the transmit stream's completion can release
+a byte, so the figure is exact and no bound is derived - and at 511 again
+once `tx_idle()` turns true (within its bound of 10 ms, twenty times the
+run's 480 us on the wire), the 48 frames heard back whole on the loop.
+`tx_drained()` reads false after `init()`, false under the mask, true
+once after the wire time and false on the read after it, on both. Read
+in the USART6 vector's glue instead, three masked writes gave three
+edges there and none left for the letter's body. The platform's
+`in_handler()` read true in that vector and false in the letter's body
+and under a critical section, where PRIMASK is set and IPSR still zero.
 
 **The cost** (`bench_stm32f4` letter u on the same loop; each line raw,
 the instrument's 4 cycles a stamp pair in every isr): the receive engine
@@ -835,7 +860,8 @@ pad, PA11, reaches nothing on this desk), the instances beyond USART1,
 USART2 and USART6 driven on the F446 and the consoles' USART1 and USART3
 (UART4/5/7/8 compiled on every header that has them, none driven), the
 OVER8 and frame-format legs on the other three boards (the loop's pad is
-surveyed on the Nucleo-F446RE alone).
+surveyed on the Nucleo-F446RE alone), and `tx_room()`, `tx_drained()`
+and `in_handler()` (letter h, run on the Nucleo-F446RE alone).
 
 Implemented, not bench-verified, in the peer: the half stop codes as a
 SENDER, which no letter judges (its `send_mpcm`, `stage`, `autobaud_tx`,

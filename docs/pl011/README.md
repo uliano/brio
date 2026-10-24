@@ -276,6 +276,21 @@ both families (their serial and DMA suites' letter `t`): `tx_idle()`
 turns true within a microsecond of the last stop bit's end, timed off
 the TX pad's own start bits.
 
+`tx_room()` and `tx_drained()` are the transmit pair a writer that
+never splits a piece asks (util/stream.hpp's `RoomSink` and `EdgeSink`,
+[design/serial.md](../design/serial.md)). `tx_room()` is the transmit
+ring's free count: the ring alone, so a `write_bulk()` on an idle ring
+takes as much more as the FIFO has room for, and the room grows a FIFO
+refill at a time as the handler moves the ring into the FIFO - or a
+block at a time under a transmit engine, whose block holds its run in
+the ring until its completion. `tx_drained()` is the transmit edge,
+true once each time the ring ran dry: raised in `isr()` where the
+handler finds the ring empty and disarms `TXIM` (the FIFO still holding
+its last bytes), or in `dma_isr()` by the transmit completion that
+leaves the ring empty, and read by the program's glue right after that
+body, in the same handler (the instance's line's, or the DMA line's). A
+run the FIFO took whole queued nothing in the ring and raises none.
+
 ## The receive side
 
 The receive interrupt stands while the FIFO holds its trigger level or

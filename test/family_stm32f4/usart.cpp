@@ -86,7 +86,8 @@ constexpr UartOptions flow{.rts = true, .cts = true,
 using Modem = Uart<1, pins1, 64, 256, NoDmaEngine, NoDmaEngine, flow>;
 
 static_assert(ByteTransport<Serial1> && ByteTransport<Serial6> && ByteTransport<OneWire>);
-static_assert(BulkSink<Serial1> && SpanSource<Serial1>);
+static_assert(BulkSink<Serial1> && EdgeSink<Serial1> && SpanSource<Serial1>);
+uint32_t edge_verbs_Serial1() { return Serial1::tx_room() + (Serial1::tx_drained() ? 1u : 0u); }
 static_assert(Serial1::kernel_hz<SysClock>() == 16'000'000);
 static_assert(Serial1::can_baud(16'000'000u, 115'200u) && !Serial1::can_baud(1'000'000u, 115'200u));
 static_assert(Serial6::divisor_for(16'000'000u, 921'600u).has_value());   // over8 reaches it

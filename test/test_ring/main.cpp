@@ -117,6 +117,54 @@ TEST_CASE("indices wrap correctly across many laps") {
     CHECK(next_in == next_out);
 }
 
+TEST_CASE("room() is the capacity less what is queued, across the wrap and at the 256 and 65536 boundaries") {
+    Ring<uint8_t, 4, HostPlatform> r;
+    CHECK(r.room() == r.capacity());
+    for (int lap = 0; lap < 100; ++lap) {
+        for (uint8_t k = 0; k < 3u; ++k) {
+            REQUIRE(r.push(k));
+            CHECK(r.room() == r.capacity() - r.count());
+        }
+        CHECK(r.room() == 0u);
+        (void)r.pop();
+        CHECK(r.room() == 1u);
+        while (r.pop()) {
+        }
+        CHECK(r.room() == r.capacity());
+    }
+    // A byte index at its widest: 255 free, then none.
+    Ring<uint8_t, 256, HostPlatform> b;
+    CHECK(b.room() == 255u);
+    while (b.push(0)) {
+    }
+    CHECK(b.room() == 0u);
+    // A 16-bit index at its widest, wrapped.
+    static Ring<uint8_t, 65536, HostPlatform> w;   // 64 KB: keep it off the stack
+    w.clear();
+    CHECK(w.room() == 65535u);
+    for (uint32_t i = 0; i < 40000u; ++i) {
+        REQUIRE(w.push(0));
+    }
+    for (uint32_t i = 0; i < 40000u; ++i) {
+        (void)w.pop();
+    }
+    for (uint32_t i = 0; i < 30000u; ++i) {
+        REQUIRE(w.push(0));   // the head now wrapped past the end
+    }
+    CHECK(w.room() == 65535u - 30000u);
+}
+
+TEST_CASE("room() takes the guard where the index is torn, and only there") {
+    NarrowPlatform::CriticalSection::entries = 0;
+    Ring<uint8_t, 16, NarrowPlatform> bare;
+    CHECK(bare.room() == 15u);
+    CHECK(NarrowPlatform::CriticalSection::entries == 0);
+    Ring<uint8_t, 512, NarrowPlatform> wide;
+    CHECK(wide.room() == 511u);
+    CHECK(NarrowPlatform::CriticalSection::entries == 1);
+    CHECK(NarrowPlatform::CriticalSection::depth == 0);
+}
+
 TEST_CASE("clear resets to empty") {
     Ring<uint8_t, 8, HostPlatform> r;
     r.push(1);

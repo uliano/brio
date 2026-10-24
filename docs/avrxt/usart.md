@@ -276,6 +276,7 @@ of a rate change through its static `rebase(hz)`,
 | `Usart<n>` data | `receive()` / `receive_as<bits>()` -> `UsartFrame` (ISR body of `USARTn_RXC_vect`), `transmit(v)` / `transmit_as<bits>(v)`, `clear_txc()` (ISR body of `USARTn_TXC_vect`), the bounded `send`/`poll`/`wait`/`wait_line_idle` |
 | `Usart<n>` events | `XckEvent` (generator), `IrdaIn` (user) |
 | `Uart<n, Route, rx, tx>` | the interrupt-driven transport: `init(clock, baud)`, `rebase(hz)`, `set_baud(hz, baud)` (a new rate under the running port, once `tx_idle()`), `release()`, `can_baud`, `min_hz_for`, `actual_baud(hz)`, `write_byte`/`write_bulk` (a run: as many as fit, its first byte pushed and DREIE set before the rest is copied, the rest copied in parts of at most `copy_part` (32) bytes, each published and DREIE set behind it), `read_byte`/`read_span`/`consume` (the receive run in place), `rx_pending`, `tx_idle` (the WIRE is idle: the ring empty and the last stop bit out - TXCIF, which the transport owns), the error counters, `rx_skips` (the gaps in the stream the receive ring hands out, never cleared - util/line_reader.hpp's epoch: the SkipRing's skips, modulo 2^8, one at the consumer's look after `rxc()` reported a frame refused by a full ring, dropped for FERR or PERR, or a BUFOVF - on the rare paths alone, the RXC vector saving no register for them), ISR bodies `rxc()` (takes every frame the buffer holds, returns the empty -> non-empty edge) and `dre()` |
+| `Uart` transmit room and edge | `tx_room()` (the bytes `write_bulk()` would take now: the transmit ring's free count, util/stream.hpp's `RoomSink`, growing a byte at a time as `dre()` hands TXDATA the ring's bytes), `tx_drained()` (the transmit edge, `EdgeSink`: true once each time `dre()` hands TXDATA the ring's last byte and clears DREIE, the read clearing it; the program's glue reads it in the `USARTn_DRE_vect` handler right after `dre()`) |
 | `OneWire<n, route>` | `available`, `init(clock, baud, fmt)`, `talk()`/`listen()`, `line()`, `echo_matches(sent)` |
 | `Rs485<n, route>` | `available`, `init(clock, baud, fmt, one_wire)`, `drive_enable()`, `guard_bits` |
 | `SyncHost<n, route>` / `SyncClient<n, route>` | `available`, `init(...)`, `clock_pin()`, `invert_xck(bool)` (host), `max_xck_hz(hz)` (client) |
@@ -1050,6 +1051,13 @@ Driver gaps (not implemented):
 
 Implemented and compile-checked for all eight DA/DB packages and the
 three AVR64EA packages, but NOT bench-verified:
+
+- **`tx_room()` and `tx_drained()` on this silicon**: the same ring and
+  the same dry branch are judged on the host over the simulated PL011
+  (test/test_pl011) and measured on the STM32F4's silicon ([the STM32F4
+  USART page](../stm32f4/usart.md), letter h); a letter that writes a
+  run with interrupts masked, reads the room under the mask and the edge
+  after the wire time would measure them here;
 
 - **the AVR EA's USART0 ALT2 and USART1 ALT2 with traffic**: read back
   routed, never driven - their pads are this board's I2C bus and analog

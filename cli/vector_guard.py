@@ -27,9 +27,10 @@ the walk FAILS on
   - an indirect call or jump the listing does not resolve to a symbol
     (a call through a pointer can reach anything) - but for a switch's
     jump table, gcc's own shape (the index bounded by a compare against
-    a constant, the table's address built with lui and addi, a word
-    loaded and jumped to), whose every entry is read from the image and
-    must land inside the same function;
+    a constant, the table's address built with lui and addi - an addi
+    of zero printed as a move -, a word loaded and jumped to), whose
+    every entry is read from the image and must land inside the same
+    function;
   - an instruction the disassembler could not decode that is four bytes
     long (the two-byte ones are WCH's xw extension, which takes the slots
     of the D extension's compressed loads and stores: this core has no
@@ -218,6 +219,13 @@ def jump_table(data, insns, k, start, end):
             base = int(operands_of(wo)[1], 0)
         elif wm == "addi" and t:
             base = int(t.group(1), 16)
+        elif wm == "mv" and operands_of(wo)[1] == src:
+            # lui then an addi of zero, which the disassembler prints as a
+            # move of the register to itself: a table on a 4 KB boundary.
+            hi = last_writer(window, src, wi)
+            if hi is not None and hi[1] == "lui":
+                base = int(operands_of(hi[2])[1], 0) << 12
+                first = min(first, hi[0])
         elif wm == "slli" and operands_of(wo)[2] in ("0x2", "2"):
             index = (wi, operands_of(wo)[1])
     if base is None or index is None:

@@ -307,7 +307,8 @@ void link_resource_verbs() {
 }
 
 using Serial = Uart<0, pads>;
-static_assert(ByteTransport<Serial> && BulkSink<Serial> && SpanSource<Serial>);
+static_assert(ByteTransport<Serial> && BulkSink<Serial> && EdgeSink<Serial> && SpanSource<Serial>);
+uint32_t edge_verbs_Serial() { return Serial::tx_room() + (Serial::tx_drained() ? 1u : 0u); }
 static_assert(ClockUser<Serial>);
 static_assert(Serial::generator == 0);
 static_assert(Serial::min_hz_for(115200) == 1'843'200);
@@ -448,8 +449,9 @@ static_assert(!NoDmaEngine::present);
 static_assert(!Serial::has_tx_engine && TxEngined::has_tx_engine);
 static_assert(DmaTxEngine::present && DmaTxEngine::channel == 0);
 // The concepts hold whether or not the engine is named.
-static_assert(ByteTransport<TxEngined> && BulkSink<TxEngined> && SkippingSource<TxEngined> &&
+static_assert(ByteTransport<TxEngined> && BulkSink<TxEngined> && EdgeSink<TxEngined> && SkippingSource<TxEngined> &&
               ClockUser<TxEngined>);
+uint32_t edge_verbs_TxEngined() { return TxEngined::tx_room() + (TxEngined::tx_drained() ? 1u : 0u); }
 // The refused claim's breadcrumb names the refused owner.
 static_assert(dma_claim_refused_context(6) == 0xD6);
 

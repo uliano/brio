@@ -55,7 +55,8 @@ static_assert(Serial::divisor_for(48'000'000, 4'000'000) == 12); // below 16: in
 static_assert(Serial::divisor_for(48'000'000, 0) == 0);
 
 static_assert(ByteSink<Serial> && ByteSource<Serial> && ByteTransport<Serial>);
-static_assert(BulkSink<Serial> && SpanSource<Serial>);
+static_assert(BulkSink<Serial> && EdgeSink<Serial> && SpanSource<Serial>);
+uint32_t edge_verbs_Serial() { return Serial::tx_room() + (Serial::tx_drained() ? 1u : 0u); }
 static_assert(ByteTransport<Wide>);
 
 // The chapter's vocabulary, pinned.

@@ -440,6 +440,65 @@ TEST_CASE("bytes written go out as packets: the first kicks the endpoint, comple
     CHECK(SimUsb::double_submits == 0u);
 }
 
+TEST_CASE("the transmit room: none unconfigured, the ring's less what it holds, a packet back at each completion; the edge told once") {
+    fresh();
+    (void)Cdc::tx_drained();   // whatever an earlier case left standing
+    CHECK(Cdc::tx_room() == 0u);   // write_bulk() refuses everything before the host configures
+    CHECK_FALSE(Cdc::tx_drained());
+
+    // The configuration finds the ring empty: the room goes from none to
+    // the whole ring, and that is the edge.
+    enumerate();
+    CHECK(Cdc::tx_room() == Cdc::tx_capacity());
+    CHECK(Cdc::tx_drained());
+    CHECK_FALSE(Cdc::tx_drained());
+
+    // 100 bytes: the kick gathers the first packet out of the ring at
+    // once, so the room falls by what is left in it.
+    std::vector<uint8_t> run(100);
+    for (uint32_t i = 0; i < 100u; ++i) {
+        run[i] = static_cast<uint8_t>(i);
+    }
+    REQUIRE(Cdc::write_bulk(std::span<const uint8_t>(run.data(), 100)) == 100u);
+    CHECK(Cdc::tx_room() == Cdc::tx_capacity() - 36u);
+    CHECK_FALSE(Cdc::tx_drained());
+
+    // The first completion gathers the rest: the room is whole again,
+    // but a packet is still to go - no edge until it has.
+    auto p = SimUsb::host_in(2);
+    REQUIRE(p.has_value());
+    CHECK(p->size() == 64u);
+    Device::isr();
+    CHECK(Cdc::tx_room() == Cdc::tx_capacity());
+    CHECK_FALSE(Cdc::tx_drained());
+    p = SimUsb::host_in(2);
+    REQUIRE(p.has_value());
+    CHECK(p->size() == 36u);
+    Device::isr();
+    CHECK(Cdc::tx_drained());   // the IN completion with nothing left to send
+    CHECK_FALSE(Cdc::tx_drained());
+
+    // A run that ends on a full packet: the edge comes with that packet's
+    // completion, and the zero-length packet behind it raises a spare one.
+    REQUIRE(Cdc::write_bulk(std::span<const uint8_t>(run.data(), 64)) == 64u);
+    p = SimUsb::host_in(2);
+    REQUIRE(p.has_value());
+    CHECK(p->size() == 64u);
+    Device::isr();
+    CHECK(Cdc::tx_drained());
+    p = SimUsb::host_in(2);
+    REQUIRE(p.has_value());
+    CHECK(p->empty());
+    Device::isr();
+    CHECK(Cdc::tx_drained());   // the spare edge
+    CHECK_FALSE(Cdc::tx_drained());
+
+    // A bus reset unconfigures: no room until the host configures again.
+    SimUsb::host_reset();
+    Device::isr();
+    CHECK(Cdc::tx_room() == 0u);
+}
+
 TEST_CASE("unconfigured, the transport refuses bytes; a bus reset unconfigures and the stack recovers") {
     fresh();
     CHECK(!Cdc::write_byte('x'));

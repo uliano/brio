@@ -449,9 +449,20 @@ taking a burst, and what this driver does with each:
   order is deliberate: clocks, reset, configure,
   enable, and only then the pads to the SERCOM - the transmitter
   idles high before the pad leaves PORT, so no glitch start bit
-  reaches the wire. `ByteTransport` and `ClockUser` are
+  reaches the wire. `ByteTransport`, `EdgeSink` and `ClockUser` are
   static_asserted. The engine slot defaults to `NoDmaEngine` - see "The
   optional transmit engine" below.
+- **The transmit room and edge** (util/stream.hpp's `RoomSink` and
+  `EdgeSink`, [design/serial.md](../design/serial.md)): `tx_room()` is
+  the bytes `write_bulk()` would take now, the transmit ring's free
+  count, growing a byte at a time as `feed()` hands DATA the ring's
+  bytes, or a block at a time with the engine, whose block (half the
+  ring at most) holds its run until its completion. `tx_drained()` is
+  the transmit edge, true once each time the ring ran dry: raised by
+  `isr()` on the DRE entry that hands DATA the ring's last byte and
+  disarms DRE, or by `dma_isr()` on the completion that leaves the ring
+  empty, and read by the program's glue right after that body, in the
+  same vector (the SERCOM's, or `DMAC_Handler`).
 - **The copy into the transmit ring and out of the receive one**
   (`write_bulk`, `read_bulk`): an inline byte loop, six instructions a
   byte - about ten cycles behind the flash's two wait states -, or the
@@ -1123,6 +1134,14 @@ Driver gaps (not built):
   user.
 
 Implemented but not bench-verified:
+
+- **`tx_room()` and `tx_drained()` on this silicon**, with and without
+  the transmit engine: the same ring and the same dry branch are judged
+  on the host over the simulated PL011 (test/test_pl011) and measured on
+  the STM32F4's silicon ([the STM32F4 USART page](../stm32f4/usart.md),
+  letter h); a letter that writes a run with interrupts masked, reads
+  the room under the mask and the edge after the wire time would
+  measure them here.
 - The console's CPU share at 115200, through the interrupt transport
   and with one engine, and the per-byte plateau through the bridge:
   `serial_speed`'s occupancy and throughput, whose host side - the

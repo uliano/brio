@@ -15,6 +15,10 @@ using SysClock = Clock<ClockSource::internal, has_oschf_frqsel ? 24'000'000 : 20
 using DynClock = DynamicClock<SysClock>;
 
 static_assert(Platform<AvrPlatform>);
+// The optional member a service called from a handler asks for: the
+// interrupt controller's executing status, read in one load.
+static_assert(HandlerAware<AvrPlatform>);
+bool platform_in_handler() { return AvrPlatform::in_handler(); }
 static_assert(AvrPlatform::atomic_width == 1);
 static_assert(AvrPlatform::ticks_per_second == 1024);
 

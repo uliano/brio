@@ -796,6 +796,17 @@ edges and one DMA beat an edge.
   bond them) and `rx_priority` (the receive engine's level, very_high by
   default, refused without a receive engine). A remap code of 0 writes no
   AFIO register at all.
+- `tx_room()` is the bytes `write_bulk()` would take now, the transmit
+  ring's free count (util/stream.hpp's `RoomSink`,
+  [design/serial.md](../design/serial.md)): it grows a byte at a time as
+  the TXE entry hands DATAR the ring's bytes, and a block at a time under
+  a transmit engine, whose block holds its run in the ring until its
+  completion. `tx_drained()` is the transmit edge (`EdgeSink`), true once
+  each time the ring ran dry: raised by `isr()` on the TXE entry that
+  finds the ring empty and disarms, the last byte then in the shift
+  register, or by `dma_isr()` on the transmit completion that leaves the
+  ring empty, and read by the program's glue right after that body, in
+  the same vector (the instance's, or the transmit channel's).
 
 ## How to use it
 
@@ -1109,6 +1120,12 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
+- **`tx_room()` and `tx_drained()` on this silicon**, on both series:
+  the same ring and the same dry branch are judged on the host over the
+  simulated PL011 (test/test_pl011) and measured on the STM32F4's
+  silicon ([the STM32F4 USART page](../stm32f4/usart.md), letter h); a
+  letter that writes a run with interrupts masked, reads the room under
+  the mask and the edge after the wire time would measure them here.
 - **Letter l's rate on the wire**: the loopback's 921600 run through the
   transmit engine is timed against the wire like every other loop, and
   neither board carries the PA2-PA3 strap while the crossed pair is

@@ -45,7 +45,9 @@ void usart_verbs() {
     (void)Aux::init(clock, 9600, {.bits = UartBits::eight, .parity = UartParity::even, .stop_bits = 2});
     (void)Console::isr();
     (void)Aux::isr();
-    static_assert(BulkSink<Console> && SpanSource<Console>);
+    static_assert(BulkSink<Console> && EdgeSink<Console> && SpanSource<Console>);
+    (void)Console::tx_room();
+    (void)Console::tx_drained();
     (void)Console::write_byte(0x55);
     uint8_t b;
     (void)Console::read_byte(b);

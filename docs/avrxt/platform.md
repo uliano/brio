@@ -320,7 +320,14 @@ masked), `idle()`, `break_here()`, `now()` and the compile-time
 `panic_record()` - a `PanicRecord` in `.noinit`. Two readbacks beyond
 the concept let a program (and the suite) check what the others did:
 `sleep_armed()` reads `SLPCTRL.CTRLA.SEN`, `interrupts_enabled()`
-reads `SREG.I`. `idle()` sleeps in IDLE unless a deeper mode is already
+reads `SREG.I`. And `in_handler()`, the concept's optional member a
+service called from an interrupt handler asks for (kernel/platform.hpp's
+`HandlerAware`), reads `CPUINT.STATUS`'s three executing bits, LVL0EX,
+LVL1EX and NMIEX, each set while a handler of its level runs and cleared
+by its RETI (DS40002247B 15.5.2 on the DB, DS40002183A 14.5.2 on the
+DA, DS40002443A 15.5.2 on the EA: one register, one offset, the same
+bits): never `SREG.I`, which a handler leaves set and a critical section
+clears. `idle()` sleeps in IDLE unless a deeper mode is already
 armed, in which case it takes that one instead - see `AvrSleepSite`
 below.
 
@@ -1134,6 +1141,12 @@ Driver gaps:
 
 Implemented but not bench-verified:
 
+- **`in_handler()` on this silicon**: compiled for every package, the
+  read of CPUINT.STATUS the data sheets' 15.5.2 (14.5.2 on the DA); a
+  letter that asks it from a vector, from the main loop and under a
+  critical section, as the STM32F4's serial suite does
+  ([../stm32f4/usart.md](../stm32f4/usart.md), letter h), would measure
+  it.
 - **The AVR EA's ADC in a real standby**: the EA engine writes its
   `run_standby` field ([adc.md](adc.md)); letter `o` keeps the
   TCA's and the AC's legs on the EA, and an ADC leg there - a conversion

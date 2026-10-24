@@ -56,6 +56,13 @@
 //      - the default never loses a byte, two copies starve nothing, four
 //      starve the ring armed low; and the overrun a starved stream leaves
 //      with nothing to take cleared, the vector quiet after it
+//   h  THE TRANSMIT ROOM AND EDGE, AND in_handler(): tx_room() the ring's
+//      capacity on an idle port, less a run written with interrupts
+//      masked, the capacity again after the wire time; tx_drained() false
+//      before a write, true once after it has drained, false again - for
+//      the interrupt transmitter and the transmit engine, and read by the
+//      vector's glue, one edge a write; the platform's in_handler() true
+//      in the USART6 vector, false in the letter's body and under a mask
 //
 // THE TWO-BOARD SET, under the second all-key t (z never runs it): USART1
 // on PA9/PA10 (AF7) crossed to the desk's STM32G0B1RE running its
@@ -167,8 +174,11 @@ using RingLow = Uart<6, loop_pins, arb_ring, 64, NoDmaEngine, RxEngine, arb_opts
 using Res = Usart<6>;
 
 /// Who owns USART6 now: 0 nobody, 1 LoopIrq, 2 LoopDma, 3 LoopOd, 4 LoopFast,
-/// 5 RingHigh, 6 RingLow.
+/// 5 RingHigh, 6 RingLow, 7 LoopIrq with letter h's glue (the transmit
+/// edge read in the vector, in_handler() asked there).
 volatile uint8_t owner = 0;
+volatile uint32_t tx_edges = 0;      ///< the transmit edges owner 7's glue read
+volatile uint8_t handler_said = 0;   ///< in_handler() in owner 7's vector: 0 unasked, 1 false, 2 true
 volatile uint32_t usart_entries = 0;
 volatile uint32_t dma_entries = 0;
 volatile uint32_t edges = 0;
@@ -177,7 +187,7 @@ volatile uint32_t pad_edge_at = 0;   ///< the DWT at PC6's last rising edge
 
 void down() {
     const uint8_t was = owner;
-    if (was == 1u) {
+    if (was == 1u || was == 7u) {
         LoopIrq::release();
     } else if (was == 2u) {
         LoopDma::release();
@@ -902,6 +912,147 @@ void tg_arbitration() {
                   "leg: the level decides correctness on this controller", four_starve);
     bench.verdict("THE OVERRUN WITH NOTHING TO TAKE IS CLEARED: after every starved leg the "
                   "vector is quiet - no entry in a millisecond of silence", quiet);
+}
+
+// ---- h  the transmit room and edge, and in_handler() -----------------------------------
+//
+// A run of 48 frames is written with interrupts MASKED, so no consumer
+// of the transmit ring can run between the write and the look that
+// follows it: the TXE handler is held off, and the transmit engine,
+// whose stream does run, releases its block's bytes only in its
+// completion handler, held off too. So the room read under the mask is
+// exact - capacity less 48, no bound to derive - and so is the edge
+// (none while masked). Then the wire runs: 48 frames of ten bits at
+// 1 Mbaud are 480 us, waited for on tx_idle() with a bound of 10 ms
+// (twenty times the wire time: a miss is a stuck transmitter, never a
+// slow one). The loop hears what it sends, so the 48 frames are read
+// back after a millisecond more (the last one's stop bit) and checked
+// against the pattern: the run went out whole, not just out of the
+// ring.
+
+constexpr uint32_t room_run = 48;
+constexpr uint32_t room_capacity = 511;   ///< LoopIrq's and LoopDma's 512-slot transmit ring
+
+/// Wait, bounded, for the port's wire to fall idle; false when the bound
+/// ran out. The bound is the caller's, derived from its run.
+template <typename Port>
+bool idle_within(uint32_t cycles) {
+    const uint32_t t0 = CycleCounter::now();
+    while (!Port::tx_idle()) {
+        if (CycleCounter::now() - t0 > cycles) {
+            return false;
+        }
+    }
+    return true;
+}
+
+struct RoomLeg {
+    bool up = false;
+    uint32_t idle_room = 0;   ///< tx_room() on the idle port
+    bool edge_before = true;  ///< tx_drained() before the write
+    uint32_t taken = 0;       ///< what write_bulk() took, masked
+    uint32_t held_room = 0;   ///< tx_room() right after it, masked
+    bool edge_held = true;    ///< tx_drained() then, masked
+    bool idle = false;        ///< the wire idle within the bound
+    uint32_t after_room = 0;  ///< tx_room() after the wire time
+    bool edge_first = false;  ///< tx_drained() then
+    bool edge_second = true;  ///< and read again
+    uint32_t back = 0;        ///< frames the loop heard back
+    bool in_order = false;
+};
+
+template <typename Port>
+RoomLeg room_leg(uint8_t who) {
+    static uint8_t run[room_run];
+    for (uint32_t i = 0; i < room_run; ++i) {
+        run[i] = pattern(i);
+    }
+    RoomLeg l;
+    l.up = up<Port>(who, 1'000'000);
+    l.idle_room = Port::tx_room();
+    l.edge_before = Port::tx_drained();
+    {
+        Stm32f4Platform<>::CriticalSection cs;
+        l.taken = Port::write_bulk(std::span<const uint8_t>(run, room_run));
+        l.held_room = Port::tx_room();
+        l.edge_held = Port::tx_drained();
+    }
+    l.idle = idle_within<Port>(SysClock::hz / 100u);
+    l.after_room = Port::tx_room();
+    l.edge_first = Port::tx_drained();
+    l.edge_second = Port::tx_drained();
+    wait_ms(1);
+    l.in_order = true;
+    l.back = drain<Port>(0, l.in_order);
+    return l;
+}
+
+bool room_leg_ok(const RoomLeg& l) {
+    return l.up && l.idle_room == room_capacity && !l.edge_before && l.taken == room_run &&
+           l.held_room == room_capacity - room_run && !l.edge_held && l.idle &&
+           l.after_room == room_capacity && l.edge_first && !l.edge_second &&
+           l.back == room_run && l.in_order;
+}
+
+void print_room_leg(const char* name, const RoomLeg& l) {
+    print(serial, "  ", name, ": room ", l.idle_room, " idle, ", l.held_room, " after ", l.taken,
+          " written masked, ", l.after_room, " after the wire; edge ", l.edge_before ? "true" : "false",
+          " before, ", l.edge_held ? "true" : "false", " masked, ", l.edge_first ? "true" : "false",
+          " then ", l.edge_second ? "true" : "false", " after; ", l.back, " of ", room_run,
+          " back", l.in_order ? " in order" : " OUT OF ORDER", crlf);
+}
+
+void th_room_edge() {
+    const RoomLeg irq = room_leg<LoopIrq>(1);
+    print_room_leg("interrupt transmitter", irq);
+    bench.verdict("the interrupt transmitter: tx_room() the capacity idle, less the run masked, the "
+                  "capacity after the wire; tx_drained() false, false, then true once",
+                  room_leg_ok(irq));
+    const RoomLeg dma = room_leg<LoopDma>(2);
+    print_room_leg("transmit engine      ", dma);
+    bench.verdict("the transmit engine: the block holds its run in the ring until its completion, "
+                  "the completion that empties the ring is the edge, told once",
+                  room_leg_ok(dma));
+
+    // The glue: the vector reads the edge after isr(), one edge a write.
+    static uint8_t run[room_run];
+    for (uint32_t i = 0; i < room_run; ++i) {
+        run[i] = pattern(i);
+    }
+    (void)up<LoopIrq>(7, 1'000'000);
+    tx_edges = 0;
+    handler_said = 0;
+    constexpr uint32_t writes = 3;
+    bool all_idle = true;
+    for (uint32_t k = 0; k < writes; ++k) {
+        {
+            Stm32f4Platform<>::CriticalSection cs;
+            (void)LoopIrq::write_bulk(std::span<const uint8_t>(run, room_run));
+        }
+        all_idle = idle_within<LoopIrq>(SysClock::hz / 100u) && all_idle;
+        wait_ms(1);
+        bool ok = true;
+        (void)drain<LoopIrq>(0, ok);
+    }
+    const uint32_t glue_edges = tx_edges;
+    const bool body_edge = LoopIrq::tx_drained();   // the glue read every one
+    const uint8_t said = handler_said;
+    const bool body_says = Stm32f4Platform<>::in_handler();
+    bool masked_says = true;
+    {
+        Stm32f4Platform<>::CriticalSection cs;
+        masked_says = Stm32f4Platform<>::in_handler();
+    }
+    down();
+    print(serial, "  the vector's glue: ", glue_edges, " edge(s) for ", writes, " writes, ",
+          body_edge ? "one" : "none", " left for the body; in_handler() ",
+          said == 2u ? "true" : said == 1u ? "false" : "unasked", " in the vector, ",
+          body_says ? "true" : "false", " in the body, ", masked_says ? "true" : "false",
+          " under a mask", crlf);
+    bench.verdict("the edge read in the vector's glue: one a write, none left behind",
+                  all_idle && glue_edges == writes && !body_edge);
+    bench.verdict("in_handler() is IPSR's: true in the USART6 vector, false in the letter's body "
+                  "and under a critical section", said == 2u && !body_says && !masked_says);
 }
 
 // ===========================================================================
@@ -3675,6 +3826,14 @@ extern "C" void USART6_IRQHandler() {
         edge = RingHigh::isr();
     } else if (owner == 6u) {
         edge = RingLow::isr();
+    } else if (owner == 7u) {
+        // The glue a transmit-side writer binds (util/stream.hpp's
+        // EdgeSink): the edge read right after the body that raises it.
+        handler_said = Stm32f4Platform<>::in_handler() ? 2u : 1u;
+        edge = LoopIrq::isr();
+        if (LoopIrq::tx_drained()) {
+            tx_edges = tx_edges + 1u;
+        }
     }
     if (edge) {
         edge_at = CycleCounter::now();
@@ -3720,6 +3879,7 @@ int main() {
     bench.letter('e', "tx_idle() against the last stop bit on the pad", te_tx_idle);
     bench.letter('f', "the burst edge from the vector, nothing polled", tf_edge);
     bench.letter('g', "the receive ring against copies on its own controller", tg_arbitration);
+    bench.letter('h', "the transmit room and edge, and in_handler()", th_room_edge);
     bench.second_letter('1', "the rendezvous, and this crystal against the far chip's", t1_link);
     bench.second_letter('2', "the baud matrix across the wire, timed by the far chip", t2_rates);
     bench.second_letter('3', "the frame matrix across the wire", t3_frames);

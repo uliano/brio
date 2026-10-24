@@ -183,6 +183,11 @@ struct Ch32x035Platform {
     /// mstatus.MIE readback: the one bit CriticalSection saves.
     static bool interrupts_enabled() { return brio::interrupts_enabled(); }
 
+    /// Whether the caller runs inside an interrupt handler: PFIC_GISR's
+    /// GACTSTA (ch32x035/pfic.hpp's Pfic::in_handler(), which says why not
+    /// mstatus.MIE; the optional member of kernel/platform.hpp).
+    static bool in_handler() { return Pfic::in_handler(); }
+
     /**
      * Halt in the debugger: the panic path's breakpoint
      * (kernel/panic.hpp), callable from any context.
@@ -276,6 +281,6 @@ inline uint32_t stack_untouched() {
     return n;
 }
 
-static_assert(Platform<Ch32x035Platform<>>);
+static_assert(Platform<Ch32x035Platform<>> && HandlerAware<Ch32x035Platform<>>);
 
 } // namespace brio

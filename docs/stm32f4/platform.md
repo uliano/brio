@@ -197,7 +197,12 @@ overhead is about 150 cycles at 180 MHz and 50 at 100 MHz (measured:
 
 - `Stm32f4Platform<TB = Ticker>` - `Timebase` (= TB), `CriticalSection`
   (= `InterruptGuard`), `idle()` (DSB, WFI, unmask),
-  `interrupts_enabled()`, `break_here()` (BKPT, unconditional - ARMv7-M
+  `interrupts_enabled()`, `in_handler()` (kernel/platform.hpp's
+  optional member: IPSR's exception number, zero in thread mode,
+  ARMv7-M ARM B1.4.2, cortexm/nvic.hpp's read - measured true in a
+  USART vector and false in thread mode and under a critical section
+  by the serial suite's letter h, [usart.md](usart.md)),
+  `break_here()` (BKPT, unconditional - ARMv7-M
   lets software read DHCSR's C_DEBUGEN, unlike ARMv6-M, and a conditional
   break is possible here; it is not taken, so the three families' panics
   end the same way), `now()`/`ticks_per_second` (the timebase's),

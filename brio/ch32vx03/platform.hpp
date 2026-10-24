@@ -252,6 +252,11 @@ struct Ch32vx03Platform {
     /// mstatus.MIE readback: the one bit CriticalSection saves.
     static bool interrupts_enabled() { return brio::interrupts_enabled(); }
 
+    /// Whether the caller runs inside an interrupt handler: PFIC_GISR's
+    /// GACTSTA (ch32vx03/pfic.hpp's Pfic::in_handler(), which says why not
+    /// mstatus.MIE; the optional member of kernel/platform.hpp).
+    static bool in_handler() { return Pfic::in_handler(); }
+
     /**
      * Halt in the debugger.
      *
@@ -337,7 +342,7 @@ inline uint32_t stack_untouched() {
     return n;
 }
 
-static_assert(Platform<Ch32vx03Platform<>>);
+static_assert(Platform<Ch32vx03Platform<>> && HandlerAware<Ch32vx03Platform<>>);
 
 /**
  * Ch32vx03RubatoPlatform<TB>: the platform a Rubato kernel runs on
@@ -385,7 +390,7 @@ struct Ch32vx03RubatoPlatform : Ch32vx03Platform<TB> {
     [[gnu::always_inline]] static void pend_schedule() { request_scheduler(); }
 };
 
-static_assert(Platform<Ch32vx03RubatoPlatform<>>);
+static_assert(Platform<Ch32vx03RubatoPlatform<>> && HandlerAware<Ch32vx03RubatoPlatform<>>);
 static_assert(Preemptive<Ch32vx03RubatoPlatform<>>);
 static_assert(!Preemptive<Ch32vx03Platform<>>);
 

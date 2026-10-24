@@ -142,6 +142,9 @@ private:
     uint32_t saved_;
 };
 
+/// PFIC_GISR.GACTSTA: an interrupt handler is executing (Pfic::in_handler()).
+inline constexpr uint32_t pfic_gisr_gactsta = 1UL << 8;
+
 /// The interrupt controller's per-line enables. Monostate: there is one
 /// PFIC, and its registers are write-one, so no verb here needs a guard
 /// around it.
@@ -191,6 +194,16 @@ struct Pfic {
         const uint32_t n = static_cast<uint32_t>(irq);
         return (pfic()->IACTR[n >> 5] & (1UL << (n & 0x1fu))) != 0u;
     }
+
+    /// Whether the caller runs inside an interrupt handler: PFIC_GISR's
+    /// GACTSTA, bit 8 of the register at offset 0x4C, which the chapter
+    /// describes as an interrupt being executed, whatever the nesting level
+    /// (the reference manual 7.5.2.11 and the QingKe V4 manual 3.1). Not
+    /// mstatus.MIE, which a critical section in thread code clears as a
+    /// trap's entry does, so it cannot tell a handler from a guard. The
+    /// platform's in_handler() (kernel/platform.hpp's optional member) is
+    /// this read. Any context; one load and a test.
+    static bool in_handler() { return (pfic()->GISR & pfic_gisr_gactsta) != 0u; }
 };
 
 } // namespace brio

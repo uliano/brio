@@ -38,7 +38,8 @@ static_assert(usart_column_on_debug_port(3, 1) && usart_column_on_debug_port(4, 
 static_assert(!usart_column_on_debug_port(2, 0));
 
 using Serial = Uart<2, P>;
-static_assert(ByteTransport<Serial> && BulkSink<Serial> && SpanSource<Serial>);
+static_assert(ByteTransport<Serial> && BulkSink<Serial> && EdgeSink<Serial> && SpanSource<Serial>);
+uint32_t edge_verbs_Serial() { return Serial::tx_room() + (Serial::tx_drained() ? 1u : 0u); }
 static_assert(Serial::pads.tx == Pad{'A', 2} && Serial::pads.rx == Pad{'A', 3});
 
 template <uint8_t n>

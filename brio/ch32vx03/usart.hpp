@@ -59,9 +59,11 @@
  * program's bindings of the instance's vector and of its engines'
  * channel vectors call them and nothing else does. Neither waits; isr()
  * masks nothing, and dma_isr()'s transmit completion starts the next
- * block through pump_tx(), whose claim takes the guard (below). The
- * transmit verbs, write_byte() and write_bulk() (and print() over
- * them), are the transmit ring's one producer: main() and active
+ * block through pump_tx(), whose claim takes the guard (below);
+ * tx_drained(), the transmit edge, is read by the program's glue in the
+ * vector whose body raised it. The transmit verbs, write_byte() and
+ * write_bulk() (and print() over them) with tx_room(), are the transmit
+ * ring's one producer: main() and active
  * objects' handlers (an active object is a component of a brio program
  * with its own event queue, served one event at a time by the kernel),
  * never an interrupt handler; both copy, the caller's buffer free when
@@ -1399,6 +1401,7 @@ struct Uart {
         m_baud = baud;
 
         m_tx.clear();
+        m_tx_drained = false;
         m_rx.clear();
         if constexpr (has_rx_engine) {
             m_rx.clear_overruns();
@@ -1487,7 +1490,11 @@ struct Uart {
                 bump(m_dma_faults);
             } else if ((f & TxEngine::flag_complete) != 0u) {
                 m_tx.consume(static_cast<typename decltype(m_tx)::index_t>(TxEngine::complete()));
-                pump_tx();
+                if (m_tx.empty()) {
+                    m_tx_drained = true;   // the transmit edge: no next run to start
+                } else {
+                    pump_tx();
+                }
             }
         }
         if constexpr (has_rx_engine) {
@@ -1623,6 +1630,7 @@ struct Uart {
                 // TXE stands while the transmitter is idle: disarm, or
                 // the handler is re-entered for ever.
                 regs().CTLR1 = static_cast<uint16_t>(regs().CTLR1 & ~usart_txeie);
+                m_tx_drained = true;   // the transmit edge, tx_drained()'s
             }
         }
 
@@ -1784,6 +1792,31 @@ struct Uart {
             }
         }
         return m_tx.empty() && (regs().STATR & usart_tc) != 0u;
+    }
+
+    /// The bytes write_bulk() would take now: the transmit ring's free
+    /// count (util/stream.hpp's RoomSink). Main context, the ring's
+    /// producer; one read of the consumer's index, never waits. Without
+    /// a transmit engine the room grows a byte at a time as the TXE entry
+    /// hands DATAR the ring's bytes; with one, a block holds its run in
+    /// the ring until its completion, so the room grows a block at a time.
+    static uint32_t tx_room() { return m_tx.room(); }
+
+    /// The transmit edge, told once (util/stream.hpp's EdgeSink): true when the
+    /// transmitter has run the ring dry since the last true, the read clearing
+    /// it. Raised by isr() on the TXE entry that finds the ring empty and
+    /// disarms - the last byte just moved into the shift register, a frame
+    /// before the wire is idle - and, with a transmit engine, by dma_isr() on
+    /// the completion that leaves the ring empty: the glue reads it right after
+    /// that body, in the same vector (the instance's, or the transmit
+    /// channel's). From main context the read is safe too, while that context
+    /// is the ring's one producer: only a write it makes can arm the next edge.
+    [[gnu::always_inline]] static bool tx_drained() {
+        const bool drained = m_tx_drained;
+        if (drained) {
+            m_tx_drained = false;
+        }
+        return drained;
     }
 
     // ---- introspection ----------------------------------------------------
@@ -2249,6 +2282,10 @@ private:
     static inline volatile uint16_t m_noise_errors = 0;
     static inline volatile uint16_t m_parity_errors = 0;
     static inline volatile uint16_t m_dma_faults = 0;
+    /// The transmit edge: set where the transmitter finds the ring dry
+    /// (the TXE entry that disarms, or a transmit block's completion that
+    /// leaves the ring empty), cleared by tx_drained()'s read.
+    static inline volatile bool m_tx_drained = false;
     /// Under a receive engine, the bytes lost beside the view's skips (an
     /// overrun, a restart), never cleared: rx_skips()'s second term.
     static inline volatile uint32_t m_rx_lost = 0;

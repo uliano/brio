@@ -339,6 +339,17 @@ the key that runs the single-board set, `w` the two-board key, below).
   block through its reset line first. `write_bulk()` copies a run of 16
   bytes or more whose source and ring slot share their alignment with
   the runtime's memcpy, any other with its byte loop.
+- `tx_room()` is the bytes `write_bulk()` would take now, the transmit
+  ring's free count (util/stream.hpp's `RoomSink`,
+  [design/serial.md](../design/serial.md)): it grows a byte at a time as
+  the TXE entry hands DATAR the ring's bytes, and a block at a time under
+  a transmit engine, whose block holds its run in the ring until its
+  completion. `tx_drained()` is the transmit edge (`EdgeSink`), true once
+  each time the ring ran dry: raised by `isr()` on the TXE entry that
+  finds the ring empty and disarms, the last byte then in the shift
+  register, or by `dma_isr()` on the transmit completion that leaves the
+  ring empty, and read by the program's glue right after that body, in
+  the same vector (the instance's, or the transmit channel's).
 - THE RECEIVE ENGINE'S EDGE IS THE USART'S VECTOR'S, and the CPU never
   reads DATAR while the channel owns it: `isr()` runs two states over
   the clear measured above. WAITING FOR THE END (IDLEIE, PEIE, EIE): an
@@ -734,6 +745,12 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
+- **`tx_room()` and `tx_drained()` on this silicon**, on both parts: the
+  same ring and the same dry branch are judged on the host over the
+  simulated PL011 (test/test_pl011) and measured on the STM32F4's
+  silicon ([the STM32F4 USART page](../stm32f4/usart.md), letter h); a
+  letter that writes a run with interrupts masked, reads the room under
+  the mask and the edge after the wire time would measure them here.
 - The run verbs, `write_bulk()` and `read_span()`/`consume()`, on the
   CH32V003: compiled and counted; one run of the console on that part
   would measure them.

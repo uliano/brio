@@ -339,6 +339,18 @@ a compile-time refusal in the task.
   them. The public surface is
   IDENTICAL to avrxt's and samc21's, which is what lets
   `util/line_reader.hpp` and `print()` compile here untouched.
+- `tx_room()` is the bytes `write_bulk()` would take now, the transmit
+  ring's free count (util/stream.hpp's `RoomSink`,
+  [design/serial.md](../design/serial.md)): it grows as the handler moves
+  the ring into TDR, a byte an entry or with the FIFO on as much as TXFNF
+  lets through, and a block at a time under a transmit engine, whose
+  block holds its run in the ring until its completion. `tx_drained()` is
+  the transmit edge (`EdgeSink`), true once each time the ring ran dry:
+  raised by `isr()` on the transmit entry that finds the ring empty and
+  disarms, or by `dma_isr()` on the transmit completion that leaves the
+  ring empty, and read by the program's glue right after that body, in
+  the same vector (the instance's, or the transmit channel's). Both are
+  the `LpUart`'s too.
 - `Rs485<n, pins, de_pin, assertion, deassertion, ..., Placement>` - the
   same task with the driver enable filled in. **`OneWire` is NOT a task here**:
   33.5.15 is a bit, so single-wire is `Uart` with
@@ -1678,6 +1690,13 @@ Declined with a reason (every field of chapter 33 is implemented):
   brio's business yet.
 
 Implemented, not bench-verified:
+- **`tx_room()` and `tx_drained()` on this silicon**, on the USARTs and
+  the LPUARTs: the same ring and the same dry branch are judged on the
+  host over the simulated PL011 (test/test_pl011) and measured on the
+  STM32F4's silicon ([the STM32F4 USART page](../stm32f4/usart.md),
+  letter h); a letter that writes a run with interrupts masked, reads
+  the room under the mask and the edge after the wire time would measure
+  them here.
 - `test_stm32_serial` as the G031K8's five group images (letters a to
   j, k to q, the host letters v, w, x and y, the two-board set's 1 to 8,
   and its 9, 0, r, s and u) and the G071RB's two (the single-board

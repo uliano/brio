@@ -23,6 +23,10 @@ using P = Ch32vx03Platform<>;
 using SysClock = Clock<ClockSource::pll, 144'000'000>;
 
 static_assert(Platform<P>);
+// The optional member a service called from a handler asks for: the
+// interrupt controller's executing status, read in one load.
+static_assert(HandlerAware<P>);
+bool platform_in_handler() { return P::in_handler(); }
 static_assert(P::atomic_width == 4);
 static_assert(P::ticks_per_second == 1000);
 static_assert(Ticker::ticks_per_second == 1000);

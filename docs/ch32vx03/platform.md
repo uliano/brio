@@ -379,7 +379,13 @@ a `PanicRecord` in `.noinit`. The interrupt verbs and the per-line
 enables are [brio/ch32vx03/pfic.hpp](../../brio/ch32vx03/pfic.hpp):
 `enable/disable/enabled/pending/set_pending/clear_pending/active` (the
 manual's ISR bank is the enable status and its IPR the pending one;
-IENR/IRER/IPSR/IPRR are write-one). `BRIO_CH32_VECTOR(name) { body }`,
+IENR/IRER/IPSR/IPRR are write-one), and `Pfic::in_handler()`, which the
+platform's `in_handler()` forwards and the Rubato platform inherits
+(kernel/platform.hpp's optional member, `HandlerAware`): PFIC_GISR's
+GACTSTA, bit 8 at offset 0x4C, an interrupt being executed at any
+nesting level (the reference manual 9.5.2.11, the QingKe V4 manual
+3.1) - not mstatus.MIE, which a critical section clears as a trap's
+entry does. `BRIO_CH32_VECTOR(name) { body }`,
 with its two forms, is the one spelling of a vector binding, and it
 follows two facts of the build. Without the F extension (every CH32V203
 image) it is an attributed handler under the name - WCH's fast attribute
@@ -940,6 +946,16 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
+- **`in_handler()` on this silicon**: the read of PFIC_GISR's GACTSTA
+  is the manual's on both series,
+  compiled for all thirteen parts; under Rubato a dispatch started at a
+  handler's exit runs in thread mode after the trap's MRET, where the
+  bit is expected clear, and the same letter in a preempting dispatch
+  would measure that too; a letter that asks it from a
+  vector, from the main loop and under a critical section, as the
+  STM32F4's serial suite does
+  ([../stm32f4/usart.md](../stm32f4/usart.md), letter h), would
+  measure it.
 - **Rubato on the other parts**: the platform, its request and the two
   vector bodies compile for all thirteen, with and without the hardware
   prologue (the family fixture), and the suite is built and run for

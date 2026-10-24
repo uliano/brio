@@ -68,7 +68,9 @@ void pl011_transport_verbs() {
     (void)Plain::init(clock, 9600,
                       {.bits = UartBits::seven, .parity = UartParity::even, .stop_bits = 2});
     (void)Plain::isr();
-    static_assert(BulkSink<Plain> && SpanSource<Plain>);
+    static_assert(BulkSink<Plain> && EdgeSink<Plain> && SpanSource<Plain>);
+    (void)Plain::tx_room();
+    (void)Plain::tx_drained();
     (void)Plain::write_byte(0x55);
     uint8_t b = 0;
     (void)Plain::read_byte(b);

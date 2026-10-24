@@ -149,6 +149,46 @@ that still calls it changes nothing. Its edge test, made in an
 interrupt body over a `HardwareRing`, asks `waiting()`, the one look
 that writes nothing ([ring.md](ring.md)).
 
+### The transmit edge, and the room a writer asks
+
+The transmit side has the mirror of that edge, for a writer that queues
+a piece of output only where it fits whole and waits otherwise
+(`util/stream.hpp`'s `RoomSink` and `EdgeSink`; every transport of every
+family is both). `tx_room()` is the bytes `write_bulk()` would take now:
+the transmit ring's free count, read from main context with one load of
+the consumer's index, never waiting. It grows behind the caller's back
+as the transmitter drains, a byte at a time under an interrupt
+transmitter and a whole run at a time where the ring's consumer is an
+engine: a DMA block holds its run in the ring until its completion, and
+the USB serial port's stack pops a packet's 64 bytes out of it at once.
+`tx_drained()` is the transmit edge: true once each time the transmitter
+ran the ring dry, the read clearing it. It is
+raised in the transport's own interrupt body, at the one place that
+finds the ring empty and disarms - an interrupt transmitter's dry
+branch, a transmit engine's completion that finds no next run, the USB
+serial port's IN completion with nothing left to send, or its
+configuration by the host while the ring is empty, the moment its room
+goes from none to the whole ring - and the application's interrupt glue
+reads it right after that body, in the same vector, as it reads the
+receive edge:
+
+```cpp
+// excerpt: a console's vector; TxActivity is the program's own event
+if (Serial::isr()) { brio::post<Lines>(brio::RxActivity{}); }
+if (Serial::tx_drained()) { brio::post<Writer>(brio::TxActivity{}); }
+```
+
+Where the transmit engine's completion runs under a vector of its own
+(the DMA line's), that vector's glue reads it. An edge follows every
+write that queued bytes into the ring, so a writer waiting for room
+always gets one; a write the transmitter took whole into its FIFO
+queued nothing and raises none, the room it found being still there. A
+spare edge is possible (a run whose first byte the transmitter took
+before the rest was queued, the zero-length packet behind a full USB
+packet), a missing one is not. The cost is one store in the dry
+branch, taken once a burst, and in the glue a load and a test per
+entry.
+
 ### No byte is stolen by a clear
 
 While a receive engine owns the data register, the CPU never reads
@@ -192,7 +232,8 @@ and the four counters `frame_errors`, `parity_errors`, `rx_overruns`,
 `hw_overruns`; the two rings and the edge contract above; and five
 more, `set_baud(hz, baud)`, `release`, `can_baud`, `min_hz_for` and
 `rx_skips`, every byte the receive ring will not deliver, never
-cleared (`LineReader`'s epoch, below). What differs is how the pins
+cleared (`LineReader`'s epoch, below); and the transmit pair,
+`tx_room` and `tx_drained` (above). What differs is how the pins
 are named, how many vectors the silicon gives the port, and what each
 family's port has that the others' has not.
 

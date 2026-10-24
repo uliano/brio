@@ -133,6 +133,9 @@ private:
     uint32_t saved_;
 };
 
+/// PFIC_GISR.GACTSTA: an interrupt handler is executing (Pfic::in_handler()).
+inline constexpr uint32_t pfic_gisr_gactsta = 1UL << 8;
+
 /// The interrupt controller's per-line enables. Monostate (a type used
 /// only through its static members, never as an object): there is one
 /// PFIC, and its two registers are write-one, so no verb here needs a
@@ -187,6 +190,19 @@ struct Pfic {
         const uint32_t n = static_cast<uint32_t>(irq);
         return (pfic()->IACTR[n >> 5] & (1UL << (n & 0x1fu))) != 0u;
     }
+
+    /// Whether the caller runs inside an interrupt handler: PFIC_GISR's
+    /// GACTSTA, bit 8 of the register at offset 0x4C, which the chapter
+    /// describes as an interrupt being executed, whatever the nesting level
+    /// (the CH32V00X reference manual 6.5.2.7 for the CH32V006, the
+    /// CH32V003's own 6.5.2.7 and the QingKe V2 manual 3.1: the same
+    /// register and the same bit on both parts). Not mstatus.MIE, which
+    /// says nothing here: interrupt entry leaves it set on this core
+    /// (QingKe V2 manual 2.2, docs/ch32v00x/platform.md), and a critical
+    /// section in thread code clears it. The platform's in_handler()
+    /// (kernel/platform.hpp's optional member) is this read. Any context;
+    /// one load and a test.
+    static bool in_handler() { return (pfic()->GISR & pfic_gisr_gactsta) != 0u; }
 };
 
 } // namespace brio

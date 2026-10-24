@@ -29,7 +29,8 @@ using Serial = UsbCdcAcm<Usb, P>;
 // The claim the driver makes, once more where the fixture can see it.
 static_assert(UsbController<Usb>);
 static_assert(UsbClass<Serial>);
-static_assert(ByteSink<Serial> && ByteSource<Serial> && BulkSink<Serial> && SpanSource<Serial>);
+static_assert(ByteSink<Serial> && ByteSource<Serial> && BulkSink<Serial> && EdgeSink<Serial> && SpanSource<Serial>);
+uint32_t edge_verbs_Serial() { return Serial::tx_room() + (Serial::tx_drained() ? 1u : 0u); }
 
 // The shared memory is 512 bytes and the CAN filter table takes the top
 // 128 when CAN is used, which is why the default budget is 384.

@@ -180,7 +180,10 @@ nothing short of the DORMANT state stops.
   DORMANT state's own (a GPIO event, the RTC), so a line that is not
   one of those waits for one; `now()`,
   `ticks_per_second` 1000, `atomic_width` 4, `panic_record()` in
-  `.noinit`, `break_here()` = BKPT; `core_id()` = SIO's CPUID.
+  `.noinit`, `break_here()` = BKPT; `core_id()` = SIO's CPUID;
+  `in_handler()` (kernel/platform.hpp's optional member) IPSR's
+  exception number, zero in thread mode, on the core that asks
+  (ARMv6-M ARM B1.4.2, cortexm/nvic.hpp's read).
 - `Rp2040RubatoPlatform<core = 0, TB = CoreTicker<core>>` - the platform
   of the preemptive kernel, `Rubato`
   ([design/kernel.md](../design/kernel.md), "Rubato"), one type per core:
@@ -645,6 +648,11 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
+- `in_handler()` on this core: IPSR is the architecture's (ARMv6-M ARM
+  B1.4.2) and the same read is measured on the STM32F4's Cortex-M4
+  ([../stm32f4/usart.md](../stm32f4/usart.md), letter h); a letter that
+  asks it from a vector, from the main loop and under a critical section
+  would measure it here, on each core.
 - The single-kernel binding, the core stratum's `scheduler_exception<K>()`
   bound to `isr_pendsv` with core 1 under Tenuto or not launched ("How
   to use it"): it runs in no image, `test_rp2040_rubato` binding the pair

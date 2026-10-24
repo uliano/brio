@@ -16,6 +16,7 @@ using namespace brio;
 using P = Ch32vx03RubatoPlatform<>;
 
 static_assert(Platform<P>);
+static_assert(HandlerAware<P>);   // in_handler() inherited from the Tenuto platform
 static_assert(Preemptive<P>);
 static_assert(!Preemptive<Ch32vx03Platform<>>);
 static_assert(std::same_as<P::CriticalSection, Ch32vx03Platform<>::CriticalSection>);

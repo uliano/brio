@@ -169,7 +169,8 @@ using View = HardwareRing<ring8, Rx>;
 // ---- the transport on its engines -------------------------------------------------
 // USART2, every part's: transmits on 7, receives on 6.
 using Console = Uart<2, P, 64, 128, UartFormat{}, DmaTxEngine<7>, DmaRxEngine<6>>;
-static_assert(ByteTransport<Console> && BulkSink<Console> && SpanSource<Console>);
+static_assert(ByteTransport<Console> && BulkSink<Console> && EdgeSink<Console> && SpanSource<Console>);
+uint32_t edge_verbs_Console() { return Console::tx_room() + (Console::tx_drained() ? 1u : 0u); }
 static_assert(Console::has_tx_engine && Console::has_rx_engine);
 // One engine at a time, and the ring ranked low by the knob.
 using TxOnly = Uart<2, P, 64, 64, UartFormat{}, DmaTxEngine<7>>;

@@ -244,7 +244,10 @@ debugger is attached (DHCSR is debugger-access-only), so with none
 the BKPT escalates to the crt's HardFault spin; `now()` reads the
 ticker; `ticks_per_second` = 1000; `atomic_width` = 4 (an aligned
 word moves in one access - what lets `util/ring.hpp` take its
-lock-free path here); `panic_record()` lives in `.noinit`.
+lock-free path here); `panic_record()` lives in `.noinit`; and
+`in_handler()`, kernel/platform.hpp's optional member, is IPSR's
+exception number, zero in thread mode (ARMv6-M ARM B1.4.2,
+cortexm/nvic.hpp's read).
 
 **`SamRubatoPlatform`** (samc21/platform.hpp) is `SamPlatform` whole
 plus the three members of a preemptive platform, the one the
@@ -1028,6 +1031,11 @@ Driver gaps (not built):
   on a console whose Uart names `DmaTxEngine`.
 
 Implemented but not bench-verified:
+- **`in_handler()` on this core**: IPSR is the architecture's (ARMv6-M
+  ARM B1.4.2) and the same read is measured on the STM32F4's Cortex-M4
+  ([../stm32f4/usart.md](../stm32f4/usart.md), letter h); a letter that
+  asks it from a vector, from the main loop and under a critical section
+  would measure it here.
 - **Erratum 1.8.13's hazard itself.** Letter w walks a TC line across
   `idle()`'s STANDBY branch with the tick held off, and never the
   tick's own edge across a standby entry - the coincidence the guard

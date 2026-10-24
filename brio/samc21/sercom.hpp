@@ -23,8 +23,10 @@
  * body: the program's handler for the instance's one vector calls it and
  * nothing else does, and it runs to completion like every interrupt
  * handler in brio; dma_isr() is the DMAC vector's body, for the transport
- * that holds the transmit engine. The transmit verbs (write_byte(),
- * write_bulk(), and print() over them) and the receive verbs (read_byte(),
+ * that holds the transmit engine, and tx_drained() is read by the
+ * program's glue in the vector whose body raised it. The transmit verbs
+ * (write_byte(), write_bulk(), tx_room(), and print() over them) and the
+ * receive verbs (read_byte(),
  * read_bulk(), read_span() with consume()) belong to the main context -
  * setup, or the handler of an active object, a brio object with an event
  * queue the kernel serves one event at a time - and never to an interrupt
@@ -1738,6 +1740,11 @@ class Uart {
     /// has sent nothing reads idle by this and not by the flag. Written by
     /// the producer's verbs alone, in main context.
     static inline bool m_tx_used = false;
+    /// The transmit edge: set where the transmitter finds the ring dry
+    /// (feed()'s disarm on the ring's last byte, or a transmit block's
+    /// completion that leaves the ring empty), cleared by tx_drained()'s
+    /// read.
+    static inline volatile bool m_tx_drained = false;
 
     /// The bound on a wait for the wire to fall idle (rebase(), set_baud()).
     static constexpr uint32_t tx_drain_spins = 8'000'000u;
@@ -1807,6 +1814,7 @@ public:
         Nvic::disable(S::irq());
         m_rx.clear();
         m_tx.clear();
+        m_tx_drained = false;
         clear_errors();
         m_baud = baud;
         m_tx_used = false;
@@ -1996,6 +2004,9 @@ public:
                     } else if ((flags & TxEngine::flag_complete) != 0u) {
                         m_tx.consume(static_cast<typename decltype(m_tx)::index_t>(
                             TxEngine::complete()));
+                        if (m_tx.empty()) {
+                            m_tx_drained = true;   // the transmit edge: no next run to start
+                        }
                     }
                     pump_tx();
                 }
@@ -2174,6 +2185,31 @@ public:
     /// written DATA. A port that has sent nothing since init() has TXC
     /// clear and is idle (m_tx_used).
     static bool tx_idle() { return m_tx.empty() && (!m_tx_used || S::txc_flag()); }
+
+    /// The bytes write_bulk() would take now: the transmit ring's free
+    /// count (util/stream.hpp's RoomSink). Main context, the ring's
+    /// producer; one read of the consumer's index, never waits. Without
+    /// an engine the room grows a byte at a time as feed() hands DATA the
+    /// ring's bytes; with one, a block holds its run (half the ring at
+    /// most) until its completion, so the room grows a block at a time.
+    static uint32_t tx_room() { return m_tx.room(); }
+
+    /// The transmit edge, told once (util/stream.hpp's EdgeSink): true when the
+    /// transmitter has run the ring dry since the last true, the read clearing
+    /// it. Raised by isr() on the DRE entry that hands DATA the ring's last
+    /// byte and disarms DRE - that byte and the one in the shift register still
+    /// to go - and, with the engine, by dma_isr() on the completion that leaves
+    /// the ring empty: the glue reads it right after that body, in the same
+    /// vector (the SERCOM's, or DMAC_Handler under the engine). From main
+    /// context the read is safe too, while that context is the ring's one
+    /// producer: only a write it makes can arm the next edge.
+    [[gnu::always_inline]] static bool tx_drained() {
+        const bool drained = m_tx_drained;
+        if (drained) {
+            m_tx_drained = false;
+        }
+        return drained;
+    }
 
     static uint8_t rx_overruns() { return m_rx_overruns; }
 
@@ -2484,6 +2520,7 @@ private:
             S::data(*c);
             if (m_tx.empty()) {
                 S::enable_dre_interrupt(false);
+                m_tx_drained = true;   // the transmit edge, tx_drained()'s
             }
         } else {
             S::enable_dre_interrupt(false);
@@ -2504,6 +2541,7 @@ inline constexpr UartPads sercom_probe_pads{
 
 static_assert(ByteTransport<Uart<0, detail::sercom_probe_pads>> &&
                   BulkSink<Uart<0, detail::sercom_probe_pads>> &&
+                  EdgeSink<Uart<0, detail::sercom_probe_pads>> &&
                   SkippingSource<Uart<0, detail::sercom_probe_pads>>,
               "Uart must satisfy the transport concepts, the skip epoch included");
 static_assert(ClockUser<Uart<0, detail::sercom_probe_pads>>,

@@ -148,7 +148,9 @@ void uart_transport_verbs() {
     (void)Instrument::dma_isr();
     (void)Instrument::harvest();
     (void)Instrument::dma_faults();
-    static_assert(BulkSink<Instrument> && SpanSource<Instrument>);
+    static_assert(BulkSink<Instrument> && EdgeSink<Instrument> && SpanSource<Instrument>);
+    (void)Instrument::tx_room();
+    (void)Instrument::tx_drained();
     (void)Instrument::write_byte('x');
     uint8_t b = 0;
     (void)Instrument::read_byte(b);

@@ -270,6 +270,20 @@ public:
     [[gnu::always_inline]] bool empty() const { return count() == 0; }
     [[gnu::always_inline]] bool full() const { return count() == capacity(); }
 
+    /// The free slots, all of them, wrapped or not: what the producer
+    /// could push now, capacity() less what is queued. Producer side: its
+    /// own index read plain, the consumer's fresh, as write_span() reads
+    /// it, so the answer is exact for the producer and can only grow
+    /// behind its back. A look: it moves nothing.
+    [[gnu::always_inline]] index_t room() const {
+        if constexpr (lock_free) {
+            return room_body();
+        } else {
+            typename P::CriticalSection cs;
+            return room_body();
+        }
+    }
+
     /// Reset to empty. Not concurrent: one party calls it while the
     /// other is quiescent (init, or the other party's interrupt masked).
     void clear() {
@@ -383,6 +397,12 @@ private:
 
     [[gnu::always_inline]] index_t count_body() const {
         return static_cast<index_t>((load_other(head_) - load_other(tail_)) & mask);
+    }
+
+    // publish_body()'s free room: one slot short of the tail, modulo the
+    // ring - the spare slot that tells full from empty.
+    [[gnu::always_inline]] index_t room_body() const {
+        return static_cast<index_t>((load_other(tail_) - head_ - 1u) & mask);
     }
 
     /// Read the index owned by the other side: fresh (never hoisted or
