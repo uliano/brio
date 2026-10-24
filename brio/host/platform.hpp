@@ -61,10 +61,15 @@ struct HostPlatform {
     static inline uint8_t current_core = 0; ///< which core "runs" (HostCore below)
     static inline uint32_t idle_calls = 0;  ///< how many times idle() ran
     static inline uint32_t break_calls = 0; ///< how many times break_here() ran
+    static inline bool in_isr = false;       ///< raised by a test's harness inside a simulated interrupt
 
     static void idle() { ++idle_calls; }
     static void break_here() { ++break_calls; }
     static uint32_t now() { return ticks; }
+
+    /// The optional member of kernel/platform.hpp: on the host, whether a
+    /// test's harness has raised `in_isr` around the call.
+    static bool in_handler() { return in_isr; }
 
     /// 1000 Hz: the identity case for ms conversions. Tests exercising a
     /// non-dividing rate define their own local platform (e.g. tps=1024).
@@ -87,6 +92,7 @@ struct HostPlatform {
         current_core = 0;
         idle_calls = 0;
         break_calls = 0;
+        in_isr = false;
         CriticalSection::depth = 0;
         CriticalSection::entries = 0;
         panic_record() = PanicRecord{};
@@ -99,7 +105,8 @@ static_assert(Platform<HostPlatform>);
 /// with the three members of a preemptive platform (kernel/platform.hpp)
 /// and what a test needs to simulate an interrupt over a dispatch.
 ///  - pend_schedule() records the request in `pending` and, unless the
-///    test has raised `in_isr`, runs the scheduler at once and clears it:
+///    test has raised the base's `in_isr`, runs the scheduler at once and
+///    clears it:
 ///    the host's image of a scheduling interrupt taken at once. Inside a
 ///    simulated interrupt the request waits, and the test's harness runs
 ///    the scheduler at the interrupt's exit when `pending` is set.
@@ -115,7 +122,6 @@ struct RubatoHostPlatform : HostPlatform {
     static constexpr bool preemptive = true;
     static inline uint8_t ceiling = 255;     ///< the index being dispatched; 255 at the base
 
-    static inline bool in_isr = false;       ///< raised by the harness inside a simulated interrupt
     static inline bool pending = false;      ///< a request not yet served
     static inline uint32_t requests = 0;     ///< how many times pend_schedule() ran
     static inline bool (*scheduler)() = nullptr;
@@ -139,7 +145,6 @@ struct RubatoHostPlatform : HostPlatform {
     static void reset() {
         HostPlatform::reset();
         ceiling = 255;
-        in_isr = false;
         pending = false;
         requests = 0;
         scheduler = nullptr;

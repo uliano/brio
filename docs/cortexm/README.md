@@ -19,8 +19,9 @@ architectures.
 
 - **`cortexm/nvic.hpp`**: the NVIC and PRIMASK. `InterruptGuard` (the
   critical section every brio platform on these cores rides on), the
-  global enable, disable and readback verbs, `Nvic` and
-  `irq_priority_levels`.
+  global enable, disable and readback verbs, `in_handler()` (IPSR's
+  exception number, zero in thread mode: the platforms' answer to the
+  kernel's optional question), `Nvic` and `irq_priority_levels`.
 - **`cortexm/ticker.hpp`**: the SysTick timebase. `BasicTicker`, the
   kernel's ticker, whose `cycles()` composes a cycle count from five
   reads in `util/cycle_count.hpp`'s order (the tick count, the

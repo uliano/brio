@@ -170,6 +170,12 @@ struct Rp2350Platform {
     /// restores.
     static bool interrupts_enabled() { return brio::interrupts_enabled(); }
 
+    /// Whether the caller runs inside a handler: the core's own answer
+    /// (IPSR's exception number on the Cortex-M33, mstatus.MIE clear on
+    /// Hazard3 - rp2350/core_m33.hpp and rp2350/core_hazard3.hpp say what
+    /// each read promises; the optional member of kernel/platform.hpp).
+    static bool in_handler() { return brio::in_handler(); }
+
     /// Halt in the debugger: the panic path's breakpoint
     /// (kernel/panic.hpp), callable from any context.
     ///

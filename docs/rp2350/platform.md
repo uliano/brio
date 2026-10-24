@@ -329,7 +329,10 @@ bootrom hands over:
   stratum's) and `scheduler_trap<K>()` (Hazard3's).
 - `core.hpp`'s names, the same on both halves: `InterruptGuard`,
   `enable_interrupts()`, `disable_interrupts()`, `interrupts_enabled()`,
-  `Irq` (the per-line controller over the device header's `IRQn_Type`:
+  `in_handler()` (IPSR's exception number on the Cortex-M33;
+  `mstatus.MIE` clear on Hazard3, which a trap's entry clears and the
+  crt never sets again before the return, so a critical section reads
+  as a handler too and no service asks it under a guard), `Irq` (the per-line controller over the device header's `IRQn_Type`:
   `enable`, `disable`, `enabled`, `set_pending`, `clear_pending`,
   `pending`), `irq_priority_levels`, `wait_for_interrupt()`,
   `debug_break()`, `core_id()`. Plus `CoreKind` and `core_kind`, a value,

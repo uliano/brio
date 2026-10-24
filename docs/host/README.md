@@ -24,6 +24,8 @@ single-threaded test process:
   assert what was posted;
 - recording `idle()` and `break_here()` (counters, no sleeping, no
   trap);
+- `in_handler()` answered from a flag, `in_isr`, that a test's harness
+  raises around a call it wants treated as an interrupt handler's;
 - `panic_record()` in ordinary static storage, cleared by `reset()`;
 - `ticks_per_second = 1000` (the identity case for millisecond
   conversions) and `atomic_width = 4` (every brio ring index is

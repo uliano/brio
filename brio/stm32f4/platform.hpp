@@ -103,6 +103,11 @@ struct Stm32f4Platform {
     /// PRIMASK readback: the one bit CriticalSection saves and restores.
     static bool interrupts_enabled() { return brio::interrupts_enabled(); }
 
+    /// Whether the caller runs inside an exception handler: IPSR's
+    /// exception number, zero in thread mode (cortexm/nvic.hpp's
+    /// in_handler(); the optional member of kernel/platform.hpp).
+    static bool in_handler() { return brio::in_handler(); }
+
     /// Halt in the debugger.
     ///
     /// Unconditional, as on the other Cortex-M families: with no debugger

@@ -933,3 +933,25 @@ TEST_CASE("Tenuto's scenarios run under Rubato with no interrupt give Tenuto's t
     CHECK(scenario_hold<UnderRubato>() == t_hold);
     CHECK(RP::ceiling == 255);
 }
+
+// ---------------------------------------------------------------------------
+// The index of the object being dispatched, through a preemption
+// ---------------------------------------------------------------------------
+
+TEST_CASE("dispatching<P> is the inner object's index inside the preemption and the outer's again after it") {
+    reset();
+    static std::vector<uint8_t> seen;
+    seen.clear();
+    CHECK(brio::dispatching<RP> == brio::no_dispatch);
+    High::action = [](uint8_t) { seen.push_back(brio::dispatching<RP>); };
+    Low::action = [](uint8_t) {
+        seen.push_back(brio::dispatching<RP>);
+        RP::preempt_hook = [] { isr([] { brio::post<High>(Hit{7}); }); };
+        RP::preempt_point();
+        RP::preempt_hook = nullptr;
+        seen.push_back(brio::dispatching<RP>);
+    };
+    isr([] { brio::post<Low>(Hit{1}); });
+    CHECK(seen == std::vector<uint8_t>{2, 0, 2});
+    CHECK(brio::dispatching<RP> == brio::no_dispatch);
+}

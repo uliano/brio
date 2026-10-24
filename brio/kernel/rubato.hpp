@@ -235,7 +235,7 @@ private:
         // False only when an interrupt's exit, between the look above and
         // the raise of the ceiling, served this queue to empty: the pass
         // goes on.
-        served = serve_one<Ao>();
+        served = serve_one<Ao, P>(index);   // dispatching<P> is the index for the dispatch
         std::atomic_signal_fence(std::memory_order_seq_cst);
         P::ceiling = ceiling;
         return served;

@@ -21,8 +21,9 @@
  * One turn of the loop:
  *  1. post the time events that have matured (kernel/time_event.hpp);
  *  2. take ONE event from the highest-priority non-empty queue and
- *     dispatch it, to completion, on the main stack; then release its
- *     queue slot unless the object held it (serve_one() in
+ *     dispatch it, to completion, on the main stack, with the object's
+ *     list index in dispatching<P> for the dispatch's duration; then
+ *     release its queue slot unless the object held it (serve_one() in
  *     kernel/active_object.hpp);
  *  3. if every queue was empty, check again with interrupts masked and,
  *     if still empty, sleep until the next interrupt.
@@ -119,6 +120,8 @@ struct Pack {
 template <Platform P, ActiveObject... Aos>
     requires (sizeof...(Aos) > 0)
 class Tenuto {
+    static_assert(sizeof...(Aos) < 255,
+                  "a list index is a byte and 255 means no dispatch (kernel/active_object.hpp)");
     static_assert((Pack<Aos...>::template lends_ok<Aos>() && ...),
                   "a Lease::dispatch borrower must precede its lender in "
                   "the Tenuto pack (see kernel/borrowed.hpp)");
@@ -180,7 +183,8 @@ public:
 private:
     template <typename Ao>
     static bool try_one() {
-        return serve_one<Ao>();
+        constexpr uint8_t index = static_cast<uint8_t>(Pack<Aos...>::template index<Ao>());
+        return serve_one<Ao, P>(index);
     }
 };
 

@@ -128,6 +128,19 @@ inline bool interrupts_enabled() {
     return (csr_read<RVCSR_MSTATUS_OFFSET>() & mstatus_mie) != 0u;
 }
 
+/// Whether the caller runs inside a trap handler, read as mstatus.MIE
+/// clear: a trap's entry saves MIE into MPIE and clears it (the RISC-V
+/// privileged architecture, 3.1.6.1), the crt's dispatch never sets it
+/// again before the mret (the header, "kept structurally"), and the
+/// mret restores it. So MIE is clear in every handler and set in thread
+/// context - except inside an InterruptGuard, which clears it too: a
+/// service that asks this from a guarded section is told it runs in a
+/// handler, which is why no service asks under a guard. The platform's
+/// in_handler() (kernel/platform.hpp's optional member) is this read.
+inline bool in_handler() {
+    return (csr_read<RVCSR_MSTATUS_OFFSET>() & mstatus_mie) == 0u;
+}
+
 /// Unmask interrupts globally. What an app calls once, at the end of
 /// main()'s setup, before handing control to the kernel.
 inline void enable_interrupts() { __asm__ volatile("csrsi mstatus, 8" ::: "memory"); }

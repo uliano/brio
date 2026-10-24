@@ -128,11 +128,36 @@ struct Sleeper : brio::Fsm<Sleeper, Hit> {
 
 using TK = brio::Tenuto<TicklessPlatform, Sleeper>;
 
+// An object that records which index the kernel says is being
+// dispatched, and the platform's answer about a handler, at each Hit.
+struct Who : brio::Fsm<Who, Hit> {
+    static inline brio::EventQueue<Event, 4, HostPlatform> queue;
+    static inline std::vector<uint8_t> seen;
+    static inline std::vector<bool> handler;
+    static void init() { start(&only); }
+    static Status only(const Event& e) {
+        return brio::match(e,
+            [](brio::Entry) { return handled(); },
+            [](Hit) {
+                seen.push_back(brio::dispatching<HostPlatform>);
+                handler.push_back(HostPlatform::in_handler());
+                return handled();
+            },
+            [](auto) { return unhandled(); }
+        );
+    }
+};
+
+using KW = brio::Tenuto<HostPlatform, High, Who>;   // Who is index 1
+
 void reset() {
     trace.clear();
     HostPlatform::reset();
     while (High::queue.pop().has_value()) {}
     while (Low::queue.pop().has_value()) {}
+    while (Who::queue.pop().has_value()) {}
+    Who::seen.clear();
+    Who::handler.clear();
 }
 
 } // namespace
@@ -444,4 +469,30 @@ TEST_CASE("posts during a dispatch never touch the event being served") {
     CHECK(Burst::intact);
     CHECK(Burst::queue.overflows() == 1);   // depth waited, the one past it counted
     CHECK(trace == Trace{"bu:1", "bu:100", "bu:101", "bu:102"});
+}
+
+TEST_CASE("dispatching<P> is the object's list index during its dispatch and no_dispatch outside") {
+    reset();
+    KW::init_all();
+    CHECK(brio::dispatching<HostPlatform> == brio::no_dispatch);
+    brio::post<Who>(Hit{1});
+    brio::post<High>(Hit{2});
+    CHECK(KW::step());   // High first: index 0, traced
+    CHECK(brio::dispatching<HostPlatform> == brio::no_dispatch);
+    CHECK(KW::step());   // then Who: index 1
+    CHECK(Who::seen == std::vector<uint8_t>{1});
+    CHECK(Who::handler == std::vector<bool>{false});
+    CHECK(brio::dispatching<HostPlatform> == brio::no_dispatch);
+    // Pumped by hand with the plain serve_one(), the index is left alone:
+    // a service pumped from inside a dispatch runs as the dispatcher.
+    brio::post<Who>(Hit{3});
+    brio::dispatching<HostPlatform> = 7;
+    CHECK(brio::serve_one<Who>());
+    CHECK(Who::seen == std::vector<uint8_t>{1, 7});
+    brio::dispatching<HostPlatform> = brio::no_dispatch;
+    // The host platform answers in_handler() from its in_isr flag.
+    HostPlatform::in_isr = true;
+    CHECK(HostPlatform::in_handler());
+    HostPlatform::in_isr = false;
+    CHECK_FALSE(HostPlatform::in_handler());
 }

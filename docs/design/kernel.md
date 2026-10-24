@@ -865,7 +865,15 @@ The loop (`run()`), one turn:
    dispatch it in its slot, to completion, and release the slot unless
    the object held it (`serve_one<Ao>()` in
    `kernel/active_object.hpp`, the same step a program that pumps an
-   object by hand calls).
+   object by hand calls). For the dispatch's duration the kernel keeps
+   the object's list index in `dispatching<P>` (`no_dispatch`, 255,
+   outside every dispatch), so a service called from inside a dispatch
+   knows which object called it without the object naming itself; the
+   same step under Rubato sets the inner object's index for a nested
+   dispatch and puts the outer one's back after it. An interrupt
+   handler reads the index of the dispatch it interrupted, which is why
+   a service that handlers may call asks the platform's `in_handler()`
+   first ([the platform](#11-platform-what-the-machine-provides-kernelplatformhpp)).
 3. If `step()` found nothing, `idle_if_empty()`: re-check every queue
    with interrupts masked and, if still empty, call `P::idle()`, which
    re-enables interrupts and sleeps in a way that leaves no window for
@@ -1414,6 +1422,19 @@ purpose: it is the one kernel data type a platform must host, so the
 concept has to name it, and `panic.hpp`, which owns the semantics, sits
 above the concept in the include graph.
 
+One optional member is asked for by a service that interrupt handlers
+may call: `in_handler()`, whether the caller runs inside a handler.
+The kernel keeps which object is being dispatched (`dispatching<P>`,
+[the scheduler](#8-scheduler-kerneltenutohpp)) and a handler sees the
+index of the dispatch it interrupted, so this is how such a service
+tells a handler's call from that object's. The `HandlerAware` concept
+detects it; a platform without it is refused by such a service and by
+nothing else. How the core knows is the platform's: the Cortex-M reads
+the exception number register, zero in thread mode; Hazard3 reads
+`mstatus.MIE` clear, which a trap's entry clears and the crt never sets
+again before the return, so that inside a critical section the answer
+is "a handler" too, and no service asks under a guard.
+
 Two more optional members belong to a platform that is one core of
 several, one platform type per core, since the kernel's statics are
 keyed by `P` and the type is therefore the core's identity:
@@ -1568,7 +1589,7 @@ balancing. The host proves the protocol deterministically
 
 | Entity | Header | Role |
 |--------|--------|------|
-| `ActiveObject` (concept), `queue_on<Ao, P>`, `serve_one<Ao>` | `active_object.hpp` | what Tenuto requires of an active object; whether an object's queue is P's (its core); one event served in its slot, released unless held |
+| `ActiveObject` (concept), `queue_on<Ao, P>`, `serve_one<Ao>`, `serve_one<Ao, P>(index)`, `dispatching<P>`, `no_dispatch` | `active_object.hpp` | what Tenuto requires of an active object; whether an object's queue is P's (its core); one event served in its slot, released unless held; the kernels' step, which keeps the index of the object being dispatched |
 | `Platform`, `Preemptive` (concepts), `PanicRecord` | `platform.hpp` | what the kernel requires of the machine (plus the optional `idle_until`, `on_own_core`, `Doorbell`, the host's `interleave_point`, and the three members of a preemptive platform: `preemptive`, `ceiling`, `pend_schedule`) |
 | `EventQueue<E, depth, P>`, `CoreAware`, `QueuePriority` | `event_queue.hpp` | the per-object queue (many producers, one consumer): the event built in its slot, `take()` handing over the slot's number, `at()` the event, `hold()`/`release()` keeping and returning a slot in any order, `depth` the events waiting or held at once; the overflow counter, the mispost check of a core-aware platform, the owner's list index on a preemptive one |
 | `Overloaded`, `match`, `Entry`, `Exit`, `Fsm<Derived, Alts...>` | `fsm.hpp` | variant dispatch helpers, the state machine base, `Event`, `Status` |

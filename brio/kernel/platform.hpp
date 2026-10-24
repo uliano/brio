@@ -77,6 +77,18 @@
  *    (kernel/time.hpp's "at least"). How the wake is placed is the
  *    platform's business; the kernel only relies on the contract.
  *
+ * Optional member a service that may be called from an interrupt handler
+ * asks for (the HandlerAware concept below; a platform without it is
+ * refused by such a service and by nothing else):
+ *  - in_handler() -> bool: whether the caller runs inside an interrupt
+ *    handler. The kernel keeps which active object is being dispatched
+ *    (dispatching<P>, kernel/active_object.hpp), and a handler sees the
+ *    index of the dispatch it interrupted, so this is how a service
+ *    tells a handler's call from that object's. How the core knows is
+ *    the platform's business (an exception number register on the
+ *    Cortex-M, where IPSR is zero in thread mode and the exception's
+ *    number in a handler), and each platform header says which.
+ *
  * Optional members of a platform that is ONE CORE OF SEVERAL (a chip
  * running a kernel per core, one platform type per core - the kernel
  * statics are keyed by P, so the type IS the core), detected the same
@@ -151,6 +163,14 @@ concept Platform =
         requires P::ticks_per_second > 0u;
         requires P::atomic_width > 0u;
     };
+
+/// Whether a platform can tell a call from an interrupt handler apart
+/// from one made by the object being dispatched (the optional member
+/// above).
+template <typename P>
+concept HandlerAware = requires {
+    { P::in_handler() } -> std::same_as<bool>;
+};
 
 /// Whether a platform is preemptive: it says so and carries the ceiling
 /// and the scheduling request (the optional members above). A platform

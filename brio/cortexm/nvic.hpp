@@ -90,6 +90,13 @@ inline void disable_interrupts() { __disable_irq(); }
 /// PRIMASK readback: true when interrupts are not masked.
 inline bool interrupts_enabled() { return __get_PRIMASK() == 0u; }
 
+/// Whether the caller runs inside an exception handler: IPSR holds the
+/// exception number being served and zero in thread mode (ARMv6-M ARM
+/// B1.4.2, ARMv7-M ARM B1.4.2, ARMv8-M ARM B3.7), the same on every core
+/// of the stratum. The platform's in_handler() (kernel/platform.hpp's
+/// optional member) is this read.
+inline bool in_handler() { return __get_IPSR() != 0u; }
+
 /**
  * The NVIC as a monostate resource. `irq` is always the device header's
  * IRQn_Type value; the core exceptions (negative values, SysTick_IRQn
