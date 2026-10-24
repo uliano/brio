@@ -21,7 +21,9 @@
  *    slot with interrupts masked for the few instructions of the copy,
  *    and never waits: on a full queue the event is dropped and a
  *    saturating counter, overflows(), is incremented. A full queue is a
- *    sizing mistake, and the counter names the queue;
+ *    sizing mistake, and the counter names the queue. push_keeping() is
+ *    the same copy for a producer that wants the answer and leaves some
+ *    slots to others;
  *  - take(), at(), hold(), take_hold(), release(), pop(): the consumer's,
  *    which is the kernel loop dispatching this object (and the object
  *    itself, inside a dispatch of its own, for hold() and for the
@@ -296,6 +298,43 @@ public:
         }
         build(slot(static_cast<uint8_t>(ring_[n] ^ n)), ev);   // position a lives at n
         store_shared(alloc_, n);              // the advance IS the publish
+    }
+
+    /// push() that answers, and that keeps `spare` slots free for others:
+    /// the event is built and true returned only when more than `spare`
+    /// slots are free, otherwise it is dropped, counted as push() counts
+    /// it, and false returned. Any context, never waits, the same masked
+    /// window as push(). A consumer that must always find room for one
+    /// kind of event - a wake-up its producers' events must not crowd
+    /// out - has those producers push keeping one slot (util/line_writer.hpp
+    /// keeps one for the transmit edge).
+    template <typename Ev>
+        requires std::constructible_from<E, const Ev&>
+    bool push_keeping(const Ev& ev, uint8_t spare) {
+        if constexpr (CoreAware<Plat>) {
+            if (!Plat::on_own_core()) {
+                if (this->misposts_ != UINT16_MAX) {
+                    ++this->misposts_;
+                }
+                return false;
+            }
+        }
+        typename Plat::CriticalSection cs;
+        const uint8_t a = alloc_;
+        const uint8_t fence = load_shared(fence_);
+        // The free run is [a, the position before the fence): a slot per
+        // position, the spare position excepted.
+        const uint8_t free = static_cast<uint8_t>(fence > a ? fence - a - 1u : fence + positions - a - 1u);
+        if (free <= spare) {
+            if (overflows_ != UINT16_MAX) {
+                ++overflows_;
+            }
+            return false;
+        }
+        const uint8_t n = next(a);
+        build(slot(static_cast<uint8_t>(ring_[n] ^ n)), ev);
+        store_shared(alloc_, n);
+        return true;
     }
 
     /// The oldest waiting event's slot number, or `none` when nothing

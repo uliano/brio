@@ -5,13 +5,15 @@
 //
 // A test_<target>_<subject> suite in the bench grammar (util/testbench.hpp)
 // that runs INSIDE the kernel it tests: the program is a Rubato pack of
-// five objects, from the highest priority down - Top, High, Mid, Low and
-// Console - and the Console, the lowest, owns the UART and runs the
-// letters in its own dispatch. Its print is the only writer of the port;
-// the other objects write what they saw into a trace in memory, and the
-// Console judges and prints it after. A post from a letter is therefore a
-// post from the Console's dispatch: to an object above it, the kernel's
-// road 2.
+// six objects, from the highest priority down - Top, High, Mid, Low,
+// Console and Log. The Console runs the letters in its own dispatch; Log,
+// the lowest, is the console's LineWriter (util/line_writer.hpp), the one
+// writer of the UART, and the Console's dispatch is the context that
+// serves it inline, so a letter's lines leave as it prints them. The
+// other objects write what they saw into a trace in memory, and the
+// Console judges and prints it after - letter k excepted, whose High
+// prints a line of its own. A post from a letter is therefore a post from
+// the Console's dispatch: to an object above it, the kernel's road 2.
 //
 // NOTHING TO WIRE, NOTHING LIT. The console is the Nucleo-F446RE's
 // ST-LINK virtual COM port (USART2 on PA2/PA3); the suite configures no
@@ -89,6 +91,20 @@
 //   i  DARK: every object but the Console idle, no time event armed,
 //      TIM9's line quiet, the LED's pad not an output, the ceiling the
 //      Console's own.
+//   j  THE WRITER'S COST: a verdict-shaped line (60 bytes) printed twice
+//      from Low's dispatch - the pack and the post, the first print after
+//      the letter's other work and the second right behind it - and the
+//      writer's two dispatches that format them into the empty ring, then
+//      one more with interrupts masked, against the same line printed
+//      straight into the transport and the transport's run alone (2 and 50
+//      bytes), min and max over 16 runs; the bound against the bytes
+//      formatted over every line since boot, and the transmit edges waited
+//      for.
+//   k  TWO LINES INTERLEAVED: the Console composes a line in five pieces
+//      with spins between them while TIM9's interrupt starts High, which
+//      prints a whole line of its own; ten times. Both lines carry a
+//      "#<" mark, and bin/brio's judge reads every marked line whole and
+//      twenty of them.
 //   h  THE STACK, the last letter: main() painted the free stack below
 //      its own frame down to the end of the image's RAM sections; the
 //      high-water mark against the deepest stack pointer the dispatches
@@ -115,6 +131,7 @@
 #include "stm32f4/ticker.hpp"
 #include "stm32f4/tim.hpp"
 #include "stm32f4/usart.hpp"
+#include "util/line_writer.hpp"
 #include "util/print.hpp"
 #include "util/testbench.hpp"
 
@@ -136,9 +153,19 @@ using Edge = Tim<9>;
 
 constexpr UartPins console_pins{.tx = {'A', 2, PinFunction::af7}, .rx = {'A', 3, PinFunction::af7}};
 using Serial = Uart<2, console_pins>;
-constexpr Serial serial;
 
-TestBench<Serial> bench;
+/// The Console's index in the pack (the pack is below).
+constexpr uint8_t console_index = 4;
+
+/// The console's writer, the last object of the pack and the one writer
+/// of the UART: 40 messages of 64 bytes (the banner and the menu, posted
+/// before the kernel runs, wait in it whole), the Console's dispatch the
+/// context that serves it inline - the letters run there - and its bytes
+/// and bounds counted for letter j.
+using Log = LineWriter<Serial, P, 40, 64,
+                       LineWriterOptions{.max_sources = 8, .inline_from = console_index, .measured = true}>;
+
+TestBench<Log> bench;
 
 // =============================================================================
 // The trace, the stamps, the stack samples
@@ -171,12 +198,21 @@ void trace_clear() {
     trace_len = 0;
 }
 
+/// The trace on one line, four entries a piece: a 48-entry trace is a
+/// line of fourteen pieces, well inside the writer's free slots.
 void print_trace() {
-    print(serial, "  trace:");
-    for (uint8_t i = 0; i < trace_len; ++i) {
-        print(serial, " ", trace[i].who, trace[i].what, trace[i].ceiling);
+    print(Log{}, "  trace:");
+    const uint8_t n = trace_len;
+    uint8_t i = 0;
+    for (; i + 4u <= n; i = static_cast<uint8_t>(i + 4u)) {
+        print(Log{}, " ", trace[i].who, trace[i].what, trace[i].ceiling, " ", trace[i + 1].who,
+              trace[i + 1].what, trace[i + 1].ceiling, " ", trace[i + 2].who, trace[i + 2].what,
+              trace[i + 2].ceiling, " ", trace[i + 3].who, trace[i + 3].what, trace[i + 3].ceiling);
     }
-    print(serial, crlf);
+    for (; i < n; ++i) {
+        print(Log{}, " ", trace[i].who, trace[i].what, trace[i].ceiling);
+    }
+    print(Log{}, crlf);
 }
 
 /// The trace equals `want`, written as "Ls3 Lm3 Hs1 ..." (who, what,
@@ -296,8 +332,7 @@ struct Console {
     }
 };
 
-using K = Rubato<P, Top, High, Mid, Low, Console>;
-constexpr uint8_t console_index = 4;
+using K = Rubato<P, Top, High, Mid, Low, Console, Log>;
 
 /// The ceiling the UART's receive interrupt read when a byte arrived.
 volatile uint8_t rx_ceiling = 0;
@@ -365,7 +400,7 @@ uint32_t ruler_cost() {
 // a - the ceiling, road 1 at depth 1
 // =============================================================================
 void ta_ceiling() {
-    print(serial, "  the UART's receive interrupt read the ceiling ", rx_ceiling,
+    print(Log{}, "  the UART's receive interrupt read the ceiling ", rx_ceiling,
           " when this letter's key arrived", crlf);
     bench.verdict("the base's ceiling is 255 (read by the receive interrupt as the key arrived)",
                   rx_ceiling == 255u);
@@ -398,7 +433,7 @@ void ta_ceiling() {
         once = once && High::runs == h0 + 1u;
     }
     reset_scenario();
-    print(serial, "  ", alike, " of 10 runs traced ", want, crlf);
+    print(Log{}, "  ", alike, " of 10 runs traced ", want, crlf);
     if constexpr (scheduler_in_thread_mode) {
         bench.verdict("High's dispatch starts inside Low's, before Low resumes, every ceiling its "
                       "own index (10 runs)",
@@ -446,7 +481,7 @@ void tb_road2() {
         back = back && P::ceiling == console_index;
     }
     reset_scenario();
-    print(serial, "  ", alike, " of 10 runs traced ", want, crlf);
+    print(Log{}, "  ", alike, " of 10 runs traced ", want, crlf);
     bench.verdict("High inside Mid inside Low, each served inside the post that asked for it, "
                   "every ceiling its own index (10 runs)",
                   alike == 10u);
@@ -490,17 +525,29 @@ constexpr uint32_t latency_events = 100;
 ///                                                               ---
 ///                                                               148
 /// at zero wait states, the code warm in the ART's cache after the
-/// uncounted first event; measured, 145 on every event no other interrupt
-/// touches. On top of it, at most one SysTick handler landing in the path
-/// - its entry (12), its fifteen instructions (20), its return (12) and,
-/// when it lands on an exception return, that return abandoned and
-/// started again (12): 58, measured +45 and +58 - and two of the ART's
-/// line misses on the way (5 wait states and the refill, 12): 220. The
-/// letter reads the kernel tick around each event, and every event over
-/// 160 had a tick in it; under `z` one run in about two and a half sees
-/// one such event (14 of 32 observed); the letter run alone saw none in
-/// 8 runs.
-constexpr uint32_t latency_bound = 220u;
+/// uncounted first event. Measured, 159 on every event no other interrupt
+/// touches. The listing's path is one cycle longer than the count, 149
+/// (the writer, the pack's sixth object, widens the scheduler's frame: a
+/// spill and two compares more, a move less), and the ten measured over
+/// it are the flash's: the ART's line misses (two cost 12) on a scheduler
+/// the writer's visit made longer - with five objects the same path
+/// measured 145, under its count. The quiet path is that measured 159;
+/// an event over latency_quiet below is one an interrupt landed in. On
+/// top of it, at
+/// most one SysTick handler landing in the path - its entry (12), its
+/// fifteen instructions (20), its return (12) and, when it lands on an
+/// exception return, that return abandoned and started again (12): 58,
+/// measured +45 and +58 - and two more of the ART's line misses (12):
+/// 159 + 58 + 12 = 229, the bound 230. The letter reads the kernel tick
+/// around each event, and every event over latency_quiet had a tick in
+/// it: under `z`, four runs in ten saw one such event (199 and 213
+/// cycles), the other six none.
+constexpr uint32_t latency_bound = 230u;
+
+/// The quiet path's measured 159 and 16 cycles of margin: well below the
+/// least a tick adds (45, so 204), well above the path's own spread (none
+/// observed: every quiet event is the same count).
+constexpr uint32_t latency_quiet = 175u;
 
 void tc_latency() {
     reset_scenario();
@@ -510,7 +557,7 @@ void tc_latency() {
         // 100; each waits at most 1 ms for High's first statement.
         console_drain();
         uint32_t missed = 0;
-        // An event slower than the count plus the misses (160) is one a
+        // An event slower than the quiet path (latency_quiet) is one a
         // tick landed in: the kernel tick read around each says so.
         uint32_t slow = 0;
         uint32_t slow_ticked = 0;
@@ -527,7 +574,7 @@ void tc_latency() {
             if (i > 0u) {
                 const uint32_t d = High::entered - edge_last;
                 latency[i - 1u] = d;
-                if (d > 160u) {
+                if (d > latency_quiet) {
                     ++slow;
                     if (ticked) {
                         ++slow_ticked;
@@ -539,12 +586,13 @@ void tc_latency() {
         const uint32_t lo = latency[0];
         const uint32_t med = latency[latency_events / 2u];
         const uint32_t hi = latency[latency_events - 1u];
-        print(serial, "  road 1 over the Console's wait: the interrupt's last statement to High's "
-              "first, min ", lo, " median ", med, " max ", hi, " cycles over ", latency_events,
-              " events (", missed, " missed); the three slowest ", latency[latency_events - 3u],
-              " ", latency[latency_events - 2u], " ", hi, crlf);
-        print(serial, "  events over 160 cycles: ", slow, ", a kernel tick inside ", slow_ticked,
-              " of them", crlf);
+        print(Log{}, "  road 1 over the Console's wait: the interrupt's last statement to High's "
+              "first, min ", lo, " median ", med, " max ", hi);
+        print(Log{}, " cycles over ", latency_events, " events (", missed,
+              " missed); the three slowest ", latency[latency_events - 3u]);
+        print(Log{}, " ", latency[latency_events - 2u], " ", hi, crlf);
+        print(Log{}, "  events over ", latency_quiet, " cycles: ", slow, ", a kernel tick inside ",
+              slow_ticked, " of them", crlf);
         bench.verdict("every interrupt's post started High within 1 ms", missed == 0u);
         bench.verdict("every event over the path's own count had a tick land in it",
                       slow == slow_ticked);
@@ -575,7 +623,7 @@ void tc_latency() {
         // deferred High starts at least 180000 - 400 - the handler's own
         // cycles after the handler's last statement: 179000 is that, with
         // the handler's 600 cycles to spare.
-        print(serial, "  handler mode: ", deferred, " of 10 interrupts left High waiting for "
+        print(Log{}, "  handler mode: ", deferred, " of 10 interrupts left High waiting for "
               "1 ms; the least deferral ", least, " cycles", crlf);
         bench.verdict("handler mode: an interrupt's post over the Console's dispatch is served "
                       "only when that dispatch posts again or returns (10 of 10 deferred past "
@@ -631,10 +679,10 @@ void td_scan() {
         }
     }
     reset_scenario();
-    print(serial, "  the ruler's two reads ", ruler, " cycles", crlf);
-    print(serial, "  activate() with nothing ready below the Console: ", scan, "..", scan_hi,
+    print(Log{}, "  the ruler's two reads ", ruler, " cycles", crlf);
+    print(Log{}, "  activate() with nothing ready below the Console: ", scan, "..", scan_hi,
           " cycles (four empty queues, the fifth at the ceiling)", crlf);
-    print(serial, "  from Mid: a post to Low (asks nothing) ", quiet,
+    print(Log{}, "  from Mid: a post to Low (asks nothing) ", quiet,
           " cycles; a post to High (road 2, High's dispatch inside) ", road2,
           " cycles; the scheduling's share ", road2 > quiet ? road2 - quiet : 0u, crlf);
     // The scan, as the release listing has it: activate()'s entry saves
@@ -714,7 +762,7 @@ void te_depth2() {
                 print_trace();
             }
         }
-        print(serial, "  High started by road ", road, ": ", alike, " of 10 runs traced ", want,
+        print(Log{}, "  High started by road ", road, ": ", alike, " of 10 runs traced ", want,
               "; Top's first statement ", least, "..", most,
               " cycles after the interrupt's last", crlf);
         if constexpr (scheduler_in_thread_mode) {
@@ -872,10 +920,10 @@ void tf_timers() {
     TE::clear_all();
     reset_scenario();
 
-    print(serial, "  part 1: fires High ", fired[21], ", Mid ", fired[31], ", Low ", fired[41],
-          "; part 2: High landed in Low's turn ", high_landed, " of 200; fires a ", fired[51],
-          ", b ", fired[52], ", c ", fired[53], ", d ", fired[54], "; one arm() ", arm_cycles,
-          " cycles", crlf);
+    print(Log{}, "  part 1: fires High ", fired[21], ", Mid ", fired[31], ", Low ", fired[41]);
+    print(Log{}, "; part 2: High landed in Low's turn ", high_landed, " of 200; fires a ", fired[51],
+          ", b ", fired[52]);
+    print(Log{}, ", c ", fired[53], ", d ", fired[54], "; one arm() ", arm_cycles, " cycles", crlf);
     bench.verdict("three timers matured in one turn: nothing dispatched during the walk "
                   "(the ceiling held at 0), every one queued",
                   walk_quiet);
@@ -971,7 +1019,7 @@ void tg_fpu() {
             edge_exact = std::bit_cast<uint32_t>(static_cast<float>(edge_acc)) ==
                          std::bit_cast<uint32_t>(ref_edge);
         }
-        print(serial, "  run ", run, run == 1 ? " (the handler's float too)" : "", ": Low ",
+        print(Log{}, "  run ", run, run == 1 ? " (the handler's float too)" : "", ": Low ",
               hex(std::bit_cast<uint32_t>(static_cast<float>(low_sum))), " (",
               hex(std::bit_cast<uint32_t>(ref_low)), "), High ",
               hex(std::bit_cast<uint32_t>(static_cast<float>(high_sum))), " (",
@@ -1002,6 +1050,199 @@ void ti_dark() {
 }
 
 // =============================================================================
+// j - the writer's cost
+// =============================================================================
+/// A verdict-shaped line, the bench grammar's shape: "  cost  <50 characters>"
+/// and CRLF, 60 bytes on the wire, 58 of them formatted (the closing is
+/// the writer's and not counted).
+const char* const cost_name = "the ruler reads delay_us(999) at least hz x 999 us";
+volatile uint32_t post_cycles[2] = {0, 0};
+volatile uint32_t cost_ruler = 0;
+
+/// The least of a sample, and its most.
+struct Spread {
+    uint32_t least = 0xFFFF'FFFFu;
+    uint32_t most = 0;
+    void add(uint32_t v) {
+        least = v < least ? v : least;
+        most = v > most ? v : most;
+    }
+};
+
+void tj_writer() {
+    reset_scenario();
+    tracing = false;
+    cost_ruler = ruler_cost();
+    // The client's side: Low prints the line twice from its own dispatch,
+    // which is not the writer's serving context, so each print packs and
+    // posts and nothing more - the first after the letter's own work, the
+    // second right behind it.
+    Low::action = [](uint8_t) {
+        for (uint32_t k = 0; k < 2u; ++k) {
+            const uint32_t t0 = Ruler::now();
+            (void)print(Log{}, "  ", "cost", "  ", cost_name, crlf);
+            post_cycles[k] = Ruler::now() - t0 - cost_ruler;
+        }
+    };
+    Spread post_cold;
+    Spread post_warm;
+    Spread write_cold;
+    Spread write_warm;
+    Spread write_masked;
+    Spread direct_masked;
+    Spread run_two;
+    Spread run_fifty;
+    bool queued_all = true;
+    bool bytes_all = true;
+    const uint16_t lost0 = Log::lost();
+    for (int i = 0; i < 16; ++i) {
+        // The writer's side: the ring empty, the writer idle (the edges'
+        // TxActivity served), then its two dispatches that write the two
+        // lines, the second warm behind the first.
+        console_drain();
+        while (serve_one<Log>()) {
+        }
+        uint32_t b0 = Log::bytes_written();
+        post<Low>(Hit{0});
+        queued_all = queued_all && Log::queue.size() == 2u;
+        uint32_t t0 = Ruler::now();
+        (void)serve_one<Log>();
+        write_cold.add(Ruler::now() - t0 - cost_ruler);
+        bytes_all = bytes_all && Log::bytes_written() - b0 == 58u;
+        b0 = Log::bytes_written();
+        t0 = Ruler::now();
+        (void)serve_one<Log>();
+        write_warm.add(Ruler::now() - t0 - cost_ruler);
+        bytes_all = bytes_all && Log::bytes_written() - b0 == 58u;
+        post_cold.add(post_cycles[0]);
+        post_warm.add(post_cycles[1]);
+        // The same warm dispatch with interrupts masked around it, for the
+        // measurement alone: the core's own cycles, without the UART's
+        // handler, which the first byte of each run starts on an idle
+        // transmitter and which then runs inside the window above.
+        console_drain();
+        while (serve_one<Log>()) {
+        }
+        post<Low>(Hit{0});
+        (void)serve_one<Log>();
+        {
+            InterruptGuard g;
+            t0 = Ruler::now();
+            (void)serve_one<Log>();
+            write_masked.add(Ruler::now() - t0 - cost_ruler);
+        }
+        // The oracle: the same line printed straight into the transport,
+        // as every line was before the writer, warm and masked alike - a
+        // write past the writer, for the measurement alone, with the
+        // writer idle and the ring empty. A debug build checks the
+        // writer's claim on every write, so there these writes say they
+        // are the writer's (a release build compiles nothing of it).
+        console_drain();
+        while (serve_one<Log>()) {
+        }
+        if constexpr (debug_checks) {
+            WriterClaim<Serial>::writing = true;
+        }
+        for (uint32_t k = 0; k < 2u; ++k) {
+            InterruptGuard g;
+            t0 = Ruler::now();
+            print(Serial{}, "  ", "dirc", "  ", cost_name, crlf);
+            const uint32_t d = Ruler::now() - t0 - cost_ruler;
+            if (k == 1u) {
+                direct_masked.add(d);
+            }
+        }
+        // And the transport's run alone, warm and masked: a run of two
+        // bytes and a run of fifty, through the string_view verb the
+        // writer formats texts with.
+        console_drain();
+        for (uint32_t k = 0; k < 2u; ++k) {
+            InterruptGuard g;
+            t0 = Ruler::now();
+            print(Serial{}, std::string_view("  ", 2));
+            const uint32_t two = Ruler::now() - t0 - cost_ruler;
+            t0 = Ruler::now();
+            print(Serial{}, std::string_view(cost_name, 50));
+            const uint32_t fifty = Ruler::now() - t0 - cost_ruler;
+            if (k == 1u) {
+                run_two.add(two);
+                run_fifty.add(fifty);
+            }
+        }
+        print(Serial{}, crlf);
+        if constexpr (debug_checks) {
+            WriterClaim<Serial>::writing = false;
+        }
+    }
+    reset_scenario();
+    const uint32_t lines = Log::lines_written();
+    const uint32_t bytes = Log::bytes_written();
+    const uint32_t bound = Log::bound_written();
+    const uint32_t x100 = bytes == 0u ? 0u : static_cast<uint32_t>(static_cast<uint64_t>(bound) * 100u / bytes);
+    print(Log{}, "  a verdict-shaped line, 60 bytes, over 16 runs: the print from Low's dispatch ",
+          post_cold.least, "..", post_cold.most, " cycles,");
+    print(Log{}, " warm ", post_warm.least, "..", post_warm.most, crlf);
+    print(Log{}, "  the writer's dispatch writing it into the empty ring ", write_cold.least, "..",
+          write_cold.most, " cycles,");
+    print(Log{}, " warm ", write_warm.least, "..", write_warm.most, ", warm and masked ",
+          write_masked.least, "..", write_masked.most);
+    print(Log{}, "; print() straight into the transport, warm and masked ", direct_masked.least,
+          "..", direct_masked.most, crlf);
+    print(Log{}, "  the transport's run, warm and masked: 2 bytes ", run_two.least, "..",
+          run_two.most, ", 50 bytes ", run_fifty.least, "..", run_fifty.most, " cycles", crlf);
+    print(Log{}, "  since boot: ", lines, " lines, ", bytes, " bytes formatted under a bound of ",
+          bound);
+    print(Log{}, ", bound/written ", x100 / 100u, '.', static_cast<char>('0' + x100 / 10u % 10u),
+          static_cast<char>('0' + x100 % 10u), crlf);
+    print(Log{}, "  edges waited ", Log::waits(), " over those lines at 115200 baud; lost ",
+          Log::lost(), ", torn ", Log::torn_lines(), crlf);
+    bench.verdict("every print from Low's dispatch was queued, one message each", queued_all);
+    bench.verdict("each dispatch wrote its line's 58 formatted bytes", bytes_all);
+    bench.verdict("nothing lost or torn while measuring", Log::lost() == lost0);
+    bench.verdict("the bound over the suite's lines holds what they wrote", bound >= bytes);
+}
+
+// =============================================================================
+// k - two lines interleaved under preemption
+// =============================================================================
+volatile uint32_t high_lines = 0;
+
+void tk_interleave() {
+    reset_scenario();
+    tracing = false;
+    high_lines = 0;
+    High::action = [](uint8_t) {
+        (void)print(Log{}, "#<H ", high_lines, ": a whole line from High's dispatch, started by TIM9 :H>#",
+                    crlf);
+        high_lines = high_lines + 1u;
+    };
+    const uint16_t lost0 = Log::lost();
+    const uint16_t torn0 = Log::torn_lines();
+    uint32_t inside = 0;
+    for (uint32_t run = 0; run < 10u; ++run) {
+        const uint32_t h0 = High::runs;
+        print(Log{}, "#<C ", run, ": the Console composes this line in pieces");
+        // TIM9 in 111 us, inside the four 56 us spins between the pieces:
+        // High's dispatch preempts the Console's and prints a whole line.
+        edge_to = 1;
+        edge_in(20000u);
+        for (uint32_t piece = 0; piece < 4u; ++piece) {
+            spin(10000u);
+            print(Log{}, ", piece ", piece);
+        }
+        const bool landed = High::runs != h0;
+        print(Log{}, " :C>#", crlf);
+        inside += landed ? 1u : 0u;
+    }
+    reset_scenario();
+    // What bin/brio's judge counts: every line marked "#<" whole, twenty.
+    print(Log{}, "#count 20", crlf);
+    bench.verdict("High's dispatch landed inside every one of the Console's lines (10 of 10)",
+                  inside == 10u && high_lines == 10u);
+    bench.verdict("no line lost or torn", Log::lost() == lost0 && Log::torn_lines() == torn0);
+}
+
+// =============================================================================
 // h - the stack
 // =============================================================================
 constexpr uint32_t paint = 0xC5AC'CE55u;
@@ -1019,7 +1260,7 @@ void th_stack() {
     const uint32_t used = paint_top - lowest;
     const uint32_t deepest_dispatch = paint_top - sp_low_dispatch;
     const uint32_t deepest_isr = paint_top - sp_low_isr;
-    print(serial, "  painted ", paint_top - paint_bottom, " bytes below main's frame; used ", used,
+    print(Log{}, "  painted ", paint_top - paint_bottom, " bytes below main's frame; used ", used,
           " bytes; the deepest stack pointer sampled: a dispatch at ", deepest_dispatch,
           ", the interrupt at ", deepest_isr, crlf);
     // A sample is taken inside activate(), whose twelve saved registers
@@ -1048,9 +1289,9 @@ bool tick_ok = false;
 bool ruler_ok = false;
 
 void console_banner() {
-    print(serial, crlf, "boot: clk=", clock_ok ? "PLL" : "FAILED", " tick=",
+    print(Log{}, crlf, "boot: clk=", clock_ok ? "PLL" : "FAILED", " tick=",
           tick_ok ? "SysTick" : "FAILED", " ruler=", ruler_ok ? "DWT" : "FAILED", crlf);
-    print(serial, "test_stm32f4_rubato - the preemptive kernel on the STM32F4, the scheduler ",
+    print(Log{}, "test_stm32f4_rubato - the preemptive kernel on the STM32F4, the scheduler ",
           scheduler_in_thread_mode ? "in thread mode" : "inside PendSV (handler mode)", crlf);
     bench.menu();
 }
@@ -1061,11 +1302,11 @@ void console_turn() {
         if (c == '\r' || c == '\n') {
             continue;
         }
-        print(serial, static_cast<char>(c), crlf);
+        print(Log{}, static_cast<char>(c), crlf);
         if (c == '?') {
             console_banner();
         } else if (!bench.handle(static_cast<char>(c))) {
-            print(serial, "unknown letter (? for the menu)", crlf);
+            print(Log{}, "unknown letter (? for the menu)", crlf);
         }
         bench.prompt();
     }
@@ -1078,6 +1319,9 @@ extern "C" void USART2_IRQHandler() {
     if (Serial::isr()) {
         rx_ceiling = P::ceiling;
         brio::post<Console>(ConsoleEvent{console_rx});
+    }
+    if (Serial::tx_drained()) {
+        brio::post<Log>(brio::TxActivity{});
     }
 }
 
@@ -1144,6 +1388,8 @@ int main() {
     bench.letter('f', "time events: the base turn's order, arm and disarm preempted", tf_timers);
     bench.letter('g', "the FPU's registers across a preemption", tg_fpu);
     bench.letter('i', "dark: every object idle, nothing lit", ti_dark);
+    bench.letter('j', "the writer's cost: a line's cycles, the bound, the waits", tj_writer);
+    bench.letter('k', "two lines interleaved under preemption, each whole", tk_interleave);
     bench.letter('h', "the stack's high-water mark", th_stack);
 
     (void)serial_ok;

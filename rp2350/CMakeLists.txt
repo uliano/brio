@@ -189,7 +189,7 @@ function(rp2350_add_app name)
 
     target_compile_options(${name} PRIVATE
         ${BRIO_COMMON_FLAGS}
-        $<$<CONFIG:Release>:-Os -g>
+        $<$<CONFIG:Release>:-Os -g -DNDEBUG>  # NDEBUG: no debug check (util/stream.hpp)
         $<$<CONFIG:Debug>:-Og -g3 -ggdb3 -fno-inline>
         $<$<COMPILE_LANGUAGE:C>:-std=gnu11>
         $<$<COMPILE_LANGUAGE:CXX>:-std=gnu++23>

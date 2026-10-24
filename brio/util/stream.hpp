@@ -2,7 +2,8 @@
  * stream.hpp
  *
  * The requirements a byte transport meets so that the services above it
- * (print.hpp, line_reader.hpp, proto/) can be written once: what a sink
+ * (print.hpp, line_reader.hpp, line_writer.hpp, proto/) can be written
+ * once: what a sink
  * that accepts bytes and a source that yields them must provide. They
  * are C++ concepts, compiler-checked sets of requirements on a type, so
  * a transport is a type and not a virtual interface: it inherits from
@@ -174,5 +175,47 @@ concept SkippingSource = SpanSource<S> && requires {
 /// A full duplex transport is both a sink and a source.
 template <typename S>
 concept ByteTransport = ByteSink<S> && ByteSource<S>;
+
+// ---- the one writer of a transport, checked in debug builds -----------------
+
+/// Whether this build compiles brio's debug checks: true unless NDEBUG is
+/// defined, the C convention. Every cross project's release configuration
+/// defines NDEBUG, so a release image carries none of them; a debug build
+/// and the host tests carry all of them. A check is written
+/// `if constexpr (debug_checks)`, so a release build compiles nothing of it.
+#if defined(NDEBUG)
+inline constexpr bool debug_checks = false;
+#else
+inline constexpr bool debug_checks = true;
+#endif
+
+/// The claim a writer of a transport takes (util/line_writer.hpp's
+/// LineWriter, whose init() claims its transport): from then on the
+/// writer is the one caller of the transport's write verbs, and in a
+/// debug build those verbs call `violated` when anything else writes -
+/// the writer raises `writing` around its own writes. `violated` is the
+/// writer's (a panic); a host test may replace it to record the call.
+/// One instance per transport type; nothing of it is touched in a
+/// release build.
+template <typename Transport>
+struct WriterClaim {
+    static inline bool claimed = false;
+    static inline bool writing = false;
+    static inline void (*violated)() = nullptr;
+};
+
+/// The check a transport's write_byte() and write_bulk() make first: in a
+/// debug build, a write to a claimed transport from anyone but its writer
+/// calls the claim's `violated`; in a release build, nothing. Any context
+/// the write verbs allow; never waits.
+template <typename Transport>
+[[gnu::always_inline]] inline void check_one_writer() {
+    if constexpr (debug_checks) {
+        if (WriterClaim<Transport>::claimed && !WriterClaim<Transport>::writing &&
+            WriterClaim<Transport>::violated != nullptr) {
+            WriterClaim<Transport>::violated();
+        }
+    }
+}
 
 } // namespace brio

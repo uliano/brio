@@ -388,3 +388,29 @@ void usart_family() {
     usart_tasks<4, UsartRoute::def>(); usart_tasks<4, UsartRoute::alt1>();
     usart_tasks<5, UsartRoute::def>(); usart_tasks<5, UsartRoute::alt1>();
 }
+
+// The console through its LineWriter (util/line_writer.hpp): the writer
+// over this family's transport, a line and a line in pieces printed to
+// it, the transmit edge's glue, the bench grammar over it and the panic
+// path's drain, compiled for every part.
+#include "avrxt/platform.hpp"
+#include "util/line_writer.hpp"
+#include "util/testbench.hpp"
+
+using ConsoleLog = LineWriter<Uart<0, UsartRoute::def>, AvrPlatform>;
+TestBench<ConsoleLog> console_log_bench;
+
+void console_log_use() {
+    ConsoleLog::init();
+    (void)print(ConsoleLog{}, "count = ", uint32_t{7}, ' ', hex(0xBEEFu), crlf);
+    (void)print(ConsoleLog{}, "a piece");
+    (void)print(ConsoleLog{}, " and its end", crlf);
+    if (Uart<0, UsartRoute::def>::tx_drained()) {
+        post<ConsoleLog>(TxActivity{});
+    }
+    console_log_bench.verdict("a verdict through the writer", true);
+    console_log_bench.prompt();
+    while (serve_one<ConsoleLog>()) {
+    }
+    ConsoleLog::drain_to_port();
+}

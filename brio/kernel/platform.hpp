@@ -89,6 +89,13 @@
  *    Cortex-M, where IPSR is zero in thread mode and the exception's
  *    number in a handler), and each platform header says which.
  *
+ * Optional member a debug check asks for (util/line_writer.hpp's check of
+ * a text's lifetime; a platform without it is checked by nothing):
+ *  - stack_span() -> std::span<const uint8_t>: the live stack, from the
+ *    stack pointer to the stack's top, so that a pointer into a frame
+ *    still running is recognized. Which platforms have it is each
+ *    platform header's statement.
+ *
  * Optional members of a platform that is ONE CORE OF SEVERAL (a chip
  * running a kernel per core, one platform type per core - the kernel
  * statics are keyed by P, so the type IS the core), detected the same

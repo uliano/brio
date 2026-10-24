@@ -27,7 +27,8 @@
  *
  * Who calls what: Stopwatch, bench_counters(), bench_sample() and
  * bench_line() from main context, in the bench letter that runs the
- * operation (bench_line() prints, so it waits as print does);
+ * operation (bench_line() prints, so it waits as print does, or, printed
+ * to a LineWriter, as the writer's print does);
  * IsrMeter::enter() and leave() from the bound interrupt handler, as its
  * first and last statements; BenchIdle::idle() and idle_until() by the
  * kernel loop alone, as a platform's are. Nothing here masks interrupts.
@@ -314,14 +315,23 @@ constexpr BenchSample bench_sample(uint32_t wall, const BenchCounters& before,
             after.isr_cycles - before.isr_cycles};
 }
 
-/// The line, printed on `s` (it waits as print() does). `hz` is the
-/// ruler's rate, `wire_bps` the medium's limit in bytes per second; rate
-/// and x are computed here and nowhere else.
-template <ByteSink S>
+/// The line, printed on `s`: a transport (it waits as print() does) or a
+/// LineWriter (util/line_writer.hpp), to which it goes in pieces that fit
+/// the writer's smallest message. `hz` is the ruler's rate, `wire_bps` the
+/// medium's limit in bytes per second; rate and x are computed here and
+/// nowhere else.
+template <typename S>
+    requires(ByteSink<S> || MessageSink<S>)
 void bench_line(S s, const char* op, uint32_t bytes, const BenchSample& m, uint32_t hz,
                 uint32_t wire_bps) {
-    print(s, "bench ", op, " n=", bytes, " wall=", m.wall, " busy=", m.busy, " irq=", m.irq,
-          " isr=", m.isr, " rate=");
+    if constexpr (MessageSink<S>) {
+        print(s, "bench ", op, " n=", bytes);
+        print(s, " wall=", m.wall, " busy=", m.busy);
+        print(s, " irq=", m.irq, " isr=", m.isr, " rate=");
+    } else {
+        print(s, "bench ", op, " n=", bytes, " wall=", m.wall, " busy=", m.busy, " irq=", m.irq,
+              " isr=", m.isr, " rate=");
+    }
     if (m.wall == 0u) {
         print(s, "-");
     } else {

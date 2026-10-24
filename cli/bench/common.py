@@ -161,6 +161,13 @@ def board_type(btype):
 PROMPT = "> "
 DEFAULT_TIMEOUT = 60.0
 SUMMARY_RE = re.compile(r"(\d+)\s+pass,\s*(\d+)\s+fail")
+# The two optional fields a tally carries when the suite prints through a
+# LineWriter that lost or tore lines (util/testbench.hpp).
+LOSS_RE = re.compile(r"(\d+)\s+pass,\s*(\d+)\s+fail,\s*(\d+)\s+lost,\s*(\d+)\s+torn")
+# A line a suite marks for the judge to read whole: "#<T ... :T>#", the
+# same tag at both ends; "#count N" says how many the run printed.
+MARKED_RE = re.compile(r"#<(\w+)\b.*:\1>#")
+MARK_COUNT_RE = re.compile(r"#count\s+(\d+)")
 
 
 def die(msg):

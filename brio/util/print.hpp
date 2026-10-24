@@ -20,7 +20,14 @@
  * Supported argument types: char, C strings, all integer types up to 64
  * bits (decimal; brio::hex() for hexadecimal, 32 or 64 bits), bool (as
  * 1/0), float/double (scientific by default, brio::fixed()/brio::sci() to
- * control), brio::TimeStamp, brio::crlf.
+ * control), brio::TimeStamp, brio::crlf, and brio::flush_line (nothing
+ * here; the end of a line that closes with nothing to a LineWriter).
+ *
+ * The first argument may instead be a LineWriter (util/line_writer.hpp),
+ * the one writer of a transport: then the same call posts its arguments
+ * to the writer, which formats them later with the verbs below, and the
+ * delivery policy is the writer's (whole lines, or refused and
+ * counted), not the one that follows.
  *
  * Extension point: print() dispatches each argument to an unqualified
  * print_one(sink, value) call, so a new type becomes printable by providing
@@ -44,8 +51,8 @@
  * while print spins, so the wait always makes progress: zero while the
  * text fits the ring's room, and otherwise one byte time for each byte
  * that does not yet fit, ten bit times a byte at 8N1 (21.7 us at 460800
- * baud, 87 us at 115200; docs/design/serial.md, "Output policy: wait,
- * do not drop"). Two consequences. A dispatch that prints holds every
+ * baud, 87 us at 115200; docs/design/serial.md, "Output policy: whole
+ * or refused, counted"). Two consequences. A dispatch that prints holds every
  * other active object for that wait, since a dispatch runs to
  * completion; and a print before the transport is initialized and
  * interrupts are enabled is a mistake: nothing drains the ring, so a
@@ -685,6 +692,21 @@ inline char* i64toa(int64_t value, char* buffer) {
 struct crlf_t {};
 inline constexpr crlf_t crlf{};  ///< print(serial, ..., crlf) -> "\r\n"
 
+/// The end of a line that writes nothing: a prompt ("> ") is a line the
+/// reader must see before any end of line comes. On a transport it
+/// prints nothing at all; to a LineWriter (util/line_writer.hpp), as the
+/// last argument, it ends the line the way crlf does but closes it with
+/// no bytes, so the text leaves at once instead of waiting for an end.
+struct flush_line_t {};
+inline constexpr flush_line_t flush_line{};
+
+/// A type that print() hands its arguments to as one message, to be
+/// formatted later, instead of formatting them onto a ByteSink:
+/// util/line_writer.hpp's LineWriter says so with `takes_messages`. The
+/// print() that takes such a type is line_writer.hpp's.
+template <typename W>
+concept MessageSink = requires { requires W::takes_messages; };
+
 struct Hex { uint32_t value; };
 /// Hexadecimal integer with 0x prefix and no leading zeros:
 /// print(s, hex(0xBEEF)) -> "0xBEEF"
@@ -839,6 +861,9 @@ template <ByteSink S>
 inline void print_one(S s, crlf_t) {
     print_one(s, std::string_view("\r\n", 2));
 }
+
+template <ByteSink S>
+inline void print_one(S, flush_line_t) {}
 
 /// Integers in decimal. Up to 32 bits through ltoa/ultoa; a 64-bit one
 /// through its own explicit-width path, never through `long`, which is 32

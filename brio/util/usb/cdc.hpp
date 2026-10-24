@@ -301,6 +301,7 @@ public:
     /// host next asks the endpoint for data (an IN token, the host's
     /// poll). Main context, the transmit ring's one producer.
     static bool write_byte(uint8_t b) {
+        check_one_writer<UsbCdcAcm>();   // debug builds: the claimed transport's one writer
         if (!configured_ || !m_tx.push(b)) {
             return false;
         }
@@ -333,6 +334,7 @@ public:
     /// not configured the port. The bytes are copied: `src` is free when
     /// this returns.
     static uint32_t write_bulk(std::span<const uint8_t> src) {
+        check_one_writer<UsbCdcAcm>();   // debug builds: the claimed transport's one writer
         if (!configured_) {
             return 0;
         }

@@ -55,12 +55,18 @@
 
 #include <stdint.h>
 
+#include <span>
+
 #include "stm32f4xx.h"
 
 #include "kernel/platform.hpp"
 #include "stm32f4/nvic.hpp"
 #include "stm32f4/ticker.hpp"
 #include "cortexm/schedule.hpp"
+
+/// The top of the stack, the linker script's: the end of RAM, where the
+/// crt's vector table starts the main stack pointer.
+extern "C" uint32_t __stack_top[];
 
 namespace brio {
 
@@ -136,6 +142,18 @@ struct Stm32f4Platform {
     /// only what Standby loses); the magic word take_panic_record()
     /// checks is what makes a cold word harmless.
     static PanicRecord& panic_record() { return panic_record_; }
+
+    /// The live stack: from the stack pointer to the top of RAM - every
+    /// frame of the caller and of the callers above it, an interrupt's
+    /// included (one stack, the main one, in thread mode and in handlers
+    /// alike). The optional member util/line_writer.hpp's debug check
+    /// reads to refuse a text that lives on the stack. Any context.
+    static std::span<const uint8_t> stack_span() {
+        const uint8_t* sp;
+        asm volatile("mov %0, sp" : "=r"(sp));
+        const uint8_t* const top = reinterpret_cast<const uint8_t*>(__stack_top);
+        return {sp, static_cast<size_t>(top - sp)};
+    }
 
 private:
     // gcc 16 emits the COMDAT section for an inline variable with a

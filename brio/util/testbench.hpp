@@ -39,6 +39,25 @@
  * The sink is any ByteSink and nothing here knows a target, which is
  * what lets the host suite drive it with a capture sink.
  *
+ * Through a writer. The sink may instead be a LineWriter
+ * (util/line_writer.hpp), the one writer of the console's transport: every
+ * print here stays as written and becomes a message to the writer. The
+ * program makes the bench's context the writer's serving context (main
+ * context by default, or the object the writer's `inline_from` option
+ * names); then each print posts and serves the writer before it returns,
+ * and the suite behaves as it does over the transport, line by line,
+ * waiting for the ring as print() waits. A bench run from any other
+ * context only posts, and its lines wait for the kernel. Each
+ * line goes in pieces that fit the writer's smallest message (four texts
+ * at most on a 32-bit core), the prompt ends with flush_line so that it
+ * leaves before its line ends, and the two tallies carry the writer's
+ * counters: when it lost or tore lines during the letter or the run, the
+ * tally reads
+ *
+ *     -> N pass, M fail, L lost, T torn
+ *
+ * and bin/brio's judge, under --strict, fails a run that lost a line.
+ *
  * The ritual around the letters - a letter table, a verdict printer, a
  * pair of counters, the per-letter tally and the closing total - is not
  * decoration: `bin/brio` reads it. Its judge matches
@@ -233,16 +252,34 @@ constexpr uint8_t test_letters_default_max() {
 namespace detail {
 /// The second set's mask in a bench that has no second set.
 struct NoSecondSet {};
+
+/// The writer's counters as a letter and a run started, in a bench that
+/// prints through a LineWriter (the header's "Through a writer").
+struct WriterMarks {
+    uint16_t letter_lost = 0;
+    uint16_t letter_torn = 0;
+    uint16_t run_lost = 0;
+    uint16_t run_torn = 0;
+};
+/// The same in a bench that prints to a transport: nothing.
+struct NoWriterMarks {};
 } // namespace detail
 
 /// The letter menu, the verdict lines and the two tallies bin/brio reads.
-/// `max_letters` bounds the static table; registration beyond it fails.
-/// `second_all_key`, when not NUL, names the second set's all-key (the
-/// header's "A second set"). Main context, one caller (the file header).
-template <ByteSink Sink, uint8_t max_letters = test_letters_default_max(),
+/// `Sink` is a transport (a ByteSink) or a LineWriter (util/line_writer.hpp,
+/// a MessageSink). `max_letters` bounds the static table; registration
+/// beyond it fails. `second_all_key`, when not NUL, names the second set's
+/// all-key (the header's "A second set"). Main context, one caller (the
+/// file header).
+template <typename Sink, uint8_t max_letters = test_letters_default_max(),
           char second_all_key = '\0'>
+    requires(ByteSink<Sink> || MessageSink<Sink>)
 class TestBench {
     static constexpr bool has_second_set = second_all_key != '\0';
+    /// Lines go to a LineWriter as messages: each line is printed in
+    /// pieces that fit the writer's smallest message, and the totals carry
+    /// its counters.
+    static constexpr bool through_writer = MessageSink<Sink>;
     static_assert(!has_second_set || max_letters <= 64,
                   "the second set is a mask over at most 64 registered letters");
 
@@ -309,24 +346,28 @@ public:
     /// The letter list, one per line, with the all-key last. A suite
     /// prints its own headline before calling this.
     void menu() const {
-        for (uint8_t i = 0; i < count_; ++i) {
-            if (letters_[i].in_all) {
-                print(Sink{}, "  ", letters_[i].key, "  ", letters_[i].title, crlf);
-            } else if (in_second_set(i)) {
-                print(Sink{}, "  ", letters_[i].key, "  ", letters_[i].title,
-                      "   (in ", second_all_key, ", not in ", all_key_, ")", crlf);
-            } else {
-                print(Sink{}, "  ", letters_[i].key, "  ", letters_[i].title,
-                      "   (by name only, not in ", all_key_, ")", crlf);
+        if constexpr (through_writer) {
+            menu_in_pieces();
+        } else {
+            for (uint8_t i = 0; i < count_; ++i) {
+                if (letters_[i].in_all) {
+                    print(Sink{}, "  ", letters_[i].key, "  ", letters_[i].title, crlf);
+                } else if (in_second_set(i)) {
+                    print(Sink{}, "  ", letters_[i].key, "  ", letters_[i].title,
+                          "   (in ", second_all_key, ", not in ", all_key_, ")", crlf);
+                } else {
+                    print(Sink{}, "  ", letters_[i].key, "  ", letters_[i].title,
+                          "   (by name only, not in ", all_key_, ")", crlf);
+                }
             }
-        }
-        print(Sink{}, "  ", all_key_, "  every letter above", crlf);
-        if constexpr (has_second_set) {
-            print(Sink{}, "  ", second_all_key, "  every letter marked in ", second_all_key, crlf);
-        }
-        if (test_letters != nullptr) {
-            print(Sink{}, "  (this image carries the letters ", test_letters,
-                  " of the suite; the other letters are in its other images)", crlf);
+            print(Sink{}, "  ", all_key_, "  every letter above", crlf);
+            if constexpr (has_second_set) {
+                print(Sink{}, "  ", second_all_key, "  every letter marked in ", second_all_key, crlf);
+            }
+            if (test_letters != nullptr) {
+                print(Sink{}, "  (this image carries the letters ", test_letters,
+                      " of the suite; the other letters are in its other images)", crlf);
+            }
         }
     }
 
@@ -341,13 +382,25 @@ public:
     /// runtime label) without a buffer to format it into.
     void verdict(const char* name, const char* suffix, bool ok) {
         count_verdict(ok);
-        print(Sink{}, "  ", ok ? "PASS" : "FAIL", "  ", name, suffix, crlf);
+        if constexpr (through_writer) {
+            print(Sink{}, "  ", ok ? "PASS" : "FAIL", "  ", name);
+            print(Sink{}, suffix, crlf);
+        } else {
+            print(Sink{}, "  ", ok ? "PASS" : "FAIL", "  ", name, suffix, crlf);
+        }
     }
 
     /// Close a letter: its tally and a blank line. handle() calls this;
-    /// a test that spans a reset calls it itself when it resumes.
+    /// a test that spans a reset calls it itself when it resumes. Through
+    /// a writer the tally carries the lines the writer lost and tore
+    /// during the letter, when there were any.
     void end_letter() {
-        print(Sink{}, "  -> ", passed_, " pass, ", failed_, " fail", crlf, crlf);
+        if constexpr (through_writer) {
+            tally("  -> ", passed_, failed_, marks_.letter_lost, marks_.letter_torn);
+            print(Sink{}, crlf, crlf);
+        } else {
+            print(Sink{}, "  -> ", passed_, " pass, ", failed_, " fail", crlf, crlf);
+        }
     }
 
     /**
@@ -368,6 +421,7 @@ public:
      */
     std::optional<Totals> handle(char c) {
         if (is_all_key(c)) {
+            mark_run();
             Totals t{0, 0};
             for (uint8_t i = 0; i < count_; ++i) {
                 if (!letters_[i].in_all) {
@@ -377,11 +431,16 @@ public:
                 t.pass = static_cast<uint16_t>(t.pass + passed_);
                 t.fail = static_cast<uint16_t>(t.fail + failed_);
             }
-            print(Sink{}, "ALL: ", t.pass, " pass, ", t.fail, " fail", crlf);
+            if constexpr (through_writer) {
+                all_line(t);
+            } else {
+                print(Sink{}, "ALL: ", t.pass, " pass, ", t.fail, " fail", crlf);
+            }
             return t;
         }
         if constexpr (has_second_set) {
             if (is_key(second_all_key, c)) {
+                mark_run();
                 Totals t{0, 0};
                 for (uint8_t i = 0; i < count_; ++i) {
                     if (!in_second_set(i)) {
@@ -391,7 +450,11 @@ public:
                     t.pass = static_cast<uint16_t>(t.pass + passed_);
                     t.fail = static_cast<uint16_t>(t.fail + failed_);
                 }
-                print(Sink{}, "ALL: ", t.pass, " pass, ", t.fail, " fail", crlf);
+                if constexpr (through_writer) {
+                    all_line(t);
+                } else {
+                    print(Sink{}, "ALL: ", t.pass, " pass, ", t.fail, " fail", crlf);
+                }
                 return t;
             }
         }
@@ -403,8 +466,16 @@ public:
         return Totals{passed_, failed_};
     }
 
-    /// The "> " bin/brio waits for after the ALL: marker.
-    void prompt() const { print(Sink{}, "> "); }
+    /// The "> " bin/brio waits for after the ALL: marker. Through a
+    /// writer it is a line ended by flush_line: written at once, closed by
+    /// nothing.
+    void prompt() const {
+        if constexpr (through_writer) {
+            print(Sink{}, "> ", flush_line);
+        } else {
+            print(Sink{}, "> ");
+        }
+    }
 
     /// The tally of the letter that just ran (or is running).
     uint16_t passed() const { return passed_; }
@@ -495,9 +566,69 @@ private:
 
     void run(const Entry& e) {
         passed_ = failed_ = 0;
+        if constexpr (through_writer) {
+            marks_.letter_lost = Sink::lost();
+            marks_.letter_torn = Sink::torn_lines();
+        }
         print(Sink{}, "-- ", e.title, crlf);
         e.fn();
         end_letter();
+    }
+
+    /// The ALL: line through a writer, with the run's lost and torn. (Over
+    /// a transport handle() prints it in place, at each of its two sites.)
+    void all_line(const Totals& t)
+        requires through_writer
+    {
+        tally("ALL: ", t.pass, t.fail, marks_.run_lost, marks_.run_torn);
+        print(Sink{}, crlf);
+    }
+
+    /// An all-key run starts: the writer's counters noted.
+    void mark_run() {
+        if constexpr (through_writer) {
+            marks_.run_lost = Sink::lost();
+            marks_.run_torn = Sink::torn_lines();
+        }
+    }
+
+    /// "<head>N pass, M fail" and, when the writer lost or tore lines
+    /// since `lost0` and `torn0` were noted, ", L lost, T torn": the line
+    /// left open for its end.
+    void tally(const char* head, uint16_t pass, uint16_t fail, uint16_t lost0, uint16_t torn0)
+        requires through_writer
+    {
+        print(Sink{}, head, pass, " pass, ", fail, " fail");
+        const uint16_t lost = static_cast<uint16_t>(Sink::lost() - lost0);
+        const uint16_t torn = static_cast<uint16_t>(Sink::torn_lines() - torn0);
+        if (lost != 0u || torn != 0u) {
+            print(Sink{}, ", ", lost, " lost, ", torn, " torn");
+        }
+    }
+
+    /// menu() through a writer: each line in pieces of at most three
+    /// texts.
+    void menu_in_pieces() const
+        requires through_writer
+    {
+        for (uint8_t i = 0; i < count_; ++i) {
+            print(Sink{}, "  ", letters_[i].key, "  ", letters_[i].title);
+            if (letters_[i].in_all) {
+                print(Sink{}, crlf);
+            } else if (in_second_set(i)) {
+                print(Sink{}, "   (in ", second_all_key, ", not in ", all_key_, ")", crlf);
+            } else {
+                print(Sink{}, "   (by name only, not in ", all_key_, ")", crlf);
+            }
+        }
+        print(Sink{}, "  ", all_key_, "  every letter above", crlf);
+        if constexpr (has_second_set) {
+            print(Sink{}, "  ", second_all_key, "  every letter marked in ", second_all_key, crlf);
+        }
+        if (test_letters != nullptr) {
+            print(Sink{}, "  (this image carries the letters ", test_letters, " of the suite;");
+            print(Sink{}, " the other letters are in its other images)", crlf);
+        }
     }
 
     Entry letters_[max_letters]{};
@@ -507,11 +638,14 @@ private:
     char all_key_ = 'z';
     /// The second set as one bit per registered letter.
     [[no_unique_address]] std::conditional_t<has_second_set, SecondMask, detail::NoSecondSet> second_{};
+    /// The writer's counters at the letter's and the run's start.
+    [[no_unique_address]] std::conditional_t<through_writer, detail::WriterMarks, detail::NoWriterMarks> marks_{};
 };
 
 /// A bench with a second set: `second_all_key` runs the letters
 /// second_letter() registers (the header's "A second set").
-template <ByteSink Sink, char second_all_key, uint8_t max_letters = test_letters_default_max()>
+template <typename Sink, char second_all_key, uint8_t max_letters = test_letters_default_max()>
+    requires(ByteSink<Sink> || MessageSink<Sink>)
 using TwoKeyTestBench = TestBench<Sink, max_letters, second_all_key>;
 
 } // namespace brio

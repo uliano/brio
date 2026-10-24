@@ -2024,6 +2024,7 @@ public:
     /// The public behaviour is identical either way - print() still
     /// blocks on a full ring and returns when the bytes are queued.
     static bool write_byte(uint8_t b) {
+        check_one_writer<Uart>();   // debug builds: the claimed transport's one writer
         if (!m_tx.push(b)) {
             // A REFUSED BYTE STILL NUDGES. print() answers a false here
             // by trying again for ever, so if this path can leave the
@@ -2097,6 +2098,7 @@ public:
      * inline byte loop otherwise (the measurement is there).
      */
     static uint32_t write_bulk(std::span<const uint8_t> src) {
+        check_one_writer<Uart>();   // debug builds: the claimed transport's one writer
         uint32_t done = 0;
         if constexpr (!has_tx_engine) {
             // write_byte()'s two steps, spelled here so the run's path
@@ -2193,6 +2195,11 @@ public:
     /// ring's bytes; with one, a block holds its run (half the ring at
     /// most) until its completion, so the room grows a block at a time.
     static uint32_t tx_room() { return m_tx.room(); }
+
+    /// The transmit ring's capacity: tx_room() when nothing is queued, the
+    /// most a writer can ever find free (util/line_writer.hpp sizes its
+    /// messages' bound by it).
+    static constexpr uint32_t tx_capacity() { return decltype(m_tx)::capacity(); }
 
     /// The transmit edge, told once (util/stream.hpp's EdgeSink): true when the
     /// transmitter has run the ring dry since the last true, the read clearing

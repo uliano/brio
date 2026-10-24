@@ -149,6 +149,9 @@ beyond the console:
 The bus operations (a bus request polled, pumped and engined; a
 receive run; an I2C tenure) join the application as the driver they
 measure is reworked, each with its own document carrying the numbers.
+A service whose cost depends on the kernel it runs under is measured in
+the suite that runs it: the line writer's in the STM32F446RE's Rubato
+suite (letter j, below).
 
 ## The skeleton's numbers
 
@@ -585,9 +588,47 @@ What the rows say:
   images from SRAM, warm and cold side by side in the two families'
   platform documents ("A handler in SRAM").
 
+## Letter j: the line writer
+
+`util/line_writer.hpp`'s writer ([serial.md](serial.md), "LineWriter")
+moves a print's formatting from the caller into its own dispatch, so
+its cost is two numbers and a ratio: what a `print()` to it costs the
+object that prints (the pack and the post), what the writer's dispatch
+costs to write the line into the ring, and how far the bound it sizes
+its room by stands above what it writes. The STM32F446RE's Rubato suite
+measures them over a verdict-shaped line, 60 bytes in five runs, with
+the ruler (the DWT's CYCCNT, one load), each figure the least and most
+of 16, the ruler's own two reads taken off; the oracle is the same line
+printed straight into the transport, as every line was before the
+writer, in the same letter.
+
+| (STM32F446RE, 180 MHz, 5 WS, ART on; console 115200; ten passes of 16) | cycles |
+|---|---|
+| `print()` from an object's dispatch, the first after other work | 421 to 478 |
+| the same, right behind it | 324 |
+| the writer's dispatch writing it into an empty ring, the UART's handler inside | 2046 to 2238 |
+| the same right behind another, interrupts enabled / masked | 1735 to 1947 / 1738 to 1898 |
+| `print()` straight into the transport, masked, right behind another | 1516 to 1725 |
+| the transport's run alone: 2 bytes / 50 bytes | 177 to 185 / 335 to 539 |
+
+The writer's dispatch is the direct print and about a tenth more (the
+take, the chain, the drain's room and release, the mark's check); both
+are the transport's runs, some 175 cycles each before its bytes and
+about seven a byte. The bound over the suite's own lines, ten passes of
+its every letter: 113 202 against 103 596 bytes formatted, 1.09; the
+transmit edges the writer waited for at the console's rate, 1277 over
+1643 lines, the suite printing faster than the wire.
+
 ## Not covered yet
 
 Gaps, each with what would explain or measure it:
+
+- The STM32F446RE transport's run costs some 175 cycles before its
+  first byte, warm and masked (letter j: a run of 2 bytes 177 to 185,
+  of 50 bytes 335 to 539), against a listing of a call, the ring's
+  indices, one push and two bit-band stores. Not split; what would: the
+  DWT's LSU and fold counters around one run, and the run with its
+  second store taken out.
 
 - `bench_vx03`'s letter i run after its letter u in one session stalls
   at its first tenure, on the CH32V203C8 (whose two images keep the

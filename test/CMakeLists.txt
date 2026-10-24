@@ -69,3 +69,26 @@ foreach(_main IN LISTS SUITE_MAINS)
 
     add_test(NAME ${_suite} COMMAND ${_suite})
 endforeach()
+
+# A suite's refusals: every test_*/neg/*.cpp is a TU that must FAIL to
+# compile, and for the reason its "// refused: <text>" line names - the
+# test passes when the compiler's output carries that text (a TU that
+# compiles, or that fails for another reason, does not print it).
+file(GLOB NEG_TUS CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/test_*/neg/*.cpp")
+
+foreach(_tu IN LISTS NEG_TUS)
+    get_filename_component(_neg_dir "${_tu}" DIRECTORY)
+    get_filename_component(_suite_dir "${_neg_dir}" DIRECTORY)
+    get_filename_component(_suite "${_suite_dir}" NAME)
+    get_filename_component(_name "${_tu}" NAME_WE)
+    file(STRINGS "${_tu}" _refused REGEX "^// refused: ")
+    if(NOT _refused)
+        message(FATAL_ERROR "${_tu}: a refusal TU names its reason on a '// refused: ' line")
+    endif()
+    string(REGEX REPLACE "^// refused: " "" _reason "${_refused}")
+    add_test(NAME ${_suite}_neg_${_name}
+        COMMAND ${CMAKE_CXX_COMPILER} -std=gnu++23 -fsyntax-only -Wall -Wextra -Werror
+            -I${CMAKE_CURRENT_SOURCE_DIR}/../brio "${_tu}")
+    set_tests_properties(${_suite}_neg_${_name} PROPERTIES
+        PASS_REGULAR_EXPRESSION "${_reason}")
+endforeach()

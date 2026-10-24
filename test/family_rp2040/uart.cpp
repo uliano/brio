@@ -105,3 +105,29 @@ void uart_verbs() {
     Pl011<1>::dma_requests(true, true);
     (void)Pl011<1>::irq();
 }
+
+// The console through its LineWriter (util/line_writer.hpp): the writer
+// over this family's transport, a line and a line in pieces printed to
+// it, the transmit edge's glue, the bench grammar over it and the panic
+// path's drain, compiled for every part.
+#include "rp2040/platform.hpp"
+#include "util/line_writer.hpp"
+#include "util/testbench.hpp"
+
+using ConsoleLog = LineWriter<Console, Rp2040Platform<>>;
+TestBench<ConsoleLog> console_log_bench;
+
+void console_log_use() {
+    ConsoleLog::init();
+    (void)print(ConsoleLog{}, "count = ", uint32_t{7}, ' ', hex(0xBEEFu), crlf);
+    (void)print(ConsoleLog{}, "a piece");
+    (void)print(ConsoleLog{}, " and its end", crlf);
+    if (Console::tx_drained()) {
+        post<ConsoleLog>(TxActivity{});
+    }
+    console_log_bench.verdict("a verdict through the writer", true);
+    console_log_bench.prompt();
+    while (serve_one<ConsoleLog>()) {
+    }
+    ConsoleLog::drain_to_port();
+}

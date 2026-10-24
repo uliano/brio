@@ -1,6 +1,8 @@
 """The console protocol of the bench suites (single-char commands, the
-"> " prompt, the "ALL: N pass, M fail" summary) and the verbs over it:
-brio run, brio console, brio duo."""
+"> " prompt, the "ALL: N pass, M fail" summary, with ", L lost, T torn"
+when the suite prints through a LineWriter that lost lines, and the lines
+a suite marks "#<T ... :T>#" for the judge to read whole) and the verbs
+over it: brio run, brio console, brio duo."""
 
 import argparse
 import json
@@ -91,6 +93,70 @@ def verdict(text, marker):
     return 0, None
 
 
+def losses(text, marker):
+    """(lost, torn) the run's tally reports: the summary line's two
+    optional fields, or the letters' tallies summed; (0, 0) when no tally
+    carries them (a suite printing to a transport, or a writer that lost
+    nothing)."""
+    for line in text.splitlines():
+        if marker and marker in line:
+            m = LOSS_RE.search(line)
+            if m:
+                return int(m.group(3)), int(m.group(4))
+    lost = torn = 0
+    for m in LOSS_RE.finditer(text):
+        lost += int(m.group(3))
+        torn += int(m.group(4))
+    return lost, torn
+
+
+def marked_lines(text):
+    """The judge's read of the lines a suite marked "#<T ...:T>#": the
+    problems found, each a string - a marked line not whole (its two tags
+    unmatched, or another line's text inside it), or a count other than
+    the one "#count N" announced."""
+    problems = []
+    whole = 0
+    expected = None
+    for line in text.splitlines():
+        stripped = line.strip()
+        m = MARK_COUNT_RE.fullmatch(stripped)
+        if m:
+            expected = (expected or 0) + int(m.group(1))
+            continue
+        if "#<" not in line and ">#" not in line:
+            continue
+        if MARKED_RE.fullmatch(stripped) and stripped.count("#<") == 1 and stripped.count(">#") == 1:
+            whole += 1
+        else:
+            problems.append("marked line not whole: %r" % stripped)
+    if expected is not None and whole != expected:
+        problems.append("%d whole marked lines, %d announced" % (whole, expected))
+    return problems, whole
+
+
+def judge(text, marker, strict, name):
+    """The run's verdict: the suite's own failures, the marked lines read
+    whole, and - under --strict - the lines a writer lost. Dies on any."""
+    fails, summary = verdict(text, marker)
+    if summary:
+        print("bench: %s" % summary)
+    problems, whole = marked_lines(text)
+    if whole or problems:
+        print("bench: %d marked line(s) read whole" % whole)
+    for p in problems:
+        print("bench: %s" % p)
+    lost, torn = losses(text, marker)
+    if lost or torn:
+        print("bench: the writer lost %d line(s), %d torn" % (lost, torn))
+    if fails:
+        die("board %s reported %d failure(s)" % (name, fails))
+    if problems:
+        die("board %s: %d marked-line problem(s)" % (name, len(problems)))
+    if strict and (lost or torn):
+        die("board %s: lines lost under --strict" % name)
+
+
 def cmd_run(args):
     name, command, marker = args.name, args.command, args.expect
     speed = speed_for(name, args.app)
@@ -104,11 +170,7 @@ def cmd_run(args):
     if not complete:
         die("timed out after %.0f s waiting for '%s' + prompt on board %s"
             % (args.timeout, marker, name))
-    fails, summary = verdict(text, marker)
-    if summary:
-        print("bench: %s" % summary)
-    if fails:
-        die("board %s reported %d failure(s)" % (name, fails))
+    judge(text, marker, args.strict, name)
     return 0
 
 
@@ -155,11 +217,7 @@ def cmd_duo(args):
     print("")
     if not complete:
         die("timed out waiting for '%s' + prompt on board %s" % (args.expect, dut_name))
-    fails, summary = verdict(text, args.expect)
-    if summary:
-        print("bench: %s" % summary)
-    if fails:
-        die("board %s reported %d failure(s)" % (dut_name, fails))
+    judge(text, args.expect, args.strict, dut_name)
     return 0
 
 

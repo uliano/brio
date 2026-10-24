@@ -1651,6 +1651,7 @@ struct Uart {
     /// pump: the push that filled the ring armed TXEIE, a level that
     /// cannot be missed.
     static bool write_byte(uint8_t b) {
+        check_one_writer<Uart>();   // debug builds: the claimed transport's one writer
         if (!m_tx.push(b)) {
             if constexpr (has_tx_engine) {
                 pump_tx();
@@ -1707,6 +1708,7 @@ struct Uart {
     /// the run is copied whole and the engine pumped once, a block being
     /// what it starts on.
     static uint32_t write_bulk(std::span<const uint8_t> src) {
+        check_one_writer<Uart>();   // debug builds: the claimed transport's one writer
         uint32_t queued = 0;
         if constexpr (!has_tx_engine) {
             // write_byte()'s two steps, spelled here so the run's path
@@ -1801,6 +1803,11 @@ struct Uart {
     /// hands DATAR the ring's bytes; with one, a block holds its run in
     /// the ring until its completion, so the room grows a block at a time.
     static uint32_t tx_room() { return m_tx.room(); }
+
+    /// The transmit ring's capacity: tx_room() when nothing is queued, the
+    /// most a writer can ever find free (util/line_writer.hpp sizes its
+    /// messages' bound by it).
+    static constexpr uint32_t tx_capacity() { return decltype(m_tx)::capacity(); }
 
     /// The transmit edge, told once (util/stream.hpp's EdgeSink): true when the
     /// transmitter has run the ring dry since the last true, the read clearing

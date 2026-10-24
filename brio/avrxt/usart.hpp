@@ -1422,6 +1422,7 @@ public:
 
     /// Try to queue one byte for transmission; false when the TX ring is full.
     static bool write_byte(uint8_t b) {
+        check_one_writer<Uart>();   // debug builds: the claimed transport's one writer
         if (!m_tx.push(b)) {
             return false;
         }
@@ -1465,6 +1466,7 @@ public:
     /// makes; the first part leaves at most three frames of gap at the
     /// top rate, once a run.
     static uint32_t write_bulk(std::span<const uint8_t> src) {
+        check_one_writer<Uart>();   // debug builds: the claimed transport's one writer
         // write_byte()'s two steps, spelled here: a full ring is its
         // refusal, nothing to set.
         if (src.empty() || !m_tx.push(src[0])) {
@@ -1546,6 +1548,11 @@ public:
     /// producer; one load of the consumer's index (a byte, so no mask
     /// with the default sizes), never waits.
     static uint32_t tx_room() { return m_tx.room(); }
+
+    /// The transmit ring's capacity: tx_room() when nothing is queued, the
+    /// most a writer can ever find free (util/line_writer.hpp sizes its
+    /// messages' bound by it).
+    static constexpr uint32_t tx_capacity() { return decltype(m_tx)::capacity(); }
 
     /// The transmit edge, told once (util/stream.hpp's EdgeSink): true when
     /// dre() has run the ring dry since the last true - the entry that hands

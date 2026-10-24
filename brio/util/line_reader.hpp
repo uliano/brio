@@ -69,20 +69,24 @@
  * `using LendsTo = Subscribers<LineSink>` and Tenuto refuses, when the
  * program is compiled, a list in which the sink comes after the reader.
  *
- * Transmit has no active object. print() (util/print.hpp) goes straight
- * to the transport, from main context only (print.hpp says why), and
- * waits until the transmit ring has taken every byte: the wait is zero
- * while the message fits the ring's room, and otherwise one byte time
- * for each byte that does not yet fit. A byte is ten bit times at 8N1,
- * 21.7 us at 460800 baud and 87 us at 115200, so a message that finds
- * the transmit ring full waits the ring's room over again: about 5.5 ms
- * at 460800 where the default ring is 256 bytes (255 of room,
- * util/ring.hpp: the AVR, the STM32 and the RP families), about 1.4 ms
- * where it is 64 (the three WCH families) (docs/design/serial.md,
- * "Output policy: wait, do not drop"). A print is atomic between active objects
- * because a dispatch runs to completion, so no other object's text can
- * interleave with it; the design page says when that policy would be
- * revisited (a slow link, a hard latency budget).
+ * Transmit is another object's, or nobody's. util/line_writer.hpp's
+ * LineWriter is the one writer of a port: a print() to it posts the
+ * arguments, and the writer writes whole lines in its own dispatch, the
+ * lines of objects that preempt one another never mixed. Without one,
+ * print() (util/print.hpp) goes straight to the transport, from main
+ * context only (print.hpp says why), and waits until the transmit ring
+ * has taken every byte: the wait is zero while the message fits the
+ * ring's room, and otherwise one byte time for each byte that does not
+ * yet fit. A byte is ten bit times at 8N1, 21.7 us at 460800 baud and
+ * 87 us at 115200, so a message that finds the transmit ring full waits
+ * the ring's room over again: about 5.5 ms at 460800 where the default
+ * ring is 256 bytes (255 of room, util/ring.hpp: the AVR, the STM32 and
+ * the RP families), about 1.4 ms where it is 64 (the three WCH
+ * families) (docs/design/serial.md, "Output policy: whole or refused,
+ * counted"). Such a print is atomic between active objects under
+ * Tenuto, where a dispatch runs to completion, and not under Rubato,
+ * whose preempting dispatch can print between two of its runs: the
+ * reason the writer exists.
  *
  * The drain takes a run where the transport lends one. A run is a
  * contiguous stretch of bytes the ring already holds. A transport that

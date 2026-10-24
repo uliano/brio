@@ -144,6 +144,8 @@ def main():
                                  "(default: the manifest's DEFAULT_MONITOR_SPEED)")
     p.add_argument("--expect", default="ALL:", help="marker line ending the capture")
     p.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT)
+    p.add_argument("--strict", action="store_true",
+                   help="a line the suite's writer lost or tore fails the run")
     p.set_defaults(func=cmd_run)
 
     p = sub.add_parser("fuses",
@@ -176,6 +178,8 @@ def main():
     p.add_argument("--instrument-app", help="instrument app whose monitor_speed to use")
     p.add_argument("--expect", default="ALL:")
     p.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT)
+    p.add_argument("--strict", action="store_true",
+                   help="a line the suite's writer lost or tore fails the run")
     p.set_defaults(func=cmd_duo)
 
     args = ap.parse_args()

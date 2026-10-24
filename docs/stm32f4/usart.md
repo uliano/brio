@@ -309,6 +309,11 @@ TX and RX inside the chip and leaves the RX pad alone.
   register, or by `dma_isr()` on the transmit completion that leaves the
   ring empty, and read by the program's glue right after that body, in
   the same vector (the instance's, or the transmit stream's).
+  `tx_capacity()` is the ring's capacity, the largest room `tx_room()`
+  can answer, a constant. In a debug build (no `NDEBUG`) `write_byte()`
+  and `write_bulk()` first check that the transport has no LineWriter or
+  that the caller is it (util/stream.hpp's `check_one_writer`); a
+  release build compiles nothing of it.
 - THE RECEIVE ENGINE ARMS AT `rx_priority`, `very_high` by default, and
   the transmit engine at `high` (docs/design/dma.md's rule): DR holds one
   character, so a starved receive stream overruns, and a starved transmit
@@ -421,6 +426,28 @@ extern "C" void DMA2_Stream1_IRQHandler() {
 }
 extern "C" void DMA2_Stream6_IRQHandler() { (void)Link::dma_isr(); }      // transmit blocks
 ```
+
+A console whose lines go through a writer
+([design/serial.md](../design/serial.md), "LineWriter": one writer of
+the port, the last active object of the program) reads the transmit
+edge in the same vector, right after the body that raises it, and
+posts it to the writer; an excerpt, `Log` the program's
+`brio::LineWriter<Serial, P>` and `Lines` its `LineReader`:
+
+```cpp
+extern "C" void USART1_IRQHandler() {
+    if (Serial::isr()) { brio::post<Lines>(brio::RxActivity{}); }
+    if (Serial::tx_drained()) { brio::post<Log>(brio::TxActivity{}); }
+}
+brio::print(Log{}, "hello", brio::crlf);           // through the writer
+```
+
+With a transmit engine the edge is raised in the transmit stream's
+vector instead, by `dma_isr()`, and read there. `tx_capacity()` is the
+transmit ring's capacity (255 bytes for the default ring of 256): a
+message whose bound, with its line's closing, exceeds it is refused by
+the writer, at compile time where the compiler knows the bound and at
+the call where a text makes it so.
 
 A mode beyond the
 transport - a LIN break, a muted receiver - through `brio::Usart<1>`'s

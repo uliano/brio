@@ -1168,6 +1168,7 @@ public:
     /// block abandoned after a bus error starts no next one, and a
     /// refused write is the one call a blocked print keeps making.
     static bool write_byte(uint8_t b) {
+        check_one_writer<Pl011Transport>();   // debug builds: the claimed transport's one writer
         if constexpr (has_tx_engine) {
             const bool queued = m_tx.push(b);
             pump_tx();
@@ -1208,6 +1209,7 @@ public:
     /// `src.size()` when the ring filled). The span is copied, and the
     /// caller's again on return; main context only, never waits.
     static uint32_t write_bulk(std::span<const uint8_t> src) {
+        check_one_writer<Pl011Transport>();   // debug builds: the claimed transport's one writer
         uint32_t done = 0;
         if constexpr (!has_tx_engine) {
             if (m_tx.empty()) {
@@ -1293,6 +1295,11 @@ public:
     /// block holds its run in the ring until its completion, so the room
     /// grows a block at a time.
     static uint32_t tx_room() { return m_tx.room(); }
+
+    /// The transmit ring's capacity: tx_room() when nothing is queued, the
+    /// most a writer can ever find free (util/line_writer.hpp sizes its
+    /// messages' bound by it).
+    static constexpr uint32_t tx_capacity() { return decltype(m_tx)::capacity(); }
 
     /// The transmit edge, told once (util/stream.hpp's EdgeSink): true when the
     /// transmitter has run the ring dry since the last true, the read clearing
