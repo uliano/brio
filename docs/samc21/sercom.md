@@ -466,10 +466,10 @@ taking a burst, and what this driver does with each:
 - **The copy into the transmit ring and out of the receive one**
   (`write_bulk`, `read_bulk`): an inline byte loop, six instructions a
   byte - about ten cycles behind the flash's two wait states -, or the
-  runtime's `memcpy` for a run of `uart_copy_crossover` bytes (20) or
+  runtime's `memcpy` for a run of `uart_copy_crossover` bytes (24) or
   more whatever the alignment of its two ends: past its fixed cost
-  about one and a quarter cycles a byte when they share their alignment
-  in the word, three to three and a half when they do not (it copies
+  about one cycle a byte when they share their alignment in the word,
+  three to three and a half when they do not (it copies
   words across alignments too, [design/runtime.md](../design/runtime.md)).
   Measured with letter u, below.
 - **The resource's DMA constants** - `Sercom<n>::dma_tx_trigger()`
@@ -809,18 +809,24 @@ bridge between the pads and the PC - as much as of the driver.
   blocks are half the ring: a block of the whole ring left a producer
   longer than the ring waiting for the wire to go idle (measured, x 1.06
   at 3 Mbaud).
-- **The copy into the ring** (letter u's `uart.copy`, `write_bulk()`
-  timed at twelve lengths and the four source alignments, the call and
-  the transmit engine's pump included): the inline byte loop costs about
-  nine and a quarter cycles a byte behind two wait states (438 cycles
-  for 8 bytes, 512 for 16); the runtime's `memcpy`, past its fixed cost,
-  about one and a quarter when the two ends share their alignment and
-  three to three and a half when they do not. At 20 bytes the run costs
-  489 cycles at the aligned source offset and 559 to 571 at the other
-  three, 547 taken over the four against some 549 for the loop, so a
-  run of 20 bytes or more goes through `memcpy` at any alignment, the
-  rest through the loop: a 1024-byte run 1535 cycles aligned alike,
-  3521 to 4021 otherwise.
+- **The copy into the ring** (letter u's `uart.copy`: `write_bulk()`
+  timed at twelve lengths with the ring's head at each of its four
+  offsets from a word, the source aligned alike and on a word, the call
+  and the transmit engine's pump included): the inline byte loop costs
+  about nine and a half cycles a byte behind two wait states (457 cycles
+  for 8 bytes, 553 to 563 for 16, 589 to 601 for 20; some 50 less in
+  another image, the loop's address behind the wait states); the
+  runtime's `memcpy`, past its fixed cost, about one cycle a byte when
+  the two ends share their alignment and three to three and a half when
+  they do not. At 24 bytes `memcpy` takes 491 cycles with both ends on a
+  word, 537 to 545 aligned alike at the other three heads and 624 to 632
+  with the source on a word and the head off it (three head bytes at a
+  head of one), against the loop's 627 to 639 carried on from 20: ahead
+  by a hundred one time in four and within ten of the loop otherwise,
+  and from 32 bytes ahead at every pair of offsets (654 to 656 against
+  703 to 715). So a run of 24 bytes or more goes through `memcpy` at
+  any alignment, the rest through the loop: a 1024-byte run 1530 cycles
+  aligned alike, 3562 to 4050 across alignments.
 - **The receiver's shapes, measured on the loop** (letter u, bursts
   of 16 and 256 from the transmit engine): the interrupt receiver one
   entry a character up to 1 Mbaud, 207-218 cycles between the bench's

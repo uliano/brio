@@ -344,7 +344,7 @@ the key that runs the single-board set, `w` the two-board key, below).
   `memcpy` 159 to 167 with the two ends aligned alike and 309 to 317
   with the destination a byte past a word, and taken over the four
   offsets the ring's head may have, `memcpy` is ahead from 20 bytes in
-  both images.
+  both images and from 16 in one of them.
 - `tx_room()` is the bytes `write_bulk()` would take now, the transmit
   ring's free count (util/stream.hpp's `RoomSink`,
   [design/serial.md](../design/serial.md)): it grows a byte at a time as

@@ -822,10 +822,12 @@ inline constexpr size_t print_scan_run = 64;
 /// drains the stretch before it (a whole-string strlen() first delays a
 /// 4096-byte print by its scan, measured at 260 us on the CH32V203).
 /// The stretch is measured by this loop and not by memchr: the call's
-/// fixed cost on the short texts a line is made of measured some 90
-/// cycles more for a 60-byte line of four texts on the STM32F446
-/// (bench_stm32f4 letter l). Any other sink is fed byte by byte up to the
-/// NUL, with no length to find.
+/// fixed cost on the short texts a line is made of measured 31 cycles
+/// more for a warm 60-byte line of four texts on the STM32F446, 1529
+/// against 1498, and some 50 more for a cold one (bench_stm32f4 letter
+/// l, the two forms built in one tree, the least of three passes of 16
+/// each). Any other sink is fed byte by byte up to the NUL, with no
+/// length to find.
 template <ByteSink S>
 inline void print_one(S s, const char *text) {
     if constexpr (BulkSink<S>) {

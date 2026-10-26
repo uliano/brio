@@ -1629,18 +1629,23 @@ private:
  * into or out of a ring calls the runtime's memcpy instead of its own
  * byte loop (Uart::copy_run()), whatever the alignment of the two ends.
  * Measured with bench_samc's letter u - write_bulk() timed at twelve
- * lengths and the four source alignments, the figures in
- * docs/samc21/sercom.md: the inline byte loop costs about nine and a
- * quarter cycles a byte at 48 MHz behind two wait states (438 cycles for
- * a run of 8, 512 for 16, the call and the pump included); memcpy, past
- * its fixed cost, about one and a quarter cycles a byte when the ends
- * share their alignment and three to three and a half when they do not
- * (its copy across alignments, rt/rt.cpp). At 20 bytes the run costs 489
- * cycles at the one aligned source offset and 559 to 571 at the other
- * three, 547 taken over the four, against some 549 for the loop (its 9.25
- * a byte carried on from 16) - the two meet there.
+ * lengths with the ring's head at each of its four offsets from a word,
+ * the source aligned alike and on a word, the call and the pump included;
+ * the figures in docs/samc21/sercom.md: the inline byte loop costs about
+ * nine and a half cycles a byte at 48 MHz behind two wait states (553 to
+ * 563 cycles for a run of 16, 589 to 601 for 20, and some 50 less in
+ * another image, the loop's address behind the wait states); memcpy,
+ * past its fixed cost, about one cycle a byte when the ends share their
+ * alignment and three to three and a half when they do not (its copy
+ * across alignments, rt/rt.cpp). At 24 bytes memcpy takes 491 cycles
+ * with both ends on a word, 537 to 545 aligned alike at the other heads
+ * and 624 to 632 with the source on a word and the head off it (three
+ * head bytes at a head of one), against the loop's 627 to 639 carried on
+ * from 20: ahead by a hundred one time in four, within ten of the loop
+ * otherwise, and from 32 bytes ahead at every pair of offsets (654 to
+ * 656 against 703 to 715).
  */
-inline constexpr uint32_t uart_copy_crossover = 20;
+inline constexpr uint32_t uart_copy_crossover = 24;
 
 /**
  * The "no DMA engine" default of the Uart's one optional engine slot.

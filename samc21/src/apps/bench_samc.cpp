@@ -1251,40 +1251,48 @@ void edge_lines() {
 }
 
 /// The copy into the ring: write_bulk() of n bytes on the engined
-/// transport, freshly brought up (the ring's head at its first slot), the
-/// source at each of the four offsets from a word - one of them shares the
-/// ring storage's alignment. The call is timed masked, from its entry to
-/// its return: the copy and the one pump that launches the block, so the
-/// difference of two sizes is the copy alone.
+/// transport, freshly brought up and then given a run of 0 to 3 bytes
+/// and drained, so that the ring's head stands at each of the four
+/// offsets from a word (the ring storage is word-aligned); at each head
+/// the source on the same offset (the two ends aligned alike) and on a
+/// word (across alignments: at a head of 1 the three head bytes, the
+/// dearest case). The call is timed masked, from its entry to its return:
+/// the copy and the one pump that launches the block, so the difference
+/// of two sizes is the copy alone.
 void copy_lines() {
     constexpr uint32_t baud = 3'000'000u;
     for (const uint32_t n : {1u, 4u, 8u, 12u, 16u, 20u, 24u, 32u, 64u, 128u, 256u, 1024u}) {
-        uint32_t lo = 0xFFFFFFFFu;
-        uint32_t hi = 0;
-        uint32_t walls[4] = {};
-        for (uint32_t off = 0; off < 4u; ++off) {
-            live = Live::txe;
-            (void)LoopTxE::init(clock, baud);
-            LoopTxE::Resource::enable_rxc_interrupt(false);
-            settle(baud);
-            const uint8_t* p = bytes_of(max_size) + off;
-            disable_interrupts();
-            const uint32_t t0 = Ruler::now();
-            (void)LoopTxE::write_bulk(std::span<const uint8_t>(p, n));
-            const uint32_t w = Ruler::now() - t0;
-            enable_interrupts();
-            uint32_t spins = 0;
-            while (DmaTxEngine::busy() && spins++ < 4'000'000u) {
+        uint32_t alike[4] = {};
+        uint32_t across[4] = {};
+        for (uint32_t head = 0; head < 4u; ++head) {
+            for (uint32_t which = 0; which < 2u; ++which) {
+                live = Live::txe;
+                (void)LoopTxE::init(clock, baud);
+                LoopTxE::Resource::enable_rxc_interrupt(false);
+                settle(baud);
+                if (head != 0u) {
+                    (void)LoopTxE::write_bulk(std::span<const uint8_t>(bytes_of(max_size), head));
+                    uint32_t spins = 0;
+                    while (DmaTxEngine::busy() && spins++ < 4'000'000u) {
+                    }
+                }
+                const uint8_t* p = bytes_of(max_size) + (which == 0u ? head : 0u);
+                disable_interrupts();
+                const uint32_t t0 = Ruler::now();
+                (void)LoopTxE::write_bulk(std::span<const uint8_t>(p, n));
+                const uint32_t w = Ruler::now() - t0;
+                enable_interrupts();
+                uint32_t spins = 0;
+                while (DmaTxEngine::busy() && spins++ < 4'000'000u) {
+                }
+                LoopTxE::release();
+                live = Live::none;
+                (which == 0u ? alike : across)[head] = w;
             }
-            LoopTxE::release();
-            live = Live::none;
-            walls[off] = w;
-            lo = w < lo ? w : lo;
-            hi = w > hi ? w : hi;
         }
-        print(serial, "  uart.copy write_bulk n=", n, ": ", walls[0], ' ', walls[1], ' ', walls[2],
-              ' ', walls[3], " cycles at source offsets 0..3 (low ", lo, ", high ", hi, ')',
-              crlf);
+        print(serial, "  uart.copy write_bulk n=", n, ": aligned alike ", alike[0], ' ', alike[1], ' ',
+              alike[2], ' ', alike[3], ", source on a word ", across[0], ' ', across[1], ' ', across[2],
+              ' ', across[3], " cycles at ring heads 0..3", crlf);
     }
 }
 

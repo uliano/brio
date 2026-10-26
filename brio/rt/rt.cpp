@@ -58,18 +58,23 @@
  * multiple of the word.
  *
  * WHY READING WHOLE WORDS IS SOUND. The merging copy reads the aligned
- * word that holds the source's first byte, and the one that holds its
- * last: bytes before the first and after the last are read with them.
- * They lie in the same aligned word as a byte the copy may read, and on
- * every core this file runs on memory is mapped, protected and faulted
- * in units of at least a word (a memory's end, an MPU or PMP region), so
- * they are readable wherever that byte is; their values are discarded.
- * strlen and memchr read the same way, the aligned word that holds the
- * string's last byte and nothing past it. A sanitizer that tracks
+ * word that holds the source's first byte and, at its end, the one that
+ * holds the last byte its words move - never a word past the one that
+ * holds the source's last byte: bytes before the first and after the
+ * last are read with them. They lie in the same aligned word as a byte
+ * the copy reads anyway, and on every core this file runs on memory is
+ * mapped, protected and faulted in units of at least a word (a memory's
+ * end, an MPU or PMP region), so they are readable wherever that byte
+ * is; their values are discarded. strlen and memchr read the same way,
+ * the aligned word that holds the string's last byte and nothing past
+ * it. These functions are for ordinary memory - SRAM and flash, ARM's
+ * Normal type: a source inside a peripheral's registers is read in words
+ * it was not asked for, and on the M4 and the M33 an unaligned load from
+ * Device memory faults (ARMv7-M ARM A3.2.1). A sanitizer that tracks
  * objects byte by byte would see those reads; the host suite's arenas
  * carry the slack around every source (test/test_rt/), and a source that
- * ends at the last byte of a page, with no page after it, is one of its
- * cases.
+ * ends at the last byte of a page, with no readable page after it, is one
+ * of its cases.
  *
  * THE SCANS. strlen and memchr read bytes up to a word boundary, then
  * aligned words, testing each for a zero byte with the carry trick -
@@ -304,11 +309,11 @@ constexpr size_t rt_turn_bytes = 4u * rt_block_bytes;
 // word taken as equally likely. Measured with the bench suites' letter m
 // and its copy table: 8 where unaligned loads do the work (the across
 // copy of 8 bytes as dear as the bytes on the STM32F446, cheaper on the
-// M33); 16 where words are merged (on the STM32G0, the RP2040, the
-// CH32V006, CH32V203 and CH32V303 and Hazard3, a copy of 16 bytes is
-// cheaper with no head byte and dearer with three, about even taken
-// over the four, and dearer at 12 either way). It leaves at least one
-// word after the head bytes.
+// M33); 16 where words are merged (a copy of 16 bytes is cheaper than
+// the bytes with no head byte and dearer with three on the STM32G0, the
+// SAM C21, the CH32V203 and Hazard3, about even taken over the four, and
+// cheaper at every head on the RP2040, the CH32V303 and the CH32V006). It
+// leaves at least one word after the head bytes.
 static_assert(__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__, "the copy and the scans read words little-endian");
 
 #if defined(__ARM_FEATURE_UNALIGNED)
@@ -505,8 +510,10 @@ void rt_copy_across(unsigned char* d, const unsigned char* s, size_t n) {
 
 // Backward copy, from the end: correct for a destination above an
 // overlapping source. The same shape, mirrored, a word a turn, and bytes
-// across alignments: no image calls memmove today (design/runtime.md),
-// so the merging form is not written backwards for it.
+// across alignments: memmove's callers are a few suites and GCC's own
+// expansion of a short move, none on a measured path, and the merging
+// form written backwards would be a mirror of three more loops, not a
+// share - not written until a caller pays for it.
 void rt_copy_backward(unsigned char* d, const unsigned char* s, size_t n) {
     d += n;
     s += n;

@@ -45,9 +45,11 @@ call them, not the application's code:
 Measured over every image of every 32-bit build project, Release and
 Debug, linked with no C library: `memcpy`, `memset` and `memcmp` are
 referenced, `strlen` by an image that makes a `std::string_view` from
-a run-time pointer, `abort` in Debug. `memmove` and `memchr` are not
-referenced today and are provided because the compiler and the
-library may emit them. Nothing else of the C library is.
+a run-time pointer, `abort` in Debug. `memmove` is referenced by a few
+suites, where the compiler expands a move inside an object into a call,
+and `memchr` by the benchmark suites that time it; both are provided
+because the compiler and the library may emit them anywhere. Nothing
+else of the C library is.
 
 ## Why brio's own, and not the C library's
 
@@ -168,7 +170,8 @@ kernel's queue compiled for each). Measured on the QingKe V4B at
 144 MHz, a 52-byte copy between word-aligned buffers: 215 cycles in
 the while shape, 101 in this one, against 91 for the full newlib's
 `memcpy`, which moves nine words a turn in 226 bytes of code where
-this `memcpy` takes 164. Four words a block is the point where a
+this `memcpy` takes 194, its copy across alignments 516 more out of
+line. Four words a block is the point where a
 52-byte event, the largest the census below found, is three blocks and
 one word.
 
@@ -251,10 +254,11 @@ words are copied in the form each core's manual allows:
 
 - On the Cortex-M4 and the M33 the source is read with single loads at
   its own offset, four a turn, and stored as aligned words; the core
-  splits each load into aligned bus accesses, one cycle dearer than an
-  aligned load from a halfword offset and two from a byte offset (DDI
-  0439B 3.3.2). Merging aligned words by shifts measured slower at every
-  length on both cores.
+  splits each load into aligned bus accesses, on the M4 one cycle dearer
+  than an aligned load from a halfword offset and two from a byte offset
+  (DDI 0439B 3.3.2; the M33's manual gives no figure, and its measured
+  turn is in the table below). Merging aligned words by shifts measured
+  slower at every length on both cores.
 - Everywhere else the source is read as aligned words, the word holding
   its next byte first, and each word stored is merged from two of them
   by shifts. The shift counts are constants, one copy of the loop for
@@ -267,22 +271,33 @@ words are copied in the form each core's manual allows:
   cores merge four words a turn.
 
 The merging copy reads the aligned word that holds the source's first
-byte and the one that holds its last, and with them up to three bytes
-on each side of the source. Those bytes lie in the same aligned word as
-a byte the copy reads anyway, and on every core this file runs on,
-memory is mapped and protected in units of at least a word, so the read
-cannot fault; the bytes read are discarded. The host suite proves it
-with a source at either edge of a page that has no page mapped beside
-it, and the scans below read the same way.
+byte and, at its end, the one that holds the last byte its words move,
+never a word past the one that holds the source's last byte; with them
+it reads up to three bytes on each side of the source. Those bytes lie
+in the same aligned word as a byte the copy reads anyway, and on every
+core this file runs on, memory is mapped and protected in units of at
+least a word, so the read cannot fault; the bytes read are discarded.
+The functions are for ordinary memory, SRAM and flash (ARM's Normal
+type): a source inside a peripheral's registers would be read in words
+it was not asked for, and on the M4 and the M33 an unaligned load from
+Device memory faults (ARMv7-M ARM A3.2.1). The host suite proves the
+reads' bounds for the form it compiles, four words a turn, and for the
+scans below, with a source at either edge of a page whose neighbours
+are mapped with no access; the word-a-turn merge of the M0+ and the
+QingKe V2 and the M4's and M33's unaligned form rest on the same
+arithmetic and on letter t's values, which cannot see an over-read.
 
 The fixed cost (up to three head bytes, the setup, on the M0+ and the
 RISC-V cores a call) decides where the copy across alignments starts:
 at 8 bytes on the M4 and the M33, where it is as cheap as the bytes
-already, and at 16 elsewhere, where a copy of 16 bytes is cheaper with
-no head byte and dearer with three, about even taken over the four
-destination offsets. Measured with the bench suites' letter m, the
-runtime's `memcpy` between static SRAM buffers, the best of eight
-runs, the call included, against the core's floor (two bytes a cycle);
+already, and at 16 elsewhere: a copy of 16 bytes is cheaper than the
+bytes with no head byte and dearer with three on the STM32G0, the
+SAM C21, the CH32V203 and Hazard3, about even taken over the four
+destination offsets, and cheaper at every head on the RP2040, the
+CH32V303 and the CH32V006. Measured with the bench suites' letter m,
+the runtime's `memcpy` between static SRAM buffers, the best of eight
+runs and the least of three passes, the call included, against the
+core's floor (two bytes a cycle);
 "across" is the three cases the letter times, the destination one past
 a word with the source on a word, the source one past a word with the
 destination on one, and the destination one and the source two past a
@@ -290,7 +305,7 @@ word:
 
 | core (board, clock) | 60 bytes, aligned alike / across | 4096 bytes, aligned alike / across (x) | the copy across, the turn in the listing |
 |---|---|---|---|
-| Cortex-M4F (STM32F446RE, 180 MHz) | 120 / 165 to 182 | 2820 (1.37) / 6465 to 6490 (3.16) | four unaligned loads, two STRD, three steps and a branch: 25 cycles a turn of 16 bytes |
+| Cortex-M4F (STM32F446RE, 180 MHz) | 120 / 165 to 182 | 2820 (1.37) / 6465 to 6490 (3.16) | four unaligned loads, two STRD, two steps, a compare and a branch: 25 cycles a turn of 16 bytes |
 | Cortex-M33 (RP2350, 150 MHz) | 99 / 127 to 141 | 2295 (1.12) / 4661 to 4684 (2.28) | the same instructions: 18 cycles a turn |
 | Cortex-M0+ (STM32G0B1RE, 64 MHz, two wait states) | 204 / 322 to 367 | 2899 (1.41) / 10412 to 10457 (5.10) | LDM of one, two shifts and an OR, STM of one, compare, branch: 10 cycles a word |
 | Cortex-M0+ (SAM C21J18A, 48 MHz, two wait states) | 241 / 367 to 425 | 2950 (1.44) / 10457 to 10515 (5.13) | the same: 10 cycles a word |
@@ -301,17 +316,20 @@ word:
 | QingKe V2 (CH32V006K8, 48 MHz, two wait states) | 307 / 532 to 595 | 2048 bytes: 4598 (4.49) / 12460 to 12523 (12.2) | a word a turn, eight instructions: 24 cycles a word, the fetch behind two wait states the rest |
 
 A byte loop moves a byte in 6 cycles on the M4, the M33 and Hazard3,
-in 7 on the QingKe V4, in 9 on the M0+ parts and in 15 on the QingKe
-V2 (the transports' copy tables, [benchmark.md](benchmark.md), letter
-m). On
+in 7 on the QingKe V4, in 9 on the M0+ parts and in 15 to 18 on the
+QingKe V2, by where the loop lies behind the flash's wait states (the
+transports' copy tables, [benchmark.md](benchmark.md): letter u on the
+STM32G0, SAM C21, RP2040 and RP2350, letter m on the STM32F4 and the
+CH32V203 and CH32V303, letter c on the CH32V00x). On
 the M4 and the M33 the unaligned load sets the turn: four of them at
 four cycles from a byte offset are 16 of its 25 cycles on the M4.
 newlib 4.6.0's `memcpy-armv7m.S`, which aligns the destination and
 then reads the source with the same unaligned loads in 64-byte turns,
 copies 4096 bytes across alignments in 5114 to 5176 cycles on the
 STM32F446 and 60 bytes in 110 to 116: its long turn saves a fifth at
-4096, and one leaf function with no co-alignment test and a branchless
-head and tail is what it saves at 60.
+4096, and one leaf function that never asks whether the two ends are
+aligned alike, its head and tail conditional instructions rather than
+loops, is what it saves at 60.
 
 ### The scans
 
@@ -334,7 +352,7 @@ asked for the NUL within 64 bytes or, for the longest, within n + 1:
 | Cortex-M0+ (STM32G0B1RE) | 152 to 185 / 253 to 302 / 12383 | 185 to 204 / 311 to 352 / 15462 | seven and ten, one constant reloaded from the literal pool every word |
 | Cortex-M0+ (SAM C21J18A) | 190 to 207 / 273 to 308 / 10377 | 236 to 279 / 380 to 442 / 17551 | the same |
 | Cortex-M0+ (RP2040) | 129 to 144 / 212 to 245 / 10318 | 161 to 176 / 269 to 307 / 13396 | the same |
-| Hazard3 (RP2350) | 72 to 87 / 128 to 164 / 7198 | 92 to 104 / 165 to 200 / 9250 | seven and eight (Zbb's ANDN folds the complement) |
+| Hazard3 (RP2350) | 72 to 87 / 128 to 164 / 7198 | 92 to 104 / 165 to 200 / 9250 | seven and eight (the bit-manipulation extension's and-not instruction folds the complement) |
 | QingKe V4B (CH32V203C8) | 116 to 137 / 188 to 236 / 9278 | 145 to 163 / 231 to 290 / 11328 | eight and nine |
 | QingKe V4F (CH32V303VC) | 95 to 110 / 173 to 206 / 9269 | 119 to 128 / 212 to 244 / 11319 | the same |
 | QingKe V2 (CH32V006K8) | 223 to 259 / 394 to 481 / 21610 | 276 to 285 / 471 to 540 / 24693 | the same, behind two wait states |
@@ -348,8 +366,10 @@ the word scan is ahead at 15 bytes on every core but in one case,
 against 256). On the STM32F446 newlib 4.6.0's `strlen` and `memchr`,
 which read eight bytes a load and test four bytes an instruction with
 the DSP extension's UADD8 and SEL, take 57 to 78 and 82 to 147 cycles
-for 15 bytes and 5552 and 6709 for 4096: a third to two fifths less,
-from instructions the other cores do not have.
+for 15 bytes and 5552 and 6709 for 4096: a third to two fifths less at
+4096, from instructions the other cores do not have; at 15 bytes from a
+start one past a word its `memchr` is 8 cycles dearer and its `strlen`
+15 cheaper.
 
 ### What the functions cost in code
 
@@ -403,7 +423,7 @@ the seven.
   gives the first differing byte, and `memchr`'s value taken as
   unsigned char and its bound honoured. A source, or a string, whose
   first byte is a page's first or whose last byte is a page's last,
-  the pages beside it unmapped, is copied and scanned at every
+  the pages beside it mapped with no access, is copied and scanned at every
   destination misalignment and every length to 130 bytes: a read one
   word past the source or before it faults there instead of passing.
 - On every compiler, every image of every 32-bit build project links

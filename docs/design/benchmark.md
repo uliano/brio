@@ -629,14 +629,14 @@ as they stand.
 | the same, warm and masked (no entry inside) | 1822 to 1986 |
 | of a warm one with interrupts enabled: the four texts into the stage / the line's end, its publish | 1126 to 1198 / 688 to 850 |
 | `print()` straight into the transport, warm and masked, the same image | 1446 to 1606 |
-| letter l: `print()` straight into the transport, no writer in the image, cold (`irq=2 isr=152`: two entries of the transmit handler, 152 cycles inside them) / warm (`irq=0`) | 1933 to 2101 / 1562 to 1698 |
+| letter l: `print()` straight into the transport, no writer in the image, cold (`irq=2 isr=152`: two entries of the transmit handler, 152 cycles inside them) / warm (`irq=0`) | 1877 to 2049 / 1498 to 1678 |
 | the transport's run alone, warm and masked: 2 bytes / 60 bytes (letter j) | 188 to 196 / 377 to 513 |
-| letter l: the same, 2 bytes / 60 bytes | 182 to 190 / 349 to 497 |
+| letter l: the same, 2 bytes / 60 bytes | 182 to 190 / 365 to 489 |
 
 Like against like: the writer's masked line against the direct print
 masked in the same image, 1822 to 1986 against 1446 to 1606, some 380
 cycles more, a quarter; its warm line against letter l's warm direct
-print, 1960 to 2124 against 1562 to 1698, some 400 to 430 more. What
+print, 1960 to 2124 against 1498 to 1678, some 450 more. What
 the writer adds: the stage's resolution at each text, its take and the
 lock, and every byte copied twice, into the stage and then into the
 ring. The line's end is mostly the transport's run of 60 bytes, which
@@ -659,7 +659,7 @@ figure is the core's cycles and one handler entry, about 140 cycles
 the core's alone. Letter l's cold direct print counts two entries
 (`irq=2`, 152 cycles inside them): its first run is the two-byte text at
 the line's start, and both the first and the second interrupt fall
-inside its 1933 cycles; its warm line, right behind, counts none.
+inside its 1877 cycles; its warm line, right behind, counts none.
 
 ## Not covered yet
 
@@ -667,12 +667,12 @@ Gaps, each with what would explain or measure it:
 
 - The STM32F446RE transport's run costs some 180 cycles before its
   first byte, warm and masked (letters j and l: a run of 2 bytes 182 to
-  196, of 60 bytes 349 to 513), against a listing of a call, the ring's
+  196, of 60 bytes 365 to 513), against a listing of a call, the ring's
   indices, one push and two bit-band stores. Not split; what would: the
   DWT's LSU and fold counters around one run, and the run with its
   second store taken out.
-- The direct line measures 1562 to 1698 in letter l and 1446 to 1606 in
-  letter j, a gap of some 100 cycles. The ring's alignment at the
+- The direct line measures 1498 to 1678 in letter l and 1446 to 1606 in
+  letter j, a gap of some 50 to 70 cycles. The ring's alignment at the
   line's longest run moves a line by some 60 cycles at most, that run
   being copied in words at any alignment (60 bytes take 120 cycles
   aligned alike, 165 to 182 across); what else differs is known and not
