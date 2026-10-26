@@ -289,7 +289,7 @@ int main() {
 
 ## Bench findings
 
-`test_stm32f4_rubato`, 32 verdicts on the Nucleo-F446RE, the preemptive
+`test_stm32f4_rubato`, 37 verdicts on the Nucleo-F446RE, the preemptive
 kernel on `Stm32f4RubatoPlatform` with the scheduler in thread mode;
 CYCCNT the ruler at 180 MHz, TIM9's compare the interrupt the road-1
 letters land, nothing wired and nothing lit:
@@ -304,16 +304,17 @@ letters land, nothing wired and nothing lit:
   handler (started by either road) runs Top before High resumes, Top's
   first statement 121 to 123 cycles after the handler's last.
 - **The latency of road 1** (letter c): from the interrupt handler's
-  last statement to High's handler's first, 145 cycles min, median and
-  max over 100 events; 190 to 205 when a kernel tick lands in the path.
-  The bound, 220, is the sum of the path's own counts in the listing
-  (148: the handler's exit, PendSV's entry by tail-chaining, the fake
-  frame's return, the entry, `activate()`'s scan and the dispatch's
-  call) plus one tick (58) and the flash accelerator's misses (12).
+  last statement to High's handler's first, 156 or 161 cycles by the
+  image's layout, min, median and max alike over 100 events of a run;
+  196 to 211 when a kernel tick lands in the path. The bound, 231, is
+  the sum of the path's own counts in the listing (161: the handler's
+  exit, PendSV's entry by tail-chaining, the fake frame's return, the
+  entry, `activate()`'s scan and the dispatch's call, every refill at
+  its most) plus one tick (58) and the flash accelerator's misses (12).
 - **The scan and the post** (letter d): `activate()` with four empty
-  queues below the ceiling 117 cycles (209 at worst, a tick inside); a
-  post that asks for nothing 79; a post that runs High's empty dispatch
-  inside it 403, the scheduling's share 324. At `-Os` the scan pays a
+  queues below the ceiling 111 cycles (159 at worst); a post that asks
+  for nothing 78; a post that runs High's empty dispatch inside it 432,
+  the scheduling's share 354. At `-Os` the scan pays a
   call per object for `empty()`, which the queue's header leaves out of
   line: inlining it would take the scan to 80 and the two posts to 123
   and 367 (measured, reverted; a change to the kernel's header and to
@@ -328,10 +329,11 @@ letters land, nothing wired and nothing lit:
   interrupted at a mark, High's computed inside, the handler computing
   a float too: every sum bit-exact against the same code run without
   preemption, the lazy context save proved by the values.
-- **The stack** (letter h): 664 bytes of high-water for the suite's
-  deepest chain, the deepest sampled stack pointer at 520 bytes in a
-  dispatch and 472 in the interrupt, the mark within the 232 bytes an
-  exception frame with the FPU's words and the handler's frames add.
+- **The stack** (letter h): 736 bytes of high-water for the suite's
+  deepest chain, the deepest sampled stack pointer at 592 bytes in a
+  dispatch and 528 in the interrupt, the mark within the 360 bytes the
+  deepest action's calls (a line through the writer), an exception frame
+  with the FPU's words and the handler's frames add.
 - **Dark** (letter i): every object idle, no timer armed, TIM9 quiet,
   PA5 not an output, the ceiling the Console's, interrupts enabled.
 - **A compiler hazard on road 2, found and closed**: GCC 16 at `-Os`

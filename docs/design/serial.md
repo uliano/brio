@@ -609,8 +609,8 @@ benchmark instrument's image, which has no writer, three passes of 16
 
 | | cycles |
 |---|---|
-| the line printed from an object's dispatch, cold (the first after the console drained: the run starts the idle transmitter, and the transmit handler's entries fall inside) / warm, the line right behind the cold one | 2004 to 2244 / 1918 to 2118 |
-| the same, warm, with interrupts masked: the core's own cycles | 1785 to 1937 |
+| the line printed from an object's dispatch, cold (the first after the console drained: its run starts the idle transmitter, and one entry of the transmit handler falls inside) / warm, the line right behind the cold one (the handler's second entry falls inside: the transmitter takes the first byte into its shift register a bit time later) | 2004 to 2244 / 1918 to 2118 |
+| the same, warm, with interrupts masked: the core's own cycles, no handler inside | 1785 to 1937 |
 | of a warm one with interrupts enabled: the four texts into the stage / the line's end, its publish | 1102 to 1108 / 667 to 864 |
 | `print()` straight into the transport, warm and masked, in the same image | 1436 to 1644 |
 | `print()` straight into the transport in the image with no writer, cold (two entries of the transmit handler inside, 152 cycles) / warm | 2045 to 2153 / 1702 to 1750 |
@@ -630,8 +630,9 @@ The line's end is mostly the transport's run of 60 bytes, whose own
 cost is bimodal by the ring's alignment (376 to 512 where the runtime's
 `memcpy` copies words, 564 to 612 where it copies bytes). The line
 right behind the cold one costs some 180 cycles more than the third and
-fourth lines of the same run, which [benchmark.md](benchmark.md) lists
-among what is not explained. A handler's print of this line holds every
+fourth lines of the same run: the transmit handler's second entry, which
+the counters letter j reads around each line place there
+([benchmark.md](benchmark.md) has the mechanism). A handler's print of this line holds every
 other interrupt for about the masked figure, some 10 us, a cost inferred
 from the dispatch's masked line and not measured from a handler; a
 handler that must stay short posts a value to an object instead. The

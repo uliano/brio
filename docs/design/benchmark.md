@@ -617,8 +617,8 @@ as they stand.
 
 | (STM32F446RE, 180 MHz, 5 WS, ST's flash accelerator on; console 115200; ten passes of 16, three of letter l) | cycles |
 |---|---|
-| the line through the writer, from an object's dispatch, cold (the transmit handler's entries inside, below) / warm, the line right behind the cold one | 2004 to 2244 / 1918 to 2118 |
-| the same, warm and masked | 1785 to 1937 |
+| the line through the writer, from an object's dispatch, cold (one entry of the transmit handler inside, below) / warm, the line right behind the cold one (one entry inside) | 2004 to 2244 / 1918 to 2118 |
+| the same, warm and masked (no entry inside) | 1785 to 1937 |
 | of a warm one with interrupts enabled: the four texts into the stage / the line's end, its publish | 1102 to 1108 / 667 to 864 |
 | `print()` straight into the transport, warm and masked, the same image | 1436 to 1644 |
 | letter l: `print()` straight into the transport, no writer in the image, cold (`irq=2 isr=152`: two entries of the transmit handler, 152 cycles inside them) / warm (`irq=0`) | 2045 to 2153 / 1702 to 1750 |
@@ -634,15 +634,24 @@ the lock, and every byte copied twice, into the stage and then into the
 ring. The line's end is mostly the transport's run of 60 bytes, bimodal
 by the ring's alignment (the runtime's `memcpy` copies words between
 buffers aligned alike and bytes otherwise: 376 to 512 against 564 to
-612 in letter j). The cold line carries the transport's own interrupts,
-read from `stm32f4/usart.hpp`'s transmit path and not counted by letter
-j: a run that starts an idle transmitter pushes its first byte and arms
-the transmit interrupt before copying the rest; the handler's first
-entry hands the transmitter that byte, its second finds the ring empty
-behind it and disarms, and the arming repeated once the rest is
-published brings a third, which hands it the second byte. Letter l's
-cold direct print counts two (`irq=2`): its first run is the two-byte
-text, so the second entry finds a byte and does not disarm.
+612 in letter j). The cold line and the warm one behind it each carry
+one entry of the transport's transmit handler, counted by letter j
+around each line (the most over 16 runs: 1, 1, 0, 0 for the cold, the
+warm, the masked and the split line; the kernel tick fell inside a line
+once in 48 runs). The mechanism, from `stm32f4/usart.hpp`'s transmit
+path: a run that starts an idle transmitter pushes its first byte and
+arms the transmit interrupt, which fires at once and hands the
+transmitter that byte, inside the cold line; the transmitter takes the
+byte into its shift register within one bit time, 8.7 us at 115200,
+some 1560 cycles, and the interrupt fires again, inside the line that
+follows, and hands it the second byte; the third comes a byte time
+after that, 15600 cycles, past the four lines. So the warm line's
+figure is the core's cycles and one handler entry, about 180 cycles
+(2042 against 1861 at the least of one run), and the masked line's is
+the core's alone. Letter l's cold direct print counts two entries
+(`irq=2`, 152 cycles inside them): its first run is the two-byte text at
+the line's start, and both the first and the second interrupt fall
+inside its 2045 cycles; its warm line, right behind, counts none.
 
 ## Not covered yet
 
@@ -654,16 +663,6 @@ Gaps, each with what would explain or measure it:
   indices, one push and two bit-band stores. Not split; what would: the
   DWT's LSU and fold counters around one run, and the run with its
   second store taken out.
-- A different 180: the writer's line right behind the cold one costs
-  some 180 cycles more than the third and fourth lines of the same run
-  (letter j: 1918 to 2118 against 1785 to 1937 masked and against the
-  split line, 1102 plus 667 to 864, printed with interrupts enabled).
-  The transport's next transmit interrupt comes a byte time after the
-  cold line's first byte, 15600 cycles later, so it is not that handler;
-  the kernel tick is not excluded. Not explained; what would: a count of
-  handler entries and of ticks read around each of the four lines, as
-  letter c reads the tick, and the DWT's CPI and LSU counters beside
-  them.
 - The direct line measures 1702 to 1750 in letter l and 1436 to 1644 in
   letter j, a gap of 60 to 300 cycles. Two differences are known and
   neither is measured: the C-string verb is inlined in the suite's image

@@ -531,20 +531,23 @@ constexpr uint32_t latency_events = 100;
 ///                                                               161
 /// at zero wait states, the code warm in the ART's cache after the
 /// uncounted first event, every refill taken at its most: an upper count.
-/// Measured, 156 on every event no other interrupt touches, inside it.
-/// The quiet path is that measured 156; an event over latency_quiet below
+/// Measured, 156 or 161 by the image's layout (the ART's lines), the same
+/// count on every event of a run no other interrupt touches, inside it.
+/// The quiet path is that measured 156 to 161; an event over latency_quiet below
 /// is one an interrupt landed in. On top of it, at most one SysTick
 /// handler landing in the path - its entry (12), its fifteen instructions
 /// (20), its return (12) and, when it lands on an exception return, that
 /// return abandoned and started again (12): 58, measured +45 and +58 -
-/// and two of the ART's line misses (12): 156 + 58 + 12 = 226, the bound.
+/// and two of the ART's line misses (12): 161 + 58 + 12 = 231, the bound,
+/// from the count (which the slower layout's measurement equals).
 /// The letter reads the kernel tick around each event, and every event
 /// over latency_quiet must have had a tick in it.
-constexpr uint32_t latency_bound = 226u;
+constexpr uint32_t latency_bound = 231u;
 
-/// The quiet path's measured 156 and 16 cycles of margin: well below the
-/// least a tick adds (45, so 201), well above the path's own spread (none
-/// observed: every quiet event is the same count).
+/// The quiet path's measured 156 to 161 and 11 to 16 cycles of margin:
+/// well below the least a tick adds (45, so 201), well above the path's
+/// own spread (none observed: every quiet event of a run is the same
+/// count).
 constexpr uint32_t latency_quiet = 172u;
 
 void tc_latency() {
@@ -684,15 +687,17 @@ void td_scan() {
           " cycles; a post to High (road 2, High's dispatch inside) ", road2,
           " cycles; the scheduling's share ", road2 > quiet ? road2 - quiet : 0u, crlf);
     // The scan, as the release listing has it: activate()'s entry saves
-    // twelve registers and its exit restores them with the return (13 +
-    // 15 cycles, DDI 0439B table 3-1: 1 + N for an STM or LDM of N, 3 more
-    // for a load of the PC); per empty object the ceiling's load, two
-    // compares and branches, and a call to the queue type's out-of-line
-    // empty() - two loads, a compare, the return - some 18 cycles with
-    // the two pipeline refills, four times; the Console's index against
-    // the ceiling ends the pass, about 10. That is 110 at zero wait
-    // states, and the least of 16 runs from the ART's cache: 150 is the
-    // sum with a third for refills and fetch beyond the table's counts.
+    // nine registers and opens a 36-byte frame, its exit closes the frame
+    // and restores them with the return (10 + 1 and 1 + 13 cycles, DDI
+    // 0439B table 3-1: 1 + N for an STM or LDM of N, 3 more for a load of
+    // the PC), two literal loads; per empty object a call to the queue
+    // type's out-of-line empty() - two loads, a compare, the return - the
+    // answer tested, the ceiling compared and branched on: some 20 cycles
+    // with the two pipeline refills, four times; the Console's index
+    // against the ceiling ends the pass, its taken branch 4. That is
+    // about 115 at zero wait states, and the least of 16 runs from the
+    // ART's cache: 150 is the sum with a third for refills and fetch
+    // beyond the table's counts.
     bench.verdict("the scan of four empty queues, the least of 16, costs under 150 cycles",
                   scan < 150u);
     // The quiet post: post<Low>() out of line, 13 instructions with the
@@ -706,12 +711,13 @@ void td_scan() {
     // The road-2 post, the quiet one's 50 plus: the request's call, its
     // store, DSB and ISB (10); PendSV's entry, body and return into thread
     // mode (12 + 20 + 12); the entry (5); activate() at Mid's ceiling -
-    // its frame (28), Top's and High's visits (25 + 55), High's dispatch
-    // with nothing to do (its stamps and counters, 30), the release (15),
-    // the rescan of Top and High and Mid's index ending the pass (50); the
-    // FP context cleared and the SVC's entry, three instructions and
-    // return (7 + 12 + 6 + 12): about 330. 450 is that with a third for
-    // the refills and the ART's misses.
+    // its frame (25: nine registers saved and restored with the return,
+    // the 36-byte frame opened and closed), Top's and High's visits (25 +
+    // 55), High's dispatch with nothing to do (its stamps and counters,
+    // 30), the release (15), the rescan of Top and High and Mid's index
+    // ending the pass (50); the FP context cleared and the SVC's entry,
+    // three instructions and return (7 + 12 + 6 + 12): about 330. 450 is
+    // that with a third for the refills and the ART's misses.
     bench.verdict("a road-2 post costs more than a quiet one (the receiver ran inside it)",
                   road2 > quiet);
     bench.verdict("and under 450 cycles, High's empty dispatch included", road2 < 450u);
@@ -1058,6 +1064,9 @@ const char cost_line[] = "  cost  the ruler reads delay_us(999) at least hz x 99
 static_assert(sizeof cost_line == 61u, "the line is 60 bytes and its NUL");
 volatile uint32_t line_cycles[3] = {0, 0, 0};
 volatile uint32_t split_cycles[2] = {0, 0};
+volatile uint32_t line_irq[4] = {0, 0, 0, 0};     ///< the UART handler's entries inside each line
+volatile uint32_t line_ticks[4] = {0, 0, 0, 0};   ///< the kernel ticks inside each line
+volatile uint32_t uart_entries = 0;               ///< the UART handler's entries since boot
 volatile uint32_t cost_ruler = 0;
 
 /// The least of a sample, and its most.
@@ -1079,24 +1088,38 @@ void tj_writer() {
     // crlf, publishes it into the ring - the whole cost of the line, there
     // is no dispatch after it. The first after the letter's other work, the
     // second right behind it, a third right behind with interrupts masked
-    // (the core's own cycles: the first line's run starts the idle
-    // transmitter and the UART's handler lands inside it), and a fourth in
-    // two halves - the four texts into the stage, then the line's end that
-    // publishes it. The second line measures some 180 cycles over the
-    // third and the fourth, which docs/design/benchmark.md lists among
-    // what is not explained.
+    // (the core's own cycles), and a fourth in two halves - the four texts
+    // into the stage, then the line's end that publishes it. The first
+    // line's run starts the idle transmitter and the UART's handler lands
+    // inside it, handing over the first byte; the transmitter takes that
+    // byte into its shift register a bit time later (1560 cycles) and the
+    // handler lands again, inside the second line - the 180 cycles the
+    // second line measures over the third and the fourth. The counters
+    // below read both, and the kernel tick, around each line.
+    // Around each line, the UART handler's entries and the kernel ticks
+    // that fell inside it: what the line's cycles carry beyond the core's.
     Low::action = [](uint8_t) {
         for (uint32_t k = 0; k < 2u; ++k) {
+            const uint32_t i0 = uart_entries;
+            const uint32_t k0 = Ticker::ticks();
             const uint32_t t0 = Ruler::now();
             print(Log{}, "  ", "cost", "  ", cost_name, crlf);
             line_cycles[k] = Ruler::now() - t0 - cost_ruler;
+            line_irq[k] = uart_entries - i0;
+            line_ticks[k] = Ticker::ticks() - k0;
         }
         {
             InterruptGuard g;
+            const uint32_t i0 = uart_entries;
+            const uint32_t k0 = Ticker::ticks();
             const uint32_t t0 = Ruler::now();
             print(Log{}, "  ", "cost", "  ", cost_name, crlf);
             line_cycles[2] = Ruler::now() - t0 - cost_ruler;
+            line_irq[2] = uart_entries - i0;
+            line_ticks[2] = Ticker::ticks() - k0;
         }
+        const uint32_t i0 = uart_entries;
+        const uint32_t k0 = Ticker::ticks();
         const uint32_t t0 = Ruler::now();
         print(Log{}, "  ", "cost", "  ", cost_name);
         const uint32_t t1 = Ruler::now();
@@ -1104,6 +1127,8 @@ void tj_writer() {
         const uint32_t t2 = Ruler::now();
         split_cycles[0] = t1 - t0 - cost_ruler;
         split_cycles[1] = t2 - t1 - cost_ruler;
+        line_irq[3] = uart_entries - i0;
+        line_ticks[3] = Ticker::ticks() - k0;
     };
     Spread cold;
     Spread warm;
@@ -1114,6 +1139,8 @@ void tj_writer() {
     Spread run_two;
     Spread run_sixty;
     bool written_all = true;
+    uint32_t most_irq[4] = {0, 0, 0, 0};
+    uint32_t most_ticks[4] = {0, 0, 0, 0};
     const uint16_t lost0 = Log::lost();
     for (int i = 0; i < 16; ++i) {
         // The ring empty, then the four lines from Low's dispatch.
@@ -1126,6 +1153,10 @@ void tj_writer() {
         warm_masked.add(line_cycles[2]);
         texts.add(split_cycles[0]);
         end.add(split_cycles[1]);
+        for (uint32_t k = 0; k < 4u; ++k) {
+            most_irq[k] = line_irq[k] > most_irq[k] ? line_irq[k] : most_irq[k];
+            most_ticks[k] = line_ticks[k] > most_ticks[k] ? line_ticks[k] : most_ticks[k];
+        }
         // The oracle: the same line printed straight into the transport,
         // warm and masked - a write past the writer, for the measurement
         // alone, with the ring empty. A debug build checks the writer's
@@ -1170,6 +1201,10 @@ void tj_writer() {
           ", warm and masked ", warm_masked.least, "..", warm_masked.most, crlf);
     print(Log{}, "  of a warm one: the four texts into the stage ", texts.least, "..", texts.most,
           " cycles, the line's end that publishes it ", end.least, "..", end.most, crlf);
+    print(Log{}, "  inside the four lines (cold, warm, masked, split), the most over 16 runs: the UART "
+          "handler's entries ", most_irq[0], ' ', most_irq[1], ' ', most_irq[2], ' ', most_irq[3],
+          ", kernel ticks ", most_ticks[0], ' ', most_ticks[1], ' ', most_ticks[2], ' ', most_ticks[3],
+          crlf);
     print(Log{}, "  print() straight into the transport, warm and masked ", direct_masked.least, "..",
           direct_masked.most, " cycles", crlf);
     print(Log{}, "  the transport's run, warm and masked: 2 bytes ", run_two.least, "..", run_two.most,
@@ -1244,22 +1279,26 @@ void th_stack() {
     print(Log{}, "  painted ", paint_top - paint_bottom, " bytes below main's frame; used ", used,
           " bytes; the deepest stack pointer sampled: a dispatch at ", deepest_dispatch,
           ", the interrupt at ", deepest_isr, crlf);
-    // A sample is taken inside activate(), whose twelve saved registers
-    // (48 bytes) are above it. Below the deepest one lies at most, by the
-    // release listing: the letter's action and what it calls (the widest
-    // action saves 32 bytes, a post 8, the queue's push 8, note() 20:
-    // under 64); an interrupt landing there, an extended frame of 26 words
-    // and its alignment word (108); and below that either the deepest
-    // handler's own frames (the UART's 32, its post and push 16: 48) or,
-    // the handler gone and its post pending PendSV, PendSV's two words
-    // and an activate() frame that finds nothing to serve (8 + 48 = 56;
-    // the fake frame's 32 are popped before activate() pushes). 64 + 108
-    // + 56 = 228: the high-water mark lies within 232 bytes of the deeper
-    // of the two samples.
+    // A dispatch's sample is taken inside activate() (the dispatch is
+    // inlined there), whose nine saved registers and 36-byte frame (72
+    // bytes) are above it. Below the deepest one lies at most, by the
+    // release listing: the letter's action and what it calls - the
+    // widest is letter j's, which saves 32 bytes and prints through the
+    // writer, whose deepest path is end_line() 16, publish() 64 (nine
+    // registers and a 28-byte frame), put() 24, the transport's
+    // write_bulk() 32 and the runtime's memcpy, a leaf: 168; an
+    // interrupt landing there, an extended frame of 26 words and its
+    // alignment word (108); and below that either the deepest handler's
+    // own frames (the UART's 32, its post and push 16: 48) or, the
+    // handler gone and its post pending PendSV, PendSV's two words and an
+    // activate() frame that finds nothing to serve (8 + 72 = 80; the fake
+    // frame's 32 are popped before activate() pushes). 168 + 108 + 80 =
+    // 356: the high-water mark lies within 360 bytes of the deeper of the
+    // two samples.
     const uint32_t deepest = deepest_dispatch > deepest_isr ? deepest_dispatch : deepest_isr;
     bench.verdict("the paint reached the deepest sampled stack pointer", used >= deepest);
-    bench.verdict("the high-water mark is within 232 bytes of the deepest sample",
-                  used <= deepest + 232u);
+    bench.verdict("the high-water mark is within 360 bytes of the deepest sample",
+                  used <= deepest + 360u);
 }
 
 // =============================================================================
@@ -1297,6 +1336,7 @@ void console_turn() {
 
 // ---- target glue ------------------------------------------------------------
 extern "C" void USART2_IRQHandler() {
+    uart_entries = uart_entries + 1u;
     if (Serial::isr()) {
         rx_ceiling = P::ceiling;
         brio::post<Console>(ConsoleEvent{console_rx});
